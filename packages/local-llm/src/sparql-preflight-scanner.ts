@@ -86,26 +86,40 @@ function hasKeywordSequence(
   return false;
 }
 
-function matchingParenthesis(
+interface ParenthesisIndex {
+  readonly closingByOpening: ReadonlyMap<number, number>;
+  readonly balanced: boolean;
+}
+
+function indexParentheses(
   tokens: readonly SparqlLexicalToken[],
-  opening: number,
-): number | undefined {
-  let depth = 0;
-  for (let index = opening; index < tokens.length; index++) {
+): ParenthesisIndex {
+  const openings: number[] = [];
+  const closingByOpening = new Map<number, number>();
+  let balanced = true;
+  for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index];
     if (!isValuedToken(token) || token.kind !== 'symbol') continue;
-    if (token.logicalValue === '(') depth++;
+    if (token.logicalValue === '(') {
+      openings.push(index);
+      continue;
+    }
     if (token.logicalValue === ')') {
-      depth--;
-      if (depth === 0) return index;
+      const opening = openings.pop();
+      if (opening === undefined) {
+        balanced = false;
+      } else {
+        closingByOpening.set(opening, index);
+      }
     }
   }
-  return undefined;
+  return { closingByOpening, balanced: balanced && openings.length === 0 };
 }
 
 function hasUnwrappedAggregateAlias(
   masked: string,
   tokens: readonly SparqlLexicalToken[],
+  closingByOpening: ReadonlyMap<number, number>,
 ): boolean {
   for (let index = 0; index < tokens.length; index++) {
     const aggregate = tokens[index];
@@ -120,7 +134,7 @@ function hasUnwrappedAggregateAlias(
       || opening.logicalValue !== '('
     ) continue;
 
-    const closingIndex = matchingParenthesis(tokens, index + 1);
+    const closingIndex = closingByOpening.get(index + 1);
     if (closingIndex === undefined) continue;
     const closing = tokens[closingIndex];
     const asToken = tokens[closingIndex + 1];
@@ -142,6 +156,7 @@ function hasUnwrappedAggregateAlias(
 export function scanSparqlPreflight(value: string): SparqlPreflightScan {
   const lexical = scanSparqlLexically(value);
   const tokens = lexical.tokens.slice(lexical.prologue.endTokenIndex);
+  const parentheses = indexParentheses(tokens);
   const first = tokens[0];
   const operation = isValuedToken(first)
     && first.kind === 'word'
@@ -163,7 +178,7 @@ export function scanSparqlPreflight(value: string): SparqlPreflightScan {
     unterminated: lexical.unterminated,
     operation,
     bracesBalanced: delimitersBalanced(lexical.tokens, '{', '}'),
-    parenthesesBalanced: delimitersBalanced(lexical.tokens, '(', ')'),
+    parenthesesBalanced: parentheses.balanced,
     hasFrom: tokens.some(
       (token) => isValuedToken(token) && token.kind === 'word' && token.upper === 'FROM',
     ),
@@ -173,7 +188,11 @@ export function scanSparqlPreflight(value: string): SparqlPreflightScan {
       '(',
     ),
     hasStrcontains: hasKeywordSequence(tokens, ['STRCONTAINS'], '('),
-    hasUnwrappedAggregateAlias: hasUnwrappedAggregateAlias(lexical.masked, tokens),
+    hasUnwrappedAggregateAlias: hasUnwrappedAggregateAlias(
+      lexical.masked,
+      tokens,
+      parentheses.closingByOpening,
+    ),
     bareAbsoluteIri: isValuedToken(bareAbsolute) ? bareAbsolute.value : undefined,
   };
 }

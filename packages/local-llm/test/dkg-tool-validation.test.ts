@@ -104,6 +104,14 @@ describe('DKG SPARQL preflight', () => {
     expect(result.errors).not.toContain('wrap aggregate aliases as (COUNT(...) AS ?count)');
   });
 
+  it('indexes near-limit nested aggregate parentheses in linear work', () => {
+    const depth = 8_000;
+    const sparql = `SELECT ${' COUNT('.repeat(depth)}${')'.repeat(depth)}`;
+
+    expect(sparql.length).toBeLessThanOrEqual(65_536);
+    expect(validateSparqlForDkg(sparql)).toEqual({ ok: true, errors: [] });
+  });
+
   it('keeps keywords in lexical regions inert and reports unterminated regions', () => {
     expect(validateSparqlForDkg([
       'SELECT ?x WHERE {',

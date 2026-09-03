@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   readSparqlVariable as readCoreVariable,
-  skipSparqlIriRef as skipCoreIriRef,
+  skipSparqlIriRefForStructuralScan as skipCoreIriRef,
   skipSparqlStringLiteral as skipCoreStringLiteral,
-} from '@origintrail-official/dkg-core/sparql-lexical-primitives';
+} from '@origintrail-official/dkg-core/sparql-cursors';
 import {
   readSparqlVariable,
   skipSparqlIriRef,
@@ -34,7 +34,7 @@ describe('shared SPARQL lexical cursor primitives', () => {
   ] as const)(
     'keeps IRIREF boundaries and raw offsets identical for %s',
     (source, start, expected) => {
-      expect(skipCoreIriRef(source, start, { requireLikelyIriStart: true })).toBe(expected);
+      expect(skipCoreIriRef(source, start)).toBe(expected);
       expect(skipSparqlIriRef(source, start)).toBe(expected);
     },
   );

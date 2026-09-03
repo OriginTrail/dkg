@@ -202,6 +202,25 @@ describe('I-009: SPARQL graph scope bypass prevention', () => {
     expect(response.error).toContain('GRAPH clauses are not allowed');
   });
 
+  it('rejects an explicit GRAPH target written with UCHAR delimiters', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: String.raw`SELECT ?name WHERE { GRAPH \u003C${OTHER_GRAPH}\u003E { ?s <${SCHEMA_NAME}> ?name } }`,
+      }),
+      'peer-attacker',
+    );
+
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('GRAPH clauses are not allowed');
+  });
+
+  it('rejects malformed UCHAR escapes before executing SPARQL', async () => {
+    await expect(engine.query(
+      String.raw`SELECT ?name WHERE { ?s <${SCHEMA_NAME}> \u00ZZ }`,
+      { contextGraphId: CONTEXT_GRAPH },
+    )).rejects.toThrow('malformed Unicode code-point escape');
+  });
+
   it('rejects SPARQL with FROM clause', async () => {
     const response = await handler.handle(
       makeRequest({

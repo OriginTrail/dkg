@@ -238,14 +238,6 @@ function isSparqlIriRefBodyCodePoint(codePoint: number): boolean {
     && codePoint !== 0x5c;
 }
 
-export interface SparqlIriRefScanOptions {
-  /**
-   * Structural query rewrites historically treat `<digit` and `<variable` as
-   * comparisons even where a later `>` could form a grammar-level IRIREF.
-   */
-  readonly requireLikelyIriStart?: boolean;
-}
-
 function isLikelyStructuralIriStart(codePoint: number): boolean {
   return (codePoint >= 0x41 && codePoint <= 0x5a)
     || (codePoint >= 0x61 && codePoint <= 0x7a)
@@ -255,19 +247,8 @@ function isLikelyStructuralIriStart(codePoint: number): boolean {
     || codePoint === 0x2e;
 }
 
-/** Skip a SPARQL IRIREF, or return null for a `<` operator. */
-export function skipSparqlIriRef(
-  source: string,
-  start: number,
-  options?: SparqlIriRefScanOptions,
-): number | null {
-  const opening = readSparqlLogicalCodePoint(source, start);
-  if (!opening || opening.codePoint !== 0x3c) return null;
-  let index = start + opening.rawWidth;
-  if (options?.requireLikelyIriStart) {
-    const firstBody = readSparqlLogicalCodePoint(source, index);
-    if (!firstBody || !isLikelyStructuralIriStart(firstBody.codePoint)) return null;
-  }
+function skipSparqlIriRefBody(source: string, start: number): number | null {
+  let index = start;
   while (index < source.length) {
     const logical = readSparqlLogicalCodePoint(source, index);
     if (!logical) return null;
@@ -276,6 +257,29 @@ export function skipSparqlIriRef(
     index += logical.rawWidth;
   }
   return null;
+}
+
+/** Recognize an IRIREF according to the SPARQL grammar's longest-match rule. */
+export function skipSparqlIriRef(source: string, start: number): number | null {
+  const opening = readSparqlLogicalCodePoint(source, start);
+  if (!opening || opening.codePoint !== 0x3c) return null;
+  return skipSparqlIriRefBody(source, start + opening.rawWidth);
+}
+
+/**
+ * Query structural rewrites deliberately treat `<digit` and `<variable` as
+ * comparisons, even where longest-match tokenization could form an IRIREF.
+ */
+export function skipSparqlIriRefForStructuralScan(
+  source: string,
+  start: number,
+): number | null {
+  const opening = readSparqlLogicalCodePoint(source, start);
+  if (!opening || opening.codePoint !== 0x3c) return null;
+  const bodyStart = start + opening.rawWidth;
+  const firstBody = readSparqlLogicalCodePoint(source, bodyStart);
+  if (!firstBody || !isLikelyStructuralIriStart(firstBody.codePoint)) return null;
+  return skipSparqlIriRefBody(source, bodyStart);
 }
 
 /** Skip whitespace and `#` line comments between SPARQL tokens. */

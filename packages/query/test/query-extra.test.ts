@@ -245,6 +245,27 @@ describe('[Q-1] DKGQueryEngine minTrust uses writer-side trust metadata', () => 
     expect(result.bindings.map((b) => b['t'])).toEqual(['http://schema.org/Person']);
   });
 
+  it('preprocesses escaped IRI and string delimiters before scoped minTrust rewriting', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiableMemoryUri(CG, 'consensus-verified');
+    const otherGraph = contextGraphVerifiableMemoryUri('other-cg', 'consensus-verified');
+    const predicate = 'http://example.com/p#name';
+    await store.insert([
+      quad('urn:e1', predicate, '"Alice"', consensusGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+      quad('urn:e1', predicate, '"Alice"', otherGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, otherGraph),
+    ]);
+
+    const result = await engine.query(
+      String.raw`SELECT ?o WHERE { \u003Curn:e1\u003E \u003Chttp://example.com/p#name\u003E ?o . FILTER(STR(?o) = \u0022Alice\u0022) }`,
+      { contextGraphId: CG, view: 'verifiable-memory', minTrust: TrustLevel.ConsensusVerified },
+    );
+
+    expect(result.bindings.map((binding) => binding['o'])).toEqual(['"Alice"']);
+  });
+
   it('still strips real line comments containing a fake terminator (`# … .`)', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);

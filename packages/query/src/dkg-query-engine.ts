@@ -54,6 +54,7 @@ import {
   isSparqlKeyword,
   isSparqlKeywordStart as isKeywordStart,
   isSparqlWordContinuation as isWordContinuation,
+  preprocessSparqlCodePointEscapes,
   readSparqlVariable,
   skipSparqlStringLiteral as scanSparqlStringLiteral,
   skipSparqlIriRef,
@@ -364,6 +365,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+    const preprocessedSparql = preprocessSparqlCodePointEscapes(sparql);
+    if (preprocessedSparql === null) {
+      throw new Error('SPARQL rejected: malformed Unicode code-point escape');
+    }
+    sparql = preprocessedSparql;
     const reads = createQueryStoreReadContext(this.store, options);
     const guard = validateReadOnlySparql(sparql);
     if (!guard.safe) {

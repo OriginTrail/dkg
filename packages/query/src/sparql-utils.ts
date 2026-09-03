@@ -1,9 +1,10 @@
 import {
+  preprocessSparqlCodePointEscapes,
   readSparqlVariable,
-  skipSparqlIriRef as skipCoreSparqlIriRef,
+  skipSparqlIriRefForStructuralScan,
   skipSparqlSpaceAndLineComments,
   skipSparqlStringLiteral,
-} from '@origintrail-official/dkg-core/sparql-lexical-primitives';
+} from '@origintrail-official/dkg-core/sparql-cursors';
 
 export {
   stripSparqlLiteralsAndComments as stripLiteralsAndComments,
@@ -12,15 +13,14 @@ export {
 // Keep the query package's cursor APIs stable while delegating their grammar
 // and raw-offset handling to core's canonical low-level primitives.
 export {
+  preprocessSparqlCodePointEscapes,
   readSparqlVariable,
   skipSparqlSpaceAndLineComments,
   skipSparqlStringLiteral,
 };
 
-const STRUCTURAL_IRIREF_OPTIONS = { requireLikelyIriStart: true } as const;
-
 export function skipSparqlIriRef(source: string, start: number): number | null {
-  return skipCoreSparqlIriRef(source, start, STRUCTURAL_IRIREF_OPTIONS);
+  return skipSparqlIriRefForStructuralScan(source, start);
 }
 
 export function isSparqlKeywordStart(src: string, idx: number): boolean {

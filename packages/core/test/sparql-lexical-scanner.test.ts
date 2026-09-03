@@ -3,6 +3,10 @@ import {
   maskSparqlLexicalRegions,
   scanSparqlLexically,
 } from '../src/sparql-lexical-scanner.js';
+import {
+  skipSparqlIriRef,
+  skipSparqlIriRefForStructuralScan,
+} from '../src/sparql-lexical-primitives.js';
 
 describe('canonical SPARQL lexical scanner', () => {
   it.each([
@@ -27,6 +31,13 @@ describe('canonical SPARQL lexical scanner', () => {
     expect(scan.prologue.endTokenIndex).toBe(2);
     expect(scan.tokens[1]).toMatchObject({ kind: 'iri' });
     expect(scan.tokens[2]).toMatchObject({ kind: 'word', upper: 'SELECT' });
+  });
+
+  it('keeps grammar IRIREF recognition distinct from the rewrite heuristic', () => {
+    const source = String.raw`\u003C10\u003E`;
+
+    expect(skipSparqlIriRef(source, 0)).toBe(source.length);
+    expect(skipSparqlIriRefForStructuralScan(source, 0)).toBeNull();
   });
 
   it('preprocesses UCHAR escapes while preserving raw token offsets', () => {
@@ -123,5 +134,7 @@ describe('canonical SPARQL lexical scanner', () => {
 
     expect(scan.unterminated).toBe(true);
     expect(scan.tokens[0]).toMatchObject({ kind: 'word', upper: 'SELECT' });
+    expect(maskSparqlLexicalRegions('SELECT ?s WHERE { BIND("unfinished AS ?s) }'))
+      .toEqual({ masked: scan.masked, unterminated: scan.unterminated });
   });
 });

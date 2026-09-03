@@ -204,7 +204,7 @@ function scanPrologue(tokens: readonly SparqlLexicalToken[]): SparqlLexicalScan[
  * higher-level policy checks. It is deliberately not a parser: it owns only
  * lexical regions, PN_PREFIX-aware names, source offsets, and masking.
  */
-function scanSparql(value: string, tokenize: boolean): SparqlLexicalScan {
+function scanSparql(value: string): SparqlLexicalScan {
   const masked = value.split('');
   const tokens: SparqlLexicalToken[] = [];
   let unterminated = false;
@@ -214,7 +214,7 @@ function scanSparql(value: string, tokenize: boolean): SparqlLexicalScan {
     const logical = readSparqlLogicalCodePoint(value, index);
     if (!logical) {
       const start = index++;
-      if (tokenize) tokens.push(lexicalToken('symbol', value[start], start, index));
+      tokens.push(lexicalToken('symbol', value[start], start, index));
       continue;
     }
     if (isWhitespace(logical.codePoint)) {
@@ -247,7 +247,7 @@ function scanSparql(value: string, tokenize: boolean): SparqlLexicalScan {
       }
       index = stringScan.end;
       blank(masked, start, index);
-      if (tokenize) tokens.push({ kind: 'string', start, end: index });
+      tokens.push({ kind: 'string', start, end: index });
       if (!stringScan.closed) unterminated = true;
       continue;
     }
@@ -258,7 +258,7 @@ function scanSparql(value: string, tokenize: boolean): SparqlLexicalScan {
         const start = index;
         index = iriEnd;
         blank(masked, start, index);
-        if (tokenize) tokens.push({ kind: 'iri', start, end: index });
+        tokens.push({ kind: 'iri', start, end: index });
         continue;
       }
     }
@@ -268,9 +268,7 @@ function scanSparql(value: string, tokenize: boolean): SparqlLexicalScan {
       if (variableEnd !== null) {
         const start = index;
         index = variableEnd;
-        if (tokenize) {
-          tokens.push(lexicalToken('variable', value.slice(start, index), start, index));
-        }
+        tokens.push(lexicalToken('variable', value.slice(start, index), start, index));
         continue;
       }
     }
@@ -278,9 +276,7 @@ function scanSparql(value: string, tokenize: boolean): SparqlLexicalScan {
     if (logical.codePoint === 0x3a) {
       const start = index;
       index = scanPnLocalEnd(value, index + logical.rawWidth);
-      if (tokenize) {
-        tokens.push(lexicalToken('prefixed-name', value.slice(start, index), start, index));
-      }
+      tokens.push(lexicalToken('prefixed-name', value.slice(start, index), start, index));
       continue;
     }
 
@@ -301,23 +297,19 @@ function scanSparql(value: string, tokenize: boolean): SparqlLexicalScan {
           width = sparqlPnCharsWidth(value, index);
         }
       }
-      if (tokenize) {
-        tokens.push(lexicalToken(kind, value.slice(start, index), start, index));
-      }
+      tokens.push(lexicalToken(kind, value.slice(start, index), start, index));
       continue;
     }
 
     const start = index;
     index += logical.rawWidth;
-    if (tokenize) {
-      tokens.push(lexicalToken(
-        'symbol',
-        value.slice(start, index),
-        start,
-        index,
-        String.fromCodePoint(logical.codePoint),
-      ));
-    }
+    tokens.push(lexicalToken(
+      'symbol',
+      value.slice(start, index),
+      start,
+      index,
+      String.fromCodePoint(logical.codePoint),
+    ));
   }
 
   return {
@@ -329,11 +321,11 @@ function scanSparql(value: string, tokenize: boolean): SparqlLexicalScan {
 }
 
 export function scanSparqlLexically(value: string): SparqlLexicalScan {
-  return scanSparql(value, true);
+  return scanSparql(value);
 }
 
-/** Mask lexical regions without allocating a token stream or policy facts. */
+/** Derive the public mask view from the same complete lexical artifact. */
 export function maskSparqlLexicalRegions(value: string): SparqlLexicalMask {
-  const scan = scanSparql(value, false);
+  const scan = scanSparql(value);
   return { masked: scan.masked, unterminated: scan.unterminated };
 }
