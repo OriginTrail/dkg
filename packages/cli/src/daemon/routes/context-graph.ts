@@ -2137,6 +2137,14 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
               classification.statePatch,
             );
           }
+          // The first subscribe can legitimately race ahead of metadata and
+          // the on-chain binding. Its eager RFC-64 responsibility pass then
+          // fails closed because accessPolicy is still unknown. Re-run the
+          // lifecycle decision after catch-up has installed authoritative
+          // metadata, before exposing a terminal job: otherwise an always-on
+          // subscription can be fully synced while remaining absent from the
+          // default catalog responsibility/status surface until restart.
+          await agent.reconcileRfc64CatalogResponsibilityV1(contextGraphId);
           if (classification.eventPayload) {
             agent.eventBus?.emit?.(DKGEvent.PROJECT_SYNCED, {
               contextGraphId,
