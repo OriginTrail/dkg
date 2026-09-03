@@ -52,6 +52,7 @@ sr:language a rdf:Property .
 sr:version a rdf:Property .
 sr:source a rdf:Property .
 sr:requiresTool a rdf:Property .
+sr:permitsProgram a rdf:Property .
 sr:offersTool a rdf:Property .
 sr:usesExecutionPolicy a rdf:Property .
 sr:allowsTool a rdf:Property .

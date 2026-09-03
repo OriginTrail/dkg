@@ -163,6 +163,48 @@ describe('real Wasm supervised-plan materialization', () => {
     }
   });
 
+  it('lets Wasm invoke only the typed safe-llm import', async () => {
+    const source = `(strategy smoke/safe-llm
+      (version "1.0.0")
+      (scope network:devnet)
+      (goal use-permitted-programs)
+      (supervise one-for-one (max-restarts 1) (window-ms 60000)
+        (delegate assistant
+          (grant llm.invoke.safe)
+          (call llm/safe@1 "Answer using the available Programs"))))`;
+    const admission = new WasmStrategyAdmissionClient({ workerUrl: componentWorkerUrl });
+    const compilation = await admission.compileAndAdmit(source);
+    expect(compilation.ok).toBe(true);
+    if (!compilation.ok) return;
+    const host = new SemanticRuntimeHost({ workerUrl, componentWorkerUrl, config: { watchdogMs: 1_000 } });
+    await host.start();
+    try {
+      const capability = toolCapability(compilation.plan.canonicalPlan, {
+        operation: 'llm/safe',
+        witInterface: 'origintrail:semantic-runtime/safe-llm@0.1.0',
+      });
+      const started = await host.startPlan(
+        compilation.plan.canonicalPlan,
+        0n,
+        capability,
+        async (call) => {
+          expect(call).toEqual({
+            kind: 'safe-llm',
+            effectId: 1n,
+            prompt: 'Answer using the available Programs',
+          });
+          return { kind: 'safe-llm', output: 'safe answer' };
+        },
+      );
+      await expect(host.applyPlan(started.handle)).resolves.toMatchObject({
+        kind: 'completed',
+        outputs: [{ role: 'assistant', value: 'safe answer' }],
+      });
+    } finally {
+      await host.stop();
+    }
+  });
+
   it('lets Wasm invoke only the explicit typed remote-execute import', async () => {
     const source = `(strategy smoke/composition
       (version "1.0.0")
@@ -223,7 +265,9 @@ function toolCapability(
   const capability = defaultExecutionCapability(planHash);
   capability.tools = [{ operation: tool.operation, version: '1', witInterface: tool.witInterface }];
   capability.budgets.maxToolCalls = 1;
-  capability.budgets.maxModelTokens = tool.operation === 'agent/investigate' ? 512 : 0;
+  capability.budgets.maxModelTokens = ['agent/investigate', 'llm/safe'].includes(tool.operation)
+    ? 512
+    : 0;
   capability.budgets.maxDkgQueries = tool.operation === 'dkg/query' ? 1 : 0;
   return capability;
 }
