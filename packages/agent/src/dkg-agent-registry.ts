@@ -419,18 +419,18 @@ function parseExplicitConnectTarget(multiaddress: string, admissionEnabled: bool
 
 export class AgentRegistryMethods extends DKGAgentBase {
   async ensureProfilePublished(this: DKGAgent): Promise<void> {
-    if (this.profileManager.profileKcId !== null) return;
     if (this.ensureProfilePublishedInFlight) {
       return this.ensureProfilePublishedInFlight;
     }
 
     let tracked: Promise<void>;
     const publish = (async () => {
-      // Re-check inside the coalesced operation in case another serialized
-      // publisher completed between the fast-path check and this turn.
-      if (this.profileManager.profileKcId === null) {
-        await this.publishProfile();
-      }
+      // A locally persisted profile is not proof that the peer receiving a
+      // private join request has observed it. Re-broadcast even when a prior
+      // profile KC exists so the curator can resolve the joiner's current
+      // encryption key before the fail-closed admission check. Concurrent
+      // callers still coalesce on ensureProfilePublishedInFlight.
+      await this.publishProfile();
     })();
     tracked = publish.finally(() => {
       if (this.ensureProfilePublishedInFlight === tracked) {
