@@ -79,6 +79,10 @@ export interface ContextGraphJoinAdmissionHost {
   clearRetryableAdmission(contextGraphId: string, delegation: SignedAgentDelegation): void;
   reserveIngress(contextGraphId: string, carrierPeerId: string): () => void;
   chargeVerifiedIngress(contextGraphId: string, agentAddress: string): void;
+  cacheVerifiedEncryptionKeys(
+    delegation: SignedAgentDelegation,
+    carrierPeerId: string,
+  ): Promise<void>;
   withAdmissionLock<T>(
     contextGraphId: string,
     operation: (token: ContextGraphJoinAdmissionLockToken) => Promise<T>,
@@ -561,17 +565,18 @@ export class ContextGraphJoinAdmission {
     )) {
       return leavePending('agent-revoked');
     }
-    try {
-      await this.host.assertActiveEncryptionKey(delegation.agentAddress);
-    } catch {
-      return leavePending('verified-active-encryption-key-required');
-    }
-
     const capacityDecision = evaluateCapacitySnapshot({ policy, memberCount: target.memberCount });
     if (capacityDecision.kind === 'pending') {
       return leavePending(capacityDecision.reason, capacityDecision.eventType);
     }
     const { maxMembers, maxApprovalsPerHour } = capacityDecision.value;
+
+    await this.host.cacheVerifiedEncryptionKeys(delegation, carrierPeerId);
+    try {
+      await this.host.assertActiveEncryptionKey(delegation.agentAddress);
+    } catch {
+      return leavePending('verified-active-encryption-key-required');
+    }
 
     let reservation: ContextGraphJoinPolicyRateReservation;
     try {

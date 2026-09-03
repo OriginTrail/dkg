@@ -142,6 +142,7 @@ import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
 import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, collectPublishableMultiaddrs, type AgentProfileConfig } from './profile.js';
 import {
   computeDelegationDigest,
+  computeWorkspaceEncryptionKeysAttestationDigest,
   signAgentDelegation,
   verifyAgentDelegation,
   type SignedAgentDelegation,
@@ -227,6 +228,7 @@ import {
   attachRevocationToWorkspaceEncryptionKey,
   migrateLegacyWorkspaceEncryptionFields,
   refreshDefaultEncryptionKeyView,
+  verifyWorkspaceEncryptionKeyBinding,
   type AgentKeyRecord,
   type KeystoreEntry,
   type WorkspaceEncryptionKeyEntry,
@@ -439,6 +441,8 @@ const REQUESTER_JOIN_STATE_GENERATION = 'urn:dkg:local:requester-join-state:gene
 const REQUESTER_JOIN_STATE_CURATOR = 'urn:dkg:local:requester-join-state:curator-peer-id';
 const JOIN_REQUEST_GENERATION_PREDICATE = 'https://dkg.network/ontology#requestGeneration';
 const JOIN_REQUEST_GENERATION_RE = /^0x[0-9a-f]{64}$/i;
+const JOIN_ENCRYPTION_KEY_CACHE_GRAPH = 'urn:dkg:local:join-encryption-key-cache';
+const JOIN_ENCRYPTION_KEY_LIMIT = 8;
 
 const requesterJoinStateCache = new WeakMap<DKGAgent, Map<string, RequesterJoinRequestState>>();
 const requesterJoinStateTails = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
@@ -1019,6 +1023,8 @@ export class JoinRequestMethods extends DKGAgentBase {
       chargeVerifiedIngress: (contextGraphId, agentAddress) => {
         this.chargeVerifiedContextGraphJoinIngress(contextGraphId, agentAddress);
       },
+      cacheVerifiedEncryptionKeys: (delegation, carrierPeerId) =>
+        this.cacheVerifiedJoinEncryptionKeys(delegation, carrierPeerId),
       withAdmissionLock: (contextGraphId, operation) =>
         this.withContextGraphJoinAdmissionLock(contextGraphId, operation),
       isPolicyDisableRequested: (contextGraphId) =>
@@ -1553,6 +1559,11 @@ export class JoinRequestMethods extends DKGAgentBase {
     const issuedAtMs = Date.now();
     const expiresAtMs = issuedAtMs + JOIN_DELEGATION_VALIDITY_MS;
 
+    const workspaceEncryptionKeys = activeWorkspaceEncryptionKeys(agent).map((key) => ({
+      encryptionKeyAlgorithm: key.encryptionKeyAlgorithm,
+      publicEncryptionKey: key.publicEncryptionKey,
+      encryptionKeyProof: key.encryptionKeyProof,
+    }));
     const signed = await signAgentDelegation({
       agentAddress: addr,
       scope: joinDelegationScope(this.chain.deploymentId, contextGraphId),
@@ -1567,7 +1578,114 @@ export class JoinRequestMethods extends DKGAgentBase {
     // intentional: a node that re-signs with a different agent has
     // changed its intent for this CG.
     this.localApprovedAgentByCG.set(contextGraphId, addr.toLowerCase());
-    return signed;
+    const delegation: SignedAgentDelegation = {
+      ...signed,
+      ...(workspaceEncryptionKeys.length > 0 ? { workspaceEncryptionKeys } : {}),
+    };
+    if (workspaceEncryptionKeys.length === 0) return delegation;
+    const workspaceEncryptionKeysSignature = await new ethers.Wallet(agent.privateKey).signMessage(
+      computeWorkspaceEncryptionKeysAttestationDigest(delegation),
+    );
+    return { ...delegation, workspaceEncryptionKeysSignature };
+  }
+
+  /**
+   * Cache a cold joiner's self-authenticating public encryption keys locally.
+   * Agent-registry gossip is opportunistic and may not have reached the
+   * curator before the targeted join request. The delegation is verified and
+   * ingress-charged before this method runs; every key proof is independently
+   * wallet-bound to the same agent address.
+   */
+  async cacheVerifiedJoinEncryptionKeys(
+    this: DKGAgent,
+    delegation: SignedAgentDelegation,
+    carrierPeerId: string,
+  ): Promise<void> {
+    const keys = delegation.workspaceEncryptionKeys;
+    if (keys === undefined) return;
+    if (!Array.isArray(keys) || keys.length === 0 || keys.length > JOIN_ENCRYPTION_KEY_LIMIT) {
+      throw new Error(
+        `Join request must carry between 1 and ${JOIN_ENCRYPTION_KEY_LIMIT} workspace encryption keys.`,
+      );
+    }
+    // Preserve the existing admission contract for a signed carrier mismatch:
+    // policy evaluation reports a bounded pending decision. Do not cache the
+    // bundle because the carrier has not proven it is the signed delegatee.
+    if (delegation.delegateePeerId !== carrierPeerId) return;
+
+    const verified = keys.map((key) => {
+      if (
+        key === null
+        || typeof key !== 'object'
+        || key.encryptionKeyAlgorithm !== WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519
+        || typeof key.publicEncryptionKey !== 'string'
+        || typeof key.encryptionKeyProof !== 'string'
+      ) {
+        throw new Error('Join request carries a malformed workspace encryption key.');
+      }
+      let valid = false;
+      try {
+        valid = verifyWorkspaceEncryptionKeyBinding(
+          delegation.agentAddress,
+          key.encryptionKeyAlgorithm,
+          key.publicEncryptionKey,
+          key.encryptionKeyProof,
+        );
+      } catch {
+        valid = false;
+      }
+      if (!valid) {
+        throw new Error('Join request carries an invalid workspace encryption key proof.');
+      }
+      return key;
+    });
+    if (typeof delegation.workspaceEncryptionKeysSignature !== 'string') {
+      throw new Error('Join request is missing its workspace encryption-key attestation.');
+    }
+    let attestationSigner = '';
+    try {
+      attestationSigner = ethers.verifyMessage(
+        computeWorkspaceEncryptionKeysAttestationDigest(delegation),
+        delegation.workspaceEncryptionKeysSignature,
+      );
+    } catch {
+      attestationSigner = '';
+    }
+    if (attestationSigner.toLowerCase() !== delegation.agentAddress.toLowerCase()) {
+      throw new Error('Join request carries an invalid workspace encryption-key attestation.');
+    }
+
+    const subject = `did:dkg:agent:${canonicalAgentDidSubject(delegation.agentAddress)}`;
+    await this.store.deleteBySubjectPrefix(JOIN_ENCRYPTION_KEY_CACHE_GRAPH, subject);
+    const quads: Quad[] = [{
+      subject,
+      predicate: DKG_ONTOLOGY.DKG_PEER_ID,
+      object: JSON.stringify(carrierPeerId),
+      graph: JOIN_ENCRYPTION_KEY_CACHE_GRAPH,
+    }];
+    for (const key of verified) {
+      quads.push(
+        {
+          subject,
+          predicate: DKG_ONTOLOGY.DKG_PUBLIC_ENCRYPTION_KEY,
+          object: JSON.stringify(key.publicEncryptionKey),
+          graph: JOIN_ENCRYPTION_KEY_CACHE_GRAPH,
+        },
+        {
+          subject,
+          predicate: DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_ALGORITHM,
+          object: JSON.stringify(key.encryptionKeyAlgorithm),
+          graph: JOIN_ENCRYPTION_KEY_CACHE_GRAPH,
+        },
+        {
+          subject,
+          predicate: DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_PROOF,
+          object: JSON.stringify(key.encryptionKeyProof),
+          graph: JOIN_ENCRYPTION_KEY_CACHE_GRAPH,
+        },
+      );
+    }
+    await this.store.insert(quads);
   }
 
   /**

@@ -38,6 +38,7 @@ export {
   signAgentDelegation,
   verifyAgentDelegation,
   computeDelegationDigest,
+  computeWorkspaceEncryptionKeysAttestationDigest,
   type AgentDelegationPayload,
   type SignedAgentDelegation,
   type SignAgentDelegationParams,

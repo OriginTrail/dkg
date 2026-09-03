@@ -4,6 +4,7 @@ import {
   signAgentDelegation,
   verifyAgentDelegation,
   computeDelegationDigest,
+  computeWorkspaceEncryptionKeysAttestationDigest,
   type SignedAgentDelegation,
 } from '../src/auth/agent-delegation.js';
 
@@ -143,5 +144,45 @@ describe('agent-delegation primitive', () => {
       delegateeOpKey: baseParams.delegateeOpKey!.toUpperCase(),
     });
     expect(ethers.hexlify(a)).toBe(ethers.hexlify(b));
+  });
+
+  it('binds an optional encryption-key bundle without changing v2 delegation verification', async () => {
+    const signed = await signAgentDelegation(baseParams);
+    const withKeys: SignedAgentDelegation = {
+      ...signed,
+      workspaceEncryptionKeys: [{
+        encryptionKeyAlgorithm: 'X25519',
+        publicEncryptionKey: 'first-public-key',
+        encryptionKeyProof: 'first-wallet-proof',
+      }],
+    };
+    const workspaceEncryptionKeysSignature = await wallet.signMessage(
+      computeWorkspaceEncryptionKeysAttestationDigest(withKeys),
+    );
+    const attested = { ...withKeys, workspaceEncryptionKeysSignature };
+
+    // An older curator verifies the unchanged v2 fields and ignores the
+    // additive bundle. Upgraded curators verify the second wallet signature.
+    expect(() => verifyAgentDelegation(attested, {
+      expectedScope: baseParams.scope,
+      nowMs: baseParams.issuedAtMs,
+    })).not.toThrow();
+    expect(ethers.verifyMessage(
+      computeWorkspaceEncryptionKeysAttestationDigest(attested),
+      workspaceEncryptionKeysSignature,
+    ).toLowerCase()).toBe(wallet.address.toLowerCase());
+
+    const substituted = {
+      ...attested,
+      workspaceEncryptionKeys: [{
+        encryptionKeyAlgorithm: 'X25519' as const,
+        publicEncryptionKey: 'substituted-public-key',
+        encryptionKeyProof: 'substituted-wallet-proof',
+      }],
+    };
+    expect(ethers.verifyMessage(
+      computeWorkspaceEncryptionKeysAttestationDigest(substituted),
+      workspaceEncryptionKeysSignature,
+    ).toLowerCase()).not.toBe(wallet.address.toLowerCase());
   });
 });

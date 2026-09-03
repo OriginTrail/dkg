@@ -39,7 +39,7 @@ A default-responsibility RFC-64 release. When RFC-64 controls are omitted, every
 - Subscription catch-up re-evaluates RFC-64 responsibility after authoritative metadata lands, so a cold Edge join cannot remain fully synced but absent from the default catalog status until restart.
 - Late verified on-chain binding now notifies the responsibility registry, covering cold subscriptions whose numeric Context Graph ID arrives after their initial fail-closed policy check.
 - A newly responsible receiver now requests a policy-authorized replay of durable catalog heads from peers that were already connected, so subscription or finalized-authority activation after publication cannot miss the current head; private replay requests remain member/provider gated.
-- A cold private joiner now re-announces its persisted profile before requesting membership, so open enrollment can verify the active encryption key instead of leaving the request pending.
+- A cold private joiner now re-announces its persisted profile before requesting membership and carries its wallet-proven public encryption keys in a request-specific attestation. An upgraded curator can therefore verify the active encryption key without waiting for opportunistic profile gossip, while the stable v2 delegation signature remains readable by older curators.
 
 ### Deployment
 

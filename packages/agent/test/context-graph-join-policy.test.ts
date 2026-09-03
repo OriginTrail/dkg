@@ -1,9 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGEvent, PROTOCOL_JOIN_REQUEST } from '@origintrail-official/dkg-core';
+import {
+  DKGEvent,
+  PROTOCOL_JOIN_REQUEST,
+  WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+  computeWorkspaceAgentEncryptionKeyProofPayload,
+  encodeWorkspaceEncryptionKey,
+  generateWorkspaceRecipientEncryptionKey,
+} from '@origintrail-official/dkg-core';
 import {
   DKGAgent,
+  computeWorkspaceEncryptionKeysAttestationDigest,
   signAgentDelegation,
   type ContextGraphJoinPolicyAuditEvent,
   type ContextGraphJoinPolicyRecord,
@@ -498,6 +506,139 @@ describe('context graph open enrollment policy', () => {
     expect(pending).toMatchObject({ status: 'pending', autoApproved: false, reason: 'manual-policy' });
     expect((await agent.getContextGraphAllowedAgents(contextGraphId)).map((address) => address.toLowerCase()))
       .not.toContain(secondJoiner.agentAddress.toLowerCase());
+  }, 30_000);
+
+  it('auto-admits a cold remote agent from its wallet-proven encryption-key bundle', async () => {
+    const { agent, owner, chain } = await boot();
+    const contextGraphId = 'private-policy-cold-remote-admit';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    await agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 5,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress);
+
+    // Model the release-harness topology: this wallet and X25519 key were
+    // created on another node, and no agent-profile gossip has reached the
+    // curator before the targeted join request arrives.
+    const remoteWallet = ethers.Wallet.createRandom();
+    const recipient = generateWorkspaceRecipientEncryptionKey(
+      `did:dkg:agent:${remoteWallet.address}`,
+      `did:dkg:agent:${remoteWallet.address}#cold-join-x25519`,
+    );
+    const publicKeyBytes = recipient.publicKeyBytes!;
+    const publicEncryptionKey = encodeWorkspaceEncryptionKey(publicKeyBytes);
+    const encryptionKeyProof = await remoteWallet.signMessage(
+      computeWorkspaceAgentEncryptionKeyProofPayload({
+        agentAddress: remoteWallet.address,
+        encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+        publicKeyBytes,
+      }),
+    );
+    const issuedAtMs = Date.now();
+    const signed = await signAgentDelegation({
+      agentAddress: remoteWallet.address,
+      scope: joinDelegationScope(chain.deploymentId, contextGraphId),
+      issuedAtMs,
+      expiresAtMs: issuedAtMs + 24 * 60 * 60 * 1000,
+      delegateePeerId: agent.peerId,
+      agentPrivateKey: remoteWallet.privateKey,
+    });
+    const unsignedKeyDelegation = {
+      ...signed,
+      workspaceEncryptionKeys: [{
+        encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+        publicEncryptionKey,
+        encryptionKeyProof,
+      }],
+    };
+    const delegation = {
+      ...unsignedKeyDelegation,
+      workspaceEncryptionKeysSignature: await remoteWallet.signMessage(
+        computeWorkspaceEncryptionKeysAttestationDigest(unsignedKeyDelegation),
+      ),
+    };
+
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      'cold-remote-agent',
+      agent.peerId,
+    )).resolves.toEqual({ status: 'approved', autoApproved: true });
+    expect((await agent.getContextGraphAllowedAgents(contextGraphId)).map((address) =>
+      address.toLowerCase())).toContain(remoteWallet.address.toLowerCase());
+
+    const rejectedContextGraphId = 'private-policy-cold-remote-rejects-bad-proof';
+    await createPrivateCg(agent, rejectedContextGraphId, owner.agentAddress);
+    await agent.setContextGraphJoinPolicy(rejectedContextGraphId, {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 5,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress);
+    const rejectedIssuedAtMs = Date.now();
+    const rejectedSigned = await signAgentDelegation({
+      agentAddress: remoteWallet.address,
+      scope: joinDelegationScope(chain.deploymentId, rejectedContextGraphId),
+      issuedAtMs: rejectedIssuedAtMs,
+      expiresAtMs: rejectedIssuedAtMs + 24 * 60 * 60 * 1000,
+      delegateePeerId: agent.peerId,
+      agentPrivateKey: remoteWallet.privateKey,
+    });
+    const tamperedProof = `${encryptionKeyProof.slice(0, -1)}${
+      encryptionKeyProof.endsWith('0') ? '1' : '0'
+    }`;
+    const invalidProofDelegation = {
+      ...rejectedSigned,
+      workspaceEncryptionKeys: [{
+        encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+        publicEncryptionKey,
+        encryptionKeyProof: tamperedProof,
+      }],
+    };
+    await expect(agent.processIncomingJoinRequest(
+      rejectedContextGraphId,
+      {
+        ...invalidProofDelegation,
+        workspaceEncryptionKeysSignature: await remoteWallet.signMessage(
+          computeWorkspaceEncryptionKeysAttestationDigest(invalidProofDelegation),
+        ),
+      },
+      'cold-remote-agent',
+      agent.peerId,
+    )).rejects.toThrow(/invalid workspace encryption key proof/i);
+
+    const alternateRecipient = generateWorkspaceRecipientEncryptionKey(
+      `did:dkg:agent:${remoteWallet.address}`,
+      `did:dkg:agent:${remoteWallet.address}#substituted-x25519`,
+    );
+    const alternatePublicKeyBytes = alternateRecipient.publicKeyBytes!;
+    const substitutedDelegation = {
+      ...rejectedSigned,
+      workspaceEncryptionKeys: [{
+        encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+        publicEncryptionKey: encodeWorkspaceEncryptionKey(alternatePublicKeyBytes),
+        encryptionKeyProof: await remoteWallet.signMessage(
+          computeWorkspaceAgentEncryptionKeyProofPayload({
+            agentAddress: remoteWallet.address,
+            encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+            publicKeyBytes: alternatePublicKeyBytes,
+          }),
+        ),
+      }],
+      // A carrier may know another valid key proof, but cannot substitute it
+      // while retaining the wallet attestation for the original bundle.
+      workspaceEncryptionKeysSignature: delegation.workspaceEncryptionKeysSignature,
+    };
+    await expect(agent.processIncomingJoinRequest(
+      rejectedContextGraphId,
+      substitutedDelegation,
+      'cold-remote-agent',
+      agent.peerId,
+    )).rejects.toThrow(/invalid workspace encryption-key attestation/i);
+    expect((await agent.getContextGraphAllowedAgents(rejectedContextGraphId)).map((address) =>
+      address.toLowerCase())).not.toContain(remoteWallet.address.toLowerCase());
   }, 30_000);
 
   it('returns the legacy alreadyMember alias to a pre-open-enrollment requester', async () => {

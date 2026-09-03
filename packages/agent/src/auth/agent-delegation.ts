@@ -44,6 +44,55 @@ export interface AgentDelegationPayload {
 export interface SignedAgentDelegation extends AgentDelegationPayload {
   /** EIP-191 signature over `computeDelegationDigest(payload)` by `agentAddress`. */
   signature: string;
+  /**
+   * Optional self-authenticating public keys for cold private enrollment.
+   * Each proof is signed independently by `agentAddress`; the delegation
+   * signature intentionally continues to cover only the stable v2 payload so
+   * older curators can verify it. `workspaceEncryptionKeysSignature` binds
+   * this exact bundle to the signed delegation for upgraded curators.
+   */
+  workspaceEncryptionKeys?: Array<{
+    encryptionKeyAlgorithm: 'X25519';
+    publicEncryptionKey: string;
+    encryptionKeyProof: string;
+  }>;
+  /** Wallet signature over `computeWorkspaceEncryptionKeysAttestationDigest`. */
+  workspaceEncryptionKeysSignature?: string;
+}
+
+/**
+ * Bind a cold-enrollment key bundle to one otherwise backwards-compatible v2
+ * delegation. Sorting makes transport reordering harmless while retaining
+ * duplicates in the signed payload, so removing or adding any entry changes
+ * the digest.
+ */
+export function computeWorkspaceEncryptionKeysAttestationDigest(
+  delegation: Pick<
+    SignedAgentDelegation,
+    'agentAddress' | 'delegateePeerId' | 'signature' | 'workspaceEncryptionKeys'
+  >,
+): Uint8Array {
+  if (!delegation.workspaceEncryptionKeys?.length) {
+    throw new Error('Workspace encryption-key attestation requires at least one key.');
+  }
+  const canonicalKeys = [...delegation.workspaceEncryptionKeys]
+    .map((key) => ({
+      encryptionKeyAlgorithm: key.encryptionKeyAlgorithm,
+      publicEncryptionKey: key.publicEncryptionKey,
+      encryptionKeyProof: key.encryptionKeyProof,
+    }))
+    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
+    ['string', 'address', 'string', 'string', 'string'],
+    [
+      'dkg.join-encryption-keys.v1',
+      delegation.agentAddress.toLowerCase(),
+      delegation.delegateePeerId ?? '',
+      delegation.signature.toLowerCase(),
+      JSON.stringify(canonicalKeys),
+    ],
+  );
+  return ethers.getBytes(ethers.keccak256(encoded));
 }
 
 /**
