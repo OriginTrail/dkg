@@ -431,4 +431,40 @@ describe('RFC-64 D26 catalog access authorization', () => {
     })).toThrow(/exact predecessor digest/u);
     expect(subject.lookup(NETWORK, CG)?.policyDigest).toBe(successorDigest);
   });
+
+  it('promotes an unregistered authority to finalized chain state exactly one way', () => {
+    const initial = policy(0, 0);
+    const initialDigest = digestFor(initial);
+    const finalized = {
+      ...policy(0, 0),
+      governanceChainId: '31337',
+      governanceContractAddress: '0x6666666666666666666666666666666666666666',
+      ownershipTransitionDigest: `0x${'77'.repeat(32)}` as Digest32V1,
+      source: {
+        kind: 'finalized-chain' as const,
+        chainId: '31337',
+        contractAddress: '0x6666666666666666666666666666666666666666',
+        blockNumber: '42',
+        blockHash: `0x${'88'.repeat(32)}` as Digest32V1,
+      },
+    } satisfies ContextGraphPolicyV1;
+    const finalizedDigest = digestFor(finalized);
+    const subject = registry();
+
+    subject.acceptAuthoritativeCurrent({ policy: initial, policyDigest: initialDigest });
+    expect(subject.acceptAuthoritativeCurrent({
+      policy: finalized,
+      policyDigest: finalizedDigest,
+    }).policyDigest).toBe(finalizedDigest);
+    expect(subject.acceptAuthoritativeCurrent({
+      policy: finalized,
+      policyDigest: finalizedDigest,
+    }).policyDigest).toBe(finalizedDigest);
+
+    expect(() => subject.acceptAuthoritativeCurrent({
+      policy: initial,
+      policyDigest: initialDigest,
+    })).toThrow(/does not advance its high-water/u);
+    expect(subject.lookup(NETWORK, CG)?.policyDigest).toBe(finalizedDigest);
+  });
 });

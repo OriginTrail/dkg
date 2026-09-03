@@ -374,6 +374,17 @@ function assertAuthoritativeMonotonicPolicyTransition(
 ): void {
   if (
     current.policy.source.kind === 'owner-signed-unregistered'
+    && successor.policy.source.kind === 'finalized-chain'
+  ) {
+    // Registration is a one-way authority promotion. Both sources begin at
+    // era/version zero, so numeric high-water comparison alone cannot admit
+    // the canonical chain snapshot that replaces the creator's local seed.
+    // The caller reaches this boundary only after independently verifying the
+    // finalized chain state and its name commitment. Never allow the reverse.
+    return;
+  }
+  if (
+    current.policy.source.kind === 'owner-signed-unregistered'
     && successor.policy.source.kind === 'owner-signed-unregistered'
     && current.policy.source.ownerAddress === successor.policy.source.ownerAddress
   ) {
