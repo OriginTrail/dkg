@@ -295,7 +295,7 @@ describe('[Q-1] DKGQueryEngine minTrust uses writer-side trust metadata', () => 
     );
   });
 
-  it('preprocesses escaped IRI and string delimiters before scoped minTrust rewriting', async () => {
+  it('preserves UCHAR payload while scoped minTrust rewriting uses raw delimiters', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
     const consensusGraph = contextGraphVerifiableMemoryUri(CG, 'consensus-verified');
@@ -309,11 +309,76 @@ describe('[Q-1] DKGQueryEngine minTrust uses writer-side trust metadata', () => 
     ]);
 
     const result = await engine.query(
-      String.raw`SELECT ?o WHERE { \u003Curn:e1\u003E \u003Chttp://example.com/p#name\u003E ?o . FILTER(STR(?o) = \u0022Alice\u0022) }`,
+      String.raw`SELECT ?o WHERE { <urn:e1> <http://example.com/p#name> ?o . FILTER(STR(?o) = "\u0041lice") }`,
       { contextGraphId: CG, view: 'verifiable-memory', minTrust: TrustLevel.ConsensusVerified },
     );
 
     expect(result.bindings.map((binding) => binding['o'])).toEqual(['"Alice"']);
+  });
+
+  it.each([
+    [String.raw`"\u0022"`, '"'],
+    [String.raw`'\u0022'`, '"'],
+    [String.raw`"""\u0022"""`, '"'],
+    [String.raw`'''\u0022'''`, '"'],
+    [String.raw`"\u005C"`, '\\'],
+    [String.raw`'\u005C'`, '\\'],
+    [String.raw`"""\u000A"""`, '\n'],
+    [String.raw`'''\u000A'''`, '\n'],
+  ])('executes raw UCHAR literal payload without promoting it to syntax: %s', async (
+    literal,
+    expected,
+  ) => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+
+    const result = await engine.query(`SELECT ?x WHERE { BIND(${literal} AS ?x) }`);
+
+    expect(result.bindings).toEqual([{ x: sparqlString(expected) }]);
+  });
+
+  it.each([
+    ['GRAPH', '\r'],
+    ['FROM', '\r'],
+    ['GRAPH', String.raw`\u000D`],
+    ['FROM', String.raw`\u000D`],
+  ])('rejects %s hidden after a %s comment boundary before store dispatch', async (
+    clause,
+    commentBoundary,
+  ) => {
+    const store = new OxigraphStore();
+    const originalQuery = store.query.bind(store);
+    let queryCalls = 0;
+    store.query = async (...args) => {
+      queryCalls++;
+      return originalQuery(...args);
+    };
+    const engine = new DKGQueryEngine(store);
+    const hidden = clause === 'GRAPH'
+      ? 'WHERE { GRAPH <urn:private> { ?s <urn:p> ?o } }'
+      : 'FROM <urn:private> WHERE { ?s <urn:p> ?o }';
+
+    await expect(engine.query(
+      `SELECT ?o # decoy${commentBoundary}${hidden}`,
+      { contextGraphId: CG },
+    )).rejects.toThrow(/Scoped query violation/);
+    expect(queryCalls).toBe(0);
+  });
+
+  it('scopes graphless DESCRIBE with LIMIT to the requested context graph', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    await store.insert([
+      quad('urn:a', 'urn:p', '"Requested"', contextGraphDataUri(CG)),
+      quad('urn:a', 'urn:p', '"Other"', contextGraphDataUri('other-cg')),
+    ]);
+
+    const result = await engine.query(
+      'DESCRIBE <urn:a> LIMIT 10',
+      { contextGraphId: CG },
+    );
+
+    expect(result.quads?.map((value) => value.object)).toEqual(['"Requested"']);
   });
 
   it.each([

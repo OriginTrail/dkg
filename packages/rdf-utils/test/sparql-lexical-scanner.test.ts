@@ -66,12 +66,43 @@ describe('canonical SPARQL lexical scanner', () => {
     }));
   });
 
+  it('derives an IRI value without promoting UCHAR payload to delimiters', () => {
+    const encodedDelimiters = prepareSparql(
+      String.raw`SELECT * WHERE { GRAPH \u003Curn:\u0061\u003E {} }`,
+    );
+    const encodedPayload = prepareSparql(
+      String.raw`SELECT * WHERE { <urn:a\u003Eb> <urn:p> ?o }`,
+    );
+
+    expect(encodedDelimiters.tokens.find((token) => token.kind === 'iri')).toMatchObject({
+      kind: 'iri',
+      logicalValue: 'urn:a',
+    });
+    expect(encodedPayload.tokens.filter((token) => token.kind === 'iri')).toEqual([
+      expect.objectContaining({ logicalValue: 'urn:a>b' }),
+      expect.objectContaining({ logicalValue: 'urn:p' }),
+    ]);
+  });
+
   it('does not reinterpret escaped string backslashes as overlapping UCHARs', () => {
     const malformedLookalike = String.raw`SELECT ?x WHERE { BIND("\\u00ZZ" AS ?x) }`;
     const validLookalike = String.raw`SELECT ?x WHERE { BIND("\\u006E" AS ?x) }`;
 
     expect(decodeSparqlCodePointEscapes(malformedLookalike)).toBe(malformedLookalike);
     expect(decodeSparqlCodePointEscapes(validLookalike)).toBe(validLookalike);
+  });
+
+  it.each([
+    String.raw`SELECT * WHERE { BIND("\u0022" AS ?x) }`,
+    String.raw`SELECT * WHERE { BIND('\u005C' AS ?x) }`,
+    String.raw`SELECT * WHERE { BIND("""\u000A""" AS ?x) }`,
+    String.raw`SELECT * WHERE { BIND('''\u0022''' AS ?x) }`,
+  ])('keeps UCHAR string payload opaque in the policy view: %s', (source) => {
+    const prepared = prepareSparql(source);
+
+    expect(prepared.normalized).toBe(source);
+    expect(prepared.lexicalStatus).toEqual({ valid: true, unterminated: false });
+    expect(prepared.tokens.filter((token) => token.kind === 'string')).toHaveLength(1);
   });
 
   it('leaves UCHAR-like comment text inert while decoding active tokens', () => {

@@ -19,13 +19,6 @@ export {
   skipSparqlStringLiteral,
 };
 
-/** Return the word facts already derived by canonical SPARQL preparation. */
-export function collectSparqlWordTokens(
-  source: string | PreparedSparql,
-): ReadonlySet<string> {
-  return typeof source === 'string' ? prepareSparql(source).wordTokens : source.wordTokens;
-}
-
 export function isSparqlKeywordStart(src: string, idx: number): boolean {
   const ch = src[idx];
   if (!isWordStart(ch)) return false;

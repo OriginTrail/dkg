@@ -24,7 +24,16 @@ export type SparqlLexicalToken =
     readonly normalizedEnd: number;
   }
   | {
-    readonly kind: 'iri' | 'string';
+    readonly kind: 'iri';
+    /** IRIREF body after UCHAR decoding, without angle brackets. */
+    readonly logicalValue: string;
+    readonly start: number;
+    readonly end: number;
+    readonly normalizedStart: number;
+    readonly normalizedEnd: number;
+  }
+  | {
+    readonly kind: 'string';
     readonly start: number;
     readonly end: number;
     readonly normalizedStart: number;
@@ -34,7 +43,11 @@ export type SparqlLexicalToken =
 export interface PreparedSparql {
   /** Exact unprocessed input. */
   readonly source: string;
-  /** SPARQL UCHAR-normalized input, or `null` when a UCHAR is malformed. */
+  /**
+   * Policy-normalized input, or `null` when a UCHAR is malformed. Active
+   * syntax is decoded; payload UCHARs inside strings/IRIs/comments retain
+   * their source spelling. Never substitute this view for backend execution.
+   */
   readonly normalized: string | null;
   /** Source-length-preserving view with strings, IRIs, and comments blanked. */
   readonly masked: string;
@@ -161,6 +174,18 @@ function blank(masked: string[], start: number, end: number): void {
   for (let index = start; index < end; index++) masked[index] = ' ';
 }
 
+function logicalIriValue(value: string, start: number, end: number): string | null {
+  const decoded: string[] = [];
+  let index = start + 1;
+  while (index < end - 1) {
+    const logical = readSparqlLogicalCodePoint(value, index);
+    if (!logical || index + logical.rawWidth > end - 1) return null;
+    decoded.push(String.fromCodePoint(logical.codePoint));
+    index += logical.rawWidth;
+  }
+  return decoded.join('');
+}
+
 function lexicalToken(
   kind: 'word' | 'variable' | 'prefixed-name' | 'symbol',
   value: string,
@@ -270,9 +295,15 @@ function scanSparql(value: string): PreparedSparql {
       if (iriEnd !== null) {
         const start = index;
         index = iriEnd;
+        const logicalValue = logicalIriValue(value, start, index);
+        if (logicalValue === null) {
+          unterminated = true;
+          continue;
+        }
         blank(masked, start, index);
         tokens.push({
           kind: 'iri',
+          logicalValue,
           start,
           end: index,
           normalizedStart: start,
@@ -369,6 +400,14 @@ function normalizedBoundaryToRaw(
  * source; `normalizedStart`/`normalizedEnd` address `normalized`.
  */
 export function prepareSparql(source: string): PreparedSparql {
+  // The overwhelmingly common path contains no UCHAR. Avoid constructing an
+  // O(n) span table and remapping every token when raw and logical coordinate
+  // spaces are identical. This also keeps large valid PREFIX preambles well
+  // below the ReDoS regression wall-clock guard while remaining linear.
+  if (!source.includes('\\u') && !source.includes('\\U')) {
+    return scanSparql(source);
+  }
+
   const normalized = normalizeSparqlCodePointEscapes(source);
   if (normalized === null) {
     return {

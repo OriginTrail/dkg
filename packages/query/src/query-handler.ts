@@ -5,10 +5,7 @@ import {
   quadsToNQuads,
   type StoreSchedulerBusyErrorLike,
 } from '@origintrail-official/dkg-storage';
-import {
-  collectSparqlWordTokens,
-  prepareSparql,
-} from './sparql-utils.js';
+import { prepareSparql } from './sparql-utils.js';
 import { validateReadOnlySparql } from './sparql-guard.js';
 import type { DKGQueryEngine } from './dkg-query-engine.js';
 import type {
@@ -405,7 +402,7 @@ export class QueryHandler {
     if (prepared.normalized === null) {
       return errorResponse(opId, 'ERROR', 'SPARQL rejected: malformed Unicode code-point escape');
     }
-    const codeWords = collectSparqlWordTokens(prepared);
+    const codeWords = prepared.wordTokens;
 
     if (codeWords.has('SERVICE')) {
       return errorResponse(opId, 'ERROR', 'SERVICE clauses are not allowed in remote queries');

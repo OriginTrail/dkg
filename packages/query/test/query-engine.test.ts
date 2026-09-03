@@ -1651,6 +1651,19 @@ describe('DKGQueryEngine', () => {
     ]);
   });
 
+  it('authorizes UCHAR payload inside an explicit scoped GRAPH IRI', async () => {
+    const result = await engine.query(
+      String.raw`SELECT ?name WHERE {
+        GRAPH <did:dkg:context-graph:\u0061gent-registry> {
+          ?s <http://schema.org/name> ?name
+        }
+      }`,
+      { contextGraphId: CONTEXT_GRAPH },
+    );
+
+    expect(result.bindings).toEqual([{ name: '"ImageBot"' }]);
+  });
+
   it('rejects prefixed explicit GRAPH targets outside the scoped graph set', async () => {
     const otherGraph = 'did:dkg:context-graph:other-agent-registry';
     await store.insert([
@@ -1834,6 +1847,23 @@ describe('DKGQueryEngine', () => {
         { contextGraphId: CONTEXT_GRAPH },
       ),
     ).rejects.toThrow(/Scoped query violation: GRAPH variables cannot be mixed with default-graph triple patterns/i);
+  });
+
+  it.each([
+    `SELECT ?g ?name ?description WHERE {
+      GRAPH ?g { ?s <http://schema.org/name> ?name }
+      OPTIONAL { ?s <http://schema.org/description> ?description }
+    }`,
+    `SELECT ?g ?name WHERE {
+      GRAPH ?g { ?s <http://schema.org/name> ?name }
+      FILTER EXISTS { ?foreign <http://schema.org/name> ?name }
+    }`,
+  ])('rejects nested default-graph patterns alongside GRAPH variables', async (sparql) => {
+    await expect(
+      engine.query(sparql, { contextGraphId: CONTEXT_GRAPH }),
+    ).rejects.toThrow(
+      /Scoped query violation: GRAPH variables cannot be mixed with default-graph triple patterns/i,
+    );
   });
 
   it('constrains GRAPH variables with non-ASCII names to the scoped context graph data graph', async () => {
