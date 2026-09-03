@@ -71,7 +71,6 @@ import {
 } from '../node-ui-static.js';
 import {
   compareSemver,
-  isValidSemver,
   resolveNpmVersionTarget,
   type NpmRegistryFailure,
   type NpmVersionNoTargetReason,
@@ -424,17 +423,6 @@ export async function checkForNpmVersionUpdate(
   }
 
   const { version } = result;
-
-  // Never trust a non-semver target through the forward-only gate below
-  // (compareSemver would return NaN, which is not <= 0). The channel path
-  // already guards this upstream; this also covers the default tag set
-  // without changing its candidate selection.
-  if (!isValidSemver(version)) {
-    log(
-      `Auto-update (npm): resolved version "${version}" is not valid semver, skipping`,
-    );
-    return channel ? { status: "no-target", channel } : { status: "up-to-date" };
-  }
 
   if (version === currentVersion) return { status: "up-to-date" };
   if (compareSemver(version, currentVersion) <= 0)

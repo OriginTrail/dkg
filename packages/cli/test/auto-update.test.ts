@@ -1290,7 +1290,7 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     expect(result.status).toBe('error');
   });
 
-  it('normalizes only own string dist-tags at the registry gateway', async () => {
+  it('preserves own dist-tag values for canonical downstream classification', async () => {
     const { fetchNpmDistTags } = await import('../src/update/npm-registry.js');
     fetchImpl = async () => ({
       ok: true,
@@ -1301,7 +1301,7 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
 
     await expect(fetchNpmDistTags({ fetch: fetchImpl as any })).resolves.toEqual({
       status: 'ok',
-      tags: { beta: '9.0.0-beta.4' },
+      tags: { latest: 9_100_000, beta: '9.0.0-beta.4' },
     });
   });
 

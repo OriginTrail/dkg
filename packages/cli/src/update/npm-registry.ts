@@ -25,8 +25,11 @@ export type NpmVersionResolution =
 
 export type NpmDistTagResult =
   | { status: 'resolved'; version: string }
-  | { status: 'not-found' }
+  | { status: 'missing' }
+  | { status: 'invalid'; value: unknown }
   | { status: 'error'; failure: NpmRegistryFailure };
+
+export type NpmDistTagClassification = Exclude<NpmDistTagResult, { status: 'error' }>;
 
 export type NpmVersionNoTargetReason =
   | { kind: 'missing-channel'; channel: string }
@@ -36,17 +39,14 @@ export type NpmVersionNoTargetReason =
   | { kind: 'no-valid-candidates' };
 
 export type NpmDistTagsResult =
-  | { status: 'ok'; tags: Record<string, string> }
+  | { status: 'ok'; tags: Record<string, unknown> }
   | { status: 'error'; failure: NpmRegistryFailure };
 
-export function decodeNpmDistTags(value: unknown): Record<string, string> | null {
+export function decodeNpmDistTags(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const distTags = (value as Record<string, unknown>)['dist-tags'];
   if (!distTags || typeof distTags !== 'object' || Array.isArray(distTags)) return null;
-  return Object.fromEntries(
-    Object.entries(distTags).filter((entry): entry is [string, string] =>
-      typeof entry[1] === 'string'),
-  );
+  return Object.fromEntries(Object.entries(distTags));
 }
 
 export function isValidSemver(value: string): boolean {
@@ -62,6 +62,20 @@ export type ExplicitNpmUpdateTargetDecision =
   | { status: 'allowed'; version: string }
   | { status: 'rejected'; reason: string }
   | { status: 'registry-error'; reason: string; failure: NpmRegistryFailure };
+
+/** The one pure owner of missing, malformed, and validated dist-tag states. */
+export function classifyNpmDistTag(
+  tags: Readonly<Record<string, unknown>>,
+  tag: string,
+): NpmDistTagClassification {
+  if (!Object.hasOwn(tags, tag)) return { status: 'missing' };
+  const value = tags[tag];
+  if (typeof value !== 'string') return { status: 'invalid', value };
+  const version = value.trim();
+  return isValidSemver(version)
+    ? { status: 'resolved', version }
+    : { status: 'invalid', value };
+}
 
 /** Canonical npm-registry boundary shared by automatic and explicit updates. */
 export async function fetchNpmDistTags(
@@ -98,10 +112,7 @@ export async function resolveNpmDistTag(
   if (result.status === 'error') {
     return { status: 'error', failure: result.failure };
   }
-  const version = Object.hasOwn(result.tags, tag) ? result.tags[tag] : null;
-  return typeof version === 'string' && isValidSemver(version)
-    ? { status: 'resolved', version }
-    : { status: 'not-found' };
+  return classifyNpmDistTag(result.tags, tag);
 }
 
 /**
@@ -112,7 +123,7 @@ export async function resolveExplicitNpmUpdateTarget(
   target: string,
   allowPrerelease: boolean,
   deps: NpmRegistryDeps & {
-    resolveNpmDistTag?: typeof resolveNpmDistTag;
+    fetchNpmDistTags?: () => Promise<NpmDistTagsResult>;
   } = {},
 ): Promise<ExplicitNpmUpdateTargetDecision> {
   const normalizedTarget = target.trim().replace(/^v/, '');
@@ -127,9 +138,7 @@ export async function resolveExplicitNpmUpdateTarget(
     return { status: 'allowed', version: normalizedTarget };
   }
 
-  const resolved = deps.resolveNpmDistTag
-    ? await deps.resolveNpmDistTag(normalizedTarget)
-    : await resolveNpmDistTag(normalizedTarget, deps);
+  const resolved = await resolveNpmDistTag(normalizedTarget, deps);
   if (resolved.status === 'error') {
     return {
       status: 'registry-error',
@@ -137,10 +146,16 @@ export async function resolveExplicitNpmUpdateTarget(
       failure: resolved.failure,
     };
   }
-  if (resolved.status === 'not-found') {
+  if (resolved.status === 'missing') {
     return {
       status: 'rejected',
       reason: `target "${normalizedTarget}" is not an exact semantic version or a published npm dist-tag`,
+    };
+  }
+  if (resolved.status === 'invalid') {
+    return {
+      status: 'rejected',
+      reason: `dist-tag "${normalizedTarget}" does not resolve to a valid semantic version`,
     };
   }
   if (!allowPrerelease && isPrerelease(resolved.version)) {
@@ -167,39 +182,52 @@ export async function resolveNpmVersionTarget(
   const tags = result.tags;
 
   if (channel) {
-    const pinned = Object.hasOwn(tags, channel) ? tags[channel] : null;
-    if (typeof pinned !== 'string') {
+    const pinned = classifyNpmDistTag(tags, channel);
+    if (pinned.status === 'missing') {
       return { status: 'no-target', reason: { kind: 'missing-channel', channel } };
     }
-    if (!isValidSemver(pinned)) {
+    if (pinned.status === 'invalid') {
       return {
         status: 'no-target',
-        reason: { kind: 'invalid-channel-version', channel, version: pinned },
+        reason: {
+          kind: 'invalid-channel-version',
+          channel,
+          version: typeof pinned.value === 'string' ? pinned.value : String(pinned.value),
+        },
       };
     }
-    if (!allowPrerelease && isPrerelease(pinned)) {
+    if (!allowPrerelease && isPrerelease(pinned.version)) {
       return {
         status: 'no-target',
-        reason: { kind: 'prerelease-channel', channel, version: pinned },
+        reason: { kind: 'prerelease-channel', channel, version: pinned.version },
       };
     }
-    return { status: 'resolved', version: pinned };
+    return pinned;
   }
 
-  const stable = tags.latest ?? null;
+  const latest = classifyNpmDistTag(tags, 'latest');
   if (!allowPrerelease) {
-    if (stable && isValidSemver(stable) && !isPrerelease(stable)) {
-      return { status: 'resolved', version: stable };
+    if (latest.status === 'resolved' && !isPrerelease(latest.version)) {
+      return latest;
     }
     return {
       status: 'no-target',
-      reason: { kind: 'unacceptable-latest', version: stable },
+      reason: {
+        kind: 'unacceptable-latest',
+        version: latest.status === 'resolved'
+          ? latest.version
+          : latest.status === 'invalid' && typeof latest.value === 'string'
+            ? latest.value
+            : null,
+      },
     };
   }
 
-  const candidates = ([stable, tags.dev, tags.beta, tags.next].filter(
-    Boolean,
-  ) as string[]).filter(isValidSemver);
+  const candidates = ['latest', 'dev', 'beta', 'next']
+    .map((tag) => classifyNpmDistTag(tags, tag))
+    .filter((candidate): candidate is Extract<NpmDistTagClassification, { status: 'resolved' }> =>
+      candidate.status === 'resolved')
+    .map((candidate) => candidate.version);
   if (candidates.length === 0) {
     return { status: 'no-target', reason: { kind: 'no-valid-candidates' } };
   }

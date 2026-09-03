@@ -117,6 +117,7 @@ export default defineConfig({
           'test/log-sink.test.ts',
           'test/log-lifecycle.test.ts',
           'test/telemetry-runtime.test.ts',
+          'test/update-telemetry-status.test.ts',
           'test/dashboard-log-volume-pruner.test.ts',
           // RFC 120 / plan PR 1 + 2 — Blazegraph support. Pure logic
           // (mocked fetch + in-memory config); cheap to keep in the
