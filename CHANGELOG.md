@@ -35,6 +35,7 @@ A default-responsibility RFC-64 release. When RFC-64 controls are omitted, every
 ### Fixed
 
 - Omitted-deployment catalog authority and author inventory use the chain adapter's namespaced network identity, matching deterministic KA UALs instead of the unrelated DKG genesis hash; post-commit inventory warnings retain their bounded cause chain for operator diagnosis.
+- Local devnet snapshot storage keeps capacity admission with explicit low-disk watermarks, avoiding dependence on production-scale free-space reserves during release certification.
 
 ### Deployment
 
