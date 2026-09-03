@@ -8,6 +8,8 @@ import {
 import {
   materializePreparedSparql,
   prepareSparql,
+  type PreparedSparql,
+  type ValidPreparedSparql,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import {
@@ -19,13 +21,23 @@ import {
 
 const CG = 'qa-extra-cg';
 
+function validPrepared(source: string): ValidPreparedSparql {
+  const prepared = prepareSparql(source);
+  if (prepared.status !== 'valid') throw new Error('expected valid prepared SPARQL');
+  return prepared;
+}
+
+function graphScope(source: string) {
+  return prepareGraphScope(validPrepared(source));
+}
+
 function quad(subject: string, predicate: string, object: string, graph: string): Quad {
   return { subject, predicate, object, graph };
 }
 
 describe('prepared SPARQL graph scope', () => {
   it('accepts the canonical lexical artifact as its sole source owner', () => {
-    const prepared = prepareSparql('SELECT * WHERE { GRAPH <urn:g> { ?s ?p ?o } }');
+    const prepared = validPrepared('SELECT * WHERE { GRAPH <urn:g> { ?s ?p ?o } }');
     const scope = prepareGraphScope(prepared);
 
     expect(scope.prepared).toBe(prepared);
@@ -37,7 +49,7 @@ describe('prepared SPARQL graph scope', () => {
 
   it('keeps no-op graph rewrites byte-identical and materializes syntax only for execution', () => {
     const source = String.raw`SELECT ?s WHERE \u007B GRAPH <urn:g> \u007B ?s <urn:p> "\u007B" \u007D \u007D`;
-    const scope = prepareGraphScope(source);
+    const scope = graphScope(source);
 
     const rewrite = wrapWithGraph(scope, 'urn:other');
     expect(rewrite.kind).toBe('ready');
@@ -51,20 +63,20 @@ describe('prepared SPARQL graph scope', () => {
 
   it('returns typed reasons and preserves canonical graph-set fallbacks', () => {
     const malformed = rewriteGraphSet(
-      prepareGraphScope('SELECT * WHERE { ?s ?p ?o'),
+      graphScope('SELECT * WHERE { ?s ?p ?o'),
       ['urn:g1', 'urn:g2'],
       'values-union',
     );
     expect(malformed).toMatchObject({ kind: 'unsupported', reason: 'missing-where' });
 
     const nestedUnion = rewriteGraphSet(
-      prepareGraphScope('SELECT * WHERE { { ?s <urn:p> ?o } UNION { ?s <urn:q> ?o } }'),
+      graphScope('SELECT * WHERE { { ?s <urn:p> ?o } UNION { ?s <urn:q> ?o } }'),
       ['urn:g1', 'urn:g2'],
       'values-union',
     );
     expect(nestedUnion).toMatchObject({ kind: 'unsupported', reason: 'nested-union' });
 
-    const collisionScope = prepareGraphScope(
+    const collisionScope = graphScope(
       'SELECT ?__dkgViewGraph ?s WHERE { ?s <urn:p> ?o }',
     );
     expect(wrapWithGraphValues(collisionScope, ['urn:g1', 'urn:g2']))
@@ -77,7 +89,7 @@ describe('prepared SPARQL graph scope', () => {
     expect(collisionFallback.kind).toBe('ready');
 
     const graphlessDescribe = rewriteGraphSet(
-      prepareGraphScope('DESCRIBE <urn:s> LIMIT 10'),
+      graphScope('DESCRIBE <urn:s> LIMIT 10'),
       ['urn:g1', 'urn:g2'],
       'union-only',
     );
@@ -89,7 +101,7 @@ describe('prepared SPARQL graph scope', () => {
   });
 
   it('prepares graph targets as payload-complete discriminated variants', () => {
-    const [iriTarget, variableTarget, invalidTarget] = prepareGraphScope(
+    const [iriTarget, variableTarget, invalidTarget] = graphScope(
       'SELECT * WHERE { GRAPH <urn:allowed> { ?s ?p ?o } '
         + 'GRAPH ?g { ?s ?p ?o } GRAPH missing:name { ?s ?p ?o } }',
     ).graphTargets;
@@ -107,6 +119,18 @@ describe('prepared SPARQL graph scope', () => {
     expect(invalidTarget.kind).toBe('invalid');
     expect('iri' in invalidTarget).toBe(false);
     expect('variable' in invalidTarget).toBe(false);
+  });
+
+  it('does not type malformed lexical artifacts as graph scopes', () => {
+    type Malformed = Extract<PreparedSparql, { status: 'malformed-uchar' }>;
+    type GraphPreparationAcceptsMalformed = Malformed extends Parameters<
+      typeof prepareGraphScope
+    >[0] ? true : false;
+    const graphPreparationAcceptsMalformed: GraphPreparationAcceptsMalformed = false;
+
+    expect(graphPreparationAcceptsMalformed).toBe(false);
+    expect(prepareSparql(String.raw`SELECT ?\u00ZZ WHERE {}`).status)
+      .toBe('malformed-uchar');
   });
 });
 

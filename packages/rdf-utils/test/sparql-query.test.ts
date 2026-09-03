@@ -1,21 +1,30 @@
 import { describe, expect, it } from 'vitest';
-import { prepareSparql } from '../src/sparql-lexical-scanner.js';
+import {
+  prepareSparql,
+  type PreparedSparql,
+  type ValidPreparedSparql,
+} from '../src/sparql-lexical-scanner.js';
 import { prepareSparqlQuery } from '../src/sparql-query.js';
 
+function validPrepared(source: string): ValidPreparedSparql {
+  const prepared = prepareSparql(source);
+  if (prepared.status !== 'valid') throw new Error('expected valid prepared SPARQL');
+  return prepared;
+}
+
 describe('prepared SPARQL query facts', () => {
-  it('accepts either source text or its canonical lexical artifact', () => {
+  it('accepts the canonical valid lexical artifact as its sole source owner', () => {
     const source = 'SELECT ?s WHERE { ?s <urn:p> ?o }';
-    const prepared = prepareSparql(source);
+    const prepared = validPrepared(source);
     const fromArtifact = prepareSparqlQuery(prepared);
 
-    expect(fromArtifact).toEqual(prepareSparqlQuery(source));
     expect(fromArtifact.prepared).toBe(prepared);
     expect(fromArtifact.source).toBe(prepared.source);
   });
 
   it('owns raw source coordinates and UCHAR-decoded variable identities', () => {
     const source = String.raw`SELECT ?\u0073 WHERE \u007B ?\u0073 <urn:p> ?o \u007D`;
-    const query = prepareSparqlQuery(prepareSparql(source));
+    const query = prepareSparqlQuery(validPrepared(source));
 
     expect(query.source).toBe(source);
     expect(query.operation).toBe('SELECT');
@@ -31,7 +40,7 @@ describe('prepared SPARQL query facts', () => {
   });
 
   it('recognizes shorthand groups without inventing a WHERE keyword', () => {
-    const query = prepareSparqlQuery('ASK { ?s <urn:p> ?o }');
+    const query = prepareSparqlQuery(validPrepared('ASK { ?s <urn:p> ?o }'));
 
     expect(query.operation).toBe('ASK');
     expect(query.where).toMatchObject({ hasUnion: false });
@@ -41,12 +50,15 @@ describe('prepared SPARQL query facts', () => {
     ]);
   });
 
-  it('returns empty query facts for malformed UCHAR input', () => {
-    const query = prepareSparqlQuery(String.raw`SELECT ?\u00ZZ WHERE {}`);
+  it('does not type malformed lexical artifacts as prepared queries', () => {
+    type Malformed = Extract<PreparedSparql, { status: 'malformed-uchar' }>;
+    type QueryPreparationAcceptsMalformed = Malformed extends Parameters<
+      typeof prepareSparqlQuery
+    >[0] ? true : false;
+    const queryPreparationAcceptsMalformed: QueryPreparationAcceptsMalformed = false;
 
-    expect(query.prepared.status).toBe('malformed-uchar');
-    expect(query.operation).toBeNull();
-    expect(query.where).toBeNull();
-    expect(query.queryVariables).toEqual([]);
+    expect(queryPreparationAcceptsMalformed).toBe(false);
+    expect(prepareSparql(String.raw`SELECT ?\u00ZZ WHERE {}`).status)
+      .toBe('malformed-uchar');
   });
 });

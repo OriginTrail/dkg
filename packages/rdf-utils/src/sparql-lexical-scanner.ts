@@ -59,6 +59,9 @@ export type PreparedSparql =
     readonly unterminated: false;
   });
 
+/** A canonical lexical artifact whose UCHAR preprocessing succeeded. */
+export type ValidPreparedSparql = Extract<PreparedSparql, { readonly status: 'valid' }>;
+
 interface ScannedSparql {
   readonly masked: string;
   readonly materialized: string;
@@ -439,7 +442,6 @@ export function prepareSparql(source: string): PreparedSparql {
 }
 
 /** Materialize active UCHAR syntax from the canonical prepared artifact. */
-export function materializePreparedSparql(input: string | PreparedSparql): string {
-  const prepared = typeof input === 'string' ? prepareSparql(input) : input;
+export function materializePreparedSparql(prepared: ValidPreparedSparql): string {
   return prepared.materialized;
 }

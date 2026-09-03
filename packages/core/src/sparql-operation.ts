@@ -91,6 +91,9 @@ function materializeSparqlOperationAnalysis(
 }
 
 function analyzePreparedSparql(scan: PreparedSparql): SparqlOperationFacts {
+  if (scan.status !== 'valid') {
+    return { form: 'UNKNOWN', mutatingKeyword: null };
+  }
   const query = prepareSparqlQuery(scan);
   const form = detectSparqlOperationForm(query);
   const mutatingToken = scan.tokens.find(

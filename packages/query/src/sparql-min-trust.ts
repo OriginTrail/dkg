@@ -206,7 +206,6 @@ export function injectMinTrustFilter(
   minTrust: number,
 ): MinTrustRewriteResult {
   const unsupported = (): MinTrustRewriteResult => sparqlRewriteUnsupported(
-    query,
     'unsupported-query-shape',
   );
   const bodyStart = query.where?.openEnd ?? -1;
@@ -281,6 +280,5 @@ export type MinTrustUnsupportedReason = 'unsupported-query-shape';
 
 export type MinTrustRewriteResult = SparqlRewriteResult<
   string,
-  MinTrustUnsupportedReason,
-  PreparedSparqlQuery
+  MinTrustUnsupportedReason
 >;

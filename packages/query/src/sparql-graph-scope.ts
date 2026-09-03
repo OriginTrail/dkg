@@ -1,9 +1,10 @@
 import {
   prepareSparqlQuery,
-  type PreparedSparql,
+  prepareSparql,
   type PreparedSparqlQuery,
   type SparqlQueryVariable,
   type SparqlLexicalToken,
+  type ValidPreparedSparql,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import {
@@ -71,10 +72,9 @@ function ready(scope: PreparedGraphScope): GraphScopeRewriteResult {
 }
 
 function unsupported(
-  original: PreparedGraphScope,
   reason: GraphScopeUnsupportedReason,
 ): GraphScopeRewriteResult {
-  return sparqlRewriteUnsupported(original, reason);
+  return sparqlRewriteUnsupported(reason);
 }
 
 /** Convert a total rewrite result into the required scoped query boundary. */
@@ -94,10 +94,15 @@ export function transitionGraphScope(
   scope: PreparedGraphScope,
   source: string,
 ): PreparedGraphScope {
-  return source === scope.source ? scope : prepareGraphScope(source);
+  if (source === scope.source) return scope;
+  const prepared = prepareSparql(source);
+  if (prepared.status !== 'valid') {
+    throw new ScopedQueryViolationError('graph rewrite produced malformed SPARQL');
+  }
+  return prepareGraphScope(prepared);
 }
 
-function prefixesFromTokens(prepared: PreparedSparql): Map<string, string> {
+function prefixesFromTokens(prepared: ValidPreparedSparql): Map<string, string> {
   const prefixes = new Map<string, string>();
   for (let index = 0; index + 2 < prepared.prologue.endTokenIndex; index++) {
     const keyword = prepared.tokens[index];
@@ -119,7 +124,7 @@ function prefixesFromTokens(prepared: PreparedSparql): Map<string, string> {
 }
 
 export function prepareGraphScope(
-  input: string | PreparedSparql,
+  input: ValidPreparedSparql,
 ): PreparedGraphScope {
   const query = prepareSparqlQuery(input);
   const { prepared } = query;
@@ -270,7 +275,7 @@ export function wrapWithGraph(
   if (!scope.where) {
     const describe = scopeGraphlessDescribe(scope, [graphUri]);
     if (describe !== null) return ready(transitionGraphScope(scope, describe));
-    return unsupported(scope, 'missing-where');
+    return unsupported('missing-where');
   }
   const { openEnd, close } = scope.where;
   const before = scope.source.slice(0, openEnd);
@@ -291,7 +296,7 @@ export function wrapWithGraphUnion(
   if (!scope.where) {
     const describe = scopeGraphlessDescribe(scope, graphUris);
     if (describe !== null) return ready(transitionGraphScope(scope, describe));
-    return unsupported(scope, 'missing-where');
+    return unsupported('missing-where');
   }
   const { openEnd, close, hasUnion } = scope.where;
   const before = scope.source.slice(0, openEnd);
@@ -303,7 +308,7 @@ export function wrapWithGraphUnion(
       `${before} GRAPH <${assertSafeIri(graphUris[0])}> { ${inner} } ${after}`,
     ));
   }
-  if (hasUnion) return unsupported(scope, 'nested-union');
+  if (hasUnion) return unsupported('nested-union');
   const branches = graphUris
     .map((graph) => `{ GRAPH <${assertSafeIri(graph)}> { ${inner} } }`)
     .join(' UNION ');
@@ -325,7 +330,7 @@ function wrapWithProjectedGraphSubselect(
 ): GraphScopeRewriteResult {
   if (scope.hasGraphClause) return ready(transitionGraphScope(scope, scope.source));
   if (graphUris.length === 0) return ready(transitionGraphScope(scope, scope.source));
-  if (!scope.where) return unsupported(scope, 'missing-where');
+  if (!scope.where) return unsupported('missing-where');
 
   const { openEnd, close, hasUnion } = scope.where;
   const inner = scope.source.slice(openEnd, close);
@@ -336,16 +341,16 @@ function wrapWithProjectedGraphSubselect(
       `${scope.source.slice(0, openEnd)} GRAPH <${assertSafeIri(graphs[0])}> { ${inner} } ${scope.source.slice(close)}`,
     ));
   }
-  if (hasUnion) return unsupported(scope, 'nested-union');
-  if (!acceptsScope(scope)) return unsupported(scope, 'strategy-rejected');
+  if (hasUnion) return unsupported('nested-union');
+  if (!acceptsScope(scope)) return unsupported('strategy-rejected');
 
   const helperNames = new Set(helperVariables.map((variable) => variable.slice(1)));
   if (scope.queryVariables.some((variable) => helperNames.has(variable.logicalName))) {
-    return unsupported(scope, 'helper-variable-collision');
+    return unsupported('helper-variable-collision');
   }
 
   const innerVariables = scope.whereVariables;
-  if (innerVariables.length === 0) return unsupported(scope, 'no-projected-variables');
+  if (innerVariables.length === 0) return unsupported('no-projected-variables');
   const graphPattern = buildGraphPattern(inner, graphs);
   return ready(transitionGraphScope(
     scope,
@@ -430,7 +435,7 @@ export function rewriteGraphSet(
     : policy === 'values-union'
       ? [wrapWithGraphValues, wrapWithGraphUnion]
       : [wrapWithGraphUnion];
-  let last = unsupported(scope, 'strategy-rejected');
+  let last = unsupported('strategy-rejected');
   for (const strategy of strategies) {
     const result = strategy(scope, graphUris);
     if (result.kind === 'ready') return result;
@@ -745,7 +750,7 @@ export function constrainGraphVariablesToAllowedSet(
   }
   if (scope.graphVariables.length === 0) return ready(transitionGraphScope(scope, scope.source));
   if (!scope.where) {
-    return unsupported(scope, 'missing-where');
+    return unsupported('missing-where');
   }
   if (!graphVariablesAreTopLevel(scope)) {
     throw new ScopedQueryViolationError(

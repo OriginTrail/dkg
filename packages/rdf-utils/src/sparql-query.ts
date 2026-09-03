@@ -1,7 +1,6 @@
 import {
-  prepareSparql,
-  type PreparedSparql,
   type SparqlLexicalToken,
+  type ValidPreparedSparql,
 } from './sparql-lexical-scanner.js';
 import {
   indexSparqlStructure,
@@ -34,7 +33,7 @@ export interface SparqlQueryVariable {
 /** Reusable prepared query facts derived from one canonical lexical artifact. */
 export interface PreparedSparqlQuery {
   readonly source: string;
-  readonly prepared: PreparedSparql;
+  readonly prepared: ValidPreparedSparql;
   readonly structure: SparqlStructure;
   readonly operation: string | null;
   readonly where: SparqlQueryGroupRange | null;
@@ -43,7 +42,7 @@ export interface PreparedSparqlQuery {
 }
 
 function whereRange(
-  prepared: PreparedSparql,
+  prepared: ValidPreparedSparql,
   structure: SparqlStructure,
 ): SparqlQueryGroupRange | null {
   const { tokens } = prepared;
@@ -94,7 +93,7 @@ function whereRange(
 }
 
 function variablesInRange(
-  prepared: PreparedSparql,
+  prepared: ValidPreparedSparql,
   start: number,
   end: number,
 ): SparqlQueryVariable[] {
@@ -111,8 +110,7 @@ function variablesInRange(
   return variables;
 }
 
-export function prepareSparqlQuery(input: string | PreparedSparql): PreparedSparqlQuery {
-  const prepared = typeof input === 'string' ? prepareSparql(input) : input;
+export function prepareSparqlQuery(prepared: ValidPreparedSparql): PreparedSparqlQuery {
   const structure = indexSparqlStructure(prepared);
   const where = whereRange(prepared, structure);
   const operationToken = prepared.tokens[prepared.prologue.endTokenIndex];

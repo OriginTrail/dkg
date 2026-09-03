@@ -3,6 +3,7 @@ export {
   prepareSparql,
   type PreparedSparql,
   type SparqlLexicalToken,
+  type ValidPreparedSparql,
 } from './sparql-lexical-scanner.js';
 
 export {

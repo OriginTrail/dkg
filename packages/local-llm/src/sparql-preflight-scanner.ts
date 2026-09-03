@@ -1,4 +1,5 @@
 import {
+  prepareSparql,
   prepareSparqlQuery,
   type SparqlLexicalToken,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
@@ -153,8 +154,21 @@ function findBareAbsoluteIri(
 
 /** Derive local-model policy facts from core's canonical lexical artifacts. */
 export function scanSparqlPreflight(value: string): SparqlPreflightScan {
-  const query = prepareSparqlQuery(value);
-  const { prepared: lexical, structure } = query;
+  const lexical = prepareSparql(value);
+  if (lexical.status !== 'valid') {
+    return {
+      masked: lexical.masked,
+      unterminated: lexical.unterminated,
+      bracesBalanced: true,
+      parenthesesBalanced: true,
+      hasFrom: false,
+      hasFilterNotExistsParentheses: false,
+      hasStrcontains: false,
+      hasUnwrappedAggregateAlias: false,
+    };
+  }
+  const query = prepareSparqlQuery(lexical);
+  const { structure } = query;
   const tokens = lexical.tokens.slice(lexical.prologue.endTokenIndex);
   const operation = query.operation === 'SELECT'
     || query.operation === 'ASK'

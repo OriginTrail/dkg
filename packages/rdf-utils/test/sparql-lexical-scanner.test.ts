@@ -2,11 +2,19 @@ import { describe, expect, it } from 'vitest';
 import {
   materializePreparedSparql,
   prepareSparql,
+  type PreparedSparql,
+  type ValidPreparedSparql,
 } from '../src/sparql-lexical-scanner.js';
 import {
   indexSparqlStructure,
   sparqlTokenIndexesAtDepth,
 } from '../src/sparql-structure.js';
+
+function validPrepared(source: string): ValidPreparedSparql {
+  const prepared = prepareSparql(source);
+  if (prepared.status !== 'valid') throw new Error('expected valid prepared SPARQL');
+  return prepared;
+}
 
 describe('canonical SPARQL lexical scanner', () => {
   it.each([
@@ -124,8 +132,8 @@ describe('canonical SPARQL lexical scanner', () => {
     const malformedLookalike = String.raw`SELECT ?x WHERE { BIND("\\u00ZZ" AS ?x) }`;
     const validLookalike = String.raw`SELECT ?x WHERE { BIND("\\u006E" AS ?x) }`;
 
-    expect(materializePreparedSparql(malformedLookalike)).toBe(malformedLookalike);
-    expect(materializePreparedSparql(validLookalike)).toBe(validLookalike);
+    expect(materializePreparedSparql(validPrepared(malformedLookalike))).toBe(malformedLookalike);
+    expect(materializePreparedSparql(validPrepared(validLookalike))).toBe(validLookalike);
   });
 
   it('rejects malformed UCHAR inside a string without treating an escaped slash as UCHAR', () => {
@@ -151,16 +159,28 @@ describe('canonical SPARQL lexical scanner', () => {
   it('leaves UCHAR-like comment text inert while decoding active tokens', () => {
     const source = String.raw`\u0053ELECT * WHERE {} # \u00ZZ \u0053ERVICE`;
 
-    expect(materializePreparedSparql(source))
+    expect(materializePreparedSparql(validPrepared(source)))
       .toBe(String.raw`SELECT * WHERE {} # \u00ZZ \u0053ERVICE`);
   });
 
   it('materializes active syntax while preserving opaque IRI, string, and comment payloads', () => {
     const source = String.raw`\u0053ELECT * WHERE \u007B <urn:\u0061> <urn:p> "\u0041" \u007D # \u0053ERVICE`;
 
-    expect(materializePreparedSparql(prepareSparql(source))).toBe(
+    expect(materializePreparedSparql(validPrepared(source))).toBe(
       String.raw`SELECT * WHERE { <urn:\u0061> <urn:p> "\u0041" } # \u0053ERVICE`,
     );
+  });
+
+  it('does not type malformed lexical artifacts as execution-ready', () => {
+    type Malformed = Extract<PreparedSparql, { status: 'malformed-uchar' }>;
+    type MaterializerAcceptsMalformed = Malformed extends Parameters<
+      typeof materializePreparedSparql
+    >[0] ? true : false;
+    const materializerAcceptsMalformed: MaterializerAcceptsMalformed = false;
+
+    expect(materializerAcceptsMalformed).toBe(false);
+    expect(prepareSparql(String.raw`SELECT ?\u00ZZ WHERE {}`).status)
+      .toBe('malformed-uchar');
   });
 
   it('does not let an escaped newline terminate an already-open comment', () => {
