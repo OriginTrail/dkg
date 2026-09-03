@@ -628,13 +628,16 @@ export interface DkgConfig {
   bootstrapPeers?: string[];
   /** V10: context graphs to subscribe. */
   contextGraphs?: string[];
-  /** Opt-in, bounded RFC-64 catalog activation for explicitly selected public CGs. */
+  /**
+   * @deprecated Compatibility authority seed / rollback controls. Omission
+   * enables release-native RFC-64 selection from ordinary CG responsibility.
+   */
   rfc64PublicCatalog?: Rfc64PublicCatalogActivationConfig;
   /**
-   * Additive, bounded RFC-64 activation for explicitly selected public or
-   * invite-only CGs. Private selections require a manual policy, roster, and
-   * exact peer-to-agent authority map. Release 3 permits up to eight complete
-   * current-roster providers for bounded failover.
+   * Optional RFC-64 authority seeds and emergency rollout controls. In
+   * 10.0.16, ordinary subscriptions, Core public hosting, and verified private
+   * membership select catalog mode without this block. Manual policy/roster
+   * material remains accepted for compatibility but no longer owns selection.
    */
   rfc64Catalog?: Rfc64CatalogActivationConfig;
   /**

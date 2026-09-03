@@ -881,7 +881,10 @@ export class AgentRegistryMethods extends DKGAgentBase {
    * @param address Ethereum address of the registered agent.
    */
   getCustodialAgentPrivateKey(this: DKGAgent, address: string): string | undefined {
-    const record = this.localAgents.get(address);
+    const record = this.localAgents.get(address)
+      ?? (ethers.isAddress(address)
+        ? this.localAgents.get(ethers.getAddress(address))
+        : undefined);
     if (!record || record.mode !== 'custodial') return undefined;
     return record.privateKey;
   }
@@ -891,7 +894,12 @@ export class AgentRegistryMethods extends DKGAgentBase {
    * Returns undefined if the agent is unknown to this node.
    */
   getLocalAgentMode(this: DKGAgent, address: string): 'custodial' | 'self-sovereign' | undefined {
-    return this.localAgents.get(address)?.mode;
+    return (
+      this.localAgents.get(address)
+      ?? (ethers.isAddress(address)
+        ? this.localAgents.get(ethers.getAddress(address))
+        : undefined)
+    )?.mode;
   }
 
   /**

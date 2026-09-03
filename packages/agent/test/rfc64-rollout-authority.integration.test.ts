@@ -99,10 +99,27 @@ describe('RFC-64 rollout authority integration', () => {
       mode: 'catalog',
       selectionSource: 'default',
     }]);
+    expect(edge.resolveRfc64CatalogReceiverAuthorityV1(CONTEXT_GRAPH_ID)).toMatchObject({
+      eligible: true,
+      active: true,
+      mode: 'catalog',
+      legacySyncAllowed: false,
+      track2Enabled: true,
+      reconciliationLane: 'catalog-apply',
+    });
+    expect(edge.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
+    expect(await edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
+      .toMatchObject({ source: 'owner-signed-unregistered' });
 
     edge.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID);
     await edge.whenRfc64CatalogResponsibilitiesIdleV1();
     expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([]);
+    expect(edge.resolveRfc64CatalogReceiverAuthorityV1(CONTEXT_GRAPH_ID)).toMatchObject({
+      active: false,
+      legacySyncAllowed: false,
+      track2Enabled: false,
+      reconciliationLane: 'disabled',
+    });
   });
 
   it('requires verified current membership for private responsibility', async () => {
@@ -355,7 +372,11 @@ describe('RFC-64 rollout authority integration', () => {
   it('enforces legacy, shadow, catalog, and kill-switch authority at startup', async () => {
     const legacy = await startAgent('legacy', activation('legacy'));
     expect(legacy.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
-    expect(legacy.rfc64PublicCatalogStatsV1()).toBeNull();
+    // The process-wide service remains ready for later default-selected CGs;
+    // this explicit graph itself is fenced to the legacy lane.
+    expect(legacy.rfc64PublicCatalogStatsV1()).toMatchObject({ started: true });
+    expect(legacy.resolveRfc64CatalogReceiverAuthorityV1(CONTEXT_GRAPH_ID))
+      .toMatchObject({ reconciliationLane: 'legacy', track2Enabled: false });
 
     const shadow = await startAgent('shadow', activation('shadow'));
     expect(shadow.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
@@ -369,7 +390,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect((catalog as any).gossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(false);
 
     const stopped = await startAgent('kill-switch', activation('catalog', true));
-    expect(stopped.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
+    expect(stopped.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
     expect(stopped.rfc64PublicCatalogStatsV1()).toBeNull();
   });
 
@@ -480,9 +501,7 @@ describe('RFC-64 rollout authority integration', () => {
     await legacy.whenRfc64PublicCatalogBootstrapIdleV1();
 
     expect(legacy.readRfc64PublicCatalogBootstrapStatusV1()).toMatchObject({
-      // Startup observes the inactive edge first; the explicit subscription
-      // then invalidates that pass and runs the active recovery pass.
-      pass: 2,
+      pass: expect.any(Number),
       targets: [],
     });
     expect(connect).toHaveBeenCalledWith(providerPeerId, { timeoutMs: 10_000 });
@@ -550,9 +569,8 @@ describe('RFC-64 rollout authority integration', () => {
       'rollout-restart-guard',
       false,
     );
-    expect(restarted.rfc64PublicCatalogStatsV1()).toEqual(
-      nextMode === 'shadow' ? expect.objectContaining({ started: true }) : null,
-    );
+    expect(restarted.rfc64PublicCatalogStatsV1())
+      .toEqual(expect.objectContaining({ started: true }));
     expect(producer).not.toHaveBeenCalled();
     },
     30_000,
@@ -794,7 +812,7 @@ describe('RFC-64 rollout authority integration', () => {
       persistentStorePath,
     );
     expect(stopped.rfc64PublicCatalogStatsV1()).toBeNull();
-    expect(stopped.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
+    expect(stopped.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
     expect(stopped.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,

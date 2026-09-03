@@ -387,7 +387,7 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
-import { resolveRfc64CatalogExecutionPlanAuthorityV1 } from
+import { rfc64ExecutionPlanAllowsLegacySyncV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
 
 export class SwmSubstrateMethods extends DKGAgentBase {
@@ -615,6 +615,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): boolean {
+    // The global emergency stop is the one plan-authorized exception that
+    // restores ordinary legacy transfer while keeping catalog state intact.
+    if (this.config.rfc64CatalogExecutionPlan.killSwitchActive) return true;
     const wireContextGraphId = /^0x[0-9a-fA-F]{64}$/.test(contextGraphId)
       ? contextGraphId.toLowerCase()
       : null;
@@ -630,10 +633,10 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         .selectedAuthorityByWireId[wireContextGraphId];
       if (wireAuthority !== undefined) return wireAuthority.legacySyncAllowed;
     }
-    return resolveRfc64CatalogExecutionPlanAuthorityV1(
+    return rfc64ExecutionPlanAllowsLegacySyncV1(
       this.config.rfc64CatalogExecutionPlan,
       authorityContextGraphId,
-    ).legacySyncAllowed;
+    );
   }
 
   async reconcileSharedMemoryGossipSubscription(this: DKGAgent, contextGraphId: string): Promise<void> {

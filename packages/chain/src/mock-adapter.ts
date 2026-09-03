@@ -35,6 +35,7 @@ import type {
   PublishTransactionResolution,
   VerifyACKIdentityResult,
   KnowledgeAssetUpdateContext,
+  ContextGraphAuthoritySnapshot,
 } from './chain-adapter.js';
 import type { RpcUsageWindow } from './rpc-usage.js';
 import {
@@ -1211,6 +1212,7 @@ export class MockChainAdapter implements ChainAdapter {
     // OT-RFC-38 / LU-6 Phase B — curator-committed wire id.
     // `null` indicates the curator opted out at create time.
     nameHash?: string | null;
+    createdBlockNumber: number;
   }>();
   private nextContextGraphId = 1n;
 
@@ -1299,6 +1301,7 @@ export class MockChainAdapter implements ChainAdapter {
       active: true,
       batches: [],
       nameHash,
+      createdBlockNumber: this.nextBlock,
     });
 
     this.pushEvent('ContextGraphCreated', {
@@ -1691,6 +1694,45 @@ export class MockChainAdapter implements ChainAdapter {
     const agents = (cg as { participantAgents?: string[] }).participantAgents;
     if (!Array.isArray(agents)) return [];
     return agents.map((a) => ethers.getAddress(a));
+  }
+
+  /** Offline-development mirror of the finalized RFC-64 authority snapshot. */
+  async getContextGraphAuthoritySnapshot(
+    contextGraphId: bigint,
+    options: ChainReadOptions = {},
+  ): Promise<ContextGraphAuthoritySnapshot> {
+    options.signal?.throwIfAborted();
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (cg === undefined) {
+      throw new Error(`Mock: Context Graph ${contextGraphId.toString()} is not registered`);
+    }
+    const numericChainId = this.chainId.split(':').at(-1);
+    if (numericChainId === undefined || !/^(0|[1-9][0-9]*)$/u.test(numericChainId)) {
+      throw new Error(`Mock: chainId ${this.chainId} has no canonical numeric authority id`);
+    }
+    return Object.freeze({
+      chainId: numericChainId,
+      governanceContract: `0x${'1'.padStart(40, '0')}`,
+      contextGraphId: contextGraphId.toString(10),
+      owner: cg.manager.toLowerCase(),
+      active: cg.active,
+      accessPolicy: cg.accessPolicy,
+      publishPolicy: cg.publishPolicy,
+      publishAuthority: cg.publishAuthority === undefined
+        || cg.publishAuthority === ethers.ZeroAddress
+        ? null
+        : cg.publishAuthority.toLowerCase(),
+      publishAuthorityAccountId: cg.publishAuthorityAccountId.toString(10),
+      participantAgents: Object.freeze(cg.participantAgents
+        .map((address) => address.toLowerCase())
+        .sort()),
+      nameHash: cg.nameHash ?? ethers.ZeroHash,
+      ownershipEra: '0',
+      policyVersion: '0',
+      rosterVersion: '0',
+      sourceBlockNumber: cg.createdBlockNumber.toString(10),
+      sourceBlockHash: `0x${cg.createdBlockNumber.toString(16).padStart(64, '0')}`,
+    });
   }
 
   /**

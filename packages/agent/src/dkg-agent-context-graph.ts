@@ -851,6 +851,11 @@ export class ContextGraphMethods extends DKGAgentBase {
         }
       }
     }
+    // The normal creation call does not return until release-native selection
+    // and its first authority-resolution attempt have settled. A temporarily
+    // unavailable authority remains explicitly blocked and retryable rather
+    // than failing creation or opening a legacy correctness lane.
+    await this.reconcileRfc64CatalogResponsibilityV1(opts.id);
   }
 
   /**

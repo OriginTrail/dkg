@@ -689,6 +689,8 @@ import {
   './rfc64/public-catalog-activation-config-v1.js';
 import { reconcileRfc64CatalogAuthorityPlanV1 } from
   './rfc64/catalog-rollout-authority-reconciliation-v1.js';
+import { initializeRfc64LegacySwmBoundaryV1 } from
+  './rfc64/legacy-swm-boundary-v1.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
@@ -2042,6 +2044,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.config.dataDir !== undefined
         && this.rfc64PersistenceV1 !== undefined
       ) {
+        await initializeRfc64LegacySwmBoundaryV1(
+          this,
+          this.rfc64PersistenceV1.rootPath,
+          this.store,
+        );
         await reconcileRfc64CatalogAuthorityPlanV1(
           this.rfc64PersistenceV1,
           this.store,
@@ -3921,6 +3928,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           const message = err instanceof Error ? err.message : String(err);
           this.log.warn(ctx, `Pending SWM sender-key drain on connect failed for ${remotePeer}: ${message}`);
         }
+        void this.reannounceRfc64CatalogHeadsToPeerV1(remotePeer).then((result) => {
+          if (result.announced > 0) {
+            this.log.info(
+              ctx,
+              `Re-announced ${result.announced} RFC-64 catalog head(s) to ${remotePeer.slice(-8)}`,
+            );
+          }
+        }).catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err);
+          this.log.warn(
+            ctx,
+            `RFC-64 catalog re-announcement failed for ${remotePeer.slice(-8)}: ${message}`,
+          );
+        });
         this.queueSyncFromPeerOnConnect(remotePeer, handleSyncError);
       })();
     });
@@ -9229,11 +9250,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     this.subscribedContextGraphs.set(contextGraphId, canonicalNext);
     this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
-    this.handleRfc64CatalogReceiverSelectionTransitionV1(
-      contextGraphId,
-      previous?.subscribed === true,
-      canonicalNext.subscribed === true,
-    );
+    const configuredRfc64Authority =
+      this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId];
+    if (
+      configuredRfc64Authority !== undefined
+      && (this.config.nodeRole ?? 'edge') === 'edge'
+    ) {
+      // A compatibility manifest is authority material only; the ordinary
+      // subscription still owns receiver activity. Preserve its immediate
+      // bootstrap invalidation while release-native metadata is still being
+      // acquired and the dynamic responsibility registry remains fail-closed.
+      this.handleRfc64CatalogReceiverSelectionTransitionV1(
+        contextGraphId,
+        previous?.subscribed === true && (
+          configuredRfc64Authority.track2Enabled
+          || configuredRfc64Authority.legacySyncAllowed
+        ),
+        canonicalNext.subscribed === true && (
+          configuredRfc64Authority.track2Enabled
+          || configuredRfc64Authority.legacySyncAllowed
+        ),
+      );
+    }
     if (
       previous === undefined
       || previous.subscribed !== canonicalNext.subscribed
@@ -9483,14 +9521,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   deleteContextGraphSubscription(this: DKGAgent, contextGraphId: string): boolean {
     this.invalidateListContextGraphsCache();
     this.forceClearVmReconcileStateForContextGraph(contextGraphId);
-    const wasSubscribed = this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true;
+    const previous = this.subscribedContextGraphs.get(contextGraphId);
     const deleted = this.subscribedContextGraphs.delete(contextGraphId);
-    if (deleted) this.handleRfc64CatalogReceiverSelectionTransitionV1(
-      contextGraphId,
-      wasSubscribed,
-      false,
-    );
     if (deleted) {
+      const configuredRfc64Authority =
+        this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId];
+      if (
+        configuredRfc64Authority !== undefined
+        && (this.config.nodeRole ?? 'edge') === 'edge'
+      ) {
+        this.handleRfc64CatalogReceiverSelectionTransitionV1(
+          contextGraphId,
+          previous?.subscribed === true && (
+            configuredRfc64Authority.track2Enabled
+            || configuredRfc64Authority.legacySyncAllowed
+          ),
+          false,
+        );
+      }
       void this.reconcileRfc64CatalogResponsibilityV1(contextGraphId).catch(() => undefined);
     }
     // Every in-flight binding continuation also captures the subscription
@@ -9504,22 +9552,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   handleRfc64CatalogReceiverSelectionTransitionV1(
     this: DKGAgent,
     contextGraphId: string,
-    previousSubscribed: boolean,
-    nextSubscribed: boolean,
+    previousReceiverActive: boolean,
+    nextReceiverActive: boolean,
   ): void {
-    const eligible = this.resolveRfc64CatalogServingAuthorityV1(contextGraphId).eligible;
-    const manifestWide = (this.config.nodeRole ?? 'edge') === 'core';
-    // A core is manifest-selected independently of its ordinary subscription
-    // record.  React only when the effective receiver capability changes: an
-    // unsubscribe must not fence a core's in-flight catalog reconciliation.
-    const wasReceiverActive = eligible && (manifestWide || previousSubscribed);
-    const isReceiverActive = eligible && (manifestWide || nextSubscribed);
-    if (wasReceiverActive === isReceiverActive) return;
-    if (!isReceiverActive) {
+    if (previousReceiverActive === nextReceiverActive) return;
+    if (!nextReceiverActive) {
       this.rfc64PublicCatalogServiceV1?.deactivateReceiverContextGraph(contextGraphId);
     }
     this.invalidateRfc64PublicCatalogBootstrapPassV1(contextGraphId);
-    if (isReceiverActive && this.rfc64PublicCatalogServiceV1 !== undefined) {
+    this.queueSharedMemoryGossipSubscription(contextGraphId);
+    if (nextReceiverActive && this.rfc64PublicCatalogServiceV1 !== undefined) {
       // Re-entering the idempotent start boundary also dirties an existing
       // failed repair for this newly active CG, including retryIntervalMs=0.
       this.startRfc64SwmCatalogProjectionSupervisorV1(
@@ -9866,6 +9908,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<void> {
     const store = this.config.contextGraphMembershipStore;
     if (!store) {
+      void this.reconcileRfc64CatalogResponsibilityV1(
+        record.contextGraphId,
+      ).catch(() => undefined);
       return Promise.resolve();
     }
     const normalizedRecord = {
@@ -9878,10 +9923,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       () => store.upsert({ ...normalizedRecord, updatedAt: Date.now() }),
       { strict: options?.strict === true },
     );
-    if (options?.strict === true) return write;
+    const refreshAuthority = () => {
+      void this.reconcileRfc64CatalogResponsibilityV1(
+        normalizedRecord.contextGraphId,
+      ).catch(() => undefined);
+    };
+    if (options?.strict === true) return write.then(refreshAuthority);
     // Background callers stay log-and-continue; durability-sensitive callers
     // opt into the strict path above and receive the original rejection.
-    return write.catch((err) => {
+    return write.then(refreshAuthority).catch((err) => {
       this.log.warn(
         createOperationContext('system'),
         `Failed to persist context-graph membership for "${normalizedRecord.contextGraphId}" (${normalizedRecord.principalType}:${normalizedRecord.principalId}): ${err instanceof Error ? err.message : String(err)}`,
@@ -9895,13 +9945,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     principalId: string,
   ): void {
     const store = this.config.contextGraphMembershipStore;
-    if (!store) return;
+    if (!store) {
+      void this.reconcileRfc64CatalogResponsibilityV1(contextGraphId)
+        .catch(() => undefined);
+      return;
+    }
     const normalizedPrincipalId = this.normalizeMembershipPrincipal(principalType, principalId);
     const key = `${contextGraphId}\0${principalType}\0${normalizedPrincipalId}`;
     void this.enqueueContextGraphMembershipPersistWrite(
       key,
       () => store.delete(contextGraphId, principalType, normalizedPrincipalId),
-    ).catch((err) => {
+    ).then(() => this.reconcileRfc64CatalogResponsibilityV1(contextGraphId))
+      .catch((err) => {
       this.log.warn(
         createOperationContext('system'),
         `Failed to delete context-graph membership for "${contextGraphId}" (${principalType}:${normalizedPrincipalId}): ${err instanceof Error ? err.message : String(err)}`,

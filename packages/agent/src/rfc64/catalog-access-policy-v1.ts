@@ -202,12 +202,24 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
   acceptCurrent(
     input: AcceptRfc64CatalogAccessSnapshotInputV1,
   ): AcceptedRfc64CatalogAccessSnapshotV1 {
-    return this.#accept(input, true);
+    return this.#accept(input, 'linked');
+  }
+
+  /**
+   * Advance state that was independently reconstructed from the canonical
+   * finalized-chain or owner lifecycle. This path owns its own monotonic
+   * generation proof and therefore does not require a transported predecessor
+   * digest that a cold node could not know.
+   */
+  acceptAuthoritativeCurrent(
+    input: AcceptRfc64CatalogAccessSnapshotInputV1,
+  ): AcceptedRfc64CatalogAccessSnapshotV1 {
+    return this.#accept(input, 'authoritative');
   }
 
   #accept(
     input: AcceptRfc64CatalogAccessSnapshotInputV1,
-    allowVerifiedTransition: boolean,
+    transition: false | 'linked' | 'authoritative',
   ): AcceptedRfc64CatalogAccessSnapshotV1 {
     const policy = snapshotPolicy(input?.policy);
     const policyDigest = snapshotDigest(input?.policyDigest, 'policyDigest');
@@ -239,12 +251,13 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
     const current = this.#byKey.get(key);
     if (current !== undefined) {
       if (!sameSnapshot(current, held)) {
-        if (!allowVerifiedTransition) {
+        if (transition === false) {
           throw new Error(
             'RFC-64 current policy replacement requires the verified transition/high-water path',
           );
         }
-        assertDirectMonotonicPolicyTransition(current, held);
+        if (transition === 'linked') assertDirectMonotonicPolicyTransition(current, held);
+        else assertAuthoritativeMonotonicPolicyTransition(current, held);
         this.#byKey.set(key, held);
         return publicSnapshot(held);
       }
@@ -352,6 +365,38 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
     } catch {
       return null;
     }
+  }
+}
+
+function assertAuthoritativeMonotonicPolicyTransition(
+  current: HeldCatalogAccessSnapshotV1,
+  successor: HeldCatalogAccessSnapshotV1,
+): void {
+  if (
+    current.policy.source.kind === 'owner-signed-unregistered'
+    && successor.policy.source.kind === 'owner-signed-unregistered'
+    && current.policy.source.ownerAddress === successor.policy.source.ownerAddress
+  ) {
+    return;
+  }
+  const currentEra = BigInt(current.policy.era);
+  const successorEra = BigInt(successor.policy.era);
+  const currentVersion = BigInt(current.policy.version);
+  const successorVersion = BigInt(successor.policy.version);
+  const policyAdvanced = successor.policyDigest !== current.policyDigest
+    && (
+      successorEra > currentEra
+      || (successorEra === currentEra && successorVersion > currentVersion)
+    );
+  const rosterAdvanced = successor.policyDigest === current.policyDigest
+    && current.roster !== null
+    && successor.roster !== null
+    && successorEra === currentEra
+    && BigInt(successor.roster.version) > BigInt(current.roster.version);
+  if (!policyAdvanced && !rosterAdvanced) {
+    throw new Error(
+      'RFC-64 authoritative policy/roster transition does not advance its high-water',
+    );
   }
 }
 

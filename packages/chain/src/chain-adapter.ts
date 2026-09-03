@@ -470,6 +470,26 @@ export interface ContextGraphOnChain {
   description?: string;
 }
 
+/** Deterministic finalized authority generation used by RFC-64 policy composition. */
+export interface ContextGraphAuthoritySnapshot {
+  readonly chainId: string;
+  readonly governanceContract: string;
+  readonly contextGraphId: string;
+  readonly owner: string;
+  readonly active: boolean;
+  readonly accessPolicy: number;
+  readonly publishPolicy: number;
+  readonly publishAuthority: string | null;
+  readonly publishAuthorityAccountId: string;
+  readonly participantAgents: readonly string[];
+  readonly nameHash: string;
+  readonly ownershipEra: string;
+  readonly policyVersion: string;
+  readonly rosterVersion: string;
+  readonly sourceBlockNumber: string;
+  readonly sourceBlockHash: string;
+}
+
 export class ContextGraphChainScanPartialError extends Error {
   readonly partialResults: ContextGraphOnChain[];
   readonly scannedToBlock: number;
@@ -1311,6 +1331,11 @@ export interface ChainAdapter {
     scanContextGraphRegistryPages?(options: ContextGraphRegistryScanOptions): AsyncIterable<ContextGraphRegistryScanPage>;
     /** True when the adapter has a registry scan watermark for its currently bound ContextGraphNameRegistry. */
     hasContextGraphRegistryScanWatermark?(): Promise<boolean>;
+    /** Resolve one graph's current policy and roster at a stable finalized anchor. */
+    getContextGraphAuthoritySnapshot?(
+      contextGraphId: bigint,
+      options?: ChainReadOptions,
+    ): Promise<ContextGraphAuthoritySnapshot>;
 
   /**
    * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.

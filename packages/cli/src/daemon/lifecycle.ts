@@ -1337,6 +1337,31 @@ async function runDaemonInnerWithStartupOwnership(
   );
   const rfc64Catalog = rfc64CatalogActivations.catalog;
   const rfc64PublicCatalog = rfc64CatalogActivations.publicCatalog;
+  const rfc64RollbackTimestamp = new Date().toISOString();
+  const explicitDisabled = config.rfc64Catalog?.enabled === false
+    || (config.rfc64Catalog === undefined && config.rfc64PublicCatalog?.enabled === false);
+  if (explicitDisabled) {
+    log(
+      `[rfc64-catalog-rollback] WARNING source=operator-override reason=deprecated-enabled-false `
+      + `timestamp=${rfc64RollbackTimestamp} affected=all-responsible-cgs; `
+      + 'RFC-64 default correctness is disabled for this compatibility release',
+    );
+  }
+  const emergencyModes = Object.entries(rfc64Catalog.rollout.contextGraphModes)
+    .filter(([, mode]) => mode === 'legacy' || mode === 'shadow')
+    .sort(([left], [right]) => left.localeCompare(right));
+  if (emergencyModes.length > 0) {
+    log(
+      `[rfc64-catalog-rollback] WARNING source=operator-override reason=per-cg-emergency-mode `
+      + `timestamp=${rfc64RollbackTimestamp} affected=${JSON.stringify(emergencyModes)}`,
+    );
+  }
+  if (rfc64Catalog.rollout.killSwitch) {
+    log(
+      `[rfc64-catalog-rollback] WARNING source=kill-switch reason=global-emergency-stop `
+      + `timestamp=${rfc64RollbackTimestamp} affected=all-responsible-cgs`,
+    );
+  }
   const syncContextGraphs = [
     ...new Set([
       ...resolveContextGraphs(config),

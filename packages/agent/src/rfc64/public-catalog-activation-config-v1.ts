@@ -43,6 +43,7 @@ export {
   resolveRfc64LegacySyncContextGraphsV1,
   resolveRfc64CatalogExecutionPlanV1,
   resolveRfc64CatalogExecutionPlanAuthorityV1,
+  resolveRfc64CatalogResponsibilityAuthorityV1,
   type Rfc64CatalogExecutionPlanV1,
   type ResolvedRfc64CatalogRolloutConfigV1,
   type Rfc64CatalogRolloutConfigV1,
@@ -441,40 +442,46 @@ export function resolveRfc64CatalogActivationConfigV1(
   activation: Rfc64CatalogActivationConfigV1 | undefined,
   chainIdentity: Rfc64PublicCatalogActivationChainIdentityV1,
 ): ResolvedRfc64CatalogActivationConfigV1 {
-  if (activation === undefined) return disabledRfc64CatalogActivationV1();
-  assertRfc64CatalogActivationConfigV1(activation);
-  if (activation.enabled !== undefined && typeof activation.enabled !== 'boolean') {
+  const activationInput = activation ?? {};
+  assertRfc64CatalogActivationConfigV1(activationInput);
+  if (
+    activationInput.enabled !== undefined
+    && typeof activationInput.enabled !== 'boolean'
+  ) {
     throw new TypeError('rfc64Catalog.enabled must be a boolean');
   }
-  if (activation.enabled === false) return disabledRfc64CatalogActivationV1();
+  if (activationInput.enabled === false) return disabledRfc64CatalogActivationV1();
 
-  const bootstrap = snapshotRfc64CatalogBootstrapConfigV1(activation.bootstrap);
-  if (bootstrap === undefined || bootstrap.acceptedPolicies.length === 0) {
+  const bootstrap = snapshotRfc64CatalogBootstrapConfigV1(activationInput.bootstrap);
+  if (bootstrap !== undefined && bootstrap.acceptedPolicies.length === 0) {
     throw new TypeError(
-      'enabled rfc64Catalog requires a non-empty bootstrap.acceptedPolicies manifest',
+      'rfc64Catalog bootstrap.acceptedPolicies must be non-empty when supplied',
     );
   }
-  const { networkId, evmChainId } = requireRfc64CatalogActivationChainIdentityV1(
-    chainIdentity,
-  );
-  for (const accepted of bootstrap.acceptedPolicies) {
-    if (accepted.policyEnvelope.payload.networkId !== networkId) {
-      throw new TypeError(
-        'rfc64Catalog policy network differs from the daemon effective chain id',
-      );
+  const requiredChainIdentity = bootstrap !== undefined
+    || activationInput.deploymentProfile !== undefined
+    ? requireRfc64CatalogActivationChainIdentityV1(chainIdentity)
+    : undefined;
+  if (bootstrap !== undefined) {
+    for (const accepted of bootstrap.acceptedPolicies) {
+      if (accepted.policyEnvelope.payload.networkId !== requiredChainIdentity!.networkId) {
+        throw new TypeError(
+          'rfc64Catalog policy network differs from the daemon effective chain id',
+        );
+      }
     }
   }
 
   const deploymentProfile = snapshotRfc64CatalogDeploymentProfileV1(
-    activation.deploymentProfile,
+    activationInput.deploymentProfile,
   );
   if (deploymentProfile !== undefined) {
-    if (deploymentProfile.networkId !== networkId) {
+    if (deploymentProfile.networkId !== requiredChainIdentity!.networkId) {
       throw new TypeError(
         'rfc64Catalog deployment network differs from the daemon effective chain id',
       );
     }
-    if (deploymentProfile.assertedAtChainId !== evmChainId) {
+    if (deploymentProfile.assertedAtChainId !== requiredChainIdentity!.evmChainId) {
       throw new TypeError(
         'rfc64Catalog deployment EVM chain id differs from the daemon effective chain id',
       );
@@ -483,33 +490,39 @@ export function resolveRfc64CatalogActivationConfigV1(
 
   const selectedPublicContextGraphs: string[] = [];
   const selectedPrivateContextGraphs: string[] = [];
-  for (const accepted of bootstrap.acceptedPolicies) {
+  for (const accepted of bootstrap?.acceptedPolicies ?? []) {
     const policy = accepted.policyEnvelope.payload;
     (policy.accessPolicy === 0
       ? selectedPublicContextGraphs
       : selectedPrivateContextGraphs).push(policy.contextGraphId);
   }
   const accessPolicyAuthority = snapshotRfc64CatalogActivationAccessPolicyAuthorityV1(
-    activation.accessPolicyAuthority,
+    activationInput.accessPolicyAuthority,
   );
   const autoPublish = snapshotRfc64CatalogAutoPublishConfigV1(
-    activation.autoPublish,
+    activationInput.autoPublish,
   );
-  const selectedCatalogAuthoringControls = resolveSelectedCatalogAuthoringControlsV1(
-    bootstrap,
-    autoPublish,
-  );
-  validatePrivateActivationAuthorityV1(
-    bootstrap,
-    selectedPrivateContextGraphs,
-    accessPolicyAuthority,
-  );
+  if (bootstrap === undefined && (accessPolicyAuthority !== undefined || autoPublish !== undefined)) {
+    throw new TypeError(
+      'rfc64Catalog bootstrap is required when manual authority or autoPublish is supplied',
+    );
+  }
+  const selectedCatalogAuthoringControls = bootstrap === undefined
+    ? Object.freeze([])
+    : resolveSelectedCatalogAuthoringControlsV1(bootstrap, autoPublish);
+  if (bootstrap !== undefined) {
+    validatePrivateActivationAuthorityV1(
+      bootstrap,
+      selectedPrivateContextGraphs,
+      accessPolicyAuthority,
+    );
+  }
   const selectedContextGraphs = [
     ...selectedPublicContextGraphs,
     ...selectedPrivateContextGraphs,
   ];
   const rollout = resolveRfc64CatalogRolloutConfigV1(
-    activation.rollout,
+    activationInput.rollout,
     selectedContextGraphs,
     'rfc64Catalog',
   );
@@ -617,6 +630,9 @@ export function resolveRfc64CatalogActivationsV1(
   );
   const selectedCatalogAuthoringControls = catalog.selectedCatalogAuthoringControls;
   if (!catalog.enabled && !publicCatalog.enabled) {
+    return Object.freeze({ catalog, publicCatalog, selectedCatalogAuthoringControls });
+  }
+  if (!publicCatalog.enabled) {
     return Object.freeze({ catalog, publicCatalog, selectedCatalogAuthoringControls });
   }
 

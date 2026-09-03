@@ -74,10 +74,11 @@ export function resolveRfc64CatalogResponsibilityReasonV1(
   if (input.coreHosted) {
     return input.accessPolicy === 'private' ? null : 'core-public';
   }
-  if (!input.subscribed || input.accessPolicy === null) return null;
+  if (input.accessPolicy === null) return null;
   if (input.accessPolicy === 'private') {
     return input.privateMembershipVerified ? 'private-membership' : null;
   }
+  if (!input.subscribed) return null;
   return input.nodeRole === 'core' ? 'core-public' : 'edge-subscription';
 }
 

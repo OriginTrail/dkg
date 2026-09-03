@@ -443,11 +443,20 @@ export class Rfc64PublicCatalogServiceV1 {
           if (lane === 'shadow-stage') {
             return stagingReconciler.reconcileHead(remotePeerId, announcement, signal);
           }
-          const reconcile = () => nativeReconciler.reconcileHead(
-            remotePeerId,
-            announcement,
-            signal,
-          );
+          const reconcile = async () => {
+            // The scheduler's optimistic applied-head check happens before it
+            // enters the semantic mutation lane. Re-check while holding that
+            // lane so an ambient hint and an awaited bootstrap cannot both
+            // run post-commit lifecycle work for the same durable head.
+            if (await nativeReconciler.isHeadApplied(announcement)) {
+              return 'applied' as const;
+            }
+            return nativeReconciler.reconcileHead(
+              remotePeerId,
+              announcement,
+              signal,
+            );
+          };
           return options.runCatalogMutationExclusive === undefined
             ? reconcile()
             : options.runCatalogMutationExclusive(
@@ -485,6 +494,13 @@ export class Rfc64PublicCatalogServiceV1 {
     input: AcceptRfc64CatalogAccessSnapshotInputV1,
   ): AcceptedRfc64CatalogAccessSnapshotV1 {
     return this.#policies.acceptCurrent(input);
+  }
+
+  /** Accept a generation independently rebuilt from canonical DKG authority. */
+  acceptAuthoritativePolicySnapshot(
+    input: AcceptRfc64CatalogAccessSnapshotInputV1,
+  ): AcceptedRfc64CatalogAccessSnapshotV1 {
+    return this.#policies.acceptAuthoritativeCurrent(input);
   }
 
   acceptedPolicySnapshot(

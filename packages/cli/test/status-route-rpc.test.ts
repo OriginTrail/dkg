@@ -39,7 +39,10 @@ import {
   resolveRfc64PublicCatalogActivation,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
 } from '../src/config.js';
-import { handleStatusRoutes } from '../src/daemon/routes/status.js';
+import {
+  buildRfc64CatalogConfigurationEvidenceV1,
+  handleStatusRoutes,
+} from '../src/daemon/routes/status.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from './helpers/live-daemon.js';
 import { rfc64PublicCatalogPolicy } from './helpers/rfc64-public-catalog.js';
@@ -140,6 +143,15 @@ describe('/api/status RFC-64 private recovery privacy', () => {
           mode: 'catalog',
           selectionSource: 'default',
         }],
+        readRfc64CatalogOperationalStatusV1: async () => [{
+          contextGraphId: privateContextGraph,
+          responsibilityReason: 'private-membership',
+          selectionSource: 'default',
+          effectiveMode: 'catalog',
+          phase: 'bootstrapping',
+          authorityState: 'accepted',
+          policySource: 'owner-signed-unregistered',
+        }],
       },
       {
         rfc64PublicCatalog: {
@@ -180,11 +192,65 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       mode: 'catalog',
       selectionSource: 'default',
     }]);
+    expect(response.body.rfc64Catalog.contextGraphs).toEqual([expect.objectContaining({
+      contextGraphId: privateContextGraph,
+      responsibilityReason: 'private-membership',
+      selectionSource: 'default',
+      effectiveMode: 'catalog',
+      phase: 'bootstrapping',
+      authorityState: 'accepted',
+    })]);
+    expect(response.body.rfc64Catalog.configuration).toMatchObject({
+      schemaVersion: 1,
+      source: 'compatibility-seed',
+      catalogControlPresent: false,
+      deprecatedPublicControlPresent: true,
+      activationManifestPresent: true,
+      deprecatedDisabledOverride: false,
+      killSwitch: false,
+    });
+    expect(response.body.rfc64Catalog.configuration.digest)
+      .toMatch(/^sha256:[0-9a-f]{64}$/u);
     expect(response.body.rfc64PublicCatalog.runtimeSelection).toEqual({
       subscriptionDriven: true,
       selectedContextGraphs: [],
     });
     expect(response.body.rfc64PublicCatalog.responsibilities).toBeUndefined();
+  });
+
+  it('attests rollback configuration without exposing private CG identifiers', () => {
+    const privateContextGraph =
+      '0x1111111111111111111111111111111111111111/private-config-evidence';
+    const evidence = buildRfc64CatalogConfigurationEvidenceV1({
+      rfc64Catalog: {
+        rollout: { contextGraphModes: { [privateContextGraph]: 'legacy' } },
+      },
+    }, {
+      killSwitch: false,
+      contextGraphModes: { [privateContextGraph]: 'legacy' },
+    });
+
+    expect(evidence).toMatchObject({
+      source: 'operator-override',
+      catalogControlPresent: true,
+      activationManifestPresent: false,
+      legacyOverrideCount: 1,
+      shadowOverrideCount: 0,
+    });
+    expect(JSON.stringify(evidence)).not.toContain(privateContextGraph);
+
+    expect(buildRfc64CatalogConfigurationEvidenceV1({}, {
+      killSwitch: false,
+      contextGraphModes: {},
+    })).toMatchObject({
+      source: 'default-omitted',
+      catalogControlPresent: false,
+      deprecatedPublicControlPresent: false,
+      activationManifestPresent: false,
+      deprecatedDisabledOverride: false,
+      legacyOverrideCount: 0,
+      shadowOverrideCount: 0,
+    });
   });
 
   it('reports aggregate telemetry for a private-only catalog activation', async () => {

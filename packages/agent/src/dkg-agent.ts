@@ -866,13 +866,16 @@ export class DKGAgent extends DKGAgentBase {
         ),
         acceptTrack2Policies: (policies) => {
           if (policies.length === 0) return;
-          const service = this.rfc64PublicCatalogServiceV1;
-          if (service === undefined) {
+          if (this.rfc64PublicCatalogServiceV1 === undefined) {
             throw new Error('RFC-64 Track-2 bootstrap requires the public catalog service');
           }
           for (const accepted of policies) {
             const { policyEnvelope } = accepted;
-            service.acceptPolicySnapshot({
+            // The bootstrap manifest is itself an explicit pre-10.0.16
+            // operator surface. Route it through the compatibility-aware API
+            // so it remains active when no release-native responsibility has
+            // been discovered for the CG.
+            this.acceptRfc64CatalogAccessSnapshotV1({
               policy: policyEnvelope.payload,
               policyDigest: computeContextGraphPolicyObjectDigestV1(policyEnvelope),
               roster: accepted.rosterEnvelope?.payload,
