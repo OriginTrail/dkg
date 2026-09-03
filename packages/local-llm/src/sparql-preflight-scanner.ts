@@ -152,6 +152,48 @@ function hasUnwrappedAggregateAlias(
   return false;
 }
 
+function isBareIriTermBoundary(
+  token: SparqlLexicalToken,
+  index: number,
+  tokens: readonly SparqlLexicalToken[],
+): boolean {
+  if (token.kind === 'string' || token.kind === 'iri') return true;
+  if (!isValuedToken(token) || token.kind !== 'symbol') return false;
+  if (['{', '}', '(', ')', '[', ']', ';', ','].includes(token.logicalValue)) return true;
+  if (token.logicalValue !== '.') return false;
+  const next = tokens[index + 1];
+  return next === undefined
+    || token.end !== next.start
+    || (
+      isValuedToken(next)
+      && next.kind === 'symbol'
+      && ['{', '}', '(', ')', '[', ']', ';', ','].includes(next.logicalValue)
+    );
+}
+
+function findBareAbsoluteIri(
+  source: string,
+  tokens: readonly SparqlLexicalToken[],
+  declaredPrefixes: ReadonlySet<string>,
+): string | undefined {
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (!isValuedToken(token) || token.kind !== 'prefixed-name') continue;
+    const colon = token.logicalValue.indexOf(':');
+    const scheme = token.logicalValue.slice(0, colon).toLowerCase();
+    if (!ABSOLUTE_IRI_SCHEMES.has(scheme) || declaredPrefixes.has(scheme)) continue;
+
+    let end = token.end;
+    for (let cursor = index + 1; cursor < tokens.length; cursor++) {
+      const next = tokens[cursor];
+      if (next.start !== end || isBareIriTermBoundary(next, cursor, tokens)) break;
+      end = next.end;
+    }
+    return source.slice(token.start, end);
+  }
+  return undefined;
+}
+
 /** Derive local-model policy facts from core's canonical lexical artifacts. */
 export function scanSparqlPreflight(value: string): SparqlPreflightScan {
   const lexical = prepareSparql(value);
@@ -166,12 +208,7 @@ export function scanSparqlPreflight(value: string): SparqlPreflightScan {
   const declaredPrefixes = new Set(
     lexical.prologue.declaredPrefixes.map((prefix) => prefix.toLowerCase()),
   );
-  const bareAbsolute = tokens.find((token) => {
-    if (!isValuedToken(token) || token.kind !== 'prefixed-name') return false;
-    const colon = token.logicalValue.indexOf(':');
-    const scheme = token.logicalValue.slice(0, colon).toLowerCase();
-    return ABSOLUTE_IRI_SCHEMES.has(scheme) && !declaredPrefixes.has(scheme);
-  });
+  const bareAbsoluteIri = findBareAbsoluteIri(value, tokens, declaredPrefixes);
 
   return {
     masked: lexical.masked,
@@ -193,6 +230,6 @@ export function scanSparqlPreflight(value: string): SparqlPreflightScan {
       tokens,
       parentheses.closingByOpening,
     ),
-    bareAbsoluteIri: isValuedToken(bareAbsolute) ? bareAbsolute.value : undefined,
+    bareAbsoluteIri,
   };
 }

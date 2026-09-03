@@ -34,6 +34,12 @@ export interface SparqlGraphTarget {
   readonly braceDepth: number;
 }
 
+/** A variable's source spelling and its UCHAR-decoded SPARQL identity. */
+export interface SparqlScopeVariable {
+  readonly source: string;
+  readonly logicalName: string;
+}
+
 /**
  * One canonical, source-coordinate model for graph authorization and rewrites.
  * Comments, strings, and IRI payloads have already been made opaque by the RDF
@@ -48,9 +54,9 @@ export interface PreparedGraphScope {
   readonly hasDatasetClause: boolean;
   readonly hasGraphClause: boolean;
   readonly graphTargets: readonly SparqlGraphTarget[];
-  readonly graphVariables: readonly string[];
-  readonly queryVariables: readonly string[];
-  readonly whereVariables: readonly string[];
+  readonly graphVariables: readonly SparqlScopeVariable[];
+  readonly queryVariables: readonly SparqlScopeVariable[];
+  readonly whereVariables: readonly SparqlScopeVariable[];
   /** Brace depth immediately before each canonical token. */
   readonly braceDepths: readonly number[];
   /** Matching token index for each `{`/`}`, or `-1` when unmatched/non-brace. */
@@ -70,30 +76,35 @@ function unsupported(original: PreparedGraphScope): GraphScopeRewriteResult {
 }
 
 /**
- * Own the state transition after a source edit. A no-op retains object identity
- * unless active UCHAR symbol tokens must be materialized for backend parsing;
- * every actual source change is prepared before it leaves this module. String,
- * IRI, and comment payload spelling remains byte-for-byte unchanged.
+ * Own the state transition after a source edit. A no-op retains object identity;
+ * every actual source change is prepared before it leaves this module.
  */
 export function transitionGraphScope(
   scope: PreparedGraphScope,
   source: string,
 ): PreparedGraphScope {
-  const candidate = source === scope.source ? scope : prepareGraphScope(source);
+  return source === scope.source ? scope : prepareGraphScope(source);
+}
+
+/**
+ * Materialize active UCHAR-spelled syntax exactly once at the store boundary.
+ * Opaque strings, IRIs, and comments retain their original source spelling.
+ */
+export function materializeGraphScopeForExecution(scope: PreparedGraphScope): string {
   const chunks: string[] = [];
   let cursor = 0;
   let changed = false;
-  for (const token of candidate.prepared.tokens) {
-    if (!isValuedToken(token) || token.kind !== 'symbol') continue;
-    const raw = candidate.source.slice(token.start, token.end);
+  for (const token of scope.prepared.tokens) {
+    if (!isValuedToken(token)) continue;
+    const raw = scope.source.slice(token.start, token.end);
     if (raw === token.logicalValue) continue;
-    chunks.push(candidate.source.slice(cursor, token.start), token.logicalValue);
+    chunks.push(scope.source.slice(cursor, token.start), token.logicalValue);
     cursor = token.end;
     changed = true;
   }
-  if (!changed) return candidate;
-  chunks.push(candidate.source.slice(cursor));
-  return prepareGraphScope(chunks.join(''));
+  if (!changed) return scope.source;
+  chunks.push(scope.source.slice(cursor));
+  return chunks.join('');
 }
 
 function braceStructure(tokens: readonly SparqlLexicalToken[]): {
@@ -206,17 +217,20 @@ export function prepareGraphScope(
   const prefixes = prefixesFromTokens(prepared);
   const { depths, matching } = braceStructure(prepared.tokens);
   const graphTargets: SparqlGraphTarget[] = [];
-  const graphVariables: string[] = [];
+  const graphVariables: SparqlScopeVariable[] = [];
   const graphVariableSet = new Set<string>();
-  const queryVariables: string[] = [];
+  const queryVariables: SparqlScopeVariable[] = [];
   const queryVariableSet = new Set<string>();
   let hasDatasetClause = false;
 
   for (let index = 0; index < prepared.tokens.length; index++) {
     const token = prepared.tokens[index];
-    if (isValuedToken(token) && token.kind === 'variable' && !queryVariableSet.has(token.value)) {
-      queryVariableSet.add(token.value);
-      queryVariables.push(token.value);
+    if (isValuedToken(token) && token.kind === 'variable') {
+      const logicalName = token.logicalValue.slice(1);
+      if (!queryVariableSet.has(logicalName)) {
+        queryVariableSet.add(logicalName);
+        queryVariables.push({ source: token.value, logicalName });
+      }
     }
     if (!isValuedToken(token) || token.kind !== 'word') continue;
     if (token.upper === 'FROM') hasDatasetClause = true;
@@ -226,14 +240,15 @@ export function prepareGraphScope(
     if (isValuedToken(target) && target.kind === 'variable') {
       graphTargets.push({
         kind: 'variable',
-        value: target.value,
+        value: target.logicalValue,
         keywordTokenIndex: index,
         targetTokenIndex: index + 1,
         braceDepth: depths[index],
       });
-      if (!graphVariableSet.has(target.value)) {
-        graphVariableSet.add(target.value);
-        graphVariables.push(target.value);
+      const logicalName = target.logicalValue.slice(1);
+      if (!graphVariableSet.has(logicalName)) {
+        graphVariableSet.add(logicalName);
+        graphVariables.push({ source: target.value, logicalName });
       }
       continue;
     }
@@ -275,7 +290,7 @@ export function prepareGraphScope(
 
   const operationToken = prepared.tokens[prepared.prologue.endTokenIndex];
   const where = whereRange(prepared, matching);
-  const whereVariables: string[] = [];
+  const whereVariables: SparqlScopeVariable[] = [];
   const whereVariableSet = new Set<string>();
   if (where) {
     for (let index = where.openingTokenIndex + 1; index < where.closingTokenIndex; index++) {
@@ -283,10 +298,11 @@ export function prepareGraphScope(
       if (
         isValuedToken(token)
         && token.kind === 'variable'
-        && !whereVariableSet.has(token.value)
+        && !whereVariableSet.has(token.logicalValue.slice(1))
       ) {
-        whereVariableSet.add(token.value);
-        whereVariables.push(token.value);
+        const logicalName = token.logicalValue.slice(1);
+        whereVariableSet.add(logicalName);
+        whereVariables.push({ source: token.value, logicalName });
       }
     }
   }
@@ -439,7 +455,7 @@ function wrapWithProjectedGraphSubselect(
   if (hasUnion || !acceptsScope(scope)) return unsupported(scope);
 
   const helperNames = new Set(helperVariables.map((variable) => variable.slice(1)));
-  if (scope.queryVariables.some((variable) => helperNames.has(variable.slice(1)))) {
+  if (scope.queryVariables.some((variable) => helperNames.has(variable.logicalName))) {
     return unsupported(scope);
   }
 
@@ -448,7 +464,7 @@ function wrapWithProjectedGraphSubselect(
   const graphPattern = buildGraphPattern(inner, graphs);
   return ready(transitionGraphScope(
     scope,
-    `${scope.source.slice(0, openEnd)} { SELECT ${innerVariables.join(' ')} WHERE { ${graphPattern} } } ${scope.source.slice(close)}`,
+    `${scope.source.slice(0, openEnd)} { SELECT ${innerVariables.map((variable) => variable.source).join(' ')} WHERE { ${graphPattern} } } ${scope.source.slice(close)}`,
   ));
 }
 
@@ -520,16 +536,16 @@ export function wrapWithGraphValues(
  */
 function callerGraphValuesAreAuthorized(
   scope: PreparedGraphScope,
-  variable: string,
+  variableName: string,
   allowedGraphs: ReadonlySet<string>,
 ): boolean {
-  const values = readTopLevelStaticGraphValues(scope, variable);
+  const values = readTopLevelStaticGraphValues(scope, variableName);
   return values !== null && values.every((graph) => allowedGraphs.has(graph));
 }
 
 function readTopLevelStaticGraphValues(
   scope: PreparedGraphScope,
-  variable: string,
+  variableName: string,
 ): string[] | null {
   const where = scope.where;
   if (!where) return null;
@@ -546,7 +562,11 @@ function readTopLevelStaticGraphValues(
     ) continue;
 
     const candidate = tokens[index + 1];
-    if (!isValuedToken(candidate) || candidate.kind !== 'variable' || candidate.value !== variable) {
+    if (
+      !isValuedToken(candidate)
+      || candidate.kind !== 'variable'
+      || candidate.logicalValue.slice(1) !== variableName
+    ) {
       continue;
     }
     const opening = tokens[index + 2];
@@ -818,7 +838,7 @@ export function constrainGraphVariablesToAllowedSet(
 
   const allowed = new Set(allowedGraphs);
   const variablesNeedingConstraint = scope.graphVariables.filter(
-    (variable) => !callerGraphValuesAreAuthorized(scope, variable, allowed),
+    (variable) => !callerGraphValuesAreAuthorized(scope, variable.logicalName, allowed),
   );
   if (variablesNeedingConstraint.length === 0) {
     return transitionGraphScope(scope, scope.source);
@@ -826,7 +846,7 @@ export function constrainGraphVariablesToAllowedSet(
 
   const values = allowedGraphs.map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
   const constraints = variablesNeedingConstraint
-    .map((variable) => `VALUES ${variable} { ${values} }`)
+    .map((variable) => `VALUES ${variable.source} { ${values} }`)
     .join(' ');
   return transitionGraphScope(
     scope,

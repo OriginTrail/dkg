@@ -59,6 +59,11 @@ import {
   TrustLevel,
 } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine, resolveViewGraphs } from '../src/dkg-query-engine.js';
+import {
+  materializeGraphScopeForExecution,
+  prepareGraphScope,
+  wrapWithGraph,
+} from '../src/sparql-graph-scope.js';
 import { QueryHandler } from '../src/query-handler.js';
 import type { QueryAccessConfig } from '../src/query-types.js';
 
@@ -379,6 +384,106 @@ describe('[Q-1] DKGQueryEngine minTrust uses writer-side trust metadata', () => 
     );
 
     expect(result.quads?.map((value) => value.object)).toEqual(['"Requested"']);
+  });
+
+  it('scopes graphless DESCRIBE with LIMIT across every authorized view graph only', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    await store.insert([
+      quad('urn:a', 'urn:p', '"Root"', contextGraphDataUri(CG)),
+      quad(
+        'urn:a',
+        'urn:p',
+        '"Verified"',
+        contextGraphVerifiableMemoryUri(CG, 'describe-multi'),
+      ),
+      quad('urn:a', 'urn:p', '"Foreign"', contextGraphDataUri('other-cg')),
+    ]);
+
+    const result = await engine.query(
+      'DESCRIBE <urn:a> LIMIT 10',
+      { contextGraphId: CG, view: 'verifiable-memory' },
+    );
+
+    expect(result.quads?.map((value) => value.object).sort())
+      .toEqual(['"Root"', '"Verified"']);
+  });
+
+  it('keeps no-op graph rewrites byte-identical and materializes syntax only for execution', () => {
+    const source = String.raw`SELECT ?s WHERE \u007B GRAPH <urn:g> \u007B ?s <urn:p> "\u007B" \u007D \u007D`;
+    const scope = prepareGraphScope(source);
+
+    expect(wrapWithGraph(scope, 'urn:other')).toBe(scope);
+    expect(scope.source).toBe(source);
+    expect(materializeGraphScopeForExecution(scope)).toBe(
+      String.raw`SELECT ?s WHERE { GRAPH <urn:g> { ?s <urn:p> "\u007B" } }`,
+    );
+  });
+
+  it('does not alias a UCHAR-spelled caller variable to the dedup helper', async () => {
+    const store = new OxigraphStore();
+    const originalQuery = store.query.bind(store);
+    const queries: string[] = [];
+    store.query = async (...args) => {
+      queries.push(args[0]);
+      return originalQuery(...args);
+    };
+    const engine = new DKGQueryEngine(store);
+    await store.insert([
+      quad('urn:root', 'urn:p', '"Root"', contextGraphDataUri(CG)),
+      quad(
+        'urn:verified',
+        'urn:p',
+        '"Verified"',
+        contextGraphVerifiableMemoryUri(CG, 'variable-collision'),
+      ),
+    ]);
+
+    const equivalent = await engine.query(
+      'SELECT ?s WHERE { ?s <urn:p> ?callerValue }',
+      { contextGraphId: CG, view: 'verifiable-memory' },
+    );
+    queries.length = 0;
+    const escaped = await engine.query(
+      String.raw`SELECT ?s WHERE { ?s <urn:p> ?\u005F_dkgDedupGraph }`,
+      { contextGraphId: CG, view: 'verifiable-memory' },
+    );
+
+    expect(escaped.bindings.map((binding) => binding['s']).sort())
+      .toEqual(equivalent.bindings.map((binding) => binding['s']).sort());
+    expect(escaped.bindings.every((binding) => Object.keys(binding).join() === 's')).toBe(true);
+    expect(queries.some((query) => query.includes('VALUES (?__dkgDedupGraph'))).toBe(false);
+  });
+
+  it('does not alias a UCHAR-spelled caller variable to the view helper', async () => {
+    const store = new OxigraphStore();
+    const originalQuery = store.query.bind(store);
+    const queries: string[] = [];
+    store.query = async (...args) => {
+      queries.push(args[0]);
+      return originalQuery(...args);
+    };
+    const engine = new DKGQueryEngine(store);
+    const swmRoot = contextGraphSharedMemoryUri(CG);
+    await store.insert([
+      quad('urn:first', 'urn:p', '"First"', `${swmRoot}/0xagent/1`),
+      quad('urn:second', 'urn:p', '"Second"', `${swmRoot}/0xagent/2`),
+    ]);
+
+    const equivalent = await engine.query(
+      'SELECT ?s WHERE { ?s <urn:p> ?callerValue }',
+      { contextGraphId: CG, view: 'shared-working-memory' },
+    );
+    queries.length = 0;
+    const escaped = await engine.query(
+      String.raw`SELECT ?s WHERE { ?s <urn:p> ?\u005F_dkgViewGraph }`,
+      { contextGraphId: CG, view: 'shared-working-memory' },
+    );
+
+    expect(escaped.bindings.map((binding) => binding['s']).sort())
+      .toEqual(equivalent.bindings.map((binding) => binding['s']).sort());
+    expect(escaped.bindings.every((binding) => Object.keys(binding).join() === 's')).toBe(true);
+    expect(queries.some((query) => query.includes('VALUES ?__dkgViewGraph'))).toBe(false);
   });
 
   it('scopes a single graph when the WHERE braces use UCHAR source spans', async () => {

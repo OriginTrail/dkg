@@ -570,9 +570,6 @@ importers:
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
-      '@origintrail-official/dkg-http-utils':
-        specifier: workspace:*
-        version: link:../http-utils
       '@origintrail-official/dkg-publisher':
         specifier: workspace:*
         version: link:../publisher

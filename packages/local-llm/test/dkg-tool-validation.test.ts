@@ -56,6 +56,17 @@ describe('DKG SPARQL preflight', () => {
     expect(validateSparqlForDkg('ASK { <urn:test:item> <schema:name> "x" }').ok).toBe(true);
   });
 
+  it.each([
+    'http://localhost/item',
+    'https://host/path',
+    'mailto:user@example.org',
+  ])('reports the complete bare absolute IRI in repair feedback: %s', (iri) => {
+    expect(validateSparqlForDkg(`SELECT ?s WHERE { ?s <urn:p> ${iri} }`)).toEqual({
+      ok: false,
+      errors: [`wrap absolute IRI ${iri} in angle brackets`],
+    });
+  });
+
   it('does not confuse declared or auto-injected prefixed names with absolute IRIs', () => {
     expect(validateSparqlForDkg('SELECT ?x WHERE { ?x schema:name ?name }').ok).toBe(true);
     expect(validateSparqlForDkg('PREFIX urn: <https://example.com/> SELECT ?x WHERE { urn:item schema:name ?x }').ok)
