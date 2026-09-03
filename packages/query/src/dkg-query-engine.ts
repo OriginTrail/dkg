@@ -14,6 +14,11 @@ import {
   readExactGraphPaged,
   resolveGraphScopedOrLegacyMetadata,
 } from '@origintrail-official/dkg-storage';
+import {
+  prepareSparql,
+  skipSparqlIriRef,
+  skipSparqlStringLiteral,
+} from '@origintrail-official/dkg-rdf-utils/sparql';
 import type {
   QueryResult,
   QueryOptions,
@@ -38,6 +43,7 @@ import {
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
   buildLegacyKnowledgeAssetMetadataQuery,
+  stripSparqlLiteralsAndComments,
   type ParsedGraphKnowledgeAssetMetadata,
 } from '@origintrail-official/dkg-core';
 import {
@@ -46,20 +52,16 @@ import {
   detectSparqlQueryForm,
 } from './sparql-guard.js';
 import {
-  prepareSparql,
-  skipSparqlStringLiteral as scanSparqlStringLiteral,
-  skipSparqlIriRef,
-  stripLiteralsAndComments,
-} from './sparql-utils.js';
-import {
   assertExplicitGraphIrisAllowed,
   assertNoCallerDatasetClauses,
   constrainGraphVariablesToAllowedSet,
   prepareGraphScope,
+  transitionGraphScope,
   wrapWithDeduplicatedGraphValues,
   wrapWithGraph,
   wrapWithGraphValues,
   wrapWithGraphUnion,
+  type GraphScopeRewriteResult,
   type PreparedGraphScope,
 } from './sparql-graph-scope.js';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
@@ -370,10 +372,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     if (!guard.safe) {
       throw new Error(`SPARQL rejected: ${guard.reason}`);
     }
-    // Policy checks use the prepared logical view, but all rewrites and the
-    // backend retain the caller's exact source. UCHAR payload inside a string
-    // or IRI is data, not a replacement source-code delimiter.
+    // Policy checks use the prepared logical view. Rewrites retain payload
+    // spelling inside strings and IRIs, while active UCHAR symbol tokens are
+    // materialized for backends that do not perform that preprocessing.
     const initialGraphScope = prepareGraphScope(sparql, prepared);
+    let routedScope = initialGraphScope;
 
     // ── V10 view-based routing ────────────────────────────────────────
     const effectiveContextGraphId = options?.contextGraphId;
@@ -500,7 +503,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // partitions for callers that explicitly opt into broad count scans;
       // legacy scoped routes keep their selected memory-layer contract.
       assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
-      sparql = constrainGraphVariablesToAllowedSet(initialGraphScope, variableAllowedGraphs);
+      routedScope = constrainGraphVariablesToAllowedSet(
+        initialGraphScope,
+        variableAllowedGraphs,
+      );
     }
 
     if (options?.view) {
@@ -526,10 +532,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
 
     // ── Legacy routing (V9 compat) ────────────────────────────────────
-    let effectiveSparql = sparql;
-    const routedScope = sparql === initialGraphScope.source
-      ? initialGraphScope
-      : prepareGraphScope(sparql);
+    let effectiveScope = routedScope;
 
     if (effectiveContextGraphId) {
       const dataGraph = options?.subGraphName
@@ -542,25 +545,29 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           `${dataGraph}/_verifiable_memory/`,
           reads,
         );
-        const dataSparql = vmGraphsInc.length > 0
-          ? (this.wrapVerifiableMemoryGraphSet(routedScope, [dataGraph, ...vmGraphsInc])
-            ?? wrapWithGraph(routedScope, dataGraph))
+        const dataRewrite = vmGraphsInc.length > 0
+          ? this.wrapVerifiableMemoryGraphSet(routedScope, [dataGraph, ...vmGraphsInc])
+          : null;
+        const dataScope = dataRewrite?.kind === 'ready'
+          ? dataRewrite.scope
           : wrapWithGraph(routedScope, dataGraph);
         // Per-KA SWM: union the discovered …/_shared_memory/{addr}/{number} graphs.
         const swmGraphs = await this.discoverGraphsByPrefix(
           `${sharedMemoryGraph}/`,
           reads,
         );
-        const sharedMemorySparql = swmGraphs.length > 0
-          ? (wrapWithGraphUnion(routedScope, swmGraphs)
-            ?? wrapWithGraph(routedScope, sharedMemoryGraph))
+        const sharedMemoryRewrite = swmGraphs.length > 0
+          ? wrapWithGraphUnion(routedScope, swmGraphs)
+          : null;
+        const sharedMemoryScope = sharedMemoryRewrite?.kind === 'ready'
+          ? sharedMemoryRewrite.scope
           : wrapWithGraph(routedScope, sharedMemoryGraph);
         // Both are graph-wrapped forms of the CALLER's query, so they carry
         // the same provenance as execAndNormalize (PR #2330 review — this
         // branch previously bypassed the marker, leaving the original 500 for
         // any `includeSharedMemory` request with malformed SPARQL).
-        const dataResult = await this.execCallerQuery(dataSparql, reads);
-        const smResult = await this.execCallerQuery(sharedMemorySparql, reads);
+        const dataResult = await this.execCallerQuery(dataScope.source, reads);
+        const smResult = await this.execCallerQuery(sharedMemoryScope.source, reads);
         return mergeSharedMemoryAndDataResults(dataResult, smResult);
       }
       if (options?.graphSuffix === '_shared_memory') {
@@ -570,9 +577,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           `${sharedMemoryGraph}/`,
           reads,
         );
-        effectiveSparql = swmGraphs.length > 0
-          ? (wrapWithGraphUnion(routedScope, swmGraphs)
-            ?? wrapWithGraph(routedScope, sharedMemoryGraph))
+        const rewrite = swmGraphs.length > 0
+          ? wrapWithGraphUnion(routedScope, swmGraphs)
+          : null;
+        effectiveScope = rewrite?.kind === 'ready'
+          ? rewrite.scope
           : wrapWithGraph(routedScope, sharedMemoryGraph);
       } else {
         // Per-KA VM: read-both the published per-KA …/_verifiable_memory/{addr}/{number} + root.
@@ -580,14 +589,16 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           `${dataGraph}/_verifiable_memory/`,
           reads,
         );
-        effectiveSparql = vmGraphs.length > 0
-          ? (this.wrapVerifiableMemoryGraphSet(routedScope, [dataGraph, ...vmGraphs])
-            ?? wrapWithGraph(routedScope, dataGraph))
+        const rewrite = vmGraphs.length > 0
+          ? this.wrapVerifiableMemoryGraphSet(routedScope, [dataGraph, ...vmGraphs])
+          : null;
+        effectiveScope = rewrite?.kind === 'ready'
+          ? rewrite.scope
           : wrapWithGraph(routedScope, dataGraph);
       }
     }
 
-    const result = await this.execAndNormalize(effectiveSparql, reads);
+    const result = await this.execAndNormalize(effectiveScope.source, reads);
 
     // Strip results originating from excluded graphs (e.g. private CGs).
     if (options?.excludeGraphPrefixes?.length && result.bindings.length > 0) {
@@ -626,7 +637,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     options: QueryOptions,
     reads: QueryStoreReadContext,
   ): Promise<QueryResult> {
-    let sparql = initialScope.source;
+    const sparql = initialScope.source;
     // Uniform layout (rc.17): a by-name working-memory read must target the per-KA
     // graph `…/_working_memory/{addr}/{number}` the data was written to. Resolve the
     // KA number from the `dkg:kaId` stamped on the lifecycle URN in `_meta` and pass
@@ -737,10 +748,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
 
     assertExplicitGraphIrisAllowed(initialScope, allGraphs);
-    sparql = constrainGraphVariablesToAllowedSet(initialScope, allGraphs);
-    const constrainedScope = sparql === initialScope.source
-      ? initialScope
-      : prepareGraphScope(sparql);
+    const constrainedScope = constrainGraphVariablesToAllowedSet(initialScope, allGraphs);
 
     // Spec §14 trust-gradient filter — only enforced on verifiable-memory
     // where on-chain-anchored trust metadata is expected to live.
@@ -758,7 +766,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // rewriter MUST succeed or we fail closed — returning an empty result
     // is the correct behaviour for "no subject meets the trust threshold"
     // when we cannot prove the threshold was applied.
-    let effectiveSparql = sparql;
+    let effectiveScope = constrainedScope;
     const effectiveMinTrust = options.minTrust ?? options._minTrust;
     // `SelfAttested` (0) is the floor and means no trust filter is needed.
     // Endorsed and above require explicit writer-side trust metadata.
@@ -768,7 +776,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       effectiveMinTrust > TrustLevel.SelfAttested
     ) {
       const rewritten = injectMinTrustFilter(constrainedScope, effectiveMinTrust);
-      if (!rewritten) {
+      if (rewritten.kind === 'unsupported') {
         console.warn(
           `[DKGQueryEngine] minTrust=${effectiveMinTrust} requested for a query shape ` +
             `injectMinTrustFilter cannot safely rewrite; returning empty result (fail-closed)`,
@@ -776,26 +784,22 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         // Preserve the query form so CONSTRUCT/DESCRIBE callers see
         // `{ bindings: [], quads: [] }` rather than a shapeless deny, and
         // ASK callers see `{ bindings: [{ result: 'false' }] }`.
-        return emptyResultForSparql(sparql);
+        return emptyResultForSparql(constrainedScope.source);
       }
-      effectiveSparql = rewritten;
+      effectiveScope = rewritten.scope;
     }
-
-    const effectiveScope = effectiveSparql === constrainedScope.source
-      ? constrainedScope
-      : prepareGraphScope(effectiveSparql);
 
     if (allGraphs.length === 1) {
       return this.execAndNormalize(
-        wrapWithGraph(effectiveScope, allGraphs[0]),
+        wrapWithGraph(effectiveScope, allGraphs[0]).source,
         reads,
       );
     }
 
     if (view === 'verifiable-memory') {
       const rewritten = this.wrapVerifiableMemoryGraphSet(effectiveScope, allGraphs);
-      if (rewritten !== null) {
-        return this.execAndNormalize(rewritten, reads);
+      if (rewritten.kind === 'ready') {
+        return this.execAndNormalize(rewritten.scope.source, reads);
       }
     }
 
@@ -806,12 +810,13 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   private wrapVerifiableMemoryGraphSet(
     scope: PreparedGraphScope,
     graphs: string[],
-  ): string | null {
-    if (graphs.length === 0) return scope.source;
-    if (graphs.length === 1) return wrapWithGraph(scope, graphs[0]);
-    return wrapWithDeduplicatedGraphValues(scope, graphs)
-      ?? wrapWithGraphValues(scope, graphs)
-      ?? wrapWithGraphUnion(scope, graphs);
+  ): GraphScopeRewriteResult {
+    if (graphs.length <= 1) return wrapWithGraphUnion(scope, graphs);
+    const deduplicated = wrapWithDeduplicatedGraphValues(scope, graphs);
+    if (deduplicated.kind === 'ready') return deduplicated;
+    const values = wrapWithGraphValues(scope, graphs);
+    if (values.kind === 'ready') return values;
+    return wrapWithGraphUnion(scope, graphs);
   }
 
   private async queryMultipleGraphs(
@@ -822,7 +827,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const sparql = scope.source;
     if (graphs.length === 0) return { bindings: [] };
     if (graphs.length === 1) {
-      return this.execAndNormalize(wrapWithGraph(scope, graphs[0]), reads);
+      return this.execAndNormalize(wrapWithGraph(scope, graphs[0]).source, reads);
     }
     // Prefer a single `VALUES ?g { … } GRAPH ?g { … }` query: it scopes the
     // read to the named-graph set as ONE basic graph pattern iterated over a
@@ -833,17 +838,17 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // VALUES form plans in constant depth. LIMIT/ORDER BY/DISTINCT/aggregate
     // semantics are preserved because those modifiers stay in the outer query
     // around the injected block.
-    const valuesSparql = wrapWithGraphValues(scope, graphs);
-    if (valuesSparql !== null) {
-      return this.execAndNormalize(valuesSparql, reads);
+    const valuesRewrite = wrapWithGraphValues(scope, graphs);
+    if (valuesRewrite.kind === 'ready') {
+      return this.execAndNormalize(valuesRewrite.scope.source, reads);
     }
     // Residual shapes `wrapWithGraphValues` declines (an inner top-level
     // UNION, no locatable WHERE block, or a sentinel-variable collision) keep
     // the original union / per-graph fallback so the #789 form-aware
     // cross-graph merge below is preserved unchanged.
-    const unionSparql = wrapWithGraphUnion(scope, graphs);
-    if (unionSparql !== null) {
-      return this.execAndNormalize(unionSparql, reads);
+    const unionRewrite = wrapWithGraphUnion(scope, graphs);
+    if (unionRewrite.kind === 'ready') {
+      return this.execAndNormalize(unionRewrite.scope.source, reads);
     }
     // Fallback: the inner body contains a UNION so we cannot safely wrap
     // in a single query without either crashing Blazegraph (nested
@@ -862,7 +867,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // constructed from multiple source graphs).
       const merged: Quad[] = [];
       for (const g of graphs) {
-        const r = await this.execAndNormalize(wrapWithGraph(scope, g), reads);
+        const r = await this.execAndNormalize(wrapWithGraph(scope, g).source, reads);
         if (r.quads) merged.push(...r.quads);
       }
       return { bindings: [], quads: dedupeQuads(merged) };
@@ -872,7 +877,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // Boolean result: true iff the pattern matches in ANY graph.
       // Short-circuit on the first positive graph.
       for (const g of graphs) {
-        const r = await this.execAndNormalize(wrapWithGraph(scope, g), reads);
+        const r = await this.execAndNormalize(wrapWithGraph(scope, g).source, reads);
         if (r.bindings[0]?.result === 'true') {
           return { bindings: [{ result: 'true' }] };
         }
@@ -899,7 +904,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
     const all: Record<string, string>[] = [];
     for (const g of graphs) {
-      const r = await this.execAndNormalize(wrapWithGraph(scope, g), reads);
+      const r = await this.execAndNormalize(wrapWithGraph(scope, g).source, reads);
       all.push(...r.bindings);
     }
     return { bindings: all };
@@ -1545,50 +1550,6 @@ async function listGraphFamily(
 }
 
 /**
- * Skip past a SPARQL string literal starting at `src[i]`, returning the
- * index immediately AFTER the closing quote.
- *
- * Recognises **all four** SPARQL 1.1 literal forms:
- *
- *   - `"…"`         single-line, double-quoted (escape: `\\`, `\"`, `\n`, …)
- *   - `'…'`         single-line, single-quoted (same escape grammar)
- *   - `"""…"""`     long-form, double-quoted (may span newlines, contains
- *                   raw `"`, `'`, `{`, `}`, `#`, `.` without escaping)
- *   - `'''…'''`     long-form, single-quoted (same as above)
- *
- * **Caller contract:** `src[i]` MUST be `"` or `'`; otherwise the function
- * returns `i` (no advance). The cursor returned points to the first byte
- * AFTER the literal, ready for the caller to resume its own scan.
- *
- * If a literal is unterminated (truncated input) the function consumes
- * the remainder of the string and returns `src.length`. Callers treat
- * unterminated literals as "the rest of the input is opaque payload",
- * which is the safe choice for structural scans (brace balancing,
- * keyword detection): we do NOT want a stray `{` near the end of a
- * truncated query body to confuse the surrounding scanner.
- *
- * dkg-query-engine.ts:848). The
- * previous helpers (`stripSparqlLineComments`, `scrubStringsAndComments`,
- * `findMatchingCloseBrace`, the former WHERE locator, and
- * `splitTopLevelTripleStatements`) all had their own copy of the
- * single-line literal scanner and NONE recognised triple-quoted
- * literals, so a long-form payload like
- *
- *     SELECT ?t WHERE { ?s <p> """contains a {brace} and a #comment""" }
- *
- * leaked `{`, `}`, `#`, `.`, etc. through the structural scrubber and
- * the `minTrust` rewriter (and the SPARQL form classifier, and the
- * triple terminator splitter) misclassified payload as syntax. The
- * downstream effect was the same fail-closed empty result the
- * scrubbing was supposed to prevent. Centralising the lex here means
- * every helper that walks SPARQL source learns triple-quoted handling
- * in one place.
- */
-export function skipSparqlStringLiteral(src: string, i: number): number {
-  return scanSparqlStringLiteral(src, i);
-}
-
-/**
  * Rewrites a SPARQL query so EVERY subject variable used in its WHERE
  * block also matches `<http://dkg.io/ontology/trustLevel> ?__trustN`
  * with an integer value ≥ `minTrust`. Subjects with no trust metadata
@@ -1599,7 +1560,7 @@ export function skipSparqlStringLiteral(src: string, i: number): number {
  * queries like `?a <p> ?o . ?b <q> ?r` have BOTH `?a` and `?b`
  * trust-filtered.
  *
- * Returns `null` when:
+ * Returns an explicit `unsupported` result when:
  *   - no `WHERE { ... }` block can be located;
  *   - braces are unbalanced;
  *   - the WHERE contains nested structure (`{`, `GRAPH`, `OPTIONAL`,
@@ -1762,31 +1723,34 @@ function splitTopLevelTripleStatements(body: string): string[] {
   return out;
 }
 
-function injectMinTrustFilter(scope: PreparedGraphScope, minTrust: number): string | null {
+function injectMinTrustFilter(
+  scope: PreparedGraphScope,
+  minTrust: number,
+): GraphScopeRewriteResult {
   const sparql = scope.source;
+  const unsupported = (): GraphScopeRewriteResult => ({ kind: 'unsupported', original: scope });
   // The
   // pre-fix rewriter only recognised `WHERE\s*\{`, so SPARQL 1.1
   // shorthand forms (`SELECT ?x { … }`, `ASK { … }`,
-  // `DESCRIBE ?x { … }`, `CONSTRUCT { tmpl } { where }`) returned
-  // `null` and the `minTrust > Endorsed` caller silently fell
-  // through to an empty result. The token locator normalises
+  // `DESCRIBE ?x { … }`, `CONSTRUCT { tmpl } { where }`) were reported
+  // as unsupported and failed closed. The token locator normalises
   // every shape to the WHERE-clause brace position before we apply
   // the existing depth-counting pass below.
-  const braceStart = scope.where?.open ?? -1;
-  if (braceStart < 0) return null;
+  const bodyStart = scope.where?.openEnd ?? -1;
+  if (bodyStart < 0) return unsupported();
 
   // — dkg-query-engine.ts:939). The
   // earlier brace-balance loop counted `{`/`}` inside SPARQL string
   // literals (e.g. `FILTER(STR(?t) = "{")`), so a literal-heavy WHERE
-  // ended at depth 1 and `injectMinTrustFilter` returned `null` —
+  // ended at depth 1 and `injectMinTrustFilter` declined the rewrite —
   // which the `_minTrust > Endorsed` caller treats as "refuse to run"
   // and silently fails closed. Use the literal/comment/IRI-aware
   // helper so the brace boundaries match what SPARQL actually
   // parses.
   const braceEnd = scope.where?.close ?? -1;
-  if (braceEnd < 0) return null;
+  if (braceEnd < 0) return unsupported();
 
-  const inner = sparql.slice(braceStart + 1, braceEnd);
+  const inner = sparql.slice(bodyStart, braceEnd);
 
   // A
   // leading top-level `VALUES` clause is the canonical SPARQL shape
@@ -1831,11 +1795,11 @@ function injectMinTrustFilter(scope: PreparedGraphScope, minTrust: number): stri
   // IRIs are preserved verbatim because IRIREF grammar already
   // forbids `{`, `}`, `"`, and the keyword tokens we care about.
   const codeView = scrubStringsAndComments(scanTarget);
-  if (/[{}]/.test(codeView)) return null;
+  if (/[{}]/.test(codeView)) return unsupported();
   if (
     /\b(GRAPH|OPTIONAL|UNION|MINUS|SERVICE|VALUES|FILTER\s+EXISTS|FILTER\s+NOT\s+EXISTS|SELECT)\b/i.test(codeView)
   ) {
-    return null;
+    return unsupported();
   }
 
   // Strip SPARQL line comments (`# … \n`) so the dot accounting below
@@ -1848,7 +1812,7 @@ function injectMinTrustFilter(scope: PreparedGraphScope, minTrust: number): stri
   // .
   const innerCodeOnly = stripSparqlLineComments(scanTarget);
   const trimmedInner = innerCodeOnly.trim();
-  if (trimmedInner.length === 0) return null;
+  if (trimmedInner.length === 0) return unsupported();
 
   // Split on the top-level `.` separator to walk each triple pattern.
   // use a
@@ -1865,8 +1829,8 @@ function injectMinTrustFilter(scope: PreparedGraphScope, minTrust: number): stri
   for (const stmt of statements) {
     // top-level `FILTER(...)` / `BIND(... AS ?x)` clauses share the
     // statement-list with triple patterns and have no subject token.
-    // Pre-fix the subject regex below didn't match either keyword,
-    // returned `null`, and `injectMinTrustFilter()` propagated `null`
+    // Pre-fix the subject regex below didn't match either keyword, so
+    // `injectMinTrustFilter()` declined the rewrite
     // — collapsing every query like
     //   SELECT ?s WHERE { ?s <p> ?o . FILTER(?o > 10) }
     // into an empty result whenever `minTrust > SelfAttested`.
@@ -1899,7 +1863,7 @@ function injectMinTrustFilter(scope: PreparedGraphScope, minTrust: number): stri
     const m = stmt.match(
       /^\s*([?$]([A-Za-z_]\w*)|<[^>]+>|_:[A-Za-z_]\w*|"[^"]*"(?:\^\^<[^>]+>|@[A-Za-z-]+)?|[A-Za-z][\w-]*:[A-Za-z_][\w-]*|[A-Za-z][\w-]*:)/,
     );
-    if (!m) return null;
+    if (!m) return unsupported();
     const subj = m[1];
     if (subj.startsWith('?') || subj.startsWith('$')) {
       subjectVars.add(subj);
@@ -1926,9 +1890,11 @@ function injectMinTrustFilter(scope: PreparedGraphScope, minTrust: number): stri
       continue;
     }
     // Blank-node / literal subject — cannot attach a trust filter.
-    return null;
+    return unsupported();
   }
-  if (subjectVars.size === 0 && subjectIris.size === 0 && subjectPrefixed.size === 0) return null;
+  if (subjectVars.size === 0 && subjectIris.size === 0 && subjectPrefixed.size === 0) {
+    return unsupported();
+  }
 
   const extraClauses: string[] = [];
   let i = 0;
@@ -1973,9 +1939,12 @@ function injectMinTrustFilter(scope: PreparedGraphScope, minTrust: number): stri
     ? `${valuesClause} ${rewrittenBody}`
     : rewrittenBody;
 
-  const before = sparql.slice(0, braceStart + 1);
+  const before = sparql.slice(0, bodyStart);
   const after = sparql.slice(braceEnd);
-  return `${before} ${rewrittenInner} ${after}`;
+  return {
+    kind: 'ready',
+    scope: transitionGraphScope(scope, `${before} ${rewrittenInner} ${after}`),
+  };
 }
 
 /**
@@ -2105,7 +2074,7 @@ function dedupeQuads(quads: Quad[]): Quad[] {
  * because the per-graph partial aggregates can't be combined post-hoc.
  */
 function hasCrossGraphUnsafeModifier(sparql: string): boolean {
-  const s = stripLiteralsAndComments(sparql);
+  const s = stripSparqlLiteralsAndComments(sparql);
   if (/\bDISTINCT\b/i.test(s)) return true;
   if (/\bORDER\s+BY\b/i.test(s)) return true;
   if (/\bGROUP\s+BY\b/i.test(s)) return true;

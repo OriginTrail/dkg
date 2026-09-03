@@ -381,6 +381,88 @@ describe('[Q-1] DKGQueryEngine minTrust uses writer-side trust metadata', () => 
     expect(result.quads?.map((value) => value.object)).toEqual(['"Requested"']);
   });
 
+  it('scopes a single graph when the WHERE braces use UCHAR source spans', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    await store.insert([
+      quad('urn:a', 'urn:p', '"Requested"', contextGraphDataUri(CG)),
+      quad('urn:a', 'urn:p', '"Other"', contextGraphDataUri('other-cg')),
+    ]);
+
+    const result = await engine.query(
+      String.raw`SELECT ?o WHERE \u007B ?s <urn:p> ?o \u007D`,
+      { contextGraphId: CG },
+    );
+
+    expect(result.bindings).toEqual([{ o: '"Requested"' }]);
+  });
+
+  it('scopes multiple view graphs when the WHERE braces use UCHAR source spans', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    await store.insert([
+      quad('urn:a', 'urn:p', '"Root"', contextGraphDataUri(CG)),
+      quad(
+        'urn:b',
+        'urn:p',
+        '"Verified"',
+        contextGraphVerifiableMemoryUri(CG, 'encoded-braces'),
+      ),
+      quad('urn:c', 'urn:p', '"Other"', contextGraphDataUri('other-cg')),
+    ]);
+
+    const result = await engine.query(
+      String.raw`SELECT ?o WHERE \u007B ?s <urn:p> ?o \u007D`,
+      { contextGraphId: CG, view: 'verifiable-memory' },
+    );
+
+    expect(result.bindings.map((binding) => binding['o']).sort())
+      .toEqual(['"Root"', '"Verified"']);
+  });
+
+  it('constrains GRAPH variables when group braces use UCHAR source spans', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const requestedGraph = contextGraphDataUri(CG);
+    await store.insert([
+      quad('urn:a', 'urn:p', '"Requested"', requestedGraph),
+      quad('urn:b', 'urn:p', '"Other"', contextGraphDataUri('other-cg')),
+    ]);
+
+    const result = await engine.query(
+      String.raw`SELECT ?g ?o WHERE \u007B GRAPH ?g \u007B ?s <urn:p> ?o \u007D \u007D`,
+      { contextGraphId: CG },
+    );
+
+    expect(result.bindings).toEqual([{ g: requestedGraph, o: '"Requested"' }]);
+  });
+
+  it('injects minTrust after a UCHAR-encoded opening WHERE brace', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const graph = contextGraphVerifiableMemoryUri(CG, 'encoded-min-trust');
+    await store.insert([
+      quad('urn:a', 'urn:p', '"Trusted"', graph),
+      quad(
+        'urn:a',
+        'http://dkg.io/ontology/trustLevel',
+        `"${TrustLevel.ConsensusVerified}"`,
+        graph,
+      ),
+    ]);
+
+    const result = await engine.query(
+      String.raw`SELECT ?o WHERE \u007B <urn:a> <urn:p> ?o \u007D`,
+      {
+        contextGraphId: CG,
+        view: 'verifiable-memory',
+        minTrust: TrustLevel.ConsensusVerified,
+      },
+    );
+
+    expect(result.bindings).toEqual([{ o: '"Trusted"' }]);
+  });
+
   it.each([
     String.raw`\u00ZZ`,
     String.raw`\u006E`,
@@ -1778,37 +1860,6 @@ describe('[Q-1] minTrust + view wrapping survive UNBALANCED literal braces (bot 
       minTrust: TrustLevel.ConsensusVerified,
     });
     expect(result.bindings.length).toBe(1);
-  });
-
-  it('skipSparqlStringLiteral atomicity — directly exercises the centralised lex helper', async () => {
-    // Direct unit test of the exported helper. This is the smallest
-    // reproduction of the bot's concern: every other test exercises
-    // it through the engine, which is integration-shaped. Pin the
-    // contract directly so a regression to per-helper duplication
-    // would surface here even if the integration paths still pass.
-    const { skipSparqlStringLiteral } = await import('../src/dkg-query-engine.js') as unknown as {
-      skipSparqlStringLiteral: (src: string, i: number) => number;
-    };
-
-    // Single-line forms.
-    expect(skipSparqlStringLiteral('"abc"X', 0)).toBe(5);
-    expect(skipSparqlStringLiteral("'abc'X", 0)).toBe(5);
-    // Embedded escape — the `\` consumes the next char.
-    expect(skipSparqlStringLiteral('"a\\"b"X', 0)).toBe(6);
-    // Triple-double-quoted with embedded `"` and `{`/`}`.
-    const tdq = '"""a"b{c}d#e."""TAIL';
-    expect(skipSparqlStringLiteral(tdq, 0)).toBe(tdq.indexOf('TAIL'));
-    // Triple-single-quoted with embedded `'`.
-    const tsq = "'''x'y{z}w#q.'''TAIL";
-    expect(skipSparqlStringLiteral(tsq, 0)).toBe(tsq.indexOf('TAIL'));
-    // Triple-quoted with newlines (long-form spans lines).
-    const multi = '"""line1\nline2\nline3"""TAIL';
-    expect(skipSparqlStringLiteral(multi, 0)).toBe(multi.indexOf('TAIL'));
-    // Non-quote start = no advance.
-    expect(skipSparqlStringLiteral('xyz', 0)).toBe(0);
-    // Unterminated literal consumes the rest (defensive — see helper docs).
-    expect(skipSparqlStringLiteral('"unterminated', 0)).toBe('"unterminated'.length);
-    expect(skipSparqlStringLiteral('"""unterminated', 0)).toBe('"""unterminated'.length);
   });
 
   it('wrapWithGraph (default-graph filter) survives unbalanced braces inside string literals', async () => {

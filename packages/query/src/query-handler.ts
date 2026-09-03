@@ -5,7 +5,7 @@ import {
   quadsToNQuads,
   type StoreSchedulerBusyErrorLike,
 } from '@origintrail-official/dkg-storage';
-import { prepareSparql } from './sparql-utils.js';
+import { prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { validateReadOnlySparql } from './sparql-guard.js';
 import type { DKGQueryEngine } from './dkg-query-engine.js';
 import type {

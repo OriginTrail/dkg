@@ -17,7 +17,9 @@ function iriValue(token: SparqlLexicalToken | undefined): string | null {
 }
 
 export interface SparqlWhereRange {
-  readonly open: number;
+  /** Raw source span of the opening brace token. UCHAR tokens span >1 code unit. */
+  readonly openStart: number;
+  readonly openEnd: number;
   readonly close: number;
   readonly hasUnion: boolean;
   readonly openingTokenIndex: number;
@@ -53,6 +55,45 @@ export interface PreparedGraphScope {
   readonly braceDepths: readonly number[];
   /** Matching token index for each `{`/`}`, or `-1` when unmatched/non-brace. */
   readonly matchingBraceTokenIndexes: readonly number[];
+}
+
+export type GraphScopeRewriteResult =
+  | { readonly kind: 'ready'; readonly scope: PreparedGraphScope }
+  | { readonly kind: 'unsupported'; readonly original: PreparedGraphScope };
+
+function ready(scope: PreparedGraphScope): GraphScopeRewriteResult {
+  return { kind: 'ready', scope };
+}
+
+function unsupported(original: PreparedGraphScope): GraphScopeRewriteResult {
+  return { kind: 'unsupported', original };
+}
+
+/**
+ * Own the state transition after a source edit. A no-op retains object identity
+ * unless active UCHAR symbol tokens must be materialized for backend parsing;
+ * every actual source change is prepared before it leaves this module. String,
+ * IRI, and comment payload spelling remains byte-for-byte unchanged.
+ */
+export function transitionGraphScope(
+  scope: PreparedGraphScope,
+  source: string,
+): PreparedGraphScope {
+  const candidate = source === scope.source ? scope : prepareGraphScope(source);
+  const chunks: string[] = [];
+  let cursor = 0;
+  let changed = false;
+  for (const token of candidate.prepared.tokens) {
+    if (!isValuedToken(token) || token.kind !== 'symbol') continue;
+    const raw = candidate.source.slice(token.start, token.end);
+    if (raw === token.logicalValue) continue;
+    chunks.push(candidate.source.slice(cursor, token.start), token.logicalValue);
+    cursor = token.end;
+    changed = true;
+  }
+  if (!changed) return candidate;
+  chunks.push(candidate.source.slice(cursor));
+  return prepareGraphScope(chunks.join(''));
 }
 
 function braceStructure(tokens: readonly SparqlLexicalToken[]): {
@@ -128,7 +169,8 @@ function whereRange(
     (token) => isValuedToken(token) && token.kind === 'word' && token.upper === 'UNION',
   );
   return {
-    open: tokens[openingIndex].start,
+    openStart: tokens[openingIndex].start,
+    openEnd: tokens[openingIndex].end,
     close: tokens[closingIndex].start,
     hasUnion,
     openingTokenIndex: openingIndex,
@@ -267,10 +309,6 @@ export function prepareGraphScope(
   };
 }
 
-function asPreparedGraphScope(scope: PreparedGraphScope | string): PreparedGraphScope {
-  return typeof scope === 'string' ? prepareGraphScope(scope) : scope;
-}
-
 export function assertNoCallerDatasetClauses(scope: PreparedGraphScope): void {
   if (scope.hasDatasetClause) {
     throw new ScopedQueryViolationError('FROM clauses are not allowed on scoped local queries');
@@ -324,45 +362,52 @@ function scopeGraphlessDescribe(
   return `${scope.source.slice(0, insertion)} ${clauses} ${scope.source.slice(insertion)}`;
 }
 
-export function wrapWithGraph(input: PreparedGraphScope | string, graphUri: string): string {
-  const scope = asPreparedGraphScope(input);
-  if (scope.hasGraphClause) return scope.source;
+export function wrapWithGraph(
+  scope: PreparedGraphScope,
+  graphUri: string,
+): PreparedGraphScope {
+  if (scope.hasGraphClause) return transitionGraphScope(scope, scope.source);
   if (!scope.where) {
     const describe = scopeGraphlessDescribe(scope, [graphUri]);
-    if (describe !== null) return describe;
+    if (describe !== null) return transitionGraphScope(scope, describe);
     throw new ScopedQueryViolationError('unable to locate a graph-scopable WHERE block');
   }
-  const { open, close } = scope.where;
-  const before = scope.source.slice(0, open + 1);
-  const inner = scope.source.slice(open + 1, close);
+  const { openEnd, close } = scope.where;
+  const before = scope.source.slice(0, openEnd);
+  const inner = scope.source.slice(openEnd, close);
   const after = scope.source.slice(close);
-  return `${before} GRAPH <${assertSafeIri(graphUri)}> { ${inner} } ${after}`;
+  return transitionGraphScope(
+    scope,
+    `${before} GRAPH <${assertSafeIri(graphUri)}> { ${inner} } ${after}`,
+  );
 }
 
 export function wrapWithGraphUnion(
-  input: PreparedGraphScope | string,
+  scope: PreparedGraphScope,
   graphUris: readonly string[],
-): string | null {
-  const scope = asPreparedGraphScope(input);
-  if (scope.hasGraphClause) return scope.source;
-  if (graphUris.length === 0) return scope.source;
+): GraphScopeRewriteResult {
+  if (scope.hasGraphClause) return ready(transitionGraphScope(scope, scope.source));
+  if (graphUris.length === 0) return ready(transitionGraphScope(scope, scope.source));
   if (!scope.where) {
     const describe = scopeGraphlessDescribe(scope, graphUris);
-    if (describe !== null) return describe;
+    if (describe !== null) return ready(transitionGraphScope(scope, describe));
     throw new ScopedQueryViolationError('unable to locate a graph-scopable WHERE block');
   }
-  const { open, close, hasUnion } = scope.where;
-  const before = scope.source.slice(0, open + 1);
-  const inner = scope.source.slice(open + 1, close);
+  const { openEnd, close, hasUnion } = scope.where;
+  const before = scope.source.slice(0, openEnd);
+  const inner = scope.source.slice(openEnd, close);
   const after = scope.source.slice(close);
   if (graphUris.length === 1) {
-    return `${before} GRAPH <${assertSafeIri(graphUris[0])}> { ${inner} } ${after}`;
+    return ready(transitionGraphScope(
+      scope,
+      `${before} GRAPH <${assertSafeIri(graphUris[0])}> { ${inner} } ${after}`,
+    ));
   }
-  if (hasUnion) return null;
+  if (hasUnion) return unsupported(scope);
   const branches = graphUris
     .map((graph) => `{ GRAPH <${assertSafeIri(graph)}> { ${inner} } }`)
     .join(' UNION ');
-  return `${before} ${branches} ${after}`;
+  return ready(transitionGraphScope(scope, `${before} ${branches} ${after}`));
 }
 
 const VIEW_GRAPH_SENTINEL = '?__dkgViewGraph';
@@ -372,32 +417,39 @@ const DEDUP_PRIOR_GRAPH_SENTINEL = '?__dkgDedupPriorGraph';
 const DEDUP_PRIOR_RANK_SENTINEL = '?__dkgDedupPriorRank';
 
 function wrapWithProjectedGraphSubselect(
-  input: PreparedGraphScope | string,
+  scope: PreparedGraphScope,
   graphUris: readonly string[],
   helperVariables: readonly string[],
   buildGraphPattern: (inner: string, graphs: readonly string[]) => string,
   acceptsScope: (scope: PreparedGraphScope) => boolean = () => true,
-): string | null {
-  const scope = asPreparedGraphScope(input);
-  if (scope.hasGraphClause) return scope.source;
-  if (graphUris.length === 0) return scope.source;
-  if (!scope.where) return null;
+): GraphScopeRewriteResult {
+  if (scope.hasGraphClause) return ready(transitionGraphScope(scope, scope.source));
+  if (graphUris.length === 0) return ready(transitionGraphScope(scope, scope.source));
+  if (!scope.where) return unsupported(scope);
 
-  const { open, close, hasUnion } = scope.where;
-  const inner = scope.source.slice(open + 1, close);
+  const { openEnd, close, hasUnion } = scope.where;
+  const inner = scope.source.slice(openEnd, close);
   const graphs = [...new Set(graphUris)];
   if (graphs.length === 1) {
-    return `${scope.source.slice(0, open + 1)} GRAPH <${assertSafeIri(graphs[0])}> { ${inner} } ${scope.source.slice(close)}`;
+    return ready(transitionGraphScope(
+      scope,
+      `${scope.source.slice(0, openEnd)} GRAPH <${assertSafeIri(graphs[0])}> { ${inner} } ${scope.source.slice(close)}`,
+    ));
   }
-  if (hasUnion || !acceptsScope(scope)) return null;
+  if (hasUnion || !acceptsScope(scope)) return unsupported(scope);
 
   const helperNames = new Set(helperVariables.map((variable) => variable.slice(1)));
-  if (scope.queryVariables.some((variable) => helperNames.has(variable.slice(1)))) return null;
+  if (scope.queryVariables.some((variable) => helperNames.has(variable.slice(1)))) {
+    return unsupported(scope);
+  }
 
   const innerVariables = scope.whereVariables;
-  if (innerVariables.length === 0) return null;
+  if (innerVariables.length === 0) return unsupported(scope);
   const graphPattern = buildGraphPattern(inner, graphs);
-  return `${scope.source.slice(0, open + 1)} { SELECT ${innerVariables.join(' ')} WHERE { ${graphPattern} } } ${scope.source.slice(close)}`;
+  return ready(transitionGraphScope(
+    scope,
+    `${scope.source.slice(0, openEnd)} { SELECT ${innerVariables.join(' ')} WHERE { ${graphPattern} } } ${scope.source.slice(close)}`,
+  ));
 }
 
 function isDedupSafeBasicGraphPattern(scope: PreparedGraphScope): boolean {
@@ -415,9 +467,9 @@ function isDedupSafeBasicGraphPattern(scope: PreparedGraphScope): boolean {
 
 /** Scope a graph set while suppressing mappings already emitted by an earlier graph. */
 export function wrapWithDeduplicatedGraphValues(
-  input: PreparedGraphScope | string,
+  input: PreparedGraphScope,
   graphUris: readonly string[],
-): string | null {
+): GraphScopeRewriteResult {
   return wrapWithProjectedGraphSubselect(
     input,
     graphUris,
@@ -447,9 +499,9 @@ export function wrapWithDeduplicatedGraphValues(
 
 /** Scope a graph set through a hidden VALUES/GRAPH subquery. */
 export function wrapWithGraphValues(
-  input: PreparedGraphScope | string,
+  input: PreparedGraphScope,
   graphUris: readonly string[],
-): string | null {
+): GraphScopeRewriteResult {
   return wrapWithProjectedGraphSubselect(
     input,
     graphUris,
@@ -739,16 +791,15 @@ function groupHasDefaultGraphPattern(
  * dataset and explicit-GRAPH authorization checks above.
  */
 export function constrainGraphVariablesToAllowedSet(
-  input: PreparedGraphScope | string,
+  scope: PreparedGraphScope,
   allowedGraphs: readonly string[],
-): string {
-  const scope = asPreparedGraphScope(input);
+): PreparedGraphScope {
   if (nestedSelectContainsGraphVariable(scope)) {
     throw new ScopedQueryViolationError(
       'GRAPH variables inside nested SELECT subqueries cannot be constrained safely',
     );
   }
-  if (scope.graphVariables.length === 0) return scope.source;
+  if (scope.graphVariables.length === 0) return transitionGraphScope(scope, scope.source);
   if (!scope.where) {
     throw new ScopedQueryViolationError(
       'GRAPH variables cannot be constrained because the WHERE block could not be located',
@@ -769,11 +820,16 @@ export function constrainGraphVariablesToAllowedSet(
   const variablesNeedingConstraint = scope.graphVariables.filter(
     (variable) => !callerGraphValuesAreAuthorized(scope, variable, allowed),
   );
-  if (variablesNeedingConstraint.length === 0) return scope.source;
+  if (variablesNeedingConstraint.length === 0) {
+    return transitionGraphScope(scope, scope.source);
+  }
 
   const values = allowedGraphs.map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
   const constraints = variablesNeedingConstraint
     .map((variable) => `VALUES ${variable} { ${values} }`)
     .join(' ');
-  return `${scope.source.slice(0, scope.where.open + 1)} ${constraints} ${scope.source.slice(scope.where.open + 1)}`;
+  return transitionGraphScope(
+    scope,
+    `${scope.source.slice(0, scope.where.openEnd)} ${constraints} ${scope.source.slice(scope.where.openEnd)}`,
+  );
 }

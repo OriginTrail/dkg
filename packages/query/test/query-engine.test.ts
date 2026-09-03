@@ -845,7 +845,7 @@ describe('DKGQueryEngine', () => {
 
   // ───────────────────────────────────────────────────────────────────
   // #789 Codex review: when a user query carries an inner UNION over a
-  // multi-graph view, `wrapWithGraphUnion` returns null (a nested
+  // multi-graph view, `wrapWithGraphUnion` reports the shape as unsupported (a nested
   // UnionNode would crash Blazegraph) and `queryMultipleGraphs` falls
   // back to per-graph execution. The fallback MUST merge results in a
   // FORM-AWARE way — flattening every form into `bindings` silently
