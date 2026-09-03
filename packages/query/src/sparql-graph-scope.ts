@@ -1,5 +1,4 @@
 import {
-  prepareSparql,
   type PreparedSparql,
   type SparqlLexicalToken,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
@@ -141,10 +140,10 @@ function prefixesFromTokens(prepared: PreparedSparql): Map<string, string> {
 }
 
 export function prepareGraphScope(
-  source: string,
-  prepared: PreparedSparql = prepareSparql(source),
+  input: string | PreparedSparql,
 ): PreparedGraphScope {
-  const query = prepareSparqlQuery(source, prepared);
+  const query = prepareSparqlQuery(input);
+  const { prepared } = query;
   const prefixes = prefixesFromTokens(prepared);
   const braceDepths = query.structure.braces.depthBefore;
   const graphTargets: SparqlGraphTarget[] = [];

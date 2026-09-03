@@ -1,5 +1,4 @@
 import {
-  normalizeSparqlCodePointEscapes,
   readSparqlLogicalCodePoint,
   readSparqlVariableEnd,
   scanSparqlStringLiteral,
@@ -58,14 +57,9 @@ export type PreparedSparql =
     readonly unterminated: false;
   });
 
-type ScannedSparqlLexicalToken = SparqlLexicalToken & {
-  readonly normalizedStart: number;
-  readonly normalizedEnd: number;
-};
-
 interface ScannedSparql {
   readonly masked: string;
-  readonly tokens: readonly ScannedSparqlLexicalToken[];
+  readonly tokens: readonly SparqlLexicalToken[];
   readonly unterminated: boolean;
   readonly wordTokens: ReadonlySet<string>;
   readonly prologue: PreparedSparql['prologue'];
@@ -178,11 +172,28 @@ function blank(masked: string[], start: number, end: number): void {
 }
 
 function logicalIriValue(value: string, start: number, end: number): string | null {
+  const opening = readSparqlLogicalCodePoint(value, start);
+  if (!opening || opening.codePoint !== 0x3c) return null;
   const decoded: string[] = [];
-  let index = start + 1;
-  while (index < end - 1) {
+  let index = start + opening.rawWidth;
+  while (index < end) {
     const logical = readSparqlLogicalCodePoint(value, index);
-    if (!logical || index + logical.rawWidth > end - 1) return null;
+    if (!logical || index + logical.rawWidth > end) return null;
+    if (index + logical.rawWidth === end) {
+      return logical.codePoint === 0x3e ? decoded.join('') : null;
+    }
+    decoded.push(String.fromCodePoint(logical.codePoint));
+    index += logical.rawWidth;
+  }
+  return null;
+}
+
+function logicalTokenValue(value: string, start: number, end: number): string | null {
+  const decoded: string[] = [];
+  let index = start;
+  while (index < end) {
+    const logical = readSparqlLogicalCodePoint(value, index);
+    if (!logical || index + logical.rawWidth > end) return null;
     decoded.push(String.fromCodePoint(logical.codePoint));
     index += logical.rawWidth;
   }
@@ -191,20 +202,19 @@ function logicalIriValue(value: string, start: number, end: number): string | nu
 
 function lexicalToken(
   kind: 'word' | 'variable' | 'prefixed-name' | 'symbol',
-  value: string,
+  source: string,
   start: number,
   end: number,
-  logicalValue = value,
-): ScannedSparqlLexicalToken {
+  logicalValue = logicalTokenValue(source, start, end),
+): Extract<SparqlLexicalToken, { value: string }> | null {
+  if (logicalValue === null) return null;
   return {
     kind,
-    value,
+    value: source.slice(start, end),
     logicalValue,
     upper: logicalValue.toUpperCase(),
     start,
     end,
-    normalizedStart: start,
-    normalizedEnd: end,
   };
 }
 
@@ -245,18 +255,16 @@ function scanPrologue(tokens: readonly SparqlLexicalToken[]): PreparedSparql['pr
  * higher-level policy checks. It is deliberately not a parser: it owns only
  * lexical regions, PN_PREFIX-aware names, source offsets, and masking.
  */
-function scanSparql(value: string): ScannedSparql {
+function scanSparql(value: string): ScannedSparql | null {
   const masked = value.split('');
-  const tokens: ScannedSparqlLexicalToken[] = [];
+  const tokens: SparqlLexicalToken[] = [];
   let unterminated = false;
   let index = 0;
 
   while (index < value.length) {
     const logical = readSparqlLogicalCodePoint(value, index);
     if (!logical) {
-      const start = index++;
-      tokens.push(lexicalToken('symbol', value[start], start, index));
-      continue;
+      return null;
     }
     if (isWhitespace(logical.codePoint)) {
       index += logical.rawWidth;
@@ -280,14 +288,13 @@ function scanSparql(value: string): ScannedSparql {
         index += logical.rawWidth;
         continue;
       }
+      if (stringScan.malformedUchar) return null;
       index = stringScan.end;
       blank(masked, start, index);
       tokens.push({
         kind: 'string',
         start,
         end: index,
-        normalizedStart: start,
-        normalizedEnd: index,
       });
       if (!stringScan.closed) unterminated = true;
       continue;
@@ -309,8 +316,6 @@ function scanSparql(value: string): ScannedSparql {
           logicalValue,
           start,
           end: index,
-          normalizedStart: start,
-          normalizedEnd: index,
         });
         continue;
       }
@@ -321,7 +326,9 @@ function scanSparql(value: string): ScannedSparql {
       if (variableEnd !== null) {
         const start = index;
         index = variableEnd;
-        tokens.push(lexicalToken('variable', value.slice(start, index), start, index));
+        const token = lexicalToken('variable', value, start, index);
+        if (!token) return null;
+        tokens.push(token);
         continue;
       }
     }
@@ -329,7 +336,9 @@ function scanSparql(value: string): ScannedSparql {
     if (logical.codePoint === 0x3a) {
       const start = index;
       index = scanPnLocalEnd(value, index + logical.rawWidth);
-      tokens.push(lexicalToken('prefixed-name', value.slice(start, index), start, index));
+      const token = lexicalToken('prefixed-name', value, start, index);
+      if (!token) return null;
+      tokens.push(token);
       continue;
     }
 
@@ -350,19 +359,23 @@ function scanSparql(value: string): ScannedSparql {
           width = sparqlPnCharsWidth(value, index);
         }
       }
-      tokens.push(lexicalToken(kind, value.slice(start, index), start, index));
+      const token = lexicalToken(kind, value, start, index);
+      if (!token) return null;
+      tokens.push(token);
       continue;
     }
 
     const start = index;
     index += logical.rawWidth;
-    tokens.push(lexicalToken(
+    const token = lexicalToken(
       'symbol',
-      value.slice(start, index),
+      value,
       start,
       index,
       String.fromCodePoint(logical.codePoint),
-    ));
+    );
+    if (!token) return null;
+    tokens.push(token);
   }
 
   const maskedValue = masked.join('');
@@ -379,68 +392,10 @@ function scanSparql(value: string): ScannedSparql {
   };
 }
 
-function normalizedBoundaryToRaw(
-  normalizedIndex: number,
-  spans: readonly { rawStart: number; rawEnd: number }[],
-  sourceLength: number,
-  boundary: 'start' | 'end',
-): number {
-  if (normalizedIndex <= 0) return 0;
-  if (normalizedIndex >= spans.length) return sourceLength;
-  return boundary === 'start'
-    ? spans[normalizedIndex].rawStart
-    : spans[normalizedIndex - 1].rawEnd;
-}
-
-function exposeToken(
-  token: ScannedSparqlLexicalToken,
-  source: string,
-  start: number,
-  end: number,
-): SparqlLexicalToken {
-  if (token.kind === 'string') return { kind: 'string', start, end };
-  if (token.kind === 'iri') {
-    return { kind: 'iri', logicalValue: token.logicalValue, start, end };
-  }
-  return {
-    kind: token.kind,
-    value: source.slice(start, end),
-    logicalValue: token.logicalValue,
-    upper: token.upper,
-    start,
-    end,
-  };
-}
-
-function exposeValidScan(source: string, scan: ScannedSparql): PreparedSparql {
-  return {
-    status: 'valid',
-    source,
-    masked: scan.masked,
-    tokens: scan.tokens.map((token) => exposeToken(
-      token,
-      source,
-      token.normalizedStart,
-      token.normalizedEnd,
-    )),
-    unterminated: scan.unterminated,
-    wordTokens: new Set(scan.wordTokens),
-    prologue: scan.prologue,
-  };
-}
-
 /** Canonical lexical artifact with raw source coordinates and logical values. */
 export function prepareSparql(source: string): PreparedSparql {
-  // The overwhelmingly common path contains no UCHAR. Avoid constructing an
-  // O(n) span table and remapping every token when raw and logical coordinate
-  // spaces are identical. This also keeps large valid PREFIX preambles well
-  // below the ReDoS regression wall-clock guard while remaining linear.
-  if (!source.includes('\\u') && !source.includes('\\U')) {
-    return exposeValidScan(source, scanSparql(source));
-  }
-
-  const normalized = normalizeSparqlCodePointEscapes(source);
-  if (normalized === null) {
+  const scan = scanSparql(source);
+  if (scan === null) {
     return {
       status: 'malformed-uchar',
       source,
@@ -452,36 +407,11 @@ export function prepareSparql(source: string): PreparedSparql {
     };
   }
 
-  const scan = scanSparql(normalized.value);
-  const tokens = scan.tokens.map((token): SparqlLexicalToken => {
-    const start = normalizedBoundaryToRaw(
-      token.normalizedStart,
-      normalized.spans,
-      source.length,
-      'start',
-    );
-    const end = normalizedBoundaryToRaw(
-      token.normalizedEnd,
-      normalized.spans,
-      source.length,
-      'end',
-    );
-    return exposeToken(token, source, start, end);
-  });
-
-  const masked = source.split('');
-  for (let index = 0; index < scan.masked.length; index++) {
-    if (scan.masked[index] !== ' ') continue;
-    const span = normalized.spans[index];
-    if (!span) continue;
-    blank(masked, span.rawStart, span.rawEnd);
-  }
-
   return {
     status: 'valid',
     source,
-    masked: masked.join(''),
-    tokens,
+    masked: scan.masked,
+    tokens: scan.tokens,
     unterminated: scan.unterminated,
     wordTokens: new Set(scan.wordTokens),
     prologue: scan.prologue,

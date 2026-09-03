@@ -48,142 +48,29 @@ export function readSparqlLogicalCodePoint(
   return { codePoint, rawWidth: 2 + digits };
 }
 
-export interface SparqlNormalizedSpan {
-  readonly rawStart: number;
-  readonly rawEnd: number;
-}
-
-export interface SparqlNormalizedSource {
-  readonly value: string;
-  /** One raw-source span for every UTF-16 code unit in `value`. */
-  readonly spans: readonly SparqlNormalizedSpan[];
-}
-
-interface SparqlNormalizationBuilder {
-  readonly decoded: string[];
-  readonly spans: SparqlNormalizedSpan[];
-}
-
-function appendLogicalCodePoint(
-  builder: SparqlNormalizationBuilder,
-  codePoint: number,
-  rawStart: number,
-  rawWidth: number,
-): void {
-  const value = String.fromCodePoint(codePoint);
-  builder.decoded.push(value);
-  for (let index = 0; index < value.length; index++) {
-    builder.spans.push({ rawStart, rawEnd: rawStart + rawWidth });
-  }
-}
-
-function appendRawRegion(
-  source: string,
-  start: number,
-  end: number,
-  builder: SparqlNormalizationBuilder,
-): void {
-  builder.decoded.push(source.slice(start, end));
-  for (let index = start; index < end; index++) {
-    builder.spans.push({ rawStart: index, rawEnd: index + 1 });
-  }
-}
-
-function appendStringRegion(
-  source: string,
-  start: number,
-  end: number,
-  builder: SparqlNormalizationBuilder,
-): boolean {
-  let index = start;
-  while (index < end) {
-    if (source.charCodeAt(index) === 0x5c) {
-      // UCHAR is literal content once a string token is open. Validate it,
-      // but preserve its spelling so a quote/backslash/newline value can
-      // never become lexical structure in the normalized policy view.
-      if (source[index + 1] === 'u' || source[index + 1] === 'U') {
-        const logical = readSparqlLogicalCodePoint(source, index);
-        if (!logical || index + logical.rawWidth > end) return false;
-        appendRawRegion(source, index, index + logical.rawWidth, builder);
-        index += logical.rawWidth;
-        continue;
-      }
-
-      // ECHAR is atomic inside a string. In particular, the first slash of
-      // `\\\\u1234` escapes the second slash, so that second slash must never
-      // be reinterpreted as the start of an overlapping UCHAR.
-      const escapedCodePoint = source.codePointAt(index + 1);
-      const escapedWidth = escapedCodePoint !== undefined && escapedCodePoint > 0xffff ? 2 : 1;
-      const escapedEnd = Math.min(index + 1 + escapedWidth, end);
-      appendRawRegion(source, index, escapedEnd, builder);
-      index = escapedEnd;
-      continue;
-    }
-
-    const codePoint = source.codePointAt(index);
-    if (codePoint === undefined || !isUnicodeScalarValue(codePoint)) return false;
-    const width = codePoint > 0xffff ? 2 : 1;
-    appendRawRegion(source, index, index + width, builder);
-    index += width;
-  }
-  return true;
-}
-
-function appendIriRegion(
-  source: string,
-  start: number,
-  end: number,
-  builder: SparqlNormalizationBuilder,
-): boolean {
-  const opening = readSparqlLogicalCodePoint(source, start);
-  if (!opening || opening.codePoint !== 0x3c) return false;
-  if (opening.rawWidth === 1) {
-    appendRawRegion(source, start, end, builder);
-    return true;
-  }
-
-  appendLogicalCodePoint(builder, opening.codePoint, start, opening.rawWidth);
-  let index = start + opening.rawWidth;
-  while (index < end) {
-    const logical = readSparqlLogicalCodePoint(source, index);
-    if (!logical || index + logical.rawWidth > end) return false;
-    if (index + logical.rawWidth === end && logical.codePoint === 0x3e) {
-      appendLogicalCodePoint(builder, logical.codePoint, index, logical.rawWidth);
-    } else {
-      appendRawRegion(source, index, index + logical.rawWidth, builder);
-    }
-    index += logical.rawWidth;
-  }
-  return true;
-}
-
-/**
- * Build the policy-normalized SPARQL view. Active syntax is UCHAR-decoded,
- * while UCHAR spelling inside comments, strings, and IRIREFs remains opaque
- * token content. This view is for lexical policy only and must not replace the
- * caller's source at the backend execution boundary.
- */
-export function normalizeSparqlCodePointEscapes(source: string): SparqlNormalizedSource | null {
-  const builder: SparqlNormalizationBuilder = { decoded: [], spans: [] };
+/** Decode active UCHAR syntax without promoting opaque token payload to syntax. */
+export function decodeSparqlCodePointEscapes(source: string): string | null {
+  const decoded: string[] = [];
   let index = 0;
   while (index < source.length) {
     const logical = readSparqlLogicalCodePoint(source, index);
     if (!logical) return null;
 
     if (logical.codePoint === 0x23) {
-      appendLogicalCodePoint(builder, logical.codePoint, index, logical.rawWidth);
+      decoded.push(String.fromCodePoint(logical.codePoint));
       index += logical.rawWidth;
       const commentStart = index;
       while (index < source.length && source[index] !== '\n' && source[index] !== '\r') {
         index++;
       }
-      appendRawRegion(source, commentStart, index, builder);
+      decoded.push(source.slice(commentStart, index));
       continue;
     }
 
     if (logical.codePoint === 0x22 || logical.codePoint === 0x27) {
       const string = scanSparqlStringLiteral(source, index);
-      if (!string || !appendStringRegion(source, index, string.end, builder)) return null;
+      if (!string || string.malformedUchar) return null;
+      decoded.push(source.slice(index, string.end));
       index = string.end;
       continue;
     }
@@ -191,23 +78,29 @@ export function normalizeSparqlCodePointEscapes(source: string): SparqlNormalize
     if (logical.codePoint === 0x3c) {
       const iriEnd = skipSparqlIriRef(source, index);
       if (iriEnd !== null) {
-        // Like strings, an IRIREF owns its UCHARs as token content. Preserve
-        // their spelling so escaped `>` cannot terminate the token early in
-        // the normalized lexical view. The cursor already validated them.
-        if (!appendIriRegion(source, index, iriEnd, builder)) return null;
+        if (logical.rawWidth === 1) {
+          decoded.push(source.slice(index, iriEnd));
+        } else {
+          const closingWidth = [1, 6, 10].find((width) => {
+            const closing = readSparqlLogicalCodePoint(source, iriEnd - width);
+            return closing?.codePoint === 0x3e && closing.rawWidth === width;
+          });
+          if (closingWidth === undefined || iriEnd - closingWidth < index) return null;
+          decoded.push(
+            '<',
+            source.slice(index + logical.rawWidth, iriEnd - closingWidth),
+            '>',
+          );
+        }
         index = iriEnd;
         continue;
       }
     }
 
-    appendLogicalCodePoint(builder, logical.codePoint, index, logical.rawWidth);
+    decoded.push(String.fromCodePoint(logical.codePoint));
     index += logical.rawWidth;
   }
-  return { value: builder.decoded.join(''), spans: builder.spans };
-}
-
-export function decodeSparqlCodePointEscapes(source: string): string | null {
-  return normalizeSparqlCodePointEscapes(source)?.value ?? null;
+  return decoded.join('');
 }
 
 export function isSparqlPnCharsBaseCodePoint(codePoint: number): boolean {
@@ -319,6 +212,7 @@ function logicalCodePointAt(source: string, index: number, expected: number): nu
 export interface SparqlStringLiteralScan {
   readonly end: number;
   readonly closed: boolean;
+  readonly malformedUchar: boolean;
 }
 
 /** Scan one short or long string without promoting UCHAR payload to syntax. */
@@ -342,11 +236,13 @@ export function scanSparqlStringLiteral(
     : 0;
   const triple = secondWidth > 0 && thirdWidth > 0;
   if (triple) index += secondWidth + thirdWidth;
+  let malformedUchar = false;
 
   while (index < source.length) {
     if (!encodedDelimiter && source.charCodeAt(index) === 0x5c) {
       if (source[index + 1] === 'u' || source[index + 1] === 'U') {
         const uchar = readSparqlLogicalCodePoint(source, index);
+        if (!uchar) malformedUchar = true;
         index += uchar?.rawWidth ?? 1;
         continue;
       }
@@ -357,6 +253,7 @@ export function scanSparqlStringLiteral(
 
     const logical = readSparqlLogicalCodePoint(source, index);
     if (!logical) {
+      malformedUchar = true;
       index++;
       continue;
     }
@@ -373,7 +270,9 @@ export function scanSparqlStringLiteral(
       index += logical.rawWidth;
       continue;
     }
-    if (!triple) return { end: index + delimiterWidth, closed: true };
+    if (!triple) {
+      return { end: index + delimiterWidth, closed: true, malformedUchar };
+    }
 
     const nextIndex = index + delimiterWidth;
     const nextWidth = delimiterWidthAt(nextIndex);
@@ -381,11 +280,15 @@ export function scanSparqlStringLiteral(
       ? delimiterWidthAt(nextIndex + nextWidth)
       : 0;
     if (nextWidth && finalWidth) {
-      return { end: nextIndex + nextWidth + finalWidth, closed: true };
+      return {
+        end: nextIndex + nextWidth + finalWidth,
+        closed: true,
+        malformedUchar,
+      };
     }
     index += logical.rawWidth;
   }
-  return { end: source.length, closed: false };
+  return { end: source.length, closed: false, malformedUchar };
 }
 
 /** Return the end offset of a string literal, or the unchanged start offset. */

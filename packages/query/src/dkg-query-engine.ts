@@ -373,7 +373,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // Policy checks and rewrites retain the prepared source/logical views.
     // Active UCHAR syntax is materialized once, immediately before the final
     // caller query crosses the store boundary.
-    const initialGraphScope = prepareGraphScope(sparql, prepared);
+    const initialGraphScope = prepareGraphScope(prepared);
     let routedScope = initialGraphScope;
 
     // ── V10 view-based routing ────────────────────────────────────────

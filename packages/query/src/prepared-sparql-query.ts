@@ -131,9 +131,10 @@ function variablesInRange(
 }
 
 export function prepareSparqlQuery(
-  source: string,
-  prepared: PreparedSparql = prepareSparql(source),
+  input: string | PreparedSparql,
 ): PreparedSparqlQuery {
+  const prepared = typeof input === 'string' ? prepareSparql(input) : input;
+  const { source } = prepared;
   const structure = indexSparqlStructure(prepared);
   const where = whereRange(prepared, structure);
   const operationToken = prepared.tokens[prepared.prologue.endTokenIndex];

@@ -128,6 +128,13 @@ describe('canonical SPARQL lexical scanner', () => {
     expect(decodeSparqlCodePointEscapes(validLookalike)).toBe(validLookalike);
   });
 
+  it('rejects malformed UCHAR inside a string without treating an escaped slash as UCHAR', () => {
+    expect(prepareSparql(String.raw`SELECT * WHERE { BIND("\u00ZZ" AS ?x) }`).status)
+      .toBe('malformed-uchar');
+    expect(prepareSparql(String.raw`SELECT * WHERE { BIND("\\u00ZZ" AS ?x) }`).status)
+      .toBe('valid');
+  });
+
   it.each([
     String.raw`SELECT * WHERE { BIND("\u0022" AS ?x) }`,
     String.raw`SELECT * WHERE { BIND('\u005C' AS ?x) }`,
