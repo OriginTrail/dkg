@@ -16,8 +16,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   prepareSparql,
-  skipSparqlIriRef,
-  skipSparqlStringLiteral,
+  type SparqlLexicalToken,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
 import type {
   QueryResult,
@@ -1552,13 +1551,13 @@ async function listGraphFamily(
 }
 
 /**
- * Rewrites a SPARQL query so EVERY subject variable used in its WHERE
+ * Rewrites a SPARQL query so EVERY supported subject used in its WHERE
  * block also matches `<http://dkg.io/ontology/trustLevel> ?__trustN`
  * with an integer value ≥ `minTrust`. Subjects with no trust metadata
  * are filtered out (the required triple is absent).
  *
  * The rewriter scans the WHERE block for top-level triple patterns
- * and collects every distinct subject variable so multi-subject
+ * and collects every distinct variable or IRI subject so multi-subject
  * queries like `?a <p> ?o . ?b <q> ?r` have BOTH `?a` and `?b`
  * trust-filtered.
  *
@@ -1567,162 +1566,210 @@ async function listGraphFamily(
  *   - braces are unbalanced;
  *   - the WHERE contains nested structure (`{`, `GRAPH`, `OPTIONAL`,
  *     `UNION`, `MINUS`, `SERVICE`, subselect) we cannot safely rewrite;
- *   - the block contains a constant (IRI/literal/blank) subject — we
- *     cannot attach a filter to a constant, and silently ignoring the
- *     constant row would leak sub-threshold data (L1 fail-closed);
- *   - no subject var is found at all.
- * Callers treat `null` as "refuse to run".
+ *   - the block contains a literal, blank node, collection, or property-list
+ *     subject/shape that cannot safely carry the injected metadata pattern;
+ *   - no supported subject is found at all.
+ * Callers treat `unsupported` as "refuse to run".
  */
-/**
- * Strip SPARQL line comments (`# … EOL`) from a fragment of SPARQL
- * WHERE body while preserving `#` that appears inside an IRI
- * (`<http://…/rdf-ns#type>`) or inside a string literal (`"…#…"`,
- * `'…#…'`). Used by `injectMinTrustFilter` where a full parser would
- * be overkill but a naive line-comment regex mangles `rdf:type` etc.
- *
- * This is intentionally small: we handle the three grammar contexts
- * that can legally contain a bare `#` in SPARQL 1.1 (IRI, quoted
- * literal, line comment) and treat everything else as ordinary code.
- * Triple-quoted `"""…"""` / `'''…'''` use the same shared string cursor.
- */
-function stripSparqlLineComments(src: string): string {
-  let out = '';
-  let i = 0;
-  const n = src.length;
-  while (i < n) {
-    const ch = src[i];
-    if (ch === '<') {
-      const end = skipSparqlIriRef(src, i);
-      if (end !== null) {
-        out += src.slice(i, end);
-        i = end;
-        continue;
-      }
-    }
-    if (ch === '"' || ch === "'") {
-      // Centralised triple-quoted-aware skip.
-      const j = skipSparqlStringLiteral(src, i);
-      out += src.slice(i, j);
-      i = j;
-      continue;
-    }
-    if (ch === '#') {
-      const nl = src.indexOf('\n', i);
-      if (nl === -1) { break; }
-      i = nl; // leave the newline so dot-accounting still sees line breaks
-      continue;
-    }
-    out += ch;
-    i++;
-  }
-  return out;
+type SourceSparqlToken = Extract<SparqlLexicalToken, { value: string }>;
+
+function isSourceSparqlToken(token: SparqlLexicalToken | undefined): token is SourceSparqlToken {
+  return token !== undefined && 'value' in token;
+}
+
+interface MinTrustBodyScan {
+  readonly valuesClause: string | null;
+  readonly bodySource: string;
+  readonly bodyTokenStart: number;
+  readonly bodyTokenEnd: number;
 }
 
 /**
- * Replace every SPARQL string literal and `# …` comment in `src`
- * with neutral whitespace, preserving overall byte length. IRIs and
- * code tokens are passed through verbatim. The returned string is
- * suitable for STRUCTURAL CHECKS (brace balancing, keyword scans)
- * that must not be confused by user payloads such as
- * `"{json: 1}"` or `# OPTIONAL: ...`.
- *
- * Triple-quoted (`"""…"""` / `'''…'''`) literals use the same shared
- * string cursor as the other structural scans.
+ * Locate the flat BGP that minTrust can safely augment. All structural
+ * decisions use the prepared logical token stream, so active UCHAR spelling
+ * cannot hide VALUES braces or introduce a nested group at execution time.
  */
-function scrubStringsAndComments(src: string): string {
-  const n = src.length;
-  const buf: string[] = new Array(n);
-  let i = 0;
-  while (i < n) {
-    const ch = src[i];
-    if (ch === '<') {
-      const end = skipSparqlIriRef(src, i);
-      if (end !== null) {
-        for (let k = i; k < end; k++) buf[k] = src[k];
-        i = end;
-        continue;
+function scanMinTrustBody(scope: PreparedGraphScope): MinTrustBodyScan | null {
+  const { where } = scope;
+  if (!where) return null;
+
+  const { tokens } = scope.prepared;
+  const bodyEnd = where.closingTokenIndex;
+  let bodyTokenStart = where.openingTokenIndex + 1;
+  let bodySourceStart = where.openEnd;
+  let valuesClause: string | null = null;
+
+  const first = tokens[bodyTokenStart];
+  if (isSourceSparqlToken(first) && first.kind === 'word' && first.upper === 'VALUES') {
+    const variable = tokens[bodyTokenStart + 1];
+    const opening = tokens[bodyTokenStart + 2];
+    if (
+      !isSourceSparqlToken(variable)
+      || variable.kind !== 'variable'
+      || !isSourceSparqlToken(opening)
+      || opening.kind !== 'symbol'
+      || opening.logicalValue !== '{'
+    ) {
+      return null;
+    }
+
+    const valuesOpeningIndex = bodyTokenStart + 2;
+    const valuesClosingIndex = scope.matchingBraceTokenIndexes[valuesOpeningIndex] ?? -1;
+    if (valuesClosingIndex <= valuesOpeningIndex || valuesClosingIndex >= bodyEnd) return null;
+
+    for (let index = valuesOpeningIndex + 1; index < valuesClosingIndex; index++) {
+      const token = tokens[index];
+      if (
+        isSourceSparqlToken(token)
+        && token.kind === 'symbol'
+        && ['{', '}', '(', ')'].includes(token.logicalValue)
+      ) {
+        return null;
       }
     }
-    if (ch === '"' || ch === "'") {
-      // Centralised triple-quoted-aware skip.
-      const j = skipSparqlStringLiteral(src, i);
-      for (let k = i; k < j; k++) buf[k] = src[k] === '\n' ? '\n' : ' ';
-      i = j;
-      continue;
-    }
-    if (ch === '#') {
-      const nl = src.indexOf('\n', i);
-      const end = nl === -1 ? n : nl;
-      for (let k = i; k < end; k++) buf[k] = ' ';
-      i = end;
-      continue;
-    }
-    buf[i] = ch;
-    i++;
+
+    const closing = tokens[valuesClosingIndex];
+    valuesClause = scope.source.slice(where.openEnd, closing.end).trim();
+    bodyTokenStart = valuesClosingIndex + 1;
+    bodySourceStart = closing.end;
   }
-  return buf.join('');
+
+  const bodyDepth = scope.braceDepths[where.openingTokenIndex] + 1;
+  const forbiddenWords = new Set([
+    'GRAPH',
+    'OPTIONAL',
+    'UNION',
+    'MINUS',
+    'SERVICE',
+    'VALUES',
+    'SELECT',
+  ]);
+  for (let index = bodyTokenStart; index < bodyEnd; index++) {
+    const token = tokens[index];
+    if (scope.braceDepths[index] !== bodyDepth) return null;
+    if (!isSourceSparqlToken(token)) continue;
+    if (token.kind === 'symbol' && (token.logicalValue === '{' || token.logicalValue === '}')) {
+      return null;
+    }
+    if (token.kind === 'word' && forbiddenWords.has(token.upper)) return null;
+  }
+
+  return {
+    valuesClause,
+    bodySource: scope.source.slice(bodySourceStart, where.close),
+    bodyTokenStart,
+    bodyTokenEnd: bodyEnd,
+  };
+}
+
+function isDecimalPoint(
+  tokens: readonly SparqlLexicalToken[],
+  index: number,
+): boolean {
+  const previous = tokens[index - 1];
+  const point = tokens[index];
+  const next = tokens[index + 1];
+  return isSourceSparqlToken(previous)
+    && isSourceSparqlToken(point)
+    && isSourceSparqlToken(next)
+    && previous.end === point.start
+    && point.end === next.start
+    && /^\d$/u.test(previous.logicalValue)
+    && /^\d$/u.test(next.logicalValue);
+}
+
+function skipMinTrustExpression(
+  tokens: readonly SparqlLexicalToken[],
+  start: number,
+  end: number,
+): number | null {
+  let opening = start + 1;
+  while (opening < end) {
+    const token = tokens[opening];
+    if (
+      isSourceSparqlToken(token)
+      && token.kind === 'symbol'
+      && token.logicalValue === '('
+    ) {
+      break;
+    }
+    if (
+      isSourceSparqlToken(token)
+      && token.kind === 'symbol'
+      && token.logicalValue === '.'
+    ) {
+      return null;
+    }
+    opening++;
+  }
+  if (opening >= end) return null;
+
+  let depth = 0;
+  for (let index = opening; index < end; index++) {
+    const token = tokens[index];
+    if (!isSourceSparqlToken(token) || token.kind !== 'symbol') continue;
+    if (token.logicalValue === '(') depth++;
+    if (token.logicalValue === ')') {
+      depth--;
+      if (depth === 0) return index + 1;
+      if (depth < 0) return null;
+    }
+  }
+  return null;
 }
 
 /**
- * Split a SPARQL WHERE body on **top-level** triple terminators, i.e.
- * dots that live outside quoted literals and outside IRI angle
- * brackets. The earlier `/\.(?=\s|$)/` regex broke on literal dots
- * in messages like `?s <p> "hello. world"`, silently fragmenting
- * the statement so the subject scanner returned garbage and
- * `_minTrust` fail-closed to `[]` for every text/chat query. This
- * tokenizer walks the body character
- * by character, tracks `<…>` and `"…"` / `'…'` scopes (with `\`-escape
- * handling), and only treats `.` as a separator when it sits at depth
- * zero and is followed by whitespace or end-of-input. Comments have
- * already been stripped by {@link stripSparqlLineComments} before we
- * get here, so `#` is treated as an ordinary character.
- *
- * Parentheses and braces would also open top-level scopes in general
- * SPARQL, but `injectMinTrustFilter` refuses to rewrite any WHERE that
- * contains `{`, `}`, `FILTER EXISTS`, subselects, or property paths
- * with grouping (the `/\{|\}/.test(inner)` + token guard above), so
- * this helper only has to handle the three grammar contexts that can
- * legally carry a bare `.` in the shapes we rewrite: IRI, string
- * literal, and top-level statement terminator.
+ * Return each subject token in the supported flat group pattern. FILTER and
+ * BIND are skipped with balanced logical parentheses, including when SPARQL's
+ * optional dot is omitted before the next triple block.
  */
-function splitTopLevelTripleStatements(body: string): string[] {
-  const out: string[] = [];
-  let start = 0;
-  let i = 0;
-  const n = body.length;
-  while (i < n) {
-    const ch = body[i];
-    if (ch === '<') {
-      const end = skipSparqlIriRef(body, i);
-      if (end !== null) {
-        i = end;
-        continue;
-      }
-    }
-    if (ch === '"' || ch === "'") {
-      // Centralised triple-quoted-aware skip.
-      i = skipSparqlStringLiteral(body, i);
+function minTrustSubjectTokens(
+  scope: PreparedGraphScope,
+  body: MinTrustBodyScan,
+): SparqlLexicalToken[] | null {
+  const { tokens } = scope.prepared;
+  const subjects: SparqlLexicalToken[] = [];
+  let expectSubject = true;
+  let index = body.bodyTokenStart;
+  while (index < body.bodyTokenEnd) {
+    const token = tokens[index];
+
+    if (
+      isSourceSparqlToken(token)
+      && token.kind === 'word'
+      && (token.upper === 'FILTER' || token.upper === 'BIND')
+    ) {
+      const next = skipMinTrustExpression(tokens, index, body.bodyTokenEnd);
+      if (next === null) return null;
+      expectSubject = true;
+      index = next;
       continue;
     }
-    if (ch === '.') {
-      // Terminator only when followed by whitespace OR end-of-input.
-      // This keeps decimals and prefixed-name dots (rdf:type.foo —
-      // rejected upstream anyway) from accidentally splitting, and
-      // matches the original regex semantics on the top-level cases.
-      const next = i + 1 < n ? body[i + 1] : '';
-      if (next === '' || /\s/.test(next)) {
-        const piece = body.slice(start, i).trim();
-        if (piece) out.push(piece);
-        start = i + 1;
-        i += 1;
-        continue;
-      }
+
+    if (
+      isSourceSparqlToken(token)
+      && token.kind === 'symbol'
+      && token.logicalValue === '.'
+      && !isDecimalPoint(tokens, index)
+    ) {
+      expectSubject = true;
+      index++;
+      continue;
     }
-    i++;
+
+    if (
+      isSourceSparqlToken(token)
+      && token.kind === 'symbol'
+      && ['(', ')', '[', ']'].includes(token.logicalValue)
+    ) return null;
+
+    if (expectSubject) {
+      subjects.push(token);
+      expectSubject = false;
+    }
+    index++;
   }
-  const tail = body.slice(start).trim();
-  if (tail) out.push(tail);
-  return out;
+  return subjects;
 }
 
 function injectMinTrustFilter(
@@ -1731,214 +1778,72 @@ function injectMinTrustFilter(
 ): GraphScopeRewriteResult {
   const sparql = scope.source;
   const unsupported = (): GraphScopeRewriteResult => ({ kind: 'unsupported', original: scope });
-  // The
-  // pre-fix rewriter only recognised `WHERE\s*\{`, so SPARQL 1.1
-  // shorthand forms (`SELECT ?x { … }`, `ASK { … }`,
-  // `DESCRIBE ?x { … }`, `CONSTRUCT { tmpl } { where }`) were reported
-  // as unsupported and failed closed. The token locator normalises
-  // every shape to the WHERE-clause brace position before we apply
-  // the existing depth-counting pass below.
   const bodyStart = scope.where?.openEnd ?? -1;
-  if (bodyStart < 0) return unsupported();
-
-  // — dkg-query-engine.ts:939). The
-  // earlier brace-balance loop counted `{`/`}` inside SPARQL string
-  // literals (e.g. `FILTER(STR(?t) = "{")`), so a literal-heavy WHERE
-  // ended at depth 1 and `injectMinTrustFilter` declined the rewrite —
-  // which the `_minTrust > Endorsed` caller treats as "refuse to run"
-  // and silently fails closed. Use the literal/comment/IRI-aware
-  // helper so the brace boundaries match what SPARQL actually
-  // parses.
   const braceEnd = scope.where?.close ?? -1;
-  if (braceEnd < 0) return unsupported();
+  const body = scanMinTrustBody(scope);
+  if (bodyStart < 0 || braceEnd < 0 || !body) return unsupported();
 
-  const inner = sparql.slice(bodyStart, braceEnd);
-
-  // A
-  // leading top-level `VALUES` clause is the canonical SPARQL shape
-  // for batched exact-subject lookups:
-  //
-  //     SELECT ?o WHERE {
-  //       VALUES ?s { <a> <b> <c> }
-  //       ?s <p> ?o .
-  //     }
-  //
-  // the forbidden-tokens regex treated any VALUES as
-  // "unsupported" and `_minTrust` fell through to
-  // `emptyResultForForm(...)`, which turns into a silent `[]` / `false`
-  // even when the bound subjects satisfy the threshold. The contract
-  // we need is:
-  //   (a) bail loudly on complex VALUES we can't reason about
-  //       (multi-var tuples, multi-line, no closing `}`);
-  //   (b) for the common single-var VALUES case, peel it off, run
-  //       the existing subject analysis on the body, and re-emit
-  //       the VALUES binding at the top of the rewritten WHERE so
-  //       the trust filter still applies to each bound IRI.
-  //
-  // Any other location (non-leading, multi-var, parenthesised row
-  // syntax `VALUES (?x ?y) { (<a> "b") }`) still bails because the
-  // flat scanner cannot safely rewrite them.
-  const { valuesClause, bodyAfterValues } = peelLeadingValues(inner);
-  const scanTarget = bodyAfterValues ?? inner;
-
-  // — dkg-query-engine.ts:851).
-  // Pre-fix the unsupported-nesting guard `/\{|\}/.test(scanTarget)`
-  // and the keyword guard below ran on the RAW WHERE body. Any
-  // `{`, `}`, or sensitive keyword that happened to appear inside a
-  // SPARQL string literal (`"{json: 1}"`, `"OPTIONAL field"`,
-  // `"SELECT * FROM x"`) or inside a `# …` line comment caused the
-  // rewriter to bail out and the caller fell through to
-  // `emptyResultForSparql(...)`. That silently fail-closed every
-  // legitimate high-trust query whose payload happened to mention
-  // those tokens — text/JSON/log content is the most common case.
-  //
-  // Scrub literals and comments to neutral spaces BEFORE the
-  // structural / keyword checks so they only see real code tokens.
-  // IRIs are preserved verbatim because IRIREF grammar already
-  // forbids `{`, `}`, `"`, and the keyword tokens we care about.
-  const codeView = scrubStringsAndComments(scanTarget);
-  if (/[{}]/.test(codeView)) return unsupported();
-  if (
-    /\b(GRAPH|OPTIONAL|UNION|MINUS|SERVICE|VALUES|FILTER\s+EXISTS|FILTER\s+NOT\s+EXISTS|SELECT)\b/i.test(codeView)
-  ) {
-    return unsupported();
-  }
-
-  // Strip SPARQL line comments (`# … \n`) so the dot accounting below
-  // doesn't misclassify "# foo ." as a terminating triple — BUT leave
-  // `#` fragments inside IRIs (`<…#…>`) and literals (`"…#…"`) alone.
-  // The naive `/#[^\n]*/g` regex used here previously mangled the
-  // extremely common `rdf:type` shape
-  // `<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>` whenever
-  // `_minTrust` was set, which fail-closes the entire query to `[]`
-  // .
-  const innerCodeOnly = stripSparqlLineComments(scanTarget);
-  const trimmedInner = innerCodeOnly.trim();
+  const trimmedInner = body.bodySource.trim();
   if (trimmedInner.length === 0) return unsupported();
 
-  // Split on the top-level `.` separator to walk each triple pattern.
-  // use a
-  // quote/IRI-aware tokenizer instead of a naive regex so `?s <p>
-  // "hello. world"` isn't fragmented into broken statements that the
-  // subject scanner then refuses, fail-closing `_minTrust` to `[]`
-  // for every text/chat query. Rejoined dots are preserved for the
-  // emitted query by the clause builder below.
-  const statements = splitTopLevelTripleStatements(trimmedInner);
-
-  const subjectVars = new Set<string>();
-  const subjectIris = new Set<string>();
-  const subjectPrefixed = new Set<string>();
-  for (const stmt of statements) {
-    // top-level `FILTER(...)` / `BIND(... AS ?x)` clauses share the
-    // statement-list with triple patterns and have no subject token.
-    // Pre-fix the subject regex below didn't match either keyword, so
-    // `injectMinTrustFilter()` declined the rewrite
-    // — collapsing every query like
-    //   SELECT ?s WHERE { ?s <p> ?o . FILTER(?o > 10) }
-    // into an empty result whenever `minTrust > SelfAttested`.
-    //
-    // Skip these clauses in the subject scan: they don't introduce
-    // new subjects and they survive verbatim because the rewritten
-    // WHERE is built by appending trust-filter triples to the
-    // *original* trimmed inner (see `rewrittenBody` below) — the
-    // FILTER/BIND text stays exactly where the caller put it.
-    //
-    // Anti-recursion: only skip TOP-LEVEL FILTER/BIND. Nested ones
-    // (e.g. `FILTER EXISTS { ... }`) are already rejected by the
-    // `\{|\}` and `FILTER\s+EXISTS` checks at line 753 / 754, so
-    // by the time we reach this loop we're guaranteed to be looking
-    // at a flat FILTER(<expr>) or BIND(<expr> AS ?x).
-    const stmtTrimmed = stmt.trim();
-    if (/^FILTER\s*\(/i.test(stmtTrimmed) || /^BIND\s*\(/i.test(stmtTrimmed)) {
+  // The first prepared token of every flat statement is its subject. String,
+  // IRI, and comment payloads are already opaque, while logicalValue exposes
+  // active UCHAR spelling. This keeps subject discovery aligned with the exact
+  // structure that will be materialized for the store.
+  const subjectTokens = minTrustSubjectTokens(scope, body);
+  if (!subjectTokens) return unsupported();
+  const subjects = new Map<string, string>();
+  for (const token of subjectTokens) {
+    if (isSourceSparqlToken(token) && token.kind === 'variable') {
+      subjects.set(`variable:${token.logicalValue.slice(1)}`, token.value);
       continue;
     }
-    // First non-whitespace token is the subject. Accept:
-    //   - variable (`?x`, `$x`)
-    //   - absolute IRI (`<urn:x>`)
-    //   - blank node (`_:b`)
-    //   - RDF literal (`"…"` with optional type/lang tag)
-    //   - prefixed name (`ex:item`) — SPARQL `PNAME_LN` / `PNAME_NS`.
-    //     Earlier revisions fail-closed `_minTrust` to `[]` for
-    //     every query that used standard `PREFIX ex: <urn:> …`
-    //     syntax, which is the recommended SPARQL shape for exact
-    //     entity lookups.
-    const m = stmt.match(
-      /^\s*([?$]([A-Za-z_]\w*)|<[^>]+>|_:[A-Za-z_]\w*|"[^"]*"(?:\^\^<[^>]+>|@[A-Za-z-]+)?|[A-Za-z][\w-]*:[A-Za-z_][\w-]*|[A-Za-z][\w-]*:)/,
-    );
-    if (!m) return unsupported();
-    const subj = m[1];
-    if (subj.startsWith('?') || subj.startsWith('$')) {
-      subjectVars.add(subj);
+    if (token.kind === 'iri') {
+      subjects.set(
+        `iri:${token.logicalValue}`,
+        sparql.slice(token.start, token.end),
+      );
       continue;
     }
-    // exact-entity lookups like `SELECT ?o WHERE { <e> <p> ?o }` are
-    // the most common SPARQL shape in DKG and must NOT fail closed on
-    // `_minTrust`. The threshold is perfectly enforceable against a
-    // concrete IRI: attach `<iri> <trustLevel> ?t . FILTER(?t >= N)`
-    // to the rewritten WHERE. Blank-node and literal subjects remain
-    // refused — neither can carry trust metadata in our ontology.
-    if (subj.startsWith('<') && subj.endsWith('>')) {
-      subjectIris.add(subj);
+    if (
+      isSourceSparqlToken(token)
+      && token.kind === 'prefixed-name'
+      && !token.logicalValue.startsWith('_:')
+    ) {
+      subjects.set(`prefixed:${token.logicalValue}`, token.value);
       continue;
     }
-    // Prefixed name — treat like an IRI at the clause-emission stage.
-    // The original query still carries the `PREFIX` declarations, so
-    // emitting `ex:item <trustLevel> ?t . FILTER(...)` is valid SPARQL
-    // at the same scope. Rejects `_:bn` (starts with `_:`) and
-    // string literals (start with `"`) naturally because this branch
-    // only runs when subj starts with a letter.
-    if (/^[A-Za-z]/.test(subj) && subj.includes(':')) {
-      subjectPrefixed.add(subj);
-      continue;
-    }
-    // Blank-node / literal subject — cannot attach a trust filter.
     return unsupported();
   }
-  if (subjectVars.size === 0 && subjectIris.size === 0 && subjectPrefixed.size === 0) {
-    return unsupported();
-  }
+  if (subjects.size === 0) return unsupported();
 
   const extraClauses: string[] = [];
-  let i = 0;
-  for (const subjectVar of subjectVars) {
-    const trustVar = `?__dkgTrust${i++}`;
+  const usedVariableNames = new Set(scope.queryVariables.map((variable) => variable.logicalName));
+  let helperIndex = 0;
+  for (const subject of subjects.values()) {
+    let helperName: string;
+    do {
+      helperName = `__dkgTrust${helperIndex++}`;
+    } while (usedVariableNames.has(helperName));
+    usedVariableNames.add(helperName);
+    const trustVar = `?${helperName}`;
     extraClauses.push(
-      `${subjectVar} <${TRUST_LEVEL_PREDICATE}> ${trustVar} . ` +
-        `FILTER(<http://www.w3.org/2001/XMLSchema#integer>(STR(${trustVar})) >= ${minTrust})`,
-    );
-  }
-  for (const subjectIri of subjectIris) {
-    const trustVar = `?__dkgTrust${i++}`;
-    extraClauses.push(
-      `${subjectIri} <${TRUST_LEVEL_PREDICATE}> ${trustVar} . ` +
-        `FILTER(<http://www.w3.org/2001/XMLSchema#integer>(STR(${trustVar})) >= ${minTrust})`,
-    );
-  }
-  for (const subjectPfx of subjectPrefixed) {
-    const trustVar = `?__dkgTrust${i++}`;
-    extraClauses.push(
-      `${subjectPfx} <${TRUST_LEVEL_PREDICATE}> ${trustVar} . ` +
+      `${subject} <${TRUST_LEVEL_PREDICATE}> ${trustVar} . ` +
         `FILTER(<http://www.w3.org/2001/XMLSchema#integer>(STR(${trustVar})) >= ${minTrust})`,
     );
   }
 
-  // the previous implementation unconditionally inserted
-  // `" . "` between `inner.trim()` and the injected clauses, which
-  // produced `... . . ?s <trustLevel> ...` when the original WHERE
-  // already ended with a dot (the common case) — a SPARQL syntax error
-  // that every rewritten query hit. Here we emit each rewritten triple
-  // with its OWN dot and join them after the original inner block,
-  // always with exactly one separating dot regardless of whether the
-  // caller terminated their final triple pattern.
-  const endsWithDot = /\.\s*$/.test(trimmedInner);
-  const separator = endsWithDot ? ' ' : ' . ';
+  const lastBodyToken = scope.prepared.tokens[body.bodyTokenEnd - 1];
+  const endsWithDot = isSourceSparqlToken(lastBodyToken)
+    && lastBodyToken.kind === 'symbol'
+    && lastBodyToken.logicalValue === '.';
+  // Always cross a source line before injecting. Otherwise a trailing comment
+  // can swallow the generated trust clauses even though it is absent from the
+  // prepared token stream.
+  const separator = endsWithDot ? '\n' : '\n. ';
   const rewrittenBody = `${trimmedInner}${separator}${extraClauses.join(' ')}`;
-
-  // if the WHERE started with a `VALUES ?s { … }` clause the
-  // peeler set aside, re-emit it at the top of the rewritten body so
-  // the bindings it introduces still drive the trust-filtered BGP.
-  const rewrittenInner = valuesClause
-    ? `${valuesClause} ${rewrittenBody}`
+  const rewrittenInner = body.valuesClause
+    ? `${body.valuesClause}\n${rewrittenBody}`
     : rewrittenBody;
 
   const before = sparql.slice(0, bodyStart);
@@ -1947,61 +1852,6 @@ function injectMinTrustFilter(
     kind: 'ready',
     scope: transitionGraphScope(scope, `${before} ${rewrittenInner} ${after}`),
   };
-}
-
-/**
- * peel a single leading top-level `VALUES ?var { … }` clause
- * off the WHERE body. Returns the clause text (verbatim, including the
- * trailing `}`) and the remainder so the caller can reason about
- * triples alone. If the WHERE does NOT start with a VALUES clause, or
- * the VALUES clause is multi-var (`VALUES (?x ?y) { (<a> "b") }`), has
- * unbalanced braces, or uses nested parentheses for row syntax, returns
- * `{ valuesClause: null, bodyAfterValues: null }` so the caller falls
- * back to refusing the query (the forbidden-tokens regex still trips
- * on `VALUES`).
- */
-function peelLeadingValues(inner: string): {
-  valuesClause: string | null;
-  bodyAfterValues: string | null;
-} {
-  const withoutComments = stripSparqlLineComments(inner);
-  const m = withoutComments.match(/^\s*VALUES\s+([?$][A-Za-z_]\w*)\s*\{/i);
-  if (!m) return { valuesClause: null, bodyAfterValues: null };
-
-  const openBraceRel = m[0].length - 1;
-  let depth = 1;
-  let i = openBraceRel + 1;
-  let inString = false;
-  let inIri = false;
-  for (; i < withoutComments.length; i++) {
-    const ch = withoutComments[i];
-    if (inString) {
-      if (ch === '\\') { i++; continue; }
-      if (ch === '"') inString = false;
-      continue;
-    }
-    if (inIri) {
-      if (ch === '>') inIri = false;
-      continue;
-    }
-    if (ch === '"') { inString = true; continue; }
-    if (ch === '<') { inIri = true; continue; }
-    if (ch === '(' || ch === ')') {
-      // Row-tuple syntax — we can't reason about multi-var rows safely.
-      return { valuesClause: null, bodyAfterValues: null };
-    }
-    if (ch === '{') depth++;
-    else if (ch === '}') {
-      depth--;
-      if (depth === 0) break;
-    }
-  }
-  if (depth !== 0) return { valuesClause: null, bodyAfterValues: null };
-
-  const closeAbs = i;
-  const valuesClause = withoutComments.slice(0, closeAbs + 1).trim();
-  const bodyAfterValues = withoutComments.slice(closeAbs + 1);
-  return { valuesClause, bodyAfterValues };
 }
 
 function mergeSharedMemoryAndDataResults(

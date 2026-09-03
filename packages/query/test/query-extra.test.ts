@@ -568,6 +568,91 @@ describe('[Q-1] DKGQueryEngine minTrust uses writer-side trust metadata', () => 
     expect(result.bindings).toEqual([{ o: '"Trusted"' }]);
   });
 
+  it('fails closed when UCHAR syntax hides a nested OPTIONAL from minTrust', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const graph = contextGraphVerifiableMemoryUri(CG, 'encoded-optional');
+    await store.insert([
+      quad('urn:trusted', 'urn:p', '"Visible"', graph),
+      quad(
+        'urn:trusted',
+        'http://dkg.io/ontology/trustLevel',
+        `"${TrustLevel.ConsensusVerified}"`,
+        graph,
+      ),
+      quad('urn:foreign', 'urn:secret', '"Must not leak"', graph),
+      quad(
+        'urn:foreign',
+        'http://dkg.io/ontology/trustLevel',
+        `"${TrustLevel.SelfAttested}"`,
+        graph,
+      ),
+    ]);
+
+    const result = await engine.query(
+      String.raw`SELECT ?secret WHERE { ?trusted <urn:p> ?value \u004FPTIONAL \u007B ?foreign <urn:secret> ?secret \u007D }`,
+      {
+        contextGraphId: CG,
+        view: 'verifiable-memory',
+        minTrust: TrustLevel.ConsensusVerified,
+      },
+    );
+
+    expect(result.bindings).toEqual([]);
+  });
+
+  it('supports a UCHAR-spelled leading VALUES clause under minTrust', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const graph = contextGraphVerifiableMemoryUri(CG, 'encoded-values');
+    await store.insert([
+      quad('urn:trusted', 'urn:p', '"Visible"', graph),
+      quad(
+        'urn:trusted',
+        'http://dkg.io/ontology/trustLevel',
+        `"${TrustLevel.ConsensusVerified}"`,
+        graph,
+      ),
+    ]);
+
+    const result = await engine.query(
+      String.raw`SELECT ?value WHERE { \u0056ALUES ?subject \u007B <urn:trusted> \u007D ?subject <urn:p> ?value }`,
+      {
+        contextGraphId: CG,
+        view: 'verifiable-memory',
+        minTrust: TrustLevel.ConsensusVerified,
+      },
+    );
+
+    expect(result.bindings).toEqual([{ value: '"Visible"' }]);
+  });
+
+  it('avoids UCHAR-equivalent caller variables when allocating minTrust helpers', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const graph = contextGraphVerifiableMemoryUri(CG, 'encoded-helper-collision');
+    await store.insert([
+      quad('urn:trusted', 'urn:p', '"Visible"', graph),
+      quad(
+        'urn:trusted',
+        'http://dkg.io/ontology/trustLevel',
+        `"${TrustLevel.ConsensusVerified}"`,
+        graph,
+      ),
+    ]);
+
+    const result = await engine.query(
+      String.raw`SELECT ?value ?__dkgTrust0 WHERE { ?subject <urn:p> ?value . BIND("caller" AS ?\u005F_dkgTrust0) }`,
+      {
+        contextGraphId: CG,
+        view: 'verifiable-memory',
+        minTrust: TrustLevel.ConsensusVerified,
+      },
+    );
+
+    expect(result.bindings).toEqual([{ value: '"Visible"', __dkgTrust0: '"caller"' }]);
+  });
+
   it.each([
     String.raw`\u00ZZ`,
     String.raw`\u006E`,
@@ -828,6 +913,34 @@ describe('[Q-1] DKGQueryEngine minTrust uses writer-side trust metadata', () => 
     // not because the data didn't match but because the rewriter
     // returned null and the caller fail-closed the entire query.
     expect(result.bindings.map((b) => b['s'])).toEqual(['urn:doc2']);
+  });
+
+  it('trust-filters a triple block after FILTER when the optional dot is omitted', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiableMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:outer', 'urn:p', '"Visible"', consensus),
+      quad('urn:outer', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:allowed', 'urn:secret', '"Allowed"', consensus),
+      quad('urn:allowed', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:denied', 'urn:secret', '"Denied"', consensus),
+      quad('urn:denied', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.SelfAttested}"`, consensus),
+    ]);
+    const sparql = [
+      'SELECT ?secret WHERE {',
+      '  ?outer <urn:p> ?value .',
+      '  FILTER(?value = "Visible")',
+      '  ?candidate <urn:secret> ?secret',
+      '}',
+    ].join('\n');
+
+    const result = await engine.query(
+      sparql,
+      { contextGraphId: CG, view: 'verifiable-memory', minTrust: TrustLevel.ConsensusVerified },
+    );
+
+    expect(result.bindings.map((binding) => binding['secret'])).toEqual(['"Allowed"']);
   });
 
   it('honors _minTrust on a BGP whose top-level statements include a BIND', async () => {
