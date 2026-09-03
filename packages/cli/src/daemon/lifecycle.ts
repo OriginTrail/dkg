@@ -47,6 +47,7 @@ import * as osModule from 'node:os';
 import type { NetworkInterfaceInfo } from 'node:os';
 import { checkCoreRelayPrereqs } from './core-prereq-check.js';
 import { rotateDaemonLogIfNeeded } from './log-rotation.js';
+import { resolveUpdateTelemetryVersionStatus } from './update-telemetry-status.js';
 const { homedir } = osModule;
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -2843,12 +2844,11 @@ async function runDaemonInnerWithStartupOwnership(
         commit: nodeCommit,
         role: config.nodeRole ?? "edge",
         autoUpdate: autoUpdateEnabled,
-        versionStatus: () => {
-          if (!autoUpdateEnabled) return "disabled";
-          if (daemonState.isUpdating) return "updating";
-          if (daemonState.lastUpdateCheck.checkedAt === 0) return "unknown";
-          return daemonState.lastUpdateCheck.upToDate ? "latest" : "behind";
-        },
+        versionStatus: () => resolveUpdateTelemetryVersionStatus({
+          autoUpdateEnabled,
+          isUpdating: daemonState.isUpdating,
+          lastUpdateCheck: daemonState.lastUpdateCheck,
+        }),
       });
       worker.start();
       return {

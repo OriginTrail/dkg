@@ -70,6 +70,7 @@ export default defineConfig({
           // paying the 2-minute hardhat-boot tax of the default config.
           'test/resolve-standalone-install.test.ts',
           'test/auto-update.test.ts',
+          'test/maintenance-update-gate.test.ts',
           'test/dkg-doctor.test.ts',
           'test/metrics-collector-config.test.ts',
           'test/init.test.ts',
@@ -116,6 +117,7 @@ export default defineConfig({
           'test/log-sink.test.ts',
           'test/log-lifecycle.test.ts',
           'test/telemetry-runtime.test.ts',
+          'test/update-telemetry-status.test.ts',
           'test/dashboard-log-volume-pruner.test.ts',
           // RFC 120 / plan PR 1 + 2 — Blazegraph support. Pure logic
           // (mocked fetch + in-memory config); cheap to keep in the
