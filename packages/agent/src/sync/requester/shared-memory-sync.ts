@@ -383,7 +383,7 @@ export function selectSwmSnapshotCoverage(
   return a.peerIdSuffix <= b.peerIdSuffix ? a : b;
 }
 
-interface SharedMemorySyncContext {
+export interface SharedMemorySyncContext {
   ctx: OperationContext;
   remotePeerId: string;
   contextGraphIds: string[];
@@ -776,19 +776,17 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const validWsQuads = processed.verifiedData;
       const dropped = processed.droppedDataTriples;
       const hydrateOwnership = () => {
-        recoveryBoundary.commit(() => {
-          for (const { dataGraph, entity, creator } of processed.entityCreators) {
-            const ownershipKey = sharedMemoryOwnershipKeyFromGraph(pid, dataGraph);
-            if (!ownershipKey) {
-              logWarn(ctx, `SWM sync skipped ownership cache hydration for "${entity}" from unexpected graph "${dataGraph}"`);
-              continue;
-            }
-            const ownedMap = ensureOwnedMap(ownershipKey);
-            if (!ownedMap.has(entity)) {
-              ownedMap.set(entity, creator);
-            }
+        for (const { dataGraph, entity, creator } of processed.entityCreators) {
+          const ownershipKey = sharedMemoryOwnershipKeyFromGraph(pid, dataGraph);
+          if (!ownershipKey) {
+            logWarn(ctx, `SWM sync skipped ownership cache hydration for "${entity}" from unexpected graph "${dataGraph}"`);
+            continue;
           }
-        });
+          const ownedMap = ensureOwnedMap(ownershipKey);
+          if (!ownedMap.has(entity)) {
+            ownedMap.set(entity, creator);
+          }
+        }
       };
       if (dropped > 0) {
         logWarn(ctx, `SWM sync dropped ${dropped} triples with invalid subjects (not in meta rootEntity or skolemized child)`);
@@ -1398,11 +1396,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           await recoveryBoundary.commit(async () => {
             await ensureContextGraph(pid);
             await storeInsert(validWsQuads);
+            // Ownership belongs to the same admitted logical write as the
+            // verified data. Revocation may be observed after this unit, but
+            // must never leave inserted entities without their arbitration
+            // state merely because it landed during the awaited insert.
+            hydrateOwnership();
           });
           summary.insertedTriples += validWsQuads.length;
           summary.insertedDataTriples += validWsQuads.length;
           recordPhaseOutcome(wsDataResult);
-          hydrateOwnership();
         }
         if (snapshotSync.timedOutPhases > 0 && shouldStopAfterBackoffWorthyFailure(pid, 'snapshot timeout')) {
           break;
@@ -1411,17 +1413,8 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       }
 
       const storeStartedAt = Date.now();
-      await recoveryBoundary.commit(async () => {
-        await ensureContextGraph(pid);
-        if (validWsQuads.length > 0) {
-          await storeInsert(validWsQuads);
-        }
-      });
-
-      if (validWsQuads.length > 0) {
-        summary.insertedTriples += validWsQuads.length;
-        summary.insertedDataTriples += validWsQuads.length;
-      }
+      let metaForBulkInsert: Quad[] = [];
+      let newlyCountedMeta = 0;
       if (verifiedMetaForInsert.length > 0) {
         // Rows written by the per-KA path are ordinarily harmless to replay —
         // an RDF store is a set. Rows for a twin retired after that path are
@@ -1446,15 +1439,29 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // Keep the old count identity for ordinary rows. Only retired rows are
         // filtered, while the per-KA ledger remains a key-set subset of the
         // verified input and is subtracted solely when its row survives.
-        const metaForBulkInsert = snapshotCommit.bulkRows(verifiedMetaForInsert);
-        if (metaForBulkInsert.length > 0) {
-          await recoveryBoundary.commit(() => storeInsert(metaForBulkInsert));
-        }
+        metaForBulkInsert = snapshotCommit.bulkRows(verifiedMetaForInsert);
         const retainedAlreadyCounted = snapshotCommit.alreadyCountedRetainedRows();
-        const newlyCountedMeta = metaForBulkInsert.length - retainedAlreadyCounted;
-        summary.insertedTriples += newlyCountedMeta;
-        summary.insertedMetaTriples += newlyCountedMeta;
+        newlyCountedMeta = metaForBulkInsert.length - retainedAlreadyCounted;
       }
+
+      // The aggregate data, its verified metadata and the in-memory ownership
+      // projection form one admitted recovery unit. Once the first awaited
+      // mutation starts, a selection revocation is deliberately observed only
+      // after all three effects drain, preventing a stale invocation from
+      // leaving a data-only or metadata-without-ownership state.
+      await recoveryBoundary.commit(async () => {
+        await ensureContextGraph(pid);
+        if (validWsQuads.length > 0) await storeInsert(validWsQuads);
+        if (metaForBulkInsert.length > 0) await storeInsert(metaForBulkInsert);
+        hydrateOwnership();
+      });
+
+      if (validWsQuads.length > 0) {
+        summary.insertedTriples += validWsQuads.length;
+        summary.insertedDataTriples += validWsQuads.length;
+      }
+      summary.insertedTriples += newlyCountedMeta;
+      summary.insertedMetaTriples += newlyCountedMeta;
       recordPhaseOutcome(wsMetaResult);
       recordPhaseOutcome(wsDataResult);
       if (metadataFetcher) {
@@ -1463,8 +1470,6 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
         break;
       }
-
-      hydrateOwnership();
       const storeDurationMs = Date.now() - storeStartedAt;
 
       logInfo(ctx, `SWM sync for "${pid}": ${validWsQuads.length} data + ${verifiedMetaForInsert.length} meta triples`);

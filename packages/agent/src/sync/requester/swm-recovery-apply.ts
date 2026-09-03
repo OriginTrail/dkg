@@ -54,13 +54,24 @@ export interface SwmRecoveryApplyResult {
   readonly insertedQuads: number;
 }
 
-export interface VerifiedSwmRecoveryGraphApply {
-  readonly descriptor: GraphScopedSwmRecoveryDescriptor;
-  /** null means content was already materialized before this final apply. */
-  readonly replacementQuads: readonly Quad[] | null;
-  /** Verified metadata disposition paired with this graph-content decision. */
-  readonly metadataDecision: 'replace' | 'preserve-if-equivalent';
-}
+export type VerifiedSwmRecoveryGraphApply = Readonly<
+  | {
+    /** Content has not been written and must be replaced by this apply. */
+    readonly kind: 'replace';
+    readonly descriptor: GraphScopedSwmRecoveryDescriptor;
+    readonly replacementQuads: readonly Quad[];
+  }
+  | {
+    /** This invocation already committed the exact graph and its metadata. */
+    readonly kind: 'already-replaced';
+    readonly descriptor: GraphScopedSwmRecoveryDescriptor;
+  }
+  | {
+    /** Exact content predates this invocation; retain an equivalent local id. */
+    readonly kind: 'preserve-equivalent';
+    readonly descriptor: GraphScopedSwmRecoveryDescriptor;
+  }
+>;
 
 export interface VerifiedSwmRecoveryOwnershipUpdate {
   readonly ownershipKey: string;
@@ -170,7 +181,7 @@ export async function applyVerifiedSwmRecoveryPlan(params: Readonly<{
     let insertedGraphQuads = 0;
     for (const asset of plan.graphAssets) {
       replacedGraphs += 1;
-      if (asset.replacementQuads === null) {
+      if (asset.kind !== 'replace') {
         insertedGraphQuads += asset.descriptor.publicQuadsCount;
         continue;
       }
@@ -193,7 +204,7 @@ export async function applyVerifiedSwmRecoveryPlan(params: Readonly<{
     const preservedWithholdRows: Quad[] = [];
     const metaReplaceTargets: GraphScopedSwmRecoveryDescriptor[] = [];
     for (const asset of plan.graphAssets) {
-      if (asset.metadataDecision === 'replace' || !params.snapshotMaterializer) {
+      if (asset.kind !== 'preserve-equivalent' || !params.snapshotMaterializer) {
         metaReplaceTargets.push(asset.descriptor);
         continue;
       }

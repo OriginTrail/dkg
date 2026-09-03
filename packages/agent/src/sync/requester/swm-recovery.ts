@@ -560,10 +560,9 @@ async function recoverContextGraphSwmUnlocked(
     if (incrementallyReadyGraphs.has(graphKey)) {
       graphAssets.push(Object.freeze({
         descriptor,
-        replacementQuads: null,
-        metadataDecision: rewrittenGraphKeys.has(graphKey)
-          ? 'replace'
-          : 'preserve-if-equivalent',
+        kind: rewrittenGraphKeys.has(graphKey)
+          ? 'already-replaced'
+          : 'preserve-equivalent',
       }));
       continue;
     }
@@ -573,9 +572,9 @@ async function recoverContextGraphSwmUnlocked(
       publicSnapshotStore: deps.publicSnapshotStore,
     }));
     graphAssets.push(Object.freeze({
+      kind: 'replace',
       descriptor,
       replacementQuads: Object.freeze([...asset.quads]),
-      metadataDecision: 'replace',
     }));
   }
 

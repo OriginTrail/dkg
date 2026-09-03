@@ -5,7 +5,6 @@
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
-  resolveRfc64RuntimeCatalogBootstrapConfigV1,
   projectRfc64CatalogReceiverAuthorityV1,
   type Rfc64CatalogAuthorityPolicyV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
@@ -247,87 +246,20 @@ export class Rfc64SwmRecoveryRuntimeV1 {
   }
 }
 
-interface Rfc64SwmRecoveryRuntimeHostV1 {
-  rfc64SwmRecoveryRuntimeV1?: Rfc64SwmRecoveryRuntimeV1;
-  config: DKGAgent['config'];
-  readRfc64CatalogRuntimeSelectionV1:
-    DKGAgent['readRfc64CatalogRuntimeSelectionV1'];
-  resolveRfc64CatalogServingAuthorityV1:
-    DKGAgent['resolveRfc64CatalogServingAuthorityV1'];
-  selectedSwmBootstrapAdmission: DKGAgent['selectedSwmBootstrapAdmission'];
-  rfc64ExactCatchupOnConnectAt: DKGAgent['rfc64ExactCatchupOnConnectAt'];
-  rfc64SwmRecoveryCoordinatorV1: DKGAgent['rfc64SwmRecoveryCoordinatorV1'];
-  queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect:
-    DKGAgent['queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect'];
-}
-
-/** Build the one runtime owner from DKGAgent's narrow dependency ports. */
+/** Build the one runtime owner from explicitly typed composition-root ports. */
 export function createRfc64SwmRecoveryRuntimeV1(
-  agent: DKGAgent,
+  ports: Rfc64SwmRecoveryRuntimePortsV1,
 ): Rfc64SwmRecoveryRuntimeV1 {
-  const host = agent as unknown as Rfc64SwmRecoveryRuntimeHostV1;
-  return new Rfc64SwmRecoveryRuntimeV1({
-    authority: {
-      resolveRuntimeSelection: () => host.readRfc64CatalogRuntimeSelectionV1.call(agent),
-      resolveConfigured: (contextGraphId) => (
-        host.resolveRfc64CatalogServingAuthorityV1.call(agent, contextGraphId)
-      ),
-      resolveRecoveryConfig: () => resolveRfc64RuntimeCatalogBootstrapConfigV1(
-        host.config.rfc64CatalogBootstrap,
-        host.config.rfc64PublicCatalogBootstrap,
-      ),
-    },
-    admission: {
-      invalidateContextGraph: (contextGraphId) => (
-        host.selectedSwmBootstrapAdmission.invalidateContextGraph(contextGraphId)
-      ),
-    },
-    cooldown: {
-      deleteProvider: (providerPeerId) => {
-        host.rfc64ExactCatchupOnConnectAt.delete(providerPeerId);
-      },
-    },
-    queue: {
-      catalogPassMinimumTerminalAgeMs: () => (
-        host.config.syncReconcilerTiming.stalenessThresholdMs
-      ),
-      authorizeForCatalogPass: (plan, minimumTerminalAgeMs) => (
-        host.rfc64SwmRecoveryCoordinatorV1.authorizeForCatalogPass(
-          plan,
-          minimumTerminalAgeMs,
-        )
-      ),
-      enqueueAuthorized: (plan, onError, delayMs) => (
-        host.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect.call(
-          agent,
-          plan,
-          onError,
-          delayMs,
-        )
-      ),
-    },
-  });
+  return new Rfc64SwmRecoveryRuntimeV1(ports);
 }
 
-/** Lazy compatibility boundary for mixin methods borrowed by narrow hosts. */
-function ensureRfc64SwmRecoveryRuntimeV1(
-  agent: DKGAgent,
-): Rfc64SwmRecoveryRuntimeV1 {
-  const host = agent as unknown as Rfc64SwmRecoveryRuntimeHostV1;
-  if (host.rfc64SwmRecoveryRuntimeV1 !== undefined) {
-    return host.rfc64SwmRecoveryRuntimeV1;
-  }
-  host.rfc64SwmRecoveryRuntimeV1 = createRfc64SwmRecoveryRuntimeV1(agent);
-  return host.rfc64SwmRecoveryRuntimeV1;
-}
-
-/** Thin compatibility delegates while DKGAgent remains mixin-composed. */
+/** Thin delegates over DKGAgent's definitely initialized runtime owner. */
 export class Rfc64SwmRecoveryRuntimeMethods extends DKGAgentBase {
   resolveRfc64SwmRecoveryRuntimeAuthorityV1(
     this: DKGAgent,
     contextGraphId: string,
   ): Readonly<Rfc64SwmRecoveryRuntimeAuthorityV1> {
-    return ensureRfc64SwmRecoveryRuntimeV1(this).resolveRuntimeAuthority(contextGraphId);
+    return this.rfc64SwmRecoveryRuntimeV1.resolveRuntimeAuthority(contextGraphId);
   }
 
   rfc64SwmRecoverySelectionChangedV1(
@@ -338,7 +270,7 @@ export class Rfc64SwmRecoveryRuntimeMethods extends DKGAgentBase {
       nextSubscribed: boolean;
     }>,
   ): boolean {
-    return ensureRfc64SwmRecoveryRuntimeV1(this).selectionChanged(
+    return this.rfc64SwmRecoveryRuntimeV1.selectionChanged(
       contextGraphId,
       transition,
     );
@@ -348,21 +280,21 @@ export class Rfc64SwmRecoveryRuntimeMethods extends DKGAgentBase {
     this: DKGAgent,
     providerPeerId: string,
   ): Readonly<Rfc64ActivePeerSwmRecoveryPlanV1> {
-    return ensureRfc64SwmRecoveryRuntimeV1(this).resolveActivePlan(providerPeerId);
+    return this.rfc64SwmRecoveryRuntimeV1.resolveActivePlan(providerPeerId);
   }
 
   acquireRfc64SwmRecoveryTargetLeaseV1(
     this: DKGAgent,
     target: Readonly<Rfc64SwmRecoveryTargetV1>,
   ): Rfc64SwmRecoveryTargetLeaseV1 {
-    return ensureRfc64SwmRecoveryRuntimeV1(this).acquireTargetLease(target);
+    return this.rfc64SwmRecoveryRuntimeV1.acquireTargetLease(target);
   }
 
   resolveRfc64CompleteSwmProviderPeerIdsV1(
     this: DKGAgent,
     contextGraphId: string,
   ): readonly string[] {
-    return ensureRfc64SwmRecoveryRuntimeV1(this)
+    return this.rfc64SwmRecoveryRuntimeV1
       .resolveCompleteProviderPeerIds(contextGraphId);
   }
 
@@ -370,7 +302,7 @@ export class Rfc64SwmRecoveryRuntimeMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): readonly string[] {
-    return ensureRfc64SwmRecoveryRuntimeV1(this).invalidateSelectionState(contextGraphId);
+    return this.rfc64SwmRecoveryRuntimeV1.invalidateSelectionState(contextGraphId);
   }
 
   queueRfc64CatalogRecoveryPlanV1(
@@ -379,7 +311,7 @@ export class Rfc64SwmRecoveryRuntimeMethods extends DKGAgentBase {
     onError: (peerId: string, error: unknown) => void,
     delayMs: number,
   ): Rfc64CatalogRecoveryQueueOutcomeV1 {
-    return ensureRfc64SwmRecoveryRuntimeV1(this)
+    return this.rfc64SwmRecoveryRuntimeV1
       .queueCatalogPlan(plan, onError, delayMs);
   }
 }

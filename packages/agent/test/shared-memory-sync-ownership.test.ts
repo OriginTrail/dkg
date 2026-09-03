@@ -4,6 +4,8 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
+import type { RecoveryExecutionGuard } from
+  '../src/sync/requester/recovery-execution-guard.js';
 import { SyncVerifyWorker } from '../src/sync-verify-worker.js';
 
 const CG_ID = 'sync-owned-cg';
@@ -70,6 +72,74 @@ async function registeredSubGraphNamesFromStore(store: OxigraphStore, contextGra
 }
 
 describe('runSharedMemorySync ownership hydration', () => {
+  it('finishes verified data, metadata, and ownership when revoked during the data insert', async () => {
+    const revoked = new Error('selected-public recovery revoked during aggregate apply');
+    const controller = new AbortController();
+    let current = true;
+    const guard: RecoveryExecutionGuard = {
+      signal: controller.signal,
+      assertCurrent: () => {
+        if (!current) throw revoked;
+      },
+    };
+    const dataQuad: Quad = {
+      graph: ROOT_GRAPH,
+      subject: ROOT_ENTITY,
+      predicate: SCHEMA_NAME,
+      object: '"root"',
+    };
+    const metadataQuad: Quad = {
+      graph: ROOT_META_GRAPH,
+      subject: 'urn:dkg:share:atomic-apply',
+      predicate: RDF_TYPE,
+      object: `${DKG}WorkspaceOperation`,
+    };
+    const inserted: Quad[][] = [];
+    const owned = new Map<string, string>();
+
+    const summary = await runSharedMemorySync({
+      ctx: createOperationContext('sync'),
+      remotePeerId: '12D3KooWRequesterAtomicApply',
+      contextGraphIds: [CG_ID],
+      createContextGraphSyncDeadline: () => Date.now() + 30_000,
+      fetchSyncPages: async (_ctx, _peer, _cg, _includeSwm, phase) => (
+        phase === 'data' ? page([dataQuad], phase) : page([metadataQuad], phase)
+      ),
+      processSharedMemoryBatch: async () => ({
+        verifiedData: [dataQuad],
+        verifiedMeta: [metadataQuad],
+        totalFetchedDataQuads: 1,
+        totalFetchedMetaQuads: 1,
+        droppedDataTriples: 0,
+        emptyResponses: 0,
+        entityCreators: [{
+          dataGraph: ROOT_GRAPH,
+          entity: ROOT_ENTITY,
+          creator: 'peer-atomic',
+        }],
+      }),
+      ensureContextGraph: async () => {},
+      storeInsert: async (quads) => {
+        inserted.push([...quads]);
+        if (quads.includes(dataQuad)) {
+          current = false;
+          controller.abort(revoked);
+        }
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      ensureOwnedMap: () => owned,
+      recoveryGuard: guard,
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(inserted).toEqual([[dataQuad], [metadataQuad]]);
+    expect(owned.get(ROOT_ENTITY)).toBe('peer-atomic');
+    expect(summary.failedPhases).toBe(1);
+  });
+
   it('hydrates root and sub-graph SWM ownership under separate keys', async () => {
     const ownedMaps = new Map<string, Map<string, string>>();
     const inserted: Quad[] = [];

@@ -25,7 +25,6 @@ import {
   resolveRfc64CatalogActivationConfigV1,
   resolveRfc64CatalogActivationInputV1,
   resolveRfc64CatalogActivationsV1,
-  resolveRfc64CatalogExecutionPlanV1,
   resolveRfc64LegacySyncContextGraphsV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogActivationInputV1,
@@ -41,7 +40,9 @@ import {
   resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
   resolveRfc64SwmRecoveryRuntimeAuthorityV1,
 } from '../src/rfc64/swm-recovery-plan-v1.js';
-import { DKGAgent, mergeRfc64CatalogBootstrapsV1 } from '../src/dkg-agent.js';
+import { mergeRfc64CatalogBootstrapsV1 } from '../src/dkg-agent.js';
+import { Rfc64SwmRecoveryRuntimeV1 } from
+  '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 
 const NETWORK = 'otp:20430' as NetworkIdV1;
 const PRIVATE_CG = (
@@ -218,20 +219,35 @@ describe('RFC-64 private catalog activation', () => {
         contextGraphModes: { [PRIVATE_CG]: 'shadow' },
       },
     }, chainIdentity);
-    const resolverAgent = {
-      config: {
-        rfc64CatalogBootstrap: bootstrap,
-        rfc64CatalogRollout: {
+    const resolver = new Rfc64SwmRecoveryRuntimeV1({
+      authority: {
+        resolveRuntimeSelection: () => ({
           selectedContextGraphs: activation.selectedContextGraphs,
-          rollout: activation.rollout,
-        },
-        rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
-          configuredContextGraphs: [PRIVATE_CG],
-          activation,
+          eligibleContextGraphs: activation.selectedContextGraphs,
+          subscriptionDriven: false,
         }),
+        resolveConfigured: (contextGraphId) => ({
+          contextGraphId,
+          selected: true,
+          eligible: true,
+          active: true,
+          mode: 'catalog',
+          killSwitchActive: false,
+          legacySyncAllowed: false,
+          track2Enabled: true,
+          authoringAllowed: true,
+          reconciliationLane: 'catalog-apply',
+        }),
+        resolveRecoveryConfig: () => bootstrap,
       },
-      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
-    } as unknown as DKGAgent;
+      admission: { invalidateContextGraph: () => [] },
+      cooldown: { deleteProvider: () => undefined },
+      queue: {
+        catalogPassMinimumTerminalAgeMs: () => 0,
+        authorizeForCatalogPass: () => null,
+        enqueueAuthorized: () => false,
+      },
+    });
 
     expect(resolveRfc64PrivateRecoveryContextGraphIdsV1(bootstrap))
       .toEqual([PRIVATE_CG]);
@@ -243,10 +259,8 @@ describe('RFC-64 private catalog activation', () => {
       bootstrap,
       '12D3KooUnconfiguredPrivateProvider',
     )).toEqual([]);
-    expect(DKGAgent.prototype.resolveRfc64CompleteSwmProviderPeerIdsV1.call(
-      resolverAgent,
-      PRIVATE_CG,
-    )).toEqual([PROVIDER_PEER]);
+    expect(resolver.resolveCompleteProviderPeerIds(PRIVATE_CG))
+      .toEqual([PROVIDER_PEER]);
   });
 
   it('derives one mixed private/public recovery plan from snapshotted catalog config', () => {

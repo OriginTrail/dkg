@@ -23,7 +23,6 @@ import {
   contextGraphMetaUri,
   contextGraphLayerUri,
   contextGraphWorkspaceGraphUri,
-  contextGraphWorkspaceMetaGraphUri,
   createGraphKnowledgeAssetScope,
   encodeCanonicalCgSharedPublicRootProjectionV1,
   knowledgeAssetLayerGraphUri,
@@ -63,6 +62,8 @@ import {
   DKGAgent,
   Rfc64CatalogReconciliationTerminalErrorV1,
 } from '../src/index.js';
+import { Rfc64SwmRecoveryRuntimeV1 } from
+  '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 import {
   snapshotRfc64CatalogAccessPolicyAuthorityV1,
   snapshotRfc64CatalogDeploymentProfileV1,
@@ -648,6 +649,7 @@ function privateCatalogAuthorityFixtureV1(): Readonly<{
 function selectedPrivateCatalogActivationV1(
   providerPeerId: string,
   authority: ReturnType<typeof privateCatalogAuthorityFixtureV1>,
+  retryIntervalMs?: number,
 ): Rfc64CatalogActivationInputV1 {
   return Object.freeze({
     enabled: true,
@@ -660,6 +662,7 @@ function selectedPrivateCatalogActivationV1(
       catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
     },
     bootstrap: {
+      ...(retryIntervalMs === undefined ? {} : { retryIntervalMs }),
       acceptedPolicies: [{
         policyEnvelope: authority.policyEnvelope,
         rosterEnvelope: authority.rosterEnvelope,
@@ -1306,6 +1309,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const catalogActivation = selectedPrivateCatalogActivationV1(
       providerPeerId,
       authority,
+      1_000,
     );
     const author = await startNativeAgentWithOptions({
       name: 'selected-private-startup-author',
@@ -2346,15 +2350,38 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(Object.isFrozen(snapshot.acceptedPublicPolicies[0]?.completeSwmProviders)).toBe(true);
     expect(Object.isFrozen(snapshot.acceptedPublicPolicies[0]?.policyEnvelope.payload.source))
       .toBe(true);
-    const providerResolver = DKGAgent.prototype.resolveRfc64CompleteSwmProviderPeerIdsV1;
-    const resolverAgent = {
-      config: { rfc64PublicCatalogBootstrap: snapshot },
-      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
-    } as unknown as DKGAgent;
-    expect(providerResolver.call(resolverAgent, CONTEXT_GRAPH_ID))
+    const providerResolver = new Rfc64SwmRecoveryRuntimeV1({
+      authority: {
+        resolveRuntimeSelection: () => ({
+          selectedContextGraphs: [],
+          eligibleContextGraphs: [],
+          subscriptionDriven: false,
+        }),
+        resolveConfigured: (contextGraphId) => ({
+          contextGraphId,
+          selected: false,
+          eligible: false,
+          active: true,
+          mode: 'catalog',
+          killSwitchActive: false,
+          legacySyncAllowed: true,
+          track2Enabled: true,
+          authoringAllowed: true,
+          reconciliationLane: 'catalog-apply',
+        }),
+        resolveRecoveryConfig: () => snapshot,
+      },
+      admission: { invalidateContextGraph: () => [] },
+      cooldown: { deleteProvider: () => undefined },
+      queue: {
+        catalogPassMinimumTerminalAgeMs: () => 0,
+        authorizeForCatalogPass: () => null,
+        enqueueAuthorized: () => false,
+      },
+    });
+    expect(providerResolver.resolveCompleteProviderPeerIds(CONTEXT_GRAPH_ID))
       .toEqual(['12D3KooCompleteSwm']);
-    expect(providerResolver.call(
-      resolverAgent,
+    expect(providerResolver.resolveCompleteProviderPeerIds(
       '0x2222222222222222222222222222222222222222/other' as ContextGraphIdV1,
     )).toEqual([]);
     expect(() => snapshotRfc64PublicCatalogBootstrapConfigV1({
@@ -2682,7 +2709,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
   });
 
-  it('revokes an in-flight ordinary-private recovery through the real selection lifecycle', async () => {
+  it('aborts an in-flight ordinary-private fetch through the real selection lifecycle', async () => {
     const authority = privateCatalogAuthorityFixtureV1();
     const providerPeerId = '12D3KooWPrivateRecoveryRevocationProvider';
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-private-recovery-revocation-'));
@@ -2722,9 +2749,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     )).toMatchObject({ active: true, lane: 'ordinary-private' });
 
     const workspaceGraph = contextGraphWorkspaceGraphUri(authority.policy.contextGraphId);
-    const workspaceMetaGraph = contextGraphWorkspaceMetaGraphUri(
-      authority.policy.contextGraphId,
-    );
     const entity = 'https://example.org/private-recovery-revocation';
     const predicate = 'https://schema.org/status';
     await store.insert([{
@@ -2733,69 +2757,45 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       object: '"v1"',
       graph: workspaceGraph,
     }]);
-    const metadataQuad: Quad = {
-      subject: 'urn:dkg:private-recovery-operation',
-      predicate: 'http://dkg.io/ontology/rootEntity',
-      object: entity,
-      graph: workspaceMetaGraph,
-    };
-    const replacementQuad: Quad = {
-      subject: entity,
-      predicate,
-      object: '"v2"',
-      graph: workspaceGraph,
-    };
     const dataFetch = vi.fn();
+    let capturedFetchSignal: AbortSignal | undefined;
+    let markFetchEntered!: () => void;
+    const fetchEntered = new Promise<void>((resolve) => {
+      markFetchEntered = resolve;
+    });
     vi.spyOn(receiver, 'fetchSyncPages').mockImplementation(async (
       _ctx,
       _peerId,
       _contextGraphId,
       _includeSharedMemory,
       phase,
+      _graphUri,
+      _deadline,
+      fetchOptions,
     ) => {
-      let quads: Quad[] = [];
-      if (phase === 'meta') quads = [metadataQuad];
-      if (phase === 'data') {
-        dataFetch();
-        quads = [replacementQuad];
+      if (phase === 'meta') {
+        capturedFetchSignal = fetchOptions?.signal;
+        markFetchEntered();
+        await new Promise<void>((_resolve, reject) => {
+          const signal = fetchOptions?.signal;
+          if (signal?.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
       }
+      if (phase === 'data') dataFetch();
       return {
-        quads,
-        bytesReceived: quads.length,
+        quads: [],
+        bytesReceived: 0,
         resumedFromOffset: 0,
-        nextOffset: quads.length,
+        nextOffset: 0,
         checkpointKey: `private-revocation:${phase}`,
         completed: true,
         timedOut: false,
       };
     });
-    let markVerificationEntered!: () => void;
-    let releaseVerification!: () => void;
-    const verificationEntered = new Promise<void>((resolve) => {
-      markVerificationEntered = resolve;
-    });
-    const verificationRelease = new Promise<void>((resolve) => {
-      releaseVerification = resolve;
-    });
-    let firstVerification = true;
-    vi.spyOn(receiver, 'getOrCreateSyncVerifyWorker').mockReturnValue({
-      processSharedMemoryBatch: async (dataQuads: Quad[], metaQuads: Quad[]) => {
-        if (firstVerification) {
-          firstVerification = false;
-          markVerificationEntered();
-          await verificationRelease;
-        }
-        return {
-          verifiedData: dataQuads,
-          verifiedMeta: metaQuads,
-          totalFetchedDataQuads: dataQuads.length,
-          totalFetchedMetaQuads: metaQuads.length,
-          droppedDataTriples: 0,
-          emptyResponses: 0,
-          entityCreators: [{ dataGraph: workspaceGraph, entity, creator: AUTHOR }],
-        };
-      },
-    } as any);
 
     const recovery = receiver.syncSelectedSharedMemoryFromPeerDetailed(
       providerPeerId,
@@ -2818,10 +2818,12 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         source: 'on-connect',
       },
     );
-    await verificationEntered;
+    await fetchEntered;
+    expect(capturedFetchSignal).toBeDefined();
+    expect(capturedFetchSignal?.aborted).toBe(false);
 
     receiver.unsubscribeFromContextGraph(authority.policy.contextGraphId);
-    releaseVerification();
+    expect(capturedFetchSignal?.aborted).toBe(true);
 
     await expect(recovery).resolves.toMatchObject({
       kind: 'selected-shared-memory',

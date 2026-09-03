@@ -18,7 +18,6 @@ import {
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
-  ENTITY_PRED_ALT, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY,
   contextGraphSharedMemoryUri,
   contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
   contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
@@ -101,7 +100,7 @@ import {
   withRetry,
 } from '@origintrail-official/dkg-core';
 import type { RandomSamplingRepairOperation } from '@origintrail-official/dkg-random-sampling';
-import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, deleteByPatternWithoutCount, tryReplaceGraphAtomically, type ChangelogReader, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, type ChangelogReader, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { readChangelogDeltaPage } from './sync/responder/graph-plan.js';
 import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelog/wire.js';
 import { runChangelogSync, planPageApply } from './sync/requester/changelog-sync.js';
@@ -116,7 +115,6 @@ import {
 } from './sync/requester/graph-scoped-materialization.js';
 import {
   reconcileFinalizedSwmTwin,
-  reconcileFinalizedSwmTwinFromDescriptor,
   type FinalizedSwmTwinRetirement,
 } from './sync/requester/finalized-swm-twin-reconciliation.js';
 import {
@@ -158,7 +156,7 @@ import {
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
   type WorkspaceSenderKeyEncryptInput,
-  type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
+  type SharedMemoryPublicSnapshotStorageConfig,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -289,7 +287,6 @@ import {
   type ExactAssetCommitment,
   type ExactAssetSelection,
 } from './sync/exact-assets.js';
-import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import {
   getSyncCheckpointKey,
@@ -334,7 +331,6 @@ import {
   type SelectedSwmMetaRetentionLimits,
 } from './sync/selected-swm-meta-budget.js';
 import {
-  runSharedMemorySync,
   selectSwmSnapshotCoverage,
   sharedMemoryOwnershipKeyFromGraph,
 } from './sync/requester/shared-memory-sync.js';
@@ -342,15 +338,13 @@ import {
   createSelectedSwmMetaFetcher,
   type SelectedSwmMetaFetcher,
 } from './sync/selected-swm-meta-fetcher.js';
-import {
-  createSharedMemorySnapshotMaterializer,
-} from './sync/requester/swm-snapshot-materializer.js';
+import { SwmRecoveryExecutorV1 } from
+  './sync/requester/swm-recovery-executor.js';
 import {
   runOrderedContextGraphSyncs,
   type ContextGraphSyncWork,
 } from './sync/requester/ordered-sync.js';
 import {
-  recoverContextGraphSwm,
   recoverContextGraphSwmWithProgressRetries,
   type RecoverContextGraphSwmResult,
 } from './sync/requester/swm-recovery.js';
@@ -1419,33 +1413,6 @@ function enforceRfc64CompleteProviderAuthority(
   };
 }
 
-type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0];
-
-interface RecoverContextGraphSwmFromPeerDependencies {
-  store: TripleStore;
-  writeLocks: Map<string, Promise<void>>;
-  listSubGraphs: (contextGraphId: string) => ReturnType<DKGAgent['listSubGraphs']>;
-  createContextGraphSyncDeadline: (remainingContextGraphs: number) => number;
-  fetchSyncPages: RecoverContextGraphSwmOptions['fetchSyncPages'];
-  processSharedMemoryBatch: RecoverContextGraphSwmOptions['processSharedMemoryBatch'];
-  publicSnapshotStore?: WorkspacePublicSnapshotStore;
-  /**
-   * GH#2273 — the materializer owns BOTH the skip predicate and the
-   * preserve-identity decision (one capability over one store and lock
-   * map). REQUIRED at this production boundary: removing a
-   * construction-site wiring is a COMPILE error.
-   */
-  snapshotMaterializer: NonNullable<RecoverContextGraphSwmOptions['snapshotMaterializer']>;
-  recordDrops: OversizeGuardHooks['recordDrops'];
-  invalidateListContextGraphsCache: () => void;
-  markMetaProjectionDirty: (quads: Quad[]) => void;
-  setCheckpoint: RecoverContextGraphSwmOptions['setCheckpoint'];
-  deleteCheckpoint: RecoverContextGraphSwmOptions['deleteCheckpoint'];
-  ensureOwnedMap: RecoverContextGraphSwmOptions['ensureOwnedMap'];
-  logInfo: NonNullable<RecoverContextGraphSwmOptions['logInfo']>;
-  logWarn: NonNullable<RecoverContextGraphSwmOptions['logWarn']>;
-}
-
 export interface ContextGraphCatchupOptions {
   includeSharedMemory?: boolean;
   maxPeers?: number;
@@ -1853,6 +1820,68 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       candidate.kaUal,
     );
   }
+
+  /** One focused executor owns both public and private SWM target wiring. */
+  private createSwmRecoveryExecutorV1(this: DKGAgent): SwmRecoveryExecutorV1 {
+    return new SwmRecoveryExecutorV1({
+      store: this.store,
+      writeLocks: this.writeLocks,
+      listSubGraphs: (contextGraphId) => this.listSubGraphs(contextGraphId),
+      createContextGraphSyncDeadline: (remainingContextGraphs) => (
+        createContextGraphSyncDeadline({ remainingContextGraphs })
+      ),
+      fetchSyncPages: (
+        ctx,
+        peerId,
+        contextGraphId,
+        includeSharedMemory,
+        phase,
+        graphUri,
+        deadline,
+        options,
+      ) => this.fetchSyncPages(
+        ctx,
+        peerId,
+        contextGraphId,
+        includeSharedMemory,
+        phase,
+        graphUri,
+        deadline,
+        options,
+      ),
+      processSharedMemoryBatch: (data, meta, contextGraphId, registered, excluded) => (
+        this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(
+          data,
+          meta,
+          contextGraphId,
+          registered,
+          excluded,
+        )
+      ),
+      publicSnapshotStore: this.publicSnapshotStore,
+      recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
+      invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
+      markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection.markDirtyFromQuads(quads),
+      setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
+      deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
+      deletePublicCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
+      ensureOwnedMap: (ownershipKey) => {
+        let owned = this.workspaceOwnedEntities.get(ownershipKey);
+        if (owned === undefined) {
+          owned = new Map();
+          this.workspaceOwnedEntities.set(ownershipKey, owned);
+        }
+        return owned;
+      },
+      retireFinalizedSwmTwin: (candidate, ctx) => (
+        this.retireFinalizedSwmTwinCandidate(candidate, ctx)
+      ),
+      logInfo: (ctx, message) => this.log.info(ctx, message),
+      logWarn: (ctx, message) => this.log.warn(ctx, message),
+      logDebug: (ctx, message) => this.log.debug(ctx, message),
+    });
+  }
+
   async runContextGraphSyncWithBackpressure<T>(this: DKGAgent,
     ctx: OperationContext,
     contextGraphId: string,
@@ -7403,65 +7432,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.log.warn(ctx, `Skipping shared-memory sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
       return execution(emptySharedMemorySyncResult());
     }
+    const recoveryExecutor = LifecycleSyncMethods.prototype
+      .createSwmRecoveryExecutorV1.call(this);
     const recoverPrivateContextGraph = (
       contextGraphId: string,
       recoveryLease?: Rfc64SwmRecoveryTargetLeaseV1,
-    ) => runRecoverContextGraphSwmFromPeer(
-      {
-        store: this.store,
-        writeLocks: this.writeLocks,
-        listSubGraphs: (id) => this.listSubGraphs(id),
-        createContextGraphSyncDeadline: (remaining) => createContextGraphSyncDeadline({
-          remainingContextGraphs: remaining,
-        }),
-        fetchSyncPages: (
-          ctx2,
-          peerId,
-          cgId,
-          includeSharedMemory,
-          phase,
-          graphUri,
-          deadline,
-          fetchOptions,
-        ) => this.fetchSyncPages(
-            ctx2,
-            peerId,
-            cgId,
-            includeSharedMemory,
-            phase,
-            graphUri,
-            deadline,
-            {
-              ...fetchOptions,
-              recovery: true,
-            },
-          ),
-        processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
-          this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(data, meta, cgId, registered, excluded),
-        publicSnapshotStore: this.publicSnapshotStore,
-        snapshotMaterializer: createSharedMemorySnapshotMaterializer({
-          store: this.store,
-          writeLocks: this.writeLocks,
-          invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
-        }),
-        recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
-        invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
-        markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection.markDirtyFromQuads(quads),
-        setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
-        deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
-        ensureOwnedMap: (ownershipKey) => {
-          if (!this.workspaceOwnedEntities.has(ownershipKey)) {
-            this.workspaceOwnedEntities.set(ownershipKey, new Map());
-          }
-          return this.workspaceOwnedEntities.get(ownershipKey)!;
-        },
-        logInfo: (opCtx, message) => this.log.info(opCtx, message),
-        logWarn: (opCtx, message) => this.log.warn(opCtx, message),
-      },
+    ) => recoveryExecutor.recoverPrivateTarget({
       remotePeerId,
       contextGraphId,
-      recoveryLease,
-    );
+      recoveryGuard: recoveryLease,
+    });
     if (
       requestedTargets !== null
       && !sameStringArray(
@@ -7582,171 +7562,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const runSync = async (
       selectedMetaFetcher?: SelectedSwmMetaFetcher,
     ): Promise<SharedMemorySyncExecution> => {
-      const subGraphAdmissionByContextGraph = new Map<string, Promise<{ registered: string[]; excluded: string[] }>>();
-      const getSubGraphAdmission = (contextGraphId: string) => {
-        let admission = subGraphAdmissionByContextGraph.get(contextGraphId);
-        if (!admission) {
-          admission = getSharedMemorySubGraphAdmission(this.store, contextGraphId, this.listSubGraphs(contextGraphId));
-          subGraphAdmissionByContextGraph.set(contextGraphId, admission);
-        }
-        return admission;
-      };
-
       const syncPublicContextGraph = async (
         contextGraphId: string,
         remainingContextGraphs: number,
-      ): Promise<SharedMemorySyncResult> => {
-        const recoveryLease = recoveryLeaseFor(contextGraphId);
-        const fetchPages = (
-          ctx2: OperationContext,
-          peerId: string,
-          cgId: string,
-          includeSharedMemory: boolean,
-          phase: SyncPhase,
-          graphUri: string,
-          deadline: number,
-          fetchOptions?: SyncPageFetchOptions,
-        ) => this.fetchSyncPages(
-          ctx2,
-          peerId,
-          cgId,
-          includeSharedMemory,
-          phase,
-          graphUri,
-          deadline,
-          recoveryLease === undefined
-            ? fetchOptions
-            : { ...fetchOptions, signal: recoveryLease.signal },
-        );
-        const processSharedMemoryBatch = (
-          wsDataQuads: Quad[],
-          wsMetaQuads: Quad[],
-          cgId: string,
-          registeredSubGraphNames?: readonly string[],
-          excludedSubGraphNames?: readonly string[],
-        ) => this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(
-          wsDataQuads,
-          wsMetaQuads,
-          cgId,
-          registeredSubGraphNames,
-          excludedSubGraphNames,
-        );
-        const ensureContextGraph = async (cgId: string) => {
-          const graphManager = new GraphManager(this.store);
-          await graphManager.ensureContextGraph(cgId);
-        };
-        const snapshotMaterializer = createSharedMemorySnapshotMaterializer({
-          store: this.store,
-          writeLocks: this.writeLocks,
-          invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
-        });
-        const reconcileFinalizedTwin = async (
-          cgId: string,
-          descriptor: Parameters<NonNullable<Parameters<typeof runSharedMemorySync>[0]['reconcileFinalizedTwin']>>[1],
-        ) => {
-          const retirement = await reconcileFinalizedSwmTwinFromDescriptor({
-            store: this.store,
-            writeLocks: this.writeLocks,
-            contextGraphId: cgId,
-            descriptor,
-            retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
-          });
-          if (retirement === 'retired') {
-            this.invalidateListContextGraphsCache();
-            this.log.info(
-              ctx,
-              `Retired byte-identical SWM twin after SWM recovery found finalized VM for ${descriptor.kaUal}`,
-            );
-          }
-          return retirement === 'retired' || retirement === 'already-retired-finalized'
-            ? 'suppress-metadata' as const
-            : 'preserve' as const;
-        };
-        const storeInsert = async (quads: Quad[]) => {
-          // Oversize guard (OT-RFC-56): drop+tombstone protocol-violating
-          // literals BEFORE insert so the SWM page cursor advances instead
-          // of the store throwing and the page re-fetching forever.
-          const inserted = await insertWithOversizeGuard(
-            (kept) => this.store.insert(kept, {
-              priority: 'background',
-              source: 'agent.sharedMemorySync.storeInsert',
-            }),
-            quads,
-            { recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam) },
-            'swm-sync',
-          );
-          this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
-        };
-        const ensureOwnedMap = (ownershipKey: string) => {
-          if (!this.workspaceOwnedEntities.has(ownershipKey)) {
-            this.workspaceOwnedEntities.set(ownershipKey, new Map());
-          }
-          return this.workspaceOwnedEntities.get(ownershipKey)!;
-        };
-        const run = () => runSharedMemorySync({
-          ctx,
-          remotePeerId,
-          contextGraphIds: [contextGraphId],
-          createContextGraphSyncDeadline: () => createContextGraphSyncDeadline({
-            remainingContextGraphs,
-          }),
-          fetchSyncPages: fetchPages,
-          processSharedMemoryBatch,
-          getRegisteredSubGraphNames: async (cgId) => (
-            await getSubGraphAdmission(cgId)
-          ).registered,
-          getExcludedSubGraphNames: async (cgId) => (
-            await getSubGraphAdmission(cgId)
-          ).excluded,
-          stopOnBackoffWorthyFailure,
-          snapshotEvidencePolicy: selectedSwmEnabled
-            ? {
-              // Any graph-backed operation sits outside the immutable snapshot
-              // walk, including when other operations in the same manifest do
-              // have store-backed refs. Until this requester has count/digest-
-              // bound transport evidence for every such operation, the selected
-              // lane must fail closed.
-              accepts: ({
-                verifiedMetadataTriples,
-                snapshotReferences,
-                graphBackedOperations,
-              }) => (
-                verifiedMetadataTriples === 0
-                || (snapshotReferences > 0 && graphBackedOperations === 0)
-              ),
-            }
-            : undefined,
-          metadataFetcher: selectedMetaFetcher?.strategy,
-          snapshotRecoveryOrder: selectedSwmEnabled ? 'recent-balanced' : 'manifest',
-          ensureContextGraph,
-          // Everything needed to materialize verified public SWM snapshots,
-          // as ONE dependency (a loose optional trio allowed a silent
-          // half-configured mode). Graph-scoped (contentScopeVersion 2) KAs
-          // carry no dkg:rootEntity, so the aggregate data phase returns 0
-          // data quads for them by design — their content arrives as
-          // immutable snapshots, and without this the catch-up lane cached
-          // every verified snapshot and never wrote one to the store.
-          // Thin wiring only: the materialization policy (content-digest
-          // guard, MAX head read + duplicate repair, atomic replace, head
-          // metadata swap) lives in `swm-snapshot-materializer.ts`. What
-          // the agent contributes here is its own resources — the store,
-          // the SAME lock map injected into SharedMemoryHandler (sharing
-          // the map + key helper is what closes the check-then-replace
-          // race with gossip), and list-cache invalidation.
-          snapshotMaterializer,
-          reconcileFinalizedTwin,
-          storeInsert,
-          publicSnapshotStore: this.publicSnapshotStore,
-          deleteCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
-          setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
-          ensureOwnedMap,
-          recoveryGuard: recoveryLease,
-          logInfo: (opCtx, message) => this.log.info(opCtx, message),
-          logWarn: (opCtx, message) => this.log.warn(opCtx, message),
-          logDebug: (opCtx, message) => this.log.debug(opCtx, message),
-        });
-        return run();
-      };
+      ): Promise<SharedMemorySyncResult> => recoveryExecutor.syncPublicTarget({
+        ctx,
+        remotePeerId,
+        contextGraphId,
+        remainingContextGraphs,
+        recoveryGuard: recoveryLeaseFor(contextGraphId),
+        metadataFetcher: selectedMetaFetcher?.strategy,
+        stopOnBackoffWorthyFailure,
+        selected: selectedSwmEnabled,
+      });
 
       const completedTargetKeys = new Set<string>();
       const selectedContinuationUnits: SelectedSwmContinuationUnit[] = [];
@@ -8023,44 +7851,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphId,
       'swm_recovery',
       `swm-recovery:${contextGraphId}:${remotePeerId.slice(-8)}`,
-      () => runRecoverContextGraphSwmFromPeer(
-        {
-          store: this.store,
-          writeLocks: this.writeLocks,
-          listSubGraphs: (id) => this.listSubGraphs(id),
-          createContextGraphSyncDeadline: (remaining) => createContextGraphSyncDeadline({
-            remainingContextGraphs: remaining,
-          }),
-          fetchSyncPages: (ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, fetchOptions) =>
-            this.fetchSyncPages(ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, {
-              ...fetchOptions,
-              recovery: true,
-            }),
-          processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
-            this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(data, meta, cgId, registered, excluded),
-          publicSnapshotStore: this.publicSnapshotStore,
-          snapshotMaterializer: createSharedMemorySnapshotMaterializer({
-            store: this.store,
-            writeLocks: this.writeLocks,
-            invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
-          }),
-          recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
-          invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
-          markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection.markDirtyFromQuads(quads),
-          setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
-          deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
-          ensureOwnedMap: (ownershipKey) => {
-            if (!this.workspaceOwnedEntities.has(ownershipKey)) {
-              this.workspaceOwnedEntities.set(ownershipKey, new Map());
-            }
-            return this.workspaceOwnedEntities.get(ownershipKey)!;
-          },
-          logInfo: (opCtx, message) => this.log.info(opCtx, message),
-          logWarn: (opCtx, message) => this.log.warn(opCtx, message),
-        },
-        remotePeerId,
-        contextGraphId,
-      ),
+      () => LifecycleSyncMethods.prototype.createSwmRecoveryExecutorV1.call(this)
+        .recoverPrivateTarget({
+          remotePeerId,
+          contextGraphId,
+        }),
       { source: 'swm-recovery' },
     );
   }
@@ -10715,205 +10510,6 @@ async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<s
     : (await store.listGraphs()).filter((graph) => graph.startsWith(prefix));
 }
 
-async function runRecoverContextGraphSwmFromPeer(
-  dependencies: RecoverContextGraphSwmFromPeerDependencies,
-  remotePeerId: string,
-  contextGraphId: string,
-  recoveryLease?: Rfc64SwmRecoveryTargetLeaseV1,
-): Promise<RecoverContextGraphSwmResult> {
-  const ctx = createOperationContext('sync');
-  const readAdmission = () => getSharedMemorySubGraphAdmission(
-    dependencies.store,
-    contextGraphId,
-    dependencies.listSubGraphs(contextGraphId),
-  );
-  let admissionPromise: ReturnType<typeof readAdmission> | undefined;
-  const admission = () => {
-    admissionPromise ??= readAdmission();
-    return admissionPromise;
-  };
-  const recoveryOptions: RecoverContextGraphSwmOptions = {
-    ctx,
-    remotePeerId,
-    contextGraphId,
-    deadline: dependencies.createContextGraphSyncDeadline(1),
-    // R9/R10 — pin recovery=true at the lifecycle boundary. This forks BOTH
-    // the checkpoint namespace
-    // (R10: a distinct `|recovery` cursor that never mutates the shared
-    // incremental-sync cursor) AND the request envelope auth mode (R9: the
-    // responder gates via the strict members-only `isMemberRecoveryAuthorized`).
-    fetchSyncPages: dependencies.fetchSyncPages,
-    processSharedMemoryBatch: dependencies.processSharedMemoryBatch,
-    writeLocks: dependencies.writeLocks,
-    publicSnapshotStore: dependencies.publicSnapshotStore,
-    snapshotMaterializer: dependencies.snapshotMaterializer,
-    // SwmRecoveryStore: invalidate the list cache + mark the meta projection
-    // dirty on insert (parity with runSharedMemorySync's
-    // insertSyncedQuadsAndInvalidateListCache); deletes pass through to the store.
-    store: {
-      insert: async (quads) => {
-        // Oversize guard (OT-RFC-56) — recovered rows are peer data too.
-        const inserted = await insertWithOversizeGuard(
-          (kept) => dependencies.store.insert(kept, {
-            priority: 'background',
-            source: 'agent.swmRecovery.insert',
-          }),
-          quads,
-          { recordDrops: (drops, seam) => dependencies.recordDrops(drops, seam) },
-          'swm-recovery',
-        );
-        if (inserted.length > 0) {
-          dependencies.invalidateListContextGraphsCache();
-          dependencies.markMetaProjectionDirty(inserted);
-        }
-      },
-      replaceGraph: async (graph, quads) => {
-        const replaced = await tryReplaceGraphAtomically(
-          dependencies.store,
-          graph,
-          quads,
-          {
-            priority: 'background',
-            source: 'agent.swmRecovery.graphScopedReplace',
-          },
-        );
-        if (!replaced) {
-          throw Object.assign(
-            new Error('Graph-scoped SWM recovery requires atomic TripleStore.replaceGraph() support'),
-            { code: 'SWM_ATOMIC_REPLACE_UNSUPPORTED' },
-          );
-        }
-        dependencies.invalidateListContextGraphsCache();
-      },
-      deleteByPattern: (pattern) => dependencies.store.deleteByPattern(pattern, {
-          priority: 'background',
-          source: 'agent.swmRecovery.deleteByPattern',
-        }),
-      deleteBySubjectPrefix: (graph, prefix) => dependencies.store.deleteBySubjectPrefix(
-        graph,
-        prefix,
-        {
-          priority: 'background',
-          source: 'agent.swmRecovery.deleteBySubjectPrefix',
-        },
-      ),
-    },
-    // Codex high: REPLACE per-root SWM meta (mirror the publisher's
-    // deleteMetaForRoot). For each recovered root, drop the op→root-entity
-    // links in the curator's fresh-meta graphs, then delete any op left with
-    // no remaining roots — so a stale WorkspaceOperation can't survive to
-    // TTL-delete the just-recovered root. Runs before swm-recovery inserts the
-    // fresh verifiedMeta. Falls back to the base meta graph if none provided.
-    replaceMetaForRoots: async (roots, metaGraphs) => {
-      const graphs = metaGraphs.length > 0
-        ? metaGraphs
-        : [contextGraphWorkspaceMetaGraphUri(contextGraphId)];
-      const entities = [...new Set(roots.map((r) => r.entity))];
-      for (const metaGraph of graphs) {
-        for (const entity of entities) {
-          const ops = await dependencies.store.query(
-            `SELECT DISTINCT ?op WHERE { GRAPH <${metaGraph}> { ?op ${ENTITY_PRED_ALT} <${entity}> } }`,
-            {
-              priority: 'background',
-              source: 'agent.swmRecovery.replaceMetaForRoots.findOps',
-            },
-          );
-          if (ops.type !== 'bindings') continue;
-          for (const row of ops.bindings) {
-            const op = row['op'];
-            if (!op) continue;
-            await dependencies.store.delete(
-              [
-                { subject: op, predicate: DKG_ROOT_ENTITY_LEGACY, object: entity, graph: metaGraph },
-                { subject: op, predicate: DKG_ENTITY, object: entity, graph: metaGraph },
-              ],
-              {
-                priority: 'background',
-                source: 'agent.swmRecovery.replaceMetaForRoots.deleteLinks',
-              },
-            );
-            const remaining = await dependencies.store.query(
-              `SELECT (COUNT(DISTINCT ?r) AS ?c) WHERE { GRAPH <${metaGraph}> { <${op}> ${ENTITY_PRED_ALT} ?r } }`,
-              {
-                priority: 'background',
-                source: 'agent.swmRecovery.replaceMetaForRoots.countRoots',
-              },
-            );
-            const raw = remaining.type === 'bindings' ? remaining.bindings[0]?.['c'] : undefined;
-            const countVal = raw ? parseInt(String(raw).match(/\d+/)?.[0] ?? '0', 10) : 0;
-            if (countVal === 0) {
-              await deleteByPatternWithoutCount(
-                dependencies.store,
-                { graph: metaGraph, subject: op },
-                {
-                  priority: 'background',
-                  source: 'agent.swmRecovery.replaceMetaForRoots.deleteOp',
-                },
-              );
-            }
-          }
-        }
-      }
-    },
-    replaceMetaForGraphAssets: (assets) => (
-      dependencies.snapshotMaterializer.replaceMetaForGraphAssets(assets)
-    ),
-    ensureContextGraph: async (cgId) => {
-      const graphManager = new GraphManager(dependencies.store);
-      await graphManager.ensureContextGraph(cgId);
-    },
-    setCheckpoint: (key, offset) => dependencies.setCheckpoint(key, offset),
-    deleteCheckpoint: (key) => dependencies.deleteCheckpoint(key),
-    getRegisteredSubGraphNames: async () => (await admission()).registered,
-    getExcludedSubGraphNames: async () => (await admission()).excluded,
-    // R2 — hydrate the Rule-4 ownership cache (same map runSharedMemorySync uses).
-    ensureOwnedMap: dependencies.ensureOwnedMap,
-    logInfo: (opCtx, message) => dependencies.logInfo(opCtx, message),
-    logWarn: (opCtx, message) => dependencies.logWarn(opCtx, message),
-  };
-  return recoverContextGraphSwm({
-    ...recoveryOptions,
-    recoveryGuard: recoveryLease,
-  });
-}
-
-async function getSharedMemorySubGraphAdmission(
-  store: TripleStore,
-  contextGraphId: string,
-  subGraphsPromise: Promise<Array<{ name: string; uri?: string }>>,
-): Promise<{ registered: string[]; excluded: string[] }> {
-  const registered: string[] = [];
-  const excluded: string[] = [];
-  for (const subGraph of await subGraphsPromise) {
-    const childContextGraphUri = `${contextGraphDataGraphUri(contextGraphId)}/${subGraph.name}`;
-    if (subGraph.uri && subGraph.uri !== childContextGraphUri) continue;
-    if (await isKnownContextGraphUri(store, childContextGraphUri)) {
-      excluded.push(subGraph.name);
-    } else {
-      registered.push(subGraph.name);
-    }
-  }
-  return { registered, excluded };
-}
-
-async function isKnownContextGraphUri(store: TripleStore, contextGraphUri: string): Promise<boolean> {
-  const metaGraph = `${contextGraphUri}/_meta`;
-  const result = await store.query(
-    `
-      ASK {
-        GRAPH <${assertSafeIri(metaGraph)}> {
-          {
-            <${assertSafeIri(contextGraphUri)}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
-          } UNION {
-            <${assertSafeIri(contextGraphUri)}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status .
-          }
-        }
-      }
-    `,
-    { source: 'agent.subGraphClassification.knownContextGraph' },
-  );
-  return result.type === 'boolean' && result.value;
-}
 /**
  * Enumerate every SWM meta graph of one context graph: the root
  * `…/_shared_memory_meta` bucket plus one `…/{subGraph}/_shared_memory_meta`

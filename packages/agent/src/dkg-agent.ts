@@ -959,7 +959,46 @@ export class DKGAgent extends DKGAgentBase {
         isStarted: () => this.started,
       },
     });
-    this.rfc64SwmRecoveryRuntimeV1 = createRfc64SwmRecoveryRuntimeV1(this);
+    this.rfc64SwmRecoveryRuntimeV1 = createRfc64SwmRecoveryRuntimeV1({
+      authority: {
+        resolveRuntimeSelection: () => this.readRfc64CatalogRuntimeSelectionV1(),
+        resolveConfigured: (contextGraphId) => (
+          this.resolveRfc64CatalogServingAuthorityV1(contextGraphId)
+        ),
+        resolveRecoveryConfig: () => resolveRfc64RuntimeCatalogBootstrapConfigV1(
+          this.config.rfc64CatalogBootstrap,
+          this.config.rfc64PublicCatalogBootstrap,
+        ),
+      },
+      admission: {
+        invalidateContextGraph: (contextGraphId) => (
+          this.selectedSwmBootstrapAdmission.invalidateContextGraph(contextGraphId)
+        ),
+      },
+      cooldown: {
+        deleteProvider: (providerPeerId) => {
+          this.rfc64ExactCatchupOnConnectAt.delete(providerPeerId);
+        },
+      },
+      queue: {
+        catalogPassMinimumTerminalAgeMs: () => (
+          this.config.syncReconcilerTiming.stalenessThresholdMs
+        ),
+        authorizeForCatalogPass: (plan, minimumTerminalAgeMs) => (
+          this.rfc64SwmRecoveryCoordinatorV1.authorizeForCatalogPass(
+            plan,
+            minimumTerminalAgeMs,
+          )
+        ),
+        enqueueAuthorized: (plan, onError, delayMs) => (
+          this.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
+            plan,
+            onError,
+            delayMs,
+          )
+        ),
+      },
+    });
   }
 
   private chainContextGraphScanFailure:
