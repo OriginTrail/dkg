@@ -574,9 +574,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     if (result.nextOffset > result.resumedFromOffset) {
       summary.checkpointAdvances += 1;
     }
-    if (result.completed) recoveryBoundary.commit(() => deleteCheckpoint(result.checkpointKey));
+    if (result.completed) recoveryBoundary.commitSync(() => deleteCheckpoint(result.checkpointKey));
     else if (result.nextOffset > 0 || result.resumedFromOffset > 0) {
-      recoveryBoundary.commit(() => setCheckpoint(result.checkpointKey, result.nextOffset));
+      recoveryBoundary.commitSync(() => setCheckpoint(result.checkpointKey, result.nextOffset));
     }
   };
 
@@ -764,7 +764,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           && !wsDataResult.timedOut
         ) {
           if (metadataFetcher) {
-            recoveryBoundary.commit(() => metadataFetcher.release(pid));
+            recoveryBoundary.commitSync(() => metadataFetcher.release(pid));
           }
         }
         if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
@@ -1028,12 +1028,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
           if (materializedKeys.has(graphKey)) continue;
           try {
-            await recoveryBoundary.commit(() => snapshotMaterializer.withKaWriteLock(
+            await recoveryBoundary.commitAsync(() => snapshotMaterializer.withKaWriteLock(
               pid,
               descriptor.subGraphName,
               descriptor.kaUal,
               async () => {
-                recoveryBoundary.assertCurrent();
                 // ALL decisions live INSIDE the lock. Between our pre-lock view
                 // of the world and acquisition, live gossip may have committed
                 // this KA — the lock stops the interleaving, and the two
@@ -1182,7 +1181,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             // arrives. Reconcile only after releasing the materialization
             // lock; the production callback reacquires the same per-KA lock
             // and re-verifies current head + both graph digests before delete.
-            await recoveryBoundary.commit(() => snapshotCommit.reconcileAfterMaterialization({
+            await recoveryBoundary.commitAsync(() => snapshotCommit.reconcileAfterMaterialization({
               contextGraphId: pid,
               descriptor,
               onDeferred: (cause) => logWarn(
@@ -1393,7 +1392,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // up with dangling/missing public snapshot state.
         summary.failedPhases += 1;
         if (validWsQuads.length > 0) {
-          await recoveryBoundary.commit(async () => {
+          await recoveryBoundary.commitAsync(async () => {
             await ensureContextGraph(pid);
             await storeInsert(validWsQuads);
             // Ownership belongs to the same admitted logical write as the
@@ -1449,7 +1448,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // mutation starts, a selection revocation is deliberately observed only
       // after all three effects drain, preventing a stale invocation from
       // leaving a data-only or metadata-without-ownership state.
-      await recoveryBoundary.commit(async () => {
+      await recoveryBoundary.commitAsync(async () => {
         await ensureContextGraph(pid);
         if (validWsQuads.length > 0) await storeInsert(validWsQuads);
         if (metaForBulkInsert.length > 0) await storeInsert(metaForBulkInsert);
@@ -1465,7 +1464,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       recordPhaseOutcome(wsMetaResult);
       recordPhaseOutcome(wsDataResult);
       if (metadataFetcher) {
-        recoveryBoundary.commit(() => metadataFetcher.release(pid));
+        recoveryBoundary.commitSync(() => metadataFetcher.release(pid));
       }
       if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
         break;
@@ -1746,7 +1745,7 @@ export async function syncPublicSnapshotsForMeta(params: {
       resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
       timedOutPhases += result.timedOut ? 1 : 0;
       if (result.completed) {
-        executionBoundary.commit(() => params.deleteCheckpoint(result.checkpointKey));
+        executionBoundary.commitSync(() => params.deleteCheckpoint(result.checkpointKey));
       }
       else {
         // `fetchSyncPages` returns only the quads fetched during THIS call. We do
@@ -1756,7 +1755,7 @@ export async function syncPublicSnapshotsForMeta(params: {
         // already completed snapshots remain cached and are skipped, preserving
         // monotonic recovery progress across the CG without accepting a partial
         // asset.
-        executionBoundary.commit(() => params.deleteCheckpoint(result.checkpointKey));
+        executionBoundary.commitSync(() => params.deleteCheckpoint(result.checkpointKey));
         abandonFrom(index);
         break;
       }
@@ -1778,7 +1777,7 @@ export async function syncPublicSnapshotsForMeta(params: {
         // repeat-pass design to a fixed point at zero progress. Skipping costs
         // this KA and nothing else — it stays uncached and unapplied, and is
         // retried from offset zero next pass.
-        executionBoundary.commit(() => params.deleteCheckpoint(result.checkpointKey));
+        executionBoundary.commitSync(() => params.deleteCheckpoint(result.checkpointKey));
         noteMissing(snapshot.ref);
         continue;
       }
@@ -1789,7 +1788,7 @@ export async function syncPublicSnapshotsForMeta(params: {
           `(expected ${snapshot.digest}/${snapshot.count}, got ${actualDigest}/${snapshotQuads.length})`,
         );
       }
-      await executionBoundary.commit(() => params.publicSnapshotStore!.putSnapshot({
+      await executionBoundary.commitAsync(() => params.publicSnapshotStore!.putSnapshot({
         digest: snapshot.digest,
         quads: snapshotQuads,
       }));

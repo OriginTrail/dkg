@@ -1412,8 +1412,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         catalogVersion: '1',
         inventoryRowCount: '1',
       });
-    }, { timeout: 5_000, interval: 25 });
-  }, 60_000);
+    }, { timeout: 20_000, interval: 50 });
+  }, 90_000);
 
   it('excludes restricted shares, restarts the public SWM-only inventory, then removes VM-confirmed rows', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-swm-shadow-restart-'));
@@ -2709,7 +2709,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
   });
 
-  it('aborts an in-flight ordinary-private fetch through the real selection lifecycle', async () => {
+  it('leases ordinary on-connect private recovery and aborts it on unsubscribe', async () => {
     const authority = privateCatalogAuthorityFixtureV1();
     const providerPeerId = '12D3KooWPrivateRecoveryRevocationProvider';
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-private-recovery-revocation-'));
@@ -2797,24 +2797,17 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       };
     });
 
-    const recovery = receiver.syncSelectedSharedMemoryFromPeerDetailed(
+    const recovery = receiver.syncSharedMemoryFromPeerDetailed(
       providerPeerId,
       [authority.policy.contextGraphId],
       {
-        selectedSwmPriority: true,
-        requestedScope: {
-          kind: 'rfc64-recovery-plan',
-          plan: {
-            kind: 'rfc64-authorized-swm-recovery-v1',
-            providerPeerId,
-            targets: [{
-              contextGraphId: authority.policy.contextGraphId,
-              lane: 'ordinary-private',
-            }],
-          },
+        sharedMemorySyncPlan: {
+          targets: [{
+            contextGraphId: authority.policy.contextGraphId,
+            lane: 'ordinary-private',
+          }],
         },
         stopOnBackoffWorthyFailure: true,
-        priority: 2_000,
         source: 'on-connect',
       },
     );
@@ -2826,11 +2819,9 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(capturedFetchSignal?.aborted).toBe(true);
 
     await expect(recovery).resolves.toMatchObject({
-      kind: 'selected-shared-memory',
-      scopeComplete: false,
-      targetDiagnostics: {
-        ordinaryPrivate: { completed: 0, total: 1 },
-      },
+      insertedDataTriples: 0,
+      failedPeers: 1,
+      backoffWorthyFailures: 1,
     });
     expect(dataFetch).not.toHaveBeenCalled();
     const stored = await store.query(

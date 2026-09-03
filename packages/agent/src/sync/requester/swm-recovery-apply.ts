@@ -98,6 +98,26 @@ export interface VerifiedSwmRecoveryApplyResult {
   readonly insertedMetaQuads: number;
 }
 
+/** Every production effect required by a complete verified recovery apply. */
+export interface VerifiedSwmRecoveryApplyPorts {
+  readonly store: SwmRecoveryStore;
+  readonly ensureContextGraph: (contextGraphId: string) => Promise<void>;
+  readonly replaceMetaForRoots: (
+    roots: readonly { readonly entity: string }[],
+    metaGraphs: readonly string[],
+  ) => Promise<void>;
+  readonly replaceMetaForGraphAssets: (
+    assets: readonly GraphScopedSwmRecoveryDescriptor[],
+  ) => Promise<void>;
+  readonly snapshotMaterializer: SharedMemorySnapshotMaterializer;
+  readonly ensureOwnedMap: (ownershipKey: string) => Map<string, string>;
+}
+
+export interface VerifiedSwmRecoveryGraphAssetApplyResult {
+  readonly insertedGraphQuads: number;
+  readonly withholdRows: readonly Quad[];
+}
+
 const SKOLEM_CHILD_INFIX = '/.well-known/genid/';
 
 /**
@@ -140,11 +160,60 @@ export async function applySwmRecovery(params: {
   // One per-recovery durability unit. If authority is revoked before this
   // point nothing mutates; if it is revoked after the first delete, the whole
   // root set still reaches its insert instead of being stranded half-applied.
-  return params.executionBoundary?.commit(apply) ?? apply();
+  return params.executionBoundary?.commitAsync(apply) ?? apply();
 }
 
 function quadKey(quad: Quad): string {
   return `${quad.graph}\u0000${quad.subject}\u0000${quad.predicate}\u0000${quad.object}`;
+}
+
+/**
+ * Canonical exact-asset mutation primitive shared by incremental snapshot
+ * commits and the final recovery plan. It owns graph replacement, witness
+ * invalidation, stored-identity preservation, and active-head cleanup.
+ */
+export async function applyVerifiedSwmRecoveryGraphAsset(params: Readonly<{
+  contextGraphId: string;
+  asset: VerifiedSwmRecoveryGraphApply;
+  ports: Pick<
+    VerifiedSwmRecoveryApplyPorts,
+    'store' | 'replaceMetaForGraphAssets' | 'snapshotMaterializer'
+  >;
+}>): Promise<VerifiedSwmRecoveryGraphAssetApplyResult> {
+  const { asset, ports } = params;
+  if (asset.kind === 'replace') {
+    await ports.store.replaceGraph(
+      asset.descriptor.assertionGraph,
+      [...asset.replacementQuads],
+    );
+    await invalidateSwmMaterializationWitness(
+      ports.store,
+      asset.descriptor.assertionGraph,
+      { source: 'agent.swmRecovery.witnessInvalidate' },
+    ).catch(() => {});
+  }
+
+  if (asset.kind === 'preserve-equivalent') {
+    const preservation = await ports.snapshotMaterializer
+      .preserveStoredIdentityForSkippedAsset(
+        params.contextGraphId,
+        asset.descriptor,
+      );
+    if (preservation.outcome === 'preserved') {
+      return {
+        insertedGraphQuads: asset.descriptor.publicQuadsCount,
+        withholdRows: preservation.withholdRows,
+      };
+    }
+  }
+
+  await ports.replaceMetaForGraphAssets([asset.descriptor]);
+  return {
+    insertedGraphQuads: asset.kind === 'replace'
+      ? asset.replacementQuads.length
+      : asset.descriptor.publicQuadsCount,
+    withholdRows: [],
+  };
 }
 
 /**
@@ -154,70 +223,35 @@ function quadKey(quad: Quad): string {
  */
 export async function applyVerifiedSwmRecoveryPlan(params: Readonly<{
   plan: VerifiedSwmRecoveryApplyPlan;
-  store: SwmRecoveryStore;
+  ports: VerifiedSwmRecoveryApplyPorts;
   executionBoundary: RecoveryExecutionBoundary;
-  ensureContextGraph: (contextGraphId: string) => Promise<void>;
-  replaceMetaForRoots?: (
-    roots: readonly { readonly entity: string }[],
-    metaGraphs: readonly string[],
-  ) => Promise<void>;
-  replaceMetaForGraphAssets?: (
-    assets: readonly GraphScopedSwmRecoveryDescriptor[],
-  ) => Promise<void>;
-  snapshotMaterializer?: SharedMemorySnapshotMaterializer;
-  ensureOwnedMap?: (ownershipKey: string) => Map<string, string>;
 }>): Promise<VerifiedSwmRecoveryApplyResult> {
-  const { plan } = params;
-  return params.executionBoundary.commit(async () => {
-    await params.ensureContextGraph(plan.contextGraphId);
+  const { plan, ports } = params;
+  return params.executionBoundary.commitAsync(async () => {
+    await ports.ensureContextGraph(plan.contextGraphId);
 
     const roots = await applySwmRecovery({
-      store: params.store,
+      store: ports.store,
       verifiedData: plan.rootData,
       roots: plan.roots,
     });
 
     let replacedGraphs = 0;
     let insertedGraphQuads = 0;
+    const preservedWithholdRows: Quad[] = [];
     for (const asset of plan.graphAssets) {
       replacedGraphs += 1;
-      if (asset.kind !== 'replace') {
-        insertedGraphQuads += asset.descriptor.publicQuadsCount;
-        continue;
-      }
-      await params.store.replaceGraph(
-        asset.descriptor.assertionGraph,
-        [...asset.replacementQuads],
-      );
-      await invalidateSwmMaterializationWitness(
-        params.store,
-        asset.descriptor.assertionGraph,
-        { source: 'agent.swmRecovery.witnessInvalidate' },
-      ).catch(() => {});
-      insertedGraphQuads += asset.replacementQuads.length;
+      const applied = await applyVerifiedSwmRecoveryGraphAsset({
+        contextGraphId: plan.contextGraphId,
+        asset,
+        ports,
+      });
+      insertedGraphQuads += applied.insertedGraphQuads;
+      preservedWithholdRows.push(...applied.withholdRows);
     }
 
-    if (plan.roots.length > 0 && params.replaceMetaForRoots) {
-      await params.replaceMetaForRoots(plan.roots, plan.rootMetaGraphs);
-    }
-
-    const preservedWithholdRows: Quad[] = [];
-    const metaReplaceTargets: GraphScopedSwmRecoveryDescriptor[] = [];
-    for (const asset of plan.graphAssets) {
-      if (asset.kind !== 'preserve-equivalent' || !params.snapshotMaterializer) {
-        metaReplaceTargets.push(asset.descriptor);
-        continue;
-      }
-      const preservation = await params.snapshotMaterializer
-        .preserveStoredIdentityForSkippedAsset(plan.contextGraphId, asset.descriptor);
-      if (preservation.outcome === 'preserved') {
-        preservedWithholdRows.push(...preservation.withholdRows);
-      } else {
-        metaReplaceTargets.push(asset.descriptor);
-      }
-    }
-    if (metaReplaceTargets.length > 0 && params.replaceMetaForGraphAssets) {
-      await params.replaceMetaForGraphAssets(metaReplaceTargets);
+    if (plan.roots.length > 0) {
+      await ports.replaceMetaForRoots(plan.roots, plan.rootMetaGraphs);
     }
 
     let insertedMetaQuads = 0;
@@ -231,16 +265,14 @@ export async function applyVerifiedSwmRecoveryPlan(params: Readonly<{
         ? canonicalMeta
         : canonicalMeta.filter((quad) => !preservedHeadIdRowKeys.has(quadKey(quad)));
       if (insertableMeta.length > 0) {
-        await params.store.insert([...insertableMeta]);
+        await ports.store.insert([...insertableMeta]);
       }
       insertedMetaQuads = insertableMeta.length;
     }
 
-    if (params.ensureOwnedMap) {
-      for (const { ownershipKey, entity, creator } of plan.ownershipUpdates) {
-        const ownedMap = params.ensureOwnedMap(ownershipKey);
-        if (!ownedMap.has(entity)) ownedMap.set(entity, creator);
-      }
+    for (const { ownershipKey, entity, creator } of plan.ownershipUpdates) {
+      const ownedMap = ports.ensureOwnedMap(ownershipKey);
+      if (!ownedMap.has(entity)) ownedMap.set(entity, creator);
     }
 
     return {

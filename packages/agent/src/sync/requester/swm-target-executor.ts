@@ -44,7 +44,7 @@ import { insertWithOversizeGuard, type OversizeGuardHooks } from '../oversize-fi
 
 type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0];
 
-export interface SwmRecoveryExecutorPortsV1 {
+export interface SwmTargetExecutorPortsV1 {
   readonly store: TripleStore;
   readonly writeLocks: Map<string, Promise<void>>;
   readonly listSubGraphs: (
@@ -70,16 +70,24 @@ export interface SwmRecoveryExecutorPortsV1 {
   readonly logDebug: (ctx: OperationContext, message: string) => void;
 }
 
-export interface PublicSwmRecoveryTargetV1 {
+interface PublicSwmTargetBaseV1 {
   readonly ctx: OperationContext;
   readonly remotePeerId: string;
   readonly contextGraphId: string;
   readonly remainingContextGraphs: number;
-  readonly recoveryGuard?: RecoveryExecutionGuard;
-  readonly metadataFetcher?: SharedMemoryMetadataFetcher;
   readonly stopOnBackoffWorthyFailure?: boolean;
-  readonly selected: boolean;
 }
+
+/** The only two valid public synchronization contracts. */
+export type PublicSwmTargetV1 = Readonly<PublicSwmTargetBaseV1 & {
+  readonly mode:
+    | Readonly<{ kind: 'ordinary' }>
+    | Readonly<{
+      kind: 'selected-recovery';
+      recoveryGuard: RecoveryExecutionGuard;
+      metadataFetcher: SharedMemoryMetadataFetcher;
+    }>;
+}>;
 
 export interface PrivateSwmRecoveryTargetV1 {
   readonly remotePeerId: string;
@@ -88,19 +96,20 @@ export interface PrivateSwmRecoveryTargetV1 {
 }
 
 /**
- * Owns the stable adapters and write policies for both recovery lanes. Callers
- * supply only per-target state; requester algorithms never reach back into the
- * lifecycle class for stores, checkpoints, verification, or materialization.
+ * Owns the stable adapters and write policies for ordinary public sync and
+ * public/private recovery. Callers supply only per-target state; requester
+ * algorithms never reach back into the lifecycle class for stores,
+ * checkpoints, verification, or materialization.
  */
-export class SwmRecoveryExecutorV1 {
-  readonly #ports: SwmRecoveryExecutorPortsV1;
+export class SwmTargetExecutorV1 {
+  readonly #ports: SwmTargetExecutorPortsV1;
   readonly #snapshotMaterializer: SharedMemorySnapshotMaterializer;
   readonly #subGraphAdmission = new Map<
     string,
     Promise<{ registered: string[]; excluded: string[] }>
   >();
 
-  constructor(ports: SwmRecoveryExecutorPortsV1) {
+  constructor(ports: SwmTargetExecutorPortsV1) {
     this.#ports = ports;
     this.#snapshotMaterializer = createSharedMemorySnapshotMaterializer({
       store: ports.store,
@@ -165,9 +174,11 @@ export class SwmRecoveryExecutorV1 {
   }
 
   async syncPublicTarget(
-    target: PublicSwmRecoveryTargetV1,
+    target: PublicSwmTargetV1,
   ): Promise<SharedMemorySyncSummary> {
-    const { recoveryGuard } = target;
+    const recoveryGuard = target.mode.kind === 'selected-recovery'
+      ? target.mode.recoveryGuard
+      : undefined;
     const fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'] = (
       requestCtx,
       peerId,
@@ -217,7 +228,7 @@ export class SwmRecoveryExecutorV1 {
         await this.#getSubGraphAdmission(contextGraphId)
       ).excluded,
       stopOnBackoffWorthyFailure: target.stopOnBackoffWorthyFailure,
-      snapshotEvidencePolicy: target.selected
+      snapshotEvidencePolicy: target.mode.kind === 'selected-recovery'
         ? {
           accepts: ({
             verifiedMetadataTriples,
@@ -229,8 +240,12 @@ export class SwmRecoveryExecutorV1 {
           ),
         }
         : undefined,
-      metadataFetcher: target.metadataFetcher,
-      snapshotRecoveryOrder: target.selected ? 'recent-balanced' : 'manifest',
+      metadataFetcher: target.mode.kind === 'selected-recovery'
+        ? target.mode.metadataFetcher
+        : undefined,
+      snapshotRecoveryOrder: target.mode.kind === 'selected-recovery'
+        ? 'recent-balanced'
+        : 'manifest',
       ensureContextGraph: (contextGraphId) => this.#ensureContextGraph(contextGraphId),
       snapshotMaterializer: this.#snapshotMaterializer,
       reconcileFinalizedTwin: async (contextGraphId, descriptor) => {

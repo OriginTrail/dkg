@@ -16,64 +16,47 @@ export interface RecoveryExecutionBoundary {
   /** Cancellable/read-only await: authority is checked before and after it. */
   read<T>(operation: () => Promise<T>): Promise<T>;
   /**
-   * One logical durability unit. Authority is checked at admission; once the
-   * unit starts, revocation cannot interrupt it between related mutations.
+   * One synchronous durability unit. Authority is checked exactly once at
+   * admission; the operation is then allowed to drain without another lease
+   * check being hidden inside this boundary.
    */
-  commit<T>(operation: () => T): T;
+  commitSync<T>(operation: () => T): T;
+  /**
+   * One asynchronous durability unit. Authority is checked exactly once at
+   * admission; an admitted promise is never interrupted between its related
+   * mutations.
+   */
+  commitAsync<T>(operation: () => Promise<T>): Promise<T>;
 }
 
 /** Build one owned boundary for a complete requester recovery invocation. */
 export function createRecoveryExecutionBoundary(
   guard?: RecoveryExecutionGuard,
 ): RecoveryExecutionBoundary {
-  let commitDepth = 0;
-  const assertGuardCurrent = (): void => guard?.assertCurrent();
-  const assertCurrent = (): void => {
-    // Explicit checks made by existing dependency callbacks are also part of
-    // an admitted durability unit. Deferring them prevents revocation from
-    // surfacing after the first mutation but before the remaining mutations.
-    if (commitDepth === 0) assertGuardCurrent();
-  };
+  const assertCurrent = (): void => guard?.assertCurrent();
   return Object.freeze({
     signal: guard?.signal,
     assertCurrent,
     async read<T>(operation: () => Promise<T>): Promise<T> {
-      // A commit may contain dependency calls that are reads internally. Once
-      // admitted, the whole unit is deliberately non-interruptible: checking
-      // the lease here would recreate a delete-without-insert failure window.
-      if (commitDepth > 0) return operation();
-      assertGuardCurrent();
+      guard?.assertCurrent();
       try {
         const result = await operation();
-        assertGuardCurrent();
+        guard?.assertCurrent();
         return result;
       } catch (error) {
         // Revocation is the authoritative outcome even when the in-flight
         // operation reports its own abort/transport error first.
-        assertGuardCurrent();
+        guard?.assertCurrent();
         throw error;
       }
     },
-    commit<T>(operation: () => T): T {
-      if (commitDepth === 0) assertGuardCurrent();
-      commitDepth += 1;
-      try {
-        const result = operation();
-        if (
-          result !== null
-          && (typeof result === 'object' || typeof result === 'function')
-          && typeof (result as unknown as PromiseLike<unknown>).then === 'function'
-        ) {
-          return Promise.resolve(result).finally(() => {
-            commitDepth -= 1;
-          }) as T;
-        }
-        commitDepth -= 1;
-        return result;
-      } catch (error) {
-        commitDepth -= 1;
-        throw error;
-      }
+    commitSync<T>(operation: () => T): T {
+      guard?.assertCurrent();
+      return operation();
+    },
+    async commitAsync<T>(operation: () => Promise<T>): Promise<T> {
+      guard?.assertCurrent();
+      return operation();
     },
   });
 }

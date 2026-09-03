@@ -338,8 +338,8 @@ import {
   createSelectedSwmMetaFetcher,
   type SelectedSwmMetaFetcher,
 } from './sync/selected-swm-meta-fetcher.js';
-import { SwmRecoveryExecutorV1 } from
-  './sync/requester/swm-recovery-executor.js';
+import { SwmTargetExecutorV1 } from
+  './sync/requester/swm-target-executor.js';
 import {
   runOrderedContextGraphSyncs,
   type ContextGraphSyncWork,
@@ -1822,8 +1822,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /** One focused executor owns both public and private SWM target wiring. */
-  private createSwmRecoveryExecutorV1(this: DKGAgent): SwmRecoveryExecutorV1 {
-    return new SwmRecoveryExecutorV1({
+  private createSwmTargetExecutorV1(this: DKGAgent): SwmTargetExecutorV1 {
+    return new SwmTargetExecutorV1({
       store: this.store,
       writeLocks: this.writeLocks,
       listSubGraphs: (contextGraphId) => this.listSubGraphs(contextGraphId),
@@ -7433,7 +7433,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return execution(emptySharedMemorySyncResult());
     }
     const recoveryExecutor = LifecycleSyncMethods.prototype
-      .createSwmRecoveryExecutorV1.call(this);
+      .createSwmTargetExecutorV1.call(this);
     const recoverPrivateContextGraph = (
       contextGraphId: string,
       recoveryLease?: Rfc64SwmRecoveryTargetLeaseV1,
@@ -7485,9 +7485,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return target;
     });
     const recoveryTargetLeases = new Map<string, Rfc64SwmRecoveryTargetLeaseV1>(
-      requestedScope === null
-        ? []
-        : orderedTargets.map((target) => [
+      orderedTargets
+        // Selected recovery always carries a scoped lease. Ordinary sync also
+        // needs one when this peer is the configured RFC-64 complete provider;
+        // otherwise unsubscribe/reconfiguration could revoke authority while
+        // an ordinary-private REPLACE continues without an abort signal.
+        .filter((target) => (
+          requestedScope !== null
+          || this.resolveRfc64CompleteSwmProviderPeerIdsV1(
+            target.contextGraphId,
+          ).includes(remotePeerId)
+        ))
+        .map((target) => [
           target.contextGraphId,
           this.acquireRfc64SwmRecoveryTargetLeaseV1(target),
         ] as const),
@@ -7565,16 +7574,31 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const syncPublicContextGraph = async (
         contextGraphId: string,
         remainingContextGraphs: number,
-      ): Promise<SharedMemorySyncResult> => recoveryExecutor.syncPublicTarget({
-        ctx,
-        remotePeerId,
-        contextGraphId,
-        remainingContextGraphs,
-        recoveryGuard: recoveryLeaseFor(contextGraphId),
-        metadataFetcher: selectedMetaFetcher?.strategy,
-        stopOnBackoffWorthyFailure,
-        selected: selectedSwmEnabled,
-      });
+      ): Promise<SharedMemorySyncResult> => {
+        const mode = selectedSwmEnabled
+          ? (() => {
+            const recoveryGuard = recoveryLeaseFor(contextGraphId);
+            if (recoveryGuard === undefined || selectedMetaFetcher === undefined) {
+              throw new Error(
+                `Selected SWM target "${contextGraphId}" is missing its recovery capability`,
+              );
+            }
+            return {
+              kind: 'selected-recovery' as const,
+              recoveryGuard,
+              metadataFetcher: selectedMetaFetcher.strategy,
+            };
+          })()
+          : { kind: 'ordinary' as const };
+        return recoveryExecutor.syncPublicTarget({
+          ctx,
+          remotePeerId,
+          contextGraphId,
+          remainingContextGraphs,
+          stopOnBackoffWorthyFailure,
+          mode,
+        });
+      };
 
       const completedTargetKeys = new Set<string>();
       const selectedContinuationUnits: SelectedSwmContinuationUnit[] = [];
@@ -7851,7 +7875,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphId,
       'swm_recovery',
       `swm-recovery:${contextGraphId}:${remotePeerId.slice(-8)}`,
-      () => LifecycleSyncMethods.prototype.createSwmRecoveryExecutorV1.call(this)
+      () => LifecycleSyncMethods.prototype.createSwmTargetExecutorV1.call(this)
         .recoverPrivateTarget({
           remotePeerId,
           contextGraphId,

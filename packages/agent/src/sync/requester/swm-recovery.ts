@@ -1,5 +1,4 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { invalidateSwmMaterializationWitness } from '@origintrail-official/dkg-storage';
 import {
   withKeyedLocks,
   type WorkspacePublicSnapshotStore,
@@ -13,6 +12,7 @@ import type { SyncPageFetchOptions, SyncPageResult } from './page-fetch.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import {
   applyVerifiedSwmRecoveryPlan,
+  applyVerifiedSwmRecoveryGraphAsset,
   type SwmRecoveryStore,
   type VerifiedSwmRecoveryApplyPlan,
 } from './swm-recovery-apply.js';
@@ -113,14 +113,15 @@ export interface RecoverContextGraphSwmDeps {
    * row for the same root lingers in `_shared_memory_meta`; the TTL sweep then
    * deletes data for that expired op and can wipe the freshly-recovered root
    * (Codex high). Mirrors the share/gossip apply path's per-root meta
-   * replacement (`deleteMetaForRoot`). Production callers MUST pass it.
+   * replacement (`deleteMetaForRoot`). This port is mandatory so recovery
+   * cannot silently apply data without retiring stale root metadata.
    */
-  readonly replaceMetaForRoots?: (
+  readonly replaceMetaForRoots: (
     roots: readonly { readonly entity: string }[],
     metaGraphs: readonly string[],
   ) => Promise<void>;
   /** Replace the active head/operation rows for each exact graph asset. */
-  readonly replaceMetaForGraphAssets?: (
+  readonly replaceMetaForGraphAssets: (
     assets: readonly GraphScopedSwmRecoveryDescriptor[],
   ) => Promise<void>;
   /**
@@ -129,11 +130,9 @@ export interface RecoverContextGraphSwmDeps {
    * materializer OWNS both halves (`isGraphAssetMaterialized` +
    * `preserveStoredIdentityForSkippedAsset`) over one store and one lock
    * map — a config that could skip but not decide, or pair a predicate from
-   * one store with a materializer over another, is unrepresentable. Absent
-   * => nothing is skipped (every KA's graph and meta are replaced — exactly
-   * the legacy shape the pre-existing suites pin).
+   * one store with a materializer over another, is unrepresentable.
    */
-  readonly snapshotMaterializer?: SharedMemorySnapshotMaterializer;
+  readonly snapshotMaterializer: SharedMemorySnapshotMaterializer;
   readonly ensureContextGraph: (contextGraphId: string) => Promise<void>;
   readonly setCheckpoint: (key: string, offset: number) => void;
   readonly deleteCheckpoint: (key: string) => void;
@@ -142,9 +141,9 @@ export interface RecoverContextGraphSwmDeps {
   /**
    * Rule-4 ownership cache hydrator (parity with `runSharedMemorySync`). Without
    * it, a recovered member holds correct triples but an empty ownership map and
-   * mis-arbitrates its NEXT contended write — so production callers MUST pass it.
+   * mis-arbitrates its NEXT contended write. This port is therefore mandatory.
    */
-  readonly ensureOwnedMap?: (ownershipKey: string) => Map<string, string>;
+  readonly ensureOwnedMap: (ownershipKey: string) => Map<string, string>;
   readonly logInfo?: (ctx: OperationContext, message: string) => void;
   readonly logWarn?: (ctx: OperationContext, message: string) => void;
   /** Backstop against a misbehaving responder that never reports `completed`. */
@@ -255,12 +254,12 @@ async function fetchPhaseFully(
     appendInPlace(all, page.quads);
     lastCheckpointKey = page.checkpointKey;
     if (page.completed) {
-      boundary.commit(() => deps.deleteCheckpoint(page.checkpointKey));
+      boundary.commitSync(() => deps.deleteCheckpoint(page.checkpointKey));
       return { quads: all, completed: true };
     }
     // Not completed (deadline or partial). Stop if no forward progress.
     if (page.nextOffset <= page.resumedFromOffset) break;
-    boundary.commit(() => deps.setCheckpoint(page.checkpointKey, page.nextOffset));
+    boundary.commitSync(() => deps.setCheckpoint(page.checkpointKey, page.nextOffset));
   }
   // Incomplete: the accumulated `all` is a prefix that the caller MUST NOT
   // apply (a tail root may be truncated mid-stream). `all` is local to this
@@ -269,7 +268,7 @@ async function fetchPhaseFully(
   // offset 0 (which makes the responder re-read from the start of its row
   // list) and rebuild the COMPLETE state before the apply gate can pass.
   if (lastCheckpointKey !== undefined) {
-    boundary.commit(() => deps.deleteCheckpoint(lastCheckpointKey!));
+    boundary.commitSync(() => deps.deleteCheckpoint(lastCheckpointKey!));
   }
   return { quads: all, completed: false };
 }
@@ -385,8 +384,8 @@ async function recoverContextGraphSwmUnlocked(
     for (const descriptor of snapshotDescriptorsByRef.get(snapshotRef) ?? []) {
       const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
       if (incrementallyReadyGraphs.has(graphKey)) continue;
-      if (await boundary.read(async () => (
-        await deps.snapshotMaterializer?.isGraphAssetMaterialized(descriptor)
+      if (await boundary.read(() => (
+        deps.snapshotMaterializer.isGraphAssetMaterialized(descriptor)
       ))) {
         incrementallyReadyGraphs.add(graphKey);
         continue;
@@ -404,26 +403,24 @@ async function recoverContextGraphSwmUnlocked(
       // One graph+metadata durability unit. A lease revoked before admission
       // prevents every mutation; one revoked after replacement starts cannot
       // interrupt the related witness/meta writes and strand a torn asset.
-      await boundary.commit(async () => {
+      await boundary.commitAsync(async () => {
         if (!contextGraphEnsured) {
           await deps.ensureContextGraph(deps.contextGraphId);
           contextGraphEnsured = true;
         }
-        await deps.store.replaceGraph(asset.assertionGraph, [...asset.quads]);
-        // #2079: a REPLACE, so the public lane's count gate cannot see it. This
-        // lane is lane-disjoint from the public one in automatic operation
-        // (`planSharedMemorySyncContextGraphs` partitions on
-        // `isPrivateContextGraph`), but the ungated `recover-shared-memory` route
-        // reaches it for any graph — and it exists to repair a corrupt local copy,
-        // which is the worst possible moment to leave a stale memo standing.
-        await invalidateSwmMaterializationWitness(
-          deps.store,
-          asset.assertionGraph,
-          { source: 'agent.swmRecovery.witnessInvalidate' },
-        ).catch(() => {});
-        if (deps.replaceMetaForGraphAssets) {
-          await deps.replaceMetaForGraphAssets([descriptor]);
-        }
+        await applyVerifiedSwmRecoveryGraphAsset({
+          contextGraphId: deps.contextGraphId,
+          asset: {
+            kind: 'replace',
+            descriptor,
+            replacementQuads: asset.quads,
+          },
+          ports: {
+            store: deps.store,
+            replaceMetaForGraphAssets: deps.replaceMetaForGraphAssets,
+            snapshotMaterializer: deps.snapshotMaterializer,
+          },
+        });
         if (verifiedAssetMeta.length > 0) {
           await deps.store.insert([...verifiedAssetMeta]);
         }
@@ -479,8 +476,8 @@ async function recoverContextGraphSwmUnlocked(
           signal: boundary.signal,
         },
       ),
-      deleteCheckpoint: (key) => boundary.commit(() => deps.deleteCheckpoint(key)),
-      setCheckpoint: (key, offset) => boundary.commit(() => deps.setCheckpoint(key, offset)),
+      deleteCheckpoint: (key) => boundary.commitSync(() => deps.deleteCheckpoint(key)),
+      setCheckpoint: (key, offset) => boundary.commitSync(() => deps.setCheckpoint(key, offset)),
       executionBoundary: boundary,
       onSnapshotReady: (snapshot) => materializeReadySnapshot(snapshot.ref),
     });
@@ -604,13 +601,15 @@ async function recoverContextGraphSwmUnlocked(
   });
   const applied = await applyVerifiedSwmRecoveryPlan({
     plan: applyPlan,
-    store: deps.store,
     executionBoundary: boundary,
-    ensureContextGraph: deps.ensureContextGraph,
-    replaceMetaForRoots: deps.replaceMetaForRoots,
-    replaceMetaForGraphAssets: deps.replaceMetaForGraphAssets,
-    snapshotMaterializer: deps.snapshotMaterializer,
-    ensureOwnedMap: deps.ensureOwnedMap,
+    ports: {
+      store: deps.store,
+      ensureContextGraph: deps.ensureContextGraph,
+      replaceMetaForRoots: deps.replaceMetaForRoots,
+      replaceMetaForGraphAssets: deps.replaceMetaForGraphAssets,
+      snapshotMaterializer: deps.snapshotMaterializer,
+      ensureOwnedMap: deps.ensureOwnedMap,
+    },
   });
   // The admitted durability unit must drain after revocation, but a stale
   // invocation must never be accounted as a completed recovery target.

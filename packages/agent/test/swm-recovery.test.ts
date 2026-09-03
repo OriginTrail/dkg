@@ -31,6 +31,8 @@ import {
   recoverContextGraphSwmWithProgressRetries,
   type RecoverContextGraphSwmResult,
 } from '../src/sync/requester/swm-recovery.js';
+import { createSharedMemorySnapshotMaterializer } from
+  '../src/sync/requester/swm-snapshot-materializer.js';
 
 /**
  * integration. `recoverContextGraphSwm` fetches a CG's
@@ -480,6 +482,34 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
   const stores: OxigraphStore[] = [];
   afterEach(async () => { await Promise.all(stores.splice(0).map((s) => s.close().catch(() => {}))); });
 
+  function completeApplyDeps(
+    store: OxigraphStore,
+    writeLocks = new Map<string, Promise<void>>(),
+  ) {
+    const snapshotMaterializer = createSharedMemorySnapshotMaterializer({
+      store,
+      writeLocks,
+      invalidateListContextGraphsCache: () => undefined,
+    });
+    const ownership = new Map<string, Map<string, string>>();
+    return {
+      writeLocks,
+      snapshotMaterializer,
+      replaceMetaForRoots: async () => undefined,
+      replaceMetaForGraphAssets: (assets: Parameters<
+        typeof snapshotMaterializer.replaceMetaForGraphAssets
+      >[0]) => snapshotMaterializer.replaceMetaForGraphAssets(assets),
+      ensureOwnedMap: (key: string) => {
+        let owned = ownership.get(key);
+        if (owned === undefined) {
+          owned = new Map();
+          ownership.set(key, owned);
+        }
+        return owned;
+      },
+    };
+  }
+
   function makeDeps(store: OxigraphStore, sourceData: Quad[], sourceMeta: Quad[] = []) {
     return {
       ctx,
@@ -501,7 +531,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
         })),
         droppedDataTriples: 0,
       }),
-      writeLocks: new Map<string, Promise<void>>(),
+      ...completeApplyDeps(store),
       store,
       ensureContextGraph: async () => {},
       setCheckpoint: () => {},
@@ -711,7 +741,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
         entityCreators: [],
         droppedDataTriples: 0,
       }),
-      writeLocks: new Map<string, Promise<void>>(),
+      ...completeApplyDeps(store),
       store,
       publicSnapshotStore: snapshotStore,
       ensureContextGraph: async () => {},
@@ -834,7 +864,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
         entityCreators: [],
         droppedDataTriples: 0,
       }),
-      writeLocks: new Map<string, Promise<void>>(),
+      ...completeApplyDeps(store),
       store,
       publicSnapshotStore: new MemorySnapshotStore(),
       ensureContextGraph: async () => {},
@@ -933,7 +963,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       processSharedMemoryBatch: async (_dataQuads, metaQuads) => ({
         verifiedData: [], verifiedMeta: metaQuads, entityCreators: [], droppedDataTriples: 0,
       }),
-      writeLocks: new Map<string, Promise<void>>(),
+      ...completeApplyDeps(store),
       store,
       publicSnapshotStore: snapshotStore,
       ensureContextGraph: async () => {},
@@ -1013,7 +1043,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       processSharedMemoryBatch: async (_dataQuads, metaQuads) => ({
         verifiedData: [], verifiedMeta: metaQuads, entityCreators: [], droppedDataTriples: 0,
       }),
-      writeLocks: new Map<string, Promise<void>>(),
+      ...completeApplyDeps(store),
       store,
       publicSnapshotStore: new MemorySnapshotStore(),
       ensureContextGraph: async () => {},
