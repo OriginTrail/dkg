@@ -29,6 +29,46 @@ describe('canonical SPARQL lexical scanner', () => {
     expect(scan.tokens[2]).toMatchObject({ kind: 'word', upper: 'SELECT' });
   });
 
+  it('preprocesses UCHAR escapes while preserving raw token offsets', () => {
+    const source = String.raw`PREFIX \u0065x\u003A <http://example.com/> \u0053ELECT \u003Fs WHERE { \u003Fs \u0065x\u003Aname ?n }`;
+    const scan = scanSparqlLexically(source);
+
+    expect(scan.prologue).toEqual({ endTokenIndex: 3, declaredPrefixes: ['ex'] });
+    const operation = scan.tokens[scan.prologue.endTokenIndex];
+    expect(operation).toMatchObject({
+      kind: 'word',
+      value: String.raw`\u0053ELECT`,
+      logicalValue: 'SELECT',
+      upper: 'SELECT',
+    });
+    for (const token of scan.tokens) {
+      if ('value' in token) {
+        expect(source.slice(token.start, token.end)).toBe(token.value);
+      }
+    }
+    expect(scan.tokens).toContainEqual(expect.objectContaining({
+      kind: 'variable',
+      value: String.raw`\u003Fs`,
+      logicalValue: '?s',
+    }));
+  });
+
+  it.each([
+    String.raw`PREFIX \u00G0x: <http://example.com/> SELECT * WHERE {}`,
+    String.raw`PREFIX \uD800x: <http://example.com/> SELECT * WHERE {}`,
+    String.raw`PREFIX \U00110000x: <http://example.com/> SELECT * WHERE {}`,
+  ])('fails closed for malformed or non-scalar UCHAR names: %s', (source) => {
+    expect(scanSparqlLexically(source).prologue)
+      .toEqual({ endTokenIndex: 0, declaredPrefixes: [] });
+  });
+
+  it('accepts a valid eight-hex-digit UCHAR in a prefix label', () => {
+    const scan = scanSparqlLexically(
+      String.raw`PREFIX \U000003B1: <http://example.com/> SELECT * WHERE {}`,
+    );
+    expect(scan.prologue).toEqual({ endTokenIndex: 3, declaredPrefixes: ['α'] });
+  });
+
   it('uses PN_LOCAL and VARNAME boundaries around operators', () => {
     const scan = scanSparqlLexically(
       String.raw`?1count ?x-STRCONTAINS() ex:value=STRCONTAINS() ex:local.name. ex:escaped\=value`,

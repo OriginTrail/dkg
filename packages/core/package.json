@@ -45,6 +45,11 @@
       "import": "./dist/sparql-lexical-scanner.js",
       "default": "./dist/sparql-lexical-scanner.js"
     },
+    "./sparql-lexical-primitives": {
+      "types": "./dist/sparql-lexical-primitives.d.ts",
+      "import": "./dist/sparql-lexical-primitives.js",
+      "default": "./dist/sparql-lexical-primitives.js"
+    },
     "./closed-data-snapshot": {
       "types": "./dist/sync-wire-objects.d.ts",
       "import": "./dist/sync-wire-objects.js",

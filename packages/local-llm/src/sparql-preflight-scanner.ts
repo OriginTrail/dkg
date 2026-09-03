@@ -46,8 +46,8 @@ function delimitersBalanced(
   let depth = 0;
   for (const token of tokens) {
     if (!isValuedToken(token) || token.kind !== 'symbol') continue;
-    if (token.value === open) depth++;
-    if (token.value === close) depth--;
+    if (token.logicalValue === open) depth++;
+    if (token.logicalValue === close) depth--;
     if (depth < 0) return false;
   }
   return depth === 0;
@@ -76,7 +76,11 @@ function hasKeywordSequence(
     const following = tokens[index + keywords.length];
     if (
       followingSymbol === undefined
-      || (isValuedToken(following) && following.kind === 'symbol' && following.value === followingSymbol)
+      || (
+        isValuedToken(following)
+        && following.kind === 'symbol'
+        && following.logicalValue === followingSymbol
+      )
     ) return true;
   }
   return false;
@@ -90,8 +94,8 @@ function matchingParenthesis(
   for (let index = opening; index < tokens.length; index++) {
     const token = tokens[index];
     if (!isValuedToken(token) || token.kind !== 'symbol') continue;
-    if (token.value === '(') depth++;
-    if (token.value === ')') {
+    if (token.logicalValue === '(') depth++;
+    if (token.logicalValue === ')') {
       depth--;
       if (depth === 0) return index;
     }
@@ -113,7 +117,7 @@ function hasUnwrappedAggregateAlias(
       || (aggregate.start > 0 && !isWhitespace(masked[aggregate.start - 1]))
       || !isValuedToken(opening)
       || opening.kind !== 'symbol'
-      || opening.value !== '('
+      || opening.logicalValue !== '('
     ) continue;
 
     const closingIndex = matchingParenthesis(tokens, index + 1);
@@ -149,8 +153,8 @@ export function scanSparqlPreflight(value: string): SparqlPreflightScan {
   );
   const bareAbsolute = tokens.find((token) => {
     if (!isValuedToken(token) || token.kind !== 'prefixed-name') return false;
-    const colon = token.value.indexOf(':');
-    const scheme = token.value.slice(0, colon).toLowerCase();
+    const colon = token.logicalValue.indexOf(':');
+    const scheme = token.logicalValue.slice(0, colon).toLowerCase();
     return ABSOLUTE_IRI_SCHEMES.has(scheme) && !declaredPrefixes.has(scheme);
   });
 

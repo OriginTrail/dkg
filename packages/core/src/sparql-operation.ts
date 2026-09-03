@@ -50,10 +50,7 @@ const sparqlAnalysisCache = new BoundedLruCache<string, SparqlOperationFacts>(
   (source) => source.length <= SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
 );
 
-const MUTATING_PATTERN = new RegExp(
-  `\\b(${SPARQL_MUTATING_KEYWORDS.join('|')})\\b`,
-  'i',
-);
+const MUTATING_KEYWORD_SET = new Set<string>(SPARQL_MUTATING_KEYWORDS);
 const UPDATE_OPERATION_SET = new Set<string>(SPARQL_UPDATE_OPERATIONS);
 const READ_ONLY_OPERATION_SET = new Set<string>(SPARQL_READ_ONLY_OPERATIONS);
 
@@ -99,10 +96,16 @@ export function analyzeSparqlOperation(sparql: string): SparqlOperationAnalysis 
 
   const scan = scanSparqlLexically(sparql);
   const form = detectSparqlOperationForm(scan);
-  const match = MUTATING_PATTERN.exec(scan.masked);
+  const mutatingToken = scan.tokens.find(
+    (token) => 'value' in token
+      && token.kind === 'word'
+      && MUTATING_KEYWORD_SET.has(token.upper),
+  );
   const facts: SparqlOperationFacts = {
     form,
-    mutatingKeyword: match?.[1] ?? null,
+    mutatingKeyword: mutatingToken && 'value' in mutatingToken
+      ? mutatingToken.value
+      : null,
   };
 
   sparqlAnalysisCache.set(sparql, facts);

@@ -1,7 +1,22 @@
+import {
+  decodeSparqlCodePointEscapes,
+  readSparqlLogicalCodePoint,
+  readSparqlVariableEnd,
+  scanSparqlStringLiteral,
+  skipSparqlIriRef,
+  sparqlAsciiDigitWidth,
+  sparqlPnCharsBaseWidth,
+  sparqlPnCharsUWidth,
+  sparqlPnCharsWidth,
+} from './sparql-lexical-primitives.js';
+
 export type SparqlLexicalToken =
   | {
     readonly kind: 'word' | 'variable' | 'prefixed-name' | 'symbol';
+    /** Exact spelling in the unprocessed source. */
     readonly value: string;
+    /** Value after SPARQL UCHAR preprocessing. */
+    readonly logicalValue: string;
     readonly upper: string;
     readonly start: number;
     readonly end: number;
@@ -29,103 +44,49 @@ export interface SparqlLexicalMask {
   readonly unterminated: boolean;
 }
 
-function codePointWidth(codePoint: number): number {
-  return codePoint > 0xffff ? 2 : 1;
+function logicalCodePointWidth(value: string, index: number, expected: number): number {
+  const logical = readSparqlLogicalCodePoint(value, index);
+  return logical?.codePoint === expected ? logical.rawWidth : 0;
 }
 
-/** SPARQL 1.1 PN_CHARS_BASE, evaluated by code point while retaining UTF-16 offsets. */
-function pnCharsBaseWidth(value: string, index: number): number {
-  const codePoint = value.codePointAt(index);
-  if (codePoint === undefined) return 0;
-  const accepted =
-    (codePoint >= 0x41 && codePoint <= 0x5a)
-    || (codePoint >= 0x61 && codePoint <= 0x7a)
-    || (codePoint >= 0x00c0 && codePoint <= 0x00d6)
-    || (codePoint >= 0x00d8 && codePoint <= 0x00f6)
-    || (codePoint >= 0x00f8 && codePoint <= 0x02ff)
-    || (codePoint >= 0x0370 && codePoint <= 0x037d)
-    || (codePoint >= 0x037f && codePoint <= 0x1fff)
-    || (codePoint >= 0x200c && codePoint <= 0x200d)
-    || (codePoint >= 0x2070 && codePoint <= 0x218f)
-    || (codePoint >= 0x2c00 && codePoint <= 0x2fef)
-    || (codePoint >= 0x3001 && codePoint <= 0xd7ff)
-    || (codePoint >= 0xf900 && codePoint <= 0xfdcf)
-    || (codePoint >= 0xfdf0 && codePoint <= 0xfffd)
-    || (codePoint >= 0x10000 && codePoint <= 0xeffff);
-  return accepted ? codePointWidth(codePoint) : 0;
+function logicalAsciiHexWidth(value: string, index: number): number {
+  const logical = readSparqlLogicalCodePoint(value, index);
+  if (!logical) return 0;
+  const accepted = (logical.codePoint >= 0x30 && logical.codePoint <= 0x39)
+    || (logical.codePoint >= 0x41 && logical.codePoint <= 0x46)
+    || (logical.codePoint >= 0x61 && logical.codePoint <= 0x66);
+  return accepted ? logical.rawWidth : 0;
 }
 
-function pnCharsUWidth(value: string, index: number): number {
-  return value[index] === '_' ? 1 : pnCharsBaseWidth(value, index);
-}
-
-function pnCharsWidth(value: string, index: number): number {
-  const baseWidth = pnCharsUWidth(value, index);
-  if (baseWidth) return baseWidth;
-  const codePoint = value.codePointAt(index);
-  if (codePoint === undefined) return 0;
-  const accepted = codePoint === 0x2d
-    || (codePoint >= 0x30 && codePoint <= 0x39)
-    || codePoint === 0x00b7
-    || (codePoint >= 0x0300 && codePoint <= 0x036f)
-    || (codePoint >= 0x203f && codePoint <= 0x2040);
-  return accepted ? codePointWidth(codePoint) : 0;
-}
-
-function asciiDigitWidth(value: string, index: number): number {
-  const code = value.charCodeAt(index);
-  return code >= 0x30 && code <= 0x39 ? 1 : 0;
-}
-
-/** SPARQL VARNAME has different start/continuation rules from PN_CHARS. */
-function varNameInitialWidth(value: string, index: number): number {
-  return pnCharsUWidth(value, index) || asciiDigitWidth(value, index);
-}
-
-function varNameContinuationWidth(value: string, index: number): number {
-  const ordinaryWidth = pnCharsUWidth(value, index) || asciiDigitWidth(value, index);
-  if (ordinaryWidth) return ordinaryWidth;
-  const codePoint = value.codePointAt(index);
-  if (codePoint === undefined) return 0;
-  const accepted = codePoint === 0x00b7
-    || (codePoint >= 0x0300 && codePoint <= 0x036f)
-    || (codePoint >= 0x203f && codePoint <= 0x2040);
-  return accepted ? codePointWidth(codePoint) : 0;
-}
-
-function isAsciiHex(character: string | undefined): boolean {
-  if (character === undefined) return false;
-  const code = character.charCodeAt(0);
-  return (code >= 0x30 && code <= 0x39)
-    || (code >= 0x41 && code <= 0x46)
-    || (code >= 0x61 && code <= 0x66);
-}
-
-/** SPARQL PLX: percent escapes and backslash-escaped PN_LOCAL punctuation. */
+/** SPARQL PLX after UCHAR preprocessing. */
 function plxWidth(value: string, index: number): number {
-  if (
-    value[index] === '%'
-    && isAsciiHex(value[index + 1])
-    && isAsciiHex(value[index + 2])
-  ) return 3;
-  if (
-    value[index] === '\\'
-    && value[index + 1] !== undefined
-    && "_~.-!$&'()*+,;=/?#@%".includes(value[index + 1])
-  ) return 2;
-  return 0;
+  const logical = readSparqlLogicalCodePoint(value, index);
+  if (!logical) return 0;
+  if (logical.codePoint === 0x25) {
+    const firstHex = logicalAsciiHexWidth(value, index + logical.rawWidth);
+    if (!firstHex) return 0;
+    const secondHex = logicalAsciiHexWidth(value, index + logical.rawWidth + firstHex);
+    return secondHex ? logical.rawWidth + firstHex + secondHex : 0;
+  }
+  if (logical.codePoint !== 0x5c) return 0;
+  const escaped = readSparqlLogicalCodePoint(value, index + logical.rawWidth);
+  if (!escaped) return 0;
+  const escapedCharacter = String.fromCodePoint(escaped.codePoint);
+  return "_~.-!$&'()*+,;=/?#@%".includes(escapedCharacter)
+    ? logical.rawWidth + escaped.rawWidth
+    : 0;
 }
 
 function pnLocalInitialWidth(value: string, index: number): number {
-  return pnCharsUWidth(value, index)
-    || asciiDigitWidth(value, index)
-    || (value[index] === ':' ? 1 : 0)
+  return sparqlPnCharsUWidth(value, index)
+    || sparqlAsciiDigitWidth(value, index)
+    || logicalCodePointWidth(value, index, 0x3a)
     || plxWidth(value, index);
 }
 
 function pnLocalContinuationWidth(value: string, index: number): number {
-  return pnCharsWidth(value, index)
-    || (value[index] === ':' ? 1 : 0)
+  return sparqlPnCharsWidth(value, index)
+    || logicalCodePointWidth(value, index, 0x3a)
     || plxWidth(value, index);
 }
 
@@ -142,8 +103,9 @@ function scanPnLocalEnd(value: string, start: number): number {
       lastValidEnd = cursor;
       continue;
     }
-    if (value[cursor] === '.') {
-      cursor++;
+    const dotWidth = logicalCodePointWidth(value, cursor, 0x2e);
+    if (dotWidth) {
+      cursor += dotWidth;
       continue;
     }
     break;
@@ -151,33 +113,37 @@ function scanPnLocalEnd(value: string, start: number): number {
   return lastValidEnd;
 }
 
-function pnPrefixColonIndex(value: string, start: number): number | undefined {
-  const firstWidth = pnCharsBaseWidth(value, start);
+interface PrefixColon {
+  readonly end: number;
+}
+
+function pnPrefixColon(value: string, start: number): PrefixColon | undefined {
+  const firstWidth = sparqlPnCharsBaseWidth(value, start);
   if (!firstWidth) return undefined;
   let cursor = start + firstWidth;
   let lastValidEnd = cursor;
   while (cursor < value.length) {
-    const width = pnCharsWidth(value, cursor);
+    const width = sparqlPnCharsWidth(value, cursor);
     if (width) {
       cursor += width;
       lastValidEnd = cursor;
       continue;
     }
-    if (value[cursor] === '.') {
-      cursor++;
+    const dotWidth = logicalCodePointWidth(value, cursor, 0x2e);
+    if (dotWidth) {
+      cursor += dotWidth;
       continue;
     }
     break;
   }
-  return value[cursor] === ':' && cursor === lastValidEnd ? cursor : undefined;
+  const colonWidth = logicalCodePointWidth(value, cursor, 0x3a);
+  return colonWidth && cursor === lastValidEnd
+    ? { end: cursor + colonWidth }
+    : undefined;
 }
 
-function isWhitespace(character: string | undefined): boolean {
-  return character !== undefined && /\s/u.test(character);
-}
-
-function isSparqlIriRefBodyChar(character: string | undefined): character is string {
-  return !!character && !/[<>"{}|^`\\\s]/.test(character) && character >= '\x21';
+function isWhitespace(codePoint: number): boolean {
+  return /\s/u.test(String.fromCodePoint(codePoint));
 }
 
 function blank(masked: string[], start: number, end: number): void {
@@ -189,8 +155,16 @@ function lexicalToken(
   value: string,
   start: number,
   end: number,
+  logicalValue = decodeSparqlCodePointEscapes(value) ?? value,
 ): SparqlLexicalToken {
-  return { kind, value, upper: value.toUpperCase(), start, end };
+  return {
+    kind,
+    value,
+    logicalValue,
+    upper: logicalValue.toUpperCase(),
+    start,
+    end,
+  };
 }
 
 function valuedToken(
@@ -217,9 +191,9 @@ function scanPrologue(tokens: readonly SparqlLexicalToken[]): SparqlLexicalScan[
     if (!valuedToken(name) || keyword.end === name.start || iri?.kind !== 'iri') break;
     if (
       name.kind !== 'prefixed-name'
-      || name.value.indexOf(':') !== name.value.length - 1
+      || name.logicalValue.indexOf(':') !== name.logicalValue.length - 1
     ) break;
-    declaredPrefixes.push(name.value.slice(0, -1));
+    declaredPrefixes.push(name.logicalValue.slice(0, -1));
     cursor += 3;
   }
   return { endTokenIndex: cursor, declaredPrefixes };
@@ -237,100 +211,94 @@ function scanSparql(value: string, tokenize: boolean): SparqlLexicalScan {
   let index = 0;
 
   while (index < value.length) {
-    const character = value[index];
-    if (isWhitespace(character)) {
-      index++;
+    const logical = readSparqlLogicalCodePoint(value, index);
+    if (!logical) {
+      const start = index++;
+      if (tokenize) tokens.push(lexicalToken('symbol', value[start], start, index));
+      continue;
+    }
+    if (isWhitespace(logical.codePoint)) {
+      index += logical.rawWidth;
       continue;
     }
 
-    if (character === '#') {
+    if (logical.codePoint === 0x23) {
       const start = index;
-      while (index < value.length && value[index] !== '\n' && value[index] !== '\r') index++;
+      index += logical.rawWidth;
+      while (index < value.length) {
+        const comment = readSparqlLogicalCodePoint(value, index);
+        if (!comment) {
+          index++;
+          continue;
+        }
+        if (comment.codePoint === 0x0a || comment.codePoint === 0x0d) break;
+        index += comment.rawWidth;
+      }
       blank(masked, start, index);
       continue;
     }
 
-    if (character === '"' || character === "'") {
+    if (logical.codePoint === 0x22 || logical.codePoint === 0x27) {
       const start = index;
-      const triple = value[index + 1] === character && value[index + 2] === character;
-      index += triple ? 3 : 1;
-      let closed = false;
-      while (index < value.length) {
-        if (value[index] === '\\') {
-          index = Math.min(value.length, index + 2);
-          continue;
-        }
-        if (
-          value[index] === character
-          && (!triple || (value[index + 1] === character && value[index + 2] === character))
-        ) {
-          index += triple ? 3 : 1;
-          closed = true;
-          break;
-        }
-        index++;
+      const stringScan = scanSparqlStringLiteral(value, start);
+      if (!stringScan) {
+        index += logical.rawWidth;
+        continue;
       }
+      index = stringScan.end;
       blank(masked, start, index);
       if (tokenize) tokens.push({ kind: 'string', start, end: index });
-      if (!closed) unterminated = true;
+      if (!stringScan.closed) unterminated = true;
       continue;
     }
 
-    if (character === '<') {
-      let cursor = index + 1;
-      if (value[cursor] === '>' || isSparqlIriRefBodyChar(value[cursor])) {
-        while (cursor < value.length && isSparqlIriRefBodyChar(value[cursor])) cursor++;
-        if (value[cursor] === '>') {
-          const start = index;
-          index = cursor + 1;
-          blank(masked, start, index);
-          if (tokenize) tokens.push({ kind: 'iri', start, end: index });
-          continue;
+    if (logical.codePoint === 0x3c) {
+      const iriEnd = skipSparqlIriRef(value, index);
+      if (iriEnd !== null) {
+        const start = index;
+        index = iriEnd;
+        blank(masked, start, index);
+        if (tokenize) tokens.push({ kind: 'iri', start, end: index });
+        continue;
+      }
+    }
+
+    if (logical.codePoint === 0x3f || logical.codePoint === 0x24) {
+      const variableEnd = readSparqlVariableEnd(value, index);
+      if (variableEnd !== null) {
+        const start = index;
+        index = variableEnd;
+        if (tokenize) {
+          tokens.push(lexicalToken('variable', value.slice(start, index), start, index));
         }
+        continue;
       }
     }
 
-    const variableStart = (character === '?' || character === '$')
-      ? varNameInitialWidth(value, index + 1)
-      : 0;
-    if (variableStart) {
+    if (logical.codePoint === 0x3a) {
       const start = index;
-      index += 1 + variableStart;
-      let width = varNameContinuationWidth(value, index);
-      while (width) {
-        index += width;
-        width = varNameContinuationWidth(value, index);
-      }
-      if (tokenize) {
-        tokens.push(lexicalToken('variable', value.slice(start, index), start, index));
-      }
-      continue;
-    }
-
-    if (character === ':') {
-      const start = index;
-      index = scanPnLocalEnd(value, index + 1);
+      index = scanPnLocalEnd(value, index + logical.rawWidth);
       if (tokenize) {
         tokens.push(lexicalToken('prefixed-name', value.slice(start, index), start, index));
       }
       continue;
     }
 
-    const wordStart = pnCharsBaseWidth(value, index);
+    const wordStart = sparqlPnCharsBaseWidth(value, index);
     if (wordStart) {
       const start = index;
-      const colonIndex = pnPrefixColonIndex(value, index);
+      const colon = pnPrefixColon(value, index);
       let kind: 'word' | 'prefixed-name';
-      if (colonIndex !== undefined) {
+      if (colon) {
         kind = 'prefixed-name';
-        index = scanPnLocalEnd(value, colonIndex + 1);
+        index = scanPnLocalEnd(value, colon.end);
       } else {
         kind = 'word';
         index += wordStart;
-        let width = pnCharsWidth(value, index);
+        let width = sparqlPnCharsWidth(value, index);
         while (width) {
           index += width;
-          width = pnCharsWidth(value, index);
+          width = sparqlPnCharsWidth(value, index);
         }
       }
       if (tokenize) {
@@ -340,9 +308,15 @@ function scanSparql(value: string, tokenize: boolean): SparqlLexicalScan {
     }
 
     const start = index;
-    index++;
+    index += logical.rawWidth;
     if (tokenize) {
-      tokens.push(lexicalToken('symbol', value.slice(start, index), start, index));
+      tokens.push(lexicalToken(
+        'symbol',
+        value.slice(start, index),
+        start,
+        index,
+        String.fromCodePoint(logical.codePoint),
+      ));
     }
   }
 

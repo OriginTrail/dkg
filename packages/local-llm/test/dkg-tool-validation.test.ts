@@ -70,6 +70,24 @@ describe('DKG SPARQL preflight', () => {
     expect(validateSparqlForDkg(sparql)).toEqual({ ok: true, errors: [] });
   });
 
+  it('accepts legal UCHAR prefix names and rejects malformed escapes', () => {
+    expect(validateSparqlForDkg(
+      String.raw`PREFIX \u0065x: <https://example.com/> SELECT ?s WHERE { ?s ex:name ?n }`,
+    )).toEqual({ ok: true, errors: [] });
+    expect(validateSparqlForDkg(
+      String.raw`PREFIX \u00G0x: <https://example.com/> SELECT ?s WHERE { ?s ex:name ?n }`,
+    ).ok).toBe(false);
+  });
+
+  it('applies UCHAR preprocessing to absolute-scheme policy checks', () => {
+    expect(validateSparqlForDkg(
+      String.raw`ASK { \u0075rn:test:item <schema:name> "x" }`,
+    ).errors).toContain(String.raw`wrap absolute IRI \u0075rn:test:item in angle brackets`);
+    expect(validateSparqlForDkg(
+      String.raw`PREFIX \u0075rn: <https://example.com/> ASK { urn:item <schema:name> "x" }`,
+    ).ok).toBe(true);
+  });
+
   it('accepts a compact BASE prologue and digit-initial variables', () => {
     expect(validateSparqlForDkg(
       'BASE<https://example.com/>SELECT ?1value WHERE { BIND(<item> AS ?1value) }',

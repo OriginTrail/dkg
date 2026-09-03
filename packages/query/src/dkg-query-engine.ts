@@ -2151,9 +2151,8 @@ export function skipSparqlStringLiteral(src: string, i: number): number {
  * single/double/triple-quoted string literals (via
  * {@link skipSparqlStringLiteral}), and IRIREFs (`<...>`) so the
  * `WHERE` substring can NOT be sourced from inside any of those
- * payload contexts. The `<` token is disambiguated as IRI-start
- * vs less-than via the same next-byte allow-list as
- * {@link findWhereBraceStart}'s fallback.
+ * payload contexts. The shared query cursor applies the package's structural
+ * comparison-vs-IRI heuristic consistently at every call site.
  *
  * Returns the index of the `W` of the `WHERE` keyword, or `-1` if
  * none is found at top level. Case-insensitive on the keyword
@@ -2167,25 +2166,6 @@ function findExplicitWhereTokenIdx(sparql: string): number {
   const isWordCont = (c: string): boolean =>
     (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
     (c >= '0' && c <= '9') || c === '_';
-  const isIriStartFirstByte = (c: string): boolean => {
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) return true;
-    return c === '#' || c === '_' || c === '/' || c === '.';
-  };
-  const isIriStart = (idx: number): boolean => {
-    const next = sparql[idx + 1];
-    if (next === undefined) return false;
-    if (!isIriStartFirstByte(next)) return false;
-    for (let j = idx + 1; j < n; j++) {
-      const c = sparql[j];
-      if (c === '>') return true;
-      if (
-        c === '<' || c === '"' || c === '{' || c === '}' ||
-        c === '|' || c === '\\' || c === '^' || c === '`' ||
-        /\s/.test(c)
-      ) return false;
-    }
-    return false;
-  };
 
   let i = 0;
   let braceDepth = 0;
@@ -2200,10 +2180,9 @@ function findExplicitWhereTokenIdx(sparql: string): number {
       continue;
     }
     if (ch === '<') {
-      if (isIriStart(i)) {
-        const end = sparql.indexOf('>', i + 1);
-        if (end === -1) return -1;
-        i = end + 1;
+      const iriEnd = skipSparqlIriRef(sparql, i);
+      if (iriEnd !== null) {
+        i = iriEnd;
         continue;
       }
       i++;
@@ -2310,9 +2289,8 @@ function findWhereBraceStart(sparql: string): number {
   //
   // Fix: locate the explicit `WHERE` token using the SAME token-
   // aware scanner the fallback already uses (skips line comments,
-  // single/double/triple-quoted string literals, and IRIREFs;
-  // disambiguates `<` as IRI-start vs less-than via the next-byte
-  // allow-list below). Then advance past inter-keyword whitespace
+  // single/double/triple-quoted string literals, and IRIREFs through
+  // the shared cursor). Then advance past inter-keyword whitespace
   // (and any line comments) before reading the `{`.
   const whereTokenIdx = findExplicitWhereTokenIdx(sparql);
   if (whereTokenIdx !== -1) {
@@ -2325,76 +2303,6 @@ function findWhereBraceStart(sparql: string): number {
   // can all contain stray `{` chars that the regex would
   // misinterpret as block openers.
   //
-  // dkg-query-engine.ts:559). The classifier rejects obvious
-  // comparison shapes after `<` and falls back to a forward scan
-  // that confirms a balanced IRIREF body. The r30 cut only rejected
-  // `=`, `<`, and whitespace — a pure forward scan from `<` in
-  // compact comparison syntax like
-  //   `FILTER(?n<10&&?m>5)`
-  // walks `1`, `0`, `&`, `&`, `?`, `m` (none of which are
-  // IRIREF-forbidden per the SPARQL grammar
-  // `[^<>"{}|^`\]-[#x00-#x20]`) and lands on `>`, mis-classifying
-  // the entire `<10&&?m>` as an IRI. The forward scan therefore
-  // CANNOT be trusted alone for compact `<` operators that operate
-  // on numerics / variables / sub-expressions whose body bytes are
-  // all IRIREF-legal.
-  //
-  // r30+ resolution: combine an EXPLICIT next-byte allow-list of
-  // characters that can validly start a real-world SPARQL IRIREF
-  // (ALPHA for absolute IRIs `http:` / `urn:` / `did:` / `file:` /
-  // `_blank-node:`, `#` for fragment-only relatives, `_` for the
-  // legacy blank-node-as-IRI shape, `/` for path-only relatives,
-  // and `.` for path-relative IRIs) with the existing
-  // forbidden-byte forward scan. Anything else after `<` is treated
-  // as a comparison and we advance by ONE byte. This bails fast on
-  // every `<digit`, `<?var`, `<$var`, `<(...)`, `<"lit"`, `<-1`,
-  // `<+1`, `<&`, `<|`, `<!`, `<*`, `<=`, `<<` shape — i.e. the
-  // full set of SPARQL operator contexts in which `<` is overloaded
-  // as less-than.
-  //
-  // Note: this is INTENTIONALLY stricter than the SPARQL grammar
-  // (which technically allows `<10>` as an IRIREF). Real-world
-  // SPARQL queries don't write bare-digit IRIs; falling out of the
-  // IRI branch here just means we treat `<` as a comparison and
-  // advance one byte, which is the safe behaviour for the brace
-  // scan we actually care about.
-  const isIriStartFirstByte = (c: string): boolean => {
-    // ASCII letter? (covers every absolute IRI scheme — `http:`,
-    // `urn:`, `did:`, `file:`, `mailto:`, `tag:`, `data:`, …).
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) return true;
-    // `#fragment` (SPARQL allows fragment-only relative IRIREFs
-    // when the base IRI is set by the query environment), `_blah`
-    // (legacy blank-node-as-IRI), `/path` (path-only relative),
-    // `.something` (path-relative). Everything else is a comparison
-    // operator context.
-    return c === '#' || c === '_' || c === '/' || c === '.';
-  };
-  const isIriStart = (idx: number): boolean => {
-    const next = sparql[idx + 1];
-    if (next === undefined) return false;
-    if (!isIriStartFirstByte(next)) return false;
-    for (let j = idx + 1; j < n; j++) {
-      const c = sparql[j];
-      if (c === '>') return true;
-      // Any IRIREF-forbidden character before `>` proves this `<`
-      // is a comparison, not the start of an IRI.
-      if (
-        c === '<' ||
-        c === '"' ||
-        c === '{' ||
-        c === '}' ||
-        c === '|' ||
-        c === '\\' ||
-        c === '^' ||
-        c === '`' ||
-        /\s/.test(c)
-      ) {
-        return false;
-      }
-    }
-    return false;
-  };
-
   const n = sparql.length;
   const opens: number[] = [];
   let depth = 0;
@@ -2406,10 +2314,9 @@ function findWhereBraceStart(sparql: string): number {
       continue;
     }
     if (ch === '<') {
-      if (isIriStart(i)) {
-        const end = sparql.indexOf('>', i + 1);
-        if (end === -1) return -1;
-        i = end + 1;
+      const iriEnd = skipSparqlIriRef(sparql, i);
+      if (iriEnd !== null) {
+        i = iriEnd;
         continue;
       }
       // Comparison operator — advance one byte and keep scanning.
@@ -2764,9 +2671,7 @@ function collectQueryVariables(sparql: string): string[] {
  * This is intentionally small: we handle the three grammar contexts
  * that can legally contain a bare `#` in SPARQL 1.1 (IRI, quoted
  * literal, line comment) and treat everything else as ordinary code.
- * Triple-quoted `"""…"""` / `'''…'''` are NOT recognised because
- * `injectMinTrustFilter` already bails on any WHERE containing tokens
- * from the multi-line literal grammar (FILTER EXISTS, SELECT, …).
+ * Triple-quoted `"""…"""` / `'''…'''` use the same shared string cursor.
  */
 function stripSparqlLineComments(src: string): string {
   let out = '';
@@ -2775,11 +2680,12 @@ function stripSparqlLineComments(src: string): string {
   while (i < n) {
     const ch = src[i];
     if (ch === '<') {
-      const end = src.indexOf('>', i + 1);
-      if (end === -1) { out += src.slice(i); break; }
-      out += src.slice(i, end + 1);
-      i = end + 1;
-      continue;
+      const end = skipSparqlIriRef(src, i);
+      if (end !== null) {
+        out += src.slice(i, end);
+        i = end;
+        continue;
+      }
     }
     if (ch === '"' || ch === "'") {
       // Centralised triple-quoted-aware skip.
@@ -2808,11 +2714,8 @@ function stripSparqlLineComments(src: string): string {
  * that must not be confused by user payloads such as
  * `"{json: 1}"` or `# OPTIONAL: ...`.
  *
- * Triple-quoted
- * (`"""…"""` / `'''…'''`) literals are NOT recognised because
- * `injectMinTrustFilter`'s outer pipeline already refuses any WHERE
- * carrying tokens from the multi-line literal grammar (FILTER EXISTS,
- * SELECT inside, etc.).
+ * Triple-quoted (`"""…"""` / `'''…'''`) literals use the same shared
+ * string cursor as the other structural scans.
  */
 function scrubStringsAndComments(src: string): string {
   const n = src.length;
@@ -2821,14 +2724,12 @@ function scrubStringsAndComments(src: string): string {
   while (i < n) {
     const ch = src[i];
     if (ch === '<') {
-      const end = src.indexOf('>', i + 1);
-      if (end === -1) {
-        for (let k = i; k < n; k++) buf[k] = src[k];
-        return buf.join('');
+      const end = skipSparqlIriRef(src, i);
+      if (end !== null) {
+        for (let k = i; k < end; k++) buf[k] = src[k];
+        i = end;
+        continue;
       }
-      for (let k = i; k <= end; k++) buf[k] = src[k];
-      i = end + 1;
-      continue;
     }
     if (ch === '"' || ch === "'") {
       // Centralised triple-quoted-aware skip.
@@ -2880,10 +2781,11 @@ function splitTopLevelTripleStatements(body: string): string[] {
   while (i < n) {
     const ch = body[i];
     if (ch === '<') {
-      const end = body.indexOf('>', i + 1);
-      if (end === -1) { i = n; break; }
-      i = end + 1;
-      continue;
+      const end = skipSparqlIriRef(body, i);
+      if (end !== null) {
+        i = end;
+        continue;
+      }
     }
     if (ch === '"' || ch === "'") {
       // Centralised triple-quoted-aware skip.

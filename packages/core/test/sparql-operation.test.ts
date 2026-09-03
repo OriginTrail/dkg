@@ -14,6 +14,7 @@ describe('analyzeSparqlOperation memoization', () => {
     'PREFIX δοκιμή: <https://example.com/> SELECT ?s WHERE { ?s δοκιμή:name ?n }',
     'BASE <https://example.com/> SELECT ?s WHERE { ?s ?p ?o }',
     'BASE<https://example.com/>SELECT ?s WHERE { ?s ?p ?o }',
+    String.raw`PREFIX \u0065x: <https://example.com/> SELECT ?s WHERE { ?s ex:name ?n }`,
   ])('classifies a valid PN_PREFIX/BASE prologue: %s', (sparql) => {
     expect(classifySparqlOperation(sparql)).toEqual({ kind: 'read', form: 'SELECT' });
   });
@@ -59,6 +60,24 @@ describe('analyzeSparqlOperation memoization', () => {
     const sparql = 'SELECT * WHERE {} INSERT DATA { <urn:a> <urn:b> <urn:c> }';
     expect(analyzeSparqlOperation(sparql).mutatingKeyword).toBe('INSERT');
     expect(analyzeSparqlOperation(sparql).mutatingKeyword).toBe('INSERT');
+  });
+
+  it('detects mutation from word tokens while preserving source spelling', () => {
+    expect(analyzeSparqlOperation('SELECT * WHERE {} dElEtE DATA {}').mutatingKeyword)
+      .toBe('dElEtE');
+    expect(analyzeSparqlOperation(String.raw`SELECT * WHERE {} \u0044ELETE DATA {}`).mutatingKeyword)
+      .toBe(String.raw`\u0044ELETE`);
+    expect(analyzeSparqlOperation('SELECT * WHERE { ?s ex:DELETE ?o }').mutatingKeyword)
+      .toBeNull();
+    expect(analyzeSparqlOperation(String.raw`SELECT * WHERE {} \u0023 DELETE
+`).mutatingKeyword).toBeNull();
+  });
+
+  it.each([
+    String.raw`PREFIX \u00G0x: <https://example.com/> SELECT * WHERE {}`,
+    String.raw`PREFIX \U00110000x: <https://example.com/> SELECT * WHERE {}`,
+  ])('does not classify through a malformed escaped prefix: %s', (sparql) => {
+    expect(classifySparqlOperation(sparql)).toEqual({ kind: 'unknown' });
   });
 });
 
