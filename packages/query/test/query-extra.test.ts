@@ -62,7 +62,9 @@ import { DKGQueryEngine, resolveViewGraphs } from '../src/dkg-query-engine.js';
 import {
   materializeGraphScopeForExecution,
   prepareGraphScope,
+  rewriteGraphSet,
   wrapWithGraph,
+  wrapWithGraphValues,
 } from '../src/sparql-graph-scope.js';
 import { QueryHandler } from '../src/query-handler.js';
 import type { QueryAccessConfig } from '../src/query-types.js';
@@ -413,11 +415,53 @@ describe('[Q-1] DKGQueryEngine minTrust uses writer-side trust metadata', () => 
     const source = String.raw`SELECT ?s WHERE \u007B GRAPH <urn:g> \u007B ?s <urn:p> "\u007B" \u007D \u007D`;
     const scope = prepareGraphScope(source);
 
-    expect(wrapWithGraph(scope, 'urn:other')).toBe(scope);
+    const rewrite = wrapWithGraph(scope, 'urn:other');
+    expect(rewrite.kind).toBe('ready');
+    if (rewrite.kind !== 'ready') throw new Error('expected graph rewrite to be ready');
+    expect(rewrite.scope).toBe(scope);
     expect(scope.source).toBe(source);
     expect(materializeGraphScopeForExecution(scope)).toBe(
       String.raw`SELECT ?s WHERE { GRAPH <urn:g> { ?s <urn:p> "\u007B" } }`,
     );
+  });
+
+  it('returns typed reasons and preserves canonical graph-set fallbacks', () => {
+    const malformed = rewriteGraphSet(
+      prepareGraphScope('SELECT * WHERE { ?s ?p ?o'),
+      ['urn:g1', 'urn:g2'],
+      'values-union',
+    );
+    expect(malformed).toMatchObject({ kind: 'unsupported', reason: 'missing-where' });
+
+    const nestedUnion = rewriteGraphSet(
+      prepareGraphScope('SELECT * WHERE { { ?s <urn:p> ?o } UNION { ?s <urn:q> ?o } }'),
+      ['urn:g1', 'urn:g2'],
+      'values-union',
+    );
+    expect(nestedUnion).toMatchObject({ kind: 'unsupported', reason: 'nested-union' });
+
+    const collisionScope = prepareGraphScope(
+      'SELECT ?__dkgViewGraph ?s WHERE { ?s <urn:p> ?o }',
+    );
+    expect(wrapWithGraphValues(collisionScope, ['urn:g1', 'urn:g2']))
+      .toMatchObject({ kind: 'unsupported', reason: 'helper-variable-collision' });
+    const collisionFallback = rewriteGraphSet(
+      collisionScope,
+      ['urn:g1', 'urn:g2'],
+      'values-union',
+    );
+    expect(collisionFallback.kind).toBe('ready');
+
+    const graphlessDescribe = rewriteGraphSet(
+      prepareGraphScope('DESCRIBE <urn:s> LIMIT 10'),
+      ['urn:g1', 'urn:g2'],
+      'union-only',
+    );
+    expect(graphlessDescribe.kind).toBe('ready');
+    if (graphlessDescribe.kind !== 'ready') {
+      throw new Error('expected graphless DESCRIBE rewrite to be ready');
+    }
+    expect(graphlessDescribe.scope.source).toContain('FROM <urn:g1> FROM <urn:g2>');
   });
 
   it('does not alias a UCHAR-spelled caller variable to the dedup helper', async () => {

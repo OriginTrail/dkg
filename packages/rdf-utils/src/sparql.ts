@@ -4,6 +4,14 @@ export {
   type SparqlLexicalToken,
 } from './sparql-lexical-scanner.js';
 
+export {
+  indexSparqlStructure,
+  sparqlTokenIndexesAtDepth,
+  type SparqlDelimiterIndex,
+  type SparqlGroupRange,
+  type SparqlStructure,
+} from './sparql-structure.js';
+
 // Grammar helpers used by parsers after they have consumed a prepared
 // artifact. There is deliberately no second, heuristic IRI cursor.
 export {

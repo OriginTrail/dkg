@@ -16,7 +16,6 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   prepareSparql,
-  type SparqlLexicalToken,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
 import type {
   QueryResult,
@@ -37,7 +36,6 @@ import {
   type GetView,
   REMOVED_VIEWS,
   TrustLevel,
-  TRUST_LEVEL_PREDICATE,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
@@ -56,14 +54,13 @@ import {
   constrainGraphVariablesToAllowedSet,
   materializeGraphScopeForExecution,
   prepareGraphScope,
-  transitionGraphScope,
-  wrapWithDeduplicatedGraphValues,
+  requireGraphScopeRewrite,
+  rewriteGraphRoute,
+  rewriteGraphSet,
   wrapWithGraph,
-  wrapWithGraphValues,
-  wrapWithGraphUnion,
-  type GraphScopeRewriteResult,
   type PreparedGraphScope,
 } from './sparql-graph-scope.js';
+import { injectMinTrustFilter } from './sparql-min-trust.js';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { raceAgainstCallerAbort } from './caller-abort.js';
 import { ScopedContentGraphDiscoveryMemo } from './scoped-content-graph-discovery-memo.js';
@@ -361,7 +358,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
     const prepared = prepareSparql(sparql);
-    if (prepared.normalized === null) {
+    if (prepared.status === 'malformed-uchar') {
       throw new Error('SPARQL rejected: malformed Unicode code-point escape');
     }
     if (prepared.wordTokens.has('SERVICE')) {
@@ -503,10 +500,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // partitions for callers that explicitly opt into broad count scans;
       // legacy scoped routes keep their selected memory-layer contract.
       assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
-      routedScope = constrainGraphVariablesToAllowedSet(
+      routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(
         initialGraphScope,
         variableAllowedGraphs,
-      );
+      ));
     }
 
     if (options?.view) {
@@ -545,23 +542,23 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           `${dataGraph}/_verifiable_memory/`,
           reads,
         );
-        const dataRewrite = vmGraphsInc.length > 0
-          ? this.wrapVerifiableMemoryGraphSet(routedScope, [dataGraph, ...vmGraphsInc])
-          : null;
-        const dataScope = dataRewrite?.kind === 'ready'
-          ? dataRewrite.scope
-          : wrapWithGraph(routedScope, dataGraph);
+        const dataScope = requireGraphScopeRewrite(rewriteGraphRoute(
+          routedScope,
+          vmGraphsInc.length > 0 ? [dataGraph, ...vmGraphsInc] : [],
+          dataGraph,
+          'deduplicated-values-union',
+        ));
         // Per-KA SWM: union the discovered …/_shared_memory/{addr}/{number} graphs.
         const swmGraphs = await this.discoverGraphsByPrefix(
           `${sharedMemoryGraph}/`,
           reads,
         );
-        const sharedMemoryRewrite = swmGraphs.length > 0
-          ? wrapWithGraphUnion(routedScope, swmGraphs)
-          : null;
-        const sharedMemoryScope = sharedMemoryRewrite?.kind === 'ready'
-          ? sharedMemoryRewrite.scope
-          : wrapWithGraph(routedScope, sharedMemoryGraph);
+        const sharedMemoryScope = requireGraphScopeRewrite(rewriteGraphRoute(
+          routedScope,
+          swmGraphs,
+          sharedMemoryGraph,
+          'union-only',
+        ));
         // Both are graph-wrapped forms of the CALLER's query, so they carry
         // the same provenance as execAndNormalize (PR #2330 review — this
         // branch previously bypassed the marker, leaving the original 500 for
@@ -577,24 +574,24 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           `${sharedMemoryGraph}/`,
           reads,
         );
-        const rewrite = swmGraphs.length > 0
-          ? wrapWithGraphUnion(routedScope, swmGraphs)
-          : null;
-        effectiveScope = rewrite?.kind === 'ready'
-          ? rewrite.scope
-          : wrapWithGraph(routedScope, sharedMemoryGraph);
+        effectiveScope = requireGraphScopeRewrite(rewriteGraphRoute(
+          routedScope,
+          swmGraphs,
+          sharedMemoryGraph,
+          'union-only',
+        ));
       } else {
         // Per-KA VM: read-both the published per-KA …/_verifiable_memory/{addr}/{number} + root.
         const vmGraphs = await this.discoverGraphsByPrefix(
           `${dataGraph}/_verifiable_memory/`,
           reads,
         );
-        const rewrite = vmGraphs.length > 0
-          ? this.wrapVerifiableMemoryGraphSet(routedScope, [dataGraph, ...vmGraphs])
-          : null;
-        effectiveScope = rewrite?.kind === 'ready'
-          ? rewrite.scope
-          : wrapWithGraph(routedScope, dataGraph);
+        effectiveScope = requireGraphScopeRewrite(rewriteGraphRoute(
+          routedScope,
+          vmGraphs.length > 0 ? [dataGraph, ...vmGraphs] : [],
+          dataGraph,
+          'deduplicated-values-union',
+        ));
       }
     }
 
@@ -748,7 +745,9 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
 
     assertExplicitGraphIrisAllowed(initialScope, allGraphs);
-    const constrainedScope = constrainGraphVariablesToAllowedSet(initialScope, allGraphs);
+    const constrainedScope = requireGraphScopeRewrite(
+      constrainGraphVariablesToAllowedSet(initialScope, allGraphs),
+    );
 
     // Spec §14 trust-gradient filter — only enforced on verifiable-memory
     // where on-chain-anchored trust metadata is expected to live.
@@ -791,32 +790,23 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
     if (allGraphs.length === 1) {
       return this.execAndNormalize(
-        wrapWithGraph(effectiveScope, allGraphs[0]),
+        requireGraphScopeRewrite(wrapWithGraph(effectiveScope, allGraphs[0])),
         reads,
       );
     }
 
     if (view === 'verifiable-memory') {
-      const rewritten = this.wrapVerifiableMemoryGraphSet(effectiveScope, allGraphs);
+      const rewritten = rewriteGraphSet(
+        effectiveScope,
+        allGraphs,
+        'deduplicated-values-union',
+      );
       if (rewritten.kind === 'ready') {
         return this.execAndNormalize(rewritten.scope, reads);
       }
     }
 
     return this.queryMultipleGraphs(effectiveScope, allGraphs, reads);
-  }
-
-  /** Canonical graph rewrite for root + per-KA/per-cgId verifiable-memory reads. */
-  private wrapVerifiableMemoryGraphSet(
-    scope: PreparedGraphScope,
-    graphs: string[],
-  ): GraphScopeRewriteResult {
-    if (graphs.length <= 1) return wrapWithGraphUnion(scope, graphs);
-    const deduplicated = wrapWithDeduplicatedGraphValues(scope, graphs);
-    if (deduplicated.kind === 'ready') return deduplicated;
-    const values = wrapWithGraphValues(scope, graphs);
-    if (values.kind === 'ready') return values;
-    return wrapWithGraphUnion(scope, graphs);
   }
 
   private async queryMultipleGraphs(
@@ -827,7 +817,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const sparql = scope.source;
     if (graphs.length === 0) return { bindings: [] };
     if (graphs.length === 1) {
-      return this.execAndNormalize(wrapWithGraph(scope, graphs[0]), reads);
+      return this.execAndNormalize(
+        requireGraphScopeRewrite(wrapWithGraph(scope, graphs[0])),
+        reads,
+      );
     }
     // Prefer a single `VALUES ?g { … } GRAPH ?g { … }` query: it scopes the
     // read to the named-graph set as ONE basic graph pattern iterated over a
@@ -838,18 +831,14 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // VALUES form plans in constant depth. LIMIT/ORDER BY/DISTINCT/aggregate
     // semantics are preserved because those modifiers stay in the outer query
     // around the injected block.
-    const valuesRewrite = wrapWithGraphValues(scope, graphs);
-    if (valuesRewrite.kind === 'ready') {
-      return this.execAndNormalize(valuesRewrite.scope, reads);
+    const graphSetRewrite = rewriteGraphSet(scope, graphs, 'values-union');
+    if (graphSetRewrite.kind === 'ready') {
+      return this.execAndNormalize(graphSetRewrite.scope, reads);
     }
-    // Residual shapes `wrapWithGraphValues` declines (an inner top-level
+    // Residual shapes the graph-set policy declines (an inner top-level
     // UNION, no locatable WHERE block, or a sentinel-variable collision) keep
     // the original union / per-graph fallback so the #789 form-aware
     // cross-graph merge below is preserved unchanged.
-    const unionRewrite = wrapWithGraphUnion(scope, graphs);
-    if (unionRewrite.kind === 'ready') {
-      return this.execAndNormalize(unionRewrite.scope, reads);
-    }
     // Fallback: the inner body contains a UNION so we cannot safely wrap
     // in a single query without either crashing Blazegraph (nested
     // UnionNode) or leaking a helper variable. Run per-graph and merge
@@ -867,7 +856,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // constructed from multiple source graphs).
       const merged: Quad[] = [];
       for (const g of graphs) {
-        const r = await this.execAndNormalize(wrapWithGraph(scope, g), reads);
+        const r = await this.execAndNormalize(
+          requireGraphScopeRewrite(wrapWithGraph(scope, g)),
+          reads,
+        );
         if (r.quads) merged.push(...r.quads);
       }
       return { bindings: [], quads: dedupeQuads(merged) };
@@ -877,7 +869,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // Boolean result: true iff the pattern matches in ANY graph.
       // Short-circuit on the first positive graph.
       for (const g of graphs) {
-        const r = await this.execAndNormalize(wrapWithGraph(scope, g), reads);
+        const r = await this.execAndNormalize(
+          requireGraphScopeRewrite(wrapWithGraph(scope, g)),
+          reads,
+        );
         if (r.bindings[0]?.result === 'true') {
           return { bindings: [{ result: 'true' }] };
         }
@@ -904,7 +899,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
     const all: Record<string, string>[] = [];
     for (const g of graphs) {
-      const r = await this.execAndNormalize(wrapWithGraph(scope, g), reads);
+      const r = await this.execAndNormalize(
+        requireGraphScopeRewrite(wrapWithGraph(scope, g)),
+        reads,
+      );
       all.push(...r.bindings);
     }
     return { bindings: all };
@@ -1548,310 +1546,6 @@ async function listGraphFamily(
     graphs.unshift(rootGraph);
   }
   return graphs;
-}
-
-/**
- * Rewrites a SPARQL query so EVERY supported subject used in its WHERE
- * block also matches `<http://dkg.io/ontology/trustLevel> ?__trustN`
- * with an integer value ≥ `minTrust`. Subjects with no trust metadata
- * are filtered out (the required triple is absent).
- *
- * The rewriter scans the WHERE block for top-level triple patterns
- * and collects every distinct variable or IRI subject so multi-subject
- * queries like `?a <p> ?o . ?b <q> ?r` have BOTH `?a` and `?b`
- * trust-filtered.
- *
- * Returns an explicit `unsupported` result when:
- *   - no `WHERE { ... }` block can be located;
- *   - braces are unbalanced;
- *   - the WHERE contains nested structure (`{`, `GRAPH`, `OPTIONAL`,
- *     `UNION`, `MINUS`, `SERVICE`, subselect) we cannot safely rewrite;
- *   - the block contains a literal, blank node, collection, or property-list
- *     subject/shape that cannot safely carry the injected metadata pattern;
- *   - no supported subject is found at all.
- * Callers treat `unsupported` as "refuse to run".
- */
-type SourceSparqlToken = Extract<SparqlLexicalToken, { value: string }>;
-
-function isSourceSparqlToken(token: SparqlLexicalToken | undefined): token is SourceSparqlToken {
-  return token !== undefined && 'value' in token;
-}
-
-interface MinTrustBodyScan {
-  readonly valuesClause: string | null;
-  readonly bodySource: string;
-  readonly bodyTokenStart: number;
-  readonly bodyTokenEnd: number;
-}
-
-/**
- * Locate the flat BGP that minTrust can safely augment. All structural
- * decisions use the prepared logical token stream, so active UCHAR spelling
- * cannot hide VALUES braces or introduce a nested group at execution time.
- */
-function scanMinTrustBody(scope: PreparedGraphScope): MinTrustBodyScan | null {
-  const { where } = scope;
-  if (!where) return null;
-
-  const { tokens } = scope.prepared;
-  const bodyEnd = where.closingTokenIndex;
-  let bodyTokenStart = where.openingTokenIndex + 1;
-  let bodySourceStart = where.openEnd;
-  let valuesClause: string | null = null;
-
-  const first = tokens[bodyTokenStart];
-  if (isSourceSparqlToken(first) && first.kind === 'word' && first.upper === 'VALUES') {
-    const variable = tokens[bodyTokenStart + 1];
-    const opening = tokens[bodyTokenStart + 2];
-    if (
-      !isSourceSparqlToken(variable)
-      || variable.kind !== 'variable'
-      || !isSourceSparqlToken(opening)
-      || opening.kind !== 'symbol'
-      || opening.logicalValue !== '{'
-    ) {
-      return null;
-    }
-
-    const valuesOpeningIndex = bodyTokenStart + 2;
-    const valuesClosingIndex = scope.matchingBraceTokenIndexes[valuesOpeningIndex] ?? -1;
-    if (valuesClosingIndex <= valuesOpeningIndex || valuesClosingIndex >= bodyEnd) return null;
-
-    for (let index = valuesOpeningIndex + 1; index < valuesClosingIndex; index++) {
-      const token = tokens[index];
-      if (
-        isSourceSparqlToken(token)
-        && token.kind === 'symbol'
-        && ['{', '}', '(', ')'].includes(token.logicalValue)
-      ) {
-        return null;
-      }
-    }
-
-    const closing = tokens[valuesClosingIndex];
-    valuesClause = scope.source.slice(where.openEnd, closing.end).trim();
-    bodyTokenStart = valuesClosingIndex + 1;
-    bodySourceStart = closing.end;
-  }
-
-  const bodyDepth = scope.braceDepths[where.openingTokenIndex] + 1;
-  const forbiddenWords = new Set([
-    'GRAPH',
-    'OPTIONAL',
-    'UNION',
-    'MINUS',
-    'SERVICE',
-    'VALUES',
-    'SELECT',
-  ]);
-  for (let index = bodyTokenStart; index < bodyEnd; index++) {
-    const token = tokens[index];
-    if (scope.braceDepths[index] !== bodyDepth) return null;
-    if (!isSourceSparqlToken(token)) continue;
-    if (token.kind === 'symbol' && (token.logicalValue === '{' || token.logicalValue === '}')) {
-      return null;
-    }
-    if (token.kind === 'word' && forbiddenWords.has(token.upper)) return null;
-  }
-
-  return {
-    valuesClause,
-    bodySource: scope.source.slice(bodySourceStart, where.close),
-    bodyTokenStart,
-    bodyTokenEnd: bodyEnd,
-  };
-}
-
-function isDecimalPoint(
-  tokens: readonly SparqlLexicalToken[],
-  index: number,
-): boolean {
-  const previous = tokens[index - 1];
-  const point = tokens[index];
-  const next = tokens[index + 1];
-  return isSourceSparqlToken(previous)
-    && isSourceSparqlToken(point)
-    && isSourceSparqlToken(next)
-    && previous.end === point.start
-    && point.end === next.start
-    && /^\d$/u.test(previous.logicalValue)
-    && /^\d$/u.test(next.logicalValue);
-}
-
-function skipMinTrustExpression(
-  tokens: readonly SparqlLexicalToken[],
-  start: number,
-  end: number,
-): number | null {
-  let opening = start + 1;
-  while (opening < end) {
-    const token = tokens[opening];
-    if (
-      isSourceSparqlToken(token)
-      && token.kind === 'symbol'
-      && token.logicalValue === '('
-    ) {
-      break;
-    }
-    if (
-      isSourceSparqlToken(token)
-      && token.kind === 'symbol'
-      && token.logicalValue === '.'
-    ) {
-      return null;
-    }
-    opening++;
-  }
-  if (opening >= end) return null;
-
-  let depth = 0;
-  for (let index = opening; index < end; index++) {
-    const token = tokens[index];
-    if (!isSourceSparqlToken(token) || token.kind !== 'symbol') continue;
-    if (token.logicalValue === '(') depth++;
-    if (token.logicalValue === ')') {
-      depth--;
-      if (depth === 0) return index + 1;
-      if (depth < 0) return null;
-    }
-  }
-  return null;
-}
-
-/**
- * Return each subject token in the supported flat group pattern. FILTER and
- * BIND are skipped with balanced logical parentheses, including when SPARQL's
- * optional dot is omitted before the next triple block.
- */
-function minTrustSubjectTokens(
-  scope: PreparedGraphScope,
-  body: MinTrustBodyScan,
-): SparqlLexicalToken[] | null {
-  const { tokens } = scope.prepared;
-  const subjects: SparqlLexicalToken[] = [];
-  let expectSubject = true;
-  let index = body.bodyTokenStart;
-  while (index < body.bodyTokenEnd) {
-    const token = tokens[index];
-
-    if (
-      isSourceSparqlToken(token)
-      && token.kind === 'word'
-      && (token.upper === 'FILTER' || token.upper === 'BIND')
-    ) {
-      const next = skipMinTrustExpression(tokens, index, body.bodyTokenEnd);
-      if (next === null) return null;
-      expectSubject = true;
-      index = next;
-      continue;
-    }
-
-    if (
-      isSourceSparqlToken(token)
-      && token.kind === 'symbol'
-      && token.logicalValue === '.'
-      && !isDecimalPoint(tokens, index)
-    ) {
-      expectSubject = true;
-      index++;
-      continue;
-    }
-
-    if (
-      isSourceSparqlToken(token)
-      && token.kind === 'symbol'
-      && ['(', ')', '[', ']'].includes(token.logicalValue)
-    ) return null;
-
-    if (expectSubject) {
-      subjects.push(token);
-      expectSubject = false;
-    }
-    index++;
-  }
-  return subjects;
-}
-
-function injectMinTrustFilter(
-  scope: PreparedGraphScope,
-  minTrust: number,
-): GraphScopeRewriteResult {
-  const sparql = scope.source;
-  const unsupported = (): GraphScopeRewriteResult => ({ kind: 'unsupported', original: scope });
-  const bodyStart = scope.where?.openEnd ?? -1;
-  const braceEnd = scope.where?.close ?? -1;
-  const body = scanMinTrustBody(scope);
-  if (bodyStart < 0 || braceEnd < 0 || !body) return unsupported();
-
-  const trimmedInner = body.bodySource.trim();
-  if (trimmedInner.length === 0) return unsupported();
-
-  // The first prepared token of every flat statement is its subject. String,
-  // IRI, and comment payloads are already opaque, while logicalValue exposes
-  // active UCHAR spelling. This keeps subject discovery aligned with the exact
-  // structure that will be materialized for the store.
-  const subjectTokens = minTrustSubjectTokens(scope, body);
-  if (!subjectTokens) return unsupported();
-  const subjects = new Map<string, string>();
-  for (const token of subjectTokens) {
-    if (isSourceSparqlToken(token) && token.kind === 'variable') {
-      subjects.set(`variable:${token.logicalValue.slice(1)}`, token.value);
-      continue;
-    }
-    if (token.kind === 'iri') {
-      subjects.set(
-        `iri:${token.logicalValue}`,
-        sparql.slice(token.start, token.end),
-      );
-      continue;
-    }
-    if (
-      isSourceSparqlToken(token)
-      && token.kind === 'prefixed-name'
-      && !token.logicalValue.startsWith('_:')
-    ) {
-      subjects.set(`prefixed:${token.logicalValue}`, token.value);
-      continue;
-    }
-    return unsupported();
-  }
-  if (subjects.size === 0) return unsupported();
-
-  const extraClauses: string[] = [];
-  const usedVariableNames = new Set(scope.queryVariables.map((variable) => variable.logicalName));
-  let helperIndex = 0;
-  for (const subject of subjects.values()) {
-    let helperName: string;
-    do {
-      helperName = `__dkgTrust${helperIndex++}`;
-    } while (usedVariableNames.has(helperName));
-    usedVariableNames.add(helperName);
-    const trustVar = `?${helperName}`;
-    extraClauses.push(
-      `${subject} <${TRUST_LEVEL_PREDICATE}> ${trustVar} . ` +
-        `FILTER(<http://www.w3.org/2001/XMLSchema#integer>(STR(${trustVar})) >= ${minTrust})`,
-    );
-  }
-
-  const lastBodyToken = scope.prepared.tokens[body.bodyTokenEnd - 1];
-  const endsWithDot = isSourceSparqlToken(lastBodyToken)
-    && lastBodyToken.kind === 'symbol'
-    && lastBodyToken.logicalValue === '.';
-  // Always cross a source line before injecting. Otherwise a trailing comment
-  // can swallow the generated trust clauses even though it is absent from the
-  // prepared token stream.
-  const separator = endsWithDot ? '\n' : '\n. ';
-  const rewrittenBody = `${trimmedInner}${separator}${extraClauses.join(' ')}`;
-  const rewrittenInner = body.valuesClause
-    ? `${body.valuesClause}\n${rewrittenBody}`
-    : rewrittenBody;
-
-  const before = sparql.slice(0, bodyStart);
-  const after = sparql.slice(braceEnd);
-  return {
-    kind: 'ready',
-    scope: transitionGraphScope(scope, `${before} ${rewrittenInner} ${after}`),
-  };
 }
 
 function mergeSharedMemoryAndDataResults(

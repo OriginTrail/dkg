@@ -1,4 +1,5 @@
 import {
+  indexSparqlStructure,
   prepareSparql,
   type SparqlLexicalToken,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
@@ -38,21 +39,6 @@ function isWhitespace(character: string | undefined): boolean {
   return character !== undefined && /\s/u.test(character);
 }
 
-function delimitersBalanced(
-  tokens: readonly SparqlLexicalToken[],
-  open: string,
-  close: string,
-): boolean {
-  let depth = 0;
-  for (const token of tokens) {
-    if (!isValuedToken(token) || token.kind !== 'symbol') continue;
-    if (token.logicalValue === open) depth++;
-    if (token.logicalValue === close) depth--;
-    if (depth < 0) return false;
-  }
-  return depth === 0;
-}
-
 function hasKeywordSequence(
   tokens: readonly SparqlLexicalToken[],
   keywords: readonly string[],
@@ -86,40 +72,11 @@ function hasKeywordSequence(
   return false;
 }
 
-interface ParenthesisIndex {
-  readonly closingByOpening: ReadonlyMap<number, number>;
-  readonly balanced: boolean;
-}
-
-function indexParentheses(
-  tokens: readonly SparqlLexicalToken[],
-): ParenthesisIndex {
-  const openings: number[] = [];
-  const closingByOpening = new Map<number, number>();
-  let balanced = true;
-  for (let index = 0; index < tokens.length; index++) {
-    const token = tokens[index];
-    if (!isValuedToken(token) || token.kind !== 'symbol') continue;
-    if (token.logicalValue === '(') {
-      openings.push(index);
-      continue;
-    }
-    if (token.logicalValue === ')') {
-      const opening = openings.pop();
-      if (opening === undefined) {
-        balanced = false;
-      } else {
-        closingByOpening.set(opening, index);
-      }
-    }
-  }
-  return { closingByOpening, balanced: balanced && openings.length === 0 };
-}
-
 function hasUnwrappedAggregateAlias(
   masked: string,
   tokens: readonly SparqlLexicalToken[],
-  closingByOpening: ReadonlyMap<number, number>,
+  matchingParenthesisTokenIndexes: readonly number[],
+  tokenOffset: number,
 ): boolean {
   for (let index = 0; index < tokens.length; index++) {
     const aggregate = tokens[index];
@@ -134,8 +91,9 @@ function hasUnwrappedAggregateAlias(
       || opening.logicalValue !== '('
     ) continue;
 
-    const closingIndex = closingByOpening.get(index + 1);
-    if (closingIndex === undefined) continue;
+    const absoluteClosingIndex = matchingParenthesisTokenIndexes[index + 1 + tokenOffset] ?? -1;
+    const closingIndex = absoluteClosingIndex - tokenOffset;
+    if (closingIndex < 0) continue;
     const closing = tokens[closingIndex];
     const asToken = tokens[closingIndex + 1];
     const variable = tokens[closingIndex + 2];
@@ -197,8 +155,8 @@ function findBareAbsoluteIri(
 /** Derive local-model policy facts from core's canonical lexical artifacts. */
 export function scanSparqlPreflight(value: string): SparqlPreflightScan {
   const lexical = prepareSparql(value);
+  const structure = indexSparqlStructure(lexical);
   const tokens = lexical.tokens.slice(lexical.prologue.endTokenIndex);
-  const parentheses = indexParentheses(tokens);
   const first = tokens[0];
   const operation = isValuedToken(first)
     && first.kind === 'word'
@@ -214,8 +172,8 @@ export function scanSparqlPreflight(value: string): SparqlPreflightScan {
     masked: lexical.masked,
     unterminated: lexical.unterminated,
     operation,
-    bracesBalanced: delimitersBalanced(lexical.tokens, '{', '}'),
-    parenthesesBalanced: parentheses.balanced,
+    bracesBalanced: structure.braces.balanced,
+    parenthesesBalanced: structure.parentheses.balanced,
     hasFrom: tokens.some(
       (token) => isValuedToken(token) && token.kind === 'word' && token.upper === 'FROM',
     ),
@@ -228,7 +186,8 @@ export function scanSparqlPreflight(value: string): SparqlPreflightScan {
     hasUnwrappedAggregateAlias: hasUnwrappedAggregateAlias(
       lexical.masked,
       tokens,
-      parentheses.closingByOpening,
+      structure.parentheses.matchingTokenIndexes,
+      lexical.prologue.endTokenIndex,
     ),
     bareAbsoluteIri,
   };

@@ -4,6 +4,7 @@ import {
   normalizeFinalAnswer,
   type McpClientLike,
 } from '../src/runtime.js';
+import { DEFAULT_MAX_MODEL_RESPONSE_BYTES } from '../src/model-response.js';
 import type { McpToolDefinition } from '../src/schema.js';
 
 const catalogList: McpToolDefinition = {
@@ -134,6 +135,21 @@ function makeMcp(tools: McpToolDefinition[] = [catalogList, catalogRun]): McpCli
 }
 
 describe('local model response bounds', () => {
+  it('enforces the default 4 MiB ceiling when the option is omitted', async () => {
+    const oversized = new Response('x'.repeat(DEFAULT_MAX_MODEL_RESPONSE_BYTES + 1), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp: makeMcp(),
+      fetch: vi.fn().mockResolvedValue(oversized) as typeof fetch,
+    });
+
+    await expect(runtime.run('Summarize the project.')).rejects.toThrow(
+      `Local LLM response exceeds ${DEFAULT_MAX_MODEL_RESPONSE_BYTES} bytes`,
+    );
+  });
+
   it('rejects an oversized HTTP response before parsing it as JSON', async () => {
     const runtime = await DkgLocalLlmRuntime.create({
       mcp: makeMcp(),

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { prepareSparql } from '../src/sparql-lexical-scanner.js';
 import {
+  indexSparqlStructure,
+  sparqlTokenIndexesAtDepth,
+} from '../src/sparql-structure.js';
+import {
   decodeSparqlCodePointEscapes,
 } from '../src/sparql-lexical-primitives.js';
 
@@ -29,12 +33,12 @@ describe('canonical SPARQL lexical scanner', () => {
     expect(scan.tokens[2]).toMatchObject({ kind: 'word', upper: 'SELECT' });
   });
 
-  it('returns normalization, raw offsets, status, prologue, and word facts together', () => {
+  it('returns one validity status plus raw offsets, prologue, and word facts', () => {
     const source = String.raw`BASE\u003Chttp://example.com/\u003E\u0053ELECT ?s{?s<1#item>?o}`;
     const prepared = prepareSparql(source);
 
-    expect(prepared.normalized).toBe('BASE<http://example.com/>SELECT ?s{?s<1#item>?o}');
-    expect(prepared.lexicalStatus).toEqual({ valid: true, unterminated: false });
+    expect(prepared.status).toBe('valid');
+    expect(prepared.unterminated).toBe(false);
     expect(prepared.prologue.endTokenIndex).toBe(2);
     expect(prepared.wordTokens.has('SELECT')).toBe(true);
     const relativeIri = prepared.tokens.find((token) => token.kind === 'iri' && token.start > 20);
@@ -64,6 +68,38 @@ describe('canonical SPARQL lexical scanner', () => {
       value: String.raw`\u003Fs`,
       logicalValue: '?s',
     }));
+    expect(scan.tokens.every((token) => !('normalizedStart' in token))).toBe(true);
+    expect(scan.tokens.every((token) => !('normalizedEnd' in token))).toBe(true);
+  });
+
+  it('indexes UCHAR-spelled groups and nested expressions once for policy consumers', () => {
+    const prepared = prepareSparql(
+      String.raw`SELECT * WHERE \u007B ?s <urn:p> ?o . OPTIONAL \u007B FILTER((?o > 1)) \u007D \u007D`,
+    );
+    const structure = indexSparqlStructure(prepared);
+    const openingIndexes = prepared.tokens
+      .map((token, index) => ({ token, index }))
+      .filter(({ token }) => (
+        'value' in token && token.kind === 'symbol' && token.logicalValue === '{'
+      ))
+      .map(({ index }) => index);
+
+    expect(structure.braces.balanced).toBe(true);
+    expect(structure.parentheses.balanced).toBe(true);
+    expect(openingIndexes).toHaveLength(2);
+    expect(structure.braces.matchingTokenIndexes[openingIndexes[0]])
+      .toBeGreaterThan(openingIndexes[1]);
+    expect(structure.braces.depthBefore[openingIndexes[1]]).toBe(1);
+    expect(structure.braces.ranges).toEqual([
+      expect.objectContaining({ openingTokenIndex: openingIndexes[0], depth: 0 }),
+      expect.objectContaining({ openingTokenIndex: openingIndexes[1], depth: 1 }),
+    ]);
+    expect(sparqlTokenIndexesAtDepth(
+      structure.braces,
+      2,
+      openingIndexes[1] + 1,
+      structure.braces.matchingTokenIndexes[openingIndexes[1]],
+    ).length).toBeGreaterThan(0);
   });
 
   it('derives an IRI value without promoting UCHAR payload to delimiters', () => {
@@ -100,8 +136,8 @@ describe('canonical SPARQL lexical scanner', () => {
   ])('keeps UCHAR string payload opaque in the policy view: %s', (source) => {
     const prepared = prepareSparql(source);
 
-    expect(prepared.normalized).toBe(source);
-    expect(prepared.lexicalStatus).toEqual({ valid: true, unterminated: false });
+    expect(prepared.status).toBe('valid');
+    expect(prepared.unterminated).toBe(false);
     expect(prepared.tokens.filter((token) => token.kind === 'string')).toHaveLength(1);
   });
 
@@ -124,8 +160,9 @@ describe('canonical SPARQL lexical scanner', () => {
     String.raw`PREFIX \uD800x: <http://example.com/> SELECT * WHERE {}`,
     String.raw`PREFIX \U00110000x: <http://example.com/> SELECT * WHERE {}`,
   ])('fails closed for malformed or non-scalar UCHAR names: %s', (source) => {
-    expect(prepareSparql(source).prologue)
-      .toEqual({ endTokenIndex: 0, declaredPrefixes: [] });
+    const prepared = prepareSparql(source);
+    expect(prepared.status).toBe('malformed-uchar');
+    expect(prepared.prologue).toEqual({ endTokenIndex: 0, declaredPrefixes: [] });
   });
 
   it('accepts a valid eight-hex-digit UCHAR in a prefix label', () => {

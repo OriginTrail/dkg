@@ -399,7 +399,7 @@ export class QueryHandler {
     }
 
     const prepared = prepareSparql(sparql);
-    if (prepared.normalized === null) {
+    if (prepared.status === 'malformed-uchar') {
       return errorResponse(opId, 'ERROR', 'SPARQL rejected: malformed Unicode code-point escape');
     }
     const codeWords = prepared.wordTokens;

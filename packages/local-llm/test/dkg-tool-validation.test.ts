@@ -192,6 +192,9 @@ describe('DKG SPARQL preflight', () => {
     expect(validateSparqlForDkg(
       'SELECT COUNT(?item) AS ?1count WHERE { ?item ?predicate ?object }',
     ).errors).toContain('wrap aggregate aliases as (COUNT(...) AS ?count)');
+    expect(validateSparqlForDkg(
+      'PREFIX ex: <urn:example:> SELECT COUNT(?item) AS ?count WHERE { ?item ex:p ?object }',
+    ).errors).toContain('wrap aggregate aliases as (COUNT(...) AS ?count)');
   });
 
   it('validates both raw and saved-catalog query tools', () => {
