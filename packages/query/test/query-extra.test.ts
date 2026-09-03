@@ -418,7 +418,7 @@ describe('[Q-1] DKGQueryEngine minTrust uses writer-side trust metadata', () => 
     const rewrite = wrapWithGraph(scope, 'urn:other');
     expect(rewrite.kind).toBe('ready');
     if (rewrite.kind !== 'ready') throw new Error('expected graph rewrite to be ready');
-    expect(rewrite.scope).toBe(scope);
+    expect(rewrite.value).toBe(scope);
     expect(scope.source).toBe(source);
     expect(materializeGraphScopeForExecution(scope)).toBe(
       String.raw`SELECT ?s WHERE { GRAPH <urn:g> { ?s <urn:p> "\u007B" } }`,
@@ -461,7 +461,28 @@ describe('[Q-1] DKGQueryEngine minTrust uses writer-side trust metadata', () => 
     if (graphlessDescribe.kind !== 'ready') {
       throw new Error('expected graphless DESCRIBE rewrite to be ready');
     }
-    expect(graphlessDescribe.scope.source).toContain('FROM <urn:g1> FROM <urn:g2>');
+    expect(graphlessDescribe.value.source).toContain('FROM <urn:g1> FROM <urn:g2>');
+  });
+
+  it('prepares graph targets as payload-complete discriminated variants', () => {
+    const [iriTarget, variableTarget, invalidTarget] = prepareGraphScope(
+      'SELECT * WHERE { GRAPH <urn:allowed> { ?s ?p ?o } '
+        + 'GRAPH ?g { ?s ?p ?o } GRAPH missing:name { ?s ?p ?o } }',
+    ).graphTargets;
+
+    expect(iriTarget.kind).toBe('iri');
+    if (iriTarget.kind !== 'iri') throw new Error('expected IRI graph target');
+    expect(iriTarget.iri).toBe('urn:allowed');
+    expect('variable' in iriTarget).toBe(false);
+
+    expect(variableTarget.kind).toBe('variable');
+    if (variableTarget.kind !== 'variable') throw new Error('expected variable graph target');
+    expect(variableTarget.variable).toEqual({ source: '?g', logicalName: 'g' });
+    expect('iri' in variableTarget).toBe(false);
+
+    expect(invalidTarget.kind).toBe('invalid');
+    expect('iri' in invalidTarget).toBe(false);
+    expect('variable' in invalidTarget).toBe(false);
   });
 
   it('does not alias a UCHAR-spelled caller variable to the dedup helper', async () => {

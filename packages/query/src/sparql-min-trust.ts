@@ -4,10 +4,11 @@ import {
   type SparqlLexicalToken,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
 import {
-  transitionGraphScope,
-  type GraphScopeRewriteResult,
-  type PreparedGraphScope,
-} from './sparql-graph-scope.js';
+  sparqlRewriteReady,
+  sparqlRewriteUnsupported,
+  type PreparedSparqlQuery,
+  type SparqlRewriteResult,
+} from './prepared-sparql-query.js';
 
 type SourceSparqlToken = Extract<SparqlLexicalToken, { value: string }>;
 
@@ -25,7 +26,7 @@ interface MinTrustBodyScan {
 }
 
 /** Locate the flat BGP that the min-trust policy can safely augment. */
-function scanMinTrustBody(scope: PreparedGraphScope): MinTrustBodyScan | null {
+function scanMinTrustBody(scope: PreparedSparqlQuery): MinTrustBodyScan | null {
   const { where } = scope;
   if (
     !where
@@ -120,7 +121,7 @@ function isDecimalPoint(tokens: readonly SparqlLexicalToken[], index: number): b
 }
 
 function skipMinTrustExpression(
-  scope: PreparedGraphScope,
+  scope: PreparedSparqlQuery,
   start: number,
   end: number,
 ): number | null {
@@ -147,7 +148,7 @@ function skipMinTrustExpression(
 
 /** Collect subject tokens in the supported flat group pattern. */
 function minTrustSubjectTokens(
-  scope: PreparedGraphScope,
+  scope: PreparedSparqlQuery,
   body: MinTrustBodyScan,
 ): SparqlLexicalToken[] | null {
   const { tokens } = scope.prepared;
@@ -201,23 +202,22 @@ function minTrustSubjectTokens(
  * handling by the query engine.
  */
 export function injectMinTrustFilter(
-  scope: PreparedGraphScope,
+  query: PreparedSparqlQuery,
   minTrust: number,
-): GraphScopeRewriteResult {
-  const unsupported = (): GraphScopeRewriteResult => ({
-    kind: 'unsupported',
-    original: scope,
-    reason: 'min-trust-unsupported',
-  });
-  const bodyStart = scope.where?.openEnd ?? -1;
-  const braceEnd = scope.where?.close ?? -1;
-  const body = scanMinTrustBody(scope);
+): MinTrustRewriteResult {
+  const unsupported = (): MinTrustRewriteResult => sparqlRewriteUnsupported(
+    query,
+    'unsupported-query-shape',
+  );
+  const bodyStart = query.where?.openEnd ?? -1;
+  const braceEnd = query.where?.close ?? -1;
+  const body = scanMinTrustBody(query);
   if (bodyStart < 0 || braceEnd < 0 || !body) return unsupported();
 
   const trimmedInner = body.bodySource.trim();
   if (trimmedInner.length === 0) return unsupported();
 
-  const subjectTokens = minTrustSubjectTokens(scope, body);
+  const subjectTokens = minTrustSubjectTokens(query, body);
   if (!subjectTokens) return unsupported();
   const subjects = new Map<string, string>();
   for (const token of subjectTokens) {
@@ -228,7 +228,7 @@ export function injectMinTrustFilter(
     if (token.kind === 'iri') {
       subjects.set(
         `iri:${token.logicalValue}`,
-        scope.source.slice(token.start, token.end),
+        query.source.slice(token.start, token.end),
       );
       continue;
     }
@@ -246,7 +246,7 @@ export function injectMinTrustFilter(
 
   const extraClauses: string[] = [];
   const usedVariableNames = new Set(
-    scope.queryVariables.map((variable) => variable.logicalName),
+    query.queryVariables.map((variable) => variable.logicalName),
   );
   let helperIndex = 0;
   for (const subject of subjects.values()) {
@@ -262,7 +262,7 @@ export function injectMinTrustFilter(
     );
   }
 
-  const lastBodyToken = scope.prepared.tokens[body.bodyTokenEnd - 1];
+  const lastBodyToken = query.prepared.tokens[body.bodyTokenEnd - 1];
   const endsWithDot = isSourceSparqlToken(lastBodyToken)
     && lastBodyToken.kind === 'symbol'
     && lastBodyToken.logicalValue === '.';
@@ -272,11 +272,15 @@ export function injectMinTrustFilter(
     ? `${body.valuesClause}\n${rewrittenBody}`
     : rewrittenBody;
 
-  return {
-    kind: 'ready',
-    scope: transitionGraphScope(
-      scope,
-      `${scope.source.slice(0, bodyStart)} ${rewrittenInner} ${scope.source.slice(braceEnd)}`,
-    ),
-  };
+  return sparqlRewriteReady(
+    `${query.source.slice(0, bodyStart)} ${rewrittenInner} ${query.source.slice(braceEnd)}`,
+  );
 }
+
+export type MinTrustUnsupportedReason = 'unsupported-query-shape';
+
+export type MinTrustRewriteResult = SparqlRewriteResult<
+  string,
+  MinTrustUnsupportedReason,
+  PreparedSparqlQuery
+>;

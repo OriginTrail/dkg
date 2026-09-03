@@ -1,12 +1,17 @@
 import {
-  indexSparqlStructure,
   prepareSparql,
-  sparqlTokenIndexesAtDepth,
   type PreparedSparql,
   type SparqlLexicalToken,
-  type SparqlStructure,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { assertSafeIri } from '@origintrail-official/dkg-core';
+import {
+  prepareSparqlQuery,
+  sparqlRewriteReady,
+  sparqlRewriteUnsupported,
+  type PreparedSparqlQuery,
+  type SparqlQueryVariable,
+  type SparqlRewriteResult,
+} from './prepared-sparql-query.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 
 type ValuedToken = Extract<SparqlLexicalToken, { value: string }>;
@@ -19,81 +24,63 @@ function iriValue(token: SparqlLexicalToken | undefined): string | null {
   return token?.kind === 'iri' ? token.logicalValue : null;
 }
 
-export interface SparqlWhereRange {
-  /** Raw source span of the opening brace token. UCHAR tokens span >1 code unit. */
-  readonly openStart: number;
-  readonly openEnd: number;
-  readonly close: number;
-  readonly hasUnion: boolean;
-  readonly openingTokenIndex: number;
-  readonly closingTokenIndex: number;
+function assertNeverGraphTarget(target: never): never {
+  throw new ScopedQueryViolationError(
+    `unrecognized prepared GRAPH target: ${JSON.stringify(target)}`,
+  );
 }
 
-export interface SparqlGraphTarget {
-  readonly kind: 'iri' | 'variable' | 'invalid';
-  readonly value?: string;
+interface SparqlGraphTargetCoordinates {
   readonly keywordTokenIndex: number;
   readonly targetTokenIndex: number;
   readonly braceDepth: number;
 }
 
-/** A variable's source spelling and its UCHAR-decoded SPARQL identity. */
-export interface SparqlScopeVariable {
-  readonly source: string;
-  readonly logicalName: string;
-}
+export type SparqlGraphTarget = SparqlGraphTargetCoordinates & (
+  | { readonly kind: 'iri'; readonly iri: string }
+  | { readonly kind: 'variable'; readonly variable: SparqlQueryVariable }
+  | { readonly kind: 'invalid' }
+);
 
 /**
  * One canonical, source-coordinate model for graph authorization and rewrites.
  * Comments, strings, and IRI payloads have already been made opaque by the RDF
  * scanner; every fact below is derived from that same token stream.
  */
-export interface PreparedGraphScope {
-  readonly source: string;
-  readonly prepared: PreparedSparql;
+export interface PreparedGraphScope extends PreparedSparqlQuery {
   readonly prefixes: ReadonlyMap<string, string>;
-  readonly where: SparqlWhereRange | null;
-  readonly operation: string | null;
   readonly hasDatasetClause: boolean;
   readonly hasGraphClause: boolean;
   readonly graphTargets: readonly SparqlGraphTarget[];
-  readonly graphVariables: readonly SparqlScopeVariable[];
-  readonly queryVariables: readonly SparqlScopeVariable[];
-  readonly whereVariables: readonly SparqlScopeVariable[];
-  /** Canonical delimiter pairing/depth index shared by every policy consumer. */
-  readonly structure: SparqlStructure;
+  readonly graphVariables: readonly SparqlQueryVariable[];
 }
 
-export type GraphScopeRewriteResult =
-  | { readonly kind: 'ready'; readonly scope: PreparedGraphScope }
-  | {
-    readonly kind: 'unsupported';
-    readonly original: PreparedGraphScope;
-    readonly reason: GraphScopeUnsupportedReason;
-  };
+export type GraphScopeRewriteResult = SparqlRewriteResult<
+  PreparedGraphScope,
+  GraphScopeUnsupportedReason
+>;
 
 export type GraphScopeUnsupportedReason =
   | 'missing-where'
   | 'nested-union'
   | 'strategy-rejected'
   | 'helper-variable-collision'
-  | 'no-projected-variables'
-  | 'min-trust-unsupported';
+  | 'no-projected-variables';
 
 function ready(scope: PreparedGraphScope): GraphScopeRewriteResult {
-  return { kind: 'ready', scope };
+  return sparqlRewriteReady(scope);
 }
 
 function unsupported(
   original: PreparedGraphScope,
   reason: GraphScopeUnsupportedReason,
 ): GraphScopeRewriteResult {
-  return { kind: 'unsupported', original, reason };
+  return sparqlRewriteUnsupported(original, reason);
 }
 
 /** Convert a total rewrite result into the required scoped query boundary. */
 export function requireGraphScopeRewrite(result: GraphScopeRewriteResult): PreparedGraphScope {
-  if (result.kind === 'ready') return result.scope;
+  if (result.kind === 'ready') return result.value;
   if (result.reason === 'missing-where') {
     throw new ScopedQueryViolationError('unable to locate a graph-scopable WHERE block');
   }
@@ -132,60 +119,6 @@ export function materializeGraphScopeForExecution(scope: PreparedGraphScope): st
   return chunks.join('');
 }
 
-function whereRange(
-  prepared: PreparedSparql,
-  structure: SparqlStructure,
-): SparqlWhereRange | null {
-  const { tokens } = prepared;
-  const topLevelOpenings: number[] = [];
-  let explicitOpening = -1;
-
-  for (const index of sparqlTokenIndexesAtDepth(structure.braces, 0)) {
-    const token = tokens[index];
-    if (
-      isValuedToken(token)
-      && token.kind === 'word'
-      && token.upper === 'WHERE'
-      && structure.braces.depthBefore[index] === 0
-    ) {
-      const next = tokens[index + 1];
-      if (!isValuedToken(next) || next.kind !== 'symbol' || next.logicalValue !== '{') {
-        return null;
-      }
-      explicitOpening = index + 1;
-      break;
-    }
-    if (
-      isValuedToken(token)
-      && token.kind === 'symbol'
-      && token.logicalValue === '{'
-      && structure.braces.depthBefore[index] === 0
-    ) {
-      topLevelOpenings.push(index);
-    }
-  }
-
-  const openingIndex = explicitOpening >= 0
-    ? explicitOpening
-    : structure.braces.balanced
-      ? (topLevelOpenings.at(-1) ?? -1)
-      : -1;
-  if (openingIndex < 0) return null;
-  const closingIndex = structure.braces.matchingTokenIndexes[openingIndex] ?? -1;
-  if (closingIndex < 0) return null;
-  const hasUnion = tokens.slice(openingIndex + 1, closingIndex).some(
-    (token) => isValuedToken(token) && token.kind === 'word' && token.upper === 'UNION',
-  );
-  return {
-    openStart: tokens[openingIndex].start,
-    openEnd: tokens[openingIndex].end,
-    close: tokens[closingIndex].start,
-    hasUnion,
-    openingTokenIndex: openingIndex,
-    closingTokenIndex: closingIndex,
-  };
-}
-
 function prefixesFromTokens(prepared: PreparedSparql): Map<string, string> {
   const prefixes = new Map<string, string>();
   for (let index = 0; index + 2 < prepared.prologue.endTokenIndex; index++) {
@@ -211,42 +144,36 @@ export function prepareGraphScope(
   source: string,
   prepared: PreparedSparql = prepareSparql(source),
 ): PreparedGraphScope {
+  const query = prepareSparqlQuery(source, prepared);
   const prefixes = prefixesFromTokens(prepared);
-  const structure = indexSparqlStructure(prepared);
-  const braceDepths = structure.braces.depthBefore;
+  const braceDepths = query.structure.braces.depthBefore;
   const graphTargets: SparqlGraphTarget[] = [];
-  const graphVariables: SparqlScopeVariable[] = [];
+  const graphVariables: SparqlQueryVariable[] = [];
   const graphVariableSet = new Set<string>();
-  const queryVariables: SparqlScopeVariable[] = [];
-  const queryVariableSet = new Set<string>();
   let hasDatasetClause = false;
 
   for (let index = 0; index < prepared.tokens.length; index++) {
     const token = prepared.tokens[index];
-    if (isValuedToken(token) && token.kind === 'variable') {
-      const logicalName = token.logicalValue.slice(1);
-      if (!queryVariableSet.has(logicalName)) {
-        queryVariableSet.add(logicalName);
-        queryVariables.push({ source: token.value, logicalName });
-      }
-    }
     if (!isValuedToken(token) || token.kind !== 'word') continue;
     if (token.upper === 'FROM') hasDatasetClause = true;
     if (token.upper !== 'GRAPH') continue;
 
     const target = prepared.tokens[index + 1];
     if (isValuedToken(target) && target.kind === 'variable') {
+      const variable = {
+        source: target.value,
+        logicalName: target.logicalValue.slice(1),
+      };
       graphTargets.push({
         kind: 'variable',
-        value: target.logicalValue,
+        variable,
         keywordTokenIndex: index,
         targetTokenIndex: index + 1,
         braceDepth: braceDepths[index],
       });
-      const logicalName = target.logicalValue.slice(1);
-      if (!graphVariableSet.has(logicalName)) {
-        graphVariableSet.add(logicalName);
-        graphVariables.push({ source: target.value, logicalName });
+      if (!graphVariableSet.has(variable.logicalName)) {
+        graphVariableSet.add(variable.logicalName);
+        graphVariables.push(variable);
       }
       continue;
     }
@@ -255,7 +182,7 @@ export function prepareGraphScope(
     if (directIri !== null) {
       graphTargets.push({
         kind: 'iri',
-        value: directIri,
+        iri: directIri,
         keywordTokenIndex: index,
         targetTokenIndex: index + 1,
         braceDepth: braceDepths[index],
@@ -269,7 +196,7 @@ export function prepareGraphScope(
       if (colon >= 0 && base !== undefined) {
         graphTargets.push({
           kind: 'iri',
-          value: `${base}${target.logicalValue.slice(colon + 1)}`,
+          iri: `${base}${target.logicalValue.slice(colon + 1)}`,
           keywordTokenIndex: index,
           targetTokenIndex: index + 1,
           braceDepth: braceDepths[index],
@@ -286,39 +213,13 @@ export function prepareGraphScope(
     });
   }
 
-  const operationToken = prepared.tokens[prepared.prologue.endTokenIndex];
-  const where = whereRange(prepared, structure);
-  const whereVariables: SparqlScopeVariable[] = [];
-  const whereVariableSet = new Set<string>();
-  if (where) {
-    for (let index = where.openingTokenIndex + 1; index < where.closingTokenIndex; index++) {
-      const token = prepared.tokens[index];
-      if (
-        isValuedToken(token)
-        && token.kind === 'variable'
-        && !whereVariableSet.has(token.logicalValue.slice(1))
-      ) {
-        const logicalName = token.logicalValue.slice(1);
-        whereVariableSet.add(logicalName);
-        whereVariables.push({ source: token.value, logicalName });
-      }
-    }
-  }
   return {
-    source,
-    prepared,
+    ...query,
     prefixes,
-    where,
-    operation: isValuedToken(operationToken) && operationToken.kind === 'word'
-      ? operationToken.upper
-      : null,
     hasDatasetClause,
     hasGraphClause: graphTargets.length > 0,
     graphTargets,
     graphVariables,
-    queryVariables,
-    whereVariables,
-    structure,
   };
 }
 
@@ -334,21 +235,29 @@ export function assertExplicitGraphIrisAllowed(
 ): void {
   const allowed = new Set(allowedGraphs);
   for (const target of scope.graphTargets) {
-    if (target.kind === 'invalid') {
-      const token = scope.prepared.tokens[target.targetTokenIndex];
-      if (isValuedToken(token) && token.kind === 'prefixed-name') {
+    switch (target.kind) {
+      case 'invalid': {
+        const token = scope.prepared.tokens[target.targetTokenIndex];
+        if (isValuedToken(token) && token.kind === 'prefixed-name') {
+          throw new ScopedQueryViolationError(
+            `GRAPH prefixed target ${token.logicalValue} cannot be resolved from PREFIX declarations`,
+          );
+        }
         throw new ScopedQueryViolationError(
-          `GRAPH prefixed target ${token.logicalValue} cannot be resolved from PREFIX declarations`,
+          'GRAPH target must be a variable, explicit IRI, or resolvable prefixed name on scoped queries',
         );
       }
-      throw new ScopedQueryViolationError(
-        'GRAPH target must be a variable, explicit IRI, or resolvable prefixed name on scoped queries',
-      );
-    }
-    if (target.kind === 'iri' && target.value !== undefined && !allowed.has(target.value)) {
-      throw new ScopedQueryViolationError(
-        `GRAPH <${target.value}> is outside the allowed graph set`,
-      );
+      case 'iri':
+        if (!allowed.has(target.iri)) {
+          throw new ScopedQueryViolationError(
+            `GRAPH <${target.iri}> is outside the allowed graph set`,
+          );
+        }
+        break;
+      case 'variable':
+        break;
+      default:
+        assertNeverGraphTarget(target);
     }
   }
 }

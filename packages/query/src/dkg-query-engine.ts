@@ -57,6 +57,7 @@ import {
   requireGraphScopeRewrite,
   rewriteGraphRoute,
   rewriteGraphSet,
+  transitionGraphScope,
   wrapWithGraph,
   type PreparedGraphScope,
 } from './sparql-graph-scope.js';
@@ -785,7 +786,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         // ASK callers see `{ bindings: [{ result: 'false' }] }`.
         return emptyResultForSparql(constrainedScope.source);
       }
-      effectiveScope = rewritten.scope;
+      effectiveScope = transitionGraphScope(constrainedScope, rewritten.value);
     }
 
     if (allGraphs.length === 1) {
@@ -802,7 +803,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         'deduplicated-values-union',
       );
       if (rewritten.kind === 'ready') {
-        return this.execAndNormalize(rewritten.scope, reads);
+        return this.execAndNormalize(rewritten.value, reads);
       }
     }
 
@@ -833,7 +834,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // around the injected block.
     const graphSetRewrite = rewriteGraphSet(scope, graphs, 'values-union');
     if (graphSetRewrite.kind === 'ready') {
-      return this.execAndNormalize(graphSetRewrite.scope, reads);
+      return this.execAndNormalize(graphSetRewrite.value, reads);
     }
     // Residual shapes the graph-set policy declines (an inner top-level
     // UNION, no locatable WHERE block, or a sentinel-variable collision) keep
