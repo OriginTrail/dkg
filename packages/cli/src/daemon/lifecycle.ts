@@ -2847,6 +2847,7 @@ async function runDaemonInnerWithStartupOwnership(
           if (!autoUpdateEnabled) return "disabled";
           if (daemonState.isUpdating) return "updating";
           if (daemonState.lastUpdateCheck.checkedAt === 0) return "unknown";
+          if (daemonState.lastUpdateCheck.channelTargetMissing) return "channel-missing";
           return daemonState.lastUpdateCheck.upToDate ? "latest" : "behind";
         },
       });
