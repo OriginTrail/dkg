@@ -21,6 +21,10 @@ import {
   sanitizeDkgToolForLocalLlm,
   validateDkgToolCall,
 } from './dkg-tool-validation.js';
+import {
+  DEFAULT_MAX_MODEL_RESPONSE_BYTES,
+  readModelResponseTextBounded,
+} from './model-response.js';
 
 export interface McpClientLike {
   listTools(options?: { signal?: AbortSignal }): Promise<{ tools: McpToolDefinition[] }>;
@@ -63,47 +67,6 @@ type OpenAiCompatibleResponse = {
   }>;
   [key: string]: unknown;
 };
-
-const DEFAULT_MAX_MODEL_RESPONSE_BYTES = 4 * 1024 * 1024;
-
-async function boundedResponseText(response: Response, maxBytes: number): Promise<string> {
-  const contentLength = response.headers.get('content-length');
-  if (contentLength !== null) {
-    const declaredBytes = Number(contentLength);
-    if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
-      throw new Error(`Local LLM response exceeds ${maxBytes} bytes`);
-    }
-  }
-
-  if (!response.body) {
-    const text = await response.text();
-    if (new TextEncoder().encode(text).byteLength > maxBytes) {
-      throw new Error(`Local LLM response exceeds ${maxBytes} bytes`);
-    }
-    return text;
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  const chunks: string[] = [];
-  let receivedBytes = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      receivedBytes += value.byteLength;
-      if (receivedBytes > maxBytes) {
-        await reader.cancel().catch(() => undefined);
-        throw new Error(`Local LLM response exceeds ${maxBytes} bytes`);
-      }
-      chunks.push(decoder.decode(value, { stream: true }));
-    }
-    chunks.push(decoder.decode());
-    return chunks.join('');
-  } finally {
-    reader.releaseLock();
-  }
-}
 
 export interface DkgLocalLlmOptions {
   mcp: McpClientLike;
@@ -611,7 +574,7 @@ export class DkgLocalLlmRuntime {
       body: JSON.stringify(body),
       signal: requestSignal,
     });
-    const raw = await boundedResponseText(response, this.maxModelResponseBytes);
+    const raw = await readModelResponseTextBounded(response, this.maxModelResponseBytes);
     signal?.throwIfAborted();
     if (!response.ok) {
       await this.trace.write(`LLM HTTP ERROR ${round}`, { status: response.status, body: raw });

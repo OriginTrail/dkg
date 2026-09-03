@@ -19,6 +19,9 @@ describe('query catalog codec', () => {
   it('decodes escaped RDF literals with language and datatype suffixes in linear time', () => {
     expect(queryCatalogBindingValue('"line\\n\\"quoted\\""@en')).toBe('line\n"quoted"');
     expect(queryCatalogBindingValue('"42"^^<http://www.w3.org/2001/XMLSchema#integer>')).toBe('42');
+    expect(queryCatalogBindingValue('"unknown:\\q"')).toBe('unknown:\\q');
+    expect(queryCatalogBindingValue('"missing datatype"^^')).toBe('"missing datatype"^^');
+    expect(queryCatalogBindingValue('<urn:dkg:query:test>')).toBe('urn:dkg:query:test');
 
     const unterminated = '"' + '\\"'.repeat(50_000);
     expect(queryCatalogBindingValue(unterminated)).toBe(unterminated);

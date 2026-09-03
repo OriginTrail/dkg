@@ -72,6 +72,18 @@ describe('DKG SPARQL preflight', () => {
     expect(result.errors).not.toContain('wrap aggregate aliases as (COUNT(...) AS ?count)');
   });
 
+  it('keeps keywords in lexical regions inert and reports unterminated regions', () => {
+    expect(validateSparqlForDkg([
+      'SELECT ?x WHERE {',
+      '  BIND("FROM STRCONTAINS(?x) FILTER NOT EXISTS(?x) urn:literal" AS ?x)',
+      '  <urn:subject> <urn:predicate> <urn:object> .',
+      '  # FROM STRCONTAINS(?x) urn:comment',
+      '}',
+    ].join('\n')).ok).toBe(true);
+    expect(validateSparqlForDkg('SELECT ?x WHERE { BIND("unterminated AS ?x) }').errors)
+      .toContain('close the unterminated string literal or IRI');
+  });
+
   it('rejects oversized SPARQL before preflight parsing', () => {
     const result = validateSparqlForDkg(`SELECT * WHERE {}${' '.repeat(70_000)}`);
     expect(result).toEqual({

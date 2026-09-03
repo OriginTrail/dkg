@@ -1,4 +1,5 @@
 import type { McpToolDefinition } from './schema.js';
+import { scanSparqlPreflight } from './sparql-preflight-scanner.js';
 
 export interface DkgToolValidationResult {
   ok: boolean;
@@ -6,7 +7,6 @@ export interface DkgToolValidationResult {
 }
 
 const MAX_SPARQL_PREFLIGHT_CHARS = 65_536;
-const AGGREGATE_KEYWORDS = ['COUNT', 'SUM', 'AVG', 'MIN', 'MAX'] as const;
 
 export interface SanitizedContextGraphArguments {
   args: Record<string, unknown>;
@@ -84,176 +84,6 @@ export function sanitizeDkgToolForLocalLlm(tool: McpToolDefinition): McpToolDefi
   };
 }
 
-function maskStringsIrisAndComments(value: string): { masked: string; unterminated: boolean } {
-  let masked = '';
-  let quote: '"' | "'" | undefined;
-  let tripleQuoted = false;
-  let inIri = false;
-  let inComment = false;
-  let escaped = false;
-  for (let index = 0; index < value.length; index++) {
-    const character = value[index];
-    if (inComment) {
-      if (character === '\n' || character === '\r') {
-        inComment = false;
-        masked += character;
-      } else {
-        masked += ' ';
-      }
-      continue;
-    }
-    if (quote) {
-      if (tripleQuoted && value.slice(index, index + 3) === quote.repeat(3)) {
-        masked += quote.repeat(3);
-        index += 2;
-        quote = undefined;
-        tripleQuoted = false;
-        escaped = false;
-        continue;
-      }
-      masked += character === quote && !tripleQuoted && !escaped ? character : ' ';
-      if (escaped) escaped = false;
-      else if (character === '\\') escaped = true;
-      else if (character === quote && !tripleQuoted) quote = undefined;
-      continue;
-    }
-    if (inIri) {
-      masked += character === '>' ? '>' : ' ';
-      if (character === '>') inIri = false;
-      continue;
-    }
-    if (character === '#') {
-      inComment = true;
-      masked += ' ';
-      continue;
-    }
-    if (character === '"' || character === "'") {
-      quote = character;
-      tripleQuoted = value.slice(index, index + 3) === character.repeat(3);
-      masked += tripleQuoted ? character.repeat(3) : character;
-      if (tripleQuoted) index += 2;
-      continue;
-    }
-    if (character === '<') {
-      const closing = value.indexOf('>', index + 1);
-      const candidate = closing >= 0 ? value.slice(index + 1, closing) : '';
-      if (candidate && !/\s/.test(candidate)) {
-        inIri = true;
-        masked += '<';
-        continue;
-      }
-    }
-    masked += character;
-  }
-  return { masked, unterminated: Boolean(quote || inIri) };
-}
-
-function balanced(text: string, open: string, close: string): boolean {
-  let depth = 0;
-  for (const character of text) {
-    if (character === open) depth++;
-    if (character === close) depth--;
-    if (depth < 0) return false;
-  }
-  return depth === 0;
-}
-
-function isWhitespace(character: string | undefined): boolean {
-  return character !== undefined && /\s/u.test(character);
-}
-
-function skipWhitespace(value: string, start: number): number {
-  let cursor = start;
-  while (cursor < value.length && isWhitespace(value[cursor])) cursor++;
-  return cursor;
-}
-
-function keywordAt(value: string, start: number, keyword: string): boolean {
-  return value.slice(start, start + keyword.length).toUpperCase() === keyword;
-}
-
-function prefixDeclarationEnd(value: string, start: number): number | undefined {
-  if (!keywordAt(value, start, 'PREFIX')) return undefined;
-  let cursor = start + 'PREFIX'.length;
-  if (!isWhitespace(value[cursor])) return undefined;
-  cursor = skipWhitespace(value, cursor);
-
-  while (
-    cursor < value.length
-    && !isWhitespace(value[cursor])
-    && value[cursor] !== ':'
-  ) cursor++;
-  if (value[cursor] !== ':') return undefined;
-  cursor = skipWhitespace(value, cursor + 1);
-  if (value[cursor] !== '<') return undefined;
-
-  const iriEnd = value.indexOf('>', cursor + 1);
-  if (iriEnd <= cursor + 1) return undefined;
-  return iriEnd + 1;
-}
-
-function stripLeadingPrefixDeclarations(value: string): string {
-  let cursor = skipWhitespace(value, 0);
-  let found = false;
-  while (cursor < value.length) {
-    const declarationEnd = prefixDeclarationEnd(value, cursor);
-    if (declarationEnd === undefined) break;
-    found = true;
-    cursor = skipWhitespace(value, declarationEnd);
-  }
-  return found ? value.slice(cursor) : value;
-}
-
-function isVariableStart(character: string | undefined): boolean {
-  if (character === '_') return true;
-  if (character === undefined) return false;
-  const code = character.charCodeAt(0);
-  return (code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a);
-}
-
-function unwrappedAggregateAlias(value: string): boolean {
-  let index = 0;
-  while (index < value.length) {
-    if (index > 0 && !isWhitespace(value[index - 1])) {
-      index++;
-      continue;
-    }
-    const aggregate = AGGREGATE_KEYWORDS.find((keyword) => keywordAt(value, index, keyword));
-    if (!aggregate) {
-      index++;
-      continue;
-    }
-
-    let cursor = skipWhitespace(value, index + aggregate.length);
-    if (value[cursor] !== '(') {
-      index += aggregate.length;
-      continue;
-    }
-    const closing = value.indexOf(')', cursor + 1);
-    if (closing < 0) return false;
-
-    cursor = closing + 1;
-    if (!isWhitespace(value[cursor])) {
-      index = cursor;
-      continue;
-    }
-    cursor = skipWhitespace(value, cursor);
-    if (!keywordAt(value, cursor, 'AS')) {
-      index = cursor;
-      continue;
-    }
-    cursor += 'AS'.length;
-    if (!isWhitespace(value[cursor])) {
-      index = cursor;
-      continue;
-    }
-    cursor = skipWhitespace(value, cursor);
-    if (value[cursor] === '?' && isVariableStart(value[cursor + 1])) return true;
-    index = cursor + 1;
-  }
-  return false;
-}
-
 /**
  * Cheap, deterministic checks for mistakes small local models commonly make.
  * This is deliberately a preflight rather than a SPARQL parser: the DKG query
@@ -273,37 +103,31 @@ export function validateSparqlForDkg(value: unknown): DkgToolValidationResult {
   if (!sparql) return { ok: false, errors: ['sparql must not be empty'] };
   if (/```/.test(sparql)) errors.push('remove Markdown fences and send raw SPARQL only');
 
-  const declaredPrefixes = new Set(
-    [...sparql.matchAll(/\bPREFIX\s+([A-Za-z][A-Za-z0-9_-]*):\s*<[^>]+>/gi)]
-      .map((match) => match[1].toLowerCase()),
-  );
-  const withoutPrefixes = stripLeadingPrefixDeclarations(sparql);
-  const { masked, unterminated } = maskStringsIrisAndComments(withoutPrefixes);
-  if (unterminated) errors.push('close the unterminated string literal or IRI');
-  if (!/^(?:\s*)(?:SELECT|ASK|CONSTRUCT)\b/i.test(masked)) {
+  const scan = scanSparqlPreflight(sparql);
+  if (scan.unterminated) errors.push('close the unterminated string literal or IRI');
+  if (!scan.operation) {
     errors.push('query must start with SELECT, ASK, or CONSTRUCT');
   }
-  if (!balanced(masked, '{', '}')) errors.push('balance SPARQL braces');
-  if (!balanced(masked, '(', ')')) errors.push('balance SPARQL parentheses');
-  if (/\bFROM\b/i.test(masked)) {
+  if (!scan.bracesBalanced) errors.push('balance SPARQL braces');
+  if (!scan.parenthesesBalanced) errors.push('balance SPARQL parentheses');
+  if (scan.hasFrom) {
     errors.push('remove FROM because projectId, subGraphName, and view already scope the query');
   }
-  if (/\bFILTER\s+NOT\s+EXISTS\s*\(/i.test(masked)) {
+  if (scan.hasFilterNotExistsParentheses) {
     errors.push('use braces for FILTER NOT EXISTS');
   }
-  if (/\bSTRCONTAINS\s*\(/i.test(masked)) {
+  if (scan.hasStrcontains) {
     errors.push('use SPARQL CONTAINS instead of STRCONTAINS');
   }
-  if (unwrappedAggregateAlias(masked)) {
+  if (scan.hasUnwrappedAggregateAlias) {
     errors.push('wrap aggregate aliases as (COUNT(...) AS ?count)');
   }
 
   // Prefixed names (schema:name) are valid. Absolute identifiers copied from
   // DKG evidence (urn:..., did:..., http://...) are not prefixed names and
   // must be enclosed in <...> when used as SPARQL terms.
-  const bareAbsolute = masked.match(/\b(urn|https?|did|ipfs|ipns|tag|mailto):[^\s;,.(){}[\]<>]+/i);
-  if (bareAbsolute && !declaredPrefixes.has(bareAbsolute[1].toLowerCase())) {
-    errors.push(`wrap absolute IRI ${bareAbsolute[0]} in angle brackets`);
+  if (scan.bareAbsoluteIri) {
+    errors.push(`wrap absolute IRI ${scan.bareAbsoluteIri} in angle brackets`);
   }
 
   const unique = [...new Set(errors)];
@@ -328,8 +152,9 @@ export function validateDkgToolCall(
 export function rewriteCompactPredicatesForDkg(sparql: string): string {
   const subject = String.raw`(?:\?[A-Za-z_][A-Za-z0-9_]*|<[^>]+>|_:[A-Za-z][A-Za-z0-9_-]*)`;
   const predicateAnchor = String.raw`(?:${subject}\s+|;\s*)`;
-  const { masked, unterminated } = maskStringsIrisAndComments(sparql);
-  if (unterminated) return sparql;
+  const scan = scanSparqlPreflight(sparql);
+  if (scan.unterminated) return sparql;
+  const { masked } = scan;
   const edits: Array<{ start: number; end: number; value: string }> = [];
   const shorthand = new RegExp(`(${predicateAnchor})a(\\s+)`, 'gi');
   for (const match of masked.matchAll(shorthand)) {

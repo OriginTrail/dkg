@@ -1,4 +1,4 @@
-import { sparqlString } from '@origintrail-official/dkg-core/dist/sparql-safe.js';
+import { sparqlString } from '@origintrail-official/dkg-core/sparql-safe';
 
 /** Build the graph-prefix filter shared by profile and agent metadata reads. */
 export function metaGraphPrefixFilter(contextGraphId: string): string {

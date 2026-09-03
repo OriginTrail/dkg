@@ -1,5 +1,9 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
+import {
+  decodeRdfLiteralBody,
+  parseRdfLiteralLexicalTerm,
+} from '@origintrail-official/dkg-rdf-utils';
 import { contextGraphSubGraphUri, validateSubGraphName } from './constants.js';
 import { GET_VIEWS, type GetView } from './memory-model.js';
 import {
@@ -144,30 +148,6 @@ export function prepareQueryCatalogExecution(
   };
 }
 
-function quotedRdfLiteral(value: string): string | undefined {
-  if (!value.startsWith('"')) return undefined;
-  let escaped = false;
-  for (let index = 1; index < value.length; index++) {
-    const character = value[index];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (character === '\\') {
-      escaped = true;
-      continue;
-    }
-    if (character !== '"') continue;
-
-    const suffix = value.slice(index + 1);
-    if (suffix && !suffix.startsWith('@') && !suffix.startsWith('^^')) {
-      return undefined;
-    }
-    return value.slice(0, index + 1);
-  }
-  return undefined;
-}
-
 export function queryCatalogBindingValue(value: unknown): string {
   if (value === null || value === undefined) return '';
   if (typeof value === 'object' && !Array.isArray(value)) {
@@ -175,15 +155,14 @@ export function queryCatalogBindingValue(value: unknown): string {
     if (typeof raw === 'string') return raw;
   }
   const raw = String(value);
-  const literal = quotedRdfLiteral(raw);
+  const literal = parseRdfLiteralLexicalTerm(raw);
   if (!literal) return raw.startsWith('<') && raw.endsWith('>')
     ? raw.slice(1, -1)
     : raw;
-  try {
-    return JSON.parse(literal);
-  } catch {
-    return literal.slice(1, -1);
-  }
+  return decodeRdfLiteralBody(literal.body, {
+    invalidEscape: 'preserve',
+    allowSurrogateCodePoints: true,
+  });
 }
 
 function queryCatalogSlugFromIri(iri: string, marker: string, fallback: string): string {
