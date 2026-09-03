@@ -2,12 +2,16 @@ import { describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 import {
   registerUpdateCommand,
-  runDefaultUpdatePreflight,
   runManualUpdateWorkflow,
+  type ManualUpdateDependencies,
+} from '../src/commands/update.js';
+import {
+  applyManualUpdate,
+  loadManualUpdateState,
+  runDefaultUpdatePreflight,
   type ManualUpdateDoctorOps,
   type ManualUpdatePreflightResult,
-  type ManualUpdateServices,
-} from '../src/commands/update.js';
+} from '../src/update/manual-update.js';
 import {
   classifyNpmDistTag,
   fetchNpmDistTags,
@@ -19,7 +23,7 @@ import {
 } from '../src/update/npm-registry.js';
 import { UPDATE_PREFLIGHT_CHECKS } from '../src/doctor/policy.js';
 import type { DoctorDeps, DoctorReport } from '../src/doctor/types.js';
-import { type DkgConfig } from '../src/config.js';
+import { type DkgConfig, type NetworkConfig } from '../src/config.js';
 
 describe('resolveExplicitNpmUpdateTarget', () => {
   const gatewayReturning = (result: NpmDistTagsResult) => vi.fn(async () => result);
@@ -260,6 +264,24 @@ describe('dkg update doctor adapter', () => {
 });
 
 describe('dkg update command stable-only wiring', () => {
+  const conflictingNetworkUpdatePolicy: NetworkConfig = {
+    networkName: 'Testnet',
+    genesisId: 'testnet-genesis',
+    networkId: 'testnet',
+    genesisVersion: 1,
+    relays: [],
+    defaultNodeRole: 'edge',
+    autoUpdate: {
+      enabled: true,
+      source: 'git',
+      repo: 'OriginTrail/dkg',
+      branch: 'testnet-canary',
+      checkIntervalMinutes: 30,
+      allowPrerelease: true,
+      channel: 'testnet',
+    },
+  };
+
   function commandHarness(
     resolvedTag: string | null = null,
     runPreflight = vi.fn(async (): Promise<ManualUpdatePreflightResult> => ({
@@ -283,36 +305,35 @@ describe('dkg update command stable-only wiring', () => {
       status: 'ok',
       tags: resolvedTag === null ? {} : { latest: resolvedTag },
     }));
-    const deps: ManualUpdateServices = {
-      configuration: {
-        load: vi.fn(async () => config),
-        resolveContext: vi.fn(async () => ({
+    const installerOps = {
+      applyCore: performNpmUpdate,
+      applyEdge: performNpmUpdateEdge,
+      currentCliVersion: () => '10.0.0',
+      stopDaemon: vi.fn(async () => true),
+    };
+    const deps: ManualUpdateDependencies = {
+      loadState: vi.fn(async () => ({
+        config,
+        context: {
           installMode: 'npm',
           allowPrerelease: false,
-        })),
-      },
-      registry: {
-        resolveExplicitTarget: (target, allowPrerelease) =>
-          resolveExplicitNpmUpdateTarget(target, allowPrerelease, {
-            fetchNpmDistTags,
-          }),
-        checkForUpdate: vi.fn(async () => ({ status: 'up-to-date' })),
-      },
-      installer: {
-        applyCore: performNpmUpdate,
-        applyEdge: performNpmUpdateEdge,
-        currentCliVersion: () => '10.0.0',
-        stopDaemon: vi.fn(async () => true),
-      },
-      preflight: {
-        run: runPreflight,
-      },
+        },
+      })),
+      resolveExplicitTarget: (target, allowPrerelease) =>
+        resolveExplicitNpmUpdateTarget(target, allowPrerelease, {
+          fetchNpmDistTags,
+        }),
+      checkForUpdate: vi.fn(async () => ({ status: 'up-to-date' })),
+      runPreflight,
+      applyUpdate: (updateConfig, version, log) =>
+        applyManualUpdate(updateConfig, version, log, installerOps),
     };
     return {
       config,
       deps,
       performNpmUpdate,
       performNpmUpdateEdge,
+      installerOps,
       reporter,
       runPreflight,
     };
@@ -412,7 +433,7 @@ describe('dkg update command stable-only wiring', () => {
       finishInstall = resolve;
     });
     const installer = vi.fn(() => pendingInstall);
-    harness.deps.installer.applyEdge = installer;
+    harness.installerOps.applyEdge = installer;
     const writeStdout = vi.fn();
     const writeStderr = vi.fn();
 
@@ -430,7 +451,7 @@ describe('dkg update command stable-only wiring', () => {
 
   it('emits failure diagnostics before setting the command exit code', async () => {
     const harness = commandHarness();
-    harness.deps.installer.applyEdge = vi.fn(async () => 'failed' as const);
+    harness.deps.applyUpdate = vi.fn(async () => 'failed' as const);
     const writeStdout = vi.fn();
     const writeStderr = vi.fn();
     const setExitCode = vi.fn();
@@ -465,10 +486,13 @@ describe('dkg update command stable-only wiring', () => {
 
   it('uses the resolved manual-update context as one workflow boundary', async () => {
     const harness = commandHarness();
-    harness.deps.configuration.resolveContext = vi.fn(async () => ({
-      installMode: 'npm',
-      allowPrerelease: false,
-      channel: 'mainnet',
+    harness.deps.loadState = vi.fn(async () => ({
+      config: harness.config,
+      context: {
+        installMode: 'npm',
+        allowPrerelease: false,
+        channel: 'mainnet',
+      },
     }));
 
     const outcome = await runManualUpdateWorkflow({
@@ -476,7 +500,64 @@ describe('dkg update command stable-only wiring', () => {
     }, harness.deps, harness.reporter);
 
     expect(outcome.exitCode).toBe(0);
-    expect(harness.deps.registry.checkForUpdate).toHaveBeenCalledWith(
+    expect(harness.deps.checkForUpdate).toHaveBeenCalledWith(
+      expect.any(Function),
+      false,
+      'mainnet',
+    );
+  });
+
+  it('preserves disabled local npm and stable-only policy through the real state adapter', async () => {
+    const harness = commandHarness();
+    const localConfig: DkgConfig = {
+      ...harness.config,
+      networkConfig: 'testnet',
+      autoUpdate: {
+        enabled: false,
+        source: 'npm',
+        allowPrerelease: false,
+        channel: 'mainnet',
+      },
+    };
+    const resolveInstallMode = vi.fn((source?: 'auto' | 'npm' | 'git' | 'monorepo') =>
+      source === 'npm');
+    harness.deps.loadState = () => loadManualUpdateState({
+      loadConfig: async () => localConfig,
+      loadNetworkConfig: async () => conflictingNetworkUpdatePolicy,
+      resolveInstallMode,
+    });
+
+    const outcome = await runManualUpdateWorkflow({
+      versionOrRef: '10.1.0-rc.1',
+    }, harness.deps, harness.reporter);
+
+    expect(outcome).toEqual({ exitCode: 1 });
+    expect(resolveInstallMode).toHaveBeenCalledWith('npm');
+    expect(harness.performNpmUpdate).not.toHaveBeenCalled();
+    expect(harness.performNpmUpdateEdge).not.toHaveBeenCalled();
+  });
+
+  it('passes the real disabled-local channel policy to check-only registry lookup', async () => {
+    const harness = commandHarness();
+    const localConfig: DkgConfig = {
+      ...harness.config,
+      networkConfig: 'testnet',
+      autoUpdate: {
+        enabled: false,
+        source: 'npm',
+        allowPrerelease: false,
+        channel: 'mainnet',
+      },
+    };
+    harness.deps.loadState = () => loadManualUpdateState({
+      loadConfig: async () => localConfig,
+      loadNetworkConfig: async () => conflictingNetworkUpdatePolicy,
+      resolveInstallMode: () => true,
+    });
+
+    await expect(runManualUpdateWorkflow({ check: true }, harness.deps, harness.reporter))
+      .resolves.toEqual({ exitCode: 0 });
+    expect(harness.deps.checkForUpdate).toHaveBeenCalledWith(
       expect.any(Function),
       false,
       'mainnet',

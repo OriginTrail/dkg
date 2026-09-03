@@ -351,32 +351,39 @@ export type NpmVersionResult =
   | { version: null; error: true }
   | { version: null; error: false };
 
+type ReportedNpmVersionResolution =
+  | { status: 'resolved'; version: string }
+  | { status: 'no-target'; channel?: string }
+  | { status: 'error' };
+
+/** One owner for registry-resolution interpretation and operator-facing logging. */
+async function resolveAndReportNpmVersion(
+  log: (message: string) => void,
+  allowPrerelease: boolean,
+  channel?: string,
+): Promise<ReportedNpmVersionResolution> {
+  const result = await resolveNpmVersionTarget(allowPrerelease, channel, {
+    fetch: _autoUpdateIo.fetch,
+  });
+  if (result.status === 'resolved') return result;
+  if (result.status === 'error') {
+    logNpmRegistryFailure(log, result.failure);
+    return { status: 'error' };
+  }
+  logNpmNoTarget(log, result.reason);
+  return { status: 'no-target', ...(channel ? { channel } : {}) };
+}
+
 export async function resolveLatestNpmVersion(
   log: (message: string) => void,
   allowPrerelease = true,
   channel?: string,
 ): Promise<NpmVersionResult> {
-  const result = await resolveNpmVersionTarget(allowPrerelease, channel, {
-    fetch: _autoUpdateIo.fetch,
-  });
+  const result = await resolveAndReportNpmVersion(log, allowPrerelease, channel);
   if (result.status === 'resolved') return { version: result.version };
-  if (result.status === 'error') {
-    if (result.failure.kind !== 'invalid-response') {
-      logNpmRegistryFailure(log, result.failure);
-    }
-    return { version: null, error: true };
-  }
-
-  switch (result.reason.kind) {
-    case 'no-valid-candidates':
-      break;
-    case 'unacceptable-latest':
-      log('Auto-update (npm): latest dist-tag is a pre-release and allowPrerelease=false, skipping');
-      break;
-    default:
-      logNpmNoTarget(log, result.reason);
-  }
-  return { version: null, error: false };
+  return result.status === 'error'
+    ? { version: null, error: true }
+    : { version: null, error: false };
 }
 
 export type NpmVersionStatus = {
@@ -405,20 +412,14 @@ export async function checkForNpmVersionUpdate(
     return { status: "error" };
   }
 
-  const result = await resolveNpmVersionTarget(allowPrerelease, channel, {
-    fetch: _autoUpdateIo.fetch,
-  });
+  const result = await resolveAndReportNpmVersion(log, allowPrerelease, channel);
   if (result.status !== 'resolved') {
-    if (result.status === 'error') {
-      logNpmRegistryFailure(log, result.failure);
-      return { status: "error" };
-    }
-    logNpmNoTarget(log, result.reason);
+    if (result.status === 'error') return { status: "error" };
     // A pinned channel with no acceptable target (tag missing / prerelease
     // rejected / non-semver) is NOT a clean "up-to-date" — surface it so a
     // misconfigured or unpublished channel (e.g. mainnet) is visible rather
     // than silently reported as current.
-    if (channel) return { status: "no-target", channel };
+    if (result.channel) return { status: "no-target", channel: result.channel };
     return { status: "up-to-date" };
   }
 

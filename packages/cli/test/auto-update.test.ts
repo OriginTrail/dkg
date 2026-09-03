@@ -1441,6 +1441,104 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     );
   });
 
+  it.each([
+    {
+      outcome: 'resolved pinned channel',
+      allowPrerelease: false,
+      channel: 'mainnet',
+      response: makeRegistryResponse({ mainnet: '9.1.0' }),
+      legacy: { version: '9.1.0' },
+      checked: { status: 'available', version: '9.1.0' },
+      logs: [],
+    },
+    {
+      outcome: 'missing pinned channel',
+      allowPrerelease: false,
+      channel: 'mainnet',
+      response: makeRegistryResponse({ latest: '9.1.0' }),
+      legacy: { version: null, error: false },
+      checked: { status: 'no-target', channel: 'mainnet' },
+      logs: ['Auto-update (npm): channel "mainnet" has no published version, skipping'],
+    },
+    {
+      outcome: 'invalid pinned channel',
+      allowPrerelease: false,
+      channel: 'mainnet',
+      response: makeRegistryResponse({ mainnet: 'not-semver' }),
+      legacy: { version: null, error: false },
+      checked: { status: 'no-target', channel: 'mainnet' },
+      logs: ['Auto-update (npm): channel "mainnet" → "not-semver" is not a valid semver, skipping'],
+    },
+    {
+      outcome: 'prerelease pinned channel under stable-only policy',
+      allowPrerelease: false,
+      channel: 'mainnet',
+      response: makeRegistryResponse({ mainnet: '9.1.0-rc.1' }),
+      legacy: { version: null, error: false },
+      checked: { status: 'no-target', channel: 'mainnet' },
+      logs: ['Auto-update (npm): channel "mainnet" points at a pre-release and allowPrerelease=false, skipping'],
+    },
+    {
+      outcome: 'unacceptable default latest under stable-only policy',
+      allowPrerelease: false,
+      channel: undefined,
+      response: makeRegistryResponse({ latest: '9.1.0-rc.1' }),
+      legacy: { version: null, error: false },
+      checked: { status: 'up-to-date' },
+      logs: ['Auto-update (npm): latest dist-tag is absent, invalid, or a pre-release while allowPrerelease=false, skipping'],
+    },
+    {
+      outcome: 'no valid default candidates',
+      allowPrerelease: true,
+      channel: undefined,
+      response: makeRegistryResponse({ latest: 'not-semver' }),
+      legacy: { version: null, error: false },
+      checked: { status: 'up-to-date' },
+      logs: [],
+    },
+    {
+      outcome: 'registry HTTP failure',
+      allowPrerelease: false,
+      channel: 'mainnet',
+      response: { ok: false, status: 503 },
+      legacy: { version: null, error: true },
+      checked: { status: 'error' },
+      logs: ['Auto-update (npm): registry returned 503 for @origintrail-official/dkg'],
+    },
+    {
+      outcome: 'malformed registry payload',
+      allowPrerelease: false,
+      channel: 'mainnet',
+      response: {
+        ok: true,
+        status: 200,
+        json: async () => ({ 'dist-tags': [] }),
+      },
+      legacy: { version: null, error: true },
+      checked: { status: 'error' },
+      logs: ['Auto-update (npm): registry returned malformed dist-tags for @origintrail-official/dkg'],
+    },
+  ])('maps and reports $outcome consistently through both public entry points', async ({
+    allowPrerelease,
+    channel,
+    response,
+    legacy,
+    checked,
+    logs,
+  }) => {
+    const { checkForNpmVersionUpdate, resolveLatestNpmVersion } = await import('../src/daemon.js');
+    fetchImpl = async () => response as any;
+    const legacyLog = vi.fn();
+    const checkLog = vi.fn();
+
+    await expect(resolveLatestNpmVersion(legacyLog, allowPrerelease, channel))
+      .resolves.toEqual(legacy);
+    await expect(checkForNpmVersionUpdate(checkLog, allowPrerelease, channel))
+      .resolves.toEqual(checked);
+    expect(legacyLog.mock.calls.map(([message]) => message)).toEqual(logs);
+    expect(checkLog.mock.calls.map(([message]) => message)).toEqual(logs);
+  });
+
   it('default path does NOT attempt an update to a non-semver latest', async () => {
     const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
     fetchImpl = async () => makeRegistryResponse({ latest: 'garbage' });
