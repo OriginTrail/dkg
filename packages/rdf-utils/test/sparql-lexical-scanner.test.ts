@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { prepareSparql } from '../src/sparql-lexical-scanner.js';
+import {
+  materializePreparedSparql,
+  prepareSparql,
+} from '../src/sparql-lexical-scanner.js';
 import {
   indexSparqlStructure,
   sparqlTokenIndexesAtDepth,
 } from '../src/sparql-structure.js';
-import {
-  decodeSparqlCodePointEscapes,
-} from '../src/sparql-lexical-primitives.js';
 
 describe('canonical SPARQL lexical scanner', () => {
   it.each([
@@ -124,8 +124,8 @@ describe('canonical SPARQL lexical scanner', () => {
     const malformedLookalike = String.raw`SELECT ?x WHERE { BIND("\\u00ZZ" AS ?x) }`;
     const validLookalike = String.raw`SELECT ?x WHERE { BIND("\\u006E" AS ?x) }`;
 
-    expect(decodeSparqlCodePointEscapes(malformedLookalike)).toBe(malformedLookalike);
-    expect(decodeSparqlCodePointEscapes(validLookalike)).toBe(validLookalike);
+    expect(materializePreparedSparql(malformedLookalike)).toBe(malformedLookalike);
+    expect(materializePreparedSparql(validLookalike)).toBe(validLookalike);
   });
 
   it('rejects malformed UCHAR inside a string without treating an escaped slash as UCHAR', () => {
@@ -151,8 +151,16 @@ describe('canonical SPARQL lexical scanner', () => {
   it('leaves UCHAR-like comment text inert while decoding active tokens', () => {
     const source = String.raw`\u0053ELECT * WHERE {} # \u00ZZ \u0053ERVICE`;
 
-    expect(decodeSparqlCodePointEscapes(source))
+    expect(materializePreparedSparql(source))
       .toBe(String.raw`SELECT * WHERE {} # \u00ZZ \u0053ERVICE`);
+  });
+
+  it('materializes active syntax while preserving opaque IRI, string, and comment payloads', () => {
+    const source = String.raw`\u0053ELECT * WHERE \u007B <urn:\u0061> <urn:p> "\u0041" \u007D # \u0053ERVICE`;
+
+    expect(materializePreparedSparql(prepareSparql(source))).toBe(
+      String.raw`SELECT * WHERE { <urn:\u0061> <urn:p> "\u0041" } # \u0053ERVICE`,
+    );
   });
 
   it('does not let an escaped newline terminate an already-open comment', () => {

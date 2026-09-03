@@ -38,6 +38,8 @@ interface PreparedSparqlCommon {
   readonly source: string;
   /** Source-length-preserving view with strings, IRIs, and comments blanked. */
   readonly masked: string;
+  /** Active UCHAR syntax decoded; opaque strings, IRIs, and comments preserved. */
+  readonly materialized: string;
   /** Tokens outside comments, including opaque string and IRI boundary tokens. */
   readonly tokens: readonly SparqlLexicalToken[];
   readonly unterminated: boolean;
@@ -59,6 +61,7 @@ export type PreparedSparql =
 
 interface ScannedSparql {
   readonly masked: string;
+  readonly materialized: string;
   readonly tokens: readonly SparqlLexicalToken[];
   readonly unterminated: boolean;
   readonly wordTokens: ReadonlySet<string>;
@@ -257,6 +260,7 @@ function scanPrologue(tokens: readonly SparqlLexicalToken[]): PreparedSparql['pr
  */
 function scanSparql(value: string): ScannedSparql | null {
   const masked = value.split('');
+  const materialized: string[] = [];
   const tokens: SparqlLexicalToken[] = [];
   let unterminated = false;
   let index = 0;
@@ -267,6 +271,7 @@ function scanSparql(value: string): ScannedSparql | null {
       return null;
     }
     if (isWhitespace(logical.codePoint)) {
+      materialized.push(String.fromCodePoint(logical.codePoint));
       index += logical.rawWidth;
       continue;
     }
@@ -274,9 +279,14 @@ function scanSparql(value: string): ScannedSparql | null {
     if (logical.codePoint === 0x23) {
       const start = index;
       index += logical.rawWidth;
+      const bodyStart = index;
       // UCHAR-looking text is inert once the comment has opened. Only an
       // actual source line ending closes the comment.
       while (index < value.length && value[index] !== '\n' && value[index] !== '\r') index++;
+      materialized.push(
+        String.fromCodePoint(logical.codePoint),
+        value.slice(bodyStart, index),
+      );
       blank(masked, start, index);
       continue;
     }
@@ -285,11 +295,13 @@ function scanSparql(value: string): ScannedSparql | null {
       const start = index;
       const stringScan = scanSparqlStringLiteral(value, start);
       if (!stringScan) {
+        materialized.push(String.fromCodePoint(logical.codePoint));
         index += logical.rawWidth;
         continue;
       }
       if (stringScan.malformedUchar) return null;
       index = stringScan.end;
+      materialized.push(value.slice(start, index));
       blank(masked, start, index);
       tokens.push({
         kind: 'string',
@@ -310,6 +322,7 @@ function scanSparql(value: string): ScannedSparql | null {
           unterminated = true;
           continue;
         }
+        materialized.push(value.slice(start, index));
         blank(masked, start, index);
         tokens.push({
           kind: 'iri',
@@ -329,6 +342,7 @@ function scanSparql(value: string): ScannedSparql | null {
         const token = lexicalToken('variable', value, start, index);
         if (!token) return null;
         tokens.push(token);
+        materialized.push(token.logicalValue);
         continue;
       }
     }
@@ -339,6 +353,7 @@ function scanSparql(value: string): ScannedSparql | null {
       const token = lexicalToken('prefixed-name', value, start, index);
       if (!token) return null;
       tokens.push(token);
+      materialized.push(token.logicalValue);
       continue;
     }
 
@@ -362,6 +377,7 @@ function scanSparql(value: string): ScannedSparql | null {
       const token = lexicalToken(kind, value, start, index);
       if (!token) return null;
       tokens.push(token);
+      materialized.push(token.logicalValue);
       continue;
     }
 
@@ -376,6 +392,7 @@ function scanSparql(value: string): ScannedSparql | null {
     );
     if (!token) return null;
     tokens.push(token);
+    materialized.push(token.logicalValue);
   }
 
   const maskedValue = masked.join('');
@@ -385,6 +402,7 @@ function scanSparql(value: string): ScannedSparql | null {
   }
   return {
     masked: maskedValue,
+    materialized: materialized.join(''),
     tokens,
     unterminated,
     wordTokens,
@@ -400,6 +418,7 @@ export function prepareSparql(source: string): PreparedSparql {
       status: 'malformed-uchar',
       source,
       masked: ' '.repeat(source.length),
+      materialized: source,
       tokens: [],
       unterminated: false,
       wordTokens: new Set(),
@@ -411,9 +430,16 @@ export function prepareSparql(source: string): PreparedSparql {
     status: 'valid',
     source,
     masked: scan.masked,
+    materialized: scan.materialized,
     tokens: scan.tokens,
     unterminated: scan.unterminated,
     wordTokens: new Set(scan.wordTokens),
     prologue: scan.prologue,
   };
+}
+
+/** Materialize active UCHAR syntax from the canonical prepared artifact. */
+export function materializePreparedSparql(input: string | PreparedSparql): string {
+  const prepared = typeof input === 'string' ? prepareSparql(input) : input;
+  return prepared.materialized;
 }

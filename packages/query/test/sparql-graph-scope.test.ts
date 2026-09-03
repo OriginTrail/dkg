@@ -5,10 +5,12 @@ import {
   contextGraphSharedMemoryUri,
   contextGraphVerifiableMemoryUri,
 } from '@origintrail-official/dkg-core';
-import { prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
+import {
+  materializePreparedSparql,
+  prepareSparql,
+} from '@origintrail-official/dkg-rdf-utils/sparql';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import {
-  materializeGraphScopeForExecution,
   prepareGraphScope,
   rewriteGraphSet,
   wrapWithGraph,
@@ -42,7 +44,7 @@ describe('prepared SPARQL graph scope', () => {
     if (rewrite.kind !== 'ready') throw new Error('expected graph rewrite to be ready');
     expect(rewrite.value).toBe(scope);
     expect(scope.source).toBe(source);
-    expect(materializeGraphScopeForExecution(scope)).toBe(
+    expect(materializePreparedSparql(scope.prepared)).toBe(
       String.raw`SELECT ?s WHERE { GRAPH <urn:g> { ?s <urn:p> "\u007B" } }`,
     );
   });

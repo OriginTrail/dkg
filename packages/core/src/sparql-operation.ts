@@ -1,7 +1,9 @@
 import { BoundedLruCache } from './bounded-lru-cache.js';
 import {
   prepareSparql,
+  prepareSparqlQuery,
   type PreparedSparql,
+  type PreparedSparqlQuery,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
 
 const SPARQL_READ_ONLY_OPERATIONS = ['SELECT', 'CONSTRUCT', 'ASK', 'DESCRIBE'] as const;
@@ -57,10 +59,9 @@ export function stripSparqlLiteralsAndComments(sparql: string): string {
   return prepareSparql(sparql).masked;
 }
 
-function detectSparqlOperationForm(scan: PreparedSparql): SparqlDetectedOperation {
-  const token = scan.tokens[scan.prologue.endTokenIndex];
-  if (!token || !('value' in token) || token.kind !== 'word') return 'UNKNOWN';
-  const operation = token.upper;
+function detectSparqlOperationForm(query: PreparedSparqlQuery): SparqlDetectedOperation {
+  const { operation } = query;
+  if (operation === null) return 'UNKNOWN';
   return isReadOnlySparqlOperation(operation) || isSparqlUpdateOperationForm(operation)
     ? operation
     : 'UNKNOWN';
@@ -90,7 +91,8 @@ function materializeSparqlOperationAnalysis(
 }
 
 function analyzePreparedSparql(scan: PreparedSparql): SparqlOperationFacts {
-  const form = detectSparqlOperationForm(scan);
+  const query = prepareSparqlQuery(scan);
+  const form = detectSparqlOperationForm(query);
   const mutatingToken = scan.tokens.find(
     (token) => 'value' in token
       && token.kind === 'word'

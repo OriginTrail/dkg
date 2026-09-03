@@ -1,11 +1,13 @@
 import {
-  indexSparqlStructure,
   prepareSparql,
-  sparqlTokenIndexesAtDepth,
   type PreparedSparql,
   type SparqlLexicalToken,
+} from './sparql-lexical-scanner.js';
+import {
+  indexSparqlStructure,
+  sparqlTokenIndexesAtDepth,
   type SparqlStructure,
-} from '@origintrail-official/dkg-rdf-utils/sparql';
+} from './sparql-structure.js';
 
 type ValuedToken = Extract<SparqlLexicalToken, { value: string }>;
 
@@ -29,7 +31,7 @@ export interface SparqlQueryVariable {
   readonly logicalName: string;
 }
 
-/** Neutral prepared query facts shared by independent rewrite policies. */
+/** Reusable prepared query facts derived from one canonical lexical artifact. */
 export interface PreparedSparqlQuery {
   readonly source: string;
   readonly prepared: PreparedSparql;
@@ -38,21 +40,6 @@ export interface PreparedSparqlQuery {
   readonly where: SparqlQueryGroupRange | null;
   readonly queryVariables: readonly SparqlQueryVariable[];
   readonly whereVariables: readonly SparqlQueryVariable[];
-}
-
-export type SparqlRewriteResult<Value, Reason extends string, Original = Value> =
-  | { readonly kind: 'ready'; readonly value: Value }
-  | { readonly kind: 'unsupported'; readonly original: Original; readonly reason: Reason };
-
-export function sparqlRewriteReady<Value>(value: Value): { readonly kind: 'ready'; readonly value: Value } {
-  return { kind: 'ready', value };
-}
-
-export function sparqlRewriteUnsupported<Original, Reason extends string>(
-  original: Original,
-  reason: Reason,
-): { readonly kind: 'unsupported'; readonly original: Original; readonly reason: Reason } {
-  return { kind: 'unsupported', original, reason };
 }
 
 function whereRange(
@@ -65,11 +52,7 @@ function whereRange(
 
   for (const index of sparqlTokenIndexesAtDepth(structure.braces, 0)) {
     const token = tokens[index];
-    if (
-      isValuedToken(token)
-      && token.kind === 'word'
-      && token.upper === 'WHERE'
-    ) {
+    if (isValuedToken(token) && token.kind === 'word' && token.upper === 'WHERE') {
       const next = tokens[index + 1];
       if (!isValuedToken(next) || next.kind !== 'symbol' || next.logicalValue !== '{') {
         return null;
@@ -77,11 +60,9 @@ function whereRange(
       explicitOpening = index + 1;
       break;
     }
-    if (
-      isValuedToken(token)
-      && token.kind === 'symbol'
-      && token.logicalValue === '{'
-    ) topLevelOpenings.push(index);
+    if (isValuedToken(token) && token.kind === 'symbol' && token.logicalValue === '{') {
+      topLevelOpenings.push(index);
+    }
   }
 
   const openingIndex = explicitOpening >= 0
@@ -130,16 +111,13 @@ function variablesInRange(
   return variables;
 }
 
-export function prepareSparqlQuery(
-  input: string | PreparedSparql,
-): PreparedSparqlQuery {
+export function prepareSparqlQuery(input: string | PreparedSparql): PreparedSparqlQuery {
   const prepared = typeof input === 'string' ? prepareSparql(input) : input;
-  const { source } = prepared;
   const structure = indexSparqlStructure(prepared);
   const where = whereRange(prepared, structure);
   const operationToken = prepared.tokens[prepared.prologue.endTokenIndex];
   return {
-    source,
+    source: prepared.source,
     prepared,
     structure,
     operation: isValuedToken(operationToken) && operationToken.kind === 'word'

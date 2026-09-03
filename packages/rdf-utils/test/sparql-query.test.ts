@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
-import { prepareSparqlQuery } from '../src/prepared-sparql-query.js';
+import { prepareSparql } from '../src/sparql-lexical-scanner.js';
+import { prepareSparqlQuery } from '../src/sparql-query.js';
 
 describe('prepared SPARQL query facts', () => {
   it('accepts either source text or its canonical lexical artifact', () => {
@@ -28,5 +28,25 @@ describe('prepared SPARQL query facts', () => {
       { source: String.raw`?\u0073`, logicalName: 's' },
       { source: '?o', logicalName: 'o' },
     ]);
+  });
+
+  it('recognizes shorthand groups without inventing a WHERE keyword', () => {
+    const query = prepareSparqlQuery('ASK { ?s <urn:p> ?o }');
+
+    expect(query.operation).toBe('ASK');
+    expect(query.where).toMatchObject({ hasUnion: false });
+    expect(query.whereVariables).toEqual([
+      { source: '?s', logicalName: 's' },
+      { source: '?o', logicalName: 'o' },
+    ]);
+  });
+
+  it('returns empty query facts for malformed UCHAR input', () => {
+    const query = prepareSparqlQuery(String.raw`SELECT ?\u00ZZ WHERE {}`);
+
+    expect(query.prepared.status).toBe('malformed-uchar');
+    expect(query.operation).toBeNull();
+    expect(query.where).toBeNull();
+    expect(query.queryVariables).toEqual([]);
   });
 });

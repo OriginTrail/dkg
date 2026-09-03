@@ -1,4 +1,5 @@
 export {
+  materializePreparedSparql,
   prepareSparql,
   type PreparedSparql,
   type SparqlLexicalToken,
@@ -11,6 +12,13 @@ export {
   type SparqlGroupRange,
   type SparqlStructure,
 } from './sparql-structure.js';
+
+export {
+  prepareSparqlQuery,
+  type PreparedSparqlQuery,
+  type SparqlQueryGroupRange,
+  type SparqlQueryVariable,
+} from './sparql-query.js';
 
 // Grammar helpers used by parsers after they have consumed a prepared
 // artifact. There is deliberately no second, heuristic IRI cursor.

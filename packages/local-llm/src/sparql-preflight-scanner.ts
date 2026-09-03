@@ -1,6 +1,5 @@
 import {
-  indexSparqlStructure,
-  prepareSparql,
+  prepareSparqlQuery,
   type SparqlLexicalToken,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
 
@@ -154,14 +153,13 @@ function findBareAbsoluteIri(
 
 /** Derive local-model policy facts from core's canonical lexical artifacts. */
 export function scanSparqlPreflight(value: string): SparqlPreflightScan {
-  const lexical = prepareSparql(value);
-  const structure = indexSparqlStructure(lexical);
+  const query = prepareSparqlQuery(value);
+  const { prepared: lexical, structure } = query;
   const tokens = lexical.tokens.slice(lexical.prologue.endTokenIndex);
-  const first = tokens[0];
-  const operation = isValuedToken(first)
-    && first.kind === 'word'
-    && (first.upper === 'SELECT' || first.upper === 'ASK' || first.upper === 'CONSTRUCT')
-    ? first.upper
+  const operation = query.operation === 'SELECT'
+    || query.operation === 'ASK'
+    || query.operation === 'CONSTRUCT'
+    ? query.operation
     : undefined;
   const declaredPrefixes = new Set(
     lexical.prologue.declaredPrefixes.map((prefix) => prefix.toLowerCase()),

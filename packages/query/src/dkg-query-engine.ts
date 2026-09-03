@@ -15,6 +15,7 @@ import {
   resolveGraphScopedOrLegacyMetadata,
 } from '@origintrail-official/dkg-storage';
 import {
+  materializePreparedSparql,
   prepareSparql,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
 import type {
@@ -52,7 +53,6 @@ import {
   assertExplicitGraphIrisAllowed,
   assertNoCallerDatasetClauses,
   constrainGraphVariablesToAllowedSet,
-  materializeGraphScopeForExecution,
   prepareGraphScope,
   requireGraphScopeRewrite,
   rewriteGraphRoute,
@@ -1227,7 +1227,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
    * rejected US and stay server faults (PR #2330 review).
    */
   private async execCallerQuery(scope: PreparedGraphScope, reads: StoreReadLane) {
-    const sparql = materializeGraphScopeForExecution(scope);
+    const sparql = materializePreparedSparql(scope.prepared);
     try {
       return await reads.query(sparql);
     } catch (err) {

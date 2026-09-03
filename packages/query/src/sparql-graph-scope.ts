@@ -1,16 +1,16 @@
 import {
+  prepareSparqlQuery,
   type PreparedSparql,
+  type PreparedSparqlQuery,
+  type SparqlQueryVariable,
   type SparqlLexicalToken,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import {
-  prepareSparqlQuery,
   sparqlRewriteReady,
   sparqlRewriteUnsupported,
-  type PreparedSparqlQuery,
-  type SparqlQueryVariable,
   type SparqlRewriteResult,
-} from './prepared-sparql-query.js';
+} from './sparql-rewrite-result.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 
 type ValuedToken = Extract<SparqlLexicalToken, { value: string }>;
@@ -95,27 +95,6 @@ export function transitionGraphScope(
   source: string,
 ): PreparedGraphScope {
   return source === scope.source ? scope : prepareGraphScope(source);
-}
-
-/**
- * Materialize active UCHAR-spelled syntax exactly once at the store boundary.
- * Opaque strings, IRIs, and comments retain their original source spelling.
- */
-export function materializeGraphScopeForExecution(scope: PreparedGraphScope): string {
-  const chunks: string[] = [];
-  let cursor = 0;
-  let changed = false;
-  for (const token of scope.prepared.tokens) {
-    if (!isValuedToken(token)) continue;
-    const raw = scope.source.slice(token.start, token.end);
-    if (raw === token.logicalValue) continue;
-    chunks.push(scope.source.slice(cursor, token.start), token.logicalValue);
-    cursor = token.end;
-    changed = true;
-  }
-  if (!changed) return scope.source;
-  chunks.push(scope.source.slice(cursor));
-  return chunks.join('');
 }
 
 function prefixesFromTokens(prepared: PreparedSparql): Map<string, string> {

@@ -1,14 +1,14 @@
 import { TRUST_LEVEL_PREDICATE } from '@origintrail-official/dkg-core';
 import {
   sparqlTokenIndexesAtDepth,
+  type PreparedSparqlQuery,
   type SparqlLexicalToken,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
 import {
   sparqlRewriteReady,
   sparqlRewriteUnsupported,
-  type PreparedSparqlQuery,
   type SparqlRewriteResult,
-} from './prepared-sparql-query.js';
+} from './sparql-rewrite-result.js';
 
 type SourceSparqlToken = Extract<SparqlLexicalToken, { value: string }>;
 

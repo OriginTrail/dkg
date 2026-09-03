@@ -48,61 +48,6 @@ export function readSparqlLogicalCodePoint(
   return { codePoint, rawWidth: 2 + digits };
 }
 
-/** Decode active UCHAR syntax without promoting opaque token payload to syntax. */
-export function decodeSparqlCodePointEscapes(source: string): string | null {
-  const decoded: string[] = [];
-  let index = 0;
-  while (index < source.length) {
-    const logical = readSparqlLogicalCodePoint(source, index);
-    if (!logical) return null;
-
-    if (logical.codePoint === 0x23) {
-      decoded.push(String.fromCodePoint(logical.codePoint));
-      index += logical.rawWidth;
-      const commentStart = index;
-      while (index < source.length && source[index] !== '\n' && source[index] !== '\r') {
-        index++;
-      }
-      decoded.push(source.slice(commentStart, index));
-      continue;
-    }
-
-    if (logical.codePoint === 0x22 || logical.codePoint === 0x27) {
-      const string = scanSparqlStringLiteral(source, index);
-      if (!string || string.malformedUchar) return null;
-      decoded.push(source.slice(index, string.end));
-      index = string.end;
-      continue;
-    }
-
-    if (logical.codePoint === 0x3c) {
-      const iriEnd = skipSparqlIriRef(source, index);
-      if (iriEnd !== null) {
-        if (logical.rawWidth === 1) {
-          decoded.push(source.slice(index, iriEnd));
-        } else {
-          const closingWidth = [1, 6, 10].find((width) => {
-            const closing = readSparqlLogicalCodePoint(source, iriEnd - width);
-            return closing?.codePoint === 0x3e && closing.rawWidth === width;
-          });
-          if (closingWidth === undefined || iriEnd - closingWidth < index) return null;
-          decoded.push(
-            '<',
-            source.slice(index + logical.rawWidth, iriEnd - closingWidth),
-            '>',
-          );
-        }
-        index = iriEnd;
-        continue;
-      }
-    }
-
-    decoded.push(String.fromCodePoint(logical.codePoint));
-    index += logical.rawWidth;
-  }
-  return decoded.join('');
-}
-
 export function isSparqlPnCharsBaseCodePoint(codePoint: number): boolean {
   return (codePoint >= 0x41 && codePoint <= 0x5a)
     || (codePoint >= 0x61 && codePoint <= 0x7a)
