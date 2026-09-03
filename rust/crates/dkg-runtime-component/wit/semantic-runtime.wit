@@ -54,6 +54,26 @@ interface query-catalog {
   ) -> result<query-result, tool-error>;
 }
 
+interface safe-llm {
+  use capability.{execution-capability};
+
+  record tool-error {
+    code: string,
+    message: string,
+    retryable: bool,
+  }
+
+  record request {
+    effect-id: u64,
+    prompt: string,
+  }
+
+  run: async func(
+    capability: borrow<execution-capability>,
+    request: request,
+  ) -> result<string, tool-error>;
+}
+
 interface remote-execute {
   use capability.{execution-capability};
 
@@ -180,6 +200,7 @@ world semantic-runtime {
   import capability;
   import investigator;
   import query-catalog;
+  import safe-llm;
   import remote-execute;
   export executor;
 }

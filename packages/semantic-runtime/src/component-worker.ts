@@ -328,6 +328,38 @@ function componentImports(): object {
         };
       }
       if (
+        name === 'origintrail:semantic-runtime/safe-llm'
+        || name === 'origintrail:semantic-runtime/safe-llm@0.1.0'
+      ) {
+        return {
+          run: async (
+            resource: ExecutionCapability,
+            request: { effectId: bigint; prompt: string },
+          ): Promise<string> => {
+            assertImportedTool(
+              resource,
+              'llm/safe',
+              'origintrail:semantic-runtime/safe-llm@0.1.0',
+            );
+            if (typeof request?.effectId !== 'bigint' || request.effectId <= 0n) {
+              throw componentResultFailure('INVALID_SAFE_LLM_EFFECT_ID');
+            }
+            if (typeof request.prompt !== 'string') {
+              throw componentResultFailure('INVALID_SAFE_LLM_ARGUMENT');
+            }
+            const result = await invokeHostTool({
+              kind: 'safe-llm',
+              effectId: request.effectId,
+              prompt: request.prompt,
+            });
+            if (result.kind !== 'safe-llm') {
+              throw componentResultFailure('COMPONENT_TOOL_RESULT_MISMATCH');
+            }
+            return result.output;
+          },
+        };
+      }
+      if (
         name === 'origintrail:semantic-runtime/remote-execute'
         || name === 'origintrail:semantic-runtime/remote-execute@0.1.0'
       ) {

@@ -26,9 +26,14 @@ import {
 import { createInvestigatorAdapter } from './semantic-runtime-investigator-adapter.js';
 import { createDkgQueryAdapter } from './semantic-runtime-query-adapter.js';
 import { createRemoteExecuteAdapter } from './semantic-runtime-remote-execute-adapter.js';
+import {
+  createSafeLlmAdapter,
+  type SafeLlmProgram,
+} from './semantic-runtime-safe-llm-adapter.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const PROV = 'http://www.w3.org/ns/prov#';
+const RDFS = 'http://www.w3.org/2000/01/rdf-schema#';
 const XSD_DATE_TIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 const SR = 'https://origintrail.io/semantic-runtime/v1#';
 
@@ -41,6 +46,9 @@ export interface StoredSemanticProgram {
   version: string;
   source: string;
   requiredTools: string[];
+  permittedPrograms: string[];
+  label?: string;
+  description?: string;
 }
 
 export type SemanticMemoryLayer = 'wm' | 'swm' | 'vm';
@@ -77,8 +85,18 @@ export interface SemanticInvocationResult {
   executionIri: string;
   executionLayer: SemanticMemoryLayer;
   executionUal?: string;
+  outputs?: string[];
   persisted: true;
 }
+
+export type SemanticProgramChildInvoker = (input: {
+  contextGraphId: string;
+  programIri: string;
+  invocationId: string;
+  programLayer: SemanticMemoryLayer;
+  executionLayer: SemanticMemoryLayer;
+  callerAgentAddress: string;
+}) => Promise<SemanticInvocationResult>;
 
 export interface SemanticProgramForkResult {
   programIri: string;
@@ -163,13 +181,16 @@ export async function loadStoredSemanticProgram(
   validateSemanticMemoryLayer(programLayer, 'programLayer');
   const safeProgramIri = sparqlIri(programIri);
   const result = await agent.query(`
-    SELECT DISTINCT ?g ?language ?version ?source ?tool WHERE {
+    SELECT DISTINCT ?g ?language ?version ?source ?tool ?permittedProgram ?label ?description WHERE {
       GRAPH ?g {
         ${safeProgramIri} <${RDF_TYPE}> <${SR}Program> ;
           <${SR}language> ?language ;
           <${SR}version> ?version ;
           <${SR}source> ?source .
         OPTIONAL { ${safeProgramIri} <${SR}requiresTool> ?tool }
+        OPTIONAL { ${safeProgramIri} <${SR}permitsProgram> ?permittedProgram }
+        OPTIONAL { ${safeProgramIri} <${RDFS}label> ?label }
+        OPTIONAL { ${safeProgramIri} <${RDFS}comment> ?description }
       }
     }
   `, queryOptions(
@@ -192,6 +213,9 @@ export async function loadStoredSemanticProgram(
   const definitions = new Map<string, { language: string; version: string; source: string }>();
   const authors = new Set<string>();
   const requiredTools = new Set<string>();
+  const permittedPrograms = new Set<string>();
+  const labels = new Set<string>();
+  const descriptions = new Set<string>();
   for (const { row, authorAgentAddress } of rows) {
     const definition = {
       language: literalValue(row.language),
@@ -201,8 +225,11 @@ export async function loadStoredSemanticProgram(
     definitions.set(JSON.stringify(definition), definition);
     authors.add(authorAgentAddress);
     if (row.tool !== undefined) requiredTools.add(iriValue(row.tool));
+    if (row.permittedProgram !== undefined) permittedPrograms.add(iriValue(row.permittedProgram));
+    if (row.label !== undefined) labels.add(literalValue(row.label));
+    if (row.description !== undefined) descriptions.add(literalValue(row.description));
   }
-  if (definitions.size !== 1 || authors.size !== 1) {
+  if (definitions.size !== 1 || authors.size !== 1 || labels.size > 1 || descriptions.size > 1) {
     throw new SemanticProgramError(
       'PROGRAM_AMBIGUOUS',
       'Program has multiple definitions or authors',
@@ -224,6 +251,9 @@ export async function loadStoredSemanticProgram(
     authorAgentAddress: [...authors][0],
     ...definition,
     requiredTools: [...requiredTools].sort(),
+    permittedPrograms: [...permittedPrograms].sort(),
+    ...([...labels][0] ? { label: [...labels][0] } : {}),
+    ...([...descriptions][0] ? { description: [...descriptions][0] } : {}),
   };
 }
 
@@ -348,6 +378,12 @@ export async function forkStoredSemanticProgram(
     iriQuad(newProgramIri, `${PROV}wasDerivedFrom`, sourceProgramIri),
     ...source.requiredTools.map((toolIri) =>
       iriQuad(newProgramIri, `${SR}requiresTool`, toolIri)),
+    ...source.permittedPrograms.map((permittedProgram) =>
+      iriQuad(newProgramIri, `${SR}permitsProgram`, permittedProgram)),
+    ...(source.label ? [literalQuad(newProgramIri, `${RDFS}label`, source.label)] : []),
+    ...(source.description
+      ? [literalQuad(newProgramIri, `${RDFS}comment`, source.description)]
+      : []),
   ];
   const persistence = await persistProgramKnowledgeAsset(
     agent,
@@ -400,6 +436,7 @@ export async function invokeStoredSemanticProgram(
   llmConfig?: LlmConfig,
   callerAgentAddress?: string,
   executingAgentAddress?: string,
+  childInvoker?: SemanticProgramChildInvoker,
 ): Promise<SemanticInvocationResult> {
   validateSemanticMemoryLayer(programLayer, 'programLayer');
   validateSemanticMemoryLayer(executionLayer, 'executionLayer');
@@ -430,6 +467,7 @@ export async function invokeStoredSemanticProgram(
     llmConfig,
     callerAgentAddress,
     executingAgentAddress,
+    childInvoker,
   );
   runtime.inFlight.set(key, { programLayer, executionLayer, promise: invocation });
   try {
@@ -458,6 +496,7 @@ async function resolveInternal(
   callerAgentAddress?: string,
   executingAgentAddress?: string,
   executionLayer: SemanticMemoryLayer = 'vm',
+  childInvoker?: SemanticProgramChildInvoker,
 ): Promise<InternalResolution> {
   const program = await loadStoredSemanticProgram(
     agent,
@@ -539,6 +578,29 @@ async function resolveInternal(
   const offerRows = resultRows(offerResult).filter((row) =>
     isOperatorVmGraph(row.g, contextGraphId, operatorAddress));
 
+  const childPrograms = await Promise.all(program.permittedPrograms.map(async (childIri) => {
+    if (childIri === programIri) {
+      throw new SemanticProgramError('PROGRAM_SELF_PERMISSION', 'A Program cannot permit itself', 409);
+    }
+    return loadStoredSemanticProgram(
+      agent,
+      contextGraphId,
+      childIri,
+      programLayer,
+      callerAgentAddress,
+    );
+  }));
+  const safePrograms = childPrograms.map((child): SafeLlmProgram => {
+    const sourceHash = createHash('sha256').update(child.source, 'utf8').digest('hex');
+    const capabilityId = hashParts([programIri, child.programIri, sourceHash]);
+    return {
+      capabilityId,
+      programIri: child.programIri,
+      name: `program_${capabilityId.slice(0, 16)}`,
+      description: ([child.label, child.description].filter(Boolean).join(': ')
+        || 'Execute the permitted DKG Program and return its persisted output.').slice(0, 512),
+    };
+  });
   const registry = new RuntimeAdapterRegistry();
   registry.register(createInvestigatorAdapter(llmConfig));
   registry.register(createDkgQueryAdapter(agent, contextGraphId, callerAgentAddress));
@@ -548,6 +610,20 @@ async function resolveInternal(
     operatorAddress,
     programLayer,
     executionLayer,
+  ));
+  registry.register(createSafeLlmAdapter(
+    llmConfig,
+    safePrograms,
+    childInvoker
+      ? (childProgramIri, invocationId) => childInvoker({
+        contextGraphId,
+        programIri: childProgramIri,
+        invocationId,
+        programLayer,
+        executionLayer,
+        callerAgentAddress: operatorAddress,
+      })
+      : undefined,
   ));
   const tools = program.requiredTools.map((toolIri): SemanticToolResolution => {
     const rows = offerRows.filter((row) => iriValue(row.tool) === toolIri);
@@ -649,6 +725,7 @@ async function invokeResolved(
   llmConfig?: LlmConfig,
   callerAgentAddress?: string,
   executingAgentAddress?: string,
+  childInvoker?: SemanticProgramChildInvoker,
 ): Promise<SemanticInvocationResult> {
   const resolved = await resolveInternal(
     agent,
@@ -660,6 +737,7 @@ async function invokeResolved(
     callerAgentAddress,
     executingAgentAddress,
     executionLayer,
+    childInvoker,
   );
   const localOperator = agent.listLocalAgents().find(({ agentAddress }) =>
     agentAddress.toLowerCase() === resolved.operatorAddress.toLowerCase());
@@ -714,6 +792,13 @@ async function invokeResolved(
       executionIri,
       executionLayer,
       ...(executionLayer === 'vm' ? { executionUal: priorHistory.publishedUal } : {}),
+      outputs: await loadExecutionOutputs(
+        agent,
+        contextGraphId,
+        executionIri,
+        executionLayer,
+        resolved.operatorAddress,
+      ),
       persisted: true,
     };
   }
@@ -838,6 +923,7 @@ async function invokeResolved(
     });
   }
 
+  const childExecutions: string[] = [];
   const toolDispatcher: ComponentToolDispatcher = async (call) => {
     const binding = call.kind === 'investigator'
       ? {
@@ -845,7 +931,11 @@ async function invokeResolved(
         version: '1',
         normalizedInput: { prompt: call.prompt },
       }
-      : call.kind === 'query-catalog' ? {
+      : call.kind === 'safe-llm' ? {
+        operation: 'llm/safe',
+        version: '1',
+        normalizedInput: { prompt: call.prompt },
+      } : call.kind === 'query-catalog' ? {
         operation: 'dkg/query',
         version: '1',
         normalizedInput: {
@@ -914,6 +1004,21 @@ async function invokeResolved(
       throw new SemanticProgramError('TOOL_REQUEST_FAILED', 'WASI tool request failed', 502);
     }
     if (call.kind === 'investigator') return { kind: 'investigator', output: outcome.output };
+    if (call.kind === 'safe-llm') {
+      let safeResult: { output?: unknown; childExecutions?: unknown };
+      try {
+        safeResult = JSON.parse(outcome.output) as typeof safeResult;
+      } catch {
+        throw new SemanticProgramError('SAFE_LLM_RESPONSE_INVALID', 'Safe LLM result is invalid', 502);
+      }
+      if (
+        typeof safeResult.output !== 'string'
+        || !Array.isArray(safeResult.childExecutions)
+        || safeResult.childExecutions.some((iri) => typeof iri !== 'string')
+      ) throw new SemanticProgramError('SAFE_LLM_RESPONSE_INVALID', 'Safe LLM result is invalid', 502);
+      childExecutions.push(...safeResult.childExecutions);
+      return { kind: 'safe-llm', output: safeResult.output };
+    }
     if (call.kind === 'query-catalog') return { kind: 'query-catalog', json: outcome.output };
     let remote: { executionIri?: unknown; executionUal?: unknown };
     try {
@@ -965,6 +1070,7 @@ async function invokeResolved(
     events: execution.events,
     outputs: execution.outputs,
     agents: inspection.agents,
+    childExecutions,
     startedAt,
     finishedAt,
   });
@@ -993,8 +1099,32 @@ async function invokeResolved(
     executionIri,
     executionLayer,
     ...(persistence.ual ? { executionUal: persistence.ual } : {}),
+    outputs: execution.outputs.map((output) => output.value),
     persisted: true,
   };
+}
+
+async function loadExecutionOutputs(
+  agent: DKGAgent,
+  contextGraphId: string,
+  executionIri: string,
+  executionLayer: SemanticMemoryLayer,
+  operatorAddress: string,
+): Promise<string[]> {
+  const result = await agent.query(`
+    SELECT ?g ?output WHERE {
+      GRAPH ?g { ${sparqlIri(executionIri)} <${SR}output> ?output }
+    }
+  `, queryOptions(
+    contextGraphId,
+    executionLayer,
+    'semantic-runtime-execution-output-load',
+    operatorAddress,
+  ));
+  return resultRows(result)
+    .filter((row) => programGraphAuthor(row.g, contextGraphId, executionLayer)
+      ?.toLowerCase() === operatorAddress.toLowerCase())
+    .map((row) => literalValue(row.output));
 }
 
 function buildExecutionQuads(input: {
@@ -1009,6 +1139,7 @@ function buildExecutionQuads(input: {
   events: Array<{ role: string; processId: Uint8Array; value: string }>;
   outputs: Array<{ role: string; processId: Uint8Array; value: string }>;
   agents: Array<{ role: string; processId: Uint8Array; status: string }>;
+  childExecutions: string[];
   startedAt: Date;
   finishedAt: Date;
 }) {
@@ -1030,6 +1161,9 @@ function buildExecutionQuads(input: {
     quads.push(iriQuad(input.executionIri, `${SR}usedTool`, tool.toolIri));
     if (tool.adapterVersion) quads.push(literalQuad(input.executionIri, `${SR}adapterVersion`, tool.adapterVersion));
     if (tool.adapterHash) quads.push(literalQuad(input.executionIri, `${SR}adapterHash`, tool.adapterHash));
+  }
+  for (const childExecution of input.childExecutions) {
+    quads.push(iriQuad(input.executionIri, `${PROV}wasInformedBy`, childExecution));
   }
   for (const event of input.events) {
     quads.push(literalQuad(input.executionIri, `${SR}event`, JSON.stringify({

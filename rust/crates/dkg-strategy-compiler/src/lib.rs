@@ -217,6 +217,17 @@ impl AdapterRegistry {
                 false,
             ),
             adapter(
+                "llm/safe",
+                1,
+                "llm.invoke.safe",
+                EffectClass::ModelInvocation,
+                IdempotencyClass::ReconcileBeforeRetry,
+                1,
+                1,
+                None,
+                false,
+            ),
+            adapter(
                 "remote-execute",
                 1,
                 "program.remote-execute",
@@ -1984,6 +1995,22 @@ mod tests {
         );
         assert_eq!(
             compile(&extra_prompt).unwrap_err()[0].code,
+            DiagnosticCode::SchemaMismatch,
+        );
+    }
+
+    #[test]
+    fn safe_llm_requires_exactly_one_prompt_argument() {
+        let valid = envelope(
+            "(delegate assistant (grant llm.invoke.safe) (call llm/safe@1 \"Use permitted programs\"))",
+        );
+        let plan = compile(&valid).expect("typed safe LLM call is admitted");
+        assert!(plan.required_capabilities.contains("llm.invoke.safe"));
+        let invalid = envelope(
+            "(delegate assistant (grant llm.invoke.safe) (call llm/safe@1 \"one\" \"two\"))",
+        );
+        assert_eq!(
+            compile(&invalid).unwrap_err()[0].code,
             DiagnosticCode::SchemaMismatch,
         );
     }

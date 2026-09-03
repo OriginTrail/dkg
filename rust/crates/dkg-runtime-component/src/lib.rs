@@ -22,7 +22,9 @@ use bindings::exports::origintrail::semantic_runtime::executor::{
     SourcePosition, SourceSpan, Step,
 };
 use bindings::origintrail::semantic_runtime::capability::ExecutionCapability;
-use bindings::origintrail::semantic_runtime::{investigator, query_catalog, remote_execute};
+use bindings::origintrail::semantic_runtime::{
+    investigator, query_catalog, remote_execute, safe_llm,
+};
 use dkg_runtime_codec::{
     AbiResponse, PlanApplyInput, decode_response, encode_admit_request, encode_apply_plan_request,
     encode_compile_request, encode_empty_request, encode_start_plan_request, message_type,
@@ -315,6 +317,18 @@ async fn dispatch_tool(
             investigator::investigate(
                 capability,
                 investigator::Request {
+                    effect_id: effect.effect_id,
+                    prompt,
+                },
+            )
+            .await
+            .map_err(|error| tool_diagnostic(error.code, error.message, error.retryable))
+        }
+        "llm/safe" => {
+            let prompt = only_text_argument(effect.arguments, "INVALID_SAFE_LLM_ARGUMENT")?;
+            safe_llm::run(
+                capability,
+                safe_llm::Request {
                     effect_id: effect.effect_id,
                     prompt,
                 },
