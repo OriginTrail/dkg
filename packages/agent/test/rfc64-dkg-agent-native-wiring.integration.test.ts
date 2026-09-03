@@ -73,6 +73,8 @@ import {
   buildOpenOwnerContextGraphPolicyV1,
   unsignedOpenContextGraphPolicyEnvelopeV1,
 } from '../src/rfc64/open-catalog-policy-v1.js';
+import { composeRfc64FinalizedCatalogAuthorityV1 } from
+  '../src/rfc64/release-native-catalog-authority-v1.js';
 import {
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogActivationConfigV1,
@@ -256,6 +258,7 @@ interface NativeAgentStartOptionsV1 {
   readonly syncContextGraphs?: readonly string[];
   /** Normal daemon identity input; intentionally independent of RFC-64 controls. */
   readonly operationalPrivateKey?: string;
+  readonly omitLegacyDeployment?: boolean;
   readonly beforeStart?: (agent: DKGAgent) => void | Promise<void>;
 }
 
@@ -276,6 +279,7 @@ async function startNativeAgentWithOptions(
     beforeStart,
     syncContextGraphs,
     operationalPrivateKey,
+    omitLegacyDeployment = false,
     networkIdentityChainId = activation === undefined && catalogActivation === undefined
       ? undefined
       : deployment.networkId,
@@ -312,7 +316,7 @@ async function startNativeAgentWithOptions(
         chainId: networkIdentityChainId,
       },
     }),
-    ...(activation === undefined && catalogActivation === undefined
+    ...(activation === undefined && catalogActivation === undefined && !omitLegacyDeployment
       ? { rfc64CatalogDeploymentProfile: deployment }
       : {}),
     ...(operationalPrivateKey === undefined ? {} : {
@@ -1077,6 +1081,63 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     },
     60_000,
   );
+
+  it('binds omitted-deployment author inventory to the adapter chain identity', async () => {
+    const author = await startNativeAgentWithOptions({
+      name: 'default-author-chain-identity',
+      omitLegacyDeployment: true,
+      networkIdentityChainId: NETWORK_ID,
+      operationalPrivateKey: AUTHOR_WALLET.privateKey,
+    });
+    await author.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Default chain identity RFC-64 catalog',
+      callerAgentAddress: AUTHOR,
+    });
+    await author.whenRfc64CatalogResponsibilitiesIdleV1();
+    const assertionCoordinate = 'default-chain-identity-swm';
+    const shareOperationId = 'default-chain-identity-swm-operation';
+    await seedSignedSwmWorkspaceV1(author, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId,
+      assertionCoordinate,
+      kaNumber: 222n,
+      accessPolicy: 'public',
+      networkId: NETWORK_ID,
+    });
+
+    await expect(author.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+    })).resolves.toMatchObject({ status: 'applied', action: 'upsert' });
+
+    const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+    });
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      head: { payload: { networkId: NETWORK_ID, totalRows: '1' } },
+    });
+    await expect(author.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        accessPolicy: 0,
+        authorityState: 'accepted',
+        policySource: 'owner-signed-unregistered',
+      }),
+    );
+  }, 60_000);
 
   it('reports a default subscription as blocked until its access authority resolves', async () => {
     const receiver = await startNativeAgentWithOptions({
@@ -6342,17 +6403,19 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(
       AUTHOR_WALLET.privateKey,
     );
-    const policy = finalizedPublicCatalogPolicy();
-    const policyEnvelope = {
-      issuer: CONTEXT_GRAPH_STORAGE,
-      objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
-      payload: policy,
-      signatureEvidence: { kind: 'none' },
-      signatureSuite: 'eip191-personal-sign-digest-v1',
-    } as UnsignedContextGraphPolicyEnvelopeV1;
-    const policyDigest = computeContextGraphPolicyObjectDigestV1(policyEnvelope);
+    const authority = composeRfc64FinalizedCatalogAuthorityV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      snapshot: await receiverChain.getContextGraphAuthoritySnapshot(
+        BigInt(ON_CHAIN_CONTEXT_GRAPH_ID),
+      ),
+    });
     for (const agent of [author, receiver]) {
-      agent.acceptRfc64CatalogAccessSnapshotV1({ policy, policyDigest, roster: null });
+      agent.acceptRfc64CatalogAccessSnapshotV1({
+        policy: authority.policy,
+        policyDigest: authority.policyDigest,
+        roster: authority.roster,
+      });
     }
     await connectBothWays(author, receiver);
 
@@ -6375,12 +6438,12 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const scope = {
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
-      governanceChainId: '20430',
-      governanceContractAddress: CONTEXT_GRAPH_STORAGE,
-      ownershipTransitionDigest: null,
+      governanceChainId: authority.policy.governanceChainId,
+      governanceContractAddress: authority.policy.governanceContractAddress,
+      ownershipTransitionDigest: authority.policy.ownershipTransitionDigest,
       subGraphName: null,
       authorAddress: AUTHOR,
-      era: '0',
+      era: authority.policy.era,
       bucketCount: '1',
     } as const;
     expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(

@@ -272,7 +272,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     networkId: NetworkIdV1,
   ): Promise<CatalogSealDeploymentProfileV1> {
     let deployment = this.config.rfc64CatalogDeploymentProfile;
-    const trustedNetworkId = deployment?.networkId ?? this.config.networkIdentity?.networkId;
+    const trustedNetworkId = deployment?.networkId ?? this.config.networkIdentity?.chainId;
     if (trustedNetworkId === undefined || trustedNetworkId !== networkId) {
       throw new Error('RFC-64 auto-publish network differs from the trusted deployment');
     }
@@ -411,7 +411,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     ) return Object.freeze({ status: 'inactive' });
     assertContextGraphIdV1(contextGraphId, 'RFC-64 catalog authoring contextGraphId');
     const networkId = (this.config.rfc64CatalogDeploymentProfile?.networkId
-      ?? this.config.networkIdentity?.networkId) as NetworkIdV1 | undefined;
+      ?? this.config.networkIdentity?.chainId) as NetworkIdV1 | undefined;
     if (networkId === undefined) {
       return Object.freeze({
         status: 'unavailable',

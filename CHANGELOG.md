@@ -32,6 +32,10 @@ A default-responsibility RFC-64 release. When RFC-64 controls are omitted, every
 - Public and private authoring share the same tier-neutral signed catalog. Private policy and roster material remain authorization-bound and are never exposed in configuration evidence.
 - Catalog head application rechecks durable state inside the mutation lock, closing the scheduler-to-commit race while preserving restart repair.
 
+### Fixed
+
+- Omitted-deployment catalog authority and author inventory use the chain adapter's namespaced network identity, matching deterministic KA UALs instead of the unrelated DKG genesis hash; post-commit inventory warnings retain their bounded cause chain for operator diagnosis.
+
 ### Deployment
 
 - **No contract or deployment changes.** Existing finalized Context Graph state supplies registered authority; the release changes node and harness behavior only.

@@ -113,6 +113,16 @@ function shadowResult(
   return Object.freeze({ status, action, attempts, headObjectDigest, error });
 }
 
+function rfc64InventoryFailureDetailV1(cause: unknown): string {
+  const messages: string[] = [];
+  let current: unknown = cause;
+  for (let depth = 0; depth < 4 && current instanceof Error; depth += 1) {
+    messages.push(current.message);
+    current = current.cause;
+  }
+  return messages.join(' <- ');
+}
+
 export interface RecordRfc64SwmAuthorInventoryShadowParamsV1 {
   readonly contextGraphId: string;
   readonly subGraphName?: string | null;
@@ -701,7 +711,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     action: 'upsert' | 'remove',
     cause: unknown,
   ): Rfc64SwmAuthorInventoryShadowMutationResultV1 {
-    const error = cause instanceof Error ? cause.message : String(cause);
+    const error = cause instanceof Error ? rfc64InventoryFailureDetailV1(cause) : String(cause);
     this.log.warn(
       createOperationContext('share'),
       `RFC-64 SWM inventory shadow ${action} failed after the user operation committed: ${error}`,

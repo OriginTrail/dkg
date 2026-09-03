@@ -504,7 +504,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const persistence = this.rfc64PersistenceV1;
     const networkId = (
       this.config.rfc64CatalogDeploymentProfile?.networkId
-      ?? this.config.networkIdentity?.networkId
+      ?? this.config.networkIdentity?.chainId
     ) as NetworkIdV1 | undefined;
     const responsibilities = this.readRfc64CatalogResponsibilitiesV1();
     const appliedByContextGraph = new Map<string, Array<Readonly<{
@@ -800,7 +800,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       if (service === undefined) {
         throw new Error('RFC-64 catalog service is unavailable');
       }
-      const networkId = await this.networkId() as NetworkIdV1;
+      const networkId = (
+        this.config.rfc64CatalogDeploymentProfile?.networkId
+        ?? this.config.networkIdentity?.chainId
+      ) as NetworkIdV1 | undefined;
+      if (networkId === undefined || networkId === 'none') {
+        throw new Error('RFC-64 release-native authority requires a trusted chain network');
+      }
       const onChainId = await this.getContextGraphOnChainId(contextGraphId);
       let authority: Rfc64ReleaseNativeAuthoritySnapshotV1;
       if (onChainId !== null) {
