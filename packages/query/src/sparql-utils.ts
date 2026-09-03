@@ -5,6 +5,7 @@ import {
   skipSparqlSpaceAndLineComments,
   skipSparqlStringLiteral,
 } from '@origintrail-official/dkg-core/sparql-cursors';
+import { scanSparqlLexically } from '@origintrail-official/dkg-core/sparql-lexical-scanner';
 
 export {
   stripSparqlLiteralsAndComments as stripLiteralsAndComments,
@@ -21,6 +22,15 @@ export {
 
 export function skipSparqlIriRef(source: string, start: number): number | null {
   return skipSparqlIriRefForStructuralScan(source, start);
+}
+
+/** Collect logical word tokens while keeping strings, IRIs, and comments inert. */
+export function collectSparqlWordTokens(source: string): ReadonlySet<string> {
+  const words = new Set<string>();
+  for (const token of scanSparqlLexically(source).tokens) {
+    if ('value' in token && token.kind === 'word') words.add(token.upper);
+  }
+  return words;
 }
 
 export function isSparqlKeywordStart(src: string, idx: number): boolean {

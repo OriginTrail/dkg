@@ -4,6 +4,7 @@ import {
   scanSparqlLexically,
 } from '../src/sparql-lexical-scanner.js';
 import {
+  decodeSparqlCodePointEscapes,
   skipSparqlIriRef,
   skipSparqlIriRefForStructuralScan,
 } from '../src/sparql-lexical-primitives.js';
@@ -62,6 +63,21 @@ describe('canonical SPARQL lexical scanner', () => {
       value: String.raw`\u003Fs`,
       logicalValue: '?s',
     }));
+  });
+
+  it('does not reinterpret escaped string backslashes as overlapping UCHARs', () => {
+    const malformedLookalike = String.raw`SELECT ?x WHERE { BIND("\\u00ZZ" AS ?x) }`;
+    const validLookalike = String.raw`SELECT ?x WHERE { BIND("\\u006E" AS ?x) }`;
+
+    expect(decodeSparqlCodePointEscapes(malformedLookalike)).toBe(malformedLookalike);
+    expect(decodeSparqlCodePointEscapes(validLookalike)).toBe(validLookalike);
+  });
+
+  it('leaves UCHAR-like comment text inert while decoding active tokens', () => {
+    const source = String.raw`\u0053ELECT * WHERE {} # \u00ZZ \u0053ERVICE`;
+
+    expect(decodeSparqlCodePointEscapes(source))
+      .toBe(String.raw`SELECT * WHERE {} # \u00ZZ \u0053ERVICE`);
   });
 
   it.each([

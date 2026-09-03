@@ -48,12 +48,91 @@ export function readSparqlLogicalCodePoint(
   return { codePoint, rawWidth: 2 + digits };
 }
 
+function appendDecodedRegion(
+  source: string,
+  start: number,
+  end: number,
+  decoded: string[],
+): boolean {
+  let index = start;
+  while (index < end) {
+    const logical = readSparqlLogicalCodePoint(source, index);
+    if (!logical || index + logical.rawWidth > end) return false;
+    decoded.push(String.fromCodePoint(logical.codePoint));
+    index += logical.rawWidth;
+  }
+  return true;
+}
+
+function appendDecodedStringRegion(
+  source: string,
+  start: number,
+  end: number,
+  decoded: string[],
+): boolean {
+  let index = start;
+  while (index < end) {
+    // ECHAR is atomic inside a string. In particular, the first slash of
+    // `\\\\u1234` escapes the second slash, so that second slash must never
+    // be reinterpreted as the start of an overlapping UCHAR.
+    if (
+      source.charCodeAt(index) === 0x5c
+      && source[index + 1] !== 'u'
+      && source[index + 1] !== 'U'
+    ) {
+      const escapedCodePoint = source.codePointAt(index + 1);
+      const escapedWidth = escapedCodePoint !== undefined && escapedCodePoint > 0xffff ? 2 : 1;
+      decoded.push(source.slice(index, Math.min(index + 1 + escapedWidth, end)));
+      index += 1 + escapedWidth;
+      continue;
+    }
+
+    const logical = readSparqlLogicalCodePoint(source, index);
+    if (!logical || index + logical.rawWidth > end) return false;
+    decoded.push(String.fromCodePoint(logical.codePoint));
+    index += logical.rawWidth;
+  }
+  return true;
+}
+
+/**
+ * Apply SPARQL UCHAR preprocessing without reinterpreting text inside an
+ * already-open comment or the second slash of a string ECHAR.
+ */
 export function decodeSparqlCodePointEscapes(source: string): string | null {
   const decoded: string[] = [];
   let index = 0;
   while (index < source.length) {
     const logical = readSparqlLogicalCodePoint(source, index);
     if (!logical) return null;
+
+    if (logical.codePoint === 0x23) {
+      decoded.push('#');
+      index += logical.rawWidth;
+      const commentStart = index;
+      while (index < source.length && source[index] !== '\n' && source[index] !== '\r') {
+        index++;
+      }
+      decoded.push(source.slice(commentStart, index));
+      continue;
+    }
+
+    if (logical.codePoint === 0x22 || logical.codePoint === 0x27) {
+      const string = scanSparqlStringLiteral(source, index);
+      if (!string || !appendDecodedStringRegion(source, index, string.end, decoded)) return null;
+      index = string.end;
+      continue;
+    }
+
+    if (logical.codePoint === 0x3c) {
+      const iriEnd = skipSparqlIriRef(source, index);
+      if (iriEnd !== null) {
+        if (!appendDecodedRegion(source, index, iriEnd, decoded)) return null;
+        index = iriEnd;
+        continue;
+      }
+    }
+
     decoded.push(String.fromCodePoint(logical.codePoint));
     index += logical.rawWidth;
   }

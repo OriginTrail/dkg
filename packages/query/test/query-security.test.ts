@@ -214,6 +214,39 @@ describe('I-009: SPARQL graph scope bypass prevention', () => {
     expect(response.error).toContain('GRAPH clauses are not allowed');
   });
 
+  it('rejects an escaped SERVICE keyword before invoking the query engine', async () => {
+    const boundary = makeNoExecuteBoundary();
+
+    const response = await boundary.handler.handle(
+      makeRequest({
+        sparql: String.raw`SELECT * WHERE { \u0053ERVICE \u003Chttp://127.0.0.1:8080/sparql\u003E { ?s ?p ?o } }`,
+      }),
+      'peer-attacker',
+    );
+
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('SERVICE clauses are not allowed');
+    expect(boundary.wasExecuted()).toBe(false);
+  });
+
+  it('keeps escaped SERVICE text inside strings and comments inert', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: String.raw`SELECT ?x WHERE { BIND("\u0053ERVICE" AS ?x) # \u00ZZ \u0053ERVICE
+}`,
+      }),
+      'peer-1',
+    );
+
+    expect(response.status).toBe('OK');
+  });
+
+  it('rejects escaped SERVICE again at the engine execution boundary', async () => {
+    await expect(engine.query(
+      String.raw`SELECT * WHERE { \u0053ERVICE \u003Chttp://127.0.0.1/sparql\u003E { ?s ?p ?o } }`,
+    )).rejects.toThrow('SERVICE clauses are not allowed');
+  });
+
   it('rejects malformed UCHAR escapes before executing SPARQL', async () => {
     await expect(engine.query(
       String.raw`SELECT ?name WHERE { ?s <${SCHEMA_NAME}> \u00ZZ }`,

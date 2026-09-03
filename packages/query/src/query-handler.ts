@@ -5,7 +5,10 @@ import {
   quadsToNQuads,
   type StoreSchedulerBusyErrorLike,
 } from '@origintrail-official/dkg-storage';
-import { stripLiteralsAndComments } from './sparql-utils.js';
+import {
+  collectSparqlWordTokens,
+  preprocessSparqlCodePointEscapes,
+} from './sparql-utils.js';
 import { validateReadOnlySparql } from './sparql-guard.js';
 import type { DKGQueryEngine } from './dkg-query-engine.js';
 import type {
@@ -398,23 +401,27 @@ export class QueryHandler {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing sparql');
     }
 
-    // Strip string literals and comments so regexes don't false-positive
-    // on keywords inside quoted values or variable names like ?graph.
-    const stripped = stripLiteralsAndComments(sparql);
+    const preprocessedSparql = preprocessSparqlCodePointEscapes(sparql);
+    if (preprocessedSparql === null) {
+      return errorResponse(opId, 'ERROR', 'SPARQL rejected: malformed Unicode code-point escape');
+    }
+    // Inspect exactly the one-pass normalization the engine will derive, but
+    // pass the original source so the execution boundary does not decode it twice.
+    const codeWords = collectSparqlWordTokens(preprocessedSparql);
 
-    if (/\bSERVICE\b/i.test(stripped)) {
+    if (codeWords.has('SERVICE')) {
       return errorResponse(opId, 'ERROR', 'SERVICE clauses are not allowed in remote queries');
     }
 
-    if (/\bGRAPH(?:\s+|(?=[?$<]))/i.test(stripped)) {
+    if (codeWords.has('GRAPH')) {
       return errorResponse(opId, 'ERROR', 'Explicit GRAPH clauses are not allowed in remote queries — queries are automatically scoped to the target context graph');
     }
 
-    if (/\bFROM(?:\s+|(?=<))/i.test(stripped)) {
+    if (codeWords.has('FROM')) {
       return errorResponse(opId, 'ERROR', 'FROM/FROM NAMED clauses are not allowed in remote queries — queries are automatically scoped to the target context graph');
     }
 
-    const guard = validateReadOnlySparql(sparql);
+    const guard = validateReadOnlySparql(preprocessedSparql);
     if (!guard.safe) {
       return errorResponse(opId, 'ERROR', `SPARQL rejected: ${guard.reason}`);
     }

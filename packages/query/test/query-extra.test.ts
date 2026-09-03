@@ -55,6 +55,7 @@ import {
   contextGraphMetaUri,
   assertionLifecycleUri,
   assertionScopedGraphUri,
+  sparqlString,
   TrustLevel,
 } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine, resolveViewGraphs } from '../src/dkg-query-engine.js';
@@ -264,6 +265,20 @@ describe('[Q-1] DKGQueryEngine minTrust uses writer-side trust metadata', () => 
     );
 
     expect(result.bindings.map((binding) => binding['o'])).toEqual(['"Alice"']);
+  });
+
+  it.each([
+    String.raw`\u00ZZ`,
+    String.raw`\u006E`,
+  ])('round-trips a sparqlString UCHAR lookalike: %s', async (value) => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+
+    const result = await engine.query(
+      `SELECT ?value WHERE { BIND(${sparqlString(value)} AS ?value) }`,
+    );
+
+    expect(result.bindings).toEqual([{ value: sparqlString(value) }]);
   });
 
   it('still strips real line comments containing a fake terminator (`# … .`)', async () => {

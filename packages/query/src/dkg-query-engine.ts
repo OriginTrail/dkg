@@ -50,6 +50,7 @@ import {
   detectSparqlQueryForm,
 } from './sparql-guard.js';
 import {
+  collectSparqlWordTokens,
   findMatchingSparqlCloseBrace as findMatchingCloseBrace,
   isSparqlKeyword,
   isSparqlKeywordStart as isKeywordStart,
@@ -370,6 +371,9 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       throw new Error('SPARQL rejected: malformed Unicode code-point escape');
     }
     sparql = preprocessedSparql;
+    if (collectSparqlWordTokens(sparql).has('SERVICE')) {
+      throw new Error('SPARQL rejected: SERVICE clauses are not allowed');
+    }
     const reads = createQueryStoreReadContext(this.store, options);
     const guard = validateReadOnlySparql(sparql);
     if (!guard.safe) {
