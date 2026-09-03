@@ -1,3 +1,4 @@
+import { maskSparqlLexicalRegions } from '@origintrail-official/dkg-core/sparql-lexical-scanner';
 import type { McpToolDefinition } from './schema.js';
 import { scanSparqlPreflight } from './sparql-preflight-scanner.js';
 
@@ -152,9 +153,8 @@ export function validateDkgToolCall(
 export function rewriteCompactPredicatesForDkg(sparql: string): string {
   const subject = String.raw`(?:\?[A-Za-z_][A-Za-z0-9_]*|<[^>]+>|_:[A-Za-z][A-Za-z0-9_-]*)`;
   const predicateAnchor = String.raw`(?:${subject}\s+|;\s*)`;
-  const scan = scanSparqlPreflight(sparql);
-  if (scan.unterminated) return sparql;
-  const { masked } = scan;
+  const { masked, unterminated } = maskSparqlLexicalRegions(sparql);
+  if (unterminated) return sparql;
   const edits: Array<{ start: number; end: number; value: string }> = [];
   const shorthand = new RegExp(`(${predicateAnchor})a(\\s+)`, 'gi');
   for (const match of masked.matchAll(shorthand)) {

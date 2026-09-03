@@ -8,6 +8,15 @@ import {
 } from '../src/bounded-lru-cache.js';
 
 describe('analyzeSparqlOperation memoization', () => {
+  it.each([
+    'PREFIX foaf.core: <http://xmlns.com/foaf/0.1/> SELECT ?s WHERE { ?s foaf.core:name ?n }',
+    'PREFIX café: <https://example.com/> SELECT ?s WHERE { ?s café:name ?n }',
+    'PREFIX δοκιμή: <https://example.com/> SELECT ?s WHERE { ?s δοκιμή:name ?n }',
+    'BASE <https://example.com/> SELECT ?s WHERE { ?s ?p ?o }',
+  ])('classifies a valid PN_PREFIX/BASE prologue: %s', (sparql) => {
+    expect(classifySparqlOperation(sparql)).toEqual({ kind: 'read', form: 'SELECT' });
+  });
+
   it('returns isolated mutable analyses while reusing the internal classification', () => {
     const sparql = `
       SELECT ?g WHERE {

@@ -15,6 +15,11 @@
       "import": "./dist/project-ontology.js",
       "default": "./dist/project-ontology.js"
     },
+    "./bounded-response-body": {
+      "types": "./dist/bounded-response-body.d.ts",
+      "import": "./dist/bounded-response-body.js",
+      "default": "./dist/bounded-response-body.js"
+    },
     "./query-catalog-parameters": {
       "types": "./dist/query-catalog-parameters.d.ts",
       "import": "./dist/query-catalog-parameters.js",
@@ -34,6 +39,11 @@
       "types": "./dist/sparql-safe.d.ts",
       "import": "./dist/sparql-safe.js",
       "default": "./dist/sparql-safe.js"
+    },
+    "./sparql-lexical-scanner": {
+      "types": "./dist/sparql-lexical-scanner.d.ts",
+      "import": "./dist/sparql-lexical-scanner.js",
+      "default": "./dist/sparql-lexical-scanner.js"
     },
     "./closed-data-snapshot": {
       "types": "./dist/sync-wire-objects.d.ts",

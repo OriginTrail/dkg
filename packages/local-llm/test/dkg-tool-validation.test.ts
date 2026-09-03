@@ -62,6 +62,14 @@ describe('DKG SPARQL preflight', () => {
       .toBe(true);
   });
 
+  it.each([
+    'PREFIX foaf.core: <http://xmlns.com/foaf/0.1/> SELECT ?s WHERE { ?s foaf.core:name ?n }',
+    'PREFIX café: <https://example.com/> SELECT ?s WHERE { ?s café:name ?n }',
+    'PREFIX δοκιμή: <https://example.com/> SELECT ?s WHERE { ?s δοκιμή:name ?n }',
+  ])('accepts a valid PN_PREFIX label and reaches SELECT: %s', (sparql) => {
+    expect(validateSparqlForDkg(sparql)).toEqual({ ok: true, errors: [] });
+  });
+
   it('handles long prefix whitespace and aggregate lookalikes without backtracking', () => {
     const paddedQuery = `PREFIX ex: <https://example.com/>${' '.repeat(20_000)}SELECT ?x WHERE { ?x ex:name ?name }`;
     expect(validateSparqlForDkg(paddedQuery).ok).toBe(true);
@@ -82,6 +90,37 @@ describe('DKG SPARQL preflight', () => {
     ].join('\n')).ok).toBe(true);
     expect(validateSparqlForDkg('SELECT ?x WHERE { BIND("unterminated AS ?x) }').errors)
       .toContain('close the unterminated string literal or IRI');
+  });
+
+  it.each([
+    [
+      'SELECT ?x FROM <urn:g> WHERE { ?x ?p ?o }',
+      'remove FROM because projectId, subGraphName, and view already scope the query',
+    ],
+    [
+      'SELECT ?x WHERE { FILTER NOT EXISTS(?x) }',
+      'use braces for FILTER NOT EXISTS',
+    ],
+    [
+      'SELECT ?x WHERE { FILTER(STRCONTAINS(str(?x), "a")) }',
+      'use SPARQL CONTAINS instead of STRCONTAINS',
+    ],
+    [
+      'SELECT ?x WHERE { ?x ?p ?o ',
+      'balance SPARQL braces',
+    ],
+  ])('rejects an active scanner guard in %s', (sparql, message) => {
+    expect(validateSparqlForDkg(sparql).errors).toContain(message);
+  });
+
+  it.each([
+    'SELECT ?x WHERE { BIND("FROM" AS ?x) }',
+    'SELECT ?x WHERE { BIND("FILTER NOT EXISTS(" AS ?x) }',
+    'SELECT ?x WHERE { BIND("STRCONTAINS(" AS ?x) }',
+    'SELECT ?x WHERE { BIND("{" AS ?x) }',
+    'SELECT ?x WHERE { ?x ?p ?o # FROM FILTER NOT EXISTS( STRCONTAINS( {\n}',
+  ])('keeps an equivalent string/comment lookalike inert: %s', (sparql) => {
+    expect(validateSparqlForDkg(sparql)).toEqual({ ok: true, errors: [] });
   });
 
   it('rejects oversized SPARQL before preflight parsing', () => {

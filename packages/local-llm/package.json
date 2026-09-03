@@ -18,6 +18,9 @@
     "benchmark:dkg": "pnpm build && node benchmark/real-dkg.mjs",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
+  "dependencies": {
+    "@origintrail-official/dkg-core": "workspace:*"
+  },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1",
     "@types/node": "^22",
