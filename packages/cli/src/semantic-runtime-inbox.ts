@@ -16,6 +16,7 @@ import {
   SemanticProgramError,
   type ConfiguredSemanticRuntimeService,
   type SemanticInvocationResult,
+  type SemanticProgramChildInvoker,
   type SemanticMemoryLayer,
 } from './semantic-runtime.js';
 import {
@@ -115,6 +116,7 @@ export function registerSemanticRuntimeInboxSkill(
         llmConfig,
         callerAgentAddress,
         executingAgentAddress,
+        childInvoker(agent, runtime, config, llmConfig),
       );
       return {
         success: true,
@@ -170,6 +172,8 @@ export async function invokeSemanticProgramOnAuthorNode(
       config,
       llmConfig,
       caller,
+      undefined,
+      childInvoker(agent, runtime, config, llmConfig),
     );
   }
 
@@ -259,6 +263,26 @@ export async function invokeSemanticProgramOnAuthorNode(
   return result;
 }
 
+function childInvoker(
+  agent: DKGAgent,
+  runtime: ConfiguredSemanticRuntimeService,
+  config: SemanticRuntimeConfig | undefined,
+  llmConfig: LlmConfig | undefined,
+): SemanticProgramChildInvoker {
+  return (input) => invokeSemanticProgramOnAuthorNode(
+    agent,
+    runtime,
+    input.contextGraphId,
+    input.programIri,
+    input.invocationId,
+    input.programLayer,
+    input.executionLayer,
+    config,
+    llmConfig,
+    input.callerAgentAddress,
+  );
+}
+
 async function assertRemoteSemanticInvocationAllowed(
   agent: DKGAgent,
   contextGraphId: string,
@@ -324,6 +348,9 @@ function decodeResult(
     || result.executionLayer !== executionLayer
     || (executionLayer === 'vm' && typeof result.executionUal !== 'string')
     || (executionLayer !== 'vm' && result.executionUal !== undefined)
+    || (result.outputs !== undefined
+      && (!Array.isArray(result.outputs)
+        || result.outputs.some((output) => typeof output !== 'string')))
     || result.persisted !== true
   ) {
     throw new SemanticProgramError(

@@ -71,12 +71,18 @@ export type ComponentToolCall =
     effectId: bigint;
     nodeId: string;
     programIri: string;
+  }
+  | {
+    kind: 'safe-llm';
+    effectId: bigint;
+    prompt: string;
   };
 
 export type ComponentToolResult =
   | { kind: 'investigator'; output: string }
   | { kind: 'query-catalog'; json: string }
-  | { kind: 'remote-execute'; executionIri: string; executionUal?: string };
+  | { kind: 'remote-execute'; executionIri: string; executionUal?: string }
+  | { kind: 'safe-llm'; output: string };
 
 export type ComponentToolDispatcher = (
   call: ComponentToolCall,

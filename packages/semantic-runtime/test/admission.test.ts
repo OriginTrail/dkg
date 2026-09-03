@@ -91,6 +91,26 @@ describe('WasmStrategyAdmissionClient', () => {
     if (!invalid.ok) expect(invalid.diagnostics[0]).toMatchObject({ code: 'IR_SCHEMA_MISMATCH' });
   });
 
+  it('admits exactly one prompt for the safe LLM operation', async () => {
+    const client = new WasmStrategyAdmissionClient({ workerUrl });
+    const valid = await client.compileStrategy(`
+      (strategy safe-llm (version "1.0.0") (scope network:testnet) (goal answer)
+        (delegate assistant
+          (grant llm.invoke.safe)
+          (call llm/safe@1 "Use permitted programs")))
+    `);
+    expect(valid.ok).toBe(true);
+    if (valid.ok) expect(valid.plan.requiredCapabilities).toContain('llm.invoke.safe');
+    const invalid = await client.compileStrategy(`
+      (strategy safe-llm (version "1.0.0") (scope network:testnet) (goal answer)
+        (delegate assistant
+          (grant llm.invoke.safe)
+          (call llm/safe@1 "one" "two")))
+    `);
+    expect(invalid.ok).toBe(false);
+    if (!invalid.ok) expect(invalid.diagnostics[0]).toMatchObject({ code: 'IR_SCHEMA_MISMATCH' });
+  });
+
   it('rejects canonical bytes whose declared authority no longer matches the plan tree', async () => {
     const client = new WasmStrategyAdmissionClient({ workerUrl });
     const compiled = await client.compileStrategy(listenerBoy);

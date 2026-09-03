@@ -605,7 +605,10 @@ fn supports_plan_effects(plan: &AdmittedPlan) -> bool {
         && !plan.required_capabilities.iter().any(|value| {
             !matches!(
                 value.as_str(),
-                "agent.invoke.investigator" | "dkg.query" | "program.remote-execute"
+                "agent.invoke.investigator"
+                    | "llm.invoke.safe"
+                    | "dkg.query"
+                    | "program.remote-execute"
             )
         })
         && !plan.effect_upper_bound.iter().any(|value| {
@@ -618,7 +621,7 @@ fn supports_plan_effects(plan: &AdmittedPlan) -> bool {
             *version != 1
                 || !matches!(
                     operation.as_str(),
-                    "agent/investigate" | "dkg/query" | "remote-execute"
+                    "agent/investigate" | "llm/safe" | "dkg/query" | "remote-execute"
                 )
         })
 }
@@ -665,7 +668,8 @@ fn materialize_plan(plan: &AdmittedPlan, logical_time: u64) -> Result<PlanRuntim
     let mut children = Vec::with_capacity(definitions.len());
     for (index, (role, instructions)) in definitions.into_iter().enumerate() {
         let index = u32::try_from(index).map_err(|_| "PLAN_MATERIALIZATION_AGENT_COUNT")?;
-        let model_call = has_call(&instructions, "agent/investigate");
+        let model_call =
+            has_call(&instructions, "agent/investigate") || has_call(&instructions, "llm/safe");
         let dkg_query = has_call(&instructions, "dkg/query");
         let remote_execute = has_call(&instructions, "remote-execute");
         let (process_id, child) = materialize_agent(
@@ -779,7 +783,10 @@ fn collect_plan_agents(
             if grants.iter().any(|value| {
                 !matches!(
                     value.as_str(),
-                    "agent.invoke.investigator" | "dkg.query" | "program.remote-execute"
+                    "agent.invoke.investigator"
+                        | "llm.invoke.safe"
+                        | "dkg.query"
+                        | "program.remote-execute"
                 )
             }) {
                 return Err("PLAN_MATERIALIZATION_AGENT_GRANT");
@@ -812,7 +819,7 @@ fn collect_instructions(
             if call.version == 1
                 && matches!(
                     call.operation.as_str(),
-                    "agent/investigate" | "dkg/query" | "remote-execute"
+                    "agent/investigate" | "llm/safe" | "dkg/query" | "remote-execute"
                 ) =>
         {
             instructions.push(PlanInstruction::Call(call.clone()));
@@ -829,7 +836,7 @@ fn collect_instructions(
 
 fn call_budget(call: &RegisteredCall) -> Option<(BudgetKind, u64)> {
     match (call.operation.as_str(), call.version) {
-        ("agent/investigate", 1) => Some((BudgetKind::ModelTokens, 512)),
+        ("agent/investigate" | "llm/safe", 1) => Some((BudgetKind::ModelTokens, 512)),
         ("dkg/query", 1) => Some((BudgetKind::DkgQueries, 1)),
         ("remote-execute", 1) => Some((BudgetKind::ToolCalls, 1)),
         _ => None,

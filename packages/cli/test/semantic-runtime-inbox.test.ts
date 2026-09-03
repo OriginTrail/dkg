@@ -222,6 +222,7 @@ describe('semantic runtime DKG inbox invocation', () => {
       undefined,
       TARGET,
       AUTHOR,
+      expect.any(Function),
     );
   });
 
