@@ -72,14 +72,108 @@ function pnCharsWidth(value: string, index: number): number {
   return accepted ? codePointWidth(codePoint) : 0;
 }
 
-function isWhitespace(character: string | undefined): boolean {
-  return character !== undefined && /\s/u.test(character);
+function asciiDigitWidth(value: string, index: number): number {
+  const code = value.charCodeAt(index);
+  return code >= 0x30 && code <= 0x39 ? 1 : 0;
 }
 
-function isPrefixedNameTerminator(character: string | undefined): boolean {
-  return character === undefined
-    || isWhitespace(character)
-    || ';,.(){}[]<>\'"'.includes(character);
+/** SPARQL VARNAME has different start/continuation rules from PN_CHARS. */
+function varNameInitialWidth(value: string, index: number): number {
+  return pnCharsUWidth(value, index) || asciiDigitWidth(value, index);
+}
+
+function varNameContinuationWidth(value: string, index: number): number {
+  const ordinaryWidth = pnCharsUWidth(value, index) || asciiDigitWidth(value, index);
+  if (ordinaryWidth) return ordinaryWidth;
+  const codePoint = value.codePointAt(index);
+  if (codePoint === undefined) return 0;
+  const accepted = codePoint === 0x00b7
+    || (codePoint >= 0x0300 && codePoint <= 0x036f)
+    || (codePoint >= 0x203f && codePoint <= 0x2040);
+  return accepted ? codePointWidth(codePoint) : 0;
+}
+
+function isAsciiHex(character: string | undefined): boolean {
+  if (character === undefined) return false;
+  const code = character.charCodeAt(0);
+  return (code >= 0x30 && code <= 0x39)
+    || (code >= 0x41 && code <= 0x46)
+    || (code >= 0x61 && code <= 0x66);
+}
+
+/** SPARQL PLX: percent escapes and backslash-escaped PN_LOCAL punctuation. */
+function plxWidth(value: string, index: number): number {
+  if (
+    value[index] === '%'
+    && isAsciiHex(value[index + 1])
+    && isAsciiHex(value[index + 2])
+  ) return 3;
+  if (
+    value[index] === '\\'
+    && value[index + 1] !== undefined
+    && "_~.-!$&'()*+,;=/?#@%".includes(value[index + 1])
+  ) return 2;
+  return 0;
+}
+
+function pnLocalInitialWidth(value: string, index: number): number {
+  return pnCharsUWidth(value, index)
+    || asciiDigitWidth(value, index)
+    || (value[index] === ':' ? 1 : 0)
+    || plxWidth(value, index);
+}
+
+function pnLocalContinuationWidth(value: string, index: number): number {
+  return pnCharsWidth(value, index)
+    || (value[index] === ':' ? 1 : 0)
+    || plxWidth(value, index);
+}
+
+function scanPnLocalEnd(value: string, start: number): number {
+  let cursor = start;
+  let width = pnLocalInitialWidth(value, cursor);
+  if (!width) return cursor;
+  cursor += width;
+  let lastValidEnd = cursor;
+  while (cursor < value.length) {
+    width = pnLocalContinuationWidth(value, cursor);
+    if (width) {
+      cursor += width;
+      lastValidEnd = cursor;
+      continue;
+    }
+    if (value[cursor] === '.') {
+      cursor++;
+      continue;
+    }
+    break;
+  }
+  return lastValidEnd;
+}
+
+function pnPrefixColonIndex(value: string, start: number): number | undefined {
+  const firstWidth = pnCharsBaseWidth(value, start);
+  if (!firstWidth) return undefined;
+  let cursor = start + firstWidth;
+  let lastValidEnd = cursor;
+  while (cursor < value.length) {
+    const width = pnCharsWidth(value, cursor);
+    if (width) {
+      cursor += width;
+      lastValidEnd = cursor;
+      continue;
+    }
+    if (value[cursor] === '.') {
+      cursor++;
+      continue;
+    }
+    break;
+  }
+  return value[cursor] === ':' && cursor === lastValidEnd ? cursor : undefined;
+}
+
+function isWhitespace(character: string | undefined): boolean {
+  return character !== undefined && /\s/u.test(character);
 }
 
 function isSparqlIriRefBodyChar(character: string | undefined): character is string {
@@ -121,12 +215,10 @@ function scanPrologue(tokens: readonly SparqlLexicalToken[]): SparqlLexicalScan[
     const name = tokens[cursor + 1];
     const iri = tokens[cursor + 2];
     if (!valuedToken(name) || keyword.end === name.start || iri?.kind !== 'iri') break;
-    if (name.kind === 'symbol' && name.value === ':') {
-      declaredPrefixes.push('');
-      cursor += 3;
-      continue;
-    }
-    if (name.kind !== 'prefixed-name' || !name.value.endsWith(':')) break;
+    if (
+      name.kind !== 'prefixed-name'
+      || name.value.indexOf(':') !== name.value.length - 1
+    ) break;
     declaredPrefixes.push(name.value.slice(0, -1));
     cursor += 3;
   }
@@ -185,34 +277,29 @@ function scanSparql(value: string, tokenize: boolean): SparqlLexicalScan {
     }
 
     if (character === '<') {
-      const previous = index > 0 ? value[index - 1] : '';
-      const comparison = previous
-        && (/[a-zA-Z0-9?$_]/.test(previous) || previous === ')' || previous === ']');
-      if (!comparison) {
-        let cursor = index + 1;
-        if (value[cursor] === '>' || isSparqlIriRefBodyChar(value[cursor])) {
-          while (cursor < value.length && isSparqlIriRefBodyChar(value[cursor])) cursor++;
-          if (value[cursor] === '>') {
-            const start = index;
-            index = cursor + 1;
-            blank(masked, start, index);
-            if (tokenize) tokens.push({ kind: 'iri', start, end: index });
-            continue;
-          }
+      let cursor = index + 1;
+      if (value[cursor] === '>' || isSparqlIriRefBodyChar(value[cursor])) {
+        while (cursor < value.length && isSparqlIriRefBodyChar(value[cursor])) cursor++;
+        if (value[cursor] === '>') {
+          const start = index;
+          index = cursor + 1;
+          blank(masked, start, index);
+          if (tokenize) tokens.push({ kind: 'iri', start, end: index });
+          continue;
         }
       }
     }
 
     const variableStart = (character === '?' || character === '$')
-      ? pnCharsUWidth(value, index + 1)
+      ? varNameInitialWidth(value, index + 1)
       : 0;
     if (variableStart) {
       const start = index;
       index += 1 + variableStart;
-      let width = pnCharsWidth(value, index);
+      let width = varNameContinuationWidth(value, index);
       while (width) {
         index += width;
-        width = pnCharsWidth(value, index);
+        width = varNameContinuationWidth(value, index);
       }
       if (tokenize) {
         tokens.push(lexicalToken('variable', value.slice(start, index), start, index));
@@ -220,20 +307,31 @@ function scanSparql(value: string, tokenize: boolean): SparqlLexicalScan {
       continue;
     }
 
+    if (character === ':') {
+      const start = index;
+      index = scanPnLocalEnd(value, index + 1);
+      if (tokenize) {
+        tokens.push(lexicalToken('prefixed-name', value.slice(start, index), start, index));
+      }
+      continue;
+    }
+
     const wordStart = pnCharsBaseWidth(value, index);
     if (wordStart) {
       const start = index;
-      index += wordStart;
-      let width = pnCharsWidth(value, index);
-      while (width || value[index] === '.') {
-        index += width || 1;
-        width = pnCharsWidth(value, index);
-      }
-      let kind: 'word' | 'prefixed-name' = 'word';
-      if (value[index] === ':' && value[index - 1] !== '.') {
+      const colonIndex = pnPrefixColonIndex(value, index);
+      let kind: 'word' | 'prefixed-name';
+      if (colonIndex !== undefined) {
         kind = 'prefixed-name';
-        index++;
-        while (!isPrefixedNameTerminator(value[index])) index++;
+        index = scanPnLocalEnd(value, colonIndex + 1);
+      } else {
+        kind = 'word';
+        index += wordStart;
+        let width = pnCharsWidth(value, index);
+        while (width) {
+          index += width;
+          width = pnCharsWidth(value, index);
+        }
       }
       if (tokenize) {
         tokens.push(lexicalToken(kind, value.slice(start, index), start, index));

@@ -13,6 +13,7 @@ describe('analyzeSparqlOperation memoization', () => {
     'PREFIX café: <https://example.com/> SELECT ?s WHERE { ?s café:name ?n }',
     'PREFIX δοκιμή: <https://example.com/> SELECT ?s WHERE { ?s δοκιμή:name ?n }',
     'BASE <https://example.com/> SELECT ?s WHERE { ?s ?p ?o }',
+    'BASE<https://example.com/>SELECT ?s WHERE { ?s ?p ?o }',
   ])('classifies a valid PN_PREFIX/BASE prologue: %s', (sparql) => {
     expect(classifySparqlOperation(sparql)).toEqual({ kind: 'read', form: 'SELECT' });
   });

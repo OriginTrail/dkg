@@ -21,6 +21,47 @@ describe('canonical SPARQL lexical scanner', () => {
     });
   });
 
+  it('recognizes an adjacent IRIREF in a compact BASE prologue', () => {
+    const scan = scanSparqlLexically('BASE<https://example.com/>SELECT * WHERE {}');
+
+    expect(scan.prologue.endTokenIndex).toBe(2);
+    expect(scan.tokens[1]).toMatchObject({ kind: 'iri' });
+    expect(scan.tokens[2]).toMatchObject({ kind: 'word', upper: 'SELECT' });
+  });
+
+  it('uses PN_LOCAL and VARNAME boundaries around operators', () => {
+    const scan = scanSparqlLexically(
+      String.raw`?1count ?x-STRCONTAINS() ex:value=STRCONTAINS() ex:local.name. ex:escaped\=value`,
+    );
+    const tokens = scan.tokens.map((token) => (
+      'value' in token ? `${token.kind}:${token.value}` : token.kind
+    ));
+
+    expect(tokens).toEqual([
+      'variable:?1count',
+      'variable:?x',
+      'symbol:-',
+      'word:STRCONTAINS',
+      'symbol:(',
+      'symbol:)',
+      'prefixed-name:ex:value',
+      'symbol:=',
+      'word:STRCONTAINS',
+      'symbol:(',
+      'symbol:)',
+      'prefixed-name:ex:local.name',
+      'symbol:.',
+      String.raw`prefixed-name:ex:escaped\=value`,
+    ]);
+  });
+
+  it('recognizes a default prefix declaration without accepting a local part', () => {
+    expect(scanSparqlLexically('PREFIX : <urn:default:> SELECT * WHERE {}').prologue)
+      .toEqual({ endTokenIndex: 3, declaredPrefixes: [''] });
+    expect(scanSparqlLexically('PREFIX :: <urn:default:> SELECT * WHERE {}').prologue)
+      .toEqual({ endTokenIndex: 0, declaredPrefixes: [] });
+  });
+
   it('preserves offsets while making strings, IRIs, and comments lexically inert', () => {
     const source = 'SELECT "FROM {" <urn:test> # DELETE }\nWHERE { ?s ?p ?o }';
     const scan = scanSparqlLexically(source);

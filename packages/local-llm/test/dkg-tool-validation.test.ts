@@ -70,6 +70,12 @@ describe('DKG SPARQL preflight', () => {
     expect(validateSparqlForDkg(sparql)).toEqual({ ok: true, errors: [] });
   });
 
+  it('accepts a compact BASE prologue and digit-initial variables', () => {
+    expect(validateSparqlForDkg(
+      'BASE<https://example.com/>SELECT ?1value WHERE { BIND(<item> AS ?1value) }',
+    )).toEqual({ ok: true, errors: [] });
+  });
+
   it('handles long prefix whitespace and aggregate lookalikes without backtracking', () => {
     const paddedQuery = `PREFIX ex: <https://example.com/>${' '.repeat(20_000)}SELECT ?x WHERE { ?x ex:name ?name }`;
     expect(validateSparqlForDkg(paddedQuery).ok).toBe(true);
@@ -106,6 +112,14 @@ describe('DKG SPARQL preflight', () => {
       'use SPARQL CONTAINS instead of STRCONTAINS',
     ],
     [
+      'SELECT ?x WHERE { FILTER(ex:value=STRCONTAINS(str(?x), "a")) }',
+      'use SPARQL CONTAINS instead of STRCONTAINS',
+    ],
+    [
+      'SELECT ?x WHERE { FILTER(?x-STRCONTAINS(str(?x), "a")) }',
+      'use SPARQL CONTAINS instead of STRCONTAINS',
+    ],
+    [
       'SELECT ?x WHERE { ?x ?p ?o ',
       'balance SPARQL braces',
     ],
@@ -138,6 +152,9 @@ describe('DKG SPARQL preflight', () => {
     expect(validateSparqlForDkg(
       'SELECT (COUNT(?item) AS ?count) WHERE { ?item ?predicate ?object }',
     ).ok).toBe(true);
+    expect(validateSparqlForDkg(
+      'SELECT COUNT(?item) AS ?1count WHERE { ?item ?predicate ?object }',
+    ).errors).toContain('wrap aggregate aliases as (COUNT(...) AS ?count)');
   });
 
   it('validates both raw and saved-catalog query tools', () => {
