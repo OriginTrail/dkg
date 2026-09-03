@@ -45,6 +45,7 @@
     "./dist/rfc64/catalog-access-policy-v1.js": null,
     "./dist/rfc64/catalog-authority-config-v1.js": null,
     "./dist/rfc64/catalog-rollout-authority-v1.js": null,
+    "./dist/rfc64/catalog-responsibility-registry-v1.js": null,
     "./dist/rfc64/catalog-rollout-authority-reconciliation-v1.js": null,
     "./dist/rfc64/applied-catalog-authority-transition-v1.js": null,
     "./dist/rfc64/catalog-semantic-authority-transition-v1.js": null,

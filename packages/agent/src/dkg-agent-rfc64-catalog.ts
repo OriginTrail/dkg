@@ -19,6 +19,7 @@
  */
 
 import {
+  SYSTEM_CONTEXT_GRAPHS,
   ZERO_DIGEST32_V1,
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   assertSignedAuthorCatalogBucketEnvelopeV1,
@@ -114,7 +115,13 @@ import {
   projectRfc64CatalogReceiverAuthorityV1,
   resolveRfc64CatalogExecutionPlanAuthorityV1,
   type Rfc64CatalogAuthorityPolicyV1,
+  type Rfc64CatalogExecutionPlanV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
+import {
+  Rfc64CatalogResponsibilityRegistryV1,
+  resolveRfc64CatalogResponsibilityReasonV1,
+  type Rfc64CatalogResponsibilitySelectionV1,
+} from './rfc64/catalog-responsibility-registry-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
 export interface Rfc64CatalogAuthorSignerV1 {
@@ -299,7 +306,150 @@ export interface Rfc64CatalogRuntimeSelectionStatusV1 {
   readonly selectedContextGraphs: readonly string[];
 }
 
+const rfc64CatalogResponsibilityRegistriesV1 =
+  new WeakMap<DKGAgent, Rfc64CatalogResponsibilityRegistryV1>();
+const rfc64CatalogResponsibilityRevisionsV1 =
+  new WeakMap<DKGAgent, Map<string, number>>();
+const rfc64CatalogResponsibilityPendingV1 =
+  new WeakMap<DKGAgent, Map<string, Promise<Rfc64CatalogResponsibilitySelectionV1>>>();
+const rfc64SystemContextGraphIdsV1 = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
+
+function rfc64CatalogResponsibilityRegistryForV1(
+  agent: DKGAgent,
+  executionPlan: Rfc64CatalogExecutionPlanV1,
+): Rfc64CatalogResponsibilityRegistryV1 {
+  let registry = rfc64CatalogResponsibilityRegistriesV1.get(agent);
+  if (registry !== undefined) return registry;
+  const defaultMode = executionPlan.responsibilityDefaultMode ?? 'legacy';
+  const contextGraphModes: Record<string, 'legacy' | 'shadow' | 'catalog'> =
+    Object.create(null);
+  // Resolved manifests contain a total catalog entry even when the operator
+  // supplied no mode. Only a mode that differs from the release default is an
+  // observable override at this compatibility boundary.
+  if (defaultMode !== 'legacy') {
+    for (const authority of Object.values(executionPlan.selectedAuthority)) {
+      if (authority.mode !== defaultMode) {
+        contextGraphModes[authority.contextGraphId] = authority.mode;
+      }
+    }
+  }
+  registry = new Rfc64CatalogResponsibilityRegistryV1({
+    defaultMode,
+    contextGraphModes,
+    killSwitchActive: executionPlan.killSwitchActive,
+  });
+  rfc64CatalogResponsibilityRegistriesV1.set(agent, registry);
+  return registry;
+}
+
+function nextRfc64CatalogResponsibilityRevisionV1(
+  agent: DKGAgent,
+  contextGraphId: string,
+): number {
+  let revisions = rfc64CatalogResponsibilityRevisionsV1.get(agent);
+  if (revisions === undefined) {
+    revisions = new Map<string, number>();
+    rfc64CatalogResponsibilityRevisionsV1.set(agent, revisions);
+  }
+  const revision = (revisions.get(contextGraphId) ?? 0) + 1;
+  revisions.set(contextGraphId, revision);
+  return revision;
+}
+
+function isCurrentRfc64CatalogResponsibilityRevisionV1(
+  agent: DKGAgent,
+  contextGraphId: string,
+  revision: number,
+): boolean {
+  return rfc64CatalogResponsibilityRevisionsV1.get(agent)?.get(contextGraphId) === revision;
+}
+
 export class Rfc64CatalogMethods extends DKGAgentBase {
+  /** Desired RFC-64 selection derived from the normal live CG lifecycle. */
+  readRfc64CatalogResponsibilitiesV1(
+    this: DKGAgent,
+  ): readonly Rfc64CatalogResponsibilitySelectionV1[] {
+    return rfc64CatalogResponsibilityRegistryForV1(
+      this,
+      this.config.rfc64CatalogExecutionPlan,
+    ).snapshot();
+  }
+
+  /**
+   * Refresh one CG from canonical local subscription/hosting state and
+   * verified access facts. Revision fencing prevents a slow authority read
+   * from reviving a responsibility after unsubscribe or membership removal.
+   */
+  reconcileRfc64CatalogResponsibilityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<Rfc64CatalogResponsibilitySelectionV1> {
+    const registry = rfc64CatalogResponsibilityRegistryForV1(
+      this,
+      this.config.rfc64CatalogExecutionPlan,
+    );
+    const revision = nextRfc64CatalogResponsibilityRevisionV1(this, contextGraphId);
+    const subscription = this.subscribedContextGraphs.get(contextGraphId);
+    if (
+      rfc64SystemContextGraphIdsV1.has(contextGraphId)
+      || (subscription?.subscribed !== true && subscription?.coreHosted !== true)
+    ) {
+      const inactive = registry.setResponsibility(contextGraphId, null).next;
+      return Promise.resolve(inactive);
+    }
+
+    const run = (async (): Promise<Rfc64CatalogResponsibilitySelectionV1> => {
+      let accessPolicy = await this.getExplicitAccessPolicy(contextGraphId);
+      if (accessPolicy === null && subscription.onChainId !== undefined) {
+        const onChainPolicy = await this.getContextGraphOnChainPolicy(contextGraphId);
+        accessPolicy = onChainPolicy.accessPolicy === 0
+          ? 'public'
+          : onChainPolicy.accessPolicy === 1
+            ? 'private'
+            : null;
+      }
+      const privateMembershipVerified = accessPolicy === 'private'
+        && await this.canReadContextGraph(contextGraphId, {
+          allowSubscriptionFallback: false,
+        });
+      const reason = resolveRfc64CatalogResponsibilityReasonV1({
+        nodeRole: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
+        subscribed: subscription.subscribed === true,
+        coreHosted: subscription.coreHosted === true,
+        accessPolicy,
+        privateMembershipVerified,
+      });
+      if (!isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision)) {
+        return registry.read(contextGraphId);
+      }
+      return registry.setResponsibility(contextGraphId, reason).next;
+    })().catch((error) => {
+      if (isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision)) {
+        registry.setResponsibility(contextGraphId, null);
+      }
+      throw error;
+    });
+
+    let pending = rfc64CatalogResponsibilityPendingV1.get(this);
+    if (pending === undefined) {
+      pending = new Map<string, Promise<Rfc64CatalogResponsibilitySelectionV1>>();
+      rfc64CatalogResponsibilityPendingV1.set(this, pending);
+    }
+    pending.set(contextGraphId, run);
+    void run.finally(() => {
+      if (pending!.get(contextGraphId) === run) pending!.delete(contextGraphId);
+    }).catch(() => undefined);
+    return run;
+  }
+
+  /** Test/operator fence for asynchronous access-policy responsibility reads. */
+  async whenRfc64CatalogResponsibilitiesIdleV1(this: DKGAgent): Promise<void> {
+    const pending = rfc64CatalogResponsibilityPendingV1.get(this);
+    while (pending !== undefined && pending.size > 0) {
+      await Promise.allSettled(pending.values());
+    }
+  }
+
   /**
    * Receiver authority is the configured manifest policy projected through the
    * canonical live subscription registry on edges. Cores deliberately retain

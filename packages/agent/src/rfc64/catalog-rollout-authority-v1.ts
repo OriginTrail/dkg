@@ -96,6 +96,8 @@ export type Rfc64CatalogReconciliationLaneV1 =
 /** Canonical lane ownership resolved once during agent construction. */
 export interface Rfc64CatalogExecutionPlanV1 {
   readonly killSwitchActive: boolean;
+  /** Desired mode for lifecycle-responsible CGs that have no explicit override. */
+  readonly responsibilityDefaultMode: Rfc64CatalogRolloutModeV1;
   readonly legacyContextGraphs: readonly string[];
   readonly track2ContextGraphs: readonly string[];
   readonly selectedAuthority: Readonly<Record<string, Rfc64CatalogAuthorityPolicyV1>>;
@@ -394,6 +396,8 @@ export function resolveRfc64LegacySyncContextGraphsV1(input: Readonly<{
 /** Resolve legacy and Track-2 owner scopes once, before either lane starts. */
 export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
   configuredContextGraphs: readonly string[];
+  /** DKG 10.0.16 supplies catalog; legacy preserves explicit enabled=false. */
+  responsibilityDefaultMode?: Rfc64CatalogRolloutModeV1;
   /** Legacy public bootstrap remains active beside additive catalog selection. */
   standaloneTrack2ContextGraphs?: readonly string[];
   activation: Readonly<{
@@ -403,6 +407,10 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
     rollout: ResolvedRfc64CatalogRolloutConfigV1;
   }>;
 }>): Rfc64CatalogExecutionPlanV1 {
+  const responsibilityDefaultMode = input.responsibilityDefaultMode ?? 'legacy';
+  if (!RFC64_CATALOG_ROLLOUT_MODES_V1.has(responsibilityDefaultMode)) {
+    throw new TypeError('RFC-64 responsibility default mode must be legacy, shadow, or catalog');
+  }
   const selectedAuthority: Record<string, Rfc64CatalogAuthorityPolicyV1> =
     Object.create(null);
   const track2ContextGraphs: string[] = [];
@@ -444,6 +452,7 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
   }
   return Object.freeze({
     killSwitchActive: input.activation.rollout.killSwitch,
+    responsibilityDefaultMode,
     legacyContextGraphs: resolveRfc64LegacySyncContextGraphsV1(input),
     track2ContextGraphs: Object.freeze(track2ContextGraphs),
     selectedAuthority: Object.freeze(selectedAuthority),

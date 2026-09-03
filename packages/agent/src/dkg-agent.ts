@@ -1072,8 +1072,18 @@ export class DKGAgent extends DKGAgentBase {
       legacyAutoPublish: normalizedConfig.rfc64PublicCatalogAutoPublish,
       legacyBootstrap: normalizedConfig.rfc64PublicCatalogBootstrap,
     }, chainIdentity);
+    // The unified block owns precedence over the deprecated public-only
+    // alias. Omission is the 10.0.16 product default; explicit enabled=false
+    // remains a one-release compatibility rollback.
+    const rfc64CatalogExplicitlyDisabled =
+      normalizedConfig.rfc64CatalogActivation?.enabled === false
+      || (
+        normalizedConfig.rfc64CatalogActivation === undefined
+        && normalizedConfig.rfc64PublicCatalogActivation?.enabled === false
+      );
     const rfc64CatalogExecutionPlan = resolveRfc64CatalogExecutionPlanV1({
       configuredContextGraphs: normalizedConfig.syncContextGraphs ?? [],
+      responsibilityDefaultMode: rfc64CatalogExplicitlyDisabled ? 'legacy' : 'catalog',
       standaloneTrack2ContextGraphs:
         normalizedConfig.rfc64PublicCatalogActivation === undefined
           ? (rfc64PublicCatalogControls.bootstrap?.acceptedPublicPolicies.map(

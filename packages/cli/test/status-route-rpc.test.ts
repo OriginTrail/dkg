@@ -132,6 +132,14 @@ describe('/api/status RFC-64 private recovery privacy', () => {
           eligibleContextGraphs: [publicContextGraph, privateContextGraph],
           selectedContextGraphs: [privateContextGraph],
         }),
+        readRfc64CatalogResponsibilitiesV1: () => [{
+          contextGraphId: privateContextGraph,
+          responsible: true,
+          responsibilityReason: 'private-membership',
+          active: true,
+          mode: 'catalog',
+          selectionSource: 'default',
+        }],
       },
       {
         rfc64PublicCatalog: {
@@ -164,10 +172,19 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       eligibleContextGraphs: [publicContextGraph, privateContextGraph],
       selectedContextGraphs: [privateContextGraph],
     });
+    expect(response.body.rfc64Catalog.responsibilities).toEqual([{
+      contextGraphId: privateContextGraph,
+      responsible: true,
+      responsibilityReason: 'private-membership',
+      active: true,
+      mode: 'catalog',
+      selectionSource: 'default',
+    }]);
     expect(response.body.rfc64PublicCatalog.runtimeSelection).toEqual({
       subscriptionDriven: true,
       selectedContextGraphs: [],
     });
+    expect(response.body.rfc64PublicCatalog.responsibilities).toBeUndefined();
   });
 
   it('reports aggregate telemetry for a private-only catalog activation', async () => {

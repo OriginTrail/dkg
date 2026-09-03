@@ -818,6 +818,10 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
             eligibleContextGraphs: rfc64CatalogActivation.selectedContextGraphs,
             selectedContextGraphs: rfc64CatalogActivation.selectedContextGraphs,
           };
+    const rfc64CatalogResponsibilities =
+      typeof agent.readRfc64CatalogResponsibilitiesV1 === 'function'
+        ? agent.readRfc64CatalogResponsibilitiesV1()
+        : [];
     const selectedPublicContextGraphs = new Set(
       rfc64CatalogActivation.selectedPublicContextGraphs,
     );
@@ -1023,6 +1027,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         selectedPublicContextGraphs: rfc64CatalogActivation.selectedPublicContextGraphs,
         selectedPrivateContextGraphs: rfc64CatalogActivation.selectedPrivateContextGraphs,
         runtimeSelection: rfc64CatalogRuntimeSelection,
+        responsibilities: rfc64CatalogResponsibilities,
         autoPublishEnabled: rfc64CatalogActivation.autoPublish !== undefined,
         rollout: rfc64CatalogRollout,
         privateAuthorityConfigured:

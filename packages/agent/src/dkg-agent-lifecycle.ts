@@ -9234,6 +9234,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       previous?.subscribed === true,
       canonicalNext.subscribed === true,
     );
+    if (
+      previous === undefined
+      || previous.subscribed !== canonicalNext.subscribed
+      || previous.coreHosted !== canonicalNext.coreHosted
+      || previous.onChainId !== canonicalNext.onChainId
+      || previous.metaSynced !== canonicalNext.metaSynced
+    ) {
+      void this.reconcileRfc64CatalogResponsibilityV1(contextGraphId).catch((error) => {
+        this.log.warn(
+          createOperationContext('system'),
+          `RFC-64 responsibility resolution failed for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
     // VM cleanup policy belongs to the lifecycle consumer, not to the binding
     // registry. Invalidating a reverse candidate must also invalidate any work
     // captured against it; otherwise only an inactive subscription needs the
@@ -9476,6 +9490,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       wasSubscribed,
       false,
     );
+    if (deleted) {
+      void this.reconcileRfc64CatalogResponsibilityV1(contextGraphId).catch(() => undefined);
+    }
     // Every in-flight binding continuation also captures the subscription
     // object, so deleting this numeric generation cannot revive old work if a
     // new subscription later reuses the same local id.

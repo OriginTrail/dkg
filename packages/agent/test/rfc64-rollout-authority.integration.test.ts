@@ -82,6 +82,88 @@ afterEach(async () => {
 });
 
 describe('RFC-64 rollout authority integration', () => {
+  it('derives clean-config responsibility from normal create and unsubscribe', async () => {
+    const edge = await startAgent('default-responsibility', undefined);
+
+    await edge.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Default RFC-64 responsibility',
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([{
+      contextGraphId: CONTEXT_GRAPH_ID,
+      responsible: true,
+      responsibilityReason: 'edge-subscription',
+      active: true,
+      mode: 'catalog',
+      selectionSource: 'default',
+    }]);
+
+    edge.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID);
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([]);
+  });
+
+  it('requires verified current membership for private responsibility', async () => {
+    const privateContextGraphId = `${AUTHOR}/private-responsibility`;
+    const edge = await startAgent('private-responsibility', undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('private');
+    const canRead = vi.spyOn(edge, 'canReadContextGraph').mockResolvedValue(false);
+
+    edge.subscribeToContextGraph(privateContextGraphId);
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([]);
+    expect(canRead).toHaveBeenCalledWith(privateContextGraphId, {
+      allowSubscriptionFallback: false,
+    });
+
+    canRead.mockResolvedValue(true);
+    await edge.reconcileRfc64CatalogResponsibilityV1(privateContextGraphId);
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([
+      expect.objectContaining({
+        contextGraphId: privateContextGraphId,
+        responsibilityReason: 'private-membership',
+        mode: 'catalog',
+        selectionSource: 'default',
+      }),
+    ]);
+  });
+
+  it('uses durable public hosting and preserves explicit disabled rollback', async () => {
+    const coreContextGraphId = `${AUTHOR}/core-hosted-responsibility`;
+    const core = await startAgent(
+      'core-hosted-responsibility',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        nodeRole: 'core',
+        rfc64CatalogActivation: { enabled: false },
+      },
+    );
+    vi.spyOn(core, 'getExplicitAccessPolicy').mockResolvedValue('public');
+
+    (core as any).setContextGraphSubscription(coreContextGraphId, {
+      syncMode: 'always-on',
+      subscribed: false,
+      synced: false,
+      coreHosted: true,
+    });
+    await core.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    expect(core.readRfc64CatalogResponsibilitiesV1()).toEqual([
+      expect.objectContaining({
+        contextGraphId: coreContextGraphId,
+        responsibilityReason: 'core-public',
+        active: true,
+        mode: 'legacy',
+        selectionSource: 'operator-override',
+      }),
+    ]);
+  });
+
   it('keeps an eligible edge CG dormant until subscribe and deactivates it on unsubscribe', async () => {
     const providerPeerId = '12D3KooWSubscriptionOwnedCatalogProvider';
     let synchronize!: ReturnType<typeof vi.spyOn>;
