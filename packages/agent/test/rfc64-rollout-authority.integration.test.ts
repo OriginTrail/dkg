@@ -84,6 +84,10 @@ afterEach(async () => {
 describe('RFC-64 rollout authority integration', () => {
   it('derives clean-config responsibility from normal create and unsubscribe', async () => {
     const edge = await startAgent('default-responsibility', undefined);
+    const requestReplays = vi.spyOn(
+      edge,
+      'requestRfc64CatalogHeadReplaysFromConnectedPeersV1',
+    ).mockResolvedValue(Object.freeze({ requested: 0, failed: 0 }));
 
     await edge.createContextGraph({
       id: CONTEXT_GRAPH_ID,
@@ -108,8 +112,11 @@ describe('RFC-64 rollout authority integration', () => {
       reconciliationLane: 'catalog-apply',
     });
     expect(edge.getSyncContextGraphIds()).not.toContain(CONTEXT_GRAPH_ID);
+    requestReplays.mockClear();
     expect(await edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
       .toMatchObject({ source: 'owner-signed-unregistered' });
+    expect(requestReplays).toHaveBeenCalledOnce();
+    expect(requestReplays).toHaveBeenCalledWith(CONTEXT_GRAPH_ID);
 
     edge.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID);
     await edge.whenRfc64CatalogResponsibilitiesIdleV1();
@@ -125,6 +132,10 @@ describe('RFC-64 rollout authority integration', () => {
   it('reconciles default responsibility when a live subscription is bound late', async () => {
     const contextGraphId = `${AUTHOR}/late-verified-binding`;
     const edge = await startAgent('late-verified-binding', undefined);
+    const requestReplays = vi.spyOn(
+      edge,
+      'requestRfc64CatalogHeadReplaysFromConnectedPeersV1',
+    ).mockResolvedValue(Object.freeze({ requested: 0, failed: 0 }));
     vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
     vi.spyOn(edge, 'getContextGraphOnChainPolicy').mockResolvedValue({
       accessPolicy: 0,
@@ -148,6 +159,7 @@ describe('RFC-64 rollout authority integration', () => {
         selectionSource: 'default',
       }),
     ]);
+    expect(requestReplays).toHaveBeenCalledWith(contextGraphId);
   });
 
   it('requires verified current membership for private responsibility', async () => {

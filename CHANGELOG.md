@@ -38,6 +38,7 @@ A default-responsibility RFC-64 release. When RFC-64 controls are omitted, every
 - Local devnet snapshot storage keeps capacity admission with explicit low-disk watermarks, avoiding dependence on production-scale free-space reserves during release certification.
 - Subscription catch-up re-evaluates RFC-64 responsibility after authoritative metadata lands, so a cold Edge join cannot remain fully synced but absent from the default catalog status until restart.
 - Late verified on-chain binding now notifies the responsibility registry, covering cold subscriptions whose numeric Context Graph ID arrives after their initial fail-closed policy check.
+- A newly responsible receiver now requests a policy-authorized replay of durable catalog heads from peers that were already connected, so subscription or finalized-authority activation after publication cannot miss the current head; private replay requests remain member/provider gated.
 
 ### Deployment
 

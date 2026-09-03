@@ -9562,6 +9562,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.invalidateRfc64PublicCatalogBootstrapPassV1(contextGraphId);
     this.queueSharedMemoryGossipSubscription(contextGraphId);
     if (nextReceiverActive && this.rfc64PublicCatalogServiceV1 !== undefined) {
+      void this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId)
+        .catch(() => undefined);
       // Re-entering the idempotent start boundary also dirties an existing
       // failed repair for this newly active CG, including retryIntervalMs=0.
       this.startRfc64SwmCatalogProjectionSupervisorV1(

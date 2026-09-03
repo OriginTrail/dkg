@@ -105,11 +105,13 @@ import type {
 } from './public-catalog-activation-config-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+  RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
   Rfc64PublicCatalogTransportV1,
   encodeRfc64PublicCatalogHeadAnnouncementV1,
   parseRfc64PublicCatalogHeadAnnouncementV1,
   type FetchedRfc64PublicCatalogHeadV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
+  type Rfc64PublicCatalogHeadReplayRequestV1,
 } from './public-catalog-transport-v1.js';
 import {
   snapshotRfc64PublicCatalogAnnouncementPeersV1,
@@ -150,6 +152,11 @@ export interface Rfc64PublicCatalogServiceOptionsV1 {
   ) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>;
   readonly onHeadStaged?: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    remotePeerId: string,
+  ) => void;
+  /** Policy-authorized signal to replay durable current heads to one peer. */
+  readonly onCatalogHeadReplayRequested?: (
+    request: Readonly<Rfc64PublicCatalogHeadReplayRequestV1>,
     remotePeerId: string,
   ) => void;
   /** Canonical immutable per-CG and operation-direction authority resolver. */
@@ -259,6 +266,13 @@ export interface AnnounceRfc64PublicCatalogHeadResultV1 {
   readonly failedPeers: ReadonlyArray<{ readonly peerId: string; readonly error: string }>;
 }
 
+export interface RequestRfc64CatalogHeadReplayInputV1 {
+  readonly remotePeerId: string;
+  readonly networkId: NetworkIdV1;
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly signal?: AbortSignal;
+}
+
 export interface DiscoverRfc64PublicCatalogCurrentHeadInputV1 {
   readonly remotePeerId: string;
   readonly scope: Rfc64PublicCatalogCurrentHeadScopeV1;
@@ -365,6 +379,7 @@ export class Rfc64PublicCatalogServiceV1 {
       onCatalogHeadAvailable: (announcement, remotePeerId) => {
         this.#receiver.schedule(announcement, remotePeerId);
       },
+      onCatalogHeadReplayRequested: options.onCatalogHeadReplayRequested,
     });
 
     this.#currentHeadDiscoveryTransport = options.currentHeadDiscovery === undefined
@@ -731,6 +746,27 @@ export class Rfc64PublicCatalogServiceV1 {
       this.#nativeTransport?.privateScopeBoundReadsConfigured === true,
     );
     return this.#announceCatalogHeadSnapshot(announcement, peers, input.signal);
+  }
+
+  /** Ask one authorized peer to replay every durable current head for a CG. */
+  async requestCatalogHeadReplay(
+    input: RequestRfc64CatalogHeadReplayInputV1,
+  ): Promise<void> {
+    this.#requireStarted();
+    const held = this.#policies.lookup(input.networkId, input.contextGraphId);
+    if (held === null) {
+      throw new Error('RFC-64 catalog replay request is not bound to an accepted policy');
+    }
+    return this.#transport.requestCatalogHeadReplay(
+      input.remotePeerId,
+      Object.freeze({
+        kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
+        networkId: held.policy.networkId,
+        contextGraphId: held.policy.contextGraphId,
+        policyDigest: held.policyDigest,
+      }),
+      this.#sendOptions(input.signal),
+    );
   }
 
   /**

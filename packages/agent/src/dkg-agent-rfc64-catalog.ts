@@ -111,6 +111,7 @@ import {
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
+  type Rfc64PublicCatalogHeadReplayRequestV1,
 } from './rfc64/public-catalog-transport-v1.js';
 import { createRfc64CatalogNativeScopedReadProviderV1 } from './rfc64/catalog-native-scoped-read-provider-v1.js';
 import {
@@ -882,6 +883,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         reason: null,
         updatedAtMs: Date.now(),
       });
+      await this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId);
       return authority;
     } catch (error) {
       if (signal?.aborted) throw signal.reason;
@@ -1107,6 +1109,23 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           );
         },
       },
+      onCatalogHeadReplayRequested: (request, remotePeerId) => {
+        void this.reannounceRfc64CatalogHeadsToPeerV1(remotePeerId, request)
+          .then((result) => {
+            if (result.announced > 0) {
+              this.log.info(
+                ctx,
+                `Replayed ${result.announced} RFC-64 catalog head(s) to ${remotePeerId.slice(-8)}`,
+              );
+            }
+          })
+          .catch((error: unknown) => {
+            this.log.warn(
+              ctx,
+              `RFC-64 catalog head replay failed for ${remotePeerId.slice(-8)}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
+      },
     });
     service.start();
     this.rfc64PublicCatalogServiceV1 = service;
@@ -1306,6 +1325,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   async reannounceRfc64CatalogHeadsToPeerV1(
     this: DKGAgent,
     peerId: string,
+    requestedScope?: Readonly<Rfc64PublicCatalogHeadReplayRequestV1>,
   ): Promise<Readonly<{ announced: number; failed: number }>> {
     const service = this.rfc64PublicCatalogServiceV1;
     const persistence = this.rfc64PersistenceV1;
@@ -1323,6 +1343,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       try {
         assertSignedAuthorCatalogHeadEnvelopeV1(stored.envelope);
         const head = stored.envelope;
+        if (
+          requestedScope !== undefined
+          && (
+            head.payload.networkId !== requestedScope.networkId
+            || head.payload.contextGraphId !== requestedScope.contextGraphId
+          )
+        ) continue;
         if (!this.resolveRfc64CatalogServingAuthorityV1(
           head.payload.contextGraphId,
         ).track2Enabled) continue;
@@ -1331,6 +1358,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           head.payload.contextGraphId,
         );
         if (accepted === null) continue;
+        if (
+          requestedScope !== undefined
+          && accepted.policyDigest !== requestedScope.policyDigest
+        ) continue;
         const delivery = await service.announceCatalogHead({
           announcement: Object.freeze({
             kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
@@ -1356,6 +1387,47 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       }
     }
     return Object.freeze({ announced, failed });
+  }
+
+  /** Request scoped head replay from already-connected peers after late activation. */
+  async requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<Readonly<{ requested: number; failed: number }>> {
+    const service = this.rfc64PublicCatalogServiceV1;
+    const networkId = (
+      this.config.rfc64CatalogDeploymentProfile?.networkId
+      ?? this.config.networkIdentity?.chainId
+    ) as NetworkIdV1 | undefined;
+    if (
+      service === undefined
+      || networkId === undefined
+      || networkId === 'none'
+      || service.acceptedPolicySnapshot(
+        networkId,
+        contextGraphId as ContextGraphIdV1,
+      ) === null
+    ) {
+      return Object.freeze({ requested: 0, failed: 0 });
+    }
+    const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(
+      this.node.libp2p.getPeers().map((peer) => peer.toString()).slice(0, 64),
+    );
+    let requested = 0;
+    let failed = 0;
+    await Promise.all(peers.map(async (remotePeerId) => {
+      try {
+        await service.requestCatalogHeadReplay({
+          remotePeerId,
+          networkId,
+          contextGraphId: contextGraphId as ContextGraphIdV1,
+        });
+        requested += 1;
+      } catch {
+        failed += 1;
+      }
+    }));
+    return Object.freeze({ requested, failed });
   }
 
   /**

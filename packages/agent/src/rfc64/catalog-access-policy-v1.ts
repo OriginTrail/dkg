@@ -37,6 +37,8 @@ import { classifyRfc64PolicyCellV1 } from './policy-cell-v1.js';
 export type Rfc64CatalogAccessOperationV1 =
   | 'announce-outbound'
   | 'announce-inbound'
+  | 'head-replay-outbound'
+  | 'head-replay-inbound'
   | 'fetch-outbound'
   | 'fetch-inbound'
   | 'catalog-object-fetch-outbound'
@@ -57,12 +59,14 @@ export function rfc64CatalogAuthorityDirectionV1(
 ): Rfc64CatalogAuthorityDirectionV1 {
   switch (operation) {
     case 'announce-outbound':
+    case 'head-replay-inbound':
     case 'fetch-inbound':
     case 'catalog-object-fetch-inbound':
     case 'ka-bundle-fetch-inbound':
     case 'current-head-discovery-inbound':
       return 'serving';
     case 'announce-inbound':
+    case 'head-replay-outbound':
     case 'fetch-outbound':
     case 'catalog-object-fetch-outbound':
     case 'ka-bundle-fetch-outbound':
@@ -450,6 +454,8 @@ function snapshotOperation(input: unknown): Rfc64CatalogAccessOperationV1 {
   switch (input) {
     case 'announce-outbound':
     case 'announce-inbound':
+    case 'head-replay-outbound':
+    case 'head-replay-inbound':
     case 'fetch-outbound':
     case 'fetch-inbound':
     case 'catalog-object-fetch-outbound':

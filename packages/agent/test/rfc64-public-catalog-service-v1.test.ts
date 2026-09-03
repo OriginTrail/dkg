@@ -58,6 +58,7 @@ import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
   RFC64_PUBLIC_CATALOG_HEAD_FETCH_KIND_V1,
   RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1,
+  RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1,
   encodeRfc64PublicCatalogHeadAnnouncementV1,
   encodeRfc64PublicCatalogHeadFetchRequestV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
@@ -1318,6 +1319,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       `register:${RFC64_CATALOG_BUNDLE_FETCH_PROTOCOL_V2}`,
       `register:${RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1}`,
       `register:${RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1}`,
+      `register:${RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1}`,
     ]);
     await service.close();
   });
@@ -1396,6 +1398,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     expect(service.started).toBe(false);
     expect(router.handlers.has(RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1)).toBe(true);
     expect(router.handlers.has(RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1)).toBe(true);
+    expect(router.handlers.has(RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1)).toBe(true);
     expect(router.handlers.has(RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1)).toBe(true);
     expect(router.handlers.has(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1)).toBe(true);
     expect(router.handlers.has(RFC64_CATALOG_OBJECT_FETCH_PROTOCOL_V2)).toBe(true);
@@ -1430,6 +1433,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     for (const protocolId of [
       RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
       RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1,
+      RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1,
       RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1,
       RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1,
       RFC64_CATALOG_OBJECT_FETCH_PROTOCOL_V2,

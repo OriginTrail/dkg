@@ -23,10 +23,13 @@ import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
   RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1,
+  RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
+  RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1,
   Rfc64PublicCatalogTransportV1,
   encodeRfc64PublicCatalogHeadAnnouncementV1,
   parseRfc64PublicCatalogHeadAnnouncementV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
+  type Rfc64PublicCatalogHeadReplayRequestV1,
 } from '../src/rfc64/public-catalog-transport-v1.js';
 import { createRfc64CatalogAccessPolicyRegistryFixture } from './support/rfc64-catalog-access-policy-fixture.js';
 
@@ -180,6 +183,10 @@ describe('RFC-64 author catalog transport v1', () => {
     }> = [];
     const authorAuthorizations: Rfc64CatalogAccessAuthorizationInputV1[] = [];
     const receiverAuthorizations: Rfc64CatalogAccessAuthorizationInputV1[] = [];
+    const replayRequests: Array<{
+      request: Readonly<Rfc64PublicCatalogHeadReplayRequestV1>;
+      remotePeerId: string;
+    }> = [];
     const authorPolicy = policyRegistry(
       LOCAL_MEMBER,
       REMOTE_MEMBER,
@@ -203,6 +210,9 @@ describe('RFC-64 author catalog transport v1', () => {
         },
         verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
         onCatalogHeadAvailable: async () => {},
+        onCatalogHeadReplayRequested: (request, remotePeerId) => {
+          replayRequests.push({ request, remotePeerId });
+        },
       },
     );
     const receiverTransport = new Rfc64PublicCatalogTransportV1(
@@ -227,6 +237,20 @@ describe('RFC-64 author catalog transport v1', () => {
       .toBe('/dkg/catalog/1/author-head-availability');
     expect(RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1)
       .toBe('/dkg/catalog/1/control-object/author-head');
+    expect(RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1)
+      .toBe('/dkg/catalog/1/author-head-replay');
+
+    const replayRequest = Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
+      networkId: announcement.networkId,
+      contextGraphId: announcement.contextGraphId,
+      policyDigest: announcement.policyDigest,
+    });
+    await receiverTransport.requestCatalogHeadReplay(authorNode.peerId, replayRequest);
+    expect(replayRequests).toEqual([{
+      request: replayRequest,
+      remotePeerId: receiverNode.peerId,
+    }]);
 
     await authorTransport.announceCatalogHead(receiverNode.peerId, announcement);
     expect(receivedAnnouncements).toEqual([{
@@ -256,12 +280,16 @@ describe('RFC-64 author catalog transport v1', () => {
     expect(receiverRead?.envelope).toEqual(fetched?.envelope);
 
     expect(authorAuthorizations.map((input) => input.operation)).toEqual([
+      'head-replay-inbound',
+      'head-replay-inbound',
       'announce-outbound',
       'announce-outbound',
       'fetch-inbound',
       'fetch-inbound',
     ]);
     expect(receiverAuthorizations.map((input) => input.operation)).toEqual([
+      'head-replay-outbound',
+      'head-replay-outbound',
       'announce-inbound',
       'announce-inbound',
       'fetch-outbound',
@@ -276,6 +304,7 @@ describe('RFC-64 author catalog transport v1', () => {
     const [providerNode, requesterNode] = await Promise.all([startNode(), startNode()]);
     await connect(requesterNode, providerNode);
     const getVerifiedObject = vi.fn(async () => null);
+    const replayRequested = vi.fn();
     const announcement = Object.freeze({
       kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
       networkId: 'otp:20430',
@@ -296,6 +325,7 @@ describe('RFC-64 author catalog transport v1', () => {
         authorizeCatalogOperation: async () => null,
         verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
         onCatalogHeadAvailable: async () => {},
+        onCatalogHeadReplayRequested: replayRequested,
       },
     );
     const requesterTransport = new Rfc64PublicCatalogTransportV1(
@@ -317,6 +347,17 @@ describe('RFC-64 author catalog transport v1', () => {
       { timeoutMs: 4_000 },
     )).rejects.toThrow();
     expect(getVerifiedObject).not.toHaveBeenCalled();
+    await expect(requesterTransport.requestCatalogHeadReplay(
+      providerNode.peerId,
+      {
+        kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
+        networkId: announcement.networkId,
+        contextGraphId: announcement.contextGraphId,
+        policyDigest: announcement.policyDigest,
+      },
+      { timeoutMs: 4_000 },
+    )).rejects.toMatchObject({ code: 'catalog-transport-policy-denied' });
+    expect(replayRequested).not.toHaveBeenCalled();
   }, 15_000);
 
   it('keeps the deprecated open authorizer fail-closed for private policy', async () => {

@@ -52,21 +52,27 @@ export const RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1 =
   '/dkg/catalog/1/author-head-availability' as const;
 export const RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1 =
   '/dkg/catalog/1/control-object/author-head' as const;
+export const RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1 =
+  '/dkg/catalog/1/author-head-replay' as const;
 
 export const RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1 =
   'rfc64-author-catalog-head-availability-v1' as const;
 export const RFC64_PUBLIC_CATALOG_HEAD_FETCH_KIND_V1 =
   'rfc64-author-catalog-head-fetch-v1' as const;
+export const RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1 =
+  'rfc64-author-catalog-head-replay-v1' as const;
 
 /** Flat JCS request caps; the fetched signed head has a separate response cap. */
 export const RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_MAX_BYTES_V1 = 2 * 1024;
 export const RFC64_PUBLIC_CATALOG_HEAD_FETCH_REQUEST_MAX_BYTES_V1 = 2 * 1024;
 export const RFC64_PUBLIC_CATALOG_HEAD_FETCH_RESPONSE_MAX_BYTES_V1 = 32 * 1024;
+export const RFC64_PUBLIC_CATALOG_HEAD_REPLAY_MAX_BYTES_V1 = 2 * 1024;
 
 const ACK = Uint8Array.of(1);
 const ANNOUNCEMENT_DENIED = 0;
 const FETCH_NOT_FOUND = 0;
 const FETCH_DENIED = 2;
+const REPLAY_DENIED = 0;
 
 const CATALOG_WIRE: Rfc64CatalogTransportWireAdapterV1 =
   createRfc64CatalogTransportWireAdapterV1({
@@ -103,6 +109,12 @@ const ANNOUNCEMENT_KEYS = Object.freeze([
 ] as const);
 
 const FETCH_REQUEST_KEYS = ANNOUNCEMENT_KEYS;
+const REPLAY_REQUEST_KEYS = Object.freeze([
+  'contextGraphId',
+  'kind',
+  'networkId',
+  'policyDigest',
+] as const);
 
 export interface Rfc64PublicCatalogHeadAnnouncementV1 {
   readonly kind: typeof RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1;
@@ -130,9 +142,24 @@ export interface Rfc64PublicCatalogHeadFetchRequestV1 {
   readonly signatureVariantDigest: Digest32V1;
 }
 
+/** Scoped request for a provider to replay every current author-head hint. */
+export interface Rfc64PublicCatalogHeadReplayRequestV1 {
+  readonly kind: typeof RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1;
+  readonly networkId: NetworkIdV1;
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly policyDigest: Digest32V1;
+}
+
+type Rfc64PublicCatalogPolicyScopeV1 =
+  | Rfc64PublicCatalogHeadAnnouncementV1
+  | Rfc64PublicCatalogHeadFetchRequestV1
+  | Rfc64PublicCatalogHeadReplayRequestV1;
+
 export type Rfc64PublicCatalogOperationV1 =
   | 'announce-outbound'
   | 'announce-inbound'
+  | 'head-replay-outbound'
+  | 'head-replay-inbound'
   | 'fetch-outbound'
   | 'fetch-inbound';
 
@@ -188,6 +215,11 @@ export interface Rfc64PublicCatalogTransportOptionsV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     remotePeerId: string,
   ) => void | Promise<void>;
+  /** Called only after a scoped replay request passes current policy authorization. */
+  readonly onCatalogHeadReplayRequested?: (
+    request: Readonly<Rfc64PublicCatalogHeadReplayRequestV1>,
+    remotePeerId: string,
+  ) => void;
 }
 
 export const RFC64_PUBLIC_CATALOG_TRANSPORT_ERROR_CODES_V1 = Object.freeze([
@@ -265,10 +297,16 @@ export class Rfc64PublicCatalogTransportV1 {
         async (data, peerId) => this.handleFetch(data, peerId.toString()),
         { maxReadBytes: RFC64_PUBLIC_CATALOG_HEAD_FETCH_REQUEST_MAX_BYTES_V1 },
       );
+      this.router.register(
+        RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1,
+        async (data, peerId) => this.handleReplayRequest(data, peerId.toString()),
+        { maxReadBytes: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_MAX_BYTES_V1 },
+      );
     } catch (cause) {
       this.#started = false;
       this.router.unregister(RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1);
       this.router.unregister(RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1);
+      this.router.unregister(RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1);
       throw cause;
     }
   }
@@ -278,6 +316,35 @@ export class Rfc64PublicCatalogTransportV1 {
     this.#started = false;
     this.router.unregister(RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1);
     this.router.unregister(RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1);
+    this.router.unregister(RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1);
+  }
+
+  /** Ask one already-connected, currently authorized peer to replay durable heads. */
+  async requestCatalogHeadReplay(
+    remotePeerId: string,
+    requestInput: Rfc64PublicCatalogHeadReplayRequestV1,
+    sendOptions?: SendOptions,
+  ): Promise<void> {
+    this.requireStarted();
+    const peerId = snapshotPeerId(remotePeerId);
+    const request = parseReplayRequest(encodeReplayRequest(requestInput));
+    const response = await this.withCurrentCatalogPolicy(
+      'head-replay-outbound',
+      peerId,
+      request,
+      () => this.router.send(
+        peerId,
+        RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1,
+        encodeReplayRequest(request),
+        sendOptions,
+      ),
+    );
+    if (response.byteLength === 1 && response[0] === REPLAY_DENIED) {
+      fail('catalog-transport-policy-denied', 'remote peer denied the catalog-head replay request');
+    }
+    if (response.byteLength !== 1 || response[0] !== ACK[0]) {
+      fail('catalog-transport-wire', 'catalog-head replay returned an invalid acknowledgement');
+    }
   }
 
   async announceCatalogHead(
@@ -407,10 +474,26 @@ export class Rfc64PublicCatalogTransportV1 {
     return served.value ?? Uint8Array.of(FETCH_NOT_FOUND);
   }
 
+  private async handleReplayRequest(
+    data: Uint8Array,
+    remotePeerIdInput: string,
+  ): Promise<Uint8Array> {
+    this.requireStarted();
+    const remotePeerId = snapshotPeerId(remotePeerIdInput);
+    const request = parseReplayRequest(data);
+    const admitted = await this.withAuthorizedCurrentCatalogPolicy(
+      'head-replay-inbound',
+      remotePeerId,
+      request,
+      () => this.options.onCatalogHeadReplayRequested?.(request, remotePeerId),
+    );
+    return admitted.authorized ? ACK : Uint8Array.of(REPLAY_DENIED);
+  }
+
   private async withAuthorizedCurrentCatalogPolicy<Value>(
     operation: Rfc64PublicCatalogOperationV1,
     remotePeerId: string,
-    scope: Rfc64PublicCatalogHeadAnnouncementV1 | Rfc64PublicCatalogHeadFetchRequestV1,
+    scope: Rfc64PublicCatalogPolicyScopeV1,
     work: () => Value | Promise<Value>,
   ): Promise<Rfc64AuthorizedCatalogWorkResultV1<Value>> {
     return withAuthorizedCurrentRfc64CatalogPolicyV1(
@@ -422,7 +505,7 @@ export class Rfc64PublicCatalogTransportV1 {
   private async isCatalogPolicyAuthorized(
     operation: Rfc64PublicCatalogOperationV1,
     remotePeerId: string,
-    scope: Rfc64PublicCatalogHeadAnnouncementV1 | Rfc64PublicCatalogHeadFetchRequestV1,
+    scope: Rfc64PublicCatalogPolicyScopeV1,
   ): Promise<boolean> {
     try {
       await this.requireCatalogPolicy(operation, remotePeerId, scope);
@@ -439,7 +522,7 @@ export class Rfc64PublicCatalogTransportV1 {
   private withCurrentCatalogPolicy<Value>(
     operation: Rfc64PublicCatalogOperationV1,
     remotePeerId: string,
-    scope: Rfc64PublicCatalogHeadAnnouncementV1 | Rfc64PublicCatalogHeadFetchRequestV1,
+    scope: Rfc64PublicCatalogPolicyScopeV1,
     work: () => Value | Promise<Value>,
   ): Promise<Value> {
     return withCurrentRfc64CatalogPolicyV1(
@@ -451,14 +534,14 @@ export class Rfc64PublicCatalogTransportV1 {
   private async requireCatalogPolicy(
     operation: Rfc64PublicCatalogOperationV1,
     remotePeerId: string,
-    scope: Rfc64PublicCatalogHeadAnnouncementV1 | Rfc64PublicCatalogHeadFetchRequestV1,
+    scope: Rfc64PublicCatalogPolicyScopeV1,
   ): Promise<void> {
     const input = Object.freeze({
       operation,
       remotePeerId,
       networkId: scope.networkId,
       contextGraphId: scope.contextGraphId,
-      subGraphName: scope.subGraphName,
+      subGraphName: 'subGraphName' in scope ? scope.subGraphName : null,
       policyDigest: scope.policyDigest,
       objectType: AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
     }) satisfies Rfc64PublicCatalogAuthorizationInputV1;
@@ -528,6 +611,18 @@ export function parseRfc64PublicCatalogHeadFetchRequestV1(
   return parseFetchRequest(input);
 }
 
+export function encodeRfc64PublicCatalogHeadReplayRequestV1(
+  input: Rfc64PublicCatalogHeadReplayRequestV1,
+): Uint8Array {
+  return encodeReplayRequest(input);
+}
+
+export function parseRfc64PublicCatalogHeadReplayRequestV1(
+  input: Uint8Array,
+): Rfc64PublicCatalogHeadReplayRequestV1 {
+  return parseReplayRequest(input);
+}
+
 function requestFromAnnouncement(
   announcement: Rfc64PublicCatalogHeadAnnouncementV1,
 ): Rfc64PublicCatalogHeadFetchRequestV1 {
@@ -566,6 +661,48 @@ function parseFetchRequest(input: Uint8Array): Rfc64PublicCatalogHeadFetchReques
     RFC64_PUBLIC_CATALOG_HEAD_FETCH_REQUEST_MAX_BYTES_V1,
   );
   return validateWireScope(parsed, RFC64_PUBLIC_CATALOG_HEAD_FETCH_KIND_V1);
+}
+
+function encodeReplayRequest(
+  input: Rfc64PublicCatalogHeadReplayRequestV1,
+): Uint8Array {
+  const snapshot = validateReplayRequest(input);
+  return encodeFlatCanonicalJson(snapshot, RFC64_PUBLIC_CATALOG_HEAD_REPLAY_MAX_BYTES_V1);
+}
+
+function parseReplayRequest(input: Uint8Array): Rfc64PublicCatalogHeadReplayRequestV1 {
+  return validateReplayRequest(parseFlatCanonicalJson(
+    input,
+    REPLAY_REQUEST_KEYS,
+    RFC64_PUBLIC_CATALOG_HEAD_REPLAY_MAX_BYTES_V1,
+  ));
+}
+
+function validateReplayRequest(value: unknown): Rfc64PublicCatalogHeadReplayRequestV1 {
+  if (!isPlainRecord(value)) {
+    fail('catalog-transport-wire', 'RFC-64 catalog replay request must be a plain object');
+  }
+  const snapshot = snapshotExactWireRecord(value, REPLAY_REQUEST_KEYS);
+  if (snapshot.kind !== RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1) {
+    fail(
+      'catalog-transport-wire',
+      `RFC-64 catalog replay request kind must be ${RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1}`,
+    );
+  }
+  try {
+    assertNetworkIdV1(snapshot.networkId);
+    assertContextGraphIdV1(snapshot.contextGraphId);
+    assertCanonicalDigest(snapshot.policyDigest, 'policyDigest');
+    return Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
+      networkId: snapshot.networkId,
+      contextGraphId: snapshot.contextGraphId,
+      policyDigest: snapshot.policyDigest,
+    });
+  } catch (cause) {
+    if (cause instanceof Rfc64PublicCatalogTransportErrorV1) throw cause;
+    fail('catalog-transport-wire', 'RFC-64 catalog replay request contains an invalid scalar', cause);
+  }
 }
 
 function validateWireScope<Kind extends
