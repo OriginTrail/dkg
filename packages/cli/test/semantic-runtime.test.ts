@@ -38,6 +38,7 @@ describe('semantic runtime daemon configuration', () => {
     const newProgramIri = 'urn:sr:program:my-copy';
     const source = '(strategy fork-me)';
     const tool = 'urn:sr:tool:investigator-v1';
+    const permittedProgram = 'urn:sr:program:read-field-a';
     const written: Array<{ subject: string; predicate: string; object: string }> = [];
     let finalized = false;
     const agent = {
@@ -56,6 +57,9 @@ describe('semantic runtime daemon configuration', () => {
           version: '"1.0.0"',
           source: JSON.stringify(source),
           tool: `<${tool}>`,
+          permittedProgram: `<${permittedProgram}>`,
+          label: '"Fork me"',
+          description: '"A safe child"',
         }],
       } : { type: 'bindings', bindings: [] }),
       assertion: {
@@ -105,6 +109,8 @@ describe('semantic runtime daemon configuration', () => {
       { subject: newProgramIri, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'https://origintrail.io/semantic-runtime/v1#Program' },
       { subject: newProgramIri, predicate: 'https://origintrail.io/semantic-runtime/v1#source', object: JSON.stringify(source) },
       { subject: newProgramIri, predicate: 'https://origintrail.io/semantic-runtime/v1#requiresTool', object: tool },
+      { subject: newProgramIri, predicate: 'https://origintrail.io/semantic-runtime/v1#permitsProgram', object: permittedProgram },
+      { subject: newProgramIri, predicate: 'http://www.w3.org/2000/01/rdf-schema#label', object: '"Fork me"' },
       { subject: newProgramIri, predicate: 'http://www.w3.org/ns/prov#wasDerivedFrom', object: sourceProgramIri },
     ]));
     expect(agent.assertion.create).toHaveBeenCalledWith(
@@ -264,6 +270,7 @@ describe('semantic runtime daemon configuration', () => {
       version: '1.0.0',
       source,
       requiredTools: [],
+      permittedPrograms: [],
     });
     expect(query).toHaveBeenCalledWith(expect.stringContaining('<urn:sr:program:demo>'), {
       contextGraphId: 'devnet-test',
@@ -394,6 +401,17 @@ describe('semantic runtime daemon configuration', () => {
             witInterface: '"origintrail:semantic-runtime/investigator@0.1.0"',
           }],
         };
+        if (sparql.includes('<https://origintrail.io/semantic-runtime/v1#output>')) return {
+          type: 'bindings',
+          bindings: [{
+            g: graph.replace('_verifiable_memory', {
+              wm: '_working_memory',
+              swm: '_shared_memory',
+              vm: '_verifiable_memory',
+            }[executionLayer]),
+            output: '"semantic-runtime-llm-ok"',
+          }],
+        };
         return { type: 'bindings', bindings: [] };
       }),
       assertion: {
@@ -456,6 +474,7 @@ describe('semantic runtime daemon configuration', () => {
         ...(executionLayer === 'vm' ? {
           executionUal: 'did:dkg:31337/0x2222222222222222222222222222222222222222/1',
         } : {}),
+        outputs: ['semantic-runtime-llm-ok'],
         persisted: true,
       });
       await expect(invoke()).resolves.toEqual({
@@ -465,6 +484,7 @@ describe('semantic runtime daemon configuration', () => {
         ...(executionLayer === 'vm' ? {
           executionUal: 'did:dkg:31337/0x2222222222222222222222222222222222222222/1',
         } : {}),
+        outputs: ['semantic-runtime-llm-ok'],
         persisted: true,
       });
       await expect(invokeStoredSemanticProgram(
