@@ -1,4 +1,4 @@
-import { maskSparqlLexicalRegions } from '@origintrail-official/dkg-core/sparql-lexical-scanner';
+import { scanSparqlLexically } from '@origintrail-official/dkg-rdf-utils/sparql-lexical-scanner';
 import type { McpToolDefinition } from './schema.js';
 import { scanSparqlPreflight } from './sparql-preflight-scanner.js';
 
@@ -151,23 +151,49 @@ export function validateDkgToolCall(
  * used only after the original, syntactically-valid read returned no evidence.
  */
 export function rewriteCompactPredicatesForDkg(sparql: string): string {
-  const subject = String.raw`(?:\?[A-Za-z_][A-Za-z0-9_]*|<[^>]+>|_:[A-Za-z][A-Za-z0-9_-]*)`;
-  const predicateAnchor = String.raw`(?:${subject}\s+|;\s*)`;
-  const { masked, unterminated } = maskSparqlLexicalRegions(sparql);
-  if (unterminated) return sparql;
+  const scan = scanSparqlLexically(sparql);
+  if (scan.unterminated) return sparql;
   const edits: Array<{ start: number; end: number; value: string }> = [];
-  const shorthand = new RegExp(`(${predicateAnchor})a(\\s+)`, 'gi');
-  for (const match of masked.matchAll(shorthand)) {
-    const start = (match.index ?? 0) + match[1].length;
-    edits.push({ start, end: start + 1, value: '<rdf:type>' });
-  }
-  const compact = new RegExp(
-    `(${predicateAnchor})((?:rdf|rdfs|schema):[A-Za-z_][A-Za-z0-9_.-]*)(\\s+)`,
-    'gi',
+
+  const hasWhitespaceGap = (start: number, end: number): boolean => (
+    end > start && /^\s+$/u.test(scan.masked.slice(start, end))
   );
-  for (const match of masked.matchAll(compact)) {
-    const start = (match.index ?? 0) + match[1].length;
-    edits.push({ start, end: start + match[2].length, value: `<${match[2]}>` });
+  const canPrecedePredicate = (index: number): boolean => {
+    const token = scan.tokens[index];
+    if (!token) return false;
+    if (token.kind === 'iri') return true;
+    if (!('value' in token)) return false;
+    if (token.kind === 'variable') return token.logicalValue.startsWith('?');
+    return token.kind === 'prefixed-name';
+  };
+
+  for (let index = 1; index < scan.tokens.length - 1; index++) {
+    const previous = scan.tokens[index - 1];
+    const candidate = scan.tokens[index];
+    const next = scan.tokens[index + 1];
+    const followsSubject = canPrecedePredicate(index - 1)
+      && hasWhitespaceGap(previous.end, candidate.start);
+    const followsSemicolon = 'value' in previous
+      && previous.kind === 'symbol'
+      && previous.logicalValue === ';'
+      && hasWhitespaceGap(previous.end, candidate.start);
+    if (!followsSubject && !followsSemicolon) continue;
+    if (!hasWhitespaceGap(candidate.end, next.start) || !('value' in candidate)) continue;
+
+    if (candidate.kind === 'word' && candidate.upper === 'A') {
+      edits.push({ start: candidate.start, end: candidate.end, value: '<rdf:type>' });
+      continue;
+    }
+    if (
+      candidate.kind === 'prefixed-name'
+      && /^(?:rdf|rdfs|schema):[A-Za-z_][A-Za-z0-9_.-]*$/iu.test(candidate.logicalValue)
+    ) {
+      edits.push({
+        start: candidate.start,
+        end: candidate.end,
+        value: `<${candidate.value}>`,
+      });
+    }
   }
   return edits
     .sort((left, right) => right.start - left.start)

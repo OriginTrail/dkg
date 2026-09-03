@@ -299,7 +299,7 @@ export function scanSparqlStringLiteral(
   return { end: source.length, closed: false };
 }
 
-/** Preserve the query package's cursor API while sharing the core scanner. */
+/** Return the end offset of a string literal, or the unchanged start offset. */
 export function skipSparqlStringLiteral(source: string, start: number): number {
   return scanSparqlStringLiteral(source, start)?.end ?? start;
 }
@@ -315,15 +315,6 @@ function isSparqlIriRefBodyCodePoint(codePoint: number): boolean {
     && codePoint !== 0x5e
     && codePoint !== 0x60
     && codePoint !== 0x5c;
-}
-
-function isLikelyStructuralIriStart(codePoint: number): boolean {
-  return (codePoint >= 0x41 && codePoint <= 0x5a)
-    || (codePoint >= 0x61 && codePoint <= 0x7a)
-    || codePoint === 0x23
-    || codePoint === 0x5f
-    || codePoint === 0x2f
-    || codePoint === 0x2e;
 }
 
 function skipSparqlIriRefBody(source: string, start: number): number | null {
@@ -345,9 +336,21 @@ export function skipSparqlIriRef(source: string, start: number): number | null {
   return skipSparqlIriRefBody(source, start + opening.rawWidth);
 }
 
+function followsIriIntroducingKeyword(source: string, start: number): boolean {
+  let wordStart = start;
+  while (wordStart > 0 && /[A-Za-z]/.test(source[wordStart - 1])) wordStart--;
+  if (wordStart === start) return false;
+  const before = wordStart > 0 ? source[wordStart - 1] : '';
+  if (before && /[A-Za-z0-9_?$]/.test(before)) return false;
+  return /^(?:BASE|FROM|GRAPH|INTO|LOAD|NAMED|PREFIX|SERVICE|TO|USING|WITH)$/i
+    .test(source.slice(wordStart, start));
+}
+
 /**
- * Query structural rewrites deliberately treat `<digit` and `<variable` as
- * comparisons, even where longest-match tokenization could form an IRIREF.
+ * Query structural rewrites must distinguish a grammar-valid relative IRI
+ * such as `<1#item>` from a compact comparison such as `?n<10&&?m>5`.
+ * A grammar-valid `<...>` is therefore treated as a comparison only when its
+ * opening delimiter is directly adjacent to a plausible left-hand operand.
  */
 export function skipSparqlIriRefForStructuralScan(
   source: string,
@@ -356,9 +359,17 @@ export function skipSparqlIriRefForStructuralScan(
   const opening = readSparqlLogicalCodePoint(source, start);
   if (!opening || opening.codePoint !== 0x3c) return null;
   const bodyStart = start + opening.rawWidth;
-  const firstBody = readSparqlLogicalCodePoint(source, bodyStart);
-  if (!firstBody || !isLikelyStructuralIriStart(firstBody.codePoint)) return null;
-  return skipSparqlIriRefBody(source, bodyStart);
+  const iriEnd = skipSparqlIriRefBody(source, bodyStart);
+  if (iriEnd === null || start === 0) return iriEnd;
+  if (followsIriIntroducingKeyword(source, start)) return iriEnd;
+
+  const previousCodeUnit = source.charCodeAt(start - 1);
+  const previousStart = previousCodeUnit >= 0xdc00 && previousCodeUnit <= 0xdfff
+    && start >= 2
+    ? start - 2
+    : start - 1;
+  const previous = source.slice(previousStart, start);
+  return /[\p{L}\p{N}_?$)\]>"']/u.test(previous) ? null : iriEnd;
 }
 
 /** Skip whitespace and `#` line comments between SPARQL tokens. */

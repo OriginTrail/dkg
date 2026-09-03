@@ -1,6 +1,7 @@
 import {
   preprocessSparqlCodePointEscapes,
   readSparqlVariable,
+  skipSparqlIriRef,
   skipSparqlIriRefForStructuralScan,
   skipSparqlSpaceAndLineComments,
   skipSparqlStringLiteral,
@@ -16,13 +17,11 @@ export {
 export {
   preprocessSparqlCodePointEscapes,
   readSparqlVariable,
+  skipSparqlIriRef,
+  skipSparqlIriRefForStructuralScan,
   skipSparqlSpaceAndLineComments,
   skipSparqlStringLiteral,
 };
-
-export function skipSparqlIriRef(source: string, start: number): number | null {
-  return skipSparqlIriRefForStructuralScan(source, start);
-}
 
 /** Collect logical word tokens while keeping strings, IRIs, and comments inert. */
 export function collectSparqlWordTokens(source: string): ReadonlySet<string> {
@@ -87,7 +86,7 @@ export function findMatchingSparqlCloseBrace(sparql: string, openIdx: number): n
       continue;
     }
     if (ch === '<') {
-      const iriEnd = skipSparqlIriRef(sparql, i);
+      const iriEnd = skipSparqlIriRefForStructuralScan(sparql, i);
       if (iriEnd) {
         i = iriEnd;
         continue;

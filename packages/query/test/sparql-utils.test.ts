@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   readSparqlVariable as readCoreVariable,
-  skipSparqlIriRefForStructuralScan as skipCoreIriRef,
+  skipSparqlIriRef as skipCoreGrammarIriRef,
+  skipSparqlIriRefForStructuralScan as skipCoreStructuralIriRef,
   skipSparqlStringLiteral as skipCoreStringLiteral,
 } from '@origintrail-official/dkg-core/sparql-cursors';
 import {
   readSparqlVariable,
   skipSparqlIriRef,
+  skipSparqlIriRefForStructuralScan,
   skipSparqlStringLiteral,
 } from '../src/sparql-utils.js';
 
@@ -29,13 +31,25 @@ describe('shared SPARQL lexical cursor primitives', () => {
     ['xx<urn:test>tail', 2, 12],
     [String.raw`xx\u003Curn:test\u003Etail`, 2, 22],
     [String.raw`xx<urn:\u00E9>tail`, 2, 14],
-    ['xx<>tail', 2, null],
+    ['xx<>tail', 2, 4],
     ['xx< 5', 2, null],
   ] as const)(
-    'keeps IRIREF boundaries and raw offsets identical for %s',
+    'keeps grammar IRIREF boundaries and raw offsets identical for %s',
     (source, start, expected) => {
-      expect(skipCoreIriRef(source, start)).toBe(expected);
+      expect(skipCoreGrammarIriRef(source, start)).toBe(expected);
       expect(skipSparqlIriRef(source, start)).toBe(expected);
+    },
+  );
+
+  it.each([
+    ['xx<urn:test>tail', 2, null],
+    [' <1#item> tail', 1, 9],
+    ['xx< 5', 2, null],
+  ] as const)(
+    'keeps structural comparison-vs-IRI decisions explicit for %s',
+    (source, start, expected) => {
+      expect(skipCoreStructuralIriRef(source, start)).toBe(expected);
+      expect(skipSparqlIriRefForStructuralScan(source, start)).toBe(expected);
     },
   );
 

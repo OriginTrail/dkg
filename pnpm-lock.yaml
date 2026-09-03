@@ -999,9 +999,9 @@ importers:
 
   packages/local-llm:
     dependencies:
-      '@origintrail-official/dkg-core':
+      '@origintrail-official/dkg-rdf-utils':
         specifier: workspace:*
-        version: link:../core
+        version: link:../rdf-utils
     devDependencies:
       '@modelcontextprotocol/sdk':
         specifier: ^1

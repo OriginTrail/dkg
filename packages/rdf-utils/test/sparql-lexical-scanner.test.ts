@@ -35,10 +35,20 @@ describe('canonical SPARQL lexical scanner', () => {
   });
 
   it('keeps grammar IRIREF recognition distinct from the rewrite heuristic', () => {
-    const source = String.raw`\u003C10\u003E`;
+    const source = String.raw`?n\u003C10\u003E`;
+    const opening = 2;
+
+    expect(skipSparqlIriRef(source, opening)).toBe(source.length);
+    expect(skipSparqlIriRefForStructuralScan(source, opening)).toBeNull();
+  });
+
+  it('keeps a standalone digit-leading relative IRI visible to structural scans', () => {
+    const source = '<1#item>';
 
     expect(skipSparqlIriRef(source, 0)).toBe(source.length);
-    expect(skipSparqlIriRefForStructuralScan(source, 0)).toBeNull();
+    expect(skipSparqlIriRefForStructuralScan(source, 0)).toBe(source.length);
+    expect(skipSparqlIriRefForStructuralScan(`BASE${source}`, 4)).toBe(4 + source.length);
+    expect(skipSparqlIriRefForStructuralScan(`?BASE${source}`, 5)).toBeNull();
   });
 
   it('preprocesses UCHAR escapes while preserving raw token offsets', () => {

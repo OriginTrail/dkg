@@ -198,6 +198,22 @@ describe('DKG SPARQL preflight', () => {
     );
   });
 
+  it('rewrites compact and shorthand predicates after exact IRI subjects', () => {
+    expect(rewriteCompactPredicatesForDkg(
+      'SELECT ?o ?type WHERE { <urn:item> schema:name ?o . <urn:item> a ?type }',
+    )).toBe(
+      'SELECT ?o ?type WHERE { <urn:item> <schema:name> ?o . <urn:item> <rdf:type> ?type }',
+    );
+  });
+
+  it('does not rewrite compact IRIs used as projection expressions', () => {
+    expect(rewriteCompactPredicatesForDkg(
+      'SELECT schema:name WHERE { ?item schema:name ?name }',
+    )).toBe(
+      'SELECT schema:name WHERE { ?item <schema:name> ?name }',
+    );
+  });
+
   it('rewrites only predicate tokens while preserving literals, IRIs, and comments byte-for-byte', () => {
     const input = [
       'SELECT ?s WHERE {',

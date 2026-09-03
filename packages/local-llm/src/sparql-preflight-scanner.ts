@@ -1,7 +1,7 @@
 import {
   scanSparqlLexically,
   type SparqlLexicalToken,
-} from '@origintrail-official/dkg-core/sparql-lexical-scanner';
+} from '@origintrail-official/dkg-rdf-utils/sparql-lexical-scanner';
 
 const ABSOLUTE_IRI_SCHEMES = new Set([
   'urn',

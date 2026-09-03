@@ -246,6 +246,24 @@ describe('[Q-1] DKGQueryEngine minTrust uses writer-side trust metadata', () => 
     expect(result.bindings.map((b) => b['t'])).toEqual(['http://schema.org/Person']);
   });
 
+  it('honors minTrust for a BASE-relative digit-leading fragment IRI', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiableMemoryUri(CG, 'consensus-verified');
+    const subject = 'http://example.com/1#item';
+    await store.insert([
+      quad(subject, 'http://example.com/name', '"Relative item"', consensusGraph),
+      quad(subject, 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    const result = await engine.query(
+      'BASE <http://example.com/> SELECT ?name WHERE { <1#item> <http://example.com/name> ?name }',
+      { contextGraphId: CG, view: 'verifiable-memory', minTrust: TrustLevel.ConsensusVerified },
+    );
+
+    expect(result.bindings.map((binding) => binding['name'])).toEqual(['"Relative item"']);
+  });
+
   it('preprocesses escaped IRI and string delimiters before scoped minTrust rewriting', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);

@@ -5,6 +5,7 @@ import {
   isSparqlWordContinuation as isWordContinuation,
   readSparqlVariable,
   skipSparqlIriRef,
+  skipSparqlIriRefForStructuralScan,
   skipSparqlSpaceAndLineComments,
   skipSparqlStringLiteral,
 } from './sparql-utils.js';
@@ -31,7 +32,7 @@ export function collectPrefixDeclarations(sparql: string): Map<string, string> {
       continue;
     }
     if (ch === '<') {
-      const end = skipSparqlIriRef(sparql, i);
+      const end = skipSparqlIriRefForStructuralScan(sparql, i);
       i = end ?? i + 1;
       continue;
     }
@@ -129,7 +130,7 @@ function readTopLevelStaticGraphValues(
       continue;
     }
     if (ch === '<') {
-      i = skipSparqlIriRef(sparql, i) ?? i + 1;
+      i = skipSparqlIriRefForStructuralScan(sparql, i) ?? i + 1;
       continue;
     }
     if (ch === '{') {

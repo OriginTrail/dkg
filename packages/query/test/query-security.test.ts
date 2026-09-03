@@ -214,6 +214,21 @@ describe('I-009: SPARQL graph scope bypass prevention', () => {
     expect(response.error).toContain('GRAPH clauses are not allowed');
   });
 
+  it('rejects an escaped GRAPH keyword before invoking the query engine', async () => {
+    const boundary = makeNoExecuteBoundary();
+
+    const response = await boundary.handler.handle(
+      makeRequest({
+        sparql: String.raw`SELECT ?name WHERE { \u0047RAPH \u003C${OTHER_GRAPH}\u003E { ?s <${SCHEMA_NAME}> ?name } }`,
+      }),
+      'peer-attacker',
+    );
+
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('GRAPH clauses are not allowed');
+    expect(boundary.wasExecuted()).toBe(false);
+  });
+
   it('rejects an escaped SERVICE keyword before invoking the query engine', async () => {
     const boundary = makeNoExecuteBoundary();
 
@@ -272,6 +287,21 @@ describe('I-009: SPARQL graph scope bypass prevention', () => {
     const response = await boundary.handler.handle(
       makeRequest({
         sparql: `SELECT ?name FROM<${OTHER_GRAPH}> WHERE { ?s <${SCHEMA_NAME}> ?name }`,
+      }),
+      'peer-attacker',
+    );
+
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('FROM');
+    expect(boundary.wasExecuted()).toBe(false);
+  });
+
+  it('rejects an escaped FROM keyword before invoking the query engine', async () => {
+    const boundary = makeNoExecuteBoundary();
+
+    const response = await boundary.handler.handle(
+      makeRequest({
+        sparql: String.raw`SELECT ?name \u0046ROM \u003C${OTHER_GRAPH}\u003E WHERE { ?s <${SCHEMA_NAME}> ?name }`,
       }),
       'peer-attacker',
     );

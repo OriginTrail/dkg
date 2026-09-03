@@ -1,7 +1,7 @@
 import {
   BoundedResponseBodyLimitError,
   readResponseBodyBytesBounded,
-} from '@origintrail-official/dkg-core/bounded-response-body';
+} from '@origintrail-official/dkg-rdf-utils/bounded-response-body';
 
 export const DEFAULT_MAX_MODEL_RESPONSE_BYTES = 4 * 1024 * 1024;
 

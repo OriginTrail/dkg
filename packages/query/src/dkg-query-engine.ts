@@ -59,6 +59,7 @@ import {
   readSparqlVariable,
   skipSparqlStringLiteral as scanSparqlStringLiteral,
   skipSparqlIriRef,
+  skipSparqlIriRefForStructuralScan,
   skipSparqlSpaceAndLineComments,
   stripLiteralsAndComments,
 } from './sparql-utils.js';
@@ -2161,8 +2162,8 @@ export function skipSparqlStringLiteral(src: string, i: number): number {
  * single/double/triple-quoted string literals (via
  * {@link skipSparqlStringLiteral}), and IRIREFs (`<...>`) so the
  * `WHERE` substring can NOT be sourced from inside any of those
- * payload contexts. The shared query cursor applies the package's structural
- * comparison-vs-IRI heuristic consistently at every call site.
+ * payload contexts. This locator explicitly uses the structural
+ * comparison-vs-IRI cursor; grammar consumers use the grammar cursor instead.
  *
  * Returns the index of the `W` of the `WHERE` keyword, or `-1` if
  * none is found at top level. Case-insensitive on the keyword
@@ -2190,7 +2191,7 @@ function findExplicitWhereTokenIdx(sparql: string): number {
       continue;
     }
     if (ch === '<') {
-      const iriEnd = skipSparqlIriRef(sparql, i);
+      const iriEnd = skipSparqlIriRefForStructuralScan(sparql, i);
       if (iriEnd !== null) {
         i = iriEnd;
         continue;
@@ -2324,7 +2325,7 @@ function findWhereBraceStart(sparql: string): number {
       continue;
     }
     if (ch === '<') {
-      const iriEnd = skipSparqlIriRef(sparql, i);
+      const iriEnd = skipSparqlIriRefForStructuralScan(sparql, i);
       if (iriEnd !== null) {
         i = iriEnd;
         continue;

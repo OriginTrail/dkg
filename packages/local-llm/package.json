@@ -19,7 +19,7 @@
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
-    "@origintrail-official/dkg-core": "workspace:*"
+    "@origintrail-official/dkg-rdf-utils": "workspace:*"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1",
