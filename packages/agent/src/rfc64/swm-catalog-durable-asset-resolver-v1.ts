@@ -71,6 +71,23 @@ export async function resolveRfc64InventoryWorkspaceCatalogAssetV1(
     kaUal: params.row.kaUal,
   });
   throwIfAbortedV1(params.signal);
+  // Finalized private placements remain in the tier-neutral author inventory
+  // after their byte-identical SWM twin is retired. Rebuild those rows from
+  // the exact VM graph; public lanes must continue to require a workspace head.
+  if (head === undefined && params.laneKind === 'private') {
+    const projectionBytes = await resolveFinalizedVmProjectionBytesV1(
+      params,
+      params.row,
+      seal,
+      'agent.rfc64.swmInventory.catalogReconcile.vmProjection',
+    );
+    if (computeKaProjectionDigestV1(projectionBytes) !== params.row.projectionDigest) {
+      throw new Error(
+        `durable RFC-64 projection differs from signed inventory row ${params.row.kaUal}`,
+      );
+    }
+    return catalogAssetV1(params.row.assertionCoordinate, projectionBytes, seal);
+  }
   if (
     head === undefined
     || head.assertionVersion !== params.row.assertionVersion
@@ -119,24 +136,12 @@ export async function resolveRfc64ConfirmedVmRepairCatalogAssetV1(
 
   let projectionBytes: Uint8Array;
   if (head === undefined) {
-    const vmGraph = knowledgeAssetLayerGraphUri(
-      params.contextGraphId,
-      MemoryLayer.VerifiableMemory,
-      createGraphKnowledgeAssetScope(
-        params.identity.kaUal,
-        params.identity.assertionVersion,
-      ),
+    projectionBytes = await resolveFinalizedVmProjectionBytesV1(
+      params,
+      params.identity,
+      seal,
+      'agent.rfc64.finalizedPrivateCatalogRepair.vmProjection',
     );
-    const result = await params.store.query(
-      `CONSTRUCT { ?subject ?predicate ?object } WHERE { GRAPH <${assertSafeIri(vmGraph)}> { ?subject ?predicate ?object } }`,
-      { source: 'agent.rfc64.finalizedPrivateCatalogRepair.vmProjection', signal: params.signal },
-    );
-    throwIfAbortedV1(params.signal);
-    if (result.type !== 'quads' || result.quads.length !== Number(seal.publicTripleCount)) {
-      throw new Error(`durable finalized VM projection differs for ${params.identity.kaUal}`);
-    }
-    assertProjectionMatchesSealV1(result.quads, seal, params.identity.kaUal);
-    projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(result.quads);
   } else {
     if (
       head.assertionVersion !== params.identity.assertionVersion
@@ -160,6 +165,29 @@ export async function resolveRfc64ConfirmedVmRepairCatalogAssetV1(
     projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(snapshot.quads);
   }
   return catalogAssetV1(params.identity.assertionCoordinate, projectionBytes, seal);
+}
+
+async function resolveFinalizedVmProjectionBytesV1(
+  params: Readonly<DurableCatalogAssetResolverBaseV1>,
+  identity: Readonly<Rfc64DurableCatalogAssetIdentityV1>,
+  seal: Readonly<CanonicalGraphScopedAuthorSealV1>,
+  source: string,
+): Promise<Uint8Array> {
+  const vmGraph = knowledgeAssetLayerGraphUri(
+    params.contextGraphId,
+    MemoryLayer.VerifiableMemory,
+    createGraphKnowledgeAssetScope(identity.kaUal, identity.assertionVersion),
+  );
+  const result = await params.store.query(
+    `CONSTRUCT { ?subject ?predicate ?object } WHERE { GRAPH <${assertSafeIri(vmGraph)}> { ?subject ?predicate ?object } }`,
+    { source, signal: params.signal },
+  );
+  throwIfAbortedV1(params.signal);
+  if (result.type !== 'quads' || result.quads.length !== Number(seal.publicTripleCount)) {
+    throw new Error(`durable finalized VM projection differs for ${identity.kaUal}`);
+  }
+  assertProjectionMatchesSealV1(result.quads, seal, identity.kaUal);
+  return encodeCanonicalCgSharedPublicRootProjectionV1(result.quads);
 }
 
 async function resolveStrictSealV1(
