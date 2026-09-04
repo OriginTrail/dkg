@@ -25,7 +25,7 @@ import {
 } from './support/rfc64-local-catalog-repair-fixture.js';
 
 describe('RFC-64 local SWM catalog projection lifecycle', () => {
-  it('retries a dormant durable promotion after default responsibility settles', async () => {
+  it('keeps retrying a dormant durable promotion while default responsibility settles', async () => {
     const agent = await startRepairAgentV1({
       name: 'dormant-default-responsibility',
       autoPublish: {
@@ -35,6 +35,14 @@ describe('RFC-64 local SWM catalog projection lifecycle', () => {
     });
     const inventoryDigest = `0x${'a0'.repeat(32)}` as Digest32V1;
     const record = vi.spyOn(agent, 'recordRfc64SwmAuthorInventoryShadowV1')
+      .mockResolvedValueOnce({
+        status: 'dormant',
+        action: 'upsert',
+        attempts: 0,
+        headObjectDigest: null,
+        error: null,
+        dormantReason: 'inactive-lane',
+      })
       .mockResolvedValueOnce({
         status: 'dormant',
         action: 'upsert',
@@ -73,9 +81,9 @@ describe('RFC-64 local SWM catalog projection lifecycle', () => {
       ctx: createOperationContext('share'),
     });
 
-    expect(reconcileResponsibility).toHaveBeenCalledTimes(2);
+    expect(reconcileResponsibility).toHaveBeenCalledTimes(3);
     expect(reconcileResponsibility).toHaveBeenCalledWith(CONTEXT_GRAPH_ID);
-    expect(record).toHaveBeenCalledTimes(2);
+    expect(record).toHaveBeenCalledTimes(3);
     expect(requestProjection).toHaveBeenCalledTimes(2);
   });
 

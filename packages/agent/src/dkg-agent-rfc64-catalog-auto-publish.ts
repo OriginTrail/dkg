@@ -70,6 +70,28 @@ export type {
   Rfc64SwmAuthorInventoryShadowStatusV1,
 } from './rfc64/swm-inventory-shadow-runtime-v1.js';
 
+// A freshly-created private CG can durably accept its first shares before the
+// membership-derived default responsibility and accepted authority converge.
+// Keep the detached observer alive across that bounded lifecycle gap so an
+// otherwise successful share cannot be omitted from the authoritative head.
+const RFC64_DEFAULT_RESPONSIBILITY_SETTLE_RETRY_DELAYS_MS_V1 = Object.freeze([
+  0,
+  100,
+  250,
+  500,
+  1_000,
+  2_000,
+  4_000,
+  8_000,
+] as const);
+
+function waitForRfc64DefaultResponsibilitySettlementV1(
+  delayMs: number,
+): Promise<void> {
+  if (delayMs === 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
 // Compatibility exports for consumers of the historically public dist/*
 // subpath. The implementation moved to the projection owner, but the named
 // types remain available from their original module path.
@@ -237,18 +259,25 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   ): Promise<void> {
     try {
       let result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
-      if (result.status === 'dormant' && result.dormantReason === 'inactive-lane') {
+      for (const delayMs of RFC64_DEFAULT_RESPONSIBILITY_SETTLE_RETRY_DELAYS_MS_V1) {
+        if (result.status !== 'dormant' || result.dormantReason !== 'inactive-lane') break;
         // A durable promotion can race the asynchronous default-responsibility
-        // and authority transition for a newly created CG. Refresh that normal
-        // lifecycle boundary once before classifying the row as deliberately
-        // unselected. The durable workspace and VM-confirmation fence are
-        // re-read by the retry, so this cannot resurrect a finalized public row.
+        // and authority transition for a newly created CG. Refresh and retry
+        // that normal lifecycle boundary for a bounded settlement window before
+        // classifying the row as deliberately unselected. The durable workspace
+        // and VM-confirmation fence are re-read by every retry, so this cannot
+        // resurrect a finalized public row.
         const responsibility = await this.reconcileRfc64CatalogResponsibilityV1(
           params.contextGraphId,
         );
-        if (responsibility.active && responsibility.mode !== 'legacy') {
-          result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
+        if (
+          responsibility.selectionSource !== 'default'
+          || responsibility.mode !== 'catalog'
+        ) {
+          break;
         }
+        await waitForRfc64DefaultResponsibilitySettlementV1(delayMs);
+        result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
       }
       if (result.status === 'applied' || result.status === 'existing') {
         const projection = {
