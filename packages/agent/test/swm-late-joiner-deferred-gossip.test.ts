@@ -96,6 +96,10 @@ async function createAgent(): Promise<{
   const agent = await DKGAgent.create({
     name: `SwmLateJoinerDeferGossip-${Math.random().toString(36).slice(2)}`,
     chainAdapter: new MockChainAdapter(),
+    // This suite pins the one-release legacy gossip rollback itself. In
+    // 10.0.16 omission selects catalog authority and intentionally suppresses
+    // the legacy workspace topic for responsible context graphs.
+    rfc64CatalogActivation: { enabled: false },
   });
   const gossip = new FakeGossip();
   Object.defineProperty(agent, 'peerId', { value: LOCAL_PEER_ID, configurable: true });
