@@ -162,6 +162,87 @@ describe('RFC-64 rollout authority integration', () => {
     );
   });
 
+  it('bounds replay work per peer and restores capacity after success and failure', async () => {
+    const edge = await startAgent('bounded-replay-per-peer', undefined);
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    let calls = 0;
+    const replay = vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1')
+      .mockImplementation(async () => {
+        calls += 1;
+        if (calls === 1) {
+          entered();
+          await gate;
+        }
+        return Object.freeze({ announced: 1, failed: 0 });
+      });
+    const peerId = '12D3KooWReplayPerPeerLimit';
+    const request = (ordinal: number) => Object.freeze({
+      kind: 'rfc64-public-catalog-head-replay-request-v1' as const,
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      policyDigest: `0x${ordinal.toString(16).padStart(64, '0')}` as Digest32V1,
+    });
+
+    const admitted = Array.from({ length: 4 }, (_, index) => (
+      edge.queueRfc64CatalogHeadReplayV1(peerId, request(index + 1))
+    ));
+    await started;
+    const overflow = edge.queueRfc64CatalogHeadReplayV1(peerId, request(5));
+    release();
+    await expect(overflow).rejects.toThrow(/replay queue is full/u);
+    await expect(Promise.all(admitted)).resolves.toHaveLength(4);
+
+    replay.mockRejectedValueOnce(new Error('injected replay failure'));
+    await expect(edge.queueRfc64CatalogHeadReplayV1(peerId, request(6)))
+      .rejects.toThrow(/injected replay failure/u);
+    replay.mockResolvedValue(Object.freeze({ announced: 1, failed: 0 }));
+    await expect(edge.queueRfc64CatalogHeadReplayV1(peerId, request(7)))
+      .resolves.toEqual({ announced: 1, failed: 0 });
+  });
+
+  it('bounds replay work globally and restores capacity after completion', async () => {
+    const edge = await startAgent('bounded-replay-global', undefined);
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    let calls = 0;
+    vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1')
+      .mockImplementation(async () => {
+        calls += 1;
+        if (calls === 1) {
+          entered();
+          await gate;
+        }
+        return Object.freeze({ announced: 1, failed: 0 });
+      });
+    const request = Object.freeze({
+      kind: 'rfc64-public-catalog-head-replay-request-v1' as const,
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      policyDigest: `0x${'22'.repeat(32)}` as Digest32V1,
+    });
+
+    const admitted = Array.from({ length: 64 }, (_, index) => (
+      edge.queueRfc64CatalogHeadReplayV1(`12D3KooWReplayGlobal${index}`, request)
+    ));
+    await started;
+    const overflow = edge.queueRfc64CatalogHeadReplayV1(
+      '12D3KooWReplayGlobalOverflow',
+      request,
+    );
+    release();
+    await expect(overflow).rejects.toThrow(/replay queue is full/u);
+    await expect(Promise.all(admitted)).resolves.toHaveLength(64);
+    await expect(edge.queueRfc64CatalogHeadReplayV1(
+      '12D3KooWReplayGlobalAfterCleanup',
+      request,
+    )).resolves.toEqual({ announced: 1, failed: 0 });
+  });
+
   it('connection replay sends public and authorized private heads without disclosing private metadata to a nonmember', async () => {
     const privateContextGraphId = `${AUTHOR}/private-connection-replay` as ContextGraphIdV1;
     const memberPeerId = '12D3KooWConnectionReplayMember';
