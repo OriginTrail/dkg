@@ -732,6 +732,7 @@ export class Rfc64PublicCatalogNativeReceiverV1<
         appliedHeadStatus = 'existing';
       } else {
         try {
+          throwIfAborted(signal);
           appliedHeadStatus = this.options.inventory.compareAndSwapAppliedCatalogHeadV1({
             catalogScopeDigest,
             authorAddress: head.payload.authorAddress,
@@ -1310,6 +1311,7 @@ export class Rfc64PublicCatalogNativeReceiverV1<
         appliedHeadStatus = 'existing';
       } else {
         try {
+          throwIfAborted(signal);
           const casResult = this.options.inventory.compareAndSwapAppliedCatalogHeadV1({
             catalogScopeDigest,
             authorAddress: head.payload.authorAddress,

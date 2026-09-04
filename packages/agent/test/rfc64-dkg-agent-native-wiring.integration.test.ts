@@ -65,6 +65,10 @@ import {
   Rfc64CatalogReconciliationTerminalErrorV1,
 } from '../src/index.js';
 import {
+  RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1,
+  RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1,
+  RFC64_CATALOG_TARGET_MAX_ENTRIES_V1,
+  Rfc64CatalogTargetTrackerV1,
   snapshotRfc64CatalogAccessPolicyAuthorityV1,
   snapshotRfc64CatalogDeploymentProfileV1,
   snapshotRfc64PublicCatalogAutoPublishConfigV1,
@@ -86,6 +90,12 @@ import {
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 import { Rfc64BoundedPublicRootCatalogNativeReconcilerV1 } from
   '../src/rfc64/public-catalog-native-reconciler-v1.js';
+import { Rfc64PublicCatalogReceiverV1 } from
+  '../src/rfc64/public-catalog-receiver-v1.js';
+import {
+  RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+  type Rfc64PublicCatalogHeadAnnouncementV1,
+} from '../src/rfc64/public-catalog-transport-v1.js';
 import type {
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionStore,
@@ -744,7 +754,579 @@ function selectedPublicCatalogActivationV1(
   });
 }
 
+function catalogOperationalTarget(
+  contextGraphIndex: number,
+  authorIndex: number,
+  digestIndex: number,
+  catalogVersion = '0',
+): Rfc64PublicCatalogHeadAnnouncementV1 {
+  const digest = (offset: number) => (
+    `0x${(digestIndex + offset).toString(16).padStart(64, '0')}` as Digest32V1
+  );
+  const contextGraphId = (
+    `0x1111111111111111111111111111111111111111/target-${contextGraphIndex}`
+  ) as ContextGraphIdV1;
+  const authorAddress = (
+    `0x${(authorIndex + 1).toString(16).padStart(40, '0')}`
+  ) as EvmAddressV1;
+  return Object.freeze({
+    kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+    networkId: NETWORK_ID,
+    contextGraphId,
+    subGraphName: null,
+    authorAddress,
+    catalogEra: '0',
+    catalogVersion,
+    policyDigest: `0x${'71'.repeat(32)}` as Digest32V1,
+    catalogHeadObjectDigest: digest(1),
+    signatureVariantDigest: digest(2),
+  }) as Rfc64PublicCatalogHeadAnnouncementV1;
+}
+
 ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring', () => {
+  it('bounds operational targets while preserving in-capacity updates and exact retirement', () => {
+    const tracker = new Rfc64CatalogTargetTrackerV1();
+    const firstTargets = Array.from(
+      { length: RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 },
+      (_, authorIndex) => catalogOperationalTarget(0, authorIndex, authorIndex * 3),
+    );
+    for (const target of firstTargets) {
+      expect(tracker.begin(target).disposition).toBe('tracked');
+    }
+    expect(tracker.size).toBe(RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1);
+    expect(tracker.targetsForContextGraph(firstTargets[0]!.contextGraphId)).toHaveLength(
+      RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1,
+    );
+    const contextCapacityLease = tracker.begin(catalogOperationalTarget(
+      0,
+      RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1,
+      RFC64_CATALOG_TARGET_MAX_ENTRIES_V1 * 4,
+    ));
+    expect(contextCapacityLease.disposition).toBe('context-capacity');
+    expect(tracker.capacityExceededForContextGraph(firstTargets[0]!.contextGraphId)).toBe(true);
+    tracker.settle(contextCapacityLease, 'applied');
+    expect(tracker.capacityExceededForContextGraph(firstTargets[0]!.contextGraphId)).toBe(false);
+
+    const newerFirst = Object.freeze({
+      ...firstTargets[0]!,
+      catalogVersion: '1',
+      catalogHeadObjectDigest: `0x${'81'.repeat(32)}` as Digest32V1,
+      signatureVariantDigest: `0x${'82'.repeat(32)}` as Digest32V1,
+    });
+    expect(tracker.begin(newerFirst).disposition).toBe('tracked');
+    expect(tracker.size).toBe(RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1);
+
+    for (
+      let index = RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1;
+      index < RFC64_CATALOG_TARGET_MAX_ENTRIES_V1;
+      index += 1
+    ) {
+      expect(tracker.begin(catalogOperationalTarget(
+        Math.floor(index / RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1),
+        index % RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1,
+        index * 3,
+      )).disposition).toBe('tracked');
+    }
+    expect(tracker.size).toBe(RFC64_CATALOG_TARGET_MAX_ENTRIES_V1);
+    const newestFirst = Object.freeze({
+      ...newerFirst,
+      catalogVersion: '2',
+      catalogHeadObjectDigest: `0x${'83'.repeat(32)}` as Digest32V1,
+      signatureVariantDigest: `0x${'84'.repeat(32)}` as Digest32V1,
+    });
+    expect(tracker.begin(newestFirst).disposition).toBe('tracked');
+    expect(tracker.size).toBe(RFC64_CATALOG_TARGET_MAX_ENTRIES_V1);
+    const overflow = catalogOperationalTarget(
+      Math.ceil(
+        RFC64_CATALOG_TARGET_MAX_ENTRIES_V1
+          / RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1,
+      ),
+      0,
+      RFC64_CATALOG_TARGET_MAX_ENTRIES_V1 * 5,
+    );
+    const globalCapacityLease = tracker.begin(overflow);
+    expect(globalCapacityLease.disposition).toBe('global-capacity');
+    expect(tracker.capacityExceededForContextGraph(overflow.contextGraphId)).toBe(true);
+    tracker.settle(globalCapacityLease, 'applied');
+    expect(tracker.capacityExceededForContextGraph(overflow.contextGraphId)).toBe(false);
+
+    expect(tracker.retire(newerFirst)).toBe(false);
+    expect(tracker.size).toBe(RFC64_CATALOG_TARGET_MAX_ENTRIES_V1);
+    expect(tracker.targetsForContextGraph(newestFirst.contextGraphId)).toContainEqual(newestFirst);
+    expect(tracker.retire(Object.freeze({
+      ...newestFirst,
+      policyDigest: `0x${'85'.repeat(32)}` as Digest32V1,
+    }))).toBe(false);
+    expect(tracker.retire(newestFirst)).toBe(true);
+    const failedLease = tracker.begin(overflow);
+    expect(failedLease.disposition).toBe('tracked');
+    tracker.settle(failedLease, 'failed');
+    expect(tracker.hasTerminalFailure(overflow)).toBe(true);
+    expect(tracker.size).toBe(RFC64_CATALOG_TARGET_MAX_ENTRIES_V1);
+    const retryLease = tracker.begin(overflow);
+    expect(retryLease.disposition).toBe('tracked');
+    expect(tracker.hasTerminalFailure(overflow)).toBe(false);
+    tracker.settle(retryLease, 'applied');
+    expect(tracker.clearContextGraph(firstTargets[0]!.contextGraphId)).toBe(
+      RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 - 1,
+    );
+    expect(tracker.targetsForContextGraph(firstTargets[0]!.contextGraphId)).toEqual([]);
+    expect(tracker.size).toBe(
+      RFC64_CATALOG_TARGET_MAX_ENTRIES_V1
+        - RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1,
+    );
+    expect(tracker.clearContextGraph(firstTargets[0]!.contextGraphId)).toBe(0);
+    expect(tracker.capacityExceededForContextGraph('unrelated-context-graph')).toBe(false);
+  });
+
+  it('retains every bounded overflow failure and ignores stale authority-epoch leases', () => {
+    const tracker = new Rfc64CatalogTargetTrackerV1();
+    const retained = Array.from(
+      { length: RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 },
+      (_, authorIndex) => catalogOperationalTarget(0, authorIndex, 100_000 + authorIndex * 3),
+    );
+    for (const target of retained) tracker.begin(target);
+    const firstOverflow = catalogOperationalTarget(0, 100, 200_000);
+    const secondOverflow = catalogOperationalTarget(0, 101, 300_000);
+    const firstLease = tracker.begin(firstOverflow);
+    const secondLease = tracker.begin(secondOverflow);
+    expect(firstLease.disposition).toBe('context-capacity');
+    expect(secondLease.disposition).toBe('context-capacity');
+    tracker.settle(firstLease, 'failed');
+    tracker.settle(secondLease, 'not-found');
+    expect(tracker.capacityExceededForContextGraph(firstOverflow.contextGraphId)).toBe(true);
+
+    expect(tracker.retire(retained[0]!)).toBe(true);
+    expect(tracker.hasTerminalFailure(firstOverflow)).toBe(true);
+    expect(tracker.capacityExceededForContextGraph(firstOverflow.contextGraphId)).toBe(true);
+    const firstRetry = tracker.begin(firstOverflow);
+    expect(firstRetry.disposition).toBe('tracked');
+    expect(tracker.hasTerminalFailure(firstOverflow)).toBe(false);
+    tracker.settle(firstRetry, 'applied');
+    expect(tracker.hasTerminalFailure(secondOverflow)).toBe(true);
+    expect(tracker.capacityExceededForContextGraph(secondOverflow.contextGraphId)).toBe(false);
+    const secondRetry = tracker.begin(secondOverflow);
+    tracker.settle(secondRetry, 'applied');
+    expect(tracker.hasTerminalFailure(secondOverflow)).toBe(false);
+
+    const staleTracker = new Rfc64CatalogTargetTrackerV1();
+    for (const target of retained) staleTracker.begin(target);
+    const staleLease = staleTracker.begin(firstOverflow);
+    staleTracker.clearContextGraph(firstOverflow.contextGraphId);
+    for (const target of retained) staleTracker.begin(Object.freeze({
+      ...target,
+      policyDigest: `0x${'92'.repeat(32)}` as Digest32V1,
+    }));
+    const currentLease = staleTracker.begin(Object.freeze({
+      ...secondOverflow,
+      policyDigest: `0x${'92'.repeat(32)}` as Digest32V1,
+    }));
+    expect(currentLease.disposition).toBe('context-capacity');
+    staleTracker.settle(staleLease, 'failed');
+    expect(staleTracker.capacityExceededForContextGraph(secondOverflow.contextGraphId)).toBe(true);
+    staleTracker.settle(currentLease, 'applied');
+    expect(staleTracker.capacityExceededForContextGraph(secondOverflow.contextGraphId)).toBe(false);
+  });
+
+  it('clears attributable global saturation with its authority generation', () => {
+    const tracker = new Rfc64CatalogTargetTrackerV1();
+    for (let index = 0; index < RFC64_CATALOG_TARGET_MAX_ENTRIES_V1; index += 1) {
+      expect(tracker.begin(catalogOperationalTarget(
+        Math.floor(index / RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1),
+        index % RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1,
+        400_000 + index * 3,
+      )).disposition).toBe('tracked');
+    }
+
+    const overflowTargets = Array.from(
+      { length: RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 + 1 },
+      (_, index) => catalogOperationalTarget(1_000, 1_000 + index, 500_000 + index * 3),
+    );
+    for (const target of overflowTargets) {
+      const lease = tracker.begin(target);
+      expect(lease.disposition).toBe('global-capacity');
+      tracker.settle(lease, 'failed');
+    }
+
+    expect(tracker.capacityExceededForContextGraph('unrelated-context-graph')).toBe(true);
+    tracker.clearContextGraph(overflowTargets[0]!.contextGraphId);
+    expect(tracker.capacityExceededForContextGraph('unrelated-context-graph')).toBe(false);
+  });
+
+  it('bounds per-context overflows and resets only unrepresentable failures', () => {
+    const tracker = new Rfc64CatalogTargetTrackerV1();
+    const overflowLeases = [];
+    for (
+      let contextGraphIndex = 0;
+      contextGraphIndex < RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1;
+      contextGraphIndex += 1
+    ) {
+      const retained = Array.from(
+        { length: RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 },
+        (_, authorIndex) => catalogOperationalTarget(
+          contextGraphIndex,
+          authorIndex,
+          600_000 + contextGraphIndex * 1_000 + authorIndex * 3,
+        ),
+      );
+      for (const target of retained) {
+        expect(tracker.begin(target).disposition).toBe('tracked');
+      }
+      const overflowLease = tracker.begin(catalogOperationalTarget(
+        contextGraphIndex,
+        RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1,
+        700_000 + contextGraphIndex * 1_000,
+      ));
+      expect(overflowLease.disposition).toBe('context-capacity');
+      overflowLeases.push(overflowLease);
+      for (const target of retained) expect(tracker.retire(target)).toBe(true);
+    }
+
+    const collapsedTarget = catalogOperationalTarget(
+      RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1,
+      RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1,
+      800_000,
+    );
+    const collapsedRetained = Array.from(
+      { length: RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 },
+      (_, authorIndex) => catalogOperationalTarget(
+        RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1,
+        authorIndex,
+        810_000 + authorIndex * 3,
+      ),
+    );
+    for (const target of collapsedRetained) tracker.begin(target);
+    const collapsedLease = tracker.begin(collapsedTarget);
+    expect(collapsedLease.disposition).toBe('global-capacity');
+    for (const target of collapsedRetained) tracker.retire(target);
+    expect(tracker.capacityExceededForContextGraph('unrelated-context-graph')).toBe(true);
+    tracker.settle(collapsedLease, 'applied');
+    expect(tracker.size).toBe(0);
+    expect(tracker.capacityExceededForContextGraph('unrelated-context-graph')).toBe(false);
+
+    const terminalFailureContextGraphIds = [];
+    const terminalFailureLeases = [];
+    const terminalFailureCount =
+      RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1
+      + RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1
+      + 1;
+    for (let failureIndex = 0; failureIndex < terminalFailureCount; failureIndex += 1) {
+      const contextGraphIndex =
+        RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1 + 1 + failureIndex;
+      const retained = Array.from(
+        { length: RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 },
+        (_, authorIndex) => catalogOperationalTarget(
+          contextGraphIndex,
+          authorIndex,
+          900_000 + failureIndex * 1_000 + authorIndex * 3,
+        ),
+      );
+      for (const target of retained) tracker.begin(target);
+      const failedTarget = catalogOperationalTarget(
+        contextGraphIndex,
+        RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1,
+        950_000 + failureIndex * 1_000,
+      );
+      const failedLease = tracker.begin(failedTarget);
+      expect(failedLease.disposition).toBe('global-capacity');
+      for (const target of retained) tracker.retire(target);
+      terminalFailureLeases.push(failedLease);
+      terminalFailureContextGraphIds.push(failedTarget.contextGraphId);
+    }
+
+    for (let index = 0; index < RFC64_CATALOG_TARGET_MAX_ENTRIES_V1; index += 1) {
+      expect(tracker.begin(catalogOperationalTarget(
+        10_000 + Math.floor(
+          index / RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1,
+        ),
+        index % RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1,
+        2_000_000 + index * 3,
+      )).disposition).toBe('tracked');
+    }
+    for (const failedLease of terminalFailureLeases) {
+      tracker.settle(failedLease, 'failed');
+    }
+
+    expect(tracker.capacityExceededForContextGraph('unrelated-context-graph')).toBe(true);
+    for (const contextGraphId of terminalFailureContextGraphIds) {
+      tracker.clearContextGraph(contextGraphId);
+    }
+    expect(tracker.capacityExceededForContextGraph('unrelated-context-graph')).toBe(true);
+
+    tracker.resetAll();
+    expect(tracker.size).toBe(0);
+    expect(tracker.capacityExceededForContextGraph('unrelated-context-graph')).toBe(false);
+    tracker.settle(overflowLeases[0]!, 'failed');
+    expect(tracker.capacityExceededForContextGraph('unrelated-context-graph')).toBe(false);
+  });
+
+  it('balances verified target lifecycle for accepted active and queued work', async () => {
+    const events: Array<readonly [
+      'start' | 'end',
+      Digest32V1,
+      string | null,
+    ]> = [];
+    const observers = {
+      onVerifiedCurrentHeadTargetAccepted: (
+        announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+      ) => events.push(['start', announcement.catalogHeadObjectDigest, null]),
+      onVerifiedCurrentHeadTargetSettled: (
+        announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+        _targetToken: number,
+        _attemptToken: number | null,
+        outcome: string,
+      ) => events.push(['end', announcement.catalogHeadObjectDigest, outcome]),
+    };
+    const stagedTarget = catalogOperationalTarget(0, 0, 10_000);
+    const stagedReceiver = new Rfc64PublicCatalogReceiverV1({
+      isHeadApplied: async () => false,
+      reconcileHead: async () => 'staged-only',
+    }, observers);
+    await expect(stagedReceiver.scheduleVerifiedCurrentHeadAndWait([{
+      announcement: stagedTarget,
+      remotePeerId: 'verified-staged-provider',
+    }])).resolves.toMatchObject({ outcome: 'staged-only' });
+    stagedReceiver.schedule(stagedTarget, 'ambient-provider');
+    await stagedReceiver.whenIdle();
+    expect(events).toEqual([
+      ['start', stagedTarget.catalogHeadObjectDigest, null],
+      ['end', stagedTarget.catalogHeadObjectDigest, 'staged-only'],
+    ]);
+
+    const closingTarget = catalogOperationalTarget(0, 1, 20_000);
+    const queuedTarget = catalogOperationalTarget(1, 2, 30_000);
+    const closingReceiver = new Rfc64PublicCatalogReceiverV1({
+      isHeadApplied: async () => false,
+      reconcileHead: async (_remotePeerId, _announcement, signal) => {
+        if (!signal.aborted) {
+          await new Promise<void>((resolve) => {
+            signal.addEventListener('abort', () => resolve(), { once: true });
+          });
+        }
+        return 'not-found';
+      },
+    }, { ...observers, maxConcurrent: 1 });
+    const closingCompletion = closingReceiver.scheduleVerifiedCurrentHeadAndWait([{
+      announcement: closingTarget,
+      remotePeerId: 'verified-closing-provider',
+    }]);
+    const queuedCompletion = closingReceiver.scheduleVerifiedCurrentHeadAndWait([{
+      announcement: queuedTarget,
+      remotePeerId: 'verified-queued-provider',
+    }]);
+    await vi.waitFor(() => {
+      expect(events).toContainEqual([
+        'start',
+        closingTarget.catalogHeadObjectDigest,
+        null,
+      ]);
+      expect(events).toContainEqual([
+        'start',
+        queuedTarget.catalogHeadObjectDigest,
+        null,
+      ]);
+    });
+    await closingReceiver.close();
+    await expect(closingCompletion).resolves.toMatchObject({ outcome: 'closed' });
+    await expect(queuedCompletion).resolves.toMatchObject({ outcome: 'closed' });
+    expect(events).toContainEqual([
+      'end',
+      closingTarget.catalogHeadObjectDigest,
+      'closed',
+    ]);
+    expect(events).toContainEqual([
+      'end',
+      queuedTarget.catalogHeadObjectDigest,
+      'closed',
+    ]);
+  });
+
+  it('reserves bounded queue admission for authenticated current-head work', async () => {
+    const activeAmbient = catalogOperationalTarget(0, 0, 40_000);
+    const queuedAmbient = catalogOperationalTarget(1, 1, 50_000);
+    const verified = catalogOperationalTarget(2, 2, 60_000);
+    let releaseActive!: () => void;
+    let activeEntered = false;
+    const activeGate = new Promise<void>((resolve) => { releaseActive = resolve; });
+    const reconciled: Digest32V1[] = [];
+    const receiver = new Rfc64PublicCatalogReceiverV1({
+      isHeadApplied: async () => false,
+      reconcileHead: async (_peer, announcement) => {
+        reconciled.push(announcement.catalogHeadObjectDigest);
+        if (announcement.catalogHeadObjectDigest === activeAmbient.catalogHeadObjectDigest) {
+          activeEntered = true;
+          await activeGate;
+          return 'not-found';
+        }
+        return 'applied';
+      },
+    }, { maxConcurrent: 1, maxQueue: 1 });
+    receiver.schedule(activeAmbient, 'ambient-active');
+    await vi.waitFor(() => expect(activeEntered).toBe(true));
+    receiver.schedule(queuedAmbient, 'ambient-queued');
+    const completion = receiver.scheduleVerifiedCurrentHeadAndWait([{
+      announcement: verified,
+      remotePeerId: 'verified-provider',
+    }]);
+    expect(receiver.stats()).toMatchObject({ queued: 1, droppedQueueFull: 1 });
+    releaseActive();
+    await expect(completion).resolves.toMatchObject({ outcome: 'applied' });
+    await receiver.whenIdle();
+    expect(reconciled).toEqual([
+      activeAmbient.catalogHeadObjectDigest,
+      verified.catalogHeadObjectDigest,
+    ]);
+
+    const rejected: Digest32V1[] = [];
+    const blockingReceiver = new Rfc64PublicCatalogReceiverV1({
+      isHeadApplied: async () => false,
+      reconcileHead: async (_peer, _announcement, signal) => {
+        if (!signal.aborted) {
+          await new Promise<void>((resolve) => {
+            signal.addEventListener('abort', () => resolve(), { once: true });
+          });
+        }
+        return 'not-found';
+      },
+    }, {
+      maxConcurrent: 1,
+      maxQueue: 1,
+      onVerifiedCurrentHeadTargetRejected: (announcement) => {
+        rejected.push(announcement.catalogHeadObjectDigest);
+      },
+    });
+    const active = blockingReceiver.scheduleVerifiedCurrentHeadAndWait([{
+      announcement: activeAmbient,
+      remotePeerId: 'verified-active',
+    }]);
+    const queued = blockingReceiver.scheduleVerifiedCurrentHeadAndWait([{
+      announcement: queuedAmbient,
+      remotePeerId: 'verified-queued',
+    }]);
+    const dropped = blockingReceiver.scheduleVerifiedCurrentHeadAndWait([{
+      announcement: verified,
+      remotePeerId: 'verified-rejected',
+    }]);
+    await expect(dropped).resolves.toMatchObject({ outcome: 'dropped' });
+    expect(rejected).toEqual([verified.catalogHeadObjectDigest]);
+    await blockingReceiver.close();
+    await expect(active).resolves.toMatchObject({ outcome: 'closed' });
+    await expect(queued).resolves.toMatchObject({ outcome: 'closed' });
+
+    let deferredAttempted = false;
+    let releaseDeferredBlocker!: () => void;
+    const deferredBlocker = new Promise<void>((resolve) => {
+      releaseDeferredBlocker = resolve;
+    });
+    const deferredAmbient = catalogOperationalTarget(3, 3, 70_000);
+    const activeAfterDeferral = catalogOperationalTarget(4, 4, 80_000);
+    const verifiedAfterDeferral = catalogOperationalTarget(5, 5, 90_000);
+    const deferredReceiver = new Rfc64PublicCatalogReceiverV1({
+      isHeadApplied: async () => false,
+      reconcileHead: async (_peer, announcement) => {
+        if (announcement.catalogHeadObjectDigest === deferredAmbient.catalogHeadObjectDigest) {
+          deferredAttempted = true;
+          throw new Error('defer this ambient task');
+        }
+        if (announcement.catalogHeadObjectDigest === activeAfterDeferral.catalogHeadObjectDigest) {
+          await deferredBlocker;
+          return 'not-found';
+        }
+        return 'applied';
+      },
+    }, {
+      maxConcurrent: 1,
+      maxQueue: 1,
+      admissionDeferralMs: 60_000,
+      isDeferrableError: () => true,
+    });
+    deferredReceiver.schedule(deferredAmbient, 'ambient-deferred');
+    await vi.waitFor(() => {
+      expect(deferredAttempted).toBe(true);
+      expect(deferredReceiver.stats().deferred).toBe(1);
+    });
+    deferredReceiver.schedule(activeAfterDeferral, 'ambient-active-after-deferral');
+    await vi.waitFor(() => expect(deferredReceiver.stats().inFlight).toBe(1));
+    const afterDeferral = deferredReceiver.scheduleVerifiedCurrentHeadAndWait([{
+      announcement: verifiedAfterDeferral,
+      remotePeerId: 'verified-after-deferral',
+    }]);
+    expect(deferredReceiver.stats()).toMatchObject({
+      deferred: 0,
+      inFlight: 1,
+      queued: 1,
+      droppedQueueFull: 1,
+    });
+    releaseDeferredBlocker();
+    await expect(afterDeferral).resolves.toMatchObject({ outcome: 'applied' });
+    await deferredReceiver.whenIdle();
+  });
+
+  it('evicts queued ambient work when deferred work predates a full queue', async () => {
+    const deferredAmbient = catalogOperationalTarget(6, 6, 100_000);
+    const activeAmbient = catalogOperationalTarget(7, 7, 110_000);
+    const queuedAmbientOne = catalogOperationalTarget(7, 7, 120_000);
+    const queuedAmbientTwo = catalogOperationalTarget(7, 7, 130_000);
+    const verified = catalogOperationalTarget(8, 8, 140_000);
+    let deferredAttempted = false;
+    let activeEntered = false;
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => { releaseActive = resolve; });
+    const reconciled: Digest32V1[] = [];
+    const receiver = new Rfc64PublicCatalogReceiverV1({
+      isHeadApplied: async () => false,
+      reconcileHead: async (_peer, announcement) => {
+        reconciled.push(announcement.catalogHeadObjectDigest);
+        if (announcement.catalogHeadObjectDigest === deferredAmbient.catalogHeadObjectDigest) {
+          deferredAttempted = true;
+          throw new Error('defer the oldest ambient task');
+        }
+        if (announcement.catalogHeadObjectDigest === activeAmbient.catalogHeadObjectDigest) {
+          activeEntered = true;
+          await activeGate;
+          return 'not-found';
+        }
+        return 'applied';
+      },
+    }, {
+      maxConcurrent: 2,
+      maxQueue: 2,
+      admissionDeferralMs: 60_000,
+      isDeferrableError: () => true,
+    });
+
+    receiver.schedule(deferredAmbient, 'ambient-deferred');
+    await vi.waitFor(() => {
+      expect(deferredAttempted).toBe(true);
+      expect(receiver.stats().deferred).toBe(1);
+    });
+    receiver.schedule(activeAmbient, 'ambient-active');
+    await vi.waitFor(() => {
+      expect(activeEntered).toBe(true);
+      expect(receiver.stats().inFlight).toBe(1);
+    });
+    receiver.schedule(queuedAmbientOne, 'ambient-queued-one');
+    receiver.schedule(queuedAmbientTwo, 'ambient-queued-two');
+    expect(receiver.stats()).toMatchObject({ deferred: 1, inFlight: 1, queued: 2 });
+
+    const verifiedCompletion = receiver.scheduleVerifiedCurrentHeadAndWait([{
+      announcement: verified,
+      remotePeerId: 'verified-provider',
+    }]);
+    expect(receiver.stats()).toMatchObject({
+      deferred: 1,
+      inFlight: 2,
+      queued: 1,
+      droppedQueueFull: 1,
+    });
+    await expect(verifiedCompletion).resolves.toMatchObject({ outcome: 'applied' });
+    expect(reconciled).not.toContain(queuedAmbientOne.catalogHeadObjectDigest);
+    expect(reconciled).not.toContain(queuedAmbientTwo.catalogHeadObjectDigest);
+
+    releaseActive();
+    await receiver.close();
+  });
+
   it('preserves the EVM default chain identity for a no-admin chain config', async () => {
     const operational = ethers.Wallet.createRandom();
     const agent = await DKGAgent.create({
@@ -4718,9 +5300,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     )).toBeNull();
   }, 60_000);
 
-  it('reports a scheduled failing successor instead of the stale applied head as complete', async () => {
-    const [author, receiver] = await Promise.all([
+  it('ignores bogus public hints while an authenticated successor remains pending', async () => {
+    const [author, provider, receiver] = await Promise.all([
       startNativeAgent('status-target-author'),
+      startNativeAgent('status-target-provider'),
       startNativeAgent('status-target-receiver'),
     ]);
     await receiver.createContextGraph({
@@ -4734,26 +5317,30 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       contextGraphId: CONTEXT_GRAPH_ID,
       ownerAddress: AUTHOR,
     });
+    provider.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
     const authorPolicy = author.acceptOpenContextGraphPolicyV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
       ownerAddress: AUTHOR,
     });
+    await connectBothWays(author, provider);
     await connectBothWays(author, receiver);
+    await connectBothWays(provider, receiver);
     const genesis = await author.publishOpenAuthorCatalogGenesisV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
       author: AUTHOR_WALLET,
-      peers: [],
+      peers: [provider.peerId, receiver.peerId],
       issuedAt: FIXED_HEAD_ISSUED_AT,
       catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
-      catalogIssuerDelegationExpiresAt: DELEGATION_EXPIRES_AT,
+      catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
     });
     expect(genesis.announcement.policyDigest).toBe(authorPolicy.policyDigest);
-    await author.announceRfc64PublicCatalogHeadV1({
-      announcement: genesis.announcement,
-      peers: [receiver.peerId],
-    });
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
     await receiver.whenRfc64PublicCatalogReceiverIdleV1();
     await expect(receiver.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
       expect.objectContaining({
@@ -4763,30 +5350,353 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         appliedCatalogHeadDigest: genesis.headObjectDigest,
       }),
     );
-
-    const unavailableSuccessorDigest = `0x${'a9'.repeat(32)}` as Digest32V1;
-    await author.announceRfc64PublicCatalogHeadV1({
-      announcement: Object.freeze({
-        ...genesis.announcement,
-        catalogVersion: '1',
-        catalogHeadObjectDigest: unavailableSuccessorDigest,
-        signatureVariantDigest: `0x${'b8'.repeat(32)}` as Digest32V1,
-      }),
-      peers: [receiver.peerId],
+    await expect((receiver as any).rfc64PublicCatalogServiceV1.discoverCurrentCatalogHead({
+      remotePeerId: provider.peerId,
+      scope: {
+        networkId: genesis.announcement.networkId,
+        contextGraphId: genesis.announcement.contextGraphId,
+        subGraphName: genesis.announcement.subGraphName,
+        authorAddress: genesis.announcement.authorAddress,
+        catalogEra: genesis.announcement.catalogEra,
+      },
+    })).resolves.toMatchObject({
+      announcement: { catalogHeadObjectDigest: genesis.headObjectDigest },
     });
+    await expect(receiver.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        phase: 'complete',
+        providerHealth: expect.objectContaining({ candidateCount: 0 }),
+      }),
+    );
+
+    const bogusAuthors = [
+      `0x${'22'.repeat(20)}`,
+      `0x${'33'.repeat(20)}`,
+      `0x${'44'.repeat(20)}`,
+    ] as const;
+    for (const [index, authorAddress] of bogusAuthors.entries()) {
+      await author.announceRfc64PublicCatalogHeadV1({
+        announcement: Object.freeze({
+          ...genesis.announcement,
+          authorAddress: authorAddress as EvmAddressV1,
+          catalogVersion: '99',
+          catalogHeadObjectDigest: (
+            `0x${(index + 1).toString(16).padStart(64, '0')}` as Digest32V1
+          ),
+          signatureVariantDigest: (
+            `0x${(index + 4).toString(16).padStart(64, '0')}` as Digest32V1
+          ),
+        }),
+        peers: [receiver.peerId],
+      });
+    }
     await receiver.whenRfc64PublicCatalogReceiverIdleV1();
 
     await expect(receiver.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
       expect.objectContaining({
         contextGraphId: CONTEXT_GRAPH_ID,
-        phase: 'blocked',
-        stableReason: 'catalog-reconciliation-failed',
-        expectedCatalogHeadDigest: unavailableSuccessorDigest,
+        phase: 'complete',
+        stableReason: null,
+        expectedCatalogHeadDigest: genesis.headObjectDigest,
         appliedCatalogHeadDigest: genesis.headObjectDigest,
-        expectedRowCount: null,
+        expectedRowCount: '0',
         appliedRowCount: '0',
-        missingRowCount: null,
+        missingRowCount: '0',
+        providerHealth: expect.objectContaining({ candidateCount: 0 }),
       }),
+    );
+
+    const successor = await author.publishOpenAuthorCatalogSuccessorV1({
+      previousHead: {
+        objectDigest: genesis.headObjectDigest,
+        signatureVariantDigest: genesis.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assertionCoordinate: 'authenticated-status-target' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(90n),
+      deployment: NATIVE_DEPLOYMENT,
+      issuedAt: SUCCESSOR_ISSUED_AT,
+      peers: [provider.peerId],
+    });
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    let releaseReconciliation!: () => void;
+    let markedReconciliationEntered = false;
+    const reconciliationGate = new Promise<void>((resolve) => {
+      releaseReconciliation = resolve;
+    });
+    const originalReconcile =
+      Rfc64BoundedPublicRootCatalogNativeReconcilerV1.prototype.reconcileHead;
+    const reconcileSpy = vi.spyOn(
+      Rfc64BoundedPublicRootCatalogNativeReconcilerV1.prototype,
+      'reconcileHead',
+    ).mockImplementation(async function (...args) {
+      if (args[1].catalogHeadObjectDigest === successor.headObjectDigest) {
+        markedReconciliationEntered = true;
+        await reconciliationGate;
+      }
+      return originalReconcile.apply(this, args);
+    });
+
+    const synchronization = (receiver as any).rfc64PublicCatalogServiceV1
+      .synchronizeCurrentCatalogHead({
+        remotePeerId: provider.peerId,
+        scope: {
+          networkId: successor.announcement.networkId,
+          contextGraphId: successor.announcement.contextGraphId,
+          subGraphName: successor.announcement.subGraphName,
+          authorAddress: successor.announcement.authorAddress,
+          catalogEra: successor.announcement.catalogEra,
+        },
+      });
+    try {
+      await vi.waitFor(
+        () => expect(markedReconciliationEntered).toBe(true),
+        { timeout: 10_000 },
+      );
+      await vi.waitFor(async () => {
+        const status = (await receiver.readRfc64CatalogOperationalStatusV1())
+          .find(({ contextGraphId }) => contextGraphId === CONTEXT_GRAPH_ID);
+        expect(status).toMatchObject({
+          phase: 'applying',
+          stableReason: null,
+          expectedCatalogHeadDigest: successor.headObjectDigest,
+          appliedCatalogHeadDigest: genesis.headObjectDigest,
+          providerHealth: expect.objectContaining({ candidateCount: 1 }),
+        });
+      });
+    } finally {
+      releaseReconciliation();
+      try {
+        await Promise.allSettled([synchronization]);
+        await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+      } finally {
+        reconcileSpy.mockRestore();
+      }
+    }
+    await expect(synchronization).resolves.toMatchObject({
+      announcement: { catalogHeadObjectDigest: successor.headObjectDigest },
+    });
+    await expect(receiver.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        phase: 'complete',
+        expectedCatalogHeadDigest: successor.headObjectDigest,
+        appliedCatalogHeadDigest: successor.headObjectDigest,
+        providerHealth: expect.objectContaining({ candidateCount: 0 }),
+      }),
+    );
+
+    const rotationTarget = await author.publishOpenAuthorCatalogSuccessorV1({
+      previousHead: {
+        objectDigest: successor.headObjectDigest,
+        signatureVariantDigest: successor.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assertionCoordinate: 'authenticated-status-target' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(90n, undefined, NETWORK_ID, '2'),
+      deployment: NATIVE_DEPLOYMENT,
+      issuedAt: (BigInt(SUCCESSOR_ISSUED_AT) + 1n).toString() as TimestampMsV1,
+      peers: [provider.peerId],
+    });
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    let releaseRotationReconciliation!: () => void;
+    let rotationReconciliationEntered = false;
+    const rotationGate = new Promise<void>((resolve) => {
+      releaseRotationReconciliation = resolve;
+    });
+    const rotationReconcileSpy = vi.spyOn(
+      Rfc64BoundedPublicRootCatalogNativeReconcilerV1.prototype,
+      'reconcileHead',
+    ).mockImplementation(async function (...args) {
+      if (args[1].catalogHeadObjectDigest === rotationTarget.headObjectDigest) {
+        rotationReconciliationEntered = true;
+        await rotationGate;
+      }
+      return originalReconcile.apply(this, args);
+    });
+    const rotationSynchronization = (receiver as any).rfc64PublicCatalogServiceV1
+      .synchronizeCurrentCatalogHead({
+        remotePeerId: provider.peerId,
+        scope: {
+          networkId: rotationTarget.announcement.networkId,
+          contextGraphId: rotationTarget.announcement.contextGraphId,
+          subGraphName: rotationTarget.announcement.subGraphName,
+          authorAddress: rotationTarget.announcement.authorAddress,
+          catalogEra: rotationTarget.announcement.catalogEra,
+        },
+      });
+    // Rotation now synchronously cancels admitted old-generation work. Attach
+    // the rejection observer before rotating so the intentional terminal
+    // result cannot surface as an unhandled promise between awaits.
+    void rotationSynchronization.catch(() => undefined);
+    try {
+      await vi.waitFor(
+        () => expect(rotationReconciliationEntered).toBe(true),
+        { timeout: 10_000 },
+      );
+      await expect(receiver.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+        expect.objectContaining({
+          contextGraphId: CONTEXT_GRAPH_ID,
+          phase: 'applying',
+          expectedCatalogHeadDigest: rotationTarget.headObjectDigest,
+          providerHealth: expect.objectContaining({ candidateCount: 1 }),
+        }),
+      );
+      const rotatedPolicy = Object.freeze({
+        ...authorPolicy.policy,
+        version: '1',
+        previousPolicyDigest: authorPolicy.policyDigest,
+      }) as ContextGraphPolicyV1;
+      const rotatedPolicyDigest = computeContextGraphPolicyObjectDigestV1(
+        unsignedOpenContextGraphPolicyEnvelopeV1(rotatedPolicy),
+      );
+      receiver.acceptRfc64CatalogAccessSnapshotV1({
+        policy: rotatedPolicy,
+        policyDigest: rotatedPolicyDigest,
+        roster: null,
+      });
+      await expect(receiver.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+        expect.objectContaining({
+          contextGraphId: CONTEXT_GRAPH_ID,
+          providerHealth: expect.objectContaining({ candidateCount: 0 }),
+        }),
+      );
+    } finally {
+      releaseRotationReconciliation();
+      try {
+        await Promise.allSettled([rotationSynchronization]);
+        await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+      } finally {
+        rotationReconcileSpy.mockRestore();
+      }
+    }
+    await expect(rotationSynchronization).rejects.toBeInstanceOf(
+      Rfc64CatalogReconciliationTerminalErrorV1,
+    );
+  }, 60_000);
+
+  it('cancels admitted private work and clears targets on roster-only rotation', async () => {
+    const authority = privateCatalogAuthorityFixtureV1();
+    const peerAddresses = new Map<string, EvmAddressV1>();
+    const createPrivateAgent = (name: string) => startNativeAgentWithOptions({
+      name,
+      networkIdentityChainId: NETWORK_ID,
+      accessPolicyAuthority: {
+        localAgentAddress: AUTHOR,
+        resolveRemoteAgentAddress: async (peerId) => peerAddresses.get(peerId) ?? null,
+      },
+    });
+    const [author, provider, receiver] = await Promise.all([
+      createPrivateAgent('roster-rotation-author'),
+      createPrivateAgent('roster-rotation-provider'),
+      createPrivateAgent('roster-rotation-receiver'),
+    ]);
+    for (const agent of [author, provider, receiver]) {
+      agent.acceptRfc64CatalogAccessSnapshotV1({
+        policy: authority.policy,
+        policyDigest: authority.policyDigest,
+        roster: authority.rosterEnvelope.payload,
+      });
+    }
+    for (const agent of [author, provider, receiver]) {
+      for (const remote of [author, provider, receiver]) {
+        if (agent !== remote) peerAddresses.set(remote.peerId, AUTHOR);
+      }
+    }
+    await connectBothWays(author, provider);
+    await connectBothWays(provider, receiver);
+    const scope = {
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+      bucketCount: '1',
+    } as const;
+    const genesis = await author.publishAuthorCatalogGenesisV1({
+      scope,
+      author: AUTHOR_WALLET,
+      peers: [provider.peerId],
+      issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    });
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+
+    let releaseReconciliation!: () => void;
+    let reconciliationEntered = false;
+    const reconciliationGate = new Promise<void>((resolve) => {
+      releaseReconciliation = resolve;
+    });
+    const originalReconcile =
+      Rfc64BoundedPublicRootCatalogNativeReconcilerV1.prototype.reconcileHead;
+    const reconcileSpy = vi.spyOn(
+      Rfc64BoundedPublicRootCatalogNativeReconcilerV1.prototype,
+      'reconcileHead',
+    ).mockImplementation(async function (...args) {
+      if (args[1].catalogHeadObjectDigest === genesis.headObjectDigest) {
+        reconciliationEntered = true;
+        await reconciliationGate;
+      }
+      return originalReconcile.apply(this, args);
+    });
+    const service = (receiver as any).rfc64PublicCatalogServiceV1;
+    const clearTargets = vi.spyOn(receiver, 'clearRfc64CatalogOperationalTargetsV1');
+    const deactivate = vi.spyOn(service, 'deactivateReceiverContextGraph');
+    const synchronization = service.synchronizeCurrentCatalogHead({
+      remotePeerId: provider.peerId,
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        catalogEra: '0',
+      },
+    });
+    void synchronization.catch(() => undefined);
+    try {
+      await vi.waitFor(
+        () => expect(reconciliationEntered).toBe(true),
+        { timeout: 10_000 },
+      );
+      (receiver as any).getContextGraphListingsChainId = async () => null;
+      vi.spyOn(receiver, 'getContextGraphOwner').mockResolvedValue(
+        `did:dkg:agent:${AUTHOR}`,
+      );
+      vi.spyOn(receiver, 'getExplicitAccessPolicy').mockResolvedValue('private');
+      vi.spyOn(receiver, 'getStoredContextGraphRegistrationOptions').mockResolvedValue({
+        publishPolicy: 1,
+      });
+      vi.spyOn(receiver, 'resolveRfc64VerifiedPrivateRosterV1').mockResolvedValue([AUTHOR]);
+      vi.spyOn(receiver, 'readRfc64PrivateRosterVersionV1').mockResolvedValue('1');
+      (receiver as any).requestRfc64CatalogHeadReplaysToConnectedPeersV1 =
+        async () => Object.freeze({ requested: 0, failed: 0 });
+      await expect(receiver.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
+        .resolves.toMatchObject({
+          policyDigest: authority.policyDigest,
+          roster: { version: '1' },
+        });
+      expect(deactivate).toHaveBeenCalledWith(CONTEXT_GRAPH_ID);
+      expect(clearTargets).toHaveBeenCalledWith(CONTEXT_GRAPH_ID);
+    } finally {
+      releaseReconciliation();
+      try {
+        await Promise.allSettled([synchronization]);
+        await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+      } finally {
+        reconcileSpy.mockRestore();
+      }
+    }
+    await expect(synchronization).rejects.toBeInstanceOf(
+      Rfc64CatalogReconciliationTerminalErrorV1,
     );
   }, 60_000);
 
@@ -7290,6 +8200,7 @@ async function authorSeal(
   kaNumber: bigint,
   publicQuads?: readonly Quad[],
   networkId: NetworkIdV1 = NETWORK_ID,
+  assertionVersion = '1',
 ): Promise<CanonicalGraphScopedAuthorSealV1> {
   const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
   const kaUal = `did:dkg:${networkId}/${AUTHOR}/${kaNumber}`;
@@ -7320,7 +8231,7 @@ async function authorSeal(
     assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
     contentScopeVersion: '2',
     kaUal,
-    assertionVersion: '1',
+    assertionVersion,
     publicTripleCount: String(publicQuads?.length ?? 2),
     privateTripleCount: '0',
     privateMerkleRoot: null,

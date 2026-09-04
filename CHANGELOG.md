@@ -51,7 +51,7 @@ A default-responsibility RFC-64 release. When RFC-64 controls are omitted, the r
 ### Validation
 
 - Focused DKG integration coverage exercises omitted configuration, all authority sources, public/private root catalog authoring, cold recovery, restart parity, provider retry/failover, legacy-boundary retirement, rollout modes, kill switch, and fail-closed unresolved authority.
-- The black-box release matrix uses ordinary node APIs and sanitized omitted configuration for root-scope policy cells `00`, `01`, `10`, and `11`; it requires exact final head/inventory/row parity, current authority, no root legacy fallback, no retained root legacy boundary, and private nonmember denial where applicable.
+- The four-cell black-box acceptance matrix is maintained separately in OriginTrail/dkg-blackbox-harness#31 and is not executed by this repository's CI. Before release, cells `00`, `01`, `10`, and `11` must run against the exact final DKG and harness SHAs using ordinary node APIs with RFC-64 configuration omitted; acceptance requires final head/inventory/row parity, current authority, no root legacy fallback or retained root legacy boundary, and private nonmember denial where applicable.
 - Omitted-configuration named-subgraph coverage must prove live delivery and restart recovery while a mutation that admits root SWM to the compatibility lane fails.
 
 ### Known limitations

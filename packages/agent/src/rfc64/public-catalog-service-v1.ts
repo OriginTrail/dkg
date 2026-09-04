@@ -886,6 +886,10 @@ export class Rfc64PublicCatalogServiceV1 {
     });
     if (discovered === null) return null;
     if (signal?.aborted) throw signal.reason;
+    // Discovery is an asynchronous authority boundary. Revalidate immediately
+    // before queue admission so a policy/roster rotation or receiver
+    // deactivation that completed during exact fetch cannot enqueue stale work.
+    this.#assertAcceptedCatalogAnnouncement(discovered.announcement);
     const completion = await this.#receiver.scheduleVerifiedCurrentHeadAndWait([{
       announcement: discovered.announcement,
       remotePeerId,
@@ -964,6 +968,9 @@ export class Rfc64PublicCatalogServiceV1 {
       exactHeadIdentityV1(discovered.announcement) === selectedIdentity
     ));
     if (signal?.aborted) throw signal.reason;
+    for (const { discovered } of selected) {
+      this.#assertAcceptedCatalogAnnouncement(discovered.announcement);
+    }
     const completion = await this.#receiver.scheduleVerifiedCurrentHeadAndWait(selected.map(({
       remotePeerId,
       discovered,

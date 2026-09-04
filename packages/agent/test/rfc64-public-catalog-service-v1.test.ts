@@ -1553,6 +1553,113 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     expect(reconcileHead).not.toHaveBeenCalled();
   });
 
+  it('revalidates roster authority after discovery and before queue admission', async () => {
+    const reconcileHead = vi.fn(async () => 'applied' as const);
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: new RecordingRouter().asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      native: nativeOptions(() => ({ isHeadApplied: async () => false, reconcileHead })),
+    });
+    const policy = catalogPolicy(CONTEXT_GRAPH_ID, 1, 1);
+    const policyDigest = `0x${'91'.repeat(32)}` as Digest32V1;
+    service.acceptAuthoritativePolicySnapshot({
+      policy,
+      policyDigest,
+      roster: memberRoster(policy, policyDigest),
+    });
+    service.start();
+    const discovery = deferred<Readonly<{
+      announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+      head: never;
+    }>>();
+    vi.spyOn(service, 'discoverCurrentCatalogHead').mockReturnValue(discovery.promise);
+    const synchronization = service.synchronizeCurrentCatalogHead({
+      remotePeerId: 'peer-a',
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        era: '0',
+      },
+    });
+    const failure = synchronization.then(() => null, (error: unknown) => error);
+    await Promise.resolve();
+    service.acceptAuthoritativePolicySnapshot({
+      policy,
+      policyDigest,
+      roster: {
+        ...rosterExcluding(policy, policyDigest, AUTHOR),
+        version: '1',
+        previousRosterDigest: `0x${'92'.repeat(32)}` as Digest32V1,
+      },
+    });
+    discovery.resolve(Object.freeze({
+      announcement: announcement(policyDigest),
+      head: {} as never,
+    }));
+    await expect(failure).resolves.toBeInstanceOf(Error);
+    await expect(failure).resolves.toMatchObject({
+      message: expect.stringMatching(/not bound to the locally accepted policy snapshot/u),
+    });
+    expect(reconcileHead).not.toHaveBeenCalled();
+    await service.close();
+  });
+
+  it('revalidates receiver activity after discovery and before queue admission', async () => {
+    let active = true;
+    const reconcileHead = vi.fn(async () => 'applied' as const);
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: new RecordingRouter().asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      resolveContextGraphAuthority: (contextGraphId) => ({
+        contextGraphId,
+        selected: true,
+        eligible: true,
+        active,
+        mode: 'catalog',
+        killSwitchActive: false,
+        legacySyncAllowed: !active,
+        track2Enabled: active,
+        authoringAllowed: active,
+        reconciliationLane: active ? 'catalog-apply' : 'disabled',
+      }),
+      native: nativeOptions(() => ({ isHeadApplied: async () => false, reconcileHead })),
+    });
+    const policy = acceptPolicy(service);
+    service.start();
+    const discovery = deferred<Readonly<{
+      announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+      head: never;
+    }>>();
+    vi.spyOn(service, 'discoverCurrentCatalogHead').mockReturnValue(discovery.promise);
+    const synchronization = service.synchronizeCurrentCatalogHead({
+      remotePeerId: 'peer-a',
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        era: '0',
+      },
+    });
+    const failure = synchronization.then(() => null, (error: unknown) => error);
+    await Promise.resolve();
+    active = false;
+    service.deactivateReceiverContextGraph(CONTEXT_GRAPH_ID);
+    discovery.resolve(Object.freeze({
+      announcement: announcement(policy.policyDigest),
+      head: {} as never,
+    }));
+    await expect(failure).resolves.toMatchObject({
+      message: expect.stringMatching(/disabled for legacy-mode CG/u),
+    });
+    expect(reconcileHead).not.toHaveBeenCalled();
+    await service.close();
+  });
+
   it('serializes remote apply before the local-author convergence it triggers', async () => {
     const coordinator = new Rfc64CatalogMutationCoordinatorV1();
     const events: string[] = [];

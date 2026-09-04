@@ -9731,6 +9731,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (previousReceiverActive === nextReceiverActive) return;
     if (!nextReceiverActive) {
       this.rfc64PublicCatalogServiceV1?.deactivateReceiverContextGraph(contextGraphId);
+      this.clearRfc64CatalogOperationalTargetsV1(contextGraphId);
     }
     this.invalidateRfc64PublicCatalogBootstrapPassV1(contextGraphId);
     this.queueSharedMemoryGossipSubscription(contextGraphId);

@@ -105,6 +105,8 @@ import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js
 import {
   type Rfc64PublicCatalogReconciliationFailureV1,
 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
+import type { Rfc64PublicCatalogReceiverCompletionOutcomeV1 } from
+  './rfc64/public-catalog-reconciliation-outcome-v1.js';
 import {
   Rfc64PublicCatalogSuccessorProducerV1,
   type Rfc64PublicCatalogIssuerAuthorizationV1,
@@ -362,7 +364,7 @@ export interface Rfc64CatalogOperationalStatusV1 {
   readonly catalogVersion: DecimalU64V1 | null;
   readonly authorHeadCount: number;
   readonly lastSuccessfulAdvanceAt: TimestampMsV1 | null;
-  /** Process-wide receiver counters; the scheduler does not attribute them per CG yet. */
+  /** Per-CG authenticated target count plus process-wide receiver counters. */
   readonly providerHealth: Readonly<{
     candidateCount: number | null;
     attempts: number;
@@ -399,6 +401,9 @@ const rfc64CatalogAuthorityRefreshV1 = new WeakMap<DKGAgent, Readonly<{
 const rfc64SystemContextGraphIdsV1 = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_V1 = 64;
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_PER_PEER_V1 = 4;
+export const RFC64_CATALOG_TARGET_MAX_ENTRIES_V1 = 1_024;
+export const RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 = 64;
+export const RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1 = 64;
 
 interface Rfc64CatalogReplayHeadV1 {
   readonly head: SignedAuthorCatalogHeadEnvelopeV1;
@@ -413,10 +418,381 @@ interface Rfc64CatalogReplayRuntimeV1 {
 }
 
 const rfc64CatalogReplayRuntimesV1 = new WeakMap<DKGAgent, Rfc64CatalogReplayRuntimeV1>();
-const rfc64CatalogTargetAnnouncementsV1 = new WeakMap<
-  DKGAgent,
-  Map<string, Map<string, Rfc64PublicCatalogHeadAnnouncementV1>>
->();
+
+interface Rfc64CatalogTrackedTargetV1 {
+  announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+  terminalFailure: boolean;
+}
+
+interface Rfc64CatalogTargetOverflowV1 {
+  active: number;
+  readonly failureWitnesses: Map<string, Rfc64PublicCatalogHeadAnnouncementV1>;
+  /** CG-owned saturation can be released only when that authority generation resets. */
+  readonly saturatedContextGraphs: Set<string>;
+  /** Lost attribution is fail-closed until the whole tracker reaches a reset boundary. */
+  unattributedSaturation: boolean;
+}
+
+interface Rfc64CatalogTargetContextEpochV1 {
+  valid: boolean;
+  activeLeases: number;
+}
+
+interface Rfc64CatalogTargetLeaseStateV1 {
+  active: boolean;
+  readonly contextEpoch: Rfc64CatalogTargetContextEpochV1;
+  readonly overflow: Rfc64CatalogTargetOverflowV1 | null;
+}
+
+export type Rfc64CatalogTargetLeaseV1 = Readonly<{
+  announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+  disposition: 'tracked' | 'covered' | 'context-capacity' | 'global-capacity';
+  /** Opaque exactly-once settlement state owned by the tracker. */
+  state: Rfc64CatalogTargetLeaseStateV1;
+}>;
+
+/** Process-local, bounded operational targets; semantic truth remains the durable inventory. */
+export class Rfc64CatalogTargetTrackerV1 {
+  readonly #byContextGraph =
+    new Map<string, Map<string, Rfc64CatalogTrackedTargetV1>>();
+  readonly #contextGraphOverflows = new Map<string, Rfc64CatalogTargetOverflowV1>();
+  readonly #contextEpochs = new Map<string, Rfc64CatalogTargetContextEpochV1>();
+  #globalOverflow: Rfc64CatalogTargetOverflowV1 | null = null;
+  #size = 0;
+
+  get size(): number {
+    return this.#size;
+  }
+
+  targetsForContextGraph(
+    contextGraphId: string,
+  ): readonly Rfc64PublicCatalogHeadAnnouncementV1[] {
+    return Object.freeze(
+      [...this.#byContextGraph.get(contextGraphId)?.values() ?? []]
+        .map(({ announcement }) => announcement),
+    );
+  }
+
+  hasTerminalFailure(announcement: Rfc64PublicCatalogHeadAnnouncementV1): boolean {
+    const entry = this.#byContextGraph
+      .get(announcement.contextGraphId)
+      ?.get(rfc64CatalogTargetScopeKeyV1(announcement));
+    return entry !== undefined
+      && rfc64CatalogTargetExactIdentityV1(entry.announcement, announcement)
+      && entry.terminalFailure;
+  }
+
+  capacityExceededForContextGraph(contextGraphId: string): boolean {
+    return this.#globalOverflow !== null
+      || this.#contextGraphOverflows.has(contextGraphId);
+  }
+
+  /** Invalidate every outstanding lease and release all process-local target evidence. */
+  resetAll(): void {
+    for (const contextEpoch of this.#contextEpochs.values()) contextEpoch.valid = false;
+    this.#contextEpochs.clear();
+    this.#byContextGraph.clear();
+    this.#contextGraphOverflows.clear();
+    this.#globalOverflow = null;
+    this.#size = 0;
+  }
+
+  clearContextGraph(contextGraphId: string): number {
+    const byScope = this.#byContextGraph.get(contextGraphId);
+    const contextEpoch = this.#contextEpochs.get(contextGraphId);
+    if (contextEpoch !== undefined) {
+      contextEpoch.valid = false;
+      this.#contextEpochs.delete(contextGraphId);
+    }
+    this.#contextGraphOverflows.delete(contextGraphId);
+    if (this.#globalOverflow !== null) {
+      for (const [identity, witness] of this.#globalOverflow.failureWitnesses) {
+        if (witness.contextGraphId === contextGraphId) {
+          this.#globalOverflow.failureWitnesses.delete(identity);
+        }
+      }
+      this.#globalOverflow.saturatedContextGraphs.delete(contextGraphId);
+      this.#finishOverflowIfResolved(this.#globalOverflow, null);
+    }
+    if (byScope !== undefined) {
+      this.#byContextGraph.delete(contextGraphId);
+      this.#size -= byScope.size;
+    }
+    this.#promoteOverflowWitnesses();
+    return byScope?.size ?? 0;
+  }
+
+  begin(announcement: Rfc64PublicCatalogHeadAnnouncementV1): Rfc64CatalogTargetLeaseV1 {
+    const existingByScope = this.#byContextGraph.get(announcement.contextGraphId);
+    const key = rfc64CatalogTargetScopeKeyV1(announcement);
+    const previous = existingByScope?.get(key);
+    let contextEpoch = this.#contextEpochs.get(announcement.contextGraphId);
+    if (contextEpoch === undefined) {
+      contextEpoch = { valid: true, activeLeases: 0 };
+      this.#contextEpochs.set(announcement.contextGraphId, contextEpoch);
+    }
+    contextEpoch.activeLeases += 1;
+    const lease = (
+      disposition: Rfc64CatalogTargetLeaseV1['disposition'],
+      overflow: Rfc64CatalogTargetOverflowV1 | null = null,
+    ) => Object.freeze({
+      announcement,
+      disposition,
+      state: { active: true, contextEpoch, overflow },
+    });
+    if (
+      previous !== undefined
+      && BigInt(announcement.catalogVersion)
+        < BigInt(previous.announcement.catalogVersion)
+    ) return lease('covered');
+    if (
+      previous === undefined
+      && (existingByScope?.size ?? 0)
+        >= RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1
+    ) {
+      const overflow = this.#beginContextGraphOverflow(announcement.contextGraphId);
+      return lease(overflow.disposition, overflow.overflow);
+    }
+    if (previous === undefined && this.#size >= RFC64_CATALOG_TARGET_MAX_ENTRIES_V1) {
+      this.#globalOverflow ??= this.#createOverflow();
+      this.#globalOverflow.active += 1;
+      return lease('global-capacity', this.#globalOverflow);
+    }
+    let byScope = existingByScope;
+    if (byScope === undefined) {
+      byScope = new Map();
+      this.#byContextGraph.set(announcement.contextGraphId, byScope);
+    }
+    byScope.set(key, { announcement, terminalFailure: false });
+    if (previous === undefined) this.#size += 1;
+    return lease('tracked');
+  }
+
+  reject(
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  ): Rfc64CatalogTargetLeaseV1 {
+    const lease = this.begin(announcement);
+    this.settle(lease, 'dropped');
+    return lease;
+  }
+
+  settle(
+    lease: Rfc64CatalogTargetLeaseV1,
+    outcome: Rfc64PublicCatalogReceiverCompletionOutcomeV1,
+  ): void {
+    if (!lease.state.active) return;
+    lease.state.active = false;
+    const { contextEpoch } = lease.state;
+    contextEpoch.activeLeases = Math.max(0, contextEpoch.activeLeases - 1);
+    if (
+      contextEpoch.activeLeases === 0
+      && this.#contextEpochs.get(lease.announcement.contextGraphId) === contextEpoch
+    ) this.#contextEpochs.delete(lease.announcement.contextGraphId);
+    const overflow = lease.state.overflow;
+    if (!contextEpoch.valid) {
+      if (overflow !== null) {
+        overflow.active = Math.max(0, overflow.active - 1);
+        if (this.#globalOverflow === overflow) {
+          this.#finishOverflowIfResolved(overflow, null);
+        }
+      }
+      return;
+    }
+    const resolved = outcome === 'already-applied'
+      || outcome === 'applied'
+      || outcome === 'closed'
+      || outcome === 'staged-only';
+    if (lease.disposition === 'tracked') {
+      if (resolved) this.retire(lease.announcement);
+      else this.#markTerminalFailure(lease.announcement);
+      return;
+    }
+    if (lease.disposition === 'covered') return;
+    if (
+      overflow === null
+      || (
+        lease.disposition === 'context-capacity'
+          ? this.#contextGraphOverflows.get(lease.announcement.contextGraphId) !== overflow
+          : this.#globalOverflow !== overflow
+      )
+    ) return;
+    overflow.active = Math.max(0, overflow.active - 1);
+    const exactIdentity = rfc64CatalogTargetExactIdentityKeyV1(lease.announcement);
+    if (resolved) {
+      overflow.failureWitnesses.delete(exactIdentity);
+    } else if (!overflow.failureWitnesses.has(exactIdentity)) {
+      if (
+        overflow.failureWitnesses.size
+          >= RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1
+      ) this.#markOverflowSaturated(overflow, lease.announcement.contextGraphId);
+      else overflow.failureWitnesses.set(exactIdentity, lease.announcement);
+    }
+    this.#finishOverflowIfResolved(
+      overflow,
+      lease.disposition === 'context-capacity'
+        ? lease.announcement.contextGraphId
+        : null,
+    );
+  }
+
+  retire(announcement: Rfc64PublicCatalogHeadAnnouncementV1): boolean {
+    const byScope = this.#byContextGraph.get(announcement.contextGraphId);
+    const key = rfc64CatalogTargetScopeKeyV1(announcement);
+    const current = byScope?.get(key);
+    let retired = false;
+    if (
+      current !== undefined
+      && rfc64CatalogTargetExactIdentityV1(current.announcement, announcement)
+    ) {
+      byScope!.delete(key);
+      this.#size -= 1;
+      if (byScope!.size === 0) this.#byContextGraph.delete(announcement.contextGraphId);
+      retired = true;
+    }
+    const exactIdentity = rfc64CatalogTargetExactIdentityKeyV1(announcement);
+    const contextOverflow = this.#contextGraphOverflows.get(announcement.contextGraphId);
+    if (contextOverflow?.failureWitnesses.delete(exactIdentity) === true) {
+      this.#finishOverflowIfResolved(contextOverflow, announcement.contextGraphId);
+      retired = true;
+    }
+    if (this.#globalOverflow?.failureWitnesses.delete(exactIdentity) === true) {
+      this.#finishOverflowIfResolved(this.#globalOverflow, null);
+      retired = true;
+    }
+    this.#promoteOverflowWitnesses();
+    return retired;
+  }
+
+  #markTerminalFailure(announcement: Rfc64PublicCatalogHeadAnnouncementV1): void {
+    const entry = this.#byContextGraph
+      .get(announcement.contextGraphId)
+      ?.get(rfc64CatalogTargetScopeKeyV1(announcement));
+    if (
+      entry !== undefined
+      && rfc64CatalogTargetExactIdentityV1(entry.announcement, announcement)
+    ) entry.terminalFailure = true;
+  }
+
+  #beginContextGraphOverflow(
+    contextGraphId: string,
+  ): Readonly<{
+    disposition: 'context-capacity' | 'global-capacity';
+    overflow: Rfc64CatalogTargetOverflowV1;
+  }> {
+    let overflow = this.#contextGraphOverflows.get(contextGraphId);
+    if (overflow === undefined) {
+      if (
+        this.#contextGraphOverflows.size
+          >= RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1
+      ) {
+        this.#globalOverflow ??= this.#createOverflow();
+        this.#globalOverflow.active += 1;
+        return Object.freeze({
+          disposition: 'global-capacity',
+          overflow: this.#globalOverflow,
+        });
+      }
+      overflow = this.#createOverflow();
+      this.#contextGraphOverflows.set(contextGraphId, overflow);
+    }
+    overflow.active += 1;
+    return Object.freeze({ disposition: 'context-capacity', overflow });
+  }
+
+  #createOverflow(): Rfc64CatalogTargetOverflowV1 {
+    return {
+      active: 0,
+      failureWitnesses: new Map(),
+      saturatedContextGraphs: new Set(),
+      unattributedSaturation: false,
+    };
+  }
+
+  #markOverflowSaturated(
+    overflow: Rfc64CatalogTargetOverflowV1,
+    contextGraphId: string,
+  ): void {
+    if (overflow.saturatedContextGraphs.has(contextGraphId)) return;
+    if (
+      overflow.saturatedContextGraphs.size
+        >= RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1
+    ) {
+      overflow.unattributedSaturation = true;
+      return;
+    }
+    overflow.saturatedContextGraphs.add(contextGraphId);
+  }
+
+  #finishOverflowIfResolved(
+    overflow: Rfc64CatalogTargetOverflowV1,
+    contextGraphId: string | null,
+  ): void {
+    if (overflow.active > 0) return;
+    if (
+      overflow.failureWitnesses.size === 0
+      && overflow.saturatedContextGraphs.size === 0
+      && !overflow.unattributedSaturation
+    ) {
+      if (contextGraphId === null) this.#globalOverflow = null;
+      else this.#contextGraphOverflows.delete(contextGraphId);
+      return;
+    }
+    this.#promoteOverflowWitness(contextGraphId, overflow);
+  }
+
+  #promoteOverflowWitnesses(): void {
+    for (const [contextGraphId, overflow] of this.#contextGraphOverflows) {
+      this.#promoteOverflowWitness(contextGraphId, overflow);
+    }
+    if (this.#globalOverflow !== null) this.#promoteOverflowWitness(null, this.#globalOverflow);
+  }
+
+  #promoteOverflowWitness(
+    contextGraphId: string | null,
+    overflow: Rfc64CatalogTargetOverflowV1,
+  ): void {
+    if (overflow.active > 0) return;
+    for (const [identity, witness] of overflow.failureWitnesses) {
+      const byScope = this.#byContextGraph.get(witness.contextGraphId);
+      const key = rfc64CatalogTargetScopeKeyV1(witness);
+      const current = byScope?.get(key);
+      if (current !== undefined) {
+        if (BigInt(current.announcement.catalogVersion) > BigInt(witness.catalogVersion)) {
+          overflow.failureWitnesses.delete(identity);
+          continue;
+        }
+        current.announcement = witness;
+        current.terminalFailure = true;
+        overflow.failureWitnesses.delete(identity);
+        continue;
+      }
+      if (
+        (byScope?.size ?? 0) >= RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1
+        || this.#size >= RFC64_CATALOG_TARGET_MAX_ENTRIES_V1
+      ) continue;
+      const targetByScope = byScope ?? new Map<string, Rfc64CatalogTrackedTargetV1>();
+      if (byScope === undefined) this.#byContextGraph.set(witness.contextGraphId, targetByScope);
+      targetByScope.set(key, { announcement: witness, terminalFailure: true });
+      this.#size += 1;
+      overflow.failureWitnesses.delete(identity);
+    }
+    if (
+      overflow.failureWitnesses.size === 0
+      && overflow.saturatedContextGraphs.size === 0
+      && !overflow.unattributedSaturation
+    ) {
+      if (contextGraphId === null && this.#globalOverflow === overflow) {
+        this.#globalOverflow = null;
+      } else if (
+        contextGraphId !== null
+        && this.#contextGraphOverflows.get(contextGraphId) === overflow
+      ) this.#contextGraphOverflows.delete(contextGraphId);
+    }
+  }
+}
+
+const rfc64CatalogTargetAnnouncementsV1 =
+  new WeakMap<DKGAgent, Rfc64CatalogTargetTrackerV1>();
 
 function rfc64CatalogReplayRuntimeForV1(agent: DKGAgent): Rfc64CatalogReplayRuntimeV1 {
   let runtime = rfc64CatalogReplayRuntimesV1.get(agent);
@@ -453,26 +829,55 @@ function rfc64CatalogTargetScopeKeyV1(input: Readonly<{
   ].join('\0');
 }
 
+function rfc64CatalogTargetExactIdentityV1(
+  left: Rfc64PublicCatalogHeadAnnouncementV1,
+  right: Rfc64PublicCatalogHeadAnnouncementV1,
+): boolean {
+  return rfc64CatalogTargetExactIdentityKeyV1(left)
+    === rfc64CatalogTargetExactIdentityKeyV1(right);
+}
+
+function rfc64CatalogTargetExactIdentityKeyV1(
+  target: Rfc64PublicCatalogHeadAnnouncementV1,
+): string {
+  return [
+    rfc64CatalogTargetScopeKeyV1(target),
+    target.catalogVersion,
+    target.policyDigest,
+    target.catalogHeadObjectDigest,
+    target.signatureVariantDigest,
+  ].join('\0');
+}
+
 function recordRfc64CatalogTargetAnnouncementV1(
   agent: DKGAgent,
   announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+): Rfc64CatalogTargetLeaseV1 {
+  let tracker = rfc64CatalogTargetAnnouncementsV1.get(agent);
+  if (tracker === undefined) {
+    tracker = new Rfc64CatalogTargetTrackerV1();
+    rfc64CatalogTargetAnnouncementsV1.set(agent, tracker);
+  }
+  return tracker.begin(announcement);
+}
+
+function rejectRfc64CatalogTargetAnnouncementV1(
+  agent: DKGAgent,
+  announcement: Rfc64PublicCatalogHeadAnnouncementV1,
 ): void {
-  let byContextGraph = rfc64CatalogTargetAnnouncementsV1.get(agent);
-  if (byContextGraph === undefined) {
-    byContextGraph = new Map();
-    rfc64CatalogTargetAnnouncementsV1.set(agent, byContextGraph);
+  let tracker = rfc64CatalogTargetAnnouncementsV1.get(agent);
+  if (tracker === undefined) {
+    tracker = new Rfc64CatalogTargetTrackerV1();
+    rfc64CatalogTargetAnnouncementsV1.set(agent, tracker);
   }
-  let byScope = byContextGraph.get(announcement.contextGraphId);
-  if (byScope === undefined) {
-    byScope = new Map();
-    byContextGraph.set(announcement.contextGraphId, byScope);
-  }
-  const key = rfc64CatalogTargetScopeKeyV1(announcement);
-  const previous = byScope.get(key);
-  if (
-    previous === undefined
-    || BigInt(announcement.catalogVersion) >= BigInt(previous.catalogVersion)
-  ) byScope.set(key, announcement);
+  tracker.reject(announcement);
+}
+
+function retireRfc64CatalogTargetAnnouncementV1(
+  agent: DKGAgent,
+  announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+): void {
+  rfc64CatalogTargetAnnouncementsV1.get(agent)?.retire(announcement);
 }
 
 function markRfc64DirectAcceptedCompatibilityV1(
@@ -485,6 +890,23 @@ function markRfc64DirectAcceptedCompatibilityV1(
     rfc64DirectAcceptedCompatibilityV1.set(agent, accepted);
   }
   accepted.add(contextGraphId);
+}
+
+function rfc64CatalogAuthorityGenerationChangedV1(
+  previous: Readonly<{
+    policyDigest: Digest32V1;
+    roster?: AcceptedRfc64CatalogAccessSnapshotV1['roster'];
+  }> | null,
+  accepted: Readonly<{
+    policyDigest: Digest32V1;
+    roster?: AcceptedRfc64CatalogAccessSnapshotV1['roster'];
+  }>,
+): boolean {
+  return previous !== null
+    && (
+      previous.policyDigest !== accepted.policyDigest
+      || previous.roster?.version !== accepted.roster?.version
+    );
 }
 
 function rfc64CatalogResponsibilityRegistryForV1(
@@ -572,6 +994,14 @@ function sumDecimalCountsV1(values: readonly string[]): string {
 }
 
 export class Rfc64CatalogMethods extends DKGAgentBase {
+  /** Forget process-local operational targets when receiver ownership ends. */
+  clearRfc64CatalogOperationalTargetsV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): void {
+    rfc64CatalogTargetAnnouncementsV1.get(this)?.clearContextGraph(contextGraphId);
+  }
+
   /** Desired RFC-64 selection derived from the normal live CG lifecycle. */
   readRfc64CatalogResponsibilitiesV1(
     this: DKGAgent,
@@ -637,10 +1067,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         : null;
       const progress = progressByContextGraph?.get(selection.contextGraphId);
       const heads = appliedByContextGraph.get(selection.contextGraphId) ?? [];
-      const targets = [...(
-        rfc64CatalogTargetAnnouncementsV1.get(this)?.get(selection.contextGraphId)?.values()
-        ?? []
-      )];
+      const targetTracker = rfc64CatalogTargetAnnouncementsV1.get(this);
+      const targets = targetTracker?.targetsForContextGraph(selection.contextGraphId) ?? [];
+      const targetCapacityExceeded = targetTracker
+        ?.capacityExceededForContextGraph(selection.contextGraphId) ?? false;
       const appliedByScope = new Map(heads.map((head) => [head.scopeKey, head]));
       const pendingTargets = targets.filter((target) => {
         const applied = appliedByScope.get(rfc64CatalogTargetScopeKeyV1(target));
@@ -719,12 +1149,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         selection.contextGraphId,
       );
       const targetFailure = pendingTargets.find((target) => (
-        this.rfc64PublicCatalogReconciliationFailuresV1.read(
-          target.catalogHeadObjectDigest,
-        ) !== null
+        targetTracker?.hasTerminalFailure(target) === true
       ));
       const stableReason = targetFailure !== undefined
         ? 'catalog-reconciliation-failed'
+        : targetCapacityExceeded
+          ? 'catalog-target-capacity-exceeded'
         : !selection.active
         ? selection.selectionSource === 'kill-switch' ? 'kill-switch-active' : null
         : selection.mode === 'legacy'
@@ -776,19 +1206,21 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         authorityEra: accepted?.policy.era ?? progress?.policyEra ?? null,
         authorityFreshness,
         catalogServiceStarted: service?.started ?? false,
-        expectedCatalogHeadDigest,
+        expectedCatalogHeadDigest: targetCapacityExceeded ? null : expectedCatalogHeadDigest,
         appliedCatalogHeadDigest: catalogHeadDigest,
-        expectedInventoryDigest: pendingTargets.length > 0 ? null : inventoryDigest,
+        expectedInventoryDigest:
+          targetCapacityExceeded || pendingTargets.length > 0 ? null : inventoryDigest,
         appliedInventoryDigest: inventoryDigest,
-        expectedRowCount: pendingTargets.length > 0 ? null : rowCount,
+        expectedRowCount: targetCapacityExceeded || pendingTargets.length > 0 ? null : rowCount,
         appliedRowCount: rowCount,
-        missingRowCount: pendingTargets.length > 0 || rowCount === null ? null : '0',
+        missingRowCount:
+          targetCapacityExceeded || pendingTargets.length > 0 || rowCount === null ? null : '0',
         legacyReadOnlyCount,
         catalogVersion,
         authorHeadCount: heads.length,
         lastSuccessfulAdvanceAt,
         providerHealth: Object.freeze({
-          candidateCount: null,
+          candidateCount: targetCapacityExceeded ? null : targets.length,
           attempts: receiverStats?.providerAttempts ?? 0,
           switches: receiverStats?.providerSwitches ?? 0,
           successes: receiverStats?.providerSuccesses ?? 0,
@@ -1264,11 +1696,19 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           rosterVersion,
         });
       }
-      service.acceptAuthoritativePolicySnapshot({
+      const previousAuthority = service.acceptedPolicySnapshot(
+        authority.policy.networkId,
+        authority.policy.contextGraphId,
+      );
+      const acceptedAuthority = service.acceptAuthoritativePolicySnapshot({
         policy: authority.policy,
         policyDigest: authority.policyDigest,
         roster: authority.roster,
       });
+      if (rfc64CatalogAuthorityGenerationChangedV1(previousAuthority, acceptedAuthority)) {
+        service.deactivateReceiverContextGraph(contextGraphId);
+        this.clearRfc64CatalogOperationalTargetsV1(contextGraphId);
+      }
       setRfc64CatalogAuthorityProgressV1(this, contextGraphId, {
         state: 'accepted',
         source: authority.source,
@@ -1459,7 +1899,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const reconciliationAttempts = new Map<number, Readonly<{
       announcement: Rfc64PublicCatalogHeadAnnouncementV1;
       succeeded: { value: boolean };
+      terminalOutcome: { value: Rfc64PublicCatalogReceiverCompletionOutcomeV1 | null };
     }>>();
+    const verifiedTargetLeases = new Map<number, Rfc64CatalogTargetLeaseV1>();
     const service = new Rfc64PublicCatalogServiceV1({
       router: this.router,
       controlObjects: persistence.controlObjects,
@@ -1490,25 +1932,69 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         },
       },
       receiver: {
-        onAttemptStart: (announcement) => {
-          recordRfc64CatalogTargetAnnouncementV1(this, announcement);
-        },
         onReconciliationAttemptStart: (announcement) => {
           const token = ++nextReconciliationAttemptToken;
           reconciliationAttempts.set(token, Object.freeze({
             announcement,
             succeeded: { value: false },
+            terminalOutcome: { value: null },
           }));
           return token;
         },
-        onReconciliationAttemptSuccess: (_announcement, token) => {
+        onReconciliationAttemptSuccess: (announcement, token) => {
+          // A retained failed/not-found verified target may later converge
+          // through the ambient lane. Exact retirement must not depend on the
+          // optional attempt-observer bookkeeping still being present.
+          retireRfc64CatalogTargetAnnouncementV1(this, announcement);
           const attempt = reconciliationAttempts.get(token);
-          if (attempt !== undefined) attempt.succeeded.value = true;
+          if (attempt === undefined) return;
+          attempt.succeeded.value = true;
+        },
+        onVerifiedCurrentHeadTargetAccepted: (announcement, targetToken) => {
+          verifiedTargetLeases.set(
+            targetToken,
+            recordRfc64CatalogTargetAnnouncementV1(this, announcement),
+          );
+        },
+        onVerifiedCurrentHeadTargetRejected: (announcement) => {
+          rejectRfc64CatalogTargetAnnouncementV1(this, announcement);
+          this.rfc64PublicCatalogReconciliationFailuresV1.record(
+            announcement.catalogHeadObjectDigest,
+            Object.assign(
+              new Error('RFC-64 verified current-head admission queue is full'),
+              {
+                name: 'Rfc64VerifiedCurrentHeadAdmissionErrorV1',
+                code: 'catalog-receiver-queue-full',
+              },
+            ),
+          );
+        },
+        onVerifiedCurrentHeadTargetSettled: (
+          announcement,
+          targetToken,
+          token,
+          outcome,
+        ) => {
+          if (token !== null) {
+            const attempt = reconciliationAttempts.get(token);
+            if (attempt !== undefined) attempt.terminalOutcome.value = outcome;
+          }
+          const lease = verifiedTargetLeases.get(targetToken);
+          verifiedTargetLeases.delete(targetToken);
+          if (lease !== undefined) {
+            rfc64CatalogTargetAnnouncementsV1.get(this)?.settle(lease, outcome);
+          }
         },
         onReconciliationAttemptEnd: (_announcement, token) => {
           const attempt = reconciliationAttempts.get(token);
           reconciliationAttempts.delete(token);
           if (attempt === undefined || attempt.succeeded.value) return;
+          if (
+            attempt.terminalOutcome.value === 'failed'
+            || attempt.terminalOutcome.value === 'closed'
+            || attempt.terminalOutcome.value === 'staged-only'
+            || attempt.terminalOutcome.value === 'dropped'
+          ) return;
           // A not-found terminal result has no thrown error callback, but it
           // is still a failed expected-head advance for operational status.
           this.rfc64PublicCatalogReconciliationFailuresV1.record(
@@ -1651,6 +2137,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         this.rfc64PublicCatalogReconciliationFailuresV1.clear();
         rfc64DirectAcceptedCompatibilityV1.delete(this);
         rfc64CatalogReplayRuntimesV1.delete(this);
+        rfc64CatalogTargetAnnouncementsV1.get(this)?.resetAll();
         rfc64CatalogTargetAnnouncementsV1.delete(this);
       }
     }
@@ -1665,7 +2152,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     input: AcceptOpenContextGraphPolicyInputV1,
   ): AcceptedOpenCatalogPolicyV1 {
-    const accepted = this.requireRfc64PublicCatalogServiceV1().acceptOpenPolicy(input);
+    const service = this.requireRfc64PublicCatalogServiceV1();
+    const previousAuthority = service.acceptedPolicySnapshot(
+      input.networkId,
+      input.contextGraphId,
+    );
+    const accepted = service.acceptOpenPolicy(input);
+    if (rfc64CatalogAuthorityGenerationChangedV1(previousAuthority, accepted)) {
+      service.deactivateReceiverContextGraph(input.contextGraphId);
+      this.clearRfc64CatalogOperationalTargetsV1(input.contextGraphId);
+    }
     markRfc64DirectAcceptedCompatibilityV1(this, input.contextGraphId);
     return accepted;
   }
@@ -1679,7 +2175,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     input: AcceptRfc64CatalogAccessSnapshotParamsV1,
   ): AcceptedRfc64CatalogAccessSnapshotV1 {
-    const accepted = this.requireRfc64PublicCatalogServiceV1().acceptPolicySnapshot(input);
+    const service = this.requireRfc64PublicCatalogServiceV1();
+    const previousAuthority = service.acceptedPolicySnapshot(
+      input.policy.networkId,
+      input.policy.contextGraphId,
+    );
+    const accepted = service.acceptPolicySnapshot(input);
+    if (rfc64CatalogAuthorityGenerationChangedV1(previousAuthority, accepted)) {
+      service.deactivateReceiverContextGraph(input.policy.contextGraphId);
+      this.clearRfc64CatalogOperationalTargetsV1(input.policy.contextGraphId);
+    }
     markRfc64DirectAcceptedCompatibilityV1(this, input.policy.contextGraphId);
     return accepted;
   }
