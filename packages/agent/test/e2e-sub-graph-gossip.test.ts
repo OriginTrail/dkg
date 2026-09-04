@@ -16,10 +16,14 @@ import {
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
-import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { contextGraphDataUri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+  encodeRootlessWorkspaceRequest,
+  rootlessSharedMemoryGraphFromWire,
+} from '../../publisher/test/_helpers/rootless-workspace.js';
 
 type DKGAgent = RealDKGAgent;
 const DKGAgent = {
@@ -294,6 +298,46 @@ describe('RFC-64 omitted-config named-subgraph compatibility', () => {
       .toMatchObject({ legacySyncAllowed: false, mode: 'catalog' });
     expect(nodeB.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId))
       .toMatchObject({ legacySyncAllowed: false, mode: 'catalog' });
+
+    // Omitted persistent configuration naturally selects RFC-64 catalog
+    // authority for the root scope. Deliver a well-formed root-scoped request
+    // through the shared legacy wire handler itself (rather than overriding the
+    // execution plan) and pin the non-overlap boundary before exercising the
+    // named-subgraph compatibility lane below.
+    const rootSubject = 'urn:rfc64:root:legacy-wire-negative';
+    const rootPayload = encodeRootlessWorkspaceRequest({
+      contextGraphId,
+      nquads: new TextEncoder().encode(
+        `<${rootSubject}> <http://schema.org/name> "must-not-apply" `
+          + `<${contextGraphDataUri(contextGraphId)}> .`,
+      ),
+      publisherPeerId: nodeA.peerId,
+      shareOperationId: 'rfc64-default-root-legacy-wire-negative',
+      timestampMs: Date.now(),
+    });
+    const rootSwmGraph = rootlessSharedMemoryGraphFromWire(rootPayload);
+    const rootWire = await (nodeA as unknown as {
+      encodeWorkspaceGossipMessage(
+        contextGraph: string,
+        payload: Uint8Array,
+      ): Promise<Uint8Array>;
+    }).encodeWorkspaceGossipMessage(contextGraphId, rootPayload);
+    const rootOutcome = await (nodeB as unknown as {
+      getOrCreateSharedMemoryHandler(): {
+        handle(data: Uint8Array, fromPeerId: string): Promise<{
+          applied: boolean;
+          retryable?: boolean;
+          reason?: string;
+        }>;
+      };
+    }).getOrCreateSharedMemoryHandler().handle(rootWire, nodeA.peerId);
+    expect(rootOutcome).toMatchObject({
+      applied: false,
+      retryable: false,
+      reason: expect.stringContaining('not authoritative'),
+    });
+    await expect(nodeB.store.hasGraph(rootSwmGraph)).resolves.toBe(false);
+
     await nodeA.createSubGraph(contextGraphId, subGraphName, { description: 'Compatibility lane' });
     await sleep(1_500);
 
@@ -349,6 +393,7 @@ describe('RFC-64 omitted-config named-subgraph compatibility', () => {
     expect(recovered).toContainEqual(expect.objectContaining({ name: '"recovered"' }));
     const persisted = await read('urn:rfc64:subgraph:live');
     expect(persisted.bindings).toContainEqual(expect.objectContaining({ name: '"live"' }));
+    await expect(nodeB.store.hasGraph(rootSwmGraph)).resolves.toBe(false);
   }, 90_000);
 });
 

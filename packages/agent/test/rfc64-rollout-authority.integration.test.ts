@@ -14,6 +14,7 @@ import {
   projectCanonicalGraphScopedAuthorSealRowsV1,
   SYSTEM_CONTEXT_GRAPHS,
   type AssertionSeal,
+  type AuthorCatalogScopeV1,
   type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
   type ContextGraphIdV1,
@@ -38,6 +39,14 @@ import type { Rfc64PublicCatalogActivationInputV1 } from
   '../src/rfc64/public-catalog-activation-config-v1.js';
 import { deriveRfc64PublicSwmGraphV1 } from
   '../src/rfc64/catalog-semantic-authority-transition-v1.js';
+import { computeRfc64AppliedInventoryDigestV1 } from
+  '../src/rfc64/public-catalog-inventory-completeness-v1.js';
+import {
+  RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
+  parseRfc64PublicCatalogHeadAnnouncementV1,
+} from '../src/rfc64/public-catalog-transport-v1.js';
+import { composeRfc64UnregisteredCatalogAuthorityV1 } from
+  '../src/rfc64/release-native-catalog-authority-v1.js';
 import {
   commitPreparedRfc64AppliedCatalogAuthorityDeactivationsV1,
   prepareRfc64AppliedCatalogAuthorityDeactivationV1,
@@ -46,6 +55,7 @@ import {
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
 const MEMBER = '0x2222222222222222222222222222222222222222' as EvmAddressV1;
+const NONMEMBER = '0x3333333333333333333333333333333333333333' as EvmAddressV1;
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
 const CONTEXT_GRAPH_ID = (
   '0x1111111111111111111111111111111111111111/rollout-authority'
@@ -112,6 +122,132 @@ describe('RFC-64 rollout authority integration', () => {
     await expect(Promise.all(attempts)).resolves.toEqual(
       Array.from({ length: 32 }, () => ({ announced: 1, failed: 0 })),
     );
+  });
+
+  it('connection replay sends public and authorized private heads without disclosing private metadata to a nonmember', async () => {
+    const privateContextGraphId = `${AUTHOR}/private-connection-replay` as ContextGraphIdV1;
+    const memberPeerId = '12D3KooWConnectionReplayMember';
+    const nonmemberPeerId = '12D3KooWConnectionReplayNonmember';
+    const remoteAgents = new Map<string, EvmAddressV1>([
+      [memberPeerId, MEMBER],
+      [nonmemberPeerId, NONMEMBER],
+    ]);
+    const author = await startAgent(
+      'connection-replay-access-boundary',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        rfc64CatalogDeploymentProfile: DEPLOYMENT,
+        rfc64CatalogAccessPolicyAuthority: {
+          localAgentAddress: AUTHOR,
+          resolveRemoteAgentAddress: async (peerId) => remoteAgents.get(peerId) ?? null,
+        },
+      },
+    );
+    const signer = Object.freeze({
+      address: AUTHOR,
+      signMessage: (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest),
+    });
+    const issuedAt = '1773900000000' as TimestampMsV1;
+    const delegationEffectiveAt = '1773899999000' as TimestampMsV1;
+    const delegationExpiresAt = '1893456000000' as TimestampMsV1;
+
+    const publicGenesis = await author.publishOpenAuthorCatalogGenesisV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      author: signer,
+      peers: [],
+      issuedAt,
+      catalogIssuerDelegationEffectiveAt: delegationEffectiveAt,
+      catalogIssuerDelegationExpiresAt: delegationExpiresAt,
+    });
+    const privateAuthority = composeRfc64UnregisteredCatalogAuthorityV1({
+      networkId: NETWORK_ID,
+      contextGraphId: privateContextGraphId,
+      ownerAddress: AUTHOR,
+      accessPolicy: 1,
+      publishPolicy: 0,
+      publishAuthorityAccountId: '0',
+      memberAddresses: [AUTHOR, MEMBER],
+      rosterVersion: '0',
+    });
+    author.acceptRfc64CatalogAccessSnapshotV1({
+      policy: privateAuthority.policy,
+      policyDigest: privateAuthority.policyDigest,
+      roster: privateAuthority.roster,
+    });
+    const privateScope = Object.freeze({
+      networkId: NETWORK_ID,
+      contextGraphId: privateContextGraphId,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+      bucketCount: '1',
+    }) as AuthorCatalogScopeV1;
+    const privateGenesis = await author.publishAuthorCatalogGenesisV1({
+      scope: privateScope,
+      author: signer,
+      peers: [],
+      issuedAt,
+      catalogIssuerDelegationEffectiveAt: delegationEffectiveAt,
+      catalogIssuerDelegationExpiresAt: delegationExpiresAt,
+    });
+
+    const persistence = (author as any).rfc64PersistenceV1;
+    expect(persistence).toBeDefined();
+    for (const [scope, publication] of [
+      [{
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        governanceChainId: null,
+        governanceContractAddress: null,
+        ownershipTransitionDigest: null,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        era: '0',
+        bucketCount: '1',
+      } as AuthorCatalogScopeV1, publicGenesis],
+      [privateScope, privateGenesis],
+    ] as const) {
+      const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(scope);
+      persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+        catalogScopeDigest,
+        authorAddress: AUTHOR,
+        expectedCurrentCatalogHeadDigest: null,
+        currentCatalogHeadDigest: publication.headObjectDigest,
+        appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({
+          catalogScopeDigest,
+          rows: [],
+        }),
+        catalogVersion: publication.announcement.catalogVersion,
+        inventoryRowCount: '0',
+      });
+    }
+
+    const send = vi.spyOn((author as any).router, 'send')
+      .mockResolvedValue(Uint8Array.of(1));
+    const announcementContextGraphs = () => send.mock.calls
+      .filter(([, protocolId]) => (
+        protocolId === RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1
+      ))
+      .map(([, , data]) => (
+        parseRfc64PublicCatalogHeadAnnouncementV1(data).contextGraphId
+      ));
+
+    await expect(author.reannounceRfc64CatalogHeadsToPeerV1(nonmemberPeerId))
+      .resolves.toEqual({ announced: 1, failed: 1 });
+    expect(announcementContextGraphs()).toEqual([CONTEXT_GRAPH_ID]);
+
+    send.mockClear();
+    await expect(author.reannounceRfc64CatalogHeadsToPeerV1(memberPeerId))
+      .resolves.toEqual({ announced: 2, failed: 0 });
+    expect(announcementContextGraphs().sort())
+      .toEqual([CONTEXT_GRAPH_ID, privateContextGraphId].sort());
   });
 
   it('keeps system control graphs on durable sync under default catalog responsibility', async () => {
