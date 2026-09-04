@@ -16,6 +16,7 @@ import {
   prepareGraphScope,
   rewriteGraphSet,
   wrapWithGraph,
+  wrapWithDeduplicatedGraphValues,
   wrapWithGraphValues,
 } from '../src/sparql-graph-scope.js';
 
@@ -87,6 +88,27 @@ describe('prepared SPARQL graph scope', () => {
       'values-union',
     );
     expect(collisionFallback.kind).toBe('ready');
+
+    const compactCollisionScope = graphScope(
+      'SELECT ?n WHERE { ?s <urn:p> ?n . FILTER(?n<100&&?__dkgDedupRank>0) }',
+    );
+    expect(wrapWithDeduplicatedGraphValues(
+      compactCollisionScope,
+      ['urn:g1', 'urn:g2'],
+    )).toMatchObject({ kind: 'unsupported', reason: 'helper-variable-collision' });
+    const compactCollisionFallback = rewriteGraphSet(
+      compactCollisionScope,
+      ['urn:g1', 'urn:g2'],
+      'deduplicated-values-union',
+    );
+    expect(compactCollisionFallback.kind).toBe('ready');
+    if (compactCollisionFallback.kind !== 'ready') {
+      throw new Error('expected compact helper collision to use a safe fallback');
+    }
+    expect(compactCollisionFallback.value.source)
+      .toContain('FILTER(?n<100&&?__dkgDedupRank>0)');
+    expect(compactCollisionFallback.value.source)
+      .not.toContain('VALUES (?__dkgDedupGraph ?__dkgDedupRank)');
 
     const graphlessDescribe = rewriteGraphSet(
       graphScope('DESCRIBE <urn:s> LIMIT 10'),
@@ -265,6 +287,37 @@ describe('graph-scope engine integration', () => {
     expect(escaped.bindings.map((binding) => binding['s']).sort())
       .toEqual(equivalent.bindings.map((binding) => binding['s']).sort());
     expect(escaped.bindings.every((binding) => Object.keys(binding).join() === 's')).toBe(true);
+    expect(queries.some((query) => query.includes('VALUES (?__dkgDedupGraph'))).toBe(false);
+  });
+
+  it('does not alias a compact-comparison caller variable to the dedup helper', async () => {
+    const store = new OxigraphStore();
+    const originalQuery = store.query.bind(store);
+    const queries: string[] = [];
+    store.query = async (...args) => {
+      queries.push(args[0]);
+      return originalQuery(...args);
+    };
+    const engine = new DKGQueryEngine(store);
+    const integer = 'http://www.w3.org/2001/XMLSchema#integer';
+    await store.insert([
+      quad('urn:root', 'urn:p', `"50"^^<${integer}>`, contextGraphDataUri(CG)),
+      quad(
+        'urn:verified',
+        'urn:p',
+        `"50"^^<${integer}>`,
+        contextGraphVerifiableMemoryUri(CG, 'compact-variable-collision'),
+      ),
+    ]);
+
+    const result = await engine.query(
+      'SELECT ?s WHERE { ?s <urn:p> ?n . FILTER(?n<100&&?__dkgDedupRank>0) }',
+      { contextGraphId: CG, view: 'verifiable-memory' },
+    );
+
+    expect(result.bindings).toEqual([]);
+    expect(queries.some((query) => query.includes('FILTER(?n<100&&?__dkgDedupRank>0)')))
+      .toBe(true);
     expect(queries.some((query) => query.includes('VALUES (?__dkgDedupGraph'))).toBe(false);
   });
 

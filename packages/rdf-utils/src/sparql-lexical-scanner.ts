@@ -279,6 +279,56 @@ function lexicalToken(
     : { kind, ...common };
 }
 
+function tokenCanEndExpression(token: SparqlLexicalToken | undefined): boolean {
+  if (!token) return false;
+  if (
+    token.kind === 'variable'
+    || token.kind === 'prefixed-name'
+    || token.kind === 'number'
+    || token.kind === 'iri'
+    || token.kind === 'string'
+  ) return true;
+  if (token.kind === 'word') return token.upper === 'TRUE' || token.upper === 'FALSE';
+  return token.logicalValue === ')';
+}
+
+/**
+ * Return the nearest still-open expression/group delimiter. A less-than sign
+ * following an expression operand inside parentheses is an operator, even if
+ * a later greater-than sign would otherwise make the whole span resemble an
+ * IRIREF. An intervening graph group wins, preserving compact triples such as
+ * `EXISTS { ?s<1#item>?o }`.
+ */
+function nearestOpenExpressionGroup(
+  tokens: readonly SparqlLexicalToken[],
+): '(' | '{' | undefined {
+  let closedParentheses = 0;
+  let closedBraces = 0;
+  for (let index = tokens.length - 1; index >= 0; index--) {
+    const token = tokens[index];
+    if (token?.kind !== 'symbol') continue;
+    if (token.logicalValue === ')') {
+      closedParentheses++;
+    } else if (token.logicalValue === '(') {
+      if (closedParentheses > 0) closedParentheses--;
+      else return '(';
+    } else if (token.logicalValue === '}') {
+      closedBraces++;
+    } else if (token.logicalValue === '{') {
+      if (closedBraces > 0) closedBraces--;
+      else return '{';
+    }
+  }
+  return undefined;
+}
+
+function lessThanStartsIriRef(tokens: readonly SparqlLexicalToken[]): boolean {
+  return !(
+    nearestOpenExpressionGroup(tokens) === '('
+    && tokenCanEndExpression(tokens[tokens.length - 1])
+  );
+}
+
 function scanPrologue(tokens: readonly SparqlLexicalToken[]): PreparedSparql['prologue'] {
   const declaredPrefixes: string[] = [];
   let cursor = 0;
@@ -364,7 +414,7 @@ function scanSparql(value: string): ScannedSparql | null {
       continue;
     }
 
-    if (logical.codePoint === 0x3c) {
+    if (logical.codePoint === 0x3c && lessThanStartsIriRef(tokens)) {
       const iriEnd = skipSparqlIriRef(value, index);
       if (iriEnd !== null) {
         const start = index;

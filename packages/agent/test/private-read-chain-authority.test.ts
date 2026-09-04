@@ -142,6 +142,31 @@ describe('private read authorization uses the on-chain participant roster', () =
     expect(localPolicy).not.toHaveBeenCalled();
   });
 
+  it('does not expose a numeric local graph through an unrelated public chain slot', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'NumericLocalGraphChainSlotCollision',
+      chainAdapter: chain,
+    });
+    vi.spyOn(agent, 'resolveRfc64PrivateReadRosterV1').mockReturnValue(undefined);
+    vi.spyOn(agent, 'contextGraphExists').mockResolvedValue(true);
+    vi.spyOn(chain, 'resolveContextGraphIdByNameHash').mockResolvedValue(null);
+    vi.spyOn(agent, 'isPrivateContextGraph').mockResolvedValue(true);
+    vi.spyOn(agent, 'getContextGraphAllowedPeers').mockResolvedValue(null);
+    vi.spyOn(agent, 'getContextGraphAgentGateAddresses').mockResolvedValue([MEMBER]);
+    const chainPolicy = vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(0);
+
+    await expect(agent.resolveContextGraphReadAuthority('42', {
+      callerAgentAddress: NON_MEMBER,
+      allowSubscriptionFallback: false,
+    })).resolves.toMatchObject({
+      outcome: 'denied',
+      source: 'legacy-local',
+      reason: 'local-agent-not-allowed',
+    });
+    expect(chainPolicy).not.toHaveBeenCalled();
+  });
+
   it('does not make a chain-proven public graph depend on legacy peer metadata', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({

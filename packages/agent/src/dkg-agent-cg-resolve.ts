@@ -711,6 +711,7 @@ export type RegisteredContextGraphAuthority =
       reason:
         | 'chain-name-binding-unavailable'
         | 'local-chain-binding-unavailable'
+        | 'local-existence-unavailable'
         | 'chain-access-policy-unavailable'
         | 'chain-access-policy-unknown'
         | 'chain-participant-authority-unsupported'

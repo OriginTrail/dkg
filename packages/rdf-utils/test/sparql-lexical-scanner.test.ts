@@ -54,6 +54,21 @@ describe('canonical SPARQL lexical scanner', () => {
     expect(source.slice(relativeIri!.start, relativeIri!.end)).toBe('<1#item>');
   });
 
+  it('does not hide compact comparison variables inside a false IRIREF', () => {
+    const prepared = validPrepared(
+      'SELECT ?n WHERE { ?s <urn:p> ?n . FILTER(?n<100&&?__dkgDedupRank>0) }',
+    );
+
+    expect(prepared.tokens.filter((token) => token.kind === 'variable'))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ logicalValue: '?n' }),
+        expect.objectContaining({ logicalValue: '?__dkgDedupRank' }),
+      ]));
+    expect(prepared.tokens.some((token) => (
+      token.kind === 'iri' && token.logicalValue.includes('__dkgDedupRank')
+    ))).toBe(false);
+  });
+
   it('preprocesses UCHAR escapes while preserving raw token offsets', () => {
     const source = String.raw`PREFIX \u0065x\u003A <http://example.com/> \u0053ELECT \u003Fs WHERE { \u003Fs \u0065x\u003Aname ?n }`;
     const scan = prepareSparql(source);

@@ -168,8 +168,43 @@ describe('cold current-state Context Graph name binding', () => {
         onChainId: 42n,
         provenance: 'numeric-id',
       });
+    expect(fixture.agent.contextGraphExists).toHaveBeenCalledWith(
+      '42',
+      { signal: expect.any(AbortSignal) },
+    );
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
     expect(fixture.query).not.toHaveBeenCalled();
+  });
+
+  it('does not confuse a numeric local graph name with an unrelated chain slot', async () => {
+    const fixture = selectedFixture();
+    fixture.agent.subscribedContextGraphs.clear();
+    fixture.agent.wireIdToLocalCgId.clear();
+    vi.mocked(fixture.agent.contextGraphExists).mockResolvedValue(true);
+    fixture.resolveContextGraphIdByNameHash.mockResolvedValue(null);
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding('42'))
+      .resolves.toEqual({ kind: 'unregistered' });
+    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledWith(
+      fixture.agent.contextGraphNameCommitment('42'),
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
+  it('fails closed when numeric local-graph existence cannot be established', async () => {
+    const fixture = selectedFixture();
+    fixture.agent.subscribedContextGraphs.clear();
+    fixture.agent.wireIdToLocalCgId.clear();
+    vi.mocked(fixture.agent.contextGraphExists)
+      .mockRejectedValue(new Error('local store unavailable'));
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding('42'))
+      .resolves.toEqual({
+        kind: 'unavailable',
+        reason: 'local-existence-unavailable',
+        detail: 'local store unavailable',
+      });
+    expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
   });
 
   it('discovers an unselected cleartext graph by immutable name commitment', async () => {

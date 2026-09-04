@@ -393,7 +393,10 @@ export type ContextGraphRegistrationBinding =
     }
   | {
       kind: 'unavailable';
-      reason: 'local-chain-binding-unavailable' | 'chain-name-binding-unavailable';
+      reason:
+        | 'local-chain-binding-unavailable'
+        | 'local-existence-unavailable'
+        | 'chain-name-binding-unavailable';
       detail?: string;
     };
 
@@ -654,14 +657,30 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       }
     }
 
-    if (!/^0x[0-9a-fA-F]{64}$/.test(contextGraphId)) {
+    if (isCanonicalPositiveContextGraphId(contextGraphId)) {
+      let localGraphExists: boolean;
       try {
-        const numericId = BigInt(contextGraphId);
-        if (numericId > 0n) {
-          return { kind: 'registered', onChainId: numericId, provenance: 'numeric-id' };
-        }
-      } catch {
-        // Non-numeric cleartext continues to immutable name-hash discovery.
+        localGraphExists = await runBoundedOperation(
+          (signal) => this.contextGraphExists(contextGraphId, { signal }),
+          {
+            label: `contextGraphExists(${contextGraphId})`,
+            timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+            signal: options.signal,
+          },
+        );
+      } catch (err) {
+        return {
+          kind: 'unavailable',
+          reason: 'local-existence-unavailable',
+          detail: err instanceof Error ? err.message : String(err),
+        };
+      }
+      if (!localGraphExists) {
+        return {
+          kind: 'registered',
+          onChainId: BigInt(contextGraphId),
+          provenance: 'numeric-id',
+        };
       }
     }
 
