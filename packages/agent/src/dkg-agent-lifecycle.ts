@@ -9478,8 +9478,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hostedActivated: nextHostedActivatedIds.length,
       hostedActivatedIds: nextHostedActivatedIds,
       activated,
-      dormant: dormancyById.size,
-      ...projectContextGraphDormancy(dormancyById),
       updatedAt: Date.now(),
     };
   }
@@ -9530,8 +9528,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hostedActivated: hostedActivatedIds.length,
       hostedActivatedIds,
       activated,
-      dormant: dormancyById.size,
-      ...projectContextGraphDormancy(dormancyById),
       updatedAt: Date.now(),
     };
     for (const id of clearedSet) {
@@ -10038,10 +10034,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const dormancyById = this.contextGraphSubscriptionDormancyById;
         dormancyById.clear();
         for (const row of rows) dormancyById.set(row.id, 'rehydrationDisabled');
-        const dormancy = projectContextGraphDormancy(dormancyById);
         this.contextGraphSubscriptionRehydrationAccountedIds.clear();
-        for (const id of dormancy.dormantIds) {
-          this.contextGraphSubscriptionRehydrationAccountedIds.add(id);
+        for (const row of rows) {
+          this.contextGraphSubscriptionRehydrationAccountedIds.add(row.id);
         }
         const completedAt = Date.now();
         this.contextGraphSubscriptionRehydrationStatus = {
@@ -10051,10 +10046,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           hostedActivated: 0,
           hostedActivatedIds: [],
           activated: 0,
-          dormant: dormancy.dormantIds.length,
           activationCap: cap,
           capDisabled: cap === 0,
-          ...dormancy,
           completedAt,
           updatedAt: completedAt,
         };
@@ -10287,8 +10280,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           await new Promise<void>((resolve) => setTimeout(resolve, 0));
         }
       }
-      const dormancy = projectContextGraphDormancy(dormancyById);
-      const skipped = dormancy.dormantIds.length;
+      const skipped = dormancyById.size;
       this.contextGraphSubscriptionRehydrationAccountedIds.clear();
       for (const row of rows) {
         this.contextGraphSubscriptionRehydrationAccountedIds.add(row.id);
@@ -10301,13 +10293,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         hostedActivated: activatedRows.filter((r) => r.coreHosted).length,
         hostedActivatedIds: activatedRows.filter((r) => r.coreHosted).map((r) => r.id),
         activated: activatedRows.length,
-        dormant: skipped,
         activationCap: cap,
         capDisabled: cap === 0,
-        ...dormancy,
         completedAt,
         updatedAt: completedAt,
       };
+      const dormancy = projectContextGraphDormancy(dormancyById);
       if (rows.length > 0) {
         this.log.info(
           ctx,

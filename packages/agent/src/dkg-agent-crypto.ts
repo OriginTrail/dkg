@@ -1296,10 +1296,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   /**
    * Resolve encryption recipients from live registered-chain authority. The
    * local store remains the source of authenticated encryption keys and peer
-   * routing, but only the chain roster selects which agents are resolved.
-   * Every chain-authorized agent must have local authenticated key metadata
-   * before publishing can proceed, otherwise the write would be unreadable by
-   * an authorized member.
+   * routing, but only the chain roster selects which agents are resolved. When
+   * the graph also has a peer allowlist, recipient routing must satisfy that
+   * second, conjunctive authority gate. Every chain-authorized agent must have
+   * at least one usable recipient key on an allowed peer before publishing can
+   * proceed, otherwise either an unauthorized peer receives the sender key or
+   * an authorized member cannot read the resulting write.
    */
   async resolveWorkspaceAgentRecipientsForCurrentAuthority(this: DKGAgent,
     input: WorkspaceAgentRecipientResolverInput,
@@ -1322,6 +1324,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       );
     }
 
+    const allowedPeers = await this.getContextGraphAllowedPeers(input.contextGraphId);
+    const allowedPeerSet = allowedPeers === null ? null : new Set(allowedPeers);
+
     // Resolve only the live chain-authorized addresses. Filtering a completed
     // local resolution afterward is too late: stale removed members can have
     // malformed/missing key metadata that makes the local resolver throw
@@ -1329,7 +1334,20 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // write until the local cleanup retry succeeds.
     const recipients: WorkspaceAgentRecipient[] = [];
     for (const agentAddress of registeredAuthority.participantAgents) {
-      recipients.push(...await resolveWorkspaceAgentRecipientKeys(this.store, agentAddress));
+      const agentRecipients = await resolveWorkspaceAgentRecipientKeys(this.store, agentAddress);
+      const authorizedRecipients = allowedPeerSet === null
+        ? agentRecipients
+        : agentRecipients.filter((recipient) => (
+          recipient.peerId !== undefined && allowedPeerSet.has(recipient.peerId)
+        ));
+      if (authorizedRecipients.length === 0) {
+        throw new Error(
+          `Registered context graph "${input.contextGraphId}" requires encrypted SWM gossip but `
+          + `chain-authorized DKG agent ${ethers.getAddress(agentAddress)} has no recipient key `
+          + 'advertised by a peer in the context graph allowlist',
+        );
+      }
+      recipients.push(...authorizedRecipients);
     }
     const [firstRecipient, ...remainingRecipients] = recipients;
     if (!firstRecipient) {
@@ -2267,6 +2285,19 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       throw new SwmSenderKeySetupRejectionError(
         'recipient-not-allowed',
         `Recipient agent ${recipientAgentAddress} is not allowed for context graph "${pkg.contextGraphId}"`,
+      );
+    }
+    const allowedPeers = await this.getContextGraphAllowedPeers(pkg.contextGraphId);
+    if (allowedPeers !== null && !allowedPeers.includes(fromPeerId)) {
+      throw new SwmSenderKeySetupRejectionError(
+        'sender-not-allowed',
+        `Sender peer ${fromPeerId} is not allowed for context graph "${pkg.contextGraphId}"`,
+      );
+    }
+    if (allowedPeers !== null && !allowedPeers.includes(this.peerId)) {
+      throw new SwmSenderKeySetupRejectionError(
+        'recipient-not-allowed',
+        `Recipient peer ${this.peerId} is not allowed for context graph "${pkg.contextGraphId}"`,
       );
     }
     if (!this.hasLocalAgent(recipientAgentAddress)) {

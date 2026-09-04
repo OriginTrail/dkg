@@ -391,13 +391,68 @@ describe('private read authorization uses the on-chain participant roster', () =
     vi.spyOn(chain, 'getContextGraphParticipantAgents')
       .mockReturnValue(new Promise<string[]>(() => undefined));
     const controller = new AbortController();
+    vi.useFakeTimers();
+    const startedAt = Date.now();
 
+    let settled = false;
     const gate = agent.getContextGraphAgentGateAddresses('aborted-private', {
       signal: controller.signal,
-    });
-    controller.abort(new Error('caller stopped'));
+    }).finally(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(false);
 
+    controller.abort(new Error('caller stopped'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(settled).toBe(true);
+    expect(Date.now()).toBe(startedAt);
     await expect(gate).resolves.toEqual([]);
+  });
+
+  it('requires every chain sender-key recipient to advertise an allowed peer when a peer gate exists', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'PrivateReadSenderKeyPeerGate',
+      chainAdapter: chain,
+    });
+    const member = await agent.registerAgent('Sender-key peer-gated member');
+    const advertisedPeer = '12D3KooWSenderKeyAuthorizedPeer';
+    await agent.store.insert([{
+      subject: `did:dkg:agent:${member.agentAddress}`,
+      predicate: 'https://dkg.network/ontology#peerId',
+      object: `"${advertisedPeer}"`,
+      graph: 'did:dkg:system/agents',
+    }]);
+    vi.spyOn(agent, 'resolveRegisteredContextGraphAuthority').mockResolvedValue({
+      kind: 'private',
+      onChainId: 7n,
+      participantAgents: [member.agentAddress],
+    });
+    const allowedPeers = vi.spyOn(agent, 'getContextGraphAllowedPeers')
+      .mockResolvedValue(null);
+
+    await expect(agent.resolveWorkspaceAgentRecipientsForCurrentAuthority({
+      contextGraphId: 'registered-private-peer-gate',
+    })).resolves.toMatchObject({
+      requiresEncryption: true,
+      recipients: [expect.objectContaining({
+        agentAddress: member.agentAddress,
+        peerId: advertisedPeer,
+      })],
+    });
+
+    allowedPeers.mockResolvedValue([advertisedPeer]);
+    await expect(agent.resolveWorkspaceAgentRecipientsForCurrentAuthority({
+      contextGraphId: 'registered-private-peer-gate',
+    })).resolves.toMatchObject({
+      requiresEncryption: true,
+      recipients: [expect.objectContaining({ peerId: advertisedPeer })],
+    });
+
+    allowedPeers.mockResolvedValue(['12D3KooWAnotherAuthorizedPeer']);
+    await expect(agent.resolveWorkspaceAgentRecipientsForCurrentAuthority({
+      contextGraphId: 'registered-private-peer-gate',
+    })).rejects.toThrow(/has no recipient key advertised by a peer in the context graph allowlist/);
   });
 
   it('does not let a never-settling registered roster block subscription rehydration', async () => {
@@ -928,6 +983,23 @@ describe('private read authorization uses the on-chain participant roster', () =
       .rejects.toThrow('chain add failed');
     await expect(agent.getContextGraphAllowedAgents(contextGraphId))
       .resolves.not.toContain(member);
+
+    const participantRoster = vi.spyOn(chain, 'getContextGraphParticipantAgents');
+    addParticipant.mockResolvedValueOnce({
+      hash: '0xunsuccessful',
+      blockNumber: 0,
+      success: false,
+    });
+    await expect(agent.inviteAgentToContextGraph(contextGraphId, member, owner))
+      .rejects.toThrow(/Failed to add/);
+    const rosterReadsAfterUnsuccessfulResult = participantRoster.mock.calls.length;
+    await expect(agent.getContextGraphAllowedAgents(contextGraphId))
+      .resolves.not.toContain(member);
+    await expect(agent.canReadContextGraph(contextGraphId, {
+      callerAgentAddress: member,
+      allowSubscriptionFallback: false,
+    })).resolves.toBe(false);
+    expect(participantRoster.mock.calls.length).toBeGreaterThan(rosterReadsAfterUnsuccessfulResult);
 
     await agent.inviteAgentToContextGraph(contextGraphId, member, owner);
     expect(await chain.getContextGraphParticipantAgents(onChainId)).toContain(member);

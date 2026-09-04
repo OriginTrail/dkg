@@ -373,7 +373,7 @@ import {
   type ChatSendResult,
   type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
-  type ContextGraphSubscriptionRehydrationStatus,
+  type ContextGraphSubscriptionRehydrationInternalStatus,
   type ContextGraphSubscriptionStore,
   type VmReconcileNegativeRecord,
   type VmReconcilePeerTopology,
@@ -1221,7 +1221,7 @@ export class DKGAgentBase {
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
   /** Process-local reverse candidates plus the monotonic binding fence. */
   protected readonly contextGraphBindingState = new ContextGraphBindingState();
-  protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationStatus | null = null;
+  protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationInternalStatus | null = null;
   /** Canonical dormant classification; public status arrays are projections. */
   protected readonly contextGraphSubscriptionDormancyById =
     new Map<string, ContextGraphDormancyReason>();

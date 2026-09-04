@@ -909,6 +909,16 @@ export interface ContextGraphSubscriptionRehydrationStatus extends ContextGraphD
   updatedAt: number;
 }
 
+/**
+ * Mutable process-local rehydration counters. Dormancy itself has one source
+ * of truth (`contextGraphSubscriptionDormancyById`) and is projected only when
+ * diagnostics cross the public API boundary.
+ */
+export type ContextGraphSubscriptionRehydrationInternalStatus = Omit<
+  ContextGraphSubscriptionRehydrationStatus,
+  keyof ContextGraphDormancyProjection | 'dormant'
+>;
+
 export interface ContextGraphWritePreflightProbe {
   /**
    * Explicit, REQUIRED store-availability discriminant. `true` when every
