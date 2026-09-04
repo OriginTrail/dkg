@@ -1,4 +1,5 @@
-import React, { Suspense, useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
+import { CenterViewBoundary } from './CenterViewBoundary.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { DashboardView } from '../../views/DashboardView.js';
 import { ContextGraphPrimerView } from '../../views/ContextGraphPrimerView.js';
@@ -290,61 +291,33 @@ function ViewContainer() {
   if (activeTabId === 'dashboard') return <DashboardView />;
 
   if (activeTabId === 'operations') {
-    return (
-      <Suspense fallback={<div className="lazy-spinner">Loading operations...</div>}>
-        <OperationsView />
-      </Suspense>
-    );
+    return <OperationsView />;
   }
 
   if (activeTabId === 'agent-hub') {
-    return (
-      <Suspense fallback={<div className="lazy-spinner">Loading agent hub...</div>}>
-        <AgentHubView />
-      </Suspense>
-    );
+    return <AgentHubView />;
   }
 
   if (activeTabId === 'settings') {
-    return (
-      <Suspense fallback={<div className="lazy-spinner">Loading settings...</div>}>
-        <SettingsView />
-      </Suspense>
-    );
+    return <SettingsView />;
   }
 
   if (activeTabId === 'conviction') {
-    return (
-      <Suspense fallback={<div className="lazy-spinner">Loading Publisher Conviction...</div>}>
-        <PublishingConvictionView />
-      </Suspense>
-    );
+    return <PublishingConvictionView />;
   }
 
-  if (activeTabId === 'memory-stack') return (
-    <Suspense fallback={<div className="lazy-spinner">Loading memory stack...</div>}>
-      <MemoryStackView />
-    </Suspense>
-  );
+  if (activeTabId === 'memory-stack') return <MemoryStackView />;
 
   if (activeTabId === CONTEXT_GRAPH_PRIMER_TAB_ID) return <ContextGraphPrimerView />;
 
   if (activeTabId.startsWith('project:')) {
     const cgId = activeTabId.slice('project:'.length);
-    return (
-      <Suspense fallback={<div className="lazy-spinner">Loading project...</div>}>
-        <ProjectView contextGraphId={cgId} />
-      </Suspense>
-    );
+    return <ProjectView contextGraphId={cgId} />;
   }
 
   if (activeTabId.startsWith('conviction:')) {
     const accountId = activeTabId.slice('conviction:'.length);
-    return (
-      <Suspense fallback={<div className="lazy-spinner">Loading account...</div>}>
-        <ConvictionDetailView accountId={accountId} />
-      </Suspense>
-    );
+    return <ConvictionDetailView accountId={accountId} />;
   }
 
   if (activeTabId.startsWith('agent:')) {
@@ -357,11 +330,7 @@ function ViewContainer() {
       const cgId = raw.slice(0, pipeIdx);
       const agentSlug = raw.slice(pipeIdx + 1);
       const agentUri = agentSlug.includes(':') ? agentSlug : `urn:dkg:agent:${agentSlug}`;
-      return (
-        <Suspense fallback={<div className="lazy-spinner">Loading agent…</div>}>
-          <AgentProfilePage contextGraphId={cgId} agentUri={agentUri} />
-        </Suspense>
-      );
+      return <AgentProfilePage contextGraphId={cgId} agentUri={agentUri} />;
     }
   }
 
@@ -374,25 +343,13 @@ function ViewContainer() {
   }
 
   if (activeTabId.startsWith('wm:')) {
-    return (
-      <Suspense fallback={<div className="lazy-spinner">Loading working memory...</div>}>
-        <MemoryLayerView layer="wm" contextGraphId={activeTabId.slice(3)} />
-      </Suspense>
-    );
+    return <MemoryLayerView layer="wm" contextGraphId={activeTabId.slice(3)} />;
   }
   if (activeTabId.startsWith('swm:')) {
-    return (
-      <Suspense fallback={<div className="lazy-spinner">Loading shared memory...</div>}>
-        <MemoryLayerView layer="swm" contextGraphId={activeTabId.slice(4)} />
-      </Suspense>
-    );
+    return <MemoryLayerView layer="swm" contextGraphId={activeTabId.slice(4)} />;
   }
   if (activeTabId.startsWith('vm:')) {
-    return (
-      <Suspense fallback={<div className="lazy-spinner">Loading verifiable memory...</div>}>
-        <MemoryLayerView layer="vm" contextGraphId={activeTabId.slice(3)} />
-      </Suspense>
-    );
+    return <MemoryLayerView layer="vm" contextGraphId={activeTabId.slice(3)} />;
   }
 
   return (
@@ -405,11 +362,14 @@ function ViewContainer() {
 }
 
 export function PanelCenter() {
+  const activeTabId = useTabsStore(s => s.activeTabId);
   return (
     <div className="v10-panel-center">
       <TabBar />
       <div className="v10-center-content">
-        <ViewContainer />
+        <CenterViewBoundary viewId={activeTabId}>
+          <ViewContainer />
+        </CenterViewBoundary>
       </div>
     </div>
   );
