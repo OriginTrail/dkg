@@ -62,11 +62,13 @@ export function rfc64VmUal(kaNumber: bigint): string {
 export async function createRfc64FinalizedVmPlacementFixture(options: {
   readonly kaNumber?: bigint;
   readonly assertionRoot?: Digest32V1;
+  readonly assertionVersion?: string;
   readonly publicTripleCount?: number;
 } = {}): Promise<FinalizedVmPlacementEvidenceV1> {
   const kaNumber = options.kaNumber ?? 1n;
   const kaId = rfc64VmPackKaId(kaNumber);
   const assertionRoot = options.assertionRoot ?? RFC64_VM_ASSERTION_ROOT;
+  const assertionVersion = options.assertionVersion ?? '2';
   const publicTripleCount = options.publicTripleCount ?? 10;
   if (!Number.isSafeInteger(publicTripleCount) || publicTripleCount < 1) {
     throw new RangeError('publicTripleCount must be a positive safe integer');
@@ -105,7 +107,7 @@ export async function createRfc64FinalizedVmPlacementFixture(options: {
     assertionFinalizedAt: '2026-07-22T08:00:00.000Z',
     contentScopeVersion: '2',
     kaUal: rfc64VmUal(kaNumber),
-    assertionVersion: '2',
+    assertionVersion,
     publicTripleCount: String(publicTripleCount),
     privateTripleCount: '0',
     privateMerkleRoot: null,
@@ -113,7 +115,7 @@ export async function createRfc64FinalizedVmPlacementFixture(options: {
   const row = {
     kaId,
     assertionCoordinate: 'vm-runtime-fixture',
-    assertionVersion: '2',
+    assertionVersion,
     projectionId: 'cg-shared-v1',
     projectionDigest: ZERO_DIGEST,
     sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal),

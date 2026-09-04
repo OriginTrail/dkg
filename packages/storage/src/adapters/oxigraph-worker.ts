@@ -4,7 +4,29 @@ import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
-import { GraphWriteGenTracker } from '../graph-write-gen.js';
+import {
+  GraphWriteGenTracker,
+  type GraphWriteLifecycle,
+  type GraphWriteScope,
+} from '../graph-write-gen.js';
+import {
+  RFC64_EXACT_BINDINGS_RESULT_ERROR_CODE_V1,
+  Rfc64ExactBindingsReadResultErrorV1,
+  executeRfc64SemanticReadCapabilityV1,
+  type Rfc64ExactBindingsReadOperationV1,
+  type Rfc64ExactBindingsStoreRowV1,
+} from '../rfc64-exact-bindings-read-capability.js';
+import type { Rfc64SemanticReadOperationV1 } from '@origintrail-official/dkg-core';
+import {
+  normalizeRfc64AuthorCommitCasV1,
+  type Rfc64AuthorCommitCasInputV1,
+  type Rfc64AuthorCommitCasResultV1,
+} from '../rfc64-author-commit-cas.js';
+import {
+  deserializeWorkerErrorV1,
+  type WorkerResponseV1,
+} from '../worker-error-protocol.js';
+import { raceStoreWorkAgainstAbort } from '../abortable-store-work-lifecycle.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -97,7 +119,7 @@ function asAbortError(reason: unknown): Error {
  * would be unsafe with the current call sites.
  */
 const READ_ONLY_METHODS = new Set<string>([
-  'query', 'hasGraph', 'listGraphs', 'countQuads',
+  'query', 'hasGraph', 'listGraphs', 'countQuads', 'rfc64ExactBindingsReadV1',
 ]);
 
 /** Rejection raised when a read op exceeds its per-op timeout. */
@@ -107,6 +129,23 @@ export interface OxigraphWorkerTimeoutError extends Error {
   method: string;
   /** The bound that was exceeded. */
   timeoutMs: number;
+}
+
+function createOxigraphWorkerTimeoutError(
+  method: string,
+  timeoutMs: number,
+): OxigraphWorkerTimeoutError {
+  const error = new Error(
+    `oxigraph-worker: "${method}" timed out after ${timeoutMs}ms. `
+      + 'The embedded store runs on a single worker thread, so a long-running or '
+      + 'stuck operation blocks all reads queued behind it. For heavy workloads '
+      + 'point the node at an external SPARQL server (store.backend "sparql-http" '
+      + '/ "blazegraph"), or raise / disable store.options.operationTimeoutMs.',
+  ) as OxigraphWorkerTimeoutError;
+  error.code = 'OXIGRAPH_WORKER_OP_TIMEOUT';
+  error.method = method;
+  error.timeoutMs = timeoutMs;
+  return error;
 }
 
 /**
@@ -145,17 +184,56 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 ]);
 
 export class OxigraphWorkerStore implements TripleStore {
+  readonly writeRevisionCoverage = 'all-writers' as const;
   readonly queryCancellation = 'interruptible' as const;
+  readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
+  readonly rfc64SemanticReadCertifiedV1 = true as const;
 
+  async rfc64ExactBindingsReadV1(
+    operation: Rfc64ExactBindingsReadOperationV1,
+    options?: Pick<TripleStoreQueryOptions, 'signal'>,
+  ): Promise<readonly Rfc64ExactBindingsStoreRowV1[]> {
+    try {
+      return await this.callWithTimeout<readonly Rfc64ExactBindingsStoreRowV1[]>(
+        this.operationTimeoutMs,
+        options?.signal,
+        'rfc64ExactBindingsReadV1',
+        operation,
+      );
+    } catch (cause) {
+      if (
+        cause instanceof Error
+        && (cause as Error & { code?: unknown }).code
+          === RFC64_EXACT_BINDINGS_RESULT_ERROR_CODE_V1
+      ) {
+        throw new Rfc64ExactBindingsReadResultErrorV1(cause.message, { cause });
+      }
+      throw cause;
+    }
+  }
+
+  rfc64SemanticReadV1(
+    operation: Rfc64SemanticReadOperationV1,
+    options?: Pick<TripleStoreQueryOptions, 'signal'>,
+  ) {
+    return executeRfc64SemanticReadCapabilityV1(this, operation, options);
+  }
   // Assigned by spawnWorker(), which the constructor always calls — hence the
   // definite-assignment assertion instead of an initializer.
   private worker!: Worker;
   private nextId = 0;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
-  // #1609: per-graph write generations, bumped client-side after each
-  // successful mutation RPC (the worker owns no caller-visible caches).
-  // Feeds the chain-reconcile negative memo via `asGraphWriteGenSource`.
+  // #1609: per-graph write generations, bumped client-side around every
+  // mutation RPC and globally around persisted-worker replacement. Feeds
+  // cache consumers via `asGraphWriteRevisionSource` / `asGraphWriteGenSource`.
   private readonly writeGen = new GraphWriteGenTracker();
+  /**
+   * Global revision fence spanning an unexpected persisted-worker exit until
+   * the replacement proves it has loaded and can serve operations. The exit
+   * transition advances the generation before any replacement read can run;
+   * the first successful reply closes the unstable interval.
+   */
+  private replacementRevisionLifecycle: GraphWriteLifecycle | null = null;
   private readonly operationTimeoutMs: number;
   /** Resolved path of the compiled worker impl; reused verbatim on respawn. */
   private readonly workerPath: string;
@@ -325,15 +403,21 @@ export class OxigraphWorkerStore implements TripleStore {
     // this: a spawn only happens in the constructor or within respawn(), which
     // bails the moment a close() is seen.
     this.markSpawnedLive();
-    worker.on('message', (msg: { id: number; result?: unknown; error?: string }) => {
+    worker.on('message', (msg: WorkerResponseV1) => {
       if (this.worker !== worker) return;
       // Any successful reply proves this worker is healthy, which ends the
       // crash-loop accounting window (see MAX_CONSECUTIVE_RESPAWNS).
-      if (!msg.error) this.consecutiveRespawnFailures = 0;
+      if (!('error' in msg)) {
+        this.consecutiveRespawnFailures = 0;
+        this.replacementRevisionLifecycle?.settle();
+        this.replacementRevisionLifecycle = null;
+      }
       const p = this.pending.get(msg.id);
       if (!p) return;
       this.pending.delete(msg.id);
-      if (msg.error) p.reject(new Error(msg.error));
+      if ('error' in msg) {
+        p.reject(deserializeWorkerErrorV1(msg.error));
+      }
       else p.resolve(msg.result);
     });
     worker.on('error', (err) => {
@@ -373,6 +457,9 @@ export class OxigraphWorkerStore implements TripleStore {
       // Distinguish the two unexpected exits up front so the log and the
       // lifecycle transition below agree on what just happened.
       const inMemoryLost = !intentional && this.persistPath === undefined;
+      if (!intentional && !inMemoryLost && !this.replacementRevisionLifecycle) {
+        this.replacementRevisionLifecycle = this.writeGen.beginWrite({ kind: 'all' });
+      }
       if (intentional) {
         console.info(`[oxigraph-worker] worker exited (code ${code}) — initiated by close()`);
       } else if (inMemoryLost) {
@@ -495,8 +582,8 @@ export class OxigraphWorkerStore implements TripleStore {
    * double-settling this promise. Only read-only ops are ever given a non-zero
    * timeout (see `call`), so a fired timeout is always a determinate,
    * side-effect-free failure. If a crashed worker is being replaced, the op
-   * first parks on the respawn (the timeout starts only once it is actually
-   * posted — backoff is capped well below the default read bound anyway).
+   * first parks on the respawn. The same timeout covers both recovery wait and
+   * posted work, so a backoff cannot extend the caller-visible read bound.
    */
   private callWithTimeout<T>(
     timeoutMs: number,
@@ -508,7 +595,10 @@ export class OxigraphWorkerStore implements TripleStore {
     // respawn instead of failing it: the store is disk-persisted and about to
     // come back, so the caller sees a slightly slower success rather than a
     // spurious "store is closed" for a condition the store is already fixing.
-    if (this.respawnPromise) return this.callAfterRespawn<T>(timeoutMs, signal, method, args);
+    if (this.respawnPromise) {
+      const deadlineAt = timeoutMs > 0 ? performance.now() + timeoutMs : undefined;
+      return this.callAfterRespawn<T>(timeoutMs, deadlineAt, signal, method, args);
+    }
     return this.postToWorker<T>(timeoutMs, signal, method, args);
   }
 
@@ -521,12 +611,37 @@ export class OxigraphWorkerStore implements TripleStore {
    */
   private async callAfterRespawn<T>(
     timeoutMs: number,
+    deadlineAt: number | undefined,
     signal: AbortSignal | undefined,
     method: string,
     args: unknown[],
   ): Promise<T> {
-    while (this.respawnPromise) await this.respawnPromise;
-    return this.postToWorker<T>(timeoutMs, signal, method, args);
+    while (this.respawnPromise) {
+      const remainingMs = deadlineAt === undefined
+        ? 0
+        : Math.ceil(deadlineAt - performance.now());
+      if (deadlineAt !== undefined && remainingMs <= 0) {
+        throw createOxigraphWorkerTimeoutError(method, timeoutMs);
+      }
+      await raceStoreWorkAgainstAbort(
+        this.respawnPromise,
+        signal,
+        {
+          timeout: {
+            timeoutMs: remainingMs,
+            timeoutError: () => createOxigraphWorkerTimeoutError(method, timeoutMs),
+          },
+        },
+      );
+    }
+    if (signal?.aborted) throw asAbortError(signal.reason);
+    const remainingMs = deadlineAt === undefined
+      ? 0
+      : Math.ceil(deadlineAt - performance.now());
+    if (deadlineAt !== undefined && remainingMs <= 0) {
+      throw createOxigraphWorkerTimeoutError(method, timeoutMs);
+    }
+    return this.postToWorker<T>(remainingMs, signal, method, args, timeoutMs);
   }
 
   private postToWorker<T>(
@@ -534,6 +649,7 @@ export class OxigraphWorkerStore implements TripleStore {
     signal: AbortSignal | undefined,
     method: string,
     args: unknown[],
+    configuredTimeoutMs = timeoutMs,
   ): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
@@ -578,17 +694,7 @@ export class OxigraphWorkerStore implements TripleStore {
         timer = setTimeout(() => {
           if (this.pending.delete(id)) {
             cleanup();
-            const err = new Error(
-              `oxigraph-worker: "${method}" timed out after ${timeoutMs}ms. ` +
-              `The embedded store runs on a single worker thread, so a long-running or ` +
-              `stuck operation blocks all reads queued behind it. For heavy workloads ` +
-              `point the node at an external SPARQL server (store.backend "sparql-http" ` +
-              `/ "blazegraph"), or raise / disable store.options.operationTimeoutMs.`,
-            ) as OxigraphWorkerTimeoutError;
-            err.code = 'OXIGRAPH_WORKER_OP_TIMEOUT';
-            err.method = method;
-            err.timeoutMs = timeoutMs;
-            reject(err);
+            reject(createOxigraphWorkerTimeoutError(method, configuredTimeoutMs));
           }
         }, timeoutMs);
         // A pending-op timer must not keep the process alive on its own.
@@ -629,31 +735,41 @@ export class OxigraphWorkerStore implements TripleStore {
   // head-of-line fairness should run on an external SPARQL server, not by
   // silently fragmenting this insert into non-atomic chunks.
   async insert(quads: Quad[]): Promise<void> {
-    await this.call('insert', quads);
-    this.writeGen.recordGraphWrites(new Set(quads.map((q) => q.graph || '')));
+    await this.runTrackedWrite(
+      { kind: 'graphs', graphs: [...new Set(quads.map((q) => q.graph || ''))] },
+      () => this.call('insert', quads),
+    );
   }
   async delete(quads: Quad[]): Promise<void> {
-    await this.call('delete', quads);
-    this.writeGen.recordGraphWrites(new Set(quads.map((q) => q.graph || '')));
+    await this.runTrackedWrite(
+      { kind: 'graphs', graphs: [...new Set(quads.map((q) => q.graph || ''))] },
+      () => this.call('delete', quads),
+    );
   }
   async deleteByPattern(pattern: Partial<Quad>): Promise<number> {
-    const removed = await this.call<number>('deleteByPattern', pattern);
-    if (pattern.graph) this.writeGen.recordGraphWrites([pattern.graph]);
-    else this.writeGen.recordUnscopedWrite();
-    return removed;
+    return this.runTrackedWrite(
+      pattern.graph
+        ? { kind: 'graphs', graphs: [pattern.graph] }
+        : { kind: 'all' },
+      () => this.call<number>('deleteByPattern', pattern),
+    );
+  }
+  async deleteByPatternWithoutCount(pattern: Partial<Quad>): Promise<void> {
+    await this.deleteByPattern(pattern);
   }
   // Server-side SPARQL UPDATE forwarded to the worker's OxigraphStore (which
   // implements `update`); same atomic single-message contract as `insert`.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async update(sparql: string, _options?: UpdateOptions): Promise<void> {
-    await this.call('update', sparql);
     // A raw UPDATE's write scope is not derivable at the call site
-    // (`touchedGraphs` hints only membership changes) — unscoped bump.
-    this.writeGen.recordUnscopedWrite();
+    // (`touchedGraphs` hints only membership changes) — unscoped lifecycle.
+    await this.runTrackedWrite({ kind: 'all' }, () => this.call('update', sparql));
   }
   async replaceGraph(graphUri: string, quads: Quad[]): Promise<void> {
-    await this.call('replaceGraph', graphUri, quads);
-    this.writeGen.recordGraphWrites([graphUri]);
+    await this.runTrackedWrite(
+      { kind: 'graphs', graphs: [graphUri] },
+      () => this.call('replaceGraph', graphUri, quads),
+    );
   }
   async replaceGraphAndSubject(
     graphUri: string,
@@ -662,22 +778,38 @@ export class OxigraphWorkerStore implements TripleStore {
     metadataSubject: string,
     metadataQuads: Quad[],
   ): Promise<void> {
-    await this.call(
-      'replaceGraphAndSubject',
-      graphUri,
-      graphQuads,
-      metaGraphUri,
-      metadataSubject,
-      metadataQuads,
+    await this.runTrackedWrite(
+      { kind: 'graphs', graphs: [graphUri, metaGraphUri] },
+      () => this.call(
+        'replaceGraphAndSubject',
+        graphUri,
+        graphQuads,
+        metaGraphUri,
+        metadataSubject,
+        metadataQuads,
+      ),
     );
-    this.writeGen.recordGraphWrites([graphUri, metaGraphUri]);
   }
   async replaceSubject(graphUri: string, subject: string, quads: Quad[]): Promise<void> {
     // The worker dispatch is generic (`store[method](...args)`), so this routes
     // to the worker's embedded OxigraphStore.replaceSubject — one atomic
     // single-message commit, same contract as insert/replaceGraph.
-    await this.call('replaceSubject', graphUri, subject, quads);
-    this.writeGen.recordGraphWrites([graphUri]);
+    await this.runTrackedWrite({ kind: 'graphs', graphs: [graphUri] }, () =>
+      this.call('replaceSubject', graphUri, subject, quads));
+  }
+  async rfc64AuthorCommitCasV1(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: TripleStoreQueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    if (options?.signal?.aborted) throw asAbortError(options.signal.reason);
+    const manifest = normalizeRfc64AuthorCommitCasV1(input);
+    return this.runTrackedWrite(
+      { kind: 'graphs', graphs: [...manifest.touchedGraphs] },
+      () => this.call<Rfc64AuthorCommitCasResultV1>(
+        'rfc64AuthorCommitCasNormalizedV1',
+        manifest,
+      ),
+    );
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);
@@ -687,21 +819,39 @@ export class OxigraphWorkerStore implements TripleStore {
   }
   async createGraph(graphUri: string): Promise<void> { return this.call('createGraph', graphUri); }
   async dropGraph(graphUri: string): Promise<void> {
-    await this.call('dropGraph', graphUri);
-    this.writeGen.recordGraphWrites([graphUri]);
+    await this.runTrackedWrite(
+      { kind: 'graphs', graphs: [graphUri] },
+      () => this.call('dropGraph', graphUri),
+    );
   }
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
     return this.callWithTimeout<string[]>(this.operationTimeoutMs, options?.signal, 'listGraphs');
   }
   async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> {
-    const removed = await this.call<number>('deleteBySubjectPrefix', graphUri, prefix);
-    this.writeGen.recordGraphWrites([graphUri]);
-    return removed;
+    return this.runTrackedWrite({ kind: 'graphs', graphs: [graphUri] }, () =>
+      this.call<number>('deleteBySubjectPrefix', graphUri, prefix));
   }
 
   /** {@link GraphWriteGenSource} capability (#1609) — see graph-write-gen.ts. */
   getWriteGen(graphPrefix: string): number {
     return this.writeGen.getWriteGen(graphPrefix);
+  }
+  getWriteRevision(graphPrefix: string) {
+    return this.writeGen.getWriteRevision(graphPrefix);
+  }
+
+  private async runTrackedWrite<T>(
+    scope: GraphWriteScope,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    const lifecycle = this.writeGen.beginWrite(scope);
+    try {
+      return await work();
+    } finally {
+      // One worker message is transactional; a returned error means it settled
+      // without a partial write, while success publishes the committed state.
+      lifecycle.settle();
+    }
   }
   async countQuads(graphUri?: string): Promise<number> { return this.call('countQuads', graphUri); }
   async flush(): Promise<void> { return this.call('flush'); }

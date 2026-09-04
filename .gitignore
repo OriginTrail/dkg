@@ -10,6 +10,7 @@ test-results/
 playwright-report/
 packages/node-ui/results.xml
 bench/results/
+packages/local-llm/benchmark-results/
 .esbench-tmp/
 .env
 .env.*

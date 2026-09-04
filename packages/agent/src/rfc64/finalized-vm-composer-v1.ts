@@ -1,5 +1,6 @@
 import {
   FinalizedVmSetAccumulatorV1,
+  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   assertCanonicalEvmAddress,
   assertContextGraphIdV1,
   assertSubGraphNameV1,
@@ -28,11 +29,13 @@ import { assertRecoverableAuthorAttestationCapabilityV1 } from './recoverable-au
 
 const COMPOSITION_KEYS = [
   'assertedAtKav10Address',
+  'catalogAuthorAddress',
   'catalogLane',
   'finalizedContextGraph',
   'inventory',
   'placements',
 ] as const;
+const LEGACY_COMPOSITION_KEYS = ['requireCompleteAuthorSet'] as const;
 const CATALOG_LANE_KEYS = ['contextGraphId', 'subGraphName'] as const;
 const PLACEMENT_KEYS = ['authorship', 'sealBinding'] as const;
 
@@ -50,10 +53,18 @@ export interface FinalizedVmPlacementEvidenceV1 {
 export interface ComposeFinalizedVmSetRequestV1 {
   /** Trusted lifecycle/KAV10 deployment address against which catalog seals were authored. */
   readonly assertedAtKav10Address: EvmAddressV1;
+  /** Exact author lane whose finalized chain rows must all be present. */
+  readonly catalogAuthorAddress: EvmAddressV1;
   readonly catalogLane: FinalizedVmCatalogLaneV1;
   readonly finalizedContextGraph: FinalizedContextGraphReadV1;
   readonly inventory: FinalizedVmChainInventoryV1;
   readonly placements: readonly FinalizedVmPlacementEvidenceV1[];
+  /**
+   * @deprecated Completeness is derived from finalized access policy. Retained
+   * only so pre-10.0.15 callers remain source/runtime compatible; `false`
+   * cannot weaken private author-set completeness.
+   */
+  readonly requireCompleteAuthorSet?: boolean;
 }
 
 interface ResolvedFinalizedVmPlacementV1 {
@@ -68,18 +79,31 @@ export interface FinalizedVmMaterializationPlanRowV1 {
   readonly row: Readonly<FinalizedVmSetRowV1>;
 }
 
+export interface FinalizedVmExistingMaterializationCheckV1 {
+  /**
+   * Exact chain-finalized assertion which a newer catalog row cannot
+   * materialize. The precommit must prove this version is already durable
+   * before the catalog head can advance.
+   */
+  readonly candidate: Readonly<FinalizedVmChainCandidateV1>;
+}
+
 export interface ComposedFinalizedVmSetV1 {
   readonly catalogLane: Readonly<FinalizedVmCatalogLaneV1>;
   readonly evidence: Readonly<FinalizedVmSetEvidenceV1>;
   readonly rows: readonly Readonly<FinalizedVmSetRowV1>[];
   /** Exact placement/inventory join in authoritative finalized ordinal order. */
   readonly materializations: readonly Readonly<FinalizedVmMaterializationPlanRowV1>[];
+  /** Older finalized VM versions which require a positive durable-store proof. */
+  readonly existingMaterializationChecks:
+    readonly Readonly<FinalizedVmExistingMaterializationCheckV1>[];
 }
 
 export type FinalizedVmCompositionErrorCodeV1 =
   | 'finalized-vm-composition-input'
   | 'finalized-vm-composition-inventory'
   | 'finalized-vm-composition-placement'
+  | 'finalized-vm-composition-incomplete'
   | 'finalized-vm-composition-mismatch'
   | 'finalized-vm-composition-duplicate';
 
@@ -98,8 +122,10 @@ export class FinalizedVmCompositionErrorV1 extends Error {
  * Join author-authorized catalog placement to a same-anchor finalized chain inventory.
  *
  * Placement rows may be a strict subset of the CG-wide on-chain inventory because
- * one catalog lane can be the root or one named subgraph. Every supplied placement
- * must resolve exactly once; output retains the authoritative on-chain ordinal order.
+ * one catalog lane can be the root or one named subgraph. They may also be a
+ * strict superset: RFC-64 catalogs are tier-neutral, so an author-authorized row
+ * absent from finalized chain inventory remains SWM-only. Output contains only
+ * the placement/inventory intersection in authoritative on-chain ordinal order.
  */
 export function composeFinalizedVmSetV1(
   untrustedRequest: ComposeFinalizedVmSetRequestV1,
@@ -109,9 +135,11 @@ export function composeFinalizedVmSetV1(
     COMPOSITION_KEYS,
     'finalized VM composition request',
     'finalized-vm-composition-input',
+    LEGACY_COMPOSITION_KEYS,
   );
   const catalogLane = snapshotCatalogLane(request.catalogLane);
   let assertedAtKav10Address: EvmAddressV1;
+  let catalogAuthorAddress: EvmAddressV1;
   let inventory: Readonly<FinalizedVmChainInventoryV1>;
   let finalizedContextGraph: Readonly<FinalizedContextGraphReadV1>;
   try {
@@ -120,6 +148,11 @@ export function composeFinalizedVmSetV1(
       'finalized VM assertedAtKav10Address',
     );
     assertedAtKav10Address = request.assertedAtKav10Address;
+    assertCanonicalEvmAddress(
+      request.catalogAuthorAddress,
+      'finalized VM catalogAuthorAddress',
+    );
+    catalogAuthorAddress = request.catalogAuthorAddress;
     inventory = snapshotFinalizedVmChainInventoryV1(request.inventory);
     finalizedContextGraph = snapshotFinalizedContextGraphReadV1(
       request.finalizedContextGraph,
@@ -141,7 +174,7 @@ export function composeFinalizedVmSetV1(
     placements = snapshotDenseArray(
       request.placements,
       'finalized VM placements',
-      inventory.rows.length,
+      MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
     );
   } catch (cause) {
     fail(
@@ -170,6 +203,7 @@ export function composeFinalizedVmSetV1(
     if (
       authorship.contextGraphId !== catalogLane.contextGraphId
       || authorship.subGraphName !== catalogLane.subGraphName
+      || authorship.authorAddress !== catalogAuthorAddress
       || authorship.governanceChainId !== finalizedContextGraph.chainId
       || authorship.governanceContractAddress !== finalizedContextGraph.governanceContract
     ) {
@@ -211,16 +245,42 @@ export function composeFinalizedVmSetV1(
   });
   const accumulator = new FinalizedVmSetAccumulatorV1(scope);
   const materializations: Readonly<FinalizedVmMaterializationPlanRowV1>[] = [];
+  const existingMaterializationChecks:
+    Readonly<FinalizedVmExistingMaterializationCheckV1>[] = [];
   for (const candidate of inventory.rows) {
     const placement = placementsByKaId.get(candidate.kaId);
-    if (placement === undefined) continue;
-    assertCandidateMatchesPlacement(
+    if (placement === undefined) {
+      // Completeness is a property of the finalized policy, never a caller
+      // option that could weaken a private author lane's closure requirement.
+      if (
+        finalizedContextGraph.accessPolicy === 1
+        && candidate.authorAddress === catalogAuthorAddress
+      ) {
+        fail(
+          'finalized-vm-composition-incomplete',
+          `known-incomplete: no-authorized-provider for finalized KA ${candidate.kaId}`,
+        );
+      }
+      continue;
+    }
+    const match = classifyCandidatePlacement(
       candidate,
       inventory,
       assertedAtKav10Address,
       placement.authorship,
       placement.sealBinding,
     );
+    if (match === 'newer-swm-only') {
+      // One catalog bucket has one row per KA, while the chain can still
+      // finalize an older assertion version. A newer author-sealed catalog
+      // row is therefore SWM-only evidence, not placement evidence for the
+      // older finalized version. The catalog cannot materialize those older
+      // bytes, so the precommit must positively prove the exact chain version
+      // is already durable. A cold store therefore fails closed rather than
+      // applying a head which would hide a missing finalized VM.
+      existingMaterializationChecks.push(Object.freeze({ candidate }));
+      continue;
+    }
     placementsByKaId.delete(candidate.kaId);
 
     const row = Object.freeze({
@@ -244,31 +304,30 @@ export function composeFinalizedVmSetV1(
       row,
     }));
   }
-  if (placementsByKaId.size !== 0) {
-    const [missingKaId] = placementsByKaId.keys();
-    fail(
-      'finalized-vm-composition-mismatch',
-      `catalog placement KA ${missingKaId} is absent from the finalized chain inventory`,
-    );
-  }
+  // Remaining placements are valid, author-authorized SWM-only rows. They do
+  // not participate in VM materialization until the same KA is present in a
+  // future finalized chain snapshot. Private completeness still fails above
+  // when any finalized asset authored in this lane is absent from the catalog.
 
   const frozenMaterializations = Object.freeze(materializations);
+  const frozenExistingMaterializationChecks = Object.freeze(existingMaterializationChecks);
   return Object.freeze({
     catalogLane,
     evidence: accumulator.finalize(),
     // Backward-compatible evidence view derived from the canonical ordered plan.
     rows: Object.freeze(frozenMaterializations.map(({ row }) => row)),
     materializations: frozenMaterializations,
+    existingMaterializationChecks: frozenExistingMaterializationChecks,
   });
 }
 
-function assertCandidateMatchesPlacement(
+function classifyCandidatePlacement(
   candidate: Readonly<FinalizedVmChainCandidateV1>,
   inventory: Readonly<FinalizedVmChainInventoryV1>,
   assertedAtKav10Address: EvmAddressV1,
   authorship: ReturnType<typeof readVerifiedAuthorCatalogRowAuthorshipV1>,
   sealBinding: ReturnType<typeof readVerifiedCatalogSealBindingV1>,
-): void {
+): 'exact-finalized-placement' | 'newer-swm-only' {
   const seal = sealBinding.seal;
   if (
     candidate.chainId !== seal.assertedAtChainId
@@ -276,8 +335,6 @@ function assertCandidateMatchesPlacement(
     || candidate.kaId !== sealBinding.kaId
     || candidate.ual !== seal.kaUal
     || candidate.authorAddress !== sealBinding.authorAddress
-    || candidate.assertionVersion !== seal.assertionVersion
-    || candidate.assertionRoot !== seal.assertionMerkleRoot
     || candidate.attestedAuthorAddress === null
     || candidate.attestedAuthorAddress !== seal.authorAddress
     || candidate.publisherAddress === null
@@ -288,6 +345,19 @@ function assertCandidateMatchesPlacement(
       `catalog placement for KA ${candidate.kaId} differs from finalized chain truth`,
     );
   }
+  const candidateVersion = BigInt(candidate.assertionVersion);
+  const placementVersion = BigInt(seal.assertionVersion);
+  if (placementVersion > candidateVersion) return 'newer-swm-only';
+  if (
+    placementVersion !== candidateVersion
+    || candidate.assertionRoot !== seal.assertionMerkleRoot
+  ) {
+    fail(
+      'finalized-vm-composition-mismatch',
+      `catalog placement for KA ${candidate.kaId} differs from finalized chain truth`,
+    );
+  }
+  return 'exact-finalized-placement';
 }
 
 function snapshotCatalogLane(input: unknown): Readonly<FinalizedVmCatalogLaneV1> {
@@ -383,6 +453,7 @@ function snapshotRecord<Code extends FinalizedVmCompositionErrorCodeV1>(
   expectedKeys: readonly string[],
   label: string,
   code: Code,
+  optionalKeys: readonly string[] = [],
 ): Record<string, unknown> {
   try {
     if (input === null || typeof input !== 'object' || Array.isArray(input)) {
@@ -391,15 +462,17 @@ function snapshotRecord<Code extends FinalizedVmCompositionErrorCodeV1>(
     const prototype = Object.getPrototypeOf(input);
     if (prototype !== Object.prototype && prototype !== null) throw new Error('not plain');
     const actualKeys = Reflect.ownKeys(input);
-    const expected = new Set(expectedKeys);
+    const accepted = new Set([...expectedKeys, ...optionalKeys]);
     if (
-      actualKeys.length !== expectedKeys.length
-      || actualKeys.some((key) => typeof key !== 'string' || !expected.has(key))
+      actualKeys.length < expectedKeys.length
+      || actualKeys.length > accepted.size
+      || expectedKeys.some((key) => !actualKeys.includes(key))
+      || actualKeys.some((key) => typeof key !== 'string' || !accepted.has(key))
     ) {
       throw new Error('unknown or missing fields');
     }
     const snapshot = Object.create(null) as Record<string, unknown>;
-    for (const key of expectedKeys) {
+    for (const key of actualKeys as string[]) {
       const descriptor = Object.getOwnPropertyDescriptor(input, key);
       if (
         descriptor === undefined

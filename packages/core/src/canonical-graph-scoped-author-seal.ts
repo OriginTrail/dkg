@@ -47,11 +47,24 @@ import {
   isPlainRecord,
   snapshotExactDataRecord,
 } from './sync-wire-objects.js';
+import { canonicalizeAuthorSealStoreXsdDateTimeValue } from './xsd-date-time.js';
+import {
+  assertCanonicalIsoUtcMillisV1 as assertSharedCanonicalIsoUtcMillisV1,
+  type CanonicalIsoUtcMillisV1,
+} from './xsd-date-time.js';
+import {
+  TypedRdfStoreRowErrorV1,
+  renderTypedRdfStoreRowV1,
+  snapshotDenseRenderedRdfStoreRowsV1,
+  snapshotDenseTypedRdfStoreRowsV1,
+  typedRdfLiteralV1,
+  type TypedRdfStoreObjectV1,
+  type TypedRdfStoreRowV1,
+} from './typed-rdf-store-row-v1.js';
 
 declare const HEX_32_V1_BRAND: unique symbol;
 declare const POSITIVE_DECIMAL_U64_V1_BRAND: unique symbol;
 declare const SEAL_TRIPLE_COUNT_V1_BRAND: unique symbol;
-declare const CANONICAL_ISO_UTC_MILLIS_V1_BRAND: unique symbol;
 
 export type Hex32V1 = string & { readonly [HEX_32_V1_BRAND]: true };
 export type PositiveDecimalU64V1 = DecimalU64V1 & {
@@ -60,9 +73,7 @@ export type PositiveDecimalU64V1 = DecimalU64V1 & {
 export type SealTripleCountV1 = DecimalU64V1 & {
   readonly [SEAL_TRIPLE_COUNT_V1_BRAND]: true;
 };
-export type CanonicalIsoUtcMillisV1 = string & {
-  readonly [CANONICAL_ISO_UTC_MILLIS_V1_BRAND]: true;
-};
+export type { CanonicalIsoUtcMillisV1 } from './xsd-date-time.js';
 export type { CanonicalDeterministicUalV1 } from './ka-content-scope.js';
 
 export const CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_DIGEST_DOMAIN_V1 =
@@ -81,8 +92,6 @@ const UTF8 = new TextEncoder();
 const SEAL_DIGEST_DOMAIN_BYTES = UTF8.encode(
   CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_DIGEST_DOMAIN_V1,
 );
-const CANONICAL_UTC_MILLIS =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})Z$/;
 
 const REQUIRED_PREDICATES = [
   ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT,
@@ -104,6 +113,17 @@ const PRIVATE_ROOT_PREDICATE = ASSERTION_SEAL_PREDICATES.PRIVATE_MERKLE_ROOT;
 const ALLOWED_PREDICATES = new Set<string>([
   ...REQUIRED_PREDICATES,
   PRIVATE_ROOT_PREDICATE,
+]);
+
+/**
+ * Store-row predicates whose object is a bare EVM address string literal. The
+ * deployed finalizer (`buildAssertionSealQuads`) persists `ethers.getAddress`
+ * output verbatim, so honest seal rows can carry EIP-55 checksummed addresses;
+ * these are canonicalized to the lowercase wire form at the store boundary.
+ */
+const ADDRESS_PREDICATES = new Set<string>([
+  ASSERTION_SEAL_PREDICATES.AUTHOR_ADDRESS,
+  ASSERTION_SEAL_PREDICATES.ASSERTED_AT_KAV10_ADDRESS,
 ]);
 
 export interface CanonicalGraphScopedAuthorSealV1 {
@@ -181,25 +201,10 @@ export interface CanonicalGraphScopedAuthorSealRowV1 {
   readonly graph: string;
 }
 
-export type CanonicalAuthorSealStoreObjectV1 =
-  | {
-      readonly kind: 'named-node';
-      /** Bare RDF IRI value; adapters must not preserve angle-bracket rendering. */
-      readonly value: string;
-    }
-  | {
-      readonly kind: 'literal';
-      readonly value: string;
-      readonly datatypeIri: string;
-    };
+export type CanonicalAuthorSealStoreObjectV1 = TypedRdfStoreObjectV1;
 
 /** Backend-neutral typed adapter row accepted by the strict inverse decoder. */
-export interface CanonicalAuthorSealStoreRowV1 {
-  readonly subjectIri: string;
-  readonly predicateIri: string;
-  readonly graphIri: string;
-  readonly object: CanonicalAuthorSealStoreObjectV1;
-}
+export type CanonicalAuthorSealStoreRowV1 = TypedRdfStoreRowV1;
 
 export interface CanonicalGraphScopedAuthorSealPlacementV1 {
   readonly subject: string;
@@ -526,14 +531,7 @@ export function projectCanonicalGraphScopedAuthorSealStoreRowsV1(
   coordinate: CanonicalGraphScopedAuthorSealCoordinateV1,
 ): readonly CanonicalAuthorSealStoreRowV1[] {
   const rows = projectCanonicalGraphScopedAuthorSealRowsV1(payload, coordinate);
-  const literal = (
-    value: string,
-    datatypeIri: string,
-  ): CanonicalAuthorSealStoreObjectV1 => Object.freeze({
-    kind: 'literal' as const,
-    value,
-    datatypeIri,
-  });
+  const literal = typedRdfLiteralV1;
   const objects: readonly CanonicalAuthorSealStoreObjectV1[] = [
     literal(payload.assertionMerkleRoot.slice(2), XSD_HEX_BINARY_IRI),
     literal(payload.authorAddress, XSD_STRING_IRI),
@@ -568,46 +566,49 @@ export function projectCanonicalGraphScopedAuthorSealStoreRowsV1(
 export function renderCanonicalAuthorSealStoreRowV1(
   row: CanonicalAuthorSealStoreRowV1,
 ): CanonicalGraphScopedAuthorSealRowV1 {
-  assertCanonicalAuthorSealStoreRowShape(row);
-  for (const [label, value] of [
-    ['subjectIri', row.subjectIri],
-    ['predicateIri', row.predicateIri],
-    ['graphIri', row.graphIri],
-  ] as const) {
-    if (!isSafeIri(value)) {
-      fail('canonical-seal-row-term', `${label} must contain one bare safe IRI`);
+  try {
+    return renderTypedRdfStoreRowV1(row, new Set([
+      XSD_STRING_IRI,
+      XSD_INTEGER_IRI,
+      XSD_HEX_BINARY_IRI,
+      XSD_DATE_TIME_IRI,
+    ]));
+  } catch (cause) {
+    const translated = translateTypedAuthorSealRowFailure(
+      cause,
+      'invalid canonical author-seal typed RDF row',
+    );
+    fail(translated.code, translated.message, cause);
+  }
+}
+
+/**
+ * Canonicalize the two RDF renderings that supported triple-store adapters
+ * may normalize on read: named-node UALs can be returned as bare IRIs and
+ * xsd:dateTime literals can be returned as an equivalent UTC lexical form.
+ * All other terms remain byte-exact, so this is not a general RDF-equivalence
+ * escape hatch.
+ */
+export function canonicalizeAuthorSealStoreRoundTripRowV1(
+  row: CanonicalGraphScopedAuthorSealRowV1,
+): CanonicalGraphScopedAuthorSealRowV1 {
+  let object = row.object;
+  if (
+    row.predicate === ASSERTION_SEAL_PREDICATES.KA_UAL
+    && !object.startsWith('<')
+    && isSafeIri(object)
+  ) {
+    object = `<${object}>`;
+  } else if (row.predicate === ASSERTION_SEAL_PREDICATES.ASSERTION_FINALIZED_AT) {
+    const match = /^"([^"]+)"\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#dateTime>$/.exec(object);
+    const canonicalInstant = match === null
+      ? null
+      : canonicalizeAuthorSealStoreXsdDateTimeValue(match[1]!);
+    if (canonicalInstant !== null) {
+      object = `${JSON.stringify(canonicalInstant)}^^${XSD_DATE_TIME}`;
     }
   }
-  let object: string;
-  if (row.object.kind === 'named-node') {
-    if (!isSafeIri(row.object.value)) {
-      fail('canonical-seal-row-term', 'named-node object must contain one bare safe IRI');
-    }
-    object = `<${row.object.value}>`;
-  } else {
-    const literal = JSON.stringify(row.object.value);
-    switch (row.object.datatypeIri) {
-      case 'http://www.w3.org/2001/XMLSchema#string':
-        object = literal;
-        break;
-      case 'http://www.w3.org/2001/XMLSchema#integer':
-      case 'http://www.w3.org/2001/XMLSchema#hexBinary':
-      case 'http://www.w3.org/2001/XMLSchema#dateTime':
-        object = `${literal}^^<${row.object.datatypeIri}>`;
-        break;
-      default:
-        fail(
-          'canonical-seal-row-term',
-          `unsupported author-seal literal datatype ${row.object.datatypeIri}`,
-        );
-    }
-  }
-  return {
-    subject: row.subjectIri,
-    predicate: row.predicateIri,
-    object,
-    graph: row.graphIri,
-  };
+  return Object.freeze({ ...row, object });
 }
 
 /**
@@ -622,14 +623,26 @@ export function decodeCanonicalGraphScopedAuthorSealRowsV1(
   coordinate: CanonicalGraphScopedAuthorSealCoordinateV1,
 ): DecodedCanonicalGraphScopedAuthorSealRowsV1 {
   assertCanonicalGraphScopedAuthorSealCoordinateV1(coordinate);
-  assertDenseOrdinaryStoreRowsArray(rows);
+  let typedRows: readonly TypedRdfStoreRowV1[];
+  try {
+    typedRows = snapshotDenseTypedRdfStoreRowsV1(rows, { allowedLengths: [14, 15] });
+  } catch (cause) {
+    const translated = translateTypedAuthorSealRowFailure(
+      cause,
+      'invalid canonical author-seal row collection',
+    );
+    fail(translated.code, translated.message, cause);
+  }
   const placement = deriveCanonicalGraphScopedAuthorSealPlacementV1(coordinate);
   const byPredicate = new Map<string, CanonicalGraphScopedAuthorSealRowV1>();
-  for (let index = 0; index < rows.length; index += 1) {
-    if (!Object.prototype.hasOwnProperty.call(rows, index)) {
-      fail('canonical-seal-row-schema', 'canonical author-seal row array must be dense');
-    }
-    const current = renderCanonicalAuthorSealStoreRowV1(rows[index]);
+  for (const row of typedRows) {
+    const rendered = renderCanonicalAuthorSealStoreRowV1(row);
+    // Canonicalize EVM address literals (the only field the deployed producer
+    // writes non-canonically) to lowercase before parsing and the byte-exact
+    // round-trip; every other RDF term is compared unchanged.
+    const current = ADDRESS_PREDICATES.has(rendered.predicate)
+      ? { ...rendered, object: canonicalizeStoreAddressLiteral(rendered.object) }
+      : rendered;
     if (current.subject !== placement.subject || current.graph !== placement.metaGraph) {
       fail('canonical-seal-row-term', 'author-seal row has the wrong subject or graph');
     }
@@ -714,7 +727,7 @@ export function decodeCanonicalGraphScopedAuthorSealRowsV1(
   }
 
   const projectedRows = projectCanonicalGraphScopedAuthorSealRowsV1(payload, coordinate);
-  if (projectedRows.length !== rows.length) {
+  if (projectedRows.length !== typedRows.length) {
     fail('canonical-seal-row-cardinality', 'private-root row cardinality is inconsistent');
   }
   for (const expected of projectedRows) {
@@ -734,6 +747,72 @@ export function decodeCanonicalGraphScopedAuthorSealRowsV1(
     placement,
     rows: projectedRows,
   };
+}
+
+/**
+ * Decode the flattened RDF rows returned by storage adapters through the same
+ * strict typed-row boundary as transferred catalog seals. This keeps RDF-term
+ * parsing, canonical projection, coordinate binding, and exact row-set checks
+ * in the protocol codec instead of duplicating them in storage callers.
+ */
+export function decodeCanonicalGraphScopedAuthorSealRenderedRowsV1(
+  rows: unknown,
+  coordinate: CanonicalGraphScopedAuthorSealCoordinateV1,
+): DecodedCanonicalGraphScopedAuthorSealRowsV1 {
+  let typedRows: readonly CanonicalAuthorSealStoreRowV1[];
+  try {
+    typedRows = snapshotDenseRenderedRdfStoreRowsV1(rows, {
+      allowedLengths: [14, 15],
+    }) as readonly CanonicalAuthorSealStoreRowV1[];
+  } catch (cause) {
+    if (cause instanceof CanonicalGraphScopedAuthorSealError) throw cause;
+    const translated = translateTypedAuthorSealRowFailure(
+      cause,
+      'invalid rendered canonical author-seal row collection',
+    );
+    fail(translated.code, translated.message, cause);
+  }
+  return decodeCanonicalGraphScopedAuthorSealRowsV1(typedRows, coordinate);
+}
+
+function translateTypedAuthorSealRowFailure(
+  cause: unknown,
+  fallbackMessage: string,
+): Readonly<{
+  readonly code: Extract<
+    CanonicalGraphScopedAuthorSealErrorCode,
+    'canonical-seal-row-schema' | 'canonical-seal-row-cardinality' | 'canonical-seal-row-term'
+  >;
+  readonly message: string;
+}> {
+  if (!(cause instanceof TypedRdfStoreRowErrorV1)) {
+    return Object.freeze({ code: 'canonical-seal-row-schema', message: fallbackMessage });
+  }
+  const code = cause.code === 'row-cardinality'
+    ? 'canonical-seal-row-cardinality'
+    : cause.code === 'row-term'
+      ? 'canonical-seal-row-term'
+      : 'canonical-seal-row-schema';
+  let message = cause.message;
+  switch (cause.reason.kind) {
+    case 'invalid-iri':
+      message = `${cause.reason.field} must contain one bare safe IRI`;
+      break;
+    case 'unsupported-literal-datatype':
+      message = `unsupported author-seal literal datatype ${cause.reason.datatypeIri}`;
+      break;
+    case 'invalid-field-set':
+      if (cause.reason.context === 'typed RDF literal') {
+        message = 'literal object has invalid fields';
+      }
+      break;
+    case 'non-data-property':
+      if (cause.reason.field === 'kind') message = 'kind must be a data property';
+      break;
+    case 'other':
+      break;
+  }
+  return Object.freeze({ code, message });
 }
 
 /**
@@ -778,15 +857,14 @@ function canonicalizePayloadAfterValidation(payload: CanonicalGraphScopedAuthorS
 function assertCanonicalIsoUtcMillisV1(
   value: unknown,
 ): asserts value is CanonicalIsoUtcMillisV1 {
-  if (typeof value !== 'string' || !CANONICAL_UTC_MILLIS.test(value)) {
+  try {
+    assertSharedCanonicalIsoUtcMillisV1(value);
+  } catch (cause) {
     fail(
       'canonical-seal-timestamp',
       'assertionFinalizedAt must use exact YYYY-MM-DDTHH:mm:ss.sssZ form',
+      cause,
     );
-  }
-  const instant = Date.parse(value);
-  if (!Number.isFinite(instant) || new Date(instant).toISOString() !== value) {
-    fail('canonical-seal-timestamp', 'assertionFinalizedAt is not a real UTC instant');
   }
 }
 
@@ -880,92 +958,6 @@ function assertClosedCoordinateKeys(record: Record<string, unknown>): void {
   }
 }
 
-function assertCanonicalAuthorSealStoreRowShape(
-  row: unknown,
-): asserts row is CanonicalAuthorSealStoreRowV1 {
-  if (!isPlainRecord(row)) {
-    fail('canonical-seal-row-schema', 'author-seal store row must be a plain object');
-  }
-  try {
-    assertExactKeys(
-      row,
-      ['graphIri', 'object', 'predicateIri', 'subjectIri'],
-      'author-seal store row',
-    );
-  } catch (cause) {
-    fail('canonical-seal-row-schema', 'author-seal store row has invalid fields', cause);
-  }
-  for (const key of ['subjectIri', 'predicateIri', 'graphIri']) {
-    if (typeof row[key] !== 'string') {
-      fail('canonical-seal-row-schema', `author-seal store row ${key} must be a string`);
-    }
-  }
-  if (!isPlainRecord(row.object)) {
-    fail('canonical-seal-row-schema', 'author-seal store object must be a plain object');
-  }
-  const kindDescriptor = Object.getOwnPropertyDescriptor(row.object, 'kind');
-  if (
-    !kindDescriptor?.enumerable
-    || !Object.prototype.hasOwnProperty.call(kindDescriptor, 'value')
-  ) {
-    fail('canonical-seal-row-schema', 'author-seal store object kind must be a data property');
-  }
-  if (kindDescriptor.value === 'named-node') {
-    try {
-      assertExactKeys(row.object, ['kind', 'value'], 'named-node object');
-    } catch (cause) {
-      fail('canonical-seal-row-schema', 'named-node object has invalid fields', cause);
-    }
-    if (typeof row.object.value !== 'string') {
-      fail('canonical-seal-row-schema', 'named-node value must be a string');
-    }
-    return;
-  }
-  if (kindDescriptor.value === 'literal') {
-    try {
-      assertExactKeys(row.object, ['datatypeIri', 'kind', 'value'], 'literal object');
-    } catch (cause) {
-      fail('canonical-seal-row-schema', 'literal object has invalid fields', cause);
-    }
-    if (typeof row.object.value !== 'string' || typeof row.object.datatypeIri !== 'string') {
-      fail('canonical-seal-row-schema', 'literal value and datatypeIri must be strings');
-    }
-    return;
-  }
-  fail('canonical-seal-row-schema', 'author-seal store object has an unsupported kind');
-}
-
-function assertDenseOrdinaryStoreRowsArray(
-  rows: unknown,
-): asserts rows is CanonicalAuthorSealStoreRowV1[] {
-  if (!Array.isArray(rows) || Object.getPrototypeOf(rows) !== Array.prototype) {
-    fail('canonical-seal-row-schema', 'author-seal rows must be an ordinary Array');
-  }
-  if (rows.length !== 14 && rows.length !== 15) {
-    fail('canonical-seal-row-cardinality', 'canonical author seal must contain 14 or 15 rows');
-  }
-  const ownKeys = Reflect.ownKeys(rows);
-  if (
-    ownKeys.some((key) => typeof key !== 'string')
-    || ownKeys.length !== rows.length + 1
-    || !ownKeys.includes('length')
-  ) {
-    fail(
-      'canonical-seal-row-schema',
-      'author-seal rows must be dense and contain no custom properties',
-    );
-  }
-  for (let index = 0; index < rows.length; index += 1) {
-    const descriptor = Object.getOwnPropertyDescriptor(rows, String(index));
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      fail(
-        'canonical-seal-row-schema',
-        'author-seal rows must contain enumerable data properties',
-      );
-    }
-  }
-}
-
 function rejectOversizedInput(input: string | Uint8Array): void {
   if (typeof input !== 'string') {
     if (input.byteLength > MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1) {
@@ -991,6 +983,22 @@ function parsePlainAddressObject(object: string, label: string): string {
   const match = /^"(0x[0-9a-f]{40})"$/.exec(object);
   if (!match) fail('canonical-seal-row-term', `${label} is not the exact plain address term`);
   return match[1];
+}
+
+/**
+ * Fold a store-row EVM address string literal to the canonical lowercase form.
+ *
+ * Honest finalized seals can store EIP-55 checksummed `authorAddress` /
+ * `assertedAtKav10Address` literals because the deployed `buildAssertionSealQuads`
+ * persists `ethers.getAddress` output verbatim. Lowercasing here lets those
+ * existing rows decode to the same canonical payload and seal digest as a
+ * lowercase-stored row, without touching the deployed producer or the canonical
+ * wire schema (which remains lowercase-only). A literal that is not a 20-byte
+ * `0x` address is returned unchanged so the strict term parser still rejects it.
+ */
+function canonicalizeStoreAddressLiteral(object: string): string {
+  const match = /^"0x([0-9a-fA-F]{40})"$/.exec(object);
+  return match ? `"0x${match[1].toLowerCase()}"` : object;
 }
 
 function parseIntegerObject(object: string, label: string): string {

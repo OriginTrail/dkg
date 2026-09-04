@@ -886,7 +886,7 @@ describe('MessageStreamPool', () => {
     await pool.close();
   });
 
-  it('inbound handler receives the full remotePeer object (real PeerId parity, Codex #560 round 3)', async () => {
+  it('inbound handler receives the normalized peer with real PeerId capabilities (Codex #560 round 3, normalized)', async () => {
     let stubHandle:
       | ((stream: unknown, conn: { remotePeer: unknown }) => void)
       | null = null;
@@ -925,12 +925,17 @@ describe('MessageStreamPool', () => {
     await flush();
     await flush();
 
-    // The handler must receive the EXACT remotePeer object — not a
-    // hollow `{ toString }` shim. This is what gives ProtocolRouter's
-    // wrapper access to `.toMultihash().bytes` for one-shot parity.
-    expect(handlerReceivedPeer).toBe(productionLikePeer);
-    const asPeer = handlerReceivedPeer as { toBytes: () => Uint8Array };
-    expect(Array.from(asPeer.toBytes())).toEqual([0x12, 0x34, 0x56]);
+    // Contract updated with normalization-at-accept: the handler receives the
+    // CANONICAL `{ toString, toBytes }` model, built exactly once from the raw
+    // `connection.remotePeer`. The original assertion pinned object identity
+    // only so ProtocolRouter's downstream wrap could reach `.toMultihash()`;
+    // normalization satisfies that rationale directly, so what is pinned now
+    // is capability parity: `toBytes()` yields the multihash bytes — the same
+    // preference order (`toMultihash` first) the router wrap always applied,
+    // i.e. exactly what application handlers observed before.
+    const asPeer = handlerReceivedPeer as { toString: () => string; toBytes: () => Uint8Array };
+    expect(asPeer.toString()).toBe(PEER_A);
+    expect(Array.from(asPeer.toBytes())).toEqual([0xde, 0xad, 0xbe, 0xef]);
 
     inboundStream.endRemote();
     await pool.close();

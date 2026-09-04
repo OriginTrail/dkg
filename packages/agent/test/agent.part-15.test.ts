@@ -651,6 +651,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       ]);
 
       try {
+        const resumePendingMetadata = vi.spyOn(agent, 'resumePendingJoinApprovalMetadata')
+          .mockResolvedValue(undefined);
         await agent.start();
         expect(agent.getDefaultAgentAddress()?.toLowerCase()).toBe(localAgentAddress.toLowerCase());
 
@@ -663,11 +665,22 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(preferredByCg.get(confirmedId)).toBe('12D3KooWRestartCurator1');
         expect(preferredByCg.get(dormantId)).toBe('12D3KooWRestartCurator2');
 
+        // A matching durable join approval restores only the restricted
+        // pending-metadata bootstrap. It is visible as subscribed intent, but
+        // does not enter periodic sync/VM scope or authorize ordinary reads.
         expect(agent.getSubscribedContextGraphs().get(pendingId)).toMatchObject({
           subscribed: true,
+          synced: false,
+          sharedMemorySynced: false,
           metaSynced: false,
           pendingMeta: true,
         });
+        expect((agent as any).config.syncContextGraphs ?? []).not.toContain(pendingId);
+        await expect(agent.canReadContextGraph(pendingId)).resolves.toBe(false);
+        expect(resumePendingMetadata).toHaveBeenCalledWith(
+          pendingId,
+          '12D3KooWRestartCurator0',
+        );
         expect(agent.getSubscribedContextGraphs().get(confirmedId)).toMatchObject({
           subscribed: true,
           metaSynced: true,
@@ -683,7 +696,17 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           onChainHash: confirmedOnChainHash.toLowerCase(),
         });
         expect(agent.getSubscribedContextGraphs().get(dormantId)).toBeUndefined();
-        expect(agent.getContextGraphSubscriptionRehydrationStatus()?.dormantIds).toEqual([dormantId]);
+        expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+          activated: 2,
+          dormantIds: [dormantId],
+          dormantReasons: {
+            activationCap: [dormantId],
+            authorityDenied: [],
+            authorityUnavailable: [],
+            rehydrationDisabled: [],
+            deactivated: [],
+          },
+        });
 
         // Even while capped/dormant, explicit activation can immediately pick
         // the approved local signer without waiting for another join decision.
@@ -1578,6 +1601,13 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           activated: 0,
           dormant: 1,
           dormantIds: [failedId],
+          dormantReasons: {
+            activationCap: [],
+            authorityDenied: [],
+            authorityUnavailable: [],
+            rehydrationDisabled: [],
+            deactivated: [failedId],
+          },
         });
       } finally {
         await agent.stop().catch(() => {});

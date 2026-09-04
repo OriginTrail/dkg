@@ -17,6 +17,8 @@ import {
   type PriorityAdmissionAcquireOptions,
 } from '../src/sync/priority-admission-queue.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import { resolveRfc64CatalogExecutionPlanV1 } from
+  '../src/rfc64/public-catalog-activation-config-v1.js';
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -1910,10 +1912,22 @@ describe('sync global backpressure', () => {
         syncGlobalQueueLimit: 6,
         rfc64PublicCatalogBootstrap: {
           acceptedPublicPolicies: [{
-            policyEnvelope: { payload: { contextGraphId: selectedCg } },
+            policyEnvelope: { payload: { contextGraphId: selectedCg, accessPolicy: 0 } },
             completeSwmProviders: ['12D3KooWSelectedProvider'],
           }],
         },
+        rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
+          configuredContextGraphs: [],
+          activation: {
+            enabled: true,
+            selectedContextGraphs: [selectedCg],
+            selectedPublicContextGraphs: [selectedCg],
+            rollout: {
+              killSwitch: false,
+              contextGraphModes: { [selectedCg]: 'shadow' },
+            },
+          },
+        }),
       },
       node: { stopSignal: undefined },
       log: { info: () => {}, warn: () => {}, debug: () => {} },
@@ -2113,7 +2127,7 @@ describe('sync global backpressure', () => {
         syncGlobalQueueLimit: 4,
         rfc64PublicCatalogBootstrap: {
           acceptedPublicPolicies: [{
-            policyEnvelope: { payload: { contextGraphId } },
+            policyEnvelope: { payload: { contextGraphId, accessPolicy: 0 } },
             completeSwmProviders: [],
           }],
         },

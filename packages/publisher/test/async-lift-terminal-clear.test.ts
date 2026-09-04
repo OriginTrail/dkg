@@ -1,7 +1,14 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncLiftPublisher, type AsyncLiftPublisherConfig } from '../src/index.js';
-import { DEFAULT_CONTROL_GRAPH_URI, jobSubject, serializeJob } from '../src/async-lift-control-plane.js';
+import { createLiftJobFailureMetadata } from '../src/lift-job.js';
+import {
+  CONTROL_PAYLOAD,
+  DEFAULT_CONTROL_GRAPH_URI,
+  jobSubject,
+  literal,
+  serializeJob,
+} from '../src/async-lift-control-plane.js';
 import {
   KA_VM_BROADCAST_TX,
   KA_VM_INCLUSION,
@@ -51,7 +58,14 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     const jobId = await driveToValidated(p, o, admission);
     await p.update(jobId, 'broadcast', { broadcast: bx });
     await p.update(jobId, 'included', { broadcast: bx, inclusion: inc });
-    await p.update(jobId, 'finalized', { broadcast: bx, inclusion: inc, finalization: { mode: 'local' } });
+    await p.update(jobId, 'finalized', {
+      finalization: {
+        mode: 'published',
+        txHash: bx.txHash,
+        ual: kaVmPublishRequest(o).kaUal,
+        batchId: '1',
+      },
+    });
     return jobId;
   }
   // Terminal, non-retryable (tx_reverted → fail_job): clearable, retry() won't touch it.
@@ -74,10 +88,64 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect((await p.getStatus(other))?.status).toBe('finalized'); // untouched
   });
 
+  it('reads, lists, and clears a pre-upgrade local finalization with retained chain evidence', async () => {
+    const p = createPublisher();
+    const jobId = await driveToValidated(p, { name: 'legacy-local-finalization' });
+    await p.update(jobId, 'broadcast', { broadcast: bx });
+    await p.update(jobId, 'included', { inclusion: inc });
+    const included = await p.getStatus(jobId);
+    if (!included || included.status !== 'included') throw new Error('expected included job');
+    const legacyFinalized = {
+      ...included,
+      status: 'finalized',
+      timestamps: { ...included.timestamps, finalizedAt: ++now, updatedAt: now },
+      finalization: { mode: 'local' },
+    } as const;
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(serializeJob(
+      legacyFinalized as never,
+      DEFAULT_CONTROL_GRAPH_URI,
+      { payloadSchema: 'legacy-v0' },
+    ));
+
+    await expect(p.getStatus(jobId)).resolves.toMatchObject({
+      status: 'finalized',
+      broadcast: included.broadcast,
+      inclusion: included.inclusion,
+      finalization: { mode: 'local' },
+    });
+    expect((await p.list()).find((job) => job.jobId === jobId)).toMatchObject({
+      broadcast: included.broadcast,
+      inclusion: included.inclusion,
+    });
+    await expect(p.clearTerminalJob(jobId)).resolves.toEqual({ outcome: 'cleared' });
+    await expect(p.getStatus(jobId)).resolves.toBeNull();
+  });
+
   it('clears an exact terminal (non-retryable) failed job', async () => {
     const p = createPublisher();
     const jobId = await driveToTerminalFailed(p);
     expect((await p.getStatus(jobId))?.status).toBe('failed');
+    expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'cleared' });
+    expect(await p.getStatus(jobId)).toBeNull();
+  });
+
+  it('keeps empty failure diagnostics readable through listing, recovery, and targeted clear', async () => {
+    const p = createPublisher();
+    const jobId = await driveToValidated(p, { name: 'empty-failure-diagnostics' });
+    await p.update(jobId, 'broadcast', { broadcast: bx });
+    await p.recordPublishFailure(jobId, {
+      error: new Error(''),
+      failedFromState: 'broadcast',
+      errorPayloadRef: '',
+    });
+
+    expect(await p.getStatus(jobId)).toMatchObject({
+      status: 'failed',
+      failure: { message: '', errorPayloadRef: '' },
+    });
+    expect((await p.list()).map((job) => job.jobId)).toContain(jobId);
+    await expect(p.recover()).resolves.toBe(0);
     expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'cleared' });
     expect(await p.getStatus(jobId)).toBeNull();
   });
@@ -89,11 +157,101 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect((await p.getStatus(accepted))?.status).toBe('accepted');
   });
 
+  it('rejects a public update that would persist a state shape the reader refuses', async () => {
+    const p = createPublisher();
+    const jobId = await p.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'write-shape' }));
+    const before = await p.getStatus(jobId);
+
+    await expect(p.update(jobId, 'accepted', {
+      claim: { walletId: 'wallet-poison' },
+    } as never)).rejects.toThrow(/claim is forbidden for status accepted/);
+
+    // Validation happens before persistJobRecord: the prior row remains readable and byte-for-byte
+    // equivalent at the public boundary, and queue inventory is not poisoned by the rejected patch.
+    await expect(p.getStatus(jobId)).resolves.toEqual(before);
+    expect((await p.list()).filter((job) => job.jobId === jobId)).toEqual([before]);
+  });
+
+  it('does not mutate a durable row when an administrative update changes recovery evidence', async () => {
+    const p = createPublisher();
+    const jobId = await p.enqueueKnowledgeAssetVmPublish(
+      kaVmPublishRequest({ name: 'recovery-evidence' }),
+    );
+    const accepted = await p.getStatus(jobId);
+    if (!accepted || accepted.status !== 'accepted') throw new Error('expected accepted job');
+    const recovered = {
+      ...accepted,
+      recovery: {
+        action: 'reset_to_accepted',
+        recoveredFromStatus: 'broadcast',
+        txHashChecked: `0x${'ab'.repeat(32)}`,
+        txHashAccounted: true,
+        operationKind: 'create',
+        walletIdChecked: 'wallet-recovery',
+        nonceChecked: 7,
+      },
+    } as const;
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(serializeJob(recovered, DEFAULT_CONTROL_GRAPH_URI));
+    const query = `SELECT ?payload WHERE { GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${jobSubject(jobId)}> <${CONTROL_PAYLOAD}> ?payload } }`;
+    const durableBefore = await store.query(query);
+
+    await expect(p.update(jobId, 'claimed', {
+      claim: { walletId: 'wallet-1' },
+      recovery: { ...recovered.recovery, nonceChecked: 8 },
+    } as never)).rejects.toThrow(/transition cannot change checked recovery\.nonceChecked/);
+
+    expect(await store.query(query)).toEqual(durableBefore);
+    await expect(p.getStatus(jobId)).resolves.toEqual(recovered);
+  });
+
   it('rejects a validated job as nonterminal without mutation', async () => {
     const p = createPublisher();
     const validated = await driveToValidated(p);
     expect(await p.clearTerminalJob(validated)).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(validated))?.status).toBe('validated');
+  });
+
+  it('rejects malformed runtime clear authorities as nonterminal without mutation', async () => {
+    const p = createPublisher();
+    const validated = await driveToValidated(
+      p,
+      {},
+      { admittedByAgentAddress: '0xCCcCCc00000000000000000000000000000000Cc' },
+    );
+    const runtimeOptions = (pendingTransactionOverride: unknown) => ({
+      pendingTransactionOverride,
+    }) as unknown as Parameters<typeof p.clearTerminalJob>[1];
+
+    for (const malformedAuthority of [
+      { requestedBy: 42 },
+      { kind: 'legacyOwner', agentAddress: '0xCCcCCc00000000000000000000000000000000Cc' },
+      { kind: 'agent' },
+    ]) {
+      expect(await p.clearTerminalJob(validated, runtimeOptions(malformedAuthority)))
+        .toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+      expect((await p.getStatus(validated))?.status).toBe('validated');
+    }
+  });
+
+  it('keeps the deprecated requestedBy override agent-scoped', async () => {
+    const OWNER = '0xCCcCCc00000000000000000000000000000000Cc';
+    const OTHER = '0xBBbBBb00000000000000000000000000000000Bb';
+    const p = createPublisher();
+    const jobId = await driveToValidated(
+      p,
+      { name: 'legacy-shape' },
+      { admittedByAgentAddress: OWNER },
+    );
+    expect(await p.clearTerminalJob(jobId, {
+      pendingTransactionOverride: { requestedBy: OTHER },
+    })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    expect(await p.getStatus(jobId)).not.toBeNull();
+
+    expect(await p.clearTerminalJob(jobId, {
+      pendingTransactionOverride: { requestedBy: OWNER },
+    })).toEqual({ outcome: 'cleared' });
+    expect(await p.getStatus(jobId)).toBeNull();
   });
 
   it('lets only the admission owner explicitly clear one pre-broadcast validated job', async () => {
@@ -103,12 +261,12 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     const validated = await driveToValidated(p, {}, { admittedByAgentAddress: OWNER });
 
     expect(await p.clearTerminalJob(validated, {
-      pendingTransactionOverride: { requestedBy: OTHER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OTHER },
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(validated))?.status).toBe('validated');
 
     expect(await p.clearTerminalJob(validated, {
-      pendingTransactionOverride: { requestedBy: OWNER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OWNER },
     })).toEqual({ outcome: 'cleared' });
     expect(await p.getStatus(validated)).toBeNull();
   });
@@ -121,6 +279,31 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect((await p.getStatus(broadcast))?.status).toBe('broadcast');
   });
 
+  it('cannot relabel a broadcast failure to erase its transaction or release its wallet', async () => {
+    const p = createPublisher();
+    const broadcast = await driveToValidated(p, { name: 'evidence-owner' });
+    await p.update(broadcast, 'broadcast', { broadcast: bx });
+    const waiting = await p.enqueueKnowledgeAssetVmPublish(
+      kaVmPublishRequest({ name: 'waiting-for-wallet' }),
+    );
+
+    await expect(p.update(broadcast, 'failed', {
+      failure: createLiftJobFailureMetadata({
+        failedFromState: 'claimed',
+        code: 'workspace_unavailable',
+        message: 'mislabelled administrative failure',
+        errorPayloadRef: 'urn:error:mislabelled-broadcast',
+      }),
+    })).rejects.toThrow(/cannot discard broadcast transaction evidence/);
+
+    expect(await p.getStatus(broadcast)).toMatchObject({
+      status: 'broadcast',
+      broadcast: { txHash: bx.txHash, walletId: bx.walletId },
+    });
+    expect(await p.claimNext('wallet-1')).toBeNull();
+    expect(await p.claimNext('wallet-2')).toMatchObject({ jobId: waiting });
+  });
+
   it('lets only the admission owner explicitly clear one broadcast job', async () => {
     const OWNER = '0xCCcCCc00000000000000000000000000000000Cc';
     const OTHER = '0xBBbBBb00000000000000000000000000000000Bb';
@@ -129,12 +312,12 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     await p.update(broadcast, 'broadcast', { broadcast: bx });
 
     expect(await p.clearTerminalJob(broadcast, {
-      pendingTransactionOverride: { requestedBy: OTHER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OTHER },
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(broadcast))?.status).toBe('broadcast');
 
     expect(await p.clearTerminalJob(broadcast, {
-      pendingTransactionOverride: { requestedBy: OWNER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OWNER },
     })).toEqual({ outcome: 'cleared' });
     expect(await p.getStatus(broadcast)).toBeNull();
   });
@@ -159,7 +342,7 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     await resolverEntered;
     let clearSettled = false;
     const clearing = p.clearTerminalJob(broadcast, {
-      pendingTransactionOverride: { requestedBy: OWNER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OWNER },
     }).then((outcome) => {
       clearSettled = true;
       return outcome;
@@ -218,7 +401,7 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     // The AUTHOR is not the enqueuer, so the author's token gets nothing — this is the exact
     // confusion the previous version had backwards.
     expect(await p.clearTerminalJob(jobId, {
-      pendingTransactionOverride: { requestedBy: AUTHOR },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: AUTHOR },
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(jobId))?.status).toBe('failed');
 
@@ -226,53 +409,41 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     // sole entitlement, so the GH#1778 hint sitting in the request grants nothing — this is
     // what fails if ownership ever falls back to reading the payload.
     expect(await p.clearTerminalJob(jobId, {
-      pendingTransactionOverride: { requestedBy: PAYLOAD_CALLER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: PAYLOAD_CALLER },
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(jobId))?.status).toBe('failed');
 
     expect(await p.clearTerminalJob(jobId, {
-      pendingTransactionOverride: { requestedBy: OWNER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OWNER },
     })).toEqual({ outcome: 'cleared' });
     expect(await p.getStatus(jobId)).toBeNull();
   });
 
-  it('a NODE-TOKEN job can be force-cleared by that node token [followup]', async () => {
-    // 🔴 3824484639 — a node-level API token is the ordinary client, and it resolves to no
-    // `callerAgentAddress` at all: that field is an author RESOLUTION HINT and is deliberately
-    // absent for node tokens. Authorizing on it therefore denied the force-clear to the most
-    // common caller, reproducing the exact dead end this PR set out to remove — the daemon handed
-    // back a command that could never work.
-    //
-    // Job-level admission metadata records the authenticated enqueuer instead, for every
-    // admission, and carries no author-selection meaning.
-    const NODE = '0xNNnNNn00000000000000000000000000000000Nn';
+  it('lets the node operator force-clear a job admitted by another agent', async () => {
+    const OWNER = '0xAAaAAa00000000000000000000000000000000Aa';
     const OTHER = '0xBBbBBb00000000000000000000000000000000Bb';
     const p = createPublisher();
-    // No callerAgentAddress in the REQUEST: the node-token shape. The principal travels
-    // beside it, as admission metadata.
-    const jobId = await driveToTerminalFailed(p, {}, { admittedByAgentAddress: NODE });
+    const jobId = await driveToTerminalFailed(p, {}, { admittedByAgentAddress: OWNER });
     const job = await p.getStatus(jobId);
     if (!job || !('failure' in job)) throw new Error('expected a failed job');
     const mutated = { ...job, failure: { ...job.failure, resolution: 'retry_recovery' } };
     await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
     await store.insert(serializeJob(mutated as typeof job, DEFAULT_CONTROL_GRAPH_URI));
 
-    // An unrelated token is still refused...
+    // An unrelated agent token is still refused...
     expect(await p.clearTerminalJob(jobId, {
-      pendingTransactionOverride: { requestedBy: OTHER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OTHER },
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
 
-    // ...and the token that admitted it can clear it, which is what the daemon advertises.
+    // ...while the explicit node-operator principal may clear any job in this node's queue.
     expect(await p.clearTerminalJob(jobId, {
-      pendingTransactionOverride: { requestedBy: NODE },
+      pendingTransactionOverride: { kind: 'nodeOperator' },
     })).toEqual({ outcome: 'cleared' });
   });
 
-  it('an UNOWNED job grants the override to nobody, including its payload caller [3825861808]', async () => {
-    // Fail-closed half. A record with no admission stamp (one admitted before ownership existed,
-    // or by a path that never stamped) has nobody to match. If ownership ever fell back to the
-    // payload's `callerAgentAddress`, this is the row that catches it: that identity is present,
-    // and it must still be refused.
+  it('lets only the node operator force-clear an unowned legacy job', async () => {
+    // A record admitted before ownership stamps existed has no agent owner. Its payload caller
+    // must not gain the right by fallback, but the operator still needs an upgrade escape hatch.
     const PAYLOAD_CALLER = '0xDDdDDd00000000000000000000000000000000Dd';
     const p = createPublisher();
     const jobId = await driveToTerminalFailed(p, { callerAgentAddress: PAYLOAD_CALLER });
@@ -284,9 +455,14 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     await store.insert(serializeJob(mutated as typeof job, DEFAULT_CONTROL_GRAPH_URI));
 
     expect(await p.clearTerminalJob(jobId, {
-      pendingTransactionOverride: { requestedBy: PAYLOAD_CALLER },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: PAYLOAD_CALLER },
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(jobId))?.status).toBe('failed');
+
+    expect(await p.clearTerminalJob(jobId, {
+      pendingTransactionOverride: { kind: 'nodeOperator' },
+    })).toEqual({ outcome: 'cleared' });
+    expect(await p.getStatus(jobId)).toBeNull();
   });
 
   it('refuses to REASSIGN the admission owner through a transition [3825861806]', async () => {
@@ -314,7 +490,7 @@ describe('#1837 lift publisher clearTerminalJob', () => {
   it('refuses an explicit `undefined` for an immutable field, which would ERASE it', async () => {
     // The merge spreads the patch, so an explicit `undefined` overwrites rather than being skipped.
     // Treating it as "nothing supplied" let a transition delete the owner outright — worse than
-    // reassigning it, because the job is then held with nobody able to clear it at all.
+    // reassigning it, because the job is then held with no agent able to clear it.
     const OWNER = '0xCCcCCc00000000000000000000000000000000Cc';
     const p = createPublisher();
     const jobId = await driveToValidated(p, {}, { admittedByAgentAddress: OWNER });
@@ -409,6 +585,60 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     const jobId = await driveToFinalized(p);
     expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'cleared' });
     expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'already_absent' });
+  });
+
+  it('performs exactly one payload read inside a targeted clear transaction', async () => {
+    const p = createPublisher();
+    const jobId = await driveToFinalized(p, { name: 'single-clear-read' });
+    const originalQuery = store.query.bind(store);
+    let payloadReads = 0;
+    store.query = async (...args) => {
+      if (args[1]?.source === 'publisher.asyncLift.getStatus') payloadReads += 1;
+      return await originalQuery(...args);
+    };
+
+    expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'cleared' });
+    expect(payloadReads).toBe(1);
+  });
+
+  it('rejects a readable future state as unknown without deleting it', async () => {
+    const p = createPublisher();
+    const jobId = await driveToFinalized(p);
+    const job = await p.getStatus(jobId);
+    if (!job) throw new Error('expected finalized job');
+    const quads = serializeJob(job, DEFAULT_CONTROL_GRAPH_URI).map((entry) =>
+      entry.predicate === CONTROL_PAYLOAD
+        ? { ...entry, object: literal(JSON.stringify({ ...job, status: 'future-state' })) }
+        : entry);
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(quads);
+    const before = await store.query(
+      `SELECT ?payload WHERE { GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${jobSubject(jobId)}> <${CONTROL_PAYLOAD}> ?payload } }`,
+    );
+
+    expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'rejected', reason: 'unknown' });
+    await expect(p.getStatus(jobId)).rejects.toThrow(
+      'Malformed persisted LiftJob payload: Unsupported LiftJob status: future-state',
+    );
+    expect(await store.query(
+      `SELECT ?payload WHERE { GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${jobSubject(jobId)}> <${CONTROL_PAYLOAD}> ?payload } }`,
+    )).toEqual(before);
+  });
+
+  it('rejects forbidden cross-state fields as malformed instead of widening the LiftJob union', async () => {
+    const p = createPublisher();
+    const jobId = await p.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'cross-state' }));
+    const job = await p.getStatus(jobId);
+    if (!job || job.status !== 'accepted') throw new Error('expected accepted job');
+    const quads = serializeJob(job, DEFAULT_CONTROL_GRAPH_URI).map((entry) =>
+      entry.predicate === CONTROL_PAYLOAD
+        ? { ...entry, object: literal(JSON.stringify({ ...job, claim: { walletId: 'wallet-injected' } })) }
+        : entry);
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(quads);
+
+    expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'rejected', reason: 'malformed' });
+    await expect(p.getStatus(jobId)).rejects.toThrow('claim is forbidden for status accepted');
   });
 
   it('rejects an empty or SPARQL-unsafe jobId as malformed without querying/mutating', async () => {

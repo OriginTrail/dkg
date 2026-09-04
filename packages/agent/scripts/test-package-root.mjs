@@ -5,6 +5,12 @@ import { fileURLToPath } from 'node:url';
 
 const root = await import('@origintrail-official/dkg-agent');
 const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent.js');
+const legacyChainReconciler = await import(
+  '@origintrail-official/dkg-agent/dist/chain-reconciler.js'
+);
+const legacyCatalogSync = await import(
+  '@origintrail-official/dkg-agent/dist/dkg-agent-rfc64-catalog-sync.js'
+);
 const publicCatalogActivation = await import(
   '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1'
 );
@@ -15,6 +21,15 @@ const expectedRfc64PolicyCells = [
   'public-curated',
   'private-open',
   'private-curated',
+];
+const expectedRfc64PublicCatalogReconciliationOutcomes = [
+  'already-applied',
+  'applied',
+  'staged-only',
+  'not-found',
+  'failed',
+  'dropped',
+  'closed',
 ];
 
 if (
@@ -30,8 +45,33 @@ if (
   || typeof root.maintainRfc64SwmAuthorInventoryV1 !== 'function'
   || typeof root.removeRfc64SwmAuthorInventoryRowV1 !== 'function'
   || typeof root.Rfc64SwmAuthorInventoryProducerErrorV1 !== 'function'
+  || typeof root.Rfc64CatalogReconciliationTerminalErrorV1 !== 'function'
+  || typeof root.Rfc64CatalogSynchronizationErrorV1 !== 'function'
+  || typeof legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1 !== 'function'
 ) {
   throw new Error('published agent entry points did not expose required root APIs');
+}
+const legacySynchronizationError = new legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1(
+  'no-authorized-provider',
+  'legacy-code',
+);
+if (
+  legacySynchronizationError.terminalReason !== 'no-authorized-provider'
+  || legacySynchronizationError.code !== 'legacy-code'
+) {
+  throw new Error('historical catalog synchronization error fields changed');
+}
+const modernSynchronizationError = new root.Rfc64CatalogReconciliationTerminalErrorV1({
+  outcome: 'failed',
+  error: Object.assign(new Error('modern failure'), { code: 'modern-code' }),
+});
+if (
+  !(modernSynchronizationError
+    instanceof legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1)
+  || modernSynchronizationError.code !== 'modern-code'
+  || modernSynchronizationError.outcome !== 'failed'
+) {
+  throw new Error('terminal reconciliation errors lost synchronization compatibility');
 }
 try {
   root.assertRecoverableAuthorAttestationV1({
@@ -74,8 +114,47 @@ if (
 ) {
   throw new Error('package root did not expose the closed RFC-64 policy-cell list');
 }
+if (
+  !Array.isArray(root.RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1)
+  || !Object.isFrozen(root.RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1)
+  || root.RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1.length
+    !== expectedRfc64PublicCatalogReconciliationOutcomes.length
+  || root.RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1.some(
+    (outcome, index) => outcome !== expectedRfc64PublicCatalogReconciliationOutcomes[index]
+  )
+) {
+  throw new Error('package root did not expose the closed RFC-64 reconciliation outcome list');
+}
+if (
+  typeof root.isRfc64CatalogReconciliationSuccessOutcomeV1 !== 'function'
+  || typeof root.isRfc64CatalogReconciliationFailureOutcomeV1 !== 'function'
+  || typeof root.isRfc64PublicCatalogReceiverSuccessCompletionV1 !== 'function'
+  || typeof root.isRfc64PublicCatalogReceiverFailureCompletionV1 !== 'function'
+) {
+  throw new Error('package root did not expose RFC-64 reconciliation outcome guards');
+}
 if (packageManifest.name !== '@origintrail-official/dkg-agent') {
   throw new Error('historical package.json subpath no longer resolves');
+}
+const legacyReconcileResult = await legacyChainReconciler.reconcileContextGraph(
+  {
+    getKCCount: async () => 2,
+    getHeadBlock: async () => undefined,
+    reconcileOrdinal: async () => ({ status: 'pending' }),
+    maxOrdinalsPerPass: 1,
+    persistWatermark: () => undefined,
+    confirmationDepth: 0,
+    log: () => undefined,
+  },
+  { watermark: 0, ahead: new Map(), scanOrdinal: 0 },
+  'package-subpath-compatibility',
+  1n,
+);
+if (
+  legacyReconcileResult.hasMore !== true
+  || legacyReconcileResult.shouldContinueImmediately !== false
+) {
+  throw new Error('historical chain reconciler result lost hasMore compatibility');
 }
 if (typeof publicCatalogActivation.resolveRfc64PublicCatalogActivationConfigV1 !== 'function') {
   throw new Error('public RFC-64 activation subpath did not expose the complete resolver');
@@ -120,8 +199,18 @@ const publicRfc64Modules = [
   'swm-author-inventory-producer-v1.js',
 ];
 const blockedRfc64Modules = [
+  'catalog-synchronization-error-v1.js',
   'catalog-access-policy-v1.js',
   'catalog-authority-config-v1.js',
+  'catalog-rollout-authority-v1.js',
+  'catalog-rollout-authority-reconciliation-v1.js',
+  'applied-catalog-authority-transition-v1.js',
+  'catalog-semantic-authority-transition-v1.js',
+  'public-catalog-native-errors-v1.js',
+  'catalog-applied-head-coordinator-v1.js',
+  'catalog-native-scoped-read-capability-v1-internal.js',
+  'catalog-native-scoped-read-provider-v1.js',
+  'catalog-head-lineage-v1.js',
   'catalog-peers-v1.js',
   'catalog-transport-authorization-v1.js',
   'catalog-transport-wire-v1-internal.js',
@@ -138,6 +227,9 @@ const blockedRfc64Modules = [
   'inventory-v1/swm-author-inventory-sql-codec.js',
   'finalized-policy-agent-precommit-v1.js',
   'finalized-policy-verifier-v1.js',
+  'finalized-private-placement-repair-store-v1.js',
+  'catalog-synchronization-evidence-v1.js',
+  'finalized-swm-retirement-lifecycle-receipt-v1.js',
   'finalized-vm-agent-precommit-v1.js',
   'finalized-vm-composer-v1.js',
   'finalized-vm-runtime-v1.js',
@@ -152,18 +244,32 @@ const blockedRfc64Modules = [
   'public-catalog-current-head-discovery-v1.js',
   'public-catalog-inventory-completeness-v1.js',
   'public-catalog-native-reconciler-v1.js',
+  'public-catalog-native-committed-head-token-v1.js',
   'public-catalog-native-receiver-v1.js',
   'public-catalog-native-transport-v1.js',
   'public-open-catalog-scope-v1.js',
   'public-catalog-reconciliation-failure-v1.js',
+  'public-catalog-reconciliation-outcome-v1.js',
+  'public-catalog-receiver-task-lifecycle-v1.js',
   'public-catalog-receiver-v1.js',
   'public-catalog-service-v1.js',
   'public-catalog-issuer-delegation-v1.js',
+  'public-catalog-successor-asset-v1.js',
   'public-catalog-successor-producer-v1.js',
   'public-catalog-transport-v1.js',
   'recoverable-author-attestation-v1.js',
   'secure-filesystem-policy-v1.js',
+  'swm-recovery-coordinator-v1.js',
+  'swm-recovery-plan-v1.js',
+  'swm-inventory-catalog-reconciler-v1.js',
+  'swm-catalog-durable-asset-resolver-v1.js',
   'swm-inventory-shadow-runtime-v1.js',
+  'abort-v1.js',
+  'catalog-mutation-runtime-v1.js',
+  'catalog-runtime-v1.js',
+  'coalescing-supervisor-v1.js',
+  'supervisor-status-v1.js',
+  'serialized-scope-runtime-v1.js',
 ];
 const packageExports = packageManifest.exports;
 const emittedRfc64Modules = await listEmittedRfc64Modules();

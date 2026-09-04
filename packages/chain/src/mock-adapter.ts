@@ -430,12 +430,19 @@ export class MockChainAdapter implements ChainAdapter {
     // declares the not-yet-final window.
     const unfinalized = this.unfinalizedTxHashes.has(txHash);
     const publish = await this.resolvePublishByTxHash(txHash);
-    if (publish) return unfinalized ? { status: 'pending' } : { status: 'confirmed', publish };
+    if (publish) {
+      // Parity with the EVM adapter: the phase classifies the pending answer, scheduling-only.
+      return unfinalized
+        ? { status: 'pending-awaiting-confirmation' }
+        : { status: 'confirmed', publish };
+    }
 
     switch (this.transactionStates.get(txHash)) {
-      case 'pending': return { status: 'pending' };
-      case 'reverted': return unfinalized ? { status: 'pending' } : { status: 'reverted' };
-      case 'mined': return unfinalized ? { status: 'pending' } : { status: 'unrecognized' };
+      case 'pending': return { status: 'pending-mempool' };
+      // The declared reverted/mined states imply a receipt exists, so their unfinalized window
+      // is the awaiting-confirmation shape — a classification, not a fabricated chain fact.
+      case 'reverted': return unfinalized ? { status: 'pending-awaiting-confirmation' } : { status: 'reverted' };
+      case 'mined': return unfinalized ? { status: 'pending-awaiting-confirmation' } : { status: 'unrecognized' };
       // Nothing in the event log, nothing declared: the mock genuinely does not
       // have this transaction, which is what `not-found` asserts.
       default: return { status: 'not-found' };
@@ -1625,7 +1632,10 @@ export class MockChainAdapter implements ChainAdapter {
    * (`0`=public, `1`=curated). Unknown ids yield `0` to match the
    * Solidity default-zero mapping.
    */
-  async getContextGraphAccessPolicy(contextGraphId: bigint): Promise<number> {
+  async getContextGraphAccessPolicy(
+    contextGraphId: bigint,
+    _options: ChainReadOptions = {},
+  ): Promise<number> {
     const cg = this.contextGraphs.get(contextGraphId);
     if (!cg) return 0;
     const ap = (cg as { accessPolicy?: number }).accessPolicy;
@@ -1641,7 +1651,10 @@ export class MockChainAdapter implements ChainAdapter {
    * proof callers require before trusting {@link getContextGraphAccessPolicy}
    * (which is permissively default-`0` for unknown ids).
    */
-  async isContextGraphActiveOnChain(contextGraphId: bigint): Promise<boolean> {
+  async isContextGraphActiveOnChain(
+    contextGraphId: bigint,
+    _options: ChainReadOptions = {},
+  ): Promise<boolean> {
     return this.contextGraphs.has(contextGraphId);
   }
 
@@ -1678,6 +1691,33 @@ export class MockChainAdapter implements ChainAdapter {
     const agents = (cg as { participantAgents?: string[] }).participantAgents;
     if (!Array.isArray(agents)) return [];
     return agents.map((a) => ethers.getAddress(a));
+  }
+
+  async addContextGraphParticipantAgent(contextGraphId: bigint, agent: string): Promise<TxResult> {
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (!cg) throw new Error(`Mock: context graph ${contextGraphId} does not exist`);
+    if (!ethers.isAddress(agent)) throw new Error(`Mock: invalid participant agent ${agent}`);
+    const normalized = ethers.getAddress(agent);
+    if (normalized === ethers.ZeroAddress) throw new Error('Mock: zero participant agent');
+    if (cg.participantAgents.some((value) => value.toLowerCase() === normalized.toLowerCase())) {
+      throw new Error(`Mock: participant agent ${normalized} already exists`);
+    }
+    if (cg.participantAgents.length >= 256) throw new Error('Mock: participantAgents cap');
+    cg.participantAgents.push(normalized);
+    return this.txResult(true);
+  }
+
+  async removeContextGraphParticipantAgent(contextGraphId: bigint, agent: string): Promise<TxResult> {
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (!cg) throw new Error(`Mock: context graph ${contextGraphId} does not exist`);
+    if (!ethers.isAddress(agent)) throw new Error(`Mock: invalid participant agent ${agent}`);
+    const normalized = ethers.getAddress(agent);
+    const index = cg.participantAgents.findIndex(
+      (value) => value.toLowerCase() === normalized.toLowerCase(),
+    );
+    if (index < 0) throw new Error(`Mock: participant agent ${normalized} not found`);
+    cg.participantAgents.splice(index, 1);
+    return this.txResult(true);
   }
 
   /**

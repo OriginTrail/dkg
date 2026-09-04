@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg",
-  "version": "10.0.14",
+  "version": "10.0.15",
   "type": "module",
   "engines": {
     "node": ">=22.13.0 <23.0.0 || >=23.4.0"
@@ -15,10 +15,16 @@
     "./daemon/plugin-api": {
       "types": "./dist/daemon/plugin-api.d.ts",
       "import": "./dist/daemon/plugin-api.js"
+    },
+    "./blazegraph-runtime-contract": {
+      "types": "./blazegraph-runtime-contract.d.cts",
+      "import": "./blazegraph-image-metadata.cjs",
+      "require": "./blazegraph-image-metadata.cjs",
+      "default": "./blazegraph-image-metadata.cjs"
     }
   },
   "scripts": {
-    "prebuild": "pnpm -r --filter @origintrail-official/dkg-adapter-openclaw... --filter @origintrail-official/dkg-adapter-hermes... --filter @origintrail-official/dkg-adapter-prime-agent... --filter @origintrail-official/dkg-mcp... --filter @origintrail-official/dkg-okf... run build",
+    "prebuild": "pnpm -r --filter @origintrail-official/dkg-adapter-openclaw... --filter @origintrail-official/dkg-adapter-hermes... --filter @origintrail-official/dkg-adapter-prime-agent... --filter @origintrail-official/dkg-mcp... --filter @origintrail-official/dkg-local-llm... --filter @origintrail-official/dkg-okf... run build",
     "build": "tsc && node scripts/test-catchup-worker-package-boundary.mjs && node ../../scripts/copy-cli-runtime-assets.mjs",
     "prepack": "node ../../scripts/copy-cli-runtime-assets.mjs",
     "benchmark:catchup-runner": "node scripts/catchup-runner-benchmark.cjs",
@@ -43,11 +49,13 @@
     "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-epcis": "workspace:*",
+    "@origintrail-official/dkg-local-llm": "workspace:*",
     "@origintrail-official/dkg-mcp": "workspace:*",
     "@origintrail-official/dkg-node-ui": "workspace:*",
     "@origintrail-official/dkg-okf": "workspace:*",
     "@origintrail-official/dkg-publisher": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1",
     "better-sqlite3": "12.11.1",
     "commander": "^13",
     "ethers": "^6",
@@ -73,6 +81,8 @@
     "project.json",
     "blazegraph-image.json",
     "blazegraph-image-metadata.cjs",
+    "blazegraph-namespace-contract.cjs",
+    "blazegraph-runtime-contract.d.cts",
     "markitdown-build-info.json",
     "markitdown-targets.json",
     "build-info.json",

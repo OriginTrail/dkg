@@ -14,6 +14,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { appendInPlace } from './append-in-place.js';
+import { compareCodePoint } from './code-point-order.js';
 import { isIriMetaSubject } from './iri-term.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
@@ -150,17 +151,6 @@ export interface BoundedGraphScopedDurableBatch {
   manifestRowCount: number;
 }
 
-function compareUnicodeCodePoints(leftValue: string, rightValue: string): number {
-  const left = Array.from(leftValue);
-  const right = Array.from(rightValue);
-  const length = Math.min(left.length, right.length);
-  for (let index = 0; index < length; index++) {
-    const delta = left[index]!.codePointAt(0)! - right[index]!.codePointAt(0)!;
-    if (delta !== 0) return delta;
-  }
-  return left.length - right.length;
-}
-
 function digestGraphScopedMetadataRows(rows: readonly Quad[]): string {
   const hash = createHash('sha256');
   const encoder = new TextEncoder();
@@ -172,10 +162,10 @@ function digestGraphScopedMetadataRows(rows: readonly Quad[]): string {
     hash.update(bytes);
   };
   const canonical = [...rows].sort((left, right) => (
-    compareUnicodeCodePoints(left.subject, right.subject)
-    || compareUnicodeCodePoints(left.predicate, right.predicate)
-    || compareUnicodeCodePoints(left.object, right.object)
-    || compareUnicodeCodePoints(left.graph, right.graph)
+    compareCodePoint(left.subject, right.subject)
+    || compareCodePoint(left.predicate, right.predicate)
+    || compareCodePoint(left.object, right.object)
+    || compareCodePoint(left.graph, right.graph)
   ));
   append('origintrail.dkg.durable-graph-metadata');
   append('1');
@@ -208,7 +198,7 @@ function readOrderedGraphScopedDescriptors(
 
   const descriptors = (parsed.candidates as GraphScopedCandidate[])
     .map((candidate) => candidate.descriptor)
-    .sort((left, right) => compareUnicodeCodePoints(left.assertionGraph, right.assertionGraph));
+    .sort((left, right) => compareCodePoint(left.assertionGraph, right.assertionGraph));
   const descriptorByGraph = new Map(
     descriptors.map((descriptor) => [descriptor.assertionGraph, descriptor] as const),
   );
@@ -1627,7 +1617,10 @@ function isDeterministicKaMetadataSubject(subject: string): boolean {
   return true;
 }
 
-function parseGraphScopedDescriptor(ual: string, rows: readonly Quad[]): GraphScopedDescriptor {
+export function parseGraphScopedDescriptor(
+  ual: string,
+  rows: readonly Quad[],
+): GraphScopedDescriptor {
   const requireSingle = (predicate: string, field: string): string => {
     const values = distinctObjects(rows, predicate);
     if (values.length !== 1) {

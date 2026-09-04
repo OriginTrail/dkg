@@ -26,7 +26,6 @@ import {
 } from "./metrics-queries.js";
 import { createMetricsPresence } from "./metrics-presence.js";
 import {
-  appendFile,
   chmod,
   copyFile,
   mkdir,
@@ -48,6 +47,7 @@ import * as osModule from 'node:os';
 import type { NetworkInterfaceInfo } from 'node:os';
 import { checkCoreRelayPrereqs } from './core-prereq-check.js';
 import { rotateDaemonLogIfNeeded } from './log-rotation.js';
+import { resolveUpdateTelemetryVersionStatus } from './update-telemetry-status.js';
 const { homedir } = osModule;
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -131,7 +131,7 @@ import {
   resolveNetworkDefaultContextGraphs,
   isPublisherRuntimeEnabled,
   resolvePublisherRetryTuning,
-  resolveRfc64PublicCatalogActivation,
+  resolveRfc64CatalogActivations,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveSharedMemoryTtlMs,
   resolveStorageAckTiming,
@@ -150,26 +150,57 @@ import {
   validateNetworkConfigReadiness,
 } from '../config.js';
 import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
-import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
+import {
+  resolveOtlpLogEndpoint,
+  type ActiveLogExporterMode,
+} from '../telemetry-config.js';
 import {
   formatMetricsCollectorStartupLog,
   resolveMetricsCollectorConfig,
 } from '../metrics-collector-config.js';
-import { createDaemonLogSink } from './log-sink.js';
-import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
+import {
+  exitAfterFatalLogDrain,
+  startDaemonLogController,
+  type DaemonLogExporterStartResult,
+} from './log-lifecycle.js';
+import { startDaemonLogFileWriter } from './daemon-log-file-writer.js';
+import {
+  CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+  createChainDiscoveryScanRunner,
+} from './chain-discovery-scan.js';
+// The scan policy lived here until GH#2323; the implementation moved to its
+// own module, but the public import path stays valid for existing consumers.
+export {
+  CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+  CHAIN_FULL_SCAN_EVERY,
+  chainDiscoveryScanOptions,
+  createChainDiscoveryScanRunner,
+} from './chain-discovery-scan.js';
+import { createDaemonLocalLlmService } from './local-llm-service.js';
+import { appendBoundedDaemonLogDiagnostic } from './daemon-log-diagnostics.js';
+import {
+  createTelemetrySettings,
+  createTelemetryRuntime,
+} from './telemetry-runtime.js';
+import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
+import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
+import {
+  decodeVmReconcileNegativeRow,
+  encodeVmReconcileNegativeRow,
+} from './vm-reconcile-negative-store-adapter.js';
 import { createAdmissionRecoveryCapabilityProbe, createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
 import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import {
   migrateLegacyContextGraphReadiness,
+  reconcileConfiguredContextGraphMetadata,
   registerProjectSyncedReadinessPersistence,
-  resetContextGraphReadinessForMissingMetadata,
   writeContextGraphReadiness,
   type ContextGraphReadinessStore,
 } from '../context-graph-readiness.js';
-import { loadTokens, httpAuthGuard } from '../auth.js';
+import { authenticateHttpRequest, loadTokens } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -292,7 +323,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
@@ -331,6 +361,7 @@ import {
   formatIdentityTagMismatch,
 } from './store-health-check.js';
 import { startManagedOxigraph } from './oxigraph-managed.js';
+import { buildAgentRuntimeStoreConfig } from './agent-runtime-store-config.js';
 import type { OxigraphServerHandle } from './oxigraph-server.js';
 import { resetNatStatus, startNatStatusWatcher } from './nat-status.js';
 import {
@@ -680,83 +711,6 @@ export function orderACKCandidatePeerIds(input: {
   });
 }
 
-export const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
-export const CHAIN_DISCOVERY_SCAN_PAGE_BUDGET = 30;
-
-export function chainDiscoveryScanOptions(input: {
-  watermarkSeeded: boolean;
-  run?: number;
-  fullScanEvery?: number;
-  pageBudget?: number;
-}):
-  | { mode: 'incremental'; pageBudget: number }
-  | { mode: 'seedFromCursor'; throwOnChainScanFailure: true; pageBudget: number }
-  | { mode: 'seedFull'; throwOnChainScanFailure: true } {
-  const configuredFullScanEvery = input.fullScanEvery;
-  let fullScanEvery = CHAIN_FULL_SCAN_EVERY;
-  if (
-    typeof configuredFullScanEvery === 'number' &&
-    Number.isFinite(configuredFullScanEvery) &&
-    configuredFullScanEvery >= 1
-  ) {
-    fullScanEvery = Math.floor(configuredFullScanEvery);
-  }
-  const configuredPageBudget = input.pageBudget;
-  const pageBudget = (
-    typeof configuredPageBudget === 'number' &&
-    Number.isFinite(configuredPageBudget) &&
-    configuredPageBudget >= 1
-  )
-    ? Math.floor(configuredPageBudget)
-    : CHAIN_DISCOVERY_SCAN_PAGE_BUDGET;
-  const run = input.run ?? 0;
-  const startupRecoveryScan = input.watermarkSeeded && run === 0;
-  const periodicFullResync = input.watermarkSeeded && run > 0 && run % fullScanEvery === 0;
-  if (startupRecoveryScan || periodicFullResync) {
-    return { mode: 'seedFull', throwOnChainScanFailure: true };
-  }
-  return input.watermarkSeeded && !periodicFullResync
-    ? { mode: 'incremental', pageBudget }
-    : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
-}
-
-export function createChainDiscoveryScanRunner(input: {
-  agent: {
-    hasContextGraphRegistryScanWatermark(): Promise<boolean>;
-    discoverContextGraphsFromChain(
-      options: ReturnType<typeof chainDiscoveryScanOptions>,
-    ): Promise<number>;
-  };
-  log: (msg: string) => void;
-  pageBudget?: number;
-  fullScanEvery?: number;
-}): () => Promise<void> {
-  let runs = 0;
-  let inFlight = false;
-  return async () => {
-    if (inFlight) return;
-    inFlight = true;
-    try {
-      const run = runs++;
-      const found = await input.agent.discoverContextGraphsFromChain(
-        chainDiscoveryScanOptions({
-          run,
-          watermarkSeeded: await input.agent.hasContextGraphRegistryScanWatermark(),
-          pageBudget: input.pageBudget,
-          fullScanEvery: input.fullScanEvery,
-        }),
-      );
-      if (found > 0) {
-        input.log(`Chain scan: discovered ${found} new context graph(s)`);
-      }
-    } catch {
-      /* non-critical */
-    } finally {
-      inFlight = false;
-    }
-  };
-}
-
 export interface PromoteWorkerDaemonLifecycle {
   waitForStartup(): Promise<void>;
   stop(reason?: string | null): Promise<void>;
@@ -1091,55 +1045,34 @@ export async function bootstrapConfiguredContextGraphs(input: {
       continue;
     }
 
-    const existing = input.agent.getSubscribedContextGraphs().get(contextGraphId);
     input.agent.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
 
-    let hasAuthoritativeMetadata = false;
-    let locallyCurated = false;
-    if (existing?.metaSynced === true) {
-      try {
-        locallyCurated = await input.agent.isCuratorOf(contextGraphId);
-      } catch (err) {
-        input.log(
-          `Context graph "${contextGraphId}" ownership check failed: ${err instanceof Error ? err.message : String(err)} — treating it as remote`,
-        );
-      }
+    const reconciliation = await reconcileConfiguredContextGraphMetadata({
+      agent: input.agent,
+      store: input.readinessStore ?? {},
+      contextGraphId,
+    });
+    if (reconciliation.diagnostic?.kind === 'public-metadata-repair-failed') {
+      input.log(
+        `Context graph "${contextGraphId}" public metadata repair failed: ${reconciliation.diagnostic.detail} — continuing fail-closed`,
+      );
+    } else if (reconciliation.diagnostic?.kind === 'public-metadata-projection-completed') {
+      input.log(
+        `Completed chain-attested public metadata for configured context graph: ${contextGraphId}`,
+      );
+    } else if (reconciliation.diagnostic?.kind === 'public-chain-proof-unavailable') {
+      const { reason, detail } = reconciliation.diagnostic;
+      input.log(
+        `Context graph "${contextGraphId}" public chain proof is unavailable (${reason}${detail ? `: ${detail}` : ''}) — continuing fail-closed`,
+      );
+    }
+    if (reconciliation.outcome === 'pending' && reconciliation.reason === 'conflicting-policy') {
+      input.log(
+        `Context graph "${contextGraphId}" has public on-chain policy but conflicting root metadata — leaving it pending`,
+      );
     }
 
-    if (existing?.metaSynced === true) {
-      try {
-        // Explicit local ownership is the only safe exception to rejecting an
-        // unregistered placeholder. createContextGraph() stamps ownership;
-        // the legacy configured-graph shadow created by
-        // ensureContextGraphLocal() deliberately has no creator/curator.
-        hasAuthoritativeMetadata = await input.agent.hasConfirmedMetaState(
-          contextGraphId,
-          { rejectUnregisteredPlaceholder: !locallyCurated },
-        );
-      } catch (err) {
-        input.log(
-          `Context graph "${contextGraphId}" metadata check failed: ${err instanceof Error ? err.message : String(err)} — treating metadata as pending`,
-        );
-      }
-    }
-
-    if (!hasAuthoritativeMetadata) {
-      // Legacy ensureContextGraphLocal() shadows contain an `unregistered`
-      // marker and stale metaSynced=true. The explicit remote proof above
-      // rejects that marker without depending on mutable subscription state;
-      // only now do we persist the fail-closed bootstrap classification.
-      const reset = await resetContextGraphReadinessForMissingMetadata({
-        agent: input.agent,
-        store: input.readinessStore ?? {},
-        contextGraphId,
-      });
-      // PROJECT_SYNCED persistence shares the same readiness lock and may
-      // have proved this graph while bootstrap was working from `existing`.
-      // Its live metadata revalidation wins over the stale snapshot.
-      if (!reset) hasAuthoritativeMetadata = true;
-    }
-
-    if (hasAuthoritativeMetadata) {
+    if (reconciliation.outcome === 'authoritative') {
       input.log(`Subscribed to configured context graph: ${contextGraphId} (metadata already confirmed)`);
       continue;
     }
@@ -1151,6 +1084,26 @@ export async function runDaemonInner(
   foreground: boolean,
   config: Awaited<ReturnType<typeof loadConfig>>,
   startedAt: number,
+): Promise<void> {
+  let cleanupOwnedStartupResources: (() => Promise<void>) | undefined;
+  try {
+    await runDaemonInnerWithStartupOwnership(
+      foreground,
+      config,
+      startedAt,
+      (cleanup) => { cleanupOwnedStartupResources = cleanup; },
+    );
+  } catch (error) {
+    await cleanupOwnedStartupResources?.();
+    throw error;
+  }
+}
+
+async function runDaemonInnerWithStartupOwnership(
+  foreground: boolean,
+  config: Awaited<ReturnType<typeof loadConfig>>,
+  startedAt: number,
+  registerStartupFailureCleanup: (cleanup: () => Promise<void>) => void,
 ): Promise<void> {
   configureKaPublishLifecycleDebugLogging(config);
   const contextGraphSubscriptionRehydrationEnabled =
@@ -1167,28 +1120,63 @@ export async function runDaemonInner(
   // upgrades/restarts and can already be multi-gigabyte at this point.
   const startupLogRotation = await rotateDaemonLogIfNeeded(logFile).catch(() => null);
 
-  // Tee all stdout/stderr (including structured Logger output) into the log file
+  // One file-level writer owns every daemon.log append after startup rotation.
+  // Its separate diagnostic file remains visible when the detached worker's
+  // original stderr is ignored and cannot recurse through the daemon.log tee.
   const origStdoutWrite = process.stdout.write.bind(process.stdout);
   const origStderrWrite = process.stderr.write.bind(process.stderr);
+  const logWriterDiagnosticFile = join(dkgDir(), 'daemon-log-writer-errors.log');
+  const daemonLogFileWriter = startDaemonLogFileWriter({
+    logFile,
+    rotate: () => rotateDaemonLogIfNeeded(logFile),
+    onDiagnostic: async (message) => {
+      const line = `[${new Date().toISOString()}] ${message}\n`;
+      await appendBoundedDaemonLogDiagnostic(logWriterDiagnosticFile, line)
+        .catch(() => {});
+      if (foreground) origStderrWrite(`[daemon-log-writer] ${message}\n`);
+    },
+  });
+
+  // Tee all stdout/stderr (including structured Logger output) through the
+  // same serialized and bounded file lifecycle.
   process.stdout.write = ((chunk: any, ...args: any[]) => {
-    appendFile(
-      logFile,
+    daemonLogFileWriter.push(
       typeof chunk === "string" ? chunk : chunk.toString(),
-    ).catch(() => {});
+    );
     return origStdoutWrite(chunk, ...args);
   }) as typeof process.stdout.write;
   process.stderr.write = ((chunk: any, ...args: any[]) => {
-    appendFile(
-      logFile,
+    daemonLogFileWriter.push(
       typeof chunk === "string" ? chunk : chunk.toString(),
-    ).catch(() => {});
+    );
     return origStderrWrite(chunk, ...args);
   }) as typeof process.stderr.write;
+
+  const detachDaemonLogTee = (): void => {
+    process.stdout.write = origStdoutWrite as typeof process.stdout.write;
+    process.stderr.write = origStderrWrite as typeof process.stderr.write;
+  };
+
+  let startupUncaughtExceptionHandler: NodeJS.UncaughtExceptionListener | undefined;
+  let startupUnhandledRejectionHandler: NodeJS.UnhandledRejectionListener | undefined;
+  registerStartupFailureCleanup(async () => {
+    // The graceful shutdown handlers are registered only after startup succeeds. A rejection
+    // before that boundary must still retire the writer it started; otherwise queued appends can
+    // outlive the failed boot and race the next startup (or test teardown) through DKG_HOME.
+    if (startupUncaughtExceptionHandler) {
+      process.removeListener("uncaughtException", startupUncaughtExceptionHandler);
+    }
+    if (startupUnhandledRejectionHandler) {
+      process.removeListener("unhandledRejection", startupUnhandledRejectionHandler);
+    }
+    detachDaemonLogTee();
+    await daemonLogFileWriter.shutdown();
+  });
 
   function log(msg: string) {
     const line = `[${new Date().toISOString()}] ${msg}`;
     if (foreground) origStdoutWrite(line + "\n");
-    appendFile(logFile, line + "\n").catch(() => {});
+    daemonLogFileWriter.push(line + "\n");
   }
   const backpressureMonitor = new BackpressureMonitor({
     emit: (level, message) => log(`[${level}] ${message}`),
@@ -1206,7 +1194,7 @@ export async function runDaemonInner(
     );
   }
 
-  process.on("uncaughtException", (err) => {
+  startupUncaughtExceptionHandler = (err) => {
     const msg = err?.message ?? String(err);
     if (
       msg.includes("Cannot write to a stream that is") ||
@@ -1218,10 +1206,20 @@ export async function runDaemonInner(
     log(`[fatal] Uncaught exception: ${err?.stack ?? msg}`);
     removePid()
       .catch(() => {})
-      .finally(() => process.exit(1));
-  });
+      .finally(() => {
+        void exitAfterFatalLogDrain({
+          detach: detachDaemonLogTee,
+          shutdown: () => daemonLogFileWriter.shutdown(),
+          exit: (code) => process.exit(code),
+          reportTimeout: (message) => {
+            origStderrWrite(`[daemon-log-writer] ${message}\n`);
+          },
+        });
+      });
+  };
+  process.on("uncaughtException", startupUncaughtExceptionHandler);
 
-  process.on("unhandledRejection", (reason) => {
+  startupUnhandledRejectionHandler = (reason) => {
     const msg = reason instanceof Error ? reason.message : String(reason);
     if (
       msg.includes("Cannot write to a stream that is") ||
@@ -1233,7 +1231,8 @@ export async function runDaemonInner(
     log(
       `[warn] Unhandled rejection: ${reason instanceof Error ? reason.stack : msg}`,
     );
-  });
+  };
+  process.on("unhandledRejection", startupUnhandledRejectionHandler);
 
   const role = config.nodeRole ?? "edge";
 
@@ -1260,7 +1259,7 @@ export async function runDaemonInner(
  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝              ╚═════╝ ╚═╝  ╚═╝ ╚═════╝       ╚═══╝   ╚═╝ ╚═════╝
 `;
   origStdoutWrite(banner + "\n");
-  appendFile(logFile, banner + "\n").catch(() => {});
+  daemonLogFileWriter.push(banner + "\n");
 
   const nodeVersion = getNodeVersion();
   const nodeCommit = getCurrentCommitShort(); // cached once at startup — avoids execSync in hot path
@@ -1332,15 +1331,21 @@ export async function runDaemonInner(
   // network manifest fails before subscriptions, stores, wallets, or agent
   // runtime construction begin. The same immutable chainBase is reused below.
   const chainBase = resolveChainConfig(config, network);
-  const rfc64PublicCatalog = resolveRfc64PublicCatalogActivation(
+  const rfc64CatalogActivations = resolveRfc64CatalogActivations(
     config,
     resolveRfc64PublicCatalogActivationChainIdentityV1(chainBase?.chainId),
   );
+  const rfc64Catalog = rfc64CatalogActivations.catalog;
+  const rfc64PublicCatalog = rfc64CatalogActivations.publicCatalog;
   const syncContextGraphs = [
     ...new Set([
       ...resolveContextGraphs(config),
       ...resolveNetworkDefaultContextGraphs(network),
-      ...rfc64PublicCatalog.selectedContextGraphs,
+      // Cores host the public corpus and therefore activate the complete
+      // accepted manifest. Edges activate RFC-64 only through explicit
+      // operator/default subscriptions; the manifest remains eligibility and
+      // serving policy, never an implicit edge subscription.
+      ...(role === 'core' ? rfc64Catalog.selectedPublicContextGraphs : []),
     ]),
   ];
 
@@ -1438,7 +1443,13 @@ export async function runDaemonInner(
   const runtimeStoreConfig: DkgConfig = managed
     ? {
         ...config,
-        store: runtimeStore,
+        store: runtimeStore
+          ? {
+              backend: runtimeStore.backend,
+              options: runtimeStore.options,
+              graphSetIndex: runtimeStore.graphSetIndex,
+            }
+          : undefined,
         largeLiteralStorage: runtimeLargeLiteralStorage,
         sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
       }
@@ -1747,6 +1758,16 @@ export async function runDaemonInner(
   const kaNumberStore = new SqliteKaNumberStore(dashDb);
   const kaNumberAllocator = new KaNumberAllocator(kaNumberStore);
 
+  // Mint managed authority only after the complete agent config has been
+  // assembled. Passing the start-up result through an ordinary object literal
+  // would intentionally strip its non-enumerable runtime authority.
+  const agentStoreConfig = buildAgentRuntimeStoreConfig({
+    runtimeStore,
+    managedStore: managed?.storeConfig,
+    changelogEnabled: Boolean(config.store?.changelog),
+    changelogEraGuard,
+  });
+
   const agent = await DKGAgent.create({
     kaNumberAllocator,
     name: config.name,
@@ -1785,6 +1806,11 @@ export async function runDaemonInner(
       : rfc64PublicCatalog.enabled
         ? config.rfc64PublicCatalog
         : { enabled: false },
+    rfc64CatalogActivation: config.rfc64Catalog === undefined
+      ? undefined
+      : rfc64Catalog.enabled
+        ? config.rfc64Catalog
+        : { enabled: false },
     maxRehydratedContextGraphSubscriptions: config.maxRehydratedContextGraphSubscriptions,
     contextGraphSubscriptionRehydrationEnabled,
     // OT-RFC-38 LU-6 / OT-RFC-49 WS-A — plumb the host-mode block (eviction
@@ -1793,21 +1819,10 @@ export async function runDaemonInner(
     // `swmHostMode` config is inert and only in-agent defaults apply, so an
     // operator could not toggle the strip via config (the rung-1 inert-flag bug).
     swmHostMode: config.swmHostMode,
-    storeConfig: runtimeStore ? {
-      backend: runtimeStore.backend,
-      options: runtimeStore.options,
-      graphSetIndex: runtimeStore.graphSetIndex,
-      // OT-RFC-59: operator opt-in to the append-only change log (default OFF).
-      // Sourced from config.store (operator intent), NOT runtimeStore — the
-      // managed-oxigraph path rebuilds runtimeStore and would drop it. Enabling
-      // this wraps the store in ChangelogStore, which is what makes
-      // asChangelogReader(store) non-null and registers the responder delta lane.
-      // Wire the DURABLE era guard (§6 P0) so restore/rollback rotates the era —
-      // enabling the changelog fleet-wide without it is unsafe (silent skips).
-      changelog: config.store?.changelog
-        ? { enabled: true, eraGuard: changelogEraGuard }
-        : undefined,
-    } : undefined,
+    // OT-RFC-59 changelog intent and its durable era guard are already folded
+    // into this final store config. Managed Oxigraph retains its opaque runtime
+    // authority through the agent's actual createTripleStore boundary.
+    storeConfig: agentStoreConfig,
     largeLiteralStorage: runtimeLargeLiteralStorage,
     sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
     publicSnapshotStore,
@@ -1908,37 +1923,15 @@ export async function runDaemonInner(
       loadVmReconcileNegative: async (cacheKey) => {
         const row = dashDb.getVmReconcileNegative(cacheKey);
         if (!row) return null;
-        try {
-          const candidateNamespaces = JSON.parse(row.candidate_namespaces) as Array<{
-            metaGraph: string;
-            dataGraph: string;
-          }>;
-          if (!Array.isArray(candidateNamespaces)) return null;
-          return {
-            cacheKey: row.cache_key,
-            localCgId: row.context_graph_id,
-            failures: row.failures,
-            nextRetryAt: row.next_retry_at,
-            swmGen: row.swm_gen,
-            candidateNamespaces,
-            peerTopologyKey: row.peer_topology_key,
-          };
-        } catch {
+        const decoded = decodeVmReconcileNegativeRow(row);
+        if (!decoded) {
           dashDb.deleteVmReconcileNegative(cacheKey);
           return null;
         }
+        return decoded;
       },
       saveVmReconcileNegative: async (record) => {
-        dashDb.upsertVmReconcileNegative({
-          cache_key: record.cacheKey,
-          context_graph_id: record.localCgId,
-          failures: record.failures,
-          next_retry_at: record.nextRetryAt,
-          swm_gen: record.swmGen,
-          candidate_namespaces: JSON.stringify(record.candidateNamespaces),
-          peer_topology_key: record.peerTopologyKey,
-          updated_at: Date.now(),
-        });
+        dashDb.upsertVmReconcileNegative(encodeVmReconcileNegativeRow(record, Date.now()));
       },
       deleteVmReconcileNegative: async (cacheKey) => {
         dashDb.deleteVmReconcileNegative(cacheKey);
@@ -2584,22 +2577,20 @@ export async function runDaemonInner(
   chatDb = dashDb;
   log("Dashboard DB initialized at " + join(dkgDir(), "node-ui.db"));
 
-  // Redactor for the copy of each record that LEAVES the node. The local
-  // dashboard DB keeps full-fidelity records (it's the operator's own machine);
-  // redaction only protects data crossing the trust boundary to a collector.
+  // Redactor for the copy of each record that LEAVES the node. The local path
+  // writes every level to daemon.log, served by the dashboard's /api/node-log.
   const redactForRemote = createLogRedactor(config.telemetry?.logs?.redact);
 
-  // Local DB gets the FULL record; remote shippers get a single REDACTED copy.
-  // `remoteShippers` is evaluated per record so runtime enable/disable of the
-  // syslog/OTLP workers is reflected without re-wiring. Logic lives in
-  // createDaemonLogSink so this trust boundary is unit-tested (log-sink.test.ts).
-  Logger.setSink(
-    createDaemonLogSink({
-      insertLog: (rec) => dashDb.insertLog(rec),
-      redact: redactForRemote,
-      remoteShippers: () => [logPusher, otlpExporter],
-    }),
-  );
+  // Avoid duplicating routine logs into SQLite on the event loop. Low-volume
+  // warning/error records remain available to operation and dashboard views;
+  // the controller owns sink attachment plus the one active remote exporter.
+  const daemonLogController = startDaemonLogController({
+    writeLocalDebug: (record) => {
+      daemonLogFileWriter.pushDebug(record);
+    },
+    insertDiagnosticLog: (record) => dashDb.insertLog(record),
+    redact: redactForRemote,
+  });
 
   // Extract the plain value from an RDF typed literal like "6"^^<xsd:integer>
   const metricsSource: MetricsSource = {
@@ -2796,11 +2787,45 @@ export async function runDaemonInner(
     ? "testnet"
     : "mainnet";
   const syslogEndpoint = TELEMETRY_ENDPOINTS[networkKey]?.syslog;
-  let logPusher: LogPushWorker | null = null;
-  let otlpExporter: OtlpLogWorker | null = null;
+  function startLogExporter(
+    mode: ActiveLogExporterMode,
+  ): DaemonLogExporterStartResult {
+    if (mode === 'otlp') {
+      const endpoint = resolveOtlpLogEndpoint(config.telemetry, process.env);
+      if (!endpoint) {
+        return {
+          ok: false,
+          error: `OTLP log export is not configured for ${networkKey} (set config.telemetry.logs.endpoint or OTEL_EXPORTER_OTLP_ENDPOINT)`,
+        };
+      }
+      const minLevel = config.telemetry?.logs?.level ?? "info";
+      const result = daemonLogController.startExporter(mode, () => {
+        const worker = new OtlpLogWorker({
+          endpoint,
+          token: config.telemetry?.logs?.token,
+          network: networkKey,
+          peerId: agent.peerId,
+          nodeName: config.name,
+          version: nodeVersion,
+          commit: nodeCommit,
+          role: config.nodeRole ?? "edge",
+          chainId: config.chain?.chainId,
+          minLevel,
+          bufferMaxEntries: config.telemetry?.logs?.bufferMaxEntries,
+          onError: (m) => log(`Telemetry(OTLP): ${m}`),
+        });
+        worker.start();
+        return {
+          shipper: worker,
+          shutdown: () => worker.shutdown(),
+        };
+      });
+      if (result.ok && result.started) {
+        log(`Telemetry: OTLP log export enabled → ${endpoint} (level ≥ ${minLevel})`);
+      }
+      return result;
+    }
 
-  function startLogPusher(): { ok: boolean; error?: string } {
-    if (logPusher) return { ok: true };
     if (!syslogEndpoint || !syslogEndpoint.port) {
       return {
         ok: false,
@@ -2808,185 +2833,99 @@ export async function runDaemonInner(
       };
     }
     const autoUpdateEnabled = config.autoUpdate?.enabled ?? false;
-    logPusher = new LogPushWorker({
-      host: syslogEndpoint.host,
-      port: syslogEndpoint.port,
-      peerId: agent.peerId,
-      network: networkKey,
-      nodeName: config.name,
-      version: nodeVersion,
-      commit: nodeCommit,
-      role: config.nodeRole ?? "edge",
-      autoUpdate: autoUpdateEnabled,
-      versionStatus: () => {
-        if (!autoUpdateEnabled) return "disabled";
-        if (daemonState.isUpdating) return "updating";
-        if (daemonState.lastUpdateCheck.checkedAt === 0) return "unknown";
-        if (daemonState.lastUpdateCheck.channelTargetMissing) return "channel-missing";
-        return daemonState.lastUpdateCheck.upToDate ? "latest" : "behind";
-      },
-    });
-    logPusher.start();
-    log(
-      `Telemetry: log streaming enabled → ${syslogEndpoint.host}:${syslogEndpoint.port}`,
-    );
-    return { ok: true };
-  }
-
-  function stopLogPusher(): void {
-    if (!logPusher) return;
-    logPusher.stop();
-    logPusher = null;
-    log("Telemetry: log streaming disabled");
-  }
-
-  function startOtlpExporter(): { ok: boolean; error?: string } {
-    if (otlpExporter) return { ok: true };
-    // Resolve env-first, matching the traces/metrics precedence (resolveOtelSignals):
-    // the standard OTEL_EXPORTER_OTLP_LOGS_ENDPOINT, then OTEL_EXPORTER_OTLP_ENDPOINT
-    // + /v1/logs, then config. NO hardcoded per-network fallback — logs must never
-    // ship to a placeholder/TBD URL the operator never set.
-    const envBase = process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.replace(/\/$/, "");
-    const endpoint =
-      process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT ||
-      (envBase ? `${envBase}/v1/logs` : undefined) ||
-      config.telemetry?.logs?.endpoint;
-    if (!endpoint) {
-      return {
-        ok: false,
-        error: `OTLP log export is not configured for ${networkKey} (set config.telemetry.logs.endpoint or OTEL_EXPORTER_OTLP_ENDPOINT)`,
-      };
-    }
-    const minLevel = config.telemetry?.logs?.level ?? "info";
-    otlpExporter = new OtlpLogWorker({
-      endpoint,
-      token: config.telemetry?.logs?.token,
-      network: networkKey,
-      peerId: agent.peerId,
-      nodeName: config.name,
-      version: nodeVersion,
-      commit: nodeCommit,
-      role: config.nodeRole ?? "edge",
-      chainId: config.chain?.chainId,
-      minLevel,
-      bufferMaxEntries: config.telemetry?.logs?.bufferMaxEntries,
-      onError: (m) => log(`Telemetry(OTLP): ${m}`),
-    });
-    otlpExporter.start();
-    log(`Telemetry: OTLP log export enabled → ${endpoint} (level ≥ ${minLevel})`);
-    return { ok: true };
-  }
-
-  async function stopOtlpExporter(): Promise<void> {
-    if (!otlpExporter) return;
-    // Await the final flush so disable/shutdown can't return while logs are
-    // still in flight or stranded in the buffer.
-    await otlpExporter.shutdown();
-    otlpExporter = null;
-    log("Telemetry: OTLP log export disabled");
-  }
-
-  // OTel traces + metrics SDK (independent of the log-exporter path below).
-  // Endpoints resolve env-first (standard OTEL_EXPORTER_OTLP_* names) then
-  // config; a signal registers ONLY when its endpoint resolves — never a
-  // guessed prod default. Idempotent (initTelemetry no-ops once configured), so
-  // it is safe to call both at boot AND from the runtime enable toggle.
-  async function startOtelSdk(): Promise<void> {
-    const { tracesEndpoint, metricsEndpoint, tracesOn, metricsOn } = resolveOtelSignals(
-      config.telemetry,
-    );
-    if (!tracesOn && !metricsOn) return;
-    try {
-      await initTelemetry({
-        enabled: true,
-        resource: {
-          serviceName: "dkg-node",
-          serviceVersion: nodeVersion,
-          serviceInstanceId: config.name,
-          network: networkKey,
-          peerId: agent.peerId,
-          nodeName: config.name,
-          nodeRole: config.nodeRole ?? "edge",
-          commit: nodeCommit,
-          chainId: config.chain?.chainId,
-        },
-        traces: tracesOn
-          ? {
-              endpoint: tracesEndpoint,
-              token: config.telemetry?.traces?.token,
-              sampleRatio: config.telemetry?.traces?.sampleRatio,
-            }
-          : undefined,
-        metrics: metricsOn
-          ? {
-              endpoint: metricsEndpoint,
-              token: config.telemetry?.metrics?.token,
-              exportIntervalMs: config.telemetry?.metrics?.exportIntervalMs,
-            }
-          : undefined,
+    const result = daemonLogController.startExporter(mode, () => {
+      const worker = new LogPushWorker({
+        host: syslogEndpoint.host,
+        port: syslogEndpoint.port,
+        peerId: agent.peerId,
+        network: networkKey,
+        nodeName: config.name,
+        version: nodeVersion,
+        commit: nodeCommit,
+        role: config.nodeRole ?? "edge",
+        autoUpdate: autoUpdateEnabled,
+        versionStatus: () => resolveUpdateTelemetryVersionStatus({
+          autoUpdateEnabled,
+          isUpdating: daemonState.isUpdating,
+          lastUpdateCheck: daemonState.lastUpdateCheck,
+        }),
       });
+      worker.start();
+      return {
+        shipper: worker,
+        shutdown: async () => worker.stop(),
+      };
+    });
+    if (result.ok && result.started) {
       log(
-        `Telemetry: OTel SDK registered (traces=${tracesOn ? tracesEndpoint : "off"}, metrics=${metricsOn ? metricsEndpoint : "off"})`,
-      );
-    } catch (err) {
-      // Telemetry must never block startup.
-      log(`Telemetry: OTel init failed (non-fatal): ${String(err)}`);
-    }
-  }
-
-  // Start ALL telemetry signals under the master gate: OTel traces/metrics
-  // (SDK) AND the configured log exporter. Used at boot and from the runtime
-  // enable toggle so both behave identically (the bug fixed here: enabling from
-  // a boot-disabled state previously started only logs, never traces/metrics).
-  // The log-exporter result is returned separately — a failed log shipper must
-  // NOT tear down or disable the independent traces/metrics signals.
-  // Await the SDK init first (it is dynamically imported) so traces/metrics are
-  // fully registered before the log exporter result is returned — that ordering
-  // lets the runtime-enable path roll the SDK back if the log exporter fails.
-  async function startTelemetry(): Promise<{ ok: boolean; error?: string }> {
-    await startOtelSdk();
-    // Dispatch to the configured log exporter. 'syslog' is the default when
-    // unset (preserves prior behaviour); 'otlp' is the recommended path; 'none'
-    // keeps logs local-only even while telemetry is enabled. An UNKNOWN/typo'd
-    // value fails closed to 'none' (never silently syslog → off-node).
-    if (isUnknownLogExporter(config.telemetry)) {
-      log(
-        `Telemetry: unknown logs.exporter "${config.telemetry?.logs?.exporter}" — ` +
-          `keeping logs local-only (no off-node forwarding). Use 'otlp', 'syslog', or 'none'.`,
+        `Telemetry: log streaming enabled → ${syslogEndpoint.host}:${syslogEndpoint.port}`,
       );
     }
-    const mode = resolveLogExporterMode(config.telemetry);
-    if (mode === "none") return { ok: true };
-    if (mode === "otlp") return startOtlpExporter();
-    return startLogPusher();
+    return result;
   }
 
-  // Stop ALL telemetry signals: log exporters AND the OTel SDK (flush + shut
-  // down + clear the API globals). Async so a runtime disable actually stops
-  // traces/metrics — not just logs — and callers can await an orderly teardown.
-  async function stopTelemetry(): Promise<void> {
-    stopLogPusher();
-    await stopOtlpExporter();
-    await shutdownTelemetry().catch(() => {});
+  async function stopLogExporter(): Promise<void> {
+    const mode = await daemonLogController.stopExporter();
+    if (!mode) return;
+    log(mode === 'otlp'
+      ? "Telemetry: OTLP log export disabled"
+      : "Telemetry: log streaming disabled");
   }
 
-  if (config.telemetry?.enabled) {
-    const r = await startTelemetry();
-    if (!r.ok) {
-      // Log forwarding failed to start (e.g. mainnet syslog port 0). Disable
-      // ONLY the log signal — leave the master gate and any registered
-      // traces/metrics intact; they are independent signals. (Boot path:
-      // best-effort per signal; the runtime toggle below rolls back instead.)
-      log(`Telemetry: log exporter not started — ${r.error} (traces/metrics unaffected)`);
-    }
+  // OTel traces/metrics and the selected log exporter share one production
+  // adapter. Boot, runtime settings changes, and shutdown all traverse it.
+  const telemetrySignals = createDaemonTelemetryLifecycle({
+    config,
+    resource: {
+      serviceName: "dkg-node",
+      serviceVersion: nodeVersion,
+      serviceInstanceId: config.name,
+      network: networkKey,
+      peerId: agent.peerId,
+      nodeName: config.name,
+      nodeRole: config.nodeRole ?? "edge",
+      commit: nodeCommit,
+      chainId: config.chain?.chainId,
+    },
+    initOtel: initTelemetry,
+    shutdownOtel: shutdownTelemetry,
+    startLogExporter,
+    stopLogExporter,
+    log,
+  });
+
+  const telemetryRuntime = createTelemetryRuntime({
+    config,
+    persist: saveConfig,
+    signals: telemetrySignals,
+    onBootStartFailure: (error) => {
+      // Boot remains best-effort per signal: a failed log shipper must not
+      // disable independently registered traces/metrics or rewrite config.
+      log(`Telemetry: log exporter not started — ${error} (traces/metrics unaffected)`);
+    },
+  });
+
+  // Daemon shutdown additionally detaches the Logger sink. Runtime telemetry
+  // disable keeps the sink attached so warn/error diagnostics still persist.
+  async function stopDaemonLogging(): Promise<void> {
+    // Detach synchronously, then flush the shared file lifecycle through a
+    // serialized barrier. The tee remains active for later teardown messages;
+    // final shutdown detaches it and closes the writer after all producers stop.
+    daemonLogController.detachSink();
+    await Promise.all([
+      telemetryRuntime.shutdown(),
+      daemonLogFileWriter.flush(),
+    ]);
   }
+
+  await telemetryRuntime.startConfiguredBestEffort();
   backpressureMonitor.start();
 
   const PRUNE_INTERVAL_MS = 6 * 60 * 60_000; // 6 hours
   const pruneRuntimeState = async (): Promise<void> => {
     try {
       dashDb.prune();
-      const rotation = await rotateDaemonLogIfNeeded(logFile);
+      const rotation = await daemonLogFileWriter.rotate();
       if (rotation.rotated) {
         log(
           `Rotated daemon.log (was ${(rotation.previousBytes / 1024 / 1024).toFixed(1)} MB)`,
@@ -3001,9 +2940,9 @@ export async function runDaemonInner(
   }, PRUNE_INTERVAL_MS);
   pruneTimer.unref();
 
-  // A time window cannot bound a same-day log storm. The focused maintenance
-  // helper owns bounded catch-up batches, compaction retries, and timer cleanup;
-  // daemon lifecycle only starts and stops it.
+  // A time window cannot bound a same-day compatibility-log storm. This
+  // independent maintenance helper enforces only the published count cap;
+  // it never guesses whether an ambiguous historical row came from the daemon.
   const logVolumePruner = startDashboardLogVolumePruner({
     dashDb,
     log,
@@ -3312,29 +3251,7 @@ export async function runDaemonInner(
     },
   };
 
-  const telemetrySettings = {
-    getTelemetryEnabled: () => config.telemetry?.enabled ?? false,
-    setTelemetryEnabled: async (
-      enabled: boolean,
-    ): Promise<{ ok: boolean; error?: string }> => {
-      if (enabled) {
-        const r = await startTelemetry();
-        if (!r.ok) {
-          // The OTel SDK may have started before the log exporter failed. Roll
-          // it back so we never leave traces/metrics exporting while we report
-          // failure and persist nothing — the API/UI state stays consistent
-          // (telemetry remains off) with what is actually running.
-          await stopTelemetry();
-          return r;
-        }
-      } else {
-        await stopTelemetry();
-      }
-      config.telemetry = { ...config.telemetry, enabled };
-      await saveConfig(config);
-      return { ok: true };
-    },
-  };
+  const telemetrySettings = createTelemetrySettings(telemetryRuntime);
 
   // Resolve the static UI directory (built by @origintrail-official/dkg-node-ui)
   //
@@ -3453,6 +3370,11 @@ export async function runDaemonInner(
   // (version counters or ETag-like compare-and-swap) to close the race
   // across processes — out of scope for Round 6.
   const assertionImportLocks = new Map<string, Promise<void>>();
+  const localLlm = createDaemonLocalLlmService({
+    dkgHome: dkgDir(),
+    cwd: process.cwd(),
+    stderr: (line) => log(`[dkg-mcp] ${line}`),
+  });
 
   // --- HTTP API ---
 
@@ -3557,14 +3479,15 @@ export async function runDaemonInner(
       }
 
       // Auth guard — rejects with 401 if token is invalid/missing
-      const authAllowed = await httpAuthGuard(
+      const authentication = await authenticateHttpRequest({
         req,
         res,
         authEnabled,
         validTokens,
-        resolveCorsOrigin(req, corsAllowed),
-      );
-      if (!authAllowed) return;
+        resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
+        corsOrigin: resolveCorsOrigin(req, corsAllowed),
+      });
+      if (!authentication.allowed) return;
 
       // Retired installable apps framework (V9): respond with 410 Gone so upgraded
       // nodes give a clear migration hint for both the JSON API and any bookmarked
@@ -3683,10 +3606,12 @@ export async function runDaemonInner(
       await handleRequest({
         req,
         res,
+        authentication,
         agent,
         publisherControl,
         publisherState,
         config,
+        rfc64Catalog,
         rfc64PublicCatalog,
         startedAt,
         dashDb,
@@ -3709,6 +3634,7 @@ export async function runDaemonInner(
         apiPortRef,
         routePlugins,
         admission: admissionStats,
+        localLlm,
         emitMemoryGraphChanged,
         emitNotification,
       });
@@ -3833,6 +3759,7 @@ export async function runDaemonInner(
         const teardown = await runProducerQuiescentTeardown(
           buildProducerQuiescentTeardownSteps({
             server,
+            closeLocalLlm: () => localLlm.close(),
             drainCatchupJobs,
             flushTelemetry,
             stopPublisherRuntime: async () => {
@@ -3856,8 +3783,8 @@ export async function runDaemonInner(
                 );
             },
             stopAgent: () => agent.stop(),
-            // Stops log exporters AND flushes + shuts down the OTel SDK.
-            stopTelemetry,
+            // Detaches the sink, stops its exporter, and shuts down the OTel SDK.
+            stopTelemetry: stopDaemonLogging,
             log,
           }),
           log,
@@ -3886,6 +3813,9 @@ export async function runDaemonInner(
       }
     })().catch((err: any) => {
       log(`Shutdown cleanup error: ${err?.message ?? String(err)}`);
+    }).finally(async () => {
+      detachDaemonLogTee();
+      await daemonLogFileWriter.shutdown();
     });
     const { forced } = await raceShutdownWithTimeout(
       cleanup,

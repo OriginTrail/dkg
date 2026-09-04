@@ -21,12 +21,13 @@ import {
   validateEvmResults,
   validatePrimaryResults,
 } from '../ci-results.mjs';
+import { validateTrustedControllerPins } from '../../ci/trusted-controller-pins.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-// This SHA predates the candidate branch and is already reachable from the
-// protected default branch. Controller updates in this PR need a second,
-// post-merge pin-rotation PR before workflows may execute them.
-const TRUSTED_CI_CONTROLLER_SHA = 'c441bd6766ace67e331c0dfc6e22cb1325a6e1f6';
+// This SHA is already reachable from the protected default branch. Candidate
+// changes may update workflow wiring, but the planner and aggregate gates must
+// continue to execute only reviewed policy from this immutable controller.
+const TRUSTED_CI_CONTROLLER_SHA = '780f14aa60c39bdca788967121085c3c0d82d85c';
 const NON_SOLIDITY_LANES = CI_LANES.filter((lane) => lane !== 'contracts');
 
 function change(filePath, status = 'M') {
@@ -256,6 +257,14 @@ test('leaf and shared package snapshots include conservative downstream consumer
   assert.deepEqual(selectedLanes(networkSim), ['kosava_supporting']);
   assert.deepEqual(networkSim.evmScopes, []);
 
+  const localLlm = pullRequestPlan([change('packages/local-llm/src/runtime.ts')]);
+  assert.deepEqual(selectedLanes(localLlm), [
+    'bura_cli',
+    'kosava_supporting',
+    'kosava_hardhat_plugins',
+  ]);
+  assert.deepEqual(localLlm.evmScopes, []);
+
   const core = pullRequestPlan([change('packages/core/src/index.ts')]);
   assert.deepEqual(selectedLanes(core), [
     'tornado_core',
@@ -450,26 +459,7 @@ test('workflows execute the planner and aggregate gates from one immutable trust
   ]);
 
   for (const [name, workflow] of workflows) {
-    const trustedCheckoutCount = workflow.match(/^\s+path: trusted-ci$/gm)?.length ?? 0;
-    const trustedPinCount = workflow.match(
-      new RegExp(`^\\s+ref: ${TRUSTED_CI_CONTROLLER_SHA}$`, 'gm'),
-    )?.length ?? 0;
-    const trustedRepositoryCount = workflow.match(
-      /^\s+repository: OriginTrail\/dkg$/gm,
-    )?.length ?? 0;
-
     assert.match(TRUSTED_CI_CONTROLLER_SHA, /^[0-9a-f]{40}$/);
-    assert.ok(trustedCheckoutCount >= 2, `${name} must trust-pin both its planner and gate`);
-    assert.equal(
-      trustedPinCount,
-      trustedCheckoutCount,
-      `${name} trusted checkouts must all use the reviewed controller SHA`,
-    );
-    assert.equal(
-      trustedRepositoryCount,
-      trustedCheckoutCount,
-      `${name} trusted checkouts must all use the base repository`,
-    );
     assert.match(workflow, /node trusted-ci\/scripts\/ci\/plan-ci\.mjs\b/);
     assert.match(workflow, /node trusted-ci\/scripts\/ci\/assert-ci-results\.mjs\b/);
     assert.doesNotMatch(
@@ -479,6 +469,13 @@ test('workflows execute the planner and aggregate gates from one immutable trust
     );
   }
 
+  const controller = validateTrustedControllerPins([
+    { sourceName: 'primary', source: workflows.get('primary') },
+    { sourceName: 'evm', source: workflows.get('evm') },
+  ]);
+  assert.equal(controller.ref, TRUSTED_CI_CONTROLLER_SHA);
+  assert.equal(controller.checkouts.length, 4);
+
   const primaryWorkflow = workflows.get('primary');
   assert.doesNotMatch(
     primaryWorkflow,
@@ -486,10 +483,20 @@ test('workflows execute the planner and aggregate gates from one immutable trust
     'the trusted controller must not point into candidate-only history',
   );
   const abiFreshnessJob = workflowJobBlock(primaryWorkflow, 'abi-freshness');
-  assert.doesNotMatch(
+  assert.match(
     abiFreshnessJob,
-    /^    if:/m,
-    'ABI freshness must have no job-level condition until the new controller is protected',
+    /^    if: needs\.changes\.outputs\.abi_freshness == 'true'$/m,
+    'ABI freshness must use the trusted planner output once the controller is protected',
+  );
+  assert.match(
+    workflowJobBlock(primaryWorkflow, 'changes'),
+    /^      abi_freshness: \$\{\{ steps\.plan\.outputs\.abi_freshness \}\}$/m,
+    'the trusted planner output must be exposed to the ABI freshness job',
+  );
+  assert.doesNotMatch(
+    workflowJobBlock(primaryWorkflow, 'changes'),
+    /candidate\/scripts\/ci\/check-tracked-text-nul\.mjs/,
+    'an untrusted candidate must never supply its own security gate',
   );
   assert.ok(
     primaryWorkflow.indexOf('run: node candidate/scripts/check-npm-metadata.mjs')
@@ -585,7 +592,10 @@ test('every planner output is wired to a real workflow job and omitted tests sta
     );
   }
   assert.ok(workflow.includes("needs.changes.outputs.contracts == 'true'"));
-  assert.doesNotMatch(workflowJobBlock(workflow, 'abi-freshness'), /^    if:/m);
+  assert.match(
+    workflowJobBlock(workflow, 'abi-freshness'),
+    /^    if: needs\.changes\.outputs\.abi_freshness == 'true'$/m,
+  );
   assert.ok(
     workflow.includes(
       "if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.contracts == 'true'",
@@ -596,11 +606,11 @@ test('every planner output is wired to a real workflow job and omitted tests sta
     workflow.includes('run: node candidate/scripts/check-npm-metadata.mjs'),
     'docs-only package README changes must retain the npm metadata gate',
   );
+  const deltaPredicate = "vars.CI_DELTA_ENABLED == 'true' && (github.base_ref == 'main' || github.base_ref == 'testnet-canary')";
   assert.ok(
-    workflow.includes("vars.CI_DELTA_ENABLED == 'true'"),
-    'delta rollout must remain default-off until repository safeguards are active',
+    workflow.includes(`DELTA_ENABLED: \${{ ${deltaPredicate} }}`),
+    'both protected branches must remain subordinate to the rollback switch',
   );
-  assert.ok(workflow.includes("github.base_ref == 'main'"));
   assert.ok(workflow.includes('git -C candidate diff --name-status -z \\\n'));
   assert.ok(workflow.includes('"${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"'));
   assert.equal(workflow.includes('"${BASE_SHA}" "${HEAD_SHA}"'), false);
@@ -625,12 +635,13 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.ok(workflow.includes('shard: [1, 2, 3, 4, 5, 6, 7]'));
   assert.ok(workflow.includes('playwright test --shard=${{ matrix.shard }}/7'));
 
-  for (const packageName of [
-    '@origintrail-official/dkg-rdf-utils',
-    '@origintrail-official/dkg-okf',
-    '@origintrail-official/dkg-demo',
+  for (const [packageName, invocation] of [
+    ['@origintrail-official/dkg-http-utils', '--lane http-utils'],
+    ['@origintrail-official/dkg-rdf-utils', '--lane rdf-utils'],
+    ['@origintrail-official/dkg-okf', '--filter @origintrail-official/dkg-okf'],
+    ['@origintrail-official/dkg-demo', '--filter @origintrail-official/dkg-demo'],
   ]) {
-    assert.ok(workflow.includes(`--filter ${packageName}`), `${packageName} tests must stay in CI`);
+    assert.ok(workflow.includes(invocation), `${packageName} tests must stay in CI`);
   }
 
   const evmWorkflow = fs.readFileSync(
@@ -638,8 +649,10 @@ test('every planner output is wired to a real workflow job and omitted tests sta
     'utf8',
   );
   assert.ok(evmWorkflow.includes('fromJSON(needs.plan.outputs.evm_matrix)'));
-  assert.ok(evmWorkflow.includes("vars.CI_DELTA_ENABLED == 'true'"));
-  assert.ok(evmWorkflow.includes("github.base_ref == 'main'"));
+  assert.ok(
+    evmWorkflow.includes(`DELTA_ENABLED: \${{ ${deltaPredicate} }}`),
+    'the EVM planner must use the same grouped rollback predicate',
+  );
   assert.ok(evmWorkflow.includes('git -C candidate diff --name-status -z \\\n'));
   assert.ok(evmWorkflow.includes('"${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"'));
   assert.ok(evmWorkflow.includes('BASE_SHA="$(git -C candidate rev-parse "${MERGE_SHA}^1")"'));

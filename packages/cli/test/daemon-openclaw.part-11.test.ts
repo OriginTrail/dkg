@@ -174,12 +174,27 @@ describe('local agent integration registry helpers', () => {
 
   it('lists built-in local integrations even before they are connected', () => {
     const integrations = listLocalAgentIntegrations(makeConfig());
+    const localLlm = integrations.find((integration) => integration.id === 'local-llm');
     const openclaw = integrations.find((integration) => integration.id === 'openclaw');
 
-    // Sorted by display name, so Prime Agent lands after OpenClaw.
-    expect(integrations.map((integration) => integration.id)).toEqual(['hermes', 'openclaw', 'prime-agent']);
-    expect(integrations.every((integration) => integration.enabled === false)).toBe(true);
-    expect(integrations.every((integration) => integration.status === 'disconnected')).toBe(true);
+    // Sorted by display name. The daemon-owned local LLM is always configured;
+    // external framework integrations stay disconnected until attached.
+    expect(integrations.map((integration) => integration.id)).toEqual([
+      'local-llm',
+      'hermes',
+      'openclaw',
+      'prime-agent',
+    ]);
+    expect(localLlm).toMatchObject({
+      enabled: true,
+      status: 'configured',
+      transport: { kind: 'dkg-local-llm' },
+      capabilities: { localChat: true, connectFromUi: false },
+    });
+    expect(integrations
+      .filter((integration) => integration.id !== 'local-llm')
+      .every((integration) => integration.enabled === false && integration.status === 'disconnected'))
+      .toBe(true);
     expect(openclaw?.capabilities.chatAttachments).toBeUndefined();
   });
 

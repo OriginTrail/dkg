@@ -19,7 +19,7 @@ import {
   type SignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import {
-  OxigraphStore,
+  createTripleStore,
   quadsToNQuads,
   type Quad,
 } from '@origintrail-official/dkg-storage';
@@ -35,24 +35,38 @@ import {
   inspectGate1ProductCapabilities,
   requireGate1ProductMethod,
 } from './product-capabilities.js';
+import {
+  GATE1_DEPLOYMENT,
+} from './fixture.js';
+import {
+  Gate1RolloutAdapterFixture,
+  parseGate1RolloutAdapterConfig,
+} from './rollout-adapter-fixture.js';
+import {
+  rolloutStoreBackendForBinding,
+  rolloutStoreBindingFromEnv,
+} from './rollout-store-config.js';
 
-const role = process.argv[2];
+const roleInput = process.argv[2];
 const dataDirInput = process.env.DKG_RFC64_GATE1_ADAPTER_DATA_DIR;
 const masterKeyHex = process.env.DKG_RFC64_GATE1_AGENT_MASTER_KEY_HEX;
-if (role !== 'author' && role !== 'receiver') throw new Error('adapter role is required');
+if (roleInput !== 'author' && roleInput !== 'receiver') throw new Error('adapter role is required');
 if (!dataDirInput) throw new Error('DKG_RFC64_GATE1_ADAPTER_DATA_DIR is required');
 if (!masterKeyHex || !/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
   throw new Error('DKG_RFC64_GATE1_AGENT_MASTER_KEY_HEX must be 32 lowercase hex bytes');
 }
 
 const dataDir = resolve(dataDirInput);
+const role: 'author' | 'receiver' = roleInput;
+const storeBinding = rolloutStoreBindingFromEnv(process.env, dataDir);
+const storeBackend = rolloutStoreBackendForBinding(storeBinding);
+const storeSentinelGraph = storeBinding.sentinelGraph;
 const pinnedMasterKeyHex = masterKeyHex;
-const RFC64_GATE1_DEPLOYMENT = Object.freeze({
-  networkId: 'otp:20430',
-  assertedAtChainId: '20430',
-  assertedAtKav10Address: '0x4444444444444444444444444444444444444444',
-});
+const rolloutConfig = parseGate1RolloutAdapterConfig(process.env);
+const rolloutMode = rolloutConfig?.mode ?? null;
+const rolloutKillSwitch = rolloutConfig?.killSwitch ?? false;
 let agent: DKGAgent | undefined;
+let rolloutFixture: Gate1RolloutAdapterFixture | undefined;
 let stopping = false;
 let commandTail = Promise.resolve();
 
@@ -106,6 +120,15 @@ async function ensureDeterministicAgentKey(): Promise<void> {
 
 async function boot(): Promise<void> {
   await ensureDeterministicAgentKey();
+  const store = await createTripleStore(storeBinding.tripleStore);
+  const storeSentinelVerified = await store.hasGraph(storeSentinelGraph);
+  if (!storeSentinelVerified) {
+    await store.close();
+    throw new Error(`selected store does not contain fixture sentinel ${storeSentinelGraph}`);
+  }
+  rolloutFixture = rolloutConfig === null
+    ? undefined
+    : await Gate1RolloutAdapterFixture.create(rolloutConfig, role, store);
   const created = await DKGAgent.create({
     name: `RFC64Gate1${role}`,
     dataDir,
@@ -113,16 +136,32 @@ async function boot(): Promise<void> {
     listenPort: 0,
     bootstrapPeers: [],
     nodeRole: 'edge',
-    store: new OxigraphStore(join(dataDir, 'store.nq')),
+    store,
     syncSharedMemoryOnConnect: false,
-    syncReconcilerEnabled: false,
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
-    rfc64CatalogDeploymentProfile: RFC64_GATE1_DEPLOYMENT as never,
+    ...(rolloutFixture === undefined ? {
+      syncReconcilerEnabled: false,
+      rfc64CatalogDeploymentProfile: GATE1_DEPLOYMENT,
+    } : rolloutFixture.agentOptions),
   });
   agent = created;
   await created.start();
+  // The rollout certificate models an Edge that explicitly selected this CG.
+  // RFC-64 receiver authority is subscription-owned; an accepted manifest by
+  // itself must not make an Edge receive every configured public graph.
+  if (
+    role === 'receiver'
+    && rolloutConfig !== null
+    && rolloutConfig.vmChainScenario !== 'inactive'
+  ) {
+    created.subscribeToContextGraph(rolloutConfig.contextGraphId, {
+      trackSyncScope: false,
+      persist: false,
+      syncMode: 'always-on',
+    });
+  }
   const tcp = created.multiaddrs.find((address) => address.includes('/tcp/'));
   if (tcp === undefined) throw new Error('real DKGAgent exposed no TCP multiaddr');
   emit({
@@ -134,6 +173,10 @@ async function boot(): Promise<void> {
     multiaddr: tcp,
     peerId: created.peerId,
     protocolVersion: GATE1_ADAPTER_PROTOCOL_VERSION,
+    rolloutKillSwitch,
+    rolloutMode,
+    storeBackend,
+    storeSentinelVerified,
     startupRepair: null,
   });
 }
@@ -143,6 +186,15 @@ async function handle(command: Command): Promise<void> {
     throw new Error('requestId is required');
   }
   const currentAgent = requireAgent();
+  if (rolloutFixture?.supportsCommand(command.command) === true) {
+    requireRole('receiver');
+    emitOperationResult(command, await rolloutFixture.dispatch(
+      currentAgent,
+      command.command,
+      command.input,
+    ));
+    return;
+  }
   switch (command.command) {
     case 'dial': {
       const input = plainRecord(command.input, 'dial input');
@@ -355,8 +407,9 @@ interface HarnessVerifiedControlObjectV1 {
 /**
  * Harness-only adversarial setup. Both signatures are cryptographically valid,
  * but the head claims the catalog author while naming an attacker-scoped
- * direct-author delegation. The product receiver must reject that exact scope
- * mismatch before activation or applied-head mutation.
+ * direct-author delegation. The product's scope-closed provider/receiver path
+ * must reject that exact mismatch before activation or applied-head mutation,
+ * without exposing whether the requested digest exists.
  */
 async function prepareForgedAuthorizationGenesis(
   currentAgent: DKGAgent,

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { SharedMemorySyncResult } from '../src/dkg-agent-types.js';
 import { classifySharedMemoryFreshness } from '../src/sync/shared-memory-freshness.js';
 import {
+  PEER,
   callSelectedSharedMemoryFromPeerDetailed,
   callSelectedSharedMemorySummary,
   callSyncSharedMemoryFromPeerDetailed,
@@ -37,20 +38,18 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
       ],
     });
     const plan = {
-      publicContextGraphIds: [publicCg],
-      privateRecoverFromCurator: [],
-      eligibleContextGraphIds: [publicCg],
+      targets: [{ contextGraphId: publicCg, lane: 'selected-public' as const }],
     };
 
     try {
       await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
-        sharedMemorySyncPlan: plan,
+        recoveryTargets: plan.targets,
       });
       await harness.agent.closeSelectedSwmMetaTransfers();
       await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
-        sharedMemorySyncPlan: plan,
+        recoveryTargets: plan.targets,
       });
 
       expect(harness.probes.metaRequesterScopes).toHaveLength(2);
@@ -108,11 +107,7 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
         {
           selectedSwmPriority: true,
           priority: 2_000,
-          sharedMemorySyncPlan: {
-            publicContextGraphIds: [publicCg],
-            privateRecoverFromCurator: [],
-            eligibleContextGraphIds: [publicCg],
-          },
+          recoveryTargets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
         },
       );
 
@@ -177,11 +172,7 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
         {
           selectedSwmPriority: true,
           priority: 2_000,
-          sharedMemorySyncPlan: {
-            publicContextGraphIds: [publicCg],
-            privateRecoverFromCurator: [],
-            eligibleContextGraphIds: [publicCg],
-          },
+          recoveryTargets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
         },
       );
 
@@ -247,11 +238,7 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
         {
           selectedSwmPriority: true,
           priority: 2_000,
-          sharedMemorySyncPlan: {
-            publicContextGraphIds: [publicCg],
-            privateRecoverFromCurator: [],
-            eligibleContextGraphIds: [publicCg],
-          },
+          recoveryTargets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
         },
       );
 
@@ -317,11 +304,7 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
         {
           selectedSwmPriority: true,
           priority: 2_000,
-          sharedMemorySyncPlan: {
-            publicContextGraphIds: [publicCg],
-            privateRecoverFromCurator: [],
-            eligibleContextGraphIds: [publicCg],
-          },
+          recoveryTargets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
         },
       );
 
@@ -376,22 +359,20 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
       },
     });
     const plan = {
-      publicContextGraphIds: [publicCg],
-      privateRecoverFromCurator: [],
-      eligibleContextGraphIds: [publicCg],
+      targets: [{ contextGraphId: publicCg, lane: 'selected-public' as const }],
     };
 
     try {
       const first = callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         priority: 2_000,
-        sharedMemorySyncPlan: plan,
+        recoveryTargets: plan.targets,
       });
       await firstStarted;
       const second = callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         priority: 2_001,
-        sharedMemorySyncPlan: plan,
+        recoveryTargets: plan.targets,
       });
       await Promise.resolve();
       expect(harness.probes.metaFetches()).toBe(1);
@@ -463,9 +444,7 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
       },
     });
     const plan = {
-      publicContextGraphIds: [publicCg],
-      privateRecoverFromCurator: [],
-      eligibleContextGraphIds: [publicCg],
+      targets: [{ contextGraphId: publicCg, lane: 'selected-public' as const }],
     };
     let ordinary: Promise<SharedMemorySyncResult> | undefined;
     let selected: ReturnType<typeof callSelectedSharedMemoryFromPeerDetailed> | undefined;
@@ -480,7 +459,7 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
       selected = callSelectedSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         priority: 2_000,
-        sharedMemorySyncPlan: plan,
+        recoveryTargets: plan.targets,
       });
       await vi.waitFor(() => expect(harness.probes.metaFetches()).toBeGreaterThanOrEqual(2));
       releaseOrdinary();
@@ -509,6 +488,74 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
       if (ordinary) pending.push(ordinary);
       if (selected) pending.push(selected);
       await Promise.allSettled(pending);
+      await harness.close();
+    }
+  });
+
+  it('does not coalesce different selected accounting scopes into one flight', async () => {
+    const publicCg = 'selected-requested-scope-single-flight-isolation';
+    let signalFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { signalFirstStarted = resolve; });
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest: snapshotManifest(publicCg, 0),
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      reportEmptyResponse: true,
+      onMetaFetch: async ({ fetch }) => {
+        if (fetch === 1) {
+          signalFirstStarted();
+          await firstGate;
+        }
+      },
+    });
+    const plan = {
+      targets: [{ contextGraphId: publicCg, lane: 'selected-public' as const }],
+    };
+
+    try {
+      const selectedPublic = callSelectedSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          selectedSwmPriority: true,
+          requestedScope: { kind: 'selected-public' },
+          priority: 2_000,
+          recoveryTargets: plan.targets,
+        },
+      );
+      await firstStarted;
+      const recoveryPlan = callSelectedSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          selectedSwmPriority: true,
+          requestedScope: { kind: 'rfc64-recovery-plan' },
+          priority: 2_000,
+          recoveryTargets: plan.targets,
+        },
+      );
+
+      releaseFirst();
+      const [selectedResult, recoveryResult] = await Promise.all([
+        selectedPublic,
+        recoveryPlan,
+      ]);
+      expect(selectedResult.requestedScope).toEqual({
+        kind: 'selected-public',
+        targets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
+      });
+      expect(recoveryResult.requestedScope).toMatchObject({
+        kind: 'rfc64-recovery-plan',
+        plan: {
+          providerPeerId: PEER,
+          targets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
+        },
+      });
+      expect(selectedResult).not.toBe(recoveryResult);
+    } finally {
+      releaseFirst();
       await harness.close();
     }
   });

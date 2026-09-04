@@ -41,6 +41,7 @@ import type {
   SubGraphNameV1,
   TimestampMsV1,
   UnsignedContextGraphPolicyEnvelopeV1,
+  UnsignedMemberRosterEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import type {
   PhaseCallback,
@@ -59,9 +60,11 @@ import type { JsonLdContent } from './dkg-agent-utils.js';
 import type { SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import type { KaNumberAllocator } from './allocator.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
+import type { ContextGraphDormancyProjection } from './context-graph-subscription-dormancy.js';
 import type {
+  Rfc64CatalogActivationInputV1,
   Rfc64PublicCatalogActivationInputV1,
-  ResolvedRfc64PublicCatalogAutoPublishPolicyV1,
+  ResolvedRfc64CatalogAuthoringPolicyV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 import type {
   SyncAdmissionConfig,
@@ -578,7 +581,7 @@ export interface PeerDiagnostics {
  * Per-peer sync-reconciler backoff state. `failures` is the count of
  * consecutive reconciler attempts that did NOT produce a successful sync;
  * `nextRetryAt` is the epoch-ms before which the reconciler skips this peer.
- * Reset on a successful sync (`onPeerSynced`) and on `connection:close`.
+ * Reset on a successful sync (`onSyncAccounting`) and on `connection:close`.
  * See `SYNC_BACKOFF_BASE_MS`.
  */
 export type SyncReconcilerBackoff = {
@@ -776,6 +779,27 @@ export interface ContextGraphSubscriptionRecord {
   syncScoped: boolean;
 }
 
+export interface VmReconcilePeerTopologyPeer {
+  peerId: string;
+  core: boolean;
+}
+
+export type VmReconcilePeerTopology =
+  | { kind: 'unreadable' }
+  | {
+    kind: 'readable';
+    preferredPeerId: string | null;
+    privateOnly: boolean;
+    /** Ranked provider order; array position is the rank. */
+    peers: VmReconcilePeerTopologyPeer[];
+  };
+
+/** Historical proof attached to a cached miss, separate from live topology. */
+export interface VmReconcilePeerTopologyEvidence {
+  topology: VmReconcilePeerTopology;
+  cleanMissPeerIds: string[];
+}
+
 export interface ContextGraphSubscriptionStore {
   loadAll(): Promise<ContextGraphSubscriptionRecord[]>;
   load?(contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null>;
@@ -827,7 +851,16 @@ export interface VmReconcileNegativeRecord {
   nextRetryAt: number;
   swmGen: string;
   candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
+  /**
+   * Legacy serialized topology contract. Required during the v1-to-v2
+   * migration so existing custom stores can keep reading and persisting the
+   * field they were compiled against.
+   */
   peerTopologyKey: string;
+  /** Typed topology used by v2-aware stores; absent when loading a legacy row. */
+  peerTopology?: VmReconcilePeerTopology;
+  /** V2 clean-miss evidence; absent legacy records conservatively imply none. */
+  cleanMissPeerIds?: string[];
 }
 
 /** Process-local evidence for one chain-ordinal exact-recovery rotation. */
@@ -857,7 +890,7 @@ export interface VmReconcileRotationRecord {
   nextRetryAt: number;
 }
 
-export interface ContextGraphSubscriptionRehydrationStatus {
+export interface ContextGraphSubscriptionRehydrationStatus extends ContextGraphDormancyProjection {
   /** Whether persisted subscription activation was enabled for this boot. */
   rehydrationEnabled: boolean;
   /** Non-system persisted rows governed by the rehydration cap. */
@@ -870,12 +903,21 @@ export interface ContextGraphSubscriptionRehydrationStatus {
   dormant: number;
   activationCap: number;
   capDisabled: boolean;
-  dormantIds: string[];
   /** Startup rehydration completion timestamp; remains stable after boot. */
   completedAt: number;
   /** Most recent timestamp for post-boot diagnostic count/id updates. */
   updatedAt: number;
 }
+
+/**
+ * Mutable process-local rehydration counters. Dormancy itself has one source
+ * of truth (`contextGraphSubscriptionDormancyById`) and is projected only when
+ * diagnostics cross the public API boundary.
+ */
+export type ContextGraphSubscriptionRehydrationInternalStatus = Omit<
+  ContextGraphSubscriptionRehydrationStatus,
+  keyof ContextGraphDormancyProjection | 'dormant'
+>;
 
 export interface ContextGraphWritePreflightProbe {
   /**
@@ -1329,6 +1371,15 @@ export interface Rfc64PublicCatalogAutoPublishConfigV1 {
   readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
 }
 
+/**
+ * Policy-neutral selected-CG authoring controls. Announcement destinations
+ * are deliberately absent: the accepted CG policy owns those per graph.
+ */
+export interface Rfc64CatalogAutoPublishConfigV1 {
+  readonly catalogIssuerDelegationEffectiveAt?: TimestampMsV1;
+  readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
+}
+
 export interface Rfc64PublicCatalogBootstrapScopeV1 {
   readonly networkId: NetworkIdV1;
   readonly contextGraphId: ContextGraphIdV1;
@@ -1368,6 +1419,25 @@ export interface Rfc64PublicCatalogBootstrapConfigV1 {
   readonly retryIntervalMs?: number;
 }
 
+/**
+ * One policy-neutral, operator-verified RFC-64 catalog selection.  The
+ * canonical roster envelope is present exactly for invite-only policies; its
+ * payload is bound to the exact policy object digest before agent startup.
+ */
+export interface Rfc64CatalogBootstrapPolicyV1 {
+  readonly policyEnvelope: UnsignedContextGraphPolicyEnvelopeV1;
+  readonly rosterEnvelope?: UnsignedMemberRosterEnvelopeV1;
+  readonly targets: readonly Rfc64PublicCatalogBootstrapTargetV1[];
+  /** One to eight graph-complete providers for selected private recovery. */
+  readonly completeSwmProviders?: readonly string[];
+}
+
+/** Explicit policy-neutral cold-start manifest used by additive `rfc64Catalog`. */
+export interface Rfc64CatalogBootstrapConfigV1 {
+  readonly acceptedPolicies: readonly Rfc64CatalogBootstrapPolicyV1[];
+  readonly retryIntervalMs?: number;
+}
+
 export interface DKGAgentConfig {
   name: string;
   /** Selected genesis document. Defaults to the compatibility Base testnet genesis. */
@@ -1387,6 +1457,12 @@ export interface DKGAgentConfig {
    * RFC-64 catalog policy. Omission preserves the legacy open-only lane.
    */
   rfc64CatalogAccessPolicyAuthority?: Rfc64CatalogAccessPolicyAuthorityConfigV1;
+  /**
+   * Additive policy-neutral RFC-64 activation. It can select public and
+   * invite-only CGs. Existing selected-public callers may continue to use
+   * `rfc64PublicCatalogActivation`.
+   */
+  rfc64CatalogActivation?: Rfc64CatalogActivationInputV1;
   /**
    * Canonical selected-public activation resolved through the versioned,
    * side-effect-free activation surface. Mutually exclusive with the legacy
@@ -1857,6 +1933,7 @@ export type ResolvedDKGAgentConfig =
     | 'syncBackoffBaseMs'
     | 'syncBackoffMaxMs'
     | 'syncBackoffJitter'
+    | 'rfc64CatalogActivation'
     | 'rfc64PublicCatalogActivation'
     | 'rfc64PublicCatalogAutoPublish'
     | 'rfc64PublicCatalogBootstrap'
@@ -1867,6 +1944,10 @@ export type ResolvedDKGAgentConfig =
     storageAckTiming: StorageAckTiming;
     syncReconcilerTiming: SyncReconcilerTiming;
     rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
-    rfc64PublicCatalogAutoPublishPolicy?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;
+    rfc64CatalogBootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
+    /** Sole immutable restart-stable D17/D18 runtime authority for this boot. */
+    rfc64CatalogExecutionPlan: import('./rfc64/catalog-rollout-authority-v1.js')
+      .Rfc64CatalogExecutionPlanV1;
+    rfc64CatalogAuthoringPolicy?: ResolvedRfc64CatalogAuthoringPolicyV1;
     rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
   };

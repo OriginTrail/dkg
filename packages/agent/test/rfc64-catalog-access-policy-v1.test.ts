@@ -14,6 +14,10 @@ import {
 
 import {
   Rfc64CatalogAccessPolicyRegistryV1,
+  assertAcceptedRfc64CatalogAuthorMembershipV1,
+  assertAcceptedRfc64CatalogPolicyRosterV1,
+  rfc64CatalogAuthorityDirectionV1,
+  type Rfc64CatalogAuthorityOperationV1,
   type Rfc64CatalogAccessOperationV1,
 } from '../src/rfc64/catalog-access-policy-v1.js';
 
@@ -119,6 +123,28 @@ function authInput(operation: Rfc64CatalogAccessOperationV1, policyDigest: Diges
 }
 
 describe('RFC-64 D26 catalog access authorization', () => {
+  it('classifies every protocol operation through one exhaustive authority table', () => {
+    const cases: readonly (readonly [
+      Rfc64CatalogAuthorityOperationV1,
+      'serving' | 'receiving',
+    ])[] = [
+      ['announce-outbound', 'serving'],
+      ['announce-inbound', 'receiving'],
+      ['fetch-outbound', 'receiving'],
+      ['fetch-inbound', 'serving'],
+      ['catalog-object-fetch-outbound', 'receiving'],
+      ['catalog-object-fetch-inbound', 'serving'],
+      ['ka-bundle-fetch-outbound', 'receiving'],
+      ['ka-bundle-fetch-inbound', 'serving'],
+      ['current-head-discovery-outbound', 'receiving'],
+      ['current-head-discovery-inbound', 'serving'],
+    ];
+    expect(cases.map(([operation]) => [
+      operation,
+      rfc64CatalogAuthorityDirectionV1(operation),
+    ])).toEqual(cases);
+  });
+
   it('supports an explicit open-only registry without a dummy identity authority', async () => {
     const subject = new Rfc64CatalogAccessPolicyRegistryV1();
     const openPolicy = policy(0, 1);
@@ -325,6 +351,40 @@ describe('RFC-64 D26 catalog access authorization', () => {
       policyDigest,
       roster: { ...roster(policyDigest), policyDigest: `0x${'cd'.repeat(32)}` as Digest32V1 },
     })).toThrow(/not bound to the exact accepted policy/u);
+  });
+
+  it('keeps snapshot validity separate from author membership', () => {
+    const acceptedPolicy = policy(1, 1);
+    const policyDigest = digestFor(acceptedPolicy);
+    const acceptedRoster = roster(policyDigest);
+
+    expect(() => assertAcceptedRfc64CatalogPolicyRosterV1(
+      acceptedPolicy,
+      policyDigest,
+      acceptedRoster,
+    )).not.toThrow();
+    expect(() => assertAcceptedRfc64CatalogAuthorMembershipV1(
+      acceptedPolicy,
+      acceptedRoster,
+      LOCAL,
+    )).not.toThrow();
+    expect(() => assertAcceptedRfc64CatalogAuthorMembershipV1(
+      acceptedPolicy,
+      acceptedRoster,
+      OUTSIDER,
+    )).toThrow(/author membership/u);
+
+    const openPolicy = policy(0, 1);
+    expect(() => assertAcceptedRfc64CatalogPolicyRosterV1(
+      openPolicy,
+      digestFor(openPolicy),
+      null,
+    )).not.toThrow();
+    expect(() => assertAcceptedRfc64CatalogAuthorMembershipV1(
+      openPolicy,
+      null,
+      OUTSIDER,
+    )).not.toThrow();
   });
 
   it('allows exact replay but refuses unverified current-policy replacement', () => {

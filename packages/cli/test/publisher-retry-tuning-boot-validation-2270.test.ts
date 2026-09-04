@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
   loadOpWallets: vi.fn(),
   loadNetworkConfig: vi.fn(),
   startPublisherRuntimeWithOutcome: vi.fn(),
+  daemonLogShutdown: vi.fn(),
+  daemonLogPush: vi.fn(),
 }));
 
 vi.mock('node:http', () => ({ createServer: mocks.createServer }));
@@ -43,6 +45,26 @@ vi.mock('../src/daemon/chain-reset-wipe.js', async importOriginal => {
 vi.mock('../src/publisher-runner.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/publisher-runner.js')>();
   return { ...actual, startPublisherRuntimeWithOutcome: mocks.startPublisherRuntimeWithOutcome };
+});
+
+vi.mock('../src/daemon/daemon-log-file-writer.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/daemon/daemon-log-file-writer.js')>();
+  return {
+    ...actual,
+    startDaemonLogFileWriter: (
+      ...args: Parameters<typeof actual.startDaemonLogFileWriter>
+    ) => {
+      const writer = actual.startDaemonLogFileWriter(...args);
+      return {
+        ...writer,
+        push: (data: string) => {
+          mocks.daemonLogPush(data);
+          return writer.push(data);
+        },
+        shutdown: () => mocks.daemonLogShutdown(writer.shutdown),
+      };
+    },
+  };
 });
 
 const { runDaemonInner } = await import('../src/daemon/lifecycle.js');
@@ -92,7 +114,11 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
       wiped: false, skipped: false, prevMarker: null, removedFiles: [], backedUpFiles: [], failedFiles: [],
     });
     mocks.agentCreate.mockRejectedValue(new Error('after-agent-create'));
+    mocks.daemonLogShutdown.mockImplementation(
+      async (shutdown: () => Promise<void>) => await shutdown(),
+    );
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     vi.spyOn(process, 'exit').mockImplementation(((code?: string | number | null) => {
       throw new Error(`process.exit:${code}`);
     }) as never);
@@ -111,6 +137,8 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
     for (const l of sigtermListeners) process.on('SIGTERM', l);
     if (originalDkgHome === undefined) delete process.env.DKG_HOME;
     else process.env.DKG_HOME = originalDkgHome;
+    // A failed boot owns and drains its daemon-log writer before rejecting, so
+    // teardown never needs timing-dependent filesystem retries.
     if (tempHome) await rm(tempHome, { recursive: true, force: true });
     tempHome = undefined;
   });
@@ -132,6 +160,13 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
         chainId: 'evm:100',
       },
     } as any, Date.now());
+  }
+
+  function closeAgentCreateDb(): void {
+    const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
+    const db = createArg?.chainEventCursorStore?.cursors?.db
+      ?? createArg?.contextGraphRegistryScanCursorStore?.cursors?.db;
+    db?.close?.();
   }
 
   it('fails the boot on an out-of-range retryJitterRatio before wipe or agent create', async () => {
@@ -179,24 +214,55 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
     await expect(bootWith({ retryJitterRatio: '0.2' as never }, { enabled: false }))
       .rejects.toThrow('after-agent-create');
     expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
-    const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
-    const db = createArg?.chainEventCursorStore?.cursors?.db
-      ?? createArg?.contextGraphRegistryScanCursorStore?.cursors?.db;
-    db?.close?.();
+    closeAgentCreateDb();
+  });
+
+  // End-to-end teardown-determinism proof against the REAL writer: the
+  // controlled ordering test pins that the rejection settles after shutdown() was
+  // CALLED, but a mock-level assertion cannot catch a shutdown() that
+  // resolves without actually draining, or a tee left installed. Nothing may
+  // land in DKG_HOME once the boot has rejected — that is the property the
+  // plain-rm() afterEach depends on (#2270's ENOTEMPTY race). The explicit
+  // push-boundary assertion keeps this proof free of another timing budget.
+  it('a failed boot writes nothing more into DKG_HOME after it rejects (#2270)', async () => {
+    await expect(bootWith({ maxAttempts: 3 })).rejects.toThrow('after-agent-create');
+    const logFile = join(tempHome!, 'daemon.log');
+    const sizeAtRejection = (await stat(logFile)).size;
+    expect(sizeAtRejection).toBeGreaterThan(0);
+    const probe = 'post-rejection straggler probe\n';
+    process.stdout.write(probe);
+    process.stderr.write(probe);
+    expect(mocks.daemonLogPush).not.toHaveBeenCalledWith(probe);
+    expect((await stat(logFile)).size).toBe(sizeAtRejection);
+    closeAgentCreateDb();
   });
 
   it('boots past the boundary with a fully valid retry-knob block', async () => {
-    await expect(bootWith({
+    let releaseShutdown!: () => void;
+    const shutdownGate = new Promise<void>((resolve) => { releaseShutdown = resolve; });
+    mocks.daemonLogShutdown.mockImplementationOnce(async (shutdown: () => Promise<void>) => {
+      await shutdown();
+      await shutdownGate;
+    });
+
+    const boot = bootWith({
       autoRetryEnabled: false,
       retryJitterRatio: 0.35,
       retryBackoffBaseMs: 2_000,
       retryBackoffMaxMs: 90_000,
-    })).rejects.toThrow('after-agent-create');
+    });
+    let bootSettled = false;
+    void boot.then(
+      () => { bootSettled = true; },
+      () => { bootSettled = true; },
+    );
+    await vi.waitFor(() => expect(mocks.daemonLogShutdown).toHaveBeenCalledTimes(1));
+    expect(bootSettled).toBe(false);
+
+    releaseShutdown();
+    await expect(boot).rejects.toThrow('after-agent-create');
 
     expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
-    const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
-    const db = createArg?.chainEventCursorStore?.cursors?.db
-      ?? createArg?.contextGraphRegistryScanCursorStore?.cursors?.db;
-    db?.close?.();
+    closeAgentCreateDb();
   });
 });

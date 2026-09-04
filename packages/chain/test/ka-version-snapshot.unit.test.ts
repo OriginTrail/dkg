@@ -35,6 +35,8 @@ type Script = {
   wrongChain?: boolean;
   /** When true, this endpoint never settles — the stalled-RPC case cancellation exists for. */
   stall?: boolean;
+  /** Fail the first N head reads with `code` before serving `blockNumber` (transient-blip cases). */
+  headFailures?: { count: number; code: string };
   latestRoot: string | null;
   rootCount: bigint;
   author?: string | null;
@@ -57,6 +59,10 @@ function adapterOver(
     },
     async getBlockNumber() {
       if (script.stall) return new Promise(() => {}) as never;
+      if (script.headFailures && script.headFailures.count > 0) {
+        script.headFailures.count -= 1;
+        throw Object.assign(new Error('scripted head-read failure'), { code: script.headFailures.code });
+      }
       if (script.blockNumber === null) throw Object.assign(new Error('no head view'), { code: 'NETWORK_ERROR' });
       return script.blockNumber;
     },
@@ -171,6 +177,58 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
     ]);
 
     await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();
+  });
+
+  it('a single transient blip on one endpoint does not void the unanimity poll', async () => {
+    // The blip endpoint fails its first head read with a transient transport code and answers
+    // normally on the in-place retry. Unanimity ("every configured endpoint reports a complete
+    // view") is judged over the retried answer, so one flaky tick no longer costs the caller a
+    // whole backoff cycle.
+    const { adapter } = adapterOver([
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+      {
+        blockNumber: 502,
+        latestRoot: `0x${'bb'.repeat(32)}`,
+        rootCount: 4n,
+        headFailures: { count: 1, code: 'SERVER_ERROR' },
+      },
+    ]);
+
+    const view = await adapter.readKnowledgeAssetVersionSnapshot(KA_ID);
+
+    expect(view).toMatchObject({ latestRoot: `0x${'bb'.repeat(32)}`, blockNumber: 502 });
+  });
+
+  it('a deterministic failure disqualifies its endpoint with NO retry — the poll stays inconclusive', async () => {
+    // CALL_EXCEPTION is an ANSWER, not an outage: re-asking cannot change it, so the retry must
+    // not apply. The endpoint would have answered on a second ask (the script only fails once) —
+    // if this row ever sees a snapshot, the retry has started second-guessing deterministic
+    // classifications.
+    const { adapter } = adapterOver([
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+      {
+        blockNumber: 502,
+        latestRoot: `0x${'bb'.repeat(32)}`,
+        rootCount: 4n,
+        headFailures: { count: 1, code: 'CALL_EXCEPTION' },
+      },
+    ]);
+
+    expect(await adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).toBeNull();
+  });
+
+  it('a second consecutive transient failure still voids the poll — the retry budget is one', async () => {
+    const { adapter } = adapterOver([
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+      {
+        blockNumber: 502,
+        latestRoot: `0x${'bb'.repeat(32)}`,
+        rootCount: 4n,
+        headFailures: { count: 2, code: 'SERVER_ERROR' },
+      },
+    ]);
+
+    expect(await adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).toBeNull();
   });
 
   it('a partial view is never returned — a missing attribution disqualifies its endpoint', async () => {

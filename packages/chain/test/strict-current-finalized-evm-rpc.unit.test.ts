@@ -538,6 +538,30 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     expect(server.calls).toHaveLength(1);
   });
 
+  it('fails over after an oversized non-2xx body instead of treating it as a resource limit', async () => {
+    const unavailable = await startRpcServer((_call, response) => {
+      response.writeHead(503, { 'content-type': 'text/plain' });
+      response.end('x'.repeat(CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1 + 1));
+    });
+    const backup = await startRpcServer(successfulHandler());
+    const adapter = createStrictCurrentFinalizedEvmChainAdapterV1({
+      chainId: CHAIN_ID,
+      endpoints: [unavailable.url, backup.url],
+    });
+
+    await expect(adapter(fixedRequest())).resolves.toMatchObject({
+      chainId: CHAIN_ID,
+      blockHash: BLOCK_HASH,
+    });
+    expect(unavailable.calls.map(({ method }) => method)).toEqual(['eth_chainId']);
+    expect(backup.calls.map(({ method }) => method)).toEqual([
+      'eth_chainId',
+      'eth_getBlockByNumber',
+      'eth_getCode',
+      'eth_call',
+    ]);
+  });
+
   it('applies the two-endpoint ceiling after normalized endpoint deduplication', async () => {
     const primary = await startRpcServer((call, response) => {
       sendResult(response, call, '0x1');
@@ -823,6 +847,28 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     expect(second.calls).toHaveLength(0);
   });
 
+  it('rejects an oversized HTTP 200 Content-Length before parsing or failover', async () => {
+    const oversizedBody = ' '.repeat(
+      CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1 + 1,
+    );
+    const first = await startRpcServer((_call, response) => {
+      response.writeHead(200, {
+        'content-type': 'application/json',
+        'content-length': String(Buffer.byteLength(oversizedBody)),
+      });
+      response.end(oversizedBody);
+    });
+    const second = await startRpcServer(successfulHandler());
+    const adapter = createStrictCurrentFinalizedEvmChainAdapterV1({
+      chainId: CHAIN_ID,
+      endpoints: [first.url, second.url],
+    });
+
+    await expect(adapter(fixedRequest())).rejects.toMatchObject({ code: 'resource-limit' });
+    expect(first.calls).toHaveLength(1);
+    expect(second.calls).toHaveLength(0);
+  });
+
   it('cancels the actual loopback HTTP operation and does not fail over', async () => {
     const received = deferred<void>();
     const connectionClosed = deferred<void>();
@@ -882,6 +928,7 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
       { chainId: CHAIN_ID, endpoints: [] },
       { chainId: CHAIN_ID, endpoints: ['ftp://127.0.0.1/a'] },
       { chainId: CHAIN_ID, endpoints: ['http://127.0.0.1/a#fragment'] },
+      { chainId: CHAIN_ID, endpoints: ['https://user:pass@rpc.example.com'] },
       { chainId: CHAIN_ID, endpoints: ['http://127.0.0.1:1'], peerEndpoint: third },
     ]) {
       expect(() => createStrictCurrentFinalizedEvmChainAdapterV1(

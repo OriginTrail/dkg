@@ -6,5 +6,9 @@
     "composite": true
   },
   "include": ["src"],
-  "references": [{ "path": "../core" }, { "path": "../rdf-utils" }]
+  "references": [
+    { "path": "../core" },
+    { "path": "../http-utils" },
+    { "path": "../rdf-utils" }
+  ]
 }

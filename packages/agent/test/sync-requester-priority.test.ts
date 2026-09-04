@@ -291,9 +291,10 @@ describe('requester per-CG priority admission', () => {
       LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailed as any
     ).call(agent, 'peer', contextGraphIds, {
       sharedMemorySyncPlan: {
-        publicContextGraphIds: contextGraphIds,
-        privateRecoverFromCurator: [],
-        eligibleContextGraphIds: contextGraphIds,
+        targets: contextGraphIds.map((contextGraphId) => ({
+          contextGraphId,
+          lane: 'selected-public',
+        })),
       },
     });
 
@@ -332,9 +333,10 @@ describe('requester per-CG priority admission', () => {
       LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailed as any
     ).call(agent, 'peer', contextGraphIds, {
       sharedMemorySyncPlan: {
-        publicContextGraphIds: [],
-        privateRecoverFromCurator: contextGraphIds,
-        eligibleContextGraphIds: contextGraphIds,
+        targets: contextGraphIds.map((contextGraphId) => ({
+          contextGraphId,
+          lane: 'ordinary-private',
+        })),
       },
     });
 

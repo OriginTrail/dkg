@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import { handleAgentChatRoutes } from '../src/daemon/routes/agent-chat.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 function fakeRes() {
   const res: any = { statusCode: 0, body: '' };
@@ -41,14 +42,17 @@ function runCtx(
   // sees the same bearer the test passed in.
   const requestToken = opts?.bearer;
   const requestAgentAddress = opts?.requestAgentAddress ?? '';
+  const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
   const ctx = {
     req: fakeReq(method, rawPath, opts),
     res,
     agent,
     path: url.pathname,
     url,
-    requestToken,
     requestAgentAddress,
+    authentication: tokenAgentAddress
+      ? requestAuthentication({ kind: 'agent', agentAddress: tokenAgentAddress, token: requestToken })
+      : requestAuthentication({ kind: 'nodeOperator', token: requestToken }),
     validTokens: new Set<string>(),
   } as unknown as RequestContext;
   return { res, done: handleAgentChatRoutes(ctx) };

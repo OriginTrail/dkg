@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { CatchupJobResult, CatchupRunRequest } from '../src/catchup-runner.js';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 import { handleQueryRoutes } from '../src/daemon/routes/query.js';
 import { daemonState } from '../src/daemon/state.js';
 
@@ -196,6 +197,12 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     };
 
     const agent = {
+      resolveContextGraphReadAuthority: async () => ({
+        outcome: 'allowed' as const,
+        source: 'legacy-local' as const,
+        reason: 'test-public',
+        metadataBootstrap: 'eligible' as const,
+      }),
       getContextGraphAllowedAgents: async () => opts.allowedAgents ?? [],
       getSubscribedContextGraphs: () => state,
       subscribeToContextGraph: (
@@ -273,8 +280,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         routePlugins: [],
         url,
         path: url.pathname,
-        requestToken: undefined,
         requestAgentAddress: undefined,
+        authentication: requestAuthentication({ kind: 'nodeOperator' }),
       } as any;
       await handleContextGraphRoutes(routeContext);
       if (!res.writableEnded) await handleQueryRoutes(routeContext);

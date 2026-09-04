@@ -7,7 +7,9 @@ import {
 import { describe, expect, it, vi } from 'vitest';
 
 import type { AppliedCatalogHeadSnapshotV1 } from '../src/rfc64/inventory-v1/index.js';
+import { FinalizedVmCompositionErrorV1 } from '../src/rfc64/finalized-vm-composer-v1.js';
 import { buildOpenOwnerContextGraphPolicyV1 } from '../src/rfc64/open-catalog-policy-v1.js';
+import { classifyRfc64CatalogReconciliationTerminalReasonV1 } from '../src/rfc64/public-catalog-reconciliation-failure-v1.js';
 import {
   createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
   type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1,
@@ -191,7 +193,6 @@ describe('RFC-64 bounded public root native reconciler v1', () => {
     for (const mismatch of [
       { currentCatalogHeadDigest: `0x${'aa'.repeat(32)}` as Digest32V1 },
       { catalogVersion: '2' },
-      { inventoryRowCount: '0' },
       { catalogScopeDigest: `0x${'bb'.repeat(32)}` as Digest32V1 },
       { authorAddress: '0xcccccccccccccccccccccccccccccccccccccccc' as EvmAddressV1 },
     ] satisfies Array<Partial<AppliedCatalogHeadSnapshotV1>>) {
@@ -206,6 +207,48 @@ describe('RFC-64 bounded public root native reconciler v1', () => {
     expect(() => deriveRfc64PublicOpenCatalogScopeV1(announcement('1', {
       subGraphName: 'not-root' as never,
     }), ACCEPTED_POLICY)).toThrow('accepted null-governance owner policy');
+  });
+
+  it('replays a durable private finalized head when current chain inventory changes', async () => {
+    const current = announcement('1');
+    const readAppliedCatalogHeadV1 = vi.fn(() => snapshot(current));
+    const requiresAppliedHeadPrecommit = vi.fn(() => true);
+    let finalizedChainAssetCount = 1;
+    const incomplete = new Rfc64PublicCatalogNativeReceiverErrorV1(
+      'catalog-native-receiver-activation',
+      'current private finalized VM precommit rejected the durable replay',
+      {
+        cause: new FinalizedVmCompositionErrorV1(
+          'finalized-vm-composition-incomplete',
+          'new finalized chain asset has no authorized catalog placement',
+        ),
+      },
+    );
+    const synchronize = vi.fn(async () => {
+      if (finalizedChainAssetCount > 1) throw incomplete;
+      return { inventoryRowCount: 1 } as never;
+    });
+    const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
+      nativeReceiver: receiver(synchronize),
+      inventory: { readAppliedCatalogHeadV1 },
+      resolveTrustedCatalogScope,
+      resolveDeployment: async () => DEPLOYMENT,
+      requiresAppliedHeadPrecommit,
+    });
+    const signal = new AbortController().signal;
+
+    await expect(reconciler.isHeadApplied(current)).resolves.toBe(false);
+    await expect(reconciler.reconcileHead('peer-a', current, signal)).resolves.toBe('applied');
+
+    finalizedChainAssetCount = 2;
+    await expect(reconciler.isHeadApplied(current)).resolves.toBe(false);
+    const failedReplay = reconciler.reconcileHead('peer-a', current, signal);
+    await expect(failedReplay).rejects.toBe(incomplete);
+    expect(classifyRfc64CatalogReconciliationTerminalReasonV1(incomplete))
+      .toBe('no-authorized-provider');
+    expect(requiresAppliedHeadPrecommit).toHaveBeenCalledWith(current);
+    expect(readAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(synchronize).toHaveBeenCalledTimes(2);
   });
 
   it('derives a multi-row dedupe count only from the exact staged head variant', async () => {
@@ -242,6 +285,37 @@ describe('RFC-64 bounded public root native reconciler v1', () => {
       resolveTrustedCatalogScope,
       resolveDeployment: async () => DEPLOYMENT,
     });
+    await expect(legacyOnly.isHeadApplied(successor)).resolves.toBe(false);
+  });
+
+  it('dedupes an exact zero-row successor with and without staged-head support', async () => {
+    const successor = announcement('2');
+    const readAppliedCatalogHeadV1 = vi.fn(() => snapshot(successor, {
+      inventoryRowCount: '0',
+    }));
+    const readStagedCatalogHead = vi.fn(async () => stagedHead(successor, '0'));
+    const withStagedHead = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
+      nativeReceiver: receiver(vi.fn()),
+      inventory: { readAppliedCatalogHeadV1 },
+      resolveTrustedCatalogScope,
+      resolveDeployment: async () => DEPLOYMENT,
+      readStagedCatalogHead,
+    });
+
+    await expect(withStagedHead.isHeadApplied(successor)).resolves.toBe(true);
+    expect(readStagedCatalogHead).toHaveBeenCalledWith(successor);
+
+    const legacyOnly = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
+      nativeReceiver: receiver(vi.fn()),
+      inventory: { readAppliedCatalogHeadV1 },
+      resolveTrustedCatalogScope,
+      resolveDeployment: async () => DEPLOYMENT,
+    });
+    await expect(legacyOnly.isHeadApplied(successor)).resolves.toBe(true);
+
+    readAppliedCatalogHeadV1.mockReturnValueOnce(snapshot(successor, {
+      inventoryRowCount: '2',
+    }));
     await expect(legacyOnly.isHeadApplied(successor)).resolves.toBe(false);
   });
 

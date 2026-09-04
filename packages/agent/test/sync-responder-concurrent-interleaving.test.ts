@@ -1,5 +1,10 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  ChangelogStore,
+  GraphSetIndexStore,
+  OxigraphStore,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -10,6 +15,7 @@ import {
   createResponderGraphListMemo,
   createResponderSubGraphRegistrationMemo,
 } from '../src/sync/responder/graph-plan.js';
+import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import {
   SYNC_BYTE_BUDGET_MAX_ROWS,
   SYNC_BYTE_BUDGET_PAGE_MODE,
@@ -1470,17 +1476,251 @@ describe('sync responder pagination interleaving', () => {
 
     const initial = memo.get({ refresh: true });
     firstRefresh.resolve(['old']);
-    await expect(initial).resolves.toEqual(['old']);
+    expect((await initial).graphs).toEqual(['old']);
 
     const refreshing = memo.get({ refresh: true });
     const overlappingRefresh = memo.get({ refresh: true });
     const deepPage = memo.get();
     secondRefresh.resolve(['new']);
 
-    await expect(refreshing).resolves.toEqual(['new']);
-    await expect(overlappingRefresh).resolves.toEqual(['new']);
-    await expect(deepPage).resolves.toEqual(['new']);
+    expect((await refreshing).graphs).toEqual(['new']);
+    expect((await overlappingRefresh).graphs).toEqual(['new']);
+    expect((await deepPage).graphs).toEqual(['new']);
     expect(calls).toBe(2);
+  });
+
+  it('does not retain a graph list read while a remote mutation is pending', async () => {
+    let generation = 0;
+    let stable = true;
+    let calls = 0;
+    let graphs = ['urn:graph:b', 'urn:graph:a', 'urn:graph:b'];
+    const store = {
+      getWriteRevision: (prefix: string) => {
+        expect(prefix).toBe('');
+        return { generation, stable };
+      },
+      listGraphs: async () => {
+        calls++;
+        return graphs;
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store);
+
+    expect((await memo.get({
+      refresh: true,
+      refreshGeneration: 'session-1',
+    })).graphs).toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect((await memo.get({
+      refresh: true,
+      refreshGeneration: 'session-2',
+    })).graphs).toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect(calls).toBe(1);
+
+    // Dispatch: the endpoint has not committed yet, so a refresh can still
+    // observe and memoize the old graph set at this intermediate generation.
+    generation++;
+    stable = false;
+    expect((await memo.get({
+      refresh: true,
+      refreshGeneration: 'pending-mutation',
+    })).graphs).toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect(calls).toBe(2);
+
+    // The remote mutation is still pending at the same revision. Stability,
+    // not generation change alone, must prevent reuse of the completed read.
+    graphs = ['urn:graph:c', 'urn:graph:a'];
+    expect((await memo.get({
+      refresh: true,
+      refreshGeneration: 'same-pending-mutation',
+    })).graphs).toEqual(['urn:graph:a', 'urn:graph:c']);
+    expect(calls).toBe(3);
+
+    // Settlement must advance again so the next session cannot reuse the
+    // graph list that was read while the mutation was in flight.
+    graphs = ['urn:graph:d', 'urn:graph:a'];
+    generation++;
+    stable = true;
+    expect((await memo.get({
+      refresh: true,
+      refreshGeneration: 'session-3',
+    })).graphs).toEqual(['urn:graph:a', 'urn:graph:d']);
+    expect(calls).toBe(4);
+  });
+
+  it('shares one in-flight graph enumeration at an unstable revision without caching it', async () => {
+    const firstRead = deferred<string[]>();
+    const secondRead = deferred<string[]>();
+    let calls = 0;
+    const store = {
+      getWriteRevision: () => ({ generation: 7, stable: false }),
+      listGraphs: async () => {
+        calls += 1;
+        return calls === 1 ? firstRead.promise : secondRead.promise;
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store);
+
+    const first = memo.get({ refresh: true });
+    const simultaneous = memo.get({ refresh: true });
+    await vi.waitFor(() => expect(calls).toBe(1));
+    firstRead.resolve(['urn:graph:b', 'urn:graph:a']);
+    expect((await first).graphs).toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect((await simultaneous).graphs).toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect(calls).toBe(1);
+
+    // Unstable completed results are never reused, even though simultaneous
+    // waiters may share the promise that produced them.
+    const later = memo.get({ refresh: true });
+    await vi.waitFor(() => expect(calls).toBe(2));
+    secondRead.resolve(['urn:graph:c']);
+    expect((await later).graphs).toEqual(['urn:graph:c']);
+  });
+
+  it('supersedes an in-flight graph list when write generation changes', async () => {
+    const oldGraphs = deferred<string[]>();
+    const newGraphs = deferred<string[]>();
+    let generation = 0;
+    let calls = 0;
+    const store = {
+      getWriteRevision: () => ({ generation, stable: true }),
+      listGraphs: async () => {
+        calls++;
+        return calls === 1 ? oldGraphs.promise : newGraphs.promise;
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store);
+
+    const beforeWrite = memo.get({ refresh: true, refreshGeneration: 'old-session' });
+    await vi.waitFor(() => expect(calls).toBe(1));
+    generation++;
+    const afterWrite = memo.get({ refresh: true, refreshGeneration: 'new-session' });
+
+    oldGraphs.resolve(['urn:graph:old']);
+    expect((await beforeWrite).graphs).toEqual(['urn:graph:old']);
+    await vi.waitFor(() => expect(calls).toBe(2));
+    newGraphs.resolve(['urn:graph:new']);
+    expect((await afterWrite).graphs).toEqual(['urn:graph:new']);
+  });
+
+  it('retains the TTL backstop for writers outside the tracked store process', async () => {
+    let calls = 0;
+    const store = {
+      getWriteRevision: () => ({ generation: 0, stable: true }),
+      listGraphs: async () => {
+        calls++;
+        return ['urn:graph:a'];
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store, 0);
+
+    await memo.get({ refresh: true, refreshGeneration: 'session-1' });
+    await memo.get({ refresh: true, refreshGeneration: 'session-2' });
+
+    expect(calls).toBe(2);
+  });
+
+  it('reuses the immutable graph membership snapshot across content-only writes', async () => {
+    let generation = 0;
+    let graphs = ['urn:graph:b', 'urn:graph:a'];
+    let calls = 0;
+    const store = {
+      getWriteRevision: () => ({ generation, stable: true }),
+      listGraphs: async () => {
+        calls += 1;
+        return graphs;
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store);
+
+    const initial = await memo.get({ refresh: true, refreshGeneration: 'initial' });
+    expect(initial.graphs).toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect(Object.isFrozen(initial)).toBe(true);
+    expect(Object.isFrozen(initial.graphs)).toBe(true);
+
+    // A write inside an existing graph advances the store revision, but the
+    // named-graph listing still describes the same set in a different order.
+    generation += 1;
+    graphs = ['urn:graph:a', 'urn:graph:b'];
+    const contentOnly = await memo.get({ refresh: true, refreshGeneration: 'content-write' });
+    expect(contentOnly).toBe(initial);
+
+    generation += 1;
+    graphs = ['urn:graph:c', 'urn:graph:a', 'urn:graph:b'];
+    const membershipChange = await memo.get({ refresh: true, refreshGeneration: 'graph-added' });
+    expect(membershipChange).not.toBe(initial);
+    expect(membershipChange.graphs).toEqual(['urn:graph:a', 'urn:graph:b', 'urn:graph:c']);
+
+    // Preserve the old deduplication contract: a malformed duplicate listing
+    // cannot make a same-length equality check retain absent graphs.
+    generation += 1;
+    graphs = ['urn:graph:a', 'urn:graph:a', 'urn:graph:b'];
+    const duplicateListing = await memo.get({ refresh: true, refreshGeneration: 'graph-removed' });
+    expect(duplicateListing).not.toBe(membershipChange);
+    expect(duplicateListing.graphs).toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect(calls).toBe(4);
+  });
+
+  it('uses the outer sorted catalog without exposing reserved decorator graphs', async () => {
+    const visible = 'did:dkg:context-graph:sorted-boundary/data';
+    const reserved = 'did:dkg:context-graph:sorted-boundary/internal';
+    const added = 'did:dkg:context-graph:sorted-boundary/added';
+    const base = new OxigraphStore();
+    await base.insert([q(visible, 1), q(reserved, 2)]);
+    const indexed = new GraphSetIndexStore(base, { revalidateMs: 100_000 });
+    const visibleStore = new ChangelogStore(indexed, { reservedGraphs: [reserved] });
+    // Initialize the changelog plane before measuring identity so its one-time
+    // reserved graph creation is not confused with a content-only mutation.
+    await visibleStore.insert([q(visible, 3)]);
+    const listGraphs = vi.spyOn(visibleStore, 'listGraphs').mockRejectedValue(
+      new Error('unsorted graph enumeration must not be selected'),
+    );
+    const store = createListContextGraphsCacheInvalidatingStore(visibleStore, () => undefined);
+    const memo = createResponderGraphListMemo(store);
+
+    const initialCatalog = await store.listGraphsSorted!();
+
+    const initial = await memo.get({ refresh: true });
+    expect(initial.graphs).toContain(visible);
+    expect(initial.graphs).not.toContain(reserved);
+    expect(listGraphs).not.toHaveBeenCalled();
+
+    await store.insert([q(visible, 4)]);
+    const contentOnlyCatalog = await store.listGraphsSorted!();
+    expect(contentOnlyCatalog).toBe(initialCatalog);
+    const contentOnly = await memo.get({ refresh: true });
+    expect(contentOnly).toBe(initial);
+    expect(contentOnly.graphs).not.toContain(reserved);
+    expect(listGraphs).not.toHaveBeenCalled();
+
+    await store.insert([q(added, 5)]);
+    const changedCatalog = await store.listGraphsSorted!();
+    expect(changedCatalog).not.toBe(initialCatalog);
+    expect(changedCatalog).toContain(added);
+    expect(changedCatalog).not.toContain(reserved);
+  });
+
+  it('does not traverse through an outer visibility decorator for a sorted catalog', async () => {
+    const visible = 'did:dkg:context-graph:visibility-boundary/data';
+    const hidden = 'did:dkg:context-graph:visibility-boundary/hidden';
+    const base = new OxigraphStore();
+    await base.insert([q(visible, 1), q(hidden, 2)]);
+    const indexed = new GraphSetIndexStore(base, { revalidateMs: 100_000 });
+    let outerListGraphsCalls = 0;
+    const store = {
+      // Deliberately documented traversal surface: the sorted capability must
+      // still stop here because this decorator changes listGraphs semantics.
+      innerStore: indexed,
+      listGraphs: async () => {
+        outerListGraphsCalls += 1;
+        return (await indexed.listGraphs()).filter((graph) => graph !== hidden);
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store);
+
+    const snapshot = await memo.get({ refresh: true });
+    expect(snapshot.graphs).toContain(visible);
+    expect(snapshot.graphs).not.toContain(hidden);
+    expect(outerListGraphsCalls).toBe(1);
   });
 
   it('reloads graph-list and subgraph prerequisites for a newer session generation', async () => {
@@ -1506,10 +1746,10 @@ describe('sync responder pagination interleaving', () => {
     await Promise.resolve();
     expect(graphCalls).toBe(1);
     oldGraphs.resolve(['urn:graph:old']);
-    await expect(oldGraphSession).resolves.toEqual(['urn:graph:old']);
+    expect((await oldGraphSession).graphs).toEqual(['urn:graph:old']);
     await vi.waitFor(() => expect(graphCalls).toBe(2));
     newGraphs.resolve(['urn:graph:new']);
-    await expect(newGraphSession).resolves.toEqual(['urn:graph:new']);
+    expect((await newGraphSession).graphs).toEqual(['urn:graph:new']);
 
     const cgId = 'generation-aware-subgraphs';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;

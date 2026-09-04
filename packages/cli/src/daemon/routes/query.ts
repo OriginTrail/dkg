@@ -17,6 +17,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import { isClientQueryFailure } from "./query-error.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFile,
@@ -57,7 +58,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, classifySparqlOperation } from '@origintrail-official/dkg-core';
 import {
   findReservedSubjectPrefix,
   isSkolemizedUri,
@@ -107,7 +108,6 @@ import {
   CLI_NPM_PACKAGE,
 } from '../../config.js';
 import {
-  getApiQueryPriority,
   type ApiQueryPriority,
 } from '../api-query-priority.js';
 export {
@@ -117,7 +117,7 @@ export {
 export type { ApiQueryPriority } from '../api-query-priority.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { authenticatedAgentAddress, canAdministerNode, loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -221,7 +221,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
@@ -333,6 +332,11 @@ import {
 } from '../local-agents.js';
 
 import type { RequestContext } from './context.js';
+import {
+  API_QUERY_CALLER_DISCONNECTED,
+  createStoreQueryRequestLifecycle,
+  type StoreQueryRequestLifecycle,
+} from '../store-query-lifecycle.js';
 
 
 // Keep these in sync with VerifyCollector's hard enforcement in
@@ -340,22 +344,9 @@ import type { RequestContext } from './context.js';
 // HTTP input is rejected before the agent starts VERIFY work.
 const VERIFY_COLLECTION_TIMEOUT_MIN_MS = 1_000;
 const VERIFY_COLLECTION_TIMEOUT_MAX_MS = 30 * 60 * 1000;
-const API_QUERY_CALLER_DISCONNECTED = 'API_QUERY_CALLER_DISCONNECTED';
-
-export interface ApiQueryRequestLifecycle {
-  readonly signal: AbortSignal;
+export interface ApiQueryRequestLifecycle extends StoreQueryRequestLifecycle {
   readonly priority: ApiQueryPriority;
   readonly source: 'api.query';
-  dispose(): void;
-}
-
-class ApiQueryCallerDisconnectedError extends Error {
-  readonly code = API_QUERY_CALLER_DISCONNECTED;
-
-  constructor() {
-    super('API query caller disconnected');
-    this.name = 'ApiQueryCallerDisconnectedError';
-  }
 }
 
 /**
@@ -367,25 +358,34 @@ export function createApiQueryRequestLifecycle(
   req: IncomingMessage,
   res: ServerResponse,
 ): ApiQueryRequestLifecycle {
-  const controller = new AbortController();
-  const abortDisconnectedQuery = () => {
-    if (!controller.signal.aborted) {
-      controller.abort(new ApiQueryCallerDisconnectedError());
-    }
-  };
-  req.once('aborted', abortDisconnectedQuery);
-  res.once('close', abortDisconnectedQuery);
-  if (req.aborted || res.destroyed) abortDisconnectedQuery();
+  return createStoreQueryRequestLifecycle(req, res, 'api.query') as ApiQueryRequestLifecycle;
+}
 
-  return {
-    signal: controller.signal,
-    priority: getApiQueryPriority(),
-    source: 'api.query',
-    dispose() {
-      req.removeListener('aborted', abortDisconnectedQuery);
-      res.removeListener('close', abortDisconnectedQuery);
-    },
-  };
+type LegacyApiQueryResult = {
+  bindings: Array<Record<string, string>>;
+  quads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+};
+
+export type PublicApiQueryResult = import('@origintrail-official/dkg-core').PublicQueryResult<
+  Record<string, string>,
+  { subject: string; predicate: string; object: string; graph: string }
+>;
+
+/** Normalize the legacy engine shape at the public daemon boundary. */
+export function normalizePublicApiQueryResult(
+  sparql: string,
+  result: LegacyApiQueryResult,
+): PublicApiQueryResult {
+  const operation = classifySparqlOperation(sparql);
+  if (operation.kind === 'read' && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE')) {
+    return { type: 'quads', quads: result.quads ?? [], bindings: [] };
+  }
+  if (operation.kind === 'read' && operation.form === 'ASK') {
+    const raw = result.bindings[0]?.result;
+    const value = String(raw).toLowerCase() === 'true';
+    return { type: 'boolean', value, bindings: [{ result: String(value) }] };
+  }
+  return { type: 'bindings', bindings: result.bindings };
 }
 
 function parseVerifyTimeoutMs(
@@ -413,7 +413,6 @@ function parseVerifyTimeoutMs(
   return { value };
 }
 
-
 export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -437,13 +436,12 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     assertionImportLocks,
     vectorStore,
     embeddingProvider,
-    validTokens,
     apiHost,
     apiPortRef,
     url,
     path,
-    requestToken,
     requestAgentAddress,
+    authentication,
     emitMemoryGraphChanged,
   } = ctx;
 
@@ -550,63 +548,14 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       // in the body). `resolveAgentByToken` returns `undefined` for
       // node-level tokens, so only genuine agent-scoped identities
       // ever reach the A-1 guard.
-      const callerAgentAddress = requestToken
-        ? agent.resolveAgentByToken(requestToken)
-        : undefined;
-      // A-1 follow-up review (iteration 2): close the auth-disabled WM
-      // hole WITHOUT regressing existing node-token clients.
-      //
-      // When we reach this line with `callerAgentAddress === undefined`,
-      // the caller is one of:
-      //
-      //   (a) node-level admin (`~/.dkg/auth.token`, a token present in
-      //       `validTokens`). Admin is already trusted to run as any
-      //       local agent — `packages/adapter-openclaw` relies on this
-      //       by passing a session-specific `agentAddress` alongside the
-      //       admin token. Keep the legacy "skip the A-1 guard" here.
-      //
-      //   (b) unauthenticated (auth disabled at daemon level, OR no
-      //       Authorization header, OR a bogus / mismatched bearer that
-      //       the auth middleware never validated because `authEnabled`
-      //       is false). This is the hole Codex flagged: a raw
-      //       `Authorization: Bearer junk` used to set `requestToken`
-      //       truthy, sliding past a `!requestToken` check and letting
-      //       foreign WM reads through.
-      //
-      //   (c) auth-enabled + rejected — we never reach this line
-      //       because `httpAuthGuard` has already 401'd the request.
-      //
-      // Gate the 403 on "not a known admin token" (i.e. the caller is
-      // not in `validTokens`), which fails closed for (b) regardless of
-      // what garbage they put in the header, and leaves (a) alone.
-      //
-      // Codex PR #242 iter-8: `validTokens` contains BOTH the
-      // node-level admin token (`~/.dkg/auth.token`) AND any
-      // per-agent tokens the node has issued. Treating every
-      // validToken as "admin" means an authenticated agent could
-      // use its OWN token to skip the A-1 guard and read another
-      // local agent's WM via `agentAddress`. Restrict the admin
-      // bypass to tokens that are NOT bound to a specific agent
-      // (`resolveAgentByToken(token) === undefined`), which is the
-      // current signal for "node-level / admin-scoped".
-      //
-      // Codex PR #242 iter-8 re-review: the A-1 fallback 403 must
-      // also NOT fire for authenticated agent callers. An agent
-      // querying its OWN WM (`callerAgentAddress === agentAddress`)
-      // was previously being rejected here unless the target happened
-      // to be the node default / peerId alias, and genuine cross-agent
-      // reads were surfacing as a 403 (leaking existence) instead of
-      // the intended silent empty-per-kind result from
-      // `DKGAgent.query`. Only gate the self-alias fallback when the
-      // caller has no recognised identity at all — neither a
-      // node-level admin token nor an agent-scoped bearer. Authenticated
-      // agent callers flow straight into `agent.query()` below, which
-      // enforces the isolation invariant by returning an empty-per-kind
-      // result for any target that is not `callerAgentAddress`.
+      const callerAgentAddress = authenticatedAgentAddress(authentication);
+      // The authentication boundary distinguishes agent, node-operator, and anonymous callers.
+      // Node operators retain the cross-agent OpenClaw use case; authenticated agents flow into
+      // DKGAgent.query's isolation check; only anonymous working-memory requests need this local
+      // self-alias fallback gate.
       const isAdminToken =
-        !!requestToken
-        && validTokens.has(requestToken)
-        && callerAgentAddress === undefined;
+        canAdministerNode(authentication)
+        && authentication.principal.kind === 'nodeOperator';
       const hasRecognisedIdentity = isAdminToken || callerAgentAddress !== undefined;
       if (
         !hasRecognisedIdentity &&
@@ -676,9 +625,17 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       }
       const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, "execute");
-      tracker.complete(ctx, { tripleCount: result?.bindings?.length ?? 0 });
+      const publicResult = normalizePublicApiQueryResult(sparql, result);
+      const resultCount = publicResult.type === 'bindings'
+        ? publicResult.bindings.length
+        : publicResult.type === 'quads'
+          ? publicResult.quads.length
+          : publicResult.type === 'boolean'
+            ? 1
+            : 0;
+      tracker.complete(ctx, { tripleCount: resultCount });
       return jsonResponse(res, 200, {
-        result,
+        result: publicResult,
         phases: { execute: execDur, serverTotal: Date.now() - serverT0 },
       });
     } catch (err: any) {
@@ -698,33 +655,9 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       }
       tracker.fail(ctx, err);
       const msg = err?.message ?? "";
-      if (
-        msg.startsWith("SPARQL rejected:") ||
-        msg.startsWith("Parse error") ||
-        // #889: oxigraph surfaces SPARQL syntax errors as
-        // `error at <line>:<col>: expected one of ...` (e.g. a missing
-        // closing brace or an incomplete triple). These are client input
-        // errors, not server faults — classify them as 400 to match the
-        // existing `SPARQL rejected:` / `must start with ...` handling
-        // instead of letting them fall through to a 500.
-        /^error at \d+:\d+:/.test(msg) ||
-        /must start with (SELECT|CONSTRUCT|ASK|DESCRIBE)/i.test(msg) ||
-        msg.includes("was removed in V10") ||
-        msg.includes("agentAddress is required") ||
-        msg.includes("requires a contextGraphId") ||
-        msg.includes("cannot be combined with") ||
-        msg.startsWith("Scoped query violation:") ||
-        // A-1 review: DKGAgent.query throws these when the caller sends
-        // a non-string `agentAddress` / `callerAgentAddress` in the
-        // body. Classify as 400 so malformed input is a clean client
-        // error instead of a 500.
-        msg.startsWith("query: 'agentAddress' must be a string") ||
-        msg.startsWith("query: 'callerAgentAddress' must be a string") ||
-        // P-13 review: `resolveViewGraphs` validates `minTrust` now,
-        // so direct callers that forward a string / out-of-range
-        // value get a 400 instead of a 500.
-        msg.startsWith("Invalid minTrust")
-      ) {
+      // #1758 — one classifier: a typed upstream status decides, otherwise
+      // legacy message families apply. See ./query-error.ts.
+      if (isClientQueryFailure(err)) {
         return jsonResponse(res, 400, { error: msg });
       }
       throw err;
@@ -1187,183 +1120,4 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     }
   }
 
-  // POST /api/ccl/policy/publish
-  if (req.method === "POST" && path === "/api/ccl/policy/publish") {
-    const body = await readBody(req, SMALL_BODY_BYTES * 4);
-    const {
-      contextGraphId,
-      name,
-      version,
-      content,
-      description,
-      contextType,
-      language,
-      format,
-    } = JSON.parse(body);
-    if (!contextGraphId || !name || !version || !content) {
-      return jsonResponse(res, 400, {
-        error: "Missing required fields: contextGraphId, name, version, content",
-      });
-    }
-    const result = await agent.publishCclPolicy({
-      contextGraphId,
-      name,
-      version,
-      content,
-      description,
-      contextType,
-      language,
-      format,
-    });
-    return jsonResponse(res, 200, result);
-  }
-
-  // POST /api/ccl/policy/approve
-  if (req.method === "POST" && path === "/api/ccl/policy/approve") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const { contextGraphId, policyUri, contextType } = JSON.parse(body);
-    if (!contextGraphId || !policyUri) {
-      return jsonResponse(res, 400, {
-        error: "Missing required fields: contextGraphId, policyUri",
-      });
-    }
-    try {
-      const result = await agent.approveCclPolicy({
-        contextGraphId,
-        policyUri,
-        contextType,
-        callerAgentAddress: requestAgentAddress,
-      });
-      return jsonResponse(res, 200, result);
-    } catch (err: any) {
-      const msg = err?.message ?? "";
-      if (/Only the contextGraph owner can manage policies/.test(msg)) {
-        return jsonResponse(res, 403, { error: msg });
-      }
-      throw err;
-    }
-  }
-
-  // POST /api/ccl/policy/revoke
-  if (req.method === "POST" && path === "/api/ccl/policy/revoke") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const { contextGraphId, policyUri, contextType } = JSON.parse(body);
-    if (!contextGraphId || !policyUri) {
-      return jsonResponse(res, 400, {
-        error: "Missing required fields: contextGraphId, policyUri",
-      });
-    }
-    try {
-      const result = await agent.revokeCclPolicy({
-        contextGraphId,
-        policyUri,
-        contextType,
-        callerAgentAddress: requestAgentAddress,
-      });
-      return jsonResponse(res, 200, result);
-    } catch (err: any) {
-      const msg = err?.message ?? "";
-      if (/Only the contextGraph owner can manage policies/.test(msg)) {
-        return jsonResponse(res, 403, { error: msg });
-      }
-      throw err;
-    }
-  }
-
-  // GET /api/ccl/policy/list
-  if (req.method === "GET" && path === "/api/ccl/policy/list") {
-    const policies = await agent.listCclPolicies({
-      contextGraphId: url.searchParams.get("contextGraphId") ?? undefined,
-      name: url.searchParams.get("name") ?? undefined,
-      contextType: url.searchParams.get("contextType") ?? undefined,
-      status: url.searchParams.get("status") ?? undefined,
-      includeBody: url.searchParams.get("includeBody") === "true",
-    });
-    return jsonResponse(res, 200, { policies });
-  }
-
-  // GET /api/ccl/policy/resolve?contextGraphId=&name=&contextType=
-  if (req.method === "GET" && path === "/api/ccl/policy/resolve") {
-    const contextGraphId = url.searchParams.get("contextGraphId");
-    const name = url.searchParams.get("name");
-    if (!contextGraphId || !name) {
-      return jsonResponse(res, 400, {
-        error: "Missing required query params: contextGraphId, name",
-      });
-    }
-    const policy = await agent.resolveCclPolicy({
-      contextGraphId,
-      name,
-      contextType: url.searchParams.get("contextType") ?? undefined,
-      includeBody: url.searchParams.get("includeBody") === "true",
-    });
-    return jsonResponse(res, 200, { policy });
-  }
-
-  // POST /api/ccl/eval
-  if (req.method === "POST" && path === "/api/ccl/eval") {
-    const body = await readBody(req, SMALL_BODY_BYTES * 8);
-    const {
-      contextGraphId,
-      name,
-      facts,
-      contextType,
-      view,
-      snapshotId,
-      scopeUal,
-      publishResult,
-    } = JSON.parse(body);
-    if (!contextGraphId || !name) {
-      return jsonResponse(res, 400, {
-        error: "Missing required fields: contextGraphId, name",
-      });
-    }
-    if (facts != null && !Array.isArray(facts)) {
-      return jsonResponse(res, 400, {
-        error: "facts must be an array when provided",
-      });
-    }
-    const result = publishResult
-      ? await agent.evaluateAndPublishCclPolicy({
-          contextGraphId,
-          name,
-          facts,
-          contextType,
-          view,
-          snapshotId,
-          scopeUal,
-        })
-      : await agent.evaluateCclPolicy({
-          contextGraphId,
-          name,
-          facts,
-          contextType,
-          view,
-          snapshotId,
-          scopeUal,
-        });
-    return jsonResponse(res, 200, result);
-  }
-
-  // GET /api/ccl/results?contextGraphId=&...
-  if (req.method === "GET" && path === "/api/ccl/results") {
-    const contextGraphId = url.searchParams.get("contextGraphId");
-    if (!contextGraphId) {
-      return jsonResponse(res, 400, {
-        error: "Missing required query param: contextGraphId",
-      });
-    }
-    const evaluations = await agent.listCclEvaluations({
-      contextGraphId,
-      policyUri: url.searchParams.get("policyUri") ?? undefined,
-      snapshotId: url.searchParams.get("snapshotId") ?? undefined,
-      view: url.searchParams.get("view") ?? undefined,
-      contextType: url.searchParams.get("contextType") ?? undefined,
-      resultKind:
-        (url.searchParams.get("resultKind") as "derived" | "decision" | null) ??
-        undefined,
-      resultName: url.searchParams.get("resultName") ?? undefined,
-    });
-    return jsonResponse(res, 200, { evaluations });
-  }
 }

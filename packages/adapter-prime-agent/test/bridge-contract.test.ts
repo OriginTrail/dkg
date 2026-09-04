@@ -673,8 +673,11 @@ describe('/send', () => {
   it('does not let an identical local prompt claim the queued bridge action', async () => {
     await bridge.stop();
     bridge = new SessionBridge(stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never, 'sess-local-race', {
-      turnIdleTimeoutMs: 40,
-      turnHardTimeoutMs: 80,
+      // This assertion exercises action ownership, not timeout arbitration.
+      // Keep both deadlines comfortably outside the observation window so a
+      // loaded CI worker cannot legitimately settle the queued request first.
+      turnIdleTimeoutMs: 5_000,
+      turnHardTimeoutMs: 10_000,
     });
     await bridge.start();
     base = await bridgeBaseUrl(bridge);

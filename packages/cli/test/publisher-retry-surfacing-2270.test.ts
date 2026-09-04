@@ -6,6 +6,7 @@ import { QuorumUnmetError, type LiftJob } from '@origintrail-official/dkg-publis
 import { createPublisherControlFromStore, type AsyncPublisherAvailability } from '../src/publisher-runner.js';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 /**
  * GH#2270 — what the daemon TELLS an operator about retries.
@@ -166,6 +167,24 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
     expect((await statusOf(control, quorumJobId)).status).toBe('accepted');
     expect((await statusOf(control, evidenceJobId)).status).toBe('failed');
     expect((await statusOf(control, terminalJobId)).status).toBe('failed');
+  });
+
+  it('POST /api/publisher/retry can select one exact failed job without sweeping the rest', async () => {
+    const control = newControl();
+    const selectedJobId = await failWithUnmetQuorum(control);
+    const untouchedJobId = await failWithUnmetQuorum(control, 'untouched');
+
+    const res = await request(
+      control,
+      'POST',
+      '/api/publisher/retry',
+      JSON.stringify({ status: 'failed', jobId: selectedJobId }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ retried: 1, blockedPendingRecovery: 0, skipped: 0 });
+    expect((await statusOf(control, selectedJobId)).status).toBe('accepted');
+    expect((await statusOf(control, untouchedJobId)).status).toBe('failed');
   });
 
   it('GET /api/publisher/job serves retryState beside a byte-identical job', async () => {
@@ -399,7 +418,7 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
       validTokens: new Set<string>(),
       apiHost: '127.0.0.1', apiPortRef: { value: 0 },
       url, path: url.pathname,
-      requestToken: undefined, requestAgentAddress: '0x0',
+      authentication: requestAuthentication({ kind: 'anonymous' }), requestAgentAddress: '0x0',
     } as unknown as RequestContext);
     return { status: res.statusCode, body: res.body ? JSON.parse(res.body) : {} };
   }

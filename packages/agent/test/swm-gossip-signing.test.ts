@@ -21,6 +21,10 @@ import { DKGAgent, agentFromPrivateKey, type AgentKeyRecord } from '../src/index
 interface DKGAgentInternals {
   localAgents: Map<string, AgentKeyRecord>;
   defaultAgentAddress?: string;
+  resolveWorkspaceRecipientsGated(input: { contextGraphId: string }): Promise<{
+    requiresEncryption: boolean;
+    recipients: Array<{ agentAddress: string; peerId?: string }>;
+  }>;
   encodeWorkspaceGossipMessage(contextGraphId: string, message: Uint8Array): Promise<Uint8Array>;
   decryptWorkspacePayloadWithSenderKey(
     message: SwmSenderKeyMessageMsg,
@@ -28,6 +32,10 @@ interface DKGAgentInternals {
     ctx: OperationContext,
   ): Promise<Uint8Array>;
 }
+
+const SNAPSHOT_SELF_PEER = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+const SNAPSHOT_PEER_A = '12D3KooWRdP3mMN9KkQCWKFjFxhgpXp8Q2y8zQZkgRYfGQ4bQh3a';
+const SNAPSHOT_PEER_B = '12D3KooWFHUALUrdSfrVHSxtCRCJC9xvxS7nYfM6T1sbYVak9HTu';
 
 class CapturingGossip {
   messages: Array<{ topic: string; data: Uint8Array }> = [];
@@ -215,6 +223,94 @@ describe('DKGAgent SWM gossip signing', () => {
     );
     const request = decodeWorkspacePublishRequest(decrypted);
     expect(new TextDecoder().decode(request.nquads)).toContain('wire secret');
+  });
+
+  it('uses one recipient resolution for real Sender Key encryption and reliable fan-out', async () => {
+    const agent = await DKGAgent.create({
+      name: 'SwmSingleRecipientSnapshot',
+      chainAdapter: new MockChainAdapter(),
+    });
+    const internals = agent as unknown as DKGAgentInternals;
+    const gossip = new CapturingGossip();
+    (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
+    Object.defineProperty((agent as unknown as { node: object }).node, 'peerId', {
+      value: { toString: () => SNAPSHOT_SELF_PEER },
+      configurable: true,
+    });
+
+    const sender = await agent.registerAgent('snapshot-sender');
+    internals.defaultAgentAddress = sender.agentAddress;
+    const contextGraphId = 'gated-swm-single-recipient-snapshot';
+    await insertAgentGate(agent, contextGraphId, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, sender.agentAddress);
+
+    const recipientId = `did:dkg:agent:${sender.agentAddress}`;
+    await agent.store.insert([{
+      subject: recipientId,
+      predicate: DKG_ONTOLOGY.DKG_PEER_ID,
+      object: `"${SNAPSHOT_PEER_A}"`,
+      graph: 'did:dkg:system/agents',
+    }]);
+
+    const originalResolver = internals.resolveWorkspaceRecipientsGated.bind(agent);
+    let resolverCalls = 0;
+    internals.resolveWorkspaceRecipientsGated = async (input) => {
+      resolverCalls += 1;
+      const resolution = await originalResolver(input);
+      // Mutate the live profile after the publisher captured its recipient
+      // resolution. Removing the live encryption key makes a second crypto
+      // resolution observably incompatible, while changing the peer makes a
+      // second transport resolution observably different. Encryption and
+      // transport must both keep using the first immutable operation snapshot.
+      await agent.store.deleteByPattern({
+        subject: recipientId,
+        predicate: DKG_ONTOLOGY.DKG_PUBLIC_ENCRYPTION_KEY,
+        graph: 'did:dkg:system/agents',
+      });
+      await agent.store.deleteByPattern({
+        subject: recipientId,
+        predicate: DKG_ONTOLOGY.DKG_PEER_ID,
+        graph: 'did:dkg:system/agents',
+      });
+      await agent.store.insert([{
+        subject: recipientId,
+        predicate: DKG_ONTOLOGY.DKG_PEER_ID,
+        object: `"${SNAPSHOT_PEER_B}"`,
+        graph: 'did:dkg:system/agents',
+      }]);
+      return resolution;
+    };
+
+    const reliableSends: Array<{ peerId: string; payload: Uint8Array }> = [];
+    (agent as unknown as { messenger: object }).messenger = {
+      sendReliable: async (peerId: string, _protocol: string, payload: Uint8Array) => {
+        reliableSends.push({ peerId, payload });
+        return {
+          delivered: true,
+          response: new Uint8Array(),
+          attempts: 1,
+          messageId: `snapshot-${peerId}`,
+        };
+      },
+    };
+
+    await agent.share(contextGraphId, [{
+      subject: 'urn:test:single-snapshot',
+      predicate: 'http://schema.org/name',
+      object: '"single snapshot"',
+      graph: '',
+    }]);
+    await agent.awaitInFlightSubstrateFanOuts();
+
+    expect(resolverCalls).toBe(1);
+    expect(reliableSends).toHaveLength(1);
+    expect(reliableSends[0]?.peerId).toBe(SNAPSHOT_PEER_A);
+    expect(reliableSends.some((send) => send.peerId === SNAPSHOT_PEER_B)).toBe(false);
+    expect(gossip.messages).toEqual([]);
+
+    const envelope = decodeGossipEnvelope(reliableSends[0]!.payload);
+    const encrypted = decodeSwmSenderKeyMessage(envelope.payload);
+    expect(encrypted.type).toBe(SWM_SENDER_KEY_MESSAGE_TYPE);
+    expect(encrypted.contextGraphId).toBe(contextGraphId);
   });
 
   it('keeps legacy raw SWM gossip for open graphs when no local signing key exists', async () => {

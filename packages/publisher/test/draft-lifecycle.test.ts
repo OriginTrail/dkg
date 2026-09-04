@@ -1,5 +1,11 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import {
+  GraphManager,
+  OxigraphStore,
+  StoreOperationTimeoutError,
+  isStoreOperationTimeoutError,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 import {
   DKG_GOSSIP_MAX_MESSAGE_BYTES,
   TypedEventBus,
@@ -15,9 +21,11 @@ import {
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
   decodeWorkspacePublishRequest,
+  generateWorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
+  isPromoteReplaySafeError,
   assertionScopedGraphUri,
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
@@ -38,8 +46,10 @@ const ACCESS_POLICY_PREDICATE = 'https://dkg.network/ontology#accessPolicy';
 const ALLOWED_AGENT_PREDICATE = 'https://dkg.network/ontology#allowedAgent';
 const AGENT = '0x1234567890abcdef1234567890abcdef12345678';
 const AGENT_B = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
-const PEER = '12D3KooWPromoteBoundary';
-const PEER_B = '12D3KooWPromoteBoundaryB';
+const PEER = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+const PEER_B = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+const PROMOTE_RECIPIENT_PEER = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
+const PROMOTE_CHANGED_PEER = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
 const ASSERTION_NAME = 'my-assertion';
 const SHARE_OPERATION_ID_PREDICATE = 'http://dkg.io/ontology/shareOperationId';
 const PROMOTE_OPERATION_INTENT_PREDICATE = 'http://dkg.io/ontology/promoteOperationIntent';
@@ -164,6 +174,16 @@ describe('Working Memory Assertion Lifecycle', () => {
         `<${lifecycle}> <${PROMOTE_OPERATION_INTENT_PREDICATE}> ?intent } }`,
     );
     return result.type === 'boolean' && result.value;
+  };
+
+  const expectExactSwmGraph = async (graphUri: string): Promise<void> => {
+    expect(await store.countQuads(graphUri)).toBe(TRIPLES.length);
+    for (const quad of TRIPLES) {
+      await expect(store.query(
+        `ASK { GRAPH <${graphUri}> { ` +
+          `<${quad.subject}> <${quad.predicate}> ${quad.object} } }`,
+      )).resolves.toEqual({ type: 'boolean', value: true });
+    }
   };
 
   const withInjectedOperationSnapshotFailure = async <T>(
@@ -503,6 +523,118 @@ describe('Working Memory Assertion Lifecycle', () => {
     }
   });
 
+  it('replays an indeterminate committed exact SWM replacement to convergence', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    await store.insert([{
+      subject: 'urn:test:stale-swm-row',
+      predicate: 'http://schema.org/name',
+      object: '"Stale"',
+      graph: finalized.sharedGraphUri,
+    }]);
+    const failure = new StoreOperationTimeoutError({
+      backend: 'managed-oxigraph',
+      operation: 'replaceGraph',
+      storeOperation: 'replaceGraph',
+      outcome: 'indeterminate',
+    });
+    const replaceGraph = store.replaceGraph.bind(store);
+    let injected = false;
+    const replaceGraphSpy = vi.spyOn(store, 'replaceGraph').mockImplementation(
+      async (graphUri, quads) => {
+        if (!injected && graphUri === finalized.sharedGraphUri) {
+          injected = true;
+          await replaceGraph(graphUri, quads);
+          throw failure;
+        }
+        return replaceGraph(graphUri, quads);
+      },
+    );
+
+    try {
+      let rejection: unknown;
+      try {
+        await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
+      } catch (error) {
+        rejection = error;
+      }
+      expect(rejection).toBe(failure);
+      expect(isStoreOperationTimeoutError(rejection)).toBe(true);
+      expect(isPromoteReplaySafeError(rejection)).toBe(true);
+      expect(injected).toBe(true);
+      await expectExactSwmGraph(finalized.sharedGraphUri);
+      expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toHaveLength(
+        TRIPLES.length,
+      );
+
+      const replayed = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
+      expect(replayed).toMatchObject({ promotedCount: 0, promotedAllRoots: true });
+      await expectExactSwmGraph(finalized.sharedGraphUri);
+      expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toHaveLength(0);
+    } finally {
+      replaceGraphSpy.mockRestore();
+    }
+  });
+
+  it('replays an indeterminate uncommitted exact SWM replacement to convergence', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    const staleQuad = {
+      subject: 'urn:test:stale-swm-row',
+      predicate: 'http://schema.org/name',
+      object: '"Stale"',
+      graph: finalized.sharedGraphUri,
+    };
+    await store.insert([staleQuad]);
+    const failure = new StoreOperationTimeoutError({
+      backend: 'managed-oxigraph',
+      operation: 'replaceGraph',
+      storeOperation: 'replaceGraph',
+      outcome: 'indeterminate',
+    });
+    const replaceGraph = store.replaceGraph.bind(store);
+    let injected = false;
+    const replaceGraphSpy = vi.spyOn(store, 'replaceGraph').mockImplementation(
+      async (graphUri, quads) => {
+        if (!injected && graphUri === finalized.sharedGraphUri) {
+          injected = true;
+          throw failure;
+        }
+        return replaceGraph(graphUri, quads);
+      },
+    );
+
+    try {
+      let rejection: unknown;
+      try {
+        await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
+      } catch (error) {
+        rejection = error;
+      }
+      expect(rejection).toBe(failure);
+      expect(isStoreOperationTimeoutError(rejection)).toBe(true);
+      expect(isPromoteReplaySafeError(rejection)).toBe(true);
+      expect(injected).toBe(true);
+      expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+      await expect(store.query(
+        `ASK { GRAPH <${finalized.sharedGraphUri}> { ` +
+          `<${staleQuad.subject}> <${staleQuad.predicate}> ${staleQuad.object} } }`,
+      )).resolves.toEqual({ type: 'boolean', value: true });
+      expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toHaveLength(
+        TRIPLES.length,
+      );
+
+      const replayed = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
+      expect(replayed).toMatchObject({ promotedCount: TRIPLES.length, promotedAllRoots: true });
+      await expectExactSwmGraph(finalized.sharedGraphUri);
+      expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toHaveLength(0);
+    } finally {
+      replaceGraphSpy.mockRestore();
+    }
+  });
+
   it('full promote drops a fully consumed blank-node WM graph instead of shape-deleting it', async () => {
     const name = 'full-blank-node-promote';
     await publisher.assertionCreate(CG_ID, name, AGENT);
@@ -610,6 +742,55 @@ describe('Working Memory Assertion Lifecycle', () => {
 
     const remaining = await publisher.assertionQuery(CG_ID, name, AGENT);
     expect(remaining).toHaveLength(0);
+  });
+
+  it('returns the encryption-time recipient projection for promotion fan-out', async () => {
+    const name = 'promotion-recipient-snapshot';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [{
+      subject: 'urn:test:promotion-snapshot',
+      predicate: 'http://schema.org/name',
+      object: '"Snapshot"',
+    }]);
+    await finalizeAssertion(name);
+
+    let advertisedPeer = PROMOTE_RECIPIENT_PEER;
+    let resolverCalls = 0;
+    const recipient = generateWorkspaceRecipientEncryptionKey(
+      `did:dkg:agent:${AGENT}`,
+      `did:dkg:agent:${AGENT}#promotion-snapshot-x25519`,
+    );
+    publisher.setWorkspaceAgentRecipientResolver(async () => {
+      resolverCalls += 1;
+      return {
+        requiresEncryption: true,
+        recipients: [{ ...recipient, agentAddress: AGENT, peerId: advertisedPeer }],
+      };
+    });
+    publisher.setWorkspaceSenderKeyEncryptor(async (input) => {
+      expect(input.resolution.recipients[0]?.peerId).toBe(PROMOTE_RECIPIENT_PEER);
+      advertisedPeer = PROMOTE_CHANGED_PEER;
+      return input.plaintext;
+    });
+
+    const result = await publisher.assertionPromote(CG_ID, name, AGENT, {
+      publisherPeerId: PEER,
+      senderAgentAddress: AGENT,
+    });
+
+    expect(resolverCalls).toBe(1);
+    expect(result.gossipPayload).toEqual({
+      message: expect.any(Uint8Array),
+      fanout: {
+        kind: 'captured',
+        snapshot: {
+          source: 'agent-roster',
+          members: [PROMOTE_RECIPIENT_PEER],
+          complete: true,
+        },
+      },
+    });
+    expect(result.gossipMessage).toBe(result.gossipPayload?.message);
   });
 
   it('rejects generated private-CG catalog floor stripping without private CG proof', async () => {
@@ -793,7 +974,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     const second = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER });
     expect(second.promotedCount).toBe(0);
     expect(second.shareOperationId).toBe(first.shareOperationId);
-    expect(second.gossipMessage).toBeInstanceOf(Uint8Array);
+    expect(second.gossipPayload?.message).toBeInstanceOf(Uint8Array);
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(true);
 
     await store.insert([{
@@ -1309,7 +1490,7 @@ describe('Working Memory Assertion Lifecycle', () => {
       promotedAllRoots: false,
       shareOperationId: promoted.shareOperationId,
     });
-    expect(retried.gossipMessage).toBeUndefined();
+    expect(retried.gossipPayload).toBeUndefined();
     expect(confirmationCalls).toBe(0);
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(true);
   });
@@ -1607,7 +1788,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     );
     expect(repaired.promotedCount).toBe(0);
     expect(repaired.shareOperationId).toBeTruthy();
-    expect(repaired.gossipMessage).toBeInstanceOf(Uint8Array);
+    expect(repaired.gossipPayload?.message).toBeInstanceOf(Uint8Array);
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(true);
 
     const graphManager = new GraphManager(store);
@@ -1934,9 +2115,9 @@ describe('Working Memory Assertion Lifecycle', () => {
     });
 
     expect(result.promotedCount).toBe(quads.length);
-    expect(result.gossipMessage).toBeInstanceOf(Uint8Array);
-    expect(result.gossipMessage!.length).toBeGreaterThan(512 * 1024);
-    expect(result.gossipMessage!.length).toBeLessThan(DKG_GOSSIP_MAX_MESSAGE_BYTES);
+    expect(result.gossipPayload?.message).toBeInstanceOf(Uint8Array);
+    expect(result.gossipPayload!.message.length).toBeGreaterThan(512 * 1024);
+    expect(result.gossipPayload!.message.length).toBeLessThan(DKG_GOSSIP_MAX_MESSAGE_BYTES);
   });
 
   it('promote rejects payloads above 4 MiB before mutating WM or SWM', async () => {

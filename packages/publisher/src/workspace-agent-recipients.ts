@@ -10,7 +10,10 @@ import {
   contextGraphMetaUri,
   contextGraphSharedMemoryUri,
   decodeWorkspaceEncryptionKey,
+  AGENT_DID_PREFIX,
+  toAgentDid,
   workspaceAgentEncryptionKeyId,
+  tryCanonicalPeerIdString,
   type WorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
@@ -21,14 +24,150 @@ const DKG_ENCRYPTION_KEY_ALGORITHM = `${DKG}encryptionKeyAlgorithm`;
 const DKG_ENCRYPTION_KEY_PROOF = `${DKG}encryptionKeyProof`;
 const DKG_PEER_ID = `${DKG}peerId`;
 
-export interface WorkspaceAgentRecipient extends WorkspaceRecipientEncryptionKey {
-  agentAddress: string;
-  peerId?: string;
+export interface WorkspaceAgentRecipient {
+  readonly purpose: WorkspaceRecipientEncryptionKey['purpose'];
+  readonly recipientId: string;
+  readonly recipientKeyId: string;
+  readonly encryptionKeyAlgorithm: WorkspaceRecipientEncryptionKey['encryptionKeyAlgorithm'];
+  readonly publicKeyBytes?: Uint8Array;
+  readonly privateKeyBytes?: Uint8Array;
+  readonly agentAddress: string;
+  readonly peerId?: string;
 }
 
-export interface WorkspaceAgentRecipientResolution {
-  requiresEncryption: boolean;
-  recipients: WorkspaceAgentRecipient[];
+export type WorkspaceAgentRecipientResolution =
+  | {
+    readonly requiresEncryption: false;
+    readonly recipients: readonly [];
+  }
+  | {
+    readonly requiresEncryption: true;
+    readonly recipients: readonly [
+      WorkspaceAgentRecipient,
+      ...WorkspaceAgentRecipient[],
+    ];
+  };
+
+function isWorkspaceAgentRecipient(value: unknown): value is WorkspaceAgentRecipient {
+  if (typeof value !== 'object' || value === null) return false;
+  const recipient = value as Record<string, unknown>;
+  return recipient['purpose'] === WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE
+    && typeof recipient['recipientId'] === 'string'
+    && typeof recipient['recipientKeyId'] === 'string'
+    && recipient['encryptionKeyAlgorithm'] === WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519
+    && (recipient['publicKeyBytes'] === undefined || recipient['publicKeyBytes'] instanceof Uint8Array)
+    && (recipient['privateKeyBytes'] === undefined || recipient['privateKeyBytes'] instanceof Uint8Array)
+    && typeof recipient['agentAddress'] === 'string'
+    && (recipient['peerId'] === undefined || typeof recipient['peerId'] === 'string');
+}
+
+function ownWorkspaceAgentRecipient(
+  recipient: WorkspaceAgentRecipient,
+): WorkspaceAgentRecipient {
+  return Object.freeze({
+    purpose: recipient.purpose,
+    recipientId: recipient.recipientId,
+    recipientKeyId: recipient.recipientKeyId,
+    encryptionKeyAlgorithm: recipient.encryptionKeyAlgorithm,
+    publicKeyBytes: recipient.publicKeyBytes === undefined
+      ? undefined
+      : Uint8Array.from(recipient.publicKeyBytes),
+    privateKeyBytes: recipient.privateKeyBytes === undefined
+      ? undefined
+      : Uint8Array.from(recipient.privateKeyBytes),
+    agentAddress: recipient.agentAddress,
+    peerId: recipient.peerId,
+  });
+}
+
+/**
+ * Validate resolver output at the publisher injection boundary. Runtime callers
+ * can bypass the TypeScript contract, so normalize the two valid arms here and
+ * keep the rest of the encrypted path impossible to enter with an empty roster.
+ * This intentionally remains an internal module export rather than a second
+ * public refinement API.
+ */
+export function parseWorkspaceAgentRecipientResolution(
+  value: unknown,
+  contextGraphId: string,
+): WorkspaceAgentRecipientResolution {
+  if (typeof value !== 'object' || value === null) {
+    throw new TypeError(`Context graph "${contextGraphId}" recipient resolver returned an invalid result`);
+  }
+  const resolution = value as Record<string, unknown>;
+  if (typeof resolution['requiresEncryption'] !== 'boolean' || !Array.isArray(resolution['recipients'])) {
+    throw new TypeError(`Context graph "${contextGraphId}" recipient resolver returned an invalid result`);
+  }
+  const recipients = resolution['recipients'];
+  if (!resolution['requiresEncryption']) {
+    if (recipients.length !== 0) {
+      throw new TypeError(
+        `Context graph "${contextGraphId}" recipient resolver returned recipients while encryption is disabled`,
+      );
+    }
+    const noRecipients: [] = [];
+    return Object.freeze({
+      requiresEncryption: false,
+      recipients: Object.freeze(noRecipients),
+    });
+  }
+  if (recipients.length === 0) {
+    throw new Error(`Context graph "${contextGraphId}" requires encrypted SWM gossip but has no valid DKG agent recipients`);
+  }
+  if (!recipients.every(isWorkspaceAgentRecipient)) {
+    throw new TypeError(`Context graph "${contextGraphId}" recipient resolver returned an invalid DKG agent recipient`);
+  }
+  const [firstRecipient, ...remainingRecipients] = recipients.map(ownWorkspaceAgentRecipient);
+  const ownedRecipients: [WorkspaceAgentRecipient, ...WorkspaceAgentRecipient[]] = [
+    firstRecipient,
+    ...remainingRecipients,
+  ];
+  return Object.freeze({
+    requiresEncryption: true,
+    recipients: Object.freeze(ownedRecipients),
+  });
+}
+
+export interface WorkspaceAgentRecipientFanoutSnapshot {
+  readonly source: 'agent-roster';
+  /** Remote transport peers from the validated encryption recipient snapshot. */
+  readonly members: readonly string[];
+  /**
+   * True only when every authorized agent has at least one advertised peer
+   * (including this node). An incomplete projection must keep GossipSub as a
+   * compatibility fallback; the reliable leg alone cannot reach the agents
+   * whose profile has no usable peer id.
+   */
+  readonly complete: boolean;
+}
+
+/**
+ * Project a validated encryption snapshot to its reliable transport roster
+ * while retaining whether the projection covers every authorized agent.
+ */
+export function projectWorkspaceAgentRecipientFanout(
+  resolution: Extract<WorkspaceAgentRecipientResolution, { readonly requiresEncryption: true }>,
+  selfPeerId?: string,
+): WorkspaceAgentRecipientFanoutSnapshot {
+  const peers = new Set<string>();
+  const agentsWithPeer = new Set<string>();
+  const authorizedAgents = new Set<string>();
+  const canonicalSelfPeerId = tryCanonicalPeerIdString(selfPeerId ?? '');
+  for (const recipient of resolution.recipients) {
+    const agentAddress = recipient.agentAddress?.trim().toLowerCase() ?? '';
+    if (agentAddress) authorizedAgents.add(agentAddress);
+
+    const peerId = tryCanonicalPeerIdString(recipient.peerId ?? '');
+    if (!peerId) continue;
+    if (agentAddress) agentsWithPeer.add(agentAddress);
+    if (peerId !== canonicalSelfPeerId) peers.add(peerId);
+  }
+
+  return {
+    source: 'agent-roster',
+    members: [...peers],
+    complete: authorizedAgents.size > 0 && agentsWithPeer.size === authorizedAgents.size,
+  };
 }
 
 export interface WorkspaceAgentRecipientResolverInput {
@@ -46,7 +185,10 @@ export async function resolveWorkspaceAgentRecipients(
   const access = await getWorkspaceAccessMetadata(store, input.contextGraphId);
   const requiresEncryption = access.hasPrivateAccessPolicy || access.agentAddresses.length > 0;
   if (!requiresEncryption) {
-    return { requiresEncryption: false, recipients: [] };
+    return parseWorkspaceAgentRecipientResolution(
+      { requiresEncryption: false, recipients: [] },
+      input.contextGraphId,
+    );
   }
 
   if (access.agentAddresses.length === 0) {
@@ -61,7 +203,17 @@ export async function resolveWorkspaceAgentRecipients(
     const agentRecipients = await resolveWorkspaceAgentRecipientKeys(store, agentAddress);
     recipients.push(...agentRecipients);
   }
-  return { requiresEncryption: true, recipients };
+  const [firstRecipient, ...remainingRecipients] = recipients;
+  if (!firstRecipient) {
+    throw new Error(`Context graph "${input.contextGraphId}" requires encrypted SWM gossip but has no valid DKG agent recipients`);
+  }
+  return parseWorkspaceAgentRecipientResolution(
+    {
+      requiresEncryption: true,
+      recipients: [firstRecipient, ...remainingRecipients],
+    },
+    input.contextGraphId,
+  );
 }
 
 async function getWorkspaceAccessMetadata(
@@ -180,8 +332,9 @@ export async function resolveWorkspaceAgentRecipientKeys(
   agentAddress: string,
 ): Promise<WorkspaceAgentRecipient[]> {
   const checksum = ethers.getAddress(agentAddress);
-  const agentUri = `did:dkg:agent:${checksum}`;
-  const lowerAgentUri = `did:dkg:agent:${checksum.toLowerCase()}`;
+  // Read the historical checksum-cased subject alongside the canonical shared-core form.
+  const agentUri = `${AGENT_DID_PREFIX}${checksum}`;
+  const lowerAgentUri = toAgentDid(checksum);
   const agentUriValues = agentUri === lowerAgentUri ? `<${agentUri}>` : `<${agentUri}> <${lowerAgentUri}>`;
   const result = await store.query(
     `SELECT ?key ?algorithm ?proof ?peerId WHERE {

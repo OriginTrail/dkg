@@ -13,20 +13,77 @@
  * controlled per-test (resolve / throw with specific message).
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
+import {
+  OxigraphStore,
+  StoreOperationTimeoutError,
+} from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncPromoteQueue,
   type AsyncPromoteQueue,
-  type PromoteJob,
   type PromoteRequest,
   type PromoteTerminalJobClearer,
 } from '@origintrail-official/dkg-publisher';
+import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
 import {
   classifyPromoteError,
   createPromoteWorkerSupervisor,
   runPromoteJob,
 } from '../src/daemon/worker/async-promote-worker.js';
+import {
+  createAsyncPromoteWorkerFixture,
+  retryableBookkeepingFailure,
+  retryableSchedulerBusyFailure,
+  type AsyncPromoteWorkerFixture,
+} from './_helpers/async-promote-worker-fixture.js';
+import { createClaimFailureBackoff } from '../src/daemon/worker/claim-failure-backoff.js';
+
+describe('claim failure backoff', () => {
+  it('grows from 250ms to the 30s cap with injected time and randomness', () => {
+    let now = 1_000;
+    const backoff = createClaimFailureBackoff({
+      now: () => now,
+      random: () => 0.5,
+    });
+
+    expect(backoff.recordFailure()).toBe(250);
+    expect(backoff.isDue()).toBe(false);
+    now += 250;
+    expect(backoff.isDue()).toBe(true);
+    expect(backoff.recordFailure()).toBe(500);
+    now += 500;
+    for (let i = 0; i < 10; i += 1) {
+      now += backoff.recordFailure();
+    }
+    expect(backoff.recordFailure()).toBe(30_000);
+  });
+
+  it('resets the next failure to the base delay', () => {
+    let now = 1_000;
+    const backoff = createClaimFailureBackoff({
+      now: () => now,
+      random: () => 0.5,
+    });
+
+    expect(backoff.recordFailure()).toBe(250);
+    now += 250;
+    expect(backoff.recordFailure()).toBe(500);
+    backoff.reset();
+    expect(backoff.isDue()).toBe(true);
+    expect(backoff.recordFailure()).toBe(250);
+  });
+
+  it('applies both ±20% jitter bounds while retaining the absolute cap', () => {
+    const low = createClaimFailureBackoff({ now: () => 0, random: () => 0 });
+    const high = createClaimFailureBackoff({ now: () => 0, random: () => 1 });
+
+    expect(low.recordFailure()).toBe(200);
+    expect(high.recordFailure()).toBe(300);
+    for (let i = 0; i < 10; i += 1) high.recordFailure();
+    expect(high.recordFailure()).toBe(30_000);
+  });
+});
 
 function deferred<T = void>(): {
   promise: Promise<T>;
@@ -126,6 +183,103 @@ describe('classifyPromoteError', () => {
     });
   });
 
+  it('requires typed outcomes for managed-store and scheduler failures', () => {
+    for (const message of [
+      'STORE_OPERATION_TIMEOUT Managed Oxigraph is recovering; query was not started',
+      'Managed Oxigraph recovery interrupted query execution',
+      'Managed Oxigraph recovery interrupted listGraphs; outcome is indeterminate',
+      'Managed Oxigraph recovery interrupted countQuads; outcome is indeterminate',
+      'Store scheduler queue wait timeout',
+    ]) {
+      expect(classifyPromoteError(new Error(message))).toEqual({
+        classification: 'fatal',
+        retryable: false,
+      });
+    }
+    expect(classifyPromoteError(retryableSchedulerBusyFailure())).toEqual({
+      classification: 'transient',
+      retryable: true,
+    });
+  });
+
+  it('retries typed indeterminate reads and producer-certified replay while failing closed for raw writes', () => {
+    for (const operation of [
+      'query',
+      'construct',
+      'hasGraph',
+      'listGraphs',
+      'listGraphsByPrefix',
+      'countQuads',
+    ] as const) {
+      expect(classifyPromoteError(new StoreOperationTimeoutError({
+        backend: 'oxigraph-server',
+        operation,
+        outcome: 'indeterminate',
+      }))).toEqual({ classification: 'transient', retryable: true });
+    }
+
+    const rawReplaceFailure = new StoreOperationTimeoutError({
+      backend: 'oxigraph-server',
+      operation: 'replaceGraph',
+      outcome: 'indeterminate',
+      message: 'Managed Oxigraph recovery interrupted replaceGraph; outcome is indeterminate',
+    });
+    expect(classifyPromoteError(rawReplaceFailure)).toEqual({
+      classification: 'fatal',
+      retryable: false,
+    });
+    expect(classifyPromoteError(
+      classifyExactSwmGraphReplaceFailure(rawReplaceFailure),
+    )).toEqual({ classification: 'transient', retryable: true });
+    expect(classifyPromoteError(classifyExactSwmGraphReplaceFailure(
+      new StoreOperationTimeoutError({
+        backend: 'oxigraph-server',
+        operation: 'replaceGraph',
+        outcome: 'indeterminate',
+        message: 'payload too large while reading the indeterminate timeout response',
+      }),
+    ))).toEqual({ classification: 'transient', retryable: true });
+    expect(classifyPromoteError({
+      code: 'PROMOTE_REPLAY_SAFE_FAILURE',
+      stage: 'atomic-exact-swm-graph-replacement',
+      cause: rawReplaceFailure,
+    })).toEqual({ classification: 'fatal', retryable: false });
+    for (const malformed of [
+      { code: 'PROMOTE_REPLAY_SAFE_FAILURE', cause: rawReplaceFailure },
+      {
+        code: 'PROMOTE_REPLAY_SAFE_FAILURE',
+        stage: 'other',
+        cause: rawReplaceFailure,
+      },
+      {
+        code: 'PROMOTE_REPLAY_SAFE_FAILURE',
+        stage: 'atomic-exact-swm-graph-replacment',
+        cause: rawReplaceFailure,
+      },
+      {
+        code: 'PROMOTE_REPLAY_SAFE_FAILURE',
+        stage: 'atomic-exact-swm-graph-replacement',
+      },
+    ]) {
+      expect(classifyPromoteError(malformed)).toEqual({
+        classification: 'fatal',
+        retryable: false,
+      });
+    }
+
+    for (const message of [
+      'insert timed out',
+      'insert timeout after dispatch',
+    ]) {
+      expect(classifyPromoteError(new StoreOperationTimeoutError({
+        backend: 'oxigraph-server',
+        operation: 'insert',
+        outcome: 'indeterminate',
+        message,
+      }))).toEqual({ classification: 'fatal', retryable: false });
+    }
+  });
+
   it('classifies unknown errors as fatal (non-retryable)', () => {
     expect(classifyPromoteError(new Error('assertion not found: foo'))).toEqual({
       classification: 'fatal',
@@ -144,41 +298,16 @@ describe('classifyPromoteError', () => {
 });
 
 describe('runPromoteJob', () => {
-  let store: OxigraphStore;
+  let fixture: AsyncPromoteWorkerFixture;
   let queue: AsyncPromoteQueue;
-  let now: number;
-  let idCounter: number;
   let logs: string[];
+  let makeRequest: AsyncPromoteWorkerFixture['makeRequest'];
+  let enqueueAndClaim: AsyncPromoteWorkerFixture['enqueueAndClaim'];
 
   beforeEach(() => {
-    store = new OxigraphStore();
-    now = 1_700_000_000_000;
-    idCounter = 0;
-    logs = [];
-    queue = new TripleStoreAsyncPromoteQueue(store, {
-      now: () => now,
-      idGenerator: () => `job-${++idCounter}`,
-      backoff: () => 60_000,
-      maxRetries: 3,
-    });
+    fixture = createAsyncPromoteWorkerFixture();
+    ({ queue, logs, makeRequest, enqueueAndClaim } = fixture);
   });
-
-  function makeRequest(overrides: Partial<PromoteRequest> = {}): PromoteRequest {
-    return {
-      contextGraphId: 'graphify',
-      subGraphName: 'code',
-      assertionName: 'shard-1',
-      entities: 'all',
-      ...overrides,
-    };
-  }
-
-  async function enqueueAndClaim(req: PromoteRequest = makeRequest()): Promise<PromoteJob> {
-    await queue.enqueue(req);
-    const claimed = await queue.claimNext('worker-test');
-    if (!claimed) throw new Error('expected claimable job');
-    return claimed;
-  }
 
   it('on success, records the recovery commit marker and transitions to succeeded', async () => {
     const job = await enqueueAndClaim();
@@ -190,7 +319,7 @@ describe('runPromoteJob', () => {
         await markPromoteStarted();
         return { promotedCount: 42 };
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: (m) => logs.push(m),
     });
@@ -211,8 +340,8 @@ describe('runPromoteJob', () => {
   it('Codex #665 — post-promote bookkeeping failure returns partial_promote_ambiguity and leaves job running', async () => {
     // Codex (#665#discussion_r3302646439): if `assertion.promote()` has
     // already returned successfully and the next `recordCommitMarker
-    // ('swmInserted')` or `queue.succeed()` write fails (store hiccup,
-    // lost lease, transient FS error, …), the previous behavior let the
+    // ('swmInserted')` or `queue.succeed()` write fails permanently (or
+    // loses its lease), the previous behavior let the
     // outer worker catch park the job as `failed` with retryable=false.
     // Re-running through `/promote-async/{jobId}/recover` would then
     // promote already-promoted data — duplicate WM/SWM writes + re-gossip.
@@ -223,10 +352,11 @@ describe('runPromoteJob', () => {
     // partial-promote bucket on next daemon boot.
     const job = await enqueueAndClaim();
     const failingQueue: AsyncPromoteQueue = {
+      effectiveLeaseMs: 15 * 60 * 1000,
       ...queue,
       recordCommitMarker: async (jobId, claimToken, step) => {
         if (step === 'swmInserted') {
-          throw new Error('simulated store hiccup');
+          throw new Error('simulated non-retryable bookkeeping failure');
         }
         return queue.recordCommitMarker(jobId, claimToken, step);
       },
@@ -240,7 +370,7 @@ describe('runPromoteJob', () => {
         await markPromoteStarted();
         return { promotedCount: 99 };
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: (m) => logs.push(m),
     });
@@ -257,7 +387,7 @@ describe('runPromoteJob', () => {
     // The loud log line operators need to see.
     expect(logs.some((l) => l.includes('PARTIAL-PROMOTE-AMBIGUITY'))).toBe(true);
 
-    now += 6 * 60 * 1000;
+    fixture.clock.advance(16 * 60 * 1000);
     await queue.claimNext('worker-after-lease-expiry');
     const reconciled = await queue.getStatus(job.jobId);
     expect(reconciled?.state).toBe('failed');
@@ -276,7 +406,7 @@ describe('runPromoteJob', () => {
         await markPromoteStarted();
         return { promotedCount: 7 };
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: () => {},
       emitMemoryGraphChanged: (e) => events.push(e),
@@ -303,7 +433,7 @@ describe('runPromoteJob', () => {
         await markPromoteStarted();
         return { promotedCount: 0 };
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: () => {},
       emitMemoryGraphChanged: (e) => events.push(e),
@@ -321,7 +451,7 @@ describe('runPromoteJob', () => {
         await markPromoteStarted();
         throw new Error('fetch failed');
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: (message) => logs.push(message),
     });
@@ -329,7 +459,7 @@ describe('runPromoteJob', () => {
     expect(result.error?.classification).toBe('transient');
     const final = await queue.getStatus(job.jobId);
     expect(final?.state).toBe('failed_retrying');
-    expect(final?.attempt.nextRetryAt).toBeGreaterThan(now);
+    expect(final?.attempt.nextRetryAt).toBeGreaterThan(fixture.clock.now());
     expect(promoteFailureDiagnostics(logs)).toEqual([
       expect.objectContaining({
         event: 'async_promote_attempt_failed',
@@ -345,6 +475,39 @@ describe('runPromoteJob', () => {
     ]);
   });
 
+  it('uses publisher-owned diagnostics for a certified replay-safe failure', async () => {
+    const job = await enqueueAndClaim();
+    const replaySafeFailure = classifyExactSwmGraphReplaceFailure(
+      new StoreOperationTimeoutError({
+        backend: 'oxigraph-server',
+        operation: 'replaceGraph',
+        outcome: 'indeterminate',
+      }),
+    );
+
+    await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw replaySafeFailure;
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+
+    expect(promoteFailureDiagnostics(logs)).toEqual([
+      expect.objectContaining({
+        classification: 'transient',
+        retryable: true,
+        errorName: 'PromoteReplaySafeError',
+        errorCode: 'PROMOTE_REPLAY_SAFE_FAILURE',
+      }),
+    ]);
+  });
+
   it('on cap_exceeded error, transitions to failed (terminal)', async () => {
     const job = await enqueueAndClaim();
     const result = await runPromoteJob({
@@ -354,7 +517,7 @@ describe('runPromoteJob', () => {
       runPromote: async () => {
         throw new Error('Promoted assertion too large for gossip (6000 KB, limit 4 MB)');
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: () => {},
     });
@@ -373,7 +536,7 @@ describe('runPromoteJob', () => {
       runPromote: async () => {
         throw new Error('assertion not found: shard-1');
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: (message) => logs.push(message),
     });
@@ -415,7 +578,7 @@ describe('runPromoteJob', () => {
         await markPromoteStarted();
         throw failure;
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: (message) => {
         order.push('diagnostic');
@@ -470,7 +633,7 @@ describe('runPromoteJob', () => {
         await markPromoteStarted();
         throw failure;
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: (message) => logs.push(message),
     });
@@ -499,7 +662,7 @@ describe('runPromoteJob', () => {
         await markPromoteStarted();
         throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: () => {
         throw new Error('logger unavailable');
@@ -536,7 +699,7 @@ describe('runPromoteJob', () => {
         await markPromoteStarted();
         throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
       },
-      now: () => now,
+      now: fixture.clock.now,
       heartbeatIntervalMs: 0,
       log: () => pendingLog.promise,
     });
@@ -583,7 +746,7 @@ describe('runPromoteJob', () => {
           await markPromoteStarted();
           throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
         },
-        now: () => now,
+        now: fixture.clock.now,
         heartbeatIntervalMs: 0,
         log: async () => {
           throw new Error('async logger unavailable');
@@ -615,11 +778,11 @@ describe('runPromoteJob', () => {
         runPromote: async () => {
           throw new Error('fetch failed');
         },
-        now: () => now,
+        now: fixture.clock.now,
         heartbeatIntervalMs: 0,
         log: () => {},
       });
-      now += 120_000; // > backoff so next claimNext picks it up
+      fixture.clock.advance(120_000); // > backoff so next claimNext picks it up
     }
     const all = await queue.list({});
     const job = all[0];
@@ -636,7 +799,7 @@ describe('runPromoteJob', () => {
         queue,
         workerId: 'worker-test',
         runPromote: async () => ({ promotedCount: 0 }),
-        now: () => now,
+        now: fixture.clock.now,
         heartbeatIntervalMs: 0,
         log: () => {},
       }),
@@ -686,7 +849,7 @@ describe('createPromoteWorkerSupervisor', () => {
   });
 
   afterEach(async () => {
-    // best-effort cleanup
+    vi.useRealTimers();
   });
 
   it('start() then tickOnce() picks up queued jobs and runs them to succeeded', async () => {
@@ -764,11 +927,370 @@ describe('createPromoteWorkerSupervisor', () => {
     await sup.stop();
   });
 
+  it('wakes immediately on enqueue while retaining a slow durable fallback poll', async () => {
+    const promoted = deferred();
+    const sup = createPromoteWorkerSupervisor({
+      agent: makeAgentStub(async () => {
+        promoted.resolve();
+        return { promotedCount: 1 };
+      }),
+      workerConcurrency: 4,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'test',
+    });
+    await sup.start();
+
+    await queue.enqueue(makeRequest('signalled'));
+    await Promise.race([
+      promoted.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('enqueue wake timed out')), 500)),
+    ]);
+    await sup.stop();
+
+    expect((await queue.getStats()).succeeded).toBe(1);
+  });
+
+  it('retains the exact 100ms fallback for durable work written through another queue instance', async () => {
+    vi.useFakeTimers();
+    const externalQueue = new TripleStoreAsyncPromoteQueue(store, {
+      now: () => Date.now(),
+      backoff: () => 50,
+      maxRetries: 2,
+    });
+    const promoted = deferred();
+    const sup = createPromoteWorkerSupervisor({
+      agent: makeAgentStub(async () => {
+        promoted.resolve();
+        return { promotedCount: 1 };
+      }),
+      workerConcurrency: 1,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'durable-fallback',
+    });
+    await sup.start();
+
+    // This queue instance has no scheduler attached, so the supervisor can
+    // observe the durable write only through its public 100ms fallback poll.
+    await externalQueue.enqueue(makeRequest('external-write'));
+    await vi.advanceTimersByTimeAsync(99);
+    expect((await queue.getStats()).running).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    await promoted.promise;
+    await sup.stop();
+
+    expect((await queue.getStats()).succeeded).toBe(1);
+  });
+
+  it('wakes only the latest supervisor after scheduler handoff and stale stop', async () => {
+    const firstOwnerCalls: string[] = [];
+    const currentOwnerCalls: string[] = [];
+    const firstCurrentRun = deferred();
+    const secondCurrentRun = deferred();
+    const firstSupervisor = createPromoteWorkerSupervisor({
+      agent: makeAgentStub(async (request) => {
+        firstOwnerCalls.push(request.assertionName);
+        return { promotedCount: 1 };
+      }),
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'superseded',
+    });
+    const currentSupervisor = createPromoteWorkerSupervisor({
+      agent: makeAgentStub(async (request) => {
+        currentOwnerCalls.push(request.assertionName);
+        if (currentOwnerCalls.length === 1) firstCurrentRun.resolve();
+        if (currentOwnerCalls.length === 2) secondCurrentRun.resolve();
+        return { promotedCount: 1 };
+      }),
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'current',
+    });
+
+    await firstSupervisor.start();
+    await currentSupervisor.start();
+    await queue.enqueue(makeRequest('after-handoff'));
+    await Promise.race([
+      firstCurrentRun.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('handoff wake timed out')), 500)),
+    ]);
+    expect(firstOwnerCalls).toEqual([]);
+
+    // This detach belongs to the superseded attachment and must not remove
+    // the current supervisor's scheduler ownership.
+    await firstSupervisor.stop();
+    await queue.enqueue(makeRequest('after-stale-stop'));
+    await Promise.race([
+      secondCurrentRun.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('post-stop wake timed out')), 500)),
+    ]);
+    await currentSupervisor.stop();
+
+    expect(firstOwnerCalls).toEqual([]);
+    expect(currentOwnerCalls).toEqual(['after-handoff', 'after-stale-stop']);
+  });
+
+  it('rolls startup back when scheduler attachment throws and can retry cleanly', async () => {
+    let attachAttempts = 0;
+    const wrappedQueue = new Proxy(queue, {
+      get(target, prop, receiver) {
+        if (prop === 'workScheduling') {
+          return {
+            attachScheduler(scheduler: { onWorkAvailable: () => void }) {
+              attachAttempts += 1;
+              if (attachAttempts === 1) throw new Error('scheduler attachment failed');
+              return target.workScheduling.attachScheduler(scheduler);
+            },
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as AsyncPromoteQueue;
+    const promoted = deferred();
+    const agent = makeAgentStub(async () => {
+      promoted.resolve();
+      return { promotedCount: 1 };
+    });
+    agent.promoteQueue = wrappedQueue;
+    const sup = createPromoteWorkerSupervisor({
+      agent,
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'startup-rollback',
+    });
+
+    await expect(sup.start()).rejects.toThrow('scheduler attachment failed');
+    await expect(sup.start()).resolves.toBeUndefined();
+    await queue.enqueue(makeRequest('after-startup-retry'));
+    await Promise.race([
+      promoted.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('startup retry wake timed out')), 500)),
+    ]);
+    await sup.stop();
+
+    expect(attachAttempts).toBe(2);
+    expect((await queue.getStats()).succeeded).toBe(1);
+  });
+
+  it('wakes immediately on resume when queued work was observed while paused', async () => {
+    const promoted = deferred();
+    let promoteCalls = 0;
+    const sup = createPromoteWorkerSupervisor({
+      agent: makeAgentStub(async () => {
+        promoteCalls += 1;
+        promoted.resolve();
+        return { promotedCount: 1 };
+      }),
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'resume',
+    });
+    await sup.start();
+    await queue.pause();
+    await queue.enqueue(makeRequest('paused'));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(promoteCalls).toBe(0);
+
+    await queue.resume();
+    await Promise.race([
+      promoted.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('resume wake timed out')), 500)),
+    ]);
+    await sup.stop();
+
+    expect(promoteCalls).toBe(1);
+    expect((await queue.getStats()).succeeded).toBe(1);
+  });
+
+  it('drains a backlog larger than worker concurrency from a single resume wake', async () => {
+    await queue.pause();
+    await queue.enqueue(makeRequest('backlog-a'));
+    await queue.enqueue(makeRequest('backlog-b'));
+    await queue.enqueue(makeRequest('backlog-c'));
+
+    const allPromoted = deferred();
+    const promoted: string[] = [];
+    const sup = createPromoteWorkerSupervisor({
+      agent: makeAgentStub(async (request) => {
+        promoted.push(request.assertionName);
+        if (promoted.length === 3) allPromoted.resolve();
+        return { promotedCount: 1 };
+      }),
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'backlog',
+    });
+    await sup.start();
+
+    await queue.resume();
+    await Promise.race([
+      allPromoted.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('backlog drain timed out')), 2_000)),
+    ]);
+    await sup.stop();
+
+    expect([...promoted].sort()).toEqual(['backlog-a', 'backlog-b', 'backlog-c']);
+    expect((await queue.getStats()).succeeded).toBe(3);
+  });
+
+  it('stops probing remaining idle slots after the first empty claim', async () => {
+    let claimCalls = 0;
+    const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
+    wrappedQueue.claimNext = async (workerId: string) => {
+      claimCalls += 1;
+      return queue.claimNext(workerId);
+    };
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: wrappedQueue,
+        assertion: { promote: async () => ({ promotedCount: 0 }) },
+      } as any,
+      workerConcurrency: 4,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'test',
+    });
+    await sup.start();
+    expect(await sup.tickOnce()).toBe(0);
+    await sup.stop();
+
+    expect(claimCalls).toBe(1);
+  });
+
+  it('backs off repeated claim failures instead of polling the store continuously', async () => {
+    let now = 10_000;
+    let claimCalls = 0;
+    const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
+    wrappedQueue.claimNext = async () => {
+      claimCalls += 1;
+      throw new Error('store unavailable');
+    };
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: wrappedQueue,
+        assertion: { promote: async () => ({ promotedCount: 0 }) },
+      } as any,
+      workerConcurrency: 4,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      now: () => now,
+      random: () => 0.5,
+      log: (message) => logs.push(message),
+      workerIdPrefix: 'claim-backoff',
+    });
+
+    await sup.start();
+    for (let i = 0; i < 400; i += 1) await sup.tickOnce();
+    expect(claimCalls).toBe(1);
+
+    now += 249;
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(1);
+    now += 1;
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(2);
+
+    now += 499;
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(2);
+    now += 1;
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(3);
+    expect(logs.some((message) => message.includes('retrying in 500ms'))).toBe(true);
+
+    await sup.stop();
+  });
+
+  it('automatically retries a failed claim when the backoff deadline arrives', async () => {
+    vi.useFakeTimers();
+    let claimCalls = 0;
+    const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
+    wrappedQueue.claimNext = async () => {
+      claimCalls += 1;
+      throw new Error('store unavailable');
+    };
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: wrappedQueue,
+        assertion: { promote: async () => ({ promotedCount: 0 }) },
+      } as any,
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      random: () => 0.5,
+      log: (message) => logs.push(message),
+      workerIdPrefix: 'automatic-claim-retry',
+    });
+
+    await sup.start();
+    await queue.enqueue(makeRequest('automatic-claim-retry'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(claimCalls).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(249);
+    expect(claimCalls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(claimCalls).toBe(2);
+    expect(logs.some((message) => message.includes('retrying in 500ms'))).toBe(true);
+
+    await sup.stop();
+  });
+
+  it('resets claim backoff after the queue recovers', async () => {
+    let now = 10_000;
+    let claimCalls = 0;
+    const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
+    wrappedQueue.claimNext = async () => {
+      claimCalls += 1;
+      if (claimCalls === 2) return null;
+      throw new Error('store unavailable');
+    };
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: wrappedQueue,
+        assertion: { promote: async () => ({ promotedCount: 0 }) },
+      } as any,
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      now: () => now,
+      random: () => 0.5,
+      log: (message) => logs.push(message),
+      workerIdPrefix: 'claim-recovery',
+    });
+
+    await sup.start();
+    expect(await sup.tickOnce()).toBe(0);
+    now += 250;
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(2);
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(3);
+    expect(logs.at(-1)).toContain('retrying in 250ms');
+
+    await sup.stop();
+  });
+
   it('rejects a heartbeat interval that is not shorter than the queue lease', () => {
     expect(() =>
       createPromoteWorkerSupervisor({
         agent: makeAgentStub(async () => ({ promotedCount: 0 })),
-        heartbeatIntervalMs: 5 * 60 * 1000,
+        heartbeatIntervalMs: 15 * 60 * 1000,
         log: () => {},
       }),
     ).toThrow(/heartbeatIntervalMs.*shorter than the queue lease/);
@@ -862,6 +1384,64 @@ describe('createPromoteWorkerSupervisor', () => {
     await slowPromote;
   });
 
+  it('shutdown timeout stops bookkeeping retries and heartbeats before returning', async () => {
+    await queue.enqueue(makeRequest('bookkeeping-recovery'));
+    const retrySleepStarted = deferred();
+    const retrySleep = deferred();
+    const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
+    const recordCommitMarker = queue.recordCommitMarker.bind(queue);
+    const heartbeat = queue.heartbeat.bind(queue);
+    let swmMarkerWrites = 0;
+    let heartbeatWrites = 0;
+    wrappedQueue.recordCommitMarker = async (jobId, claimToken, step) => {
+      if (step === 'swmInserted') {
+        swmMarkerWrites += 1;
+        throw retryableBookkeepingFailure();
+      }
+      return recordCommitMarker(jobId, claimToken, step);
+    };
+    wrappedQueue.heartbeat = async (jobId, claimToken) => {
+      heartbeatWrites += 1;
+      return heartbeat(jobId, claimToken);
+    };
+
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: wrappedQueue,
+        assertion: { promote: async () => ({ promotedCount: 1 }) },
+      } as any,
+      workerConcurrency: 1,
+      pollIntervalMs: 1_000_000,
+      heartbeatIntervalMs: 5,
+      bookkeepingRetryIntervalMs: 60_000,
+      shutdownTimeoutMs: 25,
+      sleep: async () => {
+        retrySleepStarted.resolve();
+        await retrySleep.promise;
+      },
+      log: (m) => logs.push(m),
+      workerIdPrefix: 'test',
+    });
+    await sup.start();
+    await sup.tickOnce();
+    await retrySleepStarted.promise;
+
+    await sup.stop();
+    const writesAtStop = swmMarkerWrites;
+    const heartbeatsAtStop = heartbeatWrites;
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+
+    expect(writesAtStop).toBe(1);
+    expect(swmMarkerWrites).toBe(writesAtStop);
+    expect(heartbeatWrites).toBe(heartbeatsAtStop);
+    expect(sup.getCounters().interruptedAtShutdown).toBe(1);
+    expect((await queue.getStats()).running).toBe(1);
+    expect((await queue.getStats()).succeeded).toBe(0);
+    expect((await queue.getStats()).failed).toBe(0);
+
+    retrySleep.resolve();
+  });
+
   it('stop() waits for a poll callback that has claimed work but not published inFlight yet', async () => {
     await queue.enqueue(makeRequest('interval-claim-race'));
     const claimStarted = deferred();
@@ -931,6 +1511,7 @@ describe('createPromoteWorkerSupervisor', () => {
       workerConcurrency: 1,
       pollIntervalMs: 1_000_000,
       heartbeatIntervalMs: 0,
+      bookkeepingRetryBudgetMs: 500,
       log: (m) => logs.push(m),
       workerIdPrefix: 'test',
     });
@@ -939,6 +1520,25 @@ describe('createPromoteWorkerSupervisor', () => {
     expect((await recoverableQueue.getStats()).running).toBe(0);
     expect(logs.some((m) => m.includes('abandoned=1'))).toBe(true);
     await sup.stop();
+  });
+
+  it('validates worker timing against the queue effective lease', () => {
+    const shortLeaseQueue = new TripleStoreAsyncPromoteQueue(store, { leaseMs: 1_000 });
+    const agent = {
+      promoteQueue: shortLeaseQueue,
+      assertion: { promote: async () => ({ promotedCount: 1 }) },
+    } as any;
+
+    expect(() => createPromoteWorkerSupervisor({
+      agent,
+      heartbeatIntervalMs: 1_000,
+      bookkeepingRetryBudgetMs: 500,
+    })).toThrow(/heartbeatIntervalMs.*1000ms/);
+    expect(() => createPromoteWorkerSupervisor({
+      agent,
+      heartbeatIntervalMs: 0,
+      bookkeepingRetryBudgetMs: 1_000,
+    })).toThrow(/bookkeepingRetryBudgetMs.*1000ms/);
   });
 
   it('refuses to start polling when recoverOnStartup() fails', async () => {

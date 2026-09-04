@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { type LiftJob } from '../src/index.js';
 import {
   queuedLiftOperationKind,
@@ -97,6 +97,22 @@ describe('GH#2270 failed-job retry disposition', () => {
     expect(after?.retries.retryCount).toBe(0);
   });
 
+  it('rejects unsafe exact job IDs before any control-plane store access', async () => {
+    const publisher = createPublisher();
+    const query = vi.spyOn(h.store, 'query');
+    const insert = vi.spyOn(h.store, 'insert');
+    const deleteByPattern = vi.spyOn(h.store, 'deleteByPattern');
+
+    for (const jobId of ['bad>id', 'a'.repeat(257)]) {
+      expect(await publisher.retryDetailed({ jobId }))
+        .toEqual({ retried: 0, blockedPendingRecovery: 0, skipped: 0 });
+    }
+
+    expect(query).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
+    expect(deleteByPattern).not.toHaveBeenCalled();
+  });
+
   it('reaccepts a pre-send-safe failed job and partitions the rest into blocked and skipped', async () => {
     const publisher = createPublisher();
     const retryable = await failWithUnmetQuorum(publisher);
@@ -185,6 +201,8 @@ describe('GH#2270 failed-job retry disposition', () => {
       action: 'reset_to_accepted',
       recoveredFromStatus: 'included',
       txHashChecked: TX_HASH,
+      // The included carrier retains the same pre-send branch marker as broadcast recovery.
+      operationKind: 'create',
       // r23 — the signer travels from this origin too; an 'included' failure has broadcast
       // metadata, so there is an authoritative wallet to preserve.
       walletIdChecked: includedFailure.broadcast?.walletId,
@@ -223,7 +241,9 @@ describe('GH#2270 failed-job retry disposition', () => {
       admission: { byAgentAddress: owner },
       request: { jobType: 'lift', lift: {} },
     } as unknown as LiftJob);
-    const override = (requestedBy: string) => ({ pendingTransactionOverride: { requestedBy } });
+    const override = (agentAddress: string) => ({
+      pendingTransactionOverride: { kind: 'agent' as const, agentAddress },
+    });
 
     // EVM: case-insensitive, both directions.
     const EVM = '0xAbCdEf0000000000000000000000000000001234';
@@ -234,6 +254,30 @@ describe('GH#2270 failed-job retry disposition', () => {
     const PEER = '12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw';
     expect(isTargetedClearableLiftJob(held(PEER), override(PEER))).toBe(true);
     expect(isTargetedClearableLiftJob(held(PEER), override(PEER.toLowerCase()))).toBe(false);
+  });
+
+  it('accepts the exact legacy owner shape but fails closed for non-owner and malformed variants', () => {
+    const heldJob = {
+      status: 'failed',
+      failure: { resolution: 'retry_recovery' },
+      admission: { byAgentAddress: '0xAbCdEf0000000000000000000000000000001234' },
+      request: { jobType: 'lift', lift: {} },
+    } as unknown as LiftJob;
+    const runtimeOptions = (pendingTransactionOverride: unknown) => ({
+      pendingTransactionOverride,
+    }) as unknown as Parameters<typeof isTargetedClearableLiftJob>[1];
+
+    expect(isTargetedClearableLiftJob(heldJob, runtimeOptions({
+      requestedBy: '0xAbCdEf0000000000000000000000000000001234',
+    }))).toBe(true);
+    expect(isTargetedClearableLiftJob(heldJob, runtimeOptions({
+      requestedBy: '0x0000000000000000000000000000000000000001',
+    }))).toBe(false);
+    expect(isTargetedClearableLiftJob(heldJob, runtimeOptions({
+      kind: 'legacyOwner',
+      agentAddress: '0xAbCdEf0000000000000000000000000000001234',
+    }))).toBe(false);
+    expect(isTargetedClearableLiftJob(heldJob, runtimeOptions({ kind: 'agent' }))).toBe(false);
   });
 
   it('names the two settlement ROLES explicitly, without inferring either from wiring [3825614002]', () => {
@@ -315,10 +359,10 @@ describe('GH#2270 failed-job retry disposition', () => {
       failure: { ...admitted.failure, resolution: 'retry_recovery' },
     } as PersistedFailedJob;
     expect(isTargetedClearableLiftJob(heldAfterReset, {
-      pendingTransactionOverride: { requestedBy: ADMITTED_BY },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: ADMITTED_BY },
     })).toBe(true);
     expect(isTargetedClearableLiftJob(heldAfterReset, {
-      pendingTransactionOverride: { requestedBy: '0xBBbBBb00000000000000000000000000000000Bb' },
+      pendingTransactionOverride: { kind: 'agent', agentAddress: '0xBBbBBb00000000000000000000000000000000Bb' },
     })).toBe(false);
     // ...and with no override at all, ownership alone never grants the clear.
     expect(isTargetedClearableLiftJob(heldAfterReset)).toBe(false);
@@ -366,6 +410,8 @@ describe('GH#2270 failed-job retry disposition', () => {
     await h.store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
     await h.store.insert(serializeJob(carriedInRecoveryOnly, DEFAULT_CONTROL_GRAPH_URI));
 
+    // Recovery may only reset the claim after its durable ownership lease expires.
+    h.advance(6 * 60_000);
     expect(await publisher.recover()).toBe(1);
 
     const reset = await publisher.getStatus(jobId);

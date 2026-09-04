@@ -28,7 +28,6 @@ import {
   assertSubGraphNameV1,
   assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
   computeControlSignatureVariantDigestHex,
-  parseDeterministicKnowledgeAssetUal,
   type AuthorCatalogScopeV1,
   type Digest32V1,
   type EvmAddressV1,
@@ -53,6 +52,9 @@ import {
   type FinalizedVmHarnessRuntimeV1,
 } from './finalized-vm-harness-runtime.ts';
 import { sealGate2ExecutedRuntimeManifestV1 } from './runtime-load-hook.ts';
+import { stagePrivateCatalogBulkPredecessorV1 } from
+  '../rfc64-cp2-private-swm-vm-recovery/bulk-predecessor.ts';
+import { wireSynchronizationEvidence } from './synchronization-evidence-wire.ts';
 
 const role = process.argv[2];
 const dataDirInput = process.env.DKG_RFC64_GATE2_ADAPTER_DATA_DIR;
@@ -60,6 +62,13 @@ const masterKeyHex = process.env.DKG_RFC64_GATE2_AGENT_MASTER_KEY_HEX;
 const runtimeBuildManifestDigest = process.env.DKG_RFC64_GATE2_RUNTIME_MANIFEST_DIGEST;
 const finalizedVmConfigInput = process.env.DKG_RFC64_GATE2_FINALIZED_VM_CONFIG;
 const networkChainIdInput = process.env.DKG_RFC64_GATE2_NETWORK_CHAIN_ID;
+const localCatalogAgentAddressInput =
+  process.env.DKG_RFC64_GATE2_CATALOG_LOCAL_AGENT_ADDRESS;
+const allowBulkCatalogPredecessor =
+  process.env.DKG_RFC64_GATE2_ALLOW_BULK_CATALOG_PREDECESSOR === '1';
+const bundleServeDelayMs = parseBoundedDelayMs(
+  process.env.DKG_RFC64_GATE2_BUNDLE_SERVE_DELAY_MS,
+);
 if (role !== 'author' && role !== 'receiver') throw new Error('adapter role is required');
 if (!dataDirInput) throw new Error('DKG_RFC64_GATE2_ADAPTER_DATA_DIR is required');
 if (!masterKeyHex || !/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
@@ -75,6 +84,9 @@ let agent: DKGAgent | undefined;
 let finalizedVmRuntime: Readonly<FinalizedVmHarnessRuntimeV1> | undefined;
 let stopping = false;
 let commandTail = Promise.resolve();
+const peerCatalogAgentAddresses = new Map<string, EvmAddressV1>();
+const harnessCatalogFailureMessages = new Map<string, string>();
+let armHarnessBundleReadBarrier: (() => void) | undefined;
 
 interface Command {
   readonly command: string;
@@ -135,6 +147,12 @@ async function boot(): Promise<void> {
   if (networkChainIdInput !== undefined) {
     assertNetworkIdV1(networkChainIdInput);
   }
+  const localCatalogAgentAddress = localCatalogAgentAddressInput === undefined
+    ? null
+    : canonicalNonZeroEvmAddress(
+        localCatalogAgentAddressInput,
+        'DKG_RFC64_GATE2_CATALOG_LOCAL_AGENT_ADDRESS',
+      );
   if (
     finalizedVmConfig !== null
     && networkChainIdInput !== RFC64_GATE2_DEPLOYMENT.networkId
@@ -160,6 +178,13 @@ async function boot(): Promise<void> {
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
     rfc64CatalogDeploymentProfile: RFC64_GATE2_DEPLOYMENT as never,
+    ...(localCatalogAgentAddress === null ? {} : {
+      rfc64CatalogAccessPolicyAuthority: {
+        localAgentAddress: localCatalogAgentAddress,
+        resolveRemoteAgentAddress: async (remotePeerId: string) =>
+          peerCatalogAgentAddresses.get(remotePeerId) ?? null,
+      },
+    }),
     ...(networkChainAdapter === undefined ? {} : { chainAdapter: networkChainAdapter }),
     ...(finalizedVmRuntime === undefined ? {} : {
       chainConfig: {
@@ -174,6 +199,10 @@ async function boot(): Promise<void> {
       ),
     }),
   });
+  installHarnessCatalogFailureDiagnostics(created);
+  if (bundleServeDelayMs > 0) {
+    installHarnessBundleServeDelay(created, bundleServeDelayMs);
+  }
   agent = created;
   await created.start();
   if (finalizedVmConfig !== null) {
@@ -195,6 +224,114 @@ async function boot(): Promise<void> {
     finalizedVmRuntime: finalizedVmConfig !== null,
     startupRepair: null,
   });
+}
+
+function installHarnessCatalogFailureDiagnostics(created: DKGAgent): void {
+  const surface = created as unknown as Record<string, unknown>;
+  const registryValue = surface.rfc64PublicCatalogReconciliationFailuresV1;
+  if (
+    registryValue === null
+    || typeof registryValue !== 'object'
+    || Array.isArray(registryValue)
+  ) {
+    throw new Error('catalog failure registry is unavailable');
+  }
+  const registry = registryValue as Record<string, unknown>;
+  const originalRecord = registry.record;
+  if (typeof originalRecord !== 'function') {
+    throw new Error('catalog failure registry record hook is unavailable');
+  }
+  registry.record = function recordWithHarnessDiagnostic(
+    this: unknown,
+    catalogHeadDigest: unknown,
+    error: unknown,
+  ): unknown {
+    if (typeof catalogHeadDigest === 'string') {
+      harnessCatalogFailureMessages.set(
+        catalogHeadDigest,
+        boundedErrorChainMessage(error),
+      );
+    }
+    return (originalRecord as (this: unknown, digest: unknown, cause: unknown) => unknown)
+      .call(this, catalogHeadDigest, error);
+  };
+}
+
+/**
+ * Install a harness-only delay after persistence opens and before the catalog
+ * service captures its provider read capability. This gives the parent a
+ * deterministic point at which to terminate provider A during bundle transfer.
+ */
+function installHarnessBundleServeDelay(created: DKGAgent, delayMs: number): void {
+  const surface = created as unknown as Record<string, unknown>;
+  const originalStart = surface.startRfc64PublicCatalogServiceV1;
+  if (typeof originalStart !== 'function') {
+    throw new Error('catalog service start hook is unavailable');
+  }
+  surface.startRfc64PublicCatalogServiceV1 = function delayedCatalogStart(
+    this: Record<string, unknown>,
+    context: unknown,
+  ): unknown {
+    const persistenceValue = this.rfc64PersistenceV1;
+    if (
+      persistenceValue === null
+      || typeof persistenceValue !== 'object'
+      || Array.isArray(persistenceValue)
+    ) {
+      throw new Error('open RFC-64 persistence is unavailable');
+    }
+    const persistence = persistenceValue as Record<string, unknown>;
+    const kaBundles = plainRecord(persistence.kaBundles, 'RFC-64 KA bundle operations');
+    const originalRead = kaBundles.readKaBundleByDigest;
+    if (typeof originalRead !== 'function') {
+      throw new Error('RFC-64 KA bundle reader is unavailable');
+    }
+    let readOrdinal = 0;
+    let readTail = Promise.resolve();
+    let barrierArmed = false;
+    armHarnessBundleReadBarrier = () => {
+      readOrdinal = 0;
+      barrierArmed = true;
+    };
+    Object.defineProperty(persistence, 'kaBundles', {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: Object.freeze({
+        ...kaBundles,
+        readKaBundleByDigest: async (digest: unknown) => {
+          const ordinal = ++readOrdinal;
+          const requestId = `bundle-read-${String(ordinal)}`;
+          const read = readTail.then(async () => {
+            if (barrierArmed) {
+              await emitAndFlush({ event: 'bundle-read-start', ordinal, requestId });
+            }
+            await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, delayMs));
+            const result = await (originalRead as (value: unknown) => Promise<unknown>)(digest);
+            if (barrierArmed) {
+              await emitAndFlush({ event: 'bundle-read-complete', ordinal, requestId });
+            }
+            return result;
+          });
+          readTail = read.then(() => undefined, () => undefined);
+          return read;
+        },
+      }),
+    });
+    return (originalStart as (this: unknown, value: unknown) => unknown).call(this, context);
+  };
+}
+
+function parseBoundedDelayMs(value: string | undefined): number {
+  if (value === undefined) return 0;
+  if (!/^(0|[1-9][0-9]{0,4})$/u.test(value)) {
+    throw new TypeError('DKG_RFC64_GATE2_BUNDLE_SERVE_DELAY_MS is invalid');
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 10_000) {
+    throw new TypeError('DKG_RFC64_GATE2_BUNDLE_SERVE_DELAY_MS must be 0-10000');
+  }
+  return parsed;
 }
 
 /** Model an already-durable subscription through the production restore boundary. */
@@ -224,6 +361,24 @@ async function handle(command: Command): Promise<void> {
   }
   const currentAgent = requireAgent();
   switch (command.command) {
+    case 'bindCatalogPeerAgent': {
+      const input = plainRecord(command.input, 'bindCatalogPeerAgent input');
+      const peerId = requiredString(input.peerId, 'bindCatalogPeerAgent.peerId');
+      if (Buffer.byteLength(peerId, 'utf8') > 256) {
+        throw new Error('bindCatalogPeerAgent.peerId is too long');
+      }
+      const agentAddress = canonicalNonZeroEvmAddress(
+        input.agentAddress,
+        'bindCatalogPeerAgent.agentAddress',
+      );
+      const current = peerCatalogAgentAddresses.get(peerId);
+      if (current !== undefined && current !== agentAddress) {
+        throw new Error('bindCatalogPeerAgent cannot replace an existing peer binding');
+      }
+      peerCatalogAgentAddresses.set(peerId, agentAddress);
+      emitOperationResult(command, { agentAddress, peerId });
+      return;
+    }
     case 'dial': {
       const input = plainRecord(command.input, 'dial input');
       const address = requiredString(input.multiaddr, 'dial.multiaddr');
@@ -291,6 +446,19 @@ async function handle(command: Command): Promise<void> {
       emitOperationResult(command, output);
       return;
     }
+    case 'stagePrivateCatalogBulkPredecessor': {
+      requireRole('author');
+      if (!allowBulkCatalogPredecessor) {
+        throw new Error('bulk catalog predecessor fixture is not enabled for this process');
+      }
+      const output = await stagePrivateCatalogBulkPredecessorV1(
+        currentAgent,
+        command.input,
+        verifyControlEnvelopeIssuerSignatureV1,
+      );
+      emitOperationResult(command, output);
+      return;
+    }
     case 'announce': {
       requireRole('author');
       const output = await currentAgent.announceRfc64PublicCatalogHeadV1(
@@ -332,6 +500,41 @@ async function handle(command: Command): Promise<void> {
     case 'receiverStats': {
       requireRole('receiver');
       emitOperationResult(command, currentAgent.rfc64PublicCatalogStatsV1()?.receiver ?? null);
+      return;
+    }
+    case 'catalogStats': {
+      requireRole('receiver');
+      emitOperationResult(command, currentAgent.rfc64PublicCatalogStatsV1() ?? null);
+      return;
+    }
+    case 'synchronizeCatalogProviders': {
+      requireRole('receiver');
+      const input = plainRecord(command.input, 'synchronizeCatalogProviders input');
+      const remotePeerIds = plainArray(
+        input.remotePeerIds,
+        'synchronizeCatalogProviders.remotePeerIds',
+      ).map((value, index) => requiredString(
+        value,
+        `synchronizeCatalogProviders.remotePeerIds[${index}]`,
+      ));
+      if (remotePeerIds.length < 1 || remotePeerIds.length > 8) {
+        throw new TypeError('synchronizeCatalogProviders requires 1-8 providers');
+      }
+      const scope = plainRecord(input.scope, 'synchronizeCatalogProviders.scope');
+      const output = await currentAgent.synchronizeRfc64CatalogFromProvidersV1({
+        remotePeerIds,
+        scope: scope as never,
+      });
+      emitOperationResult(command, output);
+      return;
+    }
+    case 'armBundleReadBarrier': {
+      requireRole('receiver');
+      if (armHarnessBundleReadBarrier === undefined) {
+        throw new Error('bundle read barrier is unavailable');
+      }
+      armHarnessBundleReadBarrier();
+      emitOperationResult(command, { armed: true });
       return;
     }
     case 'semanticGraphReadback': {
@@ -424,7 +627,15 @@ async function handle(command: Command): Promise<void> {
         currentAgent,
         catalogHeadDigest,
       );
-      emitOperationResult(command, output);
+      emitOperationResult(
+        command,
+        input.includeHarnessDiagnostic === true && output !== null
+          ? {
+              ...(output as Record<string, unknown>),
+              harnessDiagnostic: harnessCatalogFailureMessages.get(catalogHeadDigest) ?? null,
+            }
+          : output,
+      );
       return;
     }
     case 'awaitReceiverIdle':
@@ -689,118 +900,6 @@ function compareQuad(left: Quad, right: Quad): number {
   return leftKey.localeCompare(rightKey);
 }
 
-function wireSynchronizationEvidence(output: unknown): unknown {
-  if (output === null) return null;
-  const evidence = plainRecord(output, 'exact synchronization evidence');
-  if (evidence.inventoryRowCount === 0) return evidence;
-  const wired = evidence.inventoryRowCount === 1
-    ? [wireLegacySingleRowSynchronizationEvidence(evidence)]
-    : plainArray(evidence.rows, 'synchronization.rows').map(
-      (value, index) => wireMultiRowSynchronizationEvidence(value, index),
-    );
-  const verifiedControlObjectCount = requireUniformControlObjectCount(wired);
-  return Object.freeze({
-    inventoryDigest: evidence.inventoryDigest,
-    catalogHeadDigest: evidence.catalogHeadDigest,
-    inventoryRowCount: evidence.inventoryRowCount,
-    activatedTripleCount: evidence.activatedTripleCount,
-    appliedHeadStatus: evidence.appliedHeadStatus,
-    rows: Object.freeze(wired.map((entry) => entry.row)),
-    verifiedControlObjectCount,
-  });
-}
-
-interface WiredSynchronizationRow {
-  readonly row: Readonly<Record<string, unknown>>;
-  readonly verifiedControlObjectCount: number;
-}
-
-function wireLegacySingleRowSynchronizationEvidence(
-  evidence: Record<string, unknown>,
-): WiredSynchronizationRow {
-  const label = 'synchronization.legacySingleRow';
-  const kaUal = requiredString(evidence.kaUal, `${label}.kaUal`);
-  return wireSynchronizationRow(
-    evidence,
-    label,
-    canonicalDecimalWire(packedKaIdFromUal(kaUal), `${label}.kaId`),
-    null,
-  );
-}
-
-function wireMultiRowSynchronizationEvidence(
-  value: unknown,
-  index: number,
-): WiredSynchronizationRow {
-  const label = `synchronization.rows[${index}]`;
-  const row = plainRecord(value, label);
-  return wireSynchronizationRow(
-    row,
-    label,
-    canonicalDecimalWire(row.kaId, `${label}.kaId`),
-    requiredDigest(row.sealDigest, `${label}.sealDigest`),
-  );
-}
-
-function wireSynchronizationRow(
-  row: Record<string, unknown>,
-  label: string,
-  kaId: string,
-  sealDigest: Digest32V1 | null,
-): WiredSynchronizationRow {
-  const authorship = plainRecord(row.authorship, `${label}.authorship`);
-  const path = plainArray(
-    authorship.directoryPathObjectDigests,
-    `${label}.authorship.directoryPathObjectDigests`,
-  );
-  const variants = plainArray(
-    authorship.directoryPathSignatureVariantDigests,
-    `${label}.authorship.directoryPathSignatureVariantDigests`,
-  );
-  if (path.length !== variants.length) {
-    throw new Error('synchronization authorship path evidence is incomplete');
-  }
-  return Object.freeze({
-    row: Object.freeze({
-      kaId,
-      catalogRowDigest: row.catalogRowDigest,
-      contentDigest: row.contentDigest,
-      sealDigest,
-      bundleDigest: row.bundleDigest,
-      kaUal: requiredString(row.kaUal, `${label}.kaUal`),
-      activatedTripleCount: row.activatedTripleCount,
-      swmGraph: row.swmGraph,
-    }),
-    verifiedControlObjectCount: 3 + path.length,
-  });
-}
-
-function requireUniformControlObjectCount(
-  rows: readonly WiredSynchronizationRow[],
-): number {
-  const first = rows[0];
-  if (first === undefined) {
-    throw new Error('non-empty synchronization evidence contains no exact rows');
-  }
-  for (const row of rows.slice(1)) {
-    if (row.verifiedControlObjectCount !== first.verifiedControlObjectCount) {
-      throw new Error('synchronization rows disagree on the verified control-object closure');
-    }
-  }
-  return first.verifiedControlObjectCount;
-}
-
-function packedKaIdFromUal(kaUal: string): string {
-  const parsed = parseDeterministicKnowledgeAssetUal(kaUal);
-  return ((BigInt(parsed.agentAddress) << 96n) | BigInt(parsed.kaNumber)).toString();
-}
-
-function canonicalDecimalWire(value: unknown, label: string): string {
-  if (typeof value === 'bigint' && value >= 0n) return value.toString();
-  if (typeof value === 'string' && /^(0|[1-9][0-9]*)$/u.test(value)) return value;
-  throw new TypeError(`${label} is not a canonical non-negative integer`);
-}
-
 function inspectGate2ProductCapabilities(currentAgent: DKGAgent): Record<string, boolean> {
   const surface = currentAgent as unknown as Record<string, unknown>;
   return Object.freeze({
@@ -818,6 +917,8 @@ function inspectGate2ProductCapabilities(currentAgent: DKGAgent): Record<string,
       typeof surface.publishAuthorCatalogExactSetSuccessorV1 === 'function',
     publishPolicyBoundGenesis:
       typeof surface.publishAuthorCatalogGenesisV1 === 'function',
+    synchronizeCatalogProviders:
+      typeof surface.synchronizeRfc64CatalogFromProvidersV1 === 'function',
     terminalFailureReadback:
       typeof surface.readRfc64PublicCatalogReconciliationFailureV1 === 'function',
   });
@@ -1055,6 +1156,18 @@ function requiredString(value: unknown, label: string): string {
   return value;
 }
 
+function canonicalNonZeroEvmAddress(value: unknown, label: string): EvmAddressV1 {
+  const input = requiredString(value, label);
+  if (!ethers.isAddress(input)) {
+    throw new TypeError(`${label} must be a non-zero EVM address`);
+  }
+  const canonical = ethers.getAddress(input).toLowerCase();
+  if (canonical === ethers.ZeroAddress.toLowerCase()) {
+    throw new TypeError(`${label} must be a non-zero EVM address`);
+  }
+  return canonical as EvmAddressV1;
+}
+
 function requiredDigest(value: unknown, label: string): Digest32V1 {
   if (typeof value !== 'string' || !/^0x[0-9a-f]{64}$/u.test(value)) {
     throw new TypeError(`${label} must be a canonical digest`);
@@ -1090,9 +1203,25 @@ lines.on('line', (line) => {
   commandTail = commandTail.then(() => handle(command)).catch((error) => {
     emit({
       event: 'error',
-      message: error instanceof Error ? error.message : String(error),
+      message: boundedErrorChainMessage(error),
       requestId: command.requestId,
     });
   });
 });
 lines.once('close', () => { void stop(0); });
+
+function boundedErrorChainMessage(error: unknown): string {
+  const messages: string[] = [];
+  const seen = new Set<unknown>();
+  const pending: unknown[] = [error];
+  while (pending.length > 0 && messages.length < 6) {
+    const current = pending.shift();
+    if (current === undefined || current === null) continue;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    messages.push(current instanceof Error ? current.message : String(current));
+    if (current instanceof AggregateError) pending.push(...current.errors);
+    if (current instanceof Error && current.cause !== undefined) pending.push(current.cause);
+  }
+  return messages.join(' <- ').slice(0, 4_096);
+}

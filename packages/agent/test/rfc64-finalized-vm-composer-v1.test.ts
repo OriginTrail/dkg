@@ -4,6 +4,7 @@ import {
   AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
+  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   buildAuthorAttestationTypedData,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
   computeAuthorCatalogScopeDigestV1,
@@ -27,6 +28,7 @@ import {
   type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import {
+  FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
   verifyControlEnvelopeIssuerSignatureV1,
   type FinalizedVmChainInventoryV1,
 } from '@origintrail-official/dkg-chain';
@@ -47,6 +49,7 @@ import {
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'11'.repeat(32)}`);
 const CATALOG_WALLET = new ethers.Wallet(`0x${'22'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
+const OTHER_AUTHOR = `0x${'aa'.repeat(20)}` as EvmAddressV1;
 const CATALOG_ISSUER = CATALOG_WALLET.address.toLowerCase() as EvmAddressV1;
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
 const CHAIN_ID = '20430' as const;
@@ -59,9 +62,11 @@ const PUBLISHER = `0x${'66'.repeat(20)}` as EvmAddressV1;
 const BLOCK_HASH = `0x${'77'.repeat(32)}` as Digest32V1;
 const ROOT_1 = `0x${'88'.repeat(32)}` as Digest32V1;
 const ROOT_2 = `0x${'99'.repeat(32)}` as Digest32V1;
+const ROOT_3 = `0x${'ab'.repeat(32)}` as Digest32V1;
 const ZERO_DIGEST = `0x${'00'.repeat(32)}` as Digest32V1;
 const KA_1 = packKaId(1n);
 const KA_2 = packKaId(2n);
+const KA_3 = packKaId(3n);
 
 describe('RFC-64 finalized VM placement composition', () => {
   it('joins an authorized root-lane subset in finalized chain ordinal order', async () => {
@@ -199,18 +204,34 @@ describe('RFC-64 finalized VM placement composition', () => {
     } as never), 'finalized-vm-composition-mismatch');
   });
 
-  it('rejects placements absent from the finalized inventory and malformed unplaced rows', async () => {
+  it('rejects a valid placement when the selected catalog author is different', async () => {
     const placement = await createPlacement(KA_2, ROOT_2);
+    expectCode(() => composeFinalizedVmSetV1({
+      ...requestFor([placement]),
+      catalogAuthorAddress: OTHER_AUTHOR,
+    }), 'finalized-vm-composition-mismatch');
+  });
+
+  it('keeps author-authorized off-chain placements SWM-only and rejects malformed chain rows', async () => {
+    const placement = await createPlacement(KA_2, ROOT_2);
+    const swmOnlyPlacement = await createPlacement(KA_3, ROOT_3);
     const base = requestFor([placement]);
     const firstOnly = {
       ...structuredClone(base.inventory),
       highestFinalizedOrdinal: '0',
       rows: [structuredClone(base.inventory.rows[0])],
     };
-    expectCode(
-      () => composeFinalizedVmSetV1({ ...base, inventory: firstOnly } as never),
-      'finalized-vm-composition-mismatch',
-    );
+    const mixed = composeFinalizedVmSetV1({
+      ...base,
+      placements: [placement, swmOnlyPlacement],
+    });
+    expect(mixed.rows.map(({ ual }) => ual)).toEqual([ual(2n)]);
+    expect(mixed.materializations).toHaveLength(1);
+    expect(composeFinalizedVmSetV1({
+      ...base,
+      inventory: firstOnly,
+      placements: [placement, swmOnlyPlacement],
+    } as never).rows).toEqual([]);
 
     const malformed = structuredClone(base.inventory);
     (malformed.rows[0] as { ual: string }).ual = ual(999n);
@@ -219,6 +240,48 @@ describe('RFC-64 finalized VM placement composition', () => {
       'finalized-vm-composition-inventory',
     );
   });
+
+  it('keeps a newer SWM assertion independent of an older finalized VM version', async () => {
+    const newerSwm = await createPlacement(KA_1, ROOT_3, true, '2');
+
+    const composed = composeFinalizedVmSetV1(requestFor([newerSwm]));
+
+    expect(composed.rows).toEqual([]);
+    expect(composed.materializations).toEqual([]);
+    expect(composed.existingMaterializationChecks).toEqual([{
+      candidate: requestFor([newerSwm]).inventory.rows[0],
+    }]);
+
+    const stalePlacement = await createPlacement(KA_2, ROOT_2, true, '1');
+    expectCode(
+      () => composeFinalizedVmSetV1(requestFor([stalePlacement])),
+      'finalized-vm-composition-mismatch',
+    );
+  });
+
+  it('accepts the catalog placement superset bound and rejects only above 1024', async () => {
+    const placementCount = FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 + 1;
+    const placements = await Promise.all([
+      createPlacement(KA_2, ROOT_2),
+      ...Array.from({ length: placementCount - 1 }, (_, index) => (
+        createPlacement(packKaId(BigInt(index + 1_000)), ROOT_3)
+      )),
+    ]);
+
+    const composed = composeFinalizedVmSetV1(requestFor(placements));
+    expect(placements).toHaveLength(placementCount);
+    expect(composed.rows).toHaveLength(1);
+    expect(composed.rows[0]?.ual).toBe(ual(2n));
+
+    const aboveCatalogBound = Array.from(
+      { length: MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 + 1 },
+      () => placements[0]!,
+    );
+    expectCode(
+      () => composeFinalizedVmSetV1(requestFor(aboveCatalogBound)),
+      'finalized-vm-composition-placement',
+    );
+  }, 60_000);
 
   it('binds the cleartext catalog lane to the exact same-anchor numeric Context Graph', async () => {
     const placement = await createPlacement(KA_2, ROOT_2);
@@ -244,6 +307,40 @@ describe('RFC-64 finalized VM placement composition', () => {
       highestFinalizedOrdinal: null,
     });
   });
+
+  it('requires every finalized private author asset to be present in the catalog', async () => {
+    const placement = await createPlacement(KA_1, ROOT_1);
+    const request = requestFor([placement]);
+
+    expect(() => composeFinalizedVmSetV1({
+      ...request,
+      finalizedContextGraph: {
+        ...request.finalizedContextGraph,
+        accessPolicy: 1,
+      },
+    })).toThrow(/known-incomplete: no-authorized-provider/u);
+  });
+
+  it('accepts the legacy completeness option without allowing it to weaken private policy', async () => {
+    const placement = await createPlacement(KA_1, ROOT_1);
+    const publicRequest = {
+      ...requestFor([placement]),
+      requireCompleteAuthorSet: false,
+    } satisfies ComposeFinalizedVmSetRequestV1;
+
+    expect(composeFinalizedVmSetV1(publicRequest).rows).toHaveLength(1);
+    expect(composeFinalizedVmSetV1({
+      ...publicRequest,
+      requireCompleteAuthorSet: true,
+    }).rows).toHaveLength(1);
+    expect(() => composeFinalizedVmSetV1({
+      ...publicRequest,
+      finalizedContextGraph: {
+        ...publicRequest.finalizedContextGraph,
+        accessPolicy: 1,
+      },
+    })).toThrow(/known-incomplete: no-authorized-provider/u);
+  });
 });
 
 function requestFor(
@@ -251,6 +348,7 @@ function requestFor(
 ): ComposeFinalizedVmSetRequestV1 {
   return {
     assertedAtKav10Address: KAV10,
+    catalogAuthorAddress: AUTHOR,
     catalogLane: {
       contextGraphId: CONTEXT_GRAPH_NAME,
       subGraphName: null,
@@ -319,8 +417,10 @@ async function createPlacement(
   kaId: KaIdV1,
   assertionRoot: Digest32V1,
   validAttestation = true,
+  assertionVersionOverride?: string,
 ): Promise<FinalizedVmPlacementEvidenceV1> {
-  const assertionVersion = kaId === KA_1 ? '1' : '2';
+  const assertionVersion = assertionVersionOverride
+    ?? String(BigInt(kaId) & ((1n << 96n) - 1n));
   const scope = {
     networkId: NETWORK_ID,
     contextGraphId: CONTEXT_GRAPH_NAME,

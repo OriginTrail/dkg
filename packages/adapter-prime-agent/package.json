@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-adapter-prime-agent",
-  "version": "10.0.14",
+  "version": "10.0.15",
   "description": "Prime Intellect Prime Agent adapter — collocates a Prime Agent with a DKG V10 node for verifiable shared memory",
   "type": "module",
   "main": "dist/index.js",

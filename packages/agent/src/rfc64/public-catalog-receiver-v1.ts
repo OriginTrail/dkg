@@ -19,7 +19,31 @@
 
 import { isFinalizedChainAdmissionContention } from '@origintrail-official/dkg-chain';
 
+import {
+  Rfc64CatalogProviderFailureAggregateV1,
+  type Rfc64CatalogProviderTerminalFailureV1,
+} from './public-catalog-reconciliation-failure-v1.js';
+import {
+  createRfc64PublicCatalogReceiverCompletionV1,
+  type Rfc64PublicCatalogReceiverCompletionV1,
+} from './public-catalog-reconciliation-outcome-v1.js';
+import {
+  Rfc64ReceiverTaskLifecycleV1,
+  rfc64ReceiverSchedulingPolicyV1,
+  rfc64ReceiverCatalogScopeKeyV1,
+  rfc64ReceiverHeadKeyV1,
+  rfc64ReceiverNonNegativeIntV1,
+  rfc64ReceiverPositiveIntV1,
+  rfc64ReceiverProviderContextKeyV1,
+  type Rfc64ReceiverLifecycleTaskV1,
+  type Rfc64ReceiverSchedulingClassV1,
+} from './public-catalog-receiver-task-lifecycle-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
+
+export type {
+  Rfc64PublicCatalogReceiverCompletionOutcomeV1,
+  Rfc64PublicCatalogReceiverCompletionV1,
+} from './public-catalog-reconciliation-outcome-v1.js';
 
 export type Rfc64PublicCatalogReconcileResultV1 = 'applied' | 'not-found' | 'staged-only';
 
@@ -70,9 +94,32 @@ export interface Rfc64PublicCatalogReceiverOptionsV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     remotePeerId: string,
   ) => void;
+  /**
+   * Scheduling-time observer called once for a distinct exact-head request.
+   * It is not an execution boundary and must not own attempt-scoped state.
+   */
+  readonly onAttemptStart?: (
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  ) => void;
+  /** @deprecated Observer-only compatibility hook for execution start. */
+  readonly onReconciliationAttemptStart?: (
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  ) => number;
+  /** @deprecated Observer-only compatibility hook for successful execution. */
+  readonly onReconciliationAttemptSuccess?: (
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    attemptToken: number,
+  ) => void;
+  /** @deprecated Observer-only compatibility hook for balanced terminal cleanup. */
+  readonly onReconciliationAttemptEnd?: (
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    attemptToken: number,
+  ) => void;
   readonly onError?: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     error: unknown,
+    /** @deprecated Attempt token retained for callback compatibility. */
+    attemptToken: number | null,
   ) => void;
 }
 
@@ -86,6 +133,8 @@ export interface Rfc64PublicCatalogReceiverStatsV1 {
   readonly failed: number;
   readonly droppedQueueFull: number;
   readonly droppedProviders: number;
+  /** Older ambient heads discarded after a verified current head became durable. */
+  readonly supersededQueued: number;
   /**
    * Times a task stepped aside for a busy finalized chain lane. Distinct from
    * `failed`: the head is still pending, not lost.
@@ -95,13 +144,22 @@ export interface Rfc64PublicCatalogReceiverStatsV1 {
   readonly deferred: number;
   readonly inFlight: number;
   readonly queued: number;
+  readonly providerAttempts: number;
+  readonly providerSwitches: number;
+  readonly providerSuccesses: number;
+  readonly providerBackoffMs: number;
 }
 
-interface ReceiverTaskV1 {
+interface ReceiverTaskV1 extends Rfc64ReceiverLifecycleTaskV1 {
   readonly key: string;
   readonly scopeKey: string;
-  readonly providers: ReceiverProviderV1[];
-  readonly providerKeys: Set<string>;
+  readonly contextGraphId: string;
+  readonly catalogVersion: bigint;
+  readonly cancellation: AbortController;
+  /** Canonical provider registry; Map insertion order is the round-robin order. */
+  readonly providers: Map<string, ReceiverProviderV1>;
+  /** Monotonic accepted mutation revision used to close the settlement race. */
+  revision: bigint;
   /**
    * How many times this task has stepped aside for a busy finalized chain lane.
    * Mutable, and deliberately NOT a provider attempt: contention says nothing
@@ -118,15 +176,55 @@ interface ReceiverTaskV1 {
    * attempts. Repeated contention multiplied retries without limit.
    */
   attemptsByProvider?: Map<string, number>;
-  notFoundProviders?: Set<string>;
+  /** Latest non-deferrable terminal error for each bounded provider. */
+  terminalFailuresByProvider?: Map<string, Rfc64CatalogProviderTerminalFailureV1>;
+  /** Latest provider hint revision that returned not-found. */
+  notFoundProviderRevisions?: Map<string, bigint>;
   providerCursor?: number;
+  lastProviderKey?: string;
+  providerAttempts?: number;
+  completionWaiters?: Array<(result: Rfc64PublicCatalogReceiverCompletionV1) => void>;
+  reconciliationAttemptStarted?: boolean;
+  reconciliationAttemptToken?: number | null;
+  reconciliationAttemptEnded?: boolean;
+  running?: boolean;
+  settled?: boolean;
 }
 
 interface ReceiverProviderV1 {
   readonly key: string;
   readonly peerId: string;
   readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+  /**
+   * Monotonic availability observation for this exact provider context. A
+   * repeated hint advances the revision so a prior `not-found` observation
+   * cannot suppress newly advertised availability while another provider is
+   * still being tried. The existing per-provider attempt budget remains the
+   * hard bound against duplicate-hint retry amplification.
+   */
+  hintRevision: bigint;
 }
+
+type ReceiverTaskOutcomeV1 =
+  | { readonly kind: 'defer-admission' }
+  | { readonly kind: 'aborted' }
+  | {
+    readonly kind: 'already-applied';
+    readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+  }
+  | {
+    readonly kind: 'applied';
+    readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+    readonly peerId: string;
+  }
+  | { readonly kind: 'staged-only'; readonly taskRevision: bigint }
+  | { readonly kind: 'not-found'; readonly taskRevision: bigint }
+  | {
+    readonly kind: 'failed';
+    readonly taskRevision: bigint;
+    readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+    readonly error: unknown;
+  };
 
 const DEFAULTS = Object.freeze({
   maxConcurrent: 4,
@@ -162,13 +260,18 @@ export class Rfc64PublicCatalogReceiverV1 {
   readonly #maxProvidersPerHead: number;
   readonly #retryBackoffMs: number;
   readonly #onHeadApplied?: Rfc64PublicCatalogReceiverOptionsV1['onHeadApplied'];
+  readonly #onAttemptStart?: Rfc64PublicCatalogReceiverOptionsV1['onAttemptStart'];
+  readonly #onReconciliationAttemptStart?:
+    Rfc64PublicCatalogReceiverOptionsV1['onReconciliationAttemptStart'];
+  readonly #onReconciliationAttemptSuccess?:
+    Rfc64PublicCatalogReceiverOptionsV1['onReconciliationAttemptSuccess'];
+  readonly #onReconciliationAttemptEnd?:
+    Rfc64PublicCatalogReceiverOptionsV1['onReconciliationAttemptEnd'];
   readonly #onError?: Rfc64PublicCatalogReceiverOptionsV1['onError'];
 
-  readonly #queue: ReceiverTaskV1[] = [];
-  /** Every exact head currently queued or in-flight, including alternate peers. */
-  readonly #pendingByKey = new Map<string, ReceiverTaskV1>();
-  /** One semantic writer per exact author-catalog scope. */
-  readonly #activeScopeKeys = new Set<string>();
+  /** Every exact head and its queued/deferred/terminal task lifecycle. */
+  readonly #tasks = new Rfc64ReceiverTaskLifecycleV1<ReceiverTaskV1>();
+  /** Execution promises only; task state and scope ownership live in #tasks. */
   readonly #active = new Set<Promise<void>>();
   readonly #closing = new AbortController();
   #closed = false;
@@ -177,17 +280,7 @@ export class Rfc64PublicCatalogReceiverV1 {
   readonly #admissionDeferralMs: number;
   readonly #maxAdmissionDeferrals: number;
   readonly #isDeferrableError: (error: unknown) => boolean;
-  readonly #deferralTimers = new Set<ReturnType<typeof setTimeout>>();
-  /**
-   * The third scheduler state, made explicit: accepted work that is neither
-   * queued nor active because it is waiting for the chain lane.
-   *
-   * It MUST be observable by `#isIdle()`. Without it a deferred head sits in
-   * `#pendingByKey` and a timer only, so `whenIdle()` resolved during the retry
-   * window and a caller draining the receiver — `synchronizeCurrentCatalogHead()`
-   * — could conclude scheduling had settled before the head was applied.
-   */
-  readonly #deferred = new Set<ReceiverTaskV1>();
+  #isolatedCompletionSequence = 0;
 
   #scheduled = 0;
   #admissionDeferred = 0;
@@ -199,30 +292,48 @@ export class Rfc64PublicCatalogReceiverV1 {
   #failed = 0;
   #droppedQueueFull = 0;
   #droppedProviders = 0;
+  #supersededQueued = 0;
+  #providerAttempts = 0;
+  #providerSwitches = 0;
+  #providerSuccesses = 0;
+  #providerBackoffMs = 0;
 
   constructor(
     reconciler: Rfc64PublicCatalogReceiverReconcilerV1,
     options: Rfc64PublicCatalogReceiverOptionsV1 = {},
   ) {
     this.#reconciler = reconciler;
-    this.#maxConcurrent = positiveInt(options.maxConcurrent, DEFAULTS.maxConcurrent);
-    this.#maxQueue = positiveInt(options.maxQueue, DEFAULTS.maxQueue);
-    this.#maxAttempts = positiveInt(options.maxAttempts, DEFAULTS.maxAttempts);
-    this.#maxProvidersPerHead = positiveInt(
+    this.#maxConcurrent = rfc64ReceiverPositiveIntV1(
+      options.maxConcurrent,
+      DEFAULTS.maxConcurrent,
+    );
+    this.#maxQueue = rfc64ReceiverPositiveIntV1(options.maxQueue, DEFAULTS.maxQueue);
+    this.#maxAttempts = rfc64ReceiverPositiveIntV1(
+      options.maxAttempts,
+      DEFAULTS.maxAttempts,
+    );
+    this.#maxProvidersPerHead = rfc64ReceiverPositiveIntV1(
       options.maxProvidersPerHead,
       DEFAULTS.maxProvidersPerHead,
     );
-    this.#retryBackoffMs = nonNegativeInt(options.retryBackoffMs, DEFAULTS.retryBackoffMs);
-    this.#admissionDeferralMs = nonNegativeInt(
+    this.#retryBackoffMs = rfc64ReceiverNonNegativeIntV1(
+      options.retryBackoffMs,
+      DEFAULTS.retryBackoffMs,
+    );
+    this.#admissionDeferralMs = rfc64ReceiverNonNegativeIntV1(
       options.admissionDeferralMs,
       DEFAULTS.admissionDeferralMs,
     );
-    this.#maxAdmissionDeferrals = positiveInt(
+    this.#maxAdmissionDeferrals = rfc64ReceiverPositiveIntV1(
       options.maxAdmissionDeferrals,
       DEFAULTS.maxAdmissionDeferrals,
     );
     this.#isDeferrableError = options.isDeferrableError ?? DEFAULT_DEFERRABLE_ERROR;
     this.#onHeadApplied = options.onHeadApplied;
+    this.#onAttemptStart = options.onAttemptStart;
+    this.#onReconciliationAttemptStart = options.onReconciliationAttemptStart;
+    this.#onReconciliationAttemptSuccess = options.onReconciliationAttemptSuccess;
+    this.#onReconciliationAttemptEnd = options.onReconciliationAttemptEnd;
     this.#onError = options.onError;
   }
 
@@ -236,36 +347,230 @@ export class Rfc64PublicCatalogReceiverV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     remotePeerId: string,
   ): void {
+    this.scheduleMany([{ announcement, remotePeerId }]);
+  }
+
+  /** Atomically retain all discovered providers before the first fetch starts. */
+  scheduleMany(
+    inputs: readonly Readonly<{
+      announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+      remotePeerId: string;
+    }>[],
+  ): void {
+    this.#scheduleMany(inputs);
+  }
+
+  /** Schedule one exact head and await that task's result, not global idleness. */
+  scheduleManyAndWait(
+    inputs: readonly Readonly<{
+      announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+      remotePeerId: string;
+    }>[],
+  ): Promise<Rfc64PublicCatalogReceiverCompletionV1> {
+    if (inputs.length === 0) {
+      throw new TypeError('RFC-64 receiver completion requires at least one provider');
+    }
+    const firstKey = rfc64ReceiverHeadKeyV1(inputs[0]!.announcement);
+    if (inputs.some(({ announcement }) => rfc64ReceiverHeadKeyV1(announcement) !== firstKey)) {
+      throw new TypeError('RFC-64 receiver completion inputs must name one exact head');
+    }
+    const exactProviderKeys = new Set(inputs.map(({ announcement, remotePeerId }) => (
+      rfc64ReceiverProviderContextKeyV1(remotePeerId, announcement)
+    )));
+    if (exactProviderKeys.size !== inputs.length) {
+      throw new TypeError('RFC-64 receiver completion providers must be distinct');
+    }
+    // Explicit synchronization owns an immutable request-scoped provider set.
+    // Ambient hints keep their configurable per-head cap and coalescing; an
+    // awaited failover request must retain every provider already validated by
+    // the service, even when maxProvidersPerHead is lower.
+    return new Promise((resolve) => this.#scheduleIsolatedCompletion(
+      inputs,
+      resolve,
+      'isolated',
+    ));
+  }
+
+  /**
+   * Await a head already discovered, fetched by exact digest, and verified by
+   * the catalog service as the current head for its chain-bound scope.
+   *
+   * Unlike an ambient announcement, this authenticated recovery task may move
+   * ahead of older queued heads in the same scope. If it becomes durable, only
+   * strictly older ambient work is then retired. A failed jump leaves the
+   * history queue intact so monotonic reconciliation can still proceed.
+   */
+  scheduleVerifiedCurrentHeadAndWait(
+    inputs: readonly Readonly<{
+      announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+      remotePeerId: string;
+    }>[],
+  ): Promise<Rfc64PublicCatalogReceiverCompletionV1> {
+    if (inputs.length === 0) {
+      throw new TypeError('RFC-64 verified current-head completion requires at least one provider');
+    }
+    const firstKey = rfc64ReceiverHeadKeyV1(inputs[0]!.announcement);
+    if (inputs.some(({ announcement }) => rfc64ReceiverHeadKeyV1(announcement) !== firstKey)) {
+      throw new TypeError('RFC-64 verified current-head providers must name one exact head');
+    }
+    const exactProviderKeys = new Set(inputs.map(({ announcement, remotePeerId }) => (
+      rfc64ReceiverProviderContextKeyV1(remotePeerId, announcement)
+    )));
+    if (exactProviderKeys.size !== inputs.length) {
+      throw new TypeError('RFC-64 verified current-head providers must be distinct');
+    }
+    return new Promise((resolve) => this.#scheduleIsolatedCompletion(
+      inputs,
+      resolve,
+      'verified-current-head',
+    ));
+  }
+
+  #scheduleMany(
+    inputs: readonly Readonly<{
+      announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+      remotePeerId: string;
+    }>[],
+  ): void {
     if (this.#closed) return;
-    this.#scheduled += 1;
-    const key = headKey(announcement);
-    const existing = this.#pendingByKey.get(key);
-    if (existing !== undefined) {
-      this.#dedupedInFlight += 1;
-      const providerKey = providerContextKey(remotePeerId, announcement);
-      if (!existing.providerKeys.has(providerKey)) {
-        if (existing.providers.length >= this.#maxProvidersPerHead) {
-          this.#droppedProviders += 1;
-          return;
+    for (const { announcement, remotePeerId } of inputs) {
+      this.#scheduled += 1;
+      const key = rfc64ReceiverHeadKeyV1(announcement);
+      const candidate = this.#tasks.pending(key);
+      const existing = candidate?.cancellation.signal.aborted === true
+        ? undefined
+        : candidate;
+      if (existing !== undefined) {
+        this.#dedupedInFlight += 1;
+        const providerKey = rfc64ReceiverProviderContextKeyV1(remotePeerId, announcement);
+        const provider = existing.providers.get(providerKey);
+        if (provider !== undefined) {
+          provider.hintRevision += 1n;
+        } else {
+          if (existing.providers.size >= this.#maxProvidersPerHead) {
+            this.#droppedProviders += 1;
+            continue;
+          }
+          existing.providers.set(providerKey, {
+            key: providerKey,
+            peerId: remotePeerId,
+            announcement,
+            hintRevision: 1n,
+          });
         }
-        existing.providerKeys.add(providerKey);
-        existing.providers.push({ key: providerKey, peerId: remotePeerId, announcement });
+        existing.revision += 1n;
+        continue;
       }
-      return;
+      this.#safeNotify(() => this.#onAttemptStart?.(announcement));
+      if (this.#tasks.queuedCount >= this.#maxQueue) {
+        this.#droppedQueueFull += 1;
+        continue;
+      }
+      const task = this.#createTask(
+        [{ announcement, remotePeerId }],
+        'ambient',
+        key,
+      );
+      this.#tasks.schedule(task);
     }
-    if (this.#queue.length >= this.#maxQueue) {
-      this.#droppedQueueFull += 1;
-      return;
+    this.#pump();
+  }
+
+  /**
+   * Single validated construction boundary for every scheduler task class.
+   * After this point catalogVersion is numeric, the provider set names one
+   * exact head, and placement/supersession behavior is an explicit policy.
+   */
+  #createTask(
+    inputs: readonly Readonly<{
+      announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+      remotePeerId: string;
+    }>[],
+    schedulingClass: Rfc64ReceiverSchedulingClassV1,
+    key: string,
+    completion?: (result: Rfc64PublicCatalogReceiverCompletionV1) => void,
+  ): ReceiverTaskV1 {
+    const first = inputs[0];
+    if (first === undefined) {
+      throw new TypeError('RFC-64 receiver task requires at least one provider');
     }
-    const providerKey = providerContextKey(remotePeerId, announcement);
-    const task: ReceiverTaskV1 = {
+    const exactHeadKey = rfc64ReceiverHeadKeyV1(first.announcement);
+    const providers = new Map<string, ReceiverProviderV1>();
+    for (const { announcement, remotePeerId } of inputs) {
+      if (rfc64ReceiverHeadKeyV1(announcement) !== exactHeadKey) {
+        throw new TypeError('RFC-64 receiver task providers must name one exact head');
+      }
+      const providerKey = rfc64ReceiverProviderContextKeyV1(remotePeerId, announcement);
+      if (providers.has(providerKey)) {
+        throw new TypeError('RFC-64 receiver task providers must be distinct');
+      }
+      providers.set(providerKey, {
+        key: providerKey,
+        peerId: remotePeerId,
+        announcement,
+        hintRevision: 1n,
+      });
+    }
+    return {
       key,
-      scopeKey: catalogScopeKey(announcement),
-      providers: [{ key: providerKey, peerId: remotePeerId, announcement }],
-      providerKeys: new Set([providerKey]),
+      scopeKey: rfc64ReceiverCatalogScopeKeyV1(first.announcement),
+      contextGraphId: first.announcement.contextGraphId,
+      catalogVersion: parseCatalogVersionV1(first.announcement.catalogVersion),
+      schedulingPolicy: rfc64ReceiverSchedulingPolicyV1(schedulingClass),
+      cancellation: new AbortController(),
+      revision: 1n,
+      providers,
+      ...(completion === undefined ? {} : { completionWaiters: [completion] }),
     };
-    this.#pendingByKey.set(key, task);
-    this.#queue.push(task);
+  }
+
+  /**
+   * Keep an explicit synchronization request on exactly its caller-supplied
+   * providers when process-wide work for the same head already contains an
+   * ambient provider. The shared scope lock still prevents two semantic
+   * writers; the isolated task therefore observes `already-applied` when the
+   * earlier task wins, but it can never report that ambient peer as its own
+   * applied provider.
+   */
+  #scheduleIsolatedCompletion(
+    inputs: readonly Readonly<{
+      announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+      remotePeerId: string;
+    }>[],
+    completion: (result: Rfc64PublicCatalogReceiverCompletionV1) => void,
+    schedulingClass: Exclude<Rfc64ReceiverSchedulingClassV1, 'ambient'>,
+  ): void {
+    // An awaited request can arrive after discovery has completed but after
+    // service shutdown closed the receiver. A closed receiver never pumps its
+    // queue, so resolve at the scheduling boundary instead of enqueuing a
+    // completion that can never settle.
+    if (this.#closed) {
+      completion(createRfc64PublicCatalogReceiverCompletionV1({
+        outcome: 'closed',
+        providerAttempts: 0,
+      }));
+      return;
+    }
+    this.#scheduled += inputs.length;
+    const first = inputs[0]!;
+    this.#safeNotify(() => this.#onAttemptStart?.(first.announcement));
+    if (this.#tasks.queuedCount >= this.#maxQueue) {
+      this.#droppedQueueFull += 1;
+      completion(createRfc64PublicCatalogReceiverCompletionV1({
+        outcome: 'dropped',
+        providerAttempts: 0,
+      }));
+      return;
+    }
+    const task = this.#createTask(
+      inputs,
+      schedulingClass,
+      `${rfc64ReceiverHeadKeyV1(first.announcement)}\nexplicit-provider-set:${
+        ++this.#isolatedCompletionSequence
+      }`,
+      completion,
+    );
+    this.#tasks.schedule(task);
     this.#pump();
   }
 
@@ -273,6 +578,21 @@ export class Rfc64PublicCatalogReceiverV1 {
   whenIdle(): Promise<void> {
     if (this.#isIdle()) return Promise.resolve();
     return new Promise<void>((resolve) => this.#idleWaiters.push(resolve));
+  }
+
+  /** Fence queued, deferred, and active work for one no-longer-selected CG. */
+  cancelContextGraph(contextGraphId: string): void {
+    this.#tasks.cancelContextGraph(
+      contextGraphId,
+      new Error(`RFC-64 receiver selection inactive for ${contextGraphId}`),
+      (task) => createRfc64PublicCatalogReceiverCompletionV1({
+        outcome: 'closed',
+        providerAttempts: task.providerAttempts ?? 0,
+      }),
+      (task) => this.#finishReconciliationAttempt(task),
+      (waiter) => this.#safeNotify(waiter),
+    );
+    if (this.#isIdle()) this.#resolveIdle();
   }
 
   /**
@@ -285,12 +605,16 @@ export class Rfc64PublicCatalogReceiverV1 {
       return;
     }
     this.#closed = true;
-    for (const timer of this.#deferralTimers) clearTimeout(timer);
-    this.#deferralTimers.clear();
-    for (const task of this.#deferred) this.#pendingByKey.delete(task.key);
-    this.#deferred.clear();
-    const abandoned = this.#queue.splice(0);
-    for (const task of abandoned) this.#pendingByKey.delete(task.key);
+    this.#tasks.abortAll(new Error('RFC-64 public catalog receiver closing'));
+    this.#tasks.clearDeferredTimers();
+    this.#tasks.finalizeNonRunning(
+      (task) => createRfc64PublicCatalogReceiverCompletionV1({
+        outcome: 'closed',
+        providerAttempts: task.providerAttempts ?? 0,
+      }),
+      (task) => this.#finishReconciliationAttempt(task),
+      (waiter) => this.#safeNotify(waiter),
+    );
     this.#closing.abort(new Error('RFC-64 public catalog receiver closing'));
     await Promise.allSettled([...this.#active]);
     this.#resolveIdle();
@@ -307,34 +631,126 @@ export class Rfc64PublicCatalogReceiverV1 {
       failed: this.#failed,
       droppedQueueFull: this.#droppedQueueFull,
       droppedProviders: this.#droppedProviders,
+      supersededQueued: this.#supersededQueued,
       admissionDeferred: this.#admissionDeferred,
-      deferred: this.#deferred.size,
-      inFlight: this.#active.size,
-      queued: this.#queue.length,
+      deferred: this.#tasks.deferredCount,
+      inFlight: this.#tasks.activeCount,
+      queued: this.#tasks.queuedCount,
+      providerAttempts: this.#providerAttempts,
+      providerSwitches: this.#providerSwitches,
+      providerSuccesses: this.#providerSuccesses,
+      providerBackoffMs: this.#providerBackoffMs,
     });
   }
 
   #pump(): void {
-    while (!this.#closed && this.#active.size < this.#maxConcurrent && this.#queue.length > 0) {
-      const taskIndex = this.#queue.findIndex(
-        (candidate) => !this.#activeScopeKeys.has(candidate.scopeKey),
-      );
-      if (taskIndex < 0) return;
-      const [task] = this.#queue.splice(taskIndex, 1);
+    while (
+      !this.#closed
+      && this.#tasks.activeCount < this.#maxConcurrent
+      && this.#tasks.queuedCount > 0
+    ) {
+      const task = this.#tasks.takeNextRunnable();
       if (task === undefined) return;
-      this.#activeScopeKeys.add(task.scopeKey);
+      if (task.cancellation.signal.aborted) {
+        this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
+          outcome: 'closed',
+          providerAttempts: task.providerAttempts ?? 0,
+        }));
+        continue;
+      }
+      this.#tasks.begin(task);
       const run = this.#runTask(task).then((outcome) => {
         // A deferral releases the concurrency slot AND the semantic scope lock
         // before waiting, and keeps the pending key so a duplicate announcement
         // still dedupes onto this task instead of creating a second writer.
-        if (outcome === 'defer-admission' && !this.#closed) {
+        if (
+          outcome.kind === 'defer-admission'
+          && !this.#closed
+          && !task.cancellation.signal.aborted
+        ) {
           this.#scheduleAdmissionRetry(task);
           return;
         }
-        this.#pendingByKey.delete(task.key);
+        if (
+          !this.#closed
+          && 'taskRevision' in outcome
+          && outcome.taskRevision !== task.revision
+        ) {
+          // `#runTask` chose a non-durable terminal result, then `schedule`
+          // accepted a fresher hint before this completion continuation ran.
+          // Keep the pending key and put the mutated task back through the
+          // scheduler instead of deleting the accepted observation.
+          if (!this.#tasks.requeue(task)) {
+            this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
+              outcome: 'closed',
+              providerAttempts: task.providerAttempts ?? 0,
+            }));
+          }
+          return;
+        }
+        switch (outcome.kind) {
+          case 'already-applied':
+            this.#dedupedAlreadyApplied += 1;
+            this.#retireSupersededAmbientHeads(task);
+            this.#finishSuccessfulReconciliationAttempt(task, outcome.announcement);
+            this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
+              outcome: 'already-applied',
+              providerAttempts: task.providerAttempts ?? 0,
+            }));
+            break;
+          case 'applied':
+            this.#applied += 1;
+            this.#providerSuccesses += 1;
+            this.#retireSupersededAmbientHeads(task);
+            this.#safeNotify(() => this.#onHeadApplied?.(
+              outcome.announcement,
+              outcome.peerId,
+            ));
+            this.#finishSuccessfulReconciliationAttempt(task, outcome.announcement);
+            this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
+              outcome: 'applied',
+              appliedProviderPeerId: outcome.peerId,
+              providerAttempts: task.providerAttempts ?? 0,
+            }));
+            break;
+          case 'staged-only':
+            this.#stagedOnly += 1;
+            this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
+              outcome: 'staged-only',
+              providerAttempts: task.providerAttempts ?? 0,
+            }));
+            break;
+          case 'not-found':
+            this.#notFound += 1;
+            this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
+              outcome: 'not-found',
+              providerAttempts: task.providerAttempts ?? 0,
+            }));
+            break;
+          case 'failed':
+            this.#failed += 1;
+            this.#safeNotify(() => this.#onError?.(
+              outcome.announcement,
+              outcome.error,
+              task.reconciliationAttemptToken ?? null,
+            ));
+            this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
+              outcome: 'failed',
+              providerAttempts: task.providerAttempts ?? 0,
+              error: outcome.error,
+            }));
+            break;
+          case 'aborted':
+          case 'defer-admission':
+            this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
+              outcome: 'closed',
+              providerAttempts: task.providerAttempts ?? 0,
+            }));
+            break;
+        }
       }).finally(() => {
+        this.#tasks.finishRunning(task);
         this.#active.delete(run);
-        this.#activeScopeKeys.delete(task.scopeKey);
         if (!this.#closed) this.#pump();
         if (this.#isIdle()) this.#resolveIdle();
       });
@@ -355,88 +771,136 @@ export class Rfc64PublicCatalogReceiverV1 {
     this.#admissionDeferred += 1;
     if (task.admissionDeferrals > this.#maxAdmissionDeferrals) {
       this.#failed += 1;
-      this.#deferred.delete(task);
-      this.#pendingByKey.delete(task.key);
+      const firstProvider = task.providers.values().next().value;
       this.#safeNotify(() => this.#onError?.(
-        task.providers[0]!.announcement,
+        firstProvider!.announcement,
         new Error('RFC-64 receiver gave up waiting for the finalized chain-read lane'),
+        task.reconciliationAttemptToken ?? null,
       ));
+      this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
+        outcome: 'failed',
+        providerAttempts: task.providerAttempts ?? 0,
+        error: new Error('RFC-64 receiver gave up waiting for the finalized chain-read lane'),
+      }));
       if (this.#isIdle()) this.#resolveIdle();
       return;
     }
     // Registered BEFORE the timer is armed: between these two statements the
     // task must never be invisible to the idle predicate.
-    this.#deferred.add(task);
-    const timer = setTimeout(() => {
-      this.#deferralTimers.delete(timer);
-      this.#deferred.delete(task);
-      if (this.#closed || this.#closing.signal.aborted) {
-        this.#pendingByKey.delete(task.key);
+    if (!this.#tasks.defer(task, this.#admissionDeferralMs, () => {
+      if (
+        this.#closed
+        || this.#closing.signal.aborted
+        || task.cancellation.signal.aborted
+      ) {
+        this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
+          outcome: 'closed',
+          providerAttempts: task.providerAttempts ?? 0,
+        }));
         if (this.#isIdle()) this.#resolveIdle();
         return;
       }
-      this.#queue.push(task);
-      this.#pump();
-    }, this.#admissionDeferralMs);
-    // Never hold the process open for a retry.
-    (timer as { unref?: () => void }).unref?.();
-    this.#deferralTimers.add(timer);
+      if (this.#tasks.requeue(task)) this.#pump();
+    })) {
+      this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
+        outcome: 'closed',
+        providerAttempts: task.providerAttempts ?? 0,
+      }));
+      return;
+    }
   }
 
-  async #runTask(task: ReceiverTaskV1): Promise<'done' | 'defer-admission'> {
-    let lastError: unknown;
+  async #runTask(task: ReceiverTaskV1): Promise<ReceiverTaskOutcomeV1> {
+    this.#beginReconciliationAttempt(task);
     // Resumed, not reset: see `ReceiverTaskV1.attemptsByProvider`.
-    const notFoundProviders = (task.notFoundProviders ??= new Set<string>());
+    const notFoundProviderRevisions = (
+      task.notFoundProviderRevisions ??= new Map<string, bigint>()
+    );
     const attemptsByProvider = (task.attemptsByProvider ??= new Map<string, number>());
+    const terminalFailuresByProvider = (
+      task.terminalFailuresByProvider ??= new Map<
+        string,
+        Rfc64CatalogProviderTerminalFailureV1
+      >()
+    );
     let providerCursor = task.providerCursor ?? 0;
     while (true) {
-      if (this.#closing.signal.aborted) return 'done';
+      if (this.#closing.signal.aborted || task.cancellation.signal.aborted) {
+        return { kind: 'aborted' };
+      }
+      const providers = [...task.providers.values()];
       const selection = nextEligibleProvider(
-        task.providers,
-        notFoundProviders,
+        providers,
+        notFoundProviderRevisions,
         attemptsByProvider,
         this.#maxAttempts,
         providerCursor,
       );
       if (selection === null) {
         if (
-          task.providers.length > 0
-          && task.providers.every((provider) => notFoundProviders.has(provider.key))
+          providers.length > 0
+          && providers.every(
+            (provider) => notFoundProviderRevisions.get(provider.key)
+              === provider.hintRevision,
+          )
         ) {
-          this.#notFound += 1;
-          return 'done';
+          return { kind: 'not-found', taskRevision: task.revision };
         }
-        this.#failed += 1;
-        this.#safeNotify(() => this.#onError?.(task.providers[0]!.announcement, lastError));
-        return 'done';
+        return {
+          kind: 'failed',
+          taskRevision: task.revision,
+          announcement: providers[0]!.announcement,
+          error: terminalFailuresByProvider.size > 0
+            ? providerFailureV1(providers.length, terminalFailuresByProvider)
+            : new Error(
+              'RFC-64 receiver exhausted the per-provider attempt budget before '
+              + 'reconciling the latest accepted provider hint',
+            ),
+        };
       }
       const { provider, nextCursor } = selection;
       providerCursor = nextCursor;
       task.providerCursor = nextCursor;
+      const hintRevision = provider.hintRevision;
       const providerAttempt = (attemptsByProvider.get(provider.key) ?? 0) + 1;
       attemptsByProvider.set(provider.key, providerAttempt);
+      const recordProviderAttempt = () => {
+        this.#providerAttempts += 1;
+        task.providerAttempts = (task.providerAttempts ?? 0) + 1;
+        if (task.lastProviderKey !== undefined && task.lastProviderKey !== provider.key) {
+          this.#providerSwitches += 1;
+        }
+        task.lastProviderKey = provider.key;
+      };
       try {
         if (await this.#reconciler.isHeadApplied(provider.announcement)) {
-          this.#dedupedAlreadyApplied += 1;
-          return 'done';
+          recordProviderAttempt();
+          return { kind: 'already-applied', announcement: provider.announcement };
         }
         const result = await this.#reconciler.reconcileHead(
           provider.peerId,
           provider.announcement,
-          this.#closing.signal,
+          task.cancellation.signal,
         );
+        if (task.cancellation.signal.aborted) return { kind: 'aborted' };
+        recordProviderAttempt();
         if (result === 'not-found') {
-          notFoundProviders.add(provider.key);
+          terminalFailuresByProvider.delete(provider.key);
+          notFoundProviderRevisions.set(provider.key, hintRevision);
           continue;
         }
         if (result === 'staged-only') {
-          this.#stagedOnly += 1;
-          return 'done';
+          return { kind: 'staged-only', taskRevision: task.revision };
         }
-        this.#applied += 1;
-        this.#safeNotify(() => this.#onHeadApplied?.(provider.announcement, provider.peerId));
-        return 'done';
+        return {
+          kind: 'applied',
+          announcement: provider.announcement,
+          peerId: provider.peerId,
+        };
       } catch (error) {
+        if (this.#closing.signal.aborted || task.cancellation.signal.aborted) {
+          return { kind: 'aborted' };
+        }
         if (this.#isDeferrableError(error)) {
           // Not this head's fault and not this provider's fault: roll back ONLY
           // this attempt and let the task wait for the lane outside the slot.
@@ -444,20 +908,26 @@ export class Rfc64PublicCatalogReceiverV1 {
           // cannot launder a provider back to a full attempt budget.
           if (providerAttempt <= 1) attemptsByProvider.delete(provider.key);
           else attemptsByProvider.set(provider.key, providerAttempt - 1);
-          return 'defer-admission';
+          return { kind: 'defer-admission' };
         }
-        lastError = error;
-        if (this.#closing.signal.aborted) return 'done';
-        await this.#backoff(providerAttempt - 1);
+        recordProviderAttempt();
+        terminalFailuresByProvider.set(provider.key, Object.freeze({
+          providerPeerId: provider.peerId,
+          error,
+        }));
+        if (this.#closing.signal.aborted || task.cancellation.signal.aborted) {
+          return { kind: 'aborted' };
+        }
+        await this.#backoff(providerAttempt - 1, task.cancellation.signal);
       }
     }
   }
 
-  #backoff(attempt: number): Promise<void> {
+  #backoff(attempt: number, signal: AbortSignal): Promise<void> {
     const delay = this.#retryBackoffMs * 2 ** attempt;
     if (delay <= 0) return Promise.resolve();
+    this.#providerBackoffMs += delay;
     return new Promise<void>((resolve) => {
-      const signal = this.#closing.signal;
       const timer = setTimeout(() => {
         signal.removeEventListener('abort', onAbort);
         resolve();
@@ -479,8 +949,74 @@ export class Rfc64PublicCatalogReceiverV1 {
     }
   }
 
+  #beginReconciliationAttempt(task: ReceiverTaskV1): void {
+    if (task.reconciliationAttemptStarted === true) return;
+    task.reconciliationAttemptStarted = true;
+    try {
+      const firstProvider = task.providers.values().next().value;
+      task.reconciliationAttemptToken =
+        this.#onReconciliationAttemptStart?.(firstProvider!.announcement) ?? null;
+    } catch {
+      task.reconciliationAttemptToken = null;
+    }
+  }
+
+  #finishSuccessfulReconciliationAttempt(
+    task: ReceiverTaskV1,
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  ): void {
+    const token = task.reconciliationAttemptToken;
+    if (token === undefined || token === null) return;
+    this.#safeNotify(() => this.#onReconciliationAttemptSuccess?.(announcement, token));
+  }
+
+  #retireSupersededAmbientHeads(appliedTask: ReceiverTaskV1): void {
+    const appliedVersion = appliedTask.catalogVersion;
+    if (!appliedTask.schedulingPolicy.retiresOlderAmbientAfterDurableSuccess) {
+      return;
+    }
+    this.#supersededQueued += this.#tasks.finalizeNonRunningWhere(
+      (candidate) => (
+        candidate.schedulingPolicy.schedulingClass === 'ambient'
+        && candidate.scopeKey === appliedTask.scopeKey
+        && candidate.catalogVersion < appliedVersion
+      ),
+      (candidate) => createRfc64PublicCatalogReceiverCompletionV1({
+        outcome: 'closed',
+        providerAttempts: candidate.providerAttempts ?? 0,
+      }),
+      (candidate) => this.#finishReconciliationAttempt(candidate),
+      (waiter) => this.#safeNotify(waiter),
+    );
+  }
+
+  #finishTask(
+    task: ReceiverTaskV1,
+    result: Rfc64PublicCatalogReceiverCompletionV1,
+  ): void {
+    this.#tasks.finalize(
+      task,
+      result,
+      (settledTask) => this.#finishReconciliationAttempt(settledTask),
+      (waiter) => this.#safeNotify(waiter),
+    );
+  }
+
+  #finishReconciliationAttempt(task: ReceiverTaskV1): void {
+    if (task.reconciliationAttemptEnded === true) return;
+    task.reconciliationAttemptEnded = true;
+    const token = task.reconciliationAttemptToken;
+    if (token === undefined || token === null) return;
+    const firstProvider = task.providers.values().next().value;
+    if (firstProvider === undefined) return;
+    this.#safeNotify(() => this.#onReconciliationAttemptEnd?.(
+      firstProvider.announcement,
+      token,
+    ));
+  }
+
   #isIdle(): boolean {
-    return this.#active.size === 0 && this.#queue.length === 0 && this.#deferred.size === 0;
+    return this.#tasks.isIdle;
   }
 
   #resolveIdle(): void {
@@ -491,45 +1027,21 @@ export class Rfc64PublicCatalogReceiverV1 {
   }
 }
 
-/**
- * Dedup key: the exact head identity (scope + both digests). Heads at a new
- * era/version or with a different object/signature digest are distinct work.
- * `policyDigest` is intentionally excluded — the head binds to scope, not to a
- * policy generation, and a stale policy fails the transport's own check.
- */
-function headKey(a: Rfc64PublicCatalogHeadAnnouncementV1): string {
-  return [
-    a.networkId,
-    a.contextGraphId,
-    a.subGraphName ?? '',
-    a.authorAddress,
-    a.catalogEra,
-    a.catalogVersion,
-    a.catalogHeadObjectDigest,
-    a.signatureVariantDigest,
-  ].join('\n');
-}
-
-function catalogScopeKey(a: Rfc64PublicCatalogHeadAnnouncementV1): string {
-  return [
-    a.networkId,
-    a.contextGraphId,
-    a.subGraphName ?? '',
-    a.authorAddress,
-    a.catalogEra,
-  ].join('\n');
-}
-
-function providerContextKey(
-  peerId: string,
-  announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-): string {
-  return `${peerId}\n${announcement.policyDigest}`;
+function parseCatalogVersionV1(value: string): bigint {
+  try {
+    const version = BigInt(value);
+    if (version < 0n) throw new TypeError('catalog version must be non-negative');
+    return version;
+  } catch (cause) {
+    throw new TypeError('validated catalog version must be a non-negative integer', {
+      cause,
+    });
+  }
 }
 
 function nextEligibleProvider(
   providers: readonly ReceiverProviderV1[],
-  notFoundProviders: ReadonlySet<string>,
+  notFoundProviderRevisions: ReadonlyMap<string, bigint>,
   attemptsByProvider: ReadonlyMap<string, number>,
   maxAttempts: number,
   cursor: number,
@@ -537,23 +1049,30 @@ function nextEligibleProvider(
   for (let offset = 0; offset < providers.length; offset += 1) {
     const index = (cursor + offset) % providers.length;
     const provider = providers[index];
+    const attempts = provider === undefined
+      ? maxAttempts
+      : attemptsByProvider.get(provider.key) ?? 0;
     if (
       provider !== undefined
-      && !notFoundProviders.has(provider.key)
-      && (attemptsByProvider.get(provider.key) ?? 0) < maxAttempts
+      && notFoundProviderRevisions.get(provider.key) !== provider.hintRevision
+      && attempts < maxAttempts
     ) {
-      // Keep this monotonic. A modulo cursor would select the first provider
-      // again when a new provider is appended after the first attempt.
+      // Preserve round-robin order. A provider that just stepped aside for
+      // admission contention must not jump ahead of a fresher hint that is
+      // next at the cursor merely because its rolled-back attempt count is
+      // lower.
       return { provider, nextCursor: cursor + offset + 1 };
     }
   }
   return null;
 }
 
-function positiveInt(value: number | undefined, fallback: number): number {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : fallback;
-}
-
-function nonNegativeInt(value: number | undefined, fallback: number): number {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : fallback;
+function providerFailureV1(
+  attemptedProviderCount: number,
+  failuresByProvider: ReadonlyMap<string, Rfc64CatalogProviderTerminalFailureV1>,
+): unknown {
+  const failures = [...failuresByProvider.values()];
+  // Preserve the long-standing single-provider error identity and code.
+  if (attemptedProviderCount === 1 && failures.length === 1) return failures[0]!.error;
+  return new Rfc64CatalogProviderFailureAggregateV1(attemptedProviderCount, failures);
 }

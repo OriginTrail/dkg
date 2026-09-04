@@ -201,18 +201,32 @@ describe('GH#2270 runner chain-proof resolution', () => {
       expect(await createChainProofResolver(throwing)(identity)).toEqual({ status: 'inconclusive' });
     });
 
+    it('preserves the pending PHASE across the resolver boundary — both phases, verbatim', async () => {
+      // PR #2373 r2 (3879930159) — the tighter awaiting-confirmations cadence depends on `phase`
+      // surviving adapter → createChainProofResolver → publisher. A bridge that reconstructed a
+      // bare `{ status: 'pending-mempool' }` would silently disable the feature without failing the
+      // producer or consumer suites, so the handoff is pinned here, in the production mapper.
+      const awaiting = triStateAdapter({ status: 'pending-awaiting-confirmation' });
+      expect(await createChainProofResolver(publishersWith(awaiting))(lookup))
+        .toEqual({ status: 'pending-awaiting-confirmation' });
+
+      const mempool = triStateAdapter({ status: 'pending-mempool' });
+      expect(await createChainProofResolver(publishersWith(mempool))(lookup))
+        .toEqual({ status: 'pending-mempool' });
+    });
+
     it('does not spend a snapshot read on a verdict that is not an absence claim', async () => {
       // The read is only meaningful for `not-found`. Firing it on every verdict would cost a chain
       // read per held job per tick for no decision.
       const adapter = triStateAdapter(
-        { status: 'pending' },
+        { status: 'pending-mempool' },
         proofSnapshot({ accountNonce: SIGNED_NONCE + 1, kaMinted: false }),
       );
 
       expect(await createChainProofResolver(publishersWith(adapter))({
         ...lookupWithNonce,
         publishIdentityKaId: KA_ID.toString(),
-      })).toEqual({ status: 'pending' });
+      })).toEqual({ status: 'pending-mempool' });
       expect(adapter.readFinalizedChainProofSnapshot).not.toHaveBeenCalled();
     });
   });
@@ -563,12 +577,12 @@ describe('GH#2270 runner chain-proof resolution', () => {
     it('prefers the tri-state lookup when the adapter offers both', async () => {
       const resolvePublishByTxHash = vi.fn(async () => onChainPublish());
       const publishers = publishersWith(
-        triStateAdapter({ status: 'pending' }, { resolvePublishByTxHash }),
+        triStateAdapter({ status: 'pending-mempool' }, { resolvePublishByTxHash }),
       );
 
       // The legacy surface would have answered with a confirmed publish. The tri-state one
       // says the tx is still in the mempool, and that is the answer that must win.
-      expect(await createChainProofResolver(publishers)(lookup)).toEqual({ status: 'pending' });
+      expect(await createChainProofResolver(publishers)(lookup)).toEqual({ status: 'pending-mempool' });
       expect(resolvePublishByTxHash).not.toHaveBeenCalled();
     });
 

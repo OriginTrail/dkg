@@ -39,9 +39,18 @@
 
 import {
   decodeRdfLiteralBody,
+  decodeNTriplesIriEscapesPreservingLegacy,
   parseRdfLiteralLexicalTerm,
   XSD_STRING_DATATYPE,
 } from '@origintrail-official/dkg-rdf-utils';
+import {
+  canonicalizeTermXsdDateTimeValue,
+  civilFromDays,
+  daysFromCivil,
+  formatXsdYear as fmtYear,
+  padXsdDateTimeComponent as pad2,
+  xsdDaysInMonth as daysInMonth,
+} from '../xsd-date-time.js';
 
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const XSD_INTEGER = XSD + 'integer';
@@ -128,42 +137,7 @@ function normalizeEscaping(lex: string): string {
 // oxigraph does on parse. Out-of-range \U (> U+10FFFF) is left undecoded (oxigraph
 // would reject the literal; we must not throw).
 function decodeIriEscapes(iri: string): string {
-  if (!iri.includes('\\')) return iri;
-  return iri.replace(/\\(u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})/g, (whole, e: string) => {
-    const cp = parseInt(e.slice(1), 16);
-    return cp > 0x10ffff ? whole : String.fromCodePoint(cp);
-  });
-}
-
-// oxigraph stores temporal values as seconds-since-0001-01-01 in the same i128/1e18
-// Decimal as xsd:decimal/duration. A date/time whose scaled seconds overflow i128
-// fails to parse and is kept VERBATIM, so a foldable timezone / T24 roll / fraction
-// strip must NOT be applied to it. Replicated here via a proleptic-Gregorian day
-// count. (Byte-exact vs oxigraph for dateTime/date; for the bare g-types the cliff
-// may differ by ≤1 year at the ~5.39e12 boundary — a value impossible in real data.)
-function daysFromCivil(y: bigint, m: bigint, d: bigint): bigint {
-  const yy = m <= 2n ? y - 1n : y;
-  const era = (yy >= 0n ? yy : yy - 399n) / 400n;
-  const yoe = yy - era * 400n;
-  const doy = (153n * (m + (m > 2n ? -3n : 9n)) + 2n) / 5n + d - 1n;
-  const doe = yoe * 365n + yoe / 4n - yoe / 100n + doy;
-  return era * 146097n + doe - 719468n;
-}
-// Inverse of daysFromCivil: proleptic-Gregorian (y,m,d) from a signed day count
-// (days since 1970-01-01). Standard Howard Hinnant algorithm. Used to roll the
-// DATE when a timezone offset pushes a dateTime across midnight during the
-// backend-independent UTC normalization (OT-RFC-57).
-function civilFromDays(zIn: bigint): { y: bigint; m: bigint; d: bigint } {
-  const z = zIn + 719468n;
-  const era = (z >= 0n ? z : z - 146096n) / 146097n;
-  const doe = z - era * 146097n; // [0, 146096]
-  const yoe = (doe - doe / 1460n + doe / 36524n - doe / 146096n) / 365n; // [0, 399]
-  const y = yoe + era * 400n;
-  const doy = doe - (365n * yoe + yoe / 4n - yoe / 100n); // [0, 365]
-  const mp = (5n * doy + 2n) / 153n; // [0, 11]
-  const d = doy - (153n * mp + 2n) / 5n + 1n; // [1, 31]
-  const m = mp < 10n ? mp + 3n : mp - 9n; // [1, 12]
-  return { y: m <= 2n ? y + 1n : y, m, d };
+  return decodeNTriplesIriEscapesPreservingLegacy(iri);
 }
 
 // OT-RFC-57: the UTC date of "midnight in the given tz" — the backend-independent
@@ -370,15 +344,6 @@ function normFrac(frac: string | undefined): string {
   return d === '' ? '' : `.${d}`;
 }
 
-// Proleptic-Gregorian leap test on the astronomical year number (handles negative
-// and arbitrarily large years via BigInt).
-function isLeapYear(yearStr: string): boolean {
-  const y = BigInt(yearStr);
-  return (y % 4n === 0n && y % 100n !== 0n) || y % 400n === 0n;
-}
-function daysInMonth(yearStr: string, mo: number): number {
-  return [31, isLeapYear(yearStr) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1];
-}
 // Day after (yearStr, mo, dd). Year crosses are computed on the signed numeric
 // year (BigInt) then re-emitted min-4-digit, sign-preserved (…→0000, 9999→10000).
 function rollNextDay(yearStr: string, mo: number, dd: number): string {
@@ -392,13 +357,6 @@ function rollNextDay(yearStr: string, mo: number, dd: number): string {
   }
   return `${fmtYear(ny)}-${pad2(nmo)}-${pad2(nd)}`;
 }
-function fmtYear(y: bigint): string {
-  const neg = y < 0n;
-  const abs = (neg ? -y : y).toString().padStart(4, '0');
-  return neg ? `-${abs}` : abs;
-}
-const pad2 = (n: number) => String(n).padStart(2, '0');
-
 // hh∈[0,24], mm∈[0,59], ss∈[0,59]; hour 24 is valid ONLY when it can roll, which
 // oxigraph allows iff minute==0 OR the seconds value (incl. fraction) is 0.
 // Returns whether the time rolls to the next day (hour 24 → 00). Throws on any
@@ -427,32 +385,9 @@ const YEAR = '-?\\d{4,}';
 // Neptune). This is the value-space form the publisher's input AND every
 // backend's read-back converge to.
 function canonDateTime(lex: string): string {
-  const { body, offsetMin } = splitTzToOffset(lex);
-  const m = new RegExp(`^(${YEAR})-(\\d{2})-(\\d{2})T(\\d{2}):(\\d{2}):(\\d{2})(\\.\\d+)?$`).exec(body);
-  if (!m) throw new Error('invalid xsd:dateTime');
-  const [, yy, mo, dd, hh, mi, ss, frac] = m;
-  const moN = +mo;
-  const ddN = +dd;
-  if (moN < 1 || moN > 12) throw new Error('month');
-  if (ddN < 1 || ddN > daysInMonth(yy, moN)) throw new Error('day');
-  const fracNorm = normFrac(frac);
-  const { rolls } = validateClock(+hh, +mi, +ss, fracNorm);
-  // Base date as a day count; a T24:00 clock rolls one day and resets the hour to 0.
-  let days = daysFromCivil(BigInt(yy), BigInt(moN), BigInt(ddN));
-  const hourN = rolls ? 0 : +hh;
-  if (rolls) days += 1n;
-  // UTC: subtract the offset (whole minutes); roll the date across midnight.
-  const totalMin = hourN * 60 + +mi - offsetMin;
-  days += BigInt(Math.floor(totalMin / 1440));
-  const minInDay = ((totalMin % 1440) + 1440) % 1440;
-  const { y, m: mm, d } = civilFromDays(days);
-  // Range-check the NORMALIZED UTC instant, not the lexical components: a tz offset
-  // or T24 roll can push a boundary value outside the i128 seconds range it would
-  // otherwise pass, emitting a leaf for a value the store can't represent stably
-  // (otReviewAgent). Out of range → verbatim (throw, caught upstream).
-  if (!temporalInRange(y.toString(), Number(mm), Number(d), Math.floor(minInDay / 60), minInDay % 60, +ss))
-    throw new Error('normalized dateTime overflows i128 seconds');
-  return `${fmtYear(y)}-${pad2(Number(mm))}-${pad2(Number(d))}T${pad2(Math.floor(minInDay / 60))}:${pad2(minInDay % 60)}:${ss}${fracNorm}Z`;
+  const canonical = canonicalizeTermXsdDateTimeValue(lex);
+  if (canonical === null) throw new Error('invalid xsd:dateTime');
+  return canonical;
 }
 
 // OT-RFC-57: time has no date, so a tz offset just wraps the wall clock mod 24h;

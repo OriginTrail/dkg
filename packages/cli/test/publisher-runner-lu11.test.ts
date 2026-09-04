@@ -48,8 +48,7 @@ describe('publisher runner LU-11 runtime wiring', () => {
       store,
       keypair,
       chainBase: undefined,
-      pollIntervalMs: 10,
-      errorBackoffMs: 10,
+      runnerOptions: { pollIntervalMs: 10, errorBackoffMs: 10 },
       publishEncryptionFactory: (publishOptions) => {
         factoryInput = publishOptions;
         return {

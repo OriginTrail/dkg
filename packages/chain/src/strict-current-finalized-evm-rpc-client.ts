@@ -3,6 +3,10 @@ import type {
   ChainIdV1,
   Digest32V1,
 } from '@origintrail-official/dkg-core';
+import {
+  BoundedResponseBodyLimitError,
+  readResponseBodyBytesBounded,
+} from '@origintrail-official/dkg-http-utils';
 
 import { CurrentFinalizedEvmCallErrorV1 } from './current-finalized-evm-read-profile.js';
 import {
@@ -52,13 +56,18 @@ export async function postStrictFinalizedJsonRpcV1(
     throw unavailable(`JSON-RPC ${method} transport failed`, cause);
   }
 
-  const body = await readResponseBodyBounded(response, maxResponseBytes);
   if (!response.ok) {
     // An HTTP intermediary/provider failure is transport availability, even if
     // its untrusted body happens to mimic a deterministic JSON-RPC revert. Only
     // a successful JSON-RPC transport response may select an invalidity code.
+    // Do not run the successful-response byte cap over an error page first:
+    // oversized proxy/provider bodies must remain failover-eligible transport
+    // failures, not become terminal resource-limit evidence.
+    await response.body?.cancel().catch(() => undefined);
     throw unavailable(`JSON-RPC ${method} returned HTTP ${response.status}`);
   }
+
+  const body = await readResponseBodyBounded(response, maxResponseBytes);
 
   let parsed: unknown;
   try {
@@ -83,41 +92,17 @@ export async function postStrictFinalizedJsonRpcV1(
 }
 
 async function readResponseBodyBounded(response: Response, maxBytes: number): Promise<string> {
-  const contentLength = response.headers.get('content-length');
-  if (contentLength !== null && /^\d+$/.test(contentLength)) {
-    const declared = BigInt(contentLength);
-    if (declared > BigInt(maxBytes)) {
-      await response.body?.cancel().catch(() => undefined);
+  let bytes: Uint8Array;
+  try {
+    bytes = await readResponseBodyBytesBounded(response, maxBytes);
+  } catch (error) {
+    if (!(error instanceof BoundedResponseBodyLimitError)) throw error;
+    if (error.source === 'content-length') {
       throw resourceLimited(
-        `Raw JSON-RPC response declared ${declared.toString()} bytes, limit ${maxBytes}`,
+        `Raw JSON-RPC response declared ${error.actualBytes.toString()} bytes, limit ${maxBytes}`,
       );
     }
-  }
-
-  if (response.body === null) return '';
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel().catch(() => undefined);
-        throw resourceLimited(`Raw JSON-RPC response exceeded ${maxBytes} bytes before parsing`);
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
+    throw resourceLimited(`Raw JSON-RPC response exceeded ${maxBytes} bytes before parsing`);
   }
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes);

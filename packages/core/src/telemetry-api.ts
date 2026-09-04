@@ -337,8 +337,8 @@ export interface DkgMetrics {
    *  owner_source, joiner_source. A cross-*family* join invalidates the window. */
   syncSingleflightJoinsTotal: Counter;
   /** I7 — catch-up subscribe requests, one per route return.
-   *  result={bad_request|forbidden|deduped|ready_replay|ready_synthetic|queued|
-   *  shutting_down}, include_shared_memory. Requests ≠ jobs (N:1). */
+   *  result={bad_request|forbidden|authority_unavailable|deduped|ready_replay|
+   *  ready_synthetic|queued|shutting_down}, include_shared_memory. Requests ≠ jobs (N:1). */
   contextGraphCatchupRequestsTotal: Counter;
   /** I8 — exactly one point per unique jobId. status=<terminal CatchupJobState>,
    *  admission={walk|synthetic}. */

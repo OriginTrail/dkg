@@ -344,7 +344,10 @@ async function pollUntilFinalized(
   d: Daemon,
   basePath: string,
   captureID: string,
-  timeoutMs = 60_000,
+  // The real Hardhat publication normally crosses its confirmation boundary
+  // just after 60 seconds. Leave enough headroom for a busy hosted runner
+  // while staying below Vitest's 120-second per-test limit.
+  timeoutMs = 90_000,
 ): Promise<{ state: string; ual: string | null; error: string | null }> {
   const deadline = Date.now() + timeoutMs;
   let last: any = null;

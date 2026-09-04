@@ -1,5 +1,5 @@
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
-import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
+import { deleteByPatternWithoutCount, GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -65,6 +65,7 @@ export interface KnowledgeAssetOperationPublicSnapshot {
   readonly quads: Quad[];
   readonly kaUal: string;
   readonly assertionVersion: string;
+  readonly publicQuadsDigest: string;
   readonly publisherPeerId?: string;
 }
 
@@ -586,7 +587,8 @@ export async function storeKnowledgeAssetWorkspaceHead(params: {
     scope,
     subGraphName,
   );
-  await params.store.deleteByPattern(
+  await deleteByPatternWithoutCount(
+    params.store,
     { graph: metaGraph, subject },
     workspaceHeadStoreOptions(params.queryOptions, 'deleteByPattern'),
   );
@@ -665,10 +667,10 @@ export async function storeWorkspaceOperationPublicQuads(params: {
       root,
       subGraphName,
     );
-    await params.store.deleteByPattern({ graph: workspaceMetaGraph, subject: legacySubject });
+    await deleteByPatternWithoutCount(params.store, { graph: workspaceMetaGraph, subject: legacySubject });
   }
 
-  await params.store.deleteByPattern({ graph: workspaceMetaGraph, subject: operationSubject });
+  await deleteByPatternWithoutCount(params.store, { graph: workspaceMetaGraph, subject: operationSubject });
   await params.store.insert(generateShareMetadata(
     {
       shareOperationId: params.shareOperationId,
@@ -791,7 +793,7 @@ export async function storeKnowledgeAssetOperationPublicQuads(params: {
     );
   }
 
-  await params.store.deleteByPattern({
+  await deleteByPatternWithoutCount(params.store, {
     graph: workspaceMetaGraph,
     subject: operationSubject,
   });
@@ -952,6 +954,7 @@ export async function resolveKnowledgeAssetOperationPublicQuads(params: {
     quads,
     kaUal: actualScope.ual,
     assertionVersion: actualScope.assertionVersion,
+    publicQuadsDigest: expectedDigest,
     publisherPeerId: stripLiteral(row?.['publisherPeerId'])?.trim() || undefined,
   };
 }

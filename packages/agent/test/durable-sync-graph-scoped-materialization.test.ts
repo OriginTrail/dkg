@@ -25,6 +25,7 @@ import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
+  authenticateChallengePinnedGraphScopedAsset,
   authenticateVerifiedGraphScopedAsset,
   materializeVerifiedGraphScopedAsset,
   type GraphScopedMaterializationOutcome,
@@ -168,6 +169,7 @@ function strictContextGraphBindingVerifier(
     log: { info: () => {}, warn: () => {}, debug: () => {} },
   };
   agentLike.isWireIdKeyedSubscription = (DKGAgent.prototype as any).isWireIdKeyedSubscription;
+  agentLike.localCgMatchesOnChainSlot = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
   agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
   return (localId, onChainId, signal) => (
     DKGAgent.prototype as any
@@ -247,6 +249,140 @@ function runGraphScopedDurableSync(options: {
 }
 
 describe('durable graph-scoped KA materialization', () => {
+  it('rejects an RFC-64 control graph before graph-scoped materialization', async () => {
+    const controlGraph = `did:dkg:context-graph:${contextGraphId}/_sync/applied/test`;
+    const controlMeta = metadata(2).map((quad) => (
+      quad.predicate === `${DKG}assertionGraph`
+        ? { ...quad, object: controlGraph }
+        : quad
+    ));
+    const storeGraphScopedAsset = vi.fn(async (): Promise<GraphScopedMaterializationOutcome> => 'applied');
+
+    const result = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-rfc64-control-graph',
+      contextGraphIds: [contextGraphId],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({ phase }) => (
+        phase === 'data' ? page(phase, []) : page(phase, controlMeta)
+      ),
+      processDurableBatchInWorker: async () => ({
+        verifiedData: [],
+        verifiedMeta: controlMeta,
+        verifiedGraphScopedDataGraphs: [controlGraph],
+        totalFetchedDataQuads: 0,
+        totalFetchedMetaQuads: controlMeta.length,
+        rejectedKcs: 0,
+        emptyResponses: 0,
+        metaOnlyResponses: 0,
+        verifiedPrivateOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+      }),
+      storeInsert: async () => {},
+      storeGraphScopedAsset: ({ asset, authenticationDeadline }) => (
+        storeGraphScopedAsset(asset, authenticationDeadline)
+      ),
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(result.failedPhases).toBe(1);
+    expect(result.insertedTriples).toBe(0);
+    expect(storeGraphScopedAsset).not.toHaveBeenCalled();
+  });
+
+  it('authenticates a historical challenge pin without consulting the newer live root', async () => {
+    const historicalData = dataQuad(1);
+    const historicalRoot = computeFlatKCRootV10([historicalData], []);
+    const historicalAsset: VerifiedGraphScopedAsset = {
+      contextGraphId,
+      ual,
+      assertionVersion: 1n,
+      assertionGraph,
+      metaGraph,
+      dataQuads: [historicalData],
+      metadataQuads: generateGraphKnowledgeAssetMetadata({
+        contextGraphId,
+        ual,
+        merkleRoot: historicalRoot,
+        publisherPeerId: 'historical-provider',
+        accessPolicy: 'public',
+        timestamp: new Date(0),
+        assertionVersion: 1,
+        publicTripleCount: 1,
+        privateTripleCount: 0,
+        assertionGraph,
+      }, { status: 'tentative' }),
+    };
+    const getLatestMerkleRoot = vi.fn(async () => new Uint8Array(32).fill(0x22));
+    const getMerkleRootCount = vi.fn(async () => 2n);
+    const verifyContextGraphBinding = vi.fn(async () => true);
+    const chain = authenticatedV2Chain({ getLatestMerkleRoot, getMerkleRootCount });
+
+    await expect(authenticateChallengePinnedGraphScopedAsset(
+      chain,
+      historicalAsset,
+      {
+        assetUal: ual,
+        merkleRootHex: toHex(historicalRoot),
+        merkleLeafCount: 1n,
+      },
+      verifyContextGraphBinding,
+    )).resolves.toMatchObject({ asset: historicalAsset, privateRoots: [] });
+    expect(verifyContextGraphBinding).toHaveBeenCalledWith(
+      contextGraphId,
+      14n,
+      undefined,
+    );
+    expect(getLatestMerkleRoot).not.toHaveBeenCalled();
+    expect(getMerkleRootCount).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the historical asset is not bound to the requested context graph', async () => {
+    const historicalData = dataQuad(1);
+    const historicalRoot = computeFlatKCRootV10([historicalData], []);
+    const historicalAsset: VerifiedGraphScopedAsset = {
+      contextGraphId,
+      ual,
+      assertionVersion: 1n,
+      assertionGraph,
+      metaGraph,
+      dataQuads: [historicalData],
+      metadataQuads: generateGraphKnowledgeAssetMetadata({
+        contextGraphId,
+        ual,
+        merkleRoot: historicalRoot,
+        publisherPeerId: 'historical-provider',
+        accessPolicy: 'public',
+        timestamp: new Date(0),
+        assertionVersion: 1,
+        publicTripleCount: 1,
+        privateTripleCount: 0,
+        assertionGraph,
+      }, { status: 'tentative' }),
+    };
+    const verifyContextGraphBinding = vi.fn(async () => false);
+
+    await expect(authenticateChallengePinnedGraphScopedAsset(
+      authenticatedV2Chain(),
+      historicalAsset,
+      {
+        assetUal: ual,
+        merkleRootHex: toHex(historicalRoot),
+        merkleLeafCount: 1n,
+      },
+      verifyContextGraphBinding,
+    )).rejects.toMatchObject({ code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' });
+    expect(verifyContextGraphBinding).toHaveBeenCalledWith(
+      contextGraphId,
+      14n,
+      undefined,
+    );
+  });
+
   it('forwards the graph-scoped authentication deadline through the helper', async () => {
     const authenticationDeadline = 1_800_000_123_456;
     const storeGraphScopedAsset = vi.fn(async (
@@ -1124,7 +1260,7 @@ describe('durable graph-scoped KA materialization', () => {
       remotePeerId: 'field-sized-exact-recovery-peer',
       contextGraphIds: [contextGraphId],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 600_000),
-      exactAssetUalsFor: () => [ual],
+      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [ual] }),
       fetchSyncPages: async ({ phase }) => (
         phase === 'data'
           ? delayedPage(phase, data, completed)

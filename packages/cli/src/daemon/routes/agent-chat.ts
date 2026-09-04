@@ -118,7 +118,7 @@ import {
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -223,7 +223,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
@@ -334,6 +333,8 @@ import {
 import { authorizeAgentScopedAuthorClaim } from './shared-assertion-helpers.js';
 import { classifyAgentConnectError } from './agent-connect-error.js';
 import type { RequestContext } from './context.js';
+import { actorFromRequestContext } from './context.js';
+import { handleAgentsListRoute } from './agents-list.js';
 import type { PublishOptions } from '@origintrail-official/dkg-publisher';
 
 function parsePrecomputedUpdateAttestation(
@@ -441,9 +442,13 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     apiPortRef,
     url,
     path,
-    requestToken,
-    requestAgentAddress,
   } = ctx;
+  const actor = actorFromRequestContext(ctx);
+  const {
+    authentication,
+    authenticatedAgentAddress,
+    effectiveAgentAddress: requestAgentAddress,
+  } = actor;
 
 
   // POST /api/agent/register — register a new agent on this node
@@ -481,14 +486,13 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   // routes (e.g. memory.ts, query.ts) already use for caller-vs-target
   // gating.
   function authorizeKeyManagementOnAddress(targetAddress: string): { ok: true } | { ok: false; status: number; body: Record<string, unknown> } {
-    const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
-    if (!tokenAgentAddress) return { ok: true };
-    if (tokenAgentAddress.toLowerCase() === targetAddress.toLowerCase()) return { ok: true };
+    if (!authenticatedAgentAddress) return { ok: true };
+    if (authenticatedAgentAddress.toLowerCase() === targetAddress.toLowerCase()) return { ok: true };
     return {
       ok: false,
       status: 403,
       body: {
-        error: `Agent token for ${tokenAgentAddress} cannot manage encryption keys for ${targetAddress}. ` +
+        error: `Agent token for ${authenticatedAgentAddress} cannot manage encryption keys for ${targetAddress}. ` +
           'Use a node-level admin token (~/.dkg/auth.token) to manage other agents on this node.',
       },
     };
@@ -601,8 +605,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   // agent's; gating to admin avoids a non-default-agent token tricking
   // the daemon into republishing on demand for spam.
   if (req.method === "POST" && path === "/api/agent/publish-profile") {
-    const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
-    if (tokenAgentAddress) {
+    if (!canAdministerNode(authentication)) {
       return jsonResponse(res, 403, {
         error: 'POST /api/agent/publish-profile requires a node-level admin token; agent-scoped tokens cannot trigger a profile republish.',
       });
@@ -617,8 +620,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
 
   // GET /api/agent/identity — current agent identity for the requesting token
   if (req.method === "GET" && path === "/api/agent/identity") {
-    const token = extractBearerToken(req.headers.authorization);
-    const agentAddress = agent.resolveAgentAddress(token);
+    const agentAddress = requestAgentAddress;
     const localAgents = agent.listLocalAgents();
     const current = localAgents.find((a) => a.agentAddress === agentAddress);
     return jsonResponse(res, 200, {
@@ -632,54 +634,10 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   }
 
   // GET /api/agents — enriched with live connection health
-  // Optional query params: ?framework=X &skill_type=X
+  // Optional query params: ?framework=X &skill_type=X &connectionStatus=X
+  //                        &local=true|false &limit=N &cursor=X   (GH#310)
   if (req.method === "GET" && path === "/api/agents") {
-    const frameworkFilter = url.searchParams.get("framework") || undefined;
-    const skillTypeFilter = url.searchParams.get("skill_type") || undefined;
-    const agents = await agent.findAgents({
-      ...(frameworkFilter ? { framework: frameworkFilter } : {}),
-    });
-    // If skill_type filter is requested, find agents offering that skill and intersect
-    let filteredAgents = agents;
-    if (skillTypeFilter) {
-      const offerings = await agent.findSkills({ skillType: skillTypeFilter });
-      const agentUris = new Set(offerings.map((o: any) => o.agentUri));
-      filteredAgents = agents.filter((a: any) => agentUris.has(a.agentUri));
-    }
-    const allConns = agent.node.libp2p.getConnections();
-    const connByPeer = new Map<
-      string,
-      { transport: string; direction: string; sinceMs: number }
-    >();
-    for (const c of allConns) {
-      const pid = c.remotePeer.toString();
-      if (!connByPeer.has(pid)) {
-        connByPeer.set(pid, {
-          transport: c.remoteAddr?.toString().includes("/p2p-circuit")
-            ? "relayed"
-            : "direct",
-          direction: c.direction,
-          sinceMs: c.timeline?.open ? Date.now() - c.timeline.open : 0,
-        });
-      }
-    }
-    const myPeerId = agent.peerId;
-    const healthMap = agent.getPeerHealth();
-    const enriched = filteredAgents.map((a: any) => {
-      const isSelf = a.peerId === myPeerId;
-      const conn = connByPeer.get(a.peerId);
-      const health = healthMap.get(a.peerId);
-      return {
-        ...a,
-        connectionStatus: isSelf ? "self" : conn ? "connected" : "disconnected",
-        connectionTransport: conn?.transport ?? null,
-        connectionDirection: conn?.direction ?? null,
-        connectedSinceMs: conn?.sinceMs ?? null,
-        lastSeen: isSelf ? Date.now() : (health?.lastSeen ?? null),
-        latencyMs: health?.latencyMs ?? null,
-      };
-    });
-    return jsonResponse(res, 200, { agents: enriched });
+    return handleAgentsListRoute(ctx);
   }
 
   // GET /api/peer-info?peerId=<id>
@@ -986,10 +944,9 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     if (parsed.precomputedUpdateAttestation !== undefined && !precomputedUpdateAttestation) {
       return;
     }
-    const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
     if (!authorizeAgentScopedAuthorClaim(
       res,
-      tokenAgentAddress,
+      authenticatedAgentAddress,
       precomputedUpdateAttestation?.authorAddress,
       "precomputedUpdateAttestation.authorAddress",
     )) {

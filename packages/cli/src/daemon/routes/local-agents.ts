@@ -209,7 +209,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
@@ -403,7 +402,6 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
     apiPortRef,
     url,
     path,
-    requestToken,
     requestAgentAddress,
   } = ctx;
 
@@ -429,6 +427,12 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
     const body = await readBody(req, SMALL_BODY_BYTES);
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+    if (normalizeIntegrationId(typeof parsed.id === 'string' ? parsed.id : '') === 'local-llm') {
+      return jsonResponse(res, 409, {
+        error: 'DKG Local LLM is daemon-managed and does not require a connect or install step.',
+        code: 'DAEMON_MANAGED_INTEGRATION',
+      });
+    }
     try {
       const source = isPlainRecord(parsed.metadata) && typeof parsed.metadata.source === 'string'
         ? parsed.metadata.source
@@ -477,6 +481,12 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
   if (req.method === 'PUT' && path.startsWith('/api/local-agent-integrations/')) {
     const id = path.slice('/api/local-agent-integrations/'.length);
     if (!id) return jsonResponse(res, 404, { error: 'Integration not found' });
+    if (normalizeIntegrationId(id) === 'local-llm') {
+      return jsonResponse(res, 409, {
+        error: 'DKG Local LLM is daemon-managed and cannot be connected or disconnected.',
+        code: 'DAEMON_MANAGED_INTEGRATION',
+      });
+    }
     const body = await readBody(req, SMALL_BODY_BYTES);
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }

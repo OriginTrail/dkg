@@ -23,7 +23,6 @@ import {
 import type { Rfc64InventoryV1OperationsV1 } from './inventory-v1/index.js';
 import {
   Rfc64PublicCatalogNativeReceiverErrorV1,
-  type Rfc64PublicCatalogNativeReceiverV1,
 } from './public-catalog-native-receiver-v1.js';
 import type {
   Rfc64PublicCatalogReceiverReconcilerV1,
@@ -31,10 +30,15 @@ import type {
 } from './public-catalog-receiver-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
 
-export type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1 = Pick<
-  Rfc64PublicCatalogNativeReceiverV1,
-  'synchronizeBoundedPublicRootCatalog'
->;
+export interface Rfc64BoundedPublicRootCatalogNativeReceiverClientV1 {
+  synchronizeBoundedPublicRootCatalog(
+    remotePeerId: string,
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    trustedCatalogScope: AuthorCatalogScopeV1,
+    deployment: CatalogSealDeploymentProfileV1,
+    signal?: AbortSignal,
+  ): Promise<unknown>;
+}
 
 export type Rfc64BoundedPublicRootCatalogDeploymentResolverV1 = (
   announcement: Rfc64PublicCatalogHeadAnnouncementV1,
@@ -68,6 +72,14 @@ export interface Rfc64BoundedPublicRootCatalogNativeReconcilerOptionsV1 {
    * Optional only for Gate-1 compatibility; a multi-row lane must provide it.
    */
   readonly readStagedCatalogHead?: Rfc64BoundedPublicRootCatalogStagedHeadReaderV1;
+  /**
+   * Force an exact durable replay through the native receiver's precommit.
+   * Private finalized catalogs use this to recheck the accepted policy/roster
+   * generation and current chain truth even when the head digest is unchanged.
+   */
+  readonly requiresAppliedHeadPrecommit?: (
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  ) => boolean;
 }
 
 export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
@@ -84,6 +96,10 @@ export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
         options?.readStagedCatalogHead !== undefined
         && typeof options.readStagedCatalogHead !== 'function'
       )
+      || (
+        options?.requiresAppliedHeadPrecommit !== undefined
+        && typeof options.requiresAppliedHeadPrecommit !== 'function'
+      )
     ) {
       throw new TypeError('RFC-64 bounded public root native reconciler dependencies are incomplete');
     }
@@ -92,6 +108,9 @@ export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
   async isHeadApplied(
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
   ): Promise<boolean> {
+    if (this.options.requiresAppliedHeadPrecommit?.(announcement) === true) {
+      return false;
+    }
     const trustedCatalogScope = this.options.resolveTrustedCatalogScope(announcement);
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(
       trustedCatalogScope,
@@ -123,7 +142,9 @@ export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
       // Preserve the already-qualified Gate-1 behavior. Refuse to bless a
       // multi-row snapshot without the exact staged head that commits its count.
       if (announcement.catalogVersion === '0') return '0' as CountV1;
-      return durableInventoryRowCount === '1' ? '1' as CountV1 : null;
+      return durableInventoryRowCount === '0' || durableInventoryRowCount === '1'
+        ? durableInventoryRowCount
+        : null;
     }
     const staged = await this.options.readStagedCatalogHead(announcement);
     if (staged === null) return null;
@@ -142,7 +163,6 @@ export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
         totalRows < 0n
         || totalRows > BigInt(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1)
         || (announcement.catalogVersion === '0' && totalRows !== 0n)
-        || (announcement.catalogVersion !== '0' && totalRows < 1n)
       ) {
         throw new Error('staged head totalRows is outside the bounded lane');
       }

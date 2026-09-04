@@ -19,12 +19,14 @@
  * the binary's own behaviour is real, not emitted by the test.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm, writeFile, chmod } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer, type Server } from 'node:net';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SparqlHttpStore } from '@origintrail-official/dkg-storage';
+import {
+  createManagedOxigraphSparqlStoreV1,
+} from '@origintrail-official/dkg-storage';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 import { OXIGRAPH_WATCHDOG_OOM_MARKER } from '../src/daemon/oxigraph-parent-watchdog.js';
@@ -33,44 +35,22 @@ import {
   childOwnsListenPort,
   findListenOwnerPid,
 } from '../src/daemon/oxigraph-listen-port.js';
-
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+import {
+  createOxigraphStandinFixture,
+  fetchPid,
+  freePort,
+  portAnswers,
+  sleep,
+  type OxigraphStandinFixture,
+} from './fixtures/oxigraph-server-real-fixture.js';
 
 let dir: string;
 let standin: string;
-
-// A real port that is free at allocation time. The OS hands us an ephemeral
-// port; we close the probe listener and reuse the number immediately.
-async function freePort(): Promise<number> {
-  return await new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.once('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const addr = srv.address();
-      if (!addr || typeof addr === 'string') return reject(new Error('no port'));
-      const port = addr.port;
-      srv.close(() => resolve(port));
-    });
-  });
-}
-
-async function fetchPid(port: number): Promise<number> {
-  const res = await fetch(`http://127.0.0.1:${port}/pid`);
-  return Number(await res.text());
-}
+let standinFixture: OxigraphStandinFixture;
 
 async function fetchArgs(port: number): Promise<string[]> {
   const res = await fetch(`http://127.0.0.1:${port}/args`);
   return await res.json() as string[];
-}
-
-async function portAnswers(port: number): Promise<boolean> {
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/query`, { signal: AbortSignal.timeout(500) });
-    return res.ok;
-  } catch {
-    return false;
-  }
 }
 
 async function executableVersion(binaryPath: string): Promise<string> {
@@ -89,40 +69,13 @@ async function executableVersion(binaryPath: string): Promise<string> {
 }
 
 beforeAll(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'oxi-server-real-'));
-  standin = join(dir, 'oxigraph-standin.cjs');
-  await writeFile(
-    standin,
-    `#!/usr/bin/env node
-// Real stand-in server with oxigraph's CLI surface. Binds a REAL port,
-// answers the readiness probe, exposes its pid, exits 1 on a REAL bind
-// failure, exits 0 on SIGTERM.
-const http = require('node:http');
-const bindIdx = process.argv.indexOf('--bind');
-const [host, port] = process.argv[bindIdx + 1].split(':');
-const srv = http.createServer((req, res) => {
-  if (req.url === '/pid') { res.statusCode = 200; res.end(String(process.pid)); return; }
-  if (req.url === '/args') {
-    res.statusCode = 200;
-    res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify(process.argv.slice(2)));
-    return;
-  }
-  res.statusCode = 200;
-  res.setHeader('Content-Type', 'application/sparql-results+json');
-  res.end(JSON.stringify({ head: {}, boolean: true }));
-});
-srv.on('error', (e) => { console.error('bind failed: ' + e.message); process.exit(1); });
-srv.listen(Number(port), host);
-process.on('SIGTERM', () => { srv.close(() => process.exit(0)); setTimeout(() => process.exit(0), 100).unref(); });
-`,
-    'utf8',
-  );
-  await chmod(standin, 0o755);
+  standinFixture = await createOxigraphStandinFixture();
+  dir = standinFixture.directory;
+  standin = standinFixture.binaryPath;
 });
 
 afterAll(async () => {
-  await rm(dir, { recursive: true, force: true }).catch(() => {});
+  await standinFixture.cleanup();
 });
 
 function startOpts(port: number, extra: Record<string, unknown> = {}) {
@@ -418,10 +371,9 @@ describe('startOxigraphServer (real child processes)', () => {
         }
         return await originalFetch(input, init);
       }) as typeof fetch;
-      const store = new SparqlHttpStore({
+      const store = createManagedOxigraphSparqlStoreV1({
         queryEndpoint: `http://127.0.0.1:${port}/query`,
         updateEndpoint: `http://127.0.0.1:${port}/update`,
-        managedOxigraph: true,
         timeout: 5_000,
         getRecoveryState: () => handle.getRecoveryState(),
       });
@@ -596,11 +548,9 @@ describe.skipIf(!nativeOxigraphTestBinary)(
         log: () => {},
       });
       const endpoint = `http://127.0.0.1:${port}`;
-      const store = new SparqlHttpStore({
+      const store = createManagedOxigraphSparqlStoreV1({
         queryEndpoint: `${endpoint}/query`,
         updateEndpoint: `${endpoint}/update`,
-        managedByDkg: true,
-        managedOxigraph: true,
         timeout: 10_000,
       });
 
@@ -864,4 +814,5 @@ describe('startOxigraphServer OOM classification in the restart log', () => {
       await handle.stop();
     }
   });
+
 });

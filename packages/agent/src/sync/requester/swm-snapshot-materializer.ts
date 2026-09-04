@@ -21,6 +21,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import {
+  deleteByPatternWithoutCount,
   invalidateSwmMaterializationWitness,
   readSwmMaterializationWitness,
   writeSwmMaterializationWitness,
@@ -233,14 +234,14 @@ export interface SharedMemorySnapshotMaterializer {
     | { outcome: 'replace' }
   >;
   /**
-   * The private curator-recovery lane's skip predicate: a marker-only ASK on
-   * the head's assertionGraph row. Deliberately DIGEST-BLIND — upgrading it
-   * to the count+digest witness `isGraphAssetMaterialized` uses is the
-   * recorded F2 follow-up, out of scope for the identity fix. Living here
-   * (rather than as a caller-supplied closure) is what makes skip and
-   * preserve ONE capability over ONE store and lock map.
+   * The private curator-recovery lane's skip predicate. A head marker alone
+   * cannot prove materialization: the assertion graph can be cleared while
+   * its durable metadata survives. Reuse the same exact count+digest guard as
+   * ordinary catch-up so a marker-only, partial, or equal-count stale graph is
+   * repaired rather than reported as recovered. Living here (rather than as a
+   * caller-supplied closure) keeps skip and preserve as one capability over
+   * one store and lock map.
    */
-  hasGraphAssetMarker(descriptor: GraphScopedSwmRecoveryDescriptor): Promise<boolean>;
   /**
    * Canonical graph-asset meta replacement (delete head + kaUal-owned linked
    * operation subjects) over THIS materializer's store — the one cleanup
@@ -270,13 +271,13 @@ export function createSharedMemorySnapshotMaterializer(deps: {
   //
   // There is deliberately NO capability probe here. An earlier revision tested
   // `typeof deps.store.replaceSubject !== 'function'`, on the theory that
-  // `sparql-http` with `atomicUpdates:false` could never hold a witness and
+  // best-effort `sparql-http` could never hold a witness and
   // would otherwise pay the ASK forever. BOTH halves were false:
   //
   //   - every adapter and all three decorators DEFINE `replaceSubject` and
   //     throw `UnsupportedTripleStoreCapabilityError` INSIDE it, so the typeof
   //     is always "function" — the probe could never fire;
-  //   - that config gates `replaceGraph` on the same `atomicUpdates` flag, so
+  //   - that profile also gates `replaceGraph`, so
   //     no writer can populate a SWM assertion graph at all. The graph stays
   //     empty, the count gate returns first, and the ASK is never reached.
   //     There was no cost to avoid.
@@ -432,7 +433,55 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     };
   };
 
-  const selectRepairIdentity: SharedMemorySnapshotMaterializer['selectRepairIdentity'] = async (contextGraphId, descriptor) => {
+  /** One bounded head join acquires the complete candidate model for both consumers. */
+  const loadStoredOperationCandidates = async (
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+  ): Promise<Map<string, Quad[]> | null> => {
+    const operationResult = await deps.store.query(
+      `SELECT ?op ?p ?o WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
+      + `<${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?id . `
+      + `?op <${DKG}shareOperationId> ?id ; ?p ?o } }`,
+      { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.loadCandidates' },
+    );
+    if (operationResult.type !== 'bindings') return null;
+    const rowsBySubject = new Map<string, Quad[]>();
+    for (const row of operationResult.bindings) {
+      const subject = row['op'] ?? '';
+      // The head itself also carries shareOperationId + kaUal. It proves the
+      // pointer, but it is not the WorkspaceOperation whose commitment must
+      // be decoded.
+      if (!subject || subject === descriptor.headSubject) continue;
+      const rows = rowsBySubject.get(subject) ?? [];
+      rows.push({
+        subject,
+        predicate: row['p'] ?? '',
+        object: row['o'] ?? '',
+        graph: descriptor.metaGraph,
+      });
+      rowsBySubject.set(subject, rows);
+    }
+    return rowsBySubject;
+  };
+
+  /** The complete stored-operation invariant, shared by preservation and empty projection. */
+  const validateStoredOperation = async (input: Readonly<{
+    storedRows: readonly Quad[];
+    descriptor: GraphScopedSwmRecoveryDescriptor;
+    descriptorKey: string;
+    shareOperationId: string;
+  }>): Promise<boolean> => {
+    const { storedRows, descriptor, descriptorKey, shareOperationId } = input;
+    return operationIdentityMatches(storedRows, descriptorKey)
+      && storedWinnerIsDecodable(storedRows, descriptor, shareOperationId)
+      && storedWinnerHasResponderType(storedRows)
+      && storedWinnerHasUsableAccessEnvelope(storedRows)
+      && await snapshotLocatorIsServeable(storedRows, descriptor);
+  };
+
+  const selectRepairIdentity: SharedMemorySnapshotMaterializer['selectRepairIdentity'] = async (
+    contextGraphId,
+    descriptor,
+  ) => {
     const shareIds = await deps.store.query(
       `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
       + `<${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?op } }`,
@@ -449,30 +498,8 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       descriptor.metadataQuads.filter((quad) => quad.subject === descriptor.operationSubject),
     );
     if (descriptorKey === null) return null;
-    // ONE bounded query loads every candidate operation's rows via the
-    // head join (mirrors the resolver's acquisition): candidate identity,
-    // ownership and rows are then validated over the in-memory model
-    // instead of a per-candidate ASK/read fan-out under the lock.
-    const candidateRows = await deps.store.query(
-      `SELECT ?op ?p ?o WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
-      + `<${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?id . `
-      + `?op <${DKG}shareOperationId> ?id ; ?p ?o } }`,
-      { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.loadCandidates' },
-    );
-    if (candidateRows.type !== 'bindings') return null;
-    const rowsBySubject = new Map<string, Quad[]>();
-    for (const row of candidateRows.bindings) {
-      const subject = row['op'] ?? '';
-      if (!subject) continue;
-      const list = rowsBySubject.get(subject) ?? [];
-      list.push({
-        subject,
-        predicate: row['p'] ?? '',
-        object: row['o'] ?? '',
-        graph: descriptor.metaGraph,
-      });
-      rowsBySubject.set(subject, list);
-    }
+    const rowsBySubject = await loadStoredOperationCandidates(descriptor);
+    if (rowsBySubject === null) return null;
     for (const foreignId of foreignIds) {
       const operationSubject = `urn:dkg:share:${contextGraphId}:${foreignId}`;
       const storedRows = rowsBySubject.get(operationSubject) ?? [];
@@ -486,11 +513,12 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       // GENUINE change and for a winner some reader would reject (a
       // preserved-but-unreadable winner is the wedge shape: preserved this
       // round, corrupt to a reader, preserved again next round).
-      if (!operationIdentityMatches(storedRows, descriptorKey)) return null;
-      if (!storedWinnerIsDecodable(storedRows, descriptor, foreignId)) return null;
-      if (!storedWinnerHasResponderType(storedRows)) return null;
-      if (!storedWinnerHasUsableAccessEnvelope(storedRows)) return null;
-      if (!(await snapshotLocatorIsServeable(storedRows, descriptor))) return null;
+      if (!(await validateStoredOperation({
+        storedRows,
+        descriptor,
+        descriptorKey,
+        shareOperationId: foreignId,
+      }))) return null;
     }
     return {
       winnerShareOperationId: foreignIds[0]!,
@@ -498,6 +526,48 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         quad.subject === descriptor.headSubject
         && quad.predicate === `${DKG}shareOperationId`),
     };
+  };
+
+  /**
+   * An empty named graph is indistinguishable from an absent named graph.
+   * Private-only assets therefore also need a healthy, exact control-plane
+   * commitment before the canonical empty projection can prove materialized.
+   */
+  const hasHealthyEmptyProjectionControlPlane = async (
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+  ): Promise<boolean> => {
+    const head = await readStoredHead(descriptor);
+    if (head.needsRepair || head.version === null || head.shareOperationId === null) return false;
+    try {
+      if (BigInt(head.version) !== BigInt(descriptor.assertionVersion)) return false;
+    } catch {
+      return false;
+    }
+    if (head.shareOperationId !== descriptor.shareOperationId) {
+      const contextGraphId = literalValue(descriptor.metadataQuads.find((quad) => (
+        quad.subject === descriptor.operationSubject
+        && quad.predicate === `${DKG}contextGraphId`
+      ))?.object);
+      return contextGraphId !== undefined
+        && await selectRepairIdentity(contextGraphId, descriptor) !== null;
+    }
+    const descriptorKey = operationIdentityKey(
+      descriptor.metadataQuads.filter((quad) => quad.subject === descriptor.operationSubject),
+    );
+    if (descriptorKey === null) return false;
+    const rowsBySubject = await loadStoredOperationCandidates(descriptor);
+    if (rowsBySubject === null) return false;
+    const candidates = [...rowsBySubject.values()].filter((rows) => rows.some((row) => (
+      row.predicate === `${DKG}shareOperationId`
+      && literalValue(row.object) === head.shareOperationId
+    )));
+    if (candidates.length !== 1) return false;
+    return validateStoredOperation({
+      storedRows: candidates[0]!,
+      descriptor,
+      descriptorKey,
+      shareOperationId: head.shareOperationId,
+    });
   };
 
   const repairHeadPreservingIdentity: SharedMemorySnapshotMaterializer['repairHeadPreservingIdentity'] = async (contextGraphId, descriptor, winnerShareOperationId) => {
@@ -524,7 +594,8 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       .map((quad) => quad.predicate === `${DKG}shareOperationId`
         ? { ...quad, object: JSON.stringify(winnerShareOperationId) }
         : { ...quad });
-    await deps.store.deleteByPattern(
+    await deleteByPatternWithoutCount(
+      deps.store,
       { graph: descriptor.metaGraph, subject: descriptor.headSubject },
       { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteHead' },
     );
@@ -533,7 +604,8 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       source: 'agent.sharedMemorySync.snapshotMaterializer.writePreservedHead',
     });
     for (const operationSubject of loserSubjects) {
-      await deps.store.deleteByPattern(
+      await deleteByPatternWithoutCount(
+        deps.store,
         { graph: descriptor.metaGraph, subject: operationSubject },
         { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteOperation' },
       );
@@ -549,7 +621,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
 
     isGraphAssetMaterialized: async (descriptor) => {
       const expected = descriptor.publicQuadsCount;
-      if (!Number.isSafeInteger(expected) || expected <= 0) return false;
+      if (!Number.isSafeInteger(expected) || expected < 0) return false;
       // 1) Count gate: exact-IRI scope, so bounded — and cheap enough to run
       // every round. Strictly equal: a short graph is a partial write and must
       // be replaced, not treated as already materialized.
@@ -560,6 +632,9 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       if (countResult.type !== 'bindings' || countResult.bindings.length === 0) return false;
       const present = Number.parseInt(literalValue(countResult.bindings[0]?.['n']) ?? '0', 10);
       if (!Number.isFinite(present) || present !== expected) return false;
+      if (expected === 0 && !(await hasHealthyEmptyProjectionControlPlane(descriptor))) {
+        return false;
+      }
       // 1b) Witness fast path (#2079): a bound-subject ASK recording that THIS
       // node already read this graph back and matched this exact digest. It is
       // a memo of the measurement in step 2 — never an independent claim — so
@@ -594,6 +669,8 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(descriptor.assertionGraph)}> { ?s ?p ?o } }`,
         { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.readGraph' },
       );
+      // TripleStore adapters guarantee a quad result for CONSTRUCT queries.
+      // Fail closed if an adapter violates that contract.
       if (contentResult.type !== 'quads') return false;
       const stored = contentResult.quads.map((quad) => ({ ...quad, graph: '' }));
       const matches = workspacePublicQuadsDigest(stored) === descriptor.publicQuadsDigest;
@@ -665,12 +742,14 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       const operationSubjects = await collectOwnedHeadOperationSubjects(descriptor, {
         seed: [descriptor.operationSubject],
       });
-      await deps.store.deleteByPattern(
+      await deleteByPatternWithoutCount(
+        deps.store,
         { graph: descriptor.metaGraph, subject: descriptor.headSubject },
         { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteHead' },
       );
       for (const operationSubject of operationSubjects) {
-        await deps.store.deleteByPattern(
+        await deleteByPatternWithoutCount(
+          deps.store,
           { graph: descriptor.metaGraph, subject: operationSubject },
           { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteOperation' },
         );
@@ -686,31 +765,19 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           asset,
           { seed: [asset.operationSubject] },
         );
-        await deps.store.deleteByPattern(
+        await deleteByPatternWithoutCount(
+          deps.store,
           { graph: asset.metaGraph, subject: asset.headSubject },
           { priority: 'background', source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteHead' },
         );
         for (const operationSubject of operationSubjects) {
-          await deps.store.deleteByPattern(
+          await deleteByPatternWithoutCount(
+            deps.store,
             { graph: asset.metaGraph, subject: operationSubject },
             { priority: 'background', source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteOperation' },
           );
         }
       }
-    },
-
-    hasGraphAssetMarker: async (descriptor) => {
-      const result = await deps.store.query(
-        `ASK { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { ` +
-          `<${assertSafeIri(descriptor.headSubject)}> ` +
-          `<${DKG}assertionGraph> ` +
-          `<${assertSafeIri(descriptor.assertionGraph)}> . } }`,
-        {
-          priority: 'background',
-          source: 'agent.swmRecovery.hasGraphAssetMarker',
-        },
-      );
-      return result.type === 'boolean' && result.value;
     },
 
     preserveStoredIdentityForSkippedAsset: async (contextGraphId, descriptor) => {

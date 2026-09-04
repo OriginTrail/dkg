@@ -32,7 +32,7 @@ import {
   DEFAULT_CONTROL_GRAPH_URI,
   DEFAULT_WALLET_LOCK_GRAPH_URI,
   jobSubject,
-  serializeJob,
+  serializeJob as serializeLiftJob,
   walletLockSubject,
 } from '../src/async-lift-control-plane.js';
 import {
@@ -51,6 +51,11 @@ import {
 
 const AUTHOR = '0x1111111111111111111111111111111111111111' as LiftJobHex;
 const MERKLE_ROOT = `0x${'12'.repeat(32)}` as LiftJobHex;
+
+/** Every direct row in this file models an already-persisted, unversioned recovery fixture. */
+function serializeJob(job: LiftJob, graphUri: string) {
+  return serializeLiftJob(job, graphUri, { payloadSchema: 'legacy-v0' });
+}
 
 /** The canonical evidence the named lane needs: the generic recovery result has no publishProof. */
 function kaVmRecoveryEvidence(): AsyncKnowledgeAssetVmPublishRecoveryEvidence {
@@ -86,7 +91,7 @@ const RECOVERED: AsyncLiftChainProofResolution = {
 };
 
 /** The three verdicts that establish nothing about the transaction. */
-const UNRESOLVED_VERDICTS = ['pending', 'unrecognized', 'inconclusive'] as const;
+const UNRESOLVED_VERDICTS = ['pending-mempool', 'pending-awaiting-confirmation', 'unrecognized', 'inconclusive'] as const;
 
 describe('GH#2270 proof-first chain dispatcher', () => {
   const h = createAsyncLift2270Harness();
@@ -96,9 +101,11 @@ describe('GH#2270 proof-first chain dispatcher', () => {
 
   /** Counts every SEND, so a row can prove the dispatcher never caused one. */
   let sends = 0;
+  let chainProofLookups: AsyncLiftChainProofLookup[] = [];
 
   beforeEach(() => {
     sends = 0;
+    chainProofLookups = [];
   });
 
   function dispatcher(
@@ -106,7 +113,10 @@ describe('GH#2270 proof-first chain dispatcher', () => {
     config: Omit<AsyncLiftPublisherConfig, 'now' | 'idGenerator' | 'chainProofResolver'> = {},
   ) {
     return createPublisher({
-      chainProofResolver: async () => verdict,
+      chainProofResolver: async (lookup) => {
+        chainProofLookups.push(lookup);
+        return verdict;
+      },
       knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
       knowledgeAssetVmPublishHandler: {
         execute: async () => {
@@ -213,6 +223,44 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       // proven-ineffective, so the hold lifts while the evidence stays on the job.
       expect(isHeldForChainProof(settled)).toBe(false);
       expect(settled.broadcast?.txHash).toBe(TX_HASH);
+      expect(sends).toBe(0);
+    });
+
+    it('keeps an irregular historical failure and its wallet lock unchanged on a reverted verdict', async () => {
+      // A compatibility record may retain valid transaction evidence without all metadata needed
+      // to construct a canonical broadcast-origin failure. Chain proof establishes the revert, but
+      // it cannot authorize inventing the missing validation facts or releasing ownership through
+      // a record that the canonical writer would reject.
+      const publisher = dispatcher({ status: 'reverted' });
+      const failed = await failAfterRecordedTxHash(publisher);
+      const walletId = failed.broadcast!.walletId;
+      const irregular = { ...failed } as unknown as Record<string, unknown>;
+      delete irregular.validation;
+      await h.store.deleteByPattern({ subject: jobSubject(failed.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(irregular as unknown as LiftJob, DEFAULT_CONTROL_GRAPH_URI));
+
+      const jobQuadsBefore = await h.store.query(`SELECT ?p ?o WHERE {
+        GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${jobSubject(failed.jobId)}> ?p ?o . }
+      }`);
+      const walletQuadsBefore = await h.store.query(`SELECT ?p ?o WHERE {
+        GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> { <${walletLockSubject(walletId)}> ?p ?o . }
+      }`);
+      expect((walletQuadsBefore as { bindings: unknown[] }).bindings).not.toHaveLength(0);
+
+      expect(await publisher.recover()).toBe(0);
+      expect(chainProofLookups.map(({ txHash, walletId }) => ({ txHash, walletId }))).toEqual([
+        { txHash: TX_HASH, walletId },
+      ]);
+
+      const stillHeld = expectFailed(await publisher.getStatus(failed.jobId));
+      expect(stillHeld.validation).toBeUndefined();
+      expect(isHeldForChainProof(stillHeld)).toBe(true);
+      expect(await h.store.query(`SELECT ?p ?o WHERE {
+        GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${jobSubject(failed.jobId)}> ?p ?o . }
+      }`)).toEqual(jobQuadsBefore);
+      expect(await h.store.query(`SELECT ?p ?o WHERE {
+        GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> { <${walletLockSubject(walletId)}> ?p ?o . }
+      }`)).toEqual(walletQuadsBefore);
       expect(sends).toBe(0);
     });
 
@@ -1673,4 +1721,5 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       expect(asked).toEqual([`wallet-tx-${onlyJob}`, `wallet-tx-${onlyJob}`]);
     });
   });
+
 });

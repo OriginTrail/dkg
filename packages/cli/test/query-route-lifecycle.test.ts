@@ -2,6 +2,11 @@ import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  CclResourceNotFoundError,
+  ContextGraphPolicyAuthorizationError,
+} from '@origintrail-official/dkg-agent';
+import {
+  SparqlHttpResponseError,
   StoreOperationTimeoutError,
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
@@ -9,10 +14,16 @@ import {
   configureApiQueryPriority,
   createApiQueryRequestLifecycle,
   handleQueryRoutes,
+  normalizePublicApiQueryResult,
   resolveApiQueryPriority,
 } from '../src/daemon/routes/query.js';
-import { respondIfStoreUnavailable } from '../src/daemon/http-utils.js';
+import { handleCclRoutes } from '../src/daemon/routes/ccl.js';
+import {
+  respondIfStoreUnavailable,
+  respondWithDaemonError,
+} from '../src/daemon/http-utils.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 class RequestStub extends EventEmitter {
   aborted = false;
@@ -63,12 +74,137 @@ function queryRouteContext(
     validTokens: new Set<string>(),
     url: new URL('http://127.0.0.1/api/query'),
     path: '/api/query',
-    requestToken: undefined,
     requestAgentAddress: '',
+    authentication: requestAuthentication({ kind: 'anonymous' }),
   } as unknown as RequestContext;
 }
 
+function cclRouteContext(
+  path: string,
+  body: Record<string, unknown>,
+  agent: Record<string, unknown>,
+): { req: RequestStub; res: ResponseStub; ctx: RequestContext } {
+  const req = new RequestStub(body);
+  const res = new ResponseStub();
+  const ctx = queryRouteContext(req, res, agent, {});
+  ctx.path = path;
+  ctx.url = new URL(`http://127.0.0.1${path}`);
+  ctx.requestAgentAddress = '0x1111111111111111111111111111111111111111';
+  return { req, res, ctx };
+}
+
 describe('/api/query request lifecycle', () => {
+  it.each([
+    {
+      path: '/api/ccl/policy/approve',
+      method: 'approveCclPolicy',
+      body: { contextGraphId: 'cg', policyUri: 'did:dkg:policy:missing' },
+      resource: 'policy' as const,
+      message: 'CCL policy not found: did:dkg:policy:missing',
+    },
+    {
+      path: '/api/ccl/policy/revoke',
+      method: 'revokeCclPolicy',
+      body: { contextGraphId: 'cg', policyUri: 'did:dkg:policy:missing' },
+      resource: 'policy_binding' as const,
+      message: 'No active CCL policy binding found',
+    },
+    {
+      path: '/api/ccl/eval',
+      method: 'evaluateCclPolicy',
+      body: { contextGraphId: 'cg', name: 'missing' },
+      resource: 'approved_policy' as const,
+      message: 'No approved policy found for cg/missing',
+    },
+  ])('maps typed CCL absence to 404 for $path', async ({
+    path,
+    method,
+    body,
+    resource,
+    message,
+  }) => {
+    const error = new CclResourceNotFoundError(resource, message);
+    const agent = { [method]: vi.fn(async () => { throw error; }) };
+    const { ctx, res } = cclRouteContext(path, body, agent);
+
+    await handleCclRoutes(ctx);
+
+    expect(res.statusCode).toBe(404);
+    expect(JSON.parse(res.body)).toEqual({
+      error: message,
+      code: 'CCL_RESOURCE_NOT_FOUND',
+      resource,
+    });
+  });
+
+  it.each([
+    ['/api/ccl/policy/approve', 'approveCclPolicy'],
+    ['/api/ccl/policy/revoke', 'revokeCclPolicy'],
+  ])('maps typed CCL policy authorization failure to 403 for %s', async (path, method) => {
+    const error = new ContextGraphPolicyAuthorizationError(
+      'Only the contextGraph owner can manage policies for "cg".',
+    );
+    const { ctx, res } = cclRouteContext(
+      path,
+      { contextGraphId: 'cg', policyUri: 'did:dkg:policy:one' },
+      { [method]: vi.fn(async () => { throw error; }) },
+    );
+
+    await handleCclRoutes(ctx);
+
+    expect(res.statusCode).toBe(403);
+    expect(JSON.parse(res.body)).toEqual({ error: error.message });
+  });
+
+  it('does not map an untyped error to 404 merely because its text says not found', async () => {
+    const error = new Error('CCL policy not found: did:dkg:policy:missing');
+    const { ctx, res } = cclRouteContext(
+      '/api/ccl/policy/approve',
+      { contextGraphId: 'cg', policyUri: 'did:dkg:policy:missing' },
+      { approveCclPolicy: vi.fn(async () => { throw error; }) },
+    );
+
+    await expect(handleCclRoutes(ctx)).rejects.toBe(error);
+    respondWithDaemonError(res as unknown as ServerResponse, error);
+    expect(res.statusCode).toBe(500);
+  });
+
+  it('keeps an existing policy with a missing body on the integrity-error path', async () => {
+    const error = new Error('CCL policy body missing: did:dkg:policy:incomplete');
+    const { ctx, res } = cclRouteContext(
+      '/api/ccl/eval',
+      { contextGraphId: 'cg', name: 'incomplete' },
+      { evaluateCclPolicy: vi.fn(async () => { throw error; }) },
+    );
+
+    await expect(handleCclRoutes(ctx)).rejects.toBe(error);
+    respondWithDaemonError(res as unknown as ServerResponse, error);
+    expect(res.statusCode).toBe(500);
+    expect(JSON.parse(res.body)).toEqual({ error: error.message });
+  });
+
+  it('normalizes prefixed SELECT, ASK, and graph results at the daemon boundary', () => {
+    expect(normalizePublicApiQueryResult(
+      'PREFIX ex: <urn:ex:> SELECT ?s WHERE { ?s ex:p ?o }',
+      { bindings: [{ s: 'urn:s' }] },
+    )).toEqual({ type: 'bindings', bindings: [{ s: 'urn:s' }] });
+    expect(normalizePublicApiQueryResult(
+      'PREFIX ex: <urn:ex:> ASK { ?s ex:p ?o }',
+      { bindings: [{ result: 'true' }] },
+    )).toEqual({ type: 'boolean', value: true, bindings: [{ result: 'true' }] });
+    expect(normalizePublicApiQueryResult(
+      'PREFIX ex: <urn:ex:> DESCRIBE ?s WHERE { ?s ex:p ?o }',
+      {
+        bindings: [],
+        quads: [{ subject: 'urn:s', predicate: 'urn:ex:p', object: 'urn:o', graph: 'urn:g' }],
+      },
+    )).toEqual({
+      type: 'quads',
+      quads: [{ subject: 'urn:s', predicate: 'urn:ex:p', object: 'urn:o', graph: 'urn:g' }],
+      bindings: [],
+    });
+  });
+
   const originalPriority = process.env.DKG_API_QUERY_PRIORITY;
 
   afterEach(() => {
@@ -373,5 +509,60 @@ describe('/api/query request lifecycle', () => {
     });
     expect(busyTracker.cancel).toHaveBeenCalledTimes(1);
     expect(busyTracker.fail).not.toHaveBeenCalled();
+  });
+
+  // GH#1758 / PR #2330 review — the adapter, the engine marker and the
+  // classifier are each covered, but nothing proved `/api/query` USES the
+  // marker. Reverting the route to inline message matching would leave all of
+  // those green while a malformed caller query escaped as HTTP 500 again.
+  it('renders a marked caller-SPARQL rejection as HTTP 400', async () => {
+    const req = new RequestStub();
+    const res = new ResponseStub();
+    const tracker = {
+      start: vi.fn(),
+      startPhase: vi.fn(),
+      completePhase: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+      cancel: vi.fn(),
+    };
+
+    // Structurally complete marker — what DKGQueryEngine throws when the store
+    // rejects caller-supplied SPARQL with 400/422.
+    const marked = Object.assign(
+      new Error('SPARQL HTTP query failed (400): error at 1:15: expected one of REDUCED'),
+      { code: 'CALLER_SPARQL_REJECTED', status: 400 },
+    );
+
+    await handleQueryRoutes(queryRouteContext(req, res, {
+      query: vi.fn(async () => { throw marked; }),
+    }, tracker));
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toMatchObject({ error: marked.message });
+  });
+
+  it('does NOT render an UNMARKED typed store rejection as a caller error', async () => {
+    // The converse: an engine-generated query rejected by the backend is an
+    // integration fault and must stay a server error, even at 400 and even
+    // when its body reads like a legacy client-error family.
+    const req = new RequestStub();
+    const res = new ResponseStub();
+    const tracker = {
+      start: vi.fn(),
+      startPhase: vi.fn(),
+      completePhase: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+      cancel: vi.fn(),
+    };
+
+    const unmarked = new SparqlHttpResponseError('query', 400, 'Query must start with SELECT');
+
+    await expect(handleQueryRoutes(queryRouteContext(req, res, {
+      query: vi.fn(async () => { throw unmarked; }),
+    }, tracker))).rejects.toBe(unmarked);
+
+    expect(res.statusCode).not.toBe(400);
   });
 });

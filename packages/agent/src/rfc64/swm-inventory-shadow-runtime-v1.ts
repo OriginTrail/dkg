@@ -1,3 +1,5 @@
+import { Rfc64SerializedScopeRuntimeV1 } from './serialized-scope-runtime-v1.js';
+
 export const RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1 = 16;
 
 export type Rfc64SwmAuthorInventoryShadowMutationResultV1 = Readonly<{
@@ -43,17 +45,34 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
   };
   readonly #inFlight = new Set<Promise<void>>();
   readonly #assetTails = new Map<string, Promise<void>>();
+  readonly #scopeRuntime = new Rfc64SerializedScopeRuntimeV1(
+    'RFC-64 SWM inventory scope operation aborted',
+  );
   readonly #vmConfirmedVersions = new Map<string, Set<string>>();
   readonly #pendingExecutions: Array<() => void> = [];
   #activeExecutions = 0;
+  #closed = false;
 
   schedule(assetKey: string, observer: () => Promise<void>): boolean {
+    if (this.#closed) return false;
     this.enqueue(assetKey, observer, false);
     return true;
   }
 
   runExclusive(assetKey: string, observer: () => Promise<void>): Promise<void> {
+    if (this.#closed) {
+      return Promise.reject(new Error('RFC-64 SWM inventory observer runtime is closed'));
+    }
     return this.enqueue(assetKey, observer, true);
+  }
+
+  /** Serialize inventory mutations and catalog reads for one author/scope. */
+  runScopeExclusive<T>(
+    scopeKey: string,
+    operation: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    return this.#scopeRuntime.run(scopeKey, operation, signal);
   }
 
   markVmConfirmed(assetKey: string, assertionVersion: string): void {
@@ -71,6 +90,22 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
 
   async drain(): Promise<void> {
     await Promise.allSettled([...this.#inFlight]);
+  }
+
+  /** Fence new observers, then drain every already-admitted asset mutation. */
+  async closeAndDrain(): Promise<void> {
+    this.#closed = true;
+    await this.drain();
+    await this.#scopeRuntime.closeAndDrain();
+  }
+
+  /** Reopen the fully drained feature owner for same-instance restart. */
+  reopen(): void {
+    if (this.#inFlight.size > 0 || this.#pendingExecutions.length > 0) {
+      throw new Error('RFC-64 SWM inventory observer runtime cannot reopen before drain');
+    }
+    this.#scopeRuntime.reopen();
+    this.#closed = false;
   }
 
   get inFlightCount(): number {
@@ -172,4 +207,18 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
       this.#pendingExecutions.shift()!();
     }
   }
+}
+
+const RUNTIMES_V1 = new WeakMap<object, Rfc64SwmInventoryShadowRuntimeV1>();
+
+/** One feature-owned inventory/projection runtime per agent instance. */
+export function rfc64SwmInventoryShadowRuntimeV1(
+  owner: object,
+): Rfc64SwmInventoryShadowRuntimeV1 {
+  let runtime = RUNTIMES_V1.get(owner);
+  if (runtime === undefined) {
+    runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    RUNTIMES_V1.set(owner, runtime);
+  }
+  return runtime;
 }

@@ -22,7 +22,7 @@ import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
-  loadNetworkConfig, loadResolvedNetworkConfig, resolveUpdatePreferences, resolveChainConfig,
+  resolveChainConfig,
   releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
@@ -35,18 +35,11 @@ import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
 import {
   runDaemon,
-  checkForNpmVersionUpdate,
-  performNpmUpdate,
   performNpmUpdateEdge,
   getCurrentCliVersion,
   DAEMON_EXIT_CODE_RESTART,
-  resolveStandaloneInstall,
   decodeForcedExitCode,
 } from '../daemon.js';
-import { resolveExplicitNpmUpdateTarget } from '../update/npm-registry.js';
-import { UPDATE_PREFLIGHT_CHECKS } from '../doctor/policy.js';
-import type { RunDoctorOptions } from '../doctor/index.js';
-import type { DoctorDeps, DoctorReport } from '../doctor/types.js';
 import {
   isLivenessProbeEnabled,
   startLivenessWatcher,
@@ -83,7 +76,7 @@ import {
   sleep,
   stopDaemonIfRunning,
 } from '../cli-helpers.js';
-import type { ActionOpts, CatchupStatusCommandOptions } from '../cli-helpers.js';
+import type { CatchupStatusCommandOptions } from '../cli-helpers.js';
 import {
   cliWithTimeout,
   isCliKnownTransactionError,
@@ -100,291 +93,7 @@ import {
   runDaemonSupervisor,
   runForegroundSupervisor,
 } from '../cli-supervisor.js';
-
-export type MaintenanceUpdatePreflightResult =
-  | { status: 'ok'; warnings?: string[] }
-  | {
-    status: 'blocked';
-    findings: Array<{ check: string; message: string; advisory?: string }>;
-  };
-
-export type MaintenanceUpdateWorkflowDeps = {
-  loadConfig: typeof loadConfig;
-  loadManualUpdateContext: (
-    config: Awaited<ReturnType<typeof loadConfig>>,
-  ) => Promise<ManualUpdateContext>;
-  resolveExplicitNpmUpdateTarget: typeof resolveExplicitNpmUpdateTarget;
-  checkForNpmVersionUpdate: typeof checkForNpmVersionUpdate;
-  performNpmUpdate: typeof performNpmUpdate;
-  performNpmUpdateEdge: typeof performNpmUpdateEdge;
-  getCurrentCliVersion: typeof getCurrentCliVersion;
-  stopDaemonIfRunning: typeof stopDaemonIfRunning;
-  runPreflight: (
-    config: Awaited<ReturnType<typeof loadConfig>>,
-  ) => Promise<MaintenanceUpdatePreflightResult>;
-};
-
-export type MaintenanceUpdateWorkflowOptions = {
-  versionOrRef?: string;
-  check?: boolean;
-  allowPrerelease?: boolean;
-};
-
-export type ManualUpdateContext = {
-  installMode: 'npm' | 'source';
-  allowPrerelease: boolean;
-  channel?: string;
-};
-
-export type MaintenanceUpdateWorkflowReporter = {
-  writeStdout: (message: string) => void;
-  writeStderr: (message: string) => void;
-};
-
-export type MaintenanceUpdateWorkflowOutcome = {
-  exitCode: 0 | 1 | 2;
-};
-
-const SILENT_MAINTENANCE_UPDATE_REPORTER: MaintenanceUpdateWorkflowReporter = {
-  writeStdout: () => undefined,
-  writeStderr: () => undefined,
-};
-
-export type MaintenanceUpdateDoctorOps = {
-  createProductionDeps: (options?: { apiPort?: number }) => DoctorDeps;
-  runDoctor: (deps: DoctorDeps, options?: RunDoctorOptions) => Promise<DoctorReport>;
-};
-
-async function loadMaintenanceUpdateDoctorOps(): Promise<MaintenanceUpdateDoctorOps> {
-  const { createProductionDeps, runDoctor } = await import('../doctor/index.js');
-  return {
-    createProductionDeps,
-    runDoctor,
-  };
-}
-
-async function loadResolvedManualUpdateContext(
-  config: Awaited<ReturnType<typeof loadConfig>>,
-): Promise<ManualUpdateContext> {
-  const { network } = await loadResolvedNetworkConfig(config, loadNetworkConfig);
-  const preferences = resolveUpdatePreferences(config, network);
-  return {
-    installMode: resolveStandaloneInstall(preferences.source) ? 'npm' : 'source',
-    allowPrerelease: preferences.allowPrerelease,
-    ...(preferences.channel ? { channel: preferences.channel } : {}),
-  };
-}
-
-export async function runDefaultUpdatePreflight(
-  config: Awaited<ReturnType<typeof loadConfig>>,
-  doctorOps?: MaintenanceUpdateDoctorOps,
-): Promise<MaintenanceUpdatePreflightResult> {
-  try {
-    const ops = doctorOps ?? await loadMaintenanceUpdateDoctorOps();
-    const preflightDeps = ops.createProductionDeps({ apiPort: config.apiPort ?? 9200 });
-    const preflight = await ops.runDoctor(preflightDeps, {
-      checks: UPDATE_PREFLIGHT_CHECKS,
-    });
-    if (preflight.exitCode === 2) {
-      const errors = preflight.findings.filter((finding) => finding.severity === 'error');
-      return {
-        status: 'blocked',
-        findings: errors.map((finding) => ({
-          check: finding.check,
-          message: finding.message,
-          ...(finding.advisory ? { advisory: finding.advisory } : {}),
-        })),
-      };
-    }
-    return { status: 'ok' };
-  } catch (err: any) {
-    return {
-      status: 'ok',
-      warnings: [
-        `[dkg update] WARNING: pre-flight doctor check crashed (${err?.message ?? err}); continuing without it.`,
-      ],
-    };
-  }
-}
-
-function createMaintenanceUpdateWorkflowDeps(): MaintenanceUpdateWorkflowDeps {
-  return {
-    loadConfig,
-    loadManualUpdateContext: loadResolvedManualUpdateContext,
-    resolveExplicitNpmUpdateTarget,
-    checkForNpmVersionUpdate,
-    performNpmUpdate,
-    performNpmUpdateEdge,
-    getCurrentCliVersion,
-    stopDaemonIfRunning,
-    runPreflight: runDefaultUpdatePreflight,
-  };
-}
-
-export async function runMaintenanceUpdateWorkflow(
-  options: MaintenanceUpdateWorkflowOptions,
-  deps: MaintenanceUpdateWorkflowDeps = createMaintenanceUpdateWorkflowDeps(),
-  reporter: MaintenanceUpdateWorkflowReporter = SILENT_MAINTENANCE_UPDATE_REPORTER,
-): Promise<MaintenanceUpdateWorkflowOutcome> {
-  const log = (message: string) => reporter.writeStdout(message);
-  const error = (message: string) => reporter.writeStderr(message);
-  const config = await deps.loadConfig();
-  const updateContext = await deps.loadManualUpdateContext(config);
-  const standalone = updateContext.installMode === 'npm';
-  const allowPre = options.allowPrerelease === true
-    ? true
-    : updateContext.allowPrerelease;
-
-  if (standalone) {
-    if (options.check) {
-      log('Checking NPM registry for updates...');
-      const check = await deps.checkForNpmVersionUpdate(log, allowPre, updateContext.channel);
-      if (check.status === 'available' && check.version) {
-        log(`Update available: ${check.version}`);
-      } else if (check.status === 'no-target') {
-        log(`No acceptable target for channel "${check.channel}" (tag unpublished, or a pre-release rejected by allowPrerelease=false) — nothing to update to.`);
-      } else if (check.status === 'up-to-date') {
-        log('No updates available.');
-      } else {
-        error('Update check failed. See logs above for details.');
-        return { exitCode: 1 };
-      }
-      return { exitCode: 0 };
-    }
-
-    // RFC-41 §4.7.7 invocation pattern #3: before applying an update,
-    // `dkg update` MUST run the install-layout + version-skew doctor checks.
-    const preflight = await deps.runPreflight(config);
-    for (const warning of preflight.status === 'ok' ? preflight.warnings ?? [] : []) {
-      error(warning);
-    }
-    if (preflight.status === 'blocked') {
-      error('\n[dkg update] Pre-flight checks failed; refusing to apply update.\n');
-      for (const finding of preflight.findings) {
-        error(`  • [${finding.check}] ${finding.message}`);
-        if (finding.advisory) error(`      → ${finding.advisory}`);
-      }
-      error('\nRun `dkg doctor --json` for the full diagnostic report.\n');
-      return { exitCode: 2 };
-    }
-
-    let version = options.versionOrRef ?? null;
-    if (version) {
-      version = version.replace(/^refs\/tags\/v?/, '').replace(/^v/, '');
-    }
-    // An EXPLICIT target (version or dist-tag) must still honour the
-    // stable-only policy.
-    if (version) {
-      const gate = await deps.resolveExplicitNpmUpdateTarget(version, allowPre);
-      if (gate.status !== 'allowed') {
-        error(`[dkg update] Refusing to update: ${gate.reason}.`);
-        return { exitCode: 1 };
-      }
-      // Dist-tags are mutable. Install the exact version that passed policy.
-      version = gate.version;
-    }
-    if (!version) {
-      log('Checking NPM registry for updates...');
-      const check = await deps.checkForNpmVersionUpdate(log, allowPre, updateContext.channel);
-      if (check.status === 'available' && check.version) {
-        version = check.version;
-      } else if (check.status === 'no-target') {
-        log(`No acceptable target for channel "${check.channel}" (tag unpublished, or a pre-release rejected by allowPrerelease=false) — nothing to update to.`);
-        return { exitCode: 0 };
-      } else if (check.status === 'up-to-date') {
-        log('No update needed — already on latest.');
-        return { exitCode: 0 };
-      } else {
-        error('Update check failed. See logs above for details.');
-        return { exitCode: 1 };
-      }
-    }
-
-    const npmUpdateRole = config.nodeRole ?? 'edge';
-    log(
-      `Updating to ${version} via NPM ` +
-        `(${npmUpdateRole === 'edge' ? 'global npm install' : 'blue-green slot'})...`,
-    );
-    const updateStatus = npmUpdateRole === 'edge'
-      ? await deps.performNpmUpdateEdge(version, deps.getCurrentCliVersion(), log)
-      : await deps.performNpmUpdate(version, log);
-    if (updateStatus !== 'updated') {
-      error('Update failed. Check logs and retry.');
-      return { exitCode: 1 };
-    }
-    const stopped = await deps.stopDaemonIfRunning();
-    if (!stopped) {
-      error('Update applied but old daemon is still running. Stop it manually and run "dkg start".');
-      return { exitCode: 1 };
-    }
-    log('Update applied. Run "dkg start" to start with the new version.');
-    return { exitCode: 0 };
-  }
-
-  error(
-    '\n' +
-    '[dkg update] ERROR: manual git-based update is not supported.\n' +
-    '\n' +
-    '  Manual `dkg update` flows through the npm registry.\n' +
-    '  Advanced Core nodes may opt into daemon-polled git updates with\n' +
-    '  autoUpdate.source = "git", repo, and branch/ref in config.json.\n' +
-    '\n' +
-    '  - Monorepo contributors: use `git pull && pnpm install && pnpm build`\n' +
-    '    from the repo root. `dkg update` is for npm-installed nodes only.\n' +
-    '  - install.sh-style operators: re-install via `npm install -g\n' +
-    '    @origintrail-official/dkg`. The first daemon start records\n' +
-    '    your existing slot version as the rollback target. Run\n' +
-    '    `dkg doctor --json` for a diagnostic of your current layout.\n' +
-    '  - Then re-run `dkg update` from a fresh `npm install -g\n' +
-    '    @origintrail-official/dkg` install.\n' +
-    '\n' +
-    '  Guide: https://github.com/OriginTrail/dkg/blob/main/docs/use-dkg/updates-and-rollback.md\n' +
-    '\n',
-  );
-  return { exitCode: 1 };
-}
-
-export function registerUpdateCommand(
-  program: Command,
-  deps?: MaintenanceUpdateWorkflowDeps,
-  runtime: {
-    writeStdout: (message: string) => void;
-    writeStderr: (message: string) => void;
-    setExitCode: (code: 1 | 2) => void;
-  } = {
-    writeStdout: (message) => console.log(message),
-    writeStderr: (message) => console.error(message),
-    setExitCode: (code) => { process.exitCode = code; },
-  },
-): void {
-// ─── dkg update ──────────────────────────────────────────────────────
-//
-// OT-RFC-41 §4.5 / §5 PR 6: `dkg migrate-to-npm` was removed.
-// Edge nodes coming from a pre-rc.12 install are migrated
-// automatically on first `dkg start` via `noteEdgeLegacyReleases`
-// (see migration.ts + cli.ts dkg start). Core node operators
-// who still hold a git-checkout install follow the manual
-// procedure documented in `docs/use-dkg/migrate-to-npm.md`.
-
-
-program
-  .command('update [versionOrRef]')
-  .description('Check for and apply DKG node updates (blue-green swap)')
-  .option('--check', 'Only check for updates, do not apply')
-  .option('--allow-prerelease', 'Allow pre-release target versions')
-  .option('--no-verify-tag', 'Skip signed-tag verification for version/tag updates')
-  .action(async (versionOrRef: string | undefined, opts: ActionOpts) => {
-    const outcome = await runMaintenanceUpdateWorkflow({
-      versionOrRef,
-      check: opts.check,
-      allowPrerelease: opts.allowPrerelease,
-    }, deps, {
-      writeStdout: runtime.writeStdout,
-      writeStderr: runtime.writeStderr,
-    });
-    if (outcome.exitCode !== 0) runtime.setExitCode(outcome.exitCode);
-  });
-}
+import { registerUpdateCommand } from './update.js';
 
 export function registerMaintenanceCommands(program: Command): void {
   registerUpdateCommand(program);

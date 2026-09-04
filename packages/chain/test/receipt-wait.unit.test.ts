@@ -4,6 +4,7 @@ import {
   RpcFailoverClient,
   waitForTransactionReceiptWithFailover,
 } from '../src/rpc-failover-client.js';
+import { ChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 import { waitForReceiptWithDeadline } from '../src/receipt-wait.js';
 
 describe('receipt deadline orchestration', () => {
@@ -119,6 +120,106 @@ describe('receipt deadline orchestration', () => {
     // lookup callback must already have terminated at its own deadline cap.
     await vi.advanceTimersByTimeAsync(200);
     expect(getTransactionReceipt).not.toHaveBeenCalled();
+  });
+
+  it('keeps polling through a mid-deadline transport failure and returns the later receipt', async () => {
+    // GH: a transport-class failure inside a budgeted wait must consume budget, never the
+    // publish. Today one exhausted endpoint pass (RPC_RECEIPT_LOOKUP_FAILED, classified
+    // non-retryable) throws out of the wait with most of the 10-minute budget unspent, which
+    // demotes a healthy post-write-ahead publish into the recovery lane.
+    vi.useFakeTimers({ now: 0 });
+    const receipt = { status: 1, hash: '0xrecovered-after-blip' } as any;
+    const getReceipt = vi.fn<[], Promise<any>>()
+      .mockImplementationOnce(async () => {
+        throw new ChainRpcTransportError(
+          'RPC_RECEIPT_LOOKUP_FAILED',
+          'every configured endpoint failed this poll tick',
+          { txHash: receipt.hash },
+        );
+      })
+      .mockImplementation(async () => receipt);
+
+    const outcome = waitForReceiptWithDeadline({
+      txHash: receipt.hash,
+      receiptTimeoutMs: 10_000,
+      pollIntervalMs: 100,
+      getReceipt: getReceipt as never,
+      assertSuccessfulReceipt: () => {},
+      formatTimeoutMessage: () => 'must not be used',
+    }).then(
+      (value) => ({ status: 'fulfilled' as const, value }),
+      (reason) => ({ status: 'rejected' as const, reason }),
+    );
+
+    await vi.advanceTimersByTimeAsync(500);
+    await expect(outcome).resolves.toEqual({ status: 'fulfilled', value: receipt });
+    expect(getReceipt.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('still aborts the wait immediately on a non-transport lookup error', async () => {
+    // The tolerance is scoped to the chain-namespaced transport codes: a deterministic
+    // classification (here INVALID_ARGUMENT) must keep failing fast, not burn the budget
+    // re-asking a question with a stable answer.
+    vi.useFakeTimers({ now: 0 });
+    const deterministic = new Error('malformed tx hash') as Error & { code: string };
+    deterministic.code = 'INVALID_ARGUMENT';
+    const getReceipt = vi.fn(async () => { throw deterministic; });
+
+    const outcome = waitForReceiptWithDeadline({
+      txHash: '0xdeterministic',
+      receiptTimeoutMs: 10_000,
+      pollIntervalMs: 100,
+      getReceipt,
+      assertSuccessfulReceipt: () => {},
+      formatTimeoutMessage: () => 'must not be used',
+    }).then(
+      (value) => ({ status: 'fulfilled' as const, value }),
+      (reason) => ({ status: 'rejected' as const, reason }),
+    );
+
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(outcome).resolves.toMatchObject({
+      status: 'rejected',
+      reason: { code: 'INVALID_ARGUMENT' },
+    });
+    expect(getReceipt).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps sustained transport failure to the operation RPC_TIMEOUT after polling the whole budget', async () => {
+    // Persistent exhaustion is still terminal — but at the OPERATION deadline, with the last
+    // transport error as cause, after having actually retried across the budget rather than
+    // dying on the first tick.
+    vi.useFakeTimers({ now: 0 });
+    const getReceipt = vi.fn(async () => {
+      throw new ChainRpcTransportError(
+        'RPC_RECEIPT_LOOKUP_FAILED',
+        'endpoints failing all run long',
+        { txHash: '0xnever-found' },
+      );
+    });
+
+    const outcome = waitForReceiptWithDeadline({
+      txHash: '0xnever-found',
+      receiptTimeoutMs: 1_000,
+      pollIntervalMs: 100,
+      getReceipt,
+      assertSuccessfulReceipt: () => {},
+      formatTimeoutMessage: ({ lastError }) =>
+        `budget exhausted (last: ${(lastError as Error | undefined)?.message ?? 'none'})`,
+    }).then(
+      (value) => ({ status: 'fulfilled' as const, value }),
+      (reason) => ({ status: 'rejected' as const, reason }),
+    );
+
+    await vi.advanceTimersByTimeAsync(1_100);
+    await expect(outcome).resolves.toMatchObject({
+      status: 'rejected',
+      reason: {
+        code: 'RPC_TIMEOUT',
+        message: 'budget exhausted (last: endpoints failing all run long)',
+      },
+    });
+    expect(getReceipt.mock.calls.length).toBeGreaterThanOrEqual(5);
   });
 
   it('uses the canonical reverted-receipt error for direct transaction waits', async () => {

@@ -21,6 +21,10 @@ import {
   type SyncCheckpointScope,
 } from '../src/sync/checkpoint/state.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import {
+  createChallengePinnedExactAssetSelection,
+  createUalOnlyExactAssetSelection,
+} from '../src/sync/exact-assets.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import {
   VmReconcileQueueClosedError,
@@ -53,6 +57,9 @@ type FetchArgs = {
 
 const EXACT_UAL_7 = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
 const EXACT_UAL_8 = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';
+
+const exactSelection = (...assetUals: string[]) =>
+  createUalOnlyExactAssetSelection(assetUals);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -616,16 +623,32 @@ describe('DKGAgent sync fetch coalescing', () => {
 
     try {
       // Different exact batches: two separate runs (2 phases each).
-      const first = (agent as any).syncExactKnowledgeAssetsFromPeer(PEER_A, 'coalesced-cg', [EXACT_UAL_7]);
-      const second = (agent as any).syncExactKnowledgeAssetsFromPeer(PEER_A, 'coalesced-cg', [EXACT_UAL_8]);
+      const first = (agent as any).syncExactKnowledgeAssetsFromPeer(
+        PEER_A,
+        'coalesced-cg',
+        exactSelection(EXACT_UAL_7),
+      );
+      const second = (agent as any).syncExactKnowledgeAssetsFromPeer(
+        PEER_A,
+        'coalesced-cg',
+        exactSelection(EXACT_UAL_8),
+      );
       const [firstResult, secondResult] = await Promise.all([first, second]);
       expect(firstResult).not.toBe(secondResult);
       expect(fetchCalls).toBe(4);
 
       // The identical exact batch single-flights onto one run.
       fetchCalls = 0;
-      const third = (agent as any).syncExactKnowledgeAssetsFromPeer(PEER_A, 'coalesced-cg', [EXACT_UAL_7]);
-      const fourth = (agent as any).syncExactKnowledgeAssetsFromPeer(PEER_A, 'coalesced-cg', [EXACT_UAL_7]);
+      const third = (agent as any).syncExactKnowledgeAssetsFromPeer(
+        PEER_A,
+        'coalesced-cg',
+        exactSelection(EXACT_UAL_7),
+      );
+      const fourth = (agent as any).syncExactKnowledgeAssetsFromPeer(
+        PEER_A,
+        'coalesced-cg',
+        exactSelection(EXACT_UAL_7),
+      );
       const [thirdResult, fourthResult] = await Promise.all([third, fourth]);
       expect(thirdResult).toBe(fourthResult);
       expect(fetchCalls).toBe(2);
@@ -664,13 +687,13 @@ describe('DKGAgent sync fetch coalescing', () => {
       const publicResult = (agent as any).syncExactKnowledgeAssetsFromPeer(
         PEER_A,
         'coalesced-cg',
-        [EXACT_UAL_7],
+        exactSelection(EXACT_UAL_7),
       );
       await waitFor(() => fetchCalls === 1);
       const detailedResult = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
         PEER_A,
         'coalesced-cg',
-        [EXACT_UAL_7],
+        exactSelection(EXACT_UAL_7),
       );
       firstMetaFetch.resolve(emptySyncPage('meta'));
 
@@ -684,12 +707,12 @@ describe('DKGAgent sync fetch coalescing', () => {
       const firstDetailed = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
         PEER_A,
         'coalesced-cg',
-        [EXACT_UAL_7],
+        exactSelection(EXACT_UAL_7),
       );
       const secondDetailed = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
         PEER_A,
         'coalesced-cg',
-        [EXACT_UAL_7],
+        exactSelection(EXACT_UAL_7),
       );
       const [first, second] = await Promise.all([firstDetailed, secondDetailed]);
       expect(fetchCalls).toBe(2);
@@ -701,17 +724,72 @@ describe('DKGAgent sync fetch coalescing', () => {
       const forwardOrder = (agent as any).syncExactKnowledgeAssetsFromPeer(
         PEER_A,
         'coalesced-cg',
-        [EXACT_UAL_7, EXACT_UAL_8],
+        exactSelection(EXACT_UAL_7, EXACT_UAL_8),
       );
       const reverseOrder = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
         PEER_A,
         'coalesced-cg',
-        [EXACT_UAL_8, EXACT_UAL_7],
+        exactSelection(EXACT_UAL_8, EXACT_UAL_7),
       );
       const [forward, reverse] = await Promise.all([forwardOrder, reverseOrder]);
       expect(fetchCalls).toBe(2);
       expect(forward).toBe(reverse.result);
       expect(reverse.disposition).toBe('clean-absent');
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('never coalesces challenge-pinned fetches whose commitments differ', async () => {
+    const firstMetaFetch = deferred<SyncPageResult>();
+    const requesterScopes: Array<SyncCheckpointScope | undefined> = [];
+    let fetchCalls = 0;
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    stubLifecycleFetch(agent, async ({ phase, requesterScope }) => {
+      fetchCalls += 1;
+      if (phase === 'meta') requesterScopes.push(requesterScope);
+      if (fetchCalls === 1) return firstMetaFetch.promise;
+      return emptySyncPage(phase);
+    });
+    (agent as any).processDurableBatchInWorker = async () => ({
+      verifiedData: [],
+      verifiedMeta: [],
+      consumedUnpersistedMetaTriples: 0,
+      totalFetchedDataQuads: 0,
+      totalFetchedMetaQuads: 0,
+      rejectedKcs: 0,
+      emptyResponses: 1,
+      metaOnlyResponses: 0,
+      verifiedPrivateOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+    });
+    const pinnedSelection = (rootByte: string) => createChallengePinnedExactAssetSelection([{
+      assetUal: EXACT_UAL_7,
+      merkleRootHex: rootByte.repeat(64),
+      merkleLeafCount: 1n,
+    }]);
+
+    try {
+      const first = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
+        PEER_A,
+        'challenge-isolated-cg',
+        pinnedSelection('1'),
+      );
+      await waitFor(() => fetchCalls === 1);
+      const second = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
+        PEER_A,
+        'challenge-isolated-cg',
+        pinnedSelection('2'),
+      );
+      firstMetaFetch.resolve(emptySyncPage('meta'));
+
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      expect(fetchCalls).toBe(4);
+      expect(firstResult.result).not.toBe(secondResult.result);
+      expect(requesterScopes).toHaveLength(2);
+      expect(requesterScopes[0]).not.toBe(requesterScopes[1]);
+      expect(requesterScopes.every((scope) => scope?.startsWith('challenge-exact:')))
+        .toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -810,9 +888,7 @@ describe('DKGAgent sync fetch coalescing', () => {
       { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
     );
     const sharedMemorySyncPlan = {
-      eligibleContextGraphIds: ['coalesced-cg'],
-      publicContextGraphIds: ['coalesced-cg'],
-      privateRecoverFromCurator: [],
+      targets: [{ contextGraphId: 'coalesced-cg', lane: 'selected-public' }],
     };
     (agent as any).listSubGraphs = async () => [];
     stubLifecycleFetch(agent, async ({ phase }) => {
@@ -857,9 +933,7 @@ describe('DKGAgent sync fetch coalescing', () => {
     const completeProvider = '12D3KooWCompleteSwmProvider';
     const agent = await createAgentWithSend(async () => new Uint8Array(0));
     const sharedMemorySyncPlan = {
-      eligibleContextGraphIds: [selectedContextGraphId],
-      publicContextGraphIds: [selectedContextGraphId],
-      privateRecoverFromCurator: [],
+      targets: [{ contextGraphId: selectedContextGraphId, lane: 'selected-public' }],
     };
     (agent as any).resolveRfc64CompleteSwmProviderPeerIdsV1 = () => [completeProvider];
     stubLifecycleFetch(agent, async ({ phase }) => {
@@ -883,9 +957,7 @@ describe('DKGAgent sync fetch coalescing', () => {
     let fetchCalls = 0;
     const agent = await createAgentWithSend(async () => new Uint8Array(0));
     const sharedMemorySyncPlan = {
-      eligibleContextGraphIds: ['coalesced-cg'],
-      publicContextGraphIds: ['coalesced-cg'],
-      privateRecoverFromCurator: [],
+      targets: [{ contextGraphId: 'coalesced-cg', lane: 'selected-public' }],
     };
     (agent as any).listSubGraphs = async () => [];
     stubLifecycleFetch(agent, async ({ phase }) => {
@@ -927,26 +999,24 @@ describe('DKGAgent sync fetch coalescing', () => {
   it.each([
     {
       name: 'private-only',
-      eligibleContextGraphIds: ['private-cg'],
-      publicContextGraphIds: [] as string[],
-      privateRecoverFromCurator: ['private-cg'],
+      targets: [{ contextGraphId: 'private-cg', lane: 'ordinary-private' as const }],
       expectedAdmissionLanes: ['swm-recovery:'],
     },
     {
       name: 'mixed public/private',
-      eligibleContextGraphIds: ['public-cg', 'private-cg'],
-      publicContextGraphIds: ['public-cg'],
-      privateRecoverFromCurator: ['private-cg'],
+      targets: [
+        { contextGraphId: 'public-cg', lane: 'selected-public' as const },
+        { contextGraphId: 'private-cg', lane: 'ordinary-private' as const },
+      ],
       expectedAdmissionLanes: ['shared-memory:', 'swm-recovery:'],
       syncContextGraphPriorities: { 'private-cg': 100, 'public-cg': -10 },
     },
   ])('uses per-CG global admission for $name shared-memory aggregation', async ({
-    eligibleContextGraphIds,
-    publicContextGraphIds,
-    privateRecoverFromCurator,
+    targets,
     expectedAdmissionLanes,
     syncContextGraphPriorities,
   }) => {
+    const contextGraphIds = targets.map(({ contextGraphId }) => contextGraphId);
     const agent = await createAgentWithSend(
       async () => new Uint8Array(0),
       { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0, syncContextGraphPriorities },
@@ -972,13 +1042,9 @@ describe('DKGAgent sync fetch coalescing', () => {
     try {
       await expect((agent as any).syncSharedMemoryFromPeerDetailed(
         PEER_A,
-        eligibleContextGraphIds,
+        contextGraphIds,
         {
-          sharedMemorySyncPlan: {
-            eligibleContextGraphIds,
-            publicContextGraphIds,
-            privateRecoverFromCurator,
-          },
+          sharedMemorySyncPlan: { targets },
         },
       )).resolves.toMatchObject({ failedPeers: 0 });
       const runningAdmissions = backpressureLogs.filter((message) => (
@@ -1381,6 +1447,103 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
+  it('keeps clean-peer evidence scoped to overlapping catch-up windows', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const peerA = { toString: () => PEER_A };
+    const peerB = { toString: () => PEER_B };
+
+    try {
+      await agent.start();
+      (agent as any).isPrivateContextGraph = async () => false;
+      (agent as any).resolvePreferredSyncPeerId = async () => undefined;
+      (agent as any).primeCatchupConnections = async () => undefined;
+      (agent as any).ensurePeerAdmittedForRecovery = async () => true;
+      (agent as any).waitForSyncProtocol = async () => true;
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      (agent.node.libp2p as any).getConnections = () => [
+        { remotePeer: peerA },
+        { remotePeer: peerB },
+      ];
+      (agent.node.libp2p.peerStore as any).get = async () => ({ protocols: [PROTOCOL_SYNC] });
+      (agent as any).selectCatchupPeerWindow = (
+        peers: Array<{ toString(): string }>,
+        options: { peerRotationKey?: string },
+      ) => options.peerRotationKey === 'window-a' ? [peers[0]] : [peers[1]];
+      (agent as any).syncFromPeerDetailed = async () => cleanDurableSyncResult();
+      (agent as any).syncSharedMemoryFromPeerDetailed = async () =>
+        cleanSharedMemorySyncResult();
+
+      const [windowA, windowB] = await Promise.all([
+        agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
+          includeSharedMemory: true,
+          maxPeers: 1,
+          peerRotationKey: 'window-a',
+        }),
+        agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
+          includeSharedMemory: true,
+          maxPeers: 1,
+          peerRotationKey: 'window-b',
+        }),
+      ]);
+
+      expect(windowA.cleanMissPeerIds).toEqual([PEER_A]);
+      expect(windowB.cleanMissPeerIds).toEqual([PEER_B]);
+      expect(windowA.catchup.cleanSharedMemoryPeerIds).toEqual([PEER_A]);
+      expect(windowB.catchup.cleanSharedMemoryPeerIds).toEqual([PEER_B]);
+      expect(Object.isFrozen(windowA.catchup.cleanSharedMemoryPeerIds)).toBe(true);
+      expect(Object.isFrozen(windowB.catchup.cleanSharedMemoryPeerIds)).toBe(true);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('replays completed clean-peer evidence to a late single-flight joiner', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const remotePeer = { toString: () => PEER_A };
+    const refreshEntered = deferred<void>();
+    const releaseRefresh = deferred<void>();
+    let sharedSyncs = 0;
+
+    try {
+      await agent.start();
+      (agent as any).isPrivateContextGraph = async () => false;
+      (agent as any).resolvePreferredSyncPeerId = async () => undefined;
+      (agent as any).primeCatchupConnections = async () => undefined;
+      (agent as any).ensurePeerAdmittedForRecovery = async () => true;
+      (agent as any).waitForSyncProtocol = async () => true;
+      (agent.node.libp2p as any).getConnections = () => [{ remotePeer }];
+      (agent.node.libp2p.peerStore as any).get = async () => ({ protocols: [PROTOCOL_SYNC] });
+      (agent as any).syncFromPeerDetailed = async () => cleanDurableSyncResult();
+      (agent as any).syncSharedMemoryFromPeerDetailed = async () => {
+        sharedSyncs += 1;
+        return cleanSharedMemorySyncResult();
+      };
+      (agent as any).refreshMetaSyncedFlags = async () => {
+        refreshEntered.resolve();
+        await releaseRefresh.promise;
+      };
+
+      const first = agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
+        includeSharedMemory: true,
+      });
+      await refreshEntered.promise;
+      const lateJoiner = agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
+        includeSharedMemory: true,
+      });
+      await flushMicrotasks();
+      releaseRefresh.resolve();
+
+      const [firstResult, lateResult] = await Promise.all([first, lateJoiner]);
+      expect(sharedSyncs).toBe(1);
+      expect(firstResult.cleanMissPeerIds).toEqual([PEER_A]);
+      expect(lateResult.cleanMissPeerIds).toEqual([PEER_A]);
+      expect(lateResult.catchup).toBe(firstResult.catchup);
+    } finally {
+      releaseRefresh.resolve();
+      await agent.stop().catch(() => {});
+    }
+  });
+
   // #2050. The IN-AGENT catch-up walk (`runCatchupOverPeers`) has to publish the
   // same SWM diagnostics the worker-backed CLI runner does, or a job that happens
   // to take the inline path reports a shortfall it cannot name while an identical
@@ -1606,20 +1769,79 @@ describe('DKGAgent sync fetch coalescing', () => {
         const resolved = sharedCalls.length === 1 ? 2 : 3;
         return {
           ...cleanSharedMemorySyncResult(),
+          completedPhases: 1,
           ...(resolved < 3 ? { failedPhases: 1, snapshotPlaneIncomplete: 1 } : {}),
           swmCoverage: coverage(resolved),
         };
       };
 
-      const result = await agent.syncContextGraphFromConnectedPeers('coalesced-cg', {
+      const recovery = await agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
         includeSharedMemory: true,
       });
+      const result = recovery.catchup;
 
       expect(durableCalls).toEqual([PEER_A]);
       expect(sharedCalls).toEqual([PEER_A, PEER_A]);
       expect(result.diagnostics.sharedMemory.swmCoverage).toEqual(coverage(3));
       expect(result.diagnostics.sharedMemory.continuationPasses).toBe(1);
       expect(result.diagnostics.sharedMemory.continuationStopReason).toBe('no-capable-peers');
+      expect(recovery.cleanMissPeerIds).toEqual([PEER_A]);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it.each([
+    ['timeout', { timedOutPhases: 1 }],
+    ['phase failure', { failedPhases: 1 }],
+    ['denial', { deniedPhases: 1 }],
+    ['backpressure deferral', { deferredBackpressure: 1 }],
+  ] as const)('does not record a failed-only SWM %s continuation as miss evidence', async (
+    _failureKind,
+    continuationFailure,
+  ) => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const remotePeer = { toString: () => PEER_A };
+    let sharedCalls = 0;
+    const incompleteCoverage: SwmSnapshotCoverage = {
+      contextGraphId: 'coalesced-cg',
+      peerIdSuffix: PEER_A.slice(-8),
+      snapshotsResolved: 2,
+      snapshotsTotal: 3,
+      manifestComplete: true,
+      missingCount: 1,
+      missingSample: ['sha256:remaining'],
+      materializationFailures: 0,
+    };
+
+    try {
+      await agent.start();
+      (agent as any).waitForSyncProtocol = async () => true;
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      (agent as any).syncFromPeerDetailed = async () => cleanDurableSyncResult();
+      (agent as any).syncSharedMemoryFromPeerDetailed = async () => {
+        sharedCalls += 1;
+        return {
+          ...cleanSharedMemorySyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+          swmCoverage: { ...incompleteCoverage },
+          ...(sharedCalls === 1 ? { failedPhases: 1 } : continuationFailure),
+        };
+      };
+
+      const result = await (agent as any).runCatchupOverPeers(
+        'coalesced-cg',
+        true,
+        [remotePeer],
+        {
+          swmCatchupPassConfig: { budgetMs: 60_000, maxPasses: 2 },
+        },
+      );
+
+      expect(sharedCalls).toBe(2);
+      expect(result.diagnostics.sharedMemory.continuationPasses).toBe(1);
+      expect(result.cleanSharedMemoryPeerIds).toEqual([]);
     } finally {
       await agent.stop().catch(() => {});
     }

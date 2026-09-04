@@ -7,7 +7,18 @@ import {
   type SchedulerPressureOutcome,
   type SchedulerPressureTicket,
 } from '@origintrail-official/dkg-core';
-import type { StorePressureSnapshot, StoreWorkPriority } from './triple-store.js';
+import {
+  isStoreWorkPriority,
+  STORE_WORK_PRIORITIES,
+  type StorePressureSnapshot,
+  type StoreWorkPriority,
+} from './triple-store.js';
+import {
+  STORE_OPERATION_OUTCOME_TAG,
+  isStoreOperation,
+  type StoreOperation,
+  type StoreOperationOutcomeTagged,
+} from './store-operation-outcome.js';
 
 export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
   ackInflight: number;
@@ -32,22 +43,64 @@ export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
 
 export type StoreSchedulerBusyReason = 'queue_full' | 'queue_wait_timeout';
 
+export interface StoreSchedulerOperationMetadata {
+  /** Canonical public store operation; separate from the observability label. */
+  storeOperation: StoreOperation;
+}
+
+export interface StoreSchedulerBusyErrorOptions extends ErrorOptions {
+  storeOperation?: StoreOperation;
+}
+
 /**
  * A retry-safe overload rejection emitted only while work is still queued.
  * Callers may retry because the operation closure has not started.
  */
-export class StoreSchedulerBusyError extends Error {
+export class StoreSchedulerBusyError extends Error implements StoreOperationOutcomeTagged {
   readonly code = 'STORE_SCHEDULER_BUSY' as const;
   readonly retryable = true as const;
+  readonly outcome = 'not_started' as const;
+  readonly storeOperationOutcomeTag = STORE_OPERATION_OUTCOME_TAG;
+  readonly storeOperation?: StoreOperation;
 
   constructor(
     readonly reason: StoreSchedulerBusyReason,
     readonly priority: StoreWorkPriority,
     readonly operation: string,
+    options?: StoreSchedulerBusyErrorOptions,
   ) {
-    super(`Store scheduler ${reason.replaceAll('_', ' ')} (${priority}: ${operation || 'unknown'})`);
+    super(
+      `Store scheduler ${reason.replaceAll('_', ' ')} (${priority}: ${operation || 'unknown'})`,
+      options,
+    );
     this.name = 'StoreSchedulerBusyError';
+    this.storeOperation = options?.storeOperation;
   }
+}
+
+export interface StoreSchedulerBusyErrorLike extends StoreOperationOutcomeTagged {
+  readonly code: 'STORE_SCHEDULER_BUSY';
+  readonly retryable: true;
+  readonly outcome: 'not_started';
+  readonly reason: StoreSchedulerBusyReason;
+  readonly priority: StoreWorkPriority;
+  readonly operation: string;
+}
+
+/** Canonical cross-package guard for retry-safe scheduler admission errors. */
+export function isStoreSchedulerBusyError(
+  error: unknown,
+): error is StoreSchedulerBusyErrorLike {
+  if (!error || typeof error !== 'object') return false;
+  const shaped = error as Partial<StoreSchedulerBusyErrorLike>;
+  return shaped.code === 'STORE_SCHEDULER_BUSY'
+    && shaped.retryable === true
+    && shaped.outcome === 'not_started'
+    && shaped.storeOperationOutcomeTag === STORE_OPERATION_OUTCOME_TAG
+    && (shaped.reason === 'queue_full' || shaped.reason === 'queue_wait_timeout')
+    && isStoreWorkPriority(shaped.priority)
+    && typeof shaped.operation === 'string'
+    && (shaped.storeOperation === undefined || isStoreOperation(shaped.storeOperation));
 }
 
 export type StorePriorityQueueLimits = Record<StoreWorkPriority, number>;
@@ -66,6 +119,7 @@ export interface StorePrioritySchedulerOptions {
 interface QueueEntry<T> {
   priority: StoreWorkPriority;
   operation: string;
+  storeOperation?: StoreOperation;
   queuedAt: number;
   pressureTicket: SchedulerPressureTicket;
   work: () => Promise<T>;
@@ -231,10 +285,7 @@ function metricOperation(operation: string): string {
 }
 
 export function storeWorkPriorityRank(priority: StoreWorkPriority): number {
-  if (priority === 'ack') return 0;
-  if (priority === 'health') return 1;
-  if (priority === 'normal') return 2;
-  return 3;
+  return STORE_WORK_PRIORITIES.indexOf(priority);
 }
 
 export class StorePriorityScheduler extends ObservableScheduler {
@@ -384,6 +435,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
     operation: string,
     work: () => Promise<T>,
     signal?: AbortSignal,
+    metadata?: StoreSchedulerOperationMetadata,
   ): Promise<T> {
     const normalizedPriority = priority ?? 'normal';
     if (signal?.aborted) {
@@ -391,7 +443,12 @@ export class StorePriorityScheduler extends ObservableScheduler {
       throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
     }
     if (this.queues[normalizedPriority].length >= this.queueLimits[normalizedPriority]) {
-      const error = new StoreSchedulerBusyError('queue_full', normalizedPriority, operation);
+      const error = new StoreSchedulerBusyError(
+        'queue_full',
+        normalizedPriority,
+        operation,
+        metadata,
+      );
       this.pressureReject(
         { lane: normalizedPriority, operation },
         error.reason,
@@ -407,6 +464,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
       const entry: QueueEntry<T> = {
         priority: normalizedPriority,
         operation,
+        storeOperation: metadata?.storeOperation,
         queuedAt: this.now(),
         pressureTicket,
         work,
@@ -434,6 +492,9 @@ export class StorePriorityScheduler extends ObservableScheduler {
           'queue_wait_timeout',
           normalizedPriority,
           operation,
+          entry.storeOperation === undefined
+            ? undefined
+            : { storeOperation: entry.storeOperation },
         );
         this.pressureRejectQueued(entry.pressureTicket, error.reason);
         this.observeRejection(error);
@@ -457,9 +518,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
   }
 
   private nextRunnable(): QueueEntry<unknown> | undefined {
-    const priorities: StoreWorkPriority[] = ['ack', 'health', 'normal', 'background'];
-    priorities.sort((a, b) => storeWorkPriorityRank(a) - storeWorkPriorityRank(b));
-    for (const priority of priorities) {
+    for (const priority of STORE_WORK_PRIORITIES) {
       const queue = this.queues[priority];
       if (queue.length === 0) continue;
       if (!this.canStart(priority)) continue;

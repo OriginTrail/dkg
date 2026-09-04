@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { AsyncLiftPublisher, LiftJob } from '../src/index.js';
 import { AsyncLiftRunner } from '../src/index.js';
 
@@ -66,6 +66,41 @@ describe('AsyncLiftRunner', () => {
     });
     await runner.start();
     await waitFor(() => expect(recoverCalls).toBeGreaterThanOrEqual(2));
+    await expect(runner.stop()).resolves.toBeUndefined();
+  });
+
+  it('degrades to cadence-and-poll scheduling for a pre-scheduler capability object', async () => {
+    // The advertised runtime-compat path for the capability shape from before attachScheduler:
+    // reconcile/recover exist but the attachment method does not. start() must not throw on the
+    // missing method, and both the poll loop and the reconcile cadence must keep running.
+    let processCalls = 0;
+    let reconcileCalls = 0;
+    const publisher = createPublisher({
+      processNext: async () => {
+        processCalls += 1;
+        return null;
+      },
+      reconciliationScheduling: {
+        attachDemandListener: () => () => {},
+        reconcile: async () => {
+          reconcileCalls += 1;
+          return { reconciled: 0, pendingWork: false };
+        },
+        recover: async () => ({ reconciled: 0, pendingWork: false }),
+      },
+    } as never);
+
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 5,
+    });
+    await runner.start();
+    await waitFor(() => {
+      expect(processCalls).toBeGreaterThanOrEqual(2);
+      expect(reconcileCalls).toBeGreaterThanOrEqual(1);
+    });
     await expect(runner.stop()).resolves.toBeUndefined();
   });
 
@@ -464,6 +499,436 @@ describe('AsyncLiftRunner', () => {
     await expect(runner.start()).rejects.toThrow(
       'AsyncLiftRunner requires included-job recovery support when included jobs remain after startup recovery',
     );
+  });
+
+  it('runs reconciliation promptly on a demand poke instead of waiting out the idle cadence', async () => {
+    let demand: (() => void) | undefined;
+    let reconciliationCalls = 0;
+    const publisher = createPublisher({
+      reconciliationScheduling: {
+        attachScheduler: (scheduler: { onReconciliationDemand(): void; onWalletRelease(walletId: string): void }) => {
+          demand = () => scheduler.onReconciliationDemand();
+          return () => { demand = undefined; };
+        },
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          return { reconciled: 0, pendingWork: false };
+        },
+        recover: async () => ({ reconciled: 0, pendingWork: false }),
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      // Ten minutes out: any pass inside this test can only have come from the poke.
+      recoveryIntervalMs: 600_000,
+    });
+
+    await runner.start();
+    expect(demand).toBeDefined();
+    expect(reconciliationCalls).toBe(0);
+    demand!();
+    await waitFor(() => expect(reconciliationCalls).toBeGreaterThanOrEqual(1));
+    await runner.stop();
+  });
+
+  it('coalesces demand pokes that arrive during an in-flight pass into one follow-up pass', async () => {
+    let demand!: () => void;
+    let releaseFirstPass!: () => void;
+    const firstPassGate = new Promise<void>((resolve) => { releaseFirstPass = resolve; });
+    let reconciliationCalls = 0;
+    const publisher = createPublisher({
+      reconciliationScheduling: {
+        attachScheduler: (scheduler: { onReconciliationDemand(): void; onWalletRelease(walletId: string): void }) => {
+          demand = () => scheduler.onReconciliationDemand();
+          return () => {};
+        },
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          if (reconciliationCalls === 1) await firstPassGate;
+          return { reconciled: 0, pendingWork: false };
+        },
+        recover: async () => ({ reconciled: 0, pendingWork: false }),
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 600_000,
+      // Keep the attempt floor out of the way so the assertion measures coalescing, not backoff.
+      errorBackoffMs: 5,
+    });
+
+    await runner.start();
+    demand();
+    await waitFor(() => expect(reconciliationCalls).toBe(1));
+    demand();
+    demand();
+    demand();
+    releaseFirstPass();
+    await waitFor(() => expect(reconciliationCalls).toBe(2));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(reconciliationCalls).toBe(2);
+    await runner.stop();
+  });
+
+  it('holds the active cadence while pending work remains and returns to the idle sweep when none does', async () => {
+    let pending = true;
+    let reconciliationCalls = 0;
+    const publisher = createPublisher({
+      reconciliationScheduling: {
+        attachScheduler: () => () => {},
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          return { reconciled: 0, pendingWork: pending };
+        },
+        recover: async () => ({ reconciled: 0, pendingWork: pending }),
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 600_000,
+      activeRecoveryIntervalMs: 5,
+      // Keep the attempt floor below the active cadence so the assertion measures the cadence.
+      errorBackoffMs: 1,
+    });
+
+    await runner.start();
+    // Pending was seeded before the first schedule, so passes run on the active cadence.
+    await waitFor(() => expect(reconciliationCalls).toBeGreaterThanOrEqual(3));
+    pending = false;
+    // Let the already-due pass observe the flip, then require the cadence to go quiet.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const settledCalls = reconciliationCalls;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(reconciliationCalls).toBe(settledCalls);
+    await runner.stop();
+  });
+
+  it('keeps the error backoff as the floor for demanded reconciliation', async () => {
+    let demand!: () => void;
+    let reconciliationCalls = 0;
+    const errors: unknown[] = [];
+    const publisher = createPublisher({
+      reconciliationScheduling: {
+        attachScheduler: (scheduler: { onReconciliationDemand(): void; onWalletRelease(walletId: string): void }) => {
+          demand = () => scheduler.onReconciliationDemand();
+          return () => {};
+        },
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          throw new Error('reconciliation keeps failing');
+        },
+        recover: async () => ({ reconciled: 0, pendingWork: false }),
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 600_000,
+      errorBackoffMs: 100,
+      onError: (error) => { errors.push(error); },
+    });
+
+    await runner.start();
+    const pokeUntil = Date.now() + 250;
+    while (Date.now() < pokeUntil) {
+      demand();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    // 250ms of continuous pokes over a 100ms floor allows the initial pass plus at most a few
+    // backed-off retries — a hot loop would have produced dozens.
+    expect(reconciliationCalls).toBeGreaterThanOrEqual(1);
+    expect(reconciliationCalls).toBeLessThanOrEqual(5);
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    await runner.stop();
+  });
+
+  it('disposes the demand subscription on stop and ignores pokes from a kept listener reference', async () => {
+    let demand: (() => void) | undefined;
+    let reconciliationCalls = 0;
+    const publisher = createPublisher({
+      reconciliationScheduling: {
+        attachScheduler: (scheduler: { onReconciliationDemand(): void; onWalletRelease(walletId: string): void }) => {
+          demand = () => scheduler.onReconciliationDemand();
+          return () => { demand = undefined; };
+        },
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          return { reconciled: 0, pendingWork: false };
+        },
+        recover: async () => ({ reconciled: 0, pendingWork: false }),
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 600_000,
+    });
+
+    await runner.start();
+    expect(demand).toBeDefined();
+    const keptListener = demand!;
+    await runner.stop();
+    // stop() disposed the subscription, so the publisher no longer holds the callback...
+    expect(demand).toBeUndefined();
+    const callsAfterStop = reconciliationCalls;
+    // ...and even a reference someone kept anyway cannot poke the stopped runner into a pass.
+    keptListener();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(reconciliationCalls).toBe(callsAfterStop);
+  });
+
+  it('retries a demanded pass on the error backoff after a transient failure instead of dropping the demand', async () => {
+    let demand!: () => void;
+    let reconciliationCalls = 0;
+    const errors: unknown[] = [];
+    const publisher = createPublisher({
+      reconciliationScheduling: {
+        attachScheduler: (scheduler: { onReconciliationDemand(): void; onWalletRelease(walletId: string): void }) => {
+          demand = () => scheduler.onReconciliationDemand();
+          return () => {};
+        },
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          if (reconciliationCalls === 1) throw new Error('transient reconcile failure');
+          return { reconciled: 0, pendingWork: false };
+        },
+        recover: async () => ({ reconciled: 0, pendingWork: false }),
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      // Ten minutes out with a short backoff: the ONE poke below must survive the failed first
+      // pass and produce the successful second pass on the backoff floor, not at the idle sweep.
+      recoveryIntervalMs: 600_000,
+      errorBackoffMs: 10,
+      onError: (error) => { errors.push(error); },
+    });
+
+    await runner.start();
+    demand();
+    await waitFor(() => expect(reconciliationCalls).toBeGreaterThanOrEqual(2));
+    expect(errors).toHaveLength(1);
+    await runner.stop();
+  });
+
+  it('holds the documented 5000ms default active cadence when activeRecoveryIntervalMs is unset', async () => {
+    vi.useFakeTimers();
+    const blockedSleeps: Array<() => void> = [];
+    let reconciliationCalls = 0;
+    const publisher = createPublisher({
+      reconciliationScheduling: {
+        attachScheduler: () => () => {},
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          return { reconciled: 0, pendingWork: true };
+        },
+        recover: async () => ({ reconciled: 0, pendingWork: true }),
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      // No activeRecoveryIntervalMs: the row pins the library DEFAULT the slowdown fix relies
+      // on — a regression to a longer default would leave every override-based row green.
+      recoveryIntervalMs: 600_000,
+      errorBackoffMs: 1,
+      // Park the wallet loop without real timers: each idle turn blocks until stop.
+      sleep: () => new Promise<void>((resolve) => { blockedSleeps.push(resolve); }),
+    });
+    try {
+      await runner.start();
+      expect(reconciliationCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(reconciliationCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(2);
+      expect(reconciliationCalls).toBe(1);
+      // Repeats on the same default while pending work remains — the ACTIVE cadence, not the
+      // parked 600s idle sweep.
+      await vi.advanceTimersByTimeAsync(5_001);
+      expect(reconciliationCalls).toBe(2);
+    } finally {
+      const stopping = runner.stop();
+      blockedSleeps.forEach((resolve) => resolve());
+      await stopping;
+      vi.useRealTimers();
+    }
+  });
+
+  it('inherits an explicitly faster recoveryIntervalMs as the active cadence when the new knob is unset', async () => {
+    // A consumer that configured recoveryIntervalMs below 5s already had that pending-check
+    // rate; the new active default must not slow them down on upgrade.
+    vi.useFakeTimers();
+    const blockedSleeps: Array<() => void> = [];
+    let reconciliationCalls = 0;
+    const publisher = createPublisher({
+      reconciliationScheduling: {
+        attachScheduler: () => () => {},
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          return { reconciled: 0, pendingWork: true };
+        },
+        recover: async () => ({ reconciled: 0, pendingWork: true }),
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      recoveryIntervalMs: 1_000,
+      errorBackoffMs: 1,
+      sleep: () => new Promise<void>((resolve) => { blockedSleeps.push(resolve); }),
+    });
+    try {
+      await runner.start();
+      expect(reconciliationCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(reconciliationCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(2);
+      expect(reconciliationCalls).toBe(1);
+      await vi.advanceTimersByTimeAsync(1_001);
+      expect(reconciliationCalls).toBe(2);
+    } finally {
+      const stopping = runner.stop();
+      blockedSleeps.forEach((resolve) => resolve());
+      await stopping;
+      vi.useRealTimers();
+    }
+  });
+
+
+  it('holds an explicitly configured active cadence exactly, not merely a fast one', async () => {
+    // The knob must CONTROL the delay: a runner that ignored it for any hard-coded fast
+    // cadence would pass every loose "reconciles quickly" assertion while hammering the
+    // store and chain at a rate the operator never chose.
+    vi.useFakeTimers();
+    const blockedSleeps: Array<() => void> = [];
+    let reconciliationCalls = 0;
+    const publisher = createPublisher({
+      reconciliationScheduling: {
+        attachScheduler: () => () => {},
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          return { reconciled: 0, pendingWork: true };
+        },
+        recover: async () => ({ reconciled: 0, pendingWork: true }),
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      recoveryIntervalMs: 600_000,
+      activeRecoveryIntervalMs: 1_234,
+      errorBackoffMs: 1,
+      sleep: () => new Promise<void>((resolve) => { blockedSleeps.push(resolve); }),
+    });
+    try {
+      await runner.start();
+      expect(reconciliationCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(1_233);
+      expect(reconciliationCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(2);
+      expect(reconciliationCalls).toBe(1);
+      await vi.advanceTimersByTimeAsync(1_235);
+      expect(reconciliationCalls).toBe(2);
+    } finally {
+      const stopping = runner.stop();
+      blockedSleeps.forEach((resolve) => resolve());
+      await stopping;
+      vi.useRealTimers();
+    }
+  });
+
+  it('can retry start after the capability recovery pass fails once', async () => {
+    let recoverCalls = 0;
+    let reconciliationCalls = 0;
+    const publisher = createPublisher({
+      reconciliationScheduling: {
+        attachScheduler: () => () => {},
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          return { reconciled: 0, pendingWork: false };
+        },
+        recover: async () => {
+          recoverCalls += 1;
+          if (recoverCalls === 1) throw new Error('startup recovery failed');
+          return { reconciled: 0, pendingWork: false };
+        },
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 600_000,
+    });
+
+    await expect(runner.start()).rejects.toThrow('startup recovery failed');
+    await expect(runner.start()).resolves.toBeUndefined();
+    expect(recoverCalls).toBe(2);
+    await runner.stop();
+    expect(reconciliationCalls).toBe(0);
+  });
+
+  it('rejects an active recovery interval above the Node.js timer limit', () => {
+    expect(() => new AsyncLiftRunner({
+      publisher: createPublisher(),
+      walletIds: ['wallet-1'],
+      activeRecoveryIntervalMs: 2_147_483_648,
+    })).toThrow(/1 through 2147483647 ms/);
+  });
+
+  it('runs a demanded pass immediately after a successful pass, unfloored by errorBackoffMs', async () => {
+    vi.useFakeTimers();
+    let demand!: () => void;
+    let reconciliationCalls = 0;
+    const publisher = createPublisher({
+      reconciliationScheduling: {
+        attachScheduler: (scheduler: { onReconciliationDemand(): void; onWalletRelease(walletId: string): void }) => {
+          demand = () => scheduler.onReconciliationDemand();
+          return () => {};
+        },
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          return { reconciled: 0, pendingWork: false };
+        },
+        recover: async () => ({ reconciled: 0, pendingWork: false }),
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 600_000,
+      recoveryIntervalMs: 600_000,
+      // Parked ten minutes out: the errorBackoff floor paces FAILURES only; a wake following the
+      // (successful) startup recovery must not wait it out.
+      errorBackoffMs: 600_000,
+    });
+    try {
+      await runner.start();
+      expect(reconciliationCalls).toBe(0);
+      demand();
+      await vi.advanceTimersByTimeAsync(5);
+      expect(reconciliationCalls).toBe(1);
+      // The load-bearing half: a SECOND demanded pass right after a SUCCESSFUL first one must
+      // also run immediately. A floor keyed to attempts (rather than failures) would anchor to
+      // pass 1's start and park this wake for the full parked backoff.
+      demand();
+      await vi.advanceTimersByTimeAsync(5);
+      expect(reconciliationCalls).toBe(2);
+    } finally {
+      const stopping = runner.stop();
+      await stopping;
+      vi.useRealTimers();
+    }
   });
 
   it('stops cleanly while idle without scheduling extra work', async () => {

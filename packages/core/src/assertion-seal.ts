@@ -28,6 +28,7 @@ import {
   parseDeterministicKnowledgeAssetUal,
 } from './ka-content-scope.js';
 import { parseContextGraphAssertionUri } from './constants.js';
+import { canonicalizeAssertionSealXsdDateTimeValue } from './xsd-date-time.js';
 
 const ONT = 'http://dkg.io/ontology/';
 
@@ -716,9 +717,6 @@ function dateTimeLiteralToValue(literal: string): string {
   return canonicalizeAssertionSealDateTimeValue(m[1]);
 }
 
-const ASSERTION_SEAL_UTC_DATE_TIME =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(?:Z|\+00:00)$/u;
-
 /**
  * RDF stores may canonicalize an xsd:dateTime lexical value while preserving
  * its value (for example, `.000Z` becomes `Z`). Normalize the bounded UTC
@@ -726,44 +724,11 @@ const ASSERTION_SEAL_UTC_DATE_TIME =
  * AssertionSeal consumer sees exact millisecond bytes.
  */
 function canonicalizeAssertionSealDateTimeValue(value: string): string {
-  const match = value.match(ASSERTION_SEAL_UTC_DATE_TIME);
-  if (!match) {
+  const canonical = canonicalizeAssertionSealXsdDateTimeValue(value);
+  if (canonical === null) {
     throw new Error(`Invalid assertion seal xsd:dateTime value: ${value}`);
   }
-  const [, yearText, monthText, dayText, hourText, minuteText, secondText, fraction] = match;
-  const year = Number(yearText);
-  const month = Number(monthText);
-  const day = Number(dayText);
-  const hour = Number(hourText);
-  const minute = Number(minuteText);
-  const second = Number(secondText);
-  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
-  const daysInMonth = [
-    31,
-    leapYear ? 29 : 28,
-    31,
-    30,
-    31,
-    30,
-    31,
-    31,
-    30,
-    31,
-    30,
-    31,
-  ][month - 1];
-  if (
-    daysInMonth === undefined
-    || day < 1
-    || day > daysInMonth
-    || hour > 23
-    || minute > 59
-    || second > 59
-  ) {
-    throw new Error(`Invalid assertion seal xsd:dateTime value: ${value}`);
-  }
-  return `${yearText}-${monthText}-${dayText}T${hourText}:${minuteText}:${secondText}`
-    + `.${(fraction ?? '').padEnd(3, '0')}Z`;
+  return canonical;
 }
 
 function stringLiteralToValue(literal: string): string {

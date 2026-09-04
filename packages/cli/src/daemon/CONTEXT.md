@@ -38,8 +38,10 @@ See `packages/adapter-elizaos/`.
 **RequestContext**:
 The bag of per-request state passed to every route group and route plugin.
 Holds the live agent, publisher, config, dashDb, vectorStore, file store,
-and the derived per-request fields (`url`, `path`, `requestToken`,
-`requestAgentAddress`). Defined in `routes/context.ts`.
+and the derived per-request fields (`url`, `path`, `actor`). The actor is one
+correlated authentication/identity value. Route plugins retain deprecated
+`requestToken` and `requestAgentAddress` read-only projections. Defined in
+`routes/context.ts` and `plugin-api.ts`.
 
 **httpAuthGuard**:
 The single global authentication gate at `lifecycle.ts:1865`. Runs **before**
@@ -50,7 +52,8 @@ narrower `PUBLIC_HEAD_PATHS` (HEAD on `/api/status`, `/api/chain/rpc-health`,
 `/.well-known/skill.md` only — the three paths where `routes/status.ts`
 explicitly claims HEAD so liveness probes never reach plugins). Other methods
 go through auth. Plugins do not get a per-plugin auth surface — finer-grained
-policy reads `ctx.requestToken` / `ctx.requestAgentAddress`. See
+policy reads `ctx.actor.authentication` / `ctx.actor.effectiveAgentAddress`
+(or the deprecated plugin projections while migrating). See
 `ARCHITECTURE.md` "Auth boundary — `httpAuthGuard`" for the full breakdown.
 
 **Operator state**:

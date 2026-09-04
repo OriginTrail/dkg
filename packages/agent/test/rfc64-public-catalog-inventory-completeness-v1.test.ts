@@ -61,10 +61,23 @@ describe('RFC-64 public catalog bounded inventory completeness', () => {
 
   it('preserves the exact Gate-1 empty and one-row digest vectors', () => {
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(SCOPE);
-    expect(computeRfc64AppliedInventoryDigestV1({
+    const emptyDigest = computeRfc64AppliedInventoryDigestV1({
       catalogScopeDigest,
       rows: [],
-    })).toBe('0xcd36c729c972b50de1b2e562fa7e2200513d8ba282af29ebf4e403a806605aee');
+    });
+    expect(emptyDigest).toBe(
+      '0xcd36c729c972b50de1b2e562fa7e2200513d8ba282af29ebf4e403a806605aee',
+    );
+    expect(verifyRfc64PublicCatalogInventoryCompletenessV1({
+      catalogScope: SCOPE,
+      expectedTotalRows: '0' as CountV1,
+      expectedRows: [],
+      observedRows: [],
+    })).toMatchObject({
+      inventoryRowCount: '0',
+      inventoryDigest: emptyDigest,
+      rows: [],
+    });
 
     const only = row(7);
     const evidence = verifyRfc64PublicCatalogInventoryCompletenessV1({
@@ -157,20 +170,13 @@ describe('RFC-64 public catalog bounded inventory completeness', () => {
     }), 'catalog-inventory-completeness-input');
   });
 
-  it('enforces the signed-bucket 1..1024 row boundary before enumerating rows', () => {
+  it('enforces the signed-descriptor 0..1024 row boundary before enumerating rows', () => {
     expectCode(() => verifyRfc64PublicCatalogInventoryCompletenessV1({
       catalogScope: { ...SCOPE, bucketCount: '2' as CountV1 },
       expectedTotalRows: '1' as CountV1,
       expectedRows: [row(1)],
       observedRows: [row(1)],
     }), 'catalog-inventory-completeness-slice');
-
-    expectCode(() => verifyRfc64PublicCatalogInventoryCompletenessV1({
-      catalogScope: SCOPE,
-      expectedTotalRows: '0' as CountV1,
-      expectedRows: [],
-      observedRows: [],
-    }), 'catalog-inventory-completeness-count');
 
     const maximum = Array.from({ length: 1024 }, (_value, index) => row(index + 1));
     const evidence = verifyRfc64PublicCatalogInventoryCompletenessV1({

@@ -1,5 +1,6 @@
 export * from './types.js';
 export * from './constants.js';
+export * from './agent-identity.js';
 export * from './assertion-scoped-graphs.js';
 export * from './protocol-limits.js';
 export * from './context-graph-join-policy.js';
@@ -7,9 +8,13 @@ export * from './catalog.js';
 export { parseDotenvValue } from './dotenv.js';
 export * from './memory-model.js';
 export * from './ka-content-scope.js';
+export * from './rfc64-shared-projection-address-v1.js';
 export * from './graph-knowledge-asset-metadata.js';
 export * from './trust.js';
 export * from './sparql-operation.js';
+export * from './code-point-order.js';
+export { BoundedLruCache } from './bounded-lru-cache.js';
+export * from './query-result.js';
 export * from './publisher-extension.js';
 export * from './imported-artifact-bytes.js';
 export * from './imported-artifact-metadata.js';
@@ -69,15 +74,36 @@ export * from './author-catalog-codec.js';
 export * from './author-catalog-objects.js';
 export * from './author-catalog-directory.js';
 export * from './swm-author-inventory-v1.js';
+export * from './rfc64-semantic-addresses-v1.js';
+export * from './rfc64-semantic-records-v1.js';
+export * from './rfc64-semantic-read-manifest-v1.js';
+export * from './rfc64-author-seal-read-manifest-v1.js';
+export * from './rfc64-shared-projection-stream-manifest-v1.js';
+export {
+  isClosedDataRecord,
+  readOwnEnumerableDataProperty,
+  snapshotDenseDataArray,
+  snapshotExactDataRecord,
+  type ClosedDataPrototypePolicy,
+  type ClosedDataReject,
+  type ClosedDataSnapshotOptions,
+} from './sync-wire-objects.js';
+export * from './typed-rdf-store-row-v1.js';
 export * from './event-bus.js';
 export * from './backpressure-observability.js';
 export {
   Logger,
   createOperationContext,
+  formatLogRecord,
   type OperationContext,
   type OperationName,
   type LogSink,
   type LogRecord,
+  type LogRecordFormatOptions,
+  type CanonicalLogRecord,
+  type LogLevel,
+  LOG_LEVELS,
+  normalizeLogLevel,
 } from './logger.js';
 export {
   KA_LIFECYCLE_ROLES,
@@ -94,6 +120,7 @@ export {
   type KaLifecycleStage,
 } from './ka-lifecycle-logger.js';
 export { createLogRedactor, redactLogEntry, redactMessage, DEFAULT_SENSITIVE_KEYS, REDACTED } from './log-redaction.js';
+export type { LogRedactor } from './log-redaction.js';
 export {
   getTracer, withSpan, linkedSpan, currentTraceIds, activeSpanContext,
   getMetrics, rebuildMetrics, type WithSpanOpts, type DkgMetrics,
@@ -151,17 +178,29 @@ export {
 // deep-import it from `../src/node.js`.
 export {
   type Network,
+  type PeerConnectionNetwork,
   type NodeIdentity,
   type Address,
   type DialOpts,
+  type PeerConnectOpts,
   type ProtocolHandler,
   LibP2PNetwork,
+  canonicalPeerIdString,
+  tryCanonicalPeerIdString,
+  type CanonicalPeerId,
   type NetworkStateRegistry,
   StubNetworkStateRegistry,
   type AgentDirectoryLookup,
   type PeerResolverDeps,
+  type PeerConnectionOutcome,
+  connectLibp2pCandidate,
+  parseLibp2pConnectCandidate,
+  Libp2pConnectCandidateParseError,
+  type Libp2pConnectCandidate,
+  type Libp2pConnectHost,
   type PeerResolverLogger,
   type ResolveOpts,
+  type ConnectOpts,
   PeerResolver,
   dkgGossipMsgId,
   dkgGossipMsgIdRaw,
@@ -225,6 +264,7 @@ export {
   isAssertionEntityPredicate,
 } from './entity-predicate.js';
 export { withRetry, type RetryOptions } from './retry.js';
+export { resolveWithinAbort } from './abort-boundary.js';
 export {
   RetryQueue,
   type RetryEntry,
@@ -381,7 +421,9 @@ export {
   projectCanonicalGraphScopedAuthorSealRowsV1,
   projectCanonicalGraphScopedAuthorSealStoreRowsV1,
   renderCanonicalAuthorSealStoreRowV1,
+  canonicalizeAuthorSealStoreRoundTripRowV1,
   decodeCanonicalGraphScopedAuthorSealRowsV1,
+  decodeCanonicalGraphScopedAuthorSealRenderedRowsV1,
   classifyCanonicalGraphScopedAuthorSealRowsV1,
   type Hex32V1,
   type PositiveDecimalU64V1,
@@ -406,3 +448,5 @@ export {
   assertNodeTimerDelayMs,
   resolveNodeTimerDelayMs,
 } from './node-timer.js';
+export * from './query-catalog-parameters.js';
+export * from './query-catalog.js';

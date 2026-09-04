@@ -4,6 +4,57 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+## [10.0.15] - 2026-09-03
+
+A selected-Context-Graph recovery, query, and operational-hardening release. For public and private Context Graphs that an Edge node explicitly selects, RFC-64 makes signed SWM catalogs the recovery authority while finalized VM remains independently derived from blockchain inventory. Ordinary SHARE operations advance the author's durable catalog, receivers verify policy and provider authority before atomic application, restart repair restores catalog state, and private receivers can bootstrap from the accepted on-chain roster without pre-existing local metadata. This release does **not** subscribe an Edge node to additional Context Graphs and does **not** make RFC-64 automatic for every CG; unselected graphs keep their existing behavior. **No smart-contract changes or deployments are required.**
+
+### Upgrading from 10.0.14
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| Selected public and private SWM recovery uses RFC-64 catalogs | An Edge node that explicitly selects an eligible CG verifies signed catalog lineage, policy and provider authority, then atomically applies the exact SWM projection. Finalized VM remains chain-authoritative and is never accepted from the SWM catalog | Keep subscriptions scoped to the CGs this Edge should maintain. Configure or persist selection intent for each CG that should use RFC-64 in 10.0.15 |
+| RFC-64 is not yet the universal default | Nodes and CGs without selected RFC-64 intent retain the existing sync path. This avoids silently expanding Edge resource use, but means ordinary users do not receive RFC-64 recovery for every CG without selection | No action for compatibility. Universal responsibility-derived activation is planned separately for 10.0.16 |
+| Query catalog and local-LLM integrations are expanded | Query discovery, execution and locally hosted Ollama-compatible model flows are available through the CLI and dashboard without sending prompts to a hosted model | Configure the optional local LLM integration only when wanted; existing query and hosted-model setups remain valid |
+| CLI update-channel checks fail closed | Missing, malformed or policy-ineligible npm channel targets are no longer treated as a usable update. SemVer precedence, prerelease policy, compatibility checks and update telemetry now agree | No action. Operators receive a distinct `channel-missing` status when the selected registry channel has no valid target |
+| Store, P2P and reconciliation pressure handling is hardened | Bounded caches, retry/backoff, admission fencing and lower routine-log overhead reduce avoidable work during recovery and heavy query/sync load | No action; existing configuration remains valid |
+
+### Added
+
+- **Selected public and private RFC-64 SWM lifecycle** (#2432, #2449): ordinary durable SHARE advances the exact signed author catalog; restart repair rebuilds it from durable inventory; receivers verify access policy, provider authority, catalog lineage and payloads before committing exact state atomically.
+- **Private cold-join recovery** (#2322, #2324, #2449): an empty authorized receiver can establish Sender Key state from the accepted on-chain roster, bridge a bounded chain of signed catalog heads, and converge without manually seeded local metadata.
+- **Query catalog and local LLM support** (#2302, #2370, #2374, #2379, #2447): graph-scoped query discovery and execution are available to DKG clients, with optional Ollama-compatible local inference in the CLI and dashboard.
+- **Release-quality and dependency gates** (#2342, #2343, #2344): CI routing, dependency review and quality ratchets provide earlier, target-aware evidence for release candidates.
+
+### Changed
+
+- **RFC-64 catalog ownership is SWM-only:** selected public and private SWM recovery uses signed catalogs; finalized VM discovery and completeness continue to come from the blockchain.
+- **RFC-64 selection preserves Edge scope:** Edge nodes synchronize only CGs they explicitly subscribe to, configure as sync intent, or rehydrate from persisted intent. Core-node manifest behavior remains configured independently.
+- **CLI auto-update selection is stricter** (#1296): registry targets are validated before comparison, SemVer build metadata and prerelease ordering follow package semantics, manual update commands respect compatibility policy, registry failures fail closed, and telemetry exposes a missing channel explicitly.
+- **Graph lookup and query hot paths are bounded:** sorted catalogs, scoped classification caches, graph-list caches and SPARQL analysis caches reduce repeated store work without weakening authorization.
+
+### Fixed
+
+- **First-frame RFC-64 activation and exact post-read comparison** (#2451): a wire-form SHARE for a selected public CG is fenced before reverse discovery exists, and Oxigraph RDF-set round trips are compared structurally rather than by unstable line order.
+- **Private coalesced-head recovery** (#2449): receivers can validate bounded signed ancestry after intermediate catalog heads are coalesced, while catalog compare-and-set remains anchored to durable applied state.
+- **Managed Oxigraph timeout pressure** (#2418): retries back off instead of amplifying a busy store, while preserving bounded failure behavior.
+- **Missing access policy and cold graph resolution** (#2426, #2433, #2434): absent policy responses, random-sampling graph resolution and durable metadata timeout fallback no longer turn recoverable states into incorrect terminal failures.
+- **P2P and operator recovery paths** (#2415, #2419): store-busy admission and exact operator-clear flows retain durable state and avoid unsafe retry decisions.
+
+### Deployment
+
+- **No contract or deployment changes.** Solidity sources, ABI files and deployment registries are unchanged from 10.0.14; nodes upgrade through the normal npm release path.
+- All workspace package manifests remain aligned at `10.0.15`.
+
+### Validation
+
+- Exact-head Testnet evidence at `7d1753cec2bcce9383acd84549901015e55c52c9` includes strict coordinator PASS results for public-open `00` (20 SWM / 20 VM), public-curated `01` (20 / 20), and private-curated `11` (50 / 50, with nonmember denial).
+- Private-open `10` reached exact 50 SWM / 50 VM parity on the intended receiver, but the whole run was inconclusive because an additional admitted receiver did not converge and strict policy/nonmember evidence was incomplete. A clean release-preparation-head rerun remains the final certification gate.
+
+### Known limitations
+
+- RFC-64 activation in 10.0.15 remains selected-CG/operator-controlled. Making RFC-64 the default sync behavior for every CG a node is responsible for, while preserving opt-in Edge subscriptions, is deferred to the 10.0.16 release plan.
+- Testnet matrix results are valid only for their frozen DKG and harness SHAs. The release-preparation merge must pass current-head CI and the strict matrix gate before promotion to `main`.
+
 ## [10.0.14] - 2026-08-25
 
 A selected-public convergence and publisher-recovery release. An Edge node can opt a bounded set of publicly readable Context Graphs into RFC-64: an operator-approved graph-complete provider drives bounded native Shared Memory recovery, while Verifiable Memory remains independently derived from finalized blockchain inventory. Both lanes continue across partial progress and provider gaps, and VM recovery batches assets by bounded byte/quad footprint instead of treating an arbitrarily large graph as one transfer. The async publisher now resolves transaction-bearing failures from chain evidence and never re-sends a job on a guess. Operators can select the mined-receipt confirmation depth; the default is one confirmation. Signed SWM inventory remains shadow evidence in this release and does not drive receiver synchronization. RFC-64 remains operator-selected and public-only: a valid non-empty bootstrap manifest activates its selected scope when `enabled` is omitted, while an absent block or explicit `enabled: false` remains dormant. Private encrypted live sharing is unchanged, and private catalog-based cold join is not part of this release. **No smart-contract changes or deployments are required.**
