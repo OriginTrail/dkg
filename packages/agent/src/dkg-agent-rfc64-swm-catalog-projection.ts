@@ -50,6 +50,8 @@ import {
 } from './rfc64/swm-catalog-durable-asset-resolver-v1.js';
 import { markRfc64LegacySwmRepublishedV1 } from
   './rfc64/legacy-swm-boundary-v1.js';
+import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from
+  './rfc64/catalog-peers-v1.js';
 
 const RFC64_DEFAULT_CATALOG_DELEGATION_EXPIRES_AT_V1 =
   '253402300799000' as TimestampMsV1;
@@ -450,7 +452,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     const defaultPeers = Object.freeze([...new Set(
       this.node.libp2p.getConnections()
         .map((connection) => connection.remotePeer.toString()),
-    )].sort());
+    )].sort().slice(0, RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1));
     const selectedControl = exactControl ?? (publicDefault === undefined
       ? Object.freeze({
         kind: acceptedPolicy.policy.accessPolicy === 0

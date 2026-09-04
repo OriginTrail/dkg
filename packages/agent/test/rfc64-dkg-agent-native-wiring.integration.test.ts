@@ -122,6 +122,8 @@ import {
   RFC64_SWM_INVENTORY_MAX_CONFIRMED_TOMBSTONES_V1,
   rfc64SwmInventoryShadowRuntimeV1,
 } from '../src/rfc64/swm-inventory-shadow-runtime-v1.js';
+import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from
+  '../src/rfc64/catalog-peers-v1.js';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
@@ -1586,6 +1588,74 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     },
     60_000,
   );
+
+  it('bounds default catalog peers deterministically while publication advances', async () => {
+    const defaultNetworkId = await computeNetworkId() as NetworkIdV1;
+    const author = await startNativeAgentWithOptions({
+      name: 'default-bounded-catalog-peers',
+      deployment: Object.freeze({
+        ...NATIVE_DEPLOYMENT,
+        networkId: defaultNetworkId,
+      }),
+      networkIdentityChainId: NETWORK_ID,
+      operationalPrivateKey: AUTHOR_WALLET.privateKey,
+    });
+    await author.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Default bounded-peer RFC-64 catalog',
+      callerAgentAddress: AUTHOR,
+    });
+    const connectedPeers = Array.from(
+      { length: RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 + 2 },
+      (_, index) => `12D3KooDefaultPeer${index.toString().padStart(3, '0')}`,
+    );
+    const expectedPeers = [...connectedPeers]
+      .sort()
+      .slice(0, RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1);
+    const connectedPeerIdsWithDuplicates = [...connectedPeers].reverse();
+    connectedPeerIdsWithDuplicates.push(connectedPeers[0]!, connectedPeers[0]!);
+    const connectionSpy = vi.spyOn((author as any).node.libp2p, 'getConnections')
+      .mockReturnValue(connectedPeerIdsWithDuplicates.map((peerId) => ({
+        remotePeer: { toString: () => peerId },
+      })) as never);
+    const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1')
+      .mockImplementation(async ({ announcement, peers }) => ({
+        announcement,
+        announcedPeers: peers,
+        failedPeers: [],
+      }));
+    const assertionCoordinate = 'default-bounded-catalog-peers';
+    const shareOperationId = 'default-bounded-catalog-peers-operation';
+    await seedSignedSwmWorkspaceV1(author, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId,
+      assertionCoordinate,
+      kaNumber: 223n,
+      accessPolicy: 'public',
+      networkId: defaultNetworkId,
+    });
+
+    await author.afterDurableSwmPromotionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+      ctx: createOperationContext('share'),
+    });
+    await author.awaitInFlightRfc64SwmInventoryObserversV1();
+    await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(defaultNetworkId),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+    expect(announce).toHaveBeenCalledTimes(1);
+    expect(announce.mock.calls[0]?.[0].peers).toEqual(expectedPeers);
+    expect(announce.mock.calls[0]?.[0].peers).toHaveLength(
+      RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1,
+    );
+    connectionSpy.mockRestore();
+  }, 60_000);
 
   it('binds omitted-deployment author inventory to the adapter chain identity', async () => {
     const author = await startNativeAgentWithOptions({
