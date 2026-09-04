@@ -35,6 +35,7 @@ import {
   type EvmAddressV1,
   type MemberRosterV1,
   type NetworkIdV1,
+  type SwmAuthorInventoryRowV1,
   type TimestampMsV1,
   type UnsignedContextGraphPolicyEnvelopeV1,
   type UnsignedMemberRosterEnvelopeV1,
@@ -106,6 +107,10 @@ import {
 import { RFC64_M0_RECOVERY_SCENARIO_MANIFEST } from '../scripts/rfc64-m0-recovery-manifest.mjs';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
   '../src/rfc64/finalized-private-placement-repair-store-v1.js';
+import {
+  resolveRfc64ConfirmedVmRepairCatalogAssetV1,
+  resolveRfc64InventoryWorkspaceCatalogAssetV1,
+} from '../src/rfc64/swm-catalog-durable-asset-resolver-v1.js';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
@@ -5842,6 +5847,75 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       coordinate === workspaceOnlyCoordinate
     ))).toBe(false);
     await expect(author.store.hasGraph(workspaceOnlyVmGraph)).resolves.toBe(false);
+
+    // A production VM lift can replace the durable workspace head before the
+    // detached private inventory observer projects its already-confirmed row.
+    // The exact sealed VM graph remains authoritative for that private lane;
+    // the same drift must remain fail-closed for the public SWM-only lane.
+    await author.store.insert(
+      PROJECTION_QUADS.map((quad) => ({ ...quad, graph: workspaceOnlyVmGraph })),
+    );
+    const replacementShareOperationId = 'finalized-private-replaced-workspace-operation';
+    await storeKnowledgeAssetOperationPublicQuads({
+      store: author.store,
+      graphManager: new GraphManager(author.store),
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId: replacementShareOperationId,
+      kaUal: workspaceOnly.canonicalSeal.kaUal,
+      assertionVersion: workspaceOnly.canonicalSeal.assertionVersion,
+      quads: PROJECTION_QUADS,
+      privateTripleCount: Number(workspaceOnly.canonicalSeal.privateTripleCount),
+      publisherPeerId: author.peerId,
+      accessPolicy: 'ownerOnly',
+      agentAddress: AUTHOR,
+      timestamp: new Date(workspaceOnly.canonicalSeal.assertionFinalizedAt),
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store: author.store,
+      graphManager: new GraphManager(author.store),
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: workspaceOnly.canonicalSeal.kaUal,
+      assertionVersion: workspaceOnly.canonicalSeal.assertionVersion,
+      shareOperationId: replacementShareOperationId,
+    });
+    const staleWorkspaceRow = Object.freeze({
+      assertionCoordinate: workspaceOnlyCoordinate,
+      assertionVersion: workspaceOnly.canonicalSeal.assertionVersion,
+      kaUal: workspaceOnly.canonicalSeal.kaUal,
+      shareOperationId: 'finalized-private-workspace-only-operation',
+      projectionDigest: computeKaProjectionDigestV1(PROJECTION),
+      publicTripleCount: workspaceOnly.canonicalSeal.publicTripleCount,
+      privateTripleCount: workspaceOnly.canonicalSeal.privateTripleCount,
+      sealDigest: workspaceOnlyRepair.sealDigest,
+      sharedAt: workspaceOnly.canonicalSeal.assertionFinalizedAt,
+      expiresAt: null,
+    }) as SwmAuthorInventoryRowV1;
+    await expect(resolveRfc64InventoryWorkspaceCatalogAssetV1({
+      store: author.store,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+      laneKind: 'private',
+      row: staleWorkspaceRow,
+    })).resolves.toMatchObject({
+      assertionCoordinate: workspaceOnlyCoordinate,
+      projectionBytes: PROJECTION,
+    });
+    await expect(resolveRfc64ConfirmedVmRepairCatalogAssetV1({
+      store: author.store,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+      identity: workspaceOnlyRepair,
+    })).resolves.toMatchObject({
+      assertionCoordinate: workspaceOnlyCoordinate,
+      projectionBytes: PROJECTION,
+    });
+    await expect(resolveRfc64InventoryWorkspaceCatalogAssetV1({
+      store: author.store,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+      laneKind: 'public',
+      row: staleWorkspaceRow,
+    })).rejects.toThrow('durable RFC-64 workspace head differs');
   }, 90_000);
 
   it('awaits production private retirement and reports a real finalized missing-placement path', async () => {

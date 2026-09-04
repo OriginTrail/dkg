@@ -71,28 +71,35 @@ export async function resolveRfc64InventoryWorkspaceCatalogAssetV1(
     kaUal: params.row.kaUal,
   });
   throwIfAbortedV1(params.signal);
-  if (
-    head === undefined
-    || head.assertionVersion !== params.row.assertionVersion
-    || head.shareOperationId !== params.row.shareOperationId
-    || head.publicTripleCount !== Number(params.row.publicTripleCount)
-    || head.privateTripleCount !== Number(params.row.privateTripleCount)
-    || !laneAcceptsWorkspaceHeadV1(params.laneKind, head.accessPolicy)
-  ) {
+  const workspaceHeadMatches = head !== undefined
+    && head.assertionVersion === params.row.assertionVersion
+    && head.shareOperationId === params.row.shareOperationId
+    && head.publicTripleCount === Number(params.row.publicTripleCount)
+    && head.privateTripleCount === Number(params.row.privateTripleCount)
+    && laneAcceptsWorkspaceHeadV1(params.laneKind, head.accessPolicy);
+  let projectionBytes: Uint8Array;
+  if (workspaceHeadMatches) {
+    const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
+      store: params.store,
+      graphManager,
+      contextGraphId: params.contextGraphId,
+      shareOperationId: head.shareOperationId,
+      kaUal: params.row.kaUal,
+      assertionVersion: params.row.assertionVersion,
+      publicSnapshotStore: params.publicSnapshotStore,
+    });
+    throwIfAbortedV1(params.signal);
+    assertProjectionMatchesSealV1(snapshot.quads, seal, params.row.kaUal);
+    projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(snapshot.quads);
+  } else if (params.laneKind === 'private') {
+    // A finalized private lift may atomically replace or retire the SWM head
+    // before the detached inventory/catalog observer runs. The exact VM graph
+    // is an admissible source only for this private lane and only after the
+    // independently resolved author seal validates its count and Merkle root.
+    projectionBytes = await resolveVerifiedFinalizedVmProjectionV1(params, params.row, seal);
+  } else {
     throw new Error(`durable RFC-64 workspace head differs for ${params.row.kaUal}`);
   }
-  const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
-    store: params.store,
-    graphManager,
-    contextGraphId: params.contextGraphId,
-    shareOperationId: head.shareOperationId,
-    kaUal: params.row.kaUal,
-    assertionVersion: params.row.assertionVersion,
-    publicSnapshotStore: params.publicSnapshotStore,
-  });
-  throwIfAbortedV1(params.signal);
-  assertProjectionMatchesSealV1(snapshot.quads, seal, params.row.kaUal);
-  const projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(snapshot.quads);
   if (computeKaProjectionDigestV1(projectionBytes) !== params.row.projectionDigest) {
     throw new Error(
       `durable RFC-64 projection differs from signed inventory row ${params.row.kaUal}`,
@@ -117,35 +124,13 @@ export async function resolveRfc64ConfirmedVmRepairCatalogAssetV1(
   });
   throwIfAbortedV1(params.signal);
 
+  const workspaceHeadMatches = head !== undefined
+    && head.assertionVersion === params.identity.assertionVersion
+    && head.publicTripleCount === Number(seal.publicTripleCount)
+    && head.privateTripleCount === Number(seal.privateTripleCount)
+    && laneAcceptsWorkspaceHeadV1('private', head.accessPolicy);
   let projectionBytes: Uint8Array;
-  if (head === undefined) {
-    const vmGraph = knowledgeAssetLayerGraphUri(
-      params.contextGraphId,
-      MemoryLayer.VerifiableMemory,
-      createGraphKnowledgeAssetScope(
-        params.identity.kaUal,
-        params.identity.assertionVersion,
-      ),
-    );
-    const result = await params.store.query(
-      `CONSTRUCT { ?subject ?predicate ?object } WHERE { GRAPH <${assertSafeIri(vmGraph)}> { ?subject ?predicate ?object } }`,
-      { source: 'agent.rfc64.finalizedPrivateCatalogRepair.vmProjection', signal: params.signal },
-    );
-    throwIfAbortedV1(params.signal);
-    if (result.type !== 'quads' || result.quads.length !== Number(seal.publicTripleCount)) {
-      throw new Error(`durable finalized VM projection differs for ${params.identity.kaUal}`);
-    }
-    assertProjectionMatchesSealV1(result.quads, seal, params.identity.kaUal);
-    projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(result.quads);
-  } else {
-    if (
-      head.assertionVersion !== params.identity.assertionVersion
-      || head.publicTripleCount !== Number(seal.publicTripleCount)
-      || head.privateTripleCount !== Number(seal.privateTripleCount)
-      || !laneAcceptsWorkspaceHeadV1('private', head.accessPolicy)
-    ) {
-      throw new Error(`durable RFC-64 workspace head differs for ${params.identity.kaUal}`);
-    }
+  if (workspaceHeadMatches) {
     const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
       store: params.store,
       graphManager,
@@ -158,8 +143,32 @@ export async function resolveRfc64ConfirmedVmRepairCatalogAssetV1(
     throwIfAbortedV1(params.signal);
     assertProjectionMatchesSealV1(snapshot.quads, seal, params.identity.kaUal);
     projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(snapshot.quads);
+  } else {
+    projectionBytes = await resolveVerifiedFinalizedVmProjectionV1(params, params.identity, seal);
   }
   return catalogAssetV1(params.identity.assertionCoordinate, projectionBytes, seal);
+}
+
+async function resolveVerifiedFinalizedVmProjectionV1(
+  params: Readonly<DurableCatalogAssetResolverBaseV1>,
+  identity: Readonly<Rfc64DurableCatalogAssetIdentityV1>,
+  seal: CanonicalGraphScopedAuthorSealV1,
+): Promise<Uint8Array> {
+  const vmGraph = knowledgeAssetLayerGraphUri(
+    params.contextGraphId,
+    MemoryLayer.VerifiableMemory,
+    createGraphKnowledgeAssetScope(identity.kaUal, identity.assertionVersion),
+  );
+  const result = await params.store.query(
+    `CONSTRUCT { ?subject ?predicate ?object } WHERE { GRAPH <${assertSafeIri(vmGraph)}> { ?subject ?predicate ?object } }`,
+    { source: 'agent.rfc64.finalizedPrivateCatalogRepair.vmProjection', signal: params.signal },
+  );
+  throwIfAbortedV1(params.signal);
+  if (result.type !== 'quads' || result.quads.length !== Number(seal.publicTripleCount)) {
+    throw new Error(`durable finalized VM projection differs for ${identity.kaUal}`);
+  }
+  assertProjectionMatchesSealV1(result.quads, seal, identity.kaUal);
+  return encodeCanonicalCgSharedPublicRootProjectionV1(result.quads);
 }
 
 async function resolveStrictSealV1(
