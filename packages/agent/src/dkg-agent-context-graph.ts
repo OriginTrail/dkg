@@ -377,6 +377,11 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { ContextGraphJoinAdmissionLockToken } from './context-graph-join-admission-lock.js';
 import type { PreparedContextGraphMembershipMutation } from './context-graph-membership-mutation.js';
+import {
+  commitRegisteredParticipantMutation,
+  prepareRegisteredParticipantMutation,
+  type PreparedRegisteredParticipantMutation,
+} from './registered-context-graph-participant-mutation.js';
 
 /* eslint-disable @typescript-eslint/no-this-alias */
 
@@ -390,8 +395,7 @@ interface ContextGraphAgentInviteMutationPlan {
   delegationUri?: string;
   quadsToInsert: Quad[];
   curatorAgentAddress?: string;
-  onChainId?: bigint;
-  onChainAgentsToAdd: string[];
+  registeredParticipantMutation: PreparedRegisteredParticipantMutation;
   revokedAgentAddressesToClear: string[];
 }
 
@@ -1780,40 +1784,18 @@ export class ContextGraphMethods extends DKGAgentBase {
     // mutation boundary first, before changing local metadata. Retrying after
     // a chain-success/local-store-failure is safe: the fresh roster makes the
     // already-applied chain additions no-ops and completes the local half.
-    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(contextGraphId);
-    if (registeredAuthority.kind === 'unavailable') {
-      throw new Error(
-        `Registered context graph "${contextGraphId}" authority is unavailable (${registeredAuthority.reason})`,
-      );
-    }
     // Participant agents govern READ access only for private/curated CGs. A
     // public CG may still have a distinct local publisher gate.
-    const onChainId = registeredAuthority.kind === 'private'
-      ? registeredAuthority.onChainId
-      : undefined;
     const candidateChainAgents = [curatorAgentAddress, normalizedAgentAddress]
       .filter((address): address is string => address !== undefined)
       .map((address) => ethers.getAddress(address));
-    let onChainAgentsToAdd: string[] = [];
-    if (onChainId !== undefined) {
-      if (
-        typeof this.chain.addContextGraphParticipantAgent !== 'function'
-      ) {
-        throw new Error(
-          `Registered context graph "${contextGraphId}" requires chain participant-governance support`,
-        );
-      }
-      const chainRosterSet = new Set(
-        registeredAuthority.kind === 'private'
-          ? registeredAuthority.participantAgents.map((address) => address.toLowerCase())
-          : [],
-      );
-      onChainAgentsToAdd = candidateChainAgents.filter(
-        (address, index) => candidateChainAgents.findIndex(
-          (candidate) => candidate.toLowerCase() === address.toLowerCase(),
-        ) === index && !chainRosterSet.has(address.toLowerCase()),
-      );
-    }
+    const registeredParticipantMutation = await prepareRegisteredParticipantMutation({
+      operation: 'add',
+      contextGraphId,
+      agentAddresses: candidateChainAgents,
+      chain: this.chain,
+      resolveAuthority: () => this.resolveRegisteredContextGraphAuthority(contextGraphId),
+    });
 
     return this.contextGraphMembershipMutations.prepare(
       admissionLockToken,
@@ -1823,13 +1805,14 @@ export class ContextGraphMethods extends DKGAgentBase {
         agentAddress: normalizedAgentAddress,
         delegation,
         alreadyAllowed,
-        noOp: alreadyAllowed && !delegation && onChainAgentsToAdd.length === 0,
+        noOp: alreadyAllowed
+          && !delegation
+          && registeredParticipantMutation.agentAddresses.length === 0,
         cgMetaGraph,
         delegationUri,
         quadsToInsert,
         curatorAgentAddress,
-        onChainId,
-        onChainAgentsToAdd,
+        registeredParticipantMutation,
         revokedAgentAddressesToClear,
       },
     );
@@ -1859,8 +1842,7 @@ export class ContextGraphMethods extends DKGAgentBase {
       delegationUri,
       quadsToInsert,
       curatorAgentAddress,
-      onChainId,
-      onChainAgentsToAdd,
+      registeredParticipantMutation,
       revokedAgentAddressesToClear,
     } = plan;
     const ctx = createOperationContext('system');
@@ -1884,17 +1866,13 @@ export class ContextGraphMethods extends DKGAgentBase {
     // A failed transaction leaves local metadata unchanged. If a later local
     // write fails, retry observes the already-updated roster and completes
     // locally without sending duplicate transactions.
-    if (onChainId !== undefined) {
-      for (const address of onChainAgentsToAdd) {
-        const result = await this.chain.addContextGraphParticipantAgent!(onChainId, address);
-        if (!result.success) {
-          throw new Error(
-            `Failed to add ${address} to registered context graph "${contextGraphId}" on chain`,
-          );
-        }
-      }
-      this.onChainParticipantAgentsCache.delete(onChainId.toString());
-    }
+    await commitRegisteredParticipantMutation({
+      prepared: registeredParticipantMutation,
+      chain: this.chain,
+      invalidateRoster: (onChainId) => {
+        this.onChainParticipantAgentsCache.delete(onChainId.toString());
+      },
+    });
 
     // A synchronous admission-specific guard can run after prepare returns
     // and immediately before this call. For registered graphs the first
@@ -2021,38 +1999,20 @@ export class ContextGraphMethods extends DKGAgentBase {
     // local metadata. A chain failure therefore cannot create a misleading
     // local success. The fresh roster check makes retries idempotent after a
     // chain-success/local-store-failure split.
-    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(contextGraphId);
-    if (registeredAuthority.kind === 'unavailable') {
-      throw new Error(
-        `Registered context graph "${contextGraphId}" authority is unavailable (${registeredAuthority.reason})`,
-      );
-    }
-    const onChainId = registeredAuthority.kind === 'private'
-      ? registeredAuthority.onChainId
-      : null;
-    if (onChainId !== null) {
-      if (
-        typeof this.chain.removeContextGraphParticipantAgent !== 'function'
-      ) {
-        throw new Error(
-          `Registered context graph "${contextGraphId}" requires chain participant-governance support`,
-        );
-      }
-      if (
-        registeredAuthority.kind === 'private'
-        && registeredAuthority.participantAgents.some(
-          (address) => address.toLowerCase() === normalizedAgentAddress.toLowerCase(),
-        )
-      ) {
-        const result = await this.chain.removeContextGraphParticipantAgent(onChainId, normalizedAgentAddress);
-        if (!result.success) {
-          throw new Error(
-            `Failed to remove ${normalizedAgentAddress} from registered context graph "${contextGraphId}" on chain`,
-          );
-        }
-      }
-      this.onChainParticipantAgentsCache.delete(onChainId.toString());
-    }
+    const registeredParticipantMutation = await prepareRegisteredParticipantMutation({
+      operation: 'remove',
+      contextGraphId,
+      agentAddresses: [normalizedAgentAddress],
+      chain: this.chain,
+      resolveAuthority: () => this.resolveRegisteredContextGraphAuthority(contextGraphId),
+    });
+    await commitRegisteredParticipantMutation({
+      prepared: registeredParticipantMutation,
+      chain: this.chain,
+      invalidateRoster: (onChainId) => {
+        this.onChainParticipantAgentsCache.delete(onChainId.toString());
+      },
+    });
 
     // Persist a LOCAL tombstone before deleting any positive local projection
     // so the recipient resolver excludes this agent from future sender-key

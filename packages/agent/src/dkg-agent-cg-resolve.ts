@@ -334,12 +334,12 @@ import {
   CIPHERTEXT_CHUNK_SIZE_BYTES,
   BOOT_CHAIN_IDENTITY_TIMEOUT_MS,
   MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
-  TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
   CHAIN_POLICY_READ_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { isTransientBootChainError } from './dkg-agent-boot.js';
+import { createAbortError, runBoundedOperation } from './bounded-operation.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
   ContextGraphNotFoundError,
@@ -421,58 +421,11 @@ import {
 } from './curator-meta-refresh.js';
 
 function syncAuthAbortError(reason: unknown): Error {
-  if (reason instanceof Error) {
-    if (reason.name === 'AbortError') return reason;
-    const err = new Error(reason.message || 'aborted');
-    err.name = 'AbortError';
-    (err as Error & { cause?: unknown }).cause = reason;
-    return err;
-  }
-  const err = new Error(typeof reason === 'string' ? reason : 'aborted');
-  err.name = 'AbortError';
-  return err;
+  return createAbortError(reason);
 }
 
 function throwIfSyncAuthAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw syncAuthAbortError(signal.reason);
-}
-
-function boundedRegisteredAuthorityRead<T>(
-  start: () => Promise<T>,
-  label: string,
-  signal: AbortSignal | undefined,
-): Promise<T> {
-  if (signal?.aborted) return Promise.reject(syncAuthAbortError(signal.reason));
-  const work = start();
-  work.catch(() => {
-    // The caller may already have returned after timeout/abort.
-  });
-  return new Promise<T>((resolve, reject) => {
-    let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const finish = (complete: () => void) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      signal?.removeEventListener('abort', onAbort);
-      complete();
-    };
-    const onAbort = () => {
-      finish(() => reject(syncAuthAbortError(signal?.reason)));
-    };
-    signal?.addEventListener('abort', onAbort, { once: true });
-    timer = setTimeout(() => {
-      finish(() => reject(new Error(
-        `${label} timed out after ${CHAIN_POLICY_READ_TIMEOUT_MS}ms`,
-      )));
-    }, CHAIN_POLICY_READ_TIMEOUT_MS);
-    timer.unref?.();
-    work.then(
-      (value) => finish(() => resolve(value)),
-      (error) => finish(() => reject(error)),
-    );
-    if (signal?.aborted) onAbort();
-  });
 }
 
 type InternalContextGraphListRow = ListContextGraphsRow & {
@@ -1627,10 +1580,13 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
 
     let rawAgents: string[];
     try {
-      const result = await boundedRegisteredAuthorityRead(
+      const result = await runBoundedOperation(
         () => getParticipantAgents.call(this.chain, onChainId),
-        `getContextGraphParticipantAgents(${onChainId})`,
-        options.signal,
+        {
+          label: `getContextGraphParticipantAgents(${onChainId})`,
+          timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+          signal: options.signal,
+        },
       );
       if (!Array.isArray(result)) {
         return {

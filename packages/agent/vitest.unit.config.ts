@@ -187,6 +187,7 @@ export default defineConfig({
       "test/sync-responder-agents-meta-serve-skip.test.ts",
       "test/messenger-substrate.test.ts",
       "test/context-graph-join-policy.test.ts",
+      "test/bounded-operation.test.ts",
       "test/private-read-chain-authority.test.ts",
       "test/context-graph-historical-name-binding.test.ts",
       "test/context-graph-list-concurrency.test.ts",

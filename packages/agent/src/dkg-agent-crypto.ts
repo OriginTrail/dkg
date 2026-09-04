@@ -311,6 +311,10 @@ import {
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
+import {
+  isBoundedOperationTimeoutError,
+  runBoundedOperation,
+} from './bounded-operation.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
   ContextGraphNotFoundError,
@@ -461,7 +465,11 @@ async function evaluateContextGraphSlotBinding(
   allowNumericSelfAddress: boolean,
   isWireIdKeyedSubscription: (localId: string) => boolean,
   warn: (ctx: OperationContext, message: string) => void,
-  raceRead: <T>(read: Promise<T>) => Promise<T | typeof TIMEOUT_SENTINEL>,
+  raceRead: <T>(
+    start: () => Promise<T>,
+    label: string,
+    readSignal?: AbortSignal,
+  ) => Promise<T | typeof TIMEOUT_SENTINEL>,
 ): Promise<ContextGraphSlotBindingOutcome> {
   let numericId: bigint;
   try {
@@ -484,10 +492,13 @@ async function evaluateContextGraphSlotBinding(
 
   let onChainHash: string | null | typeof TIMEOUT_SENTINEL;
   try {
-    const read = signal
-      ? getNameHash.call(chain, numericId, { signal })
-      : getNameHash.call(chain, numericId);
-    onChainHash = await raceRead(read);
+    onChainHash = await raceRead(
+      () => signal
+        ? getNameHash.call(chain, numericId, { signal })
+        : getNameHash.call(chain, numericId),
+      `getContextGraphNameHash(${onChainId})`,
+      signal,
+    );
   } catch (error) {
     warn(
       opCtx ?? createOperationContext('share'),
@@ -822,16 +833,21 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * blocking forever. The timer is `unref`'d so a dead RPC never keeps the
    * process alive.
    */
-  private raceChainPolicyRead<T>(p: Promise<T>): Promise<T | typeof TIMEOUT_SENTINEL> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<typeof TIMEOUT_SENTINEL>((resolve) => {
-      timer = setTimeout(() => resolve(TIMEOUT_SENTINEL), CHAIN_POLICY_READ_TIMEOUT_MS);
-      timer.unref?.();
-    });
-    return Promise.race([
-      p.finally(() => { if (timer) clearTimeout(timer); }),
-      timeout,
-    ]);
+  private async raceChainPolicyRead<T>(
+    start: () => Promise<T>,
+    label: string,
+    signal?: AbortSignal,
+  ): Promise<T | typeof TIMEOUT_SENTINEL> {
+    try {
+      return await runBoundedOperation(start, {
+        label,
+        timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+        signal,
+      });
+    } catch (error) {
+      if (isBoundedOperationTimeoutError(error)) return TIMEOUT_SENTINEL;
+      throw error;
+    }
   }
 
   /**
@@ -889,9 +905,13 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       }
       return null;
     }
-    const live = await this.raceChainPolicyRead(options.signal
-      ? this.chain.isContextGraphActiveOnChain(numericId, { signal: options.signal })
-      : this.chain.isContextGraphActiveOnChain(numericId));
+    const live = await this.raceChainPolicyRead(
+      () => options.signal
+        ? this.chain.isContextGraphActiveOnChain!(numericId, { signal: options.signal })
+        : this.chain.isContextGraphActiveOnChain!(numericId),
+      `isContextGraphActiveOnChain(${onChainId})`,
+      options.signal,
+    );
     if (live === TIMEOUT_SENTINEL) {
       this.log.warn(
         opCtx ?? createOperationContext('share'),
@@ -913,9 +933,13 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // value is strictly an improvement for the other, decrypt-gated readers).
     const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
     if (typeof getAccessPolicy !== 'function') return null;
-    const policy = await this.raceChainPolicyRead(options.signal
-      ? getAccessPolicy.call(this.chain, numericId, { signal: options.signal })
-      : getAccessPolicy.call(this.chain, numericId));
+    const policy = await this.raceChainPolicyRead(
+      () => options.signal
+        ? getAccessPolicy.call(this.chain, numericId, { signal: options.signal })
+        : getAccessPolicy.call(this.chain, numericId),
+      `getContextGraphAccessPolicy(${onChainId})`,
+      options.signal,
+    );
     if (policy === TIMEOUT_SENTINEL) {
       this.log.warn(
         opCtx ?? createOperationContext('share'),
@@ -1201,7 +1225,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         || bindingMode !== 'chain-attested-repair',
       (localId) => this.isWireIdKeyedSubscription(localId),
       (ctx, message) => this.log.warn(ctx, message),
-      (read) => this.raceChainPolicyRead(read),
+      (start, label, signal) => this.raceChainPolicyRead(start, label, signal),
     );
     return mapContextGraphSlotBindingOutcome(outcome, bindingMode);
   }

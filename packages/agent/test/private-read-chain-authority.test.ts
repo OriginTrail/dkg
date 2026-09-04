@@ -114,6 +114,55 @@ describe('private read authorization uses the on-chain participant roster', () =
     expect(legacyPeers).not.toHaveBeenCalled();
   });
 
+  it('denies a chain-authorized private participant when this peer is not allowed', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'PrivateReadPeerMismatch',
+      chainAdapter: chain,
+    });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(registeredBinding(7n));
+    vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(1);
+    vi.spyOn(chain, 'getContextGraphParticipantAgents').mockResolvedValue([MEMBER]);
+    vi.spyOn(agent, 'getContextGraphAllowedPeers')
+      .mockResolvedValue(['12D3KooWAnotherAuthorizedPeer']);
+    vi.spyOn(agent, 'peerId', 'get').mockReturnValue('12D3KooWLocalPeer');
+
+    await expect(agent.resolveContextGraphReadAuthority('registered-private', {
+      callerAgentAddress: MEMBER,
+      allowSubscriptionFallback: false,
+    })).resolves.toMatchObject({
+      outcome: 'denied',
+      source: 'registered-chain',
+      reason: 'local-peer-not-allowed',
+      onChainId: 7n,
+    });
+  });
+
+  it('reports unavailable authority when private peer metadata cannot be read', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'PrivateReadPeerAuthorityUnavailable',
+      chainAdapter: chain,
+    });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(registeredBinding(7n));
+    vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(1);
+    vi.spyOn(chain, 'getContextGraphParticipantAgents').mockResolvedValue([MEMBER]);
+    vi.spyOn(agent, 'getContextGraphAllowedPeers')
+      .mockRejectedValue(new Error('peer metadata unavailable'));
+
+    await expect(agent.resolveContextGraphReadAuthority('registered-private', {
+      callerAgentAddress: MEMBER,
+      allowSubscriptionFallback: false,
+    })).resolves.toMatchObject({
+      outcome: 'unavailable',
+      source: 'registered-chain',
+      reason: 'peer-authority-unavailable',
+      onChainId: 7n,
+    });
+  });
+
   it('uses cold name-hash discovery for recovery and sender-key agent gates', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({
