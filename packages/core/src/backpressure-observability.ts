@@ -121,6 +121,8 @@ export interface BackpressureLaneSnapshot {
    */
   pressureInflight?: number;
   inflightLimit: number | null;
+  /** All contributing pressure signals on shared-pool rows; age remains visible at saturation. */
+  stateReasons?: Array<'depth' | 'age' | 'rejection' | 'active_age'>;
   oldestQueuedAgeMs: number;
   oldestActiveAgeMs: number;
   queuedOperations: BackpressureOperationSummary[];
@@ -519,6 +521,13 @@ export class SchedulerPressureTracker {
           0,
           Math.floor(now - (entry.startedAt ?? now)),
         )));
+    const stateReasons: NonNullable<BackpressureLaneSnapshot['stateReasons']> = [];
+    if (oldestActiveAgeMs >= this.thresholds.stalledActiveAgeMs) stateReasons.push('active_age');
+    if (runtime.lastRejectedAt !== null
+      && now - runtime.lastRejectedAt <= this.thresholds.rejectionStateWindowMs) stateReasons.push('rejection');
+    if (oldestQueuedAgeMs >= this.thresholds.degradedQueueAgeMs) stateReasons.push('age');
+    if (depthPressure !== null && (depthPressure.queued >= depthPressure.limit
+      || depthPressure.queued / depthPressure.limit >= this.thresholds.degradedQueueUtilization)) stateReasons.push('depth');
     let state: BackpressureState = 'healthy';
     if (oldestActiveAgeMs >= this.thresholds.stalledActiveAgeMs) {
       state = 'stalled';
@@ -542,6 +551,7 @@ export class SchedulerPressureTracker {
     return {
       lane,
       state,
+      ...(capacityModel === 'shared' ? { stateReasons } : {}),
       capacityModel,
       queued: queued.length,
       pressureQueued,
@@ -882,6 +892,7 @@ export class BackpressureMonitor {
       scheduler: scheduler.scheduler,
       lane: values.lane,
       state,
+      ...(lane?.stateReasons ? { stateReasons: lane.stateReasons } : {}),
       ...(previousState ? { previousState } : {}),
       queued: values.queued,
       // Only when the depth that classified the lane is not the lane's own

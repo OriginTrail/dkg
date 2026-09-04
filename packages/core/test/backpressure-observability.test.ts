@@ -46,6 +46,32 @@ function captureMetrics(run: () => void): RecordedMetric[] {
 }
 
 describe('SchedulerPressureTracker', () => {
+  it('distinguishes an aged lane even when shared depth saturates every queued lane (#2109)', () => {
+    let now = 0;
+    const tracker = new SchedulerPressureTracker({
+      scheduler: 'sync-global', now: () => now,
+      capacity: { capacityModel: 'shared', queueLimit: 4, inflightLimit: 2 },
+      thresholds: { degradedQueueAgeMs: 60_000 },
+    });
+    tracker.enqueue({ lane: 'durable', operation: 'durable' });
+    now = 90_000;
+    for (const lane of ['changelog', 'shared_memory', 'swm_recovery']) {
+      tracker.enqueue({ lane, operation: lane });
+    }
+    const lanes = tracker.snapshot().lanes;
+    expect(lanes.every((lane) => lane.state === 'saturated')).toBe(true);
+    expect(lanes.find((lane) => lane.lane === 'durable')?.stateReasons).toEqual(['age', 'depth']);
+    for (const lane of lanes.filter((lane) => lane.lane !== 'durable')) {
+      expect(lane.stateReasons).toEqual(['depth']);
+    }
+  });
+
+  it('leaves partitioned lane wire shape unchanged (#2109)', () => {
+    const tracker = new SchedulerPressureTracker({ scheduler: 'store', capacity: { lanes: { read: { queueLimit: 1 } } } });
+    tracker.enqueue({ lane: 'read', operation: 'read' });
+    expect(tracker.snapshot().lanes[0]).not.toHaveProperty('stateReasons');
+  });
+
   it('tracks queue and active age without owning scheduling policy', () => {
     let now = 1_000;
     const tracker = new SchedulerPressureTracker({
