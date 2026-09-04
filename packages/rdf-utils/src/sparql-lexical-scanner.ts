@@ -292,41 +292,26 @@ function tokenCanEndExpression(token: SparqlLexicalToken | undefined): boolean {
   return token.logicalValue === ')';
 }
 
-/**
- * Return the nearest still-open expression/group delimiter. A less-than sign
- * following an expression operand inside parentheses is an operator, even if
- * a later greater-than sign would otherwise make the whole span resemble an
- * IRIREF. An intervening graph group wins, preserving compact triples such as
- * `EXISTS { ?s<1#item>?o }`.
- */
-function nearestOpenExpressionGroup(
+function lessThanStartsIriRef(
   tokens: readonly SparqlLexicalToken[],
-): '(' | '{' | undefined {
-  let closedParentheses = 0;
-  let closedBraces = 0;
-  for (let index = tokens.length - 1; index >= 0; index--) {
-    const token = tokens[index];
-    if (token?.kind !== 'symbol') continue;
-    if (token.logicalValue === ')') {
-      closedParentheses++;
-    } else if (token.logicalValue === '(') {
-      if (closedParentheses > 0) closedParentheses--;
-      else return '(';
-    } else if (token.logicalValue === '}') {
-      closedBraces++;
-    } else if (token.logicalValue === '{') {
-      if (closedBraces > 0) closedBraces--;
-      else return '{';
-    }
-  }
-  return undefined;
-}
-
-function lessThanStartsIriRef(tokens: readonly SparqlLexicalToken[]): boolean {
+  openExpressionGroups: readonly ('(' | '{')[],
+): boolean {
   return !(
-    nearestOpenExpressionGroup(tokens) === '('
+    openExpressionGroups[openExpressionGroups.length - 1] === '('
     && tokenCanEndExpression(tokens[tokens.length - 1])
   );
+}
+
+function updateOpenExpressionGroups(
+  stack: Array<'(' | '{'>,
+  symbol: string,
+): void {
+  if (symbol === '(' || symbol === '{') {
+    stack.push(symbol);
+    return;
+  }
+  const expected = symbol === ')' ? '(' : symbol === '}' ? '{' : undefined;
+  if (expected !== undefined && stack[stack.length - 1] === expected) stack.pop();
 }
 
 function scanPrologue(tokens: readonly SparqlLexicalToken[]): PreparedSparql['prologue'] {
@@ -363,6 +348,10 @@ function scanSparql(value: string): ScannedSparql | null {
   const masked = value.split('');
   const materialized: string[] = [];
   const tokens: SparqlLexicalToken[] = [];
+  // Maintain expression context during the scan. Looking backwards through
+  // all prior tokens for every IRI candidate makes long PREFIX lists
+  // quadratic; this stack keeps the same nearest-group decision O(1).
+  const openExpressionGroups: Array<'(' | '{'> = [];
   let unterminated = false;
   let index = 0;
 
@@ -414,7 +403,10 @@ function scanSparql(value: string): ScannedSparql | null {
       continue;
     }
 
-    if (logical.codePoint === 0x3c && lessThanStartsIriRef(tokens)) {
+    if (
+      logical.codePoint === 0x3c
+      && lessThanStartsIriRef(tokens, openExpressionGroups)
+    ) {
       const iriEnd = skipSparqlIriRef(value, index);
       if (iriEnd !== null) {
         const start = index;
@@ -507,6 +499,7 @@ function scanSparql(value: string): ScannedSparql | null {
     if (!token) return null;
     tokens.push(token);
     materialized.push(token.logicalValue);
+    updateOpenExpressionGroups(openExpressionGroups, token.logicalValue);
   }
 
   const maskedValue = masked.join('');
