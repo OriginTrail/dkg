@@ -2452,6 +2452,66 @@ describe('graph-scoped finalization handler', () => {
     expect(retire).toHaveBeenCalledOnce();
   });
 
+  it('retires only the exact SWM twin when restart reconciliation finds matching VM metadata', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    await expectGraphScopedMetadata(`
+      <http://dkg.io/ontology/status> "confirmed" ;
+      <http://dkg.io/ontology/transactionHash> "${message.txHash}" ;
+      <http://dkg.io/ontology/materializedVersion> "123:4" .
+    `);
+
+    const unrelatedSwmGraph =
+      `did:dkg:context-graph:${CG}/_shared_memory/upgrade-restart-sentinel`;
+    await store.insert([{
+      subject: 'urn:asset:unrelated-upgrade-restart',
+      predicate: 'urn:predicate:value',
+      object: '"preserved"',
+      graph: unrelatedSwmGraph,
+    }]);
+
+    const writeLocks = new Map<string, Promise<void>>();
+    const retire = vi.fn(async (candidate: { swmGraph: string }) => {
+      await store.dropGraph(candidate.swmGraph);
+    });
+    const restarted = new FinalizationHandler(
+      store,
+      legacyFinalizationChain(),
+      {
+        reconcileConfirmedGraphScopedSwmTwin: async (evidence) => {
+          await expect(reconcileFinalizedSwmTwinFromCatalogProjection({
+            store,
+            writeLocks,
+            evidence,
+            retire,
+          })).resolves.toBe('retired');
+        },
+      },
+    );
+    const internals = restarted as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+      findSwmSnapshotForMerkleRoot?: () => Promise<never>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+    internals.findSwmSnapshotForMerkleRoot = async () => {
+      throw new Error('legacy root scan must not run for matching graph-scoped VM metadata');
+    };
+
+    await expect(reconcileGraphScoped(restarted, message)).resolves.toBe('already-confirmed');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    expect(await store.countQuads(unrelatedSwmGraph)).toBe(1);
+    expect(retire).toHaveBeenCalledOnce();
+    expect(retire).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId: CG,
+      kaUal: UAL,
+      swmGraph,
+    }));
+  });
+
   it('promotes a later exact public SWM assertion when the chain version advances', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     let rootCount = 1n;

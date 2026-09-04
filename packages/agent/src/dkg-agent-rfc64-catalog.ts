@@ -1023,6 +1023,29 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       ?? this.config.networkIdentity?.chainId
     ) as NetworkIdV1 | undefined;
     const responsibilities = this.readRfc64CatalogResponsibilitiesV1();
+    const responsibilityByContextGraph = new Map(
+      responsibilities.map((selection) => [selection.contextGraphId, selection]),
+    );
+    const configuredAuthorities = this.config.rfc64CatalogExecutionPlan.selectedAuthority;
+    const selections = Object.freeze([...new Set([
+      ...Object.keys(configuredAuthorities),
+      ...responsibilityByContextGraph.keys(),
+    ])].sort().map((contextGraphId): Rfc64CatalogResponsibilitySelectionV1 => {
+      const responsibility = responsibilityByContextGraph.get(contextGraphId);
+      const configured = configuredAuthorities[contextGraphId];
+      if (configured === undefined) return responsibility!;
+      const receiverAuthority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
+      return Object.freeze({
+        contextGraphId,
+        responsible: responsibility?.responsible ?? configured.selected,
+        responsibilityReason: responsibility?.responsibilityReason ?? null,
+        active: receiverAuthority.active,
+        mode: configured.mode,
+        selectionSource: configured.killSwitchActive
+          ? 'kill-switch'
+          : 'operator-override',
+      });
+    }));
     const appliedByContextGraph = new Map<string, Array<Readonly<{
       snapshot: AppliedCatalogHeadSnapshotV1;
       issuedAt: TimestampMsV1;
@@ -1058,7 +1081,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }
     const progressByContextGraph = rfc64CatalogAuthorityProgressV1.get(this);
     const receiverStats = service?.stats().receiver;
-    return Object.freeze(responsibilities.map((selection) => {
+    return Object.freeze(selections.map((selection) => {
       const accepted = service !== undefined && networkId !== undefined
         ? service.acceptedPolicySnapshot(
           networkId,

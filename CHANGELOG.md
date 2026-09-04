@@ -6,13 +6,14 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [10.0.16] - 2026-09-03
 
-A default-responsibility RFC-64 release. When RFC-64 controls are omitted, the root Shared Memory scope of every Context Graph the node is already responsible for uses signed catalogs as its sole discovery and recovery authority: Core nodes host their public CGs, Edge nodes follow only their public subscriptions, and private CGs follow current verified membership. Registered CG authority is rebuilt from finalized chain state; unregistered CGs use owner-signed local authority. Ordinary root-scope SHARE/update operations advance the durable author catalog, restart reconciliation restores it, and receivers recover by catalog pull without static provider lists. Named subgraphs retain a non-overlapping legacy SWM compatibility lane for live delivery and recovery until RFC-64 catalogs support non-null `subGraphName`; that lane does not accept root traffic. Finalized Verifiable Memory remains independently chain-authoritative. **No smart-contract changes or deployments are required.**
+A default-responsibility RFC-64 release. For persistent nodes, when RFC-64 controls are omitted, the root Shared Memory scope of every Context Graph the node is already responsible for uses signed catalogs as its sole discovery and recovery authority: Core nodes host their public CGs, Edge nodes follow only their public subscriptions, and private CGs follow current verified membership. Registered CG authority is rebuilt from finalized chain state; unregistered CGs use owner-signed local authority. Ordinary root-scope SHARE/update operations advance the durable author catalog, restart reconciliation restores it, and receivers recover by catalog pull without static provider lists. Agents intentionally created without `dataDir` retain the functioning in-memory legacy root lane; an explicit catalog request without persistence is rejected before startup. Named subgraphs retain a non-overlapping legacy SWM compatibility lane for live delivery and recovery until RFC-64 catalogs support non-null `subGraphName`; that lane does not accept root traffic. Finalized Verifiable Memory remains independently chain-authoritative. **No smart-contract changes or deployments are required.**
 
 ### Upgrading from 10.0.15
 
 | Change | Impact | Action |
 | --- | --- | --- |
 | RFC-64 root catalog recovery is the omitted-configuration default | A node selects root-scope catalog authority from its existing Core hosting, Edge subscription, or verified private-membership responsibility; this does not auto-subscribe an Edge to additional CGs | Remove compatibility activation manifests after confirming the default status for each intended CG. Keep Edge subscriptions scoped to the CGs the node should maintain |
+| Catalog mode requires persistent node state | An agent created without `dataDir` cannot provide durable catalog recovery, so omitted RFC-64 controls preserve its in-memory legacy root replication lane; explicitly requesting catalog mode without persistence fails before startup | Configure `dataDir` for production/default catalog operation. Use no-`dataDir` agents only when intentionally accepting ephemeral legacy behavior |
 | Named subgraphs retain a non-overlapping legacy compatibility lane | The current RFC-64 catalog authoring path supports only the root scope (`subGraphName=null`). Valid named-subgraph live delivery and recovery therefore stay on the legacy lane, while root aggregate, metadata, and data graphs remain excluded from that lane | No activation action is required. Verify named-subgraph live delivery and restart recovery when upgrading nodes that use subgraphs; do not treat this compatibility lane as root RFC-64 completion |
 | Historical root SWM is excluded from default catalog recovery | Pre-10.0.16 root SWM heads remain readable but are reported as a known-incomplete boundary until an ordinary root SHARE/update republishes them into a current catalog | Republish any legacy-only root asset that must participate in complete default recovery; monitor `legacyReadOnlyCount` and the per-CG operational phase |
 | Authority resolution is fail closed and freshness-bearing | A responsible CG cannot serve, receive, or claim root completion while its registered chain snapshot, owner authority, private roster, or freshness is unresolved | Investigate `resolving-authority`, `blocked`, `known-incomplete`, or `unknown-freshness` status before promotion |
@@ -29,7 +30,7 @@ A default-responsibility RFC-64 release. When RFC-64 controls are omitted, the r
 
 ### Changed
 
-- Omitted RFC-64 configuration now resolves the root lane to catalog mode; the deprecated explicit disabled override remains a compatibility rollback rather than the default.
+- Omitted RFC-64 configuration on persistent nodes now resolves the root lane to catalog mode; no-`dataDir` agents retain ephemeral legacy root replication, and explicit catalog mode without persistence is rejected before startup. The deprecated explicit disabled override remains a compatibility rollback rather than the persistent-node default.
 - Catalog mode disallows root-scope legacy SWM synchronization. Valid named subgraphs retain a scope-selected legacy compatibility lane; `legacy`, `shadow`, and kill-switch overrides remain operator-controlled and status-visible.
 - Public and private root authoring share the same tier-neutral signed catalog. Private policy and roster material remain authorization-bound and are never exposed in configuration evidence.
 - Catalog head application rechecks durable state inside the mutation lock, closing the scheduler-to-commit race while preserving restart repair.
@@ -42,6 +43,8 @@ A default-responsibility RFC-64 release. When RFC-64 controls are omitted, the r
 - Late verified on-chain binding now notifies the responsibility registry, covering cold subscriptions whose numeric Context Graph ID arrives after their initial fail-closed policy check.
 - A newly responsible receiver now requests a policy-authorized replay of durable catalog heads from peers that were already connected, so subscription or finalized-authority activation after publication cannot miss the current head; private replay requests remain member/provider gated.
 - A cold private joiner now re-announces its persisted profile before requesting membership and carries its wallet-proven public encryption keys in a request-specific attestation. An upgraded curator can therefore verify the active encryption key without waiting for opportunistic profile gossip, while the stable v2 delegation signature remains readable by older curators.
+- Operational status includes explicitly configured catalog, shadow, and legacy Context Graphs before the live responsibility registry observes them, preserving rollout and rollback evidence during bootstrap.
+- Restart reconciliation retires an exact stale SWM twin even when finalized VM content and metadata already match, while preserving unrelated or non-identical SWM state.
 
 ### Deployment
 
@@ -57,6 +60,7 @@ A default-responsibility RFC-64 release. When RFC-64 controls are omitted, the r
 ### Known limitations
 
 - RFC-64 catalog inventory, publication, replay, and recovery in 10.0.16 are root-scope only. Named subgraphs retain the non-overlapping legacy compatibility lane until catalogs support non-null `subGraphName`.
+- RFC-64 catalogs require `dataDir`. Agents created without persistent state keep an explicit ephemeral legacy root lane and cannot be used as default-catalog release evidence.
 - Pre-10.0.16 root SWM history is deliberately not inferred into a signed current catalog. Until an ordinary root update republishes it, status remains `known-incomplete` and release certification fails closed.
 - Matrix evidence is valid only for the frozen DKG and harness commits under test. Distributed testnet execution remains a separately authorized promotion gate.
 

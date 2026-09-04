@@ -1780,6 +1780,15 @@ export class FinalizationHandler {
           scope,
           materializedVersion,
         });
+        await this.reconcileConfirmedSwmTwin({
+          contextGraphId,
+          scope,
+          head,
+          verification: vmVerification,
+          expectedMerkleRoot: merkleRoot,
+          subGraphName,
+          ctx,
+        });
         this.log.info(ctx, `Chain-reconcile: ${ual} already has exact VM content and metadata`);
         return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
       }
@@ -1801,6 +1810,15 @@ export class FinalizationHandler {
             contextGraphId,
             scope,
             materializedVersion,
+          });
+          await this.reconcileConfirmedSwmTwin({
+            contextGraphId,
+            scope,
+            head,
+            verification: vmVerification,
+            expectedMerkleRoot: merkleRoot,
+            subGraphName,
+            ctx,
           });
           this.log.info(
             ctx,

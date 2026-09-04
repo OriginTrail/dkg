@@ -2739,6 +2739,79 @@ describe('WM → SWM gossip → VM (2 nodes)', () => {
     return lastResult;
   }
 
+  it('keeps legacy root SWM delivery for two omitted-config agents without dataDir', async () => {
+    const contextGraphId = 'ephemeral-default-legacy-lane';
+    const entity = `${ENTITY_BASE}:ephemeral-default-legacy`;
+    const sharedChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const nodeA = await RealDKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name: 'EphemeralDefaultLegacyA',
+      listenPort: 0,
+      chainAdapter: sharedChain,
+      nodeRole: 'core',
+      syncOnConnectEnabled: false,
+      syncReconcilerEnabled: false,
+      agentProfileHeartbeatMs: 0,
+    });
+    agents.push(nodeA);
+    const nodeB = await RealDKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name: 'EphemeralDefaultLegacyB',
+      listenPort: 0,
+      chainAdapter: sharedChain,
+      nodeRole: 'core',
+      syncOnConnectEnabled: false,
+      syncReconcilerEnabled: false,
+      agentProfileHeartbeatMs: 0,
+    });
+    agents.push(nodeB);
+
+    for (const node of [nodeA, nodeB]) {
+      expect((node as any).config.rfc64CatalogExecutionPlan)
+        .toMatchObject({ responsibilityDefaultMode: 'legacy' });
+      await node.start();
+      expect(node.rfc64PublicCatalogStatsV1()).toBeNull();
+    }
+    await nodeB.connectTo(nodeA.multiaddrs[0]!);
+    await sleep(1_000);
+
+    await nodeA.createContextGraph({
+      id: contextGraphId,
+      name: 'Ephemeral default legacy lane',
+    });
+    await nodeA.registerContextGraph(contextGraphId);
+    nodeA.subscribeToContextGraph(contextGraphId);
+    nodeB.subscribeToContextGraph(contextGraphId);
+    await sleep(1_500);
+    for (const node of [nodeA, nodeB]) {
+      expect(node.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId)).toMatchObject({
+        mode: 'legacy',
+        legacySyncAllowed: true,
+        reconciliationLane: 'legacy',
+      });
+    }
+
+    await nodeA.assertion.create(contextGraphId, 'ephemeral-root');
+    await nodeA.assertion.write(contextGraphId, 'ephemeral-root', [{
+      subject: entity,
+      predicate: 'http://schema.org/name',
+      object: '"Ephemeral root replicated"',
+    }]);
+    await nodeA.assertion.promote(contextGraphId, 'ephemeral-root');
+
+    const replicated = await pollUntil(
+      () => nodeB.query(
+        `SELECT ?name WHERE { <${entity}> <http://schema.org/name> ?name }`,
+        { contextGraphId, graphSuffix: '_shared_memory' },
+      ),
+      (bindings) => bindings.length > 0,
+      15_000,
+    );
+    expect(replicated).toEqual([expect.objectContaining({
+      name: '"Ephemeral root replicated"',
+    })]);
+  }, 45_000);
+
   it('an imported Markdown KA survives WM → SWM gossip → VM on a second node', async () => {
     const sharedChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const nodeA = await DKGAgent.create({

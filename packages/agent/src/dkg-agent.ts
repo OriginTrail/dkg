@@ -1084,9 +1084,25 @@ export class DKGAgent extends DKGAgentBase {
         normalizedConfig.rfc64CatalogActivation === undefined
         && normalizedConfig.rfc64PublicCatalogActivation?.enabled === false
       );
+    const rfc64CatalogConfigurationOmitted =
+      normalizedConfig.rfc64CatalogActivation === undefined
+      && normalizedConfig.rfc64PublicCatalogActivation === undefined
+      && normalizedConfig.rfc64CatalogDeploymentProfile === undefined
+      && normalizedConfig.rfc64CatalogAccessPolicyAuthority === undefined
+      && normalizedConfig.rfc64PublicCatalogAutoPublish === undefined
+      && normalizedConfig.rfc64PublicCatalogBootstrap === undefined;
+    // Agents without a persistence root cannot run the catalog service. Preserve
+    // the historical in-memory legacy lane only for a truly omitted RFC-64
+    // configuration; an explicit catalog request is rejected below instead of
+    // silently suppressing both catalog and legacy delivery.
+    const rfc64CatalogEphemeralLegacyFallback =
+      !normalizedConfig.dataDir && rfc64CatalogConfigurationOmitted;
     const rfc64CatalogExecutionPlan = resolveRfc64CatalogExecutionPlanV1({
       configuredContextGraphs: normalizedConfig.syncContextGraphs ?? [],
-      responsibilityDefaultMode: rfc64CatalogExplicitlyDisabled ? 'legacy' : 'catalog',
+      responsibilityDefaultMode:
+        rfc64CatalogExplicitlyDisabled || rfc64CatalogEphemeralLegacyFallback
+          ? 'legacy'
+          : 'catalog',
       standaloneTrack2ContextGraphs:
         normalizedConfig.rfc64PublicCatalogActivation === undefined
           ? (rfc64PublicCatalogControls.bootstrap?.acceptedPublicPolicies.map(
@@ -1107,6 +1123,16 @@ export class DKGAgent extends DKGAgentBase {
     }
     if (catalogActivation.bootstrap !== undefined && !config.dataDir) {
       throw new TypeError('rfc64Catalog bootstrap requires dataDir');
+    }
+    if (
+      !config.dataDir
+      && !rfc64CatalogExecutionPlan.killSwitchActive
+      && rfc64CatalogExecutionPlan.responsibilityDefaultMode === 'catalog'
+    ) {
+      throw new TypeError(
+        'RFC-64 catalog mode requires dataDir; omit RFC-64 catalog configuration '
+        + 'for ephemeral legacy mode or set rfc64CatalogActivation.enabled=false',
+      );
     }
     if (
       catalogActivation.deploymentProfile !== undefined
