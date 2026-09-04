@@ -292,8 +292,34 @@ describe('collectStateSummary (§4.7.0)', () => {
 // ---------------------------------------------------------------------------
 
 describe('orphan-repos check (§4.7.1)', () => {
-  it('flags a stray clone with OriginTrail/dkg origin as warning', async () => {
+  it('ignores unrelated home clones and identifies the selected node paths (#1762)', async () => {
     const deps = makeDeps({
+      dkgHome: '/isolated/node', dkgHomeEnv: '/isolated/node',
+      fs: {
+        '/test/Projects/unrelated/package.json': JSON.stringify({ name: 'dkg-v10' }),
+        '/isolated/node/releases/blue/package.json': JSON.stringify({ name: 'dkg-v10' }),
+      },
+    });
+    const findings = await runOrphanReposCheck(deps, await collectStateSummary(deps));
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ severity: 'info', subject: '/isolated/node/releases/blue', details: { relevance: 'selected-dkg-home' } });
+  });
+
+  it('finds the known active daemon without scanning sibling clones', async () => {
+    const deps = makeDeps({ fs: {
+      '/test/Projects/active/package.json': JSON.stringify({ name: 'dkg-v10' }),
+      '/test/Projects/sibling/package.json': JSON.stringify({ name: 'dkg-v10' }),
+    } });
+    const state = await collectStateSummary(deps);
+    state.daemon.entryPoint = '/test/Projects/active/packages/cli/dist/cli.js';
+    const findings = await runOrphanReposCheck(deps, state);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].details?.relevance).toBe('active-daemon');
+  });
+
+  it('reports explicitly requested clone discovery as informational', async () => {
+    const deps = makeDeps({
+      extraScanRoots: ['/test'],
       fs: {
         '/test/Projects/dkg/.git/config': '[remote "origin"]\n  url = https://github.com/OriginTrail/dkg.git\n',
         '/test/Projects/dkg/package.json': JSON.stringify({ name: 'doesnt-matter' }),
@@ -303,12 +329,14 @@ describe('orphan-repos check (§4.7.1)', () => {
     expect(findings.length).toBeGreaterThan(0);
     const stray = findings.find((f) => f.subject === '/test/Projects/dkg');
     expect(stray).toBeDefined();
-    expect(stray!.severity).toBe('warning');
-    expect(stray!.advisory).toMatch(/Do not 'git pull'/);
+    expect(stray!.severity).toBe('info');
+    expect(stray!.details?.relevance).toBe('explicit-scan-root');
+    expect(findings.filter((f) => f.subject === stray!.subject)).toHaveLength(1);
   });
 
   it('flags a clone via package.json name match', async () => {
     const deps = makeDeps({
+      extraScanRoots: ['/test'],
       fs: {
         '/test/repos/dkg/package.json': JSON.stringify({ name: '@origintrail-official/dkg', version: '10.0.0' }),
       },
@@ -316,11 +344,12 @@ describe('orphan-repos check (§4.7.1)', () => {
     const findings = await runOrphanReposCheck(deps, await collectStateSummary(deps));
     const m = findings.find((f) => f.subject === '/test/repos/dkg');
     expect(m).toBeDefined();
-    expect(m!.severity).toBe('warning');
+    expect(m!.severity).toBe('info');
   });
 
   it('reports the active-daemon source tree as info rather than warning', async () => {
     const deps = makeDeps({
+      extraScanRoots: ['/test'],
       fs: {
         '/test/.dkg/daemon.pid': '4242',
         '/test/Projects/dkg/.git/config': '[remote "origin"]\n  url = https://github.com/OriginTrail/dkg.git\n',
@@ -341,6 +370,7 @@ describe('orphan-repos check (§4.7.1)', () => {
 
   it('skips ignored directories (node_modules, .npm, .cache)', async () => {
     const deps = makeDeps({
+      extraScanRoots: ['/test'],
       fs: {
         // Stray DKG clone NESTED inside a node_modules tree → must be skipped.
         '/test/Projects/some-app/node_modules/dkg/.git/config':
@@ -353,6 +383,7 @@ describe('orphan-repos check (§4.7.1)', () => {
 
   it('respects .dkg-ignore-by-doctor sentinel', async () => {
     const deps = makeDeps({
+      extraScanRoots: ['/test'],
       fs: {
         '/test/some/.dkg-ignore-by-doctor': '',
         '/test/some/.git/config': '[remote "origin"]\n  url = https://github.com/OriginTrail/dkg.git\n',

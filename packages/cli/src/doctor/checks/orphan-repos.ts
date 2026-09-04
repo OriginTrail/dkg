@@ -1,29 +1,7 @@
-/**
- * §4.7.1 Check: orphan repository clones.
- *
- * Walks operator $HOME (plus common dev-folder children: `Projects`,
- * `repos`, `src`, `dev`, plus any operator-configured `doctor.scanRoots`)
- * up to a bounded depth, looking for directories that look like a
- * stray DKG repository clone. Each match is reported as a finding
- * with severity `warning` (or `info` if the directory IS the active
- * daemon — that's just describing reality).
- *
- * Detection signals:
- *   - `.git/config` whose `[remote "origin"]` URL contains
- *     `OriginTrail/dkg` or `origintrail-official/dkg`, OR
- *   - `package.json` whose `name` field is `@origintrail-official/dkg`
- *     or `dkg-v9` (legacy name).
- *
- * Performance constraint: the scan MUST complete in < 5 s on a
- * laptop-sized home directory. We skip `node_modules`, `.npm`,
- * `.cache`, `.npmrc`, any dot-directory other than the configured
- * roots themselves, and any directory containing a
- * `.dkg-ignore-by-doctor` sentinel.
- */
-import { join } from 'node:path';
+/** Inspect the selected node's install paths; broader discovery requires doctor.scanRoots. */
+import { dirname, join, relative, isAbsolute, sep } from 'node:path';
 import type { DoctorDeps, Finding, StateSummary } from '../types.js';
 
-const DEFAULT_SCAN_ROOT_CHILDREN = ['Projects', 'repos', 'src', 'dev'];
 const DEFAULT_MAX_DEPTH = 4;
 const IGNORE_SENTINEL = '.dkg-ignore-by-doctor';
 const SKIP_DIRECTORIES = new Set([
@@ -40,7 +18,7 @@ const SKIP_DIRECTORIES = new Set([
   'build',
 ]);
 const ORIGIN_PATTERN = /OriginTrail\/dkg|origintrail-official\/dkg/i;
-const PACKAGE_NAME_MATCHES = new Set(['@origintrail-official/dkg', 'dkg-v9']);
+const PACKAGE_NAME_MATCHES = new Set(['@origintrail-official/dkg', 'dkg-v9', 'dkg-v10']);
 
 /** A single discovered candidate. Exported for downstream consumption (e.g. CLI rendering). */
 export interface OrphanCandidate {
@@ -52,16 +30,17 @@ export interface OrphanCandidate {
   isActiveDaemon: boolean;
 }
 
-/** Compute the set of roots we will scan. */
-function resolveScanRoots(deps: DoctorDeps): string[] {
-  const roots = new Set<string>([deps.home]);
-  for (const child of DEFAULT_SCAN_ROOT_CHILDREN) {
-    roots.add(join(deps.home, child));
-  }
-  for (const extra of deps.extraScanRoots) {
-    roots.add(extra);
-  }
-  return Array.from(roots);
+function isWithin(path: string, root: string): boolean {
+  const rel = relative(root, path);
+  return rel === '' || (!rel.startsWith('..' + sep) && rel !== '..' && !isAbsolute(rel));
+}
+
+/** Never infer relevance by recursively scanning the operator's home. */
+function resolveScanRoots(deps: DoctorDeps, state: StateSummary): string[] {
+  return [...new Set([
+    deps.dkgHome, deps.monorepoRoot, state.paths.activeSlot, state.paths.npmGlobalDkg,
+    ...deps.extraScanRoots,
+  ].filter((root): root is string => Boolean(root)))];
 }
 
 /**
@@ -110,7 +89,7 @@ async function probeDirectory(
     origin && packageName ? 'both' : origin ? 'git-origin' : 'package-name';
 
   const isActiveDaemon = daemonEntryPoint
-    ? daemonEntryPoint.startsWith(dir + '/') || daemonEntryPoint === dir
+    ? isWithin(daemonEntryPoint, dir)
     : false;
 
   return {
@@ -183,33 +162,39 @@ export async function runOrphanReposCheck(
   // belt-and-braces — DEFAULT_MAX_DEPTH and the dot-dir skip should
   // keep the scan fast on a normal home tree.
   const budget = { count: 50, deadlineMs: Date.now() + 5000 };
-  const roots = resolveScanRoots(deps);
+  const roots = resolveScanRoots(deps, state);
   for (const root of roots) {
     await scan(deps, root, state.daemon.entryPoint, candidates, budget);
     if (Date.now() > budget.deadlineMs) break;
     if (budget.count <= 0) break;
   }
 
-  for (const c of candidates) {
-    if (c.isActiveDaemon) {
-      findings.push({
-        check: 'orphan-repos',
-        severity: 'info',
-        message: `DKG repository clone at ${c.path} (active daemon's source tree)`,
-        subject: c.path,
-        details: { matchedBy: c.matchedBy, isActiveDaemon: true, ...(c.origin ? { origin: c.origin } : {}), ...(c.packageName ? { packageName: c.packageName } : {}) },
-      });
-    } else {
-      findings.push({
-        check: 'orphan-repos',
-        severity: 'warning',
-        message: `Stray DKG repository clone at ${c.path}`,
-        advisory: "This is not the running daemon. Do not 'git pull' here. Run 'dkg update' instead.",
-        subject: c.path,
-        details: { matchedBy: c.matchedBy, isActiveDaemon: false, ...(c.origin ? { origin: c.origin } : {}), ...(c.packageName ? { packageName: c.packageName } : {}) },
-      });
+  // Probe the known daemon's ancestors directly, without traversing siblings.
+  if (state.daemon.entryPoint) {
+    let dir = dirname(state.daemon.entryPoint);
+    while (dirname(dir) !== dir && dir !== deps.home) {
+      const candidate = await probeDirectory(deps, dir, state.daemon.entryPoint);
+      if (candidate) { candidates.push(candidate); break; }
+      dir = dirname(dir);
     }
   }
 
+  const seen = new Set<string>();
+  for (const c of candidates) {
+    if (seen.has(c.path)) continue;
+    seen.add(c.path);
+    const relevance = c.isActiveDaemon ? 'active-daemon'
+      : isWithin(c.path, deps.dkgHome) ? 'selected-dkg-home'
+      : [deps.monorepoRoot, state.paths.activeSlot, state.paths.npmGlobalDkg].some((root) => root && isWithin(c.path, root)) ? 'selected-install'
+      : 'explicit-scan-root';
+    findings.push({
+      check: 'orphan-repos',
+      severity: 'info',
+      message: `DKG repository clone at ${c.path} (${relevance})`,
+      subject: c.path,
+      details: { relevance, matchedBy: c.matchedBy, isActiveDaemon: c.isActiveDaemon,
+        ...(c.origin ? { origin: c.origin } : {}), ...(c.packageName ? { packageName: c.packageName } : {}) },
+    });
+  }
   return findings;
 }
