@@ -1406,7 +1406,7 @@ function selectAdmittedMetadataIndexes(
     ) {
       if (admittedMetadataUals.has(quad.subject)) {
         if (
-          DURABLE_SYNC_CONTROL_PREDICATE_SET.has(quad.predicate)
+          isDurableSyncControlQuad(quad, metadata, quad.subject)
           && !authenticatedMetadataUals.has(quad.subject)
         ) {
           droppedControls += 1;
@@ -1421,7 +1421,7 @@ function selectAdmittedMetadataIndexes(
     if (owner) {
       if (admittedMetadataUals.has(owner)) {
         if (
-          DURABLE_SYNC_CONTROL_PREDICATE_SET.has(quad.predicate)
+          isDurableSyncControlQuad(quad, metadata, owner)
           && !authenticatedMetadataUals.has(owner)
         ) {
           droppedControls += 1;
@@ -1432,13 +1432,7 @@ function selectAdmittedMetadataIndexes(
       continue;
     }
 
-    // A self-consistent graph-seal assertionVersion is descriptive metadata,
-    // not a sync control — admit it via the descriptive path.
-    if (isGraphSealDescriptiveVersion(quad, metadata)) {
-      indexes.push(index);
-      continue;
-    }
-    if (DURABLE_SYNC_CONTROL_PREDICATE_SET.has(quad.predicate)) {
+    if (isDurableSyncControlQuad(quad, metadata)) {
       if (isAuthenticatedSyncControl(
         quad,
         metadata,
@@ -1476,8 +1470,7 @@ function selectSystemOverrideMetadataIndexes(
       continue;
     }
     if (
-      DURABLE_SYNC_CONTROL_PREDICATE_SET.has(quad.predicate)
-      && !isGraphSealDescriptiveVersion(quad, metadata)
+      isDurableSyncControlQuad(quad, metadata)
       && !isAuthenticatedSyncControl(
         quad,
         metadata,
@@ -1491,6 +1484,14 @@ function selectSystemOverrideMetadataIndexes(
     indexes.push(index);
   }
   return { indexes, droppedControls, droppedNonIriSubjectTriples };
+}
+
+/** One classification boundary for descriptor controls and descriptive seal fields. */
+function isDurableSyncControlQuad(quad: Quad, metadata: IntegrityMetadataIndex, descriptorOwner?: string): boolean {
+  // Descriptor-owned fields retain their existing authentication requirement;
+  // adding seal-shaped quads to a descriptor must never relax that gate.
+  return DURABLE_SYNC_CONTROL_PREDICATE_SET.has(quad.predicate)
+    && (descriptorOwner !== undefined || !isGraphSealDescriptiveVersion(quad, metadata));
 }
 
 /**
