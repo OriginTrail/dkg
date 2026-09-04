@@ -1837,7 +1837,7 @@ function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
 }
 
 export class LifecycleSyncMethods extends DKGAgentBase {
-  private async retireFinalizedSwmTwinCandidate(
+  async retireFinalizedSwmTwinCandidate(
     candidate: FinalizedSwmTwinRetirement,
     ctx: OperationContext,
   ): Promise<void> {

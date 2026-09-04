@@ -237,7 +237,10 @@ import {
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
-import { createRetireConfirmedGraphScopedSwmTwinIfOrphaned } from
+import {
+  createRetireConfirmedGraphScopedSwmTwinIfOrphaned,
+  reconcileFinalizedSwmTwinFromCatalogProjection,
+} from
   './sync/requester/finalized-swm-twin-reconciliation.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
@@ -1831,6 +1834,21 @@ export class SwmSubstrateMethods extends DKGAgentBase {
                 );
               },
             }),
+          reconcileConfirmedGraphScopedSwmTwin: async (evidence, ctx) => {
+            const retirement = await reconcileFinalizedSwmTwinFromCatalogProjection({
+              store: this.store,
+              writeLocks: this.writeLocks,
+              evidence,
+              retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
+            });
+            if (retirement === 'retired') {
+              this.invalidateListContextGraphsCache();
+              this.log.info(
+                ctx,
+                `Retired byte-identical SWM twin after finalized VM reconciliation for ${evidence.kaUal}`,
+              );
+            }
+          },
           runtime: this.finalizationRuntime,
         },
       );

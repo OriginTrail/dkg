@@ -51,6 +51,7 @@ import {
   compareMaterializedVersion, readMaterializedVersion,
   shouldApplyMaterialization, writeMaterializedVersion, materializedVersionQuad,
   withMaterializationLock,
+  workspacePublicQuadsDigest,
   KnowledgeAssetWorkspaceHeadCorruptError,
   resolveKnowledgeAssetWorkspaceHead,
   type MaterializedVersion,
@@ -108,7 +109,10 @@ import {
   type VerifiedExactGraphContent,
 } from './exact-graph-content-verifier.js';
 import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
-import type { RetireConfirmedGraphScopedSwmTwinIfOrphaned } from
+import type {
+  FinalizedSwmTwinCatalogProjectionEvidence,
+  RetireConfirmedGraphScopedSwmTwinIfOrphaned,
+} from
   './sync/requester/finalized-swm-twin-reconciliation.js';
 
 /**
@@ -310,6 +314,10 @@ export interface FinalizationHandlerOptions {
   markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads;
   retireConfirmedGraphScopedSwmTwinIfOrphaned?:
     RetireConfirmedGraphScopedSwmTwinIfOrphaned;
+  reconcileConfirmedGraphScopedSwmTwin?: (
+    evidence: Readonly<FinalizedSwmTwinCatalogProjectionEvidence>,
+    ctx: OperationContext,
+  ) => Promise<void>;
   lifecycleLogOptions?: FinalizationLifecycleLogOptions;
   recoveryStore?: FinalizationRecoveryStore;
   runtime?: FinalizationRuntime;
@@ -412,6 +420,8 @@ export class FinalizationHandler {
   private readonly markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads | undefined;
   private readonly retireConfirmedGraphScopedSwmTwinIfOrphaned:
     RetireConfirmedGraphScopedSwmTwinIfOrphaned | undefined;
+  private readonly reconcileConfirmedGraphScopedSwmTwin:
+    FinalizationHandlerOptions['reconcileConfirmedGraphScopedSwmTwin'];
   private readonly recovery: FinalizationRecovery<PreparedGraphScopedMaterialization>;
   private readonly log = new Logger('FinalizationHandler');
   private readonly lifecycle: FinalizationLifecycleLogger;
@@ -473,6 +483,8 @@ export class FinalizationHandler {
     this.markContextGraphMetaDirtyFromQuads = options.markContextGraphMetaDirtyFromQuads;
     this.retireConfirmedGraphScopedSwmTwinIfOrphaned =
       options.retireConfirmedGraphScopedSwmTwinIfOrphaned;
+    this.reconcileConfirmedGraphScopedSwmTwin =
+      options.reconcileConfirmedGraphScopedSwmTwin;
     this.lifecycle = new FinalizationLifecycleLogger(
       this.log,
       options.runtime ?? options.lifecycleLogOptions,
@@ -1259,6 +1271,15 @@ export class FinalizationHandler {
         subGraphName,
       });
       if (metadataState === 'matching') {
+        await this.reconcileConfirmedSwmTwin({
+          contextGraphId,
+          scope,
+          head,
+          verification: layerVerification,
+          expectedMerkleRoot: msg.kcMerkleRoot,
+          subGraphName,
+          ctx,
+        });
         this.markProcessed(dedupeKey);
         this.log.info(ctx, `Finalization: graph-scoped KA ${scope.ual} is already confirmed`);
         return 'already-confirmed';
@@ -1293,6 +1314,16 @@ export class FinalizationHandler {
       this.log.info(ctx, `Finalization: newer graph-scoped assertion already materialized for ${scope.ual}`);
       return 'already-confirmed';
     }
+
+    await this.reconcileConfirmedSwmTwin({
+      contextGraphId,
+      scope,
+      head,
+      verification: layerVerification,
+      expectedMerkleRoot: msg.kcMerkleRoot,
+      subGraphName,
+      ctx,
+    });
 
     this.markProcessed(dedupeKey);
     this.log.info(
@@ -2060,6 +2091,15 @@ export class FinalizationHandler {
           scope,
           materializedVersion: finalizedVersion,
         });
+        await this.reconcileConfirmedSwmTwin({
+          contextGraphId,
+          scope,
+          head: finalizedHead,
+          verification: verifiedLayer.verification,
+          expectedMerkleRoot: merkleRoot,
+          subGraphName,
+          ctx,
+        });
         this.log.info(
           ctx,
           `Chain-reconcile: ${scope.ual} already has exact receiptless public VM state`,
@@ -2090,6 +2130,16 @@ export class FinalizationHandler {
     });
     if (outcome === 'stale') return 'stale-target';
 
+    await this.reconcileConfirmedSwmTwin({
+      contextGraphId,
+      scope,
+      head: finalizedHead,
+      verification: verifiedLayer.verification,
+      expectedMerkleRoot: merkleRoot,
+      subGraphName,
+      ctx,
+    });
+
     if (contentAlreadyMaterialized) {
       this.log.info(
         ctx,
@@ -2105,6 +2155,43 @@ export class FinalizationHandler {
         + `for ${scope.ual} (ka=${batchId})`,
     );
     return 'promoted';
+  }
+
+  /**
+   * Retire an exact graph-scoped SWM twin only after the same assertion has a
+   * verified VM projection. The injected owner holds the publisher's per-KA
+   * write lock and re-proves the SWM head, VM metadata, counts, commitments,
+   * and bytes before deleting anything. This closes the arrival-order race in
+   * which chain reconciliation materializes VM after ordinary SWM catch-up:
+   * without this tail, the stale SWM graph can make a later RFC-64 cold
+   * bootstrap reject an otherwise exact author head forever.
+   */
+  private async reconcileConfirmedSwmTwin(input: {
+    contextGraphId: string;
+    scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    head: GraphScopedMaterializationEnvelope;
+    verification: VerifiedGraphScopedLayer;
+    expectedMerkleRoot: Uint8Array;
+    subGraphName?: string;
+    ctx: OperationContext;
+  }): Promise<void> {
+    const reconcile = this.reconcileConfirmedGraphScopedSwmTwin;
+    if (reconcile === undefined) return;
+    await reconcile(Object.freeze({
+      contextGraphId: input.contextGraphId,
+      ...(input.subGraphName === undefined
+        ? {}
+        : { subGraphName: input.subGraphName }),
+      kaUal: input.scope.ual,
+      assertionVersion: input.scope.assertionVersion,
+      publicQuadsDigest: workspacePublicQuadsDigest(input.verification.quads),
+      publicQuadsCount: input.head.publicTripleCount,
+      privateTripleCount: input.head.privateTripleCount,
+      ...(input.head.privateMerkleRoot === undefined
+        ? {}
+        : { privateMerkleRoot: input.head.privateMerkleRoot }),
+      expectedMerkleRoot: ethers.hexlify(input.expectedMerkleRoot),
+    }), input.ctx);
   }
 
   private async repairExactGraphScopedVmMetadata(input: {

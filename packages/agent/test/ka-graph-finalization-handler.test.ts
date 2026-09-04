@@ -48,7 +48,10 @@ import {
   type ChainReconcilerDeps,
 } from '../src/chain-reconciler.js';
 import { createCursorState } from '../src/reconcile-cursor.js';
-import { createRetireConfirmedGraphScopedSwmTwinIfOrphaned } from
+import {
+  createRetireConfirmedGraphScopedSwmTwinIfOrphaned,
+  reconcileFinalizedSwmTwinFromCatalogProjection,
+} from
   '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 
 const CG = 'rootless-finalization';
@@ -2404,6 +2407,49 @@ describe('graph-scoped finalization handler', () => {
       <http://www.w3.org/ns/prov#wasAttributedTo> <did:dkg:agent:${AUTHOR}> .
       FILTER NOT EXISTS { <${UAL}> <http://dkg.io/ontology/transactionHash> ?tx }
     `);
+  });
+
+  it('retires the exact SWM twin after receiptless public chain promotion', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    const writeLocks = new Map<string, Promise<void>>();
+    const retire = vi.fn(async (candidate: { swmGraph: string }) => {
+      await store.dropGraph(candidate.swmGraph);
+    });
+    const publicHandler = new FinalizationHandler(
+      store,
+      legacyFinalizationChain(4, {
+        isContextGraphActiveOnChain: async () => true,
+        getContextGraphAccessPolicy: async () => 0,
+        getMerkleRootCount: async () => 1n,
+        getLatestMerkleRoot: async () => message.kcMerkleRoot,
+        getLatestMerkleRootAuthor: async () => AUTHOR,
+      }),
+      {
+        reconcileConfirmedGraphScopedSwmTwin: async (evidence) => {
+          const outcome = await reconcileFinalizedSwmTwinFromCatalogProjection({
+            store,
+            writeLocks,
+            evidence,
+            retire,
+          });
+          expect(outcome).toBe('retired');
+        },
+      },
+    );
+    const internals = publicHandler as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+      findSwmSnapshotForMerkleRoot?: () => Promise<never>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+    internals.findSwmSnapshotForMerkleRoot = async () => {
+      throw new Error('legacy root scan must not run for graph-scoped SWM');
+    };
+
+    await expect(reconcileGraphScoped(publicHandler, message)).resolves.toBe('promoted');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    expect(retire).toHaveBeenCalledOnce();
   });
 
   it('promotes a later exact public SWM assertion when the chain version advances', async () => {
