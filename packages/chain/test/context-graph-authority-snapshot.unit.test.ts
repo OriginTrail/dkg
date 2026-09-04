@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 
+import type { ContextGraphAuthoritySnapshot } from '../src/chain-adapter.js';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 
@@ -9,6 +10,8 @@ const OWNER = '0x1111111111111111111111111111111111111111';
 const MEMBER = '0x2222222222222222222222222222222222222222';
 const AUTHORITY = '0x3333333333333333333333333333333333333333';
 const GOVERNANCE = '0x4444444444444444444444444444444444444444';
+const SECOND_MEMBER = '0x5555555555555555555555555555555555555555';
+const SECOND_AUTHORITY = '0x6666666666666666666666666666666666666666';
 const FINALIZED_HASH = `0x${'55'.repeat(32)}`;
 const CREATION_HASH = `0x${'66'.repeat(32)}`;
 const POLICY_HASH = `0x${'77'.repeat(32)}`;
@@ -197,5 +200,175 @@ describe('RFC-64 Context Graph authority snapshots', () => {
         policyVersion: '0',
         rosterVersion: '0',
       });
+  });
+
+  it('advances mock authority high-waters and source evidence across every mutation class', async () => {
+    const mock = new MockChainAdapter('mock:31337', OWNER);
+    const created = await mock.createOnChainContextGraph({
+      accessPolicy: 1,
+      publishPolicy: 0,
+      publishAuthority: AUTHORITY,
+      publishAuthorityAccountId: 0n,
+      participantAgents: [MEMBER],
+      nameHash: NAME_HASH,
+    });
+    let accepted: ContextGraphAuthoritySnapshot | undefined;
+    const accept = (snapshot: ContextGraphAuthoritySnapshot) => {
+      if (accepted !== undefined) {
+        const policyChanged = snapshot.owner !== accepted.owner
+          || snapshot.publishPolicy !== accepted.publishPolicy
+          || snapshot.publishAuthority !== accepted.publishAuthority
+          || snapshot.publishAuthorityAccountId !== accepted.publishAuthorityAccountId;
+        const rosterChanged = snapshot.participantAgents.join(',')
+          !== accepted.participantAgents.join(',');
+        if (policyChanged) {
+          expect(BigInt(snapshot.sourceBlockNumber))
+            .toBeGreaterThan(BigInt(accepted.sourceBlockNumber));
+          expect(snapshot.sourceBlockHash).not.toBe(accepted.sourceBlockHash);
+          expect(BigInt(snapshot.policyVersion))
+            .toBeGreaterThan(BigInt(accepted.policyVersion));
+        } else {
+          expect(snapshot.sourceBlockNumber).toBe(accepted.sourceBlockNumber);
+          expect(snapshot.sourceBlockHash).toBe(accepted.sourceBlockHash);
+          expect(snapshot.policyVersion).toBe(accepted.policyVersion);
+        }
+        if (snapshot.owner !== accepted.owner) {
+          expect(BigInt(snapshot.ownershipEra))
+            .toBeGreaterThan(BigInt(accepted.ownershipEra));
+        }
+        if (rosterChanged) {
+          expect(BigInt(snapshot.rosterVersion))
+            .toBeGreaterThan(BigInt(accepted.rosterVersion));
+        }
+      }
+      accepted = snapshot;
+    };
+    const readAndAccept = async () => {
+      const snapshot = await mock.getContextGraphAuthoritySnapshot(created.contextGraphId);
+      accept(snapshot);
+      return snapshot;
+    };
+    const expectSource = (
+      snapshot: ContextGraphAuthoritySnapshot,
+      tx: { blockNumber: number },
+    ) => {
+      expect(snapshot.sourceBlockNumber).toBe(tx.blockNumber.toString(10));
+      expect(snapshot.sourceBlockHash)
+        .toBe(`0x${tx.blockNumber.toString(16).padStart(64, '0')}`);
+    };
+
+    const initial = await readAndAccept();
+    expect(initial).toMatchObject({
+      ownershipEra: '0',
+      policyVersion: '0',
+      rosterVersion: '0',
+    });
+    expectSource(initial, created);
+
+    await mock.addContextGraphParticipantAgent(
+      created.contextGraphId,
+      SECOND_MEMBER,
+    );
+    const afterAdd = await readAndAccept();
+    expect(afterAdd).toMatchObject({
+      participantAgents: [MEMBER, SECOND_MEMBER],
+      ownershipEra: '0',
+      policyVersion: '0',
+      rosterVersion: '1',
+    });
+    expect(afterAdd.sourceBlockNumber).toBe(initial.sourceBlockNumber);
+    expect(afterAdd.sourceBlockHash).toBe(initial.sourceBlockHash);
+
+    await mock.removeContextGraphParticipantAgent(
+      created.contextGraphId,
+      SECOND_MEMBER,
+    );
+    const afterRemove = await readAndAccept();
+    expect(afterRemove).toMatchObject({
+      participantAgents: [MEMBER],
+      ownershipEra: '0',
+      policyVersion: '0',
+      rosterVersion: '2',
+    });
+    expect(afterRemove.sourceBlockNumber).toBe(initial.sourceBlockNumber);
+    expect(afterRemove.sourceBlockHash).toBe(initial.sourceBlockHash);
+
+    const authorityUpdated = await mock.__updateContextGraphPublishAuthority(
+      created.contextGraphId,
+      SECOND_AUTHORITY,
+    );
+    const afterAuthority = await readAndAccept();
+    expect(afterAuthority).toMatchObject({
+      publishAuthority: SECOND_AUTHORITY,
+      ownershipEra: '0',
+      policyVersion: '1',
+      rosterVersion: '2',
+    });
+    expectSource(afterAuthority, authorityUpdated);
+
+    const policyUpdated = await mock.__updateContextGraphPublishPolicy(
+      created.contextGraphId,
+      1,
+    );
+    const afterPolicy = await readAndAccept();
+    expect(afterPolicy).toMatchObject({
+      publishPolicy: 1,
+      publishAuthority: null,
+      publishAuthorityAccountId: '0',
+      ownershipEra: '0',
+      policyVersion: '2',
+      rosterVersion: '2',
+    });
+    expectSource(afterPolicy, policyUpdated);
+
+    const transferred = await mock.__transferContextGraphOwnership(
+      created.contextGraphId,
+      SECOND_MEMBER,
+    );
+    const afterTransfer = await readAndAccept();
+    expect(afterTransfer).toMatchObject({
+      owner: SECOND_MEMBER,
+      ownershipEra: '1',
+      policyVersion: '3',
+      rosterVersion: '3',
+    });
+    expectSource(afterTransfer, transferred);
+
+    const ownerCuratedMock = new MockChainAdapter('mock:31338', OWNER);
+    const ownerCurated = await ownerCuratedMock.createOnChainContextGraph({
+      accessPolicy: 1,
+      publishPolicy: 0,
+      publishAuthority: OWNER,
+      publishAuthorityAccountId: 0n,
+      participantAgents: [MEMBER],
+      nameHash: NAME_HASH,
+    });
+    const ownerCuratedInitial = await ownerCuratedMock.getContextGraphAuthoritySnapshot(
+      ownerCurated.contextGraphId,
+    );
+    expect(ownerCuratedInitial).toMatchObject({
+      owner: OWNER,
+      publishAuthority: OWNER,
+      ownershipEra: '0',
+      policyVersion: '0',
+      rosterVersion: '0',
+    });
+
+    const ownerCuratedTransfer = await ownerCuratedMock.__transferContextGraphOwnership(
+      ownerCurated.contextGraphId,
+      SECOND_MEMBER,
+    );
+    const ownerCuratedAfterTransfer = await ownerCuratedMock.getContextGraphAuthoritySnapshot(
+      ownerCurated.contextGraphId,
+    );
+    expect(ownerCuratedAfterTransfer).toMatchObject({
+      owner: SECOND_MEMBER,
+      publishAuthority: SECOND_MEMBER,
+      publishAuthorityAccountId: '0',
+      ownershipEra: '1',
+      policyVersion: '2',
+      rosterVersion: '1',
+    });
+    expectSource(ownerCuratedAfterTransfer, ownerCuratedTransfer);
   });
 });
