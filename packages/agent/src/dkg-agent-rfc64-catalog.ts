@@ -119,7 +119,6 @@ import { createRfc64CatalogNativeScopedReadProviderV1 } from './rfc64/catalog-na
 import {
   projectRfc64CatalogReceiverAuthorityV1,
   resolveRfc64CatalogResponsibilityAuthorityV1,
-  resolveRfc64CatalogExecutionPlanAuthorityV1,
   type Rfc64CatalogAuthorityPolicyV1,
   type Rfc64CatalogExecutionPlanV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
