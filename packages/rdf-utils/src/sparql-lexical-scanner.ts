@@ -185,7 +185,22 @@ function blank(masked: string[], start: number, end: number): void {
   for (let index = start; index < end; index++) masked[index] = ' ';
 }
 
-function logicalIriValue(value: string, start: number, end: number): string | null {
+function logicalIriValue(
+  value: string,
+  start: number,
+  end: number,
+  hasPotentialUchar: boolean,
+): string | null {
+  // A raw-delimited IRI without UCHAR syntax is already its own logical value.
+  // Avoid decoding it code point by code point after skipSparqlIriRef() has
+  // just traversed the same (often very large) body.
+  if (
+    value.charCodeAt(start) === 0x3c
+    && value.charCodeAt(end - 1) === 0x3e
+    && !hasPotentialUchar
+  ) {
+    return value.slice(start + 1, end - 1);
+  }
   const opening = readSparqlLogicalCodePoint(value, start);
   if (!opening || opening.codePoint !== 0x3c) return null;
   const decoded: string[] = [];
@@ -348,6 +363,10 @@ function scanSparql(value: string): ScannedSparql | null {
   const masked = value.split('');
   const materialized: string[] = [];
   const tokens: SparqlLexicalToken[] = [];
+  // UCHAR preprocessing is the only reason an ordinary raw IRI needs a
+  // second code-point traversal to derive its logical value. Detect that once
+  // for the whole source instead of searching the remainder for every IRI.
+  const hasPotentialUchar = value.includes('\\u') || value.includes('\\U');
   // Maintain expression context during the scan. Looking backwards through
   // all prior tokens for every IRI candidate makes long PREFIX lists
   // quadratic; this stack keeps the same nearest-group decision O(1).
@@ -411,7 +430,7 @@ function scanSparql(value: string): ScannedSparql | null {
       if (iriEnd !== null) {
         const start = index;
         index = iriEnd;
-        const logicalValue = logicalIriValue(value, start, index);
+        const logicalValue = logicalIriValue(value, start, index, hasPotentialUchar);
         if (logicalValue === null) {
           unterminated = true;
           continue;

@@ -260,20 +260,35 @@ function skipSparqlIriRefBody(
   encodedDelimiter: boolean,
 ): number | null {
   let index = start;
+  if (!encodedDelimiter) {
+    // Ordinary IRIREFs dominate generated sync queries. Keep their hot path
+    // allocation-free: constructing a SparqlLogicalCodePoint object for every
+    // UTF-16 code unit made large VALUES/FROM catalogs spend more CPU scanning
+    // the query than executing it. UCHAR escapes retain the exact slow-path
+    // validation below, including the rule that their decoded value is allowed
+    // to be a character forbidden in the raw IRI body.
+    while (index < source.length) {
+      const first = source.charCodeAt(index);
+      if (first === 0x3e) return index + 1;
+      if (first === 0x5c) {
+        const logical = readSparqlLogicalCodePoint(source, index);
+        if (!logical || (source[index + 1] !== 'u' && source[index + 1] !== 'U')) return null;
+        index += logical.rawWidth;
+        continue;
+      }
+      const codePoint = source.codePointAt(index);
+      if (codePoint === undefined
+        || !isUnicodeScalarValue(codePoint)
+        || !isSparqlIriRefBodyCodePoint(codePoint)) return null;
+      index += codePoint > 0xffff ? 2 : 1;
+    }
+    return null;
+  }
+
   while (index < source.length) {
     const logical = readSparqlLogicalCodePoint(source, index);
     if (!logical) return null;
-    if (!encodedDelimiter && source.charCodeAt(index) === 0x5c) {
-      if (source[index + 1] !== 'u' && source[index + 1] !== 'U') return null;
-      // UCHAR is an IRIREF body production, even when its decoded value is a
-      // character (such as `>`) that would be forbidden as a raw body byte.
-      index += logical.rawWidth;
-      continue;
-    }
-    if (
-      (encodedDelimiter && logical.codePoint === 0x3e)
-      || (!encodedDelimiter && source.codePointAt(index) === 0x3e)
-    ) return index + logical.rawWidth;
+    if (logical.codePoint === 0x3e) return index + logical.rawWidth;
     if (!isSparqlIriRefBodyCodePoint(logical.codePoint)) return null;
     index += logical.rawWidth;
   }

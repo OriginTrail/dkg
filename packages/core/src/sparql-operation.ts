@@ -39,6 +39,8 @@ type SparqlOperationFacts = Readonly<{
 
 const SPARQL_ANALYSIS_CACHE_MAX_ENTRIES = 256;
 const SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH = 64 * 1024;
+const SPARQL_LARGE_ANALYSIS_CACHE_MAX_ENTRIES = 4;
+const SPARQL_LARGE_ANALYSIS_CACHE_MAX_SOURCE_LENGTH = 2 * 1024 * 1024;
 
 // A single query traverses several store decorators (agent invalidation,
 // changelog, graph index, then the adapter), each of which needs the same safe
@@ -50,6 +52,23 @@ const sparqlAnalysisCache = new BoundedLruCache<string, SparqlOperationFacts>(
   SPARQL_ANALYSIS_CACHE_MAX_ENTRIES,
   (source) => source.length <= SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
 );
+// Generated scoped sync queries can legitimately exceed 64 KiB. They cross
+// several decorators that all need the same classification, so bypassing the
+// cache made each layer rescan hundreds of thousands of IRI characters. Keep a
+// separate, very small large-query tier: at most four source strings and eight
+// million UTF-16 code units can be retained (about 16 MiB worst-case), while
+// one query still gets reuse across layers.
+const largeSparqlAnalysisCache = new BoundedLruCache<string, SparqlOperationFacts>(
+  SPARQL_LARGE_ANALYSIS_CACHE_MAX_ENTRIES,
+  (source) => source.length > SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH
+    && source.length <= SPARQL_LARGE_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
+);
+
+function analysisCacheFor(source: string): BoundedLruCache<string, SparqlOperationFacts> {
+  return source.length <= SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH
+    ? sparqlAnalysisCache
+    : largeSparqlAnalysisCache;
+}
 
 const MUTATING_KEYWORD_SET = new Set<string>(SPARQL_MUTATING_KEYWORDS);
 const UPDATE_OPERATION_SET = new Set<string>(SPARQL_UPDATE_OPERATIONS);
@@ -115,12 +134,13 @@ export function analyzeSparqlOperation(
     return materializeSparqlOperationAnalysis(analyzePreparedSparql(input));
   }
 
-  const cached = sparqlAnalysisCache.get(input);
+  const cache = analysisCacheFor(input);
+  const cached = cache.get(input);
   if (cached) return materializeSparqlOperationAnalysis(cached);
 
   const facts = analyzePreparedSparql(prepareSparql(input));
 
-  sparqlAnalysisCache.set(input, facts);
+  cache.set(input, facts);
   // The cache owns only immutable scalar facts. Materializing at the public
   // boundary preserves the API's mutable, caller-isolated response objects.
   return materializeSparqlOperationAnalysis(facts);

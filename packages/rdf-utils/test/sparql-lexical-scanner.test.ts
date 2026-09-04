@@ -17,6 +17,18 @@ function validPrepared(source: string): ValidPreparedSparql {
 }
 
 describe('canonical SPARQL lexical scanner', () => {
+  it('scans large ordinary IRIs without changing their lexical value', () => {
+    const body = `urn:large:${'segment/'.repeat(16_384)}tail`;
+    const prepared = prepareSparql(`SELECT * WHERE { GRAPH <${body}> { ?s ?p ?o } }`);
+
+    expect(prepared.status).toBe('valid');
+    if (prepared.status !== 'valid') return;
+    expect(prepared.tokens.find((token) => token.kind === 'iri')).toMatchObject({
+      kind: 'iri',
+      logicalValue: body,
+    });
+  });
+
   it.each([
     'foaf.core',
     'café',
