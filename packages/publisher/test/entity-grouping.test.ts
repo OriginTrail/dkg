@@ -4,12 +4,23 @@ import { skolemizeByEntity } from '../src/auto-partition.js';
 import { canonicalPublishPayload } from '../src/canonical-publish-payload.js';
 import { computePrivateRootV10 } from '../src/merkle.js';
 import { generatedPrivateCatalogFloorQuads, generatedPrivateCatalogTripleKeys } from '../src/catalog-trust.js';
+import { entityGroupingParityDigests } from './_helpers/entity-grouping-parity.js';
 
 const q = (subject: string, object: string, graph = 'urn:graph'): Quad => ({
   subject, predicate: 'urn:predicate', object, graph,
 });
 
 describe('entity grouping compatibility', () => {
+  it('matches 1,100 snapshots from the separately built pre-change publisher', () => {
+    // Generated from the full publisher build at 580a3607f532f561c8aa7c5f8aab316e418c89fe,
+    // including its own grouping, canonicalization, skolemizer and Merkle modules.
+    // Hashes cover root/quad order and values, manifests, private roots and KC roots.
+    expect(entityGroupingParityDigests(skolemizeByEntity, canonicalPublishPayload)).toEqual({
+      grouping: '5eaf8c284c9bcb8b677f7ca4ba641bf1c20acf02e88737d8530c64f925f26c57',
+      canonical: '22290070c2cc953c20f84e220396df676dd693f0f2d8f3459aae6a60f946d78b',
+    });
+  });
+
   it('preserves root/input order, duplicate rows, and unchanged quad identity', () => {
     const a = q('urn:b', '"b"');
     const b = q('urn:a', '"a"');
