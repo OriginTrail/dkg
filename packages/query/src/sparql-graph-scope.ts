@@ -14,12 +14,6 @@ import {
 } from './sparql-rewrite-result.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 
-type ValuedToken = Extract<SparqlLexicalToken, { value: string }>;
-
-function isValuedToken(token: SparqlLexicalToken | undefined): token is ValuedToken {
-  return token !== undefined && 'value' in token;
-}
-
 function iriValue(token: SparqlLexicalToken | undefined): string | null {
   return token?.kind === 'iri' ? token.logicalValue : null;
 }
@@ -109,11 +103,9 @@ function prefixesFromTokens(prepared: ValidPreparedSparql): Map<string, string> 
     const name = prepared.tokens[index + 1];
     const iri = prepared.tokens[index + 2];
     if (
-      !isValuedToken(keyword)
-      || keyword.kind !== 'word'
+      keyword?.kind !== 'word'
       || keyword.upper !== 'PREFIX'
-      || !isValuedToken(name)
-      || name.kind !== 'prefixed-name'
+      || name?.kind !== 'prefixed-name'
       || !name.logicalValue.endsWith(':')
     ) continue;
     const declaredIri = iriValue(iri);
@@ -137,14 +129,14 @@ export function prepareGraphScope(
 
   for (let index = 0; index < prepared.tokens.length; index++) {
     const token = prepared.tokens[index];
-    if (!isValuedToken(token) || token.kind !== 'word') continue;
+    if (token.kind !== 'word') continue;
     if (token.upper === 'FROM') hasDatasetClause = true;
     if (token.upper !== 'GRAPH') continue;
 
     const target = prepared.tokens[index + 1];
-    if (isValuedToken(target) && target.kind === 'variable') {
+    if (target?.kind === 'variable') {
       const variable = {
-        source: target.value,
+        source: target.raw,
         logicalName: target.logicalValue.slice(1),
       };
       graphTargets.push({
@@ -173,7 +165,7 @@ export function prepareGraphScope(
       continue;
     }
 
-    if (isValuedToken(target) && target.kind === 'prefixed-name') {
+    if (target?.kind === 'prefixed-name') {
       const colon = target.logicalValue.indexOf(':');
       const base = prefixes.get(target.logicalValue.slice(0, colon));
       if (colon >= 0 && base !== undefined) {
@@ -221,7 +213,7 @@ export function assertExplicitGraphIrisAllowed(
     switch (target.kind) {
       case 'invalid': {
         const token = scope.prepared.tokens[target.targetTokenIndex];
-        if (isValuedToken(token) && token.kind === 'prefixed-name') {
+        if (token?.kind === 'prefixed-name') {
           throw new ScopedQueryViolationError(
             `GRAPH prefixed target ${token.logicalValue} cannot be resolved from PREFIX declarations`,
           );
@@ -251,14 +243,14 @@ function scopeGraphlessDescribe(
 ): string | null {
   if (scope.operation !== 'DESCRIBE' || scope.where !== null) return null;
   if (scope.prepared.tokens.some(
-    (token) => isValuedToken(token) && token.kind === 'symbol' && token.logicalValue === '{',
+    (token) => token.kind === 'symbol' && token.logicalValue === '{',
   )) return null;
 
   const operationIndex = scope.prepared.prologue.endTokenIndex;
   const tokens = scope.prepared.tokens.slice(operationIndex);
   const modifiers = new Set(['GROUP', 'HAVING', 'ORDER', 'LIMIT', 'OFFSET']);
   const modifier = tokens.slice(1).find(
-    (token) => isValuedToken(token) && token.kind === 'word' && modifiers.has(token.upper),
+    (token) => token.kind === 'word' && modifiers.has(token.upper),
   );
   const last = tokens.at(-1);
   const insertion = modifier?.start ?? last?.end ?? scope.prepared.tokens[operationIndex]?.end;
@@ -365,9 +357,9 @@ function isDedupSafeBasicGraphPattern(scope: PreparedGraphScope): boolean {
   ]);
   return !scope.prepared.tokens
     .slice(scope.where.openingTokenIndex + 1, scope.where.closingTokenIndex)
-    .some((token) => isValuedToken(token) && (
-    (token.kind === 'word' && forbidden.has(token.upper))
-    || (token.kind === 'symbol' && (token.logicalValue === '{' || token.logicalValue === '}'))
+    .some((token) => (
+      (token.kind === 'word' && forbidden.has(token.upper))
+      || (token.kind === 'symbol' && (token.logicalValue === '{' || token.logicalValue === '}'))
     ));
 }
 
@@ -485,21 +477,19 @@ function readTopLevelStaticGraphValues(
     const keyword = tokens[index];
     if (
       scope.structure.braces.depthBefore[index] !== outerDepth
-      || !isValuedToken(keyword)
       || keyword.kind !== 'word'
       || keyword.upper !== 'VALUES'
     ) continue;
 
     const candidate = tokens[index + 1];
     if (
-      !isValuedToken(candidate)
-      || candidate.kind !== 'variable'
+      candidate?.kind !== 'variable'
       || candidate.logicalValue.slice(1) !== variableName
     ) {
       continue;
     }
     const opening = tokens[index + 2];
-    if (!isValuedToken(opening) || opening.kind !== 'symbol' || opening.logicalValue !== '{') {
+    if (opening?.kind !== 'symbol' || opening.logicalValue !== '{') {
       return null;
     }
     const closingIndex = scope.structure.braces.matchingTokenIndexes[index + 2] ?? -1;
@@ -523,7 +513,7 @@ function parseStaticGraphValues(
       values.push(iri);
       continue;
     }
-    if (!isValuedToken(token) || token.kind !== 'prefixed-name') return null;
+    if (token.kind !== 'prefixed-name') return null;
     const colon = token.logicalValue.indexOf(':');
     const base = scope.prefixes.get(token.logicalValue.slice(0, colon));
     if (colon < 0 || base === undefined) return null;
@@ -542,8 +532,7 @@ function nestedSelectContainsGraphVariable(scope: PreparedGraphScope): boolean {
     const token = tokens[index];
     const tokenDepth = scope.structure.braces.depthBefore[index];
     if (
-      isValuedToken(token)
-      && token.kind === 'symbol'
+      token.kind === 'symbol'
       && token.logicalValue === '}'
     ) {
       while (
@@ -554,7 +543,6 @@ function nestedSelectContainsGraphVariable(scope: PreparedGraphScope): boolean {
     }
     if (
       tokenDepth > 0
-      && isValuedToken(token)
       && token.kind === 'word'
       && token.upper === 'SELECT'
     ) {
@@ -585,7 +573,7 @@ function findBalancedParenthesisEnd(
   let depth = 0;
   for (let index = openingIndex; index < limit; index++) {
     const token = tokens[index];
-    if (!isValuedToken(token) || token.kind !== 'symbol') continue;
+    if (token.kind !== 'symbol') continue;
     if (token.logicalValue === '(') depth++;
     else if (token.logicalValue === ')') {
       depth--;
@@ -615,7 +603,6 @@ function nextGroupOpening(
     const token = scope.prepared.tokens[index];
     if (
       scope.structure.braces.depthBefore[index] === depth
-      && isValuedToken(token)
       && token.kind === 'symbol'
       && token.logicalValue === '{'
     ) return index;
@@ -641,13 +628,12 @@ function groupHasDefaultGraphPattern(
 
   // A nested SELECT's projection is not a default-graph pattern. Analyze only
   // its WHERE group (or shorthand group), using the same token coordinates.
-  if (isValuedToken(first) && first.kind === 'word' && first.upper === 'SELECT') {
+  if (first?.kind === 'word' && first.upper === 'SELECT') {
     let searchStart = firstIndex + 1;
     for (let index = searchStart; index < closingIndex; index++) {
       const token = tokens[index];
       if (
         scope.structure.braces.depthBefore[index] === contentDepth
-        && isValuedToken(token)
         && token.kind === 'word'
         && token.upper === 'WHERE'
       ) {
@@ -664,7 +650,6 @@ function groupHasDefaultGraphPattern(
   for (let index = openingIndex + 1; index < closingIndex; index++) {
     if (scope.structure.braces.depthBefore[index] !== contentDepth) continue;
     const token = tokens[index];
-    if (!isValuedToken(token)) return true;
 
     if (token.kind === 'word' && token.upper === 'GRAPH') {
       const graphOpening = nextGroupOpening(scope, index + 2, closingIndex, contentDepth);
@@ -685,8 +670,7 @@ function groupHasDefaultGraphPattern(
     if (token.kind === 'word' && (token.upper === 'FILTER' || token.upper === 'BIND')) {
       const expressionOpening = tokens[index + 1];
       if (
-        !isValuedToken(expressionOpening)
-        || expressionOpening.kind !== 'symbol'
+        expressionOpening?.kind !== 'symbol'
         || expressionOpening.logicalValue !== '('
       ) return true;
       const expressionClosing = findBalancedParenthesisEnd(tokens, index + 1, closingIndex);
@@ -694,8 +678,7 @@ function groupHasDefaultGraphPattern(
       for (let nested = index + 2; nested < expressionClosing; nested++) {
         const candidate = tokens[nested];
         if (
-          isValuedToken(candidate)
-          && candidate.kind === 'symbol'
+          candidate.kind === 'symbol'
           && candidate.logicalValue === '{'
         ) {
           const nestedClosing = scope.structure.braces.matchingTokenIndexes[nested] ?? -1;

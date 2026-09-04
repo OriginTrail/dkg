@@ -162,7 +162,6 @@ export function rewriteCompactPredicatesForDkg(sparql: string): string {
     const token = scan.tokens[index];
     if (!token) return false;
     if (token.kind === 'iri') return true;
-    if (!('value' in token)) return false;
     if (token.kind === 'variable') return token.logicalValue.startsWith('?');
     return token.kind === 'prefixed-name';
   };
@@ -173,12 +172,11 @@ export function rewriteCompactPredicatesForDkg(sparql: string): string {
     const next = scan.tokens[index + 1];
     const followsSubject = canPrecedePredicate(index - 1)
       && hasWhitespaceGap(previous.end, candidate.start);
-    const followsSemicolon = 'value' in previous
-      && previous.kind === 'symbol'
+    const followsSemicolon = previous.kind === 'symbol'
       && previous.logicalValue === ';'
       && hasWhitespaceGap(previous.end, candidate.start);
     if (!followsSubject && !followsSemicolon) continue;
-    if (!hasWhitespaceGap(candidate.end, next.start) || !('value' in candidate)) continue;
+    if (!hasWhitespaceGap(candidate.end, next.start)) continue;
 
     if (candidate.kind === 'word' && candidate.upper === 'A') {
       edits.push({ start: candidate.start, end: candidate.end, value: '<rdf:type>' });
@@ -191,7 +189,7 @@ export function rewriteCompactPredicatesForDkg(sparql: string): string {
       edits.push({
         start: candidate.start,
         end: candidate.end,
-        value: `<${candidate.value}>`,
+        value: `<${candidate.raw}>`,
       });
     }
   }

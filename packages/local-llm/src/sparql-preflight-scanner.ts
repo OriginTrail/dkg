@@ -16,8 +16,6 @@ const ABSOLUTE_IRI_SCHEMES = new Set([
 ]);
 const AGGREGATE_KEYWORDS = new Set(['COUNT', 'SUM', 'AVG', 'MIN', 'MAX']);
 
-type ValuedToken = Extract<SparqlLexicalToken, { value: string }>;
-
 export interface SparqlPreflightScan {
   masked: string;
   unterminated: boolean;
@@ -29,10 +27,6 @@ export interface SparqlPreflightScan {
   hasStrcontains: boolean;
   hasUnwrappedAggregateAlias: boolean;
   bareAbsoluteIri?: string;
-}
-
-function isValuedToken(token: SparqlLexicalToken | undefined): token is ValuedToken {
-  return token !== undefined && 'value' in token;
 }
 
 function isWhitespace(character: string | undefined): boolean {
@@ -49,7 +43,7 @@ function hasKeywordSequence(
     for (let offset = 0; offset < keywords.length; offset++) {
       const token = tokens[index + offset];
       const previous = tokens[index + offset - 1];
-      if (!isValuedToken(token) || token.kind !== 'word' || token.upper !== keywords[offset]) {
+      if (token?.kind !== 'word' || token.upper !== keywords[offset]) {
         matches = false;
         break;
       }
@@ -63,8 +57,7 @@ function hasKeywordSequence(
     if (
       followingSymbol === undefined
       || (
-        isValuedToken(following)
-        && following.kind === 'symbol'
+        following?.kind === 'symbol'
         && following.logicalValue === followingSymbol
       )
     ) return true;
@@ -82,12 +75,10 @@ function hasUnwrappedAggregateAlias(
     const aggregate = tokens[index];
     const opening = tokens[index + 1];
     if (
-      !isValuedToken(aggregate)
-      || aggregate.kind !== 'word'
+      aggregate?.kind !== 'word'
       || !AGGREGATE_KEYWORDS.has(aggregate.upper)
       || (aggregate.start > 0 && !isWhitespace(masked[aggregate.start - 1]))
-      || !isValuedToken(opening)
-      || opening.kind !== 'symbol'
+      || opening?.kind !== 'symbol'
       || opening.logicalValue !== '('
     ) continue;
 
@@ -98,12 +89,10 @@ function hasUnwrappedAggregateAlias(
     const asToken = tokens[closingIndex + 1];
     const variable = tokens[closingIndex + 2];
     if (
-      isValuedToken(asToken)
-      && asToken.kind === 'word'
+      asToken?.kind === 'word'
       && asToken.upper === 'AS'
       && closing.end < asToken.start
-      && isValuedToken(variable)
-      && variable.kind === 'variable'
+      && variable?.kind === 'variable'
       && asToken.end < variable.start
     ) return true;
   }
@@ -116,15 +105,14 @@ function isBareIriTermBoundary(
   tokens: readonly SparqlLexicalToken[],
 ): boolean {
   if (token.kind === 'string' || token.kind === 'iri') return true;
-  if (!isValuedToken(token) || token.kind !== 'symbol') return false;
+  if (token.kind !== 'symbol') return false;
   if (['{', '}', '(', ')', '[', ']', ';', ','].includes(token.logicalValue)) return true;
   if (token.logicalValue !== '.') return false;
   const next = tokens[index + 1];
   return next === undefined
     || token.end !== next.start
     || (
-      isValuedToken(next)
-      && next.kind === 'symbol'
+      next.kind === 'symbol'
       && ['{', '}', '(', ')', '[', ']', ';', ','].includes(next.logicalValue)
     );
 }
@@ -136,7 +124,7 @@ function findBareAbsoluteIri(
 ): string | undefined {
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index];
-    if (!isValuedToken(token) || token.kind !== 'prefixed-name') continue;
+    if (token.kind !== 'prefixed-name') continue;
     const colon = token.logicalValue.indexOf(':');
     const scheme = token.logicalValue.slice(0, colon).toLowerCase();
     if (!ABSOLUTE_IRI_SCHEMES.has(scheme) || declaredPrefixes.has(scheme)) continue;
@@ -187,7 +175,7 @@ export function scanSparqlPreflight(value: string): SparqlPreflightScan {
     bracesBalanced: structure.braces.balanced,
     parenthesesBalanced: structure.parentheses.balanced,
     hasFrom: tokens.some(
-      (token) => isValuedToken(token) && token.kind === 'word' && token.upper === 'FROM',
+      (token) => token.kind === 'word' && token.upper === 'FROM',
     ),
     hasFilterNotExistsParentheses: hasKeywordSequence(
       tokens,

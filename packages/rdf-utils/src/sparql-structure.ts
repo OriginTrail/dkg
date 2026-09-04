@@ -1,11 +1,5 @@
 import type { PreparedSparql, SparqlLexicalToken } from './sparql-lexical-scanner.js';
 
-type ValuedToken = Extract<SparqlLexicalToken, { value: string }>;
-
-function isValuedToken(token: SparqlLexicalToken | undefined): token is ValuedToken {
-  return token !== undefined && 'value' in token;
-}
-
 export interface SparqlDelimiterIndex {
   /** Nesting depth immediately before each token. */
   readonly depthBefore: readonly number[];
@@ -44,7 +38,7 @@ function indexDelimiter(
   for (let index = 0; index < tokens.length; index++) {
     depthBefore.push(depth);
     const token = tokens[index];
-    if (!isValuedToken(token) || token.kind !== 'symbol') continue;
+    if (token.kind !== 'symbol') continue;
     if (token.logicalValue === open) {
       openings.push(index);
       depth++;

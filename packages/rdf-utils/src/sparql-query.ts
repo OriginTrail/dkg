@@ -1,5 +1,4 @@
 import {
-  type SparqlLexicalToken,
   type ValidPreparedSparql,
 } from './sparql-lexical-scanner.js';
 import {
@@ -7,12 +6,6 @@ import {
   sparqlTokenIndexesAtDepth,
   type SparqlStructure,
 } from './sparql-structure.js';
-
-type ValuedToken = Extract<SparqlLexicalToken, { value: string }>;
-
-function isValuedToken(token: SparqlLexicalToken | undefined): token is ValuedToken {
-  return token !== undefined && 'value' in token;
-}
 
 export interface SparqlQueryGroupRange {
   /** Raw source span of the opening brace token. */
@@ -51,15 +44,15 @@ function whereRange(
 
   for (const index of sparqlTokenIndexesAtDepth(structure.braces, 0)) {
     const token = tokens[index];
-    if (isValuedToken(token) && token.kind === 'word' && token.upper === 'WHERE') {
+    if (token?.kind === 'word' && token.upper === 'WHERE') {
       const next = tokens[index + 1];
-      if (!isValuedToken(next) || next.kind !== 'symbol' || next.logicalValue !== '{') {
+      if (next?.kind !== 'symbol' || next.logicalValue !== '{') {
         return null;
       }
       explicitOpening = index + 1;
       break;
     }
-    if (isValuedToken(token) && token.kind === 'symbol' && token.logicalValue === '{') {
+    if (token?.kind === 'symbol' && token.logicalValue === '{') {
       topLevelOpenings.push(index);
     }
   }
@@ -80,7 +73,7 @@ function whereRange(
     closingIndex,
   ).some((index) => {
     const token = tokens[index];
-    return isValuedToken(token) && token.kind === 'word' && token.upper === 'UNION';
+    return token?.kind === 'word' && token.upper === 'UNION';
   });
   return {
     openStart: tokens[openingIndex].start,
@@ -101,11 +94,11 @@ function variablesInRange(
   const seen = new Set<string>();
   for (let index = start; index < end; index++) {
     const token = prepared.tokens[index];
-    if (!isValuedToken(token) || token.kind !== 'variable') continue;
+    if (token?.kind !== 'variable') continue;
     const logicalName = token.logicalValue.slice(1);
     if (seen.has(logicalName)) continue;
     seen.add(logicalName);
-    variables.push({ source: token.value, logicalName });
+    variables.push({ source: token.raw, logicalName });
   }
   return variables;
 }
@@ -118,7 +111,7 @@ export function prepareSparqlQuery(prepared: ValidPreparedSparql): PreparedSparq
     source: prepared.source,
     prepared,
     structure,
-    operation: isValuedToken(operationToken) && operationToken.kind === 'word'
+    operation: operationToken?.kind === 'word'
       ? operationToken.upper
       : null,
     where,

@@ -10,14 +10,6 @@ import {
   type SparqlRewriteResult,
 } from './sparql-rewrite-result.js';
 
-type SourceSparqlToken = Extract<SparqlLexicalToken, { value: string }>;
-
-function isSourceSparqlToken(
-  token: SparqlLexicalToken | undefined,
-): token is SourceSparqlToken {
-  return token !== undefined && 'value' in token;
-}
-
 interface MinTrustBodyScan {
   readonly valuesClause: string | null;
   readonly bodySource: string;
@@ -42,14 +34,12 @@ function scanMinTrustBody(scope: PreparedSparqlQuery): MinTrustBodyScan | null {
   let valuesClause: string | null = null;
 
   const first = tokens[bodyTokenStart];
-  if (isSourceSparqlToken(first) && first.kind === 'word' && first.upper === 'VALUES') {
+  if (first?.kind === 'word' && first.upper === 'VALUES') {
     const variable = tokens[bodyTokenStart + 1];
     const opening = tokens[bodyTokenStart + 2];
     if (
-      !isSourceSparqlToken(variable)
-      || variable.kind !== 'variable'
-      || !isSourceSparqlToken(opening)
-      || opening.kind !== 'symbol'
+      variable?.kind !== 'variable'
+      || opening?.kind !== 'symbol'
       || opening.logicalValue !== '{'
     ) return null;
 
@@ -61,8 +51,7 @@ function scanMinTrustBody(scope: PreparedSparqlQuery): MinTrustBodyScan | null {
     for (let index = valuesOpeningIndex + 1; index < valuesClosingIndex; index++) {
       const token = tokens[index];
       if (
-        isSourceSparqlToken(token)
-        && token.kind === 'symbol'
+        token.kind === 'symbol'
         && ['{', '}', '(', ')'].includes(token.logicalValue)
       ) return null;
     }
@@ -92,7 +81,6 @@ function scanMinTrustBody(scope: PreparedSparqlQuery): MinTrustBodyScan | null {
   if (bodyTokenIndexes.length !== bodyEnd - bodyTokenStart) return null;
   for (const index of bodyTokenIndexes) {
     const token = tokens[index];
-    if (!isSourceSparqlToken(token)) continue;
     if (token.kind === 'symbol' && (token.logicalValue === '{' || token.logicalValue === '}')) {
       return null;
     }
@@ -107,19 +95,6 @@ function scanMinTrustBody(scope: PreparedSparqlQuery): MinTrustBodyScan | null {
   };
 }
 
-function isDecimalPoint(tokens: readonly SparqlLexicalToken[], index: number): boolean {
-  const previous = tokens[index - 1];
-  const point = tokens[index];
-  const next = tokens[index + 1];
-  return isSourceSparqlToken(previous)
-    && isSourceSparqlToken(point)
-    && isSourceSparqlToken(next)
-    && previous.end === point.start
-    && point.end === next.start
-    && /^\d$/u.test(previous.logicalValue)
-    && /^\d$/u.test(next.logicalValue);
-}
-
 function skipMinTrustExpression(
   scope: PreparedSparqlQuery,
   start: number,
@@ -130,13 +105,11 @@ function skipMinTrustExpression(
   while (opening < end) {
     const token = tokens[opening];
     if (
-      isSourceSparqlToken(token)
-      && token.kind === 'symbol'
+      token.kind === 'symbol'
       && token.logicalValue === '('
     ) break;
     if (
-      isSourceSparqlToken(token)
-      && token.kind === 'symbol'
+      token.kind === 'symbol'
       && token.logicalValue === '.'
     ) return null;
     opening++;
@@ -159,8 +132,7 @@ function minTrustSubjectTokens(
     const token = tokens[index];
 
     if (
-      isSourceSparqlToken(token)
-      && token.kind === 'word'
+      token.kind === 'word'
       && (token.upper === 'FILTER' || token.upper === 'BIND')
     ) {
       const next = skipMinTrustExpression(scope, index, body.bodyTokenEnd);
@@ -171,10 +143,8 @@ function minTrustSubjectTokens(
     }
 
     if (
-      isSourceSparqlToken(token)
-      && token.kind === 'symbol'
+      token.kind === 'symbol'
       && token.logicalValue === '.'
-      && !isDecimalPoint(tokens, index)
     ) {
       expectSubject = true;
       index++;
@@ -182,8 +152,7 @@ function minTrustSubjectTokens(
     }
 
     if (
-      isSourceSparqlToken(token)
-      && token.kind === 'symbol'
+      token.kind === 'symbol'
       && ['(', ')', '[', ']'].includes(token.logicalValue)
     ) return null;
 
@@ -220,8 +189,8 @@ export function injectMinTrustFilter(
   if (!subjectTokens) return unsupported();
   const subjects = new Map<string, string>();
   for (const token of subjectTokens) {
-    if (isSourceSparqlToken(token) && token.kind === 'variable') {
-      subjects.set(`variable:${token.logicalValue.slice(1)}`, token.value);
+    if (token.kind === 'variable') {
+      subjects.set(`variable:${token.logicalValue.slice(1)}`, token.raw);
       continue;
     }
     if (token.kind === 'iri') {
@@ -232,11 +201,10 @@ export function injectMinTrustFilter(
       continue;
     }
     if (
-      isSourceSparqlToken(token)
-      && token.kind === 'prefixed-name'
+      token.kind === 'prefixed-name'
       && !token.logicalValue.startsWith('_:')
     ) {
-      subjects.set(`prefixed:${token.logicalValue}`, token.value);
+      subjects.set(`prefixed:${token.logicalValue}`, token.raw);
       continue;
     }
     return unsupported();
@@ -262,8 +230,7 @@ export function injectMinTrustFilter(
   }
 
   const lastBodyToken = query.prepared.tokens[body.bodyTokenEnd - 1];
-  const endsWithDot = isSourceSparqlToken(lastBodyToken)
-    && lastBodyToken.kind === 'symbol'
+  const endsWithDot = lastBodyToken?.kind === 'symbol'
     && lastBodyToken.logicalValue === '.';
   const separator = endsWithDot ? '\n' : '\n. ';
   const rewrittenBody = `${trimmedInner}${separator}${extraClauses.join(' ')}`;

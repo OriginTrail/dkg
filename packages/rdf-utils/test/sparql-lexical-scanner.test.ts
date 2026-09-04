@@ -62,18 +62,16 @@ describe('canonical SPARQL lexical scanner', () => {
     const operation = scan.tokens[scan.prologue.endTokenIndex];
     expect(operation).toMatchObject({
       kind: 'word',
-      value: String.raw`\u0053ELECT`,
+      raw: String.raw`\u0053ELECT`,
       logicalValue: 'SELECT',
       upper: 'SELECT',
     });
     for (const token of scan.tokens) {
-      if ('value' in token) {
-        expect(source.slice(token.start, token.end)).toBe(token.value);
-      }
+      expect(source.slice(token.start, token.end)).toBe(token.raw);
     }
     expect(scan.tokens).toContainEqual(expect.objectContaining({
       kind: 'variable',
-      value: String.raw`\u003Fs`,
+      raw: String.raw`\u003Fs`,
       logicalValue: '?s',
     }));
     expect(scan.tokens.every((token) => !('normalizedStart' in token))).toBe(true);
@@ -88,7 +86,7 @@ describe('canonical SPARQL lexical scanner', () => {
     const openingIndexes = prepared.tokens
       .map((token, index) => ({ token, index }))
       .filter(({ token }) => (
-        'value' in token && token.kind === 'symbol' && token.logicalValue === '{'
+        token.kind === 'symbol' && token.logicalValue === '{'
       ))
       .map(({ index }) => index);
 
@@ -211,9 +209,7 @@ describe('canonical SPARQL lexical scanner', () => {
     const scan = prepareSparql(
       String.raw`?1count ?x-STRCONTAINS() ex:value=STRCONTAINS() ex:local.name. ex:escaped\=value`,
     );
-    const tokens = scan.tokens.map((token) => (
-      'value' in token ? `${token.kind}:${token.value}` : token.kind
-    ));
+    const tokens = scan.tokens.map((token) => `${token.kind}:${token.raw}`);
 
     expect(tokens).toEqual([
       'variable:?1count',
@@ -231,6 +227,24 @@ describe('canonical SPARQL lexical scanner', () => {
       'symbol:.',
       String.raw`prefixed-name:ex:escaped\=value`,
     ]);
+  });
+
+  it('emits complete signed and unsigned numeric literal tokens', () => {
+    const scan = validPrepared(
+      'SELECT * WHERE { ?s <urn:p> .5, -.5, +.5, 1.5, 1e2, -1.E+2, 1. }',
+    );
+    const numericTokens = scan.tokens
+      .filter((token) => token.kind === 'number')
+      .map((token) => token.logicalValue);
+    const trailingPoint = scan.tokens.findIndex(
+      (token) => token.kind === 'number' && token.logicalValue === '1',
+    );
+
+    expect(numericTokens).toEqual(['.5', '-.5', '+.5', '1.5', '1e2', '-1.E+2', '1']);
+    expect(scan.tokens[trailingPoint + 1]).toMatchObject({
+      kind: 'symbol',
+      logicalValue: '.',
+    });
   });
 
   it('recognizes a default prefix declaration without accepting a local part', () => {

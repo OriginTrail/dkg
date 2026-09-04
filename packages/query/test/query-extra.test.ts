@@ -263,6 +263,38 @@ describe('[Q-1] DKGQueryEngine minTrust uses writer-side trust metadata', () => 
     expect(result.bindings.map((binding) => binding['name'])).toEqual(['"Relative item"']);
   });
 
+  it('honors minTrust when triple objects are signed or unsigned leading-dot decimals', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const graph = contextGraphVerifiableMemoryUri(CG, 'leading-dot-decimals');
+    const decimal = 'http://www.w3.org/2001/XMLSchema#decimal';
+    const cases = [
+      { source: '.5', subject: 'urn:positive-half', object: `".5"^^<${decimal}>` },
+      { source: '-.5', subject: 'urn:negative-half', object: `"-.5"^^<${decimal}>` },
+    ];
+    await store.insert(cases.flatMap(({ subject, object }) => [
+      quad(subject, 'urn:score', object, graph),
+      quad(
+        subject,
+        'http://dkg.io/ontology/trustLevel',
+        `"${TrustLevel.ConsensusVerified}"`,
+        graph,
+      ),
+    ]));
+
+    for (const { source, subject } of cases) {
+      const result = await engine.query(
+        `SELECT ?s WHERE { ?s <urn:score> ${source} }`,
+        {
+          contextGraphId: CG,
+          view: 'verifiable-memory',
+          minTrust: TrustLevel.ConsensusVerified,
+        },
+      );
+      expect(result.bindings).toEqual([{ s: subject }]);
+    }
+  });
+
   it('preserves UCHAR payload while scoped minTrust rewriting uses raw delimiters', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);

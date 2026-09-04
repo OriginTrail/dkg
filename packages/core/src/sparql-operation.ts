@@ -97,14 +97,13 @@ function analyzePreparedSparql(scan: PreparedSparql): SparqlOperationFacts {
   const query = prepareSparqlQuery(scan);
   const form = detectSparqlOperationForm(query);
   const mutatingToken = scan.tokens.find(
-    (token) => 'value' in token
-      && token.kind === 'word'
+    (token) => token.kind === 'word'
       && MUTATING_KEYWORD_SET.has(token.upper),
   );
   return {
     form,
-    mutatingKeyword: mutatingToken && 'value' in mutatingToken
-      ? mutatingToken.value
+    mutatingKeyword: mutatingToken?.kind === 'word'
+      ? mutatingToken.raw
       : null,
   };
 }

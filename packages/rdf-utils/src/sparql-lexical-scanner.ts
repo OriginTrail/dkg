@@ -9,29 +9,37 @@ import {
   sparqlPnCharsWidth,
 } from './sparql-lexical-primitives.js';
 
+interface SparqlLexicalTokenBase {
+  /** Exact spelling in the unprocessed source. */
+  readonly raw: string;
+  readonly start: number;
+  readonly end: number;
+}
+
+type SparqlLogicalToken<Kind extends 'variable' | 'prefixed-name' | 'symbol' | 'number'> =
+  SparqlLexicalTokenBase & {
+    readonly kind: Kind;
+    /** Value after SPARQL UCHAR preprocessing. */
+    readonly logicalValue: string;
+  };
+
 export type SparqlLexicalToken =
-  | {
-    readonly kind: 'word' | 'variable' | 'prefixed-name' | 'symbol';
-    /** Exact spelling in the unprocessed source. */
-    readonly value: string;
+  | (SparqlLexicalTokenBase & {
+    readonly kind: 'word';
     /** Value after SPARQL UCHAR preprocessing. */
     readonly logicalValue: string;
     readonly upper: string;
-    readonly start: number;
-    readonly end: number;
-  }
-  | {
+  })
+  | SparqlLogicalToken<'variable'>
+  | SparqlLogicalToken<'prefixed-name'>
+  | SparqlLogicalToken<'symbol'>
+  | SparqlLogicalToken<'number'>
+  | (SparqlLexicalTokenBase & {
     readonly kind: 'iri';
     /** IRIREF body after UCHAR decoding, without angle brackets. */
     readonly logicalValue: string;
-    readonly start: number;
-    readonly end: number;
-  }
-  | {
-    readonly kind: 'string';
-    readonly start: number;
-    readonly end: number;
-  };
+  })
+  | (SparqlLexicalTokenBase & { readonly kind: 'string' });
 
 interface PreparedSparqlCommon {
   /** Exact unprocessed input. */
@@ -206,28 +214,69 @@ function logicalTokenValue(value: string, start: number, end: number): string | 
   return decoded.join('');
 }
 
+function scanLogicalDigits(source: string, start: number): { end: number; count: number } {
+  let end = start;
+  let count = 0;
+  let width = sparqlAsciiDigitWidth(source, end);
+  while (width > 0) {
+    end += width;
+    count++;
+    width = sparqlAsciiDigitWidth(source, end);
+  }
+  return { end, count };
+}
+
+/** Scan SPARQL INTEGER, DECIMAL, and DOUBLE spellings, including signed forms. */
+function scanNumberEnd(source: string, start: number): number | null {
+  let cursor = start;
+  const sign = readSparqlLogicalCodePoint(source, cursor);
+  if (sign?.codePoint === 0x2b || sign?.codePoint === 0x2d) cursor += sign.rawWidth;
+
+  const integer = scanLogicalDigits(source, cursor);
+  cursor = integer.end;
+  const integerEnd = cursor;
+  const point = readSparqlLogicalCodePoint(source, cursor);
+  let fractionCount = 0;
+  let hasPoint = false;
+  if (point?.codePoint === 0x2e) {
+    hasPoint = true;
+    const fraction = scanLogicalDigits(source, cursor + point.rawWidth);
+    cursor = fraction.end;
+    fractionCount = fraction.count;
+  }
+  if (integer.count === 0 && fractionCount === 0) return null;
+
+  const exponent = readSparqlLogicalCodePoint(source, cursor);
+  if (exponent?.codePoint === 0x45 || exponent?.codePoint === 0x65) {
+    let exponentCursor = cursor + exponent.rawWidth;
+    const exponentSign = readSparqlLogicalCodePoint(source, exponentCursor);
+    if (exponentSign?.codePoint === 0x2b || exponentSign?.codePoint === 0x2d) {
+      exponentCursor += exponentSign.rawWidth;
+    }
+    const exponentDigits = scanLogicalDigits(source, exponentCursor);
+    if (exponentDigits.count > 0) return exponentDigits.end;
+  }
+
+  // A point with no fractional digits is legal only in a DOUBLE with an
+  // exponent. Otherwise leave it for the statement-separator token.
+  if (hasPoint && fractionCount === 0) return integer.count > 0 ? integerEnd : null;
+  return cursor;
+}
+
+type LogicalSparqlToken = Exclude<SparqlLexicalToken, { readonly kind: 'iri' | 'string' }>;
+
 function lexicalToken(
-  kind: 'word' | 'variable' | 'prefixed-name' | 'symbol',
+  kind: LogicalSparqlToken['kind'],
   source: string,
   start: number,
   end: number,
   logicalValue = logicalTokenValue(source, start, end),
-): Extract<SparqlLexicalToken, { value: string }> | null {
+): LogicalSparqlToken | null {
   if (logicalValue === null) return null;
-  return {
-    kind,
-    value: source.slice(start, end),
-    logicalValue,
-    upper: logicalValue.toUpperCase(),
-    start,
-    end,
-  };
-}
-
-function valuedToken(
-  token: SparqlLexicalToken | undefined,
-): token is Extract<SparqlLexicalToken, { value: string }> {
-  return token !== undefined && 'value' in token;
+  const common = { raw: source.slice(start, end), logicalValue, start, end };
+  return kind === 'word'
+    ? { kind, ...common, upper: logicalValue.toUpperCase() }
+    : { kind, ...common };
 }
 
 function scanPrologue(tokens: readonly SparqlLexicalToken[]): PreparedSparql['prologue'] {
@@ -235,7 +284,7 @@ function scanPrologue(tokens: readonly SparqlLexicalToken[]): PreparedSparql['pr
   let cursor = 0;
   while (cursor < tokens.length) {
     const keyword = tokens[cursor];
-    if (!valuedToken(keyword) || keyword.kind !== 'word') break;
+    if (keyword?.kind !== 'word') break;
 
     if (keyword.upper === 'BASE' && tokens[cursor + 1]?.kind === 'iri') {
       cursor += 2;
@@ -245,10 +294,9 @@ function scanPrologue(tokens: readonly SparqlLexicalToken[]): PreparedSparql['pr
 
     const name = tokens[cursor + 1];
     const iri = tokens[cursor + 2];
-    if (!valuedToken(name) || keyword.end === name.start || iri?.kind !== 'iri') break;
+    if (name?.kind !== 'prefixed-name' || keyword.end === name.start || iri?.kind !== 'iri') break;
     if (
-      name.kind !== 'prefixed-name'
-      || name.logicalValue.indexOf(':') !== name.logicalValue.length - 1
+      name.logicalValue.indexOf(':') !== name.logicalValue.length - 1
     ) break;
     declaredPrefixes.push(name.logicalValue.slice(0, -1));
     cursor += 3;
@@ -308,6 +356,7 @@ function scanSparql(value: string): ScannedSparql | null {
       blank(masked, start, index);
       tokens.push({
         kind: 'string',
+        raw: value.slice(start, index),
         start,
         end: index,
       });
@@ -329,6 +378,7 @@ function scanSparql(value: string): ScannedSparql | null {
         blank(masked, start, index);
         tokens.push({
           kind: 'iri',
+          raw: value.slice(start, index),
           logicalValue,
           start,
           end: index,
@@ -348,6 +398,17 @@ function scanSparql(value: string): ScannedSparql | null {
         materialized.push(token.logicalValue);
         continue;
       }
+    }
+
+    const numberEnd = scanNumberEnd(value, index);
+    if (numberEnd !== null) {
+      const start = index;
+      index = numberEnd;
+      const token = lexicalToken('number', value, start, index);
+      if (!token) return null;
+      tokens.push(token);
+      materialized.push(token.logicalValue);
+      continue;
     }
 
     if (logical.codePoint === 0x3a) {
@@ -401,7 +462,7 @@ function scanSparql(value: string): ScannedSparql | null {
   const maskedValue = masked.join('');
   const wordTokens = new Set<string>();
   for (const token of tokens) {
-    if ('value' in token && token.kind === 'word') wordTokens.add(token.upper);
+    if (token.kind === 'word') wordTokens.add(token.upper);
   }
   return {
     masked: maskedValue,
