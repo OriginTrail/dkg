@@ -9,6 +9,7 @@ import {
   decodeEncryptedWorkspacePayload,
   encodeGossipEnvelope,
   encodeEncryptedWorkspacePayload,
+  encodeSwmSenderKeyMessage,
   encryptWorkspacePayload,
   generateWorkspaceRecipientEncryptionKey,
   computeGossipSigningPayload,
@@ -16,6 +17,9 @@ import {
   GOSSIP_ENVELOPE_VERSION,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
   STORAGE_ACK_MAX_STAGING_BYTES,
+  SWM_SENDER_KEY_CIPHER_ALGORITHM,
+  SWM_SENDER_KEY_MESSAGE_TYPE,
+  SWM_SENDER_KEY_PACKAGE_VERSION,
   type WorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
 import {
@@ -1640,6 +1644,84 @@ describe('SharedMemoryHandler.handle outcome (rc.9 PR-C codex R3)', () => {
     });
     expect(legacyApplyAllowedOracle).toHaveBeenCalledWith(CONTEXT_GRAPH, 'research');
     await expect(store.hasGraph(rootlessSharedMemoryGraphFromWire(subgraphMsg))).resolves.toBe(true);
+  });
+
+  it('rejects an encrypted Sender-Key scope downgrade without mutating root while accepting a matching named scope', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const peerId = '12D3KooWSenderKeyScopeFence';
+    const legacyApplyAllowedOracle = vi.fn(async (
+      _contextGraphId: string,
+      subGraphName: string | null,
+    ) => subGraphName !== null);
+    const rootRequest = encodeRootlessWorkspaceRequest({
+      contextGraphId: CONTEXT_GRAPH,
+      nquads: new TextEncoder().encode(
+        `<urn:test:sender-key-scope-root> <http://schema.org/name> "Must not apply" <${DATA_GRAPH}> .`,
+      ),
+      publisherPeerId: peerId,
+      shareOperationId: 'op-sender-key-scope-root',
+      timestampMs: Date.now(),
+    });
+    const namedRequest = encodeRootlessWorkspaceRequest({
+      contextGraphId: CONTEXT_GRAPH,
+      subGraphName: 'research',
+      nquads: new TextEncoder().encode(
+        `<urn:test:sender-key-scope-named> <http://schema.org/name> "May apply" <${DATA_GRAPH}> .`,
+      ),
+      publisherPeerId: peerId,
+      shareOperationId: 'op-sender-key-scope-named',
+      timestampMs: Date.now(),
+    });
+    const workspaceSenderKeyDecryptor = vi.fn(async (message: { epochId: string }) =>
+      message.epochId === 'epoch-root' ? rootRequest : namedRequest);
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      localAgentAddresses: () => [wallet.address],
+      legacyApplyAllowedOracle,
+      workspaceSenderKeyDecryptor,
+    });
+    await store.insert([{
+      subject: DATA_GRAPH,
+      predicate: 'https://dkg.network/ontology#allowedAgent',
+      object: `"${wallet.address}"`,
+      graph: `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`,
+    }]);
+
+    const senderKeyWire = async (epochId: string, messageIndex: number): Promise<Uint8Array> =>
+      signWorkspaceMessage(wallet, CONTEXT_GRAPH, encodeSwmSenderKeyMessage({
+        version: SWM_SENDER_KEY_PACKAGE_VERSION,
+        type: SWM_SENDER_KEY_MESSAGE_TYPE,
+        contextGraphId: CONTEXT_GRAPH,
+        subGraphName: 'research',
+        senderAgentAddress: wallet.address,
+        epochId,
+        membershipHash: 'sha256:sender-key-scope-fence',
+        messageIndex,
+        cipherAlgorithm: SWM_SENDER_KEY_CIPHER_ALGORITHM,
+        nonce: new Uint8Array(12).fill(messageIndex + 1),
+        ciphertext: new Uint8Array([messageIndex + 1]),
+        aadHash: new Uint8Array(32).fill(messageIndex + 2),
+        senderKeySignature: new Uint8Array(64).fill(messageIndex + 3),
+      }));
+
+    const rejected = await handler.handle(await senderKeyWire('epoch-root', 0), peerId);
+
+    expect(rejected).toMatchObject({
+      applied: false,
+      retryable: false,
+      reason: expect.stringContaining('not authoritative for root scope'),
+    });
+    await expect(store.hasGraph(rootlessSharedMemoryGraphFromWire(rootRequest))).resolves.toBe(false);
+
+    const accepted = await handler.handle(await senderKeyWire('epoch-research', 1), peerId);
+
+    expect(accepted).toMatchObject({ applied: true });
+    await expect(store.hasGraph(rootlessSharedMemoryGraphFromWire(namedRequest))).resolves.toBe(true);
+    expect(workspaceSenderKeyDecryptor).toHaveBeenCalledTimes(2);
+    expect(legacyApplyAllowedOracle.mock.calls).toEqual([
+      [CONTEXT_GRAPH, 'research'],
+      [CONTEXT_GRAPH, null],
+      [CONTEXT_GRAPH, 'research'],
+    ]);
   });
 
   it('retryable rejection (CAS pre-condition not met) returns { applied: false, retryable: true } — codex R4', async () => {
