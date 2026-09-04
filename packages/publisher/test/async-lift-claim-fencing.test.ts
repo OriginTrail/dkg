@@ -106,6 +106,20 @@ describe('async-lift claim fencing', () => {
     return { captured: captured.promise, release: release.resolve };
   }
 
+  it('claims the oldest accepted job and breaks timestamp ties by job ID', async () => {
+    const publisher = createPublisher();
+    for (const [jobId, acceptedAt] of [['job-b', 2], ['job-z', 1], ['job-a', 2]] as const) {
+      await seedLegacyRawLiftTestJob(store, { ...rawLiftRequest(), shareOperationId: jobId }, {
+        idGenerator: () => jobId,
+        now: () => acceptedAt,
+      });
+    }
+    expect((await publisher.claimNext('wallet-1'))?.jobId).toBe('job-z');
+    expect((await publisher.claimNext('wallet-2'))?.jobId).toBe('job-a');
+    expect((await publisher.claimNext('wallet-3'))?.jobId).toBe('job-b');
+    expect(await publisher.claimNext('wallet-4')).toBeNull();
+  });
+
   it('binds a transaction scope to the job re-read under its lock', async () => {
     const publisher = createPublisher();
     const firstId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {

@@ -167,8 +167,8 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   ): Promise<PromoteJob[]> {
     const filters: string[] = [];
     if (filter.state && filter.state.length > 0) {
-      const literals = filter.state.map((s) => literal(s)).join(', ');
-      filters.push(`FILTER (?state IN (${literals}))`);
+      const literals = [...new Set(filter.state)].map((s) => literal(s)).join(' ');
+      filters.push(`VALUES ?state { ${literals} }`);
     }
     if (filter.contextGraphId) {
       filters.push(`?job <${PROMOTE_CONTEXT_GRAPH_ID}> ${literal(filter.contextGraphId)} .`);
@@ -258,7 +258,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       const now = this.now();
       await this.reconcileExpiredRunning(now);
       const jobs = await this.listUnlocked(
-        {},
+        { state: [...ACTIVE_PROMOTE_STATES] },
         'publisher.asyncPromote.claimNext.candidates',
       );
       const candidates = jobs.filter((j) => {
@@ -272,7 +272,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         claimableCandidates.push(candidate);
       }
 
-      // The candidates read is already an all-jobs snapshot under the queue's
+      // The candidates read is already an active-jobs snapshot under the queue's
       // mutation lock. Derive running lanes from it instead of issuing a
       // second full control-graph query on every worker poll.
       const running = jobs.filter((job) => job.state === 'running');
@@ -281,7 +281,8 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       );
       if (eligible.length === 0) return null;
 
-      const next = eligible.sort(comparePromoteJobs)[0]!;
+      // listUnlocked sorted once; filtering preserves the claim order.
+      const next = eligible[0]!;
       const claimToken = `${workerId}:${next.jobId}:${this.claimTokenGenerator()}`;
       const attemptCount = next.attempt.count + 1;
       const claimed: PromoteJob = {

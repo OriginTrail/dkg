@@ -292,7 +292,10 @@ export class AsyncLiftClaimCoordinator {
       if (await this.hasActiveWalletLock(walletId)) return null;
 
       await this.dependencies.reacceptDueFailedJobs(this.config.now());
-      const next = (await this.dependencies.listAccepted()).sort(compareAcceptedJobs)[0];
+      let next: LiftJobAccepted | undefined;
+      for (const candidate of await this.dependencies.listAccepted()) {
+        if (!next || compareAcceptedJobs(candidate, next) < 0) next = candidate;
+      }
       if (!next) return null;
       const claimedJob = await this.withJobTransitionLock(next.jobId, async () => {
         const current = await this.getStatus(next.jobId);
