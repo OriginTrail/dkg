@@ -15,17 +15,7 @@
  *     (`POST /api/knowledge-assets` + `POST /api/knowledge-assets/:name/wm/write`),
  *     which the agent reads from `GET /.well-known/skill.md` on startup.
  */
-import {
-  GET_VIEWS,
-  type GetView,
-  createDkgPublisherExtension,
-  type DkgPublisherExtension,
-  escapeDkgRdfLiteral,
-  normalizeDkgPublisherQuads,
-  resolveDkgHome,
-  toEip55Checksum,
-  validateAssertionName,
-} from '@origintrail-official/dkg-core';
+import { GET_VIEWS, type GetView, createDkgPublisherExtension, type DkgPublisherExtension, normalizeDkgPublisherQuads, resolveDkgHome, toEip55Checksum, validateAssertionName } from '@origintrail-official/dkg-core';
 import {
   DkgDaemonClient,
   DkgDaemonHttpError,
@@ -954,7 +944,6 @@ export class DkgNodePlugin {
     this.chatTurnWriterStateLayout = stateLayout;
     this.channelPlugin?.setChatTurnWriter(this.chatTurnWriter);
   }
-
 
   /**
    * Install the 5 W4a/W4b hooks via HookSurface, supporting multi-phase

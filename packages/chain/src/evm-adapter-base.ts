@@ -29,7 +29,7 @@ import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializ
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
-import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
+import { resolveRpcUrls, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './rpc-failover-client.js';
@@ -3910,7 +3910,7 @@ export class EVMChainAdapterBase {
         if (logAddr !== storageAddress) continue;
         try {
           const parsed = kas.interface.parseLog({ topics: [...log.topics], data: log.data });
-          if (parsed?.name === 'KnowledgeAssetCreated' || parsed?.name === 'KnowledgeAssetCreated') {
+          if (parsed?.name === 'KnowledgeAssetCreated') {
             kaId = BigInt(parsed.args.id);
             authorAddress = String(parsed.args.author);
             startKAId = kaId;

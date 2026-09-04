@@ -26,23 +26,7 @@ import type {
   ResolvedKnowledgeAsset,
   ResolvedLegacyKnowledgeAsset,
 } from './query-engine.js';
-import {
-  contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiableMemoryUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer,
-  contextGraphLayerUriCandidates, contextGraphLayerPrefixCandidates,
-  contextGraphSubGraphUri, contextGraphMetaUri, contextGraphSharedMemoryMetaUri, assertionLifecycleUri,
-  contextGraphSubGraphMetaUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri,
-  assertSafeIri, escapeSparqlLiteral, validateSubGraphName,
-  ASSERTION_NAMED_GRAPH_PREFIX,
-  isAssertionScopedChildGraph,
-  type GetView,
-  REMOVED_VIEWS,
-  TrustLevel,
-  GRAPH_KA_CONTENT_SCOPE_VERSION,
-  createGraphKnowledgeAssetScope,
-  knowledgeAssetLayerGraphUri,
-  buildLegacyKnowledgeAssetMetadataQuery,
-  type ParsedGraphKnowledgeAssetMetadata,
-} from '@origintrail-official/dkg-core';
+import { contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiableMemoryUri, contextGraphAssertionUri, MemoryLayer, contextGraphLayerUriCandidates, contextGraphLayerPrefixCandidates, contextGraphSubGraphUri, contextGraphMetaUri, contextGraphSharedMemoryMetaUri, assertionLifecycleUri, contextGraphSubGraphMetaUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri, assertSafeIri, escapeSparqlLiteral, validateSubGraphName, ASSERTION_NAMED_GRAPH_PREFIX, isAssertionScopedChildGraph, type GetView, REMOVED_VIEWS, TrustLevel, GRAPH_KA_CONTENT_SCOPE_VERSION, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, buildLegacyKnowledgeAssetMetadataQuery, type ParsedGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-core';
 import {
   validateReadOnlySparql,
   emptyResultForSparql,

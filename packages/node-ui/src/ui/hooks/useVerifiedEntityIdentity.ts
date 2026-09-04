@@ -21,7 +21,7 @@
  *   • publisherPeerId— prov:wasAttributedTo from the op
  *   • opId           — short id parsed out of the op URI (for display)
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { executeQuery } from '../api.js';
 
 const DKG_NS  = 'http://dkg.io/ontology/';

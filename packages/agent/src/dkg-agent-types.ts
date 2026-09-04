@@ -22,27 +22,7 @@ import type {
   TripleStoreConfig,
   LargeLiteralStorageConfig,
 } from '@origintrail-official/dkg-storage';
-import type {
-  OperationContext,
-  AuthorAttestationTypedData,
-  DkgNetworkIdentity,
-  CompatibleProtocolOutboxStore,
-  MessageIdempotencyStore,
-  SwmSenderKeyPackageAckReasonCode,
-  ContextGraphJoinPolicyMode as CoreContextGraphJoinPolicyMode,
-  ContextGraphJoinPolicyRecord as CoreContextGraphJoinPolicyRecord,
-  CatalogSealDeploymentProfileV1,
-  ContextGraphIdV1,
-  ContextGraphPolicyV1,
-  DecimalU64V1,
-  Digest32V1,
-  EvmAddressV1,
-  NetworkIdV1,
-  SubGraphNameV1,
-  TimestampMsV1,
-  UnsignedContextGraphPolicyEnvelopeV1,
-  UnsignedMemberRosterEnvelopeV1,
-} from '@origintrail-official/dkg-core';
+import type { OperationContext, AuthorAttestationTypedData, DkgNetworkIdentity, CompatibleProtocolOutboxStore, MessageIdempotencyStore, SwmSenderKeyPackageAckReasonCode, ContextGraphJoinPolicyMode as CoreContextGraphJoinPolicyMode, ContextGraphJoinPolicyRecord as CoreContextGraphJoinPolicyRecord, CatalogSealDeploymentProfileV1, ContextGraphIdV1, DecimalU64V1, EvmAddressV1, NetworkIdV1, SubGraphNameV1, TimestampMsV1, UnsignedContextGraphPolicyEnvelopeV1, UnsignedMemberRosterEnvelopeV1 } from '@origintrail-official/dkg-core';
 import type {
   PhaseCallback,
   SharedMemoryPublicSnapshotStorageConfig,

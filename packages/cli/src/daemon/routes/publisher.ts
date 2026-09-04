@@ -12,28 +12,11 @@
 // See `packages/cli/scripts/split-handle-request.mjs` for the
 // extraction driver.
 
-import {
-  createServer,
-  type IncomingMessage,
-  type ServerResponse,
-} from "node:http";
-import { createHash, randomUUID } from "node:crypto";
-import {
-  appendFile,
-  chmod,
-  copyFile,
-  mkdir,
-  readFile,
-  rename,
-  rm,
-  stat,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
-import { execSync, exec, execFile } from "node:child_process";
+import { type IncomingMessage, type ServerResponse } from "node:http";
+
+import { exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { join, dirname, resolve } from 'node:path';
-import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSync as fsWriteFileSync, unlinkSync } from 'node:fs';
+
 // Namespace import: our Phase-8 install-context builder (~line 290) calls
 // `osModule.homedir()`, and the later agent-identity probe (~line 6851)
 // uses `osModule.hostname()` + `osModule.userInfo()`. v10-rc's new
@@ -42,9 +25,8 @@ import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSy
 import * as osModule from 'node:os';
 const { homedir } = osModule;
 const MAX_PUBLISH_EPOCHS = 0xffffffff;
-import { fileURLToPath } from 'node:url';
+
 import { createRequire } from 'node:module';
-import { ethers } from 'ethers';
 
 // Lazy resolver used by the manifest-install flow: find the
 // @origintrail-official/dkg-mcp package via Node's own resolution
@@ -56,283 +38,37 @@ const daemonRequire = createRequire(import.meta.url);
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import {
-  findReservedSubjectPrefix,
-  isSafeJobId,
-  isSkolemizedUri,
-  SAFE_JOB_ID_ERROR,
-} from '@origintrail-official/dkg-publisher';
+
+import { isSafeJobId, SAFE_JOB_ID_ERROR } from '@origintrail-official/dkg-publisher';
 import type {
   AsyncPreparedPublishPayload,
   LiftJobRetryProjection,
   PendingTransactionClearOverride,
   PersistedLiftJob,
 } from '@origintrail-official/dkg-publisher';
-import {
-  DashboardDB,
-  MetricsCollector,
-  OperationTracker,
-  handleNodeUIRequest,
-  ChatMemoryManager,
-  LogPushWorker,
-  LlmClient,
-  type MetricsSource,
-} from "@origintrail-official/dkg-node-ui";
-import {
-  loadConfig,
-  saveConfig,
-  loadNetworkConfig,
-  dkgDir,
-  writePid,
-  removePid,
-  writeApiPort,
-  removeApiPort,
-  logPath,
-  ensureDkgDir,
-  TELEMETRY_ENDPOINTS,
-  type DkgConfig,
-  type AutoUpdateConfig,
-  type LocalAgentIntegrationCapabilities,
-  type LocalAgentIntegrationConfig,
-  type LocalAgentIntegrationManifest,
-  type LocalAgentIntegrationRuntime,
-  type LocalAgentIntegrationStatus,
-  type LocalAgentIntegrationTransport,
-  resolveContextGraphs,
-  resolveNetworkDefaultContextGraphs,
-  resolveSharedMemoryTtlMs,
-  repoDir,
-  releasesDir,
-  activeSlot,
-  inactiveSlot,
-  swapSlot,
-  gitCommandEnv,
-  gitCommandArgs,
-  isStandaloneInstall,
-  slotEntryPoint,
-  CLI_NPM_PACKAGE,
-} from '../../config.js';
-import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type AsyncPublisherAvailability, type PublisherRuntime } from '../../publisher-runner.js';
-import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { authenticatedAgentAddress, canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
-import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
-import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
-import {
-  expectedBundledMarkItDownBuildMetadata,
-  readCliPackageVersion,
-  type BundledMarkItDownMetadata,
-} from "../../extraction/markitdown-bundle-metadata.js";
-import {
-  checksumPathFor as markItDownChecksumPath,
-  hasVerifiedBundledBinary as hasVerifiedBundledMarkItDownBinary,
-  metadataPathFor as markItDownMetadataPath,
-} from '../../../scripts/markitdown-bundle-validation.mjs';
-import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from '../../extraction-status.js';
-import { FileStore } from '../../file-store.js';
-import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
-import { parseBoundary, parseMultipart, MultipartParseError } from '../../http/multipart.js';
+
+import { type AsyncPublisherAvailability } from '../../publisher-runner.js';
+
+import { authenticatedAgentAddress, canAdministerNode } from '../../auth.js';
+
 // Phase 8 -- project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
 // reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
 // format stays identical between curator/joiner/CLI paths.
-import {
-  publishManifest as publishManifestImpl,
-  assembleStandardTemplates,
-} from '@origintrail-official/dkg-mcp/manifest/publish';
-import { fetchManifest as fetchManifestImpl } from '@origintrail-official/dkg-mcp/manifest/fetch';
-import {
-  planInstall as planInstallImpl,
-  writeInstall as writeInstallImpl,
-  buildReviewMarkdown as buildReviewMarkdownImpl,
-  type InstallContext,
-} from '@origintrail-official/dkg-mcp/manifest/install';
-import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 
 // Daemon sub-module imports -- every public symbol from sibling
 // modules is pulled in here because the legacy monolithic file used
 // them all without explicit imports. Unused ones are tolerated by
 // the project's tsconfig (`noUnusedLocals` is off).
-import {
-  daemonState,
-  DEBUG_SYNC_TRACE,
-  resolveAutoUpdateEnabled,
-  type CorsAllowlist,
-} from '../state.js';
-import {
-  type CatchupJobState,
-  type CatchupJob,
-  type CatchupTracker,
-  toCatchupStatusResponse,
-} from '../types.js';
-import {
-  type MarkItDownTarget,
-  manifestRepoRoot,
-  type McpDkgAssets,
-  resolveMcpDkgAssets,
-  readMcpDkgVersion,
-  parseSemver,
-  cmpSemverForRange,
-  versionSatisfiesRange,
-  manifestNetworkLabel,
-  formatDaemonAuthority,
-  manifestSelfClient,
-  manifestPublisherUri,
-  type SupportedTool,
-  nicknameToSlug,
-  buildManifestInstallContext,
-  _autoUpdateIo,
-  loadMarkItDownTargets,
-  getNodeVersion,
-  getCurrentCommitShort,
-  loadSkillTemplate,
-  buildSkillMd,
-  skillEtag,
-  DAEMON_EXIT_CODE_RESTART,
-  parseRequiredSignatures,
-  normalizeDetectedContentType,
-  currentBundledMarkItDownAssetName,
-  bindingValue,
-  carryForwardBundledMarkItDownBinary,
-} from '../manifest.js';
+
+import { _autoUpdateIo } from '../manifest.js';
 import { respondTerminalClearOutcome } from './terminal-clear-response.js';
-import {
-  resolveNameToPeerId,
-  jsonResponse,
-  safeDecodeURIComponent,
-  safeParseJson,
-  validateOptionalSubGraphName,
-  validateRequiredContextGraphId,
-  normalizeContextGraphIdOrUri,
-  validateEntities,
-  validateConditions,
-  MAX_BODY_BYTES,
-  SMALL_BODY_BYTES,
-  MAX_UPLOAD_BYTES,
-  type ImportFileExtractionPayload,
-  buildImportFileResponse,
-  unregisteredSubGraphError,
-  readBody,
-  readBodyBuffer,
-  buildCorsAllowlist,
-  resolveCorsOrigin,
-  corsHeaders,
-  HttpRateLimiter,
-  isLoopbackClientIp,
-  isLoopbackRateLimitExemptPath,
-  shouldBypassRateLimitForLoopbackTraffic,
-  shortId,
-  sleep,
-  deriveBlockExplorerUrl,
-} from '../http-utils.js';
-import {
-  normalizeRepo,
-  isValidRepoSpec,
-  repoToFetchUrl,
-  githubRepoForApi,
-  resolveRemoteCommitSha,
-  type PendingUpdateState,
-  type CommitCheckStatus,
-  readPendingUpdateState,
-  clearPendingUpdateState,
-  writePendingUpdateState,
-  type NpmVersionResult,
-  resolveLatestNpmVersion,
-  compareSemver,
-  getCurrentCliVersion,
-  type NpmVersionStatus,
-  checkForNpmVersionUpdate,
-  type UpdateStatus,
-  acquireUpdateLock,
-  releaseUpdateLock,
-  performNpmUpdate,
-} from '../auto-update.js';
-import { isValidRef, parseTagName } from '../../auto-update-ref.js';
-import {
-  OPENCLAW_UI_CONNECT_TIMEOUT_MS,
-  OPENCLAW_UI_CONNECT_POLL_MS,
-  OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
-  type PendingOpenClawUiAttachJob,
-  isOpenClawBridgeHealthCacheValid,
-  type OpenClawChannelTarget,
-  trimTrailingSlashes,
-  buildOpenClawGatewayBase,
-  loadBridgeAuthToken,
-  getOpenClawChannelTargets,
-  type OpenClawBridgeHealthState,
-  type OpenClawGatewayHealthState,
-  type OpenClawChannelHealthReport,
-  transportPatchFromOpenClawTarget,
-  probeOpenClawChannelHealth,
-  runOpenClawUiSetup,
-  localOpenclawConfigPath,
-  isOpenClawMemorySlotElected,
-  restartOpenClawGateway,
-  waitForOpenClawChatReady,
-  type OpenClawUiAttachDeps,
-  formatOpenClawUiAttachFailure,
-  scheduleOpenClawUiAttachJob,
-  cancelPendingLocalAgentAttachJob,
-  isOpenClawUiAttachCancelled,
-  shouldTryNextOpenClawTarget,
-  buildOpenClawChannelHeaders,
-  ensureOpenClawBridgeAvailable,
-  type OpenClawStreamRequest,
-  type OpenClawStreamResponse,
-  type OpenClawStreamReader,
-  writeOpenClawStreamChunk,
-  pipeOpenClawStream,
-  isValidOpenClawPersistTurnPayload,
-  type OpenClawAttachmentRef,
-  normalizeOpenClawAttachmentRef,
-  normalizeOpenClawAttachmentRefs,
-  type OpenClawChatContextEntry,
-  normalizeOpenClawChatContextEntry,
-  normalizeOpenClawChatContextEntries,
-  hasOpenClawChatTurnContent,
-  unescapeOpenClawAttachmentLiteralBody,
-  stripOpenClawAttachmentLiteral,
-  parseOpenClawAttachmentTripleCount,
-  isOpenClawAttachmentAssertionUriForContextGraph,
-  extractionRecordMatchesOpenClawAttachmentRef,
-  verifyOpenClawAttachmentRefsProvenance,
-} from '../openclaw.js';
-import {
-  type LocalAgentIntegrationDefinition,
-  type LocalAgentIntegrationRecord,
-  LOCAL_AGENT_INTEGRATION_DEFINITIONS,
-  isPlainRecord,
-  normalizeIntegrationId,
-  normalizeLocalAgentTransport,
-  normalizeLocalAgentCapabilities,
-  normalizeLocalAgentManifest,
-  normalizeLocalAgentRuntime,
-  isLocalAgentExplicitlyUserDisabled,
-  isExplicitLocalAgentDisconnectPatch,
-  normalizeExplicitLocalAgentDisconnectBody,
-  mergeLocalAgentIntegrationConfig,
-  getStoredLocalAgentIntegrations,
-  computeLocalAgentIntegrationStatus,
-  buildLocalAgentIntegrationRecord,
-  listLocalAgentIntegrations,
-  getLocalAgentIntegration,
-  pruneLegacyOpenClawConfig,
-  extractLocalAgentIntegrationPatch,
-  connectLocalAgentIntegration,
-  updateLocalAgentIntegration,
-  hasConfiguredLocalAgentChat,
-  hasStoredLocalAgentTransportConfig,
-  connectLocalAgentIntegrationFromUi,
-  type ReverseLocalAgentSetupDeps,
-  reverseLocalAgentSetupForUi,
-  refreshLocalAgentIntegrationFromUi,
-} from '../local-agents.js';
+import { jsonResponse, validateOptionalSubGraphName, normalizeContextGraphIdOrUri, SMALL_BODY_BYTES, readBody } from '../http-utils.js';
+
+import { isPlainRecord } from '../local-agents.js';
 
 import type { RequestContext } from './context.js';
 import { actorFromRequestContext } from './context.js';
-
 
 interface PublisherLifecycleFacts {
   contextGraphId: string;
@@ -514,7 +250,6 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     authentication,
     effectiveAgentAddress: requestAgentAddress,
   } = actor;
-
 
   // GET /api/publisher/jobs?status=...
   if (req.method === "GET" && path === "/api/publisher/jobs") {

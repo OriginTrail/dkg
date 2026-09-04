@@ -18,18 +18,7 @@ import { z } from 'zod';
 import type { DkgClient } from './client.js';
 import { normalizeContextGraphId } from './client.js';
 import type { DkgConfig } from './config.js';
-import {
-  NS,
-  PREFIXES,
-  bindingValue,
-  bindingsToTable,
-  bindingsToParagraphs,
-  escapeSparqlLiteral,
-  prettyTerm,
-  parseEntitySource,
-  sourceLabel,
-  type EntitySource,
-} from './sparql.js';
+import { NS, PREFIXES, bindingValue, bindingsToTable, escapeSparqlLiteral, prettyTerm, parseEntitySource, sourceLabel, type EntitySource } from './sparql.js';
 import { EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION } from './tools/context-graph-description.js';
 import { filterContextGraphsForScope } from './tools/context-graph-scope.js';
 import { resolveWorkingMemoryAgentAddress } from './tools/working-memory-identity.js';

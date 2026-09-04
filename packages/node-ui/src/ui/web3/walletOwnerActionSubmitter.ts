@@ -15,14 +15,7 @@ import {
   type Hex,
   type TransactionReceipt,
 } from 'viem';
-import {
-  pcaSettle,
-  type CreatePcaResult,
-  type PcaAddAgentResult,
-  type PcaContracts,
-  type PcaRemoveAgentResult,
-  type PcaTopUpResult,
-} from '../api.js';
+import { pcaSettle, type CreatePcaResult, type PcaAddAgentResult, type PcaRemoveAgentResult, type PcaTopUpResult } from '../api.js';
 import { useWalletStore, type WalletState } from '../stores/wallet.js';
 import {
   publicClientFor as defaultPublicClientFor,

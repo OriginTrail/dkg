@@ -15,31 +15,9 @@ import {
   LegacyKnowledgeAssetReadOnlyError,
   createGraphKnowledgeAssetScope,
 } from '@origintrail-official/dkg-core';
-import type { PhaseCallback, PublishResult } from './publisher.js';
+import type { PublishResult } from './publisher.js';
 import { resolveEffectiveAsyncLiftRetryTuning } from './async-lift-retry-tuning.js';
-import {
-  LIFT_JOB_STATES,
-  createLiftJobFailureMetadata,
-  type LiftJob,
-  type LiftJobCompatibility,
-  type PersistedLiftJob,
-  type LiftJobFailureCode,
-  type LiftJobAccepted,
-  type LiftJobBroadcast,
-  type LiftJobBroadcastMetadata,
-  type LiftJobHex,
-  type LiftJobIncluded,
-  type LiftJobInclusionMetadata,
-  type LiftJobFinalizationInput,
-  type LiftJobRecoveryMetadata,
-  type LiftJobRequest,
-  type LiftJobState,
-  type KnowledgeAssetVmPublishRequest,
-  type LiftPublishRequestMetadata,
-  type LiftPublishSnapshotRequest,
-  type AdmissionJournalEntry,
-  type JournalKind,
-} from './lift-job.js';
+import { LIFT_JOB_STATES, createLiftJobFailureMetadata, type LiftJob, type LiftJobCompatibility, type PersistedLiftJob, type LiftJobFailureCode, type LiftJobAccepted, type LiftJobBroadcast, type LiftJobBroadcastMetadata, type LiftJobHex, type LiftJobIncluded, type LiftJobInclusionMetadata, type LiftJobFinalizationInput, type LiftJobRequest, type LiftJobState, type KnowledgeAssetVmPublishRequest, type LiftPublishRequestMetadata, type LiftPublishSnapshotRequest, type AdmissionJournalEntry, type JournalKind } from './lift-job.js';
 import type {
   AsyncKnowledgeAssetVmPublishJobHandler,
   ActiveLiftJobClaim,
@@ -77,22 +55,7 @@ import {
   LiftJobPendingChainProofError,
   StaleLiftJobClaimError,
 } from './async-lift-publisher-types.js';
-import {
-  FAILED_JOB_RETRY_ACTION_COUNT,
-  classifyRetryAction,
-  deriveLiftJobRetryProjection,
-  isAutomaticallyRetryableLiftJob,
-  isBulkClearableTerminalLiftJob,
-  isClearableTerminalLiftJob,
-  isTargetedClearableLiftJob,
-  decideChainProofDisposition,
-  hasAutomaticRecoveryExit,
-  resolveHeldJobSettlementCapability,
-  type HeldJobSettlementCapability,
-  isHeldForChainProof,
-  selectLifecycleBindingJobs,
-  type LiftJobRetryProjection,
-} from './async-lift-retry-disposition.js';
+import { FAILED_JOB_RETRY_ACTION_COUNT, classifyRetryAction, deriveLiftJobRetryProjection, isAutomaticallyRetryableLiftJob, isBulkClearableTerminalLiftJob, isTargetedClearableLiftJob, decideChainProofDisposition, hasAutomaticRecoveryExit, resolveHeldJobSettlementCapability, type HeldJobSettlementCapability, isHeldForChainProof, selectLifecycleBindingJobs, type LiftJobRetryProjection } from './async-lift-retry-disposition.js';
 import {
   type TargetedLiftJobClearOptions,
   type TerminalJobClearOutcome,
@@ -739,7 +702,6 @@ export class TripleStoreAsyncLiftPublisher
       return jobId;
     });
   }
-
 
   async claimNext(walletId: string): Promise<ActiveLiftJobClaim | null> {
     return await this.claimCoordinator.claimNext(walletId);

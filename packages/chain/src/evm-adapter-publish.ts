@@ -374,8 +374,7 @@ export class PublishMethods extends EVMChainAdapterBase {
           try {
             const parsed = kas.interface.parseLog({ topics: [...log.topics], data: log.data });
             if (
-              (parsed?.name === 'KnowledgeAssetUpdated' ||
-                parsed?.name === 'KnowledgeAssetUpdated') &&
+              parsed?.name === 'KnowledgeAssetUpdated' &&
               BigInt(parsed.args.id) === batchId
             ) {
               onChainMerkleRoot = ethers.getBytes(parsed.args.merkleRoot);

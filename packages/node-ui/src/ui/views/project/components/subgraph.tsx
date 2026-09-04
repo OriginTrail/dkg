@@ -9,9 +9,9 @@ import { useMemoryEntities, canonicalEntityUri, type TrustLevel, type MemoryEnti
 import { useProjectProfileContext, type QueryCatalog } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
-import { SubGraphBar } from '../../../components/SubGraphBar.js';
+
 import { memoryGraphLabels } from '../../../lib/memoryLabels.js';
-import { TRUST_COLORS, LAYER_CONFIG, CODE_CLASS_COLORS, CODE_PREDICATE_COLORS, entityAuthorUri, entityMeta, neutraliseBuiltinNamespaces, useLayerTriples, useCanonicalTriples, applyCanonicalAdmission, filterTriplesToEntities, admitTripleForScope, entityTimestamp, formatTimelineBucket, type SubGraphTab, type SubGraphEntitySort } from '../helpers.js';
+import { TRUST_COLORS, LAYER_CONFIG, CODE_CLASS_COLORS, CODE_PREDICATE_COLORS, entityAuthorUri, entityMeta, neutraliseBuiltinNamespaces, useCanonicalTriples, applyCanonicalAdmission, filterTriplesToEntities, admitTripleForScope, entityTimestamp, formatTimelineBucket, type SubGraphTab, type SubGraphEntitySort } from '../helpers.js';
 import { EmptyState } from '../../../components/ContextGraphPrimitives.js';
 import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../../../lib/subGraphs.js';
 import { applyHeaviestSubjectsCap, RdfGraph, LayerGraphPanel } from './graph.js';
@@ -979,7 +979,6 @@ export function SubGraphTimeline({
     </div>
   );
 }
-
 
 /** Sort modes for the Entities tab on a sub-graph page. `created-*` is
  *  only meaningful when the sub-graph profile defines a `timelinePredicate`

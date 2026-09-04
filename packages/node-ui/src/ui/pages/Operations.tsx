@@ -1,17 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
-import {
-  ResponsiveContainer, LineChart, Line, BarChart, Bar, AreaChart, Area,
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-} from 'recharts';
+import { ResponsiveContainer, BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
 import { useFetch, formatTime, formatDuration, shortId } from '../hooks.js';
-import {
-  fetchOperationsWithPhases, fetchOperation, fetchNodeLog,
-  fetchOperationStats, fetchStatus, fetchErrorHotspots, fetchFailedOperations,
-  fetchSuccessRates, fetchPerTypeStats, fetchMetricsHistory,
-  fetchReplicationSummary, fetchReplicationPerCg, fetchReplicationTimeline,
-  fetchReplicationCursors, fetchReplicationEvents,
-  type ReplicationPerCgRow,
-} from '../api.js';
+import { fetchOperationsWithPhases, fetchOperation, fetchNodeLog, fetchStatus, fetchErrorHotspots, fetchFailedOperations, fetchSuccessRates, fetchPerTypeStats, fetchMetricsHistory, fetchReplicationSummary, fetchReplicationPerCg, fetchReplicationTimeline, fetchReplicationCursors, fetchReplicationEvents, type ReplicationPerCgRow } from '../api.js';
 // P-1 review: shared phase palette — single source of truth for
 // phase → colour AND the Operations legend. Previously Dashboard
 // and Operations kept two independent maps that drifted.

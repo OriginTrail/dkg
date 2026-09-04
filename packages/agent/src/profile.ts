@@ -1,11 +1,5 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
-import {
-  DKG_ONTOLOGY,
-  SYSTEM_CONTEXT_GRAPHS,
-  canonicalAgentDidSubject,
-  isPublicLikeAddress,
-  toAgentDid,
-} from '@origintrail-official/dkg-core';
+import { SYSTEM_CONTEXT_GRAPHS, canonicalAgentDidSubject, isPublicLikeAddress, toAgentDid } from '@origintrail-official/dkg-core';
 /** Compatibility re-export; canonicalization is implemented and documented in dkg-core. */
 export { canonicalAgentDidSubject } from '@origintrail-official/dkg-core';
 

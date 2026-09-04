@@ -19,7 +19,6 @@ import {
 } from './evm-adapter-errors.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type ChainReadOptions, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
-import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 
 type ContextGraphRegistryScanPlan =
   | {
@@ -624,7 +623,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     };
   }
 
-  async publishToContextGraph(params: PublishToContextGraphParams): Promise<OnChainPublishResult> {
+  async publishToContextGraph(_params: PublishToContextGraphParams): Promise<OnChainPublishResult> {
     await this.init();
     if (!this.contracts.knowledgeAssets) {
       throw new Error('KnowledgeAssets contract not deployed.');
@@ -640,8 +639,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     // (the on-chain createKnowledgeAssets rejects a namespace-mismatched id).
     // Publish through the V10 lifecycle (finalize → swm/share → vm/publish).
     //
-    // This guard MUST run before ANY on-chain side effect (the TRAC approve and
-    // the legacy `ka.publishToContextGraph` tx below): throwing after the send
+    // This guard MUST run before ANY on-chain side effect: throwing after a send
     // would leave a partially-applied publish on-chain and invite duplicate
     // publishes on caller retry.
     throw new Error(
@@ -649,120 +647,6 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         'publish through the V10 lifecycle (finalize → swm/share → vm/publish), which allocates ' +
         'and binds the per-author reservedKaId into the author attestation.',
     );
-
-    const signer = await this.nextAuthorizedSigner(params.contextGraphId);
-    const receiverIdentityIds = params.receiverSignatures.map((s) => s.identityId);
-    const receiverRs = params.receiverSignatures.map((s) => ethers.hexlify(s.r));
-    const receiverVSs = params.receiverSignatures.map((s) => ethers.hexlify(s.vs));
-    const participantIdentityIds = params.participantSignatures.map((s) => s.identityId);
-    const participantRs = params.participantSignatures.map((s) => ethers.hexlify(s.r));
-    const participantVSs = params.participantSignatures.map((s) => ethers.hexlify(s.vs));
-
-    // Non-null assertions: the guards above (and the unsupported-mirror throw)
-    // make this block unreachable, so TS no longer carries the `knowledgeAssets`/
-    // `token` presence narrowing here. Kept for type-completeness until the
-    // mirror is removed.
-    const ka = this.contracts.knowledgeAssets!.connect(signer) as any;
-    const kaAddress = await this.contracts.knowledgeAssets!.getAddress();
-
-    if (this.contracts.token && params.tokenAmount > 0n) {
-      const token = this.contracts.token!.connect(signer) as Contract;
-      const currentAllowance: bigint = await token.allowance(signer.address, kaAddress);
-      if (currentAllowance < params.tokenAmount) {
-        await this.sendContractTransaction(
-          token,
-          'approve',
-          [kaAddress, ethers.MaxUint256],
-          signer,
-          'approve context graph publish TRAC',
-        );
-      }
-    }
-
-    const tx = await ka.publishToContextGraph(
-      params.kaCount,
-      params.publisherNodeIdentityId,
-      ethers.hexlify(params.merkleRoot),
-      params.publicByteSize,
-      params.epochs,
-      params.tokenAmount,
-      ethers.ZeroAddress,
-      ethers.hexlify(params.publisherSignature.r),
-      ethers.hexlify(params.publisherSignature.vs),
-      receiverIdentityIds,
-      receiverRs,
-      receiverVSs,
-      params.contextGraphId,
-      participantIdentityIds,
-      participantRs,
-      participantVSs,
-    );
-
-    const ackSignatures = [
-      ...params.receiverSignatures,
-      ...params.participantSignatures,
-    ].filter((s, i, arr) =>
-      i === arr.findIndex((a) => a.identityId === s.identityId),
-    );
-
-    // V9→V10 mirror: RandomSampling reads `merkleLeafCount` from on-chain
-    // storage to pick `chunkId`. Silently writing 1 here would brick every
-    // bridged KC whose flat-KC tree has more than one leaf (the prover
-    // would request a chunk past the tree's leaf range). Refuse to mirror
-    // if the caller didn't supply the real count.
-    if (
-      typeof params.merkleLeafCount !== 'number'
-      || !Number.isInteger(params.merkleLeafCount)
-      || params.merkleLeafCount < 1
-    ) {
-      throw new Error(
-        'publishToContextGraph: missing/invalid merkleLeafCount. '
-        + 'V10 mirror requires the caller to supply the V10MerkleTree leaf count '
-        + '(integer ≥ 1). Hard-coding would corrupt RandomSampling chunk selection.',
-      );
-    }
-
-    // Unreachable below (kept for type-completeness until the mirror is removed);
-    // the unsupported-mirror guard above throws before any on-chain side effect.
-    const v10ChainId = await this.getEvmChainId();
-    const v10KavAddress = await this.contracts.knowledgeAssetsLifecycle!.getAddress();
-    const authorTypedData = buildAuthorAttestationTypedData({
-      chainId: v10ChainId,
-      kav10Address: v10KavAddress,
-      // #1116: AuthorAttestation no longer binds contextGraphId.
-      merkleRoot: params.merkleRoot,
-      authorAddress: signer.address,
-      reservedKaId: 0n,
-    });
-    const authorSig = ethers.Signature.from(
-      await signer.signTypedData(
-        authorTypedData.domain,
-        authorTypedData.types,
-        authorTypedData.message,
-      ),
-    );
-
-    return this.createKnowledgeAssets({
-      publishOperationId: ethers.hexlify(ethers.randomBytes(32)),
-      contextGraphId: params.contextGraphId,
-      merkleRoot: params.merkleRoot,
-      knowledgeAssetsAmount: params.kaCount,
-      byteSize: params.publicByteSize,
-      epochs: params.epochs,
-      tokenAmount: params.tokenAmount,
-      merkleLeafCount: params.merkleLeafCount,
-      isImmutable: false,
-      publisherNodeIdentityId: params.publisherNodeIdentityId,
-      author: {
-        address: signer.address,
-        signature: {
-          r: ethers.getBytes(authorSig.r),
-          vs: ethers.getBytes(authorSig.yParityAndS),
-        },
-        schemeVersion: AUTHOR_SCHEME_VERSION_V1,
-      },
-      ackSignatures,
-    });
   }
 
   async getKAContextGraphId(kaId: bigint, options: ChainReadOptions = {}): Promise<bigint> {
