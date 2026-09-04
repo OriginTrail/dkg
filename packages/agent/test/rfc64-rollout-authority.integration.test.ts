@@ -243,6 +243,42 @@ describe('RFC-64 rollout authority integration', () => {
     ]);
   });
 
+  it('reconciles private responsibility when refreshed ACL facts change without a subscription transition', async () => {
+    const contextGraphId = `${AUTHOR}/private-acl-refresh`;
+    const edge = await startAgent('private-acl-refresh', undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('private');
+    const canRead = vi.spyOn(edge, 'canReadContextGraph').mockResolvedValue(false);
+    vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
+    vi.spyOn(edge.store, 'query').mockResolvedValue({
+      type: 'bindings',
+      bindings: [],
+    });
+
+    (edge as any).setContextGraphSubscription(contextGraphId, {
+      subscribed: true,
+      synced: true,
+      metaSynced: true,
+      onChainId: '3',
+    }, { persist: false });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([]);
+
+    // The curator projection now admits this local agent, but every canonical
+    // subscription field is unchanged. Metadata completion itself must own the
+    // responsibility refresh.
+    canRead.mockResolvedValue(true);
+    await (edge as any).refreshMetaSyncedFlags([contextGraphId]);
+
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([
+      expect.objectContaining({
+        contextGraphId,
+        responsibilityReason: 'private-membership',
+        active: true,
+        mode: 'catalog',
+      }),
+    ]);
+  });
+
   it('uses durable public hosting and preserves explicit disabled rollback', async () => {
     const coreContextGraphId = `${AUTHOR}/core-hosted-responsibility`;
     const core = await startAgent(

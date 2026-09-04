@@ -9228,6 +9228,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             pendingMeta: false,
           });
         }
+        // Private responsibility depends on the live ACL projection, not only
+        // on subscription fields. A curator refresh can add/remove the local
+        // agent while `metaSynced`, `subscribed`, and the chain binding all stay
+        // unchanged, so the canonical setter has no transition to observe.
+        // Reconcile after the authoritative metadata proof itself and await the
+        // result so callers leave this readiness boundary with a settled
+        // default RFC-64 selection.
+        await this.reconcileRfc64CatalogResponsibilityV1(contextGraphId);
         this.queueSharedMemoryGossipSubscription(contextGraphId);
       }
     }
