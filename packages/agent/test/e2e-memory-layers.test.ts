@@ -763,7 +763,12 @@ describe('rootless graph-scoped KA lifecycle', () => {
   }, 60_000);
 
   it('repairs a named lifecycle after its async publish transaction confirmed during downtime', async () => {
-    const agent = await createAgent('QueuedAsyncVmRecoveryBot');
+    // This row drives the durable queue-recovery entry point explicitly. Keep
+    // the independent VM reconciliation worker disabled so it cannot consume
+    // the same confirmed chain event and repair/retire the fixture first.
+    const agent = await createAgent('QueuedAsyncVmRecoveryBot', {
+      syncReconcilerEnabled: false,
+    });
     await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Recovery E2E' });
     await agent.registerContextGraph(CG_ID);
 
