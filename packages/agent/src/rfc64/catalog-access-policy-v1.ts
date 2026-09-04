@@ -147,14 +147,28 @@ export function assertAcceptedRfc64CatalogAuthorMembershipV1(
   }
 }
 
-export interface Rfc64CatalogAccessPolicyRegistryOptionsV1 {
-  readonly localAgentAddress: EvmAddressV1;
+type Rfc64CatalogLocalAuthorityV1 =
+  | Readonly<{
+    /** Compatibility authority for nodes that expose one identity globally. */
+    localAgentAddress: EvmAddressV1;
+    resolveLocalAgentAddress?: never;
+  }>
+  | Readonly<{
+    localAgentAddress?: never;
+    /** Resolve the one unambiguous local principal for this Context Graph. */
+    resolveLocalAgentAddress: (
+      contextGraphId: ContextGraphIdV1,
+    ) => Promise<EvmAddressV1 | null>;
+  }>;
+
+export type Rfc64CatalogAccessPolicyRegistryOptionsV1 =
+  Rfc64CatalogLocalAuthorityV1 & Readonly<{
   /** Exact authenticated libp2p-peer to agent-wallet binding. */
-  readonly resolveRemoteAgentAddress: (
+  resolveRemoteAgentAddress: (
     remotePeerId: string,
     contextGraphId: ContextGraphIdV1,
   ) => Promise<EvmAddressV1 | null>;
-}
+}>;
 
 interface HeldCatalogAccessSnapshotV1 extends AcceptedRfc64CatalogAccessSnapshotV1 {
   readonly members: ReadonlyMap<EvmAddressV1, Readonly<MemberRosterEntryV1>> | null;
@@ -171,6 +185,9 @@ const UTF8 = new TextEncoder();
  */
 export class Rfc64CatalogAccessPolicyRegistryV1 {
   readonly #localAgentAddress: EvmAddressV1 | null;
+  readonly #resolveLocalAgentAddress: ((
+    contextGraphId: ContextGraphIdV1,
+  ) => Promise<EvmAddressV1 | null>) | null;
   readonly #resolveRemoteAgentAddress: ((
     remotePeerId: string,
     contextGraphId: ContextGraphIdV1,
@@ -180,13 +197,29 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
   constructor(options?: Rfc64CatalogAccessPolicyRegistryOptionsV1) {
     if (options === undefined) {
       this.#localAgentAddress = null;
+      this.#resolveLocalAgentAddress = null;
       this.#resolveRemoteAgentAddress = null;
       return;
     }
-    this.#localAgentAddress = snapshotAgentAddress(
-      options.localAgentAddress,
-      'localAgentAddress',
-    );
+    const hasStaticLocalAuthority = options.localAgentAddress !== undefined;
+    const hasLocalAuthorityResolver = options.resolveLocalAgentAddress !== undefined;
+    if (hasStaticLocalAuthority === hasLocalAuthorityResolver) {
+      throw new TypeError(
+        'exactly one of localAgentAddress or resolveLocalAgentAddress must be supplied',
+      );
+    }
+    if (
+      hasLocalAuthorityResolver
+      && typeof options.resolveLocalAgentAddress !== 'function'
+    ) {
+      throw new TypeError('resolveLocalAgentAddress must be a function');
+    }
+    this.#localAgentAddress = hasStaticLocalAuthority
+      ? snapshotAgentAddress(options.localAgentAddress, 'localAgentAddress')
+      : null;
+    this.#resolveLocalAgentAddress = hasLocalAuthorityResolver
+      ? options.resolveLocalAgentAddress
+      : null;
     if (typeof options.resolveRemoteAgentAddress !== 'function') {
       throw new TypeError('resolveRemoteAgentAddress must be a function');
     }
@@ -275,7 +308,9 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
   }
 
   get privatePolicyAuthorityConfigured(): boolean {
-    return this.#localAgentAddress !== null && this.#resolveRemoteAgentAddress !== null;
+    return (
+      this.#localAgentAddress !== null || this.#resolveLocalAgentAddress !== null
+    ) && this.#resolveRemoteAgentAddress !== null;
   }
 
   lookup(
@@ -314,20 +349,26 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
     }
     if (
       held.members === null
-      || this.#localAgentAddress === null
+      || (
+        this.#localAgentAddress === null
+        && this.#resolveLocalAgentAddress === null
+      )
       || this.#resolveRemoteAgentAddress === null
     ) return null;
 
-    const remoteAgentAddress = await this.#resolveRemoteMemberAddress(
-      boundary.remotePeerId,
-      boundary.contextGraphId,
-    );
-    if (remoteAgentAddress === null) return null;
-    // A future verified transition path may replace the held snapshot while the
-    // authenticated peer binding is being resolved. Never authorize against a
-    // snapshot that stopped being current during that await.
+    const [localAgentAddress, remoteAgentAddress] = await Promise.all([
+      this.#resolveLocalMemberAddress(boundary.contextGraphId),
+      this.#resolveRemoteMemberAddress(
+        boundary.remotePeerId,
+        boundary.contextGraphId,
+      ),
+    ]);
+    if (localAgentAddress === null || remoteAgentAddress === null) return null;
+    // A future verified transition path may replace the held snapshot while
+    // either authenticated identity binding is being resolved. Never authorize
+    // against a snapshot that stopped being current during those awaits.
     if (this.#byKey.get(key) !== held) return null;
-    const localMember = held.members.get(this.#localAgentAddress);
+    const localMember = held.members.get(localAgentAddress);
     const remoteMember = held.members.get(remoteAgentAddress);
     if (localMember === undefined || remoteMember === undefined) return null;
 
@@ -374,6 +415,21 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
       return resolved === null
         ? null
         : snapshotAgentAddress(resolved, 'resolved remote agent address');
+    } catch {
+      return null;
+    }
+  }
+
+  async #resolveLocalMemberAddress(
+    contextGraphId: ContextGraphIdV1,
+  ): Promise<EvmAddressV1 | null> {
+    if (this.#localAgentAddress !== null) return this.#localAgentAddress;
+    if (this.#resolveLocalAgentAddress === null) return null;
+    try {
+      const resolved = await this.#resolveLocalAgentAddress(contextGraphId);
+      return resolved === null
+        ? null
+        : snapshotAgentAddress(resolved, 'resolved local agent address');
     } catch {
       return null;
     }

@@ -111,6 +111,7 @@ import {
   parseRfc64PublicCatalogHeadAnnouncementV1,
   type FetchedRfc64PublicCatalogHeadV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
+  type Rfc64PublicCatalogHeadReplayAdmissionV1,
   type Rfc64PublicCatalogHeadReplayRequestV1,
 } from './public-catalog-transport-v1.js';
 import {
@@ -165,7 +166,7 @@ export interface Rfc64PublicCatalogServiceOptionsV1 {
   readonly onCatalogHeadReplayRequested?: (
     request: Readonly<Rfc64PublicCatalogHeadReplayRequestV1>,
     remotePeerId: string,
-  ) => void;
+  ) => Rfc64PublicCatalogHeadReplayAdmissionV1;
   /** Canonical immutable per-CG and operation-direction authority resolver. */
   readonly resolveContextGraphAuthority?: (
     contextGraphId: ContextGraphIdV1,

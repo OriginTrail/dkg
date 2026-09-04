@@ -30,6 +30,8 @@ import {
   parseRfc64PublicCatalogHeadAnnouncementV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
   type Rfc64PublicCatalogHeadReplayRequestV1,
+  type Rfc64PublicCatalogReplayOverloadRetryV1,
+  type Rfc64PublicCatalogTransportOptionsV1,
 } from '../src/rfc64/public-catalog-transport-v1.js';
 import { createRfc64CatalogAccessPolicyRegistryFixture } from './support/rfc64-catalog-access-policy-fixture.js';
 
@@ -159,6 +161,38 @@ function policyRegistry(
   });
 }
 
+function replayRequest(): Rfc64PublicCatalogHeadReplayRequestV1 {
+  return Object.freeze({
+    kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
+    networkId: 'otp:20430',
+    contextGraphId: CONTEXT_GRAPH_ID,
+    policyDigest: POLICY_DIGEST,
+  });
+}
+
+function requesterTransportForReplay(
+  send: ProtocolRouter['send'],
+  replayOverloadRetry: Rfc64PublicCatalogReplayOverloadRetryV1,
+  authorizeCatalogOperation: NonNullable<
+    Rfc64PublicCatalogTransportOptionsV1['authorizeCatalogOperation']
+  > = OPEN_POLICY,
+): Rfc64PublicCatalogTransportV1 {
+  const transport = new Rfc64PublicCatalogTransportV1({
+    register: () => {},
+    unregister: () => {},
+    send,
+  } as unknown as ProtocolRouter, {
+    controlObjects: { getVerifiedObject: async () => null },
+    authorizeCatalogOperation,
+    verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    onCatalogHeadAvailable: async () => {},
+    replayOverloadRetry,
+  });
+  transports.push(transport);
+  transport.start();
+  return transport;
+}
+
 describe('RFC-64 author catalog transport v1', () => {
   it.each([
     { accessPolicy: 0 as const, publishPolicy: 0 as const },
@@ -212,6 +246,10 @@ describe('RFC-64 author catalog transport v1', () => {
         onCatalogHeadAvailable: async () => {},
         onCatalogHeadReplayRequested: (request, remotePeerId) => {
           replayRequests.push({ request, remotePeerId });
+          return Object.freeze({
+            status: 'admitted' as const,
+            completion: Promise.resolve(),
+          });
         },
       },
     );
@@ -299,6 +337,226 @@ describe('RFC-64 author catalog transport v1', () => {
     },
     30_000,
   );
+
+  it('acknowledges replay admission without waiting for replay completion', async () => {
+    const handlers = new Map<
+      string,
+      Parameters<ProtocolRouter['register']>[1]
+    >();
+    const providerRouter = {
+      register: (protocolId: string, handler: Parameters<ProtocolRouter['register']>[1]) => {
+        handlers.set(protocolId, handler);
+      },
+      unregister: (protocolId: string) => { handlers.delete(protocolId); },
+      send: vi.fn(),
+    } as unknown as ProtocolRouter;
+    const requesterSend = vi.fn(async (
+      _peerId: string,
+      protocolId: string,
+      data: Uint8Array,
+    ) => {
+      const handler = handlers.get(protocolId);
+      if (handler === undefined) throw new Error(`missing handler for ${protocolId}`);
+      return handler(data, {
+        toString: () => 'requester-peer',
+        toBytes: () => new Uint8Array(),
+      });
+    });
+    const requesterRouter = {
+      register: () => {},
+      unregister: () => {},
+      send: requesterSend,
+    } as unknown as ProtocolRouter;
+    let releaseCompletion!: () => void;
+    let completionSettled = false;
+    const completion = new Promise<void>((resolve) => {
+      releaseCompletion = () => {
+        completionSettled = true;
+        resolve();
+      };
+    });
+    const provider = new Rfc64PublicCatalogTransportV1(providerRouter, {
+      controlObjects: { getVerifiedObject: async () => null },
+      authorizeCatalogOperation: OPEN_POLICY,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      onCatalogHeadAvailable: async () => {},
+      onCatalogHeadReplayRequested: () => Object.freeze({
+        status: 'admitted' as const,
+        completion,
+      }),
+    });
+    const requester = new Rfc64PublicCatalogTransportV1(requesterRouter, {
+      controlObjects: { getVerifiedObject: async () => null },
+      authorizeCatalogOperation: OPEN_POLICY,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      onCatalogHeadAvailable: async () => {},
+    });
+    transports.push(provider, requester);
+    provider.start();
+    requester.start();
+
+    await expect(requester.requestCatalogHeadReplay('provider-peer', replayRequest()))
+      .resolves.toBeUndefined();
+    expect(completionSettled).toBe(false);
+    expect(requesterSend).toHaveBeenCalledOnce();
+    releaseCompletion();
+    await completion;
+  });
+
+  it('retries only overload and reports a typed error at the persistent bound', async () => {
+    const send = vi.fn(async () => Uint8Array.of(2));
+    const wait = vi.fn(async () => {});
+    const requester = requesterTransportForReplay(send, {
+      maxAttempts: 3,
+      wait,
+    });
+
+    await expect(requester.requestCatalogHeadReplay('provider-peer', replayRequest()))
+      .rejects.toMatchObject({ code: 'catalog-transport-overloaded' });
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(wait.mock.calls.map(([delayMs]) => delayMs)).toEqual([100, 200]);
+  });
+
+  it('retries overload until the provider admits the request', async () => {
+    const responses = [2, 2, 1];
+    const send = vi.fn(async () => Uint8Array.of(responses.shift() ?? 2));
+    const wait = vi.fn(async () => {});
+    const requester = requesterTransportForReplay(send, {
+      maxAttempts: 4,
+      wait,
+    });
+
+    await expect(requester.requestCatalogHeadReplay('provider-peer', replayRequest()))
+      .resolves.toBeUndefined();
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(wait.mock.calls.map(([delayMs]) => delayMs)).toEqual([100, 200]);
+  });
+
+  it('reports an authorized provider with no replay admission callback as busy', async () => {
+    const handlers = new Map<
+      string,
+      Parameters<ProtocolRouter['register']>[1]
+    >();
+    const provider = new Rfc64PublicCatalogTransportV1({
+      register: (protocolId: string, handler: Parameters<ProtocolRouter['register']>[1]) => {
+        handlers.set(protocolId, handler);
+      },
+      unregister: (protocolId: string) => { handlers.delete(protocolId); },
+      send: vi.fn(),
+    } as unknown as ProtocolRouter, {
+      controlObjects: { getVerifiedObject: async () => null },
+      authorizeCatalogOperation: OPEN_POLICY,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      onCatalogHeadAvailable: async () => {},
+    });
+    const send = vi.fn(async (
+      _peerId: string,
+      protocolId: string,
+      data: Uint8Array,
+    ) => {
+      const handler = handlers.get(protocolId);
+      if (handler === undefined) throw new Error(`missing handler for ${protocolId}`);
+      return handler(data, {
+        toString: () => 'requester-peer',
+        toBytes: () => new Uint8Array(),
+      });
+    });
+    const requester = requesterTransportForReplay(send, {
+      maxAttempts: 1,
+      wait: async () => {},
+    });
+    transports.push(provider);
+    provider.start();
+
+    await expect(requester.requestCatalogHeadReplay('provider-peer', replayRequest()))
+      .rejects.toMatchObject({ code: 'catalog-transport-overloaded' });
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it('does not retry policy denial', async () => {
+    const send = vi.fn(async () => Uint8Array.of(0));
+    const wait = vi.fn(async () => {});
+    const requester = requesterTransportForReplay(send, {
+      maxAttempts: 4,
+      wait,
+    });
+
+    await expect(requester.requestCatalogHeadReplay('provider-peer', replayRequest()))
+      .rejects.toMatchObject({ code: 'catalog-transport-policy-denied' });
+    expect(send).toHaveBeenCalledOnce();
+    expect(wait).not.toHaveBeenCalled();
+  });
+
+  it('rechecks policy after an overload wait before retrying', async () => {
+    let current = true;
+    const send = vi.fn(async () => Uint8Array.of(2));
+    const wait = vi.fn(async () => { current = false; });
+    const requester = requesterTransportForReplay(send, {
+      maxAttempts: 4,
+      wait,
+    }, async () => current ? Object.freeze({
+      accessPolicy: 0 as const,
+      policyDigest: POLICY_DIGEST,
+    }) : null);
+
+    await expect(requester.requestCatalogHeadReplay('provider-peer', replayRequest()))
+      .rejects.toMatchObject({ code: 'catalog-transport-policy-denied' });
+    expect(send).toHaveBeenCalledOnce();
+    expect(wait).toHaveBeenCalledOnce();
+  });
+
+  it('passes caller cancellation into the overload retry wait', async () => {
+    const controller = new AbortController();
+    const reason = new Error('stop replay retries');
+    const send = vi.fn(async () => Uint8Array.of(2));
+    let observedSignal: AbortSignal | undefined;
+    const wait = vi.fn(async (_delayMs: number, signal?: AbortSignal) => {
+      observedSignal = signal;
+      controller.abort(reason);
+      if (signal?.aborted) throw signal.reason;
+    });
+    const requester = requesterTransportForReplay(send, {
+      maxAttempts: 4,
+      wait,
+    });
+
+    await expect(requester.requestCatalogHeadReplay(
+      'provider-peer',
+      replayRequest(),
+      { signal: controller.signal },
+    )).rejects.toBe(reason);
+    expect(send).toHaveBeenCalledOnce();
+    expect(wait).toHaveBeenCalledOnce();
+    expect(wait.mock.calls[0]?.[0]).toBe(100);
+    expect(observedSignal?.aborted).toBe(true);
+    expect(observedSignal?.reason).toBe(reason);
+  });
+
+  it('aborts an overload retry when the transport stops', async () => {
+    const send = vi.fn(async () => Uint8Array.of(2));
+    let enteredWait!: () => void;
+    const waitStarted = new Promise<void>((resolve) => { enteredWait = resolve; });
+    const wait = vi.fn(async (_delayMs: number, signal?: AbortSignal) => {
+      enteredWait();
+      if (signal === undefined) throw new Error('retry wait received no lifecycle signal');
+      if (signal.aborted) throw signal.reason;
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    });
+    const requester = requesterTransportForReplay(send, {
+      maxAttempts: 4,
+      wait,
+    });
+
+    const replay = requester.requestCatalogHeadReplay('provider-peer', replayRequest());
+    await waitStarted;
+    requester.stop();
+
+    await expect(replay).rejects.toMatchObject({ code: 'catalog-transport-state' });
+    expect(send).toHaveBeenCalledOnce();
+    expect(wait).toHaveBeenCalledOnce();
+  });
 
   it('denies an unauthorized fetch before revealing cache hit or miss state', async () => {
     const [providerNode, requesterNode] = await Promise.all([startNode(), startNode()]);
