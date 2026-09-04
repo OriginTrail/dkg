@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  RFC64_SWM_INVENTORY_MAX_CONFIRMED_TOMBSTONES_V1,
   RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1,
   Rfc64SwmInventoryShadowRuntimeV1,
 } from '../src/rfc64/swm-inventory-shadow-runtime-v1.js';
@@ -53,10 +54,10 @@ describe('RFC-64 SWM inventory shadow runtime', () => {
     expect(runtime.schedule(assetKey, async () => {
       entered();
       await gate;
-      if (!runtime.isVmConfirmed(assetKey, '1')) durableRows.add('ka-v1');
+      if (!runtime.isVmConfirmed(assetKey, '1', 'share-1')) durableRows.add('ka-v1');
     })).toBe(true);
     await started;
-    runtime.markVmConfirmed(assetKey, '1');
+    runtime.markVmConfirmed(assetKey, '1', 'share-1');
     const removal = runtime.runExclusive(assetKey, async () => {
       durableRows.delete('ka-v1');
     });
@@ -66,7 +67,30 @@ describe('RFC-64 SWM inventory shadow runtime', () => {
 
     expect(durableRows).toEqual(new Set());
     expect(runtime.inFlightCount).toBe(0);
-    expect(runtime.isVmConfirmed(assetKey, '1')).toBe(false);
+    expect(runtime.isVmConfirmed(assetKey, '1', 'share-1')).toBe(true);
+    expect(runtime.schedule(assetKey, async () => {
+      if (!runtime.isVmConfirmed(assetKey, '1', 'share-1')) durableRows.add('late-ka-v1');
+    })).toBe(true);
+    await runtime.drain();
+    expect(durableRows).toEqual(new Set());
+    expect(runtime.isVmConfirmed(assetKey, '1', 'share-2')).toBe(false);
+    expect(runtime.isVmConfirmed(assetKey, '2', 'share-1')).toBe(false);
+  });
+
+  it('bounds retained VM tombstones while keeping the newest replay fence', () => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    for (
+      let index = 0;
+      index <= RFC64_SWM_INVENTORY_MAX_CONFIRMED_TOMBSTONES_V1;
+      index += 1
+    ) runtime.markVmConfirmed(`asset-${index}`, '1', `share-${index}`);
+
+    expect(runtime.isVmConfirmed('asset-0', '1', 'share-0')).toBe(false);
+    expect(runtime.isVmConfirmed(
+      `asset-${RFC64_SWM_INVENTORY_MAX_CONFIRMED_TOMBSTONES_V1}`,
+      '1',
+      `share-${RFC64_SWM_INVENTORY_MAX_CONFIRMED_TOMBSTONES_V1}`,
+    )).toBe(true);
   });
 
   it('serializes one author scope while leaving unrelated scopes concurrent', async () => {

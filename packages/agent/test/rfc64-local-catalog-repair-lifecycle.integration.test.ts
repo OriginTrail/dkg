@@ -248,6 +248,7 @@ describe('RFC-64 local SWM catalog projection lifecycle', () => {
     await agent.observeRfc64ConfirmedVmV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate: 'same-instance-share',
+      shareOperationId: 'same-instance-operation',
       seal: assertionSealV1(canonicalSeal),
       assertionUri: contextGraphAssertionUri(
         CONTEXT_GRAPH_ID,

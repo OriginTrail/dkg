@@ -153,6 +153,7 @@ export interface ObserveRfc64ConfirmedVmParamsV1 {
   readonly contextGraphId: string;
   readonly subGraphName?: string | null;
   readonly assertionCoordinate: string;
+  readonly shareOperationId?: string;
   readonly seal: AssertionSeal;
   readonly assertionUri: string;
   readonly ctx: OperationContext;
@@ -308,7 +309,13 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     // Fence every confirmed version, including confirmation-gated finalized
     // private repairs, until the asset-tail repair and queued observers drain.
     // Newer assertion versions use distinct fence entries and remain eligible.
-    shadowRuntime.markVmConfirmed(assetKey, confirmedSeal.assertionVersion);
+    if (params.shareOperationId !== undefined) {
+      shadowRuntime.markVmConfirmed(
+        assetKey,
+        confirmedSeal.assertionVersion,
+        params.shareOperationId,
+      );
+    }
     let finalizedPrivateAttempt: Promise<void> | null = null;
     try {
       await shadowRuntime.runExclusive(
@@ -469,6 +476,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       if (rfc64SwmInventoryShadowRuntimeV1(this).isVmConfirmed(
         assetKey,
         canonicalSeal.assertionVersion,
+        shareOperationId,
       )) {
         return shadowResult('dormant', 'upsert', 0, null, null);
       }

@@ -1442,6 +1442,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await author.observeRfc64ConfirmedVmV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate,
+      shareOperationId,
       seal,
       assertionUri,
       ctx: createOperationContext('publish'),
@@ -1474,6 +1475,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await author.observeRfc64ConfirmedVmV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate: allowListCoordinate,
+      shareOperationId: allowListOperationId,
       seal: allowListSeal,
       assertionUri: allowListAssertionUri,
       ctx: createOperationContext('publish'),
@@ -1913,6 +1915,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const confirmation = restarted.observeRfc64ConfirmedVmV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate,
+      shareOperationId,
       seal,
       assertionUri,
       ctx: createOperationContext('publish'),
@@ -1984,6 +1987,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const confirmed = restarted.observeRfc64ConfirmedVmV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate,
+      shareOperationId,
       seal,
       assertionUri,
       ctx,
@@ -1993,6 +1997,22 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await confirmed;
     await restarted.awaitInFlightRfc64SwmInventoryObserversV1();
     recordSpy.mockRestore();
+    expect(restarted.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: scopeDigest,
+      authorAddress: AUTHOR,
+    })?.rows).toEqual([]);
+
+    // A delayed lifecycle replay can arrive after the confirmation queue has
+    // fully drained. The bounded VM tombstone must still suppress that exact
+    // assertion version instead of resurrecting a finalized public row.
+    await restarted.afterDurableSwmPromotionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+      ctx,
+    });
+    await restarted.awaitInFlightRfc64SwmInventoryObserversV1();
     expect(restarted.readRfc64SwmAuthorInventorySnapshotV1({
       inventoryScopeDigest: scopeDigest,
       authorAddress: AUTHOR,
@@ -2020,11 +2040,12 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       privateTripleCount: seal.privateTripleCount!,
     }));
     const restartedGraphManager = new GraphManager(restarted.store);
+    const reshareOperationId = 'swm-only-shadow-operation-reshare';
     await storeKnowledgeAssetOperationPublicQuads({
       store: restarted.store,
       graphManager: restartedGraphManager,
       contextGraphId: CONTEXT_GRAPH_ID,
-      shareOperationId,
+      shareOperationId: reshareOperationId,
       kaUal: canonicalSeal.kaUal,
       assertionVersion: canonicalSeal.assertionVersion,
       quads: publicQuads,
@@ -2040,13 +2061,13 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       contextGraphId: CONTEXT_GRAPH_ID,
       kaUal: canonicalSeal.kaUal,
       assertionVersion: canonicalSeal.assertionVersion,
-      shareOperationId,
+      shareOperationId: reshareOperationId,
     });
     await expect(restarted.recordRfc64SwmAuthorInventoryShadowV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate,
       lifecycleAgentAddress: AUTHOR,
-      shareOperationId,
+      shareOperationId: reshareOperationId,
     })).resolves.toMatchObject({ status: 'applied' });
     await expect(restarted.reconcileRfc64PublicCatalogFromSwmInventoryV1({
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -5440,6 +5461,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await author.observeRfc64ConfirmedVmV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate,
+      shareOperationId,
       seal,
       assertionUri,
       ctx: createOperationContext('publish'),
@@ -5577,6 +5599,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await author.observeRfc64ConfirmedVmV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate,
+      shareOperationId,
       seal,
       assertionUri,
       ctx: createOperationContext('publish'),
@@ -5678,6 +5701,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await author.observeRfc64ConfirmedVmV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate: repairOnlyAssertionCoordinate,
+      shareOperationId: 'finalized-private-repair-without-inventory-row-operation',
       seal: repairOnlySeal,
       assertionUri: repairOnlyAssertionUri,
       ctx: createOperationContext('publish'),
