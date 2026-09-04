@@ -1060,6 +1060,7 @@ export class JoinRequestMethods extends DKGAgentBase {
       markJoinRequestApproved: (contextGraphId, agentAddress) =>
         this.markJoinRequestApproved(contextGraphId, agentAddress),
       flushJoinApprovalDurably: () => this.flushJoinApprovalDurably(),
+      publishApprovalAuthorityProfile: () => this.ensureProfilePublished(),
       notifyJoinApproval: (contextGraphId, agentAddress, requestGeneration) => {
         this.notifyJoinApproval(contextGraphId, agentAddress, requestGeneration).catch(() => {});
       },

@@ -112,6 +112,7 @@ export interface ContextGraphJoinAdmissionHost {
   hasJoinRequestRecord(contextGraphId: string, agentAddress: string): Promise<boolean>;
   markJoinRequestApproved(contextGraphId: string, agentAddress: string): Promise<void>;
   flushJoinApprovalDurably(): Promise<void>;
+  publishApprovalAuthorityProfile(): Promise<void>;
   notifyJoinApproval(
     contextGraphId: string,
     agentAddress: string,
@@ -325,6 +326,7 @@ export class ContextGraphJoinAdmission {
       if (!committed) {
         throw new Error('Automatic approval repair reservation is missing.');
       }
+      await this.host.publishApprovalAuthorityProfile();
       this.host.notifyJoinApproval(
         contextGraphId,
         delegation.agentAddress,
@@ -437,6 +439,7 @@ export class ContextGraphJoinAdmission {
             details: { recoveredFromMemberRetry: true },
           })
         : false;
+      await this.host.publishApprovalAuthorityProfile();
       this.host.notifyJoinApproval(
         contextGraphId,
         delegation.agentAddress,
@@ -713,6 +716,7 @@ export class ContextGraphJoinAdmission {
       if (!committedAuditRecorded) {
         throw new Error('Automatic approval reservation is missing from the durable audit store.');
       }
+      await this.host.publishApprovalAuthorityProfile();
       this.host.notifyJoinApproval(
         contextGraphId,
         delegation.agentAddress,

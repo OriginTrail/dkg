@@ -1429,7 +1429,9 @@ describe('private CG membership bootstrap recovery', () => {
     const actualPrepare = agent.prepareInviteAgentToContextGraph.bind(agent);
     const actualCommitPrepared = agent.commitPreparedInviteAgentToContextGraph.bind(agent);
     let persistenceFinished = false;
+    let profilePublishedAfterPersistence = false;
     let notificationObservedPersistence = false;
+    let notificationObservedProfile = false;
     (agent as any).prepareInviteAgentToContextGraph = async (
       ...args: Parameters<typeof actualPrepare>
     ) => {
@@ -1443,8 +1445,12 @@ describe('private CG membership bootstrap recovery', () => {
       await actualCommitPrepared(...args);
       persistenceFinished = true;
     };
+    (agent as any).ensureProfilePublished = async () => {
+      profilePublishedAfterPersistence = persistenceFinished;
+    };
     (agent as any).notifyJoinApproval = async () => {
       notificationObservedPersistence = persistenceFinished;
+      notificationObservedProfile = profilePublishedAfterPersistence;
     };
 
     const response = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
@@ -1459,6 +1465,8 @@ describe('private CG membership bootstrap recovery', () => {
 
     expect(response).toEqual({ ok: true, status: 'approved', alreadyMember: true });
     expect(notificationObservedPersistence).toBe(true);
+    expect(profilePublishedAfterPersistence).toBe(true);
+    expect(notificationObservedProfile).toBe(true);
     expect((await (agent as any).getContextGraphAllowedDelegateePeers(contextGraphId))
       .get(member.address.toLowerCase())).toContain(delegateePeerId);
     expect((await (agent as any).getContextGraphAllowedDelegateeKeys(contextGraphId))
