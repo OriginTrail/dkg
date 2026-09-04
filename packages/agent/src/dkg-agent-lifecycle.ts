@@ -3484,8 +3484,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               );
               return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
             }
+            const existingApprovedSubscription =
+              this.subscribedContextGraphs.get(contextGraphId);
+            const wireOnlySubscription =
+              this.resolveWireOnlyContextGraphSubscription(contextGraphId);
+            const adoptsWireOnlySubscription = wireOnlySubscription !== null
+              && (
+                existingApprovedSubscription?.onChainId === undefined
+                || wireOnlySubscription.subscription.onChainId === undefined
+                || existingApprovedSubscription.onChainId
+                  === wireOnlySubscription.subscription.onChainId
+              )
+              && (
+                existingApprovedSubscription?.onChainHash === undefined
+                || this.contextGraphWireId(existingApprovedSubscription.onChainHash)
+                  === wireOnlySubscription.wireId
+              );
             const approvedSubscription: ContextGraphSub = {
-              ...this.subscribedContextGraphs.get(contextGraphId),
+              ...(adoptsWireOnlySubscription ? {
+                onChainId: wireOnlySubscription.subscription.onChainId,
+                onChainHash: wireOnlySubscription.wireId,
+              } : {}),
+              ...existingApprovedSubscription,
               syncMode: 'always-on',
               subscribed: true,
               pendingMeta: true,
@@ -9220,11 +9240,50 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): ContextGraphSub {
     this.invalidateListContextGraphsCache();
     const previous = this.subscribedContextGraphs.get(contextGraphId);
-    const normalizedNext = normalizeContextGraphSubscriptionTransition(previous, next);
     // A local id is always cleartext unless the subscription explicitly says
     // otherwise through `onChainHash`. This distinction matters for a valid
     // user-chosen id that happens to match the 0x+64-hex wire-id shape.
     const localWireId = this.contextGraphNameCommitment(contextGraphId);
+    const wireOnlySubscription =
+      this.resolveWireOnlyContextGraphSubscription(contextGraphId);
+    const explicitNextWireId = next.onChainHash === undefined
+      ? undefined
+      : this.contextGraphWireId(next.onChainHash);
+    const adoptsWireOnlySubscription =
+      wireOnlySubscription !== null
+      && (explicitNextWireId === undefined || explicitNextWireId === localWireId)
+      && (
+        next.onChainId === undefined
+        || wireOnlySubscription.subscription.onChainId === undefined
+        || next.onChainId === wireOnlySubscription.subscription.onChainId
+      );
+    const normalizedNext = normalizeContextGraphSubscriptionTransition(previous, {
+      ...next,
+      ...(adoptsWireOnlySubscription && next.onChainId === undefined
+        ? { onChainId: wireOnlySubscription.subscription.onChainId }
+        : {}),
+      ...(adoptsWireOnlySubscription && next.onChainHash === undefined
+        ? { onChainHash: localWireId }
+        : {}),
+    });
+    if (adoptsWireOnlySubscription) {
+      // A private chain event reaches an Edge before its join approval and can
+      // only identify the graph by the committed name hash. Once a trusted
+      // local path supplies the matching cleartext id, that hash-only row is
+      // an identity placeholder rather than a second graph. Retire it before
+      // publishing the canonical row so its RFC-64 responsibility, binding
+      // fence, and receiver lifecycle cannot remain active under the wire id.
+      // Host-mode bookkeeping is already wire-keyed and therefore survives
+      // this local-identity promotion without rewiring its ciphertext topic.
+      this.deleteContextGraphSubscription(wireOnlySubscription.localId);
+      if (this.wireIdToLocalCgId.get(localWireId) === wireOnlySubscription.localId) {
+        this.wireIdToLocalCgId.delete(localWireId);
+      }
+      this.log.info(
+        createOperationContext('system'),
+        `Promoted wire-only Context Graph ${localWireId.slice(0, 18)}… to local identity "${contextGraphId}"`,
+      );
+    }
     const previousWireId = previous?.onChainHash
       ? this.contextGraphWireId(previous.onChainHash)
       : localWireId;
@@ -9322,6 +9381,31 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
     }
     return canonicalNext;
+  }
+
+  /**
+   * Find the chain-created hash-only placeholder authenticated by the exact
+   * commitment of a newly learned local id. A hash-shaped cleartext id is not
+   * mistaken for a placeholder: the reverse index must point to the raw wire
+   * key and that row must explicitly claim the same `onChainHash`.
+   */
+  resolveWireOnlyContextGraphSubscription(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): { localId: string; wireId: string; subscription: ContextGraphSub } | null {
+    const wireId = this.contextGraphNameCommitment(contextGraphId);
+    const localId = this.wireIdToLocalCgId.get(wireId);
+    if (localId === undefined || localId === contextGraphId || localId !== wireId) {
+      return null;
+    }
+    const subscription = this.subscribedContextGraphs.get(localId);
+    if (
+      subscription?.onChainHash === undefined
+      || this.contextGraphWireId(subscription.onChainHash) !== wireId
+    ) {
+      return null;
+    }
+    return { localId, wireId, subscription };
   }
 
   markContextGraphSubscriptionState(this: DKGAgent, contextGraphId: string, patch: Partial<ContextGraphSub>): void {

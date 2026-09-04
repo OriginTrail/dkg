@@ -1058,6 +1058,71 @@ describe('private CG membership bootstrap recovery', () => {
     );
   });
 
+  it('persists and promotes a matching chain-discovered wire binding on join approval', async () => {
+    ({ agent } = await createAgent('PrivateBootstrapWirePromotion'));
+    const contextGraphId = 'private-bootstrap-wire-promotion';
+    const wireId = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    const approvedAddress = agent.getDefaultAgentAddress()!;
+    const curatorPeerId = '12D3KooWPrivateBootstrapWirePromotionCurator';
+    const requestGeneration = `0x${'9'.repeat(64)}`;
+    const subscriptionWrites: any[] = [];
+    const internals = agent as any;
+
+    internals.setContextGraphSubscription(wireId, {
+      subscribed: false,
+      synced: false,
+      onChainHash: wireId,
+      pendingMeta: true,
+    }, { persist: false });
+    expect(internals.bindOnChainContextGraphIdFromNameHash(
+      wireId,
+      '3',
+      { persist: false },
+    )).toBe(wireId);
+
+    internals.config.contextGraphMembershipStore = {
+      upsert: async () => {},
+      delete: async () => {},
+    };
+    internals.config.contextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async (record: any) => { subscriptionWrites.push({ ...record }); },
+      delete: async () => {},
+    };
+    internals.isTrustedJoinDecisionSender = async () => true;
+    internals.runImmediatePostApprovalSync = vi.fn(async () => {});
+    await agent.setRequesterJoinRequestPending(
+      contextGraphId,
+      approvedAddress,
+      requestGeneration,
+      curatorPeerId,
+    );
+
+    const response = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
+      encoder.encode(JSON.stringify({
+        type: 'join-approved',
+        contextGraphId,
+        agentAddress: approvedAddress,
+        requestGeneration,
+      })),
+      curatorPeerId,
+    )));
+
+    expect(response).toEqual({ ok: true });
+    expect(internals.subscribedContextGraphs.has(wireId)).toBe(false);
+    expect(internals.subscribedContextGraphs.get(contextGraphId)).toMatchObject({
+      subscribed: true,
+      onChainId: '3',
+      onChainHash: wireId,
+    });
+    expect(subscriptionWrites).toContainEqual(expect.objectContaining({
+      id: contextGraphId,
+      subscribed: true,
+      onChainId: '3',
+      onChainHash: wireId,
+    }));
+  });
+
   it('ACKs join-approved without optional persistence stores and starts bootstrap once', async () => {
     ({ agent } = await createAgent('PrivateBootstrapStoreless'));
     const contextGraphId = 'private-bootstrap-storeless';

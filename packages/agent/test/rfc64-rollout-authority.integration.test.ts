@@ -162,6 +162,62 @@ describe('RFC-64 rollout authority integration', () => {
     expect(requestReplays).toHaveBeenCalledWith(contextGraphId);
   });
 
+  it('promotes a chain-discovered private wire placeholder to the admitted local identity', async () => {
+    const contextGraphId = `${AUTHOR}/private-wire-promotion`;
+    const wireId = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    const edge = await startAgent('private-wire-promotion', undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('private');
+    vi.spyOn(edge, 'canReadContextGraph').mockResolvedValue(true);
+    const internals = edge as any;
+
+    // Mirror the private ContextGraphCreated path: before admission the Edge
+    // knows only the curator-committed wire id and numeric chain id.
+    internals.setContextGraphSubscription(wireId, {
+      subscribed: false,
+      synced: false,
+      onChainHash: wireId,
+      pendingMeta: true,
+    }, { persist: false });
+    expect(internals.bindOnChainContextGraphIdFromNameHash(
+      wireId,
+      '3',
+      { persist: false },
+    )).toBe(wireId);
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([
+      expect.objectContaining({
+        contextGraphId: wireId,
+        responsibilityReason: 'private-membership',
+      }),
+    ]);
+
+    // A trusted join approval supplies the matching human id. The canonical
+    // setter must carry its chain binding forward and retire the placeholder,
+    // including its RFC-64 responsibility.
+    internals.setContextGraphSubscription(contextGraphId, {
+      subscribed: true,
+      synced: false,
+      pendingMeta: true,
+      metaSynced: false,
+    }, { persist: false });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    expect(edge.getSubscribedContextGraphs().has(wireId)).toBe(false);
+    expect(edge.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+      subscribed: true,
+      onChainId: '3',
+      onChainHash: wireId,
+    });
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([
+      expect.objectContaining({
+        contextGraphId,
+        responsibilityReason: 'private-membership',
+        mode: 'catalog',
+        selectionSource: 'default',
+      }),
+    ]);
+  });
+
   it('requires verified current membership for private responsibility', async () => {
     const privateContextGraphId = `${AUTHOR}/private-responsibility`;
     const edge = await startAgent('private-responsibility', undefined);
