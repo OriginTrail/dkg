@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runRuntimePackageBuild } from '../../build-runtime-packages.mjs';
+import { buildCliPrerequisites } from '../../../packages/cli/scripts/build-prerequisites.mjs';
 import {
   RUNTIME_BUILD_EXCLUSIONS,
   runtimeBuildPnpmArgs,
@@ -49,6 +50,7 @@ test('runtime build entrypoint invokes pnpm with the checked plan and forwards e
   const status = runRuntimePackageBuild({
     extraArgs: ['--force', '--log-order=stream'],
     platform: 'linux',
+    env: { PATH: '/mock-bin' },
     spawn(command, args, options) {
       invocation = { command, args, options };
       return { status: 0, signal: null };
@@ -62,8 +64,45 @@ test('runtime build entrypoint invokes pnpm with the checked plan and forwards e
   assert.deepEqual(invocation, {
     command: 'pnpm',
     args: runtimeBuildPnpmArgs(['run', 'build', '--force', '--log-order=stream']),
-    options: { stdio: 'inherit', shell: false },
+    options: { stdio: 'inherit', shell: false, env: { PATH: '/mock-bin', DKG_RUNTIME_BUILD_TOPOLOGICAL: '1' } },
   });
+});
+
+test('CLI prebuild skips only when its root dependency graph has already run', () => {
+  assert.equal(buildCliPrerequisites({
+    env: { DKG_RUNTIME_BUILD_TOPOLOGICAL: '1' },
+    spawn: () => assert.fail('recursive root build must not rebuild CLI prerequisites'),
+  }), 0);
+  for (const env of [{ PATH: '/mock-bin' }, { DKG_RUNTIME_BUILD_TOPOLOGICAL: '0' }]) {
+    let invocation;
+    assert.equal(buildCliPrerequisites({ env, platform: 'win32', spawn(command, args, options) {
+      invocation = { command, args, options };
+      return { status: 0 };
+    } }), 0);
+    assert.equal(invocation.command, 'pnpm');
+    assert.equal(invocation.options.shell, true);
+    assert.deepEqual(invocation.options.env, env);
+    assert.deepEqual(invocation.args, [
+      '-r', '--filter', '@origintrail-official/dkg-adapter-openclaw...',
+      '--filter', '@origintrail-official/dkg-adapter-hermes...',
+      '--filter', '@origintrail-official/dkg-adapter-prime-agent...',
+      '--filter', '@origintrail-official/dkg-mcp...',
+      '--filter', '@origintrail-official/dkg-local-llm...',
+      '--filter', '@origintrail-official/dkg-okf...', 'run', 'build',
+    ]);
+  }
+});
+
+test('standalone CLI prerequisite failures propagate instead of allowing compilation', () => {
+  const messages = [];
+  for (const [result, expected] of [
+    [{ status: 17 }, 17],
+    [{ error: new Error('spawn failed') }, 1],
+    [{ status: null, signal: 'SIGTERM' }, 1],
+  ]) {
+    assert.equal(buildCliPrerequisites({ env: {}, spawn: () => result, reportError: message => messages.push(message) }), expected);
+  }
+  assert.deepEqual(messages, ['spawn failed', 'CLI prerequisites exited via SIGTERM']);
 });
 
 test('runtime build entrypoint propagates process failures', () => {

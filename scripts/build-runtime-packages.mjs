@@ -7,12 +7,16 @@ export function runRuntimePackageBuild({
   extraArgs = process.argv.slice(2),
   spawn = spawnSync,
   platform = process.platform,
+  env = process.env,
   reportError = (message) => console.error(message),
 } = {}) {
   const args = runtimeBuildPnpmArgs(['run', 'build', ...extraArgs]);
   const result = spawn('pnpm', args, {
     stdio: 'inherit',
     shell: platform === 'win32',
+    // pnpm's recursive plan builds the complete dependency closure in order.
+    // The CLI prebuild hook can therefore avoid recursively building it again.
+    env: { ...env, DKG_RUNTIME_BUILD_TOPOLOGICAL: '1' },
   });
 
   if (result.error) {
