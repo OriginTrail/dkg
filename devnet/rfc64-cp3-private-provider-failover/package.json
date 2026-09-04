@@ -6,7 +6,7 @@
   "description": "Four-process RFC-64 Release 3 private provider failover canary.",
   "dependencies": {
     "@origintrail-official/dkg-core": "workspace:*",
-    "ethers": "6.16.0"
+    "ethers": "6.17.0"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
