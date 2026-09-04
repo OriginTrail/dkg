@@ -1,14 +1,29 @@
 import { readResponseTextBounded } from '../http-response-limit.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
+import type { StoreOperation } from '../store-operation-outcome.js';
 
 // Oxigraph 0.5.x appends this evaluator error to an already-started
 // SELECT/CONSTRUCT response when `serve --timeout-s` cancels the query.
-const MANAGED_OXIGRAPH_CANCELLATION_SUFFIX = 'The SPARQL operation has been cancelled';
+export const MANAGED_OXIGRAPH_CANCELLATION_SUFFIX =
+  'The SPARQL operation has been cancelled';
+
+/** Preserve Oxigraph's typed timeout evidence for buffered and streamed bodies. */
+export function assertManagedOxigraphSparqlResponseComplete(
+  text: string,
+  operation: StoreOperation,
+): void {
+  if (!text.trimEnd().endsWith(MANAGED_OXIGRAPH_CANCELLATION_SUFFIX)) return;
+  throw new StoreOperationTimeoutError({
+    backend: 'oxigraph-server',
+    operation,
+    message: `Managed Oxigraph ${operation} exceeded its server-side query deadline`,
+  });
+}
 
 export interface SparqlResponseTextOptions {
   maxResponseBytes?: number;
   managedOxigraph?: boolean;
-  operation: string;
+  operation: StoreOperation;
   tolerateReadFailure?: boolean;
 }
 
@@ -28,15 +43,8 @@ export async function readSparqlResponseText(
     ? response.text()
     : readResponseTextBounded(response, options.maxResponseBytes);
   const text = options.tolerateReadFailure ? await read.catch(() => '') : await read;
-  if (
-    options.managedOxigraph === true
-    && text.trimEnd().endsWith(MANAGED_OXIGRAPH_CANCELLATION_SUFFIX)
-  ) {
-    throw new StoreOperationTimeoutError({
-      backend: 'oxigraph-server',
-      operation: options.operation,
-      message: `Managed Oxigraph ${options.operation} exceeded its server-side query deadline`,
-    });
+  if (options.managedOxigraph === true) {
+    assertManagedOxigraphSparqlResponseComplete(text, options.operation);
   }
   return text;
 }

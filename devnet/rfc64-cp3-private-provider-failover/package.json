@@ -1,0 +1,15 @@
+{
+  "name": "@devnet/rfc64-cp3-private-provider-failover",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Four-process RFC-64 Release 3 private provider failover canary.",
+  "dependencies": {
+    "@origintrail-official/dkg-core": "workspace:*",
+    "ethers": "6.16.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "live": "node --import tsx launch-live.ts"
+  }
+}

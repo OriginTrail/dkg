@@ -212,7 +212,9 @@ function createTwoRoundHarness(
       contextGraphIds: [contextGraphId],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages: fetch,
-      exactAssetUalsFor: exactAssetUals ? () => exactAssetUals : undefined,
+      exactAssetSelectionFor: exactAssetUals
+        ? () => ({ kind: 'ual-only', assetUals: exactAssetUals })
+        : undefined,
       processDurableBatchInWorker: processBatch,
       storeInsert: async () => {},
       storeGraphScopedAsset: async (request: DurableSyncGraphScopedStoreRequest) => {

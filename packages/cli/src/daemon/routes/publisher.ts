@@ -59,8 +59,18 @@ const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
-import type { AsyncPreparedPublishPayload, LiftJob, LiftJobRetryProjection } from '@origintrail-official/dkg-publisher';
+import {
+  findReservedSubjectPrefix,
+  isSafeJobId,
+  isSkolemizedUri,
+  SAFE_JOB_ID_ERROR,
+} from '@origintrail-official/dkg-publisher';
+import type {
+  AsyncPreparedPublishPayload,
+  LiftJobRetryProjection,
+  PendingTransactionClearOverride,
+  PersistedLiftJob,
+} from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
   MetricsCollector,
@@ -107,7 +117,7 @@ import {
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type AsyncPublisherAvailability, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { authenticatedAgentAddress, canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -213,7 +223,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
@@ -322,6 +331,7 @@ import {
 } from '../local-agents.js';
 
 import type { RequestContext } from './context.js';
+import { actorFromRequestContext } from './context.js';
 
 
 interface PublisherLifecycleFacts {
@@ -390,9 +400,9 @@ function parsePublisherLifecycleFactsFromQuery(
  */
 function wrappedJobDetailBody(
   ctx: JobDetailContext,
-  job: LiftJob,
+  job: PersistedLiftJob,
   payload?: AsyncPreparedPublishPayload | null,
-): { job: LiftJob; payload?: AsyncPreparedPublishPayload | null; retryState: LiftJobRetryProjection } {
+): { job: PersistedLiftJob; payload?: AsyncPreparedPublishPayload | null; retryState: LiftJobRetryProjection } {
   return {
     job,
     ...(payload === undefined ? {} : { payload }),
@@ -403,9 +413,9 @@ function wrappedJobDetailBody(
 /** The legacy shape: the job spread at the top level, where `payload` already lives. */
 function legacyJobDetailBody(
   ctx: JobDetailContext,
-  job: LiftJob,
+  job: PersistedLiftJob,
   payload?: AsyncPreparedPublishPayload | null,
-): LiftJob & { payload?: AsyncPreparedPublishPayload | null; retryState: LiftJobRetryProjection } {
+): PersistedLiftJob & { payload?: AsyncPreparedPublishPayload | null; retryState: LiftJobRetryProjection } {
   return {
     ...job,
     ...(payload === undefined ? {} : { payload }),
@@ -417,7 +427,7 @@ type JobDetailContext = Pick<RequestContext, 'publisherControl' | 'publisherStat
 
 /** The ONE place the operator-facing retry answer is derived: the publisher's configured view, */
 /** narrowed by this daemon's runtime availability. */
-function runtimeRetryState(ctx: JobDetailContext, job: LiftJob): LiftJobRetryProjection {
+function runtimeRetryState(ctx: JobDetailContext, job: PersistedLiftJob): LiftJobRetryProjection {
   return narrowRetryStateToRuntime(
     ctx.publisherControl.describeConfiguredRetryState(job),
     ctx.publisherState.availability,
@@ -498,9 +508,12 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     apiPortRef,
     url,
     path,
-    requestToken,
-    requestAgentAddress,
   } = ctx;
+  const actor = actorFromRequestContext(ctx);
+  const {
+    authentication,
+    effectiveAgentAddress: requestAgentAddress,
+  } = actor;
 
 
   // GET /api/publisher/jobs?status=...
@@ -612,11 +625,20 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       return jsonResponse(res, 400, {
         error: "Only status=failed is supported",
       });
+    const jobId = parsed.jobId;
+    if (jobId !== undefined && (typeof jobId !== "string" || !isSafeJobId(jobId))) {
+      return jsonResponse(res, 400, {
+        error: SAFE_JOB_ID_ERROR,
+      });
+    }
     // GH#2270 — `retried` keeps its exact pre-#2270 meaning (jobs reaccepted), so an
     // operator script reading it is unaffected; the two additive counts explain the jobs
     // left failed instead of leaving them invisible: `blockedPendingRecovery` may carry an
     // on-chain transaction and needs chain proof, `skipped` has nothing left to reaccept.
-    const outcome = await publisherControl.retryDetailed({ status: "failed" });
+    const outcome = await publisherControl.retryDetailed({
+      status: "failed",
+      ...(typeof jobId === "string" ? { jobId } : {}),
+    });
     return jsonResponse(res, 200, {
       retried: outcome.retried,
       blockedPendingRecovery: outcome.blockedPendingRecovery,
@@ -653,19 +675,34 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       return jsonResponse(res, 400, { outcome: "rejected", reason: "malformed", error: "Missing jobId" });
     }
     // GH#2270 follow-up (🔴 3823952704, 🔴 3824098476) — clearing a job whose transaction may
-    // still land is a DESTRUCTIVE override, and this route is open to every registered agent token
-    // with no ownership check of its own. The route therefore states WHO is asking and WHAT they
-    // asked for; it does not look the job up itself.
+    // still land is a DESTRUCTIVE override, and this route is open to both agent and node tokens.
+    // The route authenticates WHICH principal tier is asking and WHAT it asked for; it does not
+    // look the job up or decide agent ownership itself.
     //
     // That matters: an earlier version read the job here, which put an unvalidated jobId into a
     // query before `clearTerminalJob`'s safe-id guard ran, and decided ownership outside the claim
     // lock the clear then takes. Validation, the ownership decision and the delete now happen on
     // one record behind one boundary.
+    let pendingTransactionOverride: PendingTransactionClearOverride | undefined;
+    if (parsed.allowPendingTransaction === true) {
+      if (canAdministerNode(authentication)) {
+        pendingTransactionOverride = { kind: 'nodeOperator' };
+      } else {
+        const agentAddress = authenticatedAgentAddress(authentication);
+        if (agentAddress) {
+          pendingTransactionOverride = {
+            kind: 'agent',
+            agentAddress,
+          };
+        }
+      }
+    }
     return respondTerminalClearOutcome(
       res,
-      await publisherControl.clearTerminalJob(jobId, parsed.allowPendingTransaction === true
-        ? { pendingTransactionOverride: { requestedBy: requestAgentAddress } }
-        : {}),
+      await publisherControl.clearTerminalJob(
+        jobId,
+        pendingTransactionOverride ? { pendingTransactionOverride } : {},
+      ),
       jobId,
     );
   }

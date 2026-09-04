@@ -150,7 +150,7 @@ function verifyRuntimeEvidence(value: unknown): {
   exact(forged.catalogAuthorAddress, positive.authorAddress, '$.fixture.forged.catalogAuthorAddress');
   exact(
     forged.expectedFailureCode,
-    'catalog-native-receiver-authorization',
+    'catalog-native-receiver-not-found',
     '$.fixture.forged.expectedFailureCode',
   );
   if (forged.recoveredAuthorAddress === forged.catalogAuthorAddress) {

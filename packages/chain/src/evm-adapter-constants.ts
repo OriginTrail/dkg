@@ -187,3 +187,36 @@ export const OPERATIONAL_KEY_PURPOSE = 2;
  * native+TRAC balance read per wallet instead of re-reading on every iteration.
  */
 export const PUBLISHER_FUNDING_CACHE_TTL_MS = 15_000;
+
+/**
+ * GH#1574 — how long a caller may wait for, or hold, a per-wallet transaction
+ * lane before the serializer says so. Below this, same-wallet queueing is
+ * ordinary and uninteresting.
+ */
+export const TX_SERIALIZER_OBSERVE_AFTER_MS = 30_000;
+
+/**
+ * Repeat cadence once a wait or hold is being reported. Caps a two-hour wedge
+ * at roughly 120 lines per wallet — unmissable in a log, not a flood.
+ */
+export const TX_SERIALIZER_OBSERVE_INTERVAL_MS = 60_000;
+
+/**
+ * Minimum silence interval before routing treats a signer lane as stalled.
+ * This is an observation policy, not a transaction deadline: it neither
+ * cancels the holder nor changes any RPC timeout. Meaningful write-stage
+ * progress refreshes the interval, so this value does not duplicate the V10
+ * retry/poll topology.
+ */
+export const TX_SERIALIZER_NO_PROGRESS_STALL_AFTER_MS = 10 * 60 * 1_000;
+
+/**
+ * Keep a receipt wait healthy through its configured inclusive deadline while
+ * retaining a useful minimum for adapters configured with a very short receipt
+ * timeout. The `+ 1` makes the boundary unambiguous.
+ */
+export function resolveTxSerializerStallAfterMs(
+  receiptTimeoutMs: number,
+): number {
+  return Math.max(receiptTimeoutMs, TX_SERIALIZER_NO_PROGRESS_STALL_AFTER_MS) + 1;
+}

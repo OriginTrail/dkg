@@ -1,6 +1,6 @@
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { TripleStoreAsyncLiftPublisher } from '../../src/async-lift-publisher-impl.js';
-import type { LiftJobAccepted, RawLiftRequest } from '../../src/lift-job.js';
+import type { LiftJob, LiftJobAccepted, RawLiftRequest } from '../../src/lift-job.js';
 import { restorePersistedLegacyRawLiftJob } from '../../src/legacy-raw-lift-import.js';
 import {
   createJobSlug,
@@ -22,12 +22,16 @@ export async function seedLegacyRawLiftTestJob(
     idGenerator?: () => string;
     maxRetries?: number;
     graphUri?: string;
+    /** Merged over the accepted base record: lets a row seed a pre-upgrade CRASHED shape
+     * (e.g. status 'broadcast' with claim metadata but NO broadcast evidence) that the
+     * current write path can no longer produce. */
+    overrides?: Partial<LiftJob>;
   } = {},
 ): Promise<string> {
   const now = options.now?.() ?? Date.now();
   const jobId = options.idGenerator?.() ?? `legacy-test-job-${++fallbackId}`;
   const jobRequest = createRawLiftJobRequest(request);
-  const job: LiftJobAccepted = {
+  const base: LiftJobAccepted = {
     jobId,
     jobSlug: createJobSlug(jobRequest),
     request: jobRequest,
@@ -36,6 +40,7 @@ export async function seedLegacyRawLiftTestJob(
     retries: { retryCount: 0, maxRetries: options.maxRetries ?? 10 },
     controlPlane: { jobRef: jobSubject(jobId) },
   };
+  const job = { ...base, ...options.overrides } as LiftJob;
   await restorePersistedLegacyRawLiftJob({ store, job, graphUri: options.graphUri });
   return jobId;
 }

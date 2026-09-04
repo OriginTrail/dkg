@@ -13,16 +13,24 @@
  *    reordering hole). Enforced by the in-process write mutex.
  *  - seq reseeds from the durable high-water mark on restart → no reuse/rollback.
  */
-import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
+import { SparqlHttpStore } from '../src/adapters/sparql-http.js';
 import { ChangelogStore, CHANGELOG_GRAPH, asChangelogReader, type ChangelogEraGuard } from '../src/changelog-store.js';
 import { createTripleStore } from '../src/triple-store.js';
 import type { Quad, QueryOptions, QueryResult, TripleStore, UpdateOptions } from '../src/triple-store.js';
+import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
+import { StoreOperationTimeoutError } from '../src/store-operation-timeout.js';
+import type {
+  Rfc64AuthorCommitCasInputV1,
+  Rfc64AuthorCommitCasSemanticInputV1,
+  Rfc64AuthorCommitCasResultV1,
+} from '../src/rfc64-author-commit-cas.js';
 
 const G1 = 'http://ex.org/g1';
 const G2 = 'http://ex.org/g2';
@@ -30,6 +38,48 @@ const G3 = 'http://ex.org/g3';
 
 function q(subject: string, graph: string, object = '"x"'): Quad {
   return { subject, predicate: 'http://ex.org/p', object, graph };
+}
+
+function rfc64AuthorCommitInput(): Rfc64AuthorCommitCasSemanticInputV1 {
+  const stateGraph = 'urn:test:changelog:rfc64:state';
+  const transition = (role: string) => ({
+    graphUri: stateGraph,
+    subject: `urn:test:changelog:rfc64:${role}`,
+    predicate: 'urn:test:changelog:rfc64:value',
+    expectedObject: null,
+    expectedQuads: null,
+    quads: [q(`urn:test:changelog:rfc64:${role}`, stateGraph, `"${role}"`)],
+  });
+  return {
+    sharedProjectionGraph: 'did:dkg:context-graph:changelog-rfc64/_shared_memory',
+    sharedProjectionQuads: [q(
+      'urn:test:changelog:rfc64:projection',
+      'did:dkg:context-graph:changelog-rfc64/_shared_memory',
+    )],
+    authorSealGraph: 'urn:test:changelog:rfc64:seals',
+    authorSealSubject: 'urn:test:changelog:rfc64:seal',
+    authorSealQuads: [q(
+      'urn:test:changelog:rfc64:seal',
+      'urn:test:changelog:rfc64:seals',
+      '"seal"',
+    )],
+    currentHead: {
+      graphUri: 'urn:test:changelog:rfc64:heads',
+      subject: 'urn:test:changelog:rfc64:author',
+      predicate: 'urn:test:changelog:rfc64:current-head',
+      expectedObject: null,
+      expectedQuads: null,
+      quads: [{
+        subject: 'urn:test:changelog:rfc64:author',
+        predicate: 'urn:test:changelog:rfc64:current-head',
+        object: 'urn:test:changelog:rfc64:catalog:new',
+        graph: 'urn:test:changelog:rfc64:heads',
+      }],
+    },
+    subgraphMutationGeneration: transition('subgraph-generation'),
+    contextGraphMutationGeneration: transition('context-graph-generation'),
+    appliedSet: transition('applied-set'),
+  };
 }
 
 /** Delegating TripleStore that records insert() call shapes and can inject failures. */
@@ -61,6 +111,137 @@ class SpyStore implements TripleStore {
   countQuads(g?: string, options?: QueryOptions) { return this.inner.countQuads(g, options); }
   close() { return this.inner.close(); }
 }
+
+class Rfc64CapableSpyStore extends SpyStore {
+  rfc64AuthorCommitCalls = 0;
+
+  async rfc64AuthorCommitCasV1(): Promise<Rfc64AuthorCommitCasResultV1> {
+    this.rfc64AuthorCommitCalls += 1;
+    return 'committed';
+  }
+}
+
+class NotStartedTimeoutAtomicReplaceStore extends SpyStore {
+  async replaceGraph(): Promise<void> {
+    throw this.notStarted('replaceGraph');
+  }
+
+  async replaceGraphAndSubject(): Promise<void> {
+    throw this.notStarted('replaceGraphAndSubject');
+  }
+
+  async replaceSubject(): Promise<void> {
+    throw this.notStarted('replaceSubject');
+  }
+
+  private notStarted(operation: string): StoreOperationTimeoutError {
+    return new StoreOperationTimeoutError({
+      backend: 'managed-test-store',
+      operation,
+      outcome: 'not_started',
+    });
+  }
+}
+
+describe('ChangelogStore — pre-execution atomic replace rejection', () => {
+  for (const adapter of [
+    {
+      name: 'BlazegraphStore',
+      create: (scheduler: StorePriorityScheduler): TripleStore => new BlazegraphStore(
+        'http://blazegraph.test/sparql',
+        { scheduler, timeout: 1_000 },
+      ),
+    },
+    {
+      name: 'SparqlHttpStore',
+      create: (scheduler: StorePriorityScheduler): TripleStore => new SparqlHttpStore({
+        queryEndpoint: 'http://sparql.test/query',
+        updateEndpoint: 'http://sparql.test/update',
+        consistencyProfile: 'atomic-update',
+        scheduler,
+        timeout: 1_000,
+      }),
+    },
+  ]) {
+    it(`does not request reconciliation for a real ${adapter.name} admission rejection`, async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+        new Error('adapter closure must not dispatch'),
+      );
+      const scheduler = new StorePriorityScheduler({
+        maxConcurrent: 1,
+        ackReservedSlots: 0,
+        healthReservedSlots: 0,
+        backgroundReservedSlots: 0,
+        queueLimits: 1,
+        queueWaitTimeoutMs: 10,
+      });
+      const inner = adapter.create(scheduler);
+      const log = new ChangelogStore(inner);
+      let releaseBlocker!: () => void;
+      let blocker: Promise<void> | undefined;
+
+      try {
+        blocker = scheduler.run('normal', 'test.atomic-replace-blocker', async () => {
+          await new Promise<void>((resolve) => { releaseBlocker = resolve; });
+        });
+        await Promise.resolve();
+
+        for (const [storeOperation, work] of [
+          ['replaceGraph', () => log.replaceGraph(G1, [q('http://ex.org/a', G1)])],
+          ['replaceGraphAndSubject', () => log.replaceGraphAndSubject(
+            G1,
+            [q('http://ex.org/a', G1)],
+            G2,
+            'http://ex.org/meta',
+            [q('http://ex.org/meta', G2)],
+          )],
+          ['replaceSubject', () => log.replaceSubject(
+            G1,
+            'http://ex.org/a',
+            [q('http://ex.org/a', G1)],
+          )],
+        ] as const) {
+          await expect(work()).rejects.toMatchObject({
+            code: 'STORE_SCHEDULER_BUSY',
+            outcome: 'not_started',
+            storeOperation,
+          });
+        }
+
+        expect(log.needsReconcile).toBe(false);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        releaseBlocker?.();
+        if (blocker) await blocker;
+        await inner.close();
+        fetchSpy.mockRestore();
+      }
+    });
+  }
+
+  it('uses the shared not-started outcome for managed-store refusals', async () => {
+    const base = new OxigraphStore();
+    const log = new ChangelogStore(new NotStartedTimeoutAtomicReplaceStore(base));
+
+    await expect(log.replaceGraph(G1, [q('http://ex.org/a', G1)]))
+      .rejects.toMatchObject({ outcome: 'not_started', storeOperation: 'replaceGraph' });
+    await expect(log.replaceGraphAndSubject(
+      G1,
+      [q('http://ex.org/a', G1)],
+      G2,
+      'http://ex.org/meta',
+      [q('http://ex.org/meta', G2)],
+    )).rejects.toMatchObject({
+      outcome: 'not_started',
+      storeOperation: 'replaceGraphAndSubject',
+    });
+    await expect(log.replaceSubject(G1, 'http://ex.org/a', [q('http://ex.org/a', G1)]))
+      .rejects.toMatchObject({ outcome: 'not_started', storeOperation: 'replaceSubject' });
+
+    expect(log.needsReconcile).toBe(false);
+    await base.close();
+  });
+});
 
 describe('ChangelogStore — upsert marker atomicity', () => {
   it('appends the marker in the SAME inner.insert() call as the data (one transaction)', async () => {
@@ -209,6 +390,23 @@ describe('ChangelogStore — restart reseed & reserved-graph hiding', () => {
     expect(await log.hasGraph(CHANGELOG_GRAPH)).toBe(false);
     await base.close();
   });
+
+  it('normalizes an unsorted inner catalog while excluding reserved graphs', async () => {
+    const base = new OxigraphStore();
+    const log = new ChangelogStore(base);
+    await log.insert([
+      q('http://ex.org/z', G2),
+      q('http://ex.org/a', G1),
+      q('http://ex.org/duplicate', G1),
+    ]);
+
+    const graphs = await log.listGraphsSorted();
+    expect(graphs).toEqual([G1, G2]);
+    expect(Object.isFrozen(graphs)).toBe(true);
+    expect(new Set(graphs).size).toBe(graphs.length);
+    expect(graphs).not.toContain(CHANGELOG_GRAPH);
+    await base.close();
+  });
 });
 
 describe('ChangelogStore — opaque update handling', () => {
@@ -338,8 +536,10 @@ describe('ChangelogStore — reserved-graph write protection', () => {
     // aimed at it would erase or corrupt the log, so it is rejected outright.
     await expect(log.dropGraph(CHANGELOG_GRAPH)).rejects.toThrow(/reserved/i);
     await expect(log.deleteByPattern({ graph: CHANGELOG_GRAPH })).rejects.toThrow(/reserved/i);
+    await expect(log.deleteByPatternWithoutCount({ graph: CHANGELOG_GRAPH })).rejects.toThrow(/reserved/i);
     await expect(log.deleteBySubjectPrefix(CHANGELOG_GRAPH, 'x')).rejects.toThrow(/reserved/i);
     expect(spy.insertCalls.length).toBe(callsBefore); // nothing reached the store
+    expect(await log.headSeq()).toBe(1); // log intact
     await base.close();
   });
 
@@ -371,6 +571,8 @@ describe('ChangelogStore — reserved-graph write protection', () => {
     await log.insert([q('http://ex.org/a', G1)]); // seq 1
     await expect(log.deleteByPattern({ predicate: 'urn:dkg:changelog#seq' })).rejects.toThrow(/reserved/i);
     await expect(log.deleteByPattern({ subject: 'urn:dkg:changelog:e:1' })).rejects.toThrow(/reserved/i);
+    await expect(log.deleteByPatternWithoutCount({ predicate: 'urn:dkg:changelog#seq' })).rejects.toThrow(/reserved/i);
+    await expect(log.deleteByPatternWithoutCount({ subject: 'urn:dkg:changelog:e:1' })).rejects.toThrow(/reserved/i);
     expect(await log.headSeq()).toBe(1); // log intact
     await base.close();
   });
@@ -389,6 +591,52 @@ describe('ChangelogStore — reserved-graph write protection', () => {
       `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${CHANGELOG_GRAPH}> { ?s ?p ?o } }`,
     );
     expect(res.type).toBe('bindings');
+    await base.close();
+  });
+
+  it('rejects every RFC-64 manifest role that targets the reserved changelog plane', async () => {
+    const base = new OxigraphStore();
+    const inner = new Rfc64CapableSpyStore(base);
+    const log = new ChangelogStore(inner);
+    await log.insert([q('http://ex.org/seed', G1)]);
+    const recordsBefore = await log.readChanges(0, 100);
+    const baseInput = rfc64AuthorCommitInput();
+    const reservedQuad = (subject: string, object = '"reserved"') =>
+      q(subject, CHANGELOG_GRAPH, object);
+    const cases: Array<readonly [string, Rfc64AuthorCommitCasInputV1]> = [
+      ['projection', {
+        ...baseInput,
+        sharedProjectionGraph: CHANGELOG_GRAPH,
+        sharedProjectionQuads: [reservedQuad('urn:test:changelog:rfc64:projection')],
+      }],
+      ['author seal', {
+        ...baseInput,
+        authorSealGraph: CHANGELOG_GRAPH,
+        authorSealQuads: [reservedQuad(baseInput.authorSealSubject, '"seal"')],
+      }],
+      ...([
+        'currentHead',
+        'subgraphMutationGeneration',
+        'contextGraphMutationGeneration',
+        'appliedSet',
+      ] as const).map((role) => [role, {
+        ...baseInput,
+        [role]: {
+          ...baseInput[role],
+          graphUri: CHANGELOG_GRAPH,
+          quads: role === 'currentHead'
+            ? [{ ...baseInput.currentHead.quads[0]!, graph: CHANGELOG_GRAPH }]
+            : [reservedQuad(baseInput[role].subject, `"${role}"`)],
+        },
+      }] as const),
+    ];
+
+    for (const [role, input] of cases) {
+      await expect(log.rfc64AuthorCommitCasV1(input), role).rejects.toThrow(/reserved/i);
+      expect(inner.rfc64AuthorCommitCalls, role).toBe(0);
+      expect(await log.headSeq(), role).toBe(1);
+      expect(await log.readChanges(0, 100), role).toEqual(recordsBefore);
+    }
     await base.close();
   });
 });
@@ -445,6 +693,28 @@ describe('ChangelogStore — delete-path op attribution & reconcile', () => {
     expect(await log.deleteByPattern({ subject: 'http://ex.org/b', graph: G1 })).toBeGreaterThan(0);
     expect((await log.readChanges(0, 100)).map((c) => c.op)).toEqual(['upsert', 'upsert', 'drop']);
     expect(log.needsReconcile).toBe(false); // graph-hinted path is fully attributed
+  });
+
+  it('no-count deleteByPattern emits a conservative marker and preserves drop attribution', async () => {
+    await log.insert([q('http://ex.org/a', G1), q('http://ex.org/b', G1)]);
+
+    await log.deleteByPatternWithoutCount({ subject: 'http://ex.org/a', graph: G1 });
+    await log.deleteByPatternWithoutCount({ subject: 'http://ex.org/b', graph: G1 });
+
+    expect((await log.readChanges(0, 100)).map((c) => c.op)).toEqual([
+      'upsert',
+      'upsert',
+      'drop',
+    ]);
+    expect(log.needsReconcile).toBe(false);
+  });
+
+  it('no-count graph-less delete flags reconcile without requiring a count', async () => {
+    await log.insert([q('http://ex.org/s1', G1)]);
+
+    await log.deleteByPatternWithoutCount({ predicate: 'http://ex.org/p' });
+
+    expect(log.needsReconcile).toBe(true);
   });
 });
 

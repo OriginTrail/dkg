@@ -1,5 +1,6 @@
 import type {
   CatchupPassDecisionReason,
+  ConfiguredContextGraphMetadataReconciliationResult,
   DKGAgent,
   SwmSnapshotCoverage,
 } from '@origintrail-official/dkg-agent';
@@ -725,33 +726,50 @@ async function withContextGraphReadinessMutationLock<T>(
   }
 }
 
+export type { ConfiguredContextGraphMetadataReconciliationResult };
+
 /**
- * Revalidate live metadata and invalidate subscription/provenance together.
- * Returns false when authoritative metadata arrived before this reset acquired
- * the readiness lock, in which case newer PROJECT_SYNCED proof is preserved.
+ * Repair, classify, and persist configured-graph readiness under one lock.
+ * PROJECT_SYNCED persistence uses the same lock, so a newer authoritative
+ * proof either wins before this operation classifies live state or runs after
+ * its reset and restores readiness.
  */
-export async function resetContextGraphReadinessForMissingMetadata(input: {
+export async function reconcileConfiguredContextGraphMetadata(input: {
   agent: DKGAgent;
   store: Partial<ContextGraphReadinessStore>;
   contextGraphId: string;
-}): Promise<boolean> {
+}): Promise<ConfiguredContextGraphMetadataReconciliationResult> {
   const contextGraphId = input.contextGraphId.trim();
-  if (!contextGraphId) return false;
+  if (!contextGraphId) {
+    return {
+      outcome: 'pending',
+      reason: 'missing-metadata',
+      diagnostic: {
+        kind: 'public-metadata-repair-failed',
+        detail: 'Context graph id is empty',
+      },
+    };
+  }
 
   return withContextGraphReadinessMutationLock(input.agent, contextGraphId, async () => {
-    const locallyCurated = typeof input.agent.isCuratorOf === 'function'
-      ? await input.agent.isCuratorOf(contextGraphId).catch(() => false)
-      : false;
-    const hasConfirmedMeta = await input.agent.hasConfirmedMetaState(
+    const reconciliation = await input.agent.reconcileConfiguredContextGraphMetadata(
       contextGraphId,
-      { rejectUnregisteredPlaceholder: !locallyCurated },
-    ).catch(() => false);
-    if (hasConfirmedMeta) return false;
+    );
+    if (reconciliation.outcome === 'authoritative') {
+      const subscription = input.agent.getSubscribedContextGraphs().get(contextGraphId);
+      if (subscription?.metaSynced !== true || subscription.pendingMeta === true) {
+        input.agent.markContextGraphSubscriptionState(contextGraphId, {
+          metaSynced: true,
+          pendingMeta: false,
+        });
+      }
+      return reconciliation;
+    }
 
     const patches = missingMetadataReadinessPatches();
     input.agent.markContextGraphSubscriptionState(contextGraphId, patches.statePatch);
     writeContextGraphReadiness(input.store, contextGraphId, patches.readinessPatch);
-    return true;
+    return reconciliation;
   });
 }
 

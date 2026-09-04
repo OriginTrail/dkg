@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../src/telemetry-config.js';
+import {
+  resolveOtelSignals,
+  resolveOtlpLogEndpoint,
+  resolveLogExporterMode,
+  isUnknownLogExporter,
+} from '../src/telemetry-config.js';
 
 /**
  * Daemon telemetry-routing resolution (the logic lifecycle.ts uses to pick the
@@ -28,6 +33,86 @@ describe('resolveLogExporterMode', () => {
     expect(isUnknownLogExporter({ enabled: true })).toBe(false);
     expect(isUnknownLogExporter(undefined)).toBe(false);
   });
+});
+
+describe('resolveOtlpLogEndpoint', () => {
+  const config = {
+    enabled: true,
+    logs: { endpoint: 'http://config/v1/logs' },
+  } as const;
+
+  it('uses logs-specific env before base env and config', () => {
+    expect(resolveOtlpLogEndpoint(config, {
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'http://specific/v1/logs',
+      OTEL_EXPORTER_OTLP_ENDPOINT: 'http://base:4318',
+    })).toBe('http://specific/v1/logs');
+  });
+
+  it('derives /v1/logs from the base env and trims trailing slashes', () => {
+    expect(resolveOtlpLogEndpoint(config, {
+      OTEL_EXPORTER_OTLP_ENDPOINT: 'http://base:4318///',
+    })).toBe('http://base:4318/v1/logs');
+  });
+
+  it('falls back to config when no environment endpoint resolves', () => {
+    expect(resolveOtlpLogEndpoint(config, {})).toBe('http://config/v1/logs');
+  });
+
+  it('returns undefined instead of guessing a network endpoint', () => {
+    expect(resolveOtlpLogEndpoint({ enabled: true }, {})).toBeUndefined();
+  });
+});
+
+describe('canonical OTLP signal endpoint precedence', () => {
+  const cases = [
+    {
+      signal: 'logs',
+      envKey: 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT',
+      path: '/v1/logs',
+      configured: 'http://config/v1/logs',
+      resolve: (env: Record<string, string | undefined>) =>
+        resolveOtlpLogEndpoint({
+          enabled: true,
+          logs: { endpoint: 'http://config/v1/logs' },
+        }, env),
+    },
+    {
+      signal: 'traces',
+      envKey: 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT',
+      path: '/v1/traces',
+      configured: 'http://config/v1/traces',
+      resolve: (env: Record<string, string | undefined>) =>
+        resolveOtelSignals({
+          enabled: true,
+          traces: { endpoint: 'http://config/v1/traces' },
+        }, env).tracesEndpoint,
+    },
+    {
+      signal: 'metrics',
+      envKey: 'OTEL_EXPORTER_OTLP_METRICS_ENDPOINT',
+      path: '/v1/metrics',
+      configured: 'http://config/v1/metrics',
+      resolve: (env: Record<string, string | undefined>) =>
+        resolveOtelSignals({
+          enabled: true,
+          metrics: { endpoint: 'http://config/v1/metrics' },
+        }, env).metricsEndpoint,
+    },
+  ];
+
+  it.each(cases)(
+    '$signal uses signal env > normalized base env > config',
+    ({ envKey, path, configured, resolve }) => {
+      expect(resolve({
+        [envKey]: `http://specific${path}`,
+        OTEL_EXPORTER_OTLP_ENDPOINT: 'http://base:4318///',
+      })).toBe(`http://specific${path}`);
+      expect(resolve({
+        OTEL_EXPORTER_OTLP_ENDPOINT: 'http://base:4318///',
+      })).toBe(`http://base:4318${path}`);
+      expect(resolve({})).toBe(configured);
+    },
+  );
 });
 
 describe('resolveOtelSignals', () => {

@@ -2,15 +2,110 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+  CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+  CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+  MEMBER_ROSTER_OBJECT_TYPE_V1,
+  computeContextGraphPolicyObjectDigestV1,
+} from '@origintrail-official/dkg-core';
 import { rfc64PublicCatalogPolicy } from './helpers/rfc64-public-catalog.js';
+import {
+  SyncSemanticStoreV1,
+  SyncSharedProjectionStoreV1,
+  asChangelogReader,
+  createManagedOxigraphRuntimeStoreConfigV1,
+} from '@origintrail-official/dkg-storage';
+
+const PRIVATE_RFC64_CONTEXT_GRAPH =
+  '0x1111111111111111111111111111111111111111/private-daemon-wiring';
+const PRIVATE_RFC64_OWNER = '0x1111111111111111111111111111111111111111';
+const PRIVATE_RFC64_LOCAL = '0x2222222222222222222222222222222222222222';
+const PRIVATE_RFC64_PROVIDER = '0x3333333333333333333333333333333333333333';
+const PRIVATE_RFC64_PROVIDER_PEER = '12D3KooPrivateDaemonProvider';
+
+function rfc64PrivateCatalogActivation() {
+  const policyEnvelope = {
+    issuer: PRIVATE_RFC64_OWNER,
+    objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+    payload: {
+      networkId: 'evm:100',
+      contextGraphId: PRIVATE_RFC64_CONTEXT_GRAPH,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      era: '0',
+      version: '0',
+      previousPolicyDigest: null,
+      accessPolicy: 1,
+      publishPolicy: 1,
+      publishAuthority: null,
+      publishAuthorityAccountId: '0',
+      projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+      administrativeDelegationDigest: null,
+      source: {
+        kind: 'owner-signed-unregistered',
+        ownerAddress: PRIVATE_RFC64_OWNER,
+        ownerAuthorityEra: '0',
+      },
+      effectiveAt: '0',
+      issuedAt: '0',
+    },
+    signatureEvidence: { kind: 'none' },
+    signatureSuite: 'eip191-personal-sign-digest-v1',
+  } as const;
+  const rosterEnvelope = {
+    issuer: PRIVATE_RFC64_OWNER,
+    objectType: MEMBER_ROSTER_OBJECT_TYPE_V1,
+    payload: {
+      networkId: 'evm:100',
+      contextGraphId: PRIVATE_RFC64_CONTEXT_GRAPH,
+      ownershipTransitionDigest: null,
+      era: '0',
+      version: '0',
+      previousRosterDigest: null,
+      policyDigest: computeContextGraphPolicyObjectDigestV1(policyEnvelope),
+      administrativeDelegationDigest: null,
+      members: [
+        { agentAddress: PRIVATE_RFC64_LOCAL, roles: ['holder'] },
+        { agentAddress: PRIVATE_RFC64_PROVIDER, roles: ['holder', 'provider'] },
+      ],
+      issuedAt: '0',
+    },
+    signatureEvidence: { kind: 'none' },
+    signatureSuite: 'eip191-personal-sign-digest-v1',
+  } as const;
+  return {
+    bootstrap: {
+      acceptedPolicies: [{
+        policyEnvelope,
+        rosterEnvelope,
+        targets: [{
+          authorAddress: PRIVATE_RFC64_PROVIDER,
+          providers: [PRIVATE_RFC64_PROVIDER_PEER],
+        }],
+        completeSwmProviders: [PRIVATE_RFC64_PROVIDER_PEER],
+      }],
+    },
+    accessPolicyAuthority: {
+      localAgentAddress: PRIVATE_RFC64_LOCAL,
+      peerAgentBindings: [{
+        peerId: PRIVATE_RFC64_PROVIDER_PEER,
+        agentAddress: PRIVATE_RFC64_PROVIDER,
+      }],
+    },
+  };
+}
 
 const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
   chainResetWipe: vi.fn(),
   createServer: vi.fn(),
+  checkExternalStoreReachable: vi.fn(),
+  checkOrSetStoreIdentity: vi.fn(),
   loadOpWallets: vi.fn(),
   loadNetworkConfig: vi.fn(),
   startPublisherRuntimeWithOutcome: vi.fn(),
+  startManagedOxigraph: vi.fn(),
 }));
 
 vi.mock('node:http', () => ({
@@ -43,6 +138,20 @@ vi.mock('../src/daemon/chain-reset-wipe.js', async importOriginal => {
   };
 });
 
+vi.mock('../src/daemon/oxigraph-managed.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/daemon/oxigraph-managed.js')>();
+  return { ...actual, startManagedOxigraph: mocks.startManagedOxigraph };
+});
+
+vi.mock('../src/daemon/store-health-check.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/daemon/store-health-check.js')>();
+  return {
+    ...actual,
+    checkExternalStoreReachable: mocks.checkExternalStoreReachable,
+    checkOrSetStoreIdentity: mocks.checkOrSetStoreIdentity,
+  };
+});
+
 vi.mock('../src/publisher-runner.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/publisher-runner.js')>();
   return {
@@ -52,6 +161,9 @@ vi.mock('../src/publisher-runner.js', async importOriginal => {
 });
 
 const { runDaemonInner } = await import('../src/daemon/lifecycle.js');
+const { DKGAgent: RealDKGAgent } = await vi.importActual<
+  typeof import('@origintrail-official/dkg-agent')
+>('@origintrail-official/dkg-agent');
 
 function createFakeServer() {
   const server = {
@@ -84,6 +196,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
   let stderrWrite: typeof process.stderr.write = process.stderr.write;
   let uncaughtExceptionListeners: NodeJS.UncaughtExceptionListener[] = [];
   let unhandledRejectionListeners: NodeJS.UnhandledRejectionListener[] = [];
+  let exitListeners: NodeJS.ExitListener[] = [];
   let sigintListeners: NodeJS.SignalsListener[] = [];
   let sigtermListeners: NodeJS.SignalsListener[] = [];
 
@@ -95,6 +208,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     stderrWrite = process.stderr.write;
     uncaughtExceptionListeners = process.listeners('uncaughtException') as NodeJS.UncaughtExceptionListener[];
     unhandledRejectionListeners = process.listeners('unhandledRejection') as NodeJS.UnhandledRejectionListener[];
+    exitListeners = process.listeners('exit') as NodeJS.ExitListener[];
     sigintListeners = process.listeners('SIGINT') as NodeJS.SignalsListener[];
     sigtermListeners = process.listeners('SIGTERM') as NodeJS.SignalsListener[];
 
@@ -107,6 +221,17 @@ describe('runDaemonInner StorageACK timing wiring', () => {
         retryable: false,
         operatorActionRequired: true,
       },
+    });
+    mocks.startManagedOxigraph.mockResolvedValue(null);
+    mocks.checkExternalStoreReachable.mockResolvedValue({
+      ok: true,
+      backend: 'sparql-http',
+      endpoint: 'http://127.0.0.1:7878/query',
+    });
+    mocks.checkOrSetStoreIdentity.mockResolvedValue({
+      ok: true,
+      action: 'matched',
+      nodeName: 'storage-ack-timing-core-test',
     });
     mocks.loadNetworkConfig.mockResolvedValue({
       networkName: 'DKG V10 Gnosis Mainnet',
@@ -141,13 +266,22 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     for (const listener of uncaughtExceptionListeners) process.on('uncaughtException', listener);
     process.removeAllListeners('unhandledRejection');
     for (const listener of unhandledRejectionListeners) process.on('unhandledRejection', listener);
+    process.removeAllListeners('exit');
+    for (const listener of exitListeners) process.on('exit', listener);
     process.removeAllListeners('SIGINT');
     for (const listener of sigintListeners) process.on('SIGINT', listener);
     process.removeAllListeners('SIGTERM');
     for (const listener of sigtermListeners) process.on('SIGTERM', listener);
     if (originalDkgHome === undefined) delete process.env.DKG_HOME;
     else process.env.DKG_HOME = originalDkgHome;
-    if (tempHome) await rm(tempHome, { recursive: true, force: true });
+    if (tempHome) {
+      await rm(tempHome, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 50,
+      });
+    }
     tempHome = undefined;
   });
 
@@ -223,6 +357,67 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     });
   });
 
+  it.each([false, true])(
+    'preserves managed RFC-64 store authority through DKGAgent.create when changelog=%s',
+    async (changelog) => {
+      const managedStore = createManagedOxigraphRuntimeStoreConfigV1({
+        backend: 'sparql-http',
+        options: {
+          queryEndpoint: 'http://127.0.0.1:7878/query',
+          updateEndpoint: 'http://127.0.0.1:7878/update',
+          managedByDkg: true,
+        },
+        graphSetIndex: true,
+      });
+      mocks.startManagedOxigraph.mockResolvedValue({
+        handle: {
+          queryEndpoint: 'http://127.0.0.1:7878/query',
+          updateEndpoint: 'http://127.0.0.1:7878/update',
+          getRecoveryState: () => ({ recovering: false }),
+          killSync: vi.fn(),
+        },
+        storeConfig: managedStore,
+        largeLiteralStorage: {
+          enabled: true,
+          directory: join(tempHome!, 'literal-blobs'),
+        },
+      });
+
+      await captureCreateArg({
+        store: {
+          backend: 'oxigraph-server',
+          options: {},
+          changelog,
+        },
+      }, async (createArg) => {
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = (async (_input, init) => {
+          const body = String(init?.body ?? '');
+          if (/\bSELECT\b/iu.test(body)) {
+            return new Response(JSON.stringify({
+              head: { vars: ['network'] },
+              results: { bindings: [] },
+            }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/sparql-results+json' },
+            });
+          }
+          return new Response(null, { status: 204 });
+        }) as typeof fetch;
+        let agent: Awaited<ReturnType<typeof RealDKGAgent.create>> | undefined;
+        try {
+          agent = await RealDKGAgent.create(createArg);
+          expect(() => new SyncSharedProjectionStoreV1(agent.store)).not.toThrow();
+          expect(() => new SyncSemanticStoreV1(agent.store)).not.toThrow();
+          expect(asChangelogReader(agent.store) !== null).toBe(changelog);
+        } finally {
+          await agent?.stop().catch(() => {});
+          globalThis.fetch = originalFetch;
+        }
+      });
+    },
+  );
+
   it('merges configured and network-default context graphs into the automatic sync scope', async () => {
     mocks.loadNetworkConfig.mockResolvedValue({
       networkName: 'DKG V10 Gnosis Mainnet',
@@ -287,6 +482,37 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     expect(createArg.rfc64CatalogDeploymentProfile).toBeUndefined();
     expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();
     expect(createArg.rfc64PublicCatalogBootstrap).toBeUndefined();
+  });
+
+  it('keeps an eligible public manifest dormant on an edge without an explicit subscription', async () => {
+    const manifestContextGraph = 'rfc64-edge-eligible-only';
+    const createArg = await captureCreateArg({
+      nodeRole: 'edge',
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: {
+          acceptedPublicPolicies: [
+            rfc64PublicCatalogPolicy(manifestContextGraph, 'evm:100'),
+          ],
+        },
+      },
+    });
+
+    expect(createArg.syncContextGraphs).toEqual([]);
+    expect(createArg.rfc64PublicCatalogActivation.bootstrap.acceptedPublicPolicies[0]
+      .policyEnvelope.payload.contextGraphId).toBe(manifestContextGraph);
+  });
+
+  it('keeps a private-only RFC-64 catalog selection out of generic sync wiring', async () => {
+    const rfc64Catalog = rfc64PrivateCatalogActivation();
+    const createArg = await captureCreateArg({
+      contextGraphs: ['legacy-explicit-cg'],
+      rfc64Catalog,
+    });
+
+    expect(createArg.syncContextGraphs).toEqual(['legacy-explicit-cg']);
+    expect(createArg.syncContextGraphs).not.toContain(PRIVATE_RFC64_CONTEXT_GRAPH);
+    expect(createArg.rfc64CatalogActivation).toEqual(rfc64Catalog);
   });
 
   it('keeps receiver-only RFC-64 bootstrap active without enabling auto-publish', async () => {

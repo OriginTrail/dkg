@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import {
   MAX_AUTHOR_CATALOG_BUCKET_COUNT_V1,
+  MAX_AUTHOR_CATALOG_IDENTIFIER_BYTES_V1,
   MAX_AUTHOR_CATALOG_ROW_BYTES_V1,
   MAX_AUTHOR_CATALOG_ROW_DIGEST_INPUT_BYTES_V1,
   MAX_AUTHOR_CATALOG_SCOPE_BYTES_V1,
+  AuthorCatalogCodecError,
   assertAssertionCoordinateV1,
   assertAuthorCatalogBucketCountV1,
   assertAuthorCatalogRowScopeBindingV1,
@@ -25,6 +27,8 @@ import {
   computeAuthorCatalogKeyDigestV1,
   computeAuthorCatalogRowDigestV1,
   computeAuthorCatalogScopeDigestV1,
+  decodeIriComponentV1,
+  isCatalogForbiddenCodePointV1,
   iriComponentV1,
   parseCanonicalAuthorCatalogRowV1,
   parseCanonicalAuthorCatalogScopeV1,
@@ -72,12 +76,58 @@ describe('RFC-64 author catalog identifiers and graph names', () => {
     );
 
     const unicodeLane = validatedLane({ contextGraphId: 'cg', subGraphName: 'café' });
-    const coordinate = validatedCoordinate('name λ');
-    expect(iriComponentV1('AZaz09-._~ /é')).toBe('AZaz09-._~%20%2F%C3%A9');
+  const coordinate = validatedCoordinate('name λ');
+  expect(iriComponentV1('AZaz09-._~ /é')).toBe('AZaz09-._~%20%2F%C3%A9');
+  expect(decodeIriComponentV1('name%20%CE%BB')).toBe('name λ');
+  expect(() => decodeIriComponentV1('name%20%ce%bb')).toThrow(/not canonical/u);
+  expect(() => decodeIriComponentV1('name%2')).toThrow(/malformed/u);
+    try {
+      iriComponentV1('');
+      throw new Error('expected invalid IRI component to be rejected');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AuthorCatalogCodecError);
+      expect((error as AuthorCatalogCodecError).code).toBe('catalog-identifier');
+    }
     expect(buildCatalogAssertionSubjectV1(unicodeLane, AUTHOR as EvmAddressV1, coordinate))
       .toBe(
         `did:dkg:context-graph:v1/subgraph/cg/caf%C3%A9/assertion/${AUTHOR}/name%20%CE%BB`,
       );
+  });
+
+  it('snapshots catalog-lane data properties before encoding', () => {
+    let ordinaryReads = 0;
+    const lane = new Proxy({
+      contextGraphId: 'safe',
+      subGraphName: null,
+    }, {
+      get(target, key, receiver) {
+        ordinaryReads += 1;
+        if (key === 'contextGraphId') return 'changed';
+        if (key === 'subGraphName') return 'changed';
+        return Reflect.get(target, key, receiver);
+      },
+    }) as CatalogLaneV1;
+
+    expect(buildCatalogAssertionScopeV1(lane)).toBe('v1/root/safe');
+    expect(buildCatalogAssertionSubjectV1(
+      lane,
+      AUTHOR as EvmAddressV1,
+      validatedCoordinate('coordinate'),
+    )).toBe(`did:dkg:context-graph:v1/root/safe/assertion/${AUTHOR}/coordinate`);
+    expect(ordinaryReads).toBe(0);
+  });
+
+  it('does not let JavaScript callers relax the catalog identifier ceiling', () => {
+    const callFromJavaScript = iriComponentV1 as unknown as (
+      value: string,
+      ignoredMaxBytes?: number,
+    ) => string;
+    const oversized = 'a'.repeat(MAX_AUTHOR_CATALOG_IDENTIFIER_BYTES_V1 + 1);
+
+    expect(() => callFromJavaScript(
+      oversized,
+      MAX_AUTHOR_CATALOG_IDENTIFIER_BYTES_V1 + 1,
+    )).toThrow(AuthorCatalogCodecError);
   });
 
   it('enforces exact network/context grammar, NFC, and UTF-8 byte ceilings', () => {
@@ -109,6 +159,35 @@ describe('RFC-64 author catalog identifiers and graph names', () => {
       expect(() => assertSubGraphNameV1(value)).toThrow(/catalog-identifier/);
     }
     expect(() => assertAssertionCoordinateV1('_private')).not.toThrow();
+  });
+
+  it('pins every forbidden code-point boundary and its adjacent allowed values', () => {
+    for (const codePoint of [
+      0x0000, 0x001f,
+      0x007f, 0x009f,
+      0x00a0,
+      0x1680,
+      0x2000, 0x200b,
+      0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff,
+    ]) {
+      expect(isCatalogForbiddenCodePointV1(codePoint)).toBe(true);
+      const value = `a${String.fromCodePoint(codePoint)}b`;
+      expect(() => assertAssertionCoordinateV1(value)).toThrow();
+      expect(() => assertSubGraphNameV1(value)).toThrow();
+    }
+    for (const codePoint of [
+      0x0020, 0x007e,
+      0x00a1,
+      0x167f, 0x1681,
+      0x1fff, 0x200c,
+      0x2027, 0x202a, 0x202e, 0x2030, 0x205e, 0x2060, 0x2fff, 0x3001,
+      0xfefe, 0xff00,
+    ]) {
+      expect(isCatalogForbiddenCodePointV1(codePoint)).toBe(false);
+      const value = `a${String.fromCodePoint(codePoint)}b`;
+      expect(() => assertAssertionCoordinateV1(value)).not.toThrow();
+      expect(() => assertSubGraphNameV1(value)).not.toThrow();
+    }
   });
 });
 
@@ -142,6 +221,14 @@ describe('AuthorCatalogScopeV1', () => {
       ...VALID_SCOPE,
       governanceContractAddress: null,
     })).toThrow(/catalog-governance-tuple/);
+    const inverseMixed = {
+      ...VALID_SCOPE,
+      governanceChainId: null,
+    };
+    expect(() => assertAuthorCatalogScopeV1(inverseMixed))
+      .toThrow(/catalog-governance-tuple/);
+    expect(() => parseCanonicalAuthorCatalogScopeV1(JSON.stringify(inverseMixed)))
+      .toThrow(/catalog-governance-tuple/);
     expect(() => assertAuthorCatalogScopeV1({ ...VALID_SCOPE, era: 0 })).toThrow(
       /catalog-scalar/,
     );

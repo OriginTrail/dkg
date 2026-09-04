@@ -35,7 +35,7 @@ describe('MockChainAdapter publish-transaction tri-state [GH#2270]', () => {
 
     const resolution = await adapter.resolvePublishTransaction(UNKNOWN_TX);
 
-    expect(resolution).toEqual({ status: 'pending' });
+    expect(resolution).toEqual({ status: 'pending-mempool' });
     expect(resolution.status).not.toBe('not-found');
   });
 

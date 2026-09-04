@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { classifyAgentConnectError } from '../src/daemon/routes/agent-connect-error.js';
 import { handleAgentChatRoutes } from '../src/daemon/routes/agent-chat.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 function fakeRes() {
   const res: any = { statusCode: 0, body: '' };
@@ -27,8 +28,8 @@ function runConnect(agent: any, body: unknown) {
     path,
     url,
     validTokens: new Set<string>(),
-    requestToken: undefined,
     requestAgentAddress: '',
+    authentication: requestAuthentication({ kind: 'nodeOperator' }),
   } as unknown as RequestContext;
   return { res, done: handleAgentChatRoutes(ctx) };
 }

@@ -5,6 +5,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { createPublisherControlFromStore } from '../src/publisher-runner.js';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 // #1837 — POST /api/publisher/clear-job outcome → HTTP mapping.
 describe('#1837 POST /api/publisher/clear-job', () => {
@@ -42,14 +43,10 @@ describe('#1837 POST /api/publisher/clear-job', () => {
   }
 
   async function finalizedJob(control: ReturnType<typeof createPublisherControlFromStore>): Promise<string> {
-    const bx = { txHash: `0x${'ef'.repeat(32)}` as `0x${string}`, walletId: 'wallet-1' };
-    const inc = { blockNumber: 10, blockHash: `0x${'aa'.repeat(32)}` as `0x${string}`, blockTimestamp: 1 };
     const jobId = await control.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     await control.claimNext('wallet-1');
     await control.update(jobId, 'validated', { validation: { canonicalRoots: [], canonicalRootMap: {}, swmQuadCount: 2, authorityProofRef: 'knowledge-asset-lifecycle', transitionType: 'CREATE' } });
-    await control.update(jobId, 'broadcast', { broadcast: bx });
-    await control.update(jobId, 'included', { broadcast: bx, inclusion: inc });
-    await control.update(jobId, 'finalized', { broadcast: bx, inclusion: inc, finalization: { mode: 'local' } });
+    await control.update(jobId, 'finalized', { finalization: { mode: 'local' } });
     return jobId;
   }
 
@@ -146,7 +143,7 @@ describe('#1837 POST /api/publisher/clear-job', () => {
       apiPortRef: { value: 0 },
       url,
       path: url.pathname,
-      requestToken: undefined,
+      authentication: requestAuthentication({ kind: 'anonymous' }),
       requestAgentAddress: '0x0',
     };
   }

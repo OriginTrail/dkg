@@ -1,12 +1,69 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from './page-fetch.js';
 import { stripLiteral } from '../../dkg-agent-utils.js';
+import { parseGraphScopedDescriptor } from '../durable-integrity.js';
+import {
+  exactAssetCommitmentMatchesDescriptor,
+  exactAssetCommitmentsForSelection,
+  exactAssetUalsForSelection,
+  type ExactAssetSelection,
+} from '../exact-assets.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 const KA_UAL = `${DKG_NS}kaUal`;
 const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
 
 export type ExactDurableFetchDisposition = 'found' | 'clean-absent' | 'incomplete';
+
+export type ExactAssetFetchSessionPolicy =
+  | Readonly<{
+      kind: 'durable-materialization';
+      forceFreshSession: false;
+      allowDurableCheckpoints: true;
+      requesterScope?: never;
+    }>
+  | Readonly<{
+      kind: 'ephemeral-challenge';
+      forceFreshSession: true;
+      allowDurableCheckpoints: false;
+      requesterScope: `challenge-exact:${string}`;
+    }>;
+
+/** Keep exact retrieval semantics next to filtering and completion policy. */
+export function exactAssetFetchSessionPolicy(
+  selection: ExactAssetSelection,
+): ExactAssetFetchSessionPolicy {
+  if (selection.kind === 'ual-only') {
+    return {
+      kind: 'durable-materialization',
+      forceFreshSession: false,
+      allowDurableCheckpoints: true,
+    };
+  }
+  return {
+    kind: 'ephemeral-challenge',
+    forceFreshSession: true,
+    allowDurableCheckpoints: false,
+    requesterScope: `challenge-exact:${selection.commitments
+      .map((commitment) => `${commitment.merkleRootHex}:${commitment.merkleLeafCount}`)
+      .join('.')}`,
+  };
+}
+
+function descriptorMatchesCommitment(
+  metaQuads: readonly Quad[],
+  commitment: NonNullable<ReturnType<typeof exactAssetCommitmentsForSelection>>[number],
+): boolean {
+  const rows = metaQuads.filter((quad) => quad.subject === commitment.assetUal);
+  try {
+    return exactAssetCommitmentMatchesDescriptor(
+      commitment,
+      parseGraphScopedDescriptor(commitment.assetUal, rows),
+    );
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Rolling-upgrade guard: an old responder may ignore the additive exact-asset
@@ -16,10 +73,31 @@ export type ExactDurableFetchDisposition = 'found' | 'clean-absent' | 'incomplet
 export function filterExactAssetDurablePayload(
   dataQuads: readonly Quad[],
   metaQuads: readonly Quad[],
-  assetUals: readonly string[],
-): { dataQuads: Quad[]; metaQuads: Quad[]; descriptorCoverageComplete: boolean } {
+  selection: ExactAssetSelection,
+): {
+  dataQuads: Quad[];
+  metaQuads: Quad[];
+  descriptorCoverageComplete: boolean;
+  missingDescriptorUals: string[];
+  mismatchedDescriptorUals: string[];
+} {
+  const assetUals = exactAssetUalsForSelection(selection);
   const exactUals = new Set(assetUals);
-  const exactMeta = metaQuads.filter((quad) => exactUals.has(quad.subject));
+  const commitments = new Map(
+    exactAssetCommitmentsForSelection(selection)
+      ?.map((commitment) => [commitment.assetUal, commitment]) ?? [],
+  );
+  const mismatchedDescriptorUals: string[] = [];
+  const admittedUals = new Set([...exactUals].filter((ual) => {
+    const commitment = commitments.get(ual);
+    if (commitment === undefined) return true;
+    const descriptorRows = metaQuads.filter((quad) => quad.subject === ual);
+    if (descriptorRows.length === 0) return false;
+    if (descriptorMatchesCommitment(descriptorRows, commitment)) return true;
+    mismatchedDescriptorUals.push(ual);
+    return false;
+  }));
+  const exactMeta = metaQuads.filter((quad) => admittedUals.has(quad.subject));
   const returnedDescriptors = new Set(
     exactMeta
       .filter((quad) => (
@@ -33,11 +111,17 @@ export function filterExactAssetDurablePayload(
       .filter((quad) => quad.predicate === ASSERTION_GRAPH)
       .map((quad) => quad.object),
   );
+  const missingDescriptorUals = [...exactUals].filter((ual) => (
+    !mismatchedDescriptorUals.includes(ual)
+    && !returnedDescriptors.has(ual)
+  ));
   return {
     metaQuads: exactMeta,
     dataQuads: dataQuads.filter((quad) => exactGraphs.has(quad.graph)),
-    descriptorCoverageComplete: returnedDescriptors.size === exactUals.size
-      && [...exactUals].every((ual) => returnedDescriptors.has(ual)),
+    descriptorCoverageComplete:
+      missingDescriptorUals.length === 0 && mismatchedDescriptorUals.length === 0,
+    missingDescriptorUals,
+    mismatchedDescriptorUals,
   };
 }
 

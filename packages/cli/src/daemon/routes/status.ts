@@ -61,6 +61,10 @@ import {
   loadOpWallets,
   resolveSyncReconcilerEnabled,
 } from '@origintrail-official/dkg-agent';
+import {
+  rfc64CatalogKillSwitchActiveV1,
+  rfc64CatalogRolloutModeForContextGraphV1,
+} from '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
 import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
@@ -224,7 +228,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
@@ -630,7 +633,6 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     admission,
     url,
     path,
-    requestToken,
     requestAgentAddress,
   } = ctx;
 
@@ -701,7 +703,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
   const contextGraphMembersMatch = path.match(/^\/api\/context-graph\/([^/]+)\/members$/);
   if (req.method === "GET" && contextGraphMembersMatch) {
     const contextGraphId = decodeURIComponent(contextGraphMembersMatch[1]);
-    if (!isValidContextGraphId(contextGraphId)) {
+    if (!validateContextGraphId(contextGraphId).valid) {
       return jsonResponse(res, 400, { error: 'Invalid context graph id' });
     }
     return jsonResponse(res, 200, {
@@ -773,21 +775,106 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     // snapshot. A missing field is broken request-context wiring, not a disabled
     // feature, so keep the RequestContext contract strict here.
     const rfc64PublicCatalogActivation = ctx.rfc64PublicCatalog;
+    const rfc64CatalogActivation = ctx.rfc64Catalog ?? {
+      enabled: rfc64PublicCatalogActivation.enabled,
+      selectedContextGraphs: rfc64PublicCatalogActivation.selectedContextGraphs,
+      selectedPublicContextGraphs: rfc64PublicCatalogActivation.selectedContextGraphs,
+      selectedPrivateContextGraphs: [],
+      accessPolicyAuthority: undefined,
+      // The compatibility-only public projection has no private bootstrap
+      // manifest, but keep the fallback structurally aligned with the shared
+      // activation snapshot so downstream status projection stays typed.
+      bootstrap: undefined,
+      autoPublish: rfc64PublicCatalogActivation.autoPublish,
+      rollout: rfc64PublicCatalogActivation.rollout,
+    };
+    const rfc64CatalogRollout = {
+      killSwitch: rfc64CatalogKillSwitchActiveV1(rfc64CatalogActivation),
+      contextGraphModes: Object.fromEntries(
+        rfc64CatalogActivation.selectedContextGraphs.map((contextGraphId) => [
+          contextGraphId,
+          rfc64CatalogRolloutModeForContextGraphV1(
+            rfc64CatalogActivation,
+            contextGraphId,
+          ),
+        ]),
+      ),
+    };
     const rfc64PublicCatalogService =
-      rfc64PublicCatalogActivation.enabled
+      rfc64CatalogActivation.enabled
       && typeof agent.rfc64PublicCatalogStatsV1 === 'function'
         ? agent.rfc64PublicCatalogStatsV1()
         : null;
-    const rfc64PublicCatalogBootstrap =
-      rfc64PublicCatalogActivation.enabled
+    const rfc64CatalogBootstrapStatus =
+      rfc64CatalogActivation.enabled
       && typeof agent.readRfc64PublicCatalogBootstrapStatusV1 === 'function'
         ? agent.readRfc64PublicCatalogBootstrapStatusV1()
         : null;
+    const rfc64CatalogRuntimeSelection =
+      typeof agent.readRfc64CatalogRuntimeSelectionV1 === 'function'
+        ? agent.readRfc64CatalogRuntimeSelectionV1()
+        : {
+            subscriptionDriven: false,
+            eligibleContextGraphs: rfc64CatalogActivation.selectedContextGraphs,
+            selectedContextGraphs: rfc64CatalogActivation.selectedContextGraphs,
+          };
+    const selectedPublicContextGraphs = new Set(
+      rfc64CatalogActivation.selectedPublicContextGraphs,
+    );
+    const rfc64PublicCatalogBootstrap =
+      rfc64PublicCatalogActivation.enabled && rfc64CatalogBootstrapStatus !== null
+        ? {
+            ...rfc64CatalogBootstrapStatus,
+            // Keep the compatibility surface public-only. The shared runtime
+            // status also contains private targets and provider identities.
+            targets: rfc64CatalogBootstrapStatus.targets.filter(
+              ({ scope }) => selectedPublicContextGraphs.has(scope.contextGraphId),
+            ),
+          }
+        : null;
+    const rfc64PrivateRecovery = rfc64CatalogActivation.selectedPrivateContextGraphs.map(
+      (contextGraphId) => {
+        const targets = rfc64CatalogBootstrapStatus?.targets.filter(
+          ({ scope }) => scope.contextGraphId === contextGraphId,
+        ) ?? [];
+        const outcomeCounts = Object.fromEntries(
+          [...new Set(targets.map(({ outcome }) => outcome))]
+            .sort()
+            .map((outcome) => [
+              outcome,
+              targets.filter((target) => target.outcome === outcome).length,
+            ]),
+        );
+        const completionReasons = [...new Set(targets.flatMap(
+          ({ completionReason }) => completionReason === null ? [] : [completionReason],
+        ))].sort();
+        const accepted = rfc64CatalogActivation.bootstrap?.acceptedPolicies.find(
+          ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
+        );
+        return {
+          contextGraphId,
+          mode: rfc64CatalogRolloutModeForContextGraphV1(
+            rfc64CatalogActivation,
+            contextGraphId,
+          ),
+          accessPolicy: accepted?.policyEnvelope.payload.accessPolicy,
+          publishPolicy: accepted?.policyEnvelope.payload.publishPolicy,
+          vmRequired:
+            accepted?.policyEnvelope.payload.accessPolicy === 1
+            && accepted.policyEnvelope.payload.source.kind === 'finalized-chain',
+          targetCount: targets.length,
+          outcomeCounts,
+          completionReasons,
+        };
+      },
+    );
     const rfc64CompleteSwmProviders = rfc64PublicCatalogActivation.enabled
       ? (rfc64PublicCatalogActivation.bootstrap?.acceptedPublicPolicies ?? [])
         .filter((accepted) => (accepted.completeSwmProviders?.length ?? 0) > 0)
         .map((accepted) => ({
           contextGraphId: accepted.policyEnvelope.payload.contextGraphId,
+          accessPolicy: accepted.policyEnvelope.payload.accessPolicy,
+          publishPolicy: accepted.policyEnvelope.payload.publishPolicy,
           providers: accepted.completeSwmProviders,
         }))
       : [];
@@ -908,10 +995,61 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       rfc64PublicCatalog: {
         enabled: rfc64PublicCatalogActivation.enabled,
         selectedContextGraphs: rfc64PublicCatalogActivation.selectedContextGraphs,
+        runtimeSelection: {
+          subscriptionDriven: rfc64CatalogRuntimeSelection.subscriptionDriven,
+          selectedContextGraphs: rfc64CatalogRuntimeSelection.selectedContextGraphs.filter(
+            (contextGraphId) => selectedPublicContextGraphs.has(contextGraphId),
+          ),
+        },
+        rollout: {
+          killSwitch: rfc64CatalogRollout.killSwitch,
+          contextGraphModes: Object.fromEntries(
+            rfc64PublicCatalogActivation.selectedContextGraphs.map((contextGraphId) => [
+              contextGraphId,
+              rfc64CatalogRollout.contextGraphModes[contextGraphId],
+            ]),
+          ),
+        },
         autoPublishEnabled: rfc64PublicCatalogActivation.autoPublish !== undefined,
         completeSwmProviders: rfc64CompleteSwmProviders,
         service: rfc64PublicCatalogService,
         bootstrap: rfc64PublicCatalogBootstrap,
+      },
+      // Local operator projection only. Never expose roster members, peer-to-
+      // wallet bindings, or private provider identities through status.
+      rfc64Catalog: {
+        enabled: rfc64CatalogActivation.enabled,
+        selectedContextGraphs: rfc64CatalogActivation.selectedContextGraphs,
+        selectedPublicContextGraphs: rfc64CatalogActivation.selectedPublicContextGraphs,
+        selectedPrivateContextGraphs: rfc64CatalogActivation.selectedPrivateContextGraphs,
+        runtimeSelection: rfc64CatalogRuntimeSelection,
+        autoPublishEnabled: rfc64CatalogActivation.autoPublish !== undefined,
+        rollout: rfc64CatalogRollout,
+        privateAuthorityConfigured:
+          rfc64CatalogActivation.accessPolicyAuthority !== undefined,
+        privateRecovery: rfc64PrivateRecovery,
+        resourceTelemetry:
+          rfc64CatalogActivation.selectedPrivateContextGraphs.length === 0
+            || rfc64PublicCatalogService === null
+            ? null
+            : {
+                providerAttempts: rfc64PublicCatalogService.receiver.providerAttempts,
+                providerSwitches: rfc64PublicCatalogService.receiver.providerSwitches,
+                providerSuccesses: rfc64PublicCatalogService.receiver.providerSuccesses,
+                providerBackoffMs: rfc64PublicCatalogService.receiver.providerBackoffMs,
+                controlObjectCacheHits:
+                  rfc64PublicCatalogService.nativeReceiver?.controlObjectCacheHits ?? 0,
+                controlObjectNetworkFetches:
+                  rfc64PublicCatalogService.nativeReceiver?.controlObjectNetworkFetches ?? 0,
+                kaBundleCacheHits:
+                  rfc64PublicCatalogService.nativeReceiver?.kaBundleCacheHits ?? 0,
+                kaBundleNetworkFetches:
+                  rfc64PublicCatalogService.nativeReceiver?.kaBundleNetworkFetches ?? 0,
+                kaBundleCacheBytes:
+                  rfc64PublicCatalogService.nativeReceiver?.kaBundleCacheBytes ?? 0,
+                kaBundleNetworkBytes:
+                  rfc64PublicCatalogService.nativeReceiver?.kaBundleNetworkBytes ?? 0,
+              },
       },
       // Product-default scheduling is deliberately separate from the signed
       // catalog authority surface above. Every explicitly requested CG is

@@ -22,7 +22,7 @@
  * No real Docker, no real fetch, no real ports. Everything's
  * injectable; tests run in <50 ms.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   copyFileSync,
   existsSync,
@@ -36,6 +36,9 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import blazegraphRuntimeContract from
+  '@origintrail-official/dkg/blazegraph-runtime-contract';
+import { BlazegraphNamespaceManager } from '@origintrail-official/dkg-storage';
 import { runtimeAssetPaths } from '../src/runtime-assets.js';
 import {
   provisionBlazegraphDocker,
@@ -348,6 +351,37 @@ describe('provisionBlazegraphDocker', () => {
     expect(createCall).toBeDefined();
     expect(String(createCall?.init?.body)).toContain('<entry key="com.bigdata.rdf.sail.namespace">mynode</entry>');
     expect(String(createCall?.init?.body)).toContain('quads">true');
+  });
+
+  it('returns the canonical endpoint supplied by the namespace manager', async () => {
+    const canonicalSparqlUrl = 'http://namespace-manager.test/canonical/sparql';
+    const ensure = vi.spyOn(BlazegraphNamespaceManager.prototype, 'ensure')
+      .mockResolvedValueOnce({ created: false, sparqlUrl: canonicalSparqlUrl });
+    const { runner } = mockDocker({
+      matchers: [
+        { when: (a) => a[0] === '--version', respond: dockerVersionOk },
+        { when: (a) => a[0] === 'inspect', respond: () => dockerInspectRunning() },
+      ],
+    });
+    const { fn } = mockFetch((url) => (
+      url.endsWith('/bigdata/status')
+        ? new Response('ok', { status: 200 })
+        : new Response(null, { status: 500 })
+    ));
+
+    try {
+      const result = await provisionBlazegraphDocker({
+        namespace: 'mynode',
+        docker: runner,
+        fetch: fn,
+        isPortFree: async () => true,
+        log: () => {},
+      });
+      expect(result.url).toBe(canonicalSparqlUrl);
+      expect(result.namespaceCreated).toBe(false);
+    } finally {
+      ensure.mockRestore();
+    }
   });
 
   it('starts an existing stopped container instead of recreating', async () => {
@@ -719,6 +753,19 @@ describe('provisionBlazegraphDocker', () => {
     );
     expect(normaliseBlazegraphNamespace('dkg.node_01')).toBe('dkg.node_01');
     expect(normaliseBlazegraphNamespace('   ')).toBe('dkg-node');
+    expect(normaliseBlazegraphNamespace('.')).toBe('dkg-node');
+    expect(normaliseBlazegraphNamespace('..')).toBe('dkg-node');
+    const longNamespace = normaliseBlazegraphNamespace('a'.repeat(129));
+    expect(longNamespace).toHaveLength(128);
+    expect(longNamespace).toMatch(/^a{115}-[0-9a-f]{12}$/u);
+    expect(() => blazegraphRuntimeContract.assertBlazegraphNamespace(longNamespace)).not.toThrow();
+    const commonPrefix = 'a'.repeat(160);
+    const first = normaliseBlazegraphNamespace(`${commonPrefix}-first-tail`);
+    const second = normaliseBlazegraphNamespace(`${commonPrefix}-second-tail`);
+    expect(first).toHaveLength(128);
+    expect(second).toHaveLength(128);
+    expect(first).not.toBe(second);
+    expect(normaliseBlazegraphNamespace(`${commonPrefix}-first-tail`)).toBe(first);
   });
 });
 

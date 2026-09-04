@@ -100,7 +100,6 @@ import {
   CLI_NPM_PACKAGE,
 } from '../config.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -202,7 +201,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
@@ -310,13 +308,21 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from './local-agents.js';
-import type { MemoryGraphChangedEvent, NotificationSseEvent, RequestContext } from './routes/context.js';
+import type {
+  MemoryGraphChangedEvent,
+  NotificationSseEvent,
+  RequestContext,
+  RequestContextInputFields,
+} from './routes/context.js';
+import { createRequestActor } from './routes/context.js';
+import type { AllowedHttpAuthentication } from '../auth.js';
 import { handleStatusRoutes } from './routes/status.js';
 import { handleBackpressureRoutes } from './routes/backpressure.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
 import { handleOpenclawRoutes } from './routes/openclaw.js';
 import { handleHermesRoutes } from './routes/hermes.js';
 import { handlePrimeAgentRoutes } from './routes/prime-agent.js';
+import { handleLocalLlmRoutes } from './routes/local-llm.js';
 import { handleMemoryRoutes } from './routes/memory.js';
 import { handlePublisherRoutes } from './routes/publisher.js';
 import { handleContextGraphRoutes } from './routes/context-graph.js';
@@ -324,6 +330,7 @@ import { handleKnowledgeAssetsRoutes } from './routes/knowledge-assets.js';
 import { handleKcChainMetadataRoutes } from './routes/kc-chain-metadata.js';
 import { handleFileServingRoutes } from './routes/file-serving.js';
 import { handleQueryRoutes } from './routes/query.js';
+import { handleCclRoutes } from './routes/ccl.js';
 import { handleLocalAgentsRoutes } from './routes/local-agents.js';
 import { handleEpcisRoutes } from './routes/epcis.js';
 import { handlePcaRoutes } from './routes/pca.js';
@@ -334,31 +341,44 @@ import type { RoutePlugin } from './plugin-api.js';
 
 
 export type HandleRequestInput = Omit<
-  RequestContext,
+  RequestContextInputFields,
   | 'url'
   | 'path'
-  | 'requestToken'
+  | 'actor'
+  | 'authentication'
   | 'requestAgentAddress'
->;
+> & { readonly authentication: AllowedHttpAuthentication };
 
 export async function handleRequest(input: HandleRequestInput): Promise<void> {
-  const { req, res, agent } = input;
+  const { req, res, agent, authentication, ...contextInput } = input;
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
 
-  // Resolve the requesting agent's address from the Bearer token.
-  // Agent tokens (dkg_at_...) resolve to their specific agent; node-level tokens
-  // fall back to the default owner agent.
-  const requestToken = extractBearerToken(req.headers.authorization);
-  const requestAgentAddress = agent.resolveAgentAddress(requestToken);
-
-  const ctx: RequestContext = {
-    ...input,
+  // Build one actor from the accepted authentication decision. Compatibility properties are
+  // read-only getters over this value, never independently stored request state.
+  const actor = createRequestActor(
+    authentication,
+    (acceptedToken) => agent.resolveAgentAddress(acceptedToken),
+  );
+  const ctxBase = {
+    ...contextInput,
+    req,
+    res,
+    agent,
     url,
     path,
-    requestToken,
-    requestAgentAddress,
+    actor,
   };
+  const ctx = Object.defineProperties(ctxBase, {
+    authentication: {
+      enumerable: true,
+      get: () => actor.authentication,
+    },
+    requestAgentAddress: {
+      enumerable: true,
+      get: () => actor.effectiveAgentAddress,
+    },
+  }) as RequestContext;
 
   await handleStatusRoutes(ctx);
   if (res.writableEnded) return;
@@ -376,6 +396,9 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
   if (res.writableEnded) return;
 
   await handlePrimeAgentRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleLocalLlmRoutes(ctx);
   if (res.writableEnded) return;
 
   await handleMemoryRoutes(ctx);
@@ -397,6 +420,9 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
   if (res.writableEnded) return;
 
   await handleQueryRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleCclRoutes(ctx);
   if (res.writableEnded) return;
 
   await handleLocalAgentsRoutes(ctx);

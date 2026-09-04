@@ -115,7 +115,7 @@ export interface PoolNode {
     getConnections?: () => ReadonlyArray<PoolReusableConnection>;
     handle: (
       protocolId: string,
-      handler: (stream: Stream, connection: { remotePeer: { toString: () => string } }) => void,
+      handler: (stream: Stream, connection: { remotePeer: PooledRemotePeerSource }) => void,
       opts?: { runOnLimitedConnection?: boolean },
     ) => void;
     unhandle: (protocolId: string) => void;
@@ -145,9 +145,50 @@ interface PoolReusableConnection {
  * handlers, so calling `peerId.toBytes()` from a handler works on
  * both wire variants (Codex PR #560 round-3).
  */
+/**
+ * Canonical peer identity handed to pooled application handlers — the exact
+ * `{ toString, toBytes }` shape the one-shot path provides. Normalized ONCE
+ * from libp2p's `connection.remotePeer` at stream accept
+ * (`normalizePooledPeerId`); nothing downstream re-discovers the shape with
+ * casts, and the pre-read gate reads the same identity string the handler and
+ * the full admission check see.
+ */
+export interface PooledPeerId {
+  toString(): string;
+  toBytes(): Uint8Array;
+}
+
+/**
+ * What libp2p actually hands us at the transport boundary. Production
+ * `PeerId`s carry `toMultihash()`; minimal test doubles may carry only
+ * `toString()` — normalization preserves that tolerance by deferring the
+ * capability error to first `toBytes()` use, exactly as the previous
+ * router-side wrap did.
+ */
+export interface PooledRemotePeerSource {
+  toString(): string;
+  toMultihash?: () => { bytes: Uint8Array };
+  toBytes?: () => Uint8Array;
+}
+
+export function normalizePooledPeerId(remote: PooledRemotePeerSource): PooledPeerId {
+  return {
+    toString: () => remote.toString(),
+    toBytes: () => {
+      if (typeof remote.toMultihash === 'function') {
+        return remote.toMultihash().bytes;
+      }
+      if (typeof remote.toBytes === 'function') {
+        return remote.toBytes();
+      }
+      throw new Error('peerId.toBytes not available on pooled handler');
+    },
+  };
+}
+
 export type PooledStreamHandler = (
   requestData: Uint8Array,
-  peerId: unknown,
+  peerId: PooledPeerId,
   options?: { signal?: AbortSignal },
 ) => Promise<Uint8Array>;
 
@@ -199,6 +240,25 @@ export interface MessageStreamPoolOptions {
    * send budget.
    */
   primePeer?: (peerIdStr: string, opts: { signal?: AbortSignal }) => Promise<void>;
+  /**
+   * Optional synchronous pre-read gate for INBOUND pooled streams, consulted
+   * once per accepted stream — before the frame decoder buffers anything and
+   * before PING keepalives are answered. Return `true` to abort the stream.
+   *
+   * Contract mirrors `ProtocolRouterOptions.isPeerKnownRejected`: it must be
+   * synchronous, perform no I/O, and return `false` when unsure — full
+   * (potentially probing) admission still runs per REQUEST after a frame is
+   * read, exactly as before. A throw from the gate is treated as a rejection:
+   * failing open would silently disable the protection, and letting the throw
+   * escape would leak the stream un-aborted through the accept path's logger.
+   *
+   * When the pool is attached via `ProtocolRouter.enablePooling`, the router
+   * installs this itself (keyed by the pool's LOGICAL protocol id, honoring
+   * `admissionExemptProtocols`); `ProtocolRouterPoolingOptions` omits the field
+   * so a caller cannot supply a value the router would have to discard. Direct
+   * `MessageStreamPool` constructions may configure it freely.
+   */
+  rejectInboundStream?: (peerIdStr: string) => boolean;
 }
 
 interface PendingRequest {
@@ -283,6 +343,7 @@ export class MessageStreamPool {
   private readonly peerIdFromStringOverride?: (s: string) => unknown;
   private peerIdFromString?: (s: string) => unknown;
   private readonly primePeer?: (peerIdStr: string, opts: { signal?: AbortSignal }) => Promise<void>;
+  private readonly rejectInboundStream?: (peerIdStr: string) => boolean;
   private inboundHandler: PooledStreamHandler | null = null;
   private inboundRegistered = false;
   private closed = false;
@@ -316,6 +377,7 @@ export class MessageStreamPool {
     this.clock = options.clock ?? (() => Date.now());
     this.peerIdFromStringOverride = options.peerIdFromString;
     this.primePeer = options.primePeer;
+    this.rejectInboundStream = options.rejectInboundStream;
   }
 
   /** Protocol id this pool advertises on the wire. */
@@ -537,7 +599,7 @@ export class MessageStreamPool {
         // on the one-shot path. Codex PR #560 round-3 caught this:
         // previously only `.toString()` was threaded, which meant
         // pooled traffic broke handlers that worked on one-shot.
-        this.handleInboundStream(stream, connection.remotePeer).catch((err) => {
+        this.handleInboundStream(stream, normalizePooledPeerId(connection.remotePeer)).catch((err) => {
           // eslint-disable-next-line no-console
           console.error(
             `[MessageStreamPool] inbound stream error on ${this.protocolId}:`,
@@ -1029,7 +1091,7 @@ export class MessageStreamPool {
     }
   }
 
-  private async handleInboundStream(stream: Stream, remotePeer: unknown): Promise<void> {
+  private async handleInboundStream(stream: Stream, remotePeer: PooledPeerId): Promise<void> {
     const handler = this.inboundHandler;
     if (!handler) {
       // No application handler registered yet — reject the stream
@@ -1040,6 +1102,32 @@ export class MessageStreamPool {
         // already torn down
       }
       return;
+    }
+
+    // Pre-read gate: a peer already classified as rejected does not get to
+    // buffer request frames or have its PINGs answered. Consulted once per
+    // accepted stream; peers classified mid-stream are still refused by the
+    // per-REQUEST admission check in the application handler below.
+    if (this.rejectInboundStream) {
+      // The same normalized identity the application handler and the full
+      // admission check receive for this stream's requests.
+      const remotePeerId = remotePeer.toString();
+      let rejected: boolean;
+      try {
+        rejected = this.rejectInboundStream(remotePeerId);
+      } catch {
+        // A throwing gate violates its contract; fail closed rather than
+        // leaking an un-gated stream (see MessageStreamPoolOptions doc).
+        rejected = true;
+      }
+      if (rejected) {
+        try {
+          stream.abort(new Error('pooled inbound stream rejected before read'));
+        } catch {
+          // already torn down
+        }
+        return;
+      }
     }
 
     // Track whether we exited via clean EOF or an error path so the

@@ -24,7 +24,16 @@ export {
   type SkillOfferingConfig,
 } from './profile.js';
 export { ProfileManager } from './profile-manager.js';
-export { DiscoveryClient, type DiscoveredAgent, type DiscoveredOffering, type SkillSearchOptions } from './discovery.js';
+export {
+  DiscoveryClient,
+  discoveredAgentIdentityKey,
+  discoveredAgentRowKey,
+  groupDiscoveredAgentIdentityRows,
+  type DiscoveredAgent,
+  type DiscoveredAgentIdentityRows,
+  type DiscoveredOffering,
+  type SkillSearchOptions,
+} from './discovery.js';
 export {
   signAgentDelegation,
   verifyAgentDelegation,
@@ -41,6 +50,7 @@ export {
 } from './rfc64/recoverable-author-attestation-v1.js';
 export * from './rfc64/author-catalog-producer.js';
 export * from './rfc64/swm-author-inventory-producer-v1.js';
+export * from './rfc64/swm-inventory-catalog-reconciler-v1.js';
 export * from './rfc64/public-catalog-transport-v1.js';
 export * from './rfc64/public-catalog-current-head-discovery-v1.js';
 export * from './rfc64/open-catalog-policy-v1.js';
@@ -97,6 +107,20 @@ export {
   type VmReconcileSource,
 } from './vm-reconcile-service.js';
 export {
+  ContextGraphAssetFetchConflictError,
+  ContextGraphAssetFetchValidationError,
+  ExactAssetFetchLifecycleClosedError,
+  MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
+  runExactAssetFetch,
+  type ContextGraphAssetFetchItemResult,
+  type ContextGraphAssetFetchItemStatus,
+  type ContextGraphAssetFetchResult,
+  type ExactAssetChainSnapshot,
+  type ExactAssetFetchDependencies,
+  type ExactAssetFetchEvidence,
+  type ExactAssetLocalState,
+} from './sync/exact-asset-fetch.js';
+export {
   ContextGraphMembershipPersistQueueClosedError,
   ContextGraphMembershipPersistQueueFullError,
   ContextGraphMembershipPersistShutdownTimeoutError,
@@ -130,21 +154,68 @@ export {
   buildCclPolicyQuads,
   buildPolicyApprovalQuads,
   hashCclPolicy,
+  CclResourceNotFoundError,
   type PublishCclPolicyInput,
   type CclPolicyRecord,
+  type CclMissingResource,
   type PolicyApprovalBinding,
 } from './ccl-policy.js';
+export { ContextGraphPolicyAuthorizationError } from './dkg-agent-ownership.js';
 export { DKGAgent } from './dkg-agent.js';
+export type {
+  ConfiguredContextGraphMetadataReconciliationDiagnostic,
+  ConfiguredContextGraphMetadataReconciliationResult,
+} from './configured-context-graph-metadata-reconciliation.js';
 export type {
   AcceptRfc64CatalogAccessSnapshotParamsV1,
   PublishAuthorCatalogExactSetSuccessorParamsV1,
   PublishAuthorCatalogExactSetSuccessorResultV1,
   PublishAuthorCatalogGenesisParamsV1,
   Rfc64CatalogAuthorSignerV1,
+  Rfc64CatalogRuntimeSelectionStatusV1,
 } from './dkg-agent-rfc64-catalog.js';
+export type {
+  ReconcileRfc64PublicRootCatalogExactSetParamsV1,
+  ReconcileRfc64PublicRootCatalogExactSetResultV1,
+} from './dkg-agent-rfc64-catalog-upsert.js';
+export type {
+  ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1,
+  ReconcileRfc64PublicCatalogFromSwmInventoryResultV1,
+} from './dkg-agent-rfc64-swm-catalog-projection.js';
+export type {
+  Rfc64PublicCatalogAuthorRepairOutcomeV1,
+  Rfc64PublicCatalogAuthorRepairStatusV1,
+  Rfc64SwmCatalogProjectionSupervisorStatusV1,
+} from './dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
+export type {
+  Rfc64PublicCatalogBootstrapStatusV1,
+} from './dkg-agent-rfc64-catalog-bootstrap.js';
 export type {
   AcceptedRfc64CatalogAccessSnapshotV1,
 } from './rfc64/catalog-access-policy-v1.js';
+export {
+  Rfc64CatalogReconciliationTerminalErrorV1,
+  type Rfc64CatalogReconciliationFailureCompletionV1,
+  type Rfc64CatalogReconciliationFailureOutcomeV1,
+  type Rfc64CatalogReconciliationTerminalReasonV1,
+} from './rfc64/public-catalog-reconciliation-failure-v1.js';
+export {
+  Rfc64CatalogSynchronizationErrorV1,
+} from './rfc64/catalog-synchronization-error-v1.js';
+export {
+  RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_OUTCOMES_V1,
+  RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1,
+  RFC64_PUBLIC_CATALOG_RECONCILIATION_SUCCESS_OUTCOMES_V1,
+  isRfc64CatalogReconciliationFailureOutcomeV1,
+  isRfc64CatalogReconciliationSuccessOutcomeV1,
+  isRfc64PublicCatalogReceiverFailureCompletionV1,
+  isRfc64PublicCatalogReceiverSuccessCompletionV1,
+  type Rfc64CatalogReconciliationSuccessOutcomeV1,
+  type Rfc64PublicCatalogReceiverCompletionOutcomeV1,
+  type Rfc64PublicCatalogReceiverCompletionV1,
+  type Rfc64PublicCatalogReceiverFailureCompletionV1,
+  type Rfc64PublicCatalogReceiverSuccessCompletionV1,
+} from './rfc64/public-catalog-reconciliation-outcome-v1.js';
 export {
   DEFAULT_SYSTEM_CONTEXT_GRAPH_PRIORITY,
   SYNC_ADMISSION_SOURCES,
@@ -211,12 +282,22 @@ export {
   isRootlessUpdateError,
   type RootlessUpdateErrorCode,
 } from './rootless-update-error.js';
+export type {
+  ContextGraphReadAuthorityDecision,
+  ContextGraphReadAuthorityOutcome,
+  ContextGraphReadAuthoritySource,
+} from './context-graph-read-authority.js';
+export type { RegisteredContextGraphAuthority } from './dkg-agent-cg-resolve.js';
+export type { ContextGraphRegistrationBinding } from './dkg-agent-cg-registry.js';
 export {
   ContextGraphNotFoundError,
   InvalidContentError,
   StaleSenderKeyTargetError,
   type DKGAgentConfig,
+  type ReplicationEvent,
   type Rfc64CatalogAccessPolicyAuthorityConfigV1,
+  type Rfc64CatalogBootstrapConfigV1,
+  type Rfc64CatalogBootstrapPolicyV1,
   type DKGAgentACKTransportOptions,
   type ContextGraphSub,
   type ContextGraphSyncMode,
@@ -239,6 +320,10 @@ export {
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
+  type VmReconcileNegativeRecord,
+  type VmReconcilePeerTopology,
+  type VmReconcilePeerTopologyEvidence,
+  type VmReconcilePeerTopologyPeer,
   type SelectedVmReconcileCursorStore,
   type SelectedVmReconcileCursorRecord,
   type ContextGraphWritePreflightProbe,
@@ -265,6 +350,9 @@ export {
 } from './imported-artifact.js';
 export {
   bindRandomSampling,
+  RandomSamplingShutdownTimeoutError,
+  RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_ERROR_CODE,
+  stopRandomSamplingHandleWithin,
   type RandomSamplingBindOptions,
   type RandomSamplingDisabledReason,
   type RandomSamplingHandle,
@@ -335,6 +423,15 @@ export {
 // registry-scale per-peer fan-out and must be bounded by the SAME knob, without
 // deep-importing the compiled `dist/` module.
 export { mapWithConcurrency } from './map-with-concurrency.js';
+export {
+  createVmReconcilePeerTopology,
+  createVmReconcileCleanMissPeerIds,
+  encodeLegacyVmReconcilePeerTopologyKey,
+  isVmReconcilePeerTopology,
+  parseLegacyVmReconcilePeerTopologyKey,
+  parseVmReconcileCleanMissPeerIds,
+  parseVmReconcilePeerTopology,
+} from './vm-reconcile-peer-topology.js';
 export {
   CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
   CATCHUP_STOP_ON_PROOF,

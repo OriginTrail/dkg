@@ -1,5 +1,5 @@
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
-import { GraphManager, LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from '@origintrail-official/dkg-storage';
+import { deleteByPatternWithoutCount, GraphManager, LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from '@origintrail-official/dkg-storage';
 import {
   validateSubGraphName,
   isSafeIri,
@@ -16,6 +16,7 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
+  toAgentDid,
 } from '@origintrail-official/dkg-core';
 import type { AssertionState } from '@origintrail-official/dkg-core';
 import {
@@ -1041,16 +1042,7 @@ export function isZeroEthAddress(address: string): boolean {
 }
 
 export function agentDid(address: string): string {
-  // GH #748 Codex round 3: canonicalise EVM-address DID subjects to lowercase
-  // so the same wallet doesn't split into multiple RDF subjects when callers
-  // pass checksummed vs lowercased forms (e.g. `ethers.getAddress(...)` in
-  // workspace-handler returns checksummed, while config files often carry
-  // lowercase). Mirrors `canonicalAgentDidSubject` in
-  // `packages/agent/src/profile.ts:20` — the canonical writer for agent
-  // registry records, which has lowercased EVM subjects since A-12. Non-EVM
-  // shapes (peer IDs, names) pass through unchanged.
-  const subject = /^0x[0-9a-fA-F]{40}$/.test(address) ? address.toLowerCase() : address;
-  return `did:dkg:agent:${subject}`;
+  return toAgentDid(address);
 }
 
 // RFC ka-metadata-trim Phase 3 (P3.4): `generateShareTransitionMetadata`
@@ -1405,7 +1397,8 @@ export async function writeMaterializedVersion(
 ): Promise<void> {
   assertSafeGraphIriForSparql(metaGraph);
   assertSafeGraphIriForSparql(ual);
-  await store.deleteByPattern(
+  await deleteByPatternWithoutCount(
+    store,
     { graph: metaGraph, subject: ual, predicate: MATERIALIZED_VERSION_PRED },
     options,
   );
@@ -1584,7 +1577,7 @@ async function _restateKaPartitionLocked(opts: {
     }
   }
   for (const root of rootsToPurge) {
-    await store.deleteByPattern({ graph: dataGraph, subject: root });
+    await deleteByPatternWithoutCount(store, { graph: dataGraph, subject: root });
     await store.deleteBySubjectPrefix(dataGraph, root + SKOLEM_INFIX);
   }
 
@@ -1598,11 +1591,11 @@ async function _restateKaPartitionLocked(opts: {
   if (priorKaRes.type === 'bindings') {
     for (const row of priorKaRes.bindings) {
       const ka = row['ka'];
-      if (ka && ka !== ual) await store.deleteByPattern({ graph: metaGraph, subject: ka });
+      if (ka && ka !== ual) await deleteByPatternWithoutCount(store, { graph: metaGraph, subject: ka });
     }
   }
   for (const pred of [DKG_ROOT_ENTITY_LEGACY, DKG_ENTITY, `${DKG}privateMerkleRoot`, `${DKG}privateTripleCount`]) {
-    await store.deleteByPattern({ graph: metaGraph, subject: ual, predicate: pred });
+    await deleteByPatternWithoutCount(store, { graph: metaGraph, subject: ual, predicate: pred });
   }
 
   // 3. Insert payload public triples.
@@ -1650,7 +1643,7 @@ async function _restateKaPartitionLocked(opts: {
   // 5. Refresh resolution edges (batchId) + current merkleRoot.
   const batchLit = `"${kaId}"^^<${XSD}integer>`;
   const rootLit = `"${toHex(merkleRoot)}"`;
-  await store.deleteByPattern({ graph: metaGraph, subject: ual, predicate: `${DKG}merkleRoot` });
+  await deleteByPatternWithoutCount(store, { graph: metaGraph, subject: ual, predicate: `${DKG}merkleRoot` });
   await store.insert([
     { subject: ual, predicate: `${DKG}merkleRoot`, object: rootLit, graph: metaGraph },
     { subject: ual, predicate: `${DKG}batchId`, object: batchLit, graph: metaGraph },
@@ -1746,7 +1739,7 @@ async function _restateLabelGraphForUpdateLocked(opts: {
   const rootsToPurge = new Set<string>(newRoots);
   for (const { root } of priorKaRows) rootsToPurge.add(root);
   for (const root of rootsToPurge) {
-    await store.deleteByPattern({ graph: dataGraph, subject: root });
+    await deleteByPatternWithoutCount(store, { graph: dataGraph, subject: root });
     await store.deleteBySubjectPrefix(dataGraph, root + SKOLEM_INFIX);
   }
   const dataQuads: Quad[] = [];
@@ -1765,10 +1758,10 @@ async function _restateLabelGraphForUpdateLocked(opts: {
   //    merkleRoot, batchId, …) is preserved.
   const legacyKaSubjects = [...new Set(priorKaRows.map((r) => r.ka))].filter((ka) => ka !== ual);
   for (const ka of legacyKaSubjects) {
-    await store.deleteByPattern({ graph: metaGraph, subject: ka });
+    await deleteByPatternWithoutCount(store, { graph: metaGraph, subject: ka });
   }
   for (const pred of [DKG_ROOT_ENTITY_LEGACY, DKG_ENTITY, `${DKG}privateMerkleRoot`]) {
-    await store.deleteByPattern({ graph: metaGraph, subject: ual, predicate: pred });
+    await deleteByPatternWithoutCount(store, { graph: metaGraph, subject: ual, predicate: pred });
   }
   // Codex review "multi-root-access": MULTI-root updates additionally
   // re-emit the legacy `<ual>/<n>` token rows (manifest order, matching the
@@ -1800,7 +1793,7 @@ async function _restateLabelGraphForUpdateLocked(opts: {
 
   // 4. Refresh merkleRoot.
   const rootLit = `"${toHex(merkleRoot)}"`;
-  await store.deleteByPattern({ graph: metaGraph, subject: ual, predicate: `${DKG}merkleRoot` });
+  await deleteByPatternWithoutCount(store, { graph: metaGraph, subject: ual, predicate: `${DKG}merkleRoot` });
   await store.insert([{ subject: ual, predicate: `${DKG}merkleRoot`, object: rootLit, graph: metaGraph }]);
 
   if (version) await writeMaterializedVersion(store, metaGraph, ual, version);

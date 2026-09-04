@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
 import type { OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { createVmRecoveryHostHarness } from './_helpers/vm-recovery-host.js';
 
 interface RecoveryTarget extends OrdinalRecoveryTarget {
@@ -188,6 +189,42 @@ describe('VM recovery microbatch host — adversarial integration', () => {
     );
     expect(result.outcomes.size).toBe(11);
     expect(result.continuationOrdinal).toBe(11);
+  });
+
+  it('keeps slow exact recovery within the per-pass peer budget after cooldown expiry', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-07-20T18:00:00.000Z'));
+      const peerBudget = DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX;
+      const localCgId = '0x0000000000000000000000000000000000000001/slow-exact-budget';
+      const peers = Array.from(
+        { length: peerBudget + 1 },
+        (_, index) => `12D3KooWSlowExactBudget${index}`,
+      );
+      const harness = await createRecoveryHarness({
+        name: 'SlowExactVmPassBudget',
+        localCgId,
+        peers,
+        targetCount: peerBudget + 1,
+        unknownFootprints: true,
+        onFetch: () => {
+          vi.setSystemTime(Date.now() + 61_000);
+          return 'incomplete';
+        },
+      });
+      agents.push(harness.agent);
+
+      const result = await harness.run();
+
+      expect(harness.fetched).toHaveLength(peerBudget);
+      expect(result.attemptedOrdinals).toEqual(Array.from(
+        { length: peerBudget },
+        (_, ordinal) => ordinal,
+      ));
+      expect(result.continuationOrdinal).toBe(peerBudget);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('settles every UAL in a clean-absent microbatch into backoff', async () => {

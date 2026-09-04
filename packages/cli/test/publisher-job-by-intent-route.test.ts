@@ -5,6 +5,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { createPublisherControlFromStore } from '../src/publisher-runner.js';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 // #1828 — GET /api/publisher/job-by-intent route: read-only durable-admission
 // recovery keyed on the lifecycle facts the client retains.
@@ -227,7 +228,7 @@ function createContext(
     apiPortRef: { value: 0 },
     url,
     path: url.pathname,
-    requestToken: undefined,
+    authentication: requestAuthentication({ kind: 'anonymous' }),
     requestAgentAddress,
   };
 }

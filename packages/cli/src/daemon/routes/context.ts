@@ -2,7 +2,7 @@
 //
 // Per-request context bag passed to every route-group handler.
 // Bundles the 24 parameters `handleRequest` used to take plus the 4
-// derived locals (url, path, requestToken, requestAgentAddress) so
+// derived locals (url, path, authentication, requestAgentAddress) so
 // route-group modules destructure exactly once on entry and route
 // bodies can keep referring to bare names — identical to how they
 // looked inside the monolithic `handleRequest`.
@@ -10,6 +10,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DKGAgent, OpWalletsConfig } from '@origintrail-official/dkg-agent';
 import type { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
+import {
+  authenticatedAgentAddress,
+  type AllowedHttpAuthentication,
+} from '../../auth.js';
 import type {
   ChatMemoryManager,
   DashboardDB,
@@ -17,6 +21,7 @@ import type {
 } from '@origintrail-official/dkg-node-ui';
 import type {
   DkgConfig,
+  ResolvedRfc64CatalogActivationConfig,
   ResolvedRfc64PublicCatalogActivationConfig,
   loadNetworkConfig,
 } from '../../config.js';
@@ -28,6 +33,7 @@ import type { VectorStore, EmbeddingProvider } from '../../vector-store.js';
 import type { CatchupTracker } from '../types.js';
 import type { RoutePlugin } from '../plugin-api.js';
 import type { AdmissionStatsView } from '../http-utils.js';
+import type { DaemonLocalLlmService } from '../local-llm-service.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -59,7 +65,51 @@ export interface NotificationSseEvent {
   type: string;
 }
 
+declare const REQUEST_ACTOR_BRAND: unique symbol;
+declare const REQUEST_CONTEXT_BRAND: unique symbol;
+
+/**
+ * The identity and authority used by one routed request. Constructed once by `handleRequest` so
+ * routes cannot combine authentication from one credential with an operational identity derived
+ * from another.
+ */
+export interface RequestActor {
+  readonly [REQUEST_ACTOR_BRAND]: true;
+  readonly authentication: AllowedHttpAuthentication;
+  readonly authenticatedAgentAddress: string | undefined;
+  readonly effectiveAgentAddress: string;
+}
+
+export function createRequestActor(
+  authentication: AllowedHttpAuthentication,
+  resolveEffectiveAgentAddress: (acceptedToken: string | undefined) => string,
+): RequestActor {
+  const agentAddress = authenticatedAgentAddress(authentication);
+  return Object.freeze({
+    authentication,
+    authenticatedAgentAddress: agentAddress,
+    effectiveAgentAddress: agentAddress
+      ?? resolveEffectiveAgentAddress(authentication.acceptedToken),
+  }) as RequestActor;
+}
+
+/**
+ * Compatibility boundary for isolated route-handler embedders created before `RequestActor`.
+ * Real daemon requests always take the first branch. In the fallback, credential identity still
+ * wins over the legacy effective-address projection, so contradictory agent authority cannot be
+ * assembled even by an untyped older caller.
+ */
+export function actorFromRequestContext(ctx: RequestContext): RequestActor {
+  const actor = (ctx as RequestContext & { actor?: RequestActor }).actor;
+  return actor ?? createRequestActor(
+    ctx.authentication,
+    () => ctx.requestAgentAddress,
+  );
+}
+
 export interface RequestContext {
+  /** Opaque: daemon request contexts are assembled only by the dispatch boundary. */
+  readonly [REQUEST_CONTEXT_BRAND]: true;
   req: IncomingMessage;
   res: ServerResponse;
   agent: DKGAgent;
@@ -68,6 +118,8 @@ export interface RequestContext {
   publisherState: PublisherState;
   config: DkgConfig;
   /** Immutable RFC-64 activation resolved once during daemon startup. */
+  rfc64Catalog?: ResolvedRfc64CatalogActivationConfig;
+  /** Compatibility projection for the selected-public operator surface. */
   rfc64PublicCatalog: ResolvedRfc64PublicCatalogActivationConfig;
   startedAt: number;
   dashDb: DashboardDB;
@@ -97,14 +149,21 @@ export interface RequestContext {
   // shedding load. Deliberately the read-only `AdmissionStatsView`, not the
   // concrete limiter — plugin-facing routes must not reach tryAcquire()/release().
   admission: AdmissionStatsView;
-  // Derived per-request (from req.url + headers + token). Routes read
-  // `path`, `url`, `requestAgentAddress` extensively; pre-computing
-  // here keeps every group on the same fast path.
+  /** Daemon-owned, read-only local LLM session used by the Node UI. */
+  localLlm?: DaemonLocalLlmService;
+  // Derived per-request. The correlated authentication decision is carried unchanged; identity
+  // and capabilities are pure projections from it rather than separately mutable context fields.
   url: URL;
   path: string;
-  requestToken: string | undefined;
-  requestAgentAddress: string;
+  actor: RequestActor;
+  /** @deprecated Built-in routes should use `actor.authentication`. Runtime getter only. */
+  readonly authentication: AllowedHttpAuthentication;
+  /** @deprecated Built-in routes should use `actor.effectiveAgentAddress`. Runtime getter only. */
+  readonly requestAgentAddress: string;
   emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void;
   /** A5: broadcast a generic `notification` SSE refresh for the bell pane. */
   emitNotification?: (event: NotificationSseEvent) => void;
 }
+
+/** Unbranded input fields accepted only by the daemon's request-context factory. */
+export type RequestContextInputFields = Omit<RequestContext, typeof REQUEST_CONTEXT_BRAND>;

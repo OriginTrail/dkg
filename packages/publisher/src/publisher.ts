@@ -216,6 +216,18 @@ export type ParticipantSignatureProvider = (
   merkleRoot: string,
 ) => Promise<ReceiverSignature[]>;
 
+
+/**
+ * r10 (3877910013) — the canonical transaction-lifecycle hook contract: the subset of
+ * {@link PublishOptions} that must travel UNCHANGED through every publish boundary (agent
+ * queued execution, update forwarding, publisher entry points). Boundaries carry this as one
+ * unit via the internal `pickPublishLifecycleHooks` helper instead of naming fields by hand.
+ */
+export type PublishLifecycleHooks = Pick<
+  PublishOptions,
+  'onPhase' | 'onBeforeBroadcast' | 'onBroadcastAccepted' | 'onPublishConfirmed'
+>;
+
 export interface PublishOptions {
   contextGraphId: string;
   quads: Quad[];
@@ -276,6 +288,15 @@ export interface PublishOptions {
    * can never undo or reject an already accepted transaction.
    */
   onBroadcastAccepted?: (record: PreBroadcastRecord) => Promise<void> | void;
+  /**
+   * GH#2359 item 2 — notification that the publish transaction's receipt was CONFIRMED and
+   * parsed (an on-chain result exists), fired before any local post-receipt work. This is a
+   * SCHEDULING hint only: it carries the transaction hash and nothing else, so a listener can
+   * go prove the transaction with its own canonical chain reads immediately instead of waiting
+   * for the executor's local tail. It authorizes nothing by itself. Post-receipt and
+   * non-fail-closed: listener failure can never affect the publish.
+   */
+  onPublishConfirmed?: (confirmation: { readonly txHash: string }) => void | Promise<void>;
   /**
    * Skip the publisher-level context-graph graph creation/ensure step.
    * Only callers that already validated the target context graph should set

@@ -114,6 +114,7 @@ function plan(): Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1 {
       era: '0',
       bucketCount: '1',
     }),
+    policyDigest: RFC64_VM_POLICY_DIGEST,
     catalogHeadDigest: `0x${'91'.repeat(32)}`,
     inventoryDigest: `0x${'92'.repeat(32)}`,
     rows: Object.freeze([]),

@@ -2,11 +2,13 @@ import { describe, expect, expectTypeOf, it } from 'vitest';
 import type {
   LiftJob,
   LiftJobAccepted,
+  LiftJobBigInt,
   LiftJobBroadcast,
   LiftJobFailed,
   LiftJobFailedFromBroadcast,
   LiftJobFailedFromIncluded,
   LiftJobFinalized,
+  LiftJobFinalizationMetadata,
   LiftJobRequest,
   LiftPublishRequestMetadata,
   LiftPublishSnapshotRequest,
@@ -29,6 +31,15 @@ import {
   createKnowledgeAssetVmPublishSnapshotRequest,
   normalizePersistedLiftJobRequest,
 } from '../src/async-lift-publisher-utils.js';
+import {
+  CONTROL_PAYLOAD,
+  DEFAULT_CONTROL_GRAPH_URI,
+  literal,
+  parseLiteral,
+  serializeJob,
+} from '../src/async-lift-control-plane.js';
+import { decodeLiftJobPayload } from '../src/lift-job-payload-codec.js';
+import { LIFT_JOB_PAYLOAD_SCHEMA_VERSION } from '../src/lift-job-payload-version.js';
 
 const ROOTLESS_UAL = 'did:dkg:31337/0x1111111111111111111111111111111111111111/7';
 
@@ -261,6 +272,215 @@ describe('LiftJob request and record types', () => {
     ).toThrow(/request\.knowledgeAssetVmPublish\.seal\.signature must be an object/);
   });
 
+  it('classifies each persisted payload once as canonical, compatibility, unknown, or malformed', () => {
+    const accepted: LiftJobAccepted = {
+      jobId: 'job-codec',
+      jobSlug: 'music-social/person-profile/create/op-codec/rihana',
+      request: rawJobRequest(rawLift({ shareOperationId: 'op-codec' })),
+      status: 'accepted',
+      timestamps: { acceptedAt: 1, updatedAt: 1 },
+      retries: { retryCount: 0, maxRetries: 3 },
+    };
+    const encode = (value: unknown): string => literal(JSON.stringify(value));
+
+    const canonical = decodeLiftJobPayload(encode(accepted));
+    expect(canonical.kind).toBe('canonical');
+    if (canonical.kind === 'canonical') {
+      expect(canonical.job).toEqual({
+        ...accepted,
+        request: normalizePersistedLiftJobRequest(accepted.request),
+      });
+    }
+
+    const currentPayloadQuad = serializeJob(accepted, DEFAULT_CONTROL_GRAPH_URI)
+      .find(({ predicate }) => predicate === CONTROL_PAYLOAD);
+    if (!currentPayloadQuad) throw new Error('current payload quad missing');
+    const currentPayload = JSON.parse(String(parseLiteral(currentPayloadQuad.object))) as Record<string, unknown>;
+    expect(currentPayload['schemaVersion']).toBe(LIFT_JOB_PAYLOAD_SCHEMA_VERSION);
+    expect(decodeLiftJobPayload(currentPayloadQuad.object)).toEqual({
+      kind: 'canonical',
+      job: {
+        ...accepted,
+        request: normalizePersistedLiftJobRequest(accepted.request),
+      },
+    });
+
+    const legacyBroadcast = {
+      ...accepted,
+      status: 'broadcast',
+      claim: { walletId: 'wallet-legacy' },
+    };
+    const compatibility = decodeLiftJobPayload(encode(legacyBroadcast));
+    expect(compatibility.kind).toBe('compatibility');
+    if (compatibility.kind === 'compatibility') {
+      expect(compatibility.job.status).toBe('broadcast');
+      expect(compatibility.job.broadcast).toBeUndefined();
+    }
+
+    expect(decodeLiftJobPayload(encode({
+      ...legacyBroadcast,
+      schemaVersion: LIFT_JOB_PAYLOAD_SCHEMA_VERSION,
+    }))).toMatchObject({
+      kind: 'malformed',
+      reason: expect.stringContaining('validation is required'),
+    });
+
+    expect(decodeLiftJobPayload(encode({ ...accepted, schemaVersion: 99 }))).toEqual({
+      kind: 'malformed',
+      reason: 'payload.schemaVersion 99 is unsupported',
+    });
+
+    const unknown = decodeLiftJobPayload(encode({ ...accepted, status: 'future-state' }));
+    expect(unknown.kind).toBe('unknown');
+    if (unknown.kind === 'unknown') expect(unknown.job.status).toBe('future-state');
+
+    const malformed = decodeLiftJobPayload(encode({ ...accepted, claim: { walletId: 'injected' } }));
+    expect(malformed).toMatchObject({ kind: 'malformed', reason: expect.stringContaining('claim is forbidden') });
+  });
+
+  it('rejects unknown durable keys at both the root and nested metadata boundaries', () => {
+    const accepted: LiftJobAccepted = {
+      jobId: 'job-strict-codec',
+      jobSlug: 'music-social/person-profile/create/op-strict-codec/rihana',
+      request: rawJobRequest(rawLift({ shareOperationId: 'op-strict-codec' })),
+      status: 'accepted',
+      timestamps: { acceptedAt: 1, updatedAt: 1 },
+      retries: { retryCount: 0, maxRetries: 3 },
+    };
+    const encode = (value: unknown): string => literal(JSON.stringify(value));
+
+    expect(decodeLiftJobPayload(encode({ ...accepted, futurePolicy: 2 }))).toMatchObject({
+      kind: 'malformed',
+      reason: 'payload.futurePolicy is unsupported',
+    });
+    expect(decodeLiftJobPayload(encode({
+      ...accepted,
+      retries: { ...accepted.retries, futurePolicy: 2 },
+    }))).toMatchObject({
+      kind: 'malformed',
+      reason: 'retries.futurePolicy is unsupported',
+    });
+  });
+
+  it('accepts only documented failed compatibility shapes, not arbitrary cross-state mixtures', () => {
+    const accepted: LiftJobAccepted = {
+      jobId: 'job-failed-codec',
+      jobSlug: 'music-social/person-profile/create/op-failed-codec/rihana',
+      request: rawJobRequest(rawLift({ shareOperationId: 'op-failed-codec' })),
+      status: 'accepted',
+      timestamps: { acceptedAt: 1, claimedAt: 2, validatedAt: 3, broadcastAt: 4, failedAt: 5, updatedAt: 5 },
+      retries: { retryCount: 1, maxRetries: 3 },
+    };
+    const validation = {
+      canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+      canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+      swmQuadCount: 1,
+      authorityProofRef: 'proof:owner:codec',
+      transitionType: 'CREATE' as const,
+    };
+    const broadcast = { txHash: `0x${'ab'.repeat(32)}`, walletId: 'wallet-codec' };
+    const failure = createLiftJobFailureMetadata({
+      failedFromState: 'broadcast',
+      code: 'rpc_unavailable',
+      message: 'legacy RPC result unknown',
+      errorPayloadRef: 'urn:error:codec',
+    });
+    const encode = (value: unknown): string => literal(JSON.stringify(value));
+
+    const documented = decodeLiftJobPayload(encode({
+      ...accepted,
+      status: 'failed',
+      claim: { walletId: 'wallet-codec' },
+      broadcast,
+      failure,
+    }));
+    expect(documented.kind).toBe('compatibility');
+
+    const progressClearedRetry = decodeLiftJobPayload(encode({
+      ...accepted,
+      status: 'failed',
+      failure: { ...failure, failedFromState: 'validated' },
+    }));
+    expect(progressClearedRetry.kind).toBe('compatibility');
+    if (progressClearedRetry.kind === 'compatibility') {
+      expect(progressClearedRetry.job).not.toHaveProperty('claim');
+      expect(progressClearedRetry.job).not.toHaveProperty('validation');
+      expect(progressClearedRetry.job).not.toHaveProperty('broadcast');
+    }
+
+    const legacyFailureFixtures = [
+      {
+        name: 'recovery-only unattributed transaction evidence',
+        payload: {
+          ...accepted,
+          status: 'failed',
+          validation,
+          failure: { ...failure, failedFromState: 'validated' },
+          recovery: {
+            action: 'reset_to_accepted',
+            recoveredFromStatus: 'validated',
+            txHashChecked: broadcast.txHash,
+          },
+        },
+      },
+      {
+        name: 'claimed failure with retained validation',
+        payload: {
+          ...accepted,
+          status: 'failed',
+          claim: { walletId: 'wallet-codec' },
+          validation,
+          failure: { ...failure, failedFromState: 'claimed' },
+        },
+      },
+      {
+        name: 'validated failure without retained claim',
+        payload: {
+          ...accepted,
+          status: 'failed',
+          validation,
+          failure: { ...failure, failedFromState: 'validated' },
+        },
+      },
+      {
+        name: 'included failure finalized from chain',
+        payload: {
+          ...accepted,
+          status: 'failed',
+          claim: { walletId: 'wallet-codec' },
+          validation,
+          broadcast,
+          inclusion: { txHash: broadcast.txHash, blockNumber: 9 },
+          failure: { ...failure, failedFromState: 'included' },
+          recovery: {
+            action: 'finalized_from_chain',
+            recoveredFromStatus: 'included',
+            txHashChecked: broadcast.txHash,
+          },
+        },
+      },
+    ] as const;
+    for (const fixture of legacyFailureFixtures) {
+      expect(decodeLiftJobPayload(encode(fixture.payload)), fixture.name).toMatchObject({
+        kind: 'compatibility',
+        job: { status: 'failed' },
+      });
+    }
+
+    const unrelated = decodeLiftJobPayload(encode({
+      ...accepted,
+      status: 'failed',
+      claim: { walletId: 'wallet-codec' },
+      validation,
+      broadcast,
+      failure: { ...failure, failedFromState: 'accepted' },
+    }));
+    expect(unrelated).toMatchObject({
+      kind: 'malformed',
+      reason: expect.stringContaining('claim is forbidden'),
+    });
+  });
+
   it('requires broadcast jobs to carry claim, validation, and tx metadata', () => {
     const job: LiftJobBroadcast = {
       jobId: 'job-2',
@@ -372,7 +592,39 @@ describe('LiftJob request and record types', () => {
     };
 
     expect(finalized.finalization.batchId).toBe('99');
+    expect(BigInt(finalized.finalization.batchId!)).toBe(99n);
+    expectTypeOf<LiftJobFinalizationMetadata['batchId']>()
+      .toEqualTypeOf<LiftJobBigInt | undefined>();
     expect(failed.failure.errorPayloadRef).toBe('urn:dkg:publisher:error:job-4');
+  });
+
+  it('rejects opaque finalization identifiers at the durable runtime boundary', () => {
+    const finalized: LiftJobFinalized = {
+      jobId: 'job-opaque-finalization',
+      jobSlug: 'music-social/person-profile/create/op-opaque/rihana',
+      request: rawJobRequest(rawLift({ shareOperationId: 'op-opaque' })),
+      status: 'finalized',
+      timestamps: { acceptedAt: 1, finalizedAt: 2, updatedAt: 2 },
+      retries: { retryCount: 0, maxRetries: 3 },
+      claim: { walletId: 'wallet-opaque' },
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        swmQuadCount: 1,
+        authorityProofRef: 'proof:owner:opaque',
+        transitionType: 'CREATE',
+      },
+      finalization: { mode: 'local' },
+    };
+    const opaque = {
+      ...finalized,
+      finalization: { ...finalized.finalization, batchId: 'batch-opaque' },
+    };
+
+    expect(decodeLiftJobPayload(literal(JSON.stringify(opaque)))).toMatchObject({
+      kind: 'malformed',
+      reason: expect.stringContaining('finalization.batchId must be serialized integer text'),
+    });
   });
 
   it('supports chain-driven recovery from included jobs', () => {

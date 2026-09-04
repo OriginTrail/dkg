@@ -216,8 +216,7 @@ describe('publisher wallets', () => {
       store,
       keypair,
       chainBase: undefined,
-      pollIntervalMs: 10,
-      errorBackoffMs: 10,
+      runnerOptions: { pollIntervalMs: 10, errorBackoffMs: 10 },
     });
 
     expect(runtime.walletIds).toEqual([wallet.address]);
@@ -251,8 +250,7 @@ describe('publisher wallets', () => {
       store,
       keypair,
       chainBase: undefined,
-      pollIntervalMs: 10,
-      errorBackoffMs: 10,
+      runnerOptions: { pollIntervalMs: 10, errorBackoffMs: 10 },
       maxRetries: 10,
       v10ACKProviderFactory: () => {
         v10ACKProviderWasPassed = true;
@@ -298,8 +296,7 @@ describe('publisher wallets', () => {
         store,
         keypair,
         chainBase: { rpcUrl, hubAddress },
-        pollIntervalMs: 10,
-        errorBackoffMs: 10,
+        runnerOptions: { pollIntervalMs: 10, errorBackoffMs: 10 },
       });
 
       expect(runtime.walletIds).toEqual([wallet.address]);
@@ -358,8 +355,7 @@ describe('publisher wallets', () => {
         store,
         keypair,
         chainBase: { rpcUrl, hubAddress },
-        pollIntervalMs: 10,
-        errorBackoffMs: 10,
+        runnerOptions: { pollIntervalMs: 10, errorBackoffMs: 10 },
         knowledgeAssetVmPublishHandler: {
           execute: async (input: KnowledgeAssetVmPublishExecutorInput) => {
             const publisher = input.publisher;
@@ -454,8 +450,7 @@ describe('publisher wallets', () => {
         store,
         keypair,
         chainBase: { rpcUrl, hubAddress },
-        pollIntervalMs: 10,
-        errorBackoffMs: 10,
+        runnerOptions: { pollIntervalMs: 10, errorBackoffMs: 10 },
       });
 
       expect(new Set(runtime.walletIds)).toEqual(new Set([identityfulWallet.address, identitylessWallet.address]));

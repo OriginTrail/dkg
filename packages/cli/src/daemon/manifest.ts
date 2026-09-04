@@ -761,25 +761,25 @@ export function detectInstallMode(): InstallMode {
 
 // ---------------------------------------------------------------------------
 // SKILL.MD serving — Agent Skills standard (https://agentskills.io)
+//
+// Rendering moved to ./skill-template.ts (PR #2331 review): this file is a
+// broad manifest/semver/auto-update utility module and had grown past 1,000
+// lines. Re-exported so existing importers keep working.
 // ---------------------------------------------------------------------------
+export {
+  buildSkillMd,
+  loadSkillTemplate,
+  missingSkillTokens,
+  unknownSkillTokens,
+  renderSkillTemplate,
+  renderStandaloneDkgNodeSkill,
+  skillEtag,
+  REQUIRED_SKILL_TOKENS,
+  STANDALONE_SKILL_VALUES,
+  type SkillTokenValues,
+} from "../skill-template.js";
 
-let cachedSkillMd: string | null = null;
-let cachedSkillEtag: string | null = null;
 
-export function loadSkillTemplate(): string {
-  if (cachedSkillMd) return cachedSkillMd;
-  const skillPath = new URL("../../skills/dkg-node/SKILL.md", import.meta.url);
-  const content = readFileSync(skillPath, "utf-8");
-  cachedSkillMd = content;
-  return content;
-}
-
-// Second canonical agent-readable manual: the bulk-import skill that the
-// dkg-node skill cross-references for chunked writes, manifest resume,
-// HTTP 413 recovery, and (with PR #4 of the async-promote-queue series)
-// the async promote queue. Served at `/.well-known/skill-importer.md`
-// alongside `/.well-known/skill.md` so the cross-link in dkg-node/SKILL.md
-// is reachable for agents installed via setup flows (Codex PR #642 follow-up).
 let cachedImporterSkillMd: string | null = null;
 
 export function loadImporterSkillTemplate(): string {
@@ -790,42 +790,6 @@ export function loadImporterSkillTemplate(): string {
   return content;
 }
 
-export function buildSkillMd(opts: {
-  version: string;
-  baseUrl: string;
-  peerId: string;
-  nodeRole: string;
-  extractionPipelines: string[];
-}): string {
-  const template = loadSkillTemplate();
-  const dynamicSection = [
-    `- **Node version:** ${opts.version}`,
-    `- **Base URL:** ${opts.baseUrl}`,
-    `- **Peer ID:** ${opts.peerId}`,
-    `- **Node role:** ${opts.nodeRole}`,
-    `- **Available extraction pipelines:** ${opts.extractionPipelines.length > 0 ? opts.extractionPipelines.join(", ") : "none (install markitdown to enable document conversion)"}`,
-    '',
-    'If the Node UI injects a target context graph for the turn, use that target directly. If no target is injected or configured, call `GET /api/context-graph/list` / `dkg_list_context_graphs`; agent tool surfaces default that list to the caller\'s created/joined context graphs, with `scope: "all"` for every graph the node knows about.',
-  ].join("\n");
-
-  const staticPlaceholder =
-    "> This section is dynamically generated from node state at serve-time.\n\n" +
-    "- **Node version:** (dynamic)\n" +
-    "- **Base URL:** (dynamic)\n" +
-    "- **Peer ID:** (dynamic)\n" +
-    "- **Node role:** (dynamic — `core` or `edge`)\n" +
-    "- **Available extraction pipelines:** (dynamic)\n" +
-    "\n" +
-    "If the Node UI injects a target context graph for the turn, use that target directly. If no target is injected or configured, call `GET /api/context-graph/list` / `dkg_list_context_graphs`; agent tool surfaces default that list to the caller's created/joined context graphs, with `scope: \"all\"` for every graph the node knows about.";
-
-  return template.replace(staticPlaceholder, dynamicSection);
-}
-
-export function skillEtag(content: string): string {
-  return (
-    '"' + createHash("md5").update(content).digest("hex").slice(0, 16) + '"'
-  );
-}
 
 
 export const DAEMON_EXIT_CODE_RESTART = 75;

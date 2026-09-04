@@ -1,6 +1,12 @@
 export * from './query-engine.js';
 export * from './query-types.js';
 export { DKGQueryEngine, resolveViewGraphs, type ViewResolution } from './dkg-query-engine.js';
+export {
+  CALLER_SPARQL_REJECTED_CODE,
+  CallerSparqlRejectedError,
+  isCallerSparqlRejectedError,
+  type CallerSparqlRejectedErrorLike,
+} from './caller-sparql-error.js';
 export { QueryHandler, type QueryHandlerDeps } from './query-handler.js';
 export {
   validateReadOnlySparql,

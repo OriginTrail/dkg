@@ -28,6 +28,7 @@ import { registerQueryCatalogCommand } from './commands/query-catalog.js';
 import { registerMaintenanceCommands } from './commands/maintenance.js';
 import { registerRandomSamplingCommand } from './commands/random-sampling.js';
 import { registerOkfCommand } from './commands/okf.js';
+import { registerLlmCommand } from './commands/llm.js';
 
 const program = new Command();
 program
@@ -60,6 +61,7 @@ registerQueryCatalogCommand(program);
 registerMaintenanceCommands(program);
 registerRandomSamplingCommand(program);
 registerOkfCommand(program);
+registerLlmCommand(program);
 
 // ─── dkg integration ─────────────────────────────────────────────────
 

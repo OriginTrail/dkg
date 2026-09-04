@@ -89,6 +89,8 @@ import {
   reconcileFinalizedSwmTwinFromDescriptor,
   type FinalizedSwmTwinRetirement,
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
+import { resolveRfc64CatalogExecutionPlanV1 } from '../src/rfc64/public-catalog-activation-config-v1.js';
+import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const contextGraphId = 'agent-blackbox-vm';
@@ -423,13 +425,13 @@ describe('durable sync lifecycle chain binding', () => {
       agentLike as any,
       '12D3KooWExactRecoveryPeer',
       '0x1111111111111111111111111111111111111111/blackbox',
-      [exactUal],
+      { kind: 'ual-only', assetUals: [exactUal] },
       { signal: controller.signal },
     );
 
     expect(runLegacyDurableSyncDetailed).toHaveBeenCalledTimes(1);
     expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).toMatchObject({
-      exactAssetUals: [exactUal],
+      exactAssetSelection: { kind: 'ual-only', assetUals: [exactUal] },
       stopOnBackoffWorthyFailure: true,
       priority: 1_000,
       // The admission SOURCE is what makes this show up as `durable:vm-recovery`
@@ -461,10 +463,31 @@ describe('durable sync lifecycle chain binding', () => {
     expect(syncExactKnowledgeAssetsFromPeerDetailed).toHaveBeenCalledWith(
       '12D3KooWExactProjectionPeer',
       contextGraphId,
-      requestedAssetUals,
+      { kind: 'ual-only', assetUals: requestedAssetUals },
       {},
     );
     expect(projected).toBe(result);
+
+    const challengePinnedSelection = {
+      kind: 'challenge-pinned' as const,
+      commitments: [{
+        assetUal: ual,
+        merkleRootHex: '11'.repeat(32),
+        merkleLeafCount: 1n,
+      }],
+    };
+    await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeer.call(
+      { syncExactKnowledgeAssetsFromPeerDetailed } as any,
+      '12D3KooWExactProjectionPeer',
+      contextGraphId,
+      challengePinnedSelection,
+    );
+    expect(syncExactKnowledgeAssetsFromPeerDetailed).toHaveBeenLastCalledWith(
+      '12D3KooWExactProjectionPeer',
+      contextGraphId,
+      expect.objectContaining({ kind: 'challenge-pinned' }),
+      {},
+    );
   });
 
   it.each([
@@ -597,7 +620,7 @@ describe('durable sync lifecycle chain binding', () => {
       undefined,
       undefined,
       {
-        exactAssetUals: [exactUal],
+        exactAssetSelection: { kind: 'ual-only', assetUals: [exactUal] },
         totalTimeoutMs: 30_000,
       },
     );
@@ -616,7 +639,7 @@ describe('durable sync lifecycle chain binding', () => {
       agentLike,
       'peer-internal-exact-recovery',
       contextGraphId,
-      [exactUal],
+      { kind: 'ual-only', assetUals: [exactUal] },
     );
     expect(mockedRunDurableSyncDetailed).toHaveBeenCalledTimes(1);
     expect(
@@ -658,7 +681,7 @@ describe('durable sync lifecycle chain binding', () => {
       undefined,
       undefined,
       undefined,
-      { exactAssetUals: [exactUal] },
+      { exactAssetSelection: { kind: 'ual-only', assetUals: [exactUal] } },
     );
 
     expect(mockedRunDurableSyncDetailed).toHaveBeenCalledTimes(2);
@@ -679,7 +702,21 @@ describe('durable sync lifecycle chain binding', () => {
       needsReconcile: false,
     };
     const agentLike: any = {
-      config: {},
+      config: {
+        nodeRole: 'core',
+        rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
+          configuredContextGraphs: [],
+          activation: {
+            enabled: true,
+            selectedContextGraphs: [],
+            selectedPublicContextGraphs: [],
+            rollout: { killSwitch: false, contextGraphModes: {} },
+          },
+        }),
+      },
+      subscribedContextGraphs: new Map(),
+      resolveRfc64CatalogReceiverAuthorityV1:
+        Rfc64CatalogMethods.prototype.resolveRfc64CatalogReceiverAuthorityV1,
       store: changelogCapableStore,
       runChangelogLane,
       runLegacyDurableSync,
@@ -710,6 +747,56 @@ describe('durable sync lifecycle chain binding', () => {
     expect(runLegacyDurableSync.mock.calls[0]?.[6]).toMatchObject({
       signal: controller.signal,
     });
+  });
+
+  it('filters catalog-authoritative CGs before direct durable requester admission', async () => {
+    const runLegacyDurableSync = vi.fn(async () => ({
+      ...createDurableSyncAccumulator(),
+      complete: true,
+    }));
+    const agentLike: any = {
+      config: {
+        nodeRole: 'core',
+        rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
+          configuredContextGraphs: [],
+          activation: {
+          enabled: true,
+          selectedContextGraphs: ['legacy-cg', 'catalog-cg'],
+          selectedPublicContextGraphs: [],
+          rollout: {
+            killSwitch: false,
+            contextGraphModes: { 'legacy-cg': 'legacy', 'catalog-cg': 'catalog' },
+          },
+          },
+        }),
+      },
+      subscribedContextGraphs: new Map(),
+      resolveRfc64CatalogReceiverAuthorityV1:
+        Rfc64CatalogMethods.prototype.resolveRfc64CatalogReceiverAuthorityV1,
+      store: {},
+      runLegacyDurableSync,
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
+      agentLike,
+      'peer-mixed-rollout',
+      ['legacy-cg', 'catalog-cg', 'unselected-cg'],
+    );
+    expect(runLegacyDurableSync).toHaveBeenCalledTimes(1);
+    expect(runLegacyDurableSync.mock.calls[0]?.[2]).toEqual([
+      'legacy-cg',
+      'unselected-cg',
+    ]);
+
+    runLegacyDurableSync.mockClear();
+    const catalogOnly = await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
+      agentLike,
+      'peer-catalog-only',
+      ['catalog-cg'],
+    );
+    expect(runLegacyDurableSync).not.toHaveBeenCalled();
+    expect(catalogOnly.complete).toBe(false);
   });
 
   it('retries a transient binding read, caches only the successful proof, and persists the CG id', async () => {
@@ -1034,7 +1121,7 @@ describe('durable sync lifecycle chain binding', () => {
       publisher: { clearPublishedKnowledgeAssetSwm: vi.fn() },
       // Ordinary public CG: no RFC-64 complete-provider authority applies.
       // Required once #2271's execution-boundary source fence is in the base.
-      resolveRfc64CompleteSwmProviderPeerIdsV1: async () => [],
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
       log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     };
     agentLike.retireFinalizedSwmTwinCandidate = (
@@ -1047,9 +1134,7 @@ describe('durable sync lifecycle chain binding', () => {
       [contextGraphId],
       {
         sharedMemorySyncPlan: {
-          eligibleContextGraphIds: [contextGraphId],
-          publicContextGraphIds: [contextGraphId],
-          privateRecoverFromCurator: [],
+          targets: [{ contextGraphId, lane: 'selected-public' }],
         },
       },
     );
@@ -1124,7 +1209,7 @@ describe('durable sync lifecycle chain binding', () => {
       ) => work(),
       publisher: { clearPublishedKnowledgeAssetSwm },
       // Ordinary public CG: no RFC-64 complete-provider authority applies.
-      resolveRfc64CompleteSwmProviderPeerIdsV1: async () => [],
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
       log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     };
     agentLike.retireFinalizedSwmTwinCandidate = (
@@ -1137,9 +1222,7 @@ describe('durable sync lifecycle chain binding', () => {
       [contextGraphId],
       {
         sharedMemorySyncPlan: {
-          eligibleContextGraphIds: [contextGraphId],
-          publicContextGraphIds: [contextGraphId],
-          privateRecoverFromCurator: [],
+          targets: [{ contextGraphId, lane: 'selected-public' }],
         },
       },
     );

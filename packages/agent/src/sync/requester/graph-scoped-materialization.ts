@@ -19,6 +19,11 @@ import {
   filterOversizedSyncQuads,
   type OversizeGuardHooks,
 } from '../oversize-filter.js';
+import { parseGraphScopedDescriptor } from '../durable-integrity.js';
+import {
+  exactAssetCommitmentMatchesDescriptor,
+  type ExactAssetCommitment,
+} from '../exact-assets.js';
 
 const ASSERTION_VERSION = 'http://dkg.io/ontology/assertionVersion';
 const MERKLE_ROOT = 'http://dkg.io/ontology/merkleRoot';
@@ -50,7 +55,71 @@ export type VerifyContextGraphBinding = (
   signal?: AbortSignal,
 ) => Promise<boolean>;
 
-export type GraphScopedMaterializationOutcome = 'applied' | 'stale' | 'quarantined';
+export type GraphScopedMaterializationOutcome =
+  | 'applied'
+  | 'stale'
+  | 'quarantined';
+
+export interface ChallengePinnedGraphScopedAsset {
+  readonly asset: VerifiedGraphScopedAsset;
+  readonly privateRoots: readonly Uint8Array[];
+}
+
+/**
+ * Authenticate historical proof material against the on-chain challenge pin
+ * and the KA's current CG binding without treating it as the live assertion.
+ * The caller consumes it ephemerally and never downgrades durable VM state.
+ */
+export async function authenticateChallengePinnedGraphScopedAsset(
+  chain: ChainAdapter,
+  asset: VerifiedGraphScopedAsset,
+  commitment: ExactAssetCommitment,
+  verifyContextGraphBinding?: VerifyContextGraphBinding,
+  options: { signal?: AbortSignal } = {},
+): Promise<ChallengePinnedGraphScopedAsset> {
+  const descriptor = parseGraphScopedDescriptor(asset.ual, asset.metadataQuads);
+  if (!exactAssetCommitmentMatchesDescriptor(commitment, descriptor)) {
+    throw Object.assign(
+      new Error(`Graph-scoped durable sync ${asset.ual} does not match the challenge pin`),
+      { code: 'VM_CHALLENGE_COMMITMENT_MISMATCH' },
+    );
+  }
+  if (chain.chainId === 'none' || !chain.getKAContextGraphId || !verifyContextGraphBinding) {
+    throw Object.assign(
+      new Error('Challenge-pinned durable sync requires chain context-graph verification'),
+      { code: 'VM_CHAIN_VERIFICATION_UNSUPPORTED' },
+    );
+  }
+  const identity = parseDeterministicKnowledgeAssetUal(asset.ual);
+  if (identity.chainId !== chain.chainId) {
+    throw new Error(
+      `Graph-scoped durable sync UAL chain ${identity.chainId} does not match local chain ${chain.chainId}`,
+    );
+  }
+  const kaId = (BigInt(identity.agentAddress) << 96n) | BigInt(identity.kaNumber);
+  const boundContextGraphId = await chain.getKAContextGraphId(kaId, {
+    signal: options.signal,
+  });
+  if (
+    boundContextGraphId <= 0n
+    || !(await verifyContextGraphBinding(
+      asset.contextGraphId,
+      boundContextGraphId,
+      options.signal,
+    ))
+  ) {
+    throw Object.assign(
+      new Error(
+        `Graph-scoped durable sync ${asset.ual} challenge material has a different context graph`,
+      ),
+      { code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' },
+    );
+  }
+  return Object.freeze({
+    asset,
+    privateRoots: Object.freeze(descriptor.privateRoot ? [descriptor.privateRoot] : []),
+  });
+}
 
 /**
  * Bind the peer-verified payload to current chain truth before its structural
@@ -312,6 +381,8 @@ export async function materializeVerifiedGraphScopedAsset(params: {
   asset: VerifiedGraphScopedAsset;
   isCurrent?: () => boolean;
   shouldQuarantineCommitted?: () => boolean;
+  /** Internal composition seam for callers that already hold this asset's shared lock. */
+  lockAlreadyHeldByCaller?: boolean;
   options?: QueryOptions;
   oversizeHooks?: OversizeGuardHooks;
 }): Promise<GraphScopedMaterializationOutcome> {
@@ -320,6 +391,7 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     asset,
     isCurrent,
     shouldQuarantineCommitted,
+    lockAlreadyHeldByCaller = false,
     options = {},
     oversizeHooks,
   } = params;
@@ -340,7 +412,7 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     return 'quarantined';
   }
 
-  return withMaterializationLock(asset.metaGraph, asset.ual, async () => {
+  const materializeUnderLock = async (): Promise<GraphScopedMaterializationOutcome> => {
     assertCurrent();
     const currentVersion = await readCurrentAssertionVersion(
       store,
@@ -416,7 +488,12 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     }
     if (isCurrent?.() === false) return 'quarantined';
     return 'applied';
-  }, { signal: options.signal });
+  };
+  return lockAlreadyHeldByCaller
+    ? materializeUnderLock()
+    : withMaterializationLock(asset.metaGraph, asset.ual, materializeUnderLock, {
+        signal: options.signal,
+      });
 }
 
 /** Read the current subject once; publisher metadata helpers own typed merging. */

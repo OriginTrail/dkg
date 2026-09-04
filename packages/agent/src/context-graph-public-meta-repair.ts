@@ -7,17 +7,87 @@ import {
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
 } from '@origintrail-official/dkg-core';
-import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
-import { stripLiteral } from './dkg-agent-utils.js';
+import {
+  tryUpdateWithTouchedGraphs,
+  type Quad,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
+import {
+  buildAuthoritativePublicMetaRepairUpdate,
+  inspectAuthoritativePublicMetaDefinition,
+} from './context-graph-public-meta-proof.js';
+import type { ActivePublicContextGraphChainProof } from
+  './active-public-context-graph-chain-proof.js';
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
+const DURABILITY_PENDING_PUBLIC_META = new WeakMap<TripleStore, Set<string>>();
+
+function markPublicMetaDurabilityPending(store: TripleStore, contextGraphId: string): void {
+  const pending = DURABILITY_PENDING_PUBLIC_META.get(store) ?? new Set<string>();
+  pending.add(contextGraphId);
+  DURABILITY_PENDING_PUBLIC_META.set(store, pending);
+}
+
+function clearPublicMetaDurabilityPending(store: TripleStore, contextGraphId: string): void {
+  const pending = DURABILITY_PENDING_PUBLIC_META.get(store);
+  if (!pending) return;
+  pending.delete(contextGraphId);
+  if (pending.size === 0) DURABILITY_PENDING_PUBLIC_META.delete(store);
+}
+
+export function isPublicMetaDurabilityPending(
+  store: TripleStore,
+  contextGraphId: string,
+): boolean {
+  return DURABILITY_PENDING_PUBLIC_META.get(store)?.has(contextGraphId) === true;
+}
 
 export interface PublicMetaRepairResult {
   candidates: number;
   repairedGraphs: number;
   insertedTriples: number;
   conflictingGraphs: string[];
+}
+
+export type ChainAttestedPublicMetaRepairResult =
+  | { outcome: 'already-complete' }
+  | {
+      outcome: 'not-chain-attested';
+      chainProof: Exclude<ActivePublicContextGraphChainProof, { state: 'public' }>;
+    }
+  | { outcome: 'conflicting-policy' }
+  | { outcome: 'projection-complete' }
+  | {
+      outcome: 'repair-failed';
+      failureStage: 'pre-mutation' | 'mutation-or-durability';
+      detail: string;
+    };
+
+function errorDetail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function inspectPublicMetaProjection(
+  store: TripleStore,
+  contextGraphId: string,
+): Promise<{ missing: Quad[]; conflictingPolicy: boolean }> {
+  const subject = assertSafeIri(contextGraphDataGraphUri(contextGraphId));
+  const metaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
+  const existingResult = await store.query(`
+    SELECT ?predicate ?object WHERE {
+      GRAPH <${metaGraph}> {
+        <${subject}> ?predicate ?object .
+      }
+    }
+  `);
+  const existing: Quad[] = existingResult.type === 'bindings'
+    ? existingResult.bindings.flatMap((row) => (
+        row['predicate'] && row['object']
+          ? [{ subject, predicate: row['predicate'], object: row['object'], graph: metaGraph }]
+          : []
+      ))
+    : [];
+  return inspectAuthoritativePublicMetaDefinition(contextGraphId, existing);
 }
 
 /**
@@ -76,44 +146,13 @@ export async function repairCreatorPublicMetaProjections(
     if (!subject.startsWith(CONTEXT_GRAPH_URI_PREFIX)) continue;
     const contextGraphId = subject.slice(CONTEXT_GRAPH_URI_PREFIX.length);
     if (!contextGraphId || contextGraphDataGraphUri(contextGraphId) !== subject) continue;
-    const metaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
-    const existingResult = await store.query(`
-      SELECT ?predicate ?object WHERE {
-        GRAPH <${metaGraph}> {
-          <${assertSafeIri(subject)}> ?predicate ?object .
-          FILTER(?predicate IN (
-            <${DKG_ONTOLOGY.RDF_TYPE}>,
-            <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}>
-          ))
-        }
-      }
-    `);
-    const existing = existingResult.type === 'bindings'
-      ? existingResult.bindings
-      : [];
-    const policies = existing
-      .filter((row) => row['predicate'] === DKG_ONTOLOGY.DKG_ACCESS_POLICY)
-      .map((row) => row['object']);
-    const hasConflictingPolicy = policies.some((value) => (
-      !value?.startsWith('"') || stripLiteral(value).trim().toLowerCase() !== 'public'
-    ));
-    if (hasConflictingPolicy) {
+    const inspection = await inspectPublicMetaProjection(store, contextGraphId);
+    if (inspection.conflictingPolicy) {
       conflictingGraphs.push(contextGraphId);
       continue;
     }
-
-    const hasType = existing.some((row) => (
-      row['predicate'] === DKG_ONTOLOGY.RDF_TYPE &&
-      row['object'] === DKG_ONTOLOGY.DKG_CONTEXT_GRAPH
-    ));
-    const hasPublicPolicy = policies.some((value) => (
-      value?.startsWith('"') && stripLiteral(value).trim().toLowerCase() === 'public'
-    ));
-    const missing = buildAuthoritativePublicMetaQuads(contextGraphId).filter((quad) => (
-      quad.predicate === DKG_ONTOLOGY.RDF_TYPE ? !hasType : !hasPublicPolicy
-    ));
-    if (missing.length === 0) continue;
-    inserts.push(...missing);
+    if (inspection.missing.length === 0) continue;
+    inserts.push(...inspection.missing);
     repairedGraphs += 1;
   }
 
@@ -128,4 +167,125 @@ export async function repairCreatorPublicMetaProjections(
     insertedTriples: inserts.length,
     conflictingGraphs,
   };
+}
+
+/**
+ * Backfill one public root `_meta` projection only after a caller-supplied
+ * resolver proves that the exact local id is bound to a live, public slot on
+ * the current chain. The resolver must include identity/name-hash binding;
+ * liveness plus `accessPolicy=public` alone is insufficient because a stale
+ * numeric id can be reused after a devnet reset.
+ *
+ * Existing non-public root policy is a hard conflict and is never overwritten.
+ */
+export async function repairChainAttestedPublicMetaProjection(
+  store: TripleStore,
+  contextGraphId: string,
+  resolveActivePublicBinding: () => Promise<ActivePublicContextGraphChainProof>,
+): Promise<ChainAttestedPublicMetaRepairResult> {
+  // A prior UPDATE may be visible in memory even though its durability flush
+  // failed. Retry durability before any inspection so those facts cannot take
+  // the already-complete shortcut. Confirmation consults the same quarantine.
+  const resumedPendingDurability = isPublicMetaDurabilityPending(store, contextGraphId);
+  if (resumedPendingDurability) {
+    try {
+      await store.flush?.();
+    } catch (error) {
+      return {
+        outcome: 'repair-failed',
+        failureStage: 'mutation-or-durability',
+        detail: errorDetail(error),
+      };
+    }
+  }
+
+  // Canonical metadata needs no repair and therefore no chain RPC. This keeps
+  // normal restarts cheap once a legacy graph has been healed.
+  let inspection: Awaited<ReturnType<typeof inspectPublicMetaProjection>>;
+  try {
+    inspection = await inspectPublicMetaProjection(store, contextGraphId);
+  } catch (error) {
+    return {
+      outcome: 'repair-failed',
+      failureStage: resumedPendingDurability
+        ? 'mutation-or-durability'
+        : 'pre-mutation',
+      detail: errorDetail(error),
+    };
+  }
+  if (!inspection.conflictingPolicy && inspection.missing.length === 0) {
+    if (resumedPendingDurability) {
+      clearPublicMetaDurabilityPending(store, contextGraphId);
+    }
+    return { outcome: 'already-complete' };
+  }
+  if (resumedPendingDurability) {
+    clearPublicMetaDurabilityPending(store, contextGraphId);
+  }
+
+  let chainProof: ActivePublicContextGraphChainProof;
+  try {
+    chainProof = await resolveActivePublicBinding();
+  } catch (error) {
+    return {
+      outcome: 'repair-failed',
+      failureStage: 'pre-mutation',
+      detail: errorDetail(error),
+    };
+  }
+  if (chainProof.state !== 'public') {
+    return { outcome: 'not-chain-attested', chainProof };
+  }
+  if (inspection.conflictingPolicy) {
+    return { outcome: 'conflicting-policy' };
+  }
+
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  let updated: boolean;
+  markPublicMetaDurabilityPending(store, contextGraphId);
+  try {
+    updated = await tryUpdateWithTouchedGraphs(
+      store,
+      buildAuthoritativePublicMetaRepairUpdate(contextGraphId),
+      [metaGraph],
+      { source: 'agent.chainAttestedPublicMetaRepair' },
+    );
+  } catch (error) {
+    return {
+      outcome: 'repair-failed',
+      failureStage: 'mutation-or-durability',
+      detail: errorDetail(error),
+    };
+  }
+  if (!updated) {
+    clearPublicMetaDurabilityPending(store, contextGraphId);
+    return {
+      outcome: 'repair-failed',
+      failureStage: 'pre-mutation',
+      detail: 'Triple store does not support atomic public metadata repair',
+    };
+  }
+  try {
+    await store.flush?.();
+    const finalInspection = await inspectPublicMetaProjection(store, contextGraphId);
+    if (finalInspection.conflictingPolicy) {
+      clearPublicMetaDurabilityPending(store, contextGraphId);
+      return { outcome: 'conflicting-policy' };
+    }
+    if (finalInspection.missing.length > 0) {
+      return {
+        outcome: 'repair-failed',
+        failureStage: 'mutation-or-durability',
+        detail: 'Atomic public metadata repair completed without the canonical proof',
+      };
+    }
+    clearPublicMetaDurabilityPending(store, contextGraphId);
+  } catch (error) {
+    return {
+      outcome: 'repair-failed',
+      failureStage: 'mutation-or-durability',
+      detail: errorDetail(error),
+    };
+  }
+  return { outcome: 'projection-complete' };
 }

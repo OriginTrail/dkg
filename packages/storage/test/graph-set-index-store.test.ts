@@ -2,18 +2,26 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
+  ChangelogStore,
+  BlazegraphStore,
   GraphSetIndexStore,
   OxigraphStore,
+  SparqlHttpStore,
+  StoreSchedulerBusyError,
   StorePriorityScheduler,
+  createManagedOxigraphRuntimeStoreConfigV1,
   createTripleStore,
   registerTripleStoreAdapter,
   type GraphSetIndexStoreOptions,
   type GraphSetMutationEvent,
+  type Quad,
   type QueryOptions,
   type StoreWorkPriority,
+  type TripleStore,
 } from '../src/index.js';
+
 import {
   ControlledProbeStore,
   CountingStore,
@@ -28,6 +36,70 @@ class FailingMaintenanceStore extends CountingStore {
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
     if (this.failHasGraph) throw new Error('hasGraph failed');
     return super.hasGraph(graphUri, options);
+  }
+}
+
+class PostCommitProbeBusyStore extends CountingStore {
+  private rejectNextPresenceProbe = false;
+
+  async replaceGraph(
+    graphUri: string,
+    quads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (typeof this.inner.replaceGraph !== 'function') {
+      throw new Error('inner store does not support replaceGraph()');
+    }
+    await this.inner.replaceGraph(graphUri, quads, options);
+    this.rejectNextPresenceProbe = true;
+  }
+
+  override hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
+    if (this.rejectNextPresenceProbe) {
+      this.rejectNextPresenceProbe = false;
+      throw new StoreSchedulerBusyError(
+        'queue_wait_timeout',
+        'normal',
+        'sparql-http.hasGraph',
+        { storeOperation: 'hasGraph' },
+      );
+    }
+    return super.hasGraph(graphUri, options);
+  }
+}
+
+class RejectingControlledProbeStore extends CountingStore {
+  private rejectProbe: ((reason: Error) => void) | null = null;
+  private notifyProbeStarted: (() => void) | null = null;
+  private probeStarted: Promise<void> = Promise.resolve();
+
+  armRejectedProbe(): void {
+    this.probeStarted = new Promise<void>((resolve) => {
+      this.notifyProbeStarted = resolve;
+    });
+  }
+
+  waitForProbe(): Promise<void> {
+    return this.probeStarted;
+  }
+
+  rejectPendingProbe(reason: Error): void {
+    if (!this.rejectProbe) throw new Error('No controlled hasGraph probe is pending');
+    const reject = this.rejectProbe;
+    this.rejectProbe = null;
+    reject(reason);
+  }
+
+  override async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
+    const present = await super.hasGraph(graphUri, options);
+    if (!this.notifyProbeStarted) return present;
+    const notify = this.notifyProbeStarted;
+    this.notifyProbeStarted = null;
+    await new Promise<void>((_resolve, reject) => {
+      this.rejectProbe = reject;
+      notify();
+    });
+    return present;
   }
 }
 
@@ -82,6 +154,131 @@ async function exhaustTouchedGraphProbeRetries(
 }
 
 describe('GraphSetIndexStore', () => {
+  for (const adapter of [
+    {
+      name: 'BlazegraphStore',
+      create: (scheduler: StorePriorityScheduler): TripleStore => new BlazegraphStore(
+        'http://blazegraph.test/sparql',
+        { scheduler, timeout: 1_000 },
+      ),
+    },
+    {
+      name: 'SparqlHttpStore',
+      create: (scheduler: StorePriorityScheduler): TripleStore => new SparqlHttpStore({
+        queryEndpoint: 'http://sparql.test/query',
+        updateEndpoint: 'http://sparql.test/update',
+        consistencyProfile: 'atomic-update',
+        scheduler,
+        timeout: 1_000,
+      }),
+    },
+  ]) {
+    it(`keeps a warm index when the real ${adapter.name} boundary rejects before dispatch`, async () => {
+      const existing = 'did:dkg:context-graph:existing';
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+        JSON.stringify({
+          head: { vars: ['g'] },
+          results: { bindings: [{ g: { type: 'uri', value: existing } }] },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+      ));
+      const scheduler = new StorePriorityScheduler({
+        maxConcurrent: 1,
+        ackReservedSlots: 0,
+        healthReservedSlots: 0,
+        backgroundReservedSlots: 0,
+        queueLimits: 1,
+        queueWaitTimeoutMs: 10,
+      });
+      const inner = adapter.create(scheduler);
+      const diagnostics: unknown[] = [];
+      const store = new GraphSetIndexStore(inner, {
+        revalidateMs: 100_000,
+        now: () => 1_000,
+        onDiagnostic: (event) => diagnostics.push(event),
+      } as GraphSetIndexStoreOptions);
+      let releaseBlocker!: () => void;
+      let blockerStarted = false;
+      let blocker: Promise<void> | undefined;
+
+      try {
+        await expect(store.listGraphs()).resolves.toEqual([existing]);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+        blocker = scheduler.run('normal', 'test.atomic-replace-blocker', async () => {
+          blockerStarted = true;
+          await new Promise<void>((resolve) => { releaseBlocker = resolve; });
+        });
+        await Promise.resolve();
+        expect(blockerStarted).toBe(true);
+
+        for (const [storeOperation, work] of [
+          ['replaceGraph', () => store.replaceGraph('urn:graph', [q('urn:graph')])],
+          ['replaceGraphAndSubject', () => store.replaceGraphAndSubject(
+            'urn:graph',
+            [q('urn:graph')],
+            'urn:meta',
+            'urn:subject',
+            [q('urn:meta', 'urn:subject')],
+          )],
+          ['replaceSubject', () => store.replaceSubject(
+            'urn:graph', 'urn:subject', [q('urn:graph', 'urn:subject')],
+          )],
+        ] as const) {
+          await expect(work()).rejects.toMatchObject({
+            code: 'STORE_SCHEDULER_BUSY',
+            outcome: 'not_started',
+            storeOperation,
+          });
+        }
+
+        for (const [storeOperation, read] of [
+          ['hasGraph', () => inner.hasGraph('urn:probe')],
+          ['listGraphs', () => inner.listGraphs()],
+          ['countQuads', () => inner.countQuads('urn:probe')],
+        ] as const) {
+          await expect(read()).rejects.toMatchObject({
+            code: 'STORE_SCHEDULER_BUSY',
+            outcome: 'not_started',
+            storeOperation,
+          });
+        }
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+        await expect(store.listGraphs()).resolves.toEqual([existing]);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        expect(diagnostics).toEqual([]);
+      } finally {
+        releaseBlocker?.();
+        if (blocker) await blocker;
+        await inner.close();
+        fetchSpy.mockRestore();
+      }
+    });
+  }
+
+  it('dirties the index when a nested post-commit probe is rejected before dispatch', async () => {
+    const inner = new OxigraphStore();
+    await inner.insert([q('did:dkg:context-graph:existing')]);
+    const backend = new PostCommitProbeBusyStore(inner);
+    const changelog = new ChangelogStore(backend);
+    const store = new GraphSetIndexStore(changelog, { revalidateMs: 100_000 });
+
+    await expect(store.listGraphs()).resolves.toEqual(['did:dkg:context-graph:existing']);
+    expect(backend.listGraphsCalls).toBe(1);
+
+    await expect(store.replaceGraph('urn:committed', [q('urn:committed')]))
+      .rejects.toBeInstanceOf(StoreSchedulerBusyError);
+    expect(changelog.needsReconcile).toBe(true);
+
+    await expect(store.listGraphs()).resolves.toEqual(expect.arrayContaining([
+      'did:dkg:context-graph:existing',
+      'urn:committed',
+    ]));
+    expect(backend.listGraphsCalls).toBe(2);
+    await inner.close();
+  });
+
   it('seeds from one listGraphs scan and serves prefix lookups from memory', async () => {
     const inner = new OxigraphStore();
     await inner.insert([
@@ -98,6 +295,120 @@ describe('GraphSetIndexStore', () => {
       expect.arrayContaining(['did:dkg:context-graph:alpha', 'did:dkg:context-graph:beta']),
     );
     expect(counting.listGraphsCalls).toBe(1);
+  });
+
+  it('maintains one immutable code-point-sorted catalog across batched mutations', async () => {
+    const prefix = 'did:dkg:context-graph:sorted/';
+    const bmp = `${prefix}\uF900`;
+    const astral = `${prefix}𐀀`;
+    const inner = new OxigraphStore();
+    await inner.insert([q(`${prefix}z`), q(astral), q(bmp), q(`${prefix}b`)]);
+    const counting = new CountingStore(inner);
+    const store = new GraphSetIndexStore(counting, { revalidateMs: 100_000 });
+
+    const seeded = await store.listGraphsSorted();
+    expect(seeded).toEqual([`${prefix}b`, `${prefix}z`, bmp, astral]);
+    expect(Object.isFrozen(seeded)).toBe(true);
+    await expect(store.listGraphsSorted()).resolves.toBe(seeded);
+
+    await store.insert([q(`${prefix}a`), q(`${prefix}c`)]);
+    await store.delete([q(`${prefix}z`)]);
+    const updated = await store.listGraphsSorted();
+    expect(updated).toEqual([`${prefix}a`, `${prefix}b`, `${prefix}c`, bmp, astral]);
+    await expect(store.listGraphsByPrefix(`${prefix}c`)).resolves.toEqual([`${prefix}c`]);
+    expect(counting.listGraphsCalls).toBe(1);
+  });
+
+  it('preserves sorted catalog identity across content writes and equal-member revalidation', async () => {
+    let now = 1_000;
+    const existing = 'did:dkg:context-graph:identity/existing';
+    const added = 'did:dkg:context-graph:identity/added';
+    const inner = new OxigraphStore();
+    await inner.insert([q(existing)]);
+    const store = new GraphSetIndexStore(inner, { revalidateMs: 100, now: () => now });
+
+    const seeded = await store.listGraphsSorted();
+    await store.insert([q(existing, 'urn:content-only')]);
+    await expect(store.listGraphsSorted()).resolves.toBe(seeded);
+
+    now += 100;
+    await expect(store.listGraphsSorted()).resolves.toBe(seeded);
+
+    await store.insert([q(added)]);
+    const changed = await store.listGraphsSorted();
+    expect(changed).not.toBe(seeded);
+    expect(changed).toEqual([added, existing]);
+  });
+
+  it('retries enumeration when a concurrent failed probe invalidates the observed catalog', async () => {
+    const existing = 'did:dkg:context-graph:concurrent-invalidation';
+    const inner = new OxigraphStore();
+    await inner.insert([q(existing)]);
+    const controlled = new RejectingControlledProbeStore(inner);
+    const store = new GraphSetIndexStore(controlled, { revalidateMs: 100_000 });
+    await expect(store.listGraphsSorted()).resolves.toEqual([existing]);
+
+    controlled.armRejectedProbe();
+    const mutation = store.delete([q(existing, 'urn:absent-subject')]);
+    await controlled.waitForProbe();
+
+    const internals = store as unknown as {
+      ensureGraphSet(options?: QueryOptions): Promise<ReadonlySet<string>>;
+    };
+    const originalEnsureGraphSet = internals.ensureGraphSet.bind(store);
+    let releaseEnumeration!: () => void;
+    const enumerationGate = new Promise<void>((resolve) => { releaseEnumeration = resolve; });
+    let notifyMembershipObserved!: () => void;
+    const membershipObserved = new Promise<void>((resolve) => { notifyMembershipObserved = resolve; });
+    let gateFirstEnumeration = true;
+    internals.ensureGraphSet = async (options) => {
+      const members = await originalEnsureGraphSet(options);
+      if (gateFirstEnumeration) {
+        gateFirstEnumeration = false;
+        notifyMembershipObserved();
+        await enumerationGate;
+      }
+      return members;
+    };
+
+    const listed = store.listGraphsSorted();
+    await membershipObserved;
+    controlled.rejectPendingProbe(new Error('controlled hasGraph failure'));
+    await mutation;
+    releaseEnumeration();
+
+    await expect(listed).resolves.toEqual([existing]);
+    expect(controlled.listGraphsCalls).toBe(2);
+  });
+
+  it('matches the startsWith oracle for ranges and surrogate-splitting prefixes', async () => {
+    const root = 'did:dkg:context-graph:prefix-range';
+    const sourceGraphs = [
+      `${root}/a`,
+      `${root}/a/1`,
+      `${root}/a/2`,
+      `${root}/b`,
+      '\uE000',
+      '𐀀',
+      '𐀀/child',
+    ];
+    // The surrogate-splitting case is a JavaScript-string API invariant even
+    // though RDF serializers reject such deliberately malformed IRIs.
+    const inner = { listGraphs: async () => sourceGraphs } as unknown as OxigraphStore;
+    const store = new GraphSetIndexStore(inner, { revalidateMs: 100_000 });
+    const catalog = await store.listGraphsSorted();
+
+    for (const candidatePrefix of [
+      `${root}/a`,
+      `${root}/a/`,
+      `${root}/missing`,
+      '\uD800',
+      '𐀀',
+    ]) {
+      await expect(store.listGraphsByPrefix(candidatePrefix)).resolves.toEqual(
+        catalog.filter((graph) => graph.startsWith(candidatePrefix)),
+      );
+    }
   });
 
   it('honors enabled false for direct callers by passing graph reads through', async () => {
@@ -285,6 +596,32 @@ describe('GraphSetIndexStore', () => {
       ],
       source: 'deleteByPattern',
     });
+  });
+
+  it('keeps graph membership correct after a no-count pattern delete', async () => {
+    const graph = 'did:dkg:context-graph:no-count-delete';
+    const counting = new CountingStore(new OxigraphStore());
+    const store = new GraphSetIndexStore(counting);
+    await store.insert([q(graph)]);
+    await expect(store.listGraphs()).resolves.toEqual([graph]);
+
+    await store.deleteByPatternWithoutCount({ graph, predicate: 'urn:p' });
+
+    await expect(store.listGraphs()).resolves.toEqual([]);
+  });
+
+  it('invalidates the full index after a graph-less no-count pattern delete', async () => {
+    const counting = new CountingStore(new OxigraphStore());
+    const store = new GraphSetIndexStore(counting);
+    await store.insert([q('did:dkg:context-graph:no-count-one')]);
+    await expect(store.listGraphs()).resolves.toHaveLength(1);
+    expect(counting.listGraphsCalls).toBe(1);
+
+    await store.deleteByPatternWithoutCount({ predicate: 'urn:p' });
+    expect(counting.listGraphsCalls).toBe(1);
+
+    await expect(store.listGraphs()).resolves.toEqual([]);
+    expect(counting.listGraphsCalls).toBe(2);
   });
 
   it('preserves deferred mutation source when hasGraph reads before listGraphs', async () => {
@@ -1226,10 +1563,14 @@ describe('GraphSetIndexStore', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as { port: number }).port;
     const endpoint = `http://127.0.0.1:${port}/sparql`;
-    const store = await createTripleStore({
+    const store = await createTripleStore(createManagedOxigraphRuntimeStoreConfigV1({
       backend: 'sparql-http',
-      options: { queryEndpoint: endpoint, updateEndpoint: endpoint, managedByDkg: true },
-    });
+      options: {
+        queryEndpoint: endpoint,
+        updateEndpoint: endpoint,
+        managedByDkg: true,
+      },
+    }));
     try {
       const graph = 'did:dkg:context-graph:managed-atomic';
       await expect(store.replaceGraph!(graph, [q(graph)])).resolves.toBeUndefined();

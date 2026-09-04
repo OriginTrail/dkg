@@ -1,5 +1,11 @@
 import type { QueryEngine, QueryResult } from '@origintrail-official/dkg-query';
-import { DKG_ONTOLOGY, escapeSparqlLiteral, assertSafeIri, sparqlIri } from '@origintrail-official/dkg-core';
+import {
+  DKG_ONTOLOGY,
+  escapeSparqlLiteral,
+  assertSafeIri,
+  normalizeAgentDid,
+  sparqlIri,
+} from '@origintrail-official/dkg-core';
 import { AGENT_REGISTRY_CONTEXT_GRAPH } from './profile.js';
 
 const SKILL = 'https://dkg.origintrail.io/skill#';
@@ -28,6 +34,98 @@ export interface DiscoveredAgent {
    * fall back to `relayAddress` only.
    */
   lastSeen?: string;
+}
+
+/**
+ * Stable identity used by keyset pagination and identity-level conflict handling.
+ *
+ * Only the canonical agent URI participates. Mutable profile fields are deliberately excluded,
+ * so changing a name, peer binding, framework, or future optional field cannot move an agent
+ * across an in-progress page walk. EVM-address DIDs are case-normalized to the same canonical
+ * shape emitted by the profile writer.
+ */
+export function discoveredAgentIdentityKey(
+  agent: Pick<DiscoveredAgent, 'agentUri'>,
+): string {
+  return normalizeAgentDid(agent.agentUri);
+}
+
+function defineDiscoveredAgentRowFields<
+  const Fields extends readonly (keyof DiscoveredAgent)[],
+>(
+  fields: Fields,
+  ..._missing: [Exclude<keyof DiscoveredAgent, Fields[number]>] extends [never]
+    ? []
+    : ['Missing DiscoveredAgent row fields', Exclude<keyof DiscoveredAgent, Fields[number]>]
+): Fields {
+  return fields;
+}
+
+/**
+ * The one ordered projection used by exact-row deduplication and pagination.
+ * Adding a public DiscoveredAgent field makes this declaration fail to compile until the field is
+ * included, so the serialized key cannot silently lag behind the model.
+ */
+const DISCOVERED_AGENT_ROW_FIELDS = defineDiscoveredAgentRowFields([
+  'agentUri',
+  'name',
+  'peerId',
+  'framework',
+  'nodeRole',
+  'relayAddress',
+  'agentAddress',
+  'multiaddrs',
+  'lastSeen',
+] as const);
+
+function normalizeDiscoveredAgentRow(agent: DiscoveredAgent): DiscoveredAgent {
+  return {
+    ...agent,
+    agentUri: discoveredAgentIdentityKey(agent),
+    ...(agent.multiaddrs ? { multiaddrs: [...agent.multiaddrs].sort() } : {}),
+  };
+}
+
+export function discoveredAgentRowKey(agent: DiscoveredAgent): string {
+  const normalized = normalizeDiscoveredAgentRow(agent);
+  return JSON.stringify(
+    DISCOVERED_AGENT_ROW_FIELDS.map((field) => normalized[field] ?? null),
+  );
+}
+
+export interface DiscoveredAgentIdentityRows {
+  identity: string;
+  rows: DiscoveredAgent[];
+}
+
+/**
+ * Group exact-distinct public bindings behind their stable canonical identity.
+ *
+ * The registry does not currently expose provenance that can prove which of two peer bindings is
+ * authoritative. Discarding either binding would therefore invent a winner. Keep every distinct
+ * binding together in one deterministic group; consumers can retain every conflicting row instead
+ * of inventing an authoritative winner.
+ */
+export function groupDiscoveredAgentIdentityRows(
+  agents: readonly DiscoveredAgent[],
+): DiscoveredAgentIdentityRows[] {
+  const rowsByIdentity = new Map<string, Map<string, DiscoveredAgent>>();
+  for (const agent of agents) {
+    const identity = discoveredAgentIdentityKey(agent);
+    const normalized = normalizeDiscoveredAgentRow(agent);
+    let rows = rowsByIdentity.get(identity);
+    if (!rows) {
+      rows = new Map<string, DiscoveredAgent>();
+      rowsByIdentity.set(identity, rows);
+    }
+    rows.set(discoveredAgentRowKey(normalized), normalized);
+  }
+  return [...rowsByIdentity].map(([identity, rows]) => ({
+    identity,
+    rows: [...rows]
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([, row]) => row),
+  }));
 }
 
 export interface DiscoveredOffering {
@@ -73,10 +171,8 @@ export class DiscoveryClient {
       filter += `\n      ?agent <${DKG}agentAddress> "${escapeSparqlLiteral(options.agentAddress)}" .`;
     }
 
-    const limitClause = options.limit ? `LIMIT ${options.limit}` : '';
-
     const sparql = `
-      SELECT ?agent ?name ?peerId ?framework ?nodeRole ?relayAddress ?agentAddress WHERE {
+      SELECT DISTINCT ?agent ?name ?peerId ?framework ?nodeRole ?relayAddress ?agentAddress WHERE {
         ?agent a <${DKG}Agent> ;
                <${SCHEMA}name> ?name ;
                <${DKG}peerId> ?peerId .${filter}
@@ -85,7 +181,6 @@ export class DiscoveryClient {
         OPTIONAL { ?agent <${DKG}relayAddress> ?relayAddress }
         OPTIONAL { ?agent <${DKG}agentAddress> ?agentAddress }
       }
-      ${limitClause}
     `;
 
     const result = await this.engine.query(sparql, {
@@ -93,7 +188,7 @@ export class DiscoveryClient {
       signal: options.signal,
     });
 
-    return result.bindings.map((row) => ({
+    const discovered = result.bindings.map((row) => ({
       agentUri: row['agent'],
       name: stripQuotes(row['name']),
       peerId: stripQuotes(row['peerId']),
@@ -102,6 +197,20 @@ export class DiscoveryClient {
       relayAddress: row['relayAddress'] ? stripQuotes(row['relayAddress']) : undefined,
       agentAddress: row['agentAddress'] ? stripQuotes(row['agentAddress']) : undefined,
     }));
+
+    // DISTINCT is the primary query-boundary guarantee. Keep an explicit
+    // typed-row fence as well because different RDF term encodings can
+    // normalize to the same public string values after `stripQuotes`.
+    const seen = new Set<string>();
+    const unique = discovered.filter((agent) => {
+      const key = discoveredAgentRowKey(agent);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    // RDF-distinct bindings may normalize to one public row. Applying LIMIT in SPARQL would let
+    // those encodings consume the caller-visible slots and hide later unique agents permanently.
+    return options.limit === undefined ? unique : unique.slice(0, options.limit);
   }
 
   /**

@@ -64,7 +64,7 @@ describe('connectToMultiaddr', () => {
 
     expect(dial.calls).toHaveLength(2);
     expect(dial.calls[0]?.[0]?.toString()).toBe(relayAddress);
-    expect(dial.calls[1]?.[0]?.toString()).toBe(targetPeerId);
+    expect(dial.calls[1]?.[0]?.toString()).toBe(multiaddress);
     expect(merge.calls).toHaveLength(1);
     expect(merge.calls[0]?.[0]?.toString()).toBe(targetPeerId);
     expect(merge.calls[0]?.[1].multiaddrs.map((addr) => addr.toString())).toEqual([multiaddress]);
@@ -87,7 +87,9 @@ describe('connectToMultiaddr', () => {
 
     expect(dial.calls).toHaveLength(2);
     expect(dial.calls[0]?.[0]?.toString()).toBe(`/ip4/178.104.54.178/tcp/9090/p2p/${relayPeerId}`);
-    expect(dial.calls[1]?.[0]?.toString()).toBe(targetPeerId);
+    expect(dial.calls[1]?.[0]?.toString()).toBe(
+      parseMultiaddrConnectTarget(multiaddress).address,
+    );
     expect(merge.calls).toHaveLength(1);
     expect(merge.calls[0]?.[0]?.toString()).toBe(targetPeerId);
     expect(merge.calls[0]?.[1].multiaddrs.map((addr) => addr.toString())).toEqual([multiaddress]);
@@ -103,6 +105,47 @@ describe('connectToMultiaddr', () => {
       dial,
       peerStore: { merge },
     }, parseMultiaddrConnectTarget(multiaddress))).rejects.toThrow('Circuit target peer 12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6 not observed before timeout');
+  });
+
+  it('forwards one cancellation signal to both real circuit dial stages', async () => {
+    const controller = new AbortController();
+    const relayPeerId = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const targetPeerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const circuitAddress = `/ip4/178.104.54.178/tcp/9090/p2p/${relayPeerId}/p2p-circuit/p2p/${targetPeerId}`;
+    const dial = recorder(async () => undefined);
+
+    await connectToMultiaddr({
+      getConnections: () => [{ remotePeer: { toString: () => targetPeerId } }],
+      dial,
+      peerStore: { merge: async () => undefined },
+    }, parseMultiaddrConnectTarget(circuitAddress), undefined, {
+      signal: controller.signal,
+    });
+
+    expect(dial.calls).toHaveLength(2);
+    const observedSignals = dial.calls.map(([, options]) => options?.signal);
+    expect(observedSignals[0]).toBe(observedSignals[1]);
+    expect(observedSignals[0]).not.toBe(controller.signal);
+    controller.abort();
+    expect(observedSignals[0]?.aborted).toBe(true);
+  });
+
+  it('aborts promptly while waiting to confirm an explicit circuit', async () => {
+    const controller = new AbortController();
+    const targetPeerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const circuitAddress = `/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M/p2p-circuit/p2p/${targetPeerId}`;
+    const dial = recorder(async () => undefined);
+    const connection = connectToMultiaddr({
+      getConnections: () => [],
+      dial,
+      peerStore: { merge: async () => undefined },
+    }, parseMultiaddrConnectTarget(circuitAddress), undefined, {
+      signal: controller.signal,
+    });
+
+    while (dial.calls.length < 2) await new Promise((resolve) => setTimeout(resolve, 1));
+    controller.abort();
+    await expect(connection).rejects.toMatchObject({ name: 'AbortError' });
   });
 });
 
@@ -135,91 +178,47 @@ describe('primeCatchupConnections', () => {
 });
 
 describe('abortable recovery connection helpers', () => {
-  it('forwards cancellation to the real direct-dial path', async () => {
+  it('forwards cancellation to the canonical resolver connection boundary', async () => {
     const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
     const controller = new AbortController();
     let observedSignal: AbortSignal | undefined;
-    const dialStarted = Promise.withResolvers<void>();
-    const dial = (_peer: unknown, options?: { signal?: AbortSignal }) => {
+    const connectStarted = Promise.withResolvers<void>();
+    const connect = (_peer: string, options?: { signal?: AbortSignal }) => {
       observedSignal = options?.signal;
-      dialStarted.resolve();
+      connectStarted.resolve();
       return new Promise<never>((_resolve, reject) => {
         options?.signal?.addEventListener('abort', () => {
-          reject(new DOMException('dial aborted', 'AbortError'));
+          reject(new DOMException('connect aborted', 'AbortError'));
         }, { once: true });
       });
     };
-    let discoveryCalled = false;
 
-    const connection = ensurePeerConnected({
-      getConnections: () => [],
-      dial,
-      peerStore: { merge: async () => undefined },
-    }, {
-      findAgentByPeerId: async () => {
-        discoveryCalled = true;
-        return undefined;
-      },
-    } as any, peerId, { signal: controller.signal });
+    const connection = ensurePeerConnected({ connect } as any, peerId, {
+      signal: controller.signal,
+    });
 
-    await dialStarted.promise;
-    controller.abort();
-    await expect(connection).rejects.toMatchObject({ name: 'AbortError' });
-    expect(observedSignal).toBe(controller.signal);
-    expect(discoveryCalled).toBe(false);
-  });
-
-  it('forwards cancellation through discovery after direct dial fails', async () => {
-    const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
-    const controller = new AbortController();
-    const discoveryStarted = Promise.withResolvers<void>();
-    let observedSignal: AbortSignal | undefined;
-
-    const connection = ensurePeerConnected({
-      getConnections: () => [],
-      dial: async () => { throw new Error('direct dial failed'); },
-      peerStore: { merge: async () => undefined },
-    }, {
-      findAgentByPeerId: async (_peerId: string, options?: { signal?: AbortSignal }) => {
-        observedSignal = options?.signal;
-        discoveryStarted.resolve();
-        return new Promise<never>((_resolve, reject) => {
-          options?.signal?.addEventListener('abort', () => {
-            reject(new DOMException('discovery aborted', 'AbortError'));
-          }, { once: true });
-        });
-      },
-    } as any, peerId, { signal: controller.signal });
-
-    await discoveryStarted.promise;
+    await connectStarted.promise;
     controller.abort();
     await expect(connection).rejects.toMatchObject({ name: 'AbortError' });
     expect(observedSignal).toBe(controller.signal);
   });
 
-  it('forwards cancellation to the relay fallback dial', async () => {
+  it('keeps non-abort recovery connection failures non-fatal', async () => {
     const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
-    const relayAddress = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
-    const dialSignals: Array<AbortSignal | undefined> = [];
-    const merge = recorder(async () => undefined);
-    let dialAttempt = 0;
-    const dial = async (_peer: unknown, options?: { signal?: AbortSignal }) => {
-      dialSignals.push(options?.signal);
-      dialAttempt += 1;
-      if (dialAttempt === 1) throw new Error('direct dial failed');
-    };
+    await expect(ensurePeerConnected({
+      connect: async () => { throw new Error('unreachable'); },
+    } as any, peerId)).resolves.toBeUndefined();
+  });
 
-    const controller = new AbortController();
-    await ensurePeerConnected({
-      getConnections: () => [],
-      dial,
-      peerStore: { merge },
-    }, {
-      findAgentByPeerId: async () => ({ peerId, relayAddress }),
-    } as any, peerId, { signal: controller.signal });
+  it('deliberately discards the resolver outcome for best-effort callers', async () => {
+    const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const outcome = { status: 'connected' as const, resolvedAddresses: [] };
+    const connect = recorder(async () => outcome);
 
-    expect(dialSignals).toEqual([controller.signal, controller.signal]);
-    expect(merge.calls).toHaveLength(1);
+    await expect(ensurePeerConnected({
+      connect,
+    } as any, peerId)).resolves.toBeUndefined();
+    expect(connect.calls).toEqual([[peerId, {}]]);
   });
 
   it('interrupts the real protocol-readiness delay', async () => {

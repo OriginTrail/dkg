@@ -80,6 +80,7 @@ export interface MemoryData {
 }
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const PROFILE_QUERY_CATALOG = 'http://dkg.io/ontology/profile/QueryCatalog';
 
 function bv(v: unknown): string | undefined {
   if (v == null) return undefined;
@@ -218,6 +219,28 @@ function deriveEntityLabel(entity: MemoryEntity): string {
 const WM_LIMIT = 50_000;
 const SWM_LIMIT = 20_000;
 const VM_LIMIT = 20_000;
+
+function queryCatalogLayerSparql(cgId: string, layer: 'wm' | 'swm'): string {
+  const cgUri = `did:dkg:context-graph:${cgId}`;
+  // Replicas receive the catalog snapshot and its SWM-head metadata, but the
+  // sync protocol intentionally does not copy every author-local lifecycle
+  // predicate (notably dkg:assertionGraph). Classify the catalog by its
+  // canonical layer graph instead, and require prof:QueryCatalog in that same
+  // graph so opting in cannot expose unrelated profile/meta entities.
+  const graphFilter = layer === 'wm'
+    ? `(
+        STRSTARTS(STR(?g), "${cgUri}/meta/assertion/") ||
+        STRSTARTS(STR(?g), "${cgUri}/meta/_working_memory/")
+      )`
+    : `STRSTARTS(STR(?g), "${cgUri}/meta/_shared_memory/")`;
+  return `SELECT ?s ?p ?o ?g WHERE {
+    GRAPH ?g {
+      ?catalog a <${PROFILE_QUERY_CATALOG}> .
+      ?s ?p ?o
+    }
+    FILTER(${graphFilter})
+  } LIMIT ${SWM_LIMIT}`;
+}
 
 function wmSparql(cgId: string) {
   const cgUri = `did:dkg:context-graph:${cgId}`;
@@ -615,13 +638,14 @@ export function isFirstClassEntity(e: MemoryEntity): boolean {
 
 export function useMemoryEntities(
   contextGraphId: string,
-  opts?: { signalErrors?: boolean },
+  opts?: { signalErrors?: boolean; includeQueryCatalog?: boolean },
 ): MemoryData {
   // Off by default: every existing caller (ProjectView/MemoryStackView/
   // AgentProfilePage) keeps the original "failed query → empty, never a
   // hard error" behavior. Only the dashboard opts in so it alone gets
   // the failed-vs-empty distinction it needs (Codex).
   const signalErrors = opts?.signalErrors ?? false;
+  const includeQueryCatalog = opts?.includeQueryCatalog ?? false;
   const [layeredTriples, setLayeredTriples] = useState<LayeredTriple[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -644,27 +668,43 @@ export function useMemoryEntities(
       // whatever layers succeeded (failed layers contribute []), so a
       // single-layer 500 never blanks the others for any consumer.
       const countScope = { includeContextGraphPartitions: true };
-      const [wmR, swmR, vmR] = await Promise.all([
+      const emptyCatalogLayer: LayerResult = { triples: [], ok: true, truncated: false };
+      const [wmR, swmR, vmR, catalogWmR, catalogSwmR] = await Promise.all([
         queryLayer(wmSparql(contextGraphId), contextGraphId, { ...countScope, layerLimit: WM_LIMIT }),
         queryLayer(swmSparql(contextGraphId), contextGraphId, { ...countScope, layerLimit: SWM_LIMIT }),
         queryLayer(vmSparql(contextGraphId), contextGraphId, { ...countScope, layerLimit: VM_LIMIT }),
+        includeQueryCatalog
+          ? queryLayer(queryCatalogLayerSparql(contextGraphId, 'wm'), contextGraphId, { ...countScope, layerLimit: SWM_LIMIT })
+          : Promise.resolve(emptyCatalogLayer),
+        includeQueryCatalog
+          ? queryLayer(queryCatalogLayerSparql(contextGraphId, 'swm'), contextGraphId, { ...countScope, layerLimit: SWM_LIMIT })
+          : Promise.resolve(emptyCatalogLayer),
       ]);
 
       if (version !== versionRef.current) return;
 
       const all: LayeredTriple[] = [
         ...wmR.triples.map(t => ({ ...t, layer: 'working' as const })),
+        ...catalogWmR.triples.map(t => ({ ...t, layer: 'working' as const })),
         ...swmR.triples.map(t => ({ ...t, layer: 'shared' as const })),
+        ...catalogSwmR.triples.map(t => ({ ...t, layer: 'shared' as const })),
         ...vmR.triples.map(t => ({ ...t, layer: 'verified' as const })),
       ];
 
+      const wmOk = wmR.ok && catalogWmR.ok;
+      const swmOk = swmR.ok && catalogSwmR.ok;
+
       setLayeredTriples(all);
       setLayerStatus({
-        wm: wmR.ok ? 'ok' : 'error',
-        swm: swmR.ok ? 'ok' : 'error',
+        wm: wmOk ? 'ok' : 'error',
+        swm: swmOk ? 'ok' : 'error',
         vm: vmR.ok ? 'ok' : 'error',
       });
-      const layerResults = [wmR, swmR, vmR];
+      const layerResults = [
+        { ok: wmOk, truncated: wmR.truncated || catalogWmR.truncated },
+        { ok: swmOk, truncated: swmR.truncated || catalogSwmR.truncated },
+        vmR,
+      ];
       const failed = layerResults.filter(r => !r.ok).length;
       const clipped = layerResults.some(r => r.truncated);
       // `partial` is computed UNCONDITIONALLY for every caller — it was
@@ -685,7 +725,7 @@ export function useMemoryEntities(
     } finally {
       if (version === versionRef.current) setLoading(false);
     }
-  }, [contextGraphId, signalErrors]);
+  }, [contextGraphId, includeQueryCatalog, signalErrors]);
 
   useMemoryGraphEvents(contextGraphId, fetchAll);
 

@@ -26,4 +26,34 @@ describe('VM reconcile caller-provided store labels', () => {
       'agent.vmReconcile.swmFingerprint.privateRoots',
     ]);
   });
+
+  it('fails open on repeated fingerprint reads during one unstable revision', async () => {
+    let revision = { generation: 1, stable: false };
+    const query = vi.fn<TripleStore['query']>(async () => ({
+      type: 'bindings',
+      bindings: [],
+    }));
+    const store = {
+      query,
+      getWriteRevision: () => revision,
+    } as unknown as TripleStore;
+    const agent = { store } as never;
+    const namespaces = [{
+      metaGraph: 'did:dkg:context-graph:test/_shared_memory_meta',
+      dataGraph: 'did:dkg:context-graph:test/_shared_memory',
+    }];
+
+    await expect(
+      SwmHostModeMethods.prototype.readVmReconcileSwmGen.call(agent, namespaces),
+    ).resolves.toBeNull();
+    await expect(
+      SwmHostModeMethods.prototype.readVmReconcileSwmGen.call(agent, namespaces),
+    ).resolves.toBeNull();
+    expect(query).toHaveBeenCalledTimes(6);
+
+    revision = { generation: 2, stable: true };
+    await expect(
+      SwmHostModeMethods.prototype.readVmReconcileSwmGen.call(agent, namespaces),
+    ).resolves.toContain('writeGen:2');
+  });
 });

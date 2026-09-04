@@ -68,4 +68,76 @@ describe('RFC-64 SWM inventory shadow runtime', () => {
     expect(runtime.inFlightCount).toBe(0);
     expect(runtime.isVmConfirmed(assetKey, '1')).toBe(false);
   });
+
+  it('serializes one author scope while leaving unrelated scopes concurrent', async () => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    let markFirstEntered!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const firstEntered = new Promise<void>((resolve) => { markFirstEntered = resolve; });
+
+    const first = runtime.runScopeExclusive('scope-a', async () => {
+      events.push('first-enter');
+      markFirstEntered();
+      await firstGate;
+      events.push('first-exit');
+      return 1;
+    });
+    await firstEntered;
+    const second = runtime.runScopeExclusive('scope-a', async () => {
+      events.push('second');
+      return 2;
+    });
+    const unrelated = runtime.runScopeExclusive('scope-b', async () => {
+      events.push('unrelated');
+      return 3;
+    });
+    await expect(unrelated).resolves.toBe(3);
+    expect(events).toEqual(['first-enter', 'unrelated']);
+
+    releaseFirst();
+    await expect(first).resolves.toBe(1);
+    await expect(second).resolves.toBe(2);
+    expect(events).toEqual(['first-enter', 'unrelated', 'first-exit', 'second']);
+  });
+
+  it('fences new observers and drains admitted work before close completes', async () => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    let release!: () => void;
+    let markEntered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    expect(runtime.schedule('asset', async () => {
+      markEntered();
+      await gate;
+    })).toBe(true);
+    await entered;
+
+    let closed = false;
+    const close = runtime.closeAndDrain().then(() => { closed = true; });
+    await Promise.resolve();
+    expect(closed).toBe(false);
+    expect(runtime.schedule('late', async () => undefined)).toBe(false);
+    await expect(runtime.runExclusive('late', async () => undefined))
+      .rejects.toThrow('observer runtime is closed');
+
+    release();
+    await close;
+    expect(closed).toBe(true);
+    expect(runtime.inFlightCount).toBe(0);
+  });
+
+  it('reopens asset and scope admission after a complete restart drain', async () => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    await runtime.closeAndDrain();
+    expect(runtime.schedule('closed', async () => undefined)).toBe(false);
+    await expect(runtime.runScopeExclusive('closed', async () => undefined))
+      .rejects.toThrow('runtime is closed');
+
+    runtime.reopen();
+    expect(runtime.schedule('asset', async () => undefined)).toBe(true);
+    await runtime.drain();
+    await expect(runtime.runScopeExclusive('scope', async () => 'ok')).resolves.toBe('ok');
+  });
 });

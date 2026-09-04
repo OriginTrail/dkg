@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   runChangelogSync, planPageApply, type ChangelogSyncDeps, type ResyncOutcome,
@@ -64,7 +64,7 @@ function buildPage(specs: Array<{
 const plan = (page: ReturnType<typeof buildPage>, extra: {
   nextSeq: number;
   priorSeq?: number;
-  isForeign?: (g: string) => boolean;
+  isGraphAdmitted?: (g: string) => boolean;
   batchClean?: boolean;
   verifiedGraphScopedDataGraphs?: Set<string>;
 }) =>
@@ -72,7 +72,7 @@ const plan = (page: ReturnType<typeof buildPage>, extra: {
     records: page.records,
     nextSeq: extra.nextSeq,
     priorSeq: extra.priorSeq ?? 0,
-    isForeignGraph: extra.isForeign ?? (() => false),
+    isGraphAdmitted: extra.isGraphAdmitted ?? (() => true),
     verifiedByGraph: page.verifiedByGraph,
     recordQuadCountByGraph: page.recordQuadCountByGraph,
     metaGraphsWithRoot: page.metaGraphsWithRoot,
@@ -272,7 +272,7 @@ describe('planPageApply — verified-apply planner', () => {
     ]);
     const p = plan(page, {
       nextSeq: 2,
-      isForeign: (g) => g.startsWith('urn:dkg:changelog'),
+      isGraphAdmitted: (g) => !g.startsWith('urn:dkg:changelog'),
       verifiedGraphScopedDataGraphs: new Set([graph]),
     });
     expect(p.deferred).toBe(false);
@@ -466,6 +466,64 @@ describe('changelog drop resync reconciliation', () => {
     expect(result.failedPhases).toBe(1);
     expect(result.completedPhases).toBe(0);
     expect(cursor).toEqual({ era: 'e1', seq: 2 });
+  });
+
+  it('consumes an untrusted RFC-64 control record without parsing or storing it', async () => {
+    const controlGraph = 'did:dkg:context-graph:cg/_sync/applied-cg/peer-a';
+    const response = encodeChangelogResponse(delta(1, 1, [{
+      seq: 1,
+      graph: controlGraph,
+      op: 'upsert',
+      quads: 'this payload must not be parsed',
+    }]));
+    let cursor: { era: string; seq: number } | undefined;
+    const parseAndFilter = vi.fn(async () => ({ quads: [] }));
+    const processDurableBatchInWorker = vi.fn(async (data: Quad[], meta: Quad[]) => {
+      expect(data).toEqual([]);
+      expect(meta).toEqual([]);
+      return {
+        verifiedData: [],
+        verifiedMeta: [],
+        verifiedGraphScopedDataGraphs: [],
+        totalFetchedDataQuads: 0,
+        totalFetchedMetaQuads: 0,
+        rejectedKcs: 0,
+        emptyResponses: 1,
+        metaOnlyResponses: 0,
+        verifiedPrivateOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+      };
+    });
+    const dropGraph = vi.fn(async () => {});
+    const insertSyncedQuadsAndInvalidateListCache = vi.fn(async () => {});
+    const agent = {
+      changelogCursors: {
+        get: () => cursor,
+        set: (_peer: string, _cg: string, era: string, seq: number) => {
+          cursor = { era, seq };
+        },
+      },
+      messenger: { sendToPeer: async () => response },
+      node: { stopSignal: null },
+      getOrCreateSyncVerifyWorker: () => ({ parseAndFilter }),
+      processDurableBatchInWorker,
+      insertSyncedQuadsAndInvalidateListCache,
+      store: { dropGraph },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    await (LifecycleSyncMethods.prototype.runChangelogSyncForCg as any).call(
+      agent,
+      { kind: 'system', id: 'test', startedAt: 0 },
+      'peer',
+      'cg',
+    );
+
+    expect(parseAndFilter).not.toHaveBeenCalled();
+    expect(dropGraph).not.toHaveBeenCalled();
+    expect(insertSyncedQuadsAndInvalidateListCache).not.toHaveBeenCalled();
+    expect(processDurableBatchInWorker).toHaveBeenCalledTimes(1);
+    expect(cursor).toEqual({ era: 'e1', seq: 1 });
   });
 
   it('removes only graphs absent from the complete verified snapshot before advancing the cursor', async () => {

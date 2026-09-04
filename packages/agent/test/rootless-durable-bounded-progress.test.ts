@@ -696,8 +696,8 @@ describe('bounded rootless durable progress', () => {
     expect(checkpoints).toEqual([]);
   });
 
-  it('keeps a 20-asset exact request incomplete when the responder returns only 6 descriptors', async () => {
-    const requested = Array.from({ length: 20 }, (_, index) => asset(index + 1))
+  it('keeps a max-sized exact request incomplete when the responder returns only 6 descriptors', async () => {
+    const requested = Array.from({ length: 10 }, (_, index) => asset(index + 1))
       .sort((left, right) => left.graph.localeCompare(right.graph));
     const returned = requested.slice(0, 6);
     const meta = returned.flatMap((entry) => entry.meta);
@@ -708,7 +708,10 @@ describe('bounded rootless durable progress', () => {
       ctx,
       remotePeerId: 'peer-partial-host',
       contextGraphIds: [CONTEXT_GRAPH_ID],
-      exactAssetUalsFor: () => requested.map((entry) => entry.ual),
+      exactAssetSelectionFor: () => ({
+        kind: 'ual-only',
+        assetUals: requested.map((entry) => entry.ual),
+      }),
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages: async ({
         phase,
@@ -746,7 +749,10 @@ describe('bounded rootless durable progress', () => {
       ctx,
       remotePeerId: 'peer-complete-host',
       contextGraphIds: [CONTEXT_GRAPH_ID],
-      exactAssetUalsFor: () => requested.map((entry) => entry.ual),
+      exactAssetSelectionFor: () => ({
+        kind: 'ual-only',
+        assetUals: requested.map((entry) => entry.ual),
+      }),
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages: async ({
         phase,

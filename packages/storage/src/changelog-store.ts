@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
+import {
+  loadSortedGraphCatalog, type SortedGraphCatalog, type SortedGraphSetSource,
+} from './graph-set-index-store.js';
+import { SortedGraphCatalogProjection } from './sorted-graph-catalog-projection.js';
+import { deleteByPatternWithoutCount, findTripleStoreCapability } from './triple-store.js';
 import type {
   Quad,
   QueryOptions,
@@ -7,14 +12,23 @@ import type {
   TripleStore,
   UpdateOptions,
   StorePressureSnapshot,
+  TripleStoreDecorator,
 } from './triple-store.js';
 import {
   UnsupportedTripleStoreCapabilityError,
-  isReplaceGraphAndSubjectCapabilityRefusal,
-  isReplaceGraphCapabilityRefusal,
-  isReplaceSubjectCapabilityRefusal,
 } from './unsupported-capability-error.js';
-import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
+import {
+  isAtomicGraphReplaceStagingGraph,
+} from './atomic-graph-replace.js';
+import type {
+  Rfc64AuthorCommitCasInputV1,
+  Rfc64AuthorCommitCasResultV1,
+} from './rfc64-author-commit-cas.js';
+import {
+  normalizeRfc64AuthorCommitCasV1,
+  sourceFromNormalizedRfc64AuthorCommitCasV1,
+} from './rfc64-author-commit-cas.js';
+import { isStoreOperationNotStarted, type StoreOperation } from './store-operation-outcome.js';
 
 /**
  * ChangelogStore — an append-only per-node change log maintained on the write
@@ -197,16 +211,18 @@ export interface ChangelogStoreOptions {
  * Write-path append-only change log. See the class-level docstring for the
  * crash-consistency and single-writer arguments.
  */
-export class ChangelogStore implements TripleStore, ChangelogReader {
+export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, SortedGraphSetSource {
   get queryCancellation() {
     return this.inner.queryCancellation;
   }
 
   private readonly inner: TripleStore;
+  readonly innerStore: TripleStore;
   private readonly enabled: boolean;
   private readonly reserved: ReadonlySet<string>;
   private readonly onAppend?: (record: ChangeRecord) => void;
   private readonly eraGuard?: ChangelogEraGuard;
+  private readonly visibleSortedGraphs: SortedGraphCatalogProjection;
 
   /** Last durably committed seq (0 = none). Next seq is `seq + 1`. */
   private seq = 0;
@@ -227,10 +243,14 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
 
   constructor(inner: TripleStore, options: ChangelogStoreOptions = {}) {
     this.inner = inner;
+    this.innerStore = inner;
     this.enabled = options.enabled !== false;
     const reserved = new Set<string>([CHANGELOG_GRAPH]);
     for (const g of options.reservedGraphs ?? []) reserved.add(g);
     this.reserved = reserved;
+    this.visibleSortedGraphs = new SortedGraphCatalogProjection(
+      (graph) => !this.reserved.has(graph),
+    );
     this.onAppend = options.onAppend;
     this.eraGuard = options.eraGuard;
   }
@@ -304,6 +324,32 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
     });
   }
 
+  async deleteByPatternWithoutCount(
+    pattern: Partial<Quad>,
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (!this.enabled) {
+      await deleteByPatternWithoutCount(this.inner, pattern, options);
+      return;
+    }
+    if (pattern.graph) {
+      this.assertNotReserved(pattern.graph, 'deleteByPatternWithoutCount');
+    } else {
+      this.assertNoReservedTerm(pattern);
+    }
+    await this.runExclusive(async () => {
+      await deleteByPatternWithoutCount(this.inner, pattern, options);
+      if (pattern.graph) {
+        // No count is available to distinguish a no-op. Emitting a
+        // conservative post-mutation marker matches delete(quads) semantics
+        // and keeps every committed change discoverable.
+        await this.markPostMutation([pattern.graph], options);
+      } else {
+        this.flagReconcile('deleteByPatternWithoutCount(no-graph)');
+      }
+    });
+  }
+
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
     if (!this.enabled) return this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
     this.assertNotReserved(graphUri, 'deleteBySubjectPrefix');
@@ -338,26 +384,11 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
     }
     if (!this.enabled) return this.inner.replaceGraph(graphUri, quads, options);
     this.assertNotReserved(graphUri, 'replaceGraph');
-    await this.runExclusive(async () => {
-      try {
-        await this.inner.replaceGraph!(graphUri, quads, options);
-      } catch (err) {
-        if (isReplaceGraphCapabilityRefusal(err)) {
-          // A capability refusal is a clean preflight result: no mutation was
-          // started, so there is no gap to reconcile.
-          throw err;
-        }
-        // The replaceGraph contract allows a rejected call to have left either
-        // the complete old graph or the complete new graph (e.g. a response
-        // lost after the backend committed). A committed overwrite with no
-        // marker is invisible to set-only reconcile, so flag the gap before
-        // propagating.
-        this.flagReconcile('replaceGraph(indeterminate-failure)');
-        throw err;
-      }
-      // The adapter's internal staging graph never crosses this decorator.
-      // Sync sees exactly one logical upsert/drop for the canonical graph.
-      await this.markPostMutation([graphUri], options);
+    await this.runAtomicMutation({
+      operation: 'replaceGraph',
+      touchedGraphs: [graphUri],
+      options,
+      execute: () => this.inner.replaceGraph!(graphUri, quads, options),
     });
   }
 
@@ -387,23 +418,18 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
     }
     this.assertNotReserved(graphUri, 'replaceGraphAndSubject');
     this.assertNotReserved(metaGraphUri, 'replaceGraphAndSubject');
-    await this.runExclusive(async () => {
-      try {
-        await this.inner.replaceGraphAndSubject!(
-          graphUri,
-          graphQuads,
-          metaGraphUri,
-          metadataSubject,
-          metadataQuads,
-          options,
-        );
-      } catch (error) {
-        if (!isReplaceGraphAndSubjectCapabilityRefusal(error)) {
-          this.flagReconcile('replaceGraphAndSubject(indeterminate-failure)');
-        }
-        throw error;
-      }
-      await this.markPostMutation([graphUri, metaGraphUri], options);
+    await this.runAtomicMutation({
+      operation: 'replaceGraphAndSubject',
+      touchedGraphs: [graphUri, metaGraphUri],
+      options,
+      execute: () => this.inner.replaceGraphAndSubject!(
+        graphUri,
+        graphQuads,
+        metaGraphUri,
+        metadataSubject,
+        metadataQuads,
+        options,
+      ),
     });
   }
 
@@ -423,18 +449,36 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
     // predicate/object is accepted, matching the insert() path (#1863 regression
     // the raw-update path reintroduced via assertNoReservedRef).
     this.assertNotReserved(graphUri, 'replaceSubject');
-    await this.runExclusive(async () => {
-      try {
-        await this.inner.replaceSubject!(graphUri, subject, quads, options);
-      } catch (error) {
-        if (isReplaceSubjectCapabilityRefusal(error)) {
-          // Clean preflight refusal: no mutation started, nothing to reconcile.
-          throw error;
-        }
-        this.flagReconcile('replaceSubject(indeterminate-failure)');
-        throw error;
-      }
-      await this.markPostMutation([graphUri], options);
+    await this.runAtomicMutation({
+      operation: 'replaceSubject',
+      touchedGraphs: [graphUri],
+      options,
+      execute: () => this.inner.replaceSubject!(graphUri, subject, quads, options),
+    });
+  }
+
+  async rfc64AuthorCommitCasV1(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: QueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    if (typeof this.inner.rfc64AuthorCommitCasV1 !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'rfc64AuthorCommitCasV1',
+        'ChangelogStore',
+      );
+    }
+    const manifest = normalizeRfc64AuthorCommitCasV1(input);
+    const source = sourceFromNormalizedRfc64AuthorCommitCasV1(manifest);
+    if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(source, options);
+    for (const graph of manifest.referencedGraphs) {
+      this.assertNotReserved(graph, 'rfc64AuthorCommitCasV1');
+    }
+    return this.runAtomicMutation({
+      operation: 'rfc64AuthorCommitCasV1',
+      touchedGraphs: manifest.touchedGraphs,
+      options,
+      execute: () => this.inner.rfc64AuthorCommitCasV1!(source, options),
+      committed: result => result === 'committed',
     });
   }
 
@@ -489,6 +533,11 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
   async listGraphs(options?: QueryOptions): Promise<string[]> {
     const graphs = await this.inner.listGraphs(options);
     return graphs.filter((g) => !this.isReservedGraph(g));
+  }
+
+  async listGraphsSorted(options?: QueryOptions): Promise<SortedGraphCatalog> {
+    // Explicitly project here because this boundary owns reserved-graph visibility.
+    return this.visibleSortedGraphs.project(await loadSortedGraphCatalog(this.inner, options));
   }
 
   async listGraphsByPrefix(prefix: string, options?: QueryOptions): Promise<string[]> {
@@ -635,6 +684,31 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
     return run;
   }
 
+  /** Shared outcome-aware lifecycle for every certified atomic mutation. */
+  private runAtomicMutation<T>(args: {
+    operation: StoreOperation;
+    touchedGraphs: readonly string[];
+    options?: QueryOptions;
+    execute: () => Promise<T>;
+    committed?: (result: T) => boolean;
+  }): Promise<T> {
+    return this.runExclusive(async () => {
+      let result: T;
+      try {
+        result = await args.execute();
+      } catch (error) {
+        if (!isStoreOperationNotStarted(error, args.operation)) {
+          this.flagReconcile(`${args.operation}(indeterminate-failure)`);
+        }
+        throw error;
+      }
+      if ((args.committed?.(result) ?? true)) {
+        await this.markPostMutation(args.touchedGraphs, args.options);
+      }
+      return result;
+    });
+  }
+
   /**
    * Seed the in-memory seq counter AND the era from the durable log, once.
    *
@@ -708,7 +782,7 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
 
   /** Replace the single `#era` marker in the reserved graph (delete-any + insert). */
   private async writeEra(era: string): Promise<void> {
-    await this.inner.deleteByPattern({
+    await deleteByPatternWithoutCount(this.inner, {
       subject: META_SUBJECT, predicate: P_ERA, graph: CHANGELOG_GRAPH,
     });
     await this.inner.insert([{
@@ -942,24 +1016,17 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
  * no `instanceof`/cast/decorator-order assumption at the call site.
  */
 export function asChangelogReader(store: unknown): ChangelogReader | null {
-  // Follow `.innerStore` so a wrapper AROUND the ChangelogStore still resolves.
-  // The daemon's store is `createListContextGraphsCacheInvalidatingStore(...)`
-  // (dkg-agent-base.ts), a hand-rolled forwarder that exposes `.innerStore` but
-  // does NOT forward the changelog API — so a direct check misses it even when
-  // the changelog is enabled. The depth bound guards a pathological/cyclic chain.
-  let s = store as (Partial<ChangelogReader> & { innerStore?: unknown }) | null | undefined;
-  for (let depth = 0; s && depth < 8; depth++) {
-    if (s instanceof ChangelogStore) return s;
-    if (
-      typeof s.changelogHead === 'function' &&
-      typeof s.readChanges === 'function' &&
-      typeof s.headSeq === 'function' &&
-      typeof s.clearReconcileFlag === 'function' &&
-      typeof s.needsReconcile === 'boolean'
-    ) {
-      return s as ChangelogReader;
-    }
-    s = s.innerStore as typeof s;
-  }
-  return null;
+  return findTripleStoreCapability(
+    store,
+    (candidate): candidate is ChangelogReader => {
+      if (candidate instanceof ChangelogStore) return true;
+      if (typeof candidate !== 'object' || candidate === null) return false;
+      const reader = candidate as Partial<ChangelogReader>;
+      return typeof reader.changelogHead === 'function'
+        && typeof reader.readChanges === 'function'
+        && typeof reader.headSeq === 'function'
+        && typeof reader.clearReconcileFlag === 'function'
+        && typeof reader.needsReconcile === 'boolean';
+    },
+  );
 }

@@ -20,12 +20,10 @@ import {
   calculateOpaqueKaBundleByteLengthV1,
   canonicalizeAuthorCatalogRowV1,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
-  compareAuthorCatalogKaIdsV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeKaChunkTreeRootV1,
   encodeOpaqueKaBundleV1,
   parseCanonicalAuthorCatalogRowV1,
-  parseCanonicalGraphScopedAuthorSealV1,
   readVerifiedCatalogSealBindingV1,
   readVerifiedCgSharedProjectionMetadataV1,
   readVerifiedTransferredCatalogBundleMetadataV1,
@@ -52,6 +50,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
+import { mapWithConcurrencySettled } from '../map-with-concurrency.js';
 import {
   readVerifiedAuthorCatalogRowAuthorshipV1,
   verifyAuthorCatalogRowAuthorshipV1,
@@ -72,6 +71,13 @@ import {
   RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1,
   addRfc64PublicCatalogExactSetBundleBytesV1,
 } from './public-catalog-native-transport-v1.js';
+import {
+  snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1,
+  type Rfc64PublicCatalogSuccessorAssetInputV1,
+} from './public-catalog-successor-asset-v1.js';
+
+export type { Rfc64PublicCatalogSuccessorAssetInputV1 } from
+  './public-catalog-successor-asset-v1.js';
 
 export type Rfc64PublicCatalogSuccessorProducerErrorCodeV1 =
   | 'catalog-successor-producer-input'
@@ -116,7 +122,15 @@ export interface Rfc64PublicCatalogSuccessorProducerOptionsV1 {
   readonly stageKaBundle: (
     input: StageRfc64PublicCatalogBundleV1,
   ) => Promise<StagedRfc64PublicCatalogBundleReceiptV1>;
+  /**
+   * Optional durable-cache read used to avoid re-fsyncing unchanged bundles
+   * already referenced by the verified predecessor bucket.
+   */
+  readonly readKaBundleByDigest?: (blobDigest: Digest32V1) => Promise<Uint8Array | null>;
 }
+
+/** Bound independent immutable-bundle reads/writes without serializing an entire successor. */
+const RFC64_SUCCESSOR_BUNDLE_IO_CONCURRENCY_V1 = 8;
 
 export interface ProduceAndStagePublicOpenOneRowSuccessorInputV1 {
   readonly previousHead: SignedAuthorCatalogHeadEnvelopeV1;
@@ -132,13 +146,6 @@ export interface ProduceAndStagePublicOpenOneRowSuccessorInputV1 {
   readonly catalogIssuerAuthorization: Rfc64PublicCatalogIssuerAuthorizationV1;
 }
 
-/** One member of the complete bounded live set committed by a successor. */
-export interface Rfc64PublicCatalogSuccessorAssetInputV1 {
-  readonly assertionCoordinate: AssertionCoordinateV1;
-  readonly projectionBytes: Uint8Array;
-  readonly seal: CanonicalGraphScopedAuthorSealV1;
-}
-
 /**
  * Complete replacement set for the root-lane bucket. The producer sorts the
  * caller-owned set by mathematical KA ID before signing it. The canonical
@@ -149,6 +156,7 @@ export interface ProduceAndStagePublicOpenExactSetSuccessorInputV1 {
   readonly previousHead: SignedAuthorCatalogHeadEnvelopeV1;
   readonly previousDirectoryPath: readonly SignedAuthorCatalogDirectoryNodeEnvelopeV1[];
   readonly previousBucket: SignedAuthorCatalogBucketEnvelopeV1 | null;
+  /** Complete 0..1024-row live set; zero rows is the canonical final removal. */
   readonly assets: readonly Rfc64PublicCatalogSuccessorAssetInputV1[];
   readonly deployment: CatalogSealDeploymentProfileV1;
   readonly issuedAt: TimestampMsV1;
@@ -196,6 +204,8 @@ export interface ProducedAndStagedPublicOpenExactSetSuccessorV1 {
 export class Rfc64PublicCatalogSuccessorProducerV1 {
   readonly #stageVerifiedObjects: Rfc64ControlObjectOperationsV1['stageVerifiedObjects'];
   readonly #stageKaBundle: Rfc64PublicCatalogSuccessorProducerOptionsV1['stageKaBundle'];
+  readonly #readKaBundleByDigest:
+    Rfc64PublicCatalogSuccessorProducerOptionsV1['readKaBundleByDigest'];
 
   constructor(options: Rfc64PublicCatalogSuccessorProducerOptionsV1) {
     if (
@@ -207,6 +217,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
     this.#stageVerifiedObjects = options.controlObjects.stageVerifiedObjects
       .bind(options.controlObjects);
     this.#stageKaBundle = options.stageKaBundle;
+    this.#readKaBundleByDigest = options.readKaBundleByDigest;
   }
 
   async produceAndStage(
@@ -246,7 +257,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
     });
   }
 
-  /** Build and durably stage one complete, canonical 1..1024-row live set. */
+  /** Build and durably stage one complete, canonical 0..1024-row live set. */
   async produceAndStageExactSet(
     input: ProduceAndStagePublicOpenExactSetSuccessorInputV1,
   ): Promise<ProducedAndStagedPublicOpenExactSetSuccessorV1> {
@@ -296,14 +307,16 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
     }
 
     const producedBucket = publication.bucket;
+    const producedRows = producedBucket?.payload.rows ?? [];
     if (
       publication.head.payload.bucketCount !== '1'
       || publication.head.payload.directoryHeight !== '0'
       || publication.head.payload.totalRows !== String(preparedAssets.length)
       || publication.head.payload.version === '0'
       || publication.head.payload.previousHeadDigest === null
-      || producedBucket === null
-      || producedBucket.payload.rows.length !== preparedAssets.length
+      || (preparedAssets.length === 0 && producedBucket !== null)
+      || (preparedAssets.length > 0 && producedBucket === null)
+      || producedRows.length !== preparedAssets.length
     ) {
       fail(
         'catalog-successor-producer-verification',
@@ -311,7 +324,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       );
     }
 
-    const verifiedAssets = producedBucket.payload.rows.map((producedRow, index) => {
+    const verifiedAssets = producedRows.map((producedRow, index) => {
       const prepared = preparedAssets[index];
       if (prepared === undefined || producedRow.kaId !== prepared.row.kaId) {
         fail(
@@ -392,26 +405,30 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
           envelope.objectDigest,
           `directory path node ${index}`,
         ));
-      const bucketSignature = requiredSignature(
-        signaturesByDigest,
-        producedBucket.objectDigest,
-        'catalog bucket',
-      );
-      authorship = producedBucket.payload.rows.map((row) =>
-        readVerifiedAuthorCatalogRowAuthorshipV1(verifyAuthorCatalogRowAuthorshipV1({
-          catalogIssuerDelegation: authorization.catalogIssuerDelegation,
-          catalogIssuerDelegationSignature,
-          parentAuthorAgentEvidence: authorization.parentAuthorAgentEvidence,
-          catalogHead: publication.head,
-          catalogHeadSignature: headSignature,
-          directoryPathEnvelopes: publication.directoryPath,
-          directoryPathSignatures,
-          directoryPathProof,
-          catalogBucket: producedBucket,
-          catalogBucketSignature: bucketSignature,
-          targetKaId: row.kaId,
-        })),
-      );
+      if (producedBucket === null) {
+        authorship = Object.freeze([]);
+      } else {
+        const bucketSignature = requiredSignature(
+          signaturesByDigest,
+          producedBucket.objectDigest,
+          'catalog bucket',
+        );
+        authorship = producedBucket.payload.rows.map((row) =>
+          readVerifiedAuthorCatalogRowAuthorshipV1(verifyAuthorCatalogRowAuthorshipV1({
+            catalogIssuerDelegation: authorization.catalogIssuerDelegation,
+            catalogIssuerDelegationSignature,
+            parentAuthorAgentEvidence: authorization.parentAuthorAgentEvidence,
+            catalogHead: publication.head,
+            catalogHeadSignature: headSignature,
+            directoryPathEnvelopes: publication.directoryPath,
+            directoryPathSignatures,
+            directoryPathProof,
+            catalogBucket: producedBucket,
+            catalogBucketSignature: bucketSignature,
+            targetKaId: row.kaId,
+          })),
+        );
+      }
     } catch (cause) {
       fail(
         'catalog-successor-producer-verification',
@@ -420,25 +437,46 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       );
     }
 
-    for (const { prepared } of verifiedAssets) {
-      try {
-        const bundleReceipt = await this.#stageKaBundle(Object.freeze({
-          blobDigest: prepared.encoded.blobDigest,
-          bundleBytes: new Uint8Array(prepared.bundleBytes),
-        }));
-        assertExactDurableBundleReceipt(
-          bundleReceipt,
-          prepared.encoded.blobDigest,
-          prepared.bundleBytes.byteLength,
-        );
-      } catch (cause) {
-        fail(
-          'catalog-successor-producer-bundle-stage',
-          `verified opaque KA bundle ${prepared.row.kaId} could not be staged`,
-          cause,
-        );
-      }
-    }
+    const previousBundleByKaId = new Map(
+      (input.previousBucket?.payload.rows ?? []).map((row) => [
+        row.kaId,
+        row.transfer.blobDigest,
+      ] as const),
+    );
+    const bundleStageResults = await mapWithConcurrencySettled(
+      verifiedAssets,
+      RFC64_SUCCESSOR_BUNDLE_IO_CONCURRENCY_V1,
+      async ({ prepared, row }): Promise<void> => {
+        try {
+          if (
+            previousBundleByKaId.get(row.kaId) === prepared.encoded.blobDigest
+            && this.#readKaBundleByDigest !== undefined
+          ) {
+            const existing = await this.#readKaBundleByDigest(prepared.encoded.blobDigest);
+            if (existing !== null && bytesEqualV1(existing, prepared.bundleBytes)) return;
+          }
+          const bundleReceipt = await this.#stageKaBundle(Object.freeze({
+            blobDigest: prepared.encoded.blobDigest,
+            bundleBytes: new Uint8Array(prepared.bundleBytes),
+          }));
+          assertExactDurableBundleReceipt(
+            bundleReceipt,
+            prepared.encoded.blobDigest,
+            prepared.bundleBytes.byteLength,
+          );
+        } catch (cause) {
+          fail(
+            'catalog-successor-producer-bundle-stage',
+            `verified opaque KA bundle ${prepared.row.kaId} could not be staged`,
+            cause,
+          );
+        }
+      },
+    );
+    const bundleStageFailure = bundleStageResults.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (bundleStageFailure !== undefined) throw bundleStageFailure.reason;
 
     let stagedControlObjects: StageVerifiedControlObjectsResultV1;
     try {
@@ -477,59 +515,40 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
   }
 }
 
+function bytesEqualV1(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.byteLength !== right.byteLength) return false;
+  for (let index = 0; index < left.byteLength; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
 function prepareExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV1) {
-  const assets = input?.assets;
-  if (!Array.isArray(assets) || Object.getPrototypeOf(assets) !== Array.prototype) {
-    fail('catalog-successor-producer-input', 'assets must be an ordinary dense Array');
-  }
-  const ownKeys = Reflect.ownKeys(assets);
-  if (
-    ownKeys.some((key) => typeof key !== 'string')
-    || ownKeys.length !== assets.length + 1
-    || !ownKeys.includes('length')
-  ) {
-    fail('catalog-successor-producer-input', 'assets must be a dense Array without properties');
-  }
-  if (assets.length < 1 || assets.length > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1) {
-    fail(
-      'catalog-successor-producer-input',
-      `assets must contain 1..${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} entries`,
+  let assets: readonly Readonly<Rfc64PublicCatalogSuccessorAssetInputV1>[];
+  try {
+    assets = snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1(
+      input?.assets,
+      'RFC-64 successor assets',
     );
+  } catch (cause) {
+    fail('catalog-successor-producer-input', 'assets are not one canonical exact set', cause);
   }
   const snapshots: PreparedRfc64PublicCatalogSuccessorAssetSnapshotV1[] = [];
   let aggregateBundleBytes = 0n;
-  for (let index = 0; index < assets.length; index += 1) {
-    const descriptor = Object.getOwnPropertyDescriptor(assets, String(index));
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      fail(
-        'catalog-successor-producer-input',
-        'assets must contain only enumerable data elements',
-      );
-    }
-    const asset = descriptor.value as Rfc64PublicCatalogSuccessorAssetInputV1;
+  for (const asset of assets) {
     try {
-      // Snapshot each caller-owned field exactly once. In particular, no
-      // stateful projectionBytes getter can change validation vs encoding.
-      const assertionCoordinate = asset?.assertionCoordinate;
-      const projectionInput = asset?.projectionBytes;
-      const sealInput = asset?.seal;
-      if (!(projectionInput instanceof Uint8Array)) {
-        throw new TypeError('projectionBytes must be a Uint8Array');
-      }
       // Reject a projection that cannot possibly fit the Gate-1 transport
       // before allocating its detached snapshot.
       if (
-        BigInt(projectionInput.byteLength)
+        BigInt(asset.projectionBytes.byteLength)
         > BigInt(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1)
           - MIN_KA_BUNDLE_BYTES_V1
       ) {
         throw new RangeError('projection exceeds the Gate-1 complete-bundle ceiling');
       }
-      const projectionBytes = new Uint8Array(projectionInput);
-      const sealBytes = canonicalizeCanonicalGraphScopedAuthorSealBytesV1(sealInput);
-      const seal = parseCanonicalGraphScopedAuthorSealV1(sealBytes);
+      const sealBytes = canonicalizeCanonicalGraphScopedAuthorSealBytesV1(asset.seal);
       const bundleByteLength = calculateOpaqueKaBundleByteLengthV1(
-        BigInt(projectionBytes.byteLength),
+        BigInt(asset.projectionBytes.byteLength),
         BigInt(sealBytes.byteLength),
       );
       if (bundleByteLength > BigInt(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1)) {
@@ -541,9 +560,9 @@ function prepareExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV
         canonicalBundleByteLength,
       );
       snapshots.push(Object.freeze({
-        assertionCoordinate,
-        projectionBytes,
-        seal,
+        assertionCoordinate: asset.assertionCoordinate,
+        projectionBytes: new Uint8Array(asset.projectionBytes),
+        seal: asset.seal,
         sealBytes,
         bundleByteLength,
       }));
@@ -560,20 +579,6 @@ function prepareExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV
     input.previousHead,
     input.deployment,
   ));
-  prepared.sort((left, right) => compareAuthorCatalogKaIdsV1(left.row.kaId, right.row.kaId));
-  for (let index = 1; index < prepared.length; index += 1) {
-    const previous = prepared[index - 1];
-    const current = prepared[index];
-    if (previous === undefined || current === undefined) {
-      fail('catalog-successor-producer-input', 'assets are not a dense exact set');
-    }
-    if (previous.row.kaId === current.row.kaId) {
-      fail(
-        'catalog-successor-producer-input',
-        `assets contain duplicate kaId ${current.row.kaId}`,
-      );
-    }
-  }
   return Object.freeze(prepared);
 }
 

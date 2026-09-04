@@ -11,8 +11,11 @@ import type {
   SyncResponderSnapshotLimitsConfig,
 } from '@origintrail-official/dkg-agent';
 import {
+  resolveRfc64CatalogActivationsV1,
+  type ResolvedRfc64CatalogActivationConfigV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogActivationConfigV1,
+  type Rfc64CatalogActivationConfigV1,
   type ResolvedRfc64PublicCatalogActivationConfigV1,
   type Rfc64PublicCatalogActivationChainIdentityV1,
   type Rfc64PublicCatalogActivationConfigV1,
@@ -528,6 +531,9 @@ export type ResolvedRfc64PublicCatalogActivationConfig =
   ResolvedRfc64PublicCatalogActivationConfigV1;
 export type Rfc64PublicCatalogActivationChainIdentity =
   Rfc64PublicCatalogActivationChainIdentityV1;
+export type Rfc64CatalogActivationConfig = Rfc64CatalogActivationConfigV1;
+export type ResolvedRfc64CatalogActivationConfig =
+  ResolvedRfc64CatalogActivationConfigV1;
 
 export interface LoggingConfig {
   /** Emit detailed KA publish lifecycle logs. Default: false. */
@@ -624,6 +630,13 @@ export interface DkgConfig {
   contextGraphs?: string[];
   /** Opt-in, bounded RFC-64 catalog activation for explicitly selected public CGs. */
   rfc64PublicCatalog?: Rfc64PublicCatalogActivationConfig;
+  /**
+   * Additive, bounded RFC-64 activation for explicitly selected public or
+   * invite-only CGs. Private selections require a manual policy, roster, and
+   * exact peer-to-agent authority map. Release 3 permits up to eight complete
+   * current-roster providers for bounded failover.
+   */
+  rfc64Catalog?: Rfc64CatalogActivationConfig;
   /**
    * Explicitly trusted context graphs that daemon startup may create locally
    * instead of treating as remote subscription targets. Intended for local
@@ -755,7 +768,7 @@ export interface DkgConfig {
   /**
    * Opt-in telemetry streaming to a central network dashboard.
    * `enabled` is the master gate: when false, NOTHING is forwarded off the
-   * node (local logging — SQLite + daemon.log — is always on regardless).
+   * node (local daemon.log and dashboard operational history remain on).
    */
   telemetry?: {
     enabled?: boolean;
@@ -844,8 +857,19 @@ export interface DkgConfig {
     enabled?: boolean;
     pollIntervalMs?: number;
     errorBackoffMs?: number;
-    /** How often to check submitted transactions for chain confirmation. Default 60000ms. */
+    /**
+     * The IDLE sweep: how often to check submitted transactions for chain confirmation when the
+     * queue reports no transaction awaiting proof (crash recovery, missed wake-ups).
+     * Default 60000ms.
+     */
     recoveryIntervalMs?: number;
+    /**
+     * The ACTIVE reconcile cadence: how often to re-check while at least one submitted
+     * transaction is still awaiting chain proof. The publisher additionally wakes reconciliation
+     * immediately when a receipt task settles, so this bounds only the re-check loop for
+     * transactions whose proof was not yet available. Default 5000ms.
+     */
+    activeRecoveryIntervalMs?: number;
     /**
      * Retry budget per job — ONE counter shared by the publisher's automatic
      * retries and manual reaccepts, snapshot at admission. Default 10.
@@ -1175,6 +1199,17 @@ export function resolveRfc64PublicCatalogActivation(
     config.rfc64PublicCatalog,
     chainIdentity,
   );
+}
+
+/** Resolve the policy-neutral union and the compatibility public projection. */
+export function resolveRfc64CatalogActivations(
+  config: Pick<DkgConfig, 'rfc64Catalog' | 'rfc64PublicCatalog'>,
+  chainIdentity: Rfc64PublicCatalogActivationChainIdentity,
+) {
+  return resolveRfc64CatalogActivationsV1({
+    catalog: config.rfc64Catalog,
+    publicCatalog: config.rfc64PublicCatalog,
+  }, chainIdentity);
 }
 
 export { resolveRfc64PublicCatalogActivationChainIdentityV1 };

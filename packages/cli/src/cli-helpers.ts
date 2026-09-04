@@ -14,12 +14,11 @@ import {
   requestFaucetFunding,
   resolveDkgConfigHome,
   toErrorMessage,
-  hasErrorCode,
 } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath,
-  readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
+  readApiPort, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
   activeSlot, swapSlot,
@@ -51,6 +50,7 @@ import {
 } from './daemon/supervisor-liveness.js';
 import { migrateToBlueGreen, noteEdgeLegacyReleases } from './migration.js';
 import { ensureRollbackNodeUiBundle } from './rollback-node-ui.js';
+import { stopDaemonIfRunning } from './update/stop-daemon.js';
 
 function isDaemonUnreachable(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -360,22 +360,6 @@ function formatQuadObject(object: string): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
-}
-
-/** Returns true if daemon was stopped (or not running). False if it couldn't be stopped. */
-async function stopDaemonIfRunning(): Promise<boolean> {
-  const pid = await readPid();
-  if (!pid || !isProcessRunning(pid)) return true;
-  console.log('Stopping daemon...');
-  try { process.kill(pid, 'SIGTERM'); } catch (err) {
-    if (!hasErrorCode(err, 'ESRCH')) throw err;
-  }
-  for (let i = 0; i < 20; i++) {
-    await sleep(500);
-    if (!isProcessRunning(pid)) return true;
-  }
-  console.error('Daemon is still running after SIGTERM. Stop it manually before restarting.');
-  return false;
 }
 
 export {

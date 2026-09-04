@@ -22,9 +22,13 @@
  * tests in `packages/publisher/test/draft-lifecycle.test.ts`).
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { createServer, type Server } from 'node:http';
+import { StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
+import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const CG_ID = 'issue-864-cg';
 const ASSERTION_NAME = 'orphan-assertion';
@@ -119,8 +123,8 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
           apiPortRef: { value: 0 },
           url,
           path: url.pathname,
-          requestToken: undefined,
           requestAgentAddress: 'did:dkg:agent:test',
+          authentication: requestAuthentication({ kind: 'anonymous' }),
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);
@@ -211,6 +215,31 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
     expect(res.status).toBe(200);
     // KA swm/share wraps the promotedCount in the share envelope.
     expect(res.body).toEqual({ swmShared: true, promotedCount: 49 });
+  });
+
+  it('preserves the retryable 503 contract for a committed exact SWM replacement timeout', async () => {
+    await startWithPromoteImpl(async () => {
+      throw classifyExactSwmGraphReplaceFailure(
+        new StoreOperationTimeoutError({
+          backend: 'managed-oxigraph',
+          operation: 'replaceGraph',
+          timeoutMs: 30_000,
+          outcome: 'indeterminate',
+        }),
+      );
+    });
+
+    const res = await postPromote({ contextGraphId: CG_ID, entities: 'all' });
+
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      code: 'STORE_OPERATION_TIMEOUT',
+      retryable: true,
+      outcome: 'indeterminate',
+      backend: 'managed-oxigraph',
+      operation: 'replaceGraph',
+      timeoutMs: 30_000,
+    });
   });
 
   it('returns 200 with an explicit non-share outcome when promote moves zero rows', async () => {

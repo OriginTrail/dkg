@@ -66,6 +66,7 @@
  * server reads them from `~/.dkg/config.yaml` + the daemon-written
  * `auth.token` via `loadConfig` (`packages/mcp-dkg/src/config.ts`).
  */
+import { renderStandaloneDkgNodeSkill } from './skill-template.js';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir, platform, release as osRelease } from 'node:os';
@@ -1626,15 +1627,6 @@ function skillTargetForClient(target: ClientTarget, home: string): string | null
   return null;
 }
 
-/**
- * Load the bundled DKG-node SKILL.md from the npm package's `skills/`
- * directory. Same shape as `loadBundledDkgNodeSkill()` in
- * `hermes-setup.ts` so the two delivery paths share the canonical
- * source artifact byte-for-byte.
- */
-function loadBundledDkgNodeSkill(): string {
-  return readFileSync(new URL('../skills/dkg-node/SKILL.md', import.meta.url), 'utf-8');
-}
 
 /**
  * Copy the bundled SKILL.md into the per-client skills directory if
@@ -1656,7 +1648,7 @@ function deliverSkillToClient(target: ClientTarget): string | null {
   const skillPath = skillTargetForClient(target, home);
   if (!skillPath) return null;
   try {
-    const skillContent = loadBundledDkgNodeSkill();
+    const skillContent = renderStandaloneDkgNodeSkill();
     const skillDir = dirname(skillPath);
     if (!existsSync(skillDir)) mkdirSync(skillDir, { recursive: true });
     writeFileSync(skillPath, skillContent);

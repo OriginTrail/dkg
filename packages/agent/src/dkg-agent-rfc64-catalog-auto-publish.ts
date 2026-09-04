@@ -1,34 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Opt-in RFC-64 SWM inventory and explicit public-catalog authoring support.
- * Finalized VM remains inventoried by the chain and never advances this lane.
+ * Selected-CG RFC-64 SWM inventory and public-catalog authoring support.
+ * Finalized VM remains inventoried by the chain. Public/owner-signed lanes
+ * retract confirmed SWM-only rows; finalized private lanes publish the
+ * authenticated recovery placement only after confirmation.
  */
 
 import {
   assertAssertionCoordinateV1,
   assertContextGraphIdV1,
-  assertSafeIri,
   assertSubGraphNameV1,
   assertSwmAuthorInventoryShareOperationIdV1,
   canonicalGraphScopedAuthorSealFromAssertionSealV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeKaProjectionDigestV1,
-  contextGraphAssertionUri,
-  contextGraphMetaUri,
+  computeSwmAuthorInventoryScopeDigestV1,
   createOperationContext,
   encodeCanonicalCgSharedPublicRootProjectionV1,
-  parseGraphScopedAssertionSealCandidate,
   type AssertionCoordinateV1,
   type AssertionSeal,
-  type AuthorLaneScopeV1,
   type AuthorCatalogScopeV1,
-  type CatalogSealDeploymentProfileV1,
   type ContextGraphIdV1,
   type CountV1,
   type Digest32V1,
   type EvmAddressV1,
-  type NetworkIdV1,
   type OperationContext,
   type SubGraphNameV1,
   type SwmAuthorInventoryScopeV1,
@@ -40,48 +36,45 @@ import {
   resolveKnowledgeAssetOperationPublicQuads,
   resolvePublishedKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
-import { ethers } from 'ethers';
-
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import {
+  rfc64CatalogLaneAcceptsWorkspaceHeadV1,
+} from './dkg-agent-rfc64-swm-catalog-projection.js';
 import type {
-  Rfc64CatalogAuthorSignerV1,
   Rfc64CatalogSuccessorAssetInputV1,
 } from './dkg-agent-rfc64-catalog.js';
-import type { Rfc64PublicCatalogAutoPublishConfigV1 } from './dkg-agent-types.js';
-import { snapshotRfc64CatalogDeploymentProfileV1 } from './rfc64/catalog-authority-config-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
-import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
 import {
   maintainRfc64SwmAuthorInventoryV1,
   removeRfc64SwmAuthorInventoryRowV1,
+  type Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1,
+  type RemoveRfc64SwmAuthorInventoryResultV1,
 } from './rfc64/swm-author-inventory-producer-v1.js';
 import {
-  Rfc64SwmInventoryShadowRuntimeV1,
+  rfc64SwmInventoryShadowRuntimeV1,
   type Rfc64SwmAuthorInventoryShadowMutationResultV1,
   type Rfc64SwmAuthorInventoryShadowStatusV1,
 } from './rfc64/swm-inventory-shadow-runtime-v1.js';
+import { resolveDurableGraphScopedAuthorSealCandidateV1 } from
+  './durable-author-seal-resolver-v1.js';
+import {
+  snapshotRfc64FinalizedPrivatePlacementRepairV1,
+  type Rfc64FinalizedPrivatePlacementRepairV1,
+} from './rfc64/finalized-private-placement-repair-store-v1.js';
 
 export type {
   Rfc64SwmAuthorInventoryShadowMutationResultV1,
   Rfc64SwmAuthorInventoryShadowStatusV1,
 } from './rfc64/swm-inventory-shadow-runtime-v1.js';
 
-const rfc64SwmInventoryShadowRuntimesV1 = new WeakMap<
-  DKGAgent,
-  Rfc64SwmInventoryShadowRuntimeV1
->();
-
-function rfc64SwmInventoryShadowRuntimeV1(
-  agent: DKGAgent,
-): Rfc64SwmInventoryShadowRuntimeV1 {
-  let runtime = rfc64SwmInventoryShadowRuntimesV1.get(agent);
-  if (runtime === undefined) {
-    runtime = new Rfc64SwmInventoryShadowRuntimeV1();
-    rfc64SwmInventoryShadowRuntimesV1.set(agent, runtime);
-  }
-  return runtime;
-}
+// Compatibility exports for consumers of the historically public dist/*
+// subpath. The implementation moved to the projection owner, but the named
+// types remain available from their original module path.
+export type {
+  ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1,
+  ReconcileRfc64PublicCatalogFromSwmInventoryResultV1,
+} from './dkg-agent-rfc64-swm-catalog-projection.js';
 
 function rfc64SwmInventoryAssetKeyV1(input: Readonly<{
   contextGraphId: string;
@@ -156,14 +149,6 @@ export interface ObserveRfc64ConfirmedVmParamsV1 {
   readonly publicationLabel: 'publish' | 'queued publish';
 }
 
-interface ResolvedRfc64AcceptedPublicRootLaneV1 {
-  readonly networkId: NetworkIdV1;
-  readonly service: Rfc64PublicCatalogServiceV1;
-  readonly autoPublishConfig: Readonly<Rfc64PublicCatalogAutoPublishConfigV1>;
-  /** Domain-neutral accepted public-root lane shared by catalog and SWM builders. */
-  readonly scopeBase: Readonly<Omit<AuthorLaneScopeV1, 'authorAddress'>>;
-}
-
 export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   /**
    * One post-commit hook shared by every durable WM to SWM promotion path.
@@ -188,17 +173,33 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     });
   }
 
-  /** Background observer body; failures are contained and logged. */
+  /**
+   * Background observer body; failures are contained and logged. A durable
+   * inventory mutation for a selected CG requests its scope-owned signed
+   * catalog target. Public lanes reconcile an exact SWM set; finalized private
+   * lanes monotonically merge the same tier-neutral rows so VM placement does
+   * not remove authored content. Retrying an already-present row also
+   * re-requests a catalog reconciliation that may have failed after the prior
+   * inventory commit, without making the detached observer own projection
+   * lifetime.
+   */
   async observeRfc64DurableSwmPromotionV1(
     this: DKGAgent,
     params: ObserveRfc64DurableSwmPromotionParamsV1,
   ): Promise<void> {
     try {
-      await this.recordRfc64SwmAuthorInventoryShadowV1(params);
+      const result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
+      if (result.status === 'applied' || result.status === 'existing') {
+        this.requestRfc64SwmCatalogProjectionV1({
+          contextGraphId: params.contextGraphId as ContextGraphIdV1,
+          authorAddress: params.lifecycleAgentAddress.toLowerCase() as EvmAddressV1,
+          ctx: params.ctx,
+        });
+      }
     } catch (cause) {
       this.log.warn(
         params.ctx,
-        `RFC-64 SWM inventory shadow escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`,
+        `RFC-64 SWM inventory/catalog lifecycle escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
     }
   }
@@ -206,6 +207,17 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   /** Await a point-in-time observer snapshot for tests and controlled drains. */
   async awaitInFlightRfc64SwmInventoryObserversV1(this: DKGAgent): Promise<void> {
     await rfc64SwmInventoryShadowRuntimeV1(this).drain();
+    await this.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+  }
+
+  /** Reopen the fully drained observer owner for same-instance restart. */
+  openRfc64SwmInventoryObserversV1(this: DKGAgent): void {
+    rfc64SwmInventoryShadowRuntimeV1(this).reopen();
+  }
+
+  /** Fence detached inventory observers before projection and persistence close. */
+  async closeRfc64SwmInventoryObserversV1(this: DKGAgent): Promise<void> {
+    await rfc64SwmInventoryShadowRuntimeV1(this).closeAndDrain();
   }
 
   inFlightRfc64SwmInventoryObserverCountV1(this: DKGAgent): number {
@@ -229,9 +241,11 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   }
 
   /**
-   * Canonical post-confirmation observer for exact SWM-inventory removal.
-   * Finalized VM is already inventoried by the chain and therefore MUST NOT
-   * advance an RFC-64 catalog head.
+   * Canonical post-confirmation observer. Public SWM-only lanes retract the
+   * pending row. A finalized private lane appends the now-chain-backed
+   * placement to its durable recovery catalog while retaining its tier-neutral
+   * author-inventory row. The irreversible publish response never waits for
+   * this observer.
    */
   async observeRfc64ConfirmedVmV1(
     this: DKGAgent,
@@ -265,24 +279,102 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       authorAddress: confirmedSeal.authorAddress,
       assertionCoordinate,
     });
+    let finalizedPrivateInventoryScope: SwmAuthorInventoryScopeV1 | null = null;
+    try {
+      const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, subGraphName);
+      if (lane?.acceptsFinalizedVmRepair === true) {
+        finalizedPrivateInventoryScope = Object.freeze({
+          ...lane.scopeBase,
+          authorAddress: confirmedSeal.authorAddress,
+        }) as SwmAuthorInventoryScopeV1;
+      }
+    } catch (cause) {
+      this.log.warn(
+        params.ctx,
+        `Confirmed ${params.publicationLabel} but RFC-64 catalog authority was unavailable: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+      return;
+    }
+    // Fence every confirmed version, including confirmation-gated finalized
+    // private repairs, until the asset-tail repair and queued observers drain.
+    // Newer assertion versions use distinct fence entries and remain eligible.
     shadowRuntime.markVmConfirmed(assetKey, confirmedSeal.assertionVersion);
+    let finalizedPrivateAttempt: Promise<void> | null = null;
     try {
       await shadowRuntime.runExclusive(
         assetKey,
         async () => {
-          await this.removeRfc64SwmAuthorInventoryShadowV1({
+          if (finalizedPrivateInventoryScope !== null) {
+            const persistence = this.rfc64PersistenceV1;
+            if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
+            const repair = snapshotRfc64FinalizedPrivatePlacementRepairV1({
+              version: 1,
+              contextGraphId: contextGraphId as ContextGraphIdV1,
+              authorAddress: confirmedSeal.authorAddress,
+              inventoryScope: finalizedPrivateInventoryScope,
+              assertionCoordinate,
+              assertionVersion: confirmedSeal.assertionVersion,
+              kaUal: confirmedSeal.kaUal,
+              sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(confirmedSeal),
+            });
+            // This durable marker is the restart boundary: pre-confirmation
+            // rows have none, while every admitted post-confirmation placement
+            // survives a crash or transient signing/catalog failure.
+            await persistence.finalizedPrivatePlacementRepairs.put(repair);
+            finalizedPrivateAttempt = this.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({
+              repair,
+              ctx: params.ctx,
+            }).whenAttempted;
+            return;
+          }
+          const result = await this.removeRfc64SwmAuthorInventoryShadowV1({
             contextGraphId,
             subGraphName,
             seal: params.seal,
           });
+          if (result.status === 'applied' || result.status === 'absent') {
+            this.requestRfc64SwmCatalogProjectionV1({
+              contextGraphId: contextGraphId as ContextGraphIdV1,
+              authorAddress: confirmedSeal.authorAddress,
+              ctx: params.ctx,
+            });
+          }
         },
       );
+      await finalizedPrivateAttempt;
     } catch (cause) {
       this.log.warn(
         params.ctx,
         `Confirmed ${params.publicationLabel} but RFC-64 SWM inventory shadow removal escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
     }
+  }
+
+  /** Idempotent durable repair body owned by the catalog supervisor. */
+  async repairRfc64FinalizedPrivateCatalogPlacementV1(
+    this: DKGAgent,
+    repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+  ): Promise<'repaired' | 'already-complete'> {
+    const persistence = this.rfc64PersistenceV1;
+    if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
+    const assetKey = rfc64SwmInventoryAssetKeyV1({
+      contextGraphId: repair.contextGraphId,
+      authorAddress: repair.authorAddress,
+      assertionCoordinate: repair.assertionCoordinate,
+    });
+    let outcome: 'repaired' | 'already-complete' | null = null;
+    await rfc64SwmInventoryShadowRuntimeV1(this).runExclusive(assetKey, async () => {
+      const applied = await this.publishRfc64FinalizedPrivateCatalogPlacementV1(repair);
+      if (applied === null) {
+        await persistence.finalizedPrivatePlacementRepairs.delete(repair);
+        outcome = 'already-complete';
+        return;
+      }
+      await persistence.finalizedPrivatePlacementRepairs.delete(repair);
+      outcome = 'repaired';
+    });
+    if (outcome === null) throw new Error('RFC-64 finalized-private placement repair did not run');
+    return outcome;
   }
 
   readRfc64SwmAuthorInventorySnapshotV1(
@@ -307,7 +399,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
 
   /**
    * Observe an already-durable WM→SWM commit without participating in its outcome.
-   * Unsupported/private/unselected graphs are dormant; every attempted failure is
+   * Unsupported/unselected graphs are dormant; every attempted failure is
    * counted and logged, then returned instead of crossing back into the user write.
    */
   async recordRfc64SwmAuthorInventoryShadowV1(
@@ -316,7 +408,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   ): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
     let kaUal: string | null = null;
     try {
-      const lane = this.resolveRfc64AcceptedPublicRootLaneV1(
+      const lane = this.resolveRfc64CatalogAuthoringLaneV1(
         params.contextGraphId,
         params.subGraphName,
       );
@@ -334,21 +426,14 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       );
       const shareOperationId = params.shareOperationId;
       assertSwmAuthorInventoryShareOperationIdV1(shareOperationId);
-      const assertionUri = contextGraphAssertionUri(
-        params.contextGraphId,
-        params.lifecycleAgentAddress,
-        params.assertionCoordinate,
-        params.subGraphName ?? undefined,
-      );
-      const metaGraph = contextGraphMetaUri(params.contextGraphId);
-      const sealResult = await this.store.query(
-        `CONSTRUCT { <${assertSafeIri(assertionUri)}> ?p ?o } WHERE { GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(assertionUri)}> ?p ?o } }`,
-        { source: 'agent.rfc64.swmInventory.seal' },
-      );
-      const candidate = parseGraphScopedAssertionSealCandidate(
-        sealResult.type === 'quads' ? sealResult.quads : [],
-        assertionUri,
-      );
+      const candidate = await resolveDurableGraphScopedAuthorSealCandidateV1({
+        store: this.store,
+        contextGraphId: params.contextGraphId,
+        agentAddress: params.lifecycleAgentAddress,
+        assertionCoordinate: params.assertionCoordinate,
+        subGraphName: params.subGraphName ?? undefined,
+        source: 'agent.rfc64.swmInventory.seal',
+      });
       if (candidate === undefined) {
         throw new Error('durable SWM assertion has no strict graph-scoped author seal');
       }
@@ -392,10 +477,10 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         || head.publicTripleCount !== Number(canonicalSeal.publicTripleCount)
         || head.privateTripleCount !== Number(canonicalSeal.privateTripleCount)
       ) throw new Error('durable SWM head does not match the committed share and author seal');
-      // This inventory is a public-discovery artifact. A public Context Graph
-      // may still contain restricted individual shares, which must remain
-      // invisible to this lane rather than leaking their UAL or operation id.
-      if (head.accessPolicy !== 'public') {
+      // Public catalogs never reveal restricted individual shares. A selected
+      // private CG instead carries the same public projection only through its
+      // roster-authenticated V2 catalog transport.
+      if (!rfc64CatalogLaneAcceptsWorkspaceHeadV1(lane, head.accessPolicy)) {
         return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
           shadowResult('dormant', 'upsert', 0, null, null),
           params.contextGraphId,
@@ -422,28 +507,32 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
       const signer = this.createRfc64CatalogAuthorSignerV1(canonicalSeal.authorAddress);
       const issuedAt = Math.max(Date.now(), Number(sharedAt)).toString() as TimestampMsV1;
-      const maintained = await maintainRfc64SwmAuthorInventoryV1(
-        persistence.swmAuthorInventory,
-        {
-          scope,
-          row: Object.freeze({
-            assertionCoordinate: params.assertionCoordinate,
-            assertionVersion: canonicalSeal.assertionVersion,
-            kaUal: canonicalSeal.kaUal,
-            shareOperationId,
-            projectionDigest: computeKaProjectionDigestV1(projectionBytes),
-            publicTripleCount: canonicalSeal.publicTripleCount,
-            privateTripleCount: canonicalSeal.privateTripleCount,
-            sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(canonicalSeal),
-            sharedAt,
-            expiresAt: null,
-          }),
-          issuedAt,
-          signer: Object.freeze({
-            issuer: signer.address as EvmAddressV1,
-            signDigest: signer.signMessage,
-          }),
-        },
+      const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(scope);
+      const maintained = await rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
+        `${inventoryScopeDigest}\n${canonicalSeal.authorAddress}`,
+        () => maintainRfc64SwmAuthorInventoryV1(
+          persistence.swmAuthorInventory,
+          {
+            scope,
+            row: Object.freeze({
+              assertionCoordinate: params.assertionCoordinate as AssertionCoordinateV1,
+              assertionVersion: canonicalSeal.assertionVersion,
+              kaUal: canonicalSeal.kaUal,
+              shareOperationId,
+              projectionDigest: computeKaProjectionDigestV1(projectionBytes),
+              publicTripleCount: canonicalSeal.publicTripleCount,
+              privateTripleCount: canonicalSeal.privateTripleCount,
+              sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(canonicalSeal),
+              sharedAt,
+              expiresAt: null,
+            }),
+            issuedAt,
+            signer: Object.freeze({
+              issuer: signer.address as EvmAddressV1,
+              signDigest: signer.signMessage,
+            }),
+          },
+        ),
       );
       return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
         shadowResult(
@@ -465,14 +554,14 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     }
   }
 
-  /** Remove a row after VM confirmation; the chain becomes the VM inventory. */
+  /** Remove one pending SWM-inventory row after its lane-specific confirmation work. */
   async removeRfc64SwmAuthorInventoryShadowV1(
     this: DKGAgent,
     params: RemoveRfc64SwmAuthorInventoryShadowParamsV1,
   ): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
     let kaUal: string | null = null;
     try {
-      const lane = this.resolveRfc64AcceptedPublicRootLaneV1(
+      const lane = this.resolveRfc64CatalogAuthoringLaneV1(
         params.contextGraphId,
         params.subGraphName,
       );
@@ -490,25 +579,14 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         ...lane.scopeBase,
         authorAddress: seal.authorAddress,
       });
-      const persistence = this.rfc64PersistenceV1;
-      if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
-      const signer = this.createRfc64CatalogAuthorSignerV1(seal.authorAddress);
-      const removed = await removeRfc64SwmAuthorInventoryRowV1(
-        persistence.swmAuthorInventory,
-        {
+      const removed = await this.removeRfc64SwmAuthorInventoryConfirmedRowV1({
         scope,
         expectedRow: Object.freeze({
-          kaUal: seal.kaUal,
           assertionVersion: seal.assertionVersion,
+          kaUal: seal.kaUal,
           sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal),
         }),
-        issuedAt: Date.now().toString() as TimestampMsV1,
-        signer: Object.freeze({
-          issuer: signer.address as EvmAddressV1,
-          signDigest: signer.signMessage,
-        }),
-        },
-      );
+      });
       return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
         shadowResult(
           removed.status,
@@ -529,6 +607,35 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     }
   }
 
+  /** Remove the exact confirmed row without requiring its transient AssertionSeal object. */
+  async removeRfc64SwmAuthorInventoryConfirmedRowV1(
+    this: DKGAgent,
+    params: Readonly<{
+      readonly scope: SwmAuthorInventoryScopeV1;
+      readonly expectedRow: Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1;
+    }>,
+  ): Promise<RemoveRfc64SwmAuthorInventoryResultV1> {
+    const persistence = this.rfc64PersistenceV1;
+    if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
+    const signer = this.createRfc64CatalogAuthorSignerV1(params.scope.authorAddress);
+    const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(params.scope);
+    return rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
+      `${inventoryScopeDigest}\n${params.scope.authorAddress}`,
+      () => removeRfc64SwmAuthorInventoryRowV1(
+        persistence.swmAuthorInventory,
+        {
+          scope: params.scope,
+          expectedRow: params.expectedRow,
+          issuedAt: Date.now().toString() as TimestampMsV1,
+          signer: Object.freeze({
+            issuer: signer.address as EvmAddressV1,
+            signDigest: signer.signMessage,
+          }),
+        },
+      ),
+    );
+  }
+
   /**
    * Explicit low-level public-root catalog authoring entrypoint. This is kept
    * for catalog construction and the upcoming SWM producer lane; it is not a
@@ -539,11 +646,12 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: RecordRfc64PublicCatalogAssetParamsV1,
   ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
-    const lane = this.resolveRfc64AcceptedPublicRootLaneV1(
+    const lane = this.resolveRfc64CatalogAuthoringLaneV1(
       params.contextGraphId,
       params.subGraphName,
     );
     if (lane === null) return null;
+    if (lane.kind !== 'public') return null;
     const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
     // V1 deliberately catalogs public-only KA projections. Private-bearing
     // assets require the reserved cg-shared-v1 anchor/hash statements in the
@@ -571,12 +679,9 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       author: this.createRfc64CatalogAuthorSignerV1(seal.authorAddress),
       asset,
       deployment: await this.resolveRfc64AutoPublishDeploymentProfileV1(lane.networkId),
-      peers: lane.autoPublishConfig.peers,
-      catalogIssuerDelegationEffectiveAt:
-        lane.autoPublishConfig.catalogIssuerDelegationEffectiveAt
-        ?? ('0' as TimestampMsV1),
-      catalogIssuerDelegationExpiresAt:
-        lane.autoPublishConfig.catalogIssuerDelegationExpiresAt,
+      peers: lane.announcementPeers,
+      catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
+      catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
     });
   }
 
@@ -589,53 +694,6 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     params: RecordConfirmedRfc64PublicCatalogAssetParamsV1,
   ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
     return this.recordRfc64PublicCatalogAssetV1(params);
-  }
-
-  /** One canonical activation, policy, ownership, and era boundary for catalog and SWM. */
-  private resolveRfc64AcceptedPublicRootLaneV1(
-    this: DKGAgent,
-    contextGraphId: string,
-    subGraphName: string | null | undefined,
-  ): ResolvedRfc64AcceptedPublicRootLaneV1 | null {
-    const policy = this.config.rfc64PublicCatalogAutoPublishPolicy;
-    if (
-      policy === undefined
-      || (subGraphName !== undefined && subGraphName !== null)
-      || (
-        policy.mode === 'selected-public'
-        && !policy.selectedContextGraphs.includes(contextGraphId)
-      )
-    ) return null;
-    assertContextGraphIdV1(contextGraphId, 'RFC-64 public-root contextGraphId');
-    const networkId = (this.config.rfc64CatalogDeploymentProfile?.networkId
-      ?? this.chain.chainId) as NetworkIdV1;
-    if (networkId === 'none') {
-      throw new Error('RFC-64 public-root activation requires a trusted deployment network');
-    }
-    const service = this.rfc64PublicCatalogServiceV1;
-    if (service === undefined) {
-      throw new Error('RFC-64 public catalog service is unavailable');
-    }
-    const acceptedPolicy = service.acceptedPolicySnapshot(networkId, contextGraphId);
-    if (acceptedPolicy === null || acceptedPolicy.policy.accessPolicy !== 0) {
-      throw new Error(
-        'RFC-64 public-root activation requires an independently accepted current public policy',
-      );
-    }
-    return Object.freeze({
-      networkId,
-      service,
-      autoPublishConfig: policy.config,
-      scopeBase: Object.freeze({
-        networkId,
-        contextGraphId,
-        governanceChainId: acceptedPolicy.policy.governanceChainId,
-        governanceContractAddress: acceptedPolicy.policy.governanceContractAddress,
-        ownershipTransitionDigest: acceptedPolicy.policy.ownershipTransitionDigest,
-        subGraphName: null,
-        era: acceptedPolicy.policy.era,
-      }),
-    });
   }
 
   private failRfc64SwmAuthorInventoryShadowV1(
@@ -660,71 +718,6 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     if (result.status === 'dormant') return result;
     rfc64SwmInventoryShadowRuntimeV1(this).record(result, contextGraphId, kaUal);
     return result;
-  }
-
-  private createRfc64CatalogAuthorSignerV1(
-    this: DKGAgent,
-    authorAddress: EvmAddressV1,
-  ): Rfc64CatalogAuthorSignerV1 {
-    const custodialKey = this.getCustodialAgentPrivateKey(authorAddress);
-    if (custodialKey !== undefined) {
-      const wallet = new ethers.Wallet(
-        custodialKey.startsWith('0x') ? custodialKey : `0x${custodialKey}`,
-      );
-      if (wallet.address.toLowerCase() !== authorAddress) {
-        throw new Error('RFC-64 custodial author key does not match the confirmed seal');
-      }
-      return Object.freeze({
-        address: authorAddress,
-        signMessage: (message: Uint8Array) => wallet.signMessage(message),
-      });
-    }
-    const signMessageAs = this.chain.signMessageAs?.bind(this.chain);
-    const signMessage = this.chain.signMessage?.bind(this.chain);
-    return Object.freeze({
-      address: authorAddress,
-      signMessage: async (message: Uint8Array) => {
-        const compact = signMessageAs !== undefined
-          ? await signMessageAs(authorAddress, message)
-          : signMessage !== undefined
-            ? await signMessage(message)
-            : (() => { throw new Error('RFC-64 configured chain has no message signer'); })();
-        const signature = ethers.Signature.from({
-          r: ethers.hexlify(compact.r),
-          yParityAndS: ethers.hexlify(compact.vs),
-        }).serialized;
-        if (ethers.verifyMessage(message, signature).toLowerCase() !== authorAddress) {
-          throw new Error('RFC-64 configured publisher cannot sign for the confirmed KA author');
-        }
-        return signature;
-      },
-    });
-  }
-
-  private async resolveRfc64AutoPublishDeploymentProfileV1(
-    this: DKGAgent,
-    networkId: NetworkIdV1,
-  ): Promise<CatalogSealDeploymentProfileV1> {
-    let deployment = this.config.rfc64CatalogDeploymentProfile;
-    const trustedNetworkId = deployment?.networkId ?? this.chain.chainId;
-    if (trustedNetworkId === 'none' || trustedNetworkId !== networkId) {
-      throw new Error('RFC-64 auto-publish network differs from the trusted deployment');
-    }
-    if (deployment === undefined) {
-      const [chainId, kav10Address] = await Promise.all([
-        this.chain.getEvmChainId(),
-        this.chain.getKnowledgeAssetsLifecycleAddress(),
-      ]);
-      deployment = snapshotRfc64CatalogDeploymentProfileV1({
-        networkId,
-        assertedAtChainId: chainId.toString() as never,
-        assertedAtKav10Address: kav10Address as EvmAddressV1,
-      });
-      if (deployment === undefined) {
-        throw new Error('RFC-64 chain deployment profile resolution failed');
-      }
-    }
-    return deployment;
   }
 
 }

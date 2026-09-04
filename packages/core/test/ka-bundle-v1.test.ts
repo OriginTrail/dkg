@@ -5,6 +5,7 @@ import {
   assertOpaqueKaBundleByteLengthV1,
   calculateOpaqueKaBundleByteLengthV1,
   computeKaProjectionDigestV1,
+  createKaProjectionDigestAccumulatorV1,
   decodeOpaqueKaBundleV1,
   encodeOpaqueKaBundleV1,
   type KaBundleV1ErrorCode,
@@ -48,6 +49,15 @@ describe('RFC-64 dormant opaque KA bundle framing', () => {
     expect(lowerHex(decoded.sealBytes)).toBe('6263');
     expect(decoded.projectionDigest).toBe(A_PROJECTION_DIGEST);
     expect(decoded.blobDigest).toBe(A_BC_BLOB_DIGEST);
+  });
+
+  it('computes the same projection digest incrementally without buffering', () => {
+    const accumulator = createKaProjectionDigestAccumulatorV1();
+    accumulator.update(fromHex('61'));
+    accumulator.update(fromHex('6263'));
+    expect(accumulator.digest()).toBe(computeKaProjectionDigestV1(fromHex('616263')));
+    expect(accumulator.digest()).toBe(computeKaProjectionDigestV1(fromHex('616263')));
+    expect(() => accumulator.update(fromHex('64'))).toThrow(/already finalized/);
   });
 
   it('returns zero-copy component views from a decoded bundle', () => {

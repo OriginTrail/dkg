@@ -10,8 +10,22 @@ import type {
   SelectResult,
   StorePressureSnapshot,
   TripleStore,
+  TripleStoreDecorator,
 } from './triple-store.js';
+import { deleteByPatternWithoutCount } from './triple-store.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
+import type {
+  Rfc64AuthorCommitCasInputV1,
+  Rfc64AuthorCommitCasResultV1,
+} from './rfc64-author-commit-cas.js';
+import {
+  mapRfc64AuthorCommitCasV1,
+  normalizeRfc64AuthorCommitCasV1,
+  sourceFromNormalizedRfc64AuthorCommitCasV1,
+} from './rfc64-author-commit-cas.js';
+import {
+  ContentAddressedBlobSingleFlight,
+} from './content-addressed-blob-single-flight.js';
 
 export const EXTERNAL_LITERAL_REF_DATATYPE = 'http://dkg.io/ontology/externalLiteralRef';
 export const SHARED_MEMORY_GRAPH_SUFFIX = '/_shared_memory';
@@ -31,7 +45,7 @@ export interface SharedMemoryLiteralBlobStoreOptions {
   thresholdBytes: number;
 }
 
-export class SharedMemoryLiteralBlobStore implements TripleStore {
+export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   get queryCancellation() {
     return this.inner.queryCancellation;
   }
@@ -44,7 +58,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
   private readonly inner: TripleStore;
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
-  private readonly pendingBlobWrites = new Map<string, Promise<void>>();
+  private readonly blobWrites: ContentAddressedBlobSingleFlight;
 
   constructor(inner: TripleStore, options: SharedMemoryLiteralBlobStoreOptions) {
     if (!options.blobDir?.trim()) {
@@ -57,14 +71,15 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     this.innerStore = inner;
     this.blobDir = options.blobDir;
     this.thresholdBytes = options.thresholdBytes;
+    this.blobWrites = new ContentAddressedBlobSingleFlight({
+      createOrVerify: (hash, term) => this.writeBlobFile(hash, term),
+    });
   }
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
     if (quads.length === 0) return this.inner.insert(quads, options);
-    const externalized = await Promise.all(
-      quads.map((quad) => this.externalizeInsertQuad(quad)),
-    );
-    return this.inner.insert(externalized, options);
+    return this.withExternalizedQuads(quads, (externalized) =>
+      this.inner.insert(externalized, options));
   }
 
   async delete(quads: Quad[], options?: QueryOptions): Promise<void> {
@@ -85,6 +100,20 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     return removed;
   }
 
+  async deleteByPatternWithoutCount(
+    pattern: Partial<Quad>,
+    options?: QueryOptions,
+  ): Promise<void> {
+    const translated = this.translateDeletePattern(pattern);
+    if (!Array.isArray(translated)) {
+      await deleteByPatternWithoutCount(this.inner, translated, options);
+      return;
+    }
+    for (const item of translated) {
+      await deleteByPatternWithoutCount(this.inner, item, options);
+    }
+  }
+
   async replaceGraph(
     graphUri: string,
     quads: Quad[],
@@ -96,10 +125,8 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
         'SharedMemoryLiteralBlobStore',
       );
     }
-    const externalized = await Promise.all(
-      quads.map((quad) => this.externalizeInsertQuad(quad)),
-    );
-    await this.inner.replaceGraph(graphUri, externalized, options);
+    await this.withExternalizedQuads(quads, (externalized) =>
+      this.inner.replaceGraph!(graphUri, externalized, options));
   }
 
   async replaceGraphAndSubject(
@@ -116,17 +143,16 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
         'SharedMemoryLiteralBlobStore',
       );
     }
-    const [externalizedGraph, externalizedMetadata] = await Promise.all([
-      Promise.all(graphQuads.map((quad) => this.externalizeInsertQuad(quad))),
-      Promise.all(metadataQuads.map((quad) => this.externalizeInsertQuad(quad))),
-    ]);
-    await this.inner.replaceGraphAndSubject(
-      graphUri,
-      externalizedGraph,
-      metaGraphUri,
-      metadataSubject,
-      externalizedMetadata,
-      options,
+    await this.withExternalizedQuads(
+      [...graphQuads, ...metadataQuads],
+      (externalized) => this.inner.replaceGraphAndSubject!(
+        graphUri,
+        externalized.slice(0, graphQuads.length),
+        metaGraphUri,
+        metadataSubject,
+        externalized.slice(graphQuads.length),
+        options,
+      ),
     );
   }
 
@@ -145,10 +171,34 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     // Externalize oversized literals before the replace, exactly like insert() /
     // replaceGraph() — so a large job payload is stored as a blob ref rather than
     // inline, keeping the atomic path byte-consistent with the fallback.
-    const externalized = await Promise.all(
-      quads.map((quad) => this.externalizeInsertQuad(quad)),
+    await this.withExternalizedQuads(quads, (externalized) =>
+      this.inner.replaceSubject!(graphUri, subject, externalized, options));
+  }
+
+  async rfc64AuthorCommitCasV1(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: QueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    if (typeof this.inner.rfc64AuthorCommitCasV1 !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'rfc64AuthorCommitCasV1',
+        'SharedMemoryLiteralBlobStore',
+      );
+    }
+    // Normalize first so an incomplete closed manifest cannot create blobs.
+    // The manifest is also the sole source for decorator traversal: adding a
+    // semantic role to the protocol plan cannot silently bypass blob mapping.
+    const manifest = normalizeRfc64AuthorCommitCasV1(input);
+    const mappedInput = await mapRfc64AuthorCommitCasV1(manifest, {
+      mapQuad: (quad) => this.externalizeInsertQuad(quad),
+      mapObject: (object, context) => context.kind === 'expected'
+        ? this.translateGuardObject(context.graphUri, object)
+        : this.externalizeScalarObject(context.graphUri, object!),
+    });
+    return this.inner.rfc64AuthorCommitCasV1(
+      sourceFromNormalizedRfc64AuthorCommitCasV1(mappedInput),
+      options,
     );
-    await this.inner.replaceSubject(graphUri, subject, externalized, options);
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
@@ -216,12 +266,48 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     return this.inner.close();
   }
 
-  private async externalizeInsertQuad(quad: Quad): Promise<Quad> {
+  private async withExternalizedQuads<T>(
+    quads: readonly Quad[],
+    work: (externalized: Quad[]) => Promise<T>,
+  ): Promise<T> {
+    const externalized = await Promise.all(
+      quads.map((quad) => this.externalizeInsertQuad(quad)),
+    );
+    return work(externalized);
+  }
+
+  private async externalizeInsertQuad(
+    quad: Quad,
+  ): Promise<Quad> {
     if (!shouldExternalizeLiteral(quad, this.thresholdBytes)) return quad;
 
     const hash = sha256Term(quad.object);
-    await this.writeBlob(hash, quad.object);
+    await this.blobWrites.createOrVerify(hash, quad.object);
     return { ...quad, object: externalLiteralRefTerm(hash) };
+  }
+
+  private async translateGuardObject(
+    graphUri: string,
+    object: string | null,
+  ): Promise<string | null> {
+    if (object === null || !shouldExternalizeScalar(graphUri, object, this.thresholdBytes)) {
+      return object;
+    }
+    const hash = sha256Term(object);
+    // A guard compares caller-visible hydrated state with the physical ref.
+    // Require the referenced bytes to exist before dispatching the CAS.
+    await this.readBlob(hash);
+    return externalLiteralRefTerm(hash);
+  }
+
+  private async externalizeScalarObject(
+    graphUri: string,
+    object: string,
+  ): Promise<string> {
+    if (!shouldExternalizeScalar(graphUri, object, this.thresholdBytes)) return object;
+    const hash = sha256Term(object);
+    await this.blobWrites.createOrVerify(hash, object);
+    return externalLiteralRefTerm(hash);
   }
 
   private translateDeleteQuad(quad: Quad): Quad {
@@ -300,24 +386,6 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     return rewritten === sparql ? undefined : rewritten;
   }
 
-  private async writeBlob(hash: string, term: string): Promise<void> {
-    assertSha256Hex(hash);
-    const pending = this.pendingBlobWrites.get(hash);
-    if (pending) {
-      await pending;
-      await this.readBlob(hash);
-      return;
-    }
-
-    const write = this.writeBlobFile(hash, term);
-    this.pendingBlobWrites.set(hash, write);
-    try {
-      await write;
-    } finally {
-      this.pendingBlobWrites.delete(hash);
-    }
-  }
-
   private async writeBlobFile(hash: string, term: string): Promise<void> {
     await mkdir(this.blobDir, { recursive: true });
     const path = this.blobPath(hash);
@@ -363,11 +431,19 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
 }
 
 function shouldExternalizeLiteral(quad: Quad, thresholdBytes: number): boolean {
+  return shouldExternalizeScalar(quad.graph, quad.object, thresholdBytes);
+}
+
+function shouldExternalizeScalar(
+  graph: string | undefined,
+  object: string,
+  thresholdBytes: number,
+): boolean {
   return (
-    isSharedMemoryGraph(quad.graph) &&
-    isSerializedLiteralObjectTerm(quad.object) &&
-    !externalLiteralRefHash(quad.object) &&
-    serializedTermByteLength(quad.object) > thresholdBytes
+    isSharedMemoryGraph(graph) &&
+    isSerializedLiteralObjectTerm(object) &&
+    !externalLiteralRefHash(object) &&
+    serializedTermByteLength(object) > thresholdBytes
   );
 }
 

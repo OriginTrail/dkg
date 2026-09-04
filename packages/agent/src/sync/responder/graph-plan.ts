@@ -10,11 +10,14 @@ import {
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import {
+  asGraphWriteRevisionSource,
+  loadSortedGraphCatalog,
   StoreResponseTooLargeError,
   type QueryOptions,
   type TripleStore,
   type ChangelogReader,
   type ChangeOp,
+  type GraphWriteRevision,
 } from '@origintrail-official/dkg-storage';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncRow, SyncRowListMemo } from './snapshot-cache.js';
@@ -22,6 +25,7 @@ import {
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
   SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS,
+  isSyncRowSnapshotPagingRequiredError,
 } from './snapshot-cache.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -36,6 +40,12 @@ import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-
 import { exactAssetFilterKey } from '../exact-assets.js';
 import { isIriTerm } from '../iri-term.js';
 import type { ExactGraphReadMode } from './durable-data-request-policy.js';
+import { compareCodePoint } from '@origintrail-official/dkg-core';
+import { isLegacySyncGraphCandidateV1 } from '../legacy-sync-graph-candidate.js';
+import {
+  createGraphMembershipSnapshotFromSortedCatalog,
+  type GraphMembershipSnapshot,
+} from '../graph-membership-snapshot.js';
 
 export {
   createResponderSyncRowListMemo,
@@ -43,6 +53,7 @@ export {
   type SyncRow,
   type SyncRowListMemo,
 } from './snapshot-cache.js';
+export { compareCodePoint } from '../code-point-order.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const DKG_SUB_GRAPH = `${DKG}SubGraph`;
@@ -78,7 +89,7 @@ export interface GraphListMemo {
     refresh?: boolean;
     refreshGeneration?: string;
     signal?: AbortSignal;
-  }): Promise<readonly string[]>;
+  }): Promise<GraphMembershipSnapshot>;
 }
 
 export interface SubGraphNameMemo {
@@ -234,14 +245,41 @@ export function createResponderGraphListMemo(
   store: TripleStore,
   ttlMs = 10_000,
 ): GraphListMemo {
+  const writeRevisionSource = asGraphWriteRevisionSource(store);
+  type Revision = GraphWriteRevision | string | undefined;
+  const currentRevision = (refreshGeneration: string | undefined): Revision =>
+    writeRevisionSource?.getWriteRevision('') ?? refreshGeneration;
+  const isWriteRevision = (revision: Revision): revision is GraphWriteRevision =>
+    typeof revision === 'object' && revision !== null;
+  const supersedesCompleted = (stored: Revision, current: Revision): boolean => {
+    if (writeRevisionSource) {
+      return !isWriteRevision(stored)
+        || !isWriteRevision(current)
+        || !stored.stable
+        || !current.stable
+        || stored.generation !== current.generation;
+    }
+    // A deep-page read without a session generation joins/uses the current
+    // snapshot; only an explicitly newer responder session supersedes it.
+    return current !== undefined && stored !== current;
+  };
+  const supersedesInflight = (stored: Revision, current: Revision): boolean => {
+    if (writeRevisionSource) {
+      return !isWriteRevision(stored)
+        || !isWriteRevision(current)
+        || stored.generation !== current.generation;
+    }
+    return current !== undefined && stored !== current;
+  };
+  let lastSnapshot: GraphMembershipSnapshot | null = null;
   let cached: {
-    value: readonly string[];
+    value: GraphMembershipSnapshot;
     cachedAt: number;
-    refreshGeneration?: string;
+    revision: Revision;
   } | null = null;
   let inflight: {
-    promise: Promise<readonly string[]>;
-    refreshGeneration?: string;
+    promise: Promise<GraphMembershipSnapshot>;
+    revision: Revision;
   } | null = null;
   return {
     async get(options?: {
@@ -252,10 +290,12 @@ export function createResponderGraphListMemo(
       throwIfAborted(options?.signal);
       while (inflight) {
         const pending = inflight;
-        const supersedesPending = options?.refreshGeneration !== undefined &&
-          options.refreshGeneration !== pending.refreshGeneration;
-        if (!supersedesPending) {
-          return [...(await raceAgainstAbort(pending.promise, options?.signal))];
+        const revision = currentRevision(options?.refreshGeneration);
+        // Stability controls completed-cache reuse, not single-flight
+        // identity. Concurrent reads at the same unstable generation share
+        // one enumeration; the result is simply discarded for later callers.
+        if (!supersedesInflight(pending.revision, revision)) {
+          return raceAgainstAbort(pending.promise, options?.signal);
         }
         try {
           await raceAgainstAbort(pending.promise, options?.signal);
@@ -264,35 +304,46 @@ export function createResponderGraphListMemo(
         }
       }
       const now = Date.now();
+      const revision = currentRevision(options?.refreshGeneration);
+      if (cached && supersedesCompleted(cached.revision, revision)) cached = null;
       if (
         cached &&
-        options?.refreshGeneration !== undefined &&
-        cached.refreshGeneration !== options.refreshGeneration
-      ) cached = null;
-      if (!options?.refresh && cached && now - cached.cachedAt < ttlMs) return [...cached.value];
+        now - cached.cachedAt < ttlMs &&
+        (!options?.refresh || (writeRevisionSource !== null && isWriteRevision(revision) && revision.stable))
+      ) return cached.value;
       // This load is shared by concurrent responders. Do not bind it to the
       // first stream's abort signal; waiters race their own abort locally via
       // raceAgainstAbort/throwIfAborted below.
-      const load = store.listGraphs(syncResponderStoreOptions(undefined, 'sync.responder.listGraphs'))
+      const graphOptions = syncResponderStoreOptions(undefined, 'sync.responder.listGraphs');
+      const load = loadSortedGraphCatalog(store, graphOptions)
         .then((graphs) => {
-          const sorted = [...new Set(graphs)].sort(compareCodePoint);
+          // Content writes advance the store revision even when named-graph
+          // membership is unchanged. Reuse the immutable index in that case:
+          // enumeration stays freshness-safe, while sorting, Set construction,
+          // and every downstream membership index remain stable.
+          const snapshot = (
+            lastSnapshot?.graphs === graphs || lastSnapshot?.matches(graphs)
+          )
+            ? lastSnapshot
+            : createGraphMembershipSnapshotFromSortedCatalog(graphs);
+          lastSnapshot = snapshot;
           cached = {
-            value: sorted,
+            value: snapshot,
             cachedAt: Date.now(),
-            refreshGeneration: options?.refreshGeneration,
+            revision,
           };
-          return sorted;
+          return snapshot;
         })
         .finally(() => {
           if (inflight?.promise === load) inflight = null;
         });
       inflight = {
         promise: load,
-        refreshGeneration: options?.refreshGeneration,
+        revision,
       };
-      const graphs = await load;
+      const snapshot = await load;
       throwIfAborted(options?.signal);
-      return [...graphs];
+      return snapshot;
     },
   };
 }
@@ -532,17 +583,6 @@ function createSubGraphNameMemo(
   };
 }
 
-export function compareCodePoint(a: string, b: string): number {
-  const left = Array.from(a);
-  const right = Array.from(b);
-  const len = Math.min(left.length, right.length);
-  for (let i = 0; i < len; i++) {
-    const delta = left[i].codePointAt(0)! - right[i].codePointAt(0)!;
-    if (delta !== 0) return delta;
-  }
-  return left.length - right.length;
-}
-
 export function compareRows(a: SyncRow, b: SyncRow): number {
   return (
     compareCodePoint(a.g, b.g) ||
@@ -779,7 +819,7 @@ export function serializeResponderRowsWithinByteBudget(
 
 export async function readSwmMetaPage(params: {
   store: TripleStore;
-  graphList: readonly string[];
+  graphMembership: GraphMembershipSnapshot;
   registeredSubGraphNames: readonly string[];
   contextGraphId: string;
   cutoffIso: string | null;
@@ -793,8 +833,7 @@ export async function readSwmMetaPage(params: {
   freshMetaPlanMemo?: FreshSwmMetaPlanMemo;
 }): Promise<SyncRow[]> {
   const graphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, true);
-  const graphSet = new Set(params.graphList);
-  const candidateGraphs = graphs.filter((graph) => graphSet.has(graph));
+  const candidateGraphs = graphs.filter((graph) => params.graphMembership.has(graph));
   const cache = params.rowListMemo && params.rowListCacheKey
     ? {
       memo: params.rowListMemo,
@@ -890,19 +929,15 @@ export async function readSwmMetaPage(params: {
           cache,
         )
         : undefined,
-      // The per-snapshot budget fallback MUST stay enabled here (#1847): it
-      // degrades to the bounded plan-paged reader above, never to the deleted
-      // global-sort query. This policy used to be a positional boolean, and
-      // passing `params.cutoffIso == null` in that position is the exact defect
-      // that made every 64,000-row `_meta` CG permanently unsyncable on mainnet.
-      fallbackOnPerSnapshotBudget: true,
+      // Intrinsic snapshot-size refusals always degrade to the bounded
+      // plan-paged reader above, never to the deleted global-sort query (#1847).
     },
   );
 }
 
 export async function readSwmDataPage(params: {
   store: TripleStore;
-  graphList: readonly string[];
+  graphMembership: GraphMembershipSnapshot;
   registeredSubGraphNames: readonly string[];
   contextGraphId: string;
   cutoffIso: string | null;
@@ -917,10 +952,10 @@ export async function readSwmDataPage(params: {
   exactGraphPlanMemo?: ExactGraphPagePlanMemo;
 }): Promise<SyncRow[]> {
   const dataGraphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, false);
-  const graphSet = new Set(params.graphList);
-  const candidateGraphsFor = (graph: string) => params.graphList
-    .filter((candidate) => candidate === graph || isSharedMemoryBucketDescendantDataGraph(candidate, graph))
-    .sort(compareCodePoint);
+  const candidateGraphsFor = (graph: string) => params.graphMembership.equalOrUnder(
+    graph,
+    (candidate) => candidate === graph || isSharedMemoryBucketDescendantDataGraph(candidate, graph),
+  );
   const cache = params.rowListMemo && params.rowListCacheKey
     ? {
       memo: params.rowListMemo,
@@ -949,7 +984,7 @@ export async function readSwmDataPage(params: {
     const loadPlan = () => buildFreshSwmDataGraphPlan(
       params.store,
       dataGraphs,
-      graphSet,
+      params.graphMembership,
       params.cutoffIso!,
       signal,
     );
@@ -1404,26 +1439,11 @@ function createAdmissionContext(
   const cgPrefix = contextGraphDataGraphUri(contextGraphId);
   const topMetaGraph = contextGraphMetaGraphUri(contextGraphId);
   const isCandidateGraph = (graph: string): boolean => {
-    if (graph !== cgPrefix && !graph.startsWith(`${cgPrefix}/`)) return false;
-    if (!opts.includeTopMeta && graph === topMetaGraph) return false;
-    // `<cg>/<subGraph>/_meta` is protocol control metadata for the subgraph
-    // itself (for example local migration markers).  It is not KA payload and
-    // must not enter the durable-data integrity verifier.  Keep deeper
-    // `.../_meta` graphs admitted: assertion and partition metadata are
-    // integrity-bearing durable material served alongside their data graph.
-    const relative = graph.startsWith(`${cgPrefix}/`)
-      ? graph.slice(cgPrefix.length + 1)
-      : '';
-    if (relative.split('/').length === 2 && relative.endsWith('/_meta')) return false;
-    const segments = relative.split('/').filter(Boolean);
-    // Working memory is transient and has no durable metadata anchor (the
-    // durable-meta phase deliberately excludes memoryLayer=WM). Serving an
-    // orphan or abandoned WM graph here therefore creates unverifiable payload
-    // and, on real stores, can sort millions of unrelated draft rows. SWM has a
-    // dedicated phase and private graphs are never served by durable sync.
-    if (segments.includes('_working_memory')) return false;
-    if (segments.includes('_shared_memory') || segments.includes('_shared_memory_meta')) return false;
-    return !segments.includes('_private');
+    return isLegacySyncGraphCandidateV1(
+      graph,
+      contextGraphId,
+      opts.includeTopMeta ? 'changelog' : 'durable-data',
+    );
   };
   let assertionGraphs: Set<string> | null = null;
   const isAdmitted = (signal?: AbortSignal) => async (graph: string): Promise<boolean> => {
@@ -1560,7 +1580,7 @@ export async function readChangelogDeltaPage(params: {
 
 export async function readDurableDataPage(params: {
   store: TripleStore;
-  graphList: readonly string[];
+  graphMembership: GraphMembershipSnapshot;
   contextGraphId: string;
   sinceBatchId: bigint | null;
   offset: number;
@@ -1639,7 +1659,7 @@ export async function readDurableDataPage(params: {
           params.contextGraphId,
           planSignal,
         );
-        const { isCandidateGraph, isAdmitted } = createAdmissionContext(
+        const { cgPrefix, isCandidateGraph, isAdmitted } = createAdmissionContext(
           params.store,
           params.contextGraphId,
           { graphScopedVmManifest: manifest },
@@ -1656,7 +1676,7 @@ export async function readDurableDataPage(params: {
         // Legacy-only CGs retain the graph-list path, so their existing local
         // data remains readable and can still be synchronized on that lane.
         const legacyCandidateGraphs = manifest.knownGraphs.size === 0
-          ? params.graphList.filter(isCandidateGraph)
+          ? params.graphMembership.equalOrUnder(cgPrefix, isCandidateGraph)
           : [];
         const candidateGraphs = dedupeStrings([
           ...legacyCandidateGraphs,
@@ -1692,7 +1712,7 @@ export async function readDurableDataPage(params: {
       graphScopedVmManifest: manifest,
     });
   const candidateGraphs = dedupeStrings([
-    ...params.graphList.filter(isCandidateGraph),
+    ...params.graphMembership.equalOrUnder(cgPrefix, isCandidateGraph),
     ...manifest.confirmedEntries
       .filter((entry) => entry.rowCount > 0)
       .map((entry) => entry.graph),
@@ -2111,11 +2131,6 @@ async function readPagedDurableDeltaRowsAcrossGraphs(
   );
 }
 
-function isPerSnapshotBudgetError(error: unknown): error is SyncRowSnapshotBudgetError {
-  return error instanceof SyncRowSnapshotBudgetError &&
-    (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes');
-}
-
 /**
  * Session-plan getter shared by the plan-backed lanes (exact-graph and TTL SWM
  * meta), owning the one lifecycle both must agree on:
@@ -2175,10 +2190,10 @@ function createSessionPlanGetter<T>(
  * Serve one responder page, owning the single budget-fallback policy for every
  * memoized phase. It tries the stable-snapshot cache first, but an
  * intrinsically-oversized snapshot (over the PER-snapshot row/byte budget) must
- * stay syncable, so it falls back to the session-less store-bounded page read
- * for this and every later page of the session. The memo remembers the
- * per-snapshot rejection for the session, so subsequent pages reach this
- * fallback without repeating the full materialization inside the memo.
+ * stay syncable, so it falls back to the store-bounded page read for this and
+ * every later page of the session. Transient store errors propagate: they are
+ * not proof of intrinsic size, and OFFSET paging cannot provide an immutable
+ * session view when the underlying graph may change between requests.
  *
  * GLOBAL (process-wide) budget pressure is deliberately NOT swallowed here: it
  * is not a `snapshot_rows`/`snapshot_bytes` error, so it propagates as the quiet
@@ -2256,21 +2271,9 @@ async function loadStorePagedSnapshot(
   }
 }
 
-/**
- * Optional behavior of {@link readResponderRowsPage}, named instead of
- * positional: a bare boolean in this helper's signature is how the #1847
- * production defect happened (`params.cutoffIso == null` read as the fallback
- * policy), so call sites must now spell the policy out.
- */
 interface ResponderRowsPageOptions {
   /** Session snapshot loader; omitted phases build via the store-paged loader. */
   loadSnapshot?: () => Promise<readonly SyncRow[]>;
-  /**
-   * Whether a PER-snapshot rows/bytes budget refusal degrades to the
-   * store-bounded page loader for this and every later page of the session
-   * (defaults to true; global budget pressure always propagates).
-   */
-  fallbackOnPerSnapshotBudget?: boolean;
   /**
    * Extend a served page forward so it ends on a `(g, s)` subject boundary,
    * never mid-subject (#1788). Only the durable-meta lane sets this: its rows
@@ -2294,7 +2297,6 @@ async function readResponderRowsPage(
   options?: ResponderRowsPageOptions,
 ): Promise<SyncRow[]> {
   const loadSnapshot = options?.loadSnapshot;
-  const fallbackOnPerSnapshotBudget = options?.fallbackOnPerSnapshotBudget ?? true;
   const subjectAtomic = options?.subjectAtomic ?? false;
   const safeOffset = Math.max(0, Math.floor(offset));
   const safeLimit = Math.max(0, Math.floor(limit));
@@ -2313,7 +2315,7 @@ async function readResponderRowsPage(
       subjectAtomic,
     );
   } catch (error) {
-    if (!isPerSnapshotBudgetError(error) || !fallbackOnPerSnapshotBudget) throw error;
+    if (!isSyncRowSnapshotPagingRequiredError(error)) throw error;
     return loadStoreBoundedPage(safeOffset, safeLimit, signal);
   }
 }
@@ -3284,7 +3286,7 @@ async function readBoundedFreshSwmMetaSnapshot(
 async function readFreshSwmDataRows(
   store: TripleStore,
   dataGraphs: readonly string[],
-  graphSet: ReadonlySet<string>,
+  graphMembership: GraphMembershipSnapshot,
   candidateGraphsFor: (graph: string) => string[],
   cutoffIso: string,
   signal?: AbortSignal,
@@ -3292,7 +3294,7 @@ async function readFreshSwmDataRows(
   const rows: SyncRow[] = [];
   for (const graph of dataGraphs) {
     const metaGraph = `${graph}_meta`;
-    if (!graphSet.has(metaGraph)) continue;
+    if (!graphMembership.has(metaGraph)) continue;
     const roots = await readFreshSwmRoots(store, metaGraph, cutoffIso, signal);
     if (roots.size === 0) continue;
     const rootPrefixes = [...roots].map((root) => `${root}/.well-known/genid/`);
@@ -3353,7 +3355,7 @@ function parseSparqlInteger(value: string | undefined): number {
 async function buildFreshSwmDataGraphPlan(
   store: TripleStore,
   dataGraphs: readonly string[],
-  graphSet: ReadonlySet<string>,
+  graphMembership: GraphMembershipSnapshot,
   cutoffIso: string,
   signal?: AbortSignal,
 ): Promise<FreshSwmDataGraphPlan> {
@@ -3361,7 +3363,7 @@ async function buildFreshSwmDataGraphPlan(
   for (const bucketGraph of dedupeStrings(dataGraphs).sort(compareCodePoint)) {
     throwIfAborted(signal);
     const metaGraph = `${bucketGraph}_meta`;
-    if (!graphSet.has(metaGraph)) continue;
+    if (!graphMembership.has(metaGraph)) continue;
     const roots = [...await readFreshSwmRoots(store, metaGraph, cutoffIso, signal)]
       .sort(compareCodePoint);
     for (const chunk of chunkValues(roots, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
@@ -3388,7 +3390,7 @@ async function buildFreshSwmDataGraphPlan(
         if (
           !graph
           || !root
-          || !graphSet.has(graph)
+          || !graphMembership.has(graph)
           || !chunkSet.has(root)
           || (graph !== bucketGraph
             && !isSharedMemoryBucketDescendantDataGraph(graph, bucketGraph))

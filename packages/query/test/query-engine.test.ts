@@ -1,7 +1,13 @@
 import { describe, it, expect, beforeEach, expectTypeOf } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Worker } from 'node:worker_threads';
 import {
   GraphSetIndexStore,
   OxigraphStore,
+  OxigraphWorkerStore,
+  asGraphWriteRevisionSource,
   type Quad,
   type QueryOptions as StoreQueryOptions,
 } from '@origintrail-official/dkg-storage';
@@ -22,6 +28,16 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
   const fn = (...args: A): R => { calls.push(args); return impl(...args); };
   return Object.assign(fn, { calls });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 const CONTEXT_GRAPH = 'agent-registry';
@@ -829,7 +845,7 @@ describe('DKGQueryEngine', () => {
 
   // ───────────────────────────────────────────────────────────────────
   // #789 Codex review: when a user query carries an inner UNION over a
-  // multi-graph view, `wrapWithGraphUnion` returns null (a nested
+  // multi-graph view, `wrapWithGraphUnion` reports the shape as unsupported (a nested
   // UnionNode would crash Blazegraph) and `queryMultipleGraphs` falls
   // back to per-graph execution. The fallback MUST merge results in a
   // FORM-AWARE way — flattening every form into `bindings` silently
@@ -914,6 +930,17 @@ describe('DKGQueryEngine', () => {
           `SELECT ?s ?v WHERE {
              { ?s <http://ex.org/p1> ?v } UNION { ?s <http://ex.org/p2> ?v }
            } LIMIT 1`,
+          { contextGraphId: CONTEXT_GRAPH, view: 'verifiable-memory' },
+        ),
+      ).rejects.toThrow(/cannot be evaluated across graphs/i);
+    });
+
+    it('rejects a UCHAR-spelled LIMIT before the per-graph fallback can over-count', async () => {
+      await expect(
+        engine.query(
+          String.raw`SELECT ?s ?v WHERE {
+             { ?s <http://ex.org/p1> ?v } UNION { ?s <http://ex.org/p2> ?v }
+           } \u004cIMIT 1`,
           { contextGraphId: CONTEXT_GRAPH, view: 'verifiable-memory' },
         ),
       ).rejects.toThrow(/cannot be evaluated across graphs/i);
@@ -1635,6 +1662,19 @@ describe('DKGQueryEngine', () => {
     ]);
   });
 
+  it('authorizes UCHAR payload inside an explicit scoped GRAPH IRI', async () => {
+    const result = await engine.query(
+      String.raw`SELECT ?name WHERE {
+        GRAPH <did:dkg:context-graph:\u0061gent-registry> {
+          ?s <http://schema.org/name> ?name
+        }
+      }`,
+      { contextGraphId: CONTEXT_GRAPH },
+    );
+
+    expect(result.bindings).toEqual([{ name: '"ImageBot"' }]);
+  });
+
   it('rejects prefixed explicit GRAPH targets outside the scoped graph set', async () => {
     const otherGraph = 'did:dkg:context-graph:other-agent-registry';
     await store.insert([
@@ -1818,6 +1858,23 @@ describe('DKGQueryEngine', () => {
         { contextGraphId: CONTEXT_GRAPH },
       ),
     ).rejects.toThrow(/Scoped query violation: GRAPH variables cannot be mixed with default-graph triple patterns/i);
+  });
+
+  it.each([
+    `SELECT ?g ?name ?description WHERE {
+      GRAPH ?g { ?s <http://schema.org/name> ?name }
+      OPTIONAL { ?s <http://schema.org/description> ?description }
+    }`,
+    `SELECT ?g ?name WHERE {
+      GRAPH ?g { ?s <http://schema.org/name> ?name }
+      FILTER EXISTS { ?foreign <http://schema.org/name> ?name }
+    }`,
+  ])('rejects nested default-graph patterns alongside GRAPH variables', async (sparql) => {
+    await expect(
+      engine.query(sparql, { contextGraphId: CONTEXT_GRAPH }),
+    ).rejects.toThrow(
+      /Scoped query violation: GRAPH variables cannot be mixed with default-graph triple patterns/i,
+    );
   });
 
   it('constrains GRAPH variables with non-ASCII names to the scoped context graph data graph', async () => {
@@ -2034,7 +2091,50 @@ describe('DKGQueryEngine', () => {
     }
   });
 
-  it('does not reuse partition discovery after an in-flight count scan completes', async () => {
+  it('keeps completed partition discovery isolated between sub-graph scopes', async () => {
+    const codeMemory = `${GRAPH}/code/_shared_memory/0xAgent/1`;
+    const decisionsMemory = `${GRAPH}/decisions/_shared_memory/0xAgent/1`;
+    await store.insert([
+      ...subGraphRegistration('code'),
+      ...subGraphRegistration('decisions'),
+      q('urn:code:memory', SCHEMA_NAME, '"CodeMemory"', codeMemory),
+      q('urn:decisions:memory', SCHEMA_NAME, '"DecisionsMemory"', decisionsMemory),
+    ]);
+
+    const discoveryTarget = engine as unknown as {
+      discoverScopedContentGraphAllowList: (...args: unknown[]) => Promise<string[]>;
+    };
+    const original = discoveryTarget.discoverScopedContentGraphAllowList.bind(engine);
+    const discoverySpy = recorder((...args: unknown[]) => original(...args));
+    discoveryTarget.discoverScopedContentGraphAllowList = discoverySpy;
+    const sparql = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } }`;
+
+    const code = await engine.query(sparql, {
+      contextGraphId: CONTEXT_GRAPH,
+      subGraphName: 'code',
+      includeContextGraphPartitions: true,
+    });
+    expect(code.bindings.some((row) => row['g'] === codeMemory)).toBe(true);
+    expect(code.bindings.some((row) => row['g'] === decisionsMemory)).toBe(false);
+
+    const decisions = await engine.query(sparql, {
+      contextGraphId: CONTEXT_GRAPH,
+      subGraphName: 'decisions',
+      includeContextGraphPartitions: true,
+    });
+    expect(decisions.bindings.some((row) => row['g'] === decisionsMemory)).toBe(true);
+    expect(decisions.bindings.some((row) => row['g'] === codeMemory)).toBe(false);
+    expect(discoverySpy.calls).toHaveLength(2);
+
+    await engine.query(sparql, {
+      contextGraphId: CONTEXT_GRAPH,
+      subGraphName: 'code',
+      includeContextGraphPartitions: true,
+    });
+    expect(discoverySpy.calls).toHaveLength(2);
+  });
+
+  it('reuses completed partition discovery until the context-graph write generation changes', async () => {
     const codeSubGraph = `${GRAPH}/code`;
     const docsSubGraph = `${GRAPH}/docs`;
 
@@ -2056,9 +2156,24 @@ describe('DKGQueryEngine', () => {
     const sparql = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } } ORDER BY ?name`;
     const first = await engine.query(
       sparql,
-      { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true },
+      {
+        contextGraphId: CONTEXT_GRAPH,
+        includeContextGraphPartitions: true,
+        source: 'dashboard.wm',
+      },
     );
     expect(first.bindings.some((row) => row['g'] === codeSubGraph)).toBe(true);
+    expect(partitionDiscoverySpy.calls).toHaveLength(1);
+
+    const unchanged = await engine.query(
+      sparql,
+      {
+        contextGraphId: CONTEXT_GRAPH,
+        includeContextGraphPartitions: true,
+        source: 'dashboard.vm',
+      },
+    );
+    expect(unchanged.bindings.some((row) => row['g'] === codeSubGraph)).toBe(true);
     expect(partitionDiscoverySpy.calls).toHaveLength(1);
 
     await store.insert([
@@ -2072,6 +2187,220 @@ describe('DKGQueryEngine', () => {
     );
     expect(partitionDiscoverySpy.calls).toHaveLength(2);
     expect(second.bindings.some((row) => row['g'] === docsSubGraph)).toBe(true);
+  });
+
+  it('revalidates every authorization discovery under a process-local revision', async () => {
+    const backend = new OxigraphStore();
+    const codeSubGraph = `${GRAPH}/code`;
+    const docsSubGraph = `${GRAPH}/docs`;
+    const codeRows = [
+      ...subGraphRegistration('code'),
+      q('urn:code:data', SCHEMA_NAME, '"CodeData"', codeSubGraph),
+    ];
+    await backend.insert(codeRows);
+
+    // Model an adapter-local generation that cannot observe another writer.
+    const maskedRevisionStore = new Proxy(backend, {
+      get(target, property) {
+        if (property === 'writeRevisionCoverage') return 'process-local';
+        if (property === 'getWriteRevision') {
+          return () => ({ generation: 0, stable: true });
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as unknown as OxigraphStore;
+    const externalWriterEngine = new DKGQueryEngine(maskedRevisionStore);
+    const discoveryTarget = externalWriterEngine as unknown as {
+      discoverScopedContentGraphAllowList: (...args: unknown[]) => Promise<string[]>;
+    };
+    const original = discoveryTarget.discoverScopedContentGraphAllowList.bind(externalWriterEngine);
+    const discoverySpy = recorder((...args: unknown[]) => original(...args));
+    discoveryTarget.discoverScopedContentGraphAllowList = discoverySpy;
+    const sparql = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } } ORDER BY ?name`;
+    const options = { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true };
+
+    const initial = await externalWriterEngine.query(sparql, options);
+    expect(initial.bindings.some((row) => row['g'] === codeSubGraph)).toBe(true);
+    expect(discoverySpy.calls).toHaveLength(1);
+
+    // Bypass the engine-facing revision source to simulate another process.
+    await backend.delete(codeRows);
+    await backend.insert([
+      ...subGraphRegistration('docs'),
+      q('urn:docs:data', SCHEMA_NAME, '"DocsData"', docsSubGraph),
+    ]);
+
+    const revalidated = await externalWriterEngine.query(sparql, options);
+    expect(discoverySpy.calls).toHaveLength(2);
+    expect(revalidated.bindings.some((row) => row['g'] === docsSubGraph)).toBe(true);
+    expect(revalidated.bindings.some((row) => row['g'] === codeSubGraph)).toBe(false);
+  });
+
+  it('immediately excludes a parent partition reclassified by an external writer', async () => {
+    const backend = new OxigraphStore();
+    const collidingSubGraph = `${GRAPH}/code`;
+    await backend.insert([
+      ...subGraphRegistration('code'),
+      q('urn:code:data', SCHEMA_NAME, '"ParentData"', collidingSubGraph),
+    ]);
+    const maskedRevisionStore = new Proxy(backend, {
+      get(target, property) {
+        if (property === 'writeRevisionCoverage') return 'process-local';
+        if (property === 'getWriteRevision') {
+          return () => ({ generation: 0, stable: true });
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as unknown as OxigraphStore;
+    const externalWriterEngine = new DKGQueryEngine(maskedRevisionStore);
+    const sparql = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } }`;
+    const options = { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true };
+
+    const parentView = await externalWriterEngine.query(sparql, options);
+    expect(parentView.bindings.some((row) => row['g'] === collidingSubGraph)).toBe(true);
+
+    await backend.insert([
+      q(
+        collidingSubGraph,
+        RDF_TYPE,
+        DKG_CONTEXT_GRAPH,
+        `${collidingSubGraph}/_meta`,
+      ),
+    ]);
+    const afterReclassification = await externalWriterEngine.query(sparql, options);
+    expect(afterReclassification.bindings.some((row) => row['g'] === collidingSubGraph))
+      .toBe(false);
+    await backend.close();
+  });
+
+  it('invalidates scoped authorization discovery when a persistent worker restores older state', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'query-worker-respawn-'));
+    const persistPath = join(dir, 'store.nq');
+    const workerStore = new OxigraphWorkerStore(persistPath);
+    try {
+      const collidingSubGraph = `${GRAPH}/code`;
+      const childMarker = q(
+        collidingSubGraph,
+        RDF_TYPE,
+        DKG_CONTEXT_GRAPH,
+        `${collidingSubGraph}/_meta`,
+      );
+      await workerStore.insert([
+        ...subGraphRegistration('code'),
+        q('urn:code:data', SCHEMA_NAME, '"ParentData"', collidingSubGraph),
+        childMarker,
+      ]);
+      await workerStore.flush();
+      const restoredChildSnapshot = readFileSync(persistPath, 'utf8');
+
+      await workerStore.delete([childMarker]);
+      await workerStore.flush();
+      const workerEngine = new DKGQueryEngine(workerStore);
+      const discoveryTarget = workerEngine as unknown as {
+        discoverScopedContentGraphAllowList: (...args: unknown[]) => Promise<string[]>;
+      };
+      const original = discoveryTarget.discoverScopedContentGraphAllowList.bind(workerEngine);
+      const discoverySpy = recorder((...args: unknown[]) => original(...args));
+      discoveryTarget.discoverScopedContentGraphAllowList = discoverySpy;
+      const sparql = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } }`;
+      const options = { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true };
+
+      const parentView = await workerEngine.query(sparql, options);
+      expect(parentView.bindings.some((row) => row['g'] === collidingSubGraph)).toBe(true);
+      expect(discoverySpy.calls).toHaveLength(1);
+      const revisions = asGraphWriteRevisionSource(workerStore)!;
+      const beforeCrash = revisions.getWriteRevision(GRAPH);
+      expect(beforeCrash.stable).toBe(true);
+
+      // Model the exact recovery hazard deterministically: the worker's live
+      // state allowed the parent partition, while the durable snapshot restored
+      // after its crash still classifies the same URI as a child context graph.
+      writeFileSync(persistPath, restoredChildSnapshot, 'utf8');
+      await (workerStore as unknown as { worker: Worker }).worker.terminate();
+      const replacing = revisions.getWriteRevision(GRAPH);
+      expect(replacing.stable).toBe(false);
+      expect(replacing.generation).toBeGreaterThan(beforeCrash.generation);
+
+      const restoredView = await workerEngine.query(sparql, options);
+      expect(discoverySpy.calls).toHaveLength(2);
+      expect(restoredView.bindings.some((row) => row['g'] === collidingSubGraph)).toBe(false);
+      const afterRecovery = revisions.getWriteRevision(GRAPH);
+      expect(afterRecovery.stable).toBe(true);
+      expect(afterRecovery.generation).toBeGreaterThan(replacing.generation);
+    } finally {
+      await workerStore.close().catch(() => undefined);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it('does not retain a discovery crossed by a local generation change', async () => {
+    const firstDiscovery = deferred<string[]>();
+    const secondDiscovery = deferred<string[]>();
+    let discoveryCalls = 0;
+    const target = engine as unknown as {
+      resolveScopedContentGraphAllowList: (
+        contextGraphId: string,
+        reads: object,
+        subGraphName?: string,
+      ) => Promise<readonly string[]>;
+      discoverScopedContentGraphAllowList: (...args: unknown[]) => Promise<string[]>;
+    };
+    target.discoverScopedContentGraphAllowList = async () => {
+      discoveryCalls += 1;
+      return discoveryCalls === 1 ? firstDiscovery.promise : secondDiscovery.promise;
+    };
+    const reads = {
+      signal: undefined,
+      shared: { cacheKey: '["normal",null]' },
+    };
+
+    const beforeWrite = target.resolveScopedContentGraphAllowList(CONTEXT_GRAPH, reads);
+    expect(discoveryCalls).toBe(1);
+    await store.insert([q('urn:generation:bump', SCHEMA_NAME, '"bump"')]);
+    const afterWrite = target.resolveScopedContentGraphAllowList(CONTEXT_GRAPH, reads);
+    expect(discoveryCalls).toBe(2);
+
+    secondDiscovery.resolve(['urn:graph:fresh']);
+    await expect(afterWrite).resolves.toEqual(['urn:graph:fresh']);
+    firstDiscovery.resolve(['urn:graph:stale']);
+    await expect(beforeWrite).resolves.toEqual(['urn:graph:stale']);
+
+    await expect(target.resolveScopedContentGraphAllowList(CONTEXT_GRAPH, reads))
+      .resolves.toEqual(['urn:graph:fresh']);
+    expect(discoveryCalls).toBe(2);
+  });
+
+  it('keeps concurrent discovery isolated across execution lanes', async () => {
+    const laneA = deferred<string[]>();
+    const laneB = deferred<string[]>();
+    let discoveryCalls = 0;
+    const target = engine as unknown as {
+      resolveScopedContentGraphAllowList: (
+        contextGraphId: string,
+        reads: object,
+        subGraphName?: string,
+      ) => Promise<readonly string[]>;
+      discoverScopedContentGraphAllowList: (...args: unknown[]) => Promise<string[]>;
+    };
+    target.discoverScopedContentGraphAllowList = async () => {
+      discoveryCalls += 1;
+      return discoveryCalls === 1 ? laneA.promise : laneB.promise;
+    };
+
+    const first = target.resolveScopedContentGraphAllowList(CONTEXT_GRAPH, {
+      signal: undefined,
+      shared: { cacheKey: '["normal","dashboard.wm"]' },
+    });
+    const second = target.resolveScopedContentGraphAllowList(CONTEXT_GRAPH, {
+      signal: undefined,
+      shared: { cacheKey: '["normal","dashboard.vm"]' },
+    });
+    expect(discoveryCalls).toBe(2);
+    laneA.resolve(['urn:graph:a']);
+    laneB.resolve(['urn:graph:b']);
+    await Promise.all([first, second]);
   });
 
   it('does not bind same-prefix child context graphs as parent content partitions', async () => {

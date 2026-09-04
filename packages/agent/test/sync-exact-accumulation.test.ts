@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   exactAssetFilterKey,
   MAX_EXACT_SYNC_PHASE_BYTES_PER_ASSET,
@@ -52,6 +52,105 @@ function fetchParams(overrides: Partial<FetchParams> = {}): FetchParams {
 }
 
 describe('exact sync accumulation limits', () => {
+  it.each(['success', 'failure', 'abort'] as const)(
+    'leaves no proof-only checkpoint or responder session after %s',
+    async (terminal) => {
+      const checkpointStore = new MemorySyncCheckpointStore();
+      const requesterScope = `challenge-exact:cleanup-${terminal}` as const;
+      const checkpointKey = getSyncCheckpointKey(
+        'legacy-peer',
+        'large-legacy-cg',
+        false,
+        'data',
+        undefined,
+        undefined,
+        undefined,
+        exactAssetFilterKey([EXACT_UAL]),
+        requesterScope,
+      );
+      const controller = new AbortController();
+      const setResponderSession = vi.spyOn(checkpointStore, 'setResponderSession');
+      let sends = 0;
+      const requestedOffsets: number[] = [];
+      const responderSessionIds: Array<string | undefined> = [];
+      let markSecondRequestStarted!: () => void;
+      const secondRequestStarted = new Promise<void>((resolve) => {
+        markSecondRequestStarted = resolve;
+      });
+      const fetch = fetchSyncPages(fetchParams({
+        checkpointStore,
+        requesterScope,
+        ephemeralRequesterState: true,
+        forceFreshSession: true,
+        signal: controller.signal,
+        buildSyncRequest: async (
+          _contextGraphId,
+          offset,
+          _limit,
+          _includeSharedMemory,
+          _remotePeerId,
+          _phase,
+          _snapshotRef,
+          _sinceBatchId,
+          syncSessionId,
+        ) => {
+          requestedOffsets.push(offset);
+          responderSessionIds.push(syncSessionId);
+          return encoder.encode('request');
+        },
+        parseAndFilter: async () => ({
+          quads: [{
+            subject: 'urn:proof-prefix',
+            predicate: 'urn:p',
+            object: '"retained-before-abort"',
+            graph: 'urn:data',
+          }],
+          totalQuads: 1,
+        }),
+        send: async () => {
+          sends += 1;
+          if (terminal === 'failure') throw new Error('proof transport failed');
+          if (terminal !== 'abort') return new Uint8Array();
+          if (sends === 1) return encoder.encode('accepted-proof-page');
+          markSecondRequestStarted();
+          return new Promise<Uint8Array>((_resolve, reject) => {
+            const rejectOnAbort = () => reject(controller.signal.reason);
+            if (controller.signal.aborted) rejectOnAbort();
+            else controller.signal.addEventListener('abort', rejectOnAbort, { once: true });
+          });
+        },
+      }));
+
+      if (terminal === 'success') await expect(fetch).resolves.toBeDefined();
+      else if (terminal === 'failure') await expect(fetch).rejects.toThrow();
+      else {
+        await secondRequestStarted;
+        expect(requestedOffsets).toEqual([0, 1]);
+        expect(responderSessionIds[0]).toEqual(expect.any(String));
+        expect(responderSessionIds[1]).toBe(responderSessionIds[0]);
+        controller.abort(new Error('proof attempt stopped'));
+        await expect(fetch).rejects.toThrow('proof attempt stopped');
+        expect(setResponderSession).toHaveBeenCalled();
+        const retainedSession = setResponderSession.mock.calls.at(-1);
+        expect(retainedSession?.[0]).toBe(checkpointKey);
+        expect(retainedSession?.[1]).toBe(responderSessionIds[0]);
+      }
+      expect(checkpointStore.get(checkpointKey)).toBeUndefined();
+
+      // A store-only offset makes any leaked compatibility-cache token visible
+      // to the next ordinary call with the same key.
+      checkpointStore.set(checkpointKey, 7);
+      const retry = await fetchSyncPages(fetchParams({
+        checkpointStore,
+        requesterScope,
+        forceFreshSession: false,
+        send: async () => new Uint8Array(),
+      }));
+      expect(retry.responderSessionStartedFresh).toBe(true);
+      deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
+    },
+  );
+
   it.each([
     'peer-closed-stream',
     'The stream has been reset',
@@ -140,6 +239,61 @@ describe('exact sync accumulation limits', () => {
       offset: 0,
       responderSessionId: expect.any(String),
     });
+  });
+
+  it('rejects an accepted metadata prefix when the caller aborts during the next transport', async () => {
+    const requesterScope = 'selected-swm-meta:accepted-prefix-caller-abort' as const;
+    const checkpointStore = new MemorySyncCheckpointStore();
+    const checkpointKey = getSyncCheckpointKey(
+      'legacy-peer',
+      'large-legacy-cg',
+      true,
+      'meta',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      requesterScope,
+    );
+    const controller = new AbortController();
+    let sends = 0;
+
+    const fetch = fetchSyncPages(fetchParams({
+      checkpointStore,
+      includeSharedMemory: true,
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      requesterScope,
+      returnAcceptedPrefixOnRetryableTransportFailure: true,
+      assetUals: undefined,
+      maxAcceptedBytes: undefined,
+      signal: controller.signal,
+      parseAndFilter: async () => ({
+        quads: [{
+          subject: 'urn:selected:accepted-before-abort',
+          predicate: 'urn:p',
+          object: '"o"',
+          graph: 'urn:meta',
+        }],
+        totalQuads: 1,
+      }),
+      send: async () => {
+        sends += 1;
+        if (sends === 1) return encoder.encode('valid-page');
+        controller.abort(new Error('caller cancelled after accepted prefix'));
+        throw toSyncTransportFailureError(
+          new Error('operation timed out after caller abort'),
+        );
+      },
+    }));
+
+    await expect(fetch).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'caller cancelled after accepted prefix',
+    });
+    expect(sends).toBe(2);
+    expect(controller.signal.aborted).toBe(true);
+    expect(checkpointStore.get(checkpointKey)).toBeUndefined();
   });
 
   it('does not infer selected metadata retention policy from checkpoint scope', async () => {

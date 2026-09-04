@@ -43,6 +43,7 @@ import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js
 type RealStore = {
   replaceSubject: (g: string, s: string, q: unknown, o?: unknown) => Promise<void>;
   deleteByPattern: (p: unknown, o?: unknown) => Promise<unknown>;
+  deleteByPatternWithoutCount: (p: unknown, o?: unknown) => Promise<void>;
 };
 
 describe('#1933 async-promote-queue writeJob atomicity', () => {
@@ -79,7 +80,7 @@ describe('#1933 async-promote-queue writeJob atomicity', () => {
    *  - `real`   — delegate to the real (atomic) replaceSubject.
    *  - `absent` — no replaceSubject capability at all (tryReplaceSubjectAtomically → false).
    *  - `refuse` — replaceSubject present but raises a clean capability refusal
-   *               (SparqlHttpStore with atomicUpdates:false parity).
+   *               (best-effort SparqlHttpStore parity).
    */
   function countingStore(
     inner: OxigraphStore,
@@ -103,6 +104,12 @@ describe('#1933 async-promote-queue writeJob atomicity', () => {
           return async (pattern: { graph?: string }, o?: unknown) => {
             if (pattern?.graph === graphUri) counts.jobGraphDeletes++;
             return (target as unknown as RealStore).deleteByPattern(pattern, o);
+          };
+        }
+        if (prop === 'deleteByPatternWithoutCount') {
+          return async (pattern: { graph?: string }, o?: unknown) => {
+            if (pattern?.graph === graphUri) counts.jobGraphDeletes++;
+            return (target as unknown as RealStore).deleteByPatternWithoutCount(pattern, o);
           };
         }
         const value = Reflect.get(target, prop, target);

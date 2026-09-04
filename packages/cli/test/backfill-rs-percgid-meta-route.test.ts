@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 /**
  * Endpoint test for `POST /api/random-sampling/backfill-percgid-meta`.
@@ -152,7 +153,7 @@ function makeCtx(path: string, agent: ReturnType<typeof makeAgentMock>) {
     apiPortRef: { value: 0 },
     url,
     path: url.pathname,
-    requestToken: undefined,
+    authentication: requestAuthentication({ kind: 'anonymous' }),
     requestAgentAddress: 'did:dkg:agent:test',
     emitMemoryGraphChanged: () => {},
   };

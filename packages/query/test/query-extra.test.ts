@@ -245,6 +245,188 @@ describe('[Q-1] DKGQueryEngine minTrust uses writer-side trust metadata', () => 
     expect(result.bindings.map((b) => b['t'])).toEqual(['http://schema.org/Person']);
   });
 
+  it('honors minTrust for a BASE-relative digit-leading fragment IRI', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiableMemoryUri(CG, 'consensus-verified');
+    const subject = 'http://example.com/1#item';
+    await store.insert([
+      quad(subject, 'http://example.com/name', '"Relative item"', consensusGraph),
+      quad(subject, 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    const result = await engine.query(
+      'BASE <http://example.com/> SELECT ?name WHERE { <1#item> <http://example.com/name> ?name }',
+      { contextGraphId: CG, view: 'verifiable-memory', minTrust: TrustLevel.ConsensusVerified },
+    );
+
+    expect(result.bindings.map((binding) => binding['name'])).toEqual(['"Relative item"']);
+  });
+
+  it('honors minTrust when triple objects are signed or unsigned leading-dot decimals', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const graph = contextGraphVerifiableMemoryUri(CG, 'leading-dot-decimals');
+    const decimal = 'http://www.w3.org/2001/XMLSchema#decimal';
+    const cases = [
+      { source: '.5', subject: 'urn:positive-half', object: `".5"^^<${decimal}>` },
+      { source: '-.5', subject: 'urn:negative-half', object: `"-.5"^^<${decimal}>` },
+    ];
+    await store.insert(cases.flatMap(({ subject, object }) => [
+      quad(subject, 'urn:score', object, graph),
+      quad(
+        subject,
+        'http://dkg.io/ontology/trustLevel',
+        `"${TrustLevel.ConsensusVerified}"`,
+        graph,
+      ),
+    ]));
+
+    for (const { source, subject } of cases) {
+      const result = await engine.query(
+        `SELECT ?s WHERE { ?s <urn:score> ${source} }`,
+        {
+          contextGraphId: CG,
+          view: 'verifiable-memory',
+          minTrust: TrustLevel.ConsensusVerified,
+        },
+      );
+      expect(result.bindings).toEqual([{ s: subject }]);
+    }
+  });
+
+  it('preserves UCHAR payload while scoped minTrust rewriting uses raw delimiters', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiableMemoryUri(CG, 'consensus-verified');
+    const otherGraph = contextGraphVerifiableMemoryUri('other-cg', 'consensus-verified');
+    const predicate = 'http://example.com/p#name';
+    await store.insert([
+      quad('urn:e1', predicate, '"Alice"', consensusGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+      quad('urn:e1', predicate, '"Alice"', otherGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, otherGraph),
+    ]);
+
+    const result = await engine.query(
+      String.raw`SELECT ?o WHERE { <urn:e1> <http://example.com/p#name> ?o . FILTER(STR(?o) = "\u0041lice") }`,
+      { contextGraphId: CG, view: 'verifiable-memory', minTrust: TrustLevel.ConsensusVerified },
+    );
+
+    expect(result.bindings.map((binding) => binding['o'])).toEqual(['"Alice"']);
+  });
+
+  it('injects minTrust after a UCHAR-encoded opening WHERE brace', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const graph = contextGraphVerifiableMemoryUri(CG, 'encoded-min-trust');
+    await store.insert([
+      quad('urn:a', 'urn:p', '"Trusted"', graph),
+      quad(
+        'urn:a',
+        'http://dkg.io/ontology/trustLevel',
+        `"${TrustLevel.ConsensusVerified}"`,
+        graph,
+      ),
+    ]);
+
+    const result = await engine.query(
+      String.raw`SELECT ?o WHERE \u007B <urn:a> <urn:p> ?o \u007D`,
+      {
+        contextGraphId: CG,
+        view: 'verifiable-memory',
+        minTrust: TrustLevel.ConsensusVerified,
+      },
+    );
+
+    expect(result.bindings).toEqual([{ o: '"Trusted"' }]);
+  });
+
+  it('fails closed when UCHAR syntax hides a nested OPTIONAL from minTrust', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const graph = contextGraphVerifiableMemoryUri(CG, 'encoded-optional');
+    await store.insert([
+      quad('urn:trusted', 'urn:p', '"Visible"', graph),
+      quad(
+        'urn:trusted',
+        'http://dkg.io/ontology/trustLevel',
+        `"${TrustLevel.ConsensusVerified}"`,
+        graph,
+      ),
+      quad('urn:foreign', 'urn:secret', '"Must not leak"', graph),
+      quad(
+        'urn:foreign',
+        'http://dkg.io/ontology/trustLevel',
+        `"${TrustLevel.SelfAttested}"`,
+        graph,
+      ),
+    ]);
+
+    const result = await engine.query(
+      String.raw`SELECT ?secret WHERE { ?trusted <urn:p> ?value \u004FPTIONAL \u007B ?foreign <urn:secret> ?secret \u007D }`,
+      {
+        contextGraphId: CG,
+        view: 'verifiable-memory',
+        minTrust: TrustLevel.ConsensusVerified,
+      },
+    );
+
+    expect(result.bindings).toEqual([]);
+  });
+
+  it('supports a UCHAR-spelled leading VALUES clause under minTrust', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const graph = contextGraphVerifiableMemoryUri(CG, 'encoded-values');
+    await store.insert([
+      quad('urn:trusted', 'urn:p', '"Visible"', graph),
+      quad(
+        'urn:trusted',
+        'http://dkg.io/ontology/trustLevel',
+        `"${TrustLevel.ConsensusVerified}"`,
+        graph,
+      ),
+    ]);
+
+    const result = await engine.query(
+      String.raw`SELECT ?value WHERE { \u0056ALUES ?subject \u007B <urn:trusted> \u007D ?subject <urn:p> ?value }`,
+      {
+        contextGraphId: CG,
+        view: 'verifiable-memory',
+        minTrust: TrustLevel.ConsensusVerified,
+      },
+    );
+
+    expect(result.bindings).toEqual([{ value: '"Visible"' }]);
+  });
+
+  it('avoids UCHAR-equivalent caller variables when allocating minTrust helpers', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const graph = contextGraphVerifiableMemoryUri(CG, 'encoded-helper-collision');
+    await store.insert([
+      quad('urn:trusted', 'urn:p', '"Visible"', graph),
+      quad(
+        'urn:trusted',
+        'http://dkg.io/ontology/trustLevel',
+        `"${TrustLevel.ConsensusVerified}"`,
+        graph,
+      ),
+    ]);
+
+    const result = await engine.query(
+      String.raw`SELECT ?value ?__dkgTrust0 WHERE { ?subject <urn:p> ?value . BIND("caller" AS ?\u005F_dkgTrust0) }`,
+      {
+        contextGraphId: CG,
+        view: 'verifiable-memory',
+        minTrust: TrustLevel.ConsensusVerified,
+      },
+    );
+
+    expect(result.bindings).toEqual([{ value: '"Visible"', __dkgTrust0: '"caller"' }]);
+  });
+
   it('still strips real line comments containing a fake terminator (`# … .`)', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
@@ -491,6 +673,34 @@ describe('[Q-1] DKGQueryEngine minTrust uses writer-side trust metadata', () => 
     // not because the data didn't match but because the rewriter
     // returned null and the caller fail-closed the entire query.
     expect(result.bindings.map((b) => b['s'])).toEqual(['urn:doc2']);
+  });
+
+  it('trust-filters a triple block after FILTER when the optional dot is omitted', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiableMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:outer', 'urn:p', '"Visible"', consensus),
+      quad('urn:outer', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:allowed', 'urn:secret', '"Allowed"', consensus),
+      quad('urn:allowed', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:denied', 'urn:secret', '"Denied"', consensus),
+      quad('urn:denied', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.SelfAttested}"`, consensus),
+    ]);
+    const sparql = [
+      'SELECT ?secret WHERE {',
+      '  ?outer <urn:p> ?value .',
+      '  FILTER(?value = "Visible")',
+      '  ?candidate <urn:secret> ?secret',
+      '}',
+    ].join('\n');
+
+    const result = await engine.query(
+      sparql,
+      { contextGraphId: CG, view: 'verifiable-memory', minTrust: TrustLevel.ConsensusVerified },
+    );
+
+    expect(result.bindings.map((binding) => binding['secret'])).toEqual(['"Allowed"']);
   });
 
   it('honors _minTrust on a BGP whose top-level statements include a BIND', async () => {
@@ -1110,6 +1320,25 @@ describe('[Q-6] QueryHandler error taxonomy', () => {
     expect(resp.status).toBe('ERROR');
     expect(resp.error).toBe('Internal error processing query');
   });
+
+  it('preserves the ordinary UAL resolution failure text at the outer boundary', async () => {
+    const queryEngine = {
+      resolveKnowledgeAsset: async () => { throw new Error('resolver failed'); },
+    } as unknown as DKGQueryEngine;
+    const handler = new QueryHandler(queryEngine, { defaultPolicy: 'public' });
+
+    const response = await handler.handle({
+      operationId: 'failed-ual',
+      lookupType: 'ENTITY_BY_UAL',
+      ual: 'did:dkg:testnet:31337/0xabc/1',
+    }, 'peer');
+
+    expect(response).toMatchObject({
+      operationId: 'failed-ual',
+      status: 'ERROR',
+      error: 'Failed to resolve UAL: did:dkg:testnet:31337/0xabc/1',
+    });
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1609,37 +1838,6 @@ describe('[Q-1] minTrust + view wrapping survive UNBALANCED literal braces (bot 
       minTrust: TrustLevel.ConsensusVerified,
     });
     expect(result.bindings.length).toBe(1);
-  });
-
-  it('skipSparqlStringLiteral atomicity — directly exercises the centralised lex helper', async () => {
-    // Direct unit test of the exported helper. This is the smallest
-    // reproduction of the bot's concern: every other test exercises
-    // it through the engine, which is integration-shaped. Pin the
-    // contract directly so a regression to per-helper duplication
-    // would surface here even if the integration paths still pass.
-    const { skipSparqlStringLiteral } = await import('../src/dkg-query-engine.js') as unknown as {
-      skipSparqlStringLiteral: (src: string, i: number) => number;
-    };
-
-    // Single-line forms.
-    expect(skipSparqlStringLiteral('"abc"X', 0)).toBe(5);
-    expect(skipSparqlStringLiteral("'abc'X", 0)).toBe(5);
-    // Embedded escape — the `\` consumes the next char.
-    expect(skipSparqlStringLiteral('"a\\"b"X', 0)).toBe(6);
-    // Triple-double-quoted with embedded `"` and `{`/`}`.
-    const tdq = '"""a"b{c}d#e."""TAIL';
-    expect(skipSparqlStringLiteral(tdq, 0)).toBe(tdq.indexOf('TAIL'));
-    // Triple-single-quoted with embedded `'`.
-    const tsq = "'''x'y{z}w#q.'''TAIL";
-    expect(skipSparqlStringLiteral(tsq, 0)).toBe(tsq.indexOf('TAIL'));
-    // Triple-quoted with newlines (long-form spans lines).
-    const multi = '"""line1\nline2\nline3"""TAIL';
-    expect(skipSparqlStringLiteral(multi, 0)).toBe(multi.indexOf('TAIL'));
-    // Non-quote start = no advance.
-    expect(skipSparqlStringLiteral('xyz', 0)).toBe(0);
-    // Unterminated literal consumes the rest (defensive — see helper docs).
-    expect(skipSparqlStringLiteral('"unterminated', 0)).toBe('"unterminated'.length);
-    expect(skipSparqlStringLiteral('"""unterminated', 0)).toBe('"""unterminated'.length);
   });
 
   it('wrapWithGraph (default-graph filter) survives unbalanced braces inside string literals', async () => {

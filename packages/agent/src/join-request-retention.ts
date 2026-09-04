@@ -3,7 +3,10 @@ import {
   contextGraphMetaGraphUri,
   sparqlString,
 } from '@origintrail-official/dkg-core';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  deleteByPatternWithoutCount,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 
 const JOIN_REQUEST_SUBJECT_PREFIX = 'did:dkg:join-request:';
 const REQUEST_STATUS = 'https://dkg.network/ontology#requestStatus';
@@ -102,7 +105,8 @@ export async function pruneTerminalJoinRequestRecords(
     .map((row) => row['request'])
     .filter((subject): subject is string => Boolean(subject));
   for (const subject of subjects) {
-    await store.deleteByPattern(
+    await deleteByPatternWithoutCount(
+      store,
       { graph: metaGraph, subject },
       { priority: 'background', source: 'join.moderationRetention.pruneFallback' },
     );

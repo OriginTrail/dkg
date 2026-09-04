@@ -25,7 +25,9 @@ import {
 import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import {
+  VerifiedGraphScopedFinalizationEvidenceCodec,
   parseGraphScopedFinalization,
+  type VerifiedGraphScopedFinalizationEvidence,
 } from '../src/finalization-graph-envelope.js';
 import {
   FinalizationRecovery,
@@ -33,6 +35,7 @@ import {
 import {
   openSqliteFinalizationRecoveryStore,
 } from '../src/finalization-recovery-sqlite-store.js';
+import type { FinalizationRecoveryStore } from '../src/finalization-recovery-store.js';
 
 const CONTEXT_GRAPH = 'finalization-recovery-admission';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -113,13 +116,73 @@ function recoveryMaterializer() {
       allowedPeers: [],
     }),
     apply: async () => 'applied' as const,
+    recoverVerifiedEvidence: async () => undefined,
     replayVerified: async () => 'promoted' as const,
     invalidateVerified: async () => 'invalidated' as const,
     isRetryableError: (error: unknown) => error instanceof StoreSchedulerBusyError,
   };
 }
 
+function verifiedEvidence(
+  overrides: Partial<VerifiedGraphScopedFinalizationEvidence> = {},
+): VerifiedGraphScopedFinalizationEvidence {
+  return {
+    assertionVersion: '1',
+    publicTripleCount: 1,
+    privateTripleCount: 0,
+    publisherPeerId: '12D3KooWPublisher',
+    publisherAddress: PUBLISHER,
+    transactionHash: message().txHash,
+    blockNumber: 123,
+    blockHash: BLOCK_HASH,
+    txIndex: 4,
+    authorAddress: AUTHOR,
+    accessPolicy: 'public',
+    allowedPeers: [],
+    ...overrides,
+  };
+}
+
 describe('graph-scoped finalization recovery admission', () => {
+  it('classifies receipt placement independently of the recovery generation', () => {
+    const candidate = parsedMessage();
+    const identity = (generation: number) => ({
+      ual: UAL,
+      kaId: PACKED_KA_ID.toString(),
+      batchId: PACKED_KA_ID.toString(),
+      merkleRoot: `0x${'00'.repeat(32)}`,
+      targetContextGraphId: '42',
+      generation,
+    });
+    const original = verifiedEvidence();
+    const moved = verifiedEvidence({
+      blockNumber: 124,
+      blockHash: `0x${'ef'.repeat(32)}`,
+      txIndex: 7,
+    });
+
+    expect(VerifiedGraphScopedFinalizationEvidenceCodec.classifyPlacement(
+      original,
+      candidate,
+      identity(0),
+    )).toBe('original');
+    expect(VerifiedGraphScopedFinalizationEvidenceCodec.classifyPlacement(
+      original,
+      candidate,
+      identity(9),
+    )).toBe('original');
+    expect(VerifiedGraphScopedFinalizationEvidenceCodec.classifyPlacement(
+      moved,
+      candidate,
+      identity(0),
+    )).toBe('canonical-moved');
+    expect(VerifiedGraphScopedFinalizationEvidenceCodec.classifyPlacement(
+      moved,
+      candidate,
+      identity(9),
+    )).toBe('canonical-moved');
+  });
+
   it('preserves boolean fallback behavior for callers using the original API', async () => {
     const recovery = new FinalizationRecovery(
       undefined,
@@ -808,6 +871,317 @@ describe('graph-scoped finalization recovery admission', () => {
     }
   });
 
+  it('settles a RECEIVED entry from independently verified materialized evidence', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recover-vm-evidence-'));
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      const prepare = vi.fn(async () => undefined);
+      const recoverVerifiedEvidence = vi.fn(async () => verifiedEvidence());
+      const replayVerified = vi.fn(async () => 'already-confirmed' as const);
+      const chain = recoveryChain();
+      const recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          prepare,
+          recoverVerifiedEvidence,
+          replayVerified,
+        },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      await expect(recovery.replayMatching({
+        chainId: chain.chainId,
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      })).resolves.toBe('recovered');
+
+      expect(recoverVerifiedEvidence).toHaveBeenCalledOnce();
+      expect(replayVerified).toHaveBeenCalledOnce();
+      expect(prepare).not.toHaveBeenCalled();
+      expect(await store.list()).toMatchObject([{
+        state: 'SETTLED',
+        verifiedEvidence: {
+          transactionHash: message().txHash,
+          publisherAddress: PUBLISHER,
+        },
+      }]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('records moved-receipt retry backoff on the committed generation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recover-moved-retry-'));
+    try {
+      const now = 1_000;
+      const store = await openSqliteFinalizationRecoveryStore(directory, { now: () => now });
+      const movedEvidence = verifiedEvidence({
+        blockNumber: 124,
+        blockHash: `0x${'ef'.repeat(32)}`,
+        txIndex: 7,
+      });
+      const recoverVerifiedEvidence = vi.fn(async () => movedEvidence);
+      const replayVerified = vi.fn(async () => {
+        throw new StoreSchedulerBusyError(
+          'queue_wait_timeout',
+          'normal',
+          'finalization-recovery-worker',
+        );
+      });
+      const chain = recoveryChain({
+        resolveCanonicalFinalizationReceipt: async () => ({
+          status: 'confirmed',
+          receipt: confirmedReceipt({
+            blockNumber: movedEvidence.blockNumber,
+            blockHash: movedEvidence.blockHash,
+            txIndex: movedEvidence.txIndex,
+          }),
+        }),
+      });
+      const recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          recoverVerifiedEvidence,
+          replayVerified,
+        },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+      const replay = {
+        chainId: chain.chainId,
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      };
+
+      await expect(recovery.replayMatching(
+        replay,
+        { persistDeferredBackoff: true },
+      )).resolves.toBe('retry-pending');
+      expect(await store.list()).toMatchObject([{
+        state: 'VERIFIED',
+        generation: 1,
+        attemptCount: 1,
+        nextAttemptAt: expect.any(Number),
+        verifiedEvidence: {
+          blockNumber: 124,
+          blockHash: `0x${'ef'.repeat(32)}`,
+          txIndex: 7,
+        },
+      }]);
+      const [deferred] = await store.list();
+      expect(deferred!.nextAttemptAt).toBeGreaterThan(now);
+
+      await expect(recovery.replayMatching(
+        replay,
+        { persistDeferredBackoff: true },
+      )).resolves.toBe('retry-pending');
+      expect(recoverVerifiedEvidence).toHaveBeenCalledOnce();
+      expect(replayVerified).toHaveBeenCalledOnce();
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves no intermediate REORGED state when a moved receipt cannot be committed', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recover-commit-failed-'));
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      const commitVerifiedEvidence = vi.fn(async () => ({ status: 'closed' as const }));
+      const markReorged = vi.fn(store.markReorged.bind(store));
+      const refusingStore = new Proxy(store, {
+        get(target, property) {
+          if (property === 'commitVerifiedEvidence') return commitVerifiedEvidence;
+          if (property === 'markReorged') return markReorged;
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      }) as FinalizationRecoveryStore;
+      const prepare = vi.fn(recoveryMaterializer().prepare);
+      const apply = vi.fn(async () => 'applied' as const);
+      const recoverVerifiedEvidence = vi.fn(async () => verifiedEvidence({
+        blockNumber: 124,
+        blockHash: `0x${'ef'.repeat(32)}`,
+        txIndex: 7,
+      }));
+      const replayVerified = vi.fn(async () => 'already-confirmed' as const);
+      const chain = recoveryChain();
+      const recovery = new FinalizationRecovery(
+        refusingStore,
+        chain,
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          prepare,
+          apply,
+          recoverVerifiedEvidence,
+          replayVerified,
+        },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      await expect(recovery.replayMatching({
+        chainId: chain.chainId,
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      })).resolves.toBe('none');
+
+      expect(recoverVerifiedEvidence).toHaveBeenCalledOnce();
+      expect(commitVerifiedEvidence).toHaveBeenCalledTimes(2);
+      expect(commitVerifiedEvidence).toHaveBeenCalledWith(
+        expect.any(String),
+        0,
+        expect.objectContaining({ placement: 'canonical-moved' }),
+      );
+      expect(commitVerifiedEvidence).toHaveBeenCalledWith(
+        expect.any(String),
+        0,
+        expect.objectContaining({ placement: 'original' }),
+      );
+      expect(markReorged).not.toHaveBeenCalled();
+      expect(prepare).toHaveBeenCalledOnce();
+      expect(apply).not.toHaveBeenCalled();
+      expect(replayVerified).not.toHaveBeenCalled();
+      const [entry] = await store.list();
+      expect(entry).toMatchObject({
+        state: 'RECEIVED',
+        generation: 0,
+        attemptCount: 1,
+      });
+      expect(entry?.verifiedEvidence).toBeUndefined();
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves normal replay when evidence recovery is unavailable', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recover-noop-'));
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      const recoverVerifiedEvidence = vi.fn(async () => undefined);
+      const prepare = vi.fn(recoveryMaterializer().prepare);
+      const apply = vi.fn(async () => 'applied' as const);
+      const replayVerified = vi.fn(async () => 'already-confirmed' as const);
+      const chain = recoveryChain();
+      const recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          prepare,
+          apply,
+          recoverVerifiedEvidence,
+          replayVerified,
+        },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      await expect(recovery.replayMatching({
+        chainId: chain.chainId,
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      })).resolves.toBe('recovered');
+
+      expect(recoverVerifiedEvidence).toHaveBeenCalledOnce();
+      expect(prepare).toHaveBeenCalledOnce();
+      expect(apply).toHaveBeenCalledOnce();
+      expect(replayVerified).not.toHaveBeenCalled();
+      expect(await store.list()).toMatchObject([{ state: 'SETTLED' }]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a RECEIVED entry when recovered evidence does not match its envelope', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-reject-vm-evidence-'));
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      const prepare = vi.fn(async () => undefined);
+      const replayVerified = vi.fn(async () => 'already-confirmed' as const);
+      const warn = vi.fn();
+      const chain = recoveryChain();
+      const recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn },
+        {
+          ...recoveryMaterializer(),
+          prepare,
+          recoverVerifiedEvidence: async () => verifiedEvidence({
+            transactionHash: `0x${'ff'.repeat(32)}`,
+          }),
+          replayVerified,
+        },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      await expect(recovery.replayMatching({
+        chainId: chain.chainId,
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      })).resolves.toBe('none');
+
+      expect(prepare).toHaveBeenCalledOnce();
+      expect(replayVerified).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(
+        'ignored recovered evidence that does not match its envelope',
+      ));
+      expect(await store.list()).toMatchObject([{ state: 'RECEIVED' }]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('returns a typed parsed envelope for a valid singleton finalization', () => {
     expect(parseGraphScopedFinalization(message(), CONTEXT_GRAPH)).toMatchObject({
       ok: true,
@@ -982,10 +1356,9 @@ describe('graph-scoped finalization recovery admission', () => {
       });
       stopWorker.mockImplementationOnce(() => workerStopGate);
       const nextTeardown = vi.spyOn(
-        agent as unknown as {
-          closeRfc64PublicCatalogBootstrapV1(): Promise<void>;
-        },
-        'closeRfc64PublicCatalogBootstrapV1',
+        (agent as unknown as { rfc64CatalogRuntimeV1: { close(): Promise<void> } })
+          .rfc64CatalogRuntimeV1,
+        'close',
       );
       const stopping = agent.stop();
       await vi.waitFor(() => expect(stopWorker).toHaveBeenCalledTimes(1));
@@ -1078,7 +1451,10 @@ describe('graph-scoped finalization recovery admission', () => {
   });
 
   it('distinguishes reorged block placement from permanent receipt content mismatch', async () => {
-    const resolve = async (receipt: CanonicalFinalizationReceipt) => {
+    const resolve = async (
+      receipt: CanonicalFinalizationReceipt,
+      expectation?: unknown,
+    ) => {
       const recovery = new FinalizationRecovery(
         undefined,
         recoveryChain({
@@ -1090,11 +1466,21 @@ describe('graph-scoped finalization recovery admission', () => {
         { info: () => {}, warn: () => {} },
         recoveryMaterializer(),
       );
-      return recovery.resolveCanonicalReceipt(parsedMessage());
+      return expectation === undefined
+        ? recovery.resolveCanonicalReceipt(parsedMessage())
+        : recovery.resolveCanonicalReceipt(parsedMessage(), expectation as never);
     };
 
     await expect(resolve(confirmedReceipt({ blockNumber: 124 })))
       .resolves.toEqual({ status: 'reorged' });
+    await expect(resolve(
+      confirmedReceipt({ blockNumber: 124 }),
+      {
+        kind: 'persisted',
+        evidence: verifiedEvidence(),
+        placement: 'invalid-at-runtime',
+      },
+    )).resolves.toEqual({ status: 'reorged' });
     await expect(resolve(confirmedReceipt({
       merkleRoot: Uint8Array.from({ length: 32 }, () => 1),
     }))).resolves.toEqual({ status: 'rejected' });

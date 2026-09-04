@@ -29,6 +29,7 @@ import {
   INVENTORY_V1_DDL,
   INVENTORY_V1_FILE_MODE,
   INVENTORY_V1_LEGACY_USER_VERSION,
+  INVENTORY_V1_POSIX_QUARANTINE_CAPABILITY,
   INVENTORY_V1_RELATIVE_PATH,
   INVENTORY_V1_USER_VERSION,
   INVENTORY_V1_V2_USER_VERSION,
@@ -623,6 +624,8 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
     }
     v2.exec(`
       PRAGMA journal_mode = DELETE;
+      DROP TABLE rfc64_finalized_private_placement_repairs_v1;
+      DROP TABLE rfc64_staged_catalog_heads_v1;
       DROP TABLE rfc64_swm_author_inventory_rows_v1;
       DROP TABLE rfc64_swm_author_inventory_heads_v1;
       ${dropAppliedHead ? 'DROP TABLE rfc64_applied_catalog_heads_v1;' : ''}
@@ -632,7 +635,9 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
     chmodSync(dirname(path), INVENTORY_V1_DIRECTORY_MODE);
     chmodSync(path, INVENTORY_V1_FILE_MODE);
 
-    const migrated = await openInventoryV1(directory);
+    const migrated = await openInventoryV1(directory, {
+      quarantineCapability: INVENTORY_V1_POSIX_QUARANTINE_CAPABILITY,
+    });
     foundations.push(migrated);
     const database = new DatabaseSync(path, { readOnly: true });
     try {

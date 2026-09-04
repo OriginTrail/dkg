@@ -161,6 +161,13 @@ describe('Context Graph discovery/subscription boundary', () => {
         activated: 0,
         dormant: 2,
         dormantIds: [hostedId, subscribedId],
+        dormantReasons: {
+          activationCap: [],
+          authorityDenied: [],
+          authorityUnavailable: [],
+          rehydrationDisabled: [hostedId, subscribedId],
+          deactivated: [],
+        },
       });
       expect(await agent.query(`
         ASK WHERE {

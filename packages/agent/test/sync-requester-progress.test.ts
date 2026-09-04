@@ -233,6 +233,46 @@ describe('selected snapshot walk continuation', () => {
 });
 
 describe('sync requester progress accounting', () => {
+  it.each(['data', 'meta'] as const)(
+    'rejects RFC-64 control graphs returned in verified %s before insert',
+    async (verifiedPhase) => {
+    const contextGraphId = 'rfc64-control-boundary';
+    const controlQuad = {
+      ...quad('urn:dkg:sync:applied-cg:test'),
+      graph: `did:dkg:context-graph:${contextGraphId}/_sync/applied-cg`,
+    };
+    const storeInsert = recorder(async () => {});
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-legacy',
+      contextGraphIds: [contextGraphId],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({ phase }) => pageResult(contextGraphId, phase, {
+        quads: phase === 'data' ? [controlQuad] : [],
+      }),
+      processDurableBatchInWorker: async () => ({
+        ...durableProcessResult(),
+        emptyResponses: 0,
+        verifiedData: verifiedPhase === 'data' ? [controlQuad] : [],
+        verifiedMeta: verifiedPhase === 'meta' ? [controlQuad] : [],
+        totalFetchedDataQuads: verifiedPhase === 'data' ? 1 : 0,
+        totalFetchedMetaQuads: verifiedPhase === 'meta' ? 1 : 0,
+      }),
+      storeInsert,
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(storeInsert.calls).toHaveLength(0);
+    expect(summary.insertedTriples).toBe(0);
+    expect(summary.failedPhases).toBe(1);
+    },
+  );
+
   it('does not count a denied durable graph but counts the subsequent clean-empty graph', async () => {
     const deniedCgs: string[] = [];
     const fetchSyncPages = durableFetchRecorder(async ({
@@ -1385,7 +1425,7 @@ describe('exact durable fetch disposition', () => {
       remotePeerId: 'exact-peer',
       contextGraphIds: ['exact-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetUalsFor: () => [EXACT_UAL],
+      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
       fetchSyncPages: async ({ phase }) => {
         if (options.fetchError) throw options.fetchError;
         const page = pageResult('exact-cg', phase, {
@@ -1424,7 +1464,7 @@ describe('exact durable fetch disposition', () => {
       remotePeerId: 'exact-peer-public',
       contextGraphIds: ['exact-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetUalsFor: () => [EXACT_UAL],
+      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
       fetchSyncPages: async ({ phase }) => pageResult('exact-cg', phase),
       processDurableBatchInWorker: async () => durableProcessResult(),
       storeInsert: async () => {},
@@ -1508,7 +1548,7 @@ describe('exact durable fetch disposition', () => {
       remotePeerId: 'legacy-exact-peer',
       contextGraphIds: ['exact-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetUalsFor: () => [EXACT_UAL],
+      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
       fetchSyncPages,
       processDurableBatchInWorker,
       storeInsert,
@@ -1535,7 +1575,7 @@ describe('exact durable fetch disposition', () => {
       contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.AGENTS],
       syncAgentsMeta: false,
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetUalsFor: () => [EXACT_UAL],
+      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
       fetchSyncPages: async ({ contextGraphId, phase }) => {
         fetchedPhases.push(phase);
         return pageResult(contextGraphId, phase);
@@ -1559,7 +1599,7 @@ describe('exact durable fetch disposition', () => {
       remotePeerId: 'exact-multi-cg-peer',
       contextGraphIds: ['exact-incomplete-cg', 'exact-clean-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetUalsFor: () => [EXACT_UAL],
+      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
       fetchSyncPages: async ({ contextGraphId, phase }) => pageResult(contextGraphId, phase, {
         ...(contextGraphId === 'exact-incomplete-cg' && phase === 'data'
           ? { completed: false }

@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
+import { startProverLoop, type TickOutcome } from '@origintrail-official/dkg-random-sampling';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { RandomSamplingShutdownTimeoutError } from '../src/random-sampling-bind.js';
 import { VmReconcileDispatcher } from '../src/chain-reconciler.js';
 import { FinalizationRuntime } from '../src/finalization-runtime.js';
 import {
@@ -25,6 +27,83 @@ function syntheticShutdownAgent(): any {
 }
 
 describe('DKGAgent outbox shutdown lifecycle', () => {
+  it('retains a timed-out Random Sampling prover and blocks dependency teardown until retry', async () => {
+    const originalTimeout = DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS;
+    Object.defineProperty(DKGAgentBase, 'RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS', {
+      configurable: true,
+      value: 20,
+    });
+    let settleTick!: (outcome: TickOutcome) => void;
+    let tickStarted!: () => void;
+    const started = new Promise<void>((resolve) => { tickStarted = resolve; });
+    const closeProver = vi.fn(async () => undefined);
+    const loop = startProverLoop({
+      intervalMs: 60_000,
+      prover: {
+        tick: () => {
+          tickStarted();
+          return new Promise<TickOutcome>((resolve) => { settleTick = resolve; });
+        },
+        close: closeProver,
+      },
+    });
+    const stopProver = vi.fn(() => loop.stop());
+    const handle = {
+      enabled: true,
+      start: () => loop.start(),
+      stop: stopProver,
+      getStatus: vi.fn(),
+    };
+    const stopNode = vi.fn(async () => {});
+    const closeStore = vi.fn(async () => {});
+    const agent = syntheticShutdownAgent();
+    Object.assign(agent, {
+      started: true,
+      chainPoller: null,
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+      clearRandomSamplingBindRetry: vi.fn(),
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      randomSamplingHandle: handle,
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
+      store: { close: closeStore },
+      log: { warn: vi.fn() },
+    });
+
+    try {
+      handle.start();
+      await started;
+      const timeout = await agent.stop().catch((error: unknown) => error);
+      expect(timeout).toBeInstanceOf(RandomSamplingShutdownTimeoutError);
+      expect(timeout).toMatchObject({
+        name: 'RandomSamplingShutdownTimeoutError',
+        timeoutMs: 20,
+      });
+      expect(agent.randomSamplingHandle).toBe(handle);
+      expect(closeProver).not.toHaveBeenCalled();
+      expect(stopNode).not.toHaveBeenCalled();
+      expect(closeStore).not.toHaveBeenCalled();
+
+      settleTick({ kind: 'period-closed' });
+      await expect(agent.stop()).resolves.toBeUndefined();
+      expect(stopProver).toHaveBeenCalledTimes(2);
+      expect(closeProver).toHaveBeenCalledOnce();
+      expect(agent.randomSamplingHandle).toBeNull();
+      expect(stopNode).toHaveBeenCalledOnce();
+      expect(closeStore).toHaveBeenCalledOnce();
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS', {
+        configurable: true,
+        value: originalTimeout,
+      });
+    }
+  });
+
   it('drains an in-flight selected-SWM owner after network stop and before store close', async () => {
     const events: string[] = [];
     const transfers = new SelectedSwmMetaTransferCoordinator();

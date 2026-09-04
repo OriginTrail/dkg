@@ -1,0 +1,16 @@
+{
+  "name": "@devnet/rfc64-cp2-private-swm-vm-recovery",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Two-process RFC-64 Release 2 private Context Graph SWM and VM recovery canary.",
+  "dependencies": {
+    "@origintrail-official/dkg-core": "workspace:*",
+    "ethers": "6.16.0"
+  },
+  "scripts": {
+    "test": "node --import tsx --test batch-plan.test.ts lifecycle-receipts.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "live": "node --import tsx launch-live.ts"
+  }
+}
