@@ -1,10 +1,7 @@
 import React, { Suspense, useState, useEffect } from 'react';
 import { useTabsStore } from '../../stores/tabs.js';
 import { DashboardView } from '../../views/DashboardView.js';
-import { ProjectView } from '../../views/ProjectView.js';
 import { ContextGraphPrimerView } from '../../views/ContextGraphPrimerView.js';
-import { MemoryLayerView } from '../../views/MemoryLayerView.js';
-import { MemoryStackView } from '../../views/MemoryStackView.js';
 import { authHeaders, fileUrl } from '../../api.js';
 import { DOC_TAB_PREFIX, decodeDocTabId } from '../../lib/doc-tab-id.js';
 import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../../lib/contextGraphPrimer.js';
@@ -38,6 +35,18 @@ const PublishingConvictionView = React.lazy(() =>
 
 const ConvictionDetailView = React.lazy(() =>
   import('../../pages/conviction/ConvictionDetailView.js').then((m) => ({ default: m.ConvictionDetailView }))
+);
+
+const ProjectView = React.lazy(() =>
+  import('../../views/ProjectView.js').then((m) => ({ default: m.ProjectView }))
+);
+
+const MemoryLayerView = React.lazy(() =>
+  import('../../views/MemoryLayerView.js').then((m) => ({ default: m.MemoryLayerView }))
+);
+
+const MemoryStackView = React.lazy(() =>
+  import('../../views/MemoryStackView.js').then((m) => ({ default: m.MemoryStackView }))
 );
 
 function TabBar() {
@@ -312,13 +321,21 @@ function ViewContainer() {
     );
   }
 
-  if (activeTabId === 'memory-stack') return <MemoryStackView />;
+  if (activeTabId === 'memory-stack') return (
+    <Suspense fallback={<div className="lazy-spinner">Loading memory stack...</div>}>
+      <MemoryStackView />
+    </Suspense>
+  );
 
   if (activeTabId === CONTEXT_GRAPH_PRIMER_TAB_ID) return <ContextGraphPrimerView />;
 
   if (activeTabId.startsWith('project:')) {
     const cgId = activeTabId.slice('project:'.length);
-    return <ProjectView contextGraphId={cgId} />;
+    return (
+      <Suspense fallback={<div className="lazy-spinner">Loading project...</div>}>
+        <ProjectView contextGraphId={cgId} />
+      </Suspense>
+    );
   }
 
   if (activeTabId.startsWith('conviction:')) {
@@ -357,13 +374,25 @@ function ViewContainer() {
   }
 
   if (activeTabId.startsWith('wm:')) {
-    return <MemoryLayerView layer="wm" contextGraphId={activeTabId.slice(3)} />;
+    return (
+      <Suspense fallback={<div className="lazy-spinner">Loading working memory...</div>}>
+        <MemoryLayerView layer="wm" contextGraphId={activeTabId.slice(3)} />
+      </Suspense>
+    );
   }
   if (activeTabId.startsWith('swm:')) {
-    return <MemoryLayerView layer="swm" contextGraphId={activeTabId.slice(4)} />;
+    return (
+      <Suspense fallback={<div className="lazy-spinner">Loading shared memory...</div>}>
+        <MemoryLayerView layer="swm" contextGraphId={activeTabId.slice(4)} />
+      </Suspense>
+    );
   }
   if (activeTabId.startsWith('vm:')) {
-    return <MemoryLayerView layer="vm" contextGraphId={activeTabId.slice(3)} />;
+    return (
+      <Suspense fallback={<div className="lazy-spinner">Loading verifiable memory...</div>}>
+        <MemoryLayerView layer="vm" contextGraphId={activeTabId.slice(3)} />
+      </Suspense>
+    );
   }
 
   return (
