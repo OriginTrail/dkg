@@ -144,6 +144,11 @@ function makeAgentLike(opts: {
   agentLike.readLiveOnChainAccessPolicy = (DKGAgent.prototype as any).readLiveOnChainAccessPolicy;
   agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
   agentLike.resolveWorkspaceRecipientsGated = (DKGAgent.prototype as any).resolveWorkspaceRecipientsGated;
+  // This fixture isolates the public/plaintext decision. Registered-private
+  // chain roster selection has dedicated production-agent coverage.
+  agentLike.resolveRegisteredContextGraphAgentGate = vi.fn(async () => null);
+  agentLike.resolveWorkspaceAgentRecipientsForCurrentAuthority =
+    (DKGAgent.prototype as any).resolveWorkspaceAgentRecipientsForCurrentAuthority;
   agentLike._resolveCuratedChainKeyContext = (DKGAgent.prototype as any)._resolveCuratedChainKeyContext;
   return agentLike;
 }

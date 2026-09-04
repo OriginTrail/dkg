@@ -903,6 +903,14 @@ export interface ContextGraphSubscriptionRehydrationStatus {
   activationCap: number;
   capDisabled: boolean;
   dormantIds: string[];
+  /** Reason-specific dormant inventory; union equals `dormantIds`. */
+  dormantReasons: {
+    activationCap: string[];
+    authorityDenied: string[];
+    authorityUnavailable: string[];
+    rehydrationDisabled: string[];
+    deactivated: string[];
+  };
   /** Startup rehydration completion timestamp; remains stable after boot. */
   completedAt: number;
   /** Most recent timestamp for post-boot diagnostic count/id updates. */

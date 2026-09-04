@@ -50,6 +50,29 @@ describe('prepared SPARQL query facts', () => {
     ]);
   });
 
+  it('owns standard dataset and GRAPH facts with canonical source coordinates', () => {
+    const source = String.raw`PREFIX ex: <urn:example:> SELECT ?\u0067 FROM <urn:dataset> WHERE { GRAPH ?\u0067 { ?s ?p ?o } GRAPH ex:named { ?s ?p ?o } }`;
+    const query = prepareSparqlQuery(validPrepared(source));
+
+    expect(query.prefixes.get('ex')).toBe('urn:example:');
+    expect(query.hasDatasetClause).toBe(true);
+    expect(query.hasGraphClause).toBe(true);
+    expect(query.graphVariables).toEqual([
+      { source: String.raw`?\u0067`, logicalName: 'g' },
+    ]);
+    expect(query.graphTargets).toMatchObject([
+      {
+        kind: 'variable',
+        variable: { source: String.raw`?\u0067`, logicalName: 'g' },
+      },
+      { kind: 'iri', iri: 'urn:example:named' },
+    ]);
+    for (const target of query.graphTargets) {
+      expect(query.prepared.tokens[target.keywordTokenIndex].upper).toBe('GRAPH');
+      expect(target.braceDepth).toBe(1);
+    }
+  });
+
   it('does not type malformed lexical artifacts as prepared queries', () => {
     type Malformed = Extract<PreparedSparql, { status: 'malformed-uchar' }>;
     type QueryPreparationAcceptsMalformed = Malformed extends Parameters<

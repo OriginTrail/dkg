@@ -29,15 +29,15 @@ describe('/api/query error mapping (real daemon)', () => {
   });
 
   it('maps a real malformed-SPARQL parse error to HTTP 400, not 500 (#889)', async () => {
-    // Missing closing brace is rejected either by the fail-closed graph-scope
-    // boundary or by the backend parser; both are caller errors, never 500s.
+    // Balanced graph boundaries pass the scope scanner; the incomplete triple
+    // pattern is rejected by the real Oxigraph parser.
     const { status, body } = await postJson(daemon, '/api/query', {
-      sparql: 'SELECT ?s WHERE { ?s ?p ?o',
+      sparql: 'SELECT ?s WHERE { ?s ?p }',
       contextGraphId: 'all',
     });
     expect(status).toBe(400);
     expect(String(body.error)).toMatch(
-      /Scoped query violation: unable to locate|error at \d+:\d+|expected one of|parse/i,
+      /error at \d+:\d+|expected one of|parse|syntax/i,
     );
   });
 

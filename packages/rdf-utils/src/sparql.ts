@@ -19,4 +19,5 @@ export {
   type PreparedSparqlQuery,
   type SparqlQueryGroupRange,
   type SparqlQueryVariable,
+  type SparqlGraphTarget,
 } from './sparql-query.js';

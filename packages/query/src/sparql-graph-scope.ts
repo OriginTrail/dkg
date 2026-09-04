@@ -2,7 +2,7 @@ import {
   prepareSparqlQuery,
   prepareSparql,
   type PreparedSparqlQuery,
-  type SparqlQueryVariable,
+  type SparqlGraphTarget as PreparedSparqlGraphTarget,
   type SparqlLexicalToken,
   type ValidPreparedSparql,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
@@ -24,30 +24,14 @@ function assertNeverGraphTarget(target: never): never {
   );
 }
 
-interface SparqlGraphTargetCoordinates {
-  readonly keywordTokenIndex: number;
-  readonly targetTokenIndex: number;
-  readonly braceDepth: number;
-}
-
-export type SparqlGraphTarget = SparqlGraphTargetCoordinates & (
-  | { readonly kind: 'iri'; readonly iri: string }
-  | { readonly kind: 'variable'; readonly variable: SparqlQueryVariable }
-  | { readonly kind: 'invalid' }
-);
+export type SparqlGraphTarget = PreparedSparqlGraphTarget;
 
 /**
  * One canonical, source-coordinate model for graph authorization and rewrites.
  * Comments, strings, and IRI payloads have already been made opaque by the RDF
  * scanner; every fact below is derived from that same token stream.
  */
-export interface PreparedGraphScope extends PreparedSparqlQuery {
-  readonly prefixes: ReadonlyMap<string, string>;
-  readonly hasDatasetClause: boolean;
-  readonly hasGraphClause: boolean;
-  readonly graphTargets: readonly SparqlGraphTarget[];
-  readonly graphVariables: readonly SparqlQueryVariable[];
-}
+export type PreparedGraphScope = PreparedSparqlQuery;
 
 export type GraphScopeRewriteResult = SparqlRewriteResult<
   PreparedGraphScope,
@@ -96,106 +80,10 @@ export function transitionGraphScope(
   return prepareGraphScope(prepared);
 }
 
-function prefixesFromTokens(prepared: ValidPreparedSparql): Map<string, string> {
-  const prefixes = new Map<string, string>();
-  for (let index = 0; index + 2 < prepared.prologue.endTokenIndex; index++) {
-    const keyword = prepared.tokens[index];
-    const name = prepared.tokens[index + 1];
-    const iri = prepared.tokens[index + 2];
-    if (
-      keyword?.kind !== 'word'
-      || keyword.upper !== 'PREFIX'
-      || name?.kind !== 'prefixed-name'
-      || !name.logicalValue.endsWith(':')
-    ) continue;
-    const declaredIri = iriValue(iri);
-    if (declaredIri !== null) prefixes.set(name.logicalValue.slice(0, -1), declaredIri);
-    index += 2;
-  }
-  return prefixes;
-}
-
 export function prepareGraphScope(
   input: ValidPreparedSparql,
 ): PreparedGraphScope {
-  const query = prepareSparqlQuery(input);
-  const { prepared } = query;
-  const prefixes = prefixesFromTokens(prepared);
-  const braceDepths = query.structure.braces.depthBefore;
-  const graphTargets: SparqlGraphTarget[] = [];
-  const graphVariables: SparqlQueryVariable[] = [];
-  const graphVariableSet = new Set<string>();
-  let hasDatasetClause = false;
-
-  for (let index = 0; index < prepared.tokens.length; index++) {
-    const token = prepared.tokens[index];
-    if (token.kind !== 'word') continue;
-    if (token.upper === 'FROM') hasDatasetClause = true;
-    if (token.upper !== 'GRAPH') continue;
-
-    const target = prepared.tokens[index + 1];
-    if (target?.kind === 'variable') {
-      const variable = {
-        source: target.raw,
-        logicalName: target.logicalValue.slice(1),
-      };
-      graphTargets.push({
-        kind: 'variable',
-        variable,
-        keywordTokenIndex: index,
-        targetTokenIndex: index + 1,
-        braceDepth: braceDepths[index],
-      });
-      if (!graphVariableSet.has(variable.logicalName)) {
-        graphVariableSet.add(variable.logicalName);
-        graphVariables.push(variable);
-      }
-      continue;
-    }
-
-    const directIri = iriValue(target);
-    if (directIri !== null) {
-      graphTargets.push({
-        kind: 'iri',
-        iri: directIri,
-        keywordTokenIndex: index,
-        targetTokenIndex: index + 1,
-        braceDepth: braceDepths[index],
-      });
-      continue;
-    }
-
-    if (target?.kind === 'prefixed-name') {
-      const colon = target.logicalValue.indexOf(':');
-      const base = prefixes.get(target.logicalValue.slice(0, colon));
-      if (colon >= 0 && base !== undefined) {
-        graphTargets.push({
-          kind: 'iri',
-          iri: `${base}${target.logicalValue.slice(colon + 1)}`,
-          keywordTokenIndex: index,
-          targetTokenIndex: index + 1,
-          braceDepth: braceDepths[index],
-        });
-        continue;
-      }
-    }
-
-    graphTargets.push({
-      kind: 'invalid',
-      keywordTokenIndex: index,
-      targetTokenIndex: index + 1,
-      braceDepth: braceDepths[index],
-    });
-  }
-
-  return {
-    ...query,
-    prefixes,
-    hasDatasetClause,
-    hasGraphClause: graphTargets.length > 0,
-    graphTargets,
-    graphVariables,
-  };
+  return prepareSparqlQuery(input);
 }
 
 export function assertNoCallerDatasetClauses(scope: PreparedGraphScope): void {

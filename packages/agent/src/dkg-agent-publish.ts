@@ -127,7 +127,6 @@ import {
   PublishJournal, StaleWriteError,
   ACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
-  resolveWorkspaceAgentRecipients,
   computeTripleHashV10 as computeTripleHash,
   computeFlatKCRootV10 as computeFlatKCRoot,
   computePrivateRootV10 as computePrivateRoot,
@@ -3901,7 +3900,7 @@ export class PublishMethods extends DKGAgentBase {
         `Refusing to publish curated CG payload via the plaintext-inline fallback.`,
       );
     }
-    const resolution = await resolveWorkspaceAgentRecipients(this.store, { contextGraphId });
+    const resolution = await this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId });
     if (!resolution.requiresEncryption) {
       throw new Error(
         `${logPrefix}: curated CG ${contextGraphId}: access-policy says curated but recipient resolver ` +

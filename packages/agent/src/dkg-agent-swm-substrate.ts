@@ -101,7 +101,6 @@ import {
   PublishJournal, StaleWriteError,
   ACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
-  resolveWorkspaceAgentRecipients,
   projectWorkspaceAgentRecipientFanout,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
   canonicalPublishPayload,
@@ -1304,7 +1303,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<WorkspaceAgentRecipientFanoutSnapshot | null> {
-    const resolution = await resolveWorkspaceAgentRecipients(this.store, { contextGraphId });
+    const resolution = await this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId });
     if (!resolution.requiresEncryption) return null;
     return projectWorkspaceAgentRecipientFanout(
       resolution,

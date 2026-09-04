@@ -16,6 +16,7 @@ type BindingAgentMethods = Pick<DKGAgent,
   | 'resolveContextGraphOnChainIdBinding'
   | 'getContextGraphOnChainId'
   | 'resolveContextGraphNumericIdForPolicy'
+  | 'canReadContextGraph'
   | 'persistVmReconcileWatermark'
   | 'selfPrimeSubscriptionOnChainId'
   | 'resolveVmReconcileTarget'
@@ -112,6 +113,10 @@ function selectedFixture(resolved: bigint | null = 42n) {
     vmReconcileDispatcher: { triggerLive: vi.fn() },
     onChainParticipantAgentsCache: new Map(),
     contextGraphExists: vi.fn(async () => false),
+    // These scenarios isolate historical name binding. Read-authority
+    // admission is covered independently and must not make a synthetic,
+    // chainless binding fixture fail before reaching the behavior under test.
+    canReadContextGraph: vi.fn(async () => true),
     subscribeToContextGraph: vi.fn(),
   });
   return {

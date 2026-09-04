@@ -113,6 +113,7 @@ function runtimePrivateQueryAgent(options: {
     },
     defaultAgentAddress: LOCAL_MEMBER,
     peerId: 'peer-runtime-private-query',
+    chain: {},
     log: { info() {}, warn() {}, debug() {}, error() {} },
     queryEngine,
     store,
@@ -121,9 +122,13 @@ function runtimePrivateQueryAgent(options: {
       : new Map([[RUNTIME_PRIVATE_CG, { synced: true }]]),
     rfc64PublicCatalogServiceV1: { acceptedPolicySnapshot },
     isPrivateContextGraph,
+    getContextGraphAllowedPeers: vi.fn(async () => null),
+    resolveContextGraphNumericIdForPolicy: vi.fn(async () => null),
     isAgentAddressAllowed: QueryMethods.prototype.isAgentAddressAllowed,
     resolveRfc64PrivateReadRosterV1:
       QueryMethods.prototype.resolveRfc64PrivateReadRosterV1,
+    resolveContextGraphReadAuthority:
+      QueryMethods.prototype.resolveContextGraphReadAuthority,
     canReadContextGraph: QueryMethods.prototype.canReadContextGraph,
     getDisallowedGraphPrefixes: QueryMethods.prototype.getDisallowedGraphPrefixes,
     sparqlReferencesPrivateGraphs: QueryMethods.prototype.sparqlReferencesPrivateGraphs,

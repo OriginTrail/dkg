@@ -1,4 +1,5 @@
 import {
+  type SparqlLexicalToken,
   type ValidPreparedSparql,
 } from './sparql-lexical-scanner.js';
 import {
@@ -23,6 +24,19 @@ export interface SparqlQueryVariable {
   readonly logicalName: string;
 }
 
+interface SparqlGraphTargetCoordinates {
+  readonly keywordTokenIndex: number;
+  readonly targetTokenIndex: number;
+  readonly braceDepth: number;
+}
+
+/** One standard SPARQL GRAPH operand with canonical source coordinates. */
+export type SparqlGraphTarget = SparqlGraphTargetCoordinates & (
+  | { readonly kind: 'iri'; readonly iri: string }
+  | { readonly kind: 'variable'; readonly variable: SparqlQueryVariable }
+  | { readonly kind: 'invalid' }
+);
+
 /** Reusable prepared query facts derived from one canonical lexical artifact. */
 export interface PreparedSparqlQuery {
   readonly source: string;
@@ -32,6 +46,34 @@ export interface PreparedSparqlQuery {
   readonly where: SparqlQueryGroupRange | null;
   readonly queryVariables: readonly SparqlQueryVariable[];
   readonly whereVariables: readonly SparqlQueryVariable[];
+  readonly prefixes: ReadonlyMap<string, string>;
+  readonly hasDatasetClause: boolean;
+  readonly hasGraphClause: boolean;
+  readonly graphTargets: readonly SparqlGraphTarget[];
+  readonly graphVariables: readonly SparqlQueryVariable[];
+}
+
+function iriValue(token: SparqlLexicalToken | undefined): string | null {
+  return token?.kind === 'iri' ? token.logicalValue : null;
+}
+
+function prefixesFromTokens(prepared: ValidPreparedSparql): Map<string, string> {
+  const prefixes = new Map<string, string>();
+  for (let index = 0; index + 2 < prepared.prologue.endTokenIndex; index++) {
+    const keyword = prepared.tokens[index];
+    const name = prepared.tokens[index + 1];
+    const iri = prepared.tokens[index + 2];
+    if (
+      keyword?.kind !== 'word'
+      || keyword.upper !== 'PREFIX'
+      || name?.kind !== 'prefixed-name'
+      || !name.logicalValue.endsWith(':')
+    ) continue;
+    const declaredIri = iriValue(iri);
+    if (declaredIri !== null) prefixes.set(name.logicalValue.slice(0, -1), declaredIri);
+    index += 2;
+  }
+  return prefixes;
 }
 
 function whereRange(
@@ -107,6 +149,74 @@ export function prepareSparqlQuery(prepared: ValidPreparedSparql): PreparedSparq
   const structure = indexSparqlStructure(prepared);
   const where = whereRange(prepared, structure);
   const operationToken = prepared.tokens[prepared.prologue.endTokenIndex];
+  const prefixes = prefixesFromTokens(prepared);
+  const braceDepths = structure.braces.depthBefore;
+  const graphTargets: SparqlGraphTarget[] = [];
+  const graphVariables: SparqlQueryVariable[] = [];
+  const graphVariableSet = new Set<string>();
+  let hasDatasetClause = false;
+
+  for (let index = 0; index < prepared.tokens.length; index++) {
+    const token = prepared.tokens[index];
+    if (token.kind !== 'word') continue;
+    if (token.upper === 'FROM') hasDatasetClause = true;
+    if (token.upper !== 'GRAPH') continue;
+
+    const target = prepared.tokens[index + 1];
+    if (target?.kind === 'variable') {
+      const variable = {
+        source: target.raw,
+        logicalName: target.logicalValue.slice(1),
+      };
+      graphTargets.push({
+        kind: 'variable',
+        variable,
+        keywordTokenIndex: index,
+        targetTokenIndex: index + 1,
+        braceDepth: braceDepths[index],
+      });
+      if (!graphVariableSet.has(variable.logicalName)) {
+        graphVariableSet.add(variable.logicalName);
+        graphVariables.push(variable);
+      }
+      continue;
+    }
+
+    const directIri = iriValue(target);
+    if (directIri !== null) {
+      graphTargets.push({
+        kind: 'iri',
+        iri: directIri,
+        keywordTokenIndex: index,
+        targetTokenIndex: index + 1,
+        braceDepth: braceDepths[index],
+      });
+      continue;
+    }
+
+    if (target?.kind === 'prefixed-name') {
+      const colon = target.logicalValue.indexOf(':');
+      const base = prefixes.get(target.logicalValue.slice(0, colon));
+      if (colon >= 0 && base !== undefined) {
+        graphTargets.push({
+          kind: 'iri',
+          iri: `${base}${target.logicalValue.slice(colon + 1)}`,
+          keywordTokenIndex: index,
+          targetTokenIndex: index + 1,
+          braceDepth: braceDepths[index],
+        });
+        continue;
+      }
+    }
+
+    graphTargets.push({
+      kind: 'invalid',
+      keywordTokenIndex: index,
+      targetTokenIndex: index + 1,
+      braceDepth: braceDepths[index],
+    });
+  }
+
   return {
     source: prepared.source,
     prepared,
@@ -119,5 +229,10 @@ export function prepareSparqlQuery(prepared: ValidPreparedSparql): PreparedSparq
     whereVariables: where
       ? variablesInRange(prepared, where.openingTokenIndex + 1, where.closingTokenIndex)
       : [],
+    prefixes,
+    hasDatasetClause,
+    hasGraphClause: graphTargets.length > 0,
+    graphTargets,
+    graphVariables,
   };
 }
