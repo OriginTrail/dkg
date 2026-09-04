@@ -4930,6 +4930,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     );
     const rosterProofUpgraded = !record.curatorRosterConfirmed && curatorRosterConfirmed;
     if (!membershipUnchanged) {
+      const priorCycleWasIncomplete = record.backoffKind === 'incomplete-cycle'
+        || [...record.attemptedPeerIds]
+          .some((peerId) => !record.cleanAbsentPeerIds.has(peerId));
       const previousCandidatePeerIds = record.candidatePeerIds;
       const nextCandidatePeerIds = new Set(candidatePeerIds);
       record.candidatePeerIds = new Set(candidatePeerIds);
@@ -4951,9 +4954,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
       } else if (!rosterProofUpgraded) {
         // Pure growth preserves valid credits for retained identities, but the
         // newly observed peer is uncredited and immediately breaks backoff.
+        // Do not let a publication-window incomplete response compound into
+        // multi-minute suppression merely because startup discovers the same
+        // recovery roster one peer at a time. Clean-absence history still
+        // keeps its exponential damping; only transport/timing uncertainty
+        // starts a fresh base-delay epoch when the evidence universe grows.
         record.phase = 'collecting';
         record.backoffKind = undefined;
         record.nextRetryAt = 0;
+        if (priorCycleWasIncomplete) record.failures = 0;
         record.collectionDeadlineAt = now
           + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
       }
