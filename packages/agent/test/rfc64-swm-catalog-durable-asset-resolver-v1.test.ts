@@ -15,7 +15,10 @@ import {
   type EvmAddressV1,
   type SwmAuthorInventoryRowV1,
 } from '@origintrail-official/dkg-core';
-import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
+import {
+  computeFlatKCRootV10,
+  generateGraphKnowledgeAssetMetadata,
+} from '@origintrail-official/dkg-publisher';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -47,18 +50,7 @@ let row: SwmAuthorInventoryRowV1;
 beforeEach(async () => {
   store = new OxigraphStore();
   seal = await createSeal();
-  row = Object.freeze({
-    assertionCoordinate: ASSERTION_COORDINATE,
-    assertionVersion: seal.assertionVersion,
-    kaUal: seal.kaUal,
-    shareOperationId: 'retired-workspace-operation',
-    projectionDigest: computeKaProjectionDigestV1(PROJECTION_BYTES),
-    publicTripleCount: seal.publicTripleCount,
-    privateTripleCount: seal.privateTripleCount,
-    sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal),
-    sharedAt: '1788192000000',
-    expiresAt: null,
-  }) as SwmAuthorInventoryRowV1;
+  row = createInventoryRow(seal);
   await seedDurableSeal(store, seal);
 });
 
@@ -109,6 +101,42 @@ describe('RFC-64 durable SWM inventory catalog asset resolver', () => {
       `durable finalized VM projection differs for ${seal.kaUal}`,
     );
   });
+
+  it('rejects a headless private update when VM metadata confirms an older version', async () => {
+    const confirmedV1 = await createSeal({
+      assertionVersion: '1',
+      privateMerkleRoot: `0x${'11'.repeat(32)}` as Digest32V1,
+    });
+    seal = await createSeal({
+      assertionVersion: '2',
+      privateMerkleRoot: `0x${'22'.repeat(32)}` as Digest32V1,
+    });
+    row = createInventoryRow(seal);
+    store = new OxigraphStore();
+    await seedDurableSeal(store, seal);
+    await seedVmProjection(store, confirmedV1, PROJECTION_QUADS);
+
+    await expect(resolve('private')).rejects.toThrow(
+      `durable finalized VM projection differs for ${seal.kaUal}`,
+    );
+  });
+
+  it('accepts a headless private update when VM metadata confirms the exact version', async () => {
+    seal = await createSeal({
+      assertionVersion: '2',
+      privateMerkleRoot: `0x${'22'.repeat(32)}` as Digest32V1,
+    });
+    row = createInventoryRow(seal);
+    store = new OxigraphStore();
+    await seedDurableSeal(store, seal);
+    await seedVmProjection(store, seal, PROJECTION_QUADS);
+
+    await expect(resolve('private')).resolves.toMatchObject({
+      assertionCoordinate: ASSERTION_COORDINATE,
+      projectionBytes: PROJECTION_BYTES,
+      seal,
+    });
+  });
 });
 
 function resolve(laneKind: 'public' | 'private') {
@@ -121,9 +149,33 @@ function resolve(laneKind: 'public' | 'private') {
   });
 }
 
-async function createSeal(): Promise<CanonicalGraphScopedAuthorSealV1> {
+function createInventoryRow(
+  canonicalSeal: CanonicalGraphScopedAuthorSealV1,
+): SwmAuthorInventoryRowV1 {
+  return Object.freeze({
+    assertionCoordinate: ASSERTION_COORDINATE,
+    assertionVersion: canonicalSeal.assertionVersion,
+    kaUal: canonicalSeal.kaUal,
+    shareOperationId: 'retired-workspace-operation',
+    projectionDigest: computeKaProjectionDigestV1(PROJECTION_BYTES),
+    publicTripleCount: canonicalSeal.publicTripleCount,
+    privateTripleCount: canonicalSeal.privateTripleCount,
+    sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(canonicalSeal),
+    sharedAt: '1788192000000',
+    expiresAt: null,
+  }) as SwmAuthorInventoryRowV1;
+}
+
+async function createSeal(options: Readonly<{
+  assertionVersion?: string;
+  privateMerkleRoot?: Digest32V1;
+}> = {}): Promise<CanonicalGraphScopedAuthorSealV1> {
+  const privateMerkleRoot = options.privateMerkleRoot ?? null;
   const assertionMerkleRoot = ethers.hexlify(
-    computeFlatKCRootV10([...PROJECTION_QUADS], []),
+    computeFlatKCRootV10(
+      [...PROJECTION_QUADS],
+      privateMerkleRoot === null ? [] : [ethers.getBytes(privateMerkleRoot)],
+    ),
   ) as Digest32V1;
   const reservedKaId = ((BigInt(AUTHOR) << 96n) | KA_NUMBER).toString();
   const typedData = buildAuthorAttestationTypedData({
@@ -150,10 +202,10 @@ async function createSeal(): Promise<CanonicalGraphScopedAuthorSealV1> {
     assertionFinalizedAt: '2026-09-01T00:00:00.000Z',
     contentScopeVersion: '2',
     kaUal: `did:dkg:otp:20430/${AUTHOR}/${KA_NUMBER}`,
-    assertionVersion: '1',
+    assertionVersion: options.assertionVersion ?? '1',
     publicTripleCount: String(PROJECTION_QUADS.length),
-    privateTripleCount: '0',
-    privateMerkleRoot: null,
+    privateTripleCount: privateMerkleRoot === null ? '0' : '1',
+    privateMerkleRoot,
   }) as CanonicalGraphScopedAuthorSealV1;
 }
 
@@ -182,6 +234,9 @@ async function seedDurableSeal(
     kaUal: canonicalSeal.kaUal,
     assertionVersion: canonicalSeal.assertionVersion,
     publicTripleCount: Number(canonicalSeal.publicTripleCount),
+    ...(canonicalSeal.privateMerkleRoot === null
+      ? {}
+      : { privateMerkleRoot: ethers.getBytes(canonicalSeal.privateMerkleRoot) }),
     privateTripleCount: Number(canonicalSeal.privateTripleCount),
   }));
 }
@@ -199,5 +254,33 @@ async function seedVmProjection(
       canonicalSeal.assertionVersion,
     ),
   );
-  await target.insert(quads.map((quad) => ({ ...quad, graph: vmGraph })));
+  await target.insert([
+    ...quads.map((quad) => ({ ...quad, graph: vmGraph })),
+    ...generateGraphKnowledgeAssetMetadata({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ual: canonicalSeal.kaUal,
+      merkleRoot: ethers.getBytes(canonicalSeal.assertionMerkleRoot),
+      publisherPeerId: 'rfc64-finalized-catalog-test',
+      authorAddress: canonicalSeal.authorAddress,
+      accessPolicy: 'ownerOnly',
+      allowedPeers: [],
+      timestamp: new Date(canonicalSeal.assertionFinalizedAt),
+      assertionVersion: canonicalSeal.assertionVersion,
+      publicTripleCount: Number(canonicalSeal.publicTripleCount),
+      privateTripleCount: Number(canonicalSeal.privateTripleCount),
+      ...(canonicalSeal.privateMerkleRoot === null
+        ? {}
+        : { privateMerkleRoot: ethers.getBytes(canonicalSeal.privateMerkleRoot) }),
+      assertionGraph: vmGraph,
+    }, {
+      status: 'confirmed',
+      confirmation: {
+        kind: 'finalized-materialization',
+        provenance: {
+          batchId: BigInt(canonicalSeal.reservedKaId),
+          materializedVersion: { blockNumber: 1, txIndex: 0 },
+        },
+      },
+    }),
+  ]);
 }
