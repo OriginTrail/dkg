@@ -61,6 +61,7 @@ export interface Rfc64UnregisteredAuthorityInputV1 {
   readonly publishPolicy: 0 | 1;
   readonly publishAuthorityAccountId: string;
   readonly memberAddresses: readonly EvmAddressV1[];
+  readonly rosterVersion: string;
 }
 
 /** Compose a deterministic policy/roster generation from finalized chain evidence. */
@@ -117,6 +118,7 @@ export function composeRfc64FinalizedCatalogAuthorityV1(input: Readonly<{
 export function composeRfc64UnregisteredCatalogAuthorityV1(
   input: Rfc64UnregisteredAuthorityInputV1,
 ): Rfc64ReleaseNativeAuthoritySnapshotV1 {
+  const rosterVersion = canonicalU64V1(input.rosterVersion, 'unregistered roster version');
   const publishAuthority = input.publishPolicy === 0 ? input.ownerAddress : null;
   const policy: ContextGraphPolicyV1 = Object.freeze({
     networkId: input.networkId,
@@ -147,7 +149,7 @@ export function composeRfc64UnregisteredCatalogAuthorityV1(
     policy,
     input.ownerAddress,
     input.accessPolicy === 1 ? input.memberAddresses : [],
-    ZERO_U64,
+    rosterVersion,
     'owner-signed-unregistered',
   );
 }
@@ -205,4 +207,10 @@ function canonicalNonNegativeIntegerV1(value: string, label: string): bigint {
     throw new Error(`${label} must be a canonical non-negative integer`);
   }
   return BigInt(value);
+}
+
+function canonicalU64V1(value: string, label: string): DecimalU64V1 {
+  const parsed = canonicalNonNegativeIntegerV1(value, label);
+  if (parsed > MAX_U64_V1) throw new Error(`${label} exceeds uint64`);
+  return parsed.toString(10) as DecimalU64V1;
 }

@@ -461,11 +461,11 @@ export class Rfc64PublicCatalogReceiverV1 {
         existing.revision += 1n;
         continue;
       }
-      this.#safeNotify(() => this.#onAttemptStart?.(announcement));
       if (this.#tasks.queuedCount >= this.#maxQueue) {
         this.#droppedQueueFull += 1;
         continue;
       }
+      this.#safeNotify(() => this.#onAttemptStart?.(announcement));
       const task = this.#createTask(
         [{ announcement, remotePeerId }],
         'ambient',
@@ -553,7 +553,6 @@ export class Rfc64PublicCatalogReceiverV1 {
     }
     this.#scheduled += inputs.length;
     const first = inputs[0]!;
-    this.#safeNotify(() => this.#onAttemptStart?.(first.announcement));
     if (this.#tasks.queuedCount >= this.#maxQueue) {
       this.#droppedQueueFull += 1;
       completion(createRfc64PublicCatalogReceiverCompletionV1({
@@ -562,6 +561,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       }));
       return;
     }
+    this.#safeNotify(() => this.#onAttemptStart?.(first.announcement));
     const task = this.#createTask(
       inputs,
       schedulingClass,

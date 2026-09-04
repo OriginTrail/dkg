@@ -16,8 +16,10 @@ import {
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeKaProjectionDigestV1,
   computeSwmAuthorInventoryScopeDigestV1,
+  contextGraphMetaUri,
   createOperationContext,
   encodeCanonicalCgSharedPublicRootProjectionV1,
+  assertSafeIri,
   type AssertionCoordinateV1,
   type AssertionSeal,
   type AuthorCatalogScopeV1,
@@ -161,6 +163,33 @@ export interface ObserveRfc64ConfirmedVmParamsV1 {
 }
 
 export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
+  /**
+   * Durable finalization fence for observers that outlive the bounded
+   * process-local tombstone cache (or the process itself).
+   */
+  private async hasRfc64DurableVmConfirmationV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    subGraphName: string | null,
+    kaUal: string,
+  ): Promise<boolean> {
+    const safeUal = assertSafeIri(kaUal);
+    const labelMetaGraph = assertSafeIri(contextGraphMetaUri(contextGraphId));
+    const partitionMetaGraph = assertSafeIri(contextGraphMetaUri(
+      contextGraphId,
+      subGraphName ?? undefined,
+    ));
+    const status = '<http://dkg.io/ontology/status> "confirmed"';
+    const partitionPattern = `GRAPH <${partitionMetaGraph}> { <${safeUal}> ${status} }`;
+    const ask = partitionMetaGraph === labelMetaGraph
+      ? `ASK { ${partitionPattern} }`
+      : `ASK { { ${partitionPattern} } UNION { GRAPH <${labelMetaGraph}> { <${safeUal}> ${status} } } }`;
+    const result = await this.store.query(ask, {
+      source: 'agent.rfc64.swmInventory.durableVmConfirmation',
+    });
+    return result.type === 'boolean' && result.value === true;
+  }
+
   /**
    * One post-commit hook shared by every durable WM to SWM promotion path.
    * Pointer maintenance retains its existing best-effort ordering; the RFC-64
@@ -473,11 +502,18 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         authorAddress: canonicalSeal.authorAddress,
         assertionCoordinate: params.assertionCoordinate,
       });
-      if (rfc64SwmInventoryShadowRuntimeV1(this).isVmConfirmed(
-        assetKey,
-        canonicalSeal.assertionVersion,
-        shareOperationId,
-      )) {
+      if (
+        rfc64SwmInventoryShadowRuntimeV1(this).isVmConfirmed(
+          assetKey,
+          canonicalSeal.assertionVersion,
+          shareOperationId,
+        )
+        || await this.hasRfc64DurableVmConfirmationV1(
+          params.contextGraphId,
+          params.subGraphName ?? null,
+          canonicalSeal.kaUal,
+        )
+      ) {
         return shadowResult('dormant', 'upsert', 0, null, null);
       }
       const graphManager = new GraphManager(this.store);

@@ -707,7 +707,7 @@ describe('durable sync lifecycle chain binding', () => {
         rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
           configuredContextGraphs: [],
           activation: {
-            enabled: true,
+            enabled: false,
             selectedContextGraphs: [],
             selectedPublicContextGraphs: [],
             rollout: { killSwitch: false, contextGraphModes: {} },
@@ -715,8 +715,7 @@ describe('durable sync lifecycle chain binding', () => {
         }),
       },
       subscribedContextGraphs: new Map(),
-      resolveRfc64CatalogReceiverAuthorityV1:
-        Rfc64CatalogMethods.prototype.resolveRfc64CatalogReceiverAuthorityV1,
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
       store: changelogCapableStore,
       runChangelogLane,
       runLegacyDurableSync,
@@ -773,6 +772,8 @@ describe('durable sync lifecycle chain binding', () => {
       subscribedContextGraphs: new Map(),
       resolveRfc64CatalogReceiverAuthorityV1:
         Rfc64CatalogMethods.prototype.resolveRfc64CatalogReceiverAuthorityV1,
+      resolveRfc64AcceptedCompatibilityAuthorityV1:
+        (Rfc64CatalogMethods.prototype as any).resolveRfc64AcceptedCompatibilityAuthorityV1,
       store: {},
       runLegacyDurableSync,
       log: { info: () => {}, warn: () => {}, debug: () => {} },
@@ -784,10 +785,7 @@ describe('durable sync lifecycle chain binding', () => {
       ['legacy-cg', 'catalog-cg', 'unselected-cg'],
     );
     expect(runLegacyDurableSync).toHaveBeenCalledTimes(1);
-    expect(runLegacyDurableSync.mock.calls[0]?.[2]).toEqual([
-      'legacy-cg',
-      'unselected-cg',
-    ]);
+    expect(runLegacyDurableSync.mock.calls[0]?.[2]).toEqual(['legacy-cg']);
 
     runLegacyDurableSync.mockClear();
     const catalogOnly = await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(

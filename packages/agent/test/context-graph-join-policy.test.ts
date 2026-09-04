@@ -519,9 +519,39 @@ describe('context graph open enrollment policy', () => {
       acknowledgeOpenEnrollment: true,
     }, owner.agentAddress);
 
-    // Model the release-harness topology: this wallet and X25519 key were
-    // created on another node, and no agent-profile gossip has reached the
-    // curator before the targeted join request arrives.
+    // Model the release-harness topology through the production producer: the
+    // agent and its active X25519 key live on another, unconnected node, so no
+    // profile gossip can pre-seed the curator before the targeted request.
+    const joinerNode = await DKGAgent.create({
+      name: 'ColdJoinPolicyRequester',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: chain,
+    });
+    agents.push(joinerNode);
+    await joinerNode.start();
+    const coldJoiner = await joinerNode.registerAgent('cold-remote-agent', {
+      framework: 'test',
+    });
+    const delegation = await joinerNode.signJoinRequest(
+      contextGraphId,
+      coldJoiner.agentAddress,
+    );
+    expect(delegation.workspaceEncryptionKeys).toHaveLength(1);
+    expect(delegation.workspaceEncryptionKeysSignature).toMatch(/^0x[0-9a-f]+$/iu);
+
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      coldJoiner.name,
+      joinerNode.peerId,
+    )).resolves.toEqual({ status: 'approved', autoApproved: true });
+    expect((await agent.getContextGraphAllowedAgents(contextGraphId)).map((address) =>
+      address.toLowerCase())).toContain(coldJoiner.agentAddress.toLowerCase());
+
+    // Adversarial bundles remain hand-built so each signature layer can be
+    // independently corrupted after the production success path above.
     const remoteWallet = ethers.Wallet.createRandom();
     const recipient = generateWorkspaceRecipientEncryptionKey(
       `did:dkg:agent:${remoteWallet.address}`,
@@ -553,21 +583,12 @@ describe('context graph open enrollment policy', () => {
         encryptionKeyProof,
       }],
     };
-    const delegation = {
+    const manuallySignedDelegation = {
       ...unsignedKeyDelegation,
       workspaceEncryptionKeysSignature: await remoteWallet.signMessage(
         computeWorkspaceEncryptionKeysAttestationDigest(unsignedKeyDelegation),
       ),
     };
-
-    await expect(agent.processIncomingJoinRequest(
-      contextGraphId,
-      delegation,
-      'cold-remote-agent',
-      agent.peerId,
-    )).resolves.toEqual({ status: 'approved', autoApproved: true });
-    expect((await agent.getContextGraphAllowedAgents(contextGraphId)).map((address) =>
-      address.toLowerCase())).toContain(remoteWallet.address.toLowerCase());
 
     const rejectedContextGraphId = 'private-policy-cold-remote-rejects-bad-proof';
     await createPrivateCg(agent, rejectedContextGraphId, owner.agentAddress);
@@ -629,7 +650,7 @@ describe('context graph open enrollment policy', () => {
       }],
       // A carrier may know another valid key proof, but cannot substitute it
       // while retaining the wallet attestation for the original bundle.
-      workspaceEncryptionKeysSignature: delegation.workspaceEncryptionKeysSignature,
+      workspaceEncryptionKeysSignature: manuallySignedDelegation.workspaceEncryptionKeysSignature,
     };
     await expect(agent.processIncomingJoinRequest(
       rejectedContextGraphId,
@@ -1011,6 +1032,35 @@ describe('context graph open enrollment policy', () => {
       second.name,
       agent.peerId,
     )).resolves.toMatchObject({ status: 'pending', reason: 'context-graph-rate-limit' });
+  }, 30_000);
+
+  it('invalidates the sender-key epoch before a failing roster-version update', async () => {
+    const { agent, owner } = await boot();
+    const contextGraphId = 'private-policy-removal-key-fence';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    const removed = await agent.registerAgent('removed-key-recipient', { framework: 'test' });
+    await agent.inviteAgentToContextGraph(
+      contextGraphId,
+      removed.agentAddress,
+      owner.agentAddress,
+    );
+    const senderKeyStates = (agent as any).swmSenderKeySendStates as Map<string, unknown>;
+    const staleEpochKey = `${contextGraphId}\0private-root`;
+    senderKeyStates.set(staleEpochKey, { epochId: 7 });
+    const saveKeys = vi.spyOn(agent as any, 'saveSwmSenderKeyState');
+    vi.spyOn(agent, 'advanceRfc64PrivateRosterVersionV1')
+      .mockRejectedValueOnce(new Error('simulated roster-version persistence failure'));
+
+    await expect(agent.removeAgentFromContextGraph(
+      contextGraphId,
+      removed.agentAddress,
+      owner.agentAddress,
+    )).rejects.toThrow('simulated roster-version persistence failure');
+    expect(senderKeyStates.has(staleEpochKey)).toBe(false);
+    expect(saveKeys).toHaveBeenCalledOnce();
+    expect((await (agent as any).getCgMeta(contextGraphId)).revokedAgents.map(
+      (address: string) => address.toLowerCase(),
+    )).toContain(removed.agentAddress.toLowerCase());
   }, 30_000);
 
   it('serializes duplicate requests so one member consumes one reservation', async () => {

@@ -3441,6 +3441,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             contextGraphId,
             agentAddress: approvedAddr,
             requestGeneration,
+            curatorAgentAddress,
+            curatorAuthorityEra,
           } = payload;
           // Require BOTH fields. Earlier the address was treated as
           // optional, so a forged payload carrying only `contextGraphId`
@@ -3476,6 +3478,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               approvedAddr,
               requestGeneration,
               'approved',
+              peerId.toString(),
+              typeof curatorAgentAddress === 'string'
+                && typeof curatorAuthorityEra === 'string'
+                ? {
+                  agentAddress: curatorAgentAddress,
+                  authorityEra: curatorAuthorityEra,
+                }
+                : undefined,
             );
             if (!decisionApplied) {
               this.log.warn(
@@ -4955,7 +4965,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.selectedSwmBootstrapContextGraphIdsForPeer(remotePeer),
     );
     const selectedLaneOwnsPinnedPublicGraphs = automaticPeerSweep
-      && remotePeerIsCompleteSwmProvider;
+      && (
+        remotePeerIsCompleteSwmProvider
+        || selectedPublicContextGraphIds.size > 0
+      );
     const getPostDurableOrdinarySharedMemoryPlan = async (
       peerId: string,
     ): Promise<SharedMemorySyncContextGraphPlan> => (

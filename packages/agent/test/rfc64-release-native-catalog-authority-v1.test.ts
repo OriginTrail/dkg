@@ -52,6 +52,7 @@ describe('release-native RFC-64 catalog authority', () => {
       publishPolicy,
       publishAuthorityAccountId: '7',
       memberAddresses: [MEMBER, OWNER, MEMBER],
+      rosterVersion: '9',
     });
     const replay = composeRfc64UnregisteredCatalogAuthorityV1({
       networkId: NETWORK_ID,
@@ -61,6 +62,7 @@ describe('release-native RFC-64 catalog authority', () => {
       publishPolicy,
       publishAuthorityAccountId: '7',
       memberAddresses: [MEMBER, OWNER],
+      rosterVersion: '9',
     });
 
     expect(() => assertContextGraphPolicyV1(first.policy)).not.toThrow();
@@ -77,6 +79,7 @@ describe('release-native RFC-64 catalog authority', () => {
     } else {
       expect(() => assertMemberRosterV1(first.roster)).not.toThrow();
       expect(first.roster?.policyDigest).toBe(first.policyDigest);
+      expect(first.roster?.version).toBe('9');
       expect(first.roster?.members).toEqual([
         { agentAddress: OWNER, roles: ['holder', 'provider'] },
         { agentAddress: MEMBER, roles: ['holder', 'provider'] },

@@ -1445,7 +1445,7 @@ describe('private CG membership bootstrap recovery', () => {
       await actualCommitPrepared(...args);
       persistenceFinished = true;
     };
-    (agent as any).ensureProfilePublished = async () => {
+    (agent as any).reannounceApprovalAuthorityProfile = async () => {
       profilePublishedAfterPersistence = persistenceFinished;
     };
     (agent as any).notifyJoinApproval = async () => {

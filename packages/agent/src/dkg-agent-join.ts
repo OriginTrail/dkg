@@ -429,6 +429,10 @@ export interface RequesterJoinRequestState {
   status: RequesterJoinRequestStatus;
   /** Invite-supplied curator authorised to decide this exact generation. */
   curatorPeerId?: string;
+  /** Curator address authenticated by the approval sender for this generation. */
+  curatorAgentAddress?: string;
+  /** Ownership generation paired with curatorAgentAddress. */
+  curatorAuthorityEra?: string;
 }
 
 // Requester-side decisions must never live in a context graph's `_meta`
@@ -439,6 +443,10 @@ const REQUESTER_JOIN_STATE_GRAPH = 'urn:dkg:local:requester-join-state';
 const REQUESTER_JOIN_STATE_STATUS = 'urn:dkg:local:requester-join-state:status';
 const REQUESTER_JOIN_STATE_GENERATION = 'urn:dkg:local:requester-join-state:generation';
 const REQUESTER_JOIN_STATE_CURATOR = 'urn:dkg:local:requester-join-state:curator-peer-id';
+const REQUESTER_JOIN_STATE_CURATOR_AGENT =
+  'urn:dkg:local:requester-join-state:curator-agent-address';
+const REQUESTER_JOIN_STATE_CURATOR_ERA =
+  'urn:dkg:local:requester-join-state:curator-authority-era';
 const JOIN_REQUEST_GENERATION_PREDICATE = 'https://dkg.network/ontology#requestGeneration';
 const JOIN_REQUEST_GENERATION_RE = /^0x[0-9a-f]{64}$/i;
 const JOIN_ENCRYPTION_KEY_CACHE_GRAPH = 'urn:dkg:local:join-encryption-key-cache';
@@ -1060,7 +1068,7 @@ export class JoinRequestMethods extends DKGAgentBase {
       markJoinRequestApproved: (contextGraphId, agentAddress) =>
         this.markJoinRequestApproved(contextGraphId, agentAddress),
       flushJoinApprovalDurably: () => this.flushJoinApprovalDurably(),
-      publishApprovalAuthorityProfile: () => this.ensureProfilePublished(),
+      publishApprovalAuthorityProfile: () => this.reannounceApprovalAuthorityProfile(),
       notifyJoinApproval: (contextGraphId, agentAddress, requestGeneration) => {
         this.notifyJoinApproval(contextGraphId, agentAddress, requestGeneration).catch(() => {});
       },
@@ -1137,12 +1145,18 @@ export class JoinRequestMethods extends DKGAgentBase {
 
     const subject = requesterJoinStateSubject(contextGraphId, agentAddress);
     const result = await this.store.query(
-      `SELECT ?status ?generation ?curatorPeerId WHERE {
+      `SELECT ?status ?generation ?curatorPeerId ?curatorAgentAddress ?curatorAuthorityEra WHERE {
         GRAPH <${REQUESTER_JOIN_STATE_GRAPH}> {
           <${subject}> <${REQUESTER_JOIN_STATE_STATUS}> ?status ;
                       <${REQUESTER_JOIN_STATE_GENERATION}> ?generation .
           OPTIONAL {
             <${subject}> <${REQUESTER_JOIN_STATE_CURATOR}> ?curatorPeerId .
+          }
+          OPTIONAL {
+            <${subject}> <${REQUESTER_JOIN_STATE_CURATOR_AGENT}> ?curatorAgentAddress .
+          }
+          OPTIONAL {
+            <${subject}> <${REQUESTER_JOIN_STATE_CURATOR_ERA}> ?curatorAuthorityEra .
           }
         }
       } LIMIT 1`,
@@ -1151,16 +1165,25 @@ export class JoinRequestMethods extends DKGAgentBase {
     const status = stripLiteral(result.bindings[0]['status'] ?? '');
     const requestGeneration = stripLiteral(result.bindings[0]['generation'] ?? '');
     const curatorPeerId = stripLiteral(result.bindings[0]['curatorPeerId'] ?? '').trim();
+    const curatorAgentAddress = stripLiteral(
+      result.bindings[0]['curatorAgentAddress'] ?? '',
+    ).trim().toLowerCase();
+    const curatorAuthorityEra = stripLiteral(
+      result.bindings[0]['curatorAuthorityEra'] ?? '',
+    ).trim();
     if (
       (status !== 'pending' && status !== 'approved' && status !== 'rejected') ||
       !isJoinRequestGeneration(requestGeneration)
     ) {
       return null;
     }
+    const hasValidCuratorBinding = /^0x[0-9a-f]{40}$/u.test(curatorAgentAddress)
+      && /^(0|[1-9][0-9]*)$/u.test(curatorAuthorityEra);
     const state: RequesterJoinRequestState = {
       status,
       requestGeneration,
       ...(curatorPeerId ? { curatorPeerId } : {}),
+      ...(hasValidCuratorBinding ? { curatorAgentAddress, curatorAuthorityEra } : {}),
     };
     this.requesterJoinStateCache().set(key, state);
     return state;
@@ -1180,6 +1203,15 @@ export class JoinRequestMethods extends DKGAgentBase {
     if (state.curatorPeerId !== undefined && !curatorPeerId) {
       throw new Error('Invalid requester join-state curator peer id');
     }
+    const curatorAgentAddress = state.curatorAgentAddress?.trim().toLowerCase();
+    const curatorAuthorityEra = state.curatorAuthorityEra?.trim();
+    if (
+      (curatorAgentAddress === undefined) !== (curatorAuthorityEra === undefined)
+      || (curatorAgentAddress !== undefined && !/^0x[0-9a-f]{40}$/u.test(curatorAgentAddress))
+      || (curatorAuthorityEra !== undefined && !/^(0|[1-9][0-9]*)$/u.test(curatorAuthorityEra))
+    ) {
+      throw new Error('Invalid requester join-state curator authority binding');
+    }
     const quads: Quad[] = [{
       graph: REQUESTER_JOIN_STATE_GRAPH,
       subject,
@@ -1195,9 +1227,23 @@ export class JoinRequestMethods extends DKGAgentBase {
       subject,
       predicate: REQUESTER_JOIN_STATE_CURATOR,
       object: `"${escapeSparqlLiteral(curatorPeerId)}"`,
+    }] : []), ...(curatorAgentAddress && curatorAuthorityEra ? [{
+      graph: REQUESTER_JOIN_STATE_GRAPH,
+      subject,
+      predicate: REQUESTER_JOIN_STATE_CURATOR_AGENT,
+      object: `"${curatorAgentAddress}"`,
+    }, {
+      graph: REQUESTER_JOIN_STATE_GRAPH,
+      subject,
+      predicate: REQUESTER_JOIN_STATE_CURATOR_ERA,
+      object: `"${curatorAuthorityEra}"`,
     }] : [])];
     const curatorInsert = curatorPeerId
       ? ` ;\n                        <${REQUESTER_JOIN_STATE_CURATOR}> "${escapeSparqlLiteral(curatorPeerId)}"`
+      : '';
+    const curatorAuthorityInsert = curatorAgentAddress && curatorAuthorityEra
+      ? ` ;\n                        <${REQUESTER_JOIN_STATE_CURATOR_AGENT}> "${curatorAgentAddress}"`
+        + ` ;\n                        <${REQUESTER_JOIN_STATE_CURATOR_ERA}> "${curatorAuthorityEra}"`
       : '';
     try {
       const updatedAtomically = await tryUpdateWithTouchedGraphs(
@@ -1208,7 +1254,7 @@ export class JoinRequestMethods extends DKGAgentBase {
         INSERT {
           GRAPH <${REQUESTER_JOIN_STATE_GRAPH}> {
             <${subject}> <${REQUESTER_JOIN_STATE_STATUS}> "${state.status}" ;
-                        <${REQUESTER_JOIN_STATE_GENERATION}> "${state.requestGeneration}"${curatorInsert} .
+                        <${REQUESTER_JOIN_STATE_GENERATION}> "${state.requestGeneration}"${curatorInsert}${curatorAuthorityInsert} .
           }
         }
         WHERE {
@@ -1240,6 +1286,16 @@ export class JoinRequestMethods extends DKGAgentBase {
                 subject,
                 predicate: REQUESTER_JOIN_STATE_CURATOR,
                 object: `"${escapeSparqlLiteral(previous.curatorPeerId)}"`,
+              }] : []), ...(previous.curatorAgentAddress && previous.curatorAuthorityEra ? [{
+                graph: REQUESTER_JOIN_STATE_GRAPH,
+                subject,
+                predicate: REQUESTER_JOIN_STATE_CURATOR_AGENT,
+                object: `"${previous.curatorAgentAddress}"`,
+              }, {
+                graph: REQUESTER_JOIN_STATE_GRAPH,
+                subject,
+                predicate: REQUESTER_JOIN_STATE_CURATOR_ERA,
+                object: `"${previous.curatorAuthorityEra}"`,
               }] : [])]);
             } catch {
               // Preserve the original mutation failure; the cache is evicted
@@ -1316,6 +1372,10 @@ export class JoinRequestMethods extends DKGAgentBase {
     requestGeneration: string,
     status: 'approved' | 'rejected',
     expectedCuratorPeerId?: string,
+    curatorBinding?: Readonly<{
+      agentAddress: string;
+      authorityEra: string;
+    }>,
   ): Promise<boolean> {
     if (!isJoinRequestGeneration(requestGeneration)) return false;
     const key = requesterJoinStateKey(contextGraphId, agentAddress);
@@ -1336,11 +1396,40 @@ export class JoinRequestMethods extends DKGAgentBase {
       ) {
         return false;
       }
-      if (current.status === status) return true;
+      const normalizedBinding = curatorBinding === undefined
+        ? undefined
+        : {
+          curatorAgentAddress: curatorBinding.agentAddress.trim().toLowerCase(),
+          curatorAuthorityEra: curatorBinding.authorityEra.trim(),
+        };
+      if (
+        normalizedBinding !== undefined
+        && (
+          !/^0x[0-9a-f]{40}$/u.test(normalizedBinding.curatorAgentAddress)
+          || !/^(0|[1-9][0-9]*)$/u.test(normalizedBinding.curatorAuthorityEra)
+        )
+      ) return false;
+      if (current.status === status) {
+        if (
+          status === 'approved'
+          && normalizedBinding !== undefined
+          && (
+            current.curatorAgentAddress !== normalizedBinding.curatorAgentAddress
+            || current.curatorAuthorityEra !== normalizedBinding.curatorAuthorityEra
+          )
+        ) {
+          await this.writeRequesterJoinRequestState(contextGraphId, agentAddress, {
+            ...current,
+            ...normalizedBinding,
+          });
+        }
+        return true;
+      }
       if (current.status !== 'pending') return false;
       await this.writeRequesterJoinRequestState(contextGraphId, agentAddress, {
         ...current,
         status,
+        ...(status === 'approved' ? normalizedBinding : undefined),
       });
       return true;
     });
@@ -2220,11 +2309,18 @@ export class JoinRequestMethods extends DKGAgentBase {
     if (!resolvedGeneration) {
       throw new Error(`Cannot notify join approval without a valid request generation`);
     }
+    const curatorBinding = await this.readRfc64CurrentCuratorAuthorityBindingV1(
+      contextGraphId,
+    ).catch(() => null);
     const payload = JSON.stringify({
       type: 'join-approved',
       contextGraphId,
       agentAddress,
       requestGeneration: resolvedGeneration,
+      ...(curatorBinding === null ? {} : {
+        curatorAgentAddress: curatorBinding.agentAddress,
+        curatorAuthorityEra: curatorBinding.authorityEra,
+      }),
     });
     const result = await this.deliverPrivateJoinNotification(
       contextGraphId,
@@ -2303,11 +2399,18 @@ export class JoinRequestMethods extends DKGAgentBase {
           `approved request has no valid generation; ask the joiner to re-submit.`,
       );
     }
+    const curatorBinding = await this.readRfc64CurrentCuratorAuthorityBindingV1(
+      contextGraphId,
+    ).catch(() => null);
     const payload = JSON.stringify({
       type: 'join-approved',
       contextGraphId,
       agentAddress,
       requestGeneration,
+      ...(curatorBinding === null ? {} : {
+        curatorAgentAddress: curatorBinding.agentAddress,
+        curatorAuthorityEra: curatorBinding.authorityEra,
+      }),
     });
     const result = await this.deliverPrivateJoinNotification(
       contextGraphId,

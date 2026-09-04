@@ -33,6 +33,13 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}) {
   });
   adapter.initialized = true;
   adapter.init = async () => {};
+  adapter.cgRegistryScanPageSize = 10;
+  const evidence = {
+    filters: [] as Array<readonly [string, ...unknown[]]>,
+    ranges: [] as Array<readonly [number, number]>,
+    staticCalls: [] as Array<readonly [bigint, { blockTag: number }]>,
+    deploymentReads: [] as Array<readonly [string, string, string]>,
+  };
 
   const logs: Record<string, readonly ReturnType<typeof event>[]> = {
     ContextGraphCreated: [event(10, 1, CREATION_HASH, [9n, OWNER, NAME_HASH])],
@@ -60,10 +67,30 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}) {
   const contract = {
     filters: Object.fromEntries(Object.keys(logs).map((name) => [
       name,
-      (...args: readonly unknown[]) => ({ name, args }),
+      (...args: readonly unknown[]) => {
+        evidence.filters.push([name, ...args]);
+        const expectedArgs = name === 'Transfer'
+          ? [null, null, 9n]
+          : [9n];
+        expect(args).toEqual(expectedArgs);
+        return { name, args };
+      },
     ])),
-    queryFilter: async (filter: { name: string }) => logs[filter.name] ?? [],
-    getContextGraph: { staticCall: async () => current },
+    queryFilter: async (filter: { name: string }, fromBlock: number, toBlock: number) => {
+      evidence.ranges.push([fromBlock, toBlock]);
+      if (toBlock - fromBlock + 1 > 10) throw new Error('oversized log range');
+      return (logs[filter.name] ?? []).filter(
+        (entry) => entry.blockNumber >= fromBlock && entry.blockNumber <= toBlock,
+      );
+    },
+    getContextGraph: {
+      staticCall: async (contextGraphId: bigint, readOptions: { blockTag: number }) => {
+        evidence.staticCalls.push([contextGraphId, readOptions]);
+        expect(contextGraphId).toBe(9n);
+        expect(readOptions).toEqual({ blockTag: 30 });
+        return current;
+      },
+    },
     getAddress: async () => GOVERNANCE,
   };
   const provider = {
@@ -79,13 +106,22 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}) {
     _label: string,
     read: (selectedProvider: typeof provider) => Promise<unknown>,
   ) => read(provider);
+  adapter.resolveContractDeployBlock = async (
+    address: string,
+    operation: string,
+    label: string,
+  ) => {
+    evidence.deploymentReads.push([address, operation, label]);
+    return { fromBlock: 7, head: 30, scanProviders: [] };
+  };
+  adapter.authorityEvidence = evidence;
   return adapter as EVMChainAdapter;
 }
 
 describe('RFC-64 Context Graph authority snapshots', () => {
   it('reads one stable finalized EVM generation and derives monotonic epochs', async () => {
-    const snapshot = await makeEvmAuthorityAdapter()
-      .getContextGraphAuthoritySnapshot(9n);
+    const adapter = makeEvmAuthorityAdapter();
+    const snapshot = await adapter.getContextGraphAuthoritySnapshot(9n);
 
     expect(snapshot).toEqual({
       chainId: '31337',
@@ -107,6 +143,27 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     });
     expect(Object.isFrozen(snapshot)).toBe(true);
     expect(Object.isFrozen(snapshot.participantAgents)).toBe(true);
+    const evidence = (adapter as any).authorityEvidence;
+    expect(evidence.staticCalls).toEqual([[9n, { blockTag: 30 }]]);
+    expect(evidence.deploymentReads).toEqual([[
+      GOVERNANCE,
+      'getContextGraphAuthoritySnapshot',
+      'ContextGraphStorage',
+    ]]);
+    expect(evidence.filters).toEqual([
+      ['ContextGraphCreated', 9n],
+      ['Transfer', null, null, 9n],
+      ['PublishPolicyUpdated', 9n],
+      ['PublishAuthorityUpdated', 9n],
+      ['AgentParticipantAdded', 9n],
+      ['AgentParticipantRemoved', 9n],
+    ]);
+    expect(evidence.ranges).toHaveLength(18);
+    expect(evidence.ranges).toEqual(expect.arrayContaining([
+      [7, 16],
+      [17, 26],
+      [27, 30],
+    ]));
   });
 
   it('rejects a finalized anchor that changes while the generation is read', async () => {

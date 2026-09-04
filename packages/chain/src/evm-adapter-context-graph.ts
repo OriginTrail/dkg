@@ -881,11 +881,33 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           string,
           (...args: unknown[]) => ethers.DeferredTopicFilter
         >;
-        const readLogs = (name: string, ...args: unknown[]) => contract.queryFilter(
-          filters[name]!(...args),
-          0,
-          finalized.number,
+        const contractAddress = await contract.getAddress();
+        const { fromBlock } = await this.resolveContractDeployBlock(
+          contractAddress,
+          'getContextGraphAuthoritySnapshot',
+          'ContextGraphStorage',
         );
+        const readLogs = async (name: string, ...args: unknown[]) => {
+          const filter = filters[name]!(...args);
+          const logs: Array<ethers.EventLog | ethers.Log> = [];
+          // Production RPCs commonly cap eth_getLogs ranges. Keep every read
+          // deployment-anchored and page-bounded while all state and event
+          // results remain pinned to the single finalized anchor selected
+          // above. The exact Context Graph stays encoded in each filter.
+          for (
+            let lo = fromBlock;
+            lo <= finalized.number;
+            lo += this.cgRegistryScanPageSize
+          ) {
+            options.signal?.throwIfAborted();
+            const hi = Math.min(
+              lo + this.cgRegistryScanPageSize - 1,
+              finalized.number,
+            );
+            logs.push(...await contract.queryFilter(filter, lo, hi));
+          }
+          return logs;
+        };
         const [
           current,
           created,

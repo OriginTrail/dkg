@@ -1983,17 +1983,6 @@ export class ContextGraphMethods extends DKGAgentBase {
     this.invalidateListContextGraphsCache();
     this.contextGraphMetaProjection.markDirty(contextGraphId);
     this.deleteContextGraphMember(contextGraphId, 'agent', agentAddress);
-    const rosterVersion = await this.advanceRfc64PrivateRosterVersionV1(contextGraphId);
-    if (rosterVersion !== null) {
-      await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId).catch((error) => {
-        this.log.warn(
-          ctx,
-          `RFC-64 private roster removal remains incomplete for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
-        );
-        return null;
-      });
-    }
-    // Reconciled after the projection is invalidated at the end of removal.
     // Drop any cached sender-key send state for this CG so the next
     // write re-resolves recipients (now excluding the revoked agent
     // via the tombstone) and mints a fresh epoch. Without this the
@@ -2006,6 +1995,21 @@ export class ContextGraphMethods extends DKGAgentBase {
       }
     }
     await this.saveSwmSenderKeyState();
+    // Authority generation is durable but fallible. It deliberately follows
+    // confidentiality-critical sender-key invalidation: a failed metadata
+    // UPDATE may leave catalog authority visibly incomplete, but it must never
+    // leave a revoked member able to decrypt a subsequent private share.
+    const rosterVersion = await this.advanceRfc64PrivateRosterVersionV1(contextGraphId);
+    if (rosterVersion !== null) {
+      await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId).catch((error) => {
+        this.log.warn(
+          ctx,
+          `RFC-64 private roster removal remains incomplete for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return null;
+      });
+    }
+    // Reconciled after the projection is invalidated at the end of removal.
     // `queueSharedMemoryGossipSubscription` may start a metadata projection
     // read while the revocation mutation is still completing. Invalidate once
     // more after all awaited removal work so that an in-flight pre-revoke

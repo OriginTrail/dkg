@@ -395,13 +395,6 @@ function assertAuthoritativeMonotonicPolicyTransition(
     // finalized chain state and its name commitment. Never allow the reverse.
     return;
   }
-  if (
-    current.policy.source.kind === 'owner-signed-unregistered'
-    && successor.policy.source.kind === 'owner-signed-unregistered'
-    && current.policy.source.ownerAddress === successor.policy.source.ownerAddress
-  ) {
-    return;
-  }
   const currentEra = BigInt(current.policy.era);
   const successorEra = BigInt(successor.policy.era);
   const currentVersion = BigInt(current.policy.version);

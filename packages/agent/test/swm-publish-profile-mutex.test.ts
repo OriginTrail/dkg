@@ -139,7 +139,7 @@ describe('DKGAgent.publishProfile — tail-chain mutex serialization (PR #700 ro
     expect(publishes).toBe(1);
   });
 
-  it('re-announces an existing profile before a private join request', async () => {
+  it('keeps profile readiness idempotent once a profile exists', async () => {
     const boot = await bootAgent();
     agent = boot.agent;
     boot.internals.profileManager.currentKcId = 41n;
@@ -151,6 +151,34 @@ describe('DKGAgent.publishProfile — tail-chain mutex serialization (PR #700 ro
 
     await agent.ensureProfilePublished();
 
+    expect(publishes).toBe(0);
+  });
+
+  it('coalesces explicit approval-authority reannouncements', async () => {
+    const boot = await bootAgent();
+    agent = boot.agent;
+    boot.internals.profileManager.currentKcId = 41n;
+    let publishes = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    (agent as unknown as { publishProfile: () => Promise<unknown> }).publishProfile = async () => {
+      publishes++;
+      await gate;
+      return { ok: true };
+    };
+
+    const reannouncements = [
+      agent.reannounceApprovalAuthorityProfile(),
+      agent.reannounceApprovalAuthorityProfile(),
+      agent.reannounceApprovalAuthorityProfile(),
+    ];
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(publishes).toBe(1);
+
+    release();
+    await expect(Promise.all(reannouncements)).resolves.toHaveLength(3);
     expect(publishes).toBe(1);
   });
 

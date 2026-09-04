@@ -111,6 +111,10 @@ import {
   resolveRfc64ConfirmedVmRepairCatalogAssetV1,
   resolveRfc64InventoryWorkspaceCatalogAssetV1,
 } from '../src/rfc64/swm-catalog-durable-asset-resolver-v1.js';
+import {
+  RFC64_SWM_INVENTORY_MAX_CONFIRMED_TOMBSTONES_V1,
+  rfc64SwmInventoryShadowRuntimeV1,
+} from '../src/rfc64/swm-inventory-shadow-runtime-v1.js';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
@@ -381,6 +385,7 @@ interface SeedSignedSwmWorkspaceParamsV1 {
   readonly publicQuads?: readonly Quad[];
   readonly assertionVersion?: CanonicalGraphScopedAuthorSealV1['assertionVersion'];
   readonly networkId?: NetworkIdV1;
+  readonly publisherPeerId?: string;
 }
 
 async function seedSignedSwmWorkspaceV1(
@@ -436,7 +441,7 @@ async function seedSignedSwmWorkspaceV1(
     assertionVersion: canonicalSeal.assertionVersion,
     quads: publicQuads,
     privateTripleCount: Number(canonicalSeal.privateTripleCount),
-    publisherPeerId: agent.peerId,
+    publisherPeerId: params.publisherPeerId ?? agent.peerId,
     accessPolicy: params.accessPolicy,
     ...(params.allowedPeers === undefined ? {} : { allowedPeers: params.allowedPeers }),
     agentAddress: AUTHOR,
@@ -1168,7 +1173,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         phase: 'blocked',
         authorityState: 'blocked',
         authorityFreshness: null,
-        stableReason: 'authority-resolution-failed',
+        stableReason: 'unregistered-owner-unresolved',
       }),
     );
   });
@@ -2017,6 +2022,36 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       inventoryScopeDigest: scopeDigest,
       authorAddress: AUTHOR,
     })?.rows).toEqual([]);
+
+    // The process-local fence is only an accelerator. Once its oldest entry
+    // is evicted, durable VM metadata must still prevent an exact late replay
+    // from resurrecting the finalized asset.
+    const durableConfirmation = {
+      subject: canonicalSeal.kaUal,
+      predicate: 'http://dkg.io/ontology/status',
+      object: '"confirmed"',
+      graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+    };
+    await restarted.store.insert([durableConfirmation]);
+    const shadowRuntime = rfc64SwmInventoryShadowRuntimeV1(restarted);
+    for (
+      let index = 0;
+      index <= RFC64_SWM_INVENTORY_MAX_CONFIRMED_TOMBSTONES_V1;
+      index += 1
+    ) shadowRuntime.markVmConfirmed(`eviction-${index}`, '1', `share-${index}`);
+    await restarted.afterDurableSwmPromotionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+      ctx,
+    });
+    await restarted.awaitInFlightRfc64SwmInventoryObserversV1();
+    expect(restarted.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: scopeDigest,
+      authorAddress: AUTHOR,
+    })?.rows).toEqual([]);
+    await restarted.store.delete([durableConfirmation]);
 
     // Catalog work must not fence inventory mutation. A slow one-row snapshot
     // that reaches the catalog coordinator after a newer two-row commit must
@@ -4671,6 +4706,260 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(
       published.headObjectDigest,
     )).toBeNull();
+  }, 60_000);
+
+  it('reports a scheduled failing successor instead of the stale applied head as complete', async () => {
+    const [author, receiver] = await Promise.all([
+      startNativeAgent('status-target-author'),
+      startNativeAgent('status-target-receiver'),
+    ]);
+    await receiver.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Status target graph',
+      callerAgentAddress: AUTHOR,
+    });
+    await receiver.whenRfc64CatalogResponsibilitiesIdleV1();
+    receiver.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const authorPolicy = author.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    await connectBothWays(author, receiver);
+    const genesis = await author.publishOpenAuthorCatalogGenesisV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      author: AUTHOR_WALLET,
+      peers: [],
+      issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: DELEGATION_EXPIRES_AT,
+    });
+    expect(genesis.announcement.policyDigest).toBe(authorPolicy.policyDigest);
+    await author.announceRfc64PublicCatalogHeadV1({
+      announcement: genesis.announcement,
+      peers: [receiver.peerId],
+    });
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await expect(receiver.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        phase: 'complete',
+        expectedCatalogHeadDigest: genesis.headObjectDigest,
+        appliedCatalogHeadDigest: genesis.headObjectDigest,
+      }),
+    );
+
+    const unavailableSuccessorDigest = `0x${'a9'.repeat(32)}` as Digest32V1;
+    await author.announceRfc64PublicCatalogHeadV1({
+      announcement: Object.freeze({
+        ...genesis.announcement,
+        catalogVersion: '1',
+        catalogHeadObjectDigest: unavailableSuccessorDigest,
+        signatureVariantDigest: `0x${'b8'.repeat(32)}` as Digest32V1,
+      }),
+      peers: [receiver.peerId],
+    });
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+
+    await expect(receiver.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        phase: 'blocked',
+        stableReason: 'catalog-reconciliation-failed',
+        expectedCatalogHeadDigest: unavailableSuccessorDigest,
+        appliedCatalogHeadDigest: genesis.headObjectDigest,
+        expectedRowCount: null,
+        appliedRowCount: '0',
+        missingRowCount: null,
+      }),
+    );
+  }, 60_000);
+
+  it('recovers a durable provider head when default responsibility activates after connection', async () => {
+    const [author, provider, receiver] = await Promise.all([
+      startNativeAgent('late-activation-author'),
+      startNativeAgent('late-activation-provider'),
+      startNativeAgent('late-activation-receiver'),
+    ]);
+    provider.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    await connectBothWays(author, provider);
+    const genesis = await author.publishOpenAuthorCatalogGenesisV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      author: AUTHOR_WALLET,
+      peers: [provider.peerId],
+      issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: DELEGATION_EXPIRES_AT,
+    });
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(provider.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: genesis.headObjectDigest,
+      catalogVersion: '0',
+      inventoryRowCount: '0',
+    });
+    const replay = vi.spyOn(provider, 'queueRfc64CatalogHeadReplayV1');
+    await connectBothWays(provider, receiver);
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(receiver.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toBeNull();
+
+    await receiver.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Late catalog activation',
+      callerAgentAddress: AUTHOR,
+    });
+    await receiver.whenRfc64CatalogResponsibilitiesIdleV1();
+    await vi.waitFor(() => expect(replay).toHaveBeenCalled());
+    const replayResults = await Promise.all(replay.mock.results.map(({ value }) => value));
+    expect(replayResults).toContainEqual({ announced: 1, failed: 0 });
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+
+    expect(receiver.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: genesis.headObjectDigest,
+      catalogVersion: '0',
+      inventoryRowCount: '0',
+    });
+  }, 60_000);
+
+  it('retires a captured legacy boundary only after successful production reconciliation', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-legacy-reconcile-'));
+    tempDirs.push(dataDir);
+    const persistentStorePath = join(dataDir, 'oxigraph');
+    const assertionCoordinate = 'legacy-boundary-republish';
+    const shareOperationId = 'legacy-boundary-share';
+    let seeded!: Awaited<ReturnType<typeof seedSignedSwmWorkspaceV1>>;
+    const author = await startNativeAgentWithOptions({
+      name: 'legacy-boundary-author',
+      existingDataDir: dataDir,
+      persistentStorePath,
+      beforeStart: async (agent) => {
+        vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
+          AUTHOR_WALLET.privateKey,
+        );
+        seeded = await seedSignedSwmWorkspaceV1(agent, {
+          contextGraphId: CONTEXT_GRAPH_ID,
+          assertionCoordinate,
+          shareOperationId,
+          kaNumber: 83n,
+          accessPolicy: 'public',
+          publisherPeerId: 'legacy-boundary-prestart-provider',
+        });
+      },
+    });
+    await author.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Legacy boundary production reconcile',
+      callerAgentAddress: AUTHOR,
+    });
+    await author.whenRfc64CatalogResponsibilitiesIdleV1();
+    await expect(author.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        phase: 'known-incomplete',
+        stableReason: 'legacy-read-only-boundary',
+        legacyReadOnlyCount: 1,
+      }),
+    );
+
+    await expect(author.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+    })).resolves.toMatchObject({ status: 'applied' });
+    vi.spyOn(author as any, 'reconcileRfc64SwmInventoryCatalogV1')
+      .mockRejectedValueOnce(new Error('simulated legacy republish catalog failure'));
+    await expect(author.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).rejects.toThrow('simulated legacy republish catalog failure');
+    await expect(author.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        phase: 'known-incomplete',
+        legacyReadOnlyCount: 1,
+      }),
+    );
+
+    await author.stop();
+    agents.splice(agents.indexOf(author), 1);
+    const restarted = await startNativeAgentWithOptions({
+      name: 'legacy-boundary-author-restarted',
+      existingDataDir: dataDir,
+      persistentStorePath,
+      syncContextGraphs: [CONTEXT_GRAPH_ID],
+      beforeStart: (agent) => {
+        vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
+          AUTHOR_WALLET.privateKey,
+        );
+      },
+    });
+    await restarted.whenRfc64CatalogResponsibilitiesIdleV1();
+    await expect(restarted.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        phase: 'known-incomplete',
+        legacyReadOnlyCount: 1,
+      }),
+    );
+    await expect(restarted.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).resolves.toMatchObject({
+      targetAssetCount: 1,
+      appliedHead: {
+        inventoryRowCount: '1',
+      },
+    });
+    expect(seeded.canonicalSeal.kaUal).toMatch(/^did:dkg:/u);
+    await expect(restarted.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        phase: 'complete',
+        legacyReadOnlyCount: 0,
+      }),
+    );
+
+    await restarted.stop();
+    agents.splice(agents.indexOf(restarted), 1);
+    const secondRestart = await startNativeAgentWithOptions({
+      name: 'legacy-boundary-author-second-restart',
+      existingDataDir: dataDir,
+      persistentStorePath,
+      syncContextGraphs: [CONTEXT_GRAPH_ID],
+      beforeStart: (agent) => {
+        vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
+          AUTHOR_WALLET.privateKey,
+        );
+      },
+    });
+    await secondRestart.whenRfc64CatalogResponsibilitiesIdleV1();
+    await expect(secondRestart.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        phase: 'complete',
+        legacyReadOnlyCount: 0,
+        appliedRowCount: '1',
+      }),
+    );
   }, 60_000);
 
   it('requests local-author repair only from the production applied-head callback', async () => {

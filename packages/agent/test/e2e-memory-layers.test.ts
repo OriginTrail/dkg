@@ -11,7 +11,7 @@
  */
 import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
-import { DKGAgent, type DKGAgentConfig } from '../src/index.js';
+import { DKGAgent as RealDKGAgent, type DKGAgentConfig } from '../src/index.js';
 import { SEAL_CAPABILITY_GAP_CODE } from '../src/dkg-agent-publish.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
@@ -39,6 +39,16 @@ import {
   MemoryLayer,
 } from '@origintrail-official/dkg-core';
 import { makeSwmSyncHarness } from './_helpers/swm-sync-harness.js';
+
+type DKGAgent = RealDKGAgent;
+const DKGAgent = {
+  create(config: Parameters<typeof RealDKGAgent.create>[0]) {
+    return RealDKGAgent.create({
+      rfc64CatalogActivation: { enabled: false },
+      ...config,
+    });
+  },
+};
 
 const agents: DKGAgent[] = [];
 
@@ -1028,7 +1038,13 @@ describe('rootless graph-scoped KA lifecycle', () => {
       request: { ...recoveryInput.request, clearSharedMemoryAfter: false },
     } as any);
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
-    expect(recoveryCleanup).not.toHaveBeenCalled();
+    // RFC-64 catalog retirement may independently clear this exact published
+    // scope under a system operation while the recovery pass is running. Keep
+    // this assertion scoped to the recovery lane so unrelated, valid cleanup
+    // cannot make the row flaky.
+    expect(recoveryCleanup.mock.calls.filter((call) => (
+      call[3]?.operationName === 'publishFromSWM'
+    ))).toHaveLength(0);
 
     // PR #2300 r1 (🟡 3809054841) — the record shape item 5 exists for: a persisted FAILED job
     // held on the recovery carrier alone (`recovery.txHashChecked`, NO `broadcast`). The REAL

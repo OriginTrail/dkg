@@ -485,4 +485,37 @@ describe('RFC-64 D26 catalog access authorization', () => {
     })).toThrow(/does not advance its high-water/u);
     expect(subject.lookup(NETWORK, CG)?.policyDigest).toBe(finalizedDigest);
   });
+
+  it('rejects a stale unregistered roster after a newer curator generation', () => {
+    const privatePolicy = policy(1, 0);
+    const policyDigest = digestFor(privatePolicy);
+    const initialRoster = roster(policyDigest);
+    const newerRoster: MemberRosterV1 = {
+      ...initialRoster,
+      version: '2',
+      members: initialRoster.members.filter(({ agentAddress }) => agentAddress !== REMOTE),
+    };
+    const staleRoster: MemberRosterV1 = {
+      ...initialRoster,
+      version: '1',
+    };
+    const subject = registry();
+
+    subject.acceptAuthoritativeCurrent({
+      policy: privatePolicy,
+      policyDigest,
+      roster: initialRoster,
+    });
+    expect(subject.acceptAuthoritativeCurrent({
+      policy: privatePolicy,
+      policyDigest,
+      roster: newerRoster,
+    }).roster?.version).toBe('2');
+    expect(() => subject.acceptAuthoritativeCurrent({
+      policy: privatePolicy,
+      policyDigest,
+      roster: staleRoster,
+    })).toThrow(/does not advance its high-water/u);
+    expect(subject.lookup(NETWORK, CG)?.roster).toEqual(newerRoster);
+  });
 });

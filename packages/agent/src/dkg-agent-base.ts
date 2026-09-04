@@ -1410,6 +1410,13 @@ export class DKGAgentBase {
    */
   protected ensureProfilePublishedInFlight?: Promise<void>;
   /**
+   * Coalesces the explicit profile reannouncement performed before a private
+   * join approval is exposed. This is intentionally separate from
+   * `ensureProfilePublishedInFlight`: readiness remains idempotent once the
+   * profile exists, while approval must refresh the public authority record.
+   */
+  protected approvalAuthorityProfileReannouncementInFlight?: Promise<void>;
+  /**
    * OT-RFC-38 / LU-6 Phase B — sliding-window rate-limiter applied
    * to pre-registration (beacon-discovered) ciphertext writes.
    * Bounds the freemium-tier abuse vector: any wallet can broadcast
