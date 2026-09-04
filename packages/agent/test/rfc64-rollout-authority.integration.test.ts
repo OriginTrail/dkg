@@ -297,14 +297,38 @@ describe('RFC-64 rollout authority integration', () => {
     )).resolves.toBe(MEMBER);
 
     delegateePeers.mockResolvedValue(new Map());
-    (edge as any).preferredSyncPeers.set(contextGraphId, curatorPeerId);
     (edge as any).localApprovedAgentByCG.set(contextGraphId, MEMBER);
+    const requesterState = vi.spyOn(edge, 'readRequesterJoinRequestState')
+      .mockResolvedValue({
+        status: 'approved',
+        requestGeneration: `0x${'11'.repeat(32)}`,
+        curatorPeerId,
+      });
     vi.spyOn(edge, 'getContextGraphOwner')
       .mockResolvedValue(`did:dkg:agent:${AUTHOR}`);
     await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
       curatorPeerId,
       contextGraphId,
     )).resolves.toBe(AUTHOR);
+
+    requesterState.mockResolvedValue({
+      status: 'pending',
+      requestGeneration: `0x${'11'.repeat(32)}`,
+      curatorPeerId,
+    });
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
+      contextGraphId,
+    )).resolves.toBeNull();
+    requesterState.mockResolvedValue({
+      status: 'approved',
+      requestGeneration: `0x${'11'.repeat(32)}`,
+      curatorPeerId: '12D3KooWDifferentCurator',
+    });
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
+      contextGraphId,
+    )).resolves.toBeNull();
 
     delegateePeers.mockResolvedValue(new Map([
       [MEMBER, [memberPeerId]],

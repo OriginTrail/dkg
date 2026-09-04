@@ -746,12 +746,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (delegatedAgents.size === 1) return [...delegatedAgents][0]!;
     if (delegatedAgents.size > 1) return null;
 
+    const approvedAgent = this.localApprovedAgentByCG.get(contextGraphId);
+    if (approvedAgent === undefined) return null;
+    const requesterState = await this.readRequesterJoinRequestState(
+      contextGraphId,
+      approvedAgent,
+    ).catch(() => null);
     if (
-      this.preferredSyncPeers.get(contextGraphId) !== remotePeerId
-      || !this.localApprovedAgentByCG.has(contextGraphId)
-    ) {
-      return null;
-    }
+      requesterState?.status !== 'approved'
+      || requesterState.curatorPeerId !== remotePeerId
+    ) return null;
     const ownerDid = await this.getContextGraphOwner(contextGraphId).catch(() => null);
     const ownerAddress = ownerDid
       ?.trim()
