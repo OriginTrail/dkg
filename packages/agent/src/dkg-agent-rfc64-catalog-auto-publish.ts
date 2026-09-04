@@ -581,18 +581,23 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         authorAddress: canonicalSeal.authorAddress,
         assertionCoordinate: params.assertionCoordinate,
       });
-      if (
-        rfc64SwmInventoryShadowRuntimeV1(this).isVmConfirmed(
-          assetKey,
-          canonicalSeal.assertionVersion,
-          shareOperationId,
-        )
-        || await this.hasRfc64DurableVmConfirmationV1(
+      const exactPromotionWasConfirmed = rfc64SwmInventoryShadowRuntimeV1(this).isVmConfirmed(
+        assetKey,
+        canonicalSeal.assertionVersion,
+        shareOperationId,
+      );
+      // A durable VM confirmation retires the public SWM-only lane, but a
+      // finalized private placement remains a tier-neutral catalog member.
+      // Its exact confirmed promotion is fenced by the operation tombstone;
+      // a later SHARE operation for the same assertion version must remain
+      // eligible to rebuild the retained private author-inventory row.
+      const publicPlacementWasConfirmed = !lane.acceptsFinalizedVmRepair
+        && await this.hasRfc64DurableVmConfirmationV1(
           params.contextGraphId,
           params.subGraphName ?? null,
           canonicalSeal.kaUal,
-        )
-      ) {
+        );
+      if (exactPromotionWasConfirmed || publicPlacementWasConfirmed) {
         return shadowResult('dormant', 'upsert', 0, null, null, 'vm-confirmed');
       }
       const graphManager = new GraphManager(this.store);

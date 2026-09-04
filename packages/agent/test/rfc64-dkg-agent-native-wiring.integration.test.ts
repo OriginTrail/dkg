@@ -6178,9 +6178,13 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     // detached private inventory observer projects its already-confirmed row.
     // The exact sealed VM graph remains authoritative for that private lane;
     // the same drift must remain fail-closed for the public SWM-only lane.
-    await author.store.insert(
-      PROJECTION_QUADS.map((quad) => ({ ...quad, graph: workspaceOnlyVmGraph })),
-    );
+    await author.store.insert([
+      ...PROJECTION_QUADS.map((quad) => ({ ...quad, graph: workspaceOnlyVmGraph })),
+      ...confirmedVmMetadataForSealV1(
+        workspaceOnly.canonicalSeal,
+        workspaceOnlyVmGraph,
+      ),
+    ]);
     const replacementShareOperationId = 'finalized-private-replaced-workspace-operation';
     await storeKnowledgeAssetOperationPublicQuads({
       store: author.store,
