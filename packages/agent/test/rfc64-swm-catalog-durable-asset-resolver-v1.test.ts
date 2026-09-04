@@ -97,6 +97,8 @@ describe('RFC-64 durable SWM inventory catalog asset resolver', () => {
   });
 
   it('rejects a missing finalized VM projection', async () => {
+    await seedVmProjection(store, seal, []);
+
     await expect(resolve('private')).rejects.toThrow(
       `durable finalized VM projection differs for ${seal.kaUal}`,
     );
