@@ -71,45 +71,45 @@ export async function resolveRfc64InventoryWorkspaceCatalogAssetV1(
     kaUal: params.row.kaUal,
   });
   throwIfAbortedV1(params.signal);
+
+  let projectionBytes: Uint8Array;
   // Finalized private placements remain in the tier-neutral author inventory
   // after their byte-identical SWM twin is retired. Rebuild those rows from
   // the exact VM graph; public lanes must continue to require a workspace head.
-  if (head === undefined && params.laneKind === 'private') {
-    const projectionBytes = await resolveFinalizedVmProjectionBytesV1(
+  if (head === undefined) {
+    if (params.laneKind !== 'private') {
+      throw new Error(`durable RFC-64 workspace head differs for ${params.row.kaUal}`);
+    }
+    projectionBytes = await resolveFinalizedVmProjectionBytesV1(
       params,
       params.row,
       seal,
       'agent.rfc64.swmInventory.catalogReconcile.vmProjection',
     );
-    if (computeKaProjectionDigestV1(projectionBytes) !== params.row.projectionDigest) {
-      throw new Error(
-        `durable RFC-64 projection differs from signed inventory row ${params.row.kaUal}`,
-      );
+  } else {
+    if (
+      head.assertionVersion !== params.row.assertionVersion
+      || head.shareOperationId !== params.row.shareOperationId
+      || head.publicTripleCount !== Number(params.row.publicTripleCount)
+      || head.privateTripleCount !== Number(params.row.privateTripleCount)
+      || !laneAcceptsWorkspaceHeadV1(params.laneKind, head.accessPolicy)
+    ) {
+      throw new Error(`durable RFC-64 workspace head differs for ${params.row.kaUal}`);
     }
-    return catalogAssetV1(params.row.assertionCoordinate, projectionBytes, seal);
+    const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
+      store: params.store,
+      graphManager,
+      contextGraphId: params.contextGraphId,
+      shareOperationId: head.shareOperationId,
+      kaUal: params.row.kaUal,
+      assertionVersion: params.row.assertionVersion,
+      publicSnapshotStore: params.publicSnapshotStore,
+    });
+    throwIfAbortedV1(params.signal);
+    assertProjectionMatchesSealV1(snapshot.quads, seal, params.row.kaUal);
+    projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(snapshot.quads);
   }
-  if (
-    head === undefined
-    || head.assertionVersion !== params.row.assertionVersion
-    || head.shareOperationId !== params.row.shareOperationId
-    || head.publicTripleCount !== Number(params.row.publicTripleCount)
-    || head.privateTripleCount !== Number(params.row.privateTripleCount)
-    || !laneAcceptsWorkspaceHeadV1(params.laneKind, head.accessPolicy)
-  ) {
-    throw new Error(`durable RFC-64 workspace head differs for ${params.row.kaUal}`);
-  }
-  const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
-    store: params.store,
-    graphManager,
-    contextGraphId: params.contextGraphId,
-    shareOperationId: head.shareOperationId,
-    kaUal: params.row.kaUal,
-    assertionVersion: params.row.assertionVersion,
-    publicSnapshotStore: params.publicSnapshotStore,
-  });
-  throwIfAbortedV1(params.signal);
-  assertProjectionMatchesSealV1(snapshot.quads, seal, params.row.kaUal);
-  const projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(snapshot.quads);
+
   if (computeKaProjectionDigestV1(projectionBytes) !== params.row.projectionDigest) {
     throw new Error(
       `durable RFC-64 projection differs from signed inventory row ${params.row.kaUal}`,
