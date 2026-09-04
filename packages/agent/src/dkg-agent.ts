@@ -91,6 +91,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
+import { prepareRfc64LateLegacySwmBoundaryV1 } from
+  './rfc64/legacy-swm-boundary-v1.js';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -1344,6 +1346,28 @@ export class DKGAgent extends DKGAgentBase {
       kaAllocator: config.kaNumberAllocator,
       // RFC ka-metadata-trim P3.3 — `metadata.provenanceEvents` (default true).
       provenanceEvents: config.metadataProvenanceEvents,
+      resolveDurableRootPromotionAtomicCompanion: (input) => {
+        const executionPlan = resolvedConfig.rfc64CatalogExecutionPlan;
+        const configuredMode = executionPlan.contextGraphModes[input.contextGraphId]
+          ?? executionPlan.responsibilityDefaultMode;
+        if (!executionPlan.killSwitchActive && configuredMode !== 'legacy') return;
+
+        // Ephemeral legacy mode has no durable state to protect across a later
+        // catalog restart. Persistent legacy mode must have completed boundary
+        // initialization in start(); the marker owner deliberately throws when
+        // it has not, so a root cannot escape without its negative witness.
+        if (resolvedConfig.dataDir === undefined) return;
+        if (agentRef === undefined) {
+          throw new Error('RFC-64 legacy SWM write-ahead owner is unavailable');
+        }
+        return prepareRfc64LateLegacySwmBoundaryV1(
+          agentRef,
+          input.contextGraphId,
+          input.kaUal,
+          input.shareOperationId,
+          input.assertionVersion,
+        );
+      },
     });
 
     try {

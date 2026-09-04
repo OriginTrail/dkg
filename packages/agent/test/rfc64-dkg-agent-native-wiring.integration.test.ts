@@ -20,6 +20,7 @@ import {
   computeNetworkId,
   computeSwmAuthorInventoryScopeDigestV1,
   createOperationContext,
+  assertionLifecycleUri,
   contextGraphAssertionUri,
   contextGraphMetaUri,
   contextGraphLayerUri,
@@ -5674,6 +5675,187 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     await secondRestart.whenRfc64CatalogResponsibilitiesIdleV1();
     await expect(secondRestart.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        phase: 'complete',
+        legacyReadOnlyCount: 0,
+        appliedRowCount: '1',
+      }),
+    );
+  }, 60_000);
+
+  it('keeps a root SHARE written after legacy capture incomplete across catalog re-enable', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-late-legacy-boundary-'));
+    tempDirs.push(dataDir);
+    const persistentStorePath = join(dataDir, 'oxigraph');
+    const policy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const policyEnvelope = unsignedOpenContextGraphPolicyEnvelopeV1(policy);
+    const commonActivation = {
+      enabled: true,
+      deploymentProfile: NATIVE_DEPLOYMENT,
+      autoPublish: {
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+      bootstrap: {
+        acceptedPolicies: [{
+          policyEnvelope,
+          targets: [],
+          completeSwmProviders: ['12D3KooWLateLegacyBoundaryProvider'],
+        }],
+      },
+    } as const;
+    const assertionCoordinate = 'late-legacy-root-share';
+
+    const legacy = await startNativeAgentWithOptions({
+      name: 'late-legacy-boundary-author',
+      existingDataDir: dataDir,
+      persistentStorePath,
+      catalogActivation: {
+        ...commonActivation,
+        rollout: { contextGraphModes: { [CONTEXT_GRAPH_ID]: 'legacy' } },
+      },
+      beforeStart: (agent) => {
+        vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
+          AUTHOR_WALLET.privateKey,
+        );
+      },
+    });
+    const canonicalSeal = await authorSeal(84n, PROJECTION_QUADS);
+    const seal = assertionSealFromCanonical(canonicalSeal);
+    const assertionUri = contextGraphAssertionUri(
+      CONTEXT_GRAPH_ID,
+      AUTHOR,
+      assertionCoordinate,
+    );
+    const lifecycleUri = assertionLifecycleUri(
+      CONTEXT_GRAPH_ID,
+      AUTHOR,
+      assertionCoordinate,
+    );
+    const metaGraph = contextGraphMetaUri(CONTEXT_GRAPH_ID);
+    const workingGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH_ID,
+      MemoryLayer.WorkingMemory,
+      createGraphKnowledgeAssetScope(canonicalSeal.kaUal, canonicalSeal.assertionVersion),
+    );
+    await legacy.store.insert([
+      ...buildAssertionSealQuads({
+        assertionUri,
+        metaGraph,
+        merkleRoot: seal.merkleRoot,
+        authorAddress: seal.authorAddress,
+        authorAttestationR: seal.authorAttestationR,
+        authorAttestationVS: seal.authorAttestationVS,
+        authorSchemeVersion: seal.authorSchemeVersion,
+        chainId: seal.chainId,
+        kav10Address: seal.kav10Address,
+        reservedKaId: seal.reservedKaId!,
+        finalizedAtIso: seal.finalizedAtIso,
+        contentScopeVersion: seal.contentScopeVersion!,
+        kaUal: seal.kaUal!,
+        assertionVersion: seal.assertionVersion!,
+        publicTripleCount: seal.publicTripleCount!,
+        privateTripleCount: seal.privateTripleCount!,
+      }),
+      ...PROJECTION_QUADS.map((quad) => ({ ...quad, graph: workingGraph })),
+      {
+        graph: metaGraph,
+        subject: lifecycleUri,
+        predicate: 'http://dkg.io/ontology/kaId',
+        object: '"84"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      },
+      {
+        graph: metaGraph,
+        subject: lifecycleUri,
+        predicate: 'http://dkg.io/ontology/reservedUal',
+        object: JSON.stringify(canonicalSeal.kaUal),
+      },
+      {
+        graph: metaGraph,
+        subject: lifecycleUri,
+        predicate: ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION,
+        object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      },
+      {
+        graph: metaGraph,
+        subject: lifecycleUri,
+        predicate: ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION,
+        object: `"${canonicalSeal.assertionVersion}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+      },
+    ]);
+    const promoted = await legacy.publisher.assertionPromote(
+      CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      AUTHOR,
+      { publisherPeerId: legacy.peerId, accessPolicy: 'public' },
+    );
+    expect(promoted.shareOperationId).toBeTruthy();
+    const shareOperationId = promoted.shareOperationId!;
+    await legacy.afterDurableSwmPromotionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+      ctx: createOperationContext('share'),
+    });
+    await legacy.awaitInFlightRfc64SwmInventoryObserversV1();
+    await expect(legacy.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        phase: 'inactive',
+        stableReason: 'explicit-legacy-mode',
+        legacyReadOnlyCount: 1,
+      }),
+    );
+
+    await legacy.stop();
+    agents.splice(agents.indexOf(legacy), 1);
+    const catalog = await startNativeAgentWithOptions({
+      name: 'late-legacy-boundary-catalog-author',
+      existingDataDir: dataDir,
+      persistentStorePath,
+      catalogActivation: commonActivation,
+      beforeStart: (agent) => {
+        vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
+          AUTHOR_WALLET.privateKey,
+        );
+      },
+    });
+    await catalog.whenRfc64CatalogResponsibilitiesIdleV1();
+    await expect(catalog.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        phase: 'known-incomplete',
+        stableReason: 'legacy-read-only-boundary',
+        legacyReadOnlyCount: 1,
+        appliedRowCount: null,
+      }),
+    );
+    expect(canonicalSeal.kaUal).toMatch(/^did:dkg:/u);
+
+    // Re-entering catalog mode does not infer the historical root into the
+    // signed inventory. Only an explicit assertionPromote replay through the
+    // normal publisher hook and post-commit observer does.
+    const replayed = await catalog.publisher.assertionPromote(
+      CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      AUTHOR,
+      { publisherPeerId: catalog.peerId, accessPolicy: 'public' },
+    );
+    expect(replayed.shareOperationId).toBe(shareOperationId);
+    await catalog.afterDurableSwmPromotionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+      ctx: createOperationContext('share'),
+    });
+    await catalog.awaitInFlightRfc64SwmInventoryObserversV1();
+    await expect(catalog.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
       expect.objectContaining({
         contextGraphId: CONTEXT_GRAPH_ID,
         phase: 'complete',

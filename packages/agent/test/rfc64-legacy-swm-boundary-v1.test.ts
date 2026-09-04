@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   initializeRfc64LegacySwmBoundaryV1,
+  prepareRfc64LateLegacySwmBoundaryV1,
   markRfc64LegacySwmRepublishedV1,
   readRfc64LegacySwmBoundaryCountV1,
 } from '../src/rfc64/legacy-swm-boundary-v1.js';
@@ -60,13 +61,13 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     await markRfc64LegacySwmRepublishedV1(
       restartedOwner,
       CONTEXT_GRAPH_ID,
-      [UAL_TWO],
+      [{ kaUal: UAL_TWO, assertionVersion: '1' }],
     );
     expect(readRfc64LegacySwmBoundaryCountV1(restartedOwner, CONTEXT_GRAPH_ID)).toBe(1);
     await markRfc64LegacySwmRepublishedV1(
       restartedOwner,
       CONTEXT_GRAPH_ID,
-      [UAL_ONE],
+      [{ kaUal: UAL_ONE, assertionVersion: '1' }],
     );
     expect(readRfc64LegacySwmBoundaryCountV1(restartedOwner, CONTEXT_GRAPH_ID)).toBe(0);
 
@@ -74,6 +75,158 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     await initializeRfc64LegacySwmBoundaryV1(secondRestartOwner, root, store);
     expect(readRfc64LegacySwmBoundaryCountV1(secondRestartOwner, CONTEXT_GRAPH_ID)).toBe(0);
     expect(store.listGraphs).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists an atomic post-capture legacy SHARE companion until that exact UAL is republished', async () => {
+    const root = await secureTempRoot(roots);
+    const store = new OxigraphStore();
+    const firstOwner = {};
+    await initializeRfc64LegacySwmBoundaryV1(firstOwner, root, store);
+    expect(readRfc64LegacySwmBoundaryCountV1(firstOwner, CONTEXT_GRAPH_ID)).toBe(0);
+
+    const companion = prepareRfc64LateLegacySwmBoundaryV1(
+      firstOwner,
+      CONTEXT_GRAPH_ID,
+      UAL_ONE,
+      'late-legacy-share-one',
+      '1',
+    );
+    await store.replaceGraphAndSubject!(
+      'urn:test:late-legacy-swm',
+      [{
+        graph: 'urn:test:late-legacy-swm',
+        subject: 'urn:test:entity',
+        predicate: 'urn:test:predicate',
+        object: '"value"',
+      }],
+      companion.graphUri,
+      companion.subject,
+      [...companion.quads],
+    );
+    companion.settle(true);
+    expect(readRfc64LegacySwmBoundaryCountV1(firstOwner, CONTEXT_GRAPH_ID)).toBe(1);
+
+    const restartedOwner = {};
+    await initializeRfc64LegacySwmBoundaryV1(restartedOwner, root, store);
+    expect(readRfc64LegacySwmBoundaryCountV1(restartedOwner, CONTEXT_GRAPH_ID)).toBe(1);
+    await markRfc64LegacySwmRepublishedV1(
+      restartedOwner,
+      CONTEXT_GRAPH_ID,
+      [{ kaUal: UAL_TWO, assertionVersion: '1' }],
+    );
+    expect(readRfc64LegacySwmBoundaryCountV1(restartedOwner, CONTEXT_GRAPH_ID)).toBe(1);
+    await markRfc64LegacySwmRepublishedV1(
+      restartedOwner,
+      CONTEXT_GRAPH_ID,
+      [{ kaUal: UAL_ONE, assertionVersion: '1' }],
+    );
+    expect(readRfc64LegacySwmBoundaryCountV1(restartedOwner, CONTEXT_GRAPH_ID)).toBe(0);
+
+    const secondRestartOwner = {};
+    await initializeRfc64LegacySwmBoundaryV1(secondRestartOwner, root, store);
+    expect(readRfc64LegacySwmBoundaryCountV1(secondRestartOwner, CONTEXT_GRAPH_ID)).toBe(0);
+  });
+
+  it('keeps a newer same-UAL generation while an older catalog retirement races its commit', async () => {
+    const root = await secureTempRoot(roots);
+    const store = new OxigraphStore();
+    const owner = {};
+    await initializeRfc64LegacySwmBoundaryV1(owner, root, store);
+    const swmGraph = 'urn:test:same-ual-generations';
+    const swmQuad = (version: string) => ({
+      graph: swmGraph,
+      subject: 'urn:test:entity',
+      predicate: 'urn:test:version',
+      object: JSON.stringify(version),
+    });
+
+    const first = prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL_ONE,
+      'same-ual-generation-one',
+      '1',
+    );
+    await store.replaceGraphAndSubject!(
+      swmGraph,
+      [swmQuad('1')],
+      first.graphUri,
+      first.subject,
+      [...first.quads],
+    );
+    first.settle(true);
+
+    const second = prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL_ONE,
+      'same-ual-generation-two',
+      '2',
+    );
+    const retireFirst = markRfc64LegacySwmRepublishedV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      [{ kaUal: UAL_ONE, assertionVersion: '1' }],
+    );
+    expect(() => prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL_ONE,
+      'same-ual-generation-three',
+      '3',
+    )).toThrow('retirement is in progress');
+    await store.replaceGraphAndSubject!(
+      swmGraph,
+      [swmQuad('2')],
+      second.graphUri,
+      second.subject,
+      [...second.quads],
+    );
+    second.settle(true);
+    await retireFirst;
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
+
+    const restartedOwner = {};
+    await initializeRfc64LegacySwmBoundaryV1(restartedOwner, root, store);
+    expect(readRfc64LegacySwmBoundaryCountV1(restartedOwner, CONTEXT_GRAPH_ID)).toBe(1);
+    await markRfc64LegacySwmRepublishedV1(
+      restartedOwner,
+      CONTEXT_GRAPH_ID,
+      [{ kaUal: UAL_ONE, assertionVersion: '2' }],
+    );
+    expect(readRfc64LegacySwmBoundaryCountV1(restartedOwner, CONTEXT_GRAPH_ID)).toBe(0);
+  });
+
+  it('fails closed when persistent boundary state was not initialized', () => {
+    expect(() => prepareRfc64LateLegacySwmBoundaryV1(
+      {},
+      CONTEXT_GRAPH_ID,
+      UAL_ONE,
+      'missing-persistence',
+      '1',
+    )).toThrow('boundary persistence is unavailable');
+  });
+
+  it('rolls back only a newly prepared process-local witness on a known non-commit', async () => {
+    const root = await secureTempRoot(roots);
+    const store = new OxigraphStore();
+    const owner = {};
+    await initializeRfc64LegacySwmBoundaryV1(owner, root, store);
+
+    const companion = prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL_ONE,
+      'clean-capability-refusal',
+      '1',
+    );
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
+    companion.settle(false);
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(0);
+
+    const restartedOwner = {};
+    await initializeRfc64LegacySwmBoundaryV1(restartedOwner, root, store);
+    expect(readRfc64LegacySwmBoundaryCountV1(restartedOwner, CONTEXT_GRAPH_ID)).toBe(0);
   });
 
   it('fails closed when a head subject and its canonical UAL differ', async () => {
@@ -97,7 +250,11 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     await initializeRfc64LegacySwmBoundaryV1(owner, root, store);
 
     expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
-    await markRfc64LegacySwmRepublishedV1(owner, CONTEXT_GRAPH_ID, [UAL_ONE]);
+    await markRfc64LegacySwmRepublishedV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      [{ kaUal: UAL_ONE, assertionVersion: '1' }],
+    );
     expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(0);
   });
 
@@ -126,9 +283,17 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     const owner = {};
     await initializeRfc64LegacySwmBoundaryV1(owner, root, store);
     expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
-    await markRfc64LegacySwmRepublishedV1(owner, CONTEXT_GRAPH_ID, [UAL_TWO]);
+    await markRfc64LegacySwmRepublishedV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      [{ kaUal: UAL_TWO, assertionVersion: '1' }],
+    );
     expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
-    await markRfc64LegacySwmRepublishedV1(owner, CONTEXT_GRAPH_ID, [UAL_ONE]);
+    await markRfc64LegacySwmRepublishedV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      [{ kaUal: UAL_ONE, assertionVersion: '1' }],
+    );
     expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(0);
   });
 });

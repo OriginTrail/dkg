@@ -385,7 +385,10 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       await markRfc64LegacySwmRepublishedV1(
         this,
         params.contextGraphId,
-        prepared.assets.map((asset) => asset.seal.kaUal),
+        prepared.assets.map((asset) => Object.freeze({
+          kaUal: asset.seal.kaUal,
+          assertionVersion: asset.seal.assertionVersion,
+        })),
       );
       const { sourceCurrent: _sourceCurrent, ...result } = reconciled;
       return Object.freeze({
