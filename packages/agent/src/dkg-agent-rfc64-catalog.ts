@@ -60,6 +60,7 @@ import {
 import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { mapWithConcurrency } from './map-with-concurrency.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
 import {
   snapshotRfc64CatalogDeploymentProfileV1,
@@ -152,6 +153,64 @@ export type Rfc64OpenCatalogAuthorSignerV1 = Rfc64CatalogAuthorSignerV1;
 const RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1 =
   'https://dkg.network/ontology#rfc64RosterVersion';
 const RFC64_PRIVATE_ROSTER_VERSION_RADIX_V1 = 10_000_000_000_000n;
+const RFC64_OPERATIONAL_STATUS_HEAD_READ_CONCURRENCY_V1 = 8;
+
+interface Rfc64OperationalAppliedHeadV1 {
+  readonly snapshot: AppliedCatalogHeadSnapshotV1;
+  readonly issuedAt: TimestampMsV1;
+  readonly contextGraphId: string;
+  readonly scopeKey: string;
+}
+
+async function loadRfc64OperationalAppliedHeadsV1(
+  persistence: Rfc64PersistenceV1,
+): Promise<readonly Readonly<Rfc64OperationalAppliedHeadV1>[]> {
+  const snapshots = persistence.inventory.listAppliedCatalogHeadsV1();
+  const loaded = await mapWithConcurrency(
+    snapshots,
+    RFC64_OPERATIONAL_STATUS_HEAD_READ_CONCURRENCY_V1,
+    async (snapshot): Promise<Readonly<Rfc64OperationalAppliedHeadV1> | null> => {
+      const stored = await persistence.controlObjects.getVerifiedObjectByDigest({
+        objectDigest: snapshot.currentCatalogHeadDigest,
+        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      }).catch(() => null);
+      if (stored === null) return null;
+      try {
+        assertSignedAuthorCatalogHeadEnvelopeV1(stored.envelope);
+      } catch {
+        return null;
+      }
+      const payload = stored.envelope.payload;
+      return Object.freeze({
+        snapshot,
+        issuedAt: payload.issuedAt,
+        contextGraphId: payload.contextGraphId,
+        scopeKey: rfc64CatalogTargetScopeKeyV1({
+          networkId: payload.networkId,
+          contextGraphId: payload.contextGraphId,
+          subGraphName: payload.subGraphName,
+          authorAddress: payload.authorAddress,
+          catalogEra: payload.era,
+        }),
+      });
+    },
+  );
+  return Object.freeze(loaded.filter(
+    (head): head is Readonly<Rfc64OperationalAppliedHeadV1> => head !== null,
+  ));
+}
+
+function groupRfc64OperationalAppliedHeadsV1(
+  heads: readonly Readonly<Rfc64OperationalAppliedHeadV1>[],
+): ReadonlyMap<string, readonly Readonly<Rfc64OperationalAppliedHeadV1>[]> {
+  const byContextGraph = new Map<string, Readonly<Rfc64OperationalAppliedHeadV1>[]>();
+  for (const head of heads) {
+    const grouped = byContextGraph.get(head.contextGraphId) ?? [];
+    grouped.push(head);
+    byContextGraph.set(head.contextGraphId, grouped);
+  }
+  return byContextGraph;
+}
 
 export interface AcceptOpenContextGraphPolicyInputV1 {
   readonly networkId: NetworkIdV1;
@@ -1060,39 +1119,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           : 'operator-override',
       });
     }));
-    const appliedByContextGraph = new Map<string, Array<Readonly<{
-      snapshot: AppliedCatalogHeadSnapshotV1;
-      issuedAt: TimestampMsV1;
-      scopeKey: string;
-    }>>>();
-    if (persistence !== undefined) {
-      for (const snapshot of persistence.inventory.listAppliedCatalogHeadsV1()) {
-        const stored = await persistence.controlObjects.getVerifiedObjectByDigest({
-          objectDigest: snapshot.currentCatalogHeadDigest,
-          verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-        }).catch(() => null);
-        if (stored === null) continue;
-        try {
-          assertSignedAuthorCatalogHeadEnvelopeV1(stored.envelope);
-        } catch {
-          continue;
-        }
-        const contextGraphId = stored.envelope.payload.contextGraphId;
-        const heads = appliedByContextGraph.get(contextGraphId) ?? [];
-        heads.push(Object.freeze({
-          snapshot,
-          issuedAt: stored.envelope.payload.issuedAt,
-          scopeKey: rfc64CatalogTargetScopeKeyV1({
-            networkId: stored.envelope.payload.networkId,
-            contextGraphId,
-            subGraphName: stored.envelope.payload.subGraphName,
-            authorAddress: stored.envelope.payload.authorAddress,
-            catalogEra: stored.envelope.payload.era,
-          }),
-        }));
-        appliedByContextGraph.set(contextGraphId, heads);
-      }
-    }
+    const appliedByContextGraph = persistence === undefined
+      ? new Map<string, readonly Readonly<Rfc64OperationalAppliedHeadV1>[]>()
+      : groupRfc64OperationalAppliedHeadsV1(
+          await loadRfc64OperationalAppliedHeadsV1(persistence),
+        );
     const progressByContextGraph = rfc64CatalogAuthorityProgressV1.get(this);
     const receiverStats = service?.stats().receiver;
     return Object.freeze(selections.map((selection) => {

@@ -855,6 +855,114 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
   });
 
+  it('snapshots and bounds operational-status applied-head reads while skipping unreadable heads', async () => {
+    const policy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const author = await startNativeAgentWithOptions({
+      name: 'bounded-operational-status-applied-heads',
+      catalogActivation: {
+        enabled: true,
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        rollout: { contextGraphModes: { [CONTEXT_GRAPH_ID]: 'catalog' } },
+        autoPublish: {
+          catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+        },
+        bootstrap: {
+          acceptedPolicies: [{
+            policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+            targets: [],
+            completeSwmProviders: ['12D3KooOperationalStatusProvider'],
+          }],
+        },
+      },
+      beforeStart: (agent) => {
+        vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
+          AUTHOR_WALLET.privateKey,
+        );
+      },
+    });
+    vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1')
+      .mockImplementation(async ({ announcement, peers }) => ({
+        announcement,
+        announcedPeers: peers,
+        failedPeers: [],
+      }));
+    await expect(author.recordRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'bounded-operational-status-applied-heads' as never,
+      publicQuads: PROJECTION_QUADS,
+      seal: assertionSealFromCanonical(await authorSeal(229n, PROJECTION_QUADS)),
+    })).resolves.toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+
+    const persistence = (author as any).rfc64PersistenceV1;
+    const [appliedHead] = persistence.inventory.listAppliedCatalogHeadsV1();
+    expect(appliedHead).toBeDefined();
+    const inventoryRead = vi.fn(() => (
+      Object.freeze(Array.from({ length: 18 }, () => appliedHead))
+    ));
+    const originalRead = persistence.controlObjects.getVerifiedObjectByDigest
+      .bind(persistence.controlObjects);
+    let calls = 0;
+    let active = 0;
+    let peakActive = 0;
+    let releaseReads!: () => void;
+    const readsReleased = new Promise<void>((resolve) => {
+      releaseReads = resolve;
+    });
+    const verifiedObjectRead = vi.fn(async (input: unknown) => {
+      const callIndex = calls++;
+      active += 1;
+      peakActive = Math.max(peakActive, active);
+      try {
+        await readsReleased;
+        if (callIndex === 16) return null;
+        if (callIndex === 17) throw new Error('simulated unreadable head');
+        return await originalRead(input);
+      } finally {
+        active -= 1;
+      }
+    });
+    (author as any).rfc64PersistenceV1 = {
+      rootPath: persistence.rootPath,
+      inventory: Object.freeze({
+        ...persistence.inventory,
+        listAppliedCatalogHeadsV1: inventoryRead,
+      }),
+      swmAuthorInventory: persistence.swmAuthorInventory,
+      finalizedPrivatePlacementRepairs: persistence.finalizedPrivatePlacementRepairs,
+      controlObjects: Object.freeze({
+        ...persistence.controlObjects,
+        getVerifiedObjectByDigest: verifiedObjectRead,
+      }),
+      kaBundles: persistence.kaBundles,
+      get closed() { return persistence.closed; },
+      close: () => persistence.close(),
+    };
+
+    const statusRead = author.readRfc64CatalogOperationalStatusV1();
+    try {
+      await vi.waitFor(() => {
+        expect(active).toBe(8);
+      }, { timeout: 1_000, interval: 5 });
+      expect(calls).toBe(8);
+    } finally {
+      releaseReads();
+    }
+    const statuses = await statusRead;
+
+    expect(inventoryRead).toHaveBeenCalledTimes(1);
+    expect(calls).toBe(18);
+    expect(peakActive).toBe(8);
+    expect(statuses).toContainEqual(expect.objectContaining({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      appliedRowCount: '16',
+      missingRowCount: '0',
+    }));
+  }, 60_000);
+
   it('balances verified target lifecycle for accepted active and queued work', async () => {
     const events: Array<readonly [
       'start' | 'end',
