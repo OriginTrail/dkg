@@ -674,9 +674,7 @@ import type { DKGAgent } from './dkg-agent.js';
 
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
 import {
-  contextGraphDormancyMapFromProjection,
   projectContextGraphDormancy,
-  type ContextGraphDormancyReason,
 } from './context-graph-subscription-dormancy.js';
 import {
   isRfc64PrivateRecoveryOwnerV1,
@@ -9444,14 +9442,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) return;
 
     const sortIds = (ids: string[]): string[] => [...ids].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-    const wasDormant = status.dormantIds.includes(contextGraphId);
+    const wasDormant = this.contextGraphSubscriptionDormancyById.has(contextGraphId);
     const hostedActivatedIds = status.hostedActivatedIds ?? [];
     const wasAccounted = this.contextGraphSubscriptionRehydrationAccountedIds.has(contextGraphId);
     const isPersisted = next?.subscribed === true || next?.coreHosted === true;
 
     let persistedTotal = status.persistedTotal;
     let activated = status.activated;
-    const dormancyById = contextGraphDormancyMapFromProjection(status);
+    const dormancyById = this.contextGraphSubscriptionDormancyById;
     dormancyById.delete(contextGraphId);
     let nextHostedActivatedIds = hostedActivatedIds.filter((id) => id !== contextGraphId);
     if (next?.coreHosted === true) {
@@ -9493,7 +9491,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const status = this.contextGraphSubscriptionRehydrationStatus;
     if (!status) return;
     const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
-    const dormancyById = contextGraphDormancyMapFromProjection(status);
+    const dormancyById = this.contextGraphSubscriptionDormancyById;
     const hostedActivatedIds = [...(status.hostedActivatedIds ?? [])];
     const removeFrom = (ids: string[], id: string): boolean => {
       const index = ids.indexOf(id);
@@ -9990,17 +9988,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   getContextGraphSubscriptionRehydrationStatus(this: DKGAgent): ContextGraphSubscriptionRehydrationStatus | null {
     const status = this.contextGraphSubscriptionRehydrationStatus;
     if (!status) return null;
+    const dormancy = projectContextGraphDormancy(this.contextGraphSubscriptionDormancyById);
     return {
       ...status,
       hostedActivatedIds: [...(status.hostedActivatedIds ?? [])],
-      dormantIds: [...status.dormantIds],
-      dormantReasons: {
-        activationCap: [...status.dormantReasons.activationCap],
-        authorityDenied: [...status.dormantReasons.authorityDenied],
-        authorityUnavailable: [...status.dormantReasons.authorityUnavailable],
-        rehydrationDisabled: [...status.dormantReasons.rehydrationDisabled],
-        deactivated: [...status.dormantReasons.deactivated],
-      },
+      dormant: dormancy.dormantIds.length,
+      ...dormancy,
     };
   }
 
@@ -10042,9 +10035,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // A later explicit subscribe remains a normal live activation and updates
       // the status through updateContextGraphSubscriptionRehydrationStatusAfterPersist.
       if (!this.config.contextGraphSubscriptionRehydrationEnabled) {
-        const dormancyById = new Map<string, ContextGraphDormancyReason>(
-          rows.map((row) => [row.id, 'rehydrationDisabled']),
-        );
+        const dormancyById = this.contextGraphSubscriptionDormancyById;
+        dormancyById.clear();
+        for (const row of rows) dormancyById.set(row.id, 'rehydrationDisabled');
         const dormancy = projectContextGraphDormancy(dormancyById);
         this.contextGraphSubscriptionRehydrationAccountedIds.clear();
         for (const id of dormancy.dormantIds) {
@@ -10160,7 +10153,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         (a, b) => (b.subscribed ? 1 : 0) - (a.subscribed ? 1 : 0) || byId(a, b),
       );
       const toActivate = [...hostedRows, ...userRows];
-      const dormancyById = new Map<string, ContextGraphDormancyReason>();
+      const dormancyById = this.contextGraphSubscriptionDormancyById;
+      dormancyById.clear();
       const activatedRows: ContextGraphSubscriptionRecord[] = [];
       let activatedUserRows = 0;
       for (let i = 0; i < toActivate.length; i++) {

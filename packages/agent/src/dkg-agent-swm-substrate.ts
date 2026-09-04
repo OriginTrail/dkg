@@ -404,8 +404,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     const syncMode = resolveContextGraphSyncMode({
       existing,
       requested: options?.syncMode,
-      hasDormantDurableIntent:
-        this.contextGraphSubscriptionRehydrationStatus?.dormantIds.includes(contextGraphId) === true,
+      hasDormantDurableIntent: this.contextGraphSubscriptionDormancyById.has(contextGraphId),
     });
     const persist = syncMode === 'on-demand' ? false : options?.persist;
     if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {

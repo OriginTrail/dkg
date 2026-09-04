@@ -15,16 +15,6 @@ export type ContextGraphDormancyProjection = {
   dormantReasons: Record<ContextGraphDormancyReason, string[]>;
 };
 
-export function contextGraphDormancyMapFromProjection(
-  projection: ContextGraphDormancyProjection,
-): Map<string, ContextGraphDormancyReason> {
-  const result = new Map<string, ContextGraphDormancyReason>();
-  for (const reason of CONTEXT_GRAPH_DORMANCY_REASONS) {
-    for (const id of projection.dormantReasons[reason]) result.set(id, reason);
-  }
-  return result;
-}
-
 export function projectContextGraphDormancy(
   dormancyById: ReadonlyMap<string, ContextGraphDormancyReason>,
 ): ContextGraphDormancyProjection {
