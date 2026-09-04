@@ -1844,6 +1844,24 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     this.contextGraphMetaProjection.markDirtyFromQuads(quadsToInsert);
 
+    // Private admission changes the release-native RFC-64 roster even when
+    // the graph was registered before this member joined. Advance the
+    // curator-authored metadata generation under the same admission lock,
+    // then refresh the locally accepted authority before notifying the new
+    // member. Delegation-only refreshes keep the existing roster generation.
+    if (!alreadyAllowed) {
+      const rosterVersion = await this.advanceRfc64PrivateRosterVersionV1(contextGraphId);
+      if (rosterVersion !== null) {
+        await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId).catch((error) => {
+          this.log.warn(
+            ctx,
+            `RFC-64 private roster rotation remains incomplete for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return null;
+        });
+      }
+    }
+
     if (curatorAgentAddress) {
       this.upsertContextGraphMember({
         contextGraphId,
@@ -1965,6 +1983,16 @@ export class ContextGraphMethods extends DKGAgentBase {
     this.invalidateListContextGraphsCache();
     this.contextGraphMetaProjection.markDirty(contextGraphId);
     this.deleteContextGraphMember(contextGraphId, 'agent', agentAddress);
+    const rosterVersion = await this.advanceRfc64PrivateRosterVersionV1(contextGraphId);
+    if (rosterVersion !== null) {
+      await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId).catch((error) => {
+        this.log.warn(
+          ctx,
+          `RFC-64 private roster removal remains incomplete for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return null;
+      });
+    }
     // Reconciled after the projection is invalidated at the end of removal.
     // Drop any cached sender-key send state for this CG so the next
     // write re-resolves recipients (now excluding the revoked agent

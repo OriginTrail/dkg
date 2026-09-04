@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   composeRfc64FinalizedCatalogAuthorityV1,
+  composeRfc64RegisteredRosterVersionV1,
   composeRfc64UnregisteredCatalogAuthorityV1,
 } from '../src/rfc64/release-native-catalog-authority-v1.js';
 
@@ -26,6 +27,17 @@ const BLOCK_HASH = `0x${'44'.repeat(32)}`;
 const NAME_HASH = `0x${'55'.repeat(32)}`;
 
 describe('release-native RFC-64 catalog authority', () => {
+  it('orders registered roster generations across local and chain changes', () => {
+    expect(composeRfc64RegisteredRosterVersionV1('0', '1788482000000'))
+      .toBe('1788482000000');
+    expect(composeRfc64RegisteredRosterVersionV1('1', '0'))
+      .toBe('10000000000000');
+    expect(BigInt(composeRfc64RegisteredRosterVersionV1('1', '1788482000001')))
+      .toBeGreaterThan(BigInt(composeRfc64RegisteredRosterVersionV1('1', '1788482000000')));
+    expect(() => composeRfc64RegisteredRosterVersionV1('0', '10000000000000'))
+      .toThrow(/generation lane/u);
+  });
+
   it.each([
     [0, 0],
     [0, 1],

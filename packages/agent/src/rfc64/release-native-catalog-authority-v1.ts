@@ -21,6 +21,30 @@ import { ethers } from 'ethers';
 const ZERO_U64 = '0' as DecimalU64V1;
 const ZERO_U256 = '0' as DecimalU256V1;
 const ZERO_TIMESTAMP = '0' as TimestampMsV1;
+const LOCAL_ROSTER_VERSION_RADIX_V1 = 10_000_000_000_000n;
+const MAX_U64_V1 = (1n << 64n) - 1n;
+
+/**
+ * Combine the finalized-chain roster generation with the curator-authored
+ * lifecycle generation carried by authenticated CG metadata. The chain lane
+ * occupies the high-order radix so either a chain membership event or a later
+ * local invite/removal strictly advances the RFC-64 roster high-water.
+ */
+export function composeRfc64RegisteredRosterVersionV1(
+  chainRosterVersion: string,
+  localRosterVersion: string,
+): DecimalU64V1 {
+  const chain = canonicalNonNegativeIntegerV1(chainRosterVersion, 'chain roster version');
+  const local = canonicalNonNegativeIntegerV1(localRosterVersion, 'local roster version');
+  if (local >= LOCAL_ROSTER_VERSION_RADIX_V1) {
+    throw new Error('local roster version exceeds its registered RFC-64 generation lane');
+  }
+  const combined = chain * LOCAL_ROSTER_VERSION_RADIX_V1 + local;
+  if (combined > MAX_U64_V1) {
+    throw new Error('combined registered RFC-64 roster version exceeds uint64');
+  }
+  return combined.toString(10) as DecimalU64V1;
+}
 
 export interface Rfc64ReleaseNativeAuthoritySnapshotV1 {
   readonly policy: Readonly<ContextGraphPolicyV1>;
@@ -174,4 +198,11 @@ function ownershipTransitionDigestV1(
   return ethers.keccak256(ethers.toUtf8Bytes(
     `dkg:rfc64:ownership:v1\n${contextGraphId}\n${ownerAddress.toLowerCase()}\n${ownershipEra}`,
   )) as Digest32V1;
+}
+
+function canonicalNonNegativeIntegerV1(value: string, label: string): bigint {
+  if (!/^(0|[1-9][0-9]*)$/u.test(value)) {
+    throw new Error(`${label} must be a canonical non-negative integer`);
+  }
+  return BigInt(value);
 }

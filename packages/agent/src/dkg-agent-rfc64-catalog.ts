@@ -22,6 +22,8 @@ import {
   SYSTEM_CONTEXT_GRAPHS,
   ZERO_DIGEST32_V1,
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
+  contextGraphDataGraphUri,
+  contextGraphMetaGraphUri,
   assertSignedAuthorCatalogBucketEnvelopeV1,
   assertSignedAuthorCatalogDirectoryNodeEnvelopeV1,
   assertSignedAuthorCatalogHeadEnvelopeV1,
@@ -128,6 +130,7 @@ import {
 } from './rfc64/catalog-responsibility-registry-v1.js';
 import {
   composeRfc64FinalizedCatalogAuthorityV1,
+  composeRfc64RegisteredRosterVersionV1,
   composeRfc64UnregisteredCatalogAuthorityV1,
   type Rfc64ReleaseNativeAuthoritySnapshotV1,
 } from './rfc64/release-native-catalog-authority-v1.js';
@@ -142,6 +145,10 @@ export interface Rfc64CatalogAuthorSignerV1 {
 
 /** Compatibility name retained for the legacy public/open authoring surface. */
 export type Rfc64OpenCatalogAuthorSignerV1 = Rfc64CatalogAuthorSignerV1;
+
+const RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1 =
+  'https://dkg.network/ontology#rfc64RosterVersion';
+const RFC64_PRIVATE_ROSTER_VERSION_RADIX_V1 = 10_000_000_000_000n;
 
 export interface AcceptOpenContextGraphPolicyInputV1 {
   readonly networkId: NetworkIdV1;
@@ -662,6 +669,119 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /**
+   * Resolve the private member set from the hardened, store-backed `_meta`
+   * gate after the complete graph definition has been authenticated. This is
+   * deliberately independent of the accepted RFC-64 roster: responsibility
+   * and roster rotation cannot ask the roster they are about to establish for
+   * permission to establish it.
+   */
+  async resolveRfc64VerifiedPrivateRosterV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<readonly EvmAddressV1[] | null> {
+    if (!await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
+      return null;
+    }
+    const gate = await this.getMemberRecoveryGate(contextGraphId).catch(() => null);
+    if (gate === null || gate.length === 0) return null;
+    const members = new Set<EvmAddressV1>();
+    for (const candidate of gate) {
+      if (!ethers.isAddress(candidate) || candidate === ethers.ZeroAddress) continue;
+      members.add(candidate.toLowerCase() as EvmAddressV1);
+    }
+    return members.size === 0
+      ? null
+      : Object.freeze([...members].sort());
+  }
+
+  async hasRfc64VerifiedPrivateMembershipV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<boolean> {
+    const localAgentAddress = (
+      this.config.rfc64CatalogAccessPolicyAuthority?.localAgentAddress
+      ?? this.defaultAgentAddress
+    )?.toLowerCase();
+    if (localAgentAddress === undefined || !ethers.isAddress(localAgentAddress)) {
+      return false;
+    }
+    const roster = await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId);
+    return roster?.includes(localAgentAddress as EvmAddressV1) ?? false;
+  }
+
+  /** Read the curator-authored local roster generation from authenticated metadata. */
+  async readRfc64PrivateRosterVersionV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<string> {
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const result = await this.store.query(`
+      SELECT ?version WHERE {
+        GRAPH <${metaGraph}> {
+          <${contextGraphUri}> <${RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1}> ?version .
+        }
+      }
+    `, { source: 'agent.rfc64.privateRosterVersion' });
+    if (result.type !== 'bindings' || result.bindings.length === 0) return '0';
+    const versions = new Set<string>();
+    for (const row of result.bindings) {
+      const raw = row['version'];
+      if (typeof raw !== 'string') {
+        throw new Error('RFC-64 private roster version is not a literal');
+      }
+      const lexical = raw.match(/^"([0-9]+)"(?:\^\^<[^>]+>)?$/u)?.[1]
+        ?? (/^[0-9]+$/u.test(raw) ? raw : undefined);
+      if (lexical === undefined || !/^(0|[1-9][0-9]*)$/u.test(lexical)) {
+        throw new Error('RFC-64 private roster version is not canonical');
+      }
+      if (BigInt(lexical) >= RFC64_PRIVATE_ROSTER_VERSION_RADIX_V1) {
+        throw new Error('RFC-64 private roster version exceeds its generation lane');
+      }
+      versions.add(lexical);
+    }
+    if (versions.size !== 1) {
+      throw new Error('RFC-64 private roster metadata has conflicting generations');
+    }
+    return [...versions][0]!;
+  }
+
+  /**
+   * Advance and persist the private lifecycle roster generation under the
+   * caller's per-CG admission lock. Public allowlists do not define a read
+   * roster and therefore do not consume a generation.
+   */
+  async advanceRfc64PrivateRosterVersionV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<string | null> {
+    if (await this.getExplicitAccessPolicy(contextGraphId) !== 'private') return null;
+    if (typeof this.store.update !== 'function') {
+      throw new Error('RFC-64 private roster rotation requires atomic SPARQL UPDATE support');
+    }
+    const current = BigInt(await this.readRfc64PrivateRosterVersionV1(contextGraphId));
+    const next = BigInt(Math.max(Date.now(), Number(current + 1n)));
+    if (next >= RFC64_PRIVATE_ROSTER_VERSION_RADIX_V1) {
+      throw new Error('RFC-64 private roster clock exceeds its generation lane');
+    }
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    await this.store.update(`
+      DELETE { GRAPH <${metaGraph}> {
+        <${contextGraphUri}> <${RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1}> ?oldVersion .
+      } }
+      INSERT { GRAPH <${metaGraph}> {
+        <${contextGraphUri}> <${RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1}>
+          "${next.toString(10)}"^^<http://www.w3.org/2001/XMLSchema#integer> .
+      } }
+      WHERE { OPTIONAL { GRAPH <${metaGraph}> {
+        <${contextGraphUri}> <${RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1}> ?oldVersion .
+      } } }
+    `, { touchedGraphs: [metaGraph], source: 'agent.rfc64.privateRosterRotate' });
+    return next.toString(10);
+  }
+
+  /**
    * Refresh one CG from canonical local subscription/hosting state and
    * verified access facts. Revision fencing prevents a slow authority read
    * from reviving a responsibility after unsubscribe or membership removal.
@@ -719,9 +839,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             : null;
       }
       const privateMembershipVerified = accessPolicy === 'private'
-        && await this.canReadContextGraph(contextGraphId, {
-          allowSubscriptionFallback: false,
-        });
+        && await this.hasRfc64VerifiedPrivateMembershipV1(contextGraphId);
       const reason = resolveRfc64CatalogResponsibilityReasonV1({
         nodeRole: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
         subscribed: subscription.subscribed === true,
@@ -824,10 +942,33 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             'registered RFC-64 Context Graph authority is inactive or name-bound elsewhere',
           );
         }
+        let authoritativeSnapshot = snapshot;
+        if (snapshot.accessPolicy === 1) {
+          const localRoster = await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId);
+          if (localRoster === null) {
+            throw new Error(
+              'registered private RFC-64 Context Graph has no authenticated lifecycle roster',
+            );
+          }
+          const localRosterVersion = await this.readRfc64PrivateRosterVersionV1(contextGraphId);
+          authoritativeSnapshot = Object.freeze({
+            ...snapshot,
+            participantAgents: Object.freeze([
+              ...new Set([
+                ...snapshot.participantAgents.map((address) => address.toLowerCase()),
+                ...localRoster,
+              ]),
+            ].sort()),
+            rosterVersion: composeRfc64RegisteredRosterVersionV1(
+              snapshot.rosterVersion,
+              localRosterVersion,
+            ),
+          });
+        }
         authority = composeRfc64FinalizedCatalogAuthorityV1({
           networkId,
           contextGraphId: contextGraphId as ContextGraphIdV1,
-          snapshot,
+          snapshot: authoritativeSnapshot,
         });
       } else {
         const ownerDid = await this.getContextGraphOwner(contextGraphId);
@@ -855,8 +996,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           ? stored.publishPolicy
           : accessPolicy === 'private' ? 0 : 1;
         const members = accessPolicy === 'private'
-          ? await this.getPrivateContextGraphParticipants(contextGraphId) ?? []
+          ? await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId)
           : [];
+        if (accessPolicy === 'private' && members === null) {
+          throw new Error(
+            'unregistered private RFC-64 Context Graph has no authenticated lifecycle roster',
+          );
+        }
         if (signal?.aborted) throw signal.reason;
         authority = composeRfc64UnregisteredCatalogAuthorityV1({
           networkId,
@@ -865,7 +1011,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           accessPolicy: accessPolicy === 'private' ? 1 : 0,
           publishPolicy,
           publishAuthorityAccountId: stored.publishAuthorityAccountId?.toString(10) ?? '0',
-          memberAddresses: members
+          memberAddresses: (members ?? [])
             .map((address) => address.toLowerCase())
             .filter((address) => /^0x[0-9a-f]{40}$/u.test(address)) as EvmAddressV1[],
         });

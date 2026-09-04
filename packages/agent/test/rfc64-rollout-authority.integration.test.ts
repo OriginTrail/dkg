@@ -44,6 +44,7 @@ import {
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
+const MEMBER = '0x2222222222222222222222222222222222222222' as EvmAddressV1;
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
 const CONTEXT_GRAPH_ID = (
   '0x1111111111111111111111111111111111111111/rollout-authority'
@@ -167,7 +168,7 @@ describe('RFC-64 rollout authority integration', () => {
     const wireId = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
     const edge = await startAgent('private-wire-promotion', undefined);
     vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('private');
-    vi.spyOn(edge, 'canReadContextGraph').mockResolvedValue(true);
+    vi.spyOn(edge, 'hasRfc64VerifiedPrivateMembershipV1').mockResolvedValue(true);
     const internals = edge as any;
 
     // Mirror the private ContextGraphCreated path: before admission the Edge
@@ -222,16 +223,15 @@ describe('RFC-64 rollout authority integration', () => {
     const privateContextGraphId = `${AUTHOR}/private-responsibility`;
     const edge = await startAgent('private-responsibility', undefined);
     vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('private');
-    const canRead = vi.spyOn(edge, 'canReadContextGraph').mockResolvedValue(false);
+    const hasMembership = vi.spyOn(edge, 'hasRfc64VerifiedPrivateMembershipV1')
+      .mockResolvedValue(false);
 
     edge.subscribeToContextGraph(privateContextGraphId);
     await edge.whenRfc64CatalogResponsibilitiesIdleV1();
     expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([]);
-    expect(canRead).toHaveBeenCalledWith(privateContextGraphId, {
-      allowSubscriptionFallback: false,
-    });
+    expect(hasMembership).toHaveBeenCalledWith(privateContextGraphId);
 
-    canRead.mockResolvedValue(true);
+    hasMembership.mockResolvedValue(true);
     await edge.reconcileRfc64CatalogResponsibilityV1(privateContextGraphId);
     expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([
       expect.objectContaining({
@@ -243,11 +243,142 @@ describe('RFC-64 rollout authority integration', () => {
     ]);
   });
 
+  it('derives private responsibility from authenticated DKG ACL state, not a stale RFC-64 roster', async () => {
+    const contextGraphId = `${AUTHOR}/private-roster-bootstrap` as ContextGraphIdV1;
+    const edge = await startAgent('private-roster-bootstrap', undefined);
+    (edge as any).defaultAgentAddress = MEMBER;
+    vi.spyOn(edge, 'resolveRfc64PrivateReadRosterV1').mockReturnValue([AUTHOR]);
+    await expect(edge.canReadContextGraph(contextGraphId, {
+      allowSubscriptionFallback: false,
+    })).resolves.toBe(false);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('private');
+    const confirmedMeta = vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(false);
+    const recoveryGate = vi.spyOn(edge, 'getMemberRecoveryGate')
+      .mockResolvedValue([AUTHOR, MEMBER]);
+    await expect(edge.resolveRfc64VerifiedPrivateRosterV1(contextGraphId))
+      .resolves.toBeNull();
+    expect(recoveryGate).not.toHaveBeenCalled();
+
+    confirmedMeta.mockResolvedValue(true);
+    recoveryGate.mockResolvedValue([AUTHOR]);
+    await expect(edge.hasRfc64VerifiedPrivateMembershipV1(contextGraphId))
+      .resolves.toBe(false);
+    recoveryGate.mockResolvedValue([AUTHOR, MEMBER]);
+    await expect(edge.hasRfc64VerifiedPrivateMembershipV1(contextGraphId))
+      .resolves.toBe(true);
+    recoveryGate.mockClear();
+
+    edge.subscribeToContextGraph(contextGraphId);
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    expect(recoveryGate).toHaveBeenCalledWith(contextGraphId);
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([
+      expect.objectContaining({
+        contextGraphId,
+        responsibilityReason: 'private-membership',
+        active: true,
+      }),
+    ]);
+  });
+
+  it('merges an authenticated lifecycle roster into finalized registered authority', async () => {
+    const contextGraphId = `${AUTHOR}/registered-private-roster` as ContextGraphIdV1;
+    const edge = await startAgent(
+      'registered-private-roster',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        rfc64CatalogAccessPolicyAuthority: {
+          localAgentAddress: MEMBER,
+          resolveRemoteAgentAddress: async () => null,
+        },
+      },
+    );
+    (edge as any).defaultAgentAddress = MEMBER;
+    vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
+    vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
+    vi.spyOn(edge, 'getMemberRecoveryGate').mockResolvedValue([AUTHOR, MEMBER]);
+    vi.spyOn(edge, 'readRfc64PrivateRosterVersionV1').mockResolvedValue('1788482000000');
+    vi.spyOn(edge, 'requestRfc64CatalogHeadReplaysFromConnectedPeersV1')
+      .mockResolvedValue(Object.freeze({ requested: 0, failed: 0 }));
+    (edge as any).chain.getContextGraphAuthoritySnapshot = vi.fn().mockResolvedValue({
+      chainId: '20430',
+      governanceContract: '0x3333333333333333333333333333333333333333',
+      contextGraphId: '9',
+      owner: AUTHOR,
+      active: true,
+      accessPolicy: 1,
+      publishPolicy: 0,
+      publishAuthority: AUTHOR,
+      publishAuthorityAccountId: '0',
+      participantAgents: [AUTHOR],
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase(),
+      ownershipEra: '0',
+      policyVersion: '0',
+      rosterVersion: '0',
+      sourceBlockNumber: '42',
+      sourceBlockHash: `0x${'44'.repeat(32)}`,
+    });
+
+    const authority = await edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
+
+    expect(authority?.roster).toMatchObject({
+      version: '1788482000000',
+      members: [
+        { agentAddress: MEMBER, roles: ['holder', 'provider'] },
+        { agentAddress: AUTHOR, roles: ['holder', 'provider'] },
+      ].sort((left, right) => left.agentAddress.localeCompare(right.agentAddress)),
+    });
+    expect(edge.resolveRfc64PrivateReadRosterV1(contextGraphId))
+      .toEqual([MEMBER, AUTHOR].sort());
+  });
+
+  it('rotates the private authority generation on ordinary invite and removal', async () => {
+    const contextGraphId = `${AUTHOR}/private-roster-rotation` as ContextGraphIdV1;
+    const curator = await startAgent(
+      'private-roster-rotation',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        rfc64CatalogAccessPolicyAuthority: {
+          localAgentAddress: AUTHOR,
+          resolveRemoteAgentAddress: async () => null,
+        },
+      },
+    );
+    (curator as any).defaultAgentAddress = AUTHOR;
+    await curator.createContextGraph({
+      id: contextGraphId,
+      name: 'Private roster rotation',
+      accessPolicy: 1,
+      callerAgentAddress: AUTHOR,
+    });
+    expect(await curator.readRfc64PrivateRosterVersionV1(contextGraphId)).toBe('0');
+
+    await curator.inviteAgentToContextGraph(contextGraphId, MEMBER, AUTHOR);
+    const admittedVersion = BigInt(
+      await curator.readRfc64PrivateRosterVersionV1(contextGraphId),
+    );
+    expect(admittedVersion).toBeGreaterThan(0n);
+    expect(curator.resolveRfc64PrivateReadRosterV1(contextGraphId))
+      .toEqual([MEMBER, AUTHOR].sort());
+
+    await curator.removeAgentFromContextGraph(contextGraphId, MEMBER, AUTHOR);
+    expect(BigInt(await curator.readRfc64PrivateRosterVersionV1(contextGraphId)))
+      .toBeGreaterThan(admittedVersion);
+    expect(curator.resolveRfc64PrivateReadRosterV1(contextGraphId)).toEqual([AUTHOR]);
+  });
+
   it('reconciles private responsibility when refreshed ACL facts change without a subscription transition', async () => {
     const contextGraphId = `${AUTHOR}/private-acl-refresh`;
     const edge = await startAgent('private-acl-refresh', undefined);
     vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('private');
-    const canRead = vi.spyOn(edge, 'canReadContextGraph').mockResolvedValue(false);
+    const hasMembership = vi.spyOn(edge, 'hasRfc64VerifiedPrivateMembershipV1')
+      .mockResolvedValue(false);
     vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
     vi.spyOn(edge.store, 'query').mockResolvedValue({
       type: 'bindings',
@@ -266,7 +397,7 @@ describe('RFC-64 rollout authority integration', () => {
     // The curator projection now admits this local agent, but every canonical
     // subscription field is unchanged. Metadata completion itself must own the
     // responsibility refresh.
-    canRead.mockResolvedValue(true);
+    hasMembership.mockResolvedValue(true);
     await (edge as any).refreshMetaSyncedFlags([contextGraphId]);
 
     expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([
