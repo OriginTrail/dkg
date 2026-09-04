@@ -499,19 +499,33 @@ async function atomicallyReplaceCuratorMetaSnapshot(
   // the root subject is the activation boundary, and stale delegations are
   // removed only after their allowedAgent row is gone.
   if (typeof agent.store.replaceSubject === 'function') {
-    const existingControl = await agent.store.query(`
-      SELECT ?s ?p ?o WHERE {
-        GRAPH <${assertSafeIri(metaGraph)}> {
-          ?s ?p ?o .
-          FILTER (
-            (?s = <${assertSafeIri(contextGraphUri)}> &&
-             ?p = <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}>) ||
-            STRSTARTS(STR(?s), ${JSON.stringify(delegationPrefix)})
-          )
+    const [localRevocations, existingDelegationSubjects] = await Promise.all([
+      agent.store.query(`
+        SELECT ?o WHERE {
+          GRAPH <${assertSafeIri(metaGraph)}> {
+            <${assertSafeIri(contextGraphUri)}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?o .
+          }
         }
-      }
-    `, { source: 'agent.metaRefresh.readLocalControl' });
-    if (existingControl.type !== 'bindings') {
+      `, { source: 'agent.metaRefresh.readLocalRevocations' }),
+      agent.store.query(`
+        SELECT DISTINCT ?s WHERE {
+          GRAPH <${assertSafeIri(metaGraph)}> {
+            ?s (
+              <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}> |
+              <${DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT}> |
+              <${DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT}> |
+              <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER}> |
+              <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY}>
+            ) ?delegationValue .
+          }
+          FILTER(STRSTARTS(STR(?s), ${JSON.stringify(delegationPrefix)}))
+        }
+      `, { source: 'agent.metaRefresh.readLocalDelegations' }),
+    ]);
+    if (
+      localRevocations.type !== 'bindings'
+      || existingDelegationSubjects.type !== 'bindings'
+    ) {
       throw new Error('Curator metadata replacement requires control-plane bindings');
     }
 
@@ -522,12 +536,8 @@ async function atomicallyReplaceCuratorMetaSnapshot(
       desiredBySubject.set(quad.subject, rows);
     }
     const rootRows = desiredBySubject.get(contextGraphUri) ?? [];
-    const localRevocationRows: Quad[] = existingControl.bindings
-      .filter((row) => (
-        row['s'] === contextGraphUri
-        && row['p'] === DKG_ONTOLOGY.DKG_REVOKED_AGENT
-        && typeof row['o'] === 'string'
-      ))
+    const localRevocationRows: Quad[] = localRevocations.bindings
+      .filter((row) => typeof row['o'] === 'string')
       .map((row) => ({
         subject: contextGraphUri,
         predicate: DKG_ONTOLOGY.DKG_REVOKED_AGENT,
@@ -545,7 +555,7 @@ async function atomicallyReplaceCuratorMetaSnapshot(
       .filter(([subject]) => subject.startsWith(delegationPrefix))
       .sort(([left], [right]) => left.localeCompare(right));
     const existingDelegations = new Set(
-      existingControl.bindings
+      existingDelegationSubjects.bindings
         .map((row) => row['s'])
         .filter((subject): subject is string => (
           typeof subject === 'string' && subject.startsWith(delegationPrefix)
