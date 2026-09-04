@@ -52,6 +52,30 @@ describe('EVMChainAdapter integration', () => {
     expect(bn).toBeGreaterThanOrEqual(0);
   }, 15_000);
 
+  it('removes one participant agent from a live private context graph', async () => {
+    const adapter = new EVMChainAdapter(
+      makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER),
+    );
+    const retained = new Wallet(HARDHAT_KEYS.EXTRA1).address;
+    const removed = new Wallet(HARDHAT_KEYS.EXTRA2).address;
+    const created = await adapter.createOnChainContextGraph({
+      accessPolicy: 1,
+      publishPolicy: 0,
+      participantAgents: [retained, removed],
+    });
+
+    expect(await adapter.getContextGraphParticipantAgents(created.contextGraphId))
+      .toEqual(expect.arrayContaining([retained, removed]));
+    const result = await adapter.removeContextGraphParticipantAgent(
+      created.contextGraphId,
+      removed,
+    );
+
+    expect(result.success).toBe(true);
+    expect(await adapter.getContextGraphParticipantAgents(created.contextGraphId))
+      .toEqual([retained]);
+  }, 60_000);
+
   it('verifyPublisherOwnsRange resolves KnowledgeAssetsStorage after init', async () => {
     const adapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER));
     const deployer = adapter.getSignerAddress();

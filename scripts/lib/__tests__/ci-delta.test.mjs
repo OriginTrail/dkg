@@ -636,6 +636,7 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.ok(workflow.includes('playwright test --shard=${{ matrix.shard }}/7'));
 
   for (const [packageName, invocation] of [
+    ['@origintrail-official/dkg-http-utils', '--lane http-utils'],
     ['@origintrail-official/dkg-rdf-utils', '--lane rdf-utils'],
     ['@origintrail-official/dkg-okf', '--filter @origintrail-official/dkg-okf'],
     ['@origintrail-official/dkg-demo', '--filter @origintrail-official/dkg-demo'],

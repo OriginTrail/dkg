@@ -1068,6 +1068,12 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
+          resolveContextGraphReadAuthority: async () => ({
+            outcome: 'allowed' as const,
+            source: 'legacy-local' as const,
+            reason: 'test-public',
+            metadataBootstrap: 'eligible' as const,
+          }),
           getContextGraphAllowedAgents: async () => [],
           getSubscribedContextGraphs: () => new Map(),
           subscribeToContextGraph: () => ({
@@ -1187,6 +1193,12 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
+          resolveContextGraphReadAuthority: async () => ({
+            outcome: 'allowed' as const,
+            source: 'legacy-local' as const,
+            reason: 'test-public',
+            metadataBootstrap: 'eligible' as const,
+          }),
           getContextGraphAllowedAgents: async () => [],
           getSubscribedContextGraphs: () => new Map(),
           subscribeToContextGraph: () => ({
@@ -1299,6 +1311,12 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
+          resolveContextGraphReadAuthority: async () => ({
+            outcome: 'allowed' as const,
+            source: 'legacy-local' as const,
+            reason: 'test-public',
+            metadataBootstrap: 'eligible' as const,
+          }),
           getContextGraphAllowedAgents: async () => [],
           getSubscribedContextGraphs: () => new Map(),
           subscribeToContextGraph: (_id: string, opts: { syncMode: string }) => {
@@ -2407,20 +2425,22 @@ describe('CLI-13 / CLI-14 — shutdown signal exit codes & timer cleanup', () =>
   }, 120_000);
 });
 
-// Issue #1596: POST /api/subscribe must not 403 a caller off the allowlist when
-// the CG's explicit accessPolicy is "public". On a public CG the allowlist gates
-// PUBLISHERS, not subscribers, so an allowlist entry must not turn a public CG
-// into invite-only-to-join. An explicit-private CG must still 403. The route now
-// defers to the resolver's `isPrivateContextGraph` (the #865 single source of
-// truth) instead of gating on "allowlist non-empty" alone.
-describe('#1596 — subscribe allowlist gate respects explicit public accessPolicy', () => {
+// Issue #1596 + RFC-64 release certification: POST /api/subscribe delegates to
+// the unified read-authority boundary. Public CGs remain subscribable, while a
+// private CG with no local `_meta` allowlist must still deny a non-member before
+// any durable subscription or catch-up job is created.
+describe('#1596 — subscribe gate uses fail-closed read authority', () => {
   const CALLER = '0x0000000000000000000000000000000000000001';
-  const OTHER = '0x00000000000000000000000000000000000000ff';
 
   async function subscribeWith(opts: {
-    isPrivate: boolean | 'throw';
-    allowlist: string[];
-  }): Promise<{ status: number; subscribeCalled: boolean }> {
+    authority: 'allowed' | 'denied' | 'unavailable' | 'throw';
+  }): Promise<{
+    status: number;
+    body: Record<string, unknown>;
+    retryAfter: string | null;
+    subscribeCalled: boolean;
+    catchupJobs: number;
+  }> {
     const contextGraphId = 'cg-1596-' + Math.random().toString(36).slice(2, 8);
     const catchupTracker = {
       jobs: new Map<string, any>(),
@@ -2451,10 +2471,27 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
-          getContextGraphAllowedAgents: async () => opts.allowlist,
-          isPrivateContextGraph: async () => {
-            if (opts.isPrivate === 'throw') throw new Error('policy read failed');
-            return opts.isPrivate;
+          resolveContextGraphReadAuthority: async (
+            _id: string,
+            readOpts: { callerAgentAddress?: string; allowSubscriptionFallback?: boolean },
+          ) => {
+            expect(readOpts).toEqual({
+              callerAgentAddress: CALLER,
+              allowSubscriptionFallback: false,
+            });
+            if (opts.authority === 'throw') throw new Error('authority read failed');
+            return {
+              outcome: opts.authority,
+              source: 'registered-chain' as const,
+              reason: opts.authority === 'allowed'
+                ? 'chain-public'
+                : opts.authority === 'denied'
+                  ? 'agent-not-in-chain-roster'
+                  : 'chain-access-policy-unavailable',
+              metadataBootstrap: opts.authority === 'denied'
+                ? 'forbidden' as const
+                : 'eligible' as const,
+            };
           },
           getDefaultAgentAddress: () => CALLER,
           getSubscribedContextGraphs: () => new Map(),
@@ -2520,7 +2557,13 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
           body: JSON.stringify({ contextGraphId, includeSharedMemory: false }),
         },
       );
-      return { status: response.status, subscribeCalled };
+      return {
+        status: response.status,
+        body: await response.json() as Record<string, unknown>,
+        retryAfter: response.headers.get('retry-after'),
+        subscribeCalled,
+        catchupJobs: catchupTracker.jobs.size,
+      };
     } finally {
       daemonState.catchupRunner = previousCatchupRunner;
       if (routeServer) {
@@ -2533,32 +2576,45 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
 
   it('does NOT 403 a non-allowlisted caller on an explicit-public CG', async () => {
     const { status, subscribeCalled } = await subscribeWith({
-      isPrivate: false, // accessPolicy="public"
-      allowlist: [OTHER], // caller is NOT in it
+      authority: 'allowed',
     });
     expect(status).toBe(200);
     expect(subscribeCalled).toBe(true);
   });
 
-  it('still 403s a non-allowlisted caller on an explicit-private CG', async () => {
-    const { status, subscribeCalled } = await subscribeWith({
-      isPrivate: true, // accessPolicy="private" / curated
-      allowlist: [OTHER],
+  it('403s a private non-member even when no local allowlist is available', async () => {
+    const { status, subscribeCalled, catchupJobs } = await subscribeWith({
+      authority: 'denied',
     });
     expect(status).toBe(403);
     expect(subscribeCalled).toBe(false);
+    expect(catchupJobs).toBe(0);
   });
 
-  it('keeps the allowlist gate CLOSED (403) when the privacy resolver read fails', async () => {
-    // Fix 1 fails closed: `isPrivateContextGraph(...).catch(() => true)`. A
-    // resolver error must keep the curated gate, never fall open to public —
-    // otherwise a future fail-open regression would silently pass the cases
-    // above while letting a non-allowlisted caller subscribe. (#1599 review.)
-    const { status, subscribeCalled } = await subscribeWith({
-      isPrivate: 'throw',
-      allowlist: [OTHER],
+  it('returns a retryable 503 when typed read authority is unavailable', async () => {
+    const result = await subscribeWith({
+      authority: 'unavailable',
     });
-    expect(status).toBe(403);
-    expect(subscribeCalled).toBe(false);
+    expect(result.status).toBe(503);
+    expect(result.body).toMatchObject({
+      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+      retryable: true,
+    });
+    expect(result.retryAfter).toBe('3');
+    expect(result.subscribeCalled).toBe(false);
+    expect(result.catchupJobs).toBe(0);
+  });
+
+  it('returns the same retryable 503 when authority resolution throws', async () => {
+    const result = await subscribeWith({
+      authority: 'throw',
+    });
+    expect(result.status).toBe(503);
+    expect(result.body).toMatchObject({
+      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+      retryable: true,
+    });
+    expect(result.subscribeCalled).toBe(false);
+    expect(result.catchupJobs).toBe(0);
   });
 });

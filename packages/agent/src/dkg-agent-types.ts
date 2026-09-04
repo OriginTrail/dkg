@@ -60,6 +60,7 @@ import type { JsonLdContent } from './dkg-agent-utils.js';
 import type { SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import type { KaNumberAllocator } from './allocator.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
+import type { ContextGraphDormancyProjection } from './context-graph-subscription-dormancy.js';
 import type {
   Rfc64CatalogActivationInputV1,
   Rfc64PublicCatalogActivationInputV1,
@@ -889,7 +890,7 @@ export interface VmReconcileRotationRecord {
   nextRetryAt: number;
 }
 
-export interface ContextGraphSubscriptionRehydrationStatus {
+export interface ContextGraphSubscriptionRehydrationStatus extends ContextGraphDormancyProjection {
   /** Whether persisted subscription activation was enabled for this boot. */
   rehydrationEnabled: boolean;
   /** Non-system persisted rows governed by the rehydration cap. */
@@ -902,12 +903,21 @@ export interface ContextGraphSubscriptionRehydrationStatus {
   dormant: number;
   activationCap: number;
   capDisabled: boolean;
-  dormantIds: string[];
   /** Startup rehydration completion timestamp; remains stable after boot. */
   completedAt: number;
   /** Most recent timestamp for post-boot diagnostic count/id updates. */
   updatedAt: number;
 }
+
+/**
+ * Mutable process-local rehydration counters. Dormancy itself has one source
+ * of truth (`contextGraphSubscriptionDormancyById`) and is projected only when
+ * diagnostics cross the public API boundary.
+ */
+export type ContextGraphSubscriptionRehydrationInternalStatus = Omit<
+  ContextGraphSubscriptionRehydrationStatus,
+  keyof ContextGraphDormancyProjection | 'dormant'
+>;
 
 export interface ContextGraphWritePreflightProbe {
   /**

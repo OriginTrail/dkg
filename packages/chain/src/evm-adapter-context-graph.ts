@@ -560,6 +560,48 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     };
   }
 
+  async addContextGraphParticipantAgent(contextGraphId: bigint, agent: string): Promise<TxResult> {
+    await this.init();
+    const contextGraphs = this.contracts.contextGraphs;
+    if (!contextGraphs) {
+      throw new Error('ContextGraphs contract not deployed.');
+    }
+    const receipt = await this.sendContractTransaction(
+      contextGraphs,
+      'addParticipantAgent',
+      [contextGraphId, ethers.getAddress(agent)],
+      this.signer,
+      'add context graph participant agent',
+    );
+    return {
+      hash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      txIndex: receipt.index,
+      success: receipt.status === 1,
+    };
+  }
+
+  async removeContextGraphParticipantAgent(contextGraphId: bigint, agent: string): Promise<TxResult> {
+    await this.init();
+    const contextGraphs = this.contracts.contextGraphs;
+    if (!contextGraphs) {
+      throw new Error('ContextGraphs contract not deployed.');
+    }
+    const receipt = await this.sendContractTransaction(
+      contextGraphs,
+      'removeParticipantAgent',
+      [contextGraphId, ethers.getAddress(agent)],
+      this.signer,
+      'remove context graph participant agent',
+    );
+    return {
+      hash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      txIndex: receipt.index,
+      success: receipt.status === 1,
+    };
+  }
+
   async verify(params: VerifyParams): Promise<TxResult> {
     await this.init();
     if (!this.contracts.contextGraphs) {

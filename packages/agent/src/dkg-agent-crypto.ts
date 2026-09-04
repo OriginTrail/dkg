@@ -103,6 +103,7 @@ import {
   ACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   resolveWorkspaceAgentRecipients,
+  resolveWorkspaceAgentRecipientKeys,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
   canonicalPublishPayload,
   resolveLiftWorkspaceSlice,
@@ -310,6 +311,10 @@ import {
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
+import {
+  isBoundedOperationTimeoutError,
+  runBoundedOperation,
+} from './bounded-operation.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
   ContextGraphNotFoundError,
@@ -460,7 +465,11 @@ async function evaluateContextGraphSlotBinding(
   allowNumericSelfAddress: boolean,
   isWireIdKeyedSubscription: (localId: string) => boolean,
   warn: (ctx: OperationContext, message: string) => void,
-  raceRead: <T>(read: Promise<T>) => Promise<T | typeof TIMEOUT_SENTINEL>,
+  raceRead: <T>(
+    start: () => Promise<T>,
+    label: string,
+    readSignal?: AbortSignal,
+  ) => Promise<T | typeof TIMEOUT_SENTINEL>,
 ): Promise<ContextGraphSlotBindingOutcome> {
   let numericId: bigint;
   try {
@@ -483,10 +492,13 @@ async function evaluateContextGraphSlotBinding(
 
   let onChainHash: string | null | typeof TIMEOUT_SENTINEL;
   try {
-    const read = signal
-      ? getNameHash.call(chain, numericId, { signal })
-      : getNameHash.call(chain, numericId);
-    onChainHash = await raceRead(read);
+    onChainHash = await raceRead(
+      () => signal
+        ? getNameHash.call(chain, numericId, { signal })
+        : getNameHash.call(chain, numericId),
+      `getContextGraphNameHash(${onChainId})`,
+      signal,
+    );
   } catch (error) {
     warn(
       opCtx ?? createOperationContext('share'),
@@ -591,6 +603,18 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<string[] | null> {
+    // A registered private graph's live chain roster outranks every local
+    // projection. Returning [] on chain authority failure preserves the fact
+    // that this is a gated graph while denying sender-key and sync admissions.
+    // Registered-public graphs continue below to their distinct local
+    // publisher/signing gate, but never to stale RFC-64 private authority.
+    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(
+      contextGraphId,
+      { signal: options.signal },
+    );
+    if (registeredAuthority.kind === 'private') return registeredAuthority.participantAgents;
+    if (registeredAuthority.kind === 'unavailable') return [];
+
     // A selected private RFC-64 graph may be joining a completely empty
     // store. In that state the accepted, authority-checked roster is already
     // available to the catalog service, while the legacy `_meta` projection
@@ -602,7 +626,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // `null` means RFC-64 owns the graph but current roster authority is not
     // available. Return an empty gate—not legacy `null`—so every caller keeps
     // treating the graph as gated and fails closed until authority recovers.
-    const rfc64Roster = this.resolveRfc64PrivateReadRosterV1(contextGraphId);
+    const rfc64Roster = registeredAuthority.kind === 'unregistered'
+      ? this.resolveRfc64PrivateReadRosterV1(contextGraphId)
+      : undefined;
     if (rfc64Roster !== undefined) {
       if (rfc64Roster === null) return [];
       const seen = new Set<string>();
@@ -655,20 +681,28 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * DELIBERATELY OMITTED — that cache is poisonable, and folding it in is
    * exactly what `member-recovery-auth.ts` forbids.
    *
-   * Unlike {@link getContextGraphAgentGateAddresses} (which feeds the normal
-   * fail-open sync path and DOES fold in the subscription cache), this read is
-   * used ONLY for `request.recovery` and is passed straight to
+   * Unlike {@link getContextGraphAgentGateAddresses} (which also feeds normal
+   * sync admission and may fold in the subscription cache only for graphs that
+   * are not registered on-chain), this read is used ONLY for `request.recovery`
+   * and is passed straight to
    * `isMemberRecoveryAuthorized`, which hard-denies on null/empty. Returns
    * `null` when the CG has no `_meta` agent gate at all (⇒ hard-deny).
    */
   async getMemberRecoveryGate(
     this: DKGAgent,
     contextGraphId: string,
-    _options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal } = {},
   ): Promise<string[] | null> {
+    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(
+      contextGraphId,
+      { signal: options.signal },
+    );
+    if (registeredAuthority.kind === 'private') return registeredAuthority.participantAgents;
+    if (registeredAuthority.kind !== 'unregistered') return null;
+
     const seen = new Set<string>();
     const agents: string[] = [];
-    const meta = await this.getCgMeta(contextGraphId);
+    const meta = await this.getCgMeta(contextGraphId, { signal: options.signal });
     if (meta.allowedAgents.length === 0 && meta.participantAgents.length === 0) {
       return null; // no _meta agent gate ⇒ hard-deny at the recovery gate
     }
@@ -799,16 +833,21 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * blocking forever. The timer is `unref`'d so a dead RPC never keeps the
    * process alive.
    */
-  private raceChainPolicyRead<T>(p: Promise<T>): Promise<T | typeof TIMEOUT_SENTINEL> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<typeof TIMEOUT_SENTINEL>((resolve) => {
-      timer = setTimeout(() => resolve(TIMEOUT_SENTINEL), CHAIN_POLICY_READ_TIMEOUT_MS);
-      timer.unref?.();
-    });
-    return Promise.race([
-      p.finally(() => { if (timer) clearTimeout(timer); }),
-      timeout,
-    ]);
+  private async raceChainPolicyRead<T>(
+    start: () => Promise<T>,
+    label: string,
+    signal?: AbortSignal,
+  ): Promise<T | typeof TIMEOUT_SENTINEL> {
+    try {
+      return await runBoundedOperation(start, {
+        label,
+        timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+        signal,
+      });
+    } catch (error) {
+      if (isBoundedOperationTimeoutError(error)) return TIMEOUT_SENTINEL;
+      throw error;
+    }
   }
 
   /**
@@ -866,9 +905,13 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       }
       return null;
     }
-    const live = await this.raceChainPolicyRead(options.signal
-      ? this.chain.isContextGraphActiveOnChain(numericId, { signal: options.signal })
-      : this.chain.isContextGraphActiveOnChain(numericId));
+    const live = await this.raceChainPolicyRead(
+      () => options.signal
+        ? this.chain.isContextGraphActiveOnChain!(numericId, { signal: options.signal })
+        : this.chain.isContextGraphActiveOnChain!(numericId),
+      `isContextGraphActiveOnChain(${onChainId})`,
+      options.signal,
+    );
     if (live === TIMEOUT_SENTINEL) {
       this.log.warn(
         opCtx ?? createOperationContext('share'),
@@ -890,9 +933,13 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // value is strictly an improvement for the other, decrypt-gated readers).
     const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
     if (typeof getAccessPolicy !== 'function') return null;
-    const policy = await this.raceChainPolicyRead(options.signal
-      ? getAccessPolicy.call(this.chain, numericId, { signal: options.signal })
-      : getAccessPolicy.call(this.chain, numericId));
+    const policy = await this.raceChainPolicyRead(
+      () => options.signal
+        ? getAccessPolicy.call(this.chain, numericId, { signal: options.signal })
+        : getAccessPolicy.call(this.chain, numericId),
+      `getContextGraphAccessPolicy(${onChainId})`,
+      options.signal,
+    );
     if (policy === TIMEOUT_SENTINEL) {
       this.log.warn(
         opCtx ?? createOperationContext('share'),
@@ -1178,7 +1225,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         || bindingMode !== 'chain-attested-repair',
       (localId) => this.isWireIdKeyedSubscription(localId),
       (ctx, message) => this.log.warn(ctx, message),
-      (read) => this.raceChainPolicyRead(read),
+      (start, label, signal) => this.raceChainPolicyRead(start, label, signal),
     );
     return mapContextGraphSlotBindingOutcome(outcome, bindingMode);
   }
@@ -1232,30 +1279,86 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * ("not DKG-agent gated"), which surfaced as an HTTP 500 on WM→SWM
    * promote.
    *
-   * Gate BEFORE delegating to the store resolver: a public CG takes the
-   * plaintext path without resolving recipient keys at all. This also
+   * Resolve the canonical registered authority BEFORE delegating to the store
+   * resolver: a public CG takes the plaintext path without resolving recipient
+   * keys at all. This also
    * avoids the resolver's "Missing public encryption key" throw for an
    * allowlisted agent whose key isn't locally available — irrelevant for
-   * a public CG that never encrypts. Curated / invite-only / unknown CGs
-   * fall through to the normal (encrypted) recipient resolution.
+   * a public CG that never encrypts. Private graphs resolve recipients from
+   * the live roster; unavailable registered authority fails closed.
    */
   async resolveWorkspaceRecipientsGated(this: DKGAgent,
     input: WorkspaceAgentRecipientResolverInput,
   ): Promise<WorkspaceAgentRecipientResolution> {
-    if (await this.isContextGraphPublicOnChain(input.contextGraphId, createOperationContext('share'))) {
+    return this.resolveWorkspaceAgentRecipientsForCurrentAuthority(input);
+  }
+
+  /**
+   * Resolve encryption recipients from live registered-chain authority. The
+   * local store remains the source of authenticated encryption keys and peer
+   * routing, but only the chain roster selects which agents are resolved. When
+   * the graph also has a peer allowlist, recipient routing must satisfy that
+   * second, conjunctive authority gate. Every chain-authorized agent must have
+   * at least one usable recipient key on an allowed peer before publishing can
+   * proceed, otherwise either an unauthorized peer receives the sender key or
+   * an authorized member cannot read the resulting write.
+   */
+  async resolveWorkspaceAgentRecipientsForCurrentAuthority(this: DKGAgent,
+    input: WorkspaceAgentRecipientResolverInput,
+  ): Promise<WorkspaceAgentRecipientResolution> {
+    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(input.contextGraphId);
+    if (registeredAuthority.kind === 'unregistered') {
+      return resolveWorkspaceAgentRecipients(this.store, input);
+    }
+    if (registeredAuthority.kind === 'public') {
       return { requiresEncryption: false, recipients: [] };
     }
-    // #884 review (🔴): do NOT add a local-metadata fallback here (e.g.
-    // honoring a local `accessPolicy="public"` triple). A local policy literal
-    // is intent, not authoritative on-chain state — a pre-registration graph
-    // or a stale local graph after a devnet reset would then bypass SWM
-    // encryption purely from local metadata and leak allowlisted traffic in
-    // plaintext. When the on-chain probe above cannot establish that the CG is
-    // a LIVE public slot (unknown / not live / RPC flake), fail closed: keep
-    // the encrypted path. A genuinely-public CG resolves correctly through
-    // isContextGraphPublicOnChain's live proof; a transient RPC flake yields a
-    // transient encrypted-path retry, never a plaintext leak.
-    return resolveWorkspaceAgentRecipients(this.store, input);
+    if (registeredAuthority.kind === 'unavailable') {
+      throw new Error(
+        `Registered context graph "${input.contextGraphId}" authority is unavailable (${registeredAuthority.reason})`,
+      );
+    }
+    if (registeredAuthority.participantAgents.length === 0) {
+      throw new Error(
+        `Registered context graph "${input.contextGraphId}" requires encrypted SWM gossip but its authoritative chain roster is empty or unavailable`,
+      );
+    }
+
+    const allowedPeers = await this.getContextGraphAllowedPeers(input.contextGraphId);
+    const allowedPeerSet = allowedPeers === null ? null : new Set(allowedPeers);
+
+    // Resolve only the live chain-authorized addresses. Filtering a completed
+    // local resolution afterward is too late: stale removed members can have
+    // malformed/missing key metadata that makes the local resolver throw
+    // before the chain intersection is reached, blocking every post-revoke
+    // write until the local cleanup retry succeeds.
+    const recipients: WorkspaceAgentRecipient[] = [];
+    for (const agentAddress of registeredAuthority.participantAgents) {
+      const agentRecipients = await resolveWorkspaceAgentRecipientKeys(this.store, agentAddress);
+      const authorizedRecipients = allowedPeerSet === null
+        ? agentRecipients
+        : agentRecipients.filter((recipient) => (
+          recipient.peerId !== undefined && allowedPeerSet.has(recipient.peerId)
+        ));
+      if (authorizedRecipients.length === 0) {
+        throw new Error(
+          `Registered context graph "${input.contextGraphId}" requires encrypted SWM gossip but `
+          + `chain-authorized DKG agent ${ethers.getAddress(agentAddress)} has no recipient key `
+          + 'advertised by a peer in the context graph allowlist',
+        );
+      }
+      recipients.push(...authorizedRecipients);
+    }
+    const [firstRecipient, ...remainingRecipients] = recipients;
+    if (!firstRecipient) {
+      throw new Error(
+        `Registered context graph "${input.contextGraphId}" requires encrypted SWM gossip but has no chain-authorized DKG agent recipients`,
+      );
+    }
+    return {
+      requiresEncryption: true,
+      recipients: [firstRecipient, ...remainingRecipients],
+    };
   }
 
   async encryptWorkspacePayloadWithSenderKey(this: DKGAgent,
@@ -2196,6 +2299,19 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       throw new SwmSenderKeySetupRejectionError(
         'recipient-not-allowed',
         `Recipient agent ${recipientAgentAddress} is not allowed for context graph "${pkg.contextGraphId}"`,
+      );
+    }
+    const allowedPeers = await this.getContextGraphAllowedPeers(pkg.contextGraphId);
+    if (allowedPeers !== null && !allowedPeers.includes(fromPeerId)) {
+      throw new SwmSenderKeySetupRejectionError(
+        'sender-not-allowed',
+        `Sender peer ${fromPeerId} is not allowed for context graph "${pkg.contextGraphId}"`,
+      );
+    }
+    if (allowedPeers !== null && !allowedPeers.includes(this.peerId)) {
+      throw new SwmSenderKeySetupRejectionError(
+        'recipient-not-allowed',
+        `Recipient peer ${this.peerId} is not allowed for context graph "${pkg.contextGraphId}"`,
       );
     }
     if (!this.hasLocalAgent(recipientAgentAddress)) {

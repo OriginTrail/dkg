@@ -30,6 +30,11 @@
       "import": "./dist/query-result.js",
       "default": "./dist/query-result.js"
     },
+    "./sparql-safe": {
+      "types": "./dist/sparql-safe.d.ts",
+      "import": "./dist/sparql-safe.js",
+      "default": "./dist/sparql-safe.js"
+    },
     "./closed-data-snapshot": {
       "types": "./dist/sync-wire-objects.d.ts",
       "import": "./dist/sync-wire-objects.js",

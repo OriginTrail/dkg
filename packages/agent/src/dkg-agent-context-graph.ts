@@ -377,6 +377,11 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { ContextGraphJoinAdmissionLockToken } from './context-graph-join-admission-lock.js';
 import type { PreparedContextGraphMembershipMutation } from './context-graph-membership-mutation.js';
+import {
+  commitRegisteredParticipantMutation,
+  prepareRegisteredParticipantMutation,
+  type PreparedRegisteredParticipantMutation,
+} from './registered-context-graph-participant-mutation.js';
 
 /* eslint-disable @typescript-eslint/no-this-alias */
 
@@ -390,6 +395,8 @@ interface ContextGraphAgentInviteMutationPlan {
   delegationUri?: string;
   quadsToInsert: Quad[];
   curatorAgentAddress?: string;
+  registeredParticipantMutation: PreparedRegisteredParticipantMutation;
+  revokedAgentAddressesToClear: string[];
 }
 
 export type PreparedContextGraphAgentInviteMutation =
@@ -1706,6 +1713,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     if (!ethAddrRe.test(agentAddress)) {
       throw new Error(`Invalid Ethereum address: "${agentAddress}".`);
     }
+    const normalizedAgentAddress = ethers.getAddress(agentAddress);
 
     const exists = await this.contextGraphExists(contextGraphId);
     if (!exists) {
@@ -1723,8 +1731,10 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     const existingParticipants = await this.getPrivateContextGraphParticipants(contextGraphId);
     const alreadyAllowed = existingParticipants?.some(
-      (a) => a.toLowerCase() === agentAddress.toLowerCase(),
+      (a) => a.toLowerCase() === normalizedAgentAddress.toLowerCase(),
     ) ?? false;
+    const revokedAgentAddressesToClear = (await this.getCgMeta(contextGraphId)).revokedAgents
+      .filter((address) => address.toLowerCase() === normalizedAgentAddress.toLowerCase());
 
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
@@ -1750,7 +1760,7 @@ export class ContextGraphMethods extends DKGAgentBase {
       quadsToInsert.push({
         subject: contextGraphUri,
         predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
-        object: `"${agentAddress}"`,
+        object: `"${normalizedAgentAddress}"`,
         graph: cgMetaGraph,
       });
     }
@@ -1759,9 +1769,9 @@ export class ContextGraphMethods extends DKGAgentBase {
     if (delegation) {
       const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
       const DKG = 'https://dkg.network/ontology#';
-      delegationUri = `did:dkg:agent-delegation:${contextGraphId}:${agentAddress.toLowerCase()}`;
+      delegationUri = `did:dkg:agent-delegation:${contextGraphId}:${normalizedAgentAddress.toLowerCase()}`;
       quadsToInsert.push({ subject: delegationUri, predicate: RDF_TYPE, object: `${DKG}AgentDelegation`, graph: cgMetaGraph });
-      quadsToInsert.push({ subject: delegationUri, predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT, object: `"${agentAddress.toLowerCase()}"`, graph: cgMetaGraph });
+      quadsToInsert.push({ subject: delegationUri, predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT, object: `"${normalizedAgentAddress.toLowerCase()}"`, graph: cgMetaGraph });
       quadsToInsert.push({ subject: delegationUri, predicate: DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT, object: `"${delegation.issuedAtMs}"`, graph: cgMetaGraph });
       if (delegation.expiresAtMs && delegation.expiresAtMs > 0) {
         quadsToInsert.push({ subject: delegationUri, predicate: DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT, object: `"${delegation.expiresAtMs}"`, graph: cgMetaGraph });
@@ -1774,19 +1784,41 @@ export class ContextGraphMethods extends DKGAgentBase {
       }
     }
 
+    // A registered graph's chain roster is the authoritative read roster.
+    // Resolve and compare it during prepare so commit can cross the chain
+    // mutation boundary first, before changing local metadata. Retrying after
+    // a chain-success/local-store-failure is safe: the fresh roster makes the
+    // already-applied chain additions no-ops and completes the local half.
+    // Participant agents govern READ access only for private/curated CGs. A
+    // public CG may still have a distinct local publisher gate.
+    const candidateChainAgents = [curatorAgentAddress, normalizedAgentAddress]
+      .filter((address): address is string => address !== undefined)
+      .map((address) => ethers.getAddress(address));
+    const registeredParticipantMutation = await prepareRegisteredParticipantMutation({
+      operation: 'add',
+      contextGraphId,
+      agentAddresses: candidateChainAgents,
+      chain: this.chain,
+      resolveAuthority: () => this.resolveRegisteredContextGraphAuthority(contextGraphId),
+    });
+
     return this.contextGraphMembershipMutations.prepare(
       admissionLockToken,
       contextGraphId,
       {
         contextGraphId,
-        agentAddress,
+        agentAddress: normalizedAgentAddress,
         delegation,
         alreadyAllowed,
-        noOp: alreadyAllowed && !delegation,
+        noOp: alreadyAllowed
+          && !delegation
+          && registeredParticipantMutation.agentAddresses.length === 0,
         cgMetaGraph,
         delegationUri,
         quadsToInsert,
         curatorAgentAddress,
+        registeredParticipantMutation,
+        revokedAgentAddressesToClear,
       },
     );
   }
@@ -1815,6 +1847,8 @@ export class ContextGraphMethods extends DKGAgentBase {
       delegationUri,
       quadsToInsert,
       curatorAgentAddress,
+      registeredParticipantMutation,
+      revokedAgentAddressesToClear,
     } = plan;
     const ctx = createOperationContext('system');
 
@@ -1833,13 +1867,41 @@ export class ContextGraphMethods extends DKGAgentBase {
       return;
     }
 
+    // Chain roster first: it is the live read authority for registered CGs.
+    // A failed transaction leaves local metadata unchanged. If a later local
+    // write fails, retry observes the already-updated roster and completes
+    // locally without sending duplicate transactions.
+    await commitRegisteredParticipantMutation({
+      prepared: registeredParticipantMutation,
+      invalidateRoster: (onChainId) => {
+        this.onChainParticipantAgentsCache.delete(onChainId.toString());
+      },
+    });
+
     // A synchronous admission-specific guard can run after prepare returns
-    // and immediately before this call. The first awaited operation here is
-    // therefore also the first persistent membership mutation.
+    // and immediately before this call. For registered graphs the first
+    // persistent mutation is the chain roster update above; local metadata is
+    // committed only after that authority update succeeds.
     if (delegationUri) {
       await deleteByPatternWithoutCount(this.store, { graph: cgMetaGraph, subject: delegationUri });
     }
-    await this.store.insert(quadsToInsert);
+    if (quadsToInsert.length > 0) {
+      await this.store.insert(quadsToInsert);
+    }
+    // Re-invitation supersedes the local revocation tombstone. Clear it only
+    // after both the authoritative chain addition and the replacement local
+    // allowlist have succeeded. If either earlier step fails, the tombstone
+    // continues to deny access until a retry completes the mutation.
+    if (!alreadyAllowed) {
+      for (const revokedAddress of revokedAgentAddressesToClear) {
+        await deleteByPatternWithoutCount(this.store, {
+          graph: cgMetaGraph,
+          subject: contextGraphDataGraphUri(contextGraphId),
+          predicate: DKG_ONTOLOGY.DKG_REVOKED_AGENT,
+          object: `"${revokedAddress}"`,
+        });
+      }
+    }
     this.invalidateListContextGraphsCache();
 
     this.contextGraphMetaProjection.markDirtyFromQuads(quadsToInsert);
@@ -1934,6 +1996,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     if (!ethAddrRe.test(agentAddress)) {
       throw new Error(`Invalid Ethereum address: "${agentAddress}".`);
     }
+    const normalizedAgentAddress = ethers.getAddress(agentAddress);
 
     const exists = await this.contextGraphExists(contextGraphId);
     if (!exists) {
@@ -1951,38 +2014,57 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+    const storedAllowedAgentAddresses = (await this.getCgMeta(contextGraphId)).allowedAgents
+      .filter((address) => address.toLowerCase() === normalizedAgentAddress.toLowerCase());
 
-    await deleteByPatternWithoutCount(this.store, {
+    // Revoke in the authoritative chain roster before deleting or tombstoning
+    // local metadata. A chain failure therefore cannot create a misleading
+    // local success. The fresh roster check makes retries idempotent after a
+    // chain-success/local-store-failure split.
+    const registeredParticipantMutation = await prepareRegisteredParticipantMutation({
+      operation: 'remove',
+      contextGraphId,
+      agentAddresses: [normalizedAgentAddress],
+      chain: this.chain,
+      resolveAuthority: () => this.resolveRegisteredContextGraphAuthority(contextGraphId),
+    });
+    await commitRegisteredParticipantMutation({
+      prepared: registeredParticipantMutation,
+      invalidateRoster: (onChainId) => {
+        this.onChainParticipantAgentsCache.delete(onChainId.toString());
+      },
+    });
+
+    // Persist a LOCAL tombstone before deleting any positive local projection
+    // so the recipient resolver excludes this agent from future sender-key
+    // wraps even if peer sync later replicates the old allowlist. After the
+    // chain mutation above, every remaining partial-failure state is therefore
+    // fail-closed—even for an unregistered graph.
+    await this.store.insert([{
       graph: cgMetaGraph,
       subject: contextGraphUri,
-      predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
-      object: `"${agentAddress}"`,
-    });
+      predicate: DKG_ONTOLOGY.DKG_REVOKED_AGENT,
+      object: `"${normalizedAgentAddress}"`,
+    }]);
+    for (const storedAddress of storedAllowedAgentAddresses) {
+      await deleteByPatternWithoutCount(this.store, {
+        graph: cgMetaGraph,
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+        object: `"${storedAddress}"`,
+      });
+    }
     // Also drop any agent-delegation for this agent, otherwise their
     // node retains sync access via the delegation gate (peer-id /
     // op-key allowlist) even after the agent is removed from the
     // primary allowlist. See `inviteAgentToContextGraph` for the
     // matching write side.
-    const delegationUri = `did:dkg:agent-delegation:${contextGraphId}:${agentAddress.toLowerCase()}`;
+    const delegationUri = `did:dkg:agent-delegation:${contextGraphId}:${normalizedAgentAddress.toLowerCase()}`;
     await deleteByPatternWithoutCount(this.store, { graph: cgMetaGraph, subject: delegationUri });
-    // Persist a LOCAL tombstone so the recipient resolver excludes this
-    // agent from future sender-key wraps even when peer-sync has
-    // replicated the original `dkg:allowedAgent` triple onto this store
-    // (happens whenever multiple peers pre-create the CG with the same
-    // initial allowlist — see C1 devnet harness). Without the tombstone
-    // the delete above is racy: a fresh sync round can re-insert the
-    // revoked agent before the curator's next write resolves recipients,
-    // and the next sender-key epoch ends up wrapped for them too — a
-    // silent post-revoke read by a kicked member.
-    await this.store.insert([{
-      graph: cgMetaGraph,
-      subject: contextGraphUri,
-      predicate: DKG_ONTOLOGY.DKG_REVOKED_AGENT,
-      object: `"${agentAddress}"`,
-    }]);
     this.invalidateListContextGraphsCache();
     this.contextGraphMetaProjection.markDirty(contextGraphId);
-    this.deleteContextGraphMember(contextGraphId, 'agent', agentAddress);
+    this.deleteContextGraphMember(contextGraphId, 'agent', normalizedAgentAddress);
+    // Reconciled after the projection is invalidated at the end of removal.
     // Drop any cached sender-key send state for this CG so the next
     // write re-resolves recipients (now excluding the revoked agent
     // via the tombstone) and mints a fresh epoch. Without this the
@@ -2018,7 +2100,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     this.contextGraphMetaProjection.markDirty(contextGraphId);
     this.queueSharedMemoryGossipSubscription(contextGraphId);
 
-    this.log.info(ctx, `Removed agent ${agentAddress} from context graph "${contextGraphId}" (tombstoned)`);
+    this.log.info(ctx, `Removed agent ${normalizedAgentAddress} from context graph "${contextGraphId}" (tombstoned)`);
   }
 
   /**

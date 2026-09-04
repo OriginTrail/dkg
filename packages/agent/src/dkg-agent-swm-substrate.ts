@@ -101,7 +101,6 @@ import {
   PublishJournal, StaleWriteError,
   ACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
-  resolveWorkspaceAgentRecipients,
   projectWorkspaceAgentRecipientFanout,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
   canonicalPublishPayload,
@@ -405,8 +404,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     const syncMode = resolveContextGraphSyncMode({
       existing,
       requested: options?.syncMode,
-      hasDormantDurableIntent:
-        this.contextGraphSubscriptionRehydrationStatus?.dormantIds.includes(contextGraphId) === true,
+      hasDormantDurableIntent: this.contextGraphSubscriptionDormancyById.has(contextGraphId),
     });
     const persist = syncMode === 'on-demand' ? false : options?.persist;
     if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
@@ -1307,7 +1305,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<WorkspaceAgentRecipientFanoutSnapshot | null> {
-    const resolution = await resolveWorkspaceAgentRecipients(this.store, { contextGraphId });
+    const resolution = await this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId });
     if (!resolution.requiresEncryption) return null;
     return projectWorkspaceAgentRecipientFanout(
       resolution,

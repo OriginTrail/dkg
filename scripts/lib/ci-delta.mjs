@@ -49,6 +49,21 @@ export const WORKSPACE_RULES = Object.freeze({
     ],
     evmScopes: EVM_SCOPES,
   },
+  'packages/http-utils': {
+    lanes: [
+      'tornado_core',
+      'tornado_blazegraph',
+      'tornado_publisher',
+      'tornado_agent',
+      'bura_cli',
+      'bura_query',
+      'kosava_node_ui',
+      'kosava_node_ui_e2e',
+      'kosava_supporting',
+      'kosava_hardhat_plugins',
+    ],
+    evmScopes: EVM_SCOPES,
+  },
   'packages/storage': {
     lanes: [
       'tornado_core',
@@ -193,6 +208,7 @@ export const WORKSPACE_RULES = Object.freeze({
 // WORKSPACE_RULES in addition to this mechanically checked minimum.
 export const WORKSPACE_OWNING_LANES = Object.freeze({
   'packages/core': ['tornado_core'],
+  'packages/http-utils': ['tornado_core'],
   'packages/rdf-utils': ['tornado_core'],
   'packages/storage': ['tornado_core', 'tornado_blazegraph'],
   'packages/chain': ['tornado_core'],

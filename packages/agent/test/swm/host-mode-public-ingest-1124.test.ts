@@ -51,6 +51,11 @@ interface ClassifierInternals {
 
 interface IngestInternals {
   getContextGraphOnChainPolicy(cgId: string): Promise<{ accessPolicy?: number; publishPolicy?: number }>;
+  resolveRegisteredContextGraphAuthority(cgId: string): Promise<
+    | { kind: 'public'; onChainId: bigint }
+    | { kind: 'private'; onChainId: bigint; participantAgents: string[] }
+    | { kind: 'unavailable'; reason: 'chain-access-policy-unknown'; onChainId: bigint }
+  >;
   encodeWorkspaceGossipMessage(contextGraphId: string, message: Uint8Array): Promise<Uint8Array>;
   ingestSwmHostModeEnvelope(contextGraphId: string, data: Uint8Array, fromPeerId: string): Promise<void>;
   swmHostModeStore?: SwmHostModeStore;
@@ -322,6 +327,15 @@ describe('GH #1124 — a confirmed-public ingest makes a NON-MEMBER host ACK-cap
     const signer = agentFromPrivateKey(ethers.Wallet.createRandom().privateKey, 'signer');
     g.localAgents.set(signer.agentAddress, signer);
     g.defaultAgentAddress = signer.agentAddress;
+    g.resolveRegisteredContextGraphAuthority = async (cgId) => {
+      const onChainId = BigInt(cgId);
+      const policy = await g.getContextGraphOnChainPolicy(cgId);
+      if (policy.accessPolicy === 0) return { kind: 'public', onChainId };
+      if (policy.accessPolicy === 1) {
+        return { kind: 'private', onChainId, participantAgents: [signer.agentAddress] };
+      }
+      return { kind: 'unavailable', reason: 'chain-access-policy-unknown', onChainId };
+    };
     return core;
   }
 

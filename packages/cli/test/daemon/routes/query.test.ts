@@ -29,13 +29,16 @@ describe('/api/query error mapping (real daemon)', () => {
   });
 
   it('maps a real malformed-SPARQL parse error to HTTP 400, not 500 (#889)', async () => {
-    // Missing closing brace → the real oxigraph throws `error at <l>:<c>: …`.
+    // Balanced graph boundaries pass the scope scanner; the incomplete triple
+    // pattern is rejected by the real Oxigraph parser.
     const { status, body } = await postJson(daemon, '/api/query', {
-      sparql: 'SELECT ?s WHERE { ?s ?p ?o',
+      sparql: 'SELECT ?s WHERE { ?s ?p }',
       contextGraphId: 'all',
     });
     expect(status).toBe(400);
-    expect(String(body.error)).toMatch(/error at \d+:\d+|expected one of|parse/i);
+    expect(String(body.error)).toMatch(
+      /error at \d+:\d+|expected one of|parse|syntax/i,
+    );
   });
 
   it('a valid SELECT is not misclassified as 400 (the #889 widening stays narrow)', async () => {

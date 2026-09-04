@@ -1580,6 +1580,18 @@ export interface ChainAdapter {
 
   // On-Chain Context Graphs (ContextGraphs contract)
   createOnChainContextGraph?(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult>;
+  /**
+   * Add one address to a registered context graph's authoritative participant
+   * roster. Implementations must wait for final transaction receipt before
+   * resolving so read authorization can change immediately after success.
+   */
+  addContextGraphParticipantAgent?(contextGraphId: bigint, agent: string): Promise<TxResult>;
+  /**
+   * Remove one address from a registered context graph's authoritative
+   * participant roster. Implementations must wait for final transaction
+   * receipt before resolving so a revoked member cannot retain read access.
+   */
+  removeContextGraphParticipantAgent?(contextGraphId: bigint, agent: string): Promise<TxResult>;
   verify?(params: VerifyParams): Promise<TxResult>;
   publishToContextGraph?(params: PublishToContextGraphParams): Promise<OnChainPublishResult>;
 

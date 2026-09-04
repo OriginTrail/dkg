@@ -674,6 +674,9 @@ import type { DKGAgent } from './dkg-agent.js';
 
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
 import {
+  projectContextGraphDormancy,
+} from './context-graph-subscription-dormancy.js';
+import {
   isRfc64PrivateRecoveryOwnerV1,
   resolveRfc64PrivateRecoveryContextGraphIdsV1,
   resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
@@ -9049,6 +9052,76 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
   }
 
+  /**
+   * Resume only the authenticated metadata bootstrap for a durable
+   * `join-approved` row recovered after restart.
+   *
+   * The durable approval identifies both the local agent and the curator peer,
+   * so it may authorize this exact control-plane metadata fetch. It does not
+   * authorize VM, payload, plaintext-recovery, or SWM activation. Those lanes
+   * are installed only after the fetched metadata (or the registered chain
+   * roster) makes the ordinary read-authority resolver return `allowed`.
+   */
+  async resumePendingJoinApprovalMetadata(this: DKGAgent,
+    contextGraphId: string,
+    curatorPeerId: string,
+  ): Promise<void> {
+    const ctx = createOperationContext('sync');
+    const approvedAgentAddress = this.localApprovedAgentByCG.get(contextGraphId);
+    if (!approvedAgentAddress) return;
+
+    let expectedDelegateeOpKey: string | undefined;
+    try {
+      expectedDelegateeOpKey = await inferAdapterPublisherAddress(this.chain);
+    } catch {
+      // The durable approval always binds the current libp2p peer. An adapter
+      // without an observable operational key still has a usable proof.
+    }
+    const refreshed = await this.refreshMetaFromCurator(contextGraphId, {
+      trustedCuratorPeerId: curatorPeerId,
+      force: true,
+      memberProof: {
+        approvedAgentAddress,
+        expectedDelegateePeerId: this.peerId,
+        expectedDelegateeOpKey,
+      },
+    }).catch((error) => {
+      this.log.warn(
+        ctx,
+        `Pending join-approval metadata recovery for "${contextGraphId}" failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    });
+    if (!refreshed || !(await this.hasConfirmedMetaState(contextGraphId).catch(() => false))) {
+      this.log.warn(
+        ctx,
+        `Pending join-approval metadata recovery for "${contextGraphId}" did not establish authoritative metadata; keeping data lanes closed`,
+      );
+      return;
+    }
+
+    const authority = await this.resolveContextGraphReadAuthority(contextGraphId, {
+      allowSubscriptionFallback: false,
+    }).catch(() => ({ outcome: 'unavailable' as const }));
+    if (authority.outcome !== 'allowed') {
+      this.log.warn(
+        ctx,
+        `Pending join-approval metadata recovery for "${contextGraphId}" completed but current read authority is ${authority.outcome}; keeping data lanes closed`,
+      );
+      return;
+    }
+
+    await this.refreshMetaSyncedFlags([contextGraphId]);
+    const current = this.subscribedContextGraphs.get(contextGraphId);
+    if (!current?.subscribed) return;
+    this.subscribeToContextGraph(contextGraphId, {
+      persist: false,
+      syncMode: current.syncMode,
+    });
+    this.persistLocalNodeMembership(contextGraphId, 'rehydrated-subscription');
+    await this.runImmediatePostApprovalSync(contextGraphId, curatorPeerId);
+  }
+
   selectCatchupPeers(this: DKGAgent,
     peers: Array<{ toString(): string }>,
     preferredPeerId?: string,
@@ -9507,14 +9580,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) return;
 
     const sortIds = (ids: string[]): string[] => [...ids].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-    const wasDormant = status.dormantIds.includes(contextGraphId);
+    const wasDormant = this.contextGraphSubscriptionDormancyById.has(contextGraphId);
     const hostedActivatedIds = status.hostedActivatedIds ?? [];
     const wasAccounted = this.contextGraphSubscriptionRehydrationAccountedIds.has(contextGraphId);
     const isPersisted = next?.subscribed === true || next?.coreHosted === true;
 
     let persistedTotal = status.persistedTotal;
     let activated = status.activated;
-    let dormantIds = status.dormantIds.filter((id) => id !== contextGraphId);
+    const dormancyById = this.contextGraphSubscriptionDormancyById;
+    dormancyById.delete(contextGraphId);
     let nextHostedActivatedIds = hostedActivatedIds.filter((id) => id !== contextGraphId);
     if (next?.coreHosted === true) {
       nextHostedActivatedIds = sortIds([...nextHostedActivatedIds, contextGraphId]);
@@ -9542,8 +9616,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hostedActivated: nextHostedActivatedIds.length,
       hostedActivatedIds: nextHostedActivatedIds,
       activated,
-      dormant: dormantIds.length,
-      dormantIds,
       updatedAt: Date.now(),
     };
   }
@@ -9555,7 +9627,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const status = this.contextGraphSubscriptionRehydrationStatus;
     if (!status) return;
     const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
-    const dormantIds = [...status.dormantIds];
+    const dormancyById = this.contextGraphSubscriptionDormancyById;
     const hostedActivatedIds = [...(status.hostedActivatedIds ?? [])];
     const removeFrom = (ids: string[], id: string): boolean => {
       const index = ids.indexOf(id);
@@ -9570,7 +9642,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     for (const id of clearedSet) {
       if (systemContextGraphs.has(id)) continue;
       const wasAccounted = this.contextGraphSubscriptionRehydrationAccountedIds.delete(id);
-      const wasDormant = removeFrom(dormantIds, id);
+      const wasDormant = dormancyById.delete(id);
       removeFrom(hostedActivatedIds, id);
       if (!wasAccounted) continue;
       persistedTotal = Math.max(0, persistedTotal - 1);
@@ -9582,12 +9654,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (systemContextGraphs.has(id) || clearedSet.has(id)) continue;
       if (!this.contextGraphSubscriptionRehydrationAccountedIds.has(id)) continue;
       removeFrom(hostedActivatedIds, id);
-      if (!dormantIds.includes(id)) {
+      if (!dormancyById.has(id)) {
         activated = Math.max(0, activated - 1);
-        dormantIds.push(id);
       }
+      dormancyById.set(id, 'deactivated');
     }
-    dormantIds.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 
     this.contextGraphSubscriptionRehydrationStatus = {
       ...status,
@@ -9595,8 +9666,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hostedActivated: hostedActivatedIds.length,
       hostedActivatedIds,
       activated,
-      dormant: dormantIds.length,
-      dormantIds,
       updatedAt: Date.now(),
     };
     for (const id of clearedSet) {
@@ -10075,10 +10144,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   getContextGraphSubscriptionRehydrationStatus(this: DKGAgent): ContextGraphSubscriptionRehydrationStatus | null {
     const status = this.contextGraphSubscriptionRehydrationStatus;
     if (!status) return null;
+    const dormancy = projectContextGraphDormancy(this.contextGraphSubscriptionDormancyById);
     return {
       ...status,
       hostedActivatedIds: [...(status.hostedActivatedIds ?? [])],
-      dormantIds: [...status.dormantIds],
+      dormant: dormancy.dormantIds.length,
+      ...dormancy,
     };
   }
 
@@ -10120,10 +10191,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // A later explicit subscribe remains a normal live activation and updates
       // the status through updateContextGraphSubscriptionRehydrationStatusAfterPersist.
       if (!this.config.contextGraphSubscriptionRehydrationEnabled) {
-        const dormantIds = rows.map((row) => row.id).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+        const dormancyById = this.contextGraphSubscriptionDormancyById;
+        dormancyById.clear();
+        for (const row of rows) dormancyById.set(row.id, 'rehydrationDisabled');
         this.contextGraphSubscriptionRehydrationAccountedIds.clear();
-        for (const id of dormantIds) {
-          this.contextGraphSubscriptionRehydrationAccountedIds.add(id);
+        for (const row of rows) {
+          this.contextGraphSubscriptionRehydrationAccountedIds.add(row.id);
         }
         const completedAt = Date.now();
         this.contextGraphSubscriptionRehydrationStatus = {
@@ -10133,10 +10206,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           hostedActivated: 0,
           hostedActivatedIds: [],
           activated: 0,
-          dormant: dormantIds.length,
           activationCap: cap,
           capDisabled: cap === 0,
-          dormantIds,
           completedAt,
           updatedAt: completedAt,
         };
@@ -10234,11 +10305,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const userRows = [...rows.filter((r) => !r.coreHosted)].sort(
         (a, b) => (b.subscribed ? 1 : 0) - (a.subscribed ? 1 : 0) || byId(a, b),
       );
-      const cappedUserRows = cap > 0 ? userRows.slice(0, cap) : userRows;
-      const toActivate = [...hostedRows, ...cappedUserRows];
-      const dormantRows = (cap > 0 ? userRows.slice(cap) : []).sort(byId);
+      const toActivate = [...hostedRows, ...userRows];
+      const dormancyById = this.contextGraphSubscriptionDormancyById;
+      dormancyById.clear();
+      const activatedRows: ContextGraphSubscriptionRecord[] = [];
+      let activatedUserRows = 0;
       for (let i = 0; i < toActivate.length; i++) {
         const row = toActivate[i];
+        // The cap limits successful non-hosted activations, not candidates.
+        // A denied/unavailable row therefore cannot consume capacity that a
+        // later authorized subscription could use.
+        if (!row.coreHosted && cap > 0 && activatedUserRows >= cap) {
+          dormancyById.set(row.id, 'activationCap');
+          continue;
+        }
         const approvedAgentAddress = row.subscribed
           ? this.localApprovedAgentByCG.get(row.id)
           : undefined;
@@ -10256,7 +10336,48 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ? (await this.getContextGraphAllowedAgents(row.id).catch(() => []))
             .some((address) => address.toLowerCase() === approvedAgentAddress)
           : false;
-        const restorePendingMeta = hasJoinApproval && !approvedAgentAuthorized;
+        // A persisted row records synchronization intent, not current read
+        // authority. Older daemons could persist a private-CG subscription
+        // before proving membership; blindly restoring that row would revive
+        // the exact plaintext-recovery path the live subscribe gate closes.
+        // Check before installing gossip, sync scope, data lanes, or a
+        // membership side effect. Unknown/unavailable authority is deliberately
+        // dormant, except that a durable join approval may restore the minimal
+        // in-memory state needed for one authenticated metadata fetch. That
+        // restricted path cannot activate data lanes until this same authority
+        // resolver subsequently returns `allowed`.
+        const readAuthority = await this.resolveContextGraphReadAuthority(row.id, {
+          allowSubscriptionFallback: false,
+        }).catch(() => ({
+          outcome: 'unavailable' as const,
+          source: 'legacy-local' as const,
+          reason: 'unexpected-authority-error',
+          metadataBootstrap: 'eligible' as const,
+        }));
+        // A stale approval cannot override an explicit current membership
+        // denial. The authority resolver supplies a typed bootstrap policy so
+        // lifecycle code never infers security semantics from diagnostic text.
+        const restrictedApprovalBootstrap = hasJoinApproval
+          && readAuthority.metadataBootstrap === 'eligible'
+          && (
+            readAuthority.outcome !== 'allowed'
+            || !approvedAgentAuthorized
+          );
+        if (readAuthority.outcome !== 'allowed' && !restrictedApprovalBootstrap) {
+          dormancyById.set(
+            row.id,
+            readAuthority.outcome === 'denied' ? 'authorityDenied' : 'authorityUnavailable',
+          );
+          this.log.warn(
+            ctx,
+            `Left persisted context-graph subscription "${row.id}" dormant: ` +
+              `${readAuthority.outcome} by ${readAuthority.source} (${readAuthority.reason})`,
+          );
+          continue;
+        }
+        activatedRows.push(row);
+        if (!row.coreHosted) activatedUserRows += 1;
+        const restorePendingMeta = restrictedApprovalBootstrap;
         this.setContextGraphSubscription(row.id, {
           name: row.name,
           // Every row in the durable store predates or represents explicit
@@ -10274,16 +10395,31 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           lastReconciledOrdinal: row.lastReconciledOrdinal,
           coreHosted: row.coreHosted,
         }, { persist: false });
-        if (row.syncScoped) {
+        if (row.syncScoped && !restrictedApprovalBootstrap) {
           this.trackSyncContextGraph(row.id);
         }
-        if (row.subscribed) {
+        if (row.subscribed && !restrictedApprovalBootstrap) {
           this.subscribeToContextGraph(row.id, {
             trackSyncScope: false,
             persist: false,
             syncMode: 'always-on',
           });
           this.persistLocalNodeMembership(row.id, 'rehydrated-subscription');
+        }
+        if (restrictedApprovalBootstrap) {
+          const curatorPeerId = this.preferredSyncPeers.get(row.id);
+          this.log.info(
+            ctx,
+            `Restored persisted context-graph subscription "${row.id}" in restricted pending-metadata mode; VM, payload recovery, and SWM remain closed`,
+          );
+          if (curatorPeerId) {
+            void this.resumePendingJoinApprovalMetadata(row.id, curatorPeerId).catch((error) => {
+              this.log.warn(
+                ctx,
+                `Pending join-approval recovery for "${row.id}" stopped safely: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            });
+          }
         }
         // Upgrade/self-heal path for late private-CG members whose payload and
         // authenticated `_meta` already completed before registration binding
@@ -10304,7 +10440,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           await new Promise<void>((resolve) => setTimeout(resolve, 0));
         }
       }
-      const skipped = dormantRows.length;
+      const skipped = dormancyById.size;
       this.contextGraphSubscriptionRehydrationAccountedIds.clear();
       for (const row of rows) {
         this.contextGraphSubscriptionRehydrationAccountedIds.add(row.id);
@@ -10314,33 +10450,44 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         rehydrationEnabled: true,
         persistedTotal: rows.length,
         systemExcluded: persistedRows.length - rows.length,
-        hostedActivated: hostedRows.length,
-        hostedActivatedIds: hostedRows.map((r) => r.id),
-        activated: toActivate.length,
-        dormant: skipped,
+        hostedActivated: activatedRows.filter((r) => r.coreHosted).length,
+        hostedActivatedIds: activatedRows.filter((r) => r.coreHosted).map((r) => r.id),
+        activated: activatedRows.length,
         activationCap: cap,
         capDisabled: cap === 0,
-        dormantIds: dormantRows.map((r) => r.id),
         completedAt,
         updatedAt: completedAt,
       };
+      const dormancy = projectContextGraphDormancy(dormancyById);
       if (rows.length > 0) {
         this.log.info(
           ctx,
-          `Rehydrated ${toActivate.length} of ${rows.length} non-system persisted context-graph subscription(s)` +
+          `Rehydrated ${activatedRows.length} of ${rows.length} non-system persisted context-graph subscription(s)` +
             (skipped > 0
-              ? ` (${skipped} left dormant by the activation cap; ` +
-                `${hostedRows.length} hosted restored)`
+              ? ` (${skipped} left dormant; ` +
+                `${activatedRows.filter((r) => r.coreHosted).length} hosted restored)`
               : ''),
         );
       }
-      if (skipped > 0) {
+      if (dormancy.dormantReasons.activationCap.length > 0) {
         this.log.warn(
           ctx,
-          `${skipped} context-graph subscription(s) left dormant by the activation cap. ` +
+          `${dormancy.dormantReasons.activationCap.length} context-graph subscription(s) left dormant by the activation cap. ` +
             `Prune stale ones via 'DELETE /api/context-graph/subscriptions', or raise ` +
             `maxRehydratedContextGraphSubscriptions. Inspect ` +
             `'GET /api/context-graph/subscriptions' for dormant ids.`,
+        );
+      }
+      if (dormancy.dormantReasons.authorityDenied.length > 0) {
+        this.log.warn(
+          ctx,
+          `${dormancy.dormantReasons.authorityDenied.length} context-graph subscription(s) left dormant because current read authority denied this node.`,
+        );
+      }
+      if (dormancy.dormantReasons.authorityUnavailable.length > 0) {
+        this.log.warn(
+          ctx,
+          `${dormancy.dormantReasons.authorityUnavailable.length} context-graph subscription(s) left dormant because current read authority was unavailable; retry after restoring the authority source.`,
         );
       }
     } catch (err) {

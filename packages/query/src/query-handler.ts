@@ -5,7 +5,7 @@ import {
   quadsToNQuads,
   type StoreSchedulerBusyErrorLike,
 } from '@origintrail-official/dkg-storage';
-import { stripLiteralsAndComments } from './sparql-utils.js';
+import { prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { validateReadOnlySparql } from './sparql-guard.js';
 import type { DKGQueryEngine } from './dkg-query-engine.js';
 import type {
@@ -398,23 +398,25 @@ export class QueryHandler {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing sparql');
     }
 
-    // Strip string literals and comments so regexes don't false-positive
-    // on keywords inside quoted values or variable names like ?graph.
-    const stripped = stripLiteralsAndComments(sparql);
+    const prepared = prepareSparql(sparql);
+    if (prepared.status === 'malformed-uchar') {
+      return errorResponse(opId, 'ERROR', 'SPARQL rejected: malformed Unicode code-point escape');
+    }
+    const codeWords = prepared.wordTokens;
 
-    if (/\bSERVICE\b/i.test(stripped)) {
+    if (codeWords.has('SERVICE')) {
       return errorResponse(opId, 'ERROR', 'SERVICE clauses are not allowed in remote queries');
     }
 
-    if (/\bGRAPH(?:\s+|(?=[?$<]))/i.test(stripped)) {
+    if (codeWords.has('GRAPH')) {
       return errorResponse(opId, 'ERROR', 'Explicit GRAPH clauses are not allowed in remote queries — queries are automatically scoped to the target context graph');
     }
 
-    if (/\bFROM(?:\s+|(?=<))/i.test(stripped)) {
+    if (codeWords.has('FROM')) {
       return errorResponse(opId, 'ERROR', 'FROM/FROM NAMED clauses are not allowed in remote queries — queries are automatically scoped to the target context graph');
     }
 
-    const guard = validateReadOnlySparql(sparql);
+    const guard = validateReadOnlySparql(prepared);
     if (!guard.safe) {
       return errorResponse(opId, 'ERROR', `SPARQL rejected: ${guard.reason}`);
     }

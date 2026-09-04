@@ -121,6 +121,11 @@ function stubNode(agent: DKGAgent): void {
     peerId: '12D3KooWCoreFillTestPeer',
     libp2p: { getPeers: () => [] },
   };
+  // These fixtures exercise reconcile mechanics after target admission. Their
+  // synthetic CG ids do not have corresponding live policy slots, so model the
+  // independent read-authority prerequisite explicitly. Denial is covered by
+  // vm-reconcile-self-prime.test.ts and private-read-chain-authority.test.ts.
+  agent.canReadContextGraph = async () => true;
 }
 
 function emptyCatchupStats() {

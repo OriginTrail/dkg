@@ -2,10 +2,6 @@ import {
   asGraphWriteRevisionSource,
   isSparqlHttpResponseError,
 } from '@origintrail-official/dkg-storage';
-import { CallerSparqlRejectedError } from './caller-sparql-error.js';
-
-/** Upstream statuses that mean the SUBMITTED query was malformed. */
-const MALFORMED_CALLER_QUERY_STATUSES = new Set([400, 422]);
 import type {
   TripleStore,
   Quad,
@@ -18,6 +14,10 @@ import {
   readExactGraphPaged,
   resolveGraphScopedOrLegacyMetadata,
 } from '@origintrail-official/dkg-storage';
+import {
+  materializePreparedSparql,
+  prepareSparql,
+} from '@origintrail-official/dkg-rdf-utils/sparql';
 import type {
   QueryResult,
   QueryOptions,
@@ -37,7 +37,6 @@ import {
   type GetView,
   REMOVED_VIEWS,
   TrustLevel,
-  TRUST_LEVEL_PREDICATE,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
@@ -50,25 +49,26 @@ import {
   detectSparqlQueryForm,
 } from './sparql-guard.js';
 import {
-  findMatchingSparqlCloseBrace as findMatchingCloseBrace,
-  isSparqlKeyword,
-  isSparqlKeywordStart as isKeywordStart,
-  isSparqlWordContinuation as isWordContinuation,
-  readSparqlVariable,
-  skipSparqlStringLiteral as scanSparqlStringLiteral,
-  skipSparqlIriRef,
-  skipSparqlSpaceAndLineComments,
-  stripLiteralsAndComments,
-} from './sparql-utils.js';
-import {
-  callerGraphValuesAreAuthorized,
-  collectPrefixDeclarations,
-  readSparqlPrefixName,
-  resolveSparqlPrefixedName,
-  type SparqlPrefixName,
+  assertExplicitGraphIrisAllowed,
+  assertNoCallerDatasetClauses,
+  constrainGraphVariablesToAllowedSet,
+  prepareGraphScope,
+  requireGraphScopeRewrite,
+  rewriteGraphRoute,
+  rewriteGraphSet,
+  transitionGraphScope,
+  wrapWithGraph,
+  type PreparedGraphScope,
 } from './sparql-graph-scope.js';
+import { injectMinTrustFilter } from './sparql-min-trust.js';
+import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { raceAgainstCallerAbort } from './caller-abort.js';
 import { ScopedContentGraphDiscoveryMemo } from './scoped-content-graph-discovery-memo.js';
+
+export { ScopedQueryViolationError } from './scoped-query-error.js';
+
+/** Upstream statuses that mean the SUBMITTED query was malformed. */
+const MALFORMED_CALLER_QUERY_STATUSES = new Set([400, 422]);
 
 /**
  * Result of resolving a V10 GET view to concrete graph targets.
@@ -82,13 +82,6 @@ export interface ViewResolution {
    * assertions) and verifiable-memory (multiple quorum graphs).
    */
   graphPrefixes: string[];
-}
-
-export class ScopedQueryViolationError extends Error {
-  constructor(message: string) {
-    super(`Scoped query violation: ${message}`);
-    this.name = 'ScopedQueryViolationError';
-  }
 }
 
 function storeOptions(options: QueryOptions | undefined): StoreQueryOptions | undefined {
@@ -364,16 +357,28 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+    const prepared = prepareSparql(sparql);
+    if (prepared.status === 'malformed-uchar') {
+      throw new Error('SPARQL rejected: malformed Unicode code-point escape');
+    }
+    if (prepared.wordTokens.has('SERVICE')) {
+      throw new Error('SPARQL rejected: SERVICE clauses are not allowed');
+    }
     const reads = createQueryStoreReadContext(this.store, options);
-    const guard = validateReadOnlySparql(sparql);
+    const guard = validateReadOnlySparql(prepared);
     if (!guard.safe) {
       throw new Error(`SPARQL rejected: ${guard.reason}`);
     }
+    // Policy checks and rewrites retain the prepared source/logical views.
+    // Active UCHAR syntax is materialized once, immediately before the final
+    // caller query crosses the store boundary.
+    const initialGraphScope = prepareGraphScope(prepared);
+    let routedScope = initialGraphScope;
 
     // ── V10 view-based routing ────────────────────────────────────────
     const effectiveContextGraphId = options?.contextGraphId;
     if (effectiveContextGraphId) {
-      assertNoCallerDatasetClauses(sparql);
+      assertNoCallerDatasetClauses(initialGraphScope);
     }
 
     if (options?.subGraphName) {
@@ -480,7 +485,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         : [];
       const explicitAllowedGraphs = [...allowedGraphs, ...metaAllowList, ...privateAllowList];
       const shouldExpandGraphVariables =
-        options?.includeContextGraphPartitions === true && collectGraphVariables(sparql).length > 0;
+        options?.includeContextGraphPartitions === true
+        && initialGraphScope.graphVariables.length > 0;
       const variableAllowedGraphs = shouldExpandGraphVariables
         ? await this.resolveScopedGraphVariableAllowList(
             effectiveContextGraphId,
@@ -493,8 +499,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // allow-list. GRAPH variables only gain known same-CG content
       // partitions for callers that explicitly opt into broad count scans;
       // legacy scoped routes keep their selected memory-layer contract.
-      assertExplicitGraphIrisAllowed(sparql, explicitAllowedGraphs);
-      sparql = constrainGraphVariablesToAllowedSet(sparql, variableAllowedGraphs);
+      assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
+      routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(
+        initialGraphScope,
+        variableAllowedGraphs,
+      ));
     }
 
     if (options?.view) {
@@ -510,11 +519,17 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         const v = validateSubGraphName(options.subGraphName);
         if (!v.valid) throw new Error(v.reason);
       }
-      return this.queryWithView(sparql, options.view, effectiveContextGraphId, options, reads);
+      return this.queryWithView(
+        initialGraphScope,
+        options.view,
+        effectiveContextGraphId,
+        options,
+        reads,
+      );
     }
 
     // ── Legacy routing (V9 compat) ────────────────────────────────────
-    let effectiveSparql = sparql;
+    let effectiveScope = routedScope;
 
     if (effectiveContextGraphId) {
       const dataGraph = options?.subGraphName
@@ -527,24 +542,29 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           `${dataGraph}/_verifiable_memory/`,
           reads,
         );
-        const dataSparql = vmGraphsInc.length > 0
-          ? (this.wrapVerifiableMemoryGraphSet(sparql, [dataGraph, ...vmGraphsInc])
-            ?? wrapWithGraph(sparql, dataGraph))
-          : wrapWithGraph(sparql, dataGraph);
+        const dataScope = requireGraphScopeRewrite(rewriteGraphRoute(
+          routedScope,
+          vmGraphsInc.length > 0 ? [dataGraph, ...vmGraphsInc] : [],
+          dataGraph,
+          'deduplicated-values-union',
+        ));
         // Per-KA SWM: union the discovered …/_shared_memory/{addr}/{number} graphs.
         const swmGraphs = await this.discoverGraphsByPrefix(
           `${sharedMemoryGraph}/`,
           reads,
         );
-        const sharedMemorySparql = swmGraphs.length > 0
-          ? (wrapWithGraphUnion(sparql, swmGraphs) ?? wrapWithGraph(sparql, sharedMemoryGraph))
-          : wrapWithGraph(sparql, sharedMemoryGraph);
+        const sharedMemoryScope = requireGraphScopeRewrite(rewriteGraphRoute(
+          routedScope,
+          swmGraphs,
+          sharedMemoryGraph,
+          'union-only',
+        ));
         // Both are graph-wrapped forms of the CALLER's query, so they carry
         // the same provenance as execAndNormalize (PR #2330 review — this
         // branch previously bypassed the marker, leaving the original 500 for
         // any `includeSharedMemory` request with malformed SPARQL).
-        const dataResult = await this.execCallerQuery(dataSparql, reads);
-        const smResult = await this.execCallerQuery(sharedMemorySparql, reads);
+        const dataResult = await this.execCallerQuery(dataScope, reads);
+        const smResult = await this.execCallerQuery(sharedMemoryScope, reads);
         return mergeSharedMemoryAndDataResults(dataResult, smResult);
       }
       if (options?.graphSuffix === '_shared_memory') {
@@ -554,23 +574,28 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           `${sharedMemoryGraph}/`,
           reads,
         );
-        effectiveSparql = swmGraphs.length > 0
-          ? (wrapWithGraphUnion(sparql, swmGraphs) ?? wrapWithGraph(sparql, sharedMemoryGraph))
-          : wrapWithGraph(sparql, sharedMemoryGraph);
+        effectiveScope = requireGraphScopeRewrite(rewriteGraphRoute(
+          routedScope,
+          swmGraphs,
+          sharedMemoryGraph,
+          'union-only',
+        ));
       } else {
         // Per-KA VM: read-both the published per-KA …/_verifiable_memory/{addr}/{number} + root.
         const vmGraphs = await this.discoverGraphsByPrefix(
           `${dataGraph}/_verifiable_memory/`,
           reads,
         );
-        effectiveSparql = vmGraphs.length > 0
-          ? (this.wrapVerifiableMemoryGraphSet(sparql, [dataGraph, ...vmGraphs])
-            ?? wrapWithGraph(sparql, dataGraph))
-          : wrapWithGraph(sparql, dataGraph);
+        effectiveScope = requireGraphScopeRewrite(rewriteGraphRoute(
+          routedScope,
+          vmGraphs.length > 0 ? [dataGraph, ...vmGraphs] : [],
+          dataGraph,
+          'deduplicated-values-union',
+        ));
       }
     }
 
-    const result = await this.execAndNormalize(effectiveSparql, reads);
+    const result = await this.execAndNormalize(effectiveScope, reads);
 
     // Strip results originating from excluded graphs (e.g. private CGs).
     if (options?.excludeGraphPrefixes?.length && result.bindings.length > 0) {
@@ -603,12 +628,13 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
    * Execute a SPARQL query scoped to a declared V10 state view.
    */
   private async queryWithView(
-    sparql: string,
+    initialScope: PreparedGraphScope,
     view: GetView,
     contextGraphId: string,
     options: QueryOptions,
     reads: QueryStoreReadContext,
   ): Promise<QueryResult> {
+    const sparql = initialScope.source;
     // Uniform layout (rc.17): a by-name working-memory read must target the per-KA
     // graph `…/_working_memory/{addr}/{number}` the data was written to. Resolve the
     // KA number from the `dkg:kaId` stamped on the lifecycle URN in `_meta` and pass
@@ -718,8 +744,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       return emptyResultForSparql(sparql);
     }
 
-    assertExplicitGraphIrisAllowed(sparql, allGraphs);
-    sparql = constrainGraphVariablesToAllowedSet(sparql, allGraphs);
+    assertExplicitGraphIrisAllowed(initialScope, allGraphs);
+    const constrainedScope = requireGraphScopeRewrite(
+      constrainGraphVariablesToAllowedSet(initialScope, allGraphs),
+    );
 
     // Spec §14 trust-gradient filter — only enforced on verifiable-memory
     // where on-chain-anchored trust metadata is expected to live.
@@ -737,7 +765,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // rewriter MUST succeed or we fail closed — returning an empty result
     // is the correct behaviour for "no subject meets the trust threshold"
     // when we cannot prove the threshold was applied.
-    let effectiveSparql = sparql;
+    let effectiveScope = constrainedScope;
     const effectiveMinTrust = options.minTrust ?? options._minTrust;
     // `SelfAttested` (0) is the floor and means no trust filter is needed.
     // Endorsed and above require explicit writer-side trust metadata.
@@ -746,8 +774,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       effectiveMinTrust !== undefined &&
       effectiveMinTrust > TrustLevel.SelfAttested
     ) {
-      const rewritten = injectMinTrustFilter(sparql, effectiveMinTrust);
-      if (!rewritten) {
+      const rewritten = injectMinTrustFilter(constrainedScope, effectiveMinTrust);
+      if (rewritten.kind === 'unsupported') {
         console.warn(
           `[DKGQueryEngine] minTrust=${effectiveMinTrust} requested for a query shape ` +
             `injectMinTrustFilter cannot safely rewrite; returning empty result (fail-closed)`,
@@ -755,45 +783,44 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         // Preserve the query form so CONSTRUCT/DESCRIBE callers see
         // `{ bindings: [], quads: [] }` rather than a shapeless deny, and
         // ASK callers see `{ bindings: [{ result: 'false' }] }`.
-        return emptyResultForSparql(sparql);
+        return emptyResultForSparql(constrainedScope.source);
       }
-      effectiveSparql = rewritten;
+      effectiveScope = transitionGraphScope(constrainedScope, rewritten.value);
     }
 
     if (allGraphs.length === 1) {
       return this.execAndNormalize(
-        wrapWithGraph(effectiveSparql, allGraphs[0]),
+        requireGraphScopeRewrite(wrapWithGraph(effectiveScope, allGraphs[0])),
         reads,
       );
     }
 
     if (view === 'verifiable-memory') {
-      const rewritten = this.wrapVerifiableMemoryGraphSet(effectiveSparql, allGraphs);
-      if (rewritten !== null) {
-        return this.execAndNormalize(rewritten, reads);
+      const rewritten = rewriteGraphSet(
+        effectiveScope,
+        allGraphs,
+        'deduplicated-values-union',
+      );
+      if (rewritten.kind === 'ready') {
+        return this.execAndNormalize(rewritten.value, reads);
       }
     }
 
-    return this.queryMultipleGraphs(effectiveSparql, allGraphs, reads);
-  }
-
-  /** Canonical graph rewrite for root + per-KA/per-cgId verifiable-memory reads. */
-  private wrapVerifiableMemoryGraphSet(sparql: string, graphs: string[]): string | null {
-    if (graphs.length === 0) return sparql;
-    if (graphs.length === 1) return wrapWithGraph(sparql, graphs[0]);
-    return wrapWithDeduplicatedGraphValues(sparql, graphs)
-      ?? wrapWithGraphValues(sparql, graphs)
-      ?? wrapWithGraphUnion(sparql, graphs);
+    return this.queryMultipleGraphs(effectiveScope, allGraphs, reads);
   }
 
   private async queryMultipleGraphs(
-    sparql: string,
+    scope: PreparedGraphScope,
     graphs: string[],
     reads: StoreReadLane,
   ): Promise<QueryResult> {
+    const sparql = scope.source;
     if (graphs.length === 0) return { bindings: [] };
     if (graphs.length === 1) {
-      return this.execAndNormalize(wrapWithGraph(sparql, graphs[0]), reads);
+      return this.execAndNormalize(
+        requireGraphScopeRewrite(wrapWithGraph(scope, graphs[0])),
+        reads,
+      );
     }
     // Prefer a single `VALUES ?g { … } GRAPH ?g { … }` query: it scopes the
     // read to the named-graph set as ONE basic graph pattern iterated over a
@@ -804,18 +831,14 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // VALUES form plans in constant depth. LIMIT/ORDER BY/DISTINCT/aggregate
     // semantics are preserved because those modifiers stay in the outer query
     // around the injected block.
-    const valuesSparql = wrapWithGraphValues(sparql, graphs);
-    if (valuesSparql !== null) {
-      return this.execAndNormalize(valuesSparql, reads);
+    const graphSetRewrite = rewriteGraphSet(scope, graphs, 'values-union');
+    if (graphSetRewrite.kind === 'ready') {
+      return this.execAndNormalize(graphSetRewrite.value, reads);
     }
-    // Residual shapes `wrapWithGraphValues` declines (an inner top-level
+    // Residual shapes the graph-set policy declines (an inner top-level
     // UNION, no locatable WHERE block, or a sentinel-variable collision) keep
     // the original union / per-graph fallback so the #789 form-aware
     // cross-graph merge below is preserved unchanged.
-    const unionSparql = wrapWithGraphUnion(sparql, graphs);
-    if (unionSparql !== null) {
-      return this.execAndNormalize(unionSparql, reads);
-    }
     // Fallback: the inner body contains a UNION so we cannot safely wrap
     // in a single query without either crashing Blazegraph (nested
     // UnionNode) or leaking a helper variable. Run per-graph and merge
@@ -833,7 +856,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // constructed from multiple source graphs).
       const merged: Quad[] = [];
       for (const g of graphs) {
-        const r = await this.execAndNormalize(wrapWithGraph(sparql, g), reads);
+        const r = await this.execAndNormalize(
+          requireGraphScopeRewrite(wrapWithGraph(scope, g)),
+          reads,
+        );
         if (r.quads) merged.push(...r.quads);
       }
       return { bindings: [], quads: dedupeQuads(merged) };
@@ -843,7 +869,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // Boolean result: true iff the pattern matches in ANY graph.
       // Short-circuit on the first positive graph.
       for (const g of graphs) {
-        const r = await this.execAndNormalize(wrapWithGraph(sparql, g), reads);
+        const r = await this.execAndNormalize(
+          requireGraphScopeRewrite(wrapWithGraph(scope, g)),
+          reads,
+        );
         if (r.bindings[0]?.result === 'true') {
           return { bindings: [{ result: 'true' }] };
         }
@@ -859,7 +888,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // Rather than silently return duplicate / mis-ordered / over-limit
     // rows, reject the unsupported shape explicitly so the caller gets a
     // clear error instead of wrong data.
-    if (hasCrossGraphUnsafeModifier(sparql)) {
+    if (hasCrossGraphUnsafeModifier(scope)) {
       throw new Error(
         'Multi-graph query combines an inner UNION with a solution-set ' +
           'modifier (DISTINCT/ORDER BY/LIMIT/OFFSET/GROUP BY/aggregate). ' +
@@ -870,7 +899,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
     const all: Record<string, string>[] = [];
     for (const g of graphs) {
-      const r = await this.execAndNormalize(wrapWithGraph(sparql, g), reads);
+      const r = await this.execAndNormalize(
+        requireGraphScopeRewrite(wrapWithGraph(scope, g)),
+        reads,
+      );
       all.push(...r.bindings);
     }
     return { bindings: all };
@@ -1193,7 +1225,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
    * Only 400/422 are translated: 401/403/404/429 and 5xx mean the store
    * rejected US and stay server faults (PR #2330 review).
    */
-  private async execCallerQuery(sparql: string, reads: StoreReadLane) {
+  private async execCallerQuery(scope: PreparedGraphScope, reads: StoreReadLane) {
+    const sparql = materializePreparedSparql(scope.prepared);
     try {
       return await reads.query(sparql);
     } catch (err) {
@@ -1205,14 +1238,14 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   }
 
   private async execAndNormalize(
-    sparql: string,
+    scope: PreparedGraphScope,
     reads: StoreReadLane,
   ): Promise<QueryResult> {
-    const result = await this.execCallerQuery(sparql, reads);
+    const result = await this.execCallerQuery(scope, reads);
 
     if (result.type === 'bindings') {
       if (result.bindings.length === 0) {
-        const empty = emptyResultForSparql(sparql);
+        const empty = emptyResultForSparql(scope.source);
         if (empty.quads !== undefined) return empty;
       }
       return { bindings: result.bindings };
@@ -1493,14 +1526,6 @@ function parseCanonicalIntegerBinding(value: string | undefined): bigint | undef
   }
 }
 
-function assertNoCallerDatasetClauses(sparql: string): void {
-  if (hasCallerDatasetClause(sparql)) {
-    throw new ScopedQueryViolationError(
-      'FROM clauses are not allowed on scoped local queries',
-    );
-  }
-}
-
 async function listGraphsByPrefix(
   store: TripleStore,
   prefix: string,
@@ -1521,1664 +1546,6 @@ async function listGraphFamily(
     graphs.unshift(rootGraph);
   }
   return graphs;
-}
-
-function hasCallerDatasetClause(sparql: string): boolean {
-  const n = sparql.length;
-  let i = 0;
-
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(sparql, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      if (isSparqlKeyword(sparql, i, j, 'FROM')) {
-        return true;
-      }
-      i = j;
-      continue;
-    }
-    i++;
-  }
-
-  return false;
-}
-
-function assertExplicitGraphIrisAllowed(sparql: string, allowedGraphs: string[]): void {
-  const allowed = new Set(allowedGraphs);
-  for (const graphIri of collectExplicitGraphIris(sparql)) {
-    if (!allowed.has(graphIri)) {
-      throw new ScopedQueryViolationError(
-        `GRAPH <${graphIri}> is outside the allowed graph set`,
-      );
-    }
-  }
-}
-
-interface GraphTarget {
-  kind: 'variable' | 'iri';
-  iri?: string;
-  end: number;
-}
-
-function readGraphTarget(
-  sparql: string,
-  start: number,
-  prefixes: Map<string, string>,
-): GraphTarget | null {
-  const variable = readSparqlVariable(sparql, start);
-  if (variable) {
-    return { kind: 'variable', end: start + variable.length };
-  }
-
-  if (sparql[start] === '<') {
-    const iriEnd = skipSparqlIriRef(sparql, start);
-    if (!iriEnd) {
-      throw new ScopedQueryViolationError(
-        'GRAPH target must be a variable, explicit IRI, or resolvable prefixed name on scoped queries',
-      );
-    }
-    return {
-      kind: 'iri',
-      iri: sparql.slice(start + 1, iriEnd - 1),
-      end: iriEnd,
-    };
-  }
-
-  const prefixedName = readSparqlPrefixName(sparql, start);
-  if (prefixedName) {
-    const iri = resolveSparqlPrefixedName(prefixedName, prefixes);
-    if (!iri) {
-      throw new ScopedQueryViolationError(
-        `GRAPH prefixed target ${sparql.slice(start, start + prefixedName.length)} cannot be resolved from PREFIX declarations`,
-      );
-    }
-    return {
-      kind: 'iri',
-      iri,
-      end: start + prefixedName.length,
-    };
-  }
-
-  return null;
-}
-
-function constrainGraphVariablesToAllowedSet(sparql: string, allowedGraphs: string[]): string {
-  if (hasNestedSelectWithGraphVariable(sparql)) {
-    throw new ScopedQueryViolationError(
-      'GRAPH variables inside nested SELECT subqueries cannot be constrained safely',
-    );
-  }
-
-  const graphVariables = collectGraphVariables(sparql);
-  if (graphVariables.length === 0) return sparql;
-
-  const braceStart = findWhereBraceStart(sparql);
-  if (braceStart === -1) {
-    throw new ScopedQueryViolationError(
-      'GRAPH variables cannot be constrained because the WHERE block could not be located',
-    );
-  }
-  assertGraphVariablesAreTopLevel(sparql, braceStart);
-  assertNoTopLevelDefaultGraphPatternsWithGraphVariables(sparql, braceStart);
-
-  const allowed = new Set(allowedGraphs);
-  const variablesNeedingConstraint = graphVariables.filter((variable) => {
-    // A top-level `VALUES ?g { <g1> ... }` already constrains every use of
-    // `GRAPH ?g` in this group. When its values are all inside the DKG
-    // allow-list, injecting the complete allow-list again is redundant and can
-    // be catastrophic at scale: the Blackbox VM reader supplied five exact
-    // partitions, while DKG added the complete 128-graph allow-list and turned a ~3 KB
-    // query into the stable 24,051-byte planner stall from issue #1989.
-    //
-    // If the VALUES shape is dynamic/unsupported or contains an out-of-scope
-    // IRI, retain the existing intersection rewrite. This preserves the
-    // fail-closed behavior without broadening access.
-    return !callerGraphValuesAreAuthorized(sparql, braceStart, variable, allowed);
-  });
-  if (variablesNeedingConstraint.length === 0) return sparql;
-
-  const values = allowedGraphs
-    .map((g) => `<${assertSafeIri(g)}>`)
-    .join(' ');
-  const constraints = variablesNeedingConstraint
-    .map((variable) => `VALUES ${variable} { ${values} }`)
-    .join(' ');
-
-  return `${sparql.slice(0, braceStart + 1)} ${constraints} ${sparql.slice(braceStart + 1)}`;
-}
-
-function assertNoTopLevelDefaultGraphPatternsWithGraphVariables(sparql: string, braceStart: number): void {
-  if (!hasTopLevelDefaultGraphPattern(sparql, braceStart)) return;
-
-  throw new ScopedQueryViolationError(
-    'GRAPH variables cannot be mixed with default-graph triple patterns on scoped local queries',
-  );
-}
-
-function hasTopLevelDefaultGraphPattern(sparql: string, braceStart: number): boolean {
-  const braceEnd = findMatchingCloseBrace(sparql, braceStart);
-  if (braceEnd === -1) return true;
-
-  const prefixes = collectPrefixDeclarations(sparql);
-  let depth = 0;
-  let i = braceStart + 1;
-
-  while (i < braceEnd) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < braceEnd && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '{') {
-      depth++;
-      i++;
-      continue;
-    }
-    if (ch === '}') {
-      depth = Math.max(0, depth - 1);
-      i++;
-      continue;
-    }
-    if (depth !== 0 || /\s/.test(ch) || ch === '.' || ch === ';' || ch === ',') {
-      i++;
-      continue;
-    }
-    if (ch === '<') return !!skipSparqlIriRef(sparql, i);
-    if (ch === '?' || ch === '$' || ch === '[') return true;
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < braceEnd && isWordContinuation(sparql[j])) j++;
-      if (isSparqlKeyword(sparql, i, j, 'GRAPH')) {
-        const operandStart = skipSparqlSpaceAndLineComments(sparql, j);
-        const target = readGraphTarget(sparql, operandStart, prefixes);
-        i = target && target.end <= braceEnd ? target.end : j;
-        continue;
-      }
-      if (isSparqlKeyword(sparql, i, j, 'FILTER') || isSparqlKeyword(sparql, i, j, 'BIND')) {
-        const exprStart = skipSparqlSpaceAndLineComments(sparql, j);
-        if (sparql[exprStart] === '(') {
-          const exprEnd = skipBalancedParentheses(sparql, exprStart, braceEnd);
-          i = exprEnd ?? j;
-          continue;
-        }
-      }
-      if (isSparqlKeyword(sparql, i, j, 'VALUES')) {
-        i = skipValuesClause(sparql, j, braceEnd);
-        continue;
-      }
-      if (
-        isSparqlKeyword(sparql, i, j, 'OPTIONAL') ||
-        isSparqlKeyword(sparql, i, j, 'MINUS') ||
-        isSparqlKeyword(sparql, i, j, 'SERVICE') ||
-        isSparqlKeyword(sparql, i, j, 'UNION') ||
-        isSparqlKeyword(sparql, i, j, 'SELECT')
-      ) {
-        i = j;
-        continue;
-      }
-      return true;
-    }
-    i++;
-  }
-
-  return false;
-}
-
-function assertGraphVariablesAreTopLevel(sparql: string, braceStart: number): void {
-  const braceEnd = findMatchingCloseBrace(sparql, braceStart);
-  if (braceEnd === -1) {
-    throw new ScopedQueryViolationError(
-      'GRAPH variables cannot be constrained because the WHERE block could not be located',
-    );
-  }
-
-  let depth = 0;
-  let i = braceStart + 1;
-
-  while (i < braceEnd) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < braceEnd && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const iriEnd = skipSparqlIriRef(sparql, i);
-      i = iriEnd && iriEnd <= braceEnd ? iriEnd : i + 1;
-      continue;
-    }
-    if (ch === '{') {
-      depth++;
-      i++;
-      continue;
-    }
-    if (ch === '}') {
-      depth = Math.max(0, depth - 1);
-      i++;
-      continue;
-    }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < braceEnd && isWordContinuation(sparql[j])) j++;
-      if (isSparqlKeyword(sparql, i, j, 'GRAPH')) {
-        const operandStart = skipSparqlSpaceAndLineComments(sparql, j);
-        if (operandStart < braceEnd && readSparqlVariable(sparql, operandStart) && depth !== 0) {
-          throw new ScopedQueryViolationError(
-            'GRAPH variables must appear at the top level of scoped local queries',
-          );
-        }
-      }
-      i = j;
-      continue;
-    }
-    i++;
-  }
-}
-
-function hasNestedSelectWithGraphVariable(sparql: string): boolean {
-  const n = sparql.length;
-  let i = 0;
-  let braceDepth = 0;
-
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(sparql, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    if (ch === '{') {
-      braceDepth++;
-      i++;
-      continue;
-    }
-    if (ch === '}') {
-      braceDepth = Math.max(0, braceDepth - 1);
-      i++;
-      continue;
-    }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      const word = sparql.slice(i, j);
-      if (isSparqlKeyword(sparql, i, j, 'SELECT') && braceDepth > 0) {
-        const end = findNestedSelectEnd(sparql, j, braceDepth);
-        if (rangeContainsGraphVariable(sparql, j, end === -1 ? n : end)) {
-          return true;
-        }
-        i = end === -1 ? j : end + 1;
-        continue;
-      }
-      i = j;
-      continue;
-    }
-    i++;
-  }
-
-  return false;
-}
-
-function findNestedSelectEnd(sparql: string, start: number, startingDepth: number): number {
-  const n = sparql.length;
-  let depth = startingDepth;
-  let i = start;
-
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(sparql, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    if (ch === '{') {
-      depth++;
-      i++;
-      continue;
-    }
-    if (ch === '}') {
-      depth--;
-      if (depth < startingDepth) return i;
-      if (depth < 0) return -1;
-      i++;
-      continue;
-    }
-    i++;
-  }
-
-  return -1;
-}
-
-function rangeContainsGraphVariable(sparql: string, start: number, end: number): boolean {
-  const n = Math.min(sparql.length, end);
-  let i = start;
-
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const iriEnd = skipSparqlIriRef(sparql, i);
-      i = iriEnd && iriEnd <= n ? iriEnd : i + 1;
-      continue;
-    }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      const word = sparql.slice(i, j);
-      if (isSparqlKeyword(sparql, i, j, 'GRAPH')) {
-        const operandStart = skipSparqlSpaceAndLineComments(sparql, j);
-        if (operandStart < n && readSparqlVariable(sparql, operandStart)) {
-          return true;
-        }
-      }
-      i = j;
-      continue;
-    }
-    i++;
-  }
-
-  return false;
-}
-
-function collectExplicitGraphIris(sparql: string): string[] {
-  const iris: string[] = [];
-  const prefixes = collectPrefixDeclarations(sparql);
-  const n = sparql.length;
-  let i = 0;
-
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(sparql, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      if (isSparqlKeyword(sparql, i, j, 'GRAPH')) {
-        const operandStart = skipSparqlSpaceAndLineComments(sparql, j);
-        const target = readGraphTarget(sparql, operandStart, prefixes);
-        if (!target) {
-          throw new ScopedQueryViolationError(
-            'GRAPH target must be a variable, explicit IRI, or resolvable prefixed name on scoped queries',
-          );
-        }
-        if (target.kind === 'iri' && target.iri) iris.push(target.iri);
-        i = target.end;
-        continue;
-      }
-      i = j;
-      continue;
-    }
-    i++;
-  }
-
-  return iris;
-}
-
-function hasGraphClause(sparql: string): boolean {
-  const n = sparql.length;
-  let i = 0;
-
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(sparql, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      if (isSparqlKeyword(sparql, i, j, 'GRAPH')) {
-        return true;
-      }
-      i = j;
-      continue;
-    }
-    i++;
-  }
-
-  return false;
-}
-
-function collectGraphVariables(sparql: string): string[] {
-  const variables: string[] = [];
-  const seen = new Set<string>();
-  const n = sparql.length;
-  let i = 0;
-
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(sparql, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      const word = sparql.slice(i, j);
-      if (isSparqlKeyword(sparql, i, j, 'GRAPH')) {
-        const operandStart = skipSparqlSpaceAndLineComments(sparql, j);
-        const variable = readSparqlVariable(sparql, operandStart);
-        if (variable && !seen.has(variable)) {
-          seen.add(variable);
-          variables.push(variable);
-        }
-        i = operandStart + (variable?.length ?? 0);
-        continue;
-      }
-      i = j;
-      continue;
-    }
-    i++;
-  }
-
-  return variables;
-}
-
-function skipBalancedParentheses(sparql: string, start: number, limit = sparql.length): number | null {
-  if (sparql[start] !== '(') return null;
-  let depth = 1;
-  let i = start + 1;
-
-  while (i < limit) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < limit && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const iriEnd = skipSparqlIriRef(sparql, i);
-      i = iriEnd && iriEnd <= limit ? iriEnd : i + 1;
-      continue;
-    }
-    if (ch === '(') depth++;
-    else if (ch === ')') {
-      depth--;
-      if (depth === 0) return i + 1;
-    }
-    i++;
-  }
-
-  return null;
-}
-
-function skipValuesClause(sparql: string, start: number, limit: number): number {
-  let i = start;
-  while (i < limit) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < limit && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '{') {
-      const end = findMatchingCloseBrace(sparql, i);
-      return end === -1 || end > limit ? i : end + 1;
-    }
-    if (ch === '.') return i + 1;
-    i++;
-  }
-  return i;
-}
-
-/**
- * Skip past a SPARQL string literal starting at `src[i]`, returning the
- * index immediately AFTER the closing quote.
- *
- * Recognises **all four** SPARQL 1.1 literal forms:
- *
- *   - `"…"`         single-line, double-quoted (escape: `\\`, `\"`, `\n`, …)
- *   - `'…'`         single-line, single-quoted (same escape grammar)
- *   - `"""…"""`     long-form, double-quoted (may span newlines, contains
- *                   raw `"`, `'`, `{`, `}`, `#`, `.` without escaping)
- *   - `'''…'''`     long-form, single-quoted (same as above)
- *
- * **Caller contract:** `src[i]` MUST be `"` or `'`; otherwise the function
- * returns `i` (no advance). The cursor returned points to the first byte
- * AFTER the literal, ready for the caller to resume its own scan.
- *
- * If a literal is unterminated (truncated input) the function consumes
- * the remainder of the string and returns `src.length`. Callers treat
- * unterminated literals as "the rest of the input is opaque payload",
- * which is the safe choice for structural scans (brace balancing,
- * keyword detection): we do NOT want a stray `{` near the end of a
- * truncated query body to confuse the surrounding scanner.
- *
- * dkg-query-engine.ts:848). The
- * previous helpers (`stripSparqlLineComments`, `scrubStringsAndComments`,
- * `findMatchingCloseBrace`, `findWhereBraceStart`, and
- * `splitTopLevelTripleStatements`) all had their own copy of the
- * single-line literal scanner and NONE recognised triple-quoted
- * literals, so a long-form payload like
- *
- *     SELECT ?t WHERE { ?s <p> """contains a {brace} and a #comment""" }
- *
- * leaked `{`, `}`, `#`, `.`, etc. through the structural scrubber and
- * the `minTrust` rewriter (and the SPARQL form classifier, and the
- * triple terminator splitter) misclassified payload as syntax. The
- * downstream effect was the same fail-closed empty result the
- * scrubbing was supposed to prevent. Centralising the lex here means
- * every helper that walks SPARQL source learns triple-quoted handling
- * in one place.
- */
-export function skipSparqlStringLiteral(src: string, i: number): number {
-  return scanSparqlStringLiteral(src, i);
-}
-
-/**
- * Token-aware locator for the explicit `WHERE` keyword at the
- * top-level of a SPARQL query. Mirrors the lex rules used by
- * {@link findMatchingCloseBrace} / the fallback path in
- * {@link findWhereBraceStart}: skips line comments (`# ... \n`),
- * single/double/triple-quoted string literals (via
- * {@link skipSparqlStringLiteral}), and IRIREFs (`<...>`) so the
- * `WHERE` substring can NOT be sourced from inside any of those
- * payload contexts. The `<` token is disambiguated as IRI-start
- * vs less-than via the same next-byte allow-list as
- * {@link findWhereBraceStart}'s fallback.
- *
- * Returns the index of the `W` of the `WHERE` keyword, or `-1` if
- * none is found at top level. Case-insensitive on the keyword
- * itself, but the surrounding word boundary is enforced (so
- * identifiers like `WHEREVER` / `aWHERE` do NOT match).
- */
-function findExplicitWhereTokenIdx(sparql: string): number {
-  const n = sparql.length;
-  const isWordStart = (c: string): boolean =>
-    (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c === '_';
-  const isWordCont = (c: string): boolean =>
-    (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-    (c >= '0' && c <= '9') || c === '_';
-  const isIriStartFirstByte = (c: string): boolean => {
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) return true;
-    return c === '#' || c === '_' || c === '/' || c === '.';
-  };
-  const isIriStart = (idx: number): boolean => {
-    const next = sparql[idx + 1];
-    if (next === undefined) return false;
-    if (!isIriStartFirstByte(next)) return false;
-    for (let j = idx + 1; j < n; j++) {
-      const c = sparql[j];
-      if (c === '>') return true;
-      if (
-        c === '<' || c === '"' || c === '{' || c === '}' ||
-        c === '|' || c === '\\' || c === '^' || c === '`' ||
-        /\s/.test(c)
-      ) return false;
-    }
-    return false;
-  };
-
-  let i = 0;
-  let braceDepth = 0;
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      if (isIriStart(i)) {
-        const end = sparql.indexOf('>', i + 1);
-        if (end === -1) return -1;
-        i = end + 1;
-        continue;
-      }
-      i++;
-      continue;
-    }
-    if (ch === '{') {
-      braceDepth++;
-      i++;
-      continue;
-    }
-    if (ch === '}') {
-      braceDepth = Math.max(0, braceDepth - 1);
-      i++;
-      continue;
-    }
-    if (isWordStart(ch)) {
-      // Word boundary check: previous char (if any) must NOT be a
-      // word-continuation byte. The outer lexer already skipped
-      // comments/strings/IRIs, so a non-word predecessor means we're
-      // at a real keyword start.
-      const prev = i > 0 ? sparql[i - 1] : '';
-      if (prev && isWordCont(prev)) {
-        // Mid-identifier — skip the rest of the word.
-        let j = i + 1;
-        while (j < n && isWordCont(sparql[j])) j++;
-        i = j;
-        continue;
-      }
-      let j = i + 1;
-      while (j < n && isWordCont(sparql[j])) j++;
-      const word = sparql.substring(i, j);
-      if (braceDepth === 0 && word.length === 5 && word.toUpperCase() === 'WHERE') {
-        return i;
-      }
-      i = j;
-      continue;
-    }
-    i++;
-  }
-  return -1;
-}
-
-/**
- * Find the next significant `{` after a given index, skipping
- * whitespace AND line comments (`# … \n`) but NOT string literals
- * — SPARQL grammar does not allow a string literal between the
- * `WHERE` keyword and its opening `{`, so encountering one means
- * the input is malformed and we should bail (return `-1`).
- */
-function nextSignificantBraceAfter(sparql: string, startIdx: number): number {
-  const n = sparql.length;
-  let i = startIdx;
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (/\s/.test(ch)) { i++; continue; }
-    if (ch === '{') return i;
-    return -1;
-  }
-  return -1;
-}
-
-/**
- * Locate the opening `{` of the WHERE clause in a SPARQL query.
- *
- * SPARQL 1.1 (§16) allows the `WHERE` keyword to be omitted from
- * `SELECT`, `DESCRIBE`, and `ASK` queries, and from the second
- * `GroupGraphPattern` of a `CONSTRUCT`. The legacy callers (`wrapWithGraph`,
- * `wrapWithGraphUnion`, `injectMinTrustFilter`) all matched only
- * `WHERE\s*\{`, so any of those legitimate shorthand forms left the
- * query untouched (no GRAPH wrapping, no trust filter injection) and —
- * on a `verifiable-memory` view whose data lives in a named sub-graph —
- * silently returned `[]` instead of executing against the right graph.
- *
- * Strategy:
- *   1. Prefer the explicit `WHERE { ... }` form.
- *   2. Otherwise, walk top-level braces (skipping IRIs / quoted
- *      strings / comments) and use the LAST top-level `{...}`. This
- *      is correct for every form:
- *        - `SELECT ?x { ... }`           (1 top-level brace)
- *        - `ASK { ... }`                 (1)
- *        - `DESCRIBE ?x { ... }`         (1)
- *        - `CONSTRUCT { tmpl } { where }`(2 — last is the WHERE)
- *      `CONSTRUCT WHERE { ... }` already matches the primary path.
- *
- * Returns `null` when no top-level `{...}` block is balanced.
- */
-function findWhereBraceStart(sparql: string): number {
-  // The earlier fast path used a raw regex `/\bWHERE\s*\{/i` which
-  // matches ANY `WHERE` followed by `{` — including ones embedded inside
-  // string literals or comments. Adversarial / obfuscated input
-  // like
-  //   SELECT ("WHERE {" AS ?x) WHERE { ... }
-  // would have the regex hit the literal substring inside the
-  // SELECT projection, then `sparql.indexOf('{', whereIdx)` would
-  // grab the brace just past the literal — and every later
-  // injection (`wrapWithGraph` / `injectMinTrustFilter`) would
-  // rewrite the wrong block, in some cases producing an invalid
-  // query and in others silently filtering against a string-literal
-  // expression rather than the actual WHERE clause.
-  //
-  // Fix: locate the explicit `WHERE` token using the SAME token-
-  // aware scanner the fallback already uses (skips line comments,
-  // single/double/triple-quoted string literals, and IRIREFs;
-  // disambiguates `<` as IRI-start vs less-than via the next-byte
-  // allow-list below). Then advance past inter-keyword whitespace
-  // (and any line comments) before reading the `{`.
-  const whereTokenIdx = findExplicitWhereTokenIdx(sparql);
-  if (whereTokenIdx !== -1) {
-    const idx = nextSignificantBraceAfter(sparql, whereTokenIdx + 'WHERE'.length);
-    return idx;
-  }
-
-  // Fallback: scan for top-level `{` while honouring SPARQL token
-  // boundaries — IRIs (`<...>`), quoted literals, and `#` comments
-  // can all contain stray `{` chars that the regex would
-  // misinterpret as block openers.
-  //
-  // dkg-query-engine.ts:559). The classifier rejects obvious
-  // comparison shapes after `<` and falls back to a forward scan
-  // that confirms a balanced IRIREF body. The r30 cut only rejected
-  // `=`, `<`, and whitespace — a pure forward scan from `<` in
-  // compact comparison syntax like
-  //   `FILTER(?n<10&&?m>5)`
-  // walks `1`, `0`, `&`, `&`, `?`, `m` (none of which are
-  // IRIREF-forbidden per the SPARQL grammar
-  // `[^<>"{}|^`\]-[#x00-#x20]`) and lands on `>`, mis-classifying
-  // the entire `<10&&?m>` as an IRI. The forward scan therefore
-  // CANNOT be trusted alone for compact `<` operators that operate
-  // on numerics / variables / sub-expressions whose body bytes are
-  // all IRIREF-legal.
-  //
-  // r30+ resolution: combine an EXPLICIT next-byte allow-list of
-  // characters that can validly start a real-world SPARQL IRIREF
-  // (ALPHA for absolute IRIs `http:` / `urn:` / `did:` / `file:` /
-  // `_blank-node:`, `#` for fragment-only relatives, `_` for the
-  // legacy blank-node-as-IRI shape, `/` for path-only relatives,
-  // and `.` for path-relative IRIs) with the existing
-  // forbidden-byte forward scan. Anything else after `<` is treated
-  // as a comparison and we advance by ONE byte. This bails fast on
-  // every `<digit`, `<?var`, `<$var`, `<(...)`, `<"lit"`, `<-1`,
-  // `<+1`, `<&`, `<|`, `<!`, `<*`, `<=`, `<<` shape — i.e. the
-  // full set of SPARQL operator contexts in which `<` is overloaded
-  // as less-than.
-  //
-  // Note: this is INTENTIONALLY stricter than the SPARQL grammar
-  // (which technically allows `<10>` as an IRIREF). Real-world
-  // SPARQL queries don't write bare-digit IRIs; falling out of the
-  // IRI branch here just means we treat `<` as a comparison and
-  // advance one byte, which is the safe behaviour for the brace
-  // scan we actually care about.
-  const isIriStartFirstByte = (c: string): boolean => {
-    // ASCII letter? (covers every absolute IRI scheme — `http:`,
-    // `urn:`, `did:`, `file:`, `mailto:`, `tag:`, `data:`, …).
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) return true;
-    // `#fragment` (SPARQL allows fragment-only relative IRIREFs
-    // when the base IRI is set by the query environment), `_blah`
-    // (legacy blank-node-as-IRI), `/path` (path-only relative),
-    // `.something` (path-relative). Everything else is a comparison
-    // operator context.
-    return c === '#' || c === '_' || c === '/' || c === '.';
-  };
-  const isIriStart = (idx: number): boolean => {
-    const next = sparql[idx + 1];
-    if (next === undefined) return false;
-    if (!isIriStartFirstByte(next)) return false;
-    for (let j = idx + 1; j < n; j++) {
-      const c = sparql[j];
-      if (c === '>') return true;
-      // Any IRIREF-forbidden character before `>` proves this `<`
-      // is a comparison, not the start of an IRI.
-      if (
-        c === '<' ||
-        c === '"' ||
-        c === '{' ||
-        c === '}' ||
-        c === '|' ||
-        c === '\\' ||
-        c === '^' ||
-        c === '`' ||
-        /\s/.test(c)
-      ) {
-        return false;
-      }
-    }
-    return false;
-  };
-
-  const n = sparql.length;
-  const opens: number[] = [];
-  let depth = 0;
-  let i = 0;
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '<') {
-      if (isIriStart(i)) {
-        const end = sparql.indexOf('>', i + 1);
-        if (end === -1) return -1;
-        i = end + 1;
-        continue;
-      }
-      // Comparison operator — advance one byte and keep scanning.
-      i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      // dkg-query-engine.ts:848).
-      // Centralised triple-quoted-aware skip — see skipSparqlStringLiteral.
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '{') {
-      if (depth === 0) opens.push(i);
-      depth++;
-    } else if (ch === '}') {
-      depth--;
-      if (depth < 0) return -1;
-    }
-    i++;
-  }
-  if (depth !== 0 || opens.length === 0) return -1;
-  return opens[opens.length - 1];
-}
-
-/**
- * Wraps a SELECT query to scope it to a named graph.
- * If the query already uses GRAPH patterns, returns it unchanged.
- */
-function wrapWithGraph(sparql: string, graphUri: string): string {
-  if (hasGraphClause(sparql)) return sparql;
-
-  const braceStart = findWhereBraceStart(sparql);
-  if (braceStart === -1) return sparql;
-
-  // — dkg-query-engine.ts:939). Use the
-  // literal/comment/IRI-aware helper so a `{` or `}` inside a SPARQL
-  // string literal, line comment, or IRI does NOT confuse the depth
-  // counter and we stop wrapping queries with literal-heavy bodies.
-  const braceEnd = findMatchingCloseBrace(sparql, braceStart);
-  if (braceEnd === -1) return sparql;
-
-  const before = sparql.slice(0, braceStart + 1);
-  const inner = sparql.slice(braceStart + 1, braceEnd);
-  const after = sparql.slice(braceEnd);
-
-  return `${before} GRAPH <${graphUri}> { ${inner} } ${after}`;
-}
-
-/**
- * Wrap a query so it runs over a union of named graphs in a single execution,
- * preserving LIMIT/ORDER BY/DISTINCT/aggregate semantics.
- *
- * the previous revision injected
- * `VALUES ?_viewGraph { <g1> <g2> … } GRAPH ?_viewGraph { inner }` directly
- * into the caller's WHERE block. Two failure modes:
- *
- *   1. Scope leak — `SELECT *` (or any projection that includes the graph
- *      variable) over a multi-graph view emitted an extra `_viewGraph`
- *      column, so downstream consumers saw a mystery binding they didn't
- *      ask for.
- *   2. Name collision — a user query that legitimately binds
- *      `?_viewGraph` (rare but valid) would silently intersect with the
- *      helper's VALUES list and clamp to the helper's graph URIs.
- *
- * The fix is to use an explicit UNION over each graph instead of a
- * single GRAPH ?var binding. That keeps the inner block's variables
- * (and only those) in scope — no helper var is introduced at all, so
- * neither SELECT * leakage nor variable-name collisions can happen.
- * Single-graph views skip the UNION wrapper entirely and use a plain
- * `GRAPH <uri>` block.
- *
- * Returns `null` when the inner WHERE body contains a UNION — the
- * UNION-of-GRAPHs wrapper would produce a nested UnionNode that
- * crashes Blazegraph, and a VALUES+GRAPH fallback leaks a helper
- * variable into the caller's scope.  The caller should fall back to
- * per-graph execution.
- */
-function wrapWithGraphUnion(sparql: string, graphUris: string[]): string | null {
-  if (hasGraphClause(sparql)) return sparql;
-  if (graphUris.length === 0) return sparql;
-
-  const braceStart = findWhereBraceStart(sparql);
-  if (braceStart === -1) return sparql;
-
-  // — dkg-query-engine.ts:939). See
-  // `findMatchingCloseBrace` and the `wrapWithGraph` cousin above.
-  const braceEnd = findMatchingCloseBrace(sparql, braceStart);
-  if (braceEnd === -1) return sparql;
-
-  const before = sparql.slice(0, braceStart + 1);
-  const inner = sparql.slice(braceStart + 1, braceEnd);
-  const after = sparql.slice(braceEnd);
-
-  if (graphUris.length === 1) {
-    return `${before} GRAPH <${graphUris[0]}> { ${inner} } ${after}`;
-  }
-
-  // Blazegraph crashes with "Illegal child type for union: UnionNode"
-  // when a UNION appears inside a GRAPH block that is itself a branch
-  // of an outer UNION. We cannot use VALUES+GRAPH either because the
-  // helper variable leaks into caller scope (SELECT *, name collisions).
-  // Signal the caller to fall back to per-graph execution.
-  const innerHasUnion = /\bUNION\b/i.test(inner);
-  if (innerHasUnion) {
-    return null;
-  }
-
-  const unionBranches = graphUris
-    .map((g) => `{ GRAPH <${g}> { ${inner} } }`)
-    .join(' UNION ');
-  return `${before} ${unionBranches} ${after}`;
-}
-
-/** The graph variable `wrapWithGraphValues` injects. Double-underscore + a
- *  view-specific name so a user query is astronomically unlikely to bind it;
- *  a collision is nonetheless detected and declined (never silently clamped). */
-const VIEW_GRAPH_SENTINEL = '?__dkgViewGraph';
-const DEDUP_GRAPH_SENTINEL = '?__dkgDedupGraph';
-const DEDUP_RANK_SENTINEL = '?__dkgDedupRank';
-const DEDUP_PRIOR_GRAPH_SENTINEL = '?__dkgDedupPriorGraph';
-const DEDUP_PRIOR_RANK_SENTINEL = '?__dkgDedupPriorRank';
-
-function wrapWithProjectedGraphSubselect(
-  sparql: string,
-  graphUris: string[],
-  helperVariables: string[],
-  buildGraphPattern: (inner: string, graphs: string[]) => string,
-  acceptsInner: (inner: string) => boolean = () => true,
-): string | null {
-  if (hasGraphClause(sparql)) return sparql;
-  if (graphUris.length === 0) return sparql;
-
-  const braceStart = findWhereBraceStart(sparql);
-  if (braceStart === -1) return null;
-  const braceEnd = findMatchingCloseBrace(sparql, braceStart);
-  if (braceEnd === -1) return null;
-
-  const before = sparql.slice(0, braceStart + 1);
-  const inner = sparql.slice(braceStart + 1, braceEnd);
-  const after = sparql.slice(braceEnd);
-  const graphs = [...new Set(graphUris)];
-
-  if (graphs.length === 1) {
-    return `${before} GRAPH <${assertSafeIri(graphs[0])}> { ${inner} } ${after}`;
-  }
-  if (/\bUNION\b/i.test(inner) || !acceptsInner(inner)) return null;
-
-  const helperNames = new Set(helperVariables.map((variable) => variable.slice(1)));
-  if (collectQueryVariables(sparql).some((variable) => helperNames.has(variable.slice(1)))) {
-    return null;
-  }
-
-  const innerVars = collectQueryVariables(inner);
-  if (innerVars.length === 0) return null;
-
-  const graphPattern = buildGraphPattern(inner, graphs);
-  return `${before} { SELECT ${innerVars.join(' ')} WHERE { ${graphPattern} } } ${after}`;
-}
-
-/**
- * Run one graph pattern across an ordered graph set while suppressing only a
- * solution mapping already produced by an earlier graph. The comparison uses
- * every variable bound by the caller's inner pattern, before the caller's
- * projection runs. Thus an identical mirrored triple is emitted once, while
- * distinct triples that both project to the same `?s` still produce two rows.
- *
- * Helper graph/rank variables are hidden inside a sub-SELECT, preserving
- * `SELECT *` and caller DISTINCT semantics. Unsupported/colliding query shapes
- * return null so the existing generic multi-graph fallback remains available.
- */
-function wrapWithDeduplicatedGraphValues(sparql: string, graphUris: string[]): string | null {
-  return wrapWithProjectedGraphSubselect(
-    sparql,
-    graphUris,
-    [
-      DEDUP_GRAPH_SENTINEL,
-      DEDUP_RANK_SENTINEL,
-      DEDUP_PRIOR_GRAPH_SENTINEL,
-      DEDUP_PRIOR_RANK_SENTINEL,
-    ],
-    (inner, graphs) => {
-      const rows = graphs
-        .map((graph, rank) => `(<${assertSafeIri(graph)}> ${rank})`)
-        .join(' ');
-      return [
-        `VALUES (${DEDUP_GRAPH_SENTINEL} ${DEDUP_RANK_SENTINEL}) { ${rows} }`,
-        `GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} }`,
-        'FILTER NOT EXISTS {',
-        `  VALUES (${DEDUP_PRIOR_GRAPH_SENTINEL} ${DEDUP_PRIOR_RANK_SENTINEL}) { ${rows} }`,
-        `  FILTER (${DEDUP_PRIOR_RANK_SENTINEL} < ${DEDUP_RANK_SENTINEL})`,
-        `  GRAPH ${DEDUP_PRIOR_GRAPH_SENTINEL} { ${inner} }`,
-        '}',
-      ].join(' ');
-    },
-    isDedupSafeBasicGraphPattern,
-  );
-}
-
-/**
- * Wrap a query so it runs over a set of named graphs in ONE execution using a
- * single `VALUES ?g { <g1> … } GRAPH ?g { inner }` block, instead of one
- * `{ GRAPH <g> { inner } } UNION …` branch per graph.
- *
- * Why this exists (issue #1596): the per-graph UNION form (`wrapWithGraphUnion`)
- * emits an N-branch UnionNode. At the ~1,424 SWM graphs of a large public
- * context graph that is a ~257 KB query whose union tree makes the
- * oxigraph-server query planner blow up and reset the connection ("fetch
- * failed"). A single VALUES table is one basic graph pattern iterated over the
- * graph list — constant plan depth — so it scales.
- *
- * Semantics are preserved. LIMIT/ORDER BY/DISTINCT/GROUP BY/aggregate all live
- * in the outer query (the `before`/`after` slices) and reduce over the merged
- * solution set exactly as the UNION form did. The one hazard is the injected
- * graph variable leaking into the caller's projection: a bare `SELECT *` would
- * expose `?__dkgViewGraph` as a mystery column, and cross-graph DISTINCT of an
- * identical triple would split on the graph. Both are neutralised by scoping
- * the VALUES+GRAPH block inside a sub-SELECT that projects ONLY the user's own
- * variables (collected from `inner`), so the sentinel never escapes.
- *
- * Returns `null` (caller falls back to `wrapWithGraphUnion` / per-graph
- * execution) when the WHERE block cannot be located, when `inner` carries a
- * top-level UNION (kept on the #789 form-aware fallback so its behaviour and
- * tests are untouched), when the user query already binds the sentinel, or
- * when the WHERE body binds no user variable at all (a var-less body offers
- * nowhere to hide the sentinel from a `SELECT *` projection).
- */
-function wrapWithGraphValues(sparql: string, graphUris: string[]): string | null {
-  return wrapWithProjectedGraphSubselect(
-    sparql,
-    graphUris,
-    [VIEW_GRAPH_SENTINEL],
-    (inner, graphs) => {
-      const values = graphs.map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
-      return `VALUES ${VIEW_GRAPH_SENTINEL} { ${values} } GRAPH ${VIEW_GRAPH_SENTINEL} { ${inner} }`;
-    },
-  );
-}
-
-/**
- * The mirror anti-join is valid only for a flat basic graph pattern (plus
- * FILTER expressions). Nested graph patterns can differ by boundness, where a
- * correlated NOT EXISTS compatibility check is not exact mapping equality.
- */
-function isDedupSafeBasicGraphPattern(inner: string): boolean {
-  const forbidden = ['OPTIONAL', 'MINUS', 'SERVICE', 'VALUES', 'BIND', 'SELECT', 'GRAPH', 'EXISTS'];
-  let i = 0;
-  while (i < inner.length) {
-    const ch = inner[i];
-    if (ch === '#') {
-      while (i < inner.length && inner[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(inner, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(inner, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    if (ch === '{' || ch === '}') return false;
-    if (isKeywordStart(inner, i)) {
-      let end = i + 1;
-      while (end < inner.length && isWordContinuation(inner[end])) end++;
-      if (forbidden.some((keyword) => isSparqlKeyword(inner, i, end, keyword))) {
-        return false;
-      }
-      i = end;
-      continue;
-    }
-    i++;
-  }
-  return true;
-}
-
-/**
- * Collect every distinct SPARQL variable (`?x` / `$x`, in first-seen order,
- * sigil included) in a query fragment, skipping tokens inside line comments,
- * string literals, and IRI refs. Reuses the same literal/comment/IRI-aware
- * primitives as `collectGraphVariables` so a `?`/`$` inside a literal or IRI is
- * never mistaken for a variable.
- */
-function collectQueryVariables(sparql: string): string[] {
-  const variables: string[] = [];
-  const seen = new Set<string>();
-  const n = sparql.length;
-  let i = 0;
-
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(sparql, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    if (ch === '?' || ch === '$') {
-      const variable = readSparqlVariable(sparql, i);
-      if (variable) {
-        if (!seen.has(variable)) {
-          seen.add(variable);
-          variables.push(variable);
-        }
-        i += variable.length;
-        continue;
-      }
-    }
-    i++;
-  }
-
-  return variables;
-}
-
-/**
- * Rewrites a SPARQL query so EVERY subject variable used in its WHERE
- * block also matches `<http://dkg.io/ontology/trustLevel> ?__trustN`
- * with an integer value ≥ `minTrust`. Subjects with no trust metadata
- * are filtered out (the required triple is absent).
- *
- * The rewriter scans the WHERE block for top-level triple patterns
- * and collects every distinct subject variable so multi-subject
- * queries like `?a <p> ?o . ?b <q> ?r` have BOTH `?a` and `?b`
- * trust-filtered.
- *
- * Returns `null` when:
- *   - no `WHERE { ... }` block can be located;
- *   - braces are unbalanced;
- *   - the WHERE contains nested structure (`{`, `GRAPH`, `OPTIONAL`,
- *     `UNION`, `MINUS`, `SERVICE`, subselect) we cannot safely rewrite;
- *   - the block contains a constant (IRI/literal/blank) subject — we
- *     cannot attach a filter to a constant, and silently ignoring the
- *     constant row would leak sub-threshold data (L1 fail-closed);
- *   - no subject var is found at all.
- * Callers treat `null` as "refuse to run".
- */
-/**
- * Strip SPARQL line comments (`# … EOL`) from a fragment of SPARQL
- * WHERE body while preserving `#` that appears inside an IRI
- * (`<http://…/rdf-ns#type>`) or inside a string literal (`"…#…"`,
- * `'…#…'`). Used by `injectMinTrustFilter` where a full parser would
- * be overkill but a naive line-comment regex mangles `rdf:type` etc.
- *
- * This is intentionally small: we handle the three grammar contexts
- * that can legally contain a bare `#` in SPARQL 1.1 (IRI, quoted
- * literal, line comment) and treat everything else as ordinary code.
- * Triple-quoted `"""…"""` / `'''…'''` are NOT recognised because
- * `injectMinTrustFilter` already bails on any WHERE containing tokens
- * from the multi-line literal grammar (FILTER EXISTS, SELECT, …).
- */
-function stripSparqlLineComments(src: string): string {
-  let out = '';
-  let i = 0;
-  const n = src.length;
-  while (i < n) {
-    const ch = src[i];
-    if (ch === '<') {
-      const end = src.indexOf('>', i + 1);
-      if (end === -1) { out += src.slice(i); break; }
-      out += src.slice(i, end + 1);
-      i = end + 1;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      // Centralised triple-quoted-aware skip.
-      const j = skipSparqlStringLiteral(src, i);
-      out += src.slice(i, j);
-      i = j;
-      continue;
-    }
-    if (ch === '#') {
-      const nl = src.indexOf('\n', i);
-      if (nl === -1) { break; }
-      i = nl; // leave the newline so dot-accounting still sees line breaks
-      continue;
-    }
-    out += ch;
-    i++;
-  }
-  return out;
-}
-
-/**
- * Replace every SPARQL string literal and `# …` comment in `src`
- * with neutral whitespace, preserving overall byte length. IRIs and
- * code tokens are passed through verbatim. The returned string is
- * suitable for STRUCTURAL CHECKS (brace balancing, keyword scans)
- * that must not be confused by user payloads such as
- * `"{json: 1}"` or `# OPTIONAL: ...`.
- *
- * Triple-quoted
- * (`"""…"""` / `'''…'''`) literals are NOT recognised because
- * `injectMinTrustFilter`'s outer pipeline already refuses any WHERE
- * carrying tokens from the multi-line literal grammar (FILTER EXISTS,
- * SELECT inside, etc.).
- */
-function scrubStringsAndComments(src: string): string {
-  const n = src.length;
-  const buf: string[] = new Array(n);
-  let i = 0;
-  while (i < n) {
-    const ch = src[i];
-    if (ch === '<') {
-      const end = src.indexOf('>', i + 1);
-      if (end === -1) {
-        for (let k = i; k < n; k++) buf[k] = src[k];
-        return buf.join('');
-      }
-      for (let k = i; k <= end; k++) buf[k] = src[k];
-      i = end + 1;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      // Centralised triple-quoted-aware skip.
-      const j = skipSparqlStringLiteral(src, i);
-      for (let k = i; k < j; k++) buf[k] = src[k] === '\n' ? '\n' : ' ';
-      i = j;
-      continue;
-    }
-    if (ch === '#') {
-      const nl = src.indexOf('\n', i);
-      const end = nl === -1 ? n : nl;
-      for (let k = i; k < end; k++) buf[k] = ' ';
-      i = end;
-      continue;
-    }
-    buf[i] = ch;
-    i++;
-  }
-  return buf.join('');
-}
-
-/**
- * Split a SPARQL WHERE body on **top-level** triple terminators, i.e.
- * dots that live outside quoted literals and outside IRI angle
- * brackets. The earlier `/\.(?=\s|$)/` regex broke on literal dots
- * in messages like `?s <p> "hello. world"`, silently fragmenting
- * the statement so the subject scanner returned garbage and
- * `_minTrust` fail-closed to `[]` for every text/chat query. This
- * tokenizer walks the body character
- * by character, tracks `<…>` and `"…"` / `'…'` scopes (with `\`-escape
- * handling), and only treats `.` as a separator when it sits at depth
- * zero and is followed by whitespace or end-of-input. Comments have
- * already been stripped by {@link stripSparqlLineComments} before we
- * get here, so `#` is treated as an ordinary character.
- *
- * Parentheses and braces would also open top-level scopes in general
- * SPARQL, but `injectMinTrustFilter` refuses to rewrite any WHERE that
- * contains `{`, `}`, `FILTER EXISTS`, subselects, or property paths
- * with grouping (the `/\{|\}/.test(inner)` + token guard above), so
- * this helper only has to handle the three grammar contexts that can
- * legally carry a bare `.` in the shapes we rewrite: IRI, string
- * literal, and top-level statement terminator.
- */
-function splitTopLevelTripleStatements(body: string): string[] {
-  const out: string[] = [];
-  let start = 0;
-  let i = 0;
-  const n = body.length;
-  while (i < n) {
-    const ch = body[i];
-    if (ch === '<') {
-      const end = body.indexOf('>', i + 1);
-      if (end === -1) { i = n; break; }
-      i = end + 1;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      // Centralised triple-quoted-aware skip.
-      i = skipSparqlStringLiteral(body, i);
-      continue;
-    }
-    if (ch === '.') {
-      // Terminator only when followed by whitespace OR end-of-input.
-      // This keeps decimals and prefixed-name dots (rdf:type.foo —
-      // rejected upstream anyway) from accidentally splitting, and
-      // matches the original regex semantics on the top-level cases.
-      const next = i + 1 < n ? body[i + 1] : '';
-      if (next === '' || /\s/.test(next)) {
-        const piece = body.slice(start, i).trim();
-        if (piece) out.push(piece);
-        start = i + 1;
-        i += 1;
-        continue;
-      }
-    }
-    i++;
-  }
-  const tail = body.slice(start).trim();
-  if (tail) out.push(tail);
-  return out;
-}
-
-function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
-  // The
-  // pre-fix rewriter only recognised `WHERE\s*\{`, so SPARQL 1.1
-  // shorthand forms (`SELECT ?x { … }`, `ASK { … }`,
-  // `DESCRIBE ?x { … }`, `CONSTRUCT { tmpl } { where }`) returned
-  // `null` and the `minTrust > Endorsed` caller silently fell
-  // through to an empty result. `findWhereBraceStart` normalises
-  // every shape to the WHERE-clause brace position before we apply
-  // the existing depth-counting pass below.
-  const braceStart = findWhereBraceStart(sparql);
-  if (braceStart === -1) return null;
-
-  // — dkg-query-engine.ts:939). The
-  // earlier brace-balance loop counted `{`/`}` inside SPARQL string
-  // literals (e.g. `FILTER(STR(?t) = "{")`), so a literal-heavy WHERE
-  // ended at depth 1 and `injectMinTrustFilter` returned `null` —
-  // which the `_minTrust > Endorsed` caller treats as "refuse to run"
-  // and silently fails closed. Use the literal/comment/IRI-aware
-  // helper so the brace boundaries match what SPARQL actually
-  // parses.
-  const braceEnd = findMatchingCloseBrace(sparql, braceStart);
-  if (braceEnd === -1) return null;
-
-  const inner = sparql.slice(braceStart + 1, braceEnd);
-
-  // A
-  // leading top-level `VALUES` clause is the canonical SPARQL shape
-  // for batched exact-subject lookups:
-  //
-  //     SELECT ?o WHERE {
-  //       VALUES ?s { <a> <b> <c> }
-  //       ?s <p> ?o .
-  //     }
-  //
-  // the forbidden-tokens regex treated any VALUES as
-  // "unsupported" and `_minTrust` fell through to
-  // `emptyResultForForm(...)`, which turns into a silent `[]` / `false`
-  // even when the bound subjects satisfy the threshold. The contract
-  // we need is:
-  //   (a) bail loudly on complex VALUES we can't reason about
-  //       (multi-var tuples, multi-line, no closing `}`);
-  //   (b) for the common single-var VALUES case, peel it off, run
-  //       the existing subject analysis on the body, and re-emit
-  //       the VALUES binding at the top of the rewritten WHERE so
-  //       the trust filter still applies to each bound IRI.
-  //
-  // Any other location (non-leading, multi-var, parenthesised row
-  // syntax `VALUES (?x ?y) { (<a> "b") }`) still bails because the
-  // flat scanner cannot safely rewrite them.
-  const { valuesClause, bodyAfterValues } = peelLeadingValues(inner);
-  const scanTarget = bodyAfterValues ?? inner;
-
-  // — dkg-query-engine.ts:851).
-  // Pre-fix the unsupported-nesting guard `/\{|\}/.test(scanTarget)`
-  // and the keyword guard below ran on the RAW WHERE body. Any
-  // `{`, `}`, or sensitive keyword that happened to appear inside a
-  // SPARQL string literal (`"{json: 1}"`, `"OPTIONAL field"`,
-  // `"SELECT * FROM x"`) or inside a `# …` line comment caused the
-  // rewriter to bail out and the caller fell through to
-  // `emptyResultForSparql(...)`. That silently fail-closed every
-  // legitimate high-trust query whose payload happened to mention
-  // those tokens — text/JSON/log content is the most common case.
-  //
-  // Scrub literals and comments to neutral spaces BEFORE the
-  // structural / keyword checks so they only see real code tokens.
-  // IRIs are preserved verbatim because IRIREF grammar already
-  // forbids `{`, `}`, `"`, and the keyword tokens we care about.
-  const codeView = scrubStringsAndComments(scanTarget);
-  if (/[{}]/.test(codeView)) return null;
-  if (
-    /\b(GRAPH|OPTIONAL|UNION|MINUS|SERVICE|VALUES|FILTER\s+EXISTS|FILTER\s+NOT\s+EXISTS|SELECT)\b/i.test(codeView)
-  ) {
-    return null;
-  }
-
-  // Strip SPARQL line comments (`# … \n`) so the dot accounting below
-  // doesn't misclassify "# foo ." as a terminating triple — BUT leave
-  // `#` fragments inside IRIs (`<…#…>`) and literals (`"…#…"`) alone.
-  // The naive `/#[^\n]*/g` regex used here previously mangled the
-  // extremely common `rdf:type` shape
-  // `<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>` whenever
-  // `_minTrust` was set, which fail-closes the entire query to `[]`
-  // .
-  const innerCodeOnly = stripSparqlLineComments(scanTarget);
-  const trimmedInner = innerCodeOnly.trim();
-  if (trimmedInner.length === 0) return null;
-
-  // Split on the top-level `.` separator to walk each triple pattern.
-  // use a
-  // quote/IRI-aware tokenizer instead of a naive regex so `?s <p>
-  // "hello. world"` isn't fragmented into broken statements that the
-  // subject scanner then refuses, fail-closing `_minTrust` to `[]`
-  // for every text/chat query. Rejoined dots are preserved for the
-  // emitted query by the clause builder below.
-  const statements = splitTopLevelTripleStatements(trimmedInner);
-
-  const subjectVars = new Set<string>();
-  const subjectIris = new Set<string>();
-  const subjectPrefixed = new Set<string>();
-  for (const stmt of statements) {
-    // top-level `FILTER(...)` / `BIND(... AS ?x)` clauses share the
-    // statement-list with triple patterns and have no subject token.
-    // Pre-fix the subject regex below didn't match either keyword,
-    // returned `null`, and `injectMinTrustFilter()` propagated `null`
-    // — collapsing every query like
-    //   SELECT ?s WHERE { ?s <p> ?o . FILTER(?o > 10) }
-    // into an empty result whenever `minTrust > SelfAttested`.
-    //
-    // Skip these clauses in the subject scan: they don't introduce
-    // new subjects and they survive verbatim because the rewritten
-    // WHERE is built by appending trust-filter triples to the
-    // *original* trimmed inner (see `rewrittenBody` below) — the
-    // FILTER/BIND text stays exactly where the caller put it.
-    //
-    // Anti-recursion: only skip TOP-LEVEL FILTER/BIND. Nested ones
-    // (e.g. `FILTER EXISTS { ... }`) are already rejected by the
-    // `\{|\}` and `FILTER\s+EXISTS` checks at line 753 / 754, so
-    // by the time we reach this loop we're guaranteed to be looking
-    // at a flat FILTER(<expr>) or BIND(<expr> AS ?x).
-    const stmtTrimmed = stmt.trim();
-    if (/^FILTER\s*\(/i.test(stmtTrimmed) || /^BIND\s*\(/i.test(stmtTrimmed)) {
-      continue;
-    }
-    // First non-whitespace token is the subject. Accept:
-    //   - variable (`?x`, `$x`)
-    //   - absolute IRI (`<urn:x>`)
-    //   - blank node (`_:b`)
-    //   - RDF literal (`"…"` with optional type/lang tag)
-    //   - prefixed name (`ex:item`) — SPARQL `PNAME_LN` / `PNAME_NS`.
-    //     Earlier revisions fail-closed `_minTrust` to `[]` for
-    //     every query that used standard `PREFIX ex: <urn:> …`
-    //     syntax, which is the recommended SPARQL shape for exact
-    //     entity lookups.
-    const m = stmt.match(
-      /^\s*([?$]([A-Za-z_]\w*)|<[^>]+>|_:[A-Za-z_]\w*|"[^"]*"(?:\^\^<[^>]+>|@[A-Za-z-]+)?|[A-Za-z][\w-]*:[A-Za-z_][\w-]*|[A-Za-z][\w-]*:)/,
-    );
-    if (!m) return null;
-    const subj = m[1];
-    if (subj.startsWith('?') || subj.startsWith('$')) {
-      subjectVars.add(subj);
-      continue;
-    }
-    // exact-entity lookups like `SELECT ?o WHERE { <e> <p> ?o }` are
-    // the most common SPARQL shape in DKG and must NOT fail closed on
-    // `_minTrust`. The threshold is perfectly enforceable against a
-    // concrete IRI: attach `<iri> <trustLevel> ?t . FILTER(?t >= N)`
-    // to the rewritten WHERE. Blank-node and literal subjects remain
-    // refused — neither can carry trust metadata in our ontology.
-    if (subj.startsWith('<') && subj.endsWith('>')) {
-      subjectIris.add(subj);
-      continue;
-    }
-    // Prefixed name — treat like an IRI at the clause-emission stage.
-    // The original query still carries the `PREFIX` declarations, so
-    // emitting `ex:item <trustLevel> ?t . FILTER(...)` is valid SPARQL
-    // at the same scope. Rejects `_:bn` (starts with `_:`) and
-    // string literals (start with `"`) naturally because this branch
-    // only runs when subj starts with a letter.
-    if (/^[A-Za-z]/.test(subj) && subj.includes(':')) {
-      subjectPrefixed.add(subj);
-      continue;
-    }
-    // Blank-node / literal subject — cannot attach a trust filter.
-    return null;
-  }
-  if (subjectVars.size === 0 && subjectIris.size === 0 && subjectPrefixed.size === 0) return null;
-
-  const extraClauses: string[] = [];
-  let i = 0;
-  for (const subjectVar of subjectVars) {
-    const trustVar = `?__dkgTrust${i++}`;
-    extraClauses.push(
-      `${subjectVar} <${TRUST_LEVEL_PREDICATE}> ${trustVar} . ` +
-        `FILTER(<http://www.w3.org/2001/XMLSchema#integer>(STR(${trustVar})) >= ${minTrust})`,
-    );
-  }
-  for (const subjectIri of subjectIris) {
-    const trustVar = `?__dkgTrust${i++}`;
-    extraClauses.push(
-      `${subjectIri} <${TRUST_LEVEL_PREDICATE}> ${trustVar} . ` +
-        `FILTER(<http://www.w3.org/2001/XMLSchema#integer>(STR(${trustVar})) >= ${minTrust})`,
-    );
-  }
-  for (const subjectPfx of subjectPrefixed) {
-    const trustVar = `?__dkgTrust${i++}`;
-    extraClauses.push(
-      `${subjectPfx} <${TRUST_LEVEL_PREDICATE}> ${trustVar} . ` +
-        `FILTER(<http://www.w3.org/2001/XMLSchema#integer>(STR(${trustVar})) >= ${minTrust})`,
-    );
-  }
-
-  // the previous implementation unconditionally inserted
-  // `" . "` between `inner.trim()` and the injected clauses, which
-  // produced `... . . ?s <trustLevel> ...` when the original WHERE
-  // already ended with a dot (the common case) — a SPARQL syntax error
-  // that every rewritten query hit. Here we emit each rewritten triple
-  // with its OWN dot and join them after the original inner block,
-  // always with exactly one separating dot regardless of whether the
-  // caller terminated their final triple pattern.
-  const endsWithDot = /\.\s*$/.test(trimmedInner);
-  const separator = endsWithDot ? ' ' : ' . ';
-  const rewrittenBody = `${trimmedInner}${separator}${extraClauses.join(' ')}`;
-
-  // if the WHERE started with a `VALUES ?s { … }` clause the
-  // peeler set aside, re-emit it at the top of the rewritten body so
-  // the bindings it introduces still drive the trust-filtered BGP.
-  const rewrittenInner = valuesClause
-    ? `${valuesClause} ${rewrittenBody}`
-    : rewrittenBody;
-
-  const before = sparql.slice(0, braceStart + 1);
-  const after = sparql.slice(braceEnd);
-  return `${before} ${rewrittenInner} ${after}`;
-}
-
-/**
- * peel a single leading top-level `VALUES ?var { … }` clause
- * off the WHERE body. Returns the clause text (verbatim, including the
- * trailing `}`) and the remainder so the caller can reason about
- * triples alone. If the WHERE does NOT start with a VALUES clause, or
- * the VALUES clause is multi-var (`VALUES (?x ?y) { (<a> "b") }`), has
- * unbalanced braces, or uses nested parentheses for row syntax, returns
- * `{ valuesClause: null, bodyAfterValues: null }` so the caller falls
- * back to refusing the query (the forbidden-tokens regex still trips
- * on `VALUES`).
- */
-function peelLeadingValues(inner: string): {
-  valuesClause: string | null;
-  bodyAfterValues: string | null;
-} {
-  const withoutComments = stripSparqlLineComments(inner);
-  const m = withoutComments.match(/^\s*VALUES\s+([?$][A-Za-z_]\w*)\s*\{/i);
-  if (!m) return { valuesClause: null, bodyAfterValues: null };
-
-  const openBraceRel = m[0].length - 1;
-  let depth = 1;
-  let i = openBraceRel + 1;
-  let inString = false;
-  let inIri = false;
-  for (; i < withoutComments.length; i++) {
-    const ch = withoutComments[i];
-    if (inString) {
-      if (ch === '\\') { i++; continue; }
-      if (ch === '"') inString = false;
-      continue;
-    }
-    if (inIri) {
-      if (ch === '>') inIri = false;
-      continue;
-    }
-    if (ch === '"') { inString = true; continue; }
-    if (ch === '<') { inIri = true; continue; }
-    if (ch === '(' || ch === ')') {
-      // Row-tuple syntax — we can't reason about multi-var rows safely.
-      return { valuesClause: null, bodyAfterValues: null };
-    }
-    if (ch === '{') depth++;
-    else if (ch === '}') {
-      depth--;
-      if (depth === 0) break;
-    }
-  }
-  if (depth !== 0) return { valuesClause: null, bodyAfterValues: null };
-
-  const closeAbs = i;
-  const valuesClause = withoutComments.slice(0, closeAbs + 1).trim();
-  const bodyAfterValues = withoutComments.slice(closeAbs + 1);
-  return { valuesClause, bodyAfterValues };
 }
 
 function mergeSharedMemoryAndDataResults(
@@ -3245,21 +1612,31 @@ function dedupeQuads(quads: Quad[]): Quad[] {
  * inner-UNION case in `queryMultipleGraphs`) to reject shapes that
  * would otherwise return duplicate / mis-ordered / over-limit rows.
  *
- * Literals, comments, and IRI bodies are blanked first
- * (`stripLiteralsAndComments`) so a keyword appearing inside a string
- * literal or IRI (e.g. `"top 10 LIMIT"`) doesn't trigger a false
- * positive. The aggregate check is intentionally broad — any of the
- * standard SPARQL aggregate functions invalidates naive concatenation
- * because the per-graph partial aggregates can't be combined post-hoc.
+ * Consume the canonical prepared token stream so active UCHAR spellings are
+ * decoded exactly as they will be for execution while strings, comments, and
+ * IRI bodies remain opaque. The aggregate check is intentionally broad — any
+ * standard aggregate invalidates naive concatenation because per-graph
+ * partial aggregates cannot be combined post-hoc.
  */
-function hasCrossGraphUnsafeModifier(sparql: string): boolean {
-  const s = stripLiteralsAndComments(sparql);
-  if (/\bDISTINCT\b/i.test(s)) return true;
-  if (/\bORDER\s+BY\b/i.test(s)) return true;
-  if (/\bGROUP\s+BY\b/i.test(s)) return true;
-  if (/\bHAVING\b/i.test(s)) return true;
-  if (/\bLIMIT\b/i.test(s)) return true;
-  if (/\bOFFSET\b/i.test(s)) return true;
-  if (/\b(COUNT|SUM|AVG|MIN|MAX|SAMPLE|GROUP_CONCAT)\s*\(/i.test(s)) return true;
+function hasCrossGraphUnsafeModifier(scope: PreparedGraphScope): boolean {
+  const tokens = scope.prepared.tokens;
+  const singleWordModifiers = new Set(['DISTINCT', 'HAVING', 'LIMIT', 'OFFSET']);
+  const aggregates = new Set(['COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'SAMPLE', 'GROUP_CONCAT']);
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token?.kind !== 'word') continue;
+    if (singleWordModifiers.has(token.upper)) return true;
+    const next = tokens[index + 1];
+    if (
+      (token.upper === 'ORDER' || token.upper === 'GROUP')
+      && next?.kind === 'word'
+      && next.upper === 'BY'
+    ) return true;
+    if (
+      aggregates.has(token.upper)
+      && next?.kind === 'symbol'
+      && next.logicalValue === '('
+    ) return true;
+  }
   return false;
 }

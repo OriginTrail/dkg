@@ -454,6 +454,8 @@ jobs:
           node scripts/ci/run-vitest-junit.mjs \
             --lane core
           node scripts/ci/run-vitest-junit.mjs \
+            --lane http-utils
+          node scripts/ci/run-vitest-junit.mjs \
             --lane rdf-utils
           node scripts/ci/run-vitest-junit.mjs \
             --lane storage
