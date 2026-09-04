@@ -368,6 +368,14 @@ describe('orphan-repos check (§4.7.1)', () => {
 // ---------------------------------------------------------------------------
 
 describe('config-sanity check (§4.7.2)', () => {
+  it('reports unsupported managed memory limits statically (#1761)', async () => {
+    const deps = makeDeps({ fs: { '/test/.dkg/config.json': JSON.stringify({ store: { backend: 'oxigraph-server', options: { memoryMaxMiB: 1024 } } }) } });
+    deps.platform = 'darwin';
+    expect(await runConfigSanityCheck(deps)).toContainEqual(expect.objectContaining({ severity: 'error', subject: 'store.options.memoryMaxMiB', message: expect.stringContaining('require Linux') }));
+    deps.platform = 'linux';
+    expect(await runConfigSanityCheck(deps)).toEqual([]);
+  });
+
   it('flags missing config as warning, not error', async () => {
     const deps = makeDeps({ fs: {} });
     const findings = await runConfigSanityCheck(deps);

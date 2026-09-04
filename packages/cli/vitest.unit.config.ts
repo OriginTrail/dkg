@@ -74,6 +74,7 @@ export default defineConfig({
           'test/dkg-doctor.test.ts',
           'test/metrics-collector-config.test.ts',
           'test/init.test.ts',
+          'test/start-store-preflight.test.ts',
           'test/nat-status.test.ts',
           'test/core-prereq-check.test.ts',
           'test/random-sampling-status.test.ts',

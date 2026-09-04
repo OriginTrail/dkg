@@ -1,12 +1,10 @@
+import { normalizeOxigraphMemoryLimits, type OxigraphMemoryLimits } from '../oxigraph-memory-limits.js';
 import type { ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { CgroupOomSnapshot } from './oxigraph-memory.js';
 import { OXIGRAPH_WATCHDOG_OOM_MARKER } from './oxigraph-parent-watchdog.js';
 
-export interface OxigraphMemoryLimits {
-  highMiB?: number;
-  maxMiB: number;
-}
+export { normalizeOxigraphMemoryLimits, type OxigraphMemoryLimits } from '../oxigraph-memory-limits.js';
 
 export interface OxigraphSpawnSpec {
   command: string;
@@ -48,26 +46,6 @@ function cgroupEvidenceIncremented(
   if (!sigkillCompatibleExit || !input.snapshot) return false;
   const oomKillNow = input.readOomKill(input.snapshot.dir);
   return typeof oomKillNow === 'number' && oomKillNow > input.snapshot.oomKill;
-}
-
-export function normalizeOxigraphMemoryLimits(input: {
-  highMiB?: unknown;
-  maxMiB?: unknown;
-}): OxigraphMemoryLimits | undefined {
-  if (input.highMiB === undefined && input.maxMiB === undefined) return undefined;
-  if (typeof input.maxMiB !== 'number' || !Number.isInteger(input.maxMiB) || input.maxMiB <= 0) {
-    throw new Error('Managed Oxigraph memoryMaxMiB must be a positive integer');
-  }
-  if (
-    input.highMiB !== undefined &&
-    (typeof input.highMiB !== 'number' || !Number.isInteger(input.highMiB) || input.highMiB <= 0 || input.highMiB > input.maxMiB)
-  ) {
-    throw new Error('Managed Oxigraph memoryHighMiB must be a positive integer no greater than memoryMaxMiB');
-  }
-  return {
-    maxMiB: input.maxMiB,
-    ...(typeof input.highMiB === 'number' ? { highMiB: input.highMiB } : {}),
-  };
 }
 
 export function createOxigraphLaunchStrategy(opts: {

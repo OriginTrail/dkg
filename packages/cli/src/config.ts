@@ -1,3 +1,4 @@
+import { normalizeOxigraphMemoryLimits } from './oxigraph-memory-limits.js';
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
 import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origintrail-official/dkg-publisher';
 import { join, dirname, basename } from 'node:path';
@@ -2210,9 +2211,22 @@ export interface StoreConfigValidationError {
   message: string;
 }
 
-export function validateStoreConfig(config: DkgConfig): StoreConfigValidationError[] {
+export function validateStoreConfig(config: DkgConfig, platform: NodeJS.Platform = process.platform): StoreConfigValidationError[] {
   const errors: StoreConfigValidationError[] = [];
   const backend = config.store?.backend;
+  if (backend === 'oxigraph-server') {
+    const options = config.store?.options ?? {};
+    const hasLimits = options.memoryHighMiB !== undefined || options.memoryMaxMiB !== undefined;
+    if (hasLimits && platform !== 'linux') {
+      errors.push({ field: 'store.options.memoryMaxMiB', message:
+        `Managed Oxigraph memory limits are unsupported on ${platform}; they require Linux with a running systemd user manager. Remove memoryHighMiB/memoryMaxMiB or run the managed store on Linux.` });
+    }
+    try {
+      normalizeOxigraphMemoryLimits({ highMiB: options.memoryHighMiB, maxMiB: options.memoryMaxMiB });
+    } catch (error) {
+      errors.push({ field: 'store.options.memoryMaxMiB', message: error instanceof Error ? error.message : String(error) });
+    }
+  }
   // Mirror of `isExternalBackend` from @origintrail-official/dkg-storage.
   // Duplicated here to keep config.ts free of upward dependencies on the
   // storage package (config.ts is leaf-imported by many other modules).

@@ -17,6 +17,7 @@
 import { join } from 'node:path';
 import {
   AUTO_UPDATE_GIT_ONLY_FIELDS,
+  validateStoreConfig,
   parseAutoUpdateVerifyTagSignature,
   type DkgConfig,
 } from '../../config.js';
@@ -70,6 +71,10 @@ export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]>
       subject: configPath,
     });
     return findings;
+  }
+
+  for (const error of validateStoreConfig(parsed as unknown as DkgConfig, deps.platform)) {
+    findings.push({ check: 'config-sanity', severity: 'error', message: error.message, subject: error.field });
   }
 
   // nodeRole sanity
