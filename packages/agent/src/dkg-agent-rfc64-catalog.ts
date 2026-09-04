@@ -136,6 +136,7 @@ import {
   composeRfc64FinalizedCatalogAuthorityV1,
   composeRfc64RegisteredRosterVersionV1,
   composeRfc64UnregisteredCatalogAuthorityV1,
+  parseRfc64AuthoritySnapshotV1,
   type Rfc64ReleaseNativeAuthoritySnapshotV1,
 } from './rfc64/release-native-catalog-authority-v1.js';
 import { readRfc64LegacySwmBoundaryCountV1 } from
@@ -1353,16 +1354,18 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       const reader = requireRfc64ContextGraphAuthorityReaderV1(
         this.contextGraphAuthorityReaderCapability,
       );
-      const snapshot = await reader.getContextGraphAuthoritySnapshot(BigInt(onChainId));
+      const expectedOnChainId = BigInt(onChainId);
+      const snapshot = parseRfc64AuthoritySnapshotV1(
+        await reader.getContextGraphAuthoritySnapshot(expectedOnChainId),
+        expectedOnChainId,
+      );
       if (
         !snapshot.active
         || snapshot.nameHash !== this.contextGraphNameCommitment(contextGraphId).toLowerCase()
       ) return null;
-      const owner = snapshot.owner.toLowerCase();
-      if (!/^0x[0-9a-f]{40}$/u.test(owner)) return null;
       return Object.freeze({
-        agentAddress: owner as EvmAddressV1,
-        authorityEra: snapshot.ownershipEra as DecimalU64V1,
+        agentAddress: snapshot.owner,
+        authorityEra: snapshot.ownershipEra,
       });
     }
     const ownerDid = await this.getContextGraphOwner(contextGraphId);
@@ -1371,7 +1374,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       .replace(/^<|>$/gu, '')
       .replace(/^did:dkg:agent:/u, '')
       .toLowerCase();
-    return owner !== undefined && /^0x[0-9a-f]{40}$/u.test(owner)
+    return owner !== undefined && ethers.isAddress(owner) && owner !== ethers.ZeroAddress
       ? Object.freeze({
         agentAddress: owner as EvmAddressV1,
         authorityEra: '0' as DecimalU64V1,
@@ -1665,7 +1668,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         const reader = requireRfc64ContextGraphAuthorityReaderV1(
           this.contextGraphAuthorityReaderCapability,
         );
-        const snapshot = await reader.getContextGraphAuthoritySnapshot(BigInt(onChainId));
+        const expectedOnChainId = BigInt(onChainId);
+        const snapshot = parseRfc64AuthoritySnapshotV1(
+          await reader.getContextGraphAuthoritySnapshot(expectedOnChainId),
+          expectedOnChainId,
+        );
         if (signal?.aborted) throw signal.reason;
         const expectedNameHash = this.contextGraphNameCommitment(contextGraphId).toLowerCase();
         if (!snapshot.active || snapshot.nameHash !== expectedNameHash) {
@@ -1694,7 +1701,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             ...snapshot,
             participantAgents: Object.freeze([
               ...new Set([
-                ...snapshot.participantAgents.map((address) => address.toLowerCase()),
+                ...snapshot.participantAgents,
                 ...localRoster,
               ].filter((address) => !revokedAgents.has(address))),
             ].sort()),

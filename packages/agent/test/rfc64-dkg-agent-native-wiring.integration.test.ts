@@ -75,7 +75,10 @@ import {
   buildOpenOwnerContextGraphPolicyV1,
   unsignedOpenContextGraphPolicyEnvelopeV1,
 } from '../src/rfc64/open-catalog-policy-v1.js';
-import { composeRfc64FinalizedCatalogAuthorityV1 } from
+import {
+  composeRfc64FinalizedCatalogAuthorityV1,
+  parseRfc64AuthoritySnapshotV1,
+} from
   '../src/rfc64/release-native-catalog-authority-v1.js';
 import {
   resolveRfc64PublicCatalogActivationChainIdentityV1,
@@ -7887,11 +7890,13 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(
       AUTHOR_WALLET.privateKey,
     );
+    const onChainContextGraphId = BigInt(ON_CHAIN_CONTEXT_GRAPH_ID);
     const authority = composeRfc64FinalizedCatalogAuthorityV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
-      snapshot: await receiverChain.getContextGraphAuthoritySnapshot(
-        BigInt(ON_CHAIN_CONTEXT_GRAPH_ID),
+      snapshot: parseRfc64AuthoritySnapshotV1(
+        await receiverChain.getContextGraphAuthoritySnapshot(onChainContextGraphId),
+        onChainContextGraphId,
       ),
     });
     for (const agent of [author, receiver]) {

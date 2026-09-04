@@ -343,6 +343,25 @@ describe('RFC-64 rollout authority integration', () => {
       });
   });
 
+  it('rejects a curator binding returned for a different registered Context Graph ID', async () => {
+    const mismatchedSnapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'),
+      contextGraphId: '10',
+    });
+    const edge = await startAgent(
+      'registered-curator-binding-mismatch',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { chainAdapter: chainWithFinalizedAuthority(mismatchedSnapshot) },
+    );
+    vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
+
+    await expect(edge.readRfc64CurrentCuratorAuthorityBindingV1(CONTEXT_GRAPH_ID))
+      .rejects.toThrow(/does not match the requested ID/u);
+  });
+
   it('derives clean-config responsibility from normal create and unsubscribe', async () => {
     const edge = await startAgent('default-responsibility', undefined);
     const requestReplays = vi.spyOn(
@@ -759,6 +778,39 @@ describe('RFC-64 rollout authority integration', () => {
     });
     expect(edge.resolveRfc64PrivateReadRosterV1(contextGraphId))
       .toEqual([MEMBER, AUTHOR].sort());
+  });
+
+  it('rejects a registered authority whose final merged roster exceeds 256 members', async () => {
+    const contextGraphId = `${AUTHOR}/registered-private-roster-overflow` as ContextGraphIdV1;
+    const chainMembers = Array.from({ length: 256 }, (_, index) => (
+      `0x${(index + 1).toString(16).padStart(40, '0')}` as EvmAddressV1
+    ));
+    const localMember = '0x0000000000000000000000000000000000000101' as EvmAddressV1;
+    const edge = await startAgent(
+      'registered-private-roster-overflow',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        chainAdapter: chainWithFinalizedAuthority(finalizedAuthoritySnapshot(
+          contextGraphId,
+          chainMembers,
+          '0',
+        )),
+        rfc64CatalogAccessPolicyAuthority: {
+          localAgentAddress: localMember,
+          resolveRemoteAgentAddress: async () => null,
+        },
+      },
+    );
+    vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
+    vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
+    vi.spyOn(edge, 'getMemberRecoveryGate').mockResolvedValue([localMember]);
+    vi.spyOn(edge, 'readRfc64PrivateRosterVersionV1').mockResolvedValue('1');
+
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId))
+      .rejects.toThrow(/member roster cannot exceed 256/u);
   });
 
   it('does not re-add a locally revoked participant from a finalized chain snapshot', async () => {
