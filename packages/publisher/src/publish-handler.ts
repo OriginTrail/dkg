@@ -1,4 +1,4 @@
-import { hasValidGraphPublishContent, isGraphPublishAccessPolicy, normalizeGraphPublishPeers, hasValidGraphPublishPeers } from './graph-publish-envelope.js';
+import { hasValidGraphPublishContent, isGraphPublishAccessPolicy, resolveGraphPublishAccess } from './graph-publish-envelope.js';
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import type { EventBus, StreamHandler, OperationContext } from '@origintrail-official/dkg-core';
@@ -121,13 +121,11 @@ function resolveGraphScopedPublishRequest(
   if (!isGraphPublishAccessPolicy(accessPolicy)) {
     throw new Error(`Graph-scoped publish has invalid accessPolicy: ${accessPolicy || '(empty)'}`);
   }
-  const rawAllowedPeers = request.allowedPeers ?? [];
-  const allowedPeers = normalizeGraphPublishPeers(rawAllowedPeers);
-  if (
-    !hasValidGraphPublishPeers(accessPolicy, rawAllowedPeers.length, allowedPeers)
-  ) {
+  const access = resolveGraphPublishAccess(accessPolicy, request.allowedPeers ?? []);
+  if (!access) {
     throw new Error('Graph-scoped publish has an invalid access-policy peer envelope');
   }
+  const { allowedPeers } = access;
   const subGraphName = request.subGraphName || undefined;
   if (subGraphName) {
     const validation = validateSubGraphName(subGraphName);

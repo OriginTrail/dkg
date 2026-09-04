@@ -1,4 +1,4 @@
-import { hasValidGraphPublishContent, isGraphPublishAccessPolicy, normalizeGraphPublishPeers, hasValidGraphPublishPeers } from './graph-publish-envelope.js';
+import { hasValidGraphPublishContent, resolveGraphPublishAccess } from './graph-publish-envelope.js';
 import {
   deleteByPatternWithoutCount,
   GraphManager,
@@ -105,15 +105,11 @@ function resolveGraphScopedPublishIntent(
   if (scope.ual !== intent.kaUal || scope.assertionVersion !== '1') {
     throw new Error('StorageACK: graph-scoped publish requires a canonical version-1 UAL');
   }
-  const accessPolicy = intent.accessPolicy;
-  const rawAllowedPeers = intent.allowedPeers ?? [];
-  const allowedPeers = normalizeGraphPublishPeers(rawAllowedPeers);
-  if (
-    !isGraphPublishAccessPolicy(accessPolicy)
-    || !hasValidGraphPublishPeers(accessPolicy, rawAllowedPeers.length, allowedPeers)
-  ) {
+  const access = resolveGraphPublishAccess(intent.accessPolicy, intent.allowedPeers ?? []);
+  if (!access) {
     throw new Error('StorageACK: graph-scoped publish has an invalid access envelope');
   }
+  const { accessPolicy, allowedPeers } = access;
   const subGraphName = intent.subGraphName || undefined;
   if (subGraphName) {
     const validation = validateSubGraphName(subGraphName);

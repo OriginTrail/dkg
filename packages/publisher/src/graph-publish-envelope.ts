@@ -18,15 +18,15 @@ export function isGraphPublishAccessPolicy(value: string | undefined): value is 
   return value === 'public' || value === 'ownerOnly' || value === 'allowList';
 }
 
-export function normalizeGraphPublishPeers(peers: readonly string[]): string[] {
-  return [...new Set(peers.map(peer => peer.trim()).filter(Boolean))];
-}
-
-export function hasValidGraphPublishPeers(
-  accessPolicy: 'public' | 'ownerOnly' | 'allowList',
-  rawPeerCount: number,
-  allowedPeers: readonly string[],
-): boolean {
-  return allowedPeers.length === rawPeerCount
-    && (accessPolicy === 'allowList' ? allowedPeers.length > 0 : allowedPeers.length === 0);
+export function resolveGraphPublishAccess(
+  accessPolicy: string | undefined,
+  rawAllowedPeers: readonly string[],
+): { accessPolicy: 'public' | 'ownerOnly' | 'allowList'; allowedPeers: string[] } | undefined {
+  const allowedPeers = [...new Set(rawAllowedPeers.map(peer => peer.trim()).filter(Boolean))];
+  if (
+    !isGraphPublishAccessPolicy(accessPolicy)
+    || allowedPeers.length !== rawAllowedPeers.length
+    || (accessPolicy === 'allowList' ? allowedPeers.length === 0 : allowedPeers.length !== 0)
+  ) return undefined;
+  return { accessPolicy, allowedPeers };
 }
