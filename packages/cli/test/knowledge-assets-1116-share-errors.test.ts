@@ -1078,6 +1078,16 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(enqueueCalls[0]?.intent).not.toHaveProperty('callerAgentAddress');
   });
 
+  it('surfaces the local-chain skip reason from vm/publish (#1299)', async () => {
+    await startWith({}, {
+      publishFromFinalizedAssertion: async () => ({ status: 'tentative', localChainSkipReason: 'no-chain' }),
+    });
+    const res = await post('vm/publish', { contextGraphId: CG_ID });
+    expect(res.status).toBe(502);
+    expect(res.body.error).toContain('VM publish stayed local');
+    expect(res.body.error).toContain('chain configuration');
+  });
+
   // GH#1786 — the resident-author selector. The load-bearing property is that it can
   // never be silently dropped: a dropped selector publishes the WRONG author with a
   // success status and real TRAC/gas spent.
