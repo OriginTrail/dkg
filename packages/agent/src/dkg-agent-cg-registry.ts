@@ -383,6 +383,19 @@ import {
 const CHAIN_ATTESTED_DECLARATION_SCAN_MAX = 512;
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 
+export type ContextGraphRegistrationBinding =
+  | { kind: 'unregistered' }
+  | {
+      kind: 'registered';
+      onChainId: bigint;
+      provenance: 'authoritative' | 'ontology' | 'reverse-name-hash' | 'numeric-id' | 'name-hash';
+    }
+  | {
+      kind: 'unavailable';
+      reason: 'local-chain-binding-unavailable' | 'chain-name-binding-unavailable';
+      detail?: string;
+    };
+
 function contextGraphBindingAbortReason(signal: AbortSignal): Error {
   if (signal.reason instanceof Error) return signal.reason;
   const error = new Error(String(signal.reason ?? 'Context Graph binding resolution aborted'));
@@ -590,6 +603,86 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   ): Promise<string | null> {
     const binding = await this.resolveContextGraphOnChainIdBinding(contextGraphId, options);
     return binding?.onChainId ?? null;
+  }
+
+  /**
+   * Canonical registration-discovery boundary for policy consumers.
+   *
+   * A locally indexed graph must resolve through its current/durable binding
+   * owner; failures remain unavailable and cannot fall through to cold lookup.
+   * A graph with no local binding may be addressed by numeric id or discovered
+   * from its immutable name commitment. Callers never infer registration from
+   * a nullable id and therefore cannot confuse an authority outage with an
+   * unregistered graph.
+   */
+  async resolveContextGraphRegistrationBinding(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ContextGraphRegistrationBinding> {
+    if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
+      return { kind: 'unregistered' };
+    }
+
+    const localTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
+    if (localTarget !== null) {
+      try {
+        const binding = await this.resolveContextGraphOnChainIdBinding(contextGraphId, {
+          signal: options.signal,
+          source: 'agent.contextGraph.registrationBinding',
+        });
+        if (binding === null) return { kind: 'unregistered' };
+        return {
+          kind: 'registered',
+          onChainId: BigInt(binding.onChainId),
+          provenance: binding.provenance,
+        };
+      } catch (err) {
+        return {
+          kind: 'unavailable',
+          reason: 'local-chain-binding-unavailable',
+          detail: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }
+
+    if (!/^0x[0-9a-fA-F]{64}$/.test(contextGraphId)) {
+      try {
+        const numericId = BigInt(contextGraphId);
+        if (numericId > 0n) {
+          return { kind: 'registered', onChainId: numericId, provenance: 'numeric-id' };
+        }
+      } catch {
+        // Non-numeric cleartext continues to immutable name-hash discovery.
+      }
+    }
+
+    const resolveByNameHash = this.chain.resolveContextGraphIdByNameHash;
+    if (typeof resolveByNameHash !== 'function') return { kind: 'unregistered' };
+    try {
+      const nameHash = this.contextGraphNameCommitment(contextGraphId);
+      const onChainId = await (options.signal
+        ? resolveByNameHash.call(this.chain, nameHash, { signal: options.signal })
+        : resolveByNameHash.call(this.chain, nameHash));
+      return onChainId === null || onChainId <= 0n
+        ? { kind: 'unregistered' }
+        : { kind: 'registered', onChainId, provenance: 'name-hash' };
+    } catch (err) {
+      return {
+        kind: 'unavailable',
+        reason: 'chain-name-binding-unavailable',
+        detail: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /** Compatibility projection; authority-sensitive code uses the typed result. */
+  async resolveContextGraphNumericIdForPolicy(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<bigint | null> {
+    const binding = await this.resolveContextGraphRegistrationBinding(contextGraphId);
+    return binding.kind === 'registered' ? binding.onChainId : null;
   }
 
   /** Resolve an id together with the provenance required by the binding owner. */

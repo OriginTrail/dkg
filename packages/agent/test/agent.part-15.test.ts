@@ -1601,6 +1601,13 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           activated: 0,
           dormant: 1,
           dormantIds: [failedId],
+          dormantReasons: {
+            activationCap: [],
+            authorityDenied: [],
+            authorityUnavailable: [],
+            rehydrationDisabled: [],
+            deactivated: [failedId],
+          },
         });
       } finally {
         await agent.stop().catch(() => {});

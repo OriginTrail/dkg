@@ -781,6 +781,13 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(confirmed.status).toBe('confirmed');
     expect(confirmed.onChainResult).toBeDefined();
 
+    // Model the advertised downtime before recreating the stale local state.
+    // Otherwise the live chain poller can race this test and legitimately
+    // retire the finalized SWM twin under its own `system` operation.
+    const chainPoller = (agent as any).chainPoller;
+    await chainPoller?.stop();
+    if ((agent as any).chainPoller === chainPoller) (agent as any).chainPoller = null;
+
     const lifecycleAgent = intent.agentAddress ?? agent.defaultAgentAddress ?? agent.peerId;
     const lifecycleUri = assertionLifecycleUri(CG_ID, lifecycleAgent, name);
     const assertionUri = contextGraphAssertionUri(CG_ID, lifecycleAgent, name);

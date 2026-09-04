@@ -149,8 +149,11 @@ describe('exact Context Graph asset fetch', () => {
       localAgents: new Map([[MEMBER, { agentAddress: MEMBER }]]),
       defaultAgentAddress: MEMBER,
       getContextGraphAllowedPeers: vi.fn(async () => null),
-      resolveContextGraphNameHashBindingTarget: vi.fn(() => null),
-      resolveContextGraphNumericIdForPolicy: vi.fn(async () => BigInt(ON_CHAIN_ID)),
+      resolveContextGraphRegistrationBinding: vi.fn(async () => ({
+        kind: 'registered' as const,
+        onChainId: BigInt(ON_CHAIN_ID),
+        provenance: 'numeric-id' as const,
+      })),
       resolveRegisteredContextGraphAuthority:
         DKGAgent.prototype.resolveRegisteredContextGraphAuthority,
       onChainParticipantAgentsCache: new Map<string, string[]>(),

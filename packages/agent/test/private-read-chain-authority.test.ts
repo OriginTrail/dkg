@@ -2,14 +2,22 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/index.js';
+import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
 
 const MEMBER = '0x0000000000000000000000000000000000000001';
 const NON_MEMBER = '0x00000000000000000000000000000000000000ff';
+
+const registeredBinding = (onChainId: bigint) => ({
+  kind: 'registered' as const,
+  onChainId,
+  provenance: 'numeric-id' as const,
+});
 
 describe('private read authorization uses the on-chain participant roster', () => {
   let agent: DKGAgent | null = null;
 
   afterEach(async () => {
+    vi.useRealTimers();
     if (agent) await agent.stop().catch(() => undefined);
     agent = null;
   });
@@ -22,7 +30,8 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
     vi.spyOn(agent, 'resolveRfc64PrivateReadRosterV1').mockReturnValue(undefined);
     vi.spyOn(agent, 'isPrivateContextGraph').mockResolvedValue(true);
-    vi.spyOn(agent, 'resolveContextGraphNumericIdForPolicy').mockResolvedValue(7n);
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(registeredBinding(7n));
     vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(1);
     const chainRoster = vi.spyOn(chain, 'getContextGraphParticipantAgents')
       .mockResolvedValue([MEMBER]);
@@ -48,7 +57,6 @@ describe('private read authorization uses the on-chain participant roster', () =
       chainAdapter: chain,
     });
     vi.spyOn(agent, 'resolveRfc64PrivateReadRosterV1').mockReturnValue(undefined);
-    vi.spyOn(agent, 'resolveContextGraphNumericIdForPolicy').mockResolvedValue(null);
     const resolveByNameHash = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
       .mockResolvedValue(7n);
     vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(1);
@@ -70,7 +78,6 @@ describe('private read authorization uses the on-chain participant roster', () =
       chainAdapter: chain,
     });
     vi.spyOn(agent, 'resolveRfc64PrivateReadRosterV1').mockReturnValue(undefined);
-    vi.spyOn(agent, 'resolveContextGraphNumericIdForPolicy').mockResolvedValue(null);
     vi.spyOn(chain, 'resolveContextGraphIdByNameHash').mockResolvedValue(8n);
     vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(0);
     const chainRoster = vi.spyOn(chain, 'getContextGraphParticipantAgents');
@@ -90,7 +97,8 @@ describe('private read authorization uses the on-chain participant roster', () =
       name: 'PublicReadIndependentOfLegacyPeerMetadata',
       chainAdapter: chain,
     });
-    vi.spyOn(agent, 'resolveContextGraphNumericIdForPolicy').mockResolvedValue(8n);
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(registeredBinding(8n));
     vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(0);
     const legacyPeers = vi.spyOn(agent, 'getContextGraphAllowedPeers')
       .mockRejectedValue(new Error('local metadata store unavailable'));
@@ -112,7 +120,6 @@ describe('private read authorization uses the on-chain participant roster', () =
       name: 'PrivateColdRecoveryAgentGate',
       chainAdapter: chain,
     });
-    vi.spyOn(agent, 'resolveContextGraphNumericIdForPolicy').mockResolvedValue(null);
     const resolveByNameHash = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
       .mockResolvedValue(9n);
     vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(1);
@@ -136,7 +143,8 @@ describe('private read authorization uses the on-chain participant roster', () =
       name: 'PublicRegisteredAgentGate',
       chainAdapter: chain,
     });
-    vi.spyOn(agent, 'resolveContextGraphNumericIdForPolicy').mockResolvedValue(8n);
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(registeredBinding(8n));
     vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(0);
     const chainRoster = vi.spyOn(chain, 'getContextGraphParticipantAgents')
       .mockResolvedValue([NON_MEMBER]);
@@ -199,7 +207,13 @@ describe('private read authorization uses the on-chain participant roster', () =
       name: 'PrivateReadBindingUnavailable',
       chainAdapter: chain,
     });
-    vi.spyOn(agent, 'resolveContextGraphNumericIdForPolicy')
+    agent.setContextGraphSubscription('possibly-registered', {
+      subscribed: true,
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+    }, { persist: false });
+    vi.spyOn(agent.store, 'query')
       .mockRejectedValue(new Error('local mapping store unavailable'));
     const localPolicy = vi.spyOn(agent, 'isPrivateContextGraph').mockResolvedValue(false);
 
@@ -224,7 +238,8 @@ describe('private read authorization uses the on-chain participant roster', () =
       });
       vi.spyOn(agent, 'resolveRfc64PrivateReadRosterV1').mockReturnValue(undefined);
       vi.spyOn(agent, 'isPrivateContextGraph').mockResolvedValue(true);
-      vi.spyOn(agent, 'resolveContextGraphNumericIdForPolicy').mockResolvedValue(7n);
+      vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+        .mockResolvedValue(registeredBinding(7n));
       vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(1);
       vi.spyOn(agent, 'getContextGraphAgentGateAddresses').mockResolvedValue([MEMBER]);
       const chainRoster = vi.spyOn(chain, 'getContextGraphParticipantAgents');
@@ -237,6 +252,103 @@ describe('private read authorization uses the on-chain participant roster', () =
       })).resolves.toBe(false);
     },
   );
+
+  it('bounds a never-settling registered participant roster and fails read admission closed', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'PrivateReadHungRoster',
+      chainAdapter: chain,
+    });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(registeredBinding(7n));
+    vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(1);
+    vi.spyOn(chain, 'getContextGraphParticipantAgents')
+      .mockReturnValue(new Promise<string[]>(() => undefined));
+    vi.useFakeTimers();
+
+    const read = agent.resolveContextGraphReadAuthority('hung-private', {
+      callerAgentAddress: MEMBER,
+      allowSubscriptionFallback: false,
+    });
+    await vi.advanceTimersByTimeAsync(CHAIN_POLICY_READ_TIMEOUT_MS);
+
+    await expect(read).resolves.toMatchObject({
+      outcome: 'unavailable',
+      source: 'registered-chain',
+      reason: 'chain-participant-authority-unavailable',
+    });
+  });
+
+  it('propagates caller abort to a stalled registered participant lookup', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'PrivateReadAbortedRoster',
+      chainAdapter: chain,
+    });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(registeredBinding(7n));
+    vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(1);
+    vi.spyOn(chain, 'getContextGraphParticipantAgents')
+      .mockReturnValue(new Promise<string[]>(() => undefined));
+    const controller = new AbortController();
+
+    const gate = agent.getContextGraphAgentGateAddresses('aborted-private', {
+      signal: controller.signal,
+    });
+    controller.abort(new Error('caller stopped'));
+
+    await expect(gate).resolves.toEqual([]);
+  });
+
+  it('does not let a never-settling registered roster block subscription rehydration', async () => {
+    const contextGraphId = 'persisted-hung-roster';
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'PrivateReadHungRosterRehydration',
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [{
+          id: contextGraphId,
+          subscribed: true,
+          synced: true,
+          sharedMemorySynced: true,
+          metaSynced: true,
+          syncScoped: true,
+          onChainId: '7',
+        }],
+        save: async () => undefined,
+        delete: async () => undefined,
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+    });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(registeredBinding(7n));
+    vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(1);
+    vi.spyOn(chain, 'getContextGraphParticipantAgents')
+      .mockReturnValue(new Promise<string[]>(() => undefined));
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      agent.start(),
+      new Promise<never>((_, reject) => {
+        watchdog = setTimeout(
+          () => reject(new Error('daemon startup exceeded the roster-read deadline')),
+          CHAIN_POLICY_READ_TIMEOUT_MS + 1_500,
+        );
+      }),
+    ]).finally(() => {
+      if (watchdog) clearTimeout(watchdog);
+    });
+
+    expect(agent.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      activated: 0,
+      dormant: 1,
+      dormantIds: [contextGraphId],
+      dormantReasons: {
+        authorityUnavailable: [contextGraphId],
+      },
+    });
+  }, CHAIN_POLICY_READ_TIMEOUT_MS + 3_500);
 
   it('leaves a persisted subscription dormant when startup cannot prove current read authority', async () => {
     const contextGraphId = 'persisted-private-poison';
@@ -344,10 +456,10 @@ describe('private read authorization uses the on-chain participant roster', () =
       publishPolicy: 0,
       participantAgents: [NON_MEMBER],
     });
-    vi.spyOn(agent, 'resolveContextGraphNumericIdForPolicy').mockImplementation(async (id) => {
-      if (id === memberContextGraphId) return memberGraph.contextGraphId;
-      if (id === nonMemberContextGraphId) return nonMemberGraph.contextGraphId;
-      return null;
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding').mockImplementation(async (id) => {
+      if (id === memberContextGraphId) return registeredBinding(memberGraph.contextGraphId);
+      if (id === nonMemberContextGraphId) return registeredBinding(nonMemberGraph.contextGraphId);
+      return { kind: 'unregistered' };
     });
     // start() drives the real background recovery entry point after the local
     // agent and chain rosters have both been seeded.

@@ -597,7 +597,10 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // that this is a gated graph while denying sender-key and sync admissions.
     // Registered-public graphs continue below to their distinct local
     // publisher/signing gate, but never to stale RFC-64 private authority.
-    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(contextGraphId);
+    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(
+      contextGraphId,
+      { signal: options.signal },
+    );
     if (registeredAuthority.kind === 'private') return registeredAuthority.participantAgents;
     if (registeredAuthority.kind === 'unavailable') return [];
 
@@ -677,15 +680,18 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async getMemberRecoveryGate(
     this: DKGAgent,
     contextGraphId: string,
-    _options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal } = {},
   ): Promise<string[] | null> {
-    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(contextGraphId);
+    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(
+      contextGraphId,
+      { signal: options.signal },
+    );
     if (registeredAuthority.kind === 'private') return registeredAuthority.participantAgents;
     if (registeredAuthority.kind !== 'unregistered') return null;
 
     const seen = new Set<string>();
     const agents: string[] = [];
-    const meta = await this.getCgMeta(contextGraphId);
+    const meta = await this.getCgMeta(contextGraphId, { signal: options.signal });
     if (meta.allowedAgents.length === 0 && meta.participantAgents.length === 0) {
       return null; // no _meta agent gate ⇒ hard-deny at the recovery gate
     }

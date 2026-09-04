@@ -339,7 +339,7 @@ import {
   CHAIN_POLICY_READ_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
-import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
+import { isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
   ContextGraphNotFoundError,
@@ -435,6 +435,44 @@ function syncAuthAbortError(reason: unknown): Error {
 
 function throwIfSyncAuthAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw syncAuthAbortError(signal.reason);
+}
+
+function boundedRegisteredAuthorityRead<T>(
+  start: () => Promise<T>,
+  label: string,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (signal?.aborted) return Promise.reject(syncAuthAbortError(signal.reason));
+  const work = start();
+  work.catch(() => {
+    // The caller may already have returned after timeout/abort.
+  });
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (complete: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      complete();
+    };
+    const onAbort = () => {
+      finish(() => reject(syncAuthAbortError(signal?.reason)));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    timer = setTimeout(() => {
+      finish(() => reject(new Error(
+        `${label} timed out after ${CHAIN_POLICY_READ_TIMEOUT_MS}ms`,
+      )));
+    }, CHAIN_POLICY_READ_TIMEOUT_MS);
+    timer.unref?.();
+    work.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    );
+    if (signal?.aborted) onAbort();
+  });
 }
 
 type InternalContextGraphListRow = ListContextGraphsRow & {
@@ -1531,60 +1569,6 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   }
 
   /**
-   * OT-RFC-38 / LU-6 Phase B — chain-backed participant-agent oracle
-   * for {@link SharedMemoryHandler#chainAgentGateOracle}.
-   *
-   * Maps a CG identifier (cleartext or numeric form) to the on-chain
-   * `ContextGraphStorage.getParticipantAgents` result, with in-memory
-   * caching keyed by the numeric id (so cleartext and numeric callers
-   * share cache entries). Used to authenticate gossip envelopes on
-   * cores that host curated CGs they are not members of — the local
-   * meta-graph has no allowlist triples for such CGs, so without the
-   * chain fallback every envelope would be rejected at
-   * `verifyHostModeEnvelopeAuthority` and the LU-6 substrate would
-   * never collect ciphertext for them.
-   *
-   * Cleartext → numeric resolution probes (in order):
-   *   1. `subscribedContextGraphs[cgId].onChainId` (set by the
-   *      curator on create and by chain-event auto-discovery).
-   *   2. The typed local current-state resolver (revalidates process-local
-   *      reverse-name-hash candidates before policy use).
-   *   3. `BigInt(cgId)` parse (covers the publishes that address the
-   *      CG by its numeric on-chain id directly — see PublishIntent
-   *      shape and the matching `isCgCurated` resolver above).
-   *
-   * Returns `null` when no resolution path yields a positive-id
-   * numeric (the caller treats `null` as "no allowlist → reject
-   * defensively"); empty `[]` from the chain is cached and returned
-   * as-is so a brand-new id doesn't keep paying RPC per envelope.
-   */
-  async resolveContextGraphNumericIdForPolicy(
-    this: DKGAgent,
-    contextGraphId: string,
-  ): Promise<bigint | null> {
-    const target = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
-    if (target !== null) {
-      try {
-        const resolved = await this.getContextGraphOnChainId(contextGraphId);
-        if (!resolved) return null;
-        const numericId = BigInt(resolved);
-        return numericId > 0n ? numericId : null;
-      } catch {
-        // A local selection must never fall through to interpreting its name as
-        // a numeric id when its authoritative/reverse binding is unavailable.
-        return null;
-      }
-    }
-    if (/^0x[0-9a-fA-F]{64}$/.test(contextGraphId)) return null;
-    try {
-      const numericId = BigInt(contextGraphId);
-      return numericId > 0n ? numericId : null;
-    } catch {
-      return null;
-    }
-  }
-
-  /**
    * Canonical live authority for a registered context graph.
    *
    * All security-sensitive consumers use this discriminant so a failed chain
@@ -1596,63 +1580,21 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   async resolveRegisteredContextGraphAuthority(
     this: DKGAgent,
     contextGraphId: string,
-    options: { allowCachedRoster?: boolean } = {},
+    options: { allowCachedRoster?: boolean; signal?: AbortSignal } = {},
   ): Promise<RegisteredContextGraphAuthority> {
-    if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
-      return { kind: 'unregistered' };
-    }
-
-    let onChainId: bigint | null;
-    const localBindingTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
-    if (localBindingTarget !== null) {
-      try {
-        const resolved = await this.getContextGraphOnChainId(contextGraphId);
-        onChainId = resolved === null ? null : BigInt(resolved);
-      } catch (err) {
-        return {
-          kind: 'unavailable',
-          reason: 'local-chain-binding-unavailable',
-          detail: err instanceof Error ? err.message : String(err),
-        };
-      }
-    } else {
-      try {
-        onChainId = await this.resolveContextGraphNumericIdForPolicy(contextGraphId);
-      } catch (err) {
-        if (typeof this.chain.resolveContextGraphIdByNameHash !== 'function') {
-          return {
-            kind: 'unavailable',
-            reason: 'local-chain-binding-unavailable',
-            detail: err instanceof Error ? err.message : String(err),
-          };
-        }
-        onChainId = null;
-      }
-    }
-    if (
-      onChainId === null
-      && localBindingTarget === null
-      && typeof this.chain.resolveContextGraphIdByNameHash === 'function'
-    ) {
-      try {
-        onChainId = await this.chain.resolveContextGraphIdByNameHash(
-          this.contextGraphNameCommitment(contextGraphId),
-        );
-      } catch (err) {
-        return {
-          kind: 'unavailable',
-          reason: 'chain-name-binding-unavailable',
-          detail: err instanceof Error ? err.message : String(err),
-        };
-      }
-    }
-    if (onChainId === null || onChainId <= 0n) return { kind: 'unregistered' };
+    const registration = await this.resolveContextGraphRegistrationBinding(
+      contextGraphId,
+      { signal: options.signal },
+    );
+    if (registration.kind !== 'registered') return registration;
+    const { onChainId } = registration;
 
     let accessPolicy: 0 | 1 | null;
     try {
       accessPolicy = await this.readLiveOnChainAccessPolicy(
         onChainId.toString(),
         createOperationContext('system'),
+        { signal: options.signal },
       );
     } catch (err) {
       return {
@@ -1674,7 +1616,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         return { kind: 'private', onChainId, participantAgents: [...cached] };
       }
     }
-    if (typeof this.chain.getContextGraphParticipantAgents !== 'function') {
+    const getParticipantAgents = this.chain.getContextGraphParticipantAgents;
+    if (typeof getParticipantAgents !== 'function') {
       return {
         kind: 'unavailable',
         onChainId,
@@ -1684,7 +1627,11 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
 
     let rawAgents: string[];
     try {
-      const result = await this.chain.getContextGraphParticipantAgents(onChainId);
+      const result = await boundedRegisteredAuthorityRead(
+        () => getParticipantAgents.call(this.chain, onChainId),
+        `getContextGraphParticipantAgents(${onChainId})`,
+        options.signal,
+      );
       if (!Array.isArray(result)) {
         return {
           kind: 'unavailable',
@@ -1722,6 +1669,13 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     return { kind: 'private', onChainId, participantAgents };
   }
 
+  /**
+   * OT-RFC-38 / LU-6 Phase B chain-backed participant oracle for host-mode
+   * gossip admission. Registration and policy resolution stay behind the
+   * canonical typed authority boundary; roster caching is explicitly enabled
+   * for this availability-oriented path. Any non-private or unavailable result
+   * projects to `null`, which the caller treats as fail-closed.
+   */
   async resolveOnChainParticipantAgents(this: DKGAgent, contextGraphId: string): Promise<string[] | null> {
     const authority = await this.resolveRegisteredContextGraphAuthority(
       contextGraphId,
