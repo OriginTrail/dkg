@@ -292,12 +292,14 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
     authorReady,
     false,
   );
+  // The global service stays ready for CGs that enter the default catalog lane
+  // later; the assertions below prove this CG remains owned by explicit legacy.
   assert.deepEqual(await rolloutStatus(
     transitionedLegacy.child,
     authorReady.peerId as string,
     'transitioned-legacy',
   ), expectedStatus({
-    service: false,
+    service: true,
     legacy: true,
     manualTargets: 1,
     bootstrap: true,
@@ -355,7 +357,7 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
     authorReady.peerId as string,
     'legacy',
   ), expectedStatus({
-    service: false,
+    service: true,
     legacy: true,
     manualTargets: 1,
     bootstrap: true,
