@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'test/entity-grouping.test.ts',
       'test/ka-update-submit-failure.test.ts',
       'test/ack-peer-selection.test.ts',
       'test/trust-metadata.test.ts',

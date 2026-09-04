@@ -5,6 +5,7 @@
 
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { skolemizeByEntity } from './auto-partition.js';
+import { rootEntityFromSkolemized } from './skolemize.js';
 import { computeFlatKCRootV10, computePrivateRootV10 } from './merkle.js';
 import {
   splitTrustedGeneratedCatalogRootMap,
@@ -49,14 +50,23 @@ export function canonicalPublishPayload(
     options?.trustedNonManifestCatalogTriples,
   );
   const generatedCatalogRootSet = new Set(generatedCatalogRootEntities);
+  const privateByRoot = new Map<string, Quad[]>();
+  for (const quad of privateQuads) {
+    // kaMap roots cannot themselves contain a skolem segment. Taking the first
+    // segment therefore preserves the previous root-prefix matching, including
+    // nested skolem descendants, without scanning privateQuads for every root.
+    const root = kaMap.has(quad.subject)
+      ? quad.subject
+      : rootEntityFromSkolemized(quad.subject);
+    if (root === null || !kaMap.has(root)) continue;
+    let bucket = privateByRoot.get(root);
+    if (!bucket) privateByRoot.set(root, bucket = []);
+    bucket.push(quad);
+  }
 
   const manifestEntries: CanonicalManifestEntry[] = [];
   for (const rootEntity of generatedCatalogRootSet) {
-    const hiddenPrivateQuads = privateQuads.filter(
-      (qq) =>
-        qq.subject === rootEntity ||
-        qq.subject.startsWith(rootEntity + '/.well-known/genid/'),
-    );
+    const hiddenPrivateQuads = privateByRoot.get(rootEntity) ?? [];
     if (hiddenPrivateQuads.length > 0) {
       throw new Error(
         `Generated catalog subject "${rootEntity}" has private triples; ` +
@@ -66,11 +76,7 @@ export function canonicalPublishPayload(
   }
 
   for (const [rootEntity, publicForRoot] of contentRootMap) {
-    const entityPrivateQuads = privateQuads.filter(
-      (qq) =>
-        qq.subject === rootEntity ||
-        qq.subject.startsWith(rootEntity + '/.well-known/genid/'),
-    );
+    const entityPrivateQuads = privateByRoot.get(rootEntity) ?? [];
     manifestEntries.push({
       rootEntity,
       publicTripleCount: publicForRoot.length,
