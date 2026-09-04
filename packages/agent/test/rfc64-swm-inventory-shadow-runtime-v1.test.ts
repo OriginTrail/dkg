@@ -154,14 +154,36 @@ describe('RFC-64 SWM inventory shadow runtime', () => {
 
   it('reopens asset and scope admission after a complete restart drain', async () => {
     const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    const firstShutdownSignal = runtime.shutdownSignal;
     await runtime.closeAndDrain();
+    expect(firstShutdownSignal.aborted).toBe(true);
     expect(runtime.schedule('closed', async () => undefined)).toBe(false);
     await expect(runtime.runScopeExclusive('closed', async () => undefined))
       .rejects.toThrow('runtime is closed');
 
     runtime.reopen();
+    expect(runtime.shutdownSignal).not.toBe(firstShutdownSignal);
+    expect(runtime.shutdownSignal.aborted).toBe(false);
     expect(runtime.schedule('asset', async () => undefined)).toBe(true);
     await runtime.drain();
     await expect(runtime.runScopeExclusive('scope', async () => 'ok')).resolves.toBe('ok');
+  });
+
+  it('aborts admitted lifecycle waits so shutdown can drain promptly', async () => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+
+    expect(runtime.schedule('settling-asset', async () => {
+      const signal = runtime.shutdownSignal;
+      markEntered();
+      await new Promise<void>((resolve) => {
+        signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    })).toBe(true);
+    await entered;
+
+    await runtime.closeAndDrain();
+    expect(runtime.inFlightCount).toBe(0);
   });
 });

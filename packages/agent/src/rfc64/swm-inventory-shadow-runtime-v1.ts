@@ -53,7 +53,13 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
   readonly #vmConfirmedTombstones = new Map<string, true>();
   readonly #pendingExecutions: Array<() => void> = [];
   #activeExecutions = 0;
+  #closeAbort = new AbortController();
   #closed = false;
+
+  /** Aborts lifecycle-only waits when shutdown fences detached observers. */
+  get shutdownSignal(): AbortSignal {
+    return this.#closeAbort.signal;
+  }
 
   schedule(assetKey: string, observer: () => Promise<void>): boolean {
     if (this.#closed) return false;
@@ -116,6 +122,7 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
   /** Fence new observers, then drain every already-admitted asset mutation. */
   async closeAndDrain(): Promise<void> {
     this.#closed = true;
+    this.#closeAbort.abort();
     await this.drain();
     await this.#scopeRuntime.closeAndDrain();
   }
@@ -125,6 +132,7 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     if (this.#inFlight.size > 0 || this.#pendingExecutions.length > 0) {
       throw new Error('RFC-64 SWM inventory observer runtime cannot reopen before drain');
     }
+    this.#closeAbort = new AbortController();
     this.#scopeRuntime.reopen();
     this.#closed = false;
   }

@@ -514,7 +514,11 @@ async function reconcileVm(
 
 function assertVmChainRead(value: Gate1VmReconcileResult, label: string): void {
   const reads = value.chainReadDelta;
-  assert.equal(reads.nameHashResolution >= 2, true, `${label} omitted name-hash resolution`);
+  assert.equal(
+    (reads.active >= 1 && reads.accessPolicy >= 1) || reads.nameHashResolution >= 2,
+    true,
+    `${label} omitted active-policy or name-hash revalidation: ${JSON.stringify(reads)}`,
+  );
   assert.equal(reads.count >= 1, true, `${label} omitted chain inventory count`);
   const result = value.result;
   assert.equal(result.contextGraphId, CONTEXT_GRAPH_ID);

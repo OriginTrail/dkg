@@ -87,9 +87,21 @@ const RFC64_DEFAULT_RESPONSIBILITY_SETTLE_RETRY_DELAYS_MS_V1 = Object.freeze([
 
 function waitForRfc64DefaultResponsibilitySettlementV1(
   delayMs: number,
-): Promise<void> {
-  if (delayMs === 0) return Promise.resolve();
-  return new Promise((resolve) => setTimeout(resolve, delayMs));
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false);
+  if (delayMs === 0) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(true);
+    }, delayMs);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 // Compatibility exports for consumers of the historically public dist/*
@@ -258,9 +270,12 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     params: ObserveRfc64DurableSwmPromotionParamsV1,
   ): Promise<void> {
     try {
+      const shutdownSignal = rfc64SwmInventoryShadowRuntimeV1(this).shutdownSignal;
+      if (shutdownSignal.aborted) return;
       let result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
       for (const delayMs of RFC64_DEFAULT_RESPONSIBILITY_SETTLE_RETRY_DELAYS_MS_V1) {
         if (result.status !== 'dormant' || result.dormantReason !== 'inactive-lane') break;
+        if (shutdownSignal.aborted) return;
         // A durable promotion can race the asynchronous default-responsibility
         // and authority transition for a newly created CG. Refresh and retry
         // that normal lifecycle boundary for a bounded settlement window before
@@ -276,7 +291,10 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         ) {
           break;
         }
-        await waitForRfc64DefaultResponsibilitySettlementV1(delayMs);
+        if (!await waitForRfc64DefaultResponsibilitySettlementV1(
+          delayMs,
+          shutdownSignal,
+        )) return;
         result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
       }
       if (result.status === 'applied' || result.status === 'existing') {
