@@ -710,8 +710,6 @@ export class QueryMethods extends DKGAgentBase {
     const acceptedPublicPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
       ?? [];
-    const resolveByNameHash = this.chain.resolveContextGraphIdByNameHash;
-    const getOnChainParticipantAgents = this.chain.getContextGraphParticipantAgents;
     return resolveContextGraphReadAuthorityDecision({
       contextGraphId,
       callerAgentAddress: opts.callerAgentAddress,
@@ -719,26 +717,7 @@ export class QueryMethods extends DKGAgentBase {
       isSystemContextGraph: (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId),
       getPeerId: () => this.peerId,
       getAllowedPeers: () => this.getContextGraphAllowedPeers(contextGraphId),
-      resolveNumericId: () => this.resolveContextGraphNumericIdForPolicy(contextGraphId),
-      ...(typeof resolveByNameHash === 'function'
-        ? {
-            resolveNumericIdByNameHash: () => resolveByNameHash.call(
-              this.chain,
-              this.contextGraphNameCommitment(contextGraphId),
-            ),
-          }
-        : {}),
-      readOnChainAccessPolicy: (onChainId) => this.readLiveOnChainAccessPolicy(
-        onChainId.toString(),
-        createOperationContext('query'),
-      ),
-      ...(typeof getOnChainParticipantAgents === 'function'
-        ? {
-            getOnChainParticipantAgents: (onChainId: bigint) => (
-              getOnChainParticipantAgents.call(this.chain, onChainId)
-            ),
-          }
-        : {}),
+      getRegisteredAuthority: () => this.resolveRegisteredContextGraphAuthority(contextGraphId),
       isAgentAllowed: (agentAddress, roster) => this.isAgentAddressAllowed(agentAddress, roster),
       hasLocalAgentInRoster: (roster) => this.hasLocalAgentInGate(roster),
       resolveRfc64PrivateRoster: () => this.resolveRfc64PrivateReadRosterV1(contextGraphId),

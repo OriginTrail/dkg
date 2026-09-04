@@ -73,7 +73,13 @@ function selectedFixture(resolved: bigint | null = 42n) {
   const chain: {
     resolveContextGraphIdByNameHash: typeof resolveContextGraphIdByNameHash;
     getContextGraphParticipantAgents?: (contextGraphId: bigint) => Promise<string[]>;
-  } = { resolveContextGraphIdByNameHash };
+    isContextGraphActiveOnChain: (contextGraphId: bigint) => Promise<boolean>;
+    getContextGraphAccessPolicy: (contextGraphId: bigint) => Promise<0 | 1>;
+  } = {
+    resolveContextGraphIdByNameHash,
+    isContextGraphActiveOnChain: async () => true,
+    getContextGraphAccessPolicy: async () => 1,
+  };
   const agent = createBindingAgentHarness({
     store: { query } as unknown as TripleStore,
     chain,
@@ -582,8 +588,10 @@ describe('cold current-state Context Graph name binding', () => {
 
   it('revalidates a reverse candidate before participant-policy use', async () => {
     const fixture = selectedFixture();
-    const getParticipants = vi.fn(async () => ['did:dkg:agent:alice']);
+    const participant = '0x1111111111111111111111111111111111111111';
+    const getParticipants = vi.fn(async () => [participant]);
     fixture.agent.chain.getContextGraphParticipantAgents = getParticipants;
+    fixture.agent.readLiveOnChainAccessPolicy = vi.fn(async () => 1);
     fixture.agent.onChainParticipantAgentsCache = new Map();
     fixture.agent.log = { info: vi.fn(), warn: vi.fn() };
     fixture.agent.contextGraphBindingState.bindReverseCandidate(
@@ -595,7 +603,7 @@ describe('cold current-state Context Graph name binding', () => {
 
     await expect(fixture.agent.resolveOnChainParticipantAgents(
       LOCAL_ID,
-    )).resolves.toEqual(['did:dkg:agent:alice']);
+    )).resolves.toEqual([participant]);
     expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledTimes(1);
     expect(getParticipants).toHaveBeenCalledWith(42n);
 

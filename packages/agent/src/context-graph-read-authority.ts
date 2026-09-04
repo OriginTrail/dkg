@@ -9,6 +9,8 @@
  * the distinction between an authoritative denial and unavailable authority.
  */
 
+import type { RegisteredContextGraphAuthority } from './dkg-agent-cg-resolve.js';
+
 export type ContextGraphReadAuthorityOutcome = 'allowed' | 'denied' | 'unavailable';
 
 export type ContextGraphReadAuthoritySource =
@@ -22,6 +24,7 @@ export interface ContextGraphReadAuthorityDecision {
   outcome: ContextGraphReadAuthorityOutcome;
   source: ContextGraphReadAuthoritySource;
   reason: string;
+  metadataBootstrap: 'eligible' | 'forbidden';
   onChainId?: bigint;
 }
 
@@ -32,10 +35,7 @@ export interface ContextGraphReadAuthorityInput {
   isSystemContextGraph: boolean;
   getPeerId(): string;
   getAllowedPeers(): Promise<string[] | null>;
-  resolveNumericId(): Promise<bigint | null>;
-  resolveNumericIdByNameHash?: () => Promise<bigint | null>;
-  readOnChainAccessPolicy(onChainId: bigint): Promise<0 | 1 | null>;
-  getOnChainParticipantAgents?: (onChainId: bigint) => Promise<string[]>;
+  getRegisteredAuthority(): Promise<RegisteredContextGraphAuthority>;
   isAgentAllowed(agentAddress: string | undefined, roster: readonly string[]): boolean;
   hasLocalAgentInRoster(roster: readonly string[]): boolean;
   resolveRfc64PrivateRoster(): readonly string[] | null | undefined;
@@ -55,10 +55,12 @@ const decision = (
   source: ContextGraphReadAuthoritySource,
   reason: string,
   onChainId?: bigint,
+  metadataBootstrap: 'eligible' | 'forbidden' = outcome === 'denied' ? 'forbidden' : 'eligible',
 ): ContextGraphReadAuthorityDecision => ({
   outcome,
   source,
   reason,
+  metadataBootstrap,
   ...(onChainId === undefined ? {} : { onChainId }),
 });
 
@@ -69,69 +71,41 @@ export async function resolveContextGraphReadAuthorityDecision(
     return decision('allowed', 'system', 'system-context-graph');
   }
 
-  let numericId: bigint | null;
-  let localBindingUnavailable = false;
+  let registeredAuthority: RegisteredContextGraphAuthority;
   try {
-    numericId = await input.resolveNumericId();
+    registeredAuthority = await input.getRegisteredAuthority();
   } catch {
-    numericId = null;
-    localBindingUnavailable = true;
+    return decision('unavailable', 'registered-chain', 'registered-authority-error');
   }
-  if (numericId === null && input.resolveNumericIdByNameHash) {
-    try {
-      numericId = await input.resolveNumericIdByNameHash();
-    } catch {
-      return decision('unavailable', 'registered-chain', 'chain-name-binding-unavailable');
-    }
+  if (registeredAuthority.kind === 'unavailable') {
+    return decision(
+      'unavailable',
+      'registered-chain',
+      registeredAuthority.reason,
+      registeredAuthority.onChainId,
+    );
   }
-  if (numericId === null && localBindingUnavailable && !input.resolveNumericIdByNameHash) {
-    // A failed local binding read is not evidence that the graph is
-    // unregistered. Without an independent chain name-hash lookup, falling
-    // through to RFC-64 or legacy metadata could bypass a registered private
-    // graph's authoritative participant roster.
-    return decision('unavailable', 'registered-chain', 'local-chain-binding-unavailable');
+  if (registeredAuthority.kind === 'public') {
+    return decision('allowed', 'registered-chain', 'chain-public', registeredAuthority.onChainId);
   }
-
-  if (numericId !== null && numericId > 0n) {
-    let accessPolicy: 0 | 1 | null;
-    try {
-      accessPolicy = await input.readOnChainAccessPolicy(numericId);
-    } catch {
-      return decision('unavailable', 'registered-chain', 'chain-access-policy-unavailable', numericId);
-    }
-    if (accessPolicy === null) {
-      return decision('unavailable', 'registered-chain', 'chain-access-policy-unknown', numericId);
-    }
-    if (accessPolicy === 0) {
-      return decision('allowed', 'registered-chain', 'chain-public', numericId);
-    }
-    if (!input.getOnChainParticipantAgents) {
-      return decision('unavailable', 'registered-chain', 'chain-participant-authority-unsupported', numericId);
-    }
-
-    let onChainAgents: string[];
-    try {
-      const result = await input.getOnChainParticipantAgents(numericId);
-      onChainAgents = Array.isArray(result) ? result : [];
-    } catch {
-      return decision('unavailable', 'registered-chain', 'chain-participant-authority-unavailable', numericId);
-    }
+  if (registeredAuthority.kind === 'private') {
+    const onChainAgents = registeredAuthority.participantAgents;
     const agentAllowed = input.callerAgentAddress
       ? input.isAgentAllowed(input.callerAgentAddress, onChainAgents)
       : input.hasLocalAgentInRoster(onChainAgents);
     if (!agentAllowed) {
-      return decision('denied', 'registered-chain', 'agent-not-in-chain-roster', numericId);
+      return decision('denied', 'registered-chain', 'agent-not-in-chain-roster', registeredAuthority.onChainId);
     }
     let allowedPeers: string[] | null;
     try {
       allowedPeers = await input.getAllowedPeers();
     } catch {
-      return decision('unavailable', 'registered-chain', 'peer-authority-unavailable', numericId);
+      return decision('unavailable', 'registered-chain', 'peer-authority-unavailable', registeredAuthority.onChainId);
     }
     if (allowedPeers !== null && !allowedPeers.includes(input.getPeerId())) {
-      return decision('denied', 'registered-chain', 'local-peer-not-allowed', numericId);
+      return decision('denied', 'registered-chain', 'local-peer-not-allowed', registeredAuthority.onChainId);
     }
-    return decision('allowed', 'registered-chain', 'chain-participant', numericId);
+    return decision('allowed', 'registered-chain', 'chain-participant', registeredAuthority.onChainId);
   }
 
   const rfc64Roster = input.resolveRfc64PrivateRoster();
@@ -210,7 +184,7 @@ export async function resolveContextGraphReadAuthorityDecision(
   if (!participants || participants.length === 0) {
     return input.allowSubscriptionFallback && input.hasLegacySubscription
       ? decision('allowed', 'legacy-local', 'legacy-subscription')
-      : decision('denied', 'legacy-local', 'no-read-authority');
+      : decision('denied', 'legacy-local', 'no-read-authority', undefined, 'eligible');
   }
   if (
     input.callerAgentAddress

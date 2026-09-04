@@ -711,6 +711,24 @@ export async function resolveCuratorSyncPeer(
   return { peerId: curatorPeerId, provenance };
 }
 
+export type RegisteredContextGraphAuthority =
+  | { kind: 'unregistered' }
+  | { kind: 'public'; onChainId: bigint }
+  | { kind: 'private'; onChainId: bigint; participantAgents: string[] }
+  | {
+      kind: 'unavailable';
+      reason:
+        | 'chain-name-binding-unavailable'
+        | 'local-chain-binding-unavailable'
+        | 'chain-access-policy-unavailable'
+        | 'chain-access-policy-unknown'
+        | 'chain-participant-authority-unsupported'
+        | 'chain-participant-authority-unavailable'
+        | 'chain-participant-authority-invalid';
+      onChainId?: bigint;
+      detail?: string;
+    };
+
 export class ContextGraphResolveMethods extends DKGAgentBase {
   async getCgMeta(
     this: DKGAgent,
@@ -1566,34 +1584,159 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     }
   }
 
-  async resolveOnChainParticipantAgents(this: DKGAgent, contextGraphId: string): Promise<string[] | null> {
+  /**
+   * Canonical live authority for a registered context graph.
+   *
+   * All security-sensitive consumers use this discriminant so a failed chain
+   * read cannot be confused with an unregistered graph and fall through to
+   * local/RFC-64 policy. Roster caching is deliberately opt-in and is only
+   * suitable for host-mode gossip admission; read, encryption, and mutation
+   * callers require a fresh chain view.
+   */
+  async resolveRegisteredContextGraphAuthority(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { allowCachedRoster?: boolean } = {},
+  ): Promise<RegisteredContextGraphAuthority> {
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
-      return null;
+      return { kind: 'unregistered' };
     }
-    const numericId = await this.resolveContextGraphNumericIdForPolicy(contextGraphId);
-    if (numericId === null) return null;
 
-    const cacheKey = numericId.toString();
-    const cached = this.onChainParticipantAgentsCache.get(cacheKey);
-    if (cached !== undefined) {
-      return cached.length === 0 ? null : cached;
+    let onChainId: bigint | null;
+    const localBindingTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
+    if (localBindingTarget !== null) {
+      try {
+        const resolved = await this.getContextGraphOnChainId(contextGraphId);
+        onChainId = resolved === null ? null : BigInt(resolved);
+      } catch (err) {
+        return {
+          kind: 'unavailable',
+          reason: 'local-chain-binding-unavailable',
+          detail: err instanceof Error ? err.message : String(err),
+        };
+      }
+    } else {
+      try {
+        onChainId = await this.resolveContextGraphNumericIdForPolicy(contextGraphId);
+      } catch (err) {
+        if (typeof this.chain.resolveContextGraphIdByNameHash !== 'function') {
+          return {
+            kind: 'unavailable',
+            reason: 'local-chain-binding-unavailable',
+            detail: err instanceof Error ? err.message : String(err),
+          };
+        }
+        onChainId = null;
+      }
+    }
+    if (
+      onChainId === null
+      && localBindingTarget === null
+      && typeof this.chain.resolveContextGraphIdByNameHash === 'function'
+    ) {
+      try {
+        onChainId = await this.chain.resolveContextGraphIdByNameHash(
+          this.contextGraphNameCommitment(contextGraphId),
+        );
+      } catch (err) {
+        return {
+          kind: 'unavailable',
+          reason: 'chain-name-binding-unavailable',
+          detail: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }
+    if (onChainId === null || onChainId <= 0n) return { kind: 'unregistered' };
+
+    let accessPolicy: 0 | 1 | null;
+    try {
+      accessPolicy = await this.readLiveOnChainAccessPolicy(
+        onChainId.toString(),
+        createOperationContext('system'),
+      );
+    } catch (err) {
+      return {
+        kind: 'unavailable',
+        onChainId,
+        reason: 'chain-access-policy-unavailable',
+        detail: err instanceof Error ? err.message : String(err),
+      };
+    }
+    if (accessPolicy === null) {
+      return { kind: 'unavailable', onChainId, reason: 'chain-access-policy-unknown' };
+    }
+    if (accessPolicy === 0) return { kind: 'public', onChainId };
+
+    const cacheKey = onChainId.toString();
+    if (options.allowCachedRoster) {
+      const cached = this.onChainParticipantAgentsCache.get(cacheKey);
+      if (cached !== undefined) {
+        return { kind: 'private', onChainId, participantAgents: [...cached] };
+      }
     }
     if (typeof this.chain.getContextGraphParticipantAgents !== 'function') {
-      return null;
+      return {
+        kind: 'unavailable',
+        onChainId,
+        reason: 'chain-participant-authority-unsupported',
+      };
     }
+
+    let rawAgents: string[];
     try {
-      const agents = await this.chain.getContextGraphParticipantAgents(numericId);
-      const normalised = Array.isArray(agents) ? agents : [];
-      this.onChainParticipantAgentsCache.set(cacheKey, normalised);
-      return normalised.length === 0 ? null : normalised;
+      const result = await this.chain.getContextGraphParticipantAgents(onChainId);
+      if (!Array.isArray(result)) {
+        return {
+          kind: 'unavailable',
+          onChainId,
+          reason: 'chain-participant-authority-invalid',
+        };
+      }
+      rawAgents = result;
     } catch (err) {
+      return {
+        kind: 'unavailable',
+        onChainId,
+        reason: 'chain-participant-authority-unavailable',
+        detail: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    const seen = new Set<string>();
+    const participantAgents: string[] = [];
+    for (const value of rawAgents) {
+      if (!ethers.isAddress(value) || ethers.getAddress(value) === ethers.ZeroAddress) {
+        return {
+          kind: 'unavailable',
+          onChainId,
+          reason: 'chain-participant-authority-invalid',
+        };
+      }
+      const checksum = ethers.getAddress(value);
+      const key = checksum.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      participantAgents.push(checksum);
+    }
+    this.onChainParticipantAgentsCache.set(cacheKey, participantAgents);
+    return { kind: 'private', onChainId, participantAgents };
+  }
+
+  async resolveOnChainParticipantAgents(this: DKGAgent, contextGraphId: string): Promise<string[] | null> {
+    const authority = await this.resolveRegisteredContextGraphAuthority(
+      contextGraphId,
+      { allowCachedRoster: true },
+    );
+    if (authority.kind === 'unavailable') {
       this.log.warn(
         createOperationContext('system'),
-        `resolveOnChainParticipantAgents: chain.getContextGraphParticipantAgents(${cacheKey}) failed — treating as UNKNOWN: ` +
-        (err instanceof Error ? err.message : String(err)),
+        `resolveOnChainParticipantAgents: registered authority is unavailable (${authority.reason})` +
+        (authority.detail ? `: ${authority.detail}` : ''),
       );
-      return null;
     }
+    return authority.kind === 'private' && authority.participantAgents.length > 0
+      ? authority.participantAgents
+      : null;
   }
 
   /**

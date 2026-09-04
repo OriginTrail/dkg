@@ -146,7 +146,18 @@ function makeAgentLike(opts: {
   agentLike.resolveWorkspaceRecipientsGated = (DKGAgent.prototype as any).resolveWorkspaceRecipientsGated;
   // This fixture isolates the public/plaintext decision. Registered-private
   // chain roster selection has dedicated production-agent coverage.
-  agentLike.resolveRegisteredContextGraphAgentGate = vi.fn(async () => null);
+  agentLike.resolveRegisteredContextGraphAuthority = vi.fn(async (contextGraphId: string) => {
+    const rawNumeric = /^\d+$/.test(contextGraphId) && opts.localCgExists !== true;
+    const resolvesRegistered = opts.onChainId !== null;
+    if (!resolvesRegistered && !rawNumeric) return { kind: 'unregistered' as const };
+    if (opts.activeOnChain === false || opts.activeOnChain instanceof Error) {
+      return { kind: 'unavailable' as const, reason: 'chain-access-policy-unavailable' };
+    }
+    const onChainId = BigInt(opts.onChainId ?? (rawNumeric ? contextGraphId : '1'));
+    return (opts.accessPolicy ?? 0) === 0
+      ? { kind: 'public' as const, onChainId }
+      : { kind: 'private' as const, onChainId, participantAgents: [] };
+  });
   agentLike.resolveWorkspaceAgentRecipientsForCurrentAuthority =
     (DKGAgent.prototype as any).resolveWorkspaceAgentRecipientsForCurrentAuthority;
   agentLike._resolveCuratedChainKeyContext = (DKGAgent.prototype as any)._resolveCuratedChainKeyContext;
@@ -554,16 +565,13 @@ describe('DKGAgent.resolveWorkspaceRecipientsGated (gate-before)', () => {
     expect(agentLike.store.query.calls).toEqual([]);
   });
 
-  it('delegates to the store resolver for a non-public (curated) CG', async () => {
+  it('fails closed for a registered private CG with an empty live roster', async () => {
     const agentLike = makeAgentLike({ onChainId: '1', accessPolicy: 1 });
-    const resolution = await (DKGAgent.prototype as any).resolveWorkspaceRecipientsGated.call(
+    await expect((DKGAgent.prototype as any).resolveWorkspaceRecipientsGated.call(
       agentLike,
       { contextGraphId: '0xCURATOR/curated-cg' },
-    );
-    // Empty store bindings → no allowedAgents → store resolver returns
-    // requiresEncryption=false, but it WAS consulted (delegation path).
-    expect(resolution.requiresEncryption).toBe(false);
-    expect(agentLike.store.query.calls.length).toBeGreaterThan(0);
+    )).rejects.toThrow(/authoritative chain roster is empty/);
+    expect(agentLike.store.query.calls).toEqual([]);
   });
 
   it('delegates to the store resolver when the policy is unknown (fail-closed to encrypted path)', async () => {
@@ -575,17 +583,17 @@ describe('DKGAgent.resolveWorkspaceRecipientsGated (gate-before)', () => {
     expect(agentLike.store.query.calls.length).toBeGreaterThan(0);
   });
 
-  it('delegates (encrypted path) when the on-chain probe cannot prove the CG is live — NO local-metadata bypass (#884 review)', async () => {
+  it('fails closed when registered authority cannot prove the CG is live', async () => {
     // A local accessPolicy="public" literal (or any local signal) must NOT
     // override a failed on-chain liveness proof: a pre-registration / stale
     // local graph would otherwise leak allowlisted traffic in plaintext. With
     // liveness false we delegate to the store resolver (encrypted path).
     const agentLike = makeAgentLike({ onChainId: '1', accessPolicy: 0, activeOnChain: false });
-    await (DKGAgent.prototype as any).resolveWorkspaceRecipientsGated.call(
+    await expect((DKGAgent.prototype as any).resolveWorkspaceRecipientsGated.call(
       agentLike,
       { contextGraphId: '0xCURATOR/not-yet-live' },
-    );
-    expect(agentLike.store.query.calls.length).toBeGreaterThan(0);
+    )).rejects.toThrow(/authority is unavailable/);
+    expect(agentLike.store.query.calls).toEqual([]);
   });
 
   it('returns plaintext for a LIVE public CG addressed by its numeric on-chain id WITHOUT the store resolver (#884)', async () => {

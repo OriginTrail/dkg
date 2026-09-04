@@ -149,7 +149,11 @@ describe('exact Context Graph asset fetch', () => {
       localAgents: new Map([[MEMBER, { agentAddress: MEMBER }]]),
       defaultAgentAddress: MEMBER,
       getContextGraphAllowedPeers: vi.fn(async () => null),
+      resolveContextGraphNameHashBindingTarget: vi.fn(() => null),
       resolveContextGraphNumericIdForPolicy: vi.fn(async () => BigInt(ON_CHAIN_ID)),
+      resolveRegisteredContextGraphAuthority:
+        DKGAgent.prototype.resolveRegisteredContextGraphAuthority,
+      onChainParticipantAgentsCache: new Map<string, string[]>(),
       readLiveOnChainAccessPolicy: vi.fn(async () => 1 as const),
       resolveRfc64PrivateReadRosterV1: vi.fn(() => undefined),
       isAgentAddressAllowed: QueryMethods.prototype.isAgentAddressAllowed,

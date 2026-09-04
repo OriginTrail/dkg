@@ -536,102 +536,6 @@ async function evaluateContextGraphSlotBinding(
 }
 
 export class WorkspaceCryptoMethods extends DKGAgentBase {
-  /**
-   * Resolve a registered CG's live participant-agent roster.
-   *
-   * `null` means the CG is not registered. A registered public result remains
-   * distinct so stale RFC-64 private state cannot override its live public
-   * policy, while callers that use local publisher gates can still do so.
-   * Once a private id resolves, every inability to read or validate the roster
-   * becomes an empty (deny-all) gate rather than a fallback to stale local
-   * metadata. This distinction is security-sensitive after a chain-success/local-store-
-   * failure membership mutation: the chain removal must take effect for
-   * recovery and sender-key issuance immediately even if the local tombstone
-   * still needs a retry.
-   */
-  async resolveRegisteredContextGraphAgentGate(this: DKGAgent,
-    contextGraphId: string,
-  ): Promise<{ onChainId: bigint; accessPolicy: 0 | 1; agents: string[] } | null> {
-    let onChainId = await this.resolveContextGraphNumericIdForPolicy(contextGraphId);
-    if (
-      onChainId === null
-      && typeof this.chain.resolveContextGraphIdByNameHash === 'function'
-    ) {
-      // Match read admission: a cold/non-selected member may not possess the
-      // local registration projection yet. The immutable name commitment is
-      // the independent authority that prevents stale RFC-64/local metadata
-      // from winning merely because that projection is absent.
-      onChainId = await this.chain.resolveContextGraphIdByNameHash(
-        this.contextGraphNameCommitment(contextGraphId),
-      );
-    }
-    if (onChainId === null) return null;
-
-    const denyAll = (): { onChainId: bigint; accessPolicy: 1; agents: string[] } => ({
-      onChainId,
-      accessPolicy: 1,
-      agents: [],
-    });
-    let accessPolicy: 0 | 1 | null;
-    try {
-      accessPolicy = await this.readLiveOnChainAccessPolicy(
-        onChainId.toString(),
-        createOperationContext('system'),
-      );
-    } catch (err) {
-      this.log.warn(
-        createOperationContext('system'),
-        `Registered context graph "${contextGraphId}" access policy is unavailable; denying its participant-agent roster: `
-        + (err instanceof Error ? err.message : String(err)),
-      );
-      return denyAll();
-    }
-    if (accessPolicy === null) return denyAll();
-    // A public graph's local allowed-agent projection can still govern
-    // PUBLISHING/signing, but it is not a read/recovery roster. Preserve the
-    // existing local gate semantics for those callers instead of turning an
-    // empty public participant roster into a deny-all read gate.
-    if (accessPolicy === 0) return { onChainId, accessPolicy, agents: [] };
-
-    if (typeof this.chain.getContextGraphParticipantAgents !== 'function') {
-      this.log.warn(
-        createOperationContext('system'),
-        `Registered context graph "${contextGraphId}" cannot resolve its participant-agent roster: chain adapter support is unavailable`,
-      );
-      return denyAll();
-    }
-
-    try {
-      const rawAgents = await this.chain.getContextGraphParticipantAgents(onChainId);
-      if (!Array.isArray(rawAgents)) return denyAll();
-      const seen = new Set<string>();
-      const agents: string[] = [];
-      for (const value of rawAgents) {
-        if (!ethers.isAddress(value) || ethers.getAddress(value) === ethers.ZeroAddress) {
-          this.log.warn(
-            createOperationContext('system'),
-            `Registered context graph "${contextGraphId}" returned an invalid participant-agent roster entry; denying the roster`,
-          );
-          return denyAll();
-        }
-        const checksum = ethers.getAddress(value);
-        const key = checksum.toLowerCase();
-        if (seen.has(key)) continue;
-        seen.add(key);
-        agents.push(checksum);
-      }
-      this.onChainParticipantAgentsCache.set(onChainId.toString(), agents);
-      return { onChainId, accessPolicy, agents };
-    } catch (err) {
-      this.log.warn(
-        createOperationContext('system'),
-        `Registered context graph "${contextGraphId}" participant-agent roster is unavailable; denying the roster: `
-        + (err instanceof Error ? err.message : String(err)),
-      );
-      return denyAll();
-    }
-  }
-
   getWorkspaceGossipSigningAgent(this: DKGAgent): (AgentKeyRecord & { privateKey: string }) | null {
     const defaultAddress = this.defaultAgentAddress?.toLowerCase();
     let fallback: (AgentKeyRecord & { privateKey: string }) | null = null;
@@ -693,8 +597,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // that this is a gated graph while denying sender-key and sync admissions.
     // Registered-public graphs continue below to their distinct local
     // publisher/signing gate, but never to stale RFC-64 private authority.
-    const registeredGate = await this.resolveRegisteredContextGraphAgentGate(contextGraphId);
-    if (registeredGate?.accessPolicy === 1) return registeredGate.agents;
+    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(contextGraphId);
+    if (registeredAuthority.kind === 'private') return registeredAuthority.participantAgents;
+    if (registeredAuthority.kind === 'unavailable') return [];
 
     // A selected private RFC-64 graph may be joining a completely empty
     // store. In that state the accepted, authority-checked roster is already
@@ -707,7 +612,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // `null` means RFC-64 owns the graph but current roster authority is not
     // available. Return an empty gate—not legacy `null`—so every caller keeps
     // treating the graph as gated and fails closed until authority recovers.
-    const rfc64Roster = registeredGate === null
+    const rfc64Roster = registeredAuthority.kind === 'unregistered'
       ? this.resolveRfc64PrivateReadRosterV1(contextGraphId)
       : undefined;
     if (rfc64Roster !== undefined) {
@@ -774,10 +679,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     contextGraphId: string,
     _options: { signal?: AbortSignal } = {},
   ): Promise<string[] | null> {
-    const registeredGate = await this.resolveRegisteredContextGraphAgentGate(contextGraphId);
-    if (registeredGate !== null) {
-      return registeredGate.accessPolicy === 1 ? registeredGate.agents : null;
-    }
+    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(contextGraphId);
+    if (registeredAuthority.kind === 'private') return registeredAuthority.participantAgents;
+    if (registeredAuthority.kind !== 'unregistered') return null;
 
     const seen = new Set<string>();
     const agents: string[] = [];
@@ -1345,29 +1249,17 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * ("not DKG-agent gated"), which surfaced as an HTTP 500 on WM→SWM
    * promote.
    *
-   * Gate BEFORE delegating to the store resolver: a public CG takes the
-   * plaintext path without resolving recipient keys at all. This also
+   * Resolve the canonical registered authority BEFORE delegating to the store
+   * resolver: a public CG takes the plaintext path without resolving recipient
+   * keys at all. This also
    * avoids the resolver's "Missing public encryption key" throw for an
    * allowlisted agent whose key isn't locally available — irrelevant for
-   * a public CG that never encrypts. Curated / invite-only / unknown CGs
-   * fall through to the normal (encrypted) recipient resolution.
+   * a public CG that never encrypts. Private graphs resolve recipients from
+   * the live roster; unavailable registered authority fails closed.
    */
   async resolveWorkspaceRecipientsGated(this: DKGAgent,
     input: WorkspaceAgentRecipientResolverInput,
   ): Promise<WorkspaceAgentRecipientResolution> {
-    if (await this.isContextGraphPublicOnChain(input.contextGraphId, createOperationContext('share'))) {
-      return { requiresEncryption: false, recipients: [] };
-    }
-    // #884 review (🔴): do NOT add a local-metadata fallback here (e.g.
-    // honoring a local `accessPolicy="public"` triple). A local policy literal
-    // is intent, not authoritative on-chain state — a pre-registration graph
-    // or a stale local graph after a devnet reset would then bypass SWM
-    // encryption purely from local metadata and leak allowlisted traffic in
-    // plaintext. When the on-chain probe above cannot establish that the CG is
-    // a LIVE public slot (unknown / not live / RPC flake), fail closed: keep
-    // the encrypted path. A genuinely-public CG resolves correctly through
-    // isContextGraphPublicOnChain's live proof; a transient RPC flake yields a
-    // transient encrypted-path retry, never a plaintext leak.
     return this.resolveWorkspaceAgentRecipientsForCurrentAuthority(input);
   }
 
@@ -1382,14 +1274,19 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async resolveWorkspaceAgentRecipientsForCurrentAuthority(this: DKGAgent,
     input: WorkspaceAgentRecipientResolverInput,
   ): Promise<WorkspaceAgentRecipientResolution> {
-    const registeredGate = await this.resolveRegisteredContextGraphAgentGate(input.contextGraphId);
-    if (registeredGate === null) {
+    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(input.contextGraphId);
+    if (registeredAuthority.kind === 'unregistered') {
       return resolveWorkspaceAgentRecipients(this.store, input);
     }
-    if (registeredGate.accessPolicy === 0) {
+    if (registeredAuthority.kind === 'public') {
       return { requiresEncryption: false, recipients: [] };
     }
-    if (registeredGate.agents.length === 0) {
+    if (registeredAuthority.kind === 'unavailable') {
+      throw new Error(
+        `Registered context graph "${input.contextGraphId}" authority is unavailable (${registeredAuthority.reason})`,
+      );
+    }
+    if (registeredAuthority.participantAgents.length === 0) {
       throw new Error(
         `Registered context graph "${input.contextGraphId}" requires encrypted SWM gossip but its authoritative chain roster is empty or unavailable`,
       );
@@ -1401,7 +1298,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // before the chain intersection is reached, blocking every post-revoke
     // write until the local cleanup retry succeeds.
     const recipients: WorkspaceAgentRecipient[] = [];
-    for (const agentAddress of registeredGate.agents) {
+    for (const agentAddress of registeredAuthority.participantAgents) {
       recipients.push(...await resolveWorkspaceAgentRecipientKeys(this.store, agentAddress));
     }
     const [firstRecipient, ...remainingRecipients] = recipients;

@@ -1780,50 +1780,34 @@ export class ContextGraphMethods extends DKGAgentBase {
     // mutation boundary first, before changing local metadata. Retrying after
     // a chain-success/local-store-failure is safe: the fresh roster makes the
     // already-applied chain additions no-ops and completes the local half.
-    let resolvedOnChainId = await this.resolveContextGraphNumericIdForPolicy(contextGraphId);
-    if (
-      resolvedOnChainId === null
-      && typeof this.chain.resolveContextGraphIdByNameHash === 'function'
-    ) {
-      // A cold/non-selected registered CG need not have a local binding yet.
-      // Resolve its immutable name commitment directly so a missing local
-      // projection cannot downgrade a registered membership mutation to the
-      // legacy local-only path.
-      resolvedOnChainId = await this.chain.resolveContextGraphIdByNameHash(
-        this.contextGraphNameCommitment(contextGraphId),
+    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(contextGraphId);
+    if (registeredAuthority.kind === 'unavailable') {
+      throw new Error(
+        `Registered context graph "${contextGraphId}" authority is unavailable (${registeredAuthority.reason})`,
       );
     }
-    let onChainId: bigint | undefined;
-    if (resolvedOnChainId !== null) {
-      const accessPolicy = await this.readLiveOnChainAccessPolicy(
-        resolvedOnChainId.toString(),
-        createOperationContext('system'),
-      );
-      if (accessPolicy === null) {
-        throw new Error(
-          `Registered context graph "${contextGraphId}" has no readable chain access policy`,
-        );
-      }
-      // Participant agents govern READ access only for private/curated CGs.
-      // A public CG may still have a local allowed-agent PUBLISHER gate; do
-      // not mirror that distinct policy into the chain participant roster.
-      if (accessPolicy === 1) onChainId = resolvedOnChainId;
-    }
+    // Participant agents govern READ access only for private/curated CGs. A
+    // public CG may still have a distinct local publisher gate.
+    const onChainId = registeredAuthority.kind === 'private'
+      ? registeredAuthority.onChainId
+      : undefined;
     const candidateChainAgents = [curatorAgentAddress, normalizedAgentAddress]
       .filter((address): address is string => address !== undefined)
       .map((address) => ethers.getAddress(address));
     let onChainAgentsToAdd: string[] = [];
     if (onChainId !== undefined) {
       if (
-        typeof this.chain.getContextGraphParticipantAgents !== 'function'
-        || typeof this.chain.addContextGraphParticipantAgent !== 'function'
+        typeof this.chain.addContextGraphParticipantAgent !== 'function'
       ) {
         throw new Error(
           `Registered context graph "${contextGraphId}" requires chain participant-governance support`,
         );
       }
-      const chainRoster = await this.chain.getContextGraphParticipantAgents(onChainId);
-      const chainRosterSet = new Set(chainRoster.map((address) => address.toLowerCase()));
+      const chainRosterSet = new Set(
+        registeredAuthority.kind === 'private'
+          ? registeredAuthority.participantAgents.map((address) => address.toLowerCase())
+          : [],
+      );
       onChainAgentsToAdd = candidateChainAgents.filter(
         (address, index) => candidateChainAgents.findIndex(
           (candidate) => candidate.toLowerCase() === address.toLowerCase(),
@@ -2037,39 +2021,29 @@ export class ContextGraphMethods extends DKGAgentBase {
     // local metadata. A chain failure therefore cannot create a misleading
     // local success. The fresh roster check makes retries idempotent after a
     // chain-success/local-store-failure split.
-    let resolvedOnChainId = await this.resolveContextGraphNumericIdForPolicy(contextGraphId);
-    if (
-      resolvedOnChainId === null
-      && typeof this.chain.resolveContextGraphIdByNameHash === 'function'
-    ) {
-      resolvedOnChainId = await this.chain.resolveContextGraphIdByNameHash(
-        this.contextGraphNameCommitment(contextGraphId),
+    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(contextGraphId);
+    if (registeredAuthority.kind === 'unavailable') {
+      throw new Error(
+        `Registered context graph "${contextGraphId}" authority is unavailable (${registeredAuthority.reason})`,
       );
     }
-    let onChainId: bigint | null = null;
-    if (resolvedOnChainId !== null) {
-      const accessPolicy = await this.readLiveOnChainAccessPolicy(
-        resolvedOnChainId.toString(),
-        ctx,
-      );
-      if (accessPolicy === null) {
-        throw new Error(
-          `Registered context graph "${contextGraphId}" has no readable chain access policy`,
-        );
-      }
-      if (accessPolicy === 1) onChainId = resolvedOnChainId;
-    }
+    const onChainId = registeredAuthority.kind === 'private'
+      ? registeredAuthority.onChainId
+      : null;
     if (onChainId !== null) {
       if (
-        typeof this.chain.getContextGraphParticipantAgents !== 'function'
-        || typeof this.chain.removeContextGraphParticipantAgent !== 'function'
+        typeof this.chain.removeContextGraphParticipantAgent !== 'function'
       ) {
         throw new Error(
           `Registered context graph "${contextGraphId}" requires chain participant-governance support`,
         );
       }
-      const chainRoster = await this.chain.getContextGraphParticipantAgents(onChainId);
-      if (chainRoster.some((address) => address.toLowerCase() === normalizedAgentAddress.toLowerCase())) {
+      if (
+        registeredAuthority.kind === 'private'
+        && registeredAuthority.participantAgents.some(
+          (address) => address.toLowerCase() === normalizedAgentAddress.toLowerCase(),
+        )
+      ) {
         const result = await this.chain.removeContextGraphParticipantAgent(onChainId, normalizedAgentAddress);
         if (!result.success) {
           throw new Error(

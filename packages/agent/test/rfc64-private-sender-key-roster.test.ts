@@ -12,7 +12,7 @@ describe('RFC-64 private Sender Key roster authority', () => {
       throw new Error('legacy metadata must not be required for an RFC-64 cold join');
     });
     const receiver = {
-      resolveRegisteredContextGraphAgentGate: async () => null,
+      resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),
       resolveRfc64PrivateReadRosterV1: () => [MEMBER_A_LOWERCASE, MEMBER_B, MEMBER_A],
       getCgMeta,
       subscribedContextGraphs: new Map(),
@@ -34,7 +34,7 @@ describe('RFC-64 private Sender Key roster authority', () => {
       revokedAgents: [],
     }));
     const receiver = {
-      resolveRegisteredContextGraphAgentGate: async () => null,
+      resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),
       resolveRfc64PrivateReadRosterV1: () => null,
       getCgMeta,
       subscribedContextGraphs: new Map(),
@@ -51,7 +51,7 @@ describe('RFC-64 private Sender Key roster authority', () => {
 
   it('preserves legacy meta and subscription resolution for non-RFC-64 graphs', async () => {
     const receiver = {
-      resolveRegisteredContextGraphAgentGate: async () => null,
+      resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),
       resolveRfc64PrivateReadRosterV1: () => undefined,
       getCgMeta: async () => ({
         allowedAgents: [MEMBER_A],

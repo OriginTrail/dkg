@@ -263,6 +263,7 @@ describe('private read authorization uses the on-chain participant roster', () =
       outcome: 'unavailable',
       source: 'registered-chain',
       reason: 'test-chain-unavailable',
+      metadataBootstrap: 'eligible',
     });
     const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
 
@@ -289,8 +290,8 @@ describe('private read authorization uses the on-chain participant roster', () =
   });
 
   it('uses the real no-caller chain decision when rehydrating member and non-member rows', async () => {
-    const memberContextGraphId = 'recovery-chain-member';
-    const nonMemberContextGraphId = 'recovery-chain-non-member';
+    const nonMemberContextGraphId = 'recovery-a-denied';
+    const memberContextGraphId = 'recovery-b-member';
     const capContextGraphId = 'recovery-z-cap';
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({
@@ -309,7 +310,7 @@ describe('private read authorization uses the on-chain participant roster', () =
         delete: async () => undefined,
       },
       contextGraphSubscriptionRehydrationEnabled: true,
-      maxRehydratedContextGraphSubscriptions: 2,
+      maxRehydratedContextGraphSubscriptions: 1,
     });
     const localAgentRecord = await agent.registerAgent('Recovery member');
     await agent.markDefaultAgent(localAgentRecord.agentAddress);
@@ -387,6 +388,7 @@ describe('private read authorization uses the on-chain participant roster', () =
       outcome: 'allowed',
       source: 'legacy-local',
       reason: 'local-agent-allowlist',
+      metadataBootstrap: 'eligible',
     });
     const refreshFlags = vi.spyOn(agent, 'refreshMetaSyncedFlags').mockResolvedValue(undefined);
     const subscribe = vi.spyOn(agent, 'subscribeToContextGraph').mockImplementation(
@@ -425,6 +427,62 @@ describe('private read authorization uses the on-chain participant roster', () =
       'rehydrated-subscription',
     );
     expect(catchUp).toHaveBeenCalledWith(contextGraphId, curatorPeerId);
+  });
+
+  it.each([
+    { outcome: 'denied' as const, metadataBootstrap: 'forbidden' as const },
+    { outcome: 'unavailable' as const, metadataBootstrap: 'eligible' as const },
+  ])('keeps every data lane closed when post-refresh authority is $outcome', async (decision) => {
+    const contextGraphId = `post-refresh-${decision.outcome}`;
+    const curatorPeerId = '12D3KooWPostRefreshAuthorityCurator';
+    agent = await DKGAgent.create({
+      name: `PostRefreshAuthority-${decision.outcome}`,
+      chainAdapter: new MockChainAdapter(),
+    });
+    Object.defineProperty(agent, 'peerId', {
+      value: `12D3KooWPostRefresh${decision.outcome}`,
+      configurable: true,
+    });
+    const local = await agent.registerAgent(`Post-refresh ${decision.outcome} member`);
+    (agent as unknown as { localApprovedAgentByCG: Map<string, string> })
+      .localApprovedAgentByCG.set(contextGraphId, local.agentAddress.toLowerCase());
+    (agent as unknown as {
+      subscribedContextGraphs: Map<string, Record<string, unknown>>;
+    }).subscribedContextGraphs.set(contextGraphId, {
+      subscribed: true,
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+      pendingMeta: true,
+      syncMode: 'always-on',
+    });
+
+    vi.spyOn(agent, 'refreshMetaFromCurator').mockResolvedValue(true);
+    vi.spyOn(agent, 'hasConfirmedMetaState').mockResolvedValue(true);
+    vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockResolvedValue({
+      outcome: decision.outcome,
+      source: 'registered-chain',
+      reason: `test-${decision.outcome}`,
+      metadataBootstrap: decision.metadataBootstrap,
+    });
+    const refreshFlags = vi.spyOn(agent, 'refreshMetaSyncedFlags').mockResolvedValue(undefined);
+    const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
+    const persistMembership = vi.spyOn(agent, 'persistLocalNodeMembership');
+    const catchUp = vi.spyOn(agent, 'runImmediatePostApprovalSync').mockResolvedValue(undefined);
+
+    await agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+
+    expect(refreshFlags).not.toHaveBeenCalled();
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(persistMembership).not.toHaveBeenCalled();
+    expect(catchUp).not.toHaveBeenCalled();
+    expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+      subscribed: true,
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+      pendingMeta: true,
+    });
   });
 
   it('keeps a restarted approval with no local metadata out of every data lane', async () => {
@@ -642,7 +700,27 @@ describe('private read authorization uses the on-chain participant roster', () =
     // chain removal. Use different address casing across removal/re-invite to
     // prove exact RDF literal matching cannot strand the tombstone.
     await agent.removeAgentFromContextGraph(contextGraphId, member.toLowerCase(), owner);
+
+    // The inverse split can also happen: chain addition succeeds, then the
+    // replacement local allowlist insert fails. The tombstone must remain
+    // effective and a retry must complete locally without a duplicate tx.
+    const addCallsBeforeRetryWindow = addParticipant.mock.calls.length;
+    vi.spyOn(agent.store, 'insert').mockRejectedValueOnce(
+      new Error('local membership insert failed'),
+    );
+    await expect(agent.inviteAgentToContextGraph(contextGraphId, member, owner))
+      .rejects.toThrow('local membership insert failed');
+    expect(addParticipant).toHaveBeenCalledTimes(addCallsBeforeRetryWindow + 1);
+    expect(await chain.getContextGraphParticipantAgents(onChainId)).toContain(member);
+    await expect(agent.getContextGraphAllowedAgents(contextGraphId))
+      .resolves.not.toContain(member);
+    await expect(agent.canReadContextGraph(contextGraphId, {
+      callerAgentAddress: member,
+      allowSubscriptionFallback: false,
+    })).resolves.toBe(true);
+
     await agent.inviteAgentToContextGraph(contextGraphId, member, owner);
+    expect(addParticipant).toHaveBeenCalledTimes(addCallsBeforeRetryWindow + 1);
     await expect(agent.getContextGraphAllowedAgents(contextGraphId))
       .resolves.toContain(member);
     await expect(agent.canReadContextGraph(contextGraphId, {
