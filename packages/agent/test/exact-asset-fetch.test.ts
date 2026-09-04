@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { SwmHostModeMethods } from '../src/dkg-agent-swm-host.js';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { QueryMethods } from '../src/dkg-agent-query.js';
+import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
 import {
   ContextGraphAssetFetchConflictError,
   ContextGraphAssetFetchValidationError,
@@ -13,6 +15,7 @@ import {
 const CONTEXT_GRAPH = 'sports';
 const ON_CHAIN_ID = '9';
 const PEER = '12D3KooWExactFetchPeer';
+const MEMBER = '0x0000000000000000000000000000000000000001';
 const UALS = [
   'did:dkg:base:8453/0x00000000000000000000000000000000000000a1/1',
   'did:dkg:base:8453/0x00000000000000000000000000000000000000a1/2',
@@ -94,6 +97,9 @@ function createFetchHost(options: {
     ensurePeerConnected: async () => undefined,
     waitForSyncProtocol: async () => true,
     ensurePeerAdmittedForRecovery: async () => true,
+    // Most cases isolate exact-fetch mechanics. The successful main-path case
+    // below replaces this with the production read-authority implementation.
+    canReadContextGraph: vi.fn(async () => true),
     syncExactKnowledgeAssetsFromPeerDetailed: exactFetch,
     store: { flush },
     log: { info: vi.fn() },
@@ -136,14 +142,27 @@ describe('exact Context Graph asset fetch', () => {
     const scalarRoot = vi.fn(async () => new Uint8Array(32).fill(0xff));
     const scalarPublisher = vi.fn(async () => '0x00000000000000000000000000000000000000ff');
     const scalarBlock = vi.fn(async () => 999);
+    const chainRoster = vi.fn(async () => [MEMBER]);
     Object.assign(host, {
       config: { syncReconcilerEnabled: false },
       vmReconcileEnabled: () => false,
+      localAgents: new Map([[MEMBER, { agentAddress: MEMBER }]]),
+      defaultAgentAddress: MEMBER,
+      getContextGraphAllowedPeers: vi.fn(async () => null),
+      resolveContextGraphNumericIdForPolicy: vi.fn(async () => BigInt(ON_CHAIN_ID)),
+      readLiveOnChainAccessPolicy: vi.fn(async () => 1 as const),
+      resolveRfc64PrivateReadRosterV1: vi.fn(() => undefined),
+      isAgentAddressAllowed: QueryMethods.prototype.isAgentAddressAllowed,
+      hasLocalAgentInGate: WorkspaceCryptoMethods.prototype.hasLocalAgentInGate,
+      resolveContextGraphReadAuthority:
+        QueryMethods.prototype.resolveContextGraphReadAuthority,
+      canReadContextGraph: QueryMethods.prototype.canReadContextGraph,
     });
     Object.assign(host.chain, {
       getLatestMerkleRoot: scalarRoot,
       getLatestMerkleRootPublisher: scalarPublisher,
       getBlockNumber: scalarBlock,
+      getContextGraphParticipantAgents: chainRoster,
     });
 
     const result = await SwmHostModeMethods.prototype.fetchContextGraphAssets.call(
@@ -182,6 +201,7 @@ describe('exact Context Graph asset fetch', () => {
     expect(scalarRoot).not.toHaveBeenCalled();
     expect(scalarPublisher).not.toHaveBeenCalled();
     expect(scalarBlock).not.toHaveBeenCalled();
+    expect(chainRoster).toHaveBeenCalledWith(BigInt(ON_CHAIN_ID));
     expect(flush).toHaveBeenCalledTimes(1);
     expect(subscription.lastReconciledOrdinal).toBe(77);
   });
