@@ -1,3 +1,4 @@
+import { hasValidGraphPublishContent, isGraphPublishAccessPolicy, normalizeGraphPublishPeers, hasValidGraphPublishPeers } from './graph-publish-envelope.js';
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import type { EventBus, StreamHandler, OperationContext } from '@origintrail-official/dkg-core';
@@ -113,27 +114,17 @@ function resolveGraphScopedPublishRequest(
   }
   const publicTripleCount = request.publicTripleCount ?? 0;
   const privateTripleCount = request.privateTripleCount ?? 0;
-  if (
-    !Number.isSafeInteger(publicTripleCount)
-    || publicTripleCount < 0
-    || !Number.isSafeInteger(privateTripleCount)
-    || privateTripleCount < 0
-    || (publicTripleCount === 0 && privateTripleCount === 0)
-    || (privateTripleCount > 0 && privateMerkleRoot?.length !== 32)
-    || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
-  ) {
+  if (!hasValidGraphPublishContent(publicTripleCount, privateTripleCount, privateMerkleRoot)) {
     throw new Error('Graph-scoped publish has an invalid content envelope');
   }
   const accessPolicy = request.accessPolicy;
-  if (accessPolicy !== 'public' && accessPolicy !== 'ownerOnly' && accessPolicy !== 'allowList') {
+  if (!isGraphPublishAccessPolicy(accessPolicy)) {
     throw new Error(`Graph-scoped publish has invalid accessPolicy: ${accessPolicy || '(empty)'}`);
   }
   const rawAllowedPeers = request.allowedPeers ?? [];
-  const allowedPeers = [...new Set(rawAllowedPeers.map((peer) => peer.trim()).filter(Boolean))];
+  const allowedPeers = normalizeGraphPublishPeers(rawAllowedPeers);
   if (
-    allowedPeers.length !== rawAllowedPeers.length
-    || (accessPolicy === 'allowList' && allowedPeers.length === 0)
-    || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
+    !hasValidGraphPublishPeers(accessPolicy, rawAllowedPeers.length, allowedPeers)
   ) {
     throw new Error('Graph-scoped publish has an invalid access-policy peer envelope');
   }

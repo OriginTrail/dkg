@@ -1,3 +1,4 @@
+import { hasValidGraphPublishContent, isGraphPublishAccessPolicy, normalizeGraphPublishPeers, hasValidGraphPublishPeers } from './graph-publish-envelope.js';
 import {
   deleteByPatternWithoutCount,
   GraphManager,
@@ -97,15 +98,7 @@ function resolveGraphScopedPublishIntent(
   }
   const publicTripleCount = intent.publicTripleCount ?? 0;
   const privateTripleCount = intent.privateTripleCount ?? 0;
-  if (
-    !Number.isSafeInteger(publicTripleCount)
-    || publicTripleCount < 0
-    || !Number.isSafeInteger(privateTripleCount)
-    || privateTripleCount < 0
-    || (publicTripleCount === 0 && privateTripleCount === 0)
-    || (privateTripleCount > 0 && privateMerkleRoot?.length !== 32)
-    || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
-  ) {
+  if (!hasValidGraphPublishContent(publicTripleCount, privateTripleCount, privateMerkleRoot)) {
     throw new Error('StorageACK: graph-scoped publish has an invalid content envelope');
   }
   const scope = createGraphKnowledgeAssetScope(intent.kaUal, intent.assertionVersion);
@@ -114,12 +107,10 @@ function resolveGraphScopedPublishIntent(
   }
   const accessPolicy = intent.accessPolicy;
   const rawAllowedPeers = intent.allowedPeers ?? [];
-  const allowedPeers = [...new Set(rawAllowedPeers.map((peer) => peer.trim()).filter(Boolean))];
+  const allowedPeers = normalizeGraphPublishPeers(rawAllowedPeers);
   if (
-    (accessPolicy !== 'public' && accessPolicy !== 'ownerOnly' && accessPolicy !== 'allowList')
-    || allowedPeers.length !== rawAllowedPeers.length
-    || (accessPolicy === 'allowList' && allowedPeers.length === 0)
-    || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
+    !isGraphPublishAccessPolicy(accessPolicy)
+    || !hasValidGraphPublishPeers(accessPolicy, rawAllowedPeers.length, allowedPeers)
   ) {
     throw new Error('StorageACK: graph-scoped publish has an invalid access envelope');
   }
