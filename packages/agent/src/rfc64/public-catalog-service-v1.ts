@@ -117,6 +117,7 @@ import {
   snapshotRfc64PublicCatalogAnnouncementPeersV1,
   snapshotRfc64RemoteCatalogAnnouncementPeersV1,
 } from './catalog-peers-v1.js';
+import { Rfc64CoalescingSupervisorV1 } from './coalescing-supervisor-v1.js';
 import { mapWithConcurrency } from '../map-with-concurrency.js';
 
 export {
@@ -128,6 +129,7 @@ export {
 const DEFAULT_TRANSPORT_TIMEOUT_MS = 10_000;
 const MAX_FAILOVER_PROVIDERS_V1 = 8;
 const MAX_CONCURRENT_PROVIDER_DISCOVERIES_V1 = 4;
+const MAX_ANNOUNCED_CURRENT_HEAD_SCOPES_V1 = 1_024;
 
 export interface Rfc64PublicCatalogServiceOptionsV1 {
   readonly router: ProtocolRouter;
@@ -139,7 +141,12 @@ export interface Rfc64PublicCatalogServiceOptionsV1 {
   readonly receiver?: Rfc64PublicCatalogReceiverOptionsV1;
   /** Full production native content/reconciliation path. Omission is diagnostic-only. */
   readonly native?: Rfc64PublicCatalogServiceNativeOptionsV1;
-  /** Optional Gate-3 pull-discovery capability; no automatic lifecycle trigger. */
+  /**
+   * Optional Gate-3 pull-discovery capability. When native reconciliation is
+   * also configured, accepted announcements coalesce into bounded,
+   * authenticated current-head pulls so stale history cannot monopolize the
+   * ambient receiver queue.
+   */
   readonly currentHeadDiscovery?: Rfc64PublicCatalogServiceCurrentHeadDiscoveryOptionsV1;
   /** Per-peer announce/fetch timeout (ms). */
   readonly transportTimeoutMs?: number;
@@ -311,6 +318,11 @@ export interface SynchronizedRfc64CatalogCurrentHeadProvidersV1 {
   readonly providerAttempts: number;
 }
 
+interface AnnouncedCurrentHeadTargetV1 {
+  readonly scope: Readonly<Rfc64PublicCatalogCurrentHeadScopeV1>;
+  readonly remotePeerIds: Set<string>;
+}
+
 export interface Rfc64PublicCatalogServiceStatsV1 {
   readonly started: boolean;
   readonly acceptedPolicies: number;
@@ -337,6 +349,8 @@ export class Rfc64PublicCatalogServiceV1 {
     direction: Rfc64CatalogAuthorityDirectionV1,
   ) => Rfc64CatalogAuthorityPolicyV1;
   readonly #localPeerId: string | undefined;
+  readonly #announcedCurrentHeadTargets = new Map<string, AnnouncedCurrentHeadTargetV1>();
+  readonly #announcedCurrentHeadSupervisor: Rfc64CoalescingSupervisorV1 | undefined;
   #started = false;
   #closed = false;
 
@@ -378,6 +392,7 @@ export class Rfc64PublicCatalogServiceV1 {
       // path (which awaits this callback) is never stalled on a fetch.
       onCatalogHeadAvailable: (announcement, remotePeerId) => {
         this.#receiver.schedule(announcement, remotePeerId);
+        this.#requestAnnouncedCurrentHeadSynchronization(announcement, remotePeerId);
       },
       onCatalogHeadReplayRequested: options.onCatalogHeadReplayRequested,
     });
@@ -482,6 +497,15 @@ export class Rfc64PublicCatalogServiceV1 {
         },
       };
     this.#receiver = new Rfc64PublicCatalogReceiverV1(reconciler, options.receiver);
+    this.#announcedCurrentHeadSupervisor = (
+      this.#currentHeadDiscoveryTransport === undefined || nativeReconciler === undefined
+    )
+      ? undefined
+      : new Rfc64CoalescingSupervisorV1({
+        runPass: (signal) => this.#synchronizeAnnouncedCurrentHeads(signal),
+        onError: () => undefined,
+        closingMessage: 'RFC-64 announced current-head synchronization closing',
+      });
   }
 
   get started(): boolean {
@@ -572,11 +596,18 @@ export class Rfc64PublicCatalogServiceV1 {
 
   /** Fence receiver scheduling and drain applied-head callbacks; keep authoring live. */
   async closeReceiverAdmissionAndDrain(): Promise<void> {
+    await this.#announcedCurrentHeadSupervisor?.close();
+    this.#announcedCurrentHeadTargets.clear();
     await this.#receiver.close();
   }
 
   /** Abort receiver work for a graph while retaining verified served data. */
   deactivateReceiverContextGraph(contextGraphId: string): void {
+    for (const [key, target] of this.#announcedCurrentHeadTargets) {
+      if (target.scope.contextGraphId === contextGraphId) {
+        this.#announcedCurrentHeadTargets.delete(key);
+      }
+    }
     this.#receiver.cancelContextGraph(contextGraphId);
   }
 
@@ -966,9 +997,10 @@ export class Rfc64PublicCatalogServiceV1 {
     });
   }
 
-  /** Idle-await the receiver (tests / graceful shutdown coordination). */
-  whenReceiverIdle(): Promise<void> {
-    return this.#receiver.whenIdle();
+  /** Idle-await pull acceleration and the receiver (tests / graceful shutdown coordination). */
+  async whenReceiverIdle(): Promise<void> {
+    await this.#announcedCurrentHeadSupervisor?.whenIdle();
+    await this.#receiver.whenIdle();
   }
 
   stats(): Rfc64PublicCatalogServiceStatsV1 {
@@ -984,6 +1016,64 @@ export class Rfc64PublicCatalogServiceV1 {
     return signal === undefined
       ? { timeoutMs: this.#transportTimeoutMs }
       : { timeoutMs: this.#transportTimeoutMs, signal };
+  }
+
+  /**
+   * Turn a policy-admitted availability hint into a bounded pull request. The
+   * announcement itself never gains priority: only discovery's exact-fetch and
+   * signature/scope checks may schedule the verified-current-head lane.
+   */
+  #requestAnnouncedCurrentHeadSynchronization(
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    remotePeerId: string,
+  ): void {
+    const supervisor = this.#announcedCurrentHeadSupervisor;
+    if (supervisor === undefined || supervisor.closed || this.#closed) return;
+    const key = announcedCurrentHeadScopeKeyV1(announcement);
+    let target = this.#announcedCurrentHeadTargets.get(key);
+    if (target === undefined) {
+      if (this.#announcedCurrentHeadTargets.size >= MAX_ANNOUNCED_CURRENT_HEAD_SCOPES_V1) {
+        return;
+      }
+      target = {
+        scope: Object.freeze({
+          networkId: announcement.networkId,
+          contextGraphId: announcement.contextGraphId,
+          subGraphName: announcement.subGraphName,
+          authorAddress: announcement.authorAddress,
+          catalogEra: announcement.catalogEra,
+        }),
+        remotePeerIds: new Set<string>(),
+      };
+      this.#announcedCurrentHeadTargets.set(key, target);
+    }
+    if (target.remotePeerIds.size < MAX_FAILOVER_PROVIDERS_V1) {
+      target.remotePeerIds.add(remotePeerId);
+    }
+    supervisor.request();
+  }
+
+  /** One globally bounded pass; requests arriving during it coalesce into the next pass. */
+  async #synchronizeAnnouncedCurrentHeads(signal: AbortSignal): Promise<void> {
+    const targets = [...this.#announcedCurrentHeadTargets.values()];
+    this.#announcedCurrentHeadTargets.clear();
+    await mapWithConcurrency(
+      targets,
+      MAX_CONCURRENT_PROVIDER_DISCOVERIES_V1,
+      async ({ scope, remotePeerIds }) => {
+        if (signal.aborted || remotePeerIds.size === 0) return;
+        try {
+          await this.synchronizeCurrentCatalogHeadFromProviders({
+            remotePeerIds: [...remotePeerIds],
+            scope,
+            signal,
+          });
+        } catch {
+          // Best-effort acceleration only. The original ambient task remains
+          // authoritative recovery work, and a later hint requests a new pull.
+        }
+      },
+    );
   }
 
   #authorityForOperation(
@@ -1212,6 +1302,18 @@ function exactHeadIdentityV1(
     announcement.policyDigest,
     announcement.catalogHeadObjectDigest,
     announcement.signatureVariantDigest,
+  ].join('\n');
+}
+
+function announcedCurrentHeadScopeKeyV1(
+  announcement: Readonly<Rfc64PublicCatalogHeadAnnouncementV1>,
+): string {
+  return [
+    announcement.networkId,
+    announcement.contextGraphId,
+    announcement.subGraphName ?? '',
+    announcement.authorAddress,
+    announcement.catalogEra,
   ].join('\n');
 }
 

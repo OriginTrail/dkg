@@ -1443,6 +1443,76 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     }
   });
 
+  it('pulls an authenticated current head past stale ambient history and retires that history', async () => {
+    const router = new RecordingRouter();
+    const firstStarted = deferred<void>();
+    const releaseFirst = deferred<void>();
+    const applied = new Set<string>();
+    const reconciledVersions: string[] = [];
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest: async () => null },
+      receiver: { maxConcurrent: 1, maxAttempts: 1, retryBackoffMs: 0 },
+      native: nativeOptions(() => ({
+        isHeadApplied: async (head) => applied.has(head.catalogHeadObjectDigest),
+        reconcileHead: async (_peerId, head) => {
+          reconciledVersions.push(head.catalogVersion);
+          if (head.catalogVersion === '1') {
+            firstStarted.resolve(undefined);
+            await releaseFirst.promise;
+            throw new Error('stale intermediate head is no longer composable');
+          }
+          applied.add(head.catalogHeadObjectDigest);
+          return 'applied';
+        },
+      })),
+    });
+    const policy = acceptPolicy(service);
+    const headAt = (catalogVersion: string, byte: string) => ({
+      ...announcement(policy.policyDigest),
+      catalogVersion,
+      catalogHeadObjectDigest: `0x${byte.repeat(64)}` as Digest32V1,
+      signatureVariantDigest: `0x${byte.repeat(64)}` as Digest32V1,
+    });
+    const current = headAt('40', 'd');
+    const discovery = vi.spyOn(service, 'discoverCurrentCatalogHead').mockResolvedValue(
+      Object.freeze({ announcement: current, head: {} as never }),
+    );
+    service.start();
+
+    await router.invoke(
+      RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
+      encodeRfc64PublicCatalogHeadAnnouncementV1(headAt('1', 'a')),
+      'peer-provider',
+    );
+    await firstStarted.promise;
+    await router.invoke(
+      RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
+      encodeRfc64PublicCatalogHeadAnnouncementV1(headAt('2', 'b')),
+      'peer-provider',
+    );
+    await router.invoke(
+      RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
+      encodeRfc64PublicCatalogHeadAnnouncementV1(headAt('3', 'c')),
+      'peer-provider',
+    );
+    await vi.waitFor(() => expect(discovery).toHaveBeenCalled());
+    releaseFirst.resolve(undefined);
+
+    await service.whenReceiverIdle();
+    expect(reconciledVersions).toEqual(['1', '40']);
+    expect(service.stats().receiver).toMatchObject({
+      applied: 1,
+      failed: 1,
+      supersededQueued: 2,
+      queued: 0,
+      inFlight: 0,
+    });
+    await service.close();
+  });
+
   it('settles a single-provider synchronization closed when shutdown wins the discovery race', async () => {
     const reconcileHead = vi.fn(async () => 'applied' as const);
     const service = new Rfc64PublicCatalogServiceV1({
