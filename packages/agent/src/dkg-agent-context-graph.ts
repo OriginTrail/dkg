@@ -858,11 +858,31 @@ export class ContextGraphMethods extends DKGAgentBase {
         }
       }
     }
-    // The normal creation call does not return until release-native selection
-    // and its first authority-resolution attempt have settled. A temporarily
-    // unavailable authority remains explicitly blocked and retryable rather
-    // than failing creation or opening a legacy correctness lane.
-    await this.reconcileRfc64CatalogResponsibilityV1(opts.id);
+    // The graph, subscription, and their backing stores are already durable at
+    // this boundary. RFC-64 responsibility is a fail-closed projection of that
+    // committed state, so a transient policy/authority read must not turn a
+    // successful create into a misleading rejected operation (the daemon may
+    // otherwise skip an explicitly requested registration and a retry sees an
+    // already-existing graph). Wait for the first attempt, then contain only
+    // this post-commit projection failure and queue one detached retry. The
+    // reconciler clears receiver authority before rethrowing, so neither path
+    // opens a legacy or unauthenticated catalog lane.
+    try {
+      await this.reconcileRfc64CatalogResponsibilityV1(opts.id);
+    } catch (error) {
+      this.log.warn(
+        ctx,
+        `RFC-64 responsibility remains blocked after creating "${opts.id}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+      void Promise.resolve()
+        .then(() => this.reconcileRfc64CatalogResponsibilityV1(opts.id))
+        .catch((retryError) => {
+          this.log.warn(
+            ctx,
+            `RFC-64 responsibility retry remains blocked for "${opts.id}": ${retryError instanceof Error ? retryError.message : String(retryError)}`,
+          );
+        });
+    }
   }
 
   /**

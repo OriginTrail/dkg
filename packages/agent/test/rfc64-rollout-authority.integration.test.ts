@@ -391,6 +391,69 @@ describe('RFC-64 rollout authority integration', () => {
     });
   });
 
+  it('keeps a durable create successful when post-commit responsibility resolution transiently fails', async () => {
+    const contextGraphId = `${AUTHOR}/post-commit-responsibility-failure` as ContextGraphIdV1;
+    const edge = await startAgent('post-commit-responsibility-failure', undefined);
+    const store = (edge as unknown as { store: OxigraphStore }).store;
+    const flush = vi.spyOn(store, 'flush');
+    const readPolicy = edge.getExplicitAccessPolicy.bind(edge);
+    let failNextPolicyRead = false;
+    let observedPostCommitFailure = false;
+    vi.spyOn((edge as any).gossip, 'publish').mockImplementation(async () => {
+      // Public definition gossip is the last awaited step before the explicit
+      // post-commit responsibility reconciliation. Arm only that policy read;
+      // earlier subscription-owned attempts remain real and cannot consume it.
+      failNextPolicyRead = true;
+    });
+    const policyRead = vi.spyOn(edge, 'getExplicitAccessPolicy')
+      .mockImplementation(async (id) => {
+        if (failNextPolicyRead) {
+          failNextPolicyRead = false;
+          observedPostCommitFailure = true;
+          throw new Error('policy store temporarily unavailable');
+        }
+        return readPolicy(id);
+      });
+
+    await expect(edge.createContextGraph({
+      id: contextGraphId,
+      name: 'Post-commit responsibility failure',
+    })).resolves.toBeUndefined();
+
+    expect(flush).toHaveBeenCalledOnce();
+    await expect(edge.contextGraphExists(contextGraphId)).resolves.toBe(true);
+    expect(observedPostCommitFailure).toBe(true);
+    await vi.waitFor(() => {
+      expect(policyRead.mock.calls.length).toBeGreaterThanOrEqual(3);
+      expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
+        expect.objectContaining({
+          contextGraphId,
+          responsibilityReason: 'edge-subscription',
+          active: true,
+          mode: 'catalog',
+        }),
+      );
+    });
+
+    // No trusted owner was supplied, so the retry may recover responsibility
+    // selection but authority remains visibly blocked and the receiver stays
+    // fail-closed until a later authoritative lifecycle update.
+    await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId,
+        phase: 'blocked',
+        authorityState: 'blocked',
+        stableReason: 'unregistered-owner-unresolved',
+        legacySyncAllowed: false,
+      }),
+    );
+    expect(edge.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId)).toMatchObject({
+      active: false,
+      legacySyncAllowed: false,
+      reconciliationLane: 'disabled',
+    });
+  });
+
   it('reconciles default responsibility when a live subscription is bound late', async () => {
     const contextGraphId = `${AUTHOR}/late-verified-binding`;
     const edge = await startAgent('late-verified-binding', undefined);
