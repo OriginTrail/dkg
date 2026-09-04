@@ -357,7 +357,7 @@ export interface Rfc64CatalogOperationalStatusV1 {
   readonly expectedRowCount: string | null;
   readonly appliedRowCount: string | null;
   readonly missingRowCount: string | null;
-  /** Pre-default 10.0.15 SWM heads awaiting an explicit normal share/update. */
+  /** Pre-10.0.16 SWM heads awaiting an explicit normal share/update. */
   readonly legacyReadOnlyCount: number;
   readonly catalogVersion: DecimalU64V1 | null;
   readonly authorHeadCount: number;
@@ -1379,7 +1379,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /**
-   * Preserve the pre-default 10.0.15 direct policy-acceptance API as an additive
+   * Preserve the pre-10.0.16 direct policy-acceptance API as an additive
    * compatibility lane only after that API explicitly accepted the CG in this
    * process. A selected release-native manifest still takes precedence, and
    * an unsubscribed default Edge cannot manufacture this compatibility mark.

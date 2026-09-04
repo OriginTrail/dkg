@@ -412,7 +412,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     const persist = syncMode === 'on-demand' ? false : options?.persist;
     if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
       // Preserve the user's durable selection and VM intent without installing
-      // legacy publish/update/finalization authority. The 10.0.15 catalog owns
+      // legacy publish/update/finalization authority. The 10.0.16 catalog owns
       // this CG's ROOT SWM scope, while named subgraphs retain a disjoint legacy
       // compatibility lane until RFC-64 indexes/replay support non-null scope.
       const syncSet = new Set<string>(this.config.syncContextGraphs ?? []);
@@ -647,7 +647,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
 
   /**
    * Scope-aware materialization authority for the shared legacy wire.
-   * Catalog mode owns only the root scope in 10.0.15; a valid named subgraph
+   * Catalog mode owns only the root scope in 10.0.16; a valid named subgraph
    * is therefore non-overlapping legacy traffic. Validation still belongs to
    * SharedMemoryHandler, so this predicate makes only the null-vs-named split.
    */

@@ -232,7 +232,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
       nodeRole: 'core',
       skills: [],
       // This suite exercises the one-release legacy GossipSub rollback. In
-      // 10.0.15 omission selects catalog authority and suppresses that topic.
+      // 10.0.16 omission selects catalog authority and suppresses that topic.
       rfc64CatalogActivation: { enabled: false },
       chainConfig: makeChainConfig(NODE_A_KEY),
     });

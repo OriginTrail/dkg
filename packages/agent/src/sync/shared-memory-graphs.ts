@@ -16,7 +16,7 @@ export function isSharedMemoryBucketDescendantDataGraph(graph: string, bucketGra
  * True only for the aggregate or per-KA Shared Memory DATA graph of a valid
  * named subgraph. The Context Graph root bucket is deliberately excluded.
  *
- * RFC-64's 10.0.15 default catalog implementation owns only the root scope.
+ * RFC-64's 10.0.16 default catalog implementation owns only the root scope.
  * This predicate is the common boundary for the disjoint compatibility lane
  * that keeps existing named-subgraph SWM traffic live until catalog indexes,
  * checkpoints and replay support non-null `subGraphName` scopes.

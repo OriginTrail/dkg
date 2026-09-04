@@ -133,7 +133,7 @@ describe('E2E: DKGAgent with real blockchain', () => {
       listenPort: 0,
       skills: [],
       // This suite exercises the one-release legacy GossipSub rollback. In
-      // 10.0.15 omission selects catalog authority and suppresses that topic.
+      // 10.0.16 omission selects catalog authority and suppresses that topic.
       rfc64CatalogActivation: { enabled: false },
       chainConfig: makeChainConfig(HARDHAT_KEYS.EXTRA1, HARDHAT_KEYS.EXTRA3),
     });

@@ -635,7 +635,7 @@ export interface DkgConfig {
   rfc64PublicCatalog?: Rfc64PublicCatalogActivationConfig;
   /**
    * Optional RFC-64 authority seeds and emergency rollout controls. In
-   * 10.0.15, ordinary subscriptions, Core public hosting, and verified private
+   * 10.0.16, ordinary subscriptions, Core public hosting, and verified private
    * membership select catalog mode without this block. Manual policy/roster
    * material remains accepted for compatibility but no longer owns selection.
    */

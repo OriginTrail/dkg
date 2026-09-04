@@ -15,7 +15,7 @@ export type Rfc64CatalogSelectionSourceV1 =
   | 'kill-switch';
 
 export interface Rfc64CatalogResponsibilityRegistryControlsV1 {
-  /** Product default for responsible CGs. DKG 10.0.15 supplies `catalog`. */
+  /** Product default for responsible CGs. DKG 10.0.16 supplies `catalog`. */
   readonly defaultMode?: Rfc64CatalogRolloutModeV1;
   /** Explicit, restart-stable per-CG emergency rollout overrides. */
   readonly contextGraphModes?: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;

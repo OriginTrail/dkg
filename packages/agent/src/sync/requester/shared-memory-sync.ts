@@ -438,7 +438,7 @@ interface SharedMemorySyncContext {
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   /**
-   * False for the 10.0.15 named-subgraph compatibility lane. Remote aggregate
+   * False for the 10.0.16 named-subgraph compatibility lane. Remote aggregate
    * pages are still fetched, but root-scope rows are removed before verifier,
    * materializer, ownership, and store mutation boundaries.
    */

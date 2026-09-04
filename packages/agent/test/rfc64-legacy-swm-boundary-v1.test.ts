@@ -20,7 +20,7 @@ const SUBGRAPH_META_GRAPH =
 const UAL_ONE = 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/1';
 const UAL_TWO = 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/2';
 
-describe('RFC-64 10.0.15 legacy SWM boundary', () => {
+describe('RFC-64 10.0.16 legacy SWM boundary', () => {
   const roots: string[] = [];
 
   afterEach(async () => {
@@ -43,7 +43,7 @@ describe('RFC-64 10.0.15 legacy SWM boundary', () => {
     expect(readRfc64LegacySwmBoundaryCountV1(firstOwner, CONTEXT_GRAPH_ID)).toBe(1);
 
     // A later restart must load the immutable first-upgrade capture instead of
-    // silently classifying a new 10.0.15 share as historical.
+    // silently classifying a new 10.0.16 share as historical.
     heads.set(SUBGRAPH_META_GRAPH, [UAL_TWO]);
     const restartedOwner = {};
     await initializeRfc64LegacySwmBoundaryV1(restartedOwner, root, store);
