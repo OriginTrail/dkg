@@ -665,8 +665,9 @@ export class TripleStoreAsyncLiftPublisher
         ensureGraph: async () => await this.ensureGraph(),
         isPaused: () => this.paused,
         readStatus: async (jobId) => await this.readJobPayload(jobId),
-        listAccepted: async () =>
-          (await this.list({ status: 'accepted' })).filter(
+        // list owns acceptedAt/jobId ordering and malformed-row handling.
+        nextAccepted: async () =>
+          (await this.list({ status: 'accepted' })).find(
             (job): job is LiftJobAccepted => job.status === 'accepted',
           ),
         reacceptDueFailedJobs: async (now) => await this.reacceptDueFailedJobs(now),
