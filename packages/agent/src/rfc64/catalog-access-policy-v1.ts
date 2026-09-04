@@ -152,6 +152,7 @@ export interface Rfc64CatalogAccessPolicyRegistryOptionsV1 {
   /** Exact authenticated libp2p-peer to agent-wallet binding. */
   readonly resolveRemoteAgentAddress: (
     remotePeerId: string,
+    contextGraphId: ContextGraphIdV1,
   ) => Promise<EvmAddressV1 | null>;
 }
 
@@ -172,6 +173,7 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
   readonly #localAgentAddress: EvmAddressV1 | null;
   readonly #resolveRemoteAgentAddress: ((
     remotePeerId: string,
+    contextGraphId: ContextGraphIdV1,
   ) => Promise<EvmAddressV1 | null>) | null;
   readonly #byKey = new Map<string, HeldCatalogAccessSnapshotV1>();
 
@@ -316,7 +318,10 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
       || this.#resolveRemoteAgentAddress === null
     ) return null;
 
-    const remoteAgentAddress = await this.#resolveRemoteMemberAddress(boundary.remotePeerId);
+    const remoteAgentAddress = await this.#resolveRemoteMemberAddress(
+      boundary.remotePeerId,
+      boundary.contextGraphId,
+    );
     if (remoteAgentAddress === null) return null;
     // A future verified transition path may replace the held snapshot while the
     // authenticated peer binding is being resolved. Never authorize against a
@@ -359,10 +364,13 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
     }
   }
 
-  async #resolveRemoteMemberAddress(remotePeerId: string): Promise<EvmAddressV1 | null> {
+  async #resolveRemoteMemberAddress(
+    remotePeerId: string,
+    contextGraphId: ContextGraphIdV1,
+  ): Promise<EvmAddressV1 | null> {
     if (this.#resolveRemoteAgentAddress === null) return null;
     try {
-      const resolved = await this.#resolveRemoteAgentAddress(remotePeerId);
+      const resolved = await this.#resolveRemoteAgentAddress(remotePeerId, contextGraphId);
       return resolved === null
         ? null
         : snapshotAgentAddress(resolved, 'resolved remote agent address');

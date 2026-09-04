@@ -1347,6 +1347,7 @@ export interface Rfc64CatalogAccessPolicyAuthorityConfigV1 {
   /** Exact authenticated libp2p-peer to agent-wallet binding. */
   readonly resolveRemoteAgentAddress: (
     remotePeerId: string,
+    contextGraphId: ContextGraphIdV1,
   ) => Promise<EvmAddressV1 | null>;
 }
 

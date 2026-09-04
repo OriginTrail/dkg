@@ -709,6 +709,60 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     return roster?.includes(localAgentAddress as EvmAddressV1) ?? false;
   }
 
+  /**
+   * Resolve a catalog peer from authenticated, Context-Graph-scoped state.
+   * Public agent profiles remain the first choice, but private admission must
+   * not depend on best-effort profile gossip. Curators already hold the
+   * member's signed delegatee binding, while approved receivers persist the
+   * authenticated curator peer and learn the owner from verified `_meta`.
+   */
+  async resolveRfc64CatalogRemoteAgentAddressV1(
+    this: DKGAgent,
+    remotePeerId: string,
+    contextGraphId: ContextGraphIdV1,
+  ): Promise<EvmAddressV1 | null> {
+    const discovered = (await this.findAgentByPeerId(remotePeerId))
+      ?.agentAddress
+      ?.toLowerCase();
+    if (discovered !== undefined && /^0x[0-9a-f]{40}$/u.test(discovered)) {
+      return discovered as EvmAddressV1;
+    }
+    if (!await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
+      return null;
+    }
+
+    const delegatedAgents = new Set<EvmAddressV1>();
+    const delegateePeers = await this.getContextGraphAllowedDelegateePeers(contextGraphId)
+      .catch(() => new Map<string, string[]>());
+    for (const [agentAddress, peerIds] of delegateePeers) {
+      const normalized = agentAddress.toLowerCase();
+      if (
+        peerIds.includes(remotePeerId)
+        && /^0x[0-9a-f]{40}$/u.test(normalized)
+      ) {
+        delegatedAgents.add(normalized as EvmAddressV1);
+      }
+    }
+    if (delegatedAgents.size === 1) return [...delegatedAgents][0]!;
+    if (delegatedAgents.size > 1) return null;
+
+    if (
+      this.preferredSyncPeers.get(contextGraphId) !== remotePeerId
+      || !this.localApprovedAgentByCG.has(contextGraphId)
+    ) {
+      return null;
+    }
+    const ownerDid = await this.getContextGraphOwner(contextGraphId).catch(() => null);
+    const ownerAddress = ownerDid
+      ?.trim()
+      .replace(/^<|>$/gu, '')
+      .replace(/^did:dkg:agent:/u, '')
+      .toLowerCase();
+    return ownerAddress !== undefined && /^0x[0-9a-f]{40}$/u.test(ownerAddress)
+      ? ownerAddress as EvmAddressV1
+      : null;
+  }
+
   /** Read the curator-authored local roster generation from authenticated metadata. */
   async readRfc64PrivateRosterVersionV1(
     this: DKGAgent,
@@ -1199,12 +1253,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           ? undefined
           : {
             localAgentAddress: this.defaultAgentAddress.toLowerCase() as EvmAddressV1,
-            resolveRemoteAgentAddress: async (peerId) => {
-              const address = (await this.findAgentByPeerId(peerId))?.agentAddress?.toLowerCase();
-              return address !== undefined && /^0x[0-9a-f]{40}$/u.test(address)
-                ? address as EvmAddressV1
-                : null;
-            },
+            resolveRemoteAgentAddress: (peerId, contextGraphId) =>
+              this.resolveRfc64CatalogRemoteAgentAddressV1(peerId, contextGraphId),
           }),
       native: this.createRfc64PublicCatalogNativeOptionsV1(verifyIssuerSignature),
       verifyIssuerSignature,

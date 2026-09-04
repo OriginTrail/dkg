@@ -218,6 +218,24 @@ describe('RFC-64 D26 catalog access authorization', () => {
     }
   });
 
+  it('passes the exact private Context Graph into peer identity resolution', async () => {
+    const acceptedPolicy = policy(1, 1);
+    const policyDigest = digestFor(acceptedPolicy);
+    const resolutions: Array<{ peerId: string; contextGraphId: string }> = [];
+    const subject = new Rfc64CatalogAccessPolicyRegistryV1({
+      localAgentAddress: LOCAL,
+      resolveRemoteAgentAddress: async (peerId, contextGraphId) => {
+        resolutions.push({ peerId, contextGraphId });
+        return REMOTE;
+      },
+    });
+    subject.accept({ policy: acceptedPolicy, policyDigest, roster: roster(policyDigest) });
+
+    await expect(subject.authorize(authInput('fetch-outbound', policyDigest)))
+      .resolves.toEqual({ accessPolicy: 1, policyDigest });
+    expect(resolutions).toEqual([{ peerId: '12D3KooRemote', contextGraphId: CG }]);
+  });
+
   it('requires the serving side to hold the provider role', async () => {
     const acceptedPolicy = policy(1, 1);
     const policyDigest = digestFor(acceptedPolicy);

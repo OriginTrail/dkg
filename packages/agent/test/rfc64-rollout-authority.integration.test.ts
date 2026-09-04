@@ -281,6 +281,41 @@ describe('RFC-64 rollout authority integration', () => {
     ]);
   });
 
+  it('binds private catalog peers from verified join credentials without profile gossip', async () => {
+    const contextGraphId = `${AUTHOR}/private-peer-binding` as ContextGraphIdV1;
+    const curatorPeerId = '12D3KooWVerifiedPrivateCurator';
+    const memberPeerId = '12D3KooWVerifiedPrivateMember';
+    const edge = await startAgent('private-peer-binding', undefined);
+    vi.spyOn(edge, 'findAgentByPeerId').mockResolvedValue(null);
+    vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
+    const delegateePeers = vi.spyOn(edge, 'getContextGraphAllowedDelegateePeers')
+      .mockResolvedValue(new Map([[MEMBER, [memberPeerId]]]));
+
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      memberPeerId,
+      contextGraphId,
+    )).resolves.toBe(MEMBER);
+
+    delegateePeers.mockResolvedValue(new Map());
+    (edge as any).preferredSyncPeers.set(contextGraphId, curatorPeerId);
+    (edge as any).localApprovedAgentByCG.set(contextGraphId, MEMBER);
+    vi.spyOn(edge, 'getContextGraphOwner')
+      .mockResolvedValue(`did:dkg:agent:${AUTHOR}`);
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
+      contextGraphId,
+    )).resolves.toBe(AUTHOR);
+
+    delegateePeers.mockResolvedValue(new Map([
+      [MEMBER, [memberPeerId]],
+      [AUTHOR, [memberPeerId]],
+    ]));
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      memberPeerId,
+      contextGraphId,
+    )).resolves.toBeNull();
+  });
+
   it('merges an authenticated lifecycle roster into finalized registered authority', async () => {
     const contextGraphId = `${AUTHOR}/registered-private-roster` as ContextGraphIdV1;
     const edge = await startAgent(
