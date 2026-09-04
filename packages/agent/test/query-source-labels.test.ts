@@ -123,7 +123,7 @@ function runtimePrivateQueryAgent(options: {
     rfc64PublicCatalogServiceV1: { acceptedPolicySnapshot },
     isPrivateContextGraph,
     getContextGraphAllowedPeers: vi.fn(async () => null),
-    resolveContextGraphNumericIdForPolicy: vi.fn(async () => null),
+    resolveRegisteredContextGraphAuthority: vi.fn(async () => ({ kind: 'unregistered' as const })),
     isAgentAddressAllowed: QueryMethods.prototype.isAgentAddressAllowed,
     resolveRfc64PrivateReadRosterV1:
       QueryMethods.prototype.resolveRfc64PrivateReadRosterV1,
