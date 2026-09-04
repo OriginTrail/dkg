@@ -25,6 +25,60 @@ import {
 } from './support/rfc64-local-catalog-repair-fixture.js';
 
 describe('RFC-64 local SWM catalog projection lifecycle', () => {
+  it('retries a dormant durable promotion after default responsibility settles', async () => {
+    const agent = await startRepairAgentV1({
+      name: 'dormant-default-responsibility',
+      autoPublish: {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    });
+    const inventoryDigest = `0x${'a0'.repeat(32)}` as Digest32V1;
+    const record = vi.spyOn(agent, 'recordRfc64SwmAuthorInventoryShadowV1')
+      .mockResolvedValueOnce({
+        status: 'dormant',
+        action: 'upsert',
+        attempts: 0,
+        headObjectDigest: null,
+        error: null,
+        dormantReason: 'inactive-lane',
+      })
+      .mockResolvedValueOnce({
+        status: 'applied',
+        action: 'upsert',
+        attempts: 1,
+        headObjectDigest: inventoryDigest,
+        error: null,
+      });
+    const reconcileResponsibility = vi.spyOn(
+      agent,
+      'reconcileRfc64CatalogResponsibilityV1',
+    ).mockResolvedValue({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      responsible: true,
+      responsibilityReason: 'private-membership',
+      active: true,
+      mode: 'catalog',
+      selectionSource: 'default',
+    });
+    const requestProjection = vi.spyOn(agent, 'requestRfc64SwmCatalogProjectionV1')
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+
+    await agent.observeRfc64DurableSwmPromotionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'dormant-default-responsibility',
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: 'dormant-default-responsibility-operation',
+      ctx: createOperationContext('share'),
+    });
+
+    expect(reconcileResponsibility).toHaveBeenCalledTimes(2);
+    expect(reconcileResponsibility).toHaveBeenCalledWith(CONTEXT_GRAPH_ID);
+    expect(record).toHaveBeenCalledTimes(2);
+    expect(requestProjection).toHaveBeenCalledTimes(2);
+  });
+
   it('drains an admitted SWM observer before persistence closes and rejects late admission', async () => {
     const autoPublish = {
       peers: [],

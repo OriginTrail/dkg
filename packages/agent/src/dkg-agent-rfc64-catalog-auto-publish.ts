@@ -111,8 +111,16 @@ function shadowResult(
   attempts: number,
   headObjectDigest: string | null,
   error: string | null,
+  dormantReason?: Rfc64SwmAuthorInventoryShadowMutationResultV1['dormantReason'],
 ): Rfc64SwmAuthorInventoryShadowMutationResultV1 {
-  return Object.freeze({ status, action, attempts, headObjectDigest, error });
+  return Object.freeze({
+    status,
+    action,
+    attempts,
+    headObjectDigest,
+    error,
+    ...(dormantReason === undefined ? {} : { dormantReason }),
+  });
 }
 
 function rfc64InventoryFailureDetailV1(cause: unknown): string {
@@ -228,13 +236,37 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     params: ObserveRfc64DurableSwmPromotionParamsV1,
   ): Promise<void> {
     try {
-      const result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
+      let result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
+      if (result.status === 'dormant' && result.dormantReason === 'inactive-lane') {
+        // A durable promotion can race the asynchronous default-responsibility
+        // and authority transition for a newly created CG. Refresh that normal
+        // lifecycle boundary once before classifying the row as deliberately
+        // unselected. The durable workspace and VM-confirmation fence are
+        // re-read by the retry, so this cannot resurrect a finalized public row.
+        const responsibility = await this.reconcileRfc64CatalogResponsibilityV1(
+          params.contextGraphId,
+        );
+        if (responsibility.active && responsibility.mode !== 'legacy') {
+          result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
+        }
+      }
       if (result.status === 'applied' || result.status === 'existing') {
-        this.requestRfc64SwmCatalogProjectionV1({
+        const projection = {
           contextGraphId: params.contextGraphId as ContextGraphIdV1,
           authorAddress: params.lifecycleAgentAddress.toLowerCase() as EvmAddressV1,
           ctx: params.ctx,
-        });
+        } as const;
+        if (!this.requestRfc64SwmCatalogProjectionV1(projection)) {
+          // The authority can turn over between the durable inventory CAS and
+          // projection admission. Reconcile once and retry the exact scope;
+          // ordinary supervisor backoff owns any later transient failure.
+          const responsibility = await this.reconcileRfc64CatalogResponsibilityV1(
+            params.contextGraphId,
+          );
+          if (responsibility.active && responsibility.mode !== 'legacy') {
+            this.requestRfc64SwmCatalogProjectionV1(projection);
+          }
+        }
       }
     } catch (cause) {
       this.log.warn(
@@ -460,7 +492,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       );
       if (lane === null) {
         return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
-          shadowResult('dormant', 'upsert', 0, null, null),
+          shadowResult('dormant', 'upsert', 0, null, null, 'inactive-lane'),
           params.contextGraphId,
           null,
         );
@@ -514,7 +546,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
           canonicalSeal.kaUal,
         )
       ) {
-        return shadowResult('dormant', 'upsert', 0, null, null);
+        return shadowResult('dormant', 'upsert', 0, null, null, 'vm-confirmed');
       }
       const graphManager = new GraphManager(this.store);
       const head = await resolvePublishedKnowledgeAssetWorkspaceHead({
@@ -536,7 +568,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       // roster-authenticated V2 catalog transport.
       if (!rfc64CatalogLaneAcceptsWorkspaceHeadV1(lane, head.accessPolicy)) {
         return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
-          shadowResult('dormant', 'upsert', 0, null, null),
+          shadowResult('dormant', 'upsert', 0, null, null, 'policy-mismatch'),
           params.contextGraphId,
           kaUal,
         );
@@ -621,7 +653,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       );
       if (lane === null) {
         return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
-          shadowResult('dormant', 'remove', 0, null, null),
+          shadowResult('dormant', 'remove', 0, null, null, 'inactive-lane'),
           params.contextGraphId,
           null,
         );

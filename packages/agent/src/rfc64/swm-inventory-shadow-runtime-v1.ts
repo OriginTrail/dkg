@@ -9,6 +9,7 @@ export type Rfc64SwmAuthorInventoryShadowMutationResultV1 = Readonly<{
   attempts: number;
   headObjectDigest: string | null;
   error: string | null;
+  dormantReason?: 'inactive-lane' | 'vm-confirmed' | 'policy-mismatch';
 }>;
 
 export interface Rfc64SwmAuthorInventoryShadowStatusV1 {
