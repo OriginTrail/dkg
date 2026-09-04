@@ -8,8 +8,8 @@
  * - Standard context-graph-scoped queries still work correctly
  */
 import { readFileSync } from 'node:fs';
-import { describe, it, expect, beforeEach } from 'vitest';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { QueryHandler } from '../src/query-handler.js';
 import type { QueryRequest, QueryAccessConfig } from '../src/query-types.js';
@@ -267,6 +267,21 @@ describe('I-009: SPARQL graph scope bypass prevention', () => {
       String.raw`SELECT ?name WHERE { ?s <${SCHEMA_NAME}> \u00ZZ }`,
       { contextGraphId: CONTEXT_GRAPH },
     )).rejects.toThrow('malformed Unicode code-point escape');
+  });
+
+  it.each([
+    ['SERVICE', String.raw`SELECT * WHERE { \u005Cu0053ERVICE <http://127.0.0.1/sparql> { ?s ?p ?o } }`],
+    ['GRAPH', String.raw`SELECT * WHERE { \u005Cu0047RAPH <${OTHER_GRAPH}> { ?s ?p ?o } }`],
+    ['FROM', String.raw`SELECT * \u005Cu0046ROM <${OTHER_GRAPH}> WHERE { ?s ?p ?o }`],
+    ['mutation', String.raw`SELECT * WHERE {} \u005Cu0044ELETE DATA { <urn:s> <urn:p> <urn:o> }`],
+  ])('rejects double-encoded %s syntax before store dispatch', async (_label, sparql) => {
+    const query = vi.fn<TripleStore['query']>();
+    const noExecuteEngine = new DKGQueryEngine({ query } as unknown as TripleStore);
+
+    await expect(noExecuteEngine.query(sparql, {
+      contextGraphId: CONTEXT_GRAPH,
+    })).rejects.toThrow('malformed Unicode code-point escape');
+    expect(query).not.toHaveBeenCalled();
   });
 
   it('rejects SPARQL with FROM clause', async () => {

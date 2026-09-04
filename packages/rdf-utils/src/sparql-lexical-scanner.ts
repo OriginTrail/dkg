@@ -475,19 +475,60 @@ function scanSparql(value: string): ScannedSparql | null {
 }
 
 /** Canonical lexical artifact with raw source coordinates and logical values. */
+function malformedPreparedSparql(source: string): Extract<
+  PreparedSparql,
+  { readonly status: 'malformed-uchar' }
+> {
+  return {
+    status: 'malformed-uchar',
+    source,
+    masked: ' '.repeat(source.length),
+    materialized: source,
+    tokens: [],
+    unterminated: false,
+    wordTokens: new Set(),
+    prologue: { endTokenIndex: 0, declaredPrefixes: [] },
+  };
+}
+
+function hasStableLexicalSemantics(
+  checked: ScannedSparql,
+  execution: ScannedSparql,
+): boolean {
+  if (
+    checked.unterminated !== execution.unterminated
+    || checked.tokens.length !== execution.tokens.length
+  ) return false;
+
+  return checked.tokens.every((token, index) => {
+    const executionToken = execution.tokens[index];
+    if (executionToken?.kind !== token.kind) return false;
+    if (token.kind === 'string') return executionToken.raw === token.raw;
+    if (executionToken.kind === 'string') return false;
+    return executionToken.logicalValue === token.logicalValue;
+  });
+}
+
 export function prepareSparql(source: string): PreparedSparql {
   const scan = scanSparql(source);
-  if (scan === null) {
-    return {
-      status: 'malformed-uchar',
-      source,
-      masked: ' '.repeat(source.length),
-      materialized: source,
-      tokens: [],
-      unterminated: false,
-      wordTokens: new Set(),
-      prologue: { endTokenIndex: 0, declaredPrefixes: [] },
-    };
+  if (scan === null) return malformedPreparedSparql(source);
+
+  if (scan.materialized !== source) {
+    // The store/backend performs its own SPARQL UCHAR preprocessing. A decoded
+    // active U+005C must not combine with following source text to create a
+    // second-generation escape that was absent from the checked token stream
+    // (for example, `\\u005Cu0053ERVICE`). Opaque strings, IRI bodies, and
+    // comments retain their raw spelling, so rescanning changes the text only
+    // when materialization exposed newly active syntax. Reject that boundary
+    // rather than handing a second decoder unchecked syntax.
+    const executionScan = scanSparql(scan.materialized);
+    if (
+      executionScan === null
+      || executionScan.materialized !== scan.materialized
+      || !hasStableLexicalSemantics(scan, executionScan)
+    ) {
+      return malformedPreparedSparql(source);
+    }
   }
 
   return {

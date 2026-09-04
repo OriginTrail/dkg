@@ -169,6 +169,28 @@ describe('canonical SPARQL lexical scanner', () => {
     );
   });
 
+  it.each([
+    String.raw`SELECT * WHERE { \u005Cu0053ERVICE <http://127.0.0.1/sparql> { ?s ?p ?o } }`,
+    String.raw`SELECT * WHERE { \u005Cu0047RAPH <urn:private> { ?s ?p ?o } }`,
+    String.raw`SELECT * \u005Cu0046ROM <urn:private> WHERE { ?s ?p ?o }`,
+    String.raw`SELECT * WHERE {} \u005Cu0044ELETE DATA { <urn:s> <urn:p> <urn:o> }`,
+    String.raw`SELECT * WHERE { \u005Cu0022 SERVICE <urn:remote> {} \u005Cu0022 }`,
+  ])('rejects second-generation active UCHAR syntax: %s', (source) => {
+    expect(prepareSparql(source).status).toBe('malformed-uchar');
+  });
+
+  it.each([
+    String.raw`SELECT * WHERE { BIND("\u005Cu0053ERVICE" AS ?x) }`,
+    String.raw`SELECT * WHERE { <urn:\u005Cu0053ERVICE> <urn:p> ?o }`,
+    String.raw`SELECT * WHERE {} # \u005Cu0053ERVICE`,
+  ])('keeps second-generation-looking UCHAR text inert in opaque regions: %s', (source) => {
+    const prepared = prepareSparql(source);
+    expect(prepared.status).toBe('valid');
+    if (prepared.status === 'valid') {
+      expect(materializePreparedSparql(prepared)).toBe(source);
+    }
+  });
+
   it('does not type malformed lexical artifacts as execution-ready', () => {
     type Malformed = Extract<PreparedSparql, { status: 'malformed-uchar' }>;
     type MaterializerAcceptsMalformed = Malformed extends Parameters<
