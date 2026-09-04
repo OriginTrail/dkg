@@ -226,6 +226,12 @@ async function createHarness(opts: HarnessOptions = {}) {
   }> = [];
 
   const agent = {
+    canReadContextGraph: async () => {
+      if (opts.isPrivate !== true) return true;
+      const caller = (opts.callerAddress
+        ?? '0x0000000000000000000000000000000000000001').toLowerCase();
+      return (opts.allowedAgents ?? []).some((address) => address.toLowerCase() === caller);
+    },
     getContextGraphAllowedAgents: async () => opts.allowedAgents ?? [],
     getSubscribedContextGraphs: () => subscriptions,
     subscribeToContextGraph: (

@@ -1871,32 +1871,29 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       });
     }
 
-    // For curated CGs, verify this node's agent is on the allowlist.
-    // The allowlist may not be available locally yet (it lives on the
-    // curator's node), so this is a best-effort early rejection —
-    // the sync protocol enforces access on the remote side regardless.
-    const localAllowed = await agent.getContextGraphAllowedAgents(contextGraphId).catch(() => [] as string[]);
-    if (localAllowed.length > 0) {
-      // Issue #1596 / #865: an explicit `accessPolicy="public"` ALWAYS wins over
-      // the allowlist. On a public CG the allowlist gates PUBLISHERS, not
-      // subscribers/readers, so an allowlist entry must not turn a public CG
-      // into invite-only-to-join. Defer to the resolver's `isPrivateContextGraph`
-      // (the single source of truth) so this route can never re-drift from the
-      // resolver rule. Fail CLOSED on a read error (keep the gate) — the remote
-      // sync protocol is the real enforcement, and a public CG's `_meta` is
-      // already local here (we just read its allowlist from it), so the policy
-      // read is reliable in practice.
-      const isPrivate = await agent.isPrivateContextGraph(contextGraphId).catch(() => true);
-      if (isPrivate) {
-        const callerAddr = requestAgentAddress ?? agent.getDefaultAgentAddress();
-        const isEthAddress = callerAddr && /^0x[0-9a-fA-F]{40}$/.test(callerAddr);
-        if (isEthAddress && !localAllowed.some((a: string) => a.toLowerCase() === callerAddr.toLowerCase())) {
-          recordCatchupRequest('forbidden', shouldSyncSharedMemory);
-          return jsonResponse(res, 403, {
-            error: `Your agent (${callerAddr}) is not on the allowlist for this curated project. Ask the curator to invite you first.`,
-          });
-        }
-      }
+    // Authorization must be established BEFORE persisting subscription intent.
+    // A private RFC-64 CG can be known from accepted policy authority while its
+    // cleartext `_meta` allowlist is deliberately absent on a non-member node.
+    // Treating an empty local allowlist as "unknown, continue" lets that node
+    // create a durable subscription; the chain VM reconciler can then recover
+    // private plaintext through the otherwise legitimate member path. Reuse the
+    // query boundary because it understands RFC-64 rosters, legacy mixed
+    // agent/peer gates, and explicit-public CGs. Disable the legacy subscription
+    // fallback: the subscription is what this request is trying to create, so it
+    // cannot also serve as its authorization proof. Any authority-read failure
+    // is a denial, leaving no subscription or catch-up-job side effect behind.
+    const callerAddr = requestAgentAddress ?? agent.getDefaultAgentAddress();
+    const canSubscribe = await agent.canReadContextGraph(contextGraphId, {
+      callerAgentAddress: callerAddr,
+      allowSubscriptionFallback: false,
+    }).catch(() => false);
+    if (!canSubscribe) {
+      recordCatchupRequest('forbidden', shouldSyncSharedMemory);
+      return jsonResponse(res, 403, {
+        error: callerAddr
+          ? `Your agent (${callerAddr}) is not authorized to read this project. Ask the curator to invite you first.`
+          : 'This node has no agent authorized to read this project. Ask the curator to invite an agent first.',
+      });
     }
 
     const subMap = agent.getSubscribedContextGraphs();

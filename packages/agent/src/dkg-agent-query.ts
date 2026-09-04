@@ -693,6 +693,67 @@ export class QueryMethods extends DKGAgentBase {
       allowSubscriptionFallback?: boolean;
     } = {},
   ): Promise<boolean> {
+    // A cold non-member has no private `_meta`, so local policy alone would
+    // misclassify a registered curated CG as public. Resolve its write-once
+    // name-hash directly against the chain before applying any local fallback.
+    // Known local bindings remain the cheap first choice; inverse name-hash
+    // lookup covers the exact cold-start/non-selected case.
+    if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
+      return true;
+    }
+    const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId);
+    let numericId = await this.resolveContextGraphNumericIdForPolicy(contextGraphId);
+    if (numericId === null && typeof this.chain.resolveContextGraphIdByNameHash === 'function') {
+      try {
+        numericId = await this.chain.resolveContextGraphIdByNameHash(
+          this.contextGraphNameCommitment(contextGraphId),
+        );
+      } catch {
+        // If chain identity lookup is available but unhealthy, an unknown local
+        // graph might be a private registered graph. Deny rather than guessing.
+        return false;
+      }
+    }
+
+    if (numericId !== null && numericId > 0n) {
+      let accessPolicy: 0 | 1 | null;
+      try {
+        accessPolicy = await this.readLiveOnChainAccessPolicy(
+          numericId.toString(),
+          createOperationContext('query'),
+        );
+      } catch {
+        return false;
+      }
+      if (accessPolicy === null) return false;
+      if (accessPolicy === 0) return true;
+
+      // For registered curated CGs the participant-agent roster is an
+      // authority source that does not depend on already possessing private
+      // `_meta`. Read it fresh for every authorization decision: the general
+      // envelope-verification cache is intentionally unsuitable here because a
+      // removed participant must lose local plaintext access immediately.
+      const getOnChainAgents = this.chain.getContextGraphParticipantAgents;
+      if (typeof getOnChainAgents !== 'function') return false;
+      let onChainAgents: string[];
+      try {
+        const result = await getOnChainAgents.call(this.chain, numericId);
+        onChainAgents = Array.isArray(result) ? result : [];
+      } catch {
+        return false;
+      }
+      const agentAllowed = opts.callerAgentAddress
+        ? this.isAgentAddressAllowed(opts.callerAgentAddress, onChainAgents)
+        : this.hasLocalAgentInGate(onChainAgents);
+      return allowedPeers !== null
+        ? allowedPeers.includes(this.peerId) && agentAllowed
+        : agentAllowed;
+    }
+
+    // No live registered binding exists. Only now may pre-registration RFC-64
+    // authority or legacy local metadata decide access; neither is allowed to
+    // override a current on-chain roster above (notably after revocation or a
+    // chain/deployment reset).
     const rfc64Roster = this.resolveRfc64PrivateReadRosterV1(contextGraphId);
     if (rfc64Roster !== undefined) {
       if (rfc64Roster === null) return false;
@@ -701,12 +762,21 @@ export class QueryMethods extends DKGAgentBase {
         ?? this.defaultAgentAddress;
       return this.isAgentAddressAllowed(effectiveCaller, rfc64Roster);
     }
+    const acceptedPublicPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
+      ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
+      ?? [];
+    if (acceptedPublicPolicies.some(({ policyEnvelope }) => (
+      policyEnvelope.payload.contextGraphId === contextGraphId
+      && policyEnvelope.payload.accessPolicy === 0
+    ))) return true;
+
+    // Preserve legacy/local-only policy semantics, including explicit-public
+    // CGs with publisher allowlists.
     if (!(await this.isPrivateContextGraph(contextGraphId))) {
       return true;
     }
 
     const agentGateAddresses = await this.getContextGraphAgentGateAddresses(contextGraphId);
-    const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId);
 
     // Mixed legacy peer-id and V10 agent gates are conjunctive: a node must
     // be invited by peer id and also hold a local allowed agent identity.

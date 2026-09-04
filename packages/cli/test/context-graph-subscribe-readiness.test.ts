@@ -197,6 +197,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     };
 
     const agent = {
+      canReadContextGraph: async () => true,
       getContextGraphAllowedAgents: async () => opts.allowedAgents ?? [],
       getSubscribedContextGraphs: () => state,
       subscribeToContextGraph: (

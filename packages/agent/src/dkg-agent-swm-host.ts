@@ -2956,6 +2956,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const eligible: string[] = [];
       for (const [localCgId, sub] of this.subscribedContextGraphs) {
         if (!isLifecycleCurrent()) return;
+        // Passive discovery rows carry neither member nor host intent. Public
+        // RFC-64 selection is handled by the accepted-policy loop below.
+        if (!sub.subscribed && !sub.coreHosted) continue;
+        // A durable subscription row is synchronization intent, never an
+        // authorization credential. In particular, an older daemon may have
+        // persisted a private-CG row before the subscribe admission gate became
+        // fail-closed. Do not even enqueue VM work unless current policy
+        // authority positively proves this node can read the CG.
+        const canRead = await this.canReadContextGraph(localCgId, {
+          allowSubscriptionFallback: false,
+        }).catch(() => false);
+        if (!isLifecycleCurrent()) return;
+        if (!canRead) continue;
         // GH #1098 — self-prime onChainId for a pre-subscribed PUBLIC member CG
         // (subscribed BEFORE its first publish, so unbound) before the skip-gate
         // below would pass it over. Shared with the live KACG nudge.
@@ -3236,6 +3249,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!subscription?.subscribed && !subscription?.coreHosted) {
       throw new ContextGraphNotFoundError(localCgId);
     }
+    // Exact-asset recovery is another VM materialization entry point and must
+    // not trust the persisted subscription bit as membership proof.
+    const canRead = await this.canReadContextGraph(localCgId, {
+      allowSubscriptionFallback: false,
+    }).catch(() => false);
+    if (!canRead) throw new ContextGraphNotFoundError(localCgId);
     if (
       typeof this.chain.getKAContextGraphId !== 'function'
       || typeof this.chain.readKnowledgeAssetVersionSnapshot !== 'function'
@@ -3506,8 +3525,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (!this.isRfc64SelectedVmReconcileTargetAllowed(localCgId)) {
         throw new ContextGraphNotFoundError(localCgId);
       }
+      // This branch is definitionally an accepted RFC-64 PUBLIC policy (the
+      // selector rejects private policy envelopes) and carries no member row
+      // that could have been poisoned. Resolve it through the dedicated
+      // selected target path without doing a second general read probe.
       return this.resolveSelectedVmReconcileTarget(localCgId, isCurrent, signal);
     }
+    // Central defense for periodic, live-chain, and manual reconciliation.
+    // The outer sweep also filters unauthorized rows to avoid queue churn, but
+    // every dispatcher entry point converges here and must independently prove
+    // read authority. Never let a persisted subscription authorize itself.
+    const canRead = await this.canReadContextGraph(localCgId, {
+      allowSubscriptionFallback: false,
+    }).catch(() => false);
+    if (!isCurrent()) throw new VmReconcileQueueClosedError();
+    if (!canRead) throw new ContextGraphNotFoundError(localCgId);
     if (
       this.contextGraphBindingState.currentBindingFor(localCgId, sub) === undefined
       && sub.subscribed

@@ -1068,6 +1068,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
+          canReadContextGraph: async () => true,
           getContextGraphAllowedAgents: async () => [],
           getSubscribedContextGraphs: () => new Map(),
           subscribeToContextGraph: () => ({
@@ -1187,6 +1188,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
+          canReadContextGraph: async () => true,
           getContextGraphAllowedAgents: async () => [],
           getSubscribedContextGraphs: () => new Map(),
           subscribeToContextGraph: () => ({
@@ -1299,6 +1301,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
+          canReadContextGraph: async () => true,
           getContextGraphAllowedAgents: async () => [],
           getSubscribedContextGraphs: () => new Map(),
           subscribeToContextGraph: (_id: string, opts: { syncMode: string }) => {
@@ -2407,19 +2410,15 @@ describe('CLI-13 / CLI-14 — shutdown signal exit codes & timer cleanup', () =>
   }, 120_000);
 });
 
-// Issue #1596: POST /api/subscribe must not 403 a caller off the allowlist when
-// the CG's explicit accessPolicy is "public". On a public CG the allowlist gates
-// PUBLISHERS, not subscribers, so an allowlist entry must not turn a public CG
-// into invite-only-to-join. An explicit-private CG must still 403. The route now
-// defers to the resolver's `isPrivateContextGraph` (the #865 single source of
-// truth) instead of gating on "allowlist non-empty" alone.
-describe('#1596 — subscribe allowlist gate respects explicit public accessPolicy', () => {
+// Issue #1596 + RFC-64 release certification: POST /api/subscribe delegates to
+// the unified read-authority boundary. Public CGs remain subscribable, while a
+// private CG with no local `_meta` allowlist must still deny a non-member before
+// any durable subscription or catch-up job is created.
+describe('#1596 — subscribe gate uses fail-closed read authority', () => {
   const CALLER = '0x0000000000000000000000000000000000000001';
-  const OTHER = '0x00000000000000000000000000000000000000ff';
 
   async function subscribeWith(opts: {
-    isPrivate: boolean | 'throw';
-    allowlist: string[];
+    canRead: boolean | 'throw';
   }): Promise<{ status: number; subscribeCalled: boolean }> {
     const contextGraphId = 'cg-1596-' + Math.random().toString(36).slice(2, 8);
     const catchupTracker = {
@@ -2451,10 +2450,16 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
-          getContextGraphAllowedAgents: async () => opts.allowlist,
-          isPrivateContextGraph: async () => {
-            if (opts.isPrivate === 'throw') throw new Error('policy read failed');
-            return opts.isPrivate;
+          canReadContextGraph: async (
+            _id: string,
+            readOpts: { callerAgentAddress?: string; allowSubscriptionFallback?: boolean },
+          ) => {
+            expect(readOpts).toEqual({
+              callerAgentAddress: CALLER,
+              allowSubscriptionFallback: false,
+            });
+            if (opts.canRead === 'throw') throw new Error('authority read failed');
+            return opts.canRead;
           },
           getDefaultAgentAddress: () => CALLER,
           getSubscribedContextGraphs: () => new Map(),
@@ -2533,30 +2538,23 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
 
   it('does NOT 403 a non-allowlisted caller on an explicit-public CG', async () => {
     const { status, subscribeCalled } = await subscribeWith({
-      isPrivate: false, // accessPolicy="public"
-      allowlist: [OTHER], // caller is NOT in it
+      canRead: true,
     });
     expect(status).toBe(200);
     expect(subscribeCalled).toBe(true);
   });
 
-  it('still 403s a non-allowlisted caller on an explicit-private CG', async () => {
+  it('403s a private non-member even when no local allowlist is available', async () => {
     const { status, subscribeCalled } = await subscribeWith({
-      isPrivate: true, // accessPolicy="private" / curated
-      allowlist: [OTHER],
+      canRead: false,
     });
     expect(status).toBe(403);
     expect(subscribeCalled).toBe(false);
   });
 
-  it('keeps the allowlist gate CLOSED (403) when the privacy resolver read fails', async () => {
-    // Fix 1 fails closed: `isPrivateContextGraph(...).catch(() => true)`. A
-    // resolver error must keep the curated gate, never fall open to public —
-    // otherwise a future fail-open regression would silently pass the cases
-    // above while letting a non-allowlisted caller subscribe. (#1599 review.)
+  it('keeps the read-authority gate CLOSED (403) when authority resolution fails', async () => {
     const { status, subscribeCalled } = await subscribeWith({
-      isPrivate: 'throw',
-      allowlist: [OTHER],
+      canRead: 'throw',
     });
     expect(status).toBe(403);
     expect(subscribeCalled).toBe(false);

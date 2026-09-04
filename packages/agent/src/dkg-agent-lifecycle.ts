@@ -10076,9 +10076,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
       const cappedUserRows = cap > 0 ? userRows.slice(0, cap) : userRows;
       const toActivate = [...hostedRows, ...cappedUserRows];
-      const dormantRows = (cap > 0 ? userRows.slice(cap) : []).sort(byId);
+      const dormantRows = cap > 0 ? userRows.slice(cap) : [];
+      const activatedRows: ContextGraphSubscriptionRecord[] = [];
       for (let i = 0; i < toActivate.length; i++) {
         const row = toActivate[i];
+        // A persisted row records synchronization intent, not current read
+        // authority. Older daemons could persist a private-CG subscription
+        // before proving membership; blindly restoring that row would revive
+        // the exact plaintext-recovery path the live subscribe gate closes.
+        // Check before installing any in-memory subscription, gossip, sync
+        // scope, or membership side effect. Unknown/unavailable authority is
+        // deliberately dormant and will be retried on the next startup or an
+        // explicit (independently authorized) subscribe.
+        const canReactivate = await this.canReadContextGraph(row.id, {
+          allowSubscriptionFallback: false,
+        }).catch(() => false);
+        if (!canReactivate) {
+          dormantRows.push(row);
+          this.log.warn(
+            ctx,
+            `Left persisted context-graph subscription "${row.id}" dormant because current read authority could not be proven`,
+          );
+          continue;
+        }
+        activatedRows.push(row);
         const approvedAgentAddress = row.subscribed
           ? this.localApprovedAgentByCG.get(row.id)
           : undefined;
@@ -10144,6 +10165,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           await new Promise<void>((resolve) => setTimeout(resolve, 0));
         }
       }
+      dormantRows.sort(byId);
       const skipped = dormantRows.length;
       this.contextGraphSubscriptionRehydrationAccountedIds.clear();
       for (const row of rows) {
@@ -10154,9 +10176,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         rehydrationEnabled: true,
         persistedTotal: rows.length,
         systemExcluded: persistedRows.length - rows.length,
-        hostedActivated: hostedRows.length,
-        hostedActivatedIds: hostedRows.map((r) => r.id),
-        activated: toActivate.length,
+        hostedActivated: activatedRows.filter((r) => r.coreHosted).length,
+        hostedActivatedIds: activatedRows.filter((r) => r.coreHosted).map((r) => r.id),
+        activated: activatedRows.length,
         dormant: skipped,
         activationCap: cap,
         capDisabled: cap === 0,
@@ -10167,17 +10189,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (rows.length > 0) {
         this.log.info(
           ctx,
-          `Rehydrated ${toActivate.length} of ${rows.length} non-system persisted context-graph subscription(s)` +
+          `Rehydrated ${activatedRows.length} of ${rows.length} non-system persisted context-graph subscription(s)` +
             (skipped > 0
-              ? ` (${skipped} left dormant by the activation cap; ` +
-                `${hostedRows.length} hosted restored)`
+              ? ` (${skipped} left dormant; ` +
+                `${activatedRows.filter((r) => r.coreHosted).length} hosted restored)`
               : ''),
         );
       }
       if (skipped > 0) {
         this.log.warn(
           ctx,
-          `${skipped} context-graph subscription(s) left dormant by the activation cap. ` +
+          `${skipped} context-graph subscription(s) left dormant by the activation cap or read-authority gate. ` +
             `Prune stale ones via 'DELETE /api/context-graph/subscriptions', or raise ` +
             `maxRehydratedContextGraphSubscriptions. Inspect ` +
             `'GET /api/context-graph/subscriptions' for dormant ids.`,
