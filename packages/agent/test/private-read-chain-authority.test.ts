@@ -287,6 +287,25 @@ describe('private read authorization uses the on-chain participant roster', () =
         deactivated: [],
       },
     });
+
+    const mutableSnapshot = agent.getContextGraphSubscriptionRehydrationStatus();
+    expect(mutableSnapshot).not.toBeNull();
+    mutableSnapshot!.hostedActivatedIds.push('mutated-hosted');
+    mutableSnapshot!.dormantIds.length = 0;
+    for (const ids of Object.values(mutableSnapshot!.dormantReasons)) {
+      ids.push('mutated-reason');
+    }
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      hostedActivatedIds: [],
+      dormantIds: [contextGraphId],
+      dormantReasons: {
+        activationCap: [],
+        authorityDenied: [],
+        authorityUnavailable: [contextGraphId],
+        rehydrationDisabled: [],
+        deactivated: [],
+      },
+    });
   });
 
   it('uses the real no-caller chain decision when rehydrating member and non-member rows', async () => {

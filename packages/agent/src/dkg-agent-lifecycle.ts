@@ -9994,6 +9994,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...status,
       hostedActivatedIds: [...(status.hostedActivatedIds ?? [])],
       dormantIds: [...status.dormantIds],
+      dormantReasons: {
+        activationCap: [...status.dormantReasons.activationCap],
+        authorityDenied: [...status.dormantReasons.authorityDenied],
+        authorityUnavailable: [...status.dormantReasons.authorityUnavailable],
+        rehydrationDisabled: [...status.dormantReasons.rehydrationDisabled],
+        deactivated: [...status.dormantReasons.deactivated],
+      },
     };
   }
 
