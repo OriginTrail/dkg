@@ -1,3 +1,4 @@
+import { buildInitChainOverrides } from '../init-chain-config.js';
 import { Command } from 'commander';
 import { readFileSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -500,13 +501,11 @@ program
     const hubAddress = await ask('Hub contract address', defaultHubAddress);
     const chainIdStr = await ask('Chain ID', defaultChainId);
 
-    const chainSection = rpcUrl && hubAddress ? {
-      type: 'evm' as const,
-      rpcUrl,
-      ...(clearRpcUrls || rpcUrls.length ? { rpcUrls } : {}),
-      hubAddress,
-      chainId: chainIdStr || undefined,
-    } : undefined;
+    const chainSection = buildInitChainOverrides(
+      { rpcUrl, rpcUrls, hubAddress, chainId: chainIdStr || undefined },
+      resolveChainConfig(undefined, network),
+      isNetworkSwitch ? undefined : existing.chain,
+    );
 
     // API authentication
     console.log('\nAPI Authentication:');
@@ -537,7 +536,7 @@ program
       autoUpdate,
       // On a network switch, never fall back to the stale existing chain
       // block — let an empty chainSection inherit the new network's chain.
-      chain: isNetworkSwitch ? chainSection : (chainSection ?? existing.chain),
+      chain: chainSection,
       auth: { enabled: enableAuth, tokens: existing.auth?.tokens },
       // Persist the chosen backend. `storeBlock === null` from the
       // wizard means "use the local default" — we explicitly clear any
