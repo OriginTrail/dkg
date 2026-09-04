@@ -41,7 +41,6 @@ import {
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
   buildLegacyKnowledgeAssetMetadataQuery,
-  stripSparqlLiteralsAndComments,
   type ParsedGraphKnowledgeAssetMetadata,
 } from '@origintrail-official/dkg-core';
 import {
@@ -889,7 +888,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // Rather than silently return duplicate / mis-ordered / over-limit
     // rows, reject the unsupported shape explicitly so the caller gets a
     // clear error instead of wrong data.
-    if (hasCrossGraphUnsafeModifier(sparql)) {
+    if (hasCrossGraphUnsafeModifier(scope)) {
       throw new Error(
         'Multi-graph query combines an inner UNION with a solution-set ' +
           'modifier (DISTINCT/ORDER BY/LIMIT/OFFSET/GROUP BY/aggregate). ' +
@@ -1613,21 +1612,31 @@ function dedupeQuads(quads: Quad[]): Quad[] {
  * inner-UNION case in `queryMultipleGraphs`) to reject shapes that
  * would otherwise return duplicate / mis-ordered / over-limit rows.
  *
- * Literals, comments, and IRI bodies are blanked first
- * (`stripLiteralsAndComments`) so a keyword appearing inside a string
- * literal or IRI (e.g. `"top 10 LIMIT"`) doesn't trigger a false
- * positive. The aggregate check is intentionally broad — any of the
- * standard SPARQL aggregate functions invalidates naive concatenation
- * because the per-graph partial aggregates can't be combined post-hoc.
+ * Consume the canonical prepared token stream so active UCHAR spellings are
+ * decoded exactly as they will be for execution while strings, comments, and
+ * IRI bodies remain opaque. The aggregate check is intentionally broad — any
+ * standard aggregate invalidates naive concatenation because per-graph
+ * partial aggregates cannot be combined post-hoc.
  */
-function hasCrossGraphUnsafeModifier(sparql: string): boolean {
-  const s = stripSparqlLiteralsAndComments(sparql);
-  if (/\bDISTINCT\b/i.test(s)) return true;
-  if (/\bORDER\s+BY\b/i.test(s)) return true;
-  if (/\bGROUP\s+BY\b/i.test(s)) return true;
-  if (/\bHAVING\b/i.test(s)) return true;
-  if (/\bLIMIT\b/i.test(s)) return true;
-  if (/\bOFFSET\b/i.test(s)) return true;
-  if (/\b(COUNT|SUM|AVG|MIN|MAX|SAMPLE|GROUP_CONCAT)\s*\(/i.test(s)) return true;
+function hasCrossGraphUnsafeModifier(scope: PreparedGraphScope): boolean {
+  const tokens = scope.prepared.tokens;
+  const singleWordModifiers = new Set(['DISTINCT', 'HAVING', 'LIMIT', 'OFFSET']);
+  const aggregates = new Set(['COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'SAMPLE', 'GROUP_CONCAT']);
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token?.kind !== 'word') continue;
+    if (singleWordModifiers.has(token.upper)) return true;
+    const next = tokens[index + 1];
+    if (
+      (token.upper === 'ORDER' || token.upper === 'GROUP')
+      && next?.kind === 'word'
+      && next.upper === 'BY'
+    ) return true;
+    if (
+      aggregates.has(token.upper)
+      && next?.kind === 'symbol'
+      && next.logicalValue === '('
+    ) return true;
+  }
   return false;
 }

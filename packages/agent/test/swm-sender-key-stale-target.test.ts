@@ -49,6 +49,7 @@ import {
 
 interface DKGAgentInternals {
   localAgents: Map<string, AgentKeyRecord>;
+  swmSenderKeyReceiveStates: Map<string, unknown>;
   // Both private — we reach in via this view to drive them in tests.
   acceptSwmSenderKeyPackage(
     pkg: SwmSenderKeyPackageMsg,
@@ -292,6 +293,31 @@ describe('acceptSwmSenderKeyPackage: stale-target throw type', () => {
         name: 'SwmSenderKeySetupRejectionError',
         reasonCode: 'recipient-not-allowed',
       });
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it('rejects a sender-key package when its sender peer is outside the graph peer allowlist', async () => {
+    const { agent, internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
+    await agent.start();
+    try {
+      const pkg = await buildSignedPackage({
+        senderWallet,
+        recipientAgentAddress: recipient.agentAddress,
+        recipientKeyId: recipient.workspaceEncryptionKeys[0].encryptionKeyId,
+      });
+      internals.getContextGraphAllowedPeers = async () => [internals.peerId];
+
+      const accept = internals.acceptSwmSenderKeyPackage(pkg, FROM_PEER_ID, {
+        operationId: 'test-op',
+        operationName: 'share',
+      });
+      await expect(accept).rejects.toMatchObject({
+        name: 'SwmSenderKeySetupRejectionError',
+        reasonCode: 'sender-not-allowed',
+      });
+      expect(internals.swmSenderKeyReceiveStates).toHaveLength(0);
     } finally {
       await agent.stop();
     }

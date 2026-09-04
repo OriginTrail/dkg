@@ -934,6 +934,17 @@ describe('DKGQueryEngine', () => {
         ),
       ).rejects.toThrow(/cannot be evaluated across graphs/i);
     });
+
+    it('rejects a UCHAR-spelled LIMIT before the per-graph fallback can over-count', async () => {
+      await expect(
+        engine.query(
+          String.raw`SELECT ?s ?v WHERE {
+             { ?s <http://ex.org/p1> ?v } UNION { ?s <http://ex.org/p2> ?v }
+           } \u004cIMIT 1`,
+          { contextGraphId: CONTEXT_GRAPH, view: 'verifiable-memory' },
+        ),
+      ).rejects.toThrow(/cannot be evaluated across graphs/i);
+    });
   });
 
   // ───────────────────────────────────────────────────────────────────

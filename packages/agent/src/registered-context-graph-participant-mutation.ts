@@ -1,17 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import type { ChainAdapter, TxResult } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import type { RegisteredContextGraphAuthority } from './dkg-agent-cg-resolve.js';
 
 export type RegisteredParticipantMutationOperation = 'add' | 'remove';
 
-export interface PreparedRegisteredParticipantMutation {
+interface PreparedRegisteredParticipantMutationBase {
   operation: RegisteredParticipantMutationOperation;
   contextGraphId: string;
-  onChainId?: bigint;
-  agentAddresses: string[];
 }
+
+export type PreparedRegisteredParticipantMutation =
+  | (PreparedRegisteredParticipantMutationBase & {
+      kind: 'local-only';
+      agentAddresses: readonly [];
+    })
+  | (PreparedRegisteredParticipantMutationBase & {
+      kind: 'registered-private';
+      onChainId: bigint;
+      agentAddresses: string[];
+      mutate(onChainId: bigint, agentAddress: string): Promise<TxResult>;
+    });
+
+type RegisteredParticipantMutationCapability = (
+  onChainId: bigint,
+  agentAddress: string,
+) => Promise<TxResult>;
 
 function normalizeUniqueAddresses(agentAddresses: readonly string[]): string[] {
   const seen = new Set<string>();
@@ -26,11 +41,11 @@ function normalizeUniqueAddresses(agentAddresses: readonly string[]): string[] {
   return result;
 }
 
-function assertMutationCapability(
+function resolveMutationCapability(
   chain: ChainAdapter,
   operation: RegisteredParticipantMutationOperation,
   contextGraphId: string,
-): void {
+): RegisteredParticipantMutationCapability {
   const mutate = operation === 'add'
     ? chain.addContextGraphParticipantAgent
     : chain.removeContextGraphParticipantAgent;
@@ -39,6 +54,7 @@ function assertMutationCapability(
       `Registered context graph "${contextGraphId}" requires chain participant-governance support`,
     );
   }
+  return (onChainId, agentAddress) => mutate.call(chain, onChainId, agentAddress);
 }
 
 /**
@@ -66,10 +82,10 @@ export async function prepareRegisteredParticipantMutation(input: {
     );
   }
   if (authority.kind !== 'private') {
-    return { operation, contextGraphId, agentAddresses: [] };
+    return { kind: 'local-only', operation, contextGraphId, agentAddresses: [] };
   }
 
-  assertMutationCapability(chain, operation, contextGraphId);
+  const mutate = resolveMutationCapability(chain, operation, contextGraphId);
   const roster = new Set(
     authority.participantAgents.map((address) => address.toLowerCase()),
   );
@@ -79,29 +95,33 @@ export async function prepareRegisteredParticipantMutation(input: {
     return operation === 'add' ? !present : present;
   });
   return {
+    kind: 'registered-private',
     operation,
     contextGraphId,
     onChainId: authority.onChainId,
     agentAddresses,
+    mutate,
   };
 }
 
 /** Execute a prepared chain mutation and invalidate its authoritative roster. */
 export async function commitRegisteredParticipantMutation(input: {
   prepared: PreparedRegisteredParticipantMutation;
-  chain: ChainAdapter;
   invalidateRoster(onChainId: bigint): void;
 }): Promise<void> {
-  const { prepared, chain, invalidateRoster } = input;
-  const { operation, contextGraphId, onChainId, agentAddresses } = prepared;
-  if (onChainId === undefined) return;
+  const { prepared, invalidateRoster } = input;
+  if (prepared.kind === 'local-only') return;
+  const {
+    operation,
+    contextGraphId,
+    onChainId,
+    agentAddresses,
+    mutate,
+  } = prepared;
 
-  assertMutationCapability(chain, operation, contextGraphId);
   try {
     for (const address of agentAddresses) {
-      const result = operation === 'add'
-        ? await chain.addContextGraphParticipantAgent!(onChainId, address)
-        : await chain.removeContextGraphParticipantAgent!(onChainId, address);
+      const result = await mutate(onChainId, address);
       if (!result.success) {
         throw new Error(
           `Failed to ${operation} ${address} ${operation === 'add' ? 'to' : 'from'} `

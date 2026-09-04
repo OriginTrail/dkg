@@ -1868,7 +1868,6 @@ export class ContextGraphMethods extends DKGAgentBase {
     // locally without sending duplicate transactions.
     await commitRegisteredParticipantMutation({
       prepared: registeredParticipantMutation,
-      chain: this.chain,
       invalidateRoster: (onChainId) => {
         this.onChainParticipantAgentsCache.delete(onChainId.toString());
       },
@@ -2008,7 +2007,6 @@ export class ContextGraphMethods extends DKGAgentBase {
     });
     await commitRegisteredParticipantMutation({
       prepared: registeredParticipantMutation,
-      chain: this.chain,
       invalidateRoster: (onChainId) => {
         this.onChainParticipantAgentsCache.delete(onChainId.toString());
       },
