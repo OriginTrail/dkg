@@ -99,7 +99,7 @@ async function createAgent(): Promise<{
     name: `SwmLateJoinerDeferGossip-${Math.random().toString(36).slice(2)}`,
     chainAdapter: chain,
     // This suite pins the one-release legacy gossip rollback itself. In
-    // 10.0.16 omission selects catalog authority and intentionally suppresses
+    // 10.0.15 omission selects catalog authority and intentionally suppresses
     // the legacy workspace topic for responsible context graphs.
     rfc64CatalogActivation: { enabled: false },
   });

@@ -871,7 +871,7 @@ export class DKGAgent extends DKGAgentBase {
           }
           for (const accepted of policies) {
             const { policyEnvelope } = accepted;
-            // The bootstrap manifest is itself an explicit pre-10.0.16
+            // The bootstrap manifest is itself an explicit pre-default-10.0.15
             // operator surface. Route it through the compatibility-aware API
             // so it remains active when no release-native responsibility has
             // been discovered for the CG.
@@ -1076,7 +1076,7 @@ export class DKGAgent extends DKGAgentBase {
       legacyBootstrap: normalizedConfig.rfc64PublicCatalogBootstrap,
     }, chainIdentity);
     // The unified block owns precedence over the deprecated public-only
-    // alias. Omission is the 10.0.16 product default; explicit enabled=false
+    // alias. Omission is the 10.0.15 product default; explicit enabled=false
     // remains a one-release compatibility rollback.
     const rfc64CatalogExplicitlyDisabled =
       normalizedConfig.rfc64CatalogActivation?.enabled === false

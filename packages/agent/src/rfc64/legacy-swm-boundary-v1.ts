@@ -56,7 +56,7 @@ const rfc64LegacySwmBoundaryStatesV1 =
   new WeakMap<object, Rfc64LegacySwmBoundaryStateV1>();
 
 /**
- * Establish the one-time 10.0.16 upgrade boundary before networking starts.
+ * Establish the one-time default-10.0.15 upgrade boundary before networking starts.
  * Existing graph-scoped SWM heads remain readable through the legacy store but
  * are never inferred into a signed catalog. Only a later normal share/update
  * may durably retire a captured entry.
@@ -130,7 +130,7 @@ export function readRfc64LegacySwmBoundaryCountV1(
 
 /**
  * Retire only captured historical entries that reached an exact, verified
- * catalog successor through the normal 10.0.16 authoring path.
+ * catalog successor through the normal 10.0.15 authoring path.
  */
 export async function markRfc64LegacySwmRepublishedV1(
   owner: object,

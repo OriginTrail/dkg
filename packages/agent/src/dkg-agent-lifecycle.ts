@@ -1446,6 +1446,7 @@ interface RecoverContextGraphSwmFromPeerDependencies {
   ensureOwnedMap: RecoverContextGraphSwmOptions['ensureOwnedMap'];
   logInfo: NonNullable<RecoverContextGraphSwmOptions['logInfo']>;
   logWarn: NonNullable<RecoverContextGraphSwmOptions['logWarn']>;
+  includeRootScope?: boolean;
 }
 
 export interface ContextGraphCatchupOptions {
@@ -4934,8 +4935,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // also the automatic durable/VM scope, and private VM recovery belongs to
     // catalog activation. They still need an explicit SWM-only planning scope
     // so the ordinary private curator-replacement lane can run.
+    const namedSubgraphCompatibilityContextGraphIds = [
+      ...this.subscribedContextGraphs.entries(),
+    ].filter(([contextGraphId, subscription]) => (
+      subscription.subscribed === true
+      && !this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)
+    )).map(([contextGraphId]) => contextGraphId);
     const sharedMemoryRecoveryContextGraphIds = [...new Set([
       ...(this.config.syncContextGraphs ?? []),
+      ...namedSubgraphCompatibilityContextGraphIds,
       ...resolveRfc64PrivateRecoveryContextGraphIdsV1(
         this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
       ).filter((contextGraphId) => this.resolveRfc64CatalogReceiverAuthorityV1(
@@ -5210,12 +5218,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     for (const contextGraphId of contextGraphIds) {
-      if (!this.resolveRfc64CatalogReceiverAuthorityV1(
+      const legacyRootSyncAllowed = this.resolveRfc64CatalogReceiverAuthorityV1(
         contextGraphId,
-      ).legacySyncAllowed) {
+      ).legacySyncAllowed;
+      const namedSubgraphCompatibilityRequired = !legacyRootSyncAllowed
+        && this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true;
+      if (!legacyRootSyncAllowed && !namedSubgraphCompatibilityRequired) {
         this.log.debug(
           ctx,
-          `Skipping legacy SWM planning for catalog-authoritative CG "${contextGraphId.slice(0, 28)}"`,
+          `Skipping legacy SWM planning for unsubscribed catalog-authoritative CG "${contextGraphId.slice(0, 28)}"`,
         );
         continue;
       }
@@ -7474,6 +7485,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         },
         logInfo: (opCtx, message) => this.log.info(opCtx, message),
         logWarn: (opCtx, message) => this.log.warn(opCtx, message),
+        includeRootScope: requestedScope !== null
+          || this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed,
       },
       remotePeerId,
       contextGraphId,
@@ -7633,6 +7646,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             ),
           getRegisteredSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).registered,
           getExcludedSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).excluded,
+          includeRootScope: requestedScope !== null
+            || this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed,
           stopOnBackoffWorthyFailure,
           snapshotEvidencePolicy: selectedSwmEnabled
             ? {
@@ -8032,6 +8047,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           },
           logInfo: (opCtx, message) => this.log.info(opCtx, message),
           logWarn: (opCtx, message) => this.log.warn(opCtx, message),
+          includeRootScope: this.resolveRfc64CatalogReceiverAuthorityV1(
+            contextGraphId,
+          ).legacySyncAllowed,
         },
         remotePeerId,
         contextGraphId,
@@ -11091,6 +11109,7 @@ async function runRecoverContextGraphSwmFromPeer(
     deleteCheckpoint: (key) => dependencies.deleteCheckpoint(key),
     getRegisteredSubGraphNames: async () => admission.registered,
     getExcludedSubGraphNames: async () => admission.excluded,
+    includeRootScope: dependencies.includeRootScope,
     // R2 — hydrate the Rule-4 ownership cache (same map runSharedMemorySync uses).
     ensureOwnedMap: dependencies.ensureOwnedMap,
     logInfo: (opCtx, message) => dependencies.logInfo(opCtx, message),

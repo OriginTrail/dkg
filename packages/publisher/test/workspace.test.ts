@@ -1597,8 +1597,11 @@ describe('SharedMemoryHandler.handle outcome (rc.9 PR-C codex R3)', () => {
     expect(outcome.reason).toContain('does not match sender');
   });
 
-  it('declines legacy live materialization when another authoritative rail owns the CG', async () => {
-    const legacyApplyAllowedOracle = vi.fn(async () => false);
+  it('declines catalog-owned root materialization while preserving the named-subgraph lane', async () => {
+    const legacyApplyAllowedOracle = vi.fn(async (
+      _contextGraphId: string,
+      subGraphName: string | null,
+    ) => subGraphName !== null);
     handler = new SharedMemoryHandler(store, new TypedEventBus(), {
       legacyApplyAllowedOracle,
     });
@@ -1618,8 +1621,25 @@ describe('SharedMemoryHandler.handle outcome (rc.9 PR-C codex R3)', () => {
       retryable: false,
       reason: expect.stringContaining('not authoritative'),
     });
-    expect(legacyApplyAllowedOracle).toHaveBeenCalledWith(CONTEXT_GRAPH);
+    expect(legacyApplyAllowedOracle).toHaveBeenCalledWith(CONTEXT_GRAPH, null);
     await expect(store.hasGraph(rootlessSharedMemoryGraphFromWire(msg))).resolves.toBe(false);
+
+    const subgraphMsg = encodeRootlessWorkspaceRequest({
+      contextGraphId: CONTEXT_GRAPH,
+      subGraphName: 'research',
+      nquads: new TextEncoder().encode(
+        `<urn:test:catalog-root-subgraph-compatible> <http://schema.org/name> "Legacy subgraph" <${DATA_GRAPH}> .`,
+      ),
+      publisherPeerId: '12D3KooWCatalogOwned',
+      shareOperationId: 'op-catalog-owned-subgraph-compatible',
+      timestampMs: Date.now(),
+    });
+
+    await expect(handler.handle(subgraphMsg, '12D3KooWCatalogOwned')).resolves.toMatchObject({
+      applied: true,
+    });
+    expect(legacyApplyAllowedOracle).toHaveBeenCalledWith(CONTEXT_GRAPH, 'research');
+    await expect(store.hasGraph(rootlessSharedMemoryGraphFromWire(subgraphMsg))).resolves.toBe(true);
   });
 
   it('retryable rejection (CAS pre-condition not met) returns { applied: false, retryable: true } — codex R4', async () => {

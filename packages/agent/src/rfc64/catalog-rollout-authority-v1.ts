@@ -489,7 +489,7 @@ export function resolveRfc64LegacySyncContextGraphsV1(input: Readonly<{
 /** Resolve legacy and Track-2 owner scopes once, before either lane starts. */
 export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
   configuredContextGraphs: readonly string[];
-  /** DKG 10.0.16 supplies catalog; legacy preserves explicit enabled=false. */
+  /** DKG 10.0.15 supplies catalog; legacy preserves explicit enabled=false. */
   responsibilityDefaultMode?: Rfc64CatalogRolloutModeV1;
   /** Legacy public bootstrap remains active beside additive catalog selection. */
   standaloneTrack2ContextGraphs?: readonly string[];

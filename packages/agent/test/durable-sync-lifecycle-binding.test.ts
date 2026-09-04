@@ -52,6 +52,23 @@ vi.mock('../src/sync/requester/shared-memory-sync.js', async (importOriginal) =>
   };
 });
 
+vi.mock('../src/sync/requester/swm-recovery.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/sync/requester/swm-recovery.js')>();
+  return {
+    ...actual,
+    recoverContextGraphSwm: vi.fn(async () => ({
+      replacedRoots: 0,
+      replacedGraphs: 0,
+      insertedDataQuads: 0,
+      insertedMetaQuads: 0,
+      droppedDataTriples: 0,
+      readySnapshots: 0,
+      totalSnapshots: 0,
+      completed: true,
+    })),
+  };
+});
+
 vi.mock('../src/sync/requester/finalized-swm-twin-reconciliation.js', async (importOriginal) => {
   const actual = await importOriginal<
     typeof import('../src/sync/requester/finalized-swm-twin-reconciliation.js')
@@ -84,6 +101,7 @@ import {
   type VerifiedGraphScopedAsset,
 } from '../src/sync/requester/graph-scoped-materialization.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
+import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
 import {
   reconcileFinalizedSwmTwin,
   reconcileFinalizedSwmTwinFromDescriptor,
@@ -103,6 +121,7 @@ const mockedRunDurableSync = vi.mocked(runDurableSync);
 const mockedRunDurableSyncDetailed = vi.mocked(runDurableSyncDetailed);
 const mockedMaterialize = vi.mocked(materializeVerifiedGraphScopedAsset);
 const mockedRunSharedMemorySync = vi.mocked(runSharedMemorySync);
+const mockedRecoverContextGraphSwm = vi.mocked(recoverContextGraphSwm);
 const mockedReconcileFinalizedSwmTwin = vi.mocked(reconcileFinalizedSwmTwin);
 const mockedReconcileFinalizedSwmTwinFromDescriptor = vi.mocked(
   reconcileFinalizedSwmTwinFromDescriptor,
@@ -222,6 +241,7 @@ describe('durable sync lifecycle chain binding', () => {
     mockedRunDurableSyncDetailed.mockClear();
     mockedMaterialize.mockClear();
     mockedRunSharedMemorySync.mockClear();
+    mockedRecoverContextGraphSwm.mockClear();
     mockedReconcileFinalizedSwmTwin.mockReset();
     mockedReconcileFinalizedSwmTwin.mockResolvedValue('not-found');
     mockedReconcileFinalizedSwmTwinFromDescriptor.mockReset();
@@ -594,6 +614,55 @@ describe('durable sync lifecycle chain binding', () => {
     expect(lane).toBe('swm_recovery');
     expect(admission).toEqual({ source: 'swm-recovery' });
   });
+
+  it.each([
+    ['catalog', false],
+    ['legacy', true],
+  ] as const)(
+    'passes includeRootScope for %s authority during standalone SWM recovery',
+    async (_mode, legacySyncAllowed) => {
+      const agentLike: any = {
+        config: {},
+        store: {},
+        writeLocks: new Map(),
+        publicSnapshotStore: undefined,
+        syncCheckpoints: new Map(),
+        workspaceOwnedEntities: new Map(),
+        listSubGraphs: async () => [],
+        createContextGraphSyncDeadline: () => Date.now() + 10_000,
+        fetchSyncPages: async () => {
+          throw new Error('recovery mock must own the requester boundary');
+        },
+        getOrCreateSyncVerifyWorker: () => ({
+          processSharedMemoryBatch: async () => {
+            throw new Error('recovery mock must own the verifier boundary');
+          },
+        }),
+        oversizeTombstoneLog: { record: vi.fn() },
+        invalidateListContextGraphsCache: vi.fn(),
+        contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
+        resolveRfc64CatalogReceiverAuthorityV1: vi.fn(() => ({ legacySyncAllowed })),
+        runContextGraphSyncWithBackpressure: async (
+          _ctx: unknown,
+          _contextGraphId: string,
+          _lane: string,
+          _operationId: string,
+          work: () => Promise<unknown>,
+        ) => work(),
+        log: { info: () => {}, warn: () => {}, debug: () => {} },
+      };
+
+      await LifecycleSyncMethods.prototype.recoverContextGraphSwmFromPeer.call(
+        agentLike,
+        '12D3KooWSwmRecoveryScopePeer',
+        'scope-cg',
+      );
+
+      expect(mockedRecoverContextGraphSwm).toHaveBeenCalledTimes(1);
+      expect(mockedRecoverContextGraphSwm.mock.calls[0]?.[0].includeRootScope)
+        .toBe(legacySyncAllowed);
+    },
+  );
 
   it('reserves settlement time inside an explicit exact-asset timeout while internal VM recovery keeps 600 seconds', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
@@ -1120,6 +1189,7 @@ describe('durable sync lifecycle chain binding', () => {
       // Ordinary public CG: no RFC-64 complete-provider authority applies.
       // Required once #2271's execution-boundary source fence is in the base.
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
       log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     };
     agentLike.retireFinalizedSwmTwinCandidate = (
@@ -1208,6 +1278,7 @@ describe('durable sync lifecycle chain binding', () => {
       publisher: { clearPublishedKnowledgeAssetSwm },
       // Ordinary public CG: no RFC-64 complete-provider authority applies.
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
       log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     };
     agentLike.retireFinalizedSwmTwinCandidate = (

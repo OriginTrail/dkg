@@ -949,7 +949,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(stopped.rfc64PublicCatalogStatsV1()).toBeNull();
   });
 
-  it('keeps authorized catalog-mode metadata refresh off member and host SWM gossip', async () => {
+  it('retains catalog-mode member transport only for the named-subgraph compatibility lane', async () => {
     const catalog = await startAgent('catalog-metadata-refresh-fence', activation('catalog'));
     catalog.subscribeToContextGraph(CONTEXT_GRAPH_ID);
 
@@ -959,9 +959,8 @@ describe('RFC-64 rollout authority integration', () => {
     });
     expect(internals.sharedMemoryGossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(false);
 
-    // Exercise the exact post-catch-up transition from the review: metadata is
-    // confirmed and local SWM membership would otherwise authorize the member
-    // gossip consumer. queueSharedMemoryGossipSubscription remains
+    // Catalog mode owns the root lane, but named subgraphs still require the
+    // authorized member transport. queueSharedMemoryGossipSubscription remains
     // fire-and-forget, so capture the concrete reconciliation promise.
     vi.spyOn(catalog, 'hasConfirmedMetaState').mockResolvedValue(true);
     const memberAuthority = vi.spyOn(catalog, 'canUseSharedMemoryForContextGraph')
@@ -982,8 +981,8 @@ describe('RFC-64 rollout authority integration', () => {
       subscribed: true,
       metaSynced: true,
     });
-    expect(memberAuthority).not.toHaveBeenCalled();
-    expect(internals.sharedMemoryGossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(false);
+    expect(memberAuthority).toHaveBeenCalledWith(CONTEXT_GRAPH_ID);
+    expect(internals.sharedMemoryGossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(true);
 
     // A core's ordinary host reconciliation is another legacy entry point.
     // Make every non-RFC prerequisite available so catalog authority is the

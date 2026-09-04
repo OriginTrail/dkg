@@ -200,7 +200,7 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
     );
 
     expect(caughtUp).toEqual({ subscribed: true, hasData: true });
-    // The 10.0.16 default installs RFC-64 catalog responsibility for an
+    // The 10.0.15 default installs RFC-64 catalog responsibility for an
     // approved private member. Catch-up must complete without reviving the
     // legacy GossipSub or durable-sync receiver lanes.
     expect((joiner as any).gossipRegistered.has(CG)).toBe(false);
