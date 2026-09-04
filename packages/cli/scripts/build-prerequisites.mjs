@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
+import { runBuildCommand } from '../../../scripts/lib/run-build-command.mjs';
 
 const prerequisiteRoots = [
   '@origintrail-official/dkg-adapter-openclaw',
@@ -20,14 +21,7 @@ export function buildCliPrerequisites({
   // keeps its dependency preparation, including clean adapter asset builds.
   if (env.DKG_RUNTIME_BUILD_TOPOLOGICAL === '1') return 0;
   const args = ['-r', ...prerequisiteRoots.flatMap(name => ['--filter', `${name}...`]), 'run', 'build'];
-  const result = spawn('pnpm', args, { stdio: 'inherit', shell: platform === 'win32', env });
-  if (result.error) {
-    reportError(result.error.message);
-    return 1;
-  }
-  if (typeof result.status === 'number') return result.status;
-  reportError(result.signal ? `CLI prerequisites exited via ${result.signal}` : 'CLI prerequisites exited without a status');
-  return 1;
+  return runBuildCommand('pnpm', args, { spawn, platform, env, reportError, label: 'CLI prerequisites' });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

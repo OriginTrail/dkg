@@ -68,6 +68,11 @@ test('runtime build entrypoint invokes pnpm with the checked plan and forwards e
   });
 });
 
+test('CLI lifecycle hook invokes the standalone prerequisite entrypoint', () => {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'packages/cli/package.json'), 'utf8'));
+  assert.equal(packageJson.scripts.prebuild, 'node scripts/build-prerequisites.mjs');
+});
+
 test('CLI prebuild skips only when its root dependency graph has already run', () => {
   assert.equal(buildCliPrerequisites({
     env: { DKG_RUNTIME_BUILD_TOPOLOGICAL: '1' },
