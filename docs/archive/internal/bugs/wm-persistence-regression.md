@@ -34,9 +34,9 @@ restart) is the union of (1) and (2). The repro script can drive both.
 ## Reproduce
 
 The repro lives at
-[`scripts/repro/wm-persistence-regression.mjs`](../../scripts/repro/wm-persistence-regression.mjs)
+[`scripts/repro/wm-persistence-regression.mjs`](../../../../scripts/repro/wm-persistence-regression.mjs)
 and is gated behind the worktree's isolation contract
-([`REPRO.md`](../../REPRO.md)) — it refuses to talk to port 9200, refuses to
+([reproduction guide](wm-persistence-regression-repro.md)) — it refuses to talk to port 9200, refuses to
 touch a daemon whose PID file it does not own, and runs against an isolated
 `$DKG_HOME` only.
 

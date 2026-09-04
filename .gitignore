@@ -7,6 +7,7 @@ dist-ui/
 coverage/
 test-results/
 playwright-report/
+/devnet.log
 packages/node-ui/results.xml
 bench/results/
 packages/local-llm/benchmark-results/
@@ -45,7 +46,7 @@ devnet/**/turns/
 # Daemon state (.dkg-repro/) contains agent keystore, tokens, the Oxigraph
 # store, and the local node-ui DB — never check in. The matrix forensic
 # dumps stay local too; the actionable summary lives in
-# docs/bugs/wm-persistence-regression.md and the harness can regenerate
+# docs/archive/internal/bugs/wm-persistence-regression.md and the harness can regenerate
 # the matrix on demand.
 .dkg-repro/
 .dkg-repro-reports/
