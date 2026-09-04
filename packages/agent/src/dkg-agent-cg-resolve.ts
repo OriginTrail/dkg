@@ -1940,6 +1940,49 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   }
 
   /**
+   * Retain a finalized name-hash binding even when its cleartext subscription
+   * has not arrived yet. The chain event can legitimately win that race on a
+   * cold Edge. A process-local wire-only placeholder lets the canonical
+   * subscription setter promote the binding once an explicit create/join/
+   * subscribe path supplies the matching cleartext id.
+   *
+   * Never infer that an existing hash-shaped local id is a placeholder. It is
+   * safe to stage only when the reverse index already authenticates the row,
+   * or when neither the reverse index nor the subscription map uses the wire
+   * string. This preserves the hash-shaped-cleartext collision fence.
+   */
+  stageOnChainContextGraphBindingFromNameHash(
+    this: DKGAgent,
+    nameHash: string,
+    onChainContextGraphId: string,
+    options?: { persist?: boolean },
+  ): string | null {
+    const wireId = this.contextGraphWireId(nameHash);
+    const alreadyBound = this.bindOnChainContextGraphIdFromNameHash(
+      wireId,
+      onChainContextGraphId,
+      options,
+    );
+    if (alreadyBound !== null) return alreadyBound;
+
+    const indexedLocalId = this.wireIdToLocalCgId.get(wireId);
+    if (indexedLocalId !== undefined) return null;
+    if (this.subscribedContextGraphs.has(wireId)) return null;
+
+    this.setContextGraphSubscription(wireId, {
+      subscribed: false,
+      synced: false,
+      onChainHash: wireId,
+      pendingMeta: true,
+    }, { persist: false });
+    return this.bindOnChainContextGraphIdFromNameHash(
+      wireId,
+      onChainContextGraphId,
+      { persist: false },
+    );
+  }
+
+  /**
    * Compatibility adapter for callers that only enrich an existing
    * subscription's wire id. The canonical subscription mutator owns both the
    * forward record and reverse index update.

@@ -3058,13 +3058,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         onContextGraphCreated: async ({ contextGraphId, creator, accessPolicy, publishPolicy, nameHash, blockNumber }) => {
           this.log.info(ctx, `Discovered on-chain context graph ${contextGraphId.slice(0, 16)}… (block ${blockNumber}, creator ${creator.slice(0, 10)}…, policy ${accessPolicy}, publishPolicy ${publishPolicy ?? '?'}, nameHash ${nameHash ? nameHash.slice(0, 10) + '…' : '(opt-out)'})`);
 
-          // Bind an already-explicit cleartext subscription directly from the
-          // chain event's name commitment. Public CGs do not enter the curated
-          // host-mode block below, so without this store-free comparison a cold
-          // receiver could know the right graph name yet remain dependent on an
-          // ontology triple that durable sync has not materialized.
-          if (nameHash) {
-            this.bindOnChainContextGraphIdFromNameHash(nameHash, contextGraphId);
+          // The finalized event can arrive before or after the explicit local
+          // subscription. Bind an already-indexed cleartext row immediately;
+          // otherwise retain a process-local wire-only placeholder that the
+          // canonical setter will promote when create/join/subscribe supplies
+          // the matching cleartext id. This applies to public graphs too: they
+          // do not enter the curated host-mode block below, and a cold Edge
+          // must not lose its only authoritative chain-id/policy binding while
+          // waiting for an ontology announcement it may have missed.
+          const eventLocalId = nameHash
+            ? this.stageOnChainContextGraphBindingFromNameHash(
+                nameHash,
+                contextGraphId,
+              )
+            : null;
+          if (nameHash && eventLocalId === null) {
+            this.log.warn(
+              ctx,
+              `Skipped ambiguous Context Graph name-hash binding ${nameHash.slice(0, 18)}…`,
+            );
           }
 
           // Track the numeric on-chain id for dedup.
@@ -3123,43 +3135,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // disabled, off-sharding-table, etc.), so the call below
           // doesn't need any of those gates beyond the event-side hash
           // presence and the curated flag.
-          if (nameHash && accessPolicy === 1) {
+          if (nameHash && accessPolicy === 1 && eventLocalId !== null) {
             // Register the wire id → numeric id mapping so the receive
             // path's chain fallback resolver (Scope A) can take a hash
             // input and find the on-chain participant agents without an
             // RPC round-trip per envelope.
             const hashLower = this.contextGraphWireId(nameHash);
-            const indexedLocalId = this.wireIdToLocalCgId.get(hashLower);
-            const localId = indexedLocalId ?? hashLower;
-            // Stage a synthetic subscription record for the host-only
-            // case: cores hosting CGs they never joined have no
-            // cleartext; the hash IS their local id. `recordCgWireId`
-            // would no-op on this without a pre-existing record, so
-            // upsert a minimal stub first.
-            if (!this.subscribedContextGraphs.has(localId)) {
-              this.setContextGraphSubscription(localId, {
-                subscribed: false,
-                synced: false,
-                onChainHash: hashLower,
-                pendingMeta: true,
-              }, { persist: false });
-            } else if (indexedLocalId === undefined) {
-              // A local subscription already uses the event's hash as its
-              // cleartext id, but did not explicitly claim wire-id identity.
-              // Treat this as an ambiguous hash-shaped-name collision instead
-              // of rebinding or auto-hosting the unrelated on-chain graph.
-              this.log.warn(
-                ctx,
-                `Skipping host-mode auto-subscribe for ${hashLower.slice(0, 18)}…: ` +
-                  'the same string is already used by an uncommitted local CG id',
-              );
-              return;
-            }
-            this.bindOnChainContextGraphIdFromNameHash(
-              hashLower,
-              contextGraphId,
-              { persist: false },
-            );
 
             // Delegate to the host-mode reconciler — it owns the
             // sharding-table check, swmHostMode flag, and the wire-up
@@ -3167,7 +3148,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // the periodic reconciler covers the timer-driven fallback
             // path, so a missed event here heals on the next sweep.
             void this.reconcileSwmHostModeSubscription(
-              localId,
+              eventLocalId,
               SUBSCRIPTION_SOURCES.CHAIN_EVENT,
             ).catch((err) => {
               this.log.warn(

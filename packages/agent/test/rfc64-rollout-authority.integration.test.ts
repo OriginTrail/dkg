@@ -234,6 +234,50 @@ describe('RFC-64 rollout authority integration', () => {
     expect(requestReplays).toHaveBeenCalledWith(contextGraphId);
   });
 
+  it('retains a public chain event that arrives before the cleartext subscription', async () => {
+    const contextGraphId = `${AUTHOR}/public-chain-event-first`;
+    const wireId = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    const edge = await startAgent('public-chain-event-first', undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
+    vi.spyOn(edge, 'getContextGraphOnChainPolicy').mockResolvedValue({
+      accessPolicy: 0,
+      publishPolicy: 0,
+    });
+    vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1').mockResolvedValue(null);
+    const internals = edge as any;
+
+    // Mirror the live ordering from a cold Edge: finalized ContextGraphCreated
+    // is observed before the user supplies the matching human-readable id.
+    expect(internals.stageOnChainContextGraphBindingFromNameHash(
+      wireId,
+      '3',
+      { persist: false },
+    )).toBe(wireId);
+    expect(edge.getSubscribedContextGraphs().get(wireId)).toMatchObject({
+      subscribed: false,
+      onChainId: '3',
+      onChainHash: wireId,
+    });
+
+    edge.subscribeToContextGraph(contextGraphId);
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    expect(edge.getSubscribedContextGraphs().has(wireId)).toBe(false);
+    expect(edge.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+      subscribed: true,
+      onChainId: '3',
+      onChainHash: wireId,
+    });
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([
+      expect.objectContaining({
+        contextGraphId,
+        responsibilityReason: 'edge-subscription',
+        mode: 'catalog',
+        selectionSource: 'default',
+      }),
+    ]);
+  });
+
   it('promotes a chain-discovered private wire placeholder to the admitted local identity', async () => {
     const contextGraphId = `${AUTHOR}/private-wire-promotion`;
     const wireId = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
