@@ -140,7 +140,11 @@ export function analyzeSparqlOperation(
 
   const facts = analyzePreparedSparql(prepareSparql(input));
 
-  cache.set(input, facts);
+  // Do not let malformed or incomplete untrusted input churn the bounded
+  // large-query tier. Real queries and updates still get cross-decorator
+  // reuse, while UNKNOWN input is rescanned linearly on every attempt rather
+  // than displacing useful entries or creating cache-dependent timing cliffs.
+  if (facts.form !== 'UNKNOWN') cache.set(input, facts);
   // The cache owns only immutable scalar facts. Materializing at the public
   // boundary preserves the API's mutable, caller-isolated response objects.
   return materializeSparqlOperationAnalysis(facts);
