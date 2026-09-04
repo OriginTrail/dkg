@@ -25,6 +25,11 @@ import {
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
+import {
+  NoChainAdapter,
+  type ChainAdapter,
+  type ContextGraphAuthoritySnapshot,
+} from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -82,6 +87,39 @@ const PROJECTION_QUADS: readonly Quad[] = Object.freeze([
 ]);
 const agents: DKGAgent[] = [];
 const tempDirs: string[] = [];
+
+function finalizedAuthoritySnapshot(
+  contextGraphId: string,
+  participantAgents: readonly string[],
+  rosterVersion: string,
+): ContextGraphAuthoritySnapshot {
+  return Object.freeze({
+    chainId: '20430',
+    governanceContract: '0x3333333333333333333333333333333333333333',
+    contextGraphId: '9',
+    owner: AUTHOR,
+    active: true,
+    accessPolicy: 1,
+    publishPolicy: 0,
+    publishAuthority: AUTHOR,
+    publishAuthorityAccountId: '0',
+    participantAgents: Object.freeze([...participantAgents]),
+    nameHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase(),
+    ownershipEra: '0',
+    policyVersion: '0',
+    rosterVersion,
+    sourceBlockNumber: '42',
+    sourceBlockHash: `0x${'44'.repeat(32)}`,
+  });
+}
+
+function chainWithFinalizedAuthority(
+  snapshot: ContextGraphAuthoritySnapshot,
+): ChainAdapter {
+  return Object.assign(new NoChainAdapter(), {
+    getContextGraphAuthoritySnapshot: vi.fn(async () => snapshot),
+  });
+}
 
 afterEach(async () => {
   for (const agent of agents.splice(0)) {
@@ -287,6 +325,22 @@ describe('RFC-64 rollout authority integration', () => {
       NETWORK_ID,
       contextGraphId,
     )).toBeNull();
+  });
+
+  it('classifies missing finalized authority capability consistently for registered graphs', async () => {
+    const edge = await startAgent('registered-authority-unsupported', undefined);
+    vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
+
+    await expect(edge.readRfc64CurrentCuratorAuthorityBindingV1(CONTEXT_GRAPH_ID))
+      .rejects.toMatchObject({
+        name: 'Rfc64CatalogAuthorityResolutionErrorV1',
+        code: 'registered-authority-adapter-unsupported',
+      });
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
+      .rejects.toMatchObject({
+        name: 'Rfc64CatalogAuthorityResolutionErrorV1',
+        code: 'registered-authority-adapter-unsupported',
+      });
   });
 
   it('derives clean-config responsibility from normal create and unsubscribe', async () => {
@@ -604,6 +658,11 @@ describe('RFC-64 rollout authority integration', () => {
 
   it('merges an authenticated lifecycle roster into finalized registered authority', async () => {
     const contextGraphId = `${AUTHOR}/registered-private-roster` as ContextGraphIdV1;
+    const chainAdapter = chainWithFinalizedAuthority(finalizedAuthoritySnapshot(
+      contextGraphId,
+      [AUTHOR],
+      '0',
+    ));
     const edge = await startAgent(
       'registered-private-roster',
       undefined,
@@ -611,6 +670,7 @@ describe('RFC-64 rollout authority integration', () => {
       undefined,
       undefined,
       {
+        chainAdapter,
         rfc64CatalogAccessPolicyAuthority: {
           localAgentAddress: MEMBER,
           resolveRemoteAgentAddress: async () => null,
@@ -624,24 +684,6 @@ describe('RFC-64 rollout authority integration', () => {
     vi.spyOn(edge, 'readRfc64PrivateRosterVersionV1').mockResolvedValue('1788482000000');
     vi.spyOn(edge, 'requestRfc64CatalogHeadReplaysFromConnectedPeersV1')
       .mockResolvedValue(Object.freeze({ requested: 0, failed: 0 }));
-    (edge as any).chain.getContextGraphAuthoritySnapshot = vi.fn().mockResolvedValue({
-      chainId: '20430',
-      governanceContract: '0x3333333333333333333333333333333333333333',
-      contextGraphId: '9',
-      owner: AUTHOR,
-      active: true,
-      accessPolicy: 1,
-      publishPolicy: 0,
-      publishAuthority: AUTHOR,
-      publishAuthorityAccountId: '0',
-      participantAgents: [AUTHOR],
-      nameHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase(),
-      ownershipEra: '0',
-      policyVersion: '0',
-      rosterVersion: '0',
-      sourceBlockNumber: '42',
-      sourceBlockHash: `0x${'44'.repeat(32)}`,
-    });
 
     const authority = await edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
 
@@ -658,6 +700,11 @@ describe('RFC-64 rollout authority integration', () => {
 
   it('does not re-add a locally revoked participant from a finalized chain snapshot', async () => {
     const contextGraphId = `${AUTHOR}/registered-private-revocation` as ContextGraphIdV1;
+    const chainAdapter = chainWithFinalizedAuthority(finalizedAuthoritySnapshot(
+      contextGraphId,
+      [AUTHOR, MEMBER],
+      '6',
+    ));
     const edge = await startAgent(
       'registered-private-revocation',
       undefined,
@@ -665,6 +712,7 @@ describe('RFC-64 rollout authority integration', () => {
       undefined,
       undefined,
       {
+        chainAdapter,
         rfc64CatalogAccessPolicyAuthority: {
           localAgentAddress: AUTHOR,
           resolveRemoteAgentAddress: async () => null,
@@ -681,24 +729,6 @@ describe('RFC-64 rollout authority integration', () => {
     vi.spyOn(edge, 'readRfc64PrivateRosterVersionV1').mockResolvedValue('7');
     vi.spyOn(edge, 'requestRfc64CatalogHeadReplaysFromConnectedPeersV1')
       .mockResolvedValue(Object.freeze({ requested: 0, failed: 0 }));
-    (edge as any).chain.getContextGraphAuthoritySnapshot = vi.fn().mockResolvedValue({
-      chainId: '20430',
-      governanceContract: '0x3333333333333333333333333333333333333333',
-      contextGraphId: '9',
-      owner: AUTHOR,
-      active: true,
-      accessPolicy: 1,
-      publishPolicy: 0,
-      publishAuthority: AUTHOR,
-      publishAuthorityAccountId: '0',
-      participantAgents: [AUTHOR, MEMBER],
-      nameHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase(),
-      ownershipEra: '0',
-      policyVersion: '0',
-      rosterVersion: '6',
-      sourceBlockNumber: '42',
-      sourceBlockHash: `0x${'44'.repeat(32)}`,
-    });
 
     const authority = await edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
 

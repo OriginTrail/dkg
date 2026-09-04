@@ -1331,7 +1331,12 @@ export interface ChainAdapter {
     scanContextGraphRegistryPages?(options: ContextGraphRegistryScanOptions): AsyncIterable<ContextGraphRegistryScanPage>;
     /** True when the adapter has a registry scan watermark for its currently bound ContextGraphNameRegistry. */
     hasContextGraphRegistryScanWatermark?(): Promise<boolean>;
-    /** Resolve one graph's current policy and roster at a stable finalized anchor. */
+    /**
+     * Resolve one graph's current policy and roster at a stable finalized
+     * anchor. Optional for NoChain and legacy adapters; default RFC-64 callers
+     * must bind the explicit ContextGraphAuthorityReader capability instead of
+     * probing this member in individual workflows.
+     */
     getContextGraphAuthoritySnapshot?(
       contextGraphId: bigint,
       options?: ChainReadOptions,

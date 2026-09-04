@@ -123,7 +123,7 @@ import {
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource } from '@origintrail-official/dkg-storage';
-import { emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
+import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -672,6 +672,8 @@ export class DKGAgentBase {
   peerResolver!: PeerResolver;
   readonly eventBus: TypedEventBus;
   protected readonly chain: ChainAdapter;
+  /** Finalized-authority support classified once at the adapter boundary. */
+  protected readonly contextGraphAuthorityReaderCapability: ContextGraphAuthorityReaderCapability;
   /** Shared memory-owned root entities per context graph: entity → creatorPeerId. Used by publisher and shared memory handler. */
   protected readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
   protected readonly contextGraphMetaProjection: ContextGraphMetaProjection;
@@ -1816,6 +1818,7 @@ export class DKGAgentBase {
     this.publicSnapshotStore = publicSnapshotStore;
     this.eventBus = eventBus;
     this.chain = chain;
+    this.contextGraphAuthorityReaderCapability = bindContextGraphAuthorityReader(chain);
     // OT-RFC-43 A2 — retain the allocator so finalize can allocate-at-finalize
     // (the publisher gets the same instance as `kaAllocator`).
     this.kaNumberAllocator = config.kaNumberAllocator;

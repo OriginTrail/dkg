@@ -54,6 +54,8 @@ import {
 import {
   resolveRpcUrls,
   verifyControlEnvelopeIssuerSignatureV1,
+  type ContextGraphAuthorityReader,
+  type ContextGraphAuthorityReaderCapability,
 } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
@@ -977,6 +979,18 @@ class Rfc64CatalogAuthorityResolutionErrorV1 extends Error {
   }
 }
 
+function requireRfc64ContextGraphAuthorityReaderV1(
+  capability: ContextGraphAuthorityReaderCapability,
+): ContextGraphAuthorityReader {
+  if (capability.status === 'unsupported') {
+    throw new Rfc64CatalogAuthorityResolutionErrorV1(
+      'registered-authority-adapter-unsupported',
+      'registered RFC-64 Context Graph requires finalized authority snapshot support',
+    );
+  }
+  return capability.reader;
+}
+
 function rfc64CatalogAuthorityFailureCodeV1(error: unknown): string {
   if (error instanceof Rfc64CatalogAuthorityResolutionErrorV1) return error.code;
   return 'authority-resolution-failed';
@@ -1305,9 +1319,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }> | null> {
     const onChainId = await this.getContextGraphOnChainId(contextGraphId);
     if (onChainId !== null) {
-      const readSnapshot = this.chain.getContextGraphAuthoritySnapshot;
-      if (readSnapshot === undefined) return null;
-      const snapshot = await readSnapshot.call(this.chain, BigInt(onChainId));
+      const reader = requireRfc64ContextGraphAuthorityReaderV1(
+        this.contextGraphAuthorityReaderCapability,
+      );
+      const snapshot = await reader.getContextGraphAuthoritySnapshot(BigInt(onChainId));
       if (
         !snapshot.active
         || snapshot.nameHash !== this.contextGraphNameCommitment(contextGraphId).toLowerCase()
@@ -1616,13 +1631,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       const onChainId = await this.getContextGraphOnChainId(contextGraphId);
       let authority: Rfc64ReleaseNativeAuthoritySnapshotV1;
       if (onChainId !== null) {
-        if (this.chain.getContextGraphAuthoritySnapshot === undefined) {
-          throw new Rfc64CatalogAuthorityResolutionErrorV1(
-            'registered-authority-adapter-unsupported',
-            'registered RFC-64 Context Graph requires finalized authority snapshot support',
-          );
-        }
-        const snapshot = await this.chain.getContextGraphAuthoritySnapshot(BigInt(onChainId));
+        const reader = requireRfc64ContextGraphAuthorityReaderV1(
+          this.contextGraphAuthorityReaderCapability,
+        );
+        const snapshot = await reader.getContextGraphAuthoritySnapshot(BigInt(onChainId));
         if (signal?.aborted) throw signal.reason;
         const expectedNameHash = this.contextGraphNameCommitment(contextGraphId).toLowerCase();
         if (!snapshot.active || snapshot.nameHash !== expectedNameHash) {
