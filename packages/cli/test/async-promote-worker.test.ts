@@ -183,6 +183,28 @@ describe('classifyPromoteError', () => {
     });
   });
 
+  it('retries typed chain RPC outages only in named pre-commit promote stages', () => {
+    const exhausted = Object.assign(
+      new Error(
+        '[promote:encodeWorkspaceGossipPayload] RPC endpoints exhausted: '
+        + 'cgStorage.isContextGraphActive failed on all 1 endpoint(s)',
+      ),
+      { code: 'RPC_ENDPOINTS_EXHAUSTED' },
+    );
+    expect(classifyPromoteError(exhausted)).toEqual({
+      classification: 'transient',
+      retryable: true,
+    });
+
+    const unscoped = Object.assign(new Error('RPC endpoints exhausted'), {
+      code: 'RPC_ENDPOINTS_EXHAUSTED',
+    });
+    expect(classifyPromoteError(unscoped)).toEqual({
+      classification: 'fatal',
+      retryable: false,
+    });
+  });
+
   it('requires typed outcomes for managed-store and scheduler failures', () => {
     for (const message of [
       'STORE_OPERATION_TIMEOUT Managed Oxigraph is recovering; query was not started',

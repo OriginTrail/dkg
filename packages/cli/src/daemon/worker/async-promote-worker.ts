@@ -189,7 +189,16 @@ const SAFE_ERROR_CODES = new Set([
   'CURATOR_UNCONFIRMED',
   'CURATOR_REJECTED',
   'ASSERTION_NOT_PERSISTED',
+  'RPC_ENDPOINTS_EXHAUSTED',
+  'RPC_RECEIPT_LOOKUP_FAILED',
+  'RPC_TIMEOUT',
 ]);
+const RETRYABLE_CHAIN_RPC_ERROR_CODES = new Set([
+  'rpc_endpoints_exhausted',
+  'rpc_receipt_lookup_failed',
+  'rpc_timeout',
+]);
+const PRE_COMMIT_PROMOTE_STAGES = new Set(PROMOTE_DIAGNOSTIC_STAGES);
 
 function untagPromoteMessage(message: string): string {
   return message.replace(PROMOTE_STEP_TAG, '');
@@ -308,6 +317,18 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
     err && typeof err === 'object' && 'code' in err
       ? String((err as { code?: unknown }).code ?? '').toLowerCase()
       : '';
+
+  // Chain reads performed by the named preparation stages happen before the
+  // first SWM mutation. A typed provider-exhaustion/timeout here is therefore
+  // replay-safe. Keep the stage requirement fail-closed: the same transport
+  // code without a producer-owned pre-commit tag may describe a later,
+  // potentially indeterminate operation and remains terminal.
+  if (
+    RETRYABLE_CHAIN_RPC_ERROR_CODES.has(code)
+    && PRE_COMMIT_PROMOTE_STAGES.has(diagnosticPromoteStage(raw))
+  ) {
+    return { classification: 'transient', retryable: true };
+  }
 
   // 1. 4 MiB gossip cap — surfaced as
   //    "Promoted assertion too large for gossip (XXXX KB, limit 4 MB)"
