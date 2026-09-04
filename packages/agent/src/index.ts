@@ -282,6 +282,13 @@ export {
   isRootlessUpdateError,
   type RootlessUpdateErrorCode,
 } from './rootless-update-error.js';
+export type {
+  ContextGraphReadAuthorityDecision,
+  ContextGraphReadAuthorityOutcome,
+  ContextGraphReadAuthoritySource,
+} from './context-graph-read-authority.js';
+export type { RegisteredContextGraphAuthority } from './dkg-agent-cg-resolve.js';
+export type { ContextGraphRegistrationBinding } from './dkg-agent-cg-registry.js';
 export {
   ContextGraphNotFoundError,
   InvalidContentError,

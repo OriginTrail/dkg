@@ -5634,6 +5634,12 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const coldAgentAddress = `0x${'92'.repeat(20)}` as EvmAddressV1;
     const authorizedColdAgentAddress = `0x${'93'.repeat(20)}` as EvmAddressV1;
     const nonRosterAgentAddress = `0x${'94'.repeat(20)}` as EvmAddressV1;
+    const chainParticipantAgents = [
+      AUTHOR,
+      providerAgentAddress,
+      coldAgentAddress,
+      authorizedColdAgentAddress,
+    ];
     const nameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase();
     const firstAsset = Object.freeze({
       assertionRoot: ASSERTION_ROOT,
@@ -5716,7 +5722,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       previousRosterDigest: null,
       policyDigest,
       administrativeDelegationDigest: null,
-      members: [AUTHOR, providerAgentAddress, coldAgentAddress, authorizedColdAgentAddress]
+      members: chainParticipantAgents
         .map((agentAddress) => ({
         agentAddress,
         roles: ['holder', 'provider'] as const,
@@ -5744,6 +5750,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await providerAdapter.createOnChainContextGraph({
       accessPolicy: 1,
       publishPolicy: 0,
+      participantAgents: chainParticipantAgents,
       nameHash,
     });
     const providerPeerAddresses = new Map<string, EvmAddressV1>([
@@ -5835,6 +5842,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await authorizedAdapter.createOnChainContextGraph({
       accessPolicy: 1,
       publishPolicy: 0,
+      participantAgents: chainParticipantAgents,
       nameHash,
     });
     let releaseRetirement!: () => void;
@@ -6015,6 +6023,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await coldAdapter.createOnChainContextGraph({
       accessPolicy: 1,
       publishPolicy: 0,
+      participantAgents: chainParticipantAgents,
       nameHash,
     });
     const cold = await startNativeAgentWithOptions({

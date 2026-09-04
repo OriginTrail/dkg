@@ -14,6 +14,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 const PNPM = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
 
 const REQUIRED_RUNTIME_PACKAGES = [
+  '@origintrail-official/dkg-http-utils',
   '@origintrail-official/dkg',
   '@origintrail-official/dkg-adapter-hermes',
   '@origintrail-official/dkg-adapter-openclaw',

@@ -47,7 +47,7 @@ test('Gate 2 compatibility codec preserves the pre-extraction wire contract', ()
   assert.equal(build.schemaVersion, 'dkg-rfc64-gate2-runtime-manifest-v1');
   assert.equal(
     build.manifestDigest,
-    '0x8cbd9ec990acd49abb799776d45f30bfe678f78b2d766b2323d31d65c14c85fd',
+    '0xc8c0673fa6d3d5b8ae597b823a0e642d9a4ab4eedcbbfa21106b8b9ebdcf47e4',
   );
   assert.deepEqual(build.build, {
     buildArgs: [
@@ -74,6 +74,7 @@ test('Gate 2 compatibility codec preserves the pre-extraction wire contract', ()
     { name: '@origintrail-official/dkg-agent', path: 'packages/agent/dist' },
     { name: '@origintrail-official/dkg-chain', path: 'packages/chain/dist' },
     { name: '@origintrail-official/dkg-core', path: 'packages/core/dist' },
+    { name: '@origintrail-official/dkg-http-utils', path: 'packages/http-utils/dist' },
     { name: '@origintrail-official/dkg-publisher', path: 'packages/publisher/dist' },
     { name: '@origintrail-official/dkg-query', path: 'packages/query/dist' },
     {
@@ -91,7 +92,7 @@ test('Gate 2 compatibility codec preserves the pre-extraction wire contract', ()
   assert.equal(provenance.schemaVersion, 'dkg-rfc64-gate2-runtime-provenance-v1');
   assert.equal(
     provenance.provenanceDigest,
-    '0x0f8f2b7becf479a832938ef3b3dd77065c10fb8eeb12be2dee97d30db5da43ed',
+    '0x0fa6bc4f2c750244b8c1b9625c7a7418a3afd499768ce66da66bded99d4dcf85',
   );
 });
 

@@ -49,6 +49,7 @@ import {
 
 interface DKGAgentInternals {
   localAgents: Map<string, AgentKeyRecord>;
+  swmSenderKeyReceiveStates: Map<string, unknown>;
   // Both private — we reach in via this view to drive them in tests.
   acceptSwmSenderKeyPackage(
     pkg: SwmSenderKeyPackageMsg,
@@ -60,6 +61,8 @@ interface DKGAgentInternals {
   // full context graph + membership snapshot just to drive the
   // sender-key bootstrap path.
   getContextGraphAgentGateAddresses(contextGraphId: string): Promise<string[] | null>;
+  getContextGraphAllowedPeers(contextGraphId: string): Promise<string[] | null>;
+  readonly peerId: string;
 }
 
 interface CapturedLog {
@@ -131,6 +134,7 @@ async function bootAgentForStaleTargetTest(): Promise<{
     senderWallet.address,
     recipient.agentAddress,
   ];
+  internals.getContextGraphAllowedPeers = async () => null;
   return { agent, internals, recipient, senderWallet };
 }
 
@@ -268,6 +272,55 @@ describe('acceptSwmSenderKeyPackage: stale-target throw type', () => {
     });
     await expect(accept).rejects.toThrow(/was revoked at/);
     await expect(accept).rejects.not.toBeInstanceOf(StaleSenderKeyTargetError);
+  });
+
+  it('rejects a sender-key package when this recipient peer is outside the graph peer allowlist', async () => {
+    const { agent, internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
+    await agent.start();
+    try {
+      const pkg = await buildSignedPackage({
+        senderWallet,
+        recipientAgentAddress: recipient.agentAddress,
+        recipientKeyId: recipient.workspaceEncryptionKeys[0].encryptionKeyId,
+      });
+      internals.getContextGraphAllowedPeers = async () => [FROM_PEER_ID];
+
+      const accept = internals.acceptSwmSenderKeyPackage(pkg, FROM_PEER_ID, {
+        operationId: 'test-op',
+        operationName: 'share',
+      });
+      await expect(accept).rejects.toMatchObject({
+        name: 'SwmSenderKeySetupRejectionError',
+        reasonCode: 'recipient-not-allowed',
+      });
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it('rejects a sender-key package when its sender peer is outside the graph peer allowlist', async () => {
+    const { agent, internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
+    await agent.start();
+    try {
+      const pkg = await buildSignedPackage({
+        senderWallet,
+        recipientAgentAddress: recipient.agentAddress,
+        recipientKeyId: recipient.workspaceEncryptionKeys[0].encryptionKeyId,
+      });
+      internals.getContextGraphAllowedPeers = async () => [internals.peerId];
+
+      const accept = internals.acceptSwmSenderKeyPackage(pkg, FROM_PEER_ID, {
+        operationId: 'test-op',
+        operationName: 'share',
+      });
+      await expect(accept).rejects.toMatchObject({
+        name: 'SwmSenderKeySetupRejectionError',
+        reasonCode: 'sender-not-allowed',
+      });
+      expect(internals.swmSenderKeyReceiveStates).toHaveLength(0);
+    } finally {
+      await agent.stop();
+    }
   });
 });
 

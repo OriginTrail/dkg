@@ -1693,6 +1693,33 @@ export class MockChainAdapter implements ChainAdapter {
     return agents.map((a) => ethers.getAddress(a));
   }
 
+  async addContextGraphParticipantAgent(contextGraphId: bigint, agent: string): Promise<TxResult> {
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (!cg) throw new Error(`Mock: context graph ${contextGraphId} does not exist`);
+    if (!ethers.isAddress(agent)) throw new Error(`Mock: invalid participant agent ${agent}`);
+    const normalized = ethers.getAddress(agent);
+    if (normalized === ethers.ZeroAddress) throw new Error('Mock: zero participant agent');
+    if (cg.participantAgents.some((value) => value.toLowerCase() === normalized.toLowerCase())) {
+      throw new Error(`Mock: participant agent ${normalized} already exists`);
+    }
+    if (cg.participantAgents.length >= 256) throw new Error('Mock: participantAgents cap');
+    cg.participantAgents.push(normalized);
+    return this.txResult(true);
+  }
+
+  async removeContextGraphParticipantAgent(contextGraphId: bigint, agent: string): Promise<TxResult> {
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (!cg) throw new Error(`Mock: context graph ${contextGraphId} does not exist`);
+    if (!ethers.isAddress(agent)) throw new Error(`Mock: invalid participant agent ${agent}`);
+    const normalized = ethers.getAddress(agent);
+    const index = cg.participantAgents.findIndex(
+      (value) => value.toLowerCase() === normalized.toLowerCase(),
+    );
+    if (index < 0) throw new Error(`Mock: participant agent ${normalized} not found`);
+    cg.participantAgents.splice(index, 1);
+    return this.txResult(true);
+  }
+
   /**
    * OT-RFC-38 / LU-6 Phase B — mock mirror of
    * `ContextGraphStorage.getNameHash(uint256)`. Returns `null` for

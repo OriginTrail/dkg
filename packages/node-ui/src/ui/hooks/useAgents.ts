@@ -11,6 +11,7 @@
  */
 import React, { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { executeQuery } from '../api.js';
+import { metaGraphPrefixFilter } from '../lib/sparql.js';
 
 const AGENT_NS = 'http://dkg.io/ontology/agent/';
 const SCHEMA_NAME = 'http://schema.org/name';
@@ -62,12 +63,6 @@ export interface AgentsData {
   openAgent: (uri: string) => void;
 }
 
-// ── SPARQL ────────────────────────────────────────────────────
-function metaGraphFilter(contextGraphId: string): string {
-  const prefix = `did:dkg:context-graph:${contextGraphId}/meta`;
-  return `FILTER(strstarts(str(?g), "${prefix.replace(/"/g, '\\"')}"))`;
-}
-
 function buildAgentsQuery(contextGraphId: string): string {
   return `PREFIX ag: <${AGENT_NS}>
 PREFIX schema: <http://schema.org/>
@@ -87,7 +82,7 @@ WHERE {
     OPTIONAL { ?a ag:avatar          ?avatar }
     OPTIONAL { ?a ag:reputation      ?reputation }
   }
-  ${metaGraphFilter(contextGraphId)}
+  ${metaGraphPrefixFilter(contextGraphId)}
 }`;
 }
 

@@ -21,6 +21,10 @@ import {
   sanitizeDkgToolForLocalLlm,
   validateDkgToolCall,
 } from './dkg-tool-validation.js';
+import {
+  DEFAULT_MAX_MODEL_RESPONSE_BYTES,
+  readModelResponseTextBounded,
+} from './model-response.js';
 
 export interface McpClientLike {
   listTools(options?: { signal?: AbortSignal }): Promise<{ tools: McpToolDefinition[] }>;
@@ -97,6 +101,8 @@ export interface DkgLocalLlmOptions {
   maxToolCalls?: number;
   maxToolsPerTurn?: number;
   maxToolJsonBytes?: number;
+  /** Maximum bytes accepted from one local-model HTTP response. */
+  maxModelResponseBytes?: number;
   maxEvidenceChars?: number;
   maxSessionTurns?: number;
   maxSessionChars?: number;
@@ -345,6 +351,7 @@ export class DkgLocalLlmRuntime {
   private readonly maxToolCalls: number;
   private readonly maxToolsPerTurn: number;
   private readonly maxToolJsonBytes: number;
+  private readonly maxModelResponseBytes: number;
   private readonly maxEvidenceChars: number;
   private readonly maxSessionTurns: number;
   private readonly maxSessionChars: number;
@@ -379,6 +386,11 @@ export class DkgLocalLlmRuntime {
     this.maxToolCalls = positiveIntegerOption('maxToolCalls', options.maxToolCalls, 4);
     this.maxToolsPerTurn = positiveIntegerOption('maxToolsPerTurn', options.maxToolsPerTurn, 8);
     this.maxToolJsonBytes = positiveIntegerOption('maxToolJsonBytes', options.maxToolJsonBytes, 18_000);
+    this.maxModelResponseBytes = positiveIntegerOption(
+      'maxModelResponseBytes',
+      options.maxModelResponseBytes,
+      DEFAULT_MAX_MODEL_RESPONSE_BYTES,
+    );
     this.maxEvidenceChars = positiveIntegerOption('maxEvidenceChars', options.maxEvidenceChars, 12_000);
     this.maxSessionTurns = positiveIntegerOption('maxSessionTurns', options.maxSessionTurns, 6);
     this.maxSessionChars = positiveIntegerOption('maxSessionChars', options.maxSessionChars, 8_000);
@@ -562,7 +574,7 @@ export class DkgLocalLlmRuntime {
       body: JSON.stringify(body),
       signal: requestSignal,
     });
-    const raw = await response.text();
+    const raw = await readModelResponseTextBounded(response, this.maxModelResponseBytes);
     signal?.throwIfAborted();
     if (!response.ok) {
       await this.trace.write(`LLM HTTP ERROR ${round}`, { status: response.status, body: raw });

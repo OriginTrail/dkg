@@ -21,6 +21,7 @@ export const RUNTIME_PACKAGE_CLOSURE = Object.freeze([
   Object.freeze({ name: '@origintrail-official/dkg-agent', path: 'packages/agent/dist' }),
   Object.freeze({ name: '@origintrail-official/dkg-chain', path: 'packages/chain/dist' }),
   Object.freeze({ name: '@origintrail-official/dkg-core', path: 'packages/core/dist' }),
+  Object.freeze({ name: '@origintrail-official/dkg-http-utils', path: 'packages/http-utils/dist' }),
   Object.freeze({ name: '@origintrail-official/dkg-publisher', path: 'packages/publisher/dist' }),
   Object.freeze({ name: '@origintrail-official/dkg-query', path: 'packages/query/dist' }),
   Object.freeze({

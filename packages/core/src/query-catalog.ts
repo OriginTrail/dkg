@@ -1,5 +1,9 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
+import {
+  decodeRdfLiteralBody,
+  parseRdfLiteralLexicalTerm,
+} from '@origintrail-official/dkg-rdf-utils';
 import { contextGraphSubGraphUri, validateSubGraphName } from './constants.js';
 import { GET_VIEWS, type GetView } from './memory-model.js';
 import {
@@ -151,15 +155,14 @@ export function queryCatalogBindingValue(value: unknown): string {
     if (typeof raw === 'string') return raw;
   }
   const raw = String(value);
-  const literalMatch = raw.match(/^("[\s\S]*")(?:\^\^.*|@.*)?$/);
-  if (!literalMatch) return raw.startsWith('<') && raw.endsWith('>')
+  const literal = parseRdfLiteralLexicalTerm(raw);
+  if (!literal) return raw.startsWith('<') && raw.endsWith('>')
     ? raw.slice(1, -1)
     : raw;
-  try {
-    return JSON.parse(literalMatch[1]);
-  } catch {
-    return literalMatch[1].slice(1, -1);
-  }
+  return decodeRdfLiteralBody(literal.body, {
+    invalidEscape: 'preserve',
+    allowSurrogateCodePoints: true,
+  });
 }
 
 function queryCatalogSlugFromIri(iri: string, marker: string, fallback: string): string {

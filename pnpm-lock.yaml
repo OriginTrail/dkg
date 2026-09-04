@@ -613,6 +613,9 @@ importers:
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
+      '@origintrail-official/dkg-http-utils':
+        specifier: workspace:*
+        version: link:../http-utils
       ethers:
         specifier: ^6
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
@@ -978,6 +981,15 @@ importers:
         specifier: ^8.3.3
         version: 8.3.3(web-streams-polyfill@3.3.3)
 
+  packages/http-utils:
+    devDependencies:
+      '@vitest/coverage-v8':
+        specifier: ^4.0.18
+        version: 4.0.18(vitest@4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0))
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0)
+
   packages/kafka-plugin:
     dependencies:
       '@origintrail-official/dkg':
@@ -998,6 +1010,13 @@ importers:
         version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/local-llm:
+    dependencies:
+      '@origintrail-official/dkg-http-utils':
+        specifier: workspace:*
+        version: link:../http-utils
+      '@origintrail-official/dkg-rdf-utils':
+        specifier: workspace:*
+        version: link:../rdf-utils
     devDependencies:
       '@modelcontextprotocol/sdk':
         specifier: ^1
@@ -1250,6 +1269,9 @@ importers:
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
+      '@origintrail-official/dkg-rdf-utils':
+        specifier: workspace:*
+        version: link:../rdf-utils
       '@origintrail-official/dkg-storage':
         specifier: workspace:*
         version: link:../storage
@@ -1300,6 +1322,9 @@ importers:
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
+      '@origintrail-official/dkg-http-utils':
+        specifier: workspace:*
+        version: link:../http-utils
       '@origintrail-official/dkg-rdf-utils':
         specifier: workspace:*
         version: link:../rdf-utils

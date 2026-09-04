@@ -197,6 +197,12 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     };
 
     const agent = {
+      resolveContextGraphReadAuthority: async () => ({
+        outcome: 'allowed' as const,
+        source: 'legacy-local' as const,
+        reason: 'test-public',
+        metadataBootstrap: 'eligible' as const,
+      }),
       getContextGraphAllowedAgents: async () => opts.allowedAgents ?? [],
       getSubscribedContextGraphs: () => state,
       subscribeToContextGraph: (

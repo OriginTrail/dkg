@@ -763,7 +763,12 @@ describe('rootless graph-scoped KA lifecycle', () => {
   }, 60_000);
 
   it('repairs a named lifecycle after its async publish transaction confirmed during downtime', async () => {
-    const agent = await createAgent('QueuedAsyncVmRecoveryBot');
+    // This row drives the durable queue-recovery entry point explicitly. Keep
+    // the independent VM reconciliation worker disabled so it cannot consume
+    // the same confirmed chain event and repair/retire the fixture first.
+    const agent = await createAgent('QueuedAsyncVmRecoveryBot', {
+      syncReconcilerEnabled: false,
+    });
     await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Recovery E2E' });
     await agent.registerContextGraph(CG_ID);
 
@@ -780,6 +785,13 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const confirmed = await agent.publishFromFinalizedAssertion(CG_ID, name);
     expect(confirmed.status).toBe('confirmed');
     expect(confirmed.onChainResult).toBeDefined();
+
+    // Model the advertised downtime before recreating the stale local state.
+    // Otherwise the live chain poller can race this test and legitimately
+    // retire the finalized SWM twin under its own `system` operation.
+    const chainPoller = (agent as any).chainPoller;
+    await chainPoller?.stop();
+    if ((agent as any).chainPoller === chainPoller) (agent as any).chainPoller = null;
 
     const lifecycleAgent = intent.agentAddress ?? agent.defaultAgentAddress ?? agent.peerId;
     const lifecycleUri = assertionLifecycleUri(CG_ID, lifecycleAgent, name);

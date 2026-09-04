@@ -375,6 +375,10 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import {
+  resolveContextGraphReadAuthorityDecision,
+  type ContextGraphReadAuthorityDecision,
+} from './context-graph-read-authority.js';
 
 export class QueryMethods extends DKGAgentBase {
   async query(this: DKGAgent,
@@ -693,91 +697,52 @@ export class QueryMethods extends DKGAgentBase {
       allowSubscriptionFallback?: boolean;
     } = {},
   ): Promise<boolean> {
-    const rfc64Roster = this.resolveRfc64PrivateReadRosterV1(contextGraphId);
-    if (rfc64Roster !== undefined) {
-      if (rfc64Roster === null) return false;
-      const effectiveCaller = opts.callerAgentAddress
-        ?? this.config.rfc64CatalogAccessPolicyAuthority?.localAgentAddress
-        ?? this.defaultAgentAddress;
-      return this.isAgentAddressAllowed(effectiveCaller, rfc64Roster);
-    }
-    if (!(await this.isPrivateContextGraph(contextGraphId))) {
-      return true;
-    }
+    return (await this.resolveContextGraphReadAuthority(contextGraphId, opts)).outcome === 'allowed';
+  }
 
-    const agentGateAddresses = await this.getContextGraphAgentGateAddresses(contextGraphId);
-    const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId);
-
-    // Mixed legacy peer-id and V10 agent gates are conjunctive: a node must
-    // be invited by peer id and also hold a local allowed agent identity.
-    const agentGateAllowed = agentGateAddresses === null
-      ? false
-      : opts.callerAgentAddress
-        ? this.isAgentAddressAllowed(opts.callerAgentAddress, agentGateAddresses)
-        : this.hasLocalAgentInGate(agentGateAddresses);
-
-    if (agentGateAddresses !== null && allowedPeers !== null) {
-      return allowedPeers.includes(this.peerId) && agentGateAllowed;
-    }
-
-    if (agentGateAddresses !== null) {
-      return agentGateAllowed;
-    }
-
-    const participants = await this.getPrivateContextGraphParticipants(contextGraphId);
-
-    if ((!participants || participants.length === 0) && allowedPeers !== null) {
-      return allowedPeers.includes(this.peerId);
-    }
-
-    // No participant or peer list at all. Durable CG reads preserve the legacy
-    // subscribed-node fallback, but SWM must fail closed here because SWM
-    // GossipSub carries plaintext bytes.
-    if (!participants || participants.length === 0) {
-      if (opts.allowSubscriptionFallback === false) {
-        return false;
-      }
-      return this.subscribedContextGraphs.has(contextGraphId)
-        || (this.config.syncContextGraphs ?? []).includes(contextGraphId);
-    }
-
-    if (
-      opts.callerAgentAddress
-      && participants.some((p) => p.toLowerCase() === opts.callerAgentAddress!.toLowerCase())
-    ) {
-      return true;
-    }
-
-    // Check if any local agent address is in the participants list
-    const myAgentAddress = this.defaultAgentAddress;
-    if (myAgentAddress && participants.some((p) => p.toLowerCase() === myAgentAddress.toLowerCase())) {
-      return true;
-    }
-
-    // Check if the local identity ID is in the participants list
-    let myIdentityId = 0n;
-    try {
-      myIdentityId = await this.chain.getIdentityId();
-      if (myIdentityId > 0n && participants.includes(String(myIdentityId))) {
-        return true;
-      }
-    } catch { /* identity lookup failed — continue to deny */ }
-
-    // Legacy peer-ID allowlist: `inviteToContextGraph` writes `DKG_ALLOWED_PEER`
-    // quads. Honor them for local reads so a peer-ID-invited node can query
-    // the data it just synced.
-    if (allowedPeers?.includes(this.peerId)) {
-      return true;
-    }
-
-    // Edge nodes without an on-chain identity (identityId 0n) fall back to
-    // subscription-based access — the subscription itself is an authorization
-    // (the node was invited or created this CG).
-    if (myIdentityId === 0n && opts.allowSubscriptionFallback !== false) {
-      return this.subscribedContextGraphs.has(contextGraphId);
-    }
-
-    return false;
+  public async resolveContextGraphReadAuthority(this: DKGAgent,
+    contextGraphId: string,
+    opts: {
+      callerAgentAddress?: string;
+      allowSubscriptionFallback?: boolean;
+    } = {},
+  ): Promise<ContextGraphReadAuthorityDecision> {
+    const acceptedPublicPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
+      ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
+      ?? [];
+    return resolveContextGraphReadAuthorityDecision({
+      contextGraphId,
+      callerAgentAddress: opts.callerAgentAddress,
+      allowSubscriptionFallback: opts.allowSubscriptionFallback !== false,
+      isSystemContextGraph: (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId),
+      getPeerId: () => this.peerId,
+      getAllowedPeers: () => this.getContextGraphAllowedPeers(contextGraphId),
+      getRegisteredAuthority: () => this.resolveRegisteredContextGraphAuthority(contextGraphId),
+      isAgentAllowed: (agentAddress, roster) => this.isAgentAddressAllowed(agentAddress, roster),
+      hasLocalAgentInRoster: (roster) => this.hasLocalAgentInGate(roster),
+      resolveRfc64PrivateRoster: () => this.resolveRfc64PrivateReadRosterV1(contextGraphId),
+      rfc64LocalAgentAddress: this.config.rfc64CatalogAccessPolicyAuthority?.localAgentAddress,
+      defaultAgentAddress: this.defaultAgentAddress,
+      hasAcceptedRfc64PublicPolicy: acceptedPublicPolicies.some(({ policyEnvelope }) => (
+        policyEnvelope.payload.contextGraphId === contextGraphId
+        && policyEnvelope.payload.accessPolicy === 0
+      )),
+      isPendingMetadata:
+        this.subscribedContextGraphs.get(contextGraphId)?.pendingMeta === true,
+      isPrivateLocalGraph: () => this.isPrivateContextGraph(contextGraphId),
+      getLocalAgentGate: () => this.getContextGraphAgentGateAddresses(contextGraphId),
+      getLegacyParticipants: () => this.getPrivateContextGraphParticipants(contextGraphId),
+      // A crash-safe join approval may restore a restricted pending-metadata
+      // row before ordinary read authority is proven. Its durable subscription
+      // intent must not become the legacy subscription authorization fallback.
+      hasLegacySubscription:
+        this.subscribedContextGraphs.get(contextGraphId)?.pendingMeta !== true
+        && (
+          this.subscribedContextGraphs.has(contextGraphId)
+          || (this.config.syncContextGraphs ?? []).includes(contextGraphId)
+        ),
+      getLocalIdentityId: () => this.chain.getIdentityId(),
+    });
   }
 
   /**

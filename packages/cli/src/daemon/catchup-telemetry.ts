@@ -13,7 +13,7 @@
 //
 //   1. **Requests are not jobs.** They are N:1 — a dedupe returns a running
 //      job, an already-ready replay returns a completed one, and `400`/`403`
-//      plus both shutdown `503`s mint nothing at all. I7 counts route returns;
+//      plus authority/shutdown `503`s mint nothing at all. I7 counts route returns;
 //      I8 counts job identities.
 //   2. **Instrumentation never throws.** Every record site is synchronous and
 //      swallowed. The walk job's terminal point is emitted from a detached,
@@ -45,6 +45,7 @@ export type CatchupAdmission = 'walk' | 'synthetic';
 export type CatchupRequestResult =
   | 'bad_request'
   | 'forbidden'
+  | 'authority_unavailable'
   | 'deduped'
   | 'ready_replay'
   | 'ready_synthetic'
