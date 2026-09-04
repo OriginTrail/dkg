@@ -15,6 +15,7 @@ import {
   composeRfc64RegisteredRosterVersionV1,
   composeRfc64UnregisteredCatalogAuthorityV1,
 } from '../src/rfc64/release-native-catalog-authority-v1.js';
+import { Rfc64CatalogAccessPolicyRegistryV1 } from '../src/rfc64/catalog-access-policy-v1.js';
 
 const NETWORK_ID = 'otp:31337' as NetworkIdV1;
 const CONTEXT_GRAPH_ID = (
@@ -133,6 +134,56 @@ describe('release-native RFC-64 catalog authority', () => {
       era: '2',
       version: '3',
       policyDigest: first.policyDigest,
+    });
+  });
+
+  it('keeps finalized policy ownership separate from private roster membership', async () => {
+    const authority = composeRfc64FinalizedCatalogAuthorityV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      snapshot: {
+        chainId: '31337',
+        governanceContract: CONTRACT,
+        contextGraphId: '9',
+        owner: OWNER,
+        active: true,
+        accessPolicy: 1,
+        publishPolicy: 0,
+        publishAuthority: OWNER,
+        publishAuthorityAccountId: '7',
+        participantAgents: [MEMBER],
+        nameHash: NAME_HASH,
+        ownershipEra: '3',
+        policyVersion: '5',
+        rosterVersion: '4',
+        sourceBlockNumber: '43',
+        sourceBlockHash: BLOCK_HASH,
+      },
+    });
+
+    expect(authority.policy.publishAuthority).toBe(OWNER);
+    expect(authority.roster?.members).toEqual([
+      { agentAddress: MEMBER, roles: ['holder', 'provider'] },
+    ]);
+
+    const authorizeRemote = async (remoteAgentAddress: EvmAddressV1) => {
+      const registry = new Rfc64CatalogAccessPolicyRegistryV1({
+        localAgentAddress: MEMBER,
+        resolveRemoteAgentAddress: async () => remoteAgentAddress,
+      });
+      registry.accept(authority);
+      return registry.authorize({
+        operation: 'fetch-inbound',
+        remotePeerId: '12D3KooReleaseNativePeer',
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        policyDigest: authority.policyDigest,
+      });
+    };
+    await expect(authorizeRemote(OWNER)).resolves.toBeNull();
+    await expect(authorizeRemote(MEMBER)).resolves.toEqual({
+      accessPolicy: 1,
+      policyDigest: authority.policyDigest,
     });
   });
 });

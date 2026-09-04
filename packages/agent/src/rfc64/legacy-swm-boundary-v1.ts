@@ -6,6 +6,7 @@ import {
   assertCanonicalDeterministicUalV1,
   assertContextGraphIdV1,
   assertSafeIri,
+  contextGraphWorkspaceMetaGraphUri,
   type CanonicalDeterministicUalV1,
   type ContextGraphIdV1,
 } from '@origintrail-official/dkg-core';
@@ -226,6 +227,9 @@ async function captureRfc64LegacySwmBoundaryV1(
         contextGraphId,
         'RFC-64 legacy SWM boundary contextGraphId',
       );
+      if (metaGraph !== contextGraphWorkspaceMetaGraphUri(contextGraphId)) {
+        continue;
+      }
       const kaUal = assertCanonicalDeterministicUalV1(rawUal).ual;
       if (head !== `${kaUal}${SWM_HEAD_SUFFIX}`) {
         throw new Error(`RFC-64 legacy SWM head identity differs for ${kaUal}`);

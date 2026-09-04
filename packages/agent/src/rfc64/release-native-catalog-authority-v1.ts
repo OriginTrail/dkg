@@ -180,7 +180,10 @@ function finishAuthorityV1(
       previousRosterDigest: null,
       policyDigest,
       administrativeDelegationDigest: policy.administrativeDelegationDigest,
-      members: Object.freeze([...new Set([issuer, ...memberAddresses])]
+      // Policy issuance and private read membership are independent chain
+      // authorities: ownership must not grant holder/provider access unless
+      // the finalized participant roster names that same address.
+      members: Object.freeze([...new Set(memberAddresses)]
         .map((address) => address.toLowerCase() as EvmAddressV1)
         .sort()
         .map((agentAddress) => Object.freeze({

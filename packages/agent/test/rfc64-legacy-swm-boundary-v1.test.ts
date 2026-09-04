@@ -4,6 +4,10 @@ import { chmod, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import {
+  contextGraphSharedMemoryMetaUri,
+  contextGraphWorkspaceMetaGraphUri,
+} from '@origintrail-official/dkg-core';
 import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -14,9 +18,11 @@ import {
 } from '../src/rfc64/legacy-swm-boundary-v1.js';
 
 const CONTEXT_GRAPH_ID = '0x1111111111111111111111111111111111111111/legacy-boundary';
-const META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory_meta`;
-const SUBGRAPH_META_GRAPH =
-  `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/private-lane/_shared_memory_meta`;
+const META_GRAPH = contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH_ID);
+const SUBGRAPH_META_GRAPH = contextGraphSharedMemoryMetaUri(
+  CONTEXT_GRAPH_ID,
+  'private-lane',
+);
 const UAL_ONE = 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/1';
 const UAL_TWO = 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/2';
 
@@ -79,6 +85,22 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     );
   });
 
+  it('captures only the exact root when root and named-subgraph heads coexist', async () => {
+    const root = await secureTempRoot(roots);
+    const store = new OxigraphStore();
+    await store.insert([
+      ...legacyHeadQuads(META_GRAPH, UAL_ONE, 'root'),
+      ...legacyHeadQuads(SUBGRAPH_META_GRAPH, UAL_TWO, 'named'),
+    ]);
+
+    const owner = {};
+    await initializeRfc64LegacySwmBoundaryV1(owner, root, store);
+
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
+    await markRfc64LegacySwmRepublishedV1(owner, CONTEXT_GRAPH_ID, [UAL_ONE]);
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(0);
+  });
+
   it('captures only fully joined legacy heads through the real Oxigraph query', async () => {
     const root = await secureTempRoot(roots);
     const store = new OxigraphStore();
@@ -138,4 +160,18 @@ function fakeStore(
       };
     }),
   } as unknown as TripleStore;
+}
+
+function legacyHeadQuads(graph: string, ual: string, id: string) {
+  const head = `${ual}#dkg-swm-head`;
+  const operation = `urn:dkg:workspace-operation:${id}`;
+  const shareId = `"share-${id}"`;
+  return [
+    { graph, subject: head, predicate: 'http://dkg.io/ontology/kaUal', object: ual },
+    { graph, subject: head, predicate: 'http://dkg.io/ontology/shareOperationId', object: shareId },
+    { graph, subject: operation, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation' },
+    { graph, subject: operation, predicate: 'http://dkg.io/ontology/kaUal', object: ual },
+    { graph, subject: operation, predicate: 'http://dkg.io/ontology/shareOperationId', object: shareId },
+    { graph, subject: operation, predicate: 'http://dkg.io/ontology/contextGraphId', object: `"${CONTEXT_GRAPH_ID}"` },
+  ];
 }
