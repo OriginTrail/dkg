@@ -67,9 +67,60 @@ describe('private read authorization uses the on-chain participant roster', () =
       callerAgentAddress: NON_MEMBER,
       allowSubscriptionFallback: false,
     })).resolves.toBe(false);
-    expect(resolveByNameHash).toHaveBeenCalledWith(agent.contextGraphNameCommitment('cold-private'));
+    expect(resolveByNameHash).toHaveBeenCalledWith(
+      agent.contextGraphNameCommitment('cold-private'),
+      { signal: expect.any(AbortSignal) },
+    );
     expect(localPolicy).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['cold', false, 'chain-name-binding-unavailable'],
+    ['locally indexed', true, 'local-chain-binding-unavailable'],
+  ] as const)(
+    'bounds a never-settling %s name binding and fails read admission closed',
+    async (_label, locallyIndexed, reason) => {
+      const contextGraphId = locallyIndexed ? 'indexed-hung-binding' : 'cold-hung-binding';
+      const chain = new MockChainAdapter();
+      agent = await DKGAgent.create({
+        name: locallyIndexed ? 'PrivateReadIndexedHungBinding' : 'PrivateReadColdHungBinding',
+        chainAdapter: chain,
+      });
+      const nameHash = agent.contextGraphNameCommitment(contextGraphId);
+      if (locallyIndexed) {
+        agent.setContextGraphSubscription(contextGraphId, {
+          subscribed: true,
+          synced: false,
+          sharedMemorySynced: false,
+          metaSynced: false,
+          onChainHash: nameHash,
+        }, { persist: false });
+      }
+      const resolveByNameHash = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
+        .mockReturnValue(new Promise<bigint | null>(() => undefined));
+      const localPolicy = vi.spyOn(agent, 'isPrivateContextGraph').mockResolvedValue(false);
+      vi.useFakeTimers();
+
+      const read = agent.resolveContextGraphReadAuthority(contextGraphId, {
+        callerAgentAddress: MEMBER,
+        allowSubscriptionFallback: false,
+      });
+      await vi.advanceTimersByTimeAsync(CHAIN_POLICY_READ_TIMEOUT_MS);
+
+      await expect(read).resolves.toMatchObject({
+        outcome: 'unavailable',
+        source: 'registered-chain',
+        reason,
+      });
+      expect(resolveByNameHash).toHaveBeenCalledWith(
+        nameHash,
+        { signal: expect.any(AbortSignal) },
+      );
+      const operationSignal = resolveByNameHash.mock.calls[0]?.[1]?.signal;
+      expect(operationSignal?.aborted).toBe(true);
+      expect(localPolicy).not.toHaveBeenCalled();
+    },
+  );
 
   it('allows a cold registered graph only after fresh chain policy proves it public', async () => {
     const chain = new MockChainAdapter();
@@ -388,6 +439,56 @@ describe('private read authorization uses the on-chain participant roster', () =
       if (watchdog) clearTimeout(watchdog);
     });
 
+    expect(agent.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      activated: 0,
+      dormant: 1,
+      dormantIds: [contextGraphId],
+      dormantReasons: {
+        authorityUnavailable: [contextGraphId],
+      },
+    });
+  }, CHAIN_POLICY_READ_TIMEOUT_MS + 3_500);
+
+  it('does not let cold name-binding discovery block subscription rehydration', async () => {
+    const contextGraphId = 'persisted-hung-name-binding';
+    const chain = new MockChainAdapter();
+    const resolveByNameHash = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
+      .mockReturnValue(new Promise<bigint | null>(() => undefined));
+    agent = await DKGAgent.create({
+      name: 'PrivateReadHungNameBindingRehydration',
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [{
+          id: contextGraphId,
+          subscribed: true,
+          synced: true,
+          sharedMemorySynced: true,
+          metaSynced: true,
+          syncScoped: true,
+        }],
+        save: async () => undefined,
+        delete: async () => undefined,
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+    });
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      agent.start(),
+      new Promise<never>((_, reject) => {
+        watchdog = setTimeout(
+          () => reject(new Error('daemon startup exceeded the name-binding deadline')),
+          CHAIN_POLICY_READ_TIMEOUT_MS + 1_500,
+        );
+      }),
+    ]).finally(() => {
+      if (watchdog) clearTimeout(watchdog);
+    });
+
+    expect(resolveByNameHash).toHaveBeenCalledWith(
+      agent.contextGraphNameCommitment(contextGraphId),
+      { signal: expect.any(AbortSignal) },
+    );
     expect(agent.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);
     expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
       activated: 0,

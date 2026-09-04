@@ -457,7 +457,7 @@ function respondReconcileError(res: ServerResponse, err: unknown): void {
  * Shaped after `respondIfStoreUnavailable` — retryable 503 plus `Retry-After`
  * — because that is what this is: the request is fine, the node just cannot
  * take on new work it will never drain. Returned from BOTH mint sites, which
- * is why I7's `result` vocabulary needed a seventh value; a 503 that clamped
+ * is why I7's `result` vocabulary needed a distinct value; a 503 that clamped
  * to `unspecified` would hide the one route outcome shutdown introduces.
  */
 function catchupShuttingDownResponse(res: ServerResponse, includeSharedMemory: boolean): void {
@@ -473,6 +473,25 @@ function catchupShuttingDownResponse(res: ServerResponse, includeSharedMemory: b
     },
     undefined,
     { 'Retry-After': '5' },
+  );
+}
+
+/** Fail closed without misreporting a transient authority outage as a denial. */
+function catchupAuthorityUnavailableResponse(
+  res: ServerResponse,
+  includeSharedMemory: boolean,
+): void {
+  recordCatchupRequest('authority_unavailable', includeSharedMemory);
+  return jsonResponse(
+    res,
+    503,
+    {
+      error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
+      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+      retryable: true,
+    },
+    undefined,
+    { 'Retry-After': '3' },
   );
 }
 
@@ -1880,14 +1899,23 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     // query boundary because it understands RFC-64 rosters, legacy mixed
     // agent/peer gates, and explicit-public CGs. Disable the legacy subscription
     // fallback: the subscription is what this request is trying to create, so it
-    // cannot also serve as its authorization proof. Any authority-read failure
-    // is a denial, leaving no subscription or catch-up-job side effect behind.
+    // cannot also serve as its authorization proof. Keep a permanent denial
+    // distinct from transient authority unavailability at the HTTP boundary;
+    // both fail closed and leave no subscription or catch-up-job side effect.
     const callerAddr = requestAgentAddress ?? agent.getDefaultAgentAddress();
-    const canSubscribe = await agent.canReadContextGraph(contextGraphId, {
-      callerAgentAddress: callerAddr,
-      allowSubscriptionFallback: false,
-    }).catch(() => false);
-    if (!canSubscribe) {
+    let readAuthority: Awaited<ReturnType<typeof agent.resolveContextGraphReadAuthority>>;
+    try {
+      readAuthority = await agent.resolveContextGraphReadAuthority(contextGraphId, {
+        callerAgentAddress: callerAddr,
+        allowSubscriptionFallback: false,
+      });
+    } catch {
+      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
+    }
+    if (readAuthority.outcome === 'unavailable') {
+      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
+    }
+    if (readAuthority.outcome === 'denied') {
       recordCatchupRequest('forbidden', shouldSyncSharedMemory);
       return jsonResponse(res, 403, {
         error: callerAddr

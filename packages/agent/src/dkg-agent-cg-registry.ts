@@ -302,6 +302,7 @@ import {
   CHAIN_POLICY_READ_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
+import { runBoundedOperation } from './bounded-operation.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
@@ -627,10 +628,17 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const localTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
     if (localTarget !== null) {
       try {
-        const binding = await this.resolveContextGraphOnChainIdBinding(contextGraphId, {
-          signal: options.signal,
-          source: 'agent.contextGraph.registrationBinding',
-        });
+        const binding = await runBoundedOperation(
+          (signal) => this.resolveContextGraphOnChainIdBinding(contextGraphId, {
+            signal,
+            source: 'agent.contextGraph.registrationBinding',
+          }),
+          {
+            label: `resolveContextGraphOnChainIdBinding(${contextGraphId})`,
+            timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+            signal: options.signal,
+          },
+        );
         if (binding === null) return { kind: 'unregistered' };
         return {
           kind: 'registered',
@@ -661,9 +669,14 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     if (typeof resolveByNameHash !== 'function') return { kind: 'unregistered' };
     try {
       const nameHash = this.contextGraphNameCommitment(contextGraphId);
-      const onChainId = await (options.signal
-        ? resolveByNameHash.call(this.chain, nameHash, { signal: options.signal })
-        : resolveByNameHash.call(this.chain, nameHash));
+      const onChainId = await runBoundedOperation(
+        (signal) => resolveByNameHash.call(this.chain, nameHash, { signal }),
+        {
+          label: `resolveContextGraphIdByNameHash(${nameHash})`,
+          timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+          signal: options.signal,
+        },
+      );
       return onChainId === null || onChainId <= 0n
         ? { kind: 'unregistered' }
         : { kind: 'registered', onChainId, provenance: 'name-hash' };

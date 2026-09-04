@@ -21,8 +21,12 @@ describe('runBoundedOperation', () => {
   it('bounds non-cooperative work with a typed timeout', async () => {
     vi.useFakeTimers();
     try {
+      let operationSignal: AbortSignal | undefined;
       const result = runBoundedOperation(
-        () => new Promise<string>(() => undefined),
+        (signal) => {
+          operationSignal = signal;
+          return new Promise<string>(() => undefined);
+        },
         { label: 'hung read', timeoutMs: 25 },
       );
       const assertion = expect(result).rejects.toEqual(
@@ -30,6 +34,10 @@ describe('runBoundedOperation', () => {
       );
       await vi.advanceTimersByTimeAsync(25);
       await assertion;
+      expect(operationSignal?.aborted).toBe(true);
+      expect(operationSignal?.reason).toEqual(
+        new BoundedOperationTimeoutError('hung read', 25),
+      );
     } finally {
       vi.useRealTimers();
     }
@@ -37,13 +45,19 @@ describe('runBoundedOperation', () => {
 
   it('propagates a caller abort while work is pending', async () => {
     const controller = new AbortController();
+    let operationSignal: AbortSignal | undefined;
     const result = runBoundedOperation(
-      () => new Promise<string>(() => undefined),
+      (signal) => {
+        operationSignal = signal;
+        return new Promise<string>(() => undefined);
+      },
       { label: 'aborted read', timeoutMs: 1_000, signal: controller.signal },
     );
     controller.abort('cancelled');
 
     await expect(result).rejects.toMatchObject({ name: 'AbortError', message: 'cancelled' });
+    expect(operationSignal?.aborted).toBe(true);
+    expect(operationSignal?.reason).toBe('cancelled');
   });
 
   it('preserves dependency rejections', async () => {

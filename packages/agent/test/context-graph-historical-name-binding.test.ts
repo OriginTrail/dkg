@@ -151,7 +151,10 @@ describe('cold current-state Context Graph name binding', () => {
         onChainId: 42n,
         provenance: 'reverse-name-hash',
       });
-    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledWith(NAME_HASH);
+    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledWith(
+      NAME_HASH,
+      { signal: expect.any(AbortSignal) },
+    );
   });
 
   it('uses an unselected numeric id without a chain name lookup', async () => {
@@ -182,7 +185,10 @@ describe('cold current-state Context Graph name binding', () => {
         provenance: 'name-hash',
       });
     expect(fixture.agent.contextGraphNameCommitment).toHaveBeenCalledWith('cold-cleartext');
-    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledWith(NAME_HASH);
+    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledWith(
+      NAME_HASH,
+      { signal: expect.any(AbortSignal) },
+    );
   });
 
   it('preserves selected revalidation failures as unavailable', async () => {
@@ -214,6 +220,31 @@ describe('cold current-state Context Graph name binding', () => {
         reason: 'chain-name-binding-unavailable',
         detail: 'chain lookup unavailable',
       });
+  });
+
+  it('propagates caller abort into cold name lookup and returns typed unavailability', async () => {
+    const fixture = selectedFixture();
+    fixture.agent.subscribedContextGraphs.clear();
+    fixture.agent.wireIdToLocalCgId.clear();
+    fixture.agent.contextGraphNameCommitment = () => NAME_HASH;
+    fixture.resolveContextGraphIdByNameHash.mockReturnValueOnce(
+      new Promise<bigint | null>(() => undefined),
+    );
+    const controller = new AbortController();
+
+    const binding = fixture.agent.resolveContextGraphRegistrationBinding(
+      'cold-cleartext',
+      { signal: controller.signal },
+    );
+    controller.abort(new Error('caller stopped'));
+
+    await expect(binding).resolves.toMatchObject({
+      kind: 'unavailable',
+      reason: 'chain-name-binding-unavailable',
+      detail: 'caller stopped',
+    });
+    const operationSignal = fixture.resolveContextGraphIdByNameHash.mock.calls[0]?.[1]?.signal;
+    expect(operationSignal?.aborted).toBe(true);
   });
 
   it('resolves an explicit cleartext selection without ontology data', async () => {

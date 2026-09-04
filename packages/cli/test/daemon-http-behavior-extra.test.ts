@@ -1068,7 +1068,12 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
-          canReadContextGraph: async () => true,
+          resolveContextGraphReadAuthority: async () => ({
+            outcome: 'allowed' as const,
+            source: 'legacy-local' as const,
+            reason: 'test-public',
+            metadataBootstrap: 'eligible' as const,
+          }),
           getContextGraphAllowedAgents: async () => [],
           getSubscribedContextGraphs: () => new Map(),
           subscribeToContextGraph: () => ({
@@ -1188,7 +1193,12 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
-          canReadContextGraph: async () => true,
+          resolveContextGraphReadAuthority: async () => ({
+            outcome: 'allowed' as const,
+            source: 'legacy-local' as const,
+            reason: 'test-public',
+            metadataBootstrap: 'eligible' as const,
+          }),
           getContextGraphAllowedAgents: async () => [],
           getSubscribedContextGraphs: () => new Map(),
           subscribeToContextGraph: () => ({
@@ -1301,7 +1311,12 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
-          canReadContextGraph: async () => true,
+          resolveContextGraphReadAuthority: async () => ({
+            outcome: 'allowed' as const,
+            source: 'legacy-local' as const,
+            reason: 'test-public',
+            metadataBootstrap: 'eligible' as const,
+          }),
           getContextGraphAllowedAgents: async () => [],
           getSubscribedContextGraphs: () => new Map(),
           subscribeToContextGraph: (_id: string, opts: { syncMode: string }) => {
@@ -2418,8 +2433,14 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
   const CALLER = '0x0000000000000000000000000000000000000001';
 
   async function subscribeWith(opts: {
-    canRead: boolean | 'throw';
-  }): Promise<{ status: number; subscribeCalled: boolean }> {
+    authority: 'allowed' | 'denied' | 'unavailable' | 'throw';
+  }): Promise<{
+    status: number;
+    body: Record<string, unknown>;
+    retryAfter: string | null;
+    subscribeCalled: boolean;
+    catchupJobs: number;
+  }> {
     const contextGraphId = 'cg-1596-' + Math.random().toString(36).slice(2, 8);
     const catchupTracker = {
       jobs: new Map<string, any>(),
@@ -2450,7 +2471,7 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
-          canReadContextGraph: async (
+          resolveContextGraphReadAuthority: async (
             _id: string,
             readOpts: { callerAgentAddress?: string; allowSubscriptionFallback?: boolean },
           ) => {
@@ -2458,8 +2479,19 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
               callerAgentAddress: CALLER,
               allowSubscriptionFallback: false,
             });
-            if (opts.canRead === 'throw') throw new Error('authority read failed');
-            return opts.canRead;
+            if (opts.authority === 'throw') throw new Error('authority read failed');
+            return {
+              outcome: opts.authority,
+              source: 'registered-chain' as const,
+              reason: opts.authority === 'allowed'
+                ? 'chain-public'
+                : opts.authority === 'denied'
+                  ? 'agent-not-in-chain-roster'
+                  : 'chain-access-policy-unavailable',
+              metadataBootstrap: opts.authority === 'denied'
+                ? 'forbidden' as const
+                : 'eligible' as const,
+            };
           },
           getDefaultAgentAddress: () => CALLER,
           getSubscribedContextGraphs: () => new Map(),
@@ -2525,7 +2557,13 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
           body: JSON.stringify({ contextGraphId, includeSharedMemory: false }),
         },
       );
-      return { status: response.status, subscribeCalled };
+      return {
+        status: response.status,
+        body: await response.json() as Record<string, unknown>,
+        retryAfter: response.headers.get('retry-after'),
+        subscribeCalled,
+        catchupJobs: catchupTracker.jobs.size,
+      };
     } finally {
       daemonState.catchupRunner = previousCatchupRunner;
       if (routeServer) {
@@ -2538,25 +2576,45 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
 
   it('does NOT 403 a non-allowlisted caller on an explicit-public CG', async () => {
     const { status, subscribeCalled } = await subscribeWith({
-      canRead: true,
+      authority: 'allowed',
     });
     expect(status).toBe(200);
     expect(subscribeCalled).toBe(true);
   });
 
   it('403s a private non-member even when no local allowlist is available', async () => {
-    const { status, subscribeCalled } = await subscribeWith({
-      canRead: false,
+    const { status, subscribeCalled, catchupJobs } = await subscribeWith({
+      authority: 'denied',
     });
     expect(status).toBe(403);
     expect(subscribeCalled).toBe(false);
+    expect(catchupJobs).toBe(0);
   });
 
-  it('keeps the read-authority gate CLOSED (403) when authority resolution fails', async () => {
-    const { status, subscribeCalled } = await subscribeWith({
-      canRead: 'throw',
+  it('returns a retryable 503 when typed read authority is unavailable', async () => {
+    const result = await subscribeWith({
+      authority: 'unavailable',
     });
-    expect(status).toBe(403);
-    expect(subscribeCalled).toBe(false);
+    expect(result.status).toBe(503);
+    expect(result.body).toMatchObject({
+      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+      retryable: true,
+    });
+    expect(result.retryAfter).toBe('3');
+    expect(result.subscribeCalled).toBe(false);
+    expect(result.catchupJobs).toBe(0);
+  });
+
+  it('returns the same retryable 503 when authority resolution throws', async () => {
+    const result = await subscribeWith({
+      authority: 'throw',
+    });
+    expect(result.status).toBe(503);
+    expect(result.body).toMatchObject({
+      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+      retryable: true,
+    });
+    expect(result.subscribeCalled).toBe(false);
+    expect(result.catchupJobs).toBe(0);
   });
 });
