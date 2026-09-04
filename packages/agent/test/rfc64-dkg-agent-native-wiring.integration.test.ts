@@ -473,29 +473,7 @@ async function seedPreexistingFinalizedTwinV1(
     MemoryLayer.VerifiableMemory,
     scope,
   );
-  const vmMetadata = generateGraphKnowledgeAssetMetadata({
-    contextGraphId: CONTEXT_GRAPH_ID,
-    ual: seal.kaUal,
-    merkleRoot: ethers.getBytes(seal.assertionMerkleRoot),
-    publisherPeerId: 'rfc64-finalized-catalog-v1',
-    accessPolicy: 'ownerOnly',
-    allowedPeers: [],
-    timestamp: new Date(seal.assertionFinalizedAt),
-    assertionVersion: seal.assertionVersion,
-    authorAddress: seal.authorAddress,
-    publicTripleCount: Number(seal.publicTripleCount),
-    privateTripleCount: Number(seal.privateTripleCount),
-    assertionGraph: vmGraph,
-  }, {
-    status: 'confirmed',
-    confirmation: {
-      kind: 'finalized-materialization',
-      provenance: {
-        batchId: BigInt(seal.reservedKaId),
-        materializedVersion: { blockNumber: 124, txIndex: 0 },
-      },
-    },
-  });
+  const vmMetadata = confirmedVmMetadataForSealV1(seal, vmGraph);
   await agent.store.insert([
     ...PROJECTION_QUADS.map((quad) => ({ ...quad, graph: vmGraph })),
     ...vmMetadata,
@@ -533,6 +511,38 @@ async function seedPreexistingFinalizedTwinV1(
     publicQuadsDigest,
   )).toBe(true);
   return Object.freeze({ swmGraph, vmGraph, publicQuadsDigest });
+}
+
+function confirmedVmMetadataForSealV1(
+  seal: CanonicalGraphScopedAuthorSealV1,
+  assertionGraph: string,
+): readonly Quad[] {
+  return generateGraphKnowledgeAssetMetadata({
+    contextGraphId: CONTEXT_GRAPH_ID,
+    ual: seal.kaUal,
+    merkleRoot: ethers.getBytes(seal.assertionMerkleRoot),
+    publisherPeerId: 'rfc64-finalized-catalog-v1',
+    accessPolicy: 'ownerOnly',
+    allowedPeers: [],
+    timestamp: new Date(seal.assertionFinalizedAt),
+    assertionVersion: seal.assertionVersion,
+    authorAddress: seal.authorAddress,
+    publicTripleCount: Number(seal.publicTripleCount),
+    privateTripleCount: Number(seal.privateTripleCount),
+    ...(seal.privateMerkleRoot === null
+      ? {}
+      : { privateMerkleRoot: ethers.getBytes(seal.privateMerkleRoot) }),
+    assertionGraph,
+  }, {
+    status: 'confirmed',
+    confirmation: {
+      kind: 'finalized-materialization',
+      provenance: {
+        batchId: BigInt(seal.reservedKaId),
+        materializedVersion: { blockNumber: 124, txIndex: 0 },
+      },
+    },
+  });
 }
 
 function seededSubscriptionStore(contextGraphId: string): ContextGraphSubscriptionStore {
@@ -5921,8 +5931,14 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         repairOnlySeal.assertionVersion!,
       ),
     );
+    const repairOnlyCanonicalSeal = canonicalGraphScopedAuthorSealFromAssertionSealV1(
+      repairOnlySeal,
+    );
     await author.store.insert(
-      PROJECTION_QUADS.map((quad) => ({ ...quad, graph: repairOnlyVmGraph })),
+      [
+        ...PROJECTION_QUADS.map((quad) => ({ ...quad, graph: repairOnlyVmGraph })),
+        ...confirmedVmMetadataForSealV1(repairOnlyCanonicalSeal, repairOnlyVmGraph),
+      ],
     );
     await (author as any).publisher.clearPublishedKnowledgeAssetSwm(
       CONTEXT_GRAPH_ID,
@@ -5933,9 +5949,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       undefined,
       createOperationContext('publish'),
       repairOnlySeal.kaUal!,
-    );
-    const repairOnlyCanonicalSeal = canonicalGraphScopedAuthorSealFromAssertionSealV1(
-      repairOnlySeal,
     );
     const repairStore = (author as any).rfc64PersistenceV1
       .finalizedPrivatePlacementRepairs;
