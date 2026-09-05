@@ -46,7 +46,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     for (const agent of agents) {
       try { await agent.stop(); } catch {}
     }
-    killHardhat(hardhat);
+    await killHardhat(hardhat);
     hardhat = null;
   });
 

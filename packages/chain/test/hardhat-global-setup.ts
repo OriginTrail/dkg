@@ -41,7 +41,7 @@ export default async function setup(project: TestProject): Promise<() => Promise
   return teardown;
 
   async function teardown(): Promise<void> {
-    if (ctx) { killHardhat(ctx); ctx = null; }
+    if (ctx) { await killHardhat(ctx); ctx = null; }
     try { unlinkSync(selectedContextPath); } catch { /* already cleaned */ }
   }
 }

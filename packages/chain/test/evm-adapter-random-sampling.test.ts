@@ -35,8 +35,8 @@ describe('EVMChainAdapter random sampling integration', () => {
     ctx = await spawnHardhatEnv();
   }, 90_000);
 
-  afterAll(() => {
-    killHardhat(ctx);
+  afterAll(async () => {
+    await killHardhat(ctx);
   });
 
   it('init() resolves RandomSampling + RandomSamplingStorage from the Hub', async () => {

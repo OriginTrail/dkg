@@ -97,8 +97,8 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
     );
   }, 120_000);
 
-  afterAll(() => {
-    killHardhat(ctx);
+  afterAll(async () => {
+    await killHardhat(ctx);
   });
 
   // -------------------------------------------------------------------------

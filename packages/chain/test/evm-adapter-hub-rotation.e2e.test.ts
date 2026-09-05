@@ -168,8 +168,8 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
     ctx = await spawnHardhatEnv();
   }, 120_000);
 
-  afterAll(() => {
-    killHardhat(ctx);
+  afterAll(async () => {
+    await killHardhat(ctx);
   });
 
   it(

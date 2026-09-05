@@ -68,7 +68,7 @@ describe('baseline — curated CG rootless publish with detached catalog', () =>
 
   afterAll(async () => {
     for (const a of agents) { try { await a.stop(); } catch {} }
-    killHardhat(ctx);
+    await killHardhat(ctx);
   });
 
   it('a private CG publishes exact KAs while retaining a public catalog commitment', async () => {

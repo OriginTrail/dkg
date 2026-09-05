@@ -18,6 +18,7 @@
  * Mirrors the inline harness in `daemon-http-behavior-extra.test.ts`; extracted
  * here so the de-mocked route suites share one spinner.
  */
+import { ownProcess } from '../../../../scripts/testing/owned-process.mjs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -131,67 +132,51 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
   for (const k of Object.keys(childEnv)) if (childEnv[k] === undefined) delete childEnv[k];
   const child = spawn('node', [CLI_ENTRY, 'daemon-worker'], {
     env: childEnv,
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
 
-  const daemon: LiveDaemon = {
-    home,
-    apiPort,
-    listenPort,
-    child,
-    token: null,
-    base: `http://127.0.0.1:${apiPort}`,
-  };
-  child.once('exit', (code) => {
-    daemon.exitCode = code;
-  });
-
+  const owner = ownProcess(child, { label: 'Live daemon' });
   try {
-    const deadlineLoops = Math.ceil((opts.readyTimeoutMs ?? 45_000) / 500);
-    for (let i = 0; i < deadlineLoops; i++) {
-      if (child.exitCode !== null || child.signalCode !== null) throw new Error(`Daemon exited early with code ${child.exitCode}, signal ${child.signalCode}`);
+    const ready = await owner.ready(async ({ signal }) => {
+      let boundPort: number;
+      let response: Response;
       try {
-        const boundPort = Number((await readFile(join(home, 'api.port'), 'utf8')).trim());
-        if (!Number.isInteger(boundPort) || boundPort < 1 || boundPort > 65535) throw new Error('invalid daemon port');
-        daemon.apiPort = boundPort;
-        daemon.base = `http://127.0.0.1:${boundPort}`;
-        const res = await fetch(`${daemon.base}/api/status`, { signal: AbortSignal.timeout(1_000) });
-        if (res.ok) break;
-      } catch {
-        /* not ready yet */
-      }
-      await sleep(500);
-      if (i === deadlineLoops - 1) throw new Error('Daemon did not become ready in time');
-    }
-
-    if (authEnabled) {
-      const raw = await readFile(join(home, 'auth.token'), 'utf-8');
-      daemon.token =
-        raw.split('\n').map((l) => l.trim()).find((l) => l.length > 0 && !l.startsWith('#')) ?? null;
-      if (!daemon.token) throw new Error('auth enabled but no token written');
-    }
-    if (opts.publisherEnabled) {
-      // `/api/status` becomes ready before the zero-delay publisher startup task.
-      // Poll its explicit readiness field rather than fabricating a business
-      // publish request whose validation order could change independently.
-      for (let i = 0; i < 60; i += 1) {
-        const res = await fetch(`${daemon.base}/api/status`, {
-          headers: daemon.token ? { Authorization: `Bearer ${daemon.token}` } : {},
+        boundPort = Number((await readFile(join(home, 'api.port'), 'utf8')).trim());
+        if (!Number.isInteger(boundPort) || boundPort < 1 || boundPort > 65535) return undefined;
+        response = await fetch(`http://127.0.0.1:${boundPort}/api/status`, {
+          signal: AbortSignal.any([signal, AbortSignal.timeout(1000)]),
         });
-        const body = await res.json().catch(() => ({})) as {
-          asyncPublisher?: { available?: boolean; reason?: string };
-        };
-        if (body.asyncPublisher?.available === true) break;
-        if (body.asyncPublisher?.reason !== 'publisher_starting') {
-          throw new Error(`Async publisher failed readiness: ${body.asyncPublisher?.reason ?? res.status}`);
+        if (!response.ok) return undefined;
+      } catch { return undefined; }
+      let token: string | null = null;
+      if (authEnabled) {
+        try {
+          const raw = await readFile(join(home, 'auth.token'), 'utf8');
+          token = raw.split('\n').map((line) => line.trim()).find((line) => line && !line.startsWith('#')) ?? null;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+          throw error;
         }
-        await sleep(100);
-        if (i === 59) throw new Error('Async publisher did not become ready in time');
+        if (!token) return undefined;
       }
-    }
+      if (opts.publisherEnabled) {
+        const status = await fetch(`http://127.0.0.1:${boundPort}/api/status`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {}, signal,
+        });
+        const body = await status.json() as { asyncPublisher?: { available?: boolean; reason?: string } };
+        if (body.asyncPublisher?.available !== true) {
+          if (body.asyncPublisher?.reason === 'publisher_starting') return undefined;
+          throw new Error(`Async publisher failed readiness: ${body.asyncPublisher?.reason ?? status.status}`);
+        }
+      }
+      return { apiPort: boundPort, base: `http://127.0.0.1:${boundPort}`, token };
+    }, { timeoutMs: opts.readyTimeoutMs ?? 45_000 });
+    const daemon: LiveDaemon = { home, listenPort, child, ...ready };
+    void owner.closed.then(({ code }) => { daemon.exitCode = code; });
     return daemon;
   } catch (error) {
-    await stopLiveDaemon(daemon);
+    await owner.stop();
+    await rm(home, { recursive: true, force: true });
     throw error;
   }
 }
@@ -199,9 +184,7 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
 /** SIGTERM the daemon, escalate to SIGKILL, and wipe its home dir. */
 export async function stopLiveDaemon(daemon: LiveDaemon | undefined): Promise<void> {
   if (!daemon) return;
-  daemon.child.kill('SIGTERM');
-  await sleep(1200);
-  if (daemon.child.exitCode === null) daemon.child.kill('SIGKILL');
+  await ownProcess(daemon.child).stop();
   await rm(daemon.home, { recursive: true, force: true }).catch(() => {});
 }
 

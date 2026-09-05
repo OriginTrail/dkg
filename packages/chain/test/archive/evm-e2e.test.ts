@@ -25,8 +25,8 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     deployerProfileId = ctx.coreProfileId;
   }, 90_000);
 
-  afterAll(() => {
-    killHardhat(ctx);
+  afterAll(async () => {
+    await killHardhat(ctx);
   });
 
   it('deploys V8 + V9 contracts and registers them in Hub', async () => {
