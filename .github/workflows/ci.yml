@@ -140,6 +140,20 @@ jobs:
             --sample-key "${SAMPLE_KEY}" \
             --github-output "${GITHUB_OUTPUT}" \
             --summary "${GITHUB_STEP_SUMMARY}"
+      # The reviewed scanner and its binary policy are immutable. Candidate
+      # files (including any replacement scanner/policy) are data only.
+      - name: Checkout trusted tracked-text scanner
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: OriginTrail/dkg
+          ref: 6f6f6f4e73e965679bc534240d23a6947734d201
+          persist-credentials: false
+          path: trusted-text
+          sparse-checkout: |
+            scripts/ci/check-tracked-text-nul.mjs
+          sparse-checkout-cone-mode: false
+      - name: Reject NUL bytes in tracked candidate text
+        run: node trusted-text/scripts/ci/check-tracked-text-nul.mjs --repo candidate
       # Package README files are documentation for routing purposes, but they
       # are also npm metadata. Candidate code runs only after the trusted plan
       # has finalized its outputs, so it cannot influence test selection.
