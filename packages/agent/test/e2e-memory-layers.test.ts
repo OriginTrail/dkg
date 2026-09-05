@@ -253,6 +253,7 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
     );
 
     let dispatch = vi.spyOn((agent as any).chain, 'updateKnowledgeCollectionV10');
+    // Both CREATE and UPDATE reach this shared settlement hook after their branch.
     let settlement = vi.spyOn(agent as any, '_stampQueuedKnowledgeAssetVmPublishedLifecycle');
     const privateReplace = vi.spyOn(PrivateContentStore.prototype, 'replaceKnowledgeAssetPrivateTriples');
     // The real queued handler and agent.update run, including the native staging
@@ -3314,7 +3315,6 @@ describe('Query views', () => {
     };
 
     // CREATE branch — no prior vmCurrentAssertion.
-    const intentForUpdate = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
     const created = await runQueued();
     expect(created?.status).toBe('finalized');
     expect(created?.broadcast?.txHash).toMatch(/^0x[0-9a-f]+$/i);
@@ -3326,26 +3326,35 @@ describe('Query views', () => {
     // UPDATE branch — the hop that actually dropped it. GH#2270 r4: `agent.update` stays REAL and
     // the double sits on the underlying PUBLISHER's update entry, so this row pins the whole
     // agent-side chain of custody — queued handler → the real `agent.update` preconditions → the
-    // publisher — receiving the IDENTICAL callback. Driving the real send would need a fresh full
-    // share/reopen lifecycle, so with the publisher doubled there is no send here to prevent;
+    // publisher — receiving the IDENTICAL callback. Prepare a real promoted UPDATE so its
+    // immutable operation survives the native reuse boundary. The publisher double prevents send;
     // rejection-stops-the-send for the update path is proven at the publisher's own boundary in
     // `pre-broadcast-signal-await.test.ts`, and this row pins callback identity only.
+    await agent.assertion.pullFrom(CG_ID, name, 'vm', { onConflict: 'replace' });
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"v2"' },
+    ]);
+    await agent.assertion.finalize(CG_ID, name);
+    await agent.assertion.promote(CG_ID, name);
+    const intentForUpdate = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+    const updateSnapshot = await resolveKnowledgeAssetOperationPublicQuads({
+      store: agent.store,
+      graphManager: new GraphManager(agent.store),
+      contextGraphId: CG_ID,
+      shareOperationId: intentForUpdate.shareOperationId,
+      kaUal: intentForUpdate.kaUal!,
+      assertionVersion: intentForUpdate.assertionVersion!,
+    });
     const realPublisher = (agent as any).publisher;
     const publisherUpdateSpy = vi.spyOn(realPublisher, 'updateKnowledgeAssetFromStagedSharedWorkingMemoryV1')
       .mockResolvedValue({ status: 'failed', kaManifest: [] } as never);
     const recorder = () => {};
     try {
       await agent.publishQueuedKnowledgeAssetVmPublish(
+        intentForUpdate,
         {
-          ...intentForUpdate,
-          vmCurrentAssertion: intentForUpdate.sealMerkleRoot.slice(2),
-          // The real update path enforces that the queued version ADVANCES past the published
-          // lifecycle pointer; the create half above published version 1.
-          assertionVersion: '2',
-        },
-        {
-          quads: [{ subject: root, predicate: 'http://schema.org/name', object: '"v1"', graph: '' }],
-          publisherPeerId: 'queued-update-branch',
+          quads: updateSnapshot.quads,
+          publisherPeerId: updateSnapshot.publisherPeerId,
           onBeforeBroadcast: recorder,
         } as never,
       ).catch(() => undefined);
