@@ -13,14 +13,15 @@ export function createProfileEnvironment(baseEnv, {
   };
 }
 
-export function runProfileProcess(args, env, {
+export function runCommand(command, args, {
   cwd,
-  executable = process.execPath,
+  env,
+  label = 'command',
   spawnProcess = spawn,
   reportError = (error) => console.error(error),
 } = {}) {
   return new Promise((resolveExitCode) => {
-    const child = spawnProcess(executable, args, {
+    const child = spawnProcess(command, args, {
       cwd,
       env,
       stdio: 'inherit',
@@ -31,7 +32,7 @@ export function runProfileProcess(args, env, {
     });
     child.on('exit', (code, signal) => {
       if (signal) {
-        reportError(`[bench:profile] profiler run exited from signal ${signal}`);
+        reportError(`[bench:profile] ${label} exited from signal ${signal}`);
         resolveExitCode(1);
         return;
       }

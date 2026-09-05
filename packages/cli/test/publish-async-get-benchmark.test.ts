@@ -387,33 +387,82 @@ describe('publish async get benchmark', () => {
     const { createBenchmarkToolchain } = await import('../../../esbench.config.mjs') as EsbenchConfigForTest;
     const {
       createProfileEnvironment,
-      runProfileProcess,
+      runCommand,
     } = await import('../../../bench/support/profile-process.mjs');
     const isolated = createBenchmarkToolchain({});
     const profileEnv = createProfileEnvironment({ PATH: '/mock-bin' }, {
       reportJsonPath: '/tmp/profile.esbench.json',
       reportHtmlPath: '/tmp/profile.esbench.html',
     });
-    let spawnedEnv: Record<string, string> | undefined;
-    const exitCode = runProfileProcess(['esbench'], profileEnv, {
+    const spawns: Array<{
+      command: string;
+      args: readonly string[];
+      options: { cwd: string; env: Record<string, string>; stdio: string };
+    }> = [];
+    const spawnProcess = (
+      command: string,
+      args: readonly string[],
+      options: { cwd: string; env: Record<string, string>; stdio: string },
+    ) => {
+      spawns.push({ command, args, options });
+      const child = new EventEmitter();
+      queueMicrotask(() => child.emit('exit', 0, null));
+      return child;
+    };
+    const profileExitCode = runCommand('/node', ['esbench'], {
       cwd: '/repo',
-      executable: '/node',
-      spawnProcess(_command: string, _args: readonly string[], options: { env: Record<string, string> }) {
-        spawnedEnv = options.env;
-        const child = new EventEmitter();
-        queueMicrotask(() => child.emit('exit', 0, null));
-        return child;
-      },
+      env: profileEnv,
+      label: 'profiler run',
+      spawnProcess,
+    });
+    const analysisExitCode = runCommand('/node', ['analyze.ts'], {
+      cwd: '/repo',
+      env: profileEnv,
+      label: 'method analysis',
+      spawnProcess,
     });
 
     expect(isolated.executors).toHaveLength(1);
-    await expect(exitCode).resolves.toBe(0);
-    expect(spawnedEnv).toMatchObject({
+    await expect(profileExitCode).resolves.toBe(0);
+    await expect(analysisExitCode).resolves.toBe(0);
+    expect(spawns).toHaveLength(2);
+    expect(spawns[0]).toMatchObject({
+      command: '/node',
+      args: ['esbench'],
+      options: {
+        cwd: '/repo',
+        stdio: 'inherit',
+      },
+    });
+    expect(spawns[1]).toMatchObject({
+      command: '/node',
+      args: ['analyze.ts'],
+      options: {
+        cwd: '/repo',
+        stdio: 'inherit',
+      },
+    });
+    expect(spawns[0].options.env).toMatchObject({
       DKG_ESBENCH_IN_PROCESS: '1',
       ESBENCH_RESULT: '/tmp/profile.esbench.json',
       ESBENCH_HTML_FILE: '/tmp/profile.esbench.html',
     });
-    expect(createBenchmarkToolchain(spawnedEnv ?? {}).executors).toBeUndefined();
+    expect(createBenchmarkToolchain(spawns[0].options.env).executors).toBeUndefined();
+
+    const reportedErrors: unknown[] = [];
+    const signalledExitCode = runCommand('/node', ['analyze.ts'], {
+      cwd: '/repo',
+      env: profileEnv,
+      label: 'method analysis',
+      spawnProcess() {
+        const child = new EventEmitter();
+        queueMicrotask(() => child.emit('exit', null, 'SIGTERM'));
+        return child;
+      },
+      reportError: (error: unknown) => reportedErrors.push(error),
+    });
+    await expect(signalledExitCode).resolves.toBe(1);
+    expect(reportedErrors).toEqual(['[bench:profile] method analysis exited from signal SIGTERM']);
   });
 
   it('links the combined ESBench report and focused HTML pages together', async () => {
