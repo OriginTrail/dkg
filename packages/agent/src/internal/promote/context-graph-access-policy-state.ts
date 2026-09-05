@@ -3,7 +3,7 @@
 import { createOperationContext, type OperationContext } from
   '@origintrail-official/dkg-core';
 
-import { CHAIN_POLICY_READ_TIMEOUT_MS } from './dkg-agent-constants.js';
+import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../../dkg-agent-constants.js';
 
 /** Canonical policy failure shared with registered authority resolution. */
 export type LiveOnChainAccessPolicyUnavailable = {

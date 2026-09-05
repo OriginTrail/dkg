@@ -3,7 +3,7 @@ import {
   CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
   ContextGraphAuthorityUnavailableError,
   isContextGraphAuthorityUnavailableMarker,
-} from '../src/context-graph-agent-gate-authority.js';
+} from '../src/internal/promote/context-graph-agent-gate-authority.js';
 import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';

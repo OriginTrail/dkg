@@ -3,9 +3,32 @@ type PublicAgent = import('@origintrail-official/dkg-agent').DKGAgent;
 type AssertFalse<Value extends false> = Value;
 type AssertTrue<Value extends true> = Value;
 type PublicPromoteOptions = import('@origintrail-official/dkg-agent').AssertionPromoteOptions;
+type PublisherPromoteOptions = import(
+  '@origintrail-official/dkg-publisher'
+).PublisherAssertionPromoteOptions;
 type FacadePromoteOptions = NonNullable<Parameters<PublicAgent['assertion']['promote']>[2]>;
 type PromoteOptionsMatchFacade = AssertTrue<PublicPromoteOptions extends FacadePromoteOptions ? true : false>;
 type FacadeOptionsMatchPublic = AssertTrue<FacadePromoteOptions extends PublicPromoteOptions ? true : false>;
+type AgentAccessEnvelope = Pick<
+  PublicPromoteOptions,
+  'entities' | 'subGraphName' | 'accessPolicy' | 'allowedPeers'
+>;
+type PublisherAccessEnvelope = Pick<
+  PublisherPromoteOptions,
+  'entities' | 'subGraphName' | 'accessPolicy' | 'allowedPeers'
+>;
+type AgentEnvelopeFlowsToPublisher = AssertTrue<
+  AgentAccessEnvelope extends PublisherAccessEnvelope ? true : false
+>;
+type PublisherEnvelopeFlowsToAgent = AssertTrue<
+  PublisherAccessEnvelope extends AgentAccessEnvelope ? true : false
+>;
+type NamedPublisherResolver = AssertTrue<
+  PublisherPromoteOptions['resolveWorkspaceRecipients'] extends
+    import('@origintrail-official/dkg-publisher').WorkspaceAgentRecipientResolver | undefined
+    ? true
+    : false
+>;
 
 type GateResolverStaysProtected = AssertFalse<
   'resolveContextGraphAgentGateAuthority' extends keyof PublicAgent ? true : false
@@ -47,17 +70,14 @@ type AuthorityReasonStaysInternal =
   import('@origintrail-official/dkg-agent').ContextGraphAuthorityUnavailableReason;
 type DeepAuthorityStaysInternal =
   // @ts-expect-error The export map blocks authority implementation deep imports.
-  typeof import('@origintrail-official/dkg-agent/dist/context-graph-agent-gate-authority.js');
-type DeepPolicyStateStaysInternal =
-  // @ts-expect-error The export map blocks live policy-state implementation deep imports.
-  typeof import('@origintrail-official/dkg-agent/dist/context-graph-access-policy-state.js');
-type DeepPrecommitStaysInternal =
-  // @ts-expect-error The export map blocks promote-precommit implementation deep imports.
-  typeof import('@origintrail-official/dkg-agent/dist/assertion-promote-precommit.js');
+  typeof import('@origintrail-official/dkg-agent/dist/internal/promote/context-graph-agent-gate-authority.js');
 
 export type {
   PromoteOptionsMatchFacade,
   FacadeOptionsMatchPublic,
+  AgentEnvelopeFlowsToPublisher,
+  PublisherEnvelopeFlowsToAgent,
+  NamedPublisherResolver,
   GateResolverStaysProtected,
   LivePolicyResolverStaysProtected,
   GateProjectionRemainsPublic,
@@ -71,6 +91,4 @@ export type {
   AuthorityMarkerStaysInternal,
   AuthorityReasonStaysInternal,
   DeepAuthorityStaysInternal,
-  DeepPolicyStateStaysInternal,
-  DeepPrecommitStaysInternal,
 };

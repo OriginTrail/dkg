@@ -141,11 +141,11 @@ import {
   createContextGraphAuthorityError,
   resolveContextGraphAgentGateAuthorityDecision,
   type ContextGraphAgentGateAuthority,
-} from './context-graph-agent-gate-authority.js';
+} from './internal/promote/context-graph-agent-gate-authority.js';
 import {
   resolveLiveOnChainAccessPolicyState as resolveLiveAccessPolicyState,
   type LiveOnChainAccessPolicyState,
-} from './context-graph-access-policy-state.js';
+} from './internal/promote/context-graph-access-policy-state.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';

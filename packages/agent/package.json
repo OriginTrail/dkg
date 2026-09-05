@@ -19,9 +19,7 @@
       "default": "./dist/rfc64/public-catalog-activation-config-v1.js"
     },
     "./package.json": "./package.json",
-    "./dist/context-graph-agent-gate-authority.*": null,
-    "./dist/context-graph-access-policy-state.*": null,
-    "./dist/assertion-promote-precommit.*": null,
+    "./dist/internal/*": null,
     "./dist/rfc64/author-catalog-producer.js": "./dist/rfc64/author-catalog-producer.js",
     "./dist/rfc64/catalog-row-authorship.js": "./dist/rfc64/catalog-row-authorship.js",
     "./dist/rfc64/inventory-v1/candidate.js": "./dist/rfc64/inventory-v1/candidate.js",

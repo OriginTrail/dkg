@@ -103,6 +103,7 @@ export {
   type ShareOptions,
   type ShareResult,
   type ShareConditionalOptions,
+  type PublisherAssertionPromoteOptions,
   type CASCondition,
 } from './dkg-publisher.js';
 export {

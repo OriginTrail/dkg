@@ -343,7 +343,7 @@ import { createAbortError, runBoundedOperation } from './bounded-operation.js';
 import type {
   LiveOnChainAccessPolicyState,
   LiveOnChainAccessPolicyUnavailable,
-} from './context-graph-access-policy-state.js';
+} from './internal/promote/context-graph-access-policy-state.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
   ContextGraphNotFoundError,
