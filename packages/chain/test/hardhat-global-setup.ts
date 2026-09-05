@@ -2,7 +2,7 @@
  * Vitest globalSetup — starts a single Hardhat node + deploys contracts
  * before all test files in the package, tears it down afterward.
  *
- * The port is read from HARDHAT_PORT (default 9545).
+ * The owned child binds port zero; its actual URL is propagated to workers.
  * Context (rpcUrl, hubAddress, profile IDs) is written to a JSON file
  * so test workers can read it via evm-test-context.ts helpers.
  */
@@ -18,9 +18,8 @@ export default async function setup(project: TestProject): Promise<() => Promise
   let ctx: HardhatContext | null = null;
   const selectedContextPath = project.config.env.DKG_HARDHAT_CONTEXT_FILE;
   if (!selectedContextPath) throw new Error('Hardhat global setup requires an isolated DKG_HARDHAT_CONTEXT_FILE');
-  const port = parseInt(project.config.env.HARDHAT_PORT || process.env.HARDHAT_PORT || '9545', 10);
   try {
-    ctx = await spawnHardhatEnv(port);
+    ctx = await spawnHardhatEnv();
 
     const snapshotId = await ctx.provider.send('evm_snapshot', []);
 

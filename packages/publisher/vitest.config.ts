@@ -2,7 +2,7 @@ import { hardhatTestEnvironment } from '../../scripts/lib/hardhat-test-env.mjs';
 import { defineConfig } from 'vitest/config';
 import { coverageForPackage } from '../../vitest.coverage';
 
-const hardhatEnv = hardhatTestEnvironment(9546);
+const hardhatEnv = hardhatTestEnvironment();
 
 export default defineConfig({
   test: {

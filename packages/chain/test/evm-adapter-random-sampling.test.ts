@@ -32,7 +32,7 @@ let ctx: HardhatContext;
 describe('EVMChainAdapter random sampling integration', () => {
   beforeAll(async () => {
     // Use a unique port to avoid collision with the other Hardhat-backed tests.
-    ctx = await spawnHardhatEnv(8552);
+    ctx = await spawnHardhatEnv();
   }, 90_000);
 
   afterAll(() => {

@@ -39,7 +39,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
   beforeAll(async () => {
     // The shared fixture owns startup, deployment, staked profiles and teardown.
     // A missing chain is a failed execution obligation, never six green skips.
-    hardhat = await spawnHardhatEnv(8548);
+    hardhat = await spawnHardhatEnv();
   }, 120_000);
 
   afterAll(async () => {

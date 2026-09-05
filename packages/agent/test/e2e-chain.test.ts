@@ -95,7 +95,7 @@ let agentBIdentityId: number;
 
 describe('E2E: DKGAgent with real blockchain', () => {
   beforeAll(async () => {
-    ctx = await spawnHardhatEnv(8547);
+    ctx = await spawnHardhatEnv();
     // Create on-chain profiles for agent keys so ensureProfile finds them
     agentAIdentityId = await createNodeProfile(
       ctx.provider, ctx.hubAddress,

@@ -2,7 +2,7 @@ import { hardhatTestEnvironment } from '../../scripts/lib/hardhat-test-env.mjs';
 import { defineConfig } from 'vitest/config';
 import { coverageForPackage } from '../../vitest.coverage';
 
-const hardhatEnv = hardhatTestEnvironment(9547);
+const hardhatEnv = hardhatTestEnvironment();
 
 // `--experimental-sqlite` is required for `import('node:sqlite')` on
 // Node 22.5–23.x (the workspace's `.nvmrc` line) and is a no-op on
