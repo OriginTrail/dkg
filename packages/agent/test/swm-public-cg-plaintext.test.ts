@@ -142,6 +142,8 @@ function makeAgentLike(opts: {
   agentLike.localCgMatchesOnChainSlot = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
   agentLike.isWireIdKeyedSubscription = (DKGAgent.prototype as any).isWireIdKeyedSubscription;
   agentLike.readLiveOnChainAccessPolicy = (DKGAgent.prototype as any).readLiveOnChainAccessPolicy;
+  agentLike.resolveLiveOnChainAccessPolicyState =
+    (DKGAgent.prototype as any).resolveLiveOnChainAccessPolicyState;
   agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
   agentLike.resolveWorkspaceRecipientsGated = (DKGAgent.prototype as any).resolveWorkspaceRecipientsGated;
   // This fixture isolates the public/plaintext decision. Registered-private

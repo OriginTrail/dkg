@@ -340,6 +340,10 @@ import {
 } from './dkg-agent-constants.js';
 import { isTransientBootChainError } from './dkg-agent-boot.js';
 import { createAbortError, runBoundedOperation } from './bounded-operation.js';
+import type {
+  LiveOnChainAccessPolicyState,
+  LiveOnChainAccessPolicyUnavailable,
+} from './internal/promote/context-graph-access-policy-state.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
   ContextGraphNotFoundError,
@@ -706,6 +710,7 @@ export type RegisteredContextGraphAuthority =
   | { kind: 'unregistered' }
   | { kind: 'public'; onChainId: bigint }
   | { kind: 'private'; onChainId: bigint; participantAgents: string[] }
+  | (LiveOnChainAccessPolicyUnavailable & { onChainId: bigint })
   | {
       kind: 'unavailable';
       reason:
@@ -713,7 +718,6 @@ export type RegisteredContextGraphAuthority =
         | 'local-chain-binding-unavailable'
         | 'local-existence-unavailable'
         | 'chain-access-policy-unavailable'
-        | 'chain-access-policy-unknown'
         | 'chain-participant-authority-unsupported'
         | 'chain-participant-authority-unavailable'
         | 'chain-participant-authority-invalid';
@@ -1543,9 +1547,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     if (registration.kind !== 'registered') return registration;
     const { onChainId } = registration;
 
-    let accessPolicy: 0 | 1 | null;
+    let accessPolicyState: LiveOnChainAccessPolicyState;
     try {
-      accessPolicy = await this.readLiveOnChainAccessPolicy(
+      accessPolicyState = await this.resolveLiveOnChainAccessPolicyState(
         onChainId.toString(),
         createOperationContext('system'),
         { signal: options.signal },
@@ -1558,9 +1562,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         detail: err instanceof Error ? err.message : String(err),
       };
     }
-    if (accessPolicy === null) {
-      return { kind: 'unavailable', onChainId, reason: 'chain-access-policy-unknown' };
+    if (accessPolicyState.kind === 'unavailable') {
+      return { ...accessPolicyState, onChainId };
     }
+    const accessPolicy = accessPolicyState.accessPolicy;
     if (accessPolicy === 0) return { kind: 'public', onChainId };
 
     const cacheKey = onChainId.toString();
