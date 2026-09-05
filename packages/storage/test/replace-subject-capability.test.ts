@@ -65,7 +65,7 @@ describe('#1863 tryReplaceSubjectAtomically capability', () => {
     const bare = {} as unknown as TripleStore;
     expect(await tryReplaceSubjectAtomically(bare, GRAPH, JOB, [])).toBe(false);
 
-    // Clean preflight capability refusal (e.g. SparqlHttpStore atomicUpdates:false) → false.
+    // Clean preflight refusal (e.g. a best-effort SparqlHttpStore) returns false.
     const refusing = {
       replaceSubject: async () => {
         throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'SparqlHttpStore');

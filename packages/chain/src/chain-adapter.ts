@@ -470,6 +470,26 @@ export interface ContextGraphOnChain {
   description?: string;
 }
 
+/** Deterministic finalized authority generation used by RFC-64 policy composition. */
+export interface ContextGraphAuthoritySnapshot {
+  readonly chainId: string;
+  readonly governanceContract: string;
+  readonly contextGraphId: string;
+  readonly owner: string;
+  readonly active: boolean;
+  readonly accessPolicy: number;
+  readonly publishPolicy: number;
+  readonly publishAuthority: string | null;
+  readonly publishAuthorityAccountId: string;
+  readonly participantAgents: readonly string[];
+  readonly nameHash: string;
+  readonly ownershipEra: string;
+  readonly policyVersion: string;
+  readonly rosterVersion: string;
+  readonly sourceBlockNumber: string;
+  readonly sourceBlockHash: string;
+}
+
 export class ContextGraphChainScanPartialError extends Error {
   readonly partialResults: ContextGraphOnChain[];
   readonly scannedToBlock: number;
@@ -1311,6 +1331,16 @@ export interface ChainAdapter {
     scanContextGraphRegistryPages?(options: ContextGraphRegistryScanOptions): AsyncIterable<ContextGraphRegistryScanPage>;
     /** True when the adapter has a registry scan watermark for its currently bound ContextGraphNameRegistry. */
     hasContextGraphRegistryScanWatermark?(): Promise<boolean>;
+    /**
+     * Resolve one graph's current policy and roster at a stable finalized
+     * anchor. Optional for NoChain and legacy adapters; default RFC-64 callers
+     * must bind the explicit ContextGraphAuthorityReader capability instead of
+     * probing this member in individual workflows.
+     */
+    getContextGraphAuthoritySnapshot?(
+      contextGraphId: bigint,
+      options?: ChainReadOptions,
+    ): Promise<ContextGraphAuthoritySnapshot>;
 
   /**
    * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.
@@ -1555,6 +1585,18 @@ export interface ChainAdapter {
 
   // On-Chain Context Graphs (ContextGraphs contract)
   createOnChainContextGraph?(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult>;
+  /**
+   * Add one address to a registered context graph's authoritative participant
+   * roster. Implementations must wait for final transaction receipt before
+   * resolving so read authorization can change immediately after success.
+   */
+  addContextGraphParticipantAgent?(contextGraphId: bigint, agent: string): Promise<TxResult>;
+  /**
+   * Remove one address from a registered context graph's authoritative
+   * participant roster. Implementations must wait for final transaction
+   * receipt before resolving so a revoked member cannot retain read access.
+   */
+  removeContextGraphParticipantAgent?(contextGraphId: bigint, agent: string): Promise<TxResult>;
   verify?(params: VerifyParams): Promise<TxResult>;
   publishToContextGraph?(params: PublishToContextGraphParams): Promise<OnChainPublishResult>;
 
@@ -2028,7 +2070,10 @@ export interface ChainAdapter {
    * path, but cores SHOULD cache the result per (chainId, cgId) to
    * avoid one RPC per publish.
    */
-  getContextGraphAccessPolicy?(contextGraphId: bigint): Promise<number>;
+  getContextGraphAccessPolicy?(
+    contextGraphId: bigint,
+    options?: ChainReadOptions,
+  ): Promise<number>;
 
   /**
    * On-chain liveness probe for `contextGraphId`. Read from
@@ -2053,7 +2098,10 @@ export interface ChainAdapter {
    * inactive; transient RPC/read failures should reject so callers can choose
    * their own fail-closed or ACK-backed fallback behavior.
    */
-  isContextGraphActiveOnChain?(contextGraphId: bigint): Promise<boolean>;
+  isContextGraphActiveOnChain?(
+    contextGraphId: bigint,
+    options?: ChainReadOptions,
+  ): Promise<boolean>;
 
   /**
    * On-chain publish policy for `contextGraphId`. Read from

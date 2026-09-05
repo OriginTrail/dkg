@@ -18,7 +18,10 @@ import {
   createOperationContext,
 } from '@origintrail-official/dkg-core';
 import { enrichEvmError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
-import type { DKGAgent, ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-agent';
+import {
+  type DKGAgent,
+  type ContextGraphWritePreflightProbe,
+} from '@origintrail-official/dkg-agent';
 import {
   STORE_OPERATION_TIMEOUT_CODE,
   StoreSchedulerBusyError,

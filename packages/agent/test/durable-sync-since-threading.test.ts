@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   MemoryLayer,
+  contextGraphDataGraphUri,
   createGraphKnowledgeAssetScope,
   createOperationContext,
   knowledgeAssetLayerGraphUri,
@@ -645,7 +646,12 @@ describe('runDurableSync agents meta routing', () => {
       contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.AGENTS],
       syncAgentsMeta: false,
       processResult: {
-        verifiedData: [{ id: 'verified-data' } as never],
+        verifiedData: [{
+          subject: 'did:dkg:agent:0x1111111111111111111111111111111111111111',
+          predicate: 'https://dkg.network/ontology#name',
+          object: '"verified-data"',
+          graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS),
+        }],
         totalFetchedDataQuads: 1,
         totalFetchedMetaQuads: 0,
       },
@@ -665,7 +671,10 @@ describe('runDurableSync agents meta routing', () => {
       acceptUnverified: true,
       mode: { kind: 'fullSnapshot' },
     }]);
-    expect(insertedBatches).toEqual([[{ id: 'verified-data' }]]);
+    expect(insertedBatches).toEqual([[expect.objectContaining({
+      object: '"verified-data"',
+      graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS),
+    })]]);
     expect(deletedCheckpoints).toContain(`peerR|${SYSTEM_CONTEXT_GRAPHS.AGENTS}|durable|meta`);
   });
 

@@ -5,6 +5,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { createPublisherControlFromStore } from '../src/publisher-runner.js';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 // #1837 — POST /api/publisher/clear-job outcome → HTTP mapping.
 describe('#1837 POST /api/publisher/clear-job', () => {
@@ -142,7 +143,7 @@ describe('#1837 POST /api/publisher/clear-job', () => {
       apiPortRef: { value: 0 },
       url,
       path: url.pathname,
-      requestToken: undefined,
+      authentication: requestAuthentication({ kind: 'anonymous' }),
       requestAgentAddress: '0x0',
     };
   }

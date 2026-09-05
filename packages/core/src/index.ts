@@ -1,6 +1,7 @@
 export * from './types.js';
 export * from './constants.js';
 export * from './agent-identity.js';
+export * from './agents-list-wire.js';
 export * from './assertion-scoped-graphs.js';
 export * from './protocol-limits.js';
 export * from './context-graph-join-policy.js';
@@ -8,9 +9,12 @@ export * from './catalog.js';
 export { parseDotenvValue } from './dotenv.js';
 export * from './memory-model.js';
 export * from './ka-content-scope.js';
+export * from './rfc64-shared-projection-address-v1.js';
 export * from './graph-knowledge-asset-metadata.js';
 export * from './trust.js';
 export * from './sparql-operation.js';
+export * from './code-point-order.js';
+export { BoundedLruCache } from './bounded-lru-cache.js';
 export * from './query-result.js';
 export * from './publisher-extension.js';
 export * from './imported-artifact-bytes.js';
@@ -71,6 +75,21 @@ export * from './author-catalog-codec.js';
 export * from './author-catalog-objects.js';
 export * from './author-catalog-directory.js';
 export * from './swm-author-inventory-v1.js';
+export * from './rfc64-semantic-addresses-v1.js';
+export * from './rfc64-semantic-records-v1.js';
+export * from './rfc64-semantic-read-manifest-v1.js';
+export * from './rfc64-author-seal-read-manifest-v1.js';
+export * from './rfc64-shared-projection-stream-manifest-v1.js';
+export {
+  isClosedDataRecord,
+  readOwnEnumerableDataProperty,
+  snapshotDenseDataArray,
+  snapshotExactDataRecord,
+  type ClosedDataPrototypePolicy,
+  type ClosedDataReject,
+  type ClosedDataSnapshotOptions,
+} from './sync-wire-objects.js';
+export * from './typed-rdf-store-row-v1.js';
 export * from './event-bus.js';
 export * from './backpressure-observability.js';
 export {
@@ -110,9 +129,6 @@ export {
 export * from './crypto/index.js';
 export * from './proto/index.js';
 export {
-  DKGNode,
-  type RelayStats,
-  type RelayReservationDetail,
   // Capacity helpers + constants from PR #524 (libp2p reachability hardening PR1).
   // Re-exported here so dashboards / route handlers can import them
   // without reaching into the deep import path.
@@ -122,7 +138,6 @@ export {
   RELAY_RESERVATION_TTL_MS,
   EDGE_NODE_MAX_CONNECTIONS,
   deriveRelayCaps,
-  checkFdLimit,
   validateRelayServerCapacity,
   type RelayCapacityValidation,
   type DerivedRelayCaps,
@@ -131,6 +146,11 @@ export {
   MAX_RELAY_RESERVATION_COUNT,
   validateRelayReservationCount,
   type RelayReservationCountValidation,
+} from './relay-capacity-policy.js';
+export {
+  DKGNode,
+  type RelayStats,
+  type RelayReservationDetail,
   // Single-source-of-truth interface for the small / sparse-network
   // tunables forwarded `DkgConfig.network` → `DKGAgentConfig` →
   // `DKGNodeConfig`, plus the choke-point helper every forwarder
@@ -405,6 +425,7 @@ export {
   renderCanonicalAuthorSealStoreRowV1,
   canonicalizeAuthorSealStoreRoundTripRowV1,
   decodeCanonicalGraphScopedAuthorSealRowsV1,
+  decodeCanonicalGraphScopedAuthorSealRenderedRowsV1,
   classifyCanonicalGraphScopedAuthorSealRowsV1,
   type Hex32V1,
   type PositiveDecimalU64V1,
@@ -431,3 +452,5 @@ export {
 } from './node-timer.js';
 export * from './query-catalog-parameters.js';
 export * from './query-catalog.js';
+
+export { checkFdLimit, type FdLimitLogLevel } from './fd-limit.js';

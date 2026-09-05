@@ -72,6 +72,7 @@ async function createTestAgent(opts?: {
     ...(opts?.store ? { store: opts.store } : {}),
     ...(opts?.storeConfig ? { storeConfig: opts.storeConfig } : {}),
     chainAdapter: opts?.chainAdapter ?? createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+    rfc64CatalogActivation: { enabled: false },
     contextGraphSubscriptionStore: opts?.contextGraphSubscriptionStore,
   });
   return { agent, store: opts?.store ?? agent.store };
@@ -1320,6 +1321,7 @@ describe('listContextGraphs merge', () => {
       listenHost: '127.0.0.1',
       storeConfig: { backend },
       chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      rfc64CatalogActivation: { enabled: false },
     });
     agent = created;
     await agent.start();

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { CatchupJobResult, CatchupRunRequest } from '../src/catchup-runner.js';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 import { handleQueryRoutes } from '../src/daemon/routes/query.js';
 import { daemonState } from '../src/daemon/state.js';
 
@@ -163,6 +164,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       id: string;
       options: { syncMode?: 'on-demand' | 'always-on' } | undefined;
     }>;
+    responsibilityCalls: string[];
     state: Record<string, any>;
     patches: Array<Record<string, unknown>>;
     readiness: Record<string, unknown> | undefined;
@@ -182,6 +184,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       id: string;
       options: { syncMode?: 'on-demand' | 'always-on' } | undefined;
     }> = [];
+    const responsibilityCalls: string[] = [];
     let readiness = opts.readiness
       ? { ...opts.readiness, updatedAt: opts.readiness.updatedAt ?? Date.now() }
       : undefined;
@@ -196,6 +199,12 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     };
 
     const agent = {
+      resolveContextGraphReadAuthority: async () => ({
+        outcome: 'allowed' as const,
+        source: 'legacy-local' as const,
+        reason: 'test-public',
+        metadataBootstrap: 'eligible' as const,
+      }),
       getContextGraphAllowedAgents: async () => opts.allowedAgents ?? [],
       getSubscribedContextGraphs: () => state,
       subscribeToContextGraph: (
@@ -219,6 +228,9 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       markContextGraphSubscriptionState: (id: string, patch: Record<string, unknown>) => {
         patches.push({ ...patch });
         state.set(id, { ...state.get(id), ...patch });
+      },
+      reconcileRfc64CatalogResponsibilityV1: async (id: string) => {
+        responsibilityCalls.push(id);
       },
       hasConfirmedMetaState: async () => {
         return runCalls > 0
@@ -273,8 +285,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         routePlugins: [],
         url,
         path: url.pathname,
-        requestToken: undefined,
         requestAgentAddress: undefined,
+        authentication: requestAuthentication({ kind: 'nodeOperator' }),
       } as any;
       await handleContextGraphRoutes(routeContext);
       if (!res.writableEnded) await handleQueryRoutes(routeContext);
@@ -318,6 +330,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       runCalls,
       runRequests,
       subscribeCalls,
+      responsibilityCalls,
       state: state.get(contextGraphId) ?? {},
       patches,
       readiness,
@@ -335,6 +348,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       { id: expect.any(String), options: { syncMode: 'always-on' } },
     ]);
     expect(result.state.syncMode).toBe('always-on');
+    expect(result.responsibilityCalls).toEqual([expect.any(String)]);
   });
 
   it('forwards explicit on-demand edge intent without making it always-on', async () => {

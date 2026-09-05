@@ -302,6 +302,7 @@ import {
   CHAIN_POLICY_READ_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
+import { runBoundedOperation } from './bounded-operation.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
@@ -375,7 +376,70 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
-import { isCanonicalPositiveContextGraphId } from './context-graph-binding-state.js';
+import {
+  isCanonicalPositiveContextGraphId,
+  localContextGraphIdMatchesCommittedNameHash,
+} from './context-graph-binding-state.js';
+
+const CHAIN_ATTESTED_DECLARATION_SCAN_MAX = 512;
+const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
+
+export type ContextGraphRegistrationBinding =
+  | { kind: 'unregistered' }
+  | {
+      kind: 'registered';
+      onChainId: bigint;
+      provenance: 'authoritative' | 'ontology' | 'reverse-name-hash' | 'numeric-id' | 'name-hash';
+    }
+  | {
+      kind: 'unavailable';
+      reason:
+        | 'local-chain-binding-unavailable'
+        | 'local-existence-unavailable'
+        | 'chain-name-binding-unavailable';
+      detail?: string;
+    };
+
+function contextGraphBindingAbortReason(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  const error = new Error(String(signal.reason ?? 'Context Graph binding resolution aborted'));
+  error.name = 'AbortError';
+  return error;
+}
+
+function raceContextGraphBindingAgainstAbort<T>(
+  work: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted) return Promise.reject(contextGraphBindingAbortReason(signal));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(contextGraphBindingAbortReason(signal));
+    };
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+    if (signal.aborted) onAbort();
+  });
+}
+
+function localContextGraphIdFromTerm(raw: unknown): string | undefined {
+  const uri = typeof raw === 'string' ? raw.replace(/^<|>$/g, '') : '';
+  return uri.startsWith(CONTEXT_GRAPH_URI_PREFIX) && uri.length > CONTEXT_GRAPH_URI_PREFIX.length
+    ? uri.slice(CONTEXT_GRAPH_URI_PREFIX.length)
+    : undefined;
+}
 
 export class ContextGraphRegistryMethods extends DKGAgentBase {
   /**
@@ -414,6 +478,128 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     return owned !== undefined && owned.size > 0;
   }
 
+  /**
+   * Resolve a numeric chain slot to one local Context Graph through the
+   * canonical binding registry. Cold candidates come from durable numeric
+   * bindings or authoritative Context Graph declarations; commitment identity
+   * and live access policy reuse the shared binding/crypto authorities.
+   */
+  async resolveRandomSamplingLocalContextGraphId(
+    this: DKGAgent,
+    onChainContextGraphId: bigint,
+    signal?: AbortSignal,
+  ): Promise<string | undefined> {
+    const direct = this.resolveLocalCgIdByOnChainId(onChainContextGraphId);
+    if (direct) return direct;
+
+    const cacheKey = onChainContextGraphId.toString();
+    const isSubscribed = (localCgId: string) =>
+      this.subscribedContextGraphs.get(localCgId)?.subscribed === true;
+    const cached = this.contextGraphBindingState.getChainAttestedResolution(
+      cacheKey,
+      isSubscribed,
+    );
+    if (cached.hit) return cached.localCgId;
+
+    const rememberMiss = (): undefined => {
+      this.contextGraphBindingState.rememberChainAttestedResolutionMiss(cacheKey);
+      return undefined;
+    };
+    const getNameHash = this.chain.getContextGraphNameHash;
+    if (typeof getNameHash !== 'function') return rememberMiss();
+
+    const committedNameHash = await raceContextGraphBindingAgainstAbort(
+      getNameHash.call(
+        this.chain,
+        onChainContextGraphId,
+        signal ? { signal } : undefined,
+      ),
+      signal,
+    );
+    if (!committedNameHash || !/^0x[0-9a-fA-F]{64}$/.test(committedNameHash)) {
+      return rememberMiss();
+    }
+    const matchesCommitment = (localCgId: string) =>
+      localContextGraphIdMatchesCommittedNameHash(
+        localCgId,
+        committedNameHash,
+        (candidate) => this.isWireIdKeyedSubscription(candidate),
+      );
+
+    const candidates = new Set<string>([
+      ...this.subscribedContextGraphs.keys(),
+      ...(this.config.syncContextGraphs ?? []),
+    ]);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const onChainIdPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
+    try {
+      const durableBindings = await raceContextGraphBindingAgainstAbort(this.store.query(`
+        SELECT DISTINCT ?ctxGraph WHERE {
+          GRAPH <${ontologyGraph}> {
+            ?ctxGraph <${onChainIdPredicate}> ?onChainId .
+            FILTER(STR(?onChainId) = ${sparqlString(cacheKey)})
+          }
+        }
+        LIMIT 2
+      `, {
+        signal,
+        source: 'agent.contextGraph.resolveChainAttestedBinding.durableIndex',
+      }), signal);
+      if (durableBindings.type === 'bindings') {
+        for (const row of durableBindings.bindings) {
+          const localCgId = localContextGraphIdFromTerm(row['ctxGraph']);
+          if (localCgId) candidates.add(localCgId);
+        }
+      }
+    } catch {
+      if (signal?.aborted) throw contextGraphBindingAbortReason(signal);
+      // Compatibility discovery below remains available when the durable
+      // reverse index is absent or the older store cannot query it.
+    }
+
+    let matching = [...candidates].filter(matchesCommitment);
+    if (matching.length === 0) {
+      let declaredContextGraphIds: string[];
+      try {
+        declaredContextGraphIds = await raceContextGraphBindingAgainstAbort(
+          this.contextGraphMetaProjection.listDeclaredContextGraphIds({
+            signal,
+            source: 'agent.contextGraph.resolveChainAttestedBinding.declarations',
+          }),
+          signal,
+        );
+      } catch {
+        if (signal?.aborted) throw contextGraphBindingAbortReason(signal);
+        return rememberMiss();
+      }
+      if (declaredContextGraphIds.length > CHAIN_ATTESTED_DECLARATION_SCAN_MAX) {
+        return rememberMiss();
+      }
+      for (const localCgId of declaredContextGraphIds) candidates.add(localCgId);
+      matching = [...candidates].filter(matchesCommitment);
+    }
+    if (matching.length !== 1) return rememberMiss();
+
+    const localCgId = matching[0]!;
+    const accessPolicy = await raceContextGraphBindingAgainstAbort(
+      this.readLiveOnChainAccessPolicy(
+        cacheKey,
+        createOperationContext('sync'),
+        { signal },
+      ),
+      signal,
+    );
+    if (accessPolicy === null) return rememberMiss();
+    if (accessPolicy === 1 && !isSubscribed(localCgId)) return rememberMiss();
+
+    this.contextGraphBindingState.rememberChainAttestedResolution(
+      cacheKey,
+      localCgId,
+      accessPolicy === 1,
+    );
+    return localCgId;
+  }
+
   async getContextGraphOnChainId(
     this: DKGAgent,
     contextGraphId: string,
@@ -421,6 +607,114 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   ): Promise<string | null> {
     const binding = await this.resolveContextGraphOnChainIdBinding(contextGraphId, options);
     return binding?.onChainId ?? null;
+  }
+
+  /**
+   * Canonical registration-discovery boundary for policy consumers.
+   *
+   * A locally indexed graph must resolve through its current/durable binding
+   * owner; failures remain unavailable and cannot fall through to cold lookup.
+   * A graph with no local binding may be addressed by numeric id or discovered
+   * from its immutable name commitment. Callers never infer registration from
+   * a nullable id and therefore cannot confuse an authority outage with an
+   * unregistered graph.
+   */
+  async resolveContextGraphRegistrationBinding(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ContextGraphRegistrationBinding> {
+    if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
+      return { kind: 'unregistered' };
+    }
+
+    const localTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
+    if (localTarget !== null) {
+      try {
+        const binding = await runBoundedOperation(
+          (signal) => this.resolveContextGraphOnChainIdBinding(contextGraphId, {
+            signal,
+            source: 'agent.contextGraph.registrationBinding',
+          }),
+          {
+            label: `resolveContextGraphOnChainIdBinding(${contextGraphId})`,
+            timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+            signal: options.signal,
+          },
+        );
+        if (binding === null) return { kind: 'unregistered' };
+        return {
+          kind: 'registered',
+          onChainId: BigInt(binding.onChainId),
+          provenance: binding.provenance,
+        };
+      } catch (err) {
+        return {
+          kind: 'unavailable',
+          reason: 'local-chain-binding-unavailable',
+          detail: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }
+
+    if (isCanonicalPositiveContextGraphId(contextGraphId)) {
+      let localGraphExists: boolean;
+      try {
+        localGraphExists = await runBoundedOperation(
+          (signal) => this.contextGraphExists(contextGraphId, { signal }),
+          {
+            label: `contextGraphExists(${contextGraphId})`,
+            timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+            signal: options.signal,
+          },
+        );
+      } catch (err) {
+        return {
+          kind: 'unavailable',
+          reason: 'local-existence-unavailable',
+          detail: err instanceof Error ? err.message : String(err),
+        };
+      }
+      if (!localGraphExists) {
+        return {
+          kind: 'registered',
+          onChainId: BigInt(contextGraphId),
+          provenance: 'numeric-id',
+        };
+      }
+    }
+
+    const resolveByNameHash = this.chain.resolveContextGraphIdByNameHash;
+    if (typeof resolveByNameHash !== 'function') return { kind: 'unregistered' };
+    try {
+      const nameHash = this.contextGraphNameCommitment(contextGraphId);
+      const onChainId = await runBoundedOperation(
+        (signal) => resolveByNameHash.call(this.chain, nameHash, { signal }),
+        {
+          label: `resolveContextGraphIdByNameHash(${nameHash})`,
+          timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+          signal: options.signal,
+        },
+      );
+      return onChainId === null || onChainId <= 0n
+        ? { kind: 'unregistered' }
+        : { kind: 'registered', onChainId, provenance: 'name-hash' };
+    } catch (err) {
+      return {
+        kind: 'unavailable',
+        reason: 'chain-name-binding-unavailable',
+        detail: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /** Compatibility projection; authority-sensitive code uses the typed result. */
+  async resolveContextGraphNumericIdForPolicy(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<bigint | null> {
+    const binding = await this.resolveContextGraphRegistrationBinding(contextGraphId);
+    return binding.kind === 'registered' ? binding.onChainId : null;
   }
 
   /** Resolve an id together with the provenance required by the binding owner. */

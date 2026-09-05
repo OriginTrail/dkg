@@ -242,6 +242,30 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(String(init?.body)).toMatch(/^CONSTRUCT /);
   });
 
+  it.each([
+    [
+      'CONSTRUCT',
+      'BASE <http://ex.org/>\nPREFIX schema: <http://schema.org/>\nCONSTRUCT { <s> schema:name ?name } WHERE { <s> schema:name ?name }',
+    ],
+    [
+      'DESCRIBE',
+      'BASE <http://ex.org/>\nPREFIX schema: <http://schema.org/>\nDESCRIBE <s>',
+    ],
+  ])('uses an N-Quads Accept header for a BASE/PREFIX-prefixed %s query', async (
+    _form,
+    sparql,
+  ) => {
+    setFetch(async () => new Response(
+      '<http://ex.org/s> <http://schema.org/name> "Alice" .\n',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const s = new BlazegraphStore(baseUrl);
+    const result = await s.query(sparql);
+    expect(result.type).toBe('quads');
+    const headers = fetchCalls[0][1]?.headers as Record<string, string>;
+    expect(headers.Accept).toBe('text/x-nquads, application/n-quads');
+  });
+
   it('sends a server-side query deadline on SELECT and CONSTRUCT, wider than the client deadline', async () => {
     // Without a server-side bound, a client abort leaves the query executing
     // on Blazegraph indefinitely (observed on mainnet: 10-32+ min past a 30s
@@ -449,12 +473,12 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(outcome).not.toBe(lateTransportFailure);
   });
 
-  it('reports TimeoutError when JSON decoding rejects after the deadline clock but before its timer runs', async () => {
+  it('reports TimeoutError when response text reading rejects after the deadline clock but before its timer runs', async () => {
     const lateDecodeFailure = new Error('late JSON failure');
     setFetch(async () => ({
       ok: true,
       status: 200,
-      json: async () => {
+      text: async () => {
         blockEventLoopFor(25);
         throw lateDecodeFailure;
       },
@@ -484,15 +508,15 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     await expect(query).rejects.toBe(reason);
   });
 
-  it('keeps the SELECT deadline active through response JSON decoding', async () => {
+  it('keeps the SELECT deadline active through response text reading', async () => {
     setFetch(async (_url, init) => {
-      const body = new Promise<unknown>((_resolve, reject) => {
+      const body = new Promise<string>((_resolve, reject) => {
         init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
       });
       return {
         ok: true,
         status: 200,
-        json: () => body,
+        text: () => body,
       } as Response;
     });
     const s = new BlazegraphStore(baseUrl, { timeout: 20 });
@@ -709,7 +733,10 @@ describe('BlazegraphStore (mocked HTTP)', () => {
   });
 
   it('ASK query returns boolean result', async () => {
-    setFetch(async () => new Response(JSON.stringify({ boolean: true }), {
+    setFetch(async () => new Response(JSON.stringify({
+      head: { link: ['https://example.test/results'] },
+      boolean: true,
+    }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     }));
@@ -717,6 +744,19 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     const r = await s.query('ASK { GRAPH <http://g1> { ?s ?p ?o } }');
     expect(r.type).toBe('boolean');
     if (r.type === 'boolean') expect(r.value).toBe(true);
+  });
+
+  it.each([
+    'PREFIX ex: <urn:ex:> ASK { ?s ex:p ?o }',
+    'BASE <urn:base:> ASK { ?s <p> ?o }',
+    '# leading comment\nASK { ?s ?p ?o }',
+  ])('classifies prologue-prefixed ASK as boolean: %s', async (query) => {
+    setFetch(async () => new Response(JSON.stringify({ head: {}, boolean: false }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    const result = await new BlazegraphStore(baseUrl).query(query);
+    expect(result).toEqual({ type: 'boolean', value: false });
   });
 
   it('query throws when SPARQL endpoint returns error', async () => {

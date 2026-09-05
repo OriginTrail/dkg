@@ -1,17 +1,32 @@
 {
   "name": "@origintrail-official/dkg-storage",
-  "version": "10.0.14",
+  "version": "10.0.16",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./blazegraph-namespace-contract": {
+      "types": "./blazegraph-namespace-contract.d.cts",
+      "import": "./blazegraph-namespace-contract.cjs",
+      "require": "./blazegraph-namespace-contract.cjs",
+      "default": "./blazegraph-namespace-contract.cjs"
+    },
+    "./dist/*": "./dist/*",
+    "./package.json": "./package.json"
+  },
   "scripts": {
     "build": "tsc",
     "benchmark:delete-no-count": "pnpm run build && node scripts/delete-by-pattern-no-count-benchmark.mjs",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs storage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
+    "@origintrail-official/dkg-http-utils": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-rdf-utils": "workspace:*",
     "oxigraph": "^0.5"
@@ -25,6 +40,8 @@
   },
   "files": [
     "dist",
+    "blazegraph-namespace-contract.cjs",
+    "blazegraph-namespace-contract.d.cts",
     "README.md",
     "LICENSE"
   ],

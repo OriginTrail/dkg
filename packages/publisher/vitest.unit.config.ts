@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'test/graph-publish-envelope.test.ts',
       'test/ka-update-submit-failure.test.ts',
       'test/ack-peer-selection.test.ts',
       'test/trust-metadata.test.ts',
@@ -16,6 +17,7 @@ export default defineConfig({
       'test/views-min-trust-extra.test.ts',
       'test/async-lift-validation.test.ts',
       'test/async-lift-claim-fencing.test.ts',
+      'test/async-lift-claim-selection.test.ts',
       'test/async-lift-journal-serialize.test.ts',
       'test/async-lift-journal-append.test.ts',
       'test/async-lift-ka-broadcast-progress.test.ts',
@@ -43,11 +45,14 @@ export default defineConfig({
       'test/query-source-coverage.test.ts',
       'test/subject-atomic-write.test.ts',
       'test/async-lift-terminal-clear.test.ts',
+      'test/entity-grouping.test.ts',
       'test/async-promote-terminal-clear.test.ts',
       'test/lift-job-types.test.ts',
       'test/multi-root-token-rows.test.ts',
       'test/access-verification.test.ts',
       'test/promote-step-tag.test.ts',
+      'test/promote-replay-safety.test.ts',
+      'test/promote-operation-intent.test.ts',
       'test/ka-graph-skolemization.test.ts',
       'test/ka-graph-workspace-snapshot.test.ts',
       'test/ka-graph-workspace-receiver.test.ts',
@@ -69,6 +74,7 @@ export default defineConfig({
       'test/swm-slice-ack-unbounded.test.ts',
       'test/workspace-snapshot-store.test.ts',
       'test/workspace-head-cardinality.test.ts',
+      'test/knowledge-asset-swm-staging.test.ts',
     ],
     testTimeout: 60_000,
     maxWorkers: 1,

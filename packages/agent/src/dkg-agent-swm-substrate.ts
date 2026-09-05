@@ -101,7 +101,6 @@ import {
   PublishJournal, StaleWriteError,
   ACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
-  resolveWorkspaceAgentRecipients,
   projectWorkspaceAgentRecipientFanout,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
   canonicalPublishPayload,
@@ -238,6 +237,11 @@ import {
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import {
+  createRetireConfirmedGraphScopedSwmTwinIfOrphaned,
+  reconcileFinalizedSwmTwinFromCatalogProjection,
+} from
+  './sync/requester/finalized-swm-twin-reconciliation.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -385,6 +389,8 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { rfc64ExecutionPlanAllowsLegacySyncV1 } from
+  './rfc64/public-catalog-activation-config-v1.js';
 
 export class SwmSubstrateMethods extends DKGAgentBase {
   subscribeToContextGraph(this: DKGAgent, contextGraphId: string, options?: {
@@ -393,10 +399,6 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     deferSharedMemoryGossipSubscribe?: boolean;
     syncMode?: 'on-demand' | 'always-on';
   }): ContextGraphSub {
-    if (options?.trackSyncScope !== false) {
-      this.trackSyncContextGraph(contextGraphId);
-    }
-
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     // Opening an already durable graph must never silently downgrade it to a
     // process-local subscription. An explicit always-on request may promote an
@@ -405,10 +407,34 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     const syncMode = resolveContextGraphSyncMode({
       existing,
       requested: options?.syncMode,
-      hasDormantDurableIntent:
-        this.contextGraphSubscriptionRehydrationStatus?.dormantIds.includes(contextGraphId) === true,
+      hasDormantDurableIntent: this.contextGraphSubscriptionDormancyById.has(contextGraphId),
     });
     const persist = syncMode === 'on-demand' ? false : options?.persist;
+    if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
+      // Preserve the user's durable selection and VM intent without installing
+      // legacy publish/update/finalization authority. The 10.0.16 catalog owns
+      // this CG's ROOT SWM scope, while named subgraphs retain a disjoint legacy
+      // compatibility lane until RFC-64 indexes/replay support non-null scope.
+      const syncSet = new Set<string>(this.config.syncContextGraphs ?? []);
+      if (syncSet.delete(contextGraphId)) this.config.syncContextGraphs = [...syncSet];
+      const subscription = this.setContextGraphSubscription(
+        contextGraphId,
+        {
+          ...existing,
+          subscribed: true,
+          synced: existing?.synced ?? false,
+          syncMode,
+        },
+        { persist },
+      );
+      if (options?.deferSharedMemoryGossipSubscribe !== true) {
+        this.queueSharedMemoryGossipSubscription(contextGraphId);
+      }
+      return subscription;
+    }
+    if (options?.trackSyncScope !== false) {
+      this.trackSyncContextGraph(contextGraphId);
+    }
 
     // SWM gossip subscribe runs `canReadContextGraph` against the local
     // `_meta` graph. On a fresh `join-approved` notification the curator
@@ -585,6 +611,78 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     });
   }
 
+  /**
+   * Resolve the immutable RFC-64 authority plan at every legacy SWM gossip
+   * boundary. Host-mode discovery can address a CG by its wire hash, whereas
+   * the operator plan is cleartext-keyed; consult the authenticated reverse
+   * binding before treating an apparently unselected wire id as legacy-owned.
+   */
+  rfc64LegacySwmGossipAllowedForContextGraph(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): boolean {
+    // The global emergency stop is the one plan-authorized exception that
+    // restores ordinary legacy transfer while keeping catalog state intact.
+    if (this.config.rfc64CatalogExecutionPlan.killSwitchActive) return true;
+    const wireContextGraphId = /^0x[0-9a-fA-F]{64}$/.test(contextGraphId)
+      ? contextGraphId.toLowerCase()
+      : null;
+    const authorityContextGraphId = wireContextGraphId === null
+      ? contextGraphId
+      : this.wireIdToLocalCgId.get(wireContextGraphId) ?? wireContextGraphId;
+    if (wireContextGraphId !== null && authorityContextGraphId === wireContextGraphId) {
+      // The first live SHARE can arrive before the canonical subscription
+      // lifecycle installs its authenticated reverse binding. Consult the
+      // construction-time cleartext-name commitment index without mutating
+      // that lifecycle-owned identity map.
+      const wireAuthority = this.config.rfc64CatalogExecutionPlan
+        .selectedAuthorityByWireId[wireContextGraphId];
+      if (wireAuthority !== undefined) return wireAuthority.legacySyncAllowed;
+    }
+    return rfc64ExecutionPlanAllowsLegacySyncV1(
+      this.config.rfc64CatalogExecutionPlan,
+      authorityContextGraphId,
+    );
+  }
+
+  /**
+   * Scope-aware materialization authority for the shared legacy wire.
+   * Catalog mode owns only the root scope in 10.0.16; a valid named subgraph
+   * is therefore non-overlapping legacy traffic. Validation still belongs to
+   * SharedMemoryHandler, so this predicate makes only the null-vs-named split.
+   */
+  rfc64LegacySwmApplyAllowedForScope(
+    this: DKGAgent,
+    contextGraphId: string,
+    subGraphName: string | null,
+  ): boolean {
+    return this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)
+      || (
+        subGraphName !== null
+        && this.rfc64LegacySwmMemberTransportAllowedForContextGraph(contextGraphId)
+      );
+  }
+
+  /** Member transport remains necessary for the named-subgraph lane. */
+  rfc64LegacySwmMemberTransportAllowedForContextGraph(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): boolean {
+    const wireContextGraphId = /^0x[0-9a-fA-F]{64}$/.test(contextGraphId)
+      ? contextGraphId.toLowerCase()
+      : null;
+    const authorityContextGraphId = wireContextGraphId === null
+      ? contextGraphId
+      : (
+        this.wireIdToLocalCgId.get(wireContextGraphId)
+        ?? this.config.rfc64CatalogExecutionPlan
+          .selectedAuthorityByWireId[wireContextGraphId]?.contextGraphId
+        ?? wireContextGraphId
+      );
+    return this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)
+      || this.subscribedContextGraphs.get(authorityContextGraphId)?.subscribed === true;
+  }
+
   async reconcileSharedMemoryGossipSubscription(this: DKGAgent, contextGraphId: string): Promise<void> {
     // Reconcile is the membership boundary; rebuild this CG's policy view
     // before deciding whether to keep or drop the SWM subscription.
@@ -599,6 +697,28 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     const swmTopic = contextGraphWorkspaceTopic(wireCgId);
     const isRegistered = this.sharedMemoryGossipRegistered.has(contextGraphId);
     const ctx = createOperationContext('system');
+    if (!this.rfc64LegacySwmMemberTransportAllowedForContextGraph(contextGraphId)) {
+      // This is the member-mode transport boundary. An unsubscribed selected
+      // CG has neither root authority nor a named-subgraph member lane, so a
+      // later metadata refresh must not reinstall its legacy SWM consumer.
+      if (isRegistered) {
+        // GossipSubManager.unsubscribe() is topic-wide, so clear both member
+        // and host bookkeeping before returning. A future live subscription
+        // may explicitly restore the scope-filtered member handler.
+        this.gossip.unsubscribe(swmTopic);
+        this.sharedMemoryGossipRegistered.delete(contextGraphId);
+        const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
+        this.swmHostModeSubscribed.delete(hostKey);
+        this.swmHostModeCurated.delete(hostKey);
+        this.swmHostModeHandlers.delete(hostKey);
+        this.enqueueHostModePersistence(contextGraphId, false);
+      } else {
+        // Remove a host-only handler surgically when no member handler owns the
+        // topic. This also clears its restart-persistent designation.
+        this.unwireSwmHostModeHandler(contextGraphId);
+      }
+      return;
+    }
     if (!(await this.canUseSharedMemoryForContextGraph(contextGraphId))) {
       if (isRegistered) {
         // `gossip.unsubscribe()` drops EVERY handler on the topic,
@@ -910,6 +1030,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   public trackSyncContextGraph(this: DKGAgent, contextGraphId: string): boolean {
     const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
     if (systemContextGraphs.has(contextGraphId)) return false;
+    if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) return false;
 
     const syncSet = new Set<string>(this.config.syncContextGraphs ?? []);
     if (syncSet.has(contextGraphId)) return false;
@@ -973,6 +1094,13 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // every public/curated context graph.
         publicAccessPolicyOnChainOracle: (cgId: string) =>
           this.isContextGraphPublicOnChain(cgId, createOperationContext('share')),
+        // RFC-64 catalog authority already excludes selected CGs from legacy
+        // durable catch-up. Apply the same decision to live gossip/substrate
+        // delivery so a partial ambient generation cannot race ahead of an
+        // authenticated exact catalog head and make cold bootstrap fail closed.
+        legacyApplyAllowedOracle: (cgId: string, subGraphName: string | null) => (
+          this.rfc64LegacySwmApplyAllowedForScope(cgId, subGraphName)
+        ),
         markContextGraphMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
         // OT-RFC-38 / LU-6 Phase B: chain-backed agent-allowlist
         // fallback. Cores hosting curated CGs they are NOT members
@@ -1221,7 +1349,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<WorkspaceAgentRecipientFanoutSnapshot | null> {
-    const resolution = await resolveWorkspaceAgentRecipients(this.store, { contextGraphId });
+    const resolution = await this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId });
     if (!resolution.requiresEncryption) return null;
     return projectWorkspaceAgentRecipientFanout(
       resolution,
@@ -1726,6 +1854,41 @@ export class SwmSubstrateMethods extends DKGAgentBase {
             this.getContextGraphOnChainId(cgName),
           markContextGraphMetaDirtyFromQuads: (quads) => {
             this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+          },
+          retireConfirmedGraphScopedSwmTwinIfOrphaned:
+            createRetireConfirmedGraphScopedSwmTwinIfOrphaned({
+              store: this.store,
+              writeLocks: this.writeLocks,
+              retire: async (candidate, ctx) => {
+                await this.publisher.clearPublishedKnowledgeAssetSwm(
+                  candidate.contextGraphId,
+                  {
+                    kind: 'named-lifecycle',
+                    identity: {
+                      agentAddress: candidate.agentAddress,
+                      kaNumber: candidate.kaNumber,
+                    },
+                  },
+                  candidate.subGraphName,
+                  ctx,
+                  candidate.ual,
+                );
+              },
+            }),
+          reconcileConfirmedGraphScopedSwmTwin: async (evidence, ctx) => {
+            const retirement = await reconcileFinalizedSwmTwinFromCatalogProjection({
+              store: this.store,
+              writeLocks: this.writeLocks,
+              evidence,
+              retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
+            });
+            if (retirement === 'retired') {
+              this.invalidateListContextGraphsCache();
+              this.log.info(
+                ctx,
+                `Retired byte-identical SWM twin after finalized VM reconciliation for ${evidence.kaUal}`,
+              );
+            }
           },
           runtime: this.finalizationRuntime,
         },

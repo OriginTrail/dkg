@@ -121,6 +121,11 @@ function stubNode(agent: DKGAgent): void {
     peerId: '12D3KooWCoreFillTestPeer',
     libp2p: { getPeers: () => [] },
   };
+  // These fixtures exercise reconcile mechanics after target admission. Their
+  // synthetic CG ids do not have corresponding live policy slots, so model the
+  // independent read-authority prerequisite explicitly. Denial is covered by
+  // vm-reconcile-self-prime.test.ts and private-read-chain-authority.test.ts.
+  agent.canReadContextGraph = async () => true;
 }
 
 function emptyCatchupStats() {
@@ -4299,6 +4304,53 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       target, peerA, [peerA], shutdownRecord,
     );
     expect((internals as any).vmReconcileRotationState.size).toBe(0);
+  });
+
+  it('does not exponentially amplify incomplete recovery as the peer roster grows', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmIncompleteRosterGrowth', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const target = vmRecoveryTarget('incomplete-roster-growth', 0, 'growth');
+    const peerA = '12D3KooWIncompleteGrowthA';
+    const peerB = '12D3KooWIncompleteGrowthB';
+    const peerC = '12D3KooWIncompleteGrowthC';
+
+    const initial = (internals as any).prepareVmReconcileRotationTarget(
+      target, [peerA], 100,
+    ).record;
+    (internals as any).settleVmReconcileRotationAttempt(
+      target, peerA, 'incomplete', [peerA], initial,
+    );
+    expect(initial).toMatchObject({
+      phase: 'backoff', backoffKind: 'incomplete-cycle', failures: 1,
+    });
+
+    const grownOnce = (internals as any).prepareVmReconcileRotationTarget(
+      target, [peerA, peerB], 101,
+    ).record;
+    expect(grownOnce).toBe(initial);
+    expect(grownOnce).toMatchObject({ phase: 'collecting', failures: 0, nextRetryAt: 0 });
+    expect([...grownOnce.attemptedPeerIds]).toEqual([peerA]);
+    (internals as any).settleVmReconcileRotationAttempt(
+      target, peerB, 'clean-absent', [peerA, peerB], grownOnce,
+    );
+    expect(grownOnce).toMatchObject({
+      phase: 'backoff', backoffKind: 'incomplete-cycle', failures: 1,
+    });
+
+    const grownTwice = (internals as any).prepareVmReconcileRotationTarget(
+      target, [peerA, peerB, peerC], 102,
+    ).record;
+    expect(grownTwice).toBe(initial);
+    expect(grownTwice).toMatchObject({ phase: 'collecting', failures: 0, nextRetryAt: 0 });
+    expect([...grownTwice.attemptedPeerIds]).toEqual([peerA, peerB]);
+    (internals as any).settleVmReconcileRotationAttempt(
+      target, peerC, 'clean-absent', [peerA, peerB, peerC], grownTwice,
+    );
+    expect(grownTwice).toMatchObject({
+      phase: 'backoff', backoffKind: 'incomplete-cycle', failures: 1,
+    });
   });
 
   it('closes exact-recovery rotation state through the public stop path', async () => {

@@ -50,11 +50,7 @@ import {
 } from './daemon/supervisor-liveness.js';
 import { migrateToBlueGreen, noteEdgeLegacyReleases } from './migration.js';
 import { ensureRollbackNodeUiBundle } from './rollback-node-ui.js';
-import {
-  daemonShutdownCoordinator,
-  reportDaemonShutdownResult,
-  type DaemonShutdownCoordinator,
-} from './daemon/shutdown-wait.js';
+import { stopDaemonIfRunning } from './update/stop-daemon.js';
 
 function isDaemonUnreachable(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -364,26 +360,6 @@ function formatQuadObject(object: string): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
-}
-
-interface StopDaemonDependencies {
-  coordinator: DaemonShutdownCoordinator;
-  log(message: string): void;
-  error(message: string): void;
-}
-
-const defaultStopDaemonDependencies: StopDaemonDependencies = {
-  coordinator: daemonShutdownCoordinator,
-  log: (message) => console.log(message),
-  error: (message) => console.error(message),
-};
-
-/** Returns true if daemon was stopped (or not running). False if it couldn't be stopped. */
-async function stopDaemonIfRunning(
-  dependencies: StopDaemonDependencies = defaultStopDaemonDependencies,
-): Promise<boolean> {
-  const result = await dependencies.coordinator.stopViaSignal();
-  return reportDaemonShutdownResult(result, dependencies);
 }
 
 export {

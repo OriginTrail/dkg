@@ -91,7 +91,10 @@ export interface JSONSchemaProperty {
   type: string | string[];
   description?: string;
   items?: JSONSchemaProperty;
-  enum?: string[];
+  // readonly: lets `as const` schema declarations (e.g. the agent-list
+  // boundary's canonical enum, derived from dkg-core) assign directly.
+  enum?: readonly string[];
+  minimum?: number;
   properties?: Record<string, JSONSchemaProperty>;
   required?: string[];
   additionalProperties?: boolean | JSONSchemaProperty;

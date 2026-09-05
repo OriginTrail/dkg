@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 describe('context graph subscription diagnostics route', () => {
   let server: Server | undefined;
@@ -90,8 +91,10 @@ describe('context graph subscription diagnostics route', () => {
         routePlugins: [],
         url,
         path: url.pathname,
-        requestToken,
         requestAgentAddress: agent.resolveAgentByToken(requestToken),
+        authentication: agent.resolveAgentByToken(requestToken)
+          ? requestAuthentication({ kind: 'agent', agentAddress: agent.resolveAgentByToken(requestToken)!, token: requestToken })
+          : requestAuthentication({ kind: 'nodeOperator', token: requestToken }),
       } as any);
       if (!res.writableEnded) {
         res.writeHead(404, { 'content-type': 'application/json' });

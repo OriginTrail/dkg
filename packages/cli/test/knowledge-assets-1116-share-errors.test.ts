@@ -45,6 +45,7 @@ import { daemonState } from '../src/daemon/state.js';
 import { addPublisherWallet } from '../src/publisher-wallets.js';
 import { createPublisherRuntimeFromAgent, type AsyncPublisherAvailability } from '../src/publisher-runner.js';
 import { createKnowledgeAssetVmPublishHandler } from '../src/daemon/lifecycle.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const CG_ID = 'issue-1116-cg';
 const ASSERTION_NAME = 'seal-asset';
@@ -169,8 +170,14 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
           apiPortRef: { value: 0 },
           url,
           path: url.pathname,
-          requestToken: routeOverrides.requestToken,
           requestAgentAddress: routeOverrides.requestAgentAddress ?? 'did:dkg:agent:test',
+          authentication: routeOverrides.requestToken && agent.resolveAgentByToken(routeOverrides.requestToken)
+            ? requestAuthentication({
+                kind: 'agent',
+                agentAddress: agent.resolveAgentByToken(routeOverrides.requestToken),
+                token: routeOverrides.requestToken,
+              })
+            : requestAuthentication({ kind: 'anonymous' }),
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);
@@ -1069,6 +1076,31 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     // And it did not become an author-selection input: a node token still resolves no author hint,
     // so what gets published is unchanged.
     expect(enqueueCalls[0]?.intent).not.toHaveProperty('callerAgentAddress');
+  });
+
+  it('surfaces the local-chain skip reason from vm/publish (#1299)', async () => {
+    await startWith({}, {
+      publishFromFinalizedAssertion: async () => ({ status: 'tentative', localChainSkipReason: 'no-chain' }),
+    });
+    const res = await post('vm/publish', { contextGraphId: CG_ID });
+    expect(res.status).toBe(502);
+    expect(res.body.error).toContain('VM publish stayed local');
+    expect(res.body.error).toContain('chain configuration');
+  });
+
+  it.each([
+    { status: 'confirmed', contextGraphError: undefined, expectedStatus: 200, reason: undefined },
+    { status: 'confirmed', contextGraphError: 'binding failed', expectedStatus: 207, reason: 'binding failed' },
+    { status: 'tentative', contextGraphError: 'binding failed', expectedStatus: 502, reason: 'binding failed' },
+    { status: 'tentative', contextGraphError: undefined, expectedStatus: 502, reason: 'status: tentative' },
+    { status: 'failed', contextGraphError: undefined, expectedStatus: 502, reason: 'status: failed' },
+  ])('maps $status with contextGraphError=$contextGraphError to $expectedStatus', async ({ status, contextGraphError, expectedStatus, reason }) => {
+    await startWith({}, {
+      publishFromFinalizedAssertion: async () => ({ status, contextGraphError }),
+    });
+    const res = await post('vm/publish', { contextGraphId: CG_ID });
+    expect(res.status).toBe(expectedStatus);
+    if (reason) expect(res.body.error).toContain(reason);
   });
 
   // GH#1786 — the resident-author selector. The load-bearing property is that it can

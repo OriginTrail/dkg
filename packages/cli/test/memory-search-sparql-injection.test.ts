@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 function fakeRes() {
   const res: any = { statusCode: 0, body: '', headers: {} as Record<string, string> };
@@ -42,6 +43,7 @@ function buildCtx(body: unknown, captureSparql: (s: string) => void) {
     vectorStore: { search: async () => [] },
     path: url.pathname,
     url,
+    authentication: requestAuthentication({ kind: 'anonymous' }),
   } as unknown as RequestContext;
   return { ctx, res };
 }

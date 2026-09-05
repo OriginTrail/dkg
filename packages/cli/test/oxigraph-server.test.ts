@@ -24,7 +24,9 @@ import { createServer, type Server } from 'node:net';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SparqlHttpStore } from '@origintrail-official/dkg-storage';
+import {
+  createManagedOxigraphSparqlStoreV1,
+} from '@origintrail-official/dkg-storage';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 import { OXIGRAPH_WATCHDOG_OOM_MARKER } from '../src/daemon/oxigraph-parent-watchdog.js';
@@ -369,10 +371,9 @@ describe('startOxigraphServer (real child processes)', () => {
         }
         return await originalFetch(input, init);
       }) as typeof fetch;
-      const store = new SparqlHttpStore({
+      const store = createManagedOxigraphSparqlStoreV1({
         queryEndpoint: `http://127.0.0.1:${port}/query`,
         updateEndpoint: `http://127.0.0.1:${port}/update`,
-        managedOxigraph: true,
         timeout: 5_000,
         getRecoveryState: () => handle.getRecoveryState(),
       });
@@ -547,11 +548,9 @@ describe.skipIf(!nativeOxigraphTestBinary)(
         log: () => {},
       });
       const endpoint = `http://127.0.0.1:${port}`;
-      const store = new SparqlHttpStore({
+      const store = createManagedOxigraphSparqlStoreV1({
         queryEndpoint: `${endpoint}/query`,
         updateEndpoint: `${endpoint}/update`,
-        managedByDkg: true,
-        managedOxigraph: true,
         timeout: 10_000,
       });
 

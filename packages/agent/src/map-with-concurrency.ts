@@ -27,3 +27,21 @@ export async function mapWithConcurrency<T, R>(
   await Promise.all(Array.from({ length: limit }, () => worker()));
   return results;
 }
+
+/** Bounded counterpart to Promise.allSettled; results preserve input order. */
+export async function mapWithConcurrencySettled<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+  return mapWithConcurrency(items, limit, async (item, index) => {
+    try {
+      return Object.freeze({
+        status: 'fulfilled' as const,
+        value: await fn(item, index),
+      });
+    } catch (reason) {
+      return Object.freeze({ status: 'rejected' as const, reason });
+    }
+  });
+}

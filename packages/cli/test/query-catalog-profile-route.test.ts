@@ -8,6 +8,7 @@ import {
 import { StoreSchedulerBusyError, type Quad } from '@origintrail-official/dkg-storage';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const CONTEXT_GRAPH_ID = 'kamstrup-testnet';
 const PROFILE_NS = 'http://dkg.io/ontology/profile/';
@@ -119,8 +120,8 @@ function requestContext(
       agent,
       url,
       path: url.pathname,
-      requestToken: undefined,
       requestAgentAddress: '',
+      authentication: requestAuthentication({ kind: 'nodeOperator' }),
       validTokens: new Set<string>(),
     } as unknown as RequestContext,
     response,
@@ -194,8 +195,12 @@ describe('/api/profile/query-catalog/read', () => {
     agent.resolveAgentByToken.mockReturnValue('0x1111111111111111111111111111111111111111');
     agent.canReadContextGraph.mockResolvedValue(false);
     const { context, response } = readContext(agent);
-    context.requestToken = 'agent-token';
     context.requestAgentAddress = '0x1111111111111111111111111111111111111111';
+    context.authentication = requestAuthentication({
+      kind: 'agent',
+      agentAddress: '0x1111111111111111111111111111111111111111',
+      token: 'agent-token',
+    });
     context.validTokens = new Set(['agent-token']);
 
     await handleMemoryRoutes(context);
@@ -208,11 +213,33 @@ describe('/api/profile/query-catalog/read', () => {
     expect(agent.store.query).not.toHaveBeenCalled();
   });
 
+  it('keeps an auth-disabled agent principal behind the private-graph ACL', async () => {
+    const agentAddress = '0x1111111111111111111111111111111111111111';
+    const agent = fakeCatalogAgent();
+    agent.canReadContextGraph.mockResolvedValue(false);
+    const { context, response } = readContext(agent);
+    context.authentication = requestAuthentication({
+      kind: 'agent',
+      agentAddress,
+      mode: 'disabled',
+      token: 'agent-token',
+    });
+
+    await handleMemoryRoutes(context);
+
+    expect(response.statusCode).toBe(403);
+    expect(agent.canReadContextGraph).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, {
+      callerAgentAddress: agentAddress,
+    });
+    expect(agent.query).not.toHaveBeenCalled();
+    expect(agent.store.query).not.toHaveBeenCalled();
+  });
+
   it('reads the registered meta subgraph through all Context Graph layers', async () => {
     const agent = fakeCatalogAgent();
     agent.canReadContextGraph.mockResolvedValue(false);
     const { context, response } = readContext(agent);
-    context.requestToken = 'node-admin-token';
+    context.authentication = requestAuthentication({ kind: 'nodeOperator', token: 'node-admin-token' });
     context.validTokens = new Set(['node-admin-token']);
 
     await handleMemoryRoutes(context);

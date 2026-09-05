@@ -19,7 +19,7 @@
  *    inherited by the queue itself; the worker just calls `fail()` with
  *    a classification and the queue handles backoff bookkeeping.
  *
- * 3. **Error classification**: see `classifyPromoteError` below.
+ * 3. **Error classification**: see `async-promote-error-classification.ts`.
  *    Seeded from the rc.10 Graphify import patterns (see
  *    `INTEGRATION_NOTES_GRAPHIFY.md` and `dkg-graphify-rc10-test/FINDINGS_v2.md`).
  *
@@ -37,17 +37,25 @@
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   isStoreOperationTimeoutError,
-  isReadOnlyStoreOperation,
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
 import {
   PromoteJobLeaseError,
   type AsyncPromoteQueue,
   type PromoteAttemptError,
-  type PromoteFailureClassification,
   type PromoteJob,
   type PromoteRequest,
 } from '@origintrail-official/dkg-publisher';
+import { createClaimFailureBackoff } from './claim-failure-backoff.js';
+import {
+  classifyPromoteError,
+  diagnosticPromoteStage,
+  safePromoteErrorIdentity,
+  type ClassifiedPromoteError,
+} from './async-promote-error-classification.js';
+
+export { classifyPromoteError } from './async-promote-error-classification.js';
+export type { ClassifiedPromoteError } from './async-promote-error-classification.js';
 
 /**
  * Convenience type for the daemon's existing `emitMemoryGraphChanged`
@@ -91,6 +99,8 @@ export interface PromoteWorkerConfig {
   shutdownTimeoutMs?: number;
   /** Deterministic time source for tests. */
   now?: () => number;
+  /** Deterministic randomness source for claim-failure jitter tests. */
+  random?: () => number;
   /** Defaults to `console.warn`. The daemon passes its own logger. */
   log?: PromoteWorkerLogger;
   /** Retry interval for queue-only outcome bookkeeping (default 5s). */
@@ -149,68 +159,6 @@ export interface PromoteWorkerCounters {
   interruptedAtShutdown: number;
 }
 
-export type ClassifiedPromoteError = {
-  classification: PromoteFailureClassification;
-  retryable: boolean;
-  message?: string;
-};
-
-const PROMOTE_STEP_TAG = /^\[promote:([^\]]*)\]\s*/;
-const PROMOTE_DIAGNOSTIC_STAGES = new Set([
-  'ensureSubGraphRegistered',
-  'assertGraphScopedLifecycleWritable',
-  'knowledgeAssetPrivateQuads',
-  'assertionScopedQuads',
-  'assertTrustedCatalogTriplesAllowed',
-  'encodeWorkspaceGossipPayload',
-]);
-// Only producer-owned, source-defined identities are safe to retain verbatim.
-// Arbitrary upstream name/code strings can be credentials even when they are
-// syntactically simple, so everything outside these closed sets becomes unknown.
-const SAFE_ERROR_NAMES = new Set([
-  'Error',
-  'DKGError',
-  'DKGUserError',
-  'DKGInternalError',
-  'PayloadTooLargeError',
-  'SwmGossipPayloadTooLargeError',
-  'CuratorUnconfirmedError',
-  'CuratorRejectedError',
-  'AssertionNotPersistedError',
-]);
-const SAFE_ERROR_CODES = new Set([
-  'PAYLOAD_TOO_LARGE',
-  'SWM_GOSSIP_PAYLOAD_TOO_LARGE',
-  'CURATOR_UNCONFIRMED',
-  'CURATOR_REJECTED',
-  'ASSERTION_NOT_PERSISTED',
-]);
-
-function untagPromoteMessage(message: string): string {
-  return message.replace(PROMOTE_STEP_TAG, '');
-}
-
-function diagnosticPromoteStage(message: string): string {
-  const candidate = PROMOTE_STEP_TAG.exec(message)?.[1];
-  return candidate !== undefined && PROMOTE_DIAGNOSTIC_STAGES.has(candidate)
-    ? candidate
-    : 'unknown';
-}
-
-function safeErrorIdentity(
-  err: unknown,
-  field: 'name' | 'code',
-  allowed: ReadonlySet<string>,
-): string | undefined {
-  if ((typeof err !== 'object' && typeof err !== 'function') || err === null) return undefined;
-  try {
-    const value = Reflect.get(err, field);
-    return typeof value === 'string' && allowed.has(value) ? value : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 function bestEffortLog(log: PromoteWorkerLogger, message: string): void {
   try {
     void Promise.resolve(log(message)).catch(() => {});
@@ -258,124 +206,17 @@ function logPromoteAttemptFailure(input: {
         stage: diagnosticPromoteStage(input.message),
         classification: input.classified.classification,
         retryable: input.classified.retryable,
-        errorName: safeErrorIdentity(input.err, 'name', SAFE_ERROR_NAMES) ?? 'unknown',
-        errorCode: safeErrorIdentity(input.err, 'code', SAFE_ERROR_CODES) ?? 'unknown',
+        errorName: input.classified.diagnostic?.name
+          ?? safePromoteErrorIdentity(input.err, 'name')
+          ?? 'unknown',
+        errorCode: input.classified.diagnostic?.code
+          ?? safePromoteErrorIdentity(input.err, 'code')
+          ?? 'unknown',
       })}`,
     );
   } catch {
     // Diagnostics must never prevent fail-closed queue bookkeeping.
   }
-}
-
-/**
- * Map a promote error message to a `PromoteAttemptError` classification.
- * Seeded from the three rc.10 Graphify import patterns documented in
- * `dkg-graphify-rc10-test/FINDINGS_v2.md`. Returns `fatal` for unknown
- * patterns — the operator can re-classify and call `/recover` after
- * inspecting the failure.
- *
- * Exported so the daemon supervisor (and future tooling like an
- * operator dashboard) can preview the verdict without going through
- * the worker.
- */
-export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
-  const raw = err instanceof Error ? err.message : String(err);
-  // #1464 — strip a leading diagnostic "[promote:<step>] " tag (added by the publisher's
-  // promote step-tagging) BEFORE substring-classifying, so a step LABEL can never inject a
-  // classifier trigger token (e.g. the step "encodeWorkspaceGossipPayload" would otherwise make
-  // every error from it match the "gossip" cap-check). We classify on the ORIGINAL error text;
-  // the tag stays on the operator-facing message. The tag is single (idempotent, innermost wins).
-  const untagged = untagPromoteMessage(raw ?? '');
-  const message = untagged.toLowerCase();
-  const code =
-    err && typeof err === 'object' && 'code' in err
-      ? String((err as { code?: unknown }).code ?? '').toLowerCase()
-      : '';
-
-  // 1. 4 MiB gossip cap — surfaced as
-  //    "Promoted assertion too large for gossip (XXXX KB, limit 4 MB)"
-  //    by the daemon's promote pipeline.
-  if (
-    code === 'swm_gossip_payload_too_large' ||
-    code === 'payload_too_large' ||
-    (message.includes('gossip') && (message.includes('limit') || message.includes('too large'))) ||
-    message.includes('promoted assertion too large')
-  ) {
-    return { classification: 'cap_exceeded', retryable: false };
-  }
-
-  // 2. 256 KB body cap on /promote — surfaced as
-  //    "Request body too large (>262144 bytes)".
-  if (message.includes('request body too large') || message.includes('payload too large')) {
-    return { classification: 'cap_exceeded', retryable: false };
-  }
-
-  // Managed-store recovery can declare the exact operation outcome. A request
-  // rejected before dispatch is safe to retry. Interrupted reads cannot have
-  // mutated WM/SWM. The one safe mutation is atomic exact-graph replacement:
-  // replaying the same frozen promote payload converges from either permitted
-  // old-or-new outcome. Every other interrupted write remains fail-closed.
-  if (isStoreOperationTimeoutError(err)) {
-    if (
-      err.outcome === 'not_started' ||
-      (
-        err.outcome === 'indeterminate' &&
-        err.storeOperation !== undefined &&
-        (
-          isReadOnlyStoreOperation(err.storeOperation)
-          // Promote replaces the complete UAL-derived SWM graph through the
-          // atomic replaceGraph capability. Replaying the same frozen payload
-          // converges from either permitted old-or-new outcome.
-          || err.storeOperation === 'replaceGraph'
-        )
-      )
-    ) {
-      return { classification: 'transient', retryable: true };
-    }
-
-    // Typed store outcomes are authoritative. In particular, never let an
-    // indeterminate mutation fall through to generic words such as "timeout"
-    // below: its first attempt may already have changed durable state.
-    return { classification: 'fatal', retryable: false };
-  }
-
-  // Scheduler overload is a typed pre-dispatch rejection: the store closure
-  // never started, so both promotion execution and fenced queue bookkeeping
-  // may retry it without relying on the diagnostic wording.
-  if (err instanceof StoreSchedulerBusyError) {
-    return { classification: 'transient', retryable: true };
-  }
-
-  // Store failures without the canonical typed outcome are not safe to infer
-  // from prose. Keep them out of the generic network-timeout fallback even
-  // when a legacy message happens to contain words such as "timeout".
-  if (
-    code === 'store_operation_timeout'
-    || code === 'store_scheduler_busy'
-    || message.includes('managed oxigraph')
-    || message.includes('store scheduler')
-  ) {
-    return { classification: 'fatal', retryable: false };
-  }
-
-  // 3. Transient network / IO — the rc.10 importer hit "fetch failed"
-  //    multiple times under sustained load. Worker should retry.
-  if (
-    message.includes('fetch failed') ||
-    message.includes('econnreset') ||
-    message.includes('econnrefused') ||
-    message.includes('etimedout') ||
-    message.includes('socket hang up') ||
-    message.includes('network') ||
-    message.includes('timeout') ||
-    message.includes('timed out')
-  ) {
-    return { classification: 'transient', retryable: true };
-  }
-
-  // 4. Default: fatal, no retry. Operator can `POST .../recover` after
-  //    fixing whatever's wrong.
-  return { classification: 'fatal', retryable: false };
 }
 
 /**
@@ -679,11 +520,16 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
   let shuttingDown = false;
   let started = false;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let claimRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let detachWorkScheduler: (() => void) | null = null;
   let wakeRequested = false;
   let wakeLoop: Promise<void> | null = null;
   let lifecycleAbortController: AbortController | null = null;
   let counters: PromoteWorkerCounters = freshCounters();
+  const claimFailureBackoff = createClaimFailureBackoff({
+    now,
+    random: config.random,
+  });
 
   function freshCounters(): PromoteWorkerCounters {
     return {
@@ -696,15 +542,40 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
     };
   }
 
+  function clearClaimRetryTimer(): void {
+    if (claimRetryTimer === null) return;
+    clearTimeout(claimRetryTimer);
+    claimRetryTimer = null;
+  }
+
+  function scheduleClaimRetry(delayMs: number): void {
+    if (!started || shuttingDown || claimRetryTimer !== null) return;
+    const timer = setTimeout(() => {
+      if (claimRetryTimer === timer) claimRetryTimer = null;
+      requestWake();
+    }, delayMs);
+    if (timer.unref) timer.unref();
+    claimRetryTimer = timer;
+  }
+
   async function tickSlot(slot: WorkerSlot): Promise<boolean> {
     if (shuttingDown || slot.inFlight) return false;
-    const claimed = await config.agent.promoteQueue.claimNext(slot.workerId).catch((err: unknown) => {
+    if (!claimFailureBackoff.isDue()) return false;
+    let claimed: PromoteJob | null;
+    try {
+      claimed = await config.agent.promoteQueue.claimNext(slot.workerId);
+      claimFailureBackoff.reset();
+      clearClaimRetryTimer();
+    } catch (err: unknown) {
+      const delayMs = claimFailureBackoff.recordFailure();
+      scheduleClaimRetry(delayMs);
       bestEffortLog(
         log,
-        `claimNext error on ${slot.workerId}: ${err instanceof Error ? err.message : String(err)}`,
+        `claimNext error on ${slot.workerId}; retrying in ${delayMs}ms: `
+          + `${err instanceof Error ? err.message : String(err)}`,
       );
-      return null;
-    });
+      return false;
+    }
     if (!claimed) return false;
 
     counters.attempted += 1;
@@ -863,6 +734,8 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
       shuttingDown = false;
       lifecycleAbortController = new AbortController();
       counters = freshCounters();
+      clearClaimRetryTimer();
+      claimFailureBackoff.reset();
       let recovering = true;
       try {
         const summary = await config.agent.promoteQueue.recoverOnStartup();
@@ -891,6 +764,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           clearInterval(pollTimer);
           pollTimer = null;
         }
+        clearClaimRetryTimer();
         lifecycleAbortController.abort();
         lifecycleAbortController = null;
         started = false;
@@ -910,6 +784,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
         clearInterval(pollTimer);
         pollTimer = null;
       }
+      clearClaimRetryTimer();
       const activeAtStop = activeShutdownSlotCount();
       if (activeAtStop === 0) {
         lifecycleAbortController?.abort();

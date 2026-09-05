@@ -20,9 +20,10 @@ import { findTripleStoreCapability } from './triple-store.js';
  * call site (raw SPARQL UPDATE, pattern deletes without a graph) bump a
  * global floor that invalidates every prefix, and LRU eviction folds the
  * evicted generation into that floor — an over-report costs one extra
- * rescan, never a missed one. Cross-process writers (a second process on a
- * shared oxigraph-server) are invisible here; the memo's TTL bounds that
- * hole, and a restart clears the memo entirely (the counter is in-memory).
+ * rescan, never a missed one. Adapters with cross-process writers explicitly
+ * declare process-local coverage, disabling authorization-cache reuse; only a
+ * source that observes every live-store replacement and writer may declare
+ * all-writers coverage.
  */
 export interface GraphWriteGenSource {
   /**
@@ -36,9 +37,13 @@ export interface GraphWriteGenSource {
 
 /** Revision-aware successor capability used by cache and negative-memo consumers. */
 export interface GraphWriteRevisionSource {
+  /** Whether this source observes every writer that can mutate the live store. */
+  readonly writeRevisionCoverage: GraphWriteRevisionCoverage;
   /** The same observational generation plus whether it is safe to memoize. */
   getWriteRevision(graphPrefix: string): GraphWriteRevision;
 }
+
+export type GraphWriteRevisionCoverage = 'process-local' | 'all-writers';
 
 export interface GraphWriteRevision {
   generation: number;
@@ -64,6 +69,7 @@ const MAX_TRACKED_GRAPHS = 8192;
 
 /** Shared implementation the triple-store adapters embed. */
 export class GraphWriteGenTracker implements GraphWriteGenSource, GraphWriteRevisionSource {
+  readonly writeRevisionCoverage = 'process-local' as const;
   private counter = 0;
   /** Floor for writes with unknowable graph scope + LRU-evicted graphs. */
   private globalFloor = 0;
@@ -244,18 +250,28 @@ export function asGraphWriteGenSource(store: unknown): GraphWriteGenSource | nul
  * `null` when the backing adapter does not track write generations — callers
  * MUST fail open (always scan) on `null`. A legacy getWriteGen-only adapter is
  * deliberately not promoted: it cannot observe an in-flight write and must
- * not masquerade as a native stable revision source.
+ * not masquerade as a native stable revision source. A getWriteRevision-only
+ * implementation remains runtime-compatible, but this boundary normalizes
+ * its missing coverage metadata to process-local so consumers always receive
+ * the explicit discriminator promised by {@link GraphWriteRevisionSource}.
  */
 export function asGraphWriteRevisionSource(store: unknown): GraphWriteRevisionSource | null {
+  type RevisionReader = {
+    readonly writeRevisionCoverage?: GraphWriteRevisionCoverage;
+    getWriteRevision(graphPrefix: string): GraphWriteRevision;
+  };
   const source = findTripleStoreCapability(
     store,
-    (candidate): candidate is GraphWriteRevisionSource => (
+    (candidate): candidate is RevisionReader => (
       typeof candidate === 'object'
       && candidate !== null
-      && typeof (candidate as Partial<GraphWriteRevisionSource>).getWriteRevision === 'function'
+      && typeof (candidate as Partial<RevisionReader>).getWriteRevision === 'function'
     ),
   );
   return source
-    ? { getWriteRevision: (graphPrefix) => source.getWriteRevision(graphPrefix) }
+    ? {
+      writeRevisionCoverage: source.writeRevisionCoverage ?? 'process-local',
+      getWriteRevision: (graphPrefix) => source.getWriteRevision(graphPrefix),
+    }
     : null;
 }

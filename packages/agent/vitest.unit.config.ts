@@ -1,3 +1,4 @@
+import { coverageForPackage } from "../../vitest.coverage";
 import { defineConfig } from "vitest/config";
 
 import { RFC64_UNIT_TESTS } from "./vitest.rfc64-unit-tests";
@@ -14,6 +15,8 @@ const SQLITE_EXEC_ARGV = [
 
 export default defineConfig({
   test: {
+    allowOnly: false,
+    coverage: coverageForPackage("agent"),
     include: [
       ...RFC64_UNIT_TESTS,
       "test/endorse.test.ts",
@@ -48,6 +51,7 @@ export default defineConfig({
       "test/swm/host-mode-store.test.ts",
       "test/swm/host-mode-key-canonicalization.test.ts",
       "test/rs-heal-stranded-kc-decorated.test.ts",
+      "test/random-sampling-context-graph-resolver.test.ts",
       "test/random-sampling-proof-repair.test.ts",
       "test/vm-reconcile-source-labels.test.ts",
       "test/profile-fix-verify.test.ts",
@@ -56,6 +60,8 @@ export default defineConfig({
       "test/sync-verify-collapsed.test.ts",
       "test/sync-verify-rootless.test.ts",
       "test/sync-control-metadata-admission.test.ts",
+      "test/sync-responder-per-cgid-meta.test.ts",
+      "test/changelog-delta-page.test.ts",
       "test/sync-durable-worker-wire.test.ts",
       "test/changelog-requester.test.ts",
       "test/durable-sync-since-threading.test.ts",
@@ -81,6 +87,7 @@ export default defineConfig({
       "test/sync-responder-log-volume.test.ts",
       "test/sync-responder-snapshot-cache.test.ts",
       "test/sync-responder-durable-meta-subject-atomic.test.ts",
+      "test/sync-responder-snapshot-failure-policy.test.ts",
       "test/sync-responder-cursor.test.ts",
       "test/sync-responder-oversized-fallback.test.ts",
       "test/sync-responder-swm-meta-ceiling.test.ts",
@@ -110,6 +117,7 @@ export default defineConfig({
       "test/selected-swm-lifecycle-queue.test.ts",
       "test/selected-swm-meta-transfer-coordinator.test.ts",
       "test/selected-swm-meta-budget.test.ts",
+      "test/legacy-sync-graph-candidate.test.ts",
       "test/outbox-shutdown-lifecycle.test.ts",
       "test/sync-checkpoint-key.test.ts",
       "test/map-with-concurrency.test.ts",
@@ -126,6 +134,13 @@ export default defineConfig({
       "test/sync-responder-protection.test.ts",
       "test/sync-on-connect-retry.test.ts",
       "test/sync-on-connect-churn.test.ts",
+      "test/rfc64-sync-on-connect-recovery-plan-queue.test.ts",
+      "test/rfc64-sync-on-connect-peer-job-accounting.test.ts",
+      "test/rfc64-sync-on-connect-swm-lanes.test.ts",
+      "test/rfc64-sync-on-connect-selected-retry.test.ts",
+      "test/sync-on-connect-attempt-accounting.test.ts",
+      "test/sync-on-connect-peer-job-runner.test.ts",
+      "test/sync-on-connect-peer-scheduler.test.ts",
       "test/system-context-graph-policy.test.ts",
       "test/sync-requester-bailout.test.ts",
       "test/swm-catchup-peer-selection.test.ts",
@@ -175,6 +190,9 @@ export default defineConfig({
       "test/sync-responder-agents-meta-serve-skip.test.ts",
       "test/messenger-substrate.test.ts",
       "test/context-graph-join-policy.test.ts",
+      "test/bounded-operation.test.ts",
+      "test/private-read-chain-authority.test.ts",
+      "test/context-graph-access-policy-state.test.ts",
       "test/context-graph-historical-name-binding.test.ts",
       "test/context-graph-list-concurrency.test.ts",
       "test/cg-resolve-refresh.test.ts",
@@ -182,6 +200,7 @@ export default defineConfig({
       "test/workspace-crypto-delegatee-filter.test.ts",
       "test/swm-public-snapshot-materialization.test.ts",
       "test/swm-public-cg-plaintext.test.ts",
+      "test/swm-sender-key-stale-target.test.ts",
       "test/swm-snapshot-materializer.test.ts",
       "test/swm-head-identity-preservation.test.ts",
       // #2079 — the already-materialized witness: the warm-path win, the count

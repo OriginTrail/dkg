@@ -23,7 +23,28 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
-import type { Quad } from '../src/triple-store.js';
+import { compileRfc64SemanticAuthorCommitV1 } from '../src/rfc64-semantic-author-commit-v1.js';
+import { normalizeRfc64AuthorCommitCasV1 } from '../src/rfc64-author-commit-cas.js';
+import type {
+  Quad,
+} from '../src/triple-store.js';
+import type { Rfc64SemanticAuthorCommitInputV1 } from
+  '../src/rfc64-semantic-author-commit-v1.js';
+import {
+  assertCanonicalDeterministicUalV1,
+  deriveCanonicalGraphScopedAuthorSealPlacementV1,
+  deriveRfc64SharedProjectionGraphIriV1,
+  projectCanonicalGraphScopedAuthorSealRowsV1,
+  projectRfc64SemanticRecordStoreRowsV1,
+  renderRfc64SemanticStoreRowV1,
+  type CanonicalGraphScopedAuthorSealCoordinateV1,
+  type CanonicalGraphScopedAuthorSealV1,
+  type ContextGraphIdV1,
+  type Digest32V1,
+  type EvmAddressV1,
+  type NetworkIdV1,
+  type Rfc64SemanticRecordV1,
+} from '@origintrail-official/dkg-core';
 
 const BLAZEGRAPH_URL = process.env.BLAZEGRAPH_TEST_URL;
 
@@ -280,4 +301,320 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
     },
     60_000,
   );
+
+  it(
+    'allows exactly one of two concurrently dispatched RFC-64 author commits',
+    async () => {
+      const projectionGraph = `${GRAPH}:rfc64:projection`;
+      const sealGraph = `${GRAPH}:rfc64:seals`;
+      const headGraph = `${GRAPH}:rfc64:heads`;
+      const stateGraph = `${GRAPH}:rfc64:state`;
+      const author = `urn:bg-int:${RUN}:rfc64:author`;
+      const seal = `urn:bg-int:${RUN}:rfc64:seal`;
+      const mutation = `urn:bg-int:${RUN}:rfc64:mutation`;
+      const cgMutation = `urn:bg-int:${RUN}:rfc64:cg-mutation`;
+      const appliedSet = `urn:bg-int:${RUN}:rfc64:applied-set`;
+      const oldHead = `urn:bg-int:${RUN}:rfc64:head:old`;
+      const newHead = `urn:bg-int:${RUN}:rfc64:head:new`;
+      const pValue = 'urn:bg-int:rfc64:value';
+      const pHead = 'urn:bg-int:rfc64:current-head';
+      const pGeneration = 'urn:bg-int:rfc64:generation';
+      const graphs = [projectionGraph, sealGraph, headGraph, stateGraph];
+      const input = {
+        sharedProjectionGraph: projectionGraph,
+        sharedProjectionQuads: [
+          { subject: `${author}:ka:1`, predicate: pValue, object: '"new-1"', graph: projectionGraph },
+          { subject: `${author}:ka:2`, predicate: pValue, object: '"new-2"', graph: projectionGraph },
+        ],
+        authorSealGraph: sealGraph,
+        authorSealSubject: seal,
+        authorSealQuads: [
+          { subject: seal, predicate: pValue, object: '"new-seal"', graph: sealGraph },
+        ],
+        currentHead: {
+          graphUri: headGraph,
+          subject: author,
+          predicate: pHead,
+          expectedObject: oldHead,
+          expectedQuads: [{ subject: author, predicate: pHead, object: oldHead, graph: headGraph }],
+          quads: [{ subject: author, predicate: pHead, object: newHead, graph: headGraph }],
+        },
+        subgraphMutationGeneration: {
+          graphUri: stateGraph,
+          subject: mutation,
+          predicate: pGeneration,
+          expectedObject: '"1"',
+          expectedQuads: [{ subject: mutation, predicate: pGeneration, object: '"1"', graph: stateGraph }],
+          quads: [{ subject: mutation, predicate: pGeneration, object: '"2"', graph: stateGraph }],
+        },
+        contextGraphMutationGeneration: {
+          graphUri: stateGraph,
+          subject: cgMutation,
+          predicate: pGeneration,
+          expectedObject: '"10"',
+          expectedQuads: [{ subject: cgMutation, predicate: pGeneration, object: '"10"', graph: stateGraph }],
+          quads: [{ subject: cgMutation, predicate: pGeneration, object: '"11"', graph: stateGraph }],
+        },
+        appliedSet: {
+          graphUri: stateGraph,
+          subject: appliedSet,
+          predicate: pValue,
+          expectedObject: oldHead,
+          expectedQuads: [{ subject: appliedSet, predicate: pValue, object: oldHead, graph: stateGraph }],
+          quads: [{ subject: appliedSet, predicate: pValue, object: newHead, graph: stateGraph }],
+        },
+      };
+
+      try {
+        await store.insert([
+          { subject: `${author}:ka:old`, predicate: pValue, object: '"old"', graph: projectionGraph },
+          { subject: seal, predicate: pValue, object: '"old-seal"', graph: sealGraph },
+          { subject: author, predicate: pHead, object: oldHead, graph: headGraph },
+          { subject: mutation, predicate: pGeneration, object: '"1"', graph: stateGraph },
+          { subject: cgMutation, predicate: pGeneration, object: '"10"', graph: stateGraph },
+          { subject: appliedSet, predicate: pValue, object: oldHead, graph: stateGraph },
+        ]);
+
+        const competingHead = `urn:bg-int:${RUN}:rfc64:head:competing`;
+        const competing = {
+          ...input,
+          currentHead: {
+            ...input.currentHead,
+            quads: [{ subject: author, predicate: pHead, object: competingHead, graph: headGraph }],
+          },
+          sharedProjectionQuads: [
+            { subject: `${author}:ka:competing`, predicate: pValue, object: '"competing"', graph: projectionGraph },
+          ],
+          authorSealQuads: [
+            { subject: seal, predicate: pValue, object: '"competing-seal"', graph: sealGraph },
+          ],
+          subgraphMutationGeneration: {
+            ...input.subgraphMutationGeneration,
+            quads: [{ subject: mutation, predicate: pGeneration, object: '"3"', graph: stateGraph }],
+          },
+          contextGraphMutationGeneration: {
+            ...input.contextGraphMutationGeneration,
+            quads: [{ subject: cgMutation, predicate: pGeneration, object: '"12"', graph: stateGraph }],
+          },
+          appliedSet: {
+            ...input.appliedSet,
+            quads: [{ subject: appliedSet, predicate: pValue, object: competingHead, graph: stateGraph }],
+          },
+        };
+        const results = await Promise.all([
+          store.rfc64AuthorCommitCasV1(input),
+          store.rfc64AuthorCommitCasV1(competing),
+        ]);
+        expect(results.sort()).toEqual(['committed', 'conflict']);
+        const head = await store.query(
+          `SELECT ?o WHERE { GRAPH <${headGraph}> { <${author}> <${pHead}> ?o } }`,
+        );
+        const winner = head.type === 'bindings' ? head.bindings[0]?.o : undefined;
+        expect([newHead, competingHead]).toContain(winner);
+        expect(await store.countQuads(projectionGraph)).toBe(winner === newHead ? 2 : 1);
+        const control = await store.query(
+          `SELECT ?seal ?subgraphGeneration ?contextGraphGeneration ?applied WHERE {
+            GRAPH <${sealGraph}> { <${seal}> <${pValue}> ?seal }
+            GRAPH <${stateGraph}> {
+              <${mutation}> <${pGeneration}> ?subgraphGeneration .
+              <${cgMutation}> <${pGeneration}> ?contextGraphGeneration .
+              <${appliedSet}> <${pValue}> ?applied .
+            }
+          }`,
+        );
+        expect(control.type === 'bindings' ? control.bindings : []).toEqual([
+          winner === newHead
+            ? {
+                seal: '"new-seal"',
+                subgraphGeneration: '"2"',
+                contextGraphGeneration: '"11"',
+                applied: newHead,
+              }
+            : {
+                seal: '"competing-seal"',
+                subgraphGeneration: '"3"',
+                contextGraphGeneration: '"12"',
+                applied: competingHead,
+              },
+        ]);
+      } finally {
+        await Promise.all(graphs.map((graph) => store.dropGraph(graph).catch(() => {})));
+      }
+    },
+    60_000,
+  );
+
+  it(
+    'executes compiler-shaped semantic records and rejects a same-digest different-version predecessor',
+    async () => {
+      const fixture = semanticAuthorCommitFixture();
+      const compiled = compileRfc64SemanticAuthorCommitV1(fixture.input);
+      const graphs = [...normalizeRfc64AuthorCommitCasV1(compiled).referencedGraphs];
+      try {
+        await store.insert([
+          ...semanticRows(fixture.unexpectedHead),
+          ...fixture.expectedTail.flatMap(semanticRows),
+        ]);
+        await expect(store.rfc64AuthorCommitCasV1(compiled)).resolves.toBe('conflict');
+        expect(await store.countQuads(fixture.projectionGraph)).toBe(0);
+        expect(await store.countQuads(fixture.sealGraph)).toBe(0);
+
+        await Promise.all(graphs.map((graph) => store.dropGraph(graph).catch(() => {})));
+        await store.insert([
+          ...semanticRows(fixture.expectedHead),
+          ...fixture.expectedTail.flatMap(semanticRows),
+        ]);
+        await expect(store.rfc64AuthorCommitCasV1(compiled)).resolves.toBe('committed');
+        expect(await store.countQuads(fixture.projectionGraph)).toBe(1);
+        expect(await store.countQuads(fixture.sealGraph)).toBe(14);
+      } finally {
+        await Promise.all(graphs.map((graph) => store.dropGraph(graph).catch(() => {})));
+      }
+    },
+    60_000,
+  );
 });
+
+function semanticAuthorCommitFixture(): Readonly<{
+  input: Rfc64SemanticAuthorCommitInputV1;
+  expectedHead: Extract<Rfc64SemanticRecordV1, { recordType: 'CurrentAuthorCatalogRefV1' }>;
+  unexpectedHead: Extract<Rfc64SemanticRecordV1, { recordType: 'CurrentAuthorCatalogRefV1' }>;
+  expectedTail: readonly Rfc64SemanticRecordV1[];
+  projectionGraph: string;
+  sealGraph: string;
+}> {
+  const networkId = 'otp:20430' as NetworkIdV1;
+  const contextGraphId = (
+    '0x0123456789abcdef0123456789abcdef01234567/99'
+  ) as ContextGraphIdV1;
+  const author = '0x89abcdef0123456789abcdef0123456789abcdef' as EvmAddressV1;
+  const digest = (value: string) => `0x${value.repeat(64)}` as Digest32V1;
+  const projectionGraph = deriveRfc64SharedProjectionGraphIriV1(
+    { contextGraphId, subGraphName: null },
+    assertCanonicalDeterministicUalV1(`did:dkg:${networkId}/${author}/7`),
+  );
+  const coordinate = Object.freeze({
+    contextGraphId,
+    subGraphName: null,
+    authorAddress: author,
+    assertionCoordinate: 'blazegraph-semantic-fixture',
+  }) as CanonicalGraphScopedAuthorSealCoordinateV1;
+  const placement = deriveCanonicalGraphScopedAuthorSealPlacementV1(coordinate);
+  const seal = Object.freeze({
+    assertedAtChainId: '20430',
+    assertedAtKav10Address: '0x4444444444444444444444444444444444444444',
+    assertionFinalizedAt: '2026-08-29T10:00:00.123Z',
+    assertionMerkleRoot: digest('e'),
+    assertionVersion: '1',
+    authorAddress: author,
+    authorAttestationR: digest('1'),
+    authorAttestationVS: digest('2'),
+    authorSchemeVersion: '1',
+    contentScopeVersion: '2',
+    kaUal: `did:dkg:${networkId}/${author}/7`,
+    privateMerkleRoot: null,
+    privateTripleCount: '0',
+    publicTripleCount: '1',
+    reservedKaId: ((BigInt(author) << 96n) | 7n).toString(),
+  }) as CanonicalGraphScopedAuthorSealV1;
+  const expectedHead = semanticRecord('CurrentAuthorCatalogRefV1', {
+    networkId,
+    contextGraphId,
+    governanceChainId: null,
+    governanceContractAddress: null,
+    ownershipTransitionDigest: null,
+    subGraphName: null,
+    authorAddress: author,
+    catalogEra: '1',
+    catalogVersion: '4',
+    catalogHeadDigest: digest('a'),
+  });
+  const nextHead = semanticRecord('CurrentAuthorCatalogRefV1', {
+    ...expectedHead.value,
+    catalogVersion: '5',
+    catalogHeadDigest: digest('b'),
+  });
+  const unexpectedHead = semanticRecord('CurrentAuthorCatalogRefV1', {
+    ...expectedHead.value,
+    catalogVersion: '3',
+  });
+  const expectedSubgraph = semanticRecord('SubgraphMutationGuardV1', {
+    networkId,
+    contextGraphId,
+    subGraphName: null,
+    generation: '4',
+  });
+  const nextSubgraph = semanticRecord('SubgraphMutationGuardV1', {
+    ...expectedSubgraph.value,
+    generation: '5',
+  });
+  const expectedContextGraph = semanticRecord('ContextGraphMutationGuardV1', {
+    networkId,
+    contextGraphId,
+    generation: '8',
+  });
+  const nextContextGraph = semanticRecord('ContextGraphMutationGuardV1', {
+    ...expectedContextGraph.value,
+    generation: '9',
+  });
+  const expectedApplied = semanticRecord('AppliedSubgraphSetRefV1', {
+    networkId,
+    contextGraphId,
+    generation: '8',
+    subgraphIndexEra: '1',
+    subgraphIndexVersion: '3',
+    subgraphCount: '1',
+    appliedDirectoryRootDigest: digest('c'),
+  });
+  const nextApplied = semanticRecord('AppliedSubgraphSetRefV1', {
+    ...expectedApplied.value,
+    generation: '9',
+    appliedDirectoryRootDigest: digest('d'),
+  });
+  return Object.freeze({
+    input: Object.freeze({
+      sharedProjectionGraph: projectionGraph,
+      sharedProjectionQuads: Object.freeze([{
+        subject: 'urn:test:blazegraph-semantic',
+        predicate: 'urn:test:value',
+        object: '"new"',
+        graph: projectionGraph,
+      }]),
+      authorSealGraph: placement.metaGraph,
+      authorSealSubject: placement.subject,
+      authorSealQuads: projectCanonicalGraphScopedAuthorSealRowsV1(seal, coordinate),
+      expectedCurrentHead: expectedHead,
+      nextCurrentHead: nextHead,
+      expectedSubgraphMutation: expectedSubgraph,
+      nextSubgraphMutation: nextSubgraph,
+      expectedContextGraphMutation: expectedContextGraph,
+      nextContextGraphMutation: nextContextGraph,
+      expectedAppliedSet: expectedApplied,
+      nextAppliedSet: nextApplied,
+    }),
+    expectedHead,
+    unexpectedHead,
+    expectedTail: Object.freeze([
+      expectedSubgraph,
+      expectedContextGraph,
+      expectedApplied,
+    ]),
+    projectionGraph,
+    sealGraph: placement.metaGraph,
+  });
+}
+
+function semanticRows(record: Rfc64SemanticRecordV1): Quad[] {
+  return projectRfc64SemanticRecordStoreRowsV1(record)
+    .map(renderRfc64SemanticStoreRowV1);
+}
+
+function semanticRecord<Type extends Rfc64SemanticRecordV1['recordType']>(
+  recordType: Type,
+  value: Extract<Rfc64SemanticRecordV1, { recordType: Type }>['value'],
+): Extract<Rfc64SemanticRecordV1, { recordType: Type }> {
+  return Object.freeze({ recordType, value: Object.freeze(value) }) as Extract<
+    Rfc64SemanticRecordV1,
+    { recordType: Type }
+  >;
+}

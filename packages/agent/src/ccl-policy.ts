@@ -2,6 +2,21 @@ import { createHash } from 'node:crypto';
 import { DKG_ONTOLOGY, sparqlString } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
+export type CclMissingResource = 'policy' | 'policy_binding' | 'approved_policy';
+
+/** A requested CCL resource is absent; safe for HTTP boundaries to map to 404. */
+export class CclResourceNotFoundError extends Error {
+  readonly code = 'CCL_RESOURCE_NOT_FOUND' as const;
+
+  constructor(
+    readonly resource: CclMissingResource,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'CclResourceNotFoundError';
+  }
+}
+
 export interface PublishCclPolicyInput {
   contextGraphId: string;
   name: string;

@@ -8,6 +8,10 @@
 import type { DkgConfig } from './config.js';
 import {
   classifySparqlOperation,
+  serializeAgentListOptions,
+  type AgentConnectionStatus,
+  type AgentListFilters,
+  type AgentListPageOptions,
   type PublicQueryResponse,
   type PublicQueryResult,
 } from '@origintrail-official/dkg-core';
@@ -15,6 +19,8 @@ import type {
   QueryCatalogReadResponse,
   QueryCatalogWriteQuad,
 } from '@origintrail-official/dkg-core/query-catalog';
+
+export type { AgentListFilters, AgentListPageOptions } from '@origintrail-official/dkg-core';
 
 export interface SparqlBinding {
   [key: string]: {
@@ -558,10 +564,29 @@ export class DkgClient {
     return this.request('GET', '/api/agent/identity');
   }
 
-  /** List registered agents (human + AI) + their live connection health. */
-  async listAgents(): Promise<unknown[]> {
-    const r = await this.request<{ agents?: unknown[] }>('GET', '/api/agents');
-    return r.agents ?? [];
+  /**
+   * List registered agents (human + AI) + their live connection health.
+   *
+   * The complete-list convenience its consumers rely on (they build peer name
+   * maps). Filters that cannot truncate are accepted; anything that CAN
+   * truncate (limit/cursor) lives on {@link listAgentsPage}, which returns
+   * the continuation state — a truncating filter on a method that returns a
+   * bare array would make 10-of-11 rows indistinguishable from a complete
+   * result.
+   */
+  async listAgents(filters: AgentListFilters = {}): Promise<AgentListRow[]> {
+    const { agents } = await this.listAgentsPage(filters);
+    return agents;
+  }
+
+  /** One page of the agent registry, with the state needed to continue it. */
+  async listAgentsPage(options: AgentListPageOptions = {}): Promise<AgentListPage> {
+    const qs = serializeAgentListOptions(options);
+    const r = await this.request<{ agents?: AgentListRow[]; nextCursor?: string }>(
+      'GET',
+      `/api/agents${qs ? `?${qs}` : ''}`,
+    );
+    return { agents: r.agents ?? [], ...(r.nextCursor !== undefined ? { nextCursor: r.nextCursor } : {}) };
   }
 
   // ── Agent-to-agent chat (Phase 1: agent debug chat RFC) ────────
@@ -1444,3 +1469,32 @@ export function bindingValue(cell: SparqlBinding[string] | undefined): string {
   if (typeof cell === 'string') return cell;
   return cell.value ?? '';
 }
+
+/**
+ * A registry row as GET /api/agents actually returns it. Identity fields and
+ * the enrichment block are GUARANTEES of the route (the SPARQL selection
+ * requires agent/name/peerId; enrichment always stamps connection state), so
+ * they are required here — an all-optional bag would force defensive code on
+ * facts the daemon promises. The index signature keeps forward-compatible
+ * extra response data readable without a cast.
+ */
+export interface AgentListRow {
+  agentUri: string;
+  name: string;
+  peerId: string;
+  connectionStatus: AgentConnectionStatus;
+  connectionTransport: string | null;
+  connectionDirection: string | null;
+  connectedSinceMs: number | null;
+  lastSeen: number | null;
+  latencyMs: number | null;
+  framework?: string;
+  nodeRole?: string;
+  [key: string]: unknown;
+}
+
+export interface AgentListPage {
+  agents: AgentListRow[];
+  nextCursor?: string;
+}
+

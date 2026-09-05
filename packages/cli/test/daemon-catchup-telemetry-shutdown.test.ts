@@ -14,6 +14,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import type { CatchupJobResult } from '../src/catchup-runner.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 type Listener = (...args: unknown[]) => void;
 
@@ -206,6 +207,7 @@ interface HarnessOptions {
   isPrivate?: boolean;
   allowedAgents?: string[];
   callerAddress?: string;
+  authorityUnavailable?: boolean;
 }
 
 async function createHarness(opts: HarnessOptions = {}) {
@@ -225,6 +227,30 @@ async function createHarness(opts: HarnessOptions = {}) {
   }> = [];
 
   const agent = {
+    resolveContextGraphReadAuthority: async () => {
+      if (opts.authorityUnavailable) return {
+        outcome: 'unavailable' as const,
+        source: 'registered-chain' as const,
+        reason: 'test-chain-unavailable',
+        metadataBootstrap: 'eligible' as const,
+      };
+      if (opts.isPrivate !== true) return {
+        outcome: 'allowed' as const,
+        source: 'legacy-local' as const,
+        reason: 'test-public',
+        metadataBootstrap: 'eligible' as const,
+      };
+      const caller = (opts.callerAddress
+        ?? '0x0000000000000000000000000000000000000001').toLowerCase();
+      const allowed = (opts.allowedAgents ?? [])
+        .some((address) => address.toLowerCase() === caller);
+      return {
+        outcome: allowed ? 'allowed' as const : 'denied' as const,
+        source: 'registered-chain' as const,
+        reason: allowed ? 'chain-participant' : 'agent-not-in-chain-roster',
+        metadataBootstrap: allowed ? 'eligible' as const : 'forbidden' as const,
+      };
+    },
     getContextGraphAllowedAgents: async () => opts.allowedAgents ?? [],
     getSubscribedContextGraphs: () => subscriptions,
     subscribeToContextGraph: (
@@ -244,6 +270,7 @@ async function createHarness(opts: HarnessOptions = {}) {
     markContextGraphSubscriptionState: (id: string, patch: Record<string, unknown>) => {
       subscriptions.set(id, { ...subscriptions.get(id), ...patch });
     },
+    reconcileRfc64CatalogResponsibilityV1: async () => undefined,
     hasConfirmedMetaState: async () => opts.hasConfirmedMeta ?? true,
     isPrivateContextGraph: async () => opts.isPrivate ?? false,
     resolveAgentByToken: () => undefined,
@@ -281,7 +308,8 @@ async function createHarness(opts: HarnessOptions = {}) {
       assertionImportLocks: new Map(), vectorStore: {}, embeddingProvider: null,
       validTokens: new Set(), apiHost: '127.0.0.1', apiPortRef: { value: 0 },
       routePlugins: [], url, path: url.pathname,
-      requestToken: undefined, requestAgentAddress: undefined,
+      requestAgentAddress: undefined,
+      authentication: requestAuthentication({ kind: 'nodeOperator' }),
     } as any;
     await handleContextGraphRoutes(routeContext);
     if (!res.writableEnded) await handleQueryRoutes(routeContext);
@@ -388,8 +416,8 @@ describe('I8 — partial bounded jobs retain their terminal label', () => {
 });
 
 describe('I7 — one requests_total point per subscribe-route return', () => {
-  it('reaches all seven `result` values, exactly one point per return', async () => {
-    // A5. Requests and jobs are N:1 — this test alone produces seven request
+  it('reaches all eight `result` values, exactly one point per return', async () => {
+    // A5. Requests and jobs are N:1 — this test alone produces eight request
     // points and only two job points (one walk, one synthetic).
     daemonState.catchupRunner = createCatchupRunner({} as unknown as DKGAgent);
     const harness = await createHarness({
@@ -415,6 +443,20 @@ describe('I7 — one requests_total point per subscribe-route return', () => {
       expect((await harness.subscribe({ contextGraphId: 'cg-curated' })).status).toBe(403);
     } finally {
       await harness.close();
+    }
+
+    const unavailable = await createHarness({ authorityUnavailable: true });
+    try {
+      const response = await unavailable.subscribe({ contextGraphId: 'cg-authority-outage' });
+      expect(response.status).toBe(503);
+      expect(response.body).toMatchObject({
+        code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+        retryable: true,
+      });
+      expect(unavailable.subscriptions.size).toBe(0);
+      expect(unavailable.catchupTracker.jobs.size).toBe(0);
+    } finally {
+      await unavailable.close();
     }
 
     const open = await createHarness({
@@ -446,12 +488,12 @@ describe('I7 — one requests_total point per subscribe-route return', () => {
       expect(closedWalk.status).toBe(503);
       expect(closedWalk.body.code).toBe('CATCHUP_SHUTTING_DOWN');
 
-      // All seven, one point per route return, in the order they were made.
+      // All eight, one point per route return, in the order they were made.
       expect(metrics.results()).toEqual([
-        'bad_request', 'forbidden',
+        'bad_request', 'forbidden', 'authority_unavailable',
         'ready_synthetic', 'ready_replay', 'queued', 'deduped', 'shutting_down',
       ]);
-      // …and N:1 against jobs: seven request points, one job point (the
+      // …and N:1 against jobs: eight request points, one job point (the
       // synthetic mint). Nothing else here created a job identity.
       expect(metrics.jobs()).toHaveLength(1);
       expect(metrics.jobs()[0].attrs).toMatchObject({ status: 'done', admission: 'synthetic' });

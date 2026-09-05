@@ -25,12 +25,26 @@ import {
   buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
+import {
+  buildRfc64AuthorCommitCasUpdateFromNormalizedV1,
+  buildRfc64AuthorCommitCasUpdateV1,
+  executeRfc64AuthorCommitCasV1,
+  type Rfc64AuthorCommitCasInputV1,
+  type Rfc64AuthorCommitCasResultV1,
+  type Rfc64AuthorCommitCasUpdateV1,
+} from '../rfc64-author-commit-cas.js';
 import { quadsToNQuads } from '../bounded-rdf.js';
 import {
   assertQuadLiteralsMutf8Safe,
   classifySparqlOperation,
   JAVA_WRITE_UTF_MAX_BYTES,
+  type Rfc64SemanticReadOperationV1,
 } from '@origintrail-official/dkg-core';
+import {
+  executeRfc64ExactBindingsReadCapabilityV1,
+  executeRfc64SemanticReadCapabilityV1,
+  type Rfc64ExactBindingsReadOperationV1,
+} from '../rfc64-exact-bindings-read-capability.js';
 
 // SWM DATA segment (bucket `…/_shared_memory` + per-KA `…/_shared_memory/{author}/{n}`),
 // NOT the sibling `…/_shared_memory_meta`. Kept in sync with the sync-ingest guard.
@@ -41,8 +55,10 @@ type OxTerm = oxigraph.Term;
 type OxQuad = oxigraph.Quad;
 
 export class OxigraphStore implements TripleStore {
+  readonly writeRevisionCoverage = 'all-writers' as const;
   readonly queryCancellation = 'pre-dispatch' as const;
-
+  readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
+  readonly rfc64SemanticReadCertifiedV1 = true as const;
   private store: OxStore;
   private persistPath: string | undefined;
   // #1609: per-graph write generations, bumped on every local mutation (the
@@ -65,6 +81,20 @@ export class OxigraphStore implements TripleStore {
     }
   }
 
+  rfc64ExactBindingsReadV1(
+    operation: Rfc64ExactBindingsReadOperationV1,
+    options?: Pick<TripleStoreQueryOptions, 'signal'>,
+  ) {
+    return executeRfc64ExactBindingsReadCapabilityV1(this, operation, options);
+  }
+
+  rfc64SemanticReadV1(
+    operation: Rfc64SemanticReadOperationV1,
+    options?: Pick<TripleStoreQueryOptions, 'signal'>,
+  ) {
+    return executeRfc64SemanticReadCapabilityV1(this, operation, options);
+  }
+
   /**
    * Hydrate the in-memory store from a persisted N-Quads dump on disk.
    *
@@ -74,8 +104,8 @@ export class OxigraphStore implements TripleStore {
    * immediately rather than discovering empty data later through queries.
    *
    * Previously this swallowed all errors and started empty silently — that
-   * was the proximate cause of the WM persistence regression documented in
-   * docs/bugs/wm-persistence-regression.md.
+   * was the proximate cause of the WM persistence regression. See the current
+   * contract in packages/storage/README.md#oxigraph-persistence-contract.
    */
   private hydrateSync(filePath: string): void {
     if (!existsSync(filePath)) return;
@@ -149,8 +179,8 @@ export class OxigraphStore implements TripleStore {
    * Previously a single `writeFile(persistPath, dump)` left the store
    * vulnerable to torn writes on SIGKILL (the file would be partially
    * rewritten, then hydrateSync would fail-then-swallow on next start).
-   * This is the proximate fix for the catastrophic data-loss mode
-   * documented in docs/bugs/wm-persistence-regression.md.
+   * This is the proximate fix for the catastrophic data-loss mode. See the
+   * current contract in packages/storage/README.md#oxigraph-persistence-contract.
    *
    * Error model: this method THROWS on any write/fsync/rename failure
    * (ENOSPC, EACCES, EROFS, EXDEV, …). The background debounced flush
@@ -433,6 +463,53 @@ export class OxigraphStore implements TripleStore {
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
   }
 
+  async rfc64AuthorCommitCasV1(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: TripleStoreQueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    throwIfAborted(options?.signal);
+    return this.executeRfc64AuthorCommitCasPlanV1(
+      buildRfc64AuthorCommitCasUpdateV1(input),
+    );
+  }
+
+  /** Worker-only transport boundary for the structured-cloned internal plan. */
+  async rfc64AuthorCommitCasNormalizedV1(
+    input: unknown,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    return this.executeRfc64AuthorCommitCasPlanV1(
+      buildRfc64AuthorCommitCasUpdateFromNormalizedV1(input),
+    );
+  }
+
+  private async executeRfc64AuthorCommitCasPlanV1(
+    plan: Rfc64AuthorCommitCasUpdateV1,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
+    const guarded = plan.semanticQuads.filter(
+      (quad) => !(quad.graph && SHARED_MEMORY_DATA_SEGMENT_RE.test(quad.graph)),
+    );
+    if (guarded.length > 0) {
+      assertQuadLiteralsMutf8Safe(guarded, {
+        maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+        label: 'OxigraphStore.rfc64AuthorCommitCasV1',
+      });
+    }
+    return executeRfc64AuthorCommitCasV1({
+      executeUpdate: () => this.store.update(plan.update),
+      readReceipt: () => this.store.query(plan.receiptAsk),
+      cleanup: () => {
+        try {
+          this.store.update(plan.cleanup);
+        } finally {
+          this.scheduleFlush();
+        }
+      },
+      onCommitted: () => {
+        this.writeGen.recordWrite({ kind: 'graphs', graphs: [...plan.touchedGraphs] });
+      },
+    });
+  }
+
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
     throwIfAborted(options?.signal);
     // Index-read enumeration shared with SparqlHttpStore — see the rationale on
@@ -525,8 +602,8 @@ export class OxigraphStore implements TripleStore {
    * its own — otherwise `flushNow()` short-circuits on `this.flushing`
    * and silently drops any inserts that landed between the in-flight
    * dump and the close call. (That's the "lost the last few assertions"
-   * mode in docs/bugs/wm-persistence-regression.md after the atomic-write
-   * fix landed.)
+   * mode closed by the contract in
+   * packages/storage/README.md#oxigraph-persistence-contract.)
    *
    * THROWS if the final flush fails — see `flush()` for the same error
    * contract. The agent's `stop()` path catches this and logs but does

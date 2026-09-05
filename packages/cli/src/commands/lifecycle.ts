@@ -19,7 +19,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
-  loadConfig, saveConfig, configExists, configPath,
+  loadConfig, saveConfig, configExists, configPath, exitOnStoreConfigErrors,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
@@ -169,6 +169,8 @@ program
       console.error('No config found. Run "dkg init" first.');
       process.exit(1);
     }
+
+    exitOnStoreConfigErrors(await loadConfig(), (message) => console.error(message));
 
     const pid = await readPid();
     if (pid && isProcessRunning(pid)) {

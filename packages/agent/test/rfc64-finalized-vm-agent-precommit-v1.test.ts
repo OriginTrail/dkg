@@ -77,6 +77,7 @@ function privateFinalizedSnapshot(issuedAt = '1700000000000') {
 
 function finalizedChainFixture(
   assertionRoot: Digest32V1 = RFC64_VM_ASSERTION_ROOT,
+  assertionVersion = '2',
 ): FinalizedVmLoopbackFixtureConfigV1 {
   return {
     accessPolicy: 1,
@@ -86,7 +87,7 @@ function finalizedChainFixture(
     knowledgeAssetStorageAddress: RFC64_VM_KA_STORAGE,
     assets: [{
       assertionRoot,
-      assertionVersion: '2',
+      assertionVersion,
       authorAddress: RFC64_VM_AUTHOR,
       kaId: rfc64VmPackKaId(1n),
       publisherAddress: RFC64_VM_PUBLISHER,
@@ -102,8 +103,13 @@ function finalizedChainFixture(
   };
 }
 
-async function liveRpcEndpoint(assertionRoot?: Digest32V1): Promise<string> {
-  const rpc = createFinalizedVmLoopbackRpcV1(finalizedChainFixture(assertionRoot));
+async function liveRpcEndpoint(
+  assertionRoot?: Digest32V1,
+  assertionVersion?: string,
+): Promise<string> {
+  const rpc = createFinalizedVmLoopbackRpcV1(
+    finalizedChainFixture(assertionRoot, assertionVersion),
+  );
   const server = await rpcHarness.start((call, response) => {
     try {
       sendJsonRpcResult(response, call, rpc.respond(call.method, call.params));
@@ -116,6 +122,85 @@ async function liveRpcEndpoint(assertionRoot?: Digest32V1): Promise<string> {
 
 
 describe('RFC-64 finalized VM agent precommit', () => {
+  it('requires exact durable VM v1 before applying a catalog whose SWM row is v2', async () => {
+    const graphlessProjection: Quad[] = [{
+      subject: 'urn:rfc64:existing-finalized-v1',
+      predicate: 'urn:rfc64:value',
+      object: '"v1"',
+      graph: '',
+    }];
+    const assertionRoot = ethers.hexlify(computeFlatKCRootV10(
+      graphlessProjection,
+      [],
+    )).toLowerCase() as Digest32V1;
+    const [finalizedV1, newerSwmV2] = await Promise.all([
+      createRfc64FinalizedVmPlacementFixture({
+        assertionRoot,
+        assertionVersion: '1',
+        publicTripleCount: graphlessProjection.length,
+      }),
+      createRfc64FinalizedVmPlacementFixture({
+        assertionRoot,
+        assertionVersion: '2',
+        publicTripleCount: graphlessProjection.length,
+      }),
+    ]);
+    const endpoint = await liveRpcEndpoint(assertionRoot, '1');
+    const options = baseOptions();
+    const { store } = options;
+    const coldHandler = createRfc64FinalizedVmAgentPrecommitV1({
+      ...options,
+      acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
+      rpcEndpoints: [endpoint],
+    });
+    const newerPlan = Object.freeze({
+      ...plan(),
+      rows: Object.freeze([newerSwmV2]),
+    });
+
+    await expect(coldHandler(
+      newerPlan,
+      new AbortController().signal,
+    )).rejects.toThrow(/exact existing finalized VM proof failed/u);
+
+    const vmGraph = contextGraphLayerUri(
+      RFC64_VM_CONTEXT_GRAPH_NAME,
+      MemoryLayer.VerifiableMemory,
+      RFC64_VM_AUTHOR,
+      1,
+    );
+    await expect(store.hasGraph(vmGraph)).resolves.toBe(false);
+
+    const swmGraph = contextGraphLayerUri(
+      RFC64_VM_CONTEXT_GRAPH_NAME,
+      MemoryLayer.SharedWorkingMemory,
+      RFC64_VM_AUTHOR,
+      1,
+    );
+    await store.insert(graphlessProjection.map((quad) => ({ ...quad, graph: swmGraph })));
+    const exactHandler = createRfc64FinalizedVmAgentPrecommitV1({
+      ...options,
+      acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
+      rpcEndpoints: [endpoint],
+    });
+    const exactTransaction = await exactHandler(Object.freeze({
+      ...plan(),
+      rows: Object.freeze([finalizedV1]),
+    }), new AbortController().signal);
+    expect(exactTransaction.materializationReceipts).toHaveLength(1);
+    exactTransaction.commit();
+
+    const warmHandler = createRfc64FinalizedVmAgentPrecommitV1({
+      ...options,
+      acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
+      rpcEndpoints: [endpoint],
+    });
+    const warmTransaction = await warmHandler(newerPlan, new AbortController().signal);
+    expect(warmTransaction.materializationReceipts).toEqual([]);
+    warmTransaction.commit();
+    await expect(store.hasGraph(vmGraph)).resolves.toBe(true);
+  });
+
   it('leaves finalized SWM retirement to the catalog applied-head coordinator', async () => {
     const graphlessProjection: Quad[] = [{
       subject: 'urn:rfc64:post-commit-swm-retirement',
@@ -157,6 +242,20 @@ describe('RFC-64 finalized VM agent precommit', () => {
       rows: Object.freeze([placement]),
     }), new AbortController().signal);
 
+    expect(transaction).toMatchObject({
+      kind: 'rfc64-finalized-vm-agent-precommit-transaction-v1',
+      materializationReceipts: [{
+        kaId: rfc64VmPackKaId(1n),
+        ordinal: '0',
+        ual: rfc64VmUal(1n),
+        status: 'materialized',
+        vmGraphIri: vmGraph,
+        tripleCount: '1',
+      }],
+    });
+    expect(Object.isFrozen(transaction?.materializationReceipts)).toBe(true);
+    expect(Object.isFrozen(transaction?.materializationReceipts[0])).toBe(true);
+
     await expect(store.hasGraph(swmGraph)).resolves.toBe(true);
     await expect(store.hasGraph(vmGraph)).resolves.toBe(true);
     await transaction?.commit();
@@ -170,7 +269,10 @@ describe('RFC-64 finalized VM agent precommit', () => {
     const getEvmChainId = vi.fn(async () => BigInt(RFC64_VM_CHAIN_ID));
     const getKnowledgeAssetStorageAddress = vi.fn(async () => RFC64_VM_KA_STORAGE);
     const getKnowledgeAssetsLifecycleAddress = vi.fn(async () => RFC64_VM_KA_STORAGE);
-    const materialize = vi.fn();
+    const materialize = Object.assign(vi.fn(), {
+      commit: vi.fn(),
+      rollback: vi.fn(async () => {}),
+    });
     const handler = createRfc64FinalizedVmAgentPrecommitV1({
       ...baseOptions(),
       acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),

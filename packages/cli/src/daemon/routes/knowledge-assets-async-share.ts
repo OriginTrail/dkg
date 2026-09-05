@@ -23,6 +23,7 @@
 // Shared logic lives in `./shared-assertion-helpers.js`.
 
 import type { RequestContext } from "./context.js";
+import { authenticatedAgentAddress } from '../../auth.js';
 import { respondTerminalClearOutcome } from "./terminal-clear-response.js";
 import {
   jsonResponse,
@@ -60,10 +61,8 @@ import {
 // serves swm/share-async inline; this standalone faithful-port handler is kept in
 // lockstep so either entry point behaves identically.)
 export async function handleKaShareAsyncEnqueue(ctx: RequestContext, name: string): Promise<void> {
-  const { req, res, agent, requestToken } = ctx;
-  const writePreflightCallerAgentAddress = requestToken
-    ? agent.resolveAgentByToken(requestToken)
-    : undefined;
+  const { req, res, agent, authentication } = ctx;
+  const writePreflightCallerAgentAddress = authenticatedAgentAddress(authentication);
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,
     allowLocalExactFallback: !writePreflightCallerAgentAddress,

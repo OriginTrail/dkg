@@ -15,7 +15,7 @@ import {
   serializeJob,
   serializeJobRecord,
 } from '../src/async-lift-control-plane.js';
-import { KA_VM_VALIDATION, kaVmPublishRequest } from './_helpers/ka-vm-publish.js';
+import { KA_VM_VALIDATION, kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 
 // #1863 — writeJob persists a job transition via the atomic
 // tryReplaceSubjectAtomically capability so a lock-free reader racing a
@@ -168,7 +168,7 @@ describe('#1863 async-lift writeJob atomicity', () => {
   });
 
   it('falls back when a store implements replaceSubject but refuses it (non-atomic backend)', async () => {
-    // Mirrors SparqlHttpStore with atomicUpdates:false: replaceSubject is present
+    // Mirrors a best-effort SparqlHttpStore: replaceSubject is present
     // but raises a clean capability refusal, so the publisher must delete-then-insert.
     const inner = new OxigraphStore();
     let replaceSubjectCalls = 0;

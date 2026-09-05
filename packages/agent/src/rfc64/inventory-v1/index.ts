@@ -19,6 +19,7 @@ export {
   type CandidateSessionGcBatchResultV1,
   type CandidateSessionV1,
   type CompareAndSwapAppliedCatalogHeadInputV1,
+  type DeleteAppliedCatalogHeadInputV1,
   type CompareAndSwapSwmAuthorInventoryInputV1,
   type InventoryV1CandidateErrorCode,
   type Rfc64InventoryV1CandidateApi,

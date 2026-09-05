@@ -20,6 +20,8 @@ on:
   # develop branch that batches unrelated failures into one large PR.
   merge_group:
   workflow_dispatch:
+  schedule:
+    - cron: '23 2 * * *'
 
 concurrency:
   # Per-PR / per-branch lock: cancels any earlier in-flight run for the
@@ -38,6 +40,10 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  DKG_PROPERTY_RUNS: ${{ github.event_name == 'schedule' && '1000' || '100' }}
+  DKG_PROPERTY_SEED: ${{ github.event_name == 'schedule' && github.run_number || '640905' }}
+
 jobs:
   # ------------------------------------------------------------------
   # Produce one fail-closed test plan for every workflow in this repository.
@@ -54,6 +60,10 @@ jobs:
     outputs:
       full_ci: ${{ steps.plan.outputs.full_ci }}
       run_node: ${{ steps.plan.outputs.run_node }}
+      # The protected-history controller pin predates this capability output.
+      # Keep its trusted lane outputs as a compatibility path until a reviewed
+      # controller rotation after merge; never execute candidate policy here.
+      node_test_artifacts: ${{ steps.plan.outputs.node_test_artifacts || (steps.plan.outputs.tornado_core == 'true' || steps.plan.outputs.tornado_publisher == 'true' || steps.plan.outputs.tornado_agent == 'true' || steps.plan.outputs.bura_cli == 'true' || steps.plan.outputs.kosava_hardhat_plugins == 'true') }}
       tornado_core: ${{ steps.plan.outputs.tornado_core }}
       tornado_blazegraph: ${{ steps.plan.outputs.tornado_blazegraph }}
       tornado_publisher: ${{ steps.plan.outputs.tornado_publisher }}
@@ -175,6 +185,8 @@ jobs:
   # cache repeated builds on the same branch are fast.
   # ------------------------------------------------------------------
   build:
+    outputs:
+      test_matrices: ${{ steps.test-matrices.outputs.matrices }}
     name: Build packages
     needs: changes
     if: needs.changes.outputs.run_node == 'true'
@@ -184,6 +196,9 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+      - name: Emit canonical test matrices
+        id: test-matrices
+        run: node scripts/ci/emit-test-matrices.mjs
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -283,6 +298,16 @@ jobs:
 
       - name: Test repository scripts
         run: pnpm run test:scripts
+      - name: Verify every test has an execution route
+        run: pnpm test:inventory
+      - name: Upload test execution inventory
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-execution-inventory
+          path: test-inventory.json
+          retention-days: 14
+          if-no-files-found: warn
 
       # W1 §8.3 packet reachability. This job is the right home because it is
       # the one lane that installs the full workspace without sharding, and the
@@ -315,12 +340,14 @@ jobs:
         run: |
           set -euo pipefail
           # Collect every emitted output: tsc dist/, optional Vite dist-ui/,
-          # and the generated network/ dir the CLI copies during build.
+          # the nested Prime extension/dist, and the generated network/ dir
+          # the CLI copies during build.
           mapfile -t PATHS < <(
-            find packages -maxdepth 2 -type d \
+            find packages -maxdepth 3 -type d \
               \( -name dist -o -name dist-ui -o -name network \) \
               2>/dev/null | sort -u
           )
+          test -d packages/adapter-prime-agent/extension/dist
           echo "Packing ${#PATHS[@]} output dirs…"
           tar -czf /tmp/build-outputs.tgz "${PATHS[@]}"
           ls -lh /tmp/build-outputs.tgz
@@ -342,7 +369,7 @@ jobs:
   evm-node-test-artifacts:
     name: Compile EVM test artifacts (0.8.20/london)
     needs: changes
-    if: needs.changes.outputs.tornado_core == 'true' || needs.changes.outputs.bura_cli == 'true' || needs.changes.outputs.kosava_hardhat_plugins == 'true'
+    if: needs.changes.outputs.node_test_artifacts == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -401,6 +428,9 @@ jobs:
   # chain shard gets its own node and test context, so no state is shared.
   # ------------------------------------------------------------------
   tornado-core:
+    env:
+      DKG_CI_COVERAGE: '1'
+      DKG_CI_ROW: ${{ matrix.row }}
     name: "Tornado: ${{ matrix.label }}"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_core == 'true'
@@ -408,20 +438,7 @@ jobs:
     timeout-minutes: 10
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - label: core + RDF + storage
-            suite: core
-            shard: 0
-          - label: chain [1/3]
-            suite: chain
-            shard: 1
-          - label: chain [2/3]
-            suite: chain
-            shard: 2
-          - label: chain [3/3]
-            suite: chain
-            shard: 3
+      matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['tornado-core'] }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -439,36 +456,22 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: ./.github/actions/restore-evm-node-test-artifacts
         if: matrix.suite == 'chain'
-        with:
-          name: evm-node-test-artifacts
-          path: /tmp
-      - name: Restore EVM test artifacts
-        if: matrix.suite == 'chain'
-        run: tar -xzf /tmp/evm-node-test-artifacts.tgz
 
-      - name: Core, RDF utilities, and storage tests
+      - name: Run canonical test row
+        run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
+      - name: Authority mutation pilot
         if: matrix.suite == 'core'
-        run: |
-          node scripts/ci/run-vitest-junit.mjs \
-            --lane core
-          node scripts/ci/run-vitest-junit.mjs \
-            --lane rdf-utils
-          node scripts/ci/run-vitest-junit.mjs \
-            --lane storage
-      - name: "Chain tests (shard ${{ matrix.shard }}/3)"
-        if: matrix.suite == 'chain'
-        env:
-          SHARD_ID: ${{ matrix.shard }}
-        run: |
-          set -euo pipefail
-          mapfile -t SHARD_FILES < <(node scripts/ci/plan-vitest-shard.mjs chain "$SHARD_ID")
-          test "${#SHARD_FILES[@]}" -gt 0
-          node scripts/ci/run-vitest-junit.mjs \
-            --lane chain --shard "${SHARD_ID}" \
-            -- "${SHARD_FILES[@]}"
-
+        run: pnpm test:mutation
+      - name: Upload mutation results
+        if: always() && matrix.suite == 'core'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: authority-mutation-report
+          path: reports/mutation/
+          retention-days: 14
+          if-no-files-found: warn
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit
@@ -501,7 +504,7 @@ jobs:
   tornado-blazegraph:
     name: "Tornado: storage Blazegraph integration (live server)"
     needs: [changes, build]
-    if: needs.changes.outputs.tornado_blazegraph == 'true'
+    if: needs.changes.outputs.tornado_blazegraph == 'true' || needs.changes.outputs.tornado_agent == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     services:
@@ -540,10 +543,11 @@ jobs:
           echo "::error::Blazegraph did not become ready within 120s"
           exit 1
 
-      - name: "Storage Blazegraph integration tests (no mocks)"
+      - name: "Storage and RFC-64 rollout Blazegraph integration tests (no mocks)"
         env:
-          # Stock image ships the default `kb` namespace; that's all the
-          # adapter needs (it isolates per-test via unique GRAPH IRIs).
+          # Stock image ships the default `kb` namespace. Storage tests isolate
+          # through unique GRAPH IRIs; the rollout certificate derives the
+          # namespace API and creates separate temporary author/receiver stores.
           BLAZEGRAPH_TEST_URL: http://127.0.0.1:9999/bigdata/namespace/kb/sparql
         # term-canon-blazegraph-oracle: cross-backend V10 leaf agreement (OT-RFC-57)
         # — proves an oxigraph node and a Blazegraph node compute the SAME merkle
@@ -554,8 +558,20 @@ jobs:
         # isolate assertions, but the 2.1.5 bulk-load stream is namespace-global:
         # concurrent inserts intermittently fail with `IllegalStateException:
         # STREAM` and leave later requests timing out. Keep the unit lanes
-        # parallel; serialize only these two live-server files.
-        run: pnpm --filter @origintrail-official/dkg-storage exec vitest run --no-file-parallelism test/blazegraph.integration.test.ts test/term-canon-blazegraph-oracle.test.ts
+        # parallel; serialize only these live-server files.
+        run: |
+          DKG_REQUIRE_BLAZEGRAPH=1 pnpm test:conformance
+          pnpm --filter @origintrail-official/dkg-storage exec vitest run --no-file-parallelism test/blazegraph.integration.test.ts test/term-canon-blazegraph-oracle.test.ts test/rfc64-semantic-read-gateway.blazegraph.integration.test.ts test/rfc64-shared-projection-stream.blazegraph.integration.test.ts
+          DKG_RFC64_GATE1_STORE_BACKEND=blazegraph node --import tsx --test devnet/rfc64-gate1-public-open/rollout-store-fixture.test.ts devnet/rfc64-gate1-public-open/rollout-transition.test.ts
+
+      - name: Upload store conformance packet
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: storage-conformance-evidence
+          path: test-systems/.runtime/storage-conformance.json
+          retention-days: 14
+          if-no-files-found: error
 
   # ------------------------------------------------------------------
   # Tornado publisher lane — sharded across 4 parallel runners.
@@ -572,15 +588,17 @@ jobs:
   #             long-pole file isn't isolated to one runner anymore
   # ------------------------------------------------------------------
   tornado-publisher:
-    name: "Tornado: publisher [${{ matrix.shard }}/4]"
-    needs: [changes, build]
+    env:
+      DKG_CI_COVERAGE: '1'
+      DKG_CI_ROW: ${{ matrix.row }}
+    name: "Tornado: publisher [${{ matrix.shard }}/${{ matrix.shards }}]"
+    needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_publisher == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
+      matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['tornado-publisher'] }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -598,52 +616,37 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - name: "Publisher tests (shard ${{ matrix.shard }}/4)"
-        run: |
-          node scripts/ci/run-vitest-junit.mjs \
-            --lane publisher --shard ${{ matrix.shard }} \
-            -- --shard=${{ matrix.shard }}/4
+      # Publisher globalSetup deploys the same Hardhat contracts as chain/CLI.
+      # Restore the shared compiler outputs before starting its isolated node.
+      - uses: ./.github/actions/restore-evm-node-test-artifacts
+      - name: "Publisher tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
+        run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit
         with:
-          artifact-name: vitest-publisher-${{ matrix.shard }}-of-4
+          artifact-name: vitest-publisher-${{ matrix.shard }}-of-${{ matrix.shards }}
 
   # ------------------------------------------------------------------
-  # Tornado agent lane — the slowest Node suite, sharded across 10 runners.
-  # Sharding history:
-  #   3 shards → 6+ min each (wall-clock tail)
-  #   4 shards → ~4.5 min each (still the gating tail)
-  #   8 shards → ~3m-3m 49s each (slowest shard 4m 16s → total 5m 18s)
-  #  10 shards --shard=N/M (vitest hash) → slowest 4m 22s → total 4m 53s
-  #  10 shards greedy bin-packed ← current. Three files dominate hook
-  #           wall-clock (e2e-privacy 47s, e2e-publish-protocol 43s,
-  #           e2e-flows 39s body + ~2 min of beforeAll hooks each).
-  #           vitest's default --shard=N/M hashes files to shards and
-  #           can land multiple heavies together (shard 8/10 previously
-  #           got e2e-publish-protocol + e2e-workspace-sync + gossip-
-  #           validation = ~80s body + stacked hooks → 4m 22s ceiling).
-  #
-  #           Greedy bin-packing using historical per-file weights gives
-  #           each of the top-3 heavies its own shard and distributes
-  #           the remaining ~37 files evenly across the rest. Projected
-  #           ceiling is shard 1 (e2e-privacy alone, ~3m 30s total).
-  #
-  #           Weights live in `scripts/ci-shard-agent.mjs` in this
-  #           package and are refreshed whenever per-file timings shift
-  #           meaningfully — unknown files default to a light weight and
-  #           fall into the lightest bin automatically.
+  # Agent tests: four real-Hardhat shards and six hermetic shards using the
+  # existing unit config. Both sets come from Vitest discovery, are disjoint,
+  # and together cover the full package suite. JUnit weights include every
+  # measured file; unknown files receive a conservative 60s estimate. The last
+  # unit shard reserves time for the rollout/Gate 1 evidence steps below.
+  # See scripts/ci/plan-agent-shards.mjs and scripts/ci/timings/README.md.
   # ------------------------------------------------------------------
   tornado-agent:
-    name: "Tornado: agent [${{ matrix.shard }}/10]"
-    needs: [changes, build]
+    env:
+      DKG_CI_COVERAGE: '1'
+      DKG_CI_ROW: ${{ matrix.row }}
+    name: "Tornado: agent [${{ matrix.shard }}/${{ matrix.shards }}]"
+    needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_agent == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+      matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['tornado-agent'] }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -661,22 +664,20 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - name: "Agent tests (shard ${{ matrix.shard }}/10)"
-        working-directory: packages/agent
-        run: |
-          set -euo pipefail
-          mapfile -t SHARD_FILES < <(node scripts/ci-shard-agent.mjs ${{ matrix.shard }} 10)
-          echo "::group::Agent shard ${{ matrix.shard }}/10 — ${#SHARD_FILES[@]} files"
-          printf '  %s\n' "${SHARD_FILES[@]}"
-          echo "::endgroup::"
-          node ../../scripts/ci/run-vitest-junit.mjs \
-            --lane agent --shard ${{ matrix.shard }} \
-            -- "${SHARD_FILES[@]}"
+      - uses: ./.github/actions/restore-evm-node-test-artifacts
+      - name: "Agent tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
+        run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
+      - name: "RFC-64 rollout transition certificate (Oxigraph)"
+        if: matrix.gate1
+        run: node --import tsx --test devnet/rfc64-gate1-public-open/rollout-store-fixture.test.ts devnet/rfc64-gate1-public-open/rollout-transition.test.ts
+      - name: "RFC-64 Gate 1 live evidence generate and verify (Oxigraph)"
+        if: matrix.gate1
+        run: pnpm test:gate1:rfc64-public-open-harness
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit
         with:
-          artifact-name: vitest-agent-${{ matrix.shard }}-of-10
+          artifact-name: vitest-agent-${{ matrix.shard }}-of-${{ matrix.shards }}
 
   # ------------------------------------------------------------------
   # Bura lane — `cli` is the heaviest BURA package (CLI daemon, HTTP API,
@@ -690,15 +691,17 @@ jobs:
   # degrade service but do not threaten protocol consensus.
   # ------------------------------------------------------------------
   bura-cli:
-    name: "Bura: cli [${{ matrix.shard }}/4]"
+    env:
+      DKG_CI_COVERAGE: '1'
+      DKG_CI_ROW: ${{ matrix.row }}
+    name: "Bura: cli [${{ matrix.shard }}/${{ matrix.shards }}]"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.bura_cli == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
+      matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['bura-cli'] }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -716,30 +719,17 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: evm-node-test-artifacts
-          path: /tmp
-      - name: Restore EVM test artifacts
-        run: tar -xzf /tmp/evm-node-test-artifacts.tgz
+      - uses: ./.github/actions/restore-evm-node-test-artifacts
       - name: "Verify provisioned Blazegraph image contract"
         if: matrix.shard == 1
         run: bash scripts/ci/verify-blazegraph-image-contract.sh
-      - name: "CLI tests (shard ${{ matrix.shard }}/4)"
-        env:
-          SHARD_ID: ${{ matrix.shard }}
-        run: |
-          set -euo pipefail
-          mapfile -t SHARD_FILES < <(node scripts/ci/plan-vitest-shard.mjs cli "$SHARD_ID")
-          test "${#SHARD_FILES[@]}" -gt 0
-          node scripts/ci/run-vitest-junit.mjs \
-            --lane cli --shard "${SHARD_ID}" \
-            -- "${SHARD_FILES[@]}"
+      - name: "CLI tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
+        run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit
         with:
-          artifact-name: vitest-cli-${{ matrix.shard }}-of-4
+          artifact-name: vitest-cli-${{ matrix.shard }}-of-${{ matrix.shards }}
 
   bura-blazegraph-arm64:
     name: "Bura: Blazegraph arm64 image (native)"
@@ -755,11 +745,17 @@ jobs:
         run: bash scripts/ci/verify-blazegraph-image-contract.sh
 
   bura-supporting:
+    env:
+      DKG_CI_COVERAGE: '1'
+      DKG_CI_ROW: ${{ matrix.row }}
     name: "Bura: query"
     needs: [changes, build]
     if: needs.changes.outputs.bura_query == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['bura-supporting'] }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -778,7 +774,12 @@ jobs:
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
       - name: "Query tests"
-        run: pnpm --filter @origintrail-official/dkg-query run test
+        run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
+      - name: Upload Vitest JUnit and coverage reports
+        if: always()
+        uses: ./.github/actions/upload-vitest-junit
+        with:
+          artifact-name: vitest-bura-supporting-${{ matrix.row }}
 
   # ------------------------------------------------------------------
   # Kosava lanes — `node-ui` is heavy (React Testing Library, happy-dom)
@@ -790,11 +791,17 @@ jobs:
   # bugs here affect UX/demos, not protocol correctness.
   # ------------------------------------------------------------------
   kosava-node-ui:
+    env:
+      DKG_CI_COVERAGE: '1'
+      DKG_CI_ROW: ${{ matrix.row }}
     name: "Kosava: node-ui"
     needs: [changes, build]
     if: needs.changes.outputs.kosava_node_ui == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['kosava-node-ui'] }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -815,7 +822,12 @@ jobs:
       - name: "node-ui production build (896 MB heap budget)"
         run: pnpm --filter @origintrail-official/dkg-node-ui run build:ui
       - name: "node-ui tests"
-        run: pnpm --filter @origintrail-official/dkg-node-ui test
+        run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
+      - name: Upload Vitest JUnit and coverage reports
+        if: always()
+        uses: ./.github/actions/upload-vitest-junit
+        with:
+          artifact-name: vitest-kosava-node-ui-${{ matrix.row }}
 
   # node-ui Playwright e2e — REAL NODE, NO MOCKS. Each shard boots its OWN
   # isolated 4-node devnet (Hardhat + four DKG daemons) via Playwright's
@@ -837,6 +849,8 @@ jobs:
   # Channel is pinned to bundled chromium in playwright.config.ts under CI
   # (see `ciChromium`) since we only `playwright install chromium`.
   kosava-node-ui-e2e:
+    env:
+      PW_DEVNET_LOCAL: ${{ github.event_name == 'schedule' && '1' || '0' }}
     name: "Kosava: node-ui e2e [${{ matrix.shard }}/7] (Playwright real-node devnet)"
     needs: [changes, build, evm-devnet-test-artifacts]
     if: needs.changes.outputs.kosava_node_ui_e2e == 'true'
@@ -876,6 +890,9 @@ jobs:
         run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps
       - name: "node-ui real-node Playwright e2e (shard ${{ matrix.shard }}/7)"
         run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright test --shard=${{ matrix.shard }}/7
+      - name: Record first-attempt browser failures separately from retries
+        if: always()
+        run: node scripts/ci/browser-quality.mjs packages/node-ui/playwright-report/results.json packages/node-ui/playwright-report/quality.json
       # Upload the HTML report + traces so intermittent browser/devnet failures
       # are diagnosable from the Actions UI (Codex review on PR #832).
       - name: Upload Playwright report
@@ -905,11 +922,17 @@ jobs:
           if-no-files-found: ignore
 
   kosava-supporting:
+    env:
+      DKG_CI_COVERAGE: '1'
+      DKG_CI_ROW: ${{ matrix.row }}
     name: "Kosava: adapters + utilities + demo"
     needs: [changes, build]
     if: needs.changes.outputs.kosava_supporting == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['kosava-supporting'] }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -948,20 +971,18 @@ jobs:
         # unset) skips gracefully when Python is absent.
         env:
           DKG_REQUIRE_PYTEST: '1'
+          DKG_CI_COVERAGE: '1'
         run: |
-          pnpm \
-            --filter @origintrail-official/dkg-epcis \
-            --filter @origintrail-official/dkg-mcp \
-            --filter @origintrail-official/dkg-local-llm \
-            --filter @origintrail-official/dkg-network-sim \
-            --filter @origintrail-official/dkg-graph-viz \
-            --filter @origintrail-official/dkg-okf \
-            --filter @origintrail-official/dkg-adapter-elizaos \
-            --filter @origintrail-official/dkg-adapter-hermes \
-            --filter @origintrail-official/dkg-adapter-openclaw \
-            --filter @origintrail-official/dkg-adapter-prime-agent \
-            --filter @origintrail-official/dkg-demo \
-            run test
+          status=0
+          node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW" || status=$?
+          pnpm --filter @origintrail-official/dkg-adapter-hermes run test:py || status=$?
+          pnpm --filter @origintrail-official/dkg-demo run test || status=$?
+          exit "$status"
+      - name: Upload Vitest JUnit and coverage reports
+        if: always()
+        uses: ./.github/actions/upload-vitest-junit
+        with:
+          artifact-name: vitest-kosava-supporting-${{ matrix.row }}
 
   # ------------------------------------------------------------------
   # Hardhat-backed Kosava lane — `random-sampling` and `kafka-plugin`.
@@ -977,11 +998,17 @@ jobs:
   # No mocks: real contracts, real chain.
   # ------------------------------------------------------------------
   kosava-hardhat-plugins:
+    env:
+      DKG_CI_COVERAGE: '1'
+      DKG_CI_ROW: ${{ matrix.row }}
     name: "Kosava: random-sampling + kafka-plugin (real Hardhat)"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.kosava_hardhat_plugins == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['kosava-hardhat-plugins'] }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -999,16 +1026,14 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: ./.github/actions/restore-evm-node-test-artifacts
+      - name: Hardhat plugin tests
+        run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
+      - name: Upload Vitest JUnit and coverage reports
+        if: always()
+        uses: ./.github/actions/upload-vitest-junit
         with:
-          name: evm-node-test-artifacts
-          path: /tmp
-      - name: Restore EVM test artifacts
-        run: tar -xzf /tmp/evm-node-test-artifacts.tgz
-      - name: "random-sampling tests (real Hardhat, no mocks)"
-        run: pnpm --filter @origintrail-official/dkg-random-sampling test
-      - name: "kafka-plugin tests (real Hardhat, no mocks)"
-        run: pnpm --filter @origintrail-official/kafka-plugin test
+          artifact-name: vitest-kosava-hardhat-plugins-${{ matrix.row }}
 
   # ------------------------------------------------------------------
   # ABI freshness gate — guards the contract `auto-update.ts` deliberately
@@ -1219,9 +1244,21 @@ jobs:
           echo "::group::Shard ${SHARD_ID}/4 — ${#SHARD_FILES[@]} files"
           printf '  %s\n' "${SHARD_FILES[@]}"
           echo "::endgroup::"
-          npx hardhat test --network hardhat --config hardhat.node.config.ts "${SHARD_FILES[@]}"
+          test "${#SHARD_FILES[@]}" -gt 0
+          export DKG_MOCHA_REPORT="test-results/solidity-${SHARD_ID}.json"
+          rm -f "$DKG_MOCHA_REPORT"
+          pnpm exec hardhat test --network hardhat --config hardhat.node.config.ts "${SHARD_FILES[@]}"
+          node ../../scripts/ci/check-mocha-report.mjs "$DKG_MOCHA_REPORT"
         env:
           NODE_OPTIONS: --max-old-space-size=8192
+      - name: Upload Solidity test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: solidity-tests-${{ matrix.shard }}
+          path: packages/evm-module/test-results/*.json
+          retention-days: 14
+          if-no-files-found: warn
 
   # ------------------------------------------------------------------
   # Tornado Solidity coverage lane — safety net on protected push or manual
@@ -1443,6 +1480,58 @@ jobs:
   # One stable branch-protection check. It also verifies that every lane the
   # planner selected actually ran successfully, so a typo in a job-level `if`
   # cannot silently turn a required test into a green skip.
+  inventory-windows:
+    needs: changes
+    if: needs.changes.outputs.tornado_agent == 'true'
+    uses: ./.github/workflows/rfc64-inventory-windows.yml
+
+  coverage-results:
+    name: Verify merged package coverage
+    if: always()
+    needs: [changes, tornado-core, tornado-publisher, tornado-agent, bura-cli, bura-supporting, kosava-node-ui, kosava-supporting, kosava-hardhat-plugins]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: mkdir -p ci-test-results
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: vitest-*
+          path: ci-test-results
+      - name: Verify complete shards, production source, floors and changed lines
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          if [[ "$EVENT_NAME" == pull_request ]]; then
+            COVERAGE_BASE="$(git rev-parse HEAD^1)"
+            export COVERAGE_BASE
+          elif [[ "$EVENT_NAME" == merge_group ]]; then
+            git fetch --no-tags origin "$MERGE_GROUP_BASE"
+            export COVERAGE_BASE="$MERGE_GROUP_BASE"
+          fi
+          node scripts/ci/merge-coverage.mjs ci-test-results
+      - name: Upload verified coverage
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verified-package-coverage
+          path: |
+            coverage-results.json
+            packages/*/coverage/
+          retention-days: 14
+          if-no-files-found: error
+
   ci-gate:
     name: CI gate
     if: always()
@@ -1466,6 +1555,8 @@ jobs:
       - solidity
       - solidity-coverage
       - tornado-static-analysis
+      - coverage-results
+      - inventory-windows
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
@@ -1484,6 +1575,16 @@ jobs:
             scripts/lib/ci-delta.mjs
             scripts/lib/ci-results.mjs
           sparse-checkout-cone-mode: false
+      - name: Require selected Windows lifecycle tests
+        env:
+          SELECTED: ${{ needs.changes.outputs.tornado_agent }}
+          RESULT: ${{ needs.inventory-windows.result }}
+        run: |
+          if [[ "$SELECTED" == true ]]; then test "$RESULT" = success; else test "$RESULT" = skipped; fi
+      - name: Require the coverage verdict
+        env:
+          COVERAGE_RESULT: ${{ needs.coverage-results.result }}
+        run: test "$COVERAGE_RESULT" = success
       - name: Verify selected lanes completed
         env:
           EVENT_NAME: ${{ github.event_name }}

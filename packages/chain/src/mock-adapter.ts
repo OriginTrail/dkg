@@ -35,6 +35,7 @@ import type {
   PublishTransactionResolution,
   VerifyACKIdentityResult,
   KnowledgeAssetUpdateContext,
+  ContextGraphAuthoritySnapshot,
 } from './chain-adapter.js';
 import type { RpcUsageWindow } from './rpc-usage.js';
 import {
@@ -100,6 +101,26 @@ interface MockKnowledgeCollection {
    */
   catalogRoot: Uint8Array;
   catalogLeafCount: number;
+}
+
+interface MockContextGraph {
+  manager: string;
+  participantAgents: string[];
+  metadataBatchId: bigint;
+  accessPolicy: number;
+  publishPolicy: number;
+  publishAuthority?: string;
+  publishAuthorityAccountId: bigint;
+  active: boolean;
+  batches: bigint[];
+  // OT-RFC-38 / LU-6 Phase B — curator-committed wire id.
+  // `null` indicates the curator opted out at create time.
+  nameHash?: string | null;
+  ownershipEra: bigint;
+  policyVersion: bigint;
+  rosterVersion: bigint;
+  authoritySourceBlockNumber: number;
+  authoritySourceBlockHash: string;
 }
 
 function createLegacyUpdateContext(
@@ -1198,20 +1219,7 @@ export class MockChainAdapter implements ChainAdapter {
 
   // --- On-Chain Context Graphs (ContextGraphs contract) ---
 
-  private contextGraphs = new Map<bigint, {
-    manager: string;
-    participantAgents: string[];
-    metadataBatchId: bigint;
-    accessPolicy: number;
-    publishPolicy: number;
-    publishAuthority?: string;
-    publishAuthorityAccountId: bigint;
-    active: boolean;
-    batches: bigint[];
-    // OT-RFC-38 / LU-6 Phase B — curator-committed wire id.
-    // `null` indicates the curator opted out at create time.
-    nameHash?: string | null;
-  }>();
+  private contextGraphs = new Map<bigint, MockContextGraph>();
   private nextContextGraphId = 1n;
 
   async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
@@ -1299,6 +1307,11 @@ export class MockChainAdapter implements ChainAdapter {
       active: true,
       batches: [],
       nameHash,
+      ownershipEra: 0n,
+      policyVersion: 0n,
+      rosterVersion: 0n,
+      authoritySourceBlockNumber: this.nextBlock,
+      authoritySourceBlockHash: mockBlockHash(this.nextBlock),
     });
 
     this.pushEvent('ContextGraphCreated', {
@@ -1632,7 +1645,10 @@ export class MockChainAdapter implements ChainAdapter {
    * (`0`=public, `1`=curated). Unknown ids yield `0` to match the
    * Solidity default-zero mapping.
    */
-  async getContextGraphAccessPolicy(contextGraphId: bigint): Promise<number> {
+  async getContextGraphAccessPolicy(
+    contextGraphId: bigint,
+    _options: ChainReadOptions = {},
+  ): Promise<number> {
     const cg = this.contextGraphs.get(contextGraphId);
     if (!cg) return 0;
     const ap = (cg as { accessPolicy?: number }).accessPolicy;
@@ -1648,7 +1664,10 @@ export class MockChainAdapter implements ChainAdapter {
    * proof callers require before trusting {@link getContextGraphAccessPolicy}
    * (which is permissively default-`0` for unknown ids).
    */
-  async isContextGraphActiveOnChain(contextGraphId: bigint): Promise<boolean> {
+  async isContextGraphActiveOnChain(
+    contextGraphId: bigint,
+    _options: ChainReadOptions = {},
+  ): Promise<boolean> {
     return this.contextGraphs.has(contextGraphId);
   }
 
@@ -1685,6 +1704,196 @@ export class MockChainAdapter implements ChainAdapter {
     const agents = (cg as { participantAgents?: string[] }).participantAgents;
     if (!Array.isArray(agents)) return [];
     return agents.map((a) => ethers.getAddress(a));
+  }
+
+  /** Offline-development mirror of the finalized RFC-64 authority snapshot. */
+  async getContextGraphAuthoritySnapshot(
+    contextGraphId: bigint,
+    options: ChainReadOptions = {},
+  ): Promise<ContextGraphAuthoritySnapshot> {
+    options.signal?.throwIfAborted();
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (cg === undefined) {
+      throw new Error(`Mock: Context Graph ${contextGraphId.toString()} is not registered`);
+    }
+    const numericChainId = this.chainId.split(':').at(-1);
+    if (numericChainId === undefined || !/^(0|[1-9][0-9]*)$/u.test(numericChainId)) {
+      throw new Error(`Mock: chainId ${this.chainId} has no canonical numeric authority id`);
+    }
+    return Object.freeze({
+      chainId: numericChainId,
+      governanceContract: `0x${'1'.padStart(40, '0')}`,
+      contextGraphId: contextGraphId.toString(10),
+      owner: cg.manager.toLowerCase(),
+      active: cg.active,
+      accessPolicy: cg.accessPolicy,
+      publishPolicy: cg.publishPolicy,
+      publishAuthority: cg.publishAuthority === undefined
+        || cg.publishAuthority === ethers.ZeroAddress
+        ? null
+        : cg.publishAuthority.toLowerCase(),
+      publishAuthorityAccountId: cg.publishAuthorityAccountId.toString(10),
+      participantAgents: Object.freeze(cg.participantAgents
+        .map((address) => address.toLowerCase())
+        .sort()),
+      nameHash: cg.nameHash ?? ethers.ZeroHash,
+      ownershipEra: cg.ownershipEra.toString(10),
+      policyVersion: cg.policyVersion.toString(10),
+      rosterVersion: cg.rosterVersion.toString(10),
+      sourceBlockNumber: cg.authoritySourceBlockNumber.toString(10),
+      sourceBlockHash: cg.authoritySourceBlockHash,
+    });
+  }
+
+  async addContextGraphParticipantAgent(contextGraphId: bigint, agent: string): Promise<TxResult> {
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (!cg) throw new Error(`Mock: context graph ${contextGraphId} does not exist`);
+    if (!ethers.isAddress(agent)) throw new Error(`Mock: invalid participant agent ${agent}`);
+    const normalized = ethers.getAddress(agent);
+    if (normalized === ethers.ZeroAddress) throw new Error('Mock: zero participant agent');
+    if (cg.participantAgents.some((value) => value.toLowerCase() === normalized.toLowerCase())) {
+      throw new Error(`Mock: participant agent ${normalized} already exists`);
+    }
+    if (cg.participantAgents.length >= 256) throw new Error('Mock: participantAgents cap');
+    cg.participantAgents.push(normalized);
+    this.advanceContextGraphAuthorityGeneration(cg, { roster: true });
+    this.pushEvent('AgentParticipantAdded', {
+      contextGraphId: contextGraphId.toString(),
+      agent: normalized,
+    });
+    return this.txResult(true);
+  }
+
+  async removeContextGraphParticipantAgent(contextGraphId: bigint, agent: string): Promise<TxResult> {
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (!cg) throw new Error(`Mock: context graph ${contextGraphId} does not exist`);
+    if (!ethers.isAddress(agent)) throw new Error(`Mock: invalid participant agent ${agent}`);
+    const normalized = ethers.getAddress(agent);
+    const index = cg.participantAgents.findIndex(
+      (value) => value.toLowerCase() === normalized.toLowerCase(),
+    );
+    if (index < 0) throw new Error(`Mock: participant agent ${normalized} not found`);
+    cg.participantAgents.splice(index, 1);
+    this.advanceContextGraphAuthorityGeneration(cg, { roster: true });
+    this.pushEvent('AgentParticipantRemoved', {
+      contextGraphId: contextGraphId.toString(),
+      agent: normalized,
+    });
+    return this.txResult(true);
+  }
+
+  /** Test seam for the ownership-transfer event counted by the EVM authority snapshot. */
+  async __transferContextGraphOwnership(
+    contextGraphId: bigint,
+    newOwner: string,
+  ): Promise<TxResult> {
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (!cg) throw new Error(`Mock: context graph ${contextGraphId} does not exist`);
+    if (!ethers.isAddress(newOwner)) throw new Error(`Mock: invalid context graph owner ${newOwner}`);
+    const normalized = ethers.getAddress(newOwner);
+    if (normalized === ethers.ZeroAddress) throw new Error('Mock: zero context graph owner');
+    const previousOwner = cg.manager;
+    const rotateOwnerAuthority = previousOwner.toLowerCase()
+      === (cg.publishAuthority ?? ethers.ZeroAddress).toLowerCase()
+      && previousOwner.toLowerCase() !== normalized.toLowerCase();
+    cg.manager = normalized;
+    this.advanceContextGraphAuthorityGeneration(cg, { ownership: true });
+    this.pushEvent('Transfer', {
+      contextGraphId: contextGraphId.toString(),
+      from: previousOwner,
+      to: normalized,
+    });
+    if (rotateOwnerAuthority) {
+      cg.publishAuthority = normalized;
+      cg.publishAuthorityAccountId = 0n;
+      // ContextGraphStorage._update emits this second policy event in the same
+      // transaction, so the EVM-derived policyVersion advances twice while the
+      // policy source remains this transaction's block/hash.
+      this.advanceContextGraphAuthorityGeneration(cg, { policy: true });
+      this.pushEvent('PublishAuthorityUpdated', {
+        contextGraphId: contextGraphId.toString(),
+        publishAuthority: normalized,
+        publishAuthorityAccountId: '0',
+      });
+    }
+    return this.txResult(true);
+  }
+
+  /** Test seam for the publish-policy update event counted by the EVM authority snapshot. */
+  async __updateContextGraphPublishPolicy(
+    contextGraphId: bigint,
+    publishPolicy: number,
+  ): Promise<TxResult> {
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (!cg) throw new Error(`Mock: context graph ${contextGraphId} does not exist`);
+    if (publishPolicy !== 0 && publishPolicy !== 1) {
+      throw new Error('Mock: invalid publishPolicy');
+    }
+    cg.publishPolicy = publishPolicy;
+    if (publishPolicy === 1) {
+      cg.publishAuthority = ethers.ZeroAddress;
+      cg.publishAuthorityAccountId = 0n;
+    } else if (cg.publishAuthority === undefined || cg.publishAuthority === ethers.ZeroAddress) {
+      cg.publishAuthority = ethers.getAddress(this.signerAddress);
+    }
+    this.advanceContextGraphAuthorityGeneration(cg, { policy: true });
+    this.pushEvent('PublishPolicyUpdated', {
+      contextGraphId: contextGraphId.toString(),
+      publishPolicy,
+    });
+    return this.txResult(true);
+  }
+
+  /** Test seam for the publish-authority update event counted by the EVM authority snapshot. */
+  async __updateContextGraphPublishAuthority(
+    contextGraphId: bigint,
+    publishAuthority: string,
+    publishAuthorityAccountId = 0n,
+  ): Promise<TxResult> {
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (!cg) throw new Error(`Mock: context graph ${contextGraphId} does not exist`);
+    if (cg.publishPolicy !== 0) {
+      throw new Error('Mock: open policy cannot set a publishAuthority');
+    }
+    if (!ethers.isAddress(publishAuthority)) {
+      throw new Error(`Mock: invalid publishAuthority ${publishAuthority}`);
+    }
+    const normalized = ethers.getAddress(publishAuthority);
+    if (normalized === ethers.ZeroAddress) throw new Error('Mock: zero publishAuthority');
+    if (publishAuthorityAccountId !== 0n) {
+      const pcaOwner = await this.getPublishingConvictionAccountOwner(publishAuthorityAccountId);
+      if (normalized.toLowerCase() !== pcaOwner.toLowerCase()) {
+        throw new Error('Mock: PCA publishAuthority must match account owner');
+      }
+    }
+    cg.publishAuthority = normalized;
+    cg.publishAuthorityAccountId = publishAuthorityAccountId;
+    this.advanceContextGraphAuthorityGeneration(cg, { policy: true });
+    this.pushEvent('PublishAuthorityUpdated', {
+      contextGraphId: contextGraphId.toString(),
+      publishAuthority: normalized,
+      publishAuthorityAccountId: publishAuthorityAccountId.toString(),
+    });
+    return this.txResult(true);
+  }
+
+  private advanceContextGraphAuthorityGeneration(
+    cg: MockContextGraph,
+    dimensions: Readonly<{ ownership?: boolean; policy?: boolean; roster?: boolean }>,
+  ): void {
+    const ownershipChanged = dimensions.ownership === true;
+    const policyChanged = dimensions.policy === true || ownershipChanged;
+    const rosterChanged = dimensions.roster === true || ownershipChanged;
+    if (ownershipChanged) cg.ownershipEra += 1n;
+    if (rosterChanged) cg.rosterVersion += 1n;
+    if (policyChanged) {
+      cg.policyVersion += 1n;
+      // Match the EVM adapter: this source identifies the last policy event,
+      // not the last roster event. A roster-only change must preserve the policy
+      // digest so accepted-current authority can advance on rosterVersion alone.
+      cg.authoritySourceBlockNumber = this.nextBlock;
+      cg.authoritySourceBlockHash = mockBlockHash(this.nextBlock);
+    }
   }
 
   /**

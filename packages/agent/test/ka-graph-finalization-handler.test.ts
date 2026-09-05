@@ -30,6 +30,8 @@ import {
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
+  swmKaWriteLockKey,
+  withKeyedLocks,
   workspacePublicQuadsDigest,
 } from '@origintrail-official/dkg-publisher';
 import { FinalizationHandler } from '../src/finalization-handler.js';
@@ -46,6 +48,11 @@ import {
   type ChainReconcilerDeps,
 } from '../src/chain-reconciler.js';
 import { createCursorState } from '../src/reconcile-cursor.js';
+import {
+  createRetireConfirmedGraphScopedSwmTwinIfOrphaned,
+  reconcileFinalizedSwmTwinFromCatalogProjection,
+} from
+  '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 
 const CG = 'rootless-finalization';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -2402,6 +2409,109 @@ describe('graph-scoped finalization handler', () => {
     `);
   });
 
+  it('retires the exact SWM twin after receiptless public chain promotion', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    const writeLocks = new Map<string, Promise<void>>();
+    const retire = vi.fn(async (candidate: { swmGraph: string }) => {
+      await store.dropGraph(candidate.swmGraph);
+    });
+    const publicHandler = new FinalizationHandler(
+      store,
+      legacyFinalizationChain(4, {
+        isContextGraphActiveOnChain: async () => true,
+        getContextGraphAccessPolicy: async () => 0,
+        getMerkleRootCount: async () => 1n,
+        getLatestMerkleRoot: async () => message.kcMerkleRoot,
+        getLatestMerkleRootAuthor: async () => AUTHOR,
+      }),
+      {
+        reconcileConfirmedGraphScopedSwmTwin: async (evidence) => {
+          const outcome = await reconcileFinalizedSwmTwinFromCatalogProjection({
+            store,
+            writeLocks,
+            evidence,
+            retire,
+          });
+          expect(outcome).toBe('retired');
+        },
+      },
+    );
+    const internals = publicHandler as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+      findSwmSnapshotForMerkleRoot?: () => Promise<never>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+    internals.findSwmSnapshotForMerkleRoot = async () => {
+      throw new Error('legacy root scan must not run for graph-scoped SWM');
+    };
+
+    await expect(reconcileGraphScoped(publicHandler, message)).resolves.toBe('promoted');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    expect(retire).toHaveBeenCalledOnce();
+  });
+
+  it('retires only the exact SWM twin when restart reconciliation finds matching VM metadata', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    await expectGraphScopedMetadata(`
+      <http://dkg.io/ontology/status> "confirmed" ;
+      <http://dkg.io/ontology/transactionHash> "${message.txHash}" ;
+      <http://dkg.io/ontology/materializedVersion> "123:4" .
+    `);
+
+    const unrelatedSwmGraph =
+      `did:dkg:context-graph:${CG}/_shared_memory/upgrade-restart-sentinel`;
+    await store.insert([{
+      subject: 'urn:asset:unrelated-upgrade-restart',
+      predicate: 'urn:predicate:value',
+      object: '"preserved"',
+      graph: unrelatedSwmGraph,
+    }]);
+
+    const writeLocks = new Map<string, Promise<void>>();
+    const retire = vi.fn(async (candidate: { swmGraph: string }) => {
+      await store.dropGraph(candidate.swmGraph);
+    });
+    const restarted = new FinalizationHandler(
+      store,
+      legacyFinalizationChain(),
+      {
+        reconcileConfirmedGraphScopedSwmTwin: async (evidence) => {
+          await expect(reconcileFinalizedSwmTwinFromCatalogProjection({
+            store,
+            writeLocks,
+            evidence,
+            retire,
+          })).resolves.toBe('retired');
+        },
+      },
+    );
+    const internals = restarted as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+      findSwmSnapshotForMerkleRoot?: () => Promise<never>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+    internals.findSwmSnapshotForMerkleRoot = async () => {
+      throw new Error('legacy root scan must not run for matching graph-scoped VM metadata');
+    };
+
+    await expect(reconcileGraphScoped(restarted, message)).resolves.toBe('already-confirmed');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    expect(await store.countQuads(unrelatedSwmGraph)).toBe(1);
+    expect(retire).toHaveBeenCalledOnce();
+    expect(retire).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId: CG,
+      kaUal: UAL,
+      swmGraph,
+    }));
+  });
+
   it('promotes a later exact public SWM assertion when the chain version advances', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     let rootCount = 1n;
@@ -3143,6 +3253,212 @@ describe('graph-scoped finalization handler', () => {
       versionBlock: 126,
       authorAddress: AUTHOR,
     }, createOperationContext('system'))).resolves.toBe('no-swm');
+  });
+
+  it('retires an orphaned exact-recovery SWM twin after confirming VM without a workspace head', async () => {
+    const staged = await stageGraph();
+    const message = { ...staged.message, batchId: 42n };
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    await store.deleteByPattern({
+      graph: graphManager.sharedMemoryMetaUri(CG),
+      subject: `${UAL}#dkg-swm-head`,
+    });
+    expect(await store.countQuads(staged.swmGraph)).toBe(2);
+
+    const retire = vi.fn(async (candidate: {
+      contextGraphId: string;
+      ual: string;
+      agentAddress: string;
+      kaNumber: bigint;
+      assertionVersion: bigint;
+    }) => {
+      expect(candidate).toMatchObject({
+        contextGraphId: CG,
+        ual: UAL,
+        agentAddress: AUTHOR,
+        kaNumber: 7n,
+        assertionVersion: 1n,
+      });
+      await store.dropGraph(staged.swmGraph);
+    });
+    const recoveringHandler = new FinalizationHandler(
+      store,
+      legacyFinalizationChain(),
+      {
+        retireConfirmedGraphScopedSwmTwinIfOrphaned:
+          createRetireConfirmedGraphScopedSwmTwinIfOrphaned({
+            store,
+            writeLocks: new Map(),
+            retire,
+          }),
+      },
+    );
+    const internals = recoveringHandler as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+
+    await expect(recoveringHandler.handleExactChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      batchId: 42n,
+      versionBlock: 124,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'))).resolves.toBe('already-confirmed');
+
+    expect(retire).toHaveBeenCalledOnce();
+    expect(await store.countQuads(staged.vmGraph)).toBe(2);
+    expect(await store.countQuads(staged.swmGraph)).toBe(0);
+  });
+
+  it('preserves a newly staged workspace head that races orphan retirement', async () => {
+    const staged = await stageGraph();
+    const message = { ...staged.message, batchId: 42n };
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    await store.deleteByPattern({
+      graph: graphManager.sharedMemoryMetaUri(CG),
+      subject: `${UAL}#dkg-swm-head`,
+    });
+
+    const writeLocks = new Map<string, Promise<void>>();
+    const lockKey = swmKaWriteLockKey(CG, undefined, UAL);
+    let releaseLock!: () => void;
+    let markLockHeld!: () => void;
+    const lockHeld = new Promise<void>((resolve) => { markLockHeld = resolve; });
+    const release = new Promise<void>((resolve) => { releaseLock = resolve; });
+    const blocker = withKeyedLocks(writeLocks, [lockKey], async () => {
+      markLockHeld();
+      await release;
+    });
+    await lockHeld;
+
+    const retire = vi.fn(async () => store.dropGraph(staged.swmGraph));
+    const recoveringHandler = new FinalizationHandler(
+      store,
+      legacyFinalizationChain(),
+      {
+        retireConfirmedGraphScopedSwmTwinIfOrphaned:
+          createRetireConfirmedGraphScopedSwmTwinIfOrphaned({ store, writeLocks, retire }),
+      },
+    );
+    const internals = recoveringHandler as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+    const recovery = recoveringHandler.handleExactChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      batchId: 42n,
+      versionBlock: 124,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'));
+
+    const swm = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${staged.swmGraph}> { ?s ?p ?o } }`,
+    );
+    if (swm.type !== 'quads') throw new Error('expected SWM quads');
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId: 'newer-share-racing-retirement',
+      kaUal: UAL,
+      assertionVersion: '2',
+      quads: swm.quads,
+      privateMerkleRoot: message.privateMerkleRoot,
+      privateTripleCount: Number(message.privateTripleCount),
+      publisherPeerId: '12D3KooWNewerPublisher',
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId: 'newer-share-racing-retirement',
+      kaUal: UAL,
+      assertionVersion: '2',
+    });
+    releaseLock();
+    await blocker;
+    await expect(recovery).resolves.toBe('already-confirmed');
+
+    expect(retire).not.toHaveBeenCalled();
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ assertionVersion: '2' });
+    expect(await store.countQuads(staged.swmGraph)).toBe(2);
+  });
+
+  it('retries failed orphan retirement and never retires an invalid VM', async () => {
+    const staged = await stageGraph();
+    const message = { ...staged.message, batchId: 42n };
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    await store.deleteByPattern({
+      graph: graphManager.sharedMemoryMetaUri(CG),
+      subject: `${UAL}#dkg-swm-head`,
+    });
+    const retire = vi.fn()
+      .mockRejectedValueOnce(new Error('injected retirement failure'))
+      .mockImplementationOnce(() => store.dropGraph(staged.swmGraph));
+    const recoveringHandler = new FinalizationHandler(
+      store,
+      legacyFinalizationChain(),
+      {
+        retireConfirmedGraphScopedSwmTwinIfOrphaned:
+          createRetireConfirmedGraphScopedSwmTwinIfOrphaned({
+            store,
+            writeLocks: new Map(),
+            retire,
+          }),
+      },
+    );
+    const internals = recoveringHandler as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+    const input = {
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      batchId: 42n,
+      versionBlock: 124,
+      authorAddress: AUTHOR,
+    };
+
+    await expect(recoveringHandler.handleExactChainReconciledKC(
+      input,
+      createOperationContext('system'),
+    )).rejects.toThrow('injected retirement failure');
+    await expect(recoveringHandler.handleExactChainReconciledKC(
+      input,
+      createOperationContext('system'),
+    )).resolves.toBe('already-confirmed');
+    expect(retire).toHaveBeenCalledTimes(2);
+
+    await store.insert([{
+      subject: 'urn:invalid-vm-row',
+      predicate: 'urn:predicate:value',
+      object: '"corrupt"',
+      graph: staged.vmGraph,
+    }]);
+    await expect(recoveringHandler.handleExactChainReconciledKC(
+      input,
+      createOperationContext('system'),
+    )).resolves.toBe('no-swm');
+    expect(retire).toHaveBeenCalledTimes(2);
   });
 
   it('uses one confirmed VM resolver for absent, matching, and invalid metadata', async () => {

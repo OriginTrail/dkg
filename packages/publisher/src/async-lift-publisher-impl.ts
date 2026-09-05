@@ -93,7 +93,10 @@ import {
   selectLifecycleBindingJobs,
   type LiftJobRetryProjection,
 } from './async-lift-retry-disposition.js';
-import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
+import {
+  type TargetedLiftJobClearOptions,
+  type TerminalJobClearOutcome,
+} from './terminal-job-clear.js';
 import { isSafeJobId } from './job-id.js';
 import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
 import {
@@ -117,6 +120,7 @@ import {
   JOURNAL_JOB_ID,
   PAYLOAD_PREDICATE,
   STATUS_PREDICATE,
+  ACCEPTED_AT_PREDICATE,
   CONTROL_LIFECYCLE_KEY,
   knowledgeAssetVmPublishLifecycleKey,
   serializeJournalEntry,
@@ -662,10 +666,7 @@ export class TripleStoreAsyncLiftPublisher
         ensureGraph: async () => await this.ensureGraph(),
         isPaused: () => this.paused,
         readStatus: async (jobId) => await this.readJobPayload(jobId),
-        listAccepted: async () =>
-          (await this.list({ status: 'accepted' })).filter(
-            (job): job is LiftJobAccepted => job.status === 'accepted',
-          ),
+        nextAccepted: async () => await this.readNextAcceptedJob(),
         reacceptDueFailedJobs: async (now) => await this.reacceptDueFailedJobs(now),
         toClaimed: (current, walletId) =>
           this.buildTransitionJob(current, 'claimed', { claim: { walletId } }),
@@ -892,6 +893,25 @@ export class TripleStoreAsyncLiftPublisher
       .map((row) => this.parseJobPayloadForScan(row['payload']))
       .filter((job): job is PersistedLiftJob => job !== null)
       .sort(compareAcceptedJobs);
+  }
+
+  /**
+   * Persistence-owned claim selector. The status triple bounds the read to the
+   * actionable queue, while decoding remains best-effort so one corrupt legacy
+   * row cannot block valid work behind it. Ordering is explicit over the
+   * decoded durable values: acceptedAt first, then jobId for deterministic ties.
+   */
+  private async readNextAcceptedJob(): Promise<LiftJobAccepted | undefined> {
+    await this.ensureGraph();
+    const result = await this.store.query(
+      `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${STATUS_PREDICATE}> ${literal('accepted')} ; <${ACCEPTED_AT_PREDICATE}> ?acceptedAt ; <${PAYLOAD_PREDICATE}> ?payload } }`,
+      { source: 'publisher.asyncLift.nextAccepted' },
+    );
+    return expectBindings(result)
+      .map((row) => this.parseJobPayloadForScan(row['payload']))
+      .filter((job): job is LiftJobAccepted => job?.status === 'accepted')
+      .sort(compareAcceptedJobs)
+      .at(0);
   }
 
   async inspectPreparedPayload(jobId: string): Promise<AsyncPreparedPublishPayload | null> {
@@ -2835,7 +2855,7 @@ export class TripleStoreAsyncLiftPublisher
    */
   async clearTerminalJob(
     jobId: string,
-    options: { readonly pendingTransactionOverride?: { readonly requestedBy: string } } = {},
+    options: TargetedLiftJobClearOptions = {},
   ): Promise<TerminalJobClearOutcome> {
     // Reject an empty OR SPARQL-unsafe jobId as malformed BEFORE building the jobSubject
     // IRI — otherwise an attacker-controlled jobId (from the clear-job HTTP body) with a
@@ -2853,14 +2873,16 @@ export class TripleStoreAsyncLiftPublisher
       }
       if (transaction.kind === 'unknown') return { outcome: 'rejected', reason: 'unknown' };
       const { current: job, scope } = transaction;
-      // GH#2270 follow-up (🔴 3824098476, 🟡 3824098494) — ownership is resolved HERE, not at
-      // the route. Doing it at the route meant an unsafe jobId reached a `getStatus` query before
-      // this method's `isSafeJobId` guard ran, and the ownership read happened outside the claim
-      // lock the clear itself takes — a TOCTOU on the record the decision is about.
+      // GH#2270 follow-up (🔴 3824098476, 🟡 3824098494) — authorization against the job is
+      // resolved HERE, not at the route. Doing it at the route meant an unsafe jobId reached a
+      // `getStatus` query before this method's `isSafeJobId` guard ran, and the ownership read
+      // happened outside the claim lock the clear itself takes — a TOCTOU on the record the
+      // decision is about. The route only authenticates which principal tier made the request.
       //
       // Inside, the job has already been validated and read under that lock, so the check is on
-      // the same record that is about to be deleted. A caller that cannot be matched to the job's
-      // admission lane simply does not get the override; the ordinary terminal clear is untouched.
+      // the same record that is about to be deleted. An agent that cannot be matched to the job's
+      // admission lane gets no override; an authenticated node operator has explicit queue-wide
+      // authority. The ordinary terminal clear is untouched.
       // 3825162663 — ONE decision: the policy takes the override as the caller made it and
       // settles authority and state eligibility together, so a call site cannot read the
       // canonical predicate while forgetting the ownership half.

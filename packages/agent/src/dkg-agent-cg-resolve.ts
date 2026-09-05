@@ -334,12 +334,16 @@ import {
   CIPHERTEXT_CHUNK_SIZE_BYTES,
   BOOT_CHAIN_IDENTITY_TIMEOUT_MS,
   MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
-  TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
   CHAIN_POLICY_READ_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
-import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
+import { isTransientBootChainError } from './dkg-agent-boot.js';
+import { createAbortError, runBoundedOperation } from './bounded-operation.js';
+import type {
+  LiveOnChainAccessPolicyState,
+  LiveOnChainAccessPolicyUnavailable,
+} from './internal/promote/context-graph-access-policy-state.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
   ContextGraphNotFoundError,
@@ -421,16 +425,7 @@ import {
 } from './curator-meta-refresh.js';
 
 function syncAuthAbortError(reason: unknown): Error {
-  if (reason instanceof Error) {
-    if (reason.name === 'AbortError') return reason;
-    const err = new Error(reason.message || 'aborted');
-    err.name = 'AbortError';
-    (err as Error & { cause?: unknown }).cause = reason;
-    return err;
-  }
-  const err = new Error(typeof reason === 'string' ? reason : 'aborted');
-  err.name = 'AbortError';
-  return err;
+  return createAbortError(reason);
 }
 
 function throwIfSyncAuthAborted(signal: AbortSignal | undefined): void {
@@ -710,6 +705,25 @@ export async function resolveCuratorSyncPeer(
   bootstrapHints.delete(contextGraphId);
   return { peerId: curatorPeerId, provenance };
 }
+
+export type RegisteredContextGraphAuthority =
+  | { kind: 'unregistered' }
+  | { kind: 'public'; onChainId: bigint }
+  | { kind: 'private'; onChainId: bigint; participantAgents: string[] }
+  | (LiveOnChainAccessPolicyUnavailable & { onChainId: bigint })
+  | {
+      kind: 'unavailable';
+      reason:
+        | 'chain-name-binding-unavailable'
+        | 'local-chain-binding-unavailable'
+        | 'local-existence-unavailable'
+        | 'chain-access-policy-unavailable'
+        | 'chain-participant-authority-unsupported'
+        | 'chain-participant-authority-unavailable'
+        | 'chain-participant-authority-invalid';
+      onChainId?: bigint;
+      detail?: string;
+    };
 
 export class ContextGraphResolveMethods extends DKGAgentBase {
   async getCgMeta(
@@ -1513,87 +1527,132 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   }
 
   /**
-   * OT-RFC-38 / LU-6 Phase B — chain-backed participant-agent oracle
-   * for {@link SharedMemoryHandler#chainAgentGateOracle}.
+   * Canonical live authority for a registered context graph.
    *
-   * Maps a CG identifier (cleartext or numeric form) to the on-chain
-   * `ContextGraphStorage.getParticipantAgents` result, with in-memory
-   * caching keyed by the numeric id (so cleartext and numeric callers
-   * share cache entries). Used to authenticate gossip envelopes on
-   * cores that host curated CGs they are not members of — the local
-   * meta-graph has no allowlist triples for such CGs, so without the
-   * chain fallback every envelope would be rejected at
-   * `verifyHostModeEnvelopeAuthority` and the LU-6 substrate would
-   * never collect ciphertext for them.
-   *
-   * Cleartext → numeric resolution probes (in order):
-   *   1. `subscribedContextGraphs[cgId].onChainId` (set by the
-   *      curator on create and by chain-event auto-discovery).
-   *   2. The typed local current-state resolver (revalidates process-local
-   *      reverse-name-hash candidates before policy use).
-   *   3. `BigInt(cgId)` parse (covers the publishes that address the
-   *      CG by its numeric on-chain id directly — see PublishIntent
-   *      shape and the matching `isCgCurated` resolver above).
-   *
-   * Returns `null` when no resolution path yields a positive-id
-   * numeric (the caller treats `null` as "no allowlist → reject
-   * defensively"); empty `[]` from the chain is cached and returned
-   * as-is so a brand-new id doesn't keep paying RPC per envelope.
+   * All security-sensitive consumers use this discriminant so a failed chain
+   * read cannot be confused with an unregistered graph and fall through to
+   * local/RFC-64 policy. Roster caching is deliberately opt-in and is only
+   * suitable for host-mode gossip admission; read, encryption, and mutation
+   * callers require a fresh chain view.
    */
-  async resolveContextGraphNumericIdForPolicy(
+  async resolveRegisteredContextGraphAuthority(
     this: DKGAgent,
     contextGraphId: string,
-  ): Promise<bigint | null> {
-    const target = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
-    if (target !== null) {
-      try {
-        const resolved = await this.getContextGraphOnChainId(contextGraphId);
-        if (!resolved) return null;
-        const numericId = BigInt(resolved);
-        return numericId > 0n ? numericId : null;
-      } catch {
-        // A local selection must never fall through to interpreting its name as
-        // a numeric id when its authoritative/reverse binding is unavailable.
-        return null;
+    options: { allowCachedRoster?: boolean; signal?: AbortSignal } = {},
+  ): Promise<RegisteredContextGraphAuthority> {
+    const registration = await this.resolveContextGraphRegistrationBinding(
+      contextGraphId,
+      { signal: options.signal },
+    );
+    if (registration.kind !== 'registered') return registration;
+    const { onChainId } = registration;
+
+    let accessPolicyState: LiveOnChainAccessPolicyState;
+    try {
+      accessPolicyState = await this.resolveLiveOnChainAccessPolicyState(
+        onChainId.toString(),
+        createOperationContext('system'),
+        { signal: options.signal },
+      );
+    } catch (err) {
+      return {
+        kind: 'unavailable',
+        onChainId,
+        reason: 'chain-access-policy-unavailable',
+        detail: err instanceof Error ? err.message : String(err),
+      };
+    }
+    if (accessPolicyState.kind === 'unavailable') {
+      return { ...accessPolicyState, onChainId };
+    }
+    const accessPolicy = accessPolicyState.accessPolicy;
+    if (accessPolicy === 0) return { kind: 'public', onChainId };
+
+    const cacheKey = onChainId.toString();
+    if (options.allowCachedRoster) {
+      const cached = this.onChainParticipantAgentsCache.get(cacheKey);
+      if (cached !== undefined) {
+        return { kind: 'private', onChainId, participantAgents: [...cached] };
       }
     }
-    if (/^0x[0-9a-fA-F]{64}$/.test(contextGraphId)) return null;
-    try {
-      const numericId = BigInt(contextGraphId);
-      return numericId > 0n ? numericId : null;
-    } catch {
-      return null;
+    const getParticipantAgents = this.chain.getContextGraphParticipantAgents;
+    if (typeof getParticipantAgents !== 'function') {
+      return {
+        kind: 'unavailable',
+        onChainId,
+        reason: 'chain-participant-authority-unsupported',
+      };
     }
+
+    let rawAgents: string[];
+    try {
+      const result = await runBoundedOperation(
+        () => getParticipantAgents.call(this.chain, onChainId),
+        {
+          label: `getContextGraphParticipantAgents(${onChainId})`,
+          timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+          signal: options.signal,
+        },
+      );
+      if (!Array.isArray(result)) {
+        return {
+          kind: 'unavailable',
+          onChainId,
+          reason: 'chain-participant-authority-invalid',
+        };
+      }
+      rawAgents = result;
+    } catch (err) {
+      return {
+        kind: 'unavailable',
+        onChainId,
+        reason: 'chain-participant-authority-unavailable',
+        detail: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    const seen = new Set<string>();
+    const participantAgents: string[] = [];
+    for (const value of rawAgents) {
+      if (!ethers.isAddress(value) || ethers.getAddress(value) === ethers.ZeroAddress) {
+        return {
+          kind: 'unavailable',
+          onChainId,
+          reason: 'chain-participant-authority-invalid',
+        };
+      }
+      const checksum = ethers.getAddress(value);
+      const key = checksum.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      participantAgents.push(checksum);
+    }
+    this.onChainParticipantAgentsCache.set(cacheKey, participantAgents);
+    return { kind: 'private', onChainId, participantAgents };
   }
 
+  /**
+   * OT-RFC-38 / LU-6 Phase B chain-backed participant oracle for host-mode
+   * gossip admission. Registration and policy resolution stay behind the
+   * canonical typed authority boundary; roster caching is explicitly enabled
+   * for this availability-oriented path. Any non-private or unavailable result
+   * projects to `null`, which the caller treats as fail-closed.
+   */
   async resolveOnChainParticipantAgents(this: DKGAgent, contextGraphId: string): Promise<string[] | null> {
-    if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
-      return null;
-    }
-    const numericId = await this.resolveContextGraphNumericIdForPolicy(contextGraphId);
-    if (numericId === null) return null;
-
-    const cacheKey = numericId.toString();
-    const cached = this.onChainParticipantAgentsCache.get(cacheKey);
-    if (cached !== undefined) {
-      return cached.length === 0 ? null : cached;
-    }
-    if (typeof this.chain.getContextGraphParticipantAgents !== 'function') {
-      return null;
-    }
-    try {
-      const agents = await this.chain.getContextGraphParticipantAgents(numericId);
-      const normalised = Array.isArray(agents) ? agents : [];
-      this.onChainParticipantAgentsCache.set(cacheKey, normalised);
-      return normalised.length === 0 ? null : normalised;
-    } catch (err) {
+    const authority = await this.resolveRegisteredContextGraphAuthority(
+      contextGraphId,
+      { allowCachedRoster: true },
+    );
+    if (authority.kind === 'unavailable') {
       this.log.warn(
         createOperationContext('system'),
-        `resolveOnChainParticipantAgents: chain.getContextGraphParticipantAgents(${cacheKey}) failed — treating as UNKNOWN: ` +
-        (err instanceof Error ? err.message : String(err)),
+        `resolveOnChainParticipantAgents: registered authority is unavailable (${authority.reason})` +
+        (authority.detail ? `: ${authority.detail}` : ''),
       );
-      return null;
     }
+    return authority.kind === 'private' && authority.participantAgents.length > 0
+      ? authority.participantAgents
+      : null;
   }
 
   /**
@@ -1937,6 +1996,49 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     next.onChainHash = wireId;
     this.setContextGraphSubscription(localId, next, options);
     return localId;
+  }
+
+  /**
+   * Retain a finalized name-hash binding even when its cleartext subscription
+   * has not arrived yet. The chain event can legitimately win that race on a
+   * cold Edge. A process-local wire-only placeholder lets the canonical
+   * subscription setter promote the binding once an explicit create/join/
+   * subscribe path supplies the matching cleartext id.
+   *
+   * Never infer that an existing hash-shaped local id is a placeholder. It is
+   * safe to stage only when the reverse index already authenticates the row,
+   * or when neither the reverse index nor the subscription map uses the wire
+   * string. This preserves the hash-shaped-cleartext collision fence.
+   */
+  stageOnChainContextGraphBindingFromNameHash(
+    this: DKGAgent,
+    nameHash: string,
+    onChainContextGraphId: string,
+    options?: { persist?: boolean },
+  ): string | null {
+    const wireId = this.contextGraphWireId(nameHash);
+    const alreadyBound = this.bindOnChainContextGraphIdFromNameHash(
+      wireId,
+      onChainContextGraphId,
+      options,
+    );
+    if (alreadyBound !== null) return alreadyBound;
+
+    const indexedLocalId = this.wireIdToLocalCgId.get(wireId);
+    if (indexedLocalId !== undefined) return null;
+    if (this.subscribedContextGraphs.has(wireId)) return null;
+
+    this.setContextGraphSubscription(wireId, {
+      subscribed: false,
+      synced: false,
+      onChainHash: wireId,
+      pendingMeta: true,
+    }, { persist: false });
+    return this.bindOnChainContextGraphIdFromNameHash(
+      wireId,
+      onChainContextGraphId,
+      { persist: false },
+    );
   }
 
   /**

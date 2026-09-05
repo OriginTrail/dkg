@@ -4,8 +4,12 @@ import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { classifySharedMemoryFreshness } from '../src/sync/shared-memory-freshness.js';
 import {
   runSelectedSharedMemoryRetry,
-  runSyncOnConnect,
 } from '../src/sync/on-connect/sync-on-connect.js';
+import {
+  captureSyncOnConnectAttempt,
+  executeSyncOnConnectAttempt,
+} from '../src/sync/on-connect/attempt-accounting.js';
+import { SyncOnConnectPeerScheduler } from '../src/sync/on-connect/peer-scheduler.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
 import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
 import {
@@ -74,23 +78,35 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         },
         log: { info: () => {} },
       };
-      await LifecycleSyncMethods.prototype.accountSyncAttemptWithReconciler.call(
-        accountingAgent as never,
-        PEER,
-        {} as never,
-        (onSyncAccounting) => runSelectedSharedMemoryRetry({
+      await executeSyncOnConnectAttempt(
+        () => captureSyncOnConnectAttempt((onSyncAccounting) => (
+          runSelectedSharedMemoryRetry({
           remotePeer: PEER,
           syncingPeers: new Set(),
           getPeerProtocols: async () => [PROTOCOL_SYNC],
           selectedSharedMemoryLane: {
-            getContextGraphIds: () => [privateCg],
-            syncFromPeer: async () => recovery,
+            admitWork: () => ({
+              contextGraphIds: [privateCg],
+              syncFromPeer: async () => recovery,
+            }),
           },
           onSyncAccounting: (_peerId, outcome) => {
             if (outcome) onSyncAccounting(outcome);
           },
           logInfo: () => {},
-        }),
+          })
+        )),
+        {
+          recordAccounting: (outcome) => {
+            accountingAgent.applySyncOnConnectAccounting.call(
+              accountingAgent as never,
+              PEER,
+              outcome,
+              {} as never,
+            );
+          },
+          onBackpressure: () => {},
+        },
       );
 
       expect(backoff.has(PEER)).toBe(false);
@@ -422,12 +438,12 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       { contextGraphIds: [publicCg], selected: true },
       { contextGraphIds: [privateCg], selected: false },
     ]);
-    expect(plannedScopes.length).toBeGreaterThan(0);
-    expect(plannedScopes.every((scope) => (
-      scope.includes(publicCg)
-      && scope.includes(privateCg)
-      && !scope.includes(unselectedPublicCg)
-    ))).toBe(true);
+    expect(plannedScopes).toEqual([
+      [publicCg],
+      [publicCg, privateCg],
+    ]);
+    expect(plannedScopes.every((scope) => !scope.includes(unselectedPublicCg)))
+      .toBe(true);
   });
 
   it('does not stamp a max-pass incomplete selected provider fresh', async () => {
@@ -578,30 +594,23 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       ]);
 
       const onSyncAccounting = vi.fn();
-      const outcome = await runSyncOnConnect({
+      const outcome = await runSelectedSharedMemoryRetry({
         remotePeer: PEER,
         syncingPeers: new Set(),
         getPeerProtocols: async () => [PROTOCOL_SYNC],
-        knownCorePeerIds: new Set(),
-        knownCorePeerIdsV2: new Set(),
-        getSyncContextGraphs: () => [],
-        getDurableSyncContextGraphs: () => [],
-        getSharedMemorySyncContextGraphs: () => [publicCg],
         selectedSharedMemoryLane: {
-          getContextGraphIds: () => [publicCg],
-          syncFromPeer: async () => selected,
+          admitWork: () => ({
+            contextGraphIds: [publicCg],
+            syncFromPeer: async () => selected,
+          }),
         },
-        syncFromPeer: async () => 0,
-        refreshMetaSyncedFlags: async () => undefined,
-        discoverContextGraphsFromStore: async () => 0,
-        syncSharedMemoryFromPeer: async () => summary,
         onSyncAccounting,
         logInfo: () => {},
       });
       expect(outcome).toBe('synced');
       expect(onSyncAccounting).toHaveBeenCalledWith(PEER, {
         reconcilerDisposition: 'clear',
-        fresh: true,
+        fresh: false,
         progress: false,
       });
     } finally {
@@ -757,15 +766,23 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       queueAgent.lastSyncDisconnectedAt = new Map<string, number>();
       queueAgent.catchupOnConnectAt = new Map<string, number>();
       queueAgent.rfc64ExactCatchupOnConnectAt = new Map<string, number>();
-      queueAgent.syncOnConnectPeerScheduler = null;
+      queueAgent.syncOnConnectPeerScheduler = new SyncOnConnectPeerScheduler({
+        createJob: (peerId) => ({
+          runAutomaticSelectedThenOrdinary: async () => 'not-started',
+          runSelected: async () => {
+            queuedPeers.push(peerId);
+            return 'not-started';
+          },
+          cancel: () => undefined,
+          finish: () => undefined,
+        }),
+        onInternalError: () => undefined,
+      });
       queueAgent.getSyncOnConnectPeerScheduler =
         LifecycleSyncMethods.prototype.getSyncOnConnectPeerScheduler;
       queueAgent.syncReconcilerBackoff = new Map<string, unknown>();
       queueAgent.syncOnConnectDisconnectBoundary =
         LifecycleSyncMethods.prototype.syncOnConnectDisconnectBoundary;
-      queueAgent.runSelectedSwmRetryFromPeerOnConnect = async (peerId: string) => {
-        queuedPeers.push(peerId);
-      };
       expect(LifecycleSyncMethods.prototype.queueSyncFromPeerOnConnect.call(
         queueAgent as never,
         PEER,

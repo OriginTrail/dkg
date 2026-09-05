@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { SAFE_JOB_ID_ERROR } from '@origintrail-official/dkg-publisher';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 // #1890 — the four publisher admin POST routes now share one request-body boundary
 // (readSmallJsonObject). This pins each route's body handling — importantly the previously
@@ -71,7 +72,7 @@ describe('#1890 publisher admin POST body boundary', () => {
       validTokens: new Set<string>(),
       apiHost: '127.0.0.1', apiPortRef: { value: 0 },
       url, path: url.pathname,
-      requestToken: undefined, requestAgentAddress: '0x0',
+      authentication: requestAuthentication({ kind: 'anonymous' }), requestAgentAddress: '0x0',
     } as unknown as RequestContext;
     await handlePublisherRoutes(ctx);
     return { status: res.statusCode, body: res.body ? JSON.parse(res.body) as Record<string, unknown> : {} };

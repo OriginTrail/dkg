@@ -18,6 +18,10 @@ import {
   SAFE_JOB_ID_ERROR,
 } from '@origintrail-official/dkg-publisher';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
+import {
+  serializeAgentListOptions,
+  type AgentListPageOptions,
+} from '@origintrail-official/dkg-core';
 import { loadTokens } from './auth.js';
 import {
   finalizedPublishOptionsPayload,
@@ -634,10 +638,18 @@ export class ApiClient {
     return requireDaemonStatusResponse(status, this.expectedStatusName);
   }
 
-  async agents(): Promise<{
+  /**
+   * List agents (GH#310). Options and their wire spellings come from the
+   * shared contract in src/agents-list-wire.ts — the same module the daemon
+   * route derives its parser vocabulary from, so client and server cannot
+   * drift apart without a compile error.
+   */
+  async agents(options: AgentListPageOptions = {}): Promise<{
     agents: Array<{ agentUri: string; name: string; peerId: string; framework?: string; nodeRole?: string }>;
+    nextCursor?: string;
   }> {
-    return this.get('/api/agents');
+    const qs = serializeAgentListOptions(options);
+    return this.get(`/api/agents${qs ? `?${qs}` : ''}`);
   }
 
   /**

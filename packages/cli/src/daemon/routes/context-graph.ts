@@ -123,7 +123,7 @@ import {
   readContextGraphReadiness,
   writeContextGraphReadiness,
 } from '../../context-graph-readiness.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -344,6 +344,7 @@ import {
 } from '../local-agents.js';
 
 import type { RequestContext } from './context.js';
+import { actorFromRequestContext } from './context.js';
 
 /**
  * Map a `registerContextGraph` failure to an HTTP status +
@@ -456,7 +457,7 @@ function respondReconcileError(res: ServerResponse, err: unknown): void {
  * Shaped after `respondIfStoreUnavailable` — retryable 503 plus `Retry-After`
  * — because that is what this is: the request is fine, the node just cannot
  * take on new work it will never drain. Returned from BOTH mint sites, which
- * is why I7's `result` vocabulary needed a seventh value; a 503 that clamped
+ * is why I7's `result` vocabulary needed a distinct value; a 503 that clamped
  * to `unspecified` would hide the one route outcome shutdown introduces.
  */
 function catchupShuttingDownResponse(res: ServerResponse, includeSharedMemory: boolean): void {
@@ -472,6 +473,25 @@ function catchupShuttingDownResponse(res: ServerResponse, includeSharedMemory: b
     },
     undefined,
     { 'Retry-After': '5' },
+  );
+}
+
+/** Fail closed without misreporting a transient authority outage as a denial. */
+function catchupAuthorityUnavailableResponse(
+  res: ServerResponse,
+  includeSharedMemory: boolean,
+): void {
+  recordCatchupRequest('authority_unavailable', includeSharedMemory);
+  return jsonResponse(
+    res,
+    503,
+    {
+      error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
+      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+      retryable: true,
+    },
+    undefined,
+    { 'Retry-After': '3' },
   );
 }
 
@@ -605,7 +625,6 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     res,
     agent,
     publisherControl,
-    config,
     startedAt,
     dashDb,
     opWallets,
@@ -622,27 +641,22 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     assertionImportLocks,
     vectorStore,
     embeddingProvider,
-    validTokens,
     apiHost,
     apiPortRef,
     url,
     path,
-    requestToken,
-    requestAgentAddress,
     emitMemoryGraphChanged,
   } = ctx;
-  // Operator gate for the node-wide subscription endpoints. When auth is ENABLED,
-  // require a node-level admin token — a recognised token (in validTokens) that
-  // resolves to no agent (agent-scoped tokens resolve to an address; a
-  // missing/unrecognised token isn't in validTokens). When auth is DISABLED the
-  // daemon runs admin maintenance routes tokenless (trusted local), so don't 403.
-  const authEnabled = config.auth?.enabled !== false;
-  const isNodeAdminCaller = (): boolean =>
-    !authEnabled ||
-    (!!requestToken && validTokens.has(requestToken) && !agent.resolveAgentByToken(requestToken));
-  const writePreflightCallerAgentAddress = requestToken
-    ? agent.resolveAgentByToken(requestToken)
-    : undefined;
+  const actor = actorFromRequestContext(ctx);
+  const {
+    authentication,
+    effectiveAgentAddress: requestAgentAddress,
+  } = actor;
+  // Node-wide gates consume the principal established by authentication; route code must not
+  // reinterpret token storage or agent-token resolution.
+  const isNodeAdminCaller = (): boolean => canAdministerNode(authentication);
+  const writePreflightCallerAgentAddress = actor.authenticatedAgentAddress;
+  const requestToken = authentication.acceptedToken;
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,
     allowLocalExactFallback: !writePreflightCallerAgentAddress,
@@ -1448,13 +1462,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   if (req.method === "POST" && signJoinMatch) {
     const contextGraphId = decodeURIComponent(signJoinMatch[1]);
     try {
-      const callerAddress = agent.resolveAgentAddress(
-        extractBearerToken(req.headers.authorization),
-      );
       // Body is intentionally ignored — sign-only. Drain it so a JSON body
       // sent by older clients doesn't sit on the socket.
       try { await readBody(req, SMALL_BODY_BYTES); } catch { /* ignored */ }
-      const delegation = await agent.signJoinRequest(contextGraphId, callerAddress);
+      const delegation = await agent.signJoinRequest(contextGraphId, requestAgentAddress);
       return jsonResponse(res, 200, {
         ok: true,
         contextGraphId,
@@ -1879,32 +1890,38 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       });
     }
 
-    // For curated CGs, verify this node's agent is on the allowlist.
-    // The allowlist may not be available locally yet (it lives on the
-    // curator's node), so this is a best-effort early rejection —
-    // the sync protocol enforces access on the remote side regardless.
-    const localAllowed = await agent.getContextGraphAllowedAgents(contextGraphId).catch(() => [] as string[]);
-    if (localAllowed.length > 0) {
-      // Issue #1596 / #865: an explicit `accessPolicy="public"` ALWAYS wins over
-      // the allowlist. On a public CG the allowlist gates PUBLISHERS, not
-      // subscribers/readers, so an allowlist entry must not turn a public CG
-      // into invite-only-to-join. Defer to the resolver's `isPrivateContextGraph`
-      // (the single source of truth) so this route can never re-drift from the
-      // resolver rule. Fail CLOSED on a read error (keep the gate) — the remote
-      // sync protocol is the real enforcement, and a public CG's `_meta` is
-      // already local here (we just read its allowlist from it), so the policy
-      // read is reliable in practice.
-      const isPrivate = await agent.isPrivateContextGraph(contextGraphId).catch(() => true);
-      if (isPrivate) {
-        const callerAddr = requestAgentAddress ?? agent.getDefaultAgentAddress();
-        const isEthAddress = callerAddr && /^0x[0-9a-fA-F]{40}$/.test(callerAddr);
-        if (isEthAddress && !localAllowed.some((a: string) => a.toLowerCase() === callerAddr.toLowerCase())) {
-          recordCatchupRequest('forbidden', shouldSyncSharedMemory);
-          return jsonResponse(res, 403, {
-            error: `Your agent (${callerAddr}) is not on the allowlist for this curated project. Ask the curator to invite you first.`,
-          });
-        }
-      }
+    // Authorization must be established BEFORE persisting subscription intent.
+    // A private RFC-64 CG can be known from accepted policy authority while its
+    // cleartext `_meta` allowlist is deliberately absent on a non-member node.
+    // Treating an empty local allowlist as "unknown, continue" lets that node
+    // create a durable subscription; the chain VM reconciler can then recover
+    // private plaintext through the otherwise legitimate member path. Reuse the
+    // query boundary because it understands RFC-64 rosters, legacy mixed
+    // agent/peer gates, and explicit-public CGs. Disable the legacy subscription
+    // fallback: the subscription is what this request is trying to create, so it
+    // cannot also serve as its authorization proof. Keep a permanent denial
+    // distinct from transient authority unavailability at the HTTP boundary;
+    // both fail closed and leave no subscription or catch-up-job side effect.
+    const callerAddr = requestAgentAddress ?? agent.getDefaultAgentAddress();
+    let readAuthority: Awaited<ReturnType<typeof agent.resolveContextGraphReadAuthority>>;
+    try {
+      readAuthority = await agent.resolveContextGraphReadAuthority(contextGraphId, {
+        callerAgentAddress: callerAddr,
+        allowSubscriptionFallback: false,
+      });
+    } catch {
+      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
+    }
+    if (readAuthority.outcome === 'unavailable') {
+      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
+    }
+    if (readAuthority.outcome === 'denied') {
+      recordCatchupRequest('forbidden', shouldSyncSharedMemory);
+      return jsonResponse(res, 403, {
+        error: callerAddr
+          ? `Your agent (${callerAddr}) is not authorized to read this project. Ask the curator to invite you first.`
+          : 'This node has no agent authorized to read this project. Ask the curator to invite an agent first.',
+      });
     }
 
     const subMap = agent.getSubscribedContextGraphs();
@@ -2145,6 +2162,14 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
               classification.statePatch,
             );
           }
+          // The first subscribe can legitimately race ahead of metadata and
+          // the on-chain binding. Its eager RFC-64 responsibility pass then
+          // fails closed because accessPolicy is still unknown. Re-run the
+          // lifecycle decision after catch-up has installed authoritative
+          // metadata, before exposing a terminal job: otherwise an always-on
+          // subscription can be fully synced while remaining absent from the
+          // default catalog responsibility/status surface until restart.
+          await agent.reconcileRfc64CatalogResponsibilityV1(contextGraphId);
           if (classification.eventPayload) {
             agent.eventBus?.emit?.(DKGEvent.PROJECT_SYNCED, {
               contextGraphId,

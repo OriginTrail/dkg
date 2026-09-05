@@ -310,7 +310,8 @@ Run `dkg <command> --help` for per-command options.
 
 ### Local LLM over DKG MCP
 
-Start an OpenAI-compatible local endpoint such as `llama-server`, then run:
+Start a supported OpenAI-compatible local endpoint with llama.cpp or Ollama,
+then run:
 
 ```bash
 # Interactive, read-only by default
@@ -318,7 +319,19 @@ dkg llm --interactive --model local-model
 
 # One-shot query-catalog discovery against a selected Context Graph
 dkg llm --project my-project "Which saved queries are available?"
+
+# Ollama example (llama.cpp remains available on the default port 8080)
+dkg llm --interactive \
+  --llama-url http://127.0.0.1:11434/v1/chat/completions \
+  --model qwen3:8b
 ```
+
+The existing `--llama-url` option accepts either backend. The daemon and Node
+UI use the equivalent `DKG_LLM_URL`, `DKG_LLM_MODEL`, and
+`DKG_LLM_BACKEND=ollama` environment variables.
+Before using Ollama, complete the full guide's canonical
+[Ollama setup procedure](../../docs/use-dkg/local-llm.md#install-and-run-ollama);
+package quickstarts intentionally do not duplicate its operating policy.
 
 `--project` explicitly pins the LLM session; inherited `DKG_PROJECT` and the
 MCP config's first Context Graph are not silent agent scopes. Without a pin,

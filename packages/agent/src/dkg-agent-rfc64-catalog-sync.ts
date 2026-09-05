@@ -51,6 +51,29 @@ export interface SynchronizeRfc64CatalogFromProvidersResultV1
   readonly signatureVariantDigest: Digest32V1;
 }
 
+interface SynchronizeRfc64CatalogRolloutCommonResultV1 {
+  readonly currentCatalogHeadDigest: Digest32V1;
+  readonly catalogVersion: AppliedCatalogHeadSnapshotV1['catalogVersion'];
+  readonly inventoryRowCount: AppliedCatalogHeadSnapshotV1['inventoryRowCount'];
+  readonly providerPeerIds: readonly string[];
+  readonly appliedProviderPeerId: string | null;
+  readonly providerAttempts: number;
+  readonly signatureVariantDigest: Digest32V1;
+}
+
+/** Rollout-aware postcondition used by bootstrap for both shadow and catalog modes. */
+export type SynchronizeRfc64CatalogRolloutFromProvidersResultV1 =
+  | Readonly<SynchronizeRfc64CatalogRolloutCommonResultV1 & {
+    readonly completionOutcome: 'staged-only';
+    readonly stagedHeadDigest: Digest32V1;
+    readonly appliedHead?: never;
+  }>
+  | Readonly<SynchronizeRfc64CatalogRolloutCommonResultV1 & {
+    readonly completionOutcome: 'applied' | 'already-applied';
+    readonly stagedHeadDigest?: never;
+    readonly appliedHead: AppliedCatalogHeadSnapshotV1;
+  }>;
+
 export class Rfc64CatalogSyncMethods extends DKGAgentBase {
   /**
    * Pull one provider's authenticated current public-root head and run it
@@ -106,6 +129,31 @@ export class Rfc64CatalogSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     params: SynchronizeRfc64CatalogFromProvidersParamsV1,
   ): Promise<SynchronizeRfc64CatalogFromProvidersResultV1 | null> {
+    const synchronized = await this.synchronizeRfc64CatalogRolloutFromProvidersV1(params);
+    if (synchronized === null) return null;
+    if (synchronized.completionOutcome === 'staged-only') {
+      throw new Error(
+        'RFC-64 current catalog head synchronization did not complete successfully (staged-only)',
+      );
+    }
+    const applied = synchronized.appliedHead;
+    return Object.freeze({
+      ...applied,
+      providerPeerIds: synchronized.providerPeerIds,
+      appliedProviderPeerId: synchronized.appliedProviderPeerId,
+      providerAttempts: synchronized.providerAttempts,
+      signatureVariantDigest: synchronized.signatureVariantDigest,
+    });
+  }
+
+  /**
+   * Canonical rollout facade. Shadow proves exact durable staging without an
+   * applied-head transition; catalog proves the exact durable applied head.
+   */
+  async synchronizeRfc64CatalogRolloutFromProvidersV1(
+    this: DKGAgent,
+    params: SynchronizeRfc64CatalogFromProvidersParamsV1,
+  ): Promise<SynchronizeRfc64CatalogRolloutFromProvidersResultV1 | null> {
     const scope = params.scope;
     const signal = params.signal;
     const service = this.rfc64PublicCatalogServiceV1;
@@ -121,6 +169,7 @@ export class Rfc64CatalogSyncMethods extends DKGAgentBase {
     if (
       synchronized.completionOutcome !== 'applied'
       && synchronized.completionOutcome !== 'already-applied'
+      && synchronized.completionOutcome !== 'staged-only'
     ) {
       throw new Error(
         'RFC-64 current catalog head synchronization did not complete successfully'
@@ -131,26 +180,54 @@ export class Rfc64CatalogSyncMethods extends DKGAgentBase {
       synchronized.current.head.envelope.payload,
     );
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(catalogScope);
-    const applied = this.rfc64PersistenceV1?.inventory.readAppliedCatalogHeadV1(
+    const persistence = this.rfc64PersistenceV1;
+    const applied = persistence?.inventory.readAppliedCatalogHeadV1(
       catalogScopeDigest,
       synchronized.current.announcement.authorAddress,
     ) ?? null;
-    if (
+    const announcedHeadDigest = synchronized.current.announcement.catalogHeadObjectDigest;
+    const stagedOnly = synchronized.completionOutcome === 'staged-only';
+    if (stagedOnly) {
+      const staged = await this.readRfc64StagedAuthorCatalogHeadV1({
+        objectDigest: announcedHeadDigest,
+        signatureVariantDigest: synchronized.current.announcement.signatureVariantDigest,
+      });
+      if (staged !== announcedHeadDigest) {
+        throw new Error('RFC-64 shadow catalog head did not reach its durable staged postcondition');
+      }
+      if (applied?.currentCatalogHeadDigest === announcedHeadDigest) {
+        throw new Error('RFC-64 shadow catalog head unexpectedly became authoritative');
+      }
+    } else if (
       applied === null
-      || applied.currentCatalogHeadDigest
-        !== synchronized.current.announcement.catalogHeadObjectDigest
+      || applied.currentCatalogHeadDigest !== announcedHeadDigest
       || applied.catalogVersion !== synchronized.current.announcement.catalogVersion
     ) {
-      throw new Error(
-        'RFC-64 current public catalog head did not reach its durable applied postcondition',
-      );
+      throw new Error('RFC-64 current public catalog head did not reach its durable applied postcondition');
     }
-    return Object.freeze({
-      ...applied,
+    const common = {
+      currentCatalogHeadDigest: announcedHeadDigest,
+      catalogVersion: synchronized.current.announcement.catalogVersion,
+      inventoryRowCount: synchronized.current.head.envelope.payload.totalRows,
       providerPeerIds: synchronized.providerPeerIds,
       appliedProviderPeerId: synchronized.appliedProviderPeerId,
       providerAttempts: synchronized.providerAttempts,
       signatureVariantDigest: synchronized.current.announcement.signatureVariantDigest,
+    } satisfies SynchronizeRfc64CatalogRolloutCommonResultV1;
+    if (stagedOnly) {
+      return Object.freeze({
+        ...common,
+        completionOutcome: 'staged-only' as const,
+        stagedHeadDigest: announcedHeadDigest,
+      });
+    }
+    if (applied === null) {
+      throw new Error('RFC-64 current public catalog head lost its durable applied postcondition');
+    }
+    return Object.freeze({
+      ...common,
+      completionOutcome: synchronized.completionOutcome,
+      appliedHead: applied,
     });
   }
 }

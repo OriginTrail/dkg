@@ -47,9 +47,36 @@ if (
   || typeof root.Rfc64SwmAuthorInventoryProducerErrorV1 !== 'function'
   || typeof root.Rfc64CatalogReconciliationTerminalErrorV1 !== 'function'
   || typeof root.Rfc64CatalogSynchronizationErrorV1 !== 'function'
+  || typeof root.Rfc64CatalogResponsibilityRegistryV1 !== 'function'
   || typeof legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1 !== 'function'
 ) {
   throw new Error('published agent entry points did not expose required root APIs');
+}
+if (
+  'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE' in root
+  || 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME' in root
+  || 'ContextGraphAuthorityUnavailableError' in root
+  || 'isContextGraphAuthorityUnavailableMarker' in root
+) {
+  throw new Error('internal authority marker machinery leaked from the package root');
+}
+const internalPromoteModule = 'internal/promote/context-graph-agent-gate-authority';
+// One structural namespace rule protects current and future implementation files.
+// Check runtime imports and generated declaration/map paths against the built package.
+for (const extension of ['js', 'd.ts', 'js.map', 'd.ts.map']) {
+  const specifier = `@origintrail-official/dkg-agent/dist/${internalPromoteModule}.${extension}`;
+  try {
+    await import(specifier);
+    throw new Error(`internal promote module unexpectedly resolved: ${specifier}`);
+  } catch (error) {
+    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+  }
+  try {
+    require.resolve(specifier);
+    throw new Error(`internal promote module unexpectedly resolved via require: ${specifier}`);
+  } catch (error) {
+    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+  }
 }
 const legacySynchronizationError = new legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1(
   'no-authorized-provider',
@@ -202,9 +229,18 @@ const blockedRfc64Modules = [
   'catalog-synchronization-error-v1.js',
   'catalog-access-policy-v1.js',
   'catalog-authority-config-v1.js',
+  'catalog-responsibility-registry-v1.js',
+  'release-native-catalog-authority-v1.js',
+  'legacy-swm-boundary-v1.js',
+  'catalog-rollout-authority-v1.js',
+  'catalog-rollout-authority-reconciliation-v1.js',
+  'applied-catalog-authority-transition-v1.js',
+  'catalog-semantic-authority-transition-v1.js',
+  'public-catalog-native-errors-v1.js',
   'catalog-applied-head-coordinator-v1.js',
   'catalog-native-scoped-read-capability-v1-internal.js',
   'catalog-native-scoped-read-provider-v1.js',
+  'catalog-head-lineage-v1.js',
   'catalog-peers-v1.js',
   'catalog-transport-authorization-v1.js',
   'catalog-transport-wire-v1-internal.js',
@@ -221,6 +257,9 @@ const blockedRfc64Modules = [
   'inventory-v1/swm-author-inventory-sql-codec.js',
   'finalized-policy-agent-precommit-v1.js',
   'finalized-policy-verifier-v1.js',
+  'finalized-private-placement-repair-store-v1.js',
+  'catalog-synchronization-evidence-v1.js',
+  'finalized-swm-retirement-lifecycle-receipt-v1.js',
   'finalized-vm-agent-precommit-v1.js',
   'finalized-vm-composer-v1.js',
   'finalized-vm-runtime-v1.js',
@@ -235,11 +274,13 @@ const blockedRfc64Modules = [
   'public-catalog-current-head-discovery-v1.js',
   'public-catalog-inventory-completeness-v1.js',
   'public-catalog-native-reconciler-v1.js',
+  'public-catalog-native-committed-head-token-v1.js',
   'public-catalog-native-receiver-v1.js',
   'public-catalog-native-transport-v1.js',
   'public-open-catalog-scope-v1.js',
   'public-catalog-reconciliation-failure-v1.js',
   'public-catalog-reconciliation-outcome-v1.js',
+  'public-catalog-receiver-task-lifecycle-v1.js',
   'public-catalog-receiver-v1.js',
   'public-catalog-service-v1.js',
   'public-catalog-issuer-delegation-v1.js',
@@ -251,7 +292,14 @@ const blockedRfc64Modules = [
   'swm-recovery-coordinator-v1.js',
   'swm-recovery-plan-v1.js',
   'swm-inventory-catalog-reconciler-v1.js',
+  'swm-catalog-durable-asset-resolver-v1.js',
   'swm-inventory-shadow-runtime-v1.js',
+  'abort-v1.js',
+  'catalog-mutation-runtime-v1.js',
+  'catalog-runtime-v1.js',
+  'coalescing-supervisor-v1.js',
+  'supervisor-status-v1.js',
+  'serialized-scope-runtime-v1.js',
 ];
 const packageExports = packageManifest.exports;
 const emittedRfc64Modules = await listEmittedRfc64Modules();

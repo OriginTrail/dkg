@@ -12,7 +12,7 @@ import {
   scheduledDelay,
 } from './_helpers/async-lift-2270-harness.js';
 import type { PersistedFailedJob } from '../src/async-lift-publisher-utils.js';
-import { KA_VM_VALIDATION, kaVmPublishRequest } from './_helpers/ka-vm-publish.js';
+import { KA_VM_VALIDATION, kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 import type { LiftJob } from '../src/index.js';
 
 /**

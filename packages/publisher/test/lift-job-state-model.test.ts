@@ -20,7 +20,7 @@ import {
   KA_VM_INCLUSION,
   KA_VM_VALIDATION,
   kaVmPublishRequest,
-} from './_helpers/ka-vm-publish.js';
+} from '../../../scripts/testing/ka-vm-publish.js';
 
 const accepted: LiftJobAccepted = {
   jobId: 'job-state-model',

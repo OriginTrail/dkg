@@ -4,6 +4,7 @@ import {
   normalizeFinalAnswer,
   type McpClientLike,
 } from '../src/runtime.js';
+import { DEFAULT_MAX_MODEL_RESPONSE_BYTES } from '../src/model-response.js';
 import type { McpToolDefinition } from '../src/schema.js';
 
 const catalogList: McpToolDefinition = {
@@ -133,6 +134,35 @@ function makeMcp(tools: McpToolDefinition[] = [catalogList, catalogRun]): McpCli
   };
 }
 
+describe('local model response bounds', () => {
+  it('enforces the default 4 MiB ceiling when the option is omitted', async () => {
+    const oversized = new Response('x'.repeat(DEFAULT_MAX_MODEL_RESPONSE_BYTES + 1), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp: makeMcp(),
+      fetch: vi.fn().mockResolvedValue(oversized) as typeof fetch,
+    });
+
+    await expect(runtime.run('Summarize the project.')).rejects.toThrow(
+      `Local LLM response exceeds ${DEFAULT_MAX_MODEL_RESPONSE_BYTES} bytes`,
+    );
+  });
+
+  it('rejects an oversized HTTP response before parsing it as JSON', async () => {
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp: makeMcp(),
+      fetch: vi.fn().mockResolvedValue(answerResponse('x'.repeat(1_024))) as typeof fetch,
+      maxModelResponseBytes: 128,
+    });
+
+    await expect(runtime.run('Summarize the project.')).rejects.toThrow(
+      'Local LLM response exceeds 128 bytes',
+    );
+  });
+});
+
 describe('DkgLocalLlmRuntime', () => {
   it('executes a real catalog tool loop while exposing only the catalog profile', async () => {
     const mcp = makeMcp();
@@ -163,6 +193,46 @@ describe('DkgLocalLlmRuntime', () => {
     const secondRequest = JSON.parse(String(fetcher.mock.calls[1][1]?.body));
     expect(secondRequest.messages.at(-1).role).toBe('tool');
     expect(secondRequest.messages.at(-1).content).toContain('Structured DKG evidence');
+  });
+
+  it('repairs one ignored required tool choice from an OpenAI-compatible backend', async () => {
+    const mcp = makeMcp();
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(answerResponse('I can answer without a tool.'))
+      .mockResolvedValueOnce(toolResponse('dkg_query_catalog_list', {}))
+      .mockResolvedValueOnce(answerResponse('One saved query: supply/lifecycle.'));
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp,
+      fetch: fetcher as typeof fetch,
+      projectId: 'testing',
+    });
+
+    const result = await runtime.run('Which DKG query catalog queries are saved?');
+
+    expect(result.answer).toBe('One saved query: supply/lifecycle.');
+    expect(mcp.callTool).toHaveBeenCalledOnce();
+    const firstRequest = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
+    const repairRequest = JSON.parse(String(fetcher.mock.calls[1][1]?.body));
+    expect(firstRequest.tool_choice).toBe('required');
+    expect(repairRequest.tool_choice).toBe('required');
+    expect(repairRequest.messages.at(-1).content)
+      .toContain('Retry once with exactly one available tool call and no prose');
+  });
+
+  it('fails closed when an OpenAI-compatible backend ignores required tool choice twice', async () => {
+    const mcp = makeMcp();
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(answerResponse('First unsupported prose answer.'))
+      .mockResolvedValueOnce(answerResponse('Second unsupported prose answer.'));
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp,
+      fetch: fetcher as typeof fetch,
+      projectId: 'testing',
+    });
+
+    await expect(runtime.run('Which DKG query catalog queries are saved?'))
+      .rejects.toThrow('One-retry limit reached');
+    expect(mcp.callTool).not.toHaveBeenCalled();
   });
 
   it('strictly pins model-supplied graph arguments and excludes unscoped discovery tools', async () => {

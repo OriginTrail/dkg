@@ -102,9 +102,13 @@ async function createAgent(options: {
     name: 'W1OperationTelemetry',
     listenHost: '127.0.0.1',
     chainAdapter: new MockChainAdapter(),
+    rfc64CatalogActivation: { enabled: false },
     syncGlobalMaxInflight: options.syncGlobalMaxInflight ?? 2,
     syncGlobalQueueLimit: options.syncGlobalQueueLimit ?? 2,
     syncAdmission: options.syncAdmission,
+  });
+  (agent as any).resolveRfc64CatalogReceiverAuthorityV1 = () => ({
+    legacySyncAllowed: true,
   });
   liveAgents.push(agent);
   (agent as any).messenger = { sendToPeer: options.sendToPeer ?? (async () => new Uint8Array(0)) };

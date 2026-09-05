@@ -19,6 +19,12 @@ export {
   type McpClientLike,
 } from './runtime.js';
 export {
+  probeLocalModelEndpoint,
+  type LocalModelEndpointAvailability,
+  type LocalModelEndpointProbeStrategy,
+  type ProbeLocalModelEndpointOptions,
+} from './model-endpoint.js';
+export {
   normalizeToolForLlama,
   parseAndValidateToolArguments,
   stableJson,

@@ -52,6 +52,23 @@ vi.mock('../src/sync/requester/shared-memory-sync.js', async (importOriginal) =>
   };
 });
 
+vi.mock('../src/sync/requester/swm-recovery.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/sync/requester/swm-recovery.js')>();
+  return {
+    ...actual,
+    recoverContextGraphSwm: vi.fn(async () => ({
+      replacedRoots: 0,
+      replacedGraphs: 0,
+      insertedDataQuads: 0,
+      insertedMetaQuads: 0,
+      droppedDataTriples: 0,
+      readySnapshots: 0,
+      totalSnapshots: 0,
+      completed: true,
+    })),
+  };
+});
+
 vi.mock('../src/sync/requester/finalized-swm-twin-reconciliation.js', async (importOriginal) => {
   const actual = await importOriginal<
     typeof import('../src/sync/requester/finalized-swm-twin-reconciliation.js')
@@ -84,11 +101,14 @@ import {
   type VerifiedGraphScopedAsset,
 } from '../src/sync/requester/graph-scoped-materialization.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
+import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
 import {
   reconcileFinalizedSwmTwin,
   reconcileFinalizedSwmTwinFromDescriptor,
   type FinalizedSwmTwinRetirement,
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
+import { resolveRfc64CatalogExecutionPlanV1 } from '../src/rfc64/public-catalog-activation-config-v1.js';
+import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const contextGraphId = 'agent-blackbox-vm';
@@ -101,6 +121,7 @@ const mockedRunDurableSync = vi.mocked(runDurableSync);
 const mockedRunDurableSyncDetailed = vi.mocked(runDurableSyncDetailed);
 const mockedMaterialize = vi.mocked(materializeVerifiedGraphScopedAsset);
 const mockedRunSharedMemorySync = vi.mocked(runSharedMemorySync);
+const mockedRecoverContextGraphSwm = vi.mocked(recoverContextGraphSwm);
 const mockedReconcileFinalizedSwmTwin = vi.mocked(reconcileFinalizedSwmTwin);
 const mockedReconcileFinalizedSwmTwinFromDescriptor = vi.mocked(
   reconcileFinalizedSwmTwinFromDescriptor,
@@ -220,6 +241,7 @@ describe('durable sync lifecycle chain binding', () => {
     mockedRunDurableSyncDetailed.mockClear();
     mockedMaterialize.mockClear();
     mockedRunSharedMemorySync.mockClear();
+    mockedRecoverContextGraphSwm.mockClear();
     mockedReconcileFinalizedSwmTwin.mockReset();
     mockedReconcileFinalizedSwmTwin.mockResolvedValue('not-found');
     mockedReconcileFinalizedSwmTwinFromDescriptor.mockReset();
@@ -593,6 +615,55 @@ describe('durable sync lifecycle chain binding', () => {
     expect(admission).toEqual({ source: 'swm-recovery' });
   });
 
+  it.each([
+    ['catalog', false],
+    ['legacy', true],
+  ] as const)(
+    'passes includeRootScope for %s authority during standalone SWM recovery',
+    async (_mode, legacySyncAllowed) => {
+      const agentLike: any = {
+        config: {},
+        store: {},
+        writeLocks: new Map(),
+        publicSnapshotStore: undefined,
+        syncCheckpoints: new Map(),
+        workspaceOwnedEntities: new Map(),
+        listSubGraphs: async () => [],
+        createContextGraphSyncDeadline: () => Date.now() + 10_000,
+        fetchSyncPages: async () => {
+          throw new Error('recovery mock must own the requester boundary');
+        },
+        getOrCreateSyncVerifyWorker: () => ({
+          processSharedMemoryBatch: async () => {
+            throw new Error('recovery mock must own the verifier boundary');
+          },
+        }),
+        oversizeTombstoneLog: { record: vi.fn() },
+        invalidateListContextGraphsCache: vi.fn(),
+        contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
+        resolveRfc64CatalogReceiverAuthorityV1: vi.fn(() => ({ legacySyncAllowed })),
+        runContextGraphSyncWithBackpressure: async (
+          _ctx: unknown,
+          _contextGraphId: string,
+          _lane: string,
+          _operationId: string,
+          work: () => Promise<unknown>,
+        ) => work(),
+        log: { info: () => {}, warn: () => {}, debug: () => {} },
+      };
+
+      await LifecycleSyncMethods.prototype.recoverContextGraphSwmFromPeer.call(
+        agentLike,
+        '12D3KooWSwmRecoveryScopePeer',
+        'scope-cg',
+      );
+
+      expect(mockedRecoverContextGraphSwm).toHaveBeenCalledTimes(1);
+      expect(mockedRecoverContextGraphSwm.mock.calls[0]?.[0].includeRootScope)
+        .toBe(legacySyncAllowed);
+    },
+  );
+
   it('reserves settlement time inside an explicit exact-asset timeout while internal VM recovery keeps 600 seconds', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
     const exactUal = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/1';
@@ -700,7 +771,20 @@ describe('durable sync lifecycle chain binding', () => {
       needsReconcile: false,
     };
     const agentLike: any = {
-      config: {},
+      config: {
+        nodeRole: 'core',
+        rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
+          configuredContextGraphs: [],
+          activation: {
+            enabled: false,
+            selectedContextGraphs: [],
+            selectedPublicContextGraphs: [],
+            rollout: { killSwitch: false, contextGraphModes: {} },
+          },
+        }),
+      },
+      subscribedContextGraphs: new Map(),
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
       store: changelogCapableStore,
       runChangelogLane,
       runLegacyDurableSync,
@@ -731,6 +815,55 @@ describe('durable sync lifecycle chain binding', () => {
     expect(runLegacyDurableSync.mock.calls[0]?.[6]).toMatchObject({
       signal: controller.signal,
     });
+  });
+
+  it('filters catalog-authoritative CGs before direct durable requester admission', async () => {
+    const runLegacyDurableSync = vi.fn(async () => ({
+      ...createDurableSyncAccumulator(),
+      complete: true,
+    }));
+    const agentLike: any = {
+      config: {
+        nodeRole: 'core',
+        rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
+          configuredContextGraphs: [],
+          activation: {
+          enabled: true,
+          selectedContextGraphs: ['legacy-cg', 'catalog-cg'],
+          selectedPublicContextGraphs: [],
+          rollout: {
+            killSwitch: false,
+            contextGraphModes: { 'legacy-cg': 'legacy', 'catalog-cg': 'catalog' },
+          },
+          },
+        }),
+      },
+      subscribedContextGraphs: new Map(),
+      resolveRfc64CatalogReceiverAuthorityV1:
+        Rfc64CatalogMethods.prototype.resolveRfc64CatalogReceiverAuthorityV1,
+      resolveRfc64AcceptedCompatibilityAuthorityV1:
+        (Rfc64CatalogMethods.prototype as any).resolveRfc64AcceptedCompatibilityAuthorityV1,
+      store: {},
+      runLegacyDurableSync,
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
+      agentLike,
+      'peer-mixed-rollout',
+      ['legacy-cg', 'catalog-cg', 'unselected-cg'],
+    );
+    expect(runLegacyDurableSync).toHaveBeenCalledTimes(1);
+    expect(runLegacyDurableSync.mock.calls[0]?.[2]).toEqual(['legacy-cg']);
+
+    runLegacyDurableSync.mockClear();
+    const catalogOnly = await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
+      agentLike,
+      'peer-catalog-only',
+      ['catalog-cg'],
+    );
+    expect(runLegacyDurableSync).not.toHaveBeenCalled();
+    expect(catalogOnly.complete).toBe(false);
   });
 
   it('retries a transient binding read, caches only the successful proof, and persists the CG id', async () => {
@@ -1056,6 +1189,7 @@ describe('durable sync lifecycle chain binding', () => {
       // Ordinary public CG: no RFC-64 complete-provider authority applies.
       // Required once #2271's execution-boundary source fence is in the base.
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
       log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     };
     agentLike.retireFinalizedSwmTwinCandidate = (
@@ -1144,6 +1278,7 @@ describe('durable sync lifecycle chain binding', () => {
       publisher: { clearPublishedKnowledgeAssetSwm },
       // Ordinary public CG: no RFC-64 complete-provider authority applies.
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
       log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     };
     agentLike.retireFinalizedSwmTwinCandidate = (

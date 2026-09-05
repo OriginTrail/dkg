@@ -5,6 +5,8 @@
 #
 # Install: pip install -r packages/adapter-hermes/pytests/requirements.txt
 pytest==9.0.2
+pytest-cov==7.0.0
+click==8.1.8
 eth-utils==6.0.0
 # eth-utils ships NO keccak backend by default; eth_utils.to_checksum_address
 # computes a keccak256 to pick the EIP-55 casing and RAISES without one, which

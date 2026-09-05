@@ -3,7 +3,6 @@
 /** Restart-safe, operator-pinned public catalog cold-start supervisor. */
 
 import {
-  computeContextGraphPolicyObjectDigestV1,
   type ContextGraphIdV1,
   type Digest32V1,
   type EvmAddressV1,
@@ -14,25 +13,36 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type {
-  Rfc64CatalogBootstrapConfigV1,
   Rfc64CatalogBootstrapPolicyV1,
-  Rfc64PublicCatalogBootstrapConfigV1,
   Rfc64PublicCatalogBootstrapScopeV1,
 } from './dkg-agent-types.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
+import type { Rfc64CatalogWorkloadOwnerV1 } from './rfc64/catalog-runtime-v1.js';
 import { Rfc64CatalogSynchronizationErrorV1 } from
   './rfc64/catalog-synchronization-error-v1.js';
+import { Rfc64CoalescingSupervisorV1 } from
+  './rfc64/coalescing-supervisor-v1.js';
 import { resolveRfc64PeerSwmRecoveryPlanV1 } from
   './rfc64/swm-recovery-plan-v1.js';
+import {
+  resolveRfc64RuntimeCatalogBootstrapConfigV1,
+  resolveRfc64CatalogExecutionPlanAuthorityV1,
+  type Rfc64CatalogExecutionPlanV1,
+  type Rfc64CatalogRolloutModeV1,
+} from './rfc64/public-catalog-activation-config-v1.js';
+import {
+  boundedRfc64SupervisorErrorV1,
+  rfc64SupervisorErrorMessageV1,
+} from './rfc64/supervisor-status-v1.js';
 
-const MAX_STATUS_ERROR_BYTES_V1 = 1024;
 const MAX_CONCURRENT_TARGETS_V1 = 4;
 const COMPLETE_SWM_PROVIDER_DIAL_TIMEOUT_MS_V1 = 10_000;
-const UTF8 = new TextEncoder();
 
 export type Rfc64PublicCatalogBootstrapOutcomeV1 =
+  | 'inactive'
   | 'pending'
   | 'applied'
+  | 'shadow-staged'
   | 'not-found'
   | 'known-incomplete'
   | 'failed';
@@ -43,11 +53,13 @@ export type Rfc64CatalogBootstrapCompletionReasonV1 =
 export interface Rfc64PublicCatalogBootstrapTargetStatusV1 {
   readonly scope: Readonly<Rfc64PublicCatalogBootstrapScopeV1>;
   readonly providers: readonly string[];
+  readonly mode: Extract<Rfc64CatalogRolloutModeV1, 'shadow' | 'catalog'>;
   readonly outcome: Rfc64PublicCatalogBootstrapOutcomeV1;
   readonly completionReason: Rfc64CatalogBootstrapCompletionReasonV1 | null;
   readonly attempts: number;
   readonly providerPeerId: string | null;
   readonly appliedHeadDigest: Digest32V1 | null;
+  readonly stagedHeadDigest: Digest32V1 | null;
   readonly catalogVersion: string | null;
   readonly inventoryRowCount: string | null;
   readonly lastError: string | null;
@@ -110,37 +122,358 @@ function hasNoAuthorizedProviderTerminalReasonV1(error: unknown): boolean {
 interface MutableTargetStatusV1 {
   readonly scope: Readonly<Rfc64PublicCatalogBootstrapScopeV1>;
   readonly providers: readonly string[];
+  readonly mode: Extract<Rfc64CatalogRolloutModeV1, 'shadow' | 'catalog'>;
   readonly requiresPrivateVm: boolean;
   outcome: Rfc64PublicCatalogBootstrapOutcomeV1;
   completionReason: Rfc64CatalogBootstrapCompletionReasonV1 | null;
   attempts: number;
   providerPeerId: string | null;
   appliedHeadDigest: Digest32V1 | null;
+  stagedHeadDigest: Digest32V1 | null;
   catalogVersion: string | null;
   inventoryRowCount: string | null;
   lastError: string | null;
   updatedAtMs: number | null;
 }
 
-interface BootstrapStateV1 {
-  readonly config: Readonly<{
+interface Rfc64CatalogBootstrapTargetPlanV1 extends Pick<
+  MutableTargetStatusV1,
+  'scope' | 'providers' | 'mode' | 'requiresPrivateVm'
+> {}
+
+export interface Rfc64CatalogBootstrapPartitionV1 {
+  readonly retryIntervalMs?: number;
+  readonly track2Policies: readonly Rfc64CatalogBootstrapPolicyV1[];
+  readonly track2Targets: readonly Rfc64CatalogBootstrapTargetPlanV1[];
+  readonly legacyRecoveryConfig: Readonly<{
     readonly acceptedPolicies: readonly Rfc64CatalogBootstrapPolicyV1[];
     readonly retryIntervalMs?: number;
   }>;
+}
+
+interface BootstrapStateV1 {
+  readonly retryIntervalMs?: number;
+  readonly legacyRecoveryConfig: Rfc64CatalogBootstrapPartitionV1['legacyRecoveryConfig'];
   readonly targets: MutableTargetStatusV1[];
-  readonly ctx: OperationContext;
-  closed: boolean;
-  running: boolean;
+  readonly runner: Rfc64CoalescingSupervisorV1;
   pass: number;
   lastPassStartedAtMs: number | null;
   lastPassCompletedAtMs: number | null;
-  catalogPhaseReady: boolean;
-  timer: ReturnType<typeof setTimeout> | null;
-  abortController: AbortController | null;
-  run: Promise<void> | null;
 }
 
-const STATES = new WeakMap<DKGAgent, BootstrapStateV1>();
+type CatalogSynchronizationResultV1 = Awaited<ReturnType<
+  DKGAgent['synchronizeRfc64CatalogRolloutFromProvidersV1']
+>>;
+
+interface BootstrapOwnerDependenciesV1 {
+  readonly resolvePartition: () => Rfc64CatalogBootstrapPartitionV1 | undefined;
+  readonly resolveReceiverAuthority: (contextGraphId: string) => Readonly<{
+    readonly legacySyncAllowed: boolean;
+    readonly track2Enabled: boolean;
+  }>;
+  readonly acceptTrack2Policies: (
+    policies: readonly Rfc64CatalogBootstrapPolicyV1[],
+  ) => void;
+  readonly connectToPeerId: (peerId: string, options: Readonly<{
+    readonly timeoutMs: number;
+  }>) => Promise<unknown>;
+  readonly queueRecoveryPlan: (
+    plan: ReturnType<typeof resolveRfc64PeerSwmRecoveryPlanV1>,
+    onError: (peerId: string, error: unknown) => void,
+    delayMs: number,
+  ) => void;
+  readonly synchronizeTarget: (params: Readonly<{
+    readonly remotePeerIds: readonly string[];
+    readonly scope: Readonly<Rfc64PublicCatalogBootstrapScopeV1>;
+    readonly signal: AbortSignal;
+  }>) => Promise<CatalogSynchronizationResultV1>;
+  readonly warn: (ctx: OperationContext, message: string) => void;
+}
+
+/** Feature-local owner for bootstrap state, target transitions, and its runner. */
+export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1 {
+  readonly #dependencies: BootstrapOwnerDependenciesV1;
+  #state: BootstrapStateV1 | undefined;
+  #catalogPhaseReady = false;
+  #configuredRecoveryProviders = new Set<string>();
+
+  constructor(dependencies: BootstrapOwnerDependenciesV1) {
+    this.#dependencies = dependencies;
+  }
+
+  start(ctx: OperationContext): void {
+    if (this.#state !== undefined) return;
+    const partition = this.#dependencies.resolvePartition();
+    if (partition === undefined) return;
+    this.#dependencies.acceptTrack2Policies(partition.track2Policies);
+    const hasLegacyRecoveryProviders = partition.legacyRecoveryConfig.acceptedPolicies.some(
+      ({ completeSwmProviders = [] }) => completeSwmProviders.length > 0,
+    );
+    if (partition.track2Policies.length === 0 && !hasLegacyRecoveryProviders) return;
+    this.#catalogPhaseReady = false;
+    this.#configuredRecoveryProviders = new Set(
+      partition.legacyRecoveryConfig.acceptedPolicies.flatMap(
+        ({ completeSwmProviders = [] }) => completeSwmProviders,
+      ),
+    );
+    let state!: BootstrapStateV1;
+    const runner = new Rfc64CoalescingSupervisorV1({
+      retryIntervalMs: partition.retryIntervalMs,
+      runPass: (signal) => this.#runPass(state, ctx, signal),
+      onError: (error) => {
+        this.#dependencies.warn(
+          ctx,
+          `RFC-64 public catalog bootstrap pass failed: ${rfc64SupervisorErrorMessageV1(error)}`,
+        );
+      },
+      closingMessage: 'RFC-64 public catalog bootstrap closing',
+    });
+    state = {
+      retryIntervalMs: partition.retryIntervalMs,
+      legacyRecoveryConfig: partition.legacyRecoveryConfig,
+      targets: partition.track2Targets.map(newPendingTargetV1),
+      runner,
+      pass: 0,
+      lastPassStartedAtMs: null,
+      lastPassCompletedAtMs: null,
+    };
+    this.#state = state;
+    runner.request();
+  }
+
+  status(): Readonly<Rfc64PublicCatalogBootstrapStatusV1> | null {
+    const state = this.#state;
+    if (state === undefined) return null;
+    return Object.freeze({
+      running: state.runner.running,
+      pass: state.pass,
+      retryIntervalMs: state.retryIntervalMs ?? 0,
+      lastPassStartedAtMs: state.lastPassStartedAtMs,
+      lastPassCompletedAtMs: state.lastPassCompletedAtMs,
+      targets: Object.freeze(state.targets.map(snapshotTargetStatusV1)),
+    });
+  }
+
+  async whenIdle(): Promise<void> {
+    await this.#state?.runner.whenIdle();
+  }
+
+  request(): void {
+    this.#state?.runner.request();
+  }
+
+  invalidate(contextGraphId: string): void {
+    this.#state?.runner.invalidateAndRequest(
+      `RFC-64 receiver selection changed for ${contextGraphId}`,
+    );
+  }
+
+  async close(): Promise<void> {
+    const state = this.#state;
+    if (state === undefined) return;
+    this.#catalogPhaseReady = false;
+    await state.runner.close();
+    this.#state = undefined;
+  }
+
+  /** Gate graph-complete SWM recovery until the first catalog phase settles. */
+  isRecoveryReady(providerPeerId: string): boolean {
+    return !this.#configuredRecoveryProviders.has(providerPeerId)
+      || this.#catalogPhaseReady;
+  }
+
+  async #runPass(
+    state: BootstrapStateV1,
+    ctx: OperationContext,
+    signal: AbortSignal,
+  ): Promise<void> {
+    state.pass += 1;
+    state.lastPassStartedAtMs = Date.now();
+    try {
+      const activeLegacyPolicies = state.legacyRecoveryConfig.acceptedPolicies.filter(
+        ({ policyEnvelope }) => this.#dependencies.resolveReceiverAuthority(
+          policyEnvelope.payload.contextGraphId,
+        ).legacySyncAllowed,
+      );
+      const activeLegacyRecoveryConfig = Object.freeze({
+        ...state.legacyRecoveryConfig,
+        acceptedPolicies: Object.freeze(activeLegacyPolicies),
+      });
+      const completeSwmProviders = [...new Set(activeLegacyPolicies.flatMap(
+        ({ completeSwmProviders: providers = [] }) => providers,
+      ))];
+      const connectedCompleteSwmProviders = new Set<string>();
+      await mapWithConcurrency(
+        completeSwmProviders,
+        MAX_CONCURRENT_TARGETS_V1,
+        async (providerPeerId) => {
+          if (signal.aborted) return;
+          try {
+            await this.#dependencies.connectToPeerId(providerPeerId, {
+              timeoutMs: COMPLETE_SWM_PROVIDER_DIAL_TIMEOUT_MS_V1,
+            });
+            if (!signal.aborted) connectedCompleteSwmProviders.add(providerPeerId);
+          } catch (error) {
+            this.#dependencies.warn(
+              ctx,
+              `RFC-64 complete SWM provider ${providerPeerId.slice(-8)} is not dialable: ${rfc64SupervisorErrorMessageV1(error)}`,
+            );
+          }
+        },
+      );
+      await mapWithConcurrency(state.targets, MAX_CONCURRENT_TARGETS_V1, async (target) => {
+        if (signal.aborted) return;
+        await this.#synchronizeTarget(target, signal);
+      });
+      if (signal.aborted) return;
+      this.#catalogPhaseReady = true;
+      for (const providerPeerId of connectedCompleteSwmProviders) {
+        this.#dependencies.queueRecoveryPlan(
+          resolveRfc64PeerSwmRecoveryPlanV1(
+            activeLegacyRecoveryConfig,
+            providerPeerId,
+          ),
+          (_peerId, error) => {
+            this.#dependencies.warn(
+              ctx,
+              `RFC-64 complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${rfc64SupervisorErrorMessageV1(error)}`,
+            );
+          },
+          0,
+        );
+      }
+    } finally {
+      state.lastPassCompletedAtMs = Date.now();
+    }
+  }
+
+  async #synchronizeTarget(target: MutableTargetStatusV1, signal: AbortSignal): Promise<void> {
+    if (!this.#dependencies.resolveReceiverAuthority(target.scope.contextGraphId).track2Enabled) {
+      Object.assign(target, {
+        outcome: 'inactive' as const,
+        completionReason: null,
+        attempts: 0,
+        providerPeerId: null,
+        appliedHeadDigest: null,
+        stagedHeadDigest: null,
+        catalogVersion: null,
+        inventoryRowCount: null,
+        lastError: null,
+        updatedAtMs: Date.now(),
+      });
+      return;
+    }
+    // `state.running` exposes that a refresh is in progress. Keep the target's
+    // last completed snapshot intact until this attempt itself completes so a
+    // healthy, durably applied catalog does not transiently regress to pending
+    // (and lose its head/row evidence) on every periodic revalidation pass.
+    // New targets already start as pending in the state initializer below.
+    let lastError: string | null = null;
+    let terminalError: unknown | null = null;
+    try {
+      const synchronized = await this.#dependencies.synchronizeTarget({
+        remotePeerIds: target.providers,
+        scope: target.scope,
+        signal,
+      });
+      if (synchronized !== null) {
+        if (target.mode === 'shadow' && synchronized.completionOutcome !== 'staged-only') {
+          throw new Error(
+            `RFC-64 shadow bootstrap unexpectedly completed as ${synchronized.completionOutcome}`,
+          );
+        }
+        if (target.mode === 'catalog' && synchronized.completionOutcome === 'staged-only') {
+          throw new Error('RFC-64 catalog bootstrap unexpectedly completed as staged-only');
+        }
+        const providerPeerId = synchronized.appliedProviderPeerId
+          ?? synchronized.providerPeerIds[0]
+          ?? null;
+        const completion = synchronized.completionOutcome === 'staged-only'
+          ? Object.freeze({
+            outcome: 'shadow-staged' as const,
+            appliedHeadDigest: null,
+            stagedHeadDigest: synchronized.stagedHeadDigest,
+          })
+          : Object.freeze({
+            outcome: 'applied' as const,
+            appliedHeadDigest: synchronized.appliedHead.currentCatalogHeadDigest,
+            stagedHeadDigest: null,
+          });
+        Object.assign(target, completion, {
+          completionReason: null,
+          providerPeerId,
+          attempts: target.providers.length,
+          catalogVersion: synchronized.catalogVersion,
+          inventoryRowCount: synchronized.inventoryRowCount,
+          lastError: null,
+          updatedAtMs: Date.now(),
+        });
+        return;
+      }
+      target.attempts = target.providers.length;
+    } catch (error) {
+      if (signal.aborted) return;
+      target.attempts = target.providers.length;
+      terminalError = error;
+      lastError = boundedRfc64SupervisorErrorV1(error);
+    }
+    const classification = classifyRfc64CatalogBootstrapFailureV1(
+      target.requiresPrivateVm,
+      terminalError,
+    );
+    Object.assign(target, {
+      outcome: classification.outcome,
+      completionReason: classification.completionReason,
+      providerPeerId: null,
+      appliedHeadDigest: null,
+      stagedHeadDigest: null,
+      catalogVersion: null,
+      inventoryRowCount: null,
+      lastError,
+      updatedAtMs: Date.now(),
+    });
+  }
+}
+
+const bootstrapOwnersV1 = new WeakMap<DKGAgent, Rfc64CatalogBootstrapOwnerV1>();
+
+export function bindRfc64CatalogBootstrapOwnerV1(
+  agent: DKGAgent,
+  owner: Rfc64CatalogBootstrapOwnerV1,
+): Rfc64CatalogBootstrapOwnerV1 {
+  if (bootstrapOwnersV1.has(agent)) {
+    throw new Error('RFC-64 catalog bootstrap owner is already bound');
+  }
+  bootstrapOwnersV1.set(agent, owner);
+  return owner;
+}
+
+function bootstrapOwnerV1(agent: DKGAgent): Rfc64CatalogBootstrapOwnerV1 {
+  const owner = bootstrapOwnersV1.get(agent);
+  if (owner === undefined) throw new Error('RFC-64 catalog bootstrap owner is not bound');
+  return owner;
+}
+
+function newPendingTargetV1(
+  target: Rfc64CatalogBootstrapTargetPlanV1,
+): MutableTargetStatusV1 {
+  return {
+    mode: target.mode,
+    scope: target.scope,
+    providers: target.providers,
+    requiresPrivateVm: target.requiresPrivateVm,
+    outcome: 'pending',
+    completionReason: null,
+    attempts: 0,
+    providerPeerId: null,
+    appliedHeadDigest: null,
+    stagedHeadDigest: null,
+    catalogVersion: null,
+    inventoryRowCount: null,
+    lastError: null,
+    updatedAtMs: null,
+  };
+}
 
 export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
   /**
@@ -152,10 +485,15 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): readonly string[] {
-    const config = this.config.rfc64CatalogBootstrap
-      ?? this.config.rfc64PublicCatalogBootstrap;
+    if (!this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed) {
+      return Object.freeze([]);
+    }
+    const config = resolveRfc64RuntimeCatalogBootstrapConfigV1(
+      this.config.rfc64CatalogBootstrap,
+      this.config.rfc64PublicCatalogBootstrap,
+    );
     if (config === undefined) return Object.freeze([]);
-    const policy = acceptedPoliciesV1(config).find(
+    const policy = config.acceptedPolicies.find(
       ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
     );
     return policy?.completeSwmProviders ?? Object.freeze([]);
@@ -163,26 +501,73 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
 
   /** Accept pinned policies and start the first bounded provider pass. */
   startRfc64PublicCatalogBootstrapV1(this: DKGAgent, ctx: OperationContext): void {
-    const config = this.resolveRuntimeRfc64CatalogBootstrapV1();
-    const previous = STATES.get(this);
-    if (config === undefined || (previous !== undefined && !previous.closed)) return;
-    const service = this.rfc64PublicCatalogServiceV1;
-    if (service === undefined) {
-      throw new Error('RFC-64 bootstrap requires the public catalog service');
-    }
-    for (const accepted of config.acceptedPolicies) {
-      service.acceptPolicySnapshot({
-        policy: accepted.policyEnvelope.payload,
-        policyDigest: computeContextGraphPolicyObjectDigestV1(accepted.policyEnvelope),
-        roster: accepted.rosterEnvelope?.payload,
-      });
-    }
-    const targets = config.acceptedPolicies.flatMap(({
-      policyEnvelope,
-      targets: policyTargets,
-      completeSwmProviders = [],
-    }) => (
-      policyTargets.map((target) => ({
+    bootstrapOwnerV1(this).start(ctx);
+  }
+
+  /** Immutable bounded observability for release harnesses and daemon adapters. */
+  readRfc64PublicCatalogBootstrapStatusV1(
+    this: DKGAgent,
+  ): Readonly<Rfc64PublicCatalogBootstrapStatusV1> | null {
+    return bootstrapOwnerV1(this).status();
+  }
+
+  /** Wait through the current pass and any subscription-triggered follow-up. */
+  async whenRfc64PublicCatalogBootstrapIdleV1(this: DKGAgent): Promise<void> {
+    await bootstrapOwnerV1(this).whenIdle();
+  }
+
+  /** Re-evaluate targets immediately after an edge subscription changes. */
+  requestRfc64PublicCatalogBootstrapPassV1(this: DKGAgent): void {
+    bootstrapOwnerV1(this).request();
+  }
+
+  /** Cancel stale selection work and coalesce one pass against the new registry state. */
+  invalidateRfc64PublicCatalogBootstrapPassV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): void {
+    bootstrapOwnerV1(this).invalidate(contextGraphId);
+  }
+
+  /** Stop future retries and abort/drain the current pass before service close. */
+  async closeRfc64PublicCatalogBootstrapV1(this: DKGAgent): Promise<void> {
+    await bootstrapOwnerV1(this).close();
+  }
+
+  /** Canonical readiness gate for configured graph-complete recovery providers. */
+  isRfc64CatalogBootstrapSwmRecoveryReadyV1(
+    this: DKGAgent,
+    providerPeerId: string,
+  ): boolean {
+    return bootstrapOwnerV1(this).isRecoveryReady(providerPeerId);
+  }
+
+}
+
+/** Resolve each accepted policy exactly once into immutable lifecycle lanes. */
+export function partitionRfc64CatalogBootstrapV1(
+  config: Readonly<{
+    readonly acceptedPolicies: readonly Rfc64CatalogBootstrapPolicyV1[];
+    readonly retryIntervalMs?: number;
+  }>,
+  executionPlan: Rfc64CatalogExecutionPlanV1,
+): Rfc64CatalogBootstrapPartitionV1 {
+  const track2Policies: Rfc64CatalogBootstrapPolicyV1[] = [];
+  const track2Targets: Rfc64CatalogBootstrapTargetPlanV1[] = [];
+  const legacyPolicies: Rfc64CatalogBootstrapPolicyV1[] = [];
+  for (const accepted of config.acceptedPolicies) {
+    const { policyEnvelope, targets, completeSwmProviders = [] } = accepted;
+    const authority = resolveRfc64CatalogExecutionPlanAuthorityV1(
+      executionPlan,
+      policyEnvelope.payload.contextGraphId,
+    );
+    const mode = authority.mode;
+    if (authority.legacySyncAllowed) legacyPolicies.push(accepted);
+    if (!authority.track2Enabled) continue;
+    track2Policies.push(accepted);
+    for (const target of targets) {
+      track2Targets.push(Object.freeze({
+        mode: mode as Extract<Rfc64CatalogRolloutModeV1, 'shadow' | 'catalog'>,
         scope: Object.freeze({
           networkId: policyEnvelope.payload.networkId,
           contextGraphId: policyEnvelope.payload.contextGraphId,
@@ -198,295 +583,21 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         requiresPrivateVm:
           policyEnvelope.payload.accessPolicy === 1
           && policyEnvelope.payload.source.kind === 'finalized-chain',
-      }))
-    ));
-    const state: BootstrapStateV1 = {
-      config,
-      targets: targets.map((target) => ({
-        scope: target.scope,
-        providers: target.providers,
-        requiresPrivateVm: target.requiresPrivateVm,
-        outcome: 'pending',
-        completionReason: null,
-        attempts: 0,
-        providerPeerId: null,
-        appliedHeadDigest: null,
-        catalogVersion: null,
-        inventoryRowCount: null,
-        lastError: null,
-        updatedAtMs: null,
-      })),
-      ctx,
-      closed: false,
-      running: false,
-      pass: 0,
-      lastPassStartedAtMs: null,
-      lastPassCompletedAtMs: null,
-      catalogPhaseReady: false,
-      timer: null,
-      abortController: null,
-      run: null,
-    };
-    STATES.set(this, state);
-    this.launchRfc64PublicCatalogBootstrapPassV1(state);
-  }
-
-  /** Immutable bounded observability for release harnesses and daemon adapters. */
-  readRfc64PublicCatalogBootstrapStatusV1(
-    this: DKGAgent,
-  ): Readonly<Rfc64PublicCatalogBootstrapStatusV1> | null {
-    const state = STATES.get(this);
-    if (state === undefined) return null;
-    return Object.freeze({
-      running: state.running,
-      pass: state.pass,
-      retryIntervalMs: state.config.retryIntervalMs ?? 0,
-      lastPassStartedAtMs: state.lastPassStartedAtMs,
-      lastPassCompletedAtMs: state.lastPassCompletedAtMs,
-      targets: Object.freeze(state.targets.map(snapshotTargetStatusV1)),
-    });
-  }
-
-  /** Wait for the currently running startup/refresh pass only. */
-  async whenRfc64PublicCatalogBootstrapIdleV1(this: DKGAgent): Promise<void> {
-    const state = STATES.get(this);
-    if (state === undefined) return;
-    while (state.run !== null) {
-      const current = state.run;
-      await current;
-      if (state.run === current) return;
+      }));
     }
   }
-
-  /** Stop future retries and abort/drain the current pass before service close. */
-  async closeRfc64PublicCatalogBootstrapV1(this: DKGAgent): Promise<void> {
-    const state = STATES.get(this);
-    if (state === undefined) return;
-    state.closed = true;
-    if (state.timer !== null) {
-      clearTimeout(state.timer);
-      state.timer = null;
-    }
-    state.abortController?.abort(new Error('RFC-64 public catalog bootstrap closing'));
-    await state.run?.catch(() => undefined);
-  }
-
-  /**
-   * Canonical recovery prerequisite for graph-complete RFC-64 providers.
-   * Non-provider peers are unaffected. Configured providers remain blocked
-   * until the first complete catalog phase settles, including contained
-   * not-found/failure outcomes; shutdown closes the boundary again.
-   */
-  isRfc64CatalogBootstrapSwmRecoveryReadyV1(
-    this: DKGAgent,
-    providerPeerId: string,
-  ): boolean {
-    const state = STATES.get(this);
-    if (state === undefined) return true;
-    const configuredProvider = state.config.acceptedPolicies.some(
-      ({ completeSwmProviders = [] }) => completeSwmProviders.includes(providerPeerId),
-    );
-    if (!configuredProvider) return true;
-    return !state.closed && state.catalogPhaseReady;
-  }
-
-  private launchRfc64PublicCatalogBootstrapPassV1(
-    this: DKGAgent,
-    state: BootstrapStateV1,
-  ): void {
-    if (state.closed || state.run !== null) return;
-    const run = this.runRfc64PublicCatalogBootstrapPassV1(state)
-      .catch((error) => {
-        this.log.warn(
-          state.ctx,
-          `RFC-64 public catalog bootstrap pass failed: ${errorMessageV1(error)}`,
-        );
-      })
-      .finally(() => {
-        if (state.run === run) state.run = null;
-        const retryIntervalMs = state.config.retryIntervalMs ?? 0;
-        if (!state.closed && retryIntervalMs > 0) {
-          state.timer = setTimeout(() => {
-            state.timer = null;
-            this.launchRfc64PublicCatalogBootstrapPassV1(state);
-          }, retryIntervalMs);
-          state.timer.unref?.();
-        }
-      });
-    state.run = run;
-  }
-
-  private async runRfc64PublicCatalogBootstrapPassV1(
-    this: DKGAgent,
-    state: BootstrapStateV1,
-  ): Promise<void> {
-    state.running = true;
-    state.pass += 1;
-    state.lastPassStartedAtMs = Date.now();
-    const abortController = new AbortController();
-    state.abortController = abortController;
-    try {
-      const completeSwmProviders = [...new Set(
-        state.config.acceptedPolicies.flatMap(
-          ({ completeSwmProviders: providers = [] }) => providers,
-        ),
-      )];
-      const connectedCompleteSwmProviders = new Set<string>();
-      await mapWithConcurrency(
-        completeSwmProviders,
-        MAX_CONCURRENT_TARGETS_V1,
-        async (providerPeerId) => {
-          if (state.closed || abortController.signal.aborted) return;
-          try {
-            await this.connectToPeerId(providerPeerId, {
-              timeoutMs: COMPLETE_SWM_PROVIDER_DIAL_TIMEOUT_MS_V1,
-            });
-            connectedCompleteSwmProviders.add(providerPeerId);
-          } catch (error) {
-            this.log.warn(
-              state.ctx,
-              `RFC-64 complete SWM provider ${providerPeerId.slice(-8)} is not dialable: ${errorMessageV1(error)}`,
-            );
-          }
-        },
-      );
-      await mapWithConcurrency(
-        state.targets,
-        MAX_CONCURRENT_TARGETS_V1,
-        async (target) => {
-          if (state.closed) return;
-          await this.synchronizeRfc64PublicCatalogBootstrapTargetV1(
-            target,
-            abortController.signal,
-          );
-        },
-      );
-      // Closing aborts target synchronization by design. It must not turn the
-      // incomplete phase into readiness or admit new SWM work during teardown.
-      if (state.closed || abortController.signal.aborted) return;
-      state.catalogPhaseReady = true;
-      // The VM catalog and graph-complete SWM inventory are two independently
-      // authorized recovery planes for one private Context Graph. Apply every
-      // catalog target before starting SWM recovery so a cold catalog bootstrap
-      // cannot race an SWM materialization and misclassify that valid state as
-      // an omitted catalog row. Catalog misses/failures do not suppress SWM:
-      // target synchronization contains them in its status and this phase still
-      // queues every provider that was successfully connected above.
-      for (const providerPeerId of connectedCompleteSwmProviders) {
-        const recoveryPlan = resolveRfc64PeerSwmRecoveryPlanV1(
-          state.config,
-          providerPeerId,
-        );
-        this.rfc64SwmRecoveryCoordinatorV1.refreshSelectedPublic(
-          providerPeerId,
-          recoveryPlan.targets
-            .filter(({ lane }) => lane === 'selected-public')
-            .map(({ contextGraphId }) => contextGraphId),
-          this.config.syncReconcilerTiming.stalenessThresholdMs,
-        );
-        // A pre-existing connection has no new connection:open event. One
-        // immutable provider plan owns admission for every selected graph,
-        // including mixed public/private providers.
-        this.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
-          recoveryPlan,
-          (_peerId, error) => {
-            this.log.warn(
-              state.ctx,
-              `RFC-64 complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${errorMessageV1(error)}`,
-            );
-          },
-          0,
-        );
-      }
-    } finally {
-      if (state.abortController === abortController) state.abortController = null;
-      state.running = false;
-      state.lastPassCompletedAtMs = Date.now();
-    }
-  }
-
-  private async synchronizeRfc64PublicCatalogBootstrapTargetV1(
-    this: DKGAgent,
-    target: MutableTargetStatusV1,
-    signal: AbortSignal,
-  ): Promise<void> {
-    // `state.running` exposes that a refresh is in progress. Keep the target's
-    // last completed snapshot intact until this attempt itself completes so a
-    // healthy, durably applied catalog does not transiently regress to pending
-    // (and lose its head/row evidence) on every periodic revalidation pass.
-    // New targets already start as pending in the state initializer below.
-    let lastError: string | null = null;
-    let terminalError: unknown | null = null;
-    try {
-      const applied = await this.synchronizeRfc64CatalogFromProvidersV1({
-        remotePeerIds: target.providers,
-        scope: target.scope,
-        signal,
-      });
-      if (applied !== null) {
-        target.outcome = 'applied';
-        target.completionReason = null;
-        target.providerPeerId = applied.appliedProviderPeerId
-          ?? applied.providerPeerIds[0]
-          ?? null;
-        // Discovery is hedged across the full bounded provider set before the
-        // receiver selects an exact highest head for activation.
-        target.attempts = target.providers.length;
-        target.appliedHeadDigest = applied.currentCatalogHeadDigest;
-        target.catalogVersion = applied.catalogVersion;
-        target.inventoryRowCount = applied.inventoryRowCount;
-        target.lastError = null;
-        target.updatedAtMs = Date.now();
-        return;
-      }
-      // A null result means the bounded provider loop completed without a
-      // current head. Preserve the number of providers that were attempted.
-      target.attempts = target.providers.length;
-    } catch (error) {
-      if (signal.aborted) return;
-      // The bounded discovery call snapshots and attempts the complete
-      // configured provider set before it reports a terminal failure. Keep
-      // that work visible for both failed and known-incomplete outcomes.
-      target.attempts = target.providers.length;
-      terminalError = error;
-      lastError = boundedErrorV1(errorMessageV1(error));
-    }
-    const classification = classifyRfc64CatalogBootstrapFailureV1(
-      target.requiresPrivateVm,
-      terminalError,
-    );
-    target.outcome = classification.outcome;
-    target.completionReason = classification.completionReason;
-    target.providerPeerId = null;
-    target.appliedHeadDigest = null;
-    target.catalogVersion = null;
-    target.inventoryRowCount = null;
-    target.lastError = lastError;
-    target.updatedAtMs = Date.now();
-  }
-
-  private resolveRuntimeRfc64CatalogBootstrapV1(
-    this: DKGAgent,
-  ): BootstrapStateV1['config'] | undefined {
-    const current = this.config.rfc64CatalogBootstrap;
-    if (current !== undefined) return current;
-    const legacy = this.config.rfc64PublicCatalogBootstrap;
-    if (legacy === undefined) return undefined;
-    return Object.freeze({
-      acceptedPolicies: legacy.acceptedPublicPolicies,
-      ...(legacy.retryIntervalMs === undefined
-        ? {}
-        : { retryIntervalMs: legacy.retryIntervalMs }),
-    });
-  }
-}
-
-function acceptedPoliciesV1(
-  config: Readonly<Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1>,
-): readonly Rfc64CatalogBootstrapPolicyV1[] {
-  return 'acceptedPolicies' in config
-    ? config.acceptedPolicies
-    : config.acceptedPublicPolicies;
+  const retry = config.retryIntervalMs === undefined
+    ? {}
+    : { retryIntervalMs: config.retryIntervalMs };
+  return Object.freeze({
+    ...retry,
+    track2Policies: Object.freeze(track2Policies),
+    track2Targets: Object.freeze(track2Targets),
+    legacyRecoveryConfig: Object.freeze({
+      acceptedPolicies: Object.freeze(legacyPolicies),
+      ...retry,
+    }),
+  });
 }
 
 function snapshotTargetStatusV1(
@@ -501,28 +612,16 @@ function snapshotTargetStatusV1(
       catalogEra: target.scope.catalogEra,
     }),
     providers: Object.freeze([...target.providers]),
+    mode: target.mode,
     outcome: target.outcome,
     completionReason: target.completionReason,
     attempts: target.attempts,
     providerPeerId: target.providerPeerId,
     appliedHeadDigest: target.appliedHeadDigest,
+    stagedHeadDigest: target.stagedHeadDigest,
     catalogVersion: target.catalogVersion,
     inventoryRowCount: target.inventoryRowCount,
     lastError: target.lastError,
     updatedAtMs: target.updatedAtMs,
   });
-}
-
-function errorMessageV1(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function boundedErrorV1(input: string): string {
-  if (UTF8.encode(input).byteLength <= MAX_STATUS_ERROR_BYTES_V1) return input;
-  let output = '';
-  for (const character of input) {
-    if (UTF8.encode(`${output}${character}`).byteLength > MAX_STATUS_ERROR_BYTES_V1) break;
-    output += character;
-  }
-  return output;
 }
