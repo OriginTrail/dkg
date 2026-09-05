@@ -5,7 +5,11 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { SortedGraphCatalog } from './graph-set-index-store.js';
 
-/** Owns graph membership and the invalidation of its immutable sorted view. */
+/**
+ * Owns two synchronized representations of one graph set: `members` is the
+ * mutable authority, while `ordered` is either null or its exact immutable,
+ * unique, Unicode-code-point-sorted projection.
+ */
 export class GraphSetCatalogState {
   private members: Set<string> | null = null;
   private ordered: SortedGraphCatalog | null = null;
@@ -37,29 +41,44 @@ export class GraphSetCatalogState {
   }
 
   add(graph: string): boolean {
-    if (!this.members || this.members.has(graph)) return false;
-    this.members.add(graph);
-    // Once the immutable projection exists, preserve it incrementally. The
-    // former invalidation forced the next prefix read to sort the complete
-    // graph set after every single graph mutation under publish load.
-    if (this.ordered) {
-      // `members.has(graph)` was false before the Set mutation, so the sorted
-      // projection is guaranteed not to contain it under this class-owned
-      // synchronization invariant. Assign the canonical point update directly;
-      // an identity-triggered invalidation would only conceal a broken state.
-      this.ordered = insertSortedUniqueStringCatalog(this.ordered, graph);
+    return this.addAll([graph]).length === 1;
+  }
+
+  /** Apply a batch with at most one full immutable projection rebuild. */
+  addAll(graphs: Iterable<string>): string[] {
+    if (!this.members) return [];
+    const added: string[] = [];
+    for (const graph of graphs) {
+      if (this.members.has(graph)) continue;
+      this.members.add(graph);
+      added.push(graph);
     }
-    return true;
+    if (this.ordered && added.length > 0) {
+      this.ordered = added.length === 1
+        ? insertSortedUniqueStringCatalog(this.ordered, added[0]!)
+        : createSortedUniqueStringCatalog(this.members);
+    }
+    return added;
   }
 
   remove(graph: string): boolean {
-    if (!this.members?.delete(graph)) return false;
-    if (this.ordered) {
-      // A successful Set deletion guarantees membership in the synchronized
-      // projection; keep the incremental representation explicit.
-      this.ordered = removeSortedUniqueStringCatalog(this.ordered, graph);
+    return this.removeAll([graph]).length === 1;
+  }
+
+  /** Apply a batch with at most one full immutable projection rebuild. */
+  removeAll(graphs: Iterable<string>): string[] {
+    if (!this.members) return [];
+    const removed: string[] = [];
+    for (const graph of graphs) {
+      if (!this.members.delete(graph)) continue;
+      removed.push(graph);
     }
-    return true;
+    if (this.ordered && removed.length > 0) {
+      this.ordered = removed.length === 1
+        ? removeSortedUniqueStringCatalog(this.ordered, removed[0]!)
+        : createSortedUniqueStringCatalog(this.members);
+    }
+    return removed;
   }
 
   /**

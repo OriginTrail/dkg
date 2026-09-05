@@ -772,13 +772,14 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         if (generation !== this.mutationGeneration) {
           continue;
         }
-        for (const { graph, present } of graphPresence) {
-          if (present) {
-            this.addGraphs([graph], source);
-          } else {
-            this.removeGraphs([graph], source);
-          }
-        }
+        this.addGraphs(
+          graphPresence.filter(({ present }) => present).map(({ graph }) => graph),
+          source,
+        );
+        this.removeGraphs(
+          graphPresence.filter(({ present }) => !present).map(({ graph }) => graph),
+          source,
+        );
         return;
       } catch {
         this.clearIndex();
@@ -832,16 +833,17 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
 
   private addGraphs(graphs: string[], source: GraphSetMutationSource): void {
     if (!this.catalog.initialized) return;
-    for (const graph of graphs) {
-      if (!graph || isAtomicGraphReplaceStagingGraph(graph) || !this.catalog.add(graph)) continue;
+    const eligible = graphs.filter(
+      (graph) => graph && !isAtomicGraphReplaceStagingGraph(graph),
+    );
+    for (const graph of this.catalog.addAll(eligible)) {
       this.emit({ type: 'graph-added', graph, source });
     }
   }
 
   private removeGraphs(graphs: string[], source: GraphSetMutationSource): void {
     if (!this.catalog.initialized) return;
-    for (const graph of graphs) {
-      if (!graph || !this.catalog.remove(graph)) continue;
+    for (const graph of this.catalog.removeAll(graphs.filter(Boolean))) {
       this.emit({ type: 'graph-removed', graph, source });
     }
   }

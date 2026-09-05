@@ -55,4 +55,25 @@ describe('GraphSetCatalogState', () => {
     expect(state.remove('urn:missing')).toBe(false);
     expect(state.sortedFor(members)).toBe(initial);
   });
+
+  it('rebuilds an existing projection at most once for a large mutation batch', () => {
+    const createSortedCatalog = vi.mocked(createSortedUniqueStringCatalog);
+    createSortedCatalog.mockClear();
+    const state = new GraphSetCatalogState();
+    state.replace(new Set(['urn:existing']));
+    const members = state.current!;
+    state.sortedFor(members);
+
+    const additions = Array.from({ length: 1_000 }, (_, index) => `urn:add:${index}`);
+    expect(state.addAll([...additions, additions[0]!])).toEqual(additions);
+    expect(createSortedCatalog).toHaveBeenCalledTimes(2);
+    expect(state.sortedFor(members)).toEqual(
+      createSortedUniqueStringCatalog(['urn:existing', ...additions]),
+    );
+
+    createSortedCatalog.mockClear();
+    expect(state.removeAll([...additions, additions[0]!])).toEqual(additions);
+    expect(createSortedCatalog).toHaveBeenCalledOnce();
+    expect(state.sortedFor(members)).toEqual(['urn:existing']);
+  });
 });
