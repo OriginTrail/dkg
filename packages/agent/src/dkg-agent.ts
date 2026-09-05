@@ -91,6 +91,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
+import { runAgentPromotePreCommitReads } from './promote-precommit-replay-safety.js';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -3196,41 +3197,48 @@ export class DKGAgent extends DKGAgentBase {
         // promoted SWM gossip in the Sender Key encrypted envelope.
         // Without this, private/agent-gated CGs receive plaintext
         // gossip and the new `SharedMemoryHandler` check rejects it.
-        const gossipSigner = await agent.resolveWorkspaceGossipSigningAgent(contextGraphId);
-        // Strict curator-ack gate (OT-RFC-49 curator-leader) for the WM→SWM
-        // promote path — the same confirmer as share()/conditionalShare(). When
-        // armed (private CG, gate enabled, curator remote), assertionPromote
-        // requires the curator's applied-ack BEFORE it moves WM→SWM, so an
-        // unconfirmed promote aborts (CuratorUnconfirmedError → 503) leaving WM
-        // intact instead of silently committing a write the curator never got.
-        const confirmBeforeCommit = await agent.buildCuratorAckConfirmer(
-          contextGraphId,
+        const {
           gossipSigner,
-          { awaitCuratorAck: opts?.awaitCuratorAck, curatorAckTimeoutMs: opts?.curatorAckTimeoutMs },
-          createOperationContext('share'),
-        );
-        // A private Context Graph is an access boundary even when a particular
-        // KA contains only public RDF triples. The publisher's content-only
-        // default cannot infer that boundary: zero private triples otherwise
-        // produces a `public` workspace head, which the private RFC-64 catalog
-        // lane must reject to avoid widening access. Resolve the immutable CG
-        // access policy here, at the common sync/async SHARE execution seam, so
-        // ordinary clients do not need to duplicate graph policy on every KA.
-        // Unknown policy retains the publisher's existing content-based,
-        // fail-closed-for-private-content default; an explicit per-KA envelope
-        // remains authoritative for direct callers.
-        let shareAccessPolicy = opts?.accessPolicy;
-        if (shareAccessPolicy === undefined) {
-          const graphPolicy = await agent.getContextGraphOnChainPolicy(contextGraphId);
-          if (graphPolicy.accessPolicy === 1) shareAccessPolicy = 'ownerOnly';
-          else if (graphPolicy.accessPolicy === 0) shareAccessPolicy = 'public';
-          else if (await agent.readLocalAccessPolicyEnum(contextGraphId) === 1) {
-            // A not-yet-registered local private CG has no authoritative chain
-            // answer. Its local creation intent may safely make a share more
-            // restrictive, but never use local intent to infer `public`.
-            shareAccessPolicy = 'ownerOnly';
+          confirmBeforeCommit,
+          shareAccessPolicy,
+        } = await runAgentPromotePreCommitReads(async () => {
+          const gossipSigner = await agent.resolveWorkspaceGossipSigningAgent(contextGraphId);
+          // Strict curator-ack gate (OT-RFC-49 curator-leader) for the WM→SWM
+          // promote path — the same confirmer as share()/conditionalShare(). When
+          // armed (private CG, gate enabled, curator remote), assertionPromote
+          // requires the curator's applied-ack BEFORE it moves WM→SWM, so an
+          // unconfirmed promote aborts (CuratorUnconfirmedError → 503) leaving WM
+          // intact instead of silently committing a write the curator never got.
+          const confirmBeforeCommit = await agent.buildCuratorAckConfirmer(
+            contextGraphId,
+            gossipSigner,
+            { awaitCuratorAck: opts?.awaitCuratorAck, curatorAckTimeoutMs: opts?.curatorAckTimeoutMs },
+            createOperationContext('share'),
+          );
+          // A private Context Graph is an access boundary even when a particular
+          // KA contains only public RDF triples. The publisher's content-only
+          // default cannot infer that boundary: zero private triples otherwise
+          // produces a `public` workspace head, which the private RFC-64 catalog
+          // lane must reject to avoid widening access. Resolve the immutable CG
+          // access policy here, at the common sync/async SHARE execution seam, so
+          // ordinary clients do not need to duplicate graph policy on every KA.
+          // Unknown policy retains the publisher's existing content-based,
+          // fail-closed-for-private-content default; an explicit per-KA envelope
+          // remains authoritative for direct callers.
+          let shareAccessPolicy = opts?.accessPolicy;
+          if (shareAccessPolicy === undefined) {
+            const graphPolicy = await agent.getContextGraphOnChainPolicy(contextGraphId);
+            if (graphPolicy.accessPolicy === 1) shareAccessPolicy = 'ownerOnly';
+            else if (graphPolicy.accessPolicy === 0) shareAccessPolicy = 'public';
+            else if (await agent.readLocalAccessPolicyEnum(contextGraphId) === 1) {
+              // A not-yet-registered local private CG has no authoritative chain
+              // answer. Its local creation intent may safely make a share more
+              // restrictive, but never use local intent to infer `public`.
+              shareAccessPolicy = 'ownerOnly';
+            }
           }
-        }
+          return { gossipSigner, confirmBeforeCommit, shareAccessPolicy };
+        });
         const {
           promotedCount,
           gossipPayload,

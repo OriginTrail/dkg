@@ -380,6 +380,10 @@ import {
   isCanonicalPositiveContextGraphId,
   localContextGraphIdMatchesCommittedNameHash,
 } from './context-graph-binding-state.js';
+import {
+  contextGraphAuthorityUnavailable,
+  type ContextGraphAuthorityUnavailable,
+} from './context-graph-authority-unavailable.js';
 
 const CHAIN_ATTESTED_DECLARATION_SCAN_MAX = 512;
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
@@ -391,14 +395,11 @@ export type ContextGraphRegistrationBinding =
       onChainId: bigint;
       provenance: 'authoritative' | 'ontology' | 'reverse-name-hash' | 'numeric-id' | 'name-hash';
     }
-  | {
-      kind: 'unavailable';
-      reason:
-        | 'local-chain-binding-unavailable'
-        | 'local-existence-unavailable'
-        | 'chain-name-binding-unavailable';
-      detail?: string;
-    };
+  | ContextGraphAuthorityUnavailable<
+      | 'local-chain-binding-unavailable'
+      | 'local-existence-unavailable'
+      | 'chain-name-binding-unavailable'
+    >;
 
 function contextGraphBindingAbortReason(signal: AbortSignal): Error {
   if (signal.reason instanceof Error) return signal.reason;
@@ -649,11 +650,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           provenance: binding.provenance,
         };
       } catch (err) {
-        return {
-          kind: 'unavailable',
-          reason: 'local-chain-binding-unavailable',
-          detail: err instanceof Error ? err.message : String(err),
-        };
+        return contextGraphAuthorityUnavailable('local-chain-binding-unavailable', { error: err });
       }
     }
 
@@ -669,11 +666,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           },
         );
       } catch (err) {
-        return {
-          kind: 'unavailable',
-          reason: 'local-existence-unavailable',
-          detail: err instanceof Error ? err.message : String(err),
-        };
+        return contextGraphAuthorityUnavailable('local-existence-unavailable', { error: err });
       }
       if (!localGraphExists) {
         return {
@@ -700,11 +693,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         ? { kind: 'unregistered' }
         : { kind: 'registered', onChainId, provenance: 'name-hash' };
     } catch (err) {
-      return {
-        kind: 'unavailable',
-        reason: 'chain-name-binding-unavailable',
-        detail: err instanceof Error ? err.message : String(err),
-      };
+      return contextGraphAuthorityUnavailable('chain-name-binding-unavailable', { error: err });
     }
   }
 

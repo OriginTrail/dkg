@@ -95,7 +95,11 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isChainRpcTransportError, type ChainRpcTransportCode, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import {
+  contextGraphAuthorityUnavailable,
+  type ContextGraphAuthorityUnavailable,
+} from './context-graph-authority-unavailable.js';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -706,22 +710,7 @@ export type RegisteredContextGraphAuthority =
   | { kind: 'unregistered' }
   | { kind: 'public'; onChainId: bigint }
   | { kind: 'private'; onChainId: bigint; participantAgents: string[] }
-  | {
-      kind: 'unavailable';
-      reason:
-        | 'chain-name-binding-unavailable'
-        | 'local-chain-binding-unavailable'
-        | 'local-existence-unavailable'
-        | 'chain-access-policy-unavailable'
-        | 'chain-access-policy-unknown'
-        | 'chain-participant-authority-unsupported'
-        | 'chain-participant-authority-unavailable'
-        | 'chain-participant-authority-invalid';
-      onChainId?: bigint;
-      detail?: string;
-      /** Privacy-bounded transport identity retained for producer retry policy. */
-      transportErrorCode?: ChainRpcTransportCode;
-    };
+  | ContextGraphAuthorityUnavailable;
 
 export class ContextGraphResolveMethods extends DKGAgentBase {
   async getCgMeta(
@@ -1553,13 +1542,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         { signal: options.signal },
       );
     } catch (err) {
-      return {
-        kind: 'unavailable',
+      return contextGraphAuthorityUnavailable('chain-access-policy-unavailable', {
         onChainId,
-        reason: 'chain-access-policy-unavailable',
-        detail: err instanceof Error ? err.message : String(err),
-        ...(isChainRpcTransportError(err) ? { transportErrorCode: err.code } : {}),
-      };
+        error: err,
+      });
     }
     if (accessPolicy === null) {
       return { kind: 'unavailable', onChainId, reason: 'chain-access-policy-unknown' };
@@ -1601,13 +1587,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       }
       rawAgents = result;
     } catch (err) {
-      return {
-        kind: 'unavailable',
+      return contextGraphAuthorityUnavailable('chain-participant-authority-unavailable', {
         onChainId,
-        reason: 'chain-participant-authority-unavailable',
-        detail: err instanceof Error ? err.message : String(err),
-        ...(isChainRpcTransportError(err) ? { transportErrorCode: err.code } : {}),
-      };
+        error: err,
+      });
     }
 
     const seen = new Set<string>();

@@ -126,6 +126,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
+import { ContextGraphAuthorityUnavailableError } from './context-graph-authority-unavailable.js';
 import {
   DKGQueryEngine, QueryHandler,
   emptyQueryResultForKind,
@@ -615,6 +616,20 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     if (registeredAuthority.kind === 'private') return registeredAuthority.participantAgents;
     if (registeredAuthority.kind === 'unavailable') return [];
 
+    return this.resolveLocalContextGraphAgentGateAddresses(
+      contextGraphId,
+      registeredAuthority.kind === 'unregistered',
+      options,
+    );
+  }
+
+  /** Resolve non-chain gate state after registered authority was settled once. */
+  async resolveLocalContextGraphAgentGateAddresses(
+    this: DKGAgent,
+    contextGraphId: string,
+    includeRfc64Authority: boolean,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<string[] | null> {
     // A selected private RFC-64 graph may be joining a completely empty
     // store. In that state the accepted, authority-checked roster is already
     // available to the catalog service, while the legacy `_meta` projection
@@ -626,7 +641,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // `null` means RFC-64 owns the graph but current roster authority is not
     // available. Return an empty gate—not legacy `null`—so every caller keeps
     // treating the graph as gated and fails closed until authority recovers.
-    const rfc64Roster = registeredAuthority.kind === 'unregistered'
+    const rfc64Roster = includeRfc64Authority
       ? this.resolveRfc64PrivateReadRosterV1(contextGraphId)
       : undefined;
     if (rfc64Roster !== undefined) {
@@ -1314,14 +1329,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       return { requiresEncryption: false, recipients: [] };
     }
     if (registeredAuthority.kind === 'unavailable') {
-      throw Object.assign(
-        new Error(
-          `Registered context graph "${input.contextGraphId}" authority is unavailable (${registeredAuthority.reason})`,
-        ),
-        registeredAuthority.transportErrorCode
-          ? { code: registeredAuthority.transportErrorCode }
-          : {},
-      );
+      throw new ContextGraphAuthorityUnavailableError(input.contextGraphId, registeredAuthority);
     }
     if (registeredAuthority.participantAgents.length === 0) {
       throw new Error(
@@ -2712,7 +2720,19 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async resolveWorkspaceGossipSigningAgent(this: DKGAgent,
     contextGraphId: string,
   ): Promise<(AgentKeyRecord & { privateKey: string }) | null> {
-    const allowedAgents = await this.getContextGraphAgentGateAddresses(contextGraphId);
+    // Resolve registered authority exactly once. The generic admission helper
+    // returns an empty gate on outages to fail closed, but promotion needs the
+    // bounded typed cause so its outer pre-SWM boundary can authorize a retry.
+    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(contextGraphId);
+    if (registeredAuthority.kind === 'unavailable') {
+      throw new ContextGraphAuthorityUnavailableError(contextGraphId, registeredAuthority);
+    }
+    const allowedAgents = registeredAuthority.kind === 'private'
+      ? registeredAuthority.participantAgents
+      : await this.resolveLocalContextGraphAgentGateAddresses(
+          contextGraphId,
+          registeredAuthority.kind === 'unregistered',
+        );
     if (!allowedAgents) {
       return this.getWorkspaceGossipSigningAgent();
     }

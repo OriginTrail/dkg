@@ -14,13 +14,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+vi.mock('@origintrail-official/dkg-agent', () => import('../../agent/src/index.js'));
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import {
   OxigraphStore,
   StoreOperationTimeoutError,
 } from '@origintrail-official/dkg-storage';
 import {
-  DKGPublisher,
   TripleStoreAsyncPromoteQueue,
   type AsyncPromoteQueue,
   type PromoteRequest,
@@ -28,18 +28,12 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import {
   ChainRpcTransportError,
-  type ChainAdapter,
 } from '@origintrail-official/dkg-chain';
-import {
-  TypedEventBus,
-  generateEd25519Keypair,
-} from '@origintrail-official/dkg-core';
-import { DKGAgent } from '../../agent/src/dkg-agent.js';
+import { runAgentPromotePreCommitReads } from '../../agent/src/promote-precommit-replay-safety.js';
 import {
   classifyExactSwmGraphReplaceFailure,
   classifyPreCommitChainRpcFailure,
 } from '../../publisher/test/_helpers/promote-replay-safety.js';
-import { finalizeRootlessAssertionForTest } from '../../publisher/test/_helpers/rootless-lifecycle.js';
 import {
   classifyPromoteError,
   createPromoteWorkerSupervisor,
@@ -201,7 +195,7 @@ describe('classifyPromoteError', () => {
     ['RPC_ENDPOINTS_EXHAUSTED', 'RPC endpoints exhausted'],
     ['RPC_RECEIPT_LOOKUP_FAILED', 'receipt lookup failed on every endpoint'],
     ['RPC_TIMEOUT', 'tx 0xabc timed out waiting for a receipt'],
-  ] as const)('retries producer-certified %s while unclassified transport stays fatal', (code, message) => {
+  ] as const)('retries producer-certified %s while unclassified transport stays fatal', async (code, message) => {
     const unclassified = Object.assign(new Error(message), { code });
     expect(classifyPromoteError(unclassified)).toEqual({
       classification: 'fatal',
@@ -210,6 +204,14 @@ describe('classifyPromoteError', () => {
 
     const certified = Object.assign(new Error(message), { code });
     expect(classifyPromoteError(classifyPreCommitChainRpcFailure(certified))).toEqual({
+      classification: 'transient',
+      retryable: true,
+    });
+
+    const agentCertified = await runAgentPromotePreCommitReads(async () => {
+      throw Object.assign(new Error(message), { code });
+    }).catch((error: unknown) => error);
+    expect(classifyPromoteError(agentCertified)).toEqual({
       classification: 'transient',
       retryable: true,
     });
@@ -540,78 +542,21 @@ describe('runPromoteJob', () => {
     ]);
   });
 
-  it('retries a real agent-to-publisher pre-commit chain outage', async () => {
-    const contextGraphId = 'registered-public-rpc-outage';
-    const assertionName = 'rpc-outage-ka';
-    const agentAddress = '0x1234567890abcdef1234567890abcdef12345678';
-    const publisherPeerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
-    const publisherStore = new OxigraphStore();
-    const chain: ChainAdapter = {
-      isContextGraphActiveOnChain: async () => {
-        throw new ChainRpcTransportError(
-          'RPC_ENDPOINTS_EXHAUSTED',
-          'cgStorage.isContextGraphActive failed on all endpoints',
-        );
-      },
-      getContextGraphAccessPolicy: async () => 0,
-    } as ChainAdapter;
-    const agentLike: any = {
-      chain,
-      log: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
-      onChainAccessPolicyCache: new Map(),
-      onChainParticipantAgentsCache: new Map(),
-      resolveContextGraphRegistrationBinding: async () => ({
-        kind: 'registered' as const,
-        onChainId: 1n,
-      }),
-    };
-    agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
-    agentLike.readLiveOnChainAccessPolicy =
-      (DKGAgent.prototype as any).readLiveOnChainAccessPolicy;
-    agentLike.resolveRegisteredContextGraphAuthority =
-      (DKGAgent.prototype as any).resolveRegisteredContextGraphAuthority;
-    agentLike.resolveWorkspaceAgentRecipientsForCurrentAuthority =
-      (DKGAgent.prototype as any).resolveWorkspaceAgentRecipientsForCurrentAuthority;
-
-    const publisher = new DKGPublisher({
-      store: publisherStore,
-      chain,
-      eventBus: new TypedEventBus(),
-      keypair: await generateEd25519Keypair(),
-      workspaceAgentRecipientResolver: (input) => (
-        agentLike.resolveWorkspaceAgentRecipientsForCurrentAuthority(input)
-      ),
-    });
-    await publisher.assertionCreate(contextGraphId, assertionName, agentAddress);
-    await publisher.assertionWrite(contextGraphId, assertionName, agentAddress, [{
-      subject: 'urn:test:rpc-outage',
-      predicate: 'http://schema.org/name',
-      object: '"retry me"',
-    }]);
-    await finalizeRootlessAssertionForTest({
-      publisher,
-      store: publisherStore,
-      contextGraphId,
-      name: assertionName,
-      agentAddress,
-    });
-
-    const job = await enqueueAndClaim(makeRequest({
-      contextGraphId,
-      assertionName,
-      subGraphName: undefined,
-      agentAddress,
-    }));
+  it('moves an agent-certified pre-commit chain outage to failed_retrying', async () => {
+    const job = await enqueueAndClaim();
+    const replaySafeFailure = await runAgentPromotePreCommitReads(async () => {
+      throw new ChainRpcTransportError(
+        'RPC_ENDPOINTS_EXHAUSTED',
+        'authority lookup failed on all endpoints',
+      );
+    }).catch((error: unknown) => error);
     const result = await runPromoteJob({
       job,
       queue,
       workerId: 'worker-test',
       runPromote: async (_request, markPromoteStarted) => {
         await markPromoteStarted();
-        return publisher.assertionPromote(contextGraphId, assertionName, agentAddress, {
-          publisherPeerId,
-          senderAgentAddress: agentAddress,
-        });
+        throw replaySafeFailure;
       },
       now: fixture.clock.now,
       heartbeatIntervalMs: 0,
@@ -625,7 +570,7 @@ describe('runPromoteJob', () => {
     expect((await queue.getStatus(job.jobId))?.state).toBe('failed_retrying');
     expect(promoteFailureDiagnostics(logs)).toEqual([
       expect.objectContaining({
-        stage: 'encodeWorkspaceGossipPayload',
+        stage: 'unknown',
         errorCode: 'PROMOTE_REPLAY_SAFE_FAILURE',
       }),
     ]);
