@@ -865,18 +865,16 @@ describe('private CG membership bootstrap recovery', () => {
       accessPolicy: 1,
       callerAgentAddress: owner,
     });
-    const requester = ethers.Wallet.createRandom();
+    const requester = await agent.registerAgent(
+      'approve-generation-race-requester',
+      { framework: 'test' },
+    );
     const issuedAtMs = Date.now();
-    const makeDelegation = (timestamp: number, peerId: string) => signAgentDelegation({
-      agentAddress: requester.address,
-      scope: joinDelegationScope(created.chain.deploymentId, contextGraphId),
-      issuedAtMs: timestamp,
-      expiresAtMs: timestamp + 60_000,
-      delegateePeerId: peerId,
-      agentPrivateKey: requester.privateKey,
-    });
-    const older = await makeDelegation(issuedAtMs, '12D3KooWApproveRaceOlder');
-    const newer = await makeDelegation(issuedAtMs + 1, '12D3KooWApproveRaceNewer');
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(issuedAtMs);
+    const older = await agent.signJoinRequest(contextGraphId, requester.agentAddress);
+    clock.mockReturnValue(issuedAtMs + 1);
+    const newer = await agent.signJoinRequest(contextGraphId, requester.agentAddress);
+    clock.mockRestore();
     await agent.storePendingJoinRequest(contextGraphId, older, 'older');
 
     let releaseApproval!: () => void;
@@ -901,7 +899,7 @@ describe('private CG membership bootstrap recovery', () => {
       return actualStoreOnce(...args);
     };
 
-    const approval = agent.approveJoinRequest(contextGraphId, requester.address, owner);
+    const approval = agent.approveJoinRequest(contextGraphId, requester.agentAddress, owner);
     await approvalStarted;
     const newerStore = agent.storePendingJoinRequest(contextGraphId, newer, 'newer');
     await Promise.resolve();
@@ -910,9 +908,9 @@ describe('private CG membership bootstrap recovery', () => {
     releaseApproval();
     await Promise.all([approval, newerStore]);
     expect(newerStoreStarted).toBe(true);
-    expect(await agent.loadPendingJoinDelegation(contextGraphId, requester.address))
+    expect(await agent.loadPendingJoinDelegation(contextGraphId, requester.agentAddress))
       .toMatchObject({ signature: newer.signature, delegateePeerId: newer.delegateePeerId });
-    expect(await agent.getJoinRequestStatus(contextGraphId, requester.address)).toBe('pending');
+    expect(await agent.getJoinRequestStatus(contextGraphId, requester.agentAddress)).toBe('pending');
   });
 
   it.each(['queued', 'ok'] as const)(
