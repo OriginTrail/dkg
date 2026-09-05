@@ -4,7 +4,16 @@ import { spawn } from 'node:child_process';
 
 import { toErrorMessage } from '@origintrail-official/dkg-core';
 
-import { loadConfig, configExists, readPid, readApiPort, isProcessRunning, logPath, loadProjectConfig } from '../config.js';
+import {
+  loadConfig,
+  configExists,
+  exitOnStoreConfigErrors,
+  readPid,
+  readApiPort,
+  isProcessRunning,
+  logPath,
+  loadProjectConfig,
+} from '../config.js';
 import { ApiClient } from '../api-client.js';
 
 import { runDaemon } from '../daemon.js';
@@ -56,6 +65,8 @@ program
       console.error('No config found. Run "dkg init" first.');
       process.exit(1);
     }
+
+    exitOnStoreConfigErrors(await loadConfig(), (message) => console.error(message));
 
     const pid = await readPid();
     if (pid && isProcessRunning(pid)) {
