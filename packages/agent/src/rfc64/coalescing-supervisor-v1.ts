@@ -64,16 +64,14 @@ export class Rfc64CoalescingSupervisorV1 {
   }
 
   /** Fence new work, abort the active pass, and await physical retirement. */
-  async close(reason?: unknown): Promise<void> {
+  async close(): Promise<void> {
     this.#closed = true;
     this.#requested = false;
     if (this.#timer !== null) {
       clearTimeout(this.#timer);
       this.#timer = null;
     }
-    this.#abortController?.abort(
-      reason === undefined ? new Error(this.#options.closingMessage) : reason,
-    );
+    this.#abortController?.abort(new Error(this.#options.closingMessage));
     await this.#run?.catch(() => undefined);
   }
 

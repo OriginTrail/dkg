@@ -43,7 +43,6 @@ import { Rfc64PublicCatalogSuccessorProducerV1 } from
   '../src/rfc64/public-catalog-successor-producer-v1.js';
 import {
   RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1,
-  rfc64CatalogAuthorityRefreshSchedulerV1,
 } from '../src/rfc64/catalog-authority-refresh-loop-v1.js';
 import type { Rfc64PublicCatalogActivationInputV1 } from
   '../src/rfc64/public-catalog-activation-config-v1.js';
@@ -951,57 +950,124 @@ describe('RFC-64 rollout authority integration', () => {
     });
   });
 
-  it('wires one authority-refresh schedule per service lifecycle', async () => {
-    const scheduled: Array<Readonly<{
-      callback: () => void;
-      intervalMs: number;
-      handle: ReturnType<typeof setInterval>;
-    }>> = [];
-    const activeTimers = new Set<ReturnType<typeof setInterval>>();
-    const schedule = vi.spyOn(rfc64CatalogAuthorityRefreshSchedulerV1, 'setInterval')
-      .mockImplementation((callback, intervalMs) => {
-        const handle = Object.freeze({ ordinal: scheduled.length + 1 }) as unknown as
-          ReturnType<typeof setInterval>;
-        scheduled.push(Object.freeze({ callback, intervalMs, handle }));
-        activeTimers.add(handle);
-        return handle;
-      });
-    const cancel = vi.spyOn(rfc64CatalogAuthorityRefreshSchedulerV1, 'clearInterval')
-      .mockImplementation((handle) => {
-        activeTimers.delete(handle);
-      });
-    const edge = await startAgent('authority-refresh-timer', undefined);
-    expect(schedule).toHaveBeenCalledTimes(1);
-    expect(scheduled[0]?.intervalMs)
-      .toBe(RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1);
-    expect(activeTimers).toEqual(new Set([scheduled[0]!.handle]));
-
+  it('wires refresh selection and fences the service while a stalled pass drains', async () => {
+    const legacyContextGraphId = `${AUTHOR}/authority-refresh-legacy` as ContextGraphIdV1;
+    const inactiveContextGraphId = `${AUTHOR}/authority-refresh-inactive` as ContextGraphIdV1;
+    const authoritySnapshot = finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0');
+    const chainAdapter = chainWithFinalizedAuthority(authoritySnapshot);
+    const edge = await startAgent(
+      'authority-refresh-lifecycle',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        chainAdapter,
+        rfc64CatalogActivation: {
+          deploymentProfile: DEPLOYMENT,
+          rollout: { contextGraphModes: { [legacyContextGraphId]: 'legacy' } },
+        },
+      },
+    );
     await edge.createContextGraph({
       id: CONTEXT_GRAPH_ID,
       name: 'Authority refresh timer lifecycle',
       callerAgentAddress: AUTHOR,
     });
+    await edge.createContextGraph({
+      id: legacyContextGraphId,
+      name: 'Authority refresh legacy exclusion',
+      callerAgentAddress: AUTHOR,
+    });
     await edge.whenRfc64CatalogResponsibilitiesIdleV1();
-    const reconcile = vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1');
-    scheduled[0]!.callback();
-    await vi.waitFor(() => expect(reconcile).toHaveBeenCalledWith(
-      CONTEXT_GRAPH_ID,
-      expect.any(AbortSignal),
-    ));
-
+    const responsibilities = edge.readRfc64CatalogResponsibilitiesV1();
+    expect(responsibilities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ contextGraphId: CONTEXT_GRAPH_ID, active: true, mode: 'catalog' }),
+      expect.objectContaining({
+        contextGraphId: legacyContextGraphId,
+        active: true,
+        mode: 'legacy',
+      }),
+    ]));
     await edge.closeRfc64PublicCatalogServiceV1();
-    expect(cancel).toHaveBeenCalledTimes(1);
-    expect(cancel).toHaveBeenLastCalledWith(scheduled[0]!.handle);
-    expect(activeTimers.size).toBe(0);
+    vi.spyOn(edge, 'readRfc64CatalogResponsibilitiesV1').mockReturnValue(Object.freeze([
+      ...responsibilities,
+      Object.freeze({
+        contextGraphId: inactiveContextGraphId,
+        responsible: true,
+        responsibilityReason: 'edge-subscription' as const,
+        active: false,
+        mode: 'catalog' as const,
+        selectionSource: 'kill-switch' as const,
+      }),
+    ]));
+    const reconcile = vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1')
+      .mockResolvedValue(null);
+    let releaseAuthorityRead = () => undefined;
+    let stalledClose: Promise<void> | undefined;
+    vi.useFakeTimers();
+    try {
+      edge.startRfc64PublicCatalogServiceV1(createOperationContext('system'));
+      expect(vi.getTimerCount()).toBe(1);
+      reconcile.mockClear();
 
-    edge.startRfc64PublicCatalogServiceV1(createOperationContext('system'));
-    expect(schedule).toHaveBeenCalledTimes(2);
-    expect(activeTimers).toEqual(new Set([scheduled[1]!.handle]));
+      await vi.advanceTimersByTimeAsync(RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1);
+      expect(reconcile).toHaveBeenCalledTimes(1);
+      expect(reconcile).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, expect.any(AbortSignal));
 
-    await edge.closeRfc64PublicCatalogServiceV1();
-    expect(cancel).toHaveBeenCalledTimes(2);
-    expect(cancel).toHaveBeenLastCalledWith(scheduled[1]!.handle);
-    expect(activeTimers.size).toBe(0);
+      reconcile.mockRestore();
+      vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
+      let markAuthorityReadStarted!: () => void;
+      const authorityReadStarted = new Promise<void>((resolve) => {
+        markAuthorityReadStarted = resolve;
+      });
+      const authorityReadGate = new Promise<void>((resolve) => {
+        releaseAuthorityRead = resolve;
+      });
+      vi.mocked(chainAdapter.getContextGraphAuthoritySnapshot!)
+        .mockImplementation(async () => {
+          markAuthorityReadStarted();
+          await authorityReadGate;
+          return authoritySnapshot;
+        });
+
+      await vi.advanceTimersByTimeAsync(RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1);
+      await authorityReadStarted;
+      const service = (edge as any).rfc64PublicCatalogServiceV1;
+      let closeSettled = false;
+      stalledClose = edge.closeRfc64PublicCatalogServiceV1()
+        .then(() => { closeSettled = true; });
+      expect((edge as any).rfc64PublicCatalogServiceV1).toBeUndefined();
+      expect(service.started).toBe(false);
+      await Promise.resolve();
+      expect(closeSettled).toBe(false);
+
+      releaseAuthorityRead();
+      await stalledClose;
+      expect(closeSettled).toBe(true);
+
+      const restartedReconcile = vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1')
+        .mockResolvedValue(null);
+      await vi.advanceTimersByTimeAsync(RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1);
+      expect(restartedReconcile).not.toHaveBeenCalled();
+      edge.startRfc64PublicCatalogServiceV1(createOperationContext('system'));
+      restartedReconcile.mockClear();
+      await vi.advanceTimersByTimeAsync(RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1);
+      expect(restartedReconcile).toHaveBeenCalledTimes(1);
+      expect(restartedReconcile).toHaveBeenCalledWith(
+        CONTEXT_GRAPH_ID,
+        expect.any(AbortSignal),
+      );
+      await edge.closeRfc64PublicCatalogServiceV1();
+      restartedReconcile.mockClear();
+      await vi.advanceTimersByTimeAsync(RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1);
+      expect(restartedReconcile).not.toHaveBeenCalled();
+    } finally {
+      releaseAuthorityRead();
+      await stalledClose?.catch(() => undefined);
+      await edge.closeRfc64PublicCatalogServiceV1().catch(() => undefined);
+      vi.useRealTimers();
+    }
   });
 
   it('keeps a durable create successful when post-commit responsibility resolution transiently fails', async () => {

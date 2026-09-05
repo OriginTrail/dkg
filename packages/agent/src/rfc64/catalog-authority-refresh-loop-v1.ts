@@ -12,8 +12,8 @@ export interface Rfc64CatalogAuthorityRefreshSchedulerV1 {
   clearInterval(timer: ReturnType<typeof setInterval>): void;
 }
 
-/** Production cadence boundary; exposed so lifecycle tests can replace only this timer. */
-export const rfc64CatalogAuthorityRefreshSchedulerV1:
+/** Production cadence boundary. Tests inject a scheduler per loop instance. */
+const rfc64CatalogAuthorityRefreshSchedulerV1:
   Rfc64CatalogAuthorityRefreshSchedulerV1 = {
   setInterval(callback, intervalMs) {
     const timer = setInterval(callback, intervalMs);
@@ -84,11 +84,11 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 {
     return this.#supervisor.whenIdle();
   }
 
-  close(reason: unknown): Promise<void> {
+  close(): Promise<void> {
     if (this.#timer !== null) {
       this.#scheduler.clearInterval(this.#timer);
       this.#timer = null;
     }
-    return this.#supervisor.close(reason);
+    return this.#supervisor.close();
   }
 }

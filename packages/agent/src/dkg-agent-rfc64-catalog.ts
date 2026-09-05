@@ -2423,16 +2423,24 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   /** Stop serving and drain in-flight receiver work. Idempotent + undefined-safe. */
   async closeRfc64PublicCatalogServiceV1(this: DKGAgent): Promise<void> {
     const authorityRefresh = rfc64CatalogAuthorityRefreshV1.get(this);
-    if (authorityRefresh !== undefined) {
-      rfc64CatalogAuthorityRefreshV1.delete(this);
-      await authorityRefresh.close(
-        new Error('RFC-64 authority refresh stopped during agent shutdown'),
-      );
-    }
     const service = this.rfc64PublicCatalogServiceV1;
+    rfc64CatalogAuthorityRefreshV1.delete(this);
     this.rfc64PublicCatalogServiceV1 = undefined;
     try {
-      await service?.close();
+      // Fence protocol admission synchronously before waiting for a potentially
+      // non-cooperative chain/storage read in the authority refresh. Await both
+      // owners to physical retirement before the mutation coordinator closes.
+      const retirement = await Promise.allSettled([
+        service?.close(),
+        authorityRefresh?.close(),
+      ]);
+      const failures = retirement
+        .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        .map(({ reason }) => reason);
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1) {
+        throw new AggregateError(failures, 'RFC-64 catalog service shutdown failed');
+      }
     } finally {
       try {
         // Service close fences remote admission. The explicit coordinator then

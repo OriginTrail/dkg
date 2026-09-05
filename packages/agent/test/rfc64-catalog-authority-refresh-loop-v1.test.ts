@@ -72,9 +72,8 @@ describe('RFC-64 catalog authority refresh loop', () => {
     expect(calls).toBe(2);
     expect(peak).toBe(1);
 
-    const reason = new Error('test shutdown');
-    await loop.close(reason);
-    await loop.close(new Error('duplicate shutdown'));
+    await loop.close();
+    await loop.close();
     expect(cleared).toEqual([scheduled[0]!.handle]);
     scheduled[0]!.callback();
     await loop.whenIdle();
@@ -101,25 +100,30 @@ describe('RFC-64 catalog authority refresh loop', () => {
     await loop.whenIdle();
     expect(attempts).toEqual(['cg-a', 'cg-b']);
     expect(reported).toEqual([{ contextGraphId: 'cg-a', error: failure }]);
-    await loop.close(new Error('test shutdown'));
+    await loop.close();
   });
 
-  it('aborts an in-flight pass and suppresses later work and failure reporting', async () => {
+  it('aborts and physically drains an in-flight pass before close settles', async () => {
     const { scheduled, cleared, scheduler } = createSchedulerHarness();
     let markStarted!: () => void;
+    let markAborted!: () => void;
+    let releaseRetirement!: () => void;
     const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const aborted = new Promise<void>((resolve) => { markAborted = resolve; });
+    const retirement = new Promise<void>((resolve) => { releaseRetirement = resolve; });
     const attempts: string[] = [];
     const reported: Array<Readonly<{ contextGraphId: string; error: unknown }>> = [];
     let activeSignal: AbortSignal | undefined;
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => ['cg-a', 'cg-b'],
-      refreshContextGraph: (contextGraphId, signal) => {
+      refreshContextGraph: async (contextGraphId, signal) => {
         attempts.push(contextGraphId);
         activeSignal = signal;
+        signal.addEventListener('abort', markAborted, { once: true });
         markStarted();
-        return new Promise<void>((_resolve, reject) => {
-          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
-        });
+        // Deliberately ignore cancellation until the physical operation retires.
+        await retirement;
+        if (signal.aborted) throw signal.reason;
       },
       onRefreshFailure: (contextGraphId, error) => {
         reported.push(Object.freeze({ contextGraphId, error }));
@@ -130,11 +134,19 @@ describe('RFC-64 catalog authority refresh loop', () => {
     loop.start();
     scheduled[0]!.callback();
     await started;
-    const reason = new Error('agent shutdown');
-    await loop.close(reason);
+    let closeSettled = false;
+    const close = loop.close().then(() => { closeSettled = true; });
+    await aborted;
 
     expect(activeSignal?.aborted).toBe(true);
-    expect(activeSignal?.reason).toBe(reason);
+    expect(activeSignal?.reason).toMatchObject({
+      message: 'RFC-64 authority refresh stopped during agent shutdown',
+    });
+    await Promise.resolve();
+    expect(closeSettled).toBe(false);
+    releaseRetirement();
+    await close;
+
     expect(attempts).toEqual(['cg-a']);
     expect(reported).toEqual([]);
     expect(cleared).toEqual([scheduled[0]!.handle]);
