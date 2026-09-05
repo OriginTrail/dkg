@@ -1517,6 +1517,96 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     await service.close();
   });
 
+  it('aggregates automatic current-head hints and fails over to the second provider', async () => {
+    const router = new RecordingRouter();
+    const firstAutomaticPassStarted = deferred<void>();
+    const releaseFirstAutomaticPass = deferred<void>();
+    const reconciled: Array<{ peerId: string; version: string }> = [];
+    let currentApplied = false;
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest: async () => null },
+      receiver: { maxConcurrent: 1, maxAttempts: 1, retryBackoffMs: 0 },
+      native: nativeOptions(() => ({
+        isHeadApplied: async (head) => currentApplied && head.catalogVersion === '40',
+        reconcileHead: async (peerId, head) => {
+          reconciled.push({ peerId, version: head.catalogVersion });
+          if (head.catalogVersion !== '40') {
+            throw new Error('ambient history is stale');
+          }
+          if (peerId === 'peer-a') throw new Error('first provider is unavailable');
+          currentApplied = true;
+          return 'applied';
+        },
+      })),
+    });
+    const policy = acceptPolicy(service);
+    const headAt = (catalogVersion: string, byte: string) => ({
+      ...announcement(policy.policyDigest),
+      catalogVersion,
+      catalogHeadObjectDigest: `0x${byte.repeat(64)}` as Digest32V1,
+      signatureVariantDigest: `0x${byte.repeat(64)}` as Digest32V1,
+    });
+    const staleHint = headAt('1', 'a');
+    const current = headAt('40', 'd');
+    vi.spyOn(service, 'discoverCurrentCatalogHead').mockResolvedValue(Object.freeze({
+      announcement: current,
+      head: {} as never,
+    }));
+    const synchronizeFromProviders = service.synchronizeCurrentCatalogHeadFromProviders
+      .bind(service);
+    const automaticInputs: string[][] = [];
+    const automaticResults: Array<Awaited<ReturnType<
+      typeof service.synchronizeCurrentCatalogHeadFromProviders
+    >>> = [];
+    vi.spyOn(service, 'synchronizeCurrentCatalogHeadFromProviders')
+      .mockImplementation(async (input) => {
+        automaticInputs.push([...input.remotePeerIds]);
+        if (automaticInputs.length === 1) {
+          firstAutomaticPassStarted.resolve(undefined);
+          await releaseFirstAutomaticPass.promise;
+        }
+        const result = await synchronizeFromProviders(input);
+        automaticResults.push(result);
+        return result;
+      });
+    service.start();
+
+    const wireHint = encodeRfc64PublicCatalogHeadAnnouncementV1(staleHint);
+    await router.invoke(
+      RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
+      wireHint,
+      'peer-a',
+    );
+    await firstAutomaticPassStarted.promise;
+    await router.invoke(
+      RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
+      wireHint,
+      'peer-a',
+    );
+    await router.invoke(
+      RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
+      wireHint,
+      'peer-b',
+    );
+    releaseFirstAutomaticPass.resolve(undefined);
+
+    await service.whenReceiverIdle();
+    expect(automaticInputs).toEqual([
+      ['peer-a'],
+      ['peer-a', 'peer-b'],
+    ]);
+    expect(automaticResults).toContainEqual(expect.objectContaining({
+      providerPeerIds: ['peer-a', 'peer-b'],
+      appliedProviderPeerId: 'peer-b',
+    }));
+    expect(reconciled).toContainEqual({ peerId: 'peer-a', version: '40' });
+    expect(reconciled).toContainEqual({ peerId: 'peer-b', version: '40' });
+    await service.close();
+  });
+
   it('settles a single-provider synchronization closed when shutdown wins the discovery race', async () => {
     const reconcileHead = vi.fn(async () => 'applied' as const);
     const service = new Rfc64PublicCatalogServiceV1({

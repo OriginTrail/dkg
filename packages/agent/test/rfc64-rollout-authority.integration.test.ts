@@ -946,6 +946,92 @@ describe('RFC-64 rollout authority integration', () => {
     });
   });
 
+  it('coalesces authority-refresh timer ticks and retires the timer on shutdown', async () => {
+    const realSetInterval = globalThis.setInterval;
+    const authorityRefreshTicks: Array<() => void> = [];
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval').mockImplementation((
+      (callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+        const handle = realSetInterval(callback, delay, ...args);
+        if (
+          delay === 5 * 60_000
+          && callback.toString().includes('rfc64PublicCatalogServiceV1')
+        ) {
+          authorityRefreshTicks.push(() => callback(...args));
+        }
+        return handle;
+      }
+    ) as typeof setInterval);
+    let edge: DKGAgent;
+    try {
+      edge = await startAgent('authority-refresh-timer', undefined);
+    } finally {
+      intervalSpy.mockRestore();
+    }
+    expect(authorityRefreshTicks).toHaveLength(1);
+    await edge.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Authority refresh timer lifecycle',
+      callerAgentAddress: AUTHOR,
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        authorityState: 'accepted',
+      }),
+    );
+
+    const originalReconcile = edge.reconcileRfc64CatalogAccessAuthorityV1.bind(edge);
+    let releaseFirst!: () => void;
+    let markFirstStarted!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+    let calls = 0;
+    let active = 0;
+    let peak = 0;
+    const reconcile = vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1')
+      .mockImplementation(async (...args) => {
+        calls += 1;
+        active += 1;
+        peak = Math.max(peak, active);
+        if (calls === 1) {
+          markFirstStarted();
+          await firstGate;
+        }
+        try {
+          return await originalReconcile(...args);
+        } finally {
+          active -= 1;
+        }
+      });
+
+    authorityRefreshTicks[0]!();
+    await firstStarted;
+    authorityRefreshTicks[0]!();
+    await Promise.resolve();
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(peak).toBe(1);
+
+    releaseFirst();
+    await vi.waitFor(() => expect(active).toBe(0));
+    authorityRefreshTicks[0]!();
+    await vi.waitFor(() => expect(reconcile).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(active).toBe(0));
+    expect(peak).toBe(1);
+    await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        authorityState: 'accepted',
+        stableReason: null,
+      }),
+    );
+
+    await edge.closeRfc64PublicCatalogServiceV1();
+    authorityRefreshTicks[0]!();
+    await Promise.resolve();
+    expect(reconcile).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps a durable create successful when post-commit responsibility resolution transiently fails', async () => {
     const contextGraphId = `${AUTHOR}/post-commit-responsibility-failure` as ContextGraphIdV1;
     const edge = await startAgent('post-commit-responsibility-failure', undefined);
