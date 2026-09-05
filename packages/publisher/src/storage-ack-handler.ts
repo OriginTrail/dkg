@@ -18,6 +18,7 @@ import type {
   StorageACKMsg,
   SubscriptionSource,
   UpdateIntentMsg,
+  GraphKnowledgeAssetAccessPolicy,
 } from '@origintrail-official/dkg-core';
 import {
   Logger,
@@ -66,7 +67,7 @@ type GraphScopedPublishIntent = {
   publicTripleCount: number;
   privateTripleCount: number;
   privateMerkleRoot?: Uint8Array;
-  accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  accessPolicy: GraphKnowledgeAssetAccessPolicy;
   allowedPeers: string[];
   subGraphName?: string;
 };

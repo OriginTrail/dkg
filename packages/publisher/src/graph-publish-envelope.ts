@@ -1,5 +1,7 @@
 // Shared predicates only: wire handlers retain their own scope checks, error
 // messages, and validation order.
+import type { GraphKnowledgeAssetAccessPolicy } from '@origintrail-official/dkg-core';
+
 export function hasValidGraphPublishContent(
   publicTripleCount: number,
   privateTripleCount: number,
@@ -14,14 +16,16 @@ export function hasValidGraphPublishContent(
     && (privateTripleCount !== 0 || privateMerkleRoot === undefined);
 }
 
-export function isGraphPublishAccessPolicy(value: string | undefined): value is 'public' | 'ownerOnly' | 'allowList' {
+export function isGraphPublishAccessPolicy(
+  value: string | undefined,
+): value is GraphKnowledgeAssetAccessPolicy {
   return value === 'public' || value === 'ownerOnly' || value === 'allowList';
 }
 
 export function resolveGraphPublishAccess(
   accessPolicy: string | undefined,
   rawAllowedPeers: readonly string[],
-): { accessPolicy: 'public' | 'ownerOnly' | 'allowList'; allowedPeers: string[] } | undefined {
+): { accessPolicy: GraphKnowledgeAssetAccessPolicy; allowedPeers: string[] } | undefined {
   const allowedPeers = [...new Set(rawAllowedPeers.map(peer => peer.trim()).filter(Boolean))];
   if (
     !isGraphPublishAccessPolicy(accessPolicy)

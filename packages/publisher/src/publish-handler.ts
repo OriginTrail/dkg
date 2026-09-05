@@ -16,6 +16,7 @@ import {
   knowledgeAssetLayerGraphUri,
   validateSubGraphName,
   type PublishRequestMsg,
+  type GraphKnowledgeAssetAccessPolicy,
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
@@ -62,7 +63,7 @@ interface GraphScopedPublishRequest {
   publicTripleCount: number;
   privateTripleCount: number;
   privateMerkleRoot?: Uint8Array;
-  accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  accessPolicy: GraphKnowledgeAssetAccessPolicy;
   allowedPeers: string[];
   subGraphName?: string;
 }
