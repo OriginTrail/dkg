@@ -997,7 +997,6 @@ describe('refreshMetaFromCurator', () => {
     rejectedAgent,
   }) => {
     const contextGraphId = `private/partial-curator-replacement-${failedSubject}`;
-    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
     const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
     const staleAgent = '0x0000000000000000000000000000000000000011';
     const freshAgent = '0x0000000000000000000000000000000000000022';
