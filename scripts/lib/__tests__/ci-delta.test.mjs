@@ -761,6 +761,24 @@ test('aggregate gates reject failed or accidentally skipped selected jobs', () =
   }).join('\n'), /failure/);
 });
 
+test('all shared Hardhat consumers require and restore the matching artifact', () => {
+  const workflow = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
+  const producer = workflowJobBlock(workflow, 'evm-node-test-artifacts');
+  for (const [job, lane] of [
+    ['tornado-core', 'tornado_core'],
+    ['tornado-agent', 'tornado_agent'],
+    ['tornado-publisher', 'tornado_publisher'],
+    ['bura-cli', 'bura_cli'],
+    ['kosava-hardhat-plugins', 'kosava_hardhat_plugins'],
+  ]) {
+    const consumer = workflowJobBlock(workflow, job);
+    assert.match(consumer, /needs: \[changes, build, evm-node-test-artifacts\]/, job);
+    assert.match(consumer, /name: evm-node-test-artifacts/, job);
+    assert.match(consumer, /tar -xzf \/tmp\/evm-node-test-artifacts\.tgz/, job);
+    assert.ok(producer.includes(`needs.changes.outputs.${lane} == 'true'`), lane);
+  }
+});
+
 test('aggregate gate accepts the full-push and docs-only job shapes', () => {
   const laneJobs = Object.values(PRIMARY_LANE_JOBS);
   const full = planCi({ eventName: 'push' });

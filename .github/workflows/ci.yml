@@ -342,7 +342,7 @@ jobs:
   evm-node-test-artifacts:
     name: Compile EVM test artifacts (0.8.20/london)
     needs: changes
-    if: needs.changes.outputs.tornado_core == 'true' || needs.changes.outputs.bura_cli == 'true' || needs.changes.outputs.kosava_hardhat_plugins == 'true'
+    if: needs.changes.outputs.tornado_core == 'true' || needs.changes.outputs.tornado_publisher == 'true' || needs.changes.outputs.tornado_agent == 'true' || needs.changes.outputs.bura_cli == 'true' || needs.changes.outputs.kosava_hardhat_plugins == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -578,7 +578,7 @@ jobs:
   # ------------------------------------------------------------------
   tornado-publisher:
     name: "Tornado: publisher [${{ matrix.shard }}/4]"
-    needs: [changes, build]
+    needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_publisher == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -603,6 +603,14 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
+      # Publisher globalSetup deploys the same Hardhat contracts as chain/CLI.
+      # Restore the shared compiler outputs before starting its isolated node.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: evm-node-test-artifacts
+          path: /tmp
+      - name: Restore EVM test artifacts
+        run: tar -xzf /tmp/evm-node-test-artifacts.tgz
       - name: "Publisher tests (shard ${{ matrix.shard }}/4)"
         run: |
           node scripts/ci/run-vitest-junit.mjs \
@@ -641,7 +649,7 @@ jobs:
   # ------------------------------------------------------------------
   tornado-agent:
     name: "Tornado: agent [${{ matrix.shard }}/10]"
-    needs: [changes, build]
+    needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_agent == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -666,6 +674,12 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: evm-node-test-artifacts
+          path: /tmp
+      - name: Restore EVM test artifacts
+        run: tar -xzf /tmp/evm-node-test-artifacts.tgz
       - name: "Agent tests (shard ${{ matrix.shard }}/10)"
         working-directory: packages/agent
         run: |
