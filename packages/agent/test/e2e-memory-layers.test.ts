@@ -10,6 +10,7 @@
  * 7. Working memory view
  */
 import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest';
+import { waitForSharedMemorySubscriber } from './_helpers/gossip-readiness.js';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent as RealDKGAgent, type DKGAgentConfig } from '../src/index.js';
 import { SEAL_CAPABILITY_GAP_CODE } from '../src/dkg-agent-publish.js';
@@ -2845,11 +2846,7 @@ describe('WM → SWM gossip → VM (2 nodes)', () => {
     await expect.poll(() => nodeB.contextGraphExists(CG_ID), { timeout: 10_000 }).toBe(true);
     nodeA.subscribeToContextGraph(CG_ID);
     nodeB.subscribeToContextGraph(CG_ID);
-    const wireId = ethers.keccak256(ethers.toUtf8Bytes(CG_ID)).toLowerCase();
-    await expect.poll(
-      () => nodeA.gossip.getSubscribers(`dkg/context-graph/${wireId}/shared-memory`),
-      { timeout: 10_000 },
-    ).toContain(nodeB.peerId);
+    await waitForSharedMemorySubscriber(nodeA, CG_ID, nodeB);
 
     // Step 1: use the production Markdown extractor, including the blank-node
     // section hierarchy that originally made imported KAs appear empty on the
