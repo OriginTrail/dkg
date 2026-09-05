@@ -1,44 +1,20 @@
 import {
-  compareCodePoint,
   createSortedUniqueStringCatalog,
+  insertSortedUniqueStringCatalog,
+  removeSortedUniqueStringCatalog,
 } from '@origintrail-official/dkg-core';
 import type { SortedGraphCatalog } from './graph-set-index-store.js';
 
-function lowerBound(values: readonly string[], target: string): number {
-  let low = 0;
-  let high = values.length;
-  while (low < high) {
-    const middle = low + Math.floor((high - low) / 2);
-    if (compareCodePoint(values[middle]!, target) < 0) low = middle + 1;
-    else high = middle;
-  }
-  return low;
-}
-
-function insertSorted(
-  source: SortedGraphCatalog,
-  graph: string,
-): SortedGraphCatalog {
-  const next = [...source];
-  next.splice(lowerBound(source, graph), 0, graph);
-  return Object.freeze(next) as SortedGraphCatalog;
-}
-
-function removeSorted(
-  source: SortedGraphCatalog,
-  graph: string,
-): SortedGraphCatalog | null {
-  const index = lowerBound(source, graph);
-  if (source[index] !== graph) return null;
-  const next = [...source];
-  next.splice(index, 1);
-  return Object.freeze(next) as SortedGraphCatalog;
-}
+type SortedCatalogFactory = typeof createSortedUniqueStringCatalog;
 
 /** Owns graph membership and the invalidation of its immutable sorted view. */
 export class GraphSetCatalogState {
   private members: Set<string> | null = null;
   private ordered: SortedGraphCatalog | null = null;
+
+  constructor(
+    private readonly createSortedCatalog: SortedCatalogFactory = createSortedUniqueStringCatalog,
+  ) {}
 
   get initialized(): boolean {
     return this.members !== null;
@@ -72,13 +48,21 @@ export class GraphSetCatalogState {
     // Once the immutable projection exists, preserve it incrementally. The
     // former invalidation forced the next prefix read to sort the complete
     // graph set after every single graph mutation under publish load.
-    if (this.ordered) this.ordered = insertSorted(this.ordered, graph);
+    if (this.ordered) {
+      const previous = this.ordered;
+      const next = insertSortedUniqueStringCatalog(previous, graph);
+      this.ordered = next === previous ? null : next;
+    }
     return true;
   }
 
   remove(graph: string): boolean {
     if (!this.members?.delete(graph)) return false;
-    if (this.ordered) this.ordered = removeSorted(this.ordered, graph);
+    if (this.ordered) {
+      const previous = this.ordered;
+      const next = removeSortedUniqueStringCatalog(previous, graph);
+      this.ordered = next === previous ? null : next;
+    }
     return true;
   }
 
@@ -89,7 +73,7 @@ export class GraphSetCatalogState {
    */
   sortedFor(members: ReadonlySet<string>): SortedGraphCatalog | null {
     if (this.members !== members) return null;
-    this.ordered ??= createSortedUniqueStringCatalog(this.members);
+    this.ordered ??= this.createSortedCatalog(this.members);
     return this.ordered;
   }
 }

@@ -1,9 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { createSortedUniqueStringCatalog } from '@origintrail-official/dkg-core';
+import { describe, expect, it, vi } from 'vitest';
 import { GraphSetCatalogState } from '../src/graph-set-catalog-state.js';
 
 describe('GraphSetCatalogState', () => {
   it('maintains an existing immutable sorted projection across point mutations', () => {
-    const state = new GraphSetCatalogState();
+    const createSortedCatalog = vi.fn(createSortedUniqueStringCatalog);
+    const state = new GraphSetCatalogState(createSortedCatalog);
     state.replace(new Set(['urn:d', 'urn:b']));
     const members = state.current!;
     const initial = state.sortedFor(members)!;
@@ -19,6 +21,7 @@ describe('GraphSetCatalogState', () => {
     expect(updated).toEqual(['urn:a', 'urn:b', 'urn:c']);
     expect(updated).not.toBe(initial);
     expect(Object.isFrozen(updated)).toBe(true);
+    expect(createSortedCatalog).toHaveBeenCalledTimes(1);
   });
 
   it('preserves Unicode code-point order rather than UTF-16 code-unit order', () => {
