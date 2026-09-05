@@ -5098,7 +5098,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
   }, 60_000);
 
 
-  it('snapshots the explicit access authority and fails closed before private activation', async () => {
+  it('snapshots explicit access authority and keeps default private identity resolution fail closed', async () => {
     const resolver = async () => AUTHOR;
     const callerOwned = {
       localAgentAddress: ethers.getAddress(AUTHOR) as EvmAddressV1,
@@ -5120,11 +5120,17 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const policyDigest = `0x${'ab'.repeat(32)}` as Digest32V1;
     const roster = privateCatalogRoster(policy, policyDigest);
     const legacyOpenOnly = await startNativeAgent('private-denied');
-    expect(() => legacyOpenOnly.acceptRfc64CatalogAccessSnapshotV1({
+    expect(legacyOpenOnly.acceptRfc64CatalogAccessSnapshotV1({
       policy,
       policyDigest,
       roster,
-    })).toThrow(/requires explicit access-policy authority/);
+    })).toMatchObject({ policyDigest, roster: { policyDigest } });
+    await expect(legacyOpenOnly.resolveRfc64CatalogLocalAgentAddressV1(
+      CONTEXT_GRAPH_ID,
+    )).resolves.toBeNull();
+    await expect(legacyOpenOnly.hasRfc64VerifiedPrivateMembershipV1(
+      CONTEXT_GRAPH_ID,
+    )).resolves.toBe(false);
 
     const configured = await startNativeAgent(
       'private-configured',
@@ -5713,7 +5719,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogVersion: '0',
       inventoryRowCount: '0',
     });
-    const replay = vi.spyOn(provider, 'queueRfc64CatalogHeadReplayV1');
+    const replay = vi.spyOn(provider, 'tryQueueRfc64CatalogHeadReplayV1');
     await connectBothWays(provider, receiver);
     await receiver.whenRfc64PublicCatalogReceiverIdleV1();
     expect(receiver.readRfc64AppliedCatalogHeadV1({
@@ -5728,18 +5734,21 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     await receiver.whenRfc64CatalogResponsibilitiesIdleV1();
     await vi.waitFor(() => expect(replay).toHaveBeenCalled());
-    const replayResults = await Promise.all(replay.mock.results.map(({ value }) => value));
+    const replayResults = await Promise.all(replay.mock.results.flatMap(({ value }) => (
+      value.status === 'admitted' ? [value.completion] : []
+    )));
     expect(replayResults).toContainEqual({ announced: 1, failed: 0 });
+    await vi.waitFor(() => {
+      expect(receiver.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(),
+        authorAddress: AUTHOR,
+      })).toMatchObject({
+        currentCatalogHeadDigest: genesis.headObjectDigest,
+        catalogVersion: '0',
+        inventoryRowCount: '0',
+      });
+    }, { timeout: 10_000 });
     await receiver.whenRfc64PublicCatalogReceiverIdleV1();
-
-    expect(receiver.readRfc64AppliedCatalogHeadV1({
-      catalogScopeDigest: catalogScopeDigest(),
-      authorAddress: AUTHOR,
-    })).toMatchObject({
-      currentCatalogHeadDigest: genesis.headObjectDigest,
-      catalogVersion: '0',
-      inventoryRowCount: '0',
-    });
   }, 60_000);
 
   it('retires a captured legacy boundary only after successful production reconciliation', async () => {
