@@ -5,7 +5,10 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runRuntimePackageBuild } from '../../build-runtime-packages.mjs';
-import { buildCliPrerequisites } from '../../../packages/cli/scripts/build-prerequisites.mjs';
+import {
+  buildCliPrerequisites,
+  CLI_PREREQUISITE_ROOTS,
+} from '../../../packages/cli/scripts/build-prerequisites.mjs';
 import {
   RUNTIME_BUILD_EXCLUSIONS,
   runtimeBuildPnpmArgs,
@@ -88,12 +91,7 @@ test('CLI prebuild skips only when its root dependency graph has already run', (
     assert.equal(invocation.options.shell, true);
     assert.deepEqual(invocation.options.env, env);
     assert.deepEqual(invocation.args, [
-      '-r', '--filter', '@origintrail-official/dkg-adapter-openclaw...',
-      '--filter', '@origintrail-official/dkg-adapter-hermes...',
-      '--filter', '@origintrail-official/dkg-adapter-prime-agent...',
-      '--filter', '@origintrail-official/dkg-mcp...',
-      '--filter', '@origintrail-official/dkg-local-llm...',
-      '--filter', '@origintrail-official/dkg-okf...', 'run', 'build',
+      '-r', ...CLI_PREREQUISITE_ROOTS.flatMap(name => ['--filter', `${name}...`]), 'run', 'build',
     ]);
   }
 });
@@ -148,6 +146,12 @@ test('release runtime build plan includes workspace dependencies but excludes Ha
 
   for (const packageName of REQUIRED_RUNTIME_PACKAGES) {
     assert.ok(selectedNames.has(packageName), `${packageName} must remain in the runtime build`);
+  }
+  for (const packageName of CLI_PREREQUISITE_ROOTS) {
+    assert.ok(
+      selectedNames.has(packageName),
+      `${packageName} must be built before the CLI prebuild is allowed to skip prerequisites`,
+    );
   }
   assert.equal(
     selectedNames.has('@origintrail-official/dkg-evm-module'),
