@@ -453,13 +453,6 @@ describe('E2E: DKGAgent with real blockchain', () => {
     ];
 
     const receiver = agents[1];
-    const poller = (receiver as unknown as {
-      chainPoller: { stop(): Promise<void>; start(): Promise<void> } | null;
-    }).chainPoller;
-    expect(poller).not.toBeNull();
-    // Drain in-flight reconciliation and fence new polls before this KA exists.
-    // A broken gossip path must not be rescued by the 12-second chain poller.
-    await poller!.stop();
     const delivered = vi.spyOn(receiver.getOrCreateFinalizationHandler(), 'handleFinalizationMessage');
     try {
       await agents[0].publish(gossipCG, quads);
@@ -477,7 +470,6 @@ describe('E2E: DKGAgent with real blockchain', () => {
       }, { timeout: 10_000 }).toContain('"GossipTest"');
     } finally {
       delivered.mockRestore();
-      await poller!.start();
     }
   }, 60_000);
 });

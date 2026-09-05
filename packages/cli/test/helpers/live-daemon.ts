@@ -18,7 +18,7 @@
  * Mirrors the inline harness in `daemon-http-behavior-extra.test.ts`; extracted
  * here so the de-mocked route suites share one spinner.
  */
-import { ownProcess } from '../../../../scripts/testing/owned-process.mjs';
+import { ownProcess, type OwnedProcess } from '../../../../scripts/testing/owned-process.mjs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -39,6 +39,7 @@ export interface LiveDaemon {
   apiPort: number;
   listenPort: number;
   child: ChildProcess;
+  owner: OwnedProcess;
   token: string | null;
   /** `http://127.0.0.1:<apiPort>` */
   base: string;
@@ -171,7 +172,7 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
       }
       return { apiPort: boundPort, base: `http://127.0.0.1:${boundPort}`, token };
     }, { timeoutMs: opts.readyTimeoutMs ?? 45_000 });
-    const daemon: LiveDaemon = { home, listenPort, child, ...ready };
+    const daemon: LiveDaemon = { home, listenPort, child, owner, ...ready };
     void owner.closed.then(({ code }) => { daemon.exitCode = code; });
     return daemon;
   } catch (error) {
@@ -184,7 +185,7 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
 /** SIGTERM the daemon, escalate to SIGKILL, and wipe its home dir. */
 export async function stopLiveDaemon(daemon: LiveDaemon | undefined): Promise<void> {
   if (!daemon) return;
-  await ownProcess(daemon.child).stop();
+  await daemon.owner.stop();
   await rm(daemon.home, { recursive: true, force: true }).catch(() => {});
 }
 

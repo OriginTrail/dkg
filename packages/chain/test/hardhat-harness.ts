@@ -4,8 +4,8 @@
  * Spawns a Hardhat node, deploys all contracts, creates node profiles,
  * and provides helpers for staking, token minting, and signing.
  */
-import { ownProcess } from '../../../scripts/testing/owned-process.mjs';
-import { ChildProcess, spawn } from 'node:child_process';
+import { ownProcess, type OwnedProcess } from '../../../scripts/testing/owned-process.mjs';
+import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -38,7 +38,7 @@ export const HARDHAT_KEYS = {
 } as const;
 
 export interface HardhatContext {
-  process: ChildProcess;
+  owner: OwnedProcess;
   provider: JsonRpcProvider;
   hubAddress: string;
   rpcUrl: string;
@@ -314,7 +314,7 @@ export async function setMinimumRequiredSignatures(
 }
 
 /** Start only the owned RPC child; successful bind output supplies its actual port. */
-export async function startHardhatNode(startupTimeout = process.env.CI ? 120_000 : 60_000): Promise<{ process: ChildProcess; rpcUrl: string }> {
+export async function startHardhatNode(startupTimeout = process.env.CI ? 120_000 : 60_000): Promise<{ owner: OwnedProcess; rpcUrl: string }> {
   const hardhatCli = require.resolve('hardhat/internal/cli/bootstrap', { paths: [EVM_MODULE_DIR] });
   const hardhatProcess = spawn(
     process.execPath,
@@ -326,12 +326,12 @@ export async function startHardhatNode(startupTimeout = process.env.CI ? 120_000
     const url = stdout().match(/Started HTTP and WebSocket JSON-RPC server at (http:\/\/127\.0\.0\.1:[1-9]\d*)\//)?.[1];
     return url && await waitForNode(url, 500) ? url : undefined;
   }, { timeoutMs: startupTimeout });
-  return { process: hardhatProcess, rpcUrl };
+  return { owner, rpcUrl };
 }
 
 /** Start an isolated chain, deploy contracts, and seed the four fixture profiles. */
 export async function spawnHardhatEnv(): Promise<HardhatContext> {
-  const { process: hardhatProcess, rpcUrl } = await startHardhatNode();
+  const { owner, rpcUrl } = await startHardhatNode();
   const provider = new JsonRpcProvider(rpcUrl, undefined, { cacheTimeout: -1 });
   try {
     const hubAddress = await deployContracts(rpcUrl);
@@ -388,7 +388,7 @@ export async function spawnHardhatEnv(): Promise<HardhatContext> {
     await setMinimumRequiredSignatures(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, 1);
 
     return {
-      process: hardhatProcess,
+      owner,
       provider,
       hubAddress,
       rpcUrl,
@@ -397,15 +397,15 @@ export async function spawnHardhatEnv(): Promise<HardhatContext> {
     };
   } catch (error) {
     provider.destroy();
-    await ownProcess(hardhatProcess).stop();
+    await owner.stop();
     throw error;
   }
 }
 
 export async function killHardhat(ctx: HardhatContext | null): Promise<void> {
-  if (ctx?.process) {
+  if (ctx) {
     ctx.provider.destroy();
-    await ownProcess(ctx.process).stop();
+    await ctx.owner.stop();
   }
 }
 
