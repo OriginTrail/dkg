@@ -19,7 +19,7 @@
  * Stdout contains only paths relative to the package root, one per line.
  * A short diagnostic summary is written to stderr.
  */
-import { readdirSync } from 'node:fs';
+import { discoverVitestFiles } from './discover-vitest-files.mjs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -286,13 +286,11 @@ export const PACKAGE_SPECS = Object.freeze({
   cli: Object.freeze({
     packageDirectory: 'packages/cli',
     shardCount: 4,
-    excludedPrefixes: Object.freeze([]),
     bodyWeightsMs: CLI_BODY_MS,
   }),
   chain: Object.freeze({
     packageDirectory: 'packages/chain',
     shardCount: 3,
-    excludedPrefixes: Object.freeze(['test/archive/']),
     bodyWeightsMs: CHAIN_BODY_MS,
   }),
 });
@@ -303,38 +301,12 @@ function compareAscii(left, right) {
   return 0;
 }
 
-function walk(directory, packageRoot, output) {
-  const entries = readdirSync(directory, { withFileTypes: true })
-    .sort((left, right) => compareAscii(left.name, right.name));
-
-  for (const entry of entries) {
-    const absolutePath = path.join(directory, entry.name);
-    if (entry.isDirectory()) {
-      walk(absolutePath, packageRoot, output);
-    } else if (entry.isFile() && entry.name.endsWith('.test.ts')) {
-      const relativePath = path.relative(packageRoot, absolutePath).split(path.sep).join('/');
-      if (relativePath.includes('\n') || relativePath.includes('\r')) {
-        throw new Error('Test file paths may not contain newlines: ' + relativePath);
-      }
-      output.push(relativePath);
-    }
-  }
-}
-
 export function discoverEligibleTestFiles(packageName, repoRoot) {
   const spec = PACKAGE_SPECS[packageName];
   if (!spec) {
     throw new Error('Unsupported package ' + packageName + '; expected cli or chain');
   }
-
-  const packageRoot = path.join(repoRoot, spec.packageDirectory);
-  const testRoot = path.join(packageRoot, 'test');
-  const files = [];
-  walk(testRoot, packageRoot, files);
-
-  return files
-    .filter((file) => !spec.excludedPrefixes.some((prefix) => file.startsWith(prefix)))
-    .sort(compareAscii);
+  return discoverVitestFiles(path.join(repoRoot, spec.packageDirectory));
 }
 
 export function planWeightedShards({
