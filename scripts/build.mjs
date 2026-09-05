@@ -1,37 +1,13 @@
 #!/usr/bin/env node
-import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
+import { runBuildCommand } from './lib/run-build-command.mjs';
 
-const forwardedArgs = process.argv.slice(2);
-
-function run(command, args) {
-  const result = spawnSync(command, args, {
-    stdio: 'inherit',
-    shell: process.platform === 'win32',
-  });
-
-  if (result.error) {
-    console.error(result.error.message);
-    process.exit(1);
-  }
-
-  if (typeof result.status === 'number' && result.status !== 0) {
-    process.exit(result.status);
-  }
-
-  if (result.signal) {
-    console.error(`${command} ${args.join(' ')} exited via ${result.signal}`);
-    process.exit(1);
-  }
+export function runBuild({ extraArgs = process.argv.slice(2), run = runBuildCommand } = {}) {
+  const status = run('turbo', ['build', ...extraArgs]);
+  if (status !== 0 || extraArgs.length > 0) return status;
+  return run('pnpm', ['turbo', 'run', 'build:ui', '--filter=@origintrail-official/dkg-node-ui']);
 }
 
-if (forwardedArgs.length > 0) {
-  run('turbo', ['build', ...forwardedArgs]);
-} else {
-  run('turbo', ['build']);
-  run('pnpm', [
-    'turbo',
-    'run',
-    'build:ui',
-    '--filter=@origintrail-official/dkg-node-ui',
-  ]);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  process.exitCode = runBuild();
 }

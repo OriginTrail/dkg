@@ -404,6 +404,12 @@ export interface SignedAgentDelegation {
   delegateePeerId?: string;
   delegateeOpKey?: string;
   signature: string;
+  workspaceEncryptionKeys?: Array<{
+    encryptionKeyAlgorithm: 'X25519';
+    publicEncryptionKey: string;
+    encryptionKeyProof: string;
+  }>;
+  workspaceEncryptionKeysSignature?: string;
 }
 
 // SignJoinResponse is intentionally narrow — `/sign-join` is sign-only

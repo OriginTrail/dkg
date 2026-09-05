@@ -137,6 +137,7 @@ describe('host-mode bookkeeping key canonicalisation', () => {
       listenHost: '127.0.0.1',
       dataDir,
       nodeRole: 'core',
+      rfc64CatalogActivation: { enabled: false },
       swmHostMode: { enabled: true },
     });
     agents.push(core);

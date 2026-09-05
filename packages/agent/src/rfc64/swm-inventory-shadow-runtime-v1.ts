@@ -1,6 +1,7 @@
 import { Rfc64SerializedScopeRuntimeV1 } from './serialized-scope-runtime-v1.js';
 
 export const RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1 = 16;
+export const RFC64_SWM_INVENTORY_MAX_CONFIRMED_TOMBSTONES_V1 = 4_096;
 
 export type Rfc64SwmAuthorInventoryShadowMutationResultV1 = Readonly<{
   status: 'dormant' | 'applied' | 'existing' | 'absent' | 'failed';
@@ -8,6 +9,7 @@ export type Rfc64SwmAuthorInventoryShadowMutationResultV1 = Readonly<{
   attempts: number;
   headObjectDigest: string | null;
   error: string | null;
+  dormantReason?: 'inactive-lane' | 'vm-confirmed' | 'policy-mismatch';
 }>;
 
 export interface Rfc64SwmAuthorInventoryShadowStatusV1 {
@@ -48,10 +50,16 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
   readonly #scopeRuntime = new Rfc64SerializedScopeRuntimeV1(
     'RFC-64 SWM inventory scope operation aborted',
   );
-  readonly #vmConfirmedVersions = new Map<string, Set<string>>();
+  readonly #vmConfirmedTombstones = new Map<string, true>();
   readonly #pendingExecutions: Array<() => void> = [];
   #activeExecutions = 0;
+  #closeAbort = new AbortController();
   #closed = false;
+
+  /** Aborts lifecycle-only waits when shutdown fences detached observers. */
+  get shutdownSignal(): AbortSignal {
+    return this.#closeAbort.signal;
+  }
 
   schedule(assetKey: string, observer: () => Promise<void>): boolean {
     if (this.#closed) return false;
@@ -75,17 +83,36 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     return this.#scopeRuntime.run(scopeKey, operation, signal);
   }
 
-  markVmConfirmed(assetKey: string, assertionVersion: string): void {
-    let versions = this.#vmConfirmedVersions.get(assetKey);
-    if (versions === undefined) {
-      versions = new Set<string>();
-      this.#vmConfirmedVersions.set(assetKey, versions);
+  markVmConfirmed(
+    assetKey: string,
+    assertionVersion: string,
+    shareOperationId: string,
+  ): void {
+    const tombstone = this.confirmedTombstoneKey(
+      assetKey,
+      assertionVersion,
+      shareOperationId,
+    );
+    this.#vmConfirmedTombstones.delete(tombstone);
+    this.#vmConfirmedTombstones.set(tombstone, true);
+    while (
+      this.#vmConfirmedTombstones.size
+      > RFC64_SWM_INVENTORY_MAX_CONFIRMED_TOMBSTONES_V1
+    ) {
+      const oldest = this.#vmConfirmedTombstones.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.#vmConfirmedTombstones.delete(oldest);
     }
-    versions.add(assertionVersion);
   }
 
-  isVmConfirmed(assetKey: string, assertionVersion: string): boolean {
-    return this.#vmConfirmedVersions.get(assetKey)?.has(assertionVersion) ?? false;
+  isVmConfirmed(
+    assetKey: string,
+    assertionVersion: string,
+    shareOperationId: string,
+  ): boolean {
+    return this.#vmConfirmedTombstones.has(
+      this.confirmedTombstoneKey(assetKey, assertionVersion, shareOperationId),
+    );
   }
 
   async drain(): Promise<void> {
@@ -95,6 +122,7 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
   /** Fence new observers, then drain every already-admitted asset mutation. */
   async closeAndDrain(): Promise<void> {
     this.#closed = true;
+    this.#closeAbort.abort();
     await this.drain();
     await this.#scopeRuntime.closeAndDrain();
   }
@@ -104,6 +132,7 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     if (this.#inFlight.size > 0 || this.#pendingExecutions.length > 0) {
       throw new Error('RFC-64 SWM inventory observer runtime cannot reopen before drain');
     }
+    this.#closeAbort = new AbortController();
     this.#scopeRuntime.reopen();
     this.#closed = false;
   }
@@ -159,7 +188,6 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
       this.#inFlight.delete(tracked);
       if (this.#assetTails.get(assetKey) === tracked) {
         this.#assetTails.delete(assetKey);
-        this.#vmConfirmedVersions.delete(assetKey);
       }
     });
     this.#assetTails.set(assetKey, tracked);
@@ -206,6 +234,14 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     ) {
       this.#pendingExecutions.shift()!();
     }
+  }
+
+  private confirmedTombstoneKey(
+    assetKey: string,
+    assertionVersion: string,
+    shareOperationId: string,
+  ): string {
+    return `${assetKey}\n${assertionVersion}\n${shareOperationId}`;
   }
 }
 

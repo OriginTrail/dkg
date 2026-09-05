@@ -64,3 +64,6 @@ snapshots/_cache_phase1_neuroweb_epoch16.json
 # OKF export test writes reconstructed bundles here at runtime.
 devnet/**/.okf-export-*/
 devnet/**/.okf-manifest-*.json
+
+**/coverage-python/
+**/.coverage

@@ -331,6 +331,7 @@ export async function callTrySyncFromPeer(
     trySelectedSwmRetryFromPeer:
       typeof LifecycleSyncMethods.prototype.trySelectedSwmRetryFromPeer;
     trySyncFromPeer: typeof LifecycleSyncMethods.prototype.trySyncFromPeer;
+    subscribedContextGraphs: Map<string, unknown>;
     getSyncReconcilerProbe: () => Promise<{
       protocolsKey: string | null;
       connectionKey: string | null;
@@ -340,6 +341,7 @@ export async function callTrySyncFromPeer(
   };
   agent.trySelectedSwmRetryFromPeer = LifecycleSyncMethods.prototype.trySelectedSwmRetryFromPeer;
   agent.trySyncFromPeer = LifecycleSyncMethods.prototype.trySyncFromPeer;
+  agent.subscribedContextGraphs ??= new Map();
   agent.getSyncReconcilerProbe = async () => ({
     protocolsKey: null,
     connectionKey: null,
@@ -505,6 +507,9 @@ export interface SelectedSwmLifecycleAgentFixture {
   oversizeTombstoneLog: { record: () => void };
   log: { info: () => void; warn: () => void; debug: () => void };
   resolveRfc64CompleteSwmProviderPeerIdsV1: (contextGraphId: string) => string[];
+  resolveRfc64CatalogReceiverAuthorityV1: (
+    contextGraphId: string,
+  ) => { legacySyncAllowed: boolean };
   syncSharedMemoryFromPeerDetailedExecution:
     typeof LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution;
 }
@@ -835,6 +840,7 @@ export function createSelectedSwmLifecycleHarness(
         ? [...(options.completeSwmProviders ?? [PEER])]
         : []
     ),
+    resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
     syncSharedMemoryFromPeerDetailedExecution:
       LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     getSelectedSwmMetaTransfers: () => {

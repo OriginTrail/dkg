@@ -1087,6 +1087,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           markContextGraphSubscriptionState: () => {
             throw new Error('timeout-only catchup must not mark subscription synced');
           },
+          reconcileRfc64CatalogResponsibilityV1: async () => undefined,
           resolveAgentByToken: () => undefined,
           getDefaultAgentAddress: () => '0x0000000000000000000000000000000000000001',
         };
