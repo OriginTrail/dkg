@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { readdirSync } from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
@@ -21,37 +20,19 @@ function compareAscii(left, right) {
   return 0;
 }
 
-function independentlyDiscover(packageDirectory, excludeArchive) {
+function independentlyDiscover(packageDirectory, filters = [], config = 'vitest.config.ts') {
   const packageRoot = path.join(REPO_ROOT, packageDirectory);
-  const testRoot = path.join(packageRoot, 'test');
-  const files = [];
-
-  function walk(directory) {
-    const entries = readdirSync(directory, { withFileTypes: true });
-    for (const entry of entries) {
-      const absolutePath = path.join(directory, entry.name);
-      if (entry.isDirectory()) {
-        walk(absolutePath);
-      } else if (entry.isFile() && entry.name.endsWith('.test.ts')) {
-        files.push(path.relative(packageRoot, absolutePath).split(path.sep).join('/'));
-      }
-    }
-  }
-
-  walk(testRoot);
-  return files
-    .filter((file) => !excludeArchive
-      || (!file.startsWith('test/archive/') && file !== 'test/evm-adapter.test.ts'))
-    .sort(compareAscii);
+  const result = spawnSync('pnpm', ['exec', 'vitest', 'list', '--filesOnly', '--json', '--config', config, ...filters], {
+    cwd: packageRoot, encoding: 'utf8', timeout: 60_000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout).map(({ file }) => path.relative(packageRoot, path.resolve(packageRoot, file)).split(path.sep).join('/')).sort(compareAscii);
 }
 
 for (const packageName of ['cli', 'chain']) {
   test(packageName + ' shards cover every eligible file exactly once', () => {
     const spec = PACKAGE_SPECS[packageName];
-    const expected = independentlyDiscover(
-      spec.packageDirectory,
-      packageName === 'chain',
-    );
+    const expected = independentlyDiscover(spec.packageDirectory);
     const shards = planPackageShards(packageName, REPO_ROOT);
     const flattened = shards.flatMap((shard) => shard.files);
 
@@ -90,6 +71,7 @@ test('chain discovery excludes archived suites and the separately owned EVM inte
   assert.ok(files.includes('test/v8-v9-archive.test.ts'));
   assert.ok(files.every((file) => !file.startsWith('test/archive/')));
   assert.ok(!files.includes('test/evm-adapter.test.ts'));
+  assert.deepEqual(independentlyDiscover('packages/chain', ['test/evm-adapter.test.ts'], '../../vitest.evm-integration.ts'), ['test/evm-adapter.test.ts']);
 });
 
 test('unknown files are conservatively weighted and still assigned exactly once', () => {

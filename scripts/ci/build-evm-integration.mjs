@@ -2,15 +2,15 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const SCOPES = ['chain', 'publisher', 'agent'];
+import { EVM_SCOPES } from '../lib/ci-delta.mjs';
 
 export function integrationBuildArgs(scopes) {
   if (!Array.isArray(scopes) || scopes.length === 0
-      || scopes.some((scope) => !SCOPES.includes(scope))
+      || scopes.some((scope) => !EVM_SCOPES.includes(scope))
       || new Set(scopes).size !== scopes.length) {
-    throw new Error('Expected a non-empty selection of unique chain, publisher, agent scopes');
+    throw new Error(`Expected a non-empty selection of unique EVM scopes: ${EVM_SCOPES.join(', ')}`);
   }
-  return ['exec', 'turbo', 'build', ...SCOPES.filter((scope) => scopes.includes(scope))
+  return ['exec', 'turbo', 'build', ...EVM_SCOPES.filter((scope) => scopes.includes(scope))
     .map((scope) => `--filter=@origintrail-official/dkg-${scope}...`)];
 }
 

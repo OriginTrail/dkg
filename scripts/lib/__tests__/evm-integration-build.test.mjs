@@ -4,7 +4,7 @@ import test from 'node:test';
 import { parse } from 'yaml';
 import { buildEvmIntegration, integrationBuildArgs } from '../../ci/build-evm-integration.mjs';
 import { validateEvmResults } from '../ci-results.mjs';
-import { planCi } from '../ci-delta.mjs';
+import { EVM_SCOPES, planCi } from '../ci-delta.mjs';
 
 test('EVM build selects only requested workspace dependency closures', () => {
   assert.deepEqual(integrationBuildArgs(['publisher', 'chain']), [
@@ -12,8 +12,14 @@ test('EVM build selects only requested workspace dependency closures', () => {
     '--filter=@origintrail-official/dkg-chain...',
     '--filter=@origintrail-official/dkg-publisher...',
   ]);
+  assert.deepEqual(integrationBuildArgs([...EVM_SCOPES].reverse()), [
+    'exec', 'turbo', 'build', ...EVM_SCOPES.map((scope) => `--filter=@origintrail-official/dkg-${scope}...`),
+  ]);
+  for (const scope of EVM_SCOPES) {
+    assert.deepEqual(integrationBuildArgs([scope]), ['exec', 'turbo', 'build', `--filter=@origintrail-official/dkg-${scope}...`]);
+  }
   for (const invalid of [null, [], ['chain', 'chain'], ['unknown'], ['chain; echo bad']]) {
-    assert.throws(() => integrationBuildArgs(invalid), /unique chain, publisher, agent scopes/);
+    assert.throws(() => integrationBuildArgs(invalid), /unique EVM scopes/);
   }
 });
 
