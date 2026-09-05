@@ -3,7 +3,7 @@
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { walletLockSubject } from '../src/async-lift-control-plane.js';
-import { recoveredResolution } from './_helpers/ka-vm-publish.js';
+import { recoveredResolution } from '../../../scripts/testing/ka-vm-publish.js';
 import { createReceiptHintHarness } from './_helpers/receipt-hint-scenario.js';
 
 describe('receipt-hint lane: scheduling and fairness', () => {

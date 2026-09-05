@@ -25,7 +25,6 @@ import { makeHardhatReceiverACKProvider } from './_helpers/acks.js';
 // mint, which DKGPublisher only allocates when a kaAllocator is configured.
 import { makeTestKaAllocator } from './_helpers/ka-allocator.js';
 
-const HARDHAT_PORT = 8548;
 let CONTEXT_GRAPH: string;
 
 function q(s: string, p: string, o: string, g?: string): Quad {
@@ -39,7 +38,7 @@ let publisherIdentityId: bigint;
 
 describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
   beforeAll(async () => {
-    ctx = await spawnHardhatEnv(HARDHAT_PORT);
+    ctx = await spawnHardhatEnv();
 
     publisherWallet = new Wallet(HARDHAT_KEYS.CORE_OP, ctx.provider);
     publisherIdentityId = BigInt(ctx.coreProfileId);
@@ -98,8 +97,8 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
     );
   }, 120_000);
 
-  afterAll(() => {
-    killHardhat(ctx);
+  afterAll(async () => {
+    await killHardhat(ctx);
   });
 
   // -------------------------------------------------------------------------

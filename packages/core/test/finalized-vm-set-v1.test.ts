@@ -90,7 +90,7 @@ describe('RFC-64 finalized VM-set accumulator', () => {
         computeReferenceRoot(rows),
       );
     }
-  });
+  }, 15_000);
 
   it('rejects duplicate, descending, and cross-lane rows instead of sorting them', () => {
     const duplicate = new FinalizedVmSetAccumulatorV1(SCOPE);

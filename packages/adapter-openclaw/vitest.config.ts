@@ -1,8 +1,9 @@
 import { defineConfig } from 'vitest/config';
-import { kosavaAdapterOpenclawCoverage } from '../../vitest.coverage';
+import { coverageForPackage } from '../../vitest.coverage';
 
 export default defineConfig({
   test: {
+    allowOnly: false,
     include: ['test/**/*.test.ts'],
     // Compile-time contract assertions (@ts-expect-error) live in test-d/ and
     // run through tsc here — the ordinary transform strips types, so a
@@ -12,11 +13,6 @@ export default defineConfig({
       include: ['test-d/**/*.test-d.ts'],
       tsconfig: './tsconfig.typetest.json',
     },
-    coverage: {
-      provider: 'v8',
-      reporter: ['text', 'html', 'lcov', 'json-summary'],
-      reportsDirectory: './coverage',
-      thresholds: kosavaAdapterOpenclawCoverage,
-    },
+    coverage: coverageForPackage('adapter-openclaw'),
   },
 });

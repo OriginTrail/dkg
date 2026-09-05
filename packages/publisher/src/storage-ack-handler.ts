@@ -1,3 +1,4 @@
+import { hasValidGraphScopedContent, resolveGraphPublishAccess } from './graph-publish-envelope.js';
 import {
   deleteByPatternWithoutCount,
   GraphManager,
@@ -17,6 +18,7 @@ import type {
   StorageACKMsg,
   SubscriptionSource,
   UpdateIntentMsg,
+  GraphKnowledgeAssetAccessPolicy,
 } from '@origintrail-official/dkg-core';
 import {
   Logger,
@@ -65,7 +67,7 @@ type GraphScopedPublishIntent = {
   publicTripleCount: number;
   privateTripleCount: number;
   privateMerkleRoot?: Uint8Array;
-  accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  accessPolicy: GraphKnowledgeAssetAccessPolicy;
   allowedPeers: string[];
   subGraphName?: string;
 };
@@ -97,32 +99,18 @@ function resolveGraphScopedPublishIntent(
   }
   const publicTripleCount = intent.publicTripleCount ?? 0;
   const privateTripleCount = intent.privateTripleCount ?? 0;
-  if (
-    !Number.isSafeInteger(publicTripleCount)
-    || publicTripleCount < 0
-    || !Number.isSafeInteger(privateTripleCount)
-    || privateTripleCount < 0
-    || (publicTripleCount === 0 && privateTripleCount === 0)
-    || (privateTripleCount > 0 && privateMerkleRoot?.length !== 32)
-    || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
-  ) {
+  if (!hasValidGraphScopedContent(publicTripleCount, privateTripleCount, privateMerkleRoot)) {
     throw new Error('StorageACK: graph-scoped publish has an invalid content envelope');
   }
   const scope = createGraphKnowledgeAssetScope(intent.kaUal, intent.assertionVersion);
   if (scope.ual !== intent.kaUal || scope.assertionVersion !== '1') {
     throw new Error('StorageACK: graph-scoped publish requires a canonical version-1 UAL');
   }
-  const accessPolicy = intent.accessPolicy;
-  const rawAllowedPeers = intent.allowedPeers ?? [];
-  const allowedPeers = [...new Set(rawAllowedPeers.map((peer) => peer.trim()).filter(Boolean))];
-  if (
-    (accessPolicy !== 'public' && accessPolicy !== 'ownerOnly' && accessPolicy !== 'allowList')
-    || allowedPeers.length !== rawAllowedPeers.length
-    || (accessPolicy === 'allowList' && allowedPeers.length === 0)
-    || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
-  ) {
+  const access = resolveGraphPublishAccess(intent.accessPolicy, intent.allowedPeers ?? []);
+  if (!access) {
     throw new Error('StorageACK: graph-scoped publish has an invalid access envelope');
   }
+  const { accessPolicy, allowedPeers } = access;
   const subGraphName = intent.subGraphName || undefined;
   if (subGraphName) {
     const validation = validateSubGraphName(subGraphName);
@@ -179,15 +167,7 @@ function resolveGraphScopedUpdateIntent(
   }
   const publicTripleCount = intent.publicTripleCount ?? 0;
   const privateTripleCount = intent.privateTripleCount ?? 0;
-  if (
-    !Number.isSafeInteger(publicTripleCount)
-    || publicTripleCount < 0
-    || !Number.isSafeInteger(privateTripleCount)
-    || privateTripleCount < 0
-    || (publicTripleCount === 0 && privateTripleCount === 0)
-    || (privateTripleCount > 0 && privateMerkleRoot?.length !== 32)
-    || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
-  ) {
+  if (!hasValidGraphScopedContent(publicTripleCount, privateTripleCount, privateMerkleRoot)) {
     throw new Error('UpdateStorageACK: invalid graph-scoped content envelope');
   }
   const scope = createGraphKnowledgeAssetScope(intent.kaUal, intent.assertionVersion);

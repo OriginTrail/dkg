@@ -34,7 +34,7 @@
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist tsconfig.tsbuildinfo",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs graph-viz",
     "test:watch": "vitest",
     "demo": "vite --open /demo/index.html",
     "demo:build": "vite build"

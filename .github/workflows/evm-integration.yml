@@ -185,6 +185,12 @@ jobs:
           EVM_SCOPE: ${{ matrix.scope }}
         run: ./scripts/test-evm-integration.sh "${EVM_SCOPE}"
 
+      - name: Upload EVM integration reports
+        if: always()
+        uses: ./.github/actions/upload-vitest-junit
+        with:
+          artifact-name: evm-integration-${{ matrix.scope }}
+
   evm-gate:
     name: EVM integration gate
     if: always()

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { ethers, Wallet, Contract } from 'ethers';
 import { DKGAgent } from '../src/index.js';
@@ -95,7 +95,7 @@ let agentBIdentityId: number;
 
 describe('E2E: DKGAgent with real blockchain', () => {
   beforeAll(async () => {
-    ctx = await spawnHardhatEnv(8547);
+    ctx = await spawnHardhatEnv();
     // Create on-chain profiles for agent keys so ensureProfile finds them
     agentAIdentityId = await createNodeProfile(
       ctx.provider, ctx.hubAddress,
@@ -123,7 +123,7 @@ describe('E2E: DKGAgent with real blockchain', () => {
     for (const agent of agents) {
       try { await agent.stop(); } catch { /* teardown best-effort */ }
     }
-    killHardhat(ctx);
+    await killHardhat(ctx);
   });
 
   it('creates agents with real EVMChainAdapter (no mocks)', async () => {
@@ -452,15 +452,24 @@ describe('E2E: DKGAgent with real blockchain', () => {
       },
     ];
 
-    await agents[0].publish(gossipCG, quads);
-
-    // Observe delivery without triggering manual sync or assuming a fixed delay.
-    await expect.poll(async () => {
-      const result = await agents[1].query(
-        `SELECT ?name WHERE { <did:dkg:test:GossipEntity> <http://schema.org/name> ?name }`,
-        { contextGraphId: gossipCG },
-      );
-      return result.bindings.map((binding: any) => binding.name?.value ?? binding.name);
-    }, { timeout: 15_000 }).toContain('"GossipTest"');
+    const receiver = agents[1];
+    const delivered = vi.spyOn(receiver.getOrCreateFinalizationHandler(), 'handleFinalizationMessage');
+    try {
+      await agents[0].publish(gossipCG, quads);
+      await expect.poll(() => delivered.mock.calls.some(
+        ([, cg, from]) => cg === gossipCG && from === agents[0].peerId,
+      ), { timeout: 10_000 }).toBe(true);
+      const deliveryIndex = delivered.mock.calls.findIndex(([, cg]) => cg === gossipCG);
+      await delivered.mock.results[deliveryIndex].value;
+      await expect.poll(async () => {
+        const result = await receiver.query(
+          `SELECT ?name WHERE { <did:dkg:test:GossipEntity> <http://schema.org/name> ?name }`,
+          { contextGraphId: gossipCG },
+        );
+        return result.bindings.map((binding: any) => binding.name?.value ?? binding.name);
+      }, { timeout: 10_000 }).toContain('"GossipTest"');
+    } finally {
+      delivered.mockRestore();
+    }
   }, 60_000);
 });

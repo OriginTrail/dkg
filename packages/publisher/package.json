@@ -21,7 +21,7 @@
     "build": "tsc && pnpm run test:helper-types && pnpm run test:package-exports",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs publisher",
     "clean": "rm -rf dist tsconfig.tsbuildinfo",
     "test:helper-types": "tsc --project tsconfig.test-helpers.json",
     "test:package-exports": "node scripts/test-package-exports.mjs"

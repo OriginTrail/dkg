@@ -75,8 +75,9 @@ export default defineConfig({
   // Real-node round-trips (UI boot + live API) are far slower than the old
   // mock lane, which ran in 15–30s. Give every test room to talk to the daemon.
   timeout: CI ? 120_000 : 60_000,
+  // The HTML reporter clears its output folder; keep JSON outside that folder.
   reporter: CI
-    ? [['github'], ['html', { open: 'never' }], ['junit', { outputFile: 'results.xml' }]]
+    ? [['github'], ['json', { outputFile: 'playwright-report/results.json' }], ['html', { outputFolder: 'playwright-report/html', open: 'never' }], ['junit', { outputFile: 'results.xml' }]]
     : [['list'], ['html', { open: 'on-failure' }], ['junit', { outputFile: 'results.xml' }]],
 
   // globalTeardown stops the devnet ONLY if our bootstrap started it (it leaves

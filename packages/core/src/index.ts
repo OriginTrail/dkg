@@ -129,9 +129,6 @@ export {
 export * from './crypto/index.js';
 export * from './proto/index.js';
 export {
-  DKGNode,
-  type RelayStats,
-  type RelayReservationDetail,
   // Capacity helpers + constants from PR #524 (libp2p reachability hardening PR1).
   // Re-exported here so dashboards / route handlers can import them
   // without reaching into the deep import path.
@@ -141,7 +138,6 @@ export {
   RELAY_RESERVATION_TTL_MS,
   EDGE_NODE_MAX_CONNECTIONS,
   deriveRelayCaps,
-  checkFdLimit,
   validateRelayServerCapacity,
   type RelayCapacityValidation,
   type DerivedRelayCaps,
@@ -150,6 +146,11 @@ export {
   MAX_RELAY_RESERVATION_COUNT,
   validateRelayReservationCount,
   type RelayReservationCountValidation,
+} from './relay-capacity-policy.js';
+export {
+  DKGNode,
+  type RelayStats,
+  type RelayReservationDetail,
   // Single-source-of-truth interface for the small / sparse-network
   // tunables forwarded `DkgConfig.network` → `DKGAgentConfig` →
   // `DKGNodeConfig`, plus the choke-point helper every forwarder
@@ -451,3 +452,5 @@ export {
 } from './node-timer.js';
 export * from './query-catalog-parameters.js';
 export * from './query-catalog.js';
+
+export { checkFdLimit, type FdLimitLogLevel } from './fd-limit.js';

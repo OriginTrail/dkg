@@ -25,28 +25,7 @@ on:
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
       - 'tsconfig.base.json'
-  pull_request:
-    paths:
-      - '.github/workflows/rfc64-inventory-windows.yml'
-      - 'scripts/lib/__tests__/windows-persistence-ci.test.mjs'
-      - 'devnet/_bootstrap/package.json'
-      - 'devnet/_bootstrap/rdf-canonize.d.ts'
-      - 'devnet/_bootstrap/rfc64-evidence*'
-      - 'devnet/_bootstrap/tsconfig.evidence.json'
-      - 'devnet/_bootstrap/vitest.evidence.config.ts'
-      - 'devnet/rfc64-persistence-lifecycle/**'
-      - 'package.json'
-      - 'packages/agent/**'
-      - 'packages/chain/**'
-      - 'packages/core/**'
-      - 'packages/publisher/**'
-      - 'packages/query/**'
-      - 'packages/random-sampling/**'
-      - 'packages/rdf-utils/**'
-      - 'packages/storage/**'
-      - 'pnpm-lock.yaml'
-      - 'pnpm-workspace.yaml'
-      - 'tsconfig.base.json'
+  workflow_call:
   workflow_dispatch:
 
 concurrency:
