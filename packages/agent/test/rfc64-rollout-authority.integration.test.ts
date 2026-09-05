@@ -51,6 +51,7 @@ import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
   RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
   RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
+  Rfc64PublicCatalogTransportErrorV1,
   parseRfc64PublicCatalogHeadAnnouncementV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
   type Rfc64PublicCatalogHeadReplayRequestV1,
@@ -540,6 +541,60 @@ describe('RFC-64 rollout authority integration', () => {
     expect(requestReplay.mock.calls.map(([{ remotePeerId }]: [{ remotePeerId: string }]) => (
       remotePeerId
     ))).toEqual([peerA, peerB]);
+  });
+
+  it('treats replay policy denial as negative provider discovery without hiding wire failure', async () => {
+    const edge = await startAgent('replay-provider-discovery-boundary', activation('catalog'));
+    const deniedPeer = '12D3KooWReplayDeniedNonProvider';
+    const providerPeer = '12D3KooWReplayCompletionProvider';
+    vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([
+      { toString: () => deniedPeer },
+      { toString: () => providerPeer },
+    ] as never);
+    const service = (edge as any).rfc64PublicCatalogServiceV1;
+    const requestReplay = vi.spyOn(service, 'requestCatalogHeadReplay')
+      .mockImplementation(async ({ remotePeerId }: { remotePeerId: string }) => {
+        if (remotePeerId === deniedPeer) {
+          throw new Rfc64PublicCatalogTransportErrorV1(
+            'catalog-transport-policy-denied',
+            'peer does not hold this Context Graph',
+          );
+        }
+        return Object.freeze({
+          kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+          heads: Object.freeze([]),
+        });
+      });
+
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual({ requested: 1, failed: 0 });
+    expect(requestReplay.mock.calls.filter(
+      ([{ remotePeerId }]: [{ remotePeerId: string }]) => remotePeerId === deniedPeer,
+    )).toHaveLength(1);
+    const [discoveryStatus] = await edge.readRfc64CatalogOperationalStatusV1();
+    expect(discoveryStatus).toMatchObject({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      phase: 'bootstrapping',
+    });
+    expect(discoveryStatus?.stableReason).not.toBe('catalog-replay-incomplete');
+
+    requestReplay.mockImplementation(async () => {
+      throw new Rfc64PublicCatalogTransportErrorV1(
+        'catalog-transport-wire',
+        'legacy admission-only acknowledgement',
+      );
+    });
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual({ requested: 0, failed: 2 });
+    await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        phase: 'blocked',
+        stableReason: 'catalog-replay-incomplete',
+      }),
+    );
   });
 
   it('marks then clears the synchronous connection replay fence when admission denies the peer', async () => {

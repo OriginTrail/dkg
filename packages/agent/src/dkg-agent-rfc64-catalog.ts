@@ -117,6 +117,7 @@ import {
 } from './rfc64/public-catalog-successor-producer-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+  Rfc64PublicCatalogTransportErrorV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
   type Rfc64PublicCatalogHeadReplayRequestV1,
 } from './rfc64/public-catalog-transport-v1.js';
@@ -2890,7 +2891,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
                 manifests.push([...completion.heads]);
                 requested += 1;
                 return;
-              } catch {
+              } catch (error) {
+                // A connected peer that does not hold the current CG is not a
+                // promised provider. Policy denial is therefore a bounded
+                // negative discovery result, while unsupported V2, malformed
+                // completion, transport failure, and provider incompleteness
+                // remain fail-closed.
+                if (
+                  error instanceof Rfc64PublicCatalogTransportErrorV1
+                  && error.code === 'catalog-transport-policy-denied'
+                ) return;
                 if (attempt === 1) failed += 1;
               }
             }
