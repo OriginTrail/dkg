@@ -29,6 +29,19 @@ describe('canonical SPARQL lexical scanner', () => {
     });
   });
 
+  it('keeps a large raw IRI on the raw path when inert text looks like UCHAR', () => {
+    const body = `urn:large:${'segment/'.repeat(16_384)}tail`;
+    const source = String.raw`SELECT * WHERE { GRAPH <${body}> { ?s ?p ?o } } # \u1234`;
+    const prepared = prepareSparql(source);
+
+    expect(prepared.status).toBe('valid');
+    if (prepared.status !== 'valid') return;
+    expect(prepared.tokens.find((token) => token.kind === 'iri')).toMatchObject({
+      kind: 'iri',
+      logicalValue: body,
+    });
+  });
+
   it.each([
     'foaf.core',
     'café',

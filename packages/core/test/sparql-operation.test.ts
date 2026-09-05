@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   analyzeSparqlOperation,
   classifySparqlOperation,
+  sparqlAnalysisCacheTesting,
 } from '../src/sparql-operation.js';
 import {
   BoundedLruCache,
@@ -124,5 +125,48 @@ describe('bounded SPARQL analysis cache policy', () => {
     expect(cache.size).toBe(1);
     expect(cache.has('a')).toBe(false);
     expect(cache.get('b')).toBe(3);
+  });
+
+  it('keeps UNKNOWN reuse in the small tier but rejects it from the large tier', () => {
+    const { small, large } = sparqlAnalysisCacheTesting.createTiers();
+    const shortUnknown = String.raw`PREFIX \u00G0x: <https://example.com/> SELECT * WHERE {}`;
+    const largeUnknown = `${shortUnknown}#${'x'.repeat(
+      sparqlAnalysisCacheTesting.smallMaxSourceLength,
+    )}`;
+    const facts = { form: 'UNKNOWN', mutatingKeyword: null } as const;
+
+    small.set(shortUnknown, facts);
+    large.set(largeUnknown, facts);
+
+    expect(small.get(shortUnknown)).toBe(facts);
+    expect(large.has(largeUnknown)).toBe(false);
+  });
+
+  it('reuses valid large queries, evicts at four entries, and rejects over-limit input', () => {
+    const { large } = sparqlAnalysisCacheTesting.createTiers();
+    const facts = { form: 'SELECT', mutatingKeyword: null } as const;
+    const query = (suffix: string, length = sparqlAnalysisCacheTesting.smallMaxSourceLength + 1) => (
+      `SELECT * WHERE {} # ${suffix}${'x'.repeat(length)}`
+    );
+    const valid = query('valid');
+    large.set(valid, facts);
+    expect(large.get(valid)).toBe(facts);
+
+    const unknown = { form: 'UNKNOWN', mutatingKeyword: null } as const;
+    for (let index = 0; index < 4; index++) {
+      large.set(query(`unknown-${index}`), unknown);
+    }
+    expect(large.get(valid)).toBe(facts);
+
+    for (let index = 0; index < 4; index++) {
+      large.set(query(`valid-${index}`), facts);
+    }
+    expect(large.size).toBe(4);
+    expect(large.has(valid)).toBe(false);
+
+    const overLimit = query('over-limit', sparqlAnalysisCacheTesting.largeMaxSourceLength);
+    large.set(overLimit, facts);
+    expect(large.has(overLimit)).toBe(false);
+    expect(large.size).toBe(4);
   });
 });

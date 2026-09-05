@@ -4,7 +4,7 @@ export class BoundedLruCache<K, V> {
 
   constructor(
     private readonly maxEntries: number,
-    private readonly shouldAdmit: (key: K) => boolean = () => true,
+    private readonly shouldAdmit: (key: K, value: V) => boolean = () => true,
   ) {
     if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) {
       throw new RangeError('maxEntries must be a positive safe integer');
@@ -28,7 +28,7 @@ export class BoundedLruCache<K, V> {
   }
 
   set(key: K, value: V): void {
-    if (!this.shouldAdmit(key)) return;
+    if (!this.shouldAdmit(key, value)) return;
     this.entries.delete(key);
     this.entries.set(key, value);
     if (this.entries.size <= this.maxEntries) return;

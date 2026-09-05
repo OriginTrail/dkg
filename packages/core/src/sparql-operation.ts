@@ -32,7 +32,7 @@ export interface SparqlOperationAnalysis {
   mutatingKeyword: string | null;
 }
 
-type SparqlOperationFacts = Readonly<{
+export type SparqlOperationFacts = Readonly<{
   form: SparqlDetectedOperation;
   mutatingKeyword: string | null;
 }>;
@@ -45,30 +45,38 @@ const SPARQL_LARGE_ANALYSIS_CACHE_MAX_SOURCE_LENGTH = 2 * 1024 * 1024;
 // A single query traverses several store decorators (agent invalidation,
 // changelog, graph index, then the adapter), each of which needs the same safe
 // classification. Exact-string memoization makes that scan/allocation happen
-// once and also covers repeated scoring queries. Bound both cardinality and
-// source size so an untrusted query stream cannot turn this into an unbounded
-// retention surface.
-const sparqlAnalysisCache = new BoundedLruCache<string, SparqlOperationFacts>(
-  SPARQL_ANALYSIS_CACHE_MAX_ENTRIES,
-  (source) => source.length <= SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
-);
-// Generated scoped sync queries can legitimately exceed 64 KiB. They cross
-// several decorators that all need the same classification, so bypassing the
-// cache made each layer rescan hundreds of thousands of IRI characters. Keep a
-// separate, very small large-query tier: at most four source strings and eight
-// million UTF-16 code units can be retained (about 16 MiB worst-case), while
-// one query still gets reuse across layers.
-const largeSparqlAnalysisCache = new BoundedLruCache<string, SparqlOperationFacts>(
-  SPARQL_LARGE_ANALYSIS_CACHE_MAX_ENTRIES,
-  (source) => source.length > SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH
-    && source.length <= SPARQL_LARGE_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
-);
+// once. The established small tier accepts UNKNOWN results, while the tiny
+// large tier admits only successfully classified generated sync queries so
+// malformed untrusted input cannot displace useful entries.
+function createSparqlAnalysisCacheTiers() {
+  return {
+    small: new BoundedLruCache<string, SparqlOperationFacts>(
+      SPARQL_ANALYSIS_CACHE_MAX_ENTRIES,
+      (source) => source.length <= SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
+    ),
+    large: new BoundedLruCache<string, SparqlOperationFacts>(
+      SPARQL_LARGE_ANALYSIS_CACHE_MAX_ENTRIES,
+      (source, facts) => source.length > SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH
+        && source.length <= SPARQL_LARGE_ANALYSIS_CACHE_MAX_SOURCE_LENGTH
+        && facts.form !== 'UNKNOWN',
+    ),
+  };
+}
+
+const sparqlAnalysisCaches = createSparqlAnalysisCacheTiers();
 
 function analysisCacheFor(source: string): BoundedLruCache<string, SparqlOperationFacts> {
   return source.length <= SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH
-    ? sparqlAnalysisCache
-    : largeSparqlAnalysisCache;
+    ? sparqlAnalysisCaches.small
+    : sparqlAnalysisCaches.large;
 }
+
+/** Narrow cache-policy seam used by regression tests. */
+export const sparqlAnalysisCacheTesting = {
+  createTiers: createSparqlAnalysisCacheTiers,
+  smallMaxSourceLength: SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
+  largeMaxSourceLength: SPARQL_LARGE_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
+};
 
 const MUTATING_KEYWORD_SET = new Set<string>(SPARQL_MUTATING_KEYWORDS);
 const UPDATE_OPERATION_SET = new Set<string>(SPARQL_UPDATE_OPERATIONS);
@@ -140,11 +148,10 @@ export function analyzeSparqlOperation(
 
   const facts = analyzePreparedSparql(prepareSparql(input));
 
-  // Do not let malformed or incomplete untrusted input churn the bounded
-  // large-query tier. Real queries and updates still get cross-decorator
-  // reuse, while UNKNOWN input is rescanned linearly on every attempt rather
-  // than displacing useful entries or creating cache-dependent timing cliffs.
-  if (facts.form !== 'UNKNOWN') cache.set(input, facts);
+  // Each tier owns its complete admission policy. In particular, short
+  // UNKNOWN inputs retain their established reuse while malformed large
+  // inputs cannot churn the four-entry large-query cache.
+  cache.set(input, facts);
   // The cache owns only immutable scalar facts. Materializing at the public
   // boundary preserves the API's mutable, caller-isolated response objects.
   return materializeSparqlOperationAnalysis(facts);

@@ -1,8 +1,8 @@
 import {
   readSparqlLogicalCodePoint,
   readSparqlVariableEnd,
+  scanSparqlIriRef,
   scanSparqlStringLiteral,
-  skipSparqlIriRef,
   sparqlAsciiDigitWidth,
   sparqlPnCharsBaseWidth,
   sparqlPnCharsUWidth,
@@ -185,38 +185,6 @@ function blank(masked: string[], start: number, end: number): void {
   for (let index = start; index < end; index++) masked[index] = ' ';
 }
 
-function logicalIriValue(
-  value: string,
-  start: number,
-  end: number,
-  hasPotentialUchar: boolean,
-): string | null {
-  // A raw-delimited IRI without UCHAR syntax is already its own logical value.
-  // Avoid decoding it code point by code point after skipSparqlIriRef() has
-  // just traversed the same (often very large) body.
-  if (
-    value.charCodeAt(start) === 0x3c
-    && value.charCodeAt(end - 1) === 0x3e
-    && !hasPotentialUchar
-  ) {
-    return value.slice(start + 1, end - 1);
-  }
-  const opening = readSparqlLogicalCodePoint(value, start);
-  if (!opening || opening.codePoint !== 0x3c) return null;
-  const decoded: string[] = [];
-  let index = start + opening.rawWidth;
-  while (index < end) {
-    const logical = readSparqlLogicalCodePoint(value, index);
-    if (!logical || index + logical.rawWidth > end) return null;
-    if (index + logical.rawWidth === end) {
-      return logical.codePoint === 0x3e ? decoded.join('') : null;
-    }
-    decoded.push(String.fromCodePoint(logical.codePoint));
-    index += logical.rawWidth;
-  }
-  return null;
-}
-
 function logicalTokenValue(value: string, start: number, end: number): string | null {
   const decoded: string[] = [];
   let index = start;
@@ -363,10 +331,6 @@ function scanSparql(value: string): ScannedSparql | null {
   const masked = value.split('');
   const materialized: string[] = [];
   const tokens: SparqlLexicalToken[] = [];
-  // UCHAR preprocessing is the only reason an ordinary raw IRI needs a
-  // second code-point traversal to derive its logical value. Detect that once
-  // for the whole source instead of searching the remainder for every IRI.
-  const hasPotentialUchar = value.includes('\\u') || value.includes('\\U');
   // Maintain expression context during the scan. Looking backwards through
   // all prior tokens for every IRI candidate makes long PREFIX lists
   // quadratic; this stack keeps the same nearest-group decision O(1).
@@ -426,21 +390,16 @@ function scanSparql(value: string): ScannedSparql | null {
       logical.codePoint === 0x3c
       && lessThanStartsIriRef(tokens, openExpressionGroups)
     ) {
-      const iriEnd = skipSparqlIriRef(value, index);
-      if (iriEnd !== null) {
+      const iriScan = scanSparqlIriRef(value, index);
+      if (iriScan !== null) {
         const start = index;
-        index = iriEnd;
-        const logicalValue = logicalIriValue(value, start, index, hasPotentialUchar);
-        if (logicalValue === null) {
-          unterminated = true;
-          continue;
-        }
+        index = iriScan.end;
         materialized.push(value.slice(start, index));
         blank(masked, start, index);
         tokens.push({
           kind: 'iri',
           raw: value.slice(start, index),
-          logicalValue,
+          logicalValue: iriScan.logicalValue,
           start,
           end: index,
         });

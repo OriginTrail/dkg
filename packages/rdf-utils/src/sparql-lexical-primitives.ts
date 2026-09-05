@@ -254,11 +254,17 @@ function isSparqlIriRefBodyCodePoint(codePoint: number): boolean {
     && codePoint !== 0x5c;
 }
 
-function skipSparqlIriRefBody(
+export interface SparqlIriRefScan {
+  readonly end: number;
+  /** IRIREF body after UCHAR decoding, without angle brackets. */
+  readonly logicalValue: string;
+}
+
+function scanSparqlIriRefBody(
   source: string,
   start: number,
   encodedDelimiter: boolean,
-): number | null {
+): SparqlIriRefScan | null {
   let index = start;
   if (!encodedDelimiter) {
     // Ordinary IRIREFs dominate generated sync queries. Keep their hot path
@@ -267,13 +273,28 @@ function skipSparqlIriRefBody(
     // the query than executing it. UCHAR escapes retain the exact slow-path
     // validation below, including the rule that their decoded value is allowed
     // to be a character forbidden in the raw IRI body.
+    let decoded: string[] | null = null;
+    let rawSegmentStart = start;
     while (index < source.length) {
       const first = source.charCodeAt(index);
-      if (first === 0x3e) return index + 1;
+      if (first === 0x3e) {
+        return {
+          end: index + 1,
+          logicalValue: decoded === null
+            ? source.slice(start, index)
+            : [...decoded, source.slice(rawSegmentStart, index)].join(''),
+        };
+      }
       if (first === 0x5c) {
         const logical = readSparqlLogicalCodePoint(source, index);
         if (!logical || (source[index + 1] !== 'u' && source[index + 1] !== 'U')) return null;
+        decoded ??= [];
+        decoded.push(
+          source.slice(rawSegmentStart, index),
+          String.fromCodePoint(logical.codePoint),
+        );
         index += logical.rawWidth;
+        rawSegmentStart = index;
         continue;
       }
       const codePoint = source.codePointAt(index);
@@ -285,21 +306,30 @@ function skipSparqlIriRefBody(
     return null;
   }
 
+  const decoded: string[] = [];
   while (index < source.length) {
     const logical = readSparqlLogicalCodePoint(source, index);
     if (!logical) return null;
-    if (logical.codePoint === 0x3e) return index + logical.rawWidth;
+    if (logical.codePoint === 0x3e) {
+      return { end: index + logical.rawWidth, logicalValue: decoded.join('') };
+    }
     if (!isSparqlIriRefBodyCodePoint(logical.codePoint)) return null;
+    decoded.push(String.fromCodePoint(logical.codePoint));
     index += logical.rawWidth;
   }
   return null;
 }
 
-/** Recognize an IRIREF according to the SPARQL grammar's longest-match rule. */
-export function skipSparqlIriRef(source: string, start: number): number | null {
+/** Scan one IRIREF and return both its raw end and decoded body. */
+export function scanSparqlIriRef(source: string, start: number): SparqlIriRefScan | null {
   const opening = readSparqlLogicalCodePoint(source, start);
   if (!opening || opening.codePoint !== 0x3c) return null;
-  return skipSparqlIriRefBody(source, start + opening.rawWidth, opening.rawWidth > 1);
+  return scanSparqlIriRefBody(source, start + opening.rawWidth, opening.rawWidth > 1);
+}
+
+/** Recognize an IRIREF according to the SPARQL grammar's longest-match rule. */
+export function skipSparqlIriRef(source: string, start: number): number | null {
+  return scanSparqlIriRef(source, start)?.end ?? null;
 }
 
 /** Skip whitespace and `#` line comments between SPARQL tokens. */
