@@ -400,13 +400,28 @@ export interface SharedMemoryPublicSnapshotStorageConfig {
   };
 }
 
-/** Optional LLM config for the Node UI chatbot (OpenAI-compatible API). */
+/**
+ * Optional LLM config for the Node UI chatbot and Layer 2 semantic
+ * extraction. Provider selection is via the `provider` field; the
+ * `DKG_EXTRACTION_PROVIDER` env var overrides it at call time. Unknown
+ * values fall back to OpenAI with a console warning.
+ */
 export interface LlmConfig {
-  /** API key (e.g. OpenAI, Anthropic, or compatible provider). */
+  /** Which LLM provider to use. Default 'openai'. Overridable via DKG_EXTRACTION_PROVIDER. */
+  provider?: 'openai' | 'anthropic';
+  /** API key for the selected provider. */
   apiKey: string;
-  /** Model name (default: gpt-4o-mini). */
+  /**
+   * Model name. Defaults per provider:
+   *   - openai → 'gpt-5-nano'
+   *   - anthropic → 'claude-sonnet-4-6'
+   */
   model?: string;
-  /** Base URL for the API (default: https://api.openai.com/v1). */
+  /**
+   * Base URL override. Defaults per provider:
+   *   - openai → 'https://api.openai.com/v1'
+   *   - anthropic → 'https://api.anthropic.com'
+   */
   baseURL?: string;
 }
 

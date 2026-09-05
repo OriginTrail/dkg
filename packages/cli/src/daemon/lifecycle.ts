@@ -3236,11 +3236,27 @@ async function runDaemonInnerWithStartupOwnership(
   const llmSettings = {
     getLlm: () => config.llm,
     setLlm: async (
-      llm: { apiKey: string; model?: string; baseURL?: string } | null,
+      llm: {
+        apiKey: string;
+        model?: string;
+        baseURL?: string;
+        provider?: 'openai' | 'anthropic';
+      } | null,
     ) => {
       if (llm) {
-        config.llm = llm;
-        memoryManager.updateConfig(llm);
+        // Preserve `provider` across the node-ui settings round-trip. The
+        // UI form currently submits only { apiKey, model?, baseURL? }, so a
+        // raw `config.llm = llm` assignment would silently strip a
+        // previously-configured provider and quietly revert to the default
+        // 'openai' on the next daemon restart. Merge the incoming payload
+        // onto whatever provider is already on disk when the caller omits
+        // it; the caller can still explicitly set or change the provider
+        // by including it in the payload.
+        const preservedProvider = llm.provider ?? config.llm?.provider;
+        config.llm = preservedProvider
+          ? { ...llm, provider: preservedProvider }
+          : llm;
+        memoryManager.updateConfig(config.llm);
         log("LLM config updated via settings");
       } else {
         delete config.llm;
