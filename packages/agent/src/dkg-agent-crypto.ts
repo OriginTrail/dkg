@@ -137,8 +137,12 @@ import {
   resolveActivePublicContextGraphChainProof as resolveStrictActivePublicChainProof,
   type ActivePublicContextGraphChainProof,
 } from './active-public-context-graph-chain-proof.js';
-import { ContextGraphAuthorityUnavailableError } from './context-graph-authority-unavailable-error.js';
+import {
+  ContextGraphAuthorityUnavailableError,
+  type ContextGraphAuthorityUnavailableReason,
+} from './context-graph-authority-unavailable-error.js';
 import type { RegisteredContextGraphAuthority } from './dkg-agent-cg-resolve.js';
+import type { LiveOnChainAccessPolicyState } from './context-graph-access-policy-state.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -559,9 +563,18 @@ export type ContextGraphAgentGateAuthority =
   | { kind: 'available'; agentAddresses: string[] }
   | {
       kind: 'unavailable';
-      reason: RegisteredAuthorityUnavailableReason | 'rfc64-private-read-roster-unavailable';
+      reason: ContextGraphAuthorityUnavailableReason;
       detail?: string;
-      retryable: boolean;
+      retryable: true;
+    }
+  | {
+      kind: 'unavailable';
+      reason: Exclude<
+        RegisteredAuthorityUnavailableReason,
+        ContextGraphAuthorityUnavailableReason
+      >;
+      detail?: string;
+      retryable: false;
     };
 
 const RETRYABLE_REGISTERED_AUTHORITY_REASONS = {
@@ -569,11 +582,18 @@ const RETRYABLE_REGISTERED_AUTHORITY_REASONS = {
   'local-chain-binding-unavailable': true,
   'local-existence-unavailable': true,
   'chain-access-policy-unavailable': true,
+  'chain-access-policy-timeout': true,
   'chain-access-policy-unknown': false,
   'chain-participant-authority-unsupported': false,
   'chain-participant-authority-unavailable': true,
   'chain-participant-authority-invalid': false,
 } as const satisfies Record<RegisteredAuthorityUnavailableReason, boolean>;
+
+function isRetryableRegisteredAuthorityReason(
+  reason: RegisteredAuthorityUnavailableReason,
+): reason is Extract<RegisteredAuthorityUnavailableReason, ContextGraphAuthorityUnavailableReason> {
+  return RETRYABLE_REGISTERED_AUTHORITY_REASONS[reason];
+}
 
 export class WorkspaceCryptoMethods extends DKGAgentBase {
   getWorkspaceGossipSigningAgent(this: DKGAgent): (AgentKeyRecord & { privateKey: string }) | null {
@@ -643,13 +663,22 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       return { kind: 'available', agentAddresses: registeredAuthority.participantAgents };
     }
     if (registeredAuthority.kind === 'unavailable') {
+      const detail = registeredAuthority.detail === undefined
+        ? {}
+        : { detail: registeredAuthority.detail };
+      if (isRetryableRegisteredAuthorityReason(registeredAuthority.reason)) {
+        return {
+          kind: 'unavailable',
+          reason: registeredAuthority.reason,
+          ...detail,
+          retryable: true,
+        };
+      }
       return {
         kind: 'unavailable',
         reason: registeredAuthority.reason,
-        ...(registeredAuthority.detail === undefined
-          ? {}
-          : { detail: registeredAuthority.detail }),
-        retryable: RETRYABLE_REGISTERED_AUTHORITY_REASONS[registeredAuthority.reason],
+        ...detail,
+        retryable: false,
       };
     }
 
@@ -914,32 +943,32 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * to a less-protected path" decision (SWM-plaintext gate + publish-inline
    * curated probe), so both branches can never diverge.
    *
-   * Returns the access-policy enum (`0` = public, `1` = private/curated) ONLY
-   * after {@link ChainAdapter.isContextGraphActiveOnChain} proves the slot is
-   * actually live on-chain; otherwise returns `null` (= UNKNOWN, caller fails
-   * closed). This is essential because `getContextGraphAccessPolicy` returns
+   * Returns an available access-policy enum (`0` = public, `1` =
+   * private/curated) ONLY after
+   * {@link ChainAdapter.isContextGraphActiveOnChain} proves the slot is
+   * actually live on-chain; otherwise preserves a typed unavailable reason.
+   * This is essential because `getContextGraphAccessPolicy` returns
    * Solidity's default `0` (= public) for UNKNOWN ids, and the local
    * access-policy cache can be seeded by best-effort probes of arbitrary ids —
    * so neither is trustworthy without a liveness proof. Both the liveness and
    * the policy reads are bounded by {@link raceChainPolicyRead} so a hung RPC
-   * fails closed (`null`) instead of blocking the hot path. A genuine RPC
+   * fails closed instead of blocking the hot path. A genuine RPC
    * rejection propagates to the caller (which logs + fails closed in its own
-   * idiom). `null` is returned when: the id is non-numeric/≤0, no liveness
-   * probe is implemented, the slot is not live, a read times out, or the
-   * policy getter is missing / returns an out-of-range value.
+   * idiom). The reason distinguishes invalid input, unsupported capabilities,
+   * inactive slots, malformed values, and bounded read timeouts.
    */
-  async readLiveOnChainAccessPolicy(this: DKGAgent,
+  async resolveLiveOnChainAccessPolicyState(this: DKGAgent,
     onChainId: string,
     opCtx?: OperationContext,
     options: { signal?: AbortSignal } = {},
-  ): Promise<0 | 1 | null> {
+  ): Promise<LiveOnChainAccessPolicyState> {
     let numericId: bigint;
     try {
       numericId = BigInt(onChainId);
     } catch {
-      return null;
+      return { kind: 'unavailable', reason: 'invalid-on-chain-id' };
     }
-    if (numericId <= 0n) return null;
+    if (numericId <= 0n) return { kind: 'unavailable', reason: 'invalid-on-chain-id' };
 
     if (typeof this.chain.isContextGraphActiveOnChain !== 'function') {
       // #884 review (🔴 GZEqN): don't strand public CGs SILENTLY. An adapter
@@ -961,7 +990,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
           `public-CG plaintext detection.`,
         );
       }
-      return null;
+      return { kind: 'unavailable', reason: 'chain-liveness-unsupported' };
     }
     const live = await this.raceChainPolicyRead(
       () => options.signal
@@ -976,9 +1005,13 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         `readLiveOnChainAccessPolicy(${onChainId}): isContextGraphActiveOnChain timed out after ` +
         `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — treating on-chain access policy as UNKNOWN (fail-closed)`,
       );
-      return null;
+      return {
+        kind: 'unavailable',
+        reason: 'chain-liveness-read-timeout',
+        detail: `isContextGraphActiveOnChain(${onChainId}) timed out after ${CHAIN_POLICY_READ_TIMEOUT_MS}ms`,
+      };
     }
-    if (live !== true) return null;
+    if (live !== true) return { kind: 'unavailable', reason: 'chain-context-graph-inactive' };
 
     // #884 review (🔴 GZEqI): the slot is LIVE, but DO NOT trust the
     // onChainAccessPolicyCache for this security-downgrade decision. The cache
@@ -990,7 +1023,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // saved RPC). The cache is still WRITTEN below (a fresh, live-verified
     // value is strictly an improvement for the other, decrypt-gated readers).
     const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
-    if (typeof getAccessPolicy !== 'function') return null;
+    if (typeof getAccessPolicy !== 'function') {
+      return { kind: 'unavailable', reason: 'chain-access-policy-unsupported' };
+    }
     const policy = await this.raceChainPolicyRead(
       () => options.signal
         ? getAccessPolicy.call(this.chain, numericId, { signal: options.signal })
@@ -1004,13 +1039,27 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         `readLiveOnChainAccessPolicy(${onChainId}): getContextGraphAccessPolicy timed out after ` +
         `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — treating on-chain access policy as UNKNOWN (fail-closed)`,
       );
-      return null;
+      return {
+        kind: 'unavailable',
+        reason: 'chain-access-policy-read-timeout',
+        detail: `getContextGraphAccessPolicy(${onChainId}) timed out after ${CHAIN_POLICY_READ_TIMEOUT_MS}ms`,
+      };
     }
     if (policy === 0 || policy === 1) {
       this.onChainAccessPolicyCache.set(onChainId, policy);
-      return policy;
+      return { kind: 'available', accessPolicy: policy };
     }
-    return null;
+    return { kind: 'unavailable', reason: 'chain-access-policy-invalid' };
+  }
+
+  /** Compatibility projection for fail-closed policy consumers. */
+  async readLiveOnChainAccessPolicy(this: DKGAgent,
+    onChainId: string,
+    opCtx?: OperationContext,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<0 | 1 | null> {
+    const state = await this.resolveLiveOnChainAccessPolicyState(onChainId, opCtx, options);
+    return state.kind === 'available' ? state.accessPolicy : null;
   }
 
   async resolveActivePublicContextGraphChainProof(
@@ -1374,7 +1423,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     if (registeredAuthority.kind === 'unavailable') {
       const message =
         `Registered context graph "${input.contextGraphId}" authority is unavailable (${registeredAuthority.reason})`;
-      if (RETRYABLE_REGISTERED_AUTHORITY_REASONS[registeredAuthority.reason]) {
+      if (isRetryableRegisteredAuthorityReason(registeredAuthority.reason)) {
         throw new ContextGraphAuthorityUnavailableError(message, {
           reason: registeredAuthority.reason,
           ...(registeredAuthority.detail === undefined

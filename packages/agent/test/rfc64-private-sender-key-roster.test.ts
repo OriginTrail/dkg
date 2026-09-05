@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
   ContextGraphAuthorityUnavailableError,
-  isContextGraphAuthorityUnavailableError,
+  isContextGraphAuthorityUnavailableMarker,
 } from '../src/context-graph-authority-unavailable-error.js';
+import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
+import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
 
 const CG = '0x1111111111111111111111111111111111111111/private-cg';
@@ -86,6 +89,119 @@ describe('RFC-64 private Sender Key roster authority', () => {
     });
   });
 
+  it('locks every registered-authority reason to its queue retry disposition', async () => {
+    const cases = [
+      ['chain-name-binding-unavailable', true],
+      ['local-chain-binding-unavailable', true],
+      ['local-existence-unavailable', true],
+      ['chain-access-policy-unavailable', true],
+      ['chain-access-policy-timeout', true],
+      ['chain-access-policy-unknown', false],
+      ['chain-participant-authority-unsupported', false],
+      ['chain-participant-authority-unavailable', true],
+      ['chain-participant-authority-invalid', false],
+    ] as const;
+
+    for (const [reason, retryable] of cases) {
+      const receiver = {
+        resolveContextGraphAgentGateAuthority:
+          WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
+        resolveRegisteredContextGraphAuthority: async () => ({
+          kind: 'unavailable' as const,
+          reason,
+        }),
+        localAgents: new Map(),
+      };
+
+      await expect(WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority.call(
+        receiver as never,
+        CG,
+      )).resolves.toEqual({ kind: 'unavailable', reason, retryable });
+
+      const error = await WorkspaceCryptoMethods.prototype.resolveWorkspaceGossipSigningAgent.call(
+        receiver as never,
+        CG,
+      ).catch((cause: unknown) => cause);
+      expect(isContextGraphAuthorityUnavailableMarker(error), reason).toBe(retryable);
+    }
+  });
+
+  it('preserves bounded liveness and policy timeouts as retryable authority unavailability', async () => {
+    vi.useFakeTimers();
+    try {
+      const raceChainPolicyRead = Reflect.get(
+        WorkspaceCryptoMethods.prototype,
+        'raceChainPolicyRead',
+      ) as (...args: unknown[]) => Promise<unknown>;
+      for (const [hangingRead, chain] of [
+        [
+          'isContextGraphActiveOnChain',
+          {
+            isContextGraphActiveOnChain: () => new Promise<boolean>(() => {}),
+            getContextGraphAccessPolicy: async () => 1 as const,
+          },
+        ],
+        [
+          'getContextGraphAccessPolicy',
+          {
+            isContextGraphActiveOnChain: async () => true,
+            getContextGraphAccessPolicy: () => new Promise<0 | 1>(() => {}),
+          },
+        ],
+      ] as const) {
+        const receiver = {
+          resolveContextGraphAgentGateAuthority:
+            WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
+          resolveRegisteredContextGraphAuthority:
+            ContextGraphResolveMethods.prototype.resolveRegisteredContextGraphAuthority,
+          resolveLiveOnChainAccessPolicyState:
+            WorkspaceCryptoMethods.prototype.resolveLiveOnChainAccessPolicyState,
+          resolveContextGraphRegistrationBinding: async () => ({
+            kind: 'registered' as const,
+            onChainId: 7n,
+          }),
+          raceChainPolicyRead,
+          chain,
+          log: { warn: vi.fn() },
+          warnedMissingCgLivenessProbe: false,
+          onChainAccessPolicyCache: new Map(),
+          localAgents: new Map(),
+        };
+
+        const errorPromise = WorkspaceCryptoMethods.prototype.resolveWorkspaceGossipSigningAgent.call(
+          receiver as never,
+          CG,
+        ).catch((cause: unknown) => cause);
+        await vi.advanceTimersByTimeAsync(CHAIN_POLICY_READ_TIMEOUT_MS);
+
+        await expect(errorPromise).resolves.toMatchObject({
+          code: CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
+          reason: 'chain-access-policy-timeout',
+          detail: expect.stringContaining(hangingRead),
+        });
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('recognizes only the narrow cross-boundary authority marker contract', () => {
+    expect(isContextGraphAuthorityUnavailableMarker(
+      new ContextGraphAuthorityUnavailableError('temporarily unavailable', {
+        reason: 'chain-participant-authority-unavailable',
+      }),
+    )).toBe(true);
+    expect(isContextGraphAuthorityUnavailableMarker({
+      code: CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
+    })).toBe(true);
+    expect(isContextGraphAuthorityUnavailableMarker({
+      code: `${CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE}_LOOKALIKE`,
+      reason: 'chain-participant-authority-unavailable',
+    })).toBe(false);
+    expect(isContextGraphAuthorityUnavailableMarker({ reason: 'chain-participant-authority-unavailable' }))
+      .toBe(false);
+  });
+
   it('marks an unavailable signing authority so durable promotion can retry it', async () => {
     const receiver = {
       resolveContextGraphAgentGateAuthority: async () => ({
@@ -105,7 +221,7 @@ describe('RFC-64 private Sender Key roster authority', () => {
       code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
       reason: 'rfc64-private-read-roster-unavailable',
     });
-    expect(isContextGraphAuthorityUnavailableError(error)).toBe(true);
+    expect(isContextGraphAuthorityUnavailableMarker(error)).toBe(true);
   });
 
   it('marks an unavailable recipient authority so durable promotion can retry it', async () => {
@@ -150,10 +266,10 @@ describe('RFC-64 private Sender Key roster authority', () => {
 
     expect(signingError).toBeInstanceOf(Error);
     expect(signingError).toMatchObject({ message: expect.stringContaining('authoritative signing roster is empty') });
-    expect(isContextGraphAuthorityUnavailableError(signingError)).toBe(false);
+    expect(isContextGraphAuthorityUnavailableMarker(signingError)).toBe(false);
     expect(recipientError).toBeInstanceOf(Error);
     expect(recipientError).toMatchObject({ message: expect.stringContaining('unsupported') });
-    expect(isContextGraphAuthorityUnavailableError(recipientError)).toBe(false);
+    expect(isContextGraphAuthorityUnavailableMarker(recipientError)).toBe(false);
   });
 
   it('keeps a fully revoked legacy gate authoritative and empty', async () => {

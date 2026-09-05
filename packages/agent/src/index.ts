@@ -294,8 +294,13 @@ export type { ContextGraphAgentGateAuthority } from './dkg-agent-crypto.js';
 export {
   CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
   CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME,
+  CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS,
   ContextGraphAuthorityUnavailableError,
-  isContextGraphAuthorityUnavailableError,
+  isContextGraphAuthorityUnavailableMarker,
+} from './context-graph-authority-unavailable-error.js';
+export type {
+  ContextGraphAuthorityUnavailableMarker,
+  ContextGraphAuthorityUnavailableReason,
 } from './context-graph-authority-unavailable-error.js';
 export type { ContextGraphRegistrationBinding } from './dkg-agent-cg-registry.js';
 export {

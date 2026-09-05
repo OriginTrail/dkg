@@ -15,7 +15,10 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
-import { ContextGraphAuthorityUnavailableError } from '@origintrail-official/dkg-agent';
+import {
+  CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
+  ContextGraphAuthorityUnavailableError,
+} from '@origintrail-official/dkg-agent';
 import {
   OxigraphStore,
   StoreOperationTimeoutError,
@@ -189,6 +192,15 @@ describe('classifyPromoteError', () => {
       'signing authority is temporarily unavailable',
       { reason: 'chain-participant-authority-unavailable' },
     ))).toEqual({ classification: 'transient', retryable: true });
+  });
+
+  it('recognizes a serialized authority marker without relying on class identity', () => {
+    expect(classifyPromoteError({
+      code: CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
+    })).toEqual({ classification: 'transient', retryable: true });
+    expect(classifyPromoteError({
+      code: `${CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE}_LOOKALIKE`,
+    })).toEqual({ classification: 'fatal', retryable: false });
   });
 
   it('does not retry an authoritative empty signing roster', () => {
@@ -485,6 +497,35 @@ describe('runPromoteJob', () => {
         stage: 'unknown',
         classification: 'transient',
         retryable: true,
+      }),
+    ]);
+  });
+
+  it('keeps a cross-boundary authority outage queued for retry', async () => {
+    const job = await enqueueAndClaim();
+    const result = await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw { code: CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE };
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+
+    expect(result).toMatchObject({
+      outcome: 'failed_retrying',
+      error: { classification: 'transient', retryable: true },
+    });
+    expect(await queue.getStatus(job.jobId)).toMatchObject({ state: 'failed_retrying' });
+    expect(promoteFailureDiagnostics(logs)).toEqual([
+      expect.objectContaining({
+        classification: 'transient',
+        retryable: true,
+        errorCode: CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
       }),
     ]);
   });
