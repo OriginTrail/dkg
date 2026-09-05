@@ -155,4 +155,22 @@ describe('DKGAgent assertion promote boundary', () => {
     expect(failure).toBe(emptyRoster);
     expect(getPromoteFailureDisposition(failure)).toBeUndefined();
   });
+
+  it('preserves a typed terminal authority failure without adding a queue disposition', async () => {
+    const terminalAuthorityFailure = new ContextGraphAuthorityUnavailableError(
+      'registered authority is unsupported',
+      { reason: 'chain-participant-authority-unsupported' },
+    );
+    const agent = promoteBoundaryAgent();
+    agent.resolveWorkspaceGossipSigningAgent = async () => {
+      throw terminalAuthorityFailure;
+    };
+
+    const failure = await agent.assertion.promote('cg-1', 'asset-1')
+      .catch((error: unknown) => error);
+
+    expect(terminalAuthorityFailure.retryable).toBe(false);
+    expect(failure).toBe(terminalAuthorityFailure);
+    expect(getPromoteFailureDisposition(failure)).toBeUndefined();
+  });
 });

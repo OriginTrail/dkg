@@ -1,20 +1,11 @@
 import {
-  PROMOTE_POST_COMMIT_FAILURE_CODE,
-  PROMOTE_POST_COMMIT_FAILURE_ERROR_NAME,
-  PROMOTE_RETRYABLE_FAILURE_CODE,
-  PROMOTE_RETRYABLE_FAILURE_ERROR_NAME,
   createPromotePostCommitFailure,
   createPromoteRetryableFailure,
   getPromoteFailureDisposition,
   getPromoteReplaySafeErrorDiagnostic,
-  getPromoteRetryableFailureDiagnostic,
   isPromoteReplaySafeError,
-  isPromoteRetryableFailure,
   type PromoteFailureDisposition,
-  type PromotePostCommitFailureDiagnostic,
   type PromoteReplaySafeErrorDiagnostic,
-  type PromoteRetryableFailureDiagnostic,
-  type PromoteRetryableFailureMarker,
 } from '@origintrail-official/dkg-publisher';
 
 type PublisherApi = typeof import('../../src/index.js');
@@ -34,11 +25,17 @@ type LegacyReplaySafeGuardRemainsPublic = AssertTrue<
 type LegacyReplaySafeDiagnosticRemainsPublic = AssertTrue<
   'getPromoteReplaySafeErrorDiagnostic' extends keyof PublisherApi ? true : false
 >;
-type LegacyRetryableGuardRemainsPublic = AssertTrue<
+type GenericRetryableGuardStaysInternal = AssertFalse<
   'isPromoteRetryableFailure' extends keyof PublisherApi ? true : false
 >;
-type LegacyRetryableMarkerCodeRemainsPublic = AssertTrue<
+type GenericRetryableMarkerCodeStaysInternal = AssertFalse<
   'PROMOTE_RETRYABLE_FAILURE_CODE' extends keyof PublisherApi ? true : false
+>;
+type GenericRetryableDiagnosticStaysInternal = AssertFalse<
+  'getPromoteRetryableFailureDiagnostic' extends keyof PublisherApi ? true : false
+>;
+type PostCommitMarkerCodeStaysInternal = AssertFalse<
+  'PROMOTE_POST_COMMIT_FAILURE_CODE' extends keyof PublisherApi ? true : false
 >;
 type ReplaySafeUnwrapperStaysAbsent = AssertFalse<
   'unwrapPromoteReplaySafeError' extends keyof PublisherApi ? true : false
@@ -59,34 +56,27 @@ type ArbitraryPublisherImplementationStaysClosed = typeof import('@origintrail-o
 type LegacyWorkspaceResolutionSubpathRemainsAvailable =
   typeof import('@origintrail-official/dkg-publisher/dist/workspace-resolution.js');
 
-// Compile the source-compatible package-root surface, including both the new
-// aggregate accessor and every replay-safety symbol published before it.
+// Compile the narrow package-root surface: the pre-existing replay-safe
+// compatibility API plus the new producer and aggregate-consumer boundaries.
 void [
-  PROMOTE_POST_COMMIT_FAILURE_CODE,
-  PROMOTE_POST_COMMIT_FAILURE_ERROR_NAME,
-  PROMOTE_RETRYABLE_FAILURE_CODE,
-  PROMOTE_RETRYABLE_FAILURE_ERROR_NAME,
   createPromotePostCommitFailure,
   createPromoteRetryableFailure,
   getPromoteFailureDisposition,
   getPromoteReplaySafeErrorDiagnostic,
-  getPromoteRetryableFailureDiagnostic,
   isPromoteReplaySafeError,
-  isPromoteRetryableFailure,
 ];
 type PublicPromoteFailureDisposition = PromoteFailureDisposition;
-type PublicPromotePostCommitFailureDiagnostic = PromotePostCommitFailureDiagnostic;
 type PublicPromoteReplaySafeErrorDiagnostic = PromoteReplaySafeErrorDiagnostic;
-type PublicPromoteRetryableFailureDiagnostic = PromoteRetryableFailureDiagnostic;
-type PublicPromoteRetryableFailureMarker = PromoteRetryableFailureMarker;
 
 export type {
   PromoteFailureDispositionIsPublic,
   PromotePostCommitBoundaryIsPublic,
   LegacyReplaySafeGuardRemainsPublic,
   LegacyReplaySafeDiagnosticRemainsPublic,
-  LegacyRetryableGuardRemainsPublic,
-  LegacyRetryableMarkerCodeRemainsPublic,
+  GenericRetryableGuardStaysInternal,
+  GenericRetryableMarkerCodeStaysInternal,
+  GenericRetryableDiagnosticStaysInternal,
+  PostCommitMarkerCodeStaysInternal,
   ReplaySafeUnwrapperStaysAbsent,
   ReplaySafeCertifierStaysInternal,
   ReplaySafeConstructorStaysInternal,
@@ -95,8 +85,5 @@ export type {
   ArbitraryPublisherImplementationStaysClosed,
   LegacyWorkspaceResolutionSubpathRemainsAvailable,
   PublicPromoteFailureDisposition,
-  PublicPromotePostCommitFailureDiagnostic,
   PublicPromoteReplaySafeErrorDiagnostic,
-  PublicPromoteRetryableFailureDiagnostic,
-  PublicPromoteRetryableFailureMarker,
 };

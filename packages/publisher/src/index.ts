@@ -386,19 +386,10 @@ export {
   createPromotePostCommitFailure,
   createPromoteRetryableFailure,
   getPromoteReplaySafeErrorDiagnostic,
-  getPromoteRetryableFailureDiagnostic,
   getPromoteFailureDisposition,
   isPromoteReplaySafeError,
-  isPromoteRetryableFailure,
-  PROMOTE_POST_COMMIT_FAILURE_CODE,
-  PROMOTE_POST_COMMIT_FAILURE_ERROR_NAME,
-  PROMOTE_RETRYABLE_FAILURE_CODE,
-  PROMOTE_RETRYABLE_FAILURE_ERROR_NAME,
   type PromoteFailureDisposition,
-  type PromotePostCommitFailureDiagnostic,
   type PromoteReplaySafeErrorDiagnostic,
-  type PromoteRetryableFailureDiagnostic,
-  type PromoteRetryableFailureMarker,
 } from './promote-replay-safety.js';
 export { type LegacyWmMigrationResult } from './legacy-wm-migration.js';
 export {

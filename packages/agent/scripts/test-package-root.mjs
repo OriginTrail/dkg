@@ -22,15 +22,6 @@ const expectedRfc64PolicyCells = [
   'private-open',
   'private-curated',
 ];
-const expectedContextGraphAuthorityUnavailableReasons = [
-  'chain-name-binding-unavailable',
-  'local-chain-binding-unavailable',
-  'local-existence-unavailable',
-  'chain-access-policy-unavailable',
-  'chain-access-policy-timeout',
-  'chain-participant-authority-unavailable',
-  'rfc64-private-read-roster-unavailable',
-];
 const expectedRfc64PublicCatalogReconciliationOutcomes = [
   'already-applied',
   'applied',
@@ -65,29 +56,30 @@ if (
 }
 if (
   root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE !== 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE'
-  || root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME
-    !== 'ContextGraphAuthorityUnavailableError'
-  || !Array.isArray(root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS)
-  || !Object.isFrozen(root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS)
-  || root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS.length
-    !== expectedContextGraphAuthorityUnavailableReasons.length
-  || root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS.some(
-    (reason, index) => reason !== expectedContextGraphAuthorityUnavailableReasons[index]
-  )
+  || 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME' in root
+  || 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS' in root
 ) {
-  throw new Error('package root did not expose the exact authority-unavailable contract');
+  throw new Error('package root did not expose the narrow authority-failure contract');
 }
 const authorityUnavailable = new root.ContextGraphAuthorityUnavailableError(
   'authority unavailable',
   { reason: 'chain-access-policy-timeout' },
 );
 if (
-  authorityUnavailable.name !== root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME
+  authorityUnavailable.name !== 'ContextGraphAuthorityUnavailableError'
   || authorityUnavailable.code !== root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE
   || authorityUnavailable.reason !== 'chain-access-policy-timeout'
+  || authorityUnavailable.retryable !== true
   || !root.isContextGraphAuthorityUnavailableMarker(authorityUnavailable)
   || !root.isContextGraphAuthorityUnavailableMarker({
     code: root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
+    reason: 'chain-access-policy-timeout',
+    retryable: true,
+  })
+  || root.isContextGraphAuthorityUnavailableMarker({
+    code: root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
+    reason: 'chain-access-policy-unknown',
+    retryable: true,
   })
 ) {
   throw new Error('package-root authority-unavailable runtime contract changed');

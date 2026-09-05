@@ -127,13 +127,9 @@ describe('RFC-64 private Sender Key roster authority', () => {
 
       expect(outcome.status, reason).toBe('rejected');
       if (outcome.status !== 'rejected') continue;
-      expect(outcome.error, reason).toBeInstanceOf(Error);
-      expect(isContextGraphAuthorityUnavailableMarker(outcome.error), reason).toBe(retryable);
-      if (retryable) {
-        expect(outcome.error, reason).toBeInstanceOf(ContextGraphAuthorityUnavailableError);
-      } else {
-        expect(outcome.error, reason).not.toBeInstanceOf(ContextGraphAuthorityUnavailableError);
-      }
+      expect(outcome.error, reason).toBeInstanceOf(ContextGraphAuthorityUnavailableError);
+      expect(outcome.error, reason).toMatchObject({ reason, retryable });
+      expect(isContextGraphAuthorityUnavailableMarker(outcome.error), reason).toBe(true);
     }
   });
 
@@ -196,7 +192,7 @@ describe('RFC-64 private Sender Key roster authority', () => {
     }
   });
 
-  it('recognizes only the narrow cross-boundary authority marker contract', () => {
+  it('recognizes only a table-consistent cross-boundary authority failure', () => {
     expect(isContextGraphAuthorityUnavailableMarker(
       new ContextGraphAuthorityUnavailableError('temporarily unavailable', {
         reason: 'chain-participant-authority-unavailable',
@@ -204,10 +200,25 @@ describe('RFC-64 private Sender Key roster authority', () => {
     )).toBe(true);
     expect(isContextGraphAuthorityUnavailableMarker({
       code: CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
+      reason: 'chain-participant-authority-unavailable',
+      retryable: true,
     })).toBe(true);
+    expect(isContextGraphAuthorityUnavailableMarker({
+      code: CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
+    })).toBe(false);
+    expect(isContextGraphAuthorityUnavailableMarker({
+      code: CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
+      reason: 'chain-participant-authority-unsupported',
+      retryable: true,
+    })).toBe(false);
     expect(isContextGraphAuthorityUnavailableMarker({
       code: `${CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE}_LOOKALIKE`,
       reason: 'chain-participant-authority-unavailable',
+    })).toBe(false);
+    expect(isContextGraphAuthorityUnavailableMarker({
+      code: CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
+      reason: 'toString',
+      retryable: undefined,
     })).toBe(false);
     expect(isContextGraphAuthorityUnavailableMarker({ reason: 'chain-participant-authority-unavailable' }))
       .toBe(false);
@@ -261,7 +272,7 @@ describe('RFC-64 private Sender Key roster authority', () => {
     });
   });
 
-  it('does not mark authoritative empty or unsupported authority as retryable', async () => {
+  it('keeps authoritative empty and unsupported authority terminal', async () => {
     const emptySigningReceiver = {
       resolveContextGraphAgentGateAuthority: async () => ({
         kind: 'available' as const,
@@ -288,9 +299,13 @@ describe('RFC-64 private Sender Key roster authority', () => {
     expect(signingError).toBeInstanceOf(Error);
     expect(signingError).toMatchObject({ message: expect.stringContaining('authoritative signing roster is empty') });
     expect(isContextGraphAuthorityUnavailableMarker(signingError)).toBe(false);
-    expect(recipientError).toBeInstanceOf(Error);
-    expect(recipientError).toMatchObject({ message: expect.stringContaining('unsupported') });
-    expect(isContextGraphAuthorityUnavailableMarker(recipientError)).toBe(false);
+    expect(recipientError).toBeInstanceOf(ContextGraphAuthorityUnavailableError);
+    expect(recipientError).toMatchObject({
+      message: expect.stringContaining('unsupported'),
+      reason: 'chain-participant-authority-unsupported',
+      retryable: false,
+    });
+    expect(isContextGraphAuthorityUnavailableMarker(recipientError)).toBe(true);
   });
 
   it('keeps a fully revoked legacy gate authoritative and empty', async () => {

@@ -116,7 +116,6 @@ import {
   resolveStorageAckTiming,
   selectACKCandidatePeersWithDiagnostics,
   createPromotePostCommitFailure,
-  createPromoteRetryableFailure,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   // OT-RFC-43 A2/B3 — per-layer pointers + derived status helper.
   deriveStatus, type KaStatus,
@@ -141,8 +140,10 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
-import { isContextGraphAuthorityUnavailableMarker } from
-  './context-graph-agent-gate-authority.js';
+import {
+  executeAssertionPromotePreCommit,
+  type AssertionPromoteOptions,
+} from './assertion-promote-precommit.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -775,71 +776,6 @@ function createACKSendP2P(input: {
     }
     return sendResult.response;
   };
-}
-
-function translateAuthorityFailureAtPromoteBoundary(error: unknown): unknown {
-  return isContextGraphAuthorityUnavailableMarker(error)
-    ? createPromoteRetryableFailure(error)
-    : error;
-}
-
-interface PromotePreCommitOptions {
-  subGraphName?: string;
-  awaitCuratorAck?: boolean;
-  curatorAckTimeoutMs?: number;
-  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
-  allowedPeers?: readonly string[];
-}
-
-/**
- * The single WM→SWM pre-commit boundary. Any producer-marked authority outage
- * from signing, policy preparation, curator confirmation, or the publisher is
- * translated once for the durable queue. Post-commit gossip and observers run
- * outside this helper and therefore can never acquire a replay disposition.
- */
-async function executePromotePreCommit(
-  agent: DKGAgent,
-  contextGraphId: string,
-  name: string,
-  promoteAgentAddress: string,
-  opts: PromotePreCommitOptions | undefined,
-) {
-  try {
-    const gossipSigner = await agent.resolveWorkspaceGossipSigningAgent(contextGraphId);
-    const confirmBeforeCommit = await agent.buildCuratorAckConfirmer(
-      contextGraphId,
-      gossipSigner,
-      { awaitCuratorAck: opts?.awaitCuratorAck, curatorAckTimeoutMs: opts?.curatorAckTimeoutMs },
-      createOperationContext('share'),
-    );
-
-    let shareAccessPolicy = opts?.accessPolicy;
-    if (shareAccessPolicy === undefined) {
-      const graphPolicy = await agent.getContextGraphOnChainPolicy(contextGraphId);
-      if (graphPolicy.accessPolicy === 1) shareAccessPolicy = 'ownerOnly';
-      else if (graphPolicy.accessPolicy === 0) shareAccessPolicy = 'public';
-      else if (await agent.readLocalAccessPolicyEnum(contextGraphId) === 1) {
-        shareAccessPolicy = 'ownerOnly';
-      }
-    }
-
-    const promotion = await agent.publisher.assertionPromote(
-      contextGraphId,
-      name,
-      promoteAgentAddress,
-      {
-        ...(opts?.subGraphName !== undefined ? { subGraphName: opts.subGraphName } : {}),
-        publisherPeerId: agent.node.peerId.toString(),
-        senderAgentAddress: gossipSigner?.agentAddress,
-        confirmBeforeCommit,
-        ...(shareAccessPolicy !== undefined ? { accessPolicy: shareAccessPolicy } : {}),
-        ...(opts?.allowedPeers !== undefined ? { allowedPeers: [...opts.allowedPeers] } : {}),
-      },
-    );
-    return { gossipSigner, ...promotion };
-  } catch (error) {
-    throw translateAuthorityFailureAtPromoteBoundary(error);
-  }
 }
 
 /**
@@ -3256,7 +3192,7 @@ export class DKGAgent extends DKGAgentBase {
           ...(opts?.onConflict !== undefined ? { onConflict: opts.onConflict } : {}),
         });
       },
-      async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string; agentAddress?: string; authorAgentAddress?: string; preSignedAuthorAttestation?: PreSignedAuthorAttestation; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number; skipSeal?: boolean; accessPolicy?: 'public' | 'ownerOnly' | 'allowList'; allowedPeers?: readonly string[] }): Promise<{ promotedCount: number; sealed: boolean; publishReady: boolean; shareOperationId?: string }> {
+      async promote(contextGraphId: string, name: string, opts?: AssertionPromoteOptions): Promise<{ promotedCount: number; sealed: boolean; publishReady: boolean; shareOperationId?: string }> {
         const promoteAgentAddress = opts?.agentAddress ?? agentAddress;
         if (opts?.skipSeal) {
           throw Object.assign(
@@ -3341,12 +3277,26 @@ export class DKGAgent extends DKGAgentBase {
           gossipPayload,
           promotedAllRoots,
           shareOperationId,
-        } = await executePromotePreCommit(
-          agent,
-          contextGraphId,
-          name,
-          promoteAgentAddress,
-          opts,
+        } = await executeAssertionPromotePreCommit(
+          {
+            resolveSigningAgent: contextGraph =>
+              agent.resolveWorkspaceGossipSigningAgent(contextGraph),
+            buildCuratorAckConfirmer: (contextGraph, signer, options, ctx) =>
+              agent.buildCuratorAckConfirmer(contextGraph, signer, options, ctx),
+            getOnChainPolicy: contextGraph =>
+              agent.getContextGraphOnChainPolicy(contextGraph),
+            readLocalAccessPolicy: contextGraph =>
+              agent.readLocalAccessPolicyEnum(contextGraph),
+            promoteAssertion: (contextGraph, assertionName, address, options) =>
+              agent.publisher.assertionPromote(contextGraph, assertionName, address, options),
+          },
+          {
+            contextGraphId,
+            name,
+            agentAddress: promoteAgentAddress,
+            publisherPeerId: agent.node.peerId.toString(),
+            options: opts,
+          },
         );
         if (gossipPayload) {
           try {
@@ -3765,7 +3715,10 @@ export class DKGAgent extends DKGAgentBase {
       async promoteAsync(
         contextGraphId: string,
         name: string,
-        opts?: { entities?: readonly string[] | 'all'; subGraphName?: string; agentAddress?: string; authorAgentAddress?: string },
+        opts?: Pick<
+          AssertionPromoteOptions,
+          'entities' | 'subGraphName' | 'agentAddress' | 'authorAgentAddress'
+        >,
       ): Promise<{ jobId: string }> {
         const promoteAgentAddress = opts?.agentAddress ?? agentAddress;
         const jobId = await agent.promoteQueue.enqueue({

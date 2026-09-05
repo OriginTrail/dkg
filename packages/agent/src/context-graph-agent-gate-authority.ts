@@ -28,12 +28,15 @@ const CONTEXT_GRAPH_AUTHORITY_REASON_DISPOSITIONS = {
 export type ContextGraphAgentGateUnavailableReason =
   keyof typeof CONTEXT_GRAPH_AUTHORITY_REASON_DISPOSITIONS;
 
-export type ContextGraphAuthorityUnavailableReason = {
+export type ContextGraphAuthorityRetryableReason = {
   [Reason in ContextGraphAgentGateUnavailableReason]:
   typeof CONTEXT_GRAPH_AUTHORITY_REASON_DISPOSITIONS[Reason]['retryable'] extends true
     ? Reason
     : never;
 }[ContextGraphAgentGateUnavailableReason];
+
+/** Every explicit failure emitted by the canonical authority resolver. */
+export type ContextGraphAuthorityUnavailableReason = ContextGraphAgentGateUnavailableReason;
 
 export const CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE =
   'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE' as const;
@@ -43,33 +46,44 @@ export const CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME =
 
 export const CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS = Object.freeze(
   (Object.keys(CONTEXT_GRAPH_AUTHORITY_REASON_DISPOSITIONS) as ContextGraphAgentGateUnavailableReason[])
-    .filter((reason): reason is ContextGraphAuthorityUnavailableReason => (
+    .filter((reason): reason is ContextGraphAuthorityRetryableReason => (
       CONTEXT_GRAPH_AUTHORITY_REASON_DISPOSITIONS[reason].retryable
     )),
 );
 
-/** The narrow, serialization-safe disposition consumed across package boundaries. */
-export interface ContextGraphAuthorityUnavailableMarker {
-  readonly code: typeof CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE;
-}
+/** Serialization-safe domain failure with reason-derived retryability. */
+export type ContextGraphAuthorityUnavailableMarker = {
+  [Reason in ContextGraphAgentGateUnavailableReason]: {
+    readonly code: typeof CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE;
+    readonly reason: Reason;
+    readonly retryable:
+      typeof CONTEXT_GRAPH_AUTHORITY_REASON_DISPOSITIONS[Reason]['retryable'];
+    readonly detail?: string;
+  }
+}[ContextGraphAgentGateUnavailableReason];
 
-export class ContextGraphAuthorityUnavailableError extends Error {
+export class ContextGraphAuthorityUnavailableError<
+  Reason extends ContextGraphAgentGateUnavailableReason = ContextGraphAgentGateUnavailableReason,
+> extends Error {
   readonly code = CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE;
-  readonly reason: ContextGraphAuthorityUnavailableReason;
+  readonly reason: Reason;
+  readonly retryable:
+    typeof CONTEXT_GRAPH_AUTHORITY_REASON_DISPOSITIONS[Reason]['retryable'];
   readonly detail?: string;
 
   constructor(
     message: string,
-    options: { reason: ContextGraphAuthorityUnavailableReason; detail?: string },
+    options: { reason: Reason; detail?: string },
   ) {
     super(message);
     this.name = CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME;
     this.reason = options.reason;
+    this.retryable = CONTEXT_GRAPH_AUTHORITY_REASON_DISPOSITIONS[options.reason].retryable;
     if (options.detail !== undefined) this.detail = options.detail;
   }
 }
 
-/** Structural so retry disposition survives serialization and package copies. */
+/** Structural and table-validated so disposition survives package copies safely. */
 export function isContextGraphAuthorityUnavailableMarker(
   value: unknown,
 ): value is ContextGraphAuthorityUnavailableMarker {
@@ -77,7 +91,18 @@ export function isContextGraphAuthorityUnavailableMarker(
     return false;
   }
   try {
-    return Reflect.get(value, 'code') === CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE;
+    if (Reflect.get(value, 'code') !== CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE) return false;
+    const reason = Reflect.get(value, 'reason');
+    if (
+      typeof reason !== 'string'
+      || !Object.hasOwn(CONTEXT_GRAPH_AUTHORITY_REASON_DISPOSITIONS, reason)
+    ) {
+      return false;
+    }
+    return Reflect.get(value, 'retryable')
+      === CONTEXT_GRAPH_AUTHORITY_REASON_DISPOSITIONS[
+        reason as ContextGraphAgentGateUnavailableReason
+      ].retryable;
   } catch {
     return false;
   }
@@ -122,11 +147,12 @@ function unavailableAuthority(
 }
 
 /** Convert the canonical disposition to the public error/marker contract once. */
-export function createContextGraphAuthorityError(
+export function createContextGraphAuthorityError<
+  Reason extends ContextGraphAgentGateUnavailableReason,
+>(
   message: string,
-  failure: { reason: ContextGraphAgentGateUnavailableReason; detail?: string },
-): Error {
-  if (!isRetryableContextGraphAuthorityReason(failure.reason)) return new Error(message);
+  failure: { reason: Reason; detail?: string },
+): ContextGraphAuthorityUnavailableError<Reason> {
   return new ContextGraphAuthorityUnavailableError(message, {
     reason: failure.reason,
     ...(failure.detail === undefined ? {} : { detail: failure.detail }),
