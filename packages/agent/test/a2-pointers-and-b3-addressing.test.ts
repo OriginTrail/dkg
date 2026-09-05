@@ -129,7 +129,7 @@ describe('OT-RFC-43 A2/B3 — finalize-stamp, divergence, create-vs-update, B3 (
     for (const a of agents) {
       try { await a.stop(); } catch { /* best-effort */ }
     }
-    try { await chainAdapter?.destroy(); } finally { killHardhat(ctx); }
+    try { await chainAdapter?.destroy(); } finally { await killHardhat(ctx); }
   });
 
   it('preserves identity and addressing through finalize, publish, reopen and on-chain update', async () => {

@@ -146,7 +146,7 @@ describe('OT-RFC-49 WS-D — catalog producer↔extractor↔chain parity', () =>
 
   afterAll(async () => {
     for (const a of agents) { try { await a.stop(); } catch {} }
-    killHardhat(ctx);
+    await killHardhat(ctx);
   });
 
   it('curated publish: rebuilt catalog root == on-chain getCatalogRoot (and committedRoot is excluded)', async () => {

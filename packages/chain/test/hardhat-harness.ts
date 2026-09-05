@@ -4,6 +4,7 @@
  * Spawns a Hardhat node, deploys all contracts, creates node profiles,
  * and provides helpers for staking, token minting, and signing.
  */
+import { ownProcess } from '../../../scripts/testing/owned-process.mjs';
 import { ChildProcess, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -68,40 +69,15 @@ export async function waitForNode(url: string, timeoutMs = 30_000): Promise<bool
 export async function deployContracts(rpcUrl: string): Promise<string> {
   const deploymentsDirectory = await mkdtemp(path.join(tmpdir(), 'dkg-hardhat-deploy-'));
   try {
-    const hubAddress = await new Promise<string>((resolve, reject) => {
-      const hardhatCli = require.resolve('hardhat/internal/cli/bootstrap', {
-        paths: [EVM_MODULE_DIR],
-      });
-      const proc = spawn(
-        process.execPath,
-        [hardhatCli, 'deploy', '--network', 'localhost', '--config', 'hardhat.node.config.ts'],
-        {
-          cwd: EVM_MODULE_DIR,
-          stdio: ['ignore', 'pipe', 'pipe'],
-          env: { ...process.env, RPC_LOCALHOST: rpcUrl, DKG_TEST_DEPLOYMENTS_DIR: deploymentsDirectory },
-        },
-      );
-
-      let stdout = '';
-      let stderr = '';
-      proc.stdout?.on('data', (d) => { stdout += d.toString(); });
-      proc.stderr?.on('data', (d) => { stderr += d.toString(); });
-
-      const deadline = setTimeout(() => proc.kill('SIGKILL'), 300_000);
-      proc.on('error', (error) => { clearTimeout(deadline); reject(error); });
-      proc.on('close', (code, signal) => {
-        clearTimeout(deadline);
-        // A partial deployment can print Hub before later contracts fail.
-        if (code !== 0 || signal) {
-          reject(new Error(`Deploy failed (code ${code}, signal ${signal}):\n${stderr}\n${stdout}`));
-          return;
-        }
-
-        const hubMatch = stdout.match(/deploying "Hub".*?deployed at (\S+)/s);
-        if (hubMatch) resolve(hubMatch[1]);
-        else reject(new Error(`Hub address not found in deploy output:\n${stdout}`));
-      });
-    });
+    const hardhatCli = require.resolve('hardhat/internal/cli/bootstrap', { paths: [EVM_MODULE_DIR] });
+    const proc = spawn(process.execPath,
+      [hardhatCli, 'deploy', '--network', 'localhost', '--config', 'hardhat.node.config.ts'],
+      { cwd: EVM_MODULE_DIR, stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, RPC_LOCALHOST: rpcUrl, DKG_TEST_DEPLOYMENTS_DIR: deploymentsDirectory } });
+    const { stdout } = await ownProcess(proc, { label: 'Deploy' }).waitForExit();
+    // A Hub printed by an unsuccessful deployment never reaches this point.
+    const hubAddress = stdout.match(/deploying "Hub".*?deployed at (\S+)/s)?.[1];
+    if (!hubAddress) throw new Error(`Hub address not found in deploy output:\n${stdout}`);
     // Validate the real env -> Hardhat config -> Helpers manifest path, not
     // just a successful process or a Hub line printed before the manifest.
     const manifest = JSON.parse(await readFile(path.join(deploymentsDirectory, 'localhost_contracts.json'), 'utf8'));
@@ -339,36 +315,18 @@ export async function setMinimumRequiredSignatures(
 
 /** Start only the owned RPC child; successful bind output supplies its actual port. */
 export async function startHardhatNode(startupTimeout = process.env.CI ? 120_000 : 60_000): Promise<{ process: ChildProcess; rpcUrl: string }> {
-  let stderrOutput = '';
-  let stdoutOutput = '';
-  let closed = false;
   const hardhatCli = require.resolve('hardhat/internal/cli/bootstrap', { paths: [EVM_MODULE_DIR] });
   const hardhatProcess = spawn(
     process.execPath,
     ['--max-old-space-size=2048', hardhatCli, 'node', '--no-deploy', '--hostname', '127.0.0.1', '--port', '0', '--config', 'hardhat.node.config.ts'],
     { cwd: EVM_MODULE_DIR, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } },
   );
-  hardhatProcess.stdout?.on('data', (data) => { stdoutOutput += data.toString(); });
-  hardhatProcess.stderr?.on('data', (data) => { stderrOutput += data.toString(); });
-  hardhatProcess.on('error', (error) => { stderrOutput += `\nspawn error: ${error.message}`; });
-  // close follows exit AND stdio drainage; retain complete startup diagnostics.
-  const completion = new Promise<void>((resolve) => hardhatProcess.once('close', () => { closed = true; resolve(); }));
-  const deadline = Date.now() + startupTimeout;
-  const boundAddress = () => stdoutOutput.match(/Started HTTP and WebSocket JSON-RPC server at (http:\/\/127\.0\.0\.1:[1-9]\d*)\//)?.[1];
-  while (!boundAddress() && !closed && hardhatProcess.exitCode === null && hardhatProcess.signalCode === null && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  const rpcUrl = boundAddress();
-  if (rpcUrl && !closed && hardhatProcess.exitCode === null && hardhatProcess.signalCode === null &&
-    await waitForNode(rpcUrl, Math.max(1, deadline - Date.now()))) {
-    return { process: hardhatProcess, rpcUrl };
-  }
-  if (!closed) {
-    if (hardhatProcess.exitCode === null && hardhatProcess.signalCode === null) hardhatProcess.kill('SIGTERM');
-    const escalation = setTimeout(() => hardhatProcess.kill('SIGKILL'), 2_000);
-    try { await completion; } finally { clearTimeout(escalation); }
-  }
-  throw new Error(`Hardhat node failed to start on an OS-assigned port.\nstderr: ${stderrOutput}\nstdout: ${stdoutOutput}`);
+  const owner = ownProcess(hardhatProcess, { label: 'Hardhat node' });
+  const rpcUrl = await owner.ready(async ({ stdout }) => {
+    const url = stdout().match(/Started HTTP and WebSocket JSON-RPC server at (http:\/\/127\.0\.0\.1:[1-9]\d*)\//)?.[1];
+    return url && await waitForNode(url, 500) ? url : undefined;
+  }, { timeoutMs: startupTimeout });
+  return { process: hardhatProcess, rpcUrl };
 }
 
 /** Start an isolated chain, deploy contracts, and seed the four fixture profiles. */
@@ -439,15 +397,15 @@ export async function spawnHardhatEnv(): Promise<HardhatContext> {
     };
   } catch (error) {
     provider.destroy();
-    hardhatProcess.kill('SIGKILL');
+    await ownProcess(hardhatProcess).stop();
     throw error;
   }
 }
 
-export function killHardhat(ctx: HardhatContext | null): void {
+export async function killHardhat(ctx: HardhatContext | null): Promise<void> {
   if (ctx?.process) {
     ctx.provider.destroy();
-    ctx.process.kill('SIGKILL');
+    await ownProcess(ctx.process).stop();
   }
 }
 

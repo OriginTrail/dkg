@@ -22,7 +22,7 @@ import { deployContracts } from './hardhat-harness.js';
 
 it('rejects a partial deployment even after Hub is printed, and cleans its directory', async () => {
   deployment.code = 1;
-  await expect(deployContracts('http://127.0.0.1:1')).rejects.toThrow('Deploy failed');
+  await expect(deployContracts('http://127.0.0.1:1')).rejects.toThrow('Deploy closed (code 1');
   expect(existsSync(deployment.directory)).toBe(false);
 });
 it('accepts Hub only after successful deployment and cleans its directory', async () => {

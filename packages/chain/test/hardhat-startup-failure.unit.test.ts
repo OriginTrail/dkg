@@ -55,7 +55,7 @@ it('never deploys against a valid foreign RPC when the owned child is unready', 
   const server = createServer((_req, res) => { requests++; res.end(JSON.stringify({ result: '0x0' })); });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
-    await expect(startHardhatNode(60)).rejects.toThrow('failed to start');
+    await expect(startHardhatNode(60)).rejects.toThrow('Hardhat node timed out');
     expect(requests).toBe(0);
     expect(spawn).toHaveBeenCalledTimes(1);
     expect(failure.children[0].kill).toHaveBeenCalledOnce();

@@ -101,8 +101,8 @@ describe('Greenfield KA update E2E (explicit owner seal)', () => {
     });
   }, 120_000);
 
-  afterAll(() => {
-    killHardhat(ctx);
+  afterAll(async () => {
+    await killHardhat(ctx);
   });
 
   it('publish → off-band update seal → update → verifyKAUpdate with stable UAL', async () => {
