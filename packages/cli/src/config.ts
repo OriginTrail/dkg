@@ -2211,11 +2211,19 @@ export interface StoreConfigValidationError {
   message: string;
 }
 
-export function validateStoreConfig(config: DkgConfig, platform: NodeJS.Platform = process.platform): StoreConfigValidationError[] {
+/** Only the raw sections this validator inspects; values are narrowed at the boundary. */
+export interface StoreConfigValidationInput {
+  store?: unknown;
+  largeLiteralStorage?: unknown;
+  sharedMemoryPublicSnapshotStorage?: unknown;
+}
+
+export function validateStoreConfig(config: StoreConfigValidationInput, platform: NodeJS.Platform = process.platform): StoreConfigValidationError[] {
   const errors: StoreConfigValidationError[] = [];
-  const backend = config.store?.backend;
+  const store = isPlainConfigObject(config.store) ? config.store : undefined;
+  const backend = store?.backend;
+  const options = isPlainConfigObject(store?.options) ? store.options : {};
   if (backend === 'oxigraph-server') {
-    const options = config.store?.options ?? {};
     const hasLimits = options.memoryHighMiB !== undefined || options.memoryMaxMiB !== undefined;
     if (hasLimits && platform !== 'linux') {
       errors.push({ field: 'store.options.memoryMaxMiB', message:
@@ -2233,10 +2241,8 @@ export function validateStoreConfig(config: DkgConfig, platform: NodeJS.Platform
   const isExternal = backend === 'blazegraph' || backend === 'sparql-http';
   if (!isExternal) return errors;
 
-  const opts = (config.store?.options ?? {}) as Record<string, unknown>;
-
   if (backend === 'blazegraph') {
-    if (typeof opts.url !== 'string' || !opts.url.trim()) {
+    if (typeof options.url !== 'string' || !options.url.trim()) {
       errors.push({
         field: 'store.options.url',
         message:
@@ -2247,7 +2253,7 @@ export function validateStoreConfig(config: DkgConfig, platform: NodeJS.Platform
       });
     }
   } else if (backend === 'sparql-http') {
-    if (typeof opts.queryEndpoint !== 'string' || !opts.queryEndpoint.trim()) {
+    if (typeof options.queryEndpoint !== 'string' || !options.queryEndpoint.trim()) {
       errors.push({
         field: 'store.options.queryEndpoint',
         message:
@@ -2257,8 +2263,9 @@ export function validateStoreConfig(config: DkgConfig, platform: NodeJS.Platform
     }
   }
 
-  if (config.largeLiteralStorage?.enabled === true) {
-    const dir = config.largeLiteralStorage.directory;
+  const largeLiteralStorage = isPlainConfigObject(config.largeLiteralStorage) ? config.largeLiteralStorage : undefined;
+  if (largeLiteralStorage?.enabled === true) {
+    const dir = largeLiteralStorage.directory;
     if (typeof dir !== 'string' || !dir.trim()) {
       errors.push({
         field: 'largeLiteralStorage.directory',
@@ -2270,8 +2277,9 @@ export function validateStoreConfig(config: DkgConfig, platform: NodeJS.Platform
     }
   }
 
-  if (config.sharedMemoryPublicSnapshotStorage?.enabled === true) {
-    const dir = config.sharedMemoryPublicSnapshotStorage.directory;
+  const snapshotStorage = isPlainConfigObject(config.sharedMemoryPublicSnapshotStorage) ? config.sharedMemoryPublicSnapshotStorage : undefined;
+  if (snapshotStorage?.enabled === true) {
+    const dir = snapshotStorage.directory;
     if (typeof dir !== 'string' || !dir.trim()) {
       errors.push({
         field: 'sharedMemoryPublicSnapshotStorage.directory',

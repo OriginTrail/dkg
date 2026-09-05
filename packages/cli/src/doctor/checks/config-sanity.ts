@@ -73,7 +73,7 @@ export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]>
     return findings;
   }
 
-  for (const error of validateStoreConfig(parsed as unknown as DkgConfig, deps.platform)) {
+  for (const error of validateStoreConfig(parsed, deps.platform)) {
     findings.push({ check: 'config-sanity', severity: 'error', message: error.message, subject: error.field });
   }
 

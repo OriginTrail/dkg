@@ -26,6 +26,23 @@ function mk(overrides: Partial<DkgConfig> = {}): DkgConfig {
 }
 
 describe('validateStoreConfig', () => {
+  it('validates raw operator JSON without assuming a complete typed config', () => {
+    const raw: Record<string, unknown> = {
+      store: { backend: 'blazegraph', options: { url: 42 } },
+      largeLiteralStorage: { enabled: true, directory: [] },
+      sharedMemoryPublicSnapshotStorage: { enabled: true, directory: false },
+    };
+    expect(validateStoreConfig(raw).map((error) => error.field)).toEqual([
+      'store.options.url', 'largeLiteralStorage.directory', 'sharedMemoryPublicSnapshotStorage.directory',
+    ]);
+    expect(validateStoreConfig({ store: { backend: 'oxigraph-server', options: { memoryMaxMiB: 'bad' } } }, 'linux'))
+      .toEqual([expect.objectContaining({ field: 'store.options.memoryMaxMiB' })]);
+  });
+  it.each([null, false, 'bad', []])('narrows malformed option blocks (%j) before checking required fields', (options) => {
+    expect(validateStoreConfig({ store: { backend: 'sparql-http', options }, largeLiteralStorage: options }))
+      .toEqual([expect.objectContaining({ field: 'store.options.queryEndpoint' })]);
+    expect(validateStoreConfig({ store: options })).toEqual([]);
+  });
   it.each(['darwin', 'win32'] as const)('rejects managed memory limits before startup on %s', (platform) => {
     const config = mk({ store: { backend: 'oxigraph-server', options: { memoryMaxMiB: 1024 } } });
     expect(validateStoreConfig(config, platform)[0].message).toContain('require Linux');
