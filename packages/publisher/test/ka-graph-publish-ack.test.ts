@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -9,6 +9,7 @@ import {
   contextGraphCatalogUri,
   createGraphKnowledgeAssetScope,
   decodePublishIntent,
+  encodePublishIntent,
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -62,6 +63,57 @@ function byteSizeFloor(quads: readonly Pick<Quad, 'subject' | 'predicate' | 'obj
 }
 
 describe('graph-scoped publish storage ACKs', () => {
+  it.each([
+    {
+      label: 'content',
+      envelope: { publicTripleCount: 0, privateTripleCount: 0, accessPolicy: 'public' as const, allowedPeers: [] },
+      error: 'invalid content envelope',
+    },
+    {
+      label: 'access',
+      envelope: {
+        publicTripleCount: 1,
+        privateTripleCount: 0,
+        accessPolicy: 'public' as const,
+        allowedPeers: ['12D3KooWReader'],
+      },
+      error: 'invalid access envelope',
+    },
+  ])('rejects a malformed graph-scoped $label envelope before persistence or signing', async ({ envelope, error }) => {
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    const signMessage = vi.spyOn(wallet, 'signMessage');
+    const handler = new StorageACKHandler(
+      store,
+      handlerConfig(wallet, false),
+      new TypedEventBus(),
+    );
+    const intent = encodePublishIntent({
+      merkleRoot: new Uint8Array(32),
+      contextGraphId: CONTEXT_GRAPH_ID,
+      publisherPeerId: 'publisher-peer',
+      publicByteSize: 1,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: [],
+      merkleLeafCount: 1,
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: '1',
+      ...envelope,
+    });
+
+    await expect(handler.handler(intent, PEER)).rejects.toThrow(error);
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(await store.countQuads(SWM_GRAPH)).toBe(0);
+    expect(await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+    })).toBeUndefined();
+  });
+
   it('keeps identical-content KAs in distinct durable workspace operations', async () => {
     const store = new OxigraphStore();
     const handler = new StorageACKHandler(

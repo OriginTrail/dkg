@@ -1,3 +1,4 @@
+import { hasValidGraphPublishContent, isGraphPublishAccessPolicy, resolveGraphPublishAccess } from './graph-publish-envelope.js';
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import type { EventBus, StreamHandler, OperationContext } from '@origintrail-official/dkg-core';
@@ -15,6 +16,7 @@ import {
   knowledgeAssetLayerGraphUri,
   validateSubGraphName,
   type PublishRequestMsg,
+  type GraphKnowledgeAssetAccessPolicy,
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
@@ -61,7 +63,7 @@ interface GraphScopedPublishRequest {
   publicTripleCount: number;
   privateTripleCount: number;
   privateMerkleRoot?: Uint8Array;
-  accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  accessPolicy: GraphKnowledgeAssetAccessPolicy;
   allowedPeers: string[];
   subGraphName?: string;
 }
@@ -113,30 +115,18 @@ function resolveGraphScopedPublishRequest(
   }
   const publicTripleCount = request.publicTripleCount ?? 0;
   const privateTripleCount = request.privateTripleCount ?? 0;
-  if (
-    !Number.isSafeInteger(publicTripleCount)
-    || publicTripleCount < 0
-    || !Number.isSafeInteger(privateTripleCount)
-    || privateTripleCount < 0
-    || (publicTripleCount === 0 && privateTripleCount === 0)
-    || (privateTripleCount > 0 && privateMerkleRoot?.length !== 32)
-    || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
-  ) {
+  if (!hasValidGraphPublishContent(publicTripleCount, privateTripleCount, privateMerkleRoot)) {
     throw new Error('Graph-scoped publish has an invalid content envelope');
   }
   const accessPolicy = request.accessPolicy;
-  if (accessPolicy !== 'public' && accessPolicy !== 'ownerOnly' && accessPolicy !== 'allowList') {
+  if (!isGraphPublishAccessPolicy(accessPolicy)) {
     throw new Error(`Graph-scoped publish has invalid accessPolicy: ${accessPolicy || '(empty)'}`);
   }
-  const rawAllowedPeers = request.allowedPeers ?? [];
-  const allowedPeers = [...new Set(rawAllowedPeers.map((peer) => peer.trim()).filter(Boolean))];
-  if (
-    allowedPeers.length !== rawAllowedPeers.length
-    || (accessPolicy === 'allowList' && allowedPeers.length === 0)
-    || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
-  ) {
+  const access = resolveGraphPublishAccess(accessPolicy, request.allowedPeers ?? []);
+  if (!access) {
     throw new Error('Graph-scoped publish has an invalid access-policy peer envelope');
   }
+  const { allowedPeers } = access;
   const subGraphName = request.subGraphName || undefined;
   if (subGraphName) {
     const validation = validateSubGraphName(subGraphName);
