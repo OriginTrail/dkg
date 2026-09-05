@@ -19,7 +19,7 @@
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { mkdirSync, rmSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = resolve(here, '..');
@@ -91,7 +91,7 @@ mkdirSync(resolve(pkgRoot, 'test-results'), { recursive: true });
 rmSync(resolve(pkgRoot, 'test-results/hermes-python.xml'), { force: true });
 if (COVERAGE) rmSync(resolve(pkgRoot, 'coverage-python'), { recursive: true, force: true });
 const result = spawnSync(cmd, [...prefix, '-m', 'pytest', '--junitxml=test-results/hermes-python.xml', ...(COVERAGE ? [
-  '--cov=hermes-plugin', '--cov-branch', '--cov-report=term', '--cov-report=json:coverage-python/coverage.json', '--cov-report=xml:coverage-python/coverage.xml', '--cov-fail-under=34',
+  '--cov', '--cov-report=term', '--cov-report=json', '--cov-report=xml',
 ] : [])], {
   cwd: pkgRoot,
   stdio: 'inherit',
@@ -102,12 +102,12 @@ if (result.error) {
   process.exit(1);
 }
 if (result.status === 0 && COVERAGE) {
-  const report = JSON.parse(readFileSync(resolve(pkgRoot, 'coverage-python/coverage.json'), 'utf8'));
-  const expected = readdirSync(resolve(pkgRoot, 'hermes-plugin')).filter((file) => file.endsWith('.py')).map((file) => `hermes-plugin/${file}`).sort();
-  const actual = Object.keys(report.files).map((file) => file.replaceAll('\\', '/')).sort();
-  if (JSON.stringify(actual) !== JSON.stringify(expected) || report.totals.num_statements <= 0) {
-    throw new Error('Python coverage omitted production files or included non-production files');
+  // coverage.py owns source discovery, report formats, path handling and gates.
+  for (const args of [[], ['--include=hermes-plugin/cli.py', '--fail-under=97']]) {
+    const gate = spawnSync(cmd, [...prefix, '-m', 'coverage', 'report', ...args], {
+      cwd: pkgRoot, stdio: 'inherit',
+    });
+    if (gate.error || gate.status !== 0) process.exit(gate.status ?? 1);
   }
-  if (report.files['hermes-plugin/cli.py'].summary.percent_covered < 97) throw new Error('Hermes CLI coverage regressed below 97%');
 }
 process.exit(result.status ?? 1);

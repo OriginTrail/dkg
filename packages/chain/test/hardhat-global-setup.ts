@@ -12,12 +12,12 @@ import {
   killHardhat,
   type HardhatContext,
 } from './hardhat-harness.js';
-import { contextFilePath } from './evm-test-context.js';
 import type { TestProject } from 'vitest/node';
 
 export default async function setup(project: TestProject): Promise<() => Promise<void>> {
   let ctx: HardhatContext | null = null;
-  const selectedContextPath = project.config.env.DKG_HARDHAT_CONTEXT_FILE ?? contextFilePath();
+  const selectedContextPath = project.config.env.DKG_HARDHAT_CONTEXT_FILE;
+  if (!selectedContextPath) throw new Error('Hardhat global setup requires an isolated DKG_HARDHAT_CONTEXT_FILE');
   const port = parseInt(project.config.env.HARDHAT_PORT || process.env.HARDHAT_PORT || '9545', 10);
   try {
     ctx = await spawnHardhatEnv(port);
@@ -42,7 +42,7 @@ export default async function setup(project: TestProject): Promise<() => Promise
   return teardown;
 
   async function teardown(): Promise<void> {
-    killHardhat(ctx);
+    if (ctx) { killHardhat(ctx); ctx = null; }
     try { unlinkSync(selectedContextPath); } catch { /* already cleaned */ }
   }
 }

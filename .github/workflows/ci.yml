@@ -1025,6 +1025,7 @@ jobs:
         # unset) skips gracefully when Python is absent.
         env:
           DKG_REQUIRE_PYTEST: '1'
+          DKG_CI_COVERAGE: '1'
         run: |
           for package in epcis mcp-dkg local-llm network-sim graph-viz okf adapter-elizaos adapter-hermes adapter-openclaw adapter-prime-agent; do
             node scripts/ci/run-vitest-junit.mjs --lane "$package"

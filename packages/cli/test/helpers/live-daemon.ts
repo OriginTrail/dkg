@@ -26,7 +26,6 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { ethers } from 'ethers';
 import { getSharedContext, HARDHAT_KEYS } from '../../../chain/test/evm-test-context.js';
-import { availableTestPort } from '../../../chain/test/test-port.js';
 import { TEST_SNAPSHOT_STORAGE } from '../../../../scripts/testing/snapshot-storage.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -71,9 +70,10 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
   }
   const authEnabled = opts.authEnabled ?? true;
   const home = await mkdtemp(join(tmpdir(), 'dkg-live-daemon-'));
-  const apiPort = await availableTestPort(0);
-  let listenPort = await availableTestPort(0);
-  while (listenPort === apiPort) listenPort = await availableTestPort(0);
+  // The daemon owns both ephemeral binds. Its private home supplies readiness
+  // evidence, so an unrelated HTTP listener cannot satisfy our startup check.
+  const apiPort = 0;
+  const listenPort = 0;
   const defaultChain = Object.prototype.hasOwnProperty.call(opts.extraConfig ?? {}, 'chain')
     ? { type: 'mock' as const }
     : (() => {
@@ -149,8 +149,12 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
   try {
     const deadlineLoops = Math.ceil((opts.readyTimeoutMs ?? 45_000) / 500);
     for (let i = 0; i < deadlineLoops; i++) {
-      if (child.exitCode !== null) throw new Error(`Daemon exited early with code ${child.exitCode}`);
+      if (child.exitCode !== null || child.signalCode !== null) throw new Error(`Daemon exited early with code ${child.exitCode}, signal ${child.signalCode}`);
       try {
+        const boundPort = Number((await readFile(join(home, 'api.port'), 'utf8')).trim());
+        if (!Number.isInteger(boundPort) || boundPort < 1 || boundPort > 65535) throw new Error('invalid daemon port');
+        daemon.apiPort = boundPort;
+        daemon.base = `http://127.0.0.1:${boundPort}`;
         const res = await fetch(`${daemon.base}/api/status`, { signal: AbortSignal.timeout(1_000) });
         if (res.ok) break;
       } catch {

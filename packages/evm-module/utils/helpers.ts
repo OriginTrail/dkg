@@ -184,7 +184,7 @@ export class Helpers {
       });
     } catch (error) {
       if (this.hre.network.config.environment !== 'development') {
-        this.saveDeploymentsJson('deployments');
+        this.saveDeploymentsJson();
       }
       let message;
       if (error instanceof Error) message = error.message;
@@ -253,7 +253,7 @@ export class Helpers {
       newContractName,
     );
 
-    this.saveDeploymentsJson('deployments');
+    this.saveDeploymentsJson();
 
     return this.hre.ethers.getContractAt(
       this.getAbi(newContractName),
@@ -445,7 +445,7 @@ export class Helpers {
     };
   }
 
-  public saveDeploymentsJson(folder: string) {
+  public saveDeploymentsJson() {
     console.log(
       `New or redeployed contracts: ${JSON.stringify(this.newContracts)}`,
     );
@@ -465,7 +465,7 @@ export class Helpers {
       `Encoded data for parameters settings: ${JSON.stringify(this.setParametersEncodedData)}`,
     );
 
-    const outputFolder = folder === 'deployments' ? this.hre.config.paths.deployments : folder;
+    const outputFolder = this.hre.config.paths.deployments;
     fs.mkdirSync(outputFolder, { recursive: true });
     fs.writeFileSync(
       path.join(outputFolder, `${this.hre.network.name}_contracts.json`),

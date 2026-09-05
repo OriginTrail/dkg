@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { ethers, JsonRpcProvider, Wallet, Contract } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import path from 'node:path';
-import { availableTestPort } from './test-port.js';
+
 
 const require = createRequire(import.meta.url);
 
@@ -337,57 +337,45 @@ export async function setMinimumRequiredSignatures(
  * @param port   Hardhat JSON-RPC port (use different ports per concurrent test file)
  * @returns      Context with process handle, provider, hub address, and identity IDs
  */
-export async function spawnHardhatEnv(port: number, bindAttempts = 3): Promise<HardhatContext> {
-  port = await availableTestPort(port);
-  const rpcUrl = `http://127.0.0.1:${port}`;
-
+/** Start only the owned RPC child; successful bind output supplies its actual port. */
+export async function startHardhatNode(port: number, bindAttempts = 3, startupTimeout = process.env.CI ? 120_000 : 60_000): Promise<{ process: ChildProcess; rpcUrl: string }> {
   let stderrOutput = '';
   let stdoutOutput = '';
-  let processExitCode: number | null = null;
-
-  const hardhatCli = require.resolve('hardhat/internal/cli/bootstrap', {
-    paths: [EVM_MODULE_DIR],
-  });
+  let closed = false;
+  const hardhatCli = require.resolve('hardhat/internal/cli/bootstrap', { paths: [EVM_MODULE_DIR] });
   const hardhatProcess = spawn(
     process.execPath,
-    ['--max-old-space-size=2048', hardhatCli, 'node', '--no-deploy', '--port', String(port), '--config', 'hardhat.node.config.ts'],
-    {
-      cwd: EVM_MODULE_DIR,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env },
-    },
+    ['--max-old-space-size=2048', hardhatCli, 'node', '--no-deploy', '--hostname', '127.0.0.1', '--port', String(port), '--config', 'hardhat.node.config.ts'],
+    { cwd: EVM_MODULE_DIR, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } },
   );
-  hardhatProcess.stdout?.on('data', (d) => { stdoutOutput += d.toString(); });
-  hardhatProcess.stderr?.on('data', (d) => { stderrOutput += d.toString(); });
-  hardhatProcess.on('exit', (code) => { processExitCode = code; });
-  hardhatProcess.on('error', (err) => { stderrOutput += `\nspawn error: ${err.message}`; });
-
-  const startupTimeout = process.env.CI ? 120_000 : 60_000;
-  // Port allocation and child bind cannot be atomic. Require our child's
-  // readiness message before probing, so a concurrent port claimant cannot
-  // be mistaken for our test chain or receive deployment transactions.
+  hardhatProcess.stdout?.on('data', (data) => { stdoutOutput += data.toString(); });
+  hardhatProcess.stderr?.on('data', (data) => { stderrOutput += data.toString(); });
+  hardhatProcess.on('error', (error) => { stderrOutput += `\nspawn error: ${error.message}`; });
+  // close follows exit AND stdio drainage. Classify retries only after close.
+  const completion = new Promise<void>((resolve) => hardhatProcess.once('close', () => { closed = true; resolve(); }));
   const deadline = Date.now() + startupTimeout;
-  while (!stdoutOutput.includes('Started HTTP and WebSocket JSON-RPC server') &&
-    hardhatProcess.exitCode === null && hardhatProcess.signalCode === null && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
+  const boundAddress = () => stdoutOutput.match(/Started HTTP and WebSocket JSON-RPC server at (http:\/\/127\.0\.0\.1:[1-9]\d*)\//)?.[1];
+  while (!boundAddress() && !closed && hardhatProcess.exitCode === null && hardhatProcess.signalCode === null && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  const ready = stdoutOutput.includes('Started HTTP and WebSocket JSON-RPC server') &&
-    hardhatProcess.exitCode === null && hardhatProcess.signalCode === null &&
-    await waitForNode(rpcUrl, Math.max(1, deadline - Date.now()));
-  if (!ready) {
-    hardhatProcess.kill('SIGTERM');
-    if (stderrOutput.includes('EADDRINUSE') && bindAttempts > 1) {
-      console.warn(`[hardhat-harness] Port ${port} was claimed during startup; retrying on an ephemeral port (${bindAttempts - 1} attempts left)`);
-      return spawnHardhatEnv(0, bindAttempts - 1);
-    }
-    throw new Error(
-      `Hardhat node failed to start on port ${port} within ${startupTimeout / 1000}s.\n` +
-      `hardhatCli: ${hardhatCli}\n` +
-      `exitCode: ${processExitCode}\n` +
-      `stderr: ${stderrOutput}\nstdout: ${stdoutOutput}`,
-    );
+  const rpcUrl = boundAddress();
+  if (rpcUrl && !closed && hardhatProcess.exitCode === null && hardhatProcess.signalCode === null &&
+    await waitForNode(rpcUrl, Math.max(1, deadline - Date.now()))) {
+    return { process: hardhatProcess, rpcUrl };
   }
+  if (!closed) {
+    if (hardhatProcess.exitCode === null && hardhatProcess.signalCode === null) hardhatProcess.kill('SIGTERM');
+    const escalation = setTimeout(() => hardhatProcess.kill('SIGKILL'), 2_000);
+    try { await completion; } finally { clearTimeout(escalation); }
+  }
+  if (stderrOutput.includes('EADDRINUSE') && bindAttempts > 1) {
+    return startHardhatNode(0, bindAttempts - 1, startupTimeout);
+  }
+  throw new Error(`Hardhat node failed to start on port ${port}.\nstderr: ${stderrOutput}\nstdout: ${stdoutOutput}`);
+}
 
+export async function spawnHardhatEnv(port: number): Promise<HardhatContext> {
+  const { process: hardhatProcess, rpcUrl } = await startHardhatNode(port);
   const provider = new JsonRpcProvider(rpcUrl, undefined, { cacheTimeout: -1 });
   try {
     const hubAddress = await deployContracts(rpcUrl);

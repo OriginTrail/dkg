@@ -2,6 +2,7 @@
 import importlib
 from copy import deepcopy
 from unittest.mock import Mock
+from types import SimpleNamespace
 
 import click
 import pytest
@@ -27,70 +28,73 @@ def cli_fixture(plugin_module, monkeypatch):
     monkeypatch.setattr(plugin_module, "_save_cache", lambda value, agent: saved.append((deepcopy(value), agent)))
     cli = click.Group()
     module.register_cli(cli)
-    return CliRunner(), cli, client, cache, saved
+    return SimpleNamespace(runner=CliRunner(), cli=cli, client=client, cache=cache, saved=saved)
 
 
 def test_status_and_query_are_scoped_to_configured_graph(cli_fixture):
-    runner, cli, client, _cache, _saved = cli_fixture
-    status = runner.invoke(cli, ["dkg", "status"])
+    h = cli_fixture
+    status = h.runner.invoke(h.cli, ["dkg", "status"])
     assert status.exit_code == 0
     assert "CONNECTED" in status.output and "peer-test" in status.output
-    query = runner.invoke(cli, ["dkg", "query", "SELECT ?s WHERE { ?s ?p ?o }"])
+    query = h.runner.invoke(h.cli, ["dkg", "query", "SELECT ?s WHERE { ?s ?p ?o }"])
     assert query.exit_code == 0 and "actual" in query.output
-    client.query.assert_called_once_with("SELECT ?s WHERE { ?s ?p ?o }", "cg:test")
+    h.client.query.assert_called_once_with("SELECT ?s WHERE { ?s ?p ?o }", "cg:test")
 
 
 @pytest.mark.parametrize("command", ["query", "sync"])
 def test_unreachable_daemon_fails_without_writes(cli_fixture, command):
-    runner, cli, client, _cache, saved = cli_fixture
-    client.health_check.return_value = False
-    result = runner.invoke(cli, ["dkg", command] + (["ASK {}"] if command == "query" else []))
+    h = cli_fixture
+    h.client.health_check.return_value = False
+    result = h.runner.invoke(h.cli, ["dkg", command] + (["ASK {}"] if command == "query" else []))
     assert result.exit_code == 1 and "not reachable" in result.output
-    client.write_assertion.assert_not_called()
-    assert saved == []
+    h.client.query.assert_not_called()
+    h.client.store_turn.assert_not_called()
+    h.client.write_assertion.assert_not_called()
+    assert h.saved == []
 
 
 def test_offline_status_reports_cached_counts(cli_fixture):
-    runner, cli, client, cache, _saved = cli_fixture
-    client.health_check.return_value = False
-    cache["queued_writes"] = [{"type": "memory"}]
-    result = runner.invoke(cli, ["dkg", "status"])
+    h = cli_fixture
+    h.client.health_check.return_value = False
+    h.cache["queued_writes"] = [{"type": "memory"}]
+    result = h.runner.invoke(h.cli, ["dkg", "status"])
     assert result.exit_code == 0 and "OFFLINE" in result.output
     assert "Cached memory entries: 1" in result.output and "Queued writes: 1" in result.output
 
 
 @pytest.mark.parametrize("failure", [None, "response", "exception", "empty"])
 def test_sync_retains_failed_writes_and_only_clears_confirmed_work(cli_fixture, failure):
-    runner, cli, client, cache, saved = cli_fixture
+    h = cli_fixture
     queued = [{"type": "memory", "target": "memory"}, {"type": "turn", "session_id": "s", "user": "u", "assistant": "a", "idempotency_key": "stable"}]
-    cache["queued_writes"] = deepcopy(queued)
+    h.cache["queued_writes"] = deepcopy(queued)
     if failure == "response":
-        client.write_assertion.return_value = {"success": False, "error": "store unavailable"}
-        client.store_turn.return_value = {"success": False, "error": "store unavailable"}
+        h.client.write_assertion.return_value = {"success": False, "error": "store unavailable"}
+        h.client.store_turn.return_value = {"success": False, "error": "store unavailable"}
     elif failure == "exception":
-        client.write_assertion.side_effect = RuntimeError("lost reply")
-        client.store_turn.side_effect = RuntimeError("lost reply")
+        h.client.write_assertion.side_effect = RuntimeError("lost reply")
+        h.client.store_turn.side_effect = RuntimeError("lost reply")
     elif failure == "empty":
-        cache["memory"] = []
-    result = runner.invoke(cli, ["dkg", "sync"])
+        h.cache["memory"] = []
+    result = h.runner.invoke(h.cli, ["dkg", "sync"])
     assert result.exit_code == 0, result.output
-    assert len(saved) == 1 and saved[0][1] == "agent"
-    remaining = saved[0][0]["queued_writes"]
+    assert len(h.saved) == 1 and h.saved[0][1] == "agent"
+    remaining = h.saved[0][0]["queued_writes"]
     if failure in ("response", "exception"):
         assert sorted(item["type"] for item in remaining) == ["memory", "turn"]
     elif failure == "empty":
         assert remaining == [queued[0]]
     else:
         assert remaining == []
-        args = client.write_assertion.call_args.args
+        args = h.client.write_assertion.call_args.args
         assert args[1] == "cg:test" and args[2][0]["subject"] == "urn:hermes:agent:memory"
-    assert client.store_turn.call_args.kwargs["idempotency_key"] == "stable"
-    client.close.assert_called_once()
+    assert h.client.store_turn.call_args.kwargs["idempotency_key"] == "stable"
+    h.client.close.assert_called_once()
 
 
 def test_empty_queue_does_not_write(cli_fixture):
-    runner, cli, client, _cache, saved = cli_fixture
-    result = runner.invoke(cli, ["dkg", "sync"])
+    h = cli_fixture
+    result = h.runner.invoke(h.cli, ["dkg", "sync"])
     assert result.exit_code == 0 and "Nothing to sync" in result.output
-    client.write_assertion.assert_not_called()
-    assert saved == []
+    h.client.write_assertion.assert_not_called()
+    h.client.store_turn.assert_not_called()
+    assert h.saved == []

@@ -69,6 +69,7 @@ describe('OT-RFC-43 A2/B3 — finalize-stamp, divergence, create-vs-update, B3 (
   let CG_ID: string;
   let agentAddress: string;
   let sharedAllocator: KaNumberAllocator;
+  let chainAdapter: EVMChainAdapter | undefined;
 
   beforeAll(async () => {
     ctx = await spawnHardhatEnv(8551);
@@ -109,7 +110,7 @@ describe('OT-RFC-43 A2/B3 — finalize-stamp, divergence, create-vs-update, B3 (
     await new Promise((r) => setTimeout(r, 2000));
     agentAddress = agent.defaultAgentAddress ?? agent.peerId;
 
-    const chainAdapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.EXTRA1));
+    chainAdapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.EXTRA1));
     const cgResult = await chainAdapter.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1 });
     CG_ID = String(cgResult.contextGraphId);
     for (const a of agents) {
@@ -128,7 +129,7 @@ describe('OT-RFC-43 A2/B3 — finalize-stamp, divergence, create-vs-update, B3 (
     for (const a of agents) {
       try { await a.stop(); } catch { /* best-effort */ }
     }
-    killHardhat(ctx);
+    try { await chainAdapter?.destroy(); } finally { killHardhat(ctx); }
   });
 
   it('preserves identity and addressing through finalize, publish, reopen and on-chain update', async () => {
@@ -219,9 +220,8 @@ describe('OT-RFC-43 A2/B3 — finalize-stamp, divergence, create-vs-update, B3 (
       expect(pub2.status).toBe('confirmed');
       // UPDATE reuses the SAME kaId (no fresh mint).
       expect(pub2.kaId).toBe(expectedPacked);
-      const chain = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.EXTRA1));
-      expect(await chain.getMerkleRootCount(expectedPacked)).toBe(2n);
-      expect(ethers.hexlify(await chain.getLatestMerkleRoot(expectedPacked)).slice(2))
+      expect(await chainAdapter!.getMerkleRootCount(expectedPacked)).toBe(2n);
+      expect(ethers.hexlify(await chainAdapter!.getLatestMerkleRoot(expectedPacked)).slice(2))
         .toBe(sealedRoot);
 
       // VM now points at the new merkle; the consumed WM draft is no longer active.

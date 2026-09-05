@@ -180,21 +180,24 @@ describe('checkFdLimit', () => {
     reporter.excludeNetwork = originalExcludeNetwork;
   });
 
-  it.each([false, true])('omits DNS diagnostics and restores the caller setting (%s), including report errors', (previous) => {
-    for (const fails of [false, true]) {
-      reporter.excludeNetwork = previous;
-      let observedExcludeNetwork;
-      (process.report as any).getReport = () => {
-        observedExcludeNetwork = reporter.excludeNetwork;
-        if (fails) throw new Error('report unavailable');
-        return { userLimits: { open_files: { soft: 8192 } } };
-      };
-      const log = recorder((_level: string, _msg: string) => undefined);
-      checkFdLimit(2048, log);
-      expect(observedExcludeNetwork).toBe(true);
-      expect(reporter.excludeNetwork).toBe(previous);
-      expect(log.calls[0][0]).toBe(fails ? 'warn' : 'info');
-    }
+  it.each([
+    { previous: false, throws: false, expectedLevel: 'info' },
+    { previous: false, throws: true, expectedLevel: 'warn' },
+    { previous: true, throws: false, expectedLevel: 'info' },
+    { previous: true, throws: true, expectedLevel: 'warn' },
+  ])('omits DNS diagnostics and restores excludeNetwork=$previous when report throws=$throws', ({ previous, throws, expectedLevel }) => {
+    reporter.excludeNetwork = previous;
+    let observedExcludeNetwork;
+    (process.report as any).getReport = () => {
+      observedExcludeNetwork = reporter.excludeNetwork;
+      if (throws) throw new Error('report unavailable');
+      return { userLimits: { open_files: { soft: 8192 } } };
+    };
+    const log = recorder((_level: string, _msg: string) => undefined);
+    checkFdLimit(2048, log);
+    expect(observedExcludeNetwork).toBe(true);
+    expect(reporter.excludeNetwork).toBe(previous);
+    expect(log.calls[0][0]).toBe(expectedLevel);
   });
 
   function stubReport(report: any) {
