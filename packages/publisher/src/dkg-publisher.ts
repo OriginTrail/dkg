@@ -17,10 +17,12 @@ import {
   classifyExactSwmGraphReplaceFailure,
   createPromotePostCommitFailure,
 } from './promote-replay-safety.js';
+import { finalizeCommittedAssertionPromote } from './assertion-promote-finalization.js';
 import {
-  finalizeCommittedAssertionPromote,
-  type PromoteOperationIntent,
-} from './assertion-promote-finalization.js';
+  createPromoteOperationIntent,
+  parsePromoteOperationIntent,
+  serializePromoteOperationIntent,
+} from './promote-operation-intent.js';
 import { canonicalPublishPayload } from './canonical-publish-payload.js';
 import {
   assertTrustedCatalogTriplesAreGeneratedFloor,
@@ -984,56 +986,6 @@ function selectPublicStagingQuads(
     return undefined;
   }
   return publicNquadsBytes;
-}
-
-function parsePromoteOperationIntent(
-  rawValue: string,
-  expectedOperationId: string,
-): PromoteOperationIntent {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawValue);
-  } catch {
-    parsed = undefined;
-  }
-  const candidate = parsed as Partial<PromoteOperationIntent> | undefined;
-  const publisherPeerId = candidate?.publisherPeerId;
-  const allowedPeers = candidate?.allowedPeers;
-  const canonicalAllowedPeers = Array.isArray(allowedPeers)
-    ? [...new Set(allowedPeers.map((peer) => typeof peer === 'string' ? peer.trim() : ''))]
-        .filter(Boolean)
-        .sort()
-    : [];
-  const accessPolicy = candidate?.accessPolicy;
-  const valid = candidate?.version === 1
-    && candidate.operationId === expectedOperationId
-    && Number.isSafeInteger(candidate.timestampMs)
-    && Number(candidate.timestampMs) > 0
-    && (publisherPeerId === undefined
-      || (typeof publisherPeerId === 'string'
-        && publisherPeerId.length > 0
-        && publisherPeerId === publisherPeerId.trim()))
-    && typeof candidate.confirmationRequired === 'boolean'
-    && (accessPolicy === 'public' || accessPolicy === 'ownerOnly' || accessPolicy === 'allowList')
-    && Array.isArray(allowedPeers)
-    && allowedPeers.every((peer) => typeof peer === 'string')
-    && JSON.stringify(allowedPeers) === JSON.stringify(canonicalAllowedPeers)
-    && ((accessPolicy === 'allowList') === (canonicalAllowedPeers.length > 0));
-  if (!valid) {
-    throw Object.assign(
-      new Error(`Durable promote intent for operation ${expectedOperationId} is missing or corrupt`),
-      { code: 'KA_PROMOTE_OPERATION_INTENT_CORRUPT' },
-    );
-  }
-  return {
-    version: 1,
-    operationId: expectedOperationId,
-    timestampMs: candidate.timestampMs!,
-    ...(publisherPeerId ? { publisherPeerId } : {}),
-    confirmationRequired: candidate.confirmationRequired!,
-    accessPolicy,
-    allowedPeers: canonicalAllowedPeers,
-  };
 }
 
 function sameBigIntLiteral(left: string | bigint | undefined, right: string | bigint | undefined): boolean {
@@ -8446,6 +8398,12 @@ export class DKGPublisher implements Publisher {
         existingPrivateQuads,
         'verifiable-memory',
       );
+      // A legacy marker-before-cleanup promotion may leave this exact WM
+      // family behind after publish. VM has just been seal-verified, so retire
+      // only that stale copy under the lifecycle lock before reporting success.
+      // Propagate cleanup errors: proven non-started drops retry, while typed
+      // indeterminate drops remain terminal under the existing storage contract.
+      await this.dropAssertionScopedGraphs(graphUri);
       await maintainMarker(false);
       return { promotedCount: 0, promotedAllRoots: false };
     }
@@ -8744,20 +8702,6 @@ export class DKGPublisher implements Publisher {
     // retire that old proof before any encoding, confirmation, or other
     // fallible work. Only the final commit tail may expose completion again.
     await maintainMarker(false);
-    const requestedAccessPolicy = opts?.accessPolicy
-      ?? (normalizedPrivateQuads.length > 0 ? 'ownerOnly' : 'public');
-    const requestedAllowedPeers = [...new Set(
-      (opts?.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
-    )].sort();
-    if (!durableShareOperationId) {
-      if (requestedAccessPolicy === 'allowList' && requestedAllowedPeers.length === 0) {
-        throw new Error('Graph-scoped assertion allowList policy requires allowedPeers');
-      }
-      if (requestedAccessPolicy !== 'allowList' && requestedAllowedPeers.length > 0) {
-        throw new Error('Graph-scoped assertion allowedPeers requires allowList policy');
-      }
-    }
-
     if (!durablePromoteIntent && durableShareOperationId) {
       // Older partial commits persisted the ID but not the exact timestamp and
       // access envelope used on the wire. Reconstructing those fields from the
@@ -8771,15 +8715,14 @@ export class DKGPublisher implements Publisher {
       );
     }
 
-    const operationIntent: PromoteOperationIntent = durablePromoteIntent ?? {
-      version: 1,
+    const operationIntent = durablePromoteIntent ?? createPromoteOperationIntent({
       operationId,
       timestampMs: Date.now(),
-      ...(opts?.publisherPeerId?.trim() ? { publisherPeerId: opts.publisherPeerId.trim() } : {}),
+      publisherPeerId: opts?.publisherPeerId,
       confirmationRequired: opts?.confirmBeforeCommit !== undefined,
-      accessPolicy: requestedAccessPolicy,
-      allowedPeers: requestedAllowedPeers,
-    };
+      accessPolicy: opts?.accessPolicy ?? (normalizedPrivateQuads.length > 0 ? 'ownerOnly' : 'public'),
+      allowedPeers: opts?.allowedPeers,
+    });
     const accessPolicy = operationIntent.accessPolicy;
     const allowedPeers = operationIntent.allowedPeers;
     if (opts?.confirmBeforeCommit && !operationIntent.publisherPeerId) {
@@ -8871,7 +8814,7 @@ export class DKGPublisher implements Publisher {
     // Persist the ID and its immutable envelope in one store call before any
     // external confirmer can apply it. Every retry reuses these exact fields;
     // one operation ID can never quietly acquire a new timestamp or policy.
-    const serializedOperationIntent = JSON.stringify(operationIntent);
+    const serializedOperationIntent = serializePromoteOperationIntent(operationIntent);
     const operationIdQuad: Quad = {
       subject: lifecycleSubject,
       predicate: SHARE_OPERATION_ID_PRED,

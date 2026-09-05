@@ -51,6 +51,7 @@ export default defineConfig({
       'test/access-verification.test.ts',
       'test/promote-step-tag.test.ts',
       'test/promote-replay-safety.test.ts',
+      'test/promote-operation-intent.test.ts',
       'test/ka-graph-skolemization.test.ts',
       'test/ka-graph-workspace-snapshot.test.ts',
       'test/ka-graph-workspace-receiver.test.ts',

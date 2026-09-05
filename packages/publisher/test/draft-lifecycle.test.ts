@@ -1034,6 +1034,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     await expect(
       publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
     ).resolves.toMatchObject({ promotedCount: 0, promotedAllRoots: false });
+    expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toEqual([]);
     expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
     expect(await store.query(`ASK { GRAPH <${metaGraph}> {
       <${lifecycle}> <${memoryLayerPredicate}> "${MemoryLayer.VerifiableMemory}"
@@ -1046,9 +1047,16 @@ describe('Working Memory Assertion Lifecycle', () => {
       object: '"Tampered"',
       graph: vmGraph,
     }]);
+    if (leftoverWm) {
+      const wmGraph = await publisher.wmGraphUri(CG_ID, AGENT, ASSERTION_NAME);
+      await store.insert(finalized.publicQuads.map((quad) => ({ ...quad, graph: wmGraph })));
+    }
     await expect(
       publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
     ).rejects.toThrow(/Merkle mismatch/);
+    // Never delete the remaining WM copy when VM cannot prove the sealed payload.
+    expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT))
+      .toHaveLength(leftoverWm ? finalized.publicQuads.length : 0);
   });
 
   it('validates promote-scoped recipients without replacing the configured resolver', async () => {

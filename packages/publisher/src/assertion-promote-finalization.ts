@@ -22,15 +22,7 @@ import {
 } from './workspace-resolution.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 
-export type PromoteOperationIntent = {
-  version: 1;
-  operationId: string;
-  timestampMs: number;
-  publisherPeerId?: string;
-  confirmationRequired: boolean;
-  accessPolicy: 'public' | 'ownerOnly' | 'allowList';
-  allowedPeers: string[];
-};
+import type { PromoteOperationIntent } from './promote-operation-intent.js';
 
 /** Validated exact SWM graph and immutable intent after a successful commit. */
 export type CommittedAssertionPromoteContext = Readonly<{

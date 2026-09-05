@@ -9,6 +9,7 @@ import {
   createGraphKnowledgeAssetScope,
   generateEd25519Keypair,
   knowledgeAssetLayerGraphUri,
+  assertionScopedGraphUri,
 } from '@origintrail-official/dkg-core';
 import { DKGPublisher, resolveKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-publisher';
 import { GraphManager, StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
@@ -19,11 +20,11 @@ import { createAsyncPromoteWorkerFixture } from './_helpers/async-promote-worker
 
 describe('async promote repairs the publisher durable tail', () => {
   it.each([
-    ['snapshot', false], ['wm-cleanup', false], ['completion-marker', false],
-    ['wm-cleanup', true],
+    ['snapshot', undefined], ['wm-cleanup', undefined], ['completion-marker', undefined],
+    ['wm-cleanup', 'succeeded'], ['wm-cleanup', 'not_started'], ['wm-cleanup', 'indeterminate'],
   ] as const)(
-    'recovers non-started %s without duplicate publication (legacy confirmed VM before retry: %s)',
-    async (failureSite, legacyPublishedBeforeRetry) => {
+    'recovers non-started %s without duplicate publication (legacy VM cleanup: %s)',
+    async (failureSite, legacyVmCleanup) => {
       const { store, queue, clock } = createAsyncPromoteWorkerFixture();
       const contextGraphId = 'repair-cg';
       const name = 'repair-asset';
@@ -125,7 +126,7 @@ describe('async promote repairs the publisher durable tail', () => {
       const operationId = rawId?.match(/^"(.*)"$/)?.[1] ?? rawId;
       expect(operationId).toBeTruthy();
 
-      if (legacyPublishedBeforeRetry) {
+      if (legacyVmCleanup !== undefined) {
         // Model the durable state left by the old marker-before-cleanup ordering:
         // a confirmed publish moved SWM to VM while an already queued retry and
         // the stale WM copy survived. Exercise the actual worker/facade/publisher
@@ -142,17 +143,60 @@ describe('async promote repairs the publisher durable tail', () => {
           graph: contextGraphMetaUri(contextGraphId), subject: lifecycle,
           predicate: memoryLayer, object: `"${MemoryLayer.VerifiableMemory}"`,
         }]);
+        const staleChild = assertionScopedGraphUri(wmGraph, 'urn:legacy:named-graph');
+        const unrelatedGraph = `${wmGraph}-another-asset`;
+        await store.insert([
+          { ...finalized.publicQuads[0]!, graph: staleChild },
+          { ...finalized.publicQuads[0]!, graph: unrelatedGraph },
+        ]);
+        if (legacyVmCleanup !== 'succeeded') {
+          const cleanupFailure = new StoreOperationTimeoutError({
+            backend: 'managed-oxigraph', operation: 'dropGraph', outcome: legacyVmCleanup,
+          });
+          const cleanupSpy = vi.spyOn(store, 'dropGraph').mockImplementation(async (graph) => {
+            if (graph === wmGraph) throw cleanupFailure;
+            return dropGraph(graph);
+          });
+          try {
+            clock.advance(60_001);
+            expect(await runAttempt()).toMatchObject({
+              outcome: legacyVmCleanup === 'not_started' ? 'failed_retrying' : 'failed_terminal',
+              error: { retryable: legacyVmCleanup === 'not_started' },
+            });
+          } finally {
+            cleanupSpy.mockRestore();
+          }
+          expect(await store.countQuads(vmGraph)).toBe(1);
+          expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+          expect(await store.countQuads(wmGraph)).toBe(1);
+          expect(gossip).not.toHaveBeenCalled();
+          expect(agent.afterDurableSwmPromotionV1).not.toHaveBeenCalled();
+          if (legacyVmCleanup === 'indeterminate') {
+            expect(await queue.getStatus(jobId)).toMatchObject({ state: 'failed' });
+            return;
+          }
+        }
         clock.advance(60_001);
         expect(await runAttempt()).toMatchObject({ outcome: 'succeeded' });
-        expect(await queue.getStatus(jobId)).toMatchObject({ state: 'succeeded', attempt: { count: 2 } });
+        expect(await queue.getStatus(jobId)).toMatchObject({
+          state: 'succeeded', attempt: { count: legacyVmCleanup === 'not_started' ? 3 : 2 },
+        });
         expect(gossip).not.toHaveBeenCalled();
         expect(agent.afterDurableSwmPromotionV1).not.toHaveBeenCalled();
         expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
         expect(await store.countQuads(vmGraph)).toBe(1);
+        expect(await publisher.assertionQuery(contextGraphId, name, agentAddress)).toEqual([]);
+        expect(await store.hasGraph(wmGraph)).toBe(false);
+        expect(await store.hasGraph(staleChild)).toBe(false);
+        expect(await store.countQuads(unrelatedGraph)).toBe(1);
         expect(await publisher.hasSwmShareComplete(contextGraphId, name, agentAddress)).toBe(false);
         expect(await store.query(`ASK { GRAPH <${contextGraphMetaUri(contextGraphId)}> {
           <${lifecycle}> <${memoryLayer}> "${MemoryLayer.VerifiableMemory}"
         } }`)).toMatchObject({ type: 'boolean', value: true });
+        await expect(publisher.assertionPullFrom(contextGraphId, name, agentAddress, 'vm'))
+          .resolves.toMatchObject({ seeded: 1, fromLayer: 'vm' });
+        expect(await publisher.assertionQuery(contextGraphId, name, agentAddress)).toHaveLength(1);
+        expect(await store.countQuads(vmGraph)).toBe(1);
         return;
       }
 
