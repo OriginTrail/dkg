@@ -273,6 +273,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       const shutdownSignal = rfc64SwmInventoryShadowRuntimeV1(this).shutdownSignal;
       if (shutdownSignal.aborted) return;
       let result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
+      let lastResponsibilityFailure: unknown = null;
       for (const delayMs of RFC64_DEFAULT_RESPONSIBILITY_SETTLE_RETRY_DELAYS_MS_V1) {
         if (result.status !== 'dormant' || result.dormantReason !== 'inactive-lane') break;
         if (shutdownSignal.aborted) return;
@@ -282,9 +283,23 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         // classifying the row as deliberately unselected. The durable workspace
         // and VM-confirmation fence are re-read by every retry, so this cannot
         // resurrect a finalized public row.
-        const responsibility = await this.reconcileRfc64CatalogResponsibilityV1(
-          params.contextGraphId,
-        );
+        let responsibility: Awaited<ReturnType<
+          DKGAgent['reconcileRfc64CatalogResponsibilityV1']
+        >>;
+        try {
+          responsibility = await this.reconcileRfc64CatalogResponsibilityV1(
+            params.contextGraphId,
+          );
+          lastResponsibilityFailure = null;
+        } catch (cause) {
+          lastResponsibilityFailure = cause;
+          if (shutdownSignal.aborted) return;
+          if (!await waitForRfc64DefaultResponsibilitySettlementV1(
+            delayMs,
+            shutdownSignal,
+          )) return;
+          continue;
+        }
         if (
           responsibility.selectionSource !== 'default'
           || responsibility.mode !== 'catalog'
@@ -296,6 +311,13 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
           shutdownSignal,
         )) return;
         result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
+      }
+      if (
+        result.status === 'dormant'
+        && result.dormantReason === 'inactive-lane'
+        && lastResponsibilityFailure !== null
+      ) {
+        throw lastResponsibilityFailure;
       }
       if (result.status === 'applied' || result.status === 'existing') {
         const projection = {

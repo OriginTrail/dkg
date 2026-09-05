@@ -75,7 +75,6 @@ import {
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAckReasonCode,
   type SwmSenderKeyPackageMsg,
-  type WorkspaceRecipientEncryptionKey,
   InMemoryMessageIdempotencyStore,
   InMemoryProtocolOutboxStore,
   type MessageIdempotencyStore,
@@ -96,7 +95,7 @@ import {
   OPEN_ENROLLMENT_MAX_APPROVALS_PER_HOUR,
   isBoundedOpenEnrollmentPolicy,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryReplaceSubjectAtomically, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -450,12 +449,47 @@ const REQUESTER_JOIN_STATE_CURATOR_ERA =
 const JOIN_REQUEST_GENERATION_PREDICATE = 'https://dkg.network/ontology#requestGeneration';
 const JOIN_REQUEST_GENERATION_RE = /^0x[0-9a-f]{64}$/i;
 const JOIN_ENCRYPTION_KEY_CACHE_GRAPH = 'urn:dkg:local:join-encryption-key-cache';
+const JOIN_ENCRYPTION_KEY_CACHE_ISSUED_AT =
+  'urn:dkg:local:join-encryption-key-cache:issued-at-ms';
+const JOIN_ENCRYPTION_KEY_CACHE_KEY_SET_DIGEST =
+  'urn:dkg:local:join-encryption-key-cache:key-set-digest';
+const JOIN_ENCRYPTION_KEY_CACHE_DIGEST_RE = /^0x[0-9a-f]{64}$/i;
 const JOIN_ENCRYPTION_KEY_LIMIT = 8;
 
 const requesterJoinStateCache = new WeakMap<DKGAgent, Map<string, RequesterJoinRequestState>>();
 const requesterJoinStateTails = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const requesterJoinForwardTails = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const curatorJoinRequestStoreTails = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
+const joinEncryptionKeyCacheTails = new WeakMap<TripleStore, Map<string, Promise<void>>>();
+
+interface VerifiedJoinEncryptionKeyBundle {
+  readonly issuedAtMs: number;
+  readonly keySetDigest: string;
+  readonly keys: NonNullable<SignedAgentDelegation['workspaceEncryptionKeys']>;
+}
+
+interface StorePendingJoinRequestOptions {
+  emitNotification?: boolean;
+  beforePersist?: () => Promise<void>;
+}
+
+function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  if (left.size !== right.size) return false;
+  for (const value of left) {
+    if (!right.has(value)) return false;
+  }
+  return true;
+}
+
+function verifiedDelegationKeyIds(
+  agentAddress: string,
+  keys: VerifiedJoinEncryptionKeyBundle['keys'],
+): Set<string> {
+  return new Set(keys.map((key) => workspaceAgentEncryptionKeyId(
+    agentAddress,
+    decodeWorkspaceEncryptionKey(key.publicEncryptionKey),
+  ).toLowerCase()));
+}
 
 function requesterJoinStateKey(contextGraphId: string, agentAddress: string): string {
   return `${contextGraphId}\u0000${agentAddress.toLowerCase()}`;
@@ -537,6 +571,102 @@ async function withCuratorJoinRequestStoreLock<T>(
   } finally {
     if (tails.get(key) === tail) tails.delete(key);
   }
+}
+
+async function withJoinEncryptionKeyCacheLock<T>(
+  store: TripleStore,
+  agentSubject: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  let tails = joinEncryptionKeyCacheTails.get(store);
+  if (!tails) {
+    tails = new Map<string, Promise<void>>();
+    joinEncryptionKeyCacheTails.set(store, tails);
+  }
+  const previous = tails.get(agentSubject) ?? Promise.resolve();
+  const run = previous.catch(() => {}).then(task);
+  const tail = run.then(() => undefined, () => undefined);
+  tails.set(agentSubject, tail);
+  try {
+    return await run;
+  } finally {
+    if (tails.get(agentSubject) === tail) tails.delete(agentSubject);
+  }
+}
+
+function verifyJoinEncryptionKeyBundle(
+  delegation: SignedAgentDelegation,
+  carrierPeerId: string,
+): VerifiedJoinEncryptionKeyBundle | null {
+  const keys = delegation.workspaceEncryptionKeys;
+  if (keys === undefined) return null;
+  if (!Array.isArray(keys) || keys.length === 0 || keys.length > JOIN_ENCRYPTION_KEY_LIMIT) {
+    throw new Error(
+      `Join request must carry between 1 and ${JOIN_ENCRYPTION_KEY_LIMIT} workspace encryption keys.`,
+    );
+  }
+  // Preserve the existing admission contract for a signed carrier mismatch:
+  // policy evaluation reports a bounded pending decision. Do not accept the
+  // bundle because the carrier has not proven it is the signed delegatee.
+  if (delegation.delegateePeerId !== carrierPeerId) return null;
+
+  // issuedAtMs becomes the durable cross-CG cache high-water, so authenticate
+  // the base delegation here as well as at the admission boundary.
+  verifyAgentDelegation(delegation);
+  if (!Number.isSafeInteger(delegation.issuedAtMs) || delegation.issuedAtMs < 0) {
+    throw new Error('Join request carries an invalid encryption-key freshness timestamp.');
+  }
+  const verified = keys.map((key) => {
+    if (
+      key === null
+      || typeof key !== 'object'
+      || key.encryptionKeyAlgorithm !== WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519
+      || typeof key.publicEncryptionKey !== 'string'
+      || typeof key.encryptionKeyProof !== 'string'
+    ) {
+      throw new Error('Join request carries a malformed workspace encryption key.');
+    }
+    let valid = false;
+    try {
+      valid = verifyWorkspaceEncryptionKeyBinding(
+        delegation.agentAddress,
+        key.encryptionKeyAlgorithm,
+        key.publicEncryptionKey,
+        key.encryptionKeyProof,
+      );
+    } catch {
+      valid = false;
+    }
+    if (!valid) {
+      throw new Error('Join request carries an invalid workspace encryption key proof.');
+    }
+    return key;
+  });
+  if (typeof delegation.workspaceEncryptionKeysSignature !== 'string') {
+    throw new Error('Join request is missing its workspace encryption-key attestation.');
+  }
+  let attestationSigner = '';
+  try {
+    attestationSigner = ethers.verifyMessage(
+      computeWorkspaceEncryptionKeysAttestationDigest(delegation),
+      delegation.workspaceEncryptionKeysSignature,
+    );
+  } catch {
+    attestationSigner = '';
+  }
+  if (attestationSigner.toLowerCase() !== delegation.agentAddress.toLowerCase()) {
+    throw new Error('Join request carries an invalid workspace encryption-key attestation.');
+  }
+
+  const canonicalKeySet = [...new Set(verified.map((key) => JSON.stringify({
+    encryptionKeyAlgorithm: key.encryptionKeyAlgorithm,
+    publicEncryptionKey: key.publicEncryptionKey,
+  })))].sort();
+  return {
+    issuedAtMs: delegation.issuedAtMs,
+    keySetDigest: `0x${createHash('sha256').update(JSON.stringify(canonicalKeySet)).digest('hex')}`,
+    keys: verified,
+  };
 }
 
 export class JoinRequestMethods extends DKGAgentBase {
@@ -1031,6 +1161,9 @@ export class JoinRequestMethods extends DKGAgentBase {
       chargeVerifiedIngress: (contextGraphId, agentAddress) => {
         this.chargeVerifiedContextGraphJoinIngress(contextGraphId, agentAddress);
       },
+      validateEncryptionKeyBundle: (delegation, carrierPeerId) => {
+        this.validateJoinEncryptionKeyBundle(delegation, carrierPeerId);
+      },
       cacheVerifiedEncryptionKeys: (delegation, carrierPeerId) =>
         this.cacheVerifiedJoinEncryptionKeys(delegation, carrierPeerId),
       withAdmissionLock: (contextGraphId, operation) =>
@@ -1073,12 +1206,12 @@ export class JoinRequestMethods extends DKGAgentBase {
         this.notifyJoinApproval(contextGraphId, agentAddress, requestGeneration).catch(() => {});
       },
       countPendingJoinRequests: (contextGraphId) => this.countPendingJoinRequests(contextGraphId),
-      storePendingJoinRequest: (contextGraphId, delegation, agentName) =>
+      storePendingJoinRequest: (contextGraphId, delegation, agentName, beforePersist) =>
         this.storePendingJoinRequest(
           contextGraphId,
           delegation,
           agentName,
-          { emitNotification: false },
+          { emitNotification: false, beforePersist },
         ),
       emitPendingJoinRequest: ({ contextGraphId, agentAddress, agentName }) => {
         this.eventBus.emit(DKGEvent.JOIN_REQUEST_RECEIVED, {
@@ -1691,69 +1824,27 @@ export class JoinRequestMethods extends DKGAgentBase {
     delegation: SignedAgentDelegation,
     carrierPeerId: string,
   ): Promise<void> {
-    const keys = delegation.workspaceEncryptionKeys;
-    if (keys === undefined) return;
-    if (!Array.isArray(keys) || keys.length === 0 || keys.length > JOIN_ENCRYPTION_KEY_LIMIT) {
-      throw new Error(
-        `Join request must carry between 1 and ${JOIN_ENCRYPTION_KEY_LIMIT} workspace encryption keys.`,
-      );
-    }
-    // Preserve the existing admission contract for a signed carrier mismatch:
-    // policy evaluation reports a bounded pending decision. Do not cache the
-    // bundle because the carrier has not proven it is the signed delegatee.
-    if (delegation.delegateePeerId !== carrierPeerId) return;
-
-    const verified = keys.map((key) => {
-      if (
-        key === null
-        || typeof key !== 'object'
-        || key.encryptionKeyAlgorithm !== WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519
-        || typeof key.publicEncryptionKey !== 'string'
-        || typeof key.encryptionKeyProof !== 'string'
-      ) {
-        throw new Error('Join request carries a malformed workspace encryption key.');
-      }
-      let valid = false;
-      try {
-        valid = verifyWorkspaceEncryptionKeyBinding(
-          delegation.agentAddress,
-          key.encryptionKeyAlgorithm,
-          key.publicEncryptionKey,
-          key.encryptionKeyProof,
-        );
-      } catch {
-        valid = false;
-      }
-      if (!valid) {
-        throw new Error('Join request carries an invalid workspace encryption key proof.');
-      }
-      return key;
-    });
-    if (typeof delegation.workspaceEncryptionKeysSignature !== 'string') {
-      throw new Error('Join request is missing its workspace encryption-key attestation.');
-    }
-    let attestationSigner = '';
-    try {
-      attestationSigner = ethers.verifyMessage(
-        computeWorkspaceEncryptionKeysAttestationDigest(delegation),
-        delegation.workspaceEncryptionKeysSignature,
-      );
-    } catch {
-      attestationSigner = '';
-    }
-    if (attestationSigner.toLowerCase() !== delegation.agentAddress.toLowerCase()) {
-      throw new Error('Join request carries an invalid workspace encryption-key attestation.');
-    }
+    const bundle = verifyJoinEncryptionKeyBundle(delegation, carrierPeerId);
+    if (!bundle) return;
 
     const subject = `did:dkg:agent:${canonicalAgentDidSubject(delegation.agentAddress)}`;
-    await this.store.deleteBySubjectPrefix(JOIN_ENCRYPTION_KEY_CACHE_GRAPH, subject);
     const quads: Quad[] = [{
       subject,
       predicate: DKG_ONTOLOGY.DKG_PEER_ID,
       object: JSON.stringify(carrierPeerId),
       graph: JOIN_ENCRYPTION_KEY_CACHE_GRAPH,
+    }, {
+      subject,
+      predicate: JOIN_ENCRYPTION_KEY_CACHE_ISSUED_AT,
+      object: JSON.stringify(String(bundle.issuedAtMs)),
+      graph: JOIN_ENCRYPTION_KEY_CACHE_GRAPH,
+    }, {
+      subject,
+      predicate: JOIN_ENCRYPTION_KEY_CACHE_KEY_SET_DIGEST,
+      object: JSON.stringify(bundle.keySetDigest),
+      graph: JOIN_ENCRYPTION_KEY_CACHE_GRAPH,
     }];
-    for (const key of verified) {
+    for (const key of bundle.keys) {
       quads.push(
         {
           subject,
@@ -1775,7 +1866,162 @@ export class JoinRequestMethods extends DKGAgentBase {
         },
       );
     }
-    await this.store.insert(quads);
+    // The cache subject is shared by every CG for this agent. Serialize the
+    // complete replacement by agent so two concurrent joins/refreshes cannot
+    // race the read/compare/write high-water and roll keys backwards.
+    await withJoinEncryptionKeyCacheLock(this.store, subject, async () => {
+      const current = await this.store.query(
+        `SELECT ?predicate ?object WHERE {
+          GRAPH <${JOIN_ENCRYPTION_KEY_CACHE_GRAPH}> {
+            <${subject}> ?predicate ?object .
+          }
+        }`,
+        { source: 'agent.joinEncryptionKeyCache.readHighWater' },
+      );
+      if (current.type !== 'bindings') {
+        throw new Error('Stored join encryption-key cache returned an invalid subject snapshot.');
+      }
+      const cacheSubjectExists = current.bindings.length > 0;
+      const valuesFor = (predicate: string): string[] => current.bindings.flatMap((row) => (
+        row['predicate'] === predicate && row['object'] !== undefined
+          ? [stripLiteral(row['object'])]
+          : []
+      ));
+      const currentKeys = [...new Set(valuesFor(DKG_ONTOLOGY.DKG_PUBLIC_ENCRYPTION_KEY))];
+      const currentAlgorithms = [...new Set(valuesFor(
+        DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_ALGORITHM,
+      ))];
+      const currentProofs = [...new Set(valuesFor(DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_PROOF))];
+      const currentPeerIds = [...new Set(valuesFor(DKG_ONTOLOGY.DKG_PEER_ID))];
+      const currentIssuedAtValues = [...new Set(valuesFor(JOIN_ENCRYPTION_KEY_CACHE_ISSUED_AT))];
+      const currentDigestValues = [...new Set(valuesFor(
+        JOIN_ENCRYPTION_KEY_CACHE_KEY_SET_DIGEST,
+      ))];
+      const isLegacyCacheSubject = cacheSubjectExists
+        && currentIssuedAtValues.length === 0
+        && currentDigestValues.length === 0;
+      if (cacheSubjectExists) {
+        // Both absent is the one-time upgrade shape from the pre-high-water
+        // cache. A partial or malformed marker is ambiguous and fails closed.
+        if (!isLegacyCacheSubject) {
+          if (currentIssuedAtValues.length !== 1 || currentDigestValues.length !== 1) {
+            throw new Error('Stored join encryption-key cache has incomplete freshness metadata.');
+          }
+          const currentIssuedAtMs = Number(currentIssuedAtValues[0]);
+          const currentKeySetDigest = currentDigestValues[0].toLowerCase();
+          if (
+            !Number.isSafeInteger(currentIssuedAtMs)
+            || currentIssuedAtMs < 0
+            || !JOIN_ENCRYPTION_KEY_CACHE_DIGEST_RE.test(currentKeySetDigest)
+          ) {
+            throw new Error('Stored join encryption-key cache has invalid freshness metadata.');
+          }
+          if (bundle.issuedAtMs < currentIssuedAtMs) return;
+          if (bundle.issuedAtMs === currentIssuedAtMs) {
+            if (
+              bundle.keySetDigest.toLowerCase() === currentKeySetDigest
+              && currentPeerIds.length === 1
+              && carrierPeerId === currentPeerIds[0]
+            ) return;
+            throw new Error(
+              `Conflicting join encryption-key bundle at issuedAtMs ${bundle.issuedAtMs}.`,
+            );
+          }
+        }
+      }
+
+      const replaced = await tryReplaceSubjectAtomically(
+        this.store,
+        JOIN_ENCRYPTION_KEY_CACHE_GRAPH,
+        subject,
+        quads,
+        { source: 'agent.joinEncryptionKeyCache.replaceSubject' },
+      );
+      if (replaced) return;
+
+      // Generic best-effort SPARQL endpoints cannot guarantee an atomic
+      // subject replacement. They still support cold-join admission when the
+      // wallet-verified incoming keys are already warm in the registry/profile:
+      // with no local cache subject there is no stale cache to rotate or
+      // preserve. Existing cache subjects are handled separately below only
+      // for the exact pre-marker compatibility shape.
+      if (!cacheSubjectExists) {
+        let resolvedKeys: WorkspaceAgentRecipient[] = [];
+        try {
+          resolvedKeys = await resolveWorkspaceAgentRecipientKeys(
+            this.store,
+            delegation.agentAddress,
+            {
+              excludeGraphUris: [JOIN_ENCRYPTION_KEY_CACHE_GRAPH],
+              requiredPeerId: carrierPeerId,
+            },
+          );
+        } catch {
+          // Missing, revoked, or unreadable registry/profile keys are not warm.
+        }
+        const incomingKeyIds = verifiedDelegationKeyIds(delegation.agentAddress, bundle.keys);
+        const resolvedKeyIds = new Set(
+          resolvedKeys.map((key) => key.recipientKeyId.toLowerCase()),
+        );
+        const registryProfileIsExact = sameStringSet(incomingKeyIds, resolvedKeyIds)
+          && resolvedKeys.every((key) => key.peerId === carrierPeerId);
+        if (!registryProfileIsExact) {
+          throw new Error(
+            'Workspace encryption-key cache requires atomic subject-replacement support.',
+          );
+        }
+        return;
+      }
+
+      if (isLegacyCacheSubject) {
+        // 10.0.15 cache subjects predate the signed freshness markers and are
+        // the durable cold-key authority when registry/profile gossip has not
+        // arrived yet. A best-effort backend may retain that subject only when
+        // its complete wallet-verified key set and sole carrier are already the
+        // exact incoming identity. This is a no-mutation compatibility path,
+        // never a rotation.
+        const incomingKeyIds = verifiedDelegationKeyIds(delegation.agentAddress, bundle.keys);
+        const legacyVerifiedKeyIds = new Set<string>();
+        if (currentAlgorithms.includes(WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519)) {
+          for (const publicEncryptionKey of currentKeys) {
+            const verified = currentProofs.some((proof) => {
+              try {
+                return verifyWorkspaceEncryptionKeyBinding(
+                  delegation.agentAddress,
+                  WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+                  publicEncryptionKey,
+                  proof,
+                );
+              } catch {
+                return false;
+              }
+            });
+            if (!verified) continue;
+            legacyVerifiedKeyIds.add(workspaceAgentEncryptionKeyId(
+              delegation.agentAddress,
+              decodeWorkspaceEncryptionKey(publicEncryptionKey),
+            ).toLowerCase());
+          }
+        }
+        if (
+          currentPeerIds.length === 1
+          && currentPeerIds[0] === carrierPeerId
+          && sameStringSet(incomingKeyIds, legacyVerifiedKeyIds)
+        ) return;
+      }
+      throw new Error(
+        'Workspace encryption-key cache requires atomic subject-replacement support.',
+      );
+    });
+  }
+
+  /** Pure verification phase used before bounded queue/generation admission. */
+  validateJoinEncryptionKeyBundle(
+    this: DKGAgent,
+    delegation: SignedAgentDelegation,
+    carrierPeerId: string,
+  ): void {
+    verifyJoinEncryptionKeyBundle(delegation, carrierPeerId);
   }
 
   /**
@@ -1803,9 +2049,9 @@ export class JoinRequestMethods extends DKGAgentBase {
     contextGraphId: string,
     delegation: SignedAgentDelegation,
     agentName?: string,
-    requestGenerationOrOptions: string | { emitNotification?: boolean } =
+    requestGenerationOrOptions: string | StorePendingJoinRequestOptions =
       deriveJoinRequestGeneration(delegation),
-    options: { emitNotification?: boolean } = {},
+    options: StorePendingJoinRequestOptions = {},
   ): Promise<boolean> {
     const requestGeneration = typeof requestGenerationOrOptions === 'string'
       ? requestGenerationOrOptions
@@ -1828,7 +2074,7 @@ export class JoinRequestMethods extends DKGAgentBase {
     delegation: SignedAgentDelegation,
     agentName: string | undefined,
     requestGeneration: string,
-    options: { emitNotification?: boolean },
+    options: StorePendingJoinRequestOptions,
   ): Promise<boolean> {
     const derivedGeneration = deriveJoinRequestGeneration(delegation);
     if (
@@ -1865,10 +2111,18 @@ export class JoinRequestMethods extends DKGAgentBase {
       const currentIssuedAtMs = Number(stripLiteral(row['ts'] ?? ''));
       const currentGeneration = stripLiteral(row['generation'] ?? '');
       const currentSignature = stripLiteral(row['sig'] ?? '');
+      const currentStatus = stripLiteral(row['status'] ?? '');
       const exactReplay = isJoinRequestGeneration(currentGeneration)
         ? currentGeneration.toLowerCase() === requestGeneration
         : currentSignature.toLowerCase() === delegation.signature.toLowerCase();
-      if (exactReplay) return false;
+      if (exactReplay) {
+        // A request first delivered by the wrong carrier is intentionally kept
+        // pending without caching its optional key bundle. Let the exact signed
+        // generation, replayed by its authenticated carrier, fill that cache;
+        // terminal rows remain immutable and cannot rotate keys by replay.
+        if (currentStatus === 'pending') await options.beforePersist?.();
+        return false;
+      }
       if (Number.isFinite(currentIssuedAtMs)) {
         if (delegation.issuedAtMs < currentIssuedAtMs) {
           throw new Error(
@@ -1884,6 +2138,11 @@ export class JoinRequestMethods extends DKGAgentBase {
       }
     }
 
+    // This hook runs only after the signed generation/terminal preflight and
+    // while the per-(CG, agent) request lane is held. Admission uses it to
+    // commit the independently authenticated key bundle without letting an
+    // exact terminal replay or stale request alter the global agent cache.
+    await options.beforePersist?.();
     await deleteByPatternWithoutCount(this.store, { graph: cgMetaGraph, subject: requestUri });
 
     // Escape every user-controllable literal. `contextGraphId`, `delegation.scope`,
@@ -2176,6 +2435,20 @@ export class JoinRequestMethods extends DKGAgentBase {
       throw new Error(
         `Agent ${agentAddress} is revoked from "${contextGraphId}". Clear the revocation separately before approving a new join request.`,
       );
+    }
+
+    // Private membership is unusable without a wallet-verified recipient key:
+    // the node could add the member but could never wrap a sender key to it.
+    // Preserve public and legacy/unknown-policy moderation behavior.
+    if (meta.accessPolicy === 'private') {
+      try {
+        await resolveWorkspaceAgentRecipientKeys(this.store, agentAddress);
+      } catch (error) {
+        throw new Error(
+          `Cannot approve private join request from ${agentAddress}: `
+          + `a verified active encryption key is required (${error instanceof Error ? error.message : String(error)}).`,
+        );
+      }
     }
 
     // Every production adapter implements SPARQL UPDATE. Refuse to cross the

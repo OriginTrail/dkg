@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it } from 'vitest';
+import { ethers } from 'ethers';
 
 import type { ContextGraphAuthoritySnapshot } from '../src/chain-adapter.js';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
@@ -47,8 +48,8 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}) {
   const logs: Record<string, readonly ReturnType<typeof event>[]> = {
     ContextGraphCreated: [event(10, 1, CREATION_HASH, [9n, OWNER, NAME_HASH])],
     Transfer: [
-      event(10, 0, CREATION_HASH),
-      event(15, 0, `0x${'99'.repeat(32)}`),
+      event(10, 0, CREATION_HASH, [ethers.ZeroAddress, OWNER, 9n]),
+      event(15, 0, `0x${'99'.repeat(32)}`, [SECOND_MEMBER, OWNER, 9n]),
     ],
     PublishPolicyUpdated: [event(20, 0, POLICY_HASH)],
     PublishAuthorityUpdated: [event(21, 0, POLICY_HASH)],

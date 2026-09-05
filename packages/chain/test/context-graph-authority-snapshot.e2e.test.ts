@@ -164,6 +164,23 @@ describe('EVM Context Graph authority snapshot ABI integration', () => {
       ['function transferFrom(address,address,uint256) external'],
       new Wallet(HARDHAT_KEYS.CORE_OP, provider),
     );
+    const selfTransferReceipt = await (
+      await storage.transferFrom(owner, owner, created.contextGraphId)
+    ).wait();
+    const afterSelfTransfer = await adapter.getContextGraphAuthoritySnapshot(
+      created.contextGraphId,
+    );
+    expect(afterSelfTransfer).toMatchObject({
+      owner: owner.toLowerCase(),
+      ownershipEra: afterPolicy.ownershipEra,
+      policyVersion: afterPolicy.policyVersion,
+      rosterVersion: afterPolicy.rosterVersion,
+      sourceBlockNumber: afterPolicy.sourceBlockNumber,
+      sourceBlockHash: afterPolicy.sourceBlockHash,
+    });
+    expect(BigInt(afterSelfTransfer.sourceBlockNumber))
+      .toBeLessThan(BigInt(selfTransferReceipt.blockNumber));
+
     const transferReceipt = await (
       await storage.transferFrom(owner, newOwner, created.contextGraphId)
     ).wait();

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { resolveWorkspaceAgentRecipientKeys } from '@origintrail-official/dkg-publisher';
 import {
   DKGEvent,
   PROTOCOL_JOIN_REQUEST,
@@ -282,6 +283,47 @@ describe('context graph open enrollment policy', () => {
       accessPolicy: 1,
       callerAgentAddress: ownerAddress,
     });
+  }
+
+  async function buildColdKeyDelegation(input: {
+    wallet: ethers.Wallet;
+    deploymentId: string | undefined;
+    contextGraphId: string;
+    delegateePeerId: string;
+    issuedAtMs: number;
+    suffix: string;
+  }) {
+    const recipient = generateWorkspaceRecipientEncryptionKey(
+      `did:dkg:agent:${input.wallet.address}`,
+      `did:dkg:agent:${input.wallet.address}#${input.suffix}`,
+    );
+    const publicKeyBytes = recipient.publicKeyBytes!;
+    const workspaceEncryptionKeys = [{
+      encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+      publicEncryptionKey: encodeWorkspaceEncryptionKey(publicKeyBytes),
+      encryptionKeyProof: await input.wallet.signMessage(
+        computeWorkspaceAgentEncryptionKeyProofPayload({
+          agentAddress: input.wallet.address,
+          encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+          publicKeyBytes,
+        }),
+      ),
+    }];
+    const signed = await signAgentDelegation({
+      agentAddress: input.wallet.address,
+      scope: joinDelegationScope(input.deploymentId, input.contextGraphId),
+      issuedAtMs: input.issuedAtMs,
+      expiresAtMs: input.issuedAtMs + 60_000,
+      delegateePeerId: input.delegateePeerId,
+      agentPrivateKey: input.wallet.privateKey,
+    });
+    const unsigned = { ...signed, workspaceEncryptionKeys };
+    return {
+      ...unsigned,
+      workspaceEncryptionKeysSignature: await input.wallet.signMessage(
+        computeWorkspaceEncryptionKeysAttestationDigest(unsigned),
+      ),
+    };
   }
 
   it('requires a live same-manager, same-CG admission token before internal mutations', async () => {
@@ -660,6 +702,165 @@ describe('context graph open enrollment policy', () => {
     )).rejects.toThrow(/invalid workspace encryption-key attestation/i);
     expect((await agent.getContextGraphAllowedAgents(rejectedContextGraphId)).map((address) =>
       address.toLowerCase())).not.toContain(remoteWallet.address.toLowerCase());
+  }, 30_000);
+
+  it('retains cold multi-key bundles across manual approval and already-member refresh', async () => {
+    const { agent, owner, chain } = await boot();
+    const contextGraphId = 'private-policy-cold-manual-multi-key';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+
+    const remoteWallet = ethers.Wallet.createRandom();
+    const buildDelegation = async (issuedAtMs: number, suffix: string) => {
+      const workspaceEncryptionKeys = await Promise.all([0, 1].map(async (index) => {
+        const recipient = generateWorkspaceRecipientEncryptionKey(
+          `did:dkg:agent:${remoteWallet.address}`,
+          `did:dkg:agent:${remoteWallet.address}#${suffix}-${index}`,
+        );
+        const publicKeyBytes = recipient.publicKeyBytes!;
+        return {
+          encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+          publicEncryptionKey: encodeWorkspaceEncryptionKey(publicKeyBytes),
+          encryptionKeyProof: await remoteWallet.signMessage(
+            computeWorkspaceAgentEncryptionKeyProofPayload({
+              agentAddress: remoteWallet.address,
+              encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+              publicKeyBytes,
+            }),
+          ),
+        };
+      }));
+      const signed = await signAgentDelegation({
+        agentAddress: remoteWallet.address,
+        scope: joinDelegationScope(chain.deploymentId, contextGraphId),
+        issuedAtMs,
+        expiresAtMs: issuedAtMs + 24 * 60 * 60 * 1000,
+        delegateePeerId: agent.peerId,
+        agentPrivateKey: remoteWallet.privateKey,
+      });
+      const unsigned = { ...signed, workspaceEncryptionKeys };
+      return {
+        ...unsigned,
+        workspaceEncryptionKeysSignature: await remoteWallet.signMessage(
+          computeWorkspaceEncryptionKeysAttestationDigest(unsigned),
+        ),
+      };
+    };
+
+    const invalid = await buildDelegation(Date.now(), 'invalid-manual');
+    const invalidWorkspaceEncryptionKeys = invalid.workspaceEncryptionKeys.map((key, index) => (
+      index === 0
+        ? {
+            ...key,
+            encryptionKeyProof: `${key.encryptionKeyProof.slice(0, -1)}${
+              key.encryptionKeyProof.endsWith('0') ? '1' : '0'
+            }`,
+          }
+        : key
+    ));
+    const invalidUnsigned = {
+      ...invalid,
+      workspaceEncryptionKeys: invalidWorkspaceEncryptionKeys,
+      workspaceEncryptionKeysSignature: undefined,
+    };
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      {
+        ...invalidUnsigned,
+        workspaceEncryptionKeysSignature: await remoteWallet.signMessage(
+          computeWorkspaceEncryptionKeysAttestationDigest(invalidUnsigned),
+        ),
+      },
+      'cold-manual-agent',
+      agent.peerId,
+    )).rejects.toThrow(/invalid workspace encryption key proof/i);
+    expect(await agent.hasJoinRequestRecord(contextGraphId, remoteWallet.address)).toBe(false);
+    expect(await agent.getJoinRequestStatus(contextGraphId, remoteWallet.address)).toBeNull();
+
+    const initial = await buildDelegation(invalid.issuedAtMs + 1, 'manual');
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      initial,
+      'cold-manual-agent',
+      agent.peerId,
+    )).resolves.toMatchObject({ status: 'pending', reason: 'manual-policy' });
+    const beforeApproval = await resolveWorkspaceAgentRecipientKeys(
+      (agent as any).store,
+      remoteWallet.address,
+    );
+    expect(beforeApproval).toHaveLength(2);
+    expect(beforeApproval.map((entry) => (
+      encodeWorkspaceEncryptionKey(entry.publicKeyBytes!)
+    )).sort()).toEqual(
+      initial.workspaceEncryptionKeys.map((entry) => entry.publicEncryptionKey).sort(),
+    );
+
+    await agent.approveJoinRequest(contextGraphId, remoteWallet.address, owner.agentAddress);
+    const refreshed = await buildDelegation(initial.issuedAtMs + 1, 'refresh');
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      refreshed,
+      'cold-manual-agent',
+      agent.peerId,
+    )).resolves.toMatchObject({
+      status: 'approved',
+      alreadyMember: true,
+    });
+    const afterRefresh = await resolveWorkspaceAgentRecipientKeys(
+      (agent as any).store,
+      remoteWallet.address,
+    );
+    expect(afterRefresh).toHaveLength(2);
+    expect(afterRefresh.map((entry) => (
+      encodeWorkspaceEncryptionKey(entry.publicKeyBytes!)
+    )).sort()).toEqual(
+      refreshed.workspaceEncryptionKeys.map((entry) => entry.publicEncryptionKey).sort(),
+    );
+  }, 30_000);
+
+  it('requires a carrier-matched replay to cache keys before private manual approval', async () => {
+    const { agent, owner, chain } = await boot();
+    const contextGraphId = 'private-policy-cold-carrier-replay';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    const wallet = ethers.Wallet.createRandom();
+    const signedCarrier = '12D3KooWColdKeySignedCarrier';
+    const delegation = await buildColdKeyDelegation({
+      wallet,
+      deploymentId: chain.deploymentId,
+      contextGraphId,
+      delegateePeerId: signedCarrier,
+      issuedAtMs: Date.now(),
+      suffix: 'carrier-replay',
+    });
+
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      'cold-carrier-agent',
+      '12D3KooWColdKeyWrongCarrier',
+    )).resolves.toMatchObject({ status: 'pending', autoApproved: false });
+    await expect(agent.approveJoinRequest(
+      contextGraphId,
+      wallet.address,
+      owner.agentAddress,
+    )).rejects.toThrow(/verified active encryption key is required/i);
+    expect(await agent.getJoinRequestStatus(contextGraphId, wallet.address)).toBe('pending');
+
+    // The exact signed generation remains pending, so its authenticated carrier
+    // may replay it solely to fill the verified cache without reopening state.
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      'cold-carrier-agent',
+      signedCarrier,
+    )).resolves.toMatchObject({ status: 'pending', autoApproved: false });
+    await expect(agent.approveJoinRequest(
+      contextGraphId,
+      wallet.address,
+      owner.agentAddress,
+    )).resolves.toBeUndefined();
+    expect((await agent.getContextGraphAllowedAgents(contextGraphId)).map(
+      (address) => address.toLowerCase(),
+    )).toContain(wallet.address.toLowerCase());
   }, 30_000);
 
   it('returns the legacy alreadyMember alias to a pre-open-enrollment requester', async () => {
@@ -1320,6 +1521,7 @@ describe('context graph open enrollment policy', () => {
     vi.spyOn(agent, 'getJoinRequestStatus').mockResolvedValue('rejected');
     vi.spyOn(agent, 'countPendingJoinRequests').mockResolvedValue(1_000);
     const storePending = vi.spyOn(agent, 'storePendingJoinRequest');
+    const cacheKeys = vi.spyOn(agent, 'cacheVerifiedJoinEncryptionKeys');
 
     await expect(agent.processIncomingJoinRequest(
       contextGraphId,
@@ -1328,6 +1530,7 @@ describe('context graph open enrollment policy', () => {
       agent.peerId,
     )).rejects.toThrow(/queue.*full/i);
     expect(storePending).not.toHaveBeenCalled();
+    expect(cacheKeys).not.toHaveBeenCalled();
   }, 30_000);
 
   it('does not auto-evaluate or notify an exact replay of a rejected request', async () => {
@@ -1359,6 +1562,7 @@ describe('context graph open enrollment policy', () => {
     const notificationsBefore = emit.mock.calls.filter(
       ([event]) => event === DKGEvent.JOIN_REQUEST_RECEIVED,
     ).length;
+    const cacheKeys = vi.spyOn(agent, 'cacheVerifiedJoinEncryptionKeys');
     await expect(agent.processIncomingJoinRequest(
       contextGraphId,
       delegation,
@@ -1373,6 +1577,49 @@ describe('context graph open enrollment policy', () => {
     expect(emit.mock.calls.filter(
       ([event]) => event === DKGEvent.JOIN_REQUEST_RECEIVED,
     )).toHaveLength(notificationsBefore);
+    expect(cacheKeys).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it('rejects a stale signed generation before it can downgrade the cold-key cache', async () => {
+    const { agent, owner, chain } = await boot();
+    const contextGraphId = 'private-policy-stale-cold-key-generation';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    const wallet = ethers.Wallet.createRandom();
+    const issuedAtMs = Date.now();
+    const older = await buildColdKeyDelegation({
+      wallet,
+      deploymentId: chain.deploymentId,
+      contextGraphId,
+      delegateePeerId: agent.peerId,
+      issuedAtMs,
+      suffix: 'older',
+    });
+    const newer = await buildColdKeyDelegation({
+      wallet,
+      deploymentId: chain.deploymentId,
+      contextGraphId,
+      delegateePeerId: agent.peerId,
+      issuedAtMs: issuedAtMs + 1,
+      suffix: 'newer',
+    });
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      newer,
+      'stale-cold-key-agent',
+      agent.peerId,
+    )).resolves.toMatchObject({ status: 'pending', autoApproved: false });
+    const cacheKeys = vi.spyOn(agent, 'cacheVerifiedJoinEncryptionKeys');
+
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      older,
+      'stale-cold-key-agent',
+      agent.peerId,
+    )).rejects.toThrow(/stale join request generation/i);
+    expect(cacheKeys).not.toHaveBeenCalled();
+    const cached = await resolveWorkspaceAgentRecipientKeys((agent as any).store, wallet.address);
+    expect(cached.map((entry) => encodeWorkspaceEncryptionKey(entry.publicKeyBytes!)))
+      .toEqual([newer.workspaceEncryptionKeys[0].publicEncryptionKey]);
   }, 30_000);
 
   it('gives a manual-policy request priority over queued automatic admissions', async () => {

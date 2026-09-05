@@ -81,7 +81,11 @@ export function computeWorkspaceEncryptionKeysAttestationDigest(
       publicEncryptionKey: key.publicEncryptionKey,
       encryptionKeyProof: key.encryptionKeyProof,
     }))
-    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+    .sort((left, right) => {
+      const leftJson = JSON.stringify(left);
+      const rightJson = JSON.stringify(right);
+      return leftJson < rightJson ? -1 : leftJson > rightJson ? 1 : 0;
+    });
   const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
     ['string', 'address', 'string', 'string', 'string'],
     [

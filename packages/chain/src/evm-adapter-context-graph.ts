@@ -981,7 +981,17 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         if (post?.hash?.toLowerCase() !== finalized.hash.toLowerCase()) {
           throw new Error('finalized Context Graph authority anchor changed during resolution');
         }
-        const policyEvents = [...created, ...transfers, ...publishPolicyUpdates,
+        const ownershipTransfers = transfers.filter((event) => {
+          const transfer = event as ethers.EventLog;
+          const from = String(transfer.args.from ?? transfer.args[0]).toLowerCase();
+          const to = String(transfer.args.to ?? transfer.args[1]).toLowerCase();
+          return ethers.isAddress(from)
+            && ethers.isAddress(to)
+            && from !== ethers.ZeroAddress
+            && to !== ethers.ZeroAddress
+            && from !== to;
+        });
+        const policyEvents = [...created, ...ownershipTransfers, ...publishPolicyUpdates,
           ...publishAuthorityUpdates].sort((left, right) => (
           left.blockNumber - right.blockNumber || left.index - right.index
         ));
@@ -993,7 +1003,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         const accessPolicy = Number(BigInt(current.accessPolicy ?? current[5]));
         const publishPolicy = Number(BigInt(current.publishPolicy ?? current[6]));
         const authorityRaw = String(current.publishAuthority ?? current[7]).toLowerCase();
-        const ownershipEra = Math.max(0, transfers.length - 1);
+        const ownershipEra = ownershipTransfers.length;
         return Object.freeze({
           chainId: (await provider.getNetwork()).chainId.toString(10),
           governanceContract: (await contract.getAddress()).toLowerCase(),

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import {
   signAgentDelegation,
@@ -184,5 +184,36 @@ describe('agent-delegation primitive', () => {
       computeWorkspaceEncryptionKeysAttestationDigest(substituted),
       workspaceEncryptionKeysSignature,
     ).toLowerCase()).not.toBe(wallet.address.toLowerCase());
+  });
+
+  it('sorts a reordered two-key attestation ordinally without locale collation', async () => {
+    const signed = await signAgentDelegation(baseParams);
+    const first = {
+      encryptionKeyAlgorithm: 'X25519' as const,
+      publicEncryptionKey: 'z-public-key',
+      encryptionKeyProof: 'z-wallet-proof',
+    };
+    const second = {
+      encryptionKeyAlgorithm: 'X25519' as const,
+      publicEncryptionKey: 'ä-public-key',
+      encryptionKeyProof: 'ä-wallet-proof',
+    };
+    const localeCompare = vi.spyOn(String.prototype, 'localeCompare');
+
+    try {
+      const forward = computeWorkspaceEncryptionKeysAttestationDigest({
+        ...signed,
+        workspaceEncryptionKeys: [first, second],
+      });
+      const reordered = computeWorkspaceEncryptionKeysAttestationDigest({
+        ...signed,
+        workspaceEncryptionKeys: [second, first],
+      });
+
+      expect(ethers.hexlify(reordered)).toBe(ethers.hexlify(forward));
+      expect(localeCompare).not.toHaveBeenCalled();
+    } finally {
+      localeCompare.mockRestore();
+    }
   });
 });
