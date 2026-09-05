@@ -5,7 +5,6 @@
 
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { skolemizeByEntity } from './auto-partition.js';
-import { rootEntityFromSkolemized } from './skolemize.js';
 import { computeFlatKCRootV10, computePrivateRootV10 } from './merkle.js';
 import {
   splitTrustedGeneratedCatalogRootMap,
@@ -51,17 +50,27 @@ export function canonicalPublishPayload(
   );
   const generatedCatalogRootSet = new Set(generatedCatalogRootEntities);
   const privateByRoot = new Map<string, Quad[]>();
-  for (const quad of privateQuads) {
-    // kaMap roots cannot themselves contain a skolem segment. Taking the first
-    // segment therefore preserves the previous root-prefix matching, including
-    // nested skolem descendants, without scanning privateQuads for every root.
-    const root = kaMap.has(quad.subject)
-      ? quad.subject
-      : rootEntityFromSkolemized(quad.subject);
-    if (root === null || !kaMap.has(root)) continue;
+  const skolemBoundary = '/.well-known/genid/';
+  const addPrivateQuad = (root: string, quad: Quad): void => {
     let bucket = privateByRoot.get(root);
     if (!bucket) privateByRoot.set(root, bucket = []);
     bucket.push(quad);
+  };
+  for (const quad of privateQuads) {
+    if (kaMap.has(quad.subject)) addPrivateQuad(quad.subject, quad);
+    // The old contract attributed a private row to every known root for which
+    // subject.startsWith(root + '/.well-known/genid/'). Check only prefixes at
+    // actual skolem boundaries, preserving roots that themselves end in
+    // `/.well-known/genid` and overlapping known roots without an O(roots ×
+    // privateQuads) scan.
+    let boundary = quad.subject.indexOf(skolemBoundary);
+    while (boundary >= 0) {
+      const candidate = quad.subject.slice(0, boundary);
+      if (kaMap.has(candidate)) addPrivateQuad(candidate, quad);
+      // Advance one byte so adjacent/nested markers can share the separating
+      // slash (a valid root may end in `/.well-known/genid`).
+      boundary = quad.subject.indexOf(skolemBoundary, boundary + 1);
+    }
   }
 
   const manifestEntries: CanonicalManifestEntry[] = [];

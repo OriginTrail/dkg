@@ -68,6 +68,21 @@ describe('entity grouping compatibility', () => {
     expect(result.manifestEntries[1].privateMerkleRoot).toEqual(computePrivateRootV10([privateQuads[1]]));
   });
 
+  it('preserves descendants when a known root ends at a genid segment', () => {
+    const parent = 'https://example.test';
+    const root = `${parent}/.well-known/genid`;
+    const privateQuad = q(`${root}/.well-known/genid/x`, '"private"');
+    const result = canonicalPublishPayload(
+      [q(parent, '"parent"'), q(root, '"root"')],
+      [privateQuad],
+    );
+    expect(result.manifestEntries.map((entry) => [entry.rootEntity, entry.privateTripleCount])).toEqual([
+      [parent, 1],
+      [root, 1],
+    ]);
+    expect(result.manifestEntries[1].privateMerkleRoot).toEqual(computePrivateRootV10([privateQuad]));
+  });
+
   it('still rejects private descendants of a trusted generated catalog root', () => {
     const cg = 'grouping-catalog';
     const root = `did:dkg:context-graph:${cg}`;
