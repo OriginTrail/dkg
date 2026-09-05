@@ -1078,6 +1078,31 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(enqueueCalls[0]?.intent).not.toHaveProperty('callerAgentAddress');
   });
 
+  it('surfaces the local-chain skip reason from vm/publish (#1299)', async () => {
+    await startWith({}, {
+      publishFromFinalizedAssertion: async () => ({ status: 'tentative', localChainSkipReason: 'no-chain' }),
+    });
+    const res = await post('vm/publish', { contextGraphId: CG_ID });
+    expect(res.status).toBe(502);
+    expect(res.body.error).toContain('VM publish stayed local');
+    expect(res.body.error).toContain('chain configuration');
+  });
+
+  it.each([
+    { status: 'confirmed', contextGraphError: undefined, expectedStatus: 200, reason: undefined },
+    { status: 'confirmed', contextGraphError: 'binding failed', expectedStatus: 207, reason: 'binding failed' },
+    { status: 'tentative', contextGraphError: 'binding failed', expectedStatus: 502, reason: 'binding failed' },
+    { status: 'tentative', contextGraphError: undefined, expectedStatus: 502, reason: 'status: tentative' },
+    { status: 'failed', contextGraphError: undefined, expectedStatus: 502, reason: 'status: failed' },
+  ])('maps $status with contextGraphError=$contextGraphError to $expectedStatus', async ({ status, contextGraphError, expectedStatus, reason }) => {
+    await startWith({}, {
+      publishFromFinalizedAssertion: async () => ({ status, contextGraphError }),
+    });
+    const res = await post('vm/publish', { contextGraphId: CG_ID });
+    expect(res.status).toBe(expectedStatus);
+    if (reason) expect(res.body.error).toContain(reason);
+  });
+
   // GH#1786 — the resident-author selector. The load-bearing property is that it can
   // never be silently dropped: a dropped selector publishes the WRONG author with a
   // success status and real TRAC/gas spent.
