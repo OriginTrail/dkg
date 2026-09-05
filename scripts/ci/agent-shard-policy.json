@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "lanes": [
+    {
+      "config": "vitest.config.ts",
+      "inventory": "integration",
+      "shards": [
+        { "report": "agent-1.xml", "reservedOverheadMs": 0 },
+        { "report": "agent-2.xml", "reservedOverheadMs": 0 },
+        { "report": "agent-3.xml", "reservedOverheadMs": 0 },
+        { "report": "agent-4.xml", "reservedOverheadMs": 0 }
+      ]
+    },
+    {
+      "config": "vitest.unit.config.ts",
+      "inventory": "unit",
+      "shards": [
+        { "report": "agent-5.xml", "reservedOverheadMs": 0 },
+        { "report": "agent-6.xml", "reservedOverheadMs": 0 },
+        { "report": "agent-7.xml", "reservedOverheadMs": 0 },
+        { "report": "agent-8.xml", "reservedOverheadMs": 0 },
+        { "report": "agent-9.xml", "reservedOverheadMs": 0 },
+        { "report": "agent-10.xml", "reservedOverheadMs": 40000 }
+      ]
+    }
+  ]
+}

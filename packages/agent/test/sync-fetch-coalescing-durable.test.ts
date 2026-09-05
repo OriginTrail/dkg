@@ -60,8 +60,12 @@ async function createAgentWithSend(
     name: 'BoundedSyncFetchCoalescing',
     listenHost: '127.0.0.1',
     chainAdapter: new MockChainAdapter(),
+    rfc64CatalogActivation: { enabled: false },
     syncGlobalMaxInflight,
     syncGlobalQueueLimit: 2,
+  });
+  (agent as any).resolveRfc64CatalogReceiverAuthorityV1 = () => ({
+    legacySyncAllowed: true,
   });
   (agent as any).messenger = { sendToPeer };
   (agent as any).buildSyncRequest = async () => new Uint8Array([1, 2, 3]);

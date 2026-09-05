@@ -543,6 +543,7 @@ describe('lifecycle shared-memory fanout isolation', () => {
       // This fixture exercises ordinary public SWM fanout, not an RFC-64
       // selected scope.
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
       syncSharedMemoryFromPeerDetailedExecution:
         LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     };

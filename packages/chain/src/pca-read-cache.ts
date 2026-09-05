@@ -1,6 +1,6 @@
 import { ethers } from 'ethers';
 import type { V10PublishingConvictionAccountInfo } from './chain-adapter.js';
-import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
+import { KeyedSingleFlight, ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
 
 export type PcaMutationInvalidation<T> =
   | { kind: 'account-created'; accountIdFromResult: (result: T) => bigint | undefined }
@@ -11,9 +11,7 @@ export type PcaMutationInvalidation<T> =
 export class PcaReadCache {
   private static readonly READ_TTL_MS = 15 * 1000;
 
-  private readonly agentAccountIdCache = new ReadThroughTtlCache<string, bigint, string>({
-    ttlMs: 0,
-  });
+  private readonly agentAccountIdLookups = new KeyedSingleFlight<string, string>();
 
   private readonly accountInfoCache = new ReadThroughTtlCache<string, V10PublishingConvictionAccountInfo | null>({
     ttlMs: (value) => (value === null ? 0 : PcaReadCache.READ_TTL_MS),
@@ -26,7 +24,7 @@ export class PcaReadCache {
   ): Promise<bigint> {
     const normalized = this.normalizeAgent(agent);
     if (!normalized) return 0n;
-    return this.agentAccountIdCache.getOrLoad(
+    return this.agentAccountIdLookups.run(
       normalized.cacheKey,
       `${normalized.cacheKey}:${strict ? 'strict' : 'soft'}`,
       () => load(normalized.address),
@@ -74,11 +72,11 @@ export class PcaReadCache {
   private invalidatePcaAgent(agent: string): void {
     const normalized = this.normalizeAgent(agent);
     if (!normalized) return;
-    this.agentAccountIdCache.invalidate(normalized.cacheKey);
+    this.agentAccountIdLookups.invalidate(normalized.cacheKey);
   }
 
   private invalidateAllPcaAgents(): void {
-    this.agentAccountIdCache.invalidateAll();
+    this.agentAccountIdLookups.invalidateAll();
   }
 
   private invalidatePcaAgentsForAccount(accountId?: bigint): void {

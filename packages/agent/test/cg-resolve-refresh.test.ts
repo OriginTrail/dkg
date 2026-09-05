@@ -853,6 +853,18 @@ describe('refreshMetaFromCurator', () => {
     const freshOnChainHash = `0x${'A'.repeat(64)}`;
     const store = new OxigraphStore();
     try {
+      const replacedSubjects: string[] = [];
+      let wholeProjectionUpdates = 0;
+      const replaceSubject = store.replaceSubject.bind(store);
+      const update = store.update.bind(store);
+      store.replaceSubject = async (graph, subject, quads, options) => {
+        replacedSubjects.push(subject);
+        return replaceSubject(graph, subject, quads, options);
+      };
+      store.update = async (sparql, options) => {
+        wholeProjectionUpdates += 1;
+        return update(sparql, options);
+      };
       await store.insert([
         { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: staleCurator, graph: metaGraph },
         { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, object: `"${staleAgent}"`, graph: metaGraph },
@@ -946,6 +958,12 @@ describe('refreshMetaFromCurator', () => {
         p: 'https://dkg.network/ontology#kaNumber',
         o: '"42"',
       });
+      expect(replacedSubjects).toEqual([
+        freshDelegation,
+        contextGraphUri,
+        staleDelegation,
+      ]);
+      expect(wholeProjectionUpdates).toBe(0);
       expect(invalidations).toBe(2);
       expect(projectionInvalidations).toBe(2);
       expect(subscription).toEqual({

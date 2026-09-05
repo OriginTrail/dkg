@@ -13,6 +13,7 @@ import {
   AGENT_DID_PREFIX,
   toAgentDid,
   workspaceAgentEncryptionKeyId,
+  sparqlIri,
   tryCanonicalPeerIdString,
   type WorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
@@ -23,6 +24,7 @@ const DKG_PUBLIC_ENCRYPTION_KEY = `${DKG}publicEncryptionKey`;
 const DKG_ENCRYPTION_KEY_ALGORITHM = `${DKG}encryptionKeyAlgorithm`;
 const DKG_ENCRYPTION_KEY_PROOF = `${DKG}encryptionKeyProof`;
 const DKG_PEER_ID = `${DKG}peerId`;
+const STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT = 64;
 
 export interface WorkspaceAgentRecipient {
   readonly purpose: WorkspaceRecipientEncryptionKey['purpose'];
@@ -330,12 +332,23 @@ async function getWorkspaceAccessMetadata(
 export async function resolveWorkspaceAgentRecipientKeys(
   store: TripleStore,
   agentAddress: string,
+  options: Readonly<{
+    excludeGraphUris?: readonly string[];
+    requiredPeerId?: string;
+  }> = {},
 ): Promise<WorkspaceAgentRecipient[]> {
   const checksum = ethers.getAddress(agentAddress);
   // Read the historical checksum-cased subject alongside the canonical shared-core form.
   const agentUri = `${AGENT_DID_PREFIX}${checksum}`;
   const lowerAgentUri = toAgentDid(checksum);
   const agentUriValues = agentUri === lowerAgentUri ? `<${agentUri}>` : `<${agentUri}> <${lowerAgentUri}>`;
+  const excludedGraphs = [...new Set(options.excludeGraphUris ?? [])].map(sparqlIri);
+  const graphFilter = excludedGraphs.length === 0
+    ? ''
+    : `FILTER (?g NOT IN (${excludedGraphs.join(', ')}))`;
+  const candidateLimit = options.requiredPeerId === undefined
+    ? ''
+    : `LIMIT ${STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT + 1}`;
   const result = await store.query(
     `SELECT ?key ?algorithm ?proof ?peerId WHERE {
       VALUES ?agentSubject { ${agentUriValues} }
@@ -345,11 +358,21 @@ export async function resolveWorkspaceAgentRecipientKeys(
         OPTIONAL { ?agentSubject <${DKG_ENCRYPTION_KEY_PROOF}> ?proof }
         OPTIONAL { ?agentSubject <${DKG_PEER_ID}> ?peerId }
       }
-    }`,
+      ${graphFilter}
+    }
+    ${candidateLimit}`,
   );
 
   if (result.type !== 'bindings' || result.bindings.length === 0) {
     throw new Error(`Missing public encryption key for DKG agent ${checksum}`);
+  }
+  if (
+    options.requiredPeerId !== undefined
+    && result.bindings.length > STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT
+  ) {
+    throw new Error(
+      `Too many public encryption-key candidates for DKG agent ${checksum}`,
+    );
   }
 
   const verifiedKeys = new Map<string, WorkspaceAgentRecipient>();
@@ -393,6 +416,16 @@ export async function resolveWorkspaceAgentRecipientKeys(
       continue;
     }
 
+    const cleanPeerId = peerId ? stripRdfLiteral(peerId) : undefined;
+    if (
+      options.requiredPeerId !== undefined
+      && cleanPeerId !== options.requiredPeerId
+    ) {
+      throw new Error(
+        `Public encryption key for DKG agent ${checksum} is not bound to the required peer`,
+      );
+    }
+
     const recipientKeyId = workspaceAgentEncryptionKeyId(checksum, publicKeyBytes);
     if (verifiedKeys.has(recipientKeyId)) continue;
     verifiedKeys.set(recipientKeyId, {
@@ -402,7 +435,7 @@ export async function resolveWorkspaceAgentRecipientKeys(
       encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
       publicKeyBytes,
       agentAddress: checksum,
-      peerId: peerId ? stripRdfLiteral(peerId) : undefined,
+      peerId: cleanPeerId,
     });
   }
 

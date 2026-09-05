@@ -27,7 +27,6 @@ import {
   CONTROL_LOCK_EXPIRES_AT,
   CONTROL_LOCK_STATUS,
   CONTROL_WALLET_ID,
-  compareAcceptedJobs,
   expectBindings,
   isFailedJob,
   liftJobCheckedSigner,
@@ -230,7 +229,7 @@ export interface AsyncLiftClaimCoordinatorDependencies {
   readonly ensureGraph: () => Promise<void>;
   readonly isPaused: () => boolean;
   readonly readStatus: (jobId: string) => Promise<LiftJobPayloadDecodeResult>;
-  readonly listAccepted: () => Promise<LiftJobAccepted[]>;
+  readonly nextAccepted: () => Promise<LiftJobAccepted | undefined>;
   readonly reacceptDueFailedJobs: (now: number) => Promise<unknown>;
   readonly toClaimed: (current: LiftJobAccepted, walletId: string) => LiftJobClaimed;
   readonly writeJob: (
@@ -292,7 +291,7 @@ export class AsyncLiftClaimCoordinator {
       if (await this.hasActiveWalletLock(walletId)) return null;
 
       await this.dependencies.reacceptDueFailedJobs(this.config.now());
-      const next = (await this.dependencies.listAccepted()).sort(compareAcceptedJobs)[0];
+      const next = await this.dependencies.nextAccepted();
       if (!next) return null;
       const claimedJob = await this.withJobTransitionLock(next.jobId, async () => {
         const current = await this.getStatus(next.jobId);

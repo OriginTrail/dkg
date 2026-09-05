@@ -403,7 +403,12 @@ test('copyCliRuntimeAssets fails loudly when a source asset is missing', () => w
 test('packages/cli lifecycle is wired to the copy script (build + prepack)', () => {
   const cliPkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'packages', 'cli', 'package.json'), 'utf8'));
   assert.match(cliPkg.scripts.prepack ?? '', /copy-cli-runtime-assets\.mjs/, 'prepack must run the copy script');
-  assert.match(cliPkg.scripts.build ?? '', /copy-cli-runtime-assets\.mjs/, 'build must run the copy script');
+  assert.match(cliPkg.scripts.build ?? '', /build:prepared/, 'build must run the prepared CLI phase');
+  assert.match(
+    cliPkg.scripts['build:prepared'] ?? '',
+    /copy-cli-runtime-assets\.mjs/,
+    'prepared CLI build must run the copy script',
+  );
 });
 
 test('the manifest distinguishes copied assets from complete pack requirements', () => withFixture((root) => {

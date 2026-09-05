@@ -1,4 +1,4 @@
-# Graphify import fixes — worktree README
+# Graphify Import Fixes — Reproduction Guide
 
 This worktree (`fix/graphify-import-issues` branched off `main`) addresses fallout
 from [issue #596](https://github.com/OriginTrail/dkg/issues/596) and
@@ -95,16 +95,16 @@ To minimise merge-time pain when both branches eventually land on `main`:
 - Non-trivial edits to `packages/agent/src/dkg-agent.ts` (~13k-line file, heavily
   co-edited by the other agent). The single-line addition in `stop()` to call
   `await this.tripleStore.close()` is a deliberate exception — see
-  `docs/bugs/wm-persistence-regression.md`.
+  `docs/archive/internal/bugs/wm-persistence-regression.md`.
 
 ## Phase status
 
 - **Phase 1 (DONE)** — Reproduce the WM persistence regression and document it.
-  Artefacts: this README, `scripts/repro/wm-persistence-regression.mjs`,
-  `docs/bugs/wm-persistence-regression.md`, and the matrix evidence under
+  Artefacts: this guide, `scripts/repro/wm-persistence-regression.mjs`,
+  `docs/archive/internal/bugs/wm-persistence-regression.md`, and the matrix evidence under
   `.dkg-repro-reports/matrix-20260525-092823.json`.
 - **Phase 2** — Fix the WM persistence regression itself. Tracked in a follow-up
-  PR; see `docs/bugs/wm-persistence-regression.md` "Suggested fix shape".
+  PR; see `docs/archive/internal/bugs/wm-persistence-regression.md` "Suggested fix shape".
 - **Phases 3–6** — Importer-helpers library, agent-readable SKILL, two ADRs
   (chunking contract + code-graph ontology), upstream PR #602 review comment,
   async-promote RFC. Each lands as its own PR.

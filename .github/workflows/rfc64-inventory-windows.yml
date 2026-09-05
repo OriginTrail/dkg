@@ -6,6 +6,7 @@ on:
       - integration/rfc64-devnet
     paths:
       - '.github/workflows/rfc64-inventory-windows.yml'
+      - 'scripts/lib/__tests__/windows-persistence-ci.test.mjs'
       - 'devnet/_bootstrap/package.json'
       - 'devnet/_bootstrap/rdf-canonize.d.ts'
       - 'devnet/_bootstrap/rfc64-evidence*'
@@ -27,6 +28,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/rfc64-inventory-windows.yml'
+      - 'scripts/lib/__tests__/windows-persistence-ci.test.mjs'
       - 'devnet/_bootstrap/package.json'
       - 'devnet/_bootstrap/rdf-canonize.d.ts'
       - 'devnet/_bootstrap/rfc64-evidence*'
@@ -56,9 +58,31 @@ permissions:
 
 jobs:
   inventory-lifecycle:
-    name: SQLite lifecycle (Windows)
+    name: SQLite lifecycle (Windows, ${{ matrix.group }})
     runs-on: windows-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The control-object files account for most of the filesystem time.
+          # Each group has its own runner, temporary stores, and process tree.
+          - group: inventory
+            evidence: true
+            tests: >-
+              test/finalization-recovery-sqlite-deferred.test.ts
+              test/finalization-recovery-sqlite-migration.test.ts
+              test/finalization-recovery-sqlite-store.test.ts
+              test/rfc64-inventory-v1
+              test/rfc64-agent-inventory-lifecycle.test.ts
+              test/rfc64-author-catalog-producer.test.ts
+          - group: object-stores
+            evidence: false
+            tests: >-
+              test/rfc64-control-object-store-v1.test.ts
+              test/rfc64-control-object-store-lifecycle-v1.test.ts
+              test/rfc64-durable-file-store-v1.test.ts
+              test/rfc64-secure-filesystem-policy-v1.test.ts
     steps:
       - name: Checkout candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -77,25 +101,33 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build agent dependency closure
+        # The canonical Gate 0 closure excludes unnecessary Solidity compilation.
+        run: pnpm test:gate0:rfc64-persistence-lifecycle:build
+
       - name: Typecheck RFC-64 evidence harness
+        if: matrix.evidence
         run: pnpm typecheck:devnet:rfc64-evidence
 
       - name: Test RFC-64 evidence harness
+        if: matrix.evidence
         run: pnpm test:devnet:rfc64-evidence
 
-      - name: Build agent dependency closure
-        run: pnpm --filter @origintrail-official/dkg-agent... run build
-
-      - name: Strict-typecheck Gate 0 lifecycle harness
+      - name: Typecheck Gate 0 lifecycle harness
+        if: matrix.evidence
         run: pnpm typecheck:gate0:rfc64-persistence-lifecycle
 
-      - name: Run Gate 0 production persistence lifecycle
-        # Nine sequential 60s process bounds plus bounded forced-close cleanup
-        # fit below 10m; reserve additional time for the build and verifier.
+      - name: Generate Gate 0 persistence evidence
+        if: matrix.evidence
         timeout-minutes: 20
-        run: pnpm test:gate0:rfc64-persistence-lifecycle
+        run: pnpm test:gate0:rfc64-persistence-lifecycle:generate:only
+
+      - name: Verify Gate 0 persistence evidence
+        if: matrix.evidence
+        run: pnpm test:gate0:rfc64-persistence-lifecycle:verify
 
       - name: Typecheck the lifecycle crash harness
+        if: matrix.evidence
         run: >-
           pnpm exec tsc --noEmit --target ES2022 --module NodeNext
           --moduleResolution NodeNext --types node,vitest/globals --skipLibCheck
@@ -106,13 +138,4 @@ jobs:
         run: >-
           pnpm --filter @origintrail-official/dkg-agent exec vitest run
           --config vitest.unit.config.ts
-          test/finalization-recovery-sqlite-deferred.test.ts
-          test/finalization-recovery-sqlite-migration.test.ts
-          test/finalization-recovery-sqlite-store.test.ts
-          test/rfc64-inventory-v1
-          test/rfc64-agent-inventory-lifecycle.test.ts
-          test/rfc64-author-catalog-producer.test.ts
-          test/rfc64-control-object-store-v1.test.ts
-          test/rfc64-control-object-store-lifecycle-v1.test.ts
-          test/rfc64-durable-file-store-v1.test.ts
-          test/rfc64-secure-filesystem-policy-v1.test.ts
+          ${{ matrix.tests }}
