@@ -1,3 +1,4 @@
+import { exitOnNodeRuntimeError } from '../node-runtime-preflight.js';
 import { Command } from 'commander';
 import { readFileSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -133,6 +134,7 @@ program
     [] as string[],
   )
   .action(async (opts: ActionOpts) => {
+    exitOnNodeRuntimeError((message) => console.error(message));
     if (!configExists()) {
       console.error('No config found. Run "dkg init" first.');
       process.exit(1);

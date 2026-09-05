@@ -1060,3 +1060,21 @@ describe('runDoctor orchestrator', () => {
     expect(report.state.paths.dkgHome).toBe('/test/.dkg');
   });
 });
+
+describe('node-runtime doctor check (#1985)', () => {
+  it('reports unsupported runtime capability in the summary and as an error', async () => {
+    const deps = makeDeps();
+    deps.runtimeHost = { version: 'v22.12.0', getBuiltinModule: () => undefined };
+    const report = await runDoctor(deps, { checks: ['node-runtime'] });
+    expect(report.exitCode).toBe(2);
+    expect(report.state.runtime).toEqual({ nodeVersion: 'v22.12.0', sqliteAvailable: false, requiredNodeRange: '>=22.13.0 <23.0.0 || >=23.4.0' });
+    expect(report.findings[0]).toMatchObject({ check: 'node-runtime', severity: 'error' });
+  });
+  it('accepts an older experimental runtime with the actual SQLite capability', async () => {
+    const deps = makeDeps();
+    deps.runtimeHost = { version: 'v22.10.0', getBuiltinModule: () => ({ DatabaseSync: class {} }) };
+    const report = await runDoctor(deps, { checks: ['node-runtime'] });
+    expect(report.exitCode).toBe(0);
+    expect(report.findings).toEqual([]);
+  });
+});

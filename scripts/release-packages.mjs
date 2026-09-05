@@ -58,6 +58,27 @@ export function findReleaseVersionMismatches(version, rootDir = ROOT_DIR) {
     }));
 }
 
+// Publishable SQLite consumers share one declared runtime contract. This is
+// conservative (type-only imports count too), so adding a new consumer cannot
+// silently publish a package that advertises an unsupported runtime.
+export function findNodeSqliteEngineMismatches(rootDir = ROOT_DIR) {
+  const required = '>=22.13.0 <23.0.0 || >=23.4.0';
+  function usesSqlite(dir) {
+    if (!fs.existsSync(dir)) return false;
+    return fs.readdirSync(dir, { withFileTypes: true }).some((entry) => {
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) return usesSqlite(file);
+      return entry.isFile() && /\.(?:[cm]?[jt]s|tsx)$/.test(entry.name)
+        && /['"]node:sqlite['"]/.test(fs.readFileSync(file, 'utf8'));
+    });
+  }
+  return discoverPublishablePackages(rootDir).flatMap(({ name, packageJsonPath }) => {
+    const pkg = readJson(packageJsonPath);
+    if (!usesSqlite(path.join(path.dirname(packageJsonPath), 'src')) || pkg.engines?.node === required) return [];
+    return [{ name, path: path.relative(rootDir, packageJsonPath), actual: pkg.engines?.node, expected: required }];
+  });
+}
+
 function runCapture(cmd, args, options = {}) {
   const result = spawnSync(cmd, args, {
     cwd: options.cwd ?? ROOT_DIR,
@@ -216,6 +237,14 @@ function commandList(args) {
 
 function commandVerifyVersions(args) {
   const version = requireArg(args, 'version');
+  const runtimeMismatches = findNodeSqliteEngineMismatches(ROOT_DIR);
+  if (runtimeMismatches.length > 0) {
+    for (const mismatch of runtimeMismatches) {
+      console.error(`${mismatch.path}: node:sqlite requires engines.node = ${mismatch.expected}; got ${mismatch.actual ?? '<missing>'}`);
+    }
+    process.exitCode = 1;
+    return;
+  }
   const mismatches = findReleaseVersionMismatches(version, ROOT_DIR);
   if (mismatches.length > 0) {
     console.error(`Release package version check failed; expected ${version}:`);

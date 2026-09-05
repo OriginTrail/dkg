@@ -1,3 +1,4 @@
+import { assertNodeRuntimeSupported } from '../node-runtime-preflight.js';
 // Auto-update subsystem extracted from the legacy monolithic
 // `daemon.ts`.
 //
@@ -492,6 +493,13 @@ async function _performNpmUpdateInner(
         );
       }
     }
+  }
+
+  try {
+    assertNodeRuntimeSupported();
+  } catch (error) {
+    log(`Auto-update: refusing slot activation: ${error instanceof Error ? error.message : String(error)}`);
+    return "failed";
   }
 
   await writePendingUpdateState({
@@ -1331,6 +1339,13 @@ async function _performUpdateInner(
     log(
       `Auto-update: target version ${nextVersion} is pre-release and allowPrerelease=false. Aborting swap.`,
     );
+    return "failed";
+  }
+
+  try {
+    assertNodeRuntimeSupported();
+  } catch (error) {
+    log(`Auto-update: refusing slot activation: ${error instanceof Error ? error.message : String(error)}`);
     return "failed";
   }
 
