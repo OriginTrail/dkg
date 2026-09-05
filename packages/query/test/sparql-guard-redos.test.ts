@@ -116,13 +116,13 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
   // The scanner replacement consumes each declaration via a single
   // anchored regex with no nested quantifier — total work is O(n).
 
-  // Measure the built wrapper outside Vitest's V8 coverage instrumentation:
+  // Measure the current TypeScript source outside Vitest's V8 coverage instrumentation:
   // coverage overhead pushed the 10k case past the 500ms ceiling in CI.
   // Keep that ceiling and an external process timeout; core separately owns
   // the isolated scaling assertion. Source-level semantics stay covered below.
   const measure = (input: string, expectedForm: string): number => {
     const runner = fileURLToPath(new URL('./fixtures/sparql-guard-hang-guard.mjs', import.meta.url));
-    return JSON.parse(execFileSync(process.execPath, [runner], {
+    return JSON.parse(execFileSync(process.execPath, ['--import', 'tsx', runner], {
       input: JSON.stringify({ input, expectedForm }),
       encoding: 'utf8',
       timeout: 10_000,
