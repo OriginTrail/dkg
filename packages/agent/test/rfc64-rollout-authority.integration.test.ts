@@ -976,6 +976,19 @@ describe('RFC-64 rollout authority integration', () => {
       .toBe(RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1);
     expect(activeTimers).toEqual(new Set([scheduled[0]!.handle]));
 
+    await edge.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Authority refresh timer lifecycle',
+      callerAgentAddress: AUTHOR,
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    const reconcile = vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1');
+    scheduled[0]!.callback();
+    await vi.waitFor(() => expect(reconcile).toHaveBeenCalledWith(
+      CONTEXT_GRAPH_ID,
+      expect.any(AbortSignal),
+    ));
+
     await edge.closeRfc64PublicCatalogServiceV1();
     expect(cancel).toHaveBeenCalledTimes(1);
     expect(cancel).toHaveBeenLastCalledWith(scheduled[0]!.handle);
