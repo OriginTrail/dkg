@@ -1,3 +1,4 @@
+import { coverageForPackage } from '../../vitest.coverage';
 import { defineConfig } from 'vitest/config';
 
 /**
@@ -13,6 +14,8 @@ import { defineConfig } from 'vitest/config';
  */
 export default defineConfig({
   test: {
+    allowOnly: false,
+    coverage: coverageForPackage('mcp-dkg'),
     include: ['test/**/*.test.ts'],
   },
 });

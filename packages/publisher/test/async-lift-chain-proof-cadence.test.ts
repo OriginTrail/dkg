@@ -13,7 +13,7 @@ import {
   serializeJobRecord,
 } from '../src/async-lift-control-plane.js';
 import { createAsyncLift2270Harness } from './_helpers/async-lift-2270-harness.js';
-import { kaVmPublishRequest } from './_helpers/ka-vm-publish.js';
+import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 
 describe('GH#2270 chain-proof cadence', () => {
   const h = createAsyncLift2270Harness();

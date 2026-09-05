@@ -1,3 +1,4 @@
+import { coverageForPackage } from "../../vitest.coverage";
 import { defineConfig } from "vitest/config";
 
 import { RFC64_UNIT_TESTS } from "./vitest.rfc64-unit-tests";
@@ -14,6 +15,8 @@ const SQLITE_EXEC_ARGV = [
 
 export default defineConfig({
   test: {
+    allowOnly: false,
+    coverage: coverageForPackage("agent"),
     include: [
       ...RFC64_UNIT_TESTS,
       "test/endorse.test.ts",

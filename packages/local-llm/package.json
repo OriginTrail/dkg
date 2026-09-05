@@ -16,7 +16,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "benchmark:dkg": "pnpm build && node benchmark/real-dkg.mjs",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs local-llm"
   },
   "dependencies": {
     "@origintrail-official/dkg-http-utils": "workspace:*",

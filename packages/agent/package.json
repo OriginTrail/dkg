@@ -120,7 +120,7 @@
     "test:rfc64-m0-recovery:unit": "node --test scripts/run-rfc64-m0-recovery-scenario.test.mjs",
     "test:types": "tsc --project tsconfig.type-tests.json",
     "test:package-root": "node scripts/test-package-root.mjs",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs agent",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {

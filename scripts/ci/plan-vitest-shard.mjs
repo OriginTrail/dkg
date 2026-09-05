@@ -19,6 +19,7 @@
  * Stdout contains only paths relative to the package root, one per line.
  * A short diagnostic summary is written to stderr.
  */
+import { PACKAGE_SHARD_COUNTS } from '../lib/ci-lanes.mjs';
 import { discoverVitestFiles } from './discover-vitest-files.mjs';
 import path from 'node:path';
 import process from 'node:process';
@@ -285,12 +286,12 @@ const CHAIN_BODY_MS = Object.freeze({
 export const PACKAGE_SPECS = Object.freeze({
   cli: Object.freeze({
     packageDirectory: 'packages/cli',
-    shardCount: 4,
+    shardCount: PACKAGE_SHARD_COUNTS.cli,
     bodyWeightsMs: CLI_BODY_MS,
   }),
   chain: Object.freeze({
     packageDirectory: 'packages/chain',
-    shardCount: 3,
+    shardCount: PACKAGE_SHARD_COUNTS.chain,
     bodyWeightsMs: CHAIN_BODY_MS,
   }),
 });
@@ -408,7 +409,7 @@ function runCli() {
   ) {
     console.error(
       'Usage: node scripts/ci/plan-vitest-shard.mjs <cli|chain> <shard>; '
-      + 'CLI has 4 shards and chain has 3 shards.',
+      + `CLI has ${PACKAGE_SHARD_COUNTS.cli} shards and chain has ${PACKAGE_SHARD_COUNTS.chain} shards.`,
     );
     process.exitCode = 2;
     return;

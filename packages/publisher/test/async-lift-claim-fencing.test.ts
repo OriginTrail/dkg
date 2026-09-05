@@ -19,7 +19,7 @@ import {
   KA_VM_VALIDATION,
   kaVmPublishRequest,
   stageKnowledgeAssetShareSnapshot,
-} from './_helpers/ka-vm-publish.js';
+} from '../../../scripts/testing/ka-vm-publish.js';
 import {
   CONTROL_PAYLOAD,
   DEFAULT_CONTROL_GRAPH_URI,
