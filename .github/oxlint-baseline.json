@@ -4671,9 +4671,6 @@
       "packages/publisher/src/async-lift-subtraction.ts": {
         "{\"message\":\"Function 'safeObject' is declared but never used.\",\"evidence\":[{\"label\":\"'safeObject' is declared here\",\"source\":\"safeObject\"}]}": 1
       },
-      "packages/publisher/src/auto-partition.ts": {
-        "{\"message\":\"Variable 'skolemized' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'skolemized' is declared here\",\"source\":\"skolemized\"}]}": 1
-      },
       "packages/publisher/src/dkg-publisher.ts": {
         "{\"message\":\"Variable 'authorTypedData' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'authorTypedData' is declared here\",\"source\":\"authorTypedData\"}]}": 1,
         "{\"message\":\"Variable 'entityProofs' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'entityProofs' is declared here\",\"source\":\"entityProofs\"}]}": 1,
@@ -4796,9 +4793,6 @@
       },
       "packages/storage/test/graph-manager-swm-bound.test.ts": {
         "{\"message\":\"Identifier 'resolveSharedMemoryScopeGraphs' is imported but never used.\",\"evidence\":[{\"label\":\"'resolveSharedMemoryScopeGraphs' is imported here\",\"source\":\"resolveSharedMemoryScopeGraphs\"}]}": 1
-      },
-      "packages/storage/test/oxigraph-persistence.test.ts": {
-        "{\"message\":\"Identifier 'mkdirSync' is imported but never used.\",\"evidence\":[{\"label\":\"'mkdirSync' is imported here\",\"source\":\"mkdirSync\"}]}": 1
       },
       "scripts/chain-analysis.ts": {
         "{\"message\":\"Variable 'epochStorage' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'epochStorage' is declared here\",\"source\":\"epochStorage\"}]}": 1
@@ -5213,9 +5207,6 @@
         "{\"message\":\"Using a spread operator here creates a new array unnecessarily.\",\"evidence\":[{\"label\":\"\",\"source\":\"...\"}]}": 1
       },
       "packages/agent/src/dkg-agent-swm-host.ts": {
-        "{\"message\":\"`Promise.allSettled` accepts an iterable, so it's unnecessary to convert the iterable to an array.\",\"evidence\":[{\"label\":\"\",\"source\":\"...\"}]}": 1
-      },
-      "packages/agent/src/dkg-agent-swm-substrate.ts": {
         "{\"message\":\"`Promise.allSettled` accepts an iterable, so it's unnecessary to convert the iterable to an array.\",\"evidence\":[{\"label\":\"\",\"source\":\"...\"}]}": 1
       },
       "packages/agent/src/rfc64/control-object-store-v1-internal.ts": {

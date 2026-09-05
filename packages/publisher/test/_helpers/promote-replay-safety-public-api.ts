@@ -1,13 +1,47 @@
+import {
+  createPromotePostCommitFailure,
+  createPromoteRetryableFailure,
+  getPromoteFailureDisposition,
+  getPromoteReplaySafeErrorDiagnostic,
+  isPromoteReplaySafeError,
+  type PromoteFailureDisposition,
+  type PromoteReplaySafeErrorDiagnostic,
+} from '@origintrail-official/dkg-publisher';
+
 type PublisherApi = typeof import('../../src/index.js');
 
 type AssertTrue<Value extends true> = Value;
 type AssertFalse<Value extends false> = Value;
+type PromoteOptions = NonNullable<Parameters<
+  import('@origintrail-official/dkg-publisher').DKGPublisher['assertionPromote']
+>[3]>;
+type ArbitraryRetryPolicyStaysAbsent = AssertFalse<
+  'isRetryablePrerequisiteError' extends keyof PromoteOptions ? true : false
+>;
 
-type ReplaySafeGuardIsPublic = AssertTrue<
+type PromoteFailureDispositionIsPublic = AssertTrue<
+  'getPromoteFailureDisposition' extends keyof PublisherApi ? true : false
+>;
+type PromotePostCommitBoundaryIsPublic = AssertTrue<
+  'createPromotePostCommitFailure' extends keyof PublisherApi ? true : false
+>;
+type LegacyReplaySafeGuardRemainsPublic = AssertTrue<
   'isPromoteReplaySafeError' extends keyof PublisherApi ? true : false
 >;
-type ReplaySafeDiagnosticHelperIsPublic = AssertTrue<
+type LegacyReplaySafeDiagnosticRemainsPublic = AssertTrue<
   'getPromoteReplaySafeErrorDiagnostic' extends keyof PublisherApi ? true : false
+>;
+type GenericRetryableGuardStaysInternal = AssertFalse<
+  'isPromoteRetryableFailure' extends keyof PublisherApi ? true : false
+>;
+type GenericRetryableMarkerCodeStaysInternal = AssertFalse<
+  'PROMOTE_RETRYABLE_FAILURE_CODE' extends keyof PublisherApi ? true : false
+>;
+type GenericRetryableDiagnosticStaysInternal = AssertFalse<
+  'getPromoteRetryableFailureDiagnostic' extends keyof PublisherApi ? true : false
+>;
+type PostCommitMarkerCodeStaysInternal = AssertFalse<
+  'PROMOTE_POST_COMMIT_FAILURE_CODE' extends keyof PublisherApi ? true : false
 >;
 type ReplaySafeUnwrapperStaysAbsent = AssertFalse<
   'unwrapPromoteReplaySafeError' extends keyof PublisherApi ? true : false
@@ -28,9 +62,28 @@ type ArbitraryPublisherImplementationStaysClosed = typeof import('@origintrail-o
 type LegacyWorkspaceResolutionSubpathRemainsAvailable =
   typeof import('@origintrail-official/dkg-publisher/dist/workspace-resolution.js');
 
+// Compile the narrow package-root surface: the pre-existing replay-safe
+// compatibility API plus the new producer and aggregate-consumer boundaries.
+void [
+  createPromotePostCommitFailure,
+  createPromoteRetryableFailure,
+  getPromoteFailureDisposition,
+  getPromoteReplaySafeErrorDiagnostic,
+  isPromoteReplaySafeError,
+];
+type PublicPromoteFailureDisposition = PromoteFailureDisposition;
+type PublicPromoteReplaySafeErrorDiagnostic = PromoteReplaySafeErrorDiagnostic;
+
 export type {
-  ReplaySafeGuardIsPublic,
-  ReplaySafeDiagnosticHelperIsPublic,
+  ArbitraryRetryPolicyStaysAbsent,
+  PromoteFailureDispositionIsPublic,
+  PromotePostCommitBoundaryIsPublic,
+  LegacyReplaySafeGuardRemainsPublic,
+  LegacyReplaySafeDiagnosticRemainsPublic,
+  GenericRetryableGuardStaysInternal,
+  GenericRetryableMarkerCodeStaysInternal,
+  GenericRetryableDiagnosticStaysInternal,
+  PostCommitMarkerCodeStaysInternal,
   ReplaySafeUnwrapperStaysAbsent,
   ReplaySafeCertifierStaysInternal,
   ReplaySafeConstructorStaysInternal,
@@ -38,4 +91,6 @@ export type {
   ReplaySafetyDeepModuleStaysClosed,
   ArbitraryPublisherImplementationStaysClosed,
   LegacyWorkspaceResolutionSubpathRemainsAvailable,
+  PublicPromoteFailureDisposition,
+  PublicPromoteReplaySafeErrorDiagnostic,
 };

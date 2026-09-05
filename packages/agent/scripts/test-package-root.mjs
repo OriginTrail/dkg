@@ -52,6 +52,39 @@ if (
 ) {
   throw new Error('published agent entry points did not expose required root APIs');
 }
+if (
+  'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE' in root
+  || 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME' in root
+  || 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS' in root
+  || 'ContextGraphAuthorityUnavailableError' in root
+  || 'isContextGraphAuthorityUnavailableMarker' in root
+) {
+  throw new Error('internal authority marker machinery leaked from the package root');
+}
+const internalPromoteModules = [
+  'context-graph-agent-gate-authority',
+  'context-graph-access-policy-state',
+  'assertion-promote-precommit',
+];
+for (const module of internalPromoteModules) {
+  // Check runtime imports and declaration/map paths: the historical dist
+  // wildcard must not expose these implementation-specific contracts.
+  for (const extension of ['js', 'd.ts', 'js.map', 'd.ts.map']) {
+    const specifier = `@origintrail-official/dkg-agent/dist/${module}.${extension}`;
+    try {
+      await import(specifier);
+      throw new Error(`internal promote module unexpectedly resolved: ${specifier}`);
+    } catch (error) {
+      if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+    }
+    try {
+      require.resolve(specifier);
+      throw new Error(`internal promote module unexpectedly resolved via require: ${specifier}`);
+    } catch (error) {
+      if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+    }
+  }
+}
 const legacySynchronizationError = new legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1(
   'no-authorized-provider',
   'legacy-code',

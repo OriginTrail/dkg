@@ -383,8 +383,12 @@ export {
   type PromoteTerminalJobClearer,
 } from './async-promote-queue.js';
 export {
+  createPromotePostCommitFailure,
+  createPromoteRetryableFailure,
   getPromoteReplaySafeErrorDiagnostic,
+  getPromoteFailureDisposition,
   isPromoteReplaySafeError,
+  type PromoteFailureDisposition,
   type PromoteReplaySafeErrorDiagnostic,
 } from './promote-replay-safety.js';
 export { type LegacyWmMigrationResult } from './legacy-wm-migration.js';

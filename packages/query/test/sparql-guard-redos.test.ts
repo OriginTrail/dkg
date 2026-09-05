@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
 import {
   detectSparqlQueryForm,
@@ -114,42 +116,43 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
   // The scanner replacement consumes each declaration via a single
   // anchored regex with no nested quantifier — total work is O(n).
 
-  // Wall time is sufficient for these lightweight wrapper hang guards. The
-  // core package owns the long, isolated scaling assertion.
-  const measure = (input: string) => {
-    for (let i = 0; i < 2; i++) detectSparqlQueryForm(input);
-    let fastestMs = Infinity;
-    for (let i = 0; i < 5; i++) {
-      const startedAt = performance.now();
-      const result = detectSparqlQueryForm(input);
-      fastestMs = Math.min(fastestMs, performance.now() - startedAt);
-      expect(typeof result).toBe('string');
-    }
-    return fastestMs;
+  // Measure the built wrapper outside Vitest's V8 coverage instrumentation:
+  // coverage overhead pushed the 10k case past the 500ms ceiling in CI.
+  // Keep that ceiling and an external process timeout; core separately owns
+  // the isolated scaling assertion. Source-level semantics stay covered below.
+  const measure = (input: string, expectedForm: string): number => {
+    const runner = fileURLToPath(new URL('./fixtures/sparql-guard-hang-guard.mjs', import.meta.url));
+    return JSON.parse(execFileSync(process.execPath, [runner], {
+      input: JSON.stringify({ input, expectedForm }),
+      encoding: 'utf8',
+      timeout: 10_000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })).fastestMs;
   };
 
-  it('rejects N=1000 dangling PREFIX decls (no terminal form) in linear time', () => {
+  it('rejects N=1000 dangling PREFIX decls (no terminal form) within the hang budget', () => {
     const decls = Array.from({ length: 1_000 }, (_, i) => `PREFIX p${i}: <http://x.org/${i}/>`).join('\n');
     const input = decls + '\n'; // no SELECT — adversarial tail
-    const ms = measure(input);
+    const ms = measure(input, 'UNKNOWN');
     expect(ms).toBeLessThan(500);
+    expect(detectSparqlQueryForm(input)).toBe('UNKNOWN');
   });
 
-  it('classifies N=10_000 valid PREFIX decls + trailing SELECT in linear time', () => {
+  it('classifies N=10_000 valid PREFIX decls + trailing SELECT within the hang budget', () => {
     // Positive case at scale — the scanner must accept long but
     // legitimate preambles cleanly.
     const decls = Array.from({ length: 10_000 }, (_, i) => `PREFIX p${i}: <http://x.org/${i}/>`).join('\n');
     const input = decls + '\nSELECT * WHERE { ?s ?p ?o }';
-    const ms = measure(input);
+    const ms = measure(input, 'SELECT');
     expect(ms).toBeLessThan(500);
     expect(detectSparqlQueryForm(input)).toBe('SELECT');
   });
 
-  it('rejects single PREFIX with unterminated label (no colon) in linear time', () => {
+  it('rejects single PREFIX with unterminated label (no colon) within the hang budget', () => {
     // The single-regex backtrack-on-failure path: long label that
     // never reaches its required `:`.
     const input = 'PREFIX ' + 'a'.repeat(100_000) + '\n';
-    const ms = measure(input);
+    const ms = measure(input, 'UNKNOWN');
     expect(ms).toBeLessThan(500);
     expect(detectSparqlQueryForm(input)).toBe('UNKNOWN');
   });

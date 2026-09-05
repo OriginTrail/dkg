@@ -64,6 +64,15 @@ import {
   resolveActivePublicContextGraphChainProof as resolveStrictActivePublicChainProof,
   type ActivePublicContextGraphChainProof,
 } from './active-public-context-graph-chain-proof.js';
+import {
+  createContextGraphAuthorityError,
+  resolveContextGraphAgentGateAuthorityDecision,
+  type ContextGraphAgentGateAuthority,
+} from './context-graph-agent-gate-authority.js';
+import {
+  resolveLiveOnChainAccessPolicyState as resolveLiveAccessPolicyState,
+  type LiveOnChainAccessPolicyState,
+} from './context-graph-access-policy-state.js';
 
 import { FANOUT_RESPONSE_REJECTED, FANOUT_RESPONSE_RETRYABLE } from './swm/substrate-fanout.js';
 
@@ -328,78 +337,35 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     return null;
   }
 
+  protected async resolveContextGraphAgentGateAuthority(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ContextGraphAgentGateAuthority> {
+    return resolveContextGraphAgentGateAuthorityDecision({
+      contextGraphId,
+      getRegisteredAuthority: () => this.resolveRegisteredContextGraphAuthority(
+        contextGraphId,
+        { signal: options.signal },
+      ),
+      resolveRfc64PrivateRoster: () => this.resolveRfc64PrivateReadRosterV1(contextGraphId),
+      getLegacyMeta: () => this.getCgMeta(contextGraphId, { signal: options.signal }),
+      getSubscriptionAgents: () => (
+        this.subscribedContextGraphs.get(contextGraphId)?.participantAgents ?? []
+      ),
+    });
+  }
+
+  /** Compatibility projection for admission callers that only need fail-closed gate values. */
   async getContextGraphAgentGateAddresses(
     this: DKGAgent,
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<string[] | null> {
-    // A registered private graph's live chain roster outranks every local
-    // projection. Returning [] on chain authority failure preserves the fact
-    // that this is a gated graph while denying sender-key and sync admissions.
-    // Registered-public graphs continue below to their distinct local
-    // publisher/signing gate, but never to stale RFC-64 private authority.
-    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(
-      contextGraphId,
-      { signal: options.signal },
-    );
-    if (registeredAuthority.kind === 'private') return registeredAuthority.participantAgents;
-    if (registeredAuthority.kind === 'unavailable') return [];
-
-    // A selected private RFC-64 graph may be joining a completely empty
-    // store. In that state the accepted, authority-checked roster is already
-    // available to the catalog service, while the legacy `_meta` projection
-    // below is intentionally absent until the first semantic commit. Sender
-    // Key setup arrives before that commit and must authenticate against the
-    // accepted roster; requiring the projection creates a circular cold-join
-    // dependency (no key without `_meta`, no encrypted SWM without the key).
-    //
-    // `null` means RFC-64 owns the graph but current roster authority is not
-    // available. Return an empty gate—not legacy `null`—so every caller keeps
-    // treating the graph as gated and fails closed until authority recovers.
-    const rfc64Roster = registeredAuthority.kind === 'unregistered'
-      ? this.resolveRfc64PrivateReadRosterV1(contextGraphId)
-      : undefined;
-    if (rfc64Roster !== undefined) {
-      if (rfc64Roster === null) return [];
-      const seen = new Set<string>();
-      const accepted: string[] = [];
-      for (const value of rfc64Roster) {
-        if (!ethers.isAddress(value)) continue;
-        const checksum = ethers.getAddress(value);
-        const key = checksum.toLowerCase();
-        if (seen.has(key)) continue;
-        seen.add(key);
-        accepted.push(checksum);
-      }
-      return accepted;
-    }
-
-    const seen = new Set<string>();
-    const agents: string[] = [];
-    let sawAgentGate = false;
-    const meta = await this.getCgMeta(contextGraphId, { signal: options.signal });
-    const revoked = new Set(meta.revokedAgents.map((addr) => addr.toLowerCase()));
-    const add = (value: string | undefined) => {
-      if (!value || !ethers.isAddress(value)) return;
-      const checksum = ethers.getAddress(value);
-      const key = checksum.toLowerCase();
-      if (revoked.has(key)) return;
-      if (seen.has(key)) return;
-      seen.add(key);
-      agents.push(checksum);
-    };
-
-    const subscriptionAgents = this.subscribedContextGraphs.get(contextGraphId)?.participantAgents ?? [];
-    if (subscriptionAgents.length > 0) sawAgentGate = true;
-    for (const agentAddress of subscriptionAgents) {
-      add(agentAddress);
-    }
-
-    if (meta.allowedAgents.length > 0 || meta.participantAgents.length > 0) sawAgentGate = true;
-    for (const agent of meta.allowedAgents) add(agent);
-    for (const agent of meta.participantAgents) add(agent);
-
-    return sawAgentGate ? agents : null;
+    const authority = await this.resolveContextGraphAgentGateAuthority(contextGraphId, options);
+    if (authority.kind === 'ungated') return null;
+    if (authority.kind === 'available') return authority.agentAddresses;
+    return [];
   }
 
   /**
@@ -586,103 +552,67 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * to a less-protected path" decision (SWM-plaintext gate + publish-inline
    * curated probe), so both branches can never diverge.
    *
-   * Returns the access-policy enum (`0` = public, `1` = private/curated) ONLY
-   * after {@link ChainAdapter.isContextGraphActiveOnChain} proves the slot is
-   * actually live on-chain; otherwise returns `null` (= UNKNOWN, caller fails
-   * closed). This is essential because `getContextGraphAccessPolicy` returns
+   * Returns an available access-policy enum (`0` = public, `1` =
+   * private/curated) ONLY after
+   * {@link ChainAdapter.isContextGraphActiveOnChain} proves the slot is
+   * actually live on-chain; otherwise preserves a typed unavailable reason.
+   * This is essential because `getContextGraphAccessPolicy` returns
    * Solidity's default `0` (= public) for UNKNOWN ids, and the local
    * access-policy cache can be seeded by best-effort probes of arbitrary ids —
    * so neither is trustworthy without a liveness proof. Both the liveness and
    * the policy reads are bounded by {@link raceChainPolicyRead} so a hung RPC
-   * fails closed (`null`) instead of blocking the hot path. A genuine RPC
+   * fails closed instead of blocking the hot path. A genuine RPC
    * rejection propagates to the caller (which logs + fails closed in its own
-   * idiom). `null` is returned when: the id is non-numeric/≤0, no liveness
-   * probe is implemented, the slot is not live, a read times out, or the
-   * policy getter is missing / returns an out-of-range value.
+   * idiom). The canonical reason distinguishes retryable bounded timeouts
+   * from terminal unknown policy; diagnostics retain the timed-out read name.
    */
+  protected async resolveLiveOnChainAccessPolicyState(this: DKGAgent,
+    onChainId: string,
+    opCtx?: OperationContext,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<LiveOnChainAccessPolicyState> {
+    const readLiveness = this.chain.isContextGraphActiveOnChain;
+    const readAccessPolicy = this.chain.getContextGraphAccessPolicy;
+    return resolveLiveAccessPolicyState(
+      {
+        isContextGraphActiveOnChain: typeof readLiveness === 'function'
+          ? (numericId, signal) => signal
+            ? readLiveness.call(this.chain, numericId, { signal })
+            : readLiveness.call(this.chain, numericId)
+          : undefined,
+        getContextGraphAccessPolicy: typeof readAccessPolicy === 'function'
+          ? (numericId, signal) => signal
+            ? readAccessPolicy.call(this.chain, numericId, { signal })
+            : readAccessPolicy.call(this.chain, numericId)
+          : undefined,
+        runBoundedRead: async (start, label, signal) => {
+          const value = await this.raceChainPolicyRead(start, label, signal);
+          return value === TIMEOUT_SENTINEL
+            ? { kind: 'timeout' }
+            : { kind: 'value', value };
+        },
+        claimMissingLivenessWarning: () => {
+          if (this.warnedMissingCgLivenessProbe) return false;
+          this.warnedMissingCgLivenessProbe = true;
+          return true;
+        },
+        warn: (ctx, message) => this.log.warn(ctx, message),
+        cacheAccessPolicy: (id, policy) => this.onChainAccessPolicyCache.set(id, policy),
+      },
+      onChainId,
+      opCtx,
+      options,
+    );
+  }
+
+  /** Compatibility projection for fail-closed policy consumers. */
   async readLiveOnChainAccessPolicy(this: DKGAgent,
     onChainId: string,
     opCtx?: OperationContext,
     options: { signal?: AbortSignal } = {},
   ): Promise<0 | 1 | null> {
-    let numericId: bigint;
-    try {
-      numericId = BigInt(onChainId);
-    } catch {
-      return null;
-    }
-    if (numericId <= 0n) return null;
-
-    if (typeof this.chain.isContextGraphActiveOnChain !== 'function') {
-      // #884 review (🔴 GZEqN): don't strand public CGs SILENTLY. An adapter
-      // that exposes getContextGraphAccessPolicy but NOT the liveness probe
-      // can't prove a slot live, so we fail closed (encrypted) — but emit a
-      // one-shot loud diagnostic so operators/integrators get a runtime signal
-      // that on-chain-public detection is disabled for this adapter, instead
-      // of silently keeping every public CG on the encrypted path. (The
-      // interface documents this fail-closed-on-absence contract; we can't
-      // make the probe a hard type-level requirement without breaking the many
-      // minimal publish-only ChainAdapter implementations.)
-      if (typeof this.chain.getContextGraphAccessPolicy === 'function' && !this.warnedMissingCgLivenessProbe) {
-        this.warnedMissingCgLivenessProbe = true;
-        this.log.warn(
-          opCtx ?? createOperationContext('share'),
-          `Chain adapter implements getContextGraphAccessPolicy but not isContextGraphActiveOnChain — ` +
-          `cannot PROVE on-chain context-graph liveness, so public-on-chain CGs will be kept on the ` +
-          `ENCRYPTED SWM path (fail-closed). Implement isContextGraphActiveOnChain to enable ` +
-          `public-CG plaintext detection.`,
-        );
-      }
-      return null;
-    }
-    const live = await this.raceChainPolicyRead(
-      () => options.signal
-        ? this.chain.isContextGraphActiveOnChain!(numericId, { signal: options.signal })
-        : this.chain.isContextGraphActiveOnChain!(numericId),
-      `isContextGraphActiveOnChain(${onChainId})`,
-      options.signal,
-    );
-    if (live === TIMEOUT_SENTINEL) {
-      this.log.warn(
-        opCtx ?? createOperationContext('share'),
-        `readLiveOnChainAccessPolicy(${onChainId}): isContextGraphActiveOnChain timed out after ` +
-        `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — treating on-chain access policy as UNKNOWN (fail-closed)`,
-      );
-      return null;
-    }
-    if (live !== true) return null;
-
-    // #884 review (🔴 GZEqI): the slot is LIVE, but DO NOT trust the
-    // onChainAccessPolicyCache for this security-downgrade decision. The cache
-    // is keyed by numeric on-chain id with no chain/deployment epoch, so after
-    // a devnet reset or numeric-id reuse a value cached as public (`0`) on the
-    // OLD chain would survive and force a NEW, possibly-private CG that now
-    // occupies the same slot onto the plaintext path. Always read the access
-    // policy FRESH from chain here (one bounded eth_call — correctness over a
-    // saved RPC). The cache is still WRITTEN below (a fresh, live-verified
-    // value is strictly an improvement for the other, decrypt-gated readers).
-    const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
-    if (typeof getAccessPolicy !== 'function') return null;
-    const policy = await this.raceChainPolicyRead(
-      () => options.signal
-        ? getAccessPolicy.call(this.chain, numericId, { signal: options.signal })
-        : getAccessPolicy.call(this.chain, numericId),
-      `getContextGraphAccessPolicy(${onChainId})`,
-      options.signal,
-    );
-    if (policy === TIMEOUT_SENTINEL) {
-      this.log.warn(
-        opCtx ?? createOperationContext('share'),
-        `readLiveOnChainAccessPolicy(${onChainId}): getContextGraphAccessPolicy timed out after ` +
-        `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — treating on-chain access policy as UNKNOWN (fail-closed)`,
-      );
-      return null;
-    }
-    if (policy === 0 || policy === 1) {
-      this.onChainAccessPolicyCache.set(onChainId, policy);
-      return policy;
-    }
-    return null;
+    const state = await this.resolveLiveOnChainAccessPolicyState(onChainId, opCtx, options);
+    return state.kind === 'available' ? state.accessPolicy : null;
   }
 
   async resolveActivePublicContextGraphChainProof(
@@ -1044,9 +974,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       return { requiresEncryption: false, recipients: [] };
     }
     if (registeredAuthority.kind === 'unavailable') {
-      throw new Error(
-        `Registered context graph "${input.contextGraphId}" authority is unavailable (${registeredAuthority.reason})`,
-      );
+      const message =
+        `Registered context graph "${input.contextGraphId}" authority is unavailable (${registeredAuthority.reason})`;
+      throw createContextGraphAuthorityError(message, registeredAuthority);
     }
     if (registeredAuthority.participantAgents.length === 0) {
       throw new Error(
@@ -2446,9 +2376,24 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async resolveWorkspaceGossipSigningAgent(this: DKGAgent,
     contextGraphId: string,
   ): Promise<(AgentKeyRecord & { privateKey: string }) | null> {
-    const allowedAgents = await this.getContextGraphAgentGateAddresses(contextGraphId);
-    if (!allowedAgents) {
+    const authority = await this.resolveContextGraphAgentGateAuthority(contextGraphId);
+    if (authority.kind === 'ungated') {
       return this.getWorkspaceGossipSigningAgent();
+    }
+    if (authority.kind === 'unavailable') {
+      const message =
+        `Cannot gossip SWM write for context graph "${contextGraphId}": signing authority is unavailable (${authority.reason})`;
+      throw createContextGraphAuthorityError(message, authority);
+    }
+
+    const allowedAgents = authority.agentAddresses;
+
+    // An available-but-empty gate is authoritative (for example an empty
+    // chain roster or a fully revoked legacy gate), so retrying cannot help.
+    if (allowedAgents.length === 0) {
+      throw new Error(
+        `Cannot gossip SWM write for context graph "${contextGraphId}": authoritative signing roster is empty`,
+      );
     }
 
     const allowedSet = new Set(allowedAgents.map((agent) => agent.toLowerCase()));

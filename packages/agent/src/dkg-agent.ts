@@ -63,6 +63,7 @@ import {
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
   selectACKCandidatePeersWithDiagnostics,
+  createPromotePostCommitFailure,
   type PublishResult,
   deriveStatus,
   type KaStatus,
@@ -79,9 +80,9 @@ import {
   DEFAULT_REQUIRED_ACKS,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
-
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet } from './agent-wallet.js';
+import { prepareAssertionPromote } from './assertion-promote-precommit.js';
 
 import {
   RandomSamplingShutdownTimeoutError,
@@ -116,6 +117,7 @@ import {
   ContextGraphNotFoundError,
   InvalidContentError,
   type PreSignedAuthorAttestation,
+  type AssertionPromoteOptions,
   type ACKSignerResolution,
   type CclPublishedResultEntry,
   type CclPublishedEvaluationRecord,
@@ -226,6 +228,7 @@ export {
   InvalidContentError,
 };
 export type {
+  AssertionPromoteOptions,
   CclPublishedResultEntry,
   CclPublishedEvaluationRecord,
   PublishOpts,
@@ -2934,7 +2937,7 @@ export class DKGAgent extends DKGAgentBase {
           ...(opts?.onConflict !== undefined ? { onConflict: opts.onConflict } : {}),
         });
       },
-      async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string; agentAddress?: string; authorAgentAddress?: string; preSignedAuthorAttestation?: PreSignedAuthorAttestation; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number; skipSeal?: boolean; accessPolicy?: 'public' | 'ownerOnly' | 'allowList'; allowedPeers?: readonly string[] }): Promise<{ promotedCount: number; sealed: boolean; publishReady: boolean; shareOperationId?: string }> {
+      async promote(contextGraphId: string, name: string, opts?: AssertionPromoteOptions): Promise<{ promotedCount: number; sealed: boolean; publishReady: boolean; shareOperationId?: string }> {
         const promoteAgentAddress = opts?.agentAddress ?? agentAddress;
         if (opts?.skipSeal) {
           throw Object.assign(
@@ -3013,61 +3016,21 @@ export class DKGAgent extends DKGAgentBase {
           );
         }
         const sealed = true;
-        // Resolve the gossip signer up-front (mirrors `share()` /
-        // `conditionalShare()` patterns) so the publisher can wrap the
-        // promoted SWM gossip in the Sender Key encrypted envelope.
-        // Without this, private/agent-gated CGs receive plaintext
-        // gossip and the new `SharedMemoryHandler` check rejects it.
-        const gossipSigner = await agent.resolveWorkspaceGossipSigningAgent(contextGraphId);
-        // Strict curator-ack gate (OT-RFC-49 curator-leader) for the WM→SWM
-        // promote path — the same confirmer as share()/conditionalShare(). When
-        // armed (private CG, gate enabled, curator remote), assertionPromote
-        // requires the curator's applied-ack BEFORE it moves WM→SWM, so an
-        // unconfirmed promote aborts (CuratorUnconfirmedError → 503) leaving WM
-        // intact instead of silently committing a write the curator never got.
-        const confirmBeforeCommit = await agent.buildCuratorAckConfirmer(
+        const { gossipSigner, publisherOptions } = await prepareAssertionPromote(agent, {
           contextGraphId,
-          gossipSigner,
-          { awaitCuratorAck: opts?.awaitCuratorAck, curatorAckTimeoutMs: opts?.curatorAckTimeoutMs },
-          createOperationContext('share'),
-        );
-        // A private Context Graph is an access boundary even when a particular
-        // KA contains only public RDF triples. The publisher's content-only
-        // default cannot infer that boundary: zero private triples otherwise
-        // produces a `public` workspace head, which the private RFC-64 catalog
-        // lane must reject to avoid widening access. Resolve the immutable CG
-        // access policy here, at the common sync/async SHARE execution seam, so
-        // ordinary clients do not need to duplicate graph policy on every KA.
-        // Unknown policy retains the publisher's existing content-based,
-        // fail-closed-for-private-content default; an explicit per-KA envelope
-        // remains authoritative for direct callers.
-        let shareAccessPolicy = opts?.accessPolicy;
-        if (shareAccessPolicy === undefined) {
-          const graphPolicy = await agent.getContextGraphOnChainPolicy(contextGraphId);
-          if (graphPolicy.accessPolicy === 1) shareAccessPolicy = 'ownerOnly';
-          else if (graphPolicy.accessPolicy === 0) shareAccessPolicy = 'public';
-          else if (await agent.readLocalAccessPolicyEnum(contextGraphId) === 1) {
-            // A not-yet-registered local private CG has no authoritative chain
-            // answer. Its local creation intent may safely make a share more
-            // restrictive, but never use local intent to infer `public`.
-            shareAccessPolicy = 'ownerOnly';
-          }
-        }
+          publisherPeerId: agent.node.peerId.toString(),
+          options: opts,
+        });
         const {
           promotedCount,
           gossipPayload,
           promotedAllRoots,
           shareOperationId,
         } = await agent.publisher.assertionPromote(
-          contextGraphId, name, promoteAgentAddress,
-          {
-            ...(opts?.subGraphName !== undefined ? { subGraphName: opts.subGraphName } : {}),
-            publisherPeerId: agent.node.peerId.toString(),
-            senderAgentAddress: gossipSigner?.agentAddress,
-            confirmBeforeCommit,
-            ...(shareAccessPolicy !== undefined ? { accessPolicy: shareAccessPolicy } : {}),
-            ...(opts?.allowedPeers !== undefined ? { allowedPeers: [...opts.allowedPeers] } : {}),
-          },
+          contextGraphId,
+          name,
+          promoteAgentAddress,
+          publisherOptions,
         );
         if (gossipPayload) {
           try {
@@ -3088,15 +3051,21 @@ export class DKGAgent extends DKGAgentBase {
         }
         // OT-RFC-43 A2 (decision 2) — stamp dkg:swmCurrentAssertion on the
         // lifecycle URN so the SWM pointer is observable (and can diverge from
-        // WM/VM). Best-effort; never blocks the share result.
-        await agent.afterDurableSwmPromotionV1({
-          contextGraphId,
-          subGraphName: opts?.subGraphName,
-          assertionCoordinate: name,
-          lifecycleAgentAddress: promoteAgentAddress,
-          shareOperationId: shareOperationId ?? null,
-          ctx: createOperationContext('share'),
-        });
+        // WM/VM). A VM no-op must not restamp a pointer or notify SWM observers.
+        if (promotedAllRoots) {
+          try {
+            await agent.afterDurableSwmPromotionV1({
+              contextGraphId,
+              subGraphName: opts?.subGraphName,
+              assertionCoordinate: name,
+              lifecycleAgentAddress: promoteAgentAddress,
+              shareOperationId: shareOperationId ?? null,
+              ctx: createOperationContext('share'),
+            });
+          } catch (error) {
+            throw createPromotePostCommitFailure(error);
+          }
+        }
         // #1116 (round 9) — the swmShareComplete marker mark/clear now lives INSIDE
         // assertionPromote (co-located with the member-row REPLACE, gated on the
         // same isFullCompletePromote), so it stays in lockstep with the rows for
@@ -3482,7 +3451,10 @@ export class DKGAgent extends DKGAgentBase {
       async promoteAsync(
         contextGraphId: string,
         name: string,
-        opts?: { entities?: readonly string[] | 'all'; subGraphName?: string; agentAddress?: string; authorAgentAddress?: string },
+        opts?: Pick<
+          AssertionPromoteOptions,
+          'entities' | 'subGraphName' | 'agentAddress' | 'authorAgentAddress'
+        >,
       ): Promise<{ jobId: string }> {
         const promoteAgentAddress = opts?.agentAddress ?? agentAddress;
         const jobId = await agent.promoteQueue.enqueue({
