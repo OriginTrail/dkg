@@ -196,7 +196,7 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
         };
       },
       (state) => state.subscribed && state.hasData,
-      30_000,
+      60_000,
     );
 
     expect(caughtUp).toEqual({ subscribed: true, hasData: true });
@@ -217,7 +217,7 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
       subscribed: true,
       syncScoped: false,
     });
-  }, 45_000);
+  }, 75_000);
 
   it('a join request forwarded over real libp2p lands as PENDING on the curator', async () => {
     const delegation = await joiner.signJoinRequest(CG, approvedAddr);

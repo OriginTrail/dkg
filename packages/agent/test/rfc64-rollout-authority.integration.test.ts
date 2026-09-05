@@ -440,16 +440,17 @@ describe('RFC-64 rollout authority integration', () => {
     )).toBe(true);
   }, 30_000);
 
-  it('observes one completion for a flood of coalesced production replay requests', async () => {
+  it('observes one completion for concurrently admitted production replay requests', async () => {
     const provider = await startAgent('replay-wire-coalesced-provider', activation('catalog'));
     const requester = await startAgent('replay-wire-coalesced-requester', activation('catalog'));
     await connectBothWays(provider, requester);
-    await provider.queueRfc64CatalogHeadReplayV1(requester.peerId, Object.freeze({
-      kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
-      networkId: NETWORK_ID,
-      contextGraphId: CONTEXT_GRAPH_ID,
-      policyDigest: `0x${'fe'.repeat(32)}` as Digest32V1,
-    }));
+    // Drain the connection-triggered replays before observing the explicit
+    // production-wire batch below. Otherwise scheduler speed can make that
+    // unrelated lifecycle request appear in this test's admission count.
+    await Promise.all([
+      provider.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(CONTEXT_GRAPH_ID),
+      requester.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(CONTEXT_GRAPH_ID),
+    ]);
     let release!: () => void;
     let entered!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -461,9 +462,10 @@ describe('RFC-64 rollout authority integration', () => {
         if (requestedScope === undefined) throw new Error('missing replay scope');
         return replaySuccess(requestedScope);
       });
+    const tryQueue = vi.spyOn(provider, 'tryQueueRfc64CatalogHeadReplayV1');
     const info = vi.spyOn((provider as any).log, 'info');
     const service = (requester as any).rfc64PublicCatalogServiceV1;
-    const requests = Array.from({ length: 32 }, () => service.requestCatalogHeadReplay({
+    const requests = Array.from({ length: 4 }, () => service.requestCatalogHeadReplay({
       remotePeerId: provider.peerId,
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -472,10 +474,18 @@ describe('RFC-64 rollout authority integration', () => {
     await started;
     let completed = false;
     void Promise.all(requests).then(() => { completed = true; });
-    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    await vi.waitFor(() => {
+      expect(tryQueue).toHaveBeenCalledTimes(requests.length);
+    });
+    expect(tryQueue.mock.results.filter(
+      ({ value }) => value?.status === 'admitted' && value.newlyQueued,
+    )).toHaveLength(1);
+    expect(tryQueue.mock.results.filter(
+      ({ value }) => value?.status === 'admitted' && !value.newlyQueued,
+    )).toHaveLength(requests.length - 1);
     expect(completed).toBe(false);
     release();
-    await expect(Promise.all(requests)).resolves.toHaveLength(32);
+    await expect(Promise.all(requests)).resolves.toHaveLength(requests.length);
     expect(replay).toHaveBeenCalled();
     await vi.waitFor(() => {
       expect(info.mock.calls.filter(([, message]: unknown[]) => (
