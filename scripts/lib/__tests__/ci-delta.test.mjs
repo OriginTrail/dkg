@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { parse } from 'yaml';
 import { fileURLToPath } from 'node:url';
 import {
   CI_LANES,
@@ -762,8 +763,18 @@ test('aggregate gates reject failed or accidentally skipped selected jobs', () =
 });
 
 test('all shared Hardhat consumers require and restore the matching artifact', () => {
-  const workflow = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
-  const producer = workflowJobBlock(workflow, 'evm-node-test-artifacts');
+  const { jobs } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
+  const restorePath = './.github/actions/restore-evm-node-test-artifacts';
+  const action = parse(fs.readFileSync(path.join(REPO_ROOT, restorePath, 'action.yml'), 'utf8'));
+  assert.equal(action.runs.using, 'composite');
+  const download = action.runs.steps.find((step) => step.uses?.startsWith('actions/download-artifact@'));
+  assert.match(download.uses, /@[a-f0-9]{40}$/);
+  assert.equal(download.with.name, 'evm-node-test-artifacts');
+  assert.equal(download.with.path, '${{ runner.temp }}/evm-node-test-artifacts');
+  const extract = action.runs.steps.find((step) => step.run);
+  assert.equal(extract.shell, 'bash');
+  assert.equal(extract.env.ARTIFACT_DIR, download.with.path);
+  assert.match(extract.run, /tar -xzf "\$\{ARTIFACT_DIR\}\/evm-node-test-artifacts\.tgz"/);
   for (const [job, lane] of [
     ['tornado-core', 'tornado_core'],
     ['tornado-agent', 'tornado_agent'],
@@ -771,11 +782,15 @@ test('all shared Hardhat consumers require and restore the matching artifact', (
     ['bura-cli', 'bura_cli'],
     ['kosava-hardhat-plugins', 'kosava_hardhat_plugins'],
   ]) {
-    const consumer = workflowJobBlock(workflow, job);
-    assert.match(consumer, /needs: \[changes, build, evm-node-test-artifacts\]/, job);
-    assert.match(consumer, /name: evm-node-test-artifacts/, job);
-    assert.match(consumer, /tar -xzf \/tmp\/evm-node-test-artifacts\.tgz/, job);
-    assert.ok(producer.includes(`needs.changes.outputs.${lane} == 'true'`), lane);
+    const consumer = jobs[job];
+    const dependencies = new Set([consumer.needs].flat());
+    for (const dependency of ['changes', 'build', 'evm-node-test-artifacts']) {
+      assert.ok(dependencies.has(dependency), `${job} requires ${dependency}`);
+    }
+    const restores = consumer.steps.filter((step) => step.uses === restorePath);
+    assert.equal(restores.length, 1, job);
+    assert.equal(restores[0].if, job === 'tornado-core' ? "matrix.suite == 'chain'" : undefined);
+    assert.ok(jobs['evm-node-test-artifacts'].if.includes(`needs.changes.outputs.${lane} == 'true'`), lane);
   }
 });
 
