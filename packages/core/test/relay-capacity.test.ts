@@ -1,3 +1,4 @@
+import { readSoftOpenFileLimit, type DiagnosticReporter } from '../src/fd-limit.js';
 // relay-capacity.test.ts
 //
 // Unit tests for the Core Node relay-server capacity tuning helpers
@@ -21,7 +22,7 @@
 //      level split also came from PR #524 review — emitting the ok
 //      line at warn level breaks operator alerting downstream.
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_RELAY_SERVER_CAPACITY,
   RELAY_CAPACITY_MULTIPLIER,
@@ -165,20 +166,7 @@ describe('validateRelayServerCapacity', () => {
 });
 
 describe('checkFdLimit', () => {
-  // process.report.getReport() is the only cross-platform Node API
-  // that surfaces RLIMIT_NOFILE without a syscall dep. The
-  // `process.report` property itself is a read-only getter, so we
-  // swap the `getReport` method (which is writable on the report
-  // object) for a hand-rolled recorder per-test rather than
-  // reassigning the parent property, and restore the original
-  // afterwards.
-  const originalGetReport = (process.report as any).getReport;
-  const reporter = process.report as typeof process.report & { excludeNetwork: boolean };
-  const originalExcludeNetwork = reporter.excludeNetwork;
-  afterEach(() => {
-    (process.report as any).getReport = originalGetReport;
-    reporter.excludeNetwork = originalExcludeNetwork;
-  });
+  let readLimit: () => number | undefined;
 
   it.each([
     { previous: false, throws: false, expectedLevel: 'info' },
@@ -186,15 +174,18 @@ describe('checkFdLimit', () => {
     { previous: true, throws: false, expectedLevel: 'info' },
     { previous: true, throws: true, expectedLevel: 'warn' },
   ])('omits DNS diagnostics and restores excludeNetwork=$previous when report throws=$throws', ({ previous, throws, expectedLevel }) => {
-    reporter.excludeNetwork = previous;
     let observedExcludeNetwork;
-    (process.report as any).getReport = () => {
-      observedExcludeNetwork = reporter.excludeNetwork;
-      if (throws) throw new Error('report unavailable');
-      return { userLimits: { open_files: { soft: 8192 } } };
+    const reporter: DiagnosticReporter = {
+      excludeNetwork: previous,
+      getReport() {
+        observedExcludeNetwork = this.excludeNetwork;
+        if (throws) throw new Error('report unavailable');
+        return { userLimits: { open_files: { soft: 8192 } } };
+      },
     };
+    readLimit = () => readSoftOpenFileLimit(reporter);
     const log = recorder((_level: string, _msg: string) => undefined);
-    checkFdLimit(2048, log);
+    checkFdLimit(2048, log, readLimit);
     expect(observedExcludeNetwork).toBe(true);
     expect(reporter.excludeNetwork).toBe(previous);
     expect(log.calls[0][0]).toBe(expectedLevel);
@@ -202,7 +193,7 @@ describe('checkFdLimit', () => {
 
   function stubReport(report: any) {
     const m = recorder(() => report);
-    (process.report as any).getReport = m;
+    readLimit = () => readSoftOpenFileLimit({ excludeNetwork: false, getReport: m });
     return m;
   }
 
@@ -210,7 +201,7 @@ describe('checkFdLimit', () => {
     stubReport({ userLimits: { open_files: { soft: 1024, hard: 'unlimited' } } });
     const log = recorder((_level: string, _msg: string) => undefined);
     // maxConnections=2048 → recommended = max(4096, 4096) = 4096; soft=1024 is below.
-    checkFdLimit(2048, log);
+    checkFdLimit(2048, log, readLimit);
     expect(log.calls).toHaveLength(1);
     const [level, msg] = log.calls[0];
     expect(level).toBe('warn');
@@ -231,7 +222,7 @@ describe('checkFdLimit', () => {
     // pinned here.
     stubReport({ userLimits: { open_files: { soft: 8192, hard: 'unlimited' } } });
     const log = recorder((_level: string, _msg: string) => undefined);
-    checkFdLimit(2048, log);
+    checkFdLimit(2048, log, readLimit);
     expect(log.calls).toHaveLength(1);
     const [level, msg] = log.calls[0];
     expect(level).toBe('info');
@@ -246,7 +237,7 @@ describe('checkFdLimit', () => {
     // HTTP server, etc. all chip in).
     stubReport({ userLimits: { open_files: { soft: 1500, hard: 'unlimited' } } });
     const log = recorder((_level: string, _msg: string) => undefined);
-    checkFdLimit(512, log);
+    checkFdLimit(512, log, readLimit);
     const [level, msg] = log.calls[0];
     expect(level).toBe('warn');
     expect(msg).toContain('recommended 4096');
@@ -256,7 +247,7 @@ describe('checkFdLimit', () => {
   it('logs the can-not-read fallback at warn level when userLimits is missing (e.g. exotic Node build)', () => {
     stubReport({ userLimits: {} });
     const log = recorder((_level: string, _msg: string) => undefined);
-    checkFdLimit(2048, log);
+    checkFdLimit(2048, log, readLimit);
     expect(log.calls).toHaveLength(1);
     const [level, msg] = log.calls[0];
     expect(level).toBe('warn');
@@ -270,7 +261,7 @@ describe('checkFdLimit', () => {
     // doesn't strictly require it. Defence in depth.
     stubReport({ userLimits: { open_files: { soft: 'unlimited', hard: 'unlimited' } } });
     const log = recorder((_level: string, _msg: string) => undefined);
-    checkFdLimit(2048, log);
+    checkFdLimit(2048, log, readLimit);
     expect(log.calls).toHaveLength(1);
     const [level, msg] = log.calls[0];
     expect(level).toBe('warn');
@@ -281,9 +272,9 @@ describe('checkFdLimit', () => {
     const throwingGetReport = recorder(() => {
       throw new Error('exotic test environment');
     });
-    (process.report as any).getReport = throwingGetReport;
+    readLimit = throwingGetReport;
     const log = recorder((_level: string, _msg: string) => undefined);
-    checkFdLimit(2048, log);
+    checkFdLimit(2048, log, readLimit);
     expect(log.calls).toHaveLength(1);
     const [level, msg] = log.calls[0];
     expect(level).toBe('warn');
