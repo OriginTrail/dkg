@@ -1,4 +1,4 @@
-# GH #842 — Updated KAs are unprovable by Random Sampling
+# GH #842 — Updated KAs Are Unprovable by Random Sampling
 
 **Status:** fixed on `release/rc.12` (§7-minimal patch). The full collapse in §8 is deferred to a tracked follow-up.
 **Severity:** high — every *updated* Knowledge Asset becomes permanently unprovable by Random Sampling (RS), producing a steady stream of `rs.tick.data-corrupted` on core nodes.

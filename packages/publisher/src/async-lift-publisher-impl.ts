@@ -122,6 +122,7 @@ import {
   JOURNAL_JOB_ID,
   PAYLOAD_PREDICATE,
   STATUS_PREDICATE,
+  ACCEPTED_AT_PREDICATE,
   CONTROL_LIFECYCLE_KEY,
   knowledgeAssetVmPublishLifecycleKey,
   serializeJournalEntry,
@@ -667,10 +668,7 @@ export class TripleStoreAsyncLiftPublisher
         ensureGraph: async () => await this.ensureGraph(),
         isPaused: () => this.paused,
         readStatus: async (jobId) => await this.readJobPayload(jobId),
-        listAccepted: async () =>
-          (await this.list({ status: 'accepted' })).filter(
-            (job): job is LiftJobAccepted => job.status === 'accepted',
-          ),
+        nextAccepted: async () => await this.readNextAcceptedJob(),
         reacceptDueFailedJobs: async (now) => await this.reacceptDueFailedJobs(now),
         toClaimed: (current, walletId) =>
           this.buildTransitionJob(current, 'claimed', { claim: { walletId } }),
@@ -896,6 +894,25 @@ export class TripleStoreAsyncLiftPublisher
       .map((row) => this.parseJobPayloadForScan(row['payload']))
       .filter((job): job is PersistedLiftJob => job !== null)
       .sort(compareAcceptedJobs);
+  }
+
+  /**
+   * Persistence-owned claim selector. The status triple bounds the read to the
+   * actionable queue, while decoding remains best-effort so one corrupt legacy
+   * row cannot block valid work behind it. Ordering is explicit over the
+   * decoded durable values: acceptedAt first, then jobId for deterministic ties.
+   */
+  private async readNextAcceptedJob(): Promise<LiftJobAccepted | undefined> {
+    await this.ensureGraph();
+    const result = await this.store.query(
+      `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${STATUS_PREDICATE}> ${literal('accepted')} ; <${ACCEPTED_AT_PREDICATE}> ?acceptedAt ; <${PAYLOAD_PREDICATE}> ?payload } }`,
+      { source: 'publisher.asyncLift.nextAccepted' },
+    );
+    return expectBindings(result)
+      .map((row) => this.parseJobPayloadForScan(row['payload']))
+      .filter((job): job is LiftJobAccepted => job?.status === 'accepted')
+      .sort(compareAcceptedJobs)
+      .at(0);
   }
 
   async inspectPreparedPayload(jobId: string): Promise<AsyncPreparedPublishPayload | null> {

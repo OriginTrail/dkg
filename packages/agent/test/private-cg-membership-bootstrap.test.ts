@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
@@ -17,7 +20,10 @@ type JoinRequestHandler = (data: Uint8Array, peerId: string) => Promise<Uint8Arr
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-async function createAgent(name: string): Promise<{ agent: DKGAgent; chain: MockChainAdapter }> {
+async function createAgent(
+  name: string,
+  dataDir?: string,
+): Promise<{ agent: DKGAgent; chain: MockChainAdapter }> {
   const chain = new MockChainAdapter();
   const agent = await DKGAgent.create({
     name,
@@ -25,6 +31,7 @@ async function createAgent(name: string): Promise<{ agent: DKGAgent; chain: Mock
     listenPort: 0,
     skills: [],
     chainAdapter: chain,
+    dataDir,
   });
   await agent.start();
   // Edge nodes backed by the generic mock adapter have no operational-wallet
@@ -46,10 +53,14 @@ function joinRequestHandler(agent: DKGAgent): JoinRequestHandler {
 
 describe('private CG membership bootstrap recovery', () => {
   let agent: DKGAgent | undefined;
+  const temporaryDirectories: string[] = [];
 
   afterEach(async () => {
     await agent?.stop().catch(() => {});
     agent = undefined;
+    await Promise.all(temporaryDirectories.splice(0).map(
+      (directory) => rm(directory, { recursive: true, force: true }),
+    ));
   });
 
   it('authenticates non-catalog sync while authoritative metadata is unconfirmed despite stale synced flags', async () => {
@@ -747,6 +758,170 @@ describe('private CG membership bootstrap recovery', () => {
     }
   });
 
+  it('persists the real curator authority binding and rejects it after ownership rotation', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-curator-binding-'));
+    temporaryDirectories.push(dataDir);
+    const created = await createAgent('PrivateBootstrapDurableCuratorBinding', dataDir);
+    const original = created.agent;
+    agent = original;
+    const contextGraphId = 'private-bootstrap-durable-curator-binding';
+    const membershipRows = new Map<string, any>();
+    const subscriptionRows = new Map<string, any>();
+    const membershipStore = {
+      loadAll: async () => [...membershipRows.values()].map((row) => ({ ...row })),
+      upsert: async (record: any) => {
+        membershipRows.set([
+          record.contextGraphId,
+          record.principalType,
+          record.principalId.toLowerCase(),
+        ].join('\0'), { ...record });
+      },
+      delete: async (cg: string, principalType: string, principalId: string) => {
+        membershipRows.delete([cg, principalType, principalId.toLowerCase()].join('\0'));
+      },
+    };
+    const subscriptionStore = {
+      loadAll: async () => [...subscriptionRows.values()].map((row) => ({ ...row })),
+      load: async (id: string) => {
+        const row = subscriptionRows.get(id);
+        return row === undefined ? null : { ...row };
+      },
+      save: async (record: any) => { subscriptionRows.set(record.id, { ...record }); },
+      delete: async (id: string) => { subscriptionRows.delete(id); },
+    };
+    (original as any).config.contextGraphMembershipStore = membershipStore;
+    (original as any).config.contextGraphSubscriptionStore = subscriptionStore;
+    const ownerAddress = original.getDefaultAgentAddress()!;
+    const ownerLocalAgent = (original as any).localAgents.get(ownerAddress);
+    await original.createContextGraph({
+      id: contextGraphId,
+      name: 'Private bootstrap durable curator binding',
+      accessPolicy: 1,
+      callerAgentAddress: ownerAddress,
+    });
+    await original.registerContextGraph(contextGraphId, {
+      callerAgentAddress: ownerAddress,
+    });
+    const requester = await original.registerAgent(
+      'durable-curator-binding-requester',
+      { framework: 'test' },
+    );
+    const onChainId = await original.getContextGraphOnChainId(contextGraphId);
+    expect(onChainId).not.toBeNull();
+    await created.chain.addContextGraphParticipantAgent(
+      BigInt(onChainId!),
+      requester.agentAddress,
+    );
+    const requesterLocalAgent = (original as any).localAgents.get(requester.agentAddress);
+    const curatorPeerId = '12D3KooWPrivateBootstrapDurableCurator';
+    const delegation = await original.signJoinRequest(
+      contextGraphId,
+      requester.agentAddress,
+    );
+    await original.inviteAgentToContextGraph(
+      contextGraphId,
+      requester.agentAddress,
+      ownerAddress,
+      delegation,
+    );
+    const requestGeneration = original.getJoinRequestGeneration(delegation);
+    const binding = await original.readRfc64CurrentCuratorAuthorityBindingV1(
+      contextGraphId,
+    );
+    expect(binding).not.toBeNull();
+    (original as any).runImmediatePostApprovalSync = vi.fn(async () => {});
+    await original.setRequesterJoinRequestPending(
+      contextGraphId,
+      requester.agentAddress,
+      requestGeneration,
+      curatorPeerId,
+    );
+    const approval = JSON.parse(decoder.decode(await joinRequestHandler(original)(
+      encoder.encode(JSON.stringify({
+        type: 'join-approved',
+        contextGraphId,
+        agentAddress: requester.agentAddress,
+        requestGeneration,
+        curatorAgentAddress: binding!.agentAddress,
+        curatorAuthorityEra: binding!.authorityEra,
+      })),
+      curatorPeerId,
+    )));
+    expect(approval).toEqual({ ok: true });
+    expect(await original.readRequesterJoinRequestState(
+      contextGraphId,
+      requester.agentAddress,
+    )).toMatchObject({
+      status: 'approved',
+      curatorPeerId,
+      curatorAgentAddress: binding!.agentAddress,
+      curatorAuthorityEra: binding!.authorityEra,
+    });
+    const sharedStore = original.store;
+    const rawBinding = await sharedStore.query(`SELECT ?agent ?era WHERE {
+      GRAPH <urn:dkg:local:requester-join-state> {
+        ?state <urn:dkg:local:requester-join-state:curator-agent-address> ?agent ;
+          <urn:dkg:local:requester-join-state:curator-authority-era> ?era .
+      }
+    }`);
+    expect(rawBinding).toEqual({
+      type: 'bindings',
+      bindings: [{
+        agent: `"${binding!.agentAddress}"`,
+        era: `"${binding!.authorityEra}"`,
+      }],
+    });
+    await original.stop();
+    const restarted = await DKGAgent.create({
+      name: 'PrivateBootstrapDurableCuratorBindingRestarted',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: created.chain,
+      dataDir,
+      contextGraphMembershipStore: membershipStore,
+      contextGraphSubscriptionStore: subscriptionStore,
+      syncSharedMemoryOnConnect: false,
+      syncReconcilerEnabled: false,
+      syncOnConnectEnabled: false,
+      durableSyncEnabled: false,
+      rfc64CatalogActivation: { enabled: false },
+    });
+    (restarted as any).localAgents.set(ownerAddress, ownerLocalAgent);
+    (restarted as any).localAgents.set(requester.agentAddress, requesterLocalAgent);
+    (restarted as any).defaultAgentAddress = ownerAddress;
+    await restarted.start();
+    agent = restarted;
+    vi.spyOn(restarted, 'findAgentByPeerId').mockResolvedValue(null);
+
+    expect(await restarted.hasConfirmedMetaState(contextGraphId)).toBe(true);
+    expect(await restarted.readRequesterJoinRequestState(
+      contextGraphId,
+      requester.agentAddress,
+    )).toMatchObject({
+      status: 'approved',
+      curatorPeerId,
+      curatorAgentAddress: binding!.agentAddress,
+      curatorAuthorityEra: binding!.authorityEra,
+    });
+    await expect(restarted.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
+      contextGraphId as never,
+    )).resolves.toBe(binding!.agentAddress);
+
+    const replacementOwner = ethers.Wallet.createRandom().address;
+    await created.chain.__transferContextGraphOwnership(BigInt(onChainId!), replacementOwner);
+    await expect(restarted.readRfc64CurrentCuratorAuthorityBindingV1(contextGraphId))
+      .resolves.toMatchObject({
+        agentAddress: replacementOwner.toLowerCase(),
+        authorityEra: (BigInt(binding!.authorityEra) + 1n).toString(),
+      });
+    await expect(restarted.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
+      contextGraphId as never,
+    )).resolves.toBeNull();
+  });
+
   it('does not let a delayed older join request replace the curator pending generation', async () => {
     const created = await createAgent('PrivateBootstrapCuratorGenerationOrder');
     agent = created.agent;
@@ -865,18 +1040,16 @@ describe('private CG membership bootstrap recovery', () => {
       accessPolicy: 1,
       callerAgentAddress: owner,
     });
-    const requester = ethers.Wallet.createRandom();
+    const requester = await agent.registerAgent(
+      'approve-generation-race-requester',
+      { framework: 'test' },
+    );
     const issuedAtMs = Date.now();
-    const makeDelegation = (timestamp: number, peerId: string) => signAgentDelegation({
-      agentAddress: requester.address,
-      scope: joinDelegationScope(created.chain.deploymentId, contextGraphId),
-      issuedAtMs: timestamp,
-      expiresAtMs: timestamp + 60_000,
-      delegateePeerId: peerId,
-      agentPrivateKey: requester.privateKey,
-    });
-    const older = await makeDelegation(issuedAtMs, '12D3KooWApproveRaceOlder');
-    const newer = await makeDelegation(issuedAtMs + 1, '12D3KooWApproveRaceNewer');
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(issuedAtMs);
+    const older = await agent.signJoinRequest(contextGraphId, requester.agentAddress);
+    clock.mockReturnValue(issuedAtMs + 1);
+    const newer = await agent.signJoinRequest(contextGraphId, requester.agentAddress);
+    clock.mockRestore();
     await agent.storePendingJoinRequest(contextGraphId, older, 'older');
 
     let releaseApproval!: () => void;
@@ -901,7 +1074,7 @@ describe('private CG membership bootstrap recovery', () => {
       return actualStoreOnce(...args);
     };
 
-    const approval = agent.approveJoinRequest(contextGraphId, requester.address, owner);
+    const approval = agent.approveJoinRequest(contextGraphId, requester.agentAddress, owner);
     await approvalStarted;
     const newerStore = agent.storePendingJoinRequest(contextGraphId, newer, 'newer');
     await Promise.resolve();
@@ -910,9 +1083,9 @@ describe('private CG membership bootstrap recovery', () => {
     releaseApproval();
     await Promise.all([approval, newerStore]);
     expect(newerStoreStarted).toBe(true);
-    expect(await agent.loadPendingJoinDelegation(contextGraphId, requester.address))
+    expect(await agent.loadPendingJoinDelegation(contextGraphId, requester.agentAddress))
       .toMatchObject({ signature: newer.signature, delegateePeerId: newer.delegateePeerId });
-    expect(await agent.getJoinRequestStatus(contextGraphId, requester.address)).toBe('pending');
+    expect(await agent.getJoinRequestStatus(contextGraphId, requester.agentAddress)).toBe('pending');
   });
 
   it.each(['queued', 'ok'] as const)(
@@ -1056,6 +1229,71 @@ describe('private CG membership bootstrap recovery', () => {
       contextGraphId,
       '12D3KooWPrivateBootstrapCurator',
     );
+  });
+
+  it('persists and promotes a matching chain-discovered wire binding on join approval', async () => {
+    ({ agent } = await createAgent('PrivateBootstrapWirePromotion'));
+    const contextGraphId = 'private-bootstrap-wire-promotion';
+    const wireId = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    const approvedAddress = agent.getDefaultAgentAddress()!;
+    const curatorPeerId = '12D3KooWPrivateBootstrapWirePromotionCurator';
+    const requestGeneration = `0x${'9'.repeat(64)}`;
+    const subscriptionWrites: any[] = [];
+    const internals = agent as any;
+
+    internals.setContextGraphSubscription(wireId, {
+      subscribed: false,
+      synced: false,
+      onChainHash: wireId,
+      pendingMeta: true,
+    }, { persist: false });
+    expect(internals.bindOnChainContextGraphIdFromNameHash(
+      wireId,
+      '3',
+      { persist: false },
+    )).toBe(wireId);
+
+    internals.config.contextGraphMembershipStore = {
+      upsert: async () => {},
+      delete: async () => {},
+    };
+    internals.config.contextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async (record: any) => { subscriptionWrites.push({ ...record }); },
+      delete: async () => {},
+    };
+    internals.isTrustedJoinDecisionSender = async () => true;
+    internals.runImmediatePostApprovalSync = vi.fn(async () => {});
+    await agent.setRequesterJoinRequestPending(
+      contextGraphId,
+      approvedAddress,
+      requestGeneration,
+      curatorPeerId,
+    );
+
+    const response = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
+      encoder.encode(JSON.stringify({
+        type: 'join-approved',
+        contextGraphId,
+        agentAddress: approvedAddress,
+        requestGeneration,
+      })),
+      curatorPeerId,
+    )));
+
+    expect(response).toEqual({ ok: true });
+    expect(internals.subscribedContextGraphs.has(wireId)).toBe(false);
+    expect(internals.subscribedContextGraphs.get(contextGraphId)).toMatchObject({
+      subscribed: true,
+      onChainId: '3',
+      onChainHash: wireId,
+    });
+    expect(subscriptionWrites).toContainEqual(expect.objectContaining({
+      id: contextGraphId,
+      subscribed: true,
+      onChainId: '3',
+      onChainHash: wireId,
+    }));
   });
 
   it('ACKs join-approved without optional persistence stores and starts bootstrap once', async () => {
@@ -1364,7 +1602,9 @@ describe('private CG membership bootstrap recovery', () => {
     const actualPrepare = agent.prepareInviteAgentToContextGraph.bind(agent);
     const actualCommitPrepared = agent.commitPreparedInviteAgentToContextGraph.bind(agent);
     let persistenceFinished = false;
+    let profilePublishedAfterPersistence = false;
     let notificationObservedPersistence = false;
+    let notificationObservedProfile = false;
     (agent as any).prepareInviteAgentToContextGraph = async (
       ...args: Parameters<typeof actualPrepare>
     ) => {
@@ -1378,8 +1618,12 @@ describe('private CG membership bootstrap recovery', () => {
       await actualCommitPrepared(...args);
       persistenceFinished = true;
     };
+    (agent as any).reannounceApprovalAuthorityProfile = async () => {
+      profilePublishedAfterPersistence = persistenceFinished;
+    };
     (agent as any).notifyJoinApproval = async () => {
       notificationObservedPersistence = persistenceFinished;
+      notificationObservedProfile = profilePublishedAfterPersistence;
     };
 
     const response = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
@@ -1394,6 +1638,8 @@ describe('private CG membership bootstrap recovery', () => {
 
     expect(response).toEqual({ ok: true, status: 'approved', alreadyMember: true });
     expect(notificationObservedPersistence).toBe(true);
+    expect(profilePublishedAfterPersistence).toBe(true);
+    expect(notificationObservedProfile).toBe(true);
     expect((await (agent as any).getContextGraphAllowedDelegateePeers(contextGraphId))
       .get(member.address.toLowerCase())).toContain(delegateePeerId);
     expect((await (agent as any).getContextGraphAllowedDelegateeKeys(contextGraphId))

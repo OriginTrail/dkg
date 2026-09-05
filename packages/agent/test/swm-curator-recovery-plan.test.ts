@@ -345,6 +345,10 @@ describe('private SWM curator recovery planning', () => {
       name,
       listenHost: '127.0.0.1',
       chainAdapter: new MockChainAdapter(),
+      rfc64CatalogActivation: { enabled: false },
+    });
+    (agent as any).resolveRfc64CatalogReceiverAuthorityV1 = () => ({
+      legacySyncAllowed: true,
     });
     agents.push(agent);
     return agent;

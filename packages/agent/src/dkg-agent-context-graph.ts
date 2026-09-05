@@ -538,6 +538,31 @@ export class ContextGraphMethods extends DKGAgentBase {
         }
       }
     }
+    // The graph, subscription, and their backing stores are already durable at
+    // this boundary. RFC-64 responsibility is a fail-closed projection of that
+    // committed state, so a transient policy/authority read must not turn a
+    // successful create into a misleading rejected operation (the daemon may
+    // otherwise skip an explicitly requested registration and a retry sees an
+    // already-existing graph). Wait for the first attempt, then contain only
+    // this post-commit projection failure and queue one detached retry. The
+    // reconciler clears receiver authority before rethrowing, so neither path
+    // opens a legacy or unauthenticated catalog lane.
+    try {
+      await this.reconcileRfc64CatalogResponsibilityV1(opts.id);
+    } catch (error) {
+      this.log.warn(
+        ctx,
+        `RFC-64 responsibility remains blocked after creating "${opts.id}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+      void Promise.resolve()
+        .then(() => this.reconcileRfc64CatalogResponsibilityV1(opts.id))
+        .catch((retryError) => {
+          this.log.warn(
+            ctx,
+            `RFC-64 responsibility retry remains blocked for "${opts.id}": ${retryError instanceof Error ? retryError.message : String(retryError)}`,
+          );
+        });
+    }
   }
 
   /**
@@ -1581,6 +1606,24 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     this.contextGraphMetaProjection.markDirtyFromQuads(quadsToInsert);
 
+    // Private admission changes the release-native RFC-64 roster even when
+    // the graph was registered before this member joined. Advance the
+    // curator-authored metadata generation under the same admission lock,
+    // then refresh the locally accepted authority before notifying the new
+    // member. Delegation-only refreshes keep the existing roster generation.
+    if (!alreadyAllowed) {
+      const rosterVersion = await this.advanceRfc64PrivateRosterVersionV1(contextGraphId);
+      if (rosterVersion !== null) {
+        await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId).catch((error) => {
+          this.log.warn(
+            ctx,
+            `RFC-64 private roster rotation remains incomplete for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return null;
+        });
+      }
+    }
+
     if (curatorAgentAddress) {
       this.upsertContextGraphMember({
         contextGraphId,
@@ -1734,6 +1777,21 @@ export class ContextGraphMethods extends DKGAgentBase {
       }
     }
     await this.saveSwmSenderKeyState();
+    // Authority generation is durable but fallible. It deliberately follows
+    // confidentiality-critical sender-key invalidation: a failed metadata
+    // UPDATE may leave catalog authority visibly incomplete, but it must never
+    // leave a revoked member able to decrypt a subsequent private share.
+    const rosterVersion = await this.advanceRfc64PrivateRosterVersionV1(contextGraphId);
+    if (rosterVersion !== null) {
+      await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId).catch((error) => {
+        this.log.warn(
+          ctx,
+          `RFC-64 private roster removal remains incomplete for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return null;
+      });
+    }
+    // Reconciled after the projection is invalidated at the end of removal.
     // `queueSharedMemoryGossipSubscription` may start a metadata projection
     // read while the revocation mutation is still completing. Invalidate once
     // more after all awaited removal work so that an in-flight pre-revoke

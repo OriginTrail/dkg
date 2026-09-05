@@ -283,6 +283,7 @@ describe('requester per-CG priority admission', () => {
         debug: noop,
       },
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
       syncSharedMemoryFromPeerDetailedExecution:
         LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     };

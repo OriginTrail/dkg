@@ -11,18 +11,12 @@
  */
 
 import { performance } from 'node:perf_hooks';
-import {
-  openRfc64PersistenceV1,
-  type Rfc64PersistenceV1,
-} from './rfc64/persistence-v1.js';
-import {
-  openSqliteFinalizationRecoveryStore,
-} from './finalization-recovery-sqlite-store.js';
+import { openRfc64PersistenceV1, type Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
+import { openSqliteFinalizationRecoveryStore } from './finalization-recovery-sqlite-store.js';
 import type { FinalizationRecoveryHealth } from './finalization-recovery-store.js';
 import { FinalizationRuntime } from './finalization-runtime.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
-import type { Rfc64CatalogSynchronizationEvidenceV1 } from
-  './rfc64/catalog-synchronization-evidence-v1.js';
+import type { Rfc64CatalogSynchronizationEvidenceV1 } from './rfc64/catalog-synchronization-evidence-v1.js';
 import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 import { Rfc64CatalogMutationCoordinatorV1 } from './rfc64/catalog-mutation-runtime-v1.js';
 import type { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
@@ -35,8 +29,7 @@ import { SyncOnConnectPeerScheduler } from './sync/on-connect/peer-scheduler.js'
 import type {
   Rfc64AuthorizedSwmRecoveryPlanV1,
   Rfc64SwmRecoveryCoordinatorV1,
-} from
-  './rfc64/swm-recovery-coordinator-v1.js';
+} from './rfc64/swm-recovery-coordinator-v1.js';
 import {
   DKGNode,
   ProtocolRouter,
@@ -57,7 +50,13 @@ import {
   type QueryOptions,
   type SortedGraphSetSource,
 } from '@origintrail-official/dkg-storage';
-import { emptyRpcUsageWindow, type ChainAdapter, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
+import {
+  bindContextGraphAuthorityReader,
+  emptyRpcUsageWindow,
+  type ChainAdapter,
+  type ContextGraphAuthorityReaderCapability,
+  type RpcUsageWindow,
+} from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher,
   SharedMemoryHandler,
@@ -85,9 +84,7 @@ import { NetworkAdmissionCoordinator } from './p2p/network-admission-coordinator
 import { type CGMemberEnumerator } from './swm/enumerate-cg-members.js';
 
 import { type SwmAckQuorum } from './swm/ack-quorum.js';
-import {
-  type SwmFanoutPeerSelector,
-} from './swm/swm-fanout-peer-selection.js';
+import { type SwmFanoutPeerSelector } from './swm/swm-fanout-peer-selection.js';
 import { SwmHostModeStore } from './swm/host-mode-store.js';
 
 import { DiscoveryRateLimit } from './swm/discovery-rate-limit.js';
@@ -387,6 +384,8 @@ export class DKGAgentBase {
   peerResolver!: PeerResolver;
   readonly eventBus: TypedEventBus;
   protected readonly chain: ChainAdapter;
+  /** Finalized-authority support classified once at the adapter boundary. */
+  protected readonly contextGraphAuthorityReaderCapability: ContextGraphAuthorityReaderCapability;
   /** Shared memory-owned root entities per context graph: entity → creatorPeerId. Used by publisher and shared memory handler. */
   protected readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
   protected readonly contextGraphMetaProjection: ContextGraphMetaProjection;
@@ -1129,6 +1128,13 @@ export class DKGAgentBase {
    */
   protected ensureProfilePublishedInFlight?: Promise<void>;
   /**
+   * Coalesces the explicit profile reannouncement performed before a private
+   * join approval is exposed. This is intentionally separate from
+   * `ensureProfilePublishedInFlight`: readiness remains idempotent once the
+   * profile exists, while approval must refresh the public authority record.
+   */
+  protected approvalAuthorityProfileReannouncementInFlight?: Promise<void>;
+  /**
    * OT-RFC-38 / LU-6 Phase B — sliding-window rate-limiter applied
    * to pre-registration (beacon-discovered) ciphertext writes.
    * Bounds the freemium-tier abuse vector: any wallet can broadcast
@@ -1524,6 +1530,7 @@ export class DKGAgentBase {
     this.publicSnapshotStore = publicSnapshotStore;
     this.eventBus = eventBus;
     this.chain = chain;
+    this.contextGraphAuthorityReaderCapability = bindContextGraphAuthorityReader(chain);
     // OT-RFC-43 A2 — retain the allocator so finalize can allocate-at-finalize
     // (the publisher gets the same instance as `kaAllocator`).
     this.kaNumberAllocator = config.kaNumberAllocator;

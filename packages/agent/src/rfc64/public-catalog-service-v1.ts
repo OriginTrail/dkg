@@ -105,16 +105,21 @@ import type {
 } from './public-catalog-activation-config-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+  RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
   Rfc64PublicCatalogTransportV1,
   encodeRfc64PublicCatalogHeadAnnouncementV1,
   parseRfc64PublicCatalogHeadAnnouncementV1,
   type FetchedRfc64PublicCatalogHeadV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
+  type Rfc64PublicCatalogHeadReplayCompletionV2,
+  type Rfc64PublicCatalogHeadReplayAdmissionV1,
+  type Rfc64PublicCatalogHeadReplayRequestV1,
 } from './public-catalog-transport-v1.js';
 import {
   snapshotRfc64PublicCatalogAnnouncementPeersV1,
   snapshotRfc64RemoteCatalogAnnouncementPeersV1,
 } from './catalog-peers-v1.js';
+import { Rfc64CoalescingSupervisorV1 } from './coalescing-supervisor-v1.js';
 import { mapWithConcurrency } from '../map-with-concurrency.js';
 
 export {
@@ -126,6 +131,7 @@ export {
 const DEFAULT_TRANSPORT_TIMEOUT_MS = 10_000;
 const MAX_FAILOVER_PROVIDERS_V1 = 8;
 const MAX_CONCURRENT_PROVIDER_DISCOVERIES_V1 = 4;
+const MAX_ANNOUNCED_CURRENT_HEAD_SCOPES_V1 = 1_024;
 
 export interface Rfc64PublicCatalogServiceOptionsV1 {
   readonly router: ProtocolRouter;
@@ -137,7 +143,12 @@ export interface Rfc64PublicCatalogServiceOptionsV1 {
   readonly receiver?: Rfc64PublicCatalogReceiverOptionsV1;
   /** Full production native content/reconciliation path. Omission is diagnostic-only. */
   readonly native?: Rfc64PublicCatalogServiceNativeOptionsV1;
-  /** Optional Gate-3 pull-discovery capability; no automatic lifecycle trigger. */
+  /**
+   * Optional Gate-3 pull-discovery capability. When native reconciliation is
+   * also configured, accepted announcements coalesce into bounded,
+   * authenticated current-head pulls so stale history cannot monopolize the
+   * ambient receiver queue.
+   */
   readonly currentHeadDiscovery?: Rfc64PublicCatalogServiceCurrentHeadDiscoveryOptionsV1;
   /** Per-peer announce/fetch timeout (ms). */
   readonly transportTimeoutMs?: number;
@@ -152,6 +163,11 @@ export interface Rfc64PublicCatalogServiceOptionsV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     remotePeerId: string,
   ) => void;
+  /** Policy-authorized signal to replay durable current heads to one peer. */
+  readonly onCatalogHeadReplayRequested?: (
+    request: Readonly<Rfc64PublicCatalogHeadReplayRequestV1>,
+    remotePeerId: string,
+  ) => Rfc64PublicCatalogHeadReplayAdmissionV1;
   /** Canonical immutable per-CG and operation-direction authority resolver. */
   readonly resolveContextGraphAuthority?: (
     contextGraphId: ContextGraphIdV1,
@@ -259,6 +275,13 @@ export interface AnnounceRfc64PublicCatalogHeadResultV1 {
   readonly failedPeers: ReadonlyArray<{ readonly peerId: string; readonly error: string }>;
 }
 
+export interface RequestRfc64CatalogHeadReplayInputV1 {
+  readonly remotePeerId: string;
+  readonly networkId: NetworkIdV1;
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly signal?: AbortSignal;
+}
+
 export interface DiscoverRfc64PublicCatalogCurrentHeadInputV1 {
   readonly remotePeerId: string;
   readonly scope: Rfc64PublicCatalogCurrentHeadScopeV1;
@@ -297,6 +320,11 @@ export interface SynchronizedRfc64CatalogCurrentHeadProvidersV1 {
   readonly providerAttempts: number;
 }
 
+interface AnnouncedCurrentHeadTargetV1 {
+  readonly scope: Readonly<Rfc64PublicCatalogCurrentHeadScopeV1>;
+  readonly remotePeerIds: Set<string>;
+}
+
 export interface Rfc64PublicCatalogServiceStatsV1 {
   readonly started: boolean;
   readonly acceptedPolicies: number;
@@ -323,6 +351,8 @@ export class Rfc64PublicCatalogServiceV1 {
     direction: Rfc64CatalogAuthorityDirectionV1,
   ) => Rfc64CatalogAuthorityPolicyV1;
   readonly #localPeerId: string | undefined;
+  readonly #announcedCurrentHeadTargets = new Map<string, AnnouncedCurrentHeadTargetV1>();
+  readonly #announcedCurrentHeadSupervisor: Rfc64CoalescingSupervisorV1 | undefined;
   #started = false;
   #closed = false;
 
@@ -364,7 +394,9 @@ export class Rfc64PublicCatalogServiceV1 {
       // path (which awaits this callback) is never stalled on a fetch.
       onCatalogHeadAvailable: (announcement, remotePeerId) => {
         this.#receiver.schedule(announcement, remotePeerId);
+        this.#requestAnnouncedCurrentHeadSynchronization(announcement, remotePeerId);
       },
+      onCatalogHeadReplayRequested: options.onCatalogHeadReplayRequested,
     });
 
     this.#currentHeadDiscoveryTransport = options.currentHeadDiscovery === undefined
@@ -443,11 +475,20 @@ export class Rfc64PublicCatalogServiceV1 {
           if (lane === 'shadow-stage') {
             return stagingReconciler.reconcileHead(remotePeerId, announcement, signal);
           }
-          const reconcile = () => nativeReconciler.reconcileHead(
-            remotePeerId,
-            announcement,
-            signal,
-          );
+          const reconcile = async () => {
+            // The scheduler's optimistic applied-head check happens before it
+            // enters the semantic mutation lane. Re-check while holding that
+            // lane so an ambient hint and an awaited bootstrap cannot both
+            // run post-commit lifecycle work for the same durable head.
+            if (await nativeReconciler.isHeadApplied(announcement)) {
+              return 'applied' as const;
+            }
+            return nativeReconciler.reconcileHead(
+              remotePeerId,
+              announcement,
+              signal,
+            );
+          };
           return options.runCatalogMutationExclusive === undefined
             ? reconcile()
             : options.runCatalogMutationExclusive(
@@ -458,6 +499,15 @@ export class Rfc64PublicCatalogServiceV1 {
         },
       };
     this.#receiver = new Rfc64PublicCatalogReceiverV1(reconciler, options.receiver);
+    this.#announcedCurrentHeadSupervisor = (
+      this.#currentHeadDiscoveryTransport === undefined || nativeReconciler === undefined
+    )
+      ? undefined
+      : new Rfc64CoalescingSupervisorV1({
+        runPass: (signal) => this.#synchronizeAnnouncedCurrentHeads(signal),
+        onError: () => undefined,
+        closingMessage: 'RFC-64 announced current-head synchronization closing',
+      });
   }
 
   get started(): boolean {
@@ -485,6 +535,13 @@ export class Rfc64PublicCatalogServiceV1 {
     input: AcceptRfc64CatalogAccessSnapshotInputV1,
   ): AcceptedRfc64CatalogAccessSnapshotV1 {
     return this.#policies.acceptCurrent(input);
+  }
+
+  /** Accept a generation independently rebuilt from canonical DKG authority. */
+  acceptAuthoritativePolicySnapshot(
+    input: AcceptRfc64CatalogAccessSnapshotInputV1,
+  ): AcceptedRfc64CatalogAccessSnapshotV1 {
+    return this.#policies.acceptAuthoritativeCurrent(input);
   }
 
   acceptedPolicySnapshot(
@@ -541,11 +598,18 @@ export class Rfc64PublicCatalogServiceV1 {
 
   /** Fence receiver scheduling and drain applied-head callbacks; keep authoring live. */
   async closeReceiverAdmissionAndDrain(): Promise<void> {
+    await this.#announcedCurrentHeadSupervisor?.close();
+    this.#announcedCurrentHeadTargets.clear();
     await this.#receiver.close();
   }
 
   /** Abort receiver work for a graph while retaining verified served data. */
   deactivateReceiverContextGraph(contextGraphId: string): void {
+    for (const [key, target] of this.#announcedCurrentHeadTargets) {
+      if (target.scope.contextGraphId === contextGraphId) {
+        this.#announcedCurrentHeadTargets.delete(key);
+      }
+    }
     this.#receiver.cancelContextGraph(contextGraphId);
   }
 
@@ -717,6 +781,27 @@ export class Rfc64PublicCatalogServiceV1 {
     return this.#announceCatalogHeadSnapshot(announcement, peers, input.signal);
   }
 
+  /** Ask one authorized peer to replay every durable current head for a CG. */
+  async requestCatalogHeadReplay(
+    input: RequestRfc64CatalogHeadReplayInputV1,
+  ): Promise<Readonly<Rfc64PublicCatalogHeadReplayCompletionV2>> {
+    this.#requireStarted();
+    const held = this.#policies.lookup(input.networkId, input.contextGraphId);
+    if (held === null) {
+      throw new Error('RFC-64 catalog replay request is not bound to an accepted policy');
+    }
+    return this.#transport.requestCatalogHeadReplay(
+      input.remotePeerId,
+      Object.freeze({
+        kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
+        networkId: held.policy.networkId,
+        contextGraphId: held.policy.contextGraphId,
+        policyDigest: held.policyDigest,
+      }),
+      this.#sendOptions(input.signal),
+    );
+  }
+
   /**
    * Pull and authenticate one provider's semantically current public-root head.
    * The discovery response is treated as a hint: this method exact-fetches the
@@ -803,6 +888,10 @@ export class Rfc64PublicCatalogServiceV1 {
     });
     if (discovered === null) return null;
     if (signal?.aborted) throw signal.reason;
+    // Discovery is an asynchronous authority boundary. Revalidate immediately
+    // before queue admission so a policy/roster rotation or receiver
+    // deactivation that completed during exact fetch cannot enqueue stale work.
+    this.#assertAcceptedCatalogAnnouncement(discovered.announcement);
     const completion = await this.#receiver.scheduleVerifiedCurrentHeadAndWait([{
       announcement: discovered.announcement,
       remotePeerId,
@@ -881,6 +970,9 @@ export class Rfc64PublicCatalogServiceV1 {
       exactHeadIdentityV1(discovered.announcement) === selectedIdentity
     ));
     if (signal?.aborted) throw signal.reason;
+    for (const { discovered } of selected) {
+      this.#assertAcceptedCatalogAnnouncement(discovered.announcement);
+    }
     const completion = await this.#receiver.scheduleVerifiedCurrentHeadAndWait(selected.map(({
       remotePeerId,
       discovered,
@@ -914,9 +1006,10 @@ export class Rfc64PublicCatalogServiceV1 {
     });
   }
 
-  /** Idle-await the receiver (tests / graceful shutdown coordination). */
-  whenReceiverIdle(): Promise<void> {
-    return this.#receiver.whenIdle();
+  /** Idle-await pull acceleration and the receiver (tests / graceful shutdown coordination). */
+  async whenReceiverIdle(): Promise<void> {
+    await this.#announcedCurrentHeadSupervisor?.whenIdle();
+    await this.#receiver.whenIdle();
   }
 
   stats(): Rfc64PublicCatalogServiceStatsV1 {
@@ -932,6 +1025,64 @@ export class Rfc64PublicCatalogServiceV1 {
     return signal === undefined
       ? { timeoutMs: this.#transportTimeoutMs }
       : { timeoutMs: this.#transportTimeoutMs, signal };
+  }
+
+  /**
+   * Turn a policy-admitted availability hint into a bounded pull request. The
+   * announcement itself never gains priority: only discovery's exact-fetch and
+   * signature/scope checks may schedule the verified-current-head lane.
+   */
+  #requestAnnouncedCurrentHeadSynchronization(
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    remotePeerId: string,
+  ): void {
+    const supervisor = this.#announcedCurrentHeadSupervisor;
+    if (supervisor === undefined || supervisor.closed || this.#closed) return;
+    const key = announcedCurrentHeadScopeKeyV1(announcement);
+    let target = this.#announcedCurrentHeadTargets.get(key);
+    if (target === undefined) {
+      if (this.#announcedCurrentHeadTargets.size >= MAX_ANNOUNCED_CURRENT_HEAD_SCOPES_V1) {
+        return;
+      }
+      target = {
+        scope: Object.freeze({
+          networkId: announcement.networkId,
+          contextGraphId: announcement.contextGraphId,
+          subGraphName: announcement.subGraphName,
+          authorAddress: announcement.authorAddress,
+          catalogEra: announcement.catalogEra,
+        }),
+        remotePeerIds: new Set<string>(),
+      };
+      this.#announcedCurrentHeadTargets.set(key, target);
+    }
+    if (target.remotePeerIds.size < MAX_FAILOVER_PROVIDERS_V1) {
+      target.remotePeerIds.add(remotePeerId);
+    }
+    supervisor.request();
+  }
+
+  /** One globally bounded pass; requests arriving during it coalesce into the next pass. */
+  async #synchronizeAnnouncedCurrentHeads(signal: AbortSignal): Promise<void> {
+    const targets = [...this.#announcedCurrentHeadTargets.values()];
+    this.#announcedCurrentHeadTargets.clear();
+    await mapWithConcurrency(
+      targets,
+      MAX_CONCURRENT_PROVIDER_DISCOVERIES_V1,
+      async ({ scope, remotePeerIds }) => {
+        if (signal.aborted || remotePeerIds.size === 0) return;
+        try {
+          await this.synchronizeCurrentCatalogHeadFromProviders({
+            remotePeerIds: [...remotePeerIds],
+            scope,
+            signal,
+          });
+        } catch {
+          // Best-effort acceleration only. The original ambient task remains
+          // authoritative recovery work, and a later hint requests a new pull.
+        }
+      },
+    );
   }
 
   #authorityForOperation(
@@ -1160,6 +1311,18 @@ function exactHeadIdentityV1(
     announcement.policyDigest,
     announcement.catalogHeadObjectDigest,
     announcement.signatureVariantDigest,
+  ].join('\n');
+}
+
+function announcedCurrentHeadScopeKeyV1(
+  announcement: Readonly<Rfc64PublicCatalogHeadAnnouncementV1>,
+): string {
+  return [
+    announcement.networkId,
+    announcement.contextGraphId,
+    announcement.subGraphName ?? '',
+    announcement.authorAddress,
+    announcement.catalogEra,
   ].join('\n');
 }
 

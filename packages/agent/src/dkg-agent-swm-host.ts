@@ -2323,6 +2323,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
       newOnChainId,
     );
     if (!transition.changed) return;
+    // Some verified late-binding paths intentionally mutate the canonical
+    // in-memory subscription only after their durable write commits. They do
+    // not subsequently pass through setContextGraphSubscription(), so without
+    // this notification a subscribed Edge can remain outside the RFC-64
+    // responsibility registry until restart even though its chain id is now
+    // authoritative. Clone-based callers still let the canonical setter own
+    // the transition and avoid an eager decision against the old row.
+    if (this.subscribedContextGraphs.get(localCgId) === sub) {
+      void this.reconcileRfc64CatalogResponsibilityV1(localCgId).catch((error) => {
+        this.log.warn(
+          createOperationContext('system'),
+          `RFC-64 responsibility resolution failed after binding "${localCgId}": ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
     if (!transition.onChainIdChanged) return;
     // The bound on-chain id actually CHANGED (repair / recreate / re-register).
     // Any prior reconcile progress refers to the OLD chain graph and must be
@@ -4690,6 +4705,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     );
     const rosterProofUpgraded = !record.curatorRosterConfirmed && curatorRosterConfirmed;
     if (!membershipUnchanged) {
+      const priorCycleWasIncomplete = record.backoffKind === 'incomplete-cycle'
+        || [...record.attemptedPeerIds]
+          .some((peerId) => !record.cleanAbsentPeerIds.has(peerId));
       const previousCandidatePeerIds = record.candidatePeerIds;
       const nextCandidatePeerIds = new Set(candidatePeerIds);
       record.candidatePeerIds = new Set(candidatePeerIds);
@@ -4711,9 +4729,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
       } else if (!rosterProofUpgraded) {
         // Pure growth preserves valid credits for retained identities, but the
         // newly observed peer is uncredited and immediately breaks backoff.
+        // Do not let a publication-window incomplete response compound into
+        // multi-minute suppression merely because startup discovers the same
+        // recovery roster one peer at a time. Clean-absence history still
+        // keeps its exponential damping; only transport/timing uncertainty
+        // starts a fresh base-delay epoch when the evidence universe grows.
         record.phase = 'collecting';
         record.backoffKind = undefined;
         record.nextRetryAt = 0;
+        if (priorCycleWasIncomplete) record.failures = 0;
         record.collectionDeadlineAt = now
           + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
       }

@@ -147,6 +147,27 @@ export class AgentRegistryMethods extends DKGAgentBase {
     return tracked;
   }
 
+  async reannounceApprovalAuthorityProfile(this: DKGAgent): Promise<void> {
+    if (this.approvalAuthorityProfileReannouncementInFlight) {
+      return this.approvalAuthorityProfileReannouncementInFlight;
+    }
+
+    let tracked: Promise<void>;
+    const publish = (async () => {
+      // A locally persisted profile is not proof that the peer receiving a
+      // private join approval has observed it. Explicitly re-publish so the
+      // joining peer can resolve the curator's current authority and keys.
+      await this.publishProfile();
+    })();
+    tracked = publish.finally(() => {
+      if (this.approvalAuthorityProfileReannouncementInFlight === tracked) {
+        this.approvalAuthorityProfileReannouncementInFlight = undefined;
+      }
+    });
+    this.approvalAuthorityProfileReannouncementInFlight = tracked;
+    return tracked;
+  }
+
   async publishProfile(this: DKGAgent): Promise<PublishResult> {
     // Tail-chain serialization: every caller waits for the prior
     // `publishProfile()` to settle (success or failure) before
@@ -587,7 +608,10 @@ export class AgentRegistryMethods extends DKGAgentBase {
    * @param address Ethereum address of the registered agent.
    */
   getCustodialAgentPrivateKey(this: DKGAgent, address: string): string | undefined {
-    const record = this.localAgents.get(address);
+    const record = this.localAgents.get(address)
+      ?? (ethers.isAddress(address)
+        ? this.localAgents.get(ethers.getAddress(address))
+        : undefined);
     if (!record || record.mode !== 'custodial') return undefined;
     return record.privateKey;
   }
@@ -597,7 +621,12 @@ export class AgentRegistryMethods extends DKGAgentBase {
    * Returns undefined if the agent is unknown to this node.
    */
   getLocalAgentMode(this: DKGAgent, address: string): 'custodial' | 'self-sovereign' | undefined {
-    return this.localAgents.get(address)?.mode;
+    return (
+      this.localAgents.get(address)
+      ?? (ethers.isAddress(address)
+        ? this.localAgents.get(ethers.getAddress(address))
+        : undefined)
+    )?.mode;
   }
 
   /**

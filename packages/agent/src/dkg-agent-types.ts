@@ -1359,6 +1359,7 @@ export interface Rfc64CatalogAccessPolicyAuthorityConfigV1 {
   /** Exact authenticated libp2p-peer to agent-wallet binding. */
   readonly resolveRemoteAgentAddress: (
     remotePeerId: string,
+    contextGraphId: ContextGraphIdV1,
   ) => Promise<EvmAddressV1 | null>;
 }
 
@@ -1455,21 +1456,22 @@ export interface DKGAgentConfig {
    */
   rfc64CatalogDeploymentProfile?: CatalogSealDeploymentProfileV1;
   /**
-   * Explicit agent-identity authority required before accepting a private
-   * RFC-64 catalog policy. Omission preserves the legacy open-only lane.
+   * Compatibility-only manual peer/agent authority. Omission derives private
+   * RFC-64 authority from the local operational agent and verified DKG agent
+   * directory; unknown remote identities remain fail-closed.
    */
   rfc64CatalogAccessPolicyAuthority?: Rfc64CatalogAccessPolicyAuthorityConfigV1;
   /**
-   * Additive policy-neutral RFC-64 activation. It can select public and
-   * invite-only CGs. Existing selected-public callers may continue to use
-   * `rfc64PublicCatalogActivation`.
+   * Optional policy-neutral compatibility seed and rollout override. Runtime
+   * CG responsibility selects public and invite-only catalog lanes by default.
+   * Existing selected-public callers may continue to use
+   * `rfc64PublicCatalogActivation` for one compatibility release.
    */
   rfc64CatalogActivation?: Rfc64CatalogActivationInputV1;
   /**
-   * Canonical selected-public activation resolved through the versioned,
-   * side-effect-free activation surface. Mutually exclusive with the legacy
-   * deployment, auto-publish, and bootstrap controls; the accepted manifest
-   * is its only CG set.
+   * Deprecated selected-public compatibility seed. It remains mutually
+   * exclusive with the older loose deployment/auto-publish/bootstrap controls,
+   * but its accepted manifest no longer owns runtime CG selection.
    */
   rfc64PublicCatalogActivation?: Rfc64PublicCatalogActivationInputV1;
   /**
@@ -1478,7 +1480,7 @@ export interface DKGAgentConfig {
    * selected-public activation above.
    */
   rfc64PublicCatalogAutoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
-  /** Omission preserves manual RFC-64 current-head discovery. */
+  /** Deprecated static bootstrap; omission uses normal announcements/reconnect discovery. */
   rfc64PublicCatalogBootstrap?: Rfc64PublicCatalogBootstrapConfigV1;
   /**
    * public-projection enable flag. When set, a private CG's confirmed VM

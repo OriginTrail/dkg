@@ -59,6 +59,7 @@ import {
   loadSharedMemoryQuadsForScope,
   loadSelectedSharedMemoryQuads,
   resolveSharedMemoryScopeGraphs,
+  tryReplaceGraphAndSubjectAtomically,
   tryReplaceGraphAtomically,
 } from '@origintrail-official/dkg-storage';
 import { bestEffortNotify } from './best-effort-notify.js';
@@ -106,10 +107,7 @@ import {
   computeFlatKCRootV10 as computeFlatKCRoot,
   computeFlatKCMerkleLeafCountV10,
 } from './merkle.js';
-import {
-  validateCanonicalGraphScopedKnowledgeAssetPayload,
-  validatePublishRequest,
-} from './validation.js';
+import { validateCanonicalGraphScopedKnowledgeAssetPayload, validatePublishRequest } from './validation.js';
 import { isFailClosedInlineEncrypt } from './async-lift-publish-options.js';
 import {
   assertionOriginalGraph,
@@ -516,6 +514,33 @@ export interface KaIdAllocator {
   markReconciled(): void;
 }
 
+/**
+ * Stable identity of a validated root promotion after its durable operation
+ * intent has been fixed, but before any external confirmer or SWM mutation can
+ * observe it. Callers may use this seam for idempotent write-ahead fences.
+ */
+export interface DurableRootPromotionIdentity {
+  readonly contextGraphId: string;
+  readonly assertionCoordinate: string;
+  readonly lifecycleAgentAddress: string;
+  readonly kaUal: string;
+  readonly assertionVersion: string;
+  readonly shareOperationId: string;
+}
+
+/** One metadata subject committed atomically with the exact root SWM graph. */
+export interface DurableRootPromotionAtomicCompanion {
+  readonly graphUri: string;
+  readonly subject: string;
+  readonly quads: readonly Quad[];
+  /**
+   * Release any resolver-side admission lease exactly once. `true` is a known
+   * compound commit, `false` is a known non-commit, and `undefined` preserves a
+   * conservative witness after an indeterminate dispatch failure.
+   */
+  readonly settle?: (committed: boolean | undefined) => void;
+}
+
 export interface DKGPublisherConfig {
   store: TripleStore;
   chain: ChainAdapter;
@@ -554,6 +579,15 @@ export interface DKGPublisherConfig {
    * flows; the real EVM adapter then throws on the missing reservedKaId.
    */
   kaAllocator?: KaIdAllocator;
+  /**
+   * Synchronous root-only resolver for metadata that must share the SWM graph's
+   * atomic commit. It runs after validation and durable operation-intent
+   * persistence, but before curator confirmation or any SWM content mutation.
+   * A rejection aborts the promotion fail closed.
+   */
+  resolveDurableRootPromotionAtomicCompanion?: (
+    input: Readonly<DurableRootPromotionIdentity>,
+  ) => Readonly<DurableRootPromotionAtomicCompanion> | undefined;
   /**
    * RFC ka-metadata-trim Phase 3 (P3.3) — `metadata.provenanceEvents` config.
    * Default `true`. When `false` ("lite mode"), the lifecycle writers skip the
@@ -1236,6 +1270,9 @@ export class DKGPublisher implements Publisher {
   private readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
   /** OT-RFC-43 Option 1 — deterministic KA-id allocator (optional; see DKGPublisherConfig). */
   private readonly kaAllocator?: KaIdAllocator;
+  private readonly resolveDurableRootPromotionAtomicCompanion?: (
+    input: Readonly<DurableRootPromotionIdentity>,
+  ) => Readonly<DurableRootPromotionAtomicCompanion> | undefined;
   /** Authors whose allocator floor has been reconciled against the chain this process. */
   private readonly reconciledKaAuthors = new Set<string>();
   /** RFC ka-metadata-trim P3.3 — gate for the lifecycle PROV event rows (default true). */
@@ -1245,6 +1282,8 @@ export class DKGPublisher implements Publisher {
     this.store = config.store;
     this.chain = config.chain;
     this.kaAllocator = config.kaAllocator;
+    this.resolveDurableRootPromotionAtomicCompanion =
+      config.resolveDurableRootPromotionAtomicCompanion;
     this.provenanceEvents = config.provenanceEvents !== false;
     this.eventBus = config.eventBus;
     this.keypair = config.keypair;
@@ -8960,43 +8999,99 @@ export class DKGPublisher implements Publisher {
       }
     }
 
-    // Strict curator-ack gate (OT-RFC-49 curator-leader) for the WM→SWM promote
-    // path — the same confirm-before-commit seam as `_shareImpl`, here between the
-    // gossip-message build (above) and the SWM mutation (below). A non-confirmation
-    // aborts the promote with NO SWM mutation, leaving WM intact for retry. The
-    // per-KA promote lock stays held across confirmation and the complete local
-    // commit, so concurrent callers cannot expose two operation IDs for one
-    // UAL/version. Fail closed if the message is somehow absent (cannot confirm
-    // what we cannot send).
-    if (opts?.confirmBeforeCommit) {
-      if (!gossipPayload) throw new CuratorUnconfirmedError(contextGraphId);
-      const confirmation = await opts.confirmBeforeCommit(gossipPayload.message);
-      if (!confirmation.applied) {
-        if (confirmation.rejected) {
-          // A definitive rejection proves the curator did not apply this
-          // provisional operation, so a corrected fresh-WM retry may claim a
-          // new ID. An ID that existed at method entry is never removed: an
-          // earlier ambiguous confirmation may already have applied it.
-          if (!durableShareOperationId) {
-            await this.store.delete([operationIdQuad, operationIntentQuad]);
-          }
-          throw new CuratorRejectedError(contextGraphId);
-        }
-        throw new CuratorUnconfirmedError(contextGraphId);
-      }
-    }
-
-    // The UAL-derived graph is the ownership boundary. Replace the complete
-    // graph; never inspect, claim, skip, or delete individual RDF subjects.
+    // Resolve and snapshot the optional root companion before an external
+    // confirmer can observe this operation. Its rows are not written yet: the
+    // exact SWM graph and companion subject share one atomic commit below, so a
+    // failed promotion cannot strand a durable false-incomplete witness. The
+    // resolver itself may conservatively hydrate process-local state and must be
+    // idempotent because retries reuse operationId.
+    const resolvedRootCompanion = opts?.subGraphName === undefined
+      ? this.resolveDurableRootPromotionAtomicCompanion?.(Object.freeze({
+          contextGraphId,
+          assertionCoordinate: name,
+          lifecycleAgentAddress: agentAddress,
+          kaUal: contentScope.ual,
+          assertionVersion: contentScope.assertionVersion,
+          shareOperationId: operationId,
+        }))
+      : undefined;
     const swmQuads = normalizedQuads.map((q) => ({ ...q, graph: swmGraphUri }));
+    let companionCommitted: boolean | undefined = false;
     try {
-      await this.replaceExactKnowledgeAssetGraph(
-        swmGraphUri,
-        swmQuads,
-        'Knowledge Asset WM-to-SWM promotion',
-      );
-    } catch (error) {
-      throw classifyExactSwmGraphReplaceFailure(error);
+      const rootCompanion = resolvedRootCompanion === undefined
+        ? undefined
+        : Object.freeze({
+            graphUri: resolvedRootCompanion.graphUri,
+            subject: resolvedRootCompanion.subject,
+            quads: Object.freeze(resolvedRootCompanion.quads.map(
+              (quad) => Object.freeze({ ...quad }),
+            )),
+          });
+      // Strict curator-ack gate (OT-RFC-49 curator-leader) for the WM→SWM promote
+      // path — the same confirm-before-commit seam as `_shareImpl`, here between the
+      // gossip-message build (above) and the SWM mutation (below). A non-confirmation
+      // aborts the promote with NO SWM mutation, leaving WM intact for retry. The
+      // per-KA promote lock stays held across confirmation and the complete local
+      // commit, so concurrent callers cannot expose two operation IDs for one
+      // UAL/version. Fail closed if the message is somehow absent (cannot confirm
+      // what we cannot send).
+      if (opts?.confirmBeforeCommit) {
+        if (!gossipPayload) throw new CuratorUnconfirmedError(contextGraphId);
+        const confirmation = await opts.confirmBeforeCommit(gossipPayload.message);
+        if (!confirmation.applied) {
+          if (confirmation.rejected) {
+            // A definitive rejection proves the curator did not apply this
+            // provisional operation, so a corrected fresh-WM retry may claim a
+            // new ID. An ID that existed at method entry is never removed: an
+            // earlier ambiguous confirmation may already have applied it.
+            if (!durableShareOperationId) {
+              await this.store.delete([operationIdQuad, operationIntentQuad]);
+            }
+            throw new CuratorRejectedError(contextGraphId);
+          }
+          throw new CuratorUnconfirmedError(contextGraphId);
+        }
+      }
+
+      // The UAL-derived graph is the ownership boundary. Replace the complete
+      // graph; never inspect, claim, skip, or delete individual RDF subjects.
+      try {
+        if (rootCompanion === undefined) {
+          await this.replaceExactKnowledgeAssetGraph(
+            swmGraphUri,
+            swmQuads,
+            'Knowledge Asset WM-to-SWM promotion',
+          );
+        } else {
+          // Once dispatched, a rejection may describe either complete atomic
+          // outcome. Preserve the provisional in-memory witness unless the
+          // helper returns a clean preflight capability refusal.
+          companionCommitted = undefined;
+          const replaced = await tryReplaceGraphAndSubjectAtomically(
+            this.store,
+            swmGraphUri,
+            swmQuads,
+            rootCompanion.graphUri,
+            rootCompanion.subject,
+            rootCompanion.quads.map((quad) => ({ ...quad })),
+            { source: 'publisher.assertionPromote.atomicRootCompanion' },
+          );
+          if (!replaced) {
+            companionCommitted = false;
+            throw Object.assign(
+              new Error(
+                'Knowledge Asset WM-to-SWM promotion with a durable root companion requires atomic graph/subject replacement support',
+              ),
+              { code: 'ATOMIC_GRAPH_AND_SUBJECT_REPLACE_UNSUPPORTED', graphUri: swmGraphUri },
+            );
+          }
+          companionCommitted = true;
+        }
+      } catch (error) {
+        throw classifyExactSwmGraphReplaceFailure(error);
+      }
+    } finally {
+      resolvedRootCompanion?.settle?.(companionCommitted);
     }
     // #2079: the SIXTH replace site. Same graph the catch-up witness keys on,
     // so the memo now describes content that is gone — and a replace leaves the

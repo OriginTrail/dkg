@@ -41,6 +41,7 @@ import {
   type Quad,
 } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
+import { prepareRfc64LateLegacySwmBoundaryV1 } from './rfc64/legacy-swm-boundary-v1.js';
 import {
   EVMChainAdapter,
   NoChainAdapter,
@@ -90,10 +91,7 @@ import {
 
 import { type SloProtocolStats } from './p2p/messenger.js';
 
-import {
-  resolveSyncContextGraphPriorities,
-  validateSyncResponderSnapshotLimitsConfig,
-} from './sync/policy.js';
+import { resolveSyncContextGraphPriorities, validateSyncResponderSnapshotLimitsConfig } from './sync/policy.js';
 
 import { resolveDiscoveredContextGraphBinding } from './context-graph-chain-discovery-binding.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -180,19 +178,14 @@ import { OwnershipMethods } from './dkg-agent-ownership.js';
 import { ContextGraphResolveMethods } from './dkg-agent-cg-resolve.js';
 import { CclPolicyMethods } from './dkg-agent-ccl.js';
 import { EndorseVerifyMethods } from './dkg-agent-endorse.js';
-import {
-  Rfc64CatalogMethods,
-  snapshotRfc64CatalogAccessPolicyAuthorityV1,
-} from './dkg-agent-rfc64-catalog.js';
+import { Rfc64CatalogMethods, snapshotRfc64CatalogAccessPolicyAuthorityV1 } from './dkg-agent-rfc64-catalog.js';
 import { Rfc64CatalogAutoPublishMethods } from './dkg-agent-rfc64-catalog-auto-publish.js';
-import { Rfc64SwmCatalogProjectionMethods } from
-  './dkg-agent-rfc64-swm-catalog-projection.js';
+import { Rfc64SwmCatalogProjectionMethods } from './dkg-agent-rfc64-swm-catalog-projection.js';
 import {
   bindRfc64SwmCatalogProjectionOwnerV1,
   Rfc64SwmCatalogProjectionOwnerV1,
   Rfc64SwmCatalogProjectionSupervisorMethods,
-} from
-  './dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
+} from './dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
 import {
   bindRfc64CatalogBootstrapOwnerV1,
   partitionRfc64CatalogBootstrapV1,
@@ -212,20 +205,15 @@ import {
 import { snapshotRfc64CatalogBootstrapConfigV1 } from './rfc64/catalog-authority-config-v1.js';
 import { Rfc64CatalogSyncMethods } from './dkg-agent-rfc64-catalog-sync.js';
 import { ContextGraphRegistryMethods } from './dkg-agent-cg-registry.js';
-import { Rfc64SwmRecoveryCoordinatorV1 } from
-  './rfc64/swm-recovery-coordinator-v1.js';
-import { resolveRfc64PeerSwmRecoveryPlanV1 } from
-  './rfc64/swm-recovery-plan-v1.js';
+import { Rfc64SwmRecoveryCoordinatorV1 } from './rfc64/swm-recovery-coordinator-v1.js';
+import { resolveRfc64PeerSwmRecoveryPlanV1 } from './rfc64/swm-recovery-plan-v1.js';
 import { JoinRequestMethods } from './dkg-agent-join.js';
 import { SwmSubstrateMethods } from './dkg-agent-swm-substrate.js';
 import { QueryMethods } from './dkg-agent-query.js';
 import { AgentRegistryMethods } from './dkg-agent-registry.js';
 import { WorkspaceCryptoMethods } from './dkg-agent-crypto.js';
 import { LifecycleSyncMethods } from './dkg-agent-lifecycle.js';
-import {
-  PublishMethods,
-  SEAL_CAPABILITY_GAP_CODE,
-} from './dkg-agent-publish.js';
+import { PublishMethods, SEAL_CAPABILITY_GAP_CODE } from './dkg-agent-publish.js';
 import { SwmHostModeMethods } from './dkg-agent-swm-host.js';
 import { ContextGraphMethods } from './dkg-agent-context-graph.js';
 import { ImportedArtifactMethods } from './imported-artifact.js';
@@ -627,13 +615,16 @@ export class DKGAgent extends DKGAgentBase {
         ),
         acceptTrack2Policies: (policies) => {
           if (policies.length === 0) return;
-          const service = this.rfc64PublicCatalogServiceV1;
-          if (service === undefined) {
+          if (this.rfc64PublicCatalogServiceV1 === undefined) {
             throw new Error('RFC-64 Track-2 bootstrap requires the public catalog service');
           }
           for (const accepted of policies) {
             const { policyEnvelope } = accepted;
-            service.acceptPolicySnapshot({
+            // The bootstrap manifest is itself an explicit pre-10.0.16
+            // operator surface. Route it through the compatibility-aware API
+            // so it remains active when no release-native responsibility has
+            // been discovered for the CG.
+            this.acceptRfc64CatalogAccessSnapshotV1({
               policy: policyEnvelope.payload,
               policyDigest: computeContextGraphPolicyObjectDigestV1(policyEnvelope),
               roster: accepted.rosterEnvelope?.payload,
@@ -819,6 +810,8 @@ export class DKGAgent extends DKGAgentBase {
     const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1(
       constructedAgentChainId,
     );
+    const rfc64UnifiedCatalogExplicitlyDisabled =
+      normalizedConfig.rfc64CatalogActivation?.enabled === false;
     const activations = resolveRfc64CatalogActivationsV1({
       catalog: normalizedConfig.rfc64CatalogActivation,
       publicCatalog: normalizedConfig.rfc64PublicCatalogActivation,
@@ -829,19 +822,53 @@ export class DKGAgent extends DKGAgentBase {
       : activations.publicCatalog;
     const rfc64PublicCatalogControls = resolveRfc64PublicCatalogControlsV1({
       activation,
-      legacyDeploymentProfile: normalizedConfig.rfc64CatalogDeploymentProfile,
-      legacyAutoPublish: normalizedConfig.rfc64PublicCatalogAutoPublish,
-      legacyBootstrap: normalizedConfig.rfc64PublicCatalogBootstrap,
+      legacyDeploymentProfile: rfc64UnifiedCatalogExplicitlyDisabled
+        ? undefined
+        : normalizedConfig.rfc64CatalogDeploymentProfile,
+      legacyAutoPublish: rfc64UnifiedCatalogExplicitlyDisabled
+        ? undefined
+        : normalizedConfig.rfc64PublicCatalogAutoPublish,
+      legacyBootstrap: rfc64UnifiedCatalogExplicitlyDisabled
+        ? undefined
+        : normalizedConfig.rfc64PublicCatalogBootstrap,
     }, chainIdentity);
+    // The unified block owns precedence over the deprecated public-only
+    // alias. Omission is the 10.0.16 product default; explicit enabled=false
+    // remains a one-release compatibility rollback.
+    const rfc64CatalogExplicitlyDisabled =
+      rfc64UnifiedCatalogExplicitlyDisabled
+      || (
+        normalizedConfig.rfc64CatalogActivation === undefined
+        && normalizedConfig.rfc64PublicCatalogActivation?.enabled === false
+      );
+    const rfc64CatalogConfigurationOmitted =
+      normalizedConfig.rfc64CatalogActivation === undefined
+      && normalizedConfig.rfc64PublicCatalogActivation === undefined
+      && normalizedConfig.rfc64CatalogDeploymentProfile === undefined
+      && normalizedConfig.rfc64CatalogAccessPolicyAuthority === undefined
+      && normalizedConfig.rfc64PublicCatalogAutoPublish === undefined
+      && normalizedConfig.rfc64PublicCatalogBootstrap === undefined;
+    // Agents without a persistence root cannot run the catalog service. Preserve
+    // the historical in-memory legacy lane only for a truly omitted RFC-64
+    // configuration; an explicit catalog request is rejected below instead of
+    // silently suppressing both catalog and legacy delivery.
+    const rfc64CatalogEphemeralLegacyFallback =
+      !normalizedConfig.dataDir && rfc64CatalogConfigurationOmitted;
     const rfc64CatalogExecutionPlan = resolveRfc64CatalogExecutionPlanV1({
       configuredContextGraphs: normalizedConfig.syncContextGraphs ?? [],
+      responsibilityDefaultMode:
+        rfc64CatalogExplicitlyDisabled || rfc64CatalogEphemeralLegacyFallback
+          ? 'legacy'
+          : 'catalog',
       standaloneTrack2ContextGraphs:
         normalizedConfig.rfc64PublicCatalogActivation === undefined
           ? (rfc64PublicCatalogControls.bootstrap?.acceptedPublicPolicies.map(
             ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
           ) ?? [])
           : [],
-      activation: catalogActivation,
+      activation: rfc64UnifiedCatalogExplicitlyDisabled
+        ? Object.freeze({ ...catalogActivation, enabled: true })
+        : catalogActivation,
     });
     const config: StorageAckNormalizedDKGAgentConfig = {
       ...normalizedConfig,
@@ -857,6 +884,16 @@ export class DKGAgent extends DKGAgentBase {
       throw new TypeError('rfc64Catalog bootstrap requires dataDir');
     }
     if (
+      !config.dataDir
+      && !rfc64CatalogExecutionPlan.killSwitchActive
+      && rfc64CatalogExecutionPlan.responsibilityDefaultMode === 'catalog'
+    ) {
+      throw new TypeError(
+        'RFC-64 catalog mode requires dataDir; omit RFC-64 catalog configuration '
+        + 'for ephemeral legacy mode or set rfc64CatalogActivation.enabled=false',
+      );
+    }
+    if (
       catalogActivation.deploymentProfile !== undefined
       && rfc64PublicCatalogControls.deploymentProfile !== undefined
       && JSON.stringify(catalogActivation.deploymentProfile)
@@ -867,7 +904,9 @@ export class DKGAgent extends DKGAgentBase {
     const rfc64CatalogDeploymentProfile = catalogActivation.deploymentProfile
       ?? rfc64PublicCatalogControls.deploymentProfile;
     const legacyRfc64CatalogAccessPolicyAuthority = snapshotRfc64CatalogAccessPolicyAuthorityV1(
-      config.rfc64CatalogAccessPolicyAuthority,
+      rfc64UnifiedCatalogExplicitlyDisabled
+        ? undefined
+        : config.rfc64CatalogAccessPolicyAuthority,
     );
     if (
       legacyRfc64CatalogAccessPolicyAuthority !== undefined
@@ -1066,6 +1105,28 @@ export class DKGAgent extends DKGAgentBase {
       kaAllocator: config.kaNumberAllocator,
       // RFC ka-metadata-trim P3.3 — `metadata.provenanceEvents` (default true).
       provenanceEvents: config.metadataProvenanceEvents,
+      resolveDurableRootPromotionAtomicCompanion: (input) => {
+        const executionPlan = resolvedConfig.rfc64CatalogExecutionPlan;
+        const configuredMode = executionPlan.contextGraphModes[input.contextGraphId]
+          ?? executionPlan.responsibilityDefaultMode;
+        if (!executionPlan.killSwitchActive && configuredMode !== 'legacy') return;
+
+        // Ephemeral legacy mode has no durable state to protect across a later
+        // catalog restart. Persistent legacy mode must have completed boundary
+        // initialization in start(); the marker owner deliberately throws when
+        // it has not, so a root cannot escape without its negative witness.
+        if (resolvedConfig.dataDir === undefined) return;
+        if (agentRef === undefined) {
+          throw new Error('RFC-64 legacy SWM write-ahead owner is unavailable');
+        }
+        return prepareRfc64LateLegacySwmBoundaryV1(
+          agentRef,
+          input.contextGraphId,
+          input.kaUal,
+          input.shareOperationId,
+          input.assertionVersion,
+        );
+      },
     });
 
     try {
@@ -2112,7 +2173,7 @@ export class DKGAgent extends DKGAgentBase {
     }
     // Flush WM to disk before exit so the debounced 50ms flush in the
     // Oxigraph adapter can't lose the latest inserts when the process
-    // exits. See docs/bugs/wm-persistence-regression.md.
+    // exits. See packages/storage/README.md#oxigraph-persistence-contract.
     //
     // `store.close()` now THROWS on durable-write failures (ENOSPC,
     // EACCES, EROFS, etc.) — see oxigraph.ts. We log loudly but do not
@@ -2127,7 +2188,7 @@ export class DKGAgent extends DKGAgentBase {
         `[DKGAgent.stop] WM final flush FAILED on shutdown: ${(err as Error).message}. ` +
           `The store on disk may be missing recent inserts — operator should investigate ` +
           `(disk full, permission revoked, filesystem read-only, …). ` +
-          `See docs/bugs/wm-persistence-regression.md for the durability contract.`,
+          `See packages/storage/README.md#oxigraph-persistence-contract for the durability contract.`,
       );
     }
     this.started = false;
