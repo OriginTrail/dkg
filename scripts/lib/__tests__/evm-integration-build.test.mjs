@@ -52,7 +52,5 @@ test('EVM matrix consumes one same-run build and propagates producer failure', (
   });
   assert.match(errors.join('\n'), /build ended with failure/);
   assert.match(errors.join('\n'), /evm-integration was selected but ended with skipped/);
-  const runner = readFileSync(new URL('../../test-evm-integration.sh', import.meta.url), 'utf8');
-  assert.match(runner, /packages\/chain\/test\/evm-adapter\.test\.ts/,
-    'the omitted primary test must retain its EVM integration owner');
+
 });

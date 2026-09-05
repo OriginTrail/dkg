@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
+import { EVM_TEST_SCOPES } from '../../ci/evm-test-scopes.mjs';
 import { fileURLToPath } from 'node:url';
 import {
   PACKAGE_SPECS,
@@ -70,8 +71,9 @@ test('chain discovery excludes archived suites and the separately owned EVM inte
   const files = shards.flatMap((shard) => shard.files);
   assert.ok(files.includes('test/v8-v9-archive.test.ts'));
   assert.ok(files.every((file) => !file.startsWith('test/archive/')));
-  assert.ok(!files.includes('test/evm-adapter.test.ts'));
-  assert.deepEqual(independentlyDiscover('packages/chain', ['test/evm-adapter.test.ts'], '../../vitest.evm-integration.ts'), ['test/evm-adapter.test.ts']);
+  const integration = independentlyDiscover('packages/chain', [], '../../vitest.evm-integration.ts');
+  assert.deepEqual(integration, [...EVM_TEST_SCOPES.chain.files].sort());
+  assert.ok(integration.every((file) => !files.includes(file)), 'primary and dedicated EVM owners must be disjoint');
 });
 
 test('unknown files are conservatively weighted and still assigned exactly once', () => {

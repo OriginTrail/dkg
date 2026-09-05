@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config';
+import { EVM_TEST_SCOPES } from '../../scripts/ci/evm-test-scopes.mjs';
 import { tornadoChainCoverage } from '../../vitest.coverage';
 
 process.env.HARDHAT_PORT = '9545';
@@ -12,7 +13,7 @@ export default defineConfig({
     // from vitest discovery while keeping the source on disk for history.
     // evm-adapter owns a separate live Hardhat node and runs in the required
     // EVM integration scope. Avoid executing it again in the primary shards.
-    exclude: ['**/node_modules/**', '**/dist/**', 'test/archive/**', 'test/evm-adapter.test.ts'],
+    exclude: ['**/node_modules/**', '**/dist/**', 'test/archive/**', ...EVM_TEST_SCOPES.chain.files],
     testTimeout: 120_000,
     globalSetup: ['test/hardhat-global-setup.ts'],
     maxWorkers: 1,
