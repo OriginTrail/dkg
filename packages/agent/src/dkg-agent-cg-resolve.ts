@@ -84,7 +84,8 @@ import { stripLiteral } from './dkg-agent-utils.js';
 import { SYNC_PAGE_SIZE, SYNC_AUTH_MAX_AGE_MS, CHAIN_POLICY_READ_TIMEOUT_MS } from './dkg-agent-constants.js';
 
 import { createAbortError, runBoundedOperation } from './bounded-operation.js';
-
+import type { LiveOnChainAccessPolicyState } from './context-graph-access-policy-state.js';
+import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
   type SyncRequestEnvelope,
   type ContextGraphSub,
@@ -394,6 +395,7 @@ export type RegisteredContextGraphAuthority =
         | 'local-chain-binding-unavailable'
         | 'local-existence-unavailable'
         | 'chain-access-policy-unavailable'
+        | 'chain-access-policy-timeout'
         | 'chain-access-policy-unknown'
         | 'chain-participant-authority-unsupported'
         | 'chain-participant-authority-unavailable'
@@ -1224,9 +1226,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     if (registration.kind !== 'registered') return registration;
     const { onChainId } = registration;
 
-    let accessPolicy: 0 | 1 | null;
+    let accessPolicyState: LiveOnChainAccessPolicyState;
     try {
-      accessPolicy = await this.readLiveOnChainAccessPolicy(
+      accessPolicyState = await this.resolveLiveOnChainAccessPolicyState(
         onChainId.toString(),
         createOperationContext('system'),
         { signal: options.signal },
@@ -1239,9 +1241,21 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         detail: err instanceof Error ? err.message : String(err),
       };
     }
-    if (accessPolicy === null) {
+    if (accessPolicyState.kind === 'unavailable') {
+      if (
+        accessPolicyState.reason === 'chain-liveness-read-timeout'
+        || accessPolicyState.reason === 'chain-access-policy-read-timeout'
+      ) {
+        return {
+          kind: 'unavailable',
+          onChainId,
+          reason: 'chain-access-policy-timeout',
+          detail: accessPolicyState.detail,
+        };
+      }
       return { kind: 'unavailable', onChainId, reason: 'chain-access-policy-unknown' };
     }
+    const accessPolicy = accessPolicyState.accessPolicy;
     if (accessPolicy === 0) return { kind: 'public', onChainId };
 
     const cacheKey = onChainId.toString();
