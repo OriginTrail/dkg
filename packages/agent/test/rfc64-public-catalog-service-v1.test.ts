@@ -1551,27 +1551,20 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     });
     const staleHint = headAt('1', 'a');
     const current = headAt('40', 'd');
-    vi.spyOn(service, 'discoverCurrentCatalogHead').mockResolvedValue(Object.freeze({
-      announcement: current,
-      head: {} as never,
-    }));
-    const synchronizeFromProviders = service.synchronizeCurrentCatalogHeadFromProviders
-      .bind(service);
-    const automaticInputs: string[][] = [];
-    const automaticResults: Array<Awaited<ReturnType<
-      typeof service.synchronizeCurrentCatalogHeadFromProviders
-    >>> = [];
-    vi.spyOn(service, 'synchronizeCurrentCatalogHeadFromProviders')
-      .mockImplementation(async (input) => {
-        automaticInputs.push([...input.remotePeerIds]);
-        if (automaticInputs.length === 1) {
+    const discoveredFrom: string[] = [];
+    vi.spyOn(service, 'discoverCurrentCatalogHead').mockImplementation(
+      async ({ remotePeerId }) => {
+        discoveredFrom.push(remotePeerId);
+        if (discoveredFrom.length === 1) {
           firstAutomaticPassStarted.resolve(undefined);
           await releaseFirstAutomaticPass.promise;
         }
-        const result = await synchronizeFromProviders(input);
-        automaticResults.push(result);
-        return result;
-      });
+        return Object.freeze({
+          announcement: current,
+          head: {} as never,
+        });
+      },
+    );
     service.start();
 
     const wireHint = encodeRfc64PublicCatalogHeadAnnouncementV1(staleHint);
@@ -1594,16 +1587,17 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     releaseFirstAutomaticPass.resolve(undefined);
 
     await service.whenReceiverIdle();
-    expect(automaticInputs).toEqual([
-      ['peer-a'],
-      ['peer-a', 'peer-b'],
+    expect(discoveredFrom).toEqual([
+      'peer-a',
+      'peer-a',
+      'peer-b',
     ]);
-    expect(automaticResults).toContainEqual(expect.objectContaining({
-      providerPeerIds: ['peer-a', 'peer-b'],
-      appliedProviderPeerId: 'peer-b',
-    }));
-    expect(reconciled).toContainEqual({ peerId: 'peer-a', version: '40' });
-    expect(reconciled).toContainEqual({ peerId: 'peer-b', version: '40' });
+    expect(reconciled.filter(({ version }) => version === '40')).toEqual([
+      { peerId: 'peer-a', version: '40' },
+      { peerId: 'peer-a', version: '40' },
+      { peerId: 'peer-b', version: '40' },
+    ]);
+    expect(currentApplied).toBe(true);
     await service.close();
   });
 

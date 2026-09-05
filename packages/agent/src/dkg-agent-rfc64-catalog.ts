@@ -63,6 +63,10 @@ import type { DKGAgent } from './dkg-agent.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
 import {
+  RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1,
+  Rfc64CatalogAuthorityRefreshLoopV1,
+} from './rfc64/catalog-authority-refresh-loop-v1.js';
+import {
   snapshotRfc64CatalogDeploymentProfileV1,
 } from './rfc64/catalog-authority-config-v1.js';
 import type { AcceptedOpenCatalogPolicyV1 } from './rfc64/open-catalog-policy-v1.js';
@@ -458,11 +462,8 @@ const rfc64CatalogAuthorityProgressV1 =
 const rfc64CatalogAuthorityRevisionsV1 =
   new WeakMap<DKGAgent, Map<string, number>>();
 const rfc64DirectAcceptedCompatibilityV1 = new WeakMap<DKGAgent, Set<string>>();
-const RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1 = 5 * 60_000;
-const rfc64CatalogAuthorityRefreshV1 = new WeakMap<DKGAgent, Readonly<{
-  timer: ReturnType<typeof setInterval>;
-  state: { inFlight: Promise<void> | null; controller: AbortController | null };
-}>>();
+const rfc64CatalogAuthorityRefreshV1 =
+  new WeakMap<DKGAgent, Rfc64CatalogAuthorityRefreshLoopV1>();
 const rfc64SystemContextGraphIdsV1 = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_V1 = 64;
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_PER_PEER_V1 = 4;
@@ -2394,44 +2395,22 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       });
     }
     if (!rfc64CatalogAuthorityRefreshV1.has(this)) {
-      const state: {
-        inFlight: Promise<void> | null;
-        controller: AbortController | null;
-      } = { inFlight: null, controller: null };
-      const refresh = (): void => {
-        if (state.inFlight !== null || this.rfc64PublicCatalogServiceV1 === undefined) return;
-        const controller = new AbortController();
-        state.controller = controller;
-        const run = (async (): Promise<void> => {
-          // Sequential refresh is an intentional global bound. A large Core
-          // responsibility set cannot turn one timer tick into an RPC burst,
-          // and a later tick coalesces while this pass is still running.
-          for (const responsibility of this.readRfc64CatalogResponsibilitiesV1()) {
-            if (!responsibility.active || responsibility.mode === 'legacy') continue;
-            await this.reconcileRfc64CatalogAccessAuthorityV1(
-              responsibility.contextGraphId,
-              controller.signal,
-            ).catch((error) => {
-              if (controller.signal.aborted) return;
-              this.log.warn(
-                createOperationContext('system'),
-                `RFC-64 authority refresh incomplete for "${responsibility.contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
-              );
-            });
-          }
-        })();
-        state.inFlight = run;
-        void run.finally(() => {
-          if (state.inFlight === run) {
-            state.inFlight = null;
-            state.controller = null;
-          }
-        }).catch(() => undefined);
-      };
-      const timer = setInterval(refresh,
-        RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1);
-      timer.unref?.();
-      rfc64CatalogAuthorityRefreshV1.set(this, Object.freeze({ timer, state }));
+      const authorityRefresh = new Rfc64CatalogAuthorityRefreshLoopV1({
+        readActiveContextGraphIds: () => this.readRfc64CatalogResponsibilitiesV1()
+          .filter(({ active, mode }) => active && mode !== 'legacy')
+          .map(({ contextGraphId }) => contextGraphId),
+        refreshContextGraph: (contextGraphId, signal) => (
+          this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal)
+        ),
+        onRefreshFailure: (contextGraphId, error) => {
+          this.log.warn(
+            createOperationContext('system'),
+            `RFC-64 authority refresh incomplete for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
+          );
+        },
+      });
+      authorityRefresh.start();
+      rfc64CatalogAuthorityRefreshV1.set(this, authorityRefresh);
     }
     this.log.info(ctx, 'RFC-64 public author-catalog transport started');
   }
@@ -2445,9 +2424,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   async closeRfc64PublicCatalogServiceV1(this: DKGAgent): Promise<void> {
     const authorityRefresh = rfc64CatalogAuthorityRefreshV1.get(this);
     if (authorityRefresh !== undefined) {
-      clearInterval(authorityRefresh.timer);
       rfc64CatalogAuthorityRefreshV1.delete(this);
-      authorityRefresh.state.controller?.abort(
+      authorityRefresh.close(
         new Error('RFC-64 authority refresh stopped during agent shutdown'),
       );
     }

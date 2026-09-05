@@ -10,6 +10,7 @@ import {
   buildAuthorAttestationTypedData,
   computeAuthorCatalogScopeDigestV1,
   computeNetworkId,
+  createOperationContext,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
   projectCanonicalGraphScopedAuthorSealRowsV1,
   SYSTEM_CONTEXT_GRAPHS,
@@ -40,6 +41,10 @@ import {
 } from '../src/rfc64/open-catalog-policy-v1.js';
 import { Rfc64PublicCatalogSuccessorProducerV1 } from
   '../src/rfc64/public-catalog-successor-producer-v1.js';
+import {
+  RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1,
+  rfc64CatalogAuthorityRefreshSchedulerV1,
+} from '../src/rfc64/catalog-authority-refresh-loop-v1.js';
 import type { Rfc64PublicCatalogActivationInputV1 } from
   '../src/rfc64/public-catalog-activation-config-v1.js';
 import { deriveRfc64PublicSwmGraphV1 } from
@@ -947,27 +952,29 @@ describe('RFC-64 rollout authority integration', () => {
   });
 
   it('coalesces authority-refresh timer ticks and retires the timer on shutdown', async () => {
-    const realSetInterval = globalThis.setInterval;
-    const authorityRefreshTicks: Array<() => void> = [];
-    const intervalSpy = vi.spyOn(globalThis, 'setInterval').mockImplementation((
-      (callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
-        const handle = realSetInterval(callback, delay, ...args);
-        if (
-          delay === 5 * 60_000
-          && callback.toString().includes('rfc64PublicCatalogServiceV1')
-        ) {
-          authorityRefreshTicks.push(() => callback(...args));
-        }
+    const scheduled: Array<Readonly<{
+      callback: () => void;
+      intervalMs: number;
+      handle: ReturnType<typeof setInterval>;
+    }>> = [];
+    const activeTimers = new Set<ReturnType<typeof setInterval>>();
+    const schedule = vi.spyOn(rfc64CatalogAuthorityRefreshSchedulerV1, 'setInterval')
+      .mockImplementation((callback, intervalMs) => {
+        const handle = Object.freeze({ ordinal: scheduled.length + 1 }) as unknown as
+          ReturnType<typeof setInterval>;
+        scheduled.push(Object.freeze({ callback, intervalMs, handle }));
+        activeTimers.add(handle);
         return handle;
-      }
-    ) as typeof setInterval);
-    let edge: DKGAgent;
-    try {
-      edge = await startAgent('authority-refresh-timer', undefined);
-    } finally {
-      intervalSpy.mockRestore();
-    }
-    expect(authorityRefreshTicks).toHaveLength(1);
+      });
+    const cancel = vi.spyOn(rfc64CatalogAuthorityRefreshSchedulerV1, 'clearInterval')
+      .mockImplementation((handle) => {
+        activeTimers.delete(handle);
+      });
+    const edge = await startAgent('authority-refresh-timer', undefined);
+    expect(schedule).toHaveBeenCalledTimes(1);
+    expect(scheduled[0]?.intervalMs)
+      .toBe(RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1);
+    expect(activeTimers).toEqual(new Set([scheduled[0]!.handle]));
     await edge.createContextGraph({
       id: CONTEXT_GRAPH_ID,
       name: 'Authority refresh timer lifecycle',
@@ -1005,16 +1012,16 @@ describe('RFC-64 rollout authority integration', () => {
         }
       });
 
-    authorityRefreshTicks[0]!();
+    scheduled[0]!.callback();
     await firstStarted;
-    authorityRefreshTicks[0]!();
+    scheduled[0]!.callback();
     await Promise.resolve();
     expect(reconcile).toHaveBeenCalledTimes(1);
     expect(peak).toBe(1);
 
     releaseFirst();
     await vi.waitFor(() => expect(active).toBe(0));
-    authorityRefreshTicks[0]!();
+    scheduled[0]!.callback();
     await vi.waitFor(() => expect(reconcile).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(active).toBe(0));
     expect(peak).toBe(1);
@@ -1027,9 +1034,26 @@ describe('RFC-64 rollout authority integration', () => {
     );
 
     await edge.closeRfc64PublicCatalogServiceV1();
-    authorityRefreshTicks[0]!();
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(cancel).toHaveBeenLastCalledWith(scheduled[0]!.handle);
+    expect(activeTimers.size).toBe(0);
+    scheduled[0]!.callback();
     await Promise.resolve();
     expect(reconcile).toHaveBeenCalledTimes(2);
+
+    edge.startRfc64PublicCatalogServiceV1(createOperationContext('system'));
+    expect(schedule).toHaveBeenCalledTimes(2);
+    expect(activeTimers).toEqual(new Set([scheduled[1]!.handle]));
+    await vi.waitFor(() => expect(active).toBe(0));
+    const callsBeforeRestartTick = calls;
+    scheduled[1]!.callback();
+    await vi.waitFor(() => expect(calls).toBe(callsBeforeRestartTick + 1));
+    await vi.waitFor(() => expect(active).toBe(0));
+
+    await edge.closeRfc64PublicCatalogServiceV1();
+    expect(cancel).toHaveBeenCalledTimes(2);
+    expect(cancel).toHaveBeenLastCalledWith(scheduled[1]!.handle);
+    expect(activeTimers.size).toBe(0);
   });
 
   it('keeps a durable create successful when post-commit responsibility resolution transiently fails', async () => {
