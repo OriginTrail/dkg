@@ -6,9 +6,6 @@ on:
       - integration/rfc64-devnet
     paths:
       - '.github/workflows/rfc64-inventory-windows.yml'
-      - 'scripts/ci/run-windows-persistence-evidence.mjs'
-      - 'scripts/ci/run-process-tree.mjs'
-      - 'scripts/lib/__tests__/process-tree-timeout.test.mjs'
       - 'scripts/lib/__tests__/windows-persistence-ci.test.mjs'
       - 'devnet/_bootstrap/package.json'
       - 'devnet/_bootstrap/rdf-canonize.d.ts'
@@ -31,9 +28,6 @@ on:
   pull_request:
     paths:
       - '.github/workflows/rfc64-inventory-windows.yml'
-      - 'scripts/ci/run-windows-persistence-evidence.mjs'
-      - 'scripts/ci/run-process-tree.mjs'
-      - 'scripts/lib/__tests__/process-tree-timeout.test.mjs'
       - 'scripts/lib/__tests__/windows-persistence-ci.test.mjs'
       - 'devnet/_bootstrap/package.json'
       - 'devnet/_bootstrap/rdf-canonize.d.ts'
@@ -74,6 +68,7 @@ jobs:
           # The control-object files account for most of the filesystem time.
           # Each group has its own runner, temporary stores, and process tree.
           - group: inventory
+            evidence: true
             tests: >-
               test/finalization-recovery-sqlite-deferred.test.ts
               test/finalization-recovery-sqlite-migration.test.ts
@@ -82,6 +77,7 @@ jobs:
               test/rfc64-agent-inventory-lifecycle.test.ts
               test/rfc64-author-catalog-producer.test.ts
           - group: object-stores
+            evidence: false
             tests: >-
               test/rfc64-control-object-store-v1.test.ts
               test/rfc64-control-object-store-lifecycle-v1.test.ts
@@ -109,9 +105,34 @@ jobs:
         # The canonical Gate 0 closure excludes unnecessary Solidity compilation.
         run: pnpm test:gate0:rfc64-persistence-lifecycle:build
 
-      - name: Validate persistence evidence
-        if: matrix.group == 'inventory'
-        run: pnpm ci:rfc64-persistence-evidence
+      - name: Typecheck RFC-64 evidence harness
+        if: matrix.evidence
+        run: pnpm typecheck:devnet:rfc64-evidence
+
+      - name: Test RFC-64 evidence harness
+        if: matrix.evidence
+        run: pnpm test:devnet:rfc64-evidence
+
+      - name: Typecheck Gate 0 lifecycle harness
+        if: matrix.evidence
+        run: pnpm typecheck:gate0:rfc64-persistence-lifecycle
+
+      - name: Generate Gate 0 persistence evidence
+        if: matrix.evidence
+        timeout-minutes: 20
+        run: pnpm test:gate0:rfc64-persistence-lifecycle:generate:only
+
+      - name: Verify Gate 0 persistence evidence
+        if: matrix.evidence
+        run: pnpm test:gate0:rfc64-persistence-lifecycle:verify
+
+      - name: Typecheck the lifecycle crash harness
+        if: matrix.evidence
+        run: >-
+          pnpm exec tsc --noEmit --target ES2022 --module NodeNext
+          --moduleResolution NodeNext --types node,vitest/globals --skipLibCheck
+          packages/agent/test/rfc64-inventory-v1-lifecycle.test.ts
+          packages/agent/test/fixtures/rfc64-inventory-v1-child.ts
 
       - name: Run SQLite persistence tests
         run: >-
