@@ -1,4 +1,8 @@
-import { RELAY_CAPACITY_MULTIPLIER } from './relay-capacity-policy.js';
+import {
+  FD_HEADROOM_MULTIPLIER,
+  MIN_OPEN_FILE_LIMIT,
+  recommendOpenFileLimit,
+} from './relay-capacity-policy.js';
 
 /** Compatibility boundary for the pinned Node diagnostic-report API. */
 export interface DiagnosticReporter {
@@ -51,7 +55,7 @@ export function checkFdLimit(
   log: (level: FdLimitLogLevel, msg: string) => void,
   readLimit: () => number | undefined = readSoftOpenFileLimit,
 ): void {
-  const recommended = Math.max(4096, maxConnections * RELAY_CAPACITY_MULTIPLIER);
+  const recommended = recommendOpenFileLimit(maxConnections);
   try {
     const soft = readLimit();
     if (typeof soft === 'number') {
@@ -60,7 +64,7 @@ export function checkFdLimit(
           'warn',
           `relay server enabled with maxConnections=${maxConnections}, ` +
             `but host ulimit -n soft=${soft} is below the recommended ${recommended} ` +
-            `(= max(4096, maxConnections × ${RELAY_CAPACITY_MULTIPLIER})). The kernel will reject new ` +
+            `(= max(${MIN_OPEN_FILE_LIMIT}, maxConnections × ${FD_HEADROOM_MULTIPLIER})). The kernel will reject new ` +
             `socket() calls with EMFILE once the daemon hits the limit, ` +
             `manifesting as silent peer rejections. Bump with ` +
             `'ulimit -n ${recommended}' (shell), 'LimitNOFILE=${recommended}' (systemd unit), ` +
