@@ -39,7 +39,12 @@
     "lane": "scripts",
     "reason": "Repository tooling checks run in build gate",
     "cadence": "required",
-    "command": "pnpm test:scripts"
+    "command": "pnpm test:scripts",
+    "layer": "repository tooling",
+    "prerequisites": [
+      "pnpm frozen install",
+      "built workspace dependencies"
+    ]
   },
   {
     "pattern": "devnet/**",
@@ -81,6 +86,57 @@
     "lane": "prometheus-rules",
     "reason": "Promtool rule regression fixtures; requires Prometheus tools",
     "cadence": "manual",
-    "command": "cd tools/observability/w1 && promtool test rules w1-rules.test.yaml"
+    "command": "cd tools/observability/w1 && promtool test rules w1-rules.test.yaml",
+    "layer": "monitoring rules",
+    "prerequisites": [
+      "Prometheus promtool"
+    ]
+  },
+  {
+    "pattern": "scripts/*test*.sh",
+    "lane": "devnet",
+    "reason": "Executable shell test drivers; each script documents its node, chain and environment prerequisites",
+    "cadence": "manual",
+    "command": "bash {file}"
+  },
+  {
+    "pattern": "scripts/ci/verify-blazegraph-image-contract.sh",
+    "lane": "image-contract",
+    "reason": "Native image contract verification in the ARM64 CI lane",
+    "cadence": "required",
+    "command": "bash scripts/ci/verify-blazegraph-image-contract.sh"
+  },
+  {
+    "pattern": "packages/cli/test/fixtures/*.sh",
+    "lane": "shell-fixture",
+    "reason": "CLI test subprocess fixtures; built CLI and isolated temporary devnet required",
+    "cadence": "manual",
+    "command": "bash {file}"
+  },
+  {
+    "pattern": "tools/observability/smoke-test.sh",
+    "lane": "observability",
+    "reason": "Prometheus/Grafana smoke driver; requires its documented observability stack",
+    "cadence": "manual",
+    "command": "bash tools/observability/smoke-test.sh"
+  },
+  {
+    "pattern": "ccl_v0_1/tests/**",
+    "lane": "ccl-python-yaml",
+    "reason": "Python CCL driver loads the YAML case corpus; requires ccl_v0_1/requirements.txt",
+    "cadence": "manual",
+    "command": "cd ccl_v0_1 && python3 tests/run_all_tests.py",
+    "layer": "Python/YAML conformance",
+    "prerequisites": [
+      "Python 3",
+      "ccl_v0_1/requirements.txt"
+    ]
+  },
+  {
+    "pattern": "scripts/*soak*.sh",
+    "lane": "devnet",
+    "reason": "Long-running operator soak drivers for isolated devnets; prerequisites are documented by each script",
+    "cadence": "manual",
+    "command": "bash {file}"
   }
 ]

@@ -1,5 +1,7 @@
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -267,7 +269,6 @@ test('diff mode fails only for net-new static D2 exclusions', (t) => {
   const result = spawnSync(process.execPath, [LINT_SCRIPT, '--diff', base, head], {
     cwd: fixtureRoot,
     encoding: 'utf8',
-    env: { ...process.env, TEST_DISABLE_LINT_NO_SELF_TEST: '1' },
   });
 
   assert.equal(result.status, 1, result.stderr);
@@ -444,4 +445,373 @@ test('file audit accepts only nearby matching ticketed D1 pragmas with reasons',
     `${fixturePath}:15:1: D1 xtest`,
     `${fixturePath}:20:1: D1 describe.skip`,
   ]);
+});
+
+function semanticMoveSelfTest() {
+  const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'test-disable-lint-move-'));
+  const git = (...args) => execFileSync('git', args, {
+    cwd: fixtureRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    git('init', '-q');
+    git('config', 'user.email', 'selftest@example.invalid');
+    git('config', 'user.name', 'test-disable-lint-selftest');
+    mkdirSync(path.join(fixtureRoot, 'test'), { recursive: true });
+    writeFileSync(
+      path.join(fixtureRoot, 'test/original.test.ts'),
+      "test.skip('existing debt', () => {});\n",
+    );
+    writeFileSync(
+      path.join(fixtureRoot, 'test/untouched.test.ts'),
+      "it.todo('untouched debt');\n",
+    );
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    const base = git('rev-parse', 'HEAD').trim();
+
+    git('mv', 'test/original.test.ts', 'test/moved.test.ts');
+    writeFileSync(
+      path.join(fixtureRoot, 'test/moved.test.ts'),
+      "\n\ntest.skip('existing debt', () => {});\n",
+    );
+    git('add', '-A');
+    git('commit', '-qm', 'move disabled test');
+    const head = git('rev-parse', 'HEAD').trim();
+    const cli = spawnSync(
+      process.execPath,
+      [LINT_SCRIPT, '--diff', base, head],
+      {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+      },
+    );
+    const pass = cli.status === 0 && cli.stdout === '';
+    if (!pass) {
+      process.stderr.write(
+        `SELF-TEST FAIL: semantic move exit=${cli.status}\nstdout:\n${cli.stdout}\nstderr:\n${cli.stderr}`,
+      );
+    }
+    return pass;
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+function semanticGrowthSelfTest() {
+  const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'test-disable-lint-growth-'));
+  const git = (...args) => execFileSync('git', args, {
+    cwd: fixtureRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    git('init', '-q');
+    git('config', 'user.email', 'selftest@example.invalid');
+    git('config', 'user.name', 'test-disable-lint-selftest');
+    mkdirSync(path.join(fixtureRoot, 'test'), { recursive: true });
+    const fixturePath = path.join(fixtureRoot, 'test/original.test.ts');
+    const disabledTest = "test.skip('copied debt', () => {});\n";
+    writeFileSync(fixturePath, disabledTest);
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    const base = git('rev-parse', 'HEAD').trim();
+
+    const copiedPath = path.join(fixtureRoot, 'test/café\tcopy.test.ts');
+    copyFileSync(fixturePath, copiedPath);
+    git('add', '-A');
+    git('commit', '-qm', 'copy disabled test');
+    const head = git('rev-parse', 'HEAD').trim();
+    const cli = spawnSync(
+      process.execPath,
+      [LINT_SCRIPT, '--diff', base, head],
+      {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+      },
+    );
+    const diagnostics = cli.stdout
+      .trim()
+      .split('\n')
+      .filter((line) => line.includes(': D1 '));
+    const expected = ['test/café\tcopy.test.ts:1:1: D1 test.skip'];
+    const pass = cli.status === 1 && JSON.stringify(diagnostics) === JSON.stringify(expected);
+    if (!pass) {
+      process.stderr.write(
+        `SELF-TEST FAIL: semantic growth exit=${cli.status}\nstdout:\n${cli.stdout}\nstderr:\n${cli.stderr}`,
+      );
+    }
+    return pass;
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+function auditModesSelfTest() {
+  const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'test-disable-lint-audit-'));
+  const git = (...args) => execFileSync('git', args, {
+    cwd: fixtureRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    git('init', '-q');
+    git('config', 'user.email', 'selftest@example.invalid');
+    git('config', 'user.name', 'test-disable-lint-selftest');
+    const relativeFixturePath = 'test/café\tdebt.test.ts';
+    const fixturePath = path.join(fixtureRoot, relativeFixturePath);
+    mkdirSync(path.dirname(fixturePath), { recursive: true });
+    writeFileSync(fixturePath, "it.todo('audit debt');\n");
+    git('add', '-A');
+
+    const spawnAudit = (args) => spawnSync(
+      process.execPath,
+      [LINT_SCRIPT, ...args],
+      {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+      },
+    );
+    const fileAudit = spawnAudit(['--files', fixturePath]);
+    const fullAudit = spawnAudit(['--all']);
+    const pass = fileAudit.status === 0
+      && fileAudit.stdout.trim() === `${fixturePath}:1:1: D1 it.todo`
+      && fullAudit.status === 0
+      && fullAudit.stdout.trim() === `${relativeFixturePath}:1:1: D1 it.todo`;
+    if (!pass) {
+      process.stderr.write(
+        'SELF-TEST FAIL: audit modes did not report debt without failure\n'
+          + `--files exit=${fileAudit.status}\nstdout:\n${fileAudit.stdout}\nstderr:\n${fileAudit.stderr}`
+          + `--all exit=${fullAudit.status}\nstdout:\n${fullAudit.stdout}\nstderr:\n${fullAudit.stderr}`,
+      );
+    }
+    return pass;
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+function staticD2ArraySelfTest() {
+  const source = [
+    "const TEST_EXCLUSIONS = ['tests/unit/**'];",
+    "const NESTED_EXCLUSIONS = ['coverage/**', ...TEST_EXCLUSIONS];",
+    "const EXCLUSIONS = [...NESTED_EXCLUSIONS, '**/*.spec.ts'];",
+    'export default { test: { exclude: EXCLUSIONS } };',
+  ].join('\n');
+  const values = analyzeD2Source(source, 'vitest.config.ts').map(({ value }) => value);
+  const expected = ['tests/unit/**', '**/*.spec.ts'];
+  const pass = JSON.stringify(values) === JSON.stringify(expected);
+  if (!pass) {
+    process.stderr.write(
+      `SELF-TEST FAIL: static D2 arrays expected ${JSON.stringify(expected)}, `
+        + `received ${JSON.stringify(values)}\n`,
+    );
+  }
+  return pass;
+}
+
+function wrappedD2ArraySelfTest() {
+  const source = [
+    "const OUTPUT_EXCLUSIONS = (['coverage/**'] as const);",
+    "const TEST_EXCLUSIONS = (['tests/unit/**'] as const);",
+    "const TEST_FILE = ('**/*.test.ts' as const) satisfies string;",
+    "const SPEC_EXCLUSIONS = ['**/*.spec.ts'] satisfies readonly string[];",
+    'export default {',
+    '  test: {',
+    '    exclude: ([',
+    '      ...OUTPUT_EXCLUSIONS,',
+    '      ...TEST_EXCLUSIONS,',
+    '      TEST_FILE,',
+    '      ...SPEC_EXCLUSIONS,',
+    '    ] as const) satisfies readonly string[],',
+    '  },',
+    '};',
+  ].join('\n');
+  const values = analyzeD2Source(source, 'vitest.config.ts').map(({ value }) => value);
+  const expected = ['tests/unit/**', '**/*.test.ts', '**/*.spec.ts'];
+  const pass = JSON.stringify(values) === JSON.stringify(expected);
+  if (!pass) {
+    process.stderr.write(
+      `SELF-TEST FAIL: wrapped D2 arrays expected ${JSON.stringify(expected)}, `
+        + `received ${JSON.stringify(values)}\n`,
+    );
+  }
+  return pass;
+}
+
+function opaqueD2RatchetSelfTest() {
+  const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'test-disable-lint-opaque-d2-'));
+  const git = (...args) => execFileSync('git', args, {
+    cwd: fixtureRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    git('init', '-q');
+    git('config', 'user.email', 'selftest@example.invalid');
+    git('config', 'user.name', 'test-disable-lint-selftest');
+    const configPath = path.join(fixtureRoot, 'vitest.config.ts');
+    writeFileSync(configPath, [
+      'export default {',
+      '  test: {',
+      '    exclude: [',
+      '      legacyExclusions(),',
+      '    ],',
+      '  },',
+      '};',
+    ].join('\n'));
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    const base = git('rev-parse', 'HEAD').trim();
+
+    writeFileSync(configPath, [
+      'export default {',
+      '  test: {',
+      '    exclude: [',
+      '      legacyExclusions(),',
+      '',
+      '      // test-disable-allow: D2 #123 -- generated test inventory',
+      '      allowedExclusions(),',
+      '',
+      '',
+      '',
+      '      // test-disable-allow: D1 #124 -- wrong rule cannot allow D2',
+      '      wrongRuleExclusions(),',
+      '',
+      '',
+      '',
+      '      newExclusions(),',
+      '    ],',
+      '  },',
+      '};',
+    ].join('\n'));
+    git('add', '-A');
+    git('commit', '-qm', 'head');
+    const head = git('rev-parse', 'HEAD').trim();
+
+    const cli = spawnSync(
+      process.execPath,
+      [LINT_SCRIPT, '--diff', base, head],
+      {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+      },
+    );
+    const diagnostics = cli.stdout.trim().split('\n');
+    const expected = [
+      'vitest.config.ts:12:7: D2 vitest.exclude',
+      'vitest.config.ts:16:7: D2 vitest.exclude',
+    ];
+    const pass = cli.status === 1
+      && JSON.stringify(diagnostics) === JSON.stringify(expected);
+    if (!pass) {
+      process.stderr.write(
+        `SELF-TEST FAIL: opaque D2 ratchet exit=${cli.status}\n`
+          + `stdout:\n${cli.stdout}\nstderr:\n${cli.stderr}`,
+      );
+    }
+    return pass;
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+function destructuredD2RatchetSelfTest() {
+  const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'test-disable-lint-destructured-d2-'));
+  const git = (...args) => execFileSync('git', args, {
+    cwd: fixtureRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    git('init', '-q');
+    git('config', 'user.email', 'selftest@example.invalid');
+    git('config', 'user.name', 'test-disable-lint-selftest');
+    const configPath = path.join(fixtureRoot, 'vitest.config.ts');
+    const configSource = (exclusion) => [
+      'const [legacyExclusion, replacementExclusion] = loadExclusions();',
+      'export default {',
+      '  test: {',
+      '    exclude: [',
+      `      ${exclusion},`,
+      '    ],',
+      '  },',
+      '};',
+    ].join('\n');
+    writeFileSync(configPath, configSource('legacyExclusion'));
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    const base = git('rev-parse', 'HEAD').trim();
+
+    writeFileSync(configPath, configSource('replacementExclusion'));
+    git('add', '-A');
+    git('commit', '-qm', 'head');
+    const head = git('rev-parse', 'HEAD').trim();
+
+    const cli = spawnSync(
+      process.execPath,
+      [LINT_SCRIPT, '--diff', base, head],
+      {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+      },
+    );
+    const expected = 'vitest.config.ts:5:7: D2 vitest.exclude';
+    const pass = cli.status === 1 && cli.stdout.trim() === expected;
+    if (!pass) {
+      process.stderr.write(
+        `SELF-TEST FAIL: destructured D2 ratchet exit=${cli.status}\n`
+          + `stdout:\n${cli.stdout}\nstderr:\n${cli.stderr}`,
+      );
+    }
+    return pass;
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+
+for (const scenario of [semanticMoveSelfTest, semanticGrowthSelfTest, auditModesSelfTest, staticD2ArraySelfTest, wrappedD2ArraySelfTest, opaqueD2RatchetSelfTest, destructuredD2RatchetSelfTest]) {
+  test(scenario.name, () => assert.equal(scenario(), true));
+}
+
+test('import aliases, namespaces, chained declarations and skip references retain canonical fingerprints', () => {
+  const variants = [
+    ["import { test as check } from 'vitest'; check.skip('case', () => {});", "test.skip('case', () => {});"],
+    ["import { it as check } from 'vitest'; check.todo('case');", "it.todo('case');"],
+    ["import { test as check } from '@playwright/test'; check.skipIf(true)('case', () => {});", "test.skipIf(true)('case', () => {});"],
+    ["import { test as check } from 'vitest'; check.runIf(false)('case', () => {});", "test.runIf(false)('case', () => {});"],
+    ["import { test as check } from 'vitest'; const disabled = check.skip;", "const disabled = test.skip;"],
+    ["import * as v from 'vitest'; v.test.concurrent.skip('case', () => {});", "test.skip('case', () => {});"],
+    ["import { test as check } from 'vitest'; check['skip']('case', () => {});", "test.skip('case', () => {});"],
+  ];
+  for (const [alias, direct] of variants) {
+    const actual = analyzeD1Source(alias, 'test/alias.test.ts');
+    const expected = analyzeD1Source(direct, 'test/alias.test.ts');
+    assert.equal(actual.length, 1, alias);
+    // Reference fingerprints also include the expression spelling; declarations
+    // retain the existing title-based fingerprint across import renames.
+    if (!alias.includes('const disabled')) assert.equal(actual[0].fingerprint, expected[0].fingerprint);
+  }
+  assert.equal(analyzeD1Source("import { test as check } from 'vitest'; function local(check) { check.skip('not a test'); }", 'test/alias.test.ts').length, 0);
+});
+
+test('the repository debt gate rejects a newly disabled aliased test', () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'disabled-alias-gate-'));
+  try {
+    fs.mkdirSync(path.join(fixture, 'test-policy'));
+    fs.mkdirSync(path.join(fixture, 'test'));
+    fs.writeFileSync(path.join(fixture, 'test-policy/disabled-tests.json'), '[]');
+    fs.writeFileSync(path.join(fixture, 'test/new.test.ts'), "import { test as check } from 'vitest'; check.skip('regression', () => {});");
+    execFileSync('git', ['init', '-q'], { cwd: fixture });
+    const result = spawnSync(process.execPath, [path.join(REPO_ROOT, 'scripts/ci/check-disabled-tests.mjs')], { cwd: fixture, encoding: 'utf8' });
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /new disabled test.*test\.skip/);
+  } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
 });

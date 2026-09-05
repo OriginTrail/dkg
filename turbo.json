@@ -4,7 +4,8 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**"]
+      "outputs": ["dist/**", "extension/dist/**"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/scripts/testing/**"]
     },
     "build:ui": {
       "dependsOn": ["build"],
@@ -16,7 +17,8 @@
     },
     "test": {
       "dependsOn": ["build"],
-      "outputs": []
+      "outputs": [],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/scripts/testing/**"]
     },
     "test:coverage": {
       "dependsOn": ["build"],
@@ -25,7 +27,8 @@
         "$TURBO_ROOT$/vitest.coverage.ts",
         "$TURBO_ROOT$/scripts/lib/coverage-scope.mjs",
         "$TURBO_ROOT$/scripts/ci/check-coverage.mjs",
-        "$TURBO_ROOT$/test-policy/coverage-baselines.json"
+        "$TURBO_ROOT$/test-policy/coverage-baselines.json",
+        "$TURBO_ROOT$/scripts/testing/**"
       ],
       "outputs": ["coverage/**"],
       "cache": false

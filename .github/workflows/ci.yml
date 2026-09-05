@@ -331,12 +331,14 @@ jobs:
         run: |
           set -euo pipefail
           # Collect every emitted output: tsc dist/, optional Vite dist-ui/,
-          # and the generated network/ dir the CLI copies during build.
+          # the nested Prime extension/dist, and the generated network/ dir
+          # the CLI copies during build.
           mapfile -t PATHS < <(
-            find packages -maxdepth 2 -type d \
+            find packages -maxdepth 3 -type d \
               \( -name dist -o -name dist-ui -o -name network \) \
               2>/dev/null | sort -u
           )
+          test -d packages/adapter-prime-agent/extension/dist
           echo "Packing ${#PATHS[@]} output dirs…"
           tar -czf /tmp/build-outputs.tgz "${PATHS[@]}"
           ls -lh /tmp/build-outputs.tgz
@@ -1027,11 +1029,11 @@ jobs:
           DKG_REQUIRE_PYTEST: '1'
           DKG_CI_COVERAGE: '1'
         run: |
-          for package in epcis mcp-dkg local-llm network-sim graph-viz okf adapter-elizaos adapter-hermes adapter-openclaw adapter-prime-agent; do
-            node scripts/ci/run-vitest-junit.mjs --lane "$package"
-          done
-          pnpm --filter @origintrail-official/dkg-adapter-hermes run test:py
-          pnpm --filter @origintrail-official/dkg-demo run test
+          status=0
+          node scripts/ci/run-vitest-lanes.mjs --job kosava-supporting --concurrency 3 || status=$?
+          pnpm --filter @origintrail-official/dkg-adapter-hermes run test:py || status=$?
+          pnpm --filter @origintrail-official/dkg-demo run test || status=$?
+          exit "$status"
       - name: Upload Vitest JUnit and coverage reports
         if: always()
         uses: ./.github/actions/upload-vitest-junit
@@ -1571,7 +1573,8 @@ jobs:
           MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
         run: |
           if [[ "$EVENT_NAME" == pull_request ]]; then
-            export COVERAGE_BASE="$(git rev-parse HEAD^1)"
+            COVERAGE_BASE="$(git rev-parse HEAD^1)"
+            export COVERAGE_BASE
           elif [[ "$EVENT_NAME" == merge_group ]]; then
             git fetch --no-tags origin "$MERGE_GROUP_BASE"
             export COVERAGE_BASE="$MERGE_GROUP_BASE"

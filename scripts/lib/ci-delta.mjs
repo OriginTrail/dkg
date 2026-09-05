@@ -1,16 +1,5 @@
-export const NODE_EVM_LANES = Object.freeze([
-  'tornado_core',
-  'tornado_blazegraph',
-  'tornado_publisher',
-  'tornado_agent',
-  'bura_cli',
-  'bura_blazegraph_arm64',
-  'bura_query',
-  'kosava_node_ui',
-  'kosava_node_ui_e2e',
-  'kosava_supporting',
-  'kosava_hardhat_plugins',
-]);
+import { NODE_EVM_LANES } from './ci-lanes.mjs';
+export { NODE_EVM_LANES } from './ci-lanes.mjs';
 
 // `contracts` remains a workflow output for compatibility, but Solidity is an
 // independent relevance gate rather than part of the Node/EVM "full" profile.

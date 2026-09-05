@@ -1,18 +1,7 @@
 import { CI_LANES, EVM_SCOPES, NODE_EVM_LANES } from './ci-delta.mjs';
 
-export const PRIMARY_LANE_JOBS = Object.freeze({
-  tornado_core: 'tornado-core',
-  tornado_blazegraph: 'tornado-blazegraph',
-  tornado_publisher: 'tornado-publisher',
-  tornado_agent: 'tornado-agent',
-  bura_cli: 'bura-cli',
-  bura_blazegraph_arm64: 'bura-blazegraph-arm64',
-  bura_query: 'bura-supporting',
-  kosava_node_ui: 'kosava-node-ui',
-  kosava_node_ui_e2e: 'kosava-node-ui-e2e',
-  kosava_supporting: 'kosava-supporting',
-  kosava_hardhat_plugins: 'kosava-hardhat-plugins',
-});
+import { PRIMARY_LANE_JOBS } from './ci-lanes.mjs';
+export { PRIMARY_LANE_JOBS } from './ci-lanes.mjs';
 
 function checkNoFailedJobs(needs, errors) {
   for (const [job, state] of Object.entries(needs)) {

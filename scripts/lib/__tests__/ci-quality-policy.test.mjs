@@ -25,7 +25,7 @@ function validateJunitUploadCoverage(workflow) {
   const uploadsByJob = new Map();
   for (const [jobName, job] of Object.entries(workflow.jobs)) {
     const runnerSteps = (job.steps ?? []).filter(
-      (step) => typeof step?.run === 'string' && step.run.includes('run-vitest-junit.mjs'),
+      (step) => typeof step?.run === 'string' && /run-vitest-(?:junit|lanes)\.mjs/.test(step.run),
     );
     const uploads = (job.steps ?? []).filter(
       (step) => step?.uses === './.github/actions/upload-vitest-junit',

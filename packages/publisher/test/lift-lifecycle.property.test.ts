@@ -2,7 +2,7 @@ import { expect, it } from 'vitest';
 import fc from 'fast-check';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncLiftPublisher } from '../src/index.js';
-import { KA_VM_VALIDATION, kaVmPublishRequest } from './_helpers/ka-vm-publish.js';
+import { KA_VM_VALIDATION, kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 import { propertyOptions } from '../../../scripts/testing/property-options.js';
 
 it('generated claim, validate, finalize and restart sequences preserve durable lifecycle state', async () => {

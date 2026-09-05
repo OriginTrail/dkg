@@ -4,16 +4,8 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { COVERAGE_SOURCE_ROOTS } from './coverage-scope.mjs';
 
-export const COVERAGE_JOBS = {
-  'tornado-core': { core: 1, 'http-utils': 1, 'rdf-utils': 1, storage: 1, chain: 3 },
-  'tornado-publisher': { publisher: 4 },
-  'tornado-agent': { agent: 10 },
-  'bura-cli': { cli: 4 },
-  'bura-supporting': { query: 1 },
-  'kosava-node-ui': { 'node-ui': 1 },
-  'kosava-supporting': Object.fromEntries(['epcis', 'mcp-dkg', 'local-llm', 'network-sim', 'graph-viz', 'okf', 'adapter-elizaos', 'adapter-hermes', 'adapter-openclaw', 'adapter-prime-agent'].map((name) => [name, 1])),
-  'kosava-hardhat-plugins': { 'random-sampling': 1, 'kafka-plugin': 1 },
-};
+import { COVERAGE_JOBS } from './ci-lanes.mjs';
+export { COVERAGE_JOBS } from './ci-lanes.mjs';
 
 export function sourceFingerprint(root, name) {
   const hash = createHash('sha256');

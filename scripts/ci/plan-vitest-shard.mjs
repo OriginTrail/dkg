@@ -19,6 +19,7 @@
  * Stdout contains only paths relative to the package root, one per line.
  * A short diagnostic summary is written to stderr.
  */
+import { PACKAGE_SHARD_COUNTS } from '../lib/ci-lanes.mjs';
 import { readdirSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
@@ -285,13 +286,13 @@ const CHAIN_BODY_MS = Object.freeze({
 export const PACKAGE_SPECS = Object.freeze({
   cli: Object.freeze({
     packageDirectory: 'packages/cli',
-    shardCount: 4,
+    shardCount: PACKAGE_SHARD_COUNTS.cli,
     excludedPrefixes: Object.freeze([]),
     bodyWeightsMs: CLI_BODY_MS,
   }),
   chain: Object.freeze({
     packageDirectory: 'packages/chain',
-    shardCount: 3,
+    shardCount: PACKAGE_SHARD_COUNTS.chain,
     excludedPrefixes: Object.freeze(['test/archive/']),
     bodyWeightsMs: CHAIN_BODY_MS,
   }),

@@ -7,10 +7,9 @@ import { randomUUID, createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { OxigraphStore, SparqlHttpStore, BlazegraphStore, type TripleStore, type Quad } from '../packages/storage/dist/index.js';
 import { resolveOxigraphBinary } from '../packages/cli/dist/daemon/oxigraph-binary.js';
-import { startOxigraphServer } from '../packages/cli/dist/daemon/oxigraph-server.js';
-import { availableTestPort } from '../packages/chain/test/test-port.js';
+import { startTestOxigraphServer } from '../scripts/testing/oxigraph.js';
 import { TripleStoreAsyncLiftPublisher } from '../packages/publisher/dist/index.js';
-import { KA_VM_VALIDATION, KA_VM_BROADCAST_TX, kaVmPublishRequest } from '../packages/publisher/test/_helpers/ka-vm-publish.js';
+import { KA_VM_VALIDATION, KA_VM_BROADCAST_TX, kaVmPublishRequest } from '../scripts/testing/ka-vm-publish.js';
 
 async function values(store: TripleStore, graph: string) {
   const result = await store.query(`SELECT ?s ?p ?o WHERE { GRAPH <${graph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`);
@@ -30,7 +29,7 @@ test('real embedded, HTTP and configured Blazegraph stores preserve graph isolat
   });
   const binary = await resolveOxigraphBinary({ cacheDir: resolve('test-systems/.runtime/bin') });
   const logs: string[] = [];
-  const server = await startOxigraphServer({ binaryPath: binary.path, location: join(root, 'rocksdb'), port: await availableTestPort(0), restartBackoffBaseMs: 25, log: (line) => logs.push(line) });
+  const server = await startTestOxigraphServer({ binaryPath: binary.path, location: join(root, 'rocksdb'), restartBackoffBaseMs: 25, log: (line) => logs.push(line) });
   cleanup.push(() => server.stop());
   const embedded = new OxigraphStore();
   const http = new SparqlHttpStore({ queryEndpoint: server.queryEndpoint, updateEndpoint: server.updateEndpoint, timeout: 10_000 });
