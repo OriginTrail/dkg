@@ -140,7 +140,6 @@ export {
   RELAY_RESERVATION_TTL_MS,
   EDGE_NODE_MAX_CONNECTIONS,
   deriveRelayCaps,
-  checkFdLimit,
   validateRelayServerCapacity,
   type RelayCapacityValidation,
   type DerivedRelayCaps,
@@ -450,3 +449,5 @@ export {
 } from './node-timer.js';
 export * from './query-catalog-parameters.js';
 export * from './query-catalog.js';
+
+export { checkFdLimit, type FdLimitLogLevel } from './fd-limit.js';
