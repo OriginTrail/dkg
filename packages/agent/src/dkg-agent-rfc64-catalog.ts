@@ -2196,15 +2196,20 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /**
-   * Construct + start the public catalog service on the production router.
-   * No-op when RFC-64 persistence is dormant (no `dataDir`) or already started.
+   * Compatibility entrypoint; lifecycle ownership lives in the focused owner.
    */
-  startRfc64PublicCatalogServiceV1(this: DKGAgent, ctx: OperationContext): boolean {
-    if (this.rfc64PublicCatalogServiceV1 !== undefined) return true;
-    this.rfc64CatalogMutationCoordinatorV1.reopen();
+  startRfc64PublicCatalogServiceV1(this: DKGAgent, ctx: OperationContext): void {
+    this.rfc64PublicCatalogOwnerV1.start(ctx);
+  }
+
+  /** Construct the transport, or return null while RFC-64 is dormant. */
+  createRfc64PublicCatalogServiceV1(
+    this: DKGAgent,
+    ctx: OperationContext,
+  ): Rfc64PublicCatalogServiceV1 | null {
     if (this.config.rfc64CatalogExecutionPlan.killSwitchActive) {
       this.log.warn(ctx, 'RFC-64 catalog kill switch is active; Track-2 protocols are dormant');
-      return false;
+      return null;
     }
     if (
       !this.config.rfc64CatalogExecutionPlan.standaloneTrack2Enabled
@@ -2212,10 +2217,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       && this.config.rfc64CatalogExecutionPlan.track2ContextGraphs.length === 0
     ) {
       this.log.info(ctx, 'RFC-64 catalog protocols are dormant; every selected CG is legacy-mode');
-      return false;
+      return null;
     }
     const persistence = this.rfc64PersistenceV1;
-    if (persistence === undefined) return false;
+    if (persistence === undefined) return null;
     const verifyIssuerSignature = verifyControlEnvelopeIssuerSignatureV1;
     let nextReconciliationAttemptToken = 0;
     const reconciliationAttempts = new Map<number, Readonly<{
@@ -2377,32 +2382,17 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         return admission;
       },
     });
-    service.start();
-    this.rfc64PublicCatalogServiceV1 = service;
-    this.log.info(ctx, 'RFC-64 public author-catalog transport started');
-    return true;
+    return service;
   }
 
   /** Fence receiver admission while keeping local authoring transports live. */
   async closeRfc64PublicCatalogReceiverAdmissionV1(this: DKGAgent): Promise<void> {
-    await this.rfc64PublicCatalogServiceV1?.closeReceiverAdmissionAndDrain();
+    await this.rfc64PublicCatalogOwnerV1.closeReceiverAdmission();
   }
 
-  /** Observe in-flight public catalog transport work. */
-  async whenRfc64PublicCatalogServiceIdleV1(this: DKGAgent): Promise<void> {
-    await this.rfc64PublicCatalogServiceV1?.whenReceiverIdle();
-  }
-
-  /** Runtime-owned transport adapter: fence service admission synchronously. */
+  /** Compatibility close entrypoint for callers outside the canonical runtime. */
   closeRfc64PublicCatalogServiceV1(this: DKGAgent): Promise<void> {
-    const service = this.rfc64PublicCatalogServiceV1;
-    this.rfc64PublicCatalogServiceV1 = undefined;
-    if (service === undefined) return Promise.resolve();
-    try {
-      return service.close();
-    } catch (error) {
-      return Promise.reject(error);
-    }
+    return this.rfc64PublicCatalogOwnerV1.close();
   }
 
   /** Final runtime stage after transport and every workload physically retire. */

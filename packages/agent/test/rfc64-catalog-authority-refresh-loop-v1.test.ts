@@ -110,6 +110,93 @@ describe('RFC-64 catalog authority refresh loop', () => {
     await loop.close();
   });
 
+  it('keeps healthy lanes refreshing while another graph remains stalled', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    let releaseStalled!: () => void;
+    let markStalledStarted!: () => void;
+    const stalledGate = new Promise<void>((resolve) => { releaseStalled = resolve; });
+    const stalledStarted = new Promise<void>((resolve) => { markStalledStarted = resolve; });
+    let healthyCalls = 0;
+    let markHealthyRefreshed!: () => void;
+    let healthyRefreshed = new Promise<void>((resolve) => { markHealthyRefreshed = resolve; });
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a', 'cg-b'],
+      refreshContextGraph: async (contextGraphId) => {
+        if (contextGraphId === 'cg-a') {
+          markStalledStarted();
+          await stalledGate;
+          return;
+        }
+        healthyCalls += 1;
+        markHealthyRefreshed();
+      },
+      onRefreshFailure: () => undefined,
+      scheduler,
+      maxConcurrentReads: 2,
+    });
+
+    loop.start();
+    await Promise.all([stalledStarted, healthyRefreshed]);
+    expect(healthyCalls).toBe(1);
+    // Let the healthy lane publish its physical-idle transition before the
+    // next cadence callback requests another pass.
+    await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+
+    healthyRefreshed = new Promise<void>((resolve) => { markHealthyRefreshed = resolve; });
+    scheduled[0]!.callback();
+    await healthyRefreshed;
+    expect(healthyCalls).toBe(2);
+
+    let closeSettled = false;
+    const closing = loop.close().then(() => { closeSettled = true; });
+    await Promise.resolve();
+    expect(closeSettled).toBe(false);
+    releaseStalled();
+    await closing;
+  });
+
+  it('bounds independent lanes without letting one stalled graph own the queue', async () => {
+    let releaseA!: () => void;
+    let releaseB!: () => void;
+    let markAStarted!: () => void;
+    let markBStarted!: () => void;
+    let markCStarted!: () => void;
+    const gateA = new Promise<void>((resolve) => { releaseA = resolve; });
+    const gateB = new Promise<void>((resolve) => { releaseB = resolve; });
+    const startedA = new Promise<void>((resolve) => { markAStarted = resolve; });
+    const startedB = new Promise<void>((resolve) => { markBStarted = resolve; });
+    const startedC = new Promise<void>((resolve) => { markCStarted = resolve; });
+    const attempts: string[] = [];
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a', 'cg-b', 'cg-c'],
+      refreshContextGraph: async (contextGraphId) => {
+        attempts.push(contextGraphId);
+        if (contextGraphId === 'cg-a') {
+          markAStarted();
+          await gateA;
+        } else if (contextGraphId === 'cg-b') {
+          markBStarted();
+          await gateB;
+        } else {
+          markCStarted();
+        }
+      },
+      onRefreshFailure: () => undefined,
+      maxConcurrentReads: 2,
+    });
+
+    loop.start();
+    await Promise.all([startedA, startedB]);
+    expect(attempts).toEqual(['cg-a', 'cg-b']);
+    releaseB();
+    await startedC;
+    expect(attempts).toEqual(['cg-a', 'cg-b', 'cg-c']);
+
+    const closing = loop.close();
+    releaseA();
+    await closing;
+  });
+
   it('aborts and physically drains an in-flight pass before close settles', async () => {
     const { scheduled, cleared, scheduler } = createSchedulerHarness();
     let markStarted!: () => void;
@@ -137,6 +224,7 @@ describe('RFC-64 catalog authority refresh loop', () => {
         reported.push(Object.freeze({ contextGraphId, error }));
       },
       scheduler,
+      maxConcurrentReads: 1,
     });
 
     loop.start();

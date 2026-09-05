@@ -45,6 +45,7 @@
     "./dist/rfc64/catalog-access-policy-v1.js": null,
     "./dist/rfc64/catalog-authority-config-v1.js": null,
     "./dist/rfc64/catalog-authority-refresh-loop-v1.js": null,
+    "./dist/rfc64/public-catalog-workload-owner-v1.js": null,
     "./dist/rfc64/catalog-rollout-authority-v1.js": null,
     "./dist/rfc64/catalog-responsibility-registry-v1.js": null,
     "./dist/rfc64/release-native-catalog-authority-v1.js": null,

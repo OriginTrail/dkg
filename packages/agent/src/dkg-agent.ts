@@ -444,6 +444,8 @@ import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
 import { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
 import { Rfc64CatalogAuthorityRefreshLoopV1 } from
   './rfc64/catalog-authority-refresh-loop-v1.js';
+import { Rfc64PublicCatalogWorkloadOwnerV1 } from
+  './rfc64/public-catalog-workload-owner-v1.js';
 import {
   resolveRfc64RuntimeCatalogBootstrapConfigV1,
   resolveRfc64CatalogExecutionPlanV1,
@@ -953,25 +955,23 @@ export class DKGAgent extends DKGAgentBase {
         );
       },
     });
+    this.rfc64PublicCatalogOwnerV1 = new Rfc64PublicCatalogWorkloadOwnerV1({
+      createService: (ctx) => this.createRfc64PublicCatalogServiceV1(ctx),
+      authorityRefresh: authorityRefreshOwner,
+      openMutationPersistence: () => this.rfc64CatalogMutationCoordinatorV1.reopen(),
+      closeMutationPersistence: () => this.closeRfc64PublicCatalogMutationPersistenceV1(),
+      onServiceStarted: (ctx) => {
+        this.log.info(ctx, 'RFC-64 public author-catalog transport started');
+      },
+    });
     this.rfc64CatalogRuntimeV1 = new Rfc64CatalogRuntimeV1({
       inventoryObservers: {
         open: () => this.openRfc64SwmInventoryObserversV1(),
         close: () => this.closeRfc64SwmInventoryObserversV1(),
       },
-      service: {
-        start: (ctx) => this.startRfc64PublicCatalogServiceV1(ctx),
-        whenIdle: () => this.whenRfc64PublicCatalogServiceIdleV1(),
-        close: () => this.closeRfc64PublicCatalogServiceV1(),
-      },
-      receiverAdmission: {
-        close: () => this.closeRfc64PublicCatalogReceiverAdmissionV1(),
-      },
-      authorityRefresh: authorityRefreshOwner,
+      publicCatalog: this.rfc64PublicCatalogOwnerV1,
       bootstrap: bootstrapOwner,
       projection: projectionOwner,
-      mutationPersistence: {
-        close: () => this.closeRfc64PublicCatalogMutationPersistenceV1(),
-      },
     });
     this.rfc64SwmRecoveryCoordinatorV1 = new Rfc64SwmRecoveryCoordinatorV1({
       admission: {

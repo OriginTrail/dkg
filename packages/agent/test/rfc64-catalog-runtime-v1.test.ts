@@ -7,17 +7,14 @@ import {
 } from '../src/rfc64/catalog-runtime-v1.js';
 
 type RuntimeCallV1 =
-  | 'service.whenIdle'
-  | 'authorityRefresh.whenIdle'
+  | 'publicCatalog.whenIdle'
   | 'bootstrap.whenIdle'
   | 'projection.whenIdle'
   | 'inventoryObservers.close'
-  | 'receiverAdmission.close'
-  | 'authorityRefresh.close'
+  | 'publicCatalog.closeReceiverAdmission'
+  | 'publicCatalog.close'
   | 'bootstrap.close'
-  | 'projection.close'
-  | 'service.close'
-  | 'mutationPersistence.close';
+  | 'projection.close';
 
 function runtimeOptions(
   calls: string[],
@@ -32,18 +29,11 @@ function runtimeOptions(
       open: vi.fn(),
       close: callback('inventoryObservers.close'),
     },
-    service: {
-      start: vi.fn(() => true),
-      whenIdle: callback('service.whenIdle'),
-      close: callback('service.close'),
-    },
-    receiverAdmission: {
-      close: callback('receiverAdmission.close'),
-    },
-    authorityRefresh: {
+    publicCatalog: {
       start: vi.fn(),
-      whenIdle: callback('authorityRefresh.whenIdle'),
-      close: callback('authorityRefresh.close'),
+      whenIdle: callback('publicCatalog.whenIdle'),
+      closeReceiverAdmission: callback('publicCatalog.closeReceiverAdmission'),
+      close: callback('publicCatalog.close'),
     },
     bootstrap: {
       start: vi.fn(),
@@ -55,21 +45,16 @@ function runtimeOptions(
       whenIdle: callback('projection.whenIdle'),
       close: callback('projection.close'),
     },
-    mutationPersistence: {
-      close: callback('mutationPersistence.close'),
-    },
   };
 }
 
 describe('Rfc64CatalogRuntimeV1', () => {
   const failurePoints = [
     'inventoryObservers.close',
-    'receiverAdmission.close',
-    'authorityRefresh.close',
+    'publicCatalog.closeReceiverAdmission',
+    'publicCatalog.close',
     'bootstrap.close',
     'projection.close',
-    'service.close',
-    'mutationPersistence.close',
   ] as const;
 
   it.each(failurePoints)('attempts every later close stage when %s rejects', async (rejected) => {
@@ -80,13 +65,10 @@ describe('Rfc64CatalogRuntimeV1', () => {
 
     await expect(runtime.close()).rejects.toThrow(`failed ${rejected}`);
     expect(options.inventoryObservers.close).toHaveBeenCalledOnce();
-    expect(options.receiverAdmission.close).toHaveBeenCalledOnce();
-    expect(options.authorityRefresh.close).toHaveBeenCalledOnce();
+    expect(options.publicCatalog.closeReceiverAdmission).toHaveBeenCalledOnce();
+    expect(options.publicCatalog.close).toHaveBeenCalledOnce();
     expect(options.bootstrap.close).toHaveBeenCalledOnce();
     expect(options.projection.close).toHaveBeenCalledOnce();
-    expect(options.service.close).toHaveBeenCalledOnce();
-    expect(options.mutationPersistence.close).toHaveBeenCalledOnce();
-    expect(calls.at(-1)).toBe('mutationPersistence.close');
     expect(() => runtime.start(createOperationContext('system')))
       .toThrow('cannot start while close is in progress');
   });
@@ -99,29 +81,15 @@ describe('Rfc64CatalogRuntimeV1', () => {
     runtime.start(ctx);
     await runtime.whenIdle();
 
+    expect(options.publicCatalog.start).toHaveBeenCalledWith(ctx);
     expect(options.bootstrap.start).toHaveBeenCalledWith(ctx);
     expect(options.projection.start).toHaveBeenCalledWith(ctx);
-    expect(options.service.whenIdle).toHaveBeenCalledOnce();
-    expect(options.authorityRefresh.start).toHaveBeenCalledWith(ctx);
-    expect(options.authorityRefresh.whenIdle).toHaveBeenCalledOnce();
+    expect(options.publicCatalog.whenIdle).toHaveBeenCalledOnce();
     expect(options.bootstrap.whenIdle).toHaveBeenCalledOnce();
     expect(options.projection.whenIdle).toHaveBeenCalledOnce();
   });
 
-  it('keeps authority refresh dormant when the catalog transport is dormant', () => {
-    const options = runtimeOptions([]);
-    vi.mocked(options.service.start).mockReturnValue(false);
-    const runtime = new Rfc64CatalogRuntimeV1(options);
-    const ctx = createOperationContext('system');
-
-    runtime.start(ctx);
-
-    expect(options.authorityRefresh.start).not.toHaveBeenCalled();
-    expect(options.bootstrap.start).toHaveBeenCalledWith(ctx);
-    expect(options.projection.start).toHaveBeenCalledWith(ctx);
-  });
-
-  it('observes blocked authority work and owns one idempotent close/restart fence', async () => {
+  it('observes blocked public-catalog work and owns one idempotent close/restart fence', async () => {
     const baseOptions = runtimeOptions([]);
     let releaseIdle!: () => void;
     let releaseClose!: () => void;
@@ -129,8 +97,8 @@ describe('Rfc64CatalogRuntimeV1', () => {
     const closeGate = new Promise<void>((resolve) => { releaseClose = resolve; });
     const options: Rfc64CatalogRuntimeOptionsV1 = {
       ...baseOptions,
-      authorityRefresh: {
-        ...baseOptions.authorityRefresh,
+      publicCatalog: {
+        ...baseOptions.publicCatalog,
         whenIdle: vi.fn(() => idleGate),
         close: vi.fn(() => closeGate),
       },
@@ -151,13 +119,12 @@ describe('Rfc64CatalogRuntimeV1', () => {
     void close.then(() => { closeSettled = true; });
     expect(runtime.close()).toBe(close);
     expect(() => runtime.start(ctx)).toThrow('cannot start while close is in progress');
-    await vi.waitFor(() => expect(options.service.close).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(options.publicCatalog.close).toHaveBeenCalledOnce());
     expect(closeSettled).toBe(false);
     releaseClose();
     await close;
 
     runtime.start(ctx);
-    expect(options.service.start).toHaveBeenCalledTimes(2);
-    expect(options.authorityRefresh.start).toHaveBeenCalledTimes(2);
+    expect(options.publicCatalog.start).toHaveBeenCalledTimes(2);
   });
 });
