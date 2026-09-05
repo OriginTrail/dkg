@@ -383,9 +383,16 @@ export {
   type PromoteTerminalJobClearer,
 } from './async-promote-queue.js';
 export {
+  createPromoteRetryableFailure,
   getPromoteReplaySafeErrorDiagnostic,
+  getPromoteRetryableFailureDiagnostic,
   isPromoteReplaySafeError,
+  isPromoteRetryableFailure,
+  PROMOTE_RETRYABLE_FAILURE_CODE,
+  PROMOTE_RETRYABLE_FAILURE_ERROR_NAME,
   type PromoteReplaySafeErrorDiagnostic,
+  type PromoteRetryableFailureDiagnostic,
+  type PromoteRetryableFailureMarker,
 } from './promote-replay-safety.js';
 export { type LegacyWmMigrationResult } from './legacy-wm-migration.js';
 export {

@@ -16,14 +16,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import {
-  CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
-  ContextGraphAuthorityUnavailableError,
-} from '@origintrail-official/dkg-agent';
-import {
   OxigraphStore,
   StoreOperationTimeoutError,
 } from '@origintrail-official/dkg-storage';
 import {
+  createPromoteRetryableFailure,
+  PROMOTE_RETRYABLE_FAILURE_CODE,
   TripleStoreAsyncPromoteQueue,
   type AsyncPromoteQueue,
   type PromoteRequest,
@@ -187,19 +185,21 @@ describe('classifyPromoteError', () => {
     });
   });
 
-  it('retries a fail-closed context-graph authority outage', () => {
-    expect(classifyPromoteError(new ContextGraphAuthorityUnavailableError(
-      'signing authority is temporarily unavailable',
-      { reason: 'chain-participant-authority-unavailable' },
+  it('retries a publisher-owned generic promote failure', () => {
+    expect(classifyPromoteError(createPromoteRetryableFailure(
+      new Error('domain failure hidden behind the promote boundary'),
     ))).toEqual({ classification: 'transient', retryable: true });
   });
 
-  it('recognizes a serialized authority marker without relying on class identity', () => {
+  it('recognizes a serialized generic retry marker without relying on class identity', () => {
     expect(classifyPromoteError({
-      code: CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
+      code: PROMOTE_RETRYABLE_FAILURE_CODE,
     })).toEqual({ classification: 'transient', retryable: true });
     expect(classifyPromoteError({
-      code: `${CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE}_LOOKALIKE`,
+      code: `${PROMOTE_RETRYABLE_FAILURE_CODE}_LOOKALIKE`,
+    })).toEqual({ classification: 'fatal', retryable: false });
+    expect(classifyPromoteError({
+      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
     })).toEqual({ classification: 'fatal', retryable: false });
   });
 
@@ -501,7 +501,7 @@ describe('runPromoteJob', () => {
     ]);
   });
 
-  it('keeps a cross-boundary authority outage queued for retry', async () => {
+  it('keeps a serialized cross-boundary generic failure queued for retry', async () => {
     const job = await enqueueAndClaim();
     const result = await runPromoteJob({
       job,
@@ -509,7 +509,7 @@ describe('runPromoteJob', () => {
       workerId: 'worker-test',
       runPromote: async (_request, markPromoteStarted) => {
         await markPromoteStarted();
-        throw { code: CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE };
+        throw { code: PROMOTE_RETRYABLE_FAILURE_CODE };
       },
       now: fixture.clock.now,
       heartbeatIntervalMs: 0,
@@ -525,7 +525,8 @@ describe('runPromoteJob', () => {
       expect.objectContaining({
         classification: 'transient',
         retryable: true,
-        errorCode: CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
+        errorName: 'PromoteRetryableFailureError',
+        errorCode: PROMOTE_RETRYABLE_FAILURE_CODE,
       }),
     ]);
   });

@@ -115,6 +115,7 @@ import {
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
   selectACKCandidatePeersWithDiagnostics,
+  createPromoteRetryableFailure,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   // OT-RFC-43 A2/B3 — per-layer pointers + derived status helper.
   deriveStatus, type KaStatus,
@@ -139,6 +140,8 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+import { isContextGraphAuthorityUnavailableMarker } from
+  './context-graph-authority-unavailable-error.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -771,6 +774,12 @@ function createACKSendP2P(input: {
     }
     return sendResult.response;
   };
+}
+
+function translateAuthorityFailureAtPromoteBoundary(error: unknown): unknown {
+  return isContextGraphAuthorityUnavailableMarker(error)
+    ? createPromoteRetryableFailure(error)
+    : error;
 }
 
 /**
@@ -3271,7 +3280,10 @@ export class DKGAgent extends DKGAgentBase {
         // promoted SWM gossip in the Sender Key encrypted envelope.
         // Without this, private/agent-gated CGs receive plaintext
         // gossip and the new `SharedMemoryHandler` check rejects it.
-        const gossipSigner = await agent.resolveWorkspaceGossipSigningAgent(contextGraphId);
+        const gossipSigner = await agent.resolveWorkspaceGossipSigningAgent(contextGraphId)
+          .catch((error: unknown) => {
+            throw translateAuthorityFailureAtPromoteBoundary(error);
+          });
         // Strict curator-ack gate (OT-RFC-49 curator-leader) for the WM→SWM
         // promote path — the same confirmer as share()/conditionalShare(). When
         // armed (private CG, gate enabled, curator remote), assertionPromote
@@ -3321,7 +3333,9 @@ export class DKGAgent extends DKGAgentBase {
             ...(shareAccessPolicy !== undefined ? { accessPolicy: shareAccessPolicy } : {}),
             ...(opts?.allowedPeers !== undefined ? { allowedPeers: [...opts.allowedPeers] } : {}),
           },
-        );
+        ).catch((error: unknown) => {
+          throw translateAuthorityFailureAtPromoteBoundary(error);
+        });
         if (gossipPayload) {
           try {
             // Preserve the immutable operation id through the fan-out seam.

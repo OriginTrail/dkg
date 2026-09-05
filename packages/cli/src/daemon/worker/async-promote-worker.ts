@@ -41,6 +41,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   getPromoteReplaySafeErrorDiagnostic,
+  getPromoteRetryableFailureDiagnostic,
   PromoteJobLeaseError,
   type AsyncPromoteQueue,
   type PromoteAttemptError,
@@ -194,7 +195,8 @@ function logPromoteAttemptFailure(input: {
   log: PromoteWorkerLogger;
 }): void {
   try {
-    const replaySafeDiagnostic = getPromoteReplaySafeErrorDiagnostic(input.err);
+    const publisherDiagnostic = getPromoteRetryableFailureDiagnostic(input.err)
+      ?? getPromoteReplaySafeErrorDiagnostic(input.err);
     bestEffortLog(
       input.log,
       `[async-promote-worker] ${JSON.stringify({
@@ -208,10 +210,10 @@ function logPromoteAttemptFailure(input: {
         stage: diagnosticPromoteStage(input.message),
         classification: input.classified.classification,
         retryable: input.classified.retryable,
-        errorName: replaySafeDiagnostic?.name
+        errorName: publisherDiagnostic?.name
           ?? safePromoteErrorIdentity(input.err, 'name')
           ?? 'unknown',
-        errorCode: replaySafeDiagnostic?.code
+        errorCode: publisherDiagnostic?.code
           ?? safePromoteErrorIdentity(input.err, 'code')
           ?? 'unknown',
       })}`,
