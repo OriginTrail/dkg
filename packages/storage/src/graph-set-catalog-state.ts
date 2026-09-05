@@ -5,16 +5,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { SortedGraphCatalog } from './graph-set-index-store.js';
 
-type SortedCatalogFactory = typeof createSortedUniqueStringCatalog;
-
 /** Owns graph membership and the invalidation of its immutable sorted view. */
 export class GraphSetCatalogState {
   private members: Set<string> | null = null;
   private ordered: SortedGraphCatalog | null = null;
-
-  constructor(
-    private readonly createSortedCatalog: SortedCatalogFactory = createSortedUniqueStringCatalog,
-  ) {}
 
   get initialized(): boolean {
     return this.members !== null;
@@ -75,7 +69,7 @@ export class GraphSetCatalogState {
    */
   sortedFor(members: ReadonlySet<string>): SortedGraphCatalog | null {
     if (this.members !== members) return null;
-    this.ordered ??= this.createSortedCatalog(this.members);
+    this.ordered ??= createSortedUniqueStringCatalog(this.members);
     return this.ordered;
   }
 }

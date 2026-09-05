@@ -2,10 +2,19 @@ import { createSortedUniqueStringCatalog } from '@origintrail-official/dkg-core'
 import { describe, expect, it, vi } from 'vitest';
 import { GraphSetCatalogState } from '../src/graph-set-catalog-state.js';
 
+vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@origintrail-official/dkg-core')>();
+  return {
+    ...actual,
+    createSortedUniqueStringCatalog: vi.fn(actual.createSortedUniqueStringCatalog),
+  };
+});
+
 describe('GraphSetCatalogState', () => {
   it('maintains an existing immutable sorted projection across point mutations', () => {
-    const createSortedCatalog = vi.fn(createSortedUniqueStringCatalog);
-    const state = new GraphSetCatalogState(createSortedCatalog);
+    const createSortedCatalog = vi.mocked(createSortedUniqueStringCatalog);
+    createSortedCatalog.mockClear();
+    const state = new GraphSetCatalogState();
     state.replace(new Set(['urn:d', 'urn:b']));
     const members = state.current!;
     const initial = state.sortedFor(members)!;
