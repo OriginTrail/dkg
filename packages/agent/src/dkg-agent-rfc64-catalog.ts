@@ -2425,7 +2425,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const authorityRefresh = rfc64CatalogAuthorityRefreshV1.get(this);
     if (authorityRefresh !== undefined) {
       rfc64CatalogAuthorityRefreshV1.delete(this);
-      authorityRefresh.close(
+      await authorityRefresh.close(
         new Error('RFC-64 authority refresh stopped during agent shutdown'),
       );
     }

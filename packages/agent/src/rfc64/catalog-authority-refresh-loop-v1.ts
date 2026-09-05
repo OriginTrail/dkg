@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { Rfc64CoalescingSupervisorV1 } from './coalescing-supervisor-v1.js';
+
 export const RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1 = 5 * 60_000;
 
 export interface Rfc64CatalogAuthorityRefreshSchedulerV1 {
@@ -38,19 +40,36 @@ export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
 export class Rfc64CatalogAuthorityRefreshLoopV1 {
   readonly #scheduler: Rfc64CatalogAuthorityRefreshSchedulerV1;
   readonly #intervalMs: number;
+  readonly #supervisor: Rfc64CoalescingSupervisorV1;
   #timer: ReturnType<typeof setInterval> | null = null;
-  #inFlight: Promise<void> | null = null;
-  #controller: AbortController | null = null;
-  #closed = false;
 
   constructor(private readonly options: Rfc64CatalogAuthorityRefreshLoopOptionsV1) {
     this.#scheduler = options.scheduler ?? rfc64CatalogAuthorityRefreshSchedulerV1;
     this.#intervalMs = options.intervalMs
       ?? RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1;
+    this.#supervisor = new Rfc64CoalescingSupervisorV1({
+      requestWhileRunning: 'drop',
+      runPass: async (signal) => {
+        // Sequential refresh is an intentional global bound. A large Core
+        // responsibility set cannot turn one timer tick into an RPC burst.
+        for (const contextGraphId of this.options.readActiveContextGraphIds()) {
+          try {
+            await this.options.refreshContextGraph(contextGraphId, signal);
+          } catch (error) {
+            if (signal.aborted) return;
+            this.options.onRefreshFailure(contextGraphId, error);
+          }
+        }
+      },
+      // Per-context-graph failures are reported above. Preserve the previous
+      // behavior for the only remaining outer failure source: responsibility reads.
+      onError: () => undefined,
+      closingMessage: 'RFC-64 authority refresh stopped during agent shutdown',
+    });
   }
 
   start(): void {
-    if (this.#closed) {
+    if (this.#supervisor.closed) {
       throw new Error('RFC-64 catalog authority refresh loop is closed');
     }
     if (this.#timer !== null) return;
@@ -58,39 +77,18 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 {
   }
 
   readonly trigger = (): void => {
-    if (this.#closed || this.#inFlight !== null) return;
-    const controller = new AbortController();
-    this.#controller = controller;
-    const run = (async (): Promise<void> => {
-      // Sequential refresh is an intentional global bound. A large Core
-      // responsibility set cannot turn one timer tick into an RPC burst,
-      // and a later tick coalesces while this pass is still running.
-      for (const contextGraphId of this.options.readActiveContextGraphIds()) {
-        try {
-          await this.options.refreshContextGraph(contextGraphId, controller.signal);
-        } catch (error) {
-          if (!controller.signal.aborted) {
-            this.options.onRefreshFailure(contextGraphId, error);
-          }
-        }
-      }
-    })();
-    this.#inFlight = run;
-    void run.finally(() => {
-      if (this.#inFlight === run) {
-        this.#inFlight = null;
-        this.#controller = null;
-      }
-    }).catch(() => undefined);
+    this.#supervisor.request();
   };
 
-  close(reason: unknown): void {
-    if (this.#closed) return;
-    this.#closed = true;
+  whenIdle(): Promise<void> {
+    return this.#supervisor.whenIdle();
+  }
+
+  close(reason: unknown): Promise<void> {
     if (this.#timer !== null) {
       this.#scheduler.clearInterval(this.#timer);
       this.#timer = null;
     }
-    this.#controller?.abort(reason);
+    return this.#supervisor.close(reason);
   }
 }
