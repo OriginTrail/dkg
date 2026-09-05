@@ -54,6 +54,10 @@ jobs:
     outputs:
       full_ci: ${{ steps.plan.outputs.full_ci }}
       run_node: ${{ steps.plan.outputs.run_node }}
+      # The protected-history controller pin predates this capability output.
+      # Keep its trusted lane outputs as a compatibility path until a reviewed
+      # controller rotation after merge; never execute candidate policy here.
+      node_test_artifacts: ${{ steps.plan.outputs.node_test_artifacts || (steps.plan.outputs.tornado_core == 'true' || steps.plan.outputs.tornado_publisher == 'true' || steps.plan.outputs.tornado_agent == 'true' || steps.plan.outputs.bura_cli == 'true' || steps.plan.outputs.kosava_hardhat_plugins == 'true') }}
       tornado_core: ${{ steps.plan.outputs.tornado_core }}
       tornado_blazegraph: ${{ steps.plan.outputs.tornado_blazegraph }}
       tornado_publisher: ${{ steps.plan.outputs.tornado_publisher }}
@@ -342,7 +346,7 @@ jobs:
   evm-node-test-artifacts:
     name: Compile EVM test artifacts (0.8.20/london)
     needs: changes
-    if: needs.changes.outputs.tornado_core == 'true' || needs.changes.outputs.tornado_publisher == 'true' || needs.changes.outputs.tornado_agent == 'true' || needs.changes.outputs.bura_cli == 'true' || needs.changes.outputs.kosava_hardhat_plugins == 'true'
+    if: needs.changes.outputs.node_test_artifacts == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

@@ -10,6 +10,8 @@ import {
   CI_LANES,
   EVM_SCOPES,
   NODE_EVM_LANES,
+  NODE_TEST_ARTIFACT_LANES,
+  needsNodeTestArtifacts,
   WORKSPACE_OWNING_EVM_SCOPES,
   WORKSPACE_OWNING_LANES,
   WORKSPACE_RULES,
@@ -775,13 +777,13 @@ test('all shared Hardhat consumers require and restore the matching artifact', (
   assert.equal(extract.shell, 'bash');
   assert.equal(extract.env.ARTIFACT_DIR, download.with.path);
   assert.match(extract.run, /tar -xzf "\$\{ARTIFACT_DIR\}\/evm-node-test-artifacts\.tgz"/);
-  for (const [job, lane] of [
-    ['tornado-core', 'tornado_core'],
-    ['tornado-agent', 'tornado_agent'],
-    ['tornado-publisher', 'tornado_publisher'],
-    ['bura-cli', 'bura_cli'],
-    ['kosava-hardhat-plugins', 'kosava_hardhat_plugins'],
-  ]) {
+  assert.equal(jobs['evm-node-test-artifacts'].if, "needs.changes.outputs.node_test_artifacts == 'true'");
+  const output = jobs.changes.outputs.node_test_artifacts;
+  assert.ok(output.startsWith('${{ steps.plan.outputs.node_test_artifacts || ('));
+  const legacyLanes = [...output.matchAll(/steps\.plan\.outputs\.(\w+) == 'true'/g)].map((match) => match[1]);
+  assert.deepEqual(new Set(legacyLanes), new Set(NODE_TEST_ARTIFACT_LANES));
+  for (const lane of NODE_TEST_ARTIFACT_LANES) {
+    const job = PRIMARY_LANE_JOBS[lane];
     const consumer = jobs[job];
     const dependencies = new Set([consumer.needs].flat());
     for (const dependency of ['changes', 'build', 'evm-node-test-artifacts']) {
@@ -790,7 +792,30 @@ test('all shared Hardhat consumers require and restore the matching artifact', (
     const restores = consumer.steps.filter((step) => step.uses === restorePath);
     assert.equal(restores.length, 1, job);
     assert.equal(restores[0].if, job === 'tornado-core' ? "matrix.suite == 'chain'" : undefined);
-    assert.ok(jobs['evm-node-test-artifacts'].if.includes(`needs.changes.outputs.${lane} == 'true'`), lane);
+  }
+});
+
+test('artifact capability selects its producer and gate for each consumer lane only', () => {
+  assert.equal(NODE_TEST_ARTIFACT_LANES.length, 5);
+  for (const lane of CI_LANES) {
+    const plan = {
+      ...planCi({ eventName: 'push' }), mode: 'delta', fullCi: false,
+      runNode: Object.hasOwn(PRIMARY_LANE_JOBS, lane) && lane !== 'bura_blazegraph_arm64',
+      lanes: Object.fromEntries(CI_LANES.map((candidate) => [candidate, candidate === lane])),
+    };
+    const selected = NODE_TEST_ARTIFACT_LANES.includes(lane);
+    assert.equal(needsNodeTestArtifacts(plan), selected, lane);
+    assert.equal(githubOutputsForPlan(plan).node_test_artifacts, String(selected), lane);
+    const needs = {
+      changes: { result: 'success' }, build: { result: 'success' },
+      ...Object.fromEntries(Object.values(PRIMARY_LANE_JOBS).map((job) => [job, { result: 'success' }])),
+      'evm-node-test-artifacts': { result: 'skipped' },
+      'evm-devnet-test-artifacts': { result: 'success' },
+      'abi-freshness': { result: 'success' }, solidity: { result: 'success' },
+      'solidity-coverage': { result: 'skipped' }, 'tornado-static-analysis': { result: 'success' },
+    };
+    const errors = validatePrimaryResults({ eventName: 'pull_request', plan, needs });
+    assert.deepEqual(errors, selected ? ['evm-node-test-artifacts was selected but ended with skipped'] : [], lane);
   }
 });
 
