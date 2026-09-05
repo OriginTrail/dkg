@@ -366,6 +366,7 @@ describe('PanelRight UI - connected agent flow', () => {
 describe('Agent hub shell surfaces', () => {
   const panelLeft = readUiFile('components/Shell/PanelLeft.tsx');
   const panelCenter = readUiFile('components/Shell/PanelCenter.tsx');
+  const recoverableLazyView = readUiFile('components/Shell/RecoverableLazyView.tsx');
   const agentHub = readUiFile('pages/AgentHub.tsx');
 
   it('keeps Integrations visible while hiding the duplicate Agent Hub shell entry', () => {
@@ -375,7 +376,8 @@ describe('Agent hub shell surfaces', () => {
 
   it('keeps the center-panel agent-hub route alive under the hood', () => {
     expect(panelCenter).toContain("activeTabId === 'agent-hub'");
-    expect(panelCenter).toContain("Loading agent hub...");
+    expect(panelCenter).toMatch(/AgentHubView = createRecoverableLazyView[\s\S]*?'agent hub'/);
+    expect(recoverableLazyView).toContain('Loading {loadingLabel}...');
     expect(panelCenter).toContain('AgentHubPage');
   });
 

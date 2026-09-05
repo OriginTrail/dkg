@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { CenterViewBoundary } from './CenterViewBoundary.js';
+import { createRecoverableLazyView } from './RecoverableLazyView.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { DashboardView } from '../../views/DashboardView.js';
 import { ContextGraphPrimerView } from '../../views/ContextGraphPrimerView.js';
@@ -14,41 +14,41 @@ const CLOSE_ICON = (
   </svg>
 );
 
-const OperationsView = React.lazy(() =>
+const OperationsView = createRecoverableLazyView(() =>
   import('../../pages/Operations.js').then((m) => ({ default: m.OperationsPage }))
-);
+, 'operations');
 
-const AgentHubView = React.lazy(() =>
+const AgentHubView = createRecoverableLazyView(() =>
   import('../../pages/AgentHub.js').then((m) => ({ default: m.AgentHubPage }))
-);
+, 'agent hub');
 
-const SettingsView = React.lazy(() =>
+const SettingsView = createRecoverableLazyView(() =>
   import('../../pages/Settings.js').then((m) => ({ default: m.SettingsPage }))
-);
+, 'settings');
 
-const AgentProfilePage = React.lazy(() =>
+const AgentProfilePage = createRecoverableLazyView(() =>
   import('../AgentProfilePage.js').then((m) => ({ default: m.AgentProfilePage }))
-);
+, 'account');
 
-const PublishingConvictionView = React.lazy(() =>
+const PublishingConvictionView = createRecoverableLazyView(() =>
   import('../../pages/PublishingConviction.js').then((m) => ({ default: m.PublishingConvictionPage }))
-);
+, 'Publisher Conviction');
 
-const ConvictionDetailView = React.lazy(() =>
+const ConvictionDetailView = createRecoverableLazyView(() =>
   import('../../pages/conviction/ConvictionDetailView.js').then((m) => ({ default: m.ConvictionDetailView }))
-);
+, 'account');
 
-const ProjectView = React.lazy(() =>
+const ProjectView = createRecoverableLazyView(() =>
   import('../../views/ProjectView.js').then((m) => ({ default: m.ProjectView }))
-);
+, 'project');
 
-const MemoryLayerView = React.lazy(() =>
+const MemoryLayerView = createRecoverableLazyView(() =>
   import('../../views/MemoryLayerView.js').then((m) => ({ default: m.MemoryLayerView }))
-);
+, ({ layer }) => ({ wm: 'working memory', swm: 'shared memory', vm: 'verifiable memory' })[layer]);
 
-const MemoryStackView = React.lazy(() =>
+const MemoryStackView = createRecoverableLazyView(() =>
   import('../../views/MemoryStackView.js').then((m) => ({ default: m.MemoryStackView }))
-);
+, 'memory stack');
 
 function TabBar() {
   const { tabs, activeTabId, setActiveTab, closeTab } = useTabsStore();
@@ -362,14 +362,11 @@ function ViewContainer() {
 }
 
 export function PanelCenter() {
-  const activeTabId = useTabsStore(s => s.activeTabId);
   return (
     <div className="v10-panel-center">
       <TabBar />
       <div className="v10-center-content">
-        <CenterViewBoundary viewId={activeTabId}>
-          <ViewContainer />
-        </CenterViewBoundary>
+        <ViewContainer />
       </div>
     </div>
   );
