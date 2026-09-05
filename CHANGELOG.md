@@ -4,6 +4,10 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Documentation corrections
+
+- Since the curator/member author-resolution change (#1780), calling `publishFromFinalizedAssertion(cg, name)` without an explicit `agentAddress` can select a single finalized member author's Knowledge Asset from stored metadata. A call that previously returned 409 because the node did not author the asset can now publish it, spending the publishing node wallet's gas/TRAC, subject to on-chain publish authorization. Callers that require a particular author must pass that author's `agentAddress`; the explicit selector is authoritative and is never substituted (#1785).
+
 ## [10.0.15] - 2026-09-03
 
 A selected-Context-Graph recovery, query, and operational-hardening release. For public and private Context Graphs that an Edge node explicitly selects, RFC-64 makes signed SWM catalogs the recovery authority while finalized VM remains independently derived from blockchain inventory. Ordinary SHARE operations advance the author's durable catalog, receivers verify policy and provider authority before atomic application, restart repair restores catalog state, and private receivers can bootstrap from the accepted on-chain roster without pre-existing local metadata. This release does **not** subscribe an Edge node to additional Context Graphs and does **not** make RFC-64 automatic for every CG; unselected graphs keep their existing behavior. **No smart-contract changes or deployments are required.**

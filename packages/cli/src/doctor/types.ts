@@ -149,6 +149,8 @@ export interface DoctorReport {
  * subprocesses, or hitting the daemon's HTTP port.
  */
 export interface DoctorDeps {
+  /** Platform used for static capability checks; defaults to the current process. */
+  platform?: NodeJS.Platform;
   /** Resolved DKG home (`~/.dkg/` typically). */
   dkgHome: string;
   /** `process.env.DKG_HOME` at invocation time. */
