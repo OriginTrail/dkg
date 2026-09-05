@@ -29,6 +29,7 @@ import { join } from 'node:path';
 import { DKGAgent } from '../../src/index.js';
 import { SwmHostModeStore } from '../../src/swm/host-mode-store.js';
 import { GraphManager } from '@origintrail-official/dkg-storage';
+import { DKG_ONTOLOGY, contextGraphDataUri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 
 /**
  * Minimal in-memory gossip transport — mirrors the surface the agent
@@ -151,9 +152,14 @@ describe('host-mode bookkeeping key canonicalisation', () => {
     const internals = core as unknown as AgentInternals;
     internals.config.swmHostMode = { ...(internals.config.swmHostMode ?? {}), reconcileBatchSize: 2 };
     const graphManager = new GraphManager(core.store);
-    const cgIds = ['cursor-cg-d', 'cursor-cg-b', 'cursor-cg-a', 'cursor-cg-c'];
+    const cgIds = ['cursor-cg-d', 'cursor-cg-b', `0x${'ab'.repeat(20)}/cursor-cg-a`, 'cursor-cg-c'];
     for (const cgId of cgIds) {
       await core.store.insert([{
+        subject: contextGraphDataUri(cgId),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+      }, {
         subject: `http://example.org/${cgId}`,
         predicate: 'http://schema.org/name',
         object: `"${cgId}"`,
@@ -184,6 +190,11 @@ describe('host-mode bookkeeping key canonicalisation', () => {
     const cgIds = ['failing-cursor-cg-a', 'failing-cursor-cg-b', 'failing-cursor-cg-c'];
     for (const cgId of cgIds) {
       await core.store.insert([{
+        subject: contextGraphDataUri(cgId),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+      }, {
         subject: `http://example.org/${cgId}`,
         predicate: 'http://schema.org/name',
         object: `"${cgId}"`,

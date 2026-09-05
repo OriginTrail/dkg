@@ -756,11 +756,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       candidateIds.add(id);
     }
 
-    const graphManager = new GraphManager(this.store);
-    for (const id of await graphManager.listContextGraphs()) {
-      candidateIds.add(id);
-    }
-
+    // The projection already uses the shared declaration-based enumeration.
+    // Repeating it through GraphManager would scan the same sources twice.
     const rows = await mapContextGraphListRows([...candidateIds].sort(), async (id): Promise<InternalContextGraphListRow | null> => {
       if (!id) return null;
       const sub = this.subscribedContextGraphs.get(id);

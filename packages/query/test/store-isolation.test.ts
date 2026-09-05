@@ -11,6 +11,7 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, GraphManager, type Quad } from '@origintrail-official/dkg-storage';
+import { DKG_ONTOLOGY, contextGraphDataUri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 
 const CONTEXT_GRAPH = 'test-contextGraph';
@@ -113,9 +114,13 @@ describe('Store Isolation (Spec §1.6, §1.7)', () => {
       const engineA = new DKGQueryEngine(storeA);
 
       await storeA.insert([
+        { subject: GRAPH, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+          graph: contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) },
         q('did:dkg:agent:LocalBot', 'http://schema.org/name', '"LocalBot"'),
       ]);
       await storeB.insert([
+        { subject: 'did:dkg:context-graph:other', predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+          graph: contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) },
         { subject: 'did:dkg:agent:RemoteBot', predicate: 'http://schema.org/name', object: '"RemoteBot"', graph: 'did:dkg:context-graph:other' },
       ]);
 
