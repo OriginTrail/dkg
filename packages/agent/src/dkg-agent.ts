@@ -944,6 +944,7 @@ export class DKGAgent extends DKGAgentBase {
       },
       service: {
         start: (ctx) => this.startRfc64PublicCatalogServiceV1(ctx),
+        whenIdle: () => this.whenRfc64PublicCatalogServiceIdleV1(),
         close: () => this.closeRfc64PublicCatalogServiceV1(),
       },
       receiverAdmission: {

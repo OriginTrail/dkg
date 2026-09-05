@@ -11,6 +11,8 @@ export interface Rfc64CatalogRuntimeOptionsV1 {
   }>;
   readonly service: Readonly<{
     start: (ctx: OperationContext) => void;
+    /** Observes the composite transport/authority owner. */
+    whenIdle: () => Promise<void>;
     /** Closes transport and physically drains the shared mutation coordinator. */
     close: () => Promise<void>;
   }>;
@@ -51,6 +53,7 @@ export class Rfc64CatalogRuntimeV1 {
 
   async whenIdle(): Promise<void> {
     await Promise.all([
+      this.#options.service.whenIdle(),
       this.#options.bootstrap.whenIdle(),
       this.#options.projection.whenIdle(),
     ]);

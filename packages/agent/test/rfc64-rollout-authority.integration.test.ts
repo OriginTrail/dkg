@@ -1042,6 +1042,11 @@ describe('RFC-64 rollout authority integration', () => {
 
       edge.startRfc64PublicCatalogServiceV1(createOperationContext('system'));
       await authorityReadStarted;
+      let runtimeIdleSettled = false;
+      const runtimeIdle = edge.whenRfc64CatalogSupervisorsIdleV1()
+        .then(() => { runtimeIdleSettled = true; });
+      await Promise.resolve();
+      expect(runtimeIdleSettled).toBe(false);
       const service = (edge as any).rfc64PublicCatalogServiceV1;
       const serviceCloseFailure = new Error('injected service close failure');
       const closeService = service.close.bind(service);
@@ -1077,7 +1082,9 @@ describe('RFC-64 rollout authority integration', () => {
 
       releaseAuthorityRead();
       await expect(stalledClose).rejects.toBe(serviceCloseFailure);
+      await runtimeIdle;
       expect(closeSettled).toBe(true);
+      expect(runtimeIdleSettled).toBe(true);
       expect(coordinatorClose).toHaveBeenCalledOnce();
 
       const restartedReconcile = vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1')

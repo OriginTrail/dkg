@@ -51,6 +51,7 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 {
         for (const contextGraphId of this.options.readActiveContextGraphIds()) {
           try {
             await this.options.refreshContextGraph(contextGraphId, signal);
+            if (signal.aborted) return;
           } catch (error) {
             if (signal.aborted) return;
             this.options.onRefreshFailure(contextGraphId, error);

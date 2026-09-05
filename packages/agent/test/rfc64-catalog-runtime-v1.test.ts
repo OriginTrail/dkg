@@ -7,6 +7,7 @@ import {
 } from '../src/rfc64/catalog-runtime-v1.js';
 
 type RuntimeCallV1 =
+  | 'service.whenIdle'
   | 'bootstrap.whenIdle'
   | 'projection.whenIdle'
   | 'inventoryObservers.close'
@@ -30,6 +31,7 @@ function runtimeOptions(
     },
     service: {
       start: vi.fn(),
+      whenIdle: callback('service.whenIdle'),
       close: callback('service.close'),
     },
     receiverAdmission: {
@@ -84,6 +86,7 @@ describe('Rfc64CatalogRuntimeV1', () => {
 
     expect(options.bootstrap.start).toHaveBeenCalledWith(ctx);
     expect(options.projection.start).toHaveBeenCalledWith(ctx);
+    expect(options.service.whenIdle).toHaveBeenCalledOnce();
     expect(options.bootstrap.whenIdle).toHaveBeenCalledOnce();
     expect(options.projection.whenIdle).toHaveBeenCalledOnce();
   });

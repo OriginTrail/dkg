@@ -2414,6 +2414,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     await this.rfc64PublicCatalogServiceV1?.closeReceiverAdmissionAndDrain();
   }
 
+  /** Observe the composite transport/authority owner through the canonical runtime. */
+  async whenRfc64PublicCatalogServiceIdleV1(this: DKGAgent): Promise<void> {
+    await Promise.all([
+      this.rfc64PublicCatalogServiceV1?.whenReceiverIdle(),
+      rfc64CatalogAuthorityRefreshV1.get(this)?.whenIdle(),
+    ]);
+  }
+
   /** Stop serving and drain in-flight receiver work. Idempotent + undefined-safe. */
   closeRfc64PublicCatalogServiceV1(this: DKGAgent): Promise<void> {
     const activeClose = rfc64PublicCatalogServiceCloseV1.get(this);

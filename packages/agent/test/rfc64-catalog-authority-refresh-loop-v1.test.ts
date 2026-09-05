@@ -123,7 +123,6 @@ describe('RFC-64 catalog authority refresh loop', () => {
         markStarted();
         // Deliberately ignore cancellation until the physical operation retires.
         await retirement;
-        if (signal.aborted) throw signal.reason;
       },
       onRefreshFailure: (contextGraphId, error) => {
         reported.push(Object.freeze({ contextGraphId, error }));
