@@ -10,7 +10,16 @@ export function buildInitChainOverrides(
   networkDefaults: Partial<ChainConfig> | undefined,
   existing: Partial<ChainConfig> | undefined,
 ): Partial<ChainConfig> | undefined {
-  const { type, rpcUrl: _rpcUrl, rpcUrls: _rpcUrls, hubAddress: _hubAddress, chainId: _chainId, ...advanced } = existing ?? {};
+  // Mock mode deliberately has no RPC/Hub defaults. Keeping both prompts empty
+  // continues that mode; entering an EVM endpoint or Hub replaces it.
+  if (existing?.type === 'mock' && !answers.rpcUrl && !answers.hubAddress) {
+    return {
+      type: 'mock',
+      ...(answers.chainId ? { chainId: answers.chainId } : {}),
+      ...(existing.mockIdentityId !== undefined ? { mockIdentityId: existing.mockIdentityId } : {}),
+    };
+  }
+  const { type: _type, mockIdentityId: _mockIdentityId, rpcUrl: _rpcUrl, rpcUrls: _rpcUrls, hubAddress: _hubAddress, chainId: _chainId, ...advanced } = existing ?? {};
   const defaultBackups = networkDefaults?.rpcUrls ?? [];
   const backups = answers.rpcUrls;
   // Undefined inherits; [] explicitly removes network backups. Order is significant.
@@ -19,7 +28,6 @@ export function buildInitChainOverrides(
   );
   const overrides: Partial<ChainConfig> = {
     ...advanced,
-    ...(type && type !== 'evm' ? { type } : {}),
     ...(isScalarOverride(answers.rpcUrl, networkDefaults?.rpcUrl) ? { rpcUrl: answers.rpcUrl } : {}),
     ...(hasBackupOverride ? { rpcUrls: backups } : {}),
     ...(isScalarOverride(answers.hubAddress, networkDefaults?.hubAddress) ? { hubAddress: answers.hubAddress } : {}),
