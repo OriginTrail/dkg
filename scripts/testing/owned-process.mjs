@@ -1,10 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 
-const owners = new WeakMap();
-
 /** Attach immediately after spawn. Services supply readiness; this utility owns lifetime. */
 export function ownProcess(child, { label = 'Owned child', graceMs = 1200, killTimeoutMs = 2000 } = {}) {
-  if (owners.has(child)) return owners.get(child);
   let stdout = '';
   let stderr = '';
   let spawnError;
@@ -79,6 +76,5 @@ export function ownProcess(child, { label = 'Owned child', graceMs = 1200, killT
       }
     },
   };
-  owners.set(child, owner);
   return owner;
 }
