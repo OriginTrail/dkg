@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
@@ -19,18 +21,21 @@ test('the manifest covers canonical scopes and drives every real Vitest integrat
   assert.throws(() => evmFilesForPackage(path.join(EVM_REPO_ROOT, 'packages/core')), /No dedicated EVM tests/);
 });
 
-test('runner routes every requested file once and continues after a failed test', () => {
+test('runner routes every requested file once and continues after a failed test', (t) => {
+  const root = fs.mkdtempSync(path.join(tmpdir(), 'dkg-evm-routing-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const runFixture = (scope, options) => runEvmIntegration(scope, { ...options, repoRoot: root });
   for (const selection of [...EVM_SCOPES, 'all']) {
     const expectedScopes = selection === 'all' ? EVM_SCOPES : [selection];
     const expected = expectedScopes.flatMap((scope) => {
       const { packageDirectory, files } = EVM_TEST_SCOPES[scope];
-      return files.map((file) => ({ cwd: path.join(EVM_REPO_ROOT, packageDirectory), file }));
+      return files.map((file) => ({ cwd: path.join(root, packageDirectory), file }));
     });
     const calls = [];
-    const status = runEvmIntegration(selection, { checkReport: () => true, run: (command, args, options) => {
+    const status = runFixture(selection, { checkReport: () => true, run: (command, args, options) => {
       assert.equal(command, 'pnpm');
       assert.deepEqual(args.slice(0, 3), ['exec', 'vitest', 'run']);
-      assert.deepEqual(args.slice(4, 8), ['--config', path.join(EVM_REPO_ROOT, 'vitest.evm-integration.ts'), '--reporter=verbose', '--reporter=junit']);
+      assert.deepEqual(args.slice(4, 8), ['--config', path.join(root, 'vitest.evm-integration.ts'), '--reporter=verbose', '--reporter=junit']);
       assert.match(args[8], /--outputFile\.junit=.*test-results[/\\]evm-.*\.xml$/);
       calls.push({ cwd: options.cwd, file: args[3] });
       return { status: calls.length === 1 ? 7 : 0 };
@@ -38,8 +43,8 @@ test('runner routes every requested file once and continues after a failed test'
     assert.equal(status, 1);
     assert.deepEqual(calls, expected);
   }
-  assert.equal(runEvmIntegration('chain', { checkReport: () => true, run: () => ({ status: 0 }) }), 0);
-  assert.equal(runEvmIntegration('chain', { checkReport: () => false, run: () => ({ status: 0 }) }), 1);
-  assert.equal(runEvmIntegration('chain', { run: () => ({ error: new Error('spawn failed') }) }), 1);
-  assert.throws(() => runEvmIntegration('unknown', { run: () => assert.fail('must not execute') }), /Unknown EVM scope/);
+  assert.equal(runFixture('chain', { checkReport: () => true, run: () => ({ status: 0 }) }), 0);
+  assert.equal(runFixture('chain', { checkReport: () => false, run: () => ({ status: 0 }) }), 1);
+  assert.equal(runFixture('chain', { run: () => ({ error: new Error('spawn failed') }) }), 1);
+  assert.throws(() => runFixture('unknown', { run: () => assert.fail('must not execute') }), /Unknown EVM scope/);
 });

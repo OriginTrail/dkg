@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { EVM_TEST_SCOPES, EVM_REPO_ROOT } from './ci/evm-test-scopes.mjs';
 import { EVM_SCOPES } from './lib/ci-delta.mjs';
 
-export function runEvmIntegration(scope = 'all', { run = spawnSync, checkReport = (file) => fs.existsSync(file) && fs.statSync(file).size > 0 } = {}) {
+export function runEvmIntegration(scope = 'all', { run = spawnSync, repoRoot = EVM_REPO_ROOT, checkReport = (file) => fs.existsSync(file) && fs.statSync(file).size > 0 } = {}) {
   if (scope !== 'all' && !EVM_SCOPES.includes(scope)) throw new Error(`Unknown EVM scope: ${scope}`);
   let exitCode = 0;
   for (const selected of scope === 'all' ? EVM_SCOPES : [scope]) {
@@ -14,12 +14,12 @@ export function runEvmIntegration(scope = 'all', { run = spawnSync, checkReport 
       console.log(`Running EVM integration: ${selected} / ${file}`);
       // Preserve one isolated Hardhat lifecycle at a time and collect failures
       // across all selected files instead of dropping later tests on failure.
-      const report = path.join(EVM_REPO_ROOT, packageDirectory, 'test-results', `evm-${path.basename(file, '.test.ts')}.xml`);
+      const report = path.join(repoRoot, packageDirectory, 'test-results', `evm-${path.basename(file, '.test.ts')}.xml`);
       fs.mkdirSync(path.dirname(report), { recursive: true });
       fs.rmSync(report, { force: true });
       const result = run('pnpm', ['exec', 'vitest', 'run', file,
-        '--config', path.join(EVM_REPO_ROOT, 'vitest.evm-integration.ts'), '--reporter=verbose', '--reporter=junit', `--outputFile.junit=${report}`], {
-        cwd: path.join(EVM_REPO_ROOT, packageDirectory), stdio: 'inherit',
+        '--config', path.join(repoRoot, 'vitest.evm-integration.ts'), '--reporter=verbose', '--reporter=junit', `--outputFile.junit=${report}`], {
+        cwd: path.join(repoRoot, packageDirectory), stdio: 'inherit',
       });
       if (result.error || result.status !== 0) {
         console.error(`FAIL: ${packageDirectory}/${file}: ${result.error?.message ?? result.status}`);
