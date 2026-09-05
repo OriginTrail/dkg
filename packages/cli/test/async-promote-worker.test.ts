@@ -15,6 +15,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
+import { ContextGraphAuthorityUnavailableError } from '@origintrail-official/dkg-agent';
 import {
   OxigraphStore,
   StoreOperationTimeoutError,
@@ -184,10 +185,16 @@ describe('classifyPromoteError', () => {
   });
 
   it('retries a fail-closed context-graph authority outage', () => {
-    expect(classifyPromoteError(Object.assign(
-      new Error('signing authority is temporarily unavailable'),
-      { code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE' },
+    expect(classifyPromoteError(new ContextGraphAuthorityUnavailableError(
+      'signing authority is temporarily unavailable',
+      { reason: 'chain-participant-authority-unavailable' },
     ))).toEqual({ classification: 'transient', retryable: true });
+  });
+
+  it('does not retry an authoritative empty signing roster', () => {
+    expect(classifyPromoteError(
+      new Error('authoritative signing roster is empty'),
+    )).toEqual({ classification: 'fatal', retryable: false });
   });
 
   it('requires typed outcomes for managed-store and scheduler failures', () => {
