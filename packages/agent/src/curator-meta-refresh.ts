@@ -11,6 +11,7 @@ import {
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import {
+  tryReplaceSubjectAtomically,
   tryUpdateWithTouchedGraphs,
   type Quad,
   type TripleStore,
@@ -484,6 +485,111 @@ async function atomicallyReplaceCuratorMetaSnapshot(
   ctx: OperationContext,
 ): Promise<void> {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+  const delegationPrefix = `did:dkg:agent-delegation:${contextGraphId}:`;
+  const invalidateTargetProjections = () => {
+    agent.contextGraphMetaProjection.markDirty(contextGraphId);
+    agent.invalidateListContextGraphsCache();
+  };
+
+  // A remote endpoint can safely replace one subject in a shared graph without
+  // staging a second graph. Prefer that primitive here. Besides avoiding the
+  // whole-projection staging race under concurrent VM materialization, the
+  // ordering is fail closed: new delegation proofs land before the root ACL,
+  // the root subject is the activation boundary, and stale delegations are
+  // removed only after their allowedAgent row is gone.
+  if (typeof agent.store.replaceSubject === 'function') {
+    const [localRevocations, existingDelegationSubjects] = await Promise.all([
+      agent.store.query(`
+        SELECT ?o WHERE {
+          GRAPH <${assertSafeIri(metaGraph)}> {
+            <${assertSafeIri(contextGraphUri)}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?o .
+          }
+        }
+      `, { source: 'agent.metaRefresh.readLocalRevocations' }),
+      agent.store.query(`
+        SELECT DISTINCT ?s WHERE {
+          GRAPH <${assertSafeIri(metaGraph)}> {
+            ?s (
+              <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}> |
+              <${DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT}> |
+              <${DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT}> |
+              <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER}> |
+              <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY}>
+            ) ?delegationValue .
+          }
+          FILTER(STRSTARTS(STR(?s), ${JSON.stringify(delegationPrefix)}))
+        }
+      `, { source: 'agent.metaRefresh.readLocalDelegations' }),
+    ]);
+    if (
+      localRevocations.type !== 'bindings'
+      || existingDelegationSubjects.type !== 'bindings'
+    ) {
+      throw new Error('Curator metadata replacement requires control-plane bindings');
+    }
+
+    const desiredBySubject = new Map<string, Quad[]>();
+    for (const quad of snapshot) {
+      const rows = desiredBySubject.get(quad.subject) ?? [];
+      rows.push(quad);
+      desiredBySubject.set(quad.subject, rows);
+    }
+    const rootRows = desiredBySubject.get(contextGraphUri) ?? [];
+    const localRevocationRows: Quad[] = localRevocations.bindings
+      .filter((row) => typeof row['o'] === 'string')
+      .map((row) => ({
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.DKG_REVOKED_AGENT,
+        object: row['o']!,
+        graph: metaGraph,
+      }));
+    const rootRowKeys = new Set(rootRows.map((quad) => `${quad.predicate}\u0000${quad.object}`));
+    const rootReplacement = [
+      ...rootRows,
+      ...localRevocationRows.filter(
+        (quad) => !rootRowKeys.has(`${quad.predicate}\u0000${quad.object}`),
+      ),
+    ];
+    const desiredDelegations = [...desiredBySubject.entries()]
+      .filter(([subject]) => subject.startsWith(delegationPrefix))
+      .sort(([left], [right]) => left.localeCompare(right));
+    const existingDelegations = new Set(
+      existingDelegationSubjects.bindings
+        .map((row) => row['s'])
+        .filter((subject): subject is string => (
+          typeof subject === 'string' && subject.startsWith(delegationPrefix)
+        )),
+    );
+
+    invalidateTargetProjections();
+    try {
+      const replaceSubject = async (subject: string, quads: Quad[]): Promise<void> => {
+        const replaced = await tryReplaceSubjectAtomically(
+          agent.store,
+          metaGraph,
+          subject,
+          quads,
+          { source: 'agent.metaRefresh.replaceSubject' },
+        );
+        if (!replaced) {
+          throw new Error('Triple store lost atomic subject-replacement capability');
+        }
+      };
+      for (const [subject, quads] of desiredDelegations) {
+        await replaceSubject(subject, quads);
+        existingDelegations.delete(subject);
+      }
+      await replaceSubject(contextGraphUri, rootReplacement);
+      for (const staleSubject of [...existingDelegations].sort()) {
+        await replaceSubject(staleSubject, []);
+      }
+    } finally {
+      invalidateTargetProjections();
+    }
+    return;
+  }
+
   const stagingGraph = `urn:dkg:curator-meta-refresh:${randomUUID()}`;
   try {
     const staged = await insertWithOversizeGuard(
@@ -504,10 +610,6 @@ async function atomicallyReplaceCuratorMetaSnapshot(
     // A decorated store can commit its inner UPDATE and then throw while
     // appending a changelog marker. Invalidate before and after the attempt so
     // no authorization read can retain the previous ACL across that window.
-    const invalidateTargetProjections = () => {
-      agent.contextGraphMetaProjection.markDirty(contextGraphId);
-      agent.invalidateListContextGraphsCache();
-    };
     invalidateTargetProjections();
     let replaced = false;
     try {

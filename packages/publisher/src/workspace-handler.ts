@@ -325,6 +325,7 @@ export class SharedMemoryHandler {
    */
   private readonly legacyApplyAllowedOracle?: (
     contextGraphId: string,
+    subGraphName: string | null,
   ) => boolean | Promise<boolean>;
   private readonly markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
   /**
@@ -462,6 +463,7 @@ export class SharedMemoryHandler {
        */
       legacyApplyAllowedOracle?: (
         contextGraphId: string,
+        subGraphName: string | null,
       ) => boolean | Promise<boolean>;
       markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
       /**
@@ -1008,13 +1010,27 @@ export class SharedMemoryHandler {
         return { applied: false, reason, retryable: false };
       }
 
-      if (
-        this.legacyApplyAllowedOracle !== undefined
-        && !await this.legacyApplyAllowedOracle(contextGraphId)
-      ) {
-        const reason = `legacy SWM apply is not authoritative for context graph "${contextGraphId}"`;
+      // Every currently supported wire shape carries its scope outside the
+      // plaintext. Check it before policy work/decryption so a catalog-owned
+      // ROOT write is cheap to decline. The authoritative request is checked
+      // again below when an encrypted envelope claims a different scope.
+      const encodedSubGraphName = request?.subGraphName
+        ?? decoded.senderKeyMessage?.subGraphName
+        ?? decoded.encryptedPayload?.subGraphName
+        ?? null;
+      const declineNonAuthoritativeLegacyApply = (
+        subGraphName: string | null,
+      ): SharedMemoryApplyOutcome => {
+        const scope = subGraphName === null ? 'root scope' : `subgraph "${subGraphName}"`;
+        const reason = `legacy SWM apply is not authoritative for ${scope} of context graph "${contextGraphId}"`;
         this.log.debug(ctx, `SWM write declined: ${reason}`);
         return { applied: false, reason, retryable: false };
+      };
+      if (
+        this.legacyApplyAllowedOracle !== undefined
+        && !await this.legacyApplyAllowedOracle(contextGraphId, encodedSubGraphName)
+      ) {
+        return declineNonAuthoritativeLegacyApply(encodedSubGraphName);
       }
 
       const agentGateAddresses = await this.getContextGraphAgentGateAddresses(contextGraphId);
@@ -1181,6 +1197,15 @@ export class SharedMemoryHandler {
         const reason = `no workspace publish request for context graph "${contextGraphId}"`;
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
         return { applied: false, reason, retryable: false };
+      }
+
+      const requestSubGraphName = request.subGraphName ?? null;
+      if (
+        requestSubGraphName !== encodedSubGraphName
+        && this.legacyApplyAllowedOracle !== undefined
+        && !await this.legacyApplyAllowedOracle(contextGraphId, requestSubGraphName)
+      ) {
+        return declineNonAuthoritativeLegacyApply(requestSubGraphName);
       }
 
       if (request.operationId) {

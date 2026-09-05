@@ -289,6 +289,7 @@ describe('sync-on-connect churn gates', () => {
   it('retains progress while backing off a mixed progress-and-failure round', async () => {
     const agent = await createUnstartedAgent('SyncReconnectPartialProgressBackoff', {
       syncContextGraphs: ['cg-a'],
+      rfc64CatalogActivation: { enabled: false },
     });
     allowAllNetworkAdmission(agent);
     (agent as any).started = true;
@@ -921,7 +922,12 @@ describe('sync-on-connect churn gates', () => {
   });
 
   it('filters private SWM sync-on-connect scope to the matching curator peer', async () => {
-    const agent = await createUnstartedAgent('SwmPeerScopedRecovery');
+    const agent = await createUnstartedAgent('SwmPeerScopedRecovery', {
+      rfc64CatalogActivation: { enabled: false },
+    });
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({
+      legacySyncAllowed: true,
+    } as ReturnType<typeof agent.resolveRfc64CatalogReceiverAuthorityV1>);
     const privateCg = 'private-cg';
     const otherPrivateCg = 'other-private-cg';
     const localPrivateCg = 'local-private-cg';

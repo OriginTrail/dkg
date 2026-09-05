@@ -1,4 +1,4 @@
-# Proof-of-Storage Content-Binding — Cutover Runbook
+# Proof-of-Storage Content-Binding Cutover Runbook
 
 Bounty Finding #3 remediation. Branch `security/rs-pos-content-binding`. Pre-mainnet — **no production data to migrate**.
 

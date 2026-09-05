@@ -20,7 +20,6 @@ import {
   GATE1_DEPLOYMENT as DEPLOYMENT,
   GATE1_NETWORK_ID as NETWORK_ID,
   GATE1_PROJECTION_NQUADS as PROJECTION_NQUADS,
-  GATE1_PROJECTION_QUADS as PROJECTION_QUADS,
   GATE1_ROLE_MASTER_KEYS as ROLE_KEYS,
   createGate1AuthorSealV1 as authorSeal,
   createGate1CatalogScopeV1,
@@ -205,13 +204,13 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
   await announceAndDrain(author, shadow.child, announcement, shadow.ready, 'shadow');
   assert.equal(await stagedHead(shadow.child, headDigest, signatureVariantDigest, 'shadow'), headDigest);
   assert.equal(await appliedHead(shadow.child, catalogScopeDigest, 'shadow'), null);
-  assertSemanticExact(await semanticGraph(shadow.child, swmGraph, 'shadow'), swmGraph);
+  assertSemanticEmpty(await semanticGraph(shadow.child, swmGraph, 'shadow'), swmGraph);
   await shadow.child.stop('stop-shadow');
   await requireStoreFixture().assertGraphExact(
     'receiver',
     receiverDataDir,
     swmGraph,
-    PROJECTION_QUADS,
+    [],
   );
 
   const catalog = await startReceiver('catalog', false, receiverDataDir, author, authorReady);
@@ -236,13 +235,13 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
   assertVmReconciled(catalogVm, 'catalog');
   assertSemanticExact(catalogVmGraph, vmGraph);
   assertAppliedExact(await appliedHead(catalog.child, catalogScopeDigest, 'catalog'), headDigest);
-  assertSemanticExact(await semanticGraph(catalog.child, swmGraph, 'catalog'), swmGraph);
+  assertSemanticEmpty(await semanticGraph(catalog.child, swmGraph, 'catalog'), swmGraph);
   await catalog.child.stop('stop-catalog');
   await requireStoreFixture().assertGraphExact(
     'receiver',
     receiverDataDir,
     swmGraph,
-    PROJECTION_QUADS,
+    [],
   );
 
   const killed = await startReceiver('catalog', true, receiverDataDir, author, authorReady, false);
@@ -261,7 +260,7 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
   assertVmReconciled(killedVm, 'killed');
   assertSemanticExact(await semanticGraph(killed.child, vmGraph, 'killed-vm'), vmGraph);
   assertAppliedExact(await appliedHead(killed.child, catalogScopeDigest, 'killed'), headDigest);
-  assertSemanticExact(await semanticGraph(killed.child, swmGraph, 'killed'), swmGraph);
+  assertSemanticEmpty(await semanticGraph(killed.child, swmGraph, 'killed'), swmGraph);
   await killed.child.stop('stop-killed');
 
   const reenabled = await startReceiver('catalog', false, receiverDataDir, author, authorReady);
@@ -281,7 +280,7 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
   assertVmReconciled(reenabledVm, 'reenabled');
   assertSemanticExact(await semanticGraph(reenabled.child, vmGraph, 'reenabled-vm'), vmGraph);
   assertAppliedExact(await appliedHead(reenabled.child, catalogScopeDigest, 'reenabled'), headDigest);
-  assertSemanticExact(await semanticGraph(reenabled.child, swmGraph, 'reenabled'), swmGraph);
+  assertSemanticEmpty(await semanticGraph(reenabled.child, swmGraph, 'reenabled'), swmGraph);
   await reenabled.child.stop('stop-reenabled');
 
   const transitionedLegacy = await startReceiver(
@@ -292,12 +291,14 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
     authorReady,
     false,
   );
+  // The global service stays ready for CGs that enter the default catalog lane
+  // later; the assertions below prove this CG remains owned by explicit legacy.
   assert.deepEqual(await rolloutStatus(
     transitionedLegacy.child,
     authorReady.peerId as string,
     'transitioned-legacy',
   ), expectedStatus({
-    service: false,
+    service: true,
     legacy: true,
     manualTargets: 1,
     bootstrap: true,
@@ -355,7 +356,7 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
     authorReady.peerId as string,
     'legacy',
   ), expectedStatus({
-    service: false,
+    service: true,
     legacy: true,
     manualTargets: 1,
     bootstrap: true,
@@ -370,7 +371,7 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
   assertVmReconciled(legacyVm, 'legacy');
   assertSemanticExact(await semanticGraph(legacy.child, vmGraph, 'legacy-vm'), vmGraph);
   assert.equal(await appliedHead(legacy.child, catalogScopeDigest, 'legacy'), null);
-  assertSemanticExact(await semanticGraph(legacy.child, swmGraph, 'legacy'), swmGraph);
+  assertSemanticEmpty(await semanticGraph(legacy.child, swmGraph, 'legacy'), swmGraph);
   await legacy.child.stop('stop-legacy');
   await author.stop('stop-author');
 });
@@ -512,7 +513,11 @@ async function reconcileVm(
 
 function assertVmChainRead(value: Gate1VmReconcileResult, label: string): void {
   const reads = value.chainReadDelta;
-  assert.equal(reads.nameHashResolution >= 2, true, `${label} omitted name-hash resolution`);
+  assert.equal(
+    (reads.active >= 1 && reads.accessPolicy >= 1) || reads.nameHashResolution >= 2,
+    true,
+    `${label} omitted active-policy or name-hash revalidation: ${JSON.stringify(reads)}`,
+  );
   assert.equal(reads.count >= 1, true, `${label} omitted chain inventory count`);
   const result = value.result;
   assert.equal(result.contextGraphId, CONTEXT_GRAPH_ID);
@@ -633,6 +638,12 @@ function assertAppliedExact(value: unknown, headDigest: string): void {
 function assertSemanticExact(value: Record<string, unknown>, swmGraph: string): void {
   assert.equal(value.activatedQuadCount, 2);
   assert.equal(value.projectionNQuads, PROJECTION_NQUADS);
+  assert.equal(value.swmGraph, swmGraph);
+}
+
+function assertSemanticEmpty(value: Record<string, unknown>, swmGraph: string): void {
+  assert.equal(value.activatedQuadCount, 0);
+  assert.equal(value.projectionNQuads, '\n');
   assert.equal(value.swmGraph, swmGraph);
 }
 

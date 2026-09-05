@@ -25,6 +25,10 @@ import {
   type GraphScopedSwmRecoveryDescriptor,
 } from '../graph-scoped-swm-recovery.js';
 import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
+import {
+  isNamedSubgraphSharedMemoryDataGraph,
+  isNamedSubgraphSharedMemoryMetaGraph,
+} from '../shared-memory-graphs.js';
 
 /**
  * recovery entry point. Recovers a CG's
@@ -129,6 +133,11 @@ export interface RecoverContextGraphSwmDeps {
   readonly deleteCheckpoint: (key: string) => void;
   readonly getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   readonly getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
+  /**
+   * False for a catalog-root CG's disjoint named-subgraph compatibility lane.
+   * Root rows never reach verification or any destructive recovery mutation.
+   */
+  readonly includeRootScope?: boolean;
   /**
    * Rule-4 ownership cache hydrator (parity with `runSharedMemorySync`). Without
    * it, a recovered member holds correct triples but an empty ownership map and
@@ -300,6 +309,11 @@ async function recoverContextGraphSwmUnlocked(
       completed: false,
     };
   }
+  const metaQuads = deps.includeRootScope === false
+    ? meta.quads.filter((quad) => (
+      isNamedSubgraphSharedMemoryMetaGraph(deps.contextGraphId, quad.graph)
+    ))
+    : meta.quads;
 
   const registered = deps.getRegisteredSubGraphNames
     ? await deps.getRegisteredSubGraphNames(deps.contextGraphId)
@@ -312,7 +326,7 @@ async function recoverContextGraphSwmUnlocked(
       ...(registered ?? []),
       ...discoverSwmRecoverySubGraphNames({
         contextGraphId: deps.contextGraphId,
-        metaQuads: meta.quads,
+        metaQuads,
         excludedSubGraphNames: excluded,
       }),
     ]),
@@ -320,7 +334,7 @@ async function recoverContextGraphSwmUnlocked(
 
   const graphScopedDescriptors = parseGraphScopedSwmRecoveryDescriptors({
     contextGraphId: deps.contextGraphId,
-    metaQuads: meta.quads,
+    metaQuads,
     registeredSubGraphNames: recoveryRegistered,
     excludedSubGraphNames: excluded,
   });
@@ -331,7 +345,7 @@ async function recoverContextGraphSwmUnlocked(
   // redundant (the immutable snapshot is the canonical source for an exact
   // graph asset) and scales with every KA in the CG.
   const metadataOnlyProcessed = await deps.processSharedMemoryBatch(
-    [], meta.quads, deps.contextGraphId, recoveryRegistered, excluded,
+    [], metaQuads, deps.contextGraphId, recoveryRegistered, excluded,
   );
   const hasLegacyRoots = metadataOnlyProcessed.entityCreators.length > 0;
   const hasGraphBackedSnapshots = graphScopedDescriptors.some(
@@ -494,6 +508,11 @@ async function recoverContextGraphSwmUnlocked(
       completed: false,
     };
   }
+  const dataQuads = deps.includeRootScope === false
+    ? data.quads.filter((quad) => (
+      isNamedSubgraphSharedMemoryDataGraph(deps.contextGraphId, quad.graph)
+    ))
+    : data.quads;
 
   // Rootless exact graphs and graph-backed immutable snapshots are verified
   // per KA below. Keep them out of the legacy rootEntity worker path so they
@@ -505,13 +524,13 @@ async function recoverContextGraphSwmUnlocked(
       graphScopedTransportGraphs.add(descriptor.publicSnapshotGraph);
     }
   }
-  const legacyDataQuads = data.quads.filter(
+  const legacyDataQuads = dataQuads.filter(
     (quad) => !graphScopedTransportGraphs.has(quad.graph),
   );
 
   const processed = needsAggregateData
     ? await deps.processSharedMemoryBatch(
-      legacyDataQuads, meta.quads, deps.contextGraphId, recoveryRegistered, excluded,
+      legacyDataQuads, metaQuads, deps.contextGraphId, recoveryRegistered, excluded,
     )
     : metadataOnlyProcessed;
 
@@ -534,7 +553,7 @@ async function recoverContextGraphSwmUnlocked(
     }
     const asset = await materializeGraphScopedSwmRecoveryAsset({
       descriptor,
-      fetchedDataQuads: data.quads,
+      fetchedDataQuads: dataQuads,
       publicSnapshotStore: deps.publicSnapshotStore,
     });
     await deps.store.replaceGraph(asset.assertionGraph, [...asset.quads]);

@@ -1,3 +1,4 @@
+import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError } from './oxigraph-memory-limits.js';
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
 import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origintrail-official/dkg-publisher';
 import { join, dirname, basename } from 'node:path';
@@ -628,13 +629,16 @@ export interface DkgConfig {
   bootstrapPeers?: string[];
   /** V10: context graphs to subscribe. */
   contextGraphs?: string[];
-  /** Opt-in, bounded RFC-64 catalog activation for explicitly selected public CGs. */
+  /**
+   * @deprecated Compatibility authority seed / rollback controls. Omission
+   * enables release-native RFC-64 selection from ordinary CG responsibility.
+   */
   rfc64PublicCatalog?: Rfc64PublicCatalogActivationConfig;
   /**
-   * Additive, bounded RFC-64 activation for explicitly selected public or
-   * invite-only CGs. Private selections require a manual policy, roster, and
-   * exact peer-to-agent authority map. Release 3 permits up to eight complete
-   * current-roster providers for bounded failover.
+   * Optional RFC-64 authority seeds and emergency rollout controls. In
+   * 10.0.16, ordinary subscriptions, Core public hosting, and verified private
+   * membership select catalog mode without this block. Manual policy/roster
+   * material remains accepted for compatibility but no longer owns selection.
    */
   rfc64Catalog?: Rfc64CatalogActivationConfig;
   /**
@@ -2210,19 +2214,37 @@ export interface StoreConfigValidationError {
   message: string;
 }
 
-export function validateStoreConfig(config: DkgConfig): StoreConfigValidationError[] {
+/** Only the raw sections this validator inspects; values are narrowed at the boundary. */
+export interface StoreConfigValidationInput {
+  store?: unknown;
+  largeLiteralStorage?: unknown;
+  sharedMemoryPublicSnapshotStorage?: unknown;
+}
+
+export function validateStoreConfig(config: StoreConfigValidationInput, platform: NodeJS.Platform = process.platform): StoreConfigValidationError[] {
   const errors: StoreConfigValidationError[] = [];
-  const backend = config.store?.backend;
+  const store = isPlainConfigObject(config.store) ? config.store : undefined;
+  const backend = store?.backend;
+  const options = isPlainConfigObject(store?.options) ? store.options : {};
+  if (backend === 'oxigraph-server') {
+    const supportError = oxigraphMemorySupportError({ highMiB: options.memoryHighMiB, maxMiB: options.memoryMaxMiB }, platform);
+    if (supportError) {
+      errors.push({ field: 'store.options.memoryMaxMiB', message: supportError });
+    }
+    try {
+      normalizeOxigraphMemoryLimits({ highMiB: options.memoryHighMiB, maxMiB: options.memoryMaxMiB });
+    } catch (error) {
+      errors.push({ field: 'store.options.memoryMaxMiB', message: error instanceof Error ? error.message : String(error) });
+    }
+  }
   // Mirror of `isExternalBackend` from @origintrail-official/dkg-storage.
   // Duplicated here to keep config.ts free of upward dependencies on the
   // storage package (config.ts is leaf-imported by many other modules).
   const isExternal = backend === 'blazegraph' || backend === 'sparql-http';
   if (!isExternal) return errors;
 
-  const opts = (config.store?.options ?? {}) as Record<string, unknown>;
-
   if (backend === 'blazegraph') {
-    if (typeof opts.url !== 'string' || !opts.url.trim()) {
+    if (typeof options.url !== 'string' || !options.url.trim()) {
       errors.push({
         field: 'store.options.url',
         message:
@@ -2233,7 +2255,7 @@ export function validateStoreConfig(config: DkgConfig): StoreConfigValidationErr
       });
     }
   } else if (backend === 'sparql-http') {
-    if (typeof opts.queryEndpoint !== 'string' || !opts.queryEndpoint.trim()) {
+    if (typeof options.queryEndpoint !== 'string' || !options.queryEndpoint.trim()) {
       errors.push({
         field: 'store.options.queryEndpoint',
         message:
@@ -2243,8 +2265,9 @@ export function validateStoreConfig(config: DkgConfig): StoreConfigValidationErr
     }
   }
 
-  if (config.largeLiteralStorage?.enabled === true) {
-    const dir = config.largeLiteralStorage.directory;
+  const largeLiteralStorage = isPlainConfigObject(config.largeLiteralStorage) ? config.largeLiteralStorage : undefined;
+  if (largeLiteralStorage?.enabled === true) {
+    const dir = largeLiteralStorage.directory;
     if (typeof dir !== 'string' || !dir.trim()) {
       errors.push({
         field: 'largeLiteralStorage.directory',
@@ -2256,8 +2279,9 @@ export function validateStoreConfig(config: DkgConfig): StoreConfigValidationErr
     }
   }
 
-  if (config.sharedMemoryPublicSnapshotStorage?.enabled === true) {
-    const dir = config.sharedMemoryPublicSnapshotStorage.directory;
+  const snapshotStorage = isPlainConfigObject(config.sharedMemoryPublicSnapshotStorage) ? config.sharedMemoryPublicSnapshotStorage : undefined;
+  if (snapshotStorage?.enabled === true) {
+    const dir = snapshotStorage.directory;
     if (typeof dir !== 'string' || !dir.trim()) {
       errors.push({
         field: 'sharedMemoryPublicSnapshotStorage.directory',
