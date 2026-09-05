@@ -517,7 +517,20 @@ export function checkFdLimit(
 ): void {
   const recommended = Math.max(4096, maxConnections * RELAY_CAPACITY_MULTIPLIER);
   try {
-    const report = (process as any).report?.getReport?.();
+    // Only resource limits are needed. Network diagnostics synchronously
+    // reverse-resolve active sockets and can block startup for minutes when
+    // a resolver is unavailable (including repeated local test nodes).
+    // Supported by the pinned Node 22 runtime; older @types/node declarations
+    // in the workspace do not yet expose this diagnostic option.
+    const reporter = process.report as typeof process.report & { excludeNetwork: boolean };
+    const previousExcludeNetwork = reporter.excludeNetwork;
+    let report;
+    try {
+      reporter.excludeNetwork = true;
+      report = reporter.getReport() as { userLimits?: { open_files?: { soft?: number | string } } };
+    } finally {
+      reporter.excludeNetwork = previousExcludeNetwork;
+    }
     const openFiles = report?.userLimits?.open_files;
     const soft = openFiles?.soft;
     if (typeof soft === 'number') {

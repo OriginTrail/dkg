@@ -173,8 +173,28 @@ describe('checkFdLimit', () => {
   // reassigning the parent property, and restore the original
   // afterwards.
   const originalGetReport = (process.report as any).getReport;
+  const reporter = process.report as typeof process.report & { excludeNetwork: boolean };
+  const originalExcludeNetwork = reporter.excludeNetwork;
   afterEach(() => {
     (process.report as any).getReport = originalGetReport;
+    reporter.excludeNetwork = originalExcludeNetwork;
+  });
+
+  it.each([false, true])('omits DNS diagnostics and restores the caller setting (%s), including report errors', (previous) => {
+    for (const fails of [false, true]) {
+      reporter.excludeNetwork = previous;
+      let observedExcludeNetwork;
+      (process.report as any).getReport = () => {
+        observedExcludeNetwork = reporter.excludeNetwork;
+        if (fails) throw new Error('report unavailable');
+        return { userLimits: { open_files: { soft: 8192 } } };
+      };
+      const log = recorder((_level: string, _msg: string) => undefined);
+      checkFdLimit(2048, log);
+      expect(observedExcludeNetwork).toBe(true);
+      expect(reporter.excludeNetwork).toBe(previous);
+      expect(log.calls[0][0]).toBe(fails ? 'warn' : 'info');
+    }
   });
 
   function stubReport(report: any) {
