@@ -15,6 +15,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { validateStoreConfig, type DkgConfig } from '../src/config.js';
+import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 
 function mk(overrides: Partial<DkgConfig> = {}): DkgConfig {
   return {
@@ -26,6 +27,19 @@ function mk(overrides: Partial<DkgConfig> = {}): DkgConfig {
 }
 
 describe('validateStoreConfig', () => {
+  it.each(['linux', 'darwin', 'win32'] as const)('shares memory support policy between preflight and launch on %s', (platform) => {
+    const diagnostics = validateStoreConfig({ store: { backend: 'oxigraph-server', options: { memoryMaxMiB: 1024 } } }, platform);
+    const launch = () => createOxigraphLaunchStrategy({ memoryLimits: { maxMiB: 1024 }, platform, parentPid: 42, uid: 1000 });
+    if (platform === 'linux') {
+      expect(diagnostics).toEqual([]);
+      expect(launch().mode).toBe('systemd-scope');
+    } else {
+      expect(diagnostics).toHaveLength(1);
+      expect(launch).toThrow(diagnostics[0].message);
+    }
+    expect(validateStoreConfig({ store: { backend: 'oxigraph-server' } }, platform)).toEqual([]);
+    expect(createOxigraphLaunchStrategy({ platform, parentPid: 42, uid: 1000 }).mode).toBe('direct');
+  });
   it('validates raw operator JSON without assuming a complete typed config', () => {
     const raw: Record<string, unknown> = {
       store: { backend: 'blazegraph', options: { url: 42 } },

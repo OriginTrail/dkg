@@ -1,4 +1,4 @@
-import { normalizeOxigraphMemoryLimits } from './oxigraph-memory-limits.js';
+import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError } from './oxigraph-memory-limits.js';
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
 import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origintrail-official/dkg-publisher';
 import { join, dirname, basename } from 'node:path';
@@ -2224,10 +2224,9 @@ export function validateStoreConfig(config: StoreConfigValidationInput, platform
   const backend = store?.backend;
   const options = isPlainConfigObject(store?.options) ? store.options : {};
   if (backend === 'oxigraph-server') {
-    const hasLimits = options.memoryHighMiB !== undefined || options.memoryMaxMiB !== undefined;
-    if (hasLimits && platform !== 'linux') {
-      errors.push({ field: 'store.options.memoryMaxMiB', message:
-        `Managed Oxigraph memory limits are unsupported on ${platform}; they require Linux with a running systemd user manager. Remove memoryHighMiB/memoryMaxMiB or run the managed store on Linux.` });
+    const supportError = oxigraphMemorySupportError({ highMiB: options.memoryHighMiB, maxMiB: options.memoryMaxMiB }, platform);
+    if (supportError) {
+      errors.push({ field: 'store.options.memoryMaxMiB', message: supportError });
     }
     try {
       normalizeOxigraphMemoryLimits({ highMiB: options.memoryHighMiB, maxMiB: options.memoryMaxMiB });

@@ -3,6 +3,18 @@ export interface OxigraphMemoryLimits {
   maxMiB: number;
 }
 
+/** Shared preflight/launch policy; checking systemd availability remains a launch concern. */
+export function oxigraphMemorySupportError(
+  input: { highMiB?: unknown; maxMiB?: unknown },
+  platform: NodeJS.Platform,
+): string | undefined {
+  if ((input.highMiB !== undefined || input.maxMiB !== undefined) && platform !== 'linux') {
+    return `Managed Oxigraph memory limits require Linux with a running systemd user manager (unsupported on ${platform}). `
+      + 'Remove memoryHighMiB/memoryMaxMiB or run the managed store on Linux.';
+  }
+  return undefined;
+}
+
 export function normalizeOxigraphMemoryLimits(input: {
   highMiB?: unknown;
   maxMiB?: unknown;

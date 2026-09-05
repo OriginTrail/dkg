@@ -1,4 +1,4 @@
-import { normalizeOxigraphMemoryLimits, type OxigraphMemoryLimits } from '../oxigraph-memory-limits.js';
+import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError, type OxigraphMemoryLimits } from '../oxigraph-memory-limits.js';
 import type { ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { CgroupOomSnapshot } from './oxigraph-memory.js';
@@ -68,9 +68,8 @@ export function createOxigraphLaunchStrategy(opts: {
   }
 
   const limits = normalizeOxigraphMemoryLimits(opts.memoryLimits)!;
-  if (opts.platform !== 'linux') {
-    throw new Error('Managed Oxigraph memory limits require Linux with a running systemd user manager');
-  }
+  const supportError = oxigraphMemorySupportError(limits, opts.platform);
+  if (supportError) throw new Error(supportError);
   if (!Number.isInteger(opts.uid) || opts.uid < 0) {
     throw new Error('Managed Oxigraph memory limits require a numeric service user id');
   }
