@@ -330,7 +330,7 @@ If you operate a Core node, this is the change you'll see in your logs:
 2. **Per-KA `dkg:materializedVersion` (`block:txIndex`) guard** stamped on the KC's `<ual>` in the meta graph. Every canonical writer (publisher promotion, update promotion, receiver `FinalizationHandler`) refuses to apply a state older than what's already materialised.
 3. **Deterministic UAL fallback** in `UpdateHandler` so a gossip receiver that hasn't yet materialised the `dkg:batchId` edge still promotes instead of silently skipping.
 
-**What you have to do:** nothing — it's purely a daemon-side fix. The `rs.tick.data-corrupted` metric should drop to zero on the updated cohort once you upgrade. The fix is fully described in [`GH842-rs-update-race-analysis.md`](../GH842-rs-update-race-analysis.md) if you want the deep-dive.
+**What you have to do:** nothing — it's purely a daemon-side fix. The `rs.tick.data-corrupted` metric should drop to zero on the updated cohort once you upgrade. The fix is fully described in [`gh842-rs-update-race-analysis.md`](investigations/gh842-rs-update-race-analysis.md) if you want the deep-dive.
 
 ---
 
@@ -414,7 +414,7 @@ After upgrading, run through this list:
 
 - **Full per-PR detail:** [`CHANGELOG.md`](../CHANGELOG.md) under the `[10.0.0-rc.12]` section.
 - **Greenfield KA reference:** [`packages/evm-module/docs/greenfield-ka-ual.md`](../packages/evm-module/docs/greenfield-ka-ual.md).
-- **Random Sampling update fix deep-dive:** [`GH842-rs-update-race-analysis.md`](../GH842-rs-update-race-analysis.md).
+- **Random Sampling update fix deep-dive:** [`gh842-rs-update-race-analysis.md`](investigations/gh842-rs-update-race-analysis.md).
 - **CG memory model (the design that made edge-curator publishing possible):** [`docs/specs/SPEC_CG_MEMORY_MODEL.md`](specs/SPEC_CG_MEMORY_MODEL.md).
 - **GitHub:** issues on [`OriginTrail/dkg`](https://github.com/OriginTrail/dkg/issues) — tag with `rc.12-upgrade` so we can triage them as a group.
 - **The DKG node Discord** — the maintainers monitor #builders for upgrade questions.
