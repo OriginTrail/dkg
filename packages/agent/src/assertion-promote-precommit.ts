@@ -10,7 +10,7 @@ import {
   isContextGraphAuthorityUnavailableMarker,
 } from './context-graph-agent-gate-authority.js';
 import type { DKGAgent } from './dkg-agent.js';
-import type { PreSignedAuthorAttestation } from './dkg-agent-types.js';
+import type { AssertionPromoteOptions } from './dkg-agent-types.js';
 
 type PublisherPromoteOptions = NonNullable<
   Parameters<DKGPublisher['assertionPromote']>[3]
@@ -18,20 +18,6 @@ type PublisherPromoteOptions = NonNullable<
 type GossipSigner = Awaited<
   ReturnType<DKGAgent['resolveWorkspaceGossipSigningAgent']>
 >;
-
-/** The single options contract for the agent assertion-promote facade. */
-export interface AssertionPromoteOptions {
-  entities?: readonly string[] | 'all';
-  subGraphName?: string;
-  agentAddress?: string;
-  authorAgentAddress?: string;
-  preSignedAuthorAttestation?: PreSignedAuthorAttestation;
-  awaitCuratorAck?: boolean;
-  curatorAckTimeoutMs?: number;
-  skipSeal?: boolean;
-  accessPolicy?: PublisherPromoteOptions['accessPolicy'];
-  allowedPeers?: PublisherPromoteOptions['allowedPeers'];
-}
 
 type AssertionPromotePreCommitOptions = Pick<
   AssertionPromoteOptions,
@@ -45,38 +31,47 @@ type AssertionPromotePreCommitOptions = Pick<
 type AssertionPromotePreCommitHostMethod =
   | 'resolveWorkspaceGossipSigningAgent'
   | 'buildCuratorAckConfirmer'
+  | 'resolveWorkspaceRecipientsGated'
   | 'getContextGraphOnChainPolicy'
   | 'readLocalAccessPolicyEnum';
 
-export type AssertionPromotePreCommitHost = {
+type AssertionPromotePreCommitHost = {
   [Method in AssertionPromotePreCommitHostMethod]: OmitThisParameter<DKGAgent[Method]>;
 };
 
-export interface AssertionPromotePreCommitInput {
+interface AssertionPromotePreCommitInput {
   contextGraphId: string;
   publisherPeerId: string;
   options?: AssertionPromotePreCommitOptions;
 }
 
-export type AssertionPromotePreCommitResult = {
+type AssertionPromotePreCommitResult = {
   gossipSigner: GossipSigner;
   publisherOptions: PublisherPromoteOptions;
 };
 
-function isRetryableAuthorityFailure(error: unknown): boolean {
-  return isContextGraphAuthorityUnavailableMarker(error) && error.retryable;
+/** Retry translation belongs to these concrete agent prerequisite callbacks. */
+async function resolvePromoteAuthority<T>(resolve: () => Promise<T>): Promise<T> {
+  try {
+    return await resolve();
+  } catch (error) {
+    if (isContextGraphAuthorityUnavailableMarker(error) && error.retryable) {
+      throw createPromoteRetryableFailure(error);
+    }
+    throw error;
+  }
 }
 
 /**
  * Resolve agent prerequisites without access to the committing publisher.
- * The publisher receives a domain predicate, which it applies only at its
- * own recipient-encoding and curator-confirmation prerequisite sites.
+ * The publisher receives concrete, pre-wrapped recipient and curator callbacks,
+ * not a policy that it could apply to arbitrary commit/finalization failures.
  */
 export async function prepareAssertionPromote(
   host: AssertionPromotePreCommitHost,
   input: AssertionPromotePreCommitInput,
 ): Promise<AssertionPromotePreCommitResult> {
-  try {
+  return resolvePromoteAuthority(async () => {
     const gossipSigner = await host.resolveWorkspaceGossipSigningAgent(input.contextGraphId);
     const confirmBeforeCommit = await host.buildCuratorAckConfirmer(
       input.contextGraphId,
@@ -106,18 +101,17 @@ export async function prepareAssertionPromote(
           : {}),
         publisherPeerId: input.publisherPeerId,
         senderAgentAddress: gossipSigner?.agentAddress,
-        confirmBeforeCommit,
-        isRetryablePrerequisiteError: isRetryableAuthorityFailure,
+        confirmBeforeCommit: confirmBeforeCommit === undefined
+          ? undefined
+          : (message) => resolvePromoteAuthority(() => confirmBeforeCommit(message)),
+        resolveWorkspaceRecipients: (request) => resolvePromoteAuthority(
+          () => host.resolveWorkspaceRecipientsGated(request),
+        ),
         ...(shareAccessPolicy !== undefined ? { accessPolicy: shareAccessPolicy } : {}),
         ...(input.options?.allowedPeers !== undefined
           ? { allowedPeers: [...input.options.allowedPeers] }
           : {}),
       },
     };
-  } catch (error) {
-    if (isRetryableAuthorityFailure(error)) {
-      throw createPromoteRetryableFailure(error);
-    }
-    throw error;
-  }
+  });
 }

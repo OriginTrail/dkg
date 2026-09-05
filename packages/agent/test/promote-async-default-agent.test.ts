@@ -2,13 +2,17 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import {
   createPromoteRetryableFailure,
+  DKGPublisher,
   getPromoteFailureDisposition,
-  type DKGPublisher,
 } from '@origintrail-official/dkg-publisher';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { finalizeRootlessAssertionForTest } from '../../publisher/test/_helpers/rootless-lifecycle.js';
 import { ContextGraphAuthorityUnavailableError } from
   '../src/context-graph-agent-gate-authority.js';
 import { DKGAgent } from '../src/dkg-agent.js';
-import type { AssertionPromoteOptions } from '../src/assertion-promote-precommit.js';
+import type { AssertionPromoteOptions } from '../src/index.js';
 
 function promoteBoundaryAgent(): any {
   const agent = Object.create(DKGAgent.prototype) as any;
@@ -62,12 +66,16 @@ describe('DKGAgent assertion promote boundary', () => {
           subGraphName: 'documents',
           publisherPeerId: '12D3KooWBoundary',
           senderAgentAddress: signer.agentAddress,
-          confirmBeforeCommit: confirmer,
-          isRetryablePrerequisiteError: expect.any(Function),
+          confirmBeforeCommit: expect.any(Function),
+          resolveWorkspaceRecipients: expect.any(Function),
           ...(expectedPolicy === undefined ? {} : { accessPolicy: expectedPolicy }),
           ...(options.allowedPeers === undefined ? {} : { allowedPeers: ['peer-a'] }),
         },
       );
+      const message = new Uint8Array([1, 2, 3]);
+      await expect(assertionPromote.mock.calls[0]?.[3]?.confirmBeforeCommit?.(message))
+        .resolves.toEqual({ applied: true });
+      expect(confirmer).toHaveBeenCalledExactlyOnceWith(message);
       if (options.allowedPeers !== undefined) {
         expect(assertionPromote.mock.calls[0]?.[3]?.allowedPeers).not.toBe(options.allowedPeers);
       }
@@ -129,20 +137,19 @@ describe('DKGAgent assertion promote boundary', () => {
     });
   });
 
-  it('passes through recipient retries certified by the publisher prerequisite', async () => {
+  it('certifies recipient outages in the concrete agent callback', async () => {
     const authorityFailure = new ContextGraphAuthorityUnavailableError(
       'recipient authority is temporarily unavailable',
       { reason: 'chain-participant-authority-unavailable' },
     );
     const agent = promoteBoundaryAgent();
     agent.resolveWorkspaceGossipSigningAgent = async () => undefined;
-    const certifiedFailure = createPromoteRetryableFailure(authorityFailure);
+    agent.resolveWorkspaceRecipientsGated = vi.fn(async () => { throw authorityFailure; });
     agent.publisher = {
       assertionPromote: async (_cg: string, _name: string, _agent: string, opts: {
-        isRetryablePrerequisiteError: (error: unknown) => boolean;
+        resolveWorkspaceRecipients: (input: { contextGraphId: string }) => Promise<unknown>;
       }) => {
-        expect(opts.isRetryablePrerequisiteError(authorityFailure)).toBe(true);
-        throw certifiedFailure;
+        await opts.resolveWorkspaceRecipients({ contextGraphId: 'cg-1' });
       },
     };
 
@@ -155,7 +162,8 @@ describe('DKGAgent assertion promote boundary', () => {
       retryable: true,
     });
     expect(failure).toMatchObject({ cause: authorityFailure });
-    expect(failure).toBe(certifiedFailure);
+    expect(agent.resolveWorkspaceRecipientsGated)
+      .toHaveBeenCalledExactlyOnceWith({ contextGraphId: 'cg-1' });
   });
 
   it('does not certify an authority error escaping the committing publisher call', async () => {
@@ -256,5 +264,57 @@ describe('DKGAgent assertion promote boundary', () => {
     expect(terminalAuthorityFailure.retryable).toBe(false);
     expect(failure).toBe(terminalAuthorityFailure);
     expect(getPromoteFailureDisposition(failure)).toBeUndefined();
+  });
+});
+
+describe('concrete promote authority callbacks with the real publisher', () => {
+  it.each([
+    ['recipient', 'transient'], ['recipient', 'terminal'], ['recipient', 'ordinary'],
+    ['curator', 'transient'], ['curator', 'terminal'], ['curator', 'ordinary'],
+  ] as const)('preserves the %s callback %s disposition before SWM mutation', async (stage, kind) => {
+    const store = new OxigraphStore();
+    const publisher = new DKGPublisher({
+      store, chain: new MockChainAdapter(), eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+    });
+    const agent = promoteBoundaryAgent();
+    agent.publisher = publisher;
+    agent.resolveWorkspaceGossipSigningAgent = async () => undefined;
+    agent.resolveWorkspaceRecipientsGated = async () => ({ requiresEncryption: false, recipients: [] });
+    const failure = kind === 'ordinary'
+      ? new Error('untyped prerequisite failure')
+      : new ContextGraphAuthorityUnavailableError('authority unavailable', {
+        reason: kind === 'transient'
+          ? 'chain-participant-authority-unavailable'
+          : 'chain-participant-authority-unsupported',
+      });
+    const prerequisite = vi.fn(async () => { throw failure; });
+    if (stage === 'recipient') agent.resolveWorkspaceRecipientsGated = prerequisite;
+    else agent.buildCuratorAckConfirmer = async () => prerequisite;
+
+    await publisher.assertionCreate('cg-1', 'asset-1', agent.defaultAgentAddress);
+    await publisher.assertionWrite('cg-1', 'asset-1', agent.defaultAgentAddress, [{
+      subject: 'urn:test:prerequisite', predicate: 'http://schema.org/name', object: '"Prepared"',
+    }]);
+    const finalized = await finalizeRootlessAssertionForTest({
+      publisher, store, contextGraphId: 'cg-1', name: 'asset-1',
+      agentAddress: agent.defaultAgentAddress,
+    });
+    const caught = await agent.assertion.promote('cg-1', 'asset-1', { accessPolicy: 'public' })
+      .catch((error: unknown) => error);
+
+    expect(prerequisite).toHaveBeenCalledTimes(1);
+    if (kind === 'transient') {
+      expect(caught).toMatchObject({ cause: failure });
+      expect(getPromoteFailureDisposition(caught)).toMatchObject({
+        classification: 'transient', retryable: true,
+      });
+    } else {
+      expect(caught).toBe(failure);
+      expect(getPromoteFailureDisposition(caught)).toBeUndefined();
+    }
+    expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+    expect(await publisher.assertionQuery('cg-1', 'asset-1', agent.defaultAgentAddress))
+      .toHaveLength(1);
   });
 });

@@ -2,6 +2,10 @@ type AgentApi = typeof import('../src/index.js');
 type PublicAgent = import('@origintrail-official/dkg-agent').DKGAgent;
 type AssertFalse<Value extends false> = Value;
 type AssertTrue<Value extends true> = Value;
+type PublicPromoteOptions = import('@origintrail-official/dkg-agent').AssertionPromoteOptions;
+type FacadePromoteOptions = NonNullable<Parameters<PublicAgent['assertion']['promote']>[2]>;
+type PromoteOptionsMatchFacade = AssertTrue<PublicPromoteOptions extends FacadePromoteOptions ? true : false>;
+type FacadeOptionsMatchPublic = AssertTrue<FacadePromoteOptions extends PublicPromoteOptions ? true : false>;
 
 type GateResolverStaysProtected = AssertFalse<
   'resolveContextGraphAgentGateAuthority' extends keyof PublicAgent ? true : false
@@ -43,6 +47,8 @@ type AuthorityReasonStaysInternal =
   import('@origintrail-official/dkg-agent').ContextGraphAuthorityUnavailableReason;
 
 export type {
+  PromoteOptionsMatchFacade,
+  FacadeOptionsMatchPublic,
   GateResolverStaysProtected,
   LivePolicyResolverStaysProtected,
   GateProjectionRemainsPublic,

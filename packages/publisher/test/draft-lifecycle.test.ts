@@ -1000,7 +1000,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
   });
 
-  it('validates the exact VM graph before treating a stale promote as a no-op', async () => {
+  it.each([false, true])('validates exact VM before a stale promote no-op (leftover WM: %s)', async (leftoverWm) => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
     const finalized = await finalizeAssertion();
@@ -1024,9 +1024,20 @@ describe('Working Memory Assertion Lifecycle', () => {
       graph: metaGraph,
     }]);
 
+    if (leftoverWm) {
+      // An older promotion could expose its marker before WM cleanup. A queued
+      // retry may therefore outlive a confirmed publish while this copy remains.
+      const wmGraph = await publisher.wmGraphUri(CG_ID, AGENT, ASSERTION_NAME);
+      await store.insert(finalized.publicQuads.map((quad) => ({ ...quad, graph: wmGraph })));
+    }
+
     await expect(
       publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
     ).resolves.toMatchObject({ promotedCount: 0, promotedAllRoots: false });
+    expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+    expect(await store.query(`ASK { GRAPH <${metaGraph}> {
+      <${lifecycle}> <${memoryLayerPredicate}> "${MemoryLayer.VerifiableMemory}"
+    } }`)).toMatchObject({ type: 'boolean', value: true });
 
     await store.delete([{ ...finalized.publicQuads[0]!, graph: vmGraph }]);
     await store.insert([{
@@ -1040,8 +1051,41 @@ describe('Working Memory Assertion Lifecycle', () => {
     ).rejects.toThrow(/Merkle mismatch/);
   });
 
+  it('validates promote-scoped recipients without replacing the configured resolver', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    const configuredFailure = new Error('configured resolver still owns ordinary calls');
+    const configuredResolver = vi.fn(async () => { throw configuredFailure; });
+    publisher.setWorkspaceAgentRecipientResolver(configuredResolver);
+
+    await expect(publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER,
+      // Deliberately model an invalid JavaScript callback at the runtime boundary.
+      resolveWorkspaceRecipients: async () => ({ requiresEncryption: true, recipients: [] }) as any,
+    })).rejects.toThrow('has no valid DKG agent recipients');
+    expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+
+    const scopedResolver = vi.fn(async () => ({ requiresEncryption: false as const, recipients: [] as const }));
+    await expect(publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER, resolveWorkspaceRecipients: scopedResolver,
+    })).resolves.toMatchObject({ promotedAllRoots: true });
+    expect(scopedResolver).toHaveBeenCalledExactlyOnceWith({ contextGraphId: CG_ID });
+    expect(configuredResolver).not.toHaveBeenCalled();
+
+    const nextName = `${ASSERTION_NAME}-configured`;
+    await publisher.assertionCreate(CG_ID, nextName, AGENT);
+    await publisher.assertionWrite(CG_ID, nextName, AGENT, TRIPLES);
+    const nextFinalized = await finalizeAssertion(nextName);
+    await expect(publisher.assertionPromote(CG_ID, nextName, AGENT, {
+      publisherPeerId: PEER,
+    })).rejects.toBe(configuredFailure);
+    expect(configuredResolver).toHaveBeenCalledExactlyOnceWith({ contextGraphId: CG_ID });
+    expect(await store.hasGraph(nextFinalized.sharedGraphUri)).toBe(false);
+  });
+
   it.each(['recipient', 'curator'] as const)(
-    'certifies an authority outage in the %s prerequisite before replacing SWM',
+    'preserves a retry certified by the %s prerequisite before replacing SWM',
     async (stage) => {
       await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
       await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
@@ -1051,20 +1095,19 @@ describe('Working Memory Assertion Lifecycle', () => {
         reason: 'chain-access-policy-timeout',
         retryable: true,
       });
-      const isRetryablePrerequisiteError = vi.fn((error: unknown) => error === authorityFailure);
-      if (stage === 'recipient') {
-        publisher.setWorkspaceAgentRecipientResolver(async () => { throw authorityFailure; });
-      }
+      const retryFailure = createPromoteRetryableFailure(authorityFailure);
+      const prerequisite = vi.fn(async () => { throw retryFailure; });
 
       const failure = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
         publisherPeerId: PEER,
-        isRetryablePrerequisiteError,
+        ...(stage === 'recipient' ? { resolveWorkspaceRecipients: prerequisite } : {}),
         ...(stage === 'curator' ? {
-          confirmBeforeCommit: async () => { throw authorityFailure; },
+          confirmBeforeCommit: prerequisite,
         } : {}),
       }).catch((error: unknown) => error);
 
-      expect(isRetryablePrerequisiteError).toHaveBeenCalledExactlyOnceWith(authorityFailure);
+      expect(prerequisite).toHaveBeenCalledTimes(1);
+      expect(failure).toBe(retryFailure);
       expect(failure).toMatchObject({ cause: authorityFailure });
       expect(getPromoteFailureDisposition(failure)).toMatchObject({
         classification: 'transient', retryable: true,
@@ -1086,19 +1129,16 @@ describe('Working Memory Assertion Lifecycle', () => {
         reason: 'chain-participant-authority-unsupported',
         retryable: false,
       });
-      const isRetryablePrerequisiteError = vi.fn(() => false);
-      if (stage === 'recipient') {
-        publisher.setWorkspaceAgentRecipientResolver(async () => { throw authorityFailure; });
-      }
+      const prerequisite = vi.fn(async () => { throw authorityFailure; });
       const failure = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
         publisherPeerId: PEER,
-        isRetryablePrerequisiteError,
+        ...(stage === 'recipient' ? { resolveWorkspaceRecipients: prerequisite } : {}),
         ...(stage === 'curator' ? {
-          confirmBeforeCommit: async () => { throw authorityFailure; },
+          confirmBeforeCommit: prerequisite,
         } : {}),
       }).catch((error: unknown) => error);
       expect(failure).toBe(authorityFailure);
-      expect(isRetryablePrerequisiteError).toHaveBeenCalledExactlyOnceWith(authorityFailure);
+      expect(prerequisite).toHaveBeenCalledTimes(1);
       expect(getPromoteFailureDisposition(failure)).toBeUndefined();
       expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
       expect((await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).length)
@@ -1120,7 +1160,6 @@ describe('Working Memory Assertion Lifecycle', () => {
       const injectedFailure = kind === 'authority'
         ? authorityFailure
         : createPromoteRetryableFailure(authorityFailure);
-      const isRetryablePrerequisiteError = vi.fn(() => true);
       const insert = store.insert.bind(store);
       let injected = false;
       const insertSpy = vi.spyOn(store, 'insert').mockImplementation(async (quads) => {
@@ -1136,14 +1175,12 @@ describe('Working Memory Assertion Lifecycle', () => {
       try {
         failure = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
           publisherPeerId: PEER,
-          isRetryablePrerequisiteError,
         }).catch((error: unknown) => error);
       } finally {
         insertSpy.mockRestore();
       }
 
       expect(injected).toBe(true);
-      expect(isRetryablePrerequisiteError).not.toHaveBeenCalled();
       expect(failure).toMatchObject({ cause: injectedFailure });
       expect(getPromoteFailureDisposition(failure)).toMatchObject({
         classification: 'fatal', retryable: false,

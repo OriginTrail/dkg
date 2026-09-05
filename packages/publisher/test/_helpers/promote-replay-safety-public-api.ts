@@ -12,6 +12,12 @@ type PublisherApi = typeof import('../../src/index.js');
 
 type AssertTrue<Value extends true> = Value;
 type AssertFalse<Value extends false> = Value;
+type PromoteOptions = NonNullable<Parameters<
+  import('@origintrail-official/dkg-publisher').DKGPublisher['assertionPromote']
+>[3]>;
+type ArbitraryRetryPolicyStaysAbsent = AssertFalse<
+  'isRetryablePrerequisiteError' extends keyof PromoteOptions ? true : false
+>;
 
 type PromoteFailureDispositionIsPublic = AssertTrue<
   'getPromoteFailureDisposition' extends keyof PublisherApi ? true : false
@@ -69,6 +75,7 @@ type PublicPromoteFailureDisposition = PromoteFailureDisposition;
 type PublicPromoteReplaySafeErrorDiagnostic = PromoteReplaySafeErrorDiagnostic;
 
 export type {
+  ArbitraryRetryPolicyStaysAbsent,
   PromoteFailureDispositionIsPublic,
   PromotePostCommitBoundaryIsPublic,
   LegacyReplaySafeGuardRemainsPublic,

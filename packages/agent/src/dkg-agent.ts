@@ -140,10 +140,7 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
-import {
-  prepareAssertionPromote,
-  type AssertionPromoteOptions,
-} from './assertion-promote-precommit.js';
+import { prepareAssertionPromote } from './assertion-promote-precommit.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -335,6 +332,7 @@ import {
   SwmSenderKeySetupRejectionError,
   SyncAccessDeniedError,
   type PreSignedAuthorAttestation,
+  type AssertionPromoteOptions,
   type LocalSwmSenderKeySendState,
   type LocalSwmSenderKeyReceiveState,
   type PendingSenderKeyEntry,
@@ -484,6 +482,7 @@ export {
   InvalidContentError,
 };
 export type {
+  AssertionPromoteOptions,
   CclPublishedResultEntry,
   CclPublishedEvaluationRecord,
   PublishOpts,
@@ -3306,18 +3305,20 @@ export class DKGAgent extends DKGAgentBase {
         }
         // OT-RFC-43 A2 (decision 2) — stamp dkg:swmCurrentAssertion on the
         // lifecycle URN so the SWM pointer is observable (and can diverge from
-        // WM/VM). Best-effort; never blocks the share result.
-        try {
-          await agent.afterDurableSwmPromotionV1({
-            contextGraphId,
-            subGraphName: opts?.subGraphName,
-            assertionCoordinate: name,
-            lifecycleAgentAddress: promoteAgentAddress,
-            shareOperationId: shareOperationId ?? null,
-            ctx: createOperationContext('share'),
-          });
-        } catch (error) {
-          throw createPromotePostCommitFailure(error);
+        // WM/VM). A VM no-op must not restamp a pointer or notify SWM observers.
+        if (promotedAllRoots) {
+          try {
+            await agent.afterDurableSwmPromotionV1({
+              contextGraphId,
+              subGraphName: opts?.subGraphName,
+              assertionCoordinate: name,
+              lifecycleAgentAddress: promoteAgentAddress,
+              shareOperationId: shareOperationId ?? null,
+              ctx: createOperationContext('share'),
+            });
+          } catch (error) {
+            throw createPromotePostCommitFailure(error);
+          }
         }
         // #1116 (round 9) — the swmShareComplete marker mark/clear now lives INSIDE
         // assertionPromote (co-located with the member-row REPLACE, gated on the

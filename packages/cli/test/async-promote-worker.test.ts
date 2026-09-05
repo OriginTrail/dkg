@@ -457,6 +457,38 @@ describe('runPromoteJob', () => {
     expect(promoteFailureDiagnostics(logs)).toEqual(diagnostics);
   });
 
+  it('sanitizes caller-controlled error identity at the worker logging boundary', async () => {
+    const job = await enqueueAndClaim();
+    const secretToken = 'AKIAIOSFODNN7EXAMPLE';
+    const failure = Object.assign(new Error('[promote:callerControlled] secret-sentinel failure'), {
+      name: `Error${secretToken}`,
+      code: secretToken,
+    });
+    const result = await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw failure;
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+
+    expect(result.outcome).toBe('failed_terminal');
+    expect(promoteFailureDiagnostics(logs)).toEqual([expect.objectContaining({
+      stage: 'unknown', errorName: 'unknown', errorCode: 'unknown',
+      classification: 'fatal', retryable: false,
+    })]);
+    expect(promoteFailureDiagnostics(logs)[0]).not.toHaveProperty('messageFingerprint');
+    expect(logs.join('\n')).not.toContain(secretToken);
+    expect(logs.join('\n')).not.toContain('secret-sentinel');
+    expect(logs.join('\n')).not.toContain('callerControlled');
+    expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
+  });
+
   it('keeps fail-closed queue bookkeeping intact when the diagnostic logger throws', async () => {
     const job = await enqueueAndClaim();
 

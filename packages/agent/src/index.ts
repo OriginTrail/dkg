@@ -296,6 +296,7 @@ export {
   InvalidContentError,
   StaleSenderKeyTargetError,
   type DKGAgentConfig,
+  type AssertionPromoteOptions,
   type ReplicationEvent,
   type Rfc64CatalogAccessPolicyAuthorityConfigV1,
   type Rfc64CatalogBootstrapConfigV1,

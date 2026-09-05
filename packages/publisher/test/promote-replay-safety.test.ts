@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   StoreOperationTimeoutError,
   isStoreOperationTimeoutError,
@@ -11,37 +11,15 @@ import {
   getPromoteFailureDisposition,
   isPromoteReplaySafeError,
   isPromoteRetryableFailure,
-  runPromotePrerequisite,
   runPromoteCommittedFinalization,
 } from '../src/promote-replay-safety.js';
 
 describe('promote replay safety', () => {
-  it.each([false, undefined])('preserves a declined prerequisite error (predicate: %s)', async (decision) => {
-    const failure = Object.assign(new Error('unsupported authority'), {
-      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
-      reason: 'chain-participant-authority-unsupported',
-      retryable: false,
-    });
-    const predicate = decision === undefined ? undefined : vi.fn(() => decision);
-    const rejection = await runPromotePrerequisite(async () => { throw failure; }, predicate)
-      .catch((error: unknown) => error);
-    expect(rejection).toBe(failure);
-    expect(getPromoteFailureDisposition(rejection)).toBeUndefined();
-    if (predicate) expect(predicate).toHaveBeenCalledExactlyOnceWith(failure);
-  });
-
-  it('does not consult retry policy after a successful prerequisite', async () => {
-    const predicate = vi.fn(() => true);
-    await expect(runPromotePrerequisite(async () => 'ready', predicate)).resolves.toBe('ready');
-    expect(predicate).not.toHaveBeenCalled();
-  });
-
   it('gives the same storage failure phase-specific prerequisite, exact-commit, and finalization dispositions', async () => {
     const failure = new StoreOperationTimeoutError({
       backend: 'managed-oxigraph', operation: 'replaceGraph', outcome: 'indeterminate',
     });
-    const prerequisite = await runPromotePrerequisite(async () => { throw failure; }, () => true)
-      .catch((error: unknown) => error);
+    const prerequisite = createPromoteRetryableFailure(failure);
     expect(getPromoteFailureDisposition(prerequisite)).toMatchObject({
       classification: 'transient', diagnostic: { code: 'PROMOTE_RETRYABLE_FAILURE' },
     });
