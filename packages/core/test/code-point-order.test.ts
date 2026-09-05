@@ -1,11 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import {
+  codePointLowerBound,
   createSortedUniqueStringCatalog,
   insertSortedUniqueStringCatalog,
   removeSortedUniqueStringCatalog,
 } from '../src/code-point-order.js';
 
 describe('sorted unique string catalog mutation', () => {
+  it('shares one canonical lower-bound lookup across catalog consumers', () => {
+    const catalog = createSortedUniqueStringCatalog(['a', 'c', '\uE000', '\u{10000}']);
+    expect(codePointLowerBound(catalog, '0')).toBe(0);
+    expect(codePointLowerBound(catalog, 'b')).toBe(1);
+    expect(codePointLowerBound(catalog, 'c')).toBe(1);
+    expect(codePointLowerBound(catalog, '\uFFFF')).toBe(3);
+    expect(codePointLowerBound(catalog, '\u{10001}')).toBe(4);
+  });
+
   it('inserts immutably at the beginning, middle, and end', () => {
     let catalog = createSortedUniqueStringCatalog(['b', 'd']);
     catalog = insertSortedUniqueStringCatalog(catalog, 'a');

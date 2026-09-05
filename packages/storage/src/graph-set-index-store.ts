@@ -1,6 +1,6 @@
 import { performance } from 'node:perf_hooks';
 import {
-  compareCodePoint,
+  codePointLowerBound,
   createSortedUniqueStringCatalog,
   isSparqlUpdateOperation,
   type SortedUniqueStringCatalog,
@@ -605,7 +605,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       return graphs.filter((graph) => graph.startsWith(prefix));
     }
     const matches: string[] = [];
-    for (let index = lowerBound(graphs, prefix); index < graphs.length; index += 1) {
+    for (let index = codePointLowerBound(graphs, prefix); index < graphs.length; index += 1) {
       const graph = graphs[index]!;
       if (!graph.startsWith(prefix)) break;
       matches.push(graph);
@@ -888,17 +888,6 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
 
 function namedGraphsFromQuads(quads: Quad[]): string[] {
   return [...new Set(quads.map((quad) => quad.graph).filter(Boolean))];
-}
-
-function lowerBound(values: readonly string[], target: string): number {
-  let low = 0;
-  let high = values.length;
-  while (low < high) {
-    const middle = low + Math.floor((high - low) / 2);
-    if (compareCodePoint(values[middle]!, target) < 0) low = middle + 1;
-    else high = middle;
-  }
-  return low;
 }
 
 function endsWithHighSurrogate(value: string): boolean {

@@ -49,9 +49,11 @@ export class GraphSetCatalogState {
     // former invalidation forced the next prefix read to sort the complete
     // graph set after every single graph mutation under publish load.
     if (this.ordered) {
-      const previous = this.ordered;
-      const next = insertSortedUniqueStringCatalog(previous, graph);
-      this.ordered = next === previous ? null : next;
+      // `members.has(graph)` was false before the Set mutation, so the sorted
+      // projection is guaranteed not to contain it under this class-owned
+      // synchronization invariant. Assign the canonical point update directly;
+      // an identity-triggered invalidation would only conceal a broken state.
+      this.ordered = insertSortedUniqueStringCatalog(this.ordered, graph);
     }
     return true;
   }
@@ -59,9 +61,9 @@ export class GraphSetCatalogState {
   remove(graph: string): boolean {
     if (!this.members?.delete(graph)) return false;
     if (this.ordered) {
-      const previous = this.ordered;
-      const next = removeSortedUniqueStringCatalog(previous, graph);
-      this.ordered = next === previous ? null : next;
+      // A successful Set deletion guarantees membership in the synchronized
+      // projection; keep the incremental representation explicit.
+      this.ordered = removeSortedUniqueStringCatalog(this.ordered, graph);
     }
     return true;
   }
