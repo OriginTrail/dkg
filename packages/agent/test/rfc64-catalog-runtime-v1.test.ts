@@ -30,21 +30,20 @@ function runtimeOptions(
       close: callback('inventoryObservers.close'),
     },
     publicCatalog: {
-      start: vi.fn(),
+      start: vi.fn(() => { calls.push('publicCatalog.start'); }),
       whenIdle: callback('publicCatalog.whenIdle'),
       closeReceiverAdmission: callback('publicCatalog.closeReceiverAdmission'),
       close: callback('publicCatalog.close'),
     },
-    bootstrap: {
-      start: vi.fn(),
+    workloads: [{
+      start: vi.fn(() => { calls.push('bootstrap.start'); }),
       whenIdle: callback('bootstrap.whenIdle'),
       close: callback('bootstrap.close'),
-    },
-    projection: {
-      start: vi.fn(),
+    }, {
+      start: vi.fn(() => { calls.push('projection.start'); }),
       whenIdle: callback('projection.whenIdle'),
       close: callback('projection.close'),
-    },
+    }],
   };
 }
 
@@ -67,26 +66,32 @@ describe('Rfc64CatalogRuntimeV1', () => {
     expect(options.inventoryObservers.close).toHaveBeenCalledOnce();
     expect(options.publicCatalog.closeReceiverAdmission).toHaveBeenCalledOnce();
     expect(options.publicCatalog.close).toHaveBeenCalledOnce();
-    expect(options.bootstrap.close).toHaveBeenCalledOnce();
-    expect(options.projection.close).toHaveBeenCalledOnce();
+    expect(options.workloads[0]!.close).toHaveBeenCalledOnce();
+    expect(options.workloads[1]!.close).toHaveBeenCalledOnce();
     expect(() => runtime.start(createOperationContext('system')))
       .toThrow('cannot start while close is in progress');
   });
 
   it('composes workload owners without exposing their mutable state', async () => {
-    const options = runtimeOptions([]);
+    const calls: string[] = [];
+    const options = runtimeOptions(calls);
     const runtime = new Rfc64CatalogRuntimeV1(options);
     const ctx = createOperationContext('system');
 
     runtime.start(ctx);
     await runtime.whenIdle();
 
+    expect(calls.slice(0, 3)).toEqual([
+      'publicCatalog.start',
+      'bootstrap.start',
+      'projection.start',
+    ]);
     expect(options.publicCatalog.start).toHaveBeenCalledWith(ctx);
-    expect(options.bootstrap.start).toHaveBeenCalledWith(ctx);
-    expect(options.projection.start).toHaveBeenCalledWith(ctx);
+    expect(options.workloads[0]!.start).toHaveBeenCalledWith(ctx);
+    expect(options.workloads[1]!.start).toHaveBeenCalledWith(ctx);
     expect(options.publicCatalog.whenIdle).toHaveBeenCalledOnce();
-    expect(options.bootstrap.whenIdle).toHaveBeenCalledOnce();
-    expect(options.projection.whenIdle).toHaveBeenCalledOnce();
+    expect(options.workloads[0]!.whenIdle).toHaveBeenCalledOnce();
+    expect(options.workloads[1]!.whenIdle).toHaveBeenCalledOnce();
   });
 
   it('observes blocked public-catalog work and owns one idempotent close/restart fence', async () => {

@@ -10,8 +10,8 @@ export interface Rfc64CatalogRuntimeOptionsV1 {
     close: () => Promise<void>;
   }>;
   readonly publicCatalog: Rfc64PublicCatalogRuntimeOwnerV1;
-  readonly bootstrap: Rfc64CatalogWorkloadOwnerV1;
-  readonly projection: Rfc64CatalogWorkloadOwnerV1;
+  /** Ordered independent workloads started after public transport admission. */
+  readonly workloads: readonly Rfc64CatalogWorkloadOwnerV1[];
 }
 
 /** Semantic lifecycle surface implemented by each feature-local workload owner. */
@@ -42,16 +42,14 @@ export class Rfc64CatalogRuntimeV1 {
     if (this.#started) return;
     this.#options.inventoryObservers.open();
     this.#options.publicCatalog.start(ctx);
-    this.#options.bootstrap.start(ctx);
-    this.#options.projection.start(ctx);
+    for (const workload of this.#options.workloads) workload.start(ctx);
     this.#started = true;
   }
 
   async whenIdle(): Promise<void> {
     await Promise.all([
       this.#options.publicCatalog.whenIdle(),
-      this.#options.bootstrap.whenIdle(),
-      this.#options.projection.whenIdle(),
+      ...this.#options.workloads.map((workload) => workload.whenIdle()),
     ]);
   }
 
@@ -86,8 +84,7 @@ export class Rfc64CatalogRuntimeV1 {
     await settle([() => this.#options.publicCatalog.closeReceiverAdmission()]);
     await settle([
       () => this.#options.publicCatalog.close(),
-      () => this.#options.bootstrap.close(),
-      () => this.#options.projection.close(),
+      ...this.#options.workloads.map((workload) => () => workload.close()),
     ]);
     if (failures.length === 1) throw failures[0];
     if (failures.length > 1) {

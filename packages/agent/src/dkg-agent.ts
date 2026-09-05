@@ -970,8 +970,7 @@ export class DKGAgent extends DKGAgentBase {
         close: () => this.closeRfc64SwmInventoryObserversV1(),
       },
       publicCatalog: this.rfc64PublicCatalogOwnerV1,
-      bootstrap: bootstrapOwner,
-      projection: projectionOwner,
+      workloads: [bootstrapOwner, projectionOwner],
     });
     this.rfc64SwmRecoveryCoordinatorV1 = new Rfc64SwmRecoveryCoordinatorV1({
       admission: {

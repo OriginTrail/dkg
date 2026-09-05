@@ -43,6 +43,7 @@ import { Rfc64PublicCatalogSuccessorProducerV1 } from
   '../src/rfc64/public-catalog-successor-producer-v1.js';
 import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
   '../src/rfc64/catalog-authority-config-v1.js';
+import type { Rfc64CatalogRuntimeV1 } from '../src/rfc64/catalog-runtime-v1.js';
 import type { Rfc64PublicCatalogActivationInputV1 } from
   '../src/rfc64/public-catalog-activation-config-v1.js';
 import { deriveRfc64PublicSwmGraphV1 } from
@@ -949,7 +950,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
   });
 
-  it('wires refresh selection and fences the service while a stalled pass drains', async () => {
+  async function prepareAuthorityRefreshLifecycle() {
     const legacyContextGraphId = `${AUTHOR}/authority-refresh-legacy` as ContextGraphIdV1;
     const inactiveContextGraphId = `${AUTHOR}/authority-refresh-inactive` as ContextGraphIdV1;
     const authoritySnapshot = finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0');
@@ -968,7 +969,9 @@ describe('RFC-64 rollout authority integration', () => {
         },
       },
     );
-    const runtime = (edge as any).rfc64CatalogRuntimeV1;
+    const runtime = (edge as unknown as {
+      rfc64CatalogRuntimeV1: Rfc64CatalogRuntimeV1;
+    }).rfc64CatalogRuntimeV1;
     await edge.createContextGraph({
       id: CONTEXT_GRAPH_ID,
       name: 'Authority refresh timer lifecycle',
@@ -1001,10 +1004,13 @@ describe('RFC-64 rollout authority integration', () => {
         selectionSource: 'kill-switch' as const,
       }),
     ]));
+    return { authoritySnapshot, chainAdapter, edge, runtime };
+  }
+
+  it('wires refresh cadence only for active catalog responsibilities', async () => {
+    const { edge, runtime } = await prepareAuthorityRefreshLifecycle();
     const reconcile = vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1')
       .mockResolvedValue(null);
-    let releaseAuthorityRead = () => undefined;
-    let stalledClose: Promise<void> | undefined;
     vi.useFakeTimers();
     try {
       runtime.start(createOperationContext('system'));
@@ -1023,8 +1029,18 @@ describe('RFC-64 rollout authority integration', () => {
         RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs,
       );
       expect(reconcile).not.toHaveBeenCalled();
+    } finally {
+      await runtime.close();
+      vi.useRealTimers();
+    }
+  });
 
-      reconcile.mockRestore();
+  it('waits for a stalled authority read during public agent shutdown', async () => {
+    const { authoritySnapshot, chainAdapter, edge, runtime } =
+      await prepareAuthorityRefreshLifecycle();
+    let releaseAuthorityRead = () => undefined;
+    let stopping: Promise<void> | undefined;
+    try {
       vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
       let markAuthorityReadStarted!: () => void;
       const authorityReadStarted = new Promise<void>((resolve) => {
@@ -1042,57 +1058,22 @@ describe('RFC-64 rollout authority integration', () => {
 
       runtime.start(createOperationContext('system'));
       await authorityReadStarted;
-      let runtimeIdleSettled = false;
-      const runtimeIdle = edge.whenRfc64CatalogSupervisorsIdleV1()
-        .then(() => { runtimeIdleSettled = true; });
+      let idleSettled = false;
+      const idle = edge.whenRfc64CatalogSupervisorsIdleV1()
+        .then(() => { idleSettled = true; });
+      let stopSettled = false;
+      stopping = edge.stop().then(() => { stopSettled = true; });
       await Promise.resolve();
-      expect(runtimeIdleSettled).toBe(false);
-      const service = (edge as any).rfc64PublicCatalogServiceV1;
-      const serviceCloseFailure = new Error('injected service close failure');
-      const closeService = service.close.bind(service);
-      let markServiceCloseFailed!: () => void;
-      const serviceCloseFailed = new Promise<void>((resolve) => {
-        markServiceCloseFailed = resolve;
-      });
-      vi.spyOn(service, 'close').mockImplementation(async () => {
-        await closeService();
-        markServiceCloseFailed();
-        throw serviceCloseFailure;
-      });
-      const coordinatorClose = vi.spyOn(
-        (edge as any).rfc64CatalogMutationCoordinatorV1,
-        'closeAndDrain',
-      );
-      let closeSettled = false;
-      stalledClose = runtime.close();
-      void stalledClose.then(
-        () => { closeSettled = true; },
-        () => { closeSettled = true; },
-      );
-      expect(runtime.close()).toBe(stalledClose);
-      expect(() => runtime.start(
-        createOperationContext('system'),
-      )).toThrow('RFC-64 catalog runtime cannot start while close is in progress');
-      await serviceCloseFailed;
-      expect((edge as any).rfc64PublicCatalogServiceV1).toBeUndefined();
-      expect(service.started).toBe(false);
-      await Promise.resolve();
-      expect(closeSettled).toBe(false);
-      expect(coordinatorClose).not.toHaveBeenCalled();
+      expect(idleSettled).toBe(false);
+      expect(stopSettled).toBe(false);
 
       releaseAuthorityRead();
-      await expect(stalledClose).rejects.toBe(serviceCloseFailure);
-      await runtimeIdle;
-      expect(closeSettled).toBe(true);
-      expect(runtimeIdleSettled).toBe(true);
-      expect(coordinatorClose).toHaveBeenCalledOnce();
-      expect(() => runtime.start(createOperationContext('system')))
-        .toThrow('RFC-64 catalog runtime cannot start while close is in progress');
+      await Promise.all([stopping, idle]);
+      expect(stopSettled).toBe(true);
+      expect(idleSettled).toBe(true);
     } finally {
       releaseAuthorityRead();
-      await stalledClose?.catch(() => undefined);
-      await runtime.close().catch(() => undefined);
-      vi.useRealTimers();
+      await stopping?.catch(() => undefined);
     }
   });
 
