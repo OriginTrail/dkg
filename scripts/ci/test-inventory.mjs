@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import { validateCiLaneWorkflow } from '../lib/ci-lane-workflow.mjs';
+import { EVM_TEST_SCOPES } from './evm-test-scopes.mjs';
 import { COVERAGE_JOBS } from '../lib/coverage-artifacts.mjs';
 import { isTestSurface, secondaryRoutes } from '../lib/test-inventory-surface.mjs';
 
@@ -46,8 +47,9 @@ try {
     const lane = Object.entries(COVERAGE_JOBS).find(([, entries]) => name in entries)[0];
     for (const file of files) own(file.file, lane, `pnpm --dir packages/${name} exec vitest run`, 'required');
   }
-  const evm = fs.readFileSync(path.join(root, 'scripts/test-evm-integration.sh'), 'utf8');
-  for (const [, file] of evm.matchAll(/^  "(packages\/[^"\n]+\.test\.ts)"/gm)) own(file, 'evm-integration', 'pnpm test:evm', 'required');
+  for (const { packageDirectory, files } of Object.values(EVM_TEST_SCOPES)) {
+    for (const file of files) own(`${packageDirectory}/${file}`, 'evm-integration', 'pnpm test:evm', 'required');
+  }
   const registrations = JSON.parse(fs.readFileSync(path.join(root, 'test-policy/test-routes.json'), 'utf8'));
   const tracked = [...new Set(execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd: root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }).split('\0'))].filter(isTestSurface).filter((file) => fs.existsSync(path.join(root, file)));
   for (const [file, route] of secondaryRoutes(tracked, registrations)) {

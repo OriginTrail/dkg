@@ -250,7 +250,7 @@ pnpm dkg contextGraph create my-data --name "My Data" --description "Experiments
 pnpm dkg subscribe memes --save
 
 # Publishing (supports .ttl, .nt, .nq, .trig, .jsonld, .json)
-pnpm dkg publish memes --file ./my-data.ttl
+pnpm dkg publish memes --file ./path/to/my-data.ttl
 pnpm dkg publish memes --subject "did:dkg:entity:thing" --predicate "https://schema.org/name" --object "A Thing"
 
 # Updating (replace KA contents with new triples, recomputes merkle root on-chain)
@@ -398,7 +398,7 @@ See [SETUP_ELIZAOS.md](./SETUP_ELIZAOS.md) for the full plugin reference.
 
 ## Common: Publishing Knowledge
 
-Regardless of how you joined, knowledge publishing works the same way. Here's an example Turtle file (`my-data.ttl`):
+Regardless of how you joined, knowledge publishing works the same way. Save this example Turtle file locally as `my-data.ttl`:
 
 ```turtle
 @prefix schema: <https://schema.org/> .

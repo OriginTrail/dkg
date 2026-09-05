@@ -60,6 +60,10 @@ jobs:
     outputs:
       full_ci: ${{ steps.plan.outputs.full_ci }}
       run_node: ${{ steps.plan.outputs.run_node }}
+      # The protected-history controller pin predates this capability output.
+      # Keep its trusted lane outputs as a compatibility path until a reviewed
+      # controller rotation after merge; never execute candidate policy here.
+      node_test_artifacts: ${{ steps.plan.outputs.node_test_artifacts || (steps.plan.outputs.tornado_core == 'true' || steps.plan.outputs.tornado_publisher == 'true' || steps.plan.outputs.tornado_agent == 'true' || steps.plan.outputs.bura_cli == 'true' || steps.plan.outputs.kosava_hardhat_plugins == 'true') }}
       tornado_core: ${{ steps.plan.outputs.tornado_core }}
       tornado_blazegraph: ${{ steps.plan.outputs.tornado_blazegraph }}
       tornado_publisher: ${{ steps.plan.outputs.tornado_publisher }}
@@ -360,7 +364,7 @@ jobs:
   evm-node-test-artifacts:
     name: Compile EVM test artifacts (0.8.20/london)
     needs: changes
-    if: needs.changes.outputs.tornado_core == 'true' || needs.changes.outputs.bura_cli == 'true' || needs.changes.outputs.kosava_hardhat_plugins == 'true'
+    if: needs.changes.outputs.node_test_artifacts == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -459,14 +463,8 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: ./.github/actions/restore-evm-node-test-artifacts
         if: matrix.suite == 'chain'
-        with:
-          name: evm-node-test-artifacts
-          path: /tmp
-      - name: Restore EVM test artifacts
-        if: matrix.suite == 'chain'
-        run: tar -xzf /tmp/evm-node-test-artifacts.tgz
 
       - name: Core, RDF utilities, and storage tests
         if: matrix.suite == 'core'
@@ -621,7 +619,7 @@ jobs:
     env:
       DKG_CI_COVERAGE: '1'
     name: "Tornado: publisher [${{ matrix.shard }}/4]"
-    needs: [changes, build]
+    needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_publisher == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -646,6 +644,9 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
+      # Publisher globalSetup deploys the same Hardhat contracts as chain/CLI.
+      # Restore the shared compiler outputs before starting its isolated node.
+      - uses: ./.github/actions/restore-evm-node-test-artifacts
       - name: "Publisher tests (shard ${{ matrix.shard }}/4)"
         run: |
           node scripts/ci/run-vitest-junit.mjs \
@@ -658,35 +659,18 @@ jobs:
           artifact-name: vitest-publisher-${{ matrix.shard }}-of-4
 
   # ------------------------------------------------------------------
-  # Tornado agent lane — the slowest Node suite, sharded across 10 runners.
-  # Sharding history:
-  #   3 shards → 6+ min each (wall-clock tail)
-  #   4 shards → ~4.5 min each (still the gating tail)
-  #   8 shards → ~3m-3m 49s each (slowest shard 4m 16s → total 5m 18s)
-  #  10 shards --shard=N/M (vitest hash) → slowest 4m 22s → total 4m 53s
-  #  10 shards greedy bin-packed ← current. Three files dominate hook
-  #           wall-clock (e2e-privacy 47s, e2e-publish-protocol 43s,
-  #           e2e-flows 39s body + ~2 min of beforeAll hooks each).
-  #           vitest's default --shard=N/M hashes files to shards and
-  #           can land multiple heavies together (shard 8/10 previously
-  #           got e2e-publish-protocol + e2e-workspace-sync + gossip-
-  #           validation = ~80s body + stacked hooks → 4m 22s ceiling).
-  #
-  #           Greedy bin-packing using historical per-file weights gives
-  #           each of the top-3 heavies its own shard and distributes
-  #           the remaining ~37 files evenly across the rest. Projected
-  #           ceiling is shard 1 (e2e-privacy alone, ~3m 30s total).
-  #
-  #           Weights live in `scripts/ci-shard-agent.mjs` in this
-  #           package and are refreshed whenever per-file timings shift
-  #           meaningfully — unknown files default to a light weight and
-  #           fall into the lightest bin automatically.
+  # Agent tests: four real-Hardhat shards and six hermetic shards using the
+  # existing unit config. Both sets come from Vitest discovery, are disjoint,
+  # and together cover the full package suite. JUnit weights include every
+  # measured file; unknown files receive a conservative 60s estimate. The last
+  # unit shard reserves time for the rollout/Gate 1 evidence steps below.
+  # See scripts/ci/plan-agent-shards.mjs and scripts/ci/timings/README.md.
   # ------------------------------------------------------------------
   tornado-agent:
     env:
       DKG_CI_COVERAGE: '1'
     name: "Tornado: agent [${{ matrix.shard }}/10]"
-    needs: [changes, build]
+    needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_agent == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -711,17 +695,20 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
+      - uses: ./.github/actions/restore-evm-node-test-artifacts
       - name: "Agent tests (shard ${{ matrix.shard }}/10)"
         working-directory: packages/agent
         run: |
           set -euo pipefail
+          SHARD_CONFIG="$(node scripts/ci-shard-agent.mjs ${{ matrix.shard }} 10 --config)"
           mapfile -t SHARD_FILES < <(node scripts/ci-shard-agent.mjs ${{ matrix.shard }} 10)
+          test "${#SHARD_FILES[@]}" -gt 0
           echo "::group::Agent shard ${{ matrix.shard }}/10 — ${#SHARD_FILES[@]} files"
           printf '  %s\n' "${SHARD_FILES[@]}"
           echo "::endgroup::"
           node ../../scripts/ci/run-vitest-junit.mjs \
             --lane agent --shard ${{ matrix.shard }} \
-            -- "${SHARD_FILES[@]}"
+            -- --config "${SHARD_CONFIG}" "${SHARD_FILES[@]}"
       - name: "RFC-64 rollout transition certificate (Oxigraph)"
         if: matrix.shard == 10
         run: node --import tsx --test devnet/rfc64-gate1-public-open/rollout-store-fixture.test.ts devnet/rfc64-gate1-public-open/rollout-transition.test.ts
@@ -774,12 +761,7 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: evm-node-test-artifacts
-          path: /tmp
-      - name: Restore EVM test artifacts
-        run: tar -xzf /tmp/evm-node-test-artifacts.tgz
+      - uses: ./.github/actions/restore-evm-node-test-artifacts
       - name: "Verify provisioned Blazegraph image contract"
         if: matrix.shard == 1
         run: bash scripts/ci/verify-blazegraph-image-contract.sh
@@ -1078,12 +1060,7 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: evm-node-test-artifacts
-          path: /tmp
-      - name: Restore EVM test artifacts
-        run: tar -xzf /tmp/evm-node-test-artifacts.tgz
+      - uses: ./.github/actions/restore-evm-node-test-artifacts
       - name: "random-sampling tests (real Hardhat, no mocks)"
         run: node scripts/ci/run-vitest-junit.mjs --lane random-sampling
       - name: "kafka-plugin tests (real Hardhat, no mocks)"

@@ -102,7 +102,7 @@ The existing W1 benchmark smoke and reachability gates remain. Stable-runner thr
 
 Retained deliberately:
 
-- The chain EVM adapter runs in both default and dedicated EVM obligations. Removing one requires a coordinated change to the reviewed cross-workflow routing contract, plus evidence of equivalent environments.
+- Canary PR #2473 assigns the chain EVM adapter to the dedicated EVM obligation. This branch retains that reviewed manifest-driven route and adds A2/B3 plus checked JUnit output to the same runner.
 - The random-sampling skeleton/version test exposes an old public version constant. Changing that public export requires a compatibility decision; it is not silently rewritten as test cleanup.
 - Archived compatibility suites and architectural guards retain their explicit historical/contract routes. Source cleanup in PR #2460 is separate.
 
@@ -135,7 +135,7 @@ The inventory now covers JS/TS test filenames, Python `test_*`/`*_test` files an
 
 `ci-lanes.mjs` is the candidate-side source for planner lane IDs, aggregate job mapping, coverage package membership and shard counts. Both the inventory gate and tooling tests validate the executable workflow against this model. Matrix and package-invocation drift have negative regression cases. The supporting job runs up to three packages concurrently with two workers per package, waits for every result, and then executes the required Python and demo steps even if a Vitest lane failed. Each package retains its own JUnit and coverage receipt. This concurrency limit is not a measured CI speedup claim.
 
-The disabled-test scanner now separates pure AST analysis, Git/file discovery and CLI dispatch. Its former embedded self-tests run in the tooling suite. Imported test aliases, namespace imports, computed skip members and chained APIs cannot bypass the debt ledger; locally shadowed imports are ignored. The legacy debt ledger is unchanged.
+The disabled-test scanner now separates pure AST analysis, Git/file discovery and CLI dispatch. Its former embedded self-tests run in the tooling suite. Imported test aliases, namespace imports, computed skip members and chained APIs cannot bypass the debt ledger; locally shadowed imports are ignored. The original 72-finding ledger is unchanged; one reviewed discovery exclusion from canary PR #2473 is registered separately with its required EVM execution route and source revision.
 
 Shared KA request fixtures and owned native-server startup live under `scripts/testing`, with an explicit ESM boundary. Backend conformance no longer imports a publisher-private test module or a package-private port helper. The publisher helper-type gate still checks the shared request contract, and shared fixtures participate in Turbo cache inputs.
 

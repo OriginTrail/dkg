@@ -1,4 +1,4 @@
-import { CI_LANES, EVM_SCOPES, NODE_EVM_LANES } from './ci-delta.mjs';
+import { CI_LANES, EVM_SCOPES, NODE_EVM_LANES, needsNodeTestArtifacts } from './ci-delta.mjs';
 
 import { PRIMARY_LANE_JOBS } from './ci-lanes.mjs';
 export { PRIMARY_LANE_JOBS } from './ci-lanes.mjs';
@@ -72,12 +72,7 @@ export function validatePrimaryResults({ eventName, plan, needs }) {
   requireSuccess(needs, 'changes', true, errors);
   requireSuccess(needs, 'build', plan.runNode, errors);
 
-  const needsNodeTestArtifacts = Boolean(
-    plan.lanes?.tornado_core
-    || plan.lanes?.bura_cli
-    || plan.lanes?.kosava_hardhat_plugins
-  );
-  requireSuccess(needs, 'evm-node-test-artifacts', needsNodeTestArtifacts, errors);
+  requireSuccess(needs, 'evm-node-test-artifacts', needsNodeTestArtifacts(plan), errors);
   requireSuccess(
     needs,
     'evm-devnet-test-artifacts',

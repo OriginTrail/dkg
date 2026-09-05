@@ -481,5 +481,12 @@
     "api": "vitest.exclude",
     "count": 1,
     "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/chain/vitest.config.ts:D2:3654cb00d59f8292b1f3b452aa48f36656769815",
+    "path": "packages/chain/vitest.config.ts",
+    "api": "vitest.exclude",
+    "count": 1,
+    "reason": "Existing reviewed routing from testnet-canary f2cacb9c6 / PR #2473: evm-adapter remains required in the dedicated EVM scope. Real manifest/discovery tests enforce that execution route."
   }
 ]
