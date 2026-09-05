@@ -27,17 +27,19 @@ test('runner routes every requested file once and continues after a failed test'
       return files.map((file) => ({ cwd: path.join(EVM_REPO_ROOT, packageDirectory), file }));
     });
     const calls = [];
-    const status = runEvmIntegration(selection, { run: (command, args, options) => {
+    const status = runEvmIntegration(selection, { checkReport: () => true, run: (command, args, options) => {
       assert.equal(command, 'pnpm');
       assert.deepEqual(args.slice(0, 3), ['exec', 'vitest', 'run']);
-      assert.deepEqual(args.slice(4), ['--config', path.join(EVM_REPO_ROOT, 'vitest.evm-integration.ts'), '--reporter=verbose']);
+      assert.deepEqual(args.slice(4, 8), ['--config', path.join(EVM_REPO_ROOT, 'vitest.evm-integration.ts'), '--reporter=verbose', '--reporter=junit']);
+      assert.match(args[8], /--outputFile\.junit=.*test-results[/\\]evm-.*\.xml$/);
       calls.push({ cwd: options.cwd, file: args[3] });
       return { status: calls.length === 1 ? 7 : 0 };
     } });
     assert.equal(status, 1);
     assert.deepEqual(calls, expected);
   }
-  assert.equal(runEvmIntegration('chain', { run: () => ({ status: 0 }) }), 0);
+  assert.equal(runEvmIntegration('chain', { checkReport: () => true, run: () => ({ status: 0 }) }), 0);
+  assert.equal(runEvmIntegration('chain', { checkReport: () => false, run: () => ({ status: 0 }) }), 1);
   assert.equal(runEvmIntegration('chain', { run: () => ({ error: new Error('spawn failed') }) }), 1);
   assert.throws(() => runEvmIntegration('unknown', { run: () => assert.fail('must not execute') }), /Unknown EVM scope/);
 });
