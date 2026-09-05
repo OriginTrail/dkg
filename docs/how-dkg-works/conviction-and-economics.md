@@ -73,6 +73,8 @@ dkg context-graph register <id> --publish-policy 0 --pca-account-id <accountId>
 
 The daemon preflights authorization so a local curator cannot claim someone else's PCA. `pcaAccountId` is valid only for curated publish policy. The registration signer must own the PCA or be registered as an agent of that exact account, and the local curator must match the signer because the signer receives the Context Graph NFT. The PCA owner remains the graph's live publish authority.
 
+Publishing authorization via `--pca-account-id` and registration-deposit coverage are separate decisions. Passing the option alone does not guarantee a waiver.
+
 An eligible active PCA can waive the liquid-TRAC Context Graph registration deposit for its owner or registered agents. Each registration consumes one bounded waiver slot (`committedTRAC / registrationDeposit`); it does not debit the PCA commitment. The signer always pays native gas, and the normal liquid-TRAC deposit applies when any waiver condition is not met.
 
 ## Protocol Treasury Fee
