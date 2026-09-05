@@ -1,6 +1,6 @@
 import { access, readFile, writeFile } from 'node:fs/promises';
 import { dirname, relative, sep } from 'node:path';
-import { defineConfig, htmlReporter, rawReporter, textReporter } from 'esbench/host';
+import { defineConfig, htmlReporter, NodeExecutor, rawReporter, textReporter } from 'esbench/host';
 
 const resultFile = process.env.ESBENCH_RESULT ?? 'bench/results/latest.json';
 const htmlFile = process.env.ESBENCH_HTML_FILE ?? 'bench/results/latest.html';
@@ -39,6 +39,10 @@ export default defineConfig({
   toolchains: [
     {
       include: ['bench/**/*.bench.ts'],
+      // Each suite can load different source and built views of workspace
+      // packages. A fresh process prevents module-level registries and other
+      // benchmark fixtures from leaking into the next suite.
+      executors: [new NodeExecutor({ execArgv: ['--import', 'tsx'] })],
     },
   ],
   reporters,
