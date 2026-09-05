@@ -313,6 +313,7 @@ import {
 } from './dkg-agent-constants.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import {
+  BoundedOperationTimeoutError,
   isBoundedOperationTimeoutError,
   runBoundedOperation,
 } from './bounded-operation.js';
@@ -888,7 +889,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async readLiveOnChainAccessPolicy(this: DKGAgent,
     onChainId: string,
     opCtx?: OperationContext,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; preserveTransportTimeout?: boolean } = {},
   ): Promise<0 | 1 | null> {
     let numericId: bigint;
     try {
@@ -928,6 +929,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       options.signal,
     );
     if (live === TIMEOUT_SENTINEL) {
+      if (options.preserveTransportTimeout) {
+        throw new BoundedOperationTimeoutError(
+          `isContextGraphActiveOnChain(${onChainId})`,
+          CHAIN_POLICY_READ_TIMEOUT_MS,
+        );
+      }
       this.log.warn(
         opCtx ?? createOperationContext('share'),
         `readLiveOnChainAccessPolicy(${onChainId}): isContextGraphActiveOnChain timed out after ` +
@@ -956,6 +963,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       options.signal,
     );
     if (policy === TIMEOUT_SENTINEL) {
+      if (options.preserveTransportTimeout) {
+        throw new BoundedOperationTimeoutError(
+          `getContextGraphAccessPolicy(${onChainId})`,
+          CHAIN_POLICY_READ_TIMEOUT_MS,
+        );
+      }
       this.log.warn(
         opCtx ?? createOperationContext('share'),
         `readLiveOnChainAccessPolicy(${onChainId}): getContextGraphAccessPolicy timed out after ` +

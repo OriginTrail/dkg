@@ -288,11 +288,6 @@ export type {
   ContextGraphReadAuthoritySource,
 } from './context-graph-read-authority.js';
 export type { RegisteredContextGraphAuthority } from './dkg-agent-cg-resolve.js';
-export {
-  getAgentPromoteReplaySafeErrorDiagnostic,
-  isAgentPromotePreCommitReplaySafeError,
-  type AgentPromoteReplaySafeErrorDiagnostic,
-} from './promote-precommit-replay-safety.js';
 export type { ContextGraphRegistrationBinding } from './dkg-agent-cg-registry.js';
 export {
   ContextGraphNotFoundError,

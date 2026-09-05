@@ -22,6 +22,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncPromoteQueue,
+  runPromotePreCommitChainReads,
   type AsyncPromoteQueue,
   type PromoteRequest,
   type PromoteTerminalJobClearer,
@@ -29,7 +30,6 @@ import {
 import {
   ChainRpcTransportError,
 } from '@origintrail-official/dkg-chain';
-import { runAgentPromotePreCommitReads } from '../../agent/src/promote-precommit-replay-safety.js';
 import {
   classifyExactSwmGraphReplaceFailure,
   classifyPreCommitChainRpcFailure,
@@ -208,7 +208,7 @@ describe('classifyPromoteError', () => {
       retryable: true,
     });
 
-    const agentCertified = await runAgentPromotePreCommitReads(async () => {
+    const agentCertified = await runPromotePreCommitChainReads(async () => {
       throw Object.assign(new Error(message), { code });
     }).catch((error: unknown) => error);
     expect(classifyPromoteError(agentCertified)).toEqual({
@@ -544,7 +544,7 @@ describe('runPromoteJob', () => {
 
   it('moves an agent-certified pre-commit chain outage to failed_retrying', async () => {
     const job = await enqueueAndClaim();
-    const replaySafeFailure = await runAgentPromotePreCommitReads(async () => {
+    const replaySafeFailure = await runPromotePreCommitChainReads(async () => {
       throw new ChainRpcTransportError(
         'RPC_ENDPOINTS_EXHAUSTED',
         'authority lookup failed on all endpoints',

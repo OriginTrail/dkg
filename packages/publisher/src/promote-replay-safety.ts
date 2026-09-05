@@ -53,6 +53,17 @@ export function classifyPreCommitChainRpcFailure(error: unknown): unknown {
     : error;
 }
 
+/** Shared producer boundary for chain reads known to precede every promote mutation. */
+export async function runPromotePreCommitChainReads<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw classifyPreCommitChainRpcFailure(error);
+  }
+}
+
 /** Return a bounded identity only for producer-certified replay-safe errors. */
 export function getPromoteReplaySafeErrorDiagnostic(
   error: unknown,

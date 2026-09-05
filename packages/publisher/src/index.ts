@@ -383,6 +383,7 @@ export {
 export {
   getPromoteReplaySafeErrorDiagnostic,
   isPromoteReplaySafeError,
+  runPromotePreCommitChainReads,
   type PromoteReplaySafeErrorDiagnostic,
 } from './promote-replay-safety.js';
 export { type LegacyWmMigrationResult } from './legacy-wm-migration.js';

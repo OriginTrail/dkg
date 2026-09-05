@@ -91,10 +91,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
-import { runAgentPromotePreCommitReads } from './promote-precommit-replay-safety.js';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
+  runPromotePreCommitChainReads,
   PublishJournal, StaleWriteError,
   ACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
@@ -3201,7 +3201,7 @@ export class DKGAgent extends DKGAgentBase {
           gossipSigner,
           confirmBeforeCommit,
           shareAccessPolicy,
-        } = await runAgentPromotePreCommitReads(async () => {
+        } = await runPromotePreCommitChainReads(async () => {
           const gossipSigner = await agent.resolveWorkspaceGossipSigningAgent(contextGraphId);
           // Strict curator-ack gate (OT-RFC-49 curator-leader) for the WM→SWM
           // promote path — the same confirmer as share()/conditionalShare(). When

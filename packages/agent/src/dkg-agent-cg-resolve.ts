@@ -1539,12 +1539,13 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       accessPolicy = await this.readLiveOnChainAccessPolicy(
         onChainId.toString(),
         createOperationContext('system'),
-        { signal: options.signal },
+        { signal: options.signal, preserveTransportTimeout: true },
       );
     } catch (err) {
       return contextGraphAuthorityUnavailable('chain-access-policy-unavailable', {
         onChainId,
         error: err,
+        chainRead: true,
       });
     }
     if (accessPolicy === null) {
@@ -1590,6 +1591,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       return contextGraphAuthorityUnavailable('chain-participant-authority-unavailable', {
         onChainId,
         error: err,
+        chainRead: true,
       });
     }
 

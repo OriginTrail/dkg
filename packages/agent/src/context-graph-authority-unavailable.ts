@@ -2,6 +2,7 @@ import {
   isChainRpcTransportError,
   type ChainRpcTransportCode,
 } from '@origintrail-official/dkg-chain';
+import { isBoundedOperationTimeoutError } from './bounded-operation.js';
 
 export type ContextGraphAuthorityUnavailableReason =
   | 'chain-name-binding-unavailable'
@@ -32,14 +33,19 @@ export interface ContextGraphAuthorityUnavailable<
 /** Build every unavailable authority result through one bounded cause model. */
 export function contextGraphAuthorityUnavailable<Reason extends ContextGraphAuthorityUnavailableReason>(
   reason: Reason,
-  input: { onChainId?: bigint; error?: unknown } = {},
+  input: { onChainId?: bigint; error?: unknown; chainRead?: boolean } = {},
 ): ContextGraphAuthorityUnavailable<Reason> {
   const detail = input.error === undefined
     ? undefined
     : input.error instanceof Error ? input.error.message : String(input.error);
-  const unavailableCause = isChainRpcTransportError(input.error)
-    ? { kind: 'chain-rpc-transport' as const, code: input.error.code }
-    : undefined;
+  const transportCode = isChainRpcTransportError(input.error)
+    ? input.error.code
+    : input.chainRead === true && isBoundedOperationTimeoutError(input.error)
+      ? 'RPC_TIMEOUT'
+      : undefined;
+  const unavailableCause = transportCode === undefined
+    ? undefined
+    : { kind: 'chain-rpc-transport' as const, code: transportCode };
   return {
     kind: 'unavailable',
     reason,

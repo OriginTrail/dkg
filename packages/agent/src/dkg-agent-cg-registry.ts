@@ -693,7 +693,10 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         ? { kind: 'unregistered' }
         : { kind: 'registered', onChainId, provenance: 'name-hash' };
     } catch (err) {
-      return contextGraphAuthorityUnavailable('chain-name-binding-unavailable', { error: err });
+      return contextGraphAuthorityUnavailable('chain-name-binding-unavailable', {
+        error: err,
+        chainRead: true,
+      });
     }
   }
 

@@ -34,11 +34,7 @@
  * decide what to do with any leases the old worker held.
  */
 
-import {
-  getAgentPromoteReplaySafeErrorDiagnostic,
-  isAgentPromotePreCommitReplaySafeError,
-  type DKGAgent,
-} from '@origintrail-official/dkg-agent';
+import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import {
   isStoreOperationTimeoutError,
@@ -256,8 +252,7 @@ function logPromoteAttemptFailure(input: {
   log: PromoteWorkerLogger;
 }): void {
   try {
-    const replaySafeDiagnostic = getPromoteReplaySafeErrorDiagnostic(input.err)
-      ?? getAgentPromoteReplaySafeErrorDiagnostic(input.err);
+    const replaySafeDiagnostic = getPromoteReplaySafeErrorDiagnostic(input.err);
     bestEffortLog(
       input.log,
       `[async-promote-worker] ${JSON.stringify({
@@ -299,7 +294,7 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
   // Workflow-level replay safety is a typed producer disposition. It is more
   // authoritative than diagnostic prose inherited from the wrapped cause,
   // including incidental cap-like wording.
-  if (isPromoteReplaySafeError(err) || isAgentPromotePreCommitReplaySafeError(err)) {
+  if (isPromoteReplaySafeError(err)) {
     return { classification: 'transient', retryable: true };
   }
 

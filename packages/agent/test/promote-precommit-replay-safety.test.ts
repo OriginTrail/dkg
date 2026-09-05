@@ -6,9 +6,9 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
-  getAgentPromoteReplaySafeErrorDiagnostic,
-  isAgentPromotePreCommitReplaySafeError,
-} from '../src/promote-precommit-replay-safety.js';
+  getPromoteReplaySafeErrorDiagnostic,
+  isPromoteReplaySafeError,
+} from '@origintrail-official/dkg-publisher';
 
 const CG = 'registered-promote-rpc-outage';
 
@@ -60,8 +60,8 @@ describe('agent promote pre-commit chain replay boundary', () => {
 
     const error = await capturePromoteError(fixture.agent);
 
-    expect(isAgentPromotePreCommitReplaySafeError(error)).toBe(true);
-    expect(getAgentPromoteReplaySafeErrorDiagnostic(error)).toEqual({
+    expect(isPromoteReplaySafeError(error)).toBe(true);
+    expect(getPromoteReplaySafeErrorDiagnostic(error)).toEqual({
       name: 'PromoteReplaySafeError',
       code: 'PROMOTE_REPLAY_SAFE_FAILURE',
     });
@@ -81,10 +81,36 @@ describe('agent promote pre-commit chain replay boundary', () => {
 
     const error = await capturePromoteError(fixture.agent);
 
-    expect(isAgentPromotePreCommitReplaySafeError(error)).toBe(true);
+    expect(isPromoteReplaySafeError(error)).toBe(true);
     expect(error).toMatchObject({ code });
     expect(fixture.publisherPromote).not.toHaveBeenCalled();
   });
+
+  it('certifies an agent-generated registration RPC deadline before publisher mutation', async () => {
+    const fixture = await makeAgent({ stubRegistration: false });
+    vi.spyOn(fixture.chain, 'resolveContextGraphIdByNameHash').mockImplementation(
+      () => new Promise(() => {}),
+    );
+
+    const error = await capturePromoteError(fixture.agent);
+
+    expect(isPromoteReplaySafeError(error)).toBe(true);
+    expect(error).toMatchObject({ code: 'RPC_TIMEOUT' });
+    expect(fixture.publisherPromote).not.toHaveBeenCalled();
+  }, 10_000);
+
+  it('certifies an agent-generated access-policy RPC deadline before publisher mutation', async () => {
+    const fixture = await makeAgent();
+    vi.spyOn(fixture.chain, 'isContextGraphActiveOnChain').mockImplementation(
+      () => new Promise(() => {}),
+    );
+
+    const error = await capturePromoteError(fixture.agent);
+
+    expect(isPromoteReplaySafeError(error)).toBe(true);
+    expect(error).toMatchObject({ code: 'RPC_TIMEOUT' });
+    expect(fixture.publisherPromote).not.toHaveBeenCalled();
+  }, 10_000);
 
   it.each([
     'RPC_ENDPOINTS_EXHAUSTED',
@@ -99,7 +125,7 @@ describe('agent promote pre-commit chain replay boundary', () => {
 
     const error = await capturePromoteError(fixture.agent);
 
-    expect(isAgentPromotePreCommitReplaySafeError(error)).toBe(true);
+    expect(isPromoteReplaySafeError(error)).toBe(true);
     expect(error).toMatchObject({ code });
     expect(fixture.publisherPromote).not.toHaveBeenCalled();
   });
@@ -112,7 +138,7 @@ describe('agent promote pre-commit chain replay boundary', () => {
 
     const error = await capturePromoteError(fixture.agent);
 
-    expect(isAgentPromotePreCommitReplaySafeError(error)).toBe(false);
+    expect(isPromoteReplaySafeError(error)).toBe(false);
     expect(fixture.publisherPromote).not.toHaveBeenCalled();
   });
 });
