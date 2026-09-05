@@ -24,8 +24,15 @@ describe('promote replay safety', () => {
     expect(isPromoteReplaySafeError(transportFailure)).toBe(false);
     const classified = classifyPreCommitChainRpcFailure(transportFailure);
     expect(classified).toBeInstanceOf(PromoteReplaySafeError);
-    expect(classified).toMatchObject({ cause: transportFailure });
+    expect(classified).toMatchObject({
+      boundary: 'agent-preflight-chain',
+      cause: transportFailure,
+    });
     expect(isPromoteReplaySafeError(classified)).toBe(true);
+  });
+
+  it('does not let the public error contract certify a non-chain failure', () => {
+    expect(() => new PromoteReplaySafeError(new Error('arbitrary failure'))).toThrow(TypeError);
   });
 
   it.each([
@@ -45,7 +52,10 @@ describe('promote replay safety', () => {
 
     expect(isPromoteReplaySafeError(replaceFailure)).toBe(false);
     const classified = classifyExactSwmGraphReplaceFailure(replaceFailure);
-    expect(classified).toMatchObject({ cause: replaceFailure });
+    expect(classified).toMatchObject({
+      boundary: 'exact-swm-graph-replace',
+      cause: replaceFailure,
+    });
     expect(isStoreOperationTimeoutError((classified as Error).cause)).toBe(true);
     expect(isPromoteReplaySafeError(classified)).toBe(true);
     expect(getPromoteReplaySafeErrorDiagnostic(classified)).toEqual({

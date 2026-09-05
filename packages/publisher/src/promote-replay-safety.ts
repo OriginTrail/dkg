@@ -5,6 +5,7 @@ import { isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 
 const PROMOTE_REPLAY_SAFE_ERROR_CODE = 'PROMOTE_REPLAY_SAFE_FAILURE' as const;
 const promoteReplaySafeBrand: unique symbol = Symbol('promote-replay-safe');
+const exactSwmReplaceBoundary: unique symbol = Symbol('exact-swm-replace-boundary');
 
 /**
  * Typed failure emitted only by concrete promote preparation/commit boundaries
@@ -15,13 +16,22 @@ const promoteReplaySafeBrand: unique symbol = Symbol('promote-replay-safe');
 export class PromoteReplaySafeError extends Error {
   readonly code = PROMOTE_REPLAY_SAFE_ERROR_CODE;
   readonly [promoteReplaySafeBrand] = true;
+  readonly boundary: 'agent-preflight-chain' | 'exact-swm-graph-replace';
 
-  constructor(cause: unknown) {
+  constructor(cause: unknown, exactBoundary?: typeof exactSwmReplaceBoundary) {
+    if (exactBoundary !== exactSwmReplaceBoundary && !isChainRpcTransportError(cause)) {
+      throw new TypeError(
+        'PromoteReplaySafeError public construction requires an agent preflight chain failure',
+      );
+    }
     super(
       cause instanceof Error ? cause.message : String(cause),
       { cause },
     );
     this.name = 'PromoteReplaySafeError';
+    this.boundary = exactBoundary === exactSwmReplaceBoundary
+      ? 'exact-swm-graph-replace'
+      : 'agent-preflight-chain';
   }
 }
 
@@ -43,8 +53,10 @@ export function isPromoteReplaySafeError(
   }
 }
 
-function certifyPromoteReplaySafe(error: unknown): PromoteReplaySafeError {
-  return isPromoteReplaySafeError(error) ? error : new PromoteReplaySafeError(error);
+function certifyExactSwmReplaceReplaySafe(error: unknown): PromoteReplaySafeError {
+  return isPromoteReplaySafeError(error)
+    ? error
+    : new PromoteReplaySafeError(error, exactSwmReplaceBoundary);
 }
 
 /**
@@ -54,7 +66,7 @@ function certifyPromoteReplaySafe(error: unknown): PromoteReplaySafeError {
  */
 export function classifyPreCommitChainRpcFailure(error: unknown): unknown {
   return isChainRpcTransportError(error)
-    ? certifyPromoteReplaySafe(error)
+    ? new PromoteReplaySafeError(error)
     : error;
 }
 
@@ -75,7 +87,7 @@ export function classifyExactSwmGraphReplaceFailure(error: unknown): unknown {
   if (isStoreOperationTimeoutError(error)
     && error.outcome === 'indeterminate'
     && error.storeOperation === 'replaceGraph') {
-    return certifyPromoteReplaySafe(error);
+    return certifyExactSwmReplaceReplaySafe(error);
   }
   return error;
 }
