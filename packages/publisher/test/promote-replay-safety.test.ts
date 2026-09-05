@@ -1,16 +1,42 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ChainRpcTransportError,
+  type ChainRpcTransportCode,
+} from '@origintrail-official/dkg-chain';
+import {
   StoreOperationTimeoutError,
   isStoreOperationTimeoutError,
 } from '@origintrail-official/dkg-storage';
 
 import {
   classifyExactSwmGraphReplaceFailure,
+  classifyPreCommitChainRpcFailure,
   getPromoteReplaySafeErrorDiagnostic,
   isPromoteReplaySafeError,
 } from '../src/promote-replay-safety.js';
 
 describe('promote replay safety', () => {
+  it.each([
+    'RPC_ENDPOINTS_EXHAUSTED',
+    'RPC_RECEIPT_LOOKUP_FAILED',
+    'RPC_TIMEOUT',
+  ] as const)('certifies %s only at the pre-commit producer boundary', (code) => {
+    const transportFailure = new ChainRpcTransportError(code, 'chain transport unavailable');
+
+    expect(isPromoteReplaySafeError(transportFailure)).toBe(false);
+    expect(classifyPreCommitChainRpcFailure(transportFailure)).toBe(transportFailure);
+    expect(isPromoteReplaySafeError(transportFailure)).toBe(true);
+  });
+
+  it.each([
+    ['generic timeout', Object.assign(new Error('timed out'), { code: 'TIMEOUT' })],
+    ['on-chain revert', Object.assign(new Error('execution reverted'), { code: 'CALL_EXCEPTION' })],
+    ['frozen transport shape', Object.freeze({ code: 'RPC_TIMEOUT' satisfies ChainRpcTransportCode })],
+  ])('does not certify %s', (_label, failure) => {
+    expect(classifyPreCommitChainRpcFailure(failure)).toBe(failure);
+    expect(isPromoteReplaySafeError(failure)).toBe(false);
+  });
+
   it('certifies only an indeterminate exact SWM graph replacement at the producer boundary', () => {
     const replaceFailure = new StoreOperationTimeoutError({
       backend: 'managed-oxigraph',

@@ -95,7 +95,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isChainRpcTransportError, type ChainRpcTransportCode, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -719,6 +719,8 @@ export type RegisteredContextGraphAuthority =
         | 'chain-participant-authority-invalid';
       onChainId?: bigint;
       detail?: string;
+      /** Privacy-bounded transport identity retained for producer retry policy. */
+      transportErrorCode?: ChainRpcTransportCode;
     };
 
 export class ContextGraphResolveMethods extends DKGAgentBase {
@@ -1556,6 +1558,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         onChainId,
         reason: 'chain-access-policy-unavailable',
         detail: err instanceof Error ? err.message : String(err),
+        ...(isChainRpcTransportError(err) ? { transportErrorCode: err.code } : {}),
       };
     }
     if (accessPolicy === null) {
@@ -1603,6 +1606,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         onChainId,
         reason: 'chain-participant-authority-unavailable',
         detail: err instanceof Error ? err.message : String(err),
+        ...(isChainRpcTransportError(err) ? { transportErrorCode: err.code } : {}),
       };
     }
 

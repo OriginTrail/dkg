@@ -15,6 +15,9 @@ type ReplaySafeUnwrapperStaysAbsent = AssertFalse<
 type ReplaySafeCertifierStaysInternal = AssertFalse<
   'classifyExactSwmGraphReplaceFailure' extends keyof PublisherApi ? true : false
 >;
+type PreCommitChainCertifierStaysInternal = AssertFalse<
+  'classifyPreCommitChainRpcFailure' extends keyof PublisherApi ? true : false
+>;
 type ReplaySafeConstructorStaysInternal = AssertFalse<
   'PromoteReplaySafeError' extends keyof PublisherApi ? true : false
 >;
@@ -33,6 +36,7 @@ export type {
   ReplaySafeDiagnosticHelperIsPublic,
   ReplaySafeUnwrapperStaysAbsent,
   ReplaySafeCertifierStaysInternal,
+  PreCommitChainCertifierStaysInternal,
   ReplaySafeConstructorStaysInternal,
   ReplaySafeCodeStaysInternal,
   ReplaySafetyDeepModuleStaysClosed,

@@ -13,7 +13,10 @@ import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skole
 import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
 import { withKeyedLocks } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
-import { classifyExactSwmGraphReplaceFailure } from './promote-replay-safety.js';
+import {
+  classifyExactSwmGraphReplaceFailure,
+  classifyPreCommitChainRpcFailure,
+} from './promote-replay-safety.js';
 import { canonicalPublishPayload } from './canonical-publish-payload.js';
 import {
   assertTrustedCatalogTriplesAreGeneratedFloor,
@@ -8801,19 +8804,24 @@ export class DKGPublisher implements Publisher {
       // ("Sender Key encrypted workspace payload required for private
       // or agent-gated context graph"). Returns plaintext for public
       // CGs (resolver returns requiresEncryption=false).
-      const wrapped = await tagPromoteStep('encodeWorkspaceGossipPayload', () => this.encodeWorkspaceGossipPayload(
-        contextGraphId,
-        encoded,
-        {
-          localOnly: opts?.localOnly === true,
-          senderAgentAddress: opts?.senderAgentAddress,
-          operationId,
-          shareOperationId: operationId,
-          timestampMs,
-          subGraphName: opts?.subGraphName,
-          publisherPeerId: operationPublisherPeerId,
-        },
-      ));
+      let wrapped: EncodedWorkspaceGossipPayload;
+      try {
+        wrapped = await tagPromoteStep('encodeWorkspaceGossipPayload', () => this.encodeWorkspaceGossipPayload(
+          contextGraphId,
+          encoded,
+          {
+            localOnly: opts?.localOnly === true,
+            senderAgentAddress: opts?.senderAgentAddress,
+            operationId,
+            shareOperationId: operationId,
+            timestampMs,
+            subGraphName: opts?.subGraphName,
+            publisherPeerId: operationPublisherPeerId,
+          },
+        ));
+      } catch (error) {
+        throw classifyPreCommitChainRpcFailure(error);
+      }
 
       if (wrapped.message.length > DKG_GOSSIP_MAX_MESSAGE_BYTES) {
         const hint = 'Reduce the complete assertion payload size.';

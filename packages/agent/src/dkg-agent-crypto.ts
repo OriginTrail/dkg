@@ -1314,8 +1314,13 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       return { requiresEncryption: false, recipients: [] };
     }
     if (registeredAuthority.kind === 'unavailable') {
-      throw new Error(
-        `Registered context graph "${input.contextGraphId}" authority is unavailable (${registeredAuthority.reason})`,
+      throw Object.assign(
+        new Error(
+          `Registered context graph "${input.contextGraphId}" authority is unavailable (${registeredAuthority.reason})`,
+        ),
+        registeredAuthority.transportErrorCode
+          ? { code: registeredAuthority.transportErrorCode }
+          : {},
       );
     }
     if (registeredAuthority.participantAgents.length === 0) {

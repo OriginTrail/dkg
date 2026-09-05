@@ -35,6 +35,7 @@
  */
 
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import {
   isStoreOperationTimeoutError,
   isReadOnlyStoreOperation,
@@ -159,7 +160,6 @@ export type ClassifiedPromoteError = {
   retryable: boolean;
   message?: string;
 };
-
 const PROMOTE_STEP_TAG = /^\[promote:([^\]]*)\]\s*/;
 const PROMOTE_DIAGNOSTIC_STAGES = new Set([
   'ensureSubGraphRegistered',
@@ -193,13 +193,6 @@ const SAFE_ERROR_CODES = new Set([
   'RPC_RECEIPT_LOOKUP_FAILED',
   'RPC_TIMEOUT',
 ]);
-const RETRYABLE_CHAIN_RPC_ERROR_CODES = new Set([
-  'rpc_endpoints_exhausted',
-  'rpc_receipt_lookup_failed',
-  'rpc_timeout',
-]);
-const PRE_COMMIT_PROMOTE_STAGES = new Set(PROMOTE_DIAGNOSTIC_STAGES);
-
 function untagPromoteMessage(message: string): string {
   return message.replace(PROMOTE_STEP_TAG, '');
 }
@@ -313,21 +306,15 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
   // the tag stays on the operator-facing message. The tag is single (idempotent, innermost wins).
   const untagged = untagPromoteMessage(raw ?? '');
   const message = untagged.toLowerCase();
-  const code =
-    err && typeof err === 'object' && 'code' in err
-      ? String((err as { code?: unknown }).code ?? '').toLowerCase()
-      : '';
+  const code = err && typeof err === 'object' && 'code' in err
+    ? String((err as { code?: unknown }).code ?? '').toLowerCase()
+    : '';
 
-  // Chain reads performed by the named preparation stages happen before the
-  // first SWM mutation. A typed provider-exhaustion/timeout here is therefore
-  // replay-safe. Keep the stage requirement fail-closed: the same transport
-  // code without a producer-owned pre-commit tag may describe a later,
-  // potentially indeterminate operation and remains terminal.
-  if (
-    RETRYABLE_CHAIN_RPC_ERROR_CODES.has(code)
-    && PRE_COMMIT_PROMOTE_STAGES.has(diagnosticPromoteStage(raw))
-  ) {
-    return { classification: 'transient', retryable: true };
+  // Only the publisher's typed pre-commit disposition authorizes replay.
+  // Unclassified chain transport failures stay fail-closed even when their
+  // prose contains generic retry words such as "timed out".
+  if (isChainRpcTransportError(err)) {
+    return { classification: 'fatal', retryable: false };
   }
 
   // 1. 4 MiB gossip cap — surfaced as
