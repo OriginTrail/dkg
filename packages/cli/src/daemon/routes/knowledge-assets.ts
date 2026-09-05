@@ -588,8 +588,7 @@ async function resolveFinalizeStorageLane(
 //   confirmed, no contextGraphError → 200 (fully done)
 //   confirmed + contextGraphError   → 207 (partial: KA minted on-chain, context-graph binding failed)
 //   tentative | failed              → 502 (publish did not confirm)
-function classifyVmPublish(pub: unknown): { httpStatus: 200 | 207 | 502; reason?: string } {
-  const p = (pub ?? {}) as { status?: unknown; contextGraphError?: unknown; localChainSkipReason?: unknown };
+function classifyVmPublish(p: FinalizedPublishResult): { httpStatus: 200 | 207 | 502; reason?: string } {
   const cgError = typeof p.contextGraphError === "string" && p.contextGraphError.length > 0 ? p.contextGraphError : undefined;
   if (p.status === "confirmed" && !cgError) return { httpStatus: 200 };
   if (p.status === "confirmed") return { httpStatus: 207, reason: cgError };
