@@ -169,6 +169,53 @@ describe('Rfc64CatalogRuntimeV1', () => {
     expect(options.mutationPersistence.close).toHaveBeenCalledOnce();
   });
 
+  it('does not advance shutdown stages before each preceding fence retires', async () => {
+    const baseOptions = runtimeOptions([]);
+    let releaseInventory!: () => void;
+    let releaseReceiver!: () => void;
+    let releasePublicOwner!: () => void;
+    const inventoryGate = new Promise<void>((resolve) => { releaseInventory = resolve; });
+    const receiverGate = new Promise<void>((resolve) => { releaseReceiver = resolve; });
+    const publicOwnerGate = new Promise<void>((resolve) => { releasePublicOwner = resolve; });
+    const options: Rfc64CatalogRuntimeOptionsV1 = {
+      ...baseOptions,
+      inventoryObservers: {
+        ...baseOptions.inventoryObservers,
+        close: vi.fn(() => inventoryGate),
+      },
+      publicCatalog: {
+        ...baseOptions.publicCatalog,
+        closeReceiverAdmission: vi.fn(() => receiverGate),
+        close: vi.fn(() => publicOwnerGate),
+      },
+    };
+    const runtime = new Rfc64CatalogRuntimeV1(options);
+    runtime.start(createOperationContext('system'));
+
+    const closing = runtime.close();
+    await vi.waitFor(() => expect(options.inventoryObservers.close).toHaveBeenCalledOnce());
+    expect(options.publicCatalog.closeReceiverAdmission).not.toHaveBeenCalled();
+    expect(options.publicCatalog.close).not.toHaveBeenCalled();
+    expect(options.mutationPersistence.close).not.toHaveBeenCalled();
+
+    releaseInventory();
+    await vi.waitFor(() => (
+      expect(options.publicCatalog.closeReceiverAdmission).toHaveBeenCalledOnce()
+    ));
+    expect(options.publicCatalog.close).not.toHaveBeenCalled();
+    expect(options.mutationPersistence.close).not.toHaveBeenCalled();
+
+    releaseReceiver();
+    await vi.waitFor(() => expect(options.publicCatalog.close).toHaveBeenCalledOnce());
+    expect(options.workloads[0]!.close).toHaveBeenCalledOnce();
+    expect(options.workloads[1]!.close).toHaveBeenCalledOnce();
+    expect(options.mutationPersistence.close).not.toHaveBeenCalled();
+
+    releasePublicOwner();
+    await closing;
+    expect(options.mutationPersistence.close).toHaveBeenCalledOnce();
+  });
+
   it('joins partial-start rollback before releasing mutation persistence', async () => {
     const baseOptions = runtimeOptions([]);
     let failStart = true;
