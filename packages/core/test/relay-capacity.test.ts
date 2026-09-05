@@ -166,6 +166,36 @@ describe('validateRelayServerCapacity', () => {
 });
 
 describe('checkFdLimit', () => {
+  it('reads real Node resource limits through both default diagnostic paths', async () => {
+    const { execFileSync } = await import('node:child_process');
+    // Bound a real child: a future blocking diagnostic regression must fail
+    // without freezing the Vitest worker's own timeout machinery.
+    const moduleUrl = new URL('../src/fd-limit.ts', import.meta.url).href;
+    const output = execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', `
+      import { readSoftOpenFileLimit, checkFdLimit } from ${JSON.stringify(moduleUrl)};
+      const original = process.report.excludeNetwork;
+      const soft = readSoftOpenFileLimit();
+      const restoredAfterRead = process.report.excludeNetwork === original;
+      const messages = [];
+      checkFdLimit(2048, (level, message) => messages.push({ level, message }));
+      console.log(JSON.stringify({
+        supported: typeof original === 'boolean', soft, messages, restoredAfterRead,
+        restoredAfterCheck: process.report.excludeNetwork === original,
+      }));
+    `], { encoding: 'utf8', timeout: 10_000 });
+    const result = JSON.parse(output);
+    expect(result.supported).toBe(true);
+    expect(result.restoredAfterRead).toBe(true);
+    expect(result.restoredAfterCheck).toBe(true);
+    expect(result.messages).toHaveLength(1);
+    if (process.platform === 'win32') {
+      expect(result.messages[0].message).toContain('could not read host ulimit');
+    } else {
+      expect(result.soft).toBeGreaterThan(0);
+      expect(result.messages[0].message).toContain(`soft=${result.soft}`);
+    }
+  });
+
   it('uses the relay capacity policy above the minimum FD floor', () => {
     const capacity = 8192;
     const emissions: string[] = [];
