@@ -3,12 +3,27 @@ import {
 } from '@origintrail-official/dkg-storage';
 import { isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 
-const PROMOTE_REPLAY_SAFE_ERROR_CODE = 'PROMOTE_REPLAY_SAFE_FAILURE';
+const PROMOTE_REPLAY_SAFE_ERROR_CODE = 'PROMOTE_REPLAY_SAFE_FAILURE' as const;
 const promoteReplaySafeBrand: unique symbol = Symbol('promote-replay-safe');
 
-type PromoteReplaySafeError = object & {
-  readonly [promoteReplaySafeBrand]: true;
-};
+/**
+ * Typed failure emitted only by concrete promote preparation/commit boundaries
+ * whose replay contract is known. The original error remains available as the
+ * standard `cause`; callers cannot accidentally turn an arbitrary callback
+ * into a replay-safe operation through a generic public runner.
+ */
+export class PromoteReplaySafeError extends Error {
+  readonly code = PROMOTE_REPLAY_SAFE_ERROR_CODE;
+  readonly [promoteReplaySafeBrand] = true;
+
+  constructor(cause: unknown) {
+    super(
+      cause instanceof Error ? cause.message : String(cause),
+      { cause },
+    );
+    this.name = 'PromoteReplaySafeError';
+  }
+}
 
 export interface PromoteReplaySafeErrorDiagnostic {
   readonly name: 'PromoteReplaySafeError';
@@ -28,18 +43,8 @@ export function isPromoteReplaySafeError(
   }
 }
 
-function certifyPromoteReplaySafe(error: unknown): unknown {
-  try {
-    Object.defineProperty(error, promoteReplaySafeBrand, {
-      value: true,
-      configurable: false,
-      enumerable: false,
-      writable: false,
-    });
-  } catch {
-    // Non-extensible or hostile error objects remain uncertified (fail closed).
-  }
-  return error;
+function certifyPromoteReplaySafe(error: unknown): PromoteReplaySafeError {
+  return isPromoteReplaySafeError(error) ? error : new PromoteReplaySafeError(error);
 }
 
 /**
@@ -51,17 +56,6 @@ export function classifyPreCommitChainRpcFailure(error: unknown): unknown {
   return isChainRpcTransportError(error)
     ? certifyPromoteReplaySafe(error)
     : error;
-}
-
-/** Shared producer boundary for chain reads known to precede every promote mutation. */
-export async function runPromotePreCommitChainReads<T>(
-  operation: () => Promise<T>,
-): Promise<T> {
-  try {
-    return await operation();
-  } catch (error) {
-    throw classifyPreCommitChainRpcFailure(error);
-  }
 }
 
 /** Return a bounded identity only for producer-certified replay-safe errors. */

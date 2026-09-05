@@ -126,7 +126,10 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
-import { ContextGraphAuthorityUnavailableError } from './context-graph-authority-unavailable.js';
+import {
+  ContextGraphAuthorityUnavailableError,
+  type ContextGraphAuthorityUnavailable,
+} from './context-graph-authority-unavailable.js';
 import {
   DKGQueryEngine, QueryHandler,
   emptyQueryResultForKind,
@@ -446,6 +449,71 @@ type PublicPolicySlotBindingMode = Exclude<
   'retryable-durable'
 >;
 
+type ContextGraphAgentGateResolution =
+  | { kind: 'ungated' }
+  | { kind: 'gated'; agents: string[] }
+  | { kind: 'unavailable'; authority: ContextGraphAuthorityUnavailable };
+
+/** Resolve chain and local gate authority once into a consumer-neutral result. */
+async function resolveContextGraphAgentGate(
+  agent: DKGAgent,
+  contextGraphId: string,
+  subscriptionAgents: readonly string[],
+  options: { signal?: AbortSignal } = {},
+): Promise<ContextGraphAgentGateResolution> {
+  const registeredAuthority = await agent.resolveRegisteredContextGraphAuthority(
+    contextGraphId,
+    { signal: options.signal },
+  );
+  if (registeredAuthority.kind === 'private') {
+    return { kind: 'gated', agents: registeredAuthority.participantAgents };
+  }
+  if (registeredAuthority.kind === 'unavailable') {
+    return { kind: 'unavailable', authority: registeredAuthority };
+  }
+
+  // RFC-64 authority is relevant only while the graph is not registered.
+  // A null roster means the private catalog owns the graph but authority is
+  // temporarily unavailable, so retain an empty fail-closed gate.
+  const rfc64Roster = registeredAuthority.kind === 'unregistered'
+    ? agent.resolveRfc64PrivateReadRosterV1(contextGraphId)
+    : undefined;
+  if (rfc64Roster !== undefined) {
+    if (rfc64Roster === null) return { kind: 'gated', agents: [] };
+    const seen = new Set<string>();
+    const agents: string[] = [];
+    for (const value of rfc64Roster) {
+      if (!ethers.isAddress(value)) continue;
+      const checksum = ethers.getAddress(value);
+      const key = checksum.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      agents.push(checksum);
+    }
+    return { kind: 'gated', agents };
+  }
+
+  const seen = new Set<string>();
+  const agents: string[] = [];
+  let sawAgentGate = false;
+  const meta = await agent.getCgMeta(contextGraphId, { signal: options.signal });
+  const revoked = new Set(meta.revokedAgents.map((address) => address.toLowerCase()));
+  const add = (value: string | undefined) => {
+    if (!value || !ethers.isAddress(value)) return;
+    const checksum = ethers.getAddress(value);
+    const key = checksum.toLowerCase();
+    if (revoked.has(key) || seen.has(key)) return;
+    seen.add(key);
+    agents.push(checksum);
+  };
+  if (subscriptionAgents.length > 0) sawAgentGate = true;
+  for (const address of subscriptionAgents) add(address);
+  if (meta.allowedAgents.length > 0 || meta.participantAgents.length > 0) sawAgentGate = true;
+  for (const address of meta.allowedAgents) add(address);
+  for (const address of meta.participantAgents) add(address);
+  return sawAgentGate ? { kind: 'gated', agents } : { kind: 'ungated' };
+}
+
 function mapContextGraphSlotBindingOutcome(
   outcome: ContextGraphSlotBindingOutcome,
   mode: ContextGraphSlotBindingMode,
@@ -605,87 +673,14 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<string[] | null> {
-    // A registered private graph's live chain roster outranks every local
-    // projection. Returning [] on chain authority failure preserves the fact
-    // that this is a gated graph while denying sender-key and sync admissions.
-    // Registered-public graphs continue below to their distinct local
-    // publisher/signing gate, but never to stale RFC-64 private authority.
-    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(
+    const resolution = await resolveContextGraphAgentGate(
+      this,
       contextGraphId,
-      { signal: options.signal },
-    );
-    if (registeredAuthority.kind === 'private') return registeredAuthority.participantAgents;
-    if (registeredAuthority.kind === 'unavailable') return [];
-
-    return this.resolveLocalContextGraphAgentGateAddresses(
-      contextGraphId,
-      registeredAuthority.kind === 'unregistered',
+      this.subscribedContextGraphs.get(contextGraphId)?.participantAgents ?? [],
       options,
     );
-  }
-
-  /** Resolve non-chain gate state after registered authority was settled once. */
-  async resolveLocalContextGraphAgentGateAddresses(
-    this: DKGAgent,
-    contextGraphId: string,
-    includeRfc64Authority: boolean,
-    options: { signal?: AbortSignal } = {},
-  ): Promise<string[] | null> {
-    // A selected private RFC-64 graph may be joining a completely empty
-    // store. In that state the accepted, authority-checked roster is already
-    // available to the catalog service, while the legacy `_meta` projection
-    // below is intentionally absent until the first semantic commit. Sender
-    // Key setup arrives before that commit and must authenticate against the
-    // accepted roster; requiring the projection creates a circular cold-join
-    // dependency (no key without `_meta`, no encrypted SWM without the key).
-    //
-    // `null` means RFC-64 owns the graph but current roster authority is not
-    // available. Return an empty gate—not legacy `null`—so every caller keeps
-    // treating the graph as gated and fails closed until authority recovers.
-    const rfc64Roster = includeRfc64Authority
-      ? this.resolveRfc64PrivateReadRosterV1(contextGraphId)
-      : undefined;
-    if (rfc64Roster !== undefined) {
-      if (rfc64Roster === null) return [];
-      const seen = new Set<string>();
-      const accepted: string[] = [];
-      for (const value of rfc64Roster) {
-        if (!ethers.isAddress(value)) continue;
-        const checksum = ethers.getAddress(value);
-        const key = checksum.toLowerCase();
-        if (seen.has(key)) continue;
-        seen.add(key);
-        accepted.push(checksum);
-      }
-      return accepted;
-    }
-
-    const seen = new Set<string>();
-    const agents: string[] = [];
-    let sawAgentGate = false;
-    const meta = await this.getCgMeta(contextGraphId, { signal: options.signal });
-    const revoked = new Set(meta.revokedAgents.map((addr) => addr.toLowerCase()));
-    const add = (value: string | undefined) => {
-      if (!value || !ethers.isAddress(value)) return;
-      const checksum = ethers.getAddress(value);
-      const key = checksum.toLowerCase();
-      if (revoked.has(key)) return;
-      if (seen.has(key)) return;
-      seen.add(key);
-      agents.push(checksum);
-    };
-
-    const subscriptionAgents = this.subscribedContextGraphs.get(contextGraphId)?.participantAgents ?? [];
-    if (subscriptionAgents.length > 0) sawAgentGate = true;
-    for (const agentAddress of subscriptionAgents) {
-      add(agentAddress);
-    }
-
-    if (meta.allowedAgents.length > 0 || meta.participantAgents.length > 0) sawAgentGate = true;
-    for (const agent of meta.allowedAgents) add(agent);
-    for (const agent of meta.participantAgents) add(agent);
-
-    return sawAgentGate ? agents : null;
+    if (resolution.kind === 'unavailable') return [];
+    return resolution.kind === 'gated' ? resolution.agents : null;
   }
 
   /**
@@ -2736,21 +2731,19 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // Resolve registered authority exactly once. The generic admission helper
     // returns an empty gate on outages to fail closed, but promotion needs the
     // bounded typed cause so its outer pre-SWM boundary can authorize a retry.
-    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(contextGraphId);
-    if (registeredAuthority.kind === 'unavailable') {
-      throw new ContextGraphAuthorityUnavailableError(contextGraphId, registeredAuthority);
+    const resolution = await resolveContextGraphAgentGate(
+      this,
+      contextGraphId,
+      this.subscribedContextGraphs.get(contextGraphId)?.participantAgents ?? [],
+    );
+    if (resolution.kind === 'unavailable') {
+      throw new ContextGraphAuthorityUnavailableError(contextGraphId, resolution.authority);
     }
-    const allowedAgents = registeredAuthority.kind === 'private'
-      ? registeredAuthority.participantAgents
-      : await this.resolveLocalContextGraphAgentGateAddresses(
-          contextGraphId,
-          registeredAuthority.kind === 'unregistered',
-        );
-    if (!allowedAgents) {
+    if (resolution.kind === 'ungated') {
       return this.getWorkspaceGossipSigningAgent();
     }
 
-    const allowedSet = new Set(allowedAgents.map((agent) => agent.toLowerCase()));
+    const allowedSet = new Set(resolution.agents.map((agent) => agent.toLowerCase()));
     for (const record of this.localAgents.values()) {
       if (record.privateKey && allowedSet.has(record.agentAddress.toLowerCase())) {
         return { ...record, privateKey: record.privateKey };

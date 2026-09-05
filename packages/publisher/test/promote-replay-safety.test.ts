@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  ChainRpcTransportError,
-  type ChainRpcTransportCode,
-} from '@origintrail-official/dkg-chain';
+import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import {
   StoreOperationTimeoutError,
   isStoreOperationTimeoutError,
@@ -13,6 +10,7 @@ import {
   classifyPreCommitChainRpcFailure,
   getPromoteReplaySafeErrorDiagnostic,
   isPromoteReplaySafeError,
+  PromoteReplaySafeError,
 } from '../src/promote-replay-safety.js';
 
 describe('promote replay safety', () => {
@@ -24,14 +22,15 @@ describe('promote replay safety', () => {
     const transportFailure = new ChainRpcTransportError(code, 'chain transport unavailable');
 
     expect(isPromoteReplaySafeError(transportFailure)).toBe(false);
-    expect(classifyPreCommitChainRpcFailure(transportFailure)).toBe(transportFailure);
-    expect(isPromoteReplaySafeError(transportFailure)).toBe(true);
+    const classified = classifyPreCommitChainRpcFailure(transportFailure);
+    expect(classified).toBeInstanceOf(PromoteReplaySafeError);
+    expect(classified).toMatchObject({ cause: transportFailure });
+    expect(isPromoteReplaySafeError(classified)).toBe(true);
   });
 
   it.each([
     ['generic timeout', Object.assign(new Error('timed out'), { code: 'TIMEOUT' })],
     ['on-chain revert', Object.assign(new Error('execution reverted'), { code: 'CALL_EXCEPTION' })],
-    ['frozen transport shape', Object.freeze({ code: 'RPC_TIMEOUT' satisfies ChainRpcTransportCode })],
   ])('does not certify %s', (_label, failure) => {
     expect(classifyPreCommitChainRpcFailure(failure)).toBe(failure);
     expect(isPromoteReplaySafeError(failure)).toBe(false);
@@ -46,8 +45,8 @@ describe('promote replay safety', () => {
 
     expect(isPromoteReplaySafeError(replaceFailure)).toBe(false);
     const classified = classifyExactSwmGraphReplaceFailure(replaceFailure);
-    expect(classified).toBe(replaceFailure);
-    expect(isStoreOperationTimeoutError(classified)).toBe(true);
+    expect(classified).toMatchObject({ cause: replaceFailure });
+    expect(isStoreOperationTimeoutError((classified as Error).cause)).toBe(true);
     expect(isPromoteReplaySafeError(classified)).toBe(true);
     expect(getPromoteReplaySafeErrorDiagnostic(classified)).toEqual({
       name: 'PromoteReplaySafeError',

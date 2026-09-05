@@ -14,8 +14,6 @@ describe('RFC-64 private Sender Key roster authority', () => {
     const receiver = {
       resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),
       resolveRfc64PrivateReadRosterV1: () => [MEMBER_A_LOWERCASE, MEMBER_B, MEMBER_A],
-      resolveLocalContextGraphAgentGateAddresses:
-        WorkspaceCryptoMethods.prototype.resolveLocalContextGraphAgentGateAddresses,
       getCgMeta,
       subscribedContextGraphs: new Map(),
     };
@@ -38,8 +36,6 @@ describe('RFC-64 private Sender Key roster authority', () => {
     const receiver = {
       resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),
       resolveRfc64PrivateReadRosterV1: () => null,
-      resolveLocalContextGraphAgentGateAddresses:
-        WorkspaceCryptoMethods.prototype.resolveLocalContextGraphAgentGateAddresses,
       getCgMeta,
       subscribedContextGraphs: new Map(),
     };
@@ -57,8 +53,6 @@ describe('RFC-64 private Sender Key roster authority', () => {
     const receiver = {
       resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),
       resolveRfc64PrivateReadRosterV1: () => undefined,
-      resolveLocalContextGraphAgentGateAddresses:
-        WorkspaceCryptoMethods.prototype.resolveLocalContextGraphAgentGateAddresses,
       getCgMeta: async () => ({
         allowedAgents: [MEMBER_A],
         participantAgents: [],

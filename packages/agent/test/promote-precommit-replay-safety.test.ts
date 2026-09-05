@@ -20,14 +20,19 @@ describe('agent promote pre-commit chain replay boundary', () => {
     agent = null;
   });
 
-  async function makeAgent(options: { stubRegistration?: boolean } = {}) {
+  async function makeAgent(options: {
+    stubPrepare?: boolean;
+    stubRegistration?: boolean;
+  } = {}) {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({
       name: 'PromotePreCommitReplaySafety',
       chainAdapter: chain,
     });
     await agent.start();
-    vi.spyOn(agent, 'prepareAtomicAssertionShare').mockResolvedValue(undefined);
+    if (options.stubPrepare !== false) {
+      vi.spyOn(agent, 'prepareAtomicAssertionShare').mockResolvedValue(undefined);
+    }
     if (options.stubRegistration !== false) {
       vi.spyOn(agent, 'resolveContextGraphRegistrationBinding').mockResolvedValue({
         kind: 'registered',
@@ -65,7 +70,7 @@ describe('agent promote pre-commit chain replay boundary', () => {
       name: 'PromoteReplaySafeError',
       code: 'PROMOTE_REPLAY_SAFE_FAILURE',
     });
-    expect(error).toMatchObject({ code });
+    expect((error as Error).cause).toMatchObject({ code });
     expect(fixture.publisherPromote).not.toHaveBeenCalled();
   });
 
@@ -82,7 +87,7 @@ describe('agent promote pre-commit chain replay boundary', () => {
     const error = await capturePromoteError(fixture.agent);
 
     expect(isPromoteReplaySafeError(error)).toBe(true);
-    expect(error).toMatchObject({ code });
+    expect((error as Error).cause).toMatchObject({ code });
     expect(fixture.publisherPromote).not.toHaveBeenCalled();
   });
 
@@ -95,7 +100,7 @@ describe('agent promote pre-commit chain replay boundary', () => {
     const error = await capturePromoteError(fixture.agent);
 
     expect(isPromoteReplaySafeError(error)).toBe(true);
-    expect(error).toMatchObject({ code: 'RPC_TIMEOUT' });
+    expect((error as Error).cause).toMatchObject({ code: 'RPC_TIMEOUT' });
     expect(fixture.publisherPromote).not.toHaveBeenCalled();
   }, 10_000);
 
@@ -108,7 +113,7 @@ describe('agent promote pre-commit chain replay boundary', () => {
     const error = await capturePromoteError(fixture.agent);
 
     expect(isPromoteReplaySafeError(error)).toBe(true);
-    expect(error).toMatchObject({ code: 'RPC_TIMEOUT' });
+    expect((error as Error).cause).toMatchObject({ code: 'RPC_TIMEOUT' });
     expect(fixture.publisherPromote).not.toHaveBeenCalled();
   }, 10_000);
 
@@ -126,7 +131,7 @@ describe('agent promote pre-commit chain replay boundary', () => {
     const error = await capturePromoteError(fixture.agent);
 
     expect(isPromoteReplaySafeError(error)).toBe(true);
-    expect(error).toMatchObject({ code });
+    expect((error as Error).cause).toMatchObject({ code });
     expect(fixture.publisherPromote).not.toHaveBeenCalled();
   });
 
@@ -141,4 +146,43 @@ describe('agent promote pre-commit chain replay boundary', () => {
     expect(isPromoteReplaySafeError(error)).toBe(false);
     expect(fixture.publisherPromote).not.toHaveBeenCalled();
   });
+
+  it('certifies a cold finalize chain-identity read before publisher mutation', async () => {
+    const fixture = await makeAgent({ stubPrepare: false });
+    await fixture.agent.assertion.create(CG, 'asset');
+    await fixture.agent.assertion.write(CG, 'asset', [{
+      subject: 'urn:test:asset',
+      predicate: 'urn:test:name',
+      object: '"asset"',
+    }]);
+    vi.spyOn(fixture.chain, 'getEvmChainId').mockRejectedValue(
+      new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', 'chain identity unavailable'),
+    );
+
+    const error = await capturePromoteError(fixture.agent);
+
+    expect(isPromoteReplaySafeError(error)).toBe(true);
+    expect((error as Error).cause).toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    expect(fixture.publisherPromote).not.toHaveBeenCalled();
+  });
+
+  it('certifies a subscribed reverse-binding RPC deadline before publisher mutation', async () => {
+    const fixture = await makeAgent({ stubRegistration: false });
+    fixture.agent.subscribedContextGraphs.set(CG, {
+      name: CG,
+      subscribed: true,
+      synced: false,
+      syncMode: 'always-on',
+      onChainHash: `0x${'ab'.repeat(32)}`,
+    });
+    vi.spyOn(fixture.chain, 'resolveContextGraphIdByNameHash').mockImplementation(
+      () => new Promise(() => {}),
+    );
+
+    const error = await capturePromoteError(fixture.agent);
+
+    expect(isPromoteReplaySafeError(error)).toBe(true);
+    expect((error as Error).cause).toMatchObject({ code: 'RPC_TIMEOUT' });
+    expect(fixture.publisherPromote).not.toHaveBeenCalled();
+  }, 10_000);
 });

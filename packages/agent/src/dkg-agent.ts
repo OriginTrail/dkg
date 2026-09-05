@@ -91,10 +91,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isChainRpcTransportError, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
-  runPromotePreCommitChainReads,
+  PromoteReplaySafeError,
   PublishJournal, StaleWriteError,
   ACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
@@ -3160,6 +3160,9 @@ export class DKGAgent extends DKGAgentBase {
             preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
           });
         } catch (err: any) {
+          if (isChainRpcTransportError(err)) {
+            throw new PromoteReplaySafeError(err);
+          }
           const msg = err?.message ?? String(err);
           // Classify finalize failures so capability gaps retain a stable API
           // code while validation/integrity errors keep their original detail.
@@ -3197,11 +3200,8 @@ export class DKGAgent extends DKGAgentBase {
         // promoted SWM gossip in the Sender Key encrypted envelope.
         // Without this, private/agent-gated CGs receive plaintext
         // gossip and the new `SharedMemoryHandler` check rejects it.
-        const {
-          gossipSigner,
-          confirmBeforeCommit,
-          shareAccessPolicy,
-        } = await runPromotePreCommitChainReads(async () => {
+        let preflight;
+        try {
           const gossipSigner = await agent.resolveWorkspaceGossipSigningAgent(contextGraphId);
           // Strict curator-ack gate (OT-RFC-49 curator-leader) for the WM→SWM
           // promote path — the same confirmer as share()/conditionalShare(). When
@@ -3237,8 +3237,14 @@ export class DKGAgent extends DKGAgentBase {
               shareAccessPolicy = 'ownerOnly';
             }
           }
-          return { gossipSigner, confirmBeforeCommit, shareAccessPolicy };
-        });
+          preflight = { gossipSigner, confirmBeforeCommit, shareAccessPolicy };
+        } catch (error) {
+          if (isChainRpcTransportError(error)) {
+            throw new PromoteReplaySafeError(error);
+          }
+          throw error;
+        }
+        const { gossipSigner, confirmBeforeCommit, shareAccessPolicy } = preflight;
         const {
           promotedCount,
           gossipPayload,

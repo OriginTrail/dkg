@@ -19,7 +19,7 @@
  *    inherited by the queue itself; the worker just calls `fail()` with
  *    a classification and the queue handles backoff bookkeeping.
  *
- * 3. **Error classification**: see `classifyPromoteError` below.
+ * 3. **Error classification**: see `async-promote-error-classification.ts`.
  *    Seeded from the rc.10 Graphify import patterns (see
  *    `INTEGRATION_NOTES_GRAPHIFY.md` and `dkg-graphify-rc10-test/FINDINGS_v2.md`).
  *
@@ -35,23 +35,28 @@
  */
 
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import { isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import {
   isStoreOperationTimeoutError,
-  isReadOnlyStoreOperation,
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
 import {
-  getPromoteReplaySafeErrorDiagnostic,
   PromoteJobLeaseError,
-  isPromoteReplaySafeError,
   type AsyncPromoteQueue,
   type PromoteAttemptError,
-  type PromoteFailureClassification,
   type PromoteJob,
   type PromoteRequest,
 } from '@origintrail-official/dkg-publisher';
 import { createClaimFailureBackoff } from './claim-failure-backoff.js';
+import {
+  classifyPromoteError,
+  logPromoteAttemptFailure,
+  type ClassifiedPromoteError,
+} from './async-promote-error-classification.js';
+
+export {
+  classifyPromoteError,
+  type ClassifiedPromoteError,
+} from './async-promote-error-classification.js';
 
 /**
  * Convenience type for the daemon's existing `emitMemoryGraphChanged`
@@ -73,6 +78,20 @@ export interface PromoteMemoryGraphChangedEvent {
  * but worker progress never waits for them and sink failures are discarded.
  */
 export type PromoteWorkerLogger = (message: string) => void | Promise<void>;
+
+function bestEffortLog(log: PromoteWorkerLogger, message: string): void {
+  try {
+    void Promise.resolve(log(message)).catch(() => {});
+  } catch {
+    // Logging must never delay or alter queue state transitions.
+  }
+}
+
+/** Queue bookkeeping retries only writes that definitely did not start. */
+function isRetryableQueueBookkeepingError(error: unknown): boolean {
+  return error instanceof StoreSchedulerBusyError
+    || (isStoreOperationTimeoutError(error) && error.outcome === 'not_started');
+}
 
 export interface PromoteWorkerConfig {
   /** The host DKG agent — provides the queue + the sync `promote` call. */
@@ -153,249 +172,6 @@ export interface PromoteWorkerCounters {
   attempted: number;
   /** Set when shuttingDown was hit mid-job; ops can correlate with abandoned counts at next startup. */
   interruptedAtShutdown: number;
-}
-
-export type ClassifiedPromoteError = {
-  classification: PromoteFailureClassification;
-  retryable: boolean;
-  message?: string;
-};
-const PROMOTE_STEP_TAG = /^\[promote:([^\]]*)\]\s*/;
-const PROMOTE_DIAGNOSTIC_STAGES = new Set([
-  'ensureSubGraphRegistered',
-  'assertGraphScopedLifecycleWritable',
-  'knowledgeAssetPrivateQuads',
-  'assertionScopedQuads',
-  'assertTrustedCatalogTriplesAllowed',
-  'encodeWorkspaceGossipPayload',
-]);
-// Only producer-owned, source-defined identities are safe to retain verbatim.
-// Arbitrary upstream name/code strings can be credentials even when they are
-// syntactically simple, so everything outside these closed sets becomes unknown.
-const SAFE_ERROR_NAMES = new Set([
-  'Error',
-  'DKGError',
-  'DKGUserError',
-  'DKGInternalError',
-  'PayloadTooLargeError',
-  'SwmGossipPayloadTooLargeError',
-  'CuratorUnconfirmedError',
-  'CuratorRejectedError',
-  'AssertionNotPersistedError',
-]);
-const SAFE_ERROR_CODES = new Set([
-  'PAYLOAD_TOO_LARGE',
-  'SWM_GOSSIP_PAYLOAD_TOO_LARGE',
-  'CURATOR_UNCONFIRMED',
-  'CURATOR_REJECTED',
-  'ASSERTION_NOT_PERSISTED',
-  'RPC_ENDPOINTS_EXHAUSTED',
-  'RPC_RECEIPT_LOOKUP_FAILED',
-  'RPC_TIMEOUT',
-]);
-function untagPromoteMessage(message: string): string {
-  return message.replace(PROMOTE_STEP_TAG, '');
-}
-
-function diagnosticPromoteStage(message: string): string {
-  const candidate = PROMOTE_STEP_TAG.exec(message)?.[1];
-  return candidate !== undefined && PROMOTE_DIAGNOSTIC_STAGES.has(candidate)
-    ? candidate
-    : 'unknown';
-}
-
-function safeErrorIdentity(
-  err: unknown,
-  field: 'name' | 'code',
-  allowed: ReadonlySet<string>,
-): string | undefined {
-  if ((typeof err !== 'object' && typeof err !== 'function') || err === null) return undefined;
-  try {
-    const value = Reflect.get(err, field);
-    return typeof value === 'string' && allowed.has(value) ? value : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function bestEffortLog(log: PromoteWorkerLogger, message: string): void {
-  try {
-    void Promise.resolve(log(message)).catch(() => {});
-  } catch {
-    // Logging must never delay or alter queue state transitions.
-  }
-}
-
-/**
- * Queue bookkeeping has its own retry domain. Only typed storage failures
- * whose write definitely did not start are replayable; an indeterminate
- * mutation remains fail-closed even if its diagnostic text contains generic
- * words such as "timeout" or "recovering".
- */
-function isRetryableQueueBookkeepingError(error: unknown): boolean {
-  return error instanceof StoreSchedulerBusyError
-    || (isStoreOperationTimeoutError(error) && error.outcome === 'not_started');
-}
-
-/**
- * Emit privacy-bounded evidence before queue.fail() makes a terminal row
- * externally clearable. Diagnostics are best-effort and can never change the
- * promote state transition, even when the injected logger fails synchronously
- * or asynchronously.
- */
-function logPromoteAttemptFailure(input: {
-  job: PromoteJob;
-  err: unknown;
-  message: string;
-  classified: ClassifiedPromoteError;
-  promoteStarted: boolean;
-  log: PromoteWorkerLogger;
-}): void {
-  try {
-    const replaySafeDiagnostic = getPromoteReplaySafeErrorDiagnostic(input.err);
-    bestEffortLog(
-      input.log,
-      `[async-promote-worker] ${JSON.stringify({
-        event: 'async_promote_attempt_failed',
-        schemaVersion: 1,
-        jobId: input.job.jobId,
-        attempt: input.job.attempt.count,
-        maxAttempts: input.job.attempt.maxRetries,
-        promoteStartedMarkerPersisted: input.promoteStarted,
-        swmCommitObserved: false,
-        stage: diagnosticPromoteStage(input.message),
-        classification: input.classified.classification,
-        retryable: input.classified.retryable,
-        errorName: replaySafeDiagnostic?.name
-          ?? safeErrorIdentity(input.err, 'name', SAFE_ERROR_NAMES)
-          ?? 'unknown',
-        errorCode: replaySafeDiagnostic?.code
-          ?? safeErrorIdentity(input.err, 'code', SAFE_ERROR_CODES)
-          ?? 'unknown',
-      })}`,
-    );
-  } catch {
-    // Diagnostics must never prevent fail-closed queue bookkeeping.
-  }
-}
-
-/**
- * Map a promote error message to a `PromoteAttemptError` classification.
- * Seeded from the three rc.10 Graphify import patterns documented in
- * `dkg-graphify-rc10-test/FINDINGS_v2.md`. Returns `fatal` for unknown
- * patterns — the operator can re-classify and call `/recover` after
- * inspecting the failure.
- *
- * Exported so the daemon supervisor (and future tooling like an
- * operator dashboard) can preview the verdict without going through
- * the worker.
- */
-export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
-  // Workflow-level replay safety is a typed producer disposition. It is more
-  // authoritative than diagnostic prose inherited from the wrapped cause,
-  // including incidental cap-like wording.
-  if (isPromoteReplaySafeError(err)) {
-    return { classification: 'transient', retryable: true };
-  }
-
-  const raw = err instanceof Error ? err.message : String(err);
-  // #1464 — strip a leading diagnostic "[promote:<step>] " tag (added by the publisher's
-  // promote step-tagging) BEFORE substring-classifying, so a step LABEL can never inject a
-  // classifier trigger token (e.g. the step "encodeWorkspaceGossipPayload" would otherwise make
-  // every error from it match the "gossip" cap-check). We classify on the ORIGINAL error text;
-  // the tag stays on the operator-facing message. The tag is single (idempotent, innermost wins).
-  const untagged = untagPromoteMessage(raw ?? '');
-  const message = untagged.toLowerCase();
-  const code = err && typeof err === 'object' && 'code' in err
-    ? String((err as { code?: unknown }).code ?? '').toLowerCase()
-    : '';
-
-  // Only the publisher's typed pre-commit disposition authorizes replay.
-  // Unclassified chain transport failures stay fail-closed even when their
-  // prose contains generic retry words such as "timed out".
-  if (isChainRpcTransportError(err)) {
-    return { classification: 'fatal', retryable: false };
-  }
-
-  // 1. 4 MiB gossip cap — surfaced as
-  //    "Promoted assertion too large for gossip (XXXX KB, limit 4 MB)"
-  //    by the daemon's promote pipeline.
-  if (
-    code === 'swm_gossip_payload_too_large' ||
-    code === 'payload_too_large' ||
-    (message.includes('gossip') && (message.includes('limit') || message.includes('too large'))) ||
-    message.includes('promoted assertion too large')
-  ) {
-    return { classification: 'cap_exceeded', retryable: false };
-  }
-
-  // 2. 256 KB body cap on /promote — surfaced as
-  //    "Request body too large (>262144 bytes)".
-  if (message.includes('request body too large') || message.includes('payload too large')) {
-    return { classification: 'cap_exceeded', retryable: false };
-  }
-
-  // Managed-store recovery can declare the exact operation outcome. A request
-  // rejected before dispatch is safe to retry, and interrupted reads cannot
-  // have mutated WM/SWM. Every interrupted write remains fail-closed unless
-  // the promotion producer supplied the typed replay-safe disposition above.
-  if (isStoreOperationTimeoutError(err)) {
-    if (
-      err.outcome === 'not_started' ||
-      (
-        err.outcome === 'indeterminate' &&
-        err.storeOperation !== undefined &&
-        (
-          isReadOnlyStoreOperation(err.storeOperation)
-        )
-      )
-    ) {
-      return { classification: 'transient', retryable: true };
-    }
-
-    // Typed store outcomes are authoritative. In particular, never let an
-    // indeterminate mutation fall through to generic words such as "timeout"
-    // below: its first attempt may already have changed durable state.
-    return { classification: 'fatal', retryable: false };
-  }
-
-  // Scheduler overload is a typed pre-dispatch rejection: the store closure
-  // never started, so both promotion execution and fenced queue bookkeeping
-  // may retry it without relying on the diagnostic wording.
-  if (err instanceof StoreSchedulerBusyError) {
-    return { classification: 'transient', retryable: true };
-  }
-
-  // Store failures without the canonical typed outcome are not safe to infer
-  // from prose. Keep them out of the generic network-timeout fallback even
-  // when a legacy message happens to contain words such as "timeout".
-  if (
-    code === 'store_operation_timeout'
-    || code === 'store_scheduler_busy'
-    || message.includes('managed oxigraph')
-    || message.includes('store scheduler')
-  ) {
-    return { classification: 'fatal', retryable: false };
-  }
-
-  // 3. Transient network / IO — the rc.10 importer hit "fetch failed"
-  //    multiple times under sustained load. Worker should retry.
-  if (
-    message.includes('fetch failed') ||
-    message.includes('econnreset') ||
-    message.includes('econnrefused') ||
-    message.includes('etimedout') ||
-    message.includes('socket hang up') ||
-    message.includes('network') ||
-    message.includes('timeout') ||
-    message.includes('timed out')
-  ) {
-    return { classification: 'transient', retryable: true };
-  }
-
-  // 4. Default: fatal, no retry. Operator can `POST .../recover` after
-  //    fixing whatever's wrong.
-  return { classification: 'fatal', retryable: false };
 }
 
 /**

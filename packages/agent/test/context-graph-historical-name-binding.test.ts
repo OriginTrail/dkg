@@ -290,7 +290,7 @@ describe('cold current-state Context Graph name binding', () => {
 
     expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledWith(
       NAME_HASH,
-      { signal },
+      { signal: expect.any(AbortSignal) },
     );
     expect(fixture.subscription.onChainId).toBeUndefined();
     expect(fixture.agent.contextGraphBindingState.size).toBe(0);
@@ -300,7 +300,10 @@ describe('cold current-state Context Graph name binding', () => {
   it('uses the same admitted target for a selected wire-hash request', async () => {
     const fixture = selectedFixture();
     await expect(getOnChainId(fixture, NAME_HASH)).resolves.toBe('42');
-    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledWith(NAME_HASH);
+    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledWith(
+      NAME_HASH,
+      { signal: expect.any(AbortSignal) },
+    );
   });
 
   it('never lets an arbitrary unselected id trigger a current-state enumeration', async () => {
@@ -324,7 +327,10 @@ describe('cold current-state Context Graph name binding', () => {
     fixture.subscription.coreHosted = true;
 
     await expect(getOnChainId(fixture, LOCAL_ID)).resolves.toBe('42');
-    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledWith(NAME_HASH);
+    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledWith(
+      NAME_HASH,
+      { signal: expect.any(AbortSignal) },
+    );
   });
 
   it('hashes the original spelling of a hash-shaped cleartext subscription id', async () => {
@@ -341,7 +347,10 @@ describe('cold current-state Context Graph name binding', () => {
 
     await expect(getOnChainId(fixture, localId)).resolves.toBe('42');
     expect(fixture.agent.contextGraphNameCommitment).toHaveBeenCalledWith(localId);
-    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledWith(committedHash);
+    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledWith(
+      committedHash,
+      { signal: expect.any(AbortSignal) },
+    );
   });
 
   it('retains the legacy ontology fallback after an authoritative current-state miss', async () => {

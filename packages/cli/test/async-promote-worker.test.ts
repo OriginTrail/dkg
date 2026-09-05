@@ -21,8 +21,8 @@ import {
   StoreOperationTimeoutError,
 } from '@origintrail-official/dkg-storage';
 import {
+  PromoteReplaySafeError,
   TripleStoreAsyncPromoteQueue,
-  runPromotePreCommitChainReads,
   type AsyncPromoteQueue,
   type PromoteRequest,
   type PromoteTerminalJobClearer,
@@ -208,9 +208,9 @@ describe('classifyPromoteError', () => {
       retryable: true,
     });
 
-    const agentCertified = await runPromotePreCommitChainReads(async () => {
-      throw Object.assign(new Error(message), { code });
-    }).catch((error: unknown) => error);
+    const agentCertified = new PromoteReplaySafeError(
+      Object.assign(new Error(message), { code }),
+    );
     expect(classifyPromoteError(agentCertified)).toEqual({
       classification: 'transient',
       retryable: true,
@@ -544,12 +544,12 @@ describe('runPromoteJob', () => {
 
   it('moves an agent-certified pre-commit chain outage to failed_retrying', async () => {
     const job = await enqueueAndClaim();
-    const replaySafeFailure = await runPromotePreCommitChainReads(async () => {
-      throw new ChainRpcTransportError(
+    const replaySafeFailure = new PromoteReplaySafeError(
+      new ChainRpcTransportError(
         'RPC_ENDPOINTS_EXHAUSTED',
         'authority lookup failed on all endpoints',
-      );
-    }).catch((error: unknown) => error);
+      ),
+    );
     const result = await runPromoteJob({
       job,
       queue,

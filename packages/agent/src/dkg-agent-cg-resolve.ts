@@ -95,7 +95,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, createRpcTimeoutError, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   contextGraphAuthorityUnavailable,
   type ContextGraphAuthorityUnavailable,
@@ -343,7 +343,11 @@ import {
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { isTransientBootChainError } from './dkg-agent-boot.js';
-import { createAbortError, runBoundedOperation } from './bounded-operation.js';
+import {
+  createAbortError,
+  isBoundedOperationTimeoutError,
+  runBoundedOperation,
+} from './bounded-operation.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
   ContextGraphNotFoundError,
@@ -1929,9 +1933,25 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       }
       return undefined;
     }
-    const resolved = options.signal === undefined
-      ? await resolve.call(this.chain, target.nameHash)
-      : await resolve.call(this.chain, target.nameHash, { signal: options.signal });
+    let resolved: bigint | null;
+    try {
+      resolved = await runBoundedOperation(
+        (signal) => resolve.call(this.chain, target.nameHash!, { signal }),
+        {
+          label: `resolveContextGraphIdByNameHash(${target.nameHash})`,
+          timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+          signal: options.signal,
+        },
+      );
+    } catch (error) {
+      if (isBoundedOperationTimeoutError(error)) {
+        throw createRpcTimeoutError(
+          `Timed out resolving Context Graph name hash ${target.nameHash}`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
     if (resolved === null) {
       if (cachedReverse) {
         throw new Error(

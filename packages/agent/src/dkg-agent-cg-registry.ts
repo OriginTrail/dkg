@@ -632,17 +632,10 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const localTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
     if (localTarget !== null) {
       try {
-        const binding = await runBoundedOperation(
-          (signal) => this.resolveContextGraphOnChainIdBinding(contextGraphId, {
-            signal,
-            source: 'agent.contextGraph.registrationBinding',
-          }),
-          {
-            label: `resolveContextGraphOnChainIdBinding(${contextGraphId})`,
-            timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
-            signal: options.signal,
-          },
-        );
+        const binding = await this.resolveContextGraphOnChainIdBinding(contextGraphId, {
+          signal: options.signal,
+          source: 'agent.contextGraph.registrationBinding',
+        });
         if (binding === null) return { kind: 'unregistered' };
         return {
           kind: 'registered',
@@ -726,11 +719,18 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
 
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
-    const result = await this.store.query(
-      `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?id } } LIMIT 1`,
+    const result = await runBoundedOperation(
+      (signal) => this.store.query(
+        `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?id } } LIMIT 1`,
+        {
+          signal,
+          source: options.source ?? 'agent.contextGraph.onChainId',
+        },
+      ),
       {
+        label: `contextGraphOnChainIdStoreQuery(${contextGraphId})`,
+        timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
         signal: options.signal,
-        source: options.source ?? 'agent.contextGraph.onChainId',
       },
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return null;

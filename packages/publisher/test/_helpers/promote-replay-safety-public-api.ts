@@ -9,7 +9,7 @@ type ReplaySafeGuardIsPublic = AssertTrue<
 type ReplaySafeDiagnosticHelperIsPublic = AssertTrue<
   'getPromoteReplaySafeErrorDiagnostic' extends keyof PublisherApi ? true : false
 >;
-type ReplaySafeProducerBoundaryIsPublic = AssertTrue<
+type GenericReplaySafeProducerBoundaryStaysAbsent = AssertFalse<
   'runPromotePreCommitChainReads' extends keyof PublisherApi ? true : false
 >;
 type ReplaySafeUnwrapperStaysAbsent = AssertFalse<
@@ -21,7 +21,7 @@ type ReplaySafeCertifierStaysInternal = AssertFalse<
 type PreCommitChainCertifierStaysInternal = AssertFalse<
   'classifyPreCommitChainRpcFailure' extends keyof PublisherApi ? true : false
 >;
-type ReplaySafeConstructorStaysInternal = AssertFalse<
+type ReplaySafeConstructorIsPublic = AssertTrue<
   'PromoteReplaySafeError' extends keyof PublisherApi ? true : false
 >;
 type ReplaySafeCodeStaysInternal = AssertFalse<
@@ -37,11 +37,11 @@ type LegacyWorkspaceResolutionSubpathRemainsAvailable =
 export type {
   ReplaySafeGuardIsPublic,
   ReplaySafeDiagnosticHelperIsPublic,
-  ReplaySafeProducerBoundaryIsPublic,
+  GenericReplaySafeProducerBoundaryStaysAbsent,
   ReplaySafeUnwrapperStaysAbsent,
   ReplaySafeCertifierStaysInternal,
   PreCommitChainCertifierStaysInternal,
-  ReplaySafeConstructorStaysInternal,
+  ReplaySafeConstructorIsPublic,
   ReplaySafeCodeStaysInternal,
   ReplaySafetyDeepModuleStaysClosed,
   ArbitraryPublisherImplementationStaysClosed,
