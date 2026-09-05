@@ -1423,6 +1423,8 @@ async function runDaemonInnerWithStartupOwnership(
     process.exit(1);
   }
 
+  exitOnStoreConfigErrors(config, log);
+
   // Managed local Oxigraph server (`store.backend: 'oxigraph-server'`,
   // Release 2 opt-in). Fetch/verify the pinned binary, spawn a loopback
   // `oxigraph serve` child, and expose a runtime `sparql-http` view (without

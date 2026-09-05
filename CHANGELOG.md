@@ -4,6 +4,10 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Documentation corrections
+
+- Since the curator/member author-resolution change (#1780), calling `publishFromFinalizedAssertion(cg, name)` without an explicit `agentAddress` can select a single finalized member author's Knowledge Asset from stored metadata. A call that previously returned 409 because the node did not author the asset can now publish it, spending the publishing node wallet's gas/TRAC, subject to on-chain publish authorization. Callers that require a particular author must pass that author's `agentAddress`; the explicit selector is authoritative and is never substituted (#1785).
+
 ## [10.0.16] - 2026-09-03
 
 A default-responsibility RFC-64 release. For persistent nodes, when RFC-64 controls are omitted, the root Shared Memory scope of every Context Graph the node is already responsible for uses signed catalogs as its sole discovery and recovery authority: Core nodes host their public CGs, Edge nodes follow only their public subscriptions, and private CGs follow current verified membership. Registered CG authority is rebuilt from finalized chain state; unregistered CGs use owner-signed local authority. Ordinary root-scope SHARE/update operations advance the durable author catalog, restart reconciliation restores it, and receivers recover by catalog pull without static provider lists. Agents intentionally created without `dataDir` retain the functioning in-memory legacy root lane; an explicit catalog request without persistence is rejected before startup. Named subgraphs retain a non-overlapping legacy SWM compatibility lane for live delivery and recovery until RFC-64 catalogs support non-null `subGraphName`; that lane does not accept root traffic. Finalized Verifiable Memory remains independently chain-authoritative. **No smart-contract changes or deployments are required.**
