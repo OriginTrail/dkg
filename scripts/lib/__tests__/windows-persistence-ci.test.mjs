@@ -4,13 +4,17 @@ import test from 'node:test';
 import { parse } from 'yaml';
 
 const workflow = parse(readFileSync(new URL('../../../.github/workflows/rfc64-inventory-windows.yml', import.meta.url), 'utf8'));
+const ciWorkflow = parse(readFileSync(new URL('../../../.github/workflows/ci.yml', import.meta.url), 'utf8'));
 const job = workflow.jobs['inventory-lifecycle'];
 
-test('the reusable workflow retains automatic integration-branch and PR coverage', () => {
+test('the Windows gate runs directly for integration pushes and through CI for pull requests', () => {
   assert.ok(Object.hasOwn(workflow.on, 'workflow_call'));
   assert.deepEqual(workflow.on.push.branches, ['integration/rfc64-devnet']);
   assert.ok(workflow.on.push.paths.includes('packages/agent/**'));
-  assert.ok(workflow.on.pull_request.paths.includes('packages/agent/**'));
+  assert.equal(workflow.on.pull_request, undefined);
+  assert.deepEqual(ciWorkflow.on.pull_request.branches, ['main', 'testnet-canary']);
+  assert.equal(ciWorkflow.jobs['inventory-windows'].uses, './.github/workflows/rfc64-inventory-windows.yml');
+  assert.equal(ciWorkflow.jobs['inventory-windows'].if, "needs.changes.outputs.tornado_agent == 'true'");
 });
 
 test('Windows groups retain every original test selector exactly once', () => {
