@@ -40,6 +40,9 @@ const profileArgs = [
 ];
 const env = {
   ...process.env,
+  // The CPU profiler is attached to this ESBench host process. Keep benchmark
+  // execution here so the resulting profile contains the measured workload.
+  DKG_ESBENCH_IN_PROCESS: '1',
   ESBENCH_HTML: process.env.ESBENCH_HTML ?? '1',
   ESBENCH_RESULT: process.env.ESBENCH_RESULT ?? reportJsonPath,
   ESBENCH_HTML_FILE: process.env.ESBENCH_HTML_FILE ?? reportHtmlPath,

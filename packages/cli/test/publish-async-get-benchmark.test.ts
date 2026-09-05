@@ -42,6 +42,10 @@ type EsbenchConfigForTest = {
   ) => Record<string, FocusedBenchmarkRecord[]>;
   publishAsyncGetPages: Array<[string, string]>;
   publishAsyncGetSuite: string;
+  createBenchmarkToolchain: (env: Record<string, string>) => {
+    include: string[];
+    executors?: unknown[];
+  };
 };
 
 type EsbenchSuiteForTest = {
@@ -376,6 +380,20 @@ describe('publish async get benchmark', () => {
     expect(record.scenes).toHaveLength(2);
     expect(record.scenes[0]).toEqual({});
     expect(record.scenes[1]).toEqual({ [caseName]: { time: [3] } });
+  });
+
+  it('keeps suite isolation for normal runs and profiles the workload in-process', async () => {
+    const { createBenchmarkToolchain } = await import('../../../esbench.config.mjs') as EsbenchConfigForTest;
+    const isolated = createBenchmarkToolchain({});
+    const profiled = createBenchmarkToolchain({ DKG_ESBENCH_IN_PROCESS: '1' });
+    const profileScript = await readFile(
+      new URL('../../../bench/profile-publish-async-get.mjs', import.meta.url),
+      'utf8',
+    );
+
+    expect(isolated.executors).toHaveLength(1);
+    expect(profiled.executors).toBeUndefined();
+    expect(profileScript).toContain("DKG_ESBENCH_IN_PROCESS: '1'");
   });
 
   it('links the combined ESBench report and focused HTML pages together', async () => {

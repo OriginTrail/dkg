@@ -120,6 +120,41 @@ describe('async-lift claim fencing', () => {
     expect(await publisher.claimNext('wallet-4')).toBeNull();
   });
 
+  it('uses the accepted-job persistence read and skips malformed rows', async () => {
+    const publisher = createPublisher();
+    const malformedId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {
+      idGenerator: () => 'job-malformed',
+      now: () => 1,
+    });
+    const validId = await seedLegacyRawLiftTestJob(store, {
+      ...rawLiftRequest(),
+      shareOperationId: 'share-op-valid',
+    }, {
+      idGenerator: () => 'job-valid',
+      now: () => 2,
+    });
+    const malformed = await publisher.getStatus(malformedId);
+    if (!malformed) throw new Error('expected malformed candidate seed');
+    const corrupt = serializeJob(malformed, DEFAULT_CONTROL_GRAPH_URI).map((entry) =>
+      entry.predicate === CONTROL_PAYLOAD
+        ? { ...entry, object: literal('{not-json') }
+        : entry,
+    );
+    await store.deleteByPattern({ subject: jobSubject(malformedId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(corrupt);
+
+    const originalQuery = store.query.bind(store);
+    let selectorQuery = '';
+    store.query = async (...args) => {
+      if (args[1]?.source === 'publisher.asyncLift.nextAccepted') selectorQuery = args[0];
+      return await originalQuery(...args);
+    };
+
+    expect((await publisher.claimNext('wallet-1'))?.jobId).toBe(validId);
+    expect(selectorQuery).toContain('urn:dkg:publisher:acceptedAt');
+    expect(selectorQuery).toContain('"accepted"');
+  });
+
   it('binds a transaction scope to the job re-read under its lock', async () => {
     const publisher = createPublisher();
     const firstId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {

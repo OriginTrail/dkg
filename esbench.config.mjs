@@ -15,6 +15,18 @@ export const publishAsyncGetPages = [
   ['upload payload to local working memory', 'bench/results/publish-async-get/working-memory-upload.html'],
   ['lift local working memory to shared working memory', 'bench/results/publish-async-get/working-to-shared-memory.html'],
 ];
+
+export function createBenchmarkToolchain(env = process.env) {
+  return {
+    include: ['bench/**/*.bench.ts'],
+    // Regular runs isolate suites because they load different source and built
+    // workspace views. Profiling stays in this process so --cpu-prof observes
+    // the measured workload instead of only the ESBench host.
+    ...(env.DKG_ESBENCH_IN_PROCESS === '1'
+      ? {}
+      : { executors: [new NodeExecutor({ execArgv: ['--import', 'tsx'] })] }),
+  };
+}
 const reporters = [
   textReporter(),
   rawReporter(resultFile),
@@ -36,15 +48,7 @@ export default defineConfig({
   tags: {
     node: process.version,
   },
-  toolchains: [
-    {
-      include: ['bench/**/*.bench.ts'],
-      // Each suite can load different source and built views of workspace
-      // packages. A fresh process prevents module-level registries and other
-      // benchmark fixtures from leaking into the next suite.
-      executors: [new NodeExecutor({ execArgv: ['--import', 'tsx'] })],
-    },
-  ],
+  toolchains: [createBenchmarkToolchain()],
   reporters,
 });
 
