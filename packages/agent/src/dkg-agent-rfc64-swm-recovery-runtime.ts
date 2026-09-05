@@ -201,9 +201,9 @@ export class Rfc64SwmRecoveryRuntimeV1 {
   invalidateSelectionState(contextGraphId: string): readonly string[] {
     const current = this.#controllers.get(contextGraphId);
     current?.abort(new Rfc64SwmRecoveryTargetRevokedErrorV1(contextGraphId));
-    // Install the next generation synchronously so a recovery queued after the
-    // transition cannot capture a permanently-aborted controller.
-    this.#controllers.set(contextGraphId, new AbortController());
+    // Recreate lazily on the next lease acquisition so invalidations for
+    // inactive graphs do not leave dormant controller generations behind.
+    this.#controllers.delete(contextGraphId);
 
     const affectedProviders = new Set([
       ...this.ports.admission.invalidateContextGraph(contextGraphId),
