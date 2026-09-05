@@ -7,6 +7,9 @@ on:
     paths:
       - '.github/workflows/rfc64-inventory-windows.yml'
       - 'scripts/ci/run-windows-persistence-evidence.mjs'
+      - 'scripts/ci/run-process-tree.mjs'
+      - 'scripts/lib/__tests__/process-tree-timeout.test.mjs'
+      - 'scripts/lib/__tests__/windows-persistence-ci.test.mjs'
       - 'devnet/_bootstrap/package.json'
       - 'devnet/_bootstrap/rdf-canonize.d.ts'
       - 'devnet/_bootstrap/rfc64-evidence*'
@@ -29,6 +32,9 @@ on:
     paths:
       - '.github/workflows/rfc64-inventory-windows.yml'
       - 'scripts/ci/run-windows-persistence-evidence.mjs'
+      - 'scripts/ci/run-process-tree.mjs'
+      - 'scripts/lib/__tests__/process-tree-timeout.test.mjs'
+      - 'scripts/lib/__tests__/windows-persistence-ci.test.mjs'
       - 'devnet/_bootstrap/package.json'
       - 'devnet/_bootstrap/rdf-canonize.d.ts'
       - 'devnet/_bootstrap/rfc64-evidence*'

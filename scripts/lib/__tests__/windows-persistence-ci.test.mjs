@@ -55,10 +55,11 @@ test('canonical scripts retain developer build/generate/verify composition', () 
   assert.equal(scripts[`${prefix}:generate:only`], 'node --experimental-sqlite --import tsx devnet/rfc64-persistence-lifecycle/run.ts');
 });
 
-test('evidence phase preserves ordering and generator timeout without a rebuild', () => {
+test('evidence phase preserves ordering and generator timeout without a rebuild', async () => {
   const calls = [];
-  runPersistenceEvidence({ pnpm: '/tools/pnpm.cjs', run: (...args) => { calls.push(args); return { status: 0 }; } });
+  await runPersistenceEvidence({ pnpm: '/tools/pnpm.cjs', run: (...args) => { calls.push(args); return { status: 0 }; } });
   assert.deepEqual(calls.map(([, args]) => args.slice(1, 3)), [
+    ['exec', 'node'],
     ['run', 'typecheck:devnet:rfc64-evidence'],
     ['run', 'test:devnet:rfc64-evidence'],
     ['run', `typecheck:gate0:rfc64-persistence-lifecycle`],
@@ -67,14 +68,20 @@ test('evidence phase preserves ordering and generator timeout without a rebuild'
     ['exec', 'tsc'],
   ]);
   assert.ok(calls.every(([command, args]) => command === process.execPath && args[0] === '/tools/pnpm.cjs'));
-  assert.equal(calls[3][2].timeout, 20 * 60_000);
-  assert.ok(calls.at(-1)[1].includes('packages/agent/test/fixtures/rfc64-inventory-v1-child.ts'));
+  assert.equal(calls[4][2].timeout, 20 * 60_000);
+  assert.deepEqual(calls[0][1], ['/tools/pnpm.cjs', 'exec', 'node', '--test', 'scripts/lib/__tests__/process-tree-timeout.test.mjs']);
+  assert.deepEqual(calls.at(-1)[1], ['/tools/pnpm.cjs', 'exec', 'tsc',
+    '--noEmit', '--target', 'ES2022', '--module', 'NodeNext',
+    '--moduleResolution', 'NodeNext', '--types', 'node,vitest/globals', '--skipLibCheck',
+    'packages/agent/test/rfc64-inventory-v1-lifecycle.test.ts',
+    'packages/agent/test/fixtures/rfc64-inventory-v1-child.ts',
+  ]);
   for (const failure of [{ status: 1 }, { status: null, error: new Error('timeout') }]) {
     let count = 0;
-    assert.throws(() => runPersistenceEvidence({ pnpm: '/tools/pnpm.cjs', run: () => {
+    await assert.rejects(() => runPersistenceEvidence({ pnpm: '/tools/pnpm.cjs', run: () => {
       count += 1;
-      return count === 4 ? failure : { status: 0 };
+      return count === 5 ? failure : { status: 0 };
     } }), /Persistence evidence phase failed/);
-    assert.equal(count, 4, 'verification never runs after unsuccessful generation');
+    assert.equal(count, 5, 'verification never runs after unsuccessful generation');
   }
 });
