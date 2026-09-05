@@ -21,6 +21,7 @@ export interface SharedHardhatContext {
 }
 
 export function contextFilePath(): string {
+  if (process.env.DKG_HARDHAT_CONTEXT_FILE) return process.env.DKG_HARDHAT_CONTEXT_FILE;
   const port = process.env.HARDHAT_PORT || '9545';
   return join(tmpdir(), `dkg-hardhat-ctx-${port}.json`);
 }

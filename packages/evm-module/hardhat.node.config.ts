@@ -120,6 +120,7 @@ const config: HardhatUserConfig = {
     ],
   },
   paths: {
+    deployments: process.env.DKG_TEST_DEPLOYMENTS_DIR ?? './deployments',
     sources: './contracts',
     tests: './test',
     cache: './cache',

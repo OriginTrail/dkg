@@ -1,3 +1,4 @@
+import { TEST_SNAPSHOT_STORAGE } from '../../../scripts/testing/snapshot-storage.js';
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -64,6 +65,7 @@ async function createAgent(name: string, overrides: Partial<DKGAgentConfig> = {}
     skills: [],
     chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     nodeRole: 'core',
+    sharedMemoryPublicSnapshotStorage: TEST_SNAPSHOT_STORAGE,
     ...overrides,
     store,
   });

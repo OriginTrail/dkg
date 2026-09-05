@@ -1,9 +1,10 @@
+import { hardhatTestEnvironment } from '../../scripts/lib/hardhat-test-env.mjs';
 import { defineConfig } from 'vitest/config';
 
 // Distinct from the cli lane (9548) so kafka-plugin's E2E can spin its
 // own Hardhat node without colliding when the two packages are run in
 // parallel by turbo.
-process.env.HARDHAT_PORT = '9549';
+const hardhatEnv = hardhatTestEnvironment(9549);
 
 export default defineConfig({
   test: {
@@ -11,7 +12,7 @@ export default defineConfig({
     testTimeout: 120_000,
     globalSetup: ['../chain/test/hardhat-global-setup.ts'],
     maxWorkers: 1,
-    env: { HARDHAT_PORT: '9549' },
+    env: hardhatEnv,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html', 'lcov', 'json-summary'],

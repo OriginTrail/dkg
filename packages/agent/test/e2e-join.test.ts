@@ -19,6 +19,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
+import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.js';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 import { DKGAgent } from '../src/index.js';
 import type { ContextGraphSubscriptionRecord } from '../src/index.js';
@@ -91,6 +92,7 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
     const joinerDataDir = await mkdtemp(join(tmpdir(), 'dkg-e2e-join-joiner-'));
     tempDirs.push(curatorDataDir, joinerDataDir);
     curator = await DKGAgent.create({
+      ...TEST_SNAPSHOT_CONFIG,
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'Curator',
       listenPort: 0,
@@ -100,6 +102,7 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
       dataDir: curatorDataDir,
     });
     joiner = await DKGAgent.create({
+      ...TEST_SNAPSHOT_CONFIG,
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'Joiner',
       listenPort: 0,

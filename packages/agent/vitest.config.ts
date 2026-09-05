@@ -1,7 +1,8 @@
+import { hardhatTestEnvironment } from '../../scripts/lib/hardhat-test-env.mjs';
 import { defineConfig } from 'vitest/config';
 import { tornadoAgentCoverage } from '../../vitest.coverage';
 
-process.env.HARDHAT_PORT = '9547';
+const hardhatEnv = hardhatTestEnvironment(9547);
 
 // `--experimental-sqlite` is required for `import('node:sqlite')` on
 // Node 22.5–23.x (the workspace's `.nvmrc` line) and is a no-op on
@@ -21,7 +22,7 @@ export default defineConfig({
     testTimeout: 120_000,
     globalSetup: ['../chain/test/hardhat-global-setup.ts'],
     maxWorkers: 1,
-    env: { HARDHAT_PORT: '9547' },
+    env: hardhatEnv,
     // Vitest 4 flattened `poolOptions.{forks,threads}.execArgv` to the
     // top-level `test.execArgv`. Combined with `pool: 'forks'` it
     // becomes process-level argv on each test fork.
