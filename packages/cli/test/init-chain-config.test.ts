@@ -19,4 +19,21 @@ describe('init chain overrides (#1307)', () => {
   it('writes full answers when no network defaults exist', () => {
     expect(buildInitChainOverrides(defaults, undefined, undefined)).toEqual(defaults);
   });
+  it('preserves backup ordering while inheriting undefined or empty defaults', () => {
+    const twoBackups = { ...defaults, rpcUrls: ['https://first.invalid', 'https://second.invalid'] };
+    expect(buildInitChainOverrides({ ...twoBackups, rpcUrls: [...twoBackups.rpcUrls].reverse() }, twoBackups, undefined))
+      .toEqual({ type: 'evm', rpcUrls: ['https://second.invalid', 'https://first.invalid'] });
+    expect(buildInitChainOverrides({ ...defaults, rpcUrls: undefined }, defaults, defaults)).toBeUndefined();
+    expect(buildInitChainOverrides({ ...defaults, rpcUrls: [] }, { ...defaults, rpcUrls: undefined }, defaults)).toBeUndefined();
+  });
+  it('removes old prompted values when switching networks and preserves advanced settings', () => {
+    const nextNetwork = { ...defaults, rpcUrl: 'https://next.invalid', hubAddress: 'next-hub', chainId: 'base:8453', rpcUrls: [] };
+    expect(buildInitChainOverrides(nextNetwork, nextNetwork, { ...defaults, cgRegistryScanPageSize: 500 }))
+      .toEqual({ type: 'evm', cgRegistryScanPageSize: 500 });
+  });
+  it('treats empty scalar answers as inheritance and persists each custom scalar', () => {
+    expect(buildInitChainOverrides({ rpcUrl: '', hubAddress: '', chainId: '', rpcUrls: undefined }, defaults, defaults)).toBeUndefined();
+    expect(buildInitChainOverrides({ ...defaults, hubAddress: 'operator-hub', chainId: 'operator:1' }, defaults, undefined))
+      .toEqual({ type: 'evm', hubAddress: 'operator-hub', chainId: 'operator:1' });
+  });
 });
