@@ -22,6 +22,15 @@ const expectedRfc64PolicyCells = [
   'private-open',
   'private-curated',
 ];
+const expectedContextGraphAuthorityUnavailableReasons = [
+  'chain-name-binding-unavailable',
+  'local-chain-binding-unavailable',
+  'local-existence-unavailable',
+  'chain-access-policy-unavailable',
+  'chain-access-policy-timeout',
+  'chain-participant-authority-unavailable',
+  'rfc64-private-read-roster-unavailable',
+];
 const expectedRfc64PublicCatalogReconciliationOutcomes = [
   'already-applied',
   'applied',
@@ -48,9 +57,40 @@ if (
   || typeof root.Rfc64CatalogReconciliationTerminalErrorV1 !== 'function'
   || typeof root.Rfc64CatalogSynchronizationErrorV1 !== 'function'
   || typeof root.Rfc64CatalogResponsibilityRegistryV1 !== 'function'
+  || typeof root.ContextGraphAuthorityUnavailableError !== 'function'
+  || typeof root.isContextGraphAuthorityUnavailableMarker !== 'function'
   || typeof legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1 !== 'function'
 ) {
   throw new Error('published agent entry points did not expose required root APIs');
+}
+if (
+  root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE !== 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE'
+  || root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME
+    !== 'ContextGraphAuthorityUnavailableError'
+  || !Array.isArray(root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS)
+  || !Object.isFrozen(root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS)
+  || root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS.length
+    !== expectedContextGraphAuthorityUnavailableReasons.length
+  || root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS.some(
+    (reason, index) => reason !== expectedContextGraphAuthorityUnavailableReasons[index]
+  )
+) {
+  throw new Error('package root did not expose the exact authority-unavailable contract');
+}
+const authorityUnavailable = new root.ContextGraphAuthorityUnavailableError(
+  'authority unavailable',
+  { reason: 'chain-access-policy-timeout' },
+);
+if (
+  authorityUnavailable.name !== root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME
+  || authorityUnavailable.code !== root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE
+  || authorityUnavailable.reason !== 'chain-access-policy-timeout'
+  || !root.isContextGraphAuthorityUnavailableMarker(authorityUnavailable)
+  || !root.isContextGraphAuthorityUnavailableMarker({
+    code: root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
+  })
+) {
+  throw new Error('package-root authority-unavailable runtime contract changed');
 }
 const legacySynchronizationError = new legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1(
   'no-authorized-provider',

@@ -6,6 +6,7 @@ import {
 
 import {
   classifyExactSwmGraphReplaceFailure,
+  createPromotePostCommitFailure,
   createPromoteRetryableFailure,
   getPromoteFailureDisposition,
   isPromoteReplaySafeError,
@@ -13,6 +14,25 @@ import {
 } from '../src/promote-replay-safety.js';
 
 describe('promote replay safety', () => {
+  it('makes post-commit failures terminal even when their cause carries a retry marker', () => {
+    const retryableCause = createPromoteRetryableFailure(new Error('observer failed'));
+    const failure = createPromotePostCommitFailure(retryableCause);
+
+    expect(failure).toMatchObject({
+      name: 'PromotePostCommitFailureError',
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: retryableCause,
+    });
+    expect(getPromoteFailureDisposition(failure)).toEqual({
+      classification: 'fatal',
+      retryable: false,
+      diagnostic: {
+        name: 'PromotePostCommitFailureError',
+        code: 'PROMOTE_POST_COMMIT_FAILURE',
+      },
+    });
+  });
+
   it('preserves the generic retry disposition across Error serialization', () => {
     const failure = createPromoteRetryableFailure(new Error('domain-specific secret'));
 

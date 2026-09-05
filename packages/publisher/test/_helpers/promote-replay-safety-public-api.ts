@@ -1,6 +1,9 @@
 import {
+  PROMOTE_POST_COMMIT_FAILURE_CODE,
+  PROMOTE_POST_COMMIT_FAILURE_ERROR_NAME,
   PROMOTE_RETRYABLE_FAILURE_CODE,
   PROMOTE_RETRYABLE_FAILURE_ERROR_NAME,
+  createPromotePostCommitFailure,
   createPromoteRetryableFailure,
   getPromoteFailureDisposition,
   getPromoteReplaySafeErrorDiagnostic,
@@ -8,6 +11,7 @@ import {
   isPromoteReplaySafeError,
   isPromoteRetryableFailure,
   type PromoteFailureDisposition,
+  type PromotePostCommitFailureDiagnostic,
   type PromoteReplaySafeErrorDiagnostic,
   type PromoteRetryableFailureDiagnostic,
   type PromoteRetryableFailureMarker,
@@ -20,6 +24,9 @@ type AssertFalse<Value extends false> = Value;
 
 type PromoteFailureDispositionIsPublic = AssertTrue<
   'getPromoteFailureDisposition' extends keyof PublisherApi ? true : false
+>;
+type PromotePostCommitBoundaryIsPublic = AssertTrue<
+  'createPromotePostCommitFailure' extends keyof PublisherApi ? true : false
 >;
 type LegacyReplaySafeGuardRemainsPublic = AssertTrue<
   'isPromoteReplaySafeError' extends keyof PublisherApi ? true : false
@@ -55,8 +62,11 @@ type LegacyWorkspaceResolutionSubpathRemainsAvailable =
 // Compile the source-compatible package-root surface, including both the new
 // aggregate accessor and every replay-safety symbol published before it.
 void [
+  PROMOTE_POST_COMMIT_FAILURE_CODE,
+  PROMOTE_POST_COMMIT_FAILURE_ERROR_NAME,
   PROMOTE_RETRYABLE_FAILURE_CODE,
   PROMOTE_RETRYABLE_FAILURE_ERROR_NAME,
+  createPromotePostCommitFailure,
   createPromoteRetryableFailure,
   getPromoteFailureDisposition,
   getPromoteReplaySafeErrorDiagnostic,
@@ -65,12 +75,14 @@ void [
   isPromoteRetryableFailure,
 ];
 type PublicPromoteFailureDisposition = PromoteFailureDisposition;
+type PublicPromotePostCommitFailureDiagnostic = PromotePostCommitFailureDiagnostic;
 type PublicPromoteReplaySafeErrorDiagnostic = PromoteReplaySafeErrorDiagnostic;
 type PublicPromoteRetryableFailureDiagnostic = PromoteRetryableFailureDiagnostic;
 type PublicPromoteRetryableFailureMarker = PromoteRetryableFailureMarker;
 
 export type {
   PromoteFailureDispositionIsPublic,
+  PromotePostCommitBoundaryIsPublic,
   LegacyReplaySafeGuardRemainsPublic,
   LegacyReplaySafeDiagnosticRemainsPublic,
   LegacyRetryableGuardRemainsPublic,
@@ -83,6 +95,7 @@ export type {
   ArbitraryPublisherImplementationStaysClosed,
   LegacyWorkspaceResolutionSubpathRemainsAvailable,
   PublicPromoteFailureDisposition,
+  PublicPromotePostCommitFailureDiagnostic,
   PublicPromoteReplaySafeErrorDiagnostic,
   PublicPromoteRetryableFailureDiagnostic,
   PublicPromoteRetryableFailureMarker,

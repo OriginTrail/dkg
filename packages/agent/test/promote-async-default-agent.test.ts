@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import {
+  createPromoteRetryableFailure,
   getPromoteFailureDisposition,
 } from '@origintrail-official/dkg-publisher';
 import { ContextGraphAuthorityUnavailableError } from
@@ -114,11 +115,8 @@ describe('DKGAgent assertion promote boundary', () => {
     expect(assertionPromote).not.toHaveBeenCalled();
   });
 
-  it('does not attach a retry disposition to a post-commit observer failure', async () => {
-    const postCommitFailure = new ContextGraphAuthorityUnavailableError(
-      'post-commit observer authority is unavailable',
-      { reason: 'chain-access-policy-unavailable' },
-    );
+  it('forces a retry-marked post-commit observer failure to remain terminal', async () => {
+    const retryableCause = createPromoteRetryableFailure(new Error('observer failed'));
     const agent = promoteBoundaryAgent();
     agent.resolveWorkspaceGossipSigningAgent = async () => undefined;
     agent.publisher = {
@@ -129,14 +127,21 @@ describe('DKGAgent assertion promote boundary', () => {
         shareOperationId: 'share-operation-1',
       }),
     };
-    agent.afterDurableSwmPromotionV1 = async () => { throw postCommitFailure; };
+    agent.afterDurableSwmPromotionV1 = async () => { throw retryableCause; };
 
     const failure = await agent.assertion.promote('cg-1', 'asset-1', {
       accessPolicy: 'ownerOnly',
     }).catch((error: unknown) => error);
 
-    expect(failure).toBe(postCommitFailure);
-    expect(getPromoteFailureDisposition(failure)).toBeUndefined();
+    expect(failure).toMatchObject({ cause: retryableCause });
+    expect(getPromoteFailureDisposition(failure)).toEqual({
+      classification: 'fatal',
+      retryable: false,
+      diagnostic: {
+        name: 'PromotePostCommitFailureError',
+        code: 'PROMOTE_POST_COMMIT_FAILURE',
+      },
+    });
   });
 
   it('leaves an authoritative empty signing roster terminal and unmarked', async () => {
