@@ -91,7 +91,9 @@ import {
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { normalizeContextGraphDiscoveryScan, legacyChainListScanOptions, type DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
+export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -548,82 +550,6 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
    * minted at finalize. Both are permanent; this field is the link.
    */
   publishedUal?: string;
-}
-
-export type DiscoverContextGraphsFromChainOptions = {
-  throwOnChainScanFailure?: boolean;
-  pageBudget?: number;
-  mode?: 'listAll' | 'incremental' | 'seedFull' | 'seedFromCursor';
-  incremental?: boolean;
-  seedIncrementalWatermark?: boolean;
-  resumeFromCursor?: boolean;
-};
-
-type NormalizedContextGraphDiscoveryScan =
-  | { mode: 'listAll' }
-  | { mode: 'incremental'; pageBudget?: number }
-  | { mode: 'seedFull' }
-  | { mode: 'seedFromCursor'; pageBudget?: number };
-
-function normalizeContextGraphDiscoveryScan(
-  options: DiscoverContextGraphsFromChainOptions,
-): NormalizedContextGraphDiscoveryScan {
-  if (options.mode !== undefined) {
-    if (options.mode === 'incremental') {
-      return {
-        mode: 'incremental',
-        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-      };
-    }
-    if (options.mode === 'seedFull') return { mode: 'seedFull' };
-    if (options.mode === 'seedFromCursor') {
-      return {
-        mode: 'seedFromCursor',
-        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-      };
-    }
-    if (options.mode === 'listAll') return { mode: 'listAll' };
-    throw new Error(`Unsupported context graph chain discovery scan mode: ${String(options.mode)}`);
-  }
-
-  if (options.incremental === true) {
-    return {
-      mode: 'incremental',
-      ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-    };
-  }
-
-  if (options.seedIncrementalWatermark === true) {
-    if (options.resumeFromCursor === true) {
-      return {
-        mode: 'seedFromCursor',
-        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-      };
-    }
-    return { mode: 'seedFull' };
-  }
-
-  return { mode: 'listAll' };
-}
-
-function legacyChainListScanOptions(
-  options: DiscoverContextGraphsFromChainOptions,
-): ContextGraphChainScanOptions | undefined {
-  if (options.mode !== undefined) return undefined;
-  if (options.incremental === true) {
-    return {
-      incremental: true,
-      ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-    };
-  }
-  if (options.seedIncrementalWatermark === true) {
-    return {
-      seedIncrementalWatermark: true,
-      ...(options.resumeFromCursor !== undefined ? { resumeFromCursor: options.resumeFromCursor } : {}),
-      ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-    };
-  }
-  return undefined;
 }
 
 function assertLegacyStorageAckAlias(
@@ -1828,10 +1754,8 @@ export class DKGAgent extends DKGAgentBase {
   ): Promise<number> {
     const ctx = createOperationContext('system');
     const scanMode = normalizeContextGraphDiscoveryScan(options);
-    const legacyListOptions = legacyChainListScanOptions(options);
     const useLegacyListFallback =
       scanMode.mode !== 'listAll' &&
-      legacyListOptions !== undefined &&
       !this.chain.scanContextGraphRegistryPages &&
       !!this.chain.listContextGraphsFromChain;
     if (scanMode.mode === 'listAll' && !this.chain.listContextGraphsFromChain) {
@@ -1974,7 +1898,7 @@ export class DKGAgent extends DKGAgentBase {
       try {
         onChainContextGraphs = await this.chain.listContextGraphsFromChain!(
           undefined,
-          useLegacyListFallback ? legacyListOptions : undefined,
+          useLegacyListFallback ? legacyChainListScanOptions(scanMode) : undefined,
         );
       } catch (err) {
         const partialResults = handleChainScanFailure(err);

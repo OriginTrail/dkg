@@ -16,6 +16,7 @@ export default defineConfig({
   test: {
     include: [
       "test/context-graph-meta-projection.test.ts",
+      "test/context-graph-discovery-options.test.ts",
       ...RFC64_UNIT_TESTS,
       "test/endorse.test.ts",
       "test/ack-candidate-pool.test.ts",
