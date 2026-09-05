@@ -13,6 +13,7 @@
 // extraction driver.
 
 import { exec, execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 
 import { existsSync } from 'node:fs';
@@ -55,6 +56,7 @@ import {
 import {
   saveConfig,
   resolveChainConfig,
+  type DkgConfig,
   type ResolvedChainConfig,
   resolveContextGraphs,
   resolveNetworkDefaultContextGraphs,
