@@ -11,12 +11,16 @@ import {
   type PromoteFailureClassification,
 } from '@origintrail-official/dkg-publisher';
 
-export type ClassifiedPromoteError = {
-  classification: PromoteFailureClassification;
-  retryable: boolean;
-  message?: string;
-  publisherDiagnostic?: PromoteFailureDisposition['diagnostic'];
-};
+// Keep the publisher's discriminated union intact. Legacy prose/store results
+// cannot claim a publisher diagnostic with a contradictory queue disposition.
+export type ClassifiedPromoteError = (
+  | PromoteFailureDisposition
+  | {
+      classification: PromoteFailureClassification;
+      retryable: boolean;
+      diagnostic?: never;
+    }
+) & { message?: string };
 
 const PROMOTE_STEP_TAG = /^\[promote:([^\]]*)\]\s*/;
 const PROMOTE_DIAGNOSTIC_STAGES = new Set([
@@ -85,11 +89,7 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
   // including incidental cap-like wording.
   const publisherDisposition = getPromoteFailureDisposition(err);
   if (publisherDisposition) {
-    return {
-      classification: publisherDisposition.classification,
-      retryable: publisherDisposition.retryable,
-      publisherDiagnostic: publisherDisposition.diagnostic,
-    };
+    return publisherDisposition;
   }
 
   const raw = err instanceof Error ? err.message : String(err);

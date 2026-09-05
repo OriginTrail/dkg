@@ -153,7 +153,7 @@ describe('classifyPromoteError', () => {
     ))).toEqual({
       classification: 'transient',
       retryable: true,
-      publisherDiagnostic: {
+      diagnostic: {
         name: 'PromoteRetryableFailureError',
         code: PROMOTE_RETRYABLE_FAILURE_CODE,
       },
@@ -166,7 +166,7 @@ describe('classifyPromoteError', () => {
     ))).toEqual({
       classification: 'fatal',
       retryable: false,
-      publisherDiagnostic: {
+      diagnostic: {
         name: 'PromotePostCommitFailureError',
         code: 'PROMOTE_POST_COMMIT_FAILURE',
       },
@@ -179,7 +179,7 @@ describe('classifyPromoteError', () => {
     })).toEqual({
       classification: 'transient',
       retryable: true,
-      publisherDiagnostic: {
+      diagnostic: {
         name: 'PromoteRetryableFailureError',
         code: PROMOTE_RETRYABLE_FAILURE_CODE,
       },
@@ -251,7 +251,7 @@ describe('classifyPromoteError', () => {
     )).toEqual({
       classification: 'transient',
       retryable: true,
-      publisherDiagnostic: {
+      diagnostic: {
         name: 'PromoteReplaySafeError',
         code: 'PROMOTE_REPLAY_SAFE_FAILURE',
       },
@@ -266,7 +266,7 @@ describe('classifyPromoteError', () => {
     ))).toEqual({
       classification: 'transient',
       retryable: true,
-      publisherDiagnostic: {
+      diagnostic: {
         name: 'PromoteReplaySafeError',
         code: 'PROMOTE_REPLAY_SAFE_FAILURE',
       },

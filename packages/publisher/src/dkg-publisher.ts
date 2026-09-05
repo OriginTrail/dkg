@@ -16,6 +16,7 @@ import { tagPromoteStep } from './promote-step-tag.js';
 import {
   classifyExactSwmGraphReplaceFailure,
   createPromotePostCommitFailure,
+  runPromoteCommittedFinalization,
   runPromotePrerequisite,
 } from './promote-replay-safety.js';
 import { canonicalPublishPayload } from './canonical-publish-payload.js';
@@ -190,6 +191,21 @@ type AssertionPromoteResult = {
   promotedAllRoots: boolean;
   shareOperationId?: string;
 };
+
+/** Validated exact SWM graph and immutable intent after a successful commit. */
+type CommittedAssertionPromoteContext = Readonly<{
+  contextGraphId: string;
+  name: string;
+  agentAddress: string;
+  subGraphName?: string;
+  contentScope: GraphKnowledgeAssetScope;
+  graphUri: string;
+  swmGraphUri: string;
+  swmQuads: Quad[];
+  promotedPrivateRoot: Uint8Array | undefined;
+  privateTripleCount: number;
+  operationIntent: PromoteOperationIntent;
+}>;
 
 /**
  * Resolve the public catalog proof material independently from a V2 KA's
@@ -8796,7 +8812,6 @@ export class DKGPublisher implements Publisher {
     };
     const accessPolicy = operationIntent.accessPolicy;
     const allowedPeers = operationIntent.allowedPeers;
-    const operationTimestamp = new Date(operationIntent.timestampMs);
     if (opts?.confirmBeforeCommit && !operationIntent.publisherPeerId) {
       throw Object.assign(
         new Error('Curator-confirmed promote requires a publisherPeerId before claiming an operation ID'),
@@ -9046,126 +9061,146 @@ export class DKGPublisher implements Publisher {
       throw companionCommitted === false ? error : createPromotePostCommitFailure(error);
     }
     if (promotionFailure !== undefined) throw promotionFailure.error;
-    try {
-      // #2079: the SIXTH replace site. Same graph the catch-up witness keys on,
-      // so the memo now describes content that is gone — and a replace leaves the
-      // quad count intact, which is exactly what the count gate cannot see.
-      //
-      // Reachable on default config: this node witnesses its own KA
-      // (`onSnapshotReady(snapshot, 'cache')` has no self-peer filter), and the
-      // curator-ack gate is off by default, so gossip publishes only after promote
-      // returns. Promote v2, let the fallible tail below throw, and the curator
-      // still advertises v1 — the next round's descriptor is v1, the count
-      // matches, and a standing v1 witness would HIT.
-      //
-      // Deliberately NOT folded into `replaceExactKnowledgeAssetGraph`: of its
-      // SIX call sites this is the only one targeting a SWM assertion graph — the
-      // rest are `dataGraph` ×2, `vmGraph`, `wmGraph`, and one pass-through
-      // `graphUri` — so folding it in would add a serialised changelog round-trip
-      // to five replaces that can never hold a witness. Enumerated, not counted:
-      // an earlier revision of this comment said "five of seven" and was wrong on
-      // both numbers.
-      await invalidateSwmMaterializationWitness(this.store, swmGraphUri, {
-        source: 'publisher.promoteWmToSwm.witnessInvalidate',
-      }).catch(() => {});
-      // NB: WM source cleanup and the pending-share-operation clear happen at the
-      // very END of this tail. Every write between here and there is fallible; if
-      // WM were dropped now (or the recovery pointer cleared), a failure below
-      // would strand the promotion: retry re-enters, reads empty WM, and aborts
-      // with KA_GRAPH_CONTENT_MISSING / a seal count mismatch.
+    await runPromoteCommittedFinalization(() => this.finalizeCommittedAssertionPromote({
+      contextGraphId,
+      name,
+      agentAddress,
+      subGraphName: opts?.subGraphName,
+      contentScope,
+      graphUri,
+      swmGraphUri,
+      swmQuads,
+      promotedPrivateRoot,
+      privateTripleCount: normalizedPrivateQuads.length,
+      operationIntent,
+    }));
+    return {
+      promotedCount: resumingCommittedSwm ? 0 : swmQuads.length + normalizedPrivateQuads.length,
+      gossipPayload,
+      gossipMessage: gossipPayload?.message,
+      promotedAllRoots: true,
+      shareOperationId: operationId,
+    };
+  }
 
-      // Update the assertion's memory layer from WM → SWM in _meta
-      const assertionMetaGraph = contextGraphMetaUri(contextGraphId);
-      const DKG_MEMORY_LAYER = 'http://dkg.io/ontology/memoryLayer';
-      await this.deleteStoreByPatternWithoutCount({
-        graph: assertionMetaGraph,
-        subject: graphUri,
-        predicate: DKG_MEMORY_LAYER,
-      });
-      await this.store.insert([{
-        subject: swmGraphUri,
-        predicate: DKG_MEMORY_LAYER,
-        object: '"SWM"',
-        graph: assertionMetaGraph,
-      }]);
-      const promotedAllRoots = true; // compatibility return name; v2 has no roots.
-      const isFullCompletePromote = true;
-      await this.deleteStoreByPatternWithoutCount({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: DKG_ROOT_ENTITY_LEGACY });
-      await this.deleteStoreByPatternWithoutCount({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: DKG_ENTITY });
+  /**
+   * Repairable durable finalization only: no authority reads, confirmation,
+   * gossip, or observer callbacks. The immutable intent and WM source survive
+   * until the completion record is durable, allowing the same operation to
+   * resume after a storage operation is proven not to have started.
+   */
+  private async finalizeCommittedAssertionPromote(
+    context: CommittedAssertionPromoteContext,
+  ): Promise<void> {
+    const {
+      contextGraphId, name, agentAddress, subGraphName, contentScope, graphUri,
+      swmGraphUri, swmQuads, promotedPrivateRoot, privateTripleCount, operationIntent,
+    } = context;
+    const promoteMetaGraph = contextGraphMetaUri(contextGraphId);
+    const lifecycleSubject = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
+    const operationId = operationIntent.operationId;
+    const operationTimestamp = new Date(operationIntent.timestampMs);
+    const { accessPolicy, allowedPeers } = operationIntent;
+    // #2079: the SIXTH replace site. Same graph the catch-up witness keys on,
+    // so the memo now describes content that is gone — and a replace leaves the
+    // quad count intact, which is exactly what the count gate cannot see.
+    //
+    // Reachable on default config: this node witnesses its own KA
+    // (`onSnapshotReady(snapshot, 'cache')` has no self-peer filter), and the
+    // curator-ack gate is off by default, so gossip publishes only after promote
+    // returns. Promote v2, let the fallible tail below throw, and the curator
+    // still advertises v1 — the next round's descriptor is v1, the count
+    // matches, and a standing v1 witness would HIT.
+    //
+    // Deliberately NOT folded into `replaceExactKnowledgeAssetGraph`: of its
+    // SIX call sites this is the only one targeting a SWM assertion graph — the
+    // rest are `dataGraph` ×2, `vmGraph`, `wmGraph`, and one pass-through
+    // `graphUri` — so folding it in would add a serialised changelog round-trip
+    // to five replaces that can never hold a witness. Enumerated, not counted:
+    // an earlier revision of this comment said "five of seven" and was wrong on
+    // both numbers.
+    await invalidateSwmMaterializationWitness(this.store, swmGraphUri, {
+      source: 'publisher.promoteWmToSwm.witnessInvalidate',
+    }).catch(() => {});
+    // Retain WM until all durable metadata is complete. The operation intent
+    // remains available even after cleanup so empty-WM recovery can validate
+    // the exact SWM payload and repair this same operation.
 
-      // Update assertion lifecycle record in _meta: created → promoted
-      const promoted = generateAssertionPromotedMetadata({
-        contextGraphId,
-        agentAddress,
-        assertionName: name,
-        subGraphName: opts?.subGraphName,
-        kaNumber: BigInt(contentScope.kaNumber),
-        shareOperationId: operationId,
-        rootEntities: [],
-        timestamp: operationTimestamp,
-      }, { provenanceEvents: this.provenanceEvents });
-      await this.store.delete(promoted.delete);
-      await this.store.insert(promoted.insert);
+    // Update the assertion's memory layer from WM → SWM in _meta
+    const assertionMetaGraph = contextGraphMetaUri(contextGraphId);
+    const DKG_MEMORY_LAYER = 'http://dkg.io/ontology/memoryLayer';
+    await this.deleteStoreByPatternWithoutCount({
+      graph: assertionMetaGraph,
+      subject: graphUri,
+      predicate: DKG_MEMORY_LAYER,
+    });
+    await this.store.insert([{
+      subject: swmGraphUri,
+      predicate: DKG_MEMORY_LAYER,
+      object: '"SWM"',
+      graph: assertionMetaGraph,
+    }]);
+    await this.deleteStoreByPatternWithoutCount({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: DKG_ROOT_ENTITY_LEGACY });
+    await this.deleteStoreByPatternWithoutCount({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: DKG_ENTITY });
 
-      await storeKnowledgeAssetOperationPublicQuads({
-        store: this.store,
-        graphManager: this.graphManager,
-        contextGraphId,
-        shareOperationId: operationId,
-        kaUal: contentScope.ual,
-        assertionVersion: contentScope.assertionVersion,
-        quads: swmQuads,
-        ...(promotedPrivateRoot ? { privateMerkleRoot: promotedPrivateRoot } : {}),
-        privateTripleCount: normalizedPrivateQuads.length,
-        publisherPeerId: operationIntent.publisherPeerId,
-        accessPolicy,
-        allowedPeers,
-        agentAddress: contentScope.agentAddress,
-        subGraphName: opts?.subGraphName,
-        timestamp: operationTimestamp,
-        publicSnapshotStore: this.publicSnapshotStore,
-      });
-      // The originator does not receive its own GossipSub message, so it must
-      // persist the same monotonic KA head the receiver writes. Without this,
-      // a delayed older peer replay could look like the first version locally
-      // and replace the freshly promoted graph.
-      await storeKnowledgeAssetWorkspaceHead({
-        store: this.store,
-        graphManager: this.graphManager,
-        contextGraphId,
-        shareOperationId: operationId,
-        kaUal: contentScope.ual,
-        assertionVersion: contentScope.assertionVersion,
-        subGraphName: opts?.subGraphName,
-      });
+    // Update assertion lifecycle record in _meta: created → promoted
+    const promoted = generateAssertionPromotedMetadata({
+      contextGraphId,
+      agentAddress,
+      assertionName: name,
+      subGraphName,
+      kaNumber: BigInt(contentScope.kaNumber),
+      shareOperationId: operationId,
+      rootEntities: [],
+      timestamp: operationTimestamp,
+    }, { provenanceEvents: this.provenanceEvents });
+    await this.store.delete(promoted.delete);
+    await this.store.insert(promoted.insert);
 
-      // This is the final commit record. It is intentionally written only after
-      // the exact SWM graph, lifecycle operation id, immutable operation snapshot,
-      // and monotonic KA head are durable. A retry that sees any earlier partial
-      // state repairs the tail above before this marker can become visible.
-      await maintainMarker(isFullCompletePromote);
+    await storeKnowledgeAssetOperationPublicQuads({
+      store: this.store,
+      graphManager: this.graphManager,
+      contextGraphId,
+      shareOperationId: operationId,
+      kaUal: contentScope.ual,
+      assertionVersion: contentScope.assertionVersion,
+      quads: swmQuads,
+      ...(promotedPrivateRoot ? { privateMerkleRoot: promotedPrivateRoot } : {}),
+      privateTripleCount,
+      publisherPeerId: operationIntent.publisherPeerId,
+      accessPolicy,
+      allowedPeers,
+      agentAddress: contentScope.agentAddress,
+      subGraphName,
+      timestamp: operationTimestamp,
+      publicSnapshotStore: this.publicSnapshotStore,
+    });
+    // The originator does not receive its own GossipSub message, so it must
+    // persist the same monotonic KA head the receiver writes. Without this,
+    // a delayed older peer replay could look like the first version locally
+    // and replace the freshly promoted graph.
+    await storeKnowledgeAssetWorkspaceHead({
+      store: this.store,
+      graphManager: this.graphManager,
+      contextGraphId,
+      shareOperationId: operationId,
+      kaUal: contentScope.ual,
+      assertionVersion: contentScope.assertionVersion,
+      subGraphName,
+    });
 
-      // Keep both the shareOperationId and immutable intent as durable replay
-      // metadata. The former is also the lifecycle identity written by
-      // generateAssertionPromotedMetadata; the latter is required to reproduce
-      // the exact timestamp, policy, and publisher on an idempotent retry.
-      // Reopened drafts explicitly wipe both rows in assertionCreateUnlocked.
-      await this.dropAssertionScopedGraphs(graphUri);
+    // This is the final commit record. It is intentionally written only after
+    // the exact SWM graph, lifecycle operation id, immutable operation snapshot,
+    // and monotonic KA head are durable. A retry that sees any earlier partial
+    // state repairs the tail above before this marker can become visible.
+    await this.markSwmShareCompleteUnlocked(contextGraphId, name, agentAddress, subGraphName);
 
-      return {
-        promotedCount: resumingCommittedSwm
-          ? 0
-          : swmQuads.length + normalizedPrivateQuads.length,
-        gossipPayload,
-        gossipMessage: gossipPayload?.message,
-        promotedAllRoots,
-        shareOperationId: operationId,
-      };
-    } catch (error) {
-      // The exact SWM graph replacement succeeded. No error from this tail can
-      // acquire prerequisite replay safety, even if it carries a retry marker.
-      throw createPromotePostCommitFailure(error);
-    }
+    // Keep both the shareOperationId and immutable intent as durable replay
+    // metadata. The former is also the lifecycle identity written by
+    // generateAssertionPromotedMetadata; the latter is required to reproduce
+    // the exact timestamp, policy, and publisher on an idempotent retry.
+    // Reopened drafts explicitly wipe both rows in assertionCreateUnlocked.
+    await this.dropAssertionScopedGraphs(graphUri);
   }
 
   async assertionDiscard(

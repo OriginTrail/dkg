@@ -206,10 +206,10 @@ function logPromoteAttemptFailure(input: {
         stage: diagnosticPromoteStage(input.message),
         classification: input.classified.classification,
         retryable: input.classified.retryable,
-        errorName: input.classified.publisherDiagnostic?.name
+        errorName: input.classified.diagnostic?.name
           ?? safePromoteErrorIdentity(input.err, 'name')
           ?? 'unknown',
-        errorCode: input.classified.publisherDiagnostic?.code
+        errorCode: input.classified.diagnostic?.code
           ?? safePromoteErrorIdentity(input.err, 'code')
           ?? 'unknown',
       })}`,

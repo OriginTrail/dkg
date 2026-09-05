@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   StoreOperationTimeoutError,
   isStoreOperationTimeoutError,
@@ -11,9 +11,61 @@ import {
   getPromoteFailureDisposition,
   isPromoteReplaySafeError,
   isPromoteRetryableFailure,
+  runPromotePrerequisite,
+  runPromoteCommittedFinalization,
 } from '../src/promote-replay-safety.js';
 
 describe('promote replay safety', () => {
+  it.each([false, undefined])('preserves a declined prerequisite error (predicate: %s)', async (decision) => {
+    const failure = Object.assign(new Error('unsupported authority'), {
+      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+      reason: 'chain-participant-authority-unsupported',
+      retryable: false,
+    });
+    const predicate = decision === undefined ? undefined : vi.fn(() => decision);
+    const rejection = await runPromotePrerequisite(async () => { throw failure; }, predicate)
+      .catch((error: unknown) => error);
+    expect(rejection).toBe(failure);
+    expect(getPromoteFailureDisposition(rejection)).toBeUndefined();
+    if (predicate) expect(predicate).toHaveBeenCalledExactlyOnceWith(failure);
+  });
+
+  it('does not consult retry policy after a successful prerequisite', async () => {
+    const predicate = vi.fn(() => true);
+    await expect(runPromotePrerequisite(async () => 'ready', predicate)).resolves.toBe('ready');
+    expect(predicate).not.toHaveBeenCalled();
+  });
+
+  it('gives the same storage failure phase-specific prerequisite, exact-commit, and finalization dispositions', async () => {
+    const failure = new StoreOperationTimeoutError({
+      backend: 'managed-oxigraph', operation: 'replaceGraph', outcome: 'indeterminate',
+    });
+    const prerequisite = await runPromotePrerequisite(async () => { throw failure; }, () => true)
+      .catch((error: unknown) => error);
+    expect(getPromoteFailureDisposition(prerequisite)).toMatchObject({
+      classification: 'transient', diagnostic: { code: 'PROMOTE_RETRYABLE_FAILURE' },
+    });
+    const commit = classifyExactSwmGraphReplaceFailure(failure);
+    expect(getPromoteFailureDisposition(commit)).toMatchObject({
+      classification: 'transient', diagnostic: { code: 'PROMOTE_REPLAY_SAFE_FAILURE' },
+    });
+    const finalization = await runPromoteCommittedFinalization(async () => { throw failure; })
+      .catch((error: unknown) => error);
+    expect(getPromoteFailureDisposition(finalization)).toMatchObject({
+      classification: 'fatal', diagnostic: { code: 'PROMOTE_POST_COMMIT_FAILURE' },
+    });
+    expect(finalization).toMatchObject({ cause: failure });
+  });
+
+  it('preserves a proven non-started durable-tail failure, but not a later observer failure', async () => {
+    const failure = new StoreOperationTimeoutError({
+      backend: 'managed-oxigraph', operation: 'insert', outcome: 'not_started',
+    });
+    await expect(runPromoteCommittedFinalization(async () => { throw failure; })).rejects.toBe(failure);
+    expect(getPromoteFailureDisposition(createPromotePostCommitFailure(failure)))
+      .toMatchObject({ classification: 'fatal', retryable: false });
+  });
+
   it('makes post-commit failures terminal even when their cause carries a retry marker', () => {
     const retryableCause = createPromoteRetryableFailure(new Error('observer failed'));
     const failure = createPromotePostCommitFailure(retryableCause);

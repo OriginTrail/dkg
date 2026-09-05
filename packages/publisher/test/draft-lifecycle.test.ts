@@ -1075,6 +1075,37 @@ describe('Working Memory Assertion Lifecycle', () => {
     },
   );
 
+  it.each(['recipient', 'curator'] as const)(
+    'does not certify a terminal authority failure in the %s prerequisite',
+    async (stage) => {
+      await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+      await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+      const finalized = await finalizeAssertion();
+      const authorityFailure = Object.assign(new Error('unsupported authority'), {
+        code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+        reason: 'chain-participant-authority-unsupported',
+        retryable: false,
+      });
+      const isRetryablePrerequisiteError = vi.fn(() => false);
+      if (stage === 'recipient') {
+        publisher.setWorkspaceAgentRecipientResolver(async () => { throw authorityFailure; });
+      }
+      const failure = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        isRetryablePrerequisiteError,
+        ...(stage === 'curator' ? {
+          confirmBeforeCommit: async () => { throw authorityFailure; },
+        } : {}),
+      }).catch((error: unknown) => error);
+      expect(failure).toBe(authorityFailure);
+      expect(isRetryablePrerequisiteError).toHaveBeenCalledExactlyOnceWith(authorityFailure);
+      expect(getPromoteFailureDisposition(failure)).toBeUndefined();
+      expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+      expect((await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).length)
+        .toBe(TRIPLES.length);
+    },
+  );
+
   it.each(['authority', 'retry-marker'] as const)(
     'keeps failures of kind %s terminal after the exact SWM replacement',
     async (kind) => {
@@ -1224,18 +1255,27 @@ describe('Working Memory Assertion Lifecycle', () => {
 
   it.each([
     ['before commit', false],
+    ['on capability refusal', false],
     ['after commit', true],
     ['after indeterminate dispatch', undefined],
   ] as const)('classifies a root-companion settlement failure %s', async (_label, committed) => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
     const finalized = await finalizeAssertion();
-    const settlementFailure = createPromoteRetryableFailure(new Error('settlement timed out'));
+    const capabilityRefused = _label === 'on capability refusal';
+    const settlementFailure = capabilityRefused
+      ? new Error('settlement failed before dispatch')
+      : createPromoteRetryableFailure(new Error('settlement timed out'));
     const settle = vi.fn(() => { throw settlementFailure; });
+    const companionGraph = 'urn:test:root-companion-settlement';
+    const companionSubject = 'urn:test:root-companion';
     const hookedPublisher = await createPublisher(undefined, store, () => ({
-      graphUri: 'urn:test:root-companion-settlement',
-      subject: 'urn:test:root-companion',
-      quads: [],
+      graphUri: companionGraph,
+      subject: companionSubject,
+      quads: [{
+        graph: companionGraph, subject: companionSubject,
+        predicate: 'urn:test:state', object: '"committed"',
+      }],
       settle,
     }));
     const atomicReplace = store.replaceGraphAndSubject!.bind(store);
@@ -1251,10 +1291,13 @@ describe('Working Memory Assertion Lifecycle', () => {
     });
     let failure: unknown;
     try {
+      if (capabilityRefused) {
+        Object.defineProperty(store, 'replaceGraphAndSubject', { value: undefined, configurable: true });
+      }
       failure = await hookedPublisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
         publisherPeerId: PEER,
         confirmBeforeCommit: async () => {
-          if (committed === false) throw new Error('confirmation failed before dispatch');
+          if (committed === false && !capabilityRefused) throw new Error('confirmation failed before dispatch');
           return { applied: true };
         },
       }).catch((error: unknown) => error);
@@ -1264,12 +1307,14 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(settle).toHaveBeenCalledExactlyOnceWith(committed);
     if (committed === false) {
       expect(failure).toBe(settlementFailure);
-      expect(getPromoteFailureDisposition(failure)?.retryable).toBe(true);
+      expect(getPromoteFailureDisposition(failure)?.retryable).toBe(capabilityRefused ? undefined : true);
       expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+      expect(await store.hasGraph(companionGraph)).toBe(false);
     } else {
       expect(failure).toMatchObject({ code: 'PROMOTE_POST_COMMIT_FAILURE', cause: settlementFailure });
       expect(getPromoteFailureDisposition(failure)?.retryable).toBe(false);
       await expectExactSwmGraph(finalized.sharedGraphUri);
+      expect(await store.hasGraph(companionGraph)).toBe(true);
     }
   });
 

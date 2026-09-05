@@ -93,9 +93,26 @@ export async function runPromotePrerequisite<T>(
   }
 }
 
-/** Mark every failure beyond the WM→SWM commit boundary as terminal. */
+/** Mark an unsafe finalization failure or a post-commit side effect as terminal. */
 export function createPromotePostCommitFailure(cause: unknown): Error {
   return new PromotePostCommitFailureError(cause);
+}
+
+/**
+ * Only for the publisher's idempotent durable finalization (not observer hooks
+ * or gossip). A storage operation proven not to have started can re-enter the
+ * same immutable operation and repair its tail. Unknown/indeterminate outcomes
+ * and unrelated retry markers cannot earn that permission here.
+ */
+export async function runPromoteCommittedFinalization(
+  finalize: () => Promise<void>,
+): Promise<void> {
+  try {
+    await finalize();
+  } catch (error) {
+    if (isStoreOperationTimeoutError(error) && error.outcome === 'not_started') throw error;
+    throw createPromotePostCommitFailure(error);
+  }
 }
 
 /** Structural so the disposition survives durable/bundle boundaries. */
