@@ -1,21 +1,30 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { planWeightedShards } from './plan-vitest-shard.mjs';
+import { loadAgentTimings } from './load-agent-timings.mjs';
 
-export const AGENT_SHARD_COUNT = 10;
-export const AGENT_INTEGRATION_SHARDS = 4;
 export const AGENT_UNIT_CONFIG = 'vitest.unit.config.ts';
 export const AGENT_INTEGRATION_CONFIG = 'vitest.config.ts';
-export const AGENT_TIMINGS = JSON.parse(fs.readFileSync(new URL('./timings/agent.json', import.meta.url), 'utf8'));
+const TIMINGS = loadAgentTimings(new URL('./timings/agent.json', import.meta.url));
 export const AGENT_REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
-export function agentShardConfig(index) {
+// Each entry is one runner. Configuration, indices and reserved work all
+// derive from this policy; the final unit runner owns the evidence sidecars.
+const LANES = [
+  { config: AGENT_INTEGRATION_CONFIG, inventory: 'integration', overheadMs: [0, 0, 0, 0] },
+  { config: AGENT_UNIT_CONFIG, inventory: 'unit', overheadMs: [0, 0, 0, 0, 0, 40_000] },
+];
+const DESCRIPTORS = Object.freeze(LANES.flatMap((lane) => lane.overheadMs.map((reservedOverheadMs) => ({
+  config: lane.config, inventory: lane.inventory, reservedOverheadMs,
+}))).map((shard, index) => Object.freeze({ ...shard, index: index + 1 })));
+export const AGENT_SHARD_COUNT = DESCRIPTORS.length;
+
+export function agentShardDescriptor(index) {
   if (!Number.isInteger(index) || index < 1 || index > AGENT_SHARD_COUNT) {
-    throw new Error('Agent shard must be an integer from 1 to 10');
+    throw new Error(`Agent shard must be an integer from 1 to ${AGENT_SHARD_COUNT}`);
   }
-  return index <= AGENT_INTEGRATION_SHARDS ? AGENT_INTEGRATION_CONFIG : AGENT_UNIT_CONFIG;
+  return DESCRIPTORS[index - 1];
 }
 
 export function discoverAgentTests(config, repoRoot = AGENT_REPO_ROOT, filters = []) {
@@ -46,20 +55,17 @@ export function planAgentShards(repoRoot = AGENT_REPO_ROOT, { discover = discove
   if (unitFiles.some((file) => !all.has(file))) {
     throw new Error('Agent unit config includes files outside the primary test inventory');
   }
-  const groups = [
-    { files: allFiles.filter((file) => !unit.has(file)), count: AGENT_INTEGRATION_SHARDS, offset: 0 },
-    { files: unitFiles, count: AGENT_SHARD_COUNT - AGENT_INTEGRATION_SHARDS, offset: AGENT_INTEGRATION_SHARDS },
-  ];
-  return groups.flatMap(({ files, count, offset }) => planWeightedShards({
-    files,
-    bodyWeightsMs: AGENT_TIMINGS.bodyWeightsMs,
-    shardCount: count,
-    perFileOverheadMs: AGENT_TIMINGS.perFileOverheadMs,
-    // The last shard also generates Gate 1 and rollout-transition evidence.
-    shardOverheadMs: Array.from({ length: count }, (_, index) => offset + index + 1 === 10 ? 40_000 : 0),
-  }).map((shard) => ({
-    ...shard,
-    index: shard.index + offset,
-    config: agentShardConfig(shard.index + offset),
-  })));
+  const inventories = {
+    integration: allFiles.filter((file) => !unit.has(file)),
+    unit: unitFiles,
+  };
+  return LANES.flatMap((lane) => {
+    const descriptors = DESCRIPTORS.filter((shard) => shard.inventory === lane.inventory);
+    return planWeightedShards({
+      files: inventories[lane.inventory],
+      ...TIMINGS,
+      shardCount: descriptors.length,
+      shardOverheadMs: descriptors.map((shard) => shard.reservedOverheadMs),
+    }).map((shard, index) => ({ ...shard, ...descriptors[index] }));
+  });
 }
