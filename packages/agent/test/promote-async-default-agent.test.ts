@@ -71,9 +71,38 @@ describe('DKGAgent assertion promote boundary', () => {
     });
   });
 
-  it('translates recipient authority outages returned by the publisher boundary', async () => {
+  it('passes through recipient retries certified by the publisher prerequisite', async () => {
     const authorityFailure = new ContextGraphAuthorityUnavailableError(
       'recipient authority is temporarily unavailable',
+      { reason: 'chain-participant-authority-unavailable' },
+    );
+    const agent = promoteBoundaryAgent();
+    agent.resolveWorkspaceGossipSigningAgent = async () => undefined;
+    const certifiedFailure = createPromoteRetryableFailure(authorityFailure);
+    agent.publisher = {
+      assertionPromote: async (_cg: string, _name: string, _agent: string, opts: {
+        isRetryablePrerequisiteError: (error: unknown) => boolean;
+      }) => {
+        expect(opts.isRetryablePrerequisiteError(authorityFailure)).toBe(true);
+        throw certifiedFailure;
+      },
+    };
+
+    const failure = await agent.assertion.promote('cg-1', 'asset-1', {
+      accessPolicy: 'ownerOnly',
+    }).catch((error: unknown) => error);
+
+    expect(getPromoteFailureDisposition(failure)).toMatchObject({
+      classification: 'transient',
+      retryable: true,
+    });
+    expect(failure).toMatchObject({ cause: authorityFailure });
+    expect(failure).toBe(certifiedFailure);
+  });
+
+  it('does not certify an authority error escaping the committing publisher call', async () => {
+    const authorityFailure = new ContextGraphAuthorityUnavailableError(
+      'authority lookup failed inside the committing publisher',
       { reason: 'chain-participant-authority-unavailable' },
     );
     const agent = promoteBoundaryAgent();
@@ -86,11 +115,8 @@ describe('DKGAgent assertion promote boundary', () => {
       accessPolicy: 'ownerOnly',
     }).catch((error: unknown) => error);
 
-    expect(getPromoteFailureDisposition(failure)).toMatchObject({
-      classification: 'transient',
-      retryable: true,
-    });
-    expect(failure).toMatchObject({ cause: authorityFailure });
+    expect(failure).toBe(authorityFailure);
+    expect(getPromoteFailureDisposition(failure)).toBeUndefined();
   });
 
   it('translates authority outages from pre-commit policy preparation', async () => {

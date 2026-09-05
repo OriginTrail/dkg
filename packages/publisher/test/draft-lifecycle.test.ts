@@ -28,6 +28,7 @@ import {
   type DurableRootPromotionAtomicCompanion,
   type DurableRootPromotionIdentity,
   getPromoteFailureDisposition,
+  createPromoteRetryableFailure,
   assertionScopedGraphUri,
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
@@ -1039,6 +1040,88 @@ describe('Working Memory Assertion Lifecycle', () => {
     ).rejects.toThrow(/Merkle mismatch/);
   });
 
+  it.each(['recipient', 'curator'] as const)(
+    'certifies an authority outage in the %s prerequisite before replacing SWM',
+    async (stage) => {
+      await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+      await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+      const finalized = await finalizeAssertion();
+      const authorityFailure = Object.assign(new Error('authority lookup timed out'), {
+        code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+        reason: 'chain-access-policy-timeout',
+        retryable: true,
+      });
+      const isRetryablePrerequisiteError = vi.fn((error: unknown) => error === authorityFailure);
+      if (stage === 'recipient') {
+        publisher.setWorkspaceAgentRecipientResolver(async () => { throw authorityFailure; });
+      }
+
+      const failure = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        isRetryablePrerequisiteError,
+        ...(stage === 'curator' ? {
+          confirmBeforeCommit: async () => { throw authorityFailure; },
+        } : {}),
+      }).catch((error: unknown) => error);
+
+      expect(isRetryablePrerequisiteError).toHaveBeenCalledExactlyOnceWith(authorityFailure);
+      expect(failure).toMatchObject({ cause: authorityFailure });
+      expect(getPromoteFailureDisposition(failure)).toMatchObject({
+        classification: 'transient', retryable: true,
+      });
+      expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+      expect((await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).length)
+        .toBe(TRIPLES.length);
+    },
+  );
+
+  it.each(['authority', 'retry-marker'] as const)(
+    'keeps failures of kind %s terminal after the exact SWM replacement',
+    async (kind) => {
+      await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+      await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+      const finalized = await finalizeAssertion();
+      const authorityFailure = Object.assign(new Error('authority lookup timed out'), {
+        code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+        reason: 'chain-access-policy-timeout',
+        retryable: true,
+      });
+      const injectedFailure = kind === 'authority'
+        ? authorityFailure
+        : createPromoteRetryableFailure(authorityFailure);
+      const isRetryablePrerequisiteError = vi.fn(() => true);
+      const insert = store.insert.bind(store);
+      let injected = false;
+      const insertSpy = vi.spyOn(store, 'insert').mockImplementation(async (quads) => {
+        if (!injected && quads.some((quad) =>
+          quad.graph.includes('/_shared_memory_snapshots/') && quad.graph.endsWith('/ka'))) {
+          injected = true;
+          await expectExactSwmGraph(finalized.sharedGraphUri);
+          throw injectedFailure;
+        }
+        return insert(quads);
+      });
+      let failure: unknown;
+      try {
+        failure = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+          publisherPeerId: PEER,
+          isRetryablePrerequisiteError,
+        }).catch((error: unknown) => error);
+      } finally {
+        insertSpy.mockRestore();
+      }
+
+      expect(injected).toBe(true);
+      expect(isRetryablePrerequisiteError).not.toHaveBeenCalled();
+      expect(failure).toMatchObject({ cause: injectedFailure });
+      expect(getPromoteFailureDisposition(failure)).toMatchObject({
+        classification: 'fatal', retryable: false,
+        diagnostic: { code: 'PROMOTE_POST_COMMIT_FAILURE' },
+      });
+      await expectExactSwmGraph(finalized.sharedGraphUri);
+    },
+  );
+
   it('persists the share operation ID before curator confirmation can escape locally', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
@@ -1681,7 +1764,10 @@ describe('Working Memory Assertion Lifecycle', () => {
       ASSERTION_NAME,
       AGENT,
       { publisherPeerId: PEER },
-    ))).rejects.toThrow('injected operation snapshot failure');
+    ))).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
 
     const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
     await store.deleteByPattern({
@@ -1705,7 +1791,10 @@ describe('Working Memory Assertion Lifecycle', () => {
       ASSERTION_NAME,
       AGENT,
       { publisherPeerId: PEER },
-    ))).rejects.toThrow('injected operation snapshot failure');
+    ))).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
 
     const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
     const metaGraph = contextGraphMetaUri(CG_ID);
@@ -1885,14 +1974,20 @@ describe('Working Memory Assertion Lifecycle', () => {
       withInjectedOperationSnapshotFailure(() =>
         publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
       ),
-    ).rejects.toThrow('injected operation snapshot failure');
+    ).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
     await publisher.markSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT);
 
     await expect(
       withInjectedOperationSnapshotFailure(() =>
         publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
       ),
-    ).rejects.toThrow('injected operation snapshot failure');
+    ).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
   });
 
@@ -1907,7 +2002,10 @@ describe('Working Memory Assertion Lifecycle', () => {
       withInjectedOperationSnapshotFailure(() =>
         publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
       ),
-    ).rejects.toThrow('injected operation snapshot failure');
+    ).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
     const durableOperationId = await readShareOperationId();
     expect(durableOperationId).toBeTruthy();
 
@@ -1921,7 +2019,10 @@ describe('Working Memory Assertion Lifecycle', () => {
     try {
       await expect(
         publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
-      ).rejects.toThrow('injected lifecycle repair failure');
+      ).rejects.toMatchObject({
+        code: 'PROMOTE_POST_COMMIT_FAILURE',
+        cause: { message: 'injected lifecycle repair failure' },
+      });
     } finally {
       store.insert = insert;
     }
@@ -1945,7 +2046,10 @@ describe('Working Memory Assertion Lifecycle', () => {
       withInjectedOperationSnapshotFailure(() =>
         publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
       ),
-    ).rejects.toThrow('injected operation snapshot failure');
+    ).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
 
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
     expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(true);
@@ -2007,7 +2111,10 @@ describe('Working Memory Assertion Lifecycle', () => {
       withInjectedOperationSnapshotFailure(() =>
         publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
       ),
-    ).rejects.toThrow('injected operation snapshot failure');
+    ).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
 
     const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
     const metaGraph = contextGraphMetaUri(CG_ID);

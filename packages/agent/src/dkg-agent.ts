@@ -141,7 +141,7 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import {
-  executeAssertionPromotePreCommit,
+  prepareAssertionPromote,
   type AssertionPromoteOptions,
 } from './assertion-promote-precommit.js';
 
@@ -3271,21 +3271,21 @@ export class DKGAgent extends DKGAgentBase {
           );
         }
         const sealed = true;
+        const { gossipSigner, publisherOptions } = await prepareAssertionPromote(agent, {
+          contextGraphId,
+          publisherPeerId: agent.node.peerId.toString(),
+          options: opts,
+        });
         const {
-          gossipSigner,
           promotedCount,
           gossipPayload,
           promotedAllRoots,
           shareOperationId,
-        } = await executeAssertionPromotePreCommit(
-          agent,
-          {
-            contextGraphId,
-            name,
-            agentAddress: promoteAgentAddress,
-            publisherPeerId: agent.node.peerId.toString(),
-            options: opts,
-          },
+        } = await agent.publisher.assertionPromote(
+          contextGraphId,
+          name,
+          promoteAgentAddress,
+          publisherOptions,
         );
         if (gossipPayload) {
           try {

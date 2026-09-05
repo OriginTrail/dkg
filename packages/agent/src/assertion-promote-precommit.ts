@@ -15,7 +15,6 @@ import type { PreSignedAuthorAttestation } from './dkg-agent-types.js';
 type PublisherPromoteOptions = NonNullable<
   Parameters<DKGPublisher['assertionPromote']>[3]
 >;
-type PublisherPromoteResult = Awaited<ReturnType<DKGPublisher['assertionPromote']>>;
 type GossipSigner = Awaited<
   ReturnType<DKGAgent['resolveWorkspaceGossipSigningAgent']>
 >;
@@ -49,28 +48,31 @@ type AssertionPromotePreCommitHostMethod =
   | 'getContextGraphOnChainPolicy'
   | 'readLocalAccessPolicyEnum';
 
-export type AssertionPromotePreCommitHost = Pick<DKGAgent, 'publisher'> & {
+export type AssertionPromotePreCommitHost = {
   [Method in AssertionPromotePreCommitHostMethod]: OmitThisParameter<DKGAgent[Method]>;
 };
 
 export interface AssertionPromotePreCommitInput {
   contextGraphId: string;
-  name: string;
-  agentAddress: string;
   publisherPeerId: string;
   options?: AssertionPromotePreCommitOptions;
 }
 
-export type AssertionPromotePreCommitResult = PublisherPromoteResult & {
+export type AssertionPromotePreCommitResult = {
   gossipSigner: GossipSigner;
+  publisherOptions: PublisherPromoteOptions;
 };
 
+function isRetryableAuthorityFailure(error: unknown): boolean {
+  return isContextGraphAuthorityUnavailableMarker(error) && error.retryable;
+}
+
 /**
- * The single WM→SWM pre-commit boundary. Authority failures from signing,
- * policy preparation, curator confirmation, or the publisher are translated
- * once. Post-commit gossip and observation intentionally live elsewhere.
+ * Resolve agent prerequisites without access to the committing publisher.
+ * The publisher receives a domain predicate, which it applies only at its
+ * own recipient-encoding and curator-confirmation prerequisite sites.
  */
-export async function executeAssertionPromotePreCommit(
+export async function prepareAssertionPromote(
   host: AssertionPromotePreCommitHost,
   input: AssertionPromotePreCommitInput,
 ): Promise<AssertionPromotePreCommitResult> {
@@ -96,26 +98,24 @@ export async function executeAssertionPromotePreCommit(
       }
     }
 
-    const promotion = await host.publisher.assertionPromote(
-      input.contextGraphId,
-      input.name,
-      input.agentAddress,
-      {
+    return {
+      gossipSigner,
+      publisherOptions: {
         ...(input.options?.subGraphName !== undefined
           ? { subGraphName: input.options.subGraphName }
           : {}),
         publisherPeerId: input.publisherPeerId,
         senderAgentAddress: gossipSigner?.agentAddress,
         confirmBeforeCommit,
+        isRetryablePrerequisiteError: isRetryableAuthorityFailure,
         ...(shareAccessPolicy !== undefined ? { accessPolicy: shareAccessPolicy } : {}),
         ...(input.options?.allowedPeers !== undefined
           ? { allowedPeers: [...input.options.allowedPeers] }
           : {}),
       },
-    );
-    return { gossipSigner, ...promotion };
+    };
   } catch (error) {
-    if (isContextGraphAuthorityUnavailableMarker(error) && error.retryable) {
+    if (isRetryableAuthorityFailure(error)) {
       throw createPromoteRetryableFailure(error);
     }
     throw error;

@@ -81,6 +81,18 @@ export function createPromoteRetryableFailure(
   return new PromoteRetryableFailureError(cause);
 }
 
+/** Only invoke around a prerequisite that cannot perform the SWM commit. */
+export async function runPromotePrerequisite<T>(
+  operation: () => Promise<T>,
+  isRetryableError: ((error: unknown) => boolean) | undefined,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw isRetryableError?.(error) ? createPromoteRetryableFailure(error) : error;
+  }
+}
+
 /** Mark every failure beyond the WM→SWM commit boundary as terminal. */
 export function createPromotePostCommitFailure(cause: unknown): Error {
   return new PromotePostCommitFailureError(cause);

@@ -607,7 +607,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     return null;
   }
 
-  async resolveContextGraphAgentGateAuthority(
+  protected async resolveContextGraphAgentGateAuthority(
     this: DKGAgent,
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
@@ -836,7 +836,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * idiom). The reason distinguishes invalid input, unsupported capabilities,
    * inactive slots, malformed values, and bounded read timeouts.
    */
-  async resolveLiveOnChainAccessPolicyState(this: DKGAgent,
+  protected async resolveLiveOnChainAccessPolicyState(this: DKGAgent,
     onChainId: string,
     opCtx?: OperationContext,
     options: { signal?: AbortSignal } = {},

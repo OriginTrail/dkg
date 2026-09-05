@@ -1,5 +1,20 @@
 type AgentApi = typeof import('../src/index.js');
+type PublicAgent = import('@origintrail-official/dkg-agent').DKGAgent;
 type AssertFalse<Value extends false> = Value;
+type AssertTrue<Value extends true> = Value;
+
+type GateResolverStaysProtected = AssertFalse<
+  'resolveContextGraphAgentGateAuthority' extends keyof PublicAgent ? true : false
+>;
+type LivePolicyResolverStaysProtected = AssertFalse<
+  'resolveLiveOnChainAccessPolicyState' extends keyof PublicAgent ? true : false
+>;
+type GateProjectionRemainsPublic = AssertTrue<
+  'getContextGraphAgentGateAddresses' extends keyof PublicAgent ? true : false
+>;
+type PolicyProjectionRemainsPublic = AssertTrue<
+  'readLiveOnChainAccessPolicy' extends keyof PublicAgent ? true : false
+>;
 
 type AuthorityCodeStaysInternal = AssertFalse<
   'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE' extends keyof AgentApi ? true : false
@@ -28,6 +43,10 @@ type AuthorityReasonStaysInternal =
   import('@origintrail-official/dkg-agent').ContextGraphAuthorityUnavailableReason;
 
 export type {
+  GateResolverStaysProtected,
+  LivePolicyResolverStaysProtected,
+  GateProjectionRemainsPublic,
+  PolicyProjectionRemainsPublic,
   AuthorityCodeStaysInternal,
   AuthorityErrorNameStaysInternal,
   RetryableReasonListStaysInternal,
