@@ -104,8 +104,8 @@ export class OxigraphStore implements TripleStore {
    * immediately rather than discovering empty data later through queries.
    *
    * Previously this swallowed all errors and started empty silently — that
-   * was the proximate cause of the WM persistence regression documented in
-   * docs/archive/internal/bugs/wm-persistence-regression.md.
+   * was the proximate cause of the WM persistence regression. See the current
+   * contract in packages/storage/README.md#oxigraph-persistence-contract.
    */
   private hydrateSync(filePath: string): void {
     if (!existsSync(filePath)) return;
@@ -179,8 +179,8 @@ export class OxigraphStore implements TripleStore {
    * Previously a single `writeFile(persistPath, dump)` left the store
    * vulnerable to torn writes on SIGKILL (the file would be partially
    * rewritten, then hydrateSync would fail-then-swallow on next start).
-   * This is the proximate fix for the catastrophic data-loss mode
-   * documented in docs/archive/internal/bugs/wm-persistence-regression.md.
+   * This is the proximate fix for the catastrophic data-loss mode. See the
+   * current contract in packages/storage/README.md#oxigraph-persistence-contract.
    *
    * Error model: this method THROWS on any write/fsync/rename failure
    * (ENOSPC, EACCES, EROFS, EXDEV, …). The background debounced flush
@@ -602,8 +602,8 @@ export class OxigraphStore implements TripleStore {
    * its own — otherwise `flushNow()` short-circuits on `this.flushing`
    * and silently drops any inserts that landed between the in-flight
    * dump and the close call. (That's the "lost the last few assertions"
-   * mode in docs/archive/internal/bugs/wm-persistence-regression.md after the atomic-write
-   * fix landed.)
+   * mode closed by the contract in
+   * packages/storage/README.md#oxigraph-persistence-contract.)
    *
    * THROWS if the final flush fails — see `flush()` for the same error
    * contract. The agent's `stop()` path catches this and logs but does

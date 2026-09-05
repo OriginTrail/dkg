@@ -2351,7 +2351,7 @@ export class DKGAgent extends DKGAgentBase {
     }
     // Flush WM to disk before exit so the debounced 50ms flush in the
     // Oxigraph adapter can't lose the latest inserts when the process
-    // exits. See docs/archive/internal/bugs/wm-persistence-regression.md.
+    // exits. See packages/storage/README.md#oxigraph-persistence-contract.
     //
     // `store.close()` now THROWS on durable-write failures (ENOSPC,
     // EACCES, EROFS, etc.) — see oxigraph.ts. We log loudly but do not
@@ -2366,7 +2366,7 @@ export class DKGAgent extends DKGAgentBase {
         `[DKGAgent.stop] WM final flush FAILED on shutdown: ${(err as Error).message}. ` +
           `The store on disk may be missing recent inserts — operator should investigate ` +
           `(disk full, permission revoked, filesystem read-only, …). ` +
-          `See docs/archive/internal/bugs/wm-persistence-regression.md for the durability contract.`,
+          `See packages/storage/README.md#oxigraph-persistence-contract for the durability contract.`,
       );
     }
     this.started = false;

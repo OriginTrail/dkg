@@ -372,8 +372,8 @@ idempotent success by treating an `already exists` response as reuse.
 
 ### Daemon restart mid-import
 
-WM survives restarts ([docs/archive/internal/bugs/wm-persistence-regression.md](../../../../docs/archive/internal/bugs/wm-persistence-regression.md)
-characterises the bug fixed in OriginTrail/dkg#636-639). On resume,
+WM survives restarts under the [Oxigraph persistence contract](../../../storage/README.md#oxigraph-persistence-contract)
+(the archived incident report characterises the bug fixed in OriginTrail/dkg#636-639). On resume,
 `loadImportManifest` gives you the "where was I?" answer; if a particular
 assertion's WM state is partial, you can either:
 

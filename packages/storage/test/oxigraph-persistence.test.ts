@@ -1,6 +1,6 @@
 /**
  * Regression tests for the durability contract documented in
- * docs/archive/internal/bugs/wm-persistence-regression.md.
+ * packages/storage/README.md#oxigraph-persistence-contract.
  *
  * These cases exist because the original failure was a silent one — the
  * daemon happily reported a clean shutdown while torn writes / parse
