@@ -425,25 +425,18 @@ describe('E2E: DKGAgent with real blockchain', () => {
 
   it('second agent sees new publish via gossipsub without manual sync', async () => {
 
-    const chainAdapter = new EVMChainAdapter(
-      makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.EXTRA1),
-    );
-    const cgResult = await chainAdapter.createOnChainContextGraph({
-      accessPolicy: 0,
-      publishPolicy: 1,
-    });
-    const gossipCG = String(cgResult.contextGraphId);
-
-    await agents[0].createContextGraph({
-      id: gossipCG,
-      name: 'Gossip Verification',
-    });
-    const sub3 = (agents[0] as any).subscribedContextGraphs.get(gossipCG);
-    if (sub3) sub3.onChainId = gossipCG;
-
+    const gossipCG = 'gossip-verification-e2e';
+    await agents[0].createContextGraph({ id: gossipCG, name: 'Gossip Verification' });
+    await agents[0].registerContextGraph(gossipCG);
+    // Subscription is authorization gated on discovered CG metadata. A fixed
+    // sleep could publish before the receiver knew the graph or its topic.
+    await expect.poll(() => agents[1].contextGraphExists(gossipCG), { timeout: 10_000 }).toBe(true);
     agents[0].subscribeToContextGraph(gossipCG);
     agents[1].subscribeToContextGraph(gossipCG);
-    await new Promise((r) => setTimeout(r, 1000));
+    await expect.poll(
+      () => agents[0].gossip.getSubscribers(`dkg/context-graph/${gossipCG}/finalization`),
+      { timeout: 10_000 },
+    ).toContain(agents[1].peerId);
 
     const quads = [
       {
@@ -456,18 +449,13 @@ describe('E2E: DKGAgent with real blockchain', () => {
 
     await agents[0].publish(gossipCG, quads);
 
-    // Wait for gossip propagation
-    await new Promise((r) => setTimeout(r, 3000));
-
-    const result = await agents[1].query(
-      `SELECT ?name WHERE { <did:dkg:test:GossipEntity> <http://schema.org/name> ?name }`,
-      { contextGraphId: gossipCG },
-    );
-
-    expect(result).toBeDefined();
-    expect(result.bindings).toBeDefined();
-    expect(result.bindings.length).toBeGreaterThanOrEqual(1);
-    const names = result.bindings.map((b: any) => b.name?.value ?? b.name);
-    expect(names.some((n: string) => n.includes('GossipTest'))).toBe(true);
+    // Observe delivery without triggering manual sync or assuming a fixed delay.
+    await expect.poll(async () => {
+      const result = await agents[1].query(
+        `SELECT ?name WHERE { <did:dkg:test:GossipEntity> <http://schema.org/name> ?name }`,
+        { contextGraphId: gossipCG },
+      );
+      return result.bindings.map((binding: any) => binding.name?.value ?? binding.name);
+    }, { timeout: 15_000 }).toContain('"GossipTest"');
   }, 60_000);
 });
