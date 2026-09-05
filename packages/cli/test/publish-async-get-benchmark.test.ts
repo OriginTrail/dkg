@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -384,16 +385,35 @@ describe('publish async get benchmark', () => {
 
   it('keeps suite isolation for normal runs and profiles the workload in-process', async () => {
     const { createBenchmarkToolchain } = await import('../../../esbench.config.mjs') as EsbenchConfigForTest;
+    const {
+      createProfileEnvironment,
+      runProfileProcess,
+    } = await import('../../../bench/support/profile-process.mjs');
     const isolated = createBenchmarkToolchain({});
-    const profiled = createBenchmarkToolchain({ DKG_ESBENCH_IN_PROCESS: '1' });
-    const profileScript = await readFile(
-      new URL('../../../bench/profile-publish-async-get.mjs', import.meta.url),
-      'utf8',
-    );
+    const profileEnv = createProfileEnvironment({ PATH: '/mock-bin' }, {
+      reportJsonPath: '/tmp/profile.esbench.json',
+      reportHtmlPath: '/tmp/profile.esbench.html',
+    });
+    let spawnedEnv: Record<string, string> | undefined;
+    const exitCode = runProfileProcess(['esbench'], profileEnv, {
+      cwd: '/repo',
+      executable: '/node',
+      spawnProcess(_command: string, _args: readonly string[], options: { env: Record<string, string> }) {
+        spawnedEnv = options.env;
+        const child = new EventEmitter();
+        queueMicrotask(() => child.emit('exit', 0, null));
+        return child;
+      },
+    });
 
     expect(isolated.executors).toHaveLength(1);
-    expect(profiled.executors).toBeUndefined();
-    expect(profileScript).toContain("DKG_ESBENCH_IN_PROCESS: '1'");
+    await expect(exitCode).resolves.toBe(0);
+    expect(spawnedEnv).toMatchObject({
+      DKG_ESBENCH_IN_PROCESS: '1',
+      ESBENCH_RESULT: '/tmp/profile.esbench.json',
+      ESBENCH_HTML_FILE: '/tmp/profile.esbench.html',
+    });
+    expect(createBenchmarkToolchain(spawnedEnv ?? {}).executors).toBeUndefined();
   });
 
   it('links the combined ESBench report and focused HTML pages together', async () => {

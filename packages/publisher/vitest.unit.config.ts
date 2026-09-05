@@ -16,6 +16,7 @@ export default defineConfig({
       'test/views-min-trust-extra.test.ts',
       'test/async-lift-validation.test.ts',
       'test/async-lift-claim-fencing.test.ts',
+      'test/async-lift-claim-selection.test.ts',
       'test/async-lift-journal-serialize.test.ts',
       'test/async-lift-journal-append.test.ts',
       'test/async-lift-ka-broadcast-progress.test.ts',
