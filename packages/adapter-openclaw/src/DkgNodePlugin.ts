@@ -99,7 +99,7 @@ import type { DkgToolHost } from './tools/tool-host.js';
 import { buildNodeTools } from './tools/node-tools.js';
 import { buildContextGraphTools } from './tools/context-graph-tools.js';
 import { buildQueryTools } from './tools/query-tools.js';
-import { buildMessagingTools } from './tools/messaging-tools.js';
+import {  buildMessagingTools } from './tools/messaging-tools.js';
 import { buildAssertionTools } from './tools/assertion-tools.js';
 import { buildMemoryTools } from './tools/memory-tools.js';
 
@@ -3072,10 +3072,15 @@ export class DkgNodePlugin {
 
   private async handleFindAgents(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      const filter: { framework?: string; skill_type?: string } = {};
-      if (args.framework) filter.framework = String(args.framework);
-      if (args.skill_type) filter.skill_type = String(args.skill_type);
-      const result = await this.client.getAgents(Object.keys(filter).length ? filter : undefined);
+      // ONE boundary policy for every filter: forward the model's value
+      // VERBATIM and let the daemon validate — it 400s on bad values and
+      // unknown names, and that 400 comes back through daemonError() as the
+      // caller's signal. Raw values go through the query escape hatch, NOT
+      // through the strictly-typed getAgents(): coercing (parseInt, boolean
+      // folding) or dropping a bad value would turn the daemon's 400 into a
+      // silently different query — `limit: 0` becoming "no limit" is the
+      // full ~150 KB registry.
+      const result = await this.client.getAgentsUnvalidated(args);
       return this.json(result);
     } catch (err: any) {
       return this.daemonError(err);

@@ -516,6 +516,10 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     agentLike.reconcileCursors = new Map();
     agentLike.vmReconcilePhysicalRuns = new Set();
     agentLike.vmReconcileEnabled = () => true;
+    // This fixture isolates reconcile/heal result composition. Production
+    // dispatcher entry proves canonical read authority before target lookup;
+    // make that admission explicit instead of relying on the subscription row.
+    agentLike.canReadContextGraph = async () => true;
     agentLike.chain = {
       getContextGraphKCCount: async () => {
         order.push('main-reconcile');
@@ -574,6 +578,10 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
       },
     };
     agentLike.vmReconcileEnabled = () => true;
+    // This fixture isolates the current-watermark RS-heal path. Canonical read
+    // admission is covered separately and must not be inferred from the local
+    // subscription row now that persisted rows cannot authorize themselves.
+    agentLike.canReadContextGraph = async () => true;
     agentLike.chain = { getContextGraphKCCount: async () => 0n };
     agentLike.ensureVmReconcileDispatcher = SwmHostModeMethods.prototype.ensureVmReconcileDispatcher;
     agentLike.resolveVmReconcileTarget = SwmHostModeMethods.prototype.resolveVmReconcileTarget;

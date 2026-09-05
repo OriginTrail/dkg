@@ -13,7 +13,7 @@ let ctx: HardhatContext;
 
 describe('EVMChainAdapter.getMaxKaNumberForAuthor — on-chain view E2E (#1080)', () => {
   beforeAll(async () => {
-    ctx = await spawnHardhatEnv(8568);
+    ctx = await spawnHardhatEnv();
   }, 180_000);
   afterAll(() => killHardhat(ctx));
 

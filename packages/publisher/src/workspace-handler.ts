@@ -317,6 +317,16 @@ export class SharedMemoryHandler {
   private readonly publicAccessPolicyOnChainOracle?: (
     contextGraphId: string,
   ) => Promise<boolean>;
+  /**
+   * Authority gate for the legacy live SHARE materialization path. A caller
+   * that has handed one CG to an exact catalog must return false so ambient
+   * gossip/substrate delivery cannot race partial state ahead of that catalog.
+   * Omitted means legacy apply remains allowed for backward compatibility.
+   */
+  private readonly legacyApplyAllowedOracle?: (
+    contextGraphId: string,
+    subGraphName: string | null,
+  ) => boolean | Promise<boolean>;
   private readonly markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
   /**
    * OT-RFC-38 / LU-6 Phase B — chain-backed fallback for the agent
@@ -447,6 +457,14 @@ export class SharedMemoryHandler {
       publicAccessPolicyOnChainOracle?: (
         contextGraphId: string,
       ) => Promise<boolean>;
+      /**
+       * Return false when another authoritative synchronization rail owns this
+       * CG. The validated wire is declined permanently and is not materialized.
+       */
+      legacyApplyAllowedOracle?: (
+        contextGraphId: string,
+        subGraphName: string | null,
+      ) => boolean | Promise<boolean>;
       markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
       /**
        * OT-RFC-38 / LU-6 Phase B chain-backed agent-allowlist
@@ -506,6 +524,7 @@ export class SharedMemoryHandler {
     this.localAgentAddresses = options?.localAgentAddresses;
     this.contextGraphMetaOracle = options?.contextGraphMetaOracle;
     this.publicAccessPolicyOnChainOracle = options?.publicAccessPolicyOnChainOracle;
+    this.legacyApplyAllowedOracle = options?.legacyApplyAllowedOracle;
     this.markContextGraphMetaDirtyFromQuads = options?.markContextGraphMetaDirtyFromQuads;
     this.chainAgentGateOracle = options?.chainAgentGateOracle;
     this.beaconCuratorOracle = options?.beaconCuratorOracle;
@@ -991,6 +1010,29 @@ export class SharedMemoryHandler {
         return { applied: false, reason, retryable: false };
       }
 
+      // Every currently supported wire shape carries its scope outside the
+      // plaintext. Check it before policy work/decryption so a catalog-owned
+      // ROOT write is cheap to decline. The authoritative request is checked
+      // again below when an encrypted envelope claims a different scope.
+      const encodedSubGraphName = request?.subGraphName
+        ?? decoded.senderKeyMessage?.subGraphName
+        ?? decoded.encryptedPayload?.subGraphName
+        ?? null;
+      const declineNonAuthoritativeLegacyApply = (
+        subGraphName: string | null,
+      ): SharedMemoryApplyOutcome => {
+        const scope = subGraphName === null ? 'root scope' : `subgraph "${subGraphName}"`;
+        const reason = `legacy SWM apply is not authoritative for ${scope} of context graph "${contextGraphId}"`;
+        this.log.debug(ctx, `SWM write declined: ${reason}`);
+        return { applied: false, reason, retryable: false };
+      };
+      if (
+        this.legacyApplyAllowedOracle !== undefined
+        && !await this.legacyApplyAllowedOracle(contextGraphId, encodedSubGraphName)
+      ) {
+        return declineNonAuthoritativeLegacyApply(encodedSubGraphName);
+      }
+
       const agentGateAddresses = await this.getContextGraphAgentGateAddresses(contextGraphId);
       const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId);
       const hasPrivateAccessPolicy = await this.contextGraphHasPrivateAccessPolicy(contextGraphId);
@@ -1155,6 +1197,15 @@ export class SharedMemoryHandler {
         const reason = `no workspace publish request for context graph "${contextGraphId}"`;
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
         return { applied: false, reason, retryable: false };
+      }
+
+      const requestSubGraphName = request.subGraphName ?? null;
+      if (
+        requestSubGraphName !== encodedSubGraphName
+        && this.legacyApplyAllowedOracle !== undefined
+        && !await this.legacyApplyAllowedOracle(contextGraphId, requestSubGraphName)
+      ) {
+        return declineNonAuthoritativeLegacyApply(requestSubGraphName);
       }
 
       if (request.operationId) {

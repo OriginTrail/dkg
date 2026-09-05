@@ -625,21 +625,37 @@ describe('RFC-64 private catalog activation', () => {
     });
   });
 
-  it('fails closed on malformed, unknown, or unselected rollout modes', () => {
+  it('fails closed on malformed modes and accepts overrides before discovery', () => {
     expect(() => resolveRfc64CatalogActivationConfigV1({
       ...privateActivation(),
       rollout: { contextGraphModes: { [PRIVATE_CG]: 'automatic' } },
     } as never, chainIdentity)).toThrow(/must be legacy, shadow, or catalog/u);
 
-    expect(() => resolveRfc64CatalogActivationConfigV1({
+    const predeclared = resolveRfc64CatalogActivationConfigV1({
       ...privateActivation(),
       rollout: { contextGraphModes: { [PUBLIC_CG]: 'shadow' } },
-    }, chainIdentity)).toThrow(/contains unselected graph/u);
+    }, chainIdentity);
+    expect(predeclared.selectedContextGraphs).toEqual([PRIVATE_CG]);
+    expect(predeclared.rollout.contextGraphModes[PUBLIC_CG]).toBe('shadow');
 
     expect(() => resolveRfc64CatalogActivationConfigV1({
       ...privateActivation(),
       rollout: { killSwitch: 'yes' },
     } as never, chainIdentity)).toThrow(/killSwitch must be a boolean/u);
+  });
+
+  it('treats omitted unified activation as enabled with an optional seed', () => {
+    expect(resolveRfc64CatalogActivationConfigV1(undefined, {
+      networkId: undefined,
+      evmChainId: undefined,
+    })).toEqual({
+      enabled: true,
+      selectedContextGraphs: [],
+      selectedPublicContextGraphs: [],
+      selectedPrivateContextGraphs: [],
+      selectedCatalogAuthoringControls: [],
+      rollout: { killSwitch: false, contextGraphModes: {} },
+    });
   });
 
   it('accepts registered private policies for the Release 2 runtime', () => {
@@ -805,6 +821,34 @@ describe('RFC-64 private catalog activation', () => {
       catalog: privateActivation(),
       publicCatalog: conflictingPublic,
     }, chainIdentity)).toThrow(/conflict for selected graph/u);
+  });
+
+  it('lets the unified rollback suppress every deprecated public selection', () => {
+    const publicEnvelope = policyEnvelope(policy(PUBLIC_CG, 0));
+    const rollback = resolveRfc64CatalogActivationsV1({
+      catalog: { enabled: false },
+      publicCatalog: {
+        enabled: true,
+        bootstrap: {
+          acceptedPublicPolicies: [{ policyEnvelope: publicEnvelope, targets: [] }],
+          retryIntervalMs: 1_000,
+        },
+      },
+    }, chainIdentity);
+
+    expect(rollback.catalog).toMatchObject({
+      enabled: false,
+      selectedContextGraphs: [],
+      selectedPublicContextGraphs: [],
+      selectedPrivateContextGraphs: [],
+    });
+    expect(rollback.publicCatalog).toMatchObject({
+      enabled: false,
+      selectedContextGraphs: [],
+    });
+    expect(rollback.catalog.bootstrap).toBeUndefined();
+    expect(rollback.publicCatalog.bootstrap).toBeUndefined();
+    expect(rollback.selectedCatalogAuthoringControls).toEqual([]);
   });
 
   it('unions disjoint rollout modes and lets either block engage the shared kill switch', () => {

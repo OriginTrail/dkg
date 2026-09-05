@@ -1,5 +1,10 @@
 export * from './chain-adapter.js';
 export {
+  bindContextGraphAuthorityReader,
+  type ContextGraphAuthorityReader,
+  type ContextGraphAuthorityReaderCapability,
+} from './context-graph-authority-reader.js';
+export {
   resolvePublicFinalizedMaterializationAuthority,
   type PublicFinalizedMaterializationAuthorityRequest,
   type PublicFinalizedMaterializationAuthorityResult,

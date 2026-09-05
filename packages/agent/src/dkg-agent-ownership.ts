@@ -376,6 +376,16 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 
+/** A caller is authenticated but does not own the context graph policy boundary. */
+export class ContextGraphPolicyAuthorizationError extends Error {
+  readonly code = 'CCL_POLICY_FORBIDDEN' as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'ContextGraphPolicyAuthorizationError';
+  }
+}
+
 export class OwnershipMethods extends DKGAgentBase {
   public async getCclPolicyByUri(this: DKGAgent, policyUri: string, opts: { includeBody?: boolean } = {}): Promise<CclPolicyRecord | null> {
     const records = await this.listCclPolicies({ includeBody: opts.includeBody });
@@ -422,7 +432,10 @@ export class OwnershipMethods extends DKGAgentBase {
       throw new Error(`ContextGraph "${contextGraphId}" has no registered owner; cannot manage policies.`);
     }
     if (!this.isCallerOrNodeOwner(owner, callerAgentAddress)) {
-      throw new Error(`Only the contextGraph owner can manage policies for "${contextGraphId}". Owner=${owner}, caller=${`did:dkg:agent:${callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`}`);
+      throw new ContextGraphPolicyAuthorizationError(
+        `Only the contextGraph owner can manage policies for "${contextGraphId}". ` +
+          `Owner=${owner}, caller=${`did:dkg:agent:${callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`}`,
+      );
     }
   }
 

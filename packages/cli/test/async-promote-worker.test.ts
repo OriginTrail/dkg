@@ -1,8 +1,8 @@
 /**
  * Async-promote worker — unit tests.
  *
- * The worker module exports three concerns we test in isolation:
- *   - `classifyPromoteError(err)` — pure mapping.
+ * Worker orchestration coverage (pure classifier cases live in
+ * async-promote-error-classification.test.ts):
  *   - `runPromoteJob(...)` — per-job lifecycle including commit-marker
  *     bookkeeping and outcome reporting.
  *   - `createPromoteWorkerSupervisor(...)` — multi-slot polling +
@@ -27,16 +27,63 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
 import {
-  classifyPromoteError,
   createPromoteWorkerSupervisor,
   runPromoteJob,
 } from '../src/daemon/worker/async-promote-worker.js';
 import {
   createAsyncPromoteWorkerFixture,
   retryableBookkeepingFailure,
-  retryableSchedulerBusyFailure,
   type AsyncPromoteWorkerFixture,
 } from './_helpers/async-promote-worker-fixture.js';
+import { createClaimFailureBackoff } from '../src/daemon/worker/claim-failure-backoff.js';
+
+const PROMOTE_RETRYABLE_FAILURE_CODE = 'PROMOTE_RETRYABLE_FAILURE';
+
+describe('claim failure backoff', () => {
+  it('grows from 250ms to the 30s cap with injected time and randomness', () => {
+    let now = 1_000;
+    const backoff = createClaimFailureBackoff({
+      now: () => now,
+      random: () => 0.5,
+    });
+
+    expect(backoff.recordFailure()).toBe(250);
+    expect(backoff.isDue()).toBe(false);
+    now += 250;
+    expect(backoff.isDue()).toBe(true);
+    expect(backoff.recordFailure()).toBe(500);
+    now += 500;
+    for (let i = 0; i < 10; i += 1) {
+      now += backoff.recordFailure();
+    }
+    expect(backoff.recordFailure()).toBe(30_000);
+  });
+
+  it('resets the next failure to the base delay', () => {
+    let now = 1_000;
+    const backoff = createClaimFailureBackoff({
+      now: () => now,
+      random: () => 0.5,
+    });
+
+    expect(backoff.recordFailure()).toBe(250);
+    now += 250;
+    expect(backoff.recordFailure()).toBe(500);
+    backoff.reset();
+    expect(backoff.isDue()).toBe(true);
+    expect(backoff.recordFailure()).toBe(250);
+  });
+
+  it('applies both ±20% jitter bounds while retaining the absolute cap', () => {
+    const low = createClaimFailureBackoff({ now: () => 0, random: () => 0 });
+    const high = createClaimFailureBackoff({ now: () => 0, random: () => 1 });
+
+    expect(low.recordFailure()).toBe(200);
+    expect(high.recordFailure()).toBe(300);
+    for (let i = 0; i < 10; i += 1) high.recordFailure();
+    expect(high.recordFailure()).toBe(30_000);
+  });
+});
 
 function deferred<T = void>(): {
   promise: Promise<T>;
@@ -60,195 +107,6 @@ function promoteFailureDiagnostics(logs: readonly string[]): Record<string, unkn
     .map((line) => JSON.parse(line.slice(PROMOTE_FAILURE_LOG_PREFIX.length)) as Record<string, unknown>)
     .filter((entry) => entry['event'] === 'async_promote_attempt_failed');
 }
-
-describe('classifyPromoteError', () => {
-  // RFC §10 / plan §10.3 — the three patterns surfaced by the rc.10 Graphify import
-  // (`INTEGRATION_NOTES_GRAPHIFY.md`), plus the fatal default.
-
-  it('classifies gossip-cap errors as cap_exceeded (non-retryable)', () => {
-    const verdict = classifyPromoteError(
-      new Error('Promoted assertion too large for gossip (5120 KB, limit 4 MB). Promote fewer entities per call.'),
-    );
-    expect(verdict).toEqual({ classification: 'cap_exceeded', retryable: false });
-  });
-
-  it('classifies typed SWM gossip-cap errors by code', () => {
-    const err = new Error('custom wording') as Error & { code: string };
-    err.code = 'SWM_GOSSIP_PAYLOAD_TOO_LARGE';
-
-    const verdict = classifyPromoteError(err);
-
-    expect(verdict).toEqual({ classification: 'cap_exceeded', retryable: false });
-  });
-
-  it('classifies 256 KB body-cap errors as cap_exceeded', () => {
-    const verdict = classifyPromoteError(new Error('Request body too large (>262144 bytes)'));
-    expect(verdict.classification).toBe('cap_exceeded');
-    expect(verdict.retryable).toBe(false);
-  });
-
-  it('classifies generic PayloadTooLargeError as cap_exceeded', () => {
-    const verdict = classifyPromoteError(new Error('payload too large for this endpoint'));
-    expect(verdict.classification).toBe('cap_exceeded');
-  });
-
-  it('classifies fetch failures as transient (retryable)', () => {
-    expect(classifyPromoteError(new Error('fetch failed'))).toEqual({
-      classification: 'transient',
-      retryable: true,
-    });
-    expect(classifyPromoteError(new Error('ECONNRESET reading socket'))).toEqual({
-      classification: 'transient',
-      retryable: true,
-    });
-    expect(classifyPromoteError(new Error('socket hang up'))).toEqual({
-      classification: 'transient',
-      retryable: true,
-    });
-  });
-
-  // #1464 — the publisher tags a promote error's message with a "[promote:<step>] " prefix so the
-  // failing step is NAMED. The step LABEL must never change the retry classification: the classifier
-  // strips the tag before substring-matching. Regression for the gate-caught collision where the
-  // step label "encodeWorkspaceGossipPayload" injected the "gossip" trigger token, flipping a
-  // transient error to non-retryable cap_exceeded. Fails without the tag-strip.
-  it('#1464 — strips the [promote:<step>] tag before classifying (label tokens do not change the verdict)', () => {
-    // A transient error tagged at the gossip-encode step (label contains "gossip") stays retryable.
-    expect(classifyPromoteError(new Error('[promote:encodeWorkspaceGossipPayload] rate limit exceeded — request timed out')))
-      .toEqual({ classification: 'transient', retryable: true });
-    // Identical to the same error untagged.
-    expect(classifyPromoteError(new Error('rate limit exceeded — request timed out')))
-      .toEqual({ classification: 'transient', retryable: true });
-    // A GENUINE gossip-cap error (token in the ORIGINAL message) still classifies cap_exceeded even
-    // when tagged — stripping removes only the injected prefix, never real tokens.
-    expect(classifyPromoteError(new Error('[promote:assertionScopedQuads] Promoted assertion too large for gossip (limit 4 MB)')))
-      .toEqual({ classification: 'cap_exceeded', retryable: false });
-  });
-
-  it('classifies timeout errors as transient', () => {
-    expect(classifyPromoteError(new Error('Operation timed out'))).toEqual({
-      classification: 'transient',
-      retryable: true,
-    });
-    expect(classifyPromoteError(new Error('ETIMEDOUT connecting to 127.0.0.1'))).toEqual({
-      classification: 'transient',
-      retryable: true,
-    });
-  });
-
-  it('requires typed outcomes for managed-store and scheduler failures', () => {
-    for (const message of [
-      'STORE_OPERATION_TIMEOUT Managed Oxigraph is recovering; query was not started',
-      'Managed Oxigraph recovery interrupted query execution',
-      'Managed Oxigraph recovery interrupted listGraphs; outcome is indeterminate',
-      'Managed Oxigraph recovery interrupted countQuads; outcome is indeterminate',
-      'Store scheduler queue wait timeout',
-    ]) {
-      expect(classifyPromoteError(new Error(message))).toEqual({
-        classification: 'fatal',
-        retryable: false,
-      });
-    }
-    expect(classifyPromoteError(retryableSchedulerBusyFailure())).toEqual({
-      classification: 'transient',
-      retryable: true,
-    });
-  });
-
-  it('retries typed indeterminate reads and producer-certified replay while failing closed for raw writes', () => {
-    for (const operation of [
-      'query',
-      'construct',
-      'hasGraph',
-      'listGraphs',
-      'listGraphsByPrefix',
-      'countQuads',
-    ] as const) {
-      expect(classifyPromoteError(new StoreOperationTimeoutError({
-        backend: 'oxigraph-server',
-        operation,
-        outcome: 'indeterminate',
-      }))).toEqual({ classification: 'transient', retryable: true });
-    }
-
-    const rawReplaceFailure = new StoreOperationTimeoutError({
-      backend: 'oxigraph-server',
-      operation: 'replaceGraph',
-      outcome: 'indeterminate',
-      message: 'Managed Oxigraph recovery interrupted replaceGraph; outcome is indeterminate',
-    });
-    expect(classifyPromoteError(rawReplaceFailure)).toEqual({
-      classification: 'fatal',
-      retryable: false,
-    });
-    expect(classifyPromoteError(
-      classifyExactSwmGraphReplaceFailure(rawReplaceFailure),
-    )).toEqual({ classification: 'transient', retryable: true });
-    expect(classifyPromoteError(classifyExactSwmGraphReplaceFailure(
-      new StoreOperationTimeoutError({
-        backend: 'oxigraph-server',
-        operation: 'replaceGraph',
-        outcome: 'indeterminate',
-        message: 'payload too large while reading the indeterminate timeout response',
-      }),
-    ))).toEqual({ classification: 'transient', retryable: true });
-    expect(classifyPromoteError({
-      code: 'PROMOTE_REPLAY_SAFE_FAILURE',
-      stage: 'atomic-exact-swm-graph-replacement',
-      cause: rawReplaceFailure,
-    })).toEqual({ classification: 'fatal', retryable: false });
-    for (const malformed of [
-      { code: 'PROMOTE_REPLAY_SAFE_FAILURE', cause: rawReplaceFailure },
-      {
-        code: 'PROMOTE_REPLAY_SAFE_FAILURE',
-        stage: 'other',
-        cause: rawReplaceFailure,
-      },
-      {
-        code: 'PROMOTE_REPLAY_SAFE_FAILURE',
-        stage: 'atomic-exact-swm-graph-replacment',
-        cause: rawReplaceFailure,
-      },
-      {
-        code: 'PROMOTE_REPLAY_SAFE_FAILURE',
-        stage: 'atomic-exact-swm-graph-replacement',
-      },
-    ]) {
-      expect(classifyPromoteError(malformed)).toEqual({
-        classification: 'fatal',
-        retryable: false,
-      });
-    }
-
-    for (const message of [
-      'insert timed out',
-      'insert timeout after dispatch',
-    ]) {
-      expect(classifyPromoteError(new StoreOperationTimeoutError({
-        backend: 'oxigraph-server',
-        operation: 'insert',
-        outcome: 'indeterminate',
-        message,
-      }))).toEqual({ classification: 'fatal', retryable: false });
-    }
-  });
-
-  it('classifies unknown errors as fatal (non-retryable)', () => {
-    expect(classifyPromoteError(new Error('assertion not found: foo'))).toEqual({
-      classification: 'fatal',
-      retryable: false,
-    });
-    expect(classifyPromoteError(new Error('something exploded'))).toEqual({
-      classification: 'fatal',
-      retryable: false,
-    });
-  });
-
-  it('handles non-Error throws (strings, undefined)', () => {
-    expect(classifyPromoteError('boom').classification).toBe('fatal');
-    expect(classifyPromoteError(undefined).classification).toBe('fatal');
-  });
-});
 
 describe('runPromoteJob', () => {
   let fixture: AsyncPromoteWorkerFixture;
@@ -428,6 +286,36 @@ describe('runPromoteJob', () => {
     ]);
   });
 
+  it('keeps a serialized cross-boundary generic failure queued for retry', async () => {
+    const job = await enqueueAndClaim();
+    const result = await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw { code: PROMOTE_RETRYABLE_FAILURE_CODE };
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+
+    expect(result).toMatchObject({
+      outcome: 'failed_retrying',
+      error: { classification: 'transient', retryable: true },
+    });
+    expect(await queue.getStatus(job.jobId)).toMatchObject({ state: 'failed_retrying' });
+    expect(promoteFailureDiagnostics(logs)).toEqual([
+      expect.objectContaining({
+        classification: 'transient',
+        retryable: true,
+        errorName: 'PromoteRetryableFailureError',
+        errorCode: PROMOTE_RETRYABLE_FAILURE_CODE,
+      }),
+    ]);
+  });
+
   it('uses publisher-owned diagnostics for a certified replay-safe failure', async () => {
     const job = await enqueueAndClaim();
     const replaySafeFailure = classifyExactSwmGraphReplaceFailure(
@@ -569,16 +457,14 @@ describe('runPromoteJob', () => {
     expect(promoteFailureDiagnostics(logs)).toEqual(diagnostics);
   });
 
-  it('maps unowned stages and unsafe error identity to bounded unknown values', async () => {
+  it('sanitizes caller-controlled error identity at the worker logging boundary', async () => {
     const job = await enqueueAndClaim();
-    const sensitiveMessage = 'opaque secret-sentinel failure';
-    const alphanumericSecretToken = 'AKIAIOSFODNN7EXAMPLE';
-    const failure = Object.assign(new Error(`[promote:callerControlled] ${sensitiveMessage}`), {
-      name: `Error${alphanumericSecretToken}`,
-      code: alphanumericSecretToken,
+    const secretToken = 'AKIAIOSFODNN7EXAMPLE';
+    const failure = Object.assign(new Error('[promote:callerControlled] secret-sentinel failure'), {
+      name: `Error${secretToken}`,
+      code: secretToken,
     });
-
-    await runPromoteJob({
+    const result = await runPromoteJob({
       job,
       queue,
       workerId: 'worker-test',
@@ -591,16 +477,15 @@ describe('runPromoteJob', () => {
       log: (message) => logs.push(message),
     });
 
-    expect(promoteFailureDiagnostics(logs)).toEqual([
-      expect.objectContaining({
-        stage: 'unknown',
-        errorName: 'unknown',
-        errorCode: 'unknown',
-      }),
-    ]);
+    expect(result.outcome).toBe('failed_terminal');
+    expect(promoteFailureDiagnostics(logs)).toEqual([expect.objectContaining({
+      stage: 'unknown', errorName: 'unknown', errorCode: 'unknown',
+      classification: 'fatal', retryable: false,
+    })]);
     expect(promoteFailureDiagnostics(logs)[0]).not.toHaveProperty('messageFingerprint');
+    expect(logs.join('\n')).not.toContain(secretToken);
     expect(logs.join('\n')).not.toContain('secret-sentinel');
-    expect(logs.join('\n')).not.toContain(alphanumericSecretToken);
+    expect(logs.join('\n')).not.toContain('callerControlled');
     expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
   });
 
@@ -1123,6 +1008,120 @@ describe('createPromoteWorkerSupervisor', () => {
     await sup.stop();
 
     expect(claimCalls).toBe(1);
+  });
+
+  it('backs off repeated claim failures instead of polling the store continuously', async () => {
+    let now = 10_000;
+    let claimCalls = 0;
+    const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
+    wrappedQueue.claimNext = async () => {
+      claimCalls += 1;
+      throw new Error('store unavailable');
+    };
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: wrappedQueue,
+        assertion: { promote: async () => ({ promotedCount: 0 }) },
+      } as any,
+      workerConcurrency: 4,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      now: () => now,
+      random: () => 0.5,
+      log: (message) => logs.push(message),
+      workerIdPrefix: 'claim-backoff',
+    });
+
+    await sup.start();
+    for (let i = 0; i < 400; i += 1) await sup.tickOnce();
+    expect(claimCalls).toBe(1);
+
+    now += 249;
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(1);
+    now += 1;
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(2);
+
+    now += 499;
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(2);
+    now += 1;
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(3);
+    expect(logs.some((message) => message.includes('retrying in 500ms'))).toBe(true);
+
+    await sup.stop();
+  });
+
+  it('automatically retries a failed claim when the backoff deadline arrives', async () => {
+    vi.useFakeTimers();
+    let claimCalls = 0;
+    const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
+    wrappedQueue.claimNext = async () => {
+      claimCalls += 1;
+      throw new Error('store unavailable');
+    };
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: wrappedQueue,
+        assertion: { promote: async () => ({ promotedCount: 0 }) },
+      } as any,
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      random: () => 0.5,
+      log: (message) => logs.push(message),
+      workerIdPrefix: 'automatic-claim-retry',
+    });
+
+    await sup.start();
+    await queue.enqueue(makeRequest('automatic-claim-retry'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(claimCalls).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(249);
+    expect(claimCalls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(claimCalls).toBe(2);
+    expect(logs.some((message) => message.includes('retrying in 500ms'))).toBe(true);
+
+    await sup.stop();
+  });
+
+  it('resets claim backoff after the queue recovers', async () => {
+    let now = 10_000;
+    let claimCalls = 0;
+    const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
+    wrappedQueue.claimNext = async () => {
+      claimCalls += 1;
+      if (claimCalls === 2) return null;
+      throw new Error('store unavailable');
+    };
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: wrappedQueue,
+        assertion: { promote: async () => ({ promotedCount: 0 }) },
+      } as any,
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      now: () => now,
+      random: () => 0.5,
+      log: (message) => logs.push(message),
+      workerIdPrefix: 'claim-recovery',
+    });
+
+    await sup.start();
+    expect(await sup.tickOnce()).toBe(0);
+    now += 250;
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(2);
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(3);
+    expect(logs.at(-1)).toContain('retrying in 250ms');
+
+    await sup.stop();
   });
 
   it('rejects a heartbeat interval that is not shorter than the queue lease', () => {

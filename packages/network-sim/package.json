@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-network-sim",
-  "version": "10.0.14",
+  "version": "10.0.16",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs network-sim"
   },
   "dependencies": {
     "react": "^19.0.0",

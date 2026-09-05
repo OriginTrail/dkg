@@ -15,6 +15,7 @@
  */
 
 import {
+  AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
@@ -60,14 +61,17 @@ import {
   type VerifiedCatalogSealBindingV1,
   type VerifiedCatalogSealBindingSnapshotV1,
 } from '@origintrail-official/dkg-core';
+import { createHash } from 'node:crypto';
 import {
   verifyControlEnvelopeIssuerSignatureV1,
   type VerifiedControlEnvelopeIssuerSignatureV1,
 } from '@origintrail-official/dkg-chain';
 import {
+  quadToNQuad,
   quadsToNQuads,
   readExactGraphPaged,
   tryReplaceGraphAndSubjectAtomically,
+  type Quad,
   type TripleStore,
   invalidateSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
@@ -86,8 +90,9 @@ import {
   type VerifiedAuthorCatalogRowAuthorshipV1,
   type VerifiedAuthorCatalogRowAuthorshipSnapshotV1,
 } from './catalog-row-authorship.js';
-import type {
-  Rfc64ControlObjectOperationsV1,
+import {
+  RFC64_CONTROL_OBJECT_STORE_MAX_STAGE_OBJECTS,
+  type Rfc64ControlObjectOperationsV1,
 } from './control-object-store-v1.js';
 import type {
   AppliedCatalogHeadSnapshotV1,
@@ -126,10 +131,15 @@ import {
   transitionLocationFromRfc64RemovalV1 as transitionLocationFromRemoval,
   type Rfc64SemanticTransitionLocationV1,
 } from './catalog-semantic-authority-transition-v1.js';
+
 import {
   assertDirectAuthorCatalogIssuerDelegationBindingV1,
   loadExactAppliedCatalogRowsV1 as loadExactCatalogRowsForHeadV1,
 } from './applied-catalog-authority-transition-v1.js';
+import {
+  RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1,
+  walkRfc64BoundedCatalogHeadLineageV1,
+} from './catalog-head-lineage-v1.js';
 
 export {
   Rfc64PublicCatalogNativeReceiverErrorV1,
@@ -722,6 +732,7 @@ export class Rfc64PublicCatalogNativeReceiverV1<
         appliedHeadStatus = 'existing';
       } else {
         try {
+          throwIfAborted(signal);
           appliedHeadStatus = this.options.inventory.compareAndSwapAppliedCatalogHeadV1({
             catalogScopeDigest,
             authorAddress: head.payload.authorAddress,
@@ -732,6 +743,7 @@ export class Rfc64PublicCatalogNativeReceiverV1<
             inventoryRowCount: '0' as never,
           }).status;
         } catch (cause) {
+          if (signal?.aborted && cause === signal.reason) throw cause;
           const reconciled = this.options.inventory.readAppliedCatalogHeadV1(
             catalogScopeDigest,
             head.payload.authorAddress,
@@ -795,16 +807,20 @@ export class Rfc64PublicCatalogNativeReceiverV1<
       catalogScopeDigest,
       head.payload.authorAddress,
     );
-    const historyDisposition = classifySuccessorHistory(
-      currentAppliedHead,
-      head,
-      expectedRowCount,
-    );
     const scope = nativeScope(announcement, trustedCatalogScope, head);
     const fetchedDelegation = await this.fetchDirectAuthorCatalogIssuerDelegation(
       remotePeerId,
       scope,
       head,
+      trustedCatalogScope,
+      signal,
+    );
+    const historyDisposition = await this.classifyAndProveSuccessorHistoryV1(
+      remotePeerId,
+      scope,
+      currentAppliedHead,
+      head,
+      expectedRowCount,
       trustedCatalogScope,
       signal,
     );
@@ -1099,9 +1115,9 @@ export class Rfc64PublicCatalogNativeReceiverV1<
         // retry after a successful cold bootstrap fail despite exact durable
         // target state.
         ? Object.freeze(targetRows.map((row) => Object.freeze({ ...row })))
-        : await loadExactAppliedPredecessorRows(
+        : await loadExactAppliedCatalogRowsForSnapshotV1(
           this.options.controlObjects,
-          head,
+          currentAppliedHead,
           trustedCatalogScope,
           this.#verifyIssuerSignature,
         );
@@ -1296,12 +1312,13 @@ export class Rfc64PublicCatalogNativeReceiverV1<
         appliedHeadStatus = 'existing';
       } else {
         try {
+          throwIfAborted(signal);
           const casResult = this.options.inventory.compareAndSwapAppliedCatalogHeadV1({
             catalogScopeDigest,
             authorAddress: head.payload.authorAddress,
             expectedCurrentCatalogHeadDigest: historyDisposition === 'cold-bootstrap'
               ? null
-              : head.payload.previousHeadDigest,
+              : currentAppliedHead!.currentCatalogHeadDigest,
             currentCatalogHeadDigest: head.objectDigest as Digest32V1,
             appliedInventoryDigest: completion.inventoryDigest,
             catalogVersion: head.payload.version,
@@ -1310,6 +1327,7 @@ export class Rfc64PublicCatalogNativeReceiverV1<
           headCommitDisposition = 'target';
           appliedHeadStatus = casResult.status;
         } catch (cause) {
+          if (signal?.aborted && cause === signal.reason) throw cause;
           // The CAS adapter can throw after its durable write. Until its exact
           // state is read, predecessor rollback is unsafe.
           headCommitDisposition = 'indeterminate';
@@ -1483,6 +1501,101 @@ export class Rfc64PublicCatalogNativeReceiverV1<
       envelope: fetched.envelope,
       issuerSignature: fetched.issuerSignature,
     });
+  }
+
+  private async classifyAndProveSuccessorHistoryV1(
+    remotePeerId: string,
+    scope: Rfc64PublicCatalogNativeFetchScopeV1,
+    current: AppliedCatalogHeadSnapshotV1 | null,
+    target: SignedAuthorCatalogHeadEnvelopeV1,
+    expectedRowCount: number,
+    trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
+    signal: AbortSignal | undefined,
+  ): Promise<Rfc64SuccessorHistoryDispositionV1> {
+    if (
+      current === null
+      || current.currentCatalogHeadDigest === target.objectDigest
+      || BigInt(current.catalogVersion) + 1n === BigInt(target.payload.version)
+    ) {
+      return classifySuccessorHistory(current, target, expectedRowCount);
+    }
+
+    const currentVersion = BigInt(current.catalogVersion);
+    const targetVersion = BigInt(target.payload.version);
+    if (
+      targetVersion <= currentVersion
+      || targetVersion - currentVersion - 1n
+        > BigInt(RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1)
+    ) {
+      fail(
+        'catalog-native-receiver-history',
+        'coalesced successor is outside the bounded signed-lineage window',
+      );
+    }
+
+    let lineage: Awaited<ReturnType<typeof walkRfc64BoundedCatalogHeadLineageV1<
+      FetchedRfc64PublicCatalogObjectV1
+    >>>;
+    try {
+      lineage = await walkRfc64BoundedCatalogHeadLineageV1({
+        target,
+        catalogScope: trustedCatalogScope,
+        anchorHeadDigest: current.currentCatalogHeadDigest,
+        readPredecessor: async (predecessorDigest) => {
+          throwIfAborted(signal);
+          const fetched = await this.fetchCatalogObjectWithCacheV1(
+            remotePeerId,
+            scope,
+            AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
+            predecessorDigest,
+            signal,
+          );
+          if (fetched === null) return null;
+          assertSignedAuthorCatalogHeadEnvelopeV1(fetched.envelope);
+          return Object.freeze({ head: fetched.envelope, evidence: fetched });
+        },
+      });
+    } catch (cause) {
+      fail(
+        'catalog-native-receiver-history',
+        'coalesced successor has an invalid signed predecessor lineage',
+        cause,
+      );
+    }
+
+    if (
+      lineage.disposition !== 'anchor'
+      || BigInt(lineage.terminalChild.payload.version) !== currentVersion + 1n
+    ) {
+      if (lineage.disposition === 'missing') {
+        fail('catalog-native-receiver-not-found', 'coalesced successor predecessor head was not found');
+      }
+      fail(
+        'catalog-native-receiver-history',
+        'coalesced successor does not descend from the durable current head',
+      );
+    }
+    try {
+      for (
+        let offset = 0;
+        offset < lineage.ancestors.length;
+        offset += RFC64_CONTROL_OBJECT_STORE_MAX_STAGE_OBJECTS
+      ) {
+        await this.options.controlObjects.stageVerifiedObjects(lineage.ancestors.map(
+          ({ evidence }) => evidence,
+        ).slice(
+          offset,
+          offset + RFC64_CONTROL_OBJECT_STORE_MAX_STAGE_OBJECTS,
+        ));
+      }
+    } catch (cause) {
+      fail(
+        'catalog-native-receiver-catalog',
+        'verified coalesced successor lineage could not be staged',
+        cause,
+      );
+    }
+    return 'monotonic-successor';
   }
 
   private async fetchCatalogHeadWithCacheV1(
@@ -1843,33 +1956,32 @@ function nativeScope(
   });
 }
 
-async function loadExactAppliedPredecessorRows(
+async function loadExactAppliedCatalogRowsForSnapshotV1(
   controlObjects: Pick<Rfc64ControlObjectOperationsV1, 'getVerifiedObjectByDigest'>,
-  targetHead: SignedAuthorCatalogHeadEnvelopeV1,
+  current: AppliedCatalogHeadSnapshotV1 | null,
   trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
   verifyIssuerSignature: (
     envelope: SignedControlEnvelopeV1,
   ) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>,
 ): Promise<readonly Readonly<AuthorCatalogRowV1>[]> {
-  const predecessorDigest = targetHead.payload.previousHeadDigest;
-  if (predecessorDigest === null) {
-    fail('catalog-native-receiver-history', 'successor has no predecessor digest');
+  if (current === null) {
+    fail('catalog-native-receiver-history', 'successor has no durable applied predecessor');
   }
   try {
     const storedHead = await controlObjects.getVerifiedObjectByDigest({
-      objectDigest: predecessorDigest,
+      objectDigest: current.currentCatalogHeadDigest,
       verifyIssuerSignature,
     });
     if (storedHead === null) throw new Error('applied predecessor head is not staged');
     assertSignedAuthorCatalogHeadEnvelopeV1(storedHead.envelope);
     const predecessorHead = storedHead.envelope;
     if (
-      predecessorHead.objectDigest !== predecessorDigest
-      || predecessorHead.payload.version === targetHead.payload.version
-      || BigInt(predecessorHead.payload.version) + 1n !== BigInt(targetHead.payload.version)
+      predecessorHead.objectDigest !== current.currentCatalogHeadDigest
+      || predecessorHead.payload.version !== current.catalogVersion
+      || predecessorHead.payload.totalRows !== current.inventoryRowCount
       || BigInt(predecessorHead.payload.totalRows) > BigInt(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1)
     ) {
-      throw new Error('predecessor identity, version, or row bound differs from target history');
+      throw new Error('applied predecessor identity, version, or row count differs from durable state');
     }
     assertAuthorCatalogHeadScopeBindingV1(predecessorHead.payload, trustedCatalogScope);
     return await loadExactCatalogRowsForHeadV1(
@@ -2059,8 +2171,22 @@ async function activateExactPublicProjection(
   } catch (cause) {
     fail('catalog-native-receiver-activation', 'exact SWM post-read failed', cause);
   }
-  if (`${quadsToNQuads(readBack)}\n` !== projectionText) {
-    fail('catalog-native-receiver-activation', 'exact SWM post-read differs from verified projection');
+  const readBackText = `${quadsToNQuads(readBack)}\n`;
+  if (readBackText !== projectionText) {
+    const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+    const setEqual = canonicalQuadSetV1(quads) === canonicalQuadSetV1(readBack);
+    if (!setEqual) {
+      fail(
+        'catalog-native-receiver-activation',
+        `exact SWM post-read differs from verified projection for ${kaUal}`
+          + ` expectedTriples=${expectedTripleCount} actualTriples=${readBack.length}`
+          + ` expectedBytes=${Buffer.byteLength(projectionText)}`
+          + ` actualBytes=${Buffer.byteLength(readBackText)}`
+          + ` expectedSha256=${digest(projectionText)}`
+          + ` actualSha256=${digest(readBackText)}`
+          + ` canonicalSetEqual=${setEqual}`,
+      );
+    }
   }
   await assertExactAuthorSealPostRead(store, sealBinding);
   return {
@@ -2129,6 +2255,11 @@ function compareQuads(
     || left.object.localeCompare(right.object)
     || left.subject.localeCompare(right.subject)
     || left.graph.localeCompare(right.graph);
+}
+
+/** RDF graph equality is set equality; triple insertion does not retain row order. */
+function canonicalQuadSetV1(quads: readonly Readonly<Quad>[]): string {
+  return [...new Set(quads.map(quadToNQuad))].sort().join('\n');
 }
 
 export function rfc64CatalogSignatureVariantDigestV1(

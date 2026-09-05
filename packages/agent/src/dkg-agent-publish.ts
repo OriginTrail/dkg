@@ -127,7 +127,6 @@ import {
   PublishJournal, StaleWriteError,
   ACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
-  resolveWorkspaceAgentRecipients,
   computeTripleHashV10 as computeTripleHash,
   computeFlatKCRootV10 as computeFlatKCRoot,
   computePrivateRootV10 as computePrivateRoot,
@@ -791,6 +790,8 @@ function recordPublishOutcome(
 // symbol is module-private so a public `agent.update(...)` caller cannot opt
 // into the retry allowance and author protocol-reserved skolem IRIs.
 const INTERNAL_ROOTLESS_UPDATE_ORIGIN = Symbol('dkg-agent:internal-rootless-update-origin');
+// Only queued execution can reuse the share snapshot frozen in its job request.
+const INTERNAL_QUEUED_UPDATE_OPERATION = Symbol('dkg-agent:internal-queued-update-operation');
 
 // Serialize the full "validate current V2 head -> stage exact SWM replacement
 // -> submit update" sequence per KA. Without this, two concurrent HTTP calls
@@ -1990,6 +1991,10 @@ export class PublishMethods extends DKGAgentBase {
       privateMerkleRoot?: PublishOptions['privateMerkleRoot'];
       privateTripleCount?: PublishOptions['privateTripleCount'];
       [INTERNAL_ROOTLESS_UPDATE_ORIGIN]?: true;
+      [INTERNAL_QUEUED_UPDATE_OPERATION]?: Readonly<{
+        shareOperationId: string;
+        publisherPeerId: string;
+      }>;
       accessPolicy?: PublishOptions['accessPolicy'];
       allowedPeers?: PublishOptions['allowedPeers'];
     },
@@ -2114,26 +2119,26 @@ export class PublishMethods extends DKGAgentBase {
       throw new Error('Graph-scoped update private Merkle root does not match canonical private content');
     }
 
-    // Direct HTTP/SDK updates and finalized-assertion updates converge through
-    // the same trusted SWM boundary. Stage the immutable private version first
-    // (it cannot overwrite the previous commitment), then atomically replace
-    // the stable public SWM graph and remove historical checksum aliases before
-    // the publisher reloads it. Any failure remains retryable and cannot touch
-    // verifiable memory or the chain.
-    const graphManager = new GraphManager(this.store);
-    const updatePrivateStore = new PrivateContentStore(this.store, graphManager);
-    await updatePrivateStore.replaceKnowledgeAssetPrivateTriples(
-      contextGraphId,
-      updateScope,
-      canonicalParts.privateQuads,
-      opts?.subGraphName,
-    );
-    // Persist the exact update snapshot and monotonic SWM head before the
-    // publisher can cross the chain write-ahead boundary. If the process dies
+    // A queued UPDATE already owns a promoted immutable snapshot. Reuse it
+    // without rewriting either private content or the operation/head metadata
+    // that same-job retry validates. Direct updates still stage fresh content.
+    const queuedOperation = opts?.[INTERNAL_QUEUED_UPDATE_OPERATION];
+    if (!queuedOperation) {
+      const graphManager = new GraphManager(this.store);
+      const updatePrivateStore = new PrivateContentStore(this.store, graphManager);
+      await updatePrivateStore.replaceKnowledgeAssetPrivateTriples(
+        contextGraphId,
+        updateScope,
+        canonicalParts.privateQuads,
+        opts?.subGraphName,
+      );
+    }
+    // Stage a direct update, or validate the existing queued snapshot, before
+    // the publisher can cross the chain write-ahead boundary. If the process dies
     // after the transaction lands but before local VM materialization, chain
     // reconciliation can now resolve the staged version, counts, private
     // commitment, publisher, and immutable public payload without guessing.
-    const updateOperationId = ctx.operationId;
+    const updateOperationId = queuedOperation?.shareOperationId ?? ctx.operationId;
     const publisher = opts?.publisherOverride ?? this.publisher;
     const stagedOperation = await this.publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
       contextGraphId,
@@ -2145,10 +2150,15 @@ export class PublishMethods extends DKGAgentBase {
         ? { privateMerkleRoot: canonicalPrivateMerkleRoot }
         : {}),
       privateTripleCount: canonicalParts.privateQuads.length,
-      publisherPeerId: this.node.peerId.toString(),
+      publisherPeerId: queuedOperation?.publisherPeerId ?? this.node.peerId.toString(),
       agentAddress: updateScope.agentAddress,
       subGraphName: opts?.subGraphName,
       timestamp: new Date(),
+      ...(queuedOperation ? {
+        reuseExistingOperation: true,
+        accessPolicy: opts?.accessPolicy,
+        allowedPeers: opts?.allowedPeers,
+      } : {}),
     });
       // GH #842: thread the on-chain cgId so the publisher can promote the update
       // payload into the per-cgId partition the RS prover reads. Without it,
@@ -3901,7 +3911,7 @@ export class PublishMethods extends DKGAgentBase {
         `Refusing to publish curated CG payload via the plaintext-inline fallback.`,
       );
     }
-    const resolution = await resolveWorkspaceAgentRecipients(this.store, { contextGraphId });
+    const resolution = await this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId });
     if (!resolution.requiresEncryption) {
       throw new Error(
         `${logPrefix}: curated CG ${contextGraphId}: access-policy says curated but recipient resolver ` +
@@ -5429,6 +5439,10 @@ export class PublishMethods extends DKGAgentBase {
           ...(snapshotPrivateRoot ? { privateMerkleRoot: snapshotPrivateRoot } : {}),
           privateTripleCount: seal.privateTripleCount,
           [INTERNAL_ROOTLESS_UPDATE_ORIGIN]: true,
+          [INTERNAL_QUEUED_UPDATE_OPERATION]: {
+            shareOperationId: request.shareOperationId,
+            publisherPeerId: publishOptions.publisherPeerId ?? this.peerId,
+          },
           ...queuedKnowledgeAssetAccessEnvelope(request),
         },
       );
@@ -5693,6 +5707,7 @@ export class PublishMethods extends DKGAgentBase {
       contextGraphId: request.contextGraphId,
       subGraphName: request.subGraphName,
       assertionCoordinate: request.name,
+      shareOperationId: request.shareOperationId,
       seal,
       assertionUri,
       ctx,
@@ -5810,7 +5825,17 @@ export class PublishMethods extends DKGAgentBase {
         { code: 'PUBLISH_NOT_FULL_SHARE' },
       );
     }
-
+    // Current graph-scoped shares retain the operation identity needed to
+    // fence an exact late SWM replay. Older finalized fixtures and migrated
+    // stores may not have a workspace head, so confirmation remains valid
+    // without installing an over-broad tombstone for those records.
+    const rfc64WorkspaceHead = await resolveKnowledgeAssetWorkspaceHead({
+      store: this.store,
+      graphManager: new GraphManager(this.store),
+      contextGraphId,
+      kaUal: graphScope.ual,
+      subGraphName: opts?.subGraphName,
+    });
     // Merge note (PR #1107 ← main): #1097's "auto-promote a sealed-but-unstaged
     // assertion before publish" was dropped here. main reworked the memory
     // model so that publishing a finalized-but-unshared assertion is an
@@ -6265,6 +6290,7 @@ export class PublishMethods extends DKGAgentBase {
       contextGraphId,
       subGraphName: opts?.subGraphName,
       assertionCoordinate: name,
+      shareOperationId: rfc64WorkspaceHead?.shareOperationId,
       seal,
       assertionUri,
       ctx: opts?.operationCtx ?? createOperationContext('publishFromSWM'),
@@ -6281,6 +6307,7 @@ export class PublishMethods extends DKGAgentBase {
       contextGraphId: string;
       subGraphName?: string;
       assertionCoordinate: string;
+      shareOperationId?: string;
       seal: AssertionSeal;
       assertionUri: string;
       ctx: OperationContext;

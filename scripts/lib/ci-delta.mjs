@@ -1,22 +1,21 @@
-export const NODE_EVM_LANES = Object.freeze([
-  'tornado_core',
-  'tornado_blazegraph',
-  'tornado_publisher',
-  'tornado_agent',
-  'bura_cli',
-  'bura_blazegraph_arm64',
-  'bura_query',
-  'kosava_node_ui',
-  'kosava_node_ui_e2e',
-  'kosava_supporting',
-  'kosava_hardhat_plugins',
-]);
+import { NODE_EVM_LANES } from './ci-lanes.mjs';
+export { NODE_EVM_LANES } from './ci-lanes.mjs';
 
 // `contracts` remains a workflow output for compatibility, but Solidity is an
 // independent relevance gate rather than part of the Node/EVM "full" profile.
 export const CI_LANES = Object.freeze([...NODE_EVM_LANES, 'contracts']);
 
 export const EVM_SCOPES = Object.freeze(['chain', 'publisher', 'agent']);
+
+// Lanes that restore the shared Hardhat 0.8.20/london compiler outputs.
+export const NODE_TEST_ARTIFACT_LANES = Object.freeze([
+  'tornado_core', 'tornado_publisher', 'tornado_agent', 'bura_cli', 'kosava_hardhat_plugins',
+]);
+
+export function needsNodeTestArtifacts(plan) {
+  return NODE_TEST_ARTIFACT_LANES.some((lane) => plan.lanes?.[lane] === true);
+}
+
 
 export const WORKSPACE_RULES = Object.freeze({
   'packages/core': {
@@ -35,6 +34,21 @@ export const WORKSPACE_RULES = Object.freeze({
     evmScopes: EVM_SCOPES,
   },
   'packages/rdf-utils': {
+    lanes: [
+      'tornado_core',
+      'tornado_blazegraph',
+      'tornado_publisher',
+      'tornado_agent',
+      'bura_cli',
+      'bura_query',
+      'kosava_node_ui',
+      'kosava_node_ui_e2e',
+      'kosava_supporting',
+      'kosava_hardhat_plugins',
+    ],
+    evmScopes: EVM_SCOPES,
+  },
+  'packages/http-utils': {
     lanes: [
       'tornado_core',
       'tornado_blazegraph',
@@ -193,6 +207,7 @@ export const WORKSPACE_RULES = Object.freeze({
 // WORKSPACE_RULES in addition to this mechanically checked minimum.
 export const WORKSPACE_OWNING_LANES = Object.freeze({
   'packages/core': ['tornado_core'],
+  'packages/http-utils': ['tornado_core'],
   'packages/rdf-utils': ['tornado_core'],
   'packages/storage': ['tornado_core', 'tornado_blazegraph'],
   'packages/chain': ['tornado_core'],
@@ -568,6 +583,7 @@ export function githubOutputsForPlan(plan) {
   return {
     full_ci: String(plan.fullCi),
     run_node: String(plan.runNode),
+    node_test_artifacts: String(needsNodeTestArtifacts(plan)),
     abi_freshness: String(plan.abiFreshnessRelevant),
     ...Object.fromEntries(CI_LANES.map((lane) => [lane, String(plan.lanes[lane])])),
     evm_matrix: JSON.stringify(plan.evmScopes),

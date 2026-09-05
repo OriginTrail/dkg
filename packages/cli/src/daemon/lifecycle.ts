@@ -47,6 +47,7 @@ import * as osModule from 'node:os';
 import type { NetworkInterfaceInfo } from 'node:os';
 import { checkCoreRelayPrereqs } from './core-prereq-check.js';
 import { rotateDaemonLogIfNeeded } from './log-rotation.js';
+import { resolveUpdateTelemetryVersionStatus } from './update-telemetry-status.js';
 const { homedir } = osModule;
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -1330,12 +1331,46 @@ async function runDaemonInnerWithStartupOwnership(
   // network manifest fails before subscriptions, stores, wallets, or agent
   // runtime construction begin. The same immutable chainBase is reused below.
   const chainBase = resolveChainConfig(config, network);
+  const unifiedRfc64Disabled = config.rfc64Catalog?.enabled === false;
   const rfc64CatalogActivations = resolveRfc64CatalogActivations(
-    config,
+    unifiedRfc64Disabled
+      ? {
+          rfc64Catalog: config.rfc64Catalog,
+          // The unified rollback is authoritative at the daemon boundary too.
+          // Do not let stale deprecated controls extend sync scope, fail
+          // validation, or reach the agent while the replacement is disabled.
+          rfc64PublicCatalog: undefined,
+        }
+      : config,
     resolveRfc64PublicCatalogActivationChainIdentityV1(chainBase?.chainId),
   );
   const rfc64Catalog = rfc64CatalogActivations.catalog;
   const rfc64PublicCatalog = rfc64CatalogActivations.publicCatalog;
+  const rfc64RollbackTimestamp = new Date().toISOString();
+  const explicitDisabled = unifiedRfc64Disabled
+    || (config.rfc64Catalog === undefined && config.rfc64PublicCatalog?.enabled === false);
+  if (explicitDisabled) {
+    log(
+      `[rfc64-catalog-rollback] WARNING source=operator-override reason=deprecated-enabled-false `
+      + `timestamp=${rfc64RollbackTimestamp} affected=all-responsible-cgs; `
+      + 'RFC-64 default correctness is disabled for this compatibility release',
+    );
+  }
+  const emergencyModes = Object.entries(rfc64Catalog.rollout.contextGraphModes)
+    .filter(([, mode]) => mode === 'legacy' || mode === 'shadow')
+    .sort(([left], [right]) => left.localeCompare(right));
+  if (emergencyModes.length > 0) {
+    log(
+      `[rfc64-catalog-rollback] WARNING source=operator-override reason=per-cg-emergency-mode `
+      + `timestamp=${rfc64RollbackTimestamp} affected=${JSON.stringify(emergencyModes)}`,
+    );
+  }
+  if (rfc64Catalog.rollout.killSwitch) {
+    log(
+      `[rfc64-catalog-rollback] WARNING source=kill-switch reason=global-emergency-stop `
+      + `timestamp=${rfc64RollbackTimestamp} affected=all-responsible-cgs`,
+    );
+  }
   const syncContextGraphs = [
     ...new Set([
       ...resolveContextGraphs(config),
@@ -1387,6 +1422,8 @@ async function runDaemonInnerWithStartupOwnership(
   if (networkSwitch.aborted) {
     process.exit(1);
   }
+
+  exitOnStoreConfigErrors(config, log);
 
   // Managed local Oxigraph server (`store.backend: 'oxigraph-server'`,
   // Release 2 opt-in). Fetch/verify the pinned binary, spawn a loopback
@@ -2843,12 +2880,11 @@ async function runDaemonInnerWithStartupOwnership(
         commit: nodeCommit,
         role: config.nodeRole ?? "edge",
         autoUpdate: autoUpdateEnabled,
-        versionStatus: () => {
-          if (!autoUpdateEnabled) return "disabled";
-          if (daemonState.isUpdating) return "updating";
-          if (daemonState.lastUpdateCheck.checkedAt === 0) return "unknown";
-          return daemonState.lastUpdateCheck.upToDate ? "latest" : "behind";
-        },
+        versionStatus: () => resolveUpdateTelemetryVersionStatus({
+          autoUpdateEnabled,
+          isUpdating: daemonState.isUpdating,
+          lastUpdateCheck: daemonState.lastUpdateCheck,
+        }),
       });
       worker.start();
       return {

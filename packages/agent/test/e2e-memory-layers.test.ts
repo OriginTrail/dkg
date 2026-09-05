@@ -10,17 +10,27 @@
  * 7. Working memory view
  */
 import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest';
+import { waitForSharedMemorySubscriber } from './_helpers/gossip-readiness.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
-import { DKGAgent, type DKGAgentConfig } from '../src/index.js';
+import { DKGAgent as RealDKGAgent, type DKGAgentConfig } from '../src/index.js';
 import { SEAL_CAPABILITY_GAP_CODE } from '../src/dkg-agent-publish.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import {
+  resolvePublishedKnowledgeAssetWorkspaceHead,
+  resolveKnowledgeAssetOperationPublicQuads,
+  FileWorkspacePublicSnapshotStore,
   SWM_CURRENT_ASSERTION_PRED,
   TripleStoreAsyncLiftPublisher,
+  type KnowledgeAssetVmPublishRequest,
 } from '@origintrail-official/dkg-publisher';
+import { GraphManager, PrivateContentStore, createManagedOxigraphSparqlStoreV1 } from '@origintrail-official/dkg-storage';
+import { startOxigraphSparqlEndpoint } from '../../storage/test/helpers/oxigraph-sparql-endpoint.js';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 import { extractFromMarkdown } from '../../cli/src/extraction/markdown-extractor.js';
 import {
@@ -37,6 +47,16 @@ import {
   MemoryLayer,
 } from '@origintrail-official/dkg-core';
 import { makeSwmSyncHarness } from './_helpers/swm-sync-harness.js';
+
+type DKGAgent = RealDKGAgent;
+const DKGAgent = {
+  create(config: Parameters<typeof RealDKGAgent.create>[0]) {
+    return RealDKGAgent.create({
+      rfc64CatalogActivation: { enabled: false },
+      ...config,
+    });
+  },
+};
 
 const agents: DKGAgent[] = [];
 
@@ -79,6 +99,297 @@ async function createAgent(name: string, overrides: Partial<DKGAgentConfig> = {}
   await installHardhatACKProvider(agent, chain);
   return agent;
 }
+
+describe('queued named KA UPDATE retry [GH#2482]', () => {
+  type RetryCase = {
+    label: string;
+    accessPolicy: 'ownerOnly' | 'allowList';
+    allowedPeers?: string[];
+    privatePayload?: boolean;
+    reopen?: boolean;
+  };
+
+  const allowList = [' reader-b ', 'reader-a', 'reader-b', ''];
+
+  async function withUpdateFixture(
+    options: RetryCase,
+    run: (fixture: Awaited<ReturnType<typeof prepareUpdate>>) => Promise<void>,
+  ) {
+    const endpoint = options.reopen ? await startOxigraphSparqlEndpoint() : undefined;
+    const dataDir = options.reopen
+      ? await mkdtemp(join(tmpdir(), 'dkg-queued-update-reopen-'))
+      : undefined;
+    const ownedAgents: DKGAgent[] = [];
+    const openAgent = async () => {
+      const publicSnapshotStore = dataDir
+        ? new FileWorkspacePublicSnapshotStore(join(dataDir, 'snapshots'), undefined, { gc: { enabled: false } })
+        : undefined;
+      const agent = await createAgent(`QueuedUpdateRetry-${options.label}`, {
+        ...(dataDir ? { dataDir, publicSnapshotStore } : {}),
+        ...(endpoint ? {
+          store: createManagedOxigraphSparqlStoreV1({
+            queryEndpoint: endpoint.queryEndpoint,
+            updateEndpoint: endpoint.updateEndpoint,
+          }),
+        } : {}),
+      });
+      ownedAgents.push(agent);
+      return { agent, publicSnapshotStore };
+    };
+    try {
+      await run(await prepareUpdate(options, openAgent));
+    } finally {
+      vi.restoreAllMocks();
+      for (const agent of ownedAgents) {
+        await agent.stop();
+        await agent.store.close();
+        const index = agents.indexOf(agent);
+        if (index >= 0) agents.splice(index, 1);
+      }
+      await endpoint?.close();
+      if (dataDir) await rm(dataDir, { recursive: true, force: true });
+    }
+  }
+
+  async function prepareUpdate(
+    options: RetryCase,
+    openAgent: () => Promise<{
+      agent: DKGAgent;
+      publicSnapshotStore?: FileWorkspacePublicSnapshotStore;
+    }>,
+  ) {
+    let { agent, publicSnapshotStore } = await openAgent();
+    const cg = `queued-update-retry-${options.label}`;
+    const name = 'retry-same-named-ka';
+    const root = `${ENTITY_BASE}:${options.label}`;
+    await agent.createContextGraph({ id: cg, name: 'Queued UPDATE retry' });
+    await agent.registerContextGraph(cg);
+    await agent.assertion.create(cg, name);
+    await agent.assertion.write(cg, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"v1"' },
+    ]);
+    await agent.assertion.promote(cg, name);
+    expect((await agent.publishFromFinalizedAssertion(cg, name)).status).toBe('confirmed');
+
+    await agent.assertion.pullFrom(cg, name, 'vm', { onConflict: 'replace' });
+    await agent.assertion.write(cg, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"v2"' },
+    ]);
+    if (options.privatePayload) {
+      await agent.publisher.assertionWritePrivate(cg, name, agent.defaultAgentAddress ?? agent.peerId, [{
+        subject: root,
+        predicate: 'urn:private:note',
+        object: '"private v2"',
+        graph: '',
+      }]);
+    }
+    await agent.assertion.finalize(cg, name);
+    const promoted = await agent.assertion.promote(cg, name, {
+      accessPolicy: options.accessPolicy,
+      allowedPeers: options.allowedPeers,
+    });
+    expect(promoted.publishReady).toBe(true);
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(cg, name);
+    expect(intent).toMatchObject({
+      shareOperationId: promoted.shareOperationId,
+      assertionVersion: '2',
+      accessPolicy: options.accessPolicy,
+      privateTripleCount: options.privatePayload ? 1 : 0,
+    });
+    expect(intent.vmCurrentAssertion).toBeDefined();
+
+    const writeAhead = vi.fn();
+    const confirmations = vi.fn();
+    const makeQueue = () => new TripleStoreAsyncLiftPublisher(agent.store, {
+      publicSnapshotStore,
+      knowledgeAssetVmPublishHandler: {
+        preflight: async ({ request }) => agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
+        execute: async ({ request, publishOptions }) => agent.publishQueuedKnowledgeAssetVmPublish(request, {
+          ...publishOptions,
+          onBeforeBroadcast: async (record) => {
+            writeAhead(record);
+            await publishOptions.onBeforeBroadcast?.(record);
+          },
+          onPublishConfirmed: (record) => {
+            confirmations(record);
+            publishOptions.onPublishConfirmed?.(record);
+          },
+        }),
+      },
+    });
+    let queue = makeQueue();
+    const jobId = await queue.enqueueKnowledgeAssetVmPublish(intent);
+    const admitted = await queue.getStatus(jobId);
+    expect(admitted?.status).toBe('accepted');
+    const originalRequest = structuredClone(admitted!.request);
+
+    const readWorkspace = async (request: KnowledgeAssetVmPublishRequest = intent) => ({
+      head: await resolvePublishedKnowledgeAssetWorkspaceHead({
+        store: agent.store,
+        graphManager: new GraphManager(agent.store),
+        contextGraphId: cg,
+        kaUal: request.kaUal!,
+      }),
+      operation: await resolveKnowledgeAssetOperationPublicQuads({
+        store: agent.store,
+        graphManager: new GraphManager(agent.store),
+        contextGraphId: cg,
+        shareOperationId: request.shareOperationId,
+        kaUal: request.kaUal!,
+        assertionVersion: request.assertionVersion!,
+        publicSnapshotStore,
+      }),
+    });
+    const originalWorkspace = await readWorkspace();
+    expect(originalWorkspace.head).toMatchObject({
+      shareOperationId: intent.shareOperationId,
+      assertionVersion: intent.assertionVersion,
+      accessPolicy: intent.accessPolicy,
+      publicQuadsDigest: originalWorkspace.operation.publicQuadsDigest,
+      publisherPeerId: originalWorkspace.operation.publisherPeerId,
+    });
+    expect([...(originalWorkspace.head?.allowedPeers ?? [])].sort()).toEqual(
+      options.accessPolicy === 'allowList' ? ['reader-a', 'reader-b'] : [],
+    );
+
+    let dispatch = vi.spyOn((agent as any).chain, 'updateKnowledgeCollectionV10');
+    // Both CREATE and UPDATE reach this shared settlement hook after their branch.
+    let settlement = vi.spyOn(agent as any, '_stampQueuedKnowledgeAssetVmPublishedLifecycle');
+    const privateReplace = vi.spyOn(PrivateContentStore.prototype, 'replaceKnowledgeAssetPrivateTriples');
+    // The real queued handler and agent.update run, including the native staging
+    // boundary. The author attestation already exists by design; this one-shot
+    // dependency failure precedes TRANSACTION signing, write-ahead and dispatch.
+    const publisherUpdate = vi.spyOn(agent.publisher, 'updateKnowledgeAssetFromStagedSharedWorkingMemoryV1')
+      .mockRejectedValueOnce(new Error('controlled RPC unavailable before update transaction signing'));
+    const failed = await queue.processNext('wallet-1');
+    expect(failed?.jobId).toBe(jobId);
+    expect(failed?.status, JSON.stringify(failed?.failure)).toBe('failed');
+    expect(failed?.failure?.code).toBe('rpc_unavailable');
+    expect(failed?.retries.retryCount).toBe(0);
+    expect(failed?.request).toEqual(originalRequest);
+    expect(failed?.broadcast).toBeUndefined();
+    expect(publisherUpdate).toHaveBeenCalledOnce();
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(writeAhead).not.toHaveBeenCalled();
+    expect(confirmations).not.toHaveBeenCalled();
+    expect(settlement).not.toHaveBeenCalled();
+    // Before the fix this is operation B with missing access metadata, produced
+    // by update itself. No test writes a fabricated mismatch into the store.
+    // Keep going on the regression baseline so its SAME native job also reaches
+    // retry validation and exposes the resulting terminal publish_intent_stale.
+    expect.soft(await readWorkspace()).toEqual(originalWorkspace);
+    expect.soft(privateReplace).not.toHaveBeenCalled();
+    privateReplace.mockRestore();
+
+    if (options.reopen) {
+      const originalPeerId = agent.peerId;
+      await agent.stop();
+      await agent.store.close();
+      publisherUpdate.mockRestore();
+      dispatch.mockRestore();
+      settlement.mockRestore();
+      ({ agent, publicSnapshotStore } = await openAgent());
+      expect(agent.peerId).toBe(originalPeerId);
+      queue = makeQueue();
+      dispatch = vi.spyOn((agent as any).chain, 'updateKnowledgeCollectionV10');
+      settlement = vi.spyOn(agent as any, '_stampQueuedKnowledgeAssetVmPublishedLifecycle');
+      // Fresh managed adapter, agent, file snapshot reader and native queue.
+      // The HTTP fixture remains available: this proves client/agent reopen,
+      // not backend process restart or disk crash durability.
+      expect(await queue.getStatus(jobId)).toMatchObject({
+        jobId,
+        status: 'failed',
+        request: originalRequest,
+        retries: { retryCount: 0 },
+      });
+      expect(await readWorkspace()).toEqual(originalWorkspace);
+    }
+
+    return {
+      agent, cg, name, root, intent, queue, jobId, originalRequest, originalWorkspace,
+      readWorkspace, dispatch, writeAhead, confirmations, settlement,
+    };
+  }
+
+  it.each<RetryCase>([
+    { label: 'owner-only', accessPolicy: 'ownerOnly' },
+    { label: 'allow-list', accessPolicy: 'allowList', allowedPeers: allowList },
+    { label: 'private', accessPolicy: 'ownerOnly', privatePayload: true },
+    { label: 'managed-reopen', accessPolicy: 'allowList', allowedPeers: allowList, reopen: true },
+  ])('retries and finalizes the same $label UPDATE job once [GH#2482]', async (options) => {
+    await withUpdateFixture(options, async (fixture) => {
+      const { queue, jobId, originalRequest, dispatch, writeAhead, confirmations, settlement } = fixture;
+      expect(await queue.retryDetailed({ jobId })).toEqual({ retried: 1, blockedPendingRecovery: 0, skipped: 0 });
+      expect(await queue.getStatus(jobId)).toMatchObject({
+        jobId, status: 'accepted', request: originalRequest, retries: { retryCount: 1 },
+      });
+      const finalized = await queue.processNext('wallet-1');
+      expect(finalized?.status, JSON.stringify(finalized?.failure)).toBe('finalized');
+      expect(finalized).toMatchObject({ jobId, request: originalRequest, retries: { retryCount: 1 } });
+      expect(finalized?.broadcast).toMatchObject({ operationKind: 'update', txHash: expect.any(String) });
+      expect(finalized?.inclusion).toBeDefined();
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(writeAhead).toHaveBeenCalledOnce();
+      expect(confirmations).toHaveBeenCalledOnce();
+      expect(settlement).toHaveBeenCalledOnce();
+      expect(writeAhead.mock.calls[0]?.[0].txHash).toBe(finalized?.broadcast?.txHash);
+      expect(confirmations.mock.calls[0]?.[0].txHash).toBe(finalized?.broadcast?.txHash);
+      expect(await fixture.agent.assertion.history(fixture.cg, fixture.name)).toMatchObject({
+        state: 'published',
+        memoryLayer: MemoryLayer.VerifiableMemory,
+        vmCurrentAssertion: fixture.intent.sealMerkleRoot.slice(2),
+      });
+      // Successful finalization consumes the SWM head and its operation metadata;
+      // the immutable queue request remains available as the completed job record.
+      expect(await resolvePublishedKnowledgeAssetWorkspaceHead({
+        store: fixture.agent.store,
+        graphManager: new GraphManager(fixture.agent.store),
+        contextGraphId: fixture.cg,
+        kaUal: fixture.intent.kaUal!,
+      })).toBeUndefined();
+      expect(await queue.processNext('wallet-1')).toBeNull();
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(settlement).toHaveBeenCalledOnce();
+    });
+  }, 180_000);
+
+  it.each(['content', 'access'] as const)('rejects genuine intervening %s re-promote after UPDATE failure [GH#2482]', async (change) => {
+    await withUpdateFixture({ label: `stale-${change}`, accessPolicy: 'ownerOnly' }, async (fixture) => {
+      const { agent, cg, name, root, queue, jobId, intent } = fixture;
+      await agent.assertion.pullFrom(cg, name, 'swm', { onConflict: 'replace' });
+      if (change === 'content') {
+        await agent.assertion.write(cg, name, [
+          { subject: root, predicate: 'http://schema.org/name', object: '"superseding caller content"' },
+        ]);
+      }
+      await agent.assertion.finalize(cg, name);
+      await agent.assertion.promote(cg, name, change === 'access'
+        ? { accessPolicy: 'allowList', allowedPeers: ['new-reader'] }
+        : { accessPolicy: 'ownerOnly' });
+      const newerIntent = await agent.resolveFinalizedAssertionVmPublishIntent(cg, name);
+      expect(newerIntent.shareOperationId).not.toBe(intent.shareOperationId);
+      const newerWorkspace = await fixture.readWorkspace(newerIntent);
+      if (change === 'content') expect(newerIntent.sealMerkleRoot).not.toBe(intent.sealMerkleRoot);
+      else expect(newerWorkspace.head).toMatchObject({ accessPolicy: 'allowList', allowedPeers: ['new-reader'] });
+
+      expect(await queue.retryDetailed({ jobId })).toEqual({ retried: 1, blockedPendingRecovery: 0, skipped: 0 });
+      const rejected = await queue.processNext('wallet-1');
+      expect(rejected).toMatchObject({
+        jobId,
+        status: 'failed',
+        request: fixture.originalRequest,
+        retries: { retryCount: 1 },
+        failure: { code: 'publish_intent_stale', retryable: false },
+      });
+      expect(fixture.dispatch).not.toHaveBeenCalled();
+      expect(fixture.writeAhead).not.toHaveBeenCalled();
+      expect(fixture.confirmations).not.toHaveBeenCalled();
+      expect(fixture.settlement).not.toHaveBeenCalled();
+      expect(await fixture.readWorkspace(newerIntent)).toEqual(newerWorkspace);
+      expect((await fixture.readWorkspace()).operation).toEqual(fixture.originalWorkspace.operation);
+    });
+  }, 180_000);
+});
 
 describe('Memory layer isolation (single agent)', () => {
   it('resolveByKaId recovers a non-default lifecycle author from the KA record', async () => {
@@ -761,7 +1072,12 @@ describe('rootless graph-scoped KA lifecycle', () => {
   }, 60_000);
 
   it('repairs a named lifecycle after its async publish transaction confirmed during downtime', async () => {
-    const agent = await createAgent('QueuedAsyncVmRecoveryBot');
+    // This row drives the durable queue-recovery entry point explicitly. Keep
+    // the independent VM reconciliation worker disabled so it cannot consume
+    // the same confirmed chain event and repair/retire the fixture first.
+    const agent = await createAgent('QueuedAsyncVmRecoveryBot', {
+      syncReconcilerEnabled: false,
+    });
     await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Recovery E2E' });
     await agent.registerContextGraph(CG_ID);
 
@@ -778,6 +1094,13 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const confirmed = await agent.publishFromFinalizedAssertion(CG_ID, name);
     expect(confirmed.status).toBe('confirmed');
     expect(confirmed.onChainResult).toBeDefined();
+
+    // Model the advertised downtime before recreating the stale local state.
+    // Otherwise the live chain poller can race this test and legitimately
+    // retire the finalized SWM twin under its own `system` operation.
+    const chainPoller = (agent as any).chainPoller;
+    await chainPoller?.stop();
+    if ((agent as any).chainPoller === chainPoller) (agent as any).chainPoller = null;
 
     const lifecycleAgent = intent.agentAddress ?? agent.defaultAgentAddress ?? agent.peerId;
     const lifecycleUri = assertionLifecycleUri(CG_ID, lifecycleAgent, name);
@@ -1026,7 +1349,13 @@ describe('rootless graph-scoped KA lifecycle', () => {
       request: { ...recoveryInput.request, clearSharedMemoryAfter: false },
     } as any);
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
-    expect(recoveryCleanup).not.toHaveBeenCalled();
+    // RFC-64 catalog retirement may independently clear this exact published
+    // scope under a system operation while the recovery pass is running. Keep
+    // this assertion scoped to the recovery lane so unrelated, valid cleanup
+    // cannot make the row flaky.
+    expect(recoveryCleanup.mock.calls.filter((call) => (
+      call[3]?.operationName === 'publishFromSWM'
+    ))).toHaveLength(0);
 
     // PR #2300 r1 (🟡 3809054841) — the record shape item 5 exists for: a persisted FAILED job
     // held on the recovery carrier alone (`recovery.txHashChecked`, NO `broadcast`). The REAL
@@ -1994,9 +2323,17 @@ describe('rootless graph-scoped KA lifecycle', () => {
     ]);
     await agent.assertion.finalize(cg, name);
 
+    const publisherPromote = vi.spyOn(agent.publisher, 'assertionPromote');
     const promoted = await agent.assertion.promote(cg, name);
     expect(promoted.sealed).toBe(true);
     expect(promoted.publishReady).toBe(true);
+    expect(publisherPromote).toHaveBeenCalledWith(
+      cg,
+      name,
+      callerAgentAddress,
+      expect.objectContaining({ accessPolicy: 'ownerOnly' }),
+    );
+    publisherPromote.mockRestore();
 
     const cgDid = `did:dkg:context-graph:${cg}`;
     const swmGraph = `${cgDid}/_shared_memory`;
@@ -2012,6 +2349,43 @@ describe('rootless graph-scoped KA lifecycle', () => {
     );
     expect(swmCatalogOwner.type).toBe('bindings');
     expect(swmCatalogOwner.bindings).toHaveLength(0);
+  }, 30_000);
+
+  it('preserves an explicit allow-list envelope through promote and durable workspace state', async () => {
+    const agent = await createAgent('ExplicitAllowListPromoteBot');
+    const cg = `${CG_ID}-explicit-allow-list`;
+    await agent.createContextGraph({ id: cg, name: 'Explicit Allow List Promote E2E' });
+    const name = 'explicit-allow-list-promote';
+    await agent.assertion.create(cg, name);
+    await agent.assertion.write(cg, name, [
+      { subject: `${ENTITY_BASE}:ealp`, predicate: 'http://schema.org/name', object: '"Restricted"' },
+    ]);
+    await agent.assertion.finalize(cg, name);
+
+    const allowedPeers = ['reader-peer-a', 'reader-peer-b'];
+    const publisherPromote = vi.spyOn(agent.publisher, 'assertionPromote');
+    await agent.assertion.promote(cg, name, {
+      accessPolicy: 'allowList',
+      allowedPeers,
+    });
+    expect(publisherPromote).toHaveBeenCalledWith(
+      cg,
+      name,
+      agent.defaultAgentAddress ?? agent.peerId,
+      expect.objectContaining({ accessPolicy: 'allowList', allowedPeers }),
+    );
+
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(cg, name);
+    const head = await resolvePublishedKnowledgeAssetWorkspaceHead({
+      store: (agent as any).store,
+      graphManager: new GraphManager((agent as any).store),
+      contextGraphId: cg,
+      kaUal: intent.kaUal,
+    });
+    expect(head?.accessPolicy).toBe('allowList');
+    expect(head?.allowedPeers).toHaveLength(allowedPeers.length);
+    expect(new Set(head?.allowedPeers)).toEqual(new Set(allowedPeers));
+    publisherPromote.mockRestore();
   }, 30_000);
 
   // B3 (#1116 CORE REGRESSION GUARD): the seal is context-graph-INDEPENDENT, so
@@ -2664,13 +3038,86 @@ describe('WM → SWM gossip → VM (2 nodes)', () => {
     return lastResult;
   }
 
-  it('an imported Markdown KA survives WM → SWM gossip → VM on a second node', async () => {
+  it('keeps legacy root SWM delivery for two omitted-config agents without dataDir', async () => {
+    const contextGraphId = 'ephemeral-default-legacy-lane';
+    const entity = `${ENTITY_BASE}:ephemeral-default-legacy`;
     const sharedChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const nodeA = await RealDKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name: 'EphemeralDefaultLegacyA',
+      listenPort: 0,
+      chainAdapter: sharedChain,
+      nodeRole: 'core',
+      syncOnConnectEnabled: false,
+      syncReconcilerEnabled: false,
+      agentProfileHeartbeatMs: 0,
+    });
+    agents.push(nodeA);
+    const nodeB = await RealDKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name: 'EphemeralDefaultLegacyB',
+      listenPort: 0,
+      chainAdapter: sharedChain,
+      nodeRole: 'core',
+      syncOnConnectEnabled: false,
+      syncReconcilerEnabled: false,
+      agentProfileHeartbeatMs: 0,
+    });
+    agents.push(nodeB);
+
+    for (const node of [nodeA, nodeB]) {
+      expect((node as any).config.rfc64CatalogExecutionPlan)
+        .toMatchObject({ responsibilityDefaultMode: 'legacy' });
+      await node.start();
+      expect(node.rfc64PublicCatalogStatsV1()).toBeNull();
+    }
+    await nodeB.connectTo(nodeA.multiaddrs[0]!);
+    await sleep(1_000);
+
+    await nodeA.createContextGraph({
+      id: contextGraphId,
+      name: 'Ephemeral default legacy lane',
+    });
+    await nodeA.registerContextGraph(contextGraphId);
+    nodeA.subscribeToContextGraph(contextGraphId);
+    nodeB.subscribeToContextGraph(contextGraphId);
+    await sleep(1_500);
+    for (const node of [nodeA, nodeB]) {
+      expect(node.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId)).toMatchObject({
+        mode: 'legacy',
+        legacySyncAllowed: true,
+        reconciliationLane: 'legacy',
+      });
+    }
+
+    await nodeA.assertion.create(contextGraphId, 'ephemeral-root');
+    await nodeA.assertion.write(contextGraphId, 'ephemeral-root', [{
+      subject: entity,
+      predicate: 'http://schema.org/name',
+      object: '"Ephemeral root replicated"',
+    }]);
+    await nodeA.assertion.promote(contextGraphId, 'ephemeral-root');
+
+    const replicated = await pollUntil(
+      () => nodeB.query(
+        `SELECT ?name WHERE { <${entity}> <http://schema.org/name> ?name }`,
+        { contextGraphId, graphSuffix: '_shared_memory' },
+      ),
+      (bindings) => bindings.length > 0,
+      15_000,
+    );
+    expect(replicated).toEqual([expect.objectContaining({
+      name: '"Ephemeral root replicated"',
+    })]);
+  }, 45_000);
+
+  it('an imported Markdown KA survives WM → SWM gossip → VM on a second node', async () => {
+    const CG_ID = 'memory-layers-markdown-e2e';
     const nodeA = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'LayersA',
       listenPort: 0,
-      chainAdapter: sharedChain,
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       nodeRole: 'core',
     });
     agents.push(nodeA);
@@ -2679,24 +3126,25 @@ describe('WM → SWM gossip → VM (2 nodes)', () => {
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'LayersB',
       listenPort: 0,
-      chainAdapter: sharedChain,
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
       nodeRole: 'core',
     });
     agents.push(nodeB);
 
     await nodeA.start();
     await nodeB.start();
-    await sleep(500);
-
     const addrA = nodeA.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
     await nodeB.connectTo(addrA);
-    await sleep(2000);
 
     await nodeA.createContextGraph({ id: CG_ID, name: 'Two-Node Memory Layers' });
     await nodeA.registerContextGraph(CG_ID);
+    // A receiver cannot subscribe until graph discovery supplies its metadata.
+    // Keep this scenario separate from the other cases' chain history and wait
+    // for the actual topic subscription before publishing the Markdown KA.
+    await expect.poll(() => nodeB.contextGraphExists(CG_ID), { timeout: 10_000 }).toBe(true);
     nodeA.subscribeToContextGraph(CG_ID);
     nodeB.subscribeToContextGraph(CG_ID);
-    await sleep(1500);
+    await waitForSharedMemorySubscriber(nodeA, CG_ID, nodeB);
 
     // Step 1: use the production Markdown extractor, including the blank-node
     // section hierarchy that originally made imported KAs appear empty on the
@@ -2867,7 +3315,6 @@ describe('Query views', () => {
     };
 
     // CREATE branch — no prior vmCurrentAssertion.
-    const intentForUpdate = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
     const created = await runQueued();
     expect(created?.status).toBe('finalized');
     expect(created?.broadcast?.txHash).toMatch(/^0x[0-9a-f]+$/i);
@@ -2879,26 +3326,35 @@ describe('Query views', () => {
     // UPDATE branch — the hop that actually dropped it. GH#2270 r4: `agent.update` stays REAL and
     // the double sits on the underlying PUBLISHER's update entry, so this row pins the whole
     // agent-side chain of custody — queued handler → the real `agent.update` preconditions → the
-    // publisher — receiving the IDENTICAL callback. Driving the real send would need a fresh full
-    // share/reopen lifecycle, so with the publisher doubled there is no send here to prevent;
+    // publisher — receiving the IDENTICAL callback. Prepare a real promoted UPDATE so its
+    // immutable operation survives the native reuse boundary. The publisher double prevents send;
     // rejection-stops-the-send for the update path is proven at the publisher's own boundary in
     // `pre-broadcast-signal-await.test.ts`, and this row pins callback identity only.
+    await agent.assertion.pullFrom(CG_ID, name, 'vm', { onConflict: 'replace' });
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"v2"' },
+    ]);
+    await agent.assertion.finalize(CG_ID, name);
+    await agent.assertion.promote(CG_ID, name);
+    const intentForUpdate = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+    const updateSnapshot = await resolveKnowledgeAssetOperationPublicQuads({
+      store: agent.store,
+      graphManager: new GraphManager(agent.store),
+      contextGraphId: CG_ID,
+      shareOperationId: intentForUpdate.shareOperationId,
+      kaUal: intentForUpdate.kaUal!,
+      assertionVersion: intentForUpdate.assertionVersion!,
+    });
     const realPublisher = (agent as any).publisher;
     const publisherUpdateSpy = vi.spyOn(realPublisher, 'updateKnowledgeAssetFromStagedSharedWorkingMemoryV1')
       .mockResolvedValue({ status: 'failed', kaManifest: [] } as never);
     const recorder = () => {};
     try {
       await agent.publishQueuedKnowledgeAssetVmPublish(
+        intentForUpdate,
         {
-          ...intentForUpdate,
-          vmCurrentAssertion: intentForUpdate.sealMerkleRoot.slice(2),
-          // The real update path enforces that the queued version ADVANCES past the published
-          // lifecycle pointer; the create half above published version 1.
-          assertionVersion: '2',
-        },
-        {
-          quads: [{ subject: root, predicate: 'http://schema.org/name', object: '"v1"', graph: '' }],
-          publisherPeerId: 'queued-update-branch',
+          quads: updateSnapshot.quads,
+          publisherPeerId: updateSnapshot.publisherPeerId,
           onBeforeBroadcast: recorder,
         } as never,
       ).catch(() => undefined);

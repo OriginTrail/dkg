@@ -29,7 +29,6 @@ import { join, resolve, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import { randomUUID, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-
 import {
   dkgDir,
   releasesDir,
@@ -70,6 +69,23 @@ import {
   nodeUiStaticIndexPath,
   runtimeBuildCommandFromPackageJson,
 } from '../node-ui-static.js';
+import {
+  fetchNpmDistTags,
+} from '../update/npm-registry.js';
+import {
+  checkForNpmVersionUpdate as checkForNpmVersionUpdateShared,
+  getCurrentCliVersion as getCurrentCliVersionShared,
+  resolveLatestNpmVersion as resolveLatestNpmVersionShared,
+  type NpmVersionResult,
+  type NpmVersionStatus,
+} from '../update/npm-version.js';
+export {
+  compareSemver,
+  isPrerelease,
+  isValidSemver,
+} from '../update/npm-registry.js';
+export { deriveUpdateCheckState } from '../update/npm-version.js';
+export type { NpmVersionResult, NpmVersionStatus } from '../update/npm-version.js';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -277,216 +293,51 @@ export async function writePendingUpdateState(
 
 // ─── NPM-based auto-update helpers ──────────────────────────────────
 
-/**
- * Query the NPM registry for the latest published version of the CLI package.
- * Uses `dist-tags.latest` by default; when `allowPrerelease` is true, also
- * checks `beta` / `next` tags and picks the highest semver. When `channel`
- * is set, follows ONLY that dist-tag instead (still honouring `allowPrerelease`).
- */
-export type NpmVersionResult =
-  | { version: string; error?: false }
-  | { version: null; error: true }
-  | { version: null; error: false };
-
-// Official semver.org grammar (anchored). Rejects malformed values that a
-// loose shape check would accept (e.g. `10.0.0-alpha..1` — empty prerelease
-// identifier) before they reach `compareSemver` (a non-numeric part makes it
-// return NaN, which is not `<= 0` and would slip the forward-only gate).
-const SEMVER_RE =
-  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
-
-/** True when `v` is a valid semver string. */
-export function isValidSemver(v: string): boolean {
-  return SEMVER_RE.test(v.trim());
+export function getCurrentCliVersion(): string {
+  return getCurrentCliVersionShared(_autoUpdateIo.readFileSync);
 }
 
-/**
- * True when `v` carries a prerelease component (the `-…` segment) — build
- * metadata (`+…`) is NOT a prerelease, so `1.0.0+mainnet-build.1` is stable
- * even though it contains a hyphen. Used for the `allowPrerelease` gate.
- */
-export function isPrerelease(v: string): boolean {
-  return v.trim().split("+")[0].includes("-");
+function loadNpmDistTagsForDaemon() {
+  return fetchNpmDistTags({ fetch: _autoUpdateIo.fetch });
 }
 
+async function readCurrentNpmVersionForDaemon(): Promise<string> {
+  try {
+    return (
+      await _autoUpdateIo.readFile(
+        join(_autoUpdateIo.dkgDir(), '.current-version'),
+        'utf-8',
+      )
+    ).trim();
+  } catch {
+    return getCurrentCliVersion();
+  }
+}
+
+/** Compatibility alias over the canonical update-module implementation. */
 export async function resolveLatestNpmVersion(
-  log: (msg: string) => void,
+  log: (message: string) => void,
   allowPrerelease = true,
   channel?: string,
 ): Promise<NpmVersionResult> {
-  const { fetch } = _autoUpdateIo;
-  const url = `https://registry.npmjs.org/${CLI_NPM_PACKAGE}`;
-  try {
-    const res = await fetch(url, {
-      headers: { Accept: "application/vnd.npm.install-v1+json" },
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!res.ok) {
-      log(
-        `Auto-update (npm): registry returned ${res.status} for ${CLI_NPM_PACKAGE}`,
-      );
-      return { version: null, error: true };
-    }
-    const data = (await res.json()) as { "dist-tags"?: Record<string, string> };
-    const tags = data["dist-tags"];
-    if (!tags) return { version: null, error: true };
-
-    // Channel pin: follow ONLY this dist-tag (e.g. "testnet"), ignoring the
-    // default latest/dev/beta/next set. Lets a cohort track its own release
-    // line without being captured by whatever `latest` points at.
-    if (channel) {
-      const pinned = tags[channel] ?? null;
-      if (!pinned) {
-        log(
-          `Auto-update (npm): channel "${channel}" has no published version, skipping`,
-        );
-        return { version: null, error: false };
-      }
-      if (!isValidSemver(pinned)) {
-        log(
-          `Auto-update (npm): channel "${channel}" → "${pinned}" is not a valid semver, skipping`,
-        );
-        return { version: null, error: false };
-      }
-      if (!allowPrerelease && isPrerelease(pinned)) {
-        log(
-          `Auto-update (npm): channel "${channel}" points at a pre-release and allowPrerelease=false, skipping`,
-        );
-        return { version: null, error: false };
-      }
-      return { version: pinned };
-    }
-
-    const stable = tags.latest ?? null;
-    if (!allowPrerelease) {
-      if (stable && !isPrerelease(stable)) return { version: stable };
-      log(
-        "Auto-update (npm): latest dist-tag is a pre-release and allowPrerelease=false, skipping",
-      );
-      return { version: null, error: false };
-    }
-
-    const candidates = [stable, tags.dev, tags.beta, tags.next].filter(
-      Boolean,
-    ) as string[];
-    if (candidates.length === 0) return { version: null, error: false };
-    candidates.sort((a, b) => compareSemver(b, a));
-    return { version: candidates[0] };
-  } catch (err: any) {
-    log(
-      `Auto-update (npm): registry check failed (${err?.message ?? String(err)})`,
-    );
-    return { version: null, error: true };
-  }
+  return resolveLatestNpmVersionShared(
+    log,
+    allowPrerelease,
+    channel,
+    loadNpmDistTagsForDaemon,
+  );
 }
 
-export function compareSemver(a: string, b: string): number {
-  const pa = a.replace(/^v/, "").split(/[-+]/)[0].split(".").map(Number);
-  const pb = b.replace(/^v/, "").split(/[-+]/)[0].split(".").map(Number);
-  for (let i = 0; i < 3; i++) {
-    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
-  }
-  const stripBuild = (s: string) => s.replace(/\+.*$/, "");
-  const preA = a.includes("-")
-    ? stripBuild(a.split("-").slice(1).join("-"))
-    : "";
-  const preB = b.includes("-")
-    ? stripBuild(b.split("-").slice(1).join("-"))
-    : "";
-  if (!preA && preB) return 1;
-  if (preA && !preB) return -1;
-  return preA.localeCompare(preB, undefined, { numeric: true });
-}
-
-export function getCurrentCliVersion(): string {
-  const { readFileSync } = _autoUpdateIo;
-  try {
-    const pkg = JSON.parse(
-      readFileSync(new URL("../../package.json", import.meta.url), "utf-8"),
-    );
-    return String(pkg.version ?? "").trim();
-  } catch {
-    return "";
-  }
-}
-
-export type NpmVersionStatus = {
-  status: "available" | "up-to-date" | "error" | "no-target";
-  version?: string;
-  /** Set on "no-target": the pinned channel that has no acceptable version. */
-  channel?: string;
-};
-
+/** Compatibility alias over the canonical update-module implementation. */
 export async function checkForNpmVersionUpdate(
   log: (msg: string) => void,
   allowPrerelease = true,
   channel?: string,
 ): Promise<NpmVersionStatus> {
-  const { dkgDir, readFile } = _autoUpdateIo;
-  const versionFile = join(dkgDir(), ".current-version");
-  let currentVersion = "";
-  try {
-    currentVersion = (await readFile(versionFile, "utf-8")).trim();
-  } catch {
-    currentVersion = getCurrentCliVersion();
-  }
-
-  if (!currentVersion) {
-    log("Auto-update (npm): unable to determine current version");
-    return { status: "error" };
-  }
-
-  const result = await resolveLatestNpmVersion(log, allowPrerelease, channel);
-  if (result.version === null) {
-    if (result.error) return { status: "error" };
-    // A pinned channel with no acceptable target (tag missing / prerelease
-    // rejected / non-semver) is NOT a clean "up-to-date" — surface it so a
-    // misconfigured or unpublished channel (e.g. mainnet) is visible rather
-    // than silently reported as current.
-    if (channel) return { status: "no-target", channel };
-    return { status: "up-to-date" };
-  }
-
-  // Never trust a non-semver target through the forward-only gate below
-  // (compareSemver would return NaN, which is not <= 0). The channel path
-  // already guards this upstream; this also covers the default tag set
-  // without changing its candidate selection.
-  if (!isValidSemver(result.version)) {
-    log(
-      `Auto-update (npm): resolved version "${result.version}" is not valid semver, skipping`,
-    );
-    return channel ? { status: "no-target", channel } : { status: "up-to-date" };
-  }
-
-  if (result.version === currentVersion) return { status: "up-to-date" };
-  if (compareSemver(result.version, currentVersion) <= 0)
-    return { status: "up-to-date" };
-
-  return { status: "available", version: result.version };
-}
-
-/**
- * Pure mapping from an {@link NpmVersionStatus} to the daemon's
- * `lastUpdateCheck` fields. Extracted so the runCheck → /api/status
- * derivation is unit-testable. The `no-target` case in particular MUST report
- * `upToDate: true` (there is no update to apply) so `/api/status` does not flip
- * to `updateAvailable: true`; `channelTargetMissing` carries the distinct
- * signal. Returns null for `error` — the caller leaves prior state unchanged.
- */
-export function deriveUpdateCheckState(
-  npmStatus: NpmVersionStatus,
-): { upToDate: boolean; channelTargetMissing: boolean; latestVersion: string } | null {
-  if (npmStatus.status === "error") return null;
-  if (npmStatus.status === "no-target")
-    return { upToDate: true, channelTargetMissing: true, latestVersion: "" };
-  return {
-    upToDate: npmStatus.status === "up-to-date",
-    channelTargetMissing: false,
-    // Only an "available" result has a newer version to report; clear it on
-    // up-to-date / no-target so `/api/status` never shows a stale latestVersion.
-    latestVersion:
-      npmStatus.status === "available" ? npmStatus.version ?? "" : "",
-  };
+  return checkForNpmVersionUpdateShared(log, allowPrerelease, channel, {
+    loadDistTags: loadNpmDistTagsForDaemon,
+    readCurrentVersion: readCurrentNpmVersionForDaemon,
+  });
 }
 
 /**

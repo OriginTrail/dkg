@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-chain",
-  "version": "10.0.14",
+  "version": "10.0.16",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -8,10 +8,11 @@
     "build": "tsc",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs chain",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
+    "@origintrail-official/dkg-http-utils": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
     "ethers": "^6"
   },

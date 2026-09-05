@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   type ContextGraphIdV1,
@@ -20,7 +20,46 @@ import {
   startRepairAgentV1,
 } from './support/rfc64-local-catalog-repair-fixture.js';
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe('RFC-64 local SWM catalog projection repair', () => {
+  it('periodically repairs a default-mode projection without a bootstrap manifest', async () => {
+    const agent = await startRepairAgentV1({
+      name: 'default-mode-periodic-retry',
+      autoPublish: {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    });
+    agent.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const repair = vi.spyOn(agent, 'reconcileRfc64PublicCatalogFromSwmInventoryV1')
+      .mockRejectedValueOnce(new Error('simulated detached projection failure'))
+      .mockResolvedValue(null);
+    vi.useFakeTimers();
+
+    expect(agent.requestRfc64SwmCatalogProjectionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).toBe(true);
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(repair).toHaveBeenCalledTimes(1);
+    expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1())
+      .toMatchObject({ retryIntervalMs: 5_000 });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(repair).toHaveBeenCalledTimes(2);
+    expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs)
+      .toEqual([expect.objectContaining({ outcome: 'no-inventory', attempts: 2 })]);
+    vi.useRealTimers();
+  });
+
   it('retries without widening graph or author scope', async () => {
     const policy = buildOpenOwnerContextGraphPolicyV1({
       networkId: NETWORK_ID,
@@ -205,7 +244,8 @@ describe('RFC-64 local SWM catalog projection repair', () => {
       },
     });
     vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneV1').mockReturnValue({
-      projectionLifecycle: 'immediate-exact-set',
+      projectionTargetPolicy: 'exact-replacement',
+      acceptsFinalizedVmRepair: false,
     } as never);
     let active = 0;
     let maxActive = 0;
@@ -267,9 +307,10 @@ describe('RFC-64 local SWM catalog projection repair', () => {
       '0x1111111111111111111111111111111111111111/blocked-repair' as ContextGraphIdV1;
     vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneV1')
       .mockImplementation((contextGraphId: string) => ({
-        projectionLifecycle: contextGraphId === privateContextGraphId
-          ? 'confirmation-gated-append'
-          : 'immediate-exact-set',
+        projectionTargetPolicy: contextGraphId === privateContextGraphId
+          ? 'monotonic-union'
+          : 'exact-replacement',
+        acceptsFinalizedVmRepair: contextGraphId === privateContextGraphId,
       } as never));
     let markOrdinaryEntered!: () => void;
     let releaseOrdinary!: () => void;
@@ -350,7 +391,8 @@ describe('RFC-64 local SWM catalog projection repair', () => {
       .finalizedPrivatePlacementRepairs;
     await repairStore.put(repair);
     vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneV1').mockReturnValue({
-      projectionLifecycle: 'confirmation-gated-append',
+      projectionTargetPolicy: 'monotonic-union',
+      acceptsFinalizedVmRepair: true,
       scopeBase: Object.freeze({
         networkId: NETWORK_ID,
         contextGraphId: privateContextGraphId,

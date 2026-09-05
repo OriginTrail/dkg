@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg",
-  "version": "10.0.14",
+  "version": "10.0.16",
   "type": "module",
   "engines": {
     "node": ">=22.13.0 <23.0.0 || >=23.4.0"
@@ -24,8 +24,9 @@
     }
   },
   "scripts": {
-    "prebuild": "pnpm -r --filter @origintrail-official/dkg-adapter-openclaw... --filter @origintrail-official/dkg-adapter-hermes... --filter @origintrail-official/dkg-adapter-prime-agent... --filter @origintrail-official/dkg-mcp... --filter @origintrail-official/dkg-local-llm... --filter @origintrail-official/dkg-okf... run build",
-    "build": "tsc && node scripts/test-catchup-worker-package-boundary.mjs && node ../../scripts/copy-cli-runtime-assets.mjs",
+    "build": "pnpm run build:prerequisites && pnpm run build:prepared",
+    "build:prerequisites": "node scripts/build-prerequisites.mjs",
+    "build:prepared": "tsc && pnpm run test:types && node scripts/test-catchup-worker-package-boundary.mjs && node ../../scripts/copy-cli-runtime-assets.mjs",
     "prepack": "node ../../scripts/copy-cli-runtime-assets.mjs",
     "benchmark:catchup-runner": "node scripts/catchup-runner-benchmark.cjs",
     "benchmark:daemon-responsiveness": "node scripts/daemon-responsiveness-benchmark.cjs",
@@ -36,37 +37,40 @@
     "markitdown:build": "node ./scripts/bundle-markitdown-binaries.mjs --build-current-platform",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
+    "test:types": "tsc --project tsconfig.type-tests.json",
     "test:benchmark:publish-async-get": "vitest run --config vitest.benchmark.config.ts",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs cli",
     "clean": "node -e \"const fs=require('fs');for(const d of['dist','network']){fs.rmSync(d,{recursive:true,force:true})};fs.rmSync('tsconfig.tsbuildinfo',{force:true})\""
   },
   "dependencies": {
-    "@origintrail-official/dkg-adapter-openclaw": "workspace:*",
+    "@iarna/toml": "^2.2.5",
     "@origintrail-official/dkg-adapter-hermes": "workspace:*",
+    "@origintrail-official/dkg-adapter-openclaw": "workspace:*",
     "@origintrail-official/dkg-adapter-prime-agent": "workspace:*",
     "@origintrail-official/dkg-agent": "workspace:*",
     "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-epcis": "workspace:*",
     "@origintrail-official/dkg-local-llm": "workspace:*",
     "@origintrail-official/dkg-mcp": "workspace:*",
-    "@origintrail-official/dkg-epcis": "workspace:*",
-    "@origintrail-official/dkg-okf": "workspace:*",
     "@origintrail-official/dkg-node-ui": "workspace:*",
+    "@origintrail-official/dkg-okf": "workspace:*",
     "@origintrail-official/dkg-publisher": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
-    "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1",
-    "commander": "^13",
     "better-sqlite3": "12.11.1",
+    "commander": "^13",
     "ethers": "^6",
     "js-yaml": "^4.1.1",
     "n3": "^2.0.1",
+    "semver": "^7.7.4",
     "typescript": "^5.7"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7",
     "@types/js-yaml": "^4.0.9",
     "@types/n3": "^1.26.1",
+    "@types/semver": "^7.8.0",
     "@vitest/coverage-v8": "^4.0.18",
     "vitest": "^4.0.18"
   },

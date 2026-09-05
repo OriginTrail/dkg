@@ -1,13 +1,13 @@
 {
   "name": "@origintrail-official/kafka-plugin",
-  "version": "10.0.14",
+  "version": "10.0.16",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
     "test": "vitest run --coverage",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs kafka-plugin",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {

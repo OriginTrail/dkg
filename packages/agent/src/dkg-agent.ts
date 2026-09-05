@@ -91,6 +91,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
+import { prepareRfc64LateLegacySwmBoundaryV1 } from
+  './rfc64/legacy-swm-boundary-v1.js';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -113,6 +115,7 @@ import {
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
   selectACKCandidatePeersWithDiagnostics,
+  createPromotePostCommitFailure,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   // OT-RFC-43 A2/B3 — per-layer pointers + derived status helper.
   deriveStatus, type KaStatus,
@@ -137,6 +140,7 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+import { prepareAssertionPromote } from './internal/promote/assertion-promote-precommit.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -328,6 +332,7 @@ import {
   SwmSenderKeySetupRejectionError,
   SyncAccessDeniedError,
   type PreSignedAuthorAttestation,
+  type AssertionPromoteOptions,
   type LocalSwmSenderKeySendState,
   type LocalSwmSenderKeyReceiveState,
   type PendingSenderKeyEntry,
@@ -479,6 +484,7 @@ export {
   InvalidContentError,
 };
 export type {
+  AssertionPromoteOptions,
   CclPublishedResultEntry,
   CclPublishedEvaluationRecord,
   PublishOpts,
@@ -874,18 +880,29 @@ export class DKGAgent extends DKGAgentBase {
         },
         acceptTrack2Policies: (policies) => {
           if (policies.length === 0) return;
-          const service = this.rfc64PublicCatalogServiceV1;
-          if (service === undefined) {
+          if (this.rfc64PublicCatalogServiceV1 === undefined) {
             throw new Error('RFC-64 Track-2 bootstrap requires the public catalog service');
           }
           for (const accepted of policies) {
             const { policyEnvelope } = accepted;
-            service.acceptPolicySnapshot({
+            // The bootstrap manifest is itself an explicit pre-10.0.16
+            // operator surface. Route it through the compatibility-aware API
+            // so it remains active when no release-native responsibility has
+            // been discovered for the CG.
+            this.acceptRfc64CatalogAccessSnapshotV1({
               policy: policyEnvelope.payload,
               policyDigest: computeContextGraphPolicyObjectDigestV1(policyEnvelope),
               roster: accepted.rosterEnvelope?.payload,
             });
           }
+          // Bootstrap and projection are independent workload owners. The
+          // runtime starts both synchronously, while bootstrap accepts Track-2
+          // policy snapshots on its first asynchronous pass. Re-enter the
+          // idempotent projection boundary after acceptance so restart repair
+          // sees the now-authorized lanes and durable author inventories.
+          this.startRfc64SwmCatalogProjectionSupervisorV1(
+            createOperationContext('system'),
+          );
         },
         connectToPeerId: (peerId, options) => this.connectToPeerId(peerId, options),
         queueRecoveryPlan: (plan, onError, delayMs) => {
@@ -906,11 +923,11 @@ export class DKGAgent extends DKGAgentBase {
         ),
         acceptsPublicRootLane: (contextGraphId) => {
           const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);
-          return lane?.projectionLifecycle === 'immediate-exact-set';
+          return lane !== null;
         },
         acceptsFinalizedPrivateLane: (contextGraphId) => (
           this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null)
-            ?.projectionLifecycle === 'confirmation-gated-append'
+            ?.acceptsFinalizedVmRepair === true
         ),
         listFinalizedPrivateRepairs: () => (
           this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? []
@@ -1077,6 +1094,8 @@ export class DKGAgent extends DKGAgentBase {
     const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1(
       constructedAgentChainId,
     );
+    const rfc64UnifiedCatalogExplicitlyDisabled =
+      normalizedConfig.rfc64CatalogActivation?.enabled === false;
     const activations = resolveRfc64CatalogActivationsV1({
       catalog: normalizedConfig.rfc64CatalogActivation,
       publicCatalog: normalizedConfig.rfc64PublicCatalogActivation,
@@ -1087,19 +1106,53 @@ export class DKGAgent extends DKGAgentBase {
       : activations.publicCatalog;
     const rfc64PublicCatalogControls = resolveRfc64PublicCatalogControlsV1({
       activation,
-      legacyDeploymentProfile: normalizedConfig.rfc64CatalogDeploymentProfile,
-      legacyAutoPublish: normalizedConfig.rfc64PublicCatalogAutoPublish,
-      legacyBootstrap: normalizedConfig.rfc64PublicCatalogBootstrap,
+      legacyDeploymentProfile: rfc64UnifiedCatalogExplicitlyDisabled
+        ? undefined
+        : normalizedConfig.rfc64CatalogDeploymentProfile,
+      legacyAutoPublish: rfc64UnifiedCatalogExplicitlyDisabled
+        ? undefined
+        : normalizedConfig.rfc64PublicCatalogAutoPublish,
+      legacyBootstrap: rfc64UnifiedCatalogExplicitlyDisabled
+        ? undefined
+        : normalizedConfig.rfc64PublicCatalogBootstrap,
     }, chainIdentity);
+    // The unified block owns precedence over the deprecated public-only
+    // alias. Omission is the 10.0.16 product default; explicit enabled=false
+    // remains a one-release compatibility rollback.
+    const rfc64CatalogExplicitlyDisabled =
+      rfc64UnifiedCatalogExplicitlyDisabled
+      || (
+        normalizedConfig.rfc64CatalogActivation === undefined
+        && normalizedConfig.rfc64PublicCatalogActivation?.enabled === false
+      );
+    const rfc64CatalogConfigurationOmitted =
+      normalizedConfig.rfc64CatalogActivation === undefined
+      && normalizedConfig.rfc64PublicCatalogActivation === undefined
+      && normalizedConfig.rfc64CatalogDeploymentProfile === undefined
+      && normalizedConfig.rfc64CatalogAccessPolicyAuthority === undefined
+      && normalizedConfig.rfc64PublicCatalogAutoPublish === undefined
+      && normalizedConfig.rfc64PublicCatalogBootstrap === undefined;
+    // Agents without a persistence root cannot run the catalog service. Preserve
+    // the historical in-memory legacy lane only for a truly omitted RFC-64
+    // configuration; an explicit catalog request is rejected below instead of
+    // silently suppressing both catalog and legacy delivery.
+    const rfc64CatalogEphemeralLegacyFallback =
+      !normalizedConfig.dataDir && rfc64CatalogConfigurationOmitted;
     const rfc64CatalogExecutionPlan = resolveRfc64CatalogExecutionPlanV1({
       configuredContextGraphs: normalizedConfig.syncContextGraphs ?? [],
+      responsibilityDefaultMode:
+        rfc64CatalogExplicitlyDisabled || rfc64CatalogEphemeralLegacyFallback
+          ? 'legacy'
+          : 'catalog',
       standaloneTrack2ContextGraphs:
         normalizedConfig.rfc64PublicCatalogActivation === undefined
           ? (rfc64PublicCatalogControls.bootstrap?.acceptedPublicPolicies.map(
             ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
           ) ?? [])
           : [],
-      activation: catalogActivation,
+      activation: rfc64UnifiedCatalogExplicitlyDisabled
+        ? Object.freeze({ ...catalogActivation, enabled: true })
+        : catalogActivation,
     });
     const config: StorageAckNormalizedDKGAgentConfig = {
       ...normalizedConfig,
@@ -1115,6 +1168,16 @@ export class DKGAgent extends DKGAgentBase {
       throw new TypeError('rfc64Catalog bootstrap requires dataDir');
     }
     if (
+      !config.dataDir
+      && !rfc64CatalogExecutionPlan.killSwitchActive
+      && rfc64CatalogExecutionPlan.responsibilityDefaultMode === 'catalog'
+    ) {
+      throw new TypeError(
+        'RFC-64 catalog mode requires dataDir; omit RFC-64 catalog configuration '
+        + 'for ephemeral legacy mode or set rfc64CatalogActivation.enabled=false',
+      );
+    }
+    if (
       catalogActivation.deploymentProfile !== undefined
       && rfc64PublicCatalogControls.deploymentProfile !== undefined
       && JSON.stringify(catalogActivation.deploymentProfile)
@@ -1125,7 +1188,9 @@ export class DKGAgent extends DKGAgentBase {
     const rfc64CatalogDeploymentProfile = catalogActivation.deploymentProfile
       ?? rfc64PublicCatalogControls.deploymentProfile;
     const legacyRfc64CatalogAccessPolicyAuthority = snapshotRfc64CatalogAccessPolicyAuthorityV1(
-      config.rfc64CatalogAccessPolicyAuthority,
+      rfc64UnifiedCatalogExplicitlyDisabled
+        ? undefined
+        : config.rfc64CatalogAccessPolicyAuthority,
     );
     if (
       legacyRfc64CatalogAccessPolicyAuthority !== undefined
@@ -1324,6 +1389,28 @@ export class DKGAgent extends DKGAgentBase {
       kaAllocator: config.kaNumberAllocator,
       // RFC ka-metadata-trim P3.3 — `metadata.provenanceEvents` (default true).
       provenanceEvents: config.metadataProvenanceEvents,
+      resolveDurableRootPromotionAtomicCompanion: (input) => {
+        const executionPlan = resolvedConfig.rfc64CatalogExecutionPlan;
+        const configuredMode = executionPlan.contextGraphModes[input.contextGraphId]
+          ?? executionPlan.responsibilityDefaultMode;
+        if (!executionPlan.killSwitchActive && configuredMode !== 'legacy') return;
+
+        // Ephemeral legacy mode has no durable state to protect across a later
+        // catalog restart. Persistent legacy mode must have completed boundary
+        // initialization in start(); the marker owner deliberately throws when
+        // it has not, so a root cannot escape without its negative witness.
+        if (resolvedConfig.dataDir === undefined) return;
+        if (agentRef === undefined) {
+          throw new Error('RFC-64 legacy SWM write-ahead owner is unavailable');
+        }
+        return prepareRfc64LateLegacySwmBoundaryV1(
+          agentRef,
+          input.contextGraphId,
+          input.kaUal,
+          input.shareOperationId,
+          input.assertionVersion,
+        );
+      },
     });
 
     try {
@@ -2370,7 +2457,7 @@ export class DKGAgent extends DKGAgentBase {
     }
     // Flush WM to disk before exit so the debounced 50ms flush in the
     // Oxigraph adapter can't lose the latest inserts when the process
-    // exits. See docs/bugs/wm-persistence-regression.md.
+    // exits. See packages/storage/README.md#oxigraph-persistence-contract.
     //
     // `store.close()` now THROWS on durable-write failures (ENOSPC,
     // EACCES, EROFS, etc.) — see oxigraph.ts. We log loudly but do not
@@ -2385,7 +2472,7 @@ export class DKGAgent extends DKGAgentBase {
         `[DKGAgent.stop] WM final flush FAILED on shutdown: ${(err as Error).message}. ` +
           `The store on disk may be missing recent inserts — operator should investigate ` +
           `(disk full, permission revoked, filesystem read-only, …). ` +
-          `See docs/bugs/wm-persistence-regression.md for the durability contract.`,
+          `See packages/storage/README.md#oxigraph-persistence-contract for the durability contract.`,
       );
     }
     this.started = false;
@@ -3131,7 +3218,7 @@ export class DKGAgent extends DKGAgentBase {
           ...(opts?.onConflict !== undefined ? { onConflict: opts.onConflict } : {}),
         });
       },
-      async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string; agentAddress?: string; authorAgentAddress?: string; preSignedAuthorAttestation?: PreSignedAuthorAttestation; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number; skipSeal?: boolean }): Promise<{ promotedCount: number; sealed: boolean; publishReady: boolean; shareOperationId?: string }> {
+      async promote(contextGraphId: string, name: string, opts?: AssertionPromoteOptions): Promise<{ promotedCount: number; sealed: boolean; publishReady: boolean; shareOperationId?: string }> {
         const promoteAgentAddress = opts?.agentAddress ?? agentAddress;
         if (opts?.skipSeal) {
           throw Object.assign(
@@ -3210,37 +3297,21 @@ export class DKGAgent extends DKGAgentBase {
           );
         }
         const sealed = true;
-        // Resolve the gossip signer up-front (mirrors `share()` /
-        // `conditionalShare()` patterns) so the publisher can wrap the
-        // promoted SWM gossip in the Sender Key encrypted envelope.
-        // Without this, private/agent-gated CGs receive plaintext
-        // gossip and the new `SharedMemoryHandler` check rejects it.
-        const gossipSigner = await agent.resolveWorkspaceGossipSigningAgent(contextGraphId);
-        // Strict curator-ack gate (OT-RFC-49 curator-leader) for the WM→SWM
-        // promote path — the same confirmer as share()/conditionalShare(). When
-        // armed (private CG, gate enabled, curator remote), assertionPromote
-        // requires the curator's applied-ack BEFORE it moves WM→SWM, so an
-        // unconfirmed promote aborts (CuratorUnconfirmedError → 503) leaving WM
-        // intact instead of silently committing a write the curator never got.
-        const confirmBeforeCommit = await agent.buildCuratorAckConfirmer(
+        const { gossipSigner, publisherOptions } = await prepareAssertionPromote(agent, {
           contextGraphId,
-          gossipSigner,
-          { awaitCuratorAck: opts?.awaitCuratorAck, curatorAckTimeoutMs: opts?.curatorAckTimeoutMs },
-          createOperationContext('share'),
-        );
+          publisherPeerId: agent.node.peerId.toString(),
+          options: opts,
+        });
         const {
           promotedCount,
           gossipPayload,
           promotedAllRoots,
           shareOperationId,
         } = await agent.publisher.assertionPromote(
-          contextGraphId, name, promoteAgentAddress,
-          {
-            ...(opts?.subGraphName !== undefined ? { subGraphName: opts.subGraphName } : {}),
-            publisherPeerId: agent.node.peerId.toString(),
-            senderAgentAddress: gossipSigner?.agentAddress,
-            confirmBeforeCommit,
-          },
+          contextGraphId,
+          name,
+          promoteAgentAddress,
+          publisherOptions,
         );
         if (gossipPayload) {
           try {
@@ -3261,15 +3332,21 @@ export class DKGAgent extends DKGAgentBase {
         }
         // OT-RFC-43 A2 (decision 2) — stamp dkg:swmCurrentAssertion on the
         // lifecycle URN so the SWM pointer is observable (and can diverge from
-        // WM/VM). Best-effort; never blocks the share result.
-        await agent.afterDurableSwmPromotionV1({
-          contextGraphId,
-          subGraphName: opts?.subGraphName,
-          assertionCoordinate: name,
-          lifecycleAgentAddress: promoteAgentAddress,
-          shareOperationId: shareOperationId ?? null,
-          ctx: createOperationContext('share'),
-        });
+        // WM/VM). A VM no-op must not restamp a pointer or notify SWM observers.
+        if (promotedAllRoots) {
+          try {
+            await agent.afterDurableSwmPromotionV1({
+              contextGraphId,
+              subGraphName: opts?.subGraphName,
+              assertionCoordinate: name,
+              lifecycleAgentAddress: promoteAgentAddress,
+              shareOperationId: shareOperationId ?? null,
+              ctx: createOperationContext('share'),
+            });
+          } catch (error) {
+            throw createPromotePostCommitFailure(error);
+          }
+        }
         // #1116 (round 9) — the swmShareComplete marker mark/clear now lives INSIDE
         // assertionPromote (co-located with the member-row REPLACE, gated on the
         // same isFullCompletePromote), so it stays in lockstep with the rows for
@@ -3655,7 +3732,10 @@ export class DKGAgent extends DKGAgentBase {
       async promoteAsync(
         contextGraphId: string,
         name: string,
-        opts?: { entities?: readonly string[] | 'all'; subGraphName?: string; agentAddress?: string; authorAgentAddress?: string },
+        opts?: Pick<
+          AssertionPromoteOptions,
+          'entities' | 'subGraphName' | 'agentAddress' | 'authorAgentAddress'
+        >,
       ): Promise<{ jobId: string }> {
         const promoteAgentAddress = opts?.agentAddress ?? agentAddress;
         const jobId = await agent.promoteQueue.enqueue({

@@ -29,11 +29,14 @@ import {
 } from './public-catalog-reconciliation-outcome-v1.js';
 import {
   Rfc64ReceiverTaskLifecycleV1,
+  rfc64ReceiverSchedulingPolicyV1,
   rfc64ReceiverCatalogScopeKeyV1,
   rfc64ReceiverHeadKeyV1,
   rfc64ReceiverNonNegativeIntV1,
   rfc64ReceiverPositiveIntV1,
   rfc64ReceiverProviderContextKeyV1,
+  type Rfc64ReceiverLifecycleTaskV1,
+  type Rfc64ReceiverSchedulingClassV1,
 } from './public-catalog-receiver-task-lifecycle-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
 
@@ -112,6 +115,23 @@ export interface Rfc64PublicCatalogReceiverOptionsV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     attemptToken: number,
   ) => void;
+  /** Authenticated verified-current-head work was accepted into the receiver queue. */
+  readonly onVerifiedCurrentHeadTargetAccepted?: (
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    targetToken: number,
+  ) => void;
+  /** Authenticated work could not enter bounded pending capacity full of explicit work. */
+  readonly onVerifiedCurrentHeadTargetRejected?: (
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    outcome: 'dropped',
+  ) => void;
+  /** Balanced terminal observer for accepted verified-current-head work. */
+  readonly onVerifiedCurrentHeadTargetSettled?: (
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    targetToken: number,
+    attemptToken: number | null,
+    outcome: Rfc64PublicCatalogReceiverCompletionV1['outcome'],
+  ) => void;
   readonly onError?: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     error: unknown,
@@ -130,6 +150,8 @@ export interface Rfc64PublicCatalogReceiverStatsV1 {
   readonly failed: number;
   readonly droppedQueueFull: number;
   readonly droppedProviders: number;
+  /** Older ambient heads discarded after a verified current head became durable. */
+  readonly supersededQueued: number;
   /**
    * Times a task stepped aside for a busy finalized chain lane. Distinct from
    * `failed`: the head is still pending, not lost.
@@ -145,10 +167,11 @@ export interface Rfc64PublicCatalogReceiverStatsV1 {
   readonly providerBackoffMs: number;
 }
 
-interface ReceiverTaskV1 {
+interface ReceiverTaskV1 extends Rfc64ReceiverLifecycleTaskV1 {
   readonly key: string;
   readonly scopeKey: string;
   readonly contextGraphId: string;
+  readonly catalogVersion: bigint;
   readonly cancellation: AbortController;
   /** Canonical provider registry; Map insertion order is the round-robin order. */
   readonly providers: Map<string, ReceiverProviderV1>;
@@ -181,6 +204,9 @@ interface ReceiverTaskV1 {
   reconciliationAttemptStarted?: boolean;
   reconciliationAttemptToken?: number | null;
   reconciliationAttemptEnded?: boolean;
+  verifiedCurrentHeadTargetAccepted?: boolean;
+  verifiedCurrentHeadTargetToken?: number;
+  verifiedCurrentHeadTargetSettled?: boolean;
   running?: boolean;
   settled?: boolean;
 }
@@ -261,6 +287,12 @@ export class Rfc64PublicCatalogReceiverV1 {
     Rfc64PublicCatalogReceiverOptionsV1['onReconciliationAttemptSuccess'];
   readonly #onReconciliationAttemptEnd?:
     Rfc64PublicCatalogReceiverOptionsV1['onReconciliationAttemptEnd'];
+  readonly #onVerifiedCurrentHeadTargetAccepted?:
+    Rfc64PublicCatalogReceiverOptionsV1['onVerifiedCurrentHeadTargetAccepted'];
+  readonly #onVerifiedCurrentHeadTargetRejected?:
+    Rfc64PublicCatalogReceiverOptionsV1['onVerifiedCurrentHeadTargetRejected'];
+  readonly #onVerifiedCurrentHeadTargetSettled?:
+    Rfc64PublicCatalogReceiverOptionsV1['onVerifiedCurrentHeadTargetSettled'];
   readonly #onError?: Rfc64PublicCatalogReceiverOptionsV1['onError'];
 
   /** Every exact head and its queued/deferred/terminal task lifecycle. */
@@ -275,6 +307,7 @@ export class Rfc64PublicCatalogReceiverV1 {
   readonly #maxAdmissionDeferrals: number;
   readonly #isDeferrableError: (error: unknown) => boolean;
   #isolatedCompletionSequence = 0;
+  #verifiedCurrentHeadTargetSequence = 0;
 
   #scheduled = 0;
   #admissionDeferred = 0;
@@ -286,6 +319,7 @@ export class Rfc64PublicCatalogReceiverV1 {
   #failed = 0;
   #droppedQueueFull = 0;
   #droppedProviders = 0;
+  #supersededQueued = 0;
   #providerAttempts = 0;
   #providerSwitches = 0;
   #providerSuccesses = 0;
@@ -327,6 +361,9 @@ export class Rfc64PublicCatalogReceiverV1 {
     this.#onReconciliationAttemptStart = options.onReconciliationAttemptStart;
     this.#onReconciliationAttemptSuccess = options.onReconciliationAttemptSuccess;
     this.#onReconciliationAttemptEnd = options.onReconciliationAttemptEnd;
+    this.#onVerifiedCurrentHeadTargetAccepted = options.onVerifiedCurrentHeadTargetAccepted;
+    this.#onVerifiedCurrentHeadTargetRejected = options.onVerifiedCurrentHeadTargetRejected;
+    this.#onVerifiedCurrentHeadTargetSettled = options.onVerifiedCurrentHeadTargetSettled;
     this.#onError = options.onError;
   }
 
@@ -377,7 +414,46 @@ export class Rfc64PublicCatalogReceiverV1 {
     // Ambient hints keep their configurable per-head cap and coalescing; an
     // awaited failover request must retain every provider already validated by
     // the service, even when maxProvidersPerHead is lower.
-    return new Promise((resolve) => this.#scheduleIsolatedCompletion(inputs, resolve));
+    return new Promise((resolve) => this.#scheduleIsolatedCompletion(
+      inputs,
+      resolve,
+      'isolated',
+    ));
+  }
+
+  /**
+   * Await a head already discovered, fetched by exact digest, and verified by
+   * the catalog service as the current head for its chain-bound scope.
+   *
+   * Unlike an ambient announcement, this authenticated recovery task may move
+   * ahead of older queued heads in the same scope. If it becomes durable, only
+   * strictly older ambient work is then retired. A failed jump leaves the
+   * history queue intact so monotonic reconciliation can still proceed.
+   */
+  scheduleVerifiedCurrentHeadAndWait(
+    inputs: readonly Readonly<{
+      announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+      remotePeerId: string;
+    }>[],
+  ): Promise<Rfc64PublicCatalogReceiverCompletionV1> {
+    if (inputs.length === 0) {
+      throw new TypeError('RFC-64 verified current-head completion requires at least one provider');
+    }
+    const firstKey = rfc64ReceiverHeadKeyV1(inputs[0]!.announcement);
+    if (inputs.some(({ announcement }) => rfc64ReceiverHeadKeyV1(announcement) !== firstKey)) {
+      throw new TypeError('RFC-64 verified current-head providers must name one exact head');
+    }
+    const exactProviderKeys = new Set(inputs.map(({ announcement, remotePeerId }) => (
+      rfc64ReceiverProviderContextKeyV1(remotePeerId, announcement)
+    )));
+    if (exactProviderKeys.size !== inputs.length) {
+      throw new TypeError('RFC-64 verified current-head providers must be distinct');
+    }
+    return new Promise((resolve) => this.#scheduleIsolatedCompletion(
+      inputs,
+      resolve,
+      'verified-current-head',
+    ));
   }
 
   #scheduleMany(
@@ -415,28 +491,67 @@ export class Rfc64PublicCatalogReceiverV1 {
         existing.revision += 1n;
         continue;
       }
-      this.#safeNotify(() => this.#onAttemptStart?.(announcement));
-      if (this.#tasks.queuedCount >= this.#maxQueue) {
+      if (!this.#hasAdmissionCapacity()) {
         this.#droppedQueueFull += 1;
         continue;
       }
-      const providerKey = rfc64ReceiverProviderContextKeyV1(remotePeerId, announcement);
-      const task: ReceiverTaskV1 = {
+      this.#safeNotify(() => this.#onAttemptStart?.(announcement));
+      const task = this.#createTask(
+        [{ announcement, remotePeerId }],
+        'ambient',
         key,
-        scopeKey: rfc64ReceiverCatalogScopeKeyV1(announcement),
-        contextGraphId: announcement.contextGraphId,
-        cancellation: new AbortController(),
-        revision: 1n,
-        providers: new Map([[providerKey, {
-          key: providerKey,
-          peerId: remotePeerId,
-          announcement,
-          hintRevision: 1n,
-        }]]),
-      };
+      );
       this.#tasks.schedule(task);
     }
     this.#pump();
+  }
+
+  /**
+   * Single validated construction boundary for every scheduler task class.
+   * After this point catalogVersion is numeric, the provider set names one
+   * exact head, and placement/supersession behavior is an explicit policy.
+   */
+  #createTask(
+    inputs: readonly Readonly<{
+      announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+      remotePeerId: string;
+    }>[],
+    schedulingClass: Rfc64ReceiverSchedulingClassV1,
+    key: string,
+    completion?: (result: Rfc64PublicCatalogReceiverCompletionV1) => void,
+  ): ReceiverTaskV1 {
+    const first = inputs[0];
+    if (first === undefined) {
+      throw new TypeError('RFC-64 receiver task requires at least one provider');
+    }
+    const exactHeadKey = rfc64ReceiverHeadKeyV1(first.announcement);
+    const providers = new Map<string, ReceiverProviderV1>();
+    for (const { announcement, remotePeerId } of inputs) {
+      if (rfc64ReceiverHeadKeyV1(announcement) !== exactHeadKey) {
+        throw new TypeError('RFC-64 receiver task providers must name one exact head');
+      }
+      const providerKey = rfc64ReceiverProviderContextKeyV1(remotePeerId, announcement);
+      if (providers.has(providerKey)) {
+        throw new TypeError('RFC-64 receiver task providers must be distinct');
+      }
+      providers.set(providerKey, {
+        key: providerKey,
+        peerId: remotePeerId,
+        announcement,
+        hintRevision: 1n,
+      });
+    }
+    return {
+      key,
+      scopeKey: rfc64ReceiverCatalogScopeKeyV1(first.announcement),
+      contextGraphId: first.announcement.contextGraphId,
+      catalogVersion: parseCatalogVersionV1(first.announcement.catalogVersion),
+      schedulingPolicy: rfc64ReceiverSchedulingPolicyV1(schedulingClass),
+      cancellation: new AbortController(),
+      revision: 1n,
+      providers,
+      ...(completion === undefined ? {} : { completionWaiters: [completion] }),
+    };
   }
 
   /**
@@ -453,6 +568,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       remotePeerId: string;
     }>[],
     completion: (result: Rfc64PublicCatalogReceiverCompletionV1) => void,
+    schedulingClass: Exclude<Rfc64ReceiverSchedulingClassV1, 'ambient'>,
   ): void {
     // An awaited request can arrive after discovery has completed but after
     // service shutdown closed the receiver. A closed receiver never pumps its
@@ -467,38 +583,62 @@ export class Rfc64PublicCatalogReceiverV1 {
     }
     this.#scheduled += inputs.length;
     const first = inputs[0]!;
-    this.#safeNotify(() => this.#onAttemptStart?.(first.announcement));
-    if (this.#tasks.queuedCount >= this.#maxQueue) {
+    if (
+      schedulingClass === 'verified-current-head'
+      && !this.#hasAdmissionCapacity()
+    ) {
+      // Public ambient hints must not starve an exact head that crossed
+      // current-head discovery, exact fetch, signature, scope, and authority
+      // verification. If the queue itself is full, evicting deferred work
+      // cannot admit the verified task, so prefer one queued ambient. When
+      // only the total pending bound is full, queued or deferred ambient work
+      // may release capacity. Never evict active or other explicit work.
+      const finalizeAmbient = this.#tasks.queuedCount >= this.#maxQueue
+        ? this.#tasks.finalizeOneQueuedWhere.bind(this.#tasks)
+        : this.#tasks.finalizeOneNonRunningWhere.bind(this.#tasks);
+      const evicted = finalizeAmbient(
+        (task) => task.schedulingPolicy.schedulingClass === 'ambient',
+        (task) => createRfc64PublicCatalogReceiverCompletionV1({
+          outcome: 'dropped',
+          providerAttempts: task.providerAttempts ?? 0,
+        }),
+        (task) => this.#finishReconciliationAttempt(task),
+        (waiter) => this.#safeNotify(waiter),
+      );
+      if (evicted) this.#droppedQueueFull += 1;
+    }
+    if (!this.#hasAdmissionCapacity()) {
       this.#droppedQueueFull += 1;
+      if (schedulingClass === 'verified-current-head') {
+        this.#safeNotify(() => this.#onVerifiedCurrentHeadTargetRejected?.(
+          first.announcement,
+          'dropped',
+        ));
+      }
       completion(createRfc64PublicCatalogReceiverCompletionV1({
         outcome: 'dropped',
         providerAttempts: 0,
       }));
       return;
     }
-    const providers = new Map<string, ReceiverProviderV1>();
-    for (const { announcement, remotePeerId } of inputs) {
-      const key = rfc64ReceiverProviderContextKeyV1(remotePeerId, announcement);
-      if (providers.has(key)) continue;
-      providers.set(key, {
-        key,
-        peerId: remotePeerId,
-        announcement,
-        hintRevision: 1n,
-      });
-    }
-    const task: ReceiverTaskV1 = {
-      key: `${rfc64ReceiverHeadKeyV1(first.announcement)}\nexplicit-provider-set:${
+    this.#safeNotify(() => this.#onAttemptStart?.(first.announcement));
+    const task = this.#createTask(
+      inputs,
+      schedulingClass,
+      `${rfc64ReceiverHeadKeyV1(first.announcement)}\nexplicit-provider-set:${
         ++this.#isolatedCompletionSequence
       }`,
-      scopeKey: rfc64ReceiverCatalogScopeKeyV1(first.announcement),
-      contextGraphId: first.announcement.contextGraphId,
-      cancellation: new AbortController(),
-      revision: 1n,
-      providers,
-      completionWaiters: [completion],
-    };
+      completion,
+    );
     this.#tasks.schedule(task);
+    if (schedulingClass === 'verified-current-head') {
+      task.verifiedCurrentHeadTargetAccepted = true;
+      task.verifiedCurrentHeadTargetToken = ++this.#verifiedCurrentHeadTargetSequence;
+      this.#safeNotify(() => this.#onVerifiedCurrentHeadTargetAccepted?.(
+        first.announcement,
+        task.verifiedCurrentHeadTargetToken!,
+      ));
+    }
     this.#pump();
   }
 
@@ -517,7 +657,10 @@ export class Rfc64PublicCatalogReceiverV1 {
         outcome: 'closed',
         providerAttempts: task.providerAttempts ?? 0,
       }),
-      (task) => this.#finishReconciliationAttempt(task),
+      (task) => {
+        this.#settleVerifiedCurrentHeadTarget(task, 'closed');
+        this.#finishReconciliationAttempt(task);
+      },
       (waiter) => this.#safeNotify(waiter),
     );
     if (this.#isIdle()) this.#resolveIdle();
@@ -540,7 +683,10 @@ export class Rfc64PublicCatalogReceiverV1 {
         outcome: 'closed',
         providerAttempts: task.providerAttempts ?? 0,
       }),
-      (task) => this.#finishReconciliationAttempt(task),
+      (task) => {
+        this.#settleVerifiedCurrentHeadTarget(task, 'closed');
+        this.#finishReconciliationAttempt(task);
+      },
       (waiter) => this.#safeNotify(waiter),
     );
     this.#closing.abort(new Error('RFC-64 public catalog receiver closing'));
@@ -559,6 +705,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       failed: this.#failed,
       droppedQueueFull: this.#droppedQueueFull,
       droppedProviders: this.#droppedProviders,
+      supersededQueued: this.#supersededQueued,
       admissionDeferred: this.#admissionDeferred,
       deferred: this.#tasks.deferredCount,
       inFlight: this.#tasks.activeCount,
@@ -618,6 +765,7 @@ export class Rfc64PublicCatalogReceiverV1 {
         switch (outcome.kind) {
           case 'already-applied':
             this.#dedupedAlreadyApplied += 1;
+            this.#retireSupersededAmbientHeads(task);
             this.#finishSuccessfulReconciliationAttempt(task, outcome.announcement);
             this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
               outcome: 'already-applied',
@@ -627,6 +775,7 @@ export class Rfc64PublicCatalogReceiverV1 {
           case 'applied':
             this.#applied += 1;
             this.#providerSuccesses += 1;
+            this.#retireSupersededAmbientHeads(task);
             this.#safeNotify(() => this.#onHeadApplied?.(
               outcome.announcement,
               outcome.peerId,
@@ -877,8 +1026,8 @@ export class Rfc64PublicCatalogReceiverV1 {
   #beginReconciliationAttempt(task: ReceiverTaskV1): void {
     if (task.reconciliationAttemptStarted === true) return;
     task.reconciliationAttemptStarted = true;
+    const firstProvider = task.providers.values().next().value;
     try {
-      const firstProvider = task.providers.values().next().value;
       task.reconciliationAttemptToken =
         this.#onReconciliationAttemptStart?.(firstProvider!.announcement) ?? null;
     } catch {
@@ -895,16 +1044,59 @@ export class Rfc64PublicCatalogReceiverV1 {
     this.#safeNotify(() => this.#onReconciliationAttemptSuccess?.(announcement, token));
   }
 
+  #retireSupersededAmbientHeads(appliedTask: ReceiverTaskV1): void {
+    const appliedVersion = appliedTask.catalogVersion;
+    if (!appliedTask.schedulingPolicy.retiresOlderAmbientAfterDurableSuccess) {
+      return;
+    }
+    this.#supersededQueued += this.#tasks.finalizeNonRunningWhere(
+      (candidate) => (
+        candidate.schedulingPolicy.schedulingClass === 'ambient'
+        && candidate.scopeKey === appliedTask.scopeKey
+        && candidate.catalogVersion < appliedVersion
+      ),
+      (candidate) => createRfc64PublicCatalogReceiverCompletionV1({
+        outcome: 'closed',
+        providerAttempts: candidate.providerAttempts ?? 0,
+      }),
+      (candidate) => this.#finishReconciliationAttempt(candidate),
+      (waiter) => this.#safeNotify(waiter),
+    );
+  }
+
   #finishTask(
     task: ReceiverTaskV1,
     result: Rfc64PublicCatalogReceiverCompletionV1,
   ): void {
+    this.#settleVerifiedCurrentHeadTarget(task, result.outcome);
     this.#tasks.finalize(
       task,
       result,
       (settledTask) => this.#finishReconciliationAttempt(settledTask),
       (waiter) => this.#safeNotify(waiter),
     );
+  }
+
+  #settleVerifiedCurrentHeadTarget(
+    task: ReceiverTaskV1,
+    outcome: Rfc64PublicCatalogReceiverCompletionV1['outcome'],
+  ): void {
+    if (
+      task.schedulingPolicy.schedulingClass !== 'verified-current-head'
+      || task.verifiedCurrentHeadTargetAccepted !== true
+      || task.verifiedCurrentHeadTargetSettled === true
+    ) return;
+    task.verifiedCurrentHeadTargetSettled = true;
+    const targetToken = task.verifiedCurrentHeadTargetToken;
+    if (targetToken === undefined) return;
+    const firstProvider = task.providers.values().next().value;
+    if (firstProvider === undefined) return;
+    this.#safeNotify(() => this.#onVerifiedCurrentHeadTargetSettled?.(
+      firstProvider.announcement,
+      targetToken,
+      task.reconciliationAttemptToken ?? null,
+      outcome,
+    ));
   }
 
   #finishReconciliationAttempt(task: ReceiverTaskV1): void {
@@ -924,11 +1116,28 @@ export class Rfc64PublicCatalogReceiverV1 {
     return this.#tasks.isIdle;
   }
 
+  #hasAdmissionCapacity(): boolean {
+    return this.#tasks.queuedCount < this.#maxQueue
+      && this.#tasks.pendingCount < this.#maxQueue + this.#maxConcurrent;
+  }
+
   #resolveIdle(): void {
     if (!this.#isIdle()) return;
     const waiters = this.#idleWaiters;
     this.#idleWaiters = [];
     for (const resolve of waiters) resolve();
+  }
+}
+
+function parseCatalogVersionV1(value: string): bigint {
+  try {
+    const version = BigInt(value);
+    if (version < 0n) throw new TypeError('catalog version must be non-negative');
+    return version;
+  } catch (cause) {
+    throw new TypeError('validated catalog version must be a non-negative integer', {
+      cause,
+    });
   }
 }
 

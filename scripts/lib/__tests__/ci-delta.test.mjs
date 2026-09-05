@@ -1,14 +1,18 @@
+import { ciJobRow, COVERAGE_JOBS } from '../ci-lanes.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { parse } from 'yaml';
 import { fileURLToPath } from 'node:url';
 import {
   CI_LANES,
   EVM_SCOPES,
   NODE_EVM_LANES,
+  NODE_TEST_ARTIFACT_LANES,
+  needsNodeTestArtifacts,
   WORKSPACE_OWNING_EVM_SCOPES,
   WORKSPACE_OWNING_LANES,
   WORKSPACE_RULES,
@@ -622,8 +626,8 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.equal(workflow.includes('github.event.pull_request.base.sha'), false);
   assert.match(workflow, /^  evm-node-test-artifacts:/m);
   assert.match(workflow, /^  evm-devnet-test-artifacts:/m);
-  assert.ok(workflow.includes('plan-vitest-shard.mjs chain "$SHARD_ID"'));
-  assert.ok(workflow.includes('plan-vitest-shard.mjs cli "$SHARD_ID"'));
+  assert.equal(ciJobRow('tornado-core', 1).runner, 'weighted');
+  assert.equal(ciJobRow('bura-cli', 0).runner, 'weighted');
   assert.equal(
     workflow.includes('@origintrail-official/dkg-chain exec vitest run --shard='),
     false,
@@ -635,9 +639,10 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.ok(workflow.includes('shard: [1, 2, 3, 4, 5, 6, 7]'));
   assert.ok(workflow.includes('playwright test --shard=${{ matrix.shard }}/7'));
 
+  assert.equal(COVERAGE_JOBS['tornado-core']['http-utils'], 1);
+  assert.equal(COVERAGE_JOBS['tornado-core']['rdf-utils'], 1);
+  assert.equal(ciJobRow('kosava-supporting').concurrency, 3);
   for (const [packageName, invocation] of [
-    ['@origintrail-official/dkg-rdf-utils', '--lane rdf-utils'],
-    ['@origintrail-official/dkg-okf', '--filter @origintrail-official/dkg-okf'],
     ['@origintrail-official/dkg-demo', '--filter @origintrail-official/dkg-demo'],
   ]) {
     assert.ok(workflow.includes(invocation), `${packageName} tests must stay in CI`);
@@ -758,6 +763,61 @@ test('aggregate gates reject failed or accidentally skipped selected jobs', () =
     plan: evmPlan,
     needs: { plan: { result: 'success' }, 'evm-integration': { result: 'failure' } },
   }).join('\n'), /failure/);
+});
+
+test('all shared Hardhat consumers require and restore the matching artifact', () => {
+  const { jobs } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
+  const restorePath = './.github/actions/restore-evm-node-test-artifacts';
+  const action = parse(fs.readFileSync(path.join(REPO_ROOT, restorePath, 'action.yml'), 'utf8'));
+  assert.equal(action.runs.using, 'composite');
+  const download = action.runs.steps.find((step) => step.uses?.startsWith('actions/download-artifact@'));
+  assert.match(download.uses, /@[a-f0-9]{40}$/);
+  assert.equal(download.with.name, 'evm-node-test-artifacts');
+  assert.equal(download.with.path, '${{ runner.temp }}/evm-node-test-artifacts');
+  const extract = action.runs.steps.find((step) => step.run);
+  assert.equal(extract.shell, 'bash');
+  assert.equal(extract.env.ARTIFACT_DIR, download.with.path);
+  assert.match(extract.run, /tar -xzf "\$\{ARTIFACT_DIR\}\/evm-node-test-artifacts\.tgz"/);
+  assert.equal(jobs['evm-node-test-artifacts'].if, "needs.changes.outputs.node_test_artifacts == 'true'");
+  const output = jobs.changes.outputs.node_test_artifacts;
+  assert.ok(output.startsWith('${{ steps.plan.outputs.node_test_artifacts || ('));
+  const legacyLanes = [...output.matchAll(/steps\.plan\.outputs\.(\w+) == 'true'/g)].map((match) => match[1]);
+  assert.deepEqual(new Set(legacyLanes), new Set(NODE_TEST_ARTIFACT_LANES));
+  for (const lane of NODE_TEST_ARTIFACT_LANES) {
+    const job = PRIMARY_LANE_JOBS[lane];
+    const consumer = jobs[job];
+    const dependencies = new Set([consumer.needs].flat());
+    for (const dependency of ['changes', 'build', 'evm-node-test-artifacts']) {
+      assert.ok(dependencies.has(dependency), `${job} requires ${dependency}`);
+    }
+    const restores = consumer.steps.filter((step) => step.uses === restorePath);
+    assert.equal(restores.length, 1, job);
+    assert.equal(restores[0].if, job === 'tornado-core' ? "matrix.suite == 'chain'" : undefined);
+  }
+});
+
+test('artifact capability selects its producer and gate for each consumer lane only', () => {
+  assert.equal(NODE_TEST_ARTIFACT_LANES.length, 5);
+  for (const lane of CI_LANES) {
+    const plan = {
+      ...planCi({ eventName: 'push' }), mode: 'delta', fullCi: false,
+      runNode: Object.hasOwn(PRIMARY_LANE_JOBS, lane) && lane !== 'bura_blazegraph_arm64',
+      lanes: Object.fromEntries(CI_LANES.map((candidate) => [candidate, candidate === lane])),
+    };
+    const selected = NODE_TEST_ARTIFACT_LANES.includes(lane);
+    assert.equal(needsNodeTestArtifacts(plan), selected, lane);
+    assert.equal(githubOutputsForPlan(plan).node_test_artifacts, String(selected), lane);
+    const needs = {
+      changes: { result: 'success' }, build: { result: 'success' },
+      ...Object.fromEntries(Object.values(PRIMARY_LANE_JOBS).map((job) => [job, { result: 'success' }])),
+      'evm-node-test-artifacts': { result: 'skipped' },
+      'evm-devnet-test-artifacts': { result: 'success' },
+      'abi-freshness': { result: 'success' }, solidity: { result: 'success' },
+      'solidity-coverage': { result: 'skipped' }, 'tornado-static-analysis': { result: 'success' },
+    };
+    const errors = validatePrimaryResults({ eventName: 'pull_request', plan, needs });
+    assert.deepEqual(errors, selected ? ['evm-node-test-artifacts was selected but ended with skipped'] : [], lane);
+  }
 });
 
 test('aggregate gate accepts the full-push and docs-only job shapes', () => {

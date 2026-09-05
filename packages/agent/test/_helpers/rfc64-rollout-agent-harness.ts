@@ -80,7 +80,26 @@ export function createRfc64RolloutAgentHarness() {
     return dataDir;
   };
 
-  const startAgent = async (options: Rfc64RolloutStartAgentOptions): Promise<DKGAgent> => {
+  const startAgent = async (
+    optionsOrName: Rfc64RolloutStartAgentOptions | string,
+    legacyActivation?: Rfc64PublicCatalogActivationInputV1,
+    legacyDataDir?: string,
+    legacyPersistentStorePath?: string,
+    legacyBeforeStart?: (agent: DKGAgent) => void | Promise<void>,
+    legacyConfig: Partial<Parameters<typeof DKGAgent.create>[0]> = {},
+  ): Promise<DKGAgent> => {
+    const options: Rfc64RolloutStartAgentOptions = typeof optionsOrName === 'string'
+      ? {
+        name: optionsOrName,
+        ...(legacyActivation === undefined ? {} : { activation: legacyActivation }),
+        ...(legacyDataDir === undefined ? {} : { dataDir: legacyDataDir }),
+        ...(legacyPersistentStorePath === undefined
+          ? {}
+          : { persistentStorePath: legacyPersistentStorePath }),
+        ...(legacyBeforeStart === undefined ? {} : { beforeStart: legacyBeforeStart }),
+        config: legacyConfig,
+      }
+      : optionsOrName;
     const {
       name,
       activation: activationInput,

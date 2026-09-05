@@ -33,6 +33,56 @@ await store.insert(quads);
 const result = await store.query('SELECT * WHERE { ?s ?p ?o } LIMIT 10');
 ```
 
+## Oxigraph persistence contract
+
+This contract applies to `OxigraphStore` when it is created with a persistence
+path (`oxigraph-persistent`) and to `oxigraph-worker` when that worker is given
+a persistence path. Plain `oxigraph`, and a worker without a persistence path,
+are in-memory stores and provide no restart durability.
+
+### Mutation and flush semantics
+
+- Mutations update the in-memory store immediately and schedule a full N-Quads
+  snapshot after a 50 ms debounce. A successful mutation does not by itself
+  mean the snapshot has reached disk.
+- Callers that require an operation to survive an immediate restart must await
+  `flush()`. It cancels a pending debounce, waits for an in-flight snapshot,
+  and then writes the current state.
+- A snapshot is written to a sibling temporary file, the file is synced, and
+  then atomically renamed over the persistence file. The containing directory
+  is synced when the platform supports it. A crash before the rename retains
+  the previous complete snapshot; a temporary file may remain for cleanup.
+- Background flush failures are logged. Explicit `flush()` and `close()` calls
+  reject on write, sync, or rename failures so their callers can report that
+  recent in-memory changes may not be durable.
+
+### Hydration and corruption
+
+- Construction synchronously loads an existing non-empty persistence file.
+  Read failures abort construction.
+- Invalid N-Quads are never swallowed. The file is renamed to
+  `<persist-path>.corrupt-<timestamp>` for forensics, the failure is logged,
+  and construction throws. A later start can continue with an empty store
+  while the quarantined file remains available for investigation.
+
+### Graceful shutdown
+
+- `close()` cancels the debounce, waits for any in-flight snapshot, and runs a
+  final flush. For `oxigraph-worker`, the close request delegates to that same
+  final flush and is not subject to the read-operation timeout; the worker is
+  terminated only after the request settles.
+- `DKGAgent.stop()` awaits `store.close()`. If the final flush fails, shutdown
+  continues but emits a loud operator-facing error stating that the on-disk
+  store may be missing recent inserts.
+- Forced termination can still lose changes made after the last successful
+  flush. The atomic snapshot protocol protects the previously persisted file
+  from a torn overwrite; it cannot make unflushed memory durable.
+
+The executable regression contract is in
+[`test/oxigraph-persistence.test.ts`](test/oxigraph-persistence.test.ts). The
+[archived WM persistence incident report](../../docs/archive/internal/bugs/wm-persistence-regression.md)
+retains the original diagnosis, reproduction evidence, and fix history.
+
 ## Embedded worker store (`oxigraph-worker`) tuning
 
 The embedded worker runs **all** store operations on a single worker thread, so

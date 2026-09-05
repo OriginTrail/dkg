@@ -265,7 +265,7 @@ export async function runLlmCommand(options: ResolvedLlmCommandOptions): Promise
 export function registerLlmCommand(program: Command): void {
   program
     .command('llm')
-    .description('Chat with the local DKG through an OpenAI-compatible llama.cpp server')
+    .description('Chat with the local DKG through an OpenAI-compatible local model server')
     .argument('[prompt...]', 'one-shot prompt; omit it to start interactive chat')
     .option('-i, --interactive', 'continue into a bounded interactive chat session')
     .option('--llama-url <url>', 'OpenAI-compatible chat-completions endpoint')

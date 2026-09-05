@@ -25,7 +25,7 @@ import {
   createAsyncLift2270Harness,
   expectFailed,
 } from './_helpers/async-lift-2270-harness.js';
-import { KA_VM_VALIDATION, kaVmPublishRequest } from './_helpers/ka-vm-publish.js';
+import { KA_VM_VALIDATION, kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 
 /**
  * GH#2270 — the FAILED-JOB POLICY the publisher applies once a job has failed: what counts as

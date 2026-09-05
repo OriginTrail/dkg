@@ -49,6 +49,7 @@
 
 * [Context Pack](agent-context/context-pack.md)
 * [Invariants](agent-context/invariants.md)
+* [Publish Lifecycle Language](agent-context/publish-lifecycle-language.md)
 * [Publish & Query](agent-context/task-packs/publish-query.md)
 * [Operate & Troubleshoot](agent-context/task-packs/operate-troubleshoot.md)
 

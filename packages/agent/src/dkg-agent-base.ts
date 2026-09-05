@@ -29,6 +29,7 @@ import type { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
+import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
 import { SyncOnConnectPeerScheduler } from './sync/on-connect/peer-scheduler.js';
 import type {
@@ -124,7 +125,7 @@ import {
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource } from '@origintrail-official/dkg-storage';
-import { emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
+import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -374,7 +375,7 @@ import {
   type ChatSendResult,
   type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
-  type ContextGraphSubscriptionRehydrationStatus,
+  type ContextGraphSubscriptionRehydrationInternalStatus,
   type ContextGraphSubscriptionStore,
   type VmReconcileNegativeRecord,
   type VmReconcilePeerTopology,
@@ -673,6 +674,8 @@ export class DKGAgentBase {
   peerResolver!: PeerResolver;
   readonly eventBus: TypedEventBus;
   protected readonly chain: ChainAdapter;
+  /** Finalized-authority support classified once at the adapter boundary. */
+  protected readonly contextGraphAuthorityReaderCapability: ContextGraphAuthorityReaderCapability;
   /** Shared memory-owned root entities per context graph: entity → creatorPeerId. Used by publisher and shared memory handler. */
   protected readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
   protected readonly contextGraphMetaProjection: ContextGraphMetaProjection;
@@ -1222,7 +1225,10 @@ export class DKGAgentBase {
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
   /** Process-local reverse candidates plus the monotonic binding fence. */
   protected readonly contextGraphBindingState = new ContextGraphBindingState();
-  protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationStatus | null = null;
+  protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationInternalStatus | null = null;
+  /** Canonical dormant classification; public status arrays are projections. */
+  protected readonly contextGraphSubscriptionDormancyById =
+    new Map<string, ContextGraphDormancyReason>();
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
@@ -1411,6 +1417,13 @@ export class DKGAgentBase {
    * has observed the first result yet.
    */
   protected ensureProfilePublishedInFlight?: Promise<void>;
+  /**
+   * Coalesces the explicit profile reannouncement performed before a private
+   * join approval is exposed. This is intentionally separate from
+   * `ensureProfilePublishedInFlight`: readiness remains idempotent once the
+   * profile exists, while approval must refresh the public authority record.
+   */
+  protected approvalAuthorityProfileReannouncementInFlight?: Promise<void>;
   /**
    * OT-RFC-38 / LU-6 Phase B — sliding-window rate-limiter applied
    * to pre-registration (beacon-discovered) ciphertext writes.
@@ -1809,6 +1822,7 @@ export class DKGAgentBase {
     this.publicSnapshotStore = publicSnapshotStore;
     this.eventBus = eventBus;
     this.chain = chain;
+    this.contextGraphAuthorityReaderCapability = bindContextGraphAuthorityReader(chain);
     // OT-RFC-43 A2 — retain the allocator so finalize can allocate-at-finalize
     // (the publisher gets the same instance as `kaAllocator`).
     this.kaNumberAllocator = config.kaNumberAllocator;

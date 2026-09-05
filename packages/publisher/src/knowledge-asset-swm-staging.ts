@@ -14,7 +14,10 @@ import {
 } from '@origintrail-official/dkg-storage';
 
 import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
+import { toHex } from './metadata.js';
 import {
+  resolveKnowledgeAssetOperationPublicQuads,
+  resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
 } from './workspace-resolution.js';
@@ -35,6 +38,8 @@ export interface StageKnowledgeAssetSharedWorkingMemoryInputV1 {
   readonly agentAddress?: string;
   readonly subGraphName?: string;
   readonly timestamp?: Date;
+  /** Validate and reuse an already-promoted queued intent without restaging it. */
+  readonly reuseExistingOperation?: true;
 }
 
 export interface StagedKnowledgeAssetSharedWorkingMemoryV1 {
@@ -84,6 +89,74 @@ export async function stageKnowledgeAssetSharedWorkingMemoryStorageV1(
       },
     };
     const swmGraph = canonicalSharedMemoryScopeWriteGraph(swmBucket, sharedMemoryScope);
+    const publicQuadsDigest = workspacePublicQuadsDigest(publicQuads);
+    if (input.reuseExistingOperation) {
+      // A queued UPDATE already owns durable operation bytes and an access
+      // envelope. Rewriting either would invalidate its retry intent or restore
+      // stale work over a newer promotion. Validate under the writer lock and
+      // leave every graph, operation row and original timestamp untouched.
+      const head = await resolveKnowledgeAssetWorkspaceHead({
+        store: input.store,
+        graphManager,
+        contextGraphId: input.contextGraphId,
+        kaUal: scope.ual,
+        subGraphName: input.subGraphName,
+      });
+      const normalizePeers = (peers: readonly string[] = []): string => JSON.stringify(
+        [...new Set(peers.map((peer) => peer.trim()).filter(Boolean))].sort(),
+      );
+      const privateMerkleRoot = input.privateMerkleRoot === undefined
+        ? undefined
+        : `0x${toHex(input.privateMerkleRoot)}`;
+      const stale = (): Error & { code: 'PUBLISH_INTENT_STALE' } => Object.assign(
+        new Error(`Queued SWM operation ${input.shareOperationId} no longer matches its immutable intent`),
+        { code: 'PUBLISH_INTENT_STALE' as const },
+      );
+      if (
+        !head
+        || head.shareOperationId !== input.shareOperationId
+        || head.assertionVersion !== scope.assertionVersion
+        || head.publicQuadsDigest !== publicQuadsDigest
+        || head.publicTripleCount !== publicQuads.length
+        || head.privateTripleCount !== (input.privateTripleCount ?? 0)
+        || head.privateMerkleRoot?.toLowerCase() !== privateMerkleRoot
+        || head.publisherPeerId !== input.publisherPeerId?.trim()
+        || input.accessPolicy === undefined
+        || head.accessPolicy !== input.accessPolicy
+        || normalizePeers(head.allowedPeers) !== normalizePeers(input.allowedPeers)
+      ) {
+        throw stale();
+      }
+      // The resolver checks stored bytes against their recorded digest/count.
+      // Let operational read failures propagate; they are not evidence of drift.
+      const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
+        store: input.store,
+        graphManager,
+        contextGraphId: input.contextGraphId,
+        shareOperationId: input.shareOperationId,
+        kaUal: scope.ual,
+        assertionVersion: scope.assertionVersion,
+        subGraphName: input.subGraphName,
+        publicSnapshotStore: input.publicSnapshotStore,
+      });
+      if (
+        snapshot.publicQuadsDigest !== publicQuadsDigest
+        || snapshot.quads.length !== publicQuads.length
+        || snapshot.publisherPeerId !== head.publisherPeerId
+      ) {
+        throw stale();
+      }
+      return Object.freeze({
+        contextGraphId: input.contextGraphId,
+        shareOperationId: input.shareOperationId,
+        kaUal: scope.ual,
+        assertionVersion: scope.assertionVersion,
+        ...(input.subGraphName === undefined ? {} : { subGraphName: input.subGraphName }),
+        swmGraph,
+        tripleCount: publicQuads.length,
+        publicQuadsDigest,
+      });
+    }
     const priorSwmGraphs = await resolveSharedMemoryScopeGraphs(
       input.store,
       swmBucket,
@@ -149,7 +222,7 @@ export async function stageKnowledgeAssetSharedWorkingMemoryStorageV1(
       ...(input.subGraphName === undefined ? {} : { subGraphName: input.subGraphName }),
       swmGraph,
       tripleCount: publicQuads.length,
-      publicQuadsDigest: workspacePublicQuadsDigest(publicQuads),
+      publicQuadsDigest,
     });
   });
 }

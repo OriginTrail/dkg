@@ -1,6 +1,11 @@
 import path from 'node:path';
 import process from 'node:process';
 import {
+  probeLocalModelEndpoint,
+  type LocalModelEndpointAvailability,
+  type LocalModelEndpointProbeStrategy,
+} from '@origintrail-official/dkg-local-llm';
+import {
   createDkgLocalLlmRuntimeSession,
   type DkgLocalLlmRuntimeSession,
   type DkgLocalLlmRuntimeSessionOptions,
@@ -29,6 +34,7 @@ const DKG_LOCAL_LLM_STRICT_PROJECT_TOOLS = [
 
 export type LocalLlmErrorCode =
   | 'LOCAL_LLM_OFFLINE'
+  | 'LOCAL_LLM_NOT_READY'
   | 'LOCAL_LLM_BUSY'
   | 'LOCAL_LLM_PROJECT_MISMATCH'
   | 'LOCAL_LLM_INVALID_REQUEST'
@@ -91,6 +97,7 @@ export interface DaemonLocalLlmServiceOptions {
   cwd?: string;
   fetch?: typeof fetch;
   createSession?: SessionFactory;
+  probeStrategy?: LocalModelEndpointProbeStrategy;
   probeTimeoutMs?: number;
   stderr?: (line: string) => void;
 }
@@ -99,30 +106,48 @@ function trimmed(value: string | undefined): string | undefined {
   return value?.trim() || undefined;
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function resolveProbeStrategy(value: string | undefined): {
+  strategy: LocalModelEndpointProbeStrategy;
+  error?: string;
+} {
+  const configured = trimmed(value)?.toLowerCase();
+  if (!configured || configured === 'auto') return { strategy: { kind: 'auto' } };
+  if (configured === 'ollama') return { strategy: { kind: 'ollama' } };
+  if (['llama.cpp', 'llama-cpp', 'llamacpp'].includes(configured)) {
+    return { strategy: { kind: 'llama.cpp' } };
+  }
+  return {
+    strategy: { kind: 'auto' },
+    error: `DKG_LLM_BACKEND must be one of: auto, ollama, llama.cpp (received '${value?.trim()}')`,
+  };
+}
+
 export function resolveDaemonLocalLlmSettings(
   dkgHome: string,
   env: NodeJS.ProcessEnv = process.env,
-): { llamaUrl: string; model: string; defaultProjectId?: string; logDir: string } {
+): {
+  llamaUrl: string;
+  model: string;
+  probeStrategy: LocalModelEndpointProbeStrategy;
+  probeConfigurationError?: string;
+  defaultProjectId?: string;
+  logDir: string;
+} {
+  const probe = resolveProbeStrategy(env.DKG_LLM_BACKEND);
   return {
     llamaUrl: trimmed(env.DKG_LLM_URL)
       ?? trimmed(env.LLAMA_URL)
       ?? 'http://127.0.0.1:8080/v1/chat/completions',
     model: trimmed(env.DKG_LLM_MODEL) ?? trimmed(env.LLAMA_MODEL) ?? 'local-model',
+    probeStrategy: probe.strategy,
+    ...(probe.error ? { probeConfigurationError: probe.error } : {}),
     defaultProjectId: trimmed(env.DKG_PROJECT),
     logDir: path.join(dkgHome, 'logs', 'local-llm'),
   };
-}
-
-export function localLlmHealthUrl(llamaUrl: string): string {
-  const url = new URL(llamaUrl);
-  url.pathname = '/health';
-  url.search = '';
-  url.hash = '';
-  return url.toString();
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 export function createDaemonLocalLlmService(
@@ -144,19 +169,30 @@ export function createDaemonLocalLlmService(
   let closePromise: Promise<void> | undefined;
   let initFailure: string | undefined;
 
-  const probe = async (): Promise<{ reachable: boolean; error?: string }> => {
-    try {
-      const response = await fetcher(localLlmHealthUrl(settings.llamaUrl), {
-        method: 'GET',
-        headers: { Accept: 'application/json' },
-        signal: AbortSignal.timeout(probeTimeoutMs),
-      });
-      if (response.ok) return { reachable: true };
-      return { reachable: false, error: `llama.cpp health returned HTTP ${response.status}` };
-    } catch (error) {
-      return { reachable: false, error: `Local llama.cpp server is offline: ${errorMessage(error)}` };
+  const probe = (): Promise<LocalModelEndpointAvailability> => {
+    if (settings.probeConfigurationError) {
+      return Promise.resolve(Object.freeze({
+        status: 'offline',
+        reachable: false,
+        error: `Local LLM endpoint configuration is invalid: ${settings.probeConfigurationError}`,
+      }));
     }
+    return probeLocalModelEndpoint({
+      chatCompletionsUrl: settings.llamaUrl,
+      model: settings.model,
+      strategy: options.probeStrategy ?? settings.probeStrategy,
+      fetch: fetcher,
+      timeoutMs: probeTimeoutMs,
+    });
   };
+
+  const unavailableError = (
+    availability: Exclude<LocalModelEndpointAvailability, { status: 'ready' }>,
+  ): DaemonLocalLlmError => new DaemonLocalLlmError(
+    availability.status === 'not-ready' ? 'LOCAL_LLM_NOT_READY' : 'LOCAL_LLM_OFFLINE',
+    503,
+    availability.error,
+  );
 
   const closeSession = async (clearHistory: boolean): Promise<void> => {
     const current = session;
@@ -169,19 +205,22 @@ export function createDaemonLocalLlmService(
   return {
     async health() {
       const availability = await probe();
-      const ready = availability.reachable && !initFailure && !closed;
+      const reachable = availability.status !== 'offline';
+      const ready = availability.status === 'ready' && !initFailure && !closed;
       return {
         ok: ready,
         ready,
-        reachable: availability.reachable,
-        offline: !availability.reachable,
+        reachable,
+        offline: !reachable,
         busy: Boolean(activeOperation),
         initialized: Boolean(session),
         readOnly: true,
         sessionId: DKG_LOCAL_LLM_UI_SESSION_ID,
         ...(hasProjectLock && lockedProjectId ? { contextGraphId: lockedProjectId } : {}),
         ...(session?.trace.filePath ? { traceFile: session.trace.filePath } : {}),
-        ...(availability.error || initFailure ? { error: availability.error ?? initFailure } : {}),
+        ...(availability.status !== 'ready' || initFailure
+          ? { error: availability.status === 'ready' ? initFailure : availability.error }
+          : {}),
         ...(initFailure ? { initFailure } : {}),
       };
     },
@@ -235,13 +274,7 @@ export function createDaemonLocalLlmService(
       try {
         const availability = await probe();
         signal.throwIfAborted();
-        if (!availability.reachable) {
-          throw new DaemonLocalLlmError(
-            'LOCAL_LLM_OFFLINE',
-            503,
-            availability.error ?? 'The local llama.cpp server is offline.',
-          );
-        }
+        if (availability.status !== 'ready') throw unavailableError(availability);
         if (!session) {
           try {
             const created = await createSession({
@@ -314,12 +347,8 @@ export function createDaemonLocalLlmService(
           if (error instanceof DaemonLocalLlmError) throw error;
           if (signal.aborted) signal.throwIfAborted();
           const availabilityAfterFailure = await probe();
-          if (!availabilityAfterFailure.reachable) {
-            throw new DaemonLocalLlmError(
-              'LOCAL_LLM_OFFLINE',
-              503,
-              availabilityAfterFailure.error ?? 'The local llama.cpp server is offline.',
-            );
+          if (availabilityAfterFailure.status !== 'ready') {
+            throw unavailableError(availabilityAfterFailure);
           }
           throw new DaemonLocalLlmError(
             'LOCAL_LLM_RUNTIME_ERROR',

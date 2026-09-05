@@ -47,6 +47,7 @@ describe('agent wires publicAccessPolicyOnChainOracle into SharedMemoryHandler',
     agent = await DKGAgent.create({
       name: 'PlaintextOracleWiring',
       chainAdapter: new MockChainAdapter(),
+      rfc64CatalogActivation: { enabled: false },
     });
 
     // Counting oracle on the AGENT method the substrate closure delegates to.

@@ -1,3 +1,4 @@
+import { buildInitChainOverrides } from '../init-chain-config.js';
 import { Command } from 'commander';
 import { readFileSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -480,11 +481,12 @@ program
     //
     // EXCEPT on a network SWITCH (an existing node whose effective explicit
     // or chain-inferred network differs from the selection): the existing `chain`
-    // block belongs to the OLD network (e.g. Base-mainnet hub/RPC/chainId) and
+    // block contains OLD-network values (e.g. Base-mainnet hub/RPC/chainId) that
     // must NOT pre-fill or persist — otherwise the node would run the new
     // network's relays/genesis against the old chain (the Frankenstein config).
     // See isInitNetworkSwitch — a same-network legacy node preserves its
-    // chain field-merge (including operator RPC overrides).
+    // chain field-merge (including operator RPC overrides). The builder carries
+    // only explicitly classified portable operator tuning across a switch.
     const isNetworkSwitch = isInitNetworkSwitch(knownExistingNetwork, selectedNetwork);
     const chainDefaults = resolveChainConfig(isNetworkSwitch ? undefined : existing, network);
     const defaultRpcUrl = chainDefaults?.rpcUrl;
@@ -495,18 +497,15 @@ program
     console.log('\nBlockchain Configuration:');
     const rpcUrl = await ask('RPC URL', defaultRpcUrl);
     const rpcUrlsInput = await ask('Backup RPC URLs (comma-separated, optional; type "none" to clear)', defaultRpcUrls);
-    const clearRpcUrls = rpcUrlsInput.trim().toLowerCase() === 'none';
-    const rpcUrls = clearRpcUrls ? [] : rpcUrlsInput.split(',').map((s) => s.trim()).filter(Boolean);
     const hubAddress = await ask('Hub contract address', defaultHubAddress);
     const chainIdStr = await ask('Chain ID', defaultChainId);
 
-    const chainSection = rpcUrl && hubAddress ? {
-      type: 'evm' as const,
-      rpcUrl,
-      ...(clearRpcUrls || rpcUrls.length ? { rpcUrls } : {}),
-      hubAddress,
-      chainId: chainIdStr || undefined,
-    } : undefined;
+    const chainSection = buildInitChainOverrides(
+      { rpcUrl, rpcUrlsInput, hubAddress, chainId: chainIdStr || undefined },
+      resolveChainConfig(undefined, network),
+      existing.chain,
+      { isNetworkSwitch },
+    );
 
     // API authentication
     console.log('\nAPI Authentication:');
@@ -537,7 +536,7 @@ program
       autoUpdate,
       // On a network switch, never fall back to the stale existing chain
       // block — let an empty chainSection inherit the new network's chain.
-      chain: isNetworkSwitch ? chainSection : (chainSection ?? existing.chain),
+      chain: chainSection,
       auth: { enabled: enableAuth, tokens: existing.auth?.tokens },
       // Persist the chosen backend. `storeBlock === null` from the
       // wizard means "use the local default" — we explicitly clear any

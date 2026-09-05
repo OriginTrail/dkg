@@ -1,3 +1,4 @@
+import { coverageForPackage } from "../../vitest.coverage";
 import { defineConfig } from "vitest/config";
 
 import { RFC64_UNIT_TESTS } from "./vitest.rfc64-unit-tests";
@@ -14,6 +15,8 @@ const SQLITE_EXEC_ARGV = [
 
 export default defineConfig({
   test: {
+    allowOnly: false,
+    coverage: coverageForPackage("agent"),
     include: [
       ...RFC64_UNIT_TESTS,
       "test/endorse.test.ts",
@@ -187,6 +190,9 @@ export default defineConfig({
       "test/sync-responder-agents-meta-serve-skip.test.ts",
       "test/messenger-substrate.test.ts",
       "test/context-graph-join-policy.test.ts",
+      "test/bounded-operation.test.ts",
+      "test/private-read-chain-authority.test.ts",
+      "test/context-graph-access-policy-state.test.ts",
       "test/context-graph-historical-name-binding.test.ts",
       "test/context-graph-list-concurrency.test.ts",
       "test/cg-resolve-refresh.test.ts",
@@ -194,6 +200,7 @@ export default defineConfig({
       "test/workspace-crypto-delegatee-filter.test.ts",
       "test/swm-public-snapshot-materialization.test.ts",
       "test/swm-public-cg-plaintext.test.ts",
+      "test/swm-sender-key-stale-target.test.ts",
       "test/swm-snapshot-materializer.test.ts",
       "test/swm-head-identity-preservation.test.ts",
       // #2079 — the already-materialized witness: the warm-path win, the count

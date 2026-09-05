@@ -62,7 +62,7 @@ describe('worker error protocol', () => {
       ): Promise<T>;
     };
     try {
-      await expect(internals.postToWorker(1_000, undefined, 'missingMethod', []))
+      await expect(internals.postToWorker(5_000, undefined, 'missingMethod', []))
         .rejects.toMatchObject({
           name: 'Error',
           message: 'Unknown method: missingMethod',

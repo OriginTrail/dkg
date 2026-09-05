@@ -2580,6 +2580,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
       newOnChainId,
     );
     if (!transition.changed) return;
+    // Some verified late-binding paths intentionally mutate the canonical
+    // in-memory subscription only after their durable write commits. They do
+    // not subsequently pass through setContextGraphSubscription(), so without
+    // this notification a subscribed Edge can remain outside the RFC-64
+    // responsibility registry until restart even though its chain id is now
+    // authoritative. Clone-based callers still let the canonical setter own
+    // the transition and avoid an eager decision against the old row.
+    if (this.subscribedContextGraphs.get(localCgId) === sub) {
+      void this.reconcileRfc64CatalogResponsibilityV1(localCgId).catch((error) => {
+        this.log.warn(
+          createOperationContext('system'),
+          `RFC-64 responsibility resolution failed after binding "${localCgId}": ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
     if (!transition.onChainIdChanged) return;
     // The bound on-chain id actually CHANGED (repair / recreate / re-register).
     // Any prior reconcile progress refers to the OLD chain graph and must be
@@ -2956,6 +2971,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const eligible: string[] = [];
       for (const [localCgId, sub] of this.subscribedContextGraphs) {
         if (!isLifecycleCurrent()) return;
+        // Passive discovery rows carry neither member nor host intent. Public
+        // RFC-64 selection is handled by the accepted-policy loop below.
+        if (!sub.subscribed && !sub.coreHosted) continue;
+        // A durable subscription row is synchronization intent, never an
+        // authorization credential. In particular, an older daemon may have
+        // persisted a private-CG row before the subscribe admission gate became
+        // fail-closed. Do not even enqueue VM work unless current policy
+        // authority positively proves this node can read the CG.
+        const canRead = await this.canReadContextGraph(localCgId, {
+          allowSubscriptionFallback: false,
+        }).catch(() => false);
+        if (!isLifecycleCurrent()) return;
+        if (!canRead) continue;
         // GH #1098 — self-prime onChainId for a pre-subscribed PUBLIC member CG
         // (subscribed BEFORE its first publish, so unbound) before the skip-gate
         // below would pass it over. Shared with the live KACG nudge.
@@ -3236,6 +3264,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!subscription?.subscribed && !subscription?.coreHosted) {
       throw new ContextGraphNotFoundError(localCgId);
     }
+    // Exact-asset recovery is another VM materialization entry point and must
+    // not trust the persisted subscription bit as membership proof.
+    const canRead = await this.canReadContextGraph(localCgId, {
+      allowSubscriptionFallback: false,
+    }).catch(() => false);
+    if (!canRead) throw new ContextGraphNotFoundError(localCgId);
     if (
       typeof this.chain.getKAContextGraphId !== 'function'
       || typeof this.chain.readKnowledgeAssetVersionSnapshot !== 'function'
@@ -3506,8 +3540,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (!this.isRfc64SelectedVmReconcileTargetAllowed(localCgId)) {
         throw new ContextGraphNotFoundError(localCgId);
       }
+      // This branch is definitionally an accepted RFC-64 PUBLIC policy (the
+      // selector rejects private policy envelopes) and carries no member row
+      // that could have been poisoned. Resolve it through the dedicated
+      // selected target path without doing a second general read probe.
       return this.resolveSelectedVmReconcileTarget(localCgId, isCurrent, signal);
     }
+    // Central defense for periodic, live-chain, and manual reconciliation.
+    // The outer sweep also filters unauthorized rows to avoid queue churn, but
+    // every dispatcher entry point converges here and must independently prove
+    // read authority. Never let a persisted subscription authorize itself.
+    const canRead = await this.canReadContextGraph(localCgId, {
+      allowSubscriptionFallback: false,
+    }).catch(() => false);
+    if (!isCurrent()) throw new VmReconcileQueueClosedError();
+    if (!canRead) throw new ContextGraphNotFoundError(localCgId);
     if (
       this.contextGraphBindingState.currentBindingFor(localCgId, sub) === undefined
       && sub.subscribed
@@ -4915,6 +4962,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     );
     const rosterProofUpgraded = !record.curatorRosterConfirmed && curatorRosterConfirmed;
     if (!membershipUnchanged) {
+      const priorCycleWasIncomplete = record.backoffKind === 'incomplete-cycle'
+        || [...record.attemptedPeerIds]
+          .some((peerId) => !record.cleanAbsentPeerIds.has(peerId));
       const previousCandidatePeerIds = record.candidatePeerIds;
       const nextCandidatePeerIds = new Set(candidatePeerIds);
       record.candidatePeerIds = new Set(candidatePeerIds);
@@ -4936,9 +4986,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
       } else if (!rosterProofUpgraded) {
         // Pure growth preserves valid credits for retained identities, but the
         // newly observed peer is uncredited and immediately breaks backoff.
+        // Do not let a publication-window incomplete response compound into
+        // multi-minute suppression merely because startup discovers the same
+        // recovery roster one peer at a time. Clean-absence history still
+        // keeps its exponential damping; only transport/timing uncertainty
+        // starts a fresh base-delay epoch when the evidence universe grows.
         record.phase = 'collecting';
         record.backoffKind = undefined;
         record.nextRetryAt = 0;
+        if (priorCycleWasIncomplete) record.failures = 0;
         record.collectionDeadlineAt = now
           + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
       }

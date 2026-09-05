@@ -52,21 +52,41 @@ export const RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1 =
   '/dkg/catalog/1/author-head-availability' as const;
 export const RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1 =
   '/dkg/catalog/1/control-object/author-head' as const;
+export const RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1 =
+  '/dkg/catalog/1/author-head-replay' as const;
+export const RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V2 =
+  '/dkg/catalog/2/author-head-replay' as const;
 
 export const RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1 =
   'rfc64-author-catalog-head-availability-v1' as const;
 export const RFC64_PUBLIC_CATALOG_HEAD_FETCH_KIND_V1 =
   'rfc64-author-catalog-head-fetch-v1' as const;
+export const RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1 =
+  'rfc64-author-catalog-head-replay-v1' as const;
+export const RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2 =
+  'rfc64-author-catalog-head-replay-completion-v2' as const;
 
 /** Flat JCS request caps; the fetched signed head has a separate response cap. */
 export const RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_MAX_BYTES_V1 = 2 * 1024;
 export const RFC64_PUBLIC_CATALOG_HEAD_FETCH_REQUEST_MAX_BYTES_V1 = 2 * 1024;
 export const RFC64_PUBLIC_CATALOG_HEAD_FETCH_RESPONSE_MAX_BYTES_V1 = 32 * 1024;
+export const RFC64_PUBLIC_CATALOG_HEAD_REPLAY_MAX_BYTES_V1 = 2 * 1024;
+export const RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_MAX_BYTES_V2 = 32 * 1024;
+const RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_MAX_HEADS_V2 = 64;
+const REPLAY_UTF8 = new TextEncoder();
+const REPLAY_UTF8_FATAL = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 const ACK = Uint8Array.of(1);
 const ANNOUNCEMENT_DENIED = 0;
 const FETCH_NOT_FOUND = 0;
 const FETCH_DENIED = 2;
+const REPLAY_DENIED = 0;
+const REPLAY_BUSY = 2;
+const REPLAY_INCOMPLETE = 3;
+
+const DEFAULT_REPLAY_OVERLOAD_MAX_ATTEMPTS_V1 = 4;
+const MAX_REPLAY_OVERLOAD_MAX_ATTEMPTS_V1 = 8;
+const DEFAULT_REPLAY_OVERLOAD_RETRY_BASE_DELAY_MS_V1 = 100;
 
 const CATALOG_WIRE: Rfc64CatalogTransportWireAdapterV1 =
   createRfc64CatalogTransportWireAdapterV1({
@@ -103,6 +123,12 @@ const ANNOUNCEMENT_KEYS = Object.freeze([
 ] as const);
 
 const FETCH_REQUEST_KEYS = ANNOUNCEMENT_KEYS;
+const REPLAY_REQUEST_KEYS = Object.freeze([
+  'contextGraphId',
+  'kind',
+  'networkId',
+  'policyDigest',
+] as const);
 
 export interface Rfc64PublicCatalogHeadAnnouncementV1 {
   readonly kind: typeof RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1;
@@ -130,9 +156,36 @@ export interface Rfc64PublicCatalogHeadFetchRequestV1 {
   readonly signatureVariantDigest: Digest32V1;
 }
 
+/** Scoped request for a provider to replay every current author-head hint. */
+export interface Rfc64PublicCatalogHeadReplayRequestV1 {
+  readonly kind: typeof RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1;
+  readonly networkId: NetworkIdV1;
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly policyDigest: Digest32V1;
+}
+
+/** Completion-capable replay response introduced after 10.0.15 admission-only ACKs. */
+export interface Rfc64PublicCatalogHeadReplayCompletionV2 {
+  readonly kind: typeof RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2;
+  readonly heads: readonly Rfc64PublicCatalogHeadAnnouncementV1[];
+}
+
+export interface Rfc64PublicCatalogHeadReplayProviderCompletionV2 {
+  readonly announced: number;
+  readonly failed: number;
+  readonly manifest: readonly Rfc64PublicCatalogHeadAnnouncementV1[];
+}
+
+type Rfc64PublicCatalogPolicyScopeV1 =
+  | Rfc64PublicCatalogHeadAnnouncementV1
+  | Rfc64PublicCatalogHeadFetchRequestV1
+  | Rfc64PublicCatalogHeadReplayRequestV1;
+
 export type Rfc64PublicCatalogOperationV1 =
   | 'announce-outbound'
   | 'announce-inbound'
+  | 'head-replay-outbound'
+  | 'head-replay-inbound'
   | 'fetch-outbound'
   | 'fetch-inbound';
 
@@ -171,6 +224,27 @@ export interface FetchedRfc64PublicCatalogHeadV1 {
   readonly issuerSignature: VerifiedControlEnvelopeIssuerSignatureV1;
 }
 
+/**
+ * Synchronous admission result for inbound replay work. The completion-capable
+ * V2 transport awaits the promise before returning its manifest; the V1
+ * compatibility protocol preserves its historical admission-only ACK.
+ */
+export type Rfc64PublicCatalogHeadReplayAdmissionV1 =
+  | Readonly<{
+    status: 'admitted';
+    completion: Promise<Readonly<Rfc64PublicCatalogHeadReplayProviderCompletionV2>>;
+  }>
+  | Readonly<{
+    status: 'busy';
+  }>;
+
+export interface Rfc64PublicCatalogReplayOverloadRetryV1 {
+  /** Total attempts including the initial request. Bounded to 1..8. */
+  readonly maxAttempts?: number;
+  /** Injectable wait boundary for deterministic tests and alternate schedulers. */
+  readonly wait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+}
+
 export interface Rfc64PublicCatalogTransportOptionsV1 {
   readonly controlObjects: Rfc64PublicCatalogControlObjectReaderV1;
   /** Preferred V2 contract: the accepted-current access-policy registry. */
@@ -188,6 +262,13 @@ export interface Rfc64PublicCatalogTransportOptionsV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     remotePeerId: string,
   ) => void | Promise<void>;
+  /** Called only after a scoped replay request passes current policy authorization. */
+  readonly onCatalogHeadReplayRequested?: (
+    request: Readonly<Rfc64PublicCatalogHeadReplayRequestV1>,
+    remotePeerId: string,
+  ) => Rfc64PublicCatalogHeadReplayAdmissionV1;
+  /** Bounded retry policy for an authenticated peer that reports replay overload. */
+  readonly replayOverloadRetry?: Rfc64PublicCatalogReplayOverloadRetryV1;
 }
 
 export const RFC64_PUBLIC_CATALOG_TRANSPORT_ERROR_CODES_V1 = Object.freeze([
@@ -197,6 +278,7 @@ export const RFC64_PUBLIC_CATALOG_TRANSPORT_ERROR_CODES_V1 = Object.freeze([
   'catalog-transport-object-mismatch',
   'catalog-transport-signature',
   'catalog-transport-state',
+  'catalog-transport-overloaded',
 ] as const);
 
 export type Rfc64PublicCatalogTransportErrorCodeV1 =
@@ -223,6 +305,12 @@ export class Rfc64PublicCatalogTransportErrorV1 extends Error {
  */
 export class Rfc64PublicCatalogTransportV1 {
   #started = false;
+  #lifecycleAbortController: AbortController | null = null;
+  readonly #replayOverloadMaxAttempts: number;
+  readonly #waitBeforeReplayOverloadRetry: (
+    delayMs: number,
+    signal?: AbortSignal,
+  ) => Promise<void>;
   readonly #authorizeCatalogOperation: (
     input: Rfc64PublicCatalogAuthorizationInputV1,
   ) => Promise<Rfc64PublicCatalogAuthorizationV1 | null>;
@@ -245,6 +333,24 @@ export class Rfc64PublicCatalogTransportV1 {
     if (typeof options.onCatalogHeadAvailable !== 'function') {
       fail('catalog-transport-input', 'onCatalogHeadAvailable must be a function');
     }
+    const replayOverloadMaxAttempts = options.replayOverloadRetry?.maxAttempts
+      ?? DEFAULT_REPLAY_OVERLOAD_MAX_ATTEMPTS_V1;
+    if (
+      !Number.isSafeInteger(replayOverloadMaxAttempts)
+      || replayOverloadMaxAttempts < 1
+      || replayOverloadMaxAttempts > MAX_REPLAY_OVERLOAD_MAX_ATTEMPTS_V1
+    ) {
+      fail(
+        'catalog-transport-input',
+        `replayOverloadRetry.maxAttempts must be an integer from 1 to ${MAX_REPLAY_OVERLOAD_MAX_ATTEMPTS_V1}`,
+      );
+    }
+    const retryWait = options.replayOverloadRetry?.wait;
+    if (retryWait !== undefined && typeof retryWait !== 'function') {
+      fail('catalog-transport-input', 'replayOverloadRetry.wait must be a function');
+    }
+    this.#replayOverloadMaxAttempts = replayOverloadMaxAttempts;
+    this.#waitBeforeReplayOverloadRetry = retryWait ?? waitForReplayOverloadRetryV1;
   }
 
   get started(): boolean {
@@ -253,6 +359,8 @@ export class Rfc64PublicCatalogTransportV1 {
 
   start(): void {
     if (this.#started) return;
+    const lifecycleAbortController = new AbortController();
+    this.#lifecycleAbortController = lifecycleAbortController;
     this.#started = true;
     try {
       this.router.register(
@@ -265,10 +373,26 @@ export class Rfc64PublicCatalogTransportV1 {
         async (data, peerId) => this.handleFetch(data, peerId.toString()),
         { maxReadBytes: RFC64_PUBLIC_CATALOG_HEAD_FETCH_REQUEST_MAX_BYTES_V1 },
       );
+      this.router.register(
+        RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1,
+        async (data, peerId) => this.handleReplayRequest(data, peerId.toString()),
+        { maxReadBytes: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_MAX_BYTES_V1 },
+      );
+      this.router.register(
+        RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V2,
+        async (data, peerId) => this.handleReplayRequestV2(data, peerId.toString()),
+        { maxReadBytes: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_MAX_BYTES_V1 },
+      );
     } catch (cause) {
       this.#started = false;
+      if (this.#lifecycleAbortController === lifecycleAbortController) {
+        this.#lifecycleAbortController = null;
+      }
+      lifecycleAbortController.abort(cause);
       this.router.unregister(RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1);
       this.router.unregister(RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1);
+      this.router.unregister(RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1);
+      this.router.unregister(RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V2);
       throw cause;
     }
   }
@@ -276,8 +400,91 @@ export class Rfc64PublicCatalogTransportV1 {
   stop(): void {
     if (!this.#started) return;
     this.#started = false;
+    const lifecycleAbortController = this.#lifecycleAbortController;
+    this.#lifecycleAbortController = null;
+    lifecycleAbortController?.abort(new Rfc64PublicCatalogTransportErrorV1(
+      'catalog-transport-state',
+      'catalog transport stopped',
+    ));
     this.router.unregister(RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1);
     this.router.unregister(RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1);
+    this.router.unregister(RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1);
+    this.router.unregister(RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V2);
+  }
+
+  /** Ask one already-connected, currently authorized peer to replay durable heads. */
+  async requestCatalogHeadReplay(
+    remotePeerId: string,
+    requestInput: Rfc64PublicCatalogHeadReplayRequestV1,
+    sendOptions?: SendOptions,
+  ): Promise<Readonly<Rfc64PublicCatalogHeadReplayCompletionV2>> {
+    this.requireStarted();
+    const lifecycleSignal = this.#lifecycleAbortController?.signal;
+    if (lifecycleSignal === undefined) {
+      fail('catalog-transport-state', 'catalog transport lifecycle is unavailable');
+    }
+    const signal = sendOptions?.signal === undefined
+      ? lifecycleSignal
+      : AbortSignal.any([lifecycleSignal, sendOptions.signal]);
+    const replaySendOptions: SendOptions = { ...sendOptions, signal };
+    const peerId = snapshotPeerId(remotePeerId);
+    const request = parseReplayRequest(encodeReplayRequest(requestInput));
+    for (let attempt = 1; attempt <= this.#replayOverloadMaxAttempts; attempt += 1) {
+      const response = await this.withCurrentCatalogPolicy(
+        'head-replay-outbound',
+        peerId,
+        request,
+        () => this.router.send(
+          peerId,
+          RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V2,
+          encodeReplayRequest(request),
+          replaySendOptions,
+        ),
+      );
+      if (response.byteLength === 1 && response[0] === REPLAY_DENIED) {
+        fail('catalog-transport-policy-denied', 'remote peer denied the catalog-head replay request');
+      }
+      if (response.byteLength === 1 && response[0] === REPLAY_BUSY) {
+        if (attempt === this.#replayOverloadMaxAttempts) {
+          fail(
+            'catalog-transport-overloaded',
+            `remote peer remained busy after ${attempt} catalog-head replay attempt(s)`,
+          );
+        }
+        await this.#waitBeforeReplayOverloadRetry(
+          replayOverloadRetryDelayMsV1(attempt),
+          signal,
+        );
+        continue;
+      }
+      if (response.byteLength === 1 && response[0] === REPLAY_INCOMPLETE) {
+        fail(
+          'catalog-transport-wire',
+          'remote peer could not complete the catalog-head replay request',
+        );
+      }
+      if (response.byteLength === 1 && response[0] === ACK[0]) {
+        fail(
+          'catalog-transport-wire',
+          'catalog-head replay returned a legacy admission-only acknowledgement',
+        );
+      }
+      const completion = parseRfc64PublicCatalogHeadReplayCompletionV2(response);
+      for (const head of completion.heads) {
+        if (
+          head.networkId !== request.networkId
+          || head.contextGraphId !== request.contextGraphId
+          || head.policyDigest !== request.policyDigest
+        ) {
+          fail('catalog-transport-wire', 'catalog-head replay manifest escaped its request scope');
+        }
+      }
+      return completion;
+    }
+    fail(
+      'catalog-transport-overloaded',
+      'catalog-head replay exhausted its retry budget',
+    );
   }
 
   async announceCatalogHead(
@@ -407,10 +614,58 @@ export class Rfc64PublicCatalogTransportV1 {
     return served.value ?? Uint8Array.of(FETCH_NOT_FOUND);
   }
 
+  private async handleReplayRequest(
+    data: Uint8Array,
+    remotePeerIdInput: string,
+  ): Promise<Uint8Array> {
+    this.requireStarted();
+    const remotePeerId = snapshotPeerId(remotePeerIdInput);
+    const request = parseReplayRequest(data);
+    const admitted = await this.withAuthorizedCurrentCatalogPolicy(
+      'head-replay-inbound',
+      remotePeerId,
+      request,
+      () => this.options.onCatalogHeadReplayRequested?.(request, remotePeerId)
+        ?? Object.freeze({ status: 'busy' as const }),
+    );
+    if (!admitted.authorized) return Uint8Array.of(REPLAY_DENIED);
+    return admitted.value.status === 'admitted' ? ACK : Uint8Array.of(REPLAY_BUSY);
+  }
+
+  private async handleReplayRequestV2(
+    data: Uint8Array,
+    remotePeerIdInput: string,
+  ): Promise<Uint8Array> {
+    this.requireStarted();
+    const remotePeerId = snapshotPeerId(remotePeerIdInput);
+    const request = parseReplayRequest(data);
+    const completed = await this.withAuthorizedCurrentCatalogPolicy(
+      'head-replay-inbound',
+      remotePeerId,
+      request,
+      async () => {
+        const admission = this.options.onCatalogHeadReplayRequested?.(request, remotePeerId)
+          ?? Object.freeze({ status: 'busy' as const });
+        if (admission.status === 'busy') return admission;
+        return Object.freeze({
+          status: 'admitted' as const,
+          completion: snapshotReplayProviderCompletionV2(await admission.completion),
+        });
+      },
+    );
+    if (!completed.authorized) return Uint8Array.of(REPLAY_DENIED);
+    if (completed.value.status === 'busy') return Uint8Array.of(REPLAY_BUSY);
+    if (completed.value.completion.failed > 0) return Uint8Array.of(REPLAY_INCOMPLETE);
+    return encodeRfc64PublicCatalogHeadReplayCompletionV2(Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+      heads: completed.value.completion.manifest,
+    }));
+  }
+
   private async withAuthorizedCurrentCatalogPolicy<Value>(
     operation: Rfc64PublicCatalogOperationV1,
     remotePeerId: string,
-    scope: Rfc64PublicCatalogHeadAnnouncementV1 | Rfc64PublicCatalogHeadFetchRequestV1,
+    scope: Rfc64PublicCatalogPolicyScopeV1,
     work: () => Value | Promise<Value>,
   ): Promise<Rfc64AuthorizedCatalogWorkResultV1<Value>> {
     return withAuthorizedCurrentRfc64CatalogPolicyV1(
@@ -422,7 +677,7 @@ export class Rfc64PublicCatalogTransportV1 {
   private async isCatalogPolicyAuthorized(
     operation: Rfc64PublicCatalogOperationV1,
     remotePeerId: string,
-    scope: Rfc64PublicCatalogHeadAnnouncementV1 | Rfc64PublicCatalogHeadFetchRequestV1,
+    scope: Rfc64PublicCatalogPolicyScopeV1,
   ): Promise<boolean> {
     try {
       await this.requireCatalogPolicy(operation, remotePeerId, scope);
@@ -439,7 +694,7 @@ export class Rfc64PublicCatalogTransportV1 {
   private withCurrentCatalogPolicy<Value>(
     operation: Rfc64PublicCatalogOperationV1,
     remotePeerId: string,
-    scope: Rfc64PublicCatalogHeadAnnouncementV1 | Rfc64PublicCatalogHeadFetchRequestV1,
+    scope: Rfc64PublicCatalogPolicyScopeV1,
     work: () => Value | Promise<Value>,
   ): Promise<Value> {
     return withCurrentRfc64CatalogPolicyV1(
@@ -451,14 +706,14 @@ export class Rfc64PublicCatalogTransportV1 {
   private async requireCatalogPolicy(
     operation: Rfc64PublicCatalogOperationV1,
     remotePeerId: string,
-    scope: Rfc64PublicCatalogHeadAnnouncementV1 | Rfc64PublicCatalogHeadFetchRequestV1,
+    scope: Rfc64PublicCatalogPolicyScopeV1,
   ): Promise<void> {
     const input = Object.freeze({
       operation,
       remotePeerId,
       networkId: scope.networkId,
       contextGraphId: scope.contextGraphId,
-      subGraphName: scope.subGraphName,
+      subGraphName: 'subGraphName' in scope ? scope.subGraphName : null,
       policyDigest: scope.policyDigest,
       objectType: AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
     }) satisfies Rfc64PublicCatalogAuthorizationInputV1;
@@ -528,6 +783,149 @@ export function parseRfc64PublicCatalogHeadFetchRequestV1(
   return parseFetchRequest(input);
 }
 
+export function encodeRfc64PublicCatalogHeadReplayRequestV1(
+  input: Rfc64PublicCatalogHeadReplayRequestV1,
+): Uint8Array {
+  return encodeReplayRequest(input);
+}
+
+export function parseRfc64PublicCatalogHeadReplayRequestV1(
+  input: Uint8Array,
+): Rfc64PublicCatalogHeadReplayRequestV1 {
+  return parseReplayRequest(input);
+}
+
+export function encodeRfc64PublicCatalogHeadReplayCompletionV2(
+  input: Rfc64PublicCatalogHeadReplayCompletionV2,
+): Uint8Array {
+  const completion = snapshotReplayCompletionV2(input);
+  const heads = completion.heads.map((head) => JSON.parse(
+    REPLAY_UTF8_FATAL.decode(encodeAnnouncement(head)),
+  ));
+  const bytes = REPLAY_UTF8.encode(JSON.stringify({
+    heads,
+    kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+  }));
+  if (bytes.byteLength > RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_MAX_BYTES_V2) {
+    fail('catalog-transport-wire', 'RFC-64 catalog replay completion exceeds its byte cap');
+  }
+  return bytes;
+}
+
+export function parseRfc64PublicCatalogHeadReplayCompletionV2(
+  input: Uint8Array,
+): Rfc64PublicCatalogHeadReplayCompletionV2 {
+  if (
+    !(input instanceof Uint8Array)
+    || input.byteLength < 2
+    || input.byteLength > RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_MAX_BYTES_V2
+  ) {
+    fail('catalog-transport-wire', 'RFC-64 catalog replay completion is empty or oversized');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(REPLAY_UTF8_FATAL.decode(input));
+  } catch (cause) {
+    fail('catalog-transport-wire', 'RFC-64 catalog replay completion is not strict JSON', cause);
+  }
+  const completion = snapshotReplayCompletionV2(parsed);
+  const canonical = encodeRfc64PublicCatalogHeadReplayCompletionV2(completion);
+  if (
+    canonical.byteLength !== input.byteLength
+    || canonical.some((byte, index) => byte !== input[index])
+  ) {
+    fail('catalog-transport-wire', 'RFC-64 catalog replay completion is not canonical');
+  }
+  return completion;
+}
+
+function snapshotReplayProviderCompletionV2(value: unknown): Readonly<{
+  announced: number;
+  failed: number;
+  manifest: readonly Rfc64PublicCatalogHeadAnnouncementV1[];
+}> {
+  const snapshot = snapshotExactWireRecord(value, ['announced', 'failed', 'manifest']);
+  if (
+    !Number.isSafeInteger(snapshot.announced)
+    || (snapshot.announced as number) < 0
+    || !Number.isSafeInteger(snapshot.failed)
+    || (snapshot.failed as number) < 0
+  ) {
+    fail('catalog-transport-wire', 'RFC-64 replay completion counters are invalid');
+  }
+  const manifest = snapshotReplayManifestHeadsV2(snapshot.manifest);
+  if (snapshot.failed === 0 && snapshot.announced !== manifest.length) {
+    fail('catalog-transport-wire', 'RFC-64 replay completion counters differ from its manifest');
+  }
+  return Object.freeze({
+    announced: snapshot.announced as number,
+    failed: snapshot.failed as number,
+    manifest,
+  });
+}
+
+function snapshotReplayCompletionV2(
+  value: unknown,
+): Rfc64PublicCatalogHeadReplayCompletionV2 {
+  const snapshot = snapshotExactWireRecord(value, ['heads', 'kind']);
+  if (snapshot.kind !== RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2) {
+    fail('catalog-transport-wire', 'RFC-64 catalog replay completion kind is invalid');
+  }
+  return Object.freeze({
+    kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+    heads: snapshotReplayManifestHeadsV2(snapshot.heads),
+  });
+}
+
+function snapshotReplayManifestHeadsV2(
+  value: unknown,
+): readonly Rfc64PublicCatalogHeadAnnouncementV1[] {
+  if (
+    !Array.isArray(value)
+    || value.length > RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_MAX_HEADS_V2
+  ) {
+    fail('catalog-transport-wire', 'RFC-64 catalog replay manifest exceeds its head cap');
+  }
+  const heads = value.map((head) => parseAnnouncement(encodeAnnouncement(
+    head as Rfc64PublicCatalogHeadAnnouncementV1,
+  )));
+  const sorted = [...heads].sort((left, right) => {
+    const leftKey = replayManifestHeadKeyV2(left);
+    const rightKey = replayManifestHeadKeyV2(right);
+    return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+  });
+  if (heads.some((head, index) => replayManifestHeadKeyV2(head)
+    !== replayManifestHeadKeyV2(sorted[index]!))) {
+    fail('catalog-transport-wire', 'RFC-64 catalog replay manifest is not canonically sorted');
+  }
+  const scopes = new Set<string>();
+  for (const head of heads) {
+    const scope = [
+      head.networkId,
+      head.contextGraphId,
+      head.subGraphName ?? '',
+      head.authorAddress,
+      head.catalogEra,
+    ].join('\0');
+    if (scopes.has(scope)) {
+      fail('catalog-transport-wire', 'RFC-64 catalog replay manifest repeats a catalog scope');
+    }
+    scopes.add(scope);
+  }
+  return Object.freeze(heads);
+}
+
+function replayManifestHeadKeyV2(head: Rfc64PublicCatalogHeadAnnouncementV1): string {
+  return [
+    head.subGraphName ?? '',
+    head.authorAddress,
+    head.catalogEra,
+    head.catalogVersion,
+    head.catalogHeadObjectDigest,
+    head.signatureVariantDigest,
+  ].join('\0');
+}
+
 function requestFromAnnouncement(
   announcement: Rfc64PublicCatalogHeadAnnouncementV1,
 ): Rfc64PublicCatalogHeadFetchRequestV1 {
@@ -566,6 +964,48 @@ function parseFetchRequest(input: Uint8Array): Rfc64PublicCatalogHeadFetchReques
     RFC64_PUBLIC_CATALOG_HEAD_FETCH_REQUEST_MAX_BYTES_V1,
   );
   return validateWireScope(parsed, RFC64_PUBLIC_CATALOG_HEAD_FETCH_KIND_V1);
+}
+
+function encodeReplayRequest(
+  input: Rfc64PublicCatalogHeadReplayRequestV1,
+): Uint8Array {
+  const snapshot = validateReplayRequest(input);
+  return encodeFlatCanonicalJson(snapshot, RFC64_PUBLIC_CATALOG_HEAD_REPLAY_MAX_BYTES_V1);
+}
+
+function parseReplayRequest(input: Uint8Array): Rfc64PublicCatalogHeadReplayRequestV1 {
+  return validateReplayRequest(parseFlatCanonicalJson(
+    input,
+    REPLAY_REQUEST_KEYS,
+    RFC64_PUBLIC_CATALOG_HEAD_REPLAY_MAX_BYTES_V1,
+  ));
+}
+
+function validateReplayRequest(value: unknown): Rfc64PublicCatalogHeadReplayRequestV1 {
+  if (!isPlainRecord(value)) {
+    fail('catalog-transport-wire', 'RFC-64 catalog replay request must be a plain object');
+  }
+  const snapshot = snapshotExactWireRecord(value, REPLAY_REQUEST_KEYS);
+  if (snapshot.kind !== RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1) {
+    fail(
+      'catalog-transport-wire',
+      `RFC-64 catalog replay request kind must be ${RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1}`,
+    );
+  }
+  try {
+    assertNetworkIdV1(snapshot.networkId);
+    assertContextGraphIdV1(snapshot.contextGraphId);
+    assertCanonicalDigest(snapshot.policyDigest, 'policyDigest');
+    return Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
+      networkId: snapshot.networkId,
+      contextGraphId: snapshot.contextGraphId,
+      policyDigest: snapshot.policyDigest,
+    });
+  } catch (cause) {
+    if (cause instanceof Rfc64PublicCatalogTransportErrorV1) throw cause;
+    fail('catalog-transport-wire', 'RFC-64 catalog replay request contains an invalid scalar', cause);
+  }
 }
 
 function validateWireScope<Kind extends
@@ -759,6 +1199,31 @@ function deepFreeze<T>(value: T): T {
   if (typeof value !== 'object' || value === null || Object.isFrozen(value)) return value;
   for (const nested of Object.values(value as Record<string, unknown>)) deepFreeze(nested);
   return Object.freeze(value);
+}
+
+function replayOverloadRetryDelayMsV1(completedAttempt: number): number {
+  return DEFAULT_REPLAY_OVERLOAD_RETRY_BASE_DELAY_MS_V1 * (2 ** (completedAttempt - 1));
+}
+
+function waitForReplayOverloadRetryV1(
+  delayMs: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(signal.reason ?? new Error('catalog-head replay retry aborted'));
+  }
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      reject(signal?.reason ?? new Error('catalog-head replay retry aborted'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function fail(

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { ethers } from 'ethers';
+
 /** Restart-stable authority selection for one explicitly selected CG. */
 export type Rfc64CatalogRolloutModeV1 = 'legacy' | 'shadow' | 'catalog';
 
@@ -94,9 +96,16 @@ export type Rfc64CatalogReconciliationLaneV1 =
 /** Canonical lane ownership resolved once during agent construction. */
 export interface Rfc64CatalogExecutionPlanV1 {
   readonly killSwitchActive: boolean;
+  /** Desired mode for lifecycle-responsible CGs that have no explicit override. */
+  readonly responsibilityDefaultMode: Rfc64CatalogRolloutModeV1;
+  /** Restart-stable per-CG overrides, including graphs discovered after startup. */
+  readonly contextGraphModes: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;
   readonly legacyContextGraphs: readonly string[];
   readonly track2ContextGraphs: readonly string[];
   readonly selectedAuthority: Readonly<Record<string, Rfc64CatalogAuthorityPolicyV1>>;
+  /** Selected authority keyed by the commitment of each cleartext CG id. */
+  readonly selectedAuthorityByWireId:
+    Readonly<Record<string, Rfc64CatalogAuthorityPolicyV1>>;
   /** Compatibility catalog controls remain available without selected-CG activation. */
   readonly standaloneTrack2Enabled: boolean;
 }
@@ -139,6 +148,94 @@ export function resolveRfc64CatalogExecutionPlanAuthorityV1(
   });
 }
 
+export interface Rfc64CatalogResponsibilityAuthorityInputV1 {
+  readonly contextGraphId: string;
+  readonly responsible: boolean;
+  readonly active: boolean;
+  readonly mode: Rfc64CatalogRolloutModeV1;
+  readonly killSwitchActive: boolean;
+}
+
+/**
+ * Convert lifecycle-derived responsibility into the single effective lane.
+ * The global kill switch deliberately restores the ordinary legacy lane for
+ * a responsible CG, while retaining the configured mode for status and a
+ * later restart. An inactive/non-responsible CG owns no correctness lane.
+ */
+export function resolveRfc64CatalogResponsibilityAuthorityV1(
+  input: Rfc64CatalogResponsibilityAuthorityInputV1,
+): Rfc64CatalogAuthorityPolicyV1 {
+  const common = {
+    contextGraphId: input.contextGraphId,
+    selected: input.responsible,
+    eligible: input.responsible,
+    mode: input.mode,
+    killSwitchActive: input.killSwitchActive,
+  } as const;
+  if (!input.responsible) {
+    return Object.freeze({
+      ...common,
+      active: false,
+      legacySyncAllowed: false,
+      track2Enabled: false,
+      authoringAllowed: false,
+      reconciliationLane: 'disabled',
+    });
+  }
+  if (input.killSwitchActive) {
+    return Object.freeze({
+      ...common,
+      active: false,
+      legacySyncAllowed: true,
+      track2Enabled: false,
+      authoringAllowed: false,
+      reconciliationLane: 'disabled',
+    });
+  }
+  if (!input.active) {
+    return Object.freeze({
+      ...common,
+      active: false,
+      legacySyncAllowed: false,
+      track2Enabled: false,
+      authoringAllowed: false,
+      reconciliationLane: 'disabled',
+    });
+  }
+  if (input.mode === 'catalog') {
+    return Object.freeze({
+      ...common,
+      eligible: true,
+      active: true,
+      mode: 'catalog',
+      legacySyncAllowed: false,
+      track2Enabled: true,
+      authoringAllowed: true,
+      reconciliationLane: 'catalog-apply',
+    });
+  }
+  if (input.mode === 'shadow') {
+    return Object.freeze({
+      ...common,
+      active: true,
+      mode: 'shadow',
+      legacySyncAllowed: true,
+      track2Enabled: true,
+      authoringAllowed: true,
+      reconciliationLane: 'shadow-stage',
+    });
+  }
+  return Object.freeze({
+    ...common,
+    active: true,
+    mode: 'legacy',
+    legacySyncAllowed: true,
+    track2Enabled: false,
+    authoringAllowed: false,
+    reconciliationLane: 'legacy',
+  });
+}
+
 const RFC64_CATALOG_ROLLOUT_FIELDS_V1 = new Set([
   'contextGraphModes',
   'killSwitch',
@@ -158,13 +255,16 @@ export function resolveRfc64CatalogRolloutConfigV1(
   const selected = new Set(selectedContextGraphs);
   const suppliedModes = input?.contextGraphModes ?? {};
   for (const contextGraphId of Object.keys(suppliedModes)) {
-    if (!selected.has(contextGraphId)) {
+    if (label === 'rfc64PublicCatalog' && !selected.has(contextGraphId)) {
       throw new TypeError(
         `${label}.rollout.contextGraphModes contains unselected graph ${contextGraphId}`,
       );
     }
   }
   const contextGraphModes: Record<string, Rfc64CatalogRolloutModeV1> = Object.create(null);
+  for (const [contextGraphId, mode] of Object.entries(suppliedModes)) {
+    contextGraphModes[contextGraphId] = mode;
+  }
   for (const contextGraphId of selectedContextGraphs) {
     contextGraphModes[contextGraphId] = suppliedModes[contextGraphId] ?? 'catalog';
   }
@@ -333,7 +433,7 @@ export function projectRfc64CatalogReceiverAuthorityV1(
   configured: Rfc64CatalogAuthorityPolicyV1,
   activity: Readonly<Rfc64CatalogReceiverActivityV1>,
 ): Rfc64CatalogAuthorityPolicyV1 {
-  if (!configured.eligible || activity.active) return configured;
+  if (activity.active) return configured;
   return Object.freeze({
     contextGraphId: configured.contextGraphId,
     selected: configured.selected,
@@ -389,6 +489,8 @@ export function resolveRfc64LegacySyncContextGraphsV1(input: Readonly<{
 /** Resolve legacy and Track-2 owner scopes once, before either lane starts. */
 export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
   configuredContextGraphs: readonly string[];
+  /** DKG 10.0.16 supplies catalog; legacy preserves explicit enabled=false. */
+  responsibilityDefaultMode?: Rfc64CatalogRolloutModeV1;
   /** Legacy public bootstrap remains active beside additive catalog selection. */
   standaloneTrack2ContextGraphs?: readonly string[];
   activation: Readonly<{
@@ -398,6 +500,10 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
     rollout: ResolvedRfc64CatalogRolloutConfigV1;
   }>;
 }>): Rfc64CatalogExecutionPlanV1 {
+  const responsibilityDefaultMode = input.responsibilityDefaultMode ?? 'legacy';
+  if (!RFC64_CATALOG_ROLLOUT_MODES_V1.has(responsibilityDefaultMode)) {
+    throw new TypeError('RFC-64 responsibility default mode must be legacy, shadow, or catalog');
+  }
   const selectedAuthority: Record<string, Rfc64CatalogAuthorityPolicyV1> =
     Object.create(null);
   const track2ContextGraphs: string[] = [];
@@ -431,11 +537,32 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
     });
     track2ContextGraphs.push(contextGraphId);
   }
+  const selectedAuthorityByWireId: Record<string, Rfc64CatalogAuthorityPolicyV1> =
+    Object.create(null);
+  for (const [contextGraphId, authority] of Object.entries(selectedAuthority)) {
+    const wireId = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    selectedAuthorityByWireId[wireId] = authority;
+  }
+  const contextGraphModes = Object.freeze({ ...input.activation.rollout.contextGraphModes });
+  const legacyContextGraphs = Object.freeze([...new Set([
+    ...input.configuredContextGraphs,
+    ...input.activation.selectedPublicContextGraphs,
+  ])].filter((contextGraphId) => {
+    const configuredAuthority = selectedAuthority[contextGraphId];
+    if (configuredAuthority !== undefined) {
+      return configuredAuthority.legacySyncAllowed;
+    }
+    const mode = contextGraphModes[contextGraphId] ?? responsibilityDefaultMode;
+    return input.activation.rollout.killSwitch || mode !== 'catalog';
+  }));
   return Object.freeze({
     killSwitchActive: input.activation.rollout.killSwitch,
-    legacyContextGraphs: resolveRfc64LegacySyncContextGraphsV1(input),
+    responsibilityDefaultMode,
+    contextGraphModes,
+    legacyContextGraphs,
     track2ContextGraphs: Object.freeze(track2ContextGraphs),
     selectedAuthority: Object.freeze(selectedAuthority),
+    selectedAuthorityByWireId: Object.freeze(selectedAuthorityByWireId),
     standaloneTrack2Enabled: input.activation.enabled === false
       && !input.activation.rollout.killSwitch,
   });
@@ -446,10 +573,13 @@ export function rfc64ExecutionPlanAllowsLegacySyncV1(
   plan: Rfc64CatalogExecutionPlanV1,
   contextGraphId: string,
 ): boolean {
-  return resolveRfc64CatalogExecutionPlanAuthorityV1(
-    plan,
-    contextGraphId,
-  ).legacySyncAllowed;
+  if (plan.killSwitchActive) return true;
+  const configuredAuthority = plan.selectedAuthority[contextGraphId];
+  if (configuredAuthority !== undefined) {
+    return configuredAuthority.legacySyncAllowed;
+  }
+  return (plan.contextGraphModes[contextGraphId] ?? plan.responsibilityDefaultMode)
+    !== 'catalog';
 }
 
 function assertRolloutInputV1(

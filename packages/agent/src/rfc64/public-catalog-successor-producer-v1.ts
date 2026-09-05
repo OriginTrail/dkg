@@ -50,6 +50,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
+import { mapWithConcurrencySettled } from '../map-with-concurrency.js';
 import {
   readVerifiedAuthorCatalogRowAuthorshipV1,
   verifyAuthorCatalogRowAuthorshipV1,
@@ -121,7 +122,15 @@ export interface Rfc64PublicCatalogSuccessorProducerOptionsV1 {
   readonly stageKaBundle: (
     input: StageRfc64PublicCatalogBundleV1,
   ) => Promise<StagedRfc64PublicCatalogBundleReceiptV1>;
+  /**
+   * Optional durable-cache read used to avoid re-fsyncing unchanged bundles
+   * already referenced by the verified predecessor bucket.
+   */
+  readonly readKaBundleByDigest?: (blobDigest: Digest32V1) => Promise<Uint8Array | null>;
 }
+
+/** Bound independent immutable-bundle reads/writes without serializing an entire successor. */
+const RFC64_SUCCESSOR_BUNDLE_IO_CONCURRENCY_V1 = 8;
 
 export interface ProduceAndStagePublicOpenOneRowSuccessorInputV1 {
   readonly previousHead: SignedAuthorCatalogHeadEnvelopeV1;
@@ -195,6 +204,8 @@ export interface ProducedAndStagedPublicOpenExactSetSuccessorV1 {
 export class Rfc64PublicCatalogSuccessorProducerV1 {
   readonly #stageVerifiedObjects: Rfc64ControlObjectOperationsV1['stageVerifiedObjects'];
   readonly #stageKaBundle: Rfc64PublicCatalogSuccessorProducerOptionsV1['stageKaBundle'];
+  readonly #readKaBundleByDigest:
+    Rfc64PublicCatalogSuccessorProducerOptionsV1['readKaBundleByDigest'];
 
   constructor(options: Rfc64PublicCatalogSuccessorProducerOptionsV1) {
     if (
@@ -206,6 +217,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
     this.#stageVerifiedObjects = options.controlObjects.stageVerifiedObjects
       .bind(options.controlObjects);
     this.#stageKaBundle = options.stageKaBundle;
+    this.#readKaBundleByDigest = options.readKaBundleByDigest;
   }
 
   async produceAndStage(
@@ -425,25 +437,46 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       );
     }
 
-    for (const { prepared } of verifiedAssets) {
-      try {
-        const bundleReceipt = await this.#stageKaBundle(Object.freeze({
-          blobDigest: prepared.encoded.blobDigest,
-          bundleBytes: new Uint8Array(prepared.bundleBytes),
-        }));
-        assertExactDurableBundleReceipt(
-          bundleReceipt,
-          prepared.encoded.blobDigest,
-          prepared.bundleBytes.byteLength,
-        );
-      } catch (cause) {
-        fail(
-          'catalog-successor-producer-bundle-stage',
-          `verified opaque KA bundle ${prepared.row.kaId} could not be staged`,
-          cause,
-        );
-      }
-    }
+    const previousBundleByKaId = new Map(
+      (input.previousBucket?.payload.rows ?? []).map((row) => [
+        row.kaId,
+        row.transfer.blobDigest,
+      ] as const),
+    );
+    const bundleStageResults = await mapWithConcurrencySettled(
+      verifiedAssets,
+      RFC64_SUCCESSOR_BUNDLE_IO_CONCURRENCY_V1,
+      async ({ prepared, row }): Promise<void> => {
+        try {
+          if (
+            previousBundleByKaId.get(row.kaId) === prepared.encoded.blobDigest
+            && this.#readKaBundleByDigest !== undefined
+          ) {
+            const existing = await this.#readKaBundleByDigest(prepared.encoded.blobDigest);
+            if (existing !== null && bytesEqualV1(existing, prepared.bundleBytes)) return;
+          }
+          const bundleReceipt = await this.#stageKaBundle(Object.freeze({
+            blobDigest: prepared.encoded.blobDigest,
+            bundleBytes: new Uint8Array(prepared.bundleBytes),
+          }));
+          assertExactDurableBundleReceipt(
+            bundleReceipt,
+            prepared.encoded.blobDigest,
+            prepared.bundleBytes.byteLength,
+          );
+        } catch (cause) {
+          fail(
+            'catalog-successor-producer-bundle-stage',
+            `verified opaque KA bundle ${prepared.row.kaId} could not be staged`,
+            cause,
+          );
+        }
+      },
+    );
+    const bundleStageFailure = bundleStageResults.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (bundleStageFailure !== undefined) throw bundleStageFailure.reason;
 
     let stagedControlObjects: StageVerifiedControlObjectsResultV1;
     try {
@@ -480,6 +513,14 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       stagedControlObjects,
     });
   }
+}
+
+function bytesEqualV1(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.byteLength !== right.byteLength) return false;
+  for (let index = 0; index < left.byteLength; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
 }
 
 function prepareExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV1) {

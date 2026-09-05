@@ -25,7 +25,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
-  isPromoteReplaySafeError,
+  type DurableRootPromotionAtomicCompanion,
+  type DurableRootPromotionIdentity,
+  getPromoteFailureDisposition,
+  createPromoteRetryableFailure,
   assertionScopedGraphUri,
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
@@ -122,6 +125,9 @@ describe('Working Memory Assertion Lifecycle', () => {
   const createPublisher = async (
     writeLocks?: Map<string, Promise<void>>,
     publisherStore: OxigraphStore = store,
+    resolveDurableRootPromotionAtomicCompanion?: (
+      input: Readonly<DurableRootPromotionIdentity>,
+    ) => Readonly<DurableRootPromotionAtomicCompanion> | undefined,
   ): Promise<DKGPublisher> => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
@@ -133,6 +139,9 @@ describe('Working Memory Assertion Lifecycle', () => {
       publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
       publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
       ...(writeLocks ? { writeLocks } : {}),
+      ...(resolveDurableRootPromotionAtomicCompanion
+        ? { resolveDurableRootPromotionAtomicCompanion }
+        : {}),
     });
   };
 
@@ -561,7 +570,8 @@ describe('Working Memory Assertion Lifecycle', () => {
       }
       expect(rejection).toBe(failure);
       expect(isStoreOperationTimeoutError(rejection)).toBe(true);
-      expect(isPromoteReplaySafeError(rejection)).toBe(true);
+      expect(getPromoteFailureDisposition(rejection)?.diagnostic.name)
+        .toBe('PromoteReplaySafeError');
       expect(injected).toBe(true);
       await expectExactSwmGraph(finalized.sharedGraphUri);
       expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toHaveLength(
@@ -615,7 +625,8 @@ describe('Working Memory Assertion Lifecycle', () => {
       }
       expect(rejection).toBe(failure);
       expect(isStoreOperationTimeoutError(rejection)).toBe(true);
-      expect(isPromoteReplaySafeError(rejection)).toBe(true);
+      expect(getPromoteFailureDisposition(rejection)?.diagnostic.name)
+        .toBe('PromoteReplaySafeError');
       expect(injected).toBe(true);
       expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
       await expect(store.query(
@@ -989,7 +1000,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
   });
 
-  it('validates the exact VM graph before treating a stale promote as a no-op', async () => {
+  it.each([false, true])('validates exact VM before a stale promote no-op (leftover WM: %s)', async (leftoverWm) => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
     const finalized = await finalizeAssertion();
@@ -1013,9 +1024,21 @@ describe('Working Memory Assertion Lifecycle', () => {
       graph: metaGraph,
     }]);
 
+    if (leftoverWm) {
+      // An older promotion could expose its marker before WM cleanup. A queued
+      // retry may therefore outlive a confirmed publish while this copy remains.
+      const wmGraph = await publisher.wmGraphUri(CG_ID, AGENT, ASSERTION_NAME);
+      await store.insert(finalized.publicQuads.map((quad) => ({ ...quad, graph: wmGraph })));
+    }
+
     await expect(
       publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
     ).resolves.toMatchObject({ promotedCount: 0, promotedAllRoots: false });
+    expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toEqual([]);
+    expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+    expect(await store.query(`ASK { GRAPH <${metaGraph}> {
+      <${lifecycle}> <${memoryLayerPredicate}> "${MemoryLayer.VerifiableMemory}"
+    } }`)).toMatchObject({ type: 'boolean', value: true });
 
     await store.delete([{ ...finalized.publicQuads[0]!, graph: vmGraph }]);
     await store.insert([{
@@ -1024,10 +1047,156 @@ describe('Working Memory Assertion Lifecycle', () => {
       object: '"Tampered"',
       graph: vmGraph,
     }]);
+    if (leftoverWm) {
+      const wmGraph = await publisher.wmGraphUri(CG_ID, AGENT, ASSERTION_NAME);
+      await store.insert(finalized.publicQuads.map((quad) => ({ ...quad, graph: wmGraph })));
+    }
     await expect(
       publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
     ).rejects.toThrow(/Merkle mismatch/);
+    // Never delete the remaining WM copy when VM cannot prove the sealed payload.
+    expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT))
+      .toHaveLength(leftoverWm ? finalized.publicQuads.length : 0);
   });
+
+  it('validates promote-scoped recipients without replacing the configured resolver', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    const configuredFailure = new Error('configured resolver still owns ordinary calls');
+    const configuredResolver = vi.fn(async () => { throw configuredFailure; });
+    publisher.setWorkspaceAgentRecipientResolver(configuredResolver);
+
+    await expect(publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER,
+      // Deliberately model an invalid JavaScript callback at the runtime boundary.
+      resolveWorkspaceRecipients: async () => ({ requiresEncryption: true, recipients: [] }) as any,
+    })).rejects.toThrow('has no valid DKG agent recipients');
+    expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+
+    const scopedResolver = vi.fn(async () => ({ requiresEncryption: false as const, recipients: [] as const }));
+    await expect(publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER, resolveWorkspaceRecipients: scopedResolver,
+    })).resolves.toMatchObject({ promotedAllRoots: true });
+    expect(scopedResolver).toHaveBeenCalledExactlyOnceWith({ contextGraphId: CG_ID });
+    expect(configuredResolver).not.toHaveBeenCalled();
+
+    const nextName = `${ASSERTION_NAME}-configured`;
+    await publisher.assertionCreate(CG_ID, nextName, AGENT);
+    await publisher.assertionWrite(CG_ID, nextName, AGENT, TRIPLES);
+    const nextFinalized = await finalizeAssertion(nextName);
+    await expect(publisher.assertionPromote(CG_ID, nextName, AGENT, {
+      publisherPeerId: PEER,
+    })).rejects.toBe(configuredFailure);
+    expect(configuredResolver).toHaveBeenCalledExactlyOnceWith({ contextGraphId: CG_ID });
+    expect(await store.hasGraph(nextFinalized.sharedGraphUri)).toBe(false);
+  });
+
+  it.each(['recipient', 'curator'] as const)(
+    'preserves a retry certified by the %s prerequisite before replacing SWM',
+    async (stage) => {
+      await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+      await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+      const finalized = await finalizeAssertion();
+      const authorityFailure = Object.assign(new Error('authority lookup timed out'), {
+        code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+        reason: 'chain-access-policy-timeout',
+        retryable: true,
+      });
+      const retryFailure = createPromoteRetryableFailure(authorityFailure);
+      const prerequisite = vi.fn(async () => { throw retryFailure; });
+
+      const failure = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        ...(stage === 'recipient' ? { resolveWorkspaceRecipients: prerequisite } : {}),
+        ...(stage === 'curator' ? {
+          confirmBeforeCommit: prerequisite,
+        } : {}),
+      }).catch((error: unknown) => error);
+
+      expect(prerequisite).toHaveBeenCalledTimes(1);
+      expect(failure).toBe(retryFailure);
+      expect(failure).toMatchObject({ cause: authorityFailure });
+      expect(getPromoteFailureDisposition(failure)).toMatchObject({
+        classification: 'transient', retryable: true,
+      });
+      expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+      expect((await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).length)
+        .toBe(TRIPLES.length);
+    },
+  );
+
+  it.each(['recipient', 'curator'] as const)(
+    'does not certify a terminal authority failure in the %s prerequisite',
+    async (stage) => {
+      await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+      await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+      const finalized = await finalizeAssertion();
+      const authorityFailure = Object.assign(new Error('unsupported authority'), {
+        code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+        reason: 'chain-participant-authority-unsupported',
+        retryable: false,
+      });
+      const prerequisite = vi.fn(async () => { throw authorityFailure; });
+      const failure = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        ...(stage === 'recipient' ? { resolveWorkspaceRecipients: prerequisite } : {}),
+        ...(stage === 'curator' ? {
+          confirmBeforeCommit: prerequisite,
+        } : {}),
+      }).catch((error: unknown) => error);
+      expect(failure).toBe(authorityFailure);
+      expect(prerequisite).toHaveBeenCalledTimes(1);
+      expect(getPromoteFailureDisposition(failure)).toBeUndefined();
+      expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+      expect((await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).length)
+        .toBe(TRIPLES.length);
+    },
+  );
+
+  it.each(['authority', 'retry-marker'] as const)(
+    'keeps failures of kind %s terminal after the exact SWM replacement',
+    async (kind) => {
+      await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+      await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+      const finalized = await finalizeAssertion();
+      const authorityFailure = Object.assign(new Error('authority lookup timed out'), {
+        code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+        reason: 'chain-access-policy-timeout',
+        retryable: true,
+      });
+      const injectedFailure = kind === 'authority'
+        ? authorityFailure
+        : createPromoteRetryableFailure(authorityFailure);
+      const insert = store.insert.bind(store);
+      let injected = false;
+      const insertSpy = vi.spyOn(store, 'insert').mockImplementation(async (quads) => {
+        if (!injected && quads.some((quad) =>
+          quad.graph.includes('/_shared_memory_snapshots/') && quad.graph.endsWith('/ka'))) {
+          injected = true;
+          await expectExactSwmGraph(finalized.sharedGraphUri);
+          throw injectedFailure;
+        }
+        return insert(quads);
+      });
+      let failure: unknown;
+      try {
+        failure = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+          publisherPeerId: PEER,
+        }).catch((error: unknown) => error);
+      } finally {
+        insertSpy.mockRestore();
+      }
+
+      expect(injected).toBe(true);
+      expect(failure).toMatchObject({ cause: injectedFailure });
+      expect(getPromoteFailureDisposition(failure)).toMatchObject({
+        classification: 'fatal', retryable: false,
+        diagnostic: { code: 'PROMOTE_POST_COMMIT_FAILURE' },
+      });
+      await expectExactSwmGraph(finalized.sharedGraphUri);
+    },
+  );
 
   it('persists the share operation ID before curator confirmation can escape locally', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
@@ -1071,6 +1240,257 @@ describe('Working Memory Assertion Lifecycle', () => {
       },
     );
     expect(repaired.shareOperationId).toBe(confirmedOperationId);
+  });
+
+  it('commits the root companion atomically with SWM after resolving it before confirmation', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+
+    const companionGraph = 'urn:test:root-promotion-companions';
+    const companionPredicate = 'urn:test:root-promotion-companion';
+    const identities: DurableRootPromotionIdentity[] = [];
+    const settle = vi.fn();
+    const hookedPublisher = await createPublisher(undefined, store, (input) => {
+      identities.push(input);
+      const subject = `urn:test:root-promotion:${input.shareOperationId}`;
+      return {
+        graphUri: companionGraph,
+        subject,
+        quads: [{
+          graph: companionGraph,
+          subject,
+          predicate: companionPredicate,
+          object: JSON.stringify(input.kaUal),
+        }],
+        settle,
+      };
+    });
+    const confirmBeforeCommit = vi.fn(async () => {
+      expect(identities).toHaveLength(1);
+      expect(await store.hasGraph(companionGraph)).toBe(false);
+      expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+      return { applied: true };
+    });
+
+    const promoted = await hookedPublisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      { publisherPeerId: PEER, confirmBeforeCommit },
+    );
+    expect(confirmBeforeCommit).toHaveBeenCalledTimes(1);
+    expect(settle).toHaveBeenCalledOnce();
+    expect(settle).toHaveBeenCalledWith(true);
+    expect(identities).toEqual([expect.objectContaining({
+      contextGraphId: CG_ID,
+      assertionCoordinate: ASSERTION_NAME,
+      lifecycleAgentAddress: AGENT,
+      kaUal: finalized.kaUal,
+      assertionVersion: finalized.assertionVersion,
+      shareOperationId: promoted.shareOperationId,
+    })]);
+    await expectExactSwmGraph(finalized.sharedGraphUri);
+    await expect(store.query(
+      `ASK { GRAPH <${companionGraph}> { ` +
+        `<urn:test:root-promotion:${promoted.shareOperationId}> ` +
+        `<${companionPredicate}> ${JSON.stringify(finalized.kaUal)} } }`,
+    )).resolves.toEqual({ type: 'boolean', value: true });
+  });
+
+  it.each([
+    ['before commit', false],
+    ['on capability refusal', false],
+    ['after commit', true],
+    ['after indeterminate dispatch', undefined],
+  ] as const)('classifies a root-companion settlement failure %s', async (_label, committed) => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    const capabilityRefused = _label === 'on capability refusal';
+    const settlementFailure = capabilityRefused
+      ? new Error('settlement failed before dispatch')
+      : createPromoteRetryableFailure(new Error('settlement timed out'));
+    const settle = vi.fn(() => { throw settlementFailure; });
+    const companionGraph = 'urn:test:root-companion-settlement';
+    const companionSubject = 'urn:test:root-companion';
+    const hookedPublisher = await createPublisher(undefined, store, () => ({
+      graphUri: companionGraph,
+      subject: companionSubject,
+      quads: [{
+        graph: companionGraph, subject: companionSubject,
+        predicate: 'urn:test:state', object: '"committed"',
+      }],
+      settle,
+    }));
+    const atomicReplace = store.replaceGraphAndSubject!.bind(store);
+    const replaceSpy = vi.spyOn(store, 'replaceGraphAndSubject').mockImplementation(async (...args) => {
+      await atomicReplace(...args);
+      if (committed === undefined) {
+        throw new StoreOperationTimeoutError({
+          backend: 'managed-oxigraph',
+          operation: 'replaceGraphAndSubject',
+          outcome: 'indeterminate',
+        });
+      }
+    });
+    let failure: unknown;
+    try {
+      if (capabilityRefused) {
+        Object.defineProperty(store, 'replaceGraphAndSubject', { value: undefined, configurable: true });
+      }
+      failure = await hookedPublisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        confirmBeforeCommit: async () => {
+          if (committed === false && !capabilityRefused) throw new Error('confirmation failed before dispatch');
+          return { applied: true };
+        },
+      }).catch((error: unknown) => error);
+    } finally {
+      replaceSpy.mockRestore();
+    }
+    expect(settle).toHaveBeenCalledExactlyOnceWith(committed);
+    if (committed === false) {
+      expect(failure).toBe(settlementFailure);
+      expect(getPromoteFailureDisposition(failure)?.retryable).toBe(capabilityRefused ? undefined : true);
+      expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+      expect(await store.hasGraph(companionGraph)).toBe(false);
+    } else {
+      expect(failure).toMatchObject({ code: 'PROMOTE_POST_COMMIT_FAILURE', cause: settlementFailure });
+      expect(getPromoteFailureDisposition(failure)?.retryable).toBe(false);
+      await expectExactSwmGraph(finalized.sharedGraphUri);
+      expect(await store.hasGraph(companionGraph)).toBe(true);
+    }
+  });
+
+  it('settles before preserving even an undefined pre-commit rejection', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    const settle = vi.fn();
+    const hookedPublisher = await createPublisher(undefined, store, () => ({
+      graphUri: 'urn:test:root-companion-settlement',
+      subject: 'urn:test:root-companion',
+      quads: [],
+      settle,
+    }));
+    await expect(hookedPublisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER,
+      confirmBeforeCommit: async () => { throw undefined; },
+    })).rejects.toBeUndefined();
+    expect(settle).toHaveBeenCalledExactlyOnceWith(false);
+    expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+  });
+
+  it('fails closed without persisting SWM or its root companion on atomic capability refusal', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    const companionGraph = 'urn:test:refused-root-promotion-companions';
+    const settle = vi.fn();
+    const hookedPublisher = await createPublisher(undefined, store, (input) => {
+      const subject = `urn:test:refused-root-promotion:${input.shareOperationId}`;
+      return {
+        graphUri: companionGraph,
+        subject,
+        quads: [{
+          graph: companionGraph,
+          subject,
+          predicate: 'urn:test:root-promotion-companion',
+          object: JSON.stringify(input.kaUal),
+        }],
+        settle,
+      };
+    });
+    const ownDescriptor = Object.getOwnPropertyDescriptor(store, 'replaceGraphAndSubject');
+    Object.defineProperty(store, 'replaceGraphAndSubject', {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    });
+    try {
+      await expect(hookedPublisher.assertionPromote(
+        CG_ID,
+        ASSERTION_NAME,
+        AGENT,
+        { publisherPeerId: PEER },
+      )).rejects.toMatchObject({ code: 'ATOMIC_GRAPH_AND_SUBJECT_REPLACE_UNSUPPORTED' });
+    } finally {
+      if (ownDescriptor === undefined) delete (store as Partial<OxigraphStore>).replaceGraphAndSubject;
+      else Object.defineProperty(store, 'replaceGraphAndSubject', ownDescriptor);
+    }
+    expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+    expect(await store.hasGraph(companionGraph)).toBe(false);
+    expect(settle).toHaveBeenCalledOnce();
+    expect(settle).toHaveBeenCalledWith(false);
+  });
+
+  it('certifies an indeterminate atomic SWM-plus-companion commit as replay safe', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    const companionGraph = 'urn:test:crashed-root-promotion-companions';
+    let companionSubject = '';
+    const settle = vi.fn();
+    const hookedPublisher = await createPublisher(undefined, store, (input) => {
+      companionSubject = `urn:test:crashed-root-promotion:${input.shareOperationId}`;
+      return {
+        graphUri: companionGraph,
+        subject: companionSubject,
+        quads: [{
+          graph: companionGraph,
+          subject: companionSubject,
+          predicate: 'urn:test:root-promotion-companion',
+          object: JSON.stringify(input.kaUal),
+        }],
+        settle,
+      };
+    });
+    const failure = new StoreOperationTimeoutError({
+      backend: 'managed-oxigraph',
+      operation: 'replaceGraphAndSubject',
+      storeOperation: 'replaceGraphAndSubject',
+      outcome: 'indeterminate',
+    });
+    const atomicReplace = store.replaceGraphAndSubject!.bind(store);
+    let injected = false;
+    const replaceSpy = vi.spyOn(store, 'replaceGraphAndSubject').mockImplementation(
+      async (...args) => {
+        await atomicReplace(...args);
+        if (!injected && args[0] === finalized.sharedGraphUri) {
+          injected = true;
+          throw failure;
+        }
+      },
+    );
+    let rejection: unknown;
+    try {
+      await hookedPublisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+      });
+    } catch (error) {
+      rejection = error;
+    } finally {
+      replaceSpy.mockRestore();
+    }
+    expect(rejection).toBe(failure);
+    expect(getPromoteFailureDisposition(rejection)?.diagnostic.name)
+      .toBe('PromoteReplaySafeError');
+    expect(injected).toBe(true);
+    expect(settle).toHaveBeenCalledOnce();
+    expect(settle).toHaveBeenCalledWith(undefined);
+    await expectExactSwmGraph(finalized.sharedGraphUri);
+    await expect(store.query(
+      `ASK { GRAPH <${companionGraph}> { <${companionSubject}> ?p ?o } }`,
+    )).resolves.toEqual({ type: 'boolean', value: true });
+
+    const replayed = await hookedPublisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      { publisherPeerId: PEER },
+    );
+    expect(replayed).toMatchObject({ promotedCount: 0, promotedAllRoots: true });
   });
 
   it('serializes concurrent promotes onto one durable share operation ID', async () => {
@@ -1504,7 +1924,10 @@ describe('Working Memory Assertion Lifecycle', () => {
       ASSERTION_NAME,
       AGENT,
       { publisherPeerId: PEER },
-    ))).rejects.toThrow('injected operation snapshot failure');
+    ))).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
 
     const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
     await store.deleteByPattern({
@@ -1528,7 +1951,10 @@ describe('Working Memory Assertion Lifecycle', () => {
       ASSERTION_NAME,
       AGENT,
       { publisherPeerId: PEER },
-    ))).rejects.toThrow('injected operation snapshot failure');
+    ))).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
 
     const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
     const metaGraph = contextGraphMetaUri(CG_ID);
@@ -1708,14 +2134,20 @@ describe('Working Memory Assertion Lifecycle', () => {
       withInjectedOperationSnapshotFailure(() =>
         publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
       ),
-    ).rejects.toThrow('injected operation snapshot failure');
+    ).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
     await publisher.markSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT);
 
     await expect(
       withInjectedOperationSnapshotFailure(() =>
         publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
       ),
-    ).rejects.toThrow('injected operation snapshot failure');
+    ).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
   });
 
@@ -1730,7 +2162,10 @@ describe('Working Memory Assertion Lifecycle', () => {
       withInjectedOperationSnapshotFailure(() =>
         publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
       ),
-    ).rejects.toThrow('injected operation snapshot failure');
+    ).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
     const durableOperationId = await readShareOperationId();
     expect(durableOperationId).toBeTruthy();
 
@@ -1744,7 +2179,10 @@ describe('Working Memory Assertion Lifecycle', () => {
     try {
       await expect(
         publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
-      ).rejects.toThrow('injected lifecycle repair failure');
+      ).rejects.toMatchObject({
+        code: 'PROMOTE_POST_COMMIT_FAILURE',
+        cause: { message: 'injected lifecycle repair failure' },
+      });
     } finally {
       store.insert = insert;
     }
@@ -1768,7 +2206,10 @@ describe('Working Memory Assertion Lifecycle', () => {
       withInjectedOperationSnapshotFailure(() =>
         publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
       ),
-    ).rejects.toThrow('injected operation snapshot failure');
+    ).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
 
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
     expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(true);
@@ -1830,7 +2271,10 @@ describe('Working Memory Assertion Lifecycle', () => {
       withInjectedOperationSnapshotFailure(() =>
         publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
       ),
-    ).rejects.toThrow('injected operation snapshot failure');
+    ).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
 
     const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
     const metaGraph = contextGraphMetaUri(CG_ID);

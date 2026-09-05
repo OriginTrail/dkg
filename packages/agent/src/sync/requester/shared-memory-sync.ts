@@ -5,13 +5,18 @@ import type { SwmSnapshotCoverage } from '../../dkg-agent-types.js';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import type { SyncPhase } from '../auth/request-build.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
-import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
+import {
+  isNamedSubgraphSharedMemoryDataGraph,
+  isNamedSubgraphSharedMemoryMetaGraph,
+  isSharedMemoryBucketDescendantDataGraph,
+} from '../shared-memory-graphs.js';
 import {
   type SyncPageFetchOptions,
   type SyncPageResult,
 } from './page-fetch.js';
 import {
   canonicalizeGraphScopedSwmHeadRows,
+  discoverSwmRecoverySubGraphNames,
   materializeGraphScopedSwmRecoveryAsset,
   parseGraphScopedSwmRecoveryDescriptors,
   type GraphScopedSwmRecoveryDescriptor,
@@ -437,6 +442,12 @@ export interface SharedMemorySyncContext {
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
+  /**
+   * False for the 10.0.16 named-subgraph compatibility lane. Remote aggregate
+   * pages are still fetched, but root-scope rows are removed before verifier,
+   * materializer, ownership, and store mutation boundaries.
+   */
+  includeRootScope?: boolean;
   stopOnBackoffWorthyFailure?: boolean;
   /** Optional lane-owned policy for deciding whether snapshot evidence is sufficient. */
   snapshotEvidencePolicy?: {
@@ -493,6 +504,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     publicSnapshotStore,
     getRegisteredSubGraphNames,
     getExcludedSubGraphNames,
+    includeRootScope = true,
     stopOnBackoffWorthyFailure = false,
     snapshotEvidencePolicy,
     metadataFetcher,
@@ -713,11 +725,31 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const excludedSubGraphNames = getExcludedSubGraphNames
         ? await recoveryBoundary.read(() => getExcludedSubGraphNames(pid))
         : undefined;
+      const fetchedDataQuads = includeRootScope
+        ? wsDataResult.quads
+        : wsDataResult.quads.filter((quad) => (
+          isNamedSubgraphSharedMemoryDataGraph(pid, quad.graph)
+        ));
+      const fetchedMetaQuads = includeRootScope
+        ? wsMetaResult.quads
+        : wsMetaResult.quads.filter((quad) => (
+          isNamedSubgraphSharedMemoryMetaGraph(pid, quad.graph)
+        ));
+      const verificationSubGraphNames = includeRootScope
+        ? registeredSubGraphNames
+        : [...new Set([
+          ...(registeredSubGraphNames ?? []),
+          ...discoverSwmRecoverySubGraphNames({
+            contextGraphId: pid,
+            metaQuads: fetchedMetaQuads,
+            excludedSubGraphNames,
+          }),
+        ])];
       const processed = await recoveryBoundary.read(() => processSharedMemoryBatch(
-        wsDataResult.quads,
-        wsMetaResult.quads,
+        fetchedDataQuads,
+        fetchedMetaQuads,
         pid,
-        registeredSubGraphNames,
+        verificationSubGraphNames,
         excludedSubGraphNames,
       ));
       const verifyDurationMs = Date.now() - verifyStartedAt;
@@ -824,7 +856,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             // graph. The parser then throws, the catch clears ALL descriptors,
             // and materialization is silently disabled for the whole context
             // graph — not just for the subgraph KA that triggered it.
-            ...(registeredSubGraphNames ? { registeredSubGraphNames } : {}),
+            ...(verificationSubGraphNames
+              ? { registeredSubGraphNames: verificationSubGraphNames }
+              : {}),
             ...(excludedSubGraphNames ? { excludedSubGraphNames } : {}),
           });
           verifiedMetaForInsert = canonicalizeGraphScopedSwmHeadRows({

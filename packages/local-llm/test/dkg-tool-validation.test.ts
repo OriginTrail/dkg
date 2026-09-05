@@ -56,10 +56,145 @@ describe('DKG SPARQL preflight', () => {
     expect(validateSparqlForDkg('ASK { <urn:test:item> <schema:name> "x" }').ok).toBe(true);
   });
 
+  it.each([
+    'http://localhost/item',
+    'https://host/path',
+    'mailto:user@example.org',
+  ])('reports the complete bare absolute IRI in repair feedback: %s', (iri) => {
+    expect(validateSparqlForDkg(`SELECT ?s WHERE { ?s <urn:p> ${iri} }`)).toEqual({
+      ok: false,
+      errors: [`wrap absolute IRI ${iri} in angle brackets`],
+    });
+  });
+
   it('does not confuse declared or auto-injected prefixed names with absolute IRIs', () => {
     expect(validateSparqlForDkg('SELECT ?x WHERE { ?x schema:name ?name }').ok).toBe(true);
     expect(validateSparqlForDkg('PREFIX urn: <https://example.com/> SELECT ?x WHERE { urn:item schema:name ?x }').ok)
       .toBe(true);
+  });
+
+  it.each([
+    'PREFIX foaf.core: <http://xmlns.com/foaf/0.1/> SELECT ?s WHERE { ?s foaf.core:name ?n }',
+    'PREFIX café: <https://example.com/> SELECT ?s WHERE { ?s café:name ?n }',
+    'PREFIX δοκιμή: <https://example.com/> SELECT ?s WHERE { ?s δοκιμή:name ?n }',
+  ])('accepts a valid PN_PREFIX label and reaches SELECT: %s', (sparql) => {
+    expect(validateSparqlForDkg(sparql)).toEqual({ ok: true, errors: [] });
+  });
+
+  it('accepts legal UCHAR prefix names and rejects malformed escapes', () => {
+    expect(validateSparqlForDkg(
+      String.raw`PREFIX \u0065x: <https://example.com/> SELECT ?s WHERE { ?s ex:name ?n }`,
+    )).toEqual({ ok: true, errors: [] });
+    expect(validateSparqlForDkg(
+      String.raw`PREFIX \u00G0x: <https://example.com/> SELECT ?s WHERE { ?s ex:name ?n }`,
+    ).ok).toBe(false);
+  });
+
+  it('applies UCHAR preprocessing to absolute-scheme policy checks', () => {
+    expect(validateSparqlForDkg(
+      String.raw`ASK { \u0075rn:test:item <schema:name> "x" }`,
+    ).errors).toContain(String.raw`wrap absolute IRI \u0075rn:test:item in angle brackets`);
+    expect(validateSparqlForDkg(
+      String.raw`PREFIX \u0075rn: <https://example.com/> ASK { urn:item <schema:name> "x" }`,
+    ).ok).toBe(true);
+  });
+
+  it('accepts a compact BASE prologue and digit-initial variables', () => {
+    expect(validateSparqlForDkg(
+      'BASE<https://example.com/>SELECT ?1value WHERE { BIND(<item> AS ?1value) }',
+    )).toEqual({ ok: true, errors: [] });
+  });
+
+  it('handles long prefix whitespace and aggregate lookalikes without backtracking', () => {
+    const paddedQuery = `PREFIX ex: <https://example.com/>${' '.repeat(20_000)}SELECT ?x WHERE { ?x ex:name ?name }`;
+    expect(validateSparqlForDkg(paddedQuery).ok).toBe(true);
+
+    const lookalikes = `SELECT ?x WHERE { ?x ?p ?o } ${' COUNTx('.repeat(4_000)}`;
+    const result = validateSparqlForDkg(lookalikes);
+    expect(result.errors).toContain('balance SPARQL parentheses');
+    expect(result.errors).not.toContain('wrap aggregate aliases as (COUNT(...) AS ?count)');
+  });
+
+  it('indexes near-limit nested aggregate parentheses in linear work', () => {
+    const depth = 8_000;
+    const sparql = `SELECT ${' COUNT('.repeat(depth)}${')'.repeat(depth)}`;
+
+    expect(sparql.length).toBeLessThanOrEqual(65_536);
+    expect(validateSparqlForDkg(sparql)).toEqual({ ok: true, errors: [] });
+  });
+
+  it('keeps keywords in lexical regions inert and reports unterminated regions', () => {
+    expect(validateSparqlForDkg([
+      'SELECT ?x WHERE {',
+      '  BIND("FROM STRCONTAINS(?x) FILTER NOT EXISTS(?x) urn:literal" AS ?x)',
+      '  <urn:subject> <urn:predicate> <urn:object> .',
+      '  # FROM STRCONTAINS(?x) urn:comment',
+      '}',
+    ].join('\n')).ok).toBe(true);
+    expect(validateSparqlForDkg('SELECT ?x WHERE { BIND("unterminated AS ?x) }').errors)
+      .toContain('close the unterminated string literal or IRI');
+  });
+
+  it.each([
+    [
+      'SELECT ?x FROM <urn:g> WHERE { ?x ?p ?o }',
+      'remove FROM because projectId, subGraphName, and view already scope the query',
+    ],
+    [
+      'SELECT ?x WHERE { FILTER NOT EXISTS(?x) }',
+      'use braces for FILTER NOT EXISTS',
+    ],
+    [
+      'SELECT ?x WHERE { FILTER(STRCONTAINS(str(?x), "a")) }',
+      'use SPARQL CONTAINS instead of STRCONTAINS',
+    ],
+    [
+      'SELECT ?x WHERE { FILTER(ex:value=STRCONTAINS(str(?x), "a")) }',
+      'use SPARQL CONTAINS instead of STRCONTAINS',
+    ],
+    [
+      'SELECT ?x WHERE { FILTER(?x-STRCONTAINS(str(?x), "a")) }',
+      'use SPARQL CONTAINS instead of STRCONTAINS',
+    ],
+    [
+      'SELECT ?x WHERE { ?x ?p ?o ',
+      'balance SPARQL braces',
+    ],
+  ])('rejects an active scanner guard in %s', (sparql, message) => {
+    expect(validateSparqlForDkg(sparql).errors).toContain(message);
+  });
+
+  it.each([
+    'SELECT ?x WHERE { BIND("FROM" AS ?x) }',
+    'SELECT ?x WHERE { BIND("FILTER NOT EXISTS(" AS ?x) }',
+    'SELECT ?x WHERE { BIND("STRCONTAINS(" AS ?x) }',
+    'SELECT ?x WHERE { BIND("{" AS ?x) }',
+    'SELECT ?x WHERE { ?x ?p ?o # FROM FILTER NOT EXISTS( STRCONTAINS( {\n}',
+  ])('keeps an equivalent string/comment lookalike inert: %s', (sparql) => {
+    expect(validateSparqlForDkg(sparql)).toEqual({ ok: true, errors: [] });
+  });
+
+  it('rejects oversized SPARQL before preflight parsing', () => {
+    const result = validateSparqlForDkg(`SELECT * WHERE {}${' '.repeat(70_000)}`);
+    expect(result).toEqual({
+      ok: false,
+      errors: ['sparql must not exceed 65536 characters'],
+    });
+  });
+
+  it('detects aggregate aliases that need an outer expression wrapper', () => {
+    expect(validateSparqlForDkg(
+      'SELECT COUNT(?item) AS ?count WHERE { ?item ?predicate ?object }',
+    ).errors).toContain('wrap aggregate aliases as (COUNT(...) AS ?count)');
+    expect(validateSparqlForDkg(
+      'SELECT (COUNT(?item) AS ?count) WHERE { ?item ?predicate ?object }',
+    ).ok).toBe(true);
+    expect(validateSparqlForDkg(
+      'SELECT COUNT(?item) AS ?1count WHERE { ?item ?predicate ?object }',
+    ).errors).toContain('wrap aggregate aliases as (COUNT(...) AS ?count)');
+    expect(validateSparqlForDkg(
+      'PREFIX ex: <urn:example:> SELECT COUNT(?item) AS ?count WHERE { ?item ex:p ?object }',
+    ).errors).toContain('wrap aggregate aliases as (COUNT(...) AS ?count)');
   });
 
   it('validates both raw and saved-catalog query tools', () => {
@@ -74,6 +209,22 @@ describe('DKG SPARQL preflight', () => {
       'SELECT ?model WHERE { ?model a <urn:test:Class> ; schema:name ?name . ?model schema:category ?category }',
     )).toBe(
       'SELECT ?model WHERE { ?model <rdf:type> <urn:test:Class> ; <schema:name> ?name . ?model <schema:category> ?category }',
+    );
+  });
+
+  it('rewrites compact and shorthand predicates after exact IRI subjects', () => {
+    expect(rewriteCompactPredicatesForDkg(
+      'SELECT ?o ?type WHERE { <urn:item> schema:name ?o . <urn:item> a ?type }',
+    )).toBe(
+      'SELECT ?o ?type WHERE { <urn:item> <schema:name> ?o . <urn:item> <rdf:type> ?type }',
+    );
+  });
+
+  it('does not rewrite compact IRIs used as projection expressions', () => {
+    expect(rewriteCompactPredicatesForDkg(
+      'SELECT schema:name WHERE { ?item schema:name ?name }',
+    )).toBe(
+      'SELECT schema:name WHERE { ?item <schema:name> ?name }',
     );
   });
 

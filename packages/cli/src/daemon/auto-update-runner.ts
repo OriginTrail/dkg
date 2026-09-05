@@ -36,7 +36,7 @@ export async function resolveCurrentNpmTarget(
   channel?: string,
 ): Promise<string | null> {
   const status = await checkForNpmVersionUpdate(log, allowPrerelease, channel);
-  return status.status === 'available' && status.version ? status.version : null;
+  return status.status === 'available' ? status.version : null;
 }
 
 /** Git counterpart to {@link resolveCurrentNpmTarget}: the current ref tip, or
@@ -83,7 +83,7 @@ export function createNpmUpdateRunCheck(deps: NpmUpdateRunCheckDeps): () => Prom
           `Auto-update (npm): WARNING — channel "${npmStatus.channel}" has no acceptable target (tag missing or rejected by allowPrerelease); node will not update until it is published.`,
         );
     }
-    if (npmStatus.status !== 'available' || !npmStatus.version) return;
+    if (npmStatus.status !== 'available') return;
     if (!deps.gate) return; // version check only — no auto-apply when polling disabled
     const detectedVersion = npmStatus.version;
 

@@ -76,6 +76,8 @@ interface PublicSwmTargetBaseV1 {
   readonly contextGraphId: string;
   readonly remainingContextGraphs: number;
   readonly stopOnBackoffWorthyFailure?: boolean;
+  /** Include the catalog-owned root SWM scope as well as named subgraphs. */
+  readonly includeRootScope?: boolean;
 }
 
 /** The only two valid public synchronization contracts. */
@@ -93,6 +95,8 @@ export interface PrivateSwmRecoveryTargetV1 {
   readonly remotePeerId: string;
   readonly contextGraphId: string;
   readonly recoveryGuard?: RecoveryExecutionGuard;
+  /** Include the catalog-owned root SWM scope as well as named subgraphs. */
+  readonly includeRootScope?: boolean;
 }
 
 /**
@@ -165,6 +169,7 @@ export class SwmTargetExecutorV1 {
       deleteCheckpoint: this.#ports.deleteCheckpoint,
       getRegisteredSubGraphNames: async () => (await admission()).registered,
       getExcludedSubGraphNames: async () => (await admission()).excluded,
+      includeRootScope: target.includeRootScope,
       ensureOwnedMap: this.#ports.ensureOwnedMap,
       logInfo: this.#ports.logInfo,
       logWarn: this.#ports.logWarn,
@@ -208,6 +213,7 @@ export class SwmTargetExecutorV1 {
       getExcludedSubGraphNames: async (contextGraphId) => (
         await this.#getSubGraphAdmission(contextGraphId)
       ).excluded,
+      includeRootScope: target.includeRootScope,
       stopOnBackoffWorthyFailure: target.stopOnBackoffWorthyFailure,
       snapshotEvidencePolicy: target.mode.kind === 'selected-recovery'
         ? {

@@ -24,8 +24,8 @@
  * Production wiring (CLI flag parsing, exit codes, JSON output
  * shape) is covered separately by the integration smoke tests.
  */
-import { describe, it, expect } from 'vitest';
-import { join } from 'node:path';
+import { describe, it, expect, vi } from 'vitest';
+import { join, resolve } from 'node:path';
 import { runDoctor, collectStateSummary, ALL_CHECK_IDS } from '../src/doctor/index.js';
 import type { DoctorDeps } from '../src/doctor/types.js';
 import { runOrphanReposCheck } from '../src/doctor/checks/orphan-repos.js';
@@ -292,8 +292,98 @@ describe('collectStateSummary (§4.7.0)', () => {
 // ---------------------------------------------------------------------------
 
 describe('orphan-repos check (§4.7.1)', () => {
-  it('flags a stray clone with OriginTrail/dkg origin as warning', async () => {
+  it('charges overlapping install and discovery roots once against the scan budget', async () => {
+    const fs: FakeFS = {
+      '/test/.dkg/config.json': JSON.stringify({ nodeRole: 'core' }),
+      '/test/.dkg/releases/current': 'symlink:a',
+      '/test/.dkg/releases/a/package.json': JSON.stringify({ name: 'dkg-v10' }),
+      '/extra/last/package.json': JSON.stringify({ name: 'dkg-v10' }),
+    };
+    for (let index = 0; index < 48; index++) {
+      fs[`/test/.dkg/releases/other-${index}/package.json`] = JSON.stringify({ name: 'dkg-v10' });
+    }
+    const deps = makeDeps({ fs, extraScanRoots: ['/extra/last'] });
+    const state = await collectStateSummary(deps);
+    state.daemon.entryPoint = '/test/.dkg/releases/a/packages/cli/dist/cli.js';
+    const readFile = vi.spyOn(deps, 'readFile');
+    const findings = await runOrphanReposCheck(deps, state);
+    expect(findings).toHaveLength(50);
+    expect(findings.some((finding) => finding.subject === '/extra/last')).toBe(true);
+    expect(readFile.mock.calls.filter(([path]) => path === '/test/.dkg/releases/a/package.json')).toHaveLength(1);
+    expect(findings.find((finding) => finding.subject === '/test/.dkg/releases/a')?.details?.relevance).toBe('active-daemon');
+  });
+
+  it('probes known install directories without recursively discovering unrelated children', async () => {
+    const deps = makeDeps({ monorepoRoot: '/install', fs: {
+      '/install/unrelated/package.json': JSON.stringify({ name: 'dkg-v10' }),
+    } });
+    const readDir = vi.spyOn(deps, 'readdir');
+    expect(await runOrphanReposCheck(deps, await collectStateSummary(deps))).toEqual([]);
+    expect(readDir).not.toHaveBeenCalledWith('/install');
+  });
+
+  it.each(['a', '/external/releases/a'])('resolves active slot %s independently of the caller directory', async (activeSlot) => {
+    const slotPath = resolve('/test/.dkg/releases', activeSlot);
     const deps = makeDeps({
+      cwd: '/work/project',
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({ nodeRole: 'core' }),
+        '/test/.dkg/releases/current': `symlink:${activeSlot}`,
+        [`${slotPath}/package.json`]: JSON.stringify({ name: 'dkg-v10' }),
+        '/work/project/a/package.json': JSON.stringify({ name: 'dkg-v10' }),
+      },
+    });
+    // Match real filesystem behavior for relative paths without changing process.cwd().
+    const { exists, readFile, readdir } = deps;
+    const probed: string[] = [];
+    deps.exists = (path) => {
+      const absolute = resolve(deps.cwd, path);
+      probed.push(absolute);
+      return exists(absolute);
+    };
+    deps.readFile = (path) => readFile(resolve(deps.cwd, path));
+    deps.readdir = (path) => readdir(resolve(deps.cwd, path));
+
+    const findings = await runOrphanReposCheck(deps, await collectStateSummary(deps));
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ subject: slotPath, details: { relevance: 'selected-install' } });
+    expect(probed.some((path) => path.startsWith('/work/project/a'))).toBe(false);
+
+    // Explicit discovery may include the unrelated checkout, but never as the selected install.
+    deps.extraScanRoots = ['/work/project'];
+    const explicit = await runOrphanReposCheck(deps, await collectStateSummary(deps));
+    expect(explicit.find((finding) => finding.subject === '/work/project/a')?.details?.relevance)
+      .toBe('explicit-scan-root');
+  });
+
+  it('ignores unrelated home clones and identifies the selected node paths (#1762)', async () => {
+    const deps = makeDeps({
+      dkgHome: '/isolated/node', dkgHomeEnv: '/isolated/node',
+      fs: {
+        '/test/Projects/unrelated/package.json': JSON.stringify({ name: 'dkg-v10' }),
+        '/isolated/node/releases/blue/package.json': JSON.stringify({ name: 'dkg-v10' }),
+      },
+    });
+    const findings = await runOrphanReposCheck(deps, await collectStateSummary(deps));
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ severity: 'info', subject: '/isolated/node/releases/blue', details: { relevance: 'selected-dkg-home' } });
+  });
+
+  it('finds the known active daemon without scanning sibling clones', async () => {
+    const deps = makeDeps({ fs: {
+      '/test/Projects/active/package.json': JSON.stringify({ name: 'dkg-v10' }),
+      '/test/Projects/sibling/package.json': JSON.stringify({ name: 'dkg-v10' }),
+    } });
+    const state = await collectStateSummary(deps);
+    state.daemon.entryPoint = '/test/Projects/active/packages/cli/dist/cli.js';
+    const findings = await runOrphanReposCheck(deps, state);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].details?.relevance).toBe('active-daemon');
+  });
+
+  it('reports explicitly requested clone discovery as informational', async () => {
+    const deps = makeDeps({
+      extraScanRoots: ['/test'],
       fs: {
         '/test/Projects/dkg/.git/config': '[remote "origin"]\n  url = https://github.com/OriginTrail/dkg.git\n',
         '/test/Projects/dkg/package.json': JSON.stringify({ name: 'doesnt-matter' }),
@@ -303,12 +393,14 @@ describe('orphan-repos check (§4.7.1)', () => {
     expect(findings.length).toBeGreaterThan(0);
     const stray = findings.find((f) => f.subject === '/test/Projects/dkg');
     expect(stray).toBeDefined();
-    expect(stray!.severity).toBe('warning');
-    expect(stray!.advisory).toMatch(/Do not 'git pull'/);
+    expect(stray!.severity).toBe('info');
+    expect(stray!.details?.relevance).toBe('explicit-scan-root');
+    expect(findings.filter((f) => f.subject === stray!.subject)).toHaveLength(1);
   });
 
   it('flags a clone via package.json name match', async () => {
     const deps = makeDeps({
+      extraScanRoots: ['/test'],
       fs: {
         '/test/repos/dkg/package.json': JSON.stringify({ name: '@origintrail-official/dkg', version: '10.0.0' }),
       },
@@ -316,11 +408,12 @@ describe('orphan-repos check (§4.7.1)', () => {
     const findings = await runOrphanReposCheck(deps, await collectStateSummary(deps));
     const m = findings.find((f) => f.subject === '/test/repos/dkg');
     expect(m).toBeDefined();
-    expect(m!.severity).toBe('warning');
+    expect(m!.severity).toBe('info');
   });
 
   it('reports the active-daemon source tree as info rather than warning', async () => {
     const deps = makeDeps({
+      extraScanRoots: ['/test'],
       fs: {
         '/test/.dkg/daemon.pid': '4242',
         '/test/Projects/dkg/.git/config': '[remote "origin"]\n  url = https://github.com/OriginTrail/dkg.git\n',
@@ -341,6 +434,7 @@ describe('orphan-repos check (§4.7.1)', () => {
 
   it('skips ignored directories (node_modules, .npm, .cache)', async () => {
     const deps = makeDeps({
+      extraScanRoots: ['/test'],
       fs: {
         // Stray DKG clone NESTED inside a node_modules tree → must be skipped.
         '/test/Projects/some-app/node_modules/dkg/.git/config':
@@ -353,6 +447,7 @@ describe('orphan-repos check (§4.7.1)', () => {
 
   it('respects .dkg-ignore-by-doctor sentinel', async () => {
     const deps = makeDeps({
+      extraScanRoots: ['/test'],
       fs: {
         '/test/some/.dkg-ignore-by-doctor': '',
         '/test/some/.git/config': '[remote "origin"]\n  url = https://github.com/OriginTrail/dkg.git\n',
@@ -368,6 +463,14 @@ describe('orphan-repos check (§4.7.1)', () => {
 // ---------------------------------------------------------------------------
 
 describe('config-sanity check (§4.7.2)', () => {
+  it('reports unsupported managed memory limits statically (#1761)', async () => {
+    const deps = makeDeps({ fs: { '/test/.dkg/config.json': JSON.stringify({ store: { backend: 'oxigraph-server', options: { memoryMaxMiB: 1024 } } }) } });
+    deps.platform = 'darwin';
+    expect(await runConfigSanityCheck(deps)).toContainEqual(expect.objectContaining({ severity: 'error', subject: 'store.options.memoryMaxMiB', message: expect.stringContaining('require Linux') }));
+    deps.platform = 'linux';
+    expect(await runConfigSanityCheck(deps)).toEqual([]);
+  });
+
   it('flags missing config as warning, not error', async () => {
     const deps = makeDeps({ fs: {} });
     const findings = await runConfigSanityCheck(deps);
