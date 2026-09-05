@@ -1,39 +1,65 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import { createServer } from 'node:http';
 import { beforeEach, expect, it, vi } from 'vitest';
 
-const failure = vi.hoisted(() => ({ message: 'EADDRINUSE', children: [] as Array<{ kill: ReturnType<typeof vi.fn> }> }));
+const failure = vi.hoisted(() => ({ message: 'EADDRINUSE', delayOutput: false, idle: false, children: [] as any[] }));
 vi.mock('node:child_process', async (original) => ({
   ...await original<typeof import('node:child_process')>(),
   spawn: vi.fn(() => {
     const child = Object.assign(new EventEmitter(), {
       stdout: new PassThrough(), stderr: new PassThrough(),
-      exitCode: null as number | null, signalCode: null,
-      kill: vi.fn(),
+      exitCode: null as number | null, signalCode: null as string | null,
+      kill: vi.fn(() => {
+        child.signalCode = 'SIGTERM';
+        child.stdout.end(); child.stderr.end(); child.emit('close', null, 'SIGTERM');
+        return true;
+      }),
     });
     failure.children.push(child);
-    queueMicrotask(() => {
-      child.stderr.write(failure.message);
+    if (!failure.idle) queueMicrotask(() => {
       child.exitCode = 1;
       child.emit('exit', 1, null);
+      const close = () => {
+        child.stderr.write(failure.message);
+        child.stdout.end(); child.stderr.end(); child.emit('close', 1, null);
+      };
+      if (failure.delayOutput) setTimeout(close, 75); else close();
     });
     return child;
   }),
 }));
 
+import { spawn } from 'node:child_process';
 import { spawnHardhatEnv } from './hardhat-harness.js';
+import { startHardhatNode } from './hardhat-harness.js';
 
-beforeEach(() => { failure.children.length = 0; });
+beforeEach(() => { failure.children.length = 0; failure.delayOutput = false; failure.idle = false; vi.mocked(spawn).mockClear(); });
 
-it('bounds recovery when another process repeatedly claims the selected port', async () => {
-  failure.message = 'Error: listen EADDRINUSE';
-  await expect(spawnHardhatEnv(0)).rejects.toThrow('EADDRINUSE');
+it.each([false, true])('bounds bind retries after stdio drains (delayed output=%s)', async (delayOutput) => {
+  failure.message = 'Error: listen EADDRINUSE'; failure.delayOutput = delayOutput;
+  await expect(spawnHardhatEnv(9548)).rejects.toThrow('EADDRINUSE');
   expect(failure.children).toHaveLength(3);
-  expect(failure.children.every((child) => child.kill.mock.calls.length === 1)).toBe(true);
+  expect(vi.mocked(spawn).mock.calls.map((call) => call[1]![call[1]!.indexOf('--port') + 1])).toEqual(['9548', '0', '0']);
 });
 
 it('does not retry other startup failures as port collisions', async () => {
   failure.message = 'invalid Hardhat configuration';
   await expect(spawnHardhatEnv(0)).rejects.toThrow('invalid Hardhat configuration');
   expect(failure.children).toHaveLength(1);
+});
+
+it('never deploys against a valid foreign RPC when the owned child is unready', async () => {
+  failure.idle = true;
+  let requests = 0;
+  const server = createServer((_req, res) => { requests++; res.end(JSON.stringify({ result: '0x0' })); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = (server.address() as { port: number }).port;
+    await expect(startHardhatNode(port, 3, 60)).rejects.toThrow('failed to start');
+    expect(requests).toBe(0);
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(failure.children[0].kill).toHaveBeenCalledOnce();
+    expect(server.listening).toBe(true);
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
