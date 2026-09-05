@@ -7,6 +7,7 @@ import type {
 } from '@origintrail-official/dkg-core';
 import {
   GraphManager,
+  OxigraphStore,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import { QueryMethods } from '../src/dkg-agent-query.js';
@@ -45,8 +46,10 @@ describe('query caller-provided store labels', () => {
 
   it('forwards caller attribution through context-graph enumeration', async () => {
     const listGraphsByPrefix = vi.fn(async () => []);
+    const query = vi.fn<TripleStore['query']>(async () => ({ type: 'bindings', bindings: [] }));
     const store = {
       listGraphsByPrefix,
+      query,
     } as unknown as TripleStore;
 
     await expect(
@@ -59,6 +62,8 @@ describe('query caller-provided store labels', () => {
       'did:dkg:context-graph:',
       { source: 'agent.swmHostMode.listContextGraphs' },
     );
+    expect(query).toHaveBeenCalledOnce();
+    expect(query.mock.calls[0]?.[1]?.source).toBe('agent.swmHostMode.listContextGraphs');
   });
 });
 
@@ -73,12 +78,14 @@ const OUTSIDER = `0x${'33'.repeat(20)}` as EvmAddressV1;
 function runtimePrivateQueryAgent(options: {
   readonly subscribed?: boolean;
   readonly storedContextGraph?: boolean;
+  readonly contextGraphId?: ContextGraphIdV1;
 } = {}) {
+  const contextGraphId = options.contextGraphId ?? RUNTIME_PRIVATE_CG;
   const registry = createRfc64CatalogAccessPolicyRegistryFixture({
     localAgentAddress: LOCAL_MEMBER,
     remoteAgentAddress: REMOTE_MEMBER,
     networkId: RUNTIME_NETWORK_ID,
-    contextGraphId: RUNTIME_PRIVATE_CG,
+    contextGraphId,
     accessPolicy: 1,
     publishPolicy: 1,
     policyDigest: RUNTIME_POLICY_DIGEST,
@@ -96,7 +103,7 @@ function runtimePrivateQueryAgent(options: {
     query: vi.fn(async () => ({ type: 'bindings', bindings: [] })),
     listGraphsByPrefix: vi.fn(async () => (
       options.storedContextGraph === true
-        ? [`did:dkg:context-graph:${RUNTIME_PRIVATE_CG}`]
+        ? [`did:dkg:context-graph:${contextGraphId}`]
         : []
     )),
   };
@@ -119,7 +126,7 @@ function runtimePrivateQueryAgent(options: {
     store,
     subscribedContextGraphs: options.subscribed === false
       ? new Map()
-      : new Map([[RUNTIME_PRIVATE_CG, { synced: true }]]),
+      : new Map([[contextGraphId, { synced: true }]]),
     rfc64PublicCatalogServiceV1: { acceptedPolicySnapshot },
     isPrivateContextGraph,
     getContextGraphAllowedPeers: vi.fn(async () => null),
@@ -143,6 +150,34 @@ function runtimePrivateQueryAgent(options: {
 }
 
 describe('runtime-accepted RFC-64 private query authorization', () => {
+  it.each([
+    { id: 'runtime-private-query', suffix: '' },
+    { id: `${LOCAL_MEMBER}/private-query`, suffix: '' },
+    { id: `${LOCAL_MEMBER}/private-query`, suffix: `/_shared_memory/${REMOTE_MEMBER}/1` },
+    { id: `${LOCAL_MEMBER}/private-query`, suffix: '/tasks/_verifiable_memory' },
+  ])('protects undeclared stored graph $id$suffix using accepted policy authority', async ({ id, suffix }) => {
+    const fixture = runtimePrivateQueryAgent({ subscribed: false, contextGraphId: id as ContextGraphIdV1 });
+    const store = new OxigraphStore();
+    try {
+      await store.insert([{ subject: 'urn:private:s', predicate: 'urn:private:p', object: '"secret"',
+        graph: `did:dkg:context-graph:${id}${suffix}` }]);
+      // A graph without a declaration is absent from CG listings, but privacy
+      // still follows its accepted runtime policy even after unsubscription.
+      expect(await new GraphManager(store).listContextGraphs()).toEqual([]);
+      const agent = { ...fixture.agent, store };
+      const sparql = 'SELECT ?s WHERE { ?s ?p ?o }';
+      await expect(QueryMethods.prototype.query.call(agent as never, sparql, {
+        callerAgentAddress: REMOTE_MEMBER,
+      })).resolves.toEqual({ bindings: [{ value: 'visible' }] });
+      await expect(QueryMethods.prototype.query.call(agent as never, sparql, {
+        callerAgentAddress: OUTSIDER,
+      })).resolves.toEqual({ bindings: [] });
+      expect(fixture.queryEngine.query).toHaveBeenCalledOnce();
+      expect(fixture.acceptedPolicySnapshot).toHaveBeenCalledWith(RUNTIME_NETWORK_ID, id);
+      expect(fixture.isPrivateContextGraph).not.toHaveBeenCalled();
+    } finally { await store.close(); }
+  });
+
   it('uses a live private roster for scoped VM reads without bootstrap config', async () => {
     const fixture = runtimePrivateQueryAgent();
     expect(fixture.agent.config).not.toHaveProperty('rfc64CatalogBootstrap');

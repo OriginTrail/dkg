@@ -27,13 +27,18 @@ const DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS = 500;
 const FAILURE_BACKOFF_INITIAL_MS = 60_000;
 const FAILURE_BACKOFF_MAX_MS = 5 * 60_000;
 
+/** Each strategy owns restoration and activation semantics as one decision. */
+export type ChainEventCursorStrategy =
+  | { kind: 'live-tail'; lookbackBlocks?: number }
+  | { kind: 'isolated-live-tail'; lookbackBlocks?: number }
+  | { kind: 'full-history' }
+  | { kind: 'legacy-full-history' };
+
 export interface ChainEventPollerLaneSpec {
   name: ChainEventPollerLane;
   enabled(): boolean;
   eventTypes(): readonly string[];
-  requiresFullHistory(): boolean;
-  canUseLegacyAggregateCursor?(): boolean;
-  liveSeedLookbackBlocks?: number;
+  cursorStrategy(): ChainEventCursorStrategy;
   cadenceMs: number;
   dispatch(event: ChainEvent, ctx: OperationContext): Promise<void>;
   onBackfillFromGenesis?(ctx: OperationContext): void;
@@ -123,23 +128,39 @@ export class ChainEventLaneRunner {
       if (!spec.enabled()) return [];
       const eventTypes = [...spec.eventTypes()];
       if (eventTypes.length === 0) return [];
-      const requiresFullHistory = spec.requiresFullHistory();
+      const policy = this.resolveCursorStrategy(spec.cursorStrategy());
       return [{
         spec,
         state: this.stateFor(spec.name),
         eventTypes,
-        requiresFullHistory,
-        canUseLegacyAggregateCursor: spec.canUseLegacyAggregateCursor?.() ?? !requiresFullHistory,
-        liveSeedLookbackBlocks: this.liveSeedLookbackBlocks(spec),
+        ...policy,
       }];
     });
   }
 
-  private liveSeedLookbackBlocks(spec: ChainEventPollerLaneSpec): number {
-    const lookback = spec.liveSeedLookbackBlocks ?? DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS;
-    return Number.isFinite(lookback) && lookback >= 0
-      ? Math.floor(lookback)
-      : DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS;
+  private resolveCursorStrategy(strategy: ChainEventCursorStrategy): Pick<ChainEventPollerLaneRuntime,
+    'requiresFullHistory' | 'canUseLegacyAggregateCursor' | 'liveSeedLookbackBlocks'> {
+    switch (strategy.kind) {
+      case 'full-history':
+      case 'legacy-full-history':
+        if ('lookbackBlocks' in strategy) throw new Error('Full-history cursor strategies cannot specify live-tail lookback');
+        return {
+          requiresFullHistory: true,
+          canUseLegacyAggregateCursor: strategy.kind === 'legacy-full-history',
+          liveSeedLookbackBlocks: DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS,
+        };
+      case 'live-tail':
+      case 'isolated-live-tail': {
+        const lookback = strategy.lookbackBlocks ?? DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS;
+        return {
+          requiresFullHistory: false,
+          canUseLegacyAggregateCursor: strategy.kind === 'live-tail',
+          liveSeedLookbackBlocks: Number.isFinite(lookback) && lookback >= 0
+            ? Math.floor(lookback) : DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS,
+        };
+      }
+      default: throw new Error('Unknown chain-event cursor strategy');
+    }
   }
 
   private stateFor(lane: ChainEventPollerLane): ChainEventPollerLaneState {

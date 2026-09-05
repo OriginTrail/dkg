@@ -1,3 +1,4 @@
+import { GraphManager } from '@origintrail-official/dkg-storage';
 // SPDX-License-Identifier: Apache-2.0
 
 import {
@@ -242,100 +243,7 @@ export class ContextGraphMetaProjection {
   }
 
   async listDeclaredContextGraphIds(options: QueryOptions = {}): Promise<string[]> {
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-    const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
-
-    assertSafeIri(ontologyGraph);
-    assertSafeIri(agentsGraph);
-
-    const result = await this.store.query(`
-      SELECT DISTINCT ?ctxGraph WHERE {
-        VALUES ?sourceGraph { <${ontologyGraph}> <${agentsGraph}> }
-        GRAPH ?sourceGraph {
-          ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
-        }
-      }
-    `, options);
-
-    const ids = new Set<string>();
-    if (result.type === 'bindings') {
-      for (const row of result.bindings) {
-        const uri = typeof row['ctxGraph'] === 'string' ? stripTerm(row['ctxGraph']) : '';
-        const id = contextGraphIdFromContextGraphUri(uri);
-        if (id) ids.add(id);
-      }
-    }
-
-    for (const id of await this.listRootMetaDeclaredContextGraphIds(options)) {
-      ids.add(id);
-    }
-
-    // OT-RFC-49 §5.9: surface CGs known only through their public `_catalog`
-    // entry (e.g. discovered from a peer with no local `_meta`).
-    for (const id of await this.listCatalogDeclaredContextGraphIds(options)) {
-      ids.add(id);
-    }
-
-    return [...ids].sort();
-  }
-
-  private async listRootMetaDeclaredContextGraphIds(options: QueryOptions): Promise<string[]> {
-    const graphUris = (await this.listGraphsByPrefix(CONTEXT_GRAPH_PREFIX, options))
-      .filter((graphUri) => {
-        const id = contextGraphIdFromMetaGraphUri(graphUri);
-        return id !== null && isRootContextGraphId(id);
-      });
-    if (graphUris.length === 0) return [];
-
-    const ids = new Set<string>();
-    for (const chunk of chunks(graphUris, 128)) {
-      for (const graphUri of chunk) assertSafeIri(graphUri);
-      const result = await this.store.query(`
-        SELECT DISTINCT ?ctxGraph WHERE {
-          VALUES ?g { ${chunk.map((graphUri) => `<${graphUri}>`).join(' ')} }
-          GRAPH ?g {
-            ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
-            FILTER(STRSTARTS(STR(?ctxGraph), "${CONTEXT_GRAPH_PREFIX}"))
-            FILTER(STR(?g) = CONCAT(STR(?ctxGraph), "/_meta"))
-          }
-        }
-      `, options);
-      if (result.type !== 'bindings') continue;
-      for (const row of result.bindings) {
-        const uri = typeof row['ctxGraph'] === 'string' ? stripTerm(row['ctxGraph']) : '';
-        const id = contextGraphIdFromContextGraphUri(uri);
-        if (id && isRootContextGraphId(id)) ids.add(id);
-      }
-    }
-    return [...ids].sort();
-  }
-
-  private async listCatalogDeclaredContextGraphIds(options: QueryOptions): Promise<string[]> {
-    const graphUris = (await this.listGraphsByPrefix(CONTEXT_GRAPH_PREFIX, options))
-      .filter((graphUri) => contextGraphIdFromCatalogGraphUri(graphUri) !== null);
-    if (graphUris.length === 0) return [];
-
-    const ids = new Set<string>();
-    for (const chunk of chunks(graphUris, 128)) {
-      for (const graphUri of chunk) assertSafeIri(graphUri);
-      const result = await this.store.query(`
-        SELECT DISTINCT ?ctxGraph WHERE {
-          VALUES ?g { ${chunk.map((graphUri) => `<${graphUri}>`).join(' ')} }
-          GRAPH ?g {
-            ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH}> .
-            FILTER(STRSTARTS(STR(?ctxGraph), "${CONTEXT_GRAPH_PREFIX}"))
-            FILTER(STR(?g) = CONCAT(STR(?ctxGraph), "/_catalog"))
-          }
-        }
-      `, options);
-      if (result.type !== 'bindings') continue;
-      for (const row of result.bindings) {
-        const uri = typeof row['ctxGraph'] === 'string' ? stripTerm(row['ctxGraph']) : '';
-        const id = contextGraphIdFromContextGraphUri(uri);
-        if (id) ids.add(id);
-      }
-    }
-    return [...ids].sort();
+    return new GraphManager(this.store).listContextGraphs(options);
   }
 
   private async listGraphsByPrefix(prefix: string, options: QueryOptions): Promise<string[]> {
@@ -703,19 +611,6 @@ function contextGraphIdFromContextGraphUri(uri: string): string | null {
   const tail = uri.slice(CONTEXT_GRAPH_PREFIX.length);
   if (!tail) return null;
   return tail;
-}
-
-function isRootContextGraphId(id: string): boolean {
-  if (!id.includes('/')) return true;
-  return /^0x[0-9a-fA-F]{40}\/[^/]+$/.test(id);
-}
-
-function chunks<T>(items: readonly T[], size: number): T[][] {
-  const result: T[][] = [];
-  for (let i = 0; i < items.length; i += size) {
-    result.push([...items.slice(i, i + size)]);
-  }
-  return result;
 }
 
 function contextGraphIdFromMetaGraphUri(uri: string): string | null {

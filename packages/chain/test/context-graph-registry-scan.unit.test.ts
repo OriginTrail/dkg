@@ -851,3 +851,19 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect((defaulted as any).cgRegistryScanPageSize).toBe(2_000);
   });
 });
+
+describe('context graph list compatibility validation (#1485)', () => {
+  it.each([
+    { mode: 'listAll', incremental: true },
+    { mode: 'listAll', seedIncrementalWatermark: true },
+    { incremental: true, seedIncrementalWatermark: true },
+    { resumeFromCursor: true },
+  ])('rejects contradictory options before registry access: %j', async (options) => {
+    const registry = makeRegistry();
+    const { adapter, provider } = makeAdapter(registry);
+    await expect(adapter.listContextGraphsFromChain(undefined, options as unknown as ContextGraphChainScanOptions)).rejects.toThrow();
+    expect(registry.getAddress.calls).toEqual([]);
+    expect(registry.queryFilter.calls).toEqual([]);
+    expect(provider.getBlockNumber.calls).toEqual([]);
+  });
+});

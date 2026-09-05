@@ -14,6 +14,7 @@
  * partially-collected summary.
  */
 import { join } from 'node:path';
+import { inspectNodeRuntime } from '../node-runtime-preflight.js';
 import type { DoctorDeps, LocalInstallMode, StateSummary } from './types.js';
 
 const AUTO_UPDATE_LAST_CHECK_FILE = 'auto-update/last-check.json';
@@ -235,6 +236,7 @@ export async function collectStateSummary(deps: DoctorDeps): Promise<StateSummar
   const lastError = await readAutoUpdateLastError(deps);
 
   return {
+    runtime: inspectNodeRuntime(deps.runtimeHost),
     daemon: {
       pid,
       entryPoint,

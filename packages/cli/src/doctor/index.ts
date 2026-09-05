@@ -15,6 +15,7 @@ import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { dkgDir, isDkgMonorepo, repoDir } from '../config.js';
 import { findDkgMonorepoRoot } from '@origintrail-official/dkg-core';
+import { runNodeRuntimeCheck } from './checks/node-runtime.js';
 import { collectStateSummary } from './state-summary.js';
 import { runOrphanReposCheck } from './checks/orphan-repos.js';
 import { runConfigSanityCheck } from './checks/config-sanity.js';
@@ -53,6 +54,9 @@ export async function runDoctor(
     try {
       let next: Finding[] = [];
       switch (id) {
+        case 'node-runtime':
+          next = runNodeRuntimeCheck(deps, state);
+          break;
         case 'orphan-repos':
           next = await runOrphanReposCheck(deps, state);
           break;

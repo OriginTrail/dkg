@@ -1104,16 +1104,22 @@ describe('DKGQueryEngine', () => {
     });
   });
 
-  it('queries across all contextGraphs', async () => {
-    // Add data to another context graph
+  it.each(['text-tools', `0x${'ab'.repeat(20)}/text-tools`])('queries across all declared contextGraphs, including %s', async (id) => {
+    const graph = `did:dkg:context-graph:${id}`;
+    // Register the complete CG identity, then write its data. A raw graph name
+    // alone cannot tell CGs and subgraphs apart.
     await store.insert([
-      q('did:dkg:agent:QmTextBot', 'http://schema.org/name', '"TextBot"', 'did:dkg:context-graph:text-tools'),
+      q(graph, RDF_TYPE, DKG_CONTEXT_GRAPH, ONTOLOGY_GRAPH),
+      q('did:dkg:agent:QmTextBot', 'http://schema.org/name', '"TextBot"', graph),
+      q('urn:undeclared', 'http://schema.org/name', '"Undeclared"', 'did:dkg:context-graph:raw-data'),
     ]);
 
     const result = await engine.queryAllContextGraphs(
       'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
     );
     expect(result.bindings.length).toBe(2);
+    expect(result.bindings.map((row) => row.name)).toContain('"TextBot"');
+    expect(result.bindings.map((row) => row.name)).not.toContain('"Undeclared"');
   });
 
   it('queries shared memory graph when graphSuffix is _shared_memory', async () => {

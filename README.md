@@ -64,7 +64,7 @@ the writer, but do not encrypt GossipSub payload bytes.
 
 ## Quick Start
 
-**Prerequisites:** Node.js 22+, npm 10+. macOS, Linux, and Windows (PowerShell 5.1+ or WSL2) all supported.
+**Prerequisites:** Node.js 22.13+ (22.x), 23.4+, or newer, with `node:sqlite` support, npm 10+. macOS, Linux, and Windows (PowerShell 5.1+ or WSL2) all supported.
 
 ### Hermes adapter
 
@@ -576,7 +576,7 @@ This is a pnpm + Turborepo monorepo.
 
 ## Development
 
-Clone the repo and use pnpm (v10+) with Node.js 22+ to work across all workspace packages:
+Clone the repo and use pnpm (v10+) with Node.js 22.13+ (22.x), 23.4+, or newer, with `node:sqlite` support to work across all workspace packages:
 
 ```bash
 pnpm install                                     # install all workspace deps

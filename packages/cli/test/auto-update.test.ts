@@ -633,6 +633,20 @@ describe('blue-green checkForUpdate', () => {
     expect(logCalls.some(m => m.includes('Continuing without document conversion'))).toBe(true);
   });
 
+  it('refuses git slot activation when the launch runtime cannot load SQLite', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('ccc333');
+    const probe = vi.spyOn(process, 'getBuiltinModule').mockReturnValue(undefined);
+    const log = vi.fn();
+    try {
+      expect(await performUpdate(AU, log)).toBe(false);
+      expect(swapSlotCalls).toEqual([]);
+      expect(log.mock.calls.flat().join(' ')).toContain('refusing slot activation');
+      expect(log.mock.calls.flat().join(' ')).toContain('>=22.13.0');
+      expect(writeFileCalls.some(([file]) => String(file).includes('.update-pending.json'))).toBe(false);
+    } finally { probe.mockRestore(); }
+  });
+
   it('swaps symlink after successful build', async () => {
     const current = 'aaa111';
     const latest = 'ccc333';
@@ -1610,6 +1624,18 @@ describe('performNpmUpdate', () => {
 
   afterEach(() => {
     restoreIo();
+  });
+
+  it('refuses npm slot activation when the launch runtime cannot load SQLite', async () => {
+    const probe = vi.spyOn(process, 'getBuiltinModule').mockReturnValue(undefined);
+    const log = vi.fn();
+    try {
+      expect(await performNpmUpdate('9.0.0-beta.4-dev.100.abc1234', log)).toBe('failed');
+      expect(swapSlotCalls).toEqual([]);
+      expect(log.mock.calls.flat().join(' ')).toContain('refusing slot activation');
+      expect(log.mock.calls.flat().join(' ')).toContain('>=22.13.0');
+      expect(writeFileCalls.some(([file]) => String(file).includes('.update-pending.json'))).toBe(false);
+    } finally { probe.mockRestore(); }
   });
 
   it('installs package and swaps slot on success', async () => {
