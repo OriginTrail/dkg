@@ -24,6 +24,7 @@ PUBLISHER_TESTS=(
 AGENT_TESTS=(
   "packages/agent/test/e2e-chain.test.ts"
   "packages/agent/test/e2e-finalization.test.ts"
+  "packages/agent/test/a2-pointers-and-b3-addressing.test.ts"
 )
 
 files=()
@@ -64,11 +65,18 @@ for f in "${files[@]}"; do
   echo "──── Running: $f ────"
   pkg_dir="$ROOT/$(dirname "$(dirname "$f")")"
   test_file="test/$(basename "$f")"
-  if ! (cd "$pkg_dir" && npx vitest run "$test_file" \
+  report="$pkg_dir/test-results/evm-$(basename "$f" .test.ts).xml"
+  mkdir -p "$pkg_dir/test-results"
+  rm -f "$report"
+  if ! (cd "$pkg_dir" && pnpm exec vitest run "$test_file" \
        --config "$ROOT/vitest.evm-integration.ts" \
-       --reporter=verbose); then
+       --reporter=verbose --reporter=junit --outputFile.junit="$report"); then
     exit_code=1
     echo "FAIL: $f"
+  fi
+  if [[ ! -s "$report" ]]; then
+    exit_code=1
+    echo "Missing EVM test report: $report"
   fi
   echo ""
 done

@@ -43,6 +43,7 @@
  * a real chain") enforced in CI.
  */
 
+import { TEST_SNAPSHOT_STORAGE } from '../../../scripts/testing/snapshot-storage.js';
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -108,6 +109,7 @@ async function writeDaemonConfig(
   await writeFile(
     join(home, 'config.json'),
     JSON.stringify({
+      sharedMemoryPublicSnapshotStorage: TEST_SNAPSHOT_STORAGE,
       name: 'daemon-extra-test',
       apiPort,
       listenPort,

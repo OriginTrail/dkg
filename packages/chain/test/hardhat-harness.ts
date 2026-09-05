@@ -6,9 +6,12 @@
  */
 import { ChildProcess, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { ethers, JsonRpcProvider, Wallet, Contract } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import path from 'node:path';
+import { availableTestPort } from './test-port.js';
 
 const require = createRequire(import.meta.url);
 
@@ -48,55 +51,60 @@ export async function waitForNode(url: string, timeoutMs = 30_000): Promise<bool
     try {
       const res = await fetch(url, {
         method: 'POST',
+        signal: AbortSignal.timeout(Math.max(1, Math.min(1000, timeoutMs - (Date.now() - start)))),
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }),
       });
-      if (res.ok) return true;
+      const body = await res.json() as { result?: unknown; error?: unknown };
+      if (res.ok && !body.error && typeof body.result === 'string' && /^0x[0-9a-f]+$/i.test(body.result)) return true;
     } catch {
       // node not ready yet
     }
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, Math.max(0, Math.min(500, timeoutMs - (Date.now() - start)))));
   }
   return false;
 }
 
 export async function deployContracts(rpcUrl: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const hardhatCli = require.resolve('hardhat/internal/cli/bootstrap', {
-      paths: [EVM_MODULE_DIR],
+  const deploymentsDirectory = await mkdtemp(path.join(tmpdir(), 'dkg-hardhat-deploy-'));
+  try {
+    return await new Promise<string>((resolve, reject) => {
+      const hardhatCli = require.resolve('hardhat/internal/cli/bootstrap', {
+        paths: [EVM_MODULE_DIR],
+      });
+      const proc = spawn(
+        process.execPath,
+        [hardhatCli, 'deploy', '--network', 'localhost', '--config', 'hardhat.node.config.ts'],
+        {
+          cwd: EVM_MODULE_DIR,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, RPC_LOCALHOST: rpcUrl, DKG_TEST_DEPLOYMENTS_DIR: deploymentsDirectory },
+        },
+      );
+
+      let stdout = '';
+      let stderr = '';
+      proc.stdout?.on('data', (d) => { stdout += d.toString(); });
+      proc.stderr?.on('data', (d) => { stderr += d.toString(); });
+
+      const deadline = setTimeout(() => proc.kill('SIGKILL'), 300_000);
+      proc.on('error', (error) => { clearTimeout(deadline); reject(error); });
+      proc.on('close', (code, signal) => {
+        clearTimeout(deadline);
+        // A partial deployment can print Hub before later contracts fail.
+        if (code !== 0 || signal) {
+          reject(new Error(`Deploy failed (code ${code}, signal ${signal}):\n${stderr}\n${stdout}`));
+          return;
+        }
+
+        const hubMatch = stdout.match(/deploying "Hub".*?deployed at (\S+)/s);
+        if (hubMatch) resolve(hubMatch[1]);
+        else reject(new Error(`Hub address not found in deploy output:\n${stdout}`));
+      });
     });
-    const proc = spawn(
-      process.execPath,
-      [hardhatCli, 'deploy', '--network', 'localhost', '--config', 'hardhat.node.config.ts'],
-      {
-        cwd: EVM_MODULE_DIR,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, RPC_LOCALHOST: rpcUrl },
-      },
-    );
-
-    let stdout = '';
-    let stderr = '';
-    proc.stdout?.on('data', (d) => { stdout += d.toString(); });
-    proc.stderr?.on('data', (d) => { stderr += d.toString(); });
-
-    proc.on('close', (code, signal) => {
-      // Parse Hub address from stdout even if the process was killed
-      // (e.g. OOM after deploy completed but during GC cleanup)
-      const hubMatch = stdout.match(/deploying "Hub".*?deployed at (\S+)/s);
-      if (hubMatch) {
-        resolve(hubMatch[1]);
-        return;
-      }
-
-      if (code !== 0) {
-        reject(new Error(`Deploy failed (code ${code}, signal ${signal}):\n${stderr}\n${stdout}`));
-        return;
-      }
-
-      reject(new Error(`Hub address not found in deploy output:\n${stdout}`));
-    });
-  });
+  } finally {
+    await rm(deploymentsDirectory, { recursive: true, force: true });
+  }
 }
 
 export function makeAdapterConfig(
@@ -249,7 +257,7 @@ export async function stakeAndSetAsk(
   );
 
   await (await token.mint(operational.address, stakeAmount)).wait();
-  await (await token.connect(operational).approve(stakingV10Addr, stakeAmount)).wait();
+  await (await token.connect(operational).getFunction('approve')(stakingV10Addr, stakeAmount)).wait();
   await (await stakingNFT.createConviction(identityId, stakeAmount, lockTier)).wait();
   await (await profile.updateAsk(identityId, ask)).wait();
 }
@@ -329,20 +337,9 @@ export async function setMinimumRequiredSignatures(
  * @param port   Hardhat JSON-RPC port (use different ports per concurrent test file)
  * @returns      Context with process handle, provider, hub address, and identity IDs
  */
-export async function spawnHardhatEnv(port: number): Promise<HardhatContext> {
+export async function spawnHardhatEnv(port: number, bindAttempts = 3): Promise<HardhatContext> {
+  port = await availableTestPort(port);
   const rpcUrl = `http://127.0.0.1:${port}`;
-
-  // Kill any orphaned process left on this port from a previous crashed run
-  try {
-    const { execSync } = await import('node:child_process');
-    const pids = execSync(`lsof -ti:${port} 2>/dev/null`, { encoding: 'utf8' }).trim();
-    if (pids) {
-      for (const pid of pids.split('\n')) {
-        try { process.kill(Number(pid), 'SIGKILL'); } catch {}
-      }
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-  } catch {}
 
   let stderrOutput = '';
   let stdoutOutput = '';
@@ -366,9 +363,23 @@ export async function spawnHardhatEnv(port: number): Promise<HardhatContext> {
   hardhatProcess.on('error', (err) => { stderrOutput += `\nspawn error: ${err.message}`; });
 
   const startupTimeout = process.env.CI ? 120_000 : 60_000;
-  const ready = await waitForNode(rpcUrl, startupTimeout);
+  // Port allocation and child bind cannot be atomic. Require our child's
+  // readiness message before probing, so a concurrent port claimant cannot
+  // be mistaken for our test chain or receive deployment transactions.
+  const deadline = Date.now() + startupTimeout;
+  while (!stdoutOutput.includes('Started HTTP and WebSocket JSON-RPC server') &&
+    hardhatProcess.exitCode === null && hardhatProcess.signalCode === null && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  const ready = stdoutOutput.includes('Started HTTP and WebSocket JSON-RPC server') &&
+    hardhatProcess.exitCode === null && hardhatProcess.signalCode === null &&
+    await waitForNode(rpcUrl, Math.max(1, deadline - Date.now()));
   if (!ready) {
     hardhatProcess.kill('SIGTERM');
+    if (stderrOutput.includes('EADDRINUSE') && bindAttempts > 1) {
+      console.warn(`[hardhat-harness] Port ${port} was claimed during startup; retrying on an ephemeral port (${bindAttempts - 1} attempts left)`);
+      return spawnHardhatEnv(0, bindAttempts - 1);
+    }
     throw new Error(
       `Hardhat node failed to start on port ${port} within ${startupTimeout / 1000}s.\n` +
       `hardhatCli: ${hardhatCli}\n` +
@@ -378,71 +389,78 @@ export async function spawnHardhatEnv(port: number): Promise<HardhatContext> {
   }
 
   const provider = new JsonRpcProvider(rpcUrl, undefined, { cacheTimeout: -1 });
-  const hubAddress = await deployContracts(rpcUrl);
+  try {
+    const hubAddress = await deployContracts(rpcUrl);
 
-  const coreProfileId = await createNodeProfile(
-    provider, hubAddress,
-    HARDHAT_KEYS.CORE_OP, HARDHAT_KEYS.CORE_ADMIN,
-    'CoreNode1',
-  );
+    const coreProfileId = await createNodeProfile(
+      provider, hubAddress,
+      HARDHAT_KEYS.CORE_OP, HARDHAT_KEYS.CORE_ADMIN,
+      'CoreNode1',
+    );
 
-  const rec1Id = await createNodeProfile(provider, hubAddress, HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC1_ADMIN, 'Receiver1');
-  const rec2Id = await createNodeProfile(provider, hubAddress, HARDHAT_KEYS.REC2_OP, HARDHAT_KEYS.REC2_ADMIN, 'Receiver2');
-  const rec3Id = await createNodeProfile(provider, hubAddress, HARDHAT_KEYS.REC3_OP, HARDHAT_KEYS.REC3_ADMIN, 'Receiver3');
+    const rec1Id = await createNodeProfile(provider, hubAddress, HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC1_ADMIN, 'Receiver1');
+    const rec2Id = await createNodeProfile(provider, hubAddress, HARDHAT_KEYS.REC2_OP, HARDHAT_KEYS.REC2_ADMIN, 'Receiver2');
+    const rec3Id = await createNodeProfile(provider, hubAddress, HARDHAT_KEYS.REC3_OP, HARDHAT_KEYS.REC3_ADMIN, 'Receiver3');
 
-  await stakeAndSetAsk(
-    provider, hubAddress,
-    HARDHAT_KEYS.DEPLOYER, HARDHAT_KEYS.CORE_OP,
-    coreProfileId,
-  );
-
-  // RC11 / PR1: stake all three receiver nodes so they enter the sharding
-  // table. `KnowledgeAssetsV10._verifySignature` (contracts:777-783)
-  // requires every ACK signer to be in the sharding table — the legacy
-  // harness only staked CORE_OP and relied on the publisher's
-  // (now-deleted) self-signed ACK fallback to satisfy a 1-of-1 quorum.
-  // With the fallback gone, tests collect real 3-of-N ACKs via
-  // `makeInMemoryV10ACKProvider`, which requires REC1..REC3 to be
-  // valid sharding-table signers. Funded from DEPLOYER like CORE_OP.
-  for (const [opKey, identityId] of [
-    [HARDHAT_KEYS.REC1_OP, rec1Id],
-    [HARDHAT_KEYS.REC2_OP, rec2Id],
-    [HARDHAT_KEYS.REC3_OP, rec3Id],
-  ] as const) {
     await stakeAndSetAsk(
       provider, hubAddress,
-      HARDHAT_KEYS.DEPLOYER, opKey,
-      identityId,
+      HARDHAT_KEYS.DEPLOYER, HARDHAT_KEYS.CORE_OP,
+      coreProfileId,
     );
+
+    // RC11 / PR1: stake all three receiver nodes so they enter the sharding
+    // table. `KnowledgeAssetsV10._verifySignature` (contracts:777-783)
+    // requires every ACK signer to be in the sharding table — the legacy
+    // harness only staked CORE_OP and relied on the publisher's
+    // (now-deleted) self-signed ACK fallback to satisfy a 1-of-1 quorum.
+    // With the fallback gone, tests collect real 3-of-N ACKs via
+    // `makeInMemoryV10ACKProvider`, which requires REC1..REC3 to be
+    // valid sharding-table signers. Funded from DEPLOYER like CORE_OP.
+    for (const [opKey, identityId] of [
+      [HARDHAT_KEYS.REC1_OP, rec1Id],
+      [HARDHAT_KEYS.REC2_OP, rec2Id],
+      [HARDHAT_KEYS.REC3_OP, rec3Id],
+    ] as const) {
+      await stakeAndSetAsk(
+        provider, hubAddress,
+        HARDHAT_KEYS.DEPLOYER, opKey,
+        identityId,
+      );
+    }
+
+    // RC11 / PR1: keep the global `minimumRequiredSignatures` at 1.
+    // Publisher tests inject `makeInMemoryV10ACKProvider` with three
+    // distinct receiver signers (REC1..REC3) — every ACK still recovers
+    // to a real sharding-table identity, so the multi-signer code path
+    // is fully exercised, but the contract only enforces ≥1. This keeps
+    // single-node agent E2E tests (1-of-1 publishes from a lone core
+    // with no peer ACK collectors) honest: pre-PR1 they confirmed via
+    // the self-signed fallback; post-PR1, with self-sign deleted, they
+    // simply have 0 collected ACKs and the publisher correctly downgrades
+    // to `tentative`. Tests that need to validate the >=N quorum gate
+    // (e.g. `e2e-publish-protocol.test.ts §4`) override this in their
+    // own `beforeAll`. Production stays at 3 via the deployer script,
+    // independently of this harness default.
+    await setMinimumRequiredSignatures(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, 1);
+
+    return {
+      process: hardhatProcess,
+      provider,
+      hubAddress,
+      rpcUrl,
+      coreProfileId,
+      receiverIds: [rec1Id, rec2Id, rec3Id],
+    };
+  } catch (error) {
+    provider.destroy();
+    hardhatProcess.kill('SIGKILL');
+    throw error;
   }
-
-  // RC11 / PR1: keep the global `minimumRequiredSignatures` at 1.
-  // Publisher tests inject `makeInMemoryV10ACKProvider` with three
-  // distinct receiver signers (REC1..REC3) — every ACK still recovers
-  // to a real sharding-table identity, so the multi-signer code path
-  // is fully exercised, but the contract only enforces ≥1. This keeps
-  // single-node agent E2E tests (1-of-1 publishes from a lone core
-  // with no peer ACK collectors) honest: pre-PR1 they confirmed via
-  // the self-signed fallback; post-PR1, with self-sign deleted, they
-  // simply have 0 collected ACKs and the publisher correctly downgrades
-  // to `tentative`. Tests that need to validate the >=N quorum gate
-  // (e.g. `e2e-publish-protocol.test.ts §4`) override this in their
-  // own `beforeAll`. Production stays at 3 via the deployer script,
-  // independently of this harness default.
-  await setMinimumRequiredSignatures(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, 1);
-
-  return {
-    process: hardhatProcess,
-    provider,
-    hubAddress,
-    rpcUrl,
-    coreProfileId,
-    receiverIds: [rec1Id, rec2Id, rec3Id],
-  };
 }
 
 export function killHardhat(ctx: HardhatContext | null): void {
   if (ctx?.process) {
+    ctx.provider.destroy();
     ctx.process.kill('SIGKILL');
   }
 }

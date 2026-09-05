@@ -10,6 +10,7 @@
  * exact graph-scoped KA with N VM triples and an empty legacy root manifest.
  * The public DCAT floor is committed independently and served from `_catalog`.
  */
+import { TEST_SNAPSHOT_STORAGE } from '../../../scripts/testing/snapshot-storage.js';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -49,11 +50,13 @@ describe('baseline — curated CG rootless publish with detached catalog', () =>
     publisher = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(), name: 'CatPublisher', nodeRole: 'core', listenPort: 0, skills: [],
       dataDir: mkDataDir('pub'),
+      sharedMemoryPublicSnapshotStorage: TEST_SNAPSHOT_STORAGE,
       chainConfig: chainConfig(HARDHAT_KEYS.CORE_OP, HARDHAT_KEYS.CORE_ADMIN),
     });
     const ackCore = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(), name: 'CatAckCore', nodeRole: 'core', listenPort: 0, skills: [],
       dataDir: mkDataDir('ack'),
+      sharedMemoryPublicSnapshotStorage: TEST_SNAPSHOT_STORAGE,
       chainConfig: chainConfig(HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC1_ADMIN),
     });
     agents.push(publisher, ackCore);

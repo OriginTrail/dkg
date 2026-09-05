@@ -26,6 +26,8 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { ethers } from 'ethers';
 import { getSharedContext, HARDHAT_KEYS } from '../../../chain/test/evm-test-context.js';
+import { availableTestPort } from '../../../chain/test/test-port.js';
+import { TEST_SNAPSHOT_STORAGE } from '../../../../scripts/testing/snapshot-storage.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = join(__dirname, '..', '..', 'dist', 'cli.js');
@@ -41,14 +43,6 @@ export interface LiveDaemon {
   /** `http://127.0.0.1:<apiPort>` */
   base: string;
   exitCode?: number | null;
-}
-
-// Spread ports across runs so a crashed prior run's lingering socket can't
-// collide. The cli package runs vitest single-worker, so within-run collisions
-// aren't a concern; this only guards cross-run reuse.
-let portCounter = 0;
-function uniquePort(base: number): number {
-  return base + ((portCounter++ * 7) % 900);
 }
 
 export interface StartDaemonOpts {
@@ -77,8 +71,9 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
   }
   const authEnabled = opts.authEnabled ?? true;
   const home = await mkdtemp(join(tmpdir(), 'dkg-live-daemon-'));
-  const apiPort = uniquePort(21000);
-  const listenPort = uniquePort(21900);
+  const apiPort = await availableTestPort(0);
+  let listenPort = await availableTestPort(0);
+  while (listenPort === apiPort) listenPort = await availableTestPort(0);
   const defaultChain = Object.prototype.hasOwnProperty.call(opts.extraConfig ?? {}, 'chain')
     ? { type: 'mock' as const }
     : (() => {
@@ -100,6 +95,7 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
       chain: defaultChain,
       ...(opts.publisherEnabled ? { publisher: { enabled: true } } : {}),
       contextGraphs: [],
+      sharedMemoryPublicSnapshotStorage: TEST_SNAPSHOT_STORAGE,
       ...(opts.extraConfig ?? {}),
     }),
   );
@@ -150,45 +146,50 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
     daemon.exitCode = code;
   });
 
-  const deadlineLoops = Math.ceil((opts.readyTimeoutMs ?? 45_000) / 500);
-  for (let i = 0; i < deadlineLoops; i++) {
-    if (child.exitCode !== null) throw new Error(`Daemon exited early with code ${child.exitCode}`);
-    try {
-      const res = await fetch(`${daemon.base}/api/status`);
-      if (res.ok) break;
-    } catch {
-      /* not ready yet */
-    }
-    await sleep(500);
-    if (i === deadlineLoops - 1) throw new Error('Daemon did not become ready in time');
-  }
-
-  if (authEnabled) {
-    const raw = await readFile(join(home, 'auth.token'), 'utf-8');
-    daemon.token =
-      raw.split('\n').map((l) => l.trim()).find((l) => l.length > 0 && !l.startsWith('#')) ?? null;
-    if (!daemon.token) throw new Error('auth enabled but no token written');
-  }
-  if (opts.publisherEnabled) {
-    // `/api/status` becomes ready before the zero-delay publisher startup task.
-    // Poll its explicit readiness field rather than fabricating a business
-    // publish request whose validation order could change independently.
-    for (let i = 0; i < 60; i += 1) {
-      const res = await fetch(`${daemon.base}/api/status`, {
-        headers: daemon.token ? { Authorization: `Bearer ${daemon.token}` } : {},
-      });
-      const body = await res.json().catch(() => ({})) as {
-        asyncPublisher?: { available?: boolean; reason?: string };
-      };
-      if (body.asyncPublisher?.available === true) break;
-      if (body.asyncPublisher?.reason !== 'publisher_starting') {
-        throw new Error(`Async publisher failed readiness: ${body.asyncPublisher?.reason ?? res.status}`);
+  try {
+    const deadlineLoops = Math.ceil((opts.readyTimeoutMs ?? 45_000) / 500);
+    for (let i = 0; i < deadlineLoops; i++) {
+      if (child.exitCode !== null) throw new Error(`Daemon exited early with code ${child.exitCode}`);
+      try {
+        const res = await fetch(`${daemon.base}/api/status`, { signal: AbortSignal.timeout(1_000) });
+        if (res.ok) break;
+      } catch {
+        /* not ready yet */
       }
-      await sleep(100);
-      if (i === 59) throw new Error('Async publisher did not become ready in time');
+      await sleep(500);
+      if (i === deadlineLoops - 1) throw new Error('Daemon did not become ready in time');
     }
+
+    if (authEnabled) {
+      const raw = await readFile(join(home, 'auth.token'), 'utf-8');
+      daemon.token =
+        raw.split('\n').map((l) => l.trim()).find((l) => l.length > 0 && !l.startsWith('#')) ?? null;
+      if (!daemon.token) throw new Error('auth enabled but no token written');
+    }
+    if (opts.publisherEnabled) {
+      // `/api/status` becomes ready before the zero-delay publisher startup task.
+      // Poll its explicit readiness field rather than fabricating a business
+      // publish request whose validation order could change independently.
+      for (let i = 0; i < 60; i += 1) {
+        const res = await fetch(`${daemon.base}/api/status`, {
+          headers: daemon.token ? { Authorization: `Bearer ${daemon.token}` } : {},
+        });
+        const body = await res.json().catch(() => ({})) as {
+          asyncPublisher?: { available?: boolean; reason?: string };
+        };
+        if (body.asyncPublisher?.available === true) break;
+        if (body.asyncPublisher?.reason !== 'publisher_starting') {
+          throw new Error(`Async publisher failed readiness: ${body.asyncPublisher?.reason ?? res.status}`);
+        }
+        await sleep(100);
+        if (i === 59) throw new Error('Async publisher did not become ready in time');
+      }
+    }
+    return daemon;
+  } catch (error) {
+    await stopLiveDaemon(daemon);
+    throw error;
   }
-  return daemon;
 }
 
 /** SIGTERM the daemon, escalate to SIGKILL, and wipe its home dir. */
