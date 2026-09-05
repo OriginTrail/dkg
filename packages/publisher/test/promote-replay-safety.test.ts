@@ -6,11 +6,49 @@ import {
 
 import {
   classifyExactSwmGraphReplaceFailure,
+  createPromoteRetryableFailure,
   getPromoteReplaySafeErrorDiagnostic,
+  getPromoteRetryableFailureDiagnostic,
   isPromoteReplaySafeError,
+  isPromoteRetryableFailure,
 } from '../src/promote-replay-safety.js';
 
 describe('promote replay safety', () => {
+  it('preserves the generic retry disposition across Error serialization', () => {
+    const failure = createPromoteRetryableFailure(new Error('domain-specific secret'));
+
+    expect(isPromoteRetryableFailure(failure)).toBe(true);
+    expect(failure).toMatchObject({
+      name: 'PromoteRetryableFailureError',
+      code: 'PROMOTE_RETRYABLE_FAILURE',
+      cause: expect.any(Error),
+    });
+    expect(getPromoteRetryableFailureDiagnostic(failure)).toEqual({
+      name: 'PromoteRetryableFailureError',
+      code: 'PROMOTE_RETRYABLE_FAILURE',
+    });
+
+    const serialized = JSON.parse(JSON.stringify(failure)) as unknown;
+    expect(serialized).toEqual({
+      name: 'PromoteRetryableFailureError',
+      code: 'PROMOTE_RETRYABLE_FAILURE',
+    });
+    expect(isPromoteRetryableFailure(serialized)).toBe(true);
+    expect(getPromoteRetryableFailureDiagnostic(serialized)).toEqual({
+      name: 'PromoteRetryableFailureError',
+      code: 'PROMOTE_RETRYABLE_FAILURE',
+    });
+  });
+
+  it('fails closed for lookalike and hostile generic retry markers', () => {
+    expect(isPromoteRetryableFailure({
+      code: 'PROMOTE_RETRYABLE_FAILURE_LOOKALIKE',
+    })).toBe(false);
+    expect(isPromoteRetryableFailure(Object.defineProperty({}, 'code', {
+      get: () => { throw new Error('hostile getter'); },
+    }))).toBe(false);
+  });
+
   it('certifies only an indeterminate exact SWM graph replacement at the producer boundary', () => {
     const replaceFailure = new StoreOperationTimeoutError({
       backend: 'managed-oxigraph',

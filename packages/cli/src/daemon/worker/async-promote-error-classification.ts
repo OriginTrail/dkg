@@ -1,17 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
-  CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME,
-  isContextGraphAuthorityUnavailableMarker,
-} from '@origintrail-official/dkg-agent';
-import {
   isReadOnlyStoreOperation,
   isStoreOperationTimeoutError,
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
 import {
   isPromoteReplaySafeError,
+  isPromoteRetryableFailure,
   type PromoteFailureClassification,
 } from '@origintrail-official/dkg-publisher';
 
@@ -44,7 +40,6 @@ const SAFE_ERROR_NAMES = new Set([
   'CuratorUnconfirmedError',
   'CuratorRejectedError',
   'AssertionNotPersistedError',
-  CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME,
 ]);
 const SAFE_ERROR_CODES = new Set([
   'PAYLOAD_TOO_LARGE',
@@ -52,7 +47,6 @@ const SAFE_ERROR_CODES = new Set([
   'CURATOR_UNCONFIRMED',
   'CURATOR_REJECTED',
   'ASSERTION_NOT_PERSISTED',
-  CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
 ]);
 
 function untagPromoteMessage(message: string): string {
@@ -91,7 +85,7 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
   if (isPromoteReplaySafeError(err)) {
     return { classification: 'transient', retryable: true };
   }
-  if (isContextGraphAuthorityUnavailableMarker(err)) {
+  if (isPromoteRetryableFailure(err)) {
     return { classification: 'transient', retryable: true };
   }
 

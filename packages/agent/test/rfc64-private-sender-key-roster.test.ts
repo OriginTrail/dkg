@@ -118,11 +118,23 @@ describe('RFC-64 private Sender Key roster authority', () => {
         CG,
       )).resolves.toEqual({ kind: 'unavailable', reason, retryable });
 
-      const error = await WorkspaceCryptoMethods.prototype.resolveWorkspaceGossipSigningAgent.call(
+      const outcome = await WorkspaceCryptoMethods.prototype.resolveWorkspaceGossipSigningAgent.call(
         receiver as never,
         CG,
-      ).catch((cause: unknown) => cause);
-      expect(isContextGraphAuthorityUnavailableMarker(error), reason).toBe(retryable);
+      ).then(
+        value => ({ status: 'fulfilled' as const, value }),
+        error => ({ status: 'rejected' as const, error: error as unknown }),
+      );
+
+      expect(outcome.status, reason).toBe('rejected');
+      if (outcome.status !== 'rejected') continue;
+      expect(outcome.error, reason).toBeInstanceOf(Error);
+      expect(isContextGraphAuthorityUnavailableMarker(outcome.error), reason).toBe(retryable);
+      if (retryable) {
+        expect(outcome.error, reason).toBeInstanceOf(ContextGraphAuthorityUnavailableError);
+      } else {
+        expect(outcome.error, reason).not.toBeInstanceOf(ContextGraphAuthorityUnavailableError);
+      }
     }
   });
 
