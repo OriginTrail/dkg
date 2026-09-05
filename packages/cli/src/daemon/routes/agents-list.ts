@@ -40,20 +40,18 @@ import { createHash } from 'node:crypto';
 import { jsonResponse } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 
-export type AgentConnectionStatus = 'self' | 'connected' | 'disconnected';
+import {
+  AGENT_CONNECTION_STATUSES,
+  AGENT_LIST_WIRE_KEYS,
+  AGENT_LIST_WIRE_KEY_VALUES,
+  type AgentConnectionStatus,
+  type AgentListFilters,
+} from '@origintrail-official/dkg-core';
 
-const CONNECTION_STATUSES: readonly AgentConnectionStatus[] = [
-  'self',
-  'connected',
-  'disconnected',
-];
+export type { AgentConnectionStatus };
 
-export interface AgentsListFilters {
-  framework?: string;
-  skillType?: string;
-  connectionStatus?: AgentConnectionStatus;
-  local?: boolean;
-}
+/** The route's filter vocabulary IS the shared wire contract's. */
+export type AgentsListFilters = AgentListFilters;
 
 interface AgentsListCursor {
   readonly identityDigest: string;
@@ -72,14 +70,7 @@ export interface AgentsListQuery extends AgentsListFilters {
  * failure mode strict value validation exists to prevent, and the daemon's
  * clients are programs, for which a loud contract beats a lenient one.
  */
-const KNOWN_QUERY_KEYS = new Set([
-  'framework',
-  'skill_type',
-  'connectionStatus',
-  'local',
-  'limit',
-  'cursor',
-]);
+const KNOWN_QUERY_KEYS = new Set(AGENT_LIST_WIRE_KEY_VALUES);
 
 export type AgentsListQueryResult =
   | { ok: true; query: AgentsListQuery }
@@ -102,23 +93,23 @@ export function parseAgentsListQuery(searchParams: URLSearchParams): AgentsListQ
   const filters: AgentsListFilters = {};
 
   // Empty values retain the pre-GH#310 behavior: they mean "no filter".
-  const framework = searchParams.get('framework');
+  const framework = searchParams.get(AGENT_LIST_WIRE_KEYS.framework);
   if (framework) filters.framework = framework;
-  const skillType = searchParams.get('skill_type');
+  const skillType = searchParams.get(AGENT_LIST_WIRE_KEYS.skillType);
   if (skillType) filters.skillType = skillType;
 
-  const status = searchParams.get('connectionStatus');
+  const status = searchParams.get(AGENT_LIST_WIRE_KEYS.connectionStatus);
   if (status !== null) {
-    if (!(CONNECTION_STATUSES as readonly string[]).includes(status)) {
+    if (!(AGENT_CONNECTION_STATUSES as readonly string[]).includes(status)) {
       return {
         ok: false,
-        error: `"connectionStatus" must be one of ${CONNECTION_STATUSES.join(', ')}`,
+        error: `"connectionStatus" must be one of ${AGENT_CONNECTION_STATUSES.join(', ')}`,
       };
     }
     filters.connectionStatus = status as AgentConnectionStatus;
   }
 
-  const local = searchParams.get('local');
+  const local = searchParams.get(AGENT_LIST_WIRE_KEYS.local);
   if (local !== null) {
     if (local !== 'true' && local !== 'false') {
       return { ok: false, error: '"local" must be "true" or "false"' };
@@ -126,7 +117,7 @@ export function parseAgentsListQuery(searchParams: URLSearchParams): AgentsListQ
     filters.local = local === 'true';
   }
 
-  const rawLimit = searchParams.get('limit');
+  const rawLimit = searchParams.get(AGENT_LIST_WIRE_KEYS.limit);
   let limit: number | undefined;
   if (rawLimit !== null) {
     // Digits only — Number() would also admit '+5', '1e2' and '0x10', all
@@ -140,7 +131,7 @@ export function parseAgentsListQuery(searchParams: URLSearchParams): AgentsListQ
   const query: AgentsListQuery = { ...filters };
   if (limit !== undefined) query.limit = limit;
 
-  const cursor = searchParams.get('cursor');
+  const cursor = searchParams.get(AGENT_LIST_WIRE_KEYS.cursor);
   if (cursor !== null) {
     const decodedCursor = decodeCursor(cursor);
     if (decodedCursor === undefined) {
