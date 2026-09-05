@@ -790,6 +790,8 @@ function recordPublishOutcome(
 // symbol is module-private so a public `agent.update(...)` caller cannot opt
 // into the retry allowance and author protocol-reserved skolem IRIs.
 const INTERNAL_ROOTLESS_UPDATE_ORIGIN = Symbol('dkg-agent:internal-rootless-update-origin');
+// Only queued execution can reuse the share snapshot frozen in its job request.
+const INTERNAL_QUEUED_UPDATE_OPERATION = Symbol('dkg-agent:internal-queued-update-operation');
 
 // Serialize the full "validate current V2 head -> stage exact SWM replacement
 // -> submit update" sequence per KA. Without this, two concurrent HTTP calls
@@ -1989,6 +1991,10 @@ export class PublishMethods extends DKGAgentBase {
       privateMerkleRoot?: PublishOptions['privateMerkleRoot'];
       privateTripleCount?: PublishOptions['privateTripleCount'];
       [INTERNAL_ROOTLESS_UPDATE_ORIGIN]?: true;
+      [INTERNAL_QUEUED_UPDATE_OPERATION]?: Readonly<{
+        shareOperationId: string;
+        publisherPeerId: string;
+      }>;
       accessPolicy?: PublishOptions['accessPolicy'];
       allowedPeers?: PublishOptions['allowedPeers'];
     },
@@ -2113,26 +2119,26 @@ export class PublishMethods extends DKGAgentBase {
       throw new Error('Graph-scoped update private Merkle root does not match canonical private content');
     }
 
-    // Direct HTTP/SDK updates and finalized-assertion updates converge through
-    // the same trusted SWM boundary. Stage the immutable private version first
-    // (it cannot overwrite the previous commitment), then atomically replace
-    // the stable public SWM graph and remove historical checksum aliases before
-    // the publisher reloads it. Any failure remains retryable and cannot touch
-    // verifiable memory or the chain.
-    const graphManager = new GraphManager(this.store);
-    const updatePrivateStore = new PrivateContentStore(this.store, graphManager);
-    await updatePrivateStore.replaceKnowledgeAssetPrivateTriples(
-      contextGraphId,
-      updateScope,
-      canonicalParts.privateQuads,
-      opts?.subGraphName,
-    );
-    // Persist the exact update snapshot and monotonic SWM head before the
-    // publisher can cross the chain write-ahead boundary. If the process dies
+    // A queued UPDATE already owns a promoted immutable snapshot. Reuse it
+    // without rewriting either private content or the operation/head metadata
+    // that same-job retry validates. Direct updates still stage fresh content.
+    const queuedOperation = opts?.[INTERNAL_QUEUED_UPDATE_OPERATION];
+    if (!queuedOperation) {
+      const graphManager = new GraphManager(this.store);
+      const updatePrivateStore = new PrivateContentStore(this.store, graphManager);
+      await updatePrivateStore.replaceKnowledgeAssetPrivateTriples(
+        contextGraphId,
+        updateScope,
+        canonicalParts.privateQuads,
+        opts?.subGraphName,
+      );
+    }
+    // Stage a direct update, or validate the existing queued snapshot, before
+    // the publisher can cross the chain write-ahead boundary. If the process dies
     // after the transaction lands but before local VM materialization, chain
     // reconciliation can now resolve the staged version, counts, private
     // commitment, publisher, and immutable public payload without guessing.
-    const updateOperationId = ctx.operationId;
+    const updateOperationId = queuedOperation?.shareOperationId ?? ctx.operationId;
     const publisher = opts?.publisherOverride ?? this.publisher;
     const stagedOperation = await this.publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
       contextGraphId,
@@ -2144,10 +2150,15 @@ export class PublishMethods extends DKGAgentBase {
         ? { privateMerkleRoot: canonicalPrivateMerkleRoot }
         : {}),
       privateTripleCount: canonicalParts.privateQuads.length,
-      publisherPeerId: this.node.peerId.toString(),
+      publisherPeerId: queuedOperation?.publisherPeerId ?? this.node.peerId.toString(),
       agentAddress: updateScope.agentAddress,
       subGraphName: opts?.subGraphName,
       timestamp: new Date(),
+      ...(queuedOperation ? {
+        reuseExistingOperation: true,
+        accessPolicy: opts?.accessPolicy,
+        allowedPeers: opts?.allowedPeers,
+      } : {}),
     });
       // GH #842: thread the on-chain cgId so the publisher can promote the update
       // payload into the per-cgId partition the RS prover reads. Without it,
@@ -5428,6 +5439,10 @@ export class PublishMethods extends DKGAgentBase {
           ...(snapshotPrivateRoot ? { privateMerkleRoot: snapshotPrivateRoot } : {}),
           privateTripleCount: seal.privateTripleCount,
           [INTERNAL_ROOTLESS_UPDATE_ORIGIN]: true,
+          [INTERNAL_QUEUED_UPDATE_OPERATION]: {
+            shareOperationId: request.shareOperationId,
+            publisherPeerId: publishOptions.publisherPeerId ?? this.peerId,
+          },
           ...queuedKnowledgeAssetAccessEnvelope(request),
         },
       );
