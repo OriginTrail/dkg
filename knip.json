@@ -43,6 +43,9 @@
         ".solcover.js"
       ]
     },
+    "packages/random-sampling": {
+      "entry": ["src/index.ts", "src/proof-worker-entry.ts"]
+    },
     "packages/network-sim": {
       "entry": [
         "src/**/*.{ts,tsx}",

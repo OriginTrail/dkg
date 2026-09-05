@@ -1,6 +1,10 @@
 import { hasValidGraphScopedContent, isGraphPublishAccessPolicy, resolveGraphPublishAccess } from './graph-publish-envelope.js';
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
-import { deleteByPatternWithoutCount, GraphManager, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
+import {
+  deleteByPatternWithoutCount,
+  GraphManager,
+  tryReplaceGraphAtomically,
+} from '@origintrail-official/dkg-storage';
 import type { EventBus, StreamHandler, OperationContext } from '@origintrail-official/dkg-core';
 import {
   DKGEvent,
@@ -21,7 +25,7 @@ import {
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { validatePublishRequest } from './validation.js';
-import { computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
+import { computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
 import {
   generateTentativeMetadata,
   getTentativeStatusQuad,

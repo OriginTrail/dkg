@@ -25,14 +25,7 @@
  * entity from project B with a collision on this URI could be mixed
  * into project A's fetch. Codex tier-4g finding N10.
  */
-import {
-  ManifestP,
-  ManifestType,
-  ProjectManifestSchema,
-  manifestUri,
-  type ProjectManifest,
-  type TemplateEntity,
-} from './schema.js';
+import { ManifestP, ProjectManifestSchema, manifestUri, type ProjectManifest, type TemplateEntity } from './schema.js';
 import type { DkgClient, SparqlBinding } from '../client.js';
 import { bindingValue } from '../client.js';
 

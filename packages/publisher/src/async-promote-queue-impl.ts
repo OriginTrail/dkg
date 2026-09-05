@@ -64,7 +64,6 @@ import {
   promoteLaneConflictScope,
   promoteLaneScopesConflict,
   serializeJobRecord,
-  uniquenessKey,
   uniquenessLookupKeys,
   type PromoteUniquenessInput,
 } from './async-promote-queue-utils.js';

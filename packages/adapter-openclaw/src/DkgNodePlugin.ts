@@ -20,7 +20,6 @@ import {
   type GetView,
   createDkgPublisherExtension,
   type DkgPublisherExtension,
-  escapeDkgRdfLiteral,
   normalizeDkgPublisherQuads,
   resolveDkgHome,
   toEip55Checksum,
@@ -954,7 +953,6 @@ export class DkgNodePlugin {
     this.chatTurnWriterStateLayout = stateLayout;
     this.channelPlugin?.setChatTurnWriter(this.chatTurnWriter);
   }
-
 
   /**
    * Install the 5 W4a/W4b hooks via HookSurface, supporting multi-phase

@@ -29,7 +29,11 @@ import {
   isDkgContentHash,
   verifyDkgContentHash,
 } from "@origintrail-official/dkg-core";
-import { findReservedSubjectPrefix, isSkolemizedUri, listAssertionScopedGraphUris } from "@origintrail-official/dkg-publisher";
+import {
+  findReservedSubjectPrefix,
+  isSkolemizedUri,
+  listAssertionScopedGraphUris,
+} from "@origintrail-official/dkg-publisher";
 import { deleteByPatternWithoutCount } from "@origintrail-official/dkg-storage";
 import type { RequestContext } from "./context.js";
 import {
@@ -37,7 +41,6 @@ import {
   readBody,
   readBodyBuffer,
   safeParseJson,
-  safeDecodeURIComponent,
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
   normalizeContextGraphIdOrUri,

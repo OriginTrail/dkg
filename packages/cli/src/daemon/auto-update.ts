@@ -16,47 +16,18 @@
 // Live "last check" state is shared with `handleRequest`'s `/status`
 // endpoint via `daemonState` in `./state.js`.
 
-import { execSync, exec, execFile } from 'node:child_process';
+import { exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import {
-  existsSync, readFileSync, openSync, closeSync, unlinkSync,
-  writeFileSync as fsWriteFileSync,
-} from 'node:fs';
-import {
-  readFile, writeFile, mkdir, rm, chmod, copyFile, stat, rename, unlink,
-} from 'node:fs/promises';
-import { join, resolve, dirname } from 'node:path';
+
+import { join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
-import { randomUUID, createHash } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
-import {
-  dkgDir,
-  releasesDir,
-  activeSlot,
-  inactiveSlot,
-  swapSlot,
-  gitCommandArgs,
-  gitCommandEnv,
-  isStandaloneInstall,
-  slotEntryPoint,
-  CLI_NPM_PACKAGE,
-  type DkgConfig,
-  type ResolvedAutoUpdateConfig,
-} from '../config.js';
+
+import { gitCommandArgs, gitCommandEnv, CLI_NPM_PACKAGE, type ResolvedAutoUpdateConfig } from '../config.js';
 import type { DaemonNodeCommand } from '../daemon-entrypoint.js';
 import { resolveAutoUpdateGitRef, resolveAutoUpdateGitRefPlan, type AutoUpdateGitRefPlan } from '../auto-update-ref.js';
-import {
-  _autoUpdateIo,
-  DAEMON_EXIT_CODE_RESTART,
-  currentBundledMarkItDownAssetName,
-  carryForwardBundledMarkItDownBinary,
-} from './manifest.js';
+import { _autoUpdateIo, currentBundledMarkItDownAssetName, carryForwardBundledMarkItDownBinary } from './manifest.js';
 import { writeFileAtomic } from './fs-utils.js';
-import { daemonState } from './state.js';
-import {
-  expectedBundledMarkItDownBuildMetadata,
-  readCliPackageVersion,
-} from '../extraction/markitdown-bundle-metadata.js';
+
 import {
   FULL_BUILD_COMMAND,
   NODE_UI_PACKAGE_NAME_FALLBACKS,
