@@ -14,6 +14,40 @@ vi.mock('../src/ui/views/ContextGraphPrimerView.js', () => ({ ContextGraphPrimer
 vi.mock('../src/ui/views/ProjectView.js', () => { throw chunkFailure; });
 const { PanelCenter } = await import('../src/ui/components/Shell/PanelCenter.js');
 
+it.each((() => {
+  const named = Object.assign(new Error('named chunk failure'), { name: 'ChunkLoadError' });
+  const coded = Object.assign(new Error('coded chunk failure'), { code: 'CSS_CHUNK_LOAD_FAILED' });
+  const message = new TypeError('Importing a module script failed.');
+  const cause = new TypeError('Error loading dynamically imported module');
+  const nested = Object.assign(new Error('wrapped loader failure'), { cause });
+  return [
+    { mechanism: 'name', failure: named, reported: named },
+    { mechanism: 'code', failure: coded, reported: coded },
+    { mechanism: 'alternate message', failure: message, reported: message },
+    { mechanism: 'nested cause', failure: nested, reported: cause },
+  ];
+})())('recovers a chunk-load failure recognized by $mechanism', async ({ failure, reported }) => {
+  const report = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const FailingView = createRecoverableLazyView<Record<string, never>>(
+    async () => { throw failure; },
+    'test view',
+  );
+
+  try {
+    await act(async () => root.render(React.createElement(FailingView)));
+    await vi.waitFor(() => expect(container.querySelector('[role="alert"]')).not.toBeNull());
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Reload the page');
+    expect(report.mock.calls.some((call) => call.includes(reported))).toBe(true);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    report.mockRestore();
+  }
+});
+
 it('keeps the shell usable after chunk rejection and offers a full reload', async () => {
   const report = vi.spyOn(console, 'error').mockImplementation(() => {});
   const reload = vi.spyOn(window.location, 'reload').mockImplementation(() => {});

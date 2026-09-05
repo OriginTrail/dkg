@@ -6,7 +6,12 @@ import { useTabsStore } from '../src/ui/stores/tabs.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
-const loads = vi.hoisted(() => ({ project: 0, layer: 0, stack: 0 }));
+const loads = vi.hoisted(() => ({ agentHub: 0, project: 0, layer: 0, stack: 0 }));
+const agentHubGate = vi.hoisted(() => {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+});
 const projectGate = vi.hoisted(() => {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => { resolve = done; });
@@ -16,6 +21,11 @@ vi.mock('../src/ui/api.js', () => ({ authHeaders: () => ({}), fileUrl: () => '' 
 vi.mock('../src/ui/components/chat/MarkdownMessage.js', () => ({ MarkdownMessage: () => null }));
 vi.mock('../src/ui/views/DashboardView.js', () => ({ DashboardView: () => React.createElement('div', null, 'Dashboard ready') }));
 vi.mock('../src/ui/views/ContextGraphPrimerView.js', () => ({ ContextGraphPrimerView: () => null }));
+vi.mock('../src/ui/pages/AgentHub.js', async () => {
+  loads.agentHub++;
+  await agentHubGate.promise;
+  return { AgentHubPage: () => React.createElement('div', { id: 'agent-hub' }, 'Agent Hub ready') };
+});
 vi.mock('../src/ui/views/ProjectView.js', async () => {
   loads.project++;
   await projectGate.promise;
@@ -49,7 +59,14 @@ it('loads views on demand while preserving tab selection and mounted view state'
   try {
     await act(async () => root.render(React.createElement(PanelCenter)));
     expect(container.textContent).toContain('Dashboard ready');
-    expect(loads).toEqual({ project: 0, layer: 0, stack: 0 });
+    expect(loads).toEqual({ agentHub: 0, project: 0, layer: 0, stack: 0 });
+
+    await open('agent-hub');
+    expect(container.textContent).toContain('Loading agent hub...');
+    await vi.waitFor(() => expect(loads.agentHub).toBe(1));
+    await act(async () => agentHubGate.resolve());
+    expect(container.querySelector('#agent-hub')?.textContent).toBe('Agent Hub ready');
+    await act(async () => container.querySelector<HTMLButtonElement>('.v10-center-tab')!.click());
 
     await open('project:first');
     expect(container.textContent).toContain('Loading project...');
