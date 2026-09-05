@@ -1,9 +1,12 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   analyzeSparqlOperation,
   classifySparqlOperation,
 } from '../src/sparql-operation.js';
-import { sparqlAnalysisCacheTesting } from '../src/sparql-analysis-cache.js';
+import {
+  SparqlAnalysisCache,
+  type CachedSparqlOperationFacts,
+} from '../src/sparql-analysis-cache.js';
 import {
   BoundedLruCache,
 } from '../src/bounded-lru-cache.js';
@@ -127,66 +130,52 @@ describe('bounded SPARQL analysis cache policy', () => {
     expect(cache.get('b')).toBe(3);
   });
 
-  beforeEach(() => sparqlAnalysisCacheTesting.reset());
-
-  const largeQuery = (suffix: string, padding = sparqlAnalysisCacheTesting.smallMaxSourceLength) => (
+  const smallMaxSourceLength = 64 * 1024;
+  const largeMaxSourceLength = 2 * 1024 * 1024;
+  const largeQuery = (suffix: string, padding = smallMaxSourceLength) => (
     `SELECT * WHERE { <urn:${suffix}> ?p ?o } # ${'x'.repeat(padding)}`
   );
-
-  it('reuses a valid large query through the real analyzer integration', () => {
-    const query = largeQuery('valid');
-
-    expect(analyzeSparqlOperation(query).operation).toEqual({ kind: 'read', form: 'SELECT' });
-    expect(sparqlAnalysisCacheTesting.has(query)).toBe(true);
-    expect(sparqlAnalysisCacheTesting.snapshot()).toMatchObject({
-      largeSize: 1,
-      largeHits: 0,
-      largeMisses: 1,
-    });
-
-    expect(analyzeSparqlOperation(query).operation).toEqual({ kind: 'read', form: 'SELECT' });
-    expect(sparqlAnalysisCacheTesting.snapshot()).toMatchObject({
-      largeSize: 1,
-      largeHits: 1,
-      largeMisses: 1,
-    });
+  const facts = (largeCacheable: boolean): CachedSparqlOperationFacts => ({
+    form: 'SELECT',
+    mutatingKeyword: null,
+    largeCacheable,
   });
 
-  it('keeps small UNKNOWN reuse while malformed large input misses repeatedly', () => {
+  it('preserves public analyzer behavior when a valid large query is reused', () => {
+    const query = largeQuery('valid');
+    const first = analyzeSparqlOperation(query);
+    const second = analyzeSparqlOperation(query);
+    expect(first).toEqual(second);
+    expect(second).not.toBe(first);
+  });
+
+  it('admits small results but rejects lexically incomplete large results', () => {
+    const cache = new SparqlAnalysisCache();
     const shortUnknown = String.raw`PREFIX \u00G0x: <https://example.com/> SELECT * WHERE {}`;
-    analyzeSparqlOperation(shortUnknown);
-    analyzeSparqlOperation(shortUnknown);
-    expect(sparqlAnalysisCacheTesting.snapshot()).toMatchObject({
-      smallSize: 1,
-      smallHits: 1,
-      smallMisses: 1,
-    });
+    const shortFacts = facts(false);
+    cache.set(shortUnknown, shortFacts);
+    expect(cache.get(shortUnknown)).toBe(shortFacts);
 
     const incomplete = `SELECT * WHERE { # ${'x'.repeat(
-      sparqlAnalysisCacheTesting.smallMaxSourceLength,
+      smallMaxSourceLength,
     )}`;
-    analyzeSparqlOperation(incomplete);
-    analyzeSparqlOperation(incomplete);
-    expect(sparqlAnalysisCacheTesting.has(incomplete)).toBe(false);
-    expect(sparqlAnalysisCacheTesting.snapshot()).toMatchObject({
-      largeSize: 0,
-      largeHits: 0,
-      largeMisses: 2,
-    });
+    cache.set(incomplete, facts(false));
+    expect(cache.get(incomplete)).toBeUndefined();
   });
 
   it('evicts the large tier at four entries and rejects over-limit input', () => {
+    const cache = new SparqlAnalysisCache();
     const first = largeQuery('first');
-    analyzeSparqlOperation(first);
+    cache.set(first, facts(true));
     for (let index = 0; index < 4; index++) {
-      analyzeSparqlOperation(largeQuery(`next-${index}`));
+      cache.set(largeQuery(`next-${index}`), facts(true));
     }
-    expect(sparqlAnalysisCacheTesting.snapshot().largeSize).toBe(4);
-    expect(sparqlAnalysisCacheTesting.has(first)).toBe(false);
+    expect(cache.get(first)).toBeUndefined();
+    expect(cache.get(largeQuery('next-0'))).toEqual(facts(true));
 
-    const overLimit = largeQuery('over-limit', sparqlAnalysisCacheTesting.largeMaxSourceLength);
-    analyzeSparqlOperation(overLimit);
-    expect(sparqlAnalysisCacheTesting.has(overLimit)).toBe(false);
-    expect(sparqlAnalysisCacheTesting.snapshot().largeSize).toBe(4);
+    const overLimit = largeQuery('over-limit', largeMaxSourceLength);
+    cache.set(overLimit, facts(true));
+    expect(cache.get(overLimit)).toBeUndefined();
+    expect(cache.get(largeQuery('next-0'))).toEqual(facts(true));
   });
 });

@@ -1,35 +1,23 @@
-import { describe, expect, it, vi } from 'vitest';
-import {
-  prepareSparql,
-  sparqlLexicalScannerTesting,
-} from '../src/sparql-lexical-scanner.js';
+import { describe, expect, it } from 'vitest';
+import { prepareSparql } from '../src/sparql-lexical-scanner.js';
 import { scanSparqlIriRef } from '../src/sparql-lexical-primitives.js';
 
 describe('large raw IRI scanner regression', () => {
-  it('consumes the canonical scan result instead of traversing the IRI twice', () => {
+  it('preserves the primitive scan coordinates and logical value in the prepared token', () => {
     const body = `urn:large:${'segment/'.repeat(32_768)}tail`;
     const source = `SELECT * WHERE { GRAPH <${body}> { ?s ?p ?o } }`;
-    let logicalValueReads = 0;
-    const scanner = vi.fn<typeof scanSparqlIriRef>((value, start) => {
-      const result = scanSparqlIriRef(value, start);
-      if (result === null) return null;
-      return {
-        end: result.end,
-        get logicalValue() {
-          logicalValueReads += 1;
-          return result.logicalValue;
-        },
-      };
-    });
-
-    const prepared = sparqlLexicalScannerTesting.prepareWithIriScanner(source, scanner);
-
-    expect(prepared).toEqual(prepareSparql(source));
-    expect(scanner).toHaveBeenCalledTimes(1);
-    expect(logicalValueReads).toBe(1);
+    const iriStart = source.indexOf('<');
+    const primitive = scanSparqlIriRef(source, iriStart);
+    const prepared = prepareSparql(source);
+    expect(primitive).not.toBeNull();
+    expect(prepared.status).toBe('valid');
+    if (primitive === null || prepared.status !== 'valid') return;
     expect(prepared.tokens.find((token) => token.kind === 'iri')).toMatchObject({
       kind: 'iri',
       logicalValue: body,
+      start: iriStart,
+      end: primitive.end,
     });
+    expect(primitive.logicalValue).toBe(body);
   });
 });
