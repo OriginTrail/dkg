@@ -1,3 +1,4 @@
+import { ciJobRow, COVERAGE_JOBS } from '../ci-lanes.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -625,8 +626,8 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.equal(workflow.includes('github.event.pull_request.base.sha'), false);
   assert.match(workflow, /^  evm-node-test-artifacts:/m);
   assert.match(workflow, /^  evm-devnet-test-artifacts:/m);
-  assert.ok(workflow.includes('plan-vitest-shard.mjs chain "$SHARD_ID"'));
-  assert.ok(workflow.includes('plan-vitest-shard.mjs cli "$SHARD_ID"'));
+  assert.equal(ciJobRow('tornado-core', 1).runner, 'weighted');
+  assert.equal(ciJobRow('bura-cli', 0).runner, 'weighted');
   assert.equal(
     workflow.includes('@origintrail-official/dkg-chain exec vitest run --shard='),
     false,
@@ -638,10 +639,10 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.ok(workflow.includes('shard: [1, 2, 3, 4, 5, 6, 7]'));
   assert.ok(workflow.includes('playwright test --shard=${{ matrix.shard }}/7'));
 
+  assert.equal(COVERAGE_JOBS['tornado-core']['http-utils'], 1);
+  assert.equal(COVERAGE_JOBS['tornado-core']['rdf-utils'], 1);
+  assert.equal(ciJobRow('kosava-supporting').concurrency, 3);
   for (const [packageName, invocation] of [
-    ['@origintrail-official/dkg-http-utils', '--lane http-utils'],
-    ['@origintrail-official/dkg-rdf-utils', '--lane rdf-utils'],
-    ['supporting package group', 'run-vitest-lanes.mjs --job kosava-supporting --concurrency 3'],
     ['@origintrail-official/dkg-demo', '--filter @origintrail-official/dkg-demo'],
   ]) {
     assert.ok(workflow.includes(invocation), `${packageName} tests must stay in CI`);

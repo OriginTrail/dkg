@@ -4,6 +4,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
+import { validateSharedTestInputs } from '../lib/test-fixture-inputs.mjs';
 import { validateCiLaneWorkflow } from '../lib/ci-lane-workflow.mjs';
 import { EVM_TEST_SCOPES } from './evm-test-scopes.mjs';
 import { COVERAGE_JOBS } from '../lib/coverage-artifacts.mjs';
@@ -34,6 +35,7 @@ function secondaryCommand(file) {
   throw new Error(`secondary test needs an explicit runnable command: ${file}`);
 }
 try {
+  validateSharedTestInputs(root);
   validateCiLaneWorkflow(parseYaml(fs.readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8')));
   const packages = Object.values(COVERAGE_JOBS).flatMap(Object.keys).sort();
   const configured = fs.readdirSync(path.join(root, 'packages')).filter((name) => fs.existsSync(path.join(root, 'packages', name, 'vitest.config.ts'))).sort();

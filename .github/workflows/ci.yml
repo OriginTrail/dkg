@@ -185,6 +185,8 @@ jobs:
   # cache repeated builds on the same branch are fast.
   # ------------------------------------------------------------------
   build:
+    outputs:
+      test_matrices: ${{ steps.test-matrices.outputs.matrices }}
     name: Build packages
     needs: changes
     if: needs.changes.outputs.run_node == 'true'
@@ -194,6 +196,9 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+      - name: Emit canonical test matrices
+        id: test-matrices
+        run: node scripts/ci/emit-test-matrices.mjs
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -432,20 +437,7 @@ jobs:
     timeout-minutes: 10
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - label: core + RDF + storage
-            suite: core
-            shard: 0
-          - label: chain [1/3]
-            suite: chain
-            shard: 1
-          - label: chain [2/3]
-            suite: chain
-            shard: 2
-          - label: chain [3/3]
-            suite: chain
-            shard: 3
+      matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['tornado-core'] }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -466,17 +458,8 @@ jobs:
       - uses: ./.github/actions/restore-evm-node-test-artifacts
         if: matrix.suite == 'chain'
 
-      - name: Core, RDF utilities, and storage tests
-        if: matrix.suite == 'core'
-        run: |
-          node scripts/ci/run-vitest-junit.mjs \
-            --lane core
-          node scripts/ci/run-vitest-junit.mjs \
-            --lane http-utils
-          node scripts/ci/run-vitest-junit.mjs \
-            --lane rdf-utils
-          node scripts/ci/run-vitest-junit.mjs \
-            --lane storage
+      - name: Run canonical test row
+        run: node scripts/ci/run-vitest-lanes.mjs --job ${{ github.job }} --row ${{ matrix.row }}
       - name: Authority mutation pilot
         if: matrix.suite == 'core'
         run: pnpm test:mutation
@@ -488,18 +471,6 @@ jobs:
           path: reports/mutation/
           retention-days: 14
           if-no-files-found: warn
-      - name: "Chain tests (shard ${{ matrix.shard }}/3)"
-        if: matrix.suite == 'chain'
-        env:
-          SHARD_ID: ${{ matrix.shard }}
-        run: |
-          set -euo pipefail
-          mapfile -t SHARD_FILES < <(node scripts/ci/plan-vitest-shard.mjs chain "$SHARD_ID")
-          test "${#SHARD_FILES[@]}" -gt 0
-          node scripts/ci/run-vitest-junit.mjs \
-            --lane chain --shard "${SHARD_ID}" \
-            -- "${SHARD_FILES[@]}"
-
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit
@@ -618,15 +589,14 @@ jobs:
   tornado-publisher:
     env:
       DKG_CI_COVERAGE: '1'
-    name: "Tornado: publisher [${{ matrix.shard }}/4]"
+    name: "Tornado: publisher [${{ matrix.shard }}/${{ matrix.shards }}]"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_publisher == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
+      matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['tornado-publisher'] }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -647,16 +617,13 @@ jobs:
       # Publisher globalSetup deploys the same Hardhat contracts as chain/CLI.
       # Restore the shared compiler outputs before starting its isolated node.
       - uses: ./.github/actions/restore-evm-node-test-artifacts
-      - name: "Publisher tests (shard ${{ matrix.shard }}/4)"
-        run: |
-          node scripts/ci/run-vitest-junit.mjs \
-            --lane publisher --shard ${{ matrix.shard }} \
-            -- --shard=${{ matrix.shard }}/4
+      - name: "Publisher tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
+        run: node scripts/ci/run-vitest-lanes.mjs --job ${{ github.job }} --row ${{ matrix.row }}
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit
         with:
-          artifact-name: vitest-publisher-${{ matrix.shard }}-of-4
+          artifact-name: vitest-publisher-${{ matrix.shard }}-of-${{ matrix.shards }}
 
   # ------------------------------------------------------------------
   # Agent tests: four real-Hardhat shards and six hermetic shards using the
@@ -669,15 +636,14 @@ jobs:
   tornado-agent:
     env:
       DKG_CI_COVERAGE: '1'
-    name: "Tornado: agent [${{ matrix.shard }}/10]"
+    name: "Tornado: agent [${{ matrix.shard }}/${{ matrix.shards }}]"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_agent == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+      matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['tornado-agent'] }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -696,30 +662,19 @@ jobs:
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
       - uses: ./.github/actions/restore-evm-node-test-artifacts
-      - name: "Agent tests (shard ${{ matrix.shard }}/10)"
-        working-directory: packages/agent
-        run: |
-          set -euo pipefail
-          SHARD_CONFIG="$(node scripts/ci-shard-agent.mjs ${{ matrix.shard }} 10 --config)"
-          mapfile -t SHARD_FILES < <(node scripts/ci-shard-agent.mjs ${{ matrix.shard }} 10)
-          test "${#SHARD_FILES[@]}" -gt 0
-          echo "::group::Agent shard ${{ matrix.shard }}/10 — ${#SHARD_FILES[@]} files"
-          printf '  %s\n' "${SHARD_FILES[@]}"
-          echo "::endgroup::"
-          node ../../scripts/ci/run-vitest-junit.mjs \
-            --lane agent --shard ${{ matrix.shard }} \
-            -- --config "${SHARD_CONFIG}" "${SHARD_FILES[@]}"
+      - name: "Agent tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
+        run: node scripts/ci/run-vitest-lanes.mjs --job ${{ github.job }} --row ${{ matrix.row }}
       - name: "RFC-64 rollout transition certificate (Oxigraph)"
-        if: matrix.shard == 10
+        if: matrix.gate1
         run: node --import tsx --test devnet/rfc64-gate1-public-open/rollout-store-fixture.test.ts devnet/rfc64-gate1-public-open/rollout-transition.test.ts
       - name: "RFC-64 Gate 1 live evidence generate and verify (Oxigraph)"
-        if: matrix.shard == 10
+        if: matrix.gate1
         run: pnpm test:gate1:rfc64-public-open-harness
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit
         with:
-          artifact-name: vitest-agent-${{ matrix.shard }}-of-10
+          artifact-name: vitest-agent-${{ matrix.shard }}-of-${{ matrix.shards }}
 
   # ------------------------------------------------------------------
   # Bura lane — `cli` is the heaviest BURA package (CLI daemon, HTTP API,
@@ -735,15 +690,14 @@ jobs:
   bura-cli:
     env:
       DKG_CI_COVERAGE: '1'
-    name: "Bura: cli [${{ matrix.shard }}/4]"
+    name: "Bura: cli [${{ matrix.shard }}/${{ matrix.shards }}]"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.bura_cli == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
+      matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['bura-cli'] }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -765,21 +719,13 @@ jobs:
       - name: "Verify provisioned Blazegraph image contract"
         if: matrix.shard == 1
         run: bash scripts/ci/verify-blazegraph-image-contract.sh
-      - name: "CLI tests (shard ${{ matrix.shard }}/4)"
-        env:
-          SHARD_ID: ${{ matrix.shard }}
-        run: |
-          set -euo pipefail
-          mapfile -t SHARD_FILES < <(node scripts/ci/plan-vitest-shard.mjs cli "$SHARD_ID")
-          test "${#SHARD_FILES[@]}" -gt 0
-          node scripts/ci/run-vitest-junit.mjs \
-            --lane cli --shard "${SHARD_ID}" \
-            -- "${SHARD_FILES[@]}"
+      - name: "CLI tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
+        run: node scripts/ci/run-vitest-lanes.mjs --job ${{ github.job }} --row ${{ matrix.row }}
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit
         with:
-          artifact-name: vitest-cli-${{ matrix.shard }}-of-4
+          artifact-name: vitest-cli-${{ matrix.shard }}-of-${{ matrix.shards }}
 
   bura-blazegraph-arm64:
     name: "Bura: Blazegraph arm64 image (native)"
@@ -802,6 +748,9 @@ jobs:
     if: needs.changes.outputs.bura_query == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['bura-supporting'] }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -820,12 +769,12 @@ jobs:
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
       - name: "Query tests"
-        run: node scripts/ci/run-vitest-junit.mjs --lane query
+        run: node scripts/ci/run-vitest-lanes.mjs --job ${{ github.job }} --row ${{ matrix.row }}
       - name: Upload Vitest JUnit and coverage reports
         if: always()
         uses: ./.github/actions/upload-vitest-junit
         with:
-          artifact-name: vitest-bura-supporting
+          artifact-name: vitest-bura-supporting-${{ matrix.row }}
 
   # ------------------------------------------------------------------
   # Kosava lanes — `node-ui` is heavy (React Testing Library, happy-dom)
@@ -844,6 +793,9 @@ jobs:
     if: needs.changes.outputs.kosava_node_ui == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['kosava-node-ui'] }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -864,12 +816,12 @@ jobs:
       - name: "node-ui production build (896 MB heap budget)"
         run: pnpm --filter @origintrail-official/dkg-node-ui run build:ui
       - name: "node-ui tests"
-        run: node scripts/ci/run-vitest-junit.mjs --lane node-ui
+        run: node scripts/ci/run-vitest-lanes.mjs --job ${{ github.job }} --row ${{ matrix.row }}
       - name: Upload Vitest JUnit and coverage reports
         if: always()
         uses: ./.github/actions/upload-vitest-junit
         with:
-          artifact-name: vitest-kosava-node-ui
+          artifact-name: vitest-kosava-node-ui-${{ matrix.row }}
 
   # node-ui Playwright e2e — REAL NODE, NO MOCKS. Each shard boots its OWN
   # isolated 4-node devnet (Hardhat + four DKG daemons) via Playwright's
@@ -971,6 +923,9 @@ jobs:
     if: needs.changes.outputs.kosava_supporting == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['kosava-supporting'] }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -1012,7 +967,7 @@ jobs:
           DKG_CI_COVERAGE: '1'
         run: |
           status=0
-          node scripts/ci/run-vitest-lanes.mjs --job kosava-supporting --concurrency 3 || status=$?
+          node scripts/ci/run-vitest-lanes.mjs --job ${{ github.job }} --row ${{ matrix.row }} || status=$?
           pnpm --filter @origintrail-official/dkg-adapter-hermes run test:py || status=$?
           pnpm --filter @origintrail-official/dkg-demo run test || status=$?
           exit "$status"
@@ -1020,7 +975,7 @@ jobs:
         if: always()
         uses: ./.github/actions/upload-vitest-junit
         with:
-          artifact-name: vitest-kosava-supporting
+          artifact-name: vitest-kosava-supporting-${{ matrix.row }}
 
   # ------------------------------------------------------------------
   # Hardhat-backed Kosava lane — `random-sampling` and `kafka-plugin`.
@@ -1043,6 +998,9 @@ jobs:
     if: needs.changes.outputs.kosava_hardhat_plugins == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['kosava-hardhat-plugins'] }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -1061,15 +1019,13 @@ jobs:
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
       - uses: ./.github/actions/restore-evm-node-test-artifacts
-      - name: "random-sampling tests (real Hardhat, no mocks)"
-        run: node scripts/ci/run-vitest-junit.mjs --lane random-sampling
-      - name: "kafka-plugin tests (real Hardhat, no mocks)"
-        run: node scripts/ci/run-vitest-junit.mjs --lane kafka-plugin
+      - name: Hardhat plugin tests
+        run: node scripts/ci/run-vitest-lanes.mjs --job ${{ github.job }} --row ${{ matrix.row }}
       - name: Upload Vitest JUnit and coverage reports
         if: always()
         uses: ./.github/actions/upload-vitest-junit
         with:
-          artifact-name: vitest-kosava-hardhat-plugins
+          artifact-name: vitest-kosava-hardhat-plugins-${{ matrix.row }}
 
   # ------------------------------------------------------------------
   # ABI freshness gate — guards the contract `auto-update.ts` deliberately

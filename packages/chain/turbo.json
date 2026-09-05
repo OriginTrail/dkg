@@ -1,0 +1,23 @@
+{
+  "extends": [
+    "//"
+  ],
+  "tasks": {
+    "test": {
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/scripts/lib/hardhat-test-env.mjs"
+      ]
+    },
+    "test:coverage": {
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/vitest.coverage.ts",
+        "$TURBO_ROOT$/scripts/lib/coverage-scope.mjs",
+        "$TURBO_ROOT$/scripts/ci/check-coverage.mjs",
+        "$TURBO_ROOT$/test-policy/coverage-baselines.json",
+        "$TURBO_ROOT$/scripts/lib/hardhat-test-env.mjs"
+      ]
+    }
+  }
+}

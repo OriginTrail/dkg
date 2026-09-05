@@ -16,6 +16,7 @@ const D1_ARCHIVE_TREE = /(^|\/)(?:test|tests)\/archive(?:\/|$)/;
 const DIRECT_BASES = new Set(['describe', 'it', 'suite', 'test']);
 const DIRECT_MEMBERS = new Set(['skip', 'todo', 'skipIf', 'runIf']);
 const CONDITIONAL_MEMBERS = new Set(['skipIf', 'runIf']);
+const FOCUSED_ALIASES = new Set(['fit', 'fdescribe', 'ftest']);
 const LEGACY_ALIASES = new Set(['xdescribe', 'xit', 'xtest']);
 const TICKET = /^(?:#\d+|https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/issues\/\d+|[A-Z][A-Z0-9]*-\d+)$/i;
 const AST_PRINTER = ts.createPrinter({ removeComments: true });
@@ -234,6 +235,7 @@ function sourceComments(source, sourceFile, filePath) {
     const end = scanner.getTextPos();
     comments.push({
       text: source.slice(start, end),
+      line: sourceFile.getLineAndCharacterOfPosition(start).line + 1,
       endLine: sourceFile.getLineAndCharacterOfPosition(end - 1).line + 1,
     });
   }
@@ -277,7 +279,7 @@ export function isScannableFile(filePath) {
   return isD1ScannableFile(filePath) || isD2ScannableFile(filePath);
 }
 
-export function analyzeD1Source(source, filePath) {
+export function analyzeTestSource(source, filePath, { now = new Date(), d1 = isD1ScannableFile(filePath), d2 = isD2ScannableFile(filePath) } = {}) {
   const sourceFile = ts.createSourceFile(
     filePath,
     source,
@@ -286,8 +288,16 @@ export function analyzeD1Source(source, filePath) {
     scriptKindFor(filePath),
   );
   const imports = new Map();
+  const importedNames = new Set();
   const namespaces = new Set();
   for (const statement of sourceFile.statements) {
+    if (ts.isImportDeclaration(statement)) {
+      const clause = statement.importClause;
+      if (clause?.name) importedNames.add(clause.name.text);
+      const bindings = clause?.namedBindings;
+      if (bindings && ts.isNamespaceImport(bindings)) importedNames.add(bindings.name.text);
+      if (bindings && ts.isNamedImports(bindings)) for (const item of bindings.elements) importedNames.add(item.name.text);
+    }
     if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier) ||
       !['vitest', '@playwright/test', 'node:test', 'bun:test'].includes(statement.moduleSpecifier.text)) continue;
     const clause = statement.importClause;
@@ -296,7 +306,7 @@ export function analyzeD1Source(source, filePath) {
     if (bindings && ts.isNamespaceImport(bindings)) namespaces.add(bindings.name.text);
     if (bindings && ts.isNamedImports(bindings)) for (const item of bindings.elements) {
       const original = item.propertyName?.text ?? item.name.text;
-      if (DIRECT_BASES.has(original) || LEGACY_ALIASES.has(original)) imports.set(item.name.text, original);
+      if (DIRECT_BASES.has(original) || LEGACY_ALIASES.has(original) || FOCUSED_ALIASES.has(original)) imports.set(item.name.text, original);
     }
   }
   const member = (node) => ts.isPropertyAccessExpression(node) ? node.name.text
@@ -310,17 +320,20 @@ export function analyzeD1Source(source, filePath) {
   const testBase = (node) => {
     if (ts.isIdentifier(node)) {
       if (imports.has(node.text)) return shadowed(node) ? undefined : imports.get(node.text);
-      return DIRECT_BASES.has(node.text) || LEGACY_ALIASES.has(node.text) ? node.text : undefined;
+      if (importedNames.has(node.text)) return undefined;
+      return (DIRECT_BASES.has(node.text) || LEGACY_ALIASES.has(node.text) || FOCUSED_ALIASES.has(node.text)) && !shadowed(node) ? node.text : undefined;
     }
     if (ts.isCallExpression(node)) return testBase(node.expression);
     if (member(node)) {
-      if (ts.isIdentifier(node.expression) && namespaces.has(node.expression.text) && !shadowed(node.expression) && DIRECT_BASES.has(member(node))) return member(node);
-      if (['concurrent', 'sequential', 'each'].includes(member(node))) return testBase(node.expression);
+      if (ts.isIdentifier(node.expression) && namespaces.has(node.expression.text) && !shadowed(node.expression) && (DIRECT_BASES.has(member(node)) || LEGACY_ALIASES.has(member(node)) || FOCUSED_ALIASES.has(member(node)))) return member(node);
+      if (['concurrent', 'sequential', 'each', 'only', 'skip', 'skipIf', 'runIf'].includes(member(node))) return testBase(node.expression);
     }
     return undefined;
   };
   const comments = sourceComments(source, sourceFile, filePath);
   const findings = [];
+  const focused = [];
+  const invalidExceptions = invalidExceptionLines(comments, now);
 
   const addFinding = (node, api, pattern, titleNode, fallbackNode = node) => {
     const location = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
@@ -335,7 +348,7 @@ export function analyzeD1Source(source, filePath) {
   };
 
   const visit = (node) => {
-    if (ts.isCallExpression(node)) {
+    if (d1 && ts.isCallExpression(node)) {
       const callee = node.expression;
       if (ts.isIdentifier(callee) && LEGACY_ALIASES.has(testBase(callee))) {
         addFinding(
@@ -367,34 +380,18 @@ export function analyzeD1Source(source, filePath) {
       }
     }
     if (
-      member(node) === 'skip'
+      d1 && member(node) === 'skip'
       && DIRECT_BASES.has(testBase(node.expression))
       && !(ts.isCallExpression(node.parent) && node.parent.expression === node)
     ) {
       const api = `${testBase(node.expression)}.${member(node)}`;
       addFinding(node, api, `reference:${api}`);
     }
-    ts.forEachChild(node, visit);
-  };
-
-  visit(sourceFile);
-  return findings.filter((finding) => !isAllowed(finding, comments));
-}
-
-export function analyzeD2Source(source, filePath) {
-  if (!isD2ScannableFile(filePath)) return [];
-  const sourceFile = ts.createSourceFile(
-    filePath,
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    scriptKindFor(filePath),
-  );
-  const comments = sourceComments(source, sourceFile, filePath);
-  const findings = [];
-
-  const visit = (node) => {
-    if (
+    if ((member(node) === 'only' && DIRECT_BASES.has(testBase(node.expression))) ||
+        (ts.isCallExpression(node) && FOCUSED_ALIASES.has(testBase(node.expression)))) {
+      focused.push(sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1);
+    }
+    if (d2 &&
       ts.isPropertyAssignment(node)
       && propertyNameText(node.name) === 'test'
       && ts.isObjectLiteralExpression(node.initializer)
@@ -428,6 +425,25 @@ export function analyzeD2Source(source, filePath) {
   };
 
   visit(sourceFile);
-  return findings.filter((finding) => !isAllowed(finding, comments));
+  return { disabled: findings.filter((finding) => !isAllowed(finding, comments)), focused: [...new Set(focused)], invalidExceptions };
 }
 
+// Compatibility entry points for the reviewed D1/D2 delta and fingerprint API.
+export function analyzeD1Source(source, filePath) {
+  return analyzeTestSource(source, filePath, { d1: true, d2: false }).disabled;
+}
+export function analyzeD2Source(source, filePath) {
+  return analyzeTestSource(source, filePath, { d1: false }).disabled;
+}
+
+function invalidExceptionLines(comments, now) {
+  return comments.filter(({ text }) => {
+    if (!text.includes('test-disable-allow:')) return false;
+    const expiry = /\bexpires=(\d{4}-\d{2}-\d{2})\b/.exec(text)?.[1];
+    const owner = /\bowner=([\w@.-]+)/.exec(text)?.[1];
+    const lane = /\blane=([\w:-]+)/.exec(text)?.[1];
+    const date = expiry ? new Date(`${expiry}T23:59:59Z`) : new Date(NaN);
+    const remaining = date.valueOf() - now.valueOf();
+    return !owner || !lane || !Number.isFinite(remaining) || date.toISOString().slice(0, 10) !== expiry || remaining < 0 || remaining > 31 * 86_400_000;
+  }).map(({ line }) => line);
+}

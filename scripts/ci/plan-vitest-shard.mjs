@@ -409,7 +409,7 @@ function runCli() {
   ) {
     console.error(
       'Usage: node scripts/ci/plan-vitest-shard.mjs <cli|chain> <shard>; '
-      + 'CLI has 4 shards and chain has 3 shards.',
+      + `CLI has ${PACKAGE_SHARD_COUNTS.cli} shards and chain has ${PACKAGE_SHARD_COUNTS.chain} shards.`,
     );
     process.exitCode = 2;
     return;

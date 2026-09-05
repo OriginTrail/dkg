@@ -1,18 +1,15 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { analyzeD1Source, analyzeD2Source, isD1ScannableFile, isD2ScannableFile, isScannableFile } from './disabled-test-scanner.mjs';
+import { analyzeTestSource, analyzeD1Source, analyzeD2Source, isD1ScannableFile, isD2ScannableFile, isScannableFile } from './disabled-test-scanner.mjs';
+
+export function auditTestFiles(filePaths, options) {
+  return filePaths.filter(isScannableFile).map((filePath) => ({
+    filePath, ...analyzeTestSource(readFileSync(filePath, 'utf8'), filePath, options),
+  }));
+}
 
 export function auditFiles(filePaths) {
-  return filePaths.flatMap((filePath) => {
-    const scansD1 = isD1ScannableFile(filePath);
-    const scansD2 = isD2ScannableFile(filePath);
-    if (!scansD1 && !scansD2) return [];
-    const source = readFileSync(filePath, 'utf8');
-    return [
-      ...(scansD1 ? analyzeD1Source(source, filePath) : []),
-      ...(scansD2 ? analyzeD2Source(source, filePath) : []),
-    ];
-  });
+  return auditTestFiles(filePaths).flatMap(({ disabled }) => disabled);
 }
 
 function git(args, cwd = process.cwd()) {

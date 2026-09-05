@@ -4,17 +4,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { inspectJunitResults } from '../lib/junit-results.mjs';
 import { coverageReceipt } from '../lib/coverage-artifacts.mjs';
 
 const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(SCRIPT_DIRECTORY, '../..');
 
-function repositoryPath(relativePath, optionName) {
+function repositoryPath(relativePath, optionName, root) {
   if (!relativePath || path.isAbsolute(relativePath)) {
     throw new Error(`${optionName} must be a repository-relative path`);
   }
-  const resolved = path.resolve(REPO_ROOT, relativePath);
-  const relative = path.relative(REPO_ROOT, resolved);
+  const resolved = path.resolve(root, relativePath);
+  const relative = path.relative(root, resolved);
   if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
     throw new Error(`${optionName} must stay inside the repository`);
   }
@@ -44,7 +45,7 @@ function parseArguments(argv) {
 
 export function buildVitestJunitInvocation(
   argv,
-  { readPackageJson = (filePath) => JSON.parse(fs.readFileSync(filePath, 'utf8')), coverage = process.env.DKG_CI_COVERAGE === '1' } = {},
+  { readPackageJson = (filePath) => JSON.parse(fs.readFileSync(filePath, 'utf8')), coverage = process.env.DKG_CI_COVERAGE === '1', repoRoot = REPO_ROOT } = {},
 ) {
   const { laneName, shard, testArguments } = parseArguments(argv);
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(laneName)) {
@@ -55,7 +56,7 @@ export function buildVitestJunitInvocation(
   }
 
   const packageRelativePath = `packages/${laneName}`;
-  const packageDirectory = repositoryPath(packageRelativePath, 'lane package directory');
+  const packageDirectory = repositoryPath(packageRelativePath, 'lane package directory', repoRoot);
   const packageJsonPath = path.join(packageDirectory, 'package.json');
   if (!fs.existsSync(packageJsonPath)) {
     throw new Error(`${packageRelativePath}/package.json does not exist`);
@@ -94,10 +95,10 @@ export function buildVitestJunitInvocation(
   };
 }
 
-export function runVitestJunit(argv, { spawnProcess = spawnSync } = {}) {
+export function runVitestJunit(argv, { spawnProcess = spawnSync, repoRoot = REPO_ROOT, ...options } = {}) {
   let invocation;
   try {
-    invocation = buildVitestJunitInvocation(argv);
+    invocation = buildVitestJunitInvocation(argv, { ...options, repoRoot });
   } catch (error) {
     console.error(`vitest-junit: ${error.message}`);
     return 2;
@@ -107,9 +108,9 @@ export function runVitestJunit(argv, { spawnProcess = spawnSync } = {}) {
   fs.rmSync(invocation.outputPath, { force: true });
   const receiptPath = invocation.outputPath.replace(/\.xml$/, '.coverage.json');
   fs.rmSync(receiptPath, { force: true });
-  if (invocation.coverage) fs.rmSync(path.join(REPO_ROOT, 'packages', invocation.laneName, 'coverage'), { recursive: true, force: true });
+  if (invocation.coverage) fs.rmSync(path.join(repoRoot, 'packages', invocation.laneName, 'coverage'), { recursive: true, force: true });
   const result = spawnProcess(invocation.command, invocation.args, {
-    cwd: REPO_ROOT,
+    cwd: repoRoot,
     env: process.env,
     stdio: 'inherit',
   });
@@ -126,9 +127,10 @@ export function runVitestJunit(argv, { spawnProcess = spawnSync } = {}) {
   try {
     const report = fs.statSync(invocation.outputPath);
     if (!report.isFile() || report.size === 0) throw new Error('report is empty');
-    if (invocation.coverage) fs.writeFileSync(receiptPath, JSON.stringify(coverageReceipt(REPO_ROOT, invocation.laneName, invocation.shard)));
+    const execution = inspectJunitResults(fs.readFileSync(invocation.outputPath, 'utf8'));
+    if (invocation.coverage) fs.writeFileSync(receiptPath, JSON.stringify(coverageReceipt(repoRoot, invocation.laneName, invocation.shard, execution)));
   } catch (error) {
-    console.error(`vitest-junit: successful test command did not create ${invocation.output}: ${error.message}`);
+    console.error(`vitest-junit: invalid results for ${invocation.output}: ${error.message}`);
     return 1;
   }
   return 0;
