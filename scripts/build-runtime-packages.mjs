@@ -1,11 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import {
-  RUNTIME_CLI_PACKAGE,
-  runtimeCliPrerequisiteBuildPnpmArgs,
-  runtimeDependentBuildPnpmArgs,
-} from './lib/runtime-build-plan.mjs';
+import { runtimeBuildPhases } from './lib/runtime-build-plan.mjs';
 import { runBuildCommand } from './lib/run-build-command.mjs';
 
 export function runRuntimePackageBuild({
@@ -15,39 +11,20 @@ export function runRuntimePackageBuild({
   env = process.env,
   reportError = (message) => console.error(message),
 } = {}) {
-  const prerequisiteStatus = runBuildCommand(
-    'pnpm',
-    runtimeCliPrerequisiteBuildPnpmArgs(['run', 'build', ...extraArgs]),
-    {
-      spawn,
-      platform,
-      env,
-      reportError,
-      label: 'CLI prerequisite build',
-    },
-  );
-  if (prerequisiteStatus !== 0) return prerequisiteStatus;
-
-  const cliStatus = runBuildCommand('pnpm', ['--filter', RUNTIME_CLI_PACKAGE, 'run', 'build:prepared'], {
-    spawn,
-    platform,
-    reportError,
-    env,
-    label: 'prepared CLI build',
+  const phases = runtimeBuildPhases({
+    runtimeOperation: ['run', 'build', ...extraArgs],
   });
-  if (cliStatus !== 0) return cliStatus;
-
-  return runBuildCommand(
-    'pnpm',
-    runtimeDependentBuildPnpmArgs(['run', 'build', ...extraArgs]),
-    {
+  for (const phase of phases) {
+    const status = runBuildCommand('pnpm', phase.args, {
       spawn,
       platform,
-      reportError,
       env,
-      label: 'runtime dependent build',
-    },
-  );
+      reportError,
+      label: phase.label,
+    });
+    if (status !== 0) return status;
+  }
+  return 0;
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;

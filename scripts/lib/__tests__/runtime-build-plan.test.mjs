@@ -12,8 +12,7 @@ import {
 import {
   RUNTIME_BUILD_EXCLUSIONS,
   RUNTIME_CLI_PACKAGE,
-  runtimeCliPrerequisiteBuildPnpmArgs,
-  runtimeDependentBuildPnpmArgs,
+  runtimeBuildPhases,
   runtimeBuildPnpmArgs,
 } from '../runtime-build-plan.mjs';
 
@@ -67,23 +66,14 @@ test('runtime build entrypoint invokes pnpm with the checked plan and forwards e
   });
 
   assert.equal(status, 0);
-  assert.deepEqual(invocations, [
-    {
-      command: 'pnpm',
-      args: runtimeCliPrerequisiteBuildPnpmArgs(['run', 'build', '--force', '--log-order=stream']),
-      options: { stdio: 'inherit', shell: false, env: { PATH: '/mock-bin' } },
-    },
-    {
-      command: 'pnpm',
-      args: ['--filter', RUNTIME_CLI_PACKAGE, 'run', 'build:prepared'],
-      options: { stdio: 'inherit', shell: false, env: { PATH: '/mock-bin' } },
-    },
-    {
-      command: 'pnpm',
-      args: runtimeDependentBuildPnpmArgs(['run', 'build', '--force', '--log-order=stream']),
-      options: { stdio: 'inherit', shell: false, env: { PATH: '/mock-bin' } },
-    },
-  ]);
+  const phases = runtimeBuildPhases({
+    runtimeOperation: ['run', 'build', '--force', '--log-order=stream'],
+  });
+  assert.deepEqual(invocations, phases.map((phase) => ({
+    command: 'pnpm',
+    args: phase.args,
+    options: { stdio: 'inherit', shell: false, env: { PATH: '/mock-bin' } },
+  })));
 });
 
 test('CLI exposes explicit standalone and prepared build paths', () => {
@@ -143,26 +133,18 @@ test('runtime build entrypoint propagates process failures', () => {
   assert.match(messages[1], /exited via SIGTERM$/);
 });
 
-test('runtime build stops before the prepared CLI build when a prerequisite fails', () => {
-  let invocations = 0;
-  assert.equal(runRuntimePackageBuild({
-    spawn() {
-      invocations += 1;
-      return { status: 9, signal: null };
-    },
-  }), 9);
-  assert.equal(invocations, 1);
-});
-
-test('runtime build stops before dependents when the prepared CLI build fails', () => {
-  let invocations = 0;
-  assert.equal(runRuntimePackageBuild({
-    spawn() {
-      invocations += 1;
-      return { status: invocations === 2 ? 9 : 0, signal: null };
-    },
-  }), 9);
-  assert.equal(invocations, 2);
+test('runtime build stops on the first nonzero phase status', () => {
+  for (const failingPhase of [0, 1, 2]) {
+    let invocations = 0;
+    assert.equal(runRuntimePackageBuild({
+      spawn() {
+        const status = invocations === failingPhase ? 9 : 0;
+        invocations += 1;
+        return { status, signal: null };
+      },
+    }), 9);
+    assert.equal(invocations, failingPhase + 1);
+  }
 });
 
 test('release runtime build plan includes workspace dependencies but excludes Hardhat', () => {
@@ -180,20 +162,23 @@ test('release runtime build plan includes workspace dependencies but excludes Ha
   }));
   const selectedNames = new Set(selected.map((workspace) => workspace.name));
 
-  const prerequisitePlanArgs = runtimeCliPrerequisiteBuildPnpmArgs(['list', '--depth', '-1', '--json']);
-  const prerequisitePlan = JSON.parse(execFileSync(PNPM, prerequisitePlanArgs, {
+  const phases = runtimeBuildPhases({
+    runtimeOperation: ['list', '--depth', '-1', '--json'],
+    preparedCliOperation: ['list', '--depth', '-1', '--json'],
+  });
+  assert.deepEqual(phases.map(({ label }) => label), [
+    'CLI prerequisite build',
+    'prepared CLI build',
+    'runtime dependent build',
+  ]);
+  const phasePlans = phases.map(({ args }) => JSON.parse(execFileSync(PNPM, args, {
     cwd: REPO_ROOT,
     encoding: 'utf8',
     maxBuffer: 10 * 1024 * 1024,
-  }));
-  const prerequisiteNames = new Set(prerequisitePlan.map((workspace) => workspace.name));
-  const dependentPlanArgs = runtimeDependentBuildPnpmArgs(['list', '--depth', '-1', '--json']);
-  const dependentPlan = JSON.parse(execFileSync(PNPM, dependentPlanArgs, {
-    cwd: REPO_ROOT,
-    encoding: 'utf8',
-    maxBuffer: 10 * 1024 * 1024,
-  }));
-  const dependentNames = new Set(dependentPlan.map((workspace) => workspace.name));
+  })));
+  const prerequisiteNames = new Set(phasePlans[0].map((workspace) => workspace.name));
+  const preparedCliNames = new Set(phasePlans[1].map((workspace) => workspace.name));
+  const dependentNames = new Set(phasePlans[2].map((workspace) => workspace.name));
 
   for (const packageName of REQUIRED_RUNTIME_PACKAGES) {
     assert.ok(selectedNames.has(packageName), `${packageName} must remain in the runtime build`);
@@ -205,6 +190,7 @@ test('release runtime build plan includes workspace dependencies but excludes Ha
     );
   }
   assert.equal(prerequisiteNames.has(RUNTIME_CLI_PACKAGE), false, 'prepared CLI build must run only after prerequisites');
+  assert.deepEqual(preparedCliNames, new Set([RUNTIME_CLI_PACKAGE]));
   for (const packageName of CLI_PREREQUISITE_ROOTS) {
     assert.ok(prerequisiteNames.has(packageName), `${packageName} must remain in the prerequisite phase`);
   }
@@ -213,7 +199,7 @@ test('release runtime build plan includes workspace dependencies but excludes Ha
     assert.equal(dependentNames.has(packageName), false, `${packageName} must not be rebuilt after the CLI`);
   }
   assert.deepEqual(
-    new Set([...prerequisiteNames, RUNTIME_CLI_PACKAGE, ...dependentNames]),
+    new Set([...prerequisiteNames, ...preparedCliNames, ...dependentNames]),
     selectedNames,
     'the three explicit phases must partition the complete runtime plan',
   );

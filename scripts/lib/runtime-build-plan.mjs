@@ -36,7 +36,7 @@ export function runtimeBuildPnpmArgs(operation = ['run', 'build']) {
   return [...runtimeBuildFilterArgs(), ...operation];
 }
 
-export function runtimeCliPrerequisiteBuildPnpmArgs(operation = ['run', 'build']) {
+function runtimeCliPrerequisiteBuildPnpmArgs(operation) {
   return [
     '-r',
     '--filter', `${RUNTIME_CLI_PACKAGE}...`,
@@ -46,10 +46,30 @@ export function runtimeCliPrerequisiteBuildPnpmArgs(operation = ['run', 'build']
   ];
 }
 
-export function runtimeDependentBuildPnpmArgs(operation = ['run', 'build']) {
+function runtimeDependentBuildPnpmArgs(operation) {
   return [
     ...runtimeBuildFilterArgs(),
     '--filter', `!${RUNTIME_CLI_PACKAGE}...`,
     ...operation,
+  ];
+}
+
+export function runtimeBuildPhases({
+  runtimeOperation = ['run', 'build'],
+  preparedCliOperation = ['run', 'build:prepared'],
+} = {}) {
+  return [
+    {
+      label: 'CLI prerequisite build',
+      args: runtimeCliPrerequisiteBuildPnpmArgs(runtimeOperation),
+    },
+    {
+      label: 'prepared CLI build',
+      args: ['--filter', RUNTIME_CLI_PACKAGE, ...preparedCliOperation],
+    },
+    {
+      label: 'runtime dependent build',
+      args: runtimeDependentBuildPnpmArgs(runtimeOperation),
+    },
   ];
 }
