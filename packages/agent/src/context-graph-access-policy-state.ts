@@ -5,26 +5,20 @@ import { createOperationContext, type OperationContext } from
 
 import { CHAIN_POLICY_READ_TIMEOUT_MS } from './dkg-agent-constants.js';
 
-export type LiveOnChainAccessPolicyUnavailableReason =
-  | 'invalid-on-chain-id'
-  | 'chain-liveness-unsupported'
-  | 'chain-context-graph-inactive'
-  | 'chain-liveness-read-timeout'
-  | 'chain-access-policy-unsupported'
-  | 'chain-access-policy-read-timeout'
-  | 'chain-access-policy-invalid';
+/** Canonical policy failure shared with registered authority resolution. */
+export type LiveOnChainAccessPolicyUnavailable = {
+  kind: 'unavailable';
+  reason: 'chain-access-policy-timeout' | 'chain-access-policy-unknown';
+  detail?: string;
+};
 
 /**
- * Internal policy-read result that preserves why a fail-closed read was
- * unavailable. Compatibility callers may still project this to `null`.
+ * Preserve the timeout-versus-terminal distinction consumed by authority
+ * resolution. Compatibility callers may still project both to `null`.
  */
 export type LiveOnChainAccessPolicyState =
   | { kind: 'available'; accessPolicy: 0 | 1 }
-  | {
-      kind: 'unavailable';
-      reason: LiveOnChainAccessPolicyUnavailableReason;
-      detail?: string;
-    };
+  | LiveOnChainAccessPolicyUnavailable;
 
 type BoundedPolicyRead<T> =
   | { kind: 'value'; value: T }
@@ -62,9 +56,9 @@ export async function resolveLiveOnChainAccessPolicyState(
   try {
     numericId = BigInt(onChainId);
   } catch {
-    return { kind: 'unavailable', reason: 'invalid-on-chain-id' };
+    return { kind: 'unavailable', reason: 'chain-access-policy-unknown' };
   }
-  if (numericId <= 0n) return { kind: 'unavailable', reason: 'invalid-on-chain-id' };
+  if (numericId <= 0n) return { kind: 'unavailable', reason: 'chain-access-policy-unknown' };
 
   const readLiveness = dependencies.isContextGraphActiveOnChain;
   if (readLiveness === undefined) {
@@ -80,7 +74,7 @@ export async function resolveLiveOnChainAccessPolicyState(
         'Implement isContextGraphActiveOnChain to enable public-CG plaintext detection.',
       );
     }
-    return { kind: 'unavailable', reason: 'chain-liveness-unsupported' };
+    return { kind: 'unavailable', reason: 'chain-access-policy-unknown' };
   }
 
   const live = await dependencies.runBoundedRead(
@@ -97,10 +91,10 @@ export async function resolveLiveOnChainAccessPolicyState(
       `readLiveOnChainAccessPolicy(${onChainId}): ${detail} — ` +
       'treating on-chain access policy as UNKNOWN (fail-closed)',
     );
-    return { kind: 'unavailable', reason: 'chain-liveness-read-timeout', detail };
+    return { kind: 'unavailable', reason: 'chain-access-policy-timeout', detail };
   }
   if (live.value !== true) {
-    return { kind: 'unavailable', reason: 'chain-context-graph-inactive' };
+    return { kind: 'unavailable', reason: 'chain-access-policy-unknown' };
   }
 
   // Never trust the cache for a security downgrade. Numeric ids can be reused
@@ -108,7 +102,7 @@ export async function resolveLiveOnChainAccessPolicyState(
   // fresh liveness proof. Successful reads still improve other cached users.
   const readAccessPolicy = dependencies.getContextGraphAccessPolicy;
   if (readAccessPolicy === undefined) {
-    return { kind: 'unavailable', reason: 'chain-access-policy-unsupported' };
+    return { kind: 'unavailable', reason: 'chain-access-policy-unknown' };
   }
   const policy = await dependencies.runBoundedRead(
     () => readAccessPolicy(numericId, options.signal),
@@ -124,11 +118,11 @@ export async function resolveLiveOnChainAccessPolicyState(
       `readLiveOnChainAccessPolicy(${onChainId}): ${detail} — ` +
       'treating on-chain access policy as UNKNOWN (fail-closed)',
     );
-    return { kind: 'unavailable', reason: 'chain-access-policy-read-timeout', detail };
+    return { kind: 'unavailable', reason: 'chain-access-policy-timeout', detail };
   }
   if (policy.value === 0 || policy.value === 1) {
     dependencies.cacheAccessPolicy(onChainId, policy.value);
     return { kind: 'available', accessPolicy: policy.value };
   }
-  return { kind: 'unavailable', reason: 'chain-access-policy-invalid' };
+  return { kind: 'unavailable', reason: 'chain-access-policy-unknown' };
 }

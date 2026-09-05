@@ -8957,6 +8957,7 @@ export class DKGPublisher implements Publisher {
       : undefined;
     const swmQuads = normalizedQuads.map((q) => ({ ...q, graph: swmGraphUri }));
     let companionCommitted: boolean | undefined = false;
+    let promotionFailure: { error: unknown } | undefined;
     try {
       const rootCompanion = resolvedRootCompanion === undefined
         ? undefined
@@ -9033,14 +9034,18 @@ export class DKGPublisher implements Publisher {
       } catch (error) {
         throw classifyExactSwmGraphReplaceFailure(error);
       }
-    } finally {
-      try {
-        resolvedRootCompanion?.settle?.(companionCommitted);
-      } catch (error) {
-        // A companion settlement must never certify a retry after dispatch.
-        throw companionCommitted === false ? error : createPromotePostCommitFailure(error);
-      }
+    } catch (error) {
+      promotionFailure = { error };
     }
+    // Settle on both success and failure, before propagating either outcome.
+    // The wrapper above preserves even a rejection with an undefined value.
+    try {
+      resolvedRootCompanion?.settle?.(companionCommitted);
+    } catch (error) {
+      // A companion settlement must never certify a retry after dispatch.
+      throw companionCommitted === false ? error : createPromotePostCommitFailure(error);
+    }
+    if (promotionFailure !== undefined) throw promotionFailure.error;
     try {
       // #2079: the SIXTH replace site. Same graph the catch-up witness keys on,
       // so the memo now describes content that is gone — and a replace leaves the

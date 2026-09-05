@@ -340,7 +340,10 @@ import {
 } from './dkg-agent-constants.js';
 import { isTransientBootChainError } from './dkg-agent-boot.js';
 import { createAbortError, runBoundedOperation } from './bounded-operation.js';
-import type { LiveOnChainAccessPolicyState } from './context-graph-access-policy-state.js';
+import type {
+  LiveOnChainAccessPolicyState,
+  LiveOnChainAccessPolicyUnavailable,
+} from './context-graph-access-policy-state.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
   ContextGraphNotFoundError,
@@ -707,6 +710,7 @@ export type RegisteredContextGraphAuthority =
   | { kind: 'unregistered' }
   | { kind: 'public'; onChainId: bigint }
   | { kind: 'private'; onChainId: bigint; participantAgents: string[] }
+  | (LiveOnChainAccessPolicyUnavailable & { onChainId: bigint })
   | {
       kind: 'unavailable';
       reason:
@@ -714,8 +718,6 @@ export type RegisteredContextGraphAuthority =
         | 'local-chain-binding-unavailable'
         | 'local-existence-unavailable'
         | 'chain-access-policy-unavailable'
-        | 'chain-access-policy-timeout'
-        | 'chain-access-policy-unknown'
         | 'chain-participant-authority-unsupported'
         | 'chain-participant-authority-unavailable'
         | 'chain-participant-authority-invalid';
@@ -1561,18 +1563,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       };
     }
     if (accessPolicyState.kind === 'unavailable') {
-      if (
-        accessPolicyState.reason === 'chain-liveness-read-timeout'
-        || accessPolicyState.reason === 'chain-access-policy-read-timeout'
-      ) {
-        return {
-          kind: 'unavailable',
-          onChainId,
-          reason: 'chain-access-policy-timeout',
-          detail: accessPolicyState.detail,
-        };
-      }
-      return { kind: 'unavailable', onChainId, reason: 'chain-access-policy-unknown' };
+      return { ...accessPolicyState, onChainId };
     }
     const accessPolicy = accessPolicyState.accessPolicy;
     if (accessPolicy === 0) return { kind: 'public', onChainId };

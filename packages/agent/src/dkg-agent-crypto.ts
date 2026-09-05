@@ -833,8 +833,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * the policy reads are bounded by {@link raceChainPolicyRead} so a hung RPC
    * fails closed instead of blocking the hot path. A genuine RPC
    * rejection propagates to the caller (which logs + fails closed in its own
-   * idiom). The reason distinguishes invalid input, unsupported capabilities,
-   * inactive slots, malformed values, and bounded read timeouts.
+   * idiom). The canonical reason distinguishes retryable bounded timeouts
+   * from terminal unknown policy; diagnostics retain the timed-out read name.
    */
   protected async resolveLiveOnChainAccessPolicyState(this: DKGAgent,
     onChainId: string,

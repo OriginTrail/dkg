@@ -1222,6 +1222,76 @@ describe('Working Memory Assertion Lifecycle', () => {
     )).resolves.toEqual({ type: 'boolean', value: true });
   });
 
+  it.each([
+    ['before commit', false],
+    ['after commit', true],
+    ['after indeterminate dispatch', undefined],
+  ] as const)('classifies a root-companion settlement failure %s', async (_label, committed) => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    const settlementFailure = createPromoteRetryableFailure(new Error('settlement timed out'));
+    const settle = vi.fn(() => { throw settlementFailure; });
+    const hookedPublisher = await createPublisher(undefined, store, () => ({
+      graphUri: 'urn:test:root-companion-settlement',
+      subject: 'urn:test:root-companion',
+      quads: [],
+      settle,
+    }));
+    const atomicReplace = store.replaceGraphAndSubject!.bind(store);
+    const replaceSpy = vi.spyOn(store, 'replaceGraphAndSubject').mockImplementation(async (...args) => {
+      await atomicReplace(...args);
+      if (committed === undefined) {
+        throw new StoreOperationTimeoutError({
+          backend: 'managed-oxigraph',
+          operation: 'replaceGraphAndSubject',
+          outcome: 'indeterminate',
+        });
+      }
+    });
+    let failure: unknown;
+    try {
+      failure = await hookedPublisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        confirmBeforeCommit: async () => {
+          if (committed === false) throw new Error('confirmation failed before dispatch');
+          return { applied: true };
+        },
+      }).catch((error: unknown) => error);
+    } finally {
+      replaceSpy.mockRestore();
+    }
+    expect(settle).toHaveBeenCalledExactlyOnceWith(committed);
+    if (committed === false) {
+      expect(failure).toBe(settlementFailure);
+      expect(getPromoteFailureDisposition(failure)?.retryable).toBe(true);
+      expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+    } else {
+      expect(failure).toMatchObject({ code: 'PROMOTE_POST_COMMIT_FAILURE', cause: settlementFailure });
+      expect(getPromoteFailureDisposition(failure)?.retryable).toBe(false);
+      await expectExactSwmGraph(finalized.sharedGraphUri);
+    }
+  });
+
+  it('settles before preserving even an undefined pre-commit rejection', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    const settle = vi.fn();
+    const hookedPublisher = await createPublisher(undefined, store, () => ({
+      graphUri: 'urn:test:root-companion-settlement',
+      subject: 'urn:test:root-companion',
+      quads: [],
+      settle,
+    }));
+    await expect(hookedPublisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER,
+      confirmBeforeCommit: async () => { throw undefined; },
+    })).rejects.toBeUndefined();
+    expect(settle).toHaveBeenCalledExactlyOnceWith(false);
+    expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+  });
+
   it('fails closed without persisting SWM or its root companion on atomic capability refusal', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);

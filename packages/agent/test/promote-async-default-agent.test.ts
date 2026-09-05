@@ -3,10 +3,12 @@ vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src
 import {
   createPromoteRetryableFailure,
   getPromoteFailureDisposition,
+  type DKGPublisher,
 } from '@origintrail-official/dkg-publisher';
 import { ContextGraphAuthorityUnavailableError } from
   '../src/context-graph-agent-gate-authority.js';
 import { DKGAgent } from '../src/dkg-agent.js';
+import type { AssertionPromoteOptions } from '../src/assertion-promote-precommit.js';
 
 function promoteBoundaryAgent(): any {
   const agent = Object.create(DKGAgent.prototype) as any;
@@ -20,6 +22,62 @@ function promoteBoundaryAgent(): any {
 }
 
 describe('DKGAgent assertion promote boundary', () => {
+  it.each([
+    ['explicit allow-list', { accessPolicy: 'allowList', allowedPeers: ['peer-a'] }, 0, 0, 'allowList'],
+    ['chain public', {}, 0, 1, 'public'],
+    ['chain private', {}, 1, 0, 'ownerOnly'],
+    ['local private fallback', {}, undefined, 1, 'ownerOnly'],
+    ['unspecified local public', {}, undefined, 0, undefined],
+  ] satisfies [string, AssertionPromoteOptions, number | undefined, number, string | undefined][])(
+    'forwards the exact %s access envelope, signer, and confirmer',
+    async (_label, accessOptions, chainPolicy, localPolicy, expectedPolicy) => {
+      const agent = promoteBoundaryAgent();
+      const signer = { agentAddress: `0x${'22'.repeat(20)}` };
+      const confirmer = vi.fn(async () => ({ applied: true }));
+      agent.resolveWorkspaceGossipSigningAgent = vi.fn(async () => signer);
+      agent.buildCuratorAckConfirmer = vi.fn(async () => confirmer);
+      agent.getContextGraphOnChainPolicy = vi.fn(async () => ({ accessPolicy: chainPolicy }));
+      agent.readLocalAccessPolicyEnum = vi.fn(async () => localPolicy);
+      agent.afterDurableSwmPromotionV1 = vi.fn(async () => undefined);
+      const assertionPromote = vi.fn(async (..._args: Parameters<DKGPublisher['assertionPromote']>) => ({
+        promotedCount: 1, promotedAllRoots: true, shareOperationId: 'share-operation-1',
+      }));
+      agent.publisher = { assertionPromote };
+      const options: AssertionPromoteOptions = {
+        ...accessOptions,
+        subGraphName: 'documents',
+        awaitCuratorAck: true,
+        curatorAckTimeoutMs: 4_000,
+      };
+
+      await expect(agent.assertion.promote('cg-1', 'asset-1', options)).resolves.toEqual({
+        promotedCount: 1, sealed: true, publishReady: true, shareOperationId: 'share-operation-1',
+      });
+      expect(agent.resolveWorkspaceGossipSigningAgent).toHaveBeenCalledWith('cg-1');
+      expect(agent.buildCuratorAckConfirmer).toHaveBeenCalledWith(
+        'cg-1', signer, { awaitCuratorAck: true, curatorAckTimeoutMs: 4_000 }, expect.anything(),
+      );
+      expect(assertionPromote).toHaveBeenCalledExactlyOnceWith(
+        'cg-1', 'asset-1', agent.defaultAgentAddress, {
+          subGraphName: 'documents',
+          publisherPeerId: '12D3KooWBoundary',
+          senderAgentAddress: signer.agentAddress,
+          confirmBeforeCommit: confirmer,
+          isRetryablePrerequisiteError: expect.any(Function),
+          ...(expectedPolicy === undefined ? {} : { accessPolicy: expectedPolicy }),
+          ...(options.allowedPeers === undefined ? {} : { allowedPeers: ['peer-a'] }),
+        },
+      );
+      if (options.allowedPeers !== undefined) {
+        expect(assertionPromote.mock.calls[0]?.[3]?.allowedPeers).not.toBe(options.allowedPeers);
+      }
+      expect(agent.getContextGraphOnChainPolicy)
+        .toHaveBeenCalledTimes(options.accessPolicy === undefined ? 1 : 0);
+      expect(agent.readLocalAccessPolicyEnum)
+        .toHaveBeenCalledTimes(options.accessPolicy === undefined && chainPolicy === undefined ? 1 : 0);
+    },
+  );
+
   it('enqueues omitted agentAddress as the effective default agent lane', async () => {
     const defaultAgentAddress = `0x${'11'.repeat(20)}`;
     const enqueued: unknown[] = [];
