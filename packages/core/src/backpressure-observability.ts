@@ -521,31 +521,24 @@ export class SchedulerPressureTracker {
           0,
           Math.floor(now - (entry.startedAt ?? now)),
         )));
+    const activeAgeStalled = oldestActiveAgeMs >= this.thresholds.stalledActiveAgeMs;
+    const recentlyRejected = runtime.lastRejectedAt !== null
+      && now - runtime.lastRejectedAt <= this.thresholds.rejectionStateWindowMs;
+    const queueAgeDegraded = oldestQueuedAgeMs >= this.thresholds.degradedQueueAgeMs;
+    const depthSaturated = depthPressure !== null && depthPressure.queued >= depthPressure.limit;
+    const depthDegraded = depthPressure !== null
+      && depthPressure.queued / depthPressure.limit >= this.thresholds.degradedQueueUtilization;
     const stateReasons: NonNullable<BackpressureLaneSnapshot['stateReasons']> = [];
-    if (oldestActiveAgeMs >= this.thresholds.stalledActiveAgeMs) stateReasons.push('active_age');
-    if (runtime.lastRejectedAt !== null
-      && now - runtime.lastRejectedAt <= this.thresholds.rejectionStateWindowMs) stateReasons.push('rejection');
-    if (oldestQueuedAgeMs >= this.thresholds.degradedQueueAgeMs) stateReasons.push('age');
-    if (depthPressure !== null && (depthPressure.queued >= depthPressure.limit
-      || depthPressure.queued / depthPressure.limit >= this.thresholds.degradedQueueUtilization)) stateReasons.push('depth');
+    if (activeAgeStalled) stateReasons.push('active_age');
+    if (recentlyRejected) stateReasons.push('rejection');
+    if (queueAgeDegraded) stateReasons.push('age');
+    if (depthSaturated || depthDegraded) stateReasons.push('depth');
     let state: BackpressureState = 'healthy';
-    if (oldestActiveAgeMs >= this.thresholds.stalledActiveAgeMs) {
+    if (activeAgeStalled) {
       state = 'stalled';
-    } else if (
-      (depthPressure !== null && depthPressure.queued >= depthPressure.limit)
-      || (
-        runtime.lastRejectedAt !== null
-        && now - runtime.lastRejectedAt <= this.thresholds.rejectionStateWindowMs
-      )
-    ) {
+    } else if (depthSaturated || recentlyRejected) {
       state = 'saturated';
-    } else if (
-      oldestQueuedAgeMs >= this.thresholds.degradedQueueAgeMs
-      || (
-        depthPressure !== null
-        && depthPressure.queued / depthPressure.limit >= this.thresholds.degradedQueueUtilization
-      )
-    ) {
+    } else if (queueAgeDegraded || depthDegraded) {
       state = 'degraded';
     }
     return {

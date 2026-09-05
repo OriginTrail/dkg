@@ -437,6 +437,51 @@ describe('BackpressureRegistry', () => {
 });
 
 describe('BackpressureMonitor', () => {
+  it.each(['shared', 'partitioned'] as const)('logs pressure transitions from a real %s tracker', (capacityModel) => {
+    let now = 1_000;
+    const tracker = new SchedulerPressureTracker({
+      scheduler: 'sync-global', now: () => now,
+      capacity: { capacityModel, queueLimit: 1, lanes: { durable: { queueLimit: 1 } } },
+      thresholds: { degradedQueueAgeMs: 10_000, stalledActiveAgeMs: 20_000, rejectionStateWindowMs: 30_000 },
+    });
+    const registry = new BackpressureRegistry();
+    registry.register({ backpressureId: 'sync-global', getBackpressureSnapshot: () => tracker.snapshot() });
+    const records: Array<Record<string, unknown>> = [];
+    const monitor = new BackpressureMonitor({
+      registry, now: () => now, intervalMs: 1_000, summaryIntervalMs: 1_000,
+      emit: (_level, message) => records.push(JSON.parse(message.slice('[backpressure] '.length))),
+    });
+    const sample = (state: string, reasons: string[]) => {
+      monitor.sample();
+      const record = records.filter((item) => item.lane === 'durable').at(-1);
+      expect(record).toMatchObject({ state });
+      if (capacityModel === 'shared') expect(record?.stateReasons).toEqual(reasons);
+      else expect(record).not.toHaveProperty('stateReasons');
+    };
+
+    const active = tracker.enqueue({ lane: 'durable', operation: 'active' });
+    tracker.start(active);
+    const queued = tracker.enqueue({ lane: 'durable', operation: 'queued' });
+    sample('saturated', ['depth']);
+    now += 10_000;
+    sample('saturated', ['age', 'depth']);
+    tracker.reject({ lane: 'durable', operation: 'rejected' }, 'queue_full');
+    now += 1_000;
+    sample('saturated', ['rejection', 'age', 'depth']);
+    now += 9_000;
+    sample('stalled', ['active_age', 'rejection', 'age', 'depth']);
+    tracker.finish(active, 'completed');
+    tracker.start(queued);
+    tracker.finish(queued, 'completed');
+    now += 1_000;
+    sample('saturated', ['rejection']);
+    now += 19_000; // The rejection window includes its exact endpoint.
+    sample('saturated', ['rejection']);
+    now += 1;
+    sample('healthy', []);
+    expect(records.filter((item) => item.lane === 'durable')).toHaveLength(7);
+  });
+
   it('logs transitions, rate-limited summaries, and recovery', () => {
     let now = 1_000;
     let state: BackpressureSnapshot['state'] = 'healthy';
