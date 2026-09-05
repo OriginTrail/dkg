@@ -1,3 +1,5 @@
+import { RELAY_CAPACITY_MULTIPLIER } from './relay-capacity-policy.js';
+export { RELAY_CAPACITY_MULTIPLIER } from './relay-capacity-policy.js';
 import { checkFdLimit } from './fd-limit.js';
 export { checkFdLimit, type FdLimitLogLevel } from './fd-limit.js';
 import { createLibp2p, type Libp2p } from 'libp2p';
@@ -199,8 +201,6 @@ const RELAY_FORCED_REDIAL_COOLDOWN_MS = 10 * 60_000;
  * `ulimit -n` requirement.
  */
 export const DEFAULT_RELAY_SERVER_CAPACITY = 1024;
-/** Multiplier for derived stream + connection caps (capacity × 2). */
-export const RELAY_CAPACITY_MULTIPLIER = 2;
 /**
  * Per-circuit duration limit. Bumped from libp2p's 5-minute default to 30
  * minutes so chat-style intermittent traffic (5-15 minute silent gaps are
