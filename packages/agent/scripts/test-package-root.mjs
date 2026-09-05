@@ -55,7 +55,6 @@ if (
 if (
   'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE' in root
   || 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME' in root
-  || 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS' in root
   || 'ContextGraphAuthorityUnavailableError' in root
   || 'isContextGraphAuthorityUnavailableMarker' in root
 ) {

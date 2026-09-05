@@ -49,9 +49,6 @@ type AuthorityCodeStaysInternal = AssertFalse<
 type AuthorityErrorNameStaysInternal = AssertFalse<
   'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME' extends keyof AgentApi ? true : false
 >;
-type RetryableReasonListStaysInternal = AssertFalse<
-  'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS' extends keyof AgentApi ? true : false
->;
 type AuthorityErrorStaysInternal = AssertFalse<
   'ContextGraphAuthorityUnavailableError' extends keyof AgentApi ? true : false
 >;
@@ -65,9 +62,6 @@ type GateAuthorityResultStaysInternal =
 type AuthorityMarkerStaysInternal =
   // @ts-expect-error The marker is consumed only by the internal promote boundary.
   import('@origintrail-official/dkg-agent').ContextGraphAuthorityUnavailableMarker;
-type AuthorityReasonStaysInternal =
-  // @ts-expect-error Authority reasons are owned by the internal resolver.
-  import('@origintrail-official/dkg-agent').ContextGraphAuthorityUnavailableReason;
 type DeepAuthorityStaysInternal =
   // @ts-expect-error The export map blocks authority implementation deep imports.
   typeof import('@origintrail-official/dkg-agent/dist/internal/promote/context-graph-agent-gate-authority.js');
@@ -84,11 +78,9 @@ export type {
   PolicyProjectionRemainsPublic,
   AuthorityCodeStaysInternal,
   AuthorityErrorNameStaysInternal,
-  RetryableReasonListStaysInternal,
   AuthorityErrorStaysInternal,
   AuthorityGuardStaysInternal,
   GateAuthorityResultStaysInternal,
   AuthorityMarkerStaysInternal,
-  AuthorityReasonStaysInternal,
   DeepAuthorityStaysInternal,
 };

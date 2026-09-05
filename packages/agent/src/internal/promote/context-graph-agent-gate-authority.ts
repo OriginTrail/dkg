@@ -28,28 +28,11 @@ const CONTEXT_GRAPH_AUTHORITY_REASON_DISPOSITIONS = {
 export type ContextGraphAgentGateUnavailableReason =
   keyof typeof CONTEXT_GRAPH_AUTHORITY_REASON_DISPOSITIONS;
 
-export type ContextGraphAuthorityRetryableReason = {
-  [Reason in ContextGraphAgentGateUnavailableReason]:
-  typeof CONTEXT_GRAPH_AUTHORITY_REASON_DISPOSITIONS[Reason]['retryable'] extends true
-    ? Reason
-    : never;
-}[ContextGraphAgentGateUnavailableReason];
-
-/** Every explicit failure emitted by the canonical authority resolver. */
-export type ContextGraphAuthorityUnavailableReason = ContextGraphAgentGateUnavailableReason;
-
 export const CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE =
   'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE' as const;
 
 export const CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME =
   'ContextGraphAuthorityUnavailableError' as const;
-
-export const CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS = Object.freeze(
-  (Object.keys(CONTEXT_GRAPH_AUTHORITY_REASON_DISPOSITIONS) as ContextGraphAgentGateUnavailableReason[])
-    .filter((reason): reason is ContextGraphAuthorityRetryableReason => (
-      CONTEXT_GRAPH_AUTHORITY_REASON_DISPOSITIONS[reason].retryable
-    )),
-);
 
 /** Serialization-safe domain failure with reason-derived retryability. */
 export type ContextGraphAuthorityUnavailableMarker = {
@@ -127,12 +110,6 @@ export interface ContextGraphAgentGateAuthorityInput {
     revokedAgents: readonly string[];
   }>;
   getSubscriptionAgents(): readonly string[];
-}
-
-export function isRetryableContextGraphAuthorityReason(
-  reason: ContextGraphAgentGateUnavailableReason,
-): reason is ContextGraphAuthorityUnavailableReason {
-  return CONTEXT_GRAPH_AUTHORITY_REASON_DISPOSITIONS[reason].retryable;
 }
 
 function unavailableAuthority(
