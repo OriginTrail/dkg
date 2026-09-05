@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  hasValidGraphPublishContent,
+  hasValidGraphScopedContent,
   isGraphPublishAccessPolicy,
   resolveGraphPublishAccess,
 } from '../src/graph-publish-envelope.js';
@@ -15,7 +15,7 @@ describe('graph publish envelope predicates', () => {
     [0, 1, undefined, false], [0, 1, 31, false], [0, 1, 33, false],
     [1, 0, 32, false], [1, 0, 0, false],
   ] as const)('validates counts %s/%s and private-root bytes %s', (publicCount, privateCount, rootBytes, expected) => {
-    expect(hasValidGraphPublishContent(publicCount, privateCount,
+    expect(hasValidGraphScopedContent(publicCount, privateCount,
       rootBytes === undefined ? undefined : new Uint8Array(rootBytes))).toBe(expected);
   });
 

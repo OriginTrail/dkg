@@ -65,8 +65,19 @@ function byteSizeFloor(quads: readonly Pick<Quad, 'subject' | 'predicate' | 'obj
 describe('graph-scoped publish storage ACKs', () => {
   it.each([
     {
-      label: 'content',
+      label: 'content without triples',
       envelope: { publicTripleCount: 0, privateTripleCount: 0, accessPolicy: 'public' as const, allowedPeers: [] },
+      error: 'invalid content envelope',
+    },
+    {
+      label: 'content with an undeclared private root',
+      envelope: {
+        publicTripleCount: 1,
+        privateTripleCount: 0,
+        privateMerkleRoot: PRIVATE_ROOT,
+        accessPolicy: 'public' as const,
+        allowedPeers: [],
+      },
       error: 'invalid content envelope',
     },
     {

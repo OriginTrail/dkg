@@ -1,4 +1,4 @@
-import { hasValidGraphPublishContent, resolveGraphPublishAccess } from './graph-publish-envelope.js';
+import { hasValidGraphScopedContent, resolveGraphPublishAccess } from './graph-publish-envelope.js';
 import {
   deleteByPatternWithoutCount,
   GraphManager,
@@ -99,7 +99,7 @@ function resolveGraphScopedPublishIntent(
   }
   const publicTripleCount = intent.publicTripleCount ?? 0;
   const privateTripleCount = intent.privateTripleCount ?? 0;
-  if (!hasValidGraphPublishContent(publicTripleCount, privateTripleCount, privateMerkleRoot)) {
+  if (!hasValidGraphScopedContent(publicTripleCount, privateTripleCount, privateMerkleRoot)) {
     throw new Error('StorageACK: graph-scoped publish has an invalid content envelope');
   }
   const scope = createGraphKnowledgeAssetScope(intent.kaUal, intent.assertionVersion);
@@ -167,15 +167,7 @@ function resolveGraphScopedUpdateIntent(
   }
   const publicTripleCount = intent.publicTripleCount ?? 0;
   const privateTripleCount = intent.privateTripleCount ?? 0;
-  if (
-    !Number.isSafeInteger(publicTripleCount)
-    || publicTripleCount < 0
-    || !Number.isSafeInteger(privateTripleCount)
-    || privateTripleCount < 0
-    || (publicTripleCount === 0 && privateTripleCount === 0)
-    || (privateTripleCount > 0 && privateMerkleRoot?.length !== 32)
-    || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
-  ) {
+  if (!hasValidGraphScopedContent(publicTripleCount, privateTripleCount, privateMerkleRoot)) {
     throw new Error('UpdateStorageACK: invalid graph-scoped content envelope');
   }
   const scope = createGraphKnowledgeAssetScope(intent.kaUal, intent.assertionVersion);

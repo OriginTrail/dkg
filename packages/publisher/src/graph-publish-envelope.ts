@@ -2,7 +2,7 @@
 // messages, and validation order.
 import type { GraphKnowledgeAssetAccessPolicy } from '@origintrail-official/dkg-core';
 
-export function hasValidGraphPublishContent(
+export function hasValidGraphScopedContent(
   publicTripleCount: number,
   privateTripleCount: number,
   privateMerkleRoot: Uint8Array | undefined,

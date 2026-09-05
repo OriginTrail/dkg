@@ -1,4 +1,4 @@
-import { hasValidGraphPublishContent, isGraphPublishAccessPolicy, resolveGraphPublishAccess } from './graph-publish-envelope.js';
+import { hasValidGraphScopedContent, isGraphPublishAccessPolicy, resolveGraphPublishAccess } from './graph-publish-envelope.js';
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import type { EventBus, StreamHandler, OperationContext } from '@origintrail-official/dkg-core';
@@ -115,7 +115,7 @@ function resolveGraphScopedPublishRequest(
   }
   const publicTripleCount = request.publicTripleCount ?? 0;
   const privateTripleCount = request.privateTripleCount ?? 0;
-  if (!hasValidGraphPublishContent(publicTripleCount, privateTripleCount, privateMerkleRoot)) {
+  if (!hasValidGraphScopedContent(publicTripleCount, privateTripleCount, privateMerkleRoot)) {
     throw new Error('Graph-scoped publish has an invalid content envelope');
   }
   const accessPolicy = request.accessPolicy;
