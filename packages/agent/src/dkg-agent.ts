@@ -3278,18 +3278,7 @@ export class DKGAgent extends DKGAgentBase {
           promotedAllRoots,
           shareOperationId,
         } = await executeAssertionPromotePreCommit(
-          {
-            resolveSigningAgent: contextGraph =>
-              agent.resolveWorkspaceGossipSigningAgent(contextGraph),
-            buildCuratorAckConfirmer: (contextGraph, signer, options, ctx) =>
-              agent.buildCuratorAckConfirmer(contextGraph, signer, options, ctx),
-            getOnChainPolicy: contextGraph =>
-              agent.getContextGraphOnChainPolicy(contextGraph),
-            readLocalAccessPolicy: contextGraph =>
-              agent.readLocalAccessPolicyEnum(contextGraph),
-            promoteAssertion: (contextGraph, assertionName, address, options) =>
-              agent.publisher.assertionPromote(contextGraph, assertionName, address, options),
-          },
+          agent,
           {
             contextGraphId,
             name,
