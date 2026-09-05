@@ -15,7 +15,7 @@ describe('chain-event cursor strategies (#1456)', () => {
     const save = vi.fn(async () => {});
     const chain = {
       getBlockNumber: async () => 1000,
-      async *listenForEvents(filter: EventFilter) { filters.push(filter); },
+    async *listenForEvents(filter: EventFilter) { filters.push(filter); yield* []; },
     } as unknown as ChainAdapter;
     const runner = new ChainEventLaneRunner({
       chain, maxRange: 9000, clock: () => 0, log: new Logger('cursor-test'),

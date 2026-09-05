@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     include: [
       'test/chain-event-poller-dispatch.unit.test.ts',
+      'test/chain-event-poller-lifecycle.unit.test.ts',
       'test/chain-event-lane-runner.unit.test.ts',
       'test/chain-event-cursor-strategy.unit.test.ts',
       'test/ka-update-submit-failure.test.ts',
