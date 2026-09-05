@@ -1,5 +1,9 @@
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
-import { deleteByPatternWithoutCount, GraphManager, LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from '@origintrail-official/dkg-storage';
+import {
+  deleteByPatternWithoutCount,
+  GraphManager,
+  LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+} from '@origintrail-official/dkg-storage';
 import {
   validateSubGraphName,
   isSafeIri,
@@ -10,7 +14,6 @@ import {
   contextGraphDataUri,
   contextGraphMetaUri,
   MemoryLayer,
-  ASSERTION_STATE_TO_LAYER,
   DKG_ENTITY,
   DKG_ROOT_ENTITY_LEGACY,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -449,19 +452,6 @@ function rdfLiteralLexicalValue(value: string): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-function canonicalMetadataObject(predicate: string, value: string): string {
-  const literal = rdfLiteralLexicalValue(value);
-  if (literal === undefined) return `iri:${value}`;
-  if (
-    predicate === `${DKG}merkleRoot`
-    || predicate === `${DKG}privateMerkleRoot`
-    || predicate === `${DKG}transactionHash`
-  ) {
-    return `literal:${literal.replace(/^0x/i, '').toLowerCase()}`;
-  }
-  return `literal:${literal}`;
 }
 
 function metadataObjectsByPredicate(

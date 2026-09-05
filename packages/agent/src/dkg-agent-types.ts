@@ -33,9 +33,7 @@ import type {
   ContextGraphJoinPolicyRecord as CoreContextGraphJoinPolicyRecord,
   CatalogSealDeploymentProfileV1,
   ContextGraphIdV1,
-  ContextGraphPolicyV1,
   DecimalU64V1,
-  Digest32V1,
   EvmAddressV1,
   NetworkIdV1,
   SubGraphNameV1,
@@ -51,7 +49,11 @@ import type {
   WorkspacePublicSnapshotStore,
   CursorPersistence as ChainEventCursorPersistence,
 } from '@origintrail-official/dkg-publisher';
-import type { ApprovalPolicy, ChainAdapter, ContextGraphRegistryScanCursorStore } from '@origintrail-official/dkg-chain';
+import type {
+  ApprovalPolicy,
+  ChainAdapter,
+  ContextGraphRegistryScanCursorStore,
+} from '@origintrail-official/dkg-chain';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
 import type { CclFactResolutionMode } from './ccl-fact-resolution.js';

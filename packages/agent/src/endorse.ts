@@ -1,4 +1,4 @@
-import { assertSafeIri, contextGraphDataUri, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
+import { assertSafeIri, contextGraphDataUri } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 /** Ontology predicate: agent endorses a Knowledge Asset */

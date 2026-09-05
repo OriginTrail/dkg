@@ -23,7 +23,6 @@ import {
   PREFIXES,
   bindingValue,
   bindingsToTable,
-  bindingsToParagraphs,
   escapeSparqlLiteral,
   prettyTerm,
   parseEntitySource,

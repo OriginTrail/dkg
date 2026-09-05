@@ -1,4 +1,10 @@
-import { sha256, MerkleTree, hashTriple, hashTripleV10, V10MerkleTree, structuredKARootV10 } from '@origintrail-official/dkg-core';
+import {
+  MerkleTree,
+  hashTriple,
+  hashTripleV10,
+  V10MerkleTree,
+  structuredKARootV10,
+} from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 /**

@@ -8,7 +8,6 @@ import {
   mergeRpcUsageWindows,
   type CanonicalFinalizationReceipt,
   type ChainAdapter,
-  type OnChainPublishResult,
   type RpcUsageWindow,
 } from '@origintrail-official/dkg-chain';
 import {
@@ -34,10 +33,8 @@ import {
   type AsyncLiftPublisherConfig,
   type AsyncLiftChainProofLookup,
   type AsyncLiftUpdateChainProofLookup,
-  type AsyncLiftChainProofResolution,
   type AsyncLiftPublisherRecoveryResult,
   type VmPublisherControl,
-  type LiftJobHex,
   type PersistedLiftJob,
   type PublishOptions,
   type V10ACKProviderParams,
@@ -62,13 +59,11 @@ import { loadPublisherWallets } from './publisher-wallets.js';
 // GH#2270 PR-3 r3 — chain-proof POLICY lives in its own module; this file stays the
 // composition root that hands it the adapters and wires the result into the publisher.
 import {
-  asLiftJobBigInt,
   asLiftJobHex,
   chainAdaptersForWallets,
   createChainProofResolver,
   hasChainPublishLookup,
   hasChainRecoveryCapabilityFor,
-  mapOnChainPublishResultToLiftRecovery,
   verifyCanonicalUpdateFacts,
   type PublisherChainAdapters,
 } from './publisher-chain-proof.js';
@@ -890,7 +885,6 @@ function createV10ACKProviderForPublisher(
   };
 }
 
-
 export function createKnowledgeAssetVmPublishRecoveryResolver(
   adapters: PublisherChainAdapters,
 ): AsyncKnowledgeAssetVmPublishRecoveryResolver {
@@ -1072,7 +1066,6 @@ async function resolveCanonicalOnChainPublish(
     : null;
 }
 
-
 function mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
   receipt: CanonicalFinalizationReceipt,
   chainId: string,
@@ -1118,7 +1111,6 @@ function mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
     publishProof: { merkleRoot, authorAddress, txIndex: receipt.txIndex, operationKind: 'create' },
   };
 }
-
 
 async function createPublisherStore(dataDir: string, config: DkgConfig): Promise<TripleStore> {
   if (config.store) {

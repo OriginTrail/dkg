@@ -1,6 +1,5 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
-  DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
   canonicalAgentDidSubject,
   isPublicLikeAddress,

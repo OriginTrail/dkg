@@ -79,7 +79,6 @@ import {
   encodeFrame,
   type DecodedFrame,
 } from './message-frame.js';
-import type { DKGNode } from './node.js';
 
 /** Protocol id for the pooled, framed transport. */
 export const POOLED_MESSAGE_PROTOCOL = '/dkg/10.0.2/message';
