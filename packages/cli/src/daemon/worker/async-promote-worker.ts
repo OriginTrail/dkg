@@ -373,6 +373,7 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
   // 3. Transient network / IO — the rc.10 importer hit "fetch failed"
   //    multiple times under sustained load. Worker should retry.
   if (
+    code === 'context_graph_authority_unavailable' ||
     message.includes('fetch failed') ||
     message.includes('econnreset') ||
     message.includes('econnrefused') ||

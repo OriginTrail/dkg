@@ -49,6 +49,20 @@ describe('RFC-64 private Sender Key roster authority', () => {
     expect(getCgMeta).not.toHaveBeenCalled();
   });
 
+  it('marks an unavailable signing authority so durable promotion can retry it', async () => {
+    const receiver = {
+      getContextGraphAgentGateAddresses: async () => [],
+      localAgents: new Map(),
+    };
+
+    await expect(WorkspaceCryptoMethods.prototype.resolveWorkspaceGossipSigningAgent.call(
+      receiver as never,
+      CG,
+    )).rejects.toMatchObject({
+      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+    });
+  });
+
   it('preserves legacy meta and subscription resolution for non-RFC-64 graphs', async () => {
     const receiver = {
       resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),

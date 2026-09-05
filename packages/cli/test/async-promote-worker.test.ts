@@ -183,6 +183,13 @@ describe('classifyPromoteError', () => {
     });
   });
 
+  it('retries a fail-closed context-graph authority outage', () => {
+    expect(classifyPromoteError(Object.assign(
+      new Error('signing authority is temporarily unavailable'),
+      { code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE' },
+    ))).toEqual({ classification: 'transient', retryable: true });
+  });
+
   it('requires typed outcomes for managed-store and scheduler failures', () => {
     for (const message of [
       'STORE_OPERATION_TIMEOUT Managed Oxigraph is recovering; query was not started',

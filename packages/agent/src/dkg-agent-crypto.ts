@@ -2726,6 +2726,20 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       return this.getWorkspaceGossipSigningAgent();
     }
 
+    // An empty gate is the fail-closed representation used while registered
+    // chain or RFC-64 roster authority is temporarily unavailable. Preserve
+    // that denial, but distinguish it from a definitive non-empty gate that
+    // simply has no matching local key so durable promote workers can retry
+    // the transient authority read.
+    if (allowedAgents.length === 0) {
+      throw Object.assign(
+        new Error(
+          `Cannot gossip SWM write for context graph "${contextGraphId}": signing authority is temporarily unavailable`,
+        ),
+        { code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE' },
+      );
+    }
+
     const allowedSet = new Set(allowedAgents.map((agent) => agent.toLowerCase()));
     for (const record of this.localAgents.values()) {
       if (record.privateKey && allowedSet.has(record.agentAddress.toLowerCase())) {
