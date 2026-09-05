@@ -48,41 +48,18 @@ if (
   || typeof root.Rfc64CatalogReconciliationTerminalErrorV1 !== 'function'
   || typeof root.Rfc64CatalogSynchronizationErrorV1 !== 'function'
   || typeof root.Rfc64CatalogResponsibilityRegistryV1 !== 'function'
-  || typeof root.ContextGraphAuthorityUnavailableError !== 'function'
-  || typeof root.isContextGraphAuthorityUnavailableMarker !== 'function'
   || typeof legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1 !== 'function'
 ) {
   throw new Error('published agent entry points did not expose required root APIs');
 }
 if (
-  root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE !== 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE'
+  'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE' in root
   || 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME' in root
   || 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS' in root
+  || 'ContextGraphAuthorityUnavailableError' in root
+  || 'isContextGraphAuthorityUnavailableMarker' in root
 ) {
-  throw new Error('package root did not expose the narrow authority-failure contract');
-}
-const authorityUnavailable = new root.ContextGraphAuthorityUnavailableError(
-  'authority unavailable',
-  { reason: 'chain-access-policy-timeout' },
-);
-if (
-  authorityUnavailable.name !== 'ContextGraphAuthorityUnavailableError'
-  || authorityUnavailable.code !== root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE
-  || authorityUnavailable.reason !== 'chain-access-policy-timeout'
-  || authorityUnavailable.retryable !== true
-  || !root.isContextGraphAuthorityUnavailableMarker(authorityUnavailable)
-  || !root.isContextGraphAuthorityUnavailableMarker({
-    code: root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
-    reason: 'chain-access-policy-timeout',
-    retryable: true,
-  })
-  || root.isContextGraphAuthorityUnavailableMarker({
-    code: root.CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
-    reason: 'chain-access-policy-unknown',
-    retryable: true,
-  })
-) {
-  throw new Error('package-root authority-unavailable runtime contract changed');
+  throw new Error('internal authority marker machinery leaked from the package root');
 }
 const legacySynchronizationError = new legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1(
   'no-authorized-provider',

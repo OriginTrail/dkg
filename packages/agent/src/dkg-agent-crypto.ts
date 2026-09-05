@@ -142,7 +142,10 @@ import {
   resolveContextGraphAgentGateAuthorityDecision,
   type ContextGraphAgentGateAuthority,
 } from './context-graph-agent-gate-authority.js';
-import type { LiveOnChainAccessPolicyState } from './context-graph-access-policy-state.js';
+import {
+  resolveLiveOnChainAccessPolicyState as resolveLiveAccessPolicyState,
+  type LiveOnChainAccessPolicyState,
+} from './context-graph-access-policy-state.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -838,94 +841,38 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     opCtx?: OperationContext,
     options: { signal?: AbortSignal } = {},
   ): Promise<LiveOnChainAccessPolicyState> {
-    let numericId: bigint;
-    try {
-      numericId = BigInt(onChainId);
-    } catch {
-      return { kind: 'unavailable', reason: 'invalid-on-chain-id' };
-    }
-    if (numericId <= 0n) return { kind: 'unavailable', reason: 'invalid-on-chain-id' };
-
-    if (typeof this.chain.isContextGraphActiveOnChain !== 'function') {
-      // #884 review (🔴 GZEqN): don't strand public CGs SILENTLY. An adapter
-      // that exposes getContextGraphAccessPolicy but NOT the liveness probe
-      // can't prove a slot live, so we fail closed (encrypted) — but emit a
-      // one-shot loud diagnostic so operators/integrators get a runtime signal
-      // that on-chain-public detection is disabled for this adapter, instead
-      // of silently keeping every public CG on the encrypted path. (The
-      // interface documents this fail-closed-on-absence contract; we can't
-      // make the probe a hard type-level requirement without breaking the many
-      // minimal publish-only ChainAdapter implementations.)
-      if (typeof this.chain.getContextGraphAccessPolicy === 'function' && !this.warnedMissingCgLivenessProbe) {
-        this.warnedMissingCgLivenessProbe = true;
-        this.log.warn(
-          opCtx ?? createOperationContext('share'),
-          `Chain adapter implements getContextGraphAccessPolicy but not isContextGraphActiveOnChain — ` +
-          `cannot PROVE on-chain context-graph liveness, so public-on-chain CGs will be kept on the ` +
-          `ENCRYPTED SWM path (fail-closed). Implement isContextGraphActiveOnChain to enable ` +
-          `public-CG plaintext detection.`,
-        );
-      }
-      return { kind: 'unavailable', reason: 'chain-liveness-unsupported' };
-    }
-    const live = await this.raceChainPolicyRead(
-      () => options.signal
-        ? this.chain.isContextGraphActiveOnChain!(numericId, { signal: options.signal })
-        : this.chain.isContextGraphActiveOnChain!(numericId),
-      `isContextGraphActiveOnChain(${onChainId})`,
-      options.signal,
+    const readLiveness = this.chain.isContextGraphActiveOnChain;
+    const readAccessPolicy = this.chain.getContextGraphAccessPolicy;
+    return resolveLiveAccessPolicyState(
+      {
+        isContextGraphActiveOnChain: typeof readLiveness === 'function'
+          ? (numericId, signal) => signal
+            ? readLiveness.call(this.chain, numericId, { signal })
+            : readLiveness.call(this.chain, numericId)
+          : undefined,
+        getContextGraphAccessPolicy: typeof readAccessPolicy === 'function'
+          ? (numericId, signal) => signal
+            ? readAccessPolicy.call(this.chain, numericId, { signal })
+            : readAccessPolicy.call(this.chain, numericId)
+          : undefined,
+        runBoundedRead: async (start, label, signal) => {
+          const value = await this.raceChainPolicyRead(start, label, signal);
+          return value === TIMEOUT_SENTINEL
+            ? { kind: 'timeout' }
+            : { kind: 'value', value };
+        },
+        claimMissingLivenessWarning: () => {
+          if (this.warnedMissingCgLivenessProbe) return false;
+          this.warnedMissingCgLivenessProbe = true;
+          return true;
+        },
+        warn: (ctx, message) => this.log.warn(ctx, message),
+        cacheAccessPolicy: (id, policy) => this.onChainAccessPolicyCache.set(id, policy),
+      },
+      onChainId,
+      opCtx,
+      options,
     );
-    if (live === TIMEOUT_SENTINEL) {
-      this.log.warn(
-        opCtx ?? createOperationContext('share'),
-        `readLiveOnChainAccessPolicy(${onChainId}): isContextGraphActiveOnChain timed out after ` +
-        `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — treating on-chain access policy as UNKNOWN (fail-closed)`,
-      );
-      return {
-        kind: 'unavailable',
-        reason: 'chain-liveness-read-timeout',
-        detail: `isContextGraphActiveOnChain(${onChainId}) timed out after ${CHAIN_POLICY_READ_TIMEOUT_MS}ms`,
-      };
-    }
-    if (live !== true) return { kind: 'unavailable', reason: 'chain-context-graph-inactive' };
-
-    // #884 review (🔴 GZEqI): the slot is LIVE, but DO NOT trust the
-    // onChainAccessPolicyCache for this security-downgrade decision. The cache
-    // is keyed by numeric on-chain id with no chain/deployment epoch, so after
-    // a devnet reset or numeric-id reuse a value cached as public (`0`) on the
-    // OLD chain would survive and force a NEW, possibly-private CG that now
-    // occupies the same slot onto the plaintext path. Always read the access
-    // policy FRESH from chain here (one bounded eth_call — correctness over a
-    // saved RPC). The cache is still WRITTEN below (a fresh, live-verified
-    // value is strictly an improvement for the other, decrypt-gated readers).
-    const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
-    if (typeof getAccessPolicy !== 'function') {
-      return { kind: 'unavailable', reason: 'chain-access-policy-unsupported' };
-    }
-    const policy = await this.raceChainPolicyRead(
-      () => options.signal
-        ? getAccessPolicy.call(this.chain, numericId, { signal: options.signal })
-        : getAccessPolicy.call(this.chain, numericId),
-      `getContextGraphAccessPolicy(${onChainId})`,
-      options.signal,
-    );
-    if (policy === TIMEOUT_SENTINEL) {
-      this.log.warn(
-        opCtx ?? createOperationContext('share'),
-        `readLiveOnChainAccessPolicy(${onChainId}): getContextGraphAccessPolicy timed out after ` +
-        `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — treating on-chain access policy as UNKNOWN (fail-closed)`,
-      );
-      return {
-        kind: 'unavailable',
-        reason: 'chain-access-policy-read-timeout',
-        detail: `getContextGraphAccessPolicy(${onChainId}) timed out after ${CHAIN_POLICY_READ_TIMEOUT_MS}ms`,
-      };
-    }
-    if (policy === 0 || policy === 1) {
-      this.onChainAccessPolicyCache.set(onChainId, policy);
-      return { kind: 'available', accessPolicy: policy };
-    }
-    return { kind: 'unavailable', reason: 'chain-access-policy-invalid' };
   }
 
   /** Compatibility projection for fail-closed policy consumers. */
