@@ -608,30 +608,6 @@ describe('context graph open enrollment policy', () => {
         publicKeyBytes,
       }),
     );
-    const issuedAtMs = Date.now();
-    const signed = await signAgentDelegation({
-      agentAddress: remoteWallet.address,
-      scope: joinDelegationScope(chain.deploymentId, contextGraphId),
-      issuedAtMs,
-      expiresAtMs: issuedAtMs + 24 * 60 * 60 * 1000,
-      delegateePeerId: agent.peerId,
-      agentPrivateKey: remoteWallet.privateKey,
-    });
-    const unsignedKeyDelegation = {
-      ...signed,
-      workspaceEncryptionKeys: [{
-        encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
-        publicEncryptionKey,
-        encryptionKeyProof,
-      }],
-    };
-    const manuallySignedDelegation = {
-      ...unsignedKeyDelegation,
-      workspaceEncryptionKeysSignature: await remoteWallet.signMessage(
-        computeWorkspaceEncryptionKeysAttestationDigest(unsignedKeyDelegation),
-      ),
-    };
-
     const rejectedContextGraphId = 'private-policy-cold-remote-rejects-bad-proof';
     await createPrivateCg(agent, rejectedContextGraphId, owner.agentAddress);
     await agent.setContextGraphJoinPolicy(rejectedContextGraphId, {
@@ -649,6 +625,20 @@ describe('context graph open enrollment policy', () => {
       delegateePeerId: agent.peerId,
       agentPrivateKey: remoteWallet.privateKey,
     });
+    const attestedKeyDelegation = {
+      ...rejectedSigned,
+      workspaceEncryptionKeys: [{
+        encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+        publicEncryptionKey,
+        encryptionKeyProof,
+      }],
+    };
+    const correctlyAttestedKeyDelegation = {
+      ...attestedKeyDelegation,
+      workspaceEncryptionKeysSignature: await remoteWallet.signMessage(
+        computeWorkspaceEncryptionKeysAttestationDigest(attestedKeyDelegation),
+      ),
+    };
     const tamperedProof = `${encryptionKeyProof.slice(0, -1)}${
       encryptionKeyProof.endsWith('0') ? '1' : '0'
     }`;
@@ -678,7 +668,7 @@ describe('context graph open enrollment policy', () => {
     );
     const alternatePublicKeyBytes = alternateRecipient.publicKeyBytes!;
     const substitutedDelegation = {
-      ...rejectedSigned,
+      ...correctlyAttestedKeyDelegation,
       workspaceEncryptionKeys: [{
         encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
         publicEncryptionKey: encodeWorkspaceEncryptionKey(alternatePublicKeyBytes),
@@ -692,7 +682,6 @@ describe('context graph open enrollment policy', () => {
       }],
       // A carrier may know another valid key proof, but cannot substitute it
       // while retaining the wallet attestation for the original bundle.
-      workspaceEncryptionKeysSignature: manuallySignedDelegation.workspaceEncryptionKeysSignature,
     };
     await expect(agent.processIncomingJoinRequest(
       rejectedContextGraphId,
