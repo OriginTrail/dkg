@@ -31,6 +31,10 @@ export function createRecoverableLazyView<Props extends object>(
   load: () => Promise<React.ComponentType<Props>>,
   label: LoadingLabel<Props>,
 ) {
+  function RecoverableChunkLoadFailure(_props: Props) {
+    return <ChunkLoadFailure />;
+  }
+
   const LazyView = React.lazy(async () => {
     try {
       return { default: await load() };
@@ -38,7 +42,7 @@ export function createRecoverableLazyView<Props extends object>(
       const chunkFailure = findChunkLoadFailure(error);
       if (!chunkFailure) throw error;
       console.error('Failed to load a lazy view chunk.', chunkFailure);
-      return { default: ChunkLoadFailure as React.ComponentType<Props> };
+      return { default: RecoverableChunkLoadFailure };
     }
   });
 
