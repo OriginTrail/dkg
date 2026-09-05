@@ -43,7 +43,10 @@ export function getPromoteReplaySafeErrorDiagnostic(
 export function classifyExactSwmGraphReplaceFailure(error: unknown): unknown {
   if (isStoreOperationTimeoutError(error)
     && error.outcome === 'indeterminate'
-    && error.storeOperation === 'replaceGraph') {
+    && (
+      error.storeOperation === 'replaceGraph'
+      || error.storeOperation === 'replaceGraphAndSubject'
+    )) {
     try {
       Object.defineProperty(error, promoteReplaySafeBrand, {
         value: true,

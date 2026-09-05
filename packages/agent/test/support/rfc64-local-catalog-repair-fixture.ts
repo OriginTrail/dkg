@@ -240,6 +240,29 @@ export async function seedInventoryAssetV1(
   suffix: string,
   reservedKaId: bigint,
 ): Promise<Readonly<{ seal: AssertionSeal; scopeDigest: Digest32V1 }>> {
+  const seeded = await seedDurableWorkspaceAssetV1(agent, suffix, reservedKaId);
+  await expect(agent.recordRfc64SwmAuthorInventoryShadowV1({
+    contextGraphId: CONTEXT_GRAPH_ID,
+    assertionCoordinate: seeded.assertionCoordinate,
+    lifecycleAgentAddress: AUTHOR,
+    shareOperationId: seeded.shareOperationId,
+  })).resolves.toMatchObject({ status: 'applied' });
+  return Object.freeze({
+    seal: seeded.seal,
+    scopeDigest: seeded.scopeDigest,
+  });
+}
+
+export async function seedDurableWorkspaceAssetV1(
+  agent: DKGAgent,
+  suffix: string,
+  reservedKaId: bigint,
+): Promise<Readonly<{
+  seal: AssertionSeal;
+  scopeDigest: Digest32V1;
+  assertionCoordinate: string;
+  shareOperationId: string;
+}>> {
   const assertionCoordinate = `repair-${suffix}`;
   const shareOperationId = `repair-operation-${suffix}`;
   const canonicalSeal = await authorSealV1(reservedKaId);
@@ -290,14 +313,10 @@ export async function seedInventoryAssetV1(
     assertionVersion: canonicalSeal.assertionVersion,
     shareOperationId,
   });
-  await expect(agent.recordRfc64SwmAuthorInventoryShadowV1({
-    contextGraphId: CONTEXT_GRAPH_ID,
-    assertionCoordinate,
-    lifecycleAgentAddress: AUTHOR,
-    shareOperationId,
-  })).resolves.toMatchObject({ status: 'applied' });
   return Object.freeze({
     seal,
+    assertionCoordinate,
+    shareOperationId,
     scopeDigest: computeSwmAuthorInventoryScopeDigestV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,

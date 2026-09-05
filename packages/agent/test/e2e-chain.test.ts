@@ -132,6 +132,9 @@ describe('E2E: DKGAgent with real blockchain', () => {
       nodeRole: 'core',
       listenPort: 0,
       skills: [],
+      // This suite exercises the one-release legacy GossipSub rollback. In
+      // 10.0.16 omission selects catalog authority and suppresses that topic.
+      rfc64CatalogActivation: { enabled: false },
       chainConfig: makeChainConfig(HARDHAT_KEYS.EXTRA1, HARDHAT_KEYS.EXTRA3),
     });
     agents.push(agentA);
@@ -142,6 +145,7 @@ describe('E2E: DKGAgent with real blockchain', () => {
       nodeRole: 'core',
       listenPort: 0,
       skills: [],
+      rfc64CatalogActivation: { enabled: false },
       chainConfig: makeChainConfig(HARDHAT_KEYS.EXTRA2, HARDHAT_KEYS.PUBLISHER2),
     });
     agents.push(agentB);

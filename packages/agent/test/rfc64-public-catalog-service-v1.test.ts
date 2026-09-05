@@ -58,6 +58,8 @@ import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
   RFC64_PUBLIC_CATALOG_HEAD_FETCH_KIND_V1,
   RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1,
+  RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1,
+  RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V2,
   encodeRfc64PublicCatalogHeadAnnouncementV1,
   encodeRfc64PublicCatalogHeadFetchRequestV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
@@ -1318,6 +1320,8 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       `register:${RFC64_CATALOG_BUNDLE_FETCH_PROTOCOL_V2}`,
       `register:${RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1}`,
       `register:${RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1}`,
+      `register:${RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1}`,
+      `register:${RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V2}`,
     ]);
     await service.close();
   });
@@ -1396,6 +1400,8 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     expect(service.started).toBe(false);
     expect(router.handlers.has(RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1)).toBe(true);
     expect(router.handlers.has(RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1)).toBe(true);
+    expect(router.handlers.has(RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1)).toBe(true);
+    expect(router.handlers.has(RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V2)).toBe(true);
     expect(router.handlers.has(RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1)).toBe(true);
     expect(router.handlers.has(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1)).toBe(true);
     expect(router.handlers.has(RFC64_CATALOG_OBJECT_FETCH_PROTOCOL_V2)).toBe(true);
@@ -1430,6 +1436,8 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     for (const protocolId of [
       RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
       RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1,
+      RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1,
+      RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V2,
       RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1,
       RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1,
       RFC64_CATALOG_OBJECT_FETCH_PROTOCOL_V2,
@@ -1437,6 +1445,76 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     ]) {
       expect(countEvent(router, `unregister:${protocolId}`)).toBe(1);
     }
+  });
+
+  it('pulls an authenticated current head past stale ambient history and retires that history', async () => {
+    const router = new RecordingRouter();
+    const firstStarted = deferred<void>();
+    const releaseFirst = deferred<void>();
+    const applied = new Set<string>();
+    const reconciledVersions: string[] = [];
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest: async () => null },
+      receiver: { maxConcurrent: 1, maxAttempts: 1, retryBackoffMs: 0 },
+      native: nativeOptions(() => ({
+        isHeadApplied: async (head) => applied.has(head.catalogHeadObjectDigest),
+        reconcileHead: async (_peerId, head) => {
+          reconciledVersions.push(head.catalogVersion);
+          if (head.catalogVersion === '1') {
+            firstStarted.resolve(undefined);
+            await releaseFirst.promise;
+            throw new Error('stale intermediate head is no longer composable');
+          }
+          applied.add(head.catalogHeadObjectDigest);
+          return 'applied';
+        },
+      })),
+    });
+    const policy = acceptPolicy(service);
+    const headAt = (catalogVersion: string, byte: string) => ({
+      ...announcement(policy.policyDigest),
+      catalogVersion,
+      catalogHeadObjectDigest: `0x${byte.repeat(64)}` as Digest32V1,
+      signatureVariantDigest: `0x${byte.repeat(64)}` as Digest32V1,
+    });
+    const current = headAt('40', 'd');
+    const discovery = vi.spyOn(service, 'discoverCurrentCatalogHead').mockResolvedValue(
+      Object.freeze({ announcement: current, head: {} as never }),
+    );
+    service.start();
+
+    await router.invoke(
+      RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
+      encodeRfc64PublicCatalogHeadAnnouncementV1(headAt('1', 'a')),
+      'peer-provider',
+    );
+    await firstStarted.promise;
+    await router.invoke(
+      RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
+      encodeRfc64PublicCatalogHeadAnnouncementV1(headAt('2', 'b')),
+      'peer-provider',
+    );
+    await router.invoke(
+      RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
+      encodeRfc64PublicCatalogHeadAnnouncementV1(headAt('3', 'c')),
+      'peer-provider',
+    );
+    await vi.waitFor(() => expect(discovery).toHaveBeenCalled());
+    releaseFirst.resolve(undefined);
+
+    await service.whenReceiverIdle();
+    expect(reconciledVersions).toEqual(['1', '40']);
+    expect(service.stats().receiver).toMatchObject({
+      applied: 1,
+      failed: 1,
+      supersededQueued: 2,
+      queued: 0,
+      inFlight: 0,
+    });
+    await service.close();
   });
 
   it('settles a single-provider synchronization closed when shutdown wins the discovery race', async () => {
@@ -1477,6 +1555,113 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     expect(failure).toBeInstanceOf(Rfc64CatalogReconciliationTerminalErrorV1);
     expect(failure).toMatchObject({ outcome: 'closed', terminalReason: null });
     expect(reconcileHead).not.toHaveBeenCalled();
+  });
+
+  it('revalidates roster authority after discovery and before queue admission', async () => {
+    const reconcileHead = vi.fn(async () => 'applied' as const);
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: new RecordingRouter().asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      native: nativeOptions(() => ({ isHeadApplied: async () => false, reconcileHead })),
+    });
+    const policy = catalogPolicy(CONTEXT_GRAPH_ID, 1, 1);
+    const policyDigest = `0x${'91'.repeat(32)}` as Digest32V1;
+    service.acceptAuthoritativePolicySnapshot({
+      policy,
+      policyDigest,
+      roster: memberRoster(policy, policyDigest),
+    });
+    service.start();
+    const discovery = deferred<Readonly<{
+      announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+      head: never;
+    }>>();
+    vi.spyOn(service, 'discoverCurrentCatalogHead').mockReturnValue(discovery.promise);
+    const synchronization = service.synchronizeCurrentCatalogHead({
+      remotePeerId: 'peer-a',
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        era: '0',
+      },
+    });
+    const failure = synchronization.then(() => null, (error: unknown) => error);
+    await Promise.resolve();
+    service.acceptAuthoritativePolicySnapshot({
+      policy,
+      policyDigest,
+      roster: {
+        ...rosterExcluding(policy, policyDigest, AUTHOR),
+        version: '1',
+        previousRosterDigest: `0x${'92'.repeat(32)}` as Digest32V1,
+      },
+    });
+    discovery.resolve(Object.freeze({
+      announcement: announcement(policyDigest),
+      head: {} as never,
+    }));
+    await expect(failure).resolves.toBeInstanceOf(Error);
+    await expect(failure).resolves.toMatchObject({
+      message: expect.stringMatching(/not bound to the locally accepted policy snapshot/u),
+    });
+    expect(reconcileHead).not.toHaveBeenCalled();
+    await service.close();
+  });
+
+  it('revalidates receiver activity after discovery and before queue admission', async () => {
+    let active = true;
+    const reconcileHead = vi.fn(async () => 'applied' as const);
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: new RecordingRouter().asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      resolveContextGraphAuthority: (contextGraphId) => ({
+        contextGraphId,
+        selected: true,
+        eligible: true,
+        active,
+        mode: 'catalog',
+        killSwitchActive: false,
+        legacySyncAllowed: !active,
+        track2Enabled: active,
+        authoringAllowed: active,
+        reconciliationLane: active ? 'catalog-apply' : 'disabled',
+      }),
+      native: nativeOptions(() => ({ isHeadApplied: async () => false, reconcileHead })),
+    });
+    const policy = acceptPolicy(service);
+    service.start();
+    const discovery = deferred<Readonly<{
+      announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+      head: never;
+    }>>();
+    vi.spyOn(service, 'discoverCurrentCatalogHead').mockReturnValue(discovery.promise);
+    const synchronization = service.synchronizeCurrentCatalogHead({
+      remotePeerId: 'peer-a',
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        era: '0',
+      },
+    });
+    const failure = synchronization.then(() => null, (error: unknown) => error);
+    await Promise.resolve();
+    active = false;
+    service.deactivateReceiverContextGraph(CONTEXT_GRAPH_ID);
+    discovery.resolve(Object.freeze({
+      announcement: announcement(policy.policyDigest),
+      head: {} as never,
+    }));
+    await expect(failure).resolves.toMatchObject({
+      message: expect.stringMatching(/disabled for legacy-mode CG/u),
+    });
+    expect(reconcileHead).not.toHaveBeenCalled();
+    await service.close();
   });
 
   it('serializes remote apply before the local-author convergence it triggers', async () => {

@@ -117,6 +117,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
       listenHost: '127.0.0.1',
       dataDir,
       nodeRole: 'core',
+      rfc64CatalogActivation: { enabled: false },
       swmHostMode: strip === undefined ? { enabled: true } : { enabled: true, stripCiphertext: strip },
     });
     agents.push(core);
