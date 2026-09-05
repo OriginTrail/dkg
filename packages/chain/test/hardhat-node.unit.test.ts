@@ -33,6 +33,7 @@ it('real concurrent setups use distinct RPCs, isolated deployment manifests and 
     expect(b.context.hubAddress).toMatch(/^0x[0-9a-fA-F]{40}$/);
     expect(existsSync(manifest) ? readFileSync(manifest) : undefined).toEqual(before);
     await a.stop();
+    expect(await waitForNode(a.context.rpcUrl, 500)).toBe(false);
     expect(existsSync(a.env.DKG_HARDHAT_CONTEXT_FILE)).toBe(false);
     expect(existsSync(b.env.DKG_HARDHAT_CONTEXT_FILE)).toBe(true);
     expect(await waitForNode(b.context.rpcUrl, 1000)).toBe(true);

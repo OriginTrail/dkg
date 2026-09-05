@@ -19,7 +19,11 @@ it('two daemon children bind their own ports and one teardown leaves the other a
       expect(Number((await readFile(join(daemon.home, 'api.port'), 'utf8')).trim())).toBe(daemon.apiPort);
       expect(JSON.parse(await readFile(join(daemon.home, 'config.json'), 'utf8'))).toMatchObject({ apiPort: 0, listenPort: 0 });
     }
-    await stopLiveDaemon(daemons.shift());
+    const stopped = daemons[0];
+    await stopLiveDaemon(stopped);
+    expect(stopped.child.exitCode !== null || stopped.child.signalCode !== null).toBe(true);
+    await expect(fetch(`${stopped.base}/api/status`, { signal: AbortSignal.timeout(1000) })).rejects.toThrow();
+    daemons.shift();
     expect((await getJson(daemons[0], '/api/status')).status).toBe(200);
     expect(foreign.listening).toBe(true);
   } finally {
