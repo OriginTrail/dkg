@@ -44,10 +44,10 @@ vi.mock('@origintrail-official/dkg-agent', async (importOriginal) => ({
 import { loadNetworkConfig, resolveChainConfig } from '../src/config.js';
 import { registerInitCommand } from '../src/commands/init.js';
 
-async function runInit() {
+async function runInit(networkName = 'testnet') {
   const program = new Command().exitOverride();
   registerInitCommand(program);
-  await program.parseAsync(['init', '--network', 'testnet', '--role', 'edge'], { from: 'user' });
+  await program.parseAsync(['init', '--network', networkName, '--role', 'edge'], { from: 'user' });
   expect(mocks.saveConfig).toHaveBeenCalledTimes(1);
   expect(mocks.questions.some((prompt) => prompt.startsWith('RPC URL'))).toBe(true);
   expect(mocks.questions.some((prompt) => prompt.startsWith('Hub contract address'))).toBe(true);
@@ -55,6 +55,11 @@ async function runInit() {
 }
 
 describe('init wizard chain persistence', () => {
+  const advancedOverrides = {
+    walletRpcUrls: ['https://old-wallet.invalid'], tokenAddress: '0x0000000000000000000000000000000000000042',
+    approvalPolicy: 'per-publish', minPublisherNativeWei: '123', minPublisherTracWei: '456',
+    finalityConfirmations: 7, maxFeePerGasWei: '789', cgRegistryScanPageSize: 500, receiptTimeoutMs: 45_000,
+  };
   beforeEach(async () => {
     vi.clearAllMocks();
     mocks.home = await mkdtemp(join(tmpdir(), 'dkg-init-command-'));
@@ -118,5 +123,55 @@ describe('init wizard chain persistence', () => {
     const saved = await runInit();
     expect(saved.chain).toEqual({ type: 'mock', chainId: 'mock:31337', mockIdentityId: '7' });
     expect(resolveChainConfig(saved, await loadNetworkConfig('testnet'))).toEqual(saved.chain);
+  });
+
+  it('inherits backups when returning an off-overlay primary to the network default', async () => {
+    const network = await loadNetworkConfig('testnet');
+    const defaults = resolveChainConfig(undefined, network)!;
+    expect(defaults.rpcUrls?.length).toBeGreaterThan(0);
+    mocks.loadConfig.mockResolvedValue({ name: 'node', apiPort: 9200, networkConfig: 'testnet', chain: {
+      type: 'evm', rpcUrl: 'http://127.0.0.1:8545',
+    } });
+    mocks.answers = { 'RPC URL': defaults.rpcUrl! };
+
+    const saved = await runInit();
+    expect(saved.chain).toBeUndefined();
+    expect(resolveChainConfig(saved, network)?.rpcUrls).toEqual(defaults.rpcUrls);
+    expect(resolveChainConfig(saved, { chain: { ...network!.chain, rpcUrls: ['https://rotated.invalid'] } })?.rpcUrls)
+      .toEqual(['https://rotated.invalid']);
+  });
+
+  it.each(['explicit none', 'persisted empty override'])('keeps deliberate backup removal: %s', async (mode) => {
+    mocks.loadConfig.mockResolvedValue({ name: 'node', apiPort: 9200, networkConfig: 'testnet', chain: {
+      type: 'evm', ...(mode === 'persisted empty override' ? { rpcUrls: [] } : {}),
+    } });
+    if (mode === 'explicit none') mocks.answers = { 'Backup RPC URLs': 'none' };
+    const saved = await runInit();
+    expect(saved.chain).toEqual({ type: 'evm', rpcUrls: [] });
+    expect(resolveChainConfig(saved, await loadNetworkConfig('testnet'))?.rpcUrls).toEqual([]);
+  });
+
+  it('preserves all supported same-network overrides but not unknown or mock-only fields', async () => {
+    mocks.loadConfig.mockResolvedValue({ name: 'node', apiPort: 9200, networkConfig: 'testnet', chain: {
+      type: 'evm', rpcUrl: 'https://operator.invalid', ...advancedOverrides,
+      mockIdentityId: '7', unknownChainField: 'unowned',
+    } });
+    const saved = await runInit();
+    expect(saved.chain).toEqual({ type: 'evm', rpcUrl: 'https://operator.invalid', ...advancedOverrides });
+  });
+
+  it('resets chain-specific settings on a network switch and retains portable operator tuning', async () => {
+    mocks.loadConfig.mockResolvedValue({ name: 'node', apiPort: 9200, networkConfig: 'mainnet-base', chain: {
+      type: 'evm', rpcUrl: 'https://old-primary.invalid', rpcUrls: [],
+      hubAddress: '0x0000000000000000000000000000000000000088', chainId: 'base:8453',
+      ...advancedOverrides, mockIdentityId: '7', unknownChainField: 'unowned',
+    } });
+    const saved = await runInit('testnet');
+    expect(saved.chain).toEqual({ type: 'evm', cgRegistryScanPageSize: 500, receiptTimeoutMs: 45_000 });
+    const network = await loadNetworkConfig('testnet');
+    const defaults = resolveChainConfig(undefined, network)!;
+    expect(resolveChainConfig(saved, network)).toMatchObject({
+      rpcUrl: defaults.rpcUrl, rpcUrls: defaults.rpcUrls, hubAddress: defaults.hubAddress, chainId: defaults.chainId,
+    });
   });
 });
