@@ -3,6 +3,7 @@
 import { Rfc64CoalescingSupervisorV1 } from './coalescing-supervisor-v1.js';
 import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
   './catalog-authority-config-v1.js';
+import type { Rfc64CatalogWorkloadOwnerV1 } from './catalog-runtime-v1.js';
 
 export interface Rfc64CatalogAuthorityRefreshSchedulerV1 {
   setInterval(
@@ -36,19 +37,23 @@ export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
 }
 
 /** One bounded recurring authority pass with explicit scheduling and shutdown ownership. */
-export class Rfc64CatalogAuthorityRefreshLoopV1 {
+export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadOwnerV1 {
   readonly #scheduler: Rfc64CatalogAuthorityRefreshSchedulerV1;
-  readonly #supervisor: Rfc64CoalescingSupervisorV1;
+  #supervisor: Rfc64CoalescingSupervisorV1 | null = null;
   #timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly options: Rfc64CatalogAuthorityRefreshLoopOptionsV1) {
     this.#scheduler = options.scheduler ?? rfc64CatalogAuthorityRefreshSchedulerV1;
-    this.#supervisor = new Rfc64CoalescingSupervisorV1({
+  }
+
+  #createSupervisor(): Rfc64CoalescingSupervisorV1 {
+    return new Rfc64CoalescingSupervisorV1({
       requestWhileRunning: 'drop',
       runPass: async (signal) => {
         // Sequential refresh is an intentional global bound. A large Core
         // responsibility set cannot turn one timer tick into an RPC burst.
         for (const contextGraphId of this.options.readActiveContextGraphIds()) {
+          if (signal.aborted) return;
           try {
             await this.options.refreshContextGraph(contextGraphId, signal);
             if (signal.aborted) return;
@@ -66,10 +71,8 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 {
   }
 
   start(): void {
-    if (this.#supervisor.closed) {
-      throw new Error('RFC-64 catalog authority refresh loop is closed');
-    }
-    if (this.#timer !== null) return;
+    if (this.#supervisor !== null) return;
+    this.#supervisor = this.#createSupervisor();
     this.#timer = this.#scheduler.setInterval(
       this.trigger,
       RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs,
@@ -78,18 +81,21 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 {
   }
 
   readonly trigger = (): void => {
-    this.#supervisor.request();
+    this.#supervisor?.request();
   };
 
   whenIdle(): Promise<void> {
-    return this.#supervisor.whenIdle();
+    return this.#supervisor?.whenIdle() ?? Promise.resolve();
   }
 
-  close(): Promise<void> {
+  async close(): Promise<void> {
     if (this.#timer !== null) {
       this.#scheduler.clearInterval(this.#timer);
       this.#timer = null;
     }
-    return this.#supervisor.close();
+    const supervisor = this.#supervisor;
+    if (supervisor === null) return;
+    await supervisor.close();
+    if (this.#supervisor === supervisor) this.#supervisor = null;
   }
 }

@@ -442,6 +442,8 @@ import {
 } from './dkg-agent-rfc64-catalog-bootstrap.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
 import { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
+import { Rfc64CatalogAuthorityRefreshLoopV1 } from
+  './rfc64/catalog-authority-refresh-loop-v1.js';
 import {
   resolveRfc64RuntimeCatalogBootstrapConfigV1,
   resolveRfc64CatalogExecutionPlanV1,
@@ -937,6 +939,20 @@ export class DKGAgent extends DKGAgentBase {
         warn: (ctx, message) => this.log.warn(ctx, message),
       }),
     );
+    const authorityRefreshOwner = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => this.readRfc64CatalogResponsibilitiesV1()
+        .filter(({ active, mode }) => active && mode !== 'legacy')
+        .map(({ contextGraphId }) => contextGraphId),
+      refreshContextGraph: (contextGraphId, signal) => (
+        this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal)
+      ),
+      onRefreshFailure: (contextGraphId, error) => {
+        this.log.warn(
+          createOperationContext('system'),
+          `RFC-64 authority refresh incomplete for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+    });
     this.rfc64CatalogRuntimeV1 = new Rfc64CatalogRuntimeV1({
       inventoryObservers: {
         open: () => this.openRfc64SwmInventoryObserversV1(),
@@ -950,8 +966,12 @@ export class DKGAgent extends DKGAgentBase {
       receiverAdmission: {
         close: () => this.closeRfc64PublicCatalogReceiverAdmissionV1(),
       },
+      authorityRefresh: authorityRefreshOwner,
       bootstrap: bootstrapOwner,
       projection: projectionOwner,
+      mutationPersistence: {
+        close: () => this.closeRfc64PublicCatalogMutationPersistenceV1(),
+      },
     });
     this.rfc64SwmRecoveryCoordinatorV1 = new Rfc64SwmRecoveryCoordinatorV1({
       admission: {

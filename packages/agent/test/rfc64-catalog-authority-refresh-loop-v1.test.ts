@@ -78,7 +78,14 @@ describe('RFC-64 catalog authority refresh loop', () => {
     scheduled[0]!.callback();
     await loop.whenIdle();
     expect(calls).toBe(2);
-    expect(() => loop.start()).toThrow('RFC-64 catalog authority refresh loop is closed');
+
+    loop.start();
+    await loop.whenIdle();
+    expect(scheduled).toHaveLength(2);
+    expect(scheduled[1]!.handle).not.toBe(scheduled[0]!.handle);
+    expect(calls).toBe(3);
+    await loop.close();
+    expect(cleared).toEqual([scheduled[0]!.handle, scheduled[1]!.handle]);
   });
 
   it('reports a failed context graph and continues the bounded pass', async () => {
@@ -96,7 +103,7 @@ describe('RFC-64 catalog authority refresh loop', () => {
       },
     });
 
-    loop.trigger();
+    loop.start();
     await loop.whenIdle();
     expect(attempts).toEqual(['cg-a', 'cg-b']);
     expect(reported).toEqual([{ contextGraphId: 'cg-a', error: failure }]);
@@ -121,7 +128,9 @@ describe('RFC-64 catalog authority refresh loop', () => {
         activeSignal = signal;
         signal.addEventListener('abort', markAborted, { once: true });
         markStarted();
-        // Deliberately ignore cancellation until the physical operation retires.
+        // Deliberately ignore cancellation and resolve successfully only when
+        // the physical operation retires. The loop, not this stub, must fence
+        // the next context graph after shutdown begins.
         await retirement;
       },
       onRefreshFailure: (contextGraphId, error) => {
