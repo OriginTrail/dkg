@@ -11,7 +11,7 @@
     "dev:ui": "vite",
     "test": "vitest run",
     "test:types": "tsc --project tsconfig.type-tests.json",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs node-ui",
     "test:e2e": "playwright test",
     "test:e2e:devnet-local": "cross-env PW_DEVNET_LOCAL=1 playwright test e2e/specs/devnet-local",
     "test:e2e:hw-mock": "playwright test --config playwright.hw-mock.config.ts",

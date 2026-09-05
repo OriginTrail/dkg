@@ -1,0 +1,86 @@
+[
+  {
+    "pattern": "packages/node-ui/e2e/specs/devnet-local/**",
+    "lane": "browser-local",
+    "reason": "Heavy destructive scenarios use isolated devnet in scheduled main CI or explicit local runs",
+    "cadence": "nightly/manual",
+    "command": "pnpm --dir packages/node-ui test:e2e:devnet-local"
+  },
+  {
+    "pattern": "packages/*/test/archive/**",
+    "lane": "archive",
+    "reason": "Historical V8/V9 fixtures; excluded from V10 deploy set",
+    "cadence": "historical",
+    "command": "git history"
+  },
+  {
+    "pattern": "packages/evm-module/test/**",
+    "lane": "solidity",
+    "reason": "Hardhat resolves the active contract tests; archive route is separate",
+    "cadence": "required",
+    "command": "pnpm --dir packages/evm-module test"
+  },
+  {
+    "pattern": "packages/node-ui/e2e/specs/**",
+    "lane": "browser",
+    "reason": "Four-node browser suite; devnet-local subdirectory has a separate local command",
+    "cadence": "required",
+    "command": "pnpm test:e2e:ui"
+  },
+  {
+    "pattern": "packages/adapter-hermes/pytests/test_*.py",
+    "lane": "python",
+    "reason": "Hermes runtime Python tests required in supporting job",
+    "cadence": "required",
+    "command": "pnpm --dir packages/adapter-hermes test:py"
+  },
+  {
+    "pattern": "scripts/lib/__tests__/*.test.mjs",
+    "lane": "scripts",
+    "reason": "Repository tooling checks run in build gate",
+    "cadence": "required",
+    "command": "pnpm test:scripts"
+  },
+  {
+    "pattern": "devnet/**",
+    "lane": "devnet",
+    "reason": "Developer and certification suites; suite manifest and root scripts document prerequisites",
+    "cadence": "manual",
+    "command": "resolve"
+  },
+  {
+    "pattern": "demo/**",
+    "lane": "demo",
+    "reason": "Demo-local smoke tests",
+    "cadence": "manual",
+    "command": "resolve"
+  },
+  {
+    "pattern": "scripts/audit-*.test.mjs",
+    "lane": "audit-tools",
+    "reason": "Node test runner fixtures for diagnostic tools",
+    "cadence": "required",
+    "command": "node --test scripts/audit-*.test.mjs"
+  },
+  {
+    "pattern": "packages/agent/scripts/*.test.mjs",
+    "lane": "recovery-tool",
+    "reason": "Recovery scenario operator script contract",
+    "cadence": "required",
+    "command": "node --test packages/agent/scripts/*.test.mjs"
+  },
+  {
+    "pattern": "test-systems/*.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Native Oxigraph recovery plus real backend conformance; Blazegraph mandatory in CI",
+    "cadence": "required",
+    "command": "DKG_REQUIRE_BLAZEGRAPH=1 pnpm test:conformance"
+  },
+  {
+    "pattern": "tools/observability/w1/*.test.yaml",
+    "lane": "prometheus-rules",
+    "reason": "Promtool rule regression fixtures; requires Prometheus tools",
+    "cadence": "manual",
+    "command": "cd tools/observability/w1 && promtool test rules w1-rules.test.yaml"
+  }
+]

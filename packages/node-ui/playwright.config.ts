@@ -76,7 +76,7 @@ export default defineConfig({
   // mock lane, which ran in 15–30s. Give every test room to talk to the daemon.
   timeout: CI ? 120_000 : 60_000,
   reporter: CI
-    ? [['github'], ['html', { open: 'never' }], ['junit', { outputFile: 'results.xml' }]]
+    ? [['github'], ['json', { outputFile: 'playwright-report/results.json' }], ['html', { open: 'never' }], ['junit', { outputFile: 'results.xml' }]]
     : [['list'], ['html', { open: 'on-failure' }], ['junit', { outputFile: 'results.xml' }]],
 
   // globalTeardown stops the devnet ONLY if our bootstrap started it (it leaves

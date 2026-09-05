@@ -1,7 +1,7 @@
 {
   "name": "@origintrail-official/dkg-adapter-prime-agent",
   "version": "10.0.15",
-  "description": "Prime Intellect Prime Agent adapter — collocates a Prime Agent with a DKG V10 node for verifiable shared memory",
+  "description": "Prime Intellect Prime Agent adapter \u2014 collocates a Prime Agent with a DKG V10 node for verifiable shared memory",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -25,7 +25,7 @@
     "build:extension": "tsc -p extension/tsconfig.json",
     "test": "pnpm run build:extension && vitest run",
     "test:ts": "pnpm run build:extension && vitest run",
-    "test:coverage": "pnpm run build:extension && vitest run --coverage",
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs adapter-prime-agent",
     "clean": "node -e \"const fs=require('fs'); for (const p of ['dist','extension/dist','tsconfig.tsbuildinfo']) fs.rmSync(p,{recursive:true,force:true});\""
   },
   "dependencies": {

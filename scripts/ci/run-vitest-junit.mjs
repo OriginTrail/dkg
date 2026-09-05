@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { coverageReceipt } from '../lib/coverage-artifacts.mjs';
 
 const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(SCRIPT_DIRECTORY, '../..');
@@ -43,7 +44,7 @@ function parseArguments(argv) {
 
 export function buildVitestJunitInvocation(
   argv,
-  { readPackageJson = (filePath) => JSON.parse(fs.readFileSync(filePath, 'utf8')) } = {},
+  { readPackageJson = (filePath) => JSON.parse(fs.readFileSync(filePath, 'utf8')), coverage = process.env.DKG_CI_COVERAGE === '1' } = {},
 ) {
   const { laneName, shard, testArguments } = parseArguments(argv);
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(laneName)) {
@@ -72,6 +73,9 @@ export function buildVitestJunitInvocation(
   }
 
   return {
+    coverage,
+    laneName,
+    shard,
     command: process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm',
     output,
     outputPath,
@@ -82,6 +86,7 @@ export function buildVitestJunitInvocation(
       'vitest',
       'run',
       ...testArguments,
+      ...(coverage ? ['--coverage', '--coverage.thresholds.lines=0', '--coverage.thresholds.functions=0', '--coverage.thresholds.branches=0', '--coverage.thresholds.statements=0'] : []),
       '--reporter=default',
       '--reporter=junit',
       `--outputFile.junit=${output}`,
@@ -100,6 +105,9 @@ export function runVitestJunit(argv, { spawnProcess = spawnSync } = {}) {
 
   fs.mkdirSync(path.dirname(invocation.outputPath), { recursive: true });
   fs.rmSync(invocation.outputPath, { force: true });
+  const receiptPath = invocation.outputPath.replace(/\.xml$/, '.coverage.json');
+  fs.rmSync(receiptPath, { force: true });
+  if (invocation.coverage) fs.rmSync(path.join(REPO_ROOT, 'packages', invocation.laneName, 'coverage'), { recursive: true, force: true });
   const result = spawnProcess(invocation.command, invocation.args, {
     cwd: REPO_ROOT,
     env: process.env,
@@ -118,6 +126,7 @@ export function runVitestJunit(argv, { spawnProcess = spawnSync } = {}) {
   try {
     const report = fs.statSync(invocation.outputPath);
     if (!report.isFile() || report.size === 0) throw new Error('report is empty');
+    if (invocation.coverage) fs.writeFileSync(receiptPath, JSON.stringify(coverageReceipt(REPO_ROOT, invocation.laneName, invocation.shard)));
   } catch (error) {
     console.error(`vitest-junit: successful test command did not create ${invocation.output}: ${error.message}`);
     return 1;

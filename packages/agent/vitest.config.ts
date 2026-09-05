@@ -1,6 +1,6 @@
 import { hardhatTestEnvironment } from '../../scripts/lib/hardhat-test-env.mjs';
 import { defineConfig } from 'vitest/config';
-import { tornadoAgentCoverage } from '../../vitest.coverage';
+import { coverageForPackage } from '../../vitest.coverage';
 
 const hardhatEnv = hardhatTestEnvironment(9547);
 
@@ -17,6 +17,7 @@ const SQLITE_EXEC_ARGV = ['--experimental-sqlite', '--no-warnings=ExperimentalWa
 
 export default defineConfig({
   test: {
+    allowOnly: false,
     include: ['test/**/*.test.ts'],
     exclude: ['test/e2e-chain.test.ts', 'test/e2e-finalization.test.ts', 'test/a2-pointers-and-b3-addressing.test.ts'],
     testTimeout: 120_000,
@@ -28,11 +29,6 @@ export default defineConfig({
     // becomes process-level argv on each test fork.
     pool: 'forks',
     execArgv: SQLITE_EXEC_ARGV,
-    coverage: {
-      provider: 'v8',
-      reporter: ['text', 'html', 'lcov', 'json-summary'],
-      reportsDirectory: './coverage',
-      thresholds: tornadoAgentCoverage,
-    },
+    coverage: coverageForPackage('agent'),
   },
 });

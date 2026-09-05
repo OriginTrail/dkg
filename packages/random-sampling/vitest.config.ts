@@ -1,4 +1,5 @@
 import { hardhatTestEnvironment } from '../../scripts/lib/hardhat-test-env.mjs';
+import { coverageForPackage } from '../../vitest.coverage';
 import { defineConfig } from 'vitest/config';
 
 // Distinct port per Hardhat-backed test package so parallel monorepo
@@ -8,13 +9,10 @@ import { defineConfig } from 'vitest/config';
 // `agent`, see #957.)
 const hardhatEnv = hardhatTestEnvironment(9550);
 
-// Coverage thresholds intentionally omitted while the package is just
-// a skeleton. Once Phase 3+ lands real prover / extractor / mutual-aid
-// code, add a `tornadoRandomSamplingCoverage` export to
-// `vitest.coverage.ts` and ratchet floors here — random sampling is
-// Tornado-tier (gas-stake-rewards path).
+// Full-source critical-path coverage is ratcheted in the shared policy.
 export default defineConfig({
   test: {
+    allowOnly: false,
     include: ['test/**/*.test.ts'],
     // The Hardhat e2e file spawns a real node (~20s startup) and
     // publishes a real KC before driving the prover; bumping the
@@ -25,10 +23,6 @@ export default defineConfig({
     globalSetup: ['../chain/test/hardhat-global-setup.ts'],
     maxWorkers: 1,
     env: hardhatEnv,
-    coverage: {
-      provider: 'v8',
-      reporter: ['text', 'html', 'lcov', 'json-summary'],
-      reportsDirectory: './coverage',
-    },
+    coverage: coverageForPackage('random-sampling'),
   },
 });

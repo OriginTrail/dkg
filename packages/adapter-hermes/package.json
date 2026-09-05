@@ -1,7 +1,7 @@
 {
   "name": "@origintrail-official/dkg-adapter-hermes",
   "version": "10.0.15",
-  "description": "Hermes Agent adapter — connects Hermes AI agents to a DKG V10 node for verifiable shared memory",
+  "description": "Hermes Agent adapter \u2014 connects Hermes AI agents to a DKG V10 node for verifiable shared memory",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -24,7 +24,7 @@
     "test": "vitest run && node pytests/run-pytest.mjs",
     "test:ts": "vitest run",
     "test:py": "node pytests/run-pytest.mjs",
-    "test:coverage": "vitest run --coverage && node pytests/run-pytest.mjs --coverage",
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs adapter-hermes && node pytests/run-pytest.mjs --coverage",
     "clean": "node -e \"const fs=require('fs'); for (const p of ['dist','tsconfig.tsbuildinfo']) fs.rmSync(p,{recursive:true,force:true});\""
   },
   "dependencies": {

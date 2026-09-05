@@ -1,0 +1,15 @@
+export default {
+  $schema: './node_modules/@stryker-mutator/core/schema/stryker-schema.json',
+  testRunner: 'vitest',
+  plugins: ['@stryker-mutator/vitest-runner'],
+  vitest: { configFile: 'vitest.mutation.config.ts' },
+  mutate: ['packages/core/src/context-graph-join-policy.ts'],
+  coverageAnalysis: 'perTest',
+  concurrency: 2,
+  reporters: ['clear-text', 'json', 'html'],
+  jsonReporter: { fileName: 'reports/mutation/mutation.json' },
+  htmlReporter: { fileName: 'reports/mutation/index.html' },
+  thresholds: { high: 100, low: 99, break: 99 },
+  timeoutMS: 5000,
+  ignorePatterns: ['**/coverage/**', '**/test-results/**', 'ci-test-results/**', 'reports/**', '.devnet/**'],
+};

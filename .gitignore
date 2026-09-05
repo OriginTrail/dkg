@@ -64,5 +64,13 @@ snapshots/_cache_phase1_neuroweb_epoch16.json
 devnet/**/.okf-export-*/
 devnet/**/.okf-manifest-*.json
 
+# Generated test evidence and mutation sandboxes.
+.stryker-tmp/
+reports/mutation/
+ci-test-results/
+test-inventory.json
+coverage-results.json
+test-systems/.runtime/
+
 **/coverage-python/
 **/.coverage

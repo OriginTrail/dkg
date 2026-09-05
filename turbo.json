@@ -20,8 +20,15 @@
     },
     "test:coverage": {
       "dependsOn": ["build"],
-      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/vitest.coverage.ts"],
-      "outputs": ["coverage/**"]
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/vitest.coverage.ts",
+        "$TURBO_ROOT$/scripts/lib/coverage-scope.mjs",
+        "$TURBO_ROOT$/scripts/ci/check-coverage.mjs",
+        "$TURBO_ROOT$/test-policy/coverage-baselines.json"
+      ],
+      "outputs": ["coverage/**"],
+      "cache": false
     },
     "lint": {},
     "clean": {

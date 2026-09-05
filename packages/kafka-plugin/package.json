@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run --coverage",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs kafka-plugin",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {

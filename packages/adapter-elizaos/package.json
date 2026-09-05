@@ -13,8 +13,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "vitest run --passWithNoTests",
-    "test:coverage": "vitest run --coverage --passWithNoTests",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs adapter-elizaos",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {

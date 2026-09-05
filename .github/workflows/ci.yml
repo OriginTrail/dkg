@@ -20,6 +20,8 @@ on:
   # develop branch that batches unrelated failures into one large PR.
   merge_group:
   workflow_dispatch:
+  schedule:
+    - cron: '23 2 * * *'
 
 concurrency:
   # Per-PR / per-branch lock: cancels any earlier in-flight run for the
@@ -37,6 +39,10 @@ concurrency:
 # here is the single highest-leverage defence-in-depth control.
 permissions:
   contents: read
+
+env:
+  DKG_PROPERTY_RUNS: ${{ github.event_name == 'schedule' && '1000' || '100' }}
+  DKG_PROPERTY_SEED: ${{ github.event_name == 'schedule' && github.run_number || '640905' }}
 
 jobs:
   # ------------------------------------------------------------------
@@ -283,6 +289,16 @@ jobs:
 
       - name: Test repository scripts
         run: pnpm run test:scripts
+      - name: Verify every test has an execution route
+        run: pnpm test:inventory
+      - name: Upload test execution inventory
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-execution-inventory
+          path: test-inventory.json
+          retention-days: 14
+          if-no-files-found: warn
 
       # W1 §8.3 packet reachability. This job is the right home because it is
       # the one lane that installs the full workspace without sharding, and the
@@ -401,6 +417,8 @@ jobs:
   # chain shard gets its own node and test context, so no state is shared.
   # ------------------------------------------------------------------
   tornado-core:
+    env:
+      DKG_CI_COVERAGE: '1'
     name: "Tornado: ${{ matrix.label }}"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_core == 'true'
@@ -459,6 +477,17 @@ jobs:
             --lane rdf-utils
           node scripts/ci/run-vitest-junit.mjs \
             --lane storage
+      - name: Authority mutation pilot
+        if: matrix.suite == 'core'
+        run: pnpm test:mutation
+      - name: Upload mutation results
+        if: always() && matrix.suite == 'core'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: authority-mutation-report
+          path: reports/mutation/
+          retention-days: 14
+          if-no-files-found: warn
       - name: "Chain tests (shard ${{ matrix.shard }}/3)"
         if: matrix.suite == 'chain'
         env:
@@ -559,8 +588,18 @@ jobs:
         # STREAM` and leave later requests timing out. Keep the unit lanes
         # parallel; serialize only these live-server files.
         run: |
+          DKG_REQUIRE_BLAZEGRAPH=1 pnpm test:conformance
           pnpm --filter @origintrail-official/dkg-storage exec vitest run --no-file-parallelism test/blazegraph.integration.test.ts test/term-canon-blazegraph-oracle.test.ts test/rfc64-semantic-read-gateway.blazegraph.integration.test.ts test/rfc64-shared-projection-stream.blazegraph.integration.test.ts
           DKG_RFC64_GATE1_STORE_BACKEND=blazegraph node --import tsx --test devnet/rfc64-gate1-public-open/rollout-store-fixture.test.ts devnet/rfc64-gate1-public-open/rollout-transition.test.ts
+
+      - name: Upload store conformance packet
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: storage-conformance-evidence
+          path: test-systems/.runtime/storage-conformance.json
+          retention-days: 14
+          if-no-files-found: error
 
   # ------------------------------------------------------------------
   # Tornado publisher lane — sharded across 4 parallel runners.
@@ -577,6 +616,8 @@ jobs:
   #             long-pole file isn't isolated to one runner anymore
   # ------------------------------------------------------------------
   tornado-publisher:
+    env:
+      DKG_CI_COVERAGE: '1'
     name: "Tornado: publisher [${{ matrix.shard }}/4]"
     needs: [changes, build]
     if: needs.changes.outputs.tornado_publisher == 'true'
@@ -640,6 +681,8 @@ jobs:
   #           fall into the lightest bin automatically.
   # ------------------------------------------------------------------
   tornado-agent:
+    env:
+      DKG_CI_COVERAGE: '1'
     name: "Tornado: agent [${{ matrix.shard }}/10]"
     needs: [changes, build]
     if: needs.changes.outputs.tornado_agent == 'true'
@@ -701,6 +744,8 @@ jobs:
   # degrade service but do not threaten protocol consensus.
   # ------------------------------------------------------------------
   bura-cli:
+    env:
+      DKG_CI_COVERAGE: '1'
     name: "Bura: cli [${{ matrix.shard }}/4]"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.bura_cli == 'true'
@@ -766,6 +811,8 @@ jobs:
         run: bash scripts/ci/verify-blazegraph-image-contract.sh
 
   bura-supporting:
+    env:
+      DKG_CI_COVERAGE: '1'
     name: "Bura: query"
     needs: [changes, build]
     if: needs.changes.outputs.bura_query == 'true'
@@ -789,7 +836,12 @@ jobs:
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
       - name: "Query tests"
-        run: pnpm --filter @origintrail-official/dkg-query run test
+        run: node scripts/ci/run-vitest-junit.mjs --lane query
+      - name: Upload Vitest JUnit and coverage reports
+        if: always()
+        uses: ./.github/actions/upload-vitest-junit
+        with:
+          artifact-name: vitest-bura-supporting
 
   # ------------------------------------------------------------------
   # Kosava lanes — `node-ui` is heavy (React Testing Library, happy-dom)
@@ -801,6 +853,8 @@ jobs:
   # bugs here affect UX/demos, not protocol correctness.
   # ------------------------------------------------------------------
   kosava-node-ui:
+    env:
+      DKG_CI_COVERAGE: '1'
     name: "Kosava: node-ui"
     needs: [changes, build]
     if: needs.changes.outputs.kosava_node_ui == 'true'
@@ -826,7 +880,12 @@ jobs:
       - name: "node-ui production build (896 MB heap budget)"
         run: pnpm --filter @origintrail-official/dkg-node-ui run build:ui
       - name: "node-ui tests"
-        run: pnpm --filter @origintrail-official/dkg-node-ui test
+        run: node scripts/ci/run-vitest-junit.mjs --lane node-ui
+      - name: Upload Vitest JUnit and coverage reports
+        if: always()
+        uses: ./.github/actions/upload-vitest-junit
+        with:
+          artifact-name: vitest-kosava-node-ui
 
   # node-ui Playwright e2e — REAL NODE, NO MOCKS. Each shard boots its OWN
   # isolated 4-node devnet (Hardhat + four DKG daemons) via Playwright's
@@ -848,6 +907,8 @@ jobs:
   # Channel is pinned to bundled chromium in playwright.config.ts under CI
   # (see `ciChromium`) since we only `playwright install chromium`.
   kosava-node-ui-e2e:
+    env:
+      PW_DEVNET_LOCAL: ${{ github.event_name == 'schedule' && '1' || '0' }}
     name: "Kosava: node-ui e2e [${{ matrix.shard }}/7] (Playwright real-node devnet)"
     needs: [changes, build, evm-devnet-test-artifacts]
     if: needs.changes.outputs.kosava_node_ui_e2e == 'true'
@@ -887,6 +948,9 @@ jobs:
         run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps
       - name: "node-ui real-node Playwright e2e (shard ${{ matrix.shard }}/7)"
         run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright test --shard=${{ matrix.shard }}/7
+      - name: Record first-attempt browser failures separately from retries
+        if: always()
+        run: node scripts/ci/browser-quality.mjs packages/node-ui/playwright-report/results.json packages/node-ui/playwright-report/quality.json
       # Upload the HTML report + traces so intermittent browser/devnet failures
       # are diagnosable from the Actions UI (Codex review on PR #832).
       - name: Upload Playwright report
@@ -916,6 +980,8 @@ jobs:
           if-no-files-found: ignore
 
   kosava-supporting:
+    env:
+      DKG_CI_COVERAGE: '1'
     name: "Kosava: adapters + utilities + demo"
     needs: [changes, build]
     if: needs.changes.outputs.kosava_supporting == 'true'
@@ -960,19 +1026,16 @@ jobs:
         env:
           DKG_REQUIRE_PYTEST: '1'
         run: |
-          pnpm \
-            --filter @origintrail-official/dkg-epcis \
-            --filter @origintrail-official/dkg-mcp \
-            --filter @origintrail-official/dkg-local-llm \
-            --filter @origintrail-official/dkg-network-sim \
-            --filter @origintrail-official/dkg-graph-viz \
-            --filter @origintrail-official/dkg-okf \
-            --filter @origintrail-official/dkg-adapter-elizaos \
-            --filter @origintrail-official/dkg-adapter-hermes \
-            --filter @origintrail-official/dkg-adapter-openclaw \
-            --filter @origintrail-official/dkg-adapter-prime-agent \
-            --filter @origintrail-official/dkg-demo \
-            run test
+          for package in epcis mcp-dkg local-llm network-sim graph-viz okf adapter-elizaos adapter-hermes adapter-openclaw adapter-prime-agent; do
+            node scripts/ci/run-vitest-junit.mjs --lane "$package"
+          done
+          pnpm --filter @origintrail-official/dkg-adapter-hermes run test:py
+          pnpm --filter @origintrail-official/dkg-demo run test
+      - name: Upload Vitest JUnit and coverage reports
+        if: always()
+        uses: ./.github/actions/upload-vitest-junit
+        with:
+          artifact-name: vitest-kosava-supporting
 
   # ------------------------------------------------------------------
   # Hardhat-backed Kosava lane — `random-sampling` and `kafka-plugin`.
@@ -988,6 +1051,8 @@ jobs:
   # No mocks: real contracts, real chain.
   # ------------------------------------------------------------------
   kosava-hardhat-plugins:
+    env:
+      DKG_CI_COVERAGE: '1'
     name: "Kosava: random-sampling + kafka-plugin (real Hardhat)"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.kosava_hardhat_plugins == 'true'
@@ -1017,9 +1082,14 @@ jobs:
       - name: Restore EVM test artifacts
         run: tar -xzf /tmp/evm-node-test-artifacts.tgz
       - name: "random-sampling tests (real Hardhat, no mocks)"
-        run: pnpm --filter @origintrail-official/dkg-random-sampling test
+        run: node scripts/ci/run-vitest-junit.mjs --lane random-sampling
       - name: "kafka-plugin tests (real Hardhat, no mocks)"
-        run: pnpm --filter @origintrail-official/kafka-plugin test
+        run: node scripts/ci/run-vitest-junit.mjs --lane kafka-plugin
+      - name: Upload Vitest JUnit and coverage reports
+        if: always()
+        uses: ./.github/actions/upload-vitest-junit
+        with:
+          artifact-name: vitest-kosava-hardhat-plugins
 
   # ------------------------------------------------------------------
   # ABI freshness gate — guards the contract `auto-update.ts` deliberately
@@ -1230,9 +1300,21 @@ jobs:
           echo "::group::Shard ${SHARD_ID}/4 — ${#SHARD_FILES[@]} files"
           printf '  %s\n' "${SHARD_FILES[@]}"
           echo "::endgroup::"
-          npx hardhat test --network hardhat --config hardhat.node.config.ts "${SHARD_FILES[@]}"
+          test "${#SHARD_FILES[@]}" -gt 0
+          export DKG_MOCHA_REPORT="test-results/solidity-${SHARD_ID}.json"
+          rm -f "$DKG_MOCHA_REPORT"
+          pnpm exec hardhat test --network hardhat --config hardhat.node.config.ts "${SHARD_FILES[@]}"
+          node ../../scripts/ci/check-mocha-report.mjs "$DKG_MOCHA_REPORT"
         env:
           NODE_OPTIONS: --max-old-space-size=8192
+      - name: Upload Solidity test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: solidity-tests-${{ matrix.shard }}
+          path: packages/evm-module/test-results/*.json
+          retention-days: 14
+          if-no-files-found: warn
 
   # ------------------------------------------------------------------
   # Tornado Solidity coverage lane — safety net on protected push or manual
@@ -1454,6 +1536,57 @@ jobs:
   # One stable branch-protection check. It also verifies that every lane the
   # planner selected actually ran successfully, so a typo in a job-level `if`
   # cannot silently turn a required test into a green skip.
+  inventory-windows:
+    needs: changes
+    if: needs.changes.outputs.tornado_agent == 'true'
+    uses: ./.github/workflows/rfc64-inventory-windows.yml
+
+  coverage-results:
+    name: Verify merged package coverage
+    if: always()
+    needs: [changes, tornado-core, tornado-publisher, tornado-agent, bura-cli, bura-supporting, kosava-node-ui, kosava-supporting, kosava-hardhat-plugins]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: mkdir -p ci-test-results
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: vitest-*
+          path: ci-test-results
+      - name: Verify complete shards, production source, floors and changed lines
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          if [[ "$EVENT_NAME" == pull_request ]]; then
+            export COVERAGE_BASE="$(git rev-parse HEAD^1)"
+          elif [[ "$EVENT_NAME" == merge_group ]]; then
+            git fetch --no-tags origin "$MERGE_GROUP_BASE"
+            export COVERAGE_BASE="$MERGE_GROUP_BASE"
+          fi
+          node scripts/ci/merge-coverage.mjs ci-test-results
+      - name: Upload verified coverage
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verified-package-coverage
+          path: |
+            coverage-results.json
+            packages/*/coverage/
+          retention-days: 14
+          if-no-files-found: error
+
   ci-gate:
     name: CI gate
     if: always()
@@ -1477,6 +1610,8 @@ jobs:
       - solidity
       - solidity-coverage
       - tornado-static-analysis
+      - coverage-results
+      - inventory-windows
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
@@ -1495,6 +1630,16 @@ jobs:
             scripts/lib/ci-delta.mjs
             scripts/lib/ci-results.mjs
           sparse-checkout-cone-mode: false
+      - name: Require selected Windows lifecycle tests
+        env:
+          SELECTED: ${{ needs.changes.outputs.tornado_agent }}
+          RESULT: ${{ needs.inventory-windows.result }}
+        run: |
+          if [[ "$SELECTED" == true ]]; then test "$RESULT" = success; else test "$RESULT" = skipped; fi
+      - name: Require the coverage verdict
+        env:
+          COVERAGE_RESULT: ${{ needs.coverage-results.result }}
+        run: test "$COVERAGE_RESULT" = success
       - name: Verify selected lanes completed
         env:
           EVENT_NAME: ${{ github.event_name }}

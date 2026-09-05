@@ -107,7 +107,7 @@ test('shared Vitest runner derives sharded and unsharded package reports', () =>
 test('every shared JUnit runner job uploads convention-derived reports', () => {
   const workflow = parseRepositoryYaml('.github/workflows/ci.yml');
   const uploadsByJob = validateJunitUploadCoverage(workflow);
-  assert.equal(uploadsByJob.size, 4);
+  assert.equal(uploadsByJob.size, 8);
   for (const [, [step]] of uploadsByJob) {
     assert.equal(step.if, 'always()');
     assert.equal(typeof step.with?.['artifact-name'], 'string');
@@ -132,7 +132,7 @@ test('every shared JUnit runner job uploads convention-derived reports', () => {
   assert.match(upload.uses, /^actions\/upload-artifact@[0-9a-f]{40}$/);
   assert.deepEqual(upload.with, {
     name: '${{ inputs.artifact-name }}',
-    path: JUNIT_UPLOAD_PATTERN,
+    path: `${JUNIT_UPLOAD_PATTERN}\npackages/*/test-results/*.coverage.json\npackages/adapter-hermes/coverage-python/\n`,
     'retention-days': 14,
     'if-no-files-found': 'ignore',
   });
@@ -140,7 +140,7 @@ test('every shared JUnit runner job uploads convention-derived reports', () => {
     'packages/example/test-results/example.xml',
     'packages/example/test-results/example-1.xml',
   ]) {
-    assert.equal(path.posix.matchesGlob(report, upload.with.path), true);
+    assert.equal(path.posix.matchesGlob(report, upload.with.path.split('\n')[0]), true);
   }
 });
 
@@ -170,44 +170,25 @@ test('shared JUnit runner creates reports and propagates child failures', (t) =>
   }), 2);
 });
 
-test('coverage workflow keeps the four fixed ratchets direct and CI-gating', () => {
-  const packages = [
-    { name: '@origintrail-official/dkg-query', path: 'packages/query' },
-    { name: '@origintrail-official/dkg-okf', path: 'packages/okf' },
-    { name: '@origintrail-official/dkg-node-ui', path: 'packages/node-ui' },
-    { name: '@origintrail-official/dkg-network-sim', path: 'packages/network-sim' },
-  ];
-  const workflow = parseRepositoryYaml('.github/workflows/node-coverage.yml');
-  const pullRequestPaths = new Set(workflow.on.pull_request.paths);
-  for (const entry of packages) {
-    assert.equal(pullRequestPaths.has(`${entry.path}/**`), true, `${entry.path} must trigger coverage`);
+test('coverage is aggregated from required test lanes without a duplicate workflow', () => {
+  const workflow = parseRepositoryYaml('.github/workflows/ci.yml');
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, '.github/workflows/node-coverage.yml')), false);
+  assert.ok(workflow.on.merge_group !== undefined);
+  assert.ok(workflow.on.schedule.length > 0);
+  const merge = workflow.jobs['coverage-results'];
+  assert.equal(merge.if, 'always()');
+  assert.equal(merge['continue-on-error'], undefined);
+  assert.ok(workflow.jobs['ci-gate'].needs.includes('coverage-results'));
+  const predicate = workflow.jobs['ci-gate'].steps.find((step) => step.name === 'Require the coverage verdict');
+  assert.match(predicate.run, /test "\$COVERAGE_RESULT" = success/);
+  for (const job of ['tornado-core', 'tornado-publisher', 'tornado-agent', 'bura-cli', 'bura-supporting', 'kosava-node-ui', 'kosava-supporting', 'kosava-hardhat-plugins']) {
+    assert.ok(merge.needs.includes(job));
+    assert.equal(workflow.jobs[job].env.DKG_CI_COVERAGE, '1');
   }
-
-  const coverageJob = workflow.jobs['node-coverage'];
-  const runStep = coverageJob.steps.find((step) => step?.name === 'Run hermetic coverage ratchets');
-  assert.match(runStep.run, /^pnpm exec turbo test:coverage/);
-  assert.deepEqual(
-    [...runStep.run.matchAll(/--filter='([^']+)'/g)].map((match) => match[1]),
-    packages.map((entry) => entry.name),
-  );
-  assert.match(runStep.run, /--concurrency=1/);
-  assert.match(runStep.run, /--continue=always/);
-  assert.equal(runStep['continue-on-error'], undefined, 'Turbo threshold failures must gate the job');
-  assert.doesNotMatch(runStep.run, /\|\|\s*true/);
-
-  const uploadStep = coverageJob.steps.find((step) => step?.uses?.startsWith('actions/upload-artifact@'));
-  assert.equal(uploadStep.if, 'always()');
-  assert.deepEqual(
-    uploadStep.with.path.split('\n').map((entry) => entry.trim()).filter(Boolean),
-    packages.map((entry) => `${entry.path}/coverage/`),
-  );
-  assert.equal(uploadStep.with['retention-days'], 14);
-
   const turbo = JSON.parse(readRepositoryFile('turbo.json'));
-  assert.deepEqual(turbo.tasks['test:coverage'].inputs, [
-    '$TURBO_DEFAULT$',
-    '$TURBO_ROOT$/vitest.coverage.ts',
-  ]);
+  for (const file of ['vitest.coverage.ts', 'scripts/lib/coverage-scope.mjs', 'scripts/ci/check-coverage.mjs', 'test-policy/coverage-baselines.json']) {
+    assert.ok(turbo.tasks['test:coverage'].inputs.includes(`$TURBO_ROOT$/${file}`));
+  }
 });
 
 test('Oxlint baseline fingerprints accepted diagnostics and fails closed on runner errors', () => {

@@ -28,6 +28,13 @@ const isCoverage = process.argv.includes('coverage');
 
 const config: HardhatUserConfig = {
   defaultNetwork: 'hardhat',
+  mocha: {
+    forbidOnly: true,
+    ...(process.env.DKG_MOCHA_REPORT ? {
+      reporter: 'json',
+      reporterOptions: { output: process.env.DKG_MOCHA_REPORT },
+    } : {}),
+  },
   namedAccounts: {
     deployer: 0,
     minter: 0,
