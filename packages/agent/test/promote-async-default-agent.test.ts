@@ -10,7 +10,7 @@ import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { finalizeRootlessAssertionForTest } from '../../publisher/test/_helpers/rootless-lifecycle.js';
 import { ContextGraphAuthorityUnavailableError } from
-  '../src/context-graph-agent-gate-authority.js';
+  '../src/internal/promote/context-graph-agent-gate-authority.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import type { AssertionPromoteOptions } from '../src/index.js';
 

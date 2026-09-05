@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   resolveLiveOnChainAccessPolicyState,
   type LiveOnChainAccessPolicyDependencies,
-} from '../src/context-graph-access-policy-state.js';
+} from '../src/internal/promote/context-graph-access-policy-state.js';
 import { ContextGraphAuthorityUnavailableError } from
-  '../src/context-graph-agent-gate-authority.js';
+  '../src/internal/promote/context-graph-agent-gate-authority.js';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
 

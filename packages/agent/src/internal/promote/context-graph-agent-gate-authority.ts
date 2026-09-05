@@ -2,7 +2,7 @@
 
 import { ethers } from 'ethers';
 
-import type { RegisteredContextGraphAuthority } from './dkg-agent-cg-resolve.js';
+import type { RegisteredContextGraphAuthority } from '../../dkg-agent-cg-resolve.js';
 
 type RegisteredAuthorityUnavailableReason = Extract<
   RegisteredContextGraphAuthority,

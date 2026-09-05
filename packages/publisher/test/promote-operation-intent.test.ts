@@ -45,6 +45,16 @@ describe('durable promote operation intent v1 codec', () => {
     });
     allowedPeers.push('peer-c');
     expect(intent.allowedPeers).toEqual(['peer-a', 'peer-b']);
+    expect(Object.isFrozen(intent)).toBe(true);
+    expect(Object.isFrozen(intent.allowedPeers)).toBe(true);
+    expect(() => { (intent as any).timestampMs += 1; }).toThrow(TypeError);
+    expect(() => { (intent.allowedPeers as any).push('peer-c'); }).toThrow(TypeError);
+  });
+
+  it('returns the same deeply immutable model when parsing durable storage', () => {
+    const intent = parsePromoteOperationIntent(JSON.stringify(PUBLIC_INTENT), 'operation-1');
+    expect(Object.isFrozen(intent)).toBe(true);
+    expect(Object.isFrozen(intent.allowedPeers)).toBe(true);
   });
 
   it.each([

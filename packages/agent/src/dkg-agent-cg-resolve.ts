@@ -87,7 +87,7 @@ import { createAbortError, runBoundedOperation } from './bounded-operation.js';
 import type {
   LiveOnChainAccessPolicyState,
   LiveOnChainAccessPolicyUnavailable,
-} from './context-graph-access-policy-state.js';
+} from './internal/promote/context-graph-access-policy-state.js';
 import {
   type SyncRequestEnvelope,
   type ContextGraphSub,

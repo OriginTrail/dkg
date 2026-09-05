@@ -220,8 +220,9 @@ export {
 const SWM_SHARE_COMPLETE_PRED = 'http://dkg.io/ontology/swmShareComplete';
 
 
-type AssertionPromoteOptions = {
-  entities?: string[] | 'all';
+/** Publisher-owned contract for assertion promotion after agent prerequisites resolve. */
+export type PublisherAssertionPromoteOptions = {
+  entities?: readonly string[] | 'all';
   subGraphName?: string;
   publisherPeerId?: string;
   senderAgentAddress?: string;
@@ -8259,9 +8260,9 @@ export class DKGPublisher implements Publisher {
     contextGraphId: string,
     name: string,
     agentAddress: string,
-    opts?: AssertionPromoteOptions,
+    opts?: PublisherAssertionPromoteOptions,
   ): Promise<AssertionPromoteResult> {
-    const stableOpts: AssertionPromoteOptions | undefined = opts
+    const stableOpts: PublisherAssertionPromoteOptions | undefined = opts
       ? {
           ...opts,
           ...(Array.isArray(opts.entities) ? { entities: [...opts.entities] } : {}),
@@ -8287,7 +8288,7 @@ export class DKGPublisher implements Publisher {
     contextGraphId: string,
     name: string,
     agentAddress: string,
-    opts?: AssertionPromoteOptions,
+    opts?: PublisherAssertionPromoteOptions,
   ): Promise<AssertionPromoteResult> {
     // #1464 (PR1, diagnostic) — every awaited op below runs BEFORE the
     // `store.insert(swmQuads)` that actually lands the root in SWM. A masked
@@ -8840,7 +8841,7 @@ export class DKGPublisher implements Publisher {
         ...(promotedPrivateRoot ? { privateMerkleRoot: promotedPrivateRoot } : {}),
         privateTripleCount: normalizedPrivateQuads.length,
         accessPolicy,
-        allowedPeers,
+        allowedPeers: [...allowedPeers],
       });
 
       // Wrap the plaintext publish-request in the encrypted envelope

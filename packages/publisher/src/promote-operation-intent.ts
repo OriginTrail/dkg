@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /** Durable v1 envelope, shared by creation, replay validation and finalization. */
-export type PromoteOperationIntent = {
+export type PromoteOperationIntent = Readonly<{
   version: 1;
   operationId: string;
   timestampMs: number;
   publisherPeerId?: string;
   confirmationRequired: boolean;
   accessPolicy: 'public' | 'ownerOnly' | 'allowList';
-  allowedPeers: string[];
-};
+  allowedPeers: readonly string[];
+}>;
 
 type CreatePromoteOperationIntentInput = Omit<
   PromoteOperationIntent,
@@ -57,7 +57,7 @@ export function serializePromoteOperationIntent(intent: PromoteOperationIntent):
   return JSON.stringify(validatePromoteOperationIntent(intent, intent.operationId));
 }
 
-function canonicalizeAllowedPeers(peers: readonly string[]): string[] {
+function canonicalizeAllowedPeers(peers: readonly string[]): readonly string[] {
   return [...new Set(peers.map((peer) => peer.trim()).filter(Boolean))].sort();
 }
 
@@ -92,13 +92,14 @@ function validatePromoteOperationIntent(
       { code: 'KA_PROMOTE_OPERATION_INTENT_CORRUPT' },
     );
   }
-  return {
+  const immutableAllowedPeers = Object.freeze([...canonicalAllowedPeers]);
+  return Object.freeze({
     version: 1,
     operationId: expectedOperationId,
     timestampMs: candidate.timestampMs!,
     ...(publisherPeerId ? { publisherPeerId } : {}),
     confirmationRequired: candidate.confirmationRequired!,
     accessPolicy,
-    allowedPeers: canonicalAllowedPeers,
-  };
+    allowedPeers: immutableAllowedPeers,
+  });
 }

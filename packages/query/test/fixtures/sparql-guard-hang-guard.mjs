@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { text } from 'node:stream/consumers';
-import { detectSparqlQueryForm } from '../../dist/sparql-guard.js';
+import { detectSparqlQueryForm } from '../../src/sparql-guard.ts';
 
 const { input, expectedForm } = JSON.parse(await text(process.stdin));
 

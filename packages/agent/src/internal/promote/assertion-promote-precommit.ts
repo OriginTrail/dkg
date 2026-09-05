@@ -3,18 +3,14 @@
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import {
   createPromoteRetryableFailure,
-  type DKGPublisher,
+  type PublisherAssertionPromoteOptions,
 } from '@origintrail-official/dkg-publisher';
 
 import {
   isContextGraphAuthorityUnavailableMarker,
 } from './context-graph-agent-gate-authority.js';
-import type { DKGAgent } from './dkg-agent.js';
-import type { AssertionPromoteOptions } from './dkg-agent-types.js';
-
-type PublisherPromoteOptions = NonNullable<
-  Parameters<DKGPublisher['assertionPromote']>[3]
->;
+import type { DKGAgent } from '../../dkg-agent.js';
+import type { AssertionPromoteOptions } from '../../dkg-agent-types.js';
 type GossipSigner = Awaited<
   ReturnType<DKGAgent['resolveWorkspaceGossipSigningAgent']>
 >;
@@ -47,7 +43,7 @@ interface AssertionPromotePreCommitInput {
 
 type AssertionPromotePreCommitResult = {
   gossipSigner: GossipSigner;
-  publisherOptions: PublisherPromoteOptions;
+  publisherOptions: PublisherAssertionPromoteOptions;
 };
 
 /** Retry translation belongs to these concrete agent prerequisite callbacks. */

@@ -12,9 +12,9 @@ type PublisherApi = typeof import('../../src/index.js');
 
 type AssertTrue<Value extends true> = Value;
 type AssertFalse<Value extends false> = Value;
-type PromoteOptions = NonNullable<Parameters<
-  import('@origintrail-official/dkg-publisher').DKGPublisher['assertionPromote']
->[3]>;
+type PromoteOptions = import(
+  '@origintrail-official/dkg-publisher'
+).PublisherAssertionPromoteOptions;
 type ArbitraryRetryPolicyStaysAbsent = AssertFalse<
   'isRetryablePrerequisiteError' extends keyof PromoteOptions ? true : false
 >;

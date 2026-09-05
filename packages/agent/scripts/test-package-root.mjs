@@ -61,28 +61,22 @@ if (
 ) {
   throw new Error('internal authority marker machinery leaked from the package root');
 }
-const internalPromoteModules = [
-  'context-graph-agent-gate-authority',
-  'context-graph-access-policy-state',
-  'assertion-promote-precommit',
-];
-for (const module of internalPromoteModules) {
-  // Check runtime imports and declaration/map paths: the historical dist
-  // wildcard must not expose these implementation-specific contracts.
-  for (const extension of ['js', 'd.ts', 'js.map', 'd.ts.map']) {
-    const specifier = `@origintrail-official/dkg-agent/dist/${module}.${extension}`;
-    try {
-      await import(specifier);
-      throw new Error(`internal promote module unexpectedly resolved: ${specifier}`);
-    } catch (error) {
-      if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
-    }
-    try {
-      require.resolve(specifier);
-      throw new Error(`internal promote module unexpectedly resolved via require: ${specifier}`);
-    } catch (error) {
-      if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
-    }
+const internalPromoteModule = 'internal/promote/context-graph-agent-gate-authority';
+// One structural namespace rule protects current and future implementation files.
+// Check runtime imports and generated declaration/map paths against the built package.
+for (const extension of ['js', 'd.ts', 'js.map', 'd.ts.map']) {
+  const specifier = `@origintrail-official/dkg-agent/dist/${internalPromoteModule}.${extension}`;
+  try {
+    await import(specifier);
+    throw new Error(`internal promote module unexpectedly resolved: ${specifier}`);
+  } catch (error) {
+    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+  }
+  try {
+    require.resolve(specifier);
+    throw new Error(`internal promote module unexpectedly resolved via require: ${specifier}`);
+  } catch (error) {
+    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
   }
 }
 const legacySynchronizationError = new legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1(

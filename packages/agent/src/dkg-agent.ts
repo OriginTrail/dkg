@@ -82,7 +82,7 @@ import {
 import { ethers } from 'ethers';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet } from './agent-wallet.js';
-import { prepareAssertionPromote } from './assertion-promote-precommit.js';
+import { prepareAssertionPromote } from './internal/promote/assertion-promote-precommit.js';
 
 import {
   RandomSamplingShutdownTimeoutError,
