@@ -9,6 +9,7 @@ import { validateCiLaneWorkflow } from '../lib/ci-lane-workflow.mjs';
 import { EVM_TEST_SCOPES } from './evm-test-scopes.mjs';
 import { COVERAGE_JOBS } from '../lib/coverage-artifacts.mjs';
 import { isTestSurface, secondaryRoutes } from '../lib/test-inventory-surface.mjs';
+import { TEST_LANE_METADATA } from '../lib/ci-lanes.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
@@ -17,9 +18,11 @@ function own(file, lane, command, cadence, metadata = {}) {
   const relative = path.relative(root, path.resolve(root, file)).split(path.sep).join('/');
   const entries = owners.get(relative) ?? [];
   const packageName = relative.startsWith('packages/') ? relative.split('/')[1] : undefined;
-  const layer = lane === 'archive' ? 'historical' : lane.includes('browser') ? 'browser' : lane === 'solidity' || lane === 'evm-integration' ? 'chain integration' : lane === 'python' ? 'Python contract' : lane === 'devnet' || lane === 'tornado-blazegraph' ? 'system' : 'unit/component';
-  const prerequisites = lane === 'tornado-blazegraph' ? ['built runtime packages', 'native Oxigraph binary', 'BLAZEGRAPH_TEST_URL'] : lane.includes('browser') || lane === 'devnet' ? ['built runtime packages', 'isolated local devnet', ...(lane.includes('browser') ? ['Playwright Chromium'] : [])] : lane === 'python' ? ['Python 3', 'pytests/requirements.txt'] : lane === 'solidity' || lane === 'evm-integration' ? ['Hardhat artifacts', 'free local port'] : ['pnpm frozen install', 'built workspace dependencies'];
-  entries.push({ lane, owner: packageName ? `packages/${packageName}` : relative.split('/')[0], layer: metadata.layer ?? layer, command, cadence, prerequisites: metadata.prerequisites ?? prerequisites }); owners.set(relative, entries);
+  const descriptor = TEST_LANE_METADATA[lane];
+  const layer = metadata.layer ?? descriptor?.layer;
+  const prerequisites = metadata.prerequisites ?? descriptor?.prerequisites;
+  if (!layer || !Array.isArray(prerequisites)) throw new Error(`test lane ${lane} needs explicit inventory metadata`);
+  entries.push({ lane, owner: packageName ? `packages/${packageName}` : relative.split('/')[0], layer, command, cadence, prerequisites }); owners.set(relative, entries);
 }
 
 function secondaryCommand(file) {

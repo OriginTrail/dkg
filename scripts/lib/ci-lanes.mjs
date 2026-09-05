@@ -1,5 +1,39 @@
 import { AGENT_SHARD_POLICY } from '../ci/agent-shard-policy.mjs';
 
+const UNIT_PREREQUISITES = ['pnpm frozen install', 'built workspace dependencies'];
+const SYSTEM_PREREQUISITES = ['built runtime packages', 'isolated local devnet'];
+
+/** Explicit inventory semantics for every canonical and registered test lane. */
+export const TEST_LANE_METADATA = Object.freeze({
+  'tornado-core': { layer: 'unit/component', prerequisites: UNIT_PREREQUISITES },
+  'tornado-publisher': { layer: 'unit/component', prerequisites: UNIT_PREREQUISITES },
+  'tornado-agent': { layer: 'unit/component', prerequisites: UNIT_PREREQUISITES },
+  'bura-cli': { layer: 'unit/component', prerequisites: UNIT_PREREQUISITES },
+  'bura-blazegraph-arm64': { layer: 'container contract', prerequisites: ['Docker', 'native ARM64 runner'] },
+  'bura-supporting': { layer: 'unit/component', prerequisites: UNIT_PREREQUISITES },
+  'kosava-node-ui': { layer: 'unit/component', prerequisites: UNIT_PREREQUISITES },
+  'kosava-node-ui-e2e': { layer: 'browser', prerequisites: [...SYSTEM_PREREQUISITES, 'Playwright Chromium'] },
+  'kosava-supporting': { layer: 'unit/component', prerequisites: UNIT_PREREQUISITES },
+  'kosava-hardhat-plugins': { layer: 'unit/component', prerequisites: UNIT_PREREQUISITES },
+  'evm-integration': { layer: 'chain integration', prerequisites: ['Hardhat artifacts', 'free local port'] },
+  solidity: { layer: 'chain integration', prerequisites: ['Hardhat artifacts', 'free local port'] },
+  python: { layer: 'Python contract', prerequisites: ['Python 3', 'pytests/requirements.txt'] },
+  browser: { layer: 'browser', prerequisites: [...SYSTEM_PREREQUISITES, 'Playwright Chromium'] },
+  'browser-local': { layer: 'browser', prerequisites: [...SYSTEM_PREREQUISITES, 'Playwright Chromium'] },
+  devnet: { layer: 'system', prerequisites: SYSTEM_PREREQUISITES },
+  'tornado-blazegraph': { layer: 'system', prerequisites: ['built runtime packages', 'native Oxigraph binary', 'BLAZEGRAPH_TEST_URL'] },
+  archive: { layer: 'historical', prerequisites: [] },
+  scripts: { layer: 'repository tooling', prerequisites: UNIT_PREREQUISITES },
+  demo: { layer: 'system', prerequisites: SYSTEM_PREREQUISITES },
+  'audit-tools': { layer: 'repository tooling', prerequisites: UNIT_PREREQUISITES },
+  'recovery-tool': { layer: 'repository tooling', prerequisites: UNIT_PREREQUISITES },
+  'prometheus-rules': { layer: 'monitoring rules', prerequisites: ['Prometheus promtool'] },
+  'image-contract': { layer: 'container contract', prerequisites: ['Docker', 'native ARM64 runner'] },
+  'shell-fixture': { layer: 'system fixture', prerequisites: SYSTEM_PREREQUISITES },
+  observability: { layer: 'system', prerequisites: ['Prometheus', 'Grafana'] },
+  'ccl-python-yaml': { layer: 'Python/YAML conformance', prerequisites: ['Python 3', 'ccl_v0_1/requirements.txt'] },
+});
+
 /** Executable candidate topology: consumed by Actions matrices, runners and receipt aggregation.
  * The immutable controller still owns whether a lane may run or skip.
  * Agent subdivisions come from its existing timing/overhead policy, without a second count.

@@ -3,12 +3,24 @@ import test from 'node:test';
 import { checkMochaReport } from '../../ci/check-mocha-report.mjs';
 
 test('a Mocha report must contain real completed tests and no failures', () => {
-  const report = { stats: { tests: 2, passes: 1, pending: 1, failures: 0, duration: 10 }, tests: [{}, {}], passes: [{}], failures: [] };
+  const report = { stats: { tests: 2, passes: 1, pending: 1, failures: 0, duration: 10 }, tests: [{}, {}], passes: [{}], pending: [{}], failures: [] };
   assert.equal(checkMochaReport(report).pending, 1);
   assert.throws(() => checkMochaReport({}), /complete test inventory/);
-  assert.throws(() => checkMochaReport({ ...report, tests: [] }), /complete test inventory/);
-  assert.throws(() => checkMochaReport({ ...report, failures: [{}] }), /failures/);
-  assert.throws(() => checkMochaReport({ ...report, stats: { ...report.stats, passes: 0 } }), /passing tests/);
+  assert.throws(() => checkMochaReport({ ...report, tests: [] }), /inconsistent outcome totals/);
+  assert.throws(() => checkMochaReport({
+    ...report,
+    stats: { ...report.stats, passes: 0, failures: 1 },
+    passes: [],
+    failures: [{}],
+  }), /failures/);
+  assert.throws(() => checkMochaReport({
+    ...report,
+    stats: { ...report.stats, tests: 1, passes: 0 },
+    tests: [{}],
+    passes: [],
+  }), /passing tests/);
+  assert.throws(() => checkMochaReport({ ...report, stats: { ...report.stats, pending: 0 } }), /inconsistent outcome totals/);
+  assert.throws(() => checkMochaReport({ ...report, pending: [] }), /inconsistent outcome totals/);
 });
 
 test('Hardhat-installed Mocha JSON reporter writes into a missing parent directory', async (t) => {

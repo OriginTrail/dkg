@@ -790,6 +790,10 @@ test('import aliases, namespaces, chained declarations and skip references retai
     ["import { test as check } from 'vitest'; const disabled = check.skip;", "const disabled = test.skip;"],
     ["import * as v from 'vitest'; v.test.concurrent.skip('case', () => {});", "test.skip('case', () => {});"],
     ["import { test as check } from 'vitest'; check['skip']('case', () => {});", "test.skip('case', () => {});"],
+    ["import { test } from 'vitest'; const check = test; check.skip('case', () => {});", "test.skip('case', () => {});"],
+    ["import { it } from 'vitest'; const pending = it.todo; pending('case');", "it.todo('case');"],
+    ["import { test } from 'vitest'; const conditional = test.skipIf; conditional(true)('case', () => {});", "test.skipIf(true)('case', () => {});"],
+    ["import { test } from 'vitest'; const conditional = test.runIf; conditional(false)('case', () => {});", "test.runIf(false)('case', () => {});"],
   ];
   for (const [alias, direct] of variants) {
     const actual = analyzeD1Source(alias, 'test/alias.test.ts');
@@ -797,7 +801,7 @@ test('import aliases, namespaces, chained declarations and skip references retai
     assert.equal(actual.length, 1, alias);
     // Reference fingerprints also include the expression spelling; declarations
     // retain the existing title-based fingerprint across import renames.
-    if (!alias.includes('const disabled')) assert.equal(actual[0].fingerprint, expected[0].fingerprint);
+    if (!alias.includes('const ')) assert.equal(actual[0].fingerprint, expected[0].fingerprint);
   }
   assert.equal(analyzeD1Source("import { test as check } from 'vitest'; function local(check) { check.skip('not a test'); }", 'test/alias.test.ts').length, 0);
 });
@@ -808,7 +812,7 @@ test('the repository debt gate rejects a newly disabled aliased test', () => {
     fs.mkdirSync(path.join(fixture, 'test-policy'));
     fs.mkdirSync(path.join(fixture, 'test'));
     fs.writeFileSync(path.join(fixture, 'test-policy/disabled-tests.json'), '[]');
-    fs.writeFileSync(path.join(fixture, 'test/new.test.ts'), "import { test as check } from 'vitest'; check.skip('regression', () => {});");
+    fs.writeFileSync(path.join(fixture, 'test/new.test.ts'), "import { test } from 'vitest'; const check = test; check.skip('regression', () => {}); const pending = test.todo; pending('later');");
     execFileSync('git', ['init', '-q'], { cwd: fixture });
     const result = spawnSync(process.execPath, [path.join(REPO_ROOT, 'scripts/ci/check-disabled-tests.mjs')], { cwd: fixture, encoding: 'utf8' });
     assert.equal(result.status, 1, result.stdout + result.stderr);

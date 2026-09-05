@@ -29,7 +29,7 @@ test('empty, all-skipped, failing, malformed and non-JUnit reports cannot emit c
     return { status: 0 };
   } });
   const valid = '<testsuite tests="1"><testcase name="passes"/></testsuite>';
-  for (const xml of ['', '<testsuites/>', '<testsuite tests="99"/>', '<testsuite><testcase><skipped/></testcase></testsuite>', '<testsuite><testcase><failure/></testcase></testsuite>', '<testsuite errors="1"><testcase/></testsuite>', '<testsuite><testcase/></wrong>', '<not-junit/>']) {
+  for (const xml of ['', '<testsuites/>', '<testsuite tests="99"/>', '<testsuite tests="2"><testcase/></testsuite>', '<testsuite tests="1" skipped="1"><testcase/></testsuite>', '<testsuites tests="2"><testsuite tests="1"><testcase/></testsuite></testsuites>', '<testsuite><testcase><skipped/></testcase></testsuite>', '<testsuite><testcase><failure/></testcase></testsuite>', '<testsuite errors="1"><testcase/></testsuite>', '<testsuite><testcase/></wrong>', '<not-junit/>']) {
     assert.equal(run(valid), 0);
     assert.equal(run(xml), 1, xml);
     assert.equal(fs.existsSync(receipt), false, 'stale receipt must also be removed');

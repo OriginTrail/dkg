@@ -6,6 +6,13 @@ import { parse } from 'yaml';
 const workflow = parse(readFileSync(new URL('../../../.github/workflows/rfc64-inventory-windows.yml', import.meta.url), 'utf8'));
 const job = workflow.jobs['inventory-lifecycle'];
 
+test('the reusable workflow retains automatic integration-branch and PR coverage', () => {
+  assert.ok(Object.hasOwn(workflow.on, 'workflow_call'));
+  assert.deepEqual(workflow.on.push.branches, ['integration/rfc64-devnet']);
+  assert.ok(workflow.on.push.paths.includes('packages/agent/**'));
+  assert.ok(workflow.on.pull_request.paths.includes('packages/agent/**'));
+});
+
 test('Windows groups retain every original test selector exactly once', () => {
   const originalSelectors = [
     'test/finalization-recovery-sqlite-deferred.test.ts',

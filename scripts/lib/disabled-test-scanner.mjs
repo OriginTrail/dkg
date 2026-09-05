@@ -317,16 +317,20 @@ export function analyzeTestSource(source, filePath, { now = new Date(), d1 = isD
     }
     return false;
   };
-  const testBase = (node) => {
+  const testBase = (node, seen = new Set()) => {
+    node = unwrapTransparentExpression(node);
     if (ts.isIdentifier(node)) {
       if (imports.has(node.text)) return shadowed(node) ? undefined : imports.get(node.text);
       if (importedNames.has(node.text)) return undefined;
-      return (DIRECT_BASES.has(node.text) || LEGACY_ALIASES.has(node.text) || FOCUSED_ALIASES.has(node.text)) && !shadowed(node) ? node.text : undefined;
+      if ((DIRECT_BASES.has(node.text) || LEGACY_ALIASES.has(node.text) || FOCUSED_ALIASES.has(node.text)) && !shadowed(node)) return node.text;
+      const initializer = staticConstantInitializer(node);
+      if (initializer && !seen.has(initializer)) return testBase(initializer, new Set([...seen, initializer]));
+      return undefined;
     }
-    if (ts.isCallExpression(node)) return testBase(node.expression);
+    if (ts.isCallExpression(node)) return testBase(node.expression, seen);
     if (member(node)) {
       if (ts.isIdentifier(node.expression) && namespaces.has(node.expression.text) && !shadowed(node.expression) && (DIRECT_BASES.has(member(node)) || LEGACY_ALIASES.has(member(node)) || FOCUSED_ALIASES.has(member(node)))) return member(node);
-      if (['concurrent', 'sequential', 'each', 'only', 'skip', 'skipIf', 'runIf'].includes(member(node))) return testBase(node.expression);
+      if (['concurrent', 'sequential', 'each', 'only', 'skip', 'todo', 'skipIf', 'runIf'].includes(member(node))) return testBase(node.expression, seen);
     }
     return undefined;
   };
@@ -380,7 +384,7 @@ export function analyzeTestSource(source, filePath, { now = new Date(), d1 = isD
       }
     }
     if (
-      d1 && member(node) === 'skip'
+      d1 && DIRECT_MEMBERS.has(member(node))
       && DIRECT_BASES.has(testBase(node.expression))
       && !(ts.isCallExpression(node.parent) && node.parent.expression === node)
     ) {

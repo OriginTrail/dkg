@@ -40,9 +40,16 @@ export type CoverageThresholds = {
   statements: number;
 };
 
-/** A new package can be measured before a floor exists; the independent CI
- * validator rejects any package without a checked-in measured policy. */
-export function coverageForPackage(name: string) {
-  const entry = (coveragePolicy.packages as Record<string, { thresholds: CoverageThresholds }>)[name];
-  return { ...sourceCoverage, ...(entry ? { thresholds: entry.thresholds } : {}) };
+export type BaselinedPackageName = keyof typeof coveragePolicy.packages;
+
+/** Production package coverage is always backed by a checked-in ratchet. */
+export function coverageForPackage(name: BaselinedPackageName) {
+  const entry = coveragePolicy.packages[name];
+  if (!entry) throw new Error(`Missing coverage policy for ${name}`);
+  return { ...sourceCoverage, thresholds: entry.thresholds };
+}
+
+/** Explicit bootstrap mode for measuring a package before adding its ratchet. */
+export function coverageForUnbaselinedPackage(_name: string) {
+  return { ...sourceCoverage };
 }

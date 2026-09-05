@@ -4,9 +4,17 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export function checkMochaReport(report) {
-  if (!Number.isInteger(report.stats?.tests) || report.stats.tests <= 0 || !Array.isArray(report.tests) || report.tests.length !== report.stats.tests) throw new Error('Mocha report has no complete test inventory');
-  if (report.stats.failures !== 0 || !Array.isArray(report.failures) || report.failures.length !== 0) throw new Error('Mocha report contains failures');
-  if (!(report.stats.passes > 0) || report.stats.passes !== report.passes?.length) throw new Error('Mocha report has no verified passing tests');
+  const stats = report.stats;
+  if (!stats || !['tests', 'passes', 'pending', 'failures'].every((key) => Number.isInteger(stats[key]) && stats[key] >= 0)) throw new Error('Mocha report has no complete test inventory');
+  if (!Array.isArray(report.tests) || report.tests.length !== stats.tests
+    || !Array.isArray(report.passes) || report.passes.length !== stats.passes
+    || !Array.isArray(report.pending) || report.pending.length !== stats.pending
+    || !Array.isArray(report.failures) || report.failures.length !== stats.failures
+    || stats.passes + stats.pending + stats.failures !== stats.tests) {
+    throw new Error('Mocha report has inconsistent outcome totals');
+  }
+  if (stats.failures !== 0) throw new Error('Mocha report contains failures');
+  if (stats.passes <= 0) throw new Error('Mocha report has no verified passing tests');
   return { cases: report.stats.tests, passed: report.stats.passes, pending: report.stats.pending, durationMs: report.stats.duration };
 }
 
