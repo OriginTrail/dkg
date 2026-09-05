@@ -166,6 +166,14 @@ describe('validateRelayServerCapacity', () => {
 });
 
 describe('checkFdLimit', () => {
+  it('uses the relay capacity policy above the minimum FD floor', () => {
+    const capacity = 8192;
+    const emissions: string[] = [];
+    checkFdLimit(capacity, (_level, message) => emissions.push(message), () => 4096);
+    expect(emissions).toHaveLength(1);
+    expect(emissions[0]).toContain(`recommended ${deriveRelayCaps(capacity).maxConnections}`);
+  });
+
   let readLimit: () => number | undefined;
 
   it.each([
