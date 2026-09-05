@@ -19,11 +19,13 @@
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { mkdirSync, rmSync, readFileSync, readdirSync } from 'node:fs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = resolve(here, '..');
 
-const REQUIRED = process.env.DKG_REQUIRE_PYTEST === '1';
+const COVERAGE = process.argv.includes('--coverage') || process.env.DKG_CI_COVERAGE === '1';
+const REQUIRED = COVERAGE || process.env.DKG_REQUIRE_PYTEST === '1';
 
 const candidates =
   process.platform === 'win32'
@@ -47,7 +49,7 @@ function pytestProbe(cmd, prefix) {
     [
       ...prefix,
       '-c',
-      'import pytest, requests; from eth_utils import to_checksum_address; '
+      (COVERAGE ? 'import pytest_cov; ' : '') + 'import pytest, requests, click; from eth_utils import to_checksum_address; '
         + "assert to_checksum_address('0x52908400098527886e0f7030069857d2e4169ee7')"
         + " == '0x52908400098527886E0F7030069857D2E4169EE7'",
     ],
@@ -71,12 +73,12 @@ for (const [cmd, prefix] of candidates) {
 if (!runner) {
   const msg =
     'Python pytest suite skipped — no Python interpreter with the required deps ' +
-    '(pytest, eth_utils, requests) was found. Install Python 3 and ' +
+    '(pytest, eth_utils, requests, click; pytest-cov for coverage) was found. Install Python 3 and ' +
     '`pip install -r packages/adapter-hermes/pytests/requirements.txt` to run it.';
   if (REQUIRED) {
     console.error(
       `[adapter-hermes] ${msg}\n` +
-        'DKG_REQUIRE_PYTEST=1 is set (CI) — the Python suite is REQUIRED, failing.',
+        'CI or coverage requires the Python suite; failing.',
     );
     process.exit(1);
   }
@@ -85,7 +87,12 @@ if (!runner) {
 }
 
 const [cmd, prefix] = runner;
-const result = spawnSync(cmd, [...prefix, '-m', 'pytest'], {
+mkdirSync(resolve(pkgRoot, 'test-results'), { recursive: true });
+rmSync(resolve(pkgRoot, 'test-results/hermes-python.xml'), { force: true });
+if (COVERAGE) rmSync(resolve(pkgRoot, 'coverage-python'), { recursive: true, force: true });
+const result = spawnSync(cmd, [...prefix, '-m', 'pytest', '--junitxml=test-results/hermes-python.xml', ...(COVERAGE ? [
+  '--cov=hermes-plugin', '--cov-branch', '--cov-report=term', '--cov-report=json:coverage-python/coverage.json', '--cov-report=xml:coverage-python/coverage.xml', '--cov-fail-under=34',
+] : [])], {
   cwd: pkgRoot,
   stdio: 'inherit',
 });
@@ -93,5 +100,14 @@ const result = spawnSync(cmd, [...prefix, '-m', 'pytest'], {
 if (result.error) {
   console.error(`[adapter-hermes] Failed to launch pytest: ${result.error.message}`);
   process.exit(1);
+}
+if (result.status === 0 && COVERAGE) {
+  const report = JSON.parse(readFileSync(resolve(pkgRoot, 'coverage-python/coverage.json'), 'utf8'));
+  const expected = readdirSync(resolve(pkgRoot, 'hermes-plugin')).filter((file) => file.endsWith('.py')).map((file) => `hermes-plugin/${file}`).sort();
+  const actual = Object.keys(report.files).map((file) => file.replaceAll('\\', '/')).sort();
+  if (JSON.stringify(actual) !== JSON.stringify(expected) || report.totals.num_statements <= 0) {
+    throw new Error('Python coverage omitted production files or included non-production files');
+  }
+  if (report.files['hermes-plugin/cli.py'].summary.percent_covered < 97) throw new Error('Hermes CLI coverage regressed below 97%');
 }
 process.exit(result.status ?? 1);
