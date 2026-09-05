@@ -1,7 +1,21 @@
 import React, { Suspense } from 'react';
 
-type LazyModule<Props> = { default: React.ComponentType<Props> };
 type LoadingLabel<Props> = string | ((props: Props) => string);
+
+const CHUNK_LOAD_MESSAGES = [
+  /failed to fetch dynamically imported module/i,
+  /error loading dynamically imported module/i,
+  /importing a module script failed/i,
+  /loading (?:css )?chunk [^ ]+ failed/i,
+];
+
+function findChunkLoadFailure(error: unknown, depth = 0): Error | undefined {
+  if (!(error instanceof Error) || depth > 4) return undefined;
+  if (error.name === 'ChunkLoadError') return error;
+  if ((error as Error & { code?: unknown }).code === 'CSS_CHUNK_LOAD_FAILED') return error;
+  if (CHUNK_LOAD_MESSAGES.some((pattern) => pattern.test(error.message))) return error;
+  return findChunkLoadFailure((error as Error & { cause?: unknown }).cause, depth + 1);
+}
 
 function ChunkLoadFailure() {
   return (
@@ -14,13 +28,16 @@ function ChunkLoadFailure() {
 
 /** Add loading and recovery UI to a dynamic import without catching view render errors. */
 export function createRecoverableLazyView<Props extends object>(
-  load: () => Promise<LazyModule<Props>>,
+  load: () => Promise<React.ComponentType<Props>>,
   label: LoadingLabel<Props>,
 ) {
   const LazyView = React.lazy(async () => {
     try {
-      return await load();
-    } catch {
+      return { default: await load() };
+    } catch (error) {
+      const chunkFailure = findChunkLoadFailure(error);
+      if (!chunkFailure) throw error;
+      console.error('Failed to load a lazy view chunk.', chunkFailure);
       return { default: ChunkLoadFailure as React.ComponentType<Props> };
     }
   });

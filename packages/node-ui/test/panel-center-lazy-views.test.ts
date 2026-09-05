@@ -53,7 +53,7 @@ it('loads views on demand while preserving tab selection and mounted view state'
 
     await open('project:first');
     expect(container.textContent).toContain('Loading project...');
-    expect(loads.project).toBe(1);
+    await vi.waitFor(() => expect(loads.project).toBe(1));
     // The shell stays interactive during the first chunk load. Resolving it
     // after navigating away must not restore the old selected tab.
     await act(async () => container.querySelector<HTMLButtonElement>('.v10-center-tab')!.click());

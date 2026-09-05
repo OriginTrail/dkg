@@ -15,39 +15,39 @@ const CLOSE_ICON = (
 );
 
 const OperationsView = createRecoverableLazyView(() =>
-  import('../../pages/Operations.js').then((m) => ({ default: m.OperationsPage }))
+  import('../../pages/Operations.js').then((m) => m.OperationsPage)
 , 'operations');
 
 const AgentHubView = createRecoverableLazyView(() =>
-  import('../../pages/AgentHub.js').then((m) => ({ default: m.AgentHubPage }))
+  import('../../pages/AgentHub.js').then((m) => m.AgentHubPage)
 , 'agent hub');
 
 const SettingsView = createRecoverableLazyView(() =>
-  import('../../pages/Settings.js').then((m) => ({ default: m.SettingsPage }))
+  import('../../pages/Settings.js').then((m) => m.SettingsPage)
 , 'settings');
 
 const AgentProfilePage = createRecoverableLazyView(() =>
-  import('../AgentProfilePage.js').then((m) => ({ default: m.AgentProfilePage }))
+  import('../AgentProfilePage.js').then((m) => m.AgentProfilePage)
 , 'account');
 
 const PublishingConvictionView = createRecoverableLazyView(() =>
-  import('../../pages/PublishingConviction.js').then((m) => ({ default: m.PublishingConvictionPage }))
+  import('../../pages/PublishingConviction.js').then((m) => m.PublishingConvictionPage)
 , 'Publisher Conviction');
 
 const ConvictionDetailView = createRecoverableLazyView(() =>
-  import('../../pages/conviction/ConvictionDetailView.js').then((m) => ({ default: m.ConvictionDetailView }))
+  import('../../pages/conviction/ConvictionDetailView.js').then((m) => m.ConvictionDetailView)
 , 'account');
 
 const ProjectView = createRecoverableLazyView(() =>
-  import('../../views/ProjectView.js').then((m) => ({ default: m.ProjectView }))
+  import('../../views/ProjectView.js').then((m) => m.ProjectView)
 , 'project');
 
 const MemoryLayerView = createRecoverableLazyView(() =>
-  import('../../views/MemoryLayerView.js').then((m) => ({ default: m.MemoryLayerView }))
+  import('../../views/MemoryLayerView.js').then((m) => m.MemoryLayerView)
 , ({ layer }) => ({ wm: 'working memory', swm: 'shared memory', vm: 'verifiable memory' })[layer]);
 
 const MemoryStackView = createRecoverableLazyView(() =>
-  import('../../views/MemoryStackView.js').then((m) => ({ default: m.MemoryStackView }))
+  import('../../views/MemoryStackView.js').then((m) => m.MemoryStackView)
 , 'memory stack');
 
 function TabBar() {
