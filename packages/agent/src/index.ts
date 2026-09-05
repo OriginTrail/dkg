@@ -297,11 +297,11 @@ export {
   CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS,
   ContextGraphAuthorityUnavailableError,
   isContextGraphAuthorityUnavailableMarker,
-} from './context-graph-authority-unavailable-error.js';
+} from './context-graph-agent-gate-authority.js';
 export type {
   ContextGraphAuthorityUnavailableMarker,
   ContextGraphAuthorityUnavailableReason,
-} from './context-graph-authority-unavailable-error.js';
+} from './context-graph-agent-gate-authority.js';
 export type { ContextGraphRegistrationBinding } from './dkg-agent-cg-registry.js';
 export {
   ContextGraphNotFoundError,

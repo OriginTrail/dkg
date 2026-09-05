@@ -84,7 +84,7 @@ import { ethers } from 'ethers';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet } from './agent-wallet.js';
 import { isContextGraphAuthorityUnavailableMarker } from
-  './context-graph-authority-unavailable-error.js';
+  './context-graph-agent-gate-authority.js';
 
 import {
   RandomSamplingShutdownTimeoutError,

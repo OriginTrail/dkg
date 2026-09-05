@@ -1,3 +1,18 @@
+import {
+  PROMOTE_RETRYABLE_FAILURE_CODE,
+  PROMOTE_RETRYABLE_FAILURE_ERROR_NAME,
+  createPromoteRetryableFailure,
+  getPromoteFailureDisposition,
+  getPromoteReplaySafeErrorDiagnostic,
+  getPromoteRetryableFailureDiagnostic,
+  isPromoteReplaySafeError,
+  isPromoteRetryableFailure,
+  type PromoteFailureDisposition,
+  type PromoteReplaySafeErrorDiagnostic,
+  type PromoteRetryableFailureDiagnostic,
+  type PromoteRetryableFailureMarker,
+} from '@origintrail-official/dkg-publisher';
+
 type PublisherApi = typeof import('../../src/index.js');
 
 type AssertTrue<Value extends true> = Value;
@@ -6,16 +21,16 @@ type AssertFalse<Value extends false> = Value;
 type PromoteFailureDispositionIsPublic = AssertTrue<
   'getPromoteFailureDisposition' extends keyof PublisherApi ? true : false
 >;
-type ParallelReplaySafeGuardStaysInternal = AssertFalse<
+type LegacyReplaySafeGuardRemainsPublic = AssertTrue<
   'isPromoteReplaySafeError' extends keyof PublisherApi ? true : false
 >;
-type ParallelReplaySafeDiagnosticStaysInternal = AssertFalse<
+type LegacyReplaySafeDiagnosticRemainsPublic = AssertTrue<
   'getPromoteReplaySafeErrorDiagnostic' extends keyof PublisherApi ? true : false
 >;
-type ParallelRetryableGuardStaysInternal = AssertFalse<
+type LegacyRetryableGuardRemainsPublic = AssertTrue<
   'isPromoteRetryableFailure' extends keyof PublisherApi ? true : false
 >;
-type RetryableMarkerCodeStaysInternal = AssertFalse<
+type LegacyRetryableMarkerCodeRemainsPublic = AssertTrue<
   'PROMOTE_RETRYABLE_FAILURE_CODE' extends keyof PublisherApi ? true : false
 >;
 type ReplaySafeUnwrapperStaysAbsent = AssertFalse<
@@ -37,12 +52,29 @@ type ArbitraryPublisherImplementationStaysClosed = typeof import('@origintrail-o
 type LegacyWorkspaceResolutionSubpathRemainsAvailable =
   typeof import('@origintrail-official/dkg-publisher/dist/workspace-resolution.js');
 
+// Compile the source-compatible package-root surface, including both the new
+// aggregate accessor and every replay-safety symbol published before it.
+void [
+  PROMOTE_RETRYABLE_FAILURE_CODE,
+  PROMOTE_RETRYABLE_FAILURE_ERROR_NAME,
+  createPromoteRetryableFailure,
+  getPromoteFailureDisposition,
+  getPromoteReplaySafeErrorDiagnostic,
+  getPromoteRetryableFailureDiagnostic,
+  isPromoteReplaySafeError,
+  isPromoteRetryableFailure,
+];
+type PublicPromoteFailureDisposition = PromoteFailureDisposition;
+type PublicPromoteReplaySafeErrorDiagnostic = PromoteReplaySafeErrorDiagnostic;
+type PublicPromoteRetryableFailureDiagnostic = PromoteRetryableFailureDiagnostic;
+type PublicPromoteRetryableFailureMarker = PromoteRetryableFailureMarker;
+
 export type {
   PromoteFailureDispositionIsPublic,
-  ParallelReplaySafeGuardStaysInternal,
-  ParallelReplaySafeDiagnosticStaysInternal,
-  ParallelRetryableGuardStaysInternal,
-  RetryableMarkerCodeStaysInternal,
+  LegacyReplaySafeGuardRemainsPublic,
+  LegacyReplaySafeDiagnosticRemainsPublic,
+  LegacyRetryableGuardRemainsPublic,
+  LegacyRetryableMarkerCodeRemainsPublic,
   ReplaySafeUnwrapperStaysAbsent,
   ReplaySafeCertifierStaysInternal,
   ReplaySafeConstructorStaysInternal,
@@ -50,4 +82,8 @@ export type {
   ReplaySafetyDeepModuleStaysClosed,
   ArbitraryPublisherImplementationStaysClosed,
   LegacyWorkspaceResolutionSubpathRemainsAvailable,
+  PublicPromoteFailureDisposition,
+  PublicPromoteReplaySafeErrorDiagnostic,
+  PublicPromoteRetryableFailureDiagnostic,
+  PublicPromoteRetryableFailureMarker,
 };
