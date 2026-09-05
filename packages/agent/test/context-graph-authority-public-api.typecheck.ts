@@ -45,6 +45,15 @@ type AuthorityMarkerStaysInternal =
 type AuthorityReasonStaysInternal =
   // @ts-expect-error Authority reasons are owned by the internal resolver.
   import('@origintrail-official/dkg-agent').ContextGraphAuthorityUnavailableReason;
+type DeepAuthorityStaysInternal =
+  // @ts-expect-error The export map blocks authority implementation deep imports.
+  typeof import('@origintrail-official/dkg-agent/dist/context-graph-agent-gate-authority.js');
+type DeepPolicyStateStaysInternal =
+  // @ts-expect-error The export map blocks live policy-state implementation deep imports.
+  typeof import('@origintrail-official/dkg-agent/dist/context-graph-access-policy-state.js');
+type DeepPrecommitStaysInternal =
+  // @ts-expect-error The export map blocks promote-precommit implementation deep imports.
+  typeof import('@origintrail-official/dkg-agent/dist/assertion-promote-precommit.js');
 
 export type {
   PromoteOptionsMatchFacade,
@@ -61,4 +70,7 @@ export type {
   GateAuthorityResultStaysInternal,
   AuthorityMarkerStaysInternal,
   AuthorityReasonStaysInternal,
+  DeepAuthorityStaysInternal,
+  DeepPolicyStateStaysInternal,
+  DeepPrecommitStaysInternal,
 };
