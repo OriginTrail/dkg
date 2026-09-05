@@ -1406,7 +1406,7 @@ function selectAdmittedMetadataIndexes(
     ) {
       if (admittedMetadataUals.has(quad.subject)) {
         if (
-          isDurableSyncControlQuad(quad, metadata, quad.subject)
+          isDurableSyncControlQuad(quad, metadata, 'descriptor-owned')
           && !authenticatedMetadataUals.has(quad.subject)
         ) {
           droppedControls += 1;
@@ -1421,7 +1421,7 @@ function selectAdmittedMetadataIndexes(
     if (owner) {
       if (admittedMetadataUals.has(owner)) {
         if (
-          isDurableSyncControlQuad(quad, metadata, owner)
+          isDurableSyncControlQuad(quad, metadata, 'descriptor-owned')
           && !authenticatedMetadataUals.has(owner)
         ) {
           droppedControls += 1;
@@ -1432,7 +1432,7 @@ function selectAdmittedMetadataIndexes(
       continue;
     }
 
-    if (isDurableSyncControlQuad(quad, metadata)) {
+    if (isDurableSyncControlQuad(quad, metadata, 'standalone')) {
       if (isAuthenticatedSyncControl(
         quad,
         metadata,
@@ -1470,7 +1470,7 @@ function selectSystemOverrideMetadataIndexes(
       continue;
     }
     if (
-      isDurableSyncControlQuad(quad, metadata)
+      isDurableSyncControlQuad(quad, metadata, 'standalone')
       && !isAuthenticatedSyncControl(
         quad,
         metadata,
@@ -1487,11 +1487,15 @@ function selectSystemOverrideMetadataIndexes(
 }
 
 /** One classification boundary for descriptor controls and descriptive seal fields. */
-function isDurableSyncControlQuad(quad: Quad, metadata: IntegrityMetadataIndex, descriptorOwner?: string): boolean {
+function isDurableSyncControlQuad(
+  quad: Quad,
+  metadata: IntegrityMetadataIndex,
+  context: 'descriptor-owned' | 'standalone',
+): boolean {
   // Descriptor-owned fields retain their existing authentication requirement;
   // adding seal-shaped quads to a descriptor must never relax that gate.
   return DURABLE_SYNC_CONTROL_PREDICATE_SET.has(quad.predicate)
-    && (descriptorOwner !== undefined || !isGraphSealDescriptiveVersion(quad, metadata));
+    && (context === 'descriptor-owned' || !isGraphSealDescriptiveVersion(quad, metadata));
 }
 
 /**
