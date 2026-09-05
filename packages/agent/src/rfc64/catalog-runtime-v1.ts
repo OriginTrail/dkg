@@ -9,6 +9,10 @@ export interface Rfc64CatalogRuntimeOptionsV1 {
     open: () => void;
     close: () => Promise<void>;
   }>;
+  readonly mutationPersistence: Readonly<{
+    open: () => void;
+    close: () => Promise<void>;
+  }>;
   readonly publicCatalog: Rfc64PublicCatalogRuntimeOwnerV1;
   /** Ordered independent workloads started after public transport admission. */
   readonly workloads: readonly Rfc64CatalogWorkloadOwnerV1[];
@@ -40,10 +44,16 @@ export class Rfc64CatalogRuntimeV1 {
       throw new Error('RFC-64 catalog runtime cannot start while close is in progress');
     }
     if (this.#started) return;
-    this.#options.inventoryObservers.open();
-    this.#options.publicCatalog.start(ctx);
-    for (const workload of this.#options.workloads) workload.start(ctx);
-    this.#started = true;
+    try {
+      this.#options.inventoryObservers.open();
+      this.#options.mutationPersistence.open();
+      this.#options.publicCatalog.start(ctx);
+      for (const workload of this.#options.workloads) workload.start(ctx);
+      this.#started = true;
+    } catch (error) {
+      this.#armClose(this.#closeOwnedLifecycle());
+      throw error;
+    }
   }
 
   async whenIdle(): Promise<void> {
@@ -56,6 +66,11 @@ export class Rfc64CatalogRuntimeV1 {
   close(): Promise<void> {
     if (this.#close !== null) return this.#close;
     const closing = this.#closeOwnedLifecycle();
+    this.#armClose(closing);
+    return closing;
+  }
+
+  #armClose(closing: Promise<void>): void {
     this.#close = closing;
     void closing.then(() => {
       if (this.#close === closing) this.#close = null;
@@ -65,14 +80,13 @@ export class Rfc64CatalogRuntimeV1 {
       // rejected close promise as a permanent fence: callers may observe the
       // failure again, but same-instance restart cannot reopen partial state.
     });
-    return closing;
   }
 
   async #closeOwnedLifecycle(): Promise<void> {
     // Preserve the production dependency order: producer admission first and
     // receiver admission second. Then retire every independent workload
-    // concurrently. The public-catalog owner internally joins transport and
-    // authority retirement before it releases shared mutation persistence.
+    // concurrently. Shared mutation persistence remains live until every
+    // producer and consumer has physically retired.
     const failures: unknown[] = [];
     const settle = async (actions: readonly (() => Promise<void>)[]): Promise<void> => {
       const results = await Promise.allSettled(actions.map((action) => action()));
@@ -86,6 +100,7 @@ export class Rfc64CatalogRuntimeV1 {
       () => this.#options.publicCatalog.close(),
       ...this.#options.workloads.map((workload) => () => workload.close()),
     ]);
+    await settle([this.#options.mutationPersistence.close]);
     if (failures.length === 1) throw failures[0];
     if (failures.length > 1) {
       throw new AggregateError(failures, 'RFC-64 catalog runtime close failed');

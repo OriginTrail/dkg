@@ -38,13 +38,9 @@ describe('Rfc64PublicCatalogWorkloadOwnerV1', () => {
   it('preserves dormant starts without arming authority refresh', async () => {
     const authorityRefresh = authorityOwner();
     const createService = vi.fn(() => null);
-    const openMutationPersistence = vi.fn();
-    const closeMutationPersistence = vi.fn(async () => undefined);
     const owner = new Rfc64PublicCatalogWorkloadOwnerV1({
       createService,
       authorityRefresh,
-      openMutationPersistence,
-      closeMutationPersistence,
       onServiceStarted: vi.fn(),
     });
     const ctx = createOperationContext('system');
@@ -53,12 +49,10 @@ describe('Rfc64PublicCatalogWorkloadOwnerV1', () => {
     owner.start(ctx);
 
     expect(createService).toHaveBeenCalledOnce();
-    expect(openMutationPersistence).toHaveBeenCalledOnce();
     expect(authorityRefresh.start).not.toHaveBeenCalled();
     expect(owner.service).toBeUndefined();
     await owner.close();
     expect(authorityRefresh.close).toHaveBeenCalledOnce();
-    expect(closeMutationPersistence).toHaveBeenCalledOnce();
 
     owner.start(ctx);
     expect(createService).toHaveBeenCalledTimes(2);
@@ -78,8 +72,6 @@ describe('Rfc64PublicCatalogWorkloadOwnerV1', () => {
     const owner = new Rfc64PublicCatalogWorkloadOwnerV1({
       createService: () => service,
       authorityRefresh,
-      openMutationPersistence: () => { calls.push('persistence.open'); },
-      closeMutationPersistence: async () => { calls.push('persistence.close'); },
       onServiceStarted: () => { calls.push('owner.started'); },
     });
     const ctx = createOperationContext('system');
@@ -88,8 +80,7 @@ describe('Rfc64PublicCatalogWorkloadOwnerV1', () => {
     await owner.whenIdle();
 
     expect(owner.service).toBe(service);
-    expect(calls.slice(0, 4)).toEqual([
-      'persistence.open',
+    expect(calls.slice(0, 3)).toEqual([
       'service.start',
       'authority.start',
       'owner.started',
@@ -99,7 +90,7 @@ describe('Rfc64PublicCatalogWorkloadOwnerV1', () => {
     await owner.close();
   });
 
-  it('fences receiver admission and all-settles retirement before persistence', async () => {
+  it('fences receiver admission and all-settles owned retirement', async () => {
     const serviceFailure = new Error('service close failed');
     const authorityFailure = new Error('authority close failed');
     const service = fakeService({
@@ -108,12 +99,9 @@ describe('Rfc64PublicCatalogWorkloadOwnerV1', () => {
     const authorityRefresh = authorityOwner({
       close: vi.fn(async () => { throw authorityFailure; }),
     });
-    const closeMutationPersistence = vi.fn(async () => undefined);
     const owner = new Rfc64PublicCatalogWorkloadOwnerV1({
       createService: () => service,
       authorityRefresh,
-      openMutationPersistence: vi.fn(),
-      closeMutationPersistence,
       onServiceStarted: vi.fn(),
     });
     owner.start(createOperationContext('system'));
@@ -128,7 +116,6 @@ describe('Rfc64PublicCatalogWorkloadOwnerV1', () => {
     });
     expect(service.close).toHaveBeenCalledOnce();
     expect(authorityRefresh.close).toHaveBeenCalledOnce();
-    expect(closeMutationPersistence).toHaveBeenCalledOnce();
     expect(() => owner.start(createOperationContext('system')))
       .toThrow('cannot start while close is in progress');
   });
@@ -143,8 +130,6 @@ describe('Rfc64PublicCatalogWorkloadOwnerV1', () => {
     const owner = new Rfc64PublicCatalogWorkloadOwnerV1({
       createService: () => services.shift() ?? null,
       authorityRefresh,
-      openMutationPersistence: vi.fn(),
-      closeMutationPersistence: vi.fn(async () => undefined),
       onServiceStarted: vi.fn(),
     });
     const ctx = createOperationContext('system');
@@ -161,6 +146,71 @@ describe('Rfc64PublicCatalogWorkloadOwnerV1', () => {
     owner.start(ctx);
     expect(owner.service).toBe(second);
     expect(authorityRefresh.start).toHaveBeenCalledTimes(2);
+    await owner.close();
+  });
+
+  it.each([
+    'service.start',
+    'authority.start',
+    'started callback',
+  ] as const)('transactionally rolls back a %s failure', async (failureStage) => {
+    let initialAttempt = true;
+    let releaseServiceClose!: () => void;
+    const serviceCloseGate = new Promise<void>((resolve) => { releaseServiceClose = resolve; });
+    const firstService = fakeService({
+      start: vi.fn(() => {
+        if (failureStage === 'service.start' && initialAttempt) {
+          throw new Error('service start failed');
+        }
+      }),
+      close: vi.fn(() => serviceCloseGate),
+    });
+    const secondService = fakeService();
+    const createService = vi.fn()
+      .mockReturnValueOnce(firstService)
+      .mockReturnValue(secondService);
+    const authorityRefresh = authorityOwner({
+      start: vi.fn(() => {
+        if (failureStage === 'authority.start' && initialAttempt) {
+          throw new Error('authority start failed');
+        }
+      }),
+    });
+    const onServiceStarted = vi.fn(() => {
+      if (failureStage === 'started callback' && initialAttempt) {
+        throw new Error('started callback failed');
+      }
+    });
+    const owner = new Rfc64PublicCatalogWorkloadOwnerV1({
+      createService,
+      authorityRefresh,
+      onServiceStarted,
+    });
+    const ctx = createOperationContext('system');
+
+    expect(() => owner.start(ctx)).toThrow({
+      'service.start': 'service start failed',
+      'authority.start': 'authority start failed',
+      'started callback': 'started callback failed',
+    }[failureStage]);
+    const rollback = owner.close();
+    expect(owner.close()).toBe(rollback);
+    expect(() => owner.start(ctx)).toThrow('cannot start while close is in progress');
+    await vi.waitFor(() => expect(firstService.close).toHaveBeenCalledOnce());
+    expect(authorityRefresh.close).toHaveBeenCalledTimes(
+      failureStage === 'service.start' ? 0 : 1,
+    );
+
+    let rollbackSettled = false;
+    void rollback.then(() => { rollbackSettled = true; });
+    await Promise.resolve();
+    expect(rollbackSettled).toBe(false);
+    releaseServiceClose();
+    await rollback;
+
+    initialAttempt = false;
+    owner.start(ctx);
+    expect(owner.service).toBe(secondService);
     await owner.close();
   });
 });

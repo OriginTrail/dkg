@@ -11,6 +11,7 @@ type RuntimeCallV1 =
   | 'bootstrap.whenIdle'
   | 'projection.whenIdle'
   | 'inventoryObservers.close'
+  | 'mutationPersistence.close'
   | 'publicCatalog.closeReceiverAdmission'
   | 'publicCatalog.close'
   | 'bootstrap.close'
@@ -26,8 +27,12 @@ function runtimeOptions(
   });
   return {
     inventoryObservers: {
-      open: vi.fn(),
+      open: vi.fn(() => { calls.push('inventoryObservers.open'); }),
       close: callback('inventoryObservers.close'),
+    },
+    mutationPersistence: {
+      open: vi.fn(() => { calls.push('mutationPersistence.open'); }),
+      close: callback('mutationPersistence.close'),
     },
     publicCatalog: {
       start: vi.fn(() => { calls.push('publicCatalog.start'); }),
@@ -54,6 +59,7 @@ describe('Rfc64CatalogRuntimeV1', () => {
     'publicCatalog.close',
     'bootstrap.close',
     'projection.close',
+    'mutationPersistence.close',
   ] as const;
 
   it.each(failurePoints)('attempts every later close stage when %s rejects', async (rejected) => {
@@ -68,6 +74,7 @@ describe('Rfc64CatalogRuntimeV1', () => {
     expect(options.publicCatalog.close).toHaveBeenCalledOnce();
     expect(options.workloads[0]!.close).toHaveBeenCalledOnce();
     expect(options.workloads[1]!.close).toHaveBeenCalledOnce();
+    expect(options.mutationPersistence.close).toHaveBeenCalledOnce();
     expect(() => runtime.start(createOperationContext('system')))
       .toThrow('cannot start while close is in progress');
   });
@@ -81,7 +88,9 @@ describe('Rfc64CatalogRuntimeV1', () => {
     runtime.start(ctx);
     await runtime.whenIdle();
 
-    expect(calls.slice(0, 3)).toEqual([
+    expect(calls.slice(0, 5)).toEqual([
+      'inventoryObservers.open',
+      'mutationPersistence.open',
       'publicCatalog.start',
       'bootstrap.start',
       'projection.start',
@@ -131,5 +140,65 @@ describe('Rfc64CatalogRuntimeV1', () => {
 
     runtime.start(ctx);
     expect(options.publicCatalog.start).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps mutation persistence open until every catalog producer retires', async () => {
+    const baseOptions = runtimeOptions([]);
+    let releaseProjection!: () => void;
+    const projectionGate = new Promise<void>((resolve) => { releaseProjection = resolve; });
+    const projection = {
+      ...baseOptions.workloads[1]!,
+      close: vi.fn(() => projectionGate),
+    };
+    const options: Rfc64CatalogRuntimeOptionsV1 = {
+      ...baseOptions,
+      workloads: [baseOptions.workloads[0]!, projection],
+    };
+    const runtime = new Rfc64CatalogRuntimeV1(options);
+    runtime.start(createOperationContext('system'));
+
+    let closeSettled = false;
+    const closing = runtime.close();
+    void closing.then(() => { closeSettled = true; });
+    await vi.waitFor(() => expect(projection.close).toHaveBeenCalledOnce());
+    expect(options.mutationPersistence.close).not.toHaveBeenCalled();
+    expect(closeSettled).toBe(false);
+
+    releaseProjection();
+    await closing;
+    expect(options.mutationPersistence.close).toHaveBeenCalledOnce();
+  });
+
+  it('joins partial-start rollback before releasing mutation persistence', async () => {
+    const baseOptions = runtimeOptions([]);
+    let failStart = true;
+    let releasePublicClose!: () => void;
+    const publicCloseGate = new Promise<void>((resolve) => { releasePublicClose = resolve; });
+    const publicCatalog = {
+      ...baseOptions.publicCatalog,
+      start: vi.fn(() => {
+        if (failStart) throw new Error('public catalog start failed');
+      }),
+      close: vi.fn(() => publicCloseGate),
+    };
+    const options: Rfc64CatalogRuntimeOptionsV1 = {
+      ...baseOptions,
+      publicCatalog,
+    };
+    const runtime = new Rfc64CatalogRuntimeV1(options);
+    const ctx = createOperationContext('system');
+
+    expect(() => runtime.start(ctx)).toThrow('public catalog start failed');
+    const rollback = runtime.close();
+    expect(() => runtime.start(ctx)).toThrow('cannot start while close is in progress');
+    await vi.waitFor(() => expect(publicCatalog.close).toHaveBeenCalledOnce());
+    expect(options.mutationPersistence.close).not.toHaveBeenCalled();
+
+    releasePublicClose();
+    await rollback;
+    expect(options.mutationPersistence.close).toHaveBeenCalledOnce();
+
+    failStart = false;
+    runtime.start(ctx);
   });
 });

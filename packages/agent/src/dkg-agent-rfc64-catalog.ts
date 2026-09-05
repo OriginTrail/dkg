@@ -2195,11 +2195,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     });
   }
 
-  /**
-   * Compatibility entrypoint; lifecycle ownership lives in the focused owner.
-   */
+  /** Compatibility entrypoint; the runtime owns every shared catalog resource. */
   startRfc64PublicCatalogServiceV1(this: DKGAgent, ctx: OperationContext): void {
-    this.rfc64PublicCatalogOwnerV1.start(ctx);
+    this.rfc64CatalogRuntimeV1.start(ctx);
   }
 
   /** Construct the transport, or return null while RFC-64 is dormant. */
@@ -2392,7 +2390,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
 
   /** Compatibility close entrypoint for callers outside the canonical runtime. */
   closeRfc64PublicCatalogServiceV1(this: DKGAgent): Promise<void> {
-    return this.rfc64PublicCatalogOwnerV1.close();
+    return this.rfc64CatalogRuntimeV1.close();
   }
 
   /** Final runtime stage after transport and every workload physically retire. */

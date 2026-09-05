@@ -958,8 +958,6 @@ export class DKGAgent extends DKGAgentBase {
     this.rfc64PublicCatalogOwnerV1 = new Rfc64PublicCatalogWorkloadOwnerV1({
       createService: (ctx) => this.createRfc64PublicCatalogServiceV1(ctx),
       authorityRefresh: authorityRefreshOwner,
-      openMutationPersistence: () => this.rfc64CatalogMutationCoordinatorV1.reopen(),
-      closeMutationPersistence: () => this.closeRfc64PublicCatalogMutationPersistenceV1(),
       onServiceStarted: (ctx) => {
         this.log.info(ctx, 'RFC-64 public author-catalog transport started');
       },
@@ -968,6 +966,10 @@ export class DKGAgent extends DKGAgentBase {
       inventoryObservers: {
         open: () => this.openRfc64SwmInventoryObserversV1(),
         close: () => this.closeRfc64SwmInventoryObserversV1(),
+      },
+      mutationPersistence: {
+        open: () => this.rfc64CatalogMutationCoordinatorV1.reopen(),
+        close: () => this.closeRfc64PublicCatalogMutationPersistenceV1(),
       },
       publicCatalog: this.rfc64PublicCatalogOwnerV1,
       workloads: [bootstrapOwner, projectionOwner],

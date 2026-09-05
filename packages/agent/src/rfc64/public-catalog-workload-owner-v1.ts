@@ -13,12 +13,10 @@ export interface Rfc64PublicCatalogWorkloadOwnerOptionsV1 {
     ctx: OperationContext,
   ) => Rfc64PublicCatalogServiceV1 | null;
   readonly authorityRefresh: Rfc64CatalogWorkloadOwnerV1;
-  readonly openMutationPersistence: () => void;
-  readonly closeMutationPersistence: () => Promise<void>;
   readonly onServiceStarted: (ctx: OperationContext) => void;
 }
 
-/** Single lifecycle owner for public-catalog transport, refresh, and persistence. */
+/** Single lifecycle owner for public-catalog transport and authority refresh. */
 export class Rfc64PublicCatalogWorkloadOwnerV1
 implements Rfc64PublicCatalogRuntimeOwnerV1 {
   readonly #options: Rfc64PublicCatalogWorkloadOwnerOptionsV1;
@@ -40,23 +38,31 @@ implements Rfc64PublicCatalogRuntimeOwnerV1 {
     }
     if (this.#started) return;
     let service: Rfc64PublicCatalogServiceV1 | null = null;
+    let serviceStartAttempted = false;
+    let authorityStartAttempted = false;
     try {
-      this.#options.openMutationPersistence();
       service = this.#options.createService(ctx);
       if (service === null) {
         this.#started = true;
         return;
       }
+      serviceStartAttempted = true;
       service.start();
       this.#service = service;
+      authorityStartAttempted = true;
       this.#options.authorityRefresh.start(ctx);
+      this.#options.onServiceStarted(ctx);
       this.#started = true;
     } catch (error) {
       this.#service = null;
-      void service?.close().catch(() => undefined);
+      if (serviceStartAttempted || authorityStartAttempted) {
+        this.#armClose(this.#retireAcquiredLifecycle(
+          serviceStartAttempted ? service : null,
+          authorityStartAttempted,
+        ));
+      }
       throw error;
     }
-    this.#options.onServiceStarted(ctx);
   }
 
   async whenIdle(): Promise<void> {
@@ -74,7 +80,12 @@ implements Rfc64PublicCatalogRuntimeOwnerV1 {
     if (this.#close !== null) return this.#close;
     const service = this.#service;
     this.#service = null;
-    const closing = this.#closeOwnedLifecycle(service);
+    const closing = this.#retireAcquiredLifecycle(service, true);
+    this.#armClose(closing);
+    return closing;
+  }
+
+  #armClose(closing: Promise<void>): void {
     this.#close = closing;
     void closing.then(() => {
       if (this.#close !== closing) return;
@@ -84,24 +95,23 @@ implements Rfc64PublicCatalogRuntimeOwnerV1 {
       // A failed owner did not prove physical retirement. Preserve the
       // rejected close as a permanent same-instance restart fence.
     });
-    return closing;
   }
 
-  async #closeOwnedLifecycle(
+  async #retireAcquiredLifecycle(
     service: Rfc64PublicCatalogServiceV1 | null,
+    authorityStartAttempted: boolean,
   ): Promise<void> {
     const failures: unknown[] = [];
     const retirements = await Promise.allSettled([
       Promise.resolve().then(() => service?.close()),
-      Promise.resolve().then(() => this.#options.authorityRefresh.close()),
+      Promise.resolve().then(() => (
+        authorityStartAttempted
+          ? this.#options.authorityRefresh.close()
+          : undefined
+      )),
     ]);
     for (const result of retirements) {
       if (result.status === 'rejected') failures.push(result.reason);
-    }
-    try {
-      await this.#options.closeMutationPersistence();
-    } catch (error) {
-      failures.push(error);
     }
     if (failures.length === 1) throw failures[0];
     if (failures.length > 1) {
