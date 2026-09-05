@@ -5,7 +5,7 @@ const runsDaemonHttpBehavior = process.argv.some((arg) =>
   arg.includes('daemon-http-behavior-extra.test.ts'),
 );
 
-const hardhatEnv = runsDaemonHttpBehavior ? hardhatTestEnvironment(9548) : undefined;
+const hardhatEnv = runsDaemonHttpBehavior ? hardhatTestEnvironment() : undefined;
 
 export default defineConfig({
   test: {

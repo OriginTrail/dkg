@@ -29,7 +29,6 @@ import { buildSeal, buildUpdateSeal } from './_helpers/seal.js';
 import { makeHardhatReceiverACKProvider, makeHardhatUpdateACKProvider } from './_helpers/acks.js';
 import { makeTestKaAllocator } from './_helpers/ka-allocator.js';
 
-const HARDHAT_PORT = 8549;
 const ENTITY = 'urn:greenfield-e2e:asset';
 
 function q(s: string, p: string, o: string, graph: string): Quad {
@@ -48,7 +47,7 @@ let updateAckProvider: ReturnType<typeof makeHardhatUpdateACKProvider>;
 
 describe('Greenfield KA update E2E (explicit owner seal)', () => {
   beforeAll(async () => {
-    ctx = await spawnHardhatEnv(HARDHAT_PORT);
+    ctx = await spawnHardhatEnv();
 
     author = new Wallet(HARDHAT_KEYS.CORE_OP, ctx.provider);
     await mintTokens(

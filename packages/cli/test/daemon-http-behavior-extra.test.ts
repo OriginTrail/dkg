@@ -33,7 +33,7 @@
  *
  * Mocks policy: ZERO blockchain mocks. The daemon is wired against the
  * SHARED HARDHAT NODE spun up by `packages/chain/test/hardhat-global-setup.ts`
- * on `process.env.HARDHAT_PORT` (9548 for the CLI lane). The daemon uses a
+ * on an OS-assigned port from the isolated context file. The daemon uses a
  * real `EVMChainAdapter` against that node with the real Hub address and the
  * pre-registered `CORE_OP` operational wallet (its identityId was posted on
  * chain by the harness' profile setup). None of the tests in this file

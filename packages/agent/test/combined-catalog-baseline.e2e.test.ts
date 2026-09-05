@@ -42,7 +42,7 @@ describe('baseline — curated CG rootless publish with detached catalog', () =>
   let curator: string;
 
   beforeAll(async () => {
-    ctx = await spawnHardhatEnv(8553);
+    ctx = await spawnHardhatEnv();
     await setMinimumRequiredSignatures(ctx.provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, 1);
 
     // Genesis core nodes are pre-staked. Publisher = CORE_OP (curator/member);

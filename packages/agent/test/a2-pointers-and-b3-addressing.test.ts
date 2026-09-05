@@ -72,7 +72,7 @@ describe('OT-RFC-43 A2/B3 — finalize-stamp, divergence, create-vs-update, B3 (
   let chainAdapter: EVMChainAdapter | undefined;
 
   beforeAll(async () => {
-    ctx = await spawnHardhatEnv(8551);
+    ctx = await spawnHardhatEnv();
     // Two connected agent cores (mirrors e2e-chain.test.ts) so the V10 ACK
     // quorum is met and publishes reach `confirmed`. agentA is the publisher;
     // agentB just supplies ACKs.

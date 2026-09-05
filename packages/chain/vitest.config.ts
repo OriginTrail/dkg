@@ -3,7 +3,7 @@ import { defineConfig } from 'vitest/config';
 import { EVM_TEST_SCOPES } from '../../scripts/ci/evm-test-scopes.mjs';
 import { tornadoChainCoverage } from '../../vitest.coverage';
 
-const hardhatEnv = hardhatTestEnvironment(9545);
+const hardhatEnv = hardhatTestEnvironment();
 
 export default defineConfig({
   test: {

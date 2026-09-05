@@ -122,7 +122,7 @@ describe('OT-RFC-49 WS-D — catalog producer↔extractor↔chain parity', () =>
   let curator: string;
 
   beforeAll(async () => {
-    ctx = await spawnHardhatEnv(8554);
+    ctx = await spawnHardhatEnv();
     await setMinimumRequiredSignatures(ctx.provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, 1);
 
     publisher = await DKGAgent.create({

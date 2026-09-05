@@ -4,7 +4,7 @@ import { defineConfig } from 'vitest/config';
 // Distinct from the cli lane (9548) so kafka-plugin's E2E can spin its
 // own Hardhat node without colliding when the two packages are run in
 // parallel by turbo.
-const hardhatEnv = hardhatTestEnvironment(9549);
+const hardhatEnv = hardhatTestEnvironment();
 
 export default defineConfig({
   test: {

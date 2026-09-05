@@ -6,7 +6,7 @@ import { defineConfig } from 'vitest/config';
 // port. Current map: chain 9545, publisher 9546, agent 9547, cli 9548,
 // kafka-plugin 9549, random-sampling 9550. (Was 9547 — collided with
 // `agent`, see #957.)
-const hardhatEnv = hardhatTestEnvironment(9550);
+const hardhatEnv = hardhatTestEnvironment();
 
 // Coverage thresholds intentionally omitted while the package is just
 // a skeleton. Once Phase 3+ lands real prover / extractor / mutual-aid

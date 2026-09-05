@@ -165,7 +165,7 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
   beforeAll(async () => {
     // Unique port to avoid collision with the other Hardhat-backed
     // suites (8545 / 8546 / 8552 are taken; global setup uses 9545).
-    ctx = await spawnHardhatEnv(8553);
+    ctx = await spawnHardhatEnv();
   }, 120_000);
 
   afterAll(() => {
