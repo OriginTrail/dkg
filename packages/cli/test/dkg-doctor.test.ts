@@ -24,7 +24,7 @@
  * Production wiring (CLI flag parsing, exit codes, JSON output
  * shape) is covered separately by the integration smoke tests.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { join, resolve } from 'node:path';
 import { runDoctor, collectStateSummary, ALL_CHECK_IDS } from '../src/doctor/index.js';
 import type { DoctorDeps } from '../src/doctor/types.js';
@@ -292,6 +292,36 @@ describe('collectStateSummary (§4.7.0)', () => {
 // ---------------------------------------------------------------------------
 
 describe('orphan-repos check (§4.7.1)', () => {
+  it('charges overlapping install and discovery roots once against the scan budget', async () => {
+    const fs: FakeFS = {
+      '/test/.dkg/config.json': JSON.stringify({ nodeRole: 'core' }),
+      '/test/.dkg/releases/current': 'symlink:a',
+      '/test/.dkg/releases/a/package.json': JSON.stringify({ name: 'dkg-v10' }),
+      '/extra/last/package.json': JSON.stringify({ name: 'dkg-v10' }),
+    };
+    for (let index = 0; index < 48; index++) {
+      fs[`/test/.dkg/releases/other-${index}/package.json`] = JSON.stringify({ name: 'dkg-v10' });
+    }
+    const deps = makeDeps({ fs, extraScanRoots: ['/extra/last'] });
+    const state = await collectStateSummary(deps);
+    state.daemon.entryPoint = '/test/.dkg/releases/a/packages/cli/dist/cli.js';
+    const readFile = vi.spyOn(deps, 'readFile');
+    const findings = await runOrphanReposCheck(deps, state);
+    expect(findings).toHaveLength(50);
+    expect(findings.some((finding) => finding.subject === '/extra/last')).toBe(true);
+    expect(readFile.mock.calls.filter(([path]) => path === '/test/.dkg/releases/a/package.json')).toHaveLength(1);
+    expect(findings.find((finding) => finding.subject === '/test/.dkg/releases/a')?.details?.relevance).toBe('active-daemon');
+  });
+
+  it('probes known install directories without recursively discovering unrelated children', async () => {
+    const deps = makeDeps({ monorepoRoot: '/install', fs: {
+      '/install/unrelated/package.json': JSON.stringify({ name: 'dkg-v10' }),
+    } });
+    const readDir = vi.spyOn(deps, 'readdir');
+    expect(await runOrphanReposCheck(deps, await collectStateSummary(deps))).toEqual([]);
+    expect(readDir).not.toHaveBeenCalledWith('/install');
+  });
+
   it.each(['a', '/external/releases/a'])('resolves active slot %s independently of the caller directory', async (activeSlot) => {
     const slotPath = resolve('/test/.dkg/releases', activeSlot);
     const deps = makeDeps({
