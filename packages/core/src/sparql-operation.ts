@@ -1,7 +1,4 @@
-import {
-  sparqlAnalysisCache,
-  type CachedSparqlOperationFacts,
-} from './sparql-analysis-cache.js';
+import { SparqlAnalysisCache } from './sparql-analysis-cache.js';
 import {
   prepareSparql,
   prepareSparqlQuery,
@@ -35,9 +32,12 @@ export interface SparqlOperationAnalysis {
   mutatingKeyword: string | null;
 }
 
-type SparqlOperationFacts = CachedSparqlOperationFacts & Readonly<{
+export type SparqlOperationFacts = Readonly<{
   form: SparqlDetectedOperation;
+  mutatingKeyword: string | null;
 }>;
+
+const sparqlAnalysisCache = new SparqlAnalysisCache<SparqlOperationFacts>();
 
 const MUTATING_KEYWORD_SET = new Set<string>(SPARQL_MUTATING_KEYWORDS);
 const UPDATE_OPERATION_SET = new Set<string>(SPARQL_UPDATE_OPERATIONS);
@@ -78,9 +78,15 @@ function materializeSparqlOperationAnalysis(
   };
 }
 
-function analyzePreparedSparql(scan: PreparedSparql): SparqlOperationFacts {
+function analyzePreparedSparql(scan: PreparedSparql): Readonly<{
+  facts: SparqlOperationFacts;
+  largeCacheable: boolean;
+}> {
   if (scan.status !== 'valid') {
-    return { form: 'UNKNOWN', mutatingKeyword: null, largeCacheable: false };
+    return {
+      facts: { form: 'UNKNOWN', mutatingKeyword: null },
+      largeCacheable: false,
+    };
   }
   const query = prepareSparqlQuery(scan);
   const form = detectSparqlOperationForm(query);
@@ -89,10 +95,12 @@ function analyzePreparedSparql(scan: PreparedSparql): SparqlOperationFacts {
       && MUTATING_KEYWORD_SET.has(token.upper),
   );
   return {
-    form,
-    mutatingKeyword: mutatingToken?.kind === 'word'
-      ? mutatingToken.raw
-      : null,
+    facts: Object.freeze({
+      form,
+      mutatingKeyword: mutatingToken?.kind === 'word'
+        ? mutatingToken.raw
+        : null,
+    }),
     // Recognition of SELECT/INSERT alone is not validity evidence. Retain a
     // large source only when the lexical artifact is complete and every
     // structural delimiter family is balanced. Small UNKNOWN inputs keep the
@@ -109,18 +117,18 @@ export function analyzeSparqlOperation(
   input: string | PreparedSparql,
 ): SparqlOperationAnalysis {
   if (typeof input !== 'string') {
-    return materializeSparqlOperationAnalysis(analyzePreparedSparql(input));
+    return materializeSparqlOperationAnalysis(analyzePreparedSparql(input).facts);
   }
 
-  const cached = sparqlAnalysisCache.get(input) as SparqlOperationFacts | undefined;
+  const cached = sparqlAnalysisCache.get(input);
   if (cached) return materializeSparqlOperationAnalysis(cached);
 
-  const facts = analyzePreparedSparql(prepareSparql(input));
+  const { facts, largeCacheable } = analyzePreparedSparql(prepareSparql(input));
 
   // Each tier owns its complete admission policy. In particular, short
   // UNKNOWN inputs retain their established reuse while malformed large
   // inputs cannot churn the four-entry large-query cache.
-  sparqlAnalysisCache.set(input, facts);
+  sparqlAnalysisCache.set(input, facts, { largeCacheable });
   // The cache owns only immutable scalar facts. Materializing at the public
   // boundary preserves the API's mutable, caller-isolated response objects.
   return materializeSparqlOperationAnalysis(facts);

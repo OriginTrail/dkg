@@ -1,9 +1,7 @@
 import { BoundedLruCache } from './bounded-lru-cache.js';
 
-export type CachedSparqlOperationFacts = Readonly<{
-  form: string;
-  mutatingKeyword: string | null;
-  /** Lexically complete with balanced delimiters, so the large tier may retain it. */
+export type SparqlAnalysisCacheAdmission = Readonly<{
+  /** The caller proved the large source is complete enough to retain. */
   largeCacheable: boolean;
 }>;
 
@@ -14,37 +12,39 @@ const LARGE_MAX_SOURCE_LENGTH = 2 * 1024 * 1024;
 
 type CacheTier = 'small' | 'large';
 
-function createTiers() {
+function createTiers<Value>() {
   return {
-    small: new BoundedLruCache<string, CachedSparqlOperationFacts>(
+    small: new BoundedLruCache<string, Value>(
       SMALL_MAX_ENTRIES,
       (source) => source.length <= SMALL_MAX_SOURCE_LENGTH,
     ),
-    large: new BoundedLruCache<string, CachedSparqlOperationFacts>(
+    large: new BoundedLruCache<string, Value>(
       LARGE_MAX_ENTRIES,
-      (source, facts) => source.length > SMALL_MAX_SOURCE_LENGTH
-        && source.length <= LARGE_MAX_SOURCE_LENGTH
-        && facts.largeCacheable,
+      (source) => source.length > SMALL_MAX_SOURCE_LENGTH
+        && source.length <= LARGE_MAX_SOURCE_LENGTH,
     ),
   };
 }
 
 /** Package-internal cache boundary; intentionally not re-exported by core's root. */
-export class SparqlAnalysisCache {
-  private readonly tiers = createTiers();
+export class SparqlAnalysisCache<Value> {
+  private readonly tiers = createTiers<Value>();
 
   private tierFor(source: string): CacheTier {
     return source.length <= SMALL_MAX_SOURCE_LENGTH ? 'small' : 'large';
   }
 
-  get(source: string): CachedSparqlOperationFacts | undefined {
+  get(source: string): Value | undefined {
     return this.tiers[this.tierFor(source)].get(source);
   }
 
-  set(source: string, facts: CachedSparqlOperationFacts): void {
-    this.tiers[this.tierFor(source)].set(source, facts);
+  set(
+    source: string,
+    value: Value,
+    admission: SparqlAnalysisCacheAdmission,
+  ): void {
+    const tier = this.tierFor(source);
+    if (tier === 'large' && !admission.largeCacheable) return;
+    this.tiers[tier].set(source, value);
   }
-
 }
-
-export const sparqlAnalysisCache = new SparqlAnalysisCache();

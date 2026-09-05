@@ -1,11 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
   analyzeSparqlOperation,
   classifySparqlOperation,
+  type SparqlOperationFacts,
 } from '../src/sparql-operation.js';
 import {
   SparqlAnalysisCache,
-  type CachedSparqlOperationFacts,
 } from '../src/sparql-analysis-cache.js';
 import {
   BoundedLruCache,
@@ -135,10 +135,9 @@ describe('bounded SPARQL analysis cache policy', () => {
   const largeQuery = (suffix: string, padding = smallMaxSourceLength) => (
     `SELECT * WHERE { <urn:${suffix}> ?p ?o } # ${'x'.repeat(padding)}`
   );
-  const facts = (largeCacheable: boolean): CachedSparqlOperationFacts => ({
+  const facts = (): SparqlOperationFacts => ({
     form: 'SELECT',
     mutatingKeyword: null,
-    largeCacheable,
   });
 
   it('preserves public analyzer behavior when a valid large query is reused', () => {
@@ -150,32 +149,39 @@ describe('bounded SPARQL analysis cache policy', () => {
   });
 
   it('admits small results but rejects lexically incomplete large results', () => {
-    const cache = new SparqlAnalysisCache();
+    const cache = new SparqlAnalysisCache<SparqlOperationFacts>();
     const shortUnknown = String.raw`PREFIX \u00G0x: <https://example.com/> SELECT * WHERE {}`;
-    const shortFacts = facts(false);
-    cache.set(shortUnknown, shortFacts);
+    const shortFacts = facts();
+    cache.set(shortUnknown, shortFacts, { largeCacheable: false });
     expect(cache.get(shortUnknown)).toBe(shortFacts);
 
     const incomplete = `SELECT * WHERE { # ${'x'.repeat(
       smallMaxSourceLength,
     )}`;
-    cache.set(incomplete, facts(false));
+    cache.set(incomplete, facts(), { largeCacheable: false });
     expect(cache.get(incomplete)).toBeUndefined();
   });
 
   it('evicts the large tier at four entries and rejects over-limit input', () => {
-    const cache = new SparqlAnalysisCache();
+    const cache = new SparqlAnalysisCache<SparqlOperationFacts>();
     const first = largeQuery('first');
-    cache.set(first, facts(true));
+    cache.set(first, facts(), { largeCacheable: true });
     for (let index = 0; index < 4; index++) {
-      cache.set(largeQuery(`next-${index}`), facts(true));
+      cache.set(largeQuery(`next-${index}`), facts(), { largeCacheable: true });
     }
     expect(cache.get(first)).toBeUndefined();
-    expect(cache.get(largeQuery('next-0'))).toEqual(facts(true));
+    expect(cache.get(largeQuery('next-0'))).toEqual(facts());
 
     const overLimit = largeQuery('over-limit', largeMaxSourceLength);
-    cache.set(overLimit, facts(true));
+    cache.set(overLimit, facts(), { largeCacheable: true });
     expect(cache.get(overLimit)).toBeUndefined();
-    expect(cache.get(largeQuery('next-0'))).toEqual(facts(true));
+    expect(cache.get(largeQuery('next-0'))).toEqual(facts());
+  });
+
+  it('keeps the exact operation-facts type at the generic cache boundary', () => {
+    const cache = new SparqlAnalysisCache<SparqlOperationFacts>();
+    expectTypeOf(cache.set).parameter(1).toEqualTypeOf<SparqlOperationFacts>();
+    expectTypeOf({ form: 'ARBITRARY' as const, mutatingKeyword: null })
+      .not.toMatchTypeOf<SparqlOperationFacts>();
   });
 });
