@@ -36,6 +36,20 @@ export function runtimeBuildPnpmArgs(operation = ['run', 'build']) {
   return [...runtimeBuildFilterArgs(), ...operation];
 }
 
-export function runtimeDependencyBuildPnpmArgs(operation = ['run', 'build']) {
-  return [...runtimeBuildFilterArgs(), '--filter', `!${RUNTIME_CLI_PACKAGE}`, ...operation];
+export function runtimeCliPrerequisiteBuildPnpmArgs(operation = ['run', 'build']) {
+  return [
+    '-r',
+    '--filter', `${RUNTIME_CLI_PACKAGE}...`,
+    '--filter', `!${RUNTIME_CLI_PACKAGE}`,
+    ...RUNTIME_BUILD_EXCLUSIONS.flatMap((packageName) => ['--filter', `!${packageName}`]),
+    ...operation,
+  ];
+}
+
+export function runtimeDependentBuildPnpmArgs(operation = ['run', 'build']) {
+  return [
+    ...runtimeBuildFilterArgs(),
+    '--filter', `!${RUNTIME_CLI_PACKAGE}...`,
+    ...operation,
+  ];
 }
