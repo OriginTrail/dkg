@@ -772,14 +772,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         if (generation !== this.mutationGeneration) {
           continue;
         }
-        this.addGraphs(
-          graphPresence.filter(({ present }) => present).map(({ graph }) => graph),
-          source,
-        );
-        this.removeGraphs(
-          graphPresence.filter(({ present }) => !present).map(({ graph }) => graph),
-          source,
-        );
+        this.reconcileGraphs(graphPresence, source);
         return;
       } catch {
         this.clearIndex();
@@ -832,18 +825,26 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   private addGraphs(graphs: string[], source: GraphSetMutationSource): void {
-    if (!this.catalog.initialized) return;
-    const eligible = graphs.filter(
-      (graph) => graph && !isAtomicGraphReplaceStagingGraph(graph),
-    );
-    for (const graph of this.catalog.addAll(eligible)) {
-      this.emit({ type: 'graph-added', graph, source });
-    }
+    this.reconcileGraphs(graphs.map((graph) => ({ graph, present: true })), source);
   }
 
   private removeGraphs(graphs: string[], source: GraphSetMutationSource): void {
+    this.reconcileGraphs(graphs.map((graph) => ({ graph, present: false })), source);
+  }
+
+  private reconcileGraphs(
+    graphPresence: ReadonlyArray<Readonly<{ graph: string; present: boolean }>>,
+    source: GraphSetMutationSource,
+  ): void {
     if (!this.catalog.initialized) return;
-    for (const graph of this.catalog.removeAll(graphs.filter(Boolean))) {
+    const eligible = graphPresence.filter(
+      ({ graph, present }) => graph && (!present || !isAtomicGraphReplaceStagingGraph(graph)),
+    );
+    const { added, removed } = this.catalog.reconcile(eligible);
+    for (const graph of added) {
+      this.emit({ type: 'graph-added', graph, source });
+    }
+    for (const graph of removed) {
       this.emit({ type: 'graph-removed', graph, source });
     }
   }

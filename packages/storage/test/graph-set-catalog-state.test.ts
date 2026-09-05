@@ -56,24 +56,24 @@ describe('GraphSetCatalogState', () => {
     expect(state.sortedFor(members)).toBe(initial);
   });
 
-  it('rebuilds an existing projection at most once for a large mutation batch', () => {
+  it('rebuilds an existing projection at most once for a large mixed reconciliation', () => {
     const createSortedCatalog = vi.mocked(createSortedUniqueStringCatalog);
     createSortedCatalog.mockClear();
     const state = new GraphSetCatalogState();
-    state.replace(new Set(['urn:existing']));
+    state.replace(new Set(['urn:keep', 'urn:remove:a', 'urn:remove:b']));
     const members = state.current!;
     state.sortedFor(members);
+    createSortedCatalog.mockClear();
 
     const additions = Array.from({ length: 1_000 }, (_, index) => `urn:add:${index}`);
-    expect(state.addAll([...additions, additions[0]!])).toEqual(additions);
-    expect(createSortedCatalog).toHaveBeenCalledTimes(2);
-    expect(state.sortedFor(members)).toEqual(
-      createSortedUniqueStringCatalog(['urn:existing', ...additions]),
-    );
-
-    createSortedCatalog.mockClear();
-    expect(state.removeAll([...additions, additions[0]!])).toEqual(additions);
+    expect(state.reconcile([
+      ...additions.map((graph) => ({ graph, present: true })),
+      { graph: additions[0]!, present: true },
+      { graph: 'urn:remove:a', present: false },
+      { graph: 'urn:remove:b', present: false },
+      { graph: 'urn:missing', present: false },
+    ])).toEqual({ added: additions, removed: ['urn:remove:a', 'urn:remove:b'] });
     expect(createSortedCatalog).toHaveBeenCalledOnce();
-    expect(state.sortedFor(members)).toEqual(['urn:existing']);
+    expect(state.sortedFor(members)).toEqual(['urn:keep', ...additions].sort());
   });
 });

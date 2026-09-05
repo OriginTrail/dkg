@@ -41,44 +41,44 @@ export class GraphSetCatalogState {
   }
 
   add(graph: string): boolean {
-    return this.addAll([graph]).length === 1;
-  }
-
-  /** Apply a batch with at most one full immutable projection rebuild. */
-  addAll(graphs: Iterable<string>): string[] {
-    if (!this.members) return [];
-    const added: string[] = [];
-    for (const graph of graphs) {
-      if (this.members.has(graph)) continue;
-      this.members.add(graph);
-      added.push(graph);
-    }
-    if (this.ordered && added.length > 0) {
-      this.ordered = added.length === 1
-        ? insertSortedUniqueStringCatalog(this.ordered, added[0]!)
-        : createSortedUniqueStringCatalog(this.members);
-    }
-    return added;
+    return this.reconcile([{ graph, present: true }]).added.length === 1;
   }
 
   remove(graph: string): boolean {
-    return this.removeAll([graph]).length === 1;
+    return this.reconcile([{ graph, present: false }]).removed.length === 1;
   }
 
-  /** Apply a batch with at most one full immutable projection rebuild. */
-  removeAll(graphs: Iterable<string>): string[] {
-    if (!this.members) return [];
+  /** Apply one mixed presence reconciliation with at most one projection rebuild. */
+  reconcile(
+    graphPresence: Iterable<Readonly<{ graph: string; present: boolean }>>,
+  ): { added: string[]; removed: string[] } {
+    if (!this.members) return { added: [], removed: [] };
+    const desiredPresence = new Map<string, boolean>();
+    for (const { graph, present } of graphPresence) {
+      desiredPresence.set(graph, present);
+    }
+    const added: string[] = [];
     const removed: string[] = [];
-    for (const graph of graphs) {
-      if (!this.members.delete(graph)) continue;
-      removed.push(graph);
+    for (const [graph, present] of desiredPresence) {
+      if (present) {
+        if (this.members.has(graph)) continue;
+        this.members.add(graph);
+        added.push(graph);
+      } else if (this.members.delete(graph)) {
+        removed.push(graph);
+      }
     }
-    if (this.ordered && removed.length > 0) {
-      this.ordered = removed.length === 1
-        ? removeSortedUniqueStringCatalog(this.ordered, removed[0]!)
-        : createSortedUniqueStringCatalog(this.members);
+    if (this.ordered) {
+      const mutationCount = added.length + removed.length;
+      if (mutationCount === 1) {
+        this.ordered = added.length === 1
+          ? insertSortedUniqueStringCatalog(this.ordered, added[0]!)
+          : removeSortedUniqueStringCatalog(this.ordered, removed[0]!);
+      } else if (mutationCount > 1) {
+        this.ordered = createSortedUniqueStringCatalog(this.members);
+      }
     }
-    return removed;
+    return { added, removed };
   }
 
   /**
