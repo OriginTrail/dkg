@@ -63,6 +63,22 @@ describe('RFC-64 private Sender Key roster authority', () => {
     });
   });
 
+  it('marks an unavailable recipient authority so durable promotion can retry it', async () => {
+    const receiver = {
+      resolveRegisteredContextGraphAuthority: async () => ({
+        kind: 'unavailable' as const,
+        reason: 'chain-access-policy-unknown' as const,
+      }),
+    };
+
+    await expect(WorkspaceCryptoMethods.prototype.resolveWorkspaceAgentRecipientsForCurrentAuthority.call(
+      receiver as never,
+      { contextGraphId: CG },
+    )).rejects.toMatchObject({
+      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+    });
+  });
+
   it('preserves legacy meta and subscription resolution for non-RFC-64 graphs', async () => {
     const receiver = {
       resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),
