@@ -28,6 +28,13 @@ describe('context graph join policy validation', () => {
   });
 
   it.each([
+    { label: 'an empty graph', patch: { contextGraphId: '' } },
+    { label: 'a non-string graph with a length', patch: { contextGraphId: { length: 1 } } },
+    { label: 'an unknown mode', patch: { mode: 'automatic' } },
+    { label: 'a zero member cap', patch: { maxMembers: 0 } },
+    { label: 'a negative member cap', patch: { maxMembers: -1 } },
+    { label: 'a zero approval cap', patch: { maxApprovalsPerHour: 0 } },
+    { label: 'a negative approval cap', patch: { maxApprovalsPerHour: -1 } },
     { label: 'a future version', patch: { version: 2 } },
     { label: 'the wrong graph', patch: { contextGraphId: 'did:dkg:cg:other' } },
     { label: 'an empty owner', patch: { ownerDid: '' } },
@@ -50,6 +57,9 @@ describe('context graph join policy validation', () => {
 
     expect(parseContextGraphJoinPolicyRecord(policy, base.contextGraphId)).toBeNull();
     expect(isBoundedOpenEnrollmentPolicy(policy, base.contextGraphId)).toBe(false);
+    if (!('contextGraphId' in patch) || patch.contextGraphId !== 'did:dkg:cg:other') {
+      expect(parseContextGraphJoinPolicyRecord(policy)).toBeNull();
+    }
   });
 
   it('canonicalizes manual policies without stale open-enrollment caps', () => {
@@ -62,5 +72,16 @@ describe('context graph join policy validation', () => {
       ...base,
       mode: 'manual',
     });
+  });
+
+  it('rejects array objects even if they carry otherwise valid policy fields', () => {
+    const array = Object.assign([], { ...base, mode: 'manual' });
+    expect(parseContextGraphJoinPolicyRecord(array)).toBeNull();
+    expect(isBoundedOpenEnrollmentPolicy(array)).toBe(false);
+  });
+
+  it('rejects functions carrying otherwise valid policy fields', () => {
+    const callable = Object.assign(() => undefined, { ...base, mode: 'manual' });
+    expect(parseContextGraphJoinPolicyRecord(callable)).toBeNull();
   });
 });
