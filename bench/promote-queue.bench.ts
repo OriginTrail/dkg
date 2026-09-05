@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { defineSuite } from 'esbench';
 import { OxigraphStore } from '../packages/storage/dist/index.js';
-import { TripleStoreAsyncPromoteQueue } from '../packages/publisher/dist/async-promote-queue-impl.js';
-import { serializeJob, DEFAULT_PROMOTE_CONTROL_GRAPH_URI } from '../packages/publisher/dist/async-promote-queue-utils.js';
-import type { PromoteJob } from '../packages/publisher/dist/async-promote-queue-types.js';
+import { TripleStoreAsyncPromoteQueue } from '../packages/publisher/src/async-promote-queue-impl.ts';
+import { serializeJob, DEFAULT_PROMOTE_CONTROL_GRAPH_URI } from '../packages/publisher/src/async-promote-queue-utils.ts';
+import type { PromoteJob } from '../packages/publisher/src/async-promote-queue-types.ts';
 import { benchAsyncWithHooks } from './support/esbench-case-hooks.ts';
 
-// Build publisher, then: pnpm exec esbench --config esbench.config.mjs --file promote-queue
+// Source imports make this runnable through the standard `pnpm bench` setup,
+// which builds the only generated dependency used here: the storage package.
 // Compare separately built checkouts through ESBENCH_RESULT and ESBENCH_DIFF.
 // Setup/reset runs outside the measured claim. This uses local in-memory Oxigraph.
 export default defineSuite({
