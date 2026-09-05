@@ -64,6 +64,8 @@ import {
   resolveActivePublicContextGraphChainProof as resolveStrictActivePublicChainProof,
   type ActivePublicContextGraphChainProof,
 } from './active-public-context-graph-chain-proof.js';
+import { ContextGraphAuthorityUnavailableError } from './context-graph-authority-unavailable-error.js';
+import type { RegisteredContextGraphAuthority } from './dkg-agent-cg-resolve.js';
 
 import { FANOUT_RESPONSE_REJECTED, FANOUT_RESPONSE_RETRYABLE } from './swm/substrate-fanout.js';
 
@@ -276,6 +278,33 @@ async function evaluateContextGraphSlotBinding(
   return { kind: 'mismatch' };
 }
 
+type RegisteredAuthorityUnavailable = Extract<
+  RegisteredContextGraphAuthority,
+  { kind: 'unavailable' }
+>;
+type RegisteredAuthorityUnavailableReason = RegisteredAuthorityUnavailable['reason'];
+
+export type ContextGraphAgentGateAuthority =
+  | { kind: 'ungated' }
+  | { kind: 'available'; agentAddresses: string[] }
+  | {
+      kind: 'unavailable';
+      reason: RegisteredAuthorityUnavailableReason | 'rfc64-private-read-roster-unavailable';
+      detail?: string;
+      retryable: boolean;
+    };
+
+const RETRYABLE_REGISTERED_AUTHORITY_REASONS = {
+  'chain-name-binding-unavailable': true,
+  'local-chain-binding-unavailable': true,
+  'local-existence-unavailable': true,
+  'chain-access-policy-unavailable': true,
+  'chain-access-policy-unknown': false,
+  'chain-participant-authority-unsupported': false,
+  'chain-participant-authority-unavailable': true,
+  'chain-participant-authority-invalid': false,
+} as const satisfies Record<RegisteredAuthorityUnavailableReason, boolean>;
+
 export class WorkspaceCryptoMethods extends DKGAgentBase {
   getWorkspaceGossipSigningAgent(this: DKGAgent): (AgentKeyRecord & { privateKey: string }) | null {
     const defaultAddress = this.defaultAgentAddress?.toLowerCase();
@@ -328,22 +357,31 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     return null;
   }
 
-  async getContextGraphAgentGateAddresses(
+  async resolveContextGraphAgentGateAuthority(
     this: DKGAgent,
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
-  ): Promise<string[] | null> {
-    // A registered private graph's live chain roster outranks every local
-    // projection. Returning [] on chain authority failure preserves the fact
-    // that this is a gated graph while denying sender-key and sync admissions.
-    // Registered-public graphs continue below to their distinct local
-    // publisher/signing gate, but never to stale RFC-64 private authority.
+  ): Promise<ContextGraphAgentGateAuthority> {
+    // Registered authority outranks every local projection. Preserve its
+    // availability explicitly so an authoritative empty roster cannot be
+    // mistaken for a transient read outage by signing/promotion callers.
     const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(
       contextGraphId,
       { signal: options.signal },
     );
-    if (registeredAuthority.kind === 'private') return registeredAuthority.participantAgents;
-    if (registeredAuthority.kind === 'unavailable') return [];
+    if (registeredAuthority.kind === 'private') {
+      return { kind: 'available', agentAddresses: registeredAuthority.participantAgents };
+    }
+    if (registeredAuthority.kind === 'unavailable') {
+      return {
+        kind: 'unavailable',
+        reason: registeredAuthority.reason,
+        ...(registeredAuthority.detail === undefined
+          ? {}
+          : { detail: registeredAuthority.detail }),
+        retryable: RETRYABLE_REGISTERED_AUTHORITY_REASONS[registeredAuthority.reason],
+      };
+    }
 
     // A selected private RFC-64 graph may be joining a completely empty
     // store. In that state the accepted, authority-checked roster is already
@@ -360,7 +398,13 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       ? this.resolveRfc64PrivateReadRosterV1(contextGraphId)
       : undefined;
     if (rfc64Roster !== undefined) {
-      if (rfc64Roster === null) return [];
+      if (rfc64Roster === null) {
+        return {
+          kind: 'unavailable',
+          reason: 'rfc64-private-read-roster-unavailable',
+          retryable: true,
+        };
+      }
       const seen = new Set<string>();
       const accepted: string[] = [];
       for (const value of rfc64Roster) {
@@ -371,7 +415,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         seen.add(key);
         accepted.push(checksum);
       }
-      return accepted;
+      return { kind: 'available', agentAddresses: accepted };
     }
 
     const seen = new Set<string>();
@@ -399,7 +443,21 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     for (const agent of meta.allowedAgents) add(agent);
     for (const agent of meta.participantAgents) add(agent);
 
-    return sawAgentGate ? agents : null;
+    return sawAgentGate
+      ? { kind: 'available', agentAddresses: agents }
+      : { kind: 'ungated' };
+  }
+
+  /** Compatibility projection for admission callers that only need fail-closed gate values. */
+  async getContextGraphAgentGateAddresses(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<string[] | null> {
+    const authority = await this.resolveContextGraphAgentGateAuthority(contextGraphId, options);
+    if (authority.kind === 'ungated') return null;
+    if (authority.kind === 'available') return authority.agentAddresses;
+    return [];
   }
 
   /**
@@ -1044,12 +1102,17 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       return { requiresEncryption: false, recipients: [] };
     }
     if (registeredAuthority.kind === 'unavailable') {
-      throw Object.assign(
-        new Error(
-          `Registered context graph "${input.contextGraphId}" authority is unavailable (${registeredAuthority.reason})`,
-        ),
-        { code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE' },
-      );
+      const message =
+        `Registered context graph "${input.contextGraphId}" authority is unavailable (${registeredAuthority.reason})`;
+      if (RETRYABLE_REGISTERED_AUTHORITY_REASONS[registeredAuthority.reason]) {
+        throw new ContextGraphAuthorityUnavailableError(message, {
+          reason: registeredAuthority.reason,
+          ...(registeredAuthority.detail === undefined
+            ? {}
+            : { detail: registeredAuthority.detail }),
+        });
+      }
+      throw new Error(message);
     }
     if (registeredAuthority.participantAgents.length === 0) {
       throw new Error(
@@ -2449,22 +2512,29 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async resolveWorkspaceGossipSigningAgent(this: DKGAgent,
     contextGraphId: string,
   ): Promise<(AgentKeyRecord & { privateKey: string }) | null> {
-    const allowedAgents = await this.getContextGraphAgentGateAddresses(contextGraphId);
-    if (!allowedAgents) {
+    const authority = await this.resolveContextGraphAgentGateAuthority(contextGraphId);
+    if (authority.kind === 'ungated') {
       return this.getWorkspaceGossipSigningAgent();
     }
+    if (authority.kind === 'unavailable') {
+      const message =
+        `Cannot gossip SWM write for context graph "${contextGraphId}": signing authority is unavailable (${authority.reason})`;
+      if (authority.retryable) {
+        throw new ContextGraphAuthorityUnavailableError(message, {
+          reason: authority.reason,
+          ...(authority.detail === undefined ? {} : { detail: authority.detail }),
+        });
+      }
+      throw new Error(message);
+    }
 
-    // An empty gate is the fail-closed representation used while registered
-    // chain or RFC-64 roster authority is temporarily unavailable. Preserve
-    // that denial, but distinguish it from a definitive non-empty gate that
-    // simply has no matching local key so durable promote workers can retry
-    // the transient authority read.
+    const allowedAgents = authority.agentAddresses;
+
+    // An available-but-empty gate is authoritative (for example an empty
+    // chain roster or a fully revoked legacy gate), so retrying cannot help.
     if (allowedAgents.length === 0) {
-      throw Object.assign(
-        new Error(
-          `Cannot gossip SWM write for context graph "${contextGraphId}": signing authority is temporarily unavailable`,
-        ),
-        { code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE' },
+      throw new Error(
+        `Cannot gossip SWM write for context graph "${contextGraphId}": authoritative signing roster is empty`,
       );
     }
 

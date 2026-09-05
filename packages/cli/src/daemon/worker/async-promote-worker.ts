@@ -34,7 +34,12 @@
  * decide what to do with any leases the old worker held.
  */
 
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import {
+  CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
+  CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME,
+  isContextGraphAuthorityUnavailableError,
+  type DKGAgent,
+} from '@origintrail-official/dkg-agent';
 import {
   isStoreOperationTimeoutError,
   isReadOnlyStoreOperation,
@@ -182,6 +187,7 @@ const SAFE_ERROR_NAMES = new Set([
   'CuratorUnconfirmedError',
   'CuratorRejectedError',
   'AssertionNotPersistedError',
+  CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME,
 ]);
 const SAFE_ERROR_CODES = new Set([
   'PAYLOAD_TOO_LARGE',
@@ -189,6 +195,7 @@ const SAFE_ERROR_CODES = new Set([
   'CURATOR_UNCONFIRMED',
   'CURATOR_REJECTED',
   'ASSERTION_NOT_PERSISTED',
+  CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
 ]);
 
 function untagPromoteMessage(message: string): string {
@@ -295,6 +302,9 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
   if (isPromoteReplaySafeError(err)) {
     return { classification: 'transient', retryable: true };
   }
+  if (isContextGraphAuthorityUnavailableError(err)) {
+    return { classification: 'transient', retryable: true };
+  }
 
   const raw = err instanceof Error ? err.message : String(err);
   // #1464 — strip a leading diagnostic "[promote:<step>] " tag (added by the publisher's
@@ -373,7 +383,6 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
   // 3. Transient network / IO — the rc.10 importer hit "fetch failed"
   //    multiple times under sustained load. Worker should retry.
   if (
-    code === 'context_graph_authority_unavailable' ||
     message.includes('fetch failed') ||
     message.includes('econnreset') ||
     message.includes('econnrefused') ||
