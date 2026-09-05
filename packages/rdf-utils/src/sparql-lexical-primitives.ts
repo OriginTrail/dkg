@@ -327,11 +327,6 @@ export function scanSparqlIriRef(source: string, start: number): SparqlIriRefSca
   return scanSparqlIriRefBody(source, start + opening.rawWidth, opening.rawWidth > 1);
 }
 
-/** Recognize an IRIREF according to the SPARQL grammar's longest-match rule. */
-export function skipSparqlIriRef(source: string, start: number): number | null {
-  return scanSparqlIriRef(source, start)?.end ?? null;
-}
-
 /** Skip whitespace and `#` line comments between SPARQL tokens. */
 export function skipSparqlSpaceAndLineComments(source: string, start: number): number {
   let index = start;

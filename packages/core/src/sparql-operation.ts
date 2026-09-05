@@ -1,4 +1,7 @@
-import { BoundedLruCache } from './bounded-lru-cache.js';
+import {
+  sparqlAnalysisCache,
+  type CachedSparqlOperationFacts,
+} from './sparql-analysis-cache.js';
 import {
   prepareSparql,
   prepareSparqlQuery,
@@ -32,51 +35,9 @@ export interface SparqlOperationAnalysis {
   mutatingKeyword: string | null;
 }
 
-export type SparqlOperationFacts = Readonly<{
+type SparqlOperationFacts = CachedSparqlOperationFacts & Readonly<{
   form: SparqlDetectedOperation;
-  mutatingKeyword: string | null;
 }>;
-
-const SPARQL_ANALYSIS_CACHE_MAX_ENTRIES = 256;
-const SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH = 64 * 1024;
-const SPARQL_LARGE_ANALYSIS_CACHE_MAX_ENTRIES = 4;
-const SPARQL_LARGE_ANALYSIS_CACHE_MAX_SOURCE_LENGTH = 2 * 1024 * 1024;
-
-// A single query traverses several store decorators (agent invalidation,
-// changelog, graph index, then the adapter), each of which needs the same safe
-// classification. Exact-string memoization makes that scan/allocation happen
-// once. The established small tier accepts UNKNOWN results, while the tiny
-// large tier admits only successfully classified generated sync queries so
-// malformed untrusted input cannot displace useful entries.
-function createSparqlAnalysisCacheTiers() {
-  return {
-    small: new BoundedLruCache<string, SparqlOperationFacts>(
-      SPARQL_ANALYSIS_CACHE_MAX_ENTRIES,
-      (source) => source.length <= SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
-    ),
-    large: new BoundedLruCache<string, SparqlOperationFacts>(
-      SPARQL_LARGE_ANALYSIS_CACHE_MAX_ENTRIES,
-      (source, facts) => source.length > SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH
-        && source.length <= SPARQL_LARGE_ANALYSIS_CACHE_MAX_SOURCE_LENGTH
-        && facts.form !== 'UNKNOWN',
-    ),
-  };
-}
-
-const sparqlAnalysisCaches = createSparqlAnalysisCacheTiers();
-
-function analysisCacheFor(source: string): BoundedLruCache<string, SparqlOperationFacts> {
-  return source.length <= SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH
-    ? sparqlAnalysisCaches.small
-    : sparqlAnalysisCaches.large;
-}
-
-/** Narrow cache-policy seam used by regression tests. */
-export const sparqlAnalysisCacheTesting = {
-  createTiers: createSparqlAnalysisCacheTiers,
-  smallMaxSourceLength: SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
-  largeMaxSourceLength: SPARQL_LARGE_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
-};
 
 const MUTATING_KEYWORD_SET = new Set<string>(SPARQL_MUTATING_KEYWORDS);
 const UPDATE_OPERATION_SET = new Set<string>(SPARQL_UPDATE_OPERATIONS);
@@ -119,7 +80,7 @@ function materializeSparqlOperationAnalysis(
 
 function analyzePreparedSparql(scan: PreparedSparql): SparqlOperationFacts {
   if (scan.status !== 'valid') {
-    return { form: 'UNKNOWN', mutatingKeyword: null };
+    return { form: 'UNKNOWN', mutatingKeyword: null, largeCacheable: false };
   }
   const query = prepareSparqlQuery(scan);
   const form = detectSparqlOperationForm(query);
@@ -132,6 +93,15 @@ function analyzePreparedSparql(scan: PreparedSparql): SparqlOperationFacts {
     mutatingKeyword: mutatingToken?.kind === 'word'
       ? mutatingToken.raw
       : null,
+    // Recognition of SELECT/INSERT alone is not validity evidence. Retain a
+    // large source only when the lexical artifact is complete and every
+    // structural delimiter family is balanced. Small UNKNOWN inputs keep the
+    // established bounded reuse behavior.
+    largeCacheable: form !== 'UNKNOWN'
+      && !scan.unterminated
+      && query.structure.braces.balanced
+      && query.structure.parentheses.balanced
+      && query.structure.brackets.balanced,
   };
 }
 
@@ -142,8 +112,7 @@ export function analyzeSparqlOperation(
     return materializeSparqlOperationAnalysis(analyzePreparedSparql(input));
   }
 
-  const cache = analysisCacheFor(input);
-  const cached = cache.get(input);
+  const cached = sparqlAnalysisCache.get(input) as SparqlOperationFacts | undefined;
   if (cached) return materializeSparqlOperationAnalysis(cached);
 
   const facts = analyzePreparedSparql(prepareSparql(input));
@@ -151,7 +120,7 @@ export function analyzeSparqlOperation(
   // Each tier owns its complete admission policy. In particular, short
   // UNKNOWN inputs retain their established reuse while malformed large
   // inputs cannot churn the four-entry large-query cache.
-  cache.set(input, facts);
+  sparqlAnalysisCache.set(input, facts);
   // The cache owns only immutable scalar facts. Materializing at the public
   // boundary preserves the API's mutable, caller-isolated response objects.
   return materializeSparqlOperationAnalysis(facts);

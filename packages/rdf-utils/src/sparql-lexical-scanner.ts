@@ -79,6 +79,8 @@ interface ScannedSparql {
   readonly prologue: PreparedSparql['prologue'];
 }
 
+type SparqlIriRefScanner = typeof scanSparqlIriRef;
+
 function logicalCodePointWidth(value: string, index: number, expected: number): number {
   const logical = readSparqlLogicalCodePoint(value, index);
   return logical?.codePoint === expected ? logical.rawWidth : 0;
@@ -327,7 +329,10 @@ function scanPrologue(tokens: readonly SparqlLexicalToken[]): PreparedSparql['pr
  * higher-level policy checks. It is deliberately not a parser: it owns only
  * lexical regions, PN_PREFIX-aware names, source offsets, and masking.
  */
-function scanSparql(value: string): ScannedSparql | null {
+function scanSparql(
+  value: string,
+  iriScanner: SparqlIriRefScanner = scanSparqlIriRef,
+): ScannedSparql | null {
   const masked = value.split('');
   const materialized: string[] = [];
   const tokens: SparqlLexicalToken[] = [];
@@ -390,7 +395,7 @@ function scanSparql(value: string): ScannedSparql | null {
       logical.codePoint === 0x3c
       && lessThanStartsIriRef(tokens, openExpressionGroups)
     ) {
-      const iriScan = scanSparqlIriRef(value, index);
+      const iriScan = iriScanner(value, index);
       if (iriScan !== null) {
         const start = index;
         index = iriScan.end;
@@ -530,8 +535,11 @@ function hasStableLexicalSemantics(
   });
 }
 
-export function prepareSparql(source: string): PreparedSparql {
-  const scan = scanSparql(source);
+function prepareSparqlWithIriScanner(
+  source: string,
+  iriScanner: SparqlIriRefScanner,
+): PreparedSparql {
+  const scan = scanSparql(source, iriScanner);
   if (scan === null) return malformedPreparedSparql(source);
 
   if (scan.materialized !== source) {
@@ -542,7 +550,7 @@ export function prepareSparql(source: string): PreparedSparql {
     // comments retain their raw spelling, so rescanning changes the text only
     // when materialization exposed newly active syntax. Reject that boundary
     // rather than handing a second decoder unchecked syntax.
-    const executionScan = scanSparql(scan.materialized);
+    const executionScan = scanSparql(scan.materialized, iriScanner);
     if (
       executionScan === null
       || executionScan.materialized !== scan.materialized
@@ -563,6 +571,15 @@ export function prepareSparql(source: string): PreparedSparql {
     prologue: scan.prologue,
   };
 }
+
+export function prepareSparql(source: string): PreparedSparql {
+  return prepareSparqlWithIriScanner(source, scanSparqlIriRef);
+}
+
+/** Deep-imported deterministic test seam; not part of the package export map. */
+export const sparqlLexicalScannerTesting = Object.freeze({
+  prepareWithIriScanner: prepareSparqlWithIriScanner,
+});
 
 /** Materialize active UCHAR syntax from the canonical prepared artifact. */
 export function materializePreparedSparql(prepared: ValidPreparedSparql): string {

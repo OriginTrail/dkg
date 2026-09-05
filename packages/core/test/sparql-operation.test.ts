@@ -1,9 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   analyzeSparqlOperation,
   classifySparqlOperation,
-  sparqlAnalysisCacheTesting,
 } from '../src/sparql-operation.js';
+import { sparqlAnalysisCacheTesting } from '../src/sparql-analysis-cache.js';
 import {
   BoundedLruCache,
 } from '../src/bounded-lru-cache.js';
@@ -127,46 +127,66 @@ describe('bounded SPARQL analysis cache policy', () => {
     expect(cache.get('b')).toBe(3);
   });
 
-  it('keeps UNKNOWN reuse in the small tier but rejects it from the large tier', () => {
-    const { small, large } = sparqlAnalysisCacheTesting.createTiers();
-    const shortUnknown = String.raw`PREFIX \u00G0x: <https://example.com/> SELECT * WHERE {}`;
-    const largeUnknown = `${shortUnknown}#${'x'.repeat(
-      sparqlAnalysisCacheTesting.smallMaxSourceLength,
-    )}`;
-    const facts = { form: 'UNKNOWN', mutatingKeyword: null } as const;
+  beforeEach(() => sparqlAnalysisCacheTesting.reset());
 
-    small.set(shortUnknown, facts);
-    large.set(largeUnknown, facts);
+  const largeQuery = (suffix: string, padding = sparqlAnalysisCacheTesting.smallMaxSourceLength) => (
+    `SELECT * WHERE { <urn:${suffix}> ?p ?o } # ${'x'.repeat(padding)}`
+  );
 
-    expect(small.get(shortUnknown)).toBe(facts);
-    expect(large.has(largeUnknown)).toBe(false);
+  it('reuses a valid large query through the real analyzer integration', () => {
+    const query = largeQuery('valid');
+
+    expect(analyzeSparqlOperation(query).operation).toEqual({ kind: 'read', form: 'SELECT' });
+    expect(sparqlAnalysisCacheTesting.has(query)).toBe(true);
+    expect(sparqlAnalysisCacheTesting.snapshot()).toMatchObject({
+      largeSize: 1,
+      largeHits: 0,
+      largeMisses: 1,
+    });
+
+    expect(analyzeSparqlOperation(query).operation).toEqual({ kind: 'read', form: 'SELECT' });
+    expect(sparqlAnalysisCacheTesting.snapshot()).toMatchObject({
+      largeSize: 1,
+      largeHits: 1,
+      largeMisses: 1,
+    });
   });
 
-  it('reuses valid large queries, evicts at four entries, and rejects over-limit input', () => {
-    const { large } = sparqlAnalysisCacheTesting.createTiers();
-    const facts = { form: 'SELECT', mutatingKeyword: null } as const;
-    const query = (suffix: string, length = sparqlAnalysisCacheTesting.smallMaxSourceLength + 1) => (
-      `SELECT * WHERE {} # ${suffix}${'x'.repeat(length)}`
-    );
-    const valid = query('valid');
-    large.set(valid, facts);
-    expect(large.get(valid)).toBe(facts);
+  it('keeps small UNKNOWN reuse while malformed large input misses repeatedly', () => {
+    const shortUnknown = String.raw`PREFIX \u00G0x: <https://example.com/> SELECT * WHERE {}`;
+    analyzeSparqlOperation(shortUnknown);
+    analyzeSparqlOperation(shortUnknown);
+    expect(sparqlAnalysisCacheTesting.snapshot()).toMatchObject({
+      smallSize: 1,
+      smallHits: 1,
+      smallMisses: 1,
+    });
 
-    const unknown = { form: 'UNKNOWN', mutatingKeyword: null } as const;
+    const incomplete = `SELECT * WHERE { # ${'x'.repeat(
+      sparqlAnalysisCacheTesting.smallMaxSourceLength,
+    )}`;
+    analyzeSparqlOperation(incomplete);
+    analyzeSparqlOperation(incomplete);
+    expect(sparqlAnalysisCacheTesting.has(incomplete)).toBe(false);
+    expect(sparqlAnalysisCacheTesting.snapshot()).toMatchObject({
+      largeSize: 0,
+      largeHits: 0,
+      largeMisses: 2,
+    });
+  });
+
+  it('evicts the large tier at four entries and rejects over-limit input', () => {
+    const first = largeQuery('first');
+    analyzeSparqlOperation(first);
     for (let index = 0; index < 4; index++) {
-      large.set(query(`unknown-${index}`), unknown);
+      analyzeSparqlOperation(largeQuery(`next-${index}`));
     }
-    expect(large.get(valid)).toBe(facts);
+    expect(sparqlAnalysisCacheTesting.snapshot().largeSize).toBe(4);
+    expect(sparqlAnalysisCacheTesting.has(first)).toBe(false);
 
-    for (let index = 0; index < 4; index++) {
-      large.set(query(`valid-${index}`), facts);
-    }
-    expect(large.size).toBe(4);
-    expect(large.has(valid)).toBe(false);
-
-    const overLimit = query('over-limit', sparqlAnalysisCacheTesting.largeMaxSourceLength);
-    large.set(overLimit, facts);
-    expect(large.has(overLimit)).toBe(false);
-    expect(large.size).toBe(4);
+    const overLimit = largeQuery('over-limit', sparqlAnalysisCacheTesting.largeMaxSourceLength);
+    analyzeSparqlOperation(overLimit);
+    expect(sparqlAnalysisCacheTesting.has(overLimit)).toBe(false);
+    expect(sparqlAnalysisCacheTesting.snapshot().largeSize).toBe(4);
   });
 });
