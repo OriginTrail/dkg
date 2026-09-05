@@ -3,9 +3,10 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { EVM_TEST_SCOPES, EVM_REPO_ROOT } from './ci/evm-test-scopes.mjs';
+import { inspectJunitResults } from './lib/junit-results.mjs';
 import { EVM_SCOPES } from './lib/ci-delta.mjs';
 
-export function runEvmIntegration(scope = 'all', { run = spawnSync, repoRoot = EVM_REPO_ROOT, checkReport = (file) => fs.existsSync(file) && fs.statSync(file).size > 0 } = {}) {
+export function runEvmIntegration(scope = 'all', { run = spawnSync, repoRoot = EVM_REPO_ROOT, checkReport = (file) => inspectJunitResults(fs.readFileSync(file, 'utf8')) } = {}) {
   if (scope !== 'all' && !EVM_SCOPES.includes(scope)) throw new Error(`Unknown EVM scope: ${scope}`);
   let exitCode = 0;
   for (const selected of scope === 'all' ? EVM_SCOPES : [scope]) {
@@ -25,8 +26,10 @@ export function runEvmIntegration(scope = 'all', { run = spawnSync, repoRoot = E
         console.error(`FAIL: ${packageDirectory}/${file}: ${result.error?.message ?? result.status}`);
         exitCode = 1;
       }
-      if (!checkReport(report)) {
-        console.error(`Missing EVM test report: ${report}`);
+      try {
+        if (!checkReport(report)) throw new Error('report validator rejected the evidence');
+      } catch (error) {
+        console.error(`Invalid EVM test report ${report}: ${error.message}`);
         exitCode = 1;
       }
     }

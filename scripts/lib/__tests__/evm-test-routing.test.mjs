@@ -48,3 +48,24 @@ test('runner routes every requested file once and continues after a failed test'
   assert.equal(runFixture('chain', { run: () => ({ error: new Error('spawn failed') }) }), 1);
   assert.throws(() => runFixture('unknown', { run: () => assert.fail('must not execute') }), /Unknown EVM scope/);
 });
+
+test('EVM evidence requires executed cases in every selected file', (t) => {
+  const root = fs.mkdtempSync(path.join(tmpdir(), 'dkg-evm-junit-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const valid = '<testsuites tests="2"><testsuite><testcase name="executed"/><testcase name="pending"><skipped/></testcase></testsuite></testsuites>';
+  for (const [xml, expected] of [
+    [valid, 0],
+    ['<testsuites tests="0"/>', 1],
+    ['<testsuites tests="1" skipped="1"><testsuite tests="1" skipped="1"><testcase><skipped/></testcase></testsuite></testsuites>', 1],
+    ['<testsuite><testcase/></broken>', 1],
+    ['<testsuite><testcase><failure/></testcase></testsuite>', 1],
+  ]) {
+    let calls = 0;
+    assert.equal(runEvmIntegration('agent', { repoRoot: root, run: (_command, args) => {
+      const report = args.find((arg) => arg.startsWith('--outputFile.junit=')).slice('--outputFile.junit='.length);
+      fs.writeFileSync(report, calls++ === 0 ? xml : valid);
+      return { status: 0 };
+    } }), expected);
+    assert.equal(calls, EVM_TEST_SCOPES.agent.files.length, 'invalid evidence must not drop later journeys');
+  }
+});
