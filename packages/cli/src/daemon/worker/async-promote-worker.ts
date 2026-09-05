@@ -255,7 +255,8 @@ function logPromoteAttemptFailure(input: {
 }): void {
   try {
     const replaySafeDiagnostic = getPromoteReplaySafeErrorDiagnostic(input.err);
-    input.log(`[async-promote-worker] ${JSON.stringify({
+    input.log(
+      `[async-promote-worker] ${JSON.stringify({
         event: 'async_promote_attempt_failed',
         schemaVersion: 1,
         jobId: input.job.jobId,
@@ -492,8 +493,7 @@ async function runPromoteJobWithEmitter(
           // Expected when the job has already succeeded/failed and the lease was cleared.
           return;
         }
-        log(`Heartbeat error for ${job.jobId}: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        log(`Heartbeat error for ${job.jobId}: ${err instanceof Error ? err.message : String(err)}`);
       });
     }, heartbeatIntervalMs);
     if (heartbeatTimer.unref) heartbeatTimer.unref();
@@ -517,8 +517,7 @@ async function runPromoteJobWithEmitter(
         const retryable = isRetryableQueueBookkeepingError(err);
         if (err instanceof PromoteJobLeaseError || !retryable || now() >= deadlineAt) throw err;
         if (failures === 1) {
-          log(`Queue bookkeeping recovery started for ${job.jobId} (${label}) after a transient error`,
-          );
+          log(`Queue bookkeeping recovery started for ${job.jobId} (${label}) after a transient error`);
         }
         const remainingBudgetMs = Math.max(0, deadlineAt - now());
         await sleepUntilRetry(
@@ -615,7 +614,8 @@ async function runPromoteJobWithEmitter(
         bookkeepingErr instanceof Error
           ? bookkeepingErr.message
           : String(bookkeepingErr);
-      log(`PARTIAL-PROMOTE-AMBIGUITY: jobId=${job.jobId} ` +
+      log(
+        `PARTIAL-PROMOTE-AMBIGUITY: jobId=${job.jobId} ` +
           `assertion.promote() returned successfully (promotedCount=${result.promotedCount}) ` +
           `but post-promote bookkeeping failed: ${message}. ` +
           `Leaving job in 'running' state; recoverOnStartup() will pick this up ` +
@@ -643,8 +643,7 @@ async function runPromoteJobWithEmitter(
           counts: { triples: result.promotedCount },
         });
       } catch (emitErr: unknown) {
-        log(`memoryGraphChanged emit failed for ${job.jobId}: ${emitErr instanceof Error ? emitErr.message : String(emitErr)}`,
-        );
+        log(`memoryGraphChanged emit failed for ${job.jobId}: ${emitErr instanceof Error ? emitErr.message : String(emitErr)}`);
       }
     }
 
@@ -741,7 +740,8 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
     } catch (err: unknown) {
       const delayMs = claimFailureBackoff.recordFailure();
       scheduleClaimRetry(delayMs);
-      log(`claimNext error on ${slot.workerId}; retrying in ${delayMs}ms: `
+      log(
+        `claimNext error on ${slot.workerId}; retrying in ${delayMs}ms: `
           + `${err instanceof Error ? err.message : String(err)}`,
       );
       return false;
@@ -797,8 +797,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         if (err instanceof PromoteWorkerShutdownError || shutdownSignal?.aborted) {
-          log(`Worker ${slot.workerId} stopped bookkeeping for ${claimed.jobId} after shutdown timeout`,
-          );
+          log(`Worker ${slot.workerId} stopped bookkeeping for ${claimed.jobId} after shutdown timeout`);
           return;
         }
         log(`Worker ${slot.workerId} crashed processing ${claimed.jobId}: ${message}`);
@@ -813,10 +812,10 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           } catch (failErr: unknown) {
             const failMessage = failErr instanceof Error ? failErr.message : String(failErr);
             if (failErr instanceof PromoteJobLeaseError) {
-              log(`Lease lost while parking crashed job ${claimed.jobId}: ${failMessage}`,
-              );
+              log(`Lease lost while parking crashed job ${claimed.jobId}: ${failMessage}`);
             } else {
-              log(`Failed to park crashed job ${claimed.jobId}; next startup recovery must reconcile it: ` +
+              log(
+                `Failed to park crashed job ${claimed.jobId}; next startup recovery must reconcile it: ` +
                   `${failMessage}`,
               );
             }
@@ -864,8 +863,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
       } while (wakeRequested && !shuttingDown);
     })()
       .catch((err: unknown) => {
-        log(`Promote worker wake failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        log(`Promote worker wake failed: ${err instanceof Error ? err.message : String(err)}`);
       })
       .finally(() => {
         if (wakeLoop === run) wakeLoop = null;
@@ -903,8 +901,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
         const summary = await config.agent.promoteQueue.recoverOnStartup();
         recovering = false;
         if (summary.reclaimed > 0 || summary.abandoned > 0) {
-          log(`recoverOnStartup: reclaimed=${summary.reclaimed} abandoned=${summary.abandoned}`,
-          );
+          log(`recoverOnStartup: reclaimed=${summary.reclaimed} abandoned=${summary.abandoned}`);
         }
         if (shuttingDown) {
           started = false;
@@ -961,8 +958,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
       if (result === 'timeout') {
         const active = activeShutdownSlotCount() || activeAtStop;
         counters.interruptedAtShutdown += active;
-        log(`Shutdown timeout (${shutdownTimeoutMs}ms) reached; ${active} in-flight promote(s) abandoned to next-boot recovery`,
-        );
+        log(`Shutdown timeout (${shutdownTimeoutMs}ms) reached; ${active} in-flight promote(s) abandoned to next-boot recovery`);
         lifecycleAbortController?.abort();
       }
       lifecycleAbortController = null;
