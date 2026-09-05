@@ -66,23 +66,19 @@ export function skolemizeByEntity(quads: Quad[]): Map<string, Quad[]> {
     }
   }
 
-  // Skolemize per root entity
-  const skolemized: Quad[] = [];
-  const perRoot = new Map<string, Quad[]>();
-  for (const root of rootEntities) {
-    perRoot.set(root, []);
-  }
-
-  // Collect which quads belong to which root, skolemizing as we go
+  // Index in input order once, instead of filtering all quads for every root.
+  // Root insertion order and the existing blank-node ownership rules are part
+  // of the canonicalization contract.
   const rootQuadsMap = new Map<string, Quad[]>();
-  for (const root of rootEntities) {
-    const rootQuads = quads.filter(
-      (q) =>
-        q.subject === root ||
-        (isBlankNode(q.subject) && blankToRoot.get(q.subject) === root),
-    );
-    const sk = skolemize(root, rootQuads);
-    rootQuadsMap.set(root, sk);
+  for (const root of rootEntities) rootQuadsMap.set(root, []);
+  for (const q of quads) {
+    const root = rootEntities.has(q.subject)
+      ? q.subject
+      : isBlankNode(q.subject) ? blankToRoot.get(q.subject) : undefined;
+    if (root !== undefined) rootQuadsMap.get(root)!.push(q);
+  }
+  for (const [root, rootQuads] of rootQuadsMap) {
+    rootQuadsMap.set(root, skolemize(root, rootQuads));
   }
 
   // Also handle already-skolemized quads (no blank nodes)

@@ -91,7 +91,7 @@ describe('GH #1124 — isConfirmedPublicForHostMode safety bias (only accessPoli
   async function makeCore(): Promise<DKGAgent> {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-1124-'));
     tempDirs.push(dataDir);
-    const core = await DKGAgent.create({ name: 'Pub1124Core', listenHost: '127.0.0.1', dataDir, nodeRole: 'core' });
+    const core = await DKGAgent.create({ name: 'Pub1124Core', listenHost: '127.0.0.1', dataDir, nodeRole: 'core', rfc64CatalogActivation: { enabled: false } });
     agents.push(core);
     return core;
   }
@@ -156,7 +156,7 @@ describe('GH #1124 — ingestSwmHostModeEnvelope gate behaviour (signed plaintex
   async function makeHostCore(): Promise<DKGAgent> {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-1124-ingest-'));
     tempDirs.push(dataDir);
-    const core = await DKGAgent.create({ name: 'Ingest1124Host', listenHost: '127.0.0.1', dataDir, nodeRole: 'core', swmHostMode: { enabled: true } });
+    const core = await DKGAgent.create({ name: 'Ingest1124Host', listenHost: '127.0.0.1', dataDir, nodeRole: 'core', rfc64CatalogActivation: { enabled: false }, swmHostMode: { enabled: true } });
     agents.push(core);
     const store = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
     await store.init();
@@ -316,7 +316,7 @@ describe('GH #1124 — a confirmed-public ingest makes a NON-MEMBER host ACK-cap
   async function makeHostCore(): Promise<DKGAgent> {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-1124-ack-'));
     tempDirs.push(dataDir);
-    const core = await DKGAgent.create({ name: 'Ack1124Host', listenHost: '127.0.0.1', dataDir, nodeRole: 'core', swmHostMode: { enabled: true } });
+    const core = await DKGAgent.create({ name: 'Ack1124Host', listenHost: '127.0.0.1', dataDir, nodeRole: 'core', rfc64CatalogActivation: { enabled: false }, swmHostMode: { enabled: true } });
     agents.push(core);
     const g = core as unknown as IngestInternals;
     // Wire the host-mode store explicitly — ingestSwmHostModeEnvelope returns

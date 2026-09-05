@@ -5692,6 +5692,7 @@ export class PublishMethods extends DKGAgentBase {
       contextGraphId: request.contextGraphId,
       subGraphName: request.subGraphName,
       assertionCoordinate: request.name,
+      shareOperationId: request.shareOperationId,
       seal,
       assertionUri,
       ctx,
@@ -5809,7 +5810,17 @@ export class PublishMethods extends DKGAgentBase {
         { code: 'PUBLISH_NOT_FULL_SHARE' },
       );
     }
-
+    // Current graph-scoped shares retain the operation identity needed to
+    // fence an exact late SWM replay. Older finalized fixtures and migrated
+    // stores may not have a workspace head, so confirmation remains valid
+    // without installing an over-broad tombstone for those records.
+    const rfc64WorkspaceHead = await resolveKnowledgeAssetWorkspaceHead({
+      store: this.store,
+      graphManager: new GraphManager(this.store),
+      contextGraphId,
+      kaUal: graphScope.ual,
+      subGraphName: opts?.subGraphName,
+    });
     // Merge note (PR #1107 ← main): #1097's "auto-promote a sealed-but-unstaged
     // assertion before publish" was dropped here. main reworked the memory
     // model so that publishing a finalized-but-unshared assertion is an
@@ -6264,6 +6275,7 @@ export class PublishMethods extends DKGAgentBase {
       contextGraphId,
       subGraphName: opts?.subGraphName,
       assertionCoordinate: name,
+      shareOperationId: rfc64WorkspaceHead?.shareOperationId,
       seal,
       assertionUri,
       ctx: opts?.operationCtx ?? createOperationContext('publishFromSWM'),
@@ -6280,6 +6292,7 @@ export class PublishMethods extends DKGAgentBase {
       contextGraphId: string;
       subGraphName?: string;
       assertionCoordinate: string;
+      shareOperationId?: string;
       seal: AssertionSeal;
       assertionUri: string;
       ctx: OperationContext;

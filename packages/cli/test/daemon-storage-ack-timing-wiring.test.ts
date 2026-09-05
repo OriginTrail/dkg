@@ -597,6 +597,35 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     expect(createArg.rfc64PublicCatalogBootstrap).toBeUndefined();
   });
 
+  it('lets unified RFC-64 disable suppress deprecated public selection and runtime controls', async () => {
+    const createArg = await captureCreateArg({
+      contextGraphs: ['ordinary-legacy-sync'],
+      rfc64Catalog: { enabled: false },
+      // The unified gate is authoritative, so even stale deprecated controls
+      // that would be invalid if active must neither extend generic sync nor
+      // reach the agent runtime.
+      rfc64PublicCatalog: {
+        enabled: true,
+        autoPublish: {
+          peers: ['12D3KooIgnoredDeprecatedProvider'],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [
+            rfc64PublicCatalogPolicy('rfc64-deprecated-selection', 'base:84532'),
+          ],
+        },
+      },
+    });
+
+    expect(createArg.syncContextGraphs).toEqual(['ordinary-legacy-sync']);
+    expect(createArg.rfc64CatalogActivation).toEqual({ enabled: false });
+    expect(createArg.rfc64PublicCatalogActivation).toEqual({ enabled: false });
+    expect(createArg.rfc64CatalogDeploymentProfile).toBeUndefined();
+    expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();
+    expect(createArg.rfc64PublicCatalogBootstrap).toBeUndefined();
+  });
+
   it('passes configured StorageACK timing into DKGAgent.create', async () => {
     const createArg = await captureCreateArg({
       storageAck: { handlerDeadlineMs: 55_000, sendTimeoutMs: 60_000 },

@@ -1,9 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import {
   signAgentDelegation,
   verifyAgentDelegation,
   computeDelegationDigest,
+  computeWorkspaceEncryptionKeysAttestationDigest,
   type SignedAgentDelegation,
 } from '../src/auth/agent-delegation.js';
 
@@ -143,5 +144,76 @@ describe('agent-delegation primitive', () => {
       delegateeOpKey: baseParams.delegateeOpKey!.toUpperCase(),
     });
     expect(ethers.hexlify(a)).toBe(ethers.hexlify(b));
+  });
+
+  it('binds an optional encryption-key bundle without changing v2 delegation verification', async () => {
+    const signed = await signAgentDelegation(baseParams);
+    const withKeys: SignedAgentDelegation = {
+      ...signed,
+      workspaceEncryptionKeys: [{
+        encryptionKeyAlgorithm: 'X25519',
+        publicEncryptionKey: 'first-public-key',
+        encryptionKeyProof: 'first-wallet-proof',
+      }],
+    };
+    const workspaceEncryptionKeysSignature = await wallet.signMessage(
+      computeWorkspaceEncryptionKeysAttestationDigest(withKeys),
+    );
+    const attested = { ...withKeys, workspaceEncryptionKeysSignature };
+
+    // An older curator verifies the unchanged v2 fields and ignores the
+    // additive bundle. Upgraded curators verify the second wallet signature.
+    expect(() => verifyAgentDelegation(attested, {
+      expectedScope: baseParams.scope,
+      nowMs: baseParams.issuedAtMs,
+    })).not.toThrow();
+    expect(ethers.verifyMessage(
+      computeWorkspaceEncryptionKeysAttestationDigest(attested),
+      workspaceEncryptionKeysSignature,
+    ).toLowerCase()).toBe(wallet.address.toLowerCase());
+
+    const substituted = {
+      ...attested,
+      workspaceEncryptionKeys: [{
+        encryptionKeyAlgorithm: 'X25519' as const,
+        publicEncryptionKey: 'substituted-public-key',
+        encryptionKeyProof: 'substituted-wallet-proof',
+      }],
+    };
+    expect(ethers.verifyMessage(
+      computeWorkspaceEncryptionKeysAttestationDigest(substituted),
+      workspaceEncryptionKeysSignature,
+    ).toLowerCase()).not.toBe(wallet.address.toLowerCase());
+  });
+
+  it('sorts a reordered two-key attestation ordinally without locale collation', async () => {
+    const signed = await signAgentDelegation(baseParams);
+    const first = {
+      encryptionKeyAlgorithm: 'X25519' as const,
+      publicEncryptionKey: 'z-public-key',
+      encryptionKeyProof: 'z-wallet-proof',
+    };
+    const second = {
+      encryptionKeyAlgorithm: 'X25519' as const,
+      publicEncryptionKey: 'ä-public-key',
+      encryptionKeyProof: 'ä-wallet-proof',
+    };
+    const localeCompare = vi.spyOn(String.prototype, 'localeCompare');
+
+    try {
+      const forward = computeWorkspaceEncryptionKeysAttestationDigest({
+        ...signed,
+        workspaceEncryptionKeys: [first, second],
+      });
+      const reordered = computeWorkspaceEncryptionKeysAttestationDigest({
+        ...signed,
+        workspaceEncryptionKeys: [second, first],
+      });
+
+      expect(ethers.hexlify(reordered)).toBe(ethers.hexlify(forward));
+      expect(localeCompare).not.toHaveBeenCalled();
+    } finally {
+      localeCompare.mockRestore();
+    }
   });
 });

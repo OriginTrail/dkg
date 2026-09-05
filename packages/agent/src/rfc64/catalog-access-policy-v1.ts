@@ -37,6 +37,8 @@ import { classifyRfc64PolicyCellV1 } from './policy-cell-v1.js';
 export type Rfc64CatalogAccessOperationV1 =
   | 'announce-outbound'
   | 'announce-inbound'
+  | 'head-replay-outbound'
+  | 'head-replay-inbound'
   | 'fetch-outbound'
   | 'fetch-inbound'
   | 'catalog-object-fetch-outbound'
@@ -57,12 +59,14 @@ export function rfc64CatalogAuthorityDirectionV1(
 ): Rfc64CatalogAuthorityDirectionV1 {
   switch (operation) {
     case 'announce-outbound':
+    case 'head-replay-inbound':
     case 'fetch-inbound':
     case 'catalog-object-fetch-inbound':
     case 'ka-bundle-fetch-inbound':
     case 'current-head-discovery-inbound':
       return 'serving';
     case 'announce-inbound':
+    case 'head-replay-outbound':
     case 'fetch-outbound':
     case 'catalog-object-fetch-outbound':
     case 'ka-bundle-fetch-outbound':
@@ -143,13 +147,28 @@ export function assertAcceptedRfc64CatalogAuthorMembershipV1(
   }
 }
 
-export interface Rfc64CatalogAccessPolicyRegistryOptionsV1 {
-  readonly localAgentAddress: EvmAddressV1;
+type Rfc64CatalogLocalAuthorityV1 =
+  | Readonly<{
+    /** Compatibility authority for nodes that expose one identity globally. */
+    localAgentAddress: EvmAddressV1;
+    resolveLocalAgentAddress?: never;
+  }>
+  | Readonly<{
+    localAgentAddress?: never;
+    /** Resolve the one unambiguous local principal for this Context Graph. */
+    resolveLocalAgentAddress: (
+      contextGraphId: ContextGraphIdV1,
+    ) => Promise<EvmAddressV1 | null>;
+  }>;
+
+export type Rfc64CatalogAccessPolicyRegistryOptionsV1 =
+  Rfc64CatalogLocalAuthorityV1 & Readonly<{
   /** Exact authenticated libp2p-peer to agent-wallet binding. */
-  readonly resolveRemoteAgentAddress: (
+  resolveRemoteAgentAddress: (
     remotePeerId: string,
+    contextGraphId: ContextGraphIdV1,
   ) => Promise<EvmAddressV1 | null>;
-}
+}>;
 
 interface HeldCatalogAccessSnapshotV1 extends AcceptedRfc64CatalogAccessSnapshotV1 {
   readonly members: ReadonlyMap<EvmAddressV1, Readonly<MemberRosterEntryV1>> | null;
@@ -166,21 +185,41 @@ const UTF8 = new TextEncoder();
  */
 export class Rfc64CatalogAccessPolicyRegistryV1 {
   readonly #localAgentAddress: EvmAddressV1 | null;
+  readonly #resolveLocalAgentAddress: ((
+    contextGraphId: ContextGraphIdV1,
+  ) => Promise<EvmAddressV1 | null>) | null;
   readonly #resolveRemoteAgentAddress: ((
     remotePeerId: string,
+    contextGraphId: ContextGraphIdV1,
   ) => Promise<EvmAddressV1 | null>) | null;
   readonly #byKey = new Map<string, HeldCatalogAccessSnapshotV1>();
 
   constructor(options?: Rfc64CatalogAccessPolicyRegistryOptionsV1) {
     if (options === undefined) {
       this.#localAgentAddress = null;
+      this.#resolveLocalAgentAddress = null;
       this.#resolveRemoteAgentAddress = null;
       return;
     }
-    this.#localAgentAddress = snapshotAgentAddress(
-      options.localAgentAddress,
-      'localAgentAddress',
-    );
+    const hasStaticLocalAuthority = options.localAgentAddress !== undefined;
+    const hasLocalAuthorityResolver = options.resolveLocalAgentAddress !== undefined;
+    if (hasStaticLocalAuthority === hasLocalAuthorityResolver) {
+      throw new TypeError(
+        'exactly one of localAgentAddress or resolveLocalAgentAddress must be supplied',
+      );
+    }
+    if (
+      hasLocalAuthorityResolver
+      && typeof options.resolveLocalAgentAddress !== 'function'
+    ) {
+      throw new TypeError('resolveLocalAgentAddress must be a function');
+    }
+    this.#localAgentAddress = hasStaticLocalAuthority
+      ? snapshotAgentAddress(options.localAgentAddress, 'localAgentAddress')
+      : null;
+    this.#resolveLocalAgentAddress = hasLocalAuthorityResolver
+      ? options.resolveLocalAgentAddress
+      : null;
     if (typeof options.resolveRemoteAgentAddress !== 'function') {
       throw new TypeError('resolveRemoteAgentAddress must be a function');
     }
@@ -202,12 +241,24 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
   acceptCurrent(
     input: AcceptRfc64CatalogAccessSnapshotInputV1,
   ): AcceptedRfc64CatalogAccessSnapshotV1 {
-    return this.#accept(input, true);
+    return this.#accept(input, 'linked');
+  }
+
+  /**
+   * Advance state that was independently reconstructed from the canonical
+   * finalized-chain or owner lifecycle. This path owns its own monotonic
+   * generation proof and therefore does not require a transported predecessor
+   * digest that a cold node could not know.
+   */
+  acceptAuthoritativeCurrent(
+    input: AcceptRfc64CatalogAccessSnapshotInputV1,
+  ): AcceptedRfc64CatalogAccessSnapshotV1 {
+    return this.#accept(input, 'authoritative');
   }
 
   #accept(
     input: AcceptRfc64CatalogAccessSnapshotInputV1,
-    allowVerifiedTransition: boolean,
+    transition: false | 'linked' | 'authoritative',
   ): AcceptedRfc64CatalogAccessSnapshotV1 {
     const policy = snapshotPolicy(input?.policy);
     const policyDigest = snapshotDigest(input?.policyDigest, 'policyDigest');
@@ -239,12 +290,13 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
     const current = this.#byKey.get(key);
     if (current !== undefined) {
       if (!sameSnapshot(current, held)) {
-        if (!allowVerifiedTransition) {
+        if (transition === false) {
           throw new Error(
             'RFC-64 current policy replacement requires the verified transition/high-water path',
           );
         }
-        assertDirectMonotonicPolicyTransition(current, held);
+        if (transition === 'linked') assertDirectMonotonicPolicyTransition(current, held);
+        else assertAuthoritativeMonotonicPolicyTransition(current, held);
         this.#byKey.set(key, held);
         return publicSnapshot(held);
       }
@@ -256,7 +308,9 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
   }
 
   get privatePolicyAuthorityConfigured(): boolean {
-    return this.#localAgentAddress !== null && this.#resolveRemoteAgentAddress !== null;
+    return (
+      this.#localAgentAddress !== null || this.#resolveLocalAgentAddress !== null
+    ) && this.#resolveRemoteAgentAddress !== null;
   }
 
   lookup(
@@ -295,17 +349,26 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
     }
     if (
       held.members === null
-      || this.#localAgentAddress === null
+      || (
+        this.#localAgentAddress === null
+        && this.#resolveLocalAgentAddress === null
+      )
       || this.#resolveRemoteAgentAddress === null
     ) return null;
 
-    const remoteAgentAddress = await this.#resolveRemoteMemberAddress(boundary.remotePeerId);
-    if (remoteAgentAddress === null) return null;
-    // A future verified transition path may replace the held snapshot while the
-    // authenticated peer binding is being resolved. Never authorize against a
-    // snapshot that stopped being current during that await.
+    const [localAgentAddress, remoteAgentAddress] = await Promise.all([
+      this.#resolveLocalMemberAddress(boundary.contextGraphId),
+      this.#resolveRemoteMemberAddress(
+        boundary.remotePeerId,
+        boundary.contextGraphId,
+      ),
+    ]);
+    if (localAgentAddress === null || remoteAgentAddress === null) return null;
+    // A future verified transition path may replace the held snapshot while
+    // either authenticated identity binding is being resolved. Never authorize
+    // against a snapshot that stopped being current during those awaits.
     if (this.#byKey.get(key) !== held) return null;
-    const localMember = held.members.get(this.#localAgentAddress);
+    const localMember = held.members.get(localAgentAddress);
     const remoteMember = held.members.get(remoteAgentAddress);
     if (localMember === undefined || remoteMember === undefined) return null;
 
@@ -342,16 +405,70 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
     }
   }
 
-  async #resolveRemoteMemberAddress(remotePeerId: string): Promise<EvmAddressV1 | null> {
+  async #resolveRemoteMemberAddress(
+    remotePeerId: string,
+    contextGraphId: ContextGraphIdV1,
+  ): Promise<EvmAddressV1 | null> {
     if (this.#resolveRemoteAgentAddress === null) return null;
     try {
-      const resolved = await this.#resolveRemoteAgentAddress(remotePeerId);
+      const resolved = await this.#resolveRemoteAgentAddress(remotePeerId, contextGraphId);
       return resolved === null
         ? null
         : snapshotAgentAddress(resolved, 'resolved remote agent address');
     } catch {
       return null;
     }
+  }
+
+  async #resolveLocalMemberAddress(
+    contextGraphId: ContextGraphIdV1,
+  ): Promise<EvmAddressV1 | null> {
+    if (this.#localAgentAddress !== null) return this.#localAgentAddress;
+    if (this.#resolveLocalAgentAddress === null) return null;
+    try {
+      const resolved = await this.#resolveLocalAgentAddress(contextGraphId);
+      return resolved === null
+        ? null
+        : snapshotAgentAddress(resolved, 'resolved local agent address');
+    } catch {
+      return null;
+    }
+  }
+}
+
+function assertAuthoritativeMonotonicPolicyTransition(
+  current: HeldCatalogAccessSnapshotV1,
+  successor: HeldCatalogAccessSnapshotV1,
+): void {
+  if (
+    current.policy.source.kind === 'owner-signed-unregistered'
+    && successor.policy.source.kind === 'finalized-chain'
+  ) {
+    // Registration is a one-way authority promotion. Both sources begin at
+    // era/version zero, so numeric high-water comparison alone cannot admit
+    // the canonical chain snapshot that replaces the creator's local seed.
+    // The caller reaches this boundary only after independently verifying the
+    // finalized chain state and its name commitment. Never allow the reverse.
+    return;
+  }
+  const currentEra = BigInt(current.policy.era);
+  const successorEra = BigInt(successor.policy.era);
+  const currentVersion = BigInt(current.policy.version);
+  const successorVersion = BigInt(successor.policy.version);
+  const policyAdvanced = successor.policyDigest !== current.policyDigest
+    && (
+      successorEra > currentEra
+      || (successorEra === currentEra && successorVersion > currentVersion)
+    );
+  const rosterAdvanced = successor.policyDigest === current.policyDigest
+    && current.roster !== null
+    && successor.roster !== null
+    && successorEra === currentEra
+    && BigInt(successor.roster.version) > BigInt(current.roster.version);
+  if (!policyAdvanced && !rosterAdvanced) {
+    throw new Error(
+      'RFC-64 authoritative policy/roster transition does not advance its high-water',
+    );
   }
 }
 
@@ -394,6 +511,8 @@ function snapshotOperation(input: unknown): Rfc64CatalogAccessOperationV1 {
   switch (input) {
     case 'announce-outbound':
     case 'announce-inbound':
+    case 'head-replay-outbound':
+    case 'head-replay-inbound':
     case 'fetch-outbound':
     case 'fetch-inbound':
     case 'catalog-object-fetch-outbound':

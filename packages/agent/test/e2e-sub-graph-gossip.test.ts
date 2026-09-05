@@ -9,10 +9,31 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
-import { DKGAgent } from '../src/index.js';
+import {
+  DKGAgent as RealDKGAgent,
+  type ContextGraphSubscriptionRecord,
+} from '../src/index.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
+import { contextGraphDataUri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  encodeRootlessWorkspaceRequest,
+  rootlessSharedMemoryGraphFromWire,
+} from '../../publisher/test/_helpers/rootless-workspace.js';
+
+type DKGAgent = RealDKGAgent;
+const DKGAgent = {
+  create(config: Parameters<typeof RealDKGAgent.create>[0]) {
+    return RealDKGAgent.create({
+      rfc64CatalogActivation: { enabled: false },
+      ...config,
+    });
+  },
+};
 
 const CG_ID = 'sg-gossip-e2e';
 const SG_RESEARCH = 'research';
@@ -183,6 +204,197 @@ describe('Sub-graph gossip replication (2 nodes)', () => {
     );
     expect(rootData.bindings.length).toBe(0);
   }, 10_000);
+});
+
+describe('RFC-64 omitted-config named-subgraph compatibility', () => {
+  const sharedChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+  const contextGraphId = 'rfc64-default-subgraph-restart';
+  const subGraphName = 'research';
+  const offlineSubGraphName = 'offline-research';
+  let nodeA: RealDKGAgent | undefined;
+  let nodeB: RealDKGAgent | undefined;
+  const persistedSubscriptions = new Map<string, ContextGraphSubscriptionRecord>();
+  const tempDirs: string[] = [];
+
+  afterAll(async () => {
+    try { await nodeB?.stop(); } catch {}
+    try { await nodeA?.stop(); } catch {}
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  it('delivers an omitted-config subgraph SHARE and recovers a write missed across restart', async () => {
+    const dataDirA = await mkdtemp(join(tmpdir(), 'dkg-rfc64-default-subgraph-a-'));
+    const dataDirB = await mkdtemp(join(tmpdir(), 'dkg-rfc64-default-subgraph-b-'));
+    tempDirs.push(dataDirA, dataDirB);
+    const createReceiver = () => RealDKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name: 'Rfc64DefaultSubgraphB',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      bootstrapPeers: [],
+      chainAdapter: sharedChain,
+      nodeRole: 'edge',
+      dataDir: dataDirB,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...persistedSubscriptions.values()],
+        save: async (record) => { persistedSubscriptions.set(record.id, { ...record }); },
+        delete: async (id) => { persistedSubscriptions.delete(id); },
+      },
+    });
+    nodeA = await RealDKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name: 'Rfc64DefaultSubgraphA',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      bootstrapPeers: [],
+      chainAdapter: sharedChain,
+      nodeRole: 'core',
+      dataDir: dataDirA,
+    });
+    nodeB = await createReceiver();
+    await nodeA.start();
+    await nodeB.start();
+
+    const connectReceiver = async (receiverInbound = false) => {
+      const addressedNode = receiverInbound ? nodeB! : nodeA!;
+      const dialingNode = receiverInbound ? nodeA! : nodeB!;
+      const address = addressedNode.multiaddrs.find(
+        (candidate) => candidate.includes('/tcp/') && !candidate.includes('/p2p-circuit'),
+      );
+      expect(address).toBeDefined();
+      await dialingNode.connectTo(address!);
+      const deadline = Date.now() + 10_000;
+      while (
+        Date.now() < deadline
+        && (nodeA!.node.libp2p.getPeers().length < 1 || nodeB!.node.libp2p.getPeers().length < 1)
+      ) {
+        await sleep(100);
+      }
+      expect(nodeA!.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(1);
+      expect(nodeB!.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(1);
+    };
+    await nodeA.createContextGraph({ id: contextGraphId, name: 'RFC-64 default subgraph restart' });
+    await nodeA.registerContextGraph(contextGraphId);
+    nodeA.subscribeToContextGraph(contextGraphId);
+    await connectReceiver();
+    await nodeB.syncFromPeer(nodeA.peerId, [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]);
+    expect(await nodeB.contextGraphExists(contextGraphId)).toBe(true);
+    nodeB.subscribeToContextGraph(contextGraphId);
+    await Promise.all([
+      nodeA.whenRfc64CatalogResponsibilitiesIdleV1(),
+      nodeB.whenRfc64CatalogResponsibilitiesIdleV1(),
+    ]);
+    expect(nodeA.readRfc64CatalogResponsibilitiesV1()).toContainEqual(expect.objectContaining({
+      contextGraphId,
+      selectionSource: 'default',
+      mode: 'catalog',
+    }));
+    expect(nodeB.readRfc64CatalogResponsibilitiesV1()).toContainEqual(expect.objectContaining({
+      contextGraphId,
+      selectionSource: 'default',
+      mode: 'catalog',
+    }));
+    expect(nodeA.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId))
+      .toMatchObject({ legacySyncAllowed: false, mode: 'catalog' });
+    expect(nodeB.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId))
+      .toMatchObject({ legacySyncAllowed: false, mode: 'catalog' });
+
+    // Omitted persistent configuration naturally selects RFC-64 catalog
+    // authority for the root scope. Deliver a well-formed root-scoped request
+    // through the shared legacy wire handler itself (rather than overriding the
+    // execution plan) and pin the non-overlap boundary before exercising the
+    // named-subgraph compatibility lane below.
+    const rootSubject = 'urn:rfc64:root:legacy-wire-negative';
+    const rootPayload = encodeRootlessWorkspaceRequest({
+      contextGraphId,
+      nquads: new TextEncoder().encode(
+        `<${rootSubject}> <http://schema.org/name> "must-not-apply" `
+          + `<${contextGraphDataUri(contextGraphId)}> .`,
+      ),
+      publisherPeerId: nodeA.peerId,
+      shareOperationId: 'rfc64-default-root-legacy-wire-negative',
+      timestampMs: Date.now(),
+    });
+    const rootSwmGraph = rootlessSharedMemoryGraphFromWire(rootPayload);
+    const rootWire = await (nodeA as unknown as {
+      encodeWorkspaceGossipMessage(
+        contextGraph: string,
+        payload: Uint8Array,
+      ): Promise<Uint8Array>;
+    }).encodeWorkspaceGossipMessage(contextGraphId, rootPayload);
+    const rootOutcome = await (nodeB as unknown as {
+      getOrCreateSharedMemoryHandler(): {
+        handle(data: Uint8Array, fromPeerId: string): Promise<{
+          applied: boolean;
+          retryable?: boolean;
+          reason?: string;
+        }>;
+      };
+    }).getOrCreateSharedMemoryHandler().handle(rootWire, nodeA.peerId);
+    expect(rootOutcome).toMatchObject({
+      applied: false,
+      retryable: false,
+      reason: expect.stringContaining('not authoritative'),
+    });
+    await expect(nodeB.store.hasGraph(rootSwmGraph)).resolves.toBe(false);
+
+    await nodeA.createSubGraph(contextGraphId, subGraphName, { description: 'Compatibility lane' });
+    await sleep(1_500);
+
+    const share = async (
+      assertionName: string,
+      subject: string,
+      value: string,
+      scope = subGraphName,
+    ) => {
+      await nodeA!.assertion.create(contextGraphId, assertionName, { subGraphName: scope });
+      await nodeA!.assertion.write(contextGraphId, assertionName, [
+        { subject, predicate: 'http://schema.org/name', object: `"${value}"` },
+      ], { subGraphName: scope });
+      await nodeA!.assertion.promote(contextGraphId, assertionName, { subGraphName: scope });
+    };
+    const read = async (subject: string, scope = subGraphName) => nodeB!.query(
+      `SELECT ?name WHERE { <${subject}> <http://schema.org/name> ?name }`,
+      { contextGraphId, subGraphName: scope, graphSuffix: '_shared_memory' },
+    );
+
+    await share('live-compatible', 'urn:rfc64:subgraph:live', 'live');
+    const live = await pollUntil(
+      () => read('urn:rfc64:subgraph:live'),
+      (bindings) => bindings.some((row) => row['name'] === '"live"'),
+      20_000,
+    );
+    expect(live).toContainEqual(expect.objectContaining({ name: '"live"' }));
+
+    await nodeB.stop();
+    nodeB = undefined;
+    Object.defineProperty(nodeA, 'swmSubstrateMaxMembers', { value: 0 });
+    await nodeA.createSubGraph(contextGraphId, offlineSubGraphName, {
+      description: 'Created while receiver is offline',
+    });
+    await share(
+      'missed-during-restart',
+      'urn:rfc64:subgraph:restart',
+      'recovered',
+      offlineSubGraphName,
+    );
+
+    nodeB = await createReceiver();
+    await nodeB.start();
+    expect(nodeB.getSubscribedContextGraphs().get(contextGraphId))
+      .toMatchObject({ subscribed: true });
+    await nodeB.whenRfc64CatalogResponsibilitiesIdleV1();
+    await connectReceiver(true);
+    const recovered = await pollUntil(
+      () => read('urn:rfc64:subgraph:restart', offlineSubGraphName),
+      (bindings) => bindings.some((row) => row['name'] === '"recovered"'),
+      30_000,
+    );
+    expect(recovered).toContainEqual(expect.objectContaining({ name: '"recovered"' }));
+    const persisted = await read('urn:rfc64:subgraph:live');
+    expect(persisted.bindings).toContainEqual(expect.objectContaining({ name: '"live"' }));
+    await expect(nodeB.store.hasGraph(rootSwmGraph)).resolves.toBe(false);
+  }, 90_000);
 });
 
 describe('Multiple sub-graphs with concurrent writes (3 nodes)', () => {

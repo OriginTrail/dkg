@@ -2269,6 +2269,20 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
 
     const agentGateAddresses = await this.getContextGraphAgentGateAddresses(pkg.contextGraphId);
     if (!agentGateAddresses) {
+      // A cold private member can receive Sender Key setup after the finalized
+      // chain binding but before its accepted RFC-64 roster or legacy `_meta`
+      // projection is materialized. The chain policy is affirmative authority
+      // that this graph is private, but it does not authorize either endpoint;
+      // ask the sender to retain and retry the exact package until the local
+      // gate arrives. Unknown/public policy remains a terminal fail-closed
+      // rejection so an arbitrary ungated graph cannot create retry state.
+      const policy = await this.getContextGraphOnChainPolicy(pkg.contextGraphId);
+      if (policy.accessPolicy === 1) {
+        throw new SwmSenderKeySetupRejectionError(
+          'agent-gate-pending',
+          `Context graph "${pkg.contextGraphId}" private agent gate is not materialized yet`,
+        );
+      }
       throw new SwmSenderKeySetupRejectionError(
         'not-agent-gated',
         `Context graph "${pkg.contextGraphId}" is not DKG-agent gated`,

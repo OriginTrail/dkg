@@ -270,6 +270,7 @@ async function createHarness(opts: HarnessOptions = {}) {
     markContextGraphSubscriptionState: (id: string, patch: Record<string, unknown>) => {
       subscriptions.set(id, { ...subscriptions.get(id), ...patch });
     },
+    reconcileRfc64CatalogResponsibilityV1: async () => undefined,
     hasConfirmedMetaState: async () => opts.hasConfirmedMeta ?? true,
     isPrivateContextGraph: async () => opts.isPrivate ?? false,
     resolveAgentByToken: () => undefined,

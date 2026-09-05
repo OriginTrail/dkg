@@ -1632,6 +1632,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       syncGlobalMaxInflight: 1,
       syncGlobalQueueLimit: 0,
       syncSharedMemoryOnConnect: false,
+      rfc64CatalogActivation: { enabled: false },
     });
     const occupiedFetch = deferred<SyncPageResult>();
     let fetchCalls = 0;
@@ -1640,6 +1641,9 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       await agent.start();
       allowAllNetworkAdmission(agent);
       stubDurableSyncExternalIo(agent);
+      (agent as any).resolveRfc64CatalogReceiverAuthorityV1 = () => ({
+        legacySyncAllowed: true,
+      });
       (agent as any).fetchSyncPages = async (...args: unknown[]) => {
         fetchCalls++;
         if (fetchCalls === 1) return occupiedFetch.promise;
@@ -1693,6 +1697,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       syncContextGraphs: ['private-cg'],
       syncGlobalMaxInflight: 1,
       syncGlobalQueueLimit: 0,
+      rfc64CatalogActivation: { enabled: false },
     });
     let occupiedSlot: Promise<void> | undefined;
     let releaseOccupiedSlot: (() => void) | undefined;
