@@ -11,6 +11,8 @@ import {
 } from '../../../packages/cli/scripts/build-prerequisites.mjs';
 import {
   RUNTIME_BUILD_EXCLUSIONS,
+  RUNTIME_CLI_PACKAGE,
+  runtimeDependencyBuildPnpmArgs,
   runtimeBuildPnpmArgs,
 } from '../runtime-build-plan.mjs';
 
@@ -49,13 +51,13 @@ test('public runtime build script delegates to the checked build plan', () => {
 });
 
 test('runtime build entrypoint invokes pnpm with the checked plan and forwards extra arguments', () => {
-  let invocation;
+  const invocations = [];
   const status = runRuntimePackageBuild({
     extraArgs: ['--force', '--log-order=stream'],
     platform: 'linux',
     env: { PATH: '/mock-bin' },
     spawn(command, args, options) {
-      invocation = { command, args, options };
+      invocations.push({ command, args, options });
       return { status: 0, signal: null };
     },
     reportError(message) {
@@ -64,24 +66,30 @@ test('runtime build entrypoint invokes pnpm with the checked plan and forwards e
   });
 
   assert.equal(status, 0);
-  assert.deepEqual(invocation, {
-    command: 'pnpm',
-    args: runtimeBuildPnpmArgs(['run', 'build', '--force', '--log-order=stream']),
-    options: { stdio: 'inherit', shell: false, env: { PATH: '/mock-bin', DKG_RUNTIME_BUILD_TOPOLOGICAL: '1' } },
-  });
+  assert.deepEqual(invocations, [
+    {
+      command: 'pnpm',
+      args: runtimeDependencyBuildPnpmArgs(['run', 'build', '--force', '--log-order=stream']),
+      options: { stdio: 'inherit', shell: false, env: { PATH: '/mock-bin' } },
+    },
+    {
+      command: 'pnpm',
+      args: ['--filter', RUNTIME_CLI_PACKAGE, 'run', 'build:prepared'],
+      options: { stdio: 'inherit', shell: false, env: { PATH: '/mock-bin' } },
+    },
+  ]);
 });
 
-test('CLI lifecycle hook invokes the standalone prerequisite entrypoint', () => {
+test('CLI exposes explicit standalone and prepared build paths', () => {
   const packageJson = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'packages/cli/package.json'), 'utf8'));
-  assert.equal(packageJson.scripts.prebuild, 'node scripts/build-prerequisites.mjs');
+  assert.equal(packageJson.scripts.prebuild, undefined);
+  assert.equal(packageJson.scripts.build, 'pnpm run build:prerequisites && pnpm run build:prepared');
+  assert.equal(packageJson.scripts['build:prerequisites'], 'node scripts/build-prerequisites.mjs');
+  assert.match(packageJson.scripts['build:prepared'], /^tsc /);
 });
 
-test('CLI prebuild skips only when its root dependency graph has already run', () => {
-  assert.equal(buildCliPrerequisites({
-    env: { DKG_RUNTIME_BUILD_TOPOLOGICAL: '1' },
-    spawn: () => assert.fail('recursive root build must not rebuild CLI prerequisites'),
-  }), 0);
-  for (const env of [{ PATH: '/mock-bin' }, { DKG_RUNTIME_BUILD_TOPOLOGICAL: '0' }]) {
+test('standalone CLI prerequisite entrypoint always builds its dependency graph', () => {
+  for (const env of [{ PATH: '/mock-bin' }, { PATH: '/mock-bin', CI: 'true' }]) {
     let invocation;
     assert.equal(buildCliPrerequisites({ env, platform: 'win32', spawn(command, args, options) {
       invocation = { command, args, options };
@@ -129,6 +137,17 @@ test('runtime build entrypoint propagates process failures', () => {
   assert.match(messages[1], /exited via SIGTERM$/);
 });
 
+test('runtime build stops before the prepared CLI build when a dependency fails', () => {
+  let invocations = 0;
+  assert.equal(runRuntimePackageBuild({
+    spawn() {
+      invocations += 1;
+      return { status: 9, signal: null };
+    },
+  }), 9);
+  assert.equal(invocations, 1);
+});
+
 test('release runtime build plan includes workspace dependencies but excludes Hardhat', () => {
   assert.ok(
     RUNTIME_BUILD_EXCLUSIONS.includes('@origintrail-official/dkg-evm-module'),
@@ -144,14 +163,26 @@ test('release runtime build plan includes workspace dependencies but excludes Ha
   }));
   const selectedNames = new Set(selected.map((workspace) => workspace.name));
 
+  const dependencyPlanArgs = runtimeDependencyBuildPnpmArgs(['list', '--depth', '-1', '--json']);
+  const dependencyPlan = JSON.parse(execFileSync(PNPM, dependencyPlanArgs, {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    maxBuffer: 10 * 1024 * 1024,
+  }));
+  const dependencyNames = new Set(dependencyPlan.map((workspace) => workspace.name));
+
   for (const packageName of REQUIRED_RUNTIME_PACKAGES) {
     assert.ok(selectedNames.has(packageName), `${packageName} must remain in the runtime build`);
   }
   for (const packageName of CLI_PREREQUISITE_ROOTS) {
     assert.ok(
       selectedNames.has(packageName),
-      `${packageName} must be built before the CLI prebuild is allowed to skip prerequisites`,
+      `${packageName} must be present in the complete runtime plan`,
     );
+  }
+  assert.equal(dependencyNames.has(RUNTIME_CLI_PACKAGE), false, 'prepared CLI build must run only after dependencies');
+  for (const packageName of CLI_PREREQUISITE_ROOTS) {
+    assert.ok(dependencyNames.has(packageName), `${packageName} must remain in the dependency phase`);
   }
   assert.equal(
     selectedNames.has('@origintrail-official/dkg-evm-module'),

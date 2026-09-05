@@ -24,8 +24,9 @@
     }
   },
   "scripts": {
-    "prebuild": "node scripts/build-prerequisites.mjs",
-    "build": "tsc && node scripts/test-catchup-worker-package-boundary.mjs && node ../../scripts/copy-cli-runtime-assets.mjs",
+    "build": "pnpm run build:prerequisites && pnpm run build:prepared",
+    "build:prerequisites": "node scripts/build-prerequisites.mjs",
+    "build:prepared": "tsc && node scripts/test-catchup-worker-package-boundary.mjs && node ../../scripts/copy-cli-runtime-assets.mjs",
     "prepack": "node ../../scripts/copy-cli-runtime-assets.mjs",
     "benchmark:catchup-runner": "node scripts/catchup-runner-benchmark.cjs",
     "benchmark:daemon-responsiveness": "node scripts/daemon-responsiveness-benchmark.cjs",

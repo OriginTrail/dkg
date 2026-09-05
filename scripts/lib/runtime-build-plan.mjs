@@ -22,6 +22,8 @@ export const RUNTIME_BUILD_EXCLUSIONS = Object.freeze([
   '@origintrail-official/dkg-evm-module',
 ]);
 
+export const RUNTIME_CLI_PACKAGE = '@origintrail-official/dkg';
+
 export function runtimeBuildFilterArgs() {
   return [
     '-r',
@@ -32,4 +34,8 @@ export function runtimeBuildFilterArgs() {
 
 export function runtimeBuildPnpmArgs(operation = ['run', 'build']) {
   return [...runtimeBuildFilterArgs(), ...operation];
+}
+
+export function runtimeDependencyBuildPnpmArgs(operation = ['run', 'build']) {
+  return [...runtimeBuildFilterArgs(), '--filter', `!${RUNTIME_CLI_PACKAGE}`, ...operation];
 }

@@ -17,9 +17,6 @@ export function buildCliPrerequisites({
   spawn = spawnSync,
   reportError = (message) => console.error(message),
 } = {}) {
-  // Only the checked root runtime plan sets this marker. A direct CLI build
-  // keeps its dependency preparation, including clean adapter asset builds.
-  if (env.DKG_RUNTIME_BUILD_TOPOLOGICAL === '1') return 0;
   const args = ['-r', ...CLI_PREREQUISITE_ROOTS.flatMap(name => ['--filter', `${name}...`]), 'run', 'build'];
   return runBuildCommand('pnpm', args, { spawn, platform, env, reportError, label: 'CLI prerequisites' });
 }
