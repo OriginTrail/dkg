@@ -10,6 +10,7 @@ import {
   MemoryLayer,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
+  contextGraphFinalizationTopic,
   type PrecomputedUpdateAttestation,
 } from '@origintrail-official/dkg-core';
 import {
@@ -434,7 +435,7 @@ describe('E2E: DKGAgent with real blockchain', () => {
     agents[0].subscribeToContextGraph(gossipCG);
     agents[1].subscribeToContextGraph(gossipCG);
     await expect.poll(
-      () => agents[0].gossip.getSubscribers(`dkg/context-graph/${gossipCG}/finalization`),
+      () => agents[0].gossip.getSubscribers(contextGraphFinalizationTopic(gossipCG)),
       { timeout: 10_000 },
     ).toContain(agents[1].peerId);
 
