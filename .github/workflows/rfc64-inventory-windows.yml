@@ -6,6 +6,7 @@ on:
       - integration/rfc64-devnet
     paths:
       - '.github/workflows/rfc64-inventory-windows.yml'
+      - 'scripts/ci/run-windows-persistence-evidence.mjs'
       - 'devnet/_bootstrap/package.json'
       - 'devnet/_bootstrap/rdf-canonize.d.ts'
       - 'devnet/_bootstrap/rfc64-evidence*'
@@ -27,6 +28,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/rfc64-inventory-windows.yml'
+      - 'scripts/ci/run-windows-persistence-evidence.mjs'
       - 'devnet/_bootstrap/package.json'
       - 'devnet/_bootstrap/rdf-canonize.d.ts'
       - 'devnet/_bootstrap/rfc64-evidence*'
@@ -97,43 +99,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck RFC-64 evidence harness
-        if: matrix.group == 'inventory'
-        run: pnpm typecheck:devnet:rfc64-evidence
-
-      - name: Test RFC-64 evidence harness
-        if: matrix.group == 'inventory'
-        run: pnpm test:devnet:rfc64-evidence
-
       - name: Build agent dependency closure
-        # This harness uses committed ABIs and no live EVM. Match Gate 0's
-        # normal build closure, which already excludes Solidity compilation.
-        run: pnpm --filter @origintrail-official/dkg-agent... --filter '!@origintrail-official/dkg-evm-module' run build
+        # The canonical Gate 0 closure excludes unnecessary Solidity compilation.
+        run: pnpm test:gate0:rfc64-persistence-lifecycle:build
 
-      - name: Strict-typecheck Gate 0 lifecycle harness
+      - name: Validate persistence evidence
         if: matrix.group == 'inventory'
-        run: pnpm typecheck:gate0:rfc64-persistence-lifecycle
-
-      - name: Run Gate 0 production persistence lifecycle
-        if: matrix.group == 'inventory'
-        # Nine sequential 60s process bounds plus bounded forced-close cleanup
-        # fit below 10m; reserve additional time for the build and verifier.
-        timeout-minutes: 20
-        # The closure above is already built. Invoke the same generator
-        # directly instead of the developer entry point that rebuilds it.
-        run: node --experimental-sqlite --import tsx devnet/rfc64-persistence-lifecycle/run.ts
-
-      - name: Verify Gate 0 persistence evidence
-        if: matrix.group == 'inventory'
-        run: pnpm test:gate0:rfc64-persistence-lifecycle:verify
-
-      - name: Typecheck the lifecycle crash harness
-        if: matrix.group == 'inventory'
-        run: >-
-          pnpm exec tsc --noEmit --target ES2022 --module NodeNext
-          --moduleResolution NodeNext --types node,vitest/globals --skipLibCheck
-          packages/agent/test/rfc64-inventory-v1-lifecycle.test.ts
-          packages/agent/test/fixtures/rfc64-inventory-v1-child.ts
+        run: pnpm ci:rfc64-persistence-evidence
 
       - name: Run SQLite persistence tests
         run: >-

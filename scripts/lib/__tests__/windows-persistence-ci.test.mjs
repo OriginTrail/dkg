@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { parse } from 'yaml';
+import { runPersistenceEvidence } from '../../ci/run-windows-persistence-evidence.mjs';
 
 const workflow = parse(readFileSync(new URL('../../../.github/workflows/rfc64-inventory-windows.yml', import.meta.url), 'utf8'));
 const job = workflow.jobs['inventory-lifecycle'];
@@ -28,17 +29,52 @@ test('Windows groups retain every original test selector exactly once', () => {
     /--config vitest\.unit\.config\.ts\s+\$\{\{ matrix.tests \}\}/);
 });
 
-test('Windows builds once without EVM and still generates and verifies Gate 0', () => {
-  const builds = job.steps.filter((step) => /run build\b/.test(step.run ?? ''));
-  assert.equal(builds.length, 1);
-  assert.match(builds[0].run, /--filter @origintrail-official\/dkg-agent\.\.\./);
-  assert.match(builds[0].run, /--filter '!@origintrail-official\/dkg-evm-module'/);
-  const generate = job.steps.find((step) => step.name === 'Run Gate 0 production persistence lifecycle');
-  const verify = job.steps.find((step) => step.name === 'Verify Gate 0 persistence evidence');
-  assert.equal(generate.if, "matrix.group == 'inventory'");
-  assert.equal(verify.if, generate.if);
-  assert.equal(generate.run, 'node --experimental-sqlite --import tsx devnet/rfc64-persistence-lifecycle/run.ts');
-  assert.equal(verify.run, 'pnpm test:gate0:rfc64-persistence-lifecycle:verify');
-  assert.ok(job.steps.indexOf(builds[0]) < job.steps.indexOf(generate));
-  assert.ok(job.steps.indexOf(generate) < job.steps.indexOf(verify));
+const scripts = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8')).scripts;
+const prefix = 'test:gate0:rfc64-persistence-lifecycle';
+
+test('Windows builds once and dispatches one inventory evidence phase', () => {
+  const build = job.steps.find((step) => step.run === `pnpm ${prefix}:build`);
+  const phase = job.steps.find((step) => step.run === 'pnpm ci:rfc64-persistence-evidence');
+  assert.ok(build);
+  assert.equal(job.steps.filter((step) => step.run === build.run).length, 1);
+  assert.equal(phase.if, "matrix.group == 'inventory'");
+  assert.equal(job.steps.filter((step) => step.if).length, 1);
+  assert.ok(job.steps.indexOf(build) < job.steps.indexOf(phase));
+  assert.equal(job['timeout-minutes'], 40);
+  assert.equal(scripts['ci:rfc64-persistence-evidence'], 'node scripts/ci/run-windows-persistence-evidence.mjs');
+  for (const event of ['push', 'pull_request']) {
+    assert.ok(workflow.on[event].paths.includes('scripts/ci/run-windows-persistence-evidence.mjs'));
+  }
+});
+
+test('canonical scripts retain developer build/generate/verify composition', () => {
+  assert.equal(scripts[prefix], `pnpm run ${prefix}:generate && pnpm run ${prefix}:verify`);
+  assert.equal(scripts[`${prefix}:generate`], `pnpm run ${prefix}:build && pnpm run ${prefix}:generate:only`);
+  assert.match(scripts[`${prefix}:build`], /--filter @origintrail-official\/dkg-agent\.\.\./);
+  assert.match(scripts[`${prefix}:build`], /--filter '!@origintrail-official\/dkg-evm-module'/);
+  assert.equal(scripts[`${prefix}:generate:only`], 'node --experimental-sqlite --import tsx devnet/rfc64-persistence-lifecycle/run.ts');
+});
+
+test('evidence phase preserves ordering and generator timeout without a rebuild', () => {
+  const calls = [];
+  runPersistenceEvidence({ pnpm: '/tools/pnpm.cjs', run: (...args) => { calls.push(args); return { status: 0 }; } });
+  assert.deepEqual(calls.map(([, args]) => args.slice(1, 3)), [
+    ['run', 'typecheck:devnet:rfc64-evidence'],
+    ['run', 'test:devnet:rfc64-evidence'],
+    ['run', `typecheck:gate0:rfc64-persistence-lifecycle`],
+    ['run', `${prefix}:generate:only`],
+    ['run', `${prefix}:verify`],
+    ['exec', 'tsc'],
+  ]);
+  assert.ok(calls.every(([command, args]) => command === process.execPath && args[0] === '/tools/pnpm.cjs'));
+  assert.equal(calls[3][2].timeout, 20 * 60_000);
+  assert.ok(calls.at(-1)[1].includes('packages/agent/test/fixtures/rfc64-inventory-v1-child.ts'));
+  for (const failure of [{ status: 1 }, { status: null, error: new Error('timeout') }]) {
+    let count = 0;
+    assert.throws(() => runPersistenceEvidence({ pnpm: '/tools/pnpm.cjs', run: () => {
+      count += 1;
+      return count === 4 ? failure : { status: 0 };
+    } }), /Persistence evidence phase failed/);
+    assert.equal(count, 4, 'verification never runs after unsuccessful generation');
+  }
 });

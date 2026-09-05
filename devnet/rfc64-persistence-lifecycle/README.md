@@ -41,6 +41,13 @@ pnpm test:gate0:rfc64-persistence-lifecycle:generate
 pnpm test:gate0:rfc64-persistence-lifecycle:verify
 ```
 
+CI can build the dependency closure once with `:build`, then invoke
+`:generate:only` and `:verify` in order. `:generate:only` owns the generator
+entrypoint and Node flags; it requires the closure to have already been built.
+The developer-facing root command and `:generate` retain their existing build
+behavior. The Windows inventory shard runs the evidence and crash-harness checks
+through `pnpm ci:rfc64-persistence-evidence`; the object-store shard does not.
+
 Focused evidence-encoder, child-process cleanup, repository-state, and
 artifact-publication tests run with:
 
