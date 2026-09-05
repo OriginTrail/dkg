@@ -25,7 +25,7 @@
  * shape) is covered separately by the integration smoke tests.
  */
 import { describe, it, expect } from 'vitest';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { runDoctor, collectStateSummary, ALL_CHECK_IDS } from '../src/doctor/index.js';
 import type { DoctorDeps } from '../src/doctor/types.js';
 import { runOrphanReposCheck } from '../src/doctor/checks/orphan-repos.js';
@@ -292,6 +292,40 @@ describe('collectStateSummary (§4.7.0)', () => {
 // ---------------------------------------------------------------------------
 
 describe('orphan-repos check (§4.7.1)', () => {
+  it.each(['a', '/external/releases/a'])('resolves active slot %s independently of the caller directory', async (activeSlot) => {
+    const slotPath = resolve('/test/.dkg/releases', activeSlot);
+    const deps = makeDeps({
+      cwd: '/work/project',
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({ nodeRole: 'core' }),
+        '/test/.dkg/releases/current': `symlink:${activeSlot}`,
+        [`${slotPath}/package.json`]: JSON.stringify({ name: 'dkg-v10' }),
+        '/work/project/a/package.json': JSON.stringify({ name: 'dkg-v10' }),
+      },
+    });
+    // Match real filesystem behavior for relative paths without changing process.cwd().
+    const { exists, readFile, readdir } = deps;
+    const probed: string[] = [];
+    deps.exists = (path) => {
+      const absolute = resolve(deps.cwd, path);
+      probed.push(absolute);
+      return exists(absolute);
+    };
+    deps.readFile = (path) => readFile(resolve(deps.cwd, path));
+    deps.readdir = (path) => readdir(resolve(deps.cwd, path));
+
+    const findings = await runOrphanReposCheck(deps, await collectStateSummary(deps));
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ subject: slotPath, details: { relevance: 'selected-install' } });
+    expect(probed.some((path) => path.startsWith('/work/project/a'))).toBe(false);
+
+    // Explicit discovery may include the unrelated checkout, but never as the selected install.
+    deps.extraScanRoots = ['/work/project'];
+    const explicit = await runOrphanReposCheck(deps, await collectStateSummary(deps));
+    expect(explicit.find((finding) => finding.subject === '/work/project/a')?.details?.relevance)
+      .toBe('explicit-scan-root');
+  });
+
   it('ignores unrelated home clones and identifies the selected node paths (#1762)', async () => {
     const deps = makeDeps({
       dkgHome: '/isolated/node', dkgHomeEnv: '/isolated/node',

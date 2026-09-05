@@ -1,5 +1,5 @@
 /** Inspect the selected node's install paths; broader discovery requires doctor.scanRoots. */
-import { dirname, join, relative, isAbsolute, sep } from 'node:path';
+import { dirname, join, relative, resolve, isAbsolute, sep } from 'node:path';
 import type { DoctorDeps, Finding, StateSummary } from '../types.js';
 
 const DEFAULT_MAX_DEPTH = 4;
@@ -36,9 +36,9 @@ function isWithin(path: string, root: string): boolean {
 }
 
 /** Never infer relevance by recursively scanning the operator's home. */
-function resolveScanRoots(deps: DoctorDeps, state: StateSummary): string[] {
+function resolveScanRoots(deps: DoctorDeps, installRoots: Array<string | null>): string[] {
   return [...new Set([
-    deps.dkgHome, deps.monorepoRoot, state.paths.activeSlot, state.paths.npmGlobalDkg,
+    deps.dkgHome, ...installRoots,
     ...deps.extraScanRoots,
   ].filter((root): root is string => Boolean(root)))];
 }
@@ -162,7 +162,12 @@ export async function runOrphanReposCheck(
   // belt-and-braces — DEFAULT_MAX_DEPTH and the dot-dir skip should
   // keep the scan fast on a normal home tree.
   const budget = { count: 50, deadlineMs: Date.now() + 5000 };
-  const roots = resolveScanRoots(deps, state);
+  // activeSlot is the raw releases/current link target, which may be relative.
+  const activeSlotPath = state.paths.activeSlot
+    ? resolve(deps.dkgHome, 'releases', state.paths.activeSlot)
+    : null;
+  const installRoots = [deps.monorepoRoot, activeSlotPath, state.paths.npmGlobalDkg];
+  const roots = resolveScanRoots(deps, installRoots);
   for (const root of roots) {
     await scan(deps, root, state.daemon.entryPoint, candidates, budget);
     if (Date.now() > budget.deadlineMs) break;
@@ -184,8 +189,8 @@ export async function runOrphanReposCheck(
     if (seen.has(c.path)) continue;
     seen.add(c.path);
     const relevance = c.isActiveDaemon ? 'active-daemon'
+      : installRoots.some((root) => root && isWithin(c.path, root)) ? 'selected-install'
       : isWithin(c.path, deps.dkgHome) ? 'selected-dkg-home'
-      : [deps.monorepoRoot, state.paths.activeSlot, state.paths.npmGlobalDkg].some((root) => root && isWithin(c.path, root)) ? 'selected-install'
       : 'explicit-scan-root';
     findings.push({
       check: 'orphan-repos',
