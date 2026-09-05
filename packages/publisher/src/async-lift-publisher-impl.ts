@@ -17,7 +17,28 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { PublishResult } from './publisher.js';
 import { resolveEffectiveAsyncLiftRetryTuning } from './async-lift-retry-tuning.js';
-import { LIFT_JOB_STATES, createLiftJobFailureMetadata, type LiftJob, type LiftJobCompatibility, type PersistedLiftJob, type LiftJobFailureCode, type LiftJobAccepted, type LiftJobBroadcast, type LiftJobBroadcastMetadata, type LiftJobHex, type LiftJobIncluded, type LiftJobInclusionMetadata, type LiftJobFinalizationInput, type LiftJobRequest, type LiftJobState, type KnowledgeAssetVmPublishRequest, type LiftPublishRequestMetadata, type LiftPublishSnapshotRequest, type AdmissionJournalEntry, type JournalKind } from './lift-job.js';
+import {
+  LIFT_JOB_STATES,
+  createLiftJobFailureMetadata,
+  type LiftJob,
+  type LiftJobCompatibility,
+  type PersistedLiftJob,
+  type LiftJobFailureCode,
+  type LiftJobAccepted,
+  type LiftJobBroadcast,
+  type LiftJobBroadcastMetadata,
+  type LiftJobHex,
+  type LiftJobIncluded,
+  type LiftJobInclusionMetadata,
+  type LiftJobFinalizationInput,
+  type LiftJobRequest,
+  type LiftJobState,
+  type KnowledgeAssetVmPublishRequest,
+  type LiftPublishRequestMetadata,
+  type LiftPublishSnapshotRequest,
+  type AdmissionJournalEntry,
+  type JournalKind,
+} from './lift-job.js';
 import type {
   AsyncKnowledgeAssetVmPublishJobHandler,
   ActiveLiftJobClaim,
@@ -55,7 +76,21 @@ import {
   LiftJobPendingChainProofError,
   StaleLiftJobClaimError,
 } from './async-lift-publisher-types.js';
-import { FAILED_JOB_RETRY_ACTION_COUNT, classifyRetryAction, deriveLiftJobRetryProjection, isAutomaticallyRetryableLiftJob, isBulkClearableTerminalLiftJob, isTargetedClearableLiftJob, decideChainProofDisposition, hasAutomaticRecoveryExit, resolveHeldJobSettlementCapability, type HeldJobSettlementCapability, isHeldForChainProof, selectLifecycleBindingJobs, type LiftJobRetryProjection } from './async-lift-retry-disposition.js';
+import {
+  FAILED_JOB_RETRY_ACTION_COUNT,
+  classifyRetryAction,
+  deriveLiftJobRetryProjection,
+  isAutomaticallyRetryableLiftJob,
+  isBulkClearableTerminalLiftJob,
+  isTargetedClearableLiftJob,
+  decideChainProofDisposition,
+  hasAutomaticRecoveryExit,
+  resolveHeldJobSettlementCapability,
+  type HeldJobSettlementCapability,
+  isHeldForChainProof,
+  selectLifecycleBindingJobs,
+  type LiftJobRetryProjection,
+} from './async-lift-retry-disposition.js';
 import {
   type TargetedLiftJobClearOptions,
   type TerminalJobClearOutcome,
@@ -69,7 +104,11 @@ import {
   mapPublishResultToLiftJobSuccess,
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
-import { prepareAsyncPublishPayload, type AsyncPreparedPublishPayload, type LiftResolvedPublishSlice } from './async-lift-publish-options.js';
+import {
+  prepareAsyncPublishPayload,
+  type AsyncPreparedPublishPayload,
+  type LiftResolvedPublishSlice,
+} from './async-lift-publish-options.js';
 import { validateLiftPublishPayload } from './async-lift-validation.js';
 import { computePrivateRootV10 } from './merkle.js';
 import { subtractFinalizedExactQuads } from './async-lift-subtraction.js';

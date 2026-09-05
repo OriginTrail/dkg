@@ -38,7 +38,13 @@ const execFileAsync = promisify(execFile);
 
 import { validateSubGraphName, validateContextGraphId } from '@origintrail-official/dkg-core';
 
-import { handleCaptureAsync, EpcisValidationError, handleEventsQuery, EpcisQueryError, type AsyncPublisher as EpcisAsyncPublisher } from '@origintrail-official/dkg-epcis';
+import {
+  handleCaptureAsync,
+  EpcisValidationError,
+  handleEventsQuery,
+  EpcisQueryError,
+  type AsyncPublisher as EpcisAsyncPublisher,
+} from '@origintrail-official/dkg-epcis';
 // Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
 // reuses the same publish/fetch/plan/write helpers the CLI uses, so wire

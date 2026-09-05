@@ -9,7 +9,19 @@
  */
 
 import { createHash } from 'node:crypto';
-import { DKGEvent, PROTOCOL_JOIN_REQUEST, contextGraphMetaGraphUri, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, createOperationContext, escapeSparqlLiteral, assertSafeIri, OPEN_ENROLLMENT_MAX_MEMBERS, OPEN_ENROLLMENT_MAX_APPROVALS_PER_HOUR, isBoundedOpenEnrollmentPolicy } from '@origintrail-official/dkg-core';
+import {
+  DKGEvent,
+  PROTOCOL_JOIN_REQUEST,
+  contextGraphMetaGraphUri,
+  SYSTEM_CONTEXT_GRAPHS,
+  DKG_ONTOLOGY,
+  createOperationContext,
+  escapeSparqlLiteral,
+  assertSafeIri,
+  OPEN_ENROLLMENT_MAX_MEMBERS,
+  OPEN_ENROLLMENT_MAX_APPROVALS_PER_HOUR,
+  isBoundedOpenEnrollmentPolicy,
+} from '@origintrail-official/dkg-core';
 import { deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type Quad } from '@origintrail-official/dkg-storage';
 
 import { resolveWorkspaceAgentRecipientKeys } from '@origintrail-official/dkg-publisher';

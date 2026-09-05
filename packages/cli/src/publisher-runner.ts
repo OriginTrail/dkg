@@ -1,13 +1,46 @@
 import { join } from 'node:path';
 import { ethers } from 'ethers';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
-import { EVMChainAdapter, NoChainAdapter, buildKnowledgeAssetUal, mergeRpcUsageWindows, type CanonicalFinalizationReceipt, type ChainAdapter, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
+import {
+  EVMChainAdapter,
+  NoChainAdapter,
+  buildKnowledgeAssetUal,
+  mergeRpcUsageWindows,
+  type CanonicalFinalizationReceipt,
+  type ChainAdapter,
+  type RpcUsageWindow,
+} from '@origintrail-official/dkg-chain';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   TypedEventBus,
   type Ed25519Keypair,
 } from '@origintrail-official/dkg-core';
-import { ACKCollector, AsyncLiftRunner, type AsyncLiftRunnerConfig, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type ACKTransport, type ACKTransportFactory, type AsyncKnowledgeAssetVmPublishRecoveryEvidence, type AsyncKnowledgeAssetVmPublishRecoveryResolver, type AsyncLiftDetailedRetrier, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftChainProofLookup, type AsyncLiftUpdateChainProofLookup, type AsyncLiftPublisherRecoveryResult, type VmPublisherControl, type PersistedLiftJob, type PublishOptions, type V10ACKProviderParams, type SnapshotPageIndexStore, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
+import {
+  ACKCollector,
+  AsyncLiftRunner,
+  type AsyncLiftRunnerConfig,
+  DKGPublisher,
+  FileWorkspacePublicSnapshotStore,
+  TripleStoreAsyncLiftPublisher,
+  wrapAsRpcPreconditionIfApplicable,
+  type ACKTransport,
+  type ACKTransportFactory,
+  type AsyncKnowledgeAssetVmPublishRecoveryEvidence,
+  type AsyncKnowledgeAssetVmPublishRecoveryResolver,
+  type AsyncLiftDetailedRetrier,
+  type AsyncLiftPublishExecutionInput,
+  type AsyncLiftPublisher,
+  type AsyncLiftPublisherConfig,
+  type AsyncLiftChainProofLookup,
+  type AsyncLiftUpdateChainProofLookup,
+  type AsyncLiftPublisherRecoveryResult,
+  type VmPublisherControl,
+  type PersistedLiftJob,
+  type PublishOptions,
+  type V10ACKProviderParams,
+  type SnapshotPageIndexStore,
+  type WorkspacePublicSnapshotStore,
+} from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   loadNetworkConfig,
@@ -25,7 +58,15 @@ import {
 import { loadPublisherWallets } from './publisher-wallets.js';
 // GH#2270 PR-3 r3 — chain-proof POLICY lives in its own module; this file stays the
 // composition root that hands it the adapters and wires the result into the publisher.
-import { asLiftJobHex, chainAdaptersForWallets, createChainProofResolver, hasChainPublishLookup, hasChainRecoveryCapabilityFor, verifyCanonicalUpdateFacts, type PublisherChainAdapters } from './publisher-chain-proof.js';
+import {
+  asLiftJobHex,
+  chainAdaptersForWallets,
+  createChainProofResolver,
+  hasChainPublishLookup,
+  hasChainRecoveryCapabilityFor,
+  verifyCanonicalUpdateFacts,
+  type PublisherChainAdapters,
+} from './publisher-chain-proof.js';
 
 export type { ACKTransportFactory } from '@origintrail-official/dkg-publisher';
 

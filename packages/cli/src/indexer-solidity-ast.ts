@@ -29,7 +29,17 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { Quad, DEVGRAPH_NS, RDF_TYPE_IRI, DEFAULT_GRAPH, uri, literal, boolLiteral, moduleUri, packageUri } from './indexer.js';
+import {
+  Quad,
+  DEVGRAPH_NS,
+  RDF_TYPE_IRI,
+  DEFAULT_GRAPH,
+  uri,
+  literal,
+  boolLiteral,
+  moduleUri,
+  packageUri,
+} from './indexer.js';
 
 // ---------------------------------------------------------------------------
 // solc AST shapes (loose — we only read the subset we need)

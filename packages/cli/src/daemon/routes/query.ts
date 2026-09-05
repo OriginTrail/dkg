@@ -39,7 +39,14 @@ const daemonRequire = createRequire(import.meta.url);
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 
-import { createOperationContext, GET_VIEWS, TrustLevel, isSafeIri, sparqlIri, classifySparqlOperation } from '@origintrail-official/dkg-core';
+import {
+  createOperationContext,
+  GET_VIEWS,
+  TrustLevel,
+  isSafeIri,
+  sparqlIri,
+  classifySparqlOperation,
+} from '@origintrail-official/dkg-core';
 
 import { LlmClient } from "@origintrail-official/dkg-node-ui";
 
@@ -66,7 +73,17 @@ import { authenticatedAgentAddress, canAdministerNode } from '../../auth.js';
 
 import { toCatchupStatusResponse } from '../types.js';
 import { _autoUpdateIo, parseRequiredSignatures, bindingValue } from '../manifest.js';
-import { resolveNameToPeerId, jsonResponse, safeParseJson, validateRequiredContextGraphId, SMALL_BODY_BYTES, readBody, classifyClientError, sanitizeRevertMessage, respondIfStoreUnavailable } from '../http-utils.js';
+import {
+  resolveNameToPeerId,
+  jsonResponse,
+  safeParseJson,
+  validateRequiredContextGraphId,
+  SMALL_BODY_BYTES,
+  readBody,
+  classifyClientError,
+  sanitizeRevertMessage,
+  respondIfStoreUnavailable,
+} from '../http-utils.js';
 
 import type { RequestContext } from './context.js';
 import {

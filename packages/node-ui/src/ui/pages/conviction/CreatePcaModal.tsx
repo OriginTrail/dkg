@@ -22,7 +22,15 @@ import {
   WalletReceiptWaitError,
 } from '../../web3/walletTxError.js';
 import { useWalletTxProgress } from '../../pca/useWalletTxProgress.js';
-import { DeviceConfirmProgress, DiscountTierLadder, WalletConnectControl, WalletRow, formatPcaTrac, discountTierForTrac, PrimaryNodePicker } from '../../components/Pca/index.js';
+import {
+  DeviceConfirmProgress,
+  DiscountTierLadder,
+  WalletConnectControl,
+  WalletRow,
+  formatPcaTrac,
+  discountTierForTrac,
+  PrimaryNodePicker,
+} from '../../components/Pca/index.js';
 import { PcaModalShell } from './PcaModalShell.js';
 
 type Phase = 'form' | 'creating' | 'success' | 'reconcile';

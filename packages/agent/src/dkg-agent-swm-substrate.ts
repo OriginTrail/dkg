@@ -9,9 +9,29 @@
  * composed class.
  */
 
-import { PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic, SYSTEM_CONTEXT_GRAPHS, createOperationContext, logKaLifecycleEvent, encodeSwmShareAck, decodeSwmShareAck, type OperationContext, type SwmSenderKeyMessageMsg } from '@origintrail-official/dkg-core';
+import {
+  PROTOCOL_SWM_UPDATE,
+  PROTOCOL_SWM_SHARE_ACK,
+  contextGraphPublishTopic,
+  contextGraphWorkspaceTopic,
+  contextGraphAppTopic,
+  contextGraphUpdateTopic,
+  contextGraphFinalizationTopic,
+  SYSTEM_CONTEXT_GRAPHS,
+  createOperationContext,
+  logKaLifecycleEvent,
+  encodeSwmShareAck,
+  decodeSwmShareAck,
+  type OperationContext,
+  type SwmSenderKeyMessageMsg,
+} from '@origintrail-official/dkg-core';
 
-import { SharedMemoryHandler, UpdateHandler, projectWorkspaceAgentRecipientFanout, type WorkspaceAgentRecipientFanoutSnapshot } from '@origintrail-official/dkg-publisher';
+import {
+  SharedMemoryHandler,
+  UpdateHandler,
+  projectWorkspaceAgentRecipientFanout,
+  type WorkspaceAgentRecipientFanoutSnapshot,
+} from '@origintrail-official/dkg-publisher';
 
 import {
   createCGMemberEnumerator,

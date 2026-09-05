@@ -21,7 +21,13 @@ import { ActivityFeed } from '../components/ActivityFeed.js';
 import { SubGraphBar } from '../components/SubGraphBar.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from '../lib/contextGraphPrimer.js';
 import { useTabsStore } from '../stores/tabs.js';
-import { shouldFetchSwmAttribution, useCanonicalTriples, type LayerView, type LayerContentTab, type SubGraphTab } from './project/helpers.js';
+import {
+  shouldFetchSwmAttribution,
+  useCanonicalTriples,
+  type LayerView,
+  type LayerContentTab,
+  type SubGraphTab,
+} from './project/helpers.js';
 import {
   ProjectHeaderStrip,
   LayerSwitcher,

@@ -42,7 +42,16 @@ const execFileAsync = promisify(execFile);
 import { classifySwmCatchupPeerOutcome, createSwmCatchupPeerSelector } from '@origintrail-official/dkg-agent';
 import { isSafeIri, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 
-import { classifyDurableCatchupRequest, formatDurableCatchupFailure, runDurableCatchupLeg, summarizeDurableLeg, type DurableCatchupAttempt, type DurableCatchupFailureReason, type DurableCatchupLegState, type DurableLegDiagnostics } from '../../catchup-runner.js';
+import {
+  classifyDurableCatchupRequest,
+  formatDurableCatchupFailure,
+  runDurableCatchupLeg,
+  summarizeDurableLeg,
+  type DurableCatchupAttempt,
+  type DurableCatchupFailureReason,
+  type DurableCatchupLegState,
+  type DurableLegDiagnostics,
+} from '../../catchup-runner.js';
 import { authenticatedAgentAddress } from '../../auth.js';
 
 import { extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
@@ -58,7 +67,18 @@ import { extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 // the project's tsconfig (`noUnusedLocals` is off).
 
 import { _autoUpdateIo } from '../manifest.js';
-import { validateWritableQuadLiteralSizes, oversizedRdfLiteralResponseBody, jsonResponse, safeParseJson, validateOptionalSubGraphName, validateRequiredContextGraphId, resolveRequiredWriteContextGraphId, MAX_BODY_BYTES, SMALL_BODY_BYTES, readBody } from '../http-utils.js';
+import {
+  validateWritableQuadLiteralSizes,
+  oversizedRdfLiteralResponseBody,
+  jsonResponse,
+  safeParseJson,
+  validateOptionalSubGraphName,
+  validateRequiredContextGraphId,
+  resolveRequiredWriteContextGraphId,
+  MAX_BODY_BYTES,
+  SMALL_BODY_BYTES,
+  readBody,
+} from '../http-utils.js';
 import { handleQueryCatalogRoutes } from './query-catalog.js';
 
 import type { RequestContext } from './context.js';

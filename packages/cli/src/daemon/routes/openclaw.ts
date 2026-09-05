@@ -48,9 +48,36 @@ const execFileAsync = promisify(execFile);
 import { daemonState } from '../state.js';
 
 import { _autoUpdateIo } from '../manifest.js';
-import { resolveNameToPeerId, jsonResponse, SMALL_BODY_BYTES, readBody, resolveCorsOrigin, corsHeaders } from '../http-utils.js';
+import {
+  resolveNameToPeerId,
+  jsonResponse,
+  SMALL_BODY_BYTES,
+  readBody,
+  resolveCorsOrigin,
+  corsHeaders,
+} from '../http-utils.js';
 
-import { OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS, type OpenClawChannelTarget, getOpenClawChannelTargets, probeOpenClawChannelHealth, shouldTryNextOpenClawTarget, buildOpenClawChannelHeaders, ensureOpenClawBridgeAvailable, pipeOpenClawStream, isValidOpenClawPersistTurnPayload, type OpenClawAttachmentRef, normalizeOpenClawAttachmentRefs, normalizeOpenClawAttachmentImportResults, dedupeOpenClawAttachmentImportResults, verifyOpenClawAttachmentImportResultsProvenance, buildOpenClawAttachmentImportContextEntries, type OpenClawChatContextEntry, normalizeOpenClawChatContextEntriesWithAttachmentImportResults, hasOpenClawChatTurnContent, verifyOpenClawAttachmentRefsProvenance } from '../openclaw.js';
+import {
+  OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
+  type OpenClawChannelTarget,
+  getOpenClawChannelTargets,
+  probeOpenClawChannelHealth,
+  shouldTryNextOpenClawTarget,
+  buildOpenClawChannelHeaders,
+  ensureOpenClawBridgeAvailable,
+  pipeOpenClawStream,
+  isValidOpenClawPersistTurnPayload,
+  type OpenClawAttachmentRef,
+  normalizeOpenClawAttachmentRefs,
+  normalizeOpenClawAttachmentImportResults,
+  dedupeOpenClawAttachmentImportResults,
+  verifyOpenClawAttachmentImportResultsProvenance,
+  buildOpenClawAttachmentImportContextEntries,
+  type OpenClawChatContextEntry,
+  normalizeOpenClawChatContextEntriesWithAttachmentImportResults,
+  hasOpenClawChatTurnContent,
+  verifyOpenClawAttachmentRefsProvenance,
+} from '../openclaw.js';
 
 import type { RequestContext } from './context.js';
 

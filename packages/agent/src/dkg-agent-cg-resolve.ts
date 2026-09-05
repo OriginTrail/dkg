@@ -9,7 +9,16 @@
  * cross-calls resolve against the composed class.
  */
 
-import { contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphDataUri, contextGraphCatalogUri, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
+import {
+  contextGraphDataGraphUri,
+  contextGraphMetaGraphUri,
+  contextGraphDataUri,
+  contextGraphCatalogUri,
+  SYSTEM_CONTEXT_GRAPHS,
+  DKG_ONTOLOGY,
+  createOperationContext,
+  type OperationContext,
+} from '@origintrail-official/dkg-core';
 import { GraphManager, type Quad } from '@origintrail-official/dkg-storage';
 
 import { ethers } from 'ethers';
@@ -76,7 +85,11 @@ import { SYNC_PAGE_SIZE, SYNC_AUTH_MAX_AGE_MS, CHAIN_POLICY_READ_TIMEOUT_MS } fr
 
 import { createAbortError, runBoundedOperation } from './bounded-operation.js';
 
-import { type SyncRequestEnvelope, type ContextGraphSub, type ContextGraphWritePreflightProbe } from './dkg-agent-types.js';
+import {
+  type SyncRequestEnvelope,
+  type ContextGraphSub,
+  type ContextGraphWritePreflightProbe,
+} from './dkg-agent-types.js';
 import { normalizeSyncPhase } from './dkg-agent-helpers.js';
 
 import { DKGAgentBase } from './dkg-agent-base.js';

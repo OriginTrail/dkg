@@ -22,7 +22,25 @@ import type {
   TripleStoreConfig,
   LargeLiteralStorageConfig,
 } from '@origintrail-official/dkg-storage';
-import type { OperationContext, AuthorAttestationTypedData, DkgNetworkIdentity, CompatibleProtocolOutboxStore, MessageIdempotencyStore, SwmSenderKeyPackageAckReasonCode, ContextGraphJoinPolicyMode as CoreContextGraphJoinPolicyMode, ContextGraphJoinPolicyRecord as CoreContextGraphJoinPolicyRecord, CatalogSealDeploymentProfileV1, ContextGraphIdV1, DecimalU64V1, EvmAddressV1, NetworkIdV1, SubGraphNameV1, TimestampMsV1, UnsignedContextGraphPolicyEnvelopeV1, UnsignedMemberRosterEnvelopeV1 } from '@origintrail-official/dkg-core';
+import type {
+  OperationContext,
+  AuthorAttestationTypedData,
+  DkgNetworkIdentity,
+  CompatibleProtocolOutboxStore,
+  MessageIdempotencyStore,
+  SwmSenderKeyPackageAckReasonCode,
+  ContextGraphJoinPolicyMode as CoreContextGraphJoinPolicyMode,
+  ContextGraphJoinPolicyRecord as CoreContextGraphJoinPolicyRecord,
+  CatalogSealDeploymentProfileV1,
+  ContextGraphIdV1,
+  DecimalU64V1,
+  EvmAddressV1,
+  NetworkIdV1,
+  SubGraphNameV1,
+  TimestampMsV1,
+  UnsignedContextGraphPolicyEnvelopeV1,
+  UnsignedMemberRosterEnvelopeV1,
+} from '@origintrail-official/dkg-core';
 import type {
   PhaseCallback,
   SharedMemoryPublicSnapshotStorageConfig,
@@ -31,7 +49,11 @@ import type {
   WorkspacePublicSnapshotStore,
   CursorPersistence as ChainEventCursorPersistence,
 } from '@origintrail-official/dkg-publisher';
-import type { ApprovalPolicy, ChainAdapter, ContextGraphRegistryScanCursorStore } from '@origintrail-official/dkg-chain';
+import type {
+  ApprovalPolicy,
+  ChainAdapter,
+  ContextGraphRegistryScanCursorStore,
+} from '@origintrail-official/dkg-chain';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
 import type { CclFactResolutionMode } from './ccl-fact-resolution.js';

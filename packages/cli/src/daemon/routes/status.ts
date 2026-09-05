@@ -45,9 +45,21 @@ import {
 } from '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
-import { backpressureRegistry, computeNetworkId, validateContextGraphId, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import {
+  backpressureRegistry,
+  computeNetworkId,
+  validateContextGraphId,
+  contextGraphMetaUri,
+} from '@origintrail-official/dkg-core';
 
-import { saveConfig, resolveChainConfig, type ResolvedChainConfig, resolveContextGraphs, resolveNetworkDefaultContextGraphs, resolveNetworkConfigName } from '../../config.js';
+import {
+  saveConfig,
+  resolveChainConfig,
+  type ResolvedChainConfig,
+  resolveContextGraphs,
+  resolveNetworkDefaultContextGraphs,
+  resolveNetworkConfigName,
+} from '../../config.js';
 
 import { buildRelayStatusBlock } from '../relay-status-block.js';
 import { fetchAllEntries, resolveRegistryConfig } from '../../integrations/registry-client.js';
@@ -64,10 +76,31 @@ import type { IntegrationEntry, TrustTier } from '../../integrations/schema.js';
 // the project's tsconfig (`noUnusedLocals` is off).
 import { daemonState, resolveAutoUpdateEnabled } from '../state.js';
 
-import { _autoUpdateIo, getNodeVersion, loadBuildInfo, detectInstallMode, loadImporterSkillTemplate, buildSkillMd, skillEtag } from '../manifest.js';
-import { jsonResponse, SMALL_BODY_BYTES, readBody, deriveBlockExplorerUrl, respondIfChainRpcTransportError } from '../http-utils.js';
+import {
+  _autoUpdateIo,
+  getNodeVersion,
+  loadBuildInfo,
+  detectInstallMode,
+  loadImporterSkillTemplate,
+  buildSkillMd,
+  skillEtag,
+} from '../manifest.js';
+import {
+  jsonResponse,
+  SMALL_BODY_BYTES,
+  readBody,
+  deriveBlockExplorerUrl,
+  respondIfChainRpcTransportError,
+} from '../http-utils.js';
 
-import { LOCAL_AGENT_INTEGRATION_DEFINITIONS, isPlainRecord, normalizeIntegrationId, listLocalAgentIntegrations, connectLocalAgentIntegration, hasConfiguredLocalAgentChat } from '../local-agents.js';
+import {
+  LOCAL_AGENT_INTEGRATION_DEFINITIONS,
+  isPlainRecord,
+  normalizeIntegrationId,
+  listLocalAgentIntegrations,
+  connectLocalAgentIntegration,
+  hasConfiguredLocalAgentChat,
+} from '../local-agents.js';
 
 import type { RequestContext } from './context.js';
 

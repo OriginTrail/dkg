@@ -6,9 +6,36 @@ import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
-import { dkgAuthTokenPath, FAUCET_WALLETS_PER_REQUEST, getFundableWalletAddresses, requestFaucetFunding, resolveSetupNetworkName, SELECTABLE_SETUP_NETWORKS } from '@origintrail-official/dkg-core';
+import {
+  dkgAuthTokenPath,
+  FAUCET_WALLETS_PER_REQUEST,
+  getFundableWalletAddresses,
+  requestFaucetFunding,
+  resolveSetupNetworkName,
+  SELECTABLE_SETUP_NETWORKS,
+} from '@origintrail-official/dkg-core';
 
-import { loadConfig, saveConfig, configPath, dkgDir, ensureDkgDir, loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveChainConfig, resolveKnownNetworkConfigName, resolveNetworkConfigName, validateNetworkConfigReadiness, isDkgMonorepo, classifyMonorepoInit, sharedHomeInitGate, resolveContextGraphs, resolveNetworkDefaultContextGraphs, AUTO_UPDATE_GIT_ONLY_FIELDS, type AutoUpdateConfig } from '../config.js';
+import {
+  loadConfig,
+  saveConfig,
+  configPath,
+  dkgDir,
+  ensureDkgDir,
+  loadNetworkConfig,
+  loadProjectConfig,
+  resolveAutoUpdateConfig,
+  resolveChainConfig,
+  resolveKnownNetworkConfigName,
+  resolveNetworkConfigName,
+  validateNetworkConfigReadiness,
+  isDkgMonorepo,
+  classifyMonorepoInit,
+  sharedHomeInitGate,
+  resolveContextGraphs,
+  resolveNetworkDefaultContextGraphs,
+  AUTO_UPDATE_GIT_ONLY_FIELDS,
+  type AutoUpdateConfig,
+} from '../config.js';
 
 import { promptStoreBackend } from '../store-wizard.js';
 

@@ -10,10 +10,54 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { PROTOCOL_SWM_SENDER_KEY, encodeGossipEnvelope, computeGossipSigningPayload, GOSSIP_ENVELOPE_VERSION, GOSSIP_TYPE_WORKSPACE_PUBLISH, createOperationContext, logKaLifecycleEvent, WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519, WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE, decodeWorkspaceEncryptionKey, SWM_SENDER_KEY_PACKAGE_ACK_TYPE, SWM_SENDER_KEY_PACKAGE_ACK_RETRYABLE_REASON_CODES, SWM_SENDER_KEY_PACKAGE_VERSION, computeSwmSenderKeyMembershipHash, computeSwmSenderKeyPackageAAD, decodeWorkspacePublishRequest, decodeSwmSenderKeyPackage, decodeSwmSenderKeyPackageAck, decryptSwmSenderKeyMessage, decryptSwmSenderKeyPackage, encodeSwmSenderKeyMessage, encodeSwmSenderKeyPackage, encodeSwmSenderKeyPackageAck, encryptSwmSenderKeyMessage, encryptSwmSenderKeyPackage, generateEd25519Keypair, generateSwmSenderChainKey, generateSwmSenderEpochId, ratchetSwmSenderChainKey, uint64ForProto, SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT, type OperationContext, type SwmSenderKeyMessageMsg, type SwmSenderKeyPackageAckReasonCode, type SwmSenderKeyPackageMsg, type WorkspaceRecipientEncryptionKey } from '@origintrail-official/dkg-core';
+import {
+  PROTOCOL_SWM_SENDER_KEY,
+  encodeGossipEnvelope,
+  computeGossipSigningPayload,
+  GOSSIP_ENVELOPE_VERSION,
+  GOSSIP_TYPE_WORKSPACE_PUBLISH,
+  createOperationContext,
+  logKaLifecycleEvent,
+  WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+  WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE,
+  decodeWorkspaceEncryptionKey,
+  SWM_SENDER_KEY_PACKAGE_ACK_TYPE,
+  SWM_SENDER_KEY_PACKAGE_ACK_RETRYABLE_REASON_CODES,
+  SWM_SENDER_KEY_PACKAGE_VERSION,
+  computeSwmSenderKeyMembershipHash,
+  computeSwmSenderKeyPackageAAD,
+  decodeWorkspacePublishRequest,
+  decodeSwmSenderKeyPackage,
+  decodeSwmSenderKeyPackageAck,
+  decryptSwmSenderKeyMessage,
+  decryptSwmSenderKeyPackage,
+  encodeSwmSenderKeyMessage,
+  encodeSwmSenderKeyPackage,
+  encodeSwmSenderKeyPackageAck,
+  encryptSwmSenderKeyMessage,
+  encryptSwmSenderKeyPackage,
+  generateEd25519Keypair,
+  generateSwmSenderChainKey,
+  generateSwmSenderEpochId,
+  ratchetSwmSenderChainKey,
+  uint64ForProto,
+  SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
+  type OperationContext,
+  type SwmSenderKeyMessageMsg,
+  type SwmSenderKeyPackageAckReasonCode,
+  type SwmSenderKeyPackageMsg,
+  type WorkspaceRecipientEncryptionKey,
+} from '@origintrail-official/dkg-core';
 
 import { createRpcTimeoutError, type ChainAdapter } from '@origintrail-official/dkg-chain';
-import { resolveWorkspaceAgentRecipients, resolveWorkspaceAgentRecipientKeys, type WorkspaceAgentRecipient, type WorkspaceAgentRecipientResolution, type WorkspaceAgentRecipientResolverInput, type WorkspaceSenderKeyEncryptInput } from '@origintrail-official/dkg-publisher';
+import {
+  resolveWorkspaceAgentRecipients,
+  resolveWorkspaceAgentRecipientKeys,
+  type WorkspaceAgentRecipient,
+  type WorkspaceAgentRecipientResolution,
+  type WorkspaceAgentRecipientResolverInput,
+  type WorkspaceSenderKeyEncryptInput,
+} from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 
 import {
@@ -42,14 +86,24 @@ type JoinApprovalRetryEntry = {
   lastError: string;
 };
 
-import { TIMEOUT_SENTINEL, CHAIN_POLICY_READ_TIMEOUT_MS, SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX } from './dkg-agent-constants.js';
+import {
+  TIMEOUT_SENTINEL,
+  CHAIN_POLICY_READ_TIMEOUT_MS,
+  SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
+} from './dkg-agent-constants.js';
 
 import {
   isBoundedOperationTimeoutError,
   runBoundedOperation,
 } from './bounded-operation.js';
 
-import { StaleSenderKeyTargetError, SwmSenderKeySetupRejectionError, type LocalSwmSenderKeySendState, type LocalSwmSenderKeyReceiveState, type PendingSenderKeyEntry } from './dkg-agent-types.js';
+import {
+  StaleSenderKeyTargetError,
+  SwmSenderKeySetupRejectionError,
+  type LocalSwmSenderKeySendState,
+  type LocalSwmSenderKeyReceiveState,
+  type PendingSenderKeyEntry,
+} from './dkg-agent-types.js';
 
 import {
   swmSenderStateKey,

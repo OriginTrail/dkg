@@ -11,10 +11,55 @@
 import { createHash } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { performance } from 'node:perf_hooks';
-import { PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_SWM_HOST_CATCHUP, contextGraphWorkspaceTopic, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri, contextGraphDataUri, contextGraphMetaUri, contextGraphLayerUri, MemoryLayer, GOSSIP_TYPE_WORKSPACE_PUBLISH, decodeGossipEnvelope, type GossipEnvelopeMsg, decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE, decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE, SYSTEM_CONTEXT_GRAPHS, createOperationContext, getMetrics, sparqlString, isSafeIri, assertSafeIri, TRUST_LEVEL_PREDICATE, LEGACY_TRUST_LEVEL_PREDICATE, type OperationContext, GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED, ciphertextChunkStoreGraph, ciphertextChunkStoreSubject, CIPHERTEXT_CHUNK_PREDICATE, type SubscriptionSource, SUBSCRIPTION_SOURCES } from '@origintrail-official/dkg-core';
-import { GraphManager, isStoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, tryUpdateWithTouchedGraphs, type TripleStore, type QueryOptions, type SelectResult } from '@origintrail-official/dkg-storage';
+import {
+  PROTOCOL_GET_CIPHERTEXT_CHUNK,
+  PROTOCOL_SWM_HOST_CATCHUP,
+  contextGraphWorkspaceTopic,
+  contextGraphWorkspaceGraphUri,
+  contextGraphWorkspaceMetaGraphUri,
+  contextGraphDataUri,
+  contextGraphMetaUri,
+  contextGraphLayerUri,
+  MemoryLayer,
+  GOSSIP_TYPE_WORKSPACE_PUBLISH,
+  decodeGossipEnvelope,
+  type GossipEnvelopeMsg,
+  decodeEncryptedWorkspacePayload,
+  ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
+  decodeSwmSenderKeyMessage,
+  SWM_SENDER_KEY_MESSAGE_TYPE,
+  SYSTEM_CONTEXT_GRAPHS,
+  createOperationContext,
+  getMetrics,
+  sparqlString,
+  isSafeIri,
+  assertSafeIri,
+  TRUST_LEVEL_PREDICATE,
+  LEGACY_TRUST_LEVEL_PREDICATE,
+  type OperationContext,
+  GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
+  ciphertextChunkStoreGraph,
+  ciphertextChunkStoreSubject,
+  CIPHERTEXT_CHUNK_PREDICATE,
+  type SubscriptionSource,
+  SUBSCRIPTION_SOURCES,
+} from '@origintrail-official/dkg-core';
+import {
+  GraphManager,
+  isStoreSchedulerBusyError,
+  asChangelogReader,
+  asGraphWriteRevisionSource,
+  tryUpdateWithTouchedGraphs,
+  type TripleStore,
+  type QueryOptions,
+  type SelectResult,
+} from '@origintrail-official/dkg-storage';
 
-import { readMaterializedVersion, shouldApplyMaterialization, withMaterializationLock } from '@origintrail-official/dkg-publisher';
+import {
+  readMaterializedVersion,
+  shouldApplyMaterialization,
+  withMaterializationLock,
+} from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 
 import {
@@ -22,7 +67,14 @@ import {
 } from './ka-identity.js';
 
 import { SwmHostModeStore } from './swm/host-mode-store.js';
-import { BEACON_ACCESS_POLICY_CURATED, DKG_CG_DISCOVERY_TOPIC, decodeCgDiscoveryBeacon, encodeCgDiscoveryBeacon, mintCgDiscoveryBeacon, verifyCgDiscoveryBeacon } from './swm/cg-discovery-beacon.js';
+import {
+  BEACON_ACCESS_POLICY_CURATED,
+  DKG_CG_DISCOVERY_TOPIC,
+  decodeCgDiscoveryBeacon,
+  encodeCgDiscoveryBeacon,
+  mintCgDiscoveryBeacon,
+  verifyCgDiscoveryBeacon,
+} from './swm/cg-discovery-beacon.js';
 import { DiscoveryRateLimit } from './swm/discovery-rate-limit.js';
 import {
   decodeSwmHostCatchupRequest,
@@ -35,11 +87,28 @@ import {
   type SwmHostCatchupResponseEntry,
 } from './swm/host-catchup-wire.js';
 import { mintSignedCatchupRequest, verifySignedCatchupRequest } from './swm/host-catchup-sign.js';
-import { decodeCiphertextChunkCatchupRequest, encodeCiphertextChunkCatchupRequest, encodeCiphertextChunkCatchupResponse, decodeCiphertextChunkCatchupResponse, mintSignedCiphertextChunkCatchupRequest, verifySignedCiphertextChunkCatchupRequest, CIPHERTEXT_CHUNK_CATCHUP_WIRE_VERSION, type CiphertextChunkCatchupRequest, type CiphertextChunkCatchupResponse } from './swm/ciphertext-chunk-catchup.js';
+import {
+  decodeCiphertextChunkCatchupRequest,
+  encodeCiphertextChunkCatchupRequest,
+  encodeCiphertextChunkCatchupResponse,
+  decodeCiphertextChunkCatchupResponse,
+  mintSignedCiphertextChunkCatchupRequest,
+  verifySignedCiphertextChunkCatchupRequest,
+  CIPHERTEXT_CHUNK_CATCHUP_WIRE_VERSION,
+  type CiphertextChunkCatchupRequest,
+  type CiphertextChunkCatchupResponse,
+} from './swm/ciphertext-chunk-catchup.js';
 
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 
-import { reconcileContextGraph, VmReconcileDispatcher, type ChainReconcilerDeps, type OrdinalOutcome, type PendingOrdinalRecoveryResult, type OrdinalRecoveryTarget } from './chain-reconciler.js';
+import {
+  reconcileContextGraph,
+  VmReconcileDispatcher,
+  type ChainReconcilerDeps,
+  type OrdinalOutcome,
+  type PendingOrdinalRecoveryResult,
+  type OrdinalRecoveryTarget,
+} from './chain-reconciler.js';
 import {
   ContextGraphOnChainIdUnresolvedError,
   VmReconcileUnavailableError,
@@ -169,7 +238,15 @@ import {
 
 import { TIMEOUT_SENTINEL, CHAIN_POLICY_READ_TIMEOUT_MS } from './dkg-agent-constants.js';
 
-import { ContextGraphNotFoundError, type ContextGraphSub, type VmReconcilePeerTopology, type SelectedVmReconcileCursorRecord, type VmReconcileRotationRecord, type SharedMemorySyncDiagnostics, type ReplicationEvent } from './dkg-agent-types.js';
+import {
+  ContextGraphNotFoundError,
+  type ContextGraphSub,
+  type VmReconcilePeerTopology,
+  type SelectedVmReconcileCursorRecord,
+  type VmReconcileRotationRecord,
+  type SharedMemorySyncDiagnostics,
+  type ReplicationEvent,
+} from './dkg-agent-types.js';
 
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';

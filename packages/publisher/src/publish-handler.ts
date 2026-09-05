@@ -1,5 +1,9 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
-import { deleteByPatternWithoutCount, GraphManager, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
+import {
+  deleteByPatternWithoutCount,
+  GraphManager,
+  tryReplaceGraphAtomically,
+} from '@origintrail-official/dkg-storage';
 import type { EventBus, StreamHandler, OperationContext } from '@origintrail-official/dkg-core';
 import {
   DKGEvent,

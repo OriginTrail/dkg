@@ -9,8 +9,28 @@
  * class.
  */
 
-import { contextGraphPublishTopic, contextGraphDataGraphUri, contextGraphMetaGraphUri, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, createOperationContext, sparqlString, assertSafeIri, TrustLevel, TRUST_LEVEL_PREDICATE, buildTrustLevelQuads, type OperationContext, assertRdfLiteralMutf8Safe } from '@origintrail-official/dkg-core';
-import { GraphManager, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  contextGraphPublishTopic,
+  contextGraphDataGraphUri,
+  contextGraphMetaGraphUri,
+  SYSTEM_CONTEXT_GRAPHS,
+  DKG_ONTOLOGY,
+  createOperationContext,
+  sparqlString,
+  assertSafeIri,
+  TrustLevel,
+  TRUST_LEVEL_PREDICATE,
+  buildTrustLevelQuads,
+  type OperationContext,
+  assertRdfLiteralMutf8Safe,
+} from '@origintrail-official/dkg-core';
+import {
+  GraphManager,
+  deleteByPatternWithoutCount,
+  tryUpdateWithTouchedGraphs,
+  type TripleStore,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
@@ -27,7 +47,11 @@ type JoinApprovalRetryEntry = {
   lastError: string;
 };
 
-import { TIMEOUT_SENTINEL, ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS, CHAIN_POLICY_READ_TIMEOUT_MS } from './dkg-agent-constants.js';
+import {
+  TIMEOUT_SENTINEL,
+  ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
+  CHAIN_POLICY_READ_TIMEOUT_MS,
+} from './dkg-agent-constants.js';
 import { runBoundedOperation } from './bounded-operation.js';
 
 import { DKGAgentBase } from './dkg-agent-base.js';

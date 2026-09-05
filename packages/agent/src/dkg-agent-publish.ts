@@ -10,11 +10,117 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { PROTOCOL_SWM_UPDATE, contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic, contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceMetaGraphUri, contextGraphSharedMemoryUri, contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri, contextGraphCatalogUri, contextGraphLayerUri, MemoryLayer, encodeKAUpdateRequest, encodeGossipEnvelope, GOSSIP_ENVELOPE_VERSION, encodeFinalizationMessage, type FinalizationMessageMsg, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, createOperationContext, escapeSparqlLiteral, isSafeIri, assertSafeIri, isTrustLevelQuad, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, type AuthorAttestationTypedData, buildAssertionSealQuads, buildAssertionPublishReceiptQuads, parseAssertionSealQuads, type AssertionSeal, ASSERTION_SEAL_PREDICATES, GRAPH_KA_CONTENT_SCOPE_VERSION, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, computeSwmSenderKeyMembershipHash, type OperationContext, type AssertionEvent, encryptV10PublishPayload, encryptChunked, buildCiphertextChunksRoot, computeGossipSigningPayloadV2, GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED, ciphertextChunkStoreGraph, ciphertextChunkStoreSubject, CIPHERTEXT_CHUNK_PREDICATE, withSpan, getMetrics, assertQuadLiteralsMutf8Safe, PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE, PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE, formatPublishAuthorNotCustodialMessage } from '@origintrail-official/dkg-core';
+import {
+  PROTOCOL_SWM_UPDATE,
+  contextGraphPublishTopic,
+  contextGraphWorkspaceTopic,
+  contextGraphUpdateTopic,
+  contextGraphFinalizationTopic,
+  contextGraphDataGraphUri,
+  contextGraphMetaGraphUri,
+  contextGraphWorkspaceMetaGraphUri,
+  contextGraphSharedMemoryUri,
+  contextGraphDataUri,
+  contextGraphMetaUri,
+  assertionLifecycleUri,
+  contextGraphAssertionUri,
+  contextGraphCatalogUri,
+  contextGraphLayerUri,
+  MemoryLayer,
+  encodeKAUpdateRequest,
+  encodeGossipEnvelope,
+  GOSSIP_ENVELOPE_VERSION,
+  encodeFinalizationMessage,
+  type FinalizationMessageMsg,
+  SYSTEM_CONTEXT_GRAPHS,
+  DKG_ONTOLOGY,
+  createOperationContext,
+  escapeSparqlLiteral,
+  isSafeIri,
+  assertSafeIri,
+  isTrustLevelQuad,
+  buildAuthorAttestationTypedData,
+  buildUpdateAuthorAttestationTypedData,
+  AUTHOR_SCHEME_VERSION_V1,
+  type AuthorAttestationTypedData,
+  buildAssertionSealQuads,
+  buildAssertionPublishReceiptQuads,
+  parseAssertionSealQuads,
+  type AssertionSeal,
+  ASSERTION_SEAL_PREDICATES,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  LegacyKnowledgeAssetReadOnlyError,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+  computeSwmSenderKeyMembershipHash,
+  type OperationContext,
+  type AssertionEvent,
+  encryptV10PublishPayload,
+  encryptChunked,
+  buildCiphertextChunksRoot,
+  computeGossipSigningPayloadV2,
+  GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
+  ciphertextChunkStoreGraph,
+  ciphertextChunkStoreSubject,
+  CIPHERTEXT_CHUNK_PREDICATE,
+  withSpan,
+  getMetrics,
+  assertQuadLiteralsMutf8Safe,
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
+  PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE,
+  formatPublishAuthorNotCustodialMessage,
+} from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { deleteByPatternWithoutCount, GraphManager, PrivateContentStore, loadSharedMemoryQuadsForScope, canonicalSharedMemoryScopeWriteGraph, type SharedMemoryGraphScope, type Quad } from '@origintrail-official/dkg-storage';
-import { type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult } from '@origintrail-official/dkg-chain';
-import { DKGPublisher, computeFlatKCRootV10 as computeFlatKCRoot, computePrivateRootV10 as computePrivateRoot, skolemizeKnowledgeAssetParts, assertNoKnowledgeAssetPayloadNamedGraphs, assertValidPrecomputedUpdateAttestation, isReservedSubject, canonicalPublishPayload, generatedPrivateCatalogTripleKeys, appendMissingGeneratedPrivateCatalogFloor, createKnowledgeAssetVmPublishSnapshotMetadata, createKnowledgeAssetVmPublishSnapshotRequest, resolveLiftWorkspaceSlice, resolveKnowledgeAssetOperationPublicQuads, resolveKnowledgeAssetWorkspaceHead, KnowledgeAssetOperationPublicSnapshotNotFoundError, workspacePublicQuadsDigest, validateLiftPublishPayload, TripleStoreAsyncLiftPublisher, type PublishOptions, type PublishResult, type PhaseCallback, type CASCondition, KA_ID_PRED, RESERVED_UAL_PRED, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED, type LiftRequestAuthorSeal, type KnowledgeAssetVmPublishRequest, type AsyncKnowledgeAssetVmPublishPreflightResult, type AsyncKnowledgeAssetVmPublishRecoveryInput, createResolveCurrentWorkspaceGossipPayload, parseEncodedWorkspaceGossipPayload, type EncodedWorkspaceGossipPayload } from '@origintrail-official/dkg-publisher';
+import {
+  deleteByPatternWithoutCount,
+  GraphManager,
+  PrivateContentStore,
+  loadSharedMemoryQuadsForScope,
+  canonicalSharedMemoryScopeWriteGraph,
+  type SharedMemoryGraphScope,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
+import {
+  type CreateOnChainContextGraphParams,
+  type CreateOnChainContextGraphResult,
+} from '@origintrail-official/dkg-chain';
+import {
+  DKGPublisher,
+  computeFlatKCRootV10 as computeFlatKCRoot,
+  computePrivateRootV10 as computePrivateRoot,
+  skolemizeKnowledgeAssetParts,
+  assertNoKnowledgeAssetPayloadNamedGraphs,
+  assertValidPrecomputedUpdateAttestation,
+  isReservedSubject,
+  canonicalPublishPayload,
+  generatedPrivateCatalogTripleKeys,
+  appendMissingGeneratedPrivateCatalogFloor,
+  createKnowledgeAssetVmPublishSnapshotMetadata,
+  createKnowledgeAssetVmPublishSnapshotRequest,
+  resolveLiftWorkspaceSlice,
+  resolveKnowledgeAssetOperationPublicQuads,
+  resolveKnowledgeAssetWorkspaceHead,
+  KnowledgeAssetOperationPublicSnapshotNotFoundError,
+  workspacePublicQuadsDigest,
+  validateLiftPublishPayload,
+  TripleStoreAsyncLiftPublisher,
+  type PublishOptions,
+  type PublishResult,
+  type PhaseCallback,
+  type CASCondition,
+  KA_ID_PRED,
+  RESERVED_UAL_PRED,
+  WM_CURRENT_ASSERTION_PRED,
+  SWM_CURRENT_ASSERTION_PRED,
+  VM_CURRENT_ASSERTION_PRED,
+  type LiftRequestAuthorSeal,
+  type KnowledgeAssetVmPublishRequest,
+  type AsyncKnowledgeAssetVmPublishPreflightResult,
+  type AsyncKnowledgeAssetVmPublishRecoveryInput,
+  createResolveCurrentWorkspaceGossipPayload,
+  parseEncodedWorkspaceGossipPayload,
+  type EncodedWorkspaceGossipPayload,
+} from '@origintrail-official/dkg-publisher';
 import { pickPublishLifecycleHooks, type PublishLifecycleHooks } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 
@@ -39,7 +145,12 @@ import { RootlessUpdateError, type RootlessUpdateErrorCode } from './rootless-up
 
 import { emitPublicProjection, buildPublicProjection } from './context-graph-public-projection.js';
 
-import { chooseFanOutTier, executeSubstrateFanOut, classifySendResult, type FanOutPlan } from './swm/substrate-fanout.js';
+import {
+  chooseFanOutTier,
+  executeSubstrateFanOut,
+  classifySendResult,
+  type FanOutPlan,
+} from './swm/substrate-fanout.js';
 import { type SwmAckQuorum } from './swm/ack-quorum.js';
 import {
   classifySwmFanoutPeerOutcome,
@@ -73,8 +184,20 @@ type JoinApprovalRetryEntry = {
 import { stripLiteral, jsonLdToQuads, type JsonLdContent } from './dkg-agent-utils.js';
 import { PRIVATE_DATA_ANCHOR } from './dkg-agent-constants.js';
 
-import { ContextGraphNotFoundError, InvalidContentError, type PreSignedAuthorAttestation, type PublishOpts, type PublishAsyncOpts, type PublishAsyncContent } from './dkg-agent-types.js';
-import { normalizePublishContextGraphId, isPublishAsyncQuadEnvelope, assertQuadArray, sliceIntoCiphertextChunks } from './dkg-agent-helpers.js';
+import {
+  ContextGraphNotFoundError,
+  InvalidContentError,
+  type PreSignedAuthorAttestation,
+  type PublishOpts,
+  type PublishAsyncOpts,
+  type PublishAsyncContent,
+} from './dkg-agent-types.js';
+import {
+  normalizePublishContextGraphId,
+  isPublishAsyncQuadEnvelope,
+  assertQuadArray,
+  sliceIntoCiphertextChunks,
+} from './dkg-agent-helpers.js';
 import { readMaxKaNumberWithRetry, isTransientChainError } from './allocator.js';
 import { swmSenderStateKey } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';

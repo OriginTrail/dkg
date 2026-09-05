@@ -28,7 +28,11 @@ import type {
   TxResult,
   V10UpdateKAParams,
 } from './chain-adapter.js';
-import { floorPublishTokenAmount, computeUpdateACKDigest, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
+import {
+  floorPublishTokenAmount,
+  computeUpdateACKDigest,
+  AUTHOR_SCHEME_VERSION_V1,
+} from '@origintrail-official/dkg-core';
 import {
   resolveQuotedPublisherCandidatePricing,
   type PublisherConvictionPlanReader,

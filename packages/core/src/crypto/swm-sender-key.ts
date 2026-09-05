@@ -8,7 +8,23 @@ import {
   webcrypto,
   type KeyObject,
 } from 'node:crypto';
-import { SWM_SENDER_KEY_CIPHER_ALGORITHM, SWM_SENDER_KEY_MESSAGE_TYPE, SWM_SENDER_KEY_PACKAGE_TYPE, SWM_SENDER_KEY_PACKAGE_VERSION, SWM_SENDER_KEY_SETUP_KEY_AGREEMENT_ALGORITHM, computeSwmSenderKeyMessageAAD, computeSwmSenderKeyPackageEncryptionAAD, computeSwmSenderKeySignaturePayload, decodeSwmSenderKeySecret, encodeSwmSenderKeySecret, uint64ForProto, type SwmSenderKeyMessageAADFields, type SwmSenderKeyMessageMsg, type SwmSenderKeyPackageMsg, type SwmSenderKeySecretMsg } from '../proto/swm-sender-key.js';
+import {
+  SWM_SENDER_KEY_CIPHER_ALGORITHM,
+  SWM_SENDER_KEY_MESSAGE_TYPE,
+  SWM_SENDER_KEY_PACKAGE_TYPE,
+  SWM_SENDER_KEY_PACKAGE_VERSION,
+  SWM_SENDER_KEY_SETUP_KEY_AGREEMENT_ALGORITHM,
+  computeSwmSenderKeyMessageAAD,
+  computeSwmSenderKeyPackageEncryptionAAD,
+  computeSwmSenderKeySignaturePayload,
+  decodeSwmSenderKeySecret,
+  encodeSwmSenderKeySecret,
+  uint64ForProto,
+  type SwmSenderKeyMessageAADFields,
+  type SwmSenderKeyMessageMsg,
+  type SwmSenderKeyPackageMsg,
+  type SwmSenderKeySecretMsg,
+} from '../proto/swm-sender-key.js';
 import {
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
   WORKSPACE_ENCRYPTION_KEY_BYTES,

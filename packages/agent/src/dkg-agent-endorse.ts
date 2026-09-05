@@ -7,7 +7,17 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
-import { contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri, computeACKDigest, createOperationContext, assertSafeIri, TrustLevel, isTrustLevelQuad } from '@origintrail-official/dkg-core';
+import {
+  contextGraphDataGraphUri,
+  contextGraphMetaGraphUri,
+  contextGraphVerifiableMemoryUri,
+  contextGraphVerifiableMemoryMetaUri,
+  computeACKDigest,
+  createOperationContext,
+  assertSafeIri,
+  TrustLevel,
+  isTrustLevelQuad,
+} from '@origintrail-official/dkg-core';
 import { loadSelectedVerifiableMemoryQuads, type Quad } from '@origintrail-official/dkg-storage';
 
 import { VerifyCollector, buildVerificationMetadata, type PublishResult } from '@origintrail-official/dkg-publisher';

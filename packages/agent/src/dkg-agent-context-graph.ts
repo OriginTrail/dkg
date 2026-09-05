@@ -8,7 +8,19 @@
  * unchanged — bodies are a 1:1 move. Assembled onto DKGAgent via applyMixins.
  */
 
-import { contextGraphPublishTopic, contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphDataUri, contextGraphMetaUri, encodePublishRequest, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, createOperationContext, escapeSparqlLiteral, assertRdfLiteralMutf8Safe } from '@origintrail-official/dkg-core';
+import {
+  contextGraphPublishTopic,
+  contextGraphDataGraphUri,
+  contextGraphMetaGraphUri,
+  contextGraphDataUri,
+  contextGraphMetaUri,
+  encodePublishRequest,
+  SYSTEM_CONTEXT_GRAPHS,
+  DKG_ONTOLOGY,
+  createOperationContext,
+  escapeSparqlLiteral,
+  assertRdfLiteralMutf8Safe,
+} from '@origintrail-official/dkg-core';
 import { GraphManager, deleteByPatternWithoutCount, type Quad } from '@origintrail-official/dkg-storage';
 
 import { ethers } from 'ethers';
@@ -34,7 +46,13 @@ type JoinApprovalRetryEntry = {
   lastError: string;
 };
 
-import { LOCAL_ACCESS_OPEN, LOCAL_ACCESS_CURATED, EVM_PUBLISH_CURATED, EVM_PUBLISH_OPEN, MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS } from './dkg-agent-constants.js';
+import {
+  LOCAL_ACCESS_OPEN,
+  LOCAL_ACCESS_CURATED,
+  EVM_PUBLISH_CURATED,
+  EVM_PUBLISH_OPEN,
+  MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS,
+} from './dkg-agent-constants.js';
 
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';

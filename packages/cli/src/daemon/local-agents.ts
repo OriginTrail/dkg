@@ -12,12 +12,33 @@ import { existsSync, readFileSync } from 'node:fs';
 
 import { createRequire } from 'node:module';
 
-import { type DkgConfig, type LocalAgentIntegrationCapabilities, type LocalAgentIntegrationConfig, type LocalAgentIntegrationManifest, type LocalAgentIntegrationRuntime, type LocalAgentIntegrationStatus, type LocalAgentIntegrationTransport } from '../config.js';
+import {
+  type DkgConfig,
+  type LocalAgentIntegrationCapabilities,
+  type LocalAgentIntegrationConfig,
+  type LocalAgentIntegrationManifest,
+  type LocalAgentIntegrationRuntime,
+  type LocalAgentIntegrationStatus,
+  type LocalAgentIntegrationTransport,
+} from '../config.js';
 import { daemonState } from './state.js';
 // Pull every needed symbol from openclaw — including the previously
 // module-private helpers that handle-request and these flows reach
 // into.
-import { OpenClawUiAttachDeps, scheduleOpenClawUiAttachJob, isOpenClawUiAttachCancelled, formatOpenClawUiAttachFailure, isOpenClawMemorySlotElected, probeOpenClawChannelHealth, runOpenClawUiSetup, restartOpenClawGateway, waitForOpenClawChatReady, transportPatchFromOpenClawTarget, trimTrailingSlashes, localOpenclawConfigPath } from './openclaw.js';
+import {
+  OpenClawUiAttachDeps,
+  scheduleOpenClawUiAttachJob,
+  isOpenClawUiAttachCancelled,
+  formatOpenClawUiAttachFailure,
+  isOpenClawMemorySlotElected,
+  probeOpenClawChannelHealth,
+  runOpenClawUiSetup,
+  restartOpenClawGateway,
+  waitForOpenClawChatReady,
+  transportPatchFromOpenClawTarget,
+  trimTrailingSlashes,
+  localOpenclawConfigPath,
+} from './openclaw.js';
 import {
   DEFAULT_HERMES_API_SERVER_URL,
   type HermesChannelHealthReport,

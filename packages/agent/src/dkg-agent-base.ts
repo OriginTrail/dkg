@@ -37,10 +37,36 @@ import type {
   Rfc64SwmRecoveryCoordinatorV1,
 } from
   './rfc64/swm-recovery-coordinator-v1.js';
-import { DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, PeerResolver, Logger, createOperationContext, type SubscriptionSource, isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
-import { deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type Quad, type QueryOptions, type SortedGraphSetSource } from '@origintrail-official/dkg-storage';
+import {
+  DKGNode,
+  ProtocolRouter,
+  GossipSubManager,
+  TypedEventBus,
+  PeerResolver,
+  Logger,
+  createOperationContext,
+  type SubscriptionSource,
+  isSparqlUpdateOperation,
+} from '@origintrail-official/dkg-core';
+import {
+  deleteByPatternWithoutCount,
+  isExternalBackend,
+  isStoreOperationNotStarted,
+  type TripleStore,
+  type Quad,
+  type QueryOptions,
+  type SortedGraphSetSource,
+} from '@origintrail-official/dkg-storage';
 import { emptyRpcUsageWindow, type ChainAdapter, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
-import { DKGPublisher, SharedMemoryHandler, ChainEventPoller, type AsyncPromoteQueue, type AsyncPromoteQueueConfig, type PromoteTerminalJobClearer, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
+import {
+  DKGPublisher,
+  SharedMemoryHandler,
+  ChainEventPoller,
+  type AsyncPromoteQueue,
+  type AsyncPromoteQueueConfig,
+  type PromoteTerminalJobClearer,
+  type WorkspacePublicSnapshotStore,
+} from '@origintrail-official/dkg-publisher';
 
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
@@ -96,7 +122,20 @@ type JoinApprovalRetryEntry = {
 
 import { MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS } from './dkg-agent-constants.js';
 
-import { type LocalSwmSenderKeySendState, type LocalSwmSenderKeyReceiveState, type PendingSenderKeyEntry, type PeerHealth, type ContextGraphSub, type ContextGraphSubscriptionRehydrationInternalStatus, type VmReconcileNegativeRecord, type VmReconcilePeerTopology, type SelectedVmReconcileCursorRecord, type VmReconcileRotationRecord, type ResolvedDKGAgentConfig, type SyncReconcilerBackoff } from './dkg-agent-types.js';
+import {
+  type LocalSwmSenderKeySendState,
+  type LocalSwmSenderKeyReceiveState,
+  type PendingSenderKeyEntry,
+  type PeerHealth,
+  type ContextGraphSub,
+  type ContextGraphSubscriptionRehydrationInternalStatus,
+  type VmReconcileNegativeRecord,
+  type VmReconcilePeerTopology,
+  type SelectedVmReconcileCursorRecord,
+  type VmReconcileRotationRecord,
+  type ResolvedDKGAgentConfig,
+  type SyncReconcilerBackoff,
+} from './dkg-agent-types.js';
 import type { SyncCheckpointStore, ChangelogCursorStore } from './sync/checkpoint/state.js';
 import { isLocalOxigraphConfig } from './dkg-agent-helpers.js';
 

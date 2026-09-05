@@ -8,7 +8,13 @@
  * composed class.
  */
 
-import { contextGraphDataGraphUri, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, createOperationContext, sparqlString } from '@origintrail-official/dkg-core';
+import {
+  contextGraphDataGraphUri,
+  SYSTEM_CONTEXT_GRAPHS,
+  DKG_ONTOLOGY,
+  createOperationContext,
+  sparqlString,
+} from '@origintrail-official/dkg-core';
 
 import { type PublishResult } from '@origintrail-official/dkg-publisher';
 
@@ -27,8 +33,21 @@ type JoinApprovalRetryEntry = {
   lastError: string;
 };
 
-import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, CclResourceNotFoundError, hashCclPolicy, type CclPolicyRecord } from './ccl-policy.js';
-import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
+import {
+  buildCclPolicyQuads,
+  buildPolicyApprovalQuads,
+  buildPolicyRevocationQuads,
+  CclResourceNotFoundError,
+  hashCclPolicy,
+  type CclPolicyRecord,
+} from './ccl-policy.js';
+import {
+  CclEvaluator,
+  parseCclPolicy,
+  validateCclPolicy,
+  type CclEvaluationResult,
+  type CclFactTuple,
+} from './ccl-evaluator.js';
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
 import { buildManualCclFacts, resolveFactsFromSnapshot, type CclFactResolutionMode } from './ccl-fact-resolution.js';
 import { stripLiteral } from './dkg-agent-utils.js';

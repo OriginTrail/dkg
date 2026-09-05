@@ -1,6 +1,26 @@
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
-import { deleteByPatternWithoutCount, GraphManager, LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from '@origintrail-official/dkg-storage';
-import { validateSubGraphName, isSafeIri, assertionLifecycleUri, contextGraphAssertionUri, contextGraphSharedMemoryUri, contextGraphLayerUri, contextGraphDataUri, contextGraphMetaUri, MemoryLayer, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, GRAPH_KA_CONTENT_SCOPE_VERSION, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, toAgentDid } from '@origintrail-official/dkg-core';
+import {
+  deleteByPatternWithoutCount,
+  GraphManager,
+  LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+} from '@origintrail-official/dkg-storage';
+import {
+  validateSubGraphName,
+  isSafeIri,
+  assertionLifecycleUri,
+  contextGraphAssertionUri,
+  contextGraphSharedMemoryUri,
+  contextGraphLayerUri,
+  contextGraphDataUri,
+  contextGraphMetaUri,
+  MemoryLayer,
+  DKG_ENTITY,
+  DKG_ROOT_ENTITY_LEGACY,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+  toAgentDid,
+} from '@origintrail-official/dkg-core';
 import type { AssertionState } from '@origintrail-official/dkg-core';
 import {
   GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE as GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE_V1,

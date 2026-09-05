@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
-import { DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, sparqlString } from '@origintrail-official/dkg-core';
+import {
+  DKG_ONTOLOGY,
+  contextGraphDataGraphUri,
+  contextGraphWorkspaceGraphUri,
+  sparqlString,
+} from '@origintrail-official/dkg-core';
 import { DKG_ENDORSES } from './endorse.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { CclFactTuple } from './ccl-evaluator.js';

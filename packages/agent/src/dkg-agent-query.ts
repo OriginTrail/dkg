@@ -7,10 +7,28 @@
  * so cross-calls resolve against the composed class.
  */
 
-import { PROTOCOL_QUERY_REMOTE, contextGraphDataGraphUri, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, assertContextGraphIdV1, assertNetworkIdV1, type ContextGraphIdV1, type NetworkIdV1, createOperationContext, TrustLevel, type OperationContext, type GetView } from '@origintrail-official/dkg-core';
+import {
+  PROTOCOL_QUERY_REMOTE,
+  contextGraphDataGraphUri,
+  SYSTEM_CONTEXT_GRAPHS,
+  DKG_ONTOLOGY,
+  assertContextGraphIdV1,
+  assertNetworkIdV1,
+  type ContextGraphIdV1,
+  type NetworkIdV1,
+  createOperationContext,
+  TrustLevel,
+  type OperationContext,
+  type GetView,
+} from '@origintrail-official/dkg-core';
 import { GraphManager } from '@origintrail-official/dkg-storage';
 
-import { emptyQueryResultForKind, validateReadOnlySparql, type QueryRequest, type QueryResponse } from '@origintrail-official/dkg-query';
+import {
+  emptyQueryResultForKind,
+  validateReadOnlySparql,
+  type QueryRequest,
+  type QueryResponse,
+} from '@origintrail-official/dkg-query';
 
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local

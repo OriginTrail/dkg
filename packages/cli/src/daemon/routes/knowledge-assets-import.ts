@@ -29,10 +29,29 @@ import {
   isDkgContentHash,
   verifyDkgContentHash,
 } from "@origintrail-official/dkg-core";
-import { findReservedSubjectPrefix, isSkolemizedUri, listAssertionScopedGraphUris } from "@origintrail-official/dkg-publisher";
+import {
+  findReservedSubjectPrefix,
+  isSkolemizedUri,
+  listAssertionScopedGraphUris,
+} from "@origintrail-official/dkg-publisher";
 import { deleteByPatternWithoutCount } from "@origintrail-official/dkg-storage";
 import type { RequestContext } from "./context.js";
-import { jsonResponse, readBody, readBodyBuffer, safeParseJson, validateOptionalSubGraphName, validateRequiredContextGraphId, normalizeContextGraphIdOrUri, resolveRequiredWriteContextGraphId, oversizedRdfLiteralResponseBody, SMALL_BODY_BYTES, MAX_UPLOAD_BYTES, type ImportFileExtractionPayload, buildImportFileResponse, unregisteredSubGraphError } from "../http-utils.js";
+import {
+  jsonResponse,
+  readBody,
+  readBodyBuffer,
+  safeParseJson,
+  validateOptionalSubGraphName,
+  validateRequiredContextGraphId,
+  normalizeContextGraphIdOrUri,
+  resolveRequiredWriteContextGraphId,
+  oversizedRdfLiteralResponseBody,
+  SMALL_BODY_BYTES,
+  MAX_UPLOAD_BYTES,
+  type ImportFileExtractionPayload,
+  buildImportFileResponse,
+  unregisteredSubGraphError,
+} from "../http-utils.js";
 import {
   ImportArtifactRouteError,
   resolveImportedArtifact,

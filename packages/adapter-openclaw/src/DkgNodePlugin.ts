@@ -15,7 +15,16 @@
  *     (`POST /api/knowledge-assets` + `POST /api/knowledge-assets/:name/wm/write`),
  *     which the agent reads from `GET /.well-known/skill.md` on startup.
  */
-import { GET_VIEWS, type GetView, createDkgPublisherExtension, type DkgPublisherExtension, normalizeDkgPublisherQuads, resolveDkgHome, toEip55Checksum, validateAssertionName } from '@origintrail-official/dkg-core';
+import {
+  GET_VIEWS,
+  type GetView,
+  createDkgPublisherExtension,
+  type DkgPublisherExtension,
+  normalizeDkgPublisherQuads,
+  resolveDkgHome,
+  toEip55Checksum,
+  validateAssertionName,
+} from '@origintrail-official/dkg-core';
 import {
   DkgDaemonClient,
   DkgDaemonHttpError,

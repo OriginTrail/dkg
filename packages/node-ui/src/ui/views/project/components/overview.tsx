@@ -1,6 +1,12 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 
-import { listJoinRequests, approveJoinRequest, rejectJoinRequest, type AgentIdentity, type PendingJoinRequest } from '../../../api.js';
+import {
+  listJoinRequests,
+  approveJoinRequest,
+  rejectJoinRequest,
+  type AgentIdentity,
+  type PendingJoinRequest,
+} from '../../../api.js';
 import { useMemoryEntities } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfile } from '../../../hooks/useProjectProfile.js';
 

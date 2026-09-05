@@ -38,8 +38,22 @@ const daemonRequire = createRequire(import.meta.url);
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { isPcaUnavailableError } from '@origintrail-official/dkg-chain';
-import { ContextGraphAssetFetchConflictError, ContextGraphAssetFetchValidationError, ContextGraphNotFoundError, ContextGraphOnChainIdUnresolvedError, type ContextGraphSyncMode, VmReconcileQueueClosedError, VmReconcileQueueFullError, VmReconcileUnavailableError } from '@origintrail-official/dkg-agent';
-import { DKGEvent, validateSubGraphName, validateContextGraphId, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import {
+  ContextGraphAssetFetchConflictError,
+  ContextGraphAssetFetchValidationError,
+  ContextGraphNotFoundError,
+  ContextGraphOnChainIdUnresolvedError,
+  type ContextGraphSyncMode,
+  VmReconcileQueueClosedError,
+  VmReconcileQueueFullError,
+  VmReconcileUnavailableError,
+} from '@origintrail-official/dkg-agent';
+import {
+  DKGEvent,
+  validateSubGraphName,
+  validateContextGraphId,
+  SYSTEM_CONTEXT_GRAPHS,
+} from '@origintrail-official/dkg-core';
 
 import {
   catchupResultHasCleanResponse,
@@ -59,7 +73,11 @@ import {
   assembleStandardTemplates,
 } from '@origintrail-official/dkg-mcp/manifest/publish';
 import { fetchManifest as fetchManifestImpl } from '@origintrail-official/dkg-mcp/manifest/fetch';
-import { planInstall as planInstallImpl, writeInstall as writeInstallImpl, buildReviewMarkdown as buildReviewMarkdownImpl } from '@origintrail-official/dkg-mcp/manifest/install';
+import {
+  planInstall as planInstallImpl,
+  writeInstall as writeInstallImpl,
+  buildReviewMarkdown as buildReviewMarkdownImpl,
+} from '@origintrail-official/dkg-mcp/manifest/install';
 
 // Daemon sub-module imports — every public symbol from sibling
 // modules is pulled in here because the legacy monolithic file used
@@ -74,8 +92,25 @@ import {
   recordTerminalOnce,
   releaseCatchupJob,
 } from '../catchup-telemetry.js';
-import { manifestRepoRoot, readMcpDkgVersion, versionSatisfiesRange, manifestNetworkLabel, manifestSelfClient, manifestPublisherUri, buildManifestInstallContext, _autoUpdateIo } from '../manifest.js';
-import { jsonResponse, safeParseJson, validateRequiredContextGraphId, resolveRequiredWriteContextGraphId, SMALL_BODY_BYTES, readBody, classifyChainRpcTransportStatus } from '../http-utils.js';
+import {
+  manifestRepoRoot,
+  readMcpDkgVersion,
+  versionSatisfiesRange,
+  manifestNetworkLabel,
+  manifestSelfClient,
+  manifestPublisherUri,
+  buildManifestInstallContext,
+  _autoUpdateIo,
+} from '../manifest.js';
+import {
+  jsonResponse,
+  safeParseJson,
+  validateRequiredContextGraphId,
+  resolveRequiredWriteContextGraphId,
+  SMALL_BODY_BYTES,
+  readBody,
+  classifyChainRpcTransportStatus,
+} from '../http-utils.js';
 
 import type { RequestContext } from './context.js';
 import { actorFromRequestContext } from './context.js';

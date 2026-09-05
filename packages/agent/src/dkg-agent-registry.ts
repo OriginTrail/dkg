@@ -9,9 +9,30 @@
  * class.
  */
 
-import { PROTOCOL_MESSAGE, SYSTEM_CONTEXT_GRAPHS, createOperationContext, escapeSparqlLiteral, WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519, computeWorkspaceAgentEncryptionKeyProofPayload, computeWorkspaceAgentEncryptionKeyRevocationPayload, decodeWorkspaceEncryptionKey, workspaceAgentEncryptionKeyId, type OperationContext, type ProtocolOutboxEntry } from '@origintrail-official/dkg-core';
+import {
+  PROTOCOL_MESSAGE,
+  SYSTEM_CONTEXT_GRAPHS,
+  createOperationContext,
+  escapeSparqlLiteral,
+  WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+  computeWorkspaceAgentEncryptionKeyProofPayload,
+  computeWorkspaceAgentEncryptionKeyRevocationPayload,
+  decodeWorkspaceEncryptionKey,
+  workspaceAgentEncryptionKeyId,
+  type OperationContext,
+  type ProtocolOutboxEntry,
+} from '@origintrail-official/dkg-core';
 import { type Quad } from '@origintrail-official/dkg-storage';
-import { PcaUnavailableError, type TxResult, type V10PublishingConvictionAccountInfo, type NodePublishingConvictionAccount, type PcaAccountRelation, type ShardingTableNode, type PcaContracts, type PcaRpcMethod } from '@origintrail-official/dkg-chain';
+import {
+  PcaUnavailableError,
+  type TxResult,
+  type V10PublishingConvictionAccountInfo,
+  type NodePublishingConvictionAccount,
+  type PcaAccountRelation,
+  type ShardingTableNode,
+  type PcaContracts,
+  type PcaRpcMethod,
+} from '@origintrail-official/dkg-chain';
 import { type PublishResult } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 
@@ -31,7 +52,21 @@ import {
   parseExplicitConnectTarget as parseMultiaddrExplicitConnectTarget,
 } from './p2p/multiaddr-peer-target.js';
 
-import { generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey, ensureWorkspaceEncryptionKey, hashAgentToken, activeWorkspaceEncryptionKeys, appendCustodialWorkspaceEncryptionKey, revokeCustodialWorkspaceEncryptionKey, migrateLegacyWorkspaceEncryptionFields, refreshDefaultEncryptionKeyView, type AgentKeyRecord, type KeystoreEntry, type WorkspaceEncryptionKeyEntry } from './agent-keystore.js';
+import {
+  generateCustodialAgent,
+  registerSelfSovereignAgent,
+  agentFromPrivateKey,
+  ensureWorkspaceEncryptionKey,
+  hashAgentToken,
+  activeWorkspaceEncryptionKeys,
+  appendCustodialWorkspaceEncryptionKey,
+  revokeCustodialWorkspaceEncryptionKey,
+  migrateLegacyWorkspaceEncryptionFields,
+  refreshDefaultEncryptionKeyView,
+  type AgentKeyRecord,
+  type KeystoreEntry,
+  type WorkspaceEncryptionKeyEntry,
+} from './agent-keystore.js';
 
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local

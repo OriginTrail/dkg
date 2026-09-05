@@ -9,9 +9,66 @@
  */
 
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
-import { ProtocolRouter, GossipSubManager, DKGEvent, LibP2PNetwork, PeerResolver, StubNetworkStateRegistry, PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST, PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE, contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceMetaGraphUri, ENTITY_PRED_ALT, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, contextGraphSharedMemoryUri, deriveCuratorDidFromCgId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, validateSubGraphName, createOperationContext, isKaPublishLifecycleDebugLoggingEnabled, isStorageACKDecline, isSafeIri, assertSafeIri, type OperationContext, InMemoryMessageIdempotencyStore, InMemoryProtocolOutboxStore, SUBSCRIPTION_SOURCES, tripleContentV10, withRetry } from '@origintrail-official/dkg-core';
+import {
+  ProtocolRouter,
+  GossipSubManager,
+  DKGEvent,
+  LibP2PNetwork,
+  PeerResolver,
+  StubNetworkStateRegistry,
+  PROTOCOL_ACCESS,
+  PROTOCOL_PUBLISH,
+  PROTOCOL_SYNC,
+  PROTOCOL_SYNC_POOLED,
+  PROTOCOL_SYNC_CHANGELOG,
+  PROTOCOL_QUERY_REMOTE,
+  PROTOCOL_STORAGE_ACK,
+  PROTOCOL_STORAGE_ACK_V2,
+  PROTOCOL_STORAGE_UPDATE_ACK,
+  PROTOCOL_STORAGE_UPDATE_ACK_V2,
+  PROTOCOL_GET_CIPHERTEXT_CHUNK,
+  PROTOCOL_VERIFY_PROPOSAL,
+  PROTOCOL_JOIN_REQUEST,
+  PROTOCOL_NETWORK_IDENTITY,
+  PROTOCOL_SWM_SENDER_KEY,
+  PROTOCOL_SWM_UPDATE,
+  PROTOCOL_SWM_SHARE_ACK,
+  PROTOCOL_SWM_HOST_CATCHUP,
+  PROTOCOL_MESSAGE,
+  contextGraphDataGraphUri,
+  contextGraphMetaGraphUri,
+  contextGraphWorkspaceMetaGraphUri,
+  ENTITY_PRED_ALT,
+  DKG_ENTITY,
+  DKG_ROOT_ENTITY_LEGACY,
+  contextGraphSharedMemoryUri,
+  deriveCuratorDidFromCgId,
+  SYSTEM_CONTEXT_GRAPHS,
+  DKG_ONTOLOGY,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  validateSubGraphName,
+  createOperationContext,
+  isKaPublishLifecycleDebugLoggingEnabled,
+  isStorageACKDecline,
+  isSafeIri,
+  assertSafeIri,
+  type OperationContext,
+  InMemoryMessageIdempotencyStore,
+  InMemoryProtocolOutboxStore,
+  SUBSCRIPTION_SOURCES,
+  tripleContentV10,
+  withRetry,
+} from '@origintrail-official/dkg-core';
 import type { RandomSamplingRepairOperation } from '@origintrail-official/dkg-random-sampling';
-import { GraphManager, asChangelogReader, deleteByPatternWithoutCount, tryReplaceGraphAtomically, type ChangelogReader, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager,
+  asChangelogReader,
+  deleteByPatternWithoutCount,
+  tryReplaceGraphAtomically,
+  type ChangelogReader,
+  type TripleStore,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 import { readChangelogDeltaPage } from './sync/responder/graph-plan.js';
 import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelog/wire.js';
 import { runChangelogSync, planPageApply } from './sync/requester/changelog-sync.js';
@@ -30,7 +87,19 @@ import {
   type FinalizedSwmTwinRetirement,
 } from './sync/requester/finalized-swm-twin-reconciliation.js';
 import { createRpcTimeoutError, isChainRpcTransportError, type ChainAdapter } from '@origintrail-official/dkg-chain';
-import { PublishHandler, ChainEventPoller, AccessHandler, PublishJournal, StorageACKHandler, createStorageAckLifecycleObserver, withSignerRegistrationCache, VerifyProposalHandler, parseWorkspacePublicSnapshotNQuads, type PhaseCallback, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
+import {
+  PublishHandler,
+  ChainEventPoller,
+  AccessHandler,
+  PublishJournal,
+  StorageACKHandler,
+  createStorageAckLifecycleObserver,
+  withSignerRegistrationCache,
+  VerifyProposalHandler,
+  parseWorkspacePublicSnapshotNQuads,
+  type PhaseCallback,
+  type WorkspacePublicSnapshotStore,
+} from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 
 import { QueryHandler, type QueryAccessConfig } from '@origintrail-official/dkg-query';
@@ -57,8 +126,15 @@ import {
   type DurableBatchVerificationMode,
 } from './sync-verify-worker.js';
 import { classifyDurableMetaGraph } from './sync/durable-integrity.js';
-import { bindRandomSampling, RandomSamplingShutdownTimeoutError, stopRandomSamplingHandleWithin } from './random-sampling-bind.js';
-import { ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
+import {
+  bindRandomSampling,
+  RandomSamplingShutdownTimeoutError,
+  stopRandomSamplingHandleWithin,
+} from './random-sampling-bind.js';
+import {
+  ensurePeerConnected as ensurePeerConnectedAtom,
+  primeCatchupConnections as primeCatchupConnectionsAtom,
+} from './p2p/peer-connect.js';
 import { Messenger } from './p2p/messenger.js';
 import { createSingleUseSyncSender } from './p2p/sync-transport.js';
 import { NetworkAdmissionService } from './p2p/network-admission.js';
@@ -92,7 +168,11 @@ import {
 } from './sync/exact-assets.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
-import { MemorySyncCheckpointStore, type SelectedSwmMetaRetentionScope, type SyncCheckpointScope } from './sync/checkpoint/state.js';
+import {
+  MemorySyncCheckpointStore,
+  type SelectedSwmMetaRetentionScope,
+  type SyncCheckpointScope,
+} from './sync/checkpoint/state.js';
 import {
   DurableRecoveryRunner,
   type DurableRecoveryExecution,
@@ -220,10 +300,40 @@ import {
   recordDurableSyncDiagnostics,
   type DurableSyncAccumulator,
 } from './sync/durable-progress.js';
-import { getSyncBackpressureSnapshot, getSyncBackpressureBusyError, resolveBooleanSwitch, resolveSyncReconcilerEnabled, resolveSyncGlobalBackpressure, withGlobalSyncBackpressure } from './sync/backpressure.js';
-import { contextGraphPriority, countSyncPriorityClasses, normalizeSyncAdmissionSource, orderContextGraphIdsByPriority, syncPriorityClass, type SyncAdmissionSource } from './sync/policy.js';
+import {
+  getSyncBackpressureSnapshot,
+  getSyncBackpressureBusyError,
+  resolveBooleanSwitch,
+  resolveSyncReconcilerEnabled,
+  resolveSyncGlobalBackpressure,
+  withGlobalSyncBackpressure,
+} from './sync/backpressure.js';
+import {
+  contextGraphPriority,
+  countSyncPriorityClasses,
+  normalizeSyncAdmissionSource,
+  orderContextGraphIdsByPriority,
+  syncPriorityClass,
+  type SyncAdmissionSource,
+} from './sync/policy.js';
 import { automaticDurableSyncContextGraphs } from './sync/system-context-graph-policy.js';
-import { activeSyncAdmissionSource, monotonicNowMs, recordSyncAttempt, recordSyncAttemptRequestBytes, recordSyncAttemptResponseBytes, recordSyncOperationDuration, recordSyncOperationRejected, recordSyncSingleFlightJoin, syncAttemptAttributes, syncOperationRejectionReason, withSyncAdmissionSource, type SyncAttemptOutcome, type SyncOperationLane, type SyncOperationOutcome, type SyncSingleFlightScope } from './sync/attempt-telemetry.js';
+import {
+  activeSyncAdmissionSource,
+  monotonicNowMs,
+  recordSyncAttempt,
+  recordSyncAttemptRequestBytes,
+  recordSyncAttemptResponseBytes,
+  recordSyncOperationDuration,
+  recordSyncOperationRejected,
+  recordSyncSingleFlightJoin,
+  syncAttemptAttributes,
+  syncOperationRejectionReason,
+  withSyncAdmissionSource,
+  type SyncAttemptOutcome,
+  type SyncOperationLane,
+  type SyncOperationOutcome,
+  type SyncSingleFlightScope,
+} from './sync/attempt-telemetry.js';
 
 import { resolveStorageAckLifecycleAssetUalFromLocalSwm } from './storage-ack-lifecycle-identity.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -266,10 +376,59 @@ type JoinApprovalRetryEntry = {
 import { multiaddr } from '@multiformats/multiaddr';
 
 import { stripLiteral } from './dkg-agent-utils.js';
-import { SYNC_BYTE_BUDGET_MAX_ROWS, SYNC_PAGE_SIZE, SYNC_REQUEST_PAGE_SIZE, SYNC_PAGE_RETRY_ATTEMPTS, SYNC_TOTAL_TIMEOUT_MS, SYNC_MIN_GRAPH_BUDGET_MS, SYNC_PAGE_TIMEOUT_MS, SYNC_ROUTER_ATTEMPTS, SYNC_PROTOCOL_CHECK_ATTEMPTS, SYNC_PROTOCOL_CHECK_DELAY_MS, SYNC_ACCESS_DENIED_MARKER, DEBUG_SYNC_PROGRESS, DEFAULT_SWM_TTL_MS, SWM_CLEANUP_INTERVAL_MS, SYNC_DENIED_RESPONSE, GOSSIP_DIAL_COOLDOWN_MS, GOSSIP_DIAL_TIMEOUT_MS, CATCHUP_ON_CONNECT_COOLDOWN_MS, SYNC_RECONNECT_FLAP_GRACE_MS, RANDOM_SAMPLING_BIND_RETRY_MS, STORAGE_ACK_REGISTRATION_RETRY_MS, MESSAGE_OUTBOX_TICK_MS, AGENT_PROFILE_HEARTBEAT_MS, AGENT_PROFILE_STALE_THRESHOLD_MS, WARM_CORE_CONNECTIONS_ENABLED, WARM_CORE_RECONCILE_INTERVAL_MS, WARM_CORE_MAX, WARM_CORE_KEEPALIVE_TAG, WARM_CORE_DIAL_TIMEOUT_MS, BOOT_CHAIN_IDENTITY_TIMEOUT_MS, MIN_STORAGE_ACK_REGISTRATION_RETRY_MS } from './dkg-agent-constants.js';
+import {
+  SYNC_BYTE_BUDGET_MAX_ROWS,
+  SYNC_PAGE_SIZE,
+  SYNC_REQUEST_PAGE_SIZE,
+  SYNC_PAGE_RETRY_ATTEMPTS,
+  SYNC_TOTAL_TIMEOUT_MS,
+  SYNC_MIN_GRAPH_BUDGET_MS,
+  SYNC_PAGE_TIMEOUT_MS,
+  SYNC_ROUTER_ATTEMPTS,
+  SYNC_PROTOCOL_CHECK_ATTEMPTS,
+  SYNC_PROTOCOL_CHECK_DELAY_MS,
+  SYNC_ACCESS_DENIED_MARKER,
+  DEBUG_SYNC_PROGRESS,
+  DEFAULT_SWM_TTL_MS,
+  SWM_CLEANUP_INTERVAL_MS,
+  SYNC_DENIED_RESPONSE,
+  GOSSIP_DIAL_COOLDOWN_MS,
+  GOSSIP_DIAL_TIMEOUT_MS,
+  CATCHUP_ON_CONNECT_COOLDOWN_MS,
+  SYNC_RECONNECT_FLAP_GRACE_MS,
+  RANDOM_SAMPLING_BIND_RETRY_MS,
+  STORAGE_ACK_REGISTRATION_RETRY_MS,
+  MESSAGE_OUTBOX_TICK_MS,
+  AGENT_PROFILE_HEARTBEAT_MS,
+  AGENT_PROFILE_STALE_THRESHOLD_MS,
+  WARM_CORE_CONNECTIONS_ENABLED,
+  WARM_CORE_RECONCILE_INTERVAL_MS,
+  WARM_CORE_MAX,
+  WARM_CORE_KEEPALIVE_TAG,
+  WARM_CORE_DIAL_TIMEOUT_MS,
+  BOOT_CHAIN_IDENTITY_TIMEOUT_MS,
+  MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
+} from './dkg-agent-constants.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 
-import { type RandomSamplingStartResult, type SyncRequestEnvelope, type ContextGraphSub, type ContextGraphSubInput, type ContextGraphSubscriptionRecord, type ContextGraphSubscriptionRehydrationStatus, type ContextGraphMemberPrincipalType, type ContextGraphMembershipRecord, type CatchupSyncDiagnostics, type DurableSyncResult, type SharedMemorySyncResult, type SwmSnapshotCoverage, type DKGAgentConfig, type ResolvedDKGAgentConfig, type SyncReconcilerProbe, type SyncReconcilerBackoff } from './dkg-agent-types.js';
+import {
+  type RandomSamplingStartResult,
+  type SyncRequestEnvelope,
+  type ContextGraphSub,
+  type ContextGraphSubInput,
+  type ContextGraphSubscriptionRecord,
+  type ContextGraphSubscriptionRehydrationStatus,
+  type ContextGraphMemberPrincipalType,
+  type ContextGraphMembershipRecord,
+  type CatchupSyncDiagnostics,
+  type DurableSyncResult,
+  type SharedMemorySyncResult,
+  type SwmSnapshotCoverage,
+  type DKGAgentConfig,
+  type ResolvedDKGAgentConfig,
+  type SyncReconcilerProbe,
+  type SyncReconcilerBackoff,
+} from './dkg-agent-types.js';
 import {
   normalizeContextGraphSubscriptionTransition,
   projectContextGraphSubscriptionPersistence,

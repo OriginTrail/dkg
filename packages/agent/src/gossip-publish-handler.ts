@@ -18,7 +18,23 @@ import {
   type Quad,
 } from '@origintrail-official/dkg-storage';
 import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
-import { computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad, generateGraphKnowledgeAssetMetadata, resolveKnowledgeAssetWorkspaceHead, workspacePublicQuadsDigest, shouldApplyMaterialization, withMaterializationLock, writeMaterializedVersion, validatePublishRequest, parseSimpleNQuads, generateSubGraphRegistration, type KAMetadata } from '@origintrail-official/dkg-publisher';
+import {
+  computeFlatKCRootV10 as computeFlatKCRoot,
+  skolemizeByEntity,
+  generateTentativeMetadata,
+  getTentativeStatusQuad,
+  getConfirmedStatusQuad,
+  generateGraphKnowledgeAssetMetadata,
+  resolveKnowledgeAssetWorkspaceHead,
+  workspacePublicQuadsDigest,
+  shouldApplyMaterialization,
+  withMaterializationLock,
+  writeMaterializedVersion,
+  validatePublishRequest,
+  parseSimpleNQuads,
+  generateSubGraphRegistration,
+  type KAMetadata,
+} from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
 import type {

@@ -4,7 +4,15 @@ import { ethers } from 'ethers';
 
 import { toErrorMessage, hasErrorCode } from '@origintrail-official/dkg-core';
 
-import { loadConfig, dkgDir, logPath, loadNetworkConfig, loadResolvedNetworkConfig, resolveChainConfig, resolveReadyChainConfig } from '../config.js';
+import {
+  loadConfig,
+  dkgDir,
+  logPath,
+  loadNetworkConfig,
+  loadResolvedNetworkConfig,
+  resolveChainConfig,
+  resolveReadyChainConfig,
+} from '../config.js';
 
 import type { ActionOpts } from '../cli-helpers.js';
 import { createCliEvmProviders, sendCliRawTransactionWithFailover } from '../cli-rpc.js';

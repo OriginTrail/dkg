@@ -62,7 +62,13 @@ import { canAdministerNode } from '../../auth.js';
 // the project's tsconfig (`noUnusedLocals` is off).
 
 import { _autoUpdateIo } from '../manifest.js';
-import { resolveNameToPeerId, jsonResponse, oversizedRdfLiteralResponseBody, SMALL_BODY_BYTES, readBody } from '../http-utils.js';
+import {
+  resolveNameToPeerId,
+  jsonResponse,
+  oversizedRdfLiteralResponseBody,
+  SMALL_BODY_BYTES,
+  readBody,
+} from '../http-utils.js';
 
 import { authorizeAgentScopedAuthorClaim } from './shared-assertion-helpers.js';
 import { classifyAgentConnectError } from './agent-connect-error.js';

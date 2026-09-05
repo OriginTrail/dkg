@@ -57,10 +57,78 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
-import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
-import { selectACKCandidatePeers, type AsyncKnowledgeAssetVmPublishExecutionInput, type AsyncKnowledgeAssetVmPublishRecoveryInput, type AsyncLiftPublisherConfig } from '@origintrail-official/dkg-publisher';
-import { DashboardDB, MetricsCollector, OperationTracker, handleNodeUIRequest, LogPushWorker, OtlpLogWorker, initTelemetry, shutdownTelemetry, flushTelemetry, SqliteMessageIdempotencyStore, SqliteProtocolOutboxStore, SqliteSyncCheckpointStore, SqliteChangelogCursorStore, SqliteChangelogEraGuard, SqliteChainEventCursorStore, SqliteContextGraphRegistryScanCursorStore, SqliteKaNumberStore, type MetricsSource } from "@origintrail-official/dkg-node-ui";
-import { loadConfig, saveConfig, loadNetworkConfig, loadResolvedNetworkConfig, resolveAutoUpdateConfig, resolveChainConfig, dkgDir, writePid, removePid, writeApiPort, removeApiPort, logPath, ensureDkgDir, TELEMETRY_ENDPOINTS, type DkgConfig, type NetworkConfig, resolveContextGraphs, resolveContextGraphSubscriptionRehydrationEnabled, resolveNetworkDefaultContextGraphs, isPublisherRuntimeEnabled, resolvePublisherRetryTuning, resolveRfc64CatalogActivations, resolveRfc64PublicCatalogActivationChainIdentityV1, resolveSharedMemoryTtlMs, resolveStorageAckTiming, repoDir, resolveAutoUpdateSource, exitOnStoreConfigErrors, validateNetworkConfigReadiness } from '../config.js';
+import {
+  BackpressureMonitor,
+  computeNetworkId,
+  createOperationContext,
+  createLogRedactor,
+  DKGEvent,
+  Logger,
+  PayloadTooLargeError,
+  DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS,
+  DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS,
+  pickNetworkTunables,
+  isKaPublishLifecycleDebugLoggingEnabled,
+  setKaPublishLifecycleDebugLoggingEnabled,
+  SYSTEM_CONTEXT_GRAPHS,
+} from '@origintrail-official/dkg-core';
+import {
+  selectACKCandidatePeers,
+  type AsyncKnowledgeAssetVmPublishExecutionInput,
+  type AsyncKnowledgeAssetVmPublishRecoveryInput,
+  type AsyncLiftPublisherConfig,
+} from '@origintrail-official/dkg-publisher';
+import {
+  DashboardDB,
+  MetricsCollector,
+  OperationTracker,
+  handleNodeUIRequest,
+  LogPushWorker,
+  OtlpLogWorker,
+  initTelemetry,
+  shutdownTelemetry,
+  flushTelemetry,
+  SqliteMessageIdempotencyStore,
+  SqliteProtocolOutboxStore,
+  SqliteSyncCheckpointStore,
+  SqliteChangelogCursorStore,
+  SqliteChangelogEraGuard,
+  SqliteChainEventCursorStore,
+  SqliteContextGraphRegistryScanCursorStore,
+  SqliteKaNumberStore,
+  type MetricsSource,
+} from "@origintrail-official/dkg-node-ui";
+import {
+  loadConfig,
+  saveConfig,
+  loadNetworkConfig,
+  loadResolvedNetworkConfig,
+  resolveAutoUpdateConfig,
+  resolveChainConfig,
+  dkgDir,
+  writePid,
+  removePid,
+  writeApiPort,
+  removeApiPort,
+  logPath,
+  ensureDkgDir,
+  TELEMETRY_ENDPOINTS,
+  type DkgConfig,
+  type NetworkConfig,
+  resolveContextGraphs,
+  resolveContextGraphSubscriptionRehydrationEnabled,
+  resolveNetworkDefaultContextGraphs,
+  isPublisherRuntimeEnabled,
+  resolvePublisherRetryTuning,
+  resolveRfc64CatalogActivations,
+  resolveRfc64PublicCatalogActivationChainIdentityV1,
+  resolveSharedMemoryTtlMs,
+  resolveStorageAckTiming,
+  repoDir,
+  resolveAutoUpdateSource,
+  exitOnStoreConfigErrors,
+  validateNetworkConfigReadiness,
+} from '../config.js';
 import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
 import {
   resolveOtlpLogEndpoint,
@@ -102,7 +170,14 @@ import {
   decodeVmReconcileNegativeRow,
   encodeVmReconcileNegativeRow,
 } from './vm-reconcile-negative-store-adapter.js';
-import { createAdmissionRecoveryCapabilityProbe, createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
+import {
+  createAdmissionRecoveryCapabilityProbe,
+  createInitialPublisherState,
+  createPublicSnapshotStore,
+  createPublisherControlFromStore,
+  startPublisherRuntimeWithOutcome,
+  type PublisherState,
+} from '../publisher-runner.js';
 import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill.js';
 import { createCatchupRunner } from '../catchup-runner.js';
 import {
@@ -143,13 +218,37 @@ import {
   closeDaemonBackingStoresAfterTeardown,
   runProducerQuiescentTeardown,
 } from './teardown.js';
-import { _autoUpdateIo, getNodeVersion, getCurrentCommitShort, loadBuildInfo, detectInstallMode, DAEMON_EXIT_CODE_RESTART } from './manifest.js';
+import {
+  _autoUpdateIo,
+  getNodeVersion,
+  getCurrentCommitShort,
+  loadBuildInfo,
+  detectInstallMode,
+  DAEMON_EXIT_CODE_RESTART,
+} from './manifest.js';
 import {
   SHUTDOWN_HARD_TIMEOUT_MS,
   encodeForcedShutdownExitCode,
   raceShutdownWithTimeout,
 } from './shutdown.js';
-import { jsonResponse, SMALL_BODY_BYTES, readBody, buildCorsAllowlist, resolveCorsOrigin, corsHeaders, HttpRateLimiter, InFlightLimiter, type AdmissionStatsView, admitRequest, resolveIntSetting, applyServerLimits, shouldBypassRateLimitForLoopbackTraffic, shortId, sleep, respondWithDaemonError } from './http-utils.js';
+import {
+  jsonResponse,
+  SMALL_BODY_BYTES,
+  readBody,
+  buildCorsAllowlist,
+  resolveCorsOrigin,
+  corsHeaders,
+  HttpRateLimiter,
+  InFlightLimiter,
+  type AdmissionStatsView,
+  admitRequest,
+  resolveIntSetting,
+  applyServerLimits,
+  shouldBypassRateLimitForLoopbackTraffic,
+  shortId,
+  sleep,
+  respondWithDaemonError,
+} from './http-utils.js';
 import { repoToFetchUrl } from './auto-update.js';
 import { formatAutoUpdateTagVerificationWarning, resolveAutoUpdateGitRefPlan } from '../auto-update-ref.js';
 import { resolveUpdateJitterMs, createUpdateHoldoffGate } from './auto-update-jitter.js';

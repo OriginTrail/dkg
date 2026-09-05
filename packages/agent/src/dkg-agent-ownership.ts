@@ -9,7 +9,15 @@
  * resolve against the composed class.
  */
 
-import { contextGraphPublishTopic, contextGraphDataGraphUri, deriveCuratorDidFromCgId, encodePublishRequest, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, sparqlString } from '@origintrail-official/dkg-core';
+import {
+  contextGraphPublishTopic,
+  contextGraphDataGraphUri,
+  deriveCuratorDidFromCgId,
+  encodePublishRequest,
+  SYSTEM_CONTEXT_GRAPHS,
+  DKG_ONTOLOGY,
+  sparqlString,
+} from '@origintrail-official/dkg-core';
 import { type Quad } from '@origintrail-official/dkg-storage';
 
 import { ethers } from 'ethers';
@@ -33,7 +41,13 @@ import { type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.j
 
 import { stripLiteral } from './dkg-agent-utils.js';
 
-import { normalizeAdapterPublisherAddress, adapterOperationalPrivateKeyAddress, adapterAdvertisesPublisherSigner, privateKeyAddress, inferAdapterPublisherAddress } from './dkg-agent-helpers.js';
+import {
+  normalizeAdapterPublisherAddress,
+  adapterOperationalPrivateKeyAddress,
+  adapterAdvertisesPublisherSigner,
+  privateKeyAddress,
+  inferAdapterPublisherAddress,
+} from './dkg-agent-helpers.js';
 
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';

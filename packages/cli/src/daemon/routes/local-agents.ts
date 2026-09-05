@@ -52,7 +52,20 @@ import { _autoUpdateIo } from '../manifest.js';
 import { jsonResponse, SMALL_BODY_BYTES, readBody } from '../http-utils.js';
 
 import { cancelPendingLocalAgentAttachJob } from '../openclaw.js';
-import { LOCAL_AGENT_INTEGRATION_DEFINITIONS, isPlainRecord, normalizeIntegrationId, normalizeExplicitLocalAgentDisconnectBody, listLocalAgentIntegrations, getLocalAgentIntegration, connectLocalAgentIntegration, updateLocalAgentIntegration, connectLocalAgentIntegrationFromUi, reverseHermesSetupForUi, reverseLocalAgentSetupForUi, refreshLocalAgentIntegrationFromUi } from '../local-agents.js';
+import {
+  LOCAL_AGENT_INTEGRATION_DEFINITIONS,
+  isPlainRecord,
+  normalizeIntegrationId,
+  normalizeExplicitLocalAgentDisconnectBody,
+  listLocalAgentIntegrations,
+  getLocalAgentIntegration,
+  connectLocalAgentIntegration,
+  updateLocalAgentIntegration,
+  connectLocalAgentIntegrationFromUi,
+  reverseHermesSetupForUi,
+  reverseLocalAgentSetupForUi,
+  refreshLocalAgentIntegrationFromUi,
+} from '../local-agents.js';
 import {
   primeAgentDkgSessionId,
   readPrimeAgentSessions,

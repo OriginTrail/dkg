@@ -5,7 +5,11 @@ import { decodeRdfStringLiteral } from '../../../../rdf-literal.js';
 import { MEMORY_LABEL_PREDICATES } from '../../../lib/memoryLabels.js';
 import { useLayoutStore } from '../../../stores/layout.js';
 import { useVerifiableMemoryAnchors, type PublishAnchor } from '../../../hooks/useVerifiableMemoryAnchors.js';
-import { useSwmAttributions, type AgentPaletteEntry, type SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js';
+import {
+  useSwmAttributions,
+  type AgentPaletteEntry,
+  type SwmAttributionsResult,
+} from '../../../hooks/useSwmAttributions.js';
 import { LAYER_CONFIG, buildLayerGraphOptions, humanizeLabel, filterTriplesToEntities } from '../helpers.js';
 import { EmptyState, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 

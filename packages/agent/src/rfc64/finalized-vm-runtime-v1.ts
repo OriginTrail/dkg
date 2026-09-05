@@ -1,4 +1,27 @@
-import { MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1, assertCanonicalChainId, assertCanonicalDecimalU256, assertCanonicalDecimalU64, assertCanonicalDigest, assertCanonicalEvmAddress, assertCanonicalKaId, assertContextGraphIdV1, assertNetworkIdV1, assertSubGraphNameV1, canonicalizeContextGraphPolicyPayloadV1, canonicalizeMemberRosterPayloadV1, parseCanonicalContextGraphPolicyPayloadV1, parseCanonicalMemberRosterPayloadV1, type ChainIdV1, type DecimalU256V1, type ContextGraphPolicyV1, type DecimalU64V1, type Digest32V1, type EvmAddressV1, type KaIdV1, type NetworkIdV1 } from '@origintrail-official/dkg-core';
+import {
+  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
+  assertCanonicalChainId,
+  assertCanonicalDecimalU256,
+  assertCanonicalDecimalU64,
+  assertCanonicalDigest,
+  assertCanonicalEvmAddress,
+  assertCanonicalKaId,
+  assertContextGraphIdV1,
+  assertNetworkIdV1,
+  assertSubGraphNameV1,
+  canonicalizeContextGraphPolicyPayloadV1,
+  canonicalizeMemberRosterPayloadV1,
+  parseCanonicalContextGraphPolicyPayloadV1,
+  parseCanonicalMemberRosterPayloadV1,
+  type ChainIdV1,
+  type DecimalU256V1,
+  type ContextGraphPolicyV1,
+  type DecimalU64V1,
+  type Digest32V1,
+  type EvmAddressV1,
+  type KaIdV1,
+  type NetworkIdV1,
+} from '@origintrail-official/dkg-core';
 import {
   scanFinalizedVmChainInventoryInSnapshotV1,
   type FinalizedContextGraphReadV1,

@@ -11,7 +11,12 @@
 
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers } from 'ethers';
-import { NoEligibleContextGraphError, NoEligibleKnowledgeCollectionError, ChallengeNoLongerActiveError, MerkleRootMismatchError } from './chain-adapter.js';
+import {
+  NoEligibleContextGraphError,
+  NoEligibleKnowledgeCollectionError,
+  ChallengeNoLongerActiveError,
+  MerkleRootMismatchError,
+} from './chain-adapter.js';
 import type { NodeChallenge, CreateChallengeResult, TxResult, ProofPeriodStatus } from './chain-adapter.js';
 import { enrichEvmError } from './evm-adapter-errors.js';
 

@@ -8,7 +8,16 @@ import { writeFile, unlink } from 'node:fs/promises';
 
 import { toErrorMessage, hasErrorCode } from '@origintrail-official/dkg-core';
 
-import { loadConfig, readPid, isProcessRunning, dkgDir, releasesDir, activeSlot, swapSlot, slotEntryPoint } from '../config.js';
+import {
+  loadConfig,
+  readPid,
+  isProcessRunning,
+  dkgDir,
+  releasesDir,
+  activeSlot,
+  swapSlot,
+  slotEntryPoint,
+} from '../config.js';
 
 import { performNpmUpdateEdge, getCurrentCliVersion } from '../daemon.js';
 

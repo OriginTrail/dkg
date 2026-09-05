@@ -4,22 +4,108 @@ import type { PreBroadcastRecord } from './publisher.js';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
-import { GraphManager, deleteByPatternWithoutCount, invalidateSwmMaterializationWitness, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
+import {
+  DKGEvent,
+  Logger,
+  createOperationContext,
+  encodeWorkspacePublishRequest,
+  encodeEncryptedWorkspacePayload,
+  encryptWorkspacePayload,
+  contextGraphDataUri,
+  contextGraphDataGraphUri,
+  contextGraphMetaUri,
+  contextGraphPrivateUri,
+  contextGraphAssertionUri,
+  contextGraphLayerUri,
+  MemoryLayer,
+  assertionLifecycleUri,
+  contextGraphSubGraphUri,
+  contextGraphSubGraphPrivateUri,
+  SYSTEM_CONTEXT_GRAPHS,
+  validateSubGraphName,
+  assertSafeIri,
+  assertSafeRdfTerm,
+  assertQuadLiteralsMutf8Safe,
+  DKG_GOSSIP_MAX_MESSAGE_BYTES,
+  SwmGossipPayloadTooLargeError,
+  STORAGE_ACK_MAX_STAGING_BYTES,
+  type Ed25519Keypair,
+  buildAuthorAttestationTypedData,
+  buildUpdateAuthorAttestationTypedData,
+  TrustLevel,
+  TRUST_LEVEL_PREDICATE,
+  assertNoUserAuthoredTrustLevelQuads,
+  buildTrustLevelQuads,
+  isTrustLevelQuad,
+  isSwmMerkleExcludedQuad,
+  WORKSPACE_OWNER_PREDICATE,
+  DKG_ENTITY,
+  DKG_ROOT_ENTITY_LEGACY,
+  ENTITY_PRED_ALT,
+  parseAssertionSealQuads,
+  ASSERTION_SEAL_PREDICATES,
+  DKG_ONTOLOGY,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  isAllocatableKaAuthorV1,
+  LegacyKnowledgeAssetReadOnlyError,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+} from '@origintrail-official/dkg-core';
+import {
+  GraphManager,
+  deleteByPatternWithoutCount,
+  invalidateSwmMaterializationWitness,
+  PrivateContentStore,
+  loadSharedMemoryQuadsForScope,
+  loadSelectedSharedMemoryQuads,
+  resolveSharedMemoryScopeGraphs,
+  tryReplaceGraphAtomically,
+} from '@origintrail-official/dkg-storage';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
-import { MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishLifecycleHooks, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
-import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAssetParts } from './auto-partition.js';
+import {
+  MAX_PUBLISH_EPOCHS,
+  type Publisher,
+  type PublishOptions,
+  type PublishLifecycleHooks,
+  type PublishResult,
+  type KAManifestEntry,
+  type PhaseCallback,
+  type V10CoreNodeACK,
+  type V10ACKProviderParams,
+  type V10ACKProviderObject,
+  type LegacyV10ACKProvider,
+} from './publisher.js';
+import {
+  assertNoUserAuthoredKnowledgeAssetSkolemTerms,
+  skolemizeByEntity,
+  skolemizeKnowledgeAssetParts,
+} from './auto-partition.js';
 import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
 import { withKeyedLocks } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
 import { classifyExactSwmGraphReplaceFailure } from './promote-replay-safety.js';
 import { canonicalPublishPayload } from './canonical-publish-payload.js';
-import { assertTrustedCatalogTriplesAreGeneratedFloor, generatedPrivateCatalogFloorQuads, splitTrustedGeneratedCatalogRootMap, trustedCatalogTripleKeySet } from './catalog-trust.js';
-import { partitionCatalogQuads, catalogCommittedLeaves, computeCatalogRoot, contextGraphCatalogUri, isAgentRegistryContextGraph } from '@origintrail-official/dkg-core';
+import {
+  assertTrustedCatalogTriplesAreGeneratedFloor,
+  generatedPrivateCatalogFloorQuads,
+  splitTrustedGeneratedCatalogRootMap,
+  trustedCatalogTripleKeySet,
+} from './catalog-trust.js';
+import {
+  partitionCatalogQuads,
+  catalogCommittedLeaves,
+  computeCatalogRoot,
+  contextGraphCatalogUri,
+  isAgentRegistryContextGraph,
+} from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 import { skolemize } from './skolemize.js';
-import { computePrivateRootV10 as computePrivateRoot, computeFlatKCRootV10 as computeFlatKCRoot, computeFlatKCMerkleLeafCountV10 } from './merkle.js';
+import {
+  computePrivateRootV10 as computePrivateRoot,
+  computeFlatKCRootV10 as computeFlatKCRoot,
+  computeFlatKCMerkleLeafCountV10,
+} from './merkle.js';
 import {
   validateCanonicalGraphScopedKnowledgeAssetPayload,
   validatePublishRequest,
@@ -31,7 +117,33 @@ import {
   listAssertionScopedGraphUris,
   listGraphsByPrefix,
 } from './assertion-scoped-graphs.js';
-import { generateConfirmedFullMetadata, generateGraphKnowledgeAssetMetadata, replaceLocallyTrustedKnowledgeAssetControls, buildDeterministicTokenRows, compareRootIris, generateOwnershipQuads, generateAssertionCreatedMetadata, generateAssertionPromotedMetadata, generateAssertionDiscardedMetadata, generateTentativeMetadata, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED, SHARE_OPERATION_ID_PRED, PROMOTE_OPERATION_INTENT_PRED, buildScopedMinimalMeta, resolveUalByBatchId, promoteUpdatedKaToPerCgId, restateLabelGraphForUpdate, shouldApplyMaterialization, withMaterializationLock, writeMaterializedVersion, type MaterializedVersion, type KAMetadata, type OnChainProvenance } from './metadata.js';
+import {
+  generateConfirmedFullMetadata,
+  generateGraphKnowledgeAssetMetadata,
+  replaceLocallyTrustedKnowledgeAssetControls,
+  buildDeterministicTokenRows,
+  compareRootIris,
+  generateOwnershipQuads,
+  generateAssertionCreatedMetadata,
+  generateAssertionPromotedMetadata,
+  generateAssertionDiscardedMetadata,
+  generateTentativeMetadata,
+  WM_CURRENT_ASSERTION_PRED,
+  SWM_CURRENT_ASSERTION_PRED,
+  VM_CURRENT_ASSERTION_PRED,
+  SHARE_OPERATION_ID_PRED,
+  PROMOTE_OPERATION_INTENT_PRED,
+  buildScopedMinimalMeta,
+  resolveUalByBatchId,
+  promoteUpdatedKaToPerCgId,
+  restateLabelGraphForUpdate,
+  shouldApplyMaterialization,
+  withMaterializationLock,
+  writeMaterializedVersion,
+  type MaterializedVersion,
+  type KAMetadata,
+  type OnChainProvenance,
+} from './metadata.js';
 import {
   resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,

@@ -18,7 +18,21 @@ import {
   isTooLowAllowanceError,
 } from './evm-adapter-errors.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
-import { ContextGraphChainScanPartialError, type ChainReadOptions, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
+import {
+  ContextGraphChainScanPartialError,
+  type ChainReadOptions,
+  type CreateContextGraphParams,
+  type TxResult,
+  type ContextGraphOnChain,
+  type ContextGraphChainScanOptions,
+  type ContextGraphRegistryScanOptions,
+  type ContextGraphRegistryScanPage,
+  type CreateOnChainContextGraphParams,
+  type CreateOnChainContextGraphResult,
+  type VerifyParams,
+  type PublishToContextGraphParams,
+  type OnChainPublishResult,
+} from './chain-adapter.js';
 
 type ContextGraphRegistryScanPlan =
   | {

@@ -1,15 +1,92 @@
 
-import { DKGNode, TypedEventBus, PROTOCOL_STORAGE_ACK, contextGraphPublishTopic, contextGraphDataGraphUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri, MemoryLayer, GRAPH_KA_CONTENT_SCOPE_VERSION, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, computeContextGraphPolicyObjectDigestV1, encodePublishRequest, DEFAULT_GENESIS_ID, getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, Logger, createOperationContext, type AuthorAttestationTypedData, type DKGNodeConfig, type EvmAddressV1, type OperationContext, type AssertionDescriptor, type AssertionEvent, type AssertionState, pickNetworkTunables, ENTITY_PRED_ALT, LegacyKnowledgeAssetReadOnlyError, isAllocatableKaAuthorV1 } from '@origintrail-official/dkg-core';
-import { GraphManager, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  DKGNode,
+  TypedEventBus,
+  PROTOCOL_STORAGE_ACK,
+  contextGraphPublishTopic,
+  contextGraphDataGraphUri,
+  contextGraphMetaUri,
+  assertionLifecycleUri,
+  contextGraphAssertionUri,
+  MemoryLayer,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+  computeContextGraphPolicyObjectDigestV1,
+  encodePublishRequest,
+  DEFAULT_GENESIS_ID,
+  getGenesisQuads,
+  computeNetworkId,
+  SYSTEM_CONTEXT_GRAPHS,
+  DKG_ONTOLOGY,
+  Logger,
+  createOperationContext,
+  type AuthorAttestationTypedData,
+  type DKGNodeConfig,
+  type EvmAddressV1,
+  type OperationContext,
+  type AssertionDescriptor,
+  type AssertionEvent,
+  type AssertionState,
+  pickNetworkTunables,
+  ENTITY_PRED_ALT,
+  LegacyKnowledgeAssetReadOnlyError,
+  isAllocatableKaAuthorV1,
+} from '@origintrail-official/dkg-core';
+import {
+  GraphManager,
+  createTripleStore,
+  deleteByPatternWithoutCount,
+  type TripleStore,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
-import { EVMChainAdapter, NoChainAdapter, isContextGraphChainScanPartialError, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions } from '@origintrail-official/dkg-chain';
-import { DKGPublisher, ACKCollector, TripleStoreAsyncPromoteQueue, type AsyncPromoteQueue, type AsyncPromoteQueueConfig, type PromoteTerminalJobClearer, type TerminalJobClearOutcome, type PromoteJob, type PromoteListFilter, wrapAsRpcPreconditionIfApplicable, resolveStorageAckTiming, selectACKCandidatePeersWithDiagnostics, type PublishResult, deriveStatus, type KaStatus, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED, KA_ID_PRED, RESERVED_UAL_PRED, type V10CoreNodeACK, type V10ACKProviderParams, type ACKCollectorDeps, type ACKTransportFactory, type WorkspacePublicSnapshotStore, DEFAULT_REQUIRED_ACKS } from '@origintrail-official/dkg-publisher';
+import {
+  EVMChainAdapter,
+  NoChainAdapter,
+  isContextGraphChainScanPartialError,
+  type ChainAdapter,
+  type ContextGraphOnChain,
+  type ContextGraphChainScanOptions,
+} from '@origintrail-official/dkg-chain';
+import {
+  DKGPublisher,
+  ACKCollector,
+  TripleStoreAsyncPromoteQueue,
+  type AsyncPromoteQueue,
+  type AsyncPromoteQueueConfig,
+  type PromoteTerminalJobClearer,
+  type TerminalJobClearOutcome,
+  type PromoteJob,
+  type PromoteListFilter,
+  wrapAsRpcPreconditionIfApplicable,
+  resolveStorageAckTiming,
+  selectACKCandidatePeersWithDiagnostics,
+  type PublishResult,
+  deriveStatus,
+  type KaStatus,
+  WM_CURRENT_ASSERTION_PRED,
+  SWM_CURRENT_ASSERTION_PRED,
+  VM_CURRENT_ASSERTION_PRED,
+  KA_ID_PRED,
+  RESERVED_UAL_PRED,
+  type V10CoreNodeACK,
+  type V10ACKProviderParams,
+  type ACKCollectorDeps,
+  type ACKTransportFactory,
+  type WorkspacePublicSnapshotStore,
+  DEFAULT_REQUIRED_ACKS,
+} from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet } from './agent-wallet.js';
 
-import { RandomSamplingShutdownTimeoutError, stopRandomSamplingHandleWithin, type RandomSamplingStatus } from './random-sampling-bind.js';
+import {
+  RandomSamplingShutdownTimeoutError,
+  stopRandomSamplingHandleWithin,
+  type RandomSamplingStatus,
+} from './random-sampling-bind.js';
 
 import { type SloProtocolStats } from './p2p/messenger.js';
 
@@ -37,8 +114,61 @@ type JoinApprovalRetryEntry = {
 import { stripLiteral, jsonLdToQuads, type JsonLdContent } from './dkg-agent-utils.js';
 
 import * as diagnostics from './dkg-agent-diagnostics.js';
-import { ContextGraphNotFoundError, InvalidContentError, type PreSignedAuthorAttestation, type ACKSignerResolution, type CclPublishedResultEntry, type CclPublishedEvaluationRecord, type PublishOpts, type PublishAsyncOpts, type PublishAsyncQuadEnvelope, type PublishAsyncContent, type PeerHealth, type PeerConnectionSnapshot, type PeerDiagnostics, type ChatSendResult, type ContextGraphSub, type ContextGraphSyncMode, type ContextGraphDiscoveryMetadata, type ContextGraphDiscoveryOptions, type ContextGraphSubscriptionRecord, type ContextGraphSubscriptionStore, type SelectedVmReconcileCursorStore, type SelectedVmReconcileCursorRecord, type ContextGraphWritePreflightProbe, type ContextGraphMemberPrincipalType, type ContextGraphMemberStatus, type ContextGraphMembershipRecord, type ContextGraphMembershipStore, type ContextGraphJoinPolicyMode, type ContextGraphJoinPolicyRecord, type ContextGraphJoinPolicyAuditEventType, type ContextGraphJoinPolicyAuditEvent, type ContextGraphJoinPolicyRateReservation, type ContextGraphJoinPolicyStore, type DurableSyncDiagnostics, type SharedMemorySyncDiagnostics, type CatchupSyncDiagnostics, type DKGAgentConfig, type Rfc64CatalogAccessPolicyAuthorityConfigV1, type Rfc64CatalogBootstrapConfigV1, type Rfc64CatalogBootstrapPolicyV1, type Rfc64PublicCatalogBootstrapConfigV1, type DKGAgentACKTransportOptions, type ImportedArtifactByteStore, type ResolvedDKGAgentConfig } from './dkg-agent-types.js';
-import { normalizeAdapterPublisherAddress, adapterAdvertisesPublisherSigner, privateKeyAddress, inferAdapterPublisherAddress, defaultLargeLiteralStorage, createPublicSnapshotStore, applyDefaultLargeLiteralStorage } from './dkg-agent-helpers.js';
+import {
+  ContextGraphNotFoundError,
+  InvalidContentError,
+  type PreSignedAuthorAttestation,
+  type ACKSignerResolution,
+  type CclPublishedResultEntry,
+  type CclPublishedEvaluationRecord,
+  type PublishOpts,
+  type PublishAsyncOpts,
+  type PublishAsyncQuadEnvelope,
+  type PublishAsyncContent,
+  type PeerHealth,
+  type PeerConnectionSnapshot,
+  type PeerDiagnostics,
+  type ChatSendResult,
+  type ContextGraphSub,
+  type ContextGraphSyncMode,
+  type ContextGraphDiscoveryMetadata,
+  type ContextGraphDiscoveryOptions,
+  type ContextGraphSubscriptionRecord,
+  type ContextGraphSubscriptionStore,
+  type SelectedVmReconcileCursorStore,
+  type SelectedVmReconcileCursorRecord,
+  type ContextGraphWritePreflightProbe,
+  type ContextGraphMemberPrincipalType,
+  type ContextGraphMemberStatus,
+  type ContextGraphMembershipRecord,
+  type ContextGraphMembershipStore,
+  type ContextGraphJoinPolicyMode,
+  type ContextGraphJoinPolicyRecord,
+  type ContextGraphJoinPolicyAuditEventType,
+  type ContextGraphJoinPolicyAuditEvent,
+  type ContextGraphJoinPolicyRateReservation,
+  type ContextGraphJoinPolicyStore,
+  type DurableSyncDiagnostics,
+  type SharedMemorySyncDiagnostics,
+  type CatchupSyncDiagnostics,
+  type DKGAgentConfig,
+  type Rfc64CatalogAccessPolicyAuthorityConfigV1,
+  type Rfc64CatalogBootstrapConfigV1,
+  type Rfc64CatalogBootstrapPolicyV1,
+  type Rfc64PublicCatalogBootstrapConfigV1,
+  type DKGAgentACKTransportOptions,
+  type ImportedArtifactByteStore,
+  type ResolvedDKGAgentConfig,
+} from './dkg-agent-types.js';
+import {
+  normalizeAdapterPublisherAddress,
+  adapterAdvertisesPublisherSigner,
+  privateKeyAddress,
+  inferAdapterPublisherAddress,
+  defaultLargeLiteralStorage,
+  createPublicSnapshotStore,
+  applyDefaultLargeLiteralStorage,
+} from './dkg-agent-helpers.js';
 import { resolveSyncReconcilerTiming } from './sync/reconciler-timing.js';
 
 import { DKGAgentBase, createListContextGraphsCacheInvalidatingStore } from './dkg-agent-base.js';
