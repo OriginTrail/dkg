@@ -8,11 +8,13 @@ afterAll(async () => { await endpoint.close(); });
 
 // The HTTP fixture executes RDF operations in Oxigraph. This is an adapter
 // protocol test; native Blazegraph conformance lives in test-systems/.
-it.each(['embedded', 'sparql-http', 'blazegraph-http'] as const)('%s preserves real stored state across duplicate insert and scoped deletion', async (backend) => {
-  const store: TripleStore = backend === 'embedded' ? new OxigraphStore()
-    : backend === 'sparql-http' ? new SparqlHttpStore({ queryEndpoint: endpoint.queryEndpoint, updateEndpoint: endpoint.updateEndpoint })
-      : new BlazegraphStore(endpoint.queryEndpoint);
-  const graph = `urn:parity:${backend}`;
+it.each<{ name: string; createStore: () => TripleStore }>([
+  { name: 'embedded', createStore: () => new OxigraphStore() },
+  { name: 'sparql-http', createStore: () => new SparqlHttpStore({ queryEndpoint: endpoint.queryEndpoint, updateEndpoint: endpoint.updateEndpoint }) },
+  { name: 'blazegraph-http', createStore: () => new BlazegraphStore(endpoint.queryEndpoint) },
+])('$name preserves real stored state across duplicate insert and scoped deletion', async ({ name, createStore }) => {
+  const store = createStore();
+  const graph = `urn:parity:${name}`;
   const other = `${graph}:private`;
   const quads = [
     { graph, subject: 'urn:one', predicate: 'urn:p', object: '"one"' },
