@@ -3,11 +3,20 @@ type PublisherApi = typeof import('../../src/index.js');
 type AssertTrue<Value extends true> = Value;
 type AssertFalse<Value extends false> = Value;
 
-type ReplaySafeGuardIsPublic = AssertTrue<
+type PromoteFailureDispositionIsPublic = AssertTrue<
+  'getPromoteFailureDisposition' extends keyof PublisherApi ? true : false
+>;
+type ParallelReplaySafeGuardStaysInternal = AssertFalse<
   'isPromoteReplaySafeError' extends keyof PublisherApi ? true : false
 >;
-type ReplaySafeDiagnosticHelperIsPublic = AssertTrue<
+type ParallelReplaySafeDiagnosticStaysInternal = AssertFalse<
   'getPromoteReplaySafeErrorDiagnostic' extends keyof PublisherApi ? true : false
+>;
+type ParallelRetryableGuardStaysInternal = AssertFalse<
+  'isPromoteRetryableFailure' extends keyof PublisherApi ? true : false
+>;
+type RetryableMarkerCodeStaysInternal = AssertFalse<
+  'PROMOTE_RETRYABLE_FAILURE_CODE' extends keyof PublisherApi ? true : false
 >;
 type ReplaySafeUnwrapperStaysAbsent = AssertFalse<
   'unwrapPromoteReplaySafeError' extends keyof PublisherApi ? true : false
@@ -29,8 +38,11 @@ type LegacyWorkspaceResolutionSubpathRemainsAvailable =
   typeof import('@origintrail-official/dkg-publisher/dist/workspace-resolution.js');
 
 export type {
-  ReplaySafeGuardIsPublic,
-  ReplaySafeDiagnosticHelperIsPublic,
+  PromoteFailureDispositionIsPublic,
+  ParallelReplaySafeGuardStaysInternal,
+  ParallelReplaySafeDiagnosticStaysInternal,
+  ParallelRetryableGuardStaysInternal,
+  RetryableMarkerCodeStaysInternal,
   ReplaySafeUnwrapperStaysAbsent,
   ReplaySafeCertifierStaysInternal,
   ReplaySafeConstructorStaysInternal,

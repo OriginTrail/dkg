@@ -138,10 +138,10 @@ import {
   type ActivePublicContextGraphChainProof,
 } from './active-public-context-graph-chain-proof.js';
 import {
-  ContextGraphAuthorityUnavailableError,
-  type ContextGraphAuthorityUnavailableReason,
-} from './context-graph-authority-unavailable-error.js';
-import type { RegisteredContextGraphAuthority } from './dkg-agent-cg-resolve.js';
+  createContextGraphAuthorityError,
+  resolveContextGraphAgentGateAuthorityDecision,
+  type ContextGraphAgentGateAuthority,
+} from './context-graph-agent-gate-authority.js';
 import type { LiveOnChainAccessPolicyState } from './context-graph-access-policy-state.js';
 
 import { ProfileManager } from './profile-manager.js';
@@ -552,49 +552,6 @@ async function evaluateContextGraphSlotBinding(
   return { kind: 'mismatch' };
 }
 
-type RegisteredAuthorityUnavailable = Extract<
-  RegisteredContextGraphAuthority,
-  { kind: 'unavailable' }
->;
-type RegisteredAuthorityUnavailableReason = RegisteredAuthorityUnavailable['reason'];
-
-export type ContextGraphAgentGateAuthority =
-  | { kind: 'ungated' }
-  | { kind: 'available'; agentAddresses: string[] }
-  | {
-      kind: 'unavailable';
-      reason: ContextGraphAuthorityUnavailableReason;
-      detail?: string;
-      retryable: true;
-    }
-  | {
-      kind: 'unavailable';
-      reason: Exclude<
-        RegisteredAuthorityUnavailableReason,
-        ContextGraphAuthorityUnavailableReason
-      >;
-      detail?: string;
-      retryable: false;
-    };
-
-const RETRYABLE_REGISTERED_AUTHORITY_REASONS = {
-  'chain-name-binding-unavailable': true,
-  'local-chain-binding-unavailable': true,
-  'local-existence-unavailable': true,
-  'chain-access-policy-unavailable': true,
-  'chain-access-policy-timeout': true,
-  'chain-access-policy-unknown': false,
-  'chain-participant-authority-unsupported': false,
-  'chain-participant-authority-unavailable': true,
-  'chain-participant-authority-invalid': false,
-} as const satisfies Record<RegisteredAuthorityUnavailableReason, boolean>;
-
-function isRetryableRegisteredAuthorityReason(
-  reason: RegisteredAuthorityUnavailableReason,
-): reason is Extract<RegisteredAuthorityUnavailableReason, ContextGraphAuthorityUnavailableReason> {
-  return RETRYABLE_REGISTERED_AUTHORITY_REASONS[reason];
-}
-
 export class WorkspaceCryptoMethods extends DKGAgentBase {
   getWorkspaceGossipSigningAgent(this: DKGAgent): (AgentKeyRecord & { privateKey: string }) | null {
     const defaultAddress = this.defaultAgentAddress?.toLowerCase();
@@ -652,99 +609,18 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<ContextGraphAgentGateAuthority> {
-    // Registered authority outranks every local projection. Preserve its
-    // availability explicitly so an authoritative empty roster cannot be
-    // mistaken for a transient read outage by signing/promotion callers.
-    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(
+    return resolveContextGraphAgentGateAuthorityDecision({
       contextGraphId,
-      { signal: options.signal },
-    );
-    if (registeredAuthority.kind === 'private') {
-      return { kind: 'available', agentAddresses: registeredAuthority.participantAgents };
-    }
-    if (registeredAuthority.kind === 'unavailable') {
-      const detail = registeredAuthority.detail === undefined
-        ? {}
-        : { detail: registeredAuthority.detail };
-      if (isRetryableRegisteredAuthorityReason(registeredAuthority.reason)) {
-        return {
-          kind: 'unavailable',
-          reason: registeredAuthority.reason,
-          ...detail,
-          retryable: true,
-        };
-      }
-      return {
-        kind: 'unavailable',
-        reason: registeredAuthority.reason,
-        ...detail,
-        retryable: false,
-      };
-    }
-
-    // A selected private RFC-64 graph may be joining a completely empty
-    // store. In that state the accepted, authority-checked roster is already
-    // available to the catalog service, while the legacy `_meta` projection
-    // below is intentionally absent until the first semantic commit. Sender
-    // Key setup arrives before that commit and must authenticate against the
-    // accepted roster; requiring the projection creates a circular cold-join
-    // dependency (no key without `_meta`, no encrypted SWM without the key).
-    //
-    // `null` means RFC-64 owns the graph but current roster authority is not
-    // available. Return an empty gate—not legacy `null`—so every caller keeps
-    // treating the graph as gated and fails closed until authority recovers.
-    const rfc64Roster = registeredAuthority.kind === 'unregistered'
-      ? this.resolveRfc64PrivateReadRosterV1(contextGraphId)
-      : undefined;
-    if (rfc64Roster !== undefined) {
-      if (rfc64Roster === null) {
-        return {
-          kind: 'unavailable',
-          reason: 'rfc64-private-read-roster-unavailable',
-          retryable: true,
-        };
-      }
-      const seen = new Set<string>();
-      const accepted: string[] = [];
-      for (const value of rfc64Roster) {
-        if (!ethers.isAddress(value)) continue;
-        const checksum = ethers.getAddress(value);
-        const key = checksum.toLowerCase();
-        if (seen.has(key)) continue;
-        seen.add(key);
-        accepted.push(checksum);
-      }
-      return { kind: 'available', agentAddresses: accepted };
-    }
-
-    const seen = new Set<string>();
-    const agents: string[] = [];
-    let sawAgentGate = false;
-    const meta = await this.getCgMeta(contextGraphId, { signal: options.signal });
-    const revoked = new Set(meta.revokedAgents.map((addr) => addr.toLowerCase()));
-    const add = (value: string | undefined) => {
-      if (!value || !ethers.isAddress(value)) return;
-      const checksum = ethers.getAddress(value);
-      const key = checksum.toLowerCase();
-      if (revoked.has(key)) return;
-      if (seen.has(key)) return;
-      seen.add(key);
-      agents.push(checksum);
-    };
-
-    const subscriptionAgents = this.subscribedContextGraphs.get(contextGraphId)?.participantAgents ?? [];
-    if (subscriptionAgents.length > 0) sawAgentGate = true;
-    for (const agentAddress of subscriptionAgents) {
-      add(agentAddress);
-    }
-
-    if (meta.allowedAgents.length > 0 || meta.participantAgents.length > 0) sawAgentGate = true;
-    for (const agent of meta.allowedAgents) add(agent);
-    for (const agent of meta.participantAgents) add(agent);
-
-    return sawAgentGate
-      ? { kind: 'available', agentAddresses: agents }
-      : { kind: 'ungated' };
+      getRegisteredAuthority: () => this.resolveRegisteredContextGraphAuthority(
+        contextGraphId,
+        { signal: options.signal },
+      ),
+      resolveRfc64PrivateRoster: () => this.resolveRfc64PrivateReadRosterV1(contextGraphId),
+      getLegacyMeta: () => this.getCgMeta(contextGraphId, { signal: options.signal }),
+      getSubscriptionAgents: () => (
+        this.subscribedContextGraphs.get(contextGraphId)?.participantAgents ?? []
+      ),
+    });
   }
 
   /** Compatibility projection for admission callers that only need fail-closed gate values. */
@@ -1423,15 +1299,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     if (registeredAuthority.kind === 'unavailable') {
       const message =
         `Registered context graph "${input.contextGraphId}" authority is unavailable (${registeredAuthority.reason})`;
-      if (isRetryableRegisteredAuthorityReason(registeredAuthority.reason)) {
-        throw new ContextGraphAuthorityUnavailableError(message, {
-          reason: registeredAuthority.reason,
-          ...(registeredAuthority.detail === undefined
-            ? {}
-            : { detail: registeredAuthority.detail }),
-        });
-      }
-      throw new Error(message);
+      throw createContextGraphAuthorityError(message, registeredAuthority);
     }
     if (registeredAuthority.participantAgents.length === 0) {
       throw new Error(
@@ -2843,13 +2711,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     if (authority.kind === 'unavailable') {
       const message =
         `Cannot gossip SWM write for context graph "${contextGraphId}": signing authority is unavailable (${authority.reason})`;
-      if (authority.retryable) {
-        throw new ContextGraphAuthorityUnavailableError(message, {
-          reason: authority.reason,
-          ...(authority.detail === undefined ? {} : { detail: authority.detail }),
-        });
-      }
-      throw new Error(message);
+      throw createContextGraphAuthorityError(message, authority);
     }
 
     const allowedAgents = authority.agentAddresses;

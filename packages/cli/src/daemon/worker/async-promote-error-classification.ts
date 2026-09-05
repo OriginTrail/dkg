@@ -6,8 +6,8 @@ import {
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
 import {
-  isPromoteReplaySafeError,
-  isPromoteRetryableFailure,
+  getPromoteFailureDisposition,
+  type PromoteFailureDisposition,
   type PromoteFailureClassification,
 } from '@origintrail-official/dkg-publisher';
 
@@ -15,6 +15,7 @@ export type ClassifiedPromoteError = {
   classification: PromoteFailureClassification;
   retryable: boolean;
   message?: string;
+  publisherDiagnostic?: PromoteFailureDisposition['diagnostic'];
 };
 
 const PROMOTE_STEP_TAG = /^\[promote:([^\]]*)\]\s*/;
@@ -82,11 +83,13 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
   // Workflow-level replay safety is a typed producer disposition. It is more
   // authoritative than diagnostic prose inherited from the wrapped cause,
   // including incidental cap-like wording.
-  if (isPromoteReplaySafeError(err)) {
-    return { classification: 'transient', retryable: true };
-  }
-  if (isPromoteRetryableFailure(err)) {
-    return { classification: 'transient', retryable: true };
+  const publisherDisposition = getPromoteFailureDisposition(err);
+  if (publisherDisposition) {
+    return {
+      classification: publisherDisposition.classification,
+      retryable: publisherDisposition.retryable,
+      publisherDiagnostic: publisherDisposition.diagnostic,
+    };
   }
 
   const raw = err instanceof Error ? err.message : String(err);

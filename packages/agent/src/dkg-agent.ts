@@ -782,6 +782,65 @@ function translateAuthorityFailureAtPromoteBoundary(error: unknown): unknown {
     : error;
 }
 
+interface PromotePreCommitOptions {
+  subGraphName?: string;
+  awaitCuratorAck?: boolean;
+  curatorAckTimeoutMs?: number;
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers?: readonly string[];
+}
+
+/**
+ * The single WM→SWM pre-commit boundary. Any producer-marked authority outage
+ * from signing, policy preparation, curator confirmation, or the publisher is
+ * translated once for the durable queue. Post-commit gossip and observers run
+ * outside this helper and therefore can never acquire a replay disposition.
+ */
+async function executePromotePreCommit(
+  agent: DKGAgent,
+  contextGraphId: string,
+  name: string,
+  promoteAgentAddress: string,
+  opts: PromotePreCommitOptions | undefined,
+) {
+  try {
+    const gossipSigner = await agent.resolveWorkspaceGossipSigningAgent(contextGraphId);
+    const confirmBeforeCommit = await agent.buildCuratorAckConfirmer(
+      contextGraphId,
+      gossipSigner,
+      { awaitCuratorAck: opts?.awaitCuratorAck, curatorAckTimeoutMs: opts?.curatorAckTimeoutMs },
+      createOperationContext('share'),
+    );
+
+    let shareAccessPolicy = opts?.accessPolicy;
+    if (shareAccessPolicy === undefined) {
+      const graphPolicy = await agent.getContextGraphOnChainPolicy(contextGraphId);
+      if (graphPolicy.accessPolicy === 1) shareAccessPolicy = 'ownerOnly';
+      else if (graphPolicy.accessPolicy === 0) shareAccessPolicy = 'public';
+      else if (await agent.readLocalAccessPolicyEnum(contextGraphId) === 1) {
+        shareAccessPolicy = 'ownerOnly';
+      }
+    }
+
+    const promotion = await agent.publisher.assertionPromote(
+      contextGraphId,
+      name,
+      promoteAgentAddress,
+      {
+        ...(opts?.subGraphName !== undefined ? { subGraphName: opts.subGraphName } : {}),
+        publisherPeerId: agent.node.peerId.toString(),
+        senderAgentAddress: gossipSigner?.agentAddress,
+        confirmBeforeCommit,
+        ...(shareAccessPolicy !== undefined ? { accessPolicy: shareAccessPolicy } : {}),
+        ...(opts?.allowedPeers !== undefined ? { allowedPeers: [...opts.allowedPeers] } : {}),
+      },
+    );
+    return { gossipSigner, ...promotion };
+  } catch (error) {
+    throw translateAuthorityFailureAtPromoteBoundary(error);
+  }
+}
+
 /**
  * High-level facade that ties together all DKG agent capabilities:
  * identity, networking, publishing, querying, discovery, and messaging.
@@ -3275,67 +3334,19 @@ export class DKGAgent extends DKGAgentBase {
           );
         }
         const sealed = true;
-        // Resolve the gossip signer up-front (mirrors `share()` /
-        // `conditionalShare()` patterns) so the publisher can wrap the
-        // promoted SWM gossip in the Sender Key encrypted envelope.
-        // Without this, private/agent-gated CGs receive plaintext
-        // gossip and the new `SharedMemoryHandler` check rejects it.
-        const gossipSigner = await agent.resolveWorkspaceGossipSigningAgent(contextGraphId)
-          .catch((error: unknown) => {
-            throw translateAuthorityFailureAtPromoteBoundary(error);
-          });
-        // Strict curator-ack gate (OT-RFC-49 curator-leader) for the WM→SWM
-        // promote path — the same confirmer as share()/conditionalShare(). When
-        // armed (private CG, gate enabled, curator remote), assertionPromote
-        // requires the curator's applied-ack BEFORE it moves WM→SWM, so an
-        // unconfirmed promote aborts (CuratorUnconfirmedError → 503) leaving WM
-        // intact instead of silently committing a write the curator never got.
-        const confirmBeforeCommit = await agent.buildCuratorAckConfirmer(
-          contextGraphId,
-          gossipSigner,
-          { awaitCuratorAck: opts?.awaitCuratorAck, curatorAckTimeoutMs: opts?.curatorAckTimeoutMs },
-          createOperationContext('share'),
-        );
-        // A private Context Graph is an access boundary even when a particular
-        // KA contains only public RDF triples. The publisher's content-only
-        // default cannot infer that boundary: zero private triples otherwise
-        // produces a `public` workspace head, which the private RFC-64 catalog
-        // lane must reject to avoid widening access. Resolve the immutable CG
-        // access policy here, at the common sync/async SHARE execution seam, so
-        // ordinary clients do not need to duplicate graph policy on every KA.
-        // Unknown policy retains the publisher's existing content-based,
-        // fail-closed-for-private-content default; an explicit per-KA envelope
-        // remains authoritative for direct callers.
-        let shareAccessPolicy = opts?.accessPolicy;
-        if (shareAccessPolicy === undefined) {
-          const graphPolicy = await agent.getContextGraphOnChainPolicy(contextGraphId);
-          if (graphPolicy.accessPolicy === 1) shareAccessPolicy = 'ownerOnly';
-          else if (graphPolicy.accessPolicy === 0) shareAccessPolicy = 'public';
-          else if (await agent.readLocalAccessPolicyEnum(contextGraphId) === 1) {
-            // A not-yet-registered local private CG has no authoritative chain
-            // answer. Its local creation intent may safely make a share more
-            // restrictive, but never use local intent to infer `public`.
-            shareAccessPolicy = 'ownerOnly';
-          }
-        }
         const {
+          gossipSigner,
           promotedCount,
           gossipPayload,
           promotedAllRoots,
           shareOperationId,
-        } = await agent.publisher.assertionPromote(
-          contextGraphId, name, promoteAgentAddress,
-          {
-            ...(opts?.subGraphName !== undefined ? { subGraphName: opts.subGraphName } : {}),
-            publisherPeerId: agent.node.peerId.toString(),
-            senderAgentAddress: gossipSigner?.agentAddress,
-            confirmBeforeCommit,
-            ...(shareAccessPolicy !== undefined ? { accessPolicy: shareAccessPolicy } : {}),
-            ...(opts?.allowedPeers !== undefined ? { allowedPeers: [...opts.allowedPeers] } : {}),
-          },
-        ).catch((error: unknown) => {
-          throw translateAuthorityFailureAtPromoteBoundary(error);
-        });
+        } = await executePromotePreCommit(
+          agent,
+          contextGraphId,
+          name,
+          promoteAgentAddress,
+          opts,
+        );
         if (gossipPayload) {
           try {
             // Preserve the immutable operation id through the fan-out seam.

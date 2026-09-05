@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import {
-  getPromoteRetryableFailureDiagnostic,
-  isPromoteRetryableFailure,
+  getPromoteFailureDisposition,
 } from '@origintrail-official/dkg-publisher';
 import { ContextGraphAuthorityUnavailableError } from
   '../src/context-graph-authority-unavailable-error.js';
@@ -60,11 +59,14 @@ describe('DKGAgent assertion promote boundary', () => {
     const failure = await agent.assertion.promote('cg-1', 'asset-1')
       .catch((error: unknown) => error);
 
-    expect(isPromoteRetryableFailure(failure)).toBe(true);
     expect(failure).toMatchObject({ cause: authorityFailure });
-    expect(getPromoteRetryableFailureDiagnostic(failure)).toEqual({
-      name: 'PromoteRetryableFailureError',
-      code: 'PROMOTE_RETRYABLE_FAILURE',
+    expect(getPromoteFailureDisposition(failure)).toEqual({
+      classification: 'transient',
+      retryable: true,
+      diagnostic: {
+        name: 'PromoteRetryableFailureError',
+        code: 'PROMOTE_RETRYABLE_FAILURE',
+      },
     });
   });
 
@@ -83,8 +85,58 @@ describe('DKGAgent assertion promote boundary', () => {
       accessPolicy: 'ownerOnly',
     }).catch((error: unknown) => error);
 
-    expect(isPromoteRetryableFailure(failure)).toBe(true);
+    expect(getPromoteFailureDisposition(failure)).toMatchObject({
+      classification: 'transient',
+      retryable: true,
+    });
     expect(failure).toMatchObject({ cause: authorityFailure });
+  });
+
+  it('translates authority outages from pre-commit policy preparation', async () => {
+    const authorityFailure = new ContextGraphAuthorityUnavailableError(
+      'policy authority is temporarily unavailable',
+      { reason: 'chain-access-policy-unavailable' },
+    );
+    const assertionPromote = vi.fn();
+    const agent = promoteBoundaryAgent();
+    agent.resolveWorkspaceGossipSigningAgent = async () => undefined;
+    agent.getContextGraphOnChainPolicy = async () => { throw authorityFailure; };
+    agent.publisher = { assertionPromote };
+
+    const failure = await agent.assertion.promote('cg-1', 'asset-1')
+      .catch((error: unknown) => error);
+
+    expect(getPromoteFailureDisposition(failure)).toMatchObject({
+      classification: 'transient',
+      retryable: true,
+    });
+    expect(failure).toMatchObject({ cause: authorityFailure });
+    expect(assertionPromote).not.toHaveBeenCalled();
+  });
+
+  it('does not attach a retry disposition to a post-commit observer failure', async () => {
+    const postCommitFailure = new ContextGraphAuthorityUnavailableError(
+      'post-commit observer authority is unavailable',
+      { reason: 'chain-access-policy-unavailable' },
+    );
+    const agent = promoteBoundaryAgent();
+    agent.resolveWorkspaceGossipSigningAgent = async () => undefined;
+    agent.publisher = {
+      assertionPromote: async () => ({
+        promotedCount: 1,
+        gossipPayload: undefined,
+        promotedAllRoots: true,
+        shareOperationId: 'share-operation-1',
+      }),
+    };
+    agent.afterDurableSwmPromotionV1 = async () => { throw postCommitFailure; };
+
+    const failure = await agent.assertion.promote('cg-1', 'asset-1', {
+      accessPolicy: 'ownerOnly',
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBe(postCommitFailure);
+    expect(getPromoteFailureDisposition(failure)).toBeUndefined();
   });
 
   it('leaves an authoritative empty signing roster terminal and unmarked', async () => {
@@ -96,6 +148,6 @@ describe('DKGAgent assertion promote boundary', () => {
       .catch((error: unknown) => error);
 
     expect(failure).toBe(emptyRoster);
-    expect(isPromoteRetryableFailure(failure)).toBe(false);
+    expect(getPromoteFailureDisposition(failure)).toBeUndefined();
   });
 });

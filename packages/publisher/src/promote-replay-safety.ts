@@ -32,6 +32,16 @@ export interface PromoteRetryableFailureDiagnostic {
   readonly code: typeof PROMOTE_RETRYABLE_FAILURE_CODE;
 }
 
+export type PromoteFailureDiagnostic =
+  | PromoteReplaySafeErrorDiagnostic
+  | PromoteRetryableFailureDiagnostic;
+
+export interface PromoteFailureDisposition {
+  readonly classification: 'transient';
+  readonly retryable: true;
+  readonly diagnostic: PromoteFailureDiagnostic;
+}
+
 class PromoteRetryableFailureError extends Error implements PromoteRetryableFailureMarker {
   readonly code = PROMOTE_RETRYABLE_FAILURE_CODE;
 
@@ -92,6 +102,32 @@ export function getPromoteReplaySafeErrorDiagnostic(
 ): PromoteReplaySafeErrorDiagnostic | undefined {
   return isPromoteReplaySafeError(error)
     ? { name: 'PromoteReplaySafeError', code: PROMOTE_REPLAY_SAFE_ERROR_CODE }
+    : undefined;
+}
+
+/**
+ * The single public consumer contract for producer-certified promote
+ * failures. Internal marker families stay distinct, while queue disposition
+ * and privacy-bounded diagnostics are read together exactly once.
+ */
+export function getPromoteFailureDisposition(
+  error: unknown,
+): PromoteFailureDisposition | undefined {
+  const prerequisiteDiagnostic = getPromoteRetryableFailureDiagnostic(error);
+  if (prerequisiteDiagnostic) {
+    return {
+      classification: 'transient',
+      retryable: true,
+      diagnostic: prerequisiteDiagnostic,
+    };
+  }
+  const replaySafeDiagnostic = getPromoteReplaySafeErrorDiagnostic(error);
+  return replaySafeDiagnostic
+    ? {
+        classification: 'transient',
+        retryable: true,
+        diagnostic: replaySafeDiagnostic,
+      }
     : undefined;
 }
 

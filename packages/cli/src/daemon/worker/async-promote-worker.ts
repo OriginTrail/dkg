@@ -40,8 +40,6 @@ import {
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
 import {
-  getPromoteReplaySafeErrorDiagnostic,
-  getPromoteRetryableFailureDiagnostic,
   PromoteJobLeaseError,
   type AsyncPromoteQueue,
   type PromoteAttemptError,
@@ -195,8 +193,6 @@ function logPromoteAttemptFailure(input: {
   log: PromoteWorkerLogger;
 }): void {
   try {
-    const publisherDiagnostic = getPromoteRetryableFailureDiagnostic(input.err)
-      ?? getPromoteReplaySafeErrorDiagnostic(input.err);
     bestEffortLog(
       input.log,
       `[async-promote-worker] ${JSON.stringify({
@@ -210,10 +206,10 @@ function logPromoteAttemptFailure(input: {
         stage: diagnosticPromoteStage(input.message),
         classification: input.classified.classification,
         retryable: input.classified.retryable,
-        errorName: publisherDiagnostic?.name
+        errorName: input.classified.publisherDiagnostic?.name
           ?? safePromoteErrorIdentity(input.err, 'name')
           ?? 'unknown',
-        errorCode: publisherDiagnostic?.code
+        errorCode: input.classified.publisherDiagnostic?.code
           ?? safePromoteErrorIdentity(input.err, 'code')
           ?? 'unknown',
       })}`,

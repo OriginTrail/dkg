@@ -27,7 +27,7 @@ import {
   DKGPublisher,
   type DurableRootPromotionAtomicCompanion,
   type DurableRootPromotionIdentity,
-  isPromoteReplaySafeError,
+  getPromoteFailureDisposition,
   assertionScopedGraphUri,
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
@@ -569,7 +569,8 @@ describe('Working Memory Assertion Lifecycle', () => {
       }
       expect(rejection).toBe(failure);
       expect(isStoreOperationTimeoutError(rejection)).toBe(true);
-      expect(isPromoteReplaySafeError(rejection)).toBe(true);
+      expect(getPromoteFailureDisposition(rejection)?.diagnostic.name)
+        .toBe('PromoteReplaySafeError');
       expect(injected).toBe(true);
       await expectExactSwmGraph(finalized.sharedGraphUri);
       expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toHaveLength(
@@ -623,7 +624,8 @@ describe('Working Memory Assertion Lifecycle', () => {
       }
       expect(rejection).toBe(failure);
       expect(isStoreOperationTimeoutError(rejection)).toBe(true);
-      expect(isPromoteReplaySafeError(rejection)).toBe(true);
+      expect(getPromoteFailureDisposition(rejection)?.diagnostic.name)
+        .toBe('PromoteReplaySafeError');
       expect(injected).toBe(true);
       expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
       await expect(store.query(
@@ -1229,7 +1231,8 @@ describe('Working Memory Assertion Lifecycle', () => {
       replaceSpy.mockRestore();
     }
     expect(rejection).toBe(failure);
-    expect(isPromoteReplaySafeError(rejection)).toBe(true);
+    expect(getPromoteFailureDisposition(rejection)?.diagnostic.name)
+      .toBe('PromoteReplaySafeError');
     expect(injected).toBe(true);
     expect(settle).toHaveBeenCalledOnce();
     expect(settle).toHaveBeenCalledWith(undefined);

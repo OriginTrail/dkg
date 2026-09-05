@@ -21,7 +21,6 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   createPromoteRetryableFailure,
-  PROMOTE_RETRYABLE_FAILURE_CODE,
   TripleStoreAsyncPromoteQueue,
   type AsyncPromoteQueue,
   type PromoteRequest,
@@ -40,6 +39,8 @@ import {
   type AsyncPromoteWorkerFixture,
 } from './_helpers/async-promote-worker-fixture.js';
 import { createClaimFailureBackoff } from '../src/daemon/worker/claim-failure-backoff.js';
+
+const PROMOTE_RETRYABLE_FAILURE_CODE = 'PROMOTE_RETRYABLE_FAILURE';
 
 describe('claim failure backoff', () => {
   it('grows from 250ms to the 30s cap with injected time and randomness', () => {
@@ -188,13 +189,27 @@ describe('classifyPromoteError', () => {
   it('retries a publisher-owned generic promote failure', () => {
     expect(classifyPromoteError(createPromoteRetryableFailure(
       new Error('domain failure hidden behind the promote boundary'),
-    ))).toEqual({ classification: 'transient', retryable: true });
+    ))).toEqual({
+      classification: 'transient',
+      retryable: true,
+      publisherDiagnostic: {
+        name: 'PromoteRetryableFailureError',
+        code: PROMOTE_RETRYABLE_FAILURE_CODE,
+      },
+    });
   });
 
   it('recognizes a serialized generic retry marker without relying on class identity', () => {
     expect(classifyPromoteError({
       code: PROMOTE_RETRYABLE_FAILURE_CODE,
-    })).toEqual({ classification: 'transient', retryable: true });
+    })).toEqual({
+      classification: 'transient',
+      retryable: true,
+      publisherDiagnostic: {
+        name: 'PromoteRetryableFailureError',
+        code: PROMOTE_RETRYABLE_FAILURE_CODE,
+      },
+    });
     expect(classifyPromoteError({
       code: `${PROMOTE_RETRYABLE_FAILURE_CODE}_LOOKALIKE`,
     })).toEqual({ classification: 'fatal', retryable: false });
@@ -256,7 +271,14 @@ describe('classifyPromoteError', () => {
     });
     expect(classifyPromoteError(
       classifyExactSwmGraphReplaceFailure(rawReplaceFailure),
-    )).toEqual({ classification: 'transient', retryable: true });
+    )).toEqual({
+      classification: 'transient',
+      retryable: true,
+      publisherDiagnostic: {
+        name: 'PromoteReplaySafeError',
+        code: 'PROMOTE_REPLAY_SAFE_FAILURE',
+      },
+    });
     expect(classifyPromoteError(classifyExactSwmGraphReplaceFailure(
       new StoreOperationTimeoutError({
         backend: 'oxigraph-server',
@@ -264,7 +286,14 @@ describe('classifyPromoteError', () => {
         outcome: 'indeterminate',
         message: 'payload too large while reading the indeterminate timeout response',
       }),
-    ))).toEqual({ classification: 'transient', retryable: true });
+    ))).toEqual({
+      classification: 'transient',
+      retryable: true,
+      publisherDiagnostic: {
+        name: 'PromoteReplaySafeError',
+        code: 'PROMOTE_REPLAY_SAFE_FAILURE',
+      },
+    });
     expect(classifyPromoteError({
       code: 'PROMOTE_REPLAY_SAFE_FAILURE',
       stage: 'atomic-exact-swm-graph-replacement',

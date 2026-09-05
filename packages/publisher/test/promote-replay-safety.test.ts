@@ -7,8 +7,7 @@ import {
 import {
   classifyExactSwmGraphReplaceFailure,
   createPromoteRetryableFailure,
-  getPromoteReplaySafeErrorDiagnostic,
-  getPromoteRetryableFailureDiagnostic,
+  getPromoteFailureDisposition,
   isPromoteReplaySafeError,
   isPromoteRetryableFailure,
 } from '../src/promote-replay-safety.js';
@@ -23,9 +22,13 @@ describe('promote replay safety', () => {
       code: 'PROMOTE_RETRYABLE_FAILURE',
       cause: expect.any(Error),
     });
-    expect(getPromoteRetryableFailureDiagnostic(failure)).toEqual({
-      name: 'PromoteRetryableFailureError',
-      code: 'PROMOTE_RETRYABLE_FAILURE',
+    expect(getPromoteFailureDisposition(failure)).toEqual({
+      classification: 'transient',
+      retryable: true,
+      diagnostic: {
+        name: 'PromoteRetryableFailureError',
+        code: 'PROMOTE_RETRYABLE_FAILURE',
+      },
     });
 
     const serialized = JSON.parse(JSON.stringify(failure)) as unknown;
@@ -34,9 +37,13 @@ describe('promote replay safety', () => {
       code: 'PROMOTE_RETRYABLE_FAILURE',
     });
     expect(isPromoteRetryableFailure(serialized)).toBe(true);
-    expect(getPromoteRetryableFailureDiagnostic(serialized)).toEqual({
-      name: 'PromoteRetryableFailureError',
-      code: 'PROMOTE_RETRYABLE_FAILURE',
+    expect(getPromoteFailureDisposition(serialized)).toEqual({
+      classification: 'transient',
+      retryable: true,
+      diagnostic: {
+        name: 'PromoteRetryableFailureError',
+        code: 'PROMOTE_RETRYABLE_FAILURE',
+      },
     });
   });
 
@@ -61,9 +68,13 @@ describe('promote replay safety', () => {
     expect(classified).toBe(replaceFailure);
     expect(isStoreOperationTimeoutError(classified)).toBe(true);
     expect(isPromoteReplaySafeError(classified)).toBe(true);
-    expect(getPromoteReplaySafeErrorDiagnostic(classified)).toEqual({
-      name: 'PromoteReplaySafeError',
-      code: 'PROMOTE_REPLAY_SAFE_FAILURE',
+    expect(getPromoteFailureDisposition(classified)).toEqual({
+      classification: 'transient',
+      retryable: true,
+      diagnostic: {
+        name: 'PromoteReplaySafeError',
+        code: 'PROMOTE_REPLAY_SAFE_FAILURE',
+      },
     });
   });
 
@@ -81,7 +92,7 @@ describe('promote replay safety', () => {
     const classified = classifyExactSwmGraphReplaceFailure(failure);
     expect(classified).toBe(failure);
     expect(isPromoteReplaySafeError(classified)).toBe(false);
-    expect(getPromoteReplaySafeErrorDiagnostic(classified)).toBeUndefined();
+    expect(getPromoteFailureDisposition(classified)).toBeUndefined();
   });
 
   it('rejects a structurally identical marker that did not originate at the producer boundary', () => {
@@ -96,7 +107,7 @@ describe('promote replay safety', () => {
 
     expect(isStoreOperationTimeoutError(forgedShape)).toBe(true);
     expect(isPromoteReplaySafeError(forgedShape)).toBe(false);
-    expect(getPromoteReplaySafeErrorDiagnostic(forgedShape)).toBeUndefined();
+    expect(getPromoteFailureDisposition(forgedShape)).toBeUndefined();
   });
 
   it.each([

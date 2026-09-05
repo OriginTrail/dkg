@@ -290,7 +290,7 @@ export type {
   ContextGraphReadAuthoritySource,
 } from './context-graph-read-authority.js';
 export type { RegisteredContextGraphAuthority } from './dkg-agent-cg-resolve.js';
-export type { ContextGraphAgentGateAuthority } from './dkg-agent-crypto.js';
+export type { ContextGraphAgentGateAuthority } from './context-graph-agent-gate-authority.js';
 export {
   CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
   CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME,
