@@ -3,21 +3,14 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { planWeightedShards } from './plan-vitest-shard.mjs';
 import { loadAgentTimings } from './load-agent-timings.mjs';
+import { AGENT_SHARD_POLICY } from './agent-shard-policy.mjs';
 
-export const AGENT_UNIT_CONFIG = 'vitest.unit.config.ts';
-export const AGENT_INTEGRATION_CONFIG = 'vitest.config.ts';
+const { lanes: LANES, descriptors: DESCRIPTORS } = AGENT_SHARD_POLICY;
+export const AGENT_UNIT_CONFIG = LANES.find((lane) => lane.inventory === 'unit').config;
+export const AGENT_INTEGRATION_CONFIG = LANES.find((lane) => lane.inventory === 'integration').config;
 const TIMINGS = loadAgentTimings(new URL('./timings/agent.json', import.meta.url));
 export const AGENT_REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
-// Each entry is one runner. Configuration, indices and reserved work all
-// derive from this policy; the final unit runner owns the evidence sidecars.
-const LANES = [
-  { config: AGENT_INTEGRATION_CONFIG, inventory: 'integration', overheadMs: [0, 0, 0, 0] },
-  { config: AGENT_UNIT_CONFIG, inventory: 'unit', overheadMs: [0, 0, 0, 0, 0, 40_000] },
-];
-const DESCRIPTORS = Object.freeze(LANES.flatMap((lane) => lane.overheadMs.map((reservedOverheadMs) => ({
-  config: lane.config, inventory: lane.inventory, reservedOverheadMs,
-}))).map((shard, index) => Object.freeze({ ...shard, index: index + 1 })));
 export const AGENT_SHARD_COUNT = DESCRIPTORS.length;
 
 export function agentShardDescriptor(index) {

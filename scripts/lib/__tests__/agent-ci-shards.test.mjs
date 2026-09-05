@@ -34,6 +34,7 @@ test('agent shards match actual Vitest discovery exactly once and separate the u
     assert.equal(shard.config, descriptor.config);
     assert.equal(shard.reservedOverheadMs, descriptor.reservedOverheadMs);
     assert.equal(shard.index, descriptor.index);
+    assert.equal(descriptor.report, `agent-${shard.index}.xml`, 'policy identities match the JUnit writer');
     const configured = spawnSync(process.execPath, [script, String(shard.index), String(AGENT_SHARD_COUNT), '--config'], { encoding: 'utf8' });
     assert.equal(configured.status, 0, configured.stderr);
     assert.equal(configured.stdout.trim(), descriptor.config);
@@ -76,6 +77,7 @@ test('agent executable rejects invalid arguments and matches workflow dispatch',
   }
   const workflow = parse(fs.readFileSync(path.join(AGENT_REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
   const job = workflow.jobs['tornado-agent'];
+  assert.deepEqual(job.strategy.matrix.shard, Array.from({ length: AGENT_SHARD_COUNT }, (_, index) => agentShardDescriptor(index + 1).index));
   const run = job.steps.find((step) => step.name?.startsWith('Agent tests')).run;
   assert.match(run, /ci-shard-agent\.mjs.*--config/);
   assert.match(run, /-- --config "\$\{SHARD_CONFIG\}" "\$\{SHARD_FILES\[@\]\}"/);

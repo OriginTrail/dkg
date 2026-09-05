@@ -6,19 +6,34 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { loadAgentTimings } from '../../ci/load-agent-timings.mjs';
+import { AGENT_SHARD_POLICY_FILE, AGENT_SHARD_POLICY, loadAgentShardPolicy } from '../../ci/agent-shard-policy.mjs';
+
+const reportCount = AGENT_SHARD_POLICY.descriptors.length;
 
 const script = fileURLToPath(new URL('../../ci/refresh-agent-timings.py', import.meta.url));
 const commit = 'a'.repeat(40);
 const suite = (index, attributes = '') => `<testsuite name="test/file-${index}.test.ts" time="0.0011" tests="1" ${attributes}><testcase name="passes"/></testsuite>`;
 const report = (body) => `<testsuites>${body}</testsuites>`;
 
-function fixture(t, { count = 10, edit = (xml) => xml, zip = false } = {}) {
+function fixture(t, { count = reportCount, edit = (xml) => xml, zip = false, policy, rename, duplicate = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agent JUnit '));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const reports = path.join(root, 'reports');
   fs.mkdirSync(reports);
   for (let index = 0; index < count; index += 1) {
-    fs.writeFileSync(path.join(reports, `${index}.xml`), edit(report(suite(index)), index));
+    const name = rename?.(index) ?? `agent-${index + 1}.xml`;
+    fs.writeFileSync(path.join(reports, name), edit(report(suite(index)), index));
+  }
+  if (duplicate) {
+    fs.mkdirSync(path.join(reports, 'duplicate'));
+    fs.writeFileSync(path.join(reports, 'duplicate', 'agent-1.xml'), report(suite(999)));
+  }
+  let policyArgs = [];
+  if (policy) {
+    const policyFile = path.join(root, 'policy.json');
+    fs.writeFileSync(policyFile, JSON.stringify(policy));
+    assert.equal(loadAgentShardPolicy(policyFile).descriptors.length, count);
+    policyArgs = ['--policy', policyFile];
   }
   if (zip) {
     const result = spawnSync('python3', ['-c',
@@ -27,7 +42,7 @@ function fixture(t, { count = 10, edit = (xml) => xml, zip = false } = {}) {
     assert.equal(result.status, 0, result.stderr);
   }
   const output = path.join(root, 'output', 'agent.json');
-  const result = spawnSync('python3', [script, reports, '--run-id', '123', '--commit', commit, '--output', output], { encoding: 'utf8' });
+  const result = spawnSync('python3', [script, reports, ...policyArgs, '--run-id', '123', '--commit', commit, '--output', output], { encoding: 'utf8' });
   return { result, output };
 }
 
@@ -42,7 +57,7 @@ for (const zip of [false, true]) {
     assert.deepEqual(raw.source, { runId: 123, commit, url: 'https://github.com/OriginTrail/dkg/actions/runs/123' });
     const normalized = loadAgentTimings(output);
     assert.equal(normalized.perFileOverheadMs, 1100);
-    assert.equal(Object.keys(normalized.bodyWeightsMs).length, 10);
+    assert.equal(Object.keys(normalized.bodyWeightsMs).length, reportCount);
     assert.ok(Object.values(normalized.bodyWeightsMs).every((value) => value === 2));
     assert.ok(!Object.hasOwn(normalized.bodyWeightsMs, 'test/skipped.test.ts'));
   });
@@ -58,8 +73,10 @@ const invalidFixtures = [
   ['negative duration', { edit: (xml) => xml.replace('0.0011', '-1') }, /invalid duration/],
   ['unsafe path', { edit: (xml) => xml.replace('test/file-', 'test/../file-') }, /unexpected agent test path/],
   ['missing suite fields', { edit: (xml) => xml.replace('tests="1"', '') }, /KeyError/],
-  ['all skipped', { edit: (xml, i) => report(suite(i, 'skipped="1"')) }, /expected all ten agent reports/],
-  ...[0, 9, 11].map((count) => [`${count} reports`, { count }, /expected all ten agent reports/]),
+  ['all skipped', { edit: (xml, i) => report(suite(i, 'skipped="1"')) }, /contain no measured tests/],
+  ...[0, reportCount - 1, reportCount + 1].map((count) => [`${count} reports`, { count }, /(?:missing|unexpected) agent report/]),
+  ['duplicate report identity', { duplicate: true }, /duplicate agent report/],
+  ['wrong report identity with matching count', { rename: (index) => index === 0 ? 'wrong.xml' : `agent-${index + 1}.xml` }, /unexpected agent report/],
 ];
 
 for (const [name, options, error] of invalidFixtures) {
@@ -70,3 +87,11 @@ for (const [name, options, error] of invalidFixtures) {
     assert.ok(!fs.existsSync(output));
   });
 }
+
+test('timing refresh follows an injected topology with an additional shard', (t) => {
+  const policy = JSON.parse(fs.readFileSync(AGENT_SHARD_POLICY_FILE, 'utf8'));
+  policy.lanes.find((lane) => lane.inventory === 'unit').shards.push({ report: `agent-${reportCount + 1}.xml`, reservedOverheadMs: 0 });
+  const { result, output } = fixture(t, { count: reportCount + 1, policy });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(Object.keys(loadAgentTimings(output).bodyWeightsMs).length, reportCount + 1);
+});
