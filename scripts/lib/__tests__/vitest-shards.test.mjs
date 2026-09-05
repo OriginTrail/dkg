@@ -40,7 +40,8 @@ function independentlyDiscover(packageDirectory, excludeArchive) {
 
   walk(testRoot);
   return files
-    .filter((file) => !excludeArchive || !file.startsWith('test/archive/'))
+    .filter((file) => !excludeArchive
+      || (!file.startsWith('test/archive/') && file !== 'test/evm-adapter.test.ts'))
     .sort(compareAscii);
 }
 
@@ -83,11 +84,12 @@ for (const packageName of ['cli', 'chain']) {
   });
 }
 
-test('chain discovery excludes only the archived directory', () => {
+test('chain discovery excludes archived suites and the separately owned EVM integration test', () => {
   const shards = planPackageShards('chain', REPO_ROOT);
   const files = shards.flatMap((shard) => shard.files);
   assert.ok(files.includes('test/v8-v9-archive.test.ts'));
   assert.ok(files.every((file) => !file.startsWith('test/archive/')));
+  assert.ok(!files.includes('test/evm-adapter.test.ts'));
 });
 
 test('unknown files are conservatively weighted and still assigned exactly once', () => {

@@ -293,6 +293,7 @@ export const PACKAGE_SPECS = Object.freeze({
     packageDirectory: 'packages/chain',
     shardCount: 3,
     excludedPrefixes: Object.freeze(['test/archive/']),
+    excludedFiles: Object.freeze(['test/evm-adapter.test.ts']),
     bodyWeightsMs: CHAIN_BODY_MS,
   }),
 });
@@ -333,7 +334,8 @@ export function discoverEligibleTestFiles(packageName, repoRoot) {
   walk(testRoot, packageRoot, files);
 
   return files
-    .filter((file) => !spec.excludedPrefixes.some((prefix) => file.startsWith(prefix)))
+    .filter((file) => !spec.excludedPrefixes.some((prefix) => file.startsWith(prefix))
+      && !(spec.excludedFiles ?? []).includes(file))
     .sort(compareAscii);
 }
 
