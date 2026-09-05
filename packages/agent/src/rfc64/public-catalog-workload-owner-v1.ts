@@ -8,27 +8,40 @@ import type {
   Rfc64PublicCatalogRuntimeOwnerV1,
 } from './catalog-runtime-v1.js';
 
-export interface Rfc64PublicCatalogWorkloadOwnerOptionsV1 {
+/** Narrow transport lifecycle required by the workload owner. */
+export interface Rfc64PublicCatalogLifecyclePortV1 {
+  start(): void;
+  whenReceiverIdle(): Promise<void>;
+  closeReceiverAdmissionAndDrain(): Promise<void>;
+  close(): Promise<void>;
+}
+
+export interface Rfc64PublicCatalogWorkloadOwnerOptionsV1<
+  Service extends Rfc64PublicCatalogLifecyclePortV1 = Rfc64PublicCatalogServiceV1,
+> {
   readonly createService: (
     ctx: OperationContext,
-  ) => Rfc64PublicCatalogServiceV1 | null;
+  ) => Service | null;
   readonly authorityRefresh: Rfc64CatalogWorkloadOwnerV1;
   readonly onServiceStarted: (ctx: OperationContext) => void;
 }
 
 /** Single lifecycle owner for public-catalog transport and authority refresh. */
-export class Rfc64PublicCatalogWorkloadOwnerV1
+export class Rfc64PublicCatalogWorkloadOwnerV1<
+  Service extends Rfc64PublicCatalogLifecyclePortV1 = Rfc64PublicCatalogServiceV1,
+>
 implements Rfc64PublicCatalogRuntimeOwnerV1 {
-  readonly #options: Rfc64PublicCatalogWorkloadOwnerOptionsV1;
-  #service: Rfc64PublicCatalogServiceV1 | null = null;
+  readonly #options: Rfc64PublicCatalogWorkloadOwnerOptionsV1<Service>;
+  #service: Service | null = null;
+  #authorityStartAttempted = false;
   #started = false;
   #close: Promise<void> | null = null;
 
-  constructor(options: Rfc64PublicCatalogWorkloadOwnerOptionsV1) {
+  constructor(options: Rfc64PublicCatalogWorkloadOwnerOptionsV1<Service>) {
     this.#options = options;
   }
 
-  get service(): Rfc64PublicCatalogServiceV1 | undefined {
+  get service(): Service | undefined {
     return this.#service ?? undefined;
   }
 
@@ -37,7 +50,7 @@ implements Rfc64PublicCatalogRuntimeOwnerV1 {
       throw new Error('RFC-64 public catalog owner cannot start while close is in progress');
     }
     if (this.#started) return;
-    let service: Rfc64PublicCatalogServiceV1 | null = null;
+    let service: Service | null = null;
     let serviceStartAttempted = false;
     let authorityStartAttempted = false;
     try {
@@ -50,6 +63,7 @@ implements Rfc64PublicCatalogRuntimeOwnerV1 {
       service.start();
       this.#service = service;
       authorityStartAttempted = true;
+      this.#authorityStartAttempted = true;
       this.#options.authorityRefresh.start(ctx);
       this.#options.onServiceStarted(ctx);
       this.#started = true;
@@ -80,7 +94,7 @@ implements Rfc64PublicCatalogRuntimeOwnerV1 {
     if (this.#close !== null) return this.#close;
     const service = this.#service;
     this.#service = null;
-    const closing = this.#retireAcquiredLifecycle(service, true);
+    const closing = this.#retireAcquiredLifecycle(service, this.#authorityStartAttempted);
     this.#armClose(closing);
     return closing;
   }
@@ -90,6 +104,7 @@ implements Rfc64PublicCatalogRuntimeOwnerV1 {
     void closing.then(() => {
       if (this.#close !== closing) return;
       this.#started = false;
+      this.#authorityStartAttempted = false;
       this.#close = null;
     }, () => {
       // A failed owner did not prove physical retirement. Preserve the
@@ -98,7 +113,7 @@ implements Rfc64PublicCatalogRuntimeOwnerV1 {
   }
 
   async #retireAcquiredLifecycle(
-    service: Rfc64PublicCatalogServiceV1 | null,
+    service: Service | null,
     authorityStartAttempted: boolean,
   ): Promise<void> {
     const failures: unknown[] = [];

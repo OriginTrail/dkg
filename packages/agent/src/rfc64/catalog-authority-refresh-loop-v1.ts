@@ -28,6 +28,7 @@ const rfc64CatalogAuthorityRefreshSchedulerV1:
 
 export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
   readonly readActiveContextGraphIds: () => readonly string[];
+  readonly onActiveContextGraphIdsReadFailure: (error: unknown) => void;
   readonly refreshContextGraph: (
     contextGraphId: string,
     signal: AbortSignal,
@@ -162,7 +163,8 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
     let activeContextGraphIds: readonly string[];
     try {
       activeContextGraphIds = this.options.readActiveContextGraphIds();
-    } catch {
+    } catch (error) {
+      this.options.onActiveContextGraphIdsReadFailure(error);
       return;
     }
     for (const contextGraphId of new Set(activeContextGraphIds)) {

@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { createOperationContext } from '@origintrail-official/dkg-core';
-import type { Rfc64PublicCatalogServiceV1 } from
-  '../src/rfc64/public-catalog-service-v1.js';
-import { Rfc64PublicCatalogWorkloadOwnerV1 } from
+import {
+  type Rfc64PublicCatalogLifecyclePortV1,
+  Rfc64PublicCatalogWorkloadOwnerV1,
+} from
   '../src/rfc64/public-catalog-workload-owner-v1.js';
 
 function fakeService(overrides: Partial<Readonly<{
@@ -11,14 +12,14 @@ function fakeService(overrides: Partial<Readonly<{
   whenReceiverIdle: () => Promise<void>;
   closeReceiverAdmissionAndDrain: () => Promise<void>;
   close: () => Promise<void>;
-}>> = {}): Rfc64PublicCatalogServiceV1 {
+}>> = {}): Rfc64PublicCatalogLifecyclePortV1 {
   return {
     start: vi.fn(),
     whenReceiverIdle: vi.fn(async () => undefined),
     closeReceiverAdmissionAndDrain: vi.fn(async () => undefined),
     close: vi.fn(async () => undefined),
     ...overrides,
-  } as unknown as Rfc64PublicCatalogServiceV1;
+  };
 }
 
 function authorityOwner(overrides: Partial<Readonly<{
@@ -52,7 +53,7 @@ describe('Rfc64PublicCatalogWorkloadOwnerV1', () => {
     expect(authorityRefresh.start).not.toHaveBeenCalled();
     expect(owner.service).toBeUndefined();
     await owner.close();
-    expect(authorityRefresh.close).toHaveBeenCalledOnce();
+    expect(authorityRefresh.close).not.toHaveBeenCalled();
 
     owner.start(ctx);
     expect(createService).toHaveBeenCalledTimes(2);

@@ -30,6 +30,38 @@ function createSchedulerHarness() {
 }
 
 describe('RFC-64 catalog authority refresh loop', () => {
+  it('reports an active-set read failure and retries on the next tick', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    const failure = new Error('catalog responsibility read failed');
+    const readFailures: unknown[] = [];
+    const attempts: string[] = [];
+    let failRead = true;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => {
+        if (failRead) {
+          failRead = false;
+          throw failure;
+        }
+        return ['cg-a'];
+      },
+      onActiveContextGraphIdsReadFailure: (error) => { readFailures.push(error); },
+      refreshContextGraph: async (contextGraphId) => { attempts.push(contextGraphId); },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    expect(readFailures).toEqual([failure]);
+    expect(attempts).toEqual([]);
+
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(readFailures).toEqual([failure]);
+    expect(attempts).toEqual(['cg-a']);
+    await loop.close();
+  });
+
   it('keeps fixed cadence, drops overlapping ticks, and clears its exact handle', async () => {
     const { scheduled, cleared, scheduler } = createSchedulerHarness();
     let releaseFirst!: () => void;
@@ -41,6 +73,7 @@ describe('RFC-64 catalog authority refresh loop', () => {
     let peak = 0;
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => ['cg-a'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
       refreshContextGraph: async () => {
         calls += 1;
         active += 1;
@@ -94,6 +127,7 @@ describe('RFC-64 catalog authority refresh loop', () => {
     const reported: Array<Readonly<{ contextGraphId: string; error: unknown }>> = [];
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => ['cg-a', 'cg-b'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
       refreshContextGraph: async (contextGraphId) => {
         attempts.push(contextGraphId);
         if (contextGraphId === 'cg-a') throw failure;
@@ -121,6 +155,7 @@ describe('RFC-64 catalog authority refresh loop', () => {
     let healthyRefreshed = new Promise<void>((resolve) => { markHealthyRefreshed = resolve; });
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => ['cg-a', 'cg-b'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
       refreshContextGraph: async (contextGraphId) => {
         if (contextGraphId === 'cg-a') {
           markStalledStarted();
@@ -169,6 +204,7 @@ describe('RFC-64 catalog authority refresh loop', () => {
     const attempts: string[] = [];
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => ['cg-a', 'cg-b', 'cg-c'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
       refreshContextGraph: async (contextGraphId) => {
         attempts.push(contextGraphId);
         if (contextGraphId === 'cg-a') {
@@ -210,6 +246,7 @@ describe('RFC-64 catalog authority refresh loop', () => {
     let activeSignal: AbortSignal | undefined;
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => ['cg-a', 'cg-b'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
       refreshContextGraph: async (contextGraphId, signal) => {
         attempts.push(contextGraphId);
         activeSignal = signal;

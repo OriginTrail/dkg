@@ -32,6 +32,10 @@ export interface Rfc64PublicCatalogRuntimeOwnerV1 extends Rfc64CatalogWorkloadOw
 
 export class Rfc64CatalogRuntimeV1 {
   readonly #options: Rfc64CatalogRuntimeOptionsV1;
+  #inventoryObserversStartAttempted = false;
+  #mutationPersistenceStartAttempted = false;
+  #publicCatalogStartAttempted = false;
+  readonly #workloadsStartAttempted = new Set<Rfc64CatalogWorkloadOwnerV1>();
   #started = false;
   #close: Promise<void> | null = null;
 
@@ -45,10 +49,16 @@ export class Rfc64CatalogRuntimeV1 {
     }
     if (this.#started) return;
     try {
+      this.#inventoryObserversStartAttempted = true;
       this.#options.inventoryObservers.open();
+      this.#mutationPersistenceStartAttempted = true;
       this.#options.mutationPersistence.open();
+      this.#publicCatalogStartAttempted = true;
       this.#options.publicCatalog.start(ctx);
-      for (const workload of this.#options.workloads) workload.start(ctx);
+      for (const workload of this.#options.workloads) {
+        this.#workloadsStartAttempted.add(workload);
+        workload.start(ctx);
+      }
       this.#started = true;
     } catch (error) {
       this.#armClose(this.#closeOwnedLifecycle());
@@ -75,6 +85,10 @@ export class Rfc64CatalogRuntimeV1 {
     void closing.then(() => {
       if (this.#close === closing) this.#close = null;
       this.#started = false;
+      this.#inventoryObserversStartAttempted = false;
+      this.#mutationPersistenceStartAttempted = false;
+      this.#publicCatalogStartAttempted = false;
+      this.#workloadsStartAttempted.clear();
     }, () => {
       // A failed owner did not prove that its resource closed. Keep the
       // rejected close promise as a permanent fence: callers may observe the
@@ -94,13 +108,21 @@ export class Rfc64CatalogRuntimeV1 {
         if (result.status === 'rejected') failures.push(result.reason);
       }
     };
-    await settle([this.#options.inventoryObservers.close]);
-    await settle([() => this.#options.publicCatalog.closeReceiverAdmission()]);
+    await settle(this.#inventoryObserversStartAttempted
+      ? [this.#options.inventoryObservers.close]
+      : []);
+    await settle(this.#publicCatalogStartAttempted
+      ? [() => this.#options.publicCatalog.closeReceiverAdmission()]
+      : []);
     await settle([
-      () => this.#options.publicCatalog.close(),
-      ...this.#options.workloads.map((workload) => () => workload.close()),
+      ...(this.#publicCatalogStartAttempted
+        ? [() => this.#options.publicCatalog.close()]
+        : []),
+      ...[...this.#workloadsStartAttempted].map((workload) => () => workload.close()),
     ]);
-    await settle([this.#options.mutationPersistence.close]);
+    await settle(this.#mutationPersistenceStartAttempted
+      ? [this.#options.mutationPersistence.close]
+      : []);
     if (failures.length === 1) throw failures[0];
     if (failures.length > 1) {
       throw new AggregateError(failures, 'RFC-64 catalog runtime close failed');

@@ -259,4 +259,86 @@ describe('Rfc64CatalogRuntimeV1', () => {
     failStart = false;
     runtime.start(ctx);
   });
+
+  it('retires only the first lifecycle stage when its open attempt fails', async () => {
+    const calls: string[] = [];
+    const baseOptions = runtimeOptions(calls);
+    const options: Rfc64CatalogRuntimeOptionsV1 = {
+      ...baseOptions,
+      inventoryObservers: {
+        ...baseOptions.inventoryObservers,
+        open: vi.fn(() => {
+          calls.push('inventoryObservers.open');
+          throw new Error('inventory observer open failed');
+        }),
+      },
+    };
+    const runtime = new Rfc64CatalogRuntimeV1(options);
+
+    expect(() => runtime.start(createOperationContext('system')))
+      .toThrow('inventory observer open failed');
+    await expect(runtime.close()).resolves.toBeUndefined();
+
+    expect(options.inventoryObservers.close).toHaveBeenCalledOnce();
+    expect(options.mutationPersistence.open).not.toHaveBeenCalled();
+    expect(options.mutationPersistence.close).not.toHaveBeenCalled();
+    expect(options.publicCatalog.start).not.toHaveBeenCalled();
+    expect(options.publicCatalog.closeReceiverAdmission).not.toHaveBeenCalled();
+    expect(options.publicCatalog.close).not.toHaveBeenCalled();
+    expect(options.workloads[0]!.start).not.toHaveBeenCalled();
+    expect(options.workloads[0]!.close).not.toHaveBeenCalled();
+    expect(options.workloads[1]!.start).not.toHaveBeenCalled();
+    expect(options.workloads[1]!.close).not.toHaveBeenCalled();
+  });
+
+  it('does not retire workloads whose starts were never attempted', async () => {
+    const calls: string[] = [];
+    const baseOptions = runtimeOptions(calls);
+    const firstWorkload = {
+      ...baseOptions.workloads[0]!,
+      start: vi.fn(() => { throw new Error('bootstrap start failed'); }),
+    };
+    const neverAttemptedWorkload = baseOptions.workloads[1]!;
+    const options: Rfc64CatalogRuntimeOptionsV1 = {
+      ...baseOptions,
+      workloads: [firstWorkload, neverAttemptedWorkload],
+    };
+    const runtime = new Rfc64CatalogRuntimeV1(options);
+
+    expect(() => runtime.start(createOperationContext('system')))
+      .toThrow('bootstrap start failed');
+    await expect(runtime.close()).resolves.toBeUndefined();
+
+    expect(firstWorkload.close).toHaveBeenCalledOnce();
+    expect(neverAttemptedWorkload.start).not.toHaveBeenCalled();
+    expect(neverAttemptedWorkload.close).not.toHaveBeenCalled();
+    expect(options.publicCatalog.close).toHaveBeenCalledOnce();
+    expect(options.mutationPersistence.close).toHaveBeenCalledOnce();
+  });
+
+  it('retires a failed public-owner start without touching later workloads', async () => {
+    const calls: string[] = [];
+    const baseOptions = runtimeOptions(calls);
+    const options: Rfc64CatalogRuntimeOptionsV1 = {
+      ...baseOptions,
+      publicCatalog: {
+        ...baseOptions.publicCatalog,
+        start: vi.fn(() => { throw new Error('public catalog start failed'); }),
+      },
+    };
+    const runtime = new Rfc64CatalogRuntimeV1(options);
+
+    expect(() => runtime.start(createOperationContext('system')))
+      .toThrow('public catalog start failed');
+    await expect(runtime.close()).resolves.toBeUndefined();
+
+    expect(options.publicCatalog.closeReceiverAdmission).toHaveBeenCalledOnce();
+    expect(options.publicCatalog.close).toHaveBeenCalledOnce();
+    expect(options.workloads[0]!.start).not.toHaveBeenCalled();
+    expect(options.workloads[0]!.close).not.toHaveBeenCalled();
+    expect(options.workloads[1]!.start).not.toHaveBeenCalled();
+    expect(options.workloads[1]!.close).not.toHaveBeenCalled();
+    expect(options.mutationPersistence.close).toHaveBeenCalledOnce();
+    expect(options.inventoryObservers.close).toHaveBeenCalledOnce();
+  });
 });
