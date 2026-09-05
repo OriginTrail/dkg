@@ -430,6 +430,7 @@ jobs:
   tornado-core:
     env:
       DKG_CI_COVERAGE: '1'
+      DKG_CI_ROW: ${{ matrix.row }}
     name: "Tornado: ${{ matrix.label }}"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_core == 'true'
@@ -459,7 +460,7 @@ jobs:
         if: matrix.suite == 'chain'
 
       - name: Run canonical test row
-        run: node scripts/ci/run-vitest-lanes.mjs --job ${{ github.job }} --row ${{ matrix.row }}
+        run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: Authority mutation pilot
         if: matrix.suite == 'core'
         run: pnpm test:mutation
@@ -589,6 +590,7 @@ jobs:
   tornado-publisher:
     env:
       DKG_CI_COVERAGE: '1'
+      DKG_CI_ROW: ${{ matrix.row }}
     name: "Tornado: publisher [${{ matrix.shard }}/${{ matrix.shards }}]"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_publisher == 'true'
@@ -618,7 +620,7 @@ jobs:
       # Restore the shared compiler outputs before starting its isolated node.
       - uses: ./.github/actions/restore-evm-node-test-artifacts
       - name: "Publisher tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
-        run: node scripts/ci/run-vitest-lanes.mjs --job ${{ github.job }} --row ${{ matrix.row }}
+        run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit
@@ -636,6 +638,7 @@ jobs:
   tornado-agent:
     env:
       DKG_CI_COVERAGE: '1'
+      DKG_CI_ROW: ${{ matrix.row }}
     name: "Tornado: agent [${{ matrix.shard }}/${{ matrix.shards }}]"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_agent == 'true'
@@ -663,7 +666,7 @@ jobs:
         run: tar -xzf /tmp/build-outputs.tgz
       - uses: ./.github/actions/restore-evm-node-test-artifacts
       - name: "Agent tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
-        run: node scripts/ci/run-vitest-lanes.mjs --job ${{ github.job }} --row ${{ matrix.row }}
+        run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: "RFC-64 rollout transition certificate (Oxigraph)"
         if: matrix.gate1
         run: node --import tsx --test devnet/rfc64-gate1-public-open/rollout-store-fixture.test.ts devnet/rfc64-gate1-public-open/rollout-transition.test.ts
@@ -690,6 +693,7 @@ jobs:
   bura-cli:
     env:
       DKG_CI_COVERAGE: '1'
+      DKG_CI_ROW: ${{ matrix.row }}
     name: "Bura: cli [${{ matrix.shard }}/${{ matrix.shards }}]"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.bura_cli == 'true'
@@ -720,7 +724,7 @@ jobs:
         if: matrix.shard == 1
         run: bash scripts/ci/verify-blazegraph-image-contract.sh
       - name: "CLI tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
-        run: node scripts/ci/run-vitest-lanes.mjs --job ${{ github.job }} --row ${{ matrix.row }}
+        run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit
@@ -743,6 +747,7 @@ jobs:
   bura-supporting:
     env:
       DKG_CI_COVERAGE: '1'
+      DKG_CI_ROW: ${{ matrix.row }}
     name: "Bura: query"
     needs: [changes, build]
     if: needs.changes.outputs.bura_query == 'true'
@@ -769,7 +774,7 @@ jobs:
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
       - name: "Query tests"
-        run: node scripts/ci/run-vitest-lanes.mjs --job ${{ github.job }} --row ${{ matrix.row }}
+        run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: Upload Vitest JUnit and coverage reports
         if: always()
         uses: ./.github/actions/upload-vitest-junit
@@ -788,6 +793,7 @@ jobs:
   kosava-node-ui:
     env:
       DKG_CI_COVERAGE: '1'
+      DKG_CI_ROW: ${{ matrix.row }}
     name: "Kosava: node-ui"
     needs: [changes, build]
     if: needs.changes.outputs.kosava_node_ui == 'true'
@@ -816,7 +822,7 @@ jobs:
       - name: "node-ui production build (896 MB heap budget)"
         run: pnpm --filter @origintrail-official/dkg-node-ui run build:ui
       - name: "node-ui tests"
-        run: node scripts/ci/run-vitest-lanes.mjs --job ${{ github.job }} --row ${{ matrix.row }}
+        run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: Upload Vitest JUnit and coverage reports
         if: always()
         uses: ./.github/actions/upload-vitest-junit
@@ -918,6 +924,7 @@ jobs:
   kosava-supporting:
     env:
       DKG_CI_COVERAGE: '1'
+      DKG_CI_ROW: ${{ matrix.row }}
     name: "Kosava: adapters + utilities + demo"
     needs: [changes, build]
     if: needs.changes.outputs.kosava_supporting == 'true'
@@ -967,7 +974,7 @@ jobs:
           DKG_CI_COVERAGE: '1'
         run: |
           status=0
-          node scripts/ci/run-vitest-lanes.mjs --job ${{ github.job }} --row ${{ matrix.row }} || status=$?
+          node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW" || status=$?
           pnpm --filter @origintrail-official/dkg-adapter-hermes run test:py || status=$?
           pnpm --filter @origintrail-official/dkg-demo run test || status=$?
           exit "$status"
@@ -993,6 +1000,7 @@ jobs:
   kosava-hardhat-plugins:
     env:
       DKG_CI_COVERAGE: '1'
+      DKG_CI_ROW: ${{ matrix.row }}
     name: "Kosava: random-sampling + kafka-plugin (real Hardhat)"
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.kosava_hardhat_plugins == 'true'
@@ -1020,7 +1028,7 @@ jobs:
         run: tar -xzf /tmp/build-outputs.tgz
       - uses: ./.github/actions/restore-evm-node-test-artifacts
       - name: Hardhat plugin tests
-        run: node scripts/ci/run-vitest-lanes.mjs --job ${{ github.job }} --row ${{ matrix.row }}
+        run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: Upload Vitest JUnit and coverage reports
         if: always()
         uses: ./.github/actions/upload-vitest-junit

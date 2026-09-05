@@ -8,7 +8,9 @@
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/scripts/testing/package.json",
         "$TURBO_ROOT$/scripts/testing/snapshot-storage.ts",
-        "$TURBO_ROOT$/scripts/lib/hardhat-test-env.mjs"
+        "$TURBO_ROOT$/scripts/lib/hardhat-test-env.mjs",
+        "$TURBO_ROOT$/scripts/testing/owned-process.mjs",
+        "$TURBO_ROOT$/scripts/testing/owned-process.d.mts"
       ]
     },
     "test:coverage": {
@@ -20,7 +22,9 @@
         "$TURBO_ROOT$/test-policy/coverage-baselines.json",
         "$TURBO_ROOT$/scripts/testing/package.json",
         "$TURBO_ROOT$/scripts/testing/snapshot-storage.ts",
-        "$TURBO_ROOT$/scripts/lib/hardhat-test-env.mjs"
+        "$TURBO_ROOT$/scripts/lib/hardhat-test-env.mjs",
+        "$TURBO_ROOT$/scripts/testing/owned-process.mjs",
+        "$TURBO_ROOT$/scripts/testing/owned-process.d.mts"
       ]
     }
   }

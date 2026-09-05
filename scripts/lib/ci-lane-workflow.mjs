@@ -13,10 +13,11 @@ export function validateCiLaneWorkflow(workflow) {
     if (!groups) continue;
     if (job.env?.DKG_CI_COVERAGE !== '1') fail(`${jobId} must collect coverage`);
     if (!workflow.jobs['coverage-results']?.needs?.includes(jobId)) fail(`${jobId} is missing from coverage aggregation`);
+    if (job.env?.DKG_CI_ROW !== '${{ matrix.row }}') fail(`${jobId} must pass the matrix row as data`);
     const matrix = job.strategy?.matrix;
     const expectedMatrix = '${{ fromJSON(needs.build.outputs.test_matrices)[\'' + jobId + '\'] }}';
     if (matrix !== expectedMatrix) fail(`${jobId} must use the emitted matrix`);
-    const command = 'node scripts/ci/run-vitest-lanes.mjs --job ${{ github.job }} --row ${{ matrix.row }}';
+    const command = 'node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"';
     const lines = job.steps.flatMap((step) => (step.run ?? '').split('\n'));
     if (!lines.some((line) => line.trim() === command || line.trim() === `${command} || status=$?`)) fail(`${jobId} must run the canonical row`);
     if (lines.some((line) => line.includes('run-vitest-junit.mjs'))) fail(`${jobId} must not duplicate package routing`);
