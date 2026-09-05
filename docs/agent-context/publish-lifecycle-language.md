@@ -1,4 +1,11 @@
-# DKG
+---
+status: current
+version: v10
+audience: agent+human
+doc_type: reference
+---
+
+# Knowledge Asset Publish Lifecycle Language
 
 This context describes the project language for Knowledge Asset publication and operational diagnostics across DKG nodes.
 
