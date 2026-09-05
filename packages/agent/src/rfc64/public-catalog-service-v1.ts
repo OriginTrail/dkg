@@ -111,6 +111,7 @@ import {
   parseRfc64PublicCatalogHeadAnnouncementV1,
   type FetchedRfc64PublicCatalogHeadV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
+  type Rfc64PublicCatalogHeadReplayCompletionV2,
   type Rfc64PublicCatalogHeadReplayAdmissionV1,
   type Rfc64PublicCatalogHeadReplayRequestV1,
 } from './public-catalog-transport-v1.js';
@@ -783,7 +784,7 @@ export class Rfc64PublicCatalogServiceV1 {
   /** Ask one authorized peer to replay every durable current head for a CG. */
   async requestCatalogHeadReplay(
     input: RequestRfc64CatalogHeadReplayInputV1,
-  ): Promise<void> {
+  ): Promise<Readonly<Rfc64PublicCatalogHeadReplayCompletionV2>> {
     this.#requireStarted();
     const held = this.#policies.lookup(input.networkId, input.contextGraphId);
     if (held === null) {

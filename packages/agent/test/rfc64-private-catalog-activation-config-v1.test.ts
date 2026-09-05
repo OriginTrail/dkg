@@ -722,6 +722,34 @@ describe('RFC-64 private catalog activation', () => {
     }, chainIdentity)).toThrow(/conflict for selected graph/u);
   });
 
+  it('lets the unified rollback suppress every deprecated public selection', () => {
+    const publicEnvelope = policyEnvelope(policy(PUBLIC_CG, 0));
+    const rollback = resolveRfc64CatalogActivationsV1({
+      catalog: { enabled: false },
+      publicCatalog: {
+        enabled: true,
+        bootstrap: {
+          acceptedPublicPolicies: [{ policyEnvelope: publicEnvelope, targets: [] }],
+          retryIntervalMs: 1_000,
+        },
+      },
+    }, chainIdentity);
+
+    expect(rollback.catalog).toMatchObject({
+      enabled: false,
+      selectedContextGraphs: [],
+      selectedPublicContextGraphs: [],
+      selectedPrivateContextGraphs: [],
+    });
+    expect(rollback.publicCatalog).toMatchObject({
+      enabled: false,
+      selectedContextGraphs: [],
+    });
+    expect(rollback.catalog.bootstrap).toBeUndefined();
+    expect(rollback.publicCatalog.bootstrap).toBeUndefined();
+    expect(rollback.selectedCatalogAuthoringControls).toEqual([]);
+  });
+
   it('unions disjoint rollout modes and lets either block engage the shared kill switch', () => {
     const publicEnvelope = policyEnvelope(policy(PUBLIC_CG, 0));
     const union = resolveRfc64CatalogActivationsV1({

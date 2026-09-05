@@ -3896,6 +3896,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.node.libp2p.addEventListener('connection:open', (evt) => {
       const remotePeer = evt.detail.remotePeer.toString();
       if (remotePeer === this.node.libp2p.peerId.toString()) return;
+      const replayContextGraphIds = [...new Set([
+        ...this.readRfc64CatalogResponsibilitiesV1()
+          .filter((responsibility) => responsibility.active && responsibility.mode !== 'legacy')
+          .map((responsibility) => responsibility.contextGraphId),
+        ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority)
+          .filter((contextGraphId) => {
+            const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
+            return authority.active && authority.mode !== 'legacy';
+          }),
+      ])].sort();
+      for (const contextGraphId of replayContextGraphIds) {
+        this.markRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
+      }
       // Reverse-path peerStore enrichment for inbound circuit-relay
       // connections.
       //
@@ -3921,9 +3934,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           this.log.warn(ctx, `Network admission probe failed for ${remotePeer.slice(-8)} on connect: ${message}`);
+          for (const contextGraphId of replayContextGraphIds) {
+            this.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
+          }
           return;
         }
-        if (!admitted) return;
+        if (!admitted) {
+          for (const contextGraphId of replayContextGraphIds) {
+            this.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
+          }
+          return;
+        }
         try {
           await this.enrichPeerStoreFromInboundCircuit(evt.detail);
         } catch (err: unknown) {
@@ -3943,20 +3964,39 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           const message = err instanceof Error ? err.message : String(err);
           this.log.warn(ctx, `Pending SWM sender-key drain on connect failed for ${remotePeer}: ${message}`);
         }
-        void this.reannounceRfc64CatalogHeadsToPeerV1(remotePeer).then((result) => {
-          if (result.announced > 0) {
-            this.log.info(
-              ctx,
-              `Re-announced ${result.announced} RFC-64 catalog head(s) to ${remotePeer.slice(-8)}`,
-            );
-          }
-        }).catch((err: unknown) => {
+        // The receiver owns replay completeness. Provider-initiated pushes do
+        // not carry a promised-head manifest and can otherwise leave a brief
+        // A-applied/B-undiscovered window reporting complete. Request every
+        // active CG through the completion-capable scoped protocol instead.
+        // Keep the 10.0.15 rolling-upgrade direction alive: legacy receivers
+        // cannot request V2 completion, but they can still consume ordinary
+        // head announcements. Upgraded receivers remain fenced by the scoped
+        // pull below and never interpret this compatibility push as complete.
+        void this.reannounceRfc64CatalogHeadsToPeerV1(remotePeer).catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
           this.log.warn(
             ctx,
-            `RFC-64 catalog re-announcement failed for ${remotePeer.slice(-8)}: ${message}`,
+            `RFC-64 compatibility re-announcement failed for ${remotePeer.slice(-8)}: ${message}`,
           );
         });
+        for (const contextGraphId of replayContextGraphIds) {
+          void this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+            contextGraphId,
+          ).then((result) => {
+            if (result.failed > 0) {
+              this.log.warn(
+                ctx,
+                `RFC-64 catalog replay incomplete for "${contextGraphId}" after ${remotePeer.slice(-8)} connected`,
+              );
+            }
+          }).catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : String(err);
+            this.log.warn(
+              ctx,
+              `RFC-64 catalog replay failed after ${remotePeer.slice(-8)} connected: ${message}`,
+            );
+          });
+        }
         this.queueSyncFromPeerOnConnect(remotePeer, handleSyncError);
       })();
     });

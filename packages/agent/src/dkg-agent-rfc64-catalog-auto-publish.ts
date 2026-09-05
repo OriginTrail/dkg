@@ -20,6 +20,7 @@ import {
   createOperationContext,
   encodeCanonicalCgSharedPublicRootProjectionV1,
   assertSafeIri,
+  parseCanonicalDecimalU64,
   type AssertionCoordinateV1,
   type AssertionSeal,
   type AuthorCatalogScopeV1,
@@ -35,6 +36,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { GraphManager, type Quad } from '@origintrail-official/dkg-storage';
 import {
+  readConfirmedGraphKnowledgeAssetMetadataEnvelope,
   resolveKnowledgeAssetOperationPublicQuads,
   resolvePublishedKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
@@ -214,22 +216,68 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     contextGraphId: string,
     subGraphName: string | null,
     kaUal: string,
+    candidateAssertionVersion: string,
   ): Promise<boolean> {
+    const confirmed = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(this.store, {
+      contextGraphId,
+      ual: kaUal,
+    });
     const safeUal = assertSafeIri(kaUal);
     const labelMetaGraph = assertSafeIri(contextGraphMetaUri(contextGraphId));
     const partitionMetaGraph = assertSafeIri(contextGraphMetaUri(
       contextGraphId,
       subGraphName ?? undefined,
     ));
+    if (
+      confirmed.state === 'confirmed'
+      && (confirmed.envelope.subGraphName ?? null) === subGraphName
+    ) {
+      try {
+        const durableVersion = parseCanonicalDecimalU64(
+          confirmed.envelope.assertionVersion,
+          'durable VM assertionVersion',
+        );
+        const candidateVersion = parseCanonicalDecimalU64(
+          candidateAssertionVersion,
+          'candidate SWM assertionVersion',
+        );
+        if (durableVersion >= candidateVersion) return true;
+        // The strict root-label envelope definitively proves this exact
+        // partition has only an older confirmation. Do not let its own status
+        // marker collapse the comparison back to UAL-only semantics.
+        if (partitionMetaGraph === labelMetaGraph) return false;
+      } catch {
+        // Fall through to the conservative legacy marker fence below.
+      }
+    }
+
+    // Older/subgraph writers may have persisted only the confirmation status.
+    // Preserve that conservative restart fence: uncertainty suppresses replay
+    // rather than resurrecting a possibly finalized public placement. When a
+    // strict older root-label version was proven above, only a distinct
+    // partition marker remains ambiguous.
     const status = '<http://dkg.io/ontology/status> "confirmed"';
     const partitionPattern = `GRAPH <${partitionMetaGraph}> { <${safeUal}> ${status} }`;
-    const ask = partitionMetaGraph === labelMetaGraph
+    const strictOlderVersion = confirmed.state === 'confirmed'
+      && (confirmed.envelope.subGraphName ?? null) === subGraphName
+      && (() => {
+        try {
+          return parseCanonicalDecimalU64(confirmed.envelope.assertionVersion)
+            < parseCanonicalDecimalU64(candidateAssertionVersion);
+        } catch {
+          return false;
+        }
+      })();
+    const ask = partitionMetaGraph === labelMetaGraph || strictOlderVersion
       ? `ASK { ${partitionPattern} }`
       : `ASK { { ${partitionPattern} } UNION { GRAPH <${labelMetaGraph}> { <${safeUal}> ${status} } } }`;
     const result = await this.store.query(ask, {
       source: 'agent.rfc64.swmInventory.durableVmConfirmation',
     });
-    return result.type === 'boolean' && result.value === true;
+    if (result.type !== 'boolean') {
+      throw new Error('RFC-64 durable VM confirmation ASK did not return a boolean');
+    }
+    return result.value === true;
   }
 
   /**
@@ -618,6 +666,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
           params.contextGraphId,
           params.subGraphName ?? null,
           canonicalSeal.kaUal,
+          canonicalSeal.assertionVersion,
         );
       if (exactPromotionWasConfirmed || publicPlacementWasConfirmed) {
         return shadowResult('dormant', 'upsert', 0, null, null, 'vm-confirmed');

@@ -74,7 +74,7 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     const secondRestartOwner = {};
     await initializeRfc64LegacySwmBoundaryV1(secondRestartOwner, root, store);
     expect(readRfc64LegacySwmBoundaryCountV1(secondRestartOwner, CONTEXT_GRAPH_ID)).toBe(0);
-    expect(store.listGraphs).toHaveBeenCalledTimes(1);
+    expect(store.listGraphs).not.toHaveBeenCalled();
   });
 
   it('persists an atomic post-capture legacy SHARE companion until that exact UAL is republished', async () => {
@@ -258,6 +258,66 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(0);
   });
 
+  it('does not let named metadata graphs consume the root graph capture cap', async () => {
+    const root = await secureTempRoot(roots);
+    const heads = new Map<string, string[]>([[META_GRAPH, [UAL_ONE]]]);
+    for (let index = 0; index < 16_384; index += 1) {
+      heads.set(
+        contextGraphSharedMemoryMetaUri(CONTEXT_GRAPH_ID, `named-${index}`),
+        [],
+      );
+    }
+    const store = fakeStore(heads);
+
+    const owner = {};
+    await initializeRfc64LegacySwmBoundaryV1(owner, root, store);
+
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
+    expect(store.listGraphs).not.toHaveBeenCalled();
+    expect(store.query).toHaveBeenCalledWith(
+      expect.stringContaining('GRAPH ?metaGraph'),
+      expect.objectContaining({
+        source: 'agent.rfc64.legacySwmBoundary.readHeads',
+      }),
+    );
+  });
+
+  it('does not query a named metadata graph that could exhaust the root head cap', async () => {
+    const root = await secureTempRoot(roots);
+    const rootBinding = {
+      metaGraph: META_GRAPH,
+      head: `${UAL_ONE}#dkg-swm-head`,
+      ual: UAL_ONE,
+      contextGraphId: `"${CONTEXT_GRAPH_ID}"`,
+    };
+    const store = {
+      listGraphs: vi.fn(async () => [META_GRAPH, SUBGRAPH_META_GRAPH]),
+      query: vi.fn(async (sparql: string) => {
+        if (sparql.includes(`GRAPH <${SUBGRAPH_META_GRAPH}>`)) {
+          return {
+            type: 'bindings' as const,
+            // The old per-graph capture rejects this length before iteration.
+            bindings: { length: 100_001 },
+          };
+        }
+        if (sparql.includes('GRAPH ?metaGraph')) {
+          return { type: 'bindings' as const, bindings: [rootBinding] };
+        }
+        return { type: 'bindings' as const, bindings: [] };
+      }),
+    } as unknown as TripleStore;
+
+    const owner = {};
+    await initializeRfc64LegacySwmBoundaryV1(owner, root, store);
+
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
+    expect(store.listGraphs).not.toHaveBeenCalled();
+    expect(store.query).not.toHaveBeenCalledWith(
+      expect.stringContaining(`GRAPH <${SUBGRAPH_META_GRAPH}>`),
+      expect.anything(),
+    );
+  });
+
   it('captures only fully joined legacy heads through the real Oxigraph query', async () => {
     const root = await secureTempRoot(roots);
     const store = new OxigraphStore();
@@ -312,12 +372,14 @@ function fakeStore(
   return {
     listGraphs: vi.fn(async () => [...headsByGraph.keys()]),
     query: vi.fn(async (sparql: string) => {
-      const graph = [...headsByGraph.keys()].find((candidate) => (
-        sparql.includes(`GRAPH <${candidate}>`)
-      ));
+      if (!sparql.includes('GRAPH ?metaGraph')) {
+        return { type: 'bindings' as const, bindings: [] };
+      }
+      const rootHeads = headsByGraph.get(META_GRAPH) ?? [];
       return {
         type: 'bindings' as const,
-        bindings: (graph === undefined ? [] : headsByGraph.get(graph) ?? []).map((ual) => ({
+        bindings: rootHeads.map((ual) => ({
+          metaGraph: META_GRAPH,
           head: forcedHead ?? `${ual}#dkg-swm-head`,
           ual,
           contextGraphId: `"${CONTEXT_GRAPH_ID}"`,

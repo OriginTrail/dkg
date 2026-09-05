@@ -47,9 +47,13 @@ import { deriveRfc64PublicSwmGraphV1 } from
 import { computeRfc64AppliedInventoryDigestV1 } from
   '../src/rfc64/public-catalog-inventory-completeness-v1.js';
 import {
+  RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
+  RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
   RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
   parseRfc64PublicCatalogHeadAnnouncementV1,
+  type Rfc64PublicCatalogHeadAnnouncementV1,
+  type Rfc64PublicCatalogHeadReplayRequestV1,
 } from '../src/rfc64/public-catalog-transport-v1.js';
 import { composeRfc64UnregisteredCatalogAuthorityV1 } from
   '../src/rfc64/release-native-catalog-authority-v1.js';
@@ -122,6 +126,83 @@ function chainWithFinalizedAuthority(
   });
 }
 
+function replaySuccess(
+  request: Readonly<Rfc64PublicCatalogHeadReplayRequestV1>,
+): Readonly<{
+  announced: number;
+  failed: number;
+  manifest: readonly Rfc64PublicCatalogHeadAnnouncementV1[];
+}> {
+  const head = Object.freeze({
+    kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+    networkId: request.networkId,
+    contextGraphId: request.contextGraphId,
+    subGraphName: null,
+    authorAddress: AUTHOR,
+    catalogEra: '0',
+    catalogVersion: '0',
+    policyDigest: request.policyDigest,
+    catalogHeadObjectDigest: `0x${'a1'.repeat(32)}`,
+    signatureVariantDigest: `0x${'a2'.repeat(32)}`,
+  }) as Rfc64PublicCatalogHeadAnnouncementV1;
+  return Object.freeze({
+    announced: 1,
+    failed: 0,
+    manifest: Object.freeze([head]),
+  });
+}
+
+async function startAppliedOpenReplayProvider(name: string) {
+  const provider = await startAgent(
+    name,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { rfc64CatalogDeploymentProfile: DEPLOYMENT },
+  );
+  const signer = Object.freeze({
+    address: AUTHOR,
+    signMessage: (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest),
+  });
+  const publication = await provider.publishOpenAuthorCatalogGenesisV1({
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    author: signer,
+    peers: [],
+    issuedAt: '1773900000000' as TimestampMsV1,
+    catalogIssuerDelegationEffectiveAt: '1773899999000' as TimestampMsV1,
+    catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+  });
+  const scope = Object.freeze({
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    governanceChainId: null,
+    governanceContractAddress: null,
+    ownershipTransitionDigest: null,
+    subGraphName: null,
+    authorAddress: AUTHOR,
+    era: '0',
+    bucketCount: '1',
+  }) as AuthorCatalogScopeV1;
+  const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(scope);
+  const persistence = (provider as any).rfc64PersistenceV1;
+  if (persistence === undefined) throw new Error('test provider has no RFC-64 persistence');
+  const applied = persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+    catalogScopeDigest,
+    authorAddress: AUTHOR,
+    expectedCurrentCatalogHeadDigest: null,
+    currentCatalogHeadDigest: publication.headObjectDigest,
+    appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({
+      catalogScopeDigest,
+      rows: [],
+    }),
+    catalogVersion: publication.announcement.catalogVersion,
+    inventoryRowCount: '0',
+  }).snapshot;
+  return Object.freeze({ provider, persistence, publication, scope, applied });
+}
+
 afterEach(async () => {
   for (const agent of agents.splice(0)) {
     try { await agent.stop(); } catch { /* best effort */ }
@@ -140,10 +221,11 @@ describe('RFC-64 rollout authority integration', () => {
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const started = new Promise<void>((resolve) => { entered = resolve; });
     const replay = vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1')
-      .mockImplementation(async () => {
+      .mockImplementation(async (_peerId, requestedScope) => {
         entered();
         await gate;
-        return Object.freeze({ announced: 1, failed: 0 });
+        if (requestedScope === undefined) throw new Error('missing replay scope');
+        return replaySuccess(requestedScope);
       });
     const request = Object.freeze({
       kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
@@ -166,7 +248,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(replay).toHaveBeenCalledOnce();
     release();
     await expect(Promise.all(attempts)).resolves.toEqual(
-      Array.from({ length: 32 }, () => ({ announced: 1, failed: 0 })),
+      Array.from({ length: 32 }, () => replaySuccess(request)),
     );
   });
 
@@ -178,13 +260,14 @@ describe('RFC-64 rollout authority integration', () => {
     const started = new Promise<void>((resolve) => { entered = resolve; });
     let calls = 0;
     const replay = vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1')
-      .mockImplementation(async () => {
+      .mockImplementation(async (_peerId, requestedScope) => {
         calls += 1;
         if (calls === 1) {
           entered();
           await gate;
         }
-        return Object.freeze({ announced: 1, failed: 0 });
+        if (requestedScope === undefined) throw new Error('missing replay scope');
+        return replaySuccess(requestedScope);
       });
     const peerId = '12D3KooWReplayPerPeerLimit';
     const request = (ordinal: number) => Object.freeze({
@@ -211,13 +294,14 @@ describe('RFC-64 rollout authority integration', () => {
     const gateAfterFailure = new Promise<void>((resolve) => { releaseAfterFailure = resolve; });
     const startedAfterFailure = new Promise<void>((resolve) => { enteredAfterFailure = resolve; });
     let postFailureCalls = 0;
-    replay.mockImplementation(async () => {
+    replay.mockImplementation(async (_peerId, requestedScope) => {
       postFailureCalls += 1;
       if (postFailureCalls === 1) {
         enteredAfterFailure();
         await gateAfterFailure;
       }
-      return Object.freeze({ announced: 1, failed: 0 });
+      if (requestedScope === undefined) throw new Error('missing replay scope');
+      return replaySuccess(requestedScope);
     });
     const readmitted = Array.from({ length: 4 }, (_, index) => (
       edge.queueRfc64CatalogHeadReplayV1(peerId, request(index + 7))
@@ -237,13 +321,14 @@ describe('RFC-64 rollout authority integration', () => {
     const started = new Promise<void>((resolve) => { entered = resolve; });
     let calls = 0;
     const replay = vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1')
-      .mockImplementation(async () => {
+      .mockImplementation(async (_peerId, requestedScope) => {
         calls += 1;
         if (calls === 1) {
           entered();
           await gate;
         }
-        return Object.freeze({ announced: 1, failed: 0 });
+        if (requestedScope === undefined) throw new Error('missing replay scope');
+        return replaySuccess(requestedScope);
       });
     const request = Object.freeze({
       kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
@@ -274,13 +359,14 @@ describe('RFC-64 rollout authority integration', () => {
     const gateAfterFailure = new Promise<void>((resolve) => { releaseAfterFailure = resolve; });
     const startedAfterFailure = new Promise<void>((resolve) => { enteredAfterFailure = resolve; });
     let postFailureCalls = 0;
-    replay.mockImplementation(async () => {
+    replay.mockImplementation(async (_peerId, requestedScope) => {
       postFailureCalls += 1;
       if (postFailureCalls === 1) {
         enteredAfterFailure();
         await gateAfterFailure;
       }
-      return Object.freeze({ announced: 1, failed: 0 });
+      if (requestedScope === undefined) throw new Error('missing replay scope');
+      return replaySuccess(requestedScope);
     });
     const readmitted = Array.from({ length: 64 }, (_, index) => (
       edge.queueRfc64CatalogHeadReplayV1(
@@ -314,7 +400,11 @@ describe('RFC-64 rollout authority integration', () => {
           entered();
           await gate;
         }
-        return Object.freeze({ announced: 0, failed: 0 });
+        return Object.freeze({
+          announced: 0,
+          failed: 0,
+          manifest: Object.freeze([]),
+        });
       });
     const queued = Array.from({ length: 4 }, (_, index) => (
       provider.queueRfc64CatalogHeadReplayV1(requester.peerId, Object.freeze({
@@ -339,7 +429,10 @@ describe('RFC-64 rollout authority integration', () => {
     });
     release();
 
-    await expect(replayRequest).resolves.toBeUndefined();
+    await expect(replayRequest).resolves.toEqual({
+      kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+      heads: [],
+    });
     await expect(Promise.all(queued)).resolves.toHaveLength(4);
     expect(tryQueue.mock.results.some(
       ({ value }) => value?.status === 'admitted',
@@ -361,10 +454,11 @@ describe('RFC-64 rollout authority integration', () => {
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const started = new Promise<void>((resolve) => { entered = resolve; });
     const replay = vi.spyOn(provider, 'reannounceRfc64CatalogHeadsToPeerV1')
-      .mockImplementation(async () => {
+      .mockImplementation(async (_peerId, requestedScope) => {
         entered();
         await gate;
-        return Object.freeze({ announced: 1, failed: 0 });
+        if (requestedScope === undefined) throw new Error('missing replay scope');
+        return replaySuccess(requestedScope);
       });
     const info = vi.spyOn((provider as any).log, 'info');
     const service = (requester as any).rfc64PublicCatalogServiceV1;
@@ -375,8 +469,12 @@ describe('RFC-64 rollout authority integration', () => {
     }));
 
     await started;
-    await expect(Promise.all(requests)).resolves.toHaveLength(32);
+    let completed = false;
+    void Promise.all(requests).then(() => { completed = true; });
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    expect(completed).toBe(false);
     release();
+    await expect(Promise.all(requests)).resolves.toHaveLength(32);
     expect(replay).toHaveBeenCalled();
     await vi.waitFor(() => {
       expect(info.mock.calls.filter(([, message]: unknown[]) => (
@@ -385,6 +483,99 @@ describe('RFC-64 rollout authority integration', () => {
       ))).toHaveLength(1);
     });
   }, 30_000);
+
+  it('reruns a coalesced receiver replay for demand added while an earlier peer is in flight', async () => {
+    const edge = await startAgent('replay-dirty-peer-fence', activation('catalog'));
+    const peerA = '12D3KooWReplayDirtyPeerA';
+    const peerB = '12D3KooWReplayDirtyPeerB';
+    let connectedPeers = [peerA];
+    vi.spyOn(edge.node.libp2p, 'getPeers').mockImplementation(() => (
+      connectedPeers.map((peerId) => ({ toString: () => peerId })) as never
+    ));
+    let releaseA!: () => void;
+    let releaseB!: () => void;
+    let enteredA!: () => void;
+    let enteredB!: () => void;
+    const gateA = new Promise<void>((resolve) => { releaseA = resolve; });
+    const gateB = new Promise<void>((resolve) => { releaseB = resolve; });
+    const startedA = new Promise<void>((resolve) => { enteredA = resolve; });
+    const startedB = new Promise<void>((resolve) => { enteredB = resolve; });
+    const service = (edge as any).rfc64PublicCatalogServiceV1;
+    const requestReplay = vi.spyOn(service, 'requestCatalogHeadReplay')
+      .mockImplementation(async ({ remotePeerId }: { remotePeerId: string }) => {
+        if (remotePeerId === peerA) {
+          enteredA();
+          await gateA;
+        } else if (remotePeerId === peerB) {
+          enteredB();
+          await gateB;
+        }
+        return Object.freeze({
+          kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+          heads: Object.freeze([]),
+        });
+      });
+
+    const replay = edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+      CONTEXT_GRAPH_ID,
+    );
+    let settled = false;
+    void replay.then(() => { settled = true; });
+    await startedA;
+    await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({ contextGraphId: CONTEXT_GRAPH_ID, phase: 'applying' }),
+    );
+
+    connectedPeers = [peerA, peerB];
+    edge.markRfc64CatalogReplayPeerPendingV1(CONTEXT_GRAPH_ID, peerB);
+    releaseA();
+    await startedB;
+    expect(settled).toBe(false);
+    await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({ contextGraphId: CONTEXT_GRAPH_ID, phase: 'applying' }),
+    );
+
+    releaseB();
+    await expect(replay).resolves.toEqual({ requested: 2, failed: 0 });
+    expect(requestReplay.mock.calls.map(([{ remotePeerId }]: [{ remotePeerId: string }]) => (
+      remotePeerId
+    ))).toEqual([peerA, peerB]);
+  });
+
+  it('marks then clears the synchronous connection replay fence when admission denies the peer', async () => {
+    const peer = await startAgent('replay-denied-connection-peer', undefined);
+    const edge = await startAgent('replay-denied-connection-edge', activation('catalog'));
+    const admission = vi.spyOn(
+      (edge as any).networkAdmissionCoordinator,
+      'ensureAdmitted',
+    ).mockImplementation(async (peerId: string) => peerId !== peer.peerId);
+    const markPending = vi.spyOn(edge, 'markRfc64CatalogReplayPeerPendingV1');
+    const clearPending = vi.spyOn(edge, 'clearRfc64CatalogReplayPeerPendingV1');
+    const service = (edge as any).rfc64PublicCatalogServiceV1;
+    const requestReplay = vi.spyOn(service, 'requestCatalogHeadReplay');
+    edge.node.libp2p.dispatchEvent(new CustomEvent('connection:open', {
+      detail: {
+        remotePeer: peer.node.libp2p.peerId,
+        remoteAddr: { toString: () => '/ip4/127.0.0.1/tcp/1' },
+        direction: 'inbound',
+        timeline: { open: Date.now() },
+      },
+    } as any));
+    expect(markPending).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, peer.peerId);
+    await vi.waitFor(() => {
+      expect(clearPending).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, peer.peerId);
+    });
+    expect(markPending.mock.invocationCallOrder[0]).toBeLessThan(
+      admission.mock.invocationCallOrder[0]!,
+    );
+    expect(admission.mock.invocationCallOrder[0]).toBeLessThan(
+      clearPending.mock.invocationCallOrder[0]!,
+    );
+    await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({ contextGraphId: CONTEXT_GRAPH_ID, phase: 'bootstrapping' }),
+    );
+    expect(requestReplay).not.toHaveBeenCalled();
+  }, 15_000);
 
   it('connection replay sends public and authorized private heads without disclosing private metadata to a nonmember', async () => {
     const privateContextGraphId = `${AUTHOR}/private-connection-replay` as ContextGraphIdV1;
@@ -501,15 +692,71 @@ describe('RFC-64 rollout authority integration', () => {
         parseRfc64PublicCatalogHeadAnnouncementV1(data).contextGraphId
       ));
 
-    await expect(author.reannounceRfc64CatalogHeadsToPeerV1(nonmemberPeerId))
-      .resolves.toEqual({ announced: 1, failed: 1 });
+    const nonmemberReplay = await author.reannounceRfc64CatalogHeadsToPeerV1(nonmemberPeerId);
+    expect(nonmemberReplay).toMatchObject({ announced: 1, failed: 1 });
+    expect(nonmemberReplay.manifest.map(({ contextGraphId }) => contextGraphId))
+      .toEqual([CONTEXT_GRAPH_ID]);
     expect(announcementContextGraphs()).toEqual([CONTEXT_GRAPH_ID]);
 
     send.mockClear();
-    await expect(author.reannounceRfc64CatalogHeadsToPeerV1(memberPeerId))
-      .resolves.toEqual({ announced: 2, failed: 0 });
+    const memberReplay = await author.reannounceRfc64CatalogHeadsToPeerV1(memberPeerId);
+    expect(memberReplay).toMatchObject({ announced: 2, failed: 0 });
+    expect(memberReplay.manifest.map(({ contextGraphId }) => contextGraphId).sort())
+      .toEqual([CONTEXT_GRAPH_ID, privateContextGraphId].sort());
     expect(announcementContextGraphs().sort())
       .toEqual([CONTEXT_GRAPH_ID, privateContextGraphId].sort());
+  });
+
+  it('fails replay when an applied inventory row points at a missing durable head', async () => {
+    const { provider, persistence, applied } = await startAppliedOpenReplayProvider(
+      'replay-missing-durable-head',
+    );
+    persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+      ...applied,
+      expectedCurrentCatalogHeadDigest: applied.currentCatalogHeadDigest,
+      currentCatalogHeadDigest: `0x${'ab'.repeat(32)}`,
+      catalogVersion: '1',
+    });
+
+    await expect(provider.reannounceRfc64CatalogHeadsToPeerV1(
+      '12D3KooWReplayMissingHeadPeer',
+    )).rejects.toThrow(/durable catalog head is missing or unverifiable/u);
+  });
+
+  it('rejects a replay snapshot when the durable inventory changes during head loading', async () => {
+    const { provider, persistence, scope, applied } =
+      await startAppliedOpenReplayProvider('replay-inventory-race');
+    vi.spyOn((provider as any).router, 'send').mockResolvedValue(Uint8Array.of(1));
+    await provider.reannounceRfc64CatalogHeadsToPeerV1(
+      '12D3KooWReplayInventoryWarmupPeer',
+    );
+    let releaseMutation!: () => void;
+    let markMutationEntered!: () => void;
+    const mutationGate = new Promise<void>((resolve) => { releaseMutation = resolve; });
+    const mutationEntered = new Promise<void>((resolve) => { markMutationEntered = resolve; });
+    const heldMutation = (provider as any).rfc64CatalogMutationCoordinatorV1.run(
+      scope,
+      async () => {
+        markMutationEntered();
+        await mutationGate;
+      },
+    );
+    await mutationEntered;
+
+    const replay = provider.reannounceRfc64CatalogHeadsToPeerV1(
+      '12D3KooWReplayInventoryRacePeer',
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+      ...applied,
+      expectedCurrentCatalogHeadDigest: applied.currentCatalogHeadDigest,
+      currentCatalogHeadDigest: `0x${'cd'.repeat(32)}`,
+      catalogVersion: '1',
+    });
+    releaseMutation();
+    await heldMutation;
+
+    await expect(replay).rejects.toThrow(/inventory changed before replay snapshot/u);
   });
 
   it('keeps system control graphs on durable sync under default catalog responsibility', async () => {
@@ -1387,6 +1634,37 @@ describe('RFC-64 rollout authority integration', () => {
         selectionSource: 'operator-override',
       }),
     ]);
+  });
+
+  it('lets unified rollback suppress deprecated selected-public runtime lanes', async () => {
+    const edge = await startAgent(
+      'unified-rollback-suppresses-public-alias',
+      activation('catalog'),
+      undefined,
+      undefined,
+      undefined,
+      { rfc64CatalogActivation: { enabled: false } },
+    );
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('public');
+    await edge.reconcileRfc64CatalogResponsibilityV1(CONTEXT_GRAPH_ID);
+
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        active: true,
+        mode: 'legacy',
+        selectionSource: 'operator-override',
+      }),
+    );
+    expect((edge as any).config.rfc64CatalogExecutionPlan).toMatchObject({
+      responsibilityDefaultMode: 'legacy',
+      selectedAuthority: {},
+      track2ContextGraphs: [],
+      standaloneTrack2Enabled: false,
+    });
+    expect((edge as any).config.rfc64CatalogBootstrap).toBeUndefined();
+    expect((edge as any).config.rfc64CatalogAuthoringPolicy).toBeUndefined();
+    expect((edge as any).rfc64PublicCatalogServiceV1).toBeUndefined();
   });
 
   it('keeps an eligible edge CG dormant until subscribe and deactivates it on unsubscribe', async () => {

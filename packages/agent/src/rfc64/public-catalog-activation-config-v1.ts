@@ -624,6 +624,16 @@ export function resolveRfc64CatalogActivationsV1(
   chainIdentity: Rfc64PublicCatalogActivationChainIdentityV1,
 ): ResolvedRfc64CatalogActivationsV1 {
   const catalog = resolveRfc64CatalogActivationInputV1(input.catalog, chainIdentity);
+  // The unified block is authoritative. Its explicit compatibility rollback
+  // must suppress every deprecated public selection, including stale nested
+  // data that should not be parsed while operators are disabling the feature.
+  if (!catalog.enabled) {
+    return Object.freeze({
+      catalog,
+      publicCatalog: disabledRfc64PublicCatalogActivationV1(),
+      selectedCatalogAuthoringControls: Object.freeze([]),
+    });
+  }
   const publicCatalog = resolveRfc64PublicCatalogActivationInputV1(
     input.publicCatalog,
     chainIdentity,

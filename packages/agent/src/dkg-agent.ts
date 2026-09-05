@@ -1063,6 +1063,8 @@ export class DKGAgent extends DKGAgentBase {
     const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1(
       constructedAgentChainId,
     );
+    const rfc64UnifiedCatalogExplicitlyDisabled =
+      normalizedConfig.rfc64CatalogActivation?.enabled === false;
     const activations = resolveRfc64CatalogActivationsV1({
       catalog: normalizedConfig.rfc64CatalogActivation,
       publicCatalog: normalizedConfig.rfc64PublicCatalogActivation,
@@ -1073,15 +1075,21 @@ export class DKGAgent extends DKGAgentBase {
       : activations.publicCatalog;
     const rfc64PublicCatalogControls = resolveRfc64PublicCatalogControlsV1({
       activation,
-      legacyDeploymentProfile: normalizedConfig.rfc64CatalogDeploymentProfile,
-      legacyAutoPublish: normalizedConfig.rfc64PublicCatalogAutoPublish,
-      legacyBootstrap: normalizedConfig.rfc64PublicCatalogBootstrap,
+      legacyDeploymentProfile: rfc64UnifiedCatalogExplicitlyDisabled
+        ? undefined
+        : normalizedConfig.rfc64CatalogDeploymentProfile,
+      legacyAutoPublish: rfc64UnifiedCatalogExplicitlyDisabled
+        ? undefined
+        : normalizedConfig.rfc64PublicCatalogAutoPublish,
+      legacyBootstrap: rfc64UnifiedCatalogExplicitlyDisabled
+        ? undefined
+        : normalizedConfig.rfc64PublicCatalogBootstrap,
     }, chainIdentity);
     // The unified block owns precedence over the deprecated public-only
     // alias. Omission is the 10.0.16 product default; explicit enabled=false
     // remains a one-release compatibility rollback.
     const rfc64CatalogExplicitlyDisabled =
-      normalizedConfig.rfc64CatalogActivation?.enabled === false
+      rfc64UnifiedCatalogExplicitlyDisabled
       || (
         normalizedConfig.rfc64CatalogActivation === undefined
         && normalizedConfig.rfc64PublicCatalogActivation?.enabled === false
@@ -1111,7 +1119,9 @@ export class DKGAgent extends DKGAgentBase {
             ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
           ) ?? [])
           : [],
-      activation: catalogActivation,
+      activation: rfc64UnifiedCatalogExplicitlyDisabled
+        ? Object.freeze({ ...catalogActivation, enabled: true })
+        : catalogActivation,
     });
     const config: StorageAckNormalizedDKGAgentConfig = {
       ...normalizedConfig,
@@ -1147,7 +1157,9 @@ export class DKGAgent extends DKGAgentBase {
     const rfc64CatalogDeploymentProfile = catalogActivation.deploymentProfile
       ?? rfc64PublicCatalogControls.deploymentProfile;
     const legacyRfc64CatalogAccessPolicyAuthority = snapshotRfc64CatalogAccessPolicyAuthorityV1(
-      config.rfc64CatalogAccessPolicyAuthority,
+      rfc64UnifiedCatalogExplicitlyDisabled
+        ? undefined
+        : config.rfc64CatalogAccessPolicyAuthority,
     );
     if (
       legacyRfc64CatalogAccessPolicyAuthority !== undefined

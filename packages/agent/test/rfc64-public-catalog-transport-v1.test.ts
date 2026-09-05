@@ -23,10 +23,13 @@ import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
   RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1,
+  RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
   RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
   RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1,
+  RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V2,
   Rfc64PublicCatalogTransportV1,
   encodeRfc64PublicCatalogHeadAnnouncementV1,
+  encodeRfc64PublicCatalogHeadReplayCompletionV2,
   parseRfc64PublicCatalogHeadAnnouncementV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
   type Rfc64PublicCatalogHeadReplayRequestV1,
@@ -248,7 +251,11 @@ describe('RFC-64 author catalog transport v1', () => {
           replayRequests.push({ request, remotePeerId });
           return Object.freeze({
             status: 'admitted' as const,
-            completion: Promise.resolve(),
+            completion: Promise.resolve(Object.freeze({
+              announced: 1,
+              failed: 0,
+              manifest: Object.freeze([announcement]),
+            })),
           });
         },
       },
@@ -277,6 +284,8 @@ describe('RFC-64 author catalog transport v1', () => {
       .toBe('/dkg/catalog/1/control-object/author-head');
     expect(RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V1)
       .toBe('/dkg/catalog/1/author-head-replay');
+    expect(RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V2)
+      .toBe('/dkg/catalog/2/author-head-replay');
 
     const replayRequest = Object.freeze({
       kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
@@ -284,7 +293,11 @@ describe('RFC-64 author catalog transport v1', () => {
       contextGraphId: announcement.contextGraphId,
       policyDigest: announcement.policyDigest,
     });
-    await receiverTransport.requestCatalogHeadReplay(authorNode.peerId, replayRequest);
+    await expect(receiverTransport.requestCatalogHeadReplay(authorNode.peerId, replayRequest))
+      .resolves.toEqual({
+        kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+        heads: [announcement],
+      });
     expect(replayRequests).toEqual([{
       request: replayRequest,
       remotePeerId: receiverNode.peerId,
@@ -338,7 +351,7 @@ describe('RFC-64 author catalog transport v1', () => {
     30_000,
   );
 
-  it('acknowledges replay admission without waiting for replay completion', async () => {
+  it('returns the replay manifest only after admitted replay completion settles', async () => {
     const handlers = new Map<
       string,
       Parameters<ProtocolRouter['register']>[1]
@@ -369,10 +382,18 @@ describe('RFC-64 author catalog transport v1', () => {
     } as unknown as ProtocolRouter;
     let releaseCompletion!: () => void;
     let completionSettled = false;
-    const completion = new Promise<void>((resolve) => {
+    const completion = new Promise<Readonly<{
+      announced: number;
+      failed: number;
+      manifest: readonly Rfc64PublicCatalogHeadAnnouncementV1[];
+    }>>((resolve) => {
       releaseCompletion = () => {
         completionSettled = true;
-        resolve();
+        resolve(Object.freeze({
+          announced: 0,
+          failed: 0,
+          manifest: Object.freeze([]),
+        }));
       };
     });
     const provider = new Rfc64PublicCatalogTransportV1(providerRouter, {
@@ -395,12 +416,17 @@ describe('RFC-64 author catalog transport v1', () => {
     provider.start();
     requester.start();
 
-    await expect(requester.requestCatalogHeadReplay('provider-peer', replayRequest()))
-      .resolves.toBeUndefined();
+    let requestSettled = false;
+    const replay = requester.requestCatalogHeadReplay('provider-peer', replayRequest());
+    void replay.then(() => { requestSettled = true; });
+    await vi.waitFor(() => { expect(requesterSend).toHaveBeenCalledOnce(); });
     expect(completionSettled).toBe(false);
-    expect(requesterSend).toHaveBeenCalledOnce();
+    expect(requestSettled).toBe(false);
     releaseCompletion();
-    await completion;
+    await expect(replay).resolves.toEqual({
+      kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+      heads: [],
+    });
   });
 
   it('retries only overload and reports a typed error at the persistent bound', async () => {
@@ -418,8 +444,12 @@ describe('RFC-64 author catalog transport v1', () => {
   });
 
   it('retries overload until the provider admits the request', async () => {
-    const responses = [2, 2, 1];
-    const send = vi.fn(async () => Uint8Array.of(responses.shift() ?? 2));
+    const completion = encodeRfc64PublicCatalogHeadReplayCompletionV2(Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+      heads: Object.freeze([]),
+    }));
+    const responses = [Uint8Array.of(2), Uint8Array.of(2), completion];
+    const send = vi.fn(async () => responses.shift() ?? Uint8Array.of(2));
     const wait = vi.fn(async () => {});
     const requester = requesterTransportForReplay(send, {
       maxAttempts: 4,
@@ -427,7 +457,10 @@ describe('RFC-64 author catalog transport v1', () => {
     });
 
     await expect(requester.requestCatalogHeadReplay('provider-peer', replayRequest()))
-      .resolves.toBeUndefined();
+      .resolves.toEqual({
+        kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+        heads: [],
+      });
     expect(send).toHaveBeenCalledTimes(3);
     expect(wait.mock.calls.map(([delayMs]) => delayMs)).toEqual([100, 200]);
   });

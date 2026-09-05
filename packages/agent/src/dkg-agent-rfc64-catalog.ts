@@ -475,7 +475,7 @@ interface Rfc64CatalogReplayHeadV1 {
 
 interface Rfc64CatalogReplayRuntimeV1 {
   tail: Promise<void>;
-  readonly pending: Map<string, Promise<Readonly<{ announced: number; failed: number }>>>;
+  readonly pending: Map<string, Promise<Readonly<Rfc64CatalogReplayResultV1>>>;
   readonly pendingByPeer: Map<string, number>;
   indexFingerprint: string | null;
   indexByScope: ReadonlyMap<string, readonly Rfc64CatalogReplayHeadV1[]>;
@@ -484,6 +484,23 @@ interface Rfc64CatalogReplayRuntimeV1 {
 interface Rfc64CatalogReplayResultV1 {
   readonly announced: number;
   readonly failed: number;
+  readonly manifest: readonly Rfc64PublicCatalogHeadAnnouncementV1[];
+}
+
+function rfc64CatalogReplayInventoryFingerprintV1(
+  snapshots: readonly AppliedCatalogHeadSnapshotV1[],
+): string {
+  return snapshots
+    .map((snapshot) => [
+      snapshot.catalogScopeDigest,
+      snapshot.authorAddress,
+      snapshot.currentCatalogHeadDigest,
+      snapshot.appliedInventoryDigest,
+      snapshot.catalogVersion,
+      snapshot.inventoryRowCount,
+    ].join(':'))
+    .sort()
+    .join('\n');
 }
 
 type Rfc64CatalogReplayAdmissionV1 = Readonly<{
@@ -496,6 +513,60 @@ type Rfc64CatalogReplayAdmissionV1 = Readonly<{
 }>;
 
 const rfc64CatalogReplayRuntimesV1 = new WeakMap<DKGAgent, Rfc64CatalogReplayRuntimeV1>();
+
+interface Rfc64CatalogReplayProgressV1 {
+  readonly policyDigest: Digest32V1;
+  readonly pendingPeers: Set<string>;
+  token: number;
+  active: boolean;
+  failed: boolean;
+  completion: Promise<Readonly<{ requested: number; failed: number }>> | null;
+}
+
+const rfc64CatalogReplayProgressV1 =
+  new WeakMap<DKGAgent, Map<string, Rfc64CatalogReplayProgressV1>>();
+const rfc64CatalogReplayStatusRevisionV1 = new WeakMap<DKGAgent, number>();
+
+function bumpRfc64CatalogReplayStatusRevisionV1(agent: DKGAgent): void {
+  rfc64CatalogReplayStatusRevisionV1.set(
+    agent,
+    (rfc64CatalogReplayStatusRevisionV1.get(agent) ?? 0) + 1,
+  );
+}
+
+function rfc64CatalogReplayProgressForV1(
+  agent: DKGAgent,
+  contextGraphId: string,
+  policyDigest: Digest32V1,
+): Rfc64CatalogReplayProgressV1 {
+  let byContextGraph = rfc64CatalogReplayProgressV1.get(agent);
+  if (byContextGraph === undefined) {
+    byContextGraph = new Map();
+    rfc64CatalogReplayProgressV1.set(agent, byContextGraph);
+  }
+  let progress = byContextGraph.get(contextGraphId);
+  if (progress === undefined || progress.policyDigest !== policyDigest) {
+    progress = {
+      policyDigest,
+      pendingPeers: new Set(),
+      token: 0,
+      active: false,
+      failed: false,
+      completion: null,
+    };
+    byContextGraph.set(contextGraphId, progress);
+  }
+  return progress;
+}
+
+function clearRfc64CatalogReplayProgressV1(
+  agent: DKGAgent,
+  contextGraphId: string,
+): void {
+  if (rfc64CatalogReplayProgressV1.get(agent)?.delete(contextGraphId) === true) {
+    bumpRfc64CatalogReplayStatusRevisionV1(agent);
+  }
+}
 
 interface Rfc64CatalogTrackedTargetV1 {
   announcement: Rfc64PublicCatalogHeadAnnouncementV1;
@@ -1112,6 +1183,52 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     contextGraphId: string,
   ): void {
     rfc64CatalogTargetAnnouncementsV1.get(this)?.clearContextGraph(contextGraphId);
+    clearRfc64CatalogReplayProgressV1(this, contextGraphId);
+  }
+
+  /** Fence operational completeness synchronously when a replay-capable peer connects. */
+  markRfc64CatalogReplayPeerPendingV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    peerId: string,
+  ): void {
+    const service = this.rfc64PublicCatalogServiceV1;
+    const networkId = (
+      this.config.rfc64CatalogDeploymentProfile?.networkId
+      ?? this.config.networkIdentity?.chainId
+    ) as NetworkIdV1 | undefined;
+    if (service === undefined || networkId === undefined || networkId === 'none') return;
+    const accepted = service.acceptedPolicySnapshot(
+      networkId,
+      contextGraphId as ContextGraphIdV1,
+    );
+    if (accepted === null) return;
+    const progress = rfc64CatalogReplayProgressForV1(
+      this,
+      contextGraphId,
+      accepted.policyDigest,
+    );
+    progress.pendingPeers.add(peerId);
+    if (!progress.active) {
+      progress.active = true;
+      progress.failed = false;
+      bumpRfc64CatalogReplayStatusRevisionV1(this);
+    }
+  }
+
+  /** Release a synchronous connection fence when admission rejects that peer. */
+  clearRfc64CatalogReplayPeerPendingV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    peerId: string,
+  ): void {
+    const progress = rfc64CatalogReplayProgressV1.get(this)?.get(contextGraphId);
+    if (progress === undefined) return;
+    progress.pendingPeers.delete(peerId);
+    if (progress.pendingPeers.size === 0 && progress.completion === null && progress.active) {
+      progress.active = false;
+      bumpRfc64CatalogReplayStatusRevisionV1(this);
+    }
   }
 
   /** Desired RFC-64 selection derived from the normal live CG lifecycle. */
@@ -1158,11 +1275,23 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           : 'operator-override',
       });
     }));
-    const appliedByContextGraph = persistence === undefined
+    let replaySnapshotRevision = rfc64CatalogReplayStatusRevisionV1.get(this) ?? 0;
+    let appliedByContextGraph = persistence === undefined
       ? new Map<string, readonly Readonly<Rfc64OperationalAppliedHeadV1>[]>()
       : groupRfc64OperationalAppliedHeadsV1(
           await loadRfc64OperationalAppliedHeadsV1(persistence),
         );
+    if (
+      persistence !== undefined
+      && replaySnapshotRevision !== (rfc64CatalogReplayStatusRevisionV1.get(this) ?? 0)
+    ) {
+      replaySnapshotRevision = rfc64CatalogReplayStatusRevisionV1.get(this) ?? 0;
+      appliedByContextGraph = groupRfc64OperationalAppliedHeadsV1(
+        await loadRfc64OperationalAppliedHeadsV1(persistence),
+      );
+    }
+    const replaySnapshotUnstable = replaySnapshotRevision
+      !== (rfc64CatalogReplayStatusRevisionV1.get(this) ?? 0);
     const progressByContextGraph = rfc64CatalogAuthorityProgressV1.get(this);
     const receiverStats = service?.stats().receiver;
     return Object.freeze(selections.map((selection) => {
@@ -1173,6 +1302,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         )
         : null;
       const progress = progressByContextGraph?.get(selection.contextGraphId);
+      const replayProgress = rfc64CatalogReplayProgressV1
+        .get(this)?.get(selection.contextGraphId);
+      const currentReplayProgress = accepted !== null
+        && replayProgress?.policyDigest === accepted.policyDigest
+        ? replayProgress
+        : undefined;
+      const replayActive = replaySnapshotUnstable || currentReplayProgress?.active === true;
+      const replayFailed = currentReplayProgress?.failed === true;
+      const replayUnsettled = replayActive || replayFailed;
       const heads = appliedByContextGraph.get(selection.contextGraphId) ?? [];
       const targetTracker = rfc64CatalogTargetAnnouncementsV1.get(this);
       const targets = targetTracker?.targetsForContextGraph(selection.contextGraphId) ?? [];
@@ -1262,6 +1400,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         ? 'catalog-reconciliation-failed'
         : targetCapacityExceeded
           ? 'catalog-target-capacity-exceeded'
+        : replayFailed
+          ? 'catalog-replay-incomplete'
         : !selection.active
         ? selection.selectionSource === 'kill-switch' ? 'kill-switch-active' : null
         : selection.mode === 'legacy'
@@ -1285,6 +1425,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               ? 'unknown-freshness'
             : targetFailure !== undefined
               ? 'blocked'
+            : replayActive
+              ? 'applying'
             : pendingTargets.length > 0
               ? 'applying'
             : legacyReadOnlyCount > 0
@@ -1313,21 +1455,32 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         authorityEra: accepted?.policy.era ?? progress?.policyEra ?? null,
         authorityFreshness,
         catalogServiceStarted: service?.started ?? false,
-        expectedCatalogHeadDigest: targetCapacityExceeded ? null : expectedCatalogHeadDigest,
+        expectedCatalogHeadDigest:
+          targetCapacityExceeded || replayUnsettled ? null : expectedCatalogHeadDigest,
         appliedCatalogHeadDigest: catalogHeadDigest,
         expectedInventoryDigest:
-          targetCapacityExceeded || pendingTargets.length > 0 ? null : inventoryDigest,
+          targetCapacityExceeded || replayUnsettled || pendingTargets.length > 0
+            ? null
+            : inventoryDigest,
         appliedInventoryDigest: inventoryDigest,
-        expectedRowCount: targetCapacityExceeded || pendingTargets.length > 0 ? null : rowCount,
+        expectedRowCount:
+          targetCapacityExceeded || replayUnsettled || pendingTargets.length > 0
+            ? null
+            : rowCount,
         appliedRowCount: rowCount,
         missingRowCount:
-          targetCapacityExceeded || pendingTargets.length > 0 || rowCount === null ? null : '0',
+          targetCapacityExceeded
+          || replayUnsettled
+          || pendingTargets.length > 0
+          || rowCount === null
+            ? null
+            : '0',
         legacyReadOnlyCount,
         catalogVersion,
         authorHeadCount: heads.length,
         lastSuccessfulAdvanceAt,
         providerHealth: Object.freeze({
-          candidateCount: targetCapacityExceeded ? null : targets.length,
+          candidateCount: targetCapacityExceeded || replayUnsettled ? null : targets.length,
           attempts: receiverStats?.providerAttempts ?? 0,
           switches: receiverStats?.providerSwitches ?? 0,
           successes: receiverStats?.providerSuccesses ?? 0,
@@ -2312,6 +2465,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         this.rfc64PublicCatalogReconciliationFailuresV1.clear();
         rfc64DirectAcceptedCompatibilityV1.delete(this);
         rfc64CatalogReplayRuntimesV1.delete(this);
+        rfc64CatalogReplayProgressV1.delete(this);
+        rfc64CatalogReplayStatusRevisionV1.delete(this);
         rfc64CatalogTargetAnnouncementsV1.get(this)?.resetAll();
         rfc64CatalogTargetAnnouncementsV1.delete(this);
       }
@@ -2446,7 +2601,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     peerId: string,
     requestedScope: Readonly<Rfc64PublicCatalogHeadReplayRequestV1>,
-  ): Promise<Readonly<{ announced: number; failed: number }>> {
+  ): Promise<Readonly<Rfc64CatalogReplayResultV1>> {
     const admission = this.tryQueueRfc64CatalogHeadReplayV1(peerId, requestedScope);
     if (admission.status === 'busy') {
       throw new Error('RFC-64 catalog head replay queue is full');
@@ -2504,14 +2659,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (persistence === undefined) return new Map();
     const runtime = rfc64CatalogReplayRuntimeForV1(this);
     const snapshots = persistence.inventory.listAppliedCatalogHeadsV1();
-    const fingerprint = snapshots
-      .map((snapshot) => [
-        snapshot.catalogScopeDigest,
-        snapshot.authorAddress,
-        snapshot.currentCatalogHeadDigest,
-      ].join(':'))
-      .sort()
-      .join('\n');
+    const fingerprint = rfc64CatalogReplayInventoryFingerprintV1(snapshots);
     if (runtime.indexFingerprint === fingerprint) return runtime.indexByScope;
 
     const index = new Map<string, Rfc64CatalogReplayHeadV1[]>();
@@ -2520,10 +2668,20 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         objectDigest: applied.currentCatalogHeadDigest,
         verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
       }).catch(() => null);
-      if (stored === null) continue;
+      if (stored === null) {
+        throw new Error('RFC-64 durable catalog head is missing or unverifiable');
+      }
       try {
         assertSignedAuthorCatalogHeadEnvelopeV1(stored.envelope);
         const head = stored.envelope;
+        const scope = deriveAuthorCatalogScopeFromHeadV1(head.payload);
+        if (
+          computeAuthorCatalogScopeDigestV1(scope) !== applied.catalogScopeDigest
+          || head.payload.authorAddress !== applied.authorAddress
+          || head.payload.version !== applied.catalogVersion
+        ) {
+          throw new Error('RFC-64 durable catalog head does not match its applied inventory row');
+        }
         const key = rfc64CatalogReplayScopeKeyV1(
           head.payload.networkId,
           head.payload.contextGraphId,
@@ -2531,8 +2689,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         const entries = index.get(key) ?? [];
         entries.push(Object.freeze({ head }));
         index.set(key, entries);
-      } catch {
-        // Corrupt/non-head control objects are not replayable availability.
+      } catch (cause) {
+        throw new Error('RFC-64 durable catalog inventory contains an invalid head', {
+          cause,
+        });
       }
     }
     runtime.indexFingerprint = fingerprint;
@@ -2547,14 +2707,20 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     peerId: string,
     requestedScope?: Readonly<Rfc64PublicCatalogHeadReplayRequestV1>,
-  ): Promise<Readonly<{ announced: number; failed: number }>> {
+  ): Promise<Readonly<Rfc64CatalogReplayResultV1>> {
     const service = this.rfc64PublicCatalogServiceV1;
     const persistence = this.rfc64PersistenceV1;
     if (service === undefined || persistence === undefined) {
-      return Object.freeze({ announced: 0, failed: 0 });
+      if (requestedScope !== undefined) {
+        throw new Error('RFC-64 scoped catalog replay service is unavailable');
+      }
+      return Object.freeze({ announced: 0, failed: 0, manifest: Object.freeze([]) });
     }
     let announced = 0;
     let failed = 0;
+    const replayInventoryFingerprint = rfc64CatalogReplayInventoryFingerprintV1(
+      persistence.inventory.listAppliedCatalogHeadsV1(),
+    );
     const index = await this.readRfc64CatalogReplayIndexV1();
     const entries = requestedScope === undefined
       ? [...index.values()].flat()
@@ -2562,45 +2728,104 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         requestedScope.networkId,
         requestedScope.contextGraphId,
       )) ?? [];
-    for (const { head } of entries) {
-      try {
-        if (!this.resolveRfc64CatalogServingAuthorityV1(
+    const replayScopes = [...new Map(entries.map(({ head }) => {
+      const scope = deriveAuthorCatalogScopeFromHeadV1(head.payload);
+      return [
+        `${computeAuthorCatalogScopeDigestV1(scope)}\0${scope.authorAddress}`,
+        scope,
+      ] as const;
+    })).entries()]
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([, scope]) => scope);
+    const runWithReplayScopesLocked = async <T>(
+      scopeIndex: number,
+      operation: () => Promise<T>,
+    ): Promise<T> => {
+      const scope = replayScopes[scopeIndex];
+      if (scope === undefined) return operation();
+      return this.rfc64CatalogMutationCoordinatorV1.run(
+        scope,
+        () => runWithReplayScopesLocked(scopeIndex + 1, operation),
+      );
+    };
+    return runWithReplayScopesLocked(0, async () => {
+      if (rfc64CatalogReplayInventoryFingerprintV1(
+        persistence.inventory.listAppliedCatalogHeadsV1(),
+      ) !== replayInventoryFingerprint) {
+        throw new Error('RFC-64 durable catalog inventory changed before replay snapshot');
+      }
+      const manifest: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
+      for (const { head } of entries) {
+        const servingAuthority = this.resolveRfc64CatalogServingAuthorityV1(
           head.payload.contextGraphId,
-        ).track2Enabled) continue;
+        );
         const accepted = service.acceptedPolicySnapshot(
           head.payload.networkId,
           head.payload.contextGraphId,
         );
-        if (accepted === null) continue;
+        if (!servingAuthority.track2Enabled || accepted === null) {
+          if (requestedScope !== undefined) {
+            throw new Error('RFC-64 scoped catalog replay authority is unavailable');
+          }
+          continue;
+        }
         if (
           requestedScope !== undefined
           && accepted.policyDigest !== requestedScope.policyDigest
-        ) continue;
-        const delivery = await service.announceCatalogHead({
-          announcement: Object.freeze({
-            kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
-            networkId: head.payload.networkId,
-            contextGraphId: head.payload.contextGraphId,
-            subGraphName: head.payload.subGraphName,
-            authorAddress: head.payload.authorAddress,
-            catalogEra: head.payload.era,
-            catalogVersion: head.payload.version,
-            policyDigest: accepted.policyDigest,
-            catalogHeadObjectDigest: head.objectDigest as Digest32V1,
-            signatureVariantDigest: computeControlSignatureVariantDigestHex(
-              head.objectDigest,
-              head.signature,
-            ) as Digest32V1,
-          }),
-          peers: [peerId],
-        });
-        announced += delivery.announcedPeers.length;
-        failed += delivery.failedPeers.length;
-      } catch {
-        failed += 1;
+        ) {
+          throw new Error('RFC-64 scoped catalog replay policy changed before snapshot');
+        }
+        manifest.push(Object.freeze({
+          kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+          networkId: head.payload.networkId,
+          contextGraphId: head.payload.contextGraphId,
+          subGraphName: head.payload.subGraphName,
+          authorAddress: head.payload.authorAddress,
+          catalogEra: head.payload.era,
+          catalogVersion: head.payload.version,
+          policyDigest: accepted.policyDigest,
+          catalogHeadObjectDigest: head.objectDigest as Digest32V1,
+          signatureVariantDigest: computeControlSignatureVariantDigestHex(
+            head.objectDigest,
+            head.signature,
+          ) as Digest32V1,
+        }));
       }
-    }
-    return Object.freeze({ announced, failed });
+      if (manifest.length > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1) {
+        throw new Error('RFC-64 scoped catalog replay manifest exceeds the per-CG target cap');
+      }
+      manifest.sort((left, right) => {
+        const leftKey = rfc64CatalogTargetExactIdentityKeyV1(left);
+        const rightKey = rfc64CatalogTargetExactIdentityKeyV1(right);
+        return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+      });
+      const completedManifest: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
+      for (const announcement of manifest) {
+        try {
+          const delivery = await service.announceCatalogHead({
+            announcement,
+            peers: [peerId],
+          });
+          announced += delivery.announcedPeers.length;
+          failed += delivery.failedPeers.length;
+          if (delivery.announcedPeers.length === 1) {
+            completedManifest.push(announcement);
+          }
+        } catch {
+          failed += 1;
+        }
+      }
+      if (rfc64CatalogReplayInventoryFingerprintV1(
+        persistence.inventory.listAppliedCatalogHeadsV1(),
+      ) !== replayInventoryFingerprint) {
+        throw new Error('RFC-64 durable catalog inventory changed during replay');
+      }
+      return Object.freeze({
+        announced,
+        failed,
+        manifest: Object.freeze(completedManifest),
+      });
+    });
   }
 
   /** Request scoped head replay from already-connected peers after late activation. */
@@ -2613,35 +2838,120 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       this.config.rfc64CatalogDeploymentProfile?.networkId
       ?? this.config.networkIdentity?.chainId
     ) as NetworkIdV1 | undefined;
+    const accepted = service !== undefined && networkId !== undefined && networkId !== 'none'
+      ? service.acceptedPolicySnapshot(
+        networkId,
+        contextGraphId as ContextGraphIdV1,
+      )
+      : null;
     if (
       service === undefined
       || networkId === undefined
       || networkId === 'none'
-      || service.acceptedPolicySnapshot(
-        networkId,
-        contextGraphId as ContextGraphIdV1,
-      ) === null
+      || accepted === null
     ) {
       return Object.freeze({ requested: 0, failed: 0 });
     }
     const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(
       this.node.libp2p.getPeers().map((peer) => peer.toString()).slice(0, 64),
     );
-    let requested = 0;
-    let failed = 0;
-    await Promise.all(peers.map(async (remotePeerId) => {
+    const replayProgress = rfc64CatalogReplayProgressForV1(
+      this,
+      contextGraphId,
+      accepted.policyDigest,
+    );
+    for (const peer of peers) replayProgress.pendingPeers.add(peer);
+    if (replayProgress.pendingPeers.size === 0) {
+      return Object.freeze({ requested: 0, failed: 0 });
+    }
+    if (replayProgress.completion !== null) return replayProgress.completion;
+    replayProgress.token += 1;
+    const token = replayProgress.token;
+    replayProgress.active = true;
+    replayProgress.failed = false;
+    bumpRfc64CatalogReplayStatusRevisionV1(this);
+    const run = (async (): Promise<Readonly<{ requested: number; failed: number }>> => {
+      let requested = 0;
+      let failed = 0;
+      let replayFailed = true;
       try {
-        await service.requestCatalogHeadReplay({
-          remotePeerId,
-          networkId,
-          contextGraphId: contextGraphId as ContextGraphIdV1,
-        });
-        requested += 1;
+        const manifests: Rfc64PublicCatalogHeadAnnouncementV1[][] = [];
+        for (;;) {
+          const replayPeers = [...replayProgress.pendingPeers];
+          replayProgress.pendingPeers.clear();
+          await Promise.all(replayPeers.map(async (remotePeerId) => {
+            for (let attempt = 0; attempt < 2; attempt += 1) {
+              try {
+                const completion = await service.requestCatalogHeadReplay({
+                  remotePeerId,
+                  networkId,
+                  contextGraphId: contextGraphId as ContextGraphIdV1,
+                });
+                manifests.push([...completion.heads]);
+                requested += 1;
+                return;
+              } catch {
+                if (attempt === 1) failed += 1;
+              }
+            }
+          }));
+          // Completion-capable provider responses are returned only after every
+          // promised announcement is synchronously admitted at this receiver.
+          await service.whenReceiverIdle();
+          if (replayProgress.pendingPeers.size > 0) continue;
+
+          const promisedByIdentity = new Map<string, Rfc64PublicCatalogHeadAnnouncementV1>();
+          for (const target of manifests.flat()) {
+            promisedByIdentity.set(rfc64CatalogTargetExactIdentityKeyV1(target), target);
+          }
+          const promised = [...promisedByIdentity.values()];
+          let parityFailures = 0;
+          if (promised.length > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1) {
+            parityFailures = 1;
+          } else if (this.rfc64PersistenceV1 === undefined) {
+            parityFailures = 1;
+          } else {
+            const applied = new Map(
+              (await loadRfc64OperationalAppliedHeadsV1(this.rfc64PersistenceV1))
+                .filter((head) => head.contextGraphId === contextGraphId)
+                .map((head) => [head.scopeKey, head]),
+            );
+            const unsatisfied = promised.some((target) => {
+              const current = applied.get(rfc64CatalogTargetScopeKeyV1(target));
+              if (current === undefined) return true;
+              const currentVersion = BigInt(current.snapshot.catalogVersion);
+              const promisedVersion = BigInt(target.catalogVersion);
+              return currentVersion < promisedVersion || (
+                currentVersion === promisedVersion
+                && current.snapshot.currentCatalogHeadDigest
+                  !== target.catalogHeadObjectDigest
+              );
+            });
+            if (unsatisfied) parityFailures = 1;
+          }
+          // A connection arriving during the asynchronous durable parity read
+          // owns another replay pass; never settle the coalesced run around it.
+          if (replayProgress.pendingPeers.size > 0) continue;
+          failed += parityFailures;
+          break;
+        }
+        replayFailed = failed > 0;
+        return Object.freeze({ requested, failed });
       } catch {
         failed += 1;
+        return Object.freeze({ requested, failed });
+      } finally {
+        const current = rfc64CatalogReplayProgressV1.get(this)?.get(contextGraphId);
+        if (current === replayProgress && current.token === token) {
+          current.active = false;
+          current.failed = replayFailed;
+          current.completion = null;
+          bumpRfc64CatalogReplayStatusRevisionV1(this);
+        }
       }
-    }));
-    return Object.freeze({ requested, failed });
+    })();
+    replayProgress.completion = run;
+    return run;
   }
 
   /**

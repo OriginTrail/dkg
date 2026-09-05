@@ -1331,14 +1331,23 @@ async function runDaemonInnerWithStartupOwnership(
   // network manifest fails before subscriptions, stores, wallets, or agent
   // runtime construction begin. The same immutable chainBase is reused below.
   const chainBase = resolveChainConfig(config, network);
+  const unifiedRfc64Disabled = config.rfc64Catalog?.enabled === false;
   const rfc64CatalogActivations = resolveRfc64CatalogActivations(
-    config,
+    unifiedRfc64Disabled
+      ? {
+          rfc64Catalog: config.rfc64Catalog,
+          // The unified rollback is authoritative at the daemon boundary too.
+          // Do not let stale deprecated controls extend sync scope, fail
+          // validation, or reach the agent while the replacement is disabled.
+          rfc64PublicCatalog: undefined,
+        }
+      : config,
     resolveRfc64PublicCatalogActivationChainIdentityV1(chainBase?.chainId),
   );
   const rfc64Catalog = rfc64CatalogActivations.catalog;
   const rfc64PublicCatalog = rfc64CatalogActivations.publicCatalog;
   const rfc64RollbackTimestamp = new Date().toISOString();
-  const explicitDisabled = config.rfc64Catalog?.enabled === false
+  const explicitDisabled = unifiedRfc64Disabled
     || (config.rfc64Catalog === undefined && config.rfc64PublicCatalog?.enabled === false);
   if (explicitDisabled) {
     log(
