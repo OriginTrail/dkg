@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import {
-  RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1,
-  Rfc64CatalogAuthorityRefreshLoopV1,
-} from '../src/rfc64/catalog-authority-refresh-loop-v1.js';
+import { Rfc64CatalogAuthorityRefreshLoopV1 } from
+  '../src/rfc64/catalog-authority-refresh-loop-v1.js';
+import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
+  '../src/rfc64/catalog-authority-config-v1.js';
 
 function createSchedulerHarness() {
   const scheduled: Array<Readonly<{
@@ -57,7 +57,7 @@ describe('RFC-64 catalog authority refresh loop', () => {
     loop.start();
     expect(scheduled).toHaveLength(1);
     expect(scheduled[0]?.intervalMs)
-      .toBe(RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1);
+      .toBe(RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs);
 
     scheduled[0]!.callback();
     await firstStarted;
@@ -132,7 +132,6 @@ describe('RFC-64 catalog authority refresh loop', () => {
     });
 
     loop.start();
-    scheduled[0]!.callback();
     await started;
     let closeSettled = false;
     const close = loop.close().then(() => { closeSettled = true; });

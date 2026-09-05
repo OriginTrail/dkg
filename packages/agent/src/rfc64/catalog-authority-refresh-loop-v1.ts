@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Rfc64CoalescingSupervisorV1 } from './coalescing-supervisor-v1.js';
-
-export const RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1 = 5 * 60_000;
+import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
+  './catalog-authority-config-v1.js';
 
 export interface Rfc64CatalogAuthorityRefreshSchedulerV1 {
   setInterval(
@@ -33,20 +33,16 @@ export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
   ) => Promise<unknown>;
   readonly onRefreshFailure: (contextGraphId: string, error: unknown) => void;
   readonly scheduler?: Rfc64CatalogAuthorityRefreshSchedulerV1;
-  readonly intervalMs?: number;
 }
 
 /** One bounded recurring authority pass with explicit scheduling and shutdown ownership. */
 export class Rfc64CatalogAuthorityRefreshLoopV1 {
   readonly #scheduler: Rfc64CatalogAuthorityRefreshSchedulerV1;
-  readonly #intervalMs: number;
   readonly #supervisor: Rfc64CoalescingSupervisorV1;
   #timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly options: Rfc64CatalogAuthorityRefreshLoopOptionsV1) {
     this.#scheduler = options.scheduler ?? rfc64CatalogAuthorityRefreshSchedulerV1;
-    this.#intervalMs = options.intervalMs
-      ?? RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1;
     this.#supervisor = new Rfc64CoalescingSupervisorV1({
       requestWhileRunning: 'drop',
       runPass: async (signal) => {
@@ -73,7 +69,11 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 {
       throw new Error('RFC-64 catalog authority refresh loop is closed');
     }
     if (this.#timer !== null) return;
-    this.#timer = this.#scheduler.setInterval(this.trigger, this.#intervalMs);
+    this.#timer = this.#scheduler.setInterval(
+      this.trigger,
+      RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs,
+    );
+    this.trigger();
   }
 
   readonly trigger = (): void => {

@@ -63,10 +63,10 @@ import type { DKGAgent } from './dkg-agent.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
 import {
-  RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1,
   Rfc64CatalogAuthorityRefreshLoopV1,
 } from './rfc64/catalog-authority-refresh-loop-v1.js';
 import {
+  RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1,
   snapshotRfc64CatalogDeploymentProfileV1,
 } from './rfc64/catalog-authority-config-v1.js';
 import type { AcceptedOpenCatalogPolicyV1 } from './rfc64/open-catalog-policy-v1.js';
@@ -464,6 +464,7 @@ const rfc64CatalogAuthorityRevisionsV1 =
 const rfc64DirectAcceptedCompatibilityV1 = new WeakMap<DKGAgent, Set<string>>();
 const rfc64CatalogAuthorityRefreshV1 =
   new WeakMap<DKGAgent, Rfc64CatalogAuthorityRefreshLoopV1>();
+const rfc64PublicCatalogServiceCloseV1 = new WeakMap<DKGAgent, Promise<void>>();
 const rfc64SystemContextGraphIdsV1 = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_V1 = 64;
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_PER_PEER_V1 = 4;
@@ -1388,7 +1389,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           ? 'current' as const
           : progress?.state === 'accepted'
             && Date.now() - progress.updatedAtMs
-              <= RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1 * 4
+              <= RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs
+                * RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.freshnessIntervalCount
             ? 'current' as const
             : 'unknown' as const;
       const legacyReadOnlyCount = readRfc64LegacySwmBoundaryCountV1(
@@ -2204,6 +2206,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
    * No-op when RFC-64 persistence is dormant (no `dataDir`) or already started.
    */
   startRfc64PublicCatalogServiceV1(this: DKGAgent, ctx: OperationContext): void {
+    if (rfc64PublicCatalogServiceCloseV1.has(this)) {
+      throw new Error('RFC-64 public catalog service is closing');
+    }
     if (this.rfc64PublicCatalogServiceV1 !== undefined) return;
     this.rfc64CatalogMutationCoordinatorV1.reopen();
     if (this.config.rfc64CatalogExecutionPlan.killSwitchActive) {
@@ -2383,17 +2388,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     });
     service.start();
     this.rfc64PublicCatalogServiceV1 = service;
-    for (const responsibility of this.readRfc64CatalogResponsibilitiesV1()) {
-      if (!responsibility.active || responsibility.mode === 'legacy') continue;
-      void this.reconcileRfc64CatalogAccessAuthorityV1(
-        responsibility.contextGraphId,
-      ).catch((error) => {
-        this.log.warn(
-          ctx,
-          `RFC-64 authority bootstrap failed for "${responsibility.contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
-    }
     if (!rfc64CatalogAuthorityRefreshV1.has(this)) {
       const authorityRefresh = new Rfc64CatalogAuthorityRefreshLoopV1({
         readActiveContextGraphIds: () => this.readRfc64CatalogResponsibilitiesV1()
@@ -2421,43 +2415,54 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /** Stop serving and drain in-flight receiver work. Idempotent + undefined-safe. */
-  async closeRfc64PublicCatalogServiceV1(this: DKGAgent): Promise<void> {
+  closeRfc64PublicCatalogServiceV1(this: DKGAgent): Promise<void> {
+    const activeClose = rfc64PublicCatalogServiceCloseV1.get(this);
+    if (activeClose !== undefined) return activeClose;
     const authorityRefresh = rfc64CatalogAuthorityRefreshV1.get(this);
     const service = this.rfc64PublicCatalogServiceV1;
     rfc64CatalogAuthorityRefreshV1.delete(this);
     this.rfc64PublicCatalogServiceV1 = undefined;
-    try {
-      // Fence protocol admission synchronously before waiting for a potentially
-      // non-cooperative chain/storage read in the authority refresh. Await both
-      // owners to physical retirement before the mutation coordinator closes.
-      const retirement = await Promise.allSettled([
-        service?.close(),
-        authorityRefresh?.close(),
-      ]);
-      const failures = retirement
-        .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
-        .map(({ reason }) => reason);
-      if (failures.length === 1) throw failures[0];
-      if (failures.length > 1) {
-        throw new AggregateError(failures, 'RFC-64 catalog service shutdown failed');
-      }
-    } finally {
+    const close = (async (): Promise<void> => {
       try {
-        // Service close fences remote admission. The explicit coordinator then
-        // waits for any non-cooperative physical mutation that outlived an
-        // aborted caller before persistence can be released.
-        await this.rfc64CatalogMutationCoordinatorV1.closeAndDrain();
+        // Fence protocol admission synchronously before waiting for a potentially
+        // non-cooperative chain/storage read in the authority refresh. Await both
+        // owners to physical retirement before the mutation coordinator closes.
+        const retirement = await Promise.allSettled([
+          service?.close(),
+          authorityRefresh?.close(),
+        ]);
+        const failures = retirement
+          .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+          .map(({ reason }) => reason);
+        if (failures.length === 1) throw failures[0];
+        if (failures.length > 1) {
+          throw new AggregateError(failures, 'RFC-64 catalog service shutdown failed');
+        }
       } finally {
-        this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
-        this.rfc64PublicCatalogReconciliationFailuresV1.clear();
-        rfc64DirectAcceptedCompatibilityV1.delete(this);
-        rfc64CatalogReplayRuntimesV1.delete(this);
-        rfc64CatalogReplayProgressV1.delete(this);
-        rfc64CatalogReplayStatusRevisionV1.delete(this);
-        rfc64CatalogTargetAnnouncementsV1.get(this)?.resetAll();
-        rfc64CatalogTargetAnnouncementsV1.delete(this);
+        try {
+          // Service close fences remote admission. The explicit coordinator then
+          // waits for any non-cooperative physical mutation that outlived an
+          // aborted caller before persistence can be released.
+          await this.rfc64CatalogMutationCoordinatorV1.closeAndDrain();
+        } finally {
+          this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
+          this.rfc64PublicCatalogReconciliationFailuresV1.clear();
+          rfc64DirectAcceptedCompatibilityV1.delete(this);
+          rfc64CatalogReplayRuntimesV1.delete(this);
+          rfc64CatalogReplayProgressV1.delete(this);
+          rfc64CatalogReplayStatusRevisionV1.delete(this);
+          rfc64CatalogTargetAnnouncementsV1.get(this)?.resetAll();
+          rfc64CatalogTargetAnnouncementsV1.delete(this);
+        }
       }
-    }
+    })();
+    rfc64PublicCatalogServiceCloseV1.set(this, close);
+    void close.finally(() => {
+      if (rfc64PublicCatalogServiceCloseV1.get(this) === close) {
+        rfc64PublicCatalogServiceCloseV1.delete(this);
+      }
+    }).catch(() => undefined);
+    return close;
   }
 
   /**
