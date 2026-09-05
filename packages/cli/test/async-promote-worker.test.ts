@@ -20,6 +20,7 @@ import {
   StoreOperationTimeoutError,
 } from '@origintrail-official/dkg-storage';
 import {
+  createPromotePostCommitFailure,
   createPromoteRetryableFailure,
   TripleStoreAsyncPromoteQueue,
   type AsyncPromoteQueue,
@@ -195,6 +196,19 @@ describe('classifyPromoteError', () => {
       publisherDiagnostic: {
         name: 'PromoteRetryableFailureError',
         code: PROMOTE_RETRYABLE_FAILURE_CODE,
+      },
+    });
+  });
+
+  it('keeps post-commit failures terminal even when their cause is retryable', () => {
+    expect(classifyPromoteError(createPromotePostCommitFailure(
+      createPromoteRetryableFailure(new Error('observer failed')),
+    ))).toEqual({
+      classification: 'fatal',
+      retryable: false,
+      publisherDiagnostic: {
+        name: 'PromotePostCommitFailureError',
+        code: 'PROMOTE_POST_COMMIT_FAILURE',
       },
     });
   });

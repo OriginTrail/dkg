@@ -8,6 +8,8 @@ const promoteReplaySafeBrand: unique symbol = Symbol('promote-replay-safe');
 
 export const PROMOTE_RETRYABLE_FAILURE_CODE = 'PROMOTE_RETRYABLE_FAILURE' as const;
 export const PROMOTE_RETRYABLE_FAILURE_ERROR_NAME = 'PromoteRetryableFailureError' as const;
+export const PROMOTE_POST_COMMIT_FAILURE_CODE = 'PROMOTE_POST_COMMIT_FAILURE' as const;
+export const PROMOTE_POST_COMMIT_FAILURE_ERROR_NAME = 'PromotePostCommitFailureError' as const;
 
 type PromoteReplaySafeTimeoutError = StoreOperationTimeoutErrorLike & {
   readonly [promoteReplaySafeBrand]: true;
@@ -32,15 +34,27 @@ export interface PromoteRetryableFailureDiagnostic {
   readonly code: typeof PROMOTE_RETRYABLE_FAILURE_CODE;
 }
 
+export interface PromotePostCommitFailureDiagnostic {
+  readonly name: typeof PROMOTE_POST_COMMIT_FAILURE_ERROR_NAME;
+  readonly code: typeof PROMOTE_POST_COMMIT_FAILURE_CODE;
+}
+
 export type PromoteFailureDiagnostic =
   | PromoteReplaySafeErrorDiagnostic
-  | PromoteRetryableFailureDiagnostic;
+  | PromoteRetryableFailureDiagnostic
+  | PromotePostCommitFailureDiagnostic;
 
-export interface PromoteFailureDisposition {
-  readonly classification: 'transient';
-  readonly retryable: true;
-  readonly diagnostic: PromoteFailureDiagnostic;
-}
+export type PromoteFailureDisposition =
+  | {
+      readonly classification: 'transient';
+      readonly retryable: true;
+      readonly diagnostic: PromoteReplaySafeErrorDiagnostic | PromoteRetryableFailureDiagnostic;
+    }
+  | {
+      readonly classification: 'fatal';
+      readonly retryable: false;
+      readonly diagnostic: PromotePostCommitFailureDiagnostic;
+    };
 
 class PromoteRetryableFailureError extends Error implements PromoteRetryableFailureMarker {
   readonly code = PROMOTE_RETRYABLE_FAILURE_CODE;
@@ -51,11 +65,25 @@ class PromoteRetryableFailureError extends Error implements PromoteRetryableFail
   }
 }
 
+class PromotePostCommitFailureError extends Error {
+  readonly code = PROMOTE_POST_COMMIT_FAILURE_CODE;
+
+  constructor(cause: unknown) {
+    super('A promote post-commit step failed after Shared Memory was committed', { cause });
+    this.name = PROMOTE_POST_COMMIT_FAILURE_ERROR_NAME;
+  }
+}
+
 /** Translate a domain failure at the promote boundary into the queue contract. */
 export function createPromoteRetryableFailure(
   cause: unknown,
 ): Error & PromoteRetryableFailureMarker {
   return new PromoteRetryableFailureError(cause);
+}
+
+/** Mark every failure beyond the WM→SWM commit boundary as terminal. */
+export function createPromotePostCommitFailure(cause: unknown): Error {
+  return new PromotePostCommitFailureError(cause);
 }
 
 /** Structural so the disposition survives durable/bundle boundaries. */
@@ -82,6 +110,24 @@ export function getPromoteRetryableFailureDiagnostic(
         code: PROMOTE_RETRYABLE_FAILURE_CODE,
       }
     : undefined;
+}
+
+function getPromotePostCommitFailureDiagnostic(
+  error: unknown,
+): PromotePostCommitFailureDiagnostic | undefined {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
+    return undefined;
+  }
+  try {
+    return Reflect.get(error, 'code') === PROMOTE_POST_COMMIT_FAILURE_CODE
+      ? {
+          name: PROMOTE_POST_COMMIT_FAILURE_ERROR_NAME,
+          code: PROMOTE_POST_COMMIT_FAILURE_CODE,
+        }
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Consume replay-safe certification without replacing the storage error contract. */
@@ -113,6 +159,14 @@ export function getPromoteReplaySafeErrorDiagnostic(
 export function getPromoteFailureDisposition(
   error: unknown,
 ): PromoteFailureDisposition | undefined {
+  const postCommitDiagnostic = getPromotePostCommitFailureDiagnostic(error);
+  if (postCommitDiagnostic) {
+    return {
+      classification: 'fatal',
+      retryable: false,
+      diagnostic: postCommitDiagnostic,
+    };
+  }
   const prerequisiteDiagnostic = getPromoteRetryableFailureDiagnostic(error);
   if (prerequisiteDiagnostic) {
     return {
