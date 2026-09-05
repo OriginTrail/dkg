@@ -61,6 +61,10 @@ import {
   loadOpWallets,
   resolveSyncReconcilerEnabled,
 } from '@origintrail-official/dkg-agent';
+import {
+  rfc64CatalogKillSwitchActiveV1,
+  rfc64CatalogRolloutModeForContextGraphV1,
+} from '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
 import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
@@ -599,6 +603,77 @@ function projectRfc64SelectedPublicSyncStatus(
   };
 }
 
+export interface Rfc64CatalogConfigurationEvidenceV1 {
+  readonly schemaVersion: 1;
+  readonly source:
+    | 'default-omitted'
+    | 'operator-override'
+    | 'compatibility-seed'
+    | 'explicit-disabled';
+  readonly catalogControlPresent: boolean;
+  readonly deprecatedPublicControlPresent: boolean;
+  readonly activationManifestPresent: boolean;
+  readonly deprecatedDisabledOverride: boolean;
+  readonly killSwitch: boolean;
+  readonly legacyOverrideCount: number;
+  readonly shadowOverrideCount: number;
+  readonly digest: string;
+}
+
+/**
+ * Privacy-safe attestation of the startup controls that selected RFC-64.
+ * Private graph ids and policy material participate in the digest but never
+ * leave the node; a release harness can still prove the clean omission case.
+ */
+export function buildRfc64CatalogConfigurationEvidenceV1(
+  config: Pick<DkgConfig, 'rfc64Catalog' | 'rfc64PublicCatalog'>,
+  effectiveRollout: Readonly<{
+    killSwitch: boolean;
+    contextGraphModes: Readonly<Record<string, 'legacy' | 'shadow' | 'catalog'>>;
+  }>,
+): Rfc64CatalogConfigurationEvidenceV1 {
+  const catalogControlPresent = config.rfc64Catalog !== undefined;
+  const deprecatedPublicControlPresent = config.rfc64PublicCatalog !== undefined;
+  const catalog = config.rfc64Catalog;
+  const publicCatalog = config.rfc64PublicCatalog;
+  const deprecatedDisabledOverride = catalog?.enabled === false
+    || (catalog === undefined && publicCatalog?.enabled === false);
+  const activationManifestPresent = catalog?.bootstrap !== undefined
+    || publicCatalog?.bootstrap !== undefined;
+  const modes = Object.entries(effectiveRollout.contextGraphModes)
+    .sort(([left], [right]) => left.localeCompare(right));
+  const source = !catalogControlPresent && !deprecatedPublicControlPresent
+    ? 'default-omitted' as const
+    : deprecatedDisabledOverride
+      ? 'explicit-disabled' as const
+      : activationManifestPresent
+        ? 'compatibility-seed' as const
+        : 'operator-override' as const;
+  const digestPayload = {
+    schemaVersion: 1,
+    catalogControlPresent,
+    deprecatedPublicControlPresent,
+    activationManifestPresent,
+    deprecatedDisabledOverride,
+    killSwitch: effectiveRollout.killSwitch,
+    contextGraphModes: modes,
+  };
+  return Object.freeze({
+    schemaVersion: 1,
+    source,
+    catalogControlPresent,
+    deprecatedPublicControlPresent,
+    activationManifestPresent,
+    deprecatedDisabledOverride,
+    killSwitch: effectiveRollout.killSwitch,
+    legacyOverrideCount: modes.filter(([, mode]) => mode === 'legacy').length,
+    shadowOverrideCount: modes.filter(([, mode]) => mode === 'shadow').length,
+    digest: `sha256:${createHash('sha256')
+      .update(JSON.stringify(digestPayload))
+      .digest('hex')}`,
+  });
+}
+
 export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -629,7 +704,6 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     admission,
     url,
     path,
-    requestToken,
     requestAgentAddress,
   } = ctx;
 
@@ -778,7 +852,32 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       selectedPublicContextGraphs: rfc64PublicCatalogActivation.selectedContextGraphs,
       selectedPrivateContextGraphs: [],
       accessPolicyAuthority: undefined,
+      // The compatibility-only public projection has no private bootstrap
+      // manifest, but keep the fallback structurally aligned with the shared
+      // activation snapshot so downstream status projection stays typed.
+      bootstrap: undefined,
+      autoPublish: rfc64PublicCatalogActivation.autoPublish,
+      rollout: rfc64PublicCatalogActivation.rollout,
     };
+    const rfc64CatalogRollout = rfc64CatalogActivation.rollout ?? {
+      // Resolved activations produced by this release always carry a total
+      // rollout plan. Preserve the package-boundary compatibility behavior for
+      // older direct JS callers that still pass the pre-rollout shape.
+      killSwitch: rfc64CatalogKillSwitchActiveV1(rfc64CatalogActivation),
+      contextGraphModes: Object.fromEntries(
+        rfc64CatalogActivation.selectedContextGraphs.map((contextGraphId) => [
+          contextGraphId,
+          rfc64CatalogRolloutModeForContextGraphV1(
+            rfc64CatalogActivation,
+            contextGraphId,
+          ),
+        ]),
+      ),
+    };
+    const rfc64CatalogConfiguration = buildRfc64CatalogConfigurationEvidenceV1(
+      config,
+      rfc64CatalogRollout,
+    );
     const rfc64PublicCatalogService =
       rfc64CatalogActivation.enabled
       && typeof agent.rfc64PublicCatalogStatsV1 === 'function'
@@ -789,6 +888,22 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       && typeof agent.readRfc64PublicCatalogBootstrapStatusV1 === 'function'
         ? agent.readRfc64PublicCatalogBootstrapStatusV1()
         : null;
+    const rfc64CatalogRuntimeSelection =
+      typeof agent.readRfc64CatalogRuntimeSelectionV1 === 'function'
+        ? agent.readRfc64CatalogRuntimeSelectionV1()
+        : {
+            subscriptionDriven: false,
+            eligibleContextGraphs: rfc64CatalogActivation.selectedContextGraphs,
+            selectedContextGraphs: rfc64CatalogActivation.selectedContextGraphs,
+          };
+    const rfc64CatalogResponsibilities =
+      typeof agent.readRfc64CatalogResponsibilitiesV1 === 'function'
+        ? agent.readRfc64CatalogResponsibilitiesV1()
+        : [];
+    const rfc64CatalogContextGraphs =
+      typeof agent.readRfc64CatalogOperationalStatusV1 === 'function'
+        ? await agent.readRfc64CatalogOperationalStatusV1()
+        : [];
     const selectedPublicContextGraphs = new Set(
       rfc64CatalogActivation.selectedPublicContextGraphs,
     );
@@ -824,6 +939,10 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         );
         return {
           contextGraphId,
+          mode: rfc64CatalogRolloutModeForContextGraphV1(
+            rfc64CatalogActivation,
+            contextGraphId,
+          ),
           accessPolicy: accepted?.policyEnvelope.payload.accessPolicy,
           publishPolicy: accepted?.policyEnvelope.payload.publishPolicy,
           vmRequired:
@@ -962,6 +1081,21 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       rfc64PublicCatalog: {
         enabled: rfc64PublicCatalogActivation.enabled,
         selectedContextGraphs: rfc64PublicCatalogActivation.selectedContextGraphs,
+        runtimeSelection: {
+          subscriptionDriven: rfc64CatalogRuntimeSelection.subscriptionDriven,
+          selectedContextGraphs: rfc64CatalogRuntimeSelection.selectedContextGraphs.filter(
+            (contextGraphId) => selectedPublicContextGraphs.has(contextGraphId),
+          ),
+        },
+        rollout: {
+          killSwitch: rfc64CatalogRollout.killSwitch,
+          contextGraphModes: Object.fromEntries(
+            rfc64PublicCatalogActivation.selectedContextGraphs.map((contextGraphId) => [
+              contextGraphId,
+              rfc64CatalogRollout.contextGraphModes[contextGraphId],
+            ]),
+          ),
+        },
         autoPublishEnabled: rfc64PublicCatalogActivation.autoPublish !== undefined,
         completeSwmProviders: rfc64CompleteSwmProviders,
         service: rfc64PublicCatalogService,
@@ -974,6 +1108,12 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         selectedContextGraphs: rfc64CatalogActivation.selectedContextGraphs,
         selectedPublicContextGraphs: rfc64CatalogActivation.selectedPublicContextGraphs,
         selectedPrivateContextGraphs: rfc64CatalogActivation.selectedPrivateContextGraphs,
+        runtimeSelection: rfc64CatalogRuntimeSelection,
+        responsibilities: rfc64CatalogResponsibilities,
+        contextGraphs: rfc64CatalogContextGraphs,
+        configuration: rfc64CatalogConfiguration,
+        autoPublishEnabled: rfc64CatalogActivation.autoPublish !== undefined,
+        rollout: rfc64CatalogRollout,
         privateAuthorityConfigured:
           rfc64CatalogActivation.accessPolicyAuthority !== undefined,
         privateRecovery: rfc64PrivateRecovery,

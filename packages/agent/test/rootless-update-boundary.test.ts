@@ -3,10 +3,12 @@ import {
   AUTHOR_SCHEME_VERSION_V1,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
+  TypedEventBus,
   buildUpdateAuthorAttestationTypedData,
   contextGraphDataUri,
   contextGraphMetaUri,
   createGraphKnowledgeAssetScope,
+  generateEd25519Keypair,
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import {
@@ -19,6 +21,7 @@ import {
   type SharedMemoryGraphScope,
 } from '@origintrail-official/dkg-storage';
 import {
+  DKGPublisher,
   computeFlatKCRootV10,
   computePrivateRootV10,
   resolveKnowledgeAssetOperationPublicQuads,
@@ -114,20 +117,30 @@ async function updateAttestation(
   };
 }
 
-function makeAgentLike(
+async function makeAgentLike(
   store: OxigraphStore,
   onPublisherUpdate: (kaId: bigint, options: Record<string, any>) => Promise<any>,
   currentOwner = CURRENT_OWNER,
 ) {
+  const writeLocks = new Map<string, Promise<void>>();
+  const chain = {
+    chainId: CHAIN_ID,
+    getEvmChainId: async () => EVM_CHAIN_ID,
+    getKnowledgeAssetsLifecycleAddress: async () => KAV_ADDRESS,
+    getKnowledgeAssetOwner: async () => currentOwner,
+    hasContractCode: async () => false,
+  };
+  const publisher = new DKGPublisher({
+    store,
+    chain: chain as never,
+    eventBus: new TypedEventBus(),
+    keypair: await generateEd25519Keypair(),
+    writeLocks,
+  });
+  publisher.updateKnowledgeAssetFromStagedSharedWorkingMemoryV1 = onPublisherUpdate as never;
   return {
     store,
-    chain: {
-      chainId: CHAIN_ID,
-      getEvmChainId: async () => EVM_CHAIN_ID,
-      getKnowledgeAssetsLifecycleAddress: async () => KAV_ADDRESS,
-      getKnowledgeAssetOwner: async () => currentOwner,
-      hasContractCode: async () => false,
-    },
+    chain,
     log: {
       info: () => undefined,
       warn: () => undefined,
@@ -135,7 +148,8 @@ function makeAgentLike(
       debug: () => undefined,
     },
     node: { peerId: { toString: () => 'peer-rootless-update' } },
-    publisher: { updateKnowledgeAssetFromSharedMemory: onPublisherUpdate },
+    writeLocks,
+    publisher,
     getContextGraphOnChainId: async () => null,
     createV10UpdateACKProvider: () => undefined,
     _resolveEncryptInlinePayload: async () => undefined,
@@ -169,7 +183,9 @@ describe('DKGAgent rootless update boundary', () => {
     await store.insert([q('urn:stale', 'urn:value', '"stale"', historicalAlias)]);
 
     let publisherCalls = 0;
-    const agent = makeAgentLike(store, async (kaId, options) => {
+    let lastStagedReference: unknown;
+    const interleavedPublicQuads = [q('urn:update:interleaved', 'urn:value', '"three"')];
+    const agent = await makeAgentLike(store, async (kaId, options) => {
       publisherCalls += 1;
       expect(kaId).toBe(KA_ID);
       expect(options).toMatchObject({
@@ -180,15 +196,38 @@ describe('DKGAgent rootless update boundary', () => {
         privateTripleCount: canonical.privateQuads.length,
       });
       expect(options.privateMerkleRoot).toEqual(privateRoot);
+      expect(options.stagedOperation).toBe(lastStagedReference);
+      const operationA = options.stagedOperation;
 
-      const staged = await loadSharedMemoryQuadsForScope(
+      await agent.publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+        contextGraphId: CG,
+        shareOperationId: 'interleaved-operation-b',
+        kaUal: UAL,
+        assertionVersion: '2',
+        quads: interleavedPublicQuads,
+        privateTripleCount: 0,
+      });
+      const liveAfterInterleave = await loadSharedMemoryQuadsForScope(
         store,
         swmBucket,
         'all',
         scope,
       );
-      expect(staged.map(({ graph: _graph, ...quad }) => quad)).toEqual(
-        canonical.publicQuads.map(({ graph: _graph, ...quad }) => quad),
+      expect(liveAfterInterleave.map(({ graph: _graph, ...quad }) => quad))
+        .toEqual(interleavedPublicQuads.map(({ graph: _graph, ...quad }) => quad));
+      const stagedA = await resolveKnowledgeAssetOperationPublicQuads({
+        store,
+        graphManager,
+        contextGraphId: operationA.contextGraphId,
+        shareOperationId: operationA.shareOperationId,
+        kaUal: operationA.kaUal,
+        assertionVersion: operationA.assertionVersion,
+      });
+      const byTriple = (left: Omit<Quad, 'graph'>, right: Omit<Quad, 'graph'>) =>
+        `${left.subject}\u0000${left.predicate}\u0000${left.object}`
+          .localeCompare(`${right.subject}\u0000${right.predicate}\u0000${right.object}`);
+      expect(stagedA.quads.map(({ graph: _graph, ...quad }) => quad).sort(byTriple)).toEqual(
+        canonical.publicQuads.map(({ graph: _graph, ...quad }) => quad).sort(byTriple),
       );
       return {
         kaId,
@@ -196,9 +235,17 @@ describe('DKGAgent rootless update boundary', () => {
         merkleRoot: attestation.expectedNewMerkleRoot,
         kaManifest: [],
         status: 'tentative',
-        publicQuads: staged,
+        publicQuads: stagedA.quads,
       };
     });
+    const realStage = agent.publisher.stageKnowledgeAssetSharedWorkingMemoryV1.bind(
+      agent.publisher,
+    );
+    agent.publisher.stageKnowledgeAssetSharedWorkingMemoryV1 = async (input) => {
+      const staged = await realStage(input);
+      lastStagedReference = staged;
+      return staged;
+    };
 
     const result = await (PublishMethods.prototype as any).update.call(
       agent,
@@ -211,7 +258,7 @@ describe('DKGAgent rootless update boundary', () => {
 
     expect(result.status).toBe('tentative');
     expect(publisherCalls).toBe(1);
-    expect(await store.countQuads(canonicalSwm)).toBe(canonical.publicQuads.length);
+    expect(await store.countQuads(canonicalSwm)).toBe(interleavedPublicQuads.length);
     expect(await store.countQuads(historicalAlias)).toBe(0);
     const privateStore = new PrivateContentStore(store, graphManager);
     expect(await privateStore.getKnowledgeAssetPrivateTriples(
@@ -236,7 +283,7 @@ describe('DKGAgent rootless update boundary', () => {
     const { attestation } = await updateAttestation(publicQuads);
     attestation.expectedNewMerkleRoot = new Uint8Array(32).fill(0xff);
     let publisherCalls = 0;
-    const agent = makeAgentLike(store, async () => {
+    const agent = await makeAgentLike(store, async () => {
       publisherCalls += 1;
       throw new Error('publisher must not be called');
     });
@@ -292,7 +339,7 @@ describe('DKGAgent rootless update boundary', () => {
     await privateStore.replaceKnowledgeAssetPrivateTriples(CG, nextScope, priorPrivate);
 
     let publisherCalls = 0;
-    const agent = makeAgentLike(store, async () => {
+    const agent = await makeAgentLike(store, async () => {
       publisherCalls += 1;
       throw new Error('publisher must not be called');
     });
@@ -326,7 +373,7 @@ describe('DKGAgent rootless update boundary', () => {
     const publicQuads = [q('urn:update:contract', 'urn:value', '"replacement"')];
     const { attestation } = await updateAttestation(publicQuads);
     let publisherCalls = 0;
-    const agent = makeAgentLike(store, async () => {
+    const agent = await makeAgentLike(store, async () => {
       publisherCalls += 1;
       throw new Error('publisher must not be called');
     });
@@ -380,7 +427,7 @@ describe('DKGAgent rootless update boundary', () => {
     await privateStore.replaceKnowledgeAssetPrivateTriples(CG, nextScope, priorPrivate);
 
     let publisherCalls = 0;
-    const agent = makeAgentLike(store, async () => {
+    const agent = await makeAgentLike(store, async () => {
       publisherCalls += 1;
       throw new Error('publisher must not be called');
     });
@@ -417,7 +464,7 @@ describe('DKGAgent rootless update boundary', () => {
       publicQuads,
       privateQuads,
     );
-    const agent = makeAgentLike(store, async () => {
+    const agent = await makeAgentLike(store, async () => {
       throw new Error('simulated crash after chain write-ahead');
     });
 
@@ -464,7 +511,7 @@ describe('DKGAgent rootless update boundary', () => {
     const plain = [q('urn:update:named', 'urn:value', '"blocked"')];
     const { attestation } = await updateAttestation(plain);
     let publisherCalls = 0;
-    const agent = makeAgentLike(store, async () => {
+    const agent = await makeAgentLike(store, async () => {
       publisherCalls += 1;
       throw new Error('publisher must not be called');
     });
@@ -499,7 +546,7 @@ describe('DKGAgent rootless update boundary', () => {
     let firstPublisherEntered!: () => void;
     const firstEntered = new Promise<void>((resolve) => { firstPublisherEntered = resolve; });
     const stagedByCall: Quad[][] = [];
-    const agent = makeAgentLike(store, async (kaId) => {
+    const agent = await makeAgentLike(store, async (kaId) => {
       const staged = await loadSharedMemoryQuadsForScope(
         store,
         swmBucket,
@@ -558,7 +605,7 @@ describe('DKGAgent rootless update boundary', () => {
     const privateQuads = [q('urn:private:only', 'urn:secret', '"updated"')];
     const { canonical, privateRoot, attestation } = await updateAttestation([], privateQuads);
     let publisherCalls = 0;
-    const agent = makeAgentLike(store, async (kaId, options) => {
+    const agent = await makeAgentLike(store, async (kaId, options) => {
       publisherCalls += 1;
       expect(kaId).toBe(KA_ID);
       expect(options.publicTripleCount).toBe(0);
@@ -604,7 +651,7 @@ describe('DKGAgent rootless update boundary', () => {
     const publicQuads = [q('urn:update:asset', 'urn:value', '"two"')];
     const { attestation } = await updateAttestation(publicQuads);
     let publisherCalls = 0;
-    const agent = makeAgentLike(store, async () => {
+    const agent = await makeAgentLike(store, async () => {
       publisherCalls += 1;
       throw new Error('publisher must not be called');
     });
@@ -630,7 +677,7 @@ describe('DKGAgent rootless update boundary', () => {
     const publicQuads = [q('urn:update:asset', 'urn:value', '"two"')];
     const { attestation } = await updateAttestation(publicQuads);
     let publisherCalls = 0;
-    const agent = makeAgentLike(store, async () => {
+    const agent = await makeAgentLike(store, async () => {
       publisherCalls += 1;
       throw new Error('publisher must not be called');
     });

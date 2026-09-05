@@ -9,15 +9,20 @@ gate. See §Verification below.
 **Filed in response to**: [issue #596](https://github.com/OriginTrail/dkg/issues/596),
 [PR #602](https://github.com/OriginTrail/dkg/pull/602).
 
+> [!IMPORTANT]
+> This document preserves the pre-fix diagnosis and verification evidence. The
+> maintained behavior is defined by the current
+> [Oxigraph persistence contract](../../../../packages/storage/README.md#oxigraph-persistence-contract).
+
 ## TL;DR
 
 The V10 daemon's persistent triple store (`oxigraph-persistent` / `oxigraph-worker`
-adapters in [`packages/storage/src/adapters/oxigraph.ts`](../../packages/storage/src/adapters/oxigraph.ts))
+adapters in [`packages/storage/src/adapters/oxigraph.ts`](../../../../packages/storage/src/adapters/oxigraph.ts))
 persists WM via a single best-effort 50 ms debounced full-file rewrite of
 `<DKG_HOME>/store.nq`. Three problems compound:
 
 1. **No flush on graceful shutdown.** `agent.stop()` (around
-   [`packages/agent/src/dkg-agent.ts:13895`](../../packages/agent/src/dkg-agent.ts))
+   [`packages/agent/src/dkg-agent.ts:13895`](../../../../packages/agent/src/dkg-agent.ts))
    never calls `store.close()` or `store.flush()`. On `dkg stop` / `POST
    /api/shutdown` / SIGTERM, writes from the last 50 ms before exit are NOT
    guaranteed to reach disk.
@@ -34,9 +39,9 @@ restart) is the union of (1) and (2). The repro script can drive both.
 ## Reproduce
 
 The repro lives at
-[`scripts/repro/wm-persistence-regression.mjs`](../../scripts/repro/wm-persistence-regression.mjs)
+[`scripts/repro/wm-persistence-regression.mjs`](../../../../scripts/repro/wm-persistence-regression.mjs)
 and is gated behind the worktree's isolation contract
-([`REPRO.md`](../../REPRO.md)) — it refuses to talk to port 9200, refuses to
+([reproduction guide](wm-persistence-regression-repro.md)) — it refuses to talk to port 9200, refuses to
 touch a daemon whose PID file it does not own, and runs against an isolated
 `$DKG_HOME` only.
 
@@ -104,7 +109,7 @@ forensic dump and the actionable result is the table below. Re-run
   the route fails (HTTP error swallowed by the repro script's `try/catch`),
   meaning the daemon hydrated empty AND the sub-graph metadata is missing,
   exactly the silent-empty-store path from
-  [`oxigraph.ts:44`](../../packages/storage/src/adapters/oxigraph.ts).
+  [`oxigraph.ts:44`](../../../../packages/storage/src/adapters/oxigraph.ts).
 
 The repro is reliable. Threshold for partial loss starts around **125 k
 triples** depending on cumulative store size; threshold for **total loss**
@@ -175,11 +180,11 @@ written, ordered by severity:
    page). On restart, `oxigraph.Store.load()` throws on the malformed
    N-Quads line.
    Symptom: the catch at
-   [`oxigraph.ts:44`](../../packages/storage/src/adapters/oxigraph.ts)
+   [`oxigraph.ts:44`](../../../../packages/storage/src/adapters/oxigraph.ts)
    swallows the parse error and the store comes up empty. **Whole-store
    loss with no log line.**
 4. **Worker-thread orphaning** (default backend `oxigraph-worker`).
-   The default daemon backend ([`dkg-agent.ts:1414`](../../packages/agent/src/dkg-agent.ts))
+   The default daemon backend ([`dkg-agent.ts:1414`](../../../../packages/agent/src/dkg-agent.ts))
    runs `OxigraphStore` in a separate worker thread. The parent
    `agent.stop()` does `await this.node.stop()` but never sends a
    `close`/`flush` RPC to the worker. The worker dies when the parent
@@ -191,7 +196,7 @@ written, ordered by severity:
 ## Hypothesised root cause
 
 Three concrete primary-cause sites in
-[`packages/storage/src/adapters/oxigraph.ts`](../../packages/storage/src/adapters/oxigraph.ts):
+[`packages/storage/src/adapters/oxigraph.ts`](../../../../packages/storage/src/adapters/oxigraph.ts):
 
 **(A) — `flushNow()` uses non-atomic, non-durable `writeFile`** (lines 60–72):
 
@@ -254,9 +259,9 @@ A corrupt `store.nq` becomes silent empty-store with no log line, no
 sidecar `.corrupt` rename, no operator alarm.
 
 **(D) — Daemon shutdown path never flushes** (in
-[`packages/agent/src/dkg-agent.ts`](../../packages/agent/src/dkg-agent.ts)
+[`packages/agent/src/dkg-agent.ts`](../../../../packages/agent/src/dkg-agent.ts)
 around line 13895 and
-[`packages/cli/src/daemon/lifecycle.ts`](../../packages/cli/src/daemon/lifecycle.ts)
+[`packages/cli/src/daemon/lifecycle.ts`](../../../../packages/cli/src/daemon/lifecycle.ts)
 around line 1920):
 
 ```ts
@@ -281,7 +286,7 @@ async stop(): Promise<void> {
 ```
 
 And the API-driven graceful-stop hits the same problem from one layer up
-([`packages/cli/src/daemon/routes/status.ts:828`](../../packages/cli/src/daemon/routes/status.ts)):
+([`packages/cli/src/daemon/routes/status.ts:828`](../../../../packages/cli/src/daemon/routes/status.ts)):
 
 ```ts
 if (req.method === "POST" && path === "/api/shutdown") {
@@ -305,7 +310,7 @@ This bug is FIXED on `fix/graphify-wm-persistence`. The fix is **three
 coordinated changes** that together close every loss mode characterised in
 §Failure mode A-D above:
 
-### 1. `OxigraphStore.flushNow`: write atomically and durably ([`packages/storage/src/adapters/oxigraph.ts`](../../packages/storage/src/adapters/oxigraph.ts))
+### 1. `OxigraphStore.flushNow`: write atomically and durably ([`packages/storage/src/adapters/oxigraph.ts`](../../../../packages/storage/src/adapters/oxigraph.ts))
 
 ```ts
 private async flushNow(): Promise<void> {
@@ -334,7 +339,7 @@ leaves `store.nq` at its previous good state or leaves a `store.nq.tmp` that
 the loader ignores. Verified by the medium-SIGKILL repro (125k quads, 25
 assertions → **lost=0**).
 
-### 2. `OxigraphStore.close`: drain in-flight flush before the final flush ([`packages/storage/src/adapters/oxigraph.ts`](../../packages/storage/src/adapters/oxigraph.ts))
+### 2. `OxigraphStore.close`: drain in-flight flush before the final flush ([`packages/storage/src/adapters/oxigraph.ts`](../../../../packages/storage/src/adapters/oxigraph.ts))
 
 ```ts
 async close(): Promise<void> {
@@ -354,7 +359,7 @@ loop, `close()`'s `flushNow()` would see `this.flushing === true` and return
 immediately, leaving every insert from "between the in-flight snapshot and
 now" unflushed. Verified by the medium-clean repro (125k quads → **lost=0**).
 
-### 3. `OxigraphStore.hydrateSync`: never swallow corruption silently ([`packages/storage/src/adapters/oxigraph.ts`](../../packages/storage/src/adapters/oxigraph.ts))
+### 3. `OxigraphStore.hydrateSync`: never swallow corruption silently ([`packages/storage/src/adapters/oxigraph.ts`](../../../../packages/storage/src/adapters/oxigraph.ts))
 
 ```ts
 private hydrateSync(filePath: string): void {
@@ -376,7 +381,7 @@ private hydrateSync(filePath: string): void {
 Closes loss mode (C). Operators now see a loud log line + a renamed
 forensic file instead of "data quietly gone".
 
-### 4. `DKGAgent.stop`: flush WM before exit ([`packages/agent/src/dkg-agent.ts`](../../packages/agent/src/dkg-agent.ts))
+### 4. `DKGAgent.stop`: flush WM before exit ([`packages/agent/src/dkg-agent.ts`](../../../../packages/agent/src/dkg-agent.ts))
 
 ```ts
 await this.node.stop();                       // libp2p (no more network inserts)

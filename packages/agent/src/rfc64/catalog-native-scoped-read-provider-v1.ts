@@ -41,6 +41,9 @@ import type {
 } from '@origintrail-official/dkg-chain';
 
 import {
+  walkRfc64BoundedCatalogHeadLineageV1,
+} from './catalog-head-lineage-v1.js';
+import {
   verifyAuthorCatalogRowAuthorshipV1,
 } from './catalog-row-authorship.js';
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-policy-v1.js';
@@ -206,6 +209,16 @@ async function resolveExactBoundedHeadCapability(
     [delegation.objectDigest as Digest32V1, AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1],
     [directory.objectDigest as Digest32V1, AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1],
   ]);
+  for (const ancestor of await readBoundedAuthorCatalogHeadAncestorsV1(
+    options,
+    head,
+    catalogScope,
+  )) {
+    allowedControlObjects.set(
+      ancestor.objectDigest as Digest32V1,
+      AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
+    );
+  }
   const allowedBundles = new Map<Digest32V1, number>();
 
   if (head.payload.totalRows === '0') {
@@ -296,6 +309,24 @@ async function resolveExactBoundedHeadCapability(
     },
   });
   return Object.freeze({ capability, catalogScope });
+}
+
+async function readBoundedAuthorCatalogHeadAncestorsV1(
+  options: Rfc64CatalogNativeScopedReadProviderOptionsV1,
+  target: SignedAuthorCatalogHeadEnvelopeV1,
+  catalogScope: Readonly<AuthorCatalogScopeV1>,
+): Promise<readonly SignedAuthorCatalogHeadEnvelopeV1[]> {
+  const lineage = await walkRfc64BoundedCatalogHeadLineageV1({
+    target,
+    catalogScope,
+    readPredecessor: async (predecessorDigest) => {
+      const stored = await readStored(options, predecessorDigest);
+      if (stored === null) return null;
+      assertSignedAuthorCatalogHeadEnvelopeV1(stored.envelope);
+      return Object.freeze({ head: stored.envelope, evidence: stored.envelope });
+    },
+  });
+  return Object.freeze(lineage.ancestors.map(({ head }) => head));
 }
 
 function exactScopeCacheKey(

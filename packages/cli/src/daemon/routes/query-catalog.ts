@@ -30,6 +30,7 @@ import {
   readContextGraphQueryCatalogBindings,
   writeContextGraphQueryCatalog,
 } from '../query-catalog-service.js';
+import { authenticatedAgentAddress } from '../../auth.js';
 
 const QUERY_CATALOG_RESULT_LIMIT = 5_000;
 const QUERY_CATALOG_RESPONSE_BYTES = 1024 * 1024;
@@ -45,8 +46,7 @@ export async function handleQueryCatalogRoutes(ctx: RequestContext): Promise<boo
     res,
     agent,
     path,
-    requestToken,
-    validTokens,
+    authentication,
     emitMemoryGraphChanged,
   } = ctx;
 
@@ -62,9 +62,7 @@ export async function handleQueryCatalogRoutes(ctx: RequestContext): Promise<boo
       return true;
     }
 
-    const callerAgentAddress = requestToken
-      ? agent.resolveAgentByToken(requestToken)
-      : undefined;
+    const callerAgentAddress = authenticatedAgentAddress(authentication);
     const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
       agent,
       parsed.contextGraphId,
@@ -157,12 +155,8 @@ export async function handleQueryCatalogRoutes(ctx: RequestContext): Promise<boo
     const contextGraphId = parsed.contextGraphId;
     if (!validateRequiredContextGraphId(contextGraphId, res)) return true;
 
-    const callerAgentAddress = requestToken
-      ? agent.resolveAgentByToken(requestToken)
-      : undefined;
-    const isNodeAdmin = !!requestToken
-      && validTokens.has(requestToken)
-      && callerAgentAddress === undefined;
+    const callerAgentAddress = authenticatedAgentAddress(authentication);
+    const isNodeAdmin = authentication.principal.kind === 'nodeOperator';
     if (
       !isNodeAdmin
       && !(await agent.canReadContextGraph(contextGraphId, { callerAgentAddress }))

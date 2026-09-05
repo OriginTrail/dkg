@@ -25,6 +25,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
+  type DurableRootPromotionAtomicCompanion,
+  type DurableRootPromotionIdentity,
   isPromoteReplaySafeError,
   assertionScopedGraphUri,
   generatedPrivateCatalogFloorQuads,
@@ -122,6 +124,9 @@ describe('Working Memory Assertion Lifecycle', () => {
   const createPublisher = async (
     writeLocks?: Map<string, Promise<void>>,
     publisherStore: OxigraphStore = store,
+    resolveDurableRootPromotionAtomicCompanion?: (
+      input: Readonly<DurableRootPromotionIdentity>,
+    ) => Readonly<DurableRootPromotionAtomicCompanion> | undefined,
   ): Promise<DKGPublisher> => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
@@ -133,6 +138,9 @@ describe('Working Memory Assertion Lifecycle', () => {
       publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
       publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
       ...(writeLocks ? { writeLocks } : {}),
+      ...(resolveDurableRootPromotionAtomicCompanion
+        ? { resolveDurableRootPromotionAtomicCompanion }
+        : {}),
     });
   };
 
@@ -1071,6 +1079,172 @@ describe('Working Memory Assertion Lifecycle', () => {
       },
     );
     expect(repaired.shareOperationId).toBe(confirmedOperationId);
+  });
+
+  it('commits the root companion atomically with SWM after resolving it before confirmation', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+
+    const companionGraph = 'urn:test:root-promotion-companions';
+    const companionPredicate = 'urn:test:root-promotion-companion';
+    const identities: DurableRootPromotionIdentity[] = [];
+    const settle = vi.fn();
+    const hookedPublisher = await createPublisher(undefined, store, (input) => {
+      identities.push(input);
+      const subject = `urn:test:root-promotion:${input.shareOperationId}`;
+      return {
+        graphUri: companionGraph,
+        subject,
+        quads: [{
+          graph: companionGraph,
+          subject,
+          predicate: companionPredicate,
+          object: JSON.stringify(input.kaUal),
+        }],
+        settle,
+      };
+    });
+    const confirmBeforeCommit = vi.fn(async () => {
+      expect(identities).toHaveLength(1);
+      expect(await store.hasGraph(companionGraph)).toBe(false);
+      expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+      return { applied: true };
+    });
+
+    const promoted = await hookedPublisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      { publisherPeerId: PEER, confirmBeforeCommit },
+    );
+    expect(confirmBeforeCommit).toHaveBeenCalledTimes(1);
+    expect(settle).toHaveBeenCalledOnce();
+    expect(settle).toHaveBeenCalledWith(true);
+    expect(identities).toEqual([expect.objectContaining({
+      contextGraphId: CG_ID,
+      assertionCoordinate: ASSERTION_NAME,
+      lifecycleAgentAddress: AGENT,
+      kaUal: finalized.kaUal,
+      assertionVersion: finalized.assertionVersion,
+      shareOperationId: promoted.shareOperationId,
+    })]);
+    await expectExactSwmGraph(finalized.sharedGraphUri);
+    await expect(store.query(
+      `ASK { GRAPH <${companionGraph}> { ` +
+        `<urn:test:root-promotion:${promoted.shareOperationId}> ` +
+        `<${companionPredicate}> ${JSON.stringify(finalized.kaUal)} } }`,
+    )).resolves.toEqual({ type: 'boolean', value: true });
+  });
+
+  it('fails closed without persisting SWM or its root companion on atomic capability refusal', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    const companionGraph = 'urn:test:refused-root-promotion-companions';
+    const settle = vi.fn();
+    const hookedPublisher = await createPublisher(undefined, store, (input) => {
+      const subject = `urn:test:refused-root-promotion:${input.shareOperationId}`;
+      return {
+        graphUri: companionGraph,
+        subject,
+        quads: [{
+          graph: companionGraph,
+          subject,
+          predicate: 'urn:test:root-promotion-companion',
+          object: JSON.stringify(input.kaUal),
+        }],
+        settle,
+      };
+    });
+    const ownDescriptor = Object.getOwnPropertyDescriptor(store, 'replaceGraphAndSubject');
+    Object.defineProperty(store, 'replaceGraphAndSubject', {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    });
+    try {
+      await expect(hookedPublisher.assertionPromote(
+        CG_ID,
+        ASSERTION_NAME,
+        AGENT,
+        { publisherPeerId: PEER },
+      )).rejects.toMatchObject({ code: 'ATOMIC_GRAPH_AND_SUBJECT_REPLACE_UNSUPPORTED' });
+    } finally {
+      if (ownDescriptor === undefined) delete (store as Partial<OxigraphStore>).replaceGraphAndSubject;
+      else Object.defineProperty(store, 'replaceGraphAndSubject', ownDescriptor);
+    }
+    expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+    expect(await store.hasGraph(companionGraph)).toBe(false);
+    expect(settle).toHaveBeenCalledOnce();
+    expect(settle).toHaveBeenCalledWith(false);
+  });
+
+  it('certifies an indeterminate atomic SWM-plus-companion commit as replay safe', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    const companionGraph = 'urn:test:crashed-root-promotion-companions';
+    let companionSubject = '';
+    const settle = vi.fn();
+    const hookedPublisher = await createPublisher(undefined, store, (input) => {
+      companionSubject = `urn:test:crashed-root-promotion:${input.shareOperationId}`;
+      return {
+        graphUri: companionGraph,
+        subject: companionSubject,
+        quads: [{
+          graph: companionGraph,
+          subject: companionSubject,
+          predicate: 'urn:test:root-promotion-companion',
+          object: JSON.stringify(input.kaUal),
+        }],
+        settle,
+      };
+    });
+    const failure = new StoreOperationTimeoutError({
+      backend: 'managed-oxigraph',
+      operation: 'replaceGraphAndSubject',
+      storeOperation: 'replaceGraphAndSubject',
+      outcome: 'indeterminate',
+    });
+    const atomicReplace = store.replaceGraphAndSubject!.bind(store);
+    let injected = false;
+    const replaceSpy = vi.spyOn(store, 'replaceGraphAndSubject').mockImplementation(
+      async (...args) => {
+        await atomicReplace(...args);
+        if (!injected && args[0] === finalized.sharedGraphUri) {
+          injected = true;
+          throw failure;
+        }
+      },
+    );
+    let rejection: unknown;
+    try {
+      await hookedPublisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+      });
+    } catch (error) {
+      rejection = error;
+    } finally {
+      replaceSpy.mockRestore();
+    }
+    expect(rejection).toBe(failure);
+    expect(isPromoteReplaySafeError(rejection)).toBe(true);
+    expect(injected).toBe(true);
+    expect(settle).toHaveBeenCalledOnce();
+    expect(settle).toHaveBeenCalledWith(undefined);
+    await expectExactSwmGraph(finalized.sharedGraphUri);
+    await expect(store.query(
+      `ASK { GRAPH <${companionGraph}> { <${companionSubject}> ?p ?o } }`,
+    )).resolves.toEqual({ type: 'boolean', value: true });
+
+    const replayed = await hookedPublisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      { publisherPeerId: PEER },
+    );
+    expect(replayed).toMatchObject({ promotedCount: 0, promotedAllRoots: true });
   });
 
   it('serializes concurrent promotes onto one durable share operation ID', async () => {

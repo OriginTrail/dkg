@@ -10,6 +10,7 @@ import {
   analyzeSparqlOperation,
   classifySparqlOperation,
 } from '@origintrail-official/dkg-core';
+import type { PreparedSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 import type { QueryResult } from './query-engine.js';
 
 // CodeQL alert #65 (js/redos) — the previous single-shot regex
@@ -235,7 +236,9 @@ export interface SparqlGuardResult {
  * Returns `{ safe: true }` for SELECT/CONSTRUCT/ASK/DESCRIBE.
  * Returns `{ safe: false, reason }` for anything that could mutate data.
  */
-export function validateReadOnlySparql(sparql: string): SparqlGuardResult {
+export function validateReadOnlySparql(
+  sparql: string | PreparedSparql,
+): SparqlGuardResult {
   const analysis = analyzeSparqlOperation(sparql);
   const operation = analysis.operation;
 

@@ -47,6 +47,7 @@ import * as osModule from 'node:os';
 import type { NetworkInterfaceInfo } from 'node:os';
 import { checkCoreRelayPrereqs } from './core-prereq-check.js';
 import { rotateDaemonLogIfNeeded } from './log-rotation.js';
+import { resolveUpdateTelemetryVersionStatus } from './update-telemetry-status.js';
 const { homedir } = osModule;
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -164,6 +165,18 @@ import {
   type DaemonLogExporterStartResult,
 } from './log-lifecycle.js';
 import { startDaemonLogFileWriter } from './daemon-log-file-writer.js';
+import {
+  CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+  createChainDiscoveryScanRunner,
+} from './chain-discovery-scan.js';
+// The scan policy lived here until GH#2323; the implementation moved to its
+// own module, but the public import path stays valid for existing consumers.
+export {
+  CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+  CHAIN_FULL_SCAN_EVERY,
+  chainDiscoveryScanOptions,
+  createChainDiscoveryScanRunner,
+} from './chain-discovery-scan.js';
 import { createDaemonLocalLlmService } from './local-llm-service.js';
 import { appendBoundedDaemonLogDiagnostic } from './daemon-log-diagnostics.js';
 import {
@@ -187,7 +200,7 @@ import {
   writeContextGraphReadiness,
   type ContextGraphReadinessStore,
 } from '../context-graph-readiness.js';
-import { loadTokens, httpAuthGuard } from '../auth.js';
+import { authenticateHttpRequest, loadTokens } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -348,6 +361,7 @@ import {
   formatIdentityTagMismatch,
 } from './store-health-check.js';
 import { startManagedOxigraph } from './oxigraph-managed.js';
+import { buildAgentRuntimeStoreConfig } from './agent-runtime-store-config.js';
 import type { OxigraphServerHandle } from './oxigraph-server.js';
 import { resetNatStatus, startNatStatusWatcher } from './nat-status.js';
 import {
@@ -695,83 +709,6 @@ export function orderACKCandidatePeerIds(input: {
     verifiedSameNetworkPeerIds: input.verifiedSameNetworkPeerIds,
     requiredACKs: Number.MAX_SAFE_INTEGER,
   });
-}
-
-export const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
-export const CHAIN_DISCOVERY_SCAN_PAGE_BUDGET = 30;
-
-export function chainDiscoveryScanOptions(input: {
-  watermarkSeeded: boolean;
-  run?: number;
-  fullScanEvery?: number;
-  pageBudget?: number;
-}):
-  | { mode: 'incremental'; pageBudget: number }
-  | { mode: 'seedFromCursor'; throwOnChainScanFailure: true; pageBudget: number }
-  | { mode: 'seedFull'; throwOnChainScanFailure: true } {
-  const configuredFullScanEvery = input.fullScanEvery;
-  let fullScanEvery = CHAIN_FULL_SCAN_EVERY;
-  if (
-    typeof configuredFullScanEvery === 'number' &&
-    Number.isFinite(configuredFullScanEvery) &&
-    configuredFullScanEvery >= 1
-  ) {
-    fullScanEvery = Math.floor(configuredFullScanEvery);
-  }
-  const configuredPageBudget = input.pageBudget;
-  const pageBudget = (
-    typeof configuredPageBudget === 'number' &&
-    Number.isFinite(configuredPageBudget) &&
-    configuredPageBudget >= 1
-  )
-    ? Math.floor(configuredPageBudget)
-    : CHAIN_DISCOVERY_SCAN_PAGE_BUDGET;
-  const run = input.run ?? 0;
-  const startupRecoveryScan = input.watermarkSeeded && run === 0;
-  const periodicFullResync = input.watermarkSeeded && run > 0 && run % fullScanEvery === 0;
-  if (startupRecoveryScan || periodicFullResync) {
-    return { mode: 'seedFull', throwOnChainScanFailure: true };
-  }
-  return input.watermarkSeeded && !periodicFullResync
-    ? { mode: 'incremental', pageBudget }
-    : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
-}
-
-export function createChainDiscoveryScanRunner(input: {
-  agent: {
-    hasContextGraphRegistryScanWatermark(): Promise<boolean>;
-    discoverContextGraphsFromChain(
-      options: ReturnType<typeof chainDiscoveryScanOptions>,
-    ): Promise<number>;
-  };
-  log: (msg: string) => void;
-  pageBudget?: number;
-  fullScanEvery?: number;
-}): () => Promise<void> {
-  let runs = 0;
-  let inFlight = false;
-  return async () => {
-    if (inFlight) return;
-    inFlight = true;
-    try {
-      const run = runs++;
-      const found = await input.agent.discoverContextGraphsFromChain(
-        chainDiscoveryScanOptions({
-          run,
-          watermarkSeeded: await input.agent.hasContextGraphRegistryScanWatermark(),
-          pageBudget: input.pageBudget,
-          fullScanEvery: input.fullScanEvery,
-        }),
-      );
-      if (found > 0) {
-        input.log(`Chain scan: discovered ${found} new context graph(s)`);
-      }
-    } catch {
-      /* non-critical */
-    } finally {
-      inFlight = false;
-    }
-  };
 }
 
 export interface PromoteWorkerDaemonLifecycle {
@@ -1394,17 +1331,55 @@ async function runDaemonInnerWithStartupOwnership(
   // network manifest fails before subscriptions, stores, wallets, or agent
   // runtime construction begin. The same immutable chainBase is reused below.
   const chainBase = resolveChainConfig(config, network);
+  const unifiedRfc64Disabled = config.rfc64Catalog?.enabled === false;
   const rfc64CatalogActivations = resolveRfc64CatalogActivations(
-    config,
+    unifiedRfc64Disabled
+      ? {
+          rfc64Catalog: config.rfc64Catalog,
+          // The unified rollback is authoritative at the daemon boundary too.
+          // Do not let stale deprecated controls extend sync scope, fail
+          // validation, or reach the agent while the replacement is disabled.
+          rfc64PublicCatalog: undefined,
+        }
+      : config,
     resolveRfc64PublicCatalogActivationChainIdentityV1(chainBase?.chainId),
   );
   const rfc64Catalog = rfc64CatalogActivations.catalog;
   const rfc64PublicCatalog = rfc64CatalogActivations.publicCatalog;
+  const rfc64RollbackTimestamp = new Date().toISOString();
+  const explicitDisabled = unifiedRfc64Disabled
+    || (config.rfc64Catalog === undefined && config.rfc64PublicCatalog?.enabled === false);
+  if (explicitDisabled) {
+    log(
+      `[rfc64-catalog-rollback] WARNING source=operator-override reason=deprecated-enabled-false `
+      + `timestamp=${rfc64RollbackTimestamp} affected=all-responsible-cgs; `
+      + 'RFC-64 default correctness is disabled for this compatibility release',
+    );
+  }
+  const emergencyModes = Object.entries(rfc64Catalog.rollout.contextGraphModes)
+    .filter(([, mode]) => mode === 'legacy' || mode === 'shadow')
+    .sort(([left], [right]) => left.localeCompare(right));
+  if (emergencyModes.length > 0) {
+    log(
+      `[rfc64-catalog-rollback] WARNING source=operator-override reason=per-cg-emergency-mode `
+      + `timestamp=${rfc64RollbackTimestamp} affected=${JSON.stringify(emergencyModes)}`,
+    );
+  }
+  if (rfc64Catalog.rollout.killSwitch) {
+    log(
+      `[rfc64-catalog-rollback] WARNING source=kill-switch reason=global-emergency-stop `
+      + `timestamp=${rfc64RollbackTimestamp} affected=all-responsible-cgs`,
+    );
+  }
   const syncContextGraphs = [
     ...new Set([
       ...resolveContextGraphs(config),
       ...resolveNetworkDefaultContextGraphs(network),
-      ...rfc64Catalog.selectedPublicContextGraphs,
+      // Cores host the public corpus and therefore activate the complete
+      // accepted manifest. Edges activate RFC-64 only through explicit
+      // operator/default subscriptions; the manifest remains eligibility and
+      // serving policy, never an implicit edge subscription.
+      ...(role === 'core' ? rfc64Catalog.selectedPublicContextGraphs : []),
     ]),
   ];
 
@@ -1447,6 +1422,8 @@ async function runDaemonInnerWithStartupOwnership(
   if (networkSwitch.aborted) {
     process.exit(1);
   }
+
+  exitOnStoreConfigErrors(config, log);
 
   // Managed local Oxigraph server (`store.backend: 'oxigraph-server'`,
   // Release 2 opt-in). Fetch/verify the pinned binary, spawn a loopback
@@ -1502,7 +1479,13 @@ async function runDaemonInnerWithStartupOwnership(
   const runtimeStoreConfig: DkgConfig = managed
     ? {
         ...config,
-        store: runtimeStore,
+        store: runtimeStore
+          ? {
+              backend: runtimeStore.backend,
+              options: runtimeStore.options,
+              graphSetIndex: runtimeStore.graphSetIndex,
+            }
+          : undefined,
         largeLiteralStorage: runtimeLargeLiteralStorage,
         sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
       }
@@ -1811,6 +1794,16 @@ async function runDaemonInnerWithStartupOwnership(
   const kaNumberStore = new SqliteKaNumberStore(dashDb);
   const kaNumberAllocator = new KaNumberAllocator(kaNumberStore);
 
+  // Mint managed authority only after the complete agent config has been
+  // assembled. Passing the start-up result through an ordinary object literal
+  // would intentionally strip its non-enumerable runtime authority.
+  const agentStoreConfig = buildAgentRuntimeStoreConfig({
+    runtimeStore,
+    managedStore: managed?.storeConfig,
+    changelogEnabled: Boolean(config.store?.changelog),
+    changelogEraGuard,
+  });
+
   const agent = await DKGAgent.create({
     kaNumberAllocator,
     name: config.name,
@@ -1862,21 +1855,10 @@ async function runDaemonInnerWithStartupOwnership(
     // `swmHostMode` config is inert and only in-agent defaults apply, so an
     // operator could not toggle the strip via config (the rung-1 inert-flag bug).
     swmHostMode: config.swmHostMode,
-    storeConfig: runtimeStore ? {
-      backend: runtimeStore.backend,
-      options: runtimeStore.options,
-      graphSetIndex: runtimeStore.graphSetIndex,
-      // OT-RFC-59: operator opt-in to the append-only change log (default OFF).
-      // Sourced from config.store (operator intent), NOT runtimeStore — the
-      // managed-oxigraph path rebuilds runtimeStore and would drop it. Enabling
-      // this wraps the store in ChangelogStore, which is what makes
-      // asChangelogReader(store) non-null and registers the responder delta lane.
-      // Wire the DURABLE era guard (§6 P0) so restore/rollback rotates the era —
-      // enabling the changelog fleet-wide without it is unsafe (silent skips).
-      changelog: config.store?.changelog
-        ? { enabled: true, eraGuard: changelogEraGuard }
-        : undefined,
-    } : undefined,
+    // OT-RFC-59 changelog intent and its durable era guard are already folded
+    // into this final store config. Managed Oxigraph retains its opaque runtime
+    // authority through the agent's actual createTripleStore boundary.
+    storeConfig: agentStoreConfig,
     largeLiteralStorage: runtimeLargeLiteralStorage,
     sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
     publicSnapshotStore,
@@ -2898,12 +2880,11 @@ async function runDaemonInnerWithStartupOwnership(
         commit: nodeCommit,
         role: config.nodeRole ?? "edge",
         autoUpdate: autoUpdateEnabled,
-        versionStatus: () => {
-          if (!autoUpdateEnabled) return "disabled";
-          if (daemonState.isUpdating) return "updating";
-          if (daemonState.lastUpdateCheck.checkedAt === 0) return "unknown";
-          return daemonState.lastUpdateCheck.upToDate ? "latest" : "behind";
-        },
+        versionStatus: () => resolveUpdateTelemetryVersionStatus({
+          autoUpdateEnabled,
+          isUpdating: daemonState.isUpdating,
+          lastUpdateCheck: daemonState.lastUpdateCheck,
+        }),
       });
       worker.start();
       return {
@@ -3534,14 +3515,15 @@ async function runDaemonInnerWithStartupOwnership(
       }
 
       // Auth guard — rejects with 401 if token is invalid/missing
-      const authAllowed = await httpAuthGuard(
+      const authentication = await authenticateHttpRequest({
         req,
         res,
         authEnabled,
         validTokens,
-        resolveCorsOrigin(req, corsAllowed),
-      );
-      if (!authAllowed) return;
+        resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
+        corsOrigin: resolveCorsOrigin(req, corsAllowed),
+      });
+      if (!authentication.allowed) return;
 
       // Retired installable apps framework (V9): respond with 410 Gone so upgraded
       // nodes give a clear migration hint for both the JSON API and any bookmarked
@@ -3660,6 +3642,7 @@ async function runDaemonInnerWithStartupOwnership(
       await handleRequest({
         req,
         res,
+        authentication,
         agent,
         publisherControl,
         publisherState,

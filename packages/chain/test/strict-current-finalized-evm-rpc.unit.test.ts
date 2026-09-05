@@ -847,6 +847,28 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     expect(second.calls).toHaveLength(0);
   });
 
+  it('rejects an oversized HTTP 200 Content-Length before parsing or failover', async () => {
+    const oversizedBody = ' '.repeat(
+      CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1 + 1,
+    );
+    const first = await startRpcServer((_call, response) => {
+      response.writeHead(200, {
+        'content-type': 'application/json',
+        'content-length': String(Buffer.byteLength(oversizedBody)),
+      });
+      response.end(oversizedBody);
+    });
+    const second = await startRpcServer(successfulHandler());
+    const adapter = createStrictCurrentFinalizedEvmChainAdapterV1({
+      chainId: CHAIN_ID,
+      endpoints: [first.url, second.url],
+    });
+
+    await expect(adapter(fixedRequest())).rejects.toMatchObject({ code: 'resource-limit' });
+    expect(first.calls).toHaveLength(1);
+    expect(second.calls).toHaveLength(0);
+  });
+
   it('cancels the actual loopback HTTP operation and does not fail over', async () => {
     const received = deferred<void>();
     const connectionClosed = deferred<void>();

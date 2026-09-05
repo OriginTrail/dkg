@@ -1356,10 +1356,9 @@ describe('graph-scoped finalization recovery admission', () => {
       });
       stopWorker.mockImplementationOnce(() => workerStopGate);
       const nextTeardown = vi.spyOn(
-        agent as unknown as {
-          closeRfc64PublicCatalogBootstrapV1(): Promise<void>;
-        },
-        'closeRfc64PublicCatalogBootstrapV1',
+        (agent as unknown as { rfc64CatalogRuntimeV1: { close(): Promise<void> } })
+          .rfc64CatalogRuntimeV1,
+        'close',
       );
       const stopping = agent.stop();
       await vi.waitFor(() => expect(stopWorker).toHaveBeenCalledTimes(1));

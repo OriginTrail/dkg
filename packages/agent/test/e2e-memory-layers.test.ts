@@ -11,16 +11,18 @@
  */
 import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
-import { DKGAgent, type DKGAgentConfig } from '../src/index.js';
+import { DKGAgent as RealDKGAgent, type DKGAgentConfig } from '../src/index.js';
 import { SEAL_CAPABILITY_GAP_CODE } from '../src/dkg-agent-publish.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import {
+  resolvePublishedKnowledgeAssetWorkspaceHead,
   SWM_CURRENT_ASSERTION_PRED,
   TripleStoreAsyncLiftPublisher,
 } from '@origintrail-official/dkg-publisher';
+import { GraphManager } from '@origintrail-official/dkg-storage';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 import { extractFromMarkdown } from '../../cli/src/extraction/markdown-extractor.js';
 import {
@@ -37,6 +39,16 @@ import {
   MemoryLayer,
 } from '@origintrail-official/dkg-core';
 import { makeSwmSyncHarness } from './_helpers/swm-sync-harness.js';
+
+type DKGAgent = RealDKGAgent;
+const DKGAgent = {
+  create(config: Parameters<typeof RealDKGAgent.create>[0]) {
+    return RealDKGAgent.create({
+      rfc64CatalogActivation: { enabled: false },
+      ...config,
+    });
+  },
+};
 
 const agents: DKGAgent[] = [];
 
@@ -667,8 +679,8 @@ describe('rootless graph-scoped KA lifecycle', () => {
 
     let updateHookForwarded: unknown = 'unset';
     const updateFired: string[] = [];
-    const realUpdate = underlying.updateKnowledgeAssetFromSharedMemory.bind(underlying);
-    underlying.updateKnowledgeAssetFromSharedMemory = async (kaId: bigint, options: any) => {
+    const realUpdate = underlying.updateKnowledgeAssetFromStagedSharedWorkingMemoryV1.bind(underlying);
+    underlying.updateKnowledgeAssetFromStagedSharedWorkingMemoryV1 = async (kaId: bigint, options: any) => {
       const original = options.onPublishConfirmed;
       updateHookForwarded = original;
       return realUpdate(kaId, {
@@ -761,7 +773,12 @@ describe('rootless graph-scoped KA lifecycle', () => {
   }, 60_000);
 
   it('repairs a named lifecycle after its async publish transaction confirmed during downtime', async () => {
-    const agent = await createAgent('QueuedAsyncVmRecoveryBot');
+    // This row drives the durable queue-recovery entry point explicitly. Keep
+    // the independent VM reconciliation worker disabled so it cannot consume
+    // the same confirmed chain event and repair/retire the fixture first.
+    const agent = await createAgent('QueuedAsyncVmRecoveryBot', {
+      syncReconcilerEnabled: false,
+    });
     await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Recovery E2E' });
     await agent.registerContextGraph(CG_ID);
 
@@ -778,6 +795,13 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const confirmed = await agent.publishFromFinalizedAssertion(CG_ID, name);
     expect(confirmed.status).toBe('confirmed');
     expect(confirmed.onChainResult).toBeDefined();
+
+    // Model the advertised downtime before recreating the stale local state.
+    // Otherwise the live chain poller can race this test and legitimately
+    // retire the finalized SWM twin under its own `system` operation.
+    const chainPoller = (agent as any).chainPoller;
+    await chainPoller?.stop();
+    if ((agent as any).chainPoller === chainPoller) (agent as any).chainPoller = null;
 
     const lifecycleAgent = intent.agentAddress ?? agent.defaultAgentAddress ?? agent.peerId;
     const lifecycleUri = assertionLifecycleUri(CG_ID, lifecycleAgent, name);
@@ -1026,7 +1050,13 @@ describe('rootless graph-scoped KA lifecycle', () => {
       request: { ...recoveryInput.request, clearSharedMemoryAfter: false },
     } as any);
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
-    expect(recoveryCleanup).not.toHaveBeenCalled();
+    // RFC-64 catalog retirement may independently clear this exact published
+    // scope under a system operation while the recovery pass is running. Keep
+    // this assertion scoped to the recovery lane so unrelated, valid cleanup
+    // cannot make the row flaky.
+    expect(recoveryCleanup.mock.calls.filter((call) => (
+      call[3]?.operationName === 'publishFromSWM'
+    ))).toHaveLength(0);
 
     // PR #2300 r1 (🟡 3809054841) — the record shape item 5 exists for: a persisted FAILED job
     // held on the recovery carrier alone (`recovery.txHashChecked`, NO `broadcast`). The REAL
@@ -1994,9 +2024,17 @@ describe('rootless graph-scoped KA lifecycle', () => {
     ]);
     await agent.assertion.finalize(cg, name);
 
+    const publisherPromote = vi.spyOn(agent.publisher, 'assertionPromote');
     const promoted = await agent.assertion.promote(cg, name);
     expect(promoted.sealed).toBe(true);
     expect(promoted.publishReady).toBe(true);
+    expect(publisherPromote).toHaveBeenCalledWith(
+      cg,
+      name,
+      callerAgentAddress,
+      expect.objectContaining({ accessPolicy: 'ownerOnly' }),
+    );
+    publisherPromote.mockRestore();
 
     const cgDid = `did:dkg:context-graph:${cg}`;
     const swmGraph = `${cgDid}/_shared_memory`;
@@ -2012,6 +2050,43 @@ describe('rootless graph-scoped KA lifecycle', () => {
     );
     expect(swmCatalogOwner.type).toBe('bindings');
     expect(swmCatalogOwner.bindings).toHaveLength(0);
+  }, 30_000);
+
+  it('preserves an explicit allow-list envelope through promote and durable workspace state', async () => {
+    const agent = await createAgent('ExplicitAllowListPromoteBot');
+    const cg = `${CG_ID}-explicit-allow-list`;
+    await agent.createContextGraph({ id: cg, name: 'Explicit Allow List Promote E2E' });
+    const name = 'explicit-allow-list-promote';
+    await agent.assertion.create(cg, name);
+    await agent.assertion.write(cg, name, [
+      { subject: `${ENTITY_BASE}:ealp`, predicate: 'http://schema.org/name', object: '"Restricted"' },
+    ]);
+    await agent.assertion.finalize(cg, name);
+
+    const allowedPeers = ['reader-peer-a', 'reader-peer-b'];
+    const publisherPromote = vi.spyOn(agent.publisher, 'assertionPromote');
+    await agent.assertion.promote(cg, name, {
+      accessPolicy: 'allowList',
+      allowedPeers,
+    });
+    expect(publisherPromote).toHaveBeenCalledWith(
+      cg,
+      name,
+      agent.defaultAgentAddress ?? agent.peerId,
+      expect.objectContaining({ accessPolicy: 'allowList', allowedPeers }),
+    );
+
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(cg, name);
+    const head = await resolvePublishedKnowledgeAssetWorkspaceHead({
+      store: (agent as any).store,
+      graphManager: new GraphManager((agent as any).store),
+      contextGraphId: cg,
+      kaUal: intent.kaUal,
+    });
+    expect(head?.accessPolicy).toBe('allowList');
+    expect(head?.allowedPeers).toHaveLength(allowedPeers.length);
+    expect(new Set(head?.allowedPeers)).toEqual(new Set(allowedPeers));
+    publisherPromote.mockRestore();
   }, 30_000);
 
   // B3 (#1116 CORE REGRESSION GUARD): the seal is context-graph-INDEPENDENT, so
@@ -2664,6 +2739,79 @@ describe('WM → SWM gossip → VM (2 nodes)', () => {
     return lastResult;
   }
 
+  it('keeps legacy root SWM delivery for two omitted-config agents without dataDir', async () => {
+    const contextGraphId = 'ephemeral-default-legacy-lane';
+    const entity = `${ENTITY_BASE}:ephemeral-default-legacy`;
+    const sharedChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const nodeA = await RealDKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name: 'EphemeralDefaultLegacyA',
+      listenPort: 0,
+      chainAdapter: sharedChain,
+      nodeRole: 'core',
+      syncOnConnectEnabled: false,
+      syncReconcilerEnabled: false,
+      agentProfileHeartbeatMs: 0,
+    });
+    agents.push(nodeA);
+    const nodeB = await RealDKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name: 'EphemeralDefaultLegacyB',
+      listenPort: 0,
+      chainAdapter: sharedChain,
+      nodeRole: 'core',
+      syncOnConnectEnabled: false,
+      syncReconcilerEnabled: false,
+      agentProfileHeartbeatMs: 0,
+    });
+    agents.push(nodeB);
+
+    for (const node of [nodeA, nodeB]) {
+      expect((node as any).config.rfc64CatalogExecutionPlan)
+        .toMatchObject({ responsibilityDefaultMode: 'legacy' });
+      await node.start();
+      expect(node.rfc64PublicCatalogStatsV1()).toBeNull();
+    }
+    await nodeB.connectTo(nodeA.multiaddrs[0]!);
+    await sleep(1_000);
+
+    await nodeA.createContextGraph({
+      id: contextGraphId,
+      name: 'Ephemeral default legacy lane',
+    });
+    await nodeA.registerContextGraph(contextGraphId);
+    nodeA.subscribeToContextGraph(contextGraphId);
+    nodeB.subscribeToContextGraph(contextGraphId);
+    await sleep(1_500);
+    for (const node of [nodeA, nodeB]) {
+      expect(node.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId)).toMatchObject({
+        mode: 'legacy',
+        legacySyncAllowed: true,
+        reconciliationLane: 'legacy',
+      });
+    }
+
+    await nodeA.assertion.create(contextGraphId, 'ephemeral-root');
+    await nodeA.assertion.write(contextGraphId, 'ephemeral-root', [{
+      subject: entity,
+      predicate: 'http://schema.org/name',
+      object: '"Ephemeral root replicated"',
+    }]);
+    await nodeA.assertion.promote(contextGraphId, 'ephemeral-root');
+
+    const replicated = await pollUntil(
+      () => nodeB.query(
+        `SELECT ?name WHERE { <${entity}> <http://schema.org/name> ?name }`,
+        { contextGraphId, graphSuffix: '_shared_memory' },
+      ),
+      (bindings) => bindings.length > 0,
+      15_000,
+    );
+    expect(replicated).toEqual([expect.objectContaining({
+      name: '"Ephemeral root replicated"',
+    })]);
+  }, 45_000);
+
   it('an imported Markdown KA survives WM → SWM gossip → VM on a second node', async () => {
     const sharedChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const nodeA = await DKGAgent.create({
@@ -2884,7 +3032,7 @@ describe('Query views', () => {
     // rejection-stops-the-send for the update path is proven at the publisher's own boundary in
     // `pre-broadcast-signal-await.test.ts`, and this row pins callback identity only.
     const realPublisher = (agent as any).publisher;
-    const publisherUpdateSpy = vi.spyOn(realPublisher, 'updateKnowledgeAssetFromSharedMemory')
+    const publisherUpdateSpy = vi.spyOn(realPublisher, 'updateKnowledgeAssetFromStagedSharedWorkingMemoryV1')
       .mockResolvedValue({ status: 'failed', kaManifest: [] } as never);
     const recorder = () => {};
     try {

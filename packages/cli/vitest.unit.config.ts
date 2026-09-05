@@ -70,9 +70,13 @@ export default defineConfig({
           // paying the 2-minute hardhat-boot tax of the default config.
           'test/resolve-standalone-install.test.ts',
           'test/auto-update.test.ts',
+          'test/maintenance-update-gate.test.ts',
           'test/dkg-doctor.test.ts',
           'test/metrics-collector-config.test.ts',
           'test/init.test.ts',
+          'test/init-command.test.ts',
+          'test/init-chain-config.test.ts',
+          'test/start-store-preflight.test.ts',
           'test/nat-status.test.ts',
           'test/core-prereq-check.test.ts',
           'test/random-sampling-status.test.ts',
@@ -116,6 +120,7 @@ export default defineConfig({
           'test/log-sink.test.ts',
           'test/log-lifecycle.test.ts',
           'test/telemetry-runtime.test.ts',
+          'test/update-telemetry-status.test.ts',
           'test/dashboard-log-volume-pruner.test.ts',
           // RFC 120 / plan PR 1 + 2 — Blazegraph support. Pure logic
           // (mocked fetch + in-memory config); cheap to keep in the
@@ -126,6 +131,7 @@ export default defineConfig({
           'test/validate-store-config.test.ts',
           'test/store-wizard.test.ts',
           'test/blazegraph-docker.test.ts',
+          'test/blazegraph-image-metadata.test.ts',
           'test/store-identity-tag.test.ts',
           'test/publisher-runner-lu11.test.ts',
           'test/publisher-runner-ack-transport.test.ts',

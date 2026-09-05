@@ -3,8 +3,11 @@ import { availableParallelism } from 'node:os';
 import {
   StorePriorityScheduler,
   StoreSchedulerBusyError,
+  isStoreSchedulerBusyError,
 } from '../src/store-priority-scheduler.js';
-import type { StoreWorkPriority } from '../src/triple-store.js';
+import {
+  STORE_WORK_PRIORITIES,
+} from '../src/triple-store.js';
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>();
@@ -18,6 +21,46 @@ const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 const mockedAvailableParallelism = vi.mocked(availableParallelism);
 
 describe('StorePriorityScheduler', () => {
+  it('keeps the exported canonical priority collection runtime-immutable', () => {
+    expect(Object.isFrozen(STORE_WORK_PRIORITIES)).toBe(true);
+    expect(() => {
+      (STORE_WORK_PRIORITIES as unknown as string[]).sort();
+    }).toThrow(TypeError);
+    expect(STORE_WORK_PRIORITIES).toEqual(['ack', 'health', 'normal', 'background']);
+  });
+
+  it('dispatches contending lanes in the stable canonical order', async () => {
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 1,
+      ackReservedSlots: 0,
+      healthReservedSlots: 0,
+      backgroundReservedSlots: 0,
+      queueWaitTimeoutMs: 1_000,
+    });
+    let release!: () => void;
+    const blocker = scheduler.run('normal', 'priority-order.blocker', async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+    });
+    const dispatched: string[] = [];
+    const background = scheduler.run('background', 'priority-order.background', async () => {
+      dispatched.push('background');
+    });
+    const normal = scheduler.run('normal', 'priority-order.normal', async () => {
+      dispatched.push('normal');
+    });
+    const health = scheduler.run('health', 'priority-order.health', async () => {
+      dispatched.push('health');
+    });
+    const ack = scheduler.run('ack', 'priority-order.ack', async () => {
+      dispatched.push('ack');
+    });
+
+    release();
+    await Promise.all([blocker, background, normal, health, ack]);
+
+    expect(dispatched).toEqual(['ack', 'health', 'normal', 'background']);
+  });
+
   it('caps only oversized process settings while preserving lower values and constructor overrides', () => {
     const previous = process.env.DKG_STORE_MAX_CONCURRENT;
     mockedAvailableParallelism.mockReturnValue(4);
@@ -77,7 +120,7 @@ describe('StorePriorityScheduler', () => {
     }
   });
 
-  for (const priority of ['ack', 'health', 'normal', 'background'] as const satisfies readonly StoreWorkPriority[]) {
+  for (const priority of STORE_WORK_PRIORITIES) {
     it(`bounds the ${priority} queue and returns a typed retryable rejection`, async () => {
       const scheduler = new StorePriorityScheduler({
         maxConcurrent: 1,
@@ -240,6 +283,35 @@ describe('StorePriorityScheduler', () => {
       retryable: true,
       reason: 'queue_full',
     });
+    expect(isStoreSchedulerBusyError(error)).toBe(true);
+  });
+
+  it('recognizes only complete structural busy errors across package boundaries', () => {
+    const structural = {
+      code: 'STORE_SCHEDULER_BUSY',
+      retryable: true,
+      outcome: 'not_started',
+      storeOperationOutcomeTag: 'dkg.store-operation-outcome.v1',
+      reason: 'queue_wait_timeout',
+      priority: 'normal',
+      operation: 'remote-query.read',
+      storeOperation: 'query',
+    };
+
+    for (const priority of STORE_WORK_PRIORITIES) {
+      expect(isStoreSchedulerBusyError({ ...structural, priority })).toBe(true);
+    }
+    expect(isStoreSchedulerBusyError({ ...structural, retryable: false })).toBe(false);
+    expect(isStoreSchedulerBusyError({ ...structural, outcome: 'indeterminate' })).toBe(false);
+    expect(isStoreSchedulerBusyError({
+      ...structural,
+      storeOperationOutcomeTag: 'dkg.store-operation-outcome.v2',
+    })).toBe(false);
+    expect(isStoreSchedulerBusyError({ ...structural, storeOperation: 'unknown' })).toBe(false);
+    expect(isStoreSchedulerBusyError({ ...structural, reason: undefined })).toBe(false);
+    expect(isStoreSchedulerBusyError({ ...structural, priority: 'urgent' })).toBe(false);
+    expect(isStoreSchedulerBusyError({ ...structural, operation: undefined })).toBe(false);
+    expect(isStoreSchedulerBusyError({ code: 'STORE_SCHEDULER_BUSY' })).toBe(false);
   });
 
   it('binds canonical operations at both scheduler-owned admission rejection sites', async () => {

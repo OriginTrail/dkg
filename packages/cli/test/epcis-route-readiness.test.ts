@@ -3,6 +3,7 @@ import type { ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import { handleEpcisRoutes } from '../src/daemon/routes/epcis.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const VALID_OBJECT_EVENT_DOC = {
   '@context': {
@@ -141,7 +142,7 @@ function createContext(overrides: Partial<RequestContext> = {}): RequestContext 
     apiPortRef: { value: 0 },
     url,
     path: url.pathname,
-    requestToken: undefined,
+    authentication: requestAuthentication({ kind: 'anonymous' }),
     requestAgentAddress: '0x0',
     ...overrides,
   };

@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildQueryCatalogState, useProjectProfile, type ProjectProfile } from '../src/ui/hooks/useProjectProfile.js';
 import { ROOT_SLUG_SENTINEL } from '../src/ui/lib/subGraphs.js';
-import { readProfileQueryCatalog } from '../src/ui/api.js';
+import { executeQuery, readProfileQueryCatalog } from '../src/ui/api.js';
 import {
   decodeQueryCatalogBindings,
   QUERY_CATALOG_READ_CAPABILITIES,
@@ -174,6 +174,8 @@ describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () 
     document.body.appendChild(container);
     root = createRoot(container);
     captured = null;
+    vi.mocked(executeQuery).mockClear();
+    vi.mocked(executeQuery).mockResolvedValue({ result: { bindings: [] } });
     vi.mocked(readProfileQueryCatalog).mockResolvedValue(queryCatalogResponse([]));
   });
 
@@ -223,6 +225,25 @@ describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () 
     expect(binding!.slug).toBe('recipes');
     expect(binding!.displayName).toBe('recipes');
     expect(binding!.icon).toBe('•');
+  });
+
+  it('keeps a hostile context graph id inside one literal at every profile query sink', async () => {
+    const contextGraphId = ['cg-', '\\', '"', '\n', '") } UNION { ?s ?p ?o } #'].join('');
+    const prefix = `did:dkg:context-graph:${contextGraphId}/meta`;
+    const expectedFilter = `FILTER(strstarts(str(?g), ${JSON.stringify(prefix)}))`;
+    vi.mocked(readProfileQueryCatalog).mockResolvedValueOnce(queryCatalogResponse([], contextGraphId));
+
+    await act(async () => {
+      root.render(React.createElement(Probe, { contextGraphId }));
+    });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(executeQuery).toHaveBeenCalledTimes(5);
+    for (const [sparql, options] of vi.mocked(executeQuery).mock.calls) {
+      expect(sparql).toContain(expectedFilter);
+      expect(sparql).not.toContain(contextGraphId);
+      expect(options).toEqual({ contextGraphId });
+    }
   });
 
   it('loads saved queries through the dedicated profile catalog endpoint', async () => {

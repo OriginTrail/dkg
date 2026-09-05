@@ -79,6 +79,14 @@ export interface ContextGraphJoinAdmissionHost {
   clearRetryableAdmission(contextGraphId: string, delegation: SignedAgentDelegation): void;
   reserveIngress(contextGraphId: string, carrierPeerId: string): () => void;
   chargeVerifiedIngress(contextGraphId: string, agentAddress: string): void;
+  validateEncryptionKeyBundle(
+    delegation: SignedAgentDelegation,
+    carrierPeerId: string,
+  ): void;
+  cacheVerifiedEncryptionKeys(
+    delegation: SignedAgentDelegation,
+    carrierPeerId: string,
+  ): Promise<void>;
   withAdmissionLock<T>(
     contextGraphId: string,
     operation: (token: ContextGraphJoinAdmissionLockToken) => Promise<T>,
@@ -108,6 +116,7 @@ export interface ContextGraphJoinAdmissionHost {
   hasJoinRequestRecord(contextGraphId: string, agentAddress: string): Promise<boolean>;
   markJoinRequestApproved(contextGraphId: string, agentAddress: string): Promise<void>;
   flushJoinApprovalDurably(): Promise<void>;
+  publishApprovalAuthorityProfile(): Promise<void>;
   notifyJoinApproval(
     contextGraphId: string,
     agentAddress: string,
@@ -118,6 +127,7 @@ export interface ContextGraphJoinAdmissionHost {
     contextGraphId: string,
     delegation: SignedAgentDelegation,
     agentName: string | undefined,
+    beforePersist: () => Promise<void>,
   ): Promise<boolean>;
   emitPendingJoinRequest(input: {
     contextGraphId: string;
@@ -321,6 +331,7 @@ export class ContextGraphJoinAdmission {
       if (!committed) {
         throw new Error('Automatic approval repair reservation is missing.');
       }
+      await this.host.publishApprovalAuthorityProfile();
       this.host.notifyJoinApproval(
         contextGraphId,
         delegation.agentAddress,
@@ -359,6 +370,10 @@ export class ContextGraphJoinAdmission {
     const repaired = await this.repairExistingMemberUnderLock(request);
     if (repaired) return repaired;
 
+    // Reject an invalid wallet-attested bundle before any pending mutation.
+    // Persistence happens later, only after capacity and the stored signed
+    // generation/terminal state have accepted this request.
+    this.host.validateEncryptionKeyBundle(request.delegation, request.carrierPeerId);
     await this.persistPendingUnderLock(request);
     return this.evaluatePolicyUnderLock(request);
   }
@@ -394,6 +409,11 @@ export class ContextGraphJoinAdmission {
       delegation,
       carrierPeerId,
     );
+    this.host.validateEncryptionKeyBundle(delegation, carrierPeerId);
+    // The already-member path returns before ordinary policy evaluation, so
+    // refresh a cold agent's independently wallet-attested key bundle only
+    // after the signed carrier and monotonic delegation checks succeed.
+    await this.host.cacheVerifiedEncryptionKeys(delegation, carrierPeerId);
     let refreshMutationStarted = false;
     try {
       const prepared = await this.host.prepareMemberRefresh({
@@ -433,6 +453,7 @@ export class ContextGraphJoinAdmission {
             details: { recoveredFromMemberRetry: true },
           })
         : false;
+      await this.host.publishApprovalAuthorityProfile();
       this.host.notifyJoinApproval(
         contextGraphId,
         delegation.agentAddress,
@@ -472,6 +493,7 @@ export class ContextGraphJoinAdmission {
       contextGraphId,
       delegation,
       agentName,
+      () => this.host.cacheVerifiedEncryptionKeys(delegation, request.carrierPeerId),
     );
     if (!persisted && existingRequestStatus && existingRequestStatus !== 'pending') {
       throw new Error(
@@ -561,17 +583,17 @@ export class ContextGraphJoinAdmission {
     )) {
       return leavePending('agent-revoked');
     }
-    try {
-      await this.host.assertActiveEncryptionKey(delegation.agentAddress);
-    } catch {
-      return leavePending('verified-active-encryption-key-required');
-    }
-
     const capacityDecision = evaluateCapacitySnapshot({ policy, memberCount: target.memberCount });
     if (capacityDecision.kind === 'pending') {
       return leavePending(capacityDecision.reason, capacityDecision.eventType);
     }
     const { maxMembers, maxApprovalsPerHour } = capacityDecision.value;
+
+    try {
+      await this.host.assertActiveEncryptionKey(delegation.agentAddress);
+    } catch {
+      return leavePending('verified-active-encryption-key-required');
+    }
 
     let reservation: ContextGraphJoinPolicyRateReservation;
     try {
@@ -708,6 +730,7 @@ export class ContextGraphJoinAdmission {
       if (!committedAuditRecorded) {
         throw new Error('Automatic approval reservation is missing from the durable audit store.');
       }
+      await this.host.publishApprovalAuthorityProfile();
       this.host.notifyJoinApproval(
         contextGraphId,
         delegation.agentAddress,

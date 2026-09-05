@@ -163,7 +163,11 @@ describe('SWM snapshot catch-up sync', () => {
       name,
       dataDir,
       listenHost: '127.0.0.1',
+      rfc64CatalogActivation: { enabled: false },
     });
+    (agent as unknown as {
+      resolveRfc64CatalogReceiverAuthorityV1: () => { legacySyncAllowed: boolean };
+    }).resolveRfc64CatalogReceiverAuthorityV1 = () => ({ legacySyncAllowed: true });
     agents.push(agent);
     return agent;
   }

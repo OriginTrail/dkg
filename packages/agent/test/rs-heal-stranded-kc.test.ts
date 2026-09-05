@@ -402,6 +402,43 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     expect(options.every((entry) => entry.source?.startsWith('agent.swm.rsHeal.'))).toBe(true);
   });
 
+  it('does not treat an incomplete busy-shaped failure as retry-safe admission rejection', async () => {
+    let queryCalls = 0;
+    const cursorKey = 'incomplete-busy-cg\u000029';
+    const cursorMap = new Map<string, string>([[cursorKey, 'did:dkg:hardhat:31337/0xbefore/1']]);
+    const agentLike = {
+      store: {
+        update: async () => undefined,
+        query: async () => {
+          queryCalls += 1;
+          if (queryCalls === 1) return { type: 'boolean', value: true } as const;
+          if (queryCalls === 2) {
+            return {
+              type: 'bindings',
+              bindings: [{
+                ual: 'did:dkg:hardhat:31337/0xincomplete/1',
+                b: `"1"^^<${XSD}integer>`,
+              }],
+            } as const;
+          }
+          throw { code: 'STORE_SCHEDULER_BUSY' };
+        },
+      },
+      contextGraphBindingState: new ContextGraphBindingState(),
+      rsHealCursorByCg: cursorMap,
+      log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+    };
+
+    await expect(SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      agentLike as never,
+      'incomplete-busy-cg',
+      authoritativeTarget('29') as never,
+    )).resolves.toEqual({ status: 'completed', inspected: 1 });
+
+    expect(queryCalls).toBe(3);
+    expect(cursorMap.has(cursorKey)).toBe(false);
+  });
+
   it('cancels a queued legacy-version read through the scheduler before teardown completes', async () => {
     const scheduler = new StorePriorityScheduler({
       maxConcurrent: 1,
@@ -479,6 +516,10 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     agentLike.reconcileCursors = new Map();
     agentLike.vmReconcilePhysicalRuns = new Set();
     agentLike.vmReconcileEnabled = () => true;
+    // This fixture isolates reconcile/heal result composition. Production
+    // dispatcher entry proves canonical read authority before target lookup;
+    // make that admission explicit instead of relying on the subscription row.
+    agentLike.canReadContextGraph = async () => true;
     agentLike.chain = {
       getContextGraphKCCount: async () => {
         order.push('main-reconcile');
@@ -537,6 +578,10 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
       },
     };
     agentLike.vmReconcileEnabled = () => true;
+    // This fixture isolates the current-watermark RS-heal path. Canonical read
+    // admission is covered separately and must not be inferred from the local
+    // subscription row now that persisted rows cannot authorize themselves.
+    agentLike.canReadContextGraph = async () => true;
     agentLike.chain = { getContextGraphKCCount: async () => 0n };
     agentLike.ensureVmReconcileDispatcher = SwmHostModeMethods.prototype.ensureVmReconcileDispatcher;
     agentLike.resolveVmReconcileTarget = SwmHostModeMethods.prototype.resolveVmReconcileTarget;

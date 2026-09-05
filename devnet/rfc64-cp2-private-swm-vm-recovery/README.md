@@ -2,9 +2,19 @@
 
 This canary starts two real `DKGAgent` processes. Both nodes accept one
 registered private Context Graph policy and its exact roster. The author
-publishes 32 signed catalog assets. The cold receiver must recover exactly
-32/32 SWM assets and materialize exactly 32/32 VM assets from the finalized
-chain ordinal set.
+publishes 32 signed catalog assets. The cold receiver must authenticate and
+activate exactly 32/32 SWM catalog payloads, materialize exactly 32/32 VM
+assets from the finalized chain ordinal set, and then retire exactly 32/32
+duplicate SWM twins. The durable synchronization evidence proves the catalog
+activation. For every KA, the receiver also exports a production-owned
+lifecycle receipt bound to the exact catalog head, inventory digest, VM graph,
+and VM post-read digest. The canary requires the receiver-owned committed-head
+token, which exists only after the VM transaction commits and the exact durable
+head and inventory survive their post-read; the receipt is emitted only after
+SWM reconciliation. An early retirement therefore cannot pass merely because
+VM appears later. Exact empty
+SWM graph readback plus exact VM bytes and metadata independently prove the
+intentional post-finalization retirement rather than data loss.
 
 The scale fixture does not build 500 cumulative exact sets. For a 500-asset
 run, it stages the

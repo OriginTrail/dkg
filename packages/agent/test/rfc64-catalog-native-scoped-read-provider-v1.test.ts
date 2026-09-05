@@ -5,6 +5,7 @@ import {
   KA_TRANSFER_CHUNK_SIZE_V1,
   KA_TRANSFER_CODEC_V1,
   KA_TRANSFER_PROJECTION_V1,
+  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   assertAuthorCatalogRowV1,
   canonicalizeAuthorCatalogBucketPayloadBytesV1,
@@ -13,6 +14,7 @@ import {
   computeAuthorCatalogHeadObjectDigestV1,
   computeAuthorCatalogScopeDigestV1,
   computeKaChunkTreeRootV1,
+  deriveAuthorCatalogScopeFromHeadV1,
   encodeOpaqueKaBundleV1,
   type AuthorCatalogBucketV1,
   type AuthorCatalogDirectoryNodeV1,
@@ -26,6 +28,7 @@ import {
   type EvmAddressV1,
   type ContextGraphPolicyV1,
   type MemberRosterV1,
+  type SignedAuthorCatalogHeadEnvelopeV1,
   type SignedControlEnvelopeV1,
   type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
@@ -36,6 +39,11 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   produceEmptyAuthorCatalogGenesisV1,
 } from '../src/rfc64/author-catalog-producer.js';
+import {
+  RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1,
+  assertRfc64BoundedCatalogPredecessorV1,
+  walkRfc64BoundedCatalogHeadLineageV1,
+} from '../src/rfc64/catalog-head-lineage-v1.js';
 import { createRfc64CatalogNativeScopedReadProviderV1 } from '../src/rfc64/catalog-native-scoped-read-provider-v1.js';
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from '../src/rfc64/catalog-access-policy-v1.js';
 import { produceDirectAuthorCatalogIssuerDelegationV1 } from '../src/rfc64/public-catalog-issuer-delegation-v1.js';
@@ -332,6 +340,136 @@ async function signFixtureEnvelopeV1(
 }
 
 describe('RFC-64 catalog native scoped read provider v1', () => {
+  it('uses one lineage invariant for issuer and delegation continuity', async () => {
+    const fixture = await providerFixture();
+    const predecessor = fixture.genesis.head;
+    const child = fixture.successor.head as SignedAuthorCatalogHeadEnvelopeV1;
+    const scope = deriveAuthorCatalogScopeFromHeadV1(predecessor.payload);
+    expect(() => assertRfc64BoundedCatalogPredecessorV1(
+      predecessor,
+      child,
+      scope,
+    )).not.toThrow();
+
+    const wrongIssuer = Object.freeze({
+      ...predecessor,
+      issuer: `0x${'99'.repeat(20)}`,
+    }) as SignedAuthorCatalogHeadEnvelopeV1;
+    expect(() => assertRfc64BoundedCatalogPredecessorV1(
+      wrongIssuer,
+      child,
+      scope,
+    )).toThrow(/contiguous bounded signed head/u);
+
+    const wrongDelegation = Object.freeze({
+      ...predecessor,
+      payload: Object.freeze({
+        ...predecessor.payload,
+        catalogIssuerDelegationDigest: `0x${'98'.repeat(32)}`,
+      }),
+    }) as SignedAuthorCatalogHeadEnvelopeV1;
+    expect(() => assertRfc64BoundedCatalogPredecessorV1(
+      wrongDelegation,
+      child,
+      scope,
+    )).toThrow(/contiguous bounded signed head/u);
+
+    const digest = `0x${'97'.repeat(32)}` as Digest32V1;
+    const rejectedLinks: Array<Readonly<{
+      label: string;
+      predecessor: SignedAuthorCatalogHeadEnvelopeV1;
+      child: SignedAuthorCatalogHeadEnvelopeV1;
+    }>> = [
+      {
+        label: 'skipped version',
+        predecessor,
+        child: Object.freeze({
+          ...child,
+          payload: Object.freeze({ ...child.payload, version: '2' }),
+        }) as SignedAuthorCatalogHeadEnvelopeV1,
+      },
+      {
+        label: 'timestamp rollback',
+        predecessor,
+        child: Object.freeze({
+          ...child,
+          payload: Object.freeze({ ...child.payload, issuedAt: '0' }),
+        }) as SignedAuthorCatalogHeadEnvelopeV1,
+      },
+      {
+        label: 'wrong previous digest',
+        predecessor,
+        child: Object.freeze({
+          ...child,
+          payload: Object.freeze({ ...child.payload, previousHeadDigest: digest }),
+        }) as SignedAuthorCatalogHeadEnvelopeV1,
+      },
+      {
+        label: 'linked genesis',
+        predecessor: Object.freeze({
+          ...predecessor,
+          payload: Object.freeze({ ...predecessor.payload, previousHeadDigest: digest }),
+        }) as SignedAuthorCatalogHeadEnvelopeV1,
+        child,
+      },
+      {
+        label: 'unlinked non-genesis',
+        predecessor: Object.freeze({
+          ...predecessor,
+          payload: Object.freeze({ ...predecessor.payload, version: '1' }),
+        }) as SignedAuthorCatalogHeadEnvelopeV1,
+        child: Object.freeze({
+          ...child,
+          payload: Object.freeze({ ...child.payload, version: '2' }),
+        }) as SignedAuthorCatalogHeadEnvelopeV1,
+      },
+      {
+        label: 'row bound',
+        predecessor: Object.freeze({
+          ...predecessor,
+          payload: Object.freeze({
+            ...predecessor.payload,
+            totalRows: String(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 + 1),
+          }),
+        }) as SignedAuthorCatalogHeadEnvelopeV1,
+        child,
+      },
+      {
+        label: 'bucket shape',
+        predecessor: Object.freeze({
+          ...predecessor,
+          payload: Object.freeze({ ...predecessor.payload, bucketCount: '2' }),
+        }) as SignedAuthorCatalogHeadEnvelopeV1,
+        child,
+      },
+      {
+        label: 'directory shape',
+        predecessor: Object.freeze({
+          ...predecessor,
+          payload: Object.freeze({ ...predecessor.payload, directoryHeight: '1' }),
+        }) as SignedAuthorCatalogHeadEnvelopeV1,
+        child,
+      },
+    ];
+    for (const mutation of rejectedLinks) {
+      expect(
+        () => assertRfc64BoundedCatalogPredecessorV1(
+          mutation.predecessor,
+          mutation.child,
+          scope,
+        ),
+        mutation.label,
+      ).toThrow();
+    }
+
+    await expect(walkRfc64BoundedCatalogHeadLineageV1({
+      target: child,
+      catalogScope: scope,
+      maxPredecessors: RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1 + 1,
+      readPredecessor: async () => null,
+    })).rejects.toThrow(/invalid bounded window/u);
+  });
+
   it('closes one exact signed bounded head and exposes only its reachable digests', async () => {
     const fixture = await providerFixture();
     const capability = await fixture.resolve(fixture.scope);
@@ -350,10 +488,13 @@ describe('RFC-64 catalog native scoped read provider v1', () => {
     await expect(capability?.readKaBundleByDigest(fixture.bundle.blobDigest))
       .resolves.toEqual(fixture.bundle.bundleBytes);
 
-    // This is a valid signed object in the same shared store, but it is not in
-    // the requested successor closure.
+    // The signed ancestor HEAD is reachable for bounded lineage proofs. Its
+    // directory/bucket closure is not exposed by the current-head capability.
     await expect(capability?.readCatalogObjectByDigest(
       fixture.genesis.head.objectDigest as Digest32V1,
+    )).resolves.toEqual(fixture.genesis.head);
+    await expect(capability?.readCatalogObjectByDigest(
+      fixture.genesis.directoryPath[0]!.objectDigest as Digest32V1,
     )).resolves.toBeNull();
     await expect(capability?.readKaBundleByDigest(
       `0x${'91'.repeat(32)}` as Digest32V1,
@@ -371,7 +512,7 @@ describe('RFC-64 catalog native scoped read provider v1', () => {
       .resolves.toEqual(fixture.bundle.bundleBytes);
     await expect(capability?.readCatalogObjectByDigest(
       fixture.genesis.head.objectDigest as Digest32V1,
-    )).resolves.toBeNull();
+    )).resolves.toEqual(fixture.genesis.head);
     await expect(capability?.readKaBundleByDigest(
       `0x${'91'.repeat(32)}` as Digest32V1,
     )).resolves.toBeNull();
@@ -493,13 +634,13 @@ describe('RFC-64 catalog native scoped read provider v1', () => {
     const capability = await fixture.resolve(fixture.scope);
     expect(capability).not.toBeNull();
     expect(fixture.rows).toHaveLength(500);
-    expect(fixture.controlRead).toHaveBeenCalledTimes(4);
+    expect(fixture.controlRead).toHaveBeenCalledTimes(5);
     expect(onAuthorCatalogBucketProof).toHaveBeenCalledTimes(1);
 
     for (let index = 0; index < 500; index += 1) {
       await expect(fixture.resolve(fixture.scope)).resolves.toBe(capability);
     }
-    expect(fixture.controlRead).toHaveBeenCalledTimes(4);
+    expect(fixture.controlRead).toHaveBeenCalledTimes(5);
     expect(onAuthorCatalogBucketProof).toHaveBeenCalledTimes(1);
   }, 15_000);
 
@@ -521,7 +662,7 @@ describe('RFC-64 catalog native scoped read provider v1', () => {
     const capabilities = await Promise.all(resolutions);
     expect(capabilities[0]).not.toBeNull();
     expect(capabilities.every((capability) => capability === capabilities[0])).toBe(true);
-    expect(fixture.controlRead).toHaveBeenCalledTimes(4);
+    expect(fixture.controlRead).toHaveBeenCalledTimes(5);
   });
 
   it('denies a cached exact-head capability after private author membership is revoked', async () => {
@@ -545,6 +686,6 @@ describe('RFC-64 catalog native scoped read provider v1', () => {
     const restored = await fixture.resolve(fixture.scope);
     expect(restored).not.toBeNull();
     expect(restored).not.toBe(capability);
-    expect(fixture.controlRead).toHaveBeenCalledTimes(8);
+    expect(fixture.controlRead).toHaveBeenCalledTimes(10);
   });
 });

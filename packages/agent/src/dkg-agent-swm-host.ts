@@ -96,7 +96,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, isStoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -281,13 +281,6 @@ function rsHealStoreOptions(operation: string, signal?: AbortSignal): QueryOptio
     source: `agent.swm.rsHeal.${operation}`,
     ...(signal ? { signal } : {}),
   };
-}
-
-function isStoreSchedulerBusyError(err: unknown): boolean {
-  return err instanceof StoreSchedulerBusyError || (
-    typeof err === 'object' && err !== null &&
-    (err as { code?: unknown }).code === 'STORE_SCHEDULER_BUSY'
-  );
 }
 
 export type RsHealPassResult =
@@ -842,6 +835,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
   ): Promise<void> {
     if (!this.swmHostModeStore) return;
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) return;
+    if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
+      // Host reconciliation is a second, independent path into the same
+      // legacy SWM topic. Catalog authority must remove an already-wired host
+      // handler as well as refuse a new one.
+      this.unwireSwmHostModeHandler(contextGraphId);
+      return;
+    }
     if (this.sharedMemoryGossipRegistered.has(contextGraphId)) {
       // Member-mode subscription already active — apply path covers
       // local consumption; no need to also opaquely store.
@@ -1039,6 +1039,27 @@ export class SwmHostModeMethods extends DKGAgentBase {
     source: SubscriptionSource = SUBSCRIPTION_SOURCES.RECONCILER,
     curated = true,
   ): void {
+    if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
+      const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
+      const hadRuntimeHostState = this.swmHostModeHandlers.has(hostKey)
+        || this.swmHostModeSubscribed.has(hostKey)
+        || this.swmHostModeCurated.has(hostKey);
+      this.unwireSwmHostModeHandler(contextGraphId);
+      const deletedStaleHandler = this.swmHostModeHandlers.delete(hostKey);
+      const deletedStaleSubscription = this.swmHostModeSubscribed.delete(hostKey);
+      const deletedStaleClassification = this.swmHostModeCurated.delete(hostKey);
+      if (deletedStaleHandler || deletedStaleSubscription || deletedStaleClassification) {
+        // Heal partially restored/stale bookkeeping even when its handler
+        // reference is absent, which makes unwireSwmHostModeHandler a no-op.
+        this.enqueueHostModePersistence(contextGraphId, false);
+      } else if (!hadRuntimeHostState) {
+        // The restart restore path calls this method from a persisted marker
+        // before rebuilding runtime maps. Clear that marker too, otherwise
+        // every catalog-authoritative restart would retry the legacy host path.
+        this.enqueueHostModePersistence(contextGraphId, false);
+      }
+      return;
+    }
     // OT-RFC-38 / LU-6 Phase B — host-mode subscribes on the wire-form
     // topic. For chain-event-driven auto-subscribe, `contextGraphId`
     // IS the wire id (the core has no cleartext to translate from).
@@ -2559,6 +2580,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
       newOnChainId,
     );
     if (!transition.changed) return;
+    // Some verified late-binding paths intentionally mutate the canonical
+    // in-memory subscription only after their durable write commits. They do
+    // not subsequently pass through setContextGraphSubscription(), so without
+    // this notification a subscribed Edge can remain outside the RFC-64
+    // responsibility registry until restart even though its chain id is now
+    // authoritative. Clone-based callers still let the canonical setter own
+    // the transition and avoid an eager decision against the old row.
+    if (this.subscribedContextGraphs.get(localCgId) === sub) {
+      void this.reconcileRfc64CatalogResponsibilityV1(localCgId).catch((error) => {
+        this.log.warn(
+          createOperationContext('system'),
+          `RFC-64 responsibility resolution failed after binding "${localCgId}": ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
     if (!transition.onChainIdChanged) return;
     // The bound on-chain id actually CHANGED (repair / recreate / re-register).
     // Any prior reconcile progress refers to the OLD chain graph and must be
@@ -2886,7 +2922,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): boolean {
-    if (!(this.config.syncContextGraphs ?? []).includes(contextGraphId)) return false;
+    // Catalog mode removes the CG from the legacy durable/SWM scope, but VM
+    // remains chain-inventoried and must not disappear with that authority
+    // hand-off (or with the Track-2 kill switch). The immutable RFC-64
+    // selection therefore remains an independent VM-reconcile intent source.
+    const explicitlySelected = (this.config.syncContextGraphs ?? []).includes(contextGraphId)
+      || this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] !== undefined;
+    if (!explicitlySelected) return false;
     const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
       ?? [];
@@ -2929,6 +2971,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const eligible: string[] = [];
       for (const [localCgId, sub] of this.subscribedContextGraphs) {
         if (!isLifecycleCurrent()) return;
+        // Passive discovery rows carry neither member nor host intent. Public
+        // RFC-64 selection is handled by the accepted-policy loop below.
+        if (!sub.subscribed && !sub.coreHosted) continue;
+        // A durable subscription row is synchronization intent, never an
+        // authorization credential. In particular, an older daemon may have
+        // persisted a private-CG row before the subscribe admission gate became
+        // fail-closed. Do not even enqueue VM work unless current policy
+        // authority positively proves this node can read the CG.
+        const canRead = await this.canReadContextGraph(localCgId, {
+          allowSubscriptionFallback: false,
+        }).catch(() => false);
+        if (!isLifecycleCurrent()) return;
+        if (!canRead) continue;
         // GH #1098 — self-prime onChainId for a pre-subscribed PUBLIC member CG
         // (subscribed BEFORE its first publish, so unbound) before the skip-gate
         // below would pass it over. Shared with the live KACG nudge.
@@ -3209,6 +3264,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!subscription?.subscribed && !subscription?.coreHosted) {
       throw new ContextGraphNotFoundError(localCgId);
     }
+    // Exact-asset recovery is another VM materialization entry point and must
+    // not trust the persisted subscription bit as membership proof.
+    const canRead = await this.canReadContextGraph(localCgId, {
+      allowSubscriptionFallback: false,
+    }).catch(() => false);
+    if (!canRead) throw new ContextGraphNotFoundError(localCgId);
     if (
       typeof this.chain.getKAContextGraphId !== 'function'
       || typeof this.chain.readKnowledgeAssetVersionSnapshot !== 'function'
@@ -3479,8 +3540,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (!this.isRfc64SelectedVmReconcileTargetAllowed(localCgId)) {
         throw new ContextGraphNotFoundError(localCgId);
       }
+      // This branch is definitionally an accepted RFC-64 PUBLIC policy (the
+      // selector rejects private policy envelopes) and carries no member row
+      // that could have been poisoned. Resolve it through the dedicated
+      // selected target path without doing a second general read probe.
       return this.resolveSelectedVmReconcileTarget(localCgId, isCurrent, signal);
     }
+    // Central defense for periodic, live-chain, and manual reconciliation.
+    // The outer sweep also filters unauthorized rows to avoid queue churn, but
+    // every dispatcher entry point converges here and must independently prove
+    // read authority. Never let a persisted subscription authorize itself.
+    const canRead = await this.canReadContextGraph(localCgId, {
+      allowSubscriptionFallback: false,
+    }).catch(() => false);
+    if (!isCurrent()) throw new VmReconcileQueueClosedError();
+    if (!canRead) throw new ContextGraphNotFoundError(localCgId);
     if (
       this.contextGraphBindingState.currentBindingFor(localCgId, sub) === undefined
       && sub.subscribed
@@ -4888,6 +4962,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     );
     const rosterProofUpgraded = !record.curatorRosterConfirmed && curatorRosterConfirmed;
     if (!membershipUnchanged) {
+      const priorCycleWasIncomplete = record.backoffKind === 'incomplete-cycle'
+        || [...record.attemptedPeerIds]
+          .some((peerId) => !record.cleanAbsentPeerIds.has(peerId));
       const previousCandidatePeerIds = record.candidatePeerIds;
       const nextCandidatePeerIds = new Set(candidatePeerIds);
       record.candidatePeerIds = new Set(candidatePeerIds);
@@ -4909,9 +4986,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
       } else if (!rosterProofUpgraded) {
         // Pure growth preserves valid credits for retained identities, but the
         // newly observed peer is uncredited and immediately breaks backoff.
+        // Do not let a publication-window incomplete response compound into
+        // multi-minute suppression merely because startup discovers the same
+        // recovery roster one peer at a time. Clean-absence history still
+        // keeps its exponential damping; only transport/timing uncertainty
+        // starts a fresh base-delay epoch when the evidence universe grows.
         record.phase = 'collecting';
         record.backoffKind = undefined;
         record.nextRetryAt = 0;
+        if (priorCycleWasIncomplete) record.failures = 0;
         record.collectionDeadlineAt = now
           + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
       }
@@ -7102,6 +7185,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return { subscribed: false, alreadySubscribed: false, hostingEnabled: false };
     }
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
+      return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
+    }
+    if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
+      this.unwireSwmHostModeHandler(contextGraphId);
       return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
     }
     // Codex PR #610 R4: refuse host-mode subscribe when the same

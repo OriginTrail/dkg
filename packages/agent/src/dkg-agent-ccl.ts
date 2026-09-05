@@ -245,7 +245,7 @@ type JoinApprovalRetryEntry = {
   lastError: string;
 };
 import { multiaddr } from '@multiformats/multiaddr';
-import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
+import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, CclResourceNotFoundError, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
 import { buildManualCclFacts, resolveFactsFromSnapshot, type CclFactResolutionMode } from './ccl-fact-resolution.js';
@@ -422,7 +422,12 @@ export class CclPolicyMethods extends DKGAgentBase {
     const ctx = createOperationContext('system');
     await this.assertContextGraphPolicyOwner(opts.contextGraphId, opts.callerAgentAddress);
     const record = await this.getCclPolicyByUri(opts.policyUri, { includeBody: true });
-    if (!record) throw new Error(`CCL policy not found: ${opts.policyUri}`);
+    if (!record) {
+      throw new CclResourceNotFoundError(
+        'policy',
+        `CCL policy not found: ${opts.policyUri}`,
+      );
+    }
     if (record.contextGraphId !== opts.contextGraphId) {
       throw new Error(`CCL policy ${opts.policyUri} belongs to contextGraph "${record.contextGraphId}", not "${opts.contextGraphId}"`);
     }
@@ -488,7 +493,10 @@ export class CclPolicyMethods extends DKGAgentBase {
       contextType: opts.contextType,
     });
     if (!target) {
-      throw new Error(`No active CCL policy binding found for ${opts.policyUri} in contextGraph "${opts.contextGraphId}"${opts.contextType ? ` and context "${opts.contextType}"` : ''}.`);
+      throw new CclResourceNotFoundError(
+        'policy_binding',
+        `No active CCL policy binding found for ${opts.policyUri} in contextGraph "${opts.contextGraphId}"${opts.contextType ? ` and context "${opts.contextType}"` : ''}.`,
+      );
     }
 
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
@@ -666,8 +674,14 @@ export class CclPolicyMethods extends DKGAgentBase {
       contextType: opts.contextType,
       includeBody: true,
     });
-    if (!policy?.body) {
-      throw new Error(`No approved policy found for ${opts.contextGraphId}/${opts.name}${opts.contextType ? `/${opts.contextType}` : ''}`);
+    if (!policy) {
+      throw new CclResourceNotFoundError(
+        'approved_policy',
+        `No approved policy found for ${opts.contextGraphId}/${opts.name}${opts.contextType ? `/${opts.contextType}` : ''}`,
+      );
+    }
+    if (!policy.body) {
+      throw new Error(`CCL policy body missing: ${policy.policyUri}`);
     }
 
     const parsed = parseCclPolicy(policy.body);

@@ -21,6 +21,10 @@ import {
   sanitizeDkgToolForLocalLlm,
   validateDkgToolCall,
 } from './dkg-tool-validation.js';
+import {
+  DEFAULT_MAX_MODEL_RESPONSE_BYTES,
+  readModelResponseTextBounded,
+} from './model-response.js';
 
 export interface McpClientLike {
   listTools(options?: { signal?: AbortSignal }): Promise<{ tools: McpToolDefinition[] }>;
@@ -52,7 +56,7 @@ type ChatMessage = {
   tool_calls?: ToolCall[];
 };
 
-type LlamaResponse = {
+type OpenAiCompatibleResponse = {
   choices?: Array<{
     finish_reason?: string | null;
     message?: {
@@ -97,6 +101,8 @@ export interface DkgLocalLlmOptions {
   maxToolCalls?: number;
   maxToolsPerTurn?: number;
   maxToolJsonBytes?: number;
+  /** Maximum bytes accepted from one local-model HTTP response. */
+  maxModelResponseBytes?: number;
   maxEvidenceChars?: number;
   maxSessionTurns?: number;
   maxSessionChars?: number;
@@ -345,6 +351,7 @@ export class DkgLocalLlmRuntime {
   private readonly maxToolCalls: number;
   private readonly maxToolsPerTurn: number;
   private readonly maxToolJsonBytes: number;
+  private readonly maxModelResponseBytes: number;
   private readonly maxEvidenceChars: number;
   private readonly maxSessionTurns: number;
   private readonly maxSessionChars: number;
@@ -379,6 +386,11 @@ export class DkgLocalLlmRuntime {
     this.maxToolCalls = positiveIntegerOption('maxToolCalls', options.maxToolCalls, 4);
     this.maxToolsPerTurn = positiveIntegerOption('maxToolsPerTurn', options.maxToolsPerTurn, 8);
     this.maxToolJsonBytes = positiveIntegerOption('maxToolJsonBytes', options.maxToolJsonBytes, 18_000);
+    this.maxModelResponseBytes = positiveIntegerOption(
+      'maxModelResponseBytes',
+      options.maxModelResponseBytes,
+      DEFAULT_MAX_MODEL_RESPONSE_BYTES,
+    );
     this.maxEvidenceChars = positiveIntegerOption('maxEvidenceChars', options.maxEvidenceChars, 12_000);
     this.maxSessionTurns = positiveIntegerOption('maxSessionTurns', options.maxSessionTurns, 6);
     this.maxSessionChars = positiveIntegerOption('maxSessionChars', options.maxSessionChars, 8_000);
@@ -529,14 +541,14 @@ export class DkgLocalLlmRuntime {
     return undefined;
   }
 
-  private async callLlama(
+  private async callModel(
     messages: ChatMessage[],
     tools: OpenAiToolDefinition[],
     toolChoice: 'required' | 'auto' | undefined,
     round: number,
     maxTokens = this.maxTokens,
     signal?: AbortSignal,
-  ): Promise<LlamaResponse> {
+  ): Promise<OpenAiCompatibleResponse> {
     const body: Record<string, unknown> = {
       model: this.model,
       messages,
@@ -550,7 +562,7 @@ export class DkgLocalLlmRuntime {
     if (tools.length) body.tools = tools;
     if (toolChoice) body.tool_choice = toolChoice;
 
-    await this.trace.write(`LLAMA REQUEST ${round}`, { endpoint: this.llamaUrl, body });
+    await this.trace.write(`LLM REQUEST ${round}`, { endpoint: this.llamaUrl, body });
     signal?.throwIfAborted();
     const timeoutSignal = AbortSignal.timeout(this.requestTimeoutMs);
     const requestSignal = signal
@@ -562,20 +574,20 @@ export class DkgLocalLlmRuntime {
       body: JSON.stringify(body),
       signal: requestSignal,
     });
-    const raw = await response.text();
+    const raw = await readModelResponseTextBounded(response, this.maxModelResponseBytes);
     signal?.throwIfAborted();
     if (!response.ok) {
-      await this.trace.write(`LLAMA HTTP ERROR ${round}`, { status: response.status, body: raw });
-      throw new Error(`llama.cpp returned ${response.status}: ${raw}`);
+      await this.trace.write(`LLM HTTP ERROR ${round}`, { status: response.status, body: raw });
+      throw new Error(`Local LLM endpoint returned ${response.status}: ${raw}`);
     }
 
-    let parsed: LlamaResponse;
+    let parsed: OpenAiCompatibleResponse;
     try {
-      parsed = JSON.parse(raw) as LlamaResponse;
+      parsed = JSON.parse(raw) as OpenAiCompatibleResponse;
     } catch (error) {
-      throw new Error(`llama.cpp returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(`Local LLM endpoint returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
     }
-    await this.trace.write(`LLAMA RESPONSE ${round}`, parsed);
+    await this.trace.write(`LLM RESPONSE ${round}`, parsed);
     return parsed;
   }
 
@@ -689,7 +701,7 @@ export class DkgLocalLlmRuntime {
             ? []
             : openAiTools;
       const toolChoice = routedTools.length ? (requireTool ? 'required' : 'auto') : undefined;
-      const response = await this.callLlama(
+      const response = await this.callModel(
         messages,
         routedTools,
         toolChoice,
@@ -699,7 +711,7 @@ export class DkgLocalLlmRuntime {
       );
       const choice = response.choices?.[0];
       const assistant = choice?.message;
-      if (!assistant) throw new Error('llama.cpp returned no assistant choice.');
+      if (!assistant) throw new Error('Local LLM endpoint returned no assistant choice.');
       const toolCalls = assistant.tool_calls ?? [];
 
       if (toolCalls.length === 0) {
@@ -730,7 +742,7 @@ export class DkgLocalLlmRuntime {
           continue;
         }
         const answer = normalizeFinalAnswer(String(assistant.content ?? ''));
-        if (!answer) throw new Error('llama.cpp returned an empty final answer.');
+        if (!answer) throw new Error('Local LLM endpoint returned an empty final answer.');
         await this.trace.write('FINAL ANSWER', answer);
         await this.rememberTurn(prompt, answer, sessionEvidence, signal);
         return { answer, profile: route.profile, toolCalls: executed, traceFile: this.trace.filePath };

@@ -60,6 +60,10 @@ export {
   type KnowledgeAssetOperationPublicSnapshot,
 } from './workspace-resolution.js';
 export {
+  type StageKnowledgeAssetSharedWorkingMemoryInputV1,
+  type StagedKnowledgeAssetSharedWorkingMemoryV1,
+} from './knowledge-asset-swm-staging.js';
+export {
   computeTripleHash,
   computePublicRoot,
   computePrivateRoot,
@@ -92,6 +96,8 @@ export {
   CuratorRejectedError,
   assertValidPrecomputedUpdateAttestation,
   type DKGPublisherConfig,
+  type DurableRootPromotionIdentity,
+  type DurableRootPromotionAtomicCompanion,
   type WorkspaceSenderKeyEncryptInput,
   type WorkspaceSenderKeyEncryptor,
   type ShareOptions,
@@ -298,6 +304,12 @@ export {
   type LiftJobRetryProjection,
   type LiftJobRetryWaitingReason,
 } from './async-lift-retry-disposition.js';
+// Public option types for the narrow terminal-job administrative capability.
+export {
+  type LegacyPendingTransactionClearOverride,
+  type PendingTransactionClearOverride,
+  type TargetedLiftJobClearOptions,
+} from './terminal-job-clear.js';
 export {
   AsyncLiftJobConflictError,
   LiftJobPendingChainProofError,

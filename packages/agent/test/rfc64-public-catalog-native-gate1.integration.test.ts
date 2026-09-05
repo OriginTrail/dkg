@@ -58,6 +58,7 @@ import {
   rfc64CatalogSignatureVariantDigestV1,
   type Rfc64PublicCatalogNativeAppliedHeadLifecycleV1,
   type Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
+  type Rfc64PublicCatalogNativeCommittedHeadTokenV1,
   type Rfc64PublicCatalogNativePrecommitTransactionV1,
 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
 import { readVerifiedAuthorCatalogRowAuthorshipV1 } from '../src/rfc64/catalog-row-authorship.js';
@@ -83,12 +84,44 @@ import {
 
 function appliedHeadLifecycleV1(
   transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null = null,
-  afterAppliedHead: (() => void | Promise<void>) | null = null,
+  afterAppliedHead: ((
+    committedHead: Readonly<Rfc64PublicCatalogNativeCommittedHeadTokenV1>,
+  ) => void | Promise<void>) | null = null,
 ): Rfc64PublicCatalogNativeAppliedHeadLifecycleV1 {
   return Object.freeze({
     kind: 'rfc64-public-catalog-native-applied-head-lifecycle-v1',
     transaction,
     afterAppliedHead,
+  });
+}
+
+function appliedHeadLifecycleAbortingBeforeCasV1(
+  controller: AbortController,
+  abortReason: unknown,
+  transaction: Rfc64PublicCatalogNativePrecommitTransactionV1,
+): Readonly<{
+  lifecycle: Rfc64PublicCatalogNativeAppliedHeadLifecycleV1;
+  afterAppliedHeadReadCount: () => number;
+}> {
+  let afterAppliedHeadReadCount = 0;
+  const lifecycle: Rfc64PublicCatalogNativeAppliedHeadLifecycleV1 = Object.freeze({
+    kind: 'rfc64-public-catalog-native-applied-head-lifecycle-v1',
+    transaction,
+    get afterAppliedHead() {
+      afterAppliedHeadReadCount += 1;
+      // The first read is the lifecycle type guard. Returning null makes that
+      // branch short-circuit after one read. The second read assigns the
+      // normalized lifecycle; its microtask runs after runBeforeAppliedHeadCommitV1's
+      // trailing abort check but before the awaiting receiver resumes at CAS.
+      if (afterAppliedHeadReadCount === 2) {
+        queueMicrotask(() => controller.abort(abortReason));
+      }
+      return null;
+    },
+  });
+  return Object.freeze({
+    lifecycle,
+    afterAppliedHeadReadCount: () => afterAppliedHeadReadCount,
   });
 }
 
@@ -339,6 +372,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       fixture.successor.head.objectDigest,
       fixture.catalogIssuerDelegation.objectDigest,
       fixture.successor.head.payload.directoryRootDigest,
+      fixture.genesis.head.objectDigest,
       fixture.successor.bucket?.objectDigest,
       fixture.successor.head.payload.directoryRootDigest,
       fixture.successor.bucket?.objectDigest,
@@ -353,6 +387,73 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     })).resolves.toMatchObject({
       envelope: { objectDigest: fixture.catalogIssuerDelegation.objectDigest },
     });
+  }, 30_000);
+
+  it('accepts an exact projection when the store post-read returns a different row order', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    const reorderedPostReadStore = new Proxy(fixture.receiverStore, {
+      get(target, property) {
+        if (property === 'query') {
+          return async (...args: Parameters<TripleStore['query']>) => {
+            const result = await target.query(...args);
+            if (
+              args[1]?.source === 'rfc64-public-catalog-native-post-read'
+              && result.type === 'bindings'
+              && result.bindings.length > 1
+            ) {
+              return { ...result, bindings: [...result.bindings].reverse() };
+            }
+            return result;
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const observed = fixture.createCasObservedReceiver(undefined, reorderedPostReadStore);
+
+    await expect(fixture.synchronize(fixture.announcement, observed.receiver))
+      .resolves.toMatchObject({
+        appliedHeadStatus: 'applied',
+        inventoryRowCount: 1,
+        activatedTripleCount: 2,
+      });
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).toHaveBeenCalledOnce();
+  }, 30_000);
+
+  it('rejects changed post-read content before the applied-head CAS', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    const changedPostReadStore = new Proxy(fixture.receiverStore, {
+      get(target, property) {
+        if (property === 'query') {
+          return async (...args: Parameters<TripleStore['query']>) => {
+            const result = await target.query(...args);
+            if (
+              args[1]?.source === 'rfc64-public-catalog-native-post-read'
+              && result.type === 'bindings'
+              && result.bindings.length > 1
+            ) {
+              const bindings = [...result.bindings];
+              bindings[1] = { ...bindings[1], o: '"Alixe"' };
+              return { ...result, bindings };
+            }
+            return result;
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const observed = fixture.createCasObservedReceiver(undefined, changedPostReadStore);
+
+    await expect(fixture.synchronize(fixture.announcement, observed.receiver))
+      .rejects.toMatchObject({
+        code: 'catalog-native-receiver-activation',
+        message: expect.stringContaining('exact SWM post-read differs'),
+      });
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
   }, 30_000);
 
   it('cold-bootstraps a zero-row successor on a fresh receiver', async () => {
@@ -479,6 +580,55 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       inventoryRowCount: '2',
     });
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(32);
+  }, 30_000);
+
+  it('proves a bounded signed lineage and converges after announcements coalesce', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+
+    const evidence = await fixture.synchronizeAny(fixture.threeAssetAnnouncement);
+
+    expect(evidence).toMatchObject({
+      catalogHeadDigest: fixture.threeAssetSuccessor.head.objectDigest,
+      inventoryRowCount: 3,
+      activatedTripleCount: 6,
+      appliedHeadStatus: 'applied',
+    });
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toMatchObject({
+      currentCatalogHeadDigest: fixture.threeAssetSuccessor.head.objectDigest,
+      catalogVersion: '3',
+      inventoryRowCount: '3',
+    });
+    await expect(fixture.receiverPersistence.controlObjects.getVerifiedObjectByDigest({
+      objectDigest: fixture.multiAssetSuccessor.head.objectDigest,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    })).resolves.toMatchObject({
+      envelope: { objectDigest: fixture.multiAssetSuccessor.head.objectDigest },
+    });
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(48);
+  }, 30_000);
+
+  it('rejects a signed coalesced branch that does not descend from the durable head', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+
+    await expect(fixture.synchronizeAny(fixture.alternateThirdAnnouncement))
+      .rejects.toMatchObject({ code: 'catalog-native-receiver-history' });
+
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toMatchObject({
+      currentCatalogHeadDigest: fixture.successor.head.objectDigest,
+      catalogVersion: '1',
+      inventoryRowCount: '1',
+    });
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
   }, 30_000);
 
   it('replays a cold-bootstrapped current exact head without staging its predecessor', async () => {
@@ -1250,6 +1400,123 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
         expect(call.at(-1)).toEqual({ timeoutMs: 10_000, signal });
       }
     }
+  }, 30_000);
+
+  it('rolls back genesis cancellation in the precommit-to-CAS gap', async () => {
+    const fixture = await setupLiveReceiver();
+    await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+    const controller = new AbortController();
+    const abortReason = new Error('cancel genesis after precommit semantic work');
+    const compareAndSwapAppliedCatalogHeadV1 = vi.fn(
+      fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1.bind(
+        fixture.receiverPersistence.inventory,
+      ),
+    );
+    const commit = vi.fn();
+    const rollback = vi.fn();
+    const cancellationBoundary = appliedHeadLifecycleAbortingBeforeCasV1(
+      controller,
+      abortReason,
+      {
+        commit,
+        rollback: async (cause) => {
+          rollback(cause);
+          await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+        },
+      },
+    );
+    const receiver = fixture.createReceiver({
+      readAppliedCatalogHeadV1:
+        fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
+          fixture.receiverPersistence.inventory,
+        ),
+      compareAndSwapAppliedCatalogHeadV1,
+    }, undefined, undefined, fixture.receiverStore, async (_plan, signal) => {
+      expect(signal).toBe(controller.signal);
+      await setTransactionTestVmGeneration(fixture.receiverStore, 'target');
+      return cancellationBoundary.lifecycle;
+    });
+
+    await expect(fixture.bootstrap(
+      fixture.genesisAnnouncement,
+      receiver,
+      controller.signal,
+    )).rejects.toBe(abortReason);
+    expect(cancellationBoundary.afterAppliedHeadReadCount()).toBe(2);
+    expect(controller.signal.reason).toBe(abortReason);
+    expect(compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toBeNull();
+    await expect(readTransactionTestVmGeneration(fixture.receiverStore))
+      .resolves.toBe('predecessor');
+    expect(rollback).toHaveBeenCalledOnce();
+    expect(rollback).toHaveBeenCalledWith(abortReason);
+    expect(commit).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it('restores the predecessor after successor cancellation in the precommit-to-CAS gap', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+    const controller = new AbortController();
+    const abortReason = new Error('cancel successor after precommit semantic work');
+    const compareAndSwapAppliedCatalogHeadV1 = vi.fn(
+      fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1.bind(
+        fixture.receiverPersistence.inventory,
+      ),
+    );
+    const commit = vi.fn();
+    const rollback = vi.fn();
+    let targetWasActiveWhenLifecycleReturned = false;
+    const cancellationBoundary = appliedHeadLifecycleAbortingBeforeCasV1(
+      controller,
+      abortReason,
+      {
+        commit,
+        rollback: async (cause) => {
+          rollback(cause);
+          await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+        },
+      },
+    );
+    const receiver = fixture.createReceiver({
+      readAppliedCatalogHeadV1:
+        fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
+          fixture.receiverPersistence.inventory,
+        ),
+      compareAndSwapAppliedCatalogHeadV1,
+    }, undefined, undefined, fixture.receiverStore, async (_plan, signal) => {
+      expect(signal).toBe(controller.signal);
+      await setTransactionTestVmGeneration(fixture.receiverStore, 'target');
+      targetWasActiveWhenLifecycleReturned = await fixture.receiverStore.hasGraph(
+        `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${KA_NUMBER}`,
+      );
+      return cancellationBoundary.lifecycle;
+    });
+
+    await expect(fixture.synchronize(
+      fixture.announcement,
+      receiver,
+      controller.signal,
+    )).rejects.toBe(abortReason);
+    expect(cancellationBoundary.afterAppliedHeadReadCount()).toBe(2);
+    expect(controller.signal.reason).toBe(abortReason);
+    expect(targetWasActiveWhenLifecycleReturned).toBe(true);
+    expect(compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.genesis.head.objectDigest);
+    await expect(fixture.receiverStore.hasGraph(
+      `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${KA_NUMBER}`,
+    )).resolves.toBe(false);
+    await expect(readTransactionTestVmGeneration(fixture.receiverStore))
+      .resolves.toBe('predecessor');
+    expect(rollback).toHaveBeenCalledOnce();
+    expect(rollback).toHaveBeenCalledWith(abortReason);
+    expect(commit).not.toHaveBeenCalled();
   }, 30_000);
 
   it('rejects a genesis head with no delegation without staging it durably', async () => {
@@ -2287,6 +2554,24 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     issuedAt: '1773900001001' as never,
     signer,
   });
+  const alternateSecondSuccessor = await produceSparseAuthorCatalogSuccessorV1({
+    previousHead: competingSuccessor.head,
+    previousDirectoryPath: competingSuccessor.directoryPath,
+    previousBucket: competingSuccessor.bucket,
+    selectedBucketId: '0' as never,
+    nextRows: [rowBundle.row, secondRowBundle.row],
+    issuedAt: '1773900001006' as never,
+    signer,
+  });
+  const alternateThirdSuccessor = await produceSparseAuthorCatalogSuccessorV1({
+    previousHead: alternateSecondSuccessor.head,
+    previousDirectoryPath: alternateSecondSuccessor.directoryPath,
+    previousBucket: alternateSecondSuccessor.bucket,
+    selectedBucketId: '0' as never,
+    nextRows: [rowBundle.row, secondRowBundle.row, thirdRowBundle.row],
+    issuedAt: '1773900001007' as never,
+    signer,
+  });
   const crossLaneHead = await rewriteCatalogHeadDelegation(
     successor.head,
     crossLaneDelegation.objectDigest,
@@ -2324,6 +2609,8 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     ...replacementSuccessor.stagedObjects,
     ...governedSuccessor.stagedObjects,
     ...competingSuccessor.stagedObjects,
+    ...alternateSecondSuccessor.stagedObjects,
+    ...alternateThirdSuccessor.stagedObjects,
     crossLaneHead,
     expiredHead,
     missingDelegationHead,
@@ -2495,6 +2782,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   const replacementAnnouncement = announcementFor(replacementSuccessor.head);
   const threeAssetAnnouncement = announcementFor(threeAssetSuccessor.head);
   const competingAnnouncement = announcementFor(competingSuccessor.head);
+  const alternateThirdAnnouncement = announcementFor(alternateThirdSuccessor.head);
   const governedGenesisAnnouncement = announcementFor(governedGenesis.head);
   const governedSuccessorAnnouncement = announcementFor(governedSuccessor.head);
   const crossLaneAnnouncement = announcementFor(crossLaneHead);
@@ -2600,6 +2888,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     authorBundleRead,
     authorObjectRead,
     authorObjects,
+    alternateThirdAnnouncement,
     catalogIssuerDelegation,
     competingAnnouncement,
     crossLaneAnnouncement,

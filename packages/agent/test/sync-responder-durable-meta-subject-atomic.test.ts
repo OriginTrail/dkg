@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  OxigraphStore,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 import {
   DurableMetaPageFrameError,
   readDurableMetaPage,

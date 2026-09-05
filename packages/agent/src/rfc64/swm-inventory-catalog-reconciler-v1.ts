@@ -29,6 +29,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
+import { mapWithConcurrency } from '../map-with-concurrency.js';
 import type { Rfc64PublicCatalogSuccessorAssetInputV1 } from
   './public-catalog-successor-producer-v1.js';
 import {
@@ -38,6 +39,9 @@ import {
 
 export const RFC64_SWM_INVENTORY_CATALOG_TARGET_MAX_ROWS_V1 =
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1;
+
+/** Bound read-only projection resolution so a large author lane does not serialize N store reads. */
+const RFC64_SWM_INVENTORY_CATALOG_RESOLVE_CONCURRENCY_V1 = 8;
 
 export type Rfc64SwmInventoryCatalogReconcilerErrorCodeV1 =
   | 'swm-catalog-reconcile-input'
@@ -108,22 +112,25 @@ export async function prepareRfc64SwmInventoryCatalogTargetV1(
     ...inventoryScope,
     bucketCount: '1',
   }) as AuthorCatalogScopeV1;
-  const assets: Rfc64PublicCatalogSuccessorAssetInputV1[] = [];
-  for (const row of snapshot.rows) {
-    let resolved: Rfc64PublicCatalogSuccessorAssetInputV1;
-    try {
-      resolved = await input.resolveAsset(row);
-    } catch (cause) {
-      fail(
-        'swm-catalog-reconcile-resolution',
-        `durable catalog asset could not be resolved for ${row.kaUal}`,
-        cause,
-      );
-    }
-    const asset = snapshotAsset(resolved);
-    assertAssetBindsInventoryRow(asset, row);
-    assets.push(asset);
-  }
+  const assets = await mapWithConcurrency(
+    snapshot.rows,
+    RFC64_SWM_INVENTORY_CATALOG_RESOLVE_CONCURRENCY_V1,
+    async (row): Promise<Rfc64PublicCatalogSuccessorAssetInputV1> => {
+      let resolved: Rfc64PublicCatalogSuccessorAssetInputV1;
+      try {
+        resolved = await input.resolveAsset(row);
+      } catch (cause) {
+        fail(
+          'swm-catalog-reconcile-resolution',
+          `durable catalog asset could not be resolved for ${row.kaUal}`,
+          cause,
+        );
+      }
+      const asset = snapshotAsset(resolved);
+      assertAssetBindsInventoryRow(asset, row);
+      return asset;
+    },
+  );
 
   return Object.freeze({
     inventoryHeadObjectDigest: snapshot.head.objectDigest,

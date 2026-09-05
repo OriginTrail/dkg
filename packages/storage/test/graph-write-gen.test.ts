@@ -165,6 +165,7 @@ describe('OxigraphStore write-generation capability', () => {
   it('is recoverable via asGraphWriteGenSource on the bare adapter and through decorator chains', () => {
     const store = new OxigraphStore();
     expect(asGraphWriteGenSource(store)).not.toBeNull();
+    expect(asGraphWriteRevisionSource(store)?.writeRevisionCoverage).toBe('all-writers');
     const decorated = new ChangelogStore(
       new GraphSetIndexStore(
         new SharedMemoryLiteralBlobStore(store, {
@@ -177,7 +178,7 @@ describe('OxigraphStore write-generation capability', () => {
     // both expose the documented innerStore boundary.
     const forwarded = { innerStore: decorated };
     expect(asGraphWriteGenSource(forwarded)).not.toBeNull();
-    expect(asGraphWriteRevisionSource(forwarded)).not.toBeNull();
+    expect(asGraphWriteRevisionSource(forwarded)?.writeRevisionCoverage).toBe('all-writers');
     // Undocumented implementation fields are deliberately not traversed.
     expect(asGraphWriteGenSource({ inner: store })).toBeNull();
     expect(asGraphWriteGenSource({})).toBeNull();
@@ -192,7 +193,9 @@ describe('OxigraphStore write-generation capability', () => {
     expect(asGraphWriteRevisionSource(decorated)).toBeNull();
 
     const revisionOnly = { getWriteRevision: () => ({ generation: 7, stable: false }) };
-    expect(asGraphWriteRevisionSource(revisionOnly)?.getWriteRevision(CG_PREFIX)).toEqual({
+    const normalized = asGraphWriteRevisionSource(revisionOnly);
+    expect(normalized?.writeRevisionCoverage).toBe('process-local');
+    expect(normalized?.getWriteRevision(CG_PREFIX)).toEqual({
       generation: 7,
       stable: false,
     });

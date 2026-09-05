@@ -4,11 +4,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { parse } from 'yaml';
 import { fileURLToPath } from 'node:url';
 import {
   CI_LANES,
   EVM_SCOPES,
   NODE_EVM_LANES,
+  NODE_TEST_ARTIFACT_LANES,
+  needsNodeTestArtifacts,
   WORKSPACE_OWNING_EVM_SCOPES,
   WORKSPACE_OWNING_LANES,
   WORKSPACE_RULES,
@@ -493,6 +496,11 @@ test('workflows execute the planner and aggregate gates from one immutable trust
     /^      abi_freshness: \$\{\{ steps\.plan\.outputs\.abi_freshness \}\}$/m,
     'the trusted planner output must be exposed to the ABI freshness job',
   );
+  assert.doesNotMatch(
+    workflowJobBlock(primaryWorkflow, 'changes'),
+    /candidate\/scripts\/ci\/check-tracked-text-nul\.mjs/,
+    'an untrusted candidate must never supply its own security gate',
+  );
   assert.ok(
     primaryWorkflow.indexOf('run: node candidate/scripts/check-npm-metadata.mjs')
       > primaryWorkflow.indexOf('node trusted-ci/scripts/ci/plan-ci.mjs'),
@@ -631,6 +639,7 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.ok(workflow.includes('playwright test --shard=${{ matrix.shard }}/7'));
 
   for (const [packageName, invocation] of [
+    ['@origintrail-official/dkg-http-utils', '--lane http-utils'],
     ['@origintrail-official/dkg-rdf-utils', '--lane rdf-utils'],
     ['@origintrail-official/dkg-okf', '--filter @origintrail-official/dkg-okf'],
     ['@origintrail-official/dkg-demo', '--filter @origintrail-official/dkg-demo'],
@@ -753,6 +762,61 @@ test('aggregate gates reject failed or accidentally skipped selected jobs', () =
     plan: evmPlan,
     needs: { plan: { result: 'success' }, 'evm-integration': { result: 'failure' } },
   }).join('\n'), /failure/);
+});
+
+test('all shared Hardhat consumers require and restore the matching artifact', () => {
+  const { jobs } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
+  const restorePath = './.github/actions/restore-evm-node-test-artifacts';
+  const action = parse(fs.readFileSync(path.join(REPO_ROOT, restorePath, 'action.yml'), 'utf8'));
+  assert.equal(action.runs.using, 'composite');
+  const download = action.runs.steps.find((step) => step.uses?.startsWith('actions/download-artifact@'));
+  assert.match(download.uses, /@[a-f0-9]{40}$/);
+  assert.equal(download.with.name, 'evm-node-test-artifacts');
+  assert.equal(download.with.path, '${{ runner.temp }}/evm-node-test-artifacts');
+  const extract = action.runs.steps.find((step) => step.run);
+  assert.equal(extract.shell, 'bash');
+  assert.equal(extract.env.ARTIFACT_DIR, download.with.path);
+  assert.match(extract.run, /tar -xzf "\$\{ARTIFACT_DIR\}\/evm-node-test-artifacts\.tgz"/);
+  assert.equal(jobs['evm-node-test-artifacts'].if, "needs.changes.outputs.node_test_artifacts == 'true'");
+  const output = jobs.changes.outputs.node_test_artifacts;
+  assert.ok(output.startsWith('${{ steps.plan.outputs.node_test_artifacts || ('));
+  const legacyLanes = [...output.matchAll(/steps\.plan\.outputs\.(\w+) == 'true'/g)].map((match) => match[1]);
+  assert.deepEqual(new Set(legacyLanes), new Set(NODE_TEST_ARTIFACT_LANES));
+  for (const lane of NODE_TEST_ARTIFACT_LANES) {
+    const job = PRIMARY_LANE_JOBS[lane];
+    const consumer = jobs[job];
+    const dependencies = new Set([consumer.needs].flat());
+    for (const dependency of ['changes', 'build', 'evm-node-test-artifacts']) {
+      assert.ok(dependencies.has(dependency), `${job} requires ${dependency}`);
+    }
+    const restores = consumer.steps.filter((step) => step.uses === restorePath);
+    assert.equal(restores.length, 1, job);
+    assert.equal(restores[0].if, job === 'tornado-core' ? "matrix.suite == 'chain'" : undefined);
+  }
+});
+
+test('artifact capability selects its producer and gate for each consumer lane only', () => {
+  assert.equal(NODE_TEST_ARTIFACT_LANES.length, 5);
+  for (const lane of CI_LANES) {
+    const plan = {
+      ...planCi({ eventName: 'push' }), mode: 'delta', fullCi: false,
+      runNode: Object.hasOwn(PRIMARY_LANE_JOBS, lane) && lane !== 'bura_blazegraph_arm64',
+      lanes: Object.fromEntries(CI_LANES.map((candidate) => [candidate, candidate === lane])),
+    };
+    const selected = NODE_TEST_ARTIFACT_LANES.includes(lane);
+    assert.equal(needsNodeTestArtifacts(plan), selected, lane);
+    assert.equal(githubOutputsForPlan(plan).node_test_artifacts, String(selected), lane);
+    const needs = {
+      changes: { result: 'success' }, build: { result: 'success' },
+      ...Object.fromEntries(Object.values(PRIMARY_LANE_JOBS).map((job) => [job, { result: 'success' }])),
+      'evm-node-test-artifacts': { result: 'skipped' },
+      'evm-devnet-test-artifacts': { result: 'success' },
+      'abi-freshness': { result: 'success' }, solidity: { result: 'success' },
+      'solidity-coverage': { result: 'skipped' }, 'tornado-static-analysis': { result: 'success' },
+    };
+    const errors = validatePrimaryResults({ eventName: 'pull_request', plan, needs });
+    assert.deepEqual(errors, selected ? ['evm-node-test-artifacts was selected but ended with skipped'] : [], lane);
+  }
 });
 
 test('aggregate gate accepts the full-push and docs-only job shapes', () => {

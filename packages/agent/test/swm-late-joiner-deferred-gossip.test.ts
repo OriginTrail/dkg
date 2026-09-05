@@ -92,15 +92,21 @@ async function createAgent(): Promise<{
   agent: DKGAgent;
   internals: DKGAgentInternals;
   gossip: FakeGossip;
+  chain: MockChainAdapter;
 }> {
+  const chain = new MockChainAdapter();
   const agent = await DKGAgent.create({
     name: `SwmLateJoinerDeferGossip-${Math.random().toString(36).slice(2)}`,
-    chainAdapter: new MockChainAdapter(),
+    chainAdapter: chain,
+    // This suite pins the one-release legacy gossip rollback itself. In
+    // 10.0.16 omission selects catalog authority and intentionally suppresses
+    // the legacy workspace topic for responsible context graphs.
+    rfc64CatalogActivation: { enabled: false },
   });
   const gossip = new FakeGossip();
   Object.defineProperty(agent, 'peerId', { value: LOCAL_PEER_ID, configurable: true });
   (agent as unknown as { gossip: FakeGossip }).gossip = gossip;
-  return { agent, internals: agent as unknown as DKGAgentInternals, gossip };
+  return { agent, internals: agent as unknown as DKGAgentInternals, gossip, chain };
 }
 
 function workspaceTopic(contextGraphId: string): string {
@@ -113,6 +119,7 @@ async function insertCgMetaWithAllowlist(
   agent: DKGAgent,
   contextGraphId: string,
   agentAddress: string,
+  onChainId = '106',
 ): Promise<void> {
   const contextGraphUri = contextGraphDataUri(contextGraphId);
   const metaGraph = contextGraphMetaUri(contextGraphId);
@@ -157,7 +164,7 @@ async function insertCgMetaWithAllowlist(
     {
       subject: contextGraphUri,
       predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
-      object: '"106"',
+      object: `"${onChainId}"`,
       graph: metaGraph,
     },
     {
@@ -169,20 +176,39 @@ async function insertCgMetaWithAllowlist(
   ]);
 }
 
+async function registerPrivateContextGraph(
+  chain: MockChainAdapter,
+  contextGraphId: string,
+  agentAddress: string,
+): Promise<string> {
+  const created = await chain.createOnChainContextGraph({
+    accessPolicy: 1,
+    publishPolicy: 1,
+    participantAgents: [agentAddress],
+    nameHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+  });
+  return created.contextGraphId.toString();
+}
+
 describe('SWM late-joiner deferred gossip subscribe (#885 Codex)', () => {
   it('skips the SWM workspace topic when deferSharedMemoryGossipSubscribe=true, but still wires the other gossip topics', async () => {
-    const { agent, internals, gossip } = await createAgent();
+    const { agent, internals, gossip, chain } = await createAgent();
     const contextGraphId = 'cg-deferred-swm';
     const wallet = ethers.Wallet.createRandom();
     const record = agentFromPrivateKey(wallet.privateKey, 'local');
     internals.localAgents.set(record.agentAddress, record);
     internals.defaultAgentAddress = record.agentAddress;
+    const onChainId = await registerPrivateContextGraph(
+      chain,
+      contextGraphId,
+      record.agentAddress,
+    );
 
     // The ACL is already in place locally — the ONLY reason the
     // workspace topic should remain unsubscribed in this scenario is
     // the explicit deferral. This isolates the option's effect from
     // the ACL-deny path tested in swm-agent-gate-access.test.ts.
-    await insertCgMetaWithAllowlist(agent, contextGraphId, record.agentAddress);
+    await insertCgMetaWithAllowlist(agent, contextGraphId, record.agentAddress, onChainId);
 
     agent.subscribeToContextGraph(contextGraphId, {
       deferSharedMemoryGossipSubscribe: true,
@@ -205,12 +231,17 @@ describe('SWM late-joiner deferred gossip subscribe (#885 Codex)', () => {
   });
 
   it('refreshMetaSyncedFlags re-queues the SWM workspace subscribe once meta lands', async () => {
-    const { agent, internals, gossip } = await createAgent();
+    const { agent, internals, gossip, chain } = await createAgent();
     const contextGraphId = 'cg-deferred-then-meta';
     const wallet = ethers.Wallet.createRandom();
     const record = agentFromPrivateKey(wallet.privateKey, 'local');
     internals.localAgents.set(record.agentAddress, record);
     internals.defaultAgentAddress = record.agentAddress;
+    const onChainId = await registerPrivateContextGraph(
+      chain,
+      contextGraphId,
+      record.agentAddress,
+    );
 
     // Step 1: simulate the join-approved handler exactly. Mark
     // pending-meta and defer the SWM gossip subscribe.
@@ -230,7 +261,7 @@ describe('SWM late-joiner deferred gossip subscribe (#885 Codex)', () => {
     // `hasConfirmedMetaState` returns true once `_meta` has the complete
     // private definition plus allowlist, which in turn unlocks
     // `refreshMetaSyncedFlags`'s SWM re-queue.
-    await insertCgMetaWithAllowlist(agent, contextGraphId, record.agentAddress);
+    await insertCgMetaWithAllowlist(agent, contextGraphId, record.agentAddress, onChainId);
 
     // Step 3: drive the same call site that `runCatchupOverPeers` uses
     // after a successful `_meta` page lands (sync-on-connect.ts:85 and
@@ -244,20 +275,25 @@ describe('SWM late-joiner deferred gossip subscribe (#885 Codex)', () => {
     // until the next catchup cycle (~minutes).
     expect(gossip.subscribed.has(workspaceTopic(contextGraphId))).toBe(true);
     expect(internals.subscribedContextGraphs.get(contextGraphId)).toMatchObject({
-      onChainId: '106',
+      onChainId,
       onChainHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase(),
     });
   });
 
   it('without deferSharedMemoryGossipSubscribe, SWM workspace topic subscribes immediately when the ACL allows', async () => {
-    const { agent, internals, gossip } = await createAgent();
+    const { agent, internals, gossip, chain } = await createAgent();
     const contextGraphId = 'cg-no-defer-immediate';
     const wallet = ethers.Wallet.createRandom();
     const record = agentFromPrivateKey(wallet.privateKey, 'local');
     internals.localAgents.set(record.agentAddress, record);
     internals.defaultAgentAddress = record.agentAddress;
+    const onChainId = await registerPrivateContextGraph(
+      chain,
+      contextGraphId,
+      record.agentAddress,
+    );
 
-    await insertCgMetaWithAllowlist(agent, contextGraphId, record.agentAddress);
+    await insertCgMetaWithAllowlist(agent, contextGraphId, record.agentAddress, onChainId);
 
     // No option object → defer is OFF (the pre-#885 default behaviour).
     // This is the regression guard: a careless refactor that flipped

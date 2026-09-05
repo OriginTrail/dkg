@@ -321,27 +321,7 @@ describe('synced status logic', () => {
   });
 });
 
-// Redesign reverses the old "notifications are non-interactive" guard:
-// incoming join requests are now actionable (inline Approve/Deny) and
-// activity/approved rows open their context graph. This guard asserts the
-// new intended interactivity lives in the row components.
-describe('notification rows are actionable', () => {
-  const rows = readFile('components/Notifications/rows.tsx');
-
-  it('join request row exposes inline Approve / Deny controls', () => {
-    expect(rows).toContain('Approve');
-    expect(rows).toContain('onApprove');
-    expect(rows).toContain('onDeny');
-    // Deny is a two-tap inline confirm, never a modal.
-    expect(rows).toContain('confirming-deny');
-  });
-
-  it('activity + approved rows open their context graph; rejected is a dead-end', () => {
-    expect(rows).toContain('onOpen(item.cgId)');
-    // Rejected confirmation renders as a non-interactive row.
-    expect(rows).toContain('aria-disabled="true"');
-  });
-});
+// Notification interactions are exercised by notifications-pane.dom.test.ts.
 
 // NOTE: the dashboard "Import Memories" Quick Action was removed in PR6
 // (dashboard revamp). Import still launches from the left sidebar; the

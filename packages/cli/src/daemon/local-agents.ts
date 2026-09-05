@@ -100,7 +100,7 @@ export const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentInteg
   'local-llm': {
     id: 'local-llm',
     name: 'DKG Local LLM',
-    description: 'Chat with a local llama.cpp model through the DKG MCP tool surface.',
+    description: 'Chat with a local llama.cpp or Ollama model through the DKG MCP tool surface.',
     transportKind: 'dkg-local-llm',
     daemonOwned: true,
     capabilities: {

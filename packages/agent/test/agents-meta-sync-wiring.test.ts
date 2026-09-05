@@ -24,6 +24,8 @@ vi.mock('../src/sync/requester/durable-sync.js', async (importOriginal) => {
 
 import { runDurableSync } from '../src/sync/requester/durable-sync.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import { resolveRfc64CatalogExecutionPlanV1 } from
+  '../src/rfc64/public-catalog-activation-config-v1.js';
 
 const mockedRunDurableSync = vi.mocked(runDurableSync);
 
@@ -38,7 +40,20 @@ const mockedRunDurableSync = vi.mocked(runDurableSync);
 // established fake-`this` pattern in imported-artifact.test.ts.
 function fakeAgent(config: { nodeRole?: 'core' | 'edge'; syncAgentsMeta?: boolean }): any {
   return {
-    config,
+    config: {
+      ...config,
+      rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
+        configuredContextGraphs: [],
+        activation: {
+          enabled: false,
+          selectedContextGraphs: [],
+          selectedPublicContextGraphs: [],
+          rollout: { killSwitch: false, contextGraphModes: {} },
+        },
+      }),
+    },
+    subscribedContextGraphs: new Map(),
+    resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
     store: undefined, // no ChangelogStore ⇒ asChangelogReader null ⇒ legacy lane runs
     // The legacy lane the changelog dispatch delegates to; it owns the
     // syncAgentsMeta resolution + the (stubbed) runDurableSync call.
@@ -65,7 +80,7 @@ async function passedSyncAgentsMeta(
   await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
     fakeAgent(config),
     'peer-remote',
-    ['did:dkg:context-graph:agents'],
+    ['agents'],
   );
   expect(mockedRunDurableSync).toHaveBeenCalledTimes(1);
   return mockedRunDurableSync.mock.calls[0][0].syncAgentsMeta as boolean;

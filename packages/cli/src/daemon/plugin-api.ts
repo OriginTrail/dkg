@@ -20,6 +20,8 @@ import type { RequestContext as DaemonRequestContext } from './routes/context.js
  * treat them as independent lifecycle state.
  */
 export type RequestContext = DaemonRequestContext & {
+  /** @deprecated Use `actor.authentication.acceptedToken`. */
+  readonly requestToken: string | undefined;
   /** @deprecated Use publisherState.runtime. */
   publisherRuntime: PublisherRuntime | null;
   /** @deprecated Use publisherState.availability. */

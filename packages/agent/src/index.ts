@@ -38,6 +38,7 @@ export {
   signAgentDelegation,
   verifyAgentDelegation,
   computeDelegationDigest,
+  computeWorkspaceEncryptionKeysAttestationDigest,
   type AgentDelegationPayload,
   type SignedAgentDelegation,
   type SignAgentDelegationParams,
@@ -68,6 +69,7 @@ export * from './rfc64/public-catalog-successor-producer-v1.js';
 export * from './rfc64/public-open-catalog-scope-v1.js';
 export * from './rfc64/public-catalog-native-reconciler-v1.js';
 export * from './rfc64/public-catalog-activation-config-v1.js';
+export * from './rfc64/catalog-responsibility-registry-v1.js';
 export * from './rfc64/policy-cell-v1.js';
 export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret } from './encryption.js';
 export { MessageHandler, type SkillRequest, type SkillResponse, type SkillHandler, type ChatHandler, type ChatAclCheck } from './messaging.js';
@@ -154,10 +156,13 @@ export {
   buildCclPolicyQuads,
   buildPolicyApprovalQuads,
   hashCclPolicy,
+  CclResourceNotFoundError,
   type PublishCclPolicyInput,
   type CclPolicyRecord,
+  type CclMissingResource,
   type PolicyApprovalBinding,
 } from './ccl-policy.js';
+export { ContextGraphPolicyAuthorizationError } from './dkg-agent-ownership.js';
 export { DKGAgent } from './dkg-agent.js';
 export type {
   ConfiguredContextGraphMetadataReconciliationDiagnostic,
@@ -169,6 +174,7 @@ export type {
   PublishAuthorCatalogExactSetSuccessorResultV1,
   PublishAuthorCatalogGenesisParamsV1,
   Rfc64CatalogAuthorSignerV1,
+  Rfc64CatalogRuntimeSelectionStatusV1,
 } from './dkg-agent-rfc64-catalog.js';
 export type {
   ReconcileRfc64PublicRootCatalogExactSetParamsV1,
@@ -177,7 +183,15 @@ export type {
 export type {
   ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1,
   ReconcileRfc64PublicCatalogFromSwmInventoryResultV1,
-} from './dkg-agent-rfc64-catalog-auto-publish.js';
+} from './dkg-agent-rfc64-swm-catalog-projection.js';
+export type {
+  Rfc64PublicCatalogAuthorRepairOutcomeV1,
+  Rfc64PublicCatalogAuthorRepairStatusV1,
+  Rfc64SwmCatalogProjectionSupervisorStatusV1,
+} from './dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
+export type {
+  Rfc64PublicCatalogBootstrapStatusV1,
+} from './dkg-agent-rfc64-catalog-bootstrap.js';
 export type {
   AcceptedRfc64CatalogAccessSnapshotV1,
 } from './rfc64/catalog-access-policy-v1.js';
@@ -270,11 +284,19 @@ export {
   isRootlessUpdateError,
   type RootlessUpdateErrorCode,
 } from './rootless-update-error.js';
+export type {
+  ContextGraphReadAuthorityDecision,
+  ContextGraphReadAuthorityOutcome,
+  ContextGraphReadAuthoritySource,
+} from './context-graph-read-authority.js';
+export type { RegisteredContextGraphAuthority } from './dkg-agent-cg-resolve.js';
+export type { ContextGraphRegistrationBinding } from './dkg-agent-cg-registry.js';
 export {
   ContextGraphNotFoundError,
   InvalidContentError,
   StaleSenderKeyTargetError,
   type DKGAgentConfig,
+  type ReplicationEvent,
   type Rfc64CatalogAccessPolicyAuthorityConfigV1,
   type Rfc64CatalogBootstrapConfigV1,
   type Rfc64CatalogBootstrapPolicyV1,

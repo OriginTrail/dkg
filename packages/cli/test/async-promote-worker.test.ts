@@ -37,6 +37,53 @@ import {
   retryableSchedulerBusyFailure,
   type AsyncPromoteWorkerFixture,
 } from './_helpers/async-promote-worker-fixture.js';
+import { createClaimFailureBackoff } from '../src/daemon/worker/claim-failure-backoff.js';
+
+describe('claim failure backoff', () => {
+  it('grows from 250ms to the 30s cap with injected time and randomness', () => {
+    let now = 1_000;
+    const backoff = createClaimFailureBackoff({
+      now: () => now,
+      random: () => 0.5,
+    });
+
+    expect(backoff.recordFailure()).toBe(250);
+    expect(backoff.isDue()).toBe(false);
+    now += 250;
+    expect(backoff.isDue()).toBe(true);
+    expect(backoff.recordFailure()).toBe(500);
+    now += 500;
+    for (let i = 0; i < 10; i += 1) {
+      now += backoff.recordFailure();
+    }
+    expect(backoff.recordFailure()).toBe(30_000);
+  });
+
+  it('resets the next failure to the base delay', () => {
+    let now = 1_000;
+    const backoff = createClaimFailureBackoff({
+      now: () => now,
+      random: () => 0.5,
+    });
+
+    expect(backoff.recordFailure()).toBe(250);
+    now += 250;
+    expect(backoff.recordFailure()).toBe(500);
+    backoff.reset();
+    expect(backoff.isDue()).toBe(true);
+    expect(backoff.recordFailure()).toBe(250);
+  });
+
+  it('applies both ±20% jitter bounds while retaining the absolute cap', () => {
+    const low = createClaimFailureBackoff({ now: () => 0, random: () => 0 });
+    const high = createClaimFailureBackoff({ now: () => 0, random: () => 1 });
+
+    expect(low.recordFailure()).toBe(200);
+    expect(high.recordFailure()).toBe(300);
+    for (let i = 0; i < 10; i += 1) high.recordFailure();
+    expect(high.recordFailure()).toBe(30_000);
+  });
+});
 
 function deferred<T = void>(): {
   promise: Promise<T>;
@@ -1123,6 +1170,120 @@ describe('createPromoteWorkerSupervisor', () => {
     await sup.stop();
 
     expect(claimCalls).toBe(1);
+  });
+
+  it('backs off repeated claim failures instead of polling the store continuously', async () => {
+    let now = 10_000;
+    let claimCalls = 0;
+    const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
+    wrappedQueue.claimNext = async () => {
+      claimCalls += 1;
+      throw new Error('store unavailable');
+    };
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: wrappedQueue,
+        assertion: { promote: async () => ({ promotedCount: 0 }) },
+      } as any,
+      workerConcurrency: 4,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      now: () => now,
+      random: () => 0.5,
+      log: (message) => logs.push(message),
+      workerIdPrefix: 'claim-backoff',
+    });
+
+    await sup.start();
+    for (let i = 0; i < 400; i += 1) await sup.tickOnce();
+    expect(claimCalls).toBe(1);
+
+    now += 249;
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(1);
+    now += 1;
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(2);
+
+    now += 499;
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(2);
+    now += 1;
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(3);
+    expect(logs.some((message) => message.includes('retrying in 500ms'))).toBe(true);
+
+    await sup.stop();
+  });
+
+  it('automatically retries a failed claim when the backoff deadline arrives', async () => {
+    vi.useFakeTimers();
+    let claimCalls = 0;
+    const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
+    wrappedQueue.claimNext = async () => {
+      claimCalls += 1;
+      throw new Error('store unavailable');
+    };
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: wrappedQueue,
+        assertion: { promote: async () => ({ promotedCount: 0 }) },
+      } as any,
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      random: () => 0.5,
+      log: (message) => logs.push(message),
+      workerIdPrefix: 'automatic-claim-retry',
+    });
+
+    await sup.start();
+    await queue.enqueue(makeRequest('automatic-claim-retry'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(claimCalls).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(249);
+    expect(claimCalls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(claimCalls).toBe(2);
+    expect(logs.some((message) => message.includes('retrying in 500ms'))).toBe(true);
+
+    await sup.stop();
+  });
+
+  it('resets claim backoff after the queue recovers', async () => {
+    let now = 10_000;
+    let claimCalls = 0;
+    const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
+    wrappedQueue.claimNext = async () => {
+      claimCalls += 1;
+      if (claimCalls === 2) return null;
+      throw new Error('store unavailable');
+    };
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: wrappedQueue,
+        assertion: { promote: async () => ({ promotedCount: 0 }) },
+      } as any,
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      now: () => now,
+      random: () => 0.5,
+      log: (message) => logs.push(message),
+      workerIdPrefix: 'claim-recovery',
+    });
+
+    await sup.start();
+    expect(await sup.tickOnce()).toBe(0);
+    now += 250;
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(2);
+    expect(await sup.tickOnce()).toBe(0);
+    expect(claimCalls).toBe(3);
+    expect(logs.at(-1)).toContain('retrying in 250ms');
+
+    await sup.stop();
   });
 
   it('rejects a heartbeat interval that is not shorter than the queue lease', () => {

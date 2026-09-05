@@ -44,6 +44,7 @@ import { DKGAgent } from '../src/index.js';
 interface PublishProfileInternals {
   publishProfileImpl(): Promise<unknown>;
   publishProfileTail: Promise<unknown>;
+  profileManager: { currentKcId: bigint | null };
 }
 
 async function bootAgent(): Promise<{ agent: DKGAgent; internals: PublishProfileInternals }> {
@@ -135,6 +136,49 @@ describe('DKGAgent.publishProfile — tail-chain mutex serialization (PR #700 ro
 
     release();
     await expect(Promise.all(readiness)).resolves.toHaveLength(3);
+    expect(publishes).toBe(1);
+  });
+
+  it('keeps profile readiness idempotent once a profile exists', async () => {
+    const boot = await bootAgent();
+    agent = boot.agent;
+    boot.internals.profileManager.currentKcId = 41n;
+    let publishes = 0;
+    (agent as unknown as { publishProfile: () => Promise<unknown> }).publishProfile = async () => {
+      publishes++;
+      return { ok: true };
+    };
+
+    await agent.ensureProfilePublished();
+
+    expect(publishes).toBe(0);
+  });
+
+  it('coalesces explicit approval-authority reannouncements', async () => {
+    const boot = await bootAgent();
+    agent = boot.agent;
+    boot.internals.profileManager.currentKcId = 41n;
+    let publishes = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    (agent as unknown as { publishProfile: () => Promise<unknown> }).publishProfile = async () => {
+      publishes++;
+      await gate;
+      return { ok: true };
+    };
+
+    const reannouncements = [
+      agent.reannounceApprovalAuthorityProfile(),
+      agent.reannounceApprovalAuthorityProfile(),
+      agent.reannounceApprovalAuthorityProfile(),
+    ];
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(publishes).toBe(1);
+
+    release();
+    await expect(Promise.all(reannouncements)).resolves.toHaveLength(3);
     expect(publishes).toBe(1);
   });
 

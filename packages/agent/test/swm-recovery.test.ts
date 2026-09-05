@@ -42,6 +42,9 @@ import {
 const CG = 'ws00-recovery';
 const WS = contextGraphWorkspaceGraphUri(CG);
 const WS_META = contextGraphWorkspaceMetaGraphUri(CG);
+const SUBGRAPH = 'research';
+const SUB_WS = `did:dkg:context-graph:${CG}/${SUBGRAPH}/_shared_memory`;
+const SUB_WS_META = `did:dkg:context-graph:${CG}/${SUBGRAPH}/_shared_memory_meta`;
 const SUBJ = 'urn:ws00r:shipment';
 const STATUS = 'http://schema.org/status';
 const ctx: OperationContext = { operationId: 'test', operationName: 'sync' } as never;
@@ -521,6 +524,52 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     expect(result.completed).toBe(true);
     expect(result.replacedRoots).toBe(1);
     expect(await statusValues(store)).toEqual(['"v2"']); // ONLY v2 — the bug would leave {v1,v2}
+  });
+
+  it('recovers only named subgraphs when the RFC-64 catalog owns the root scope', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert([
+      { subject: SUBJ, predicate: STATUS, object: '"root-local"', graph: WS },
+      { subject: SUBJ, predicate: STATUS, object: '"sub-local"', graph: SUB_WS },
+    ]);
+    const rootData = { subject: SUBJ, predicate: STATUS, object: '"root-remote"', graph: WS };
+    const subData = { subject: SUBJ, predicate: STATUS, object: '"sub-remote"', graph: SUB_WS };
+    const rootMeta = { subject: 'urn:op:root', predicate: `${DKG}rootEntity`, object: SUBJ, graph: WS_META };
+    const subMeta = { subject: 'urn:op:sub', predicate: `${DKG}rootEntity`, object: SUBJ, graph: SUB_WS_META };
+    const processed: Array<{ data: Quad[]; meta: Quad[] }> = [];
+
+    const result = await recoverContextGraphSwm({
+      ...makeDeps(store, []),
+      includeRootScope: false,
+      fetchSyncPages: async (
+        _c: OperationContext, _p: string, _cg: string, _inc: boolean,
+        phase: 'data' | 'meta',
+      ): Promise<SyncPageResult> => page(
+        phase === 'data' ? [rootData, subData] : [rootMeta, subMeta],
+      ),
+      processSharedMemoryBatch: async (data, meta) => {
+        processed.push({ data: [...data], meta: [...meta] });
+        return {
+          verifiedData: data,
+          verifiedMeta: meta,
+          entityCreators: meta.some((quad) => quad.graph === SUB_WS_META)
+            ? [{ dataGraph: SUB_WS, entity: SUBJ, creator: 'peer-source' }]
+            : [],
+          droppedDataTriples: 0,
+        };
+      },
+    });
+
+    expect(result).toMatchObject({ completed: true, replacedRoots: 1 });
+    expect(processed).toEqual([
+      { data: [], meta: [subMeta] },
+      { data: [subData], meta: [subMeta] },
+    ]);
+    const root = await store.query(`SELECT ?o WHERE { GRAPH <${WS}> { <${SUBJ}> <${STATUS}> ?o } }`);
+    const sub = await store.query(`SELECT ?o WHERE { GRAPH <${SUB_WS}> { <${SUBJ}> <${STATUS}> ?o } }`);
+    expect(root.type === 'bindings' ? root.bindings.map((row) => row['o']) : []).toEqual(['"root-local"']);
+    expect(sub.type === 'bindings' ? sub.bindings.map((row) => row['o']) : []).toEqual(['"sub-remote"']);
   });
 
   it('is a clean recovery into an empty store (cold-start parity)', async () => {

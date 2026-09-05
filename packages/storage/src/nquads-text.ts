@@ -1,4 +1,5 @@
 import type { Quad as DKGQuad } from './triple-store.js';
+import { decodeNTriplesIriEscapesStrict } from '@origintrail-official/dkg-rdf-utils';
 
 export type NQuadLineScan =
   | { readonly line: string; readonly parsed: true; readonly quad: DKGQuad }
@@ -17,11 +18,18 @@ export function parseNQuadLine(line: string): DKGQuad | undefined {
     /^(<[^>]+>|_:\S+)\s+(<[^>]+>)\s+(<[^>]+>|_:\S+|"(?:[^"\\]|\\.)*"(?:@\S+|\^\^<[^>]+>)?)\s*(?:(<[^>]+>)\s*)?\.$/,
   );
   if (!match) return undefined;
+  const subject = decodeIriTerm(match[1]);
+  const predicate = decodeIriTerm(match[2]);
+  const object = match[3].startsWith('<') ? decodeIriTerm(match[3]) : match[3];
+  const graph = match[4] ? decodeIriTerm(match[4]) : '';
+  if (subject === null || predicate === null || object === null || graph === null) {
+    return undefined;
+  }
   return {
-    subject: stripAngle(match[1]),
-    predicate: stripAngle(match[2]),
-    object: match[3].startsWith('<') ? stripAngle(match[3]) : match[3],
-    graph: match[4] ? stripAngle(match[4]) : '',
+    subject,
+    predicate,
+    object,
+    graph,
   };
 }
 
@@ -59,6 +67,7 @@ export function parseNQuadsTextTolerant(text: string): DKGQuad[] {
   return quads;
 }
 
-function stripAngle(term: string): string {
-  return term.startsWith('<') && term.endsWith('>') ? term.slice(1, -1) : term;
+function decodeIriTerm(term: string): string | null {
+  if (!term.startsWith('<') || !term.endsWith('>')) return term;
+  return decodeNTriplesIriEscapesStrict(term.slice(1, -1));
 }

@@ -90,6 +90,7 @@ import {
   type NormalizedFinalizedPublishOptions,
 } from "../../finalized-publish-options.js";
 import { storageAckPeerIdsFromPublishResult } from "./storage-ack-peers.js";
+import { authenticatedAgentAddress } from '../../auth.js';
 
 const PREFIX = "/api/knowledge-assets";
 
@@ -587,14 +588,15 @@ async function resolveFinalizeStorageLane(
 //   confirmed, no contextGraphError → 200 (fully done)
 //   confirmed + contextGraphError   → 207 (partial: KA minted on-chain, context-graph binding failed)
 //   tentative | failed              → 502 (publish did not confirm)
-function classifyVmPublish(pub: unknown): { httpStatus: 200 | 207 | 502; reason?: string } {
-  const p = (pub ?? {}) as { status?: unknown; contextGraphError?: unknown };
+function classifyVmPublish(p: FinalizedPublishResult): { httpStatus: 200 | 207 | 502; reason?: string } {
   const cgError = typeof p.contextGraphError === "string" && p.contextGraphError.length > 0 ? p.contextGraphError : undefined;
   if (p.status === "confirmed" && !cgError) return { httpStatus: 200 };
   if (p.status === "confirmed") return { httpStatus: 207, reason: cgError };
   return {
     httpStatus: 502,
-    reason: cgError ?? `VM publish did not confirm (status: ${typeof p.status === "string" ? p.status : "unknown"})`,
+    reason: cgError ?? (p.status === "tentative" && p.localChainSkipReason === "no-chain"
+      ? "VM publish stayed local: no on-chain context graph was resolved or the chain adapter is not V10-ready. Check context graph registration and chain configuration."
+      : `VM publish did not confirm (status: ${typeof p.status === "string" ? p.status : "unknown"})`),
   };
 }
 
@@ -732,7 +734,17 @@ function rejectSelectedAuthorOnCreate(
 }
 
 export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<void> {
-  const { req, res, agent, publisherControl, path, url, requestToken, requestAgentAddress, emitMemoryGraphChanged } = ctx;
+  const {
+    req,
+    res,
+    agent,
+    publisherControl,
+    path,
+    url,
+    requestAgentAddress,
+    authentication,
+    emitMemoryGraphChanged,
+  } = ctx;
   if (path !== PREFIX && !path.startsWith(`${PREFIX}/`)) return;
   const method = req.method ?? "GET";
 
@@ -815,7 +827,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   // Parity with the legacy assertion routes: resolve/validate the write
   // contextGraphId against the caller's known graphs before any mutation, so a
   // bad/foreign id is a 400 here rather than an opaque 500 from the engine.
-  const writePreflightCallerAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
+  const writePreflightCallerAgentAddress = authenticatedAgentAddress(authentication);
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,
     allowLocalExactFallback: !writePreflightCallerAgentAddress,

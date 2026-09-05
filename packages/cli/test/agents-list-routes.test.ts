@@ -6,6 +6,7 @@ import {
 import { serializeAgentListOptions } from '@origintrail-official/dkg-core';
 import { handleAgentChatRoutes } from '../src/daemon/routes/agent-chat.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 import {
   discoveredAgentIdentityKey,
 } from '@origintrail-official/dkg-agent';
@@ -391,8 +392,8 @@ async function getAgents(agent: any, qs = '') {
     path,
     url,
     validTokens: new Set<string>(),
-    requestToken: undefined,
     requestAgentAddress: '',
+    authentication: requestAuthentication({ kind: 'nodeOperator' }),
   } as unknown as RequestContext;
   await handleAgentChatRoutes(ctx);
   return { status: res.statusCode, body: JSON.parse(res.body) };

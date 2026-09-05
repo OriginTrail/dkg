@@ -23,7 +23,6 @@ import {
 import type { Rfc64InventoryV1OperationsV1 } from './inventory-v1/index.js';
 import {
   Rfc64PublicCatalogNativeReceiverErrorV1,
-  type Rfc64PublicCatalogNativeReceiverV1,
 } from './public-catalog-native-receiver-v1.js';
 import type {
   Rfc64PublicCatalogReceiverReconcilerV1,
@@ -31,10 +30,15 @@ import type {
 } from './public-catalog-receiver-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
 
-export type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1 = Pick<
-  Rfc64PublicCatalogNativeReceiverV1,
-  'synchronizeBoundedPublicRootCatalog'
->;
+export interface Rfc64BoundedPublicRootCatalogNativeReceiverClientV1 {
+  synchronizeBoundedPublicRootCatalog(
+    remotePeerId: string,
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    trustedCatalogScope: AuthorCatalogScopeV1,
+    deployment: CatalogSealDeploymentProfileV1,
+    signal?: AbortSignal,
+  ): Promise<unknown>;
+}
 
 export type Rfc64BoundedPublicRootCatalogDeploymentResolverV1 = (
   announcement: Rfc64PublicCatalogHeadAnnouncementV1,
