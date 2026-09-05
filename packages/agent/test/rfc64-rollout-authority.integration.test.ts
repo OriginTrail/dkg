@@ -43,6 +43,7 @@ import { Rfc64PublicCatalogSuccessorProducerV1 } from
   '../src/rfc64/public-catalog-successor-producer-v1.js';
 import {
   RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1,
+  Rfc64CatalogAuthorityRefreshLoopV1,
   rfc64CatalogAuthorityRefreshSchedulerV1,
 } from '../src/rfc64/catalog-authority-refresh-loop-v1.js';
 import type { Rfc64PublicCatalogActivationInputV1 } from
@@ -1054,6 +1055,48 @@ describe('RFC-64 rollout authority integration', () => {
     expect(cancel).toHaveBeenCalledTimes(2);
     expect(cancel).toHaveBeenLastCalledWith(scheduled[1]!.handle);
     expect(activeTimers.size).toBe(0);
+  });
+
+  it('reports authority-refresh failures and refuses to restart a closed loop', async () => {
+    const scheduled: Array<Readonly<{
+      callback: () => void;
+      intervalMs: number;
+      handle: ReturnType<typeof setInterval>;
+    }>> = [];
+    const cleared: Array<ReturnType<typeof setInterval>> = [];
+    const handle = Object.freeze({ ordinal: 1 }) as unknown as
+      ReturnType<typeof setInterval>;
+    const failure = new Error('authority unavailable');
+    const reported: Array<Readonly<{ contextGraphId: string; error: unknown }>> = [];
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => [CONTEXT_GRAPH_ID],
+      refreshContextGraph: async () => { throw failure; },
+      onRefreshFailure: (contextGraphId, error) => {
+        reported.push(Object.freeze({ contextGraphId, error }));
+      },
+      scheduler: {
+        setInterval(callback, intervalMs) {
+          scheduled.push(Object.freeze({ callback, intervalMs, handle }));
+          return handle;
+        },
+        clearInterval(timer) {
+          cleared.push(timer);
+        },
+      },
+      intervalMs: 1_000,
+    });
+
+    loop.start();
+    scheduled[0]!.callback();
+    await vi.waitFor(() => expect(reported).toEqual([{
+      contextGraphId: CONTEXT_GRAPH_ID,
+      error: failure,
+    }]));
+
+    loop.close(new Error('test shutdown'));
+    loop.close(new Error('duplicate shutdown'));
+    expect(cleared).toEqual([handle]);
+    expect(() => loop.start()).toThrow('RFC-64 catalog authority refresh loop is closed');
   });
 
   it('keeps a durable create successful when post-commit responsibility resolution transiently fails', async () => {
