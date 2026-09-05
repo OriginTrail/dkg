@@ -457,7 +457,7 @@ describe('Track-2 control-object envelopes', () => {
     expect(() => assertSignedControlEnvelope(signedAtLimit)).not.toThrow();
     // Several full-size canonicalizations are deliberately exercised here;
     // V8 coverage instrumentation makes this byte-ceiling regression expensive.
-  }, 20_000);
+  }, 60_000);
 
   it('rejects malformed or mismatched detached signature variants', () => {
     const mismatched = EOA_CANONICAL_SIGNATURE_VARIANT.replace(

@@ -24,27 +24,17 @@ it('canonical policies survive persistence and never authorize a different graph
 
 it('one corrupt authority field cannot retain auto-admission', () => {
   const corrupt = fc.oneof(
-    fc.constantFrom(null, [], false, 0, ''),
-    fc.record({ field: fc.constantFrom('version', 'contextGraphId', 'ownerDid', 'mode', 'updatedAt', 'maxMembers', 'maxApprovalsPerHour'), value: fc.anything() }),
+    fc.record({ field: fc.constant('version'), value: fc.constantFrom(0, 2, '1', null) }),
+    fc.record({ field: fc.constantFrom('contextGraphId', 'ownerDid'), value: fc.constantFrom('', 0, false, null) }),
+    fc.record({ field: fc.constant('mode'), value: fc.constantFrom('', 'automatic', 0, null) }),
+    fc.record({ field: fc.constant('updatedAt'), value: fc.constantFrom(Number.NaN, Number.POSITIVE_INFINITY, '0', null) }),
+    fc.record({ field: fc.constant('maxMembers'), value: fc.constantFrom(0, -1, 10_001, 1.5, '1', null) }),
+    fc.record({ field: fc.constant('maxApprovalsPerHour'), value: fc.constantFrom(0, -1, 1_001, 1.5, '1', null) }),
   );
   fc.assert(fc.property(policy, corrupt, (base, edit) => {
-    const input = edit && typeof edit === 'object' && 'field' in edit ? { ...base, mode: 'open', [edit.field]: edit.value } : edit;
-    const result = parseContextGraphJoinPolicyRecord(input);
-    if (result === null) {
-      expect(isBoundedOpenEnrollmentPolicy(input)).toBe(false);
-      expect(isContextGraphJoinPolicyRecord(input)).toBe(false);
-    } else {
-      expect(result.version).toBe(1);
-      expect(typeof result.contextGraphId).toBe('string'); expect(result.contextGraphId.length).toBeGreaterThan(0);
-      expect(typeof result.ownerDid).toBe('string'); expect(result.ownerDid.length).toBeGreaterThan(0);
-      expect(Number.isFinite(result.updatedAt)).toBe(true);
-      expect(['manual', 'open']).toContain(result.mode);
-      if (result.mode === 'open') {
-        expect(Number.isInteger(result.maxMembers)).toBe(true);
-        expect(result.maxMembers).toBeGreaterThan(0); expect(result.maxMembers).toBeLessThanOrEqual(10_000);
-        expect(Number.isInteger(result.maxApprovalsPerHour)).toBe(true);
-        expect(result.maxApprovalsPerHour).toBeGreaterThan(0); expect(result.maxApprovalsPerHour).toBeLessThanOrEqual(1_000);
-      }
-    }
+    const input = { ...base, mode: 'open', [edit.field]: edit.value };
+    expect(parseContextGraphJoinPolicyRecord(input)).toBeNull();
+    expect(isBoundedOpenEnrollmentPolicy(input)).toBe(false);
+    expect(isContextGraphJoinPolicyRecord(input)).toBe(false);
   }), propertyOptions());
 });
