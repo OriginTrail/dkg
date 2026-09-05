@@ -4,7 +4,7 @@ import {
   getPromoteFailureDisposition,
 } from '@origintrail-official/dkg-publisher';
 import { ContextGraphAuthorityUnavailableError } from
-  '../src/context-graph-authority-unavailable-error.js';
+  '../src/context-graph-agent-gate-authority.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 
 function promoteBoundaryAgent(): any {

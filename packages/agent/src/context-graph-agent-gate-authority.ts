@@ -90,7 +90,6 @@ export type ContextGraphAgentGateAuthority =
       kind: 'unavailable';
       reason: ContextGraphAgentGateUnavailableReason;
       detail?: string;
-      retryable: boolean;
     };
 
 export interface ContextGraphAgentGateAuthorityInput {
@@ -119,7 +118,6 @@ function unavailableAuthority(
     kind: 'unavailable',
     reason,
     ...(detail === undefined ? {} : { detail }),
-    retryable: isRetryableContextGraphAuthorityReason(reason),
   };
 }
 

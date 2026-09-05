@@ -3,7 +3,7 @@ import {
   CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
   ContextGraphAuthorityUnavailableError,
   isContextGraphAuthorityUnavailableMarker,
-} from '../src/context-graph-authority-unavailable-error.js';
+} from '../src/context-graph-agent-gate-authority.js';
 import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
@@ -85,7 +85,6 @@ describe('RFC-64 private Sender Key roster authority', () => {
     )).resolves.toEqual({
       kind: 'unavailable',
       reason: 'chain-participant-authority-unavailable',
-      retryable: true,
     });
   });
 
@@ -116,7 +115,7 @@ describe('RFC-64 private Sender Key roster authority', () => {
       await expect(WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority.call(
         receiver as never,
         CG,
-      )).resolves.toEqual({ kind: 'unavailable', reason, retryable });
+      )).resolves.toEqual({ kind: 'unavailable', reason });
 
       const outcome = await WorkspaceCryptoMethods.prototype.resolveWorkspaceGossipSigningAgent.call(
         receiver as never,
@@ -215,14 +214,23 @@ describe('RFC-64 private Sender Key roster authority', () => {
   });
 
   it('marks an unavailable signing authority so durable promotion can retry it', async () => {
+    const getCgMeta = vi.fn(async () => {
+      throw new Error('legacy metadata must not mask RFC-64 authority unavailability');
+    });
     const receiver = {
-      resolveContextGraphAgentGateAuthority: async () => ({
-        kind: 'unavailable' as const,
-        reason: 'rfc64-private-read-roster-unavailable' as const,
-        retryable: true,
-      }),
+      resolveContextGraphAgentGateAuthority:
+        WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
+      resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),
+      resolveRfc64PrivateReadRosterV1: () => null,
+      getCgMeta,
+      subscribedContextGraphs: new Map(),
       localAgents: new Map(),
     };
+
+    await expect(WorkspaceCryptoMethods.prototype.getContextGraphAgentGateAddresses.call(
+      receiver as never,
+      CG,
+    )).resolves.toEqual([]);
 
     const error = await WorkspaceCryptoMethods.prototype.resolveWorkspaceGossipSigningAgent.call(
       receiver as never,
@@ -234,6 +242,7 @@ describe('RFC-64 private Sender Key roster authority', () => {
       reason: 'rfc64-private-read-roster-unavailable',
     });
     expect(isContextGraphAuthorityUnavailableMarker(error)).toBe(true);
+    expect(getCgMeta).not.toHaveBeenCalled();
   });
 
   it('marks an unavailable recipient authority so durable promotion can retry it', async () => {
