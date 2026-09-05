@@ -343,6 +343,7 @@ export function planWeightedShards({
   shardCount,
   perFileOverheadMs = PER_FILE_OVERHEAD_MS,
   unknownFileBodyMs = UNKNOWN_FILE_BODY_MS,
+  shardOverheadMs,
 }) {
   if (!Number.isInteger(shardCount) || shardCount < 1) {
     throw new Error('shardCount must be a positive integer');
@@ -352,6 +353,11 @@ export function planWeightedShards({
   }
   if (new Set(files).size !== files.length) {
     throw new Error('Eligible test file list contains duplicates');
+  }
+  const overhead = shardOverheadMs ?? Array(shardCount).fill(0);
+  if (!Array.isArray(overhead) || overhead.length !== shardCount
+      || overhead.some((value) => !Number.isFinite(value) || value < 0)) {
+    throw new Error('Expected one non-negative overhead per shard');
   }
 
   const weightedFiles = files.map((file) => {
@@ -371,7 +377,7 @@ export function planWeightedShards({
 
   const shards = Array.from({ length: shardCount }, (_, index) => ({
     index: index + 1,
-    estimatedMs: 0,
+    estimatedMs: overhead[index],
     files: [],
     unknownFiles: [],
   }));
