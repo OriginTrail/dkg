@@ -1,8 +1,9 @@
+import { hardhatTestEnvironment } from '../../scripts/lib/hardhat-test-env.mjs';
 import { defineConfig } from 'vitest/config';
 import { EVM_TEST_SCOPES } from '../../scripts/ci/evm-test-scopes.mjs';
 import { tornadoChainCoverage } from '../../vitest.coverage';
 
-process.env.HARDHAT_PORT = '9545';
+const hardhatEnv = hardhatTestEnvironment();
 
 export default defineConfig({
   test: {
@@ -17,7 +18,7 @@ export default defineConfig({
     testTimeout: 120_000,
     globalSetup: ['test/hardhat-global-setup.ts'],
     maxWorkers: 1,
-    env: { HARDHAT_PORT: '9545' },
+    env: hardhatEnv,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html', 'lcov', 'json-summary'],

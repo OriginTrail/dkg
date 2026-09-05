@@ -27,7 +27,7 @@ let ctx: HardhatContext;
 
 describe('chain-proof snapshot — real ERC-721 boundary (GH#2270 r4, repointed PR#2300 r1)', () => {
   beforeAll(async () => {
-    ctx = await spawnHardhatEnv(8569);
+    ctx = await spawnHardhatEnv();
   }, 180_000);
   afterAll(() => killHardhat(ctx));
 

@@ -10,6 +10,7 @@
  * 7. Working memory view
  */
 import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest';
+import { waitForSharedMemorySubscriber } from './_helpers/gossip-readiness.js';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent as RealDKGAgent, type DKGAgentConfig } from '../src/index.js';
 import { SEAL_CAPABILITY_GAP_CODE } from '../src/dkg-agent-publish.js';
@@ -2813,12 +2814,12 @@ describe('WM → SWM gossip → VM (2 nodes)', () => {
   }, 45_000);
 
   it('an imported Markdown KA survives WM → SWM gossip → VM on a second node', async () => {
-    const sharedChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const CG_ID = 'memory-layers-markdown-e2e';
     const nodeA = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'LayersA',
       listenPort: 0,
-      chainAdapter: sharedChain,
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       nodeRole: 'core',
     });
     agents.push(nodeA);
@@ -2827,24 +2828,25 @@ describe('WM → SWM gossip → VM (2 nodes)', () => {
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'LayersB',
       listenPort: 0,
-      chainAdapter: sharedChain,
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
       nodeRole: 'core',
     });
     agents.push(nodeB);
 
     await nodeA.start();
     await nodeB.start();
-    await sleep(500);
-
     const addrA = nodeA.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
     await nodeB.connectTo(addrA);
-    await sleep(2000);
 
     await nodeA.createContextGraph({ id: CG_ID, name: 'Two-Node Memory Layers' });
     await nodeA.registerContextGraph(CG_ID);
+    // A receiver cannot subscribe until graph discovery supplies its metadata.
+    // Keep this scenario separate from the other cases' chain history and wait
+    // for the actual topic subscription before publishing the Markdown KA.
+    await expect.poll(() => nodeB.contextGraphExists(CG_ID), { timeout: 10_000 }).toBe(true);
     nodeA.subscribeToContextGraph(CG_ID);
     nodeB.subscribeToContextGraph(CG_ID);
-    await sleep(1500);
+    await waitForSharedMemorySubscriber(nodeA, CG_ID, nodeB);
 
     // Step 1: use the production Markdown extractor, including the blank-node
     // section hierarchy that originally made imported KAs appear empty on the
