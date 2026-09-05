@@ -4689,7 +4689,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     })?.currentCatalogHeadDigest).toBe(staleHeadDigest);
   }, 60_000);
 
-  it('keeps a canceled successor mutation attached to service shutdown', async () => {
+  it('keeps a canceled successor mutation attached to runtime shutdown', async () => {
     const author = await startNativeAgent('r1-3-canceled-successor-author');
     author.acceptOpenContextGraphPolicyV1({
       networkId: NETWORK_ID,
@@ -4740,11 +4740,11 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await successorEntered;
     abortController.abort(new Error('test cancellation'));
     await expect(reconciliation).rejects.toThrow(/test cancellation|aborted/u);
-    let serviceClosed = false;
-    const closing = author.closeRfc64PublicCatalogServiceV1()
-      .finally(() => { serviceClosed = true; });
+    let runtimeClosed = false;
+    const closing = author.closeRfc64CatalogRuntimeV1()
+      .finally(() => { runtimeClosed = true; });
     await Promise.resolve();
-    expect(serviceClosed).toBe(false);
+    expect(runtimeClosed).toBe(false);
     releaseSuccessor();
     await expect(closing).resolves.toBeUndefined();
     expect(author.readRfc64AppliedCatalogHeadV1({
@@ -8140,7 +8140,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       errorCode: 'catalog-native-receiver-activation',
       causeCode: 'finalized-vm-composition-incomplete',
     });
-    await authorizedCold.closeRfc64PublicCatalogServiceV1();
+    await authorizedCold.closeRfc64CatalogRuntimeV1();
     expect(authorizedCold.readRfc64PublicCatalogSynchronizationEvidenceV1(
       successor.headObjectDigest,
     )).toBeNull();

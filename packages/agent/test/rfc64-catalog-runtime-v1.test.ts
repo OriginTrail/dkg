@@ -223,22 +223,33 @@ describe('Rfc64CatalogRuntimeV1', () => {
     const publicCloseGate = new Promise<void>((resolve) => { releasePublicClose = resolve; });
     const publicCatalog = {
       ...baseOptions.publicCatalog,
-      start: vi.fn(() => {
-        if (failStart) throw new Error('public catalog start failed');
-      }),
       close: vi.fn(() => publicCloseGate),
+    };
+    const projection = {
+      ...baseOptions.workloads[1]!,
+      start: vi.fn(() => {
+        if (failStart) throw new Error('projection start failed');
+      }),
     };
     const options: Rfc64CatalogRuntimeOptionsV1 = {
       ...baseOptions,
       publicCatalog,
+      workloads: [baseOptions.workloads[0]!, projection],
     };
     const runtime = new Rfc64CatalogRuntimeV1(options);
     const ctx = createOperationContext('system');
 
-    expect(() => runtime.start(ctx)).toThrow('public catalog start failed');
-    const rollback = runtime.close();
-    expect(() => runtime.start(ctx)).toThrow('cannot start while close is in progress');
+    expect(() => runtime.start(ctx)).toThrow('projection start failed');
+    // start() itself must arm rollback. Observe every workload retirement
+    // before calling close(), so close() cannot be what initiated cleanup.
     await vi.waitFor(() => expect(publicCatalog.close).toHaveBeenCalledOnce());
+    expect(options.workloads[0]!.close).toHaveBeenCalledOnce();
+    expect(projection.close).toHaveBeenCalledOnce();
+    expect(options.mutationPersistence.close).not.toHaveBeenCalled();
+
+    const rollback = runtime.close();
+    expect(runtime.close()).toBe(rollback);
+    expect(() => runtime.start(ctx)).toThrow('cannot start while close is in progress');
     expect(options.mutationPersistence.close).not.toHaveBeenCalled();
 
     releasePublicClose();

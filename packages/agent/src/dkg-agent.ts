@@ -2389,11 +2389,11 @@ export class DKGAgent extends DKGAgentBase {
       // and authoring transports remain live. Receiver close then proves that
       // no later applied-head callback can enqueue work. Only after both
       // producer classes are quiet may the projection owner drain and close.
-      await this.rfc64CatalogRuntimeV1.close();
+      await this.closeRfc64CatalogRuntimeV1();
     } catch (err) {
       this.log.warn(
         createOperationContext('connect'),
-        `RFC-64 public catalog service close failed: ${err instanceof Error ? err.message : String(err)}`,
+        `RFC-64 catalog runtime close failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
 

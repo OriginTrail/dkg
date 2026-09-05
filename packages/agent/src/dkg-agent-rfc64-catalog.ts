@@ -2195,8 +2195,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     });
   }
 
-  /** Compatibility entrypoint; the runtime owns every shared catalog resource. */
-  startRfc64PublicCatalogServiceV1(this: DKGAgent, ctx: OperationContext): void {
+  /** Start the complete agent-owned RFC-64 catalog runtime. */
+  startRfc64CatalogRuntimeV1(this: DKGAgent, ctx: OperationContext): void {
     this.rfc64CatalogRuntimeV1.start(ctx);
   }
 
@@ -2388,8 +2388,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     await this.rfc64PublicCatalogOwnerV1.closeReceiverAdmission();
   }
 
-  /** Compatibility close entrypoint for callers outside the canonical runtime. */
-  closeRfc64PublicCatalogServiceV1(this: DKGAgent): Promise<void> {
+  /** Close the complete agent-owned RFC-64 catalog runtime. */
+  closeRfc64CatalogRuntimeV1(this: DKGAgent): Promise<void> {
     return this.rfc64CatalogRuntimeV1.close();
   }
 
