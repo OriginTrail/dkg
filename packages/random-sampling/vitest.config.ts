@@ -1,11 +1,7 @@
 import { hardhatTestEnvironment } from '../../scripts/lib/hardhat-test-env.mjs';
 import { defineConfig } from 'vitest/config';
 
-// Distinct port per Hardhat-backed test package so parallel monorepo
-// test runs (`pnpm -r test` / turbo) don't collide on the same RPC
-// port. Current map: chain 9545, publisher 9546, agent 9547, cli 9548,
-// kafka-plugin 9549, random-sampling 9550. (Was 9547 — collided with
-// `agent`, see #957.)
+// Each project owns its context; Hardhat binds an OS-assigned port.
 const hardhatEnv = hardhatTestEnvironment();
 
 // Coverage thresholds intentionally omitted while the package is just

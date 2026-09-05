@@ -1,9 +1,7 @@
 import { hardhatTestEnvironment } from '../../scripts/lib/hardhat-test-env.mjs';
 import { defineConfig } from 'vitest/config';
 
-// Distinct from the cli lane (9548) so kafka-plugin's E2E can spin its
-// own Hardhat node without colliding when the two packages are run in
-// parallel by turbo.
+// Each project owns its context; Hardhat binds an OS-assigned port.
 const hardhatEnv = hardhatTestEnvironment();
 
 export default defineConfig({
