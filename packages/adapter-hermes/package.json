@@ -24,7 +24,7 @@
     "test": "vitest run && node pytests/run-pytest.mjs",
     "test:ts": "vitest run",
     "test:py": "node pytests/run-pytest.mjs",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage && node pytests/run-pytest.mjs --coverage",
     "clean": "node -e \"const fs=require('fs'); for (const p of ['dist','tsconfig.tsbuildinfo']) fs.rmSync(p,{recursive:true,force:true});\""
   },
   "dependencies": {

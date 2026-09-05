@@ -941,6 +941,7 @@ jobs:
         # unset) skips gracefully when Python is absent.
         env:
           DKG_REQUIRE_PYTEST: '1'
+          DKG_CI_COVERAGE: '1'
         run: |
           pnpm \
             --filter @origintrail-official/dkg-epcis \
@@ -955,6 +956,17 @@ jobs:
             --filter @origintrail-official/dkg-adapter-prime-agent \
             --filter @origintrail-official/dkg-demo \
             run test
+      - name: Upload Hermes Python test and coverage reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hermes-python-reports
+          path: |
+            packages/adapter-hermes/test-results/hermes-python.xml
+            packages/adapter-hermes/coverage-python/
+          retention-days: 14
+          if-no-files-found: error
+
 
   # ------------------------------------------------------------------
   # Hardhat-backed Kosava lane — `random-sampling` and `kafka-plugin`.
