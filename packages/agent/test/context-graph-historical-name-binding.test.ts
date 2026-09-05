@@ -731,7 +731,10 @@ describe('cold current-state Context Graph name binding', () => {
     const participant = '0x1111111111111111111111111111111111111111';
     const getParticipants = vi.fn(async () => [participant]);
     fixture.agent.chain.getContextGraphParticipantAgents = getParticipants;
-    fixture.agent.readLiveOnChainAccessPolicy = vi.fn(async () => 1);
+    fixture.agent.resolveLiveOnChainAccessPolicyState = vi.fn(async () => ({
+      kind: 'available' as const,
+      accessPolicy: 1 as const,
+    }));
     fixture.agent.onChainParticipantAgentsCache = new Map();
     fixture.agent.log = { info: vi.fn(), warn: vi.fn() };
     fixture.agent.contextGraphBindingState.bindReverseCandidate(
