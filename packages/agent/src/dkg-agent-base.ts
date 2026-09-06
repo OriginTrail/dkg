@@ -1675,7 +1675,7 @@ export class DKGAgentBase {
     | null = null;
   /** Typed RFC-64 admission and current-configuration validation boundary. */
   protected rfc64SwmRecoveryCoordinatorV1!: Rfc64SwmRecoveryCoordinatorV1;
-  /** Cohesive owner of RFC-64 recovery authority, leases and queue admission. */
+  /** Cohesive owner of RFC-64 recovery authority, leases and selection invalidation. */
   protected rfc64SwmRecoveryRuntimeV1!: Rfc64SwmRecoveryRuntimeV1;
   /**
    * Per-peer timestamp of the last time all live connections to that peer

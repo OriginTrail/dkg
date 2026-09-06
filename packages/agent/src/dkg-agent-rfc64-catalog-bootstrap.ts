@@ -24,8 +24,6 @@ import { Rfc64CoalescingSupervisorV1 } from
   './rfc64/coalescing-supervisor-v1.js';
 import type { Rfc64ActivePeerSwmRecoveryPlanV1 } from
   './rfc64/swm-recovery-plan-v1.js';
-import type { Rfc64CatalogRecoveryQueueOutcomeV1 } from
-  './dkg-agent-rfc64-swm-recovery-runtime.js';
 import {
   resolveRfc64CatalogExecutionPlanAuthorityV1,
   type Rfc64CatalogExecutionPlanV1,
@@ -50,6 +48,12 @@ export type Rfc64PublicCatalogBootstrapOutcomeV1 =
 
 export type Rfc64CatalogBootstrapCompletionReasonV1 =
   | 'no-authorized-provider';
+
+export type Rfc64CatalogRecoveryQueueOutcomeV1 = Readonly<
+  | { kind: 'not-authorized' }
+  | { kind: 'queued' }
+  | { kind: 'rejected' }
+>;
 
 export interface Rfc64PublicCatalogBootstrapTargetStatusV1 {
   readonly scope: Readonly<Rfc64PublicCatalogBootstrapScopeV1>;
@@ -516,6 +520,27 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     providerPeerId: string,
   ): boolean {
     return bootstrapOwnerV1(this).isRecoveryReady(providerPeerId);
+  }
+
+  /** Bootstrap-local composition of current-plan admission and queueing. */
+  queueRfc64CatalogRecoveryPlanV1(
+    this: DKGAgent,
+    plan: Readonly<Rfc64ActivePeerSwmRecoveryPlanV1>,
+    onError: (peerId: string, error: unknown) => void,
+    delayMs: number,
+  ): Rfc64CatalogRecoveryQueueOutcomeV1 {
+    const authorizedPlan = this.rfc64SwmRecoveryCoordinatorV1.authorizeForCatalogPass(
+      plan,
+      this.config.syncReconcilerTiming.stalenessThresholdMs,
+    );
+    if (authorizedPlan === null) return Object.freeze({ kind: 'not-authorized' });
+    return Object.freeze({
+      kind: this.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
+        authorizedPlan,
+        onError,
+        delayMs,
+      ) ? 'queued' : 'rejected',
+    });
   }
 
 }

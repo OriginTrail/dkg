@@ -105,11 +105,6 @@ function selectedFixture(resolved: bigint | null = 42n) {
     },
     admission: { invalidateContextGraph: () => [] },
     cooldown: { deleteProvider: () => undefined },
-    queue: {
-      catalogPassMinimumTerminalAgeMs: () => 0,
-      authorizeForCatalogPass: () => null,
-      enqueueAuthorized: () => false,
-    },
   });
   const agent = createBindingAgentHarness({
     store: { query } as unknown as TripleStore,

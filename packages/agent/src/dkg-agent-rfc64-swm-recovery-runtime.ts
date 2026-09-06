@@ -13,7 +13,6 @@ import {
   resolveRfc64SwmRecoveryLaneV1,
   resolveRfc64SwmRecoveryRuntimeAuthorityV1,
   type Rfc64ActivePeerSwmRecoveryPlanV1,
-  type Rfc64AuthorizedSwmRecoveryPlanV1,
   type Rfc64SwmRecoveryTargetV1,
   type Rfc64SwmRecoveryRuntimeAuthorityV1,
 } from './rfc64/swm-recovery-plan-v1.js';
@@ -34,12 +33,6 @@ interface Rfc64SwmRecoveryRuntimeSelectionV1 {
   readonly eligibleContextGraphs: readonly string[];
   readonly subscriptionDriven: boolean;
 }
-
-export type Rfc64CatalogRecoveryQueueOutcomeV1 = Readonly<
-  | { kind: 'not-authorized' }
-  | { kind: 'queued' }
-  | { kind: 'rejected' }
->;
 
 export class Rfc64SwmRecoveryTargetRevokedErrorV1 extends Error {
   readonly code = 'RFC64_SWM_RECOVERY_TARGET_REVOKED' as const;
@@ -103,23 +96,11 @@ export interface Rfc64SwmRecoveryRuntimePortsV1 {
   readonly cooldown: Readonly<{
     deleteProvider: (providerPeerId: string) => void;
   }>;
-  readonly queue: Readonly<{
-    catalogPassMinimumTerminalAgeMs: () => number;
-    authorizeForCatalogPass: (
-      plan: Readonly<Rfc64ActivePeerSwmRecoveryPlanV1>,
-      minimumTerminalAgeMs: number,
-    ) => Readonly<Rfc64AuthorizedSwmRecoveryPlanV1> | null;
-    enqueueAuthorized: (
-      plan: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
-      onError: (peerId: string, error: unknown) => void,
-      delayMs: number,
-    ) => boolean;
-  }>;
 }
 
 /**
  * Cohesive owner of recovery authority projection, lease generations,
- * selection invalidation, provider cooldown reset and catalog queue admission.
+ * selection invalidation and provider cooldown reset.
  * The agent supplies narrow ports and exposes only delegate methods.
  */
 export class Rfc64SwmRecoveryRuntimeV1 {
@@ -215,23 +196,6 @@ export class Rfc64SwmRecoveryRuntimeV1 {
     return Object.freeze([...affectedProviders]);
   }
 
-  queueCatalogPlan(
-    plan: Readonly<Rfc64ActivePeerSwmRecoveryPlanV1>,
-    onError: (peerId: string, error: unknown) => void,
-    delayMs: number,
-  ): Rfc64CatalogRecoveryQueueOutcomeV1 {
-    const authorizedPlan = this.ports.queue.authorizeForCatalogPass(
-      plan,
-      this.ports.queue.catalogPassMinimumTerminalAgeMs(),
-    );
-    if (authorizedPlan === null) return Object.freeze({ kind: 'not-authorized' });
-    return Object.freeze({
-      kind: this.ports.queue.enqueueAuthorized(authorizedPlan, onError, delayMs)
-        ? 'queued'
-        : 'rejected',
-    });
-  }
-
   private projectAuthority(
     contextGraphId: string,
     selected: boolean,
@@ -305,13 +269,4 @@ export class Rfc64SwmRecoveryRuntimeMethods extends DKGAgentBase {
     return this.rfc64SwmRecoveryRuntimeV1.invalidateSelectionState(contextGraphId);
   }
 
-  queueRfc64CatalogRecoveryPlanV1(
-    this: DKGAgent,
-    plan: Readonly<Rfc64ActivePeerSwmRecoveryPlanV1>,
-    onError: (peerId: string, error: unknown) => void,
-    delayMs: number,
-  ): Rfc64CatalogRecoveryQueueOutcomeV1 {
-    return this.rfc64SwmRecoveryRuntimeV1
-      .queueCatalogPlan(plan, onError, delayMs);
-  }
 }

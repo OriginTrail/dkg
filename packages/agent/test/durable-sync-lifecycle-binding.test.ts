@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
+import { SwmTargetExecutorCompositionMethods } from
+  '../src/dkg-agent-swm-target-executor.js';
 
 vi.mock('../src/sync/requester/durable-sync.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/sync/requester/durable-sync.js')>();
@@ -641,6 +643,8 @@ describe('durable sync lifecycle chain binding', () => {
         oversizeTombstoneLog: { record: vi.fn() },
         invalidateListContextGraphsCache: vi.fn(),
         contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
+        createSwmTargetExecutorV1:
+          SwmTargetExecutorCompositionMethods.prototype.createSwmTargetExecutorV1,
         resolveRfc64CatalogReceiverAuthorityV1: vi.fn(() => ({ legacySyncAllowed })),
         runContextGraphSyncWithBackpressure: async (
           _ctx: unknown,
@@ -1174,6 +1178,8 @@ describe('durable sync lifecycle chain binding', () => {
       workspaceOwnedEntities: new Map(),
       oversizeTombstoneLog: { record: () => {} },
       contextGraphMetaProjection: { markDirtyFromQuads: () => {} },
+      createSwmTargetExecutorV1:
+        SwmTargetExecutorCompositionMethods.prototype.createSwmTargetExecutorV1,
       invalidateListContextGraphsCache: vi.fn(),
       listSubGraphs: async () => [],
       fetchSyncPages: async () => { throw new Error('unexpected fetch'); },
@@ -1264,6 +1270,8 @@ describe('durable sync lifecycle chain binding', () => {
       workspaceOwnedEntities: new Map(),
       oversizeTombstoneLog: { record: () => {} },
       contextGraphMetaProjection: { markDirtyFromQuads: () => {} },
+      createSwmTargetExecutorV1:
+        SwmTargetExecutorCompositionMethods.prototype.createSwmTargetExecutorV1,
       invalidateListContextGraphsCache: vi.fn(),
       listSubGraphs: async () => [],
       fetchSyncPages: async () => { throw new Error('unexpected fetch'); },

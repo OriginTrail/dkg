@@ -242,11 +242,6 @@ describe('RFC-64 private catalog activation', () => {
       },
       admission: { invalidateContextGraph: () => [] },
       cooldown: { deleteProvider: () => undefined },
-      queue: {
-        catalogPassMinimumTerminalAgeMs: () => 0,
-        authorizeForCatalogPass: () => null,
-        enqueueAuthorized: () => false,
-      },
     });
 
     expect(resolveRfc64PrivateRecoveryContextGraphIdsV1(bootstrap))

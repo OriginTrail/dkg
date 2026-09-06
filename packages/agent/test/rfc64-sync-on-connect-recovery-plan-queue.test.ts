@@ -9,6 +9,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS } from '../src/dkg-agent-constants.js';
 import { Rfc64SwmRecoveryRuntimeV1 } from
   '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
+import { SwmTargetExecutorV1 } from '../src/sync/requester/swm-target-executor.js';
 import { SyncOnConnectPeerScheduler } from '../src/sync/on-connect/peer-scheduler.js';
 import {
   allowAllNetworkAdmission,
@@ -69,11 +70,6 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       },
       admission: { invalidateContextGraph: () => [] },
       cooldown: { deleteProvider: () => undefined },
-      queue: {
-        catalogPassMinimumTerminalAgeMs: () => 0,
-        authorizeForCatalogPass: () => null,
-        enqueueAuthorized: () => false,
-      },
     });
 
     expect(runtime.resolveRuntimeAuthority(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
@@ -90,6 +86,61 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       previousSubscribed: false,
       nextSubscribed: true,
     })).toBe(true);
+  });
+
+  it('creates a fresh SWM target executor for each synchronization session', async () => {
+    const agent = await createUnstartedAgent('SwmTargetExecutorComposition');
+
+    const first = agent.createSwmTargetExecutorV1();
+    const second = agent.createSwmTargetExecutorV1();
+
+    expect(first).toBeInstanceOf(SwmTargetExecutorV1);
+    expect(second).not.toBe(first);
+  });
+
+  it('wires runtime authority into one-way coordinator admission and revalidation', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-owner-composition-'));
+    tempDirs.push(dataDir);
+    const agent = await createUnstartedAgent('Rfc64RecoveryOwnerComposition', {
+      dataDir,
+      rfc64PublicCatalogActivation: {
+        ...rfc64RolloutActivation('catalog'),
+        bootstrap: {
+          retryIntervalMs: 0,
+          acceptedPublicPolicies: [{
+            policyEnvelope: rfc64RolloutPolicyEnvelope(),
+            targets: [],
+            completeSwmProviders: [PEER_A],
+          }],
+        },
+      },
+      syncContextGraphs: [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
+      chainAdapter: new MockChainAdapter(RFC64_ROLLOUT_NETWORK_ID),
+      networkIdentity: {
+        networkId: await computeNetworkId(),
+        chainId: RFC64_ROLLOUT_NETWORK_ID,
+      },
+    });
+    agent.subscribedContextGraphs.set(RFC64_ROLLOUT_CONTEXT_GRAPH_ID, {
+      subscribed: true,
+    });
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.isRfc64CatalogBootstrapSwmRecoveryReadyV1 = () => true;
+
+    expect(agent.resolveRfc64SwmRecoveryRuntimeAuthorityV1(
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+    )).toMatchObject({ active: true, lane: 'selected-public' });
+
+    const coordinator = agent.rfc64SwmRecoveryCoordinatorV1;
+    expect(coordinator.admitSelectedPublic(
+      PEER_A,
+      [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
+    )).toBe(true);
+    const activePlan = agent.resolveActiveRfc64SwmRecoveryPlanV1(PEER_A);
+    const authorized = coordinator.authorizeForCatalogPass(activePlan, 0);
+    expect(authorized).not.toBeNull();
+    expect(coordinator.revalidate(authorized!)).toEqual(authorized);
   });
 
   it('queues a widened plan when a newly selected graph had no admission owner', async () => {

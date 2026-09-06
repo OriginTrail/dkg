@@ -304,7 +304,6 @@ export type {
   DurableRecoveryPeerExecution,
 } from './sync/durable-recovery-runner.js';
 import {
-  createContextGraphSyncDeadline,
   createDurableSyncBudget,
   createDurableSyncFetchTimeoutMs,
   DURABLE_SYNC_SETTLEMENT_HEADROOM_MS,
@@ -338,8 +337,6 @@ import {
   createSelectedSwmMetaFetcher,
   type SelectedSwmMetaFetcher,
 } from './sync/selected-swm-meta-fetcher.js';
-import { SwmTargetExecutorV1 } from
-  './sync/requester/swm-target-executor.js';
 import {
   runOrderedContextGraphSyncs,
   type ContextGraphSyncWork,
@@ -1824,67 +1821,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ctx,
       candidate.kaUal,
     );
-  }
-
-  /** One focused executor owns both public and private SWM target wiring. */
-  private createSwmTargetExecutorV1(this: DKGAgent): SwmTargetExecutorV1 {
-    return new SwmTargetExecutorV1({
-      store: this.store,
-      writeLocks: this.writeLocks,
-      listSubGraphs: (contextGraphId) => this.listSubGraphs(contextGraphId),
-      createContextGraphSyncDeadline: (remainingContextGraphs) => (
-        createContextGraphSyncDeadline({ remainingContextGraphs })
-      ),
-      fetchSyncPages: (
-        ctx,
-        peerId,
-        contextGraphId,
-        includeSharedMemory,
-        phase,
-        graphUri,
-        deadline,
-        options,
-      ) => this.fetchSyncPages(
-        ctx,
-        peerId,
-        contextGraphId,
-        includeSharedMemory,
-        phase,
-        graphUri,
-        deadline,
-        options,
-      ),
-      processSharedMemoryBatch: (data, meta, contextGraphId, registered, excluded) => (
-        this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(
-          data,
-          meta,
-          contextGraphId,
-          registered,
-          excluded,
-        )
-      ),
-      publicSnapshotStore: this.publicSnapshotStore,
-      recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
-      invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
-      markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection.markDirtyFromQuads(quads),
-      setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
-      deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
-      deletePublicCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
-      ensureOwnedMap: (ownershipKey) => {
-        let owned = this.workspaceOwnedEntities.get(ownershipKey);
-        if (owned === undefined) {
-          owned = new Map();
-          this.workspaceOwnedEntities.set(ownershipKey, owned);
-        }
-        return owned;
-      },
-      retireFinalizedSwmTwin: (candidate, ctx) => (
-        this.retireFinalizedSwmTwinCandidate(candidate, ctx)
-      ),
-      logInfo: (ctx, message) => this.log.info(ctx, message),
-      logWarn: (ctx, message) => this.log.warn(ctx, message),
-      logDebug: (ctx, message) => this.log.debug(ctx, message),
-    });
   }
 
   async runContextGraphSyncWithBackpressure<T>(this: DKGAgent,
@@ -7529,8 +7465,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.log.warn(ctx, `Skipping shared-memory sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
       return execution(emptySharedMemorySyncResult());
     }
-    const recoveryExecutor = LifecycleSyncMethods.prototype
-      .createSwmTargetExecutorV1.call(this);
+    const recoveryExecutor = this.createSwmTargetExecutorV1();
     const recoverPrivateContextGraph = (
       contextGraphId: string,
       recoveryLease?: Rfc64SwmRecoveryTargetLeaseV1,
@@ -7976,7 +7911,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphId,
       'swm_recovery',
       `swm-recovery:${contextGraphId}:${remotePeerId.slice(-8)}`,
-      () => LifecycleSyncMethods.prototype.createSwmTargetExecutorV1.call(this)
+      () => this.createSwmTargetExecutorV1()
         .recoverPrivateTarget({
           remotePeerId,
           contextGraphId,

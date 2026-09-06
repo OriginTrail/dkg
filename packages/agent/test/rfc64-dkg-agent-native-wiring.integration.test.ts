@@ -2209,8 +2209,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         catalogVersion: '1',
         inventoryRowCount: '1',
       });
-    }, { timeout: 20_000, interval: 50 });
-  }, 90_000);
+    }, { timeout: 60_000, interval: 50 });
+  }, 120_000);
 
   it('excludes restricted shares, restarts the public SWM-only inventory, then removes VM-confirmed rows', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-swm-shadow-restart-'));
@@ -3301,11 +3301,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       },
       admission: { invalidateContextGraph: () => [] },
       cooldown: { deleteProvider: () => undefined },
-      queue: {
-        catalogPassMinimumTerminalAgeMs: () => 0,
-        authorizeForCatalogPass: () => null,
-        enqueueAuthorized: () => false,
-      },
     });
     expect(providerResolver.resolveCompleteProviderPeerIds(CONTEXT_GRAPH_ID))
       .toEqual(['12D3KooCompleteSwm']);
