@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
+import { createSwmTargetExecutorSessionFactoryForTest } from
+  './_helpers/swm-target-executor-session-fixture.js';
 
 vi.mock('../src/sync/requester/durable-sync.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/sync/requester/durable-sync.js')>();
@@ -651,6 +653,8 @@ describe('durable sync lifecycle chain binding', () => {
         ) => work(),
         log: { info: () => {}, warn: () => {}, debug: () => {} },
       };
+      agentLike.createSwmTargetExecutorSessionV1 =
+        createSwmTargetExecutorSessionFactoryForTest(agentLike);
 
       await LifecycleSyncMethods.prototype.recoverContextGraphSwmFromPeer.call(
         agentLike,
@@ -1195,6 +1199,8 @@ describe('durable sync lifecycle chain binding', () => {
     agentLike.retireFinalizedSwmTwinCandidate = (
       LifecycleSyncMethods.prototype as any
     ).retireFinalizedSwmTwinCandidate;
+    agentLike.createSwmTargetExecutorSessionV1 =
+      createSwmTargetExecutorSessionFactoryForTest(agentLike);
 
     await LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution.call(
       agentLike,
@@ -1284,6 +1290,8 @@ describe('durable sync lifecycle chain binding', () => {
     agentLike.retireFinalizedSwmTwinCandidate = (
       LifecycleSyncMethods.prototype as any
     ).retireFinalizedSwmTwinCandidate;
+    agentLike.createSwmTargetExecutorSessionV1 =
+      createSwmTargetExecutorSessionFactoryForTest(agentLike);
 
     await LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution.call(
       agentLike,

@@ -218,6 +218,33 @@ describe('private SWM curator recovery planning', () => {
     });
   });
 
+  it('retains subscribed catalog compatibility sync when its accepted policy has no complete provider', async () => {
+    const contextGraphId = `${ethers.Wallet.createRandom().address}/catalog-no-provider`;
+    const agent = await createAgent('CatalogWithoutCompleteProviderFallbackPlan');
+    const internals = agent as any;
+    internals.config.rfc64CatalogBootstrap = {
+      acceptedPolicies: [{
+        policyEnvelope: { payload: { contextGraphId, accessPolicy: 0 } },
+        targets: [],
+      }],
+    };
+    internals.resolveRfc64CatalogReceiverAuthorityV1 = () => ({
+      legacySyncAllowed: false,
+    });
+    internals.subscribedContextGraphs.set(contextGraphId, { subscribed: true });
+    internals.canUseSharedMemoryForContextGraph = async () => true;
+    internals.isPrivateContextGraph = async () => false;
+    internals.resolveRfc64CompleteSwmProviderPeerIdsV1 = () => [];
+
+    await expect(agent.planSharedMemorySyncContextGraphs(
+      '12D3KooWCompatibleMemberPeer',
+      [contextGraphId],
+      createOperationContext('sync'),
+    )).resolves.toEqual({
+      targets: [{ contextGraphId, lane: 'selected-public' }],
+    });
+  });
+
   it('does not treat an empty registry after a failed metadata refresh as authoritative', async () => {
     const curator = ethers.Wallet.createRandom().address.toLowerCase();
     const contextGraphId = `${curator}/refresh-failed-plan`;

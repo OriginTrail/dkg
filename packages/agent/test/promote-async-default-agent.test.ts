@@ -10,7 +10,7 @@ import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { finalizeRootlessAssertionForTest } from '../../publisher/test/_helpers/rootless-lifecycle.js';
 import { ContextGraphAuthorityUnavailableError } from
-  '../src/internal/promote/context-graph-agent-gate-authority.js';
+  '../src/internal/context-graph-authority/context-graph-authority.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import type { AssertionPromoteOptions } from '../src/index.js';
 
@@ -115,27 +115,46 @@ describe('DKGAgent assertion promote boundary', () => {
     });
   });
 
-  it('translates a signer authority outage into the generic queue retry contract', async () => {
-    const authorityFailure = new ContextGraphAuthorityUnavailableError(
-      'chain roster read failed with domain detail',
-      { reason: 'chain-participant-authority-unavailable' },
-    );
-    const agent = promoteBoundaryAgent();
-    agent.resolveWorkspaceGossipSigningAgent = async () => { throw authorityFailure; };
+  it.each([
+    ['chain-name-binding-unavailable', true],
+    ['local-chain-binding-unavailable', true],
+    ['local-existence-unavailable', true],
+    ['chain-access-policy-unavailable', true],
+    ['chain-access-policy-timeout', true],
+    ['chain-access-policy-unknown', false],
+    ['chain-participant-authority-unsupported', false],
+    ['chain-participant-authority-unavailable', true],
+    ['chain-participant-authority-invalid', false],
+    ['rfc64-private-read-roster-unavailable', true],
+  ] as const)(
+    'applies promotion retry policy for %s at the promotion boundary',
+    async (reason, retryable) => {
+      const authorityFailure = new ContextGraphAuthorityUnavailableError(
+        `authority failure: ${reason}`,
+        { reason },
+      );
+      const agent = promoteBoundaryAgent();
+      agent.resolveWorkspaceGossipSigningAgent = async () => { throw authorityFailure; };
 
-    const failure = await agent.assertion.promote('cg-1', 'asset-1')
-      .catch((error: unknown) => error);
+      const failure = await agent.assertion.promote('cg-1', 'asset-1')
+        .catch((error: unknown) => error);
 
-    expect(failure).toMatchObject({ cause: authorityFailure });
-    expect(getPromoteFailureDisposition(failure)).toEqual({
-      classification: 'transient',
-      retryable: true,
-      diagnostic: {
-        name: 'PromoteRetryableFailureError',
-        code: 'PROMOTE_RETRYABLE_FAILURE',
-      },
-    });
-  });
+      if (retryable) {
+        expect(failure).toMatchObject({ cause: authorityFailure });
+        expect(getPromoteFailureDisposition(failure)).toEqual({
+          classification: 'transient',
+          retryable: true,
+          diagnostic: {
+            name: 'PromoteRetryableFailureError',
+            code: 'PROMOTE_RETRYABLE_FAILURE',
+          },
+        });
+      } else {
+        expect(failure).toBe(authorityFailure);
+        expect(getPromoteFailureDisposition(failure)).toBeUndefined();
+      }
+    },
+  );
 
   it('certifies recipient outages in the concrete agent callback', async () => {
     const authorityFailure = new ContextGraphAuthorityUnavailableError(
@@ -261,7 +280,7 @@ describe('DKGAgent assertion promote boundary', () => {
     const failure = await agent.assertion.promote('cg-1', 'asset-1')
       .catch((error: unknown) => error);
 
-    expect(terminalAuthorityFailure.retryable).toBe(false);
+    expect('retryable' in terminalAuthorityFailure).toBe(false);
     expect(failure).toBe(terminalAuthorityFailure);
     expect(getPromoteFailureDisposition(failure)).toBeUndefined();
   });

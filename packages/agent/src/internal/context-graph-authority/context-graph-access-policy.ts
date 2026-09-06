@@ -4,18 +4,9 @@ import { createOperationContext, type OperationContext } from
   '@origintrail-official/dkg-core';
 
 import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../../dkg-agent-constants.js';
+import type { LiveOnChainAccessPolicyUnavailable } from
+  '../../registered-context-graph-authority.js';
 
-/** Canonical policy failure shared with registered authority resolution. */
-export type LiveOnChainAccessPolicyUnavailable = {
-  kind: 'unavailable';
-  reason: 'chain-access-policy-timeout' | 'chain-access-policy-unknown';
-  detail?: string;
-};
-
-/**
- * Preserve the timeout-versus-terminal distinction consumed by authority
- * resolution. Compatibility callers may still project both to `null`.
- */
 export type LiveOnChainAccessPolicyState =
   | { kind: 'available'; accessPolicy: 0 | 1 }
   | LiveOnChainAccessPolicyUnavailable;

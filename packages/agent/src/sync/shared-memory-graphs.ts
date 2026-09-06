@@ -56,3 +56,41 @@ export function isNamedSubgraphSharedMemoryMetaGraph(
   const subGraphName = graph.slice(prefix.length, graph.length - suffix.length);
   return validateSubGraphName(subGraphName).valid;
 }
+
+/** Resolve the in-memory ownership partition for a Shared Memory data graph. */
+export function sharedMemoryOwnershipKeyFromGraph(
+  contextGraphId: string,
+  dataGraph: string,
+): string | undefined {
+  const rootGraph = contextGraphWorkspaceGraphUri(contextGraphId);
+  if (
+    dataGraph === rootGraph
+    || isSharedMemoryBucketDescendantDataGraph(dataGraph, rootGraph)
+  ) {
+    return contextGraphId;
+  }
+
+  const prefix = `did:dkg:context-graph:${contextGraphId}/`;
+  const suffix = '/_shared_memory';
+  if (!dataGraph.startsWith(prefix)) return undefined;
+
+  const remainder = dataGraph.slice(prefix.length);
+  const suffixAt = remainder.indexOf(suffix);
+  if (suffixAt <= 0) return undefined;
+  const bucketGraph = dataGraph.slice(0, prefix.length + suffixAt + suffix.length);
+  const subGraphName = remainder.slice(0, suffixAt);
+  const tail = remainder.slice(suffixAt + suffix.length);
+  if (
+    tail
+    && (
+      !tail.startsWith('/')
+      || !isSharedMemoryBucketDescendantDataGraph(dataGraph, bucketGraph)
+    )
+  ) {
+    return undefined;
+  }
+  if (!subGraphName || subGraphName.includes('/')) return undefined;
+  if (!validateSubGraphName(subGraphName).valid) return undefined;
+
+  return `${contextGraphId}\0${subGraphName}`;
+}

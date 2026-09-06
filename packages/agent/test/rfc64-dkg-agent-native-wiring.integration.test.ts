@@ -24,6 +24,7 @@ import {
   contextGraphAssertionUri,
   contextGraphMetaUri,
   contextGraphLayerUri,
+  contextGraphWorkspaceGraphUri,
   createGraphKnowledgeAssetScope,
   encodeCanonicalCgSharedPublicRootProjectionV1,
   knowledgeAssetLayerGraphUri,
@@ -65,6 +66,8 @@ import {
   DKGAgent,
   Rfc64CatalogReconciliationTerminalErrorV1,
 } from '../src/index.js';
+import { Rfc64SwmRecoveryRuntimeV1 } from
+  '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 import {
   snapshotRfc64CatalogAccessPolicyAuthorityV1,
   snapshotRfc64CatalogDeploymentProfileV1,
@@ -84,6 +87,7 @@ import {
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogActivationConfigV1,
   resolveRfc64PublicCatalogControlsV1,
+  resolveRfc64RuntimeCatalogBootstrapConfigV1,
   snapshotRfc64CatalogAutoPublishConfigV1,
   type Rfc64CatalogActivationInputV1,
   type Rfc64PublicCatalogActivationInputV1,
@@ -713,6 +717,7 @@ function privateCatalogAuthorityFixtureV1(): Readonly<{
 function selectedPrivateCatalogActivationV1(
   providerPeerId: string,
   authority: ReturnType<typeof privateCatalogAuthorityFixtureV1>,
+  retryIntervalMs?: number,
 ): Rfc64CatalogActivationInputV1 {
   return Object.freeze({
     enabled: true,
@@ -725,6 +730,7 @@ function selectedPrivateCatalogActivationV1(
       catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
     },
     bootstrap: {
+      ...(retryIntervalMs === undefined ? {} : { retryIntervalMs }),
       acceptedPolicies: [{
         policyEnvelope: authority.policyEnvelope,
         rosterEnvelope: authority.rosterEnvelope,
@@ -786,6 +792,15 @@ function catalogOperationalTarget(
     catalogHeadObjectDigest: digest(1),
     signatureVariantDigest: digest(2),
   }) as Rfc64PublicCatalogHeadAnnouncementV1;
+}
+
+function hasSafeBootstrapRecoveryOrdering(events: readonly string[]): boolean {
+  const finalCatalogStart = events.lastIndexOf('catalog-start');
+  const finalCatalogComplete = events.lastIndexOf('catalog-complete');
+  return finalCatalogStart > 0
+    && events[finalCatalogStart - 1] === 'connect'
+    && finalCatalogComplete === finalCatalogStart + 1
+    && events.indexOf('swm') === finalCatalogComplete + 1;
 }
 
 ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring', () => {
@@ -2101,6 +2116,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const catalogActivation = selectedPrivateCatalogActivationV1(
       providerPeerId,
       authority,
+      1_000,
     );
     const author = await startNativeAgentWithOptions({
       name: 'selected-private-startup-author',
@@ -2133,8 +2149,14 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
     })).toBeNull();
+    const authorPeerId = author.peerId;
     await author.stop();
     agents.splice(agents.indexOf(author), 1);
+    await vi.waitFor(() => {
+      expect(provider.node.libp2p.getConnections().some(
+        ({ remotePeer }) => remotePeer.toString() === authorPeerId,
+      )).toBe(false);
+    }, { timeout: 10_000, interval: 10 });
 
     let markStartupProjectionEntered!: () => void;
     let releaseStartupProjection!: () => void;
@@ -2190,19 +2212,21 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(announce!).toHaveBeenCalledWith(expect.objectContaining({
       peers: [providerPeerId],
     }));
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
-    expect(provider.readRfc64AppliedCatalogHeadV1({
-      catalogScopeDigest: catalogScopeDigest(),
-      authorAddress: AUTHOR,
-    })).toMatchObject({
-      currentCatalogHeadDigest: restarted.readRfc64AppliedCatalogHeadV1({
+    await vi.waitFor(async () => {
+      await provider.whenRfc64PublicCatalogReceiverIdleV1();
+      expect(provider.readRfc64AppliedCatalogHeadV1({
         catalogScopeDigest: catalogScopeDigest(),
         authorAddress: AUTHOR,
-      })?.currentCatalogHeadDigest,
-      catalogVersion: '1',
-      inventoryRowCount: '1',
-    });
-  }, 60_000);
+      })).toMatchObject({
+        currentCatalogHeadDigest: restarted.readRfc64AppliedCatalogHeadV1({
+          catalogScopeDigest: catalogScopeDigest(),
+          authorAddress: AUTHOR,
+        })?.currentCatalogHeadDigest,
+        catalogVersion: '1',
+        inventoryRowCount: '1',
+      });
+    }, { timeout: 60_000, interval: 50 });
+  }, 120_000);
 
   it('excludes restricted shares, restarts the public SWM-only inventory, then removes VM-confirmed rows', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-swm-shadow-restart-'));
@@ -3256,6 +3280,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       retryIntervalMs: 1_000,
     };
     const snapshot = snapshotRfc64PublicCatalogBootstrapConfigV1(callerOwned)!;
+    const normalizedSnapshot = resolveRfc64RuntimeCatalogBootstrapConfigV1(
+      undefined,
+      snapshot,
+    );
     providers.push('12D3KooLateMutation');
     completeSwmProviders.push('12D3KooLateSwmMutation');
 
@@ -3270,15 +3298,35 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(Object.isFrozen(snapshot.acceptedPublicPolicies[0]?.completeSwmProviders)).toBe(true);
     expect(Object.isFrozen(snapshot.acceptedPublicPolicies[0]?.policyEnvelope.payload.source))
       .toBe(true);
-    const providerResolver = DKGAgent.prototype.resolveRfc64CompleteSwmProviderPeerIdsV1;
-    const resolverAgent = {
-      config: { rfc64PublicCatalogBootstrap: snapshot },
-      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
-    } as unknown as DKGAgent;
-    expect(providerResolver.call(resolverAgent, CONTEXT_GRAPH_ID))
+    const providerResolver = new Rfc64SwmRecoveryRuntimeV1({
+      authority: {
+        resolveRuntimeSelection: () => ({
+          selectedContextGraphs: [],
+          eligibleContextGraphs: [],
+          subscriptionDriven: false,
+        }),
+        resolveConfigured: (contextGraphId) => ({
+          contextGraphId,
+          selected: false,
+          eligible: false,
+          active: true,
+          mode: 'catalog',
+          killSwitchActive: false,
+          legacySyncAllowed: true,
+          track2Enabled: true,
+          authoringAllowed: true,
+          reconciliationLane: 'catalog-apply',
+        }),
+        resolveRecoveryConfig: () => normalizedSnapshot,
+      },
+      admission: { invalidateContextGraph: () => [] },
+      cooldown: { deleteProvider: () => undefined },
+    });
+    expect(providerResolver.resolveConfiguredCompleteProviderPeerIds(CONTEXT_GRAPH_ID))
       .toEqual(['12D3KooCompleteSwm']);
-    expect(providerResolver.call(
-      resolverAgent,
+    expect(providerResolver.resolveActiveCompleteProviderPeerIds(CONTEXT_GRAPH_ID))
+      .toEqual([]);
+    expect(providerResolver.resolveConfiguredCompleteProviderPeerIds(
       '0x2222222222222222222222222222222222222222/other' as ContextGraphIdV1,
     )).toEqual([]);
     expect(() => snapshotRfc64PublicCatalogBootstrapConfigV1({
@@ -3287,6 +3335,19 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         policyDigest: `0x${'11'.repeat(32)}`,
       }],
     } as unknown as Rfc64PublicCatalogBootstrapConfigV1)).toThrow(/unknown or missing fields/u);
+  });
+
+  it('rejects SWM recovery escaping from a stale bootstrap pass', () => {
+    expect(hasSafeBootstrapRecoveryOrdering([
+      'connect',
+      'catalog-start',
+      'catalog-complete',
+      'swm',
+      'connect',
+      'catalog-start',
+      'catalog-complete',
+      'swm',
+    ])).toBe(false);
   });
 
   it('dials and schedules every graph-complete SWM provider during bootstrap', async () => {
@@ -3370,20 +3431,11 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       0,
     );
     expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(true);
-    // The live subscription transition invalidates a pass that may already
-    // have dialed. Its coalesced replacement is allowed to redial, but no
-    // recovery work may escape before that replacement's catalog phase has
-    // completed.
-    const catalogStartIndex = ordering.indexOf('catalog-start');
-    expect(catalogStartIndex).toBeGreaterThan(0);
-    expect(ordering.slice(0, catalogStartIndex)).toEqual(
-      Array.from({ length: catalogStartIndex }, () => 'connect'),
-    );
-    expect(ordering.slice(catalogStartIndex)).toEqual([
-      'catalog-start',
-      'catalog-complete',
-      'swm',
-    ]);
+    // The live subscription transition may fence a catalog-only pass that
+    // started before selection. Regardless of that race, the replacement
+    // must dial first and no recovery work may escape before its catalog
+    // phase has completed.
+    expect(hasSafeBootstrapRecoveryOrdering(ordering)).toBe(true);
     await receiver.stop();
     expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(false);
   });
@@ -3404,6 +3456,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       listenPort: 0,
       bootstrapPeers: [],
       store: new OxigraphStore(),
+      contextGraphSubscriptionStore: seededSubscriptionStore(CONTEXT_GRAPH_ID),
       syncOnConnectEnabled: true,
       syncReconcilerEnabled: false,
       syncContextGraphs: [CONTEXT_GRAPH_ID],
@@ -3609,6 +3662,129 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
   });
 
+  it('leases ordinary on-connect private recovery and aborts it on unsubscribe', async () => {
+    const authority = privateCatalogAuthorityFixtureV1();
+    const providerPeerId = '12D3KooWPrivateRecoveryRevocationProvider';
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-private-recovery-revocation-'));
+    tempDirs.push(dataDir);
+    const store = new OxigraphStore();
+    const receiver = await DKGAgent.create({
+      name: 'private-recovery-revocation-receiver',
+      dataDir,
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      bootstrapPeers: [],
+      store,
+      durableSyncEnabled: true,
+      syncOnConnectEnabled: false,
+      syncReconcilerEnabled: false,
+      syncContextGraphs: [authority.policy.contextGraphId],
+      agentProfileHeartbeatMs: 0,
+      networkIdentity: {
+        networkId: await computeNetworkId(),
+        chainId: NATIVE_DEPLOYMENT.networkId,
+      },
+      rfc64CatalogActivation: selectedPrivateCatalogActivationV1(
+        providerPeerId,
+        authority,
+      ),
+    });
+    agents.push(receiver);
+    vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
+    vi.spyOn(receiver, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
+      .mockReturnValue(true);
+    await receiver.start();
+    receiver.subscribeToContextGraph(authority.policy.contextGraphId);
+    await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
+
+    expect(receiver.resolveRfc64SwmRecoveryRuntimeAuthorityV1(
+      authority.policy.contextGraphId,
+    )).toMatchObject({ active: true, lane: 'ordinary-private' });
+
+    const workspaceGraph = contextGraphWorkspaceGraphUri(authority.policy.contextGraphId);
+    const entity = 'https://example.org/private-recovery-revocation';
+    const predicate = 'https://schema.org/status';
+    await store.insert([{
+      subject: entity,
+      predicate,
+      object: '"v1"',
+      graph: workspaceGraph,
+    }]);
+    const dataFetch = vi.fn();
+    let capturedFetchSignal: AbortSignal | undefined;
+    let markFetchEntered!: () => void;
+    const fetchEntered = new Promise<void>((resolve) => {
+      markFetchEntered = resolve;
+    });
+    vi.spyOn(receiver, 'fetchSyncPages').mockImplementation(async (
+      _ctx,
+      _peerId,
+      _contextGraphId,
+      _includeSharedMemory,
+      phase,
+      _graphUri,
+      _deadline,
+      fetchOptions,
+    ) => {
+      if (phase === 'meta') {
+        capturedFetchSignal = fetchOptions?.signal;
+        markFetchEntered();
+        await new Promise<void>((_resolve, reject) => {
+          const signal = fetchOptions?.signal;
+          if (signal?.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      }
+      if (phase === 'data') dataFetch();
+      return {
+        quads: [],
+        bytesReceived: 0,
+        resumedFromOffset: 0,
+        nextOffset: 0,
+        checkpointKey: `private-revocation:${phase}`,
+        completed: true,
+        timedOut: false,
+      };
+    });
+
+    const recovery = receiver.syncSharedMemoryFromPeerDetailed(
+      providerPeerId,
+      [authority.policy.contextGraphId],
+      {
+        sharedMemorySyncPlan: {
+          targets: [{
+            contextGraphId: authority.policy.contextGraphId,
+            lane: 'ordinary-private',
+          }],
+        },
+        stopOnBackoffWorthyFailure: true,
+        source: 'on-connect',
+      },
+    );
+    await fetchEntered;
+    expect(capturedFetchSignal).toBeDefined();
+    expect(capturedFetchSignal?.aborted).toBe(false);
+
+    receiver.unsubscribeFromContextGraph(authority.policy.contextGraphId);
+    expect(capturedFetchSignal?.aborted).toBe(true);
+
+    await expect(recovery).resolves.toMatchObject({
+      insertedDataTriples: 0,
+      failedPeers: 1,
+      backoffWorthyFailures: 1,
+    });
+    expect(dataFetch).not.toHaveBeenCalled();
+    const stored = await store.query(
+      `SELECT ?value WHERE { GRAPH <${workspaceGraph}> { <${entity}> <${predicate}> ?value } }`,
+    );
+    expect(stored.type).toBe('bindings');
+    expect(stored.type === 'bindings' ? stored.bindings.map((row) => row['value']) : [])
+      .toEqual(['"v1"']);
+  });
+
   it('does not reseed a plane-proven SWM provider before anti-entropy staleness', async () => {
     const policy = buildOpenOwnerContextGraphPolicyV1({
       networkId: NETWORK_ID,
@@ -3727,6 +3903,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       });
 
     await receiver.start();
+    receiver.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
     expect(authorizedPlans).toHaveLength(1);
     expect(authorizeForCatalogPass).toHaveBeenCalledWith(
@@ -3799,12 +3976,15 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect((receiver as any).selectedSwmBootstrapAdmission.isRetryRequired(providerPeerId))
       .toBe(true);
 
+    const admittedPass = receiver.readRfc64PublicCatalogBootstrapStatusV1()?.pass ?? 0;
     await vi.waitFor(() => {
       expect(authorizedPlans).toHaveLength(2);
     }, { timeout: 2_500, interval: 25 });
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
 
     expect(authorizedPlans).toHaveLength(2);
+    expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()?.pass)
+      .toBeGreaterThan(admittedPass);
     expect((receiver as any).selectedSwmBootstrapAdmission.isRetryRequired(providerPeerId))
       .toBe(true);
   });

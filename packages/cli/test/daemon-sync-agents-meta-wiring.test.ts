@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 
 // Wiring guard for the CLI DAEMON call site in
 // `packages/cli/src/daemon/lifecycle.ts` — inside `runDaemonInner`'s
@@ -121,7 +122,7 @@ describe('runDaemonInner wires sync options into DKGAgent.create', () => {
         chainId: 'evm:100',
       },
       ...configOverrides,
-    } as any, Date.now())).rejects.toThrow('after-agent-create');
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('after-agent-create');
 
     expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
     const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;

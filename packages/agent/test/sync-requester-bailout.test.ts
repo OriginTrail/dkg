@@ -16,6 +16,8 @@ import { SyncBackpressureBusyError } from '../src/sync/backpressure.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import { createSwmTargetExecutorSessionFactoryForTest } from
+  './_helpers/swm-target-executor-session-fixture.js';
 
 const ctx = { kind: 'system', id: 'test', startedAt: 0 } as OperationContext;
 const noop = () => {};
@@ -255,6 +257,7 @@ describe('sync requester bailout', () => {
     });
 
     const summary = await runSharedMemorySync({
+      mode: { kind: 'ordinary' },
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['pressured-swm', 'next-swm'],
@@ -497,7 +500,10 @@ describe('lifecycle shared-memory fanout isolation', () => {
     admissions: string[],
     failFor: (contextGraphId: string) => Error | undefined,
   ) {
-    return {
+    let createTargetExecutorSession:
+      | ReturnType<typeof createSwmTargetExecutorSessionFactoryForTest>
+      | undefined;
+    const agent = {
       config: { syncContextGraphPriorities: {} },
       store: {},
       listSubGraphs: async () => [],
@@ -544,9 +550,15 @@ describe('lifecycle shared-memory fanout isolation', () => {
       // selected scope.
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
       resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+      createSwmTargetExecutorSessionV1: () => {
+        createTargetExecutorSession ??=
+          createSwmTargetExecutorSessionFactoryForTest(agent as never);
+        return createTargetExecutorSession();
+      },
       syncSharedMemoryFromPeerDetailedExecution:
         LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     };
+    return agent;
   }
 
   function swmPlan(contextGraphIds: string[]) {

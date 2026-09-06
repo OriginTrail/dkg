@@ -1779,8 +1779,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       if (transition.changed) {
         this.handleRfc64CatalogReceiverSelectionTransitionV1(
           contextGraphId,
-          transition.previous.active && transition.previous.mode !== 'legacy',
-          transition.next.active && transition.next.mode !== 'legacy',
+          {
+            kind: 'responsibility',
+            previousReceiverActive:
+              transition.previous.active && transition.previous.mode !== 'legacy',
+            nextReceiverActive:
+              transition.next.active && transition.next.mode !== 'legacy',
+          },
         );
       }
       return transition.next;

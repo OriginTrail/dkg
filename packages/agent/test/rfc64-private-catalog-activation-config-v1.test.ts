@@ -25,7 +25,6 @@ import {
   resolveRfc64CatalogActivationConfigV1,
   resolveRfc64CatalogActivationInputV1,
   resolveRfc64CatalogActivationsV1,
-  resolveRfc64CatalogExecutionPlanV1,
   resolveRfc64LegacySyncContextGraphsV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogActivationInputV1,
@@ -35,11 +34,15 @@ import {
   snapshotRfc64PublicCatalogBootstrapConfigV1,
 } from '../src/rfc64/catalog-authority-config-v1.js';
 import {
+  resolveRfc64ActivePeerSwmRecoveryPlanV1,
   resolveRfc64PeerSwmRecoveryPlanV1,
   resolveRfc64PrivateRecoveryContextGraphIdsV1,
   resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
+  resolveRfc64SwmRecoveryRuntimeAuthorityV1,
 } from '../src/rfc64/swm-recovery-plan-v1.js';
-import { DKGAgent, mergeRfc64CatalogBootstrapsV1 } from '../src/dkg-agent.js';
+import { mergeRfc64CatalogBootstrapsV1 } from '../src/dkg-agent.js';
+import { Rfc64SwmRecoveryRuntimeV1 } from
+  '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 
 const NETWORK = 'otp:20430' as NetworkIdV1;
 const PRIVATE_CG = (
@@ -177,6 +180,34 @@ function publicBootstrapPolicy(index: number, targetCount = 0) {
 const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1(NETWORK);
 
 describe('RFC-64 private catalog activation', () => {
+  it.each([
+    ['compatibility legacy selected', 'selected-public', true, false, false, true, true],
+    ['compatibility legacy unselected', 'selected-public', true, false, false, false, false],
+    ['shadow selected', 'selected-public', true, true, false, true, true],
+    ['catalog selected', 'selected-public', false, true, false, true, true],
+    ['kill switch selected', 'selected-public', true, true, true, true, false],
+    ['legacy private', 'ordinary-private', true, false, false, false, true],
+    ['catalog private', 'ordinary-private', false, true, false, false, true],
+    ['kill switch private', 'ordinary-private', true, true, true, false, false],
+  ] as const)(
+    'projects canonical %s recovery authority',
+    (_name, lane, legacySyncAllowed, track2Enabled, killSwitchActive, runtimeSelected, active) => {
+      const authority = { legacySyncAllowed, track2Enabled, killSwitchActive };
+      expect(resolveRfc64SwmRecoveryRuntimeAuthorityV1({
+        contextGraphId: PRIVATE_CG,
+        lane,
+        configuredAuthority: authority,
+        receiverAuthority: authority,
+        runtimeSelected,
+      })).toEqual({
+        kind: 'rfc64-swm-recovery-runtime-authority-v1',
+        contextGraphId: PRIVATE_CG,
+        lane,
+        active,
+      });
+    },
+  );
+
   it('reserves the exact graph-complete provider for selected private SWM recovery', () => {
     const bootstrap = snapshotRfc64CatalogBootstrapConfigV1(
       privateActivation().bootstrap,
@@ -188,20 +219,30 @@ describe('RFC-64 private catalog activation', () => {
         contextGraphModes: { [PRIVATE_CG]: 'shadow' },
       },
     }, chainIdentity);
-    const resolverAgent = {
-      config: {
-        rfc64CatalogBootstrap: bootstrap,
-        rfc64CatalogRollout: {
+    const resolver = new Rfc64SwmRecoveryRuntimeV1({
+      authority: {
+        resolveRuntimeSelection: () => ({
           selectedContextGraphs: activation.selectedContextGraphs,
-          rollout: activation.rollout,
-        },
-        rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
-          configuredContextGraphs: [PRIVATE_CG],
-          activation,
+          eligibleContextGraphs: activation.selectedContextGraphs,
+          subscriptionDriven: false,
         }),
+        resolveConfigured: (contextGraphId) => ({
+          contextGraphId,
+          selected: true,
+          eligible: true,
+          active: true,
+          mode: 'catalog',
+          killSwitchActive: false,
+          legacySyncAllowed: false,
+          track2Enabled: true,
+          authoringAllowed: true,
+          reconciliationLane: 'catalog-apply',
+        }),
+        resolveRecoveryConfig: () => bootstrap,
       },
-      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
-    } as unknown as DKGAgent;
+      admission: { invalidateContextGraph: () => [] },
+      cooldown: { deleteProvider: () => undefined },
+    });
 
     expect(resolveRfc64PrivateRecoveryContextGraphIdsV1(bootstrap))
       .toEqual([PRIVATE_CG]);
@@ -213,10 +254,10 @@ describe('RFC-64 private catalog activation', () => {
       bootstrap,
       '12D3KooUnconfiguredPrivateProvider',
     )).toEqual([]);
-    expect(DKGAgent.prototype.resolveRfc64CompleteSwmProviderPeerIdsV1.call(
-      resolverAgent,
-      PRIVATE_CG,
-    )).toEqual([PROVIDER_PEER]);
+    expect(resolver.resolveConfiguredCompleteProviderPeerIds(PRIVATE_CG))
+      .toEqual([PROVIDER_PEER]);
+    expect(resolver.resolveActiveCompleteProviderPeerIds(PRIVATE_CG))
+      .toEqual([PROVIDER_PEER]);
   });
 
   it('derives one mixed private/public recovery plan from snapshotted catalog config', () => {
@@ -239,6 +280,63 @@ describe('RFC-64 private catalog activation', () => {
         { contextGraphId: PRIVATE_CG, lane: 'ordinary-private' },
         { contextGraphId: PUBLIC_CG, lane: 'selected-public' },
       ],
+    });
+    expect(resolveRfc64ActivePeerSwmRecoveryPlanV1(
+      bootstrap,
+      PROVIDER_PEER,
+      (contextGraphId) => ({
+        kind: 'rfc64-swm-recovery-runtime-authority-v1',
+        contextGraphId,
+        lane: contextGraphId === PRIVATE_CG ? 'ordinary-private' : 'selected-public',
+        active: contextGraphId === PUBLIC_CG,
+      }),
+    )).toEqual({
+      kind: 'rfc64-active-swm-recovery-plan-v1',
+      providerPeerId: PROVIDER_PEER,
+      targets: [{ contextGraphId: PUBLIC_CG, lane: 'selected-public' }],
+    });
+    expect(resolveRfc64ActivePeerSwmRecoveryPlanV1(
+      bootstrap,
+      PROVIDER_PEER,
+      (contextGraphId) => ({
+        kind: 'rfc64-swm-recovery-runtime-authority-v1',
+        contextGraphId,
+        lane: contextGraphId === PRIVATE_CG ? 'ordinary-private' : 'selected-public',
+        active: true,
+      }),
+    )).toEqual({
+      kind: 'rfc64-active-swm-recovery-plan-v1',
+      providerPeerId: PROVIDER_PEER,
+      targets: [
+        { contextGraphId: PRIVATE_CG, lane: 'ordinary-private' },
+        { contextGraphId: PUBLIC_CG, lane: 'selected-public' },
+      ],
+    });
+  });
+
+  it('keeps unselected standalone public policies out of active recovery', () => {
+    const otherPublic = `${PUBLIC_CG}-other` as ContextGraphIdV1;
+    const bootstrap = snapshotRfc64CatalogBootstrapConfigV1({
+      acceptedPolicies: [PUBLIC_CG, otherPublic].map((contextGraphId) => ({
+        policyEnvelope: policyEnvelope(policy(contextGraphId, 0)),
+        targets: [],
+        completeSwmProviders: [PROVIDER_PEER],
+      })),
+    })!;
+
+    expect(resolveRfc64ActivePeerSwmRecoveryPlanV1(
+      bootstrap,
+      PROVIDER_PEER,
+      (contextGraphId) => ({
+        kind: 'rfc64-swm-recovery-runtime-authority-v1',
+        contextGraphId,
+        lane: 'selected-public',
+        active: contextGraphId === PUBLIC_CG,
+      }),
+    )).toEqual({
+      kind: 'rfc64-active-swm-recovery-plan-v1',
+      providerPeerId: PROVIDER_PEER,
+      targets: [{ contextGraphId: PUBLIC_CG, lane: 'selected-public' }],
     });
   });
 

@@ -22,10 +22,9 @@ import { Rfc64CatalogSynchronizationErrorV1 } from
   './rfc64/catalog-synchronization-error-v1.js';
 import { Rfc64CoalescingSupervisorV1 } from
   './rfc64/coalescing-supervisor-v1.js';
-import { resolveRfc64PeerSwmRecoveryPlanV1 } from
+import type { Rfc64ActivePeerSwmRecoveryPlanV1 } from
   './rfc64/swm-recovery-plan-v1.js';
 import {
-  resolveRfc64RuntimeCatalogBootstrapConfigV1,
   resolveRfc64CatalogExecutionPlanAuthorityV1,
   type Rfc64CatalogExecutionPlanV1,
   type Rfc64CatalogRolloutModeV1,
@@ -49,6 +48,12 @@ export type Rfc64PublicCatalogBootstrapOutcomeV1 =
 
 export type Rfc64CatalogBootstrapCompletionReasonV1 =
   | 'no-authorized-provider';
+
+export type Rfc64CatalogRecoveryQueueOutcomeV1 = Readonly<
+  | { kind: 'not-authorized' }
+  | { kind: 'queued' }
+  | { kind: 'rejected' }
+>;
 
 export interface Rfc64PublicCatalogBootstrapTargetStatusV1 {
   readonly scope: Readonly<Rfc64PublicCatalogBootstrapScopeV1>;
@@ -145,15 +150,12 @@ export interface Rfc64CatalogBootstrapPartitionV1 {
   readonly retryIntervalMs?: number;
   readonly track2Policies: readonly Rfc64CatalogBootstrapPolicyV1[];
   readonly track2Targets: readonly Rfc64CatalogBootstrapTargetPlanV1[];
-  readonly legacyRecoveryConfig: Readonly<{
-    readonly acceptedPolicies: readonly Rfc64CatalogBootstrapPolicyV1[];
-    readonly retryIntervalMs?: number;
-  }>;
+  readonly recoveryProviderPeerIds: readonly string[];
 }
 
 interface BootstrapStateV1 {
   readonly retryIntervalMs?: number;
-  readonly legacyRecoveryConfig: Rfc64CatalogBootstrapPartitionV1['legacyRecoveryConfig'];
+  readonly recoveryProviderPeerIds: readonly string[];
   readonly targets: MutableTargetStatusV1[];
   readonly runner: Rfc64CoalescingSupervisorV1;
   pass: number;
@@ -171,6 +173,10 @@ interface BootstrapOwnerDependenciesV1 {
     readonly legacySyncAllowed: boolean;
     readonly track2Enabled: boolean;
   }>;
+  readonly resolveRecoveryPlan: (
+    providerPeerId: string,
+  ) => Readonly<Rfc64ActivePeerSwmRecoveryPlanV1>;
+  readonly invalidateRecoveryAdmission: (contextGraphId: string) => void;
   readonly acceptTrack2Policies: (
     policies: readonly Rfc64CatalogBootstrapPolicyV1[],
   ) => void;
@@ -178,10 +184,10 @@ interface BootstrapOwnerDependenciesV1 {
     readonly timeoutMs: number;
   }>) => Promise<unknown>;
   readonly queueRecoveryPlan: (
-    plan: ReturnType<typeof resolveRfc64PeerSwmRecoveryPlanV1>,
+    plan: Readonly<Rfc64ActivePeerSwmRecoveryPlanV1>,
     onError: (peerId: string, error: unknown) => void,
     delayMs: number,
-  ) => void;
+  ) => Rfc64CatalogRecoveryQueueOutcomeV1;
   readonly synchronizeTarget: (params: Readonly<{
     readonly remotePeerIds: readonly string[];
     readonly scope: Readonly<Rfc64PublicCatalogBootstrapScopeV1>;
@@ -206,16 +212,10 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
     const partition = this.#dependencies.resolvePartition();
     if (partition === undefined) return;
     this.#dependencies.acceptTrack2Policies(partition.track2Policies);
-    const hasLegacyRecoveryProviders = partition.legacyRecoveryConfig.acceptedPolicies.some(
-      ({ completeSwmProviders = [] }) => completeSwmProviders.length > 0,
-    );
-    if (partition.track2Policies.length === 0 && !hasLegacyRecoveryProviders) return;
+    const hasRecoveryProviders = partition.recoveryProviderPeerIds.length > 0;
+    if (partition.track2Policies.length === 0 && !hasRecoveryProviders) return;
     this.#catalogPhaseReady = false;
-    this.#configuredRecoveryProviders = new Set(
-      partition.legacyRecoveryConfig.acceptedPolicies.flatMap(
-        ({ completeSwmProviders = [] }) => completeSwmProviders,
-      ),
-    );
+    this.#configuredRecoveryProviders = new Set(partition.recoveryProviderPeerIds);
     let state!: BootstrapStateV1;
     const runner = new Rfc64CoalescingSupervisorV1({
       retryIntervalMs: partition.retryIntervalMs,
@@ -230,7 +230,7 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
     });
     state = {
       retryIntervalMs: partition.retryIntervalMs,
-      legacyRecoveryConfig: partition.legacyRecoveryConfig,
+      recoveryProviderPeerIds: partition.recoveryProviderPeerIds,
       targets: partition.track2Targets.map(newPendingTargetV1),
       runner,
       pass: 0,
@@ -263,6 +263,11 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
   }
 
   invalidate(contextGraphId: string): void {
+    // A completed inactive/older pass cannot authorize the newly selected
+    // scope. Close readiness synchronously before aborting/coalescing work so
+    // peer-connect scheduling cannot slip through ahead of the fresh catalog.
+    this.#catalogPhaseReady = false;
+    this.#dependencies.invalidateRecoveryAdmission(contextGraphId);
     this.#state?.runner.invalidateAndRequest(
       `RFC-64 receiver selection changed for ${contextGraphId}`,
     );
@@ -290,21 +295,14 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
     state.pass += 1;
     state.lastPassStartedAtMs = Date.now();
     try {
-      const activeLegacyPolicies = state.legacyRecoveryConfig.acceptedPolicies.filter(
-        ({ policyEnvelope }) => this.#dependencies.resolveReceiverAuthority(
-          policyEnvelope.payload.contextGraphId,
-        ).legacySyncAllowed,
-      );
-      const activeLegacyRecoveryConfig = Object.freeze({
-        ...state.legacyRecoveryConfig,
-        acceptedPolicies: Object.freeze(activeLegacyPolicies),
-      });
-      const completeSwmProviders = [...new Set(activeLegacyPolicies.flatMap(
-        ({ completeSwmProviders: providers = [] }) => providers,
-      ))];
+      const recoveryPlans = new Map(state.recoveryProviderPeerIds
+        .map((providerPeerId) => (
+          [providerPeerId, this.#dependencies.resolveRecoveryPlan(providerPeerId)] as const
+        ))
+        .filter(([, plan]) => plan.targets.length > 0));
       const connectedCompleteSwmProviders = new Set<string>();
       await mapWithConcurrency(
-        completeSwmProviders,
+        [...recoveryPlans.keys()],
         MAX_CONCURRENT_TARGETS_V1,
         async (providerPeerId) => {
           if (signal.aborted) return;
@@ -328,11 +326,10 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
       if (signal.aborted) return;
       this.#catalogPhaseReady = true;
       for (const providerPeerId of connectedCompleteSwmProviders) {
-        this.#dependencies.queueRecoveryPlan(
-          resolveRfc64PeerSwmRecoveryPlanV1(
-            activeLegacyRecoveryConfig,
-            providerPeerId,
-          ),
+        const recoveryPlan = recoveryPlans.get(providerPeerId);
+        if (recoveryPlan === undefined) continue;
+        const queueOutcome = this.#dependencies.queueRecoveryPlan(
+          recoveryPlan,
           (_peerId, error) => {
             this.#dependencies.warn(
               ctx,
@@ -341,6 +338,12 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
           },
           0,
         );
+        if (queueOutcome.kind === 'rejected') {
+          this.#dependencies.warn(
+            ctx,
+            `RFC-64 complete SWM provider ${providerPeerId.slice(-8)} was not queued after catalog recovery`,
+          );
+        }
       }
     } finally {
       state.lastPassCompletedAtMs = Date.now();
@@ -476,29 +479,6 @@ function newPendingTargetV1(
 }
 
 export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
-  /**
-   * Exact operator-pinned graph-complete SWM providers for one accepted policy.
-   * These are deliberately separate from per-author catalog providers: only
-   * this explicit graph-wide assertion may let one peer end the SWM walk.
-   */
-  resolveRfc64CompleteSwmProviderPeerIdsV1(
-    this: DKGAgent,
-    contextGraphId: string,
-  ): readonly string[] {
-    if (!this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed) {
-      return Object.freeze([]);
-    }
-    const config = resolveRfc64RuntimeCatalogBootstrapConfigV1(
-      this.config.rfc64CatalogBootstrap,
-      this.config.rfc64PublicCatalogBootstrap,
-    );
-    if (config === undefined) return Object.freeze([]);
-    const policy = config.acceptedPolicies.find(
-      ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
-    );
-    return policy?.completeSwmProviders ?? Object.freeze([]);
-  }
-
   /** Accept pinned policies and start the first bounded provider pass. */
   startRfc64PublicCatalogBootstrapV1(this: DKGAgent, ctx: OperationContext): void {
     bootstrapOwnerV1(this).start(ctx);
@@ -542,6 +522,27 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     return bootstrapOwnerV1(this).isRecoveryReady(providerPeerId);
   }
 
+  /** Bootstrap-local composition of current-plan admission and queueing. */
+  queueRfc64CatalogRecoveryPlanV1(
+    this: DKGAgent,
+    plan: Readonly<Rfc64ActivePeerSwmRecoveryPlanV1>,
+    onError: (peerId: string, error: unknown) => void,
+    delayMs: number,
+  ): Rfc64CatalogRecoveryQueueOutcomeV1 {
+    const authorizedPlan = this.rfc64SwmRecoveryCoordinatorV1.authorizeForCatalogPass(
+      plan,
+      this.config.syncReconcilerTiming.stalenessThresholdMs,
+    );
+    if (authorizedPlan === null) return Object.freeze({ kind: 'not-authorized' });
+    return Object.freeze({
+      kind: this.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
+        authorizedPlan,
+        onError,
+        delayMs,
+      ) ? 'queued' : 'rejected',
+    });
+  }
+
 }
 
 /** Resolve each accepted policy exactly once into immutable lifecycle lanes. */
@@ -554,7 +555,7 @@ export function partitionRfc64CatalogBootstrapV1(
 ): Rfc64CatalogBootstrapPartitionV1 {
   const track2Policies: Rfc64CatalogBootstrapPolicyV1[] = [];
   const track2Targets: Rfc64CatalogBootstrapTargetPlanV1[] = [];
-  const legacyPolicies: Rfc64CatalogBootstrapPolicyV1[] = [];
+  const recoveryProviderPeerIds = new Set<string>();
   for (const accepted of config.acceptedPolicies) {
     const { policyEnvelope, targets, completeSwmProviders = [] } = accepted;
     const authority = resolveRfc64CatalogExecutionPlanAuthorityV1(
@@ -562,7 +563,17 @@ export function partitionRfc64CatalogBootstrapV1(
       policyEnvelope.payload.contextGraphId,
     );
     const mode = authority.mode;
-    if (authority.legacySyncAllowed) legacyPolicies.push(accepted);
+    // Complete-provider recovery is active only when the configured rollout
+    // retains a legacy or Track-2 lane. The kill switch therefore leaves no
+    // bootstrap workload while preserving the immutable manifest.
+    if (
+      !authority.killSwitchActive
+      && (authority.legacySyncAllowed || authority.track2Enabled)
+    ) {
+      for (const providerPeerId of completeSwmProviders) {
+        recoveryProviderPeerIds.add(providerPeerId);
+      }
+    }
     if (!authority.track2Enabled) continue;
     track2Policies.push(accepted);
     for (const target of targets) {
@@ -593,10 +604,7 @@ export function partitionRfc64CatalogBootstrapV1(
     ...retry,
     track2Policies: Object.freeze(track2Policies),
     track2Targets: Object.freeze(track2Targets),
-    legacyRecoveryConfig: Object.freeze({
-      acceptedPolicies: Object.freeze(legacyPolicies),
-      ...retry,
-    }),
+    recoveryProviderPeerIds: Object.freeze([...recoveryProviderPeerIds]),
   });
 }
 
