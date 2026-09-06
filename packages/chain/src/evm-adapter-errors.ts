@@ -13,7 +13,10 @@ import { ethers, Interface } from 'ethers';
 import {
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   NO_FUNDED_PUBLISHER_WALLET_MESSAGE_PREFIX,
+  PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE,
+  PUBLISHER_NOT_AUTHORIZED_FOR_CG_MESSAGE_PREFIX,
   messageIndicatesNoFundedPublisherWallet,
+  messageIndicatesPublisherNotAuthorizedForCg,
 } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 
@@ -376,4 +379,198 @@ export function formatNoFundedPublisherWalletMessage(balances: PublisherWalletBa
     'Operational wallet balances:\n' + lines + '\n' +
     'Fund one of these wallets (run `dkg wallets` to list addresses) and retry the publish.'
   );
+}
+
+/** Machine-readable code carried by {@link PublisherNotAuthorizedForContextGraphError}.
+ *  Defined in dkg-core (UI-safe shared package) so the adapter that throws and the
+ *  publisher's async-job classifier reference one contract, and re-exported here so
+ *  chain consumers can keep importing it from dkg-chain — the same convention as
+ *  {@link NO_FUNDED_PUBLISHER_WALLET_CODE}. */
+export { PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE };
+
+/**
+ * The principals a publish carries, as the context-graph publish gate ACTUALLY
+ * weighed them.
+ *
+ * Every field must be sourced from the single gate evaluation that produced the
+ * rejection — never re-derived afterwards. Re-deriving `attestedAuthorConsidered`
+ * with a second `version()` read can disagree with the first (read failures are
+ * deliberately not memoized), which would make the message assert that the author
+ * was weighed and refused when it was never consulted at all, sending an operator
+ * to rewrite a publish policy over a transient RPC blip.
+ */
+export interface PublisherNotAuthorizedForCgDetails {
+  /** Context graph the publish targeted. */
+  contextGraphId: bigint;
+  /** Wallet that would have paid — `msg.sender` on chain. For a signer-pool
+   *  rejection this is the wallet selection would have used (the cursor head);
+   *  `payerPoolAddresses` then lists every wallet that was weighed. */
+  payerAddress: string;
+  /** Every operational wallet weighed, when the rejection came from the signer-pool
+   *  branch rather than an explicitly pinned wallet. Absent for a pinned rejection. */
+  payerPoolAddresses?: readonly string[];
+  /** EIP-712-attested author, when the caller supplied one. */
+  attestedAuthorAddress?: string;
+  /** True iff the author was actually carried to an on-chain authorization read.
+   *  False when no author was supplied, or when one was but the DEPLOYED lifecycle
+   *  does not consult authors — including the case where its version could not be
+   *  read. The operator needs to tell "the author was refused" apart from "the
+   *  author was never weighed". */
+  attestedAuthorConsidered: boolean;
+  /** Deployed `KnowledgeAssetsLifecycle.version()` as observed WHILE deciding;
+   *  `null` when it could not be read or was never needed. */
+  deployedLifecycleVersion?: string | null;
+  /** Lowest lifecycle version whose publish gate consults the attested author. */
+  minLifecycleVersion: string;
+}
+
+/**
+ * GH#1689 — thrown when NEITHER principal a publish carries is an authorized
+ * publisher for the target context graph: the paying wallet, and (on a lifecycle
+ * that consults it) the EIP-712-attested author.
+ *
+ * Terminal by nature — no retry changes an on-chain publish policy — so it carries
+ * a stable `code` that the publisher's async-job classifier maps to a terminal
+ * `authority_forbidden` instead of falling through to the retryable
+ * `rpc_unavailable` default that made this failure loop to `maxRetries`. Same
+ * shape and convention as {@link InsufficientPublisherFundsError}.
+ *
+ * Carries the FULL {@link PublisherNotAuthorizedForCgDetails} it was built from, not
+ * just the fields the message happens to render. The gate computes those facts
+ * exactly once at throw time; without them on the object, a consumer asking the very
+ * next question — *"is this chain simply not rotated yet, or was the author checked
+ * and refused?"* — would have to parse `message`. This PR exists to remove exactly
+ * that coupling, so re-introducing it one question later would be self-defeating.
+ * The message stays the human surface; `details` is the machine surface.
+ */
+export class PublisherNotAuthorizedForContextGraphError extends Error {
+  readonly code = PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE;
+
+  /**
+   * The exact facts the message was rendered from — frozen, so a consumer cannot
+   * mutate one error's diagnosis and have it disagree with its own text.
+   * `attestedAuthorConsidered` + `deployedLifecycleVersion` are the pair worth
+   * reading: together they separate "author refused" from "author never weighed
+   * because the lifecycle predates the capability (or its version was unreadable)".
+   */
+  readonly details: PublisherNotAuthorizedForCgDetails;
+
+  /**
+   * Constructed from `details` ALONE — the message is DERIVED here, never supplied.
+   *
+   * A `(message, details)` signature let a caller build an error whose text does not
+   * describe its own facts — precisely the invariant this type exists to hold, and
+   * our own test defeated it that way. Deriving internally makes "the message
+   * describes these details" structural rather than a convention every future call
+   * site has to remember. A caller wanting arbitrary text should throw a plain
+   * `Error`; this type is for the one rejection whose text is a function of its facts.
+   */
+  constructor(
+    details: PublisherNotAuthorizedForCgDetails,
+    options?: { cause?: unknown },
+  ) {
+    super(formatPublisherNotAuthorizedForCgMessage(details), options);
+    this.name = 'PublisherNotAuthorizedForContextGraphError';
+    this.details = Object.freeze({
+      ...details,
+      payerPoolAddresses: details.payerPoolAddresses
+        ? Object.freeze([...details.payerPoolAddresses])
+        : undefined,
+    });
+  }
+
+  // Flattened accessors over the SINGLE source of state above. Getters rather than
+  // copied fields so the two representations cannot drift apart — the same failure
+  // the `message === format(details)` assertion forecloses one layer up, closed
+  // here at the field layer, and one less decision ("one place or two?") for every
+  // field added later.
+  //
+  // Safe as getters specifically because nothing spreads or JSON-serializes this
+  // error: the publisher classifier reads `.code`/`.message` by plain property
+  // access (`readPublishErrorFacts`), and `errorMessage()` takes its
+  // `err instanceof Error` branch before any `JSON.stringify` fallback. Were that
+  // to change, these would need to go back to own enumerable properties.
+  get contextGraphId(): bigint { return this.details.contextGraphId; }
+
+  get payerAddress(): string { return this.details.payerAddress; }
+
+  get payerPoolAddresses(): readonly string[] | undefined {
+    return this.details.payerPoolAddresses;
+  }
+
+  get attestedAuthorAddress(): string | undefined {
+    return this.details.attestedAuthorAddress;
+  }
+}
+
+/**
+ * True iff `err` is the context-graph publish-authorization rejection — code-first,
+ * with a message-marker fallback for a wrapper that dropped `.code`. Uses the same
+ * shared dkg-core contract (`messageIndicatesPublisherNotAuthorizedForCg`) as the
+ * publisher-side predicate, so the chain and publisher classifiers agree.
+ *
+ * Property access is throw-SAFE: this is exported API and callers hand it arbitrary
+ * caught values, which may be a Proxy or an object whose `code`/`message` accessor
+ * throws. A classification helper must never become the failure it is classifying.
+ * Mirrors `readPublishErrorFacts` in the publisher's async-lift result mapper.
+ */
+export function isPublisherNotAuthorizedForCgError(err: unknown): boolean {
+  const read = (key: 'code' | 'message'): unknown => {
+    try {
+      return (err as Record<string, unknown> | null | undefined)?.[key];
+    } catch {
+      return undefined;
+    }
+  };
+  return read('code') === PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE
+    || messageIndicatesPublisherNotAuthorizedForCg(read('message'));
+}
+
+/**
+ * Build the operator-facing publish-authorization rejection message.
+ *
+ * Every branch starts with `PUBLISHER_NOT_AUTHORIZED_FOR_CG_MESSAGE_PREFIX` (the
+ * message-marker fallback) and names every principal that was weighed, so an
+ * operator reading a job record can tell "my payer wallet is not the CG authority"
+ * apart from "my chain has not been rotated yet".
+ *
+ * The wording deliberately contains NONE of the substrings the publisher's fallback
+ * classifier greps for — `timeout`, `insufficient funds`, `nonce`, `revert`,
+ * `reorg`, `mismatch` — so a re-wrap that strips `.code` degrades to the default
+ * classification rather than to a wrong, confidently-typed one.
+ */
+export function formatPublisherNotAuthorizedForCgMessage(
+  details: PublisherNotAuthorizedForCgDetails,
+): string {
+  const cg = details.contextGraphId.toString();
+  const author = details.attestedAuthorAddress;
+  const hint = ' Authorize that wallet on the context graph publish policy, '
+    + 'or publish from a wallet that policy already permits.';
+  const pool = details.payerPoolAddresses;
+  // A pool rejection weighed EVERY operational wallet, so naming one of them as
+  // "the paying wallet" would misdirect the operator to fund/authorize that one.
+  const payer = pool && pool.length > 0
+    ? (pool.length === 1
+      ? `the operational wallet ${pool[0]}`
+      : `any of the ${pool.length} operational wallets in the signer pool`)
+    : `the paying wallet ${details.payerAddress}`;
+  // An author identical to the payer names no second principal — the on-chain gate
+  // would evaluate the same address twice — so it reads as the single-principal case.
+  const namesTwoPrincipals = Boolean(author)
+    && (Boolean(pool && pool.length > 0)
+      || author!.toLowerCase() !== details.payerAddress.toLowerCase());
+  if (namesTwoPrincipals && details.attestedAuthorConsidered) {
+    return `${PUBLISHER_NOT_AUTHORIZED_FOR_CG_MESSAGE_PREFIX}: neither ${payer} `
+      + `nor the attested author ${author} is an authorized publisher for context graph ${cg}.${hint}`;
+  }
+  if (namesTwoPrincipals) {
+    const deployed = details.deployedLifecycleVersion
+      ? `deployed version is ${details.deployedLifecycleVersion}`
+      : 'the deployed version could not be read';
+    return `${PUBLISHER_NOT_AUTHORIZED_FOR_CG_MESSAGE_PREFIX}: ${payer} is not an `
+      + `authorized publisher for context graph ${cg} (attested-author authorization requires `
+      + `KnowledgeAssetsLifecycle >= ${details.minLifecycleVersion}; ${deployed}).${hint}`;
+  }
+  return `${PUBLISHER_NOT_AUTHORIZED_FOR_CG_MESSAGE_PREFIX}: ${payer} is not an `
+    + `authorized publisher for context graph ${cg}.${hint}`;
 }

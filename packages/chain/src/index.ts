@@ -150,6 +150,10 @@ export {
   InsufficientPublisherFundsError,
   isNoFundedPublisherWalletError,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
+  PublisherNotAuthorizedForContextGraphError,
+  isPublisherNotAuthorizedForCgError,
+  PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE,
+  type PublisherNotAuthorizedForCgDetails,
   type PublisherWalletBalance,
 } from './evm-adapter.js';
 export { NoChainAdapter } from './no-chain-adapter.js';

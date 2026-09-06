@@ -3,6 +3,7 @@ import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { getPcaLogicInterface } from '../src/evm-adapter-errors.js';
+import { CLEAR_AGENTS_MIN_PCA_VERSION } from '../src/evm-adapter-conviction.js';
 
 const PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const HUB = '0x0000000000000000000000000000000000000001';
@@ -603,6 +604,74 @@ describe('EVMChainAdapter PCA read cache', () => {
       await expect(adapter.getPublishingConvictionAccountInfo(9n))
         .resolves.toMatchObject(scenario.expectedAfter);
       expect(adapter.readContract.calls, `${scenario.name}: refreshed read`).toHaveLength(2);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PCA `clearAgents` capability gate, at its PUBLIC consumer [CH-PCA-GATE]
+//
+// This PR migrated the gate off an inline parse/compare onto the shared strict
+// comparator, which CHANGED its live behaviour on malformed version strings. The
+// comparator itself is pinned in `contract-version.unit.test.ts` — but that proves
+// how versions compare, not how the flag is WIRED. Hardcode `clearAgentsSupported`
+// to `false` and nothing in the suite noticed; that is the same "a test exists
+// nearby but binds nothing" shape closed four times over for author threading,
+// sitting on a gate this PR touched.
+//
+// So: drive `getPcaContractContext` (the public consumer the wallet-connect UI
+// actually calls) and assert the flag across the threshold, rather than asserting
+// the comparator a second time.
+// ---------------------------------------------------------------------------
+describe('getPcaContractContext — clearAgents capability gate [CH-PCA-GATE]', () => {
+  const ADDR = '0x' + '44'.repeat(20);
+
+  /** @param version string ⇒ `version()` resolves it; Error ⇒ it throws. */
+  function gateAdapter(version: string | Error) {
+    const adapter = new EVMChainAdapter(minimalConfig());
+    const a = adapter as any;
+    a.init = async () => undefined;
+    a.requireConvictionNFT = () => ({ getAddress: async () => ADDR });
+    a.contracts.token = { getAddress: async () => ADDR };
+    a.getEvmChainId = async () => 31337n;
+    a.resolveContract = async () => ({
+      getAddress: async () => ADDR,
+      version: async () => {
+        if (version instanceof Error) throw version;
+        return version;
+      },
+    });
+    return adapter;
+  }
+
+  const supported = async (version: string | Error) =>
+    (await gateAdapter(version).getPcaContractContext()).clearAgentsSupported;
+
+  it('is FALSE one patch below the threshold', async () => {
+    expect(await supported('10.0.5')).toBe(false);
+  });
+
+  it('is TRUE exactly at the threshold', async () => {
+    expect(await supported(CLEAR_AGENTS_MIN_PCA_VERSION)).toBe(true);
+    expect(await supported('10.0.6')).toBe(true);
+  });
+
+  it('is TRUE above the threshold, on each component', async () => {
+    for (const v of ['10.0.7', '10.1.0', '11.0.0']) {
+      expect(await supported(v), v).toBe(true);
+    }
+  });
+
+  it('FAILS CLOSED when version() cannot be read', async () => {
+    expect(await supported(new Error('RPC endpoint unreachable'))).toBe(false);
+  });
+
+  it('FAILS CLOSED on a malformed version — the behaviour this PR changed', async () => {
+    // Under the previous inline `split`+`parseInt`, '11.garbage' parsed as 11.0.0
+    // and ENABLED the capability. Strict parsing refuses it. This is the row that
+    // pins the deliberate divergence at the consumer, not just in the comparator.
+    for (const v of ['11.garbage', '10.0.6-rc.1', '10.0', '', 'unknown']) {
+      expect(await supported(v), v).toBe(false);
     }
   });
 });

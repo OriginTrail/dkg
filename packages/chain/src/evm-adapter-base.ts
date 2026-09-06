@@ -28,16 +28,17 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, PublisherNotAuthorizedForContextGraphError, formatPublisherNotAuthorizedForCgMessage, type PublisherNotAuthorizedForCgDetails, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { rpcHost } from './rpc-failover-log.js';
-import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
+import { ChainRpcTransportError, isChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './rpc-failover-client.js';
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
 import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
+import { contractVersionAtLeast } from './contract-version.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
@@ -200,6 +201,77 @@ const RESOLVE_CONTRACT_ADDRESS_MEMO_EXCLUDED = new Set<string>([
  * `CG_REGISTRY_*` consts. (Review of PR #1615, round-2.)
  */
 export const RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS = 30_000;
+
+/**
+ * Lowest DEPLOYED `KnowledgeAssetsLifecycle` version whose publish gate is
+ * satisfied by EITHER principal a publish carries (GH#1689):
+ * `isAuthorizedPublisher(cg, msg.sender) || isAuthorizedPublisher(cg, p.authorAddress)`.
+ * Below it, the lifecycle authorizes the PAYER only.
+ *
+ * The client-side mirror of that gate is version-gated on this value, and fails
+ * CLOSED, so a node running new code against a chain whose lifecycle has not been
+ * rotated keeps its current payer-only behaviour instead of building and
+ * broadcasting a transaction that is certain to fail on chain, burning gas.
+ *
+ * Exported (not a class member) so unit tests can couple their gate assertions to
+ * the production value without widening the adapter's protected surface — the same
+ * idiom already used for {@link RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS}.
+ *
+ * **Coupled to `KnowledgeAssetsLifecycle._VERSION`** (`packages/evm-module/contracts/
+ * KnowledgeAssetsLifecycle.sol`) — the capability signal this value is compared
+ * against. Raising this above what the contract ships, or lowering the contract's
+ * `_VERSION`, compiles and type-checks and passes every other test, and simply
+ * leaves the fix DORMANT forever after the Hub rotation with no signal anywhere.
+ * Because that failure is silent, the coupling is enforced mechanically rather than
+ * by this comment: `test/evm-adapter-publish-admission.unit.test.ts` drives this
+ * gate with the `_VERSION` literal read out of the contract source and asserts it
+ * activates. (That guard pins the two artifacts SHIPPED together; a chain still
+ * running an older lifecycle is the runtime gate's job, not the guard's.)
+ */
+export const ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION = '10.1.7';
+
+/**
+ * What the context-graph publish gate decided AND the facts it used (GH#1689).
+ *
+ * Returned instead of a bare boolean so a rejection is explained from the single
+ * evaluation that produced it. Re-deriving the explanation with a second
+ * `version()` read can DISAGREE with the first — read failures are deliberately
+ * not memoized, so a blip-then-success sequence would report "the attested author
+ * is not an authorized publisher" for an author that was never consulted, sending
+ * an operator to rewrite a publish policy over a transient RPC fault.
+ */
+/** Outcome of reading the deployed lifecycle's `_VERSION`. */
+export interface DeployedLifecycleVersionRead {
+  /** The deployed `_VERSION`, or `null` when it could not be read. */
+  version: string | null;
+  /**
+   * Set ONLY when `version` is null *because the RPC transport failed* — a proven
+   * `ChainRpcTransportError`, never a deterministic decode. Its presence is what
+   * lets a caller distinguish "policy denied" (terminal) from "could not determine
+   * whether policy denies" (retryable). Absent for an un-versioned lifecycle, an
+   * unparseable version, or an absent contract: those are real, stable answers.
+   */
+  transportError?: unknown;
+}
+
+export interface CgPublishAdmission {
+  /** True iff the CG's on-chain publish policy admits this publish. */
+  admitted: boolean;
+  /**
+   * Present only when admission could not be DETERMINED because the deployed-version
+   * read failed at the transport layer. `admitted` is still false (fail-closed), but
+   * a caller about to reject MUST rethrow this instead of reporting an authorization
+   * verdict — a transient 503 is not a policy denial, and classifying it as one makes
+   * a recoverable job permanently terminal.
+   */
+  versionReadError?: unknown;
+  /** True iff the attested author was actually carried to an `isAuthorizedPublisher`
+   *  read. False when no author was supplied, or when the deployed lifecycle does
+   *  not consult authors (including "version unreadable"). */
+  authorConsulted: boolean;
+  /** Deployed lifecycle version observed while deciding; `null` when unread or not needed. */
+  deployedVersion: string | null;
+}
 
 const KA_HIGH_WATER_VIEW_SIGNATURE = 'getMaxKaNumberForAuthor(address)';
 
@@ -590,6 +662,15 @@ export type SelectSignerSpec =
       funding: NativeAndTracFundingMode;
       /** The CG whose authorized publishers gate publish eligibility. */
       contextGraphId: bigint;
+      /**
+       * GH#1689 — the EIP-712-attested author of the publish being planned, when
+       * the caller knows it. A lifecycle at or above
+       * {@link ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION} accepts an
+       * author the CG authorizes REGARDLESS of who pays, so eligibility is then
+       * the whole pool rather than the payer-authorized subset. Absent ⇒
+       * payer-only eligibility, exactly as before.
+       */
+      attestedAuthorAddress?: string;
       /** Soft, fail-open bias toward a funded wallet whose per-wallet lock is free. Default false. */
       preferIdle?: boolean;
     }
@@ -597,6 +678,7 @@ export type SelectSignerSpec =
       txClass: 'rotatable-funded';
       funding: NativeAndTracFundingMode;
       contextGraphId?: never;
+      attestedAuthorAddress?: never;
       /** Soft, fail-open bias toward a funded wallet whose per-wallet lock is free. Default false. */
       preferIdle?: boolean;
     }
@@ -604,6 +686,7 @@ export type SelectSignerSpec =
       txClass: 'rotatable-free';
       funding: NativeOnlyFundingMode;
       contextGraphId?: never;
+      attestedAuthorAddress?: never;
       /** Soft, fail-open bias toward a funded wallet whose per-wallet lock is free. Default false. */
       preferIdle?: boolean;
     };
@@ -825,6 +908,19 @@ export class EVMChainAdapterBase {
    * Assigned in the constructor (TTL sourced from the `PREFLIGHT_TTL_MS` static).
    */
   protected readonly resolvedContractAddressCache: ReadThroughTtlCache<string, string>;
+
+  /**
+   * GH#1689 — deployed `KnowledgeAssetsLifecycle.version()` memo backing the
+   * attested-author publish-authorization gate.
+   *
+   * Keyed by the RESOLVED lifecycle ADDRESS rather than by hub+chain: `version()`
+   * is `pure`, so for a given deployment the answer is immutable, and a Hub
+   * rotation to a new lifecycle changes the key — the gate self-heals on rotation
+   * with no extra invalidation wiring, and the TTL only bounds retention (and the
+   * window of a rotation the address memo has not yet observed). Read FAILURES are
+   * never memoized; see {@link EVMChainAdapterBase.deployedKnowledgeAssetsLifecycleVersion}.
+   */
+  private readonly deployedLifecycleVersionCache: ReadThroughTtlCache<string, string>;
 
   protected readonly hubRotationPoller: HubRotationPoller;
 
@@ -1305,6 +1401,12 @@ export class EVMChainAdapterBase {
     this.resolvedContractAddressCache = new ReadThroughTtlCache<string, string>({
       ttlMs: RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS,
     });
+    // #1689 — deployed-lifecycle version memo, keyed by lifecycle address (see the
+    // field doc). Shares the address memo's 30s TTL: the two bound the same
+    // rotation-observability window.
+    this.deployedLifecycleVersionCache = new ReadThroughTtlCache<string, string>({
+      ttlMs: RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS,
+    });
     this.hubAddress = config.hubAddress;
     if (config.tokenAddress && !ethers.isAddress(config.tokenAddress)) {
       throw new Error(`Invalid tokenAddress: ${config.tokenAddress}`);
@@ -1361,14 +1463,214 @@ export class EVMChainAdapterBase {
   }
 
   /**
+   * Deployed `KnowledgeAssetsLifecycle.version()`, or `null` when it cannot be
+   * read — no lifecycle bound on this chain, a pre-versioned deployment, or an RPC
+   * failure.
+   *
+   * Read off `this.contracts.knowledgeAssetsLifecycle`, the SAME handle
+   * `createKnowledgeAssets` sends the publish through, so the capability this gate
+   * believes in and the contract that will execute the transaction can never
+   * disagree. A failed read is deliberately NOT memoized: a transient RPC blip must
+   * not pin the node to legacy behaviour for a whole TTL window, and this is only
+   * ever consulted on a path that is already rejecting, so the extra read is free
+   * in the common case.
+   */
+  protected async deployedKnowledgeAssetsLifecycleVersion(): Promise<DeployedLifecycleVersionRead> {
+    const lifecycle = this.contracts.knowledgeAssetsLifecycle;
+    if (!lifecycle) return { version: null };
+    try {
+      const key = (await lifecycle.getAddress()).toLowerCase();
+      const version = await this.deployedLifecycleVersionCache.getOrLoad(key, key, async () => String(
+        await this.readContract<string>(
+          lifecycle, 'knowledgeAssetsLifecycle.version', 'version',
+        ),
+      ));
+      return { version };
+    } catch (err) {
+      // Callers still fail closed on `version: null` — nothing is admitted on an
+      // unknown version and no transaction is ever built. But WHY it is null
+      // decides whether the eventual rejection may be reported as TERMINAL: a
+      // proven transport exhaustion means "could not determine whether policy
+      // denies", which is not the same claim as "policy denied".
+      //
+      // Discriminate on `isChainRpcTransportError`, NOT `isRetryableRpcError` —
+      // the latter counts `BAD_DATA` as retryable, and `BAD_DATA` is exactly the
+      // "this lifecycle has no `version()` to decode" case that MUST stay
+      // terminal, or the forever-retry trap this PR closes re-opens. Deterministic
+      // errors are rethrown raw by the failover loop and carry no transport code,
+      // so any unrecognised shape defaults to the safe terminal verdict.
+      return {
+        version: null,
+        ...(isChainRpcTransportError(err) ? { transportError: err } : {}),
+      };
+    }
+  }
+
+  /**
+   * GH#1689 — true iff the DEPLOYED lifecycle authorizes a publish by its
+   * EIP-712-attested author in addition to the paying principal (version at or
+   * above {@link ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION}).
+   *
+   * Gates the client-side relaxation on the DEPLOYED contract rather than on the
+   * node's own software version, so a node self-heals the moment the Hub is
+   * repointed at a rotated lifecycle — no restart and no config edit. Fails CLOSED
+   * when the version cannot be read: against an un-rotated chain the relaxed gate
+   * would build and broadcast a transaction guaranteed to fail on chain, burning
+   * gas, so "unknown" must behave exactly like "unsupported". Same idiom as the PCA
+   * `clearAgents` gate in `getPcaContractContext`.
+   */
+  protected async attestedAuthorPublishAuthorizationSupported(): Promise<boolean> {
+    const { version } = await this.deployedKnowledgeAssetsLifecycleVersion();
+    if (version === null) return false;
+    return contractVersionAtLeast(version, ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION);
+  }
+
+  /**
+   * GH#1689 — does the attested author ALONE admit the publish? True when an author
+   * was supplied, the deployed lifecycle consults authors, and that author is an
+   * authorized publisher for the CG.
+   *
+   * Payer-INDEPENDENT by construction: when it holds, the on-chain gate accepts ANY
+   * payer, which is what lets {@link EVMChainAdapterBase._authorizedPublisherSigners}
+   * leave the signer pool unnarrowed on one read instead of one per wallet.
+   *
+   * Reports the FACTS behind the decision ({@link CgPublishAdmission}) so a caller
+   * that rejects can explain itself without a second, possibly-disagreeing read.
+   *
+   * Cheapest checks first, so a caller that supplies no author issues NO extra RPC
+   * and behaves exactly as before. `admitted` is false when ContextGraphs is
+   * unresolved — "the author admits by itself" is not the fail-open case; that lives
+   * in the callers (see {@link EVMChainAdapterBase._cgPublishAdmits}).
+   */
+  protected async _cgAdmitsAttestedAuthor(
+    contextGraphId: bigint,
+    attestedAuthorAddress?: string,
+  ): Promise<CgPublishAdmission> {
+    const notWeighed: CgPublishAdmission = {
+      admitted: false, authorConsulted: false, deployedVersion: null,
+    };
+    // The on-chain `p.authorAddress` is guaranteed non-zero (`AuthorRequired` reverts
+    // before the gate), so mirror that: `ethers.isAddress` accepts the zero address,
+    // which ContextGraphs refuses in all three curator modes — a guaranteed-false
+    // read. Same rejection `coercePublisherAddress` applies in publisher-planning.
+    if (!attestedAuthorAddress
+      || !ethers.isAddress(attestedAuthorAddress)
+      || attestedAuthorAddress === ethers.ZeroAddress) return notWeighed;
+    const contextGraphs = this.contracts.contextGraphs;
+    if (!contextGraphs) return notWeighed;
+    const { version: deployedVersion, transportError } =
+      await this.deployedKnowledgeAssetsLifecycleVersion();
+    if (deployedVersion === null
+      || !contractVersionAtLeast(deployedVersion, ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION)) {
+      // The author is NOT consulted on an un-rotated (or unreadable) lifecycle.
+      // `versionReadError` rides along ONLY when the version was unreadable because
+      // the transport failed, so a caller about to reject can tell "policy denied"
+      // from "could not determine". Omitted (not set to undefined) otherwise, so the
+      // exact-shape assertions on this object stay unchanged.
+      return {
+        admitted: false,
+        authorConsulted: false,
+        deployedVersion,
+        ...(deployedVersion === null && transportError !== undefined
+          ? { versionReadError: transportError }
+          : {}),
+      };
+    }
+    const admitted = Boolean(await this.readContract(
+      contextGraphs, 'contextGraphs.isAuthorizedPublisher',
+      'isAuthorizedPublisher', contextGraphId, ethers.getAddress(attestedAuthorAddress),
+    ));
+    return { admitted, authorConsulted: true, deployedVersion };
+  }
+
+  /**
+   * THE client-side publish-admission predicate: does the context graph's on-chain
+   * publish policy admit this publish, given the two principals it carries?
+   *
+   * Mirrors `KnowledgeAssetsLifecycle._executePublishCore` exactly — the PAYER
+   * first (the common case, and the only principal an un-rotated lifecycle
+   * accepts), then the attested author behind the deployed-version gate (GH#1689).
+   * Every client-side publish gate routes through here, so the client and the
+   * contract cannot drift apart and there is exactly ONE place that decides who may
+   * publish.
+   *
+   * Fails OPEN when ContextGraphs is absent from the Hub — unchanged from the
+   * pre-#1689 gates, which skipped the check entirely on such a chain.
+   */
+  protected async _cgPublishAdmits(
+    contextGraphId: bigint,
+    payerAddress: string,
+    attestedAuthorAddress?: string,
+  ): Promise<CgPublishAdmission> {
+    const contextGraphs = this.contracts.contextGraphs;
+    if (!contextGraphs) return { admitted: true, authorConsulted: false, deployedVersion: null };
+    if (await this.readContract(
+      contextGraphs, 'contextGraphs.isAuthorizedPublisher',
+      'isAuthorizedPublisher', contextGraphId, payerAddress,
+    )) return { admitted: true, authorConsulted: false, deployedVersion: null };
+    // The author branch is a strict WIDENING of the payer branch. Skip it when it
+    // would re-read the identical (cg, address) pair the payer branch just refused —
+    // that read DID weigh the author, so report it as consulted rather than as
+    // "never looked at".
+    if (attestedAuthorAddress
+      && attestedAuthorAddress.toLowerCase() === payerAddress.toLowerCase()) {
+      return { admitted: false, authorConsulted: true, deployedVersion: null };
+    }
+    return this._cgAdmitsAttestedAuthor(contextGraphId, attestedAuthorAddress);
+  }
+
+  /**
+   * Build the structured rejection for a publish the CG's policy did not admit,
+   * FROM the admission that rejected it.
+   *
+   * Deliberately synchronous and read-free: every fact comes from `admission`, the
+   * one evaluation that produced the rejection. An earlier cut re-derived
+   * `attestedAuthorConsidered` with a second `version()` read, which could disagree
+   * with the first (failed reads are not memoized) and then claim the attested
+   * author had been weighed and refused when it was never consulted — sending an
+   * operator to rewrite a publish policy over a transient RPC fault.
+   *
+   * `payerPoolAddresses` distinguishes a signer-pool rejection (every operational
+   * wallet weighed) from a pinned-wallet one, so the message cannot misdirect the
+   * operator at a single wallet that was only one of several candidates.
+   */
+  private _publishAuthorizationRejection(
+    contextGraphId: bigint,
+    payerAddress: string,
+    attestedAuthorAddress: string | undefined,
+    admission: CgPublishAdmission,
+    payerPoolAddresses?: readonly string[],
+  ): PublisherNotAuthorizedForContextGraphError {
+    const details: PublisherNotAuthorizedForCgDetails = {
+      contextGraphId,
+      payerAddress,
+      payerPoolAddresses,
+      attestedAuthorAddress,
+      attestedAuthorConsidered: admission.authorConsulted,
+      deployedLifecycleVersion: admission.deployedVersion,
+      minLifecycleVersion: ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION,
+    };
+    // Message derived inside the constructor from exactly these details — see the
+    // constructor doc; there is no way to hand it text that disagrees with them.
+    return new PublisherNotAuthorizedForContextGraphError(details);
+  }
+
+  /**
    * Resolve and authorize an explicitly pinned publisher through one shared
    * boundary. Reservation and transaction submission both call this helper so
    * signer-pool membership, authorization policy, and error shaping cannot
    * drift between the preflight and the final write.
+   *
+   * The async publisher lane ALWAYS lands here (every per-wallet publisher pins its
+   * own wallet), so this is the gate that decided GH#1689: the pinned wallet pays,
+   * and on a rotated lifecycle the attested author — not the payer — can be the
+   * principal the CG authorizes. A rejection is structured and TERMINAL, so the
+   * async lane fails the job instead of looping it as a transient RPC outage.
    */
   protected async resolvePinnedPublisherSigner(
     contextGraphId: bigint,
     publisherAddress: string,
+    attestedAuthorAddress?: string,
   ): Promise<Wallet> {
     const selected = this.findSignerByAddress(publisherAddress);
     if (!selected) {
@@ -1376,20 +1678,20 @@ export class EVMChainAdapterBase {
         `Configured publisherAddress ${publisherAddress} is not present in the EVM signer pool.`,
       );
     }
-    if (this.contracts.contextGraphs) {
-      const authorized = await this.readContract(
-        this.contracts.contextGraphs,
-        'contextGraphs.isAuthorizedPublisher',
-        'isAuthorizedPublisher',
-        contextGraphId,
-        selected.address,
+    const admission = await this._cgPublishAdmits(
+      contextGraphId, selected.address, attestedAuthorAddress,
+    );
+    if (!admission.admitted) {
+      // A transport failure on the version read means admission was never
+      // DETERMINED. Reporting that as an authorization verdict would be a false
+      // claim, and downstream it becomes a TERMINAL `authority_forbidden` that no
+      // retry will revisit — so one 503 would permanently kill a publish the chain
+      // would have accepted. Rethrow the transport error raw, exactly as a
+      // transport failure on the PAYER read already propagates.
+      if (admission.versionReadError !== undefined) throw admission.versionReadError;
+      throw this._publishAuthorizationRejection(
+        contextGraphId, selected.address, attestedAuthorAddress, admission,
       );
-      if (!authorized) {
-        throw new Error(
-          `Configured publisherAddress ${selected.address} is not authorized to publish ` +
-          `to context graph ${contextGraphId.toString()}.`,
-        );
-      }
     }
     return selected;
   }
@@ -2152,21 +2454,60 @@ export class EVMChainAdapterBase {
     }
   }
 
+  /**
+   * The pool wallets whose publish to `contextGraphId` the CG's policy admits.
+   *
+   * GH#1689: when the publish carries an attested author the CG authorizes (on a
+   * lifecycle that consults authors), the on-chain gate accepts ANY payer, so the
+   * pool is returned UNNARROWED and funding-aware selection decides which wallet
+   * pays — one read for the whole pool instead of one per wallet. Without such an
+   * author this is the pre-#1689 payer-only filter.
+   *
+   * The empty-pool rejection is deliberately SPLIT by whether an author was in play:
+   *
+   * - **No author supplied** → the legacy untyped `Error`, string byte-identical.
+   *   Plan-mandated, and `chain-lifecycle-extra.test.ts` pins that literal.
+   * - **Author supplied and still not admitted** → the same structured
+   *   {@link PublisherNotAuthorizedForContextGraphError} the pinned gate throws, so
+   *   one condition does not carry two different error contracts depending on which
+   *   code path reached it. (The async lane always takes the pinned branch; this is
+   *   the sync lane, whose error reaches a human.)
+   */
   protected async _authorizedPublisherSigners(
     ordered: Wallet[],
     contextGraphId: bigint,
+    attestedAuthorAddress?: string,
   ): Promise<Wallet[]> {
     if (!this.contracts.contextGraphs) return ordered;
+    const authorAdmission = await this._cgAdmitsAttestedAuthor(
+      contextGraphId, attestedAuthorAddress,
+    );
+    if (authorAdmission.admitted) return ordered;
     const eligible: Wallet[] = [];
     for (const signer of ordered) {
-      if (await this.readContract(
-        this.contracts.contextGraphs, 'contextGraphs.isAuthorizedPublisher',
-        'isAuthorizedPublisher', contextGraphId, signer.address,
-      )) {
+      if ((await this._cgPublishAdmits(contextGraphId, signer.address)).admitted) {
         eligible.push(signer);
       }
     }
     if (eligible.length === 0) {
+      // Only here, and only when we are actually about to reject: if the author
+      // probe could not reach the chain, we do not know whether the author would
+      // have admitted this publish, so we must not report an authorization verdict.
+      // Deliberately NOT raised where `authorAdmission` is computed — the payer loop
+      // below it can still find an eligible wallet, and failing early would break a
+      // payer-authorized publish that never needed the author at all.
+      if (authorAdmission.versionReadError !== undefined) throw authorAdmission.versionReadError;
+      if (attestedAuthorAddress && ordered.length > 0) {
+        throw this._publishAuthorizationRejection(
+          contextGraphId,
+          // Cursor head — the wallet selection would have used. Every wallet was
+          // weighed; `payerPoolAddresses` carries the full set for the message.
+          ordered[0].address,
+          attestedAuthorAddress,
+          authorAdmission,
+          ordered.map((w) => w.address),
+        );
+      }
       throw new Error(
         `No authorized publisher wallet found in signer pool for context graph ${contextGraphId.toString()}. ` +
         'Ensure at least one configured wallet is permitted by on-chain publish authority.',
@@ -2184,7 +2525,9 @@ export class EVMChainAdapterBase {
       // wallets, failing CLOSED. `rotatable-funded` uses the whole pool.
       let eligible: Wallet[];
       if (spec.txClass === 'rotatable-policy') {
-        eligible = await this._authorizedPublisherSigners(ordered, spec.contextGraphId);
+        eligible = await this._authorizedPublisherSigners(
+          ordered, spec.contextGraphId, spec.attestedAuthorAddress,
+        );
       } else if (spec.txClass === 'rotatable-free') {
         // FAIL CLOSED to registered operational wallets. An unregistered signer
         // resolves to identity 0 on `RandomSampling` and reverts, burning the
@@ -2220,11 +2563,14 @@ export class EVMChainAdapterBase {
     requiredTracWei: bigint = 0n,
     options: {
       publishEpochs?: number;
+      /** GH#1689 — see `SelectSignerSpec.attestedAuthorAddress`. Absent ⇒ payer-only eligibility. */
+      attestedAuthorAddress?: string;
     } = {},
   ): Promise<Wallet> {
     return this.selectSigner({
       txClass: 'rotatable-policy',
       contextGraphId,
+      attestedAuthorAddress: options.attestedAuthorAddress,
       funding: {
         kind: 'native+trac',
         nativeFloorWei: this.minPublisherNativeWei,
@@ -2606,6 +2952,7 @@ export class EVMChainAdapterBase {
     signer: Wallet,
     contextGraphId: bigint,
     requiredTracWei: bigint = 0n,
+    attestedAuthorAddress?: string,
   ): Promise<unknown> {
     try {
       let selectedShort = isInsufficientFundsError(err);
@@ -2625,8 +2972,13 @@ export class EVMChainAdapterBase {
       // selected wallet was short but another authorized wallet could cover it (a
       // cost-blind pre-pin, an explicit pinned address, or a stale cached
       // balance), preserve the original error so a retry can reroute to that
-      // wallet instead of being told no wallet is funded.
-      if (selectedShort && !(await this.poolHasFundableSigner(contextGraphId, requiredTracWei))) {
+      // wallet instead of being told no wallet is funded. The attested author is
+      // threaded through because it widens WHICH wallets are viable reroutes
+      // (#1689) — probing on the narrower payer-only rule could claim the pool is
+      // unfundable while a funded wallet was in fact admissible.
+      if (selectedShort && !(await this.poolHasFundableSigner(
+        contextGraphId, requiredTracWei, attestedAuthorAddress,
+      ))) {
         const balances = await this.snapshotPublisherWalletBalances();
         return new InsufficientPublisherFundsError(
           formatNoFundedPublisherWalletMessage(balances),
@@ -2641,29 +2993,57 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * True iff some operational wallet AUTHORIZED for `contextGraphId` is fundable
-   * for a publish costing `requiredTracWei` (own balance above floor+cost, or a
-   * covering PCA agent). Only an authorized+funded wallet is a viable reroute, so
-   * a funded-but-unauthorized wallet does NOT suppress NO_FUNDED. Used to
-   * distinguish a whole-pool funding problem (→ NO_FUNDED, terminal) from the
-   * selected wallet merely being the wrong, recoverable pick. Cached reads;
-   * fail-open per wallet.
+   * True iff some operational wallet whose publish the CG ADMITS is fundable for a
+   * publish costing `requiredTracWei` (own balance above floor+cost, or a covering
+   * PCA agent). Only an admitted+funded wallet is a viable reroute, so a
+   * funded-but-unauthorized wallet does NOT suppress NO_FUNDED. Used to distinguish
+   * a whole-pool funding problem (→ NO_FUNDED, terminal) from the selected wallet
+   * merely being the wrong, recoverable pick. Cached reads; fail-open per wallet.
+   *
+   * GH#1689: admission is the same two-principal rule the publish itself is held
+   * to, so an attested author the CG authorizes makes the WHOLE pool a viable
+   * reroute — routing through {@link EVMChainAdapterBase._cgPublishAdmits} keeps
+   * this probe and the gates it feeds from disagreeing about who may publish.
    */
-  protected async poolHasFundableSigner(contextGraphId: bigint, requiredTracWei: bigint): Promise<boolean> {
-    const contextGraphs = this.contracts.contextGraphs;
+  protected async poolHasFundableSigner(
+    contextGraphId: bigint,
+    requiredTracWei: bigint,
+    attestedAuthorAddress?: string,
+  ): Promise<boolean> {
+    // Captured rather than thrown from inside the map: throwing there would reject
+    // the whole `Promise.all` and could mask a different in-flight rejection. Collect
+    // first, decide after — so any genuine probe failure still propagates unchanged.
+    let versionReadError: unknown;
     const checks = await Promise.all(
       this.signerPool.map(async (s) => {
         // No ContextGraphs surface ⇒ every operational wallet is a candidate
-        // (mirrors nextAuthorizedSigner); otherwise only authorized wallets are
-        // viable reroutes.
-        if (contextGraphs && !(await this.readContract(
-          contextGraphs, 'contextGraphs.isAuthorizedPublisher',
-          'isAuthorizedPublisher', contextGraphId, s.address,
-        ))) return false;
+        // (mirrors nextAuthorizedSigner); that fail-open lives in `_cgPublishAdmits`.
+        const admission = await this._cgPublishAdmits(
+          contextGraphId, s.address, attestedAuthorAddress,
+        );
+        if (!admission.admitted) {
+          if (admission.versionReadError !== undefined) {
+            versionReadError = admission.versionReadError;
+          }
+          return false;
+        }
         return this.isWalletPublishFundable(s.address, await this.getWalletFunding(s.address), requiredTracWei);
       }),
     );
-    return checks.some(Boolean);
+    const fundable = checks.some(Boolean);
+    // THIRD consumer of "inconclusive is not denied". `.admitted === false` alone
+    // cannot distinguish "this wallet may not publish" from "I could not determine
+    // whether it may" — and the sole caller turns a `false` here into a TERMINAL
+    // `NO_FUNDED_PUBLISHER_WALLET`, killing a recoverable job because one `version()`
+    // read hit a transient fault while the memo was cold.
+    //
+    // So when nothing was fundable AND some wallet's admission was inconclusive,
+    // throw: `enrichInsufficientPublisherFundsError`'s existing catch converts that
+    // into "return the ORIGINAL funds error", which is exactly right — a retry can
+    // still reroute. No new plumbing, and no behaviour change when `versionReadError`
+    // is absent (no author ⇒ no version read ⇒ never set).
+    if (!fundable && versionReadError !== undefined) throw versionReadError;
+    return fundable;
   }
 
   /**
@@ -3692,10 +4072,17 @@ export class EVMChainAdapterBase {
     }
 
     let txSigner: Wallet;
+    // #1689 — the EIP-712-attested author is a publish-authorization principal on a
+    // rotated lifecycle (`isAuthorizedPublisher(cg, msg.sender) ||
+    // isAuthorizedPublisher(cg, p.authorAddress)`), so BOTH selection branches are
+    // told who the author is. It never widens attribution: the tx is still sent,
+    // paid, and recorded from `txSigner`.
+    const attestedAuthorAddress = params.author?.address;
     if (params.publisherAddress) {
       txSigner = await this.resolvePinnedPublisherSigner(
         params.contextGraphId,
         params.publisherAddress,
+        attestedAuthorAddress,
       );
     } else {
       // No pre-pinned publisher address: select cost-aware here, where the
@@ -3704,7 +4091,7 @@ export class EVMChainAdapterBase {
       txSigner = await this.nextAuthorizedSigner(
         params.contextGraphId,
         floorPublishTokenAmount(params.tokenAmount),
-        { publishEpochs: params.epochs },
+        { publishEpochs: params.epochs, attestedAuthorAddress },
       );
     }
     const ka = this.contracts.knowledgeAssetsLifecycle.connect(txSigner) as Contract;
@@ -3886,6 +4273,7 @@ export class EVMChainAdapterBase {
         txSigner,
         params.contextGraphId,
         floorPublishTokenAmount(params.tokenAmount),
+        attestedAuthorAddress,
       );
     });
 

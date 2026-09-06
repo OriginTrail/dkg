@@ -28,6 +28,15 @@ export interface PublisherPublishPlanRequest {
   defaultPublishEpochs: number;
   /** Exact signer pin for an explicit publisher address/private key. */
   publisherAddress?: string;
+  /**
+   * EIP-712-attested KA author, when known at planning time. GH#1689: the CG
+   * publish policy admits EITHER this principal or the paying wallet, so the
+   * planner must see the author to avoid rejecting a publish the chain would
+   * accept. Optional — routes that plan without a precomputed attestation
+   * (local/tentative publishes, legacy callers) omit it and the admission gate
+   * degrades to the payer-only check it performs today.
+   */
+  attestedAuthorAddress?: string;
 }
 
 /** Final signer-dependent values that must be fixed before publish side effects. */

@@ -100,6 +100,43 @@ export function messageIndicatesPublishAuthorNotCustodial(message: unknown): boo
 }
 
 /**
+ * Context-graph publish authorization — cross-package error contract (GH#1689).
+ *
+ * Thrown by the chain adapter when NEITHER principal a publish carries is an
+ * authorized publisher for the target context graph: the paying wallet
+ * (`msg.sender` on chain) and the EIP-712-attested author. Defined here, next to
+ * {@link NO_FUNDED_PUBLISHER_WALLET_CODE}, so the adapter (which throws) and the
+ * publisher's async-job classifier (which must record it as a TERMINAL
+ * `authority_forbidden` rather than the retryable `rpc_unavailable` default)
+ * reference one source instead of matching on message text.
+ *
+ * The message deliberately contains none of the substrings
+ * `classifyPublishFailureCode` matches (`timeout`, `insufficient funds`,
+ * `nonce`, `revert`, `reorg`, `mismatch`) so a code-stripped re-wrap degrades to
+ * the default rather than to a wrong, confidently-typed classification.
+ */
+export const PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE = 'PUBLISHER_NOT_AUTHORIZED_FOR_CG';
+
+/** The literal prefix every publish-authorization rejection message starts with.
+ *  The chain adapter builds the message from this; consumers that only have a
+ *  (possibly re-wrapped, code-stripped) message string match on it via
+ *  {@link messageIndicatesPublisherNotAuthorizedForCg}. */
+export const PUBLISHER_NOT_AUTHORIZED_FOR_CG_MESSAGE_PREFIX =
+  'Publish rejected by context graph publish policy';
+
+const PUBLISHER_NOT_AUTHORIZED_FOR_CG_MARKER = new RegExp(
+  PUBLISHER_NOT_AUTHORIZED_FOR_CG_MESSAGE_PREFIX,
+  'i',
+);
+
+/** True iff a message string indicates a context-graph publish-authorization
+ *  rejection — the fallback used when the structured `.code` was lost to a
+ *  re-wrap. */
+export function messageIndicatesPublisherNotAuthorizedForCg(message: unknown): boolean {
+  return typeof message === 'string' && PUBLISHER_NOT_AUTHORIZED_FOR_CG_MARKER.test(message);
+}
+
+/**
  * An error caused by invalid user input or a pre-condition that the user
  * can fix. CLI handlers can show these messages directly without a stack trace.
  */

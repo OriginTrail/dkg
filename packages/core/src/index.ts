@@ -372,6 +372,9 @@ export {
   messageIndicatesNoFundedPublisherWallet,
   messageIndicatesPublishAuthorNotCustodial,
   formatPublishAuthorNotCustodialMessage,
+  PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE,
+  PUBLISHER_NOT_AUTHORIZED_FOR_CG_MESSAGE_PREFIX,
+  messageIndicatesPublisherNotAuthorizedForCg,
 } from './errors.js';
 export {
   dkgHomeDir,
