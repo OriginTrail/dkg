@@ -3,7 +3,7 @@ import {
   CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
   ContextGraphAuthorityUnavailableError,
   isContextGraphAuthorityUnavailableMarker,
-} from '../src/internal/promote/context-graph-agent-gate-authority.js';
+} from '../src/context-graph-authority.js';
 import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
@@ -88,20 +88,20 @@ describe('RFC-64 private Sender Key roster authority', () => {
     });
   });
 
-  it('locks every registered-authority reason to its queue retry disposition', async () => {
+  it('preserves every registered-authority reason without adding caller retry policy', async () => {
     const cases = [
-      ['chain-name-binding-unavailable', true],
-      ['local-chain-binding-unavailable', true],
-      ['local-existence-unavailable', true],
-      ['chain-access-policy-unavailable', true],
-      ['chain-access-policy-timeout', true],
-      ['chain-access-policy-unknown', false],
-      ['chain-participant-authority-unsupported', false],
-      ['chain-participant-authority-unavailable', true],
-      ['chain-participant-authority-invalid', false],
+      'chain-name-binding-unavailable',
+      'local-chain-binding-unavailable',
+      'local-existence-unavailable',
+      'chain-access-policy-unavailable',
+      'chain-access-policy-timeout',
+      'chain-access-policy-unknown',
+      'chain-participant-authority-unsupported',
+      'chain-participant-authority-unavailable',
+      'chain-participant-authority-invalid',
     ] as const;
 
-    for (const [reason, retryable] of cases) {
+    for (const reason of cases) {
       const receiver = {
         resolveContextGraphAgentGateAuthority:
           WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
@@ -128,12 +128,13 @@ describe('RFC-64 private Sender Key roster authority', () => {
       expect(outcome.status, reason).toBe('rejected');
       if (outcome.status !== 'rejected') continue;
       expect(outcome.error, reason).toBeInstanceOf(ContextGraphAuthorityUnavailableError);
-      expect(outcome.error, reason).toMatchObject({ reason, retryable });
+      expect(outcome.error, reason).toMatchObject({ reason });
+      expect('retryable' in Object(outcome.error), reason).toBe(false);
       expect(isContextGraphAuthorityUnavailableMarker(outcome.error), reason).toBe(true);
     }
   });
 
-  it('preserves bounded liveness and policy timeouts as retryable authority unavailability', async () => {
+  it('preserves bounded liveness and policy timeouts as typed authority unavailability', async () => {
     vi.useFakeTimers();
     try {
       const raceChainPolicyRead = Reflect.get(
@@ -192,7 +193,7 @@ describe('RFC-64 private Sender Key roster authority', () => {
     }
   });
 
-  it('recognizes only a table-consistent cross-boundary authority failure', () => {
+  it('recognizes only a reason-valid cross-boundary authority failure', () => {
     expect(isContextGraphAuthorityUnavailableMarker(
       new ContextGraphAuthorityUnavailableError('temporarily unavailable', {
         reason: 'chain-participant-authority-unavailable',
@@ -201,7 +202,6 @@ describe('RFC-64 private Sender Key roster authority', () => {
     expect(isContextGraphAuthorityUnavailableMarker({
       code: CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
       reason: 'chain-participant-authority-unavailable',
-      retryable: true,
     })).toBe(true);
     expect(isContextGraphAuthorityUnavailableMarker({
       code: CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
@@ -210,7 +210,7 @@ describe('RFC-64 private Sender Key roster authority', () => {
       code: CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
       reason: 'chain-participant-authority-unsupported',
       retryable: true,
-    })).toBe(false);
+    })).toBe(true);
     expect(isContextGraphAuthorityUnavailableMarker({
       code: `${CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE}_LOOKALIKE`,
       reason: 'chain-participant-authority-unavailable',
@@ -303,8 +303,8 @@ describe('RFC-64 private Sender Key roster authority', () => {
     expect(recipientError).toMatchObject({
       message: expect.stringContaining('unsupported'),
       reason: 'chain-participant-authority-unsupported',
-      retryable: false,
     });
+    expect('retryable' in Object(recipientError)).toBe(false);
     expect(isContextGraphAuthorityUnavailableMarker(recipientError)).toBe(true);
   });
 
