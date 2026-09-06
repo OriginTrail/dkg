@@ -1,4 +1,4 @@
-import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri, validateSubGraphName } from '@origintrail-official/dkg-core';
+import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SwmSnapshotCoverage } from '../../dkg-agent-types.js';
@@ -8,8 +8,9 @@ import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection,
 import {
   isNamedSubgraphSharedMemoryDataGraph,
   isNamedSubgraphSharedMemoryMetaGraph,
-  isSharedMemoryBucketDescendantDataGraph,
+  sharedMemoryOwnershipKeyFromGraph,
 } from '../shared-memory-graphs.js';
+export { sharedMemoryOwnershipKeyFromGraph } from '../shared-memory-graphs.js';
 import {
   type SyncPageFetchOptions,
   type SyncPageResult,
@@ -22,6 +23,12 @@ import {
   type GraphScopedSwmRecoveryDescriptor,
 } from '../graph-scoped-swm-recovery.js';
 import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
+import {
+  createRecoveryExecutionAdmission,
+  type RecoveryExecutionAdmission,
+  type RecoveryExecutionGuard,
+} from './recovery-execution-guard.js';
+import { canonicalQuadKey } from './quad-key.js';
 
 const DKG = 'http://dkg.io/ontology/';
 
@@ -52,12 +59,6 @@ function boundSampledRef(ref: string): string {
     : ref;
 }
 
-function metadataQuadKey(quad: Quad): string {
-  // JSON's tuple boundaries are unambiguous even when a literal contains the
-  // whitespace/delimiter text that made the former flattened key lossy.
-  return JSON.stringify([quad.graph, quad.subject, quad.predicate, quad.object]);
-}
-
 /**
  * Own the one-round metadata commit policy for graph-scoped snapshots.
  * Per-KA writes, finalized-twin suppression, the final bulk append and counter
@@ -80,13 +81,13 @@ class GraphScopedSnapshotCommitCoordinator {
     verifiedMeta: readonly Quad[],
     reconcileFinalizedTwin: FinalizedTwinReconciler | undefined,
   ) {
-    this.#verifiedKeys = new Set(verifiedMeta.map(metadataQuadKey));
+    this.#verifiedKeys = new Set(verifiedMeta.map(canonicalQuadKey));
     this.#reconcileFinalizedTwin = reconcileFinalizedTwin;
   }
 
   unwrittenVerifiedRows(descriptor: GraphScopedSwmRecoveryDescriptor): Quad[] {
     return descriptor.metadataQuads.filter((quad) => {
-      const key = metadataQuadKey(quad);
+      const key = canonicalQuadKey(quad);
       return this.#verifiedKeys.has(key)
         && !this.#writtenKeys.has(key)
         && !this.#suppressedKeys.has(key);
@@ -94,7 +95,7 @@ class GraphScopedSnapshotCommitCoordinator {
   }
 
   recordWritten(rows: readonly Quad[]): void {
-    for (const quad of rows) this.#writtenKeys.add(metadataQuadKey(quad));
+    for (const quad of rows) this.#writtenKeys.add(canonicalQuadKey(quad));
   }
 
   /**
@@ -111,18 +112,18 @@ class GraphScopedSnapshotCommitCoordinator {
    */
   suppressRows(rows: readonly Quad[]): void {
     for (const quad of rows) {
-      const key = metadataQuadKey(quad);
+      const key = canonicalQuadKey(quad);
       if (this.#verifiedKeys.has(key)) this.#suppressedKeys.add(key);
     }
   }
 
   suppressedRows(rows: readonly Quad[]): Quad[] {
-    return rows.filter((quad) => this.#suppressedKeys.has(metadataQuadKey(quad)));
+    return rows.filter((quad) => this.#suppressedKeys.has(canonicalQuadKey(quad)));
   }
 
   #suppress(descriptor: GraphScopedSwmRecoveryDescriptor): void {
     for (const quad of descriptor.metadataQuads) {
-      const key = metadataQuadKey(quad);
+      const key = canonicalQuadKey(quad);
       if (this.#verifiedKeys.has(key)) this.#suppressedKeys.add(key);
     }
   }
@@ -154,7 +155,7 @@ class GraphScopedSnapshotCommitCoordinator {
   bulkRows(rows: readonly Quad[]): Quad[] {
     return this.#suppressedKeys.size === 0
       ? [...rows]
-      : rows.filter((quad) => !this.#suppressedKeys.has(metadataQuadKey(quad)));
+      : rows.filter((quad) => !this.#suppressedKeys.has(canonicalQuadKey(quad)));
   }
 
   alreadyCountedRetainedRows(): number {
@@ -383,7 +384,29 @@ export function selectSwmSnapshotCoverage(
   return a.peerIdSuffix <= b.peerIdSuffix ? a : b;
 }
 
-interface SharedMemorySyncContext {
+export interface SharedMemorySyncSnapshotEvidencePolicy {
+  readonly accepts: (evidence: {
+    verifiedMetadataTriples: number;
+    snapshotReferences: number;
+    graphBackedOperations: number;
+  }) => boolean;
+}
+
+/** The only two valid requester algorithm modes. */
+export type SharedMemorySyncMode = Readonly<
+  | { kind: 'ordinary' }
+  | {
+    kind: 'selected-recovery';
+    recoveryGuard: RecoveryExecutionGuard;
+    metadataFetcher?: SharedMemoryMetadataFetcher;
+    snapshotEvidencePolicy?: SharedMemorySyncSnapshotEvidencePolicy;
+    snapshotRecoveryOrder?: 'manifest' | 'recent-balanced';
+  }
+>;
+
+export interface SharedMemorySyncContext {
+  /** One discriminant owns every selected-recovery-only capability. */
+  mode: SharedMemorySyncMode;
   ctx: OperationContext;
   remotePeerId: string;
   contextGraphIds: string[];
@@ -444,21 +467,6 @@ interface SharedMemorySyncContext {
    */
   includeRootScope?: boolean;
   stopOnBackoffWorthyFailure?: boolean;
-  /** Optional lane-owned policy for deciding whether snapshot evidence is sufficient. */
-  snapshotEvidencePolicy?: {
-    accepts: (evidence: {
-      verifiedMetadataTriples: number;
-      snapshotReferences: number;
-      graphBackedOperations: number;
-    }) => boolean;
-  };
-  /** Optional metadata retrieval strategy; ordinary callers use page fetch. */
-  metadataFetcher?: SharedMemoryMetadataFetcher;
-  /**
-   * Selected cold-join recovery may interleave recent snapshots with the
-   * oldest outstanding history. Ordinary sync preserves manifest order.
-   */
-  snapshotRecoveryOrder?: 'manifest' | 'recent-balanced';
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
   ensureOwnedMap: (ownershipKey: string) => Map<string, string>;
@@ -499,9 +507,6 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     getExcludedSubGraphNames,
     includeRootScope = true,
     stopOnBackoffWorthyFailure = false,
-    snapshotEvidencePolicy,
-    metadataFetcher,
-    snapshotRecoveryOrder = 'manifest',
     deleteCheckpoint,
     setCheckpoint,
     ensureOwnedMap,
@@ -509,6 +514,39 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     logWarn,
     logDebug,
   } = context;
+  const snapshotEvidencePolicy = context.mode.kind === 'selected-recovery'
+    ? context.mode.snapshotEvidencePolicy
+    : undefined;
+  const metadataFetcher = context.mode.kind === 'selected-recovery'
+    ? context.mode.metadataFetcher
+    : undefined;
+  const snapshotRecoveryOrder = context.mode.kind === 'selected-recovery'
+    ? context.mode.snapshotRecoveryOrder ?? 'manifest'
+    : 'manifest';
+  const recoveryGuard = context.mode.kind === 'selected-recovery'
+    ? context.mode.recoveryGuard
+    : undefined;
+  const recoveryBoundary = createRecoveryExecutionAdmission(recoveryGuard);
+  recoveryBoundary.assertCurrent();
+  const fetchRecoveryPages = (
+    contextGraphId: string,
+    phase: SyncPhase,
+    graphUri: string,
+    deadline: number,
+  ): Promise<SyncPageResult> => {
+    const commonArgs = [
+      ctx,
+      remotePeerId,
+      contextGraphId,
+      true,
+      phase,
+      graphUri,
+      deadline,
+    ] as const;
+    return recoveryBoundary.signal === undefined
+      ? fetchSyncPages(...commonArgs)
+      : fetchSyncPages(...commonArgs, { signal: recoveryBoundary.signal });
+  };
 
   const summary: SharedMemorySyncSummary = {
     insertedTriples: 0,
@@ -538,6 +576,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     result: SyncPageResult,
     options: { updateCheckpoint?: boolean; emptyPhase?: boolean } = {},
   ) => {
+    recoveryBoundary.assertCurrent();
     const updateCheckpoint = options.updateCheckpoint ?? true;
     summary.resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
     summary.timedOutPhases += result.timedOut ? 1 : 0;
@@ -556,9 +595,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     if (result.nextOffset > result.resumedFromOffset) {
       summary.checkpointAdvances += 1;
     }
-    if (result.completed) deleteCheckpoint(result.checkpointKey);
+    if (result.completed) recoveryBoundary.admitSyncMutation(() => deleteCheckpoint(result.checkpointKey));
     else if (result.nextOffset > 0 || result.resumedFromOffset > 0) {
-      setCheckpoint(result.checkpointKey, result.nextOffset);
+      recoveryBoundary.admitSyncMutation(() => setCheckpoint(result.checkpointKey, result.nextOffset));
     }
   };
 
@@ -626,6 +665,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
   };
 
   for (const [index, pid] of contextGraphIds.entries()) {
+    recoveryBoundary.assertCurrent();
     let peerRespondedForContextGraph = false;
     // Hoisted out of the `try` so the `catch` can still say whether this peer's
     // manifest was whole. Without it a throwing round could only report a
@@ -646,23 +686,20 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
 
       const fetchStartedAt = Date.now();
       const metadataOutcome = metadataFetcher
-        ? await metadataFetcher.fetch({
+        ? await recoveryBoundary.read(() => metadataFetcher.fetch({
           ctx,
           remotePeerId,
           contextGraphId: pid,
           graphUri: wsMetaGraph,
           deadline,
-        })
+        }))
         : {
-          result: await fetchSyncPages(
-            ctx,
-            remotePeerId,
+          result: await recoveryBoundary.read(() => fetchRecoveryPages(
             pid,
-            true,
             'meta',
             wsMetaGraph,
             deadline,
-          ),
+          )),
           continuationYielded: false,
         };
       const wsMetaResult = metadataOutcome.result;
@@ -681,16 +718,21 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         recordPhaseOutcome(wsMetaResult, { updateCheckpoint: false });
         break;
       }
-      const wsDataResult = await fetchSyncPages(ctx, remotePeerId, pid, true, 'data', wsGraph, deadline);
+      const wsDataResult = await recoveryBoundary.read(() => fetchRecoveryPages(
+        pid,
+        'data',
+        wsGraph,
+        deadline,
+      ));
       peerRespondedForContextGraph = true;
       const fetchDurationMs = Date.now() - fetchStartedAt;
 
       const verifyStartedAt = Date.now();
       const registeredSubGraphNames = getRegisteredSubGraphNames
-        ? await getRegisteredSubGraphNames(pid)
+        ? await recoveryBoundary.read(() => getRegisteredSubGraphNames(pid))
         : undefined;
       const excludedSubGraphNames = getExcludedSubGraphNames
-        ? await getExcludedSubGraphNames(pid)
+        ? await recoveryBoundary.read(() => getExcludedSubGraphNames(pid))
         : undefined;
       const fetchedDataQuads = includeRootScope
         ? wsDataResult.quads
@@ -712,13 +754,13 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             excludedSubGraphNames,
           }),
         ])];
-      const processed = await processSharedMemoryBatch(
+      const processed = await recoveryBoundary.read(() => processSharedMemoryBatch(
         fetchedDataQuads,
         fetchedMetaQuads,
         pid,
         verificationSubGraphNames,
         excludedSubGraphNames,
-      );
+      ));
       const verifyDurationMs = Date.now() - verifyStartedAt;
       logInfo(ctx, `  shared memory: ${processed.totalFetchedDataQuads} data + ${processed.totalFetchedMetaQuads} meta triples fetched`);
       summary.bytesReceived += wsMetaResult.bytesReceived + wsDataResult.bytesReceived;
@@ -762,7 +804,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           && wsDataResult.completed
           && !wsDataResult.timedOut
         ) {
-          metadataFetcher?.release(pid);
+          if (metadataFetcher) {
+            recoveryBoundary.admitSyncMutation(() => metadataFetcher.release(pid));
+          }
         }
         if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
           break;
@@ -1027,7 +1071,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
           if (materializedKeys.has(graphKey)) continue;
           try {
-            await snapshotMaterializer.withKaWriteLock(
+            await recoveryBoundary.admitAsyncMutation(() => snapshotMaterializer.withKaWriteLock(
               pid,
               descriptor.subGraphName,
               descriptor.kaUal,
@@ -1174,13 +1218,13 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 logInfo(ctx, `SWM sync for "${pid}": materialized snapshot ${snapshotRef} `
                   + `as ${asset.assertionGraph} (${asset.quads.length} triples)`);
               },
-            );
+            ));
             // The opposite ordering from durable VM catch-up is equally
             // possible: VM may already be present when this SWM snapshot
             // arrives. Reconcile only after releasing the materialization
             // lock; the production callback reacquires the same per-KA lock
             // and re-verifies current head + both graph digests before delete.
-            await snapshotCommit.reconcileAfterMaterialization({
+            await recoveryBoundary.admitAsyncMutation(() => snapshotCommit.reconcileAfterMaterialization({
               contextGraphId: pid,
               descriptor,
               onDeferred: (cause) => logWarn(
@@ -1188,8 +1232,12 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 `SWM sync deferred finalized-twin reconciliation for ${descriptor.kaUal}: `
                   + `${cause instanceof Error ? cause.message : String(cause)}`,
               ),
-            });
+            }));
           } catch (err) {
+            // Revocation must escape this best-effort materialization catch;
+            // treating it as one failed snapshot would let the stale run keep
+            // walking and reach later commit points.
+            recoveryBoundary.assertCurrent();
             // A failed replace must never be able to look materialized later.
             // Suppressing it here while the surrounding sync still inserts the
             // graph-scoped head marker makes the loss PERMANENT: the next pass
@@ -1233,6 +1281,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       };
 
       const snapshotStartedAt = Date.now();
+      recoveryBoundary.assertCurrent();
       const snapshotSync = await syncPublicSnapshotsForMeta({
         ctx,
         remotePeerId,
@@ -1248,6 +1297,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         fetchSyncPages,
         deleteCheckpoint,
         setCheckpoint,
+        executionBoundary: recoveryBoundary,
         // Fires for BOTH 'cache' and 'network' sources, so a node whose earlier
         // runs already cached the blobs materializes them on the next pass
         // without refetching a byte.
@@ -1279,6 +1329,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // absent, so this costs nothing when there is genuinely no wiring.
         onSnapshotReady: async (snapshot: PublicSnapshotMetadata) => {
           await materializeReadySnapshot(snapshot.ref);
+          recoveryBoundary.assertCurrent();
           if (materializedRefs.has(snapshot.ref)) {
             const suppressedRows = (snapshotDescriptorsByRef.get(snapshot.ref) ?? [])
               .flatMap((descriptor) => snapshotCommit.suppressedRows(descriptor.metadataQuads));
@@ -1384,12 +1435,18 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // up with dangling/missing public snapshot state.
         summary.failedPhases += 1;
         if (validWsQuads.length > 0) {
-          await ensureContextGraph(pid);
-          await storeInsert(validWsQuads);
+          await recoveryBoundary.admitAsyncMutation(async () => {
+            await ensureContextGraph(pid);
+            await storeInsert(validWsQuads);
+            // Ownership belongs to the same admitted logical write as the
+            // verified data. Revocation may be observed after this unit, but
+            // must never leave inserted entities without their arbitration
+            // state merely because it landed during the awaited insert.
+            hydrateOwnership();
+          });
           summary.insertedTriples += validWsQuads.length;
           summary.insertedDataTriples += validWsQuads.length;
           recordPhaseOutcome(wsDataResult);
-          hydrateOwnership();
         }
         if (snapshotSync.timedOutPhases > 0 && shouldStopAfterBackoffWorthyFailure(pid, 'snapshot timeout')) {
           break;
@@ -1398,13 +1455,8 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       }
 
       const storeStartedAt = Date.now();
-      await ensureContextGraph(pid);
-
-      if (validWsQuads.length > 0) {
-        await storeInsert(validWsQuads);
-        summary.insertedTriples += validWsQuads.length;
-        summary.insertedDataTriples += validWsQuads.length;
-      }
+      let metaForBulkInsert: Quad[] = [];
+      let newlyCountedMeta = 0;
       if (verifiedMetaForInsert.length > 0) {
         // Rows written by the per-KA path are ordinarily harmless to replay —
         // an RDF store is a set. Rows for a twin retired after that path are
@@ -1429,23 +1481,37 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // Keep the old count identity for ordinary rows. Only retired rows are
         // filtered, while the per-KA ledger remains a key-set subset of the
         // verified input and is subtracted solely when its row survives.
-        const metaForBulkInsert = snapshotCommit.bulkRows(verifiedMetaForInsert);
-        if (metaForBulkInsert.length > 0) {
-          await storeInsert(metaForBulkInsert);
-        }
+        metaForBulkInsert = snapshotCommit.bulkRows(verifiedMetaForInsert);
         const retainedAlreadyCounted = snapshotCommit.alreadyCountedRetainedRows();
-        const newlyCountedMeta = metaForBulkInsert.length - retainedAlreadyCounted;
-        summary.insertedTriples += newlyCountedMeta;
-        summary.insertedMetaTriples += newlyCountedMeta;
+        newlyCountedMeta = metaForBulkInsert.length - retainedAlreadyCounted;
       }
+
+      // The aggregate data, its verified metadata and the in-memory ownership
+      // projection form one admitted recovery unit. Once the first awaited
+      // mutation starts, a selection revocation is deliberately observed only
+      // after all three effects drain, preventing a stale invocation from
+      // leaving a data-only or metadata-without-ownership state.
+      await recoveryBoundary.admitAsyncMutation(async () => {
+        await ensureContextGraph(pid);
+        if (validWsQuads.length > 0) await storeInsert(validWsQuads);
+        if (metaForBulkInsert.length > 0) await storeInsert(metaForBulkInsert);
+        hydrateOwnership();
+      });
+
+      if (validWsQuads.length > 0) {
+        summary.insertedTriples += validWsQuads.length;
+        summary.insertedDataTriples += validWsQuads.length;
+      }
+      summary.insertedTriples += newlyCountedMeta;
+      summary.insertedMetaTriples += newlyCountedMeta;
       recordPhaseOutcome(wsMetaResult);
       recordPhaseOutcome(wsDataResult);
-      metadataFetcher?.release(pid);
+      if (metadataFetcher) {
+        recoveryBoundary.admitSyncMutation(() => metadataFetcher.release(pid));
+      }
       if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
         break;
       }
-
-      hydrateOwnership();
       const storeDurationMs = Date.now() - storeStartedAt;
 
       logInfo(ctx, `SWM sync for "${pid}": ${validWsQuads.length} data + ${verifiedMetaForInsert.length} meta triples`);
@@ -1511,29 +1577,6 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
   return summary;
 }
 
-export function sharedMemoryOwnershipKeyFromGraph(contextGraphId: string, dataGraph: string): string | undefined {
-  const rootGraph = contextGraphWorkspaceGraphUri(contextGraphId);
-  if (dataGraph === rootGraph || isSharedMemoryBucketDescendantDataGraph(dataGraph, rootGraph)) return contextGraphId;
-
-  const prefix = `did:dkg:context-graph:${contextGraphId}/`;
-  const suffix = '/_shared_memory';
-  if (!dataGraph.startsWith(prefix)) return undefined;
-
-  const remainder = dataGraph.slice(prefix.length);
-  const suffixAt = remainder.indexOf(suffix);
-  if (suffixAt <= 0) return undefined;
-  const bucketGraph = dataGraph.slice(0, prefix.length + suffixAt + suffix.length);
-  const subGraphName = remainder.slice(0, suffixAt);
-  const tail = remainder.slice(suffixAt + suffix.length);
-  if (tail && (!tail.startsWith('/') || !isSharedMemoryBucketDescendantDataGraph(dataGraph, bucketGraph))) {
-    return undefined;
-  }
-  if (!subGraphName || subGraphName.includes('/')) return undefined;
-  if (!validateSubGraphName(subGraphName).valid) return undefined;
-
-  return `${contextGraphId}\0${subGraphName}`;
-}
-
 export interface PublicSnapshotMetadata {
   ref: string;
   digest: string;
@@ -1553,6 +1596,8 @@ export async function syncPublicSnapshotsForMeta(params: {
   fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
+  /** Shared with the owning requester invocation so every effect uses one guard. */
+  executionBoundary?: RecoveryExecutionAdmission;
   /**
    * Optional recovery hook invoked only after the complete immutable snapshot
    * has passed its signed digest/count check. Callers may make that one KA
@@ -1588,6 +1633,9 @@ export async function syncPublicSnapshotsForMeta(params: {
    */
   yieldedAtDeadline: boolean;
 }> {
+  const executionBoundary = params.executionBoundary
+    ?? createRecoveryExecutionAdmission();
+  executionBoundary.assertCurrent();
   const manifestSnapshots = params.snapshotWalk
     ? []
     : collectPublicSnapshotMetadata(params.metaQuads);
@@ -1658,6 +1706,7 @@ export async function syncPublicSnapshotsForMeta(params: {
   };
 
   for (const [index, snapshot] of snapshots.entries()) {
+    executionBoundary.assertCurrent();
     // A selected transfer owner may carry exact, manifest-bound evidence from
     // an earlier bounded slice. Skipping these refs is intentionally cheaper
     // than re-reading and re-hashing every snapshot blob and assertion graph:
@@ -1687,13 +1736,22 @@ export async function syncPublicSnapshotsForMeta(params: {
       break;
     }
     try {
-      if (await hasValidSnapshot(params.publicSnapshotStore, snapshot)) {
-        await params.onSnapshotReady?.(snapshot, 'cache');
+      if (await executionBoundary.read(
+        () => hasValidSnapshot(params.publicSnapshotStore!, snapshot),
+      )) {
+        if (params.onSnapshotReady) {
+          executionBoundary.assertCurrent();
+          await params.onSnapshotReady(snapshot, 'cache');
+          executionBoundary.assertCurrent();
+        }
         readySnapshots += 1;
         continue;
       }
 
-      const result = await params.fetchSyncPages(
+      const snapshotOptions: SyncPageFetchOptions = executionBoundary.signal === undefined
+        ? { snapshotRef: snapshot.ref }
+        : { snapshotRef: snapshot.ref, signal: executionBoundary.signal };
+      const result = await executionBoundary.read(() => params.fetchSyncPages(
         params.ctx,
         params.remotePeerId,
         params.contextGraphId,
@@ -1701,12 +1759,14 @@ export async function syncPublicSnapshotsForMeta(params: {
         'snapshot',
         '',
         params.deadline,
-        { snapshotRef: snapshot.ref },
-      );
+        snapshotOptions,
+      ));
       bytesReceived += result.bytesReceived;
       resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
       timedOutPhases += result.timedOut ? 1 : 0;
-      if (result.completed) params.deleteCheckpoint(result.checkpointKey);
+      if (result.completed) {
+        executionBoundary.admitSyncMutation(() => params.deleteCheckpoint(result.checkpointKey));
+      }
       else {
         // `fetchSyncPages` returns only the quads fetched during THIS call. We do
         // not persist an unverified prefix, so resuming a snapshot at nextOffset
@@ -1715,7 +1775,7 @@ export async function syncPublicSnapshotsForMeta(params: {
         // already completed snapshots remain cached and are skipped, preserving
         // monotonic recovery progress across the CG without accepting a partial
         // asset.
-        params.deleteCheckpoint(result.checkpointKey);
+        executionBoundary.admitSyncMutation(() => params.deleteCheckpoint(result.checkpointKey));
         abandonFrom(index);
         break;
       }
@@ -1737,7 +1797,7 @@ export async function syncPublicSnapshotsForMeta(params: {
         // repeat-pass design to a fixed point at zero progress. Skipping costs
         // this KA and nothing else — it stays uncached and unapplied, and is
         // retried from offset zero next pass.
-        params.deleteCheckpoint(result.checkpointKey);
+        executionBoundary.admitSyncMutation(() => params.deleteCheckpoint(result.checkpointKey));
         noteMissing(snapshot.ref);
         continue;
       }
@@ -1748,11 +1808,19 @@ export async function syncPublicSnapshotsForMeta(params: {
           `(expected ${snapshot.digest}/${snapshot.count}, got ${actualDigest}/${snapshotQuads.length})`,
         );
       }
-      await params.publicSnapshotStore.putSnapshot({ digest: snapshot.digest, quads: snapshotQuads });
-      await params.onSnapshotReady?.(snapshot, 'network');
+      await executionBoundary.admitAsyncMutation(() => params.publicSnapshotStore!.putSnapshot({
+        digest: snapshot.digest,
+        quads: snapshotQuads,
+      }));
+      if (params.onSnapshotReady) {
+        executionBoundary.assertCurrent();
+        await params.onSnapshotReady(snapshot, 'network');
+        executionBoundary.assertCurrent();
+      }
       completedPhases += 1;
       readySnapshots += 1;
     } catch (err) {
+      executionBoundary.assertCurrent();
       // Any failure in this KA's work — the blob read, the fetch, the
       // digest check, the store write, or materialization — leaves the walk
       // here. Carry what earlier iterations achieved out with it.

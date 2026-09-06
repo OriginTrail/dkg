@@ -8,15 +8,12 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
   createGraphKnowledgeAssetScope,
-  contextGraphWorkspaceGraphUri,
-  contextGraphWorkspaceMetaGraphUri,
   knowledgeAssetLayerGraphUri,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import {
   generateKnowledgeAssetShareMetadata,
   workspacePublicQuadsDigest,
-  type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -31,6 +28,23 @@ import {
   recoverContextGraphSwmWithProgressRetries,
   type RecoverContextGraphSwmResult,
 } from '../src/sync/requester/swm-recovery.js';
+import {
+  CG,
+  CTX as ctx,
+  DKG,
+  MemorySnapshotStore,
+  STATUS,
+  SUBJ,
+  UAL,
+  UAL_2,
+  WS,
+  WS_META,
+  XSD_INTEGER,
+  completeRecoveryApplyDeps as completeApplyDeps,
+  makeRecoveryDeps as makeDeps,
+  recoveryPage as page,
+  recoveryStatusValues as statusValues,
+} from './_helpers/swm-recovery-fixture.js';
 
 /**
  * integration. `recoverContextGraphSwm` fetches a CG's
@@ -39,17 +53,9 @@ import {
  * source's value rather than accumulating a corrupt `{v1,v2}` superset.
  * Transport + verifier are mocked (no libp2p); the apply hits a real store.
  */
-const CG = 'ws00-recovery';
-const WS = contextGraphWorkspaceGraphUri(CG);
-const WS_META = contextGraphWorkspaceMetaGraphUri(CG);
 const SUBGRAPH = 'research';
 const SUB_WS = `did:dkg:context-graph:${CG}/${SUBGRAPH}/_shared_memory`;
 const SUB_WS_META = `did:dkg:context-graph:${CG}/${SUBGRAPH}/_shared_memory_meta`;
-const SUBJ = 'urn:ws00r:shipment';
-const STATUS = 'http://schema.org/status';
-const ctx: OperationContext = { operationId: 'test', operationName: 'sync' } as never;
-const DKG = 'http://dkg.io/ontology/';
-const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 
 function recoveryResult(
   readySnapshots: number,
@@ -455,62 +461,9 @@ describe('syncPublicSnapshotsForMeta', () => {
     }
   });
 });
-const UAL = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/7';
-const UAL_2 = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/8';
-
-class MemorySnapshotStore implements WorkspacePublicSnapshotStore {
-  readonly snapshots = new Map<string, Quad[]>();
-
-  async putSnapshot(input: { readonly digest: string; readonly quads: readonly Quad[] }) {
-    this.snapshots.set(input.digest, input.quads.map((quad) => ({ ...quad })));
-    return { ref: input.digest, byteLength: 0 };
-  }
-
-  async getSnapshot(ref: string): Promise<Quad[] | null> {
-    return this.snapshots.get(ref)?.map((quad) => ({ ...quad })) ?? null;
-  }
-}
-
-function page(quads: Quad[], completed = true): SyncPageResult {
-  return { quads, bytesReceived: 0, resumedFromOffset: 0, nextOffset: quads.length, checkpointKey: 'k', completed };
-}
-async function statusValues(store: OxigraphStore): Promise<string[]> {
-  const r = await store.query(`SELECT ?o WHERE { GRAPH <${WS}> { <${SUBJ}> <${STATUS}> ?o } }`);
-  return r.type === 'bindings' ? r.bindings.map((b) => b['o']) : [];
-}
-
 describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
   const stores: OxigraphStore[] = [];
   afterEach(async () => { await Promise.all(stores.splice(0).map((s) => s.close().catch(() => {}))); });
-
-  function makeDeps(store: OxigraphStore, sourceData: Quad[], sourceMeta: Quad[] = []) {
-    return {
-      ctx,
-      remotePeerId: 'peer-source',
-      contextGraphId: CG,
-      deadline: Number.MAX_SAFE_INTEGER,
-      fetchSyncPages: async (
-        _c: OperationContext, _p: string, _cg: string, _inc: boolean,
-        phase: 'data' | 'meta',
-      ): Promise<SyncPageResult> => page(phase === 'data' ? sourceData : sourceMeta),
-      processSharedMemoryBatch: async (dataQuads: Quad[], metaQuads: Quad[]) => ({
-        verifiedData: dataQuads,
-        verifiedMeta: metaQuads,
-        // Production derives the legacy recovery plan from rootEntity metadata,
-        // so it is available during the metadata-only classification call. This
-        // compact fixture models that plan from the declared source snapshot.
-        entityCreators: [...new Set(sourceData.map((q) => q.subject))].map((entity) => ({
-          dataGraph: WS, entity, creator: 'peer-source',
-        })),
-        droppedDataTriples: 0,
-      }),
-      writeLocks: new Map<string, Promise<void>>(),
-      store,
-      ensureContextGraph: async () => {},
-      setCheckpoint: () => {},
-      deleteCheckpoint: () => {},
-    };
-  }
 
   it('replaces a stale local value with the source value (no union corruption)', async () => {
     const store = new OxigraphStore();
@@ -728,7 +681,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
         entityCreators: [],
         droppedDataTriples: 0,
       }),
-      writeLocks: new Map<string, Promise<void>>(),
+      ...completeApplyDeps(store),
       store,
       publicSnapshotStore: snapshotStore,
       ensureContextGraph: async () => {},
@@ -815,15 +768,17 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       contextGraphId: CG,
       deadline: Number.MAX_SAFE_INTEGER,
       fetchSyncPages: async (
-        _c, _p, _cg, _inc, phase, _graph, _deadline, snapshotRef,
+        _c, _p, _cg, _inc, phase, _graph, _deadline, fetchOptions,
       ): Promise<SyncPageResult> => {
         if (phase === 'meta') return page(sourceMeta);
         if (phase === 'data') {
           dataFetches += 1;
           throw new Error('rootless recovery must not request aggregate data');
         }
-        const asset = assets.find((candidate) => candidate.digest === snapshotRef);
-        if (!asset) throw new Error(`Unexpected snapshot ref ${snapshotRef}`);
+        const asset = assets.find(
+          (candidate) => candidate.digest === fetchOptions?.snapshotRef,
+        );
+        if (!asset) throw new Error(`Unexpected snapshot ref ${fetchOptions?.snapshotRef}`);
         snapshotFetches.set(asset.digest, (snapshotFetches.get(asset.digest) ?? 0) + 1);
         if (round === 1 && asset === assets[1]) {
           return { ...page([], false), checkpointKey: `snapshot:${asset.digest}` };
@@ -833,7 +788,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       processSharedMemoryBatch: async (_dataQuads, metaQuads) => ({
         verifiedData: [], verifiedMeta: metaQuads, entityCreators: [], droppedDataTriples: 0,
       }),
-      writeLocks: new Map<string, Promise<void>>(),
+      ...completeApplyDeps(store),
       store,
       publicSnapshotStore: snapshotStore,
       ensureContextGraph: async () => {},
@@ -913,7 +868,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       processSharedMemoryBatch: async (_dataQuads, metaQuads) => ({
         verifiedData: [], verifiedMeta: metaQuads, entityCreators: [], droppedDataTriples: 0,
       }),
-      writeLocks: new Map<string, Promise<void>>(),
+      ...completeApplyDeps(store),
       store,
       publicSnapshotStore: new MemorySnapshotStore(),
       ensureContextGraph: async () => {},

@@ -4,6 +4,8 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
+import type { RecoveryExecutionGuard } from
+  '../src/sync/requester/recovery-execution-guard.js';
 import { SyncVerifyWorker } from '../src/sync-verify-worker.js';
 
 const CG_ID = 'sync-owned-cg';
@@ -71,6 +73,74 @@ async function registeredSubGraphNamesFromStore(store: OxigraphStore, contextGra
 }
 
 describe('runSharedMemorySync ownership hydration', () => {
+  it('finishes verified data, metadata, and ownership when revoked during the data insert', async () => {
+    const revoked = new Error('selected-public recovery revoked during aggregate apply');
+    const controller = new AbortController();
+    let current = true;
+    const guard: RecoveryExecutionGuard = {
+      signal: controller.signal,
+      assertCurrent: () => {
+        if (!current) throw revoked;
+      },
+    };
+    const dataQuad: Quad = {
+      graph: ROOT_GRAPH,
+      subject: ROOT_ENTITY,
+      predicate: SCHEMA_NAME,
+      object: '"root"',
+    };
+    const metadataQuad: Quad = {
+      graph: ROOT_META_GRAPH,
+      subject: 'urn:dkg:share:atomic-apply',
+      predicate: RDF_TYPE,
+      object: `${DKG}WorkspaceOperation`,
+    };
+    const inserted: Quad[][] = [];
+    const owned = new Map<string, string>();
+
+    const summary = await runSharedMemorySync({
+      mode: { kind: 'selected-recovery', recoveryGuard: guard },
+      ctx: createOperationContext('sync'),
+      remotePeerId: '12D3KooWRequesterAtomicApply',
+      contextGraphIds: [CG_ID],
+      createContextGraphSyncDeadline: () => Date.now() + 30_000,
+      fetchSyncPages: async (_ctx, _peer, _cg, _includeSwm, phase) => (
+        phase === 'data' ? page([dataQuad], phase) : page([metadataQuad], phase)
+      ),
+      processSharedMemoryBatch: async () => ({
+        verifiedData: [dataQuad],
+        verifiedMeta: [metadataQuad],
+        totalFetchedDataQuads: 1,
+        totalFetchedMetaQuads: 1,
+        droppedDataTriples: 0,
+        emptyResponses: 0,
+        entityCreators: [{
+          dataGraph: ROOT_GRAPH,
+          entity: ROOT_ENTITY,
+          creator: 'peer-atomic',
+        }],
+      }),
+      ensureContextGraph: async () => {},
+      storeInsert: async (quads) => {
+        inserted.push([...quads]);
+        if (quads.includes(dataQuad)) {
+          current = false;
+          controller.abort(revoked);
+        }
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      ensureOwnedMap: () => owned,
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(inserted).toEqual([[dataQuad], [metadataQuad]]);
+    expect(owned.get(ROOT_ENTITY)).toBe('peer-atomic');
+    expect(summary.failedPhases).toBe(1);
+  });
+
   it('keeps root rows out of a named-subgraph-only compatibility sync', async () => {
     const inserted: Quad[] = [];
     const processedBatches: Array<{ data: Quad[]; meta: Quad[] }> = [];
@@ -80,6 +150,7 @@ describe('runSharedMemorySync ownership hydration', () => {
     const subMeta = { graph: SUB_GRAPH_META, subject: 'urn:op:sub', predicate: RDF_TYPE, object: `${DKG}WorkspaceOperation` };
 
     const summary = await runSharedMemorySync({
+      mode: { kind: 'ordinary' },
       ctx: createOperationContext('sync'),
       remotePeerId: '12D3KooWNamedSubgraphCompatibility',
       contextGraphIds: [CG_ID],
@@ -127,6 +198,7 @@ describe('runSharedMemorySync ownership hydration', () => {
     ];
 
     const summary = await runSharedMemorySync({
+      mode: { kind: 'ordinary' },
       ctx: createOperationContext('sync'),
       remotePeerId: '12D3KooWRequesterOwnership',
       contextGraphIds: [CG_ID],
@@ -189,6 +261,7 @@ describe('runSharedMemorySync ownership hydration', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterReplicatedRegistration',
         contextGraphIds: [CG_ID],
@@ -252,6 +325,7 @@ describe('runSharedMemorySync ownership hydration', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterColdSubgraph',
         contextGraphIds: [CG_ID],
@@ -308,6 +382,7 @@ describe('runSharedMemorySync ownership hydration', () => {
     try {
       await durableStore.insert(subGraphRegistrationMeta(SUB_GRAPH));
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterDurableRegisteredSub',
         contextGraphIds: [CG_ID],
@@ -389,6 +464,7 @@ describe('runSharedMemorySync ownership hydration', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterForgedRegistration',
         contextGraphIds: [CG_ID],
@@ -439,6 +515,7 @@ describe('runSharedMemorySync ownership hydration', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterExcludedRegistration',
         contextGraphIds: [CG_ID],
@@ -497,6 +574,7 @@ describe('runSharedMemorySync ownership hydration', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterDescendantSwm',
         contextGraphIds: [CG_ID],
@@ -552,6 +630,7 @@ describe('runSharedMemorySync ownership hydration', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterMalformedDescendant',
         contextGraphIds: [CG_ID],
@@ -594,6 +673,7 @@ describe('runSharedMemorySync ownership hydration', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterFakeMeta',
         contextGraphIds: [CG_ID],
@@ -636,6 +716,7 @@ describe('runSharedMemorySync ownership hydration', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterNestedFake',
         contextGraphIds: [CG_ID],
@@ -678,6 +759,7 @@ describe('runSharedMemorySync ownership hydration', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterChildCgFake',
         contextGraphIds: [CG_ID],

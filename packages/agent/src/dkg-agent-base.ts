@@ -34,11 +34,18 @@ import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
 import { SyncOnConnectPeerScheduler } from './sync/on-connect/peer-scheduler.js';
+import {
+  SwmTargetExecutorSessionFactoryV1,
+  type SwmTargetExecutorPortsV1,
+  type SwmTargetExecutorV1,
+} from './sync/requester/swm-target-executor.js';
 import type {
   Rfc64AuthorizedSwmRecoveryPlanV1,
   Rfc64SwmRecoveryCoordinatorV1,
 } from
   './rfc64/swm-recovery-coordinator-v1.js';
+import type { Rfc64SwmRecoveryRuntimeV1 } from
+  './dkg-agent-rfc64-swm-recovery-runtime.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -698,6 +705,7 @@ export class DKGAgentBase {
   /** Shared write locks so gossip writes serialize against local CAS writes. */
   protected readonly writeLocks: Map<string, Promise<void>>;
   protected readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  private swmTargetExecutorSessionFactoryV1?: SwmTargetExecutorSessionFactoryV1;
   protected sharedMemoryHandler?: InstanceType<typeof SharedMemoryHandler>;
   protected gossipPublishHandler?: GossipPublishHandler;
   protected finalizationHandler?: FinalizationHandler;
@@ -1675,6 +1683,8 @@ export class DKGAgentBase {
     | null = null;
   /** Typed RFC-64 admission and current-configuration validation boundary. */
   protected rfc64SwmRecoveryCoordinatorV1!: Rfc64SwmRecoveryCoordinatorV1;
+  /** Cohesive owner of RFC-64 recovery authority, leases and selection invalidation. */
+  protected rfc64SwmRecoveryRuntimeV1!: Rfc64SwmRecoveryRuntimeV1;
   /**
    * Per-peer timestamp of the last time all live connections to that peer
    * were gone. Used to avoid suppressing reconnect catch-up with a
@@ -1840,6 +1850,24 @@ export class DKGAgentBase {
     this.publisher.setWorkspaceSenderKeyEncryptor((input) => (this as unknown as DKGAgent).encryptWorkspacePayloadWithSenderKey(input));
     this.syncCheckpoints = config.syncCheckpointStore ?? this.syncCheckpoints;
     this.changelogCursors = config.changelogCursorStore ?? this.changelogCursors;
+  }
+
+  /** Bind stable requester ports once at concrete-agent construction. */
+  protected configureSwmTargetExecutorSessionsV1(
+    ports: SwmTargetExecutorPortsV1,
+  ): void {
+    if (this.swmTargetExecutorSessionFactoryV1 !== undefined) {
+      throw new Error('SWM target executor sessions are already configured');
+    }
+    this.swmTargetExecutorSessionFactoryV1 = new SwmTargetExecutorSessionFactoryV1(ports);
+  }
+
+  /** Create one synchronization-scoped executor with isolated mutable state. */
+  protected createSwmTargetExecutorSessionV1(): SwmTargetExecutorV1 {
+    if (this.swmTargetExecutorSessionFactoryV1 === undefined) {
+      throw new Error('SWM target executor sessions are not configured');
+    }
+    return this.swmTargetExecutorSessionFactoryV1.createSession();
   }
 
   /**
