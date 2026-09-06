@@ -65,6 +65,18 @@ type AuthorityMarkerStaysInternal =
 type RootRegisteredAuthority = import(
   '@origintrail-official/dkg-agent'
 ).RegisteredContextGraphAuthority;
+type RootLivePolicyUnavailable = import(
+  '@origintrail-official/dkg-agent'
+).LiveOnChainAccessPolicyUnavailable;
+type RootLivePolicyUnavailableReason = import(
+  '@origintrail-official/dkg-agent'
+).LiveOnChainAccessPolicyUnavailableReason;
+type RootRegisteredAuthorityUnavailable = import(
+  '@origintrail-official/dkg-agent'
+).RegisteredContextGraphAuthorityUnavailable;
+type RootRegisteredAuthorityUnavailableReason = import(
+  '@origintrail-official/dkg-agent'
+).RegisteredContextGraphAuthorityUnavailableReason;
 type LegacyDeepRegisteredAuthority = import(
   '@origintrail-official/dkg-agent/dist/dkg-agent-cg-resolve.js'
 ).RegisteredContextGraphAuthority;
@@ -91,6 +103,15 @@ type ExpectedLegacyRegisteredAuthority =
       onChainId?: bigint;
       detail?: string;
     };
+type ExpectedLivePolicyUnavailable = {
+  kind: 'unavailable';
+  reason: 'chain-access-policy-timeout' | 'chain-access-policy-unknown';
+  detail?: string;
+};
+type ExpectedRegisteredAuthorityUnavailable = Extract<
+  ExpectedLegacyRegisteredAuthority,
+  { kind: 'unavailable' }
+>;
 type LegacyAuthorityMatchesRoot = AssertTrue<
   LegacyDeepRegisteredAuthority extends RootRegisteredAuthority ? true : false
 >;
@@ -108,6 +129,32 @@ type LegacyAuthorityMatchesExpected = AssertTrue<
 >;
 type ExpectedAuthorityMatchesLegacy = AssertTrue<
   ExpectedLegacyRegisteredAuthority extends LegacyDeepRegisteredAuthority ? true : false
+>;
+type LivePolicyUnavailableMatchesExpected = AssertTrue<
+  RootLivePolicyUnavailable extends ExpectedLivePolicyUnavailable ? true : false
+>;
+type ExpectedMatchesLivePolicyUnavailable = AssertTrue<
+  ExpectedLivePolicyUnavailable extends RootLivePolicyUnavailable ? true : false
+>;
+type LivePolicyReasonMatchesExpected = AssertTrue<
+  RootLivePolicyUnavailableReason extends ExpectedLivePolicyUnavailable['reason'] ? true : false
+>;
+type ExpectedMatchesLivePolicyReason = AssertTrue<
+  ExpectedLivePolicyUnavailable['reason'] extends RootLivePolicyUnavailableReason ? true : false
+>;
+type RegisteredUnavailableMatchesExpected = AssertTrue<
+  RootRegisteredAuthorityUnavailable extends ExpectedRegisteredAuthorityUnavailable ? true : false
+>;
+type ExpectedMatchesRegisteredUnavailable = AssertTrue<
+  ExpectedRegisteredAuthorityUnavailable extends RootRegisteredAuthorityUnavailable ? true : false
+>;
+type RegisteredUnavailableReasonMatchesExpected = AssertTrue<
+  RootRegisteredAuthorityUnavailableReason extends
+    ExpectedRegisteredAuthorityUnavailable['reason'] ? true : false
+>;
+type ExpectedMatchesRegisteredUnavailableReason = AssertTrue<
+  ExpectedRegisteredAuthorityUnavailable['reason'] extends
+    RootRegisteredAuthorityUnavailableReason ? true : false
 >;
 type DeepAuthorityStaysInternal =
   // @ts-expect-error The export map blocks authority implementation deep imports.
@@ -139,6 +186,14 @@ export type {
   ExpectedAuthorityMatchesRoot,
   LegacyAuthorityMatchesExpected,
   ExpectedAuthorityMatchesLegacy,
+  LivePolicyUnavailableMatchesExpected,
+  ExpectedMatchesLivePolicyUnavailable,
+  LivePolicyReasonMatchesExpected,
+  ExpectedMatchesLivePolicyReason,
+  RegisteredUnavailableMatchesExpected,
+  ExpectedMatchesRegisteredUnavailable,
+  RegisteredUnavailableReasonMatchesExpected,
+  ExpectedMatchesRegisteredUnavailableReason,
   GateAuthorityResultStaysInternal,
   AuthorityMarkerStaysInternal,
   DeepAuthorityStaysInternal,

@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { RegisteredContextGraphAuthority } from
+import type { RegisteredContextGraphAuthorityUnavailableReason } from
   '../../registered-context-graph-authority.js';
-
-type RegisteredContextGraphAuthorityUnavailableReason = Extract<
-  RegisteredContextGraphAuthority,
-  { kind: 'unavailable' }
->['reason'];
 
 const REGISTERED_CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASON_REGISTRY = Object.freeze({
   'chain-name-binding-unavailable': true,
