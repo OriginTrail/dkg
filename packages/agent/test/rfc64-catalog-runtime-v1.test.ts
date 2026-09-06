@@ -291,6 +291,60 @@ describe('Rfc64CatalogRuntimeV1', () => {
     expect(options.workloads[1]!.close).not.toHaveBeenCalled();
   });
 
+  it('retires mutation persistence when its open attempt fails and fences restart', async () => {
+    const calls: string[] = [];
+    const baseOptions = runtimeOptions(calls);
+    let failOpen = true;
+    let releaseMutationClose!: () => void;
+    const mutationCloseGate = new Promise<void>((resolve) => {
+      releaseMutationClose = resolve;
+    });
+    const options: Rfc64CatalogRuntimeOptionsV1 = {
+      ...baseOptions,
+      mutationPersistence: {
+        open: vi.fn(() => {
+          calls.push('mutationPersistence.open');
+          if (failOpen) throw new Error('mutation persistence open failed');
+        }),
+        close: vi.fn(async () => {
+          calls.push('mutationPersistence.close');
+          await mutationCloseGate;
+        }),
+      },
+    };
+    const runtime = new Rfc64CatalogRuntimeV1(options);
+    const ctx = createOperationContext('system');
+
+    expect(() => runtime.start(ctx)).toThrow('mutation persistence open failed');
+    await vi.waitFor(() => expect(options.mutationPersistence.close).toHaveBeenCalledOnce());
+    expect(options.inventoryObservers.close).toHaveBeenCalledOnce();
+    expect(options.publicCatalog.start).not.toHaveBeenCalled();
+    expect(options.publicCatalog.closeReceiverAdmission).not.toHaveBeenCalled();
+    expect(options.publicCatalog.close).not.toHaveBeenCalled();
+    expect(options.workloads[0]!.start).not.toHaveBeenCalled();
+    expect(options.workloads[0]!.close).not.toHaveBeenCalled();
+    expect(options.workloads[1]!.start).not.toHaveBeenCalled();
+    expect(options.workloads[1]!.close).not.toHaveBeenCalled();
+    expect(calls).toEqual([
+      'inventoryObservers.open',
+      'mutationPersistence.open',
+      'inventoryObservers.close',
+      'mutationPersistence.close',
+    ]);
+
+    const rollback = runtime.close();
+    expect(runtime.close()).toBe(rollback);
+    expect(() => runtime.start(ctx)).toThrow('cannot start while close is in progress');
+    releaseMutationClose();
+    await rollback;
+
+    failOpen = false;
+    runtime.start(ctx);
+    expect(options.mutationPersistence.open).toHaveBeenCalledTimes(2);
+    expect(options.publicCatalog.start).toHaveBeenCalledOnce();
+    await runtime.close();
+  });
+
   it('does not retire workloads whose starts were never attempted', async () => {
     const calls: string[] = [];
     const baseOptions = runtimeOptions(calls);

@@ -233,6 +233,51 @@ describe('RFC-64 catalog authority refresh loop', () => {
     await closing;
   });
 
+  it('uses the production four-read concurrency cap by default', async () => {
+    const limit = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.maxConcurrentReads;
+    expect(limit).toBe(4);
+    const contextGraphIds = Array.from(
+      { length: limit + 1 },
+      (_, index) => `cg-${index + 1}`,
+    );
+    const releases: Array<() => void> = [];
+    const gates = contextGraphIds.map(() => new Promise<void>((resolve) => {
+      releases.push(resolve);
+    }));
+    const markStarted: Array<() => void> = [];
+    const started = contextGraphIds.map(() => new Promise<void>((resolve) => {
+      markStarted.push(resolve);
+    }));
+    const attempts: string[] = [];
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => contextGraphIds,
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      refreshContextGraph: async (contextGraphId) => {
+        const index = contextGraphIds.indexOf(contextGraphId);
+        attempts.push(contextGraphId);
+        markStarted[index]!();
+        await gates[index];
+      },
+      onRefreshFailure: () => undefined,
+    });
+
+    loop.start();
+    await Promise.all(started.slice(0, limit));
+    expect(attempts).toEqual(contextGraphIds.slice(0, limit));
+
+    let fifthStarted = false;
+    void started[limit]!.then(() => { fifthStarted = true; });
+    await Promise.resolve();
+    expect(fifthStarted).toBe(false);
+
+    releases[0]!();
+    await started[limit];
+    expect(attempts).toEqual(contextGraphIds);
+
+    for (const release of releases.slice(1)) release();
+    await loop.close();
+  });
+
   it('aborts and physically drains an in-flight pass before close settles', async () => {
     const { scheduled, cleared, scheduler } = createSchedulerHarness();
     let markStarted!: () => void;
