@@ -88,6 +88,8 @@ try {
   }
 }
 const requiredCatalogMethods = [
+  'startRfc64PublicCatalogServiceV1',
+  'closeRfc64PublicCatalogServiceV1',
   'acceptRfc64CatalogAccessSnapshotV1',
   'publishAuthorCatalogGenesisV1',
   'publishAuthorCatalogExactSetSuccessorV1',

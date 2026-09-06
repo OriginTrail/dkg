@@ -2200,6 +2200,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this.rfc64CatalogRuntimeV1.start(ctx);
   }
 
+  /**
+   * @deprecated Use `startRfc64CatalogRuntimeV1`. Kept as a patch-release
+   * compatibility alias while the complete runtime owns the service lifecycle.
+   */
+  startRfc64PublicCatalogServiceV1(this: DKGAgent, ctx: OperationContext): void {
+    this.startRfc64CatalogRuntimeV1(ctx);
+  }
+
   /** Construct the transport, or return null while RFC-64 is dormant. */
   createRfc64PublicCatalogServiceV1(
     this: DKGAgent,
@@ -2391,6 +2399,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   /** Close the complete agent-owned RFC-64 catalog runtime. */
   closeRfc64CatalogRuntimeV1(this: DKGAgent): Promise<void> {
     return this.rfc64CatalogRuntimeV1.close();
+  }
+
+  /**
+   * @deprecated Use `closeRfc64CatalogRuntimeV1`. Kept as a patch-release
+   * compatibility alias while preserving the complete physical drain.
+   */
+  closeRfc64PublicCatalogServiceV1(this: DKGAgent): Promise<void> {
+    return this.closeRfc64CatalogRuntimeV1();
   }
 
   /** Final runtime stage after transport and every workload physically retire. */

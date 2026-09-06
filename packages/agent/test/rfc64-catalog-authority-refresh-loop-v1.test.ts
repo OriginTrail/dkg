@@ -283,4 +283,50 @@ describe('RFC-64 catalog authority refresh loop', () => {
     expect(reported).toEqual([]);
     expect(cleared).toEqual([scheduled[0]!.handle]);
   });
+
+  it('retires lanes that leave the active responsibility set and recreates them on return', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    let activeContextGraphIds = ['cg-a'];
+    let releaseFirst!: () => void;
+    let markFirstStarted!: () => void;
+    let markFirstAborted!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+    const firstAborted = new Promise<void>((resolve) => { markFirstAborted = resolve; });
+    const attempts: string[] = [];
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => activeContextGraphIds,
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      refreshContextGraph: async (contextGraphId, signal) => {
+        attempts.push(contextGraphId);
+        if (attempts.length !== 1) return;
+        signal.addEventListener('abort', markFirstAborted, { once: true });
+        markFirstStarted();
+        // A non-cooperative physical read must still be drained after its lane
+        // is no longer part of the desired responsibility set.
+        await firstGate;
+      },
+      onRefreshFailure: () => undefined,
+      scheduler,
+      maxConcurrentReads: 1,
+    });
+
+    loop.start();
+    await firstStarted;
+    activeContextGraphIds = [];
+    scheduled[0]!.callback();
+    await firstAborted;
+    let idleSettled = false;
+    const idle = loop.whenIdle().then(() => { idleSettled = true; });
+    await Promise.resolve();
+    expect(idleSettled).toBe(false);
+    releaseFirst();
+    await idle;
+
+    activeContextGraphIds = ['cg-a'];
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(attempts).toEqual(['cg-a', 'cg-a']);
+    await loop.close();
+  });
 });

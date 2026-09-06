@@ -106,6 +106,7 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
   readonly #scheduler: Rfc64CatalogAuthorityRefreshSchedulerV1;
   readonly #permits: Rfc64AuthorityRefreshPermitPoolV1;
   readonly #lanes = new Map<string, Rfc64CoalescingSupervisorV1>();
+  readonly #retirements = new Set<Promise<void>>();
   #timer: ReturnType<typeof setInterval> | null = null;
   #started = false;
   #close: Promise<void> | null = null;
@@ -145,6 +146,20 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
     });
   }
 
+  #retireLane(
+    contextGraphId: string,
+    lane: Rfc64CoalescingSupervisorV1,
+  ): void {
+    if (this.#lanes.get(contextGraphId) !== lane) return;
+    this.#lanes.delete(contextGraphId);
+    const retirement = lane.close();
+    this.#retirements.add(retirement);
+    void retirement.then(
+      () => { this.#retirements.delete(retirement); },
+      () => { this.#retirements.delete(retirement); },
+    );
+  }
+
   start(): void {
     if (this.#close !== null) {
       throw new Error('RFC-64 authority refresh cannot start while close is in progress');
@@ -167,7 +182,13 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
       this.options.onActiveContextGraphIdsReadFailure(error);
       return;
     }
-    for (const contextGraphId of new Set(activeContextGraphIds)) {
+    const desiredContextGraphIds = new Set(activeContextGraphIds);
+    for (const [contextGraphId, lane] of this.#lanes) {
+      if (!desiredContextGraphIds.has(contextGraphId)) {
+        this.#retireLane(contextGraphId, lane);
+      }
+    }
+    for (const contextGraphId of desiredContextGraphIds) {
       let lane = this.#lanes.get(contextGraphId);
       if (lane === undefined || lane.closed) {
         lane = this.#createLane(contextGraphId);
@@ -180,11 +201,20 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
   async whenIdle(): Promise<void> {
     for (;;) {
       const lanes = [...this.#lanes.values()];
-      await Promise.all(lanes.map((lane) => lane.whenIdle()));
-      const current = [...this.#lanes.values()];
-      if (lanes.length === current.length && lanes.every((lane, index) => (
-        lane === current[index]
-      ))) return;
+      const retirements = [...this.#retirements];
+      await Promise.all([
+        ...lanes.map((lane) => lane.whenIdle()),
+        ...retirements,
+      ]);
+      const currentLanes = [...this.#lanes.values()];
+      const currentRetirements = [...this.#retirements];
+      const sameLanes = lanes.length === currentLanes.length
+        && lanes.every((lane, index) => lane === currentLanes[index]);
+      const sameRetirements = retirements.length === currentRetirements.length
+        && retirements.every((retirement, index) => (
+          retirement === currentRetirements[index]
+        ));
+      if (sameLanes && sameRetirements) return;
     }
   }
 
@@ -196,11 +226,16 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
       this.#timer = null;
     }
     const lanes = [...this.#lanes.values()];
-    const closing = Promise.all(lanes.map((lane) => lane.close())).then(() => undefined);
+    const retirements = [...this.#retirements];
+    const closing = Promise.all([
+      ...lanes.map((lane) => lane.close()),
+      ...retirements,
+    ]).then(() => undefined);
     this.#close = closing;
     void closing.then(() => {
       if (this.#close !== closing) return;
       this.#lanes.clear();
+      this.#retirements.clear();
       this.#close = null;
     });
     return closing;
