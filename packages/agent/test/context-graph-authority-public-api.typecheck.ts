@@ -68,11 +68,46 @@ type RootRegisteredAuthority = import(
 type LegacyDeepRegisteredAuthority = import(
   '@origintrail-official/dkg-agent/dist/dkg-agent-cg-resolve.js'
 ).RegisteredContextGraphAuthority;
+type ExpectedLegacyRegisteredAuthority =
+  | { kind: 'unregistered' }
+  | { kind: 'public'; onChainId: bigint }
+  | { kind: 'private'; onChainId: bigint; participantAgents: string[] }
+  | {
+      kind: 'unavailable';
+      reason: 'chain-access-policy-timeout' | 'chain-access-policy-unknown';
+      onChainId: bigint;
+      detail?: string;
+    }
+  | {
+      kind: 'unavailable';
+      reason:
+        | 'chain-name-binding-unavailable'
+        | 'local-chain-binding-unavailable'
+        | 'local-existence-unavailable'
+        | 'chain-access-policy-unavailable'
+        | 'chain-participant-authority-unsupported'
+        | 'chain-participant-authority-unavailable'
+        | 'chain-participant-authority-invalid';
+      onChainId?: bigint;
+      detail?: string;
+    };
 type LegacyAuthorityMatchesRoot = AssertTrue<
   LegacyDeepRegisteredAuthority extends RootRegisteredAuthority ? true : false
 >;
 type RootAuthorityMatchesLegacy = AssertTrue<
   RootRegisteredAuthority extends LegacyDeepRegisteredAuthority ? true : false
+>;
+type RootAuthorityMatchesExpected = AssertTrue<
+  RootRegisteredAuthority extends ExpectedLegacyRegisteredAuthority ? true : false
+>;
+type ExpectedAuthorityMatchesRoot = AssertTrue<
+  ExpectedLegacyRegisteredAuthority extends RootRegisteredAuthority ? true : false
+>;
+type LegacyAuthorityMatchesExpected = AssertTrue<
+  LegacyDeepRegisteredAuthority extends ExpectedLegacyRegisteredAuthority ? true : false
+>;
+type ExpectedAuthorityMatchesLegacy = AssertTrue<
+  ExpectedLegacyRegisteredAuthority extends LegacyDeepRegisteredAuthority ? true : false
 >;
 type DeepAuthorityStaysInternal =
   // @ts-expect-error The export map blocks authority implementation deep imports.
@@ -100,6 +135,10 @@ export type {
   AuthorityGuardStaysInternal,
   LegacyAuthorityMatchesRoot,
   RootAuthorityMatchesLegacy,
+  RootAuthorityMatchesExpected,
+  ExpectedAuthorityMatchesRoot,
+  LegacyAuthorityMatchesExpected,
+  ExpectedAuthorityMatchesLegacy,
   GateAuthorityResultStaysInternal,
   AuthorityMarkerStaysInternal,
   DeepAuthorityStaysInternal,

@@ -1,8 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  REGISTERED_CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS,
-} from '../../registered-context-graph-authority.js';
+  LIVE_ON_CHAIN_ACCESS_POLICY_UNAVAILABLE_REASONS,
+} from './context-graph-access-policy.js';
+
+const REGISTERED_CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS = Object.freeze([
+  'chain-name-binding-unavailable',
+  'local-chain-binding-unavailable',
+  'local-existence-unavailable',
+  'chain-access-policy-unavailable',
+  ...LIVE_ON_CHAIN_ACCESS_POLICY_UNAVAILABLE_REASONS,
+  'chain-participant-authority-unsupported',
+  'chain-participant-authority-unavailable',
+  'chain-participant-authority-invalid',
+] as const);
 
 export const CONTEXT_GRAPH_AGENT_GATE_UNAVAILABLE_REASONS = Object.freeze([
   ...REGISTERED_CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS,
