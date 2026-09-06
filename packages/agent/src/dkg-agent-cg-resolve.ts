@@ -340,10 +340,10 @@ import {
 } from './dkg-agent-constants.js';
 import { isTransientBootChainError } from './dkg-agent-boot.js';
 import { createAbortError, runBoundedOperation } from './bounded-operation.js';
-import type {
-  RegisteredContextGraphAuthority,
-  LiveOnChainAccessPolicyState,
-} from './registered-context-graph-authority.js';
+import type { RegisteredContextGraphAuthority } from
+  './registered-context-graph-authority.js';
+import type { LiveOnChainAccessPolicyState } from
+  './internal/context-graph-authority/context-graph-access-policy.js';
 // Keep the historical dist/dkg-agent-cg-resolve.js type entry point backed by
 // the same stable public contract as the package root.
 export type { RegisteredContextGraphAuthority } from

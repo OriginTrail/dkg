@@ -14,6 +14,9 @@ const legacyCatalogSync = await import(
 const publicCatalogActivation = await import(
   '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1'
 );
+const registeredAuthorityContract = await import(
+  '@origintrail-official/dkg-agent/dist/registered-context-graph-authority.js'
+);
 const require = createRequire(import.meta.url);
 const packageManifest = require('@origintrail-official/dkg-agent/package.json');
 const packageExports = packageManifest.exports;
@@ -60,6 +63,9 @@ if (
   || 'isContextGraphAuthorityUnavailableMarker' in root
 ) {
   throw new Error('internal authority marker machinery leaked from the package root');
+}
+if (Object.keys(registeredAuthorityContract).length !== 0) {
+  throw new Error('the registered authority contract must remain type-only at runtime');
 }
 if (packageExports['./dist/internal/*'] !== null) {
   throw new Error('the internal namespace is not structurally blocked');
