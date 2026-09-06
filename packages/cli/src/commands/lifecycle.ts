@@ -97,6 +97,38 @@ import {
   runForegroundSupervisor,
 } from '../cli-supervisor.js';
 import { resolveDaemonNodeCommand } from '../daemon-entrypoint.js';
+import { resolveShutdownPolicy } from '../daemon/shutdown-policy.js';
+import {
+  daemonShutdownCoordinator,
+  reportDaemonShutdownResult,
+  type DaemonShutdownCoordinator,
+} from '../daemon/shutdown-wait.js';
+
+interface StopCommandDependencies {
+  connectApi(): Promise<{ shutdown(): Promise<unknown> }>;
+  coordinator: DaemonShutdownCoordinator;
+  log(message: string): void;
+  error(message: string): void;
+}
+
+const defaultStopCommandDependencies: StopCommandDependencies = {
+  connectApi: () => ApiClient.connect(),
+  coordinator: daemonShutdownCoordinator,
+  log: (message) => console.log(message),
+  error: (message) => console.error(message),
+};
+
+/** Executable boundary for the user-facing `dkg stop` lifecycle. */
+export async function executeStopCommand(
+  dependencies: StopCommandDependencies = defaultStopCommandDependencies,
+): Promise<boolean> {
+  const client = await dependencies.connectApi();
+  const result = await dependencies.coordinator.stopViaApi(async () => {
+    await client.shutdown();
+    dependencies.log('Daemon stopping...');
+  });
+  return reportDaemonShutdownResult(result, dependencies);
+}
 
 export function registerLifecycleCommands(program: Command): void {
 // ─── dkg start ───────────────────────────────────────────────────────
@@ -146,6 +178,11 @@ program
       process.exit(1);
     }
 
+    const daemonEnv: NodeJS.ProcessEnv = withSelectedDkgHome(process.env);
+    // Validate at the user-facing boundary before migrations or a detached
+    // child can hide the actionable configuration error.
+    resolveShutdownPolicy(daemonEnv.DKG_SHUTDOWN_HARD_TIMEOUT_MS);
+
     // OT-RFC-41 §4.1 / Bundle B1a: blue-green slot initialization is
     // a Core-only concern under rc.12+. Edge nodes run directly from
     // the npm-global install. Pre-rc.12 Edge users may still have
@@ -175,7 +212,6 @@ program
     // declaration order first.
     const relayPreferredOpt = Array.isArray(opts.relayPreferred) ? (opts.relayPreferred as string[]) : [];
     const cleanedRelayPreferred = relayPreferredOpt.map((s) => s.trim()).filter((s) => s.length > 0);
-    const daemonEnv: NodeJS.ProcessEnv = withSelectedDkgHome(process.env);
     if (cleanedRelayPreferred.length > 0) {
       daemonEnv.DKG_RELAY_PREFERRED = cleanedRelayPreferred.join(',');
       console.log(
@@ -244,19 +280,7 @@ program
   .description('Stop the DKG daemon')
   .action(async () => {
     try {
-      const client = await ApiClient.connect();
-      await client.shutdown();
-      console.log('Daemon stopping...');
-      // Wait for process to exit
-      for (let i = 0; i < 20; i++) {
-        await sleep(500);
-        const pid = await readPid();
-        if (!pid || !isProcessRunning(pid)) {
-          console.log('Stopped.');
-          return;
-        }
-      }
-      console.log('Daemon still running after 10s — you may need to kill it manually.');
+      await executeStopCommand();
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);

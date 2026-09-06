@@ -325,7 +325,10 @@ describe('ApiClient', () => {
       delete process.env.DKG_API_PORT;
       await writeFile(join(tempDir, 'config.json'), JSON.stringify({ name: 'isolated', apiPort: 9317 }));
       await writeFile(join(tempDir, 'auth.token'), 'local-token\n', 'utf8');
-      const { fetch, calls } = createRejectingFetch(new TypeError('fetch failed'));
+      const { fetch, calls } = createRejectingFetch(Object.assign(
+        new TypeError('request transport failed'),
+        { cause: { code: 'ECONNREFUSED' } },
+      ));
       globalThis.fetch = fetch;
 
       const connected = await ApiClient.connect({ allowConfigFallback: true });
@@ -334,6 +337,34 @@ describe('ApiClient', () => {
       expect(calls).toHaveLength(1);
       expect(calls[0].url).toBe('http://127.0.0.1:9317/api/status');
       expect((calls[0].opts.headers as any).Authorization).toBeUndefined();
+    });
+
+    it('classifies a fetch-failure message even when the transport omits an error code', async () => {
+      process.env.DKG_HOME = tempDir;
+      delete process.env.DKG_API_PORT;
+      await writeFile(join(tempDir, 'config.json'), JSON.stringify({ name: 'isolated', apiPort: 9317 }));
+      const { fetch } = createRejectingFetch(new TypeError('fetch failed'));
+      globalThis.fetch = fetch;
+
+      const connected = await ApiClient.connect({ allowConfigFallback: true });
+      await expect(connected.status()).rejects.toThrow('Daemon is not running. Start it with: dkg start');
+    });
+
+    it('does not let a hostile nested error getter escape transport classification', async () => {
+      process.env.DKG_HOME = tempDir;
+      delete process.env.DKG_API_PORT;
+      await writeFile(join(tempDir, 'config.json'), JSON.stringify({ name: 'isolated', apiPort: 9317 }));
+      const hostileCause = new Proxy({}, {
+        get: () => { throw new Error('hostile getter'); },
+      });
+      const transportError = Object.assign(new TypeError('unclassified transport error'), {
+        cause: hostileCause,
+      });
+      const { fetch } = createRejectingFetch(transportError);
+      globalThis.fetch = fetch;
+
+      const connected = await ApiClient.connect({ allowConfigFallback: true });
+      await expect(connected.status()).rejects.toBe(transportError);
     });
 
     it('agents() calls /api/agents', async () => {
@@ -908,8 +939,30 @@ describe('ApiClient', () => {
 
   describe('shutdown', () => {
     it('does not throw even if connection closes', async () => {
-      globalThis.fetch = (async () => { throw new Error('connection reset'); }) as any;
+      globalThis.fetch = (async () => {
+        throw Object.assign(new Error('fetch failed'), { cause: { code: 'ECONNRESET' } });
+      }) as any;
       await expect(client.shutdown()).resolves.toBeUndefined();
+    });
+
+    it('propagates a definite HTTP rejection', async () => {
+      const { fetch } = createTrackingFetch({
+        ok: false,
+        status: 401,
+        body: { error: 'Unauthorized' },
+      });
+      globalThis.fetch = fetch;
+      await expect(client.shutdown()).rejects.toMatchObject({
+        message: 'Unauthorized',
+        httpStatus: 401,
+      });
+    });
+
+    it('propagates a definite pre-request connection failure', async () => {
+      globalThis.fetch = (async () => {
+        throw Object.assign(new Error('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
+      }) as any;
+      await expect(client.shutdown()).rejects.toMatchObject({ message: 'fetch failed' });
     });
   });
 

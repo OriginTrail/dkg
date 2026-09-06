@@ -11,7 +11,6 @@
 import {
   createServer,
   type IncomingMessage,
-  type ServerResponse,
 } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -110,8 +109,6 @@ import {
   resolveAutoUpdateConfig,
   resolveChainConfig,
   dkgDir,
-  writePid,
-  removePid,
   writeApiPort,
   removeApiPort,
   logPath,
@@ -258,6 +255,11 @@ import {
   runProducerQuiescentTeardown,
 } from './teardown.js';
 import {
+  closeDaemonHttpServer,
+  createDaemonDetachedResponseRegistry,
+  createDaemonSseRegistry,
+} from './http-lifecycle.js';
+import {
   type MarkItDownTarget,
   manifestRepoRoot,
   type McpDkgAssets,
@@ -290,10 +292,13 @@ import {
   carryForwardBundledMarkItDownBinary,
 } from './manifest.js';
 import {
-  SHUTDOWN_HARD_TIMEOUT_MS,
   encodeForcedShutdownExitCode,
   raceShutdownWithTimeout,
 } from './shutdown.js';
+import { resolveShutdownPolicy, type ShutdownPolicy } from './shutdown-policy.js';
+import {
+  daemonRuntimeState,
+} from './shutdown-wait.js';
 import {
   resolveNameToPeerId,
   jsonResponse,
@@ -914,20 +919,24 @@ export async function validateStartupGenesis(
 
 export async function runDaemon(foreground: boolean): Promise<void> {
   await ensureDkgDir();
-  const config = await loadConfig();
-  configureKaPublishLifecycleDebugLogging(config);
-  const startedAt = Date.now();
-
-  // Write PID early so the CLI detects the process is alive while
-  // initialization (sync, on-chain identity, profile publish) proceeds.
-  // Wrapped in try/finally so the PID file is cleaned up if boot fails.
-  await writePid(process.pid);
+  const shutdownPolicy = resolveShutdownPolicy(process.env.DKG_SHUTDOWN_HARD_TIMEOUT_MS);
   try {
-    await runDaemonInner(foreground, config, startedAt);
+    const config = await loadConfig();
+    configureKaPublishLifecycleDebugLogging(config);
+    const startedAt = Date.now();
+
+    // Claim PID + shutdown policy together so lifecycle commands never have
+    // to coordinate independent ownership files.
+    await daemonRuntimeState.claim(process.pid, shutdownPolicy);
+    await runDaemonInner(foreground, config, startedAt, shutdownPolicy);
   } catch (err) {
-    await removePid().catch(() => {});
+    await removeOwnedDaemonRuntimeState().catch(() => {});
     throw err;
   }
+}
+
+async function removeOwnedDaemonRuntimeState(): Promise<void> {
+  await daemonRuntimeState.release(process.pid);
 }
 
 function configureKaPublishLifecycleDebugLogging(config: Pick<DkgConfig, 'logging'>): void {
@@ -1084,6 +1093,7 @@ export async function runDaemonInner(
   foreground: boolean,
   config: Awaited<ReturnType<typeof loadConfig>>,
   startedAt: number,
+  shutdownPolicy: ShutdownPolicy,
 ): Promise<void> {
   let cleanupOwnedStartupResources: (() => Promise<void>) | undefined;
   try {
@@ -1092,6 +1102,7 @@ export async function runDaemonInner(
       config,
       startedAt,
       (cleanup) => { cleanupOwnedStartupResources = cleanup; },
+      shutdownPolicy,
     );
   } catch (error) {
     await cleanupOwnedStartupResources?.();
@@ -1104,6 +1115,7 @@ async function runDaemonInnerWithStartupOwnership(
   config: Awaited<ReturnType<typeof loadConfig>>,
   startedAt: number,
   registerStartupFailureCleanup: (cleanup: () => Promise<void>) => void,
+  shutdownPolicy: ShutdownPolicy,
 ): Promise<void> {
   configureKaPublishLifecycleDebugLogging(config);
   const contextGraphSubscriptionRehydrationEnabled =
@@ -1204,7 +1216,7 @@ async function runDaemonInnerWithStartupOwnership(
       return;
     }
     log(`[fatal] Uncaught exception: ${err?.stack ?? msg}`);
-    removePid()
+    removeOwnedDaemonRuntimeState()
       .catch(() => {})
       .finally(() => {
         void exitAfterFatalLogDrain({
@@ -1747,7 +1759,7 @@ async function runDaemonInnerWithStartupOwnership(
       } catch (err: any) {
         log(`Core prereq fatal DB close error: ${err?.message ?? String(err)}`);
       }
-      await removePid().catch(() => {});
+      await removeOwnedDaemonRuntimeState().catch(() => {});
       process.exit(1);
       return;
     }
@@ -2344,7 +2356,7 @@ async function runDaemonInnerWithStartupOwnership(
             } catch (err: any) {
               log(`Core prereq fatal DB close error: ${err?.message ?? String(err)}`);
             }
-            await removePid().catch(() => {});
+            await removeOwnedDaemonRuntimeState().catch(() => {});
             process.exit(1);
             return;
           }
@@ -2794,7 +2806,8 @@ async function runDaemonInnerWithStartupOwnership(
   // Connected node-UI SSE dashboard clients. Declared here (before the metrics
   // collector) so the presence gate below can consult it; the /api/events
   // handler further down populates it.
-  const sseClients = new Set<ServerResponse>();
+  const sseClients = createDaemonSseRegistry();
+  const detachedHttpResponses = createDaemonDetachedResponseRegistry();
 
   // Metrics presence gate (#1066 Item 1): the metric COUNT getters are
   // full-store scans, so the collector skips them when nothing is consuming
@@ -3102,9 +3115,7 @@ async function runDaemonInnerWithStartupOwnership(
   function sseBroadcast(event: string, payload: Record<string, unknown>) {
     const data = JSON.stringify(payload);
     const msg = `event: ${event}\ndata: ${data}\n\n`;
-    for (const client of sseClients) {
-      try { client.write(msg); } catch { sseClients.delete(client); }
-    }
+    sseClients.broadcast(msg);
   }
   function emitMemoryGraphChanged(event: MemoryGraphChangedEvent) {
     if (!event.contextGraphId) return;
@@ -3681,6 +3692,12 @@ async function runDaemonInnerWithStartupOwnership(
       // chain-RPC transport exhaustion (so rethrowing lifecycle publish routes
       // get the retryable status); else 500.
       respondWithDaemonError(res, err);
+    } finally {
+      // Any handler that returned after starting, but not ending, a response
+      // transferred ownership to an asynchronous producer (route-plugin SSE,
+      // built-in detached stream, etc.). Keep one server-wide shutdown owner
+      // while finite handlers that are still running continue to drain normally.
+      detachedHttpResponses.track(res);
     }
     // Note: the admission slot is released on the response's `close` event
     // (registered above), not in a finally here — see the comment at acquire.
@@ -3756,8 +3773,8 @@ async function runDaemonInnerWithStartupOwnership(
     // window is already refused — which is not observable from here.
     await beginGracefulShutdown({ state: daemonState, removeApiPort, log });
     const cleanupStateFiles = async () => {
-      await removePid().catch((err: any) =>
-        log(`PID cleanup error: ${err?.message ?? String(err)}`),
+      await removeOwnedDaemonRuntimeState().catch((err: any) =>
+        log(`Runtime state cleanup error: ${err?.message ?? String(err)}`),
       );
       await removeApiPort().catch((err: any) =>
         log(`API port cleanup error: ${err?.message ?? String(err)}`),
@@ -3794,7 +3811,7 @@ async function runDaemonInnerWithStartupOwnership(
         // shutdown, where previously it was skipped.
         const teardown = await runProducerQuiescentTeardown(
           buildProducerQuiescentTeardownSteps({
-            server,
+            closeHttpServer: () => closeDaemonHttpServer(server, detachedHttpResponses),
             closeLocalLlm: () => localLlm.close(),
             drainCatchupJobs,
             flushTelemetry,
@@ -3855,7 +3872,7 @@ async function runDaemonInnerWithStartupOwnership(
     });
     const { forced } = await raceShutdownWithTimeout(
       cleanup,
-      SHUTDOWN_HARD_TIMEOUT_MS,
+      shutdownPolicy.hardTimeoutMs,
       log,
       cleanupStateFiles,
     );
