@@ -1,4 +1,4 @@
-import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri, validateSubGraphName } from '@origintrail-official/dkg-core';
+import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SwmSnapshotCoverage } from '../../dkg-agent-types.js';
@@ -8,8 +8,9 @@ import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection,
 import {
   isNamedSubgraphSharedMemoryDataGraph,
   isNamedSubgraphSharedMemoryMetaGraph,
-  isSharedMemoryBucketDescendantDataGraph,
+  sharedMemoryOwnershipKeyFromGraph,
 } from '../shared-memory-graphs.js';
+export { sharedMemoryOwnershipKeyFromGraph } from '../shared-memory-graphs.js';
 import {
   type SyncPageFetchOptions,
   type SyncPageResult,
@@ -27,6 +28,7 @@ import {
   type RecoveryExecutionAdmission,
   type RecoveryExecutionGuard,
 } from './recovery-execution-guard.js';
+import { canonicalQuadKey } from './quad-key.js';
 
 const DKG = 'http://dkg.io/ontology/';
 
@@ -57,12 +59,6 @@ function boundSampledRef(ref: string): string {
     : ref;
 }
 
-function metadataQuadKey(quad: Quad): string {
-  // JSON's tuple boundaries are unambiguous even when a literal contains the
-  // whitespace/delimiter text that made the former flattened key lossy.
-  return JSON.stringify([quad.graph, quad.subject, quad.predicate, quad.object]);
-}
-
 /**
  * Own the one-round metadata commit policy for graph-scoped snapshots.
  * Per-KA writes, finalized-twin suppression, the final bulk append and counter
@@ -85,13 +81,13 @@ class GraphScopedSnapshotCommitCoordinator {
     verifiedMeta: readonly Quad[],
     reconcileFinalizedTwin: FinalizedTwinReconciler | undefined,
   ) {
-    this.#verifiedKeys = new Set(verifiedMeta.map(metadataQuadKey));
+    this.#verifiedKeys = new Set(verifiedMeta.map(canonicalQuadKey));
     this.#reconcileFinalizedTwin = reconcileFinalizedTwin;
   }
 
   unwrittenVerifiedRows(descriptor: GraphScopedSwmRecoveryDescriptor): Quad[] {
     return descriptor.metadataQuads.filter((quad) => {
-      const key = metadataQuadKey(quad);
+      const key = canonicalQuadKey(quad);
       return this.#verifiedKeys.has(key)
         && !this.#writtenKeys.has(key)
         && !this.#suppressedKeys.has(key);
@@ -99,7 +95,7 @@ class GraphScopedSnapshotCommitCoordinator {
   }
 
   recordWritten(rows: readonly Quad[]): void {
-    for (const quad of rows) this.#writtenKeys.add(metadataQuadKey(quad));
+    for (const quad of rows) this.#writtenKeys.add(canonicalQuadKey(quad));
   }
 
   /**
@@ -116,18 +112,18 @@ class GraphScopedSnapshotCommitCoordinator {
    */
   suppressRows(rows: readonly Quad[]): void {
     for (const quad of rows) {
-      const key = metadataQuadKey(quad);
+      const key = canonicalQuadKey(quad);
       if (this.#verifiedKeys.has(key)) this.#suppressedKeys.add(key);
     }
   }
 
   suppressedRows(rows: readonly Quad[]): Quad[] {
-    return rows.filter((quad) => this.#suppressedKeys.has(metadataQuadKey(quad)));
+    return rows.filter((quad) => this.#suppressedKeys.has(canonicalQuadKey(quad)));
   }
 
   #suppress(descriptor: GraphScopedSwmRecoveryDescriptor): void {
     for (const quad of descriptor.metadataQuads) {
-      const key = metadataQuadKey(quad);
+      const key = canonicalQuadKey(quad);
       if (this.#verifiedKeys.has(key)) this.#suppressedKeys.add(key);
     }
   }
@@ -159,7 +155,7 @@ class GraphScopedSnapshotCommitCoordinator {
   bulkRows(rows: readonly Quad[]): Quad[] {
     return this.#suppressedKeys.size === 0
       ? [...rows]
-      : rows.filter((quad) => !this.#suppressedKeys.has(metadataQuadKey(quad)));
+      : rows.filter((quad) => !this.#suppressedKeys.has(canonicalQuadKey(quad)));
   }
 
   alreadyCountedRetainedRows(): number {
@@ -1579,29 +1575,6 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
   }
 
   return summary;
-}
-
-export function sharedMemoryOwnershipKeyFromGraph(contextGraphId: string, dataGraph: string): string | undefined {
-  const rootGraph = contextGraphWorkspaceGraphUri(contextGraphId);
-  if (dataGraph === rootGraph || isSharedMemoryBucketDescendantDataGraph(dataGraph, rootGraph)) return contextGraphId;
-
-  const prefix = `did:dkg:context-graph:${contextGraphId}/`;
-  const suffix = '/_shared_memory';
-  if (!dataGraph.startsWith(prefix)) return undefined;
-
-  const remainder = dataGraph.slice(prefix.length);
-  const suffixAt = remainder.indexOf(suffix);
-  if (suffixAt <= 0) return undefined;
-  const bucketGraph = dataGraph.slice(0, prefix.length + suffixAt + suffix.length);
-  const subGraphName = remainder.slice(0, suffixAt);
-  const tail = remainder.slice(suffixAt + suffix.length);
-  if (tail && (!tail.startsWith('/') || !isSharedMemoryBucketDescendantDataGraph(dataGraph, bucketGraph))) {
-    return undefined;
-  }
-  if (!subGraphName || subGraphName.includes('/')) return undefined;
-  if (!validateSubGraphName(subGraphName).valid) return undefined;
-
-  return `${contextGraphId}\0${subGraphName}`;
 }
 
 export interface PublicSnapshotMetadata {

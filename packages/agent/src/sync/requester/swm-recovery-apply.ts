@@ -18,7 +18,9 @@ import {
 } from '../graph-scoped-swm-recovery.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from
   '../oversize-filter.js';
+import { sharedMemoryOwnershipKeyFromGraph } from '../shared-memory-graphs.js';
 import type { RecoveryExecutionAdmission } from './recovery-execution-guard.js';
+import { canonicalQuadKey } from './quad-key.js';
 import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
 
 /**
@@ -232,21 +234,41 @@ export type VerifiedSwmRecoveryGraphApply = Readonly<
   }
 >;
 
-export interface VerifiedSwmRecoveryOwnershipUpdate {
-  readonly ownershipKey: string;
-  readonly entity: string;
-  readonly creator: string;
-}
-
-/** Immutable, fully verified inputs for one complete, retryable recovery apply. */
-export interface VerifiedSwmRecoveryApplyPlan {
+/** Primary verified inputs for one complete, retryable recovery apply. */
+export interface VerifiedSwmRecoveryApplyPlanInput {
   readonly contextGraphId: string;
   readonly rootData: readonly Quad[];
   readonly roots: readonly (SwmRecoveryRoot & { readonly creator: string })[];
   readonly graphAssets: readonly VerifiedSwmRecoveryGraphApply[];
   readonly verifiedMeta: readonly Quad[];
-  readonly rootMetaGraphs: readonly string[];
-  readonly ownershipUpdates: readonly VerifiedSwmRecoveryOwnershipUpdate[];
+}
+
+const VERIFIED_SWM_RECOVERY_APPLY_PLAN = Symbol('verified-swm-recovery-apply-plan');
+
+/** Canonical immutable plan; only the builder can mint its private brand. */
+export type VerifiedSwmRecoveryApplyPlan = Readonly<
+  VerifiedSwmRecoveryApplyPlanInput & {
+    readonly [VERIFIED_SWM_RECOVERY_APPLY_PLAN]: true;
+  }
+>;
+
+/**
+ * Canonicalize verified recovery inputs without accepting duplicated derived
+ * projections. Metadata graphs and ownership partitions are derived by apply.
+ */
+export function createVerifiedSwmRecoveryApplyPlan(
+  input: VerifiedSwmRecoveryApplyPlanInput,
+): VerifiedSwmRecoveryApplyPlan {
+  return Object.freeze({
+    contextGraphId: input.contextGraphId,
+    rootData: Object.freeze([...input.rootData]),
+    roots: Object.freeze(
+      input.roots.map((root) => Object.freeze({ ...root })),
+    ),
+    graphAssets: Object.freeze([...input.graphAssets]),
+    verifiedMeta: Object.freeze([...input.verifiedMeta]),
+    [VERIFIED_SWM_RECOVERY_APPLY_PLAN]: true as const,
+  });
 }
 
 export interface VerifiedSwmRecoveryApplyResult {
@@ -323,10 +345,6 @@ export async function applySwmRecovery(params: {
   // admission does not interrupt it, but a store failure can leave a partial
   // replacement; the delete/delete/insert sequence above is safe to retry.
   return params.executionBoundary?.admitAsyncMutation(apply) ?? apply();
-}
-
-function quadKey(quad: Quad): string {
-  return `${quad.graph}\u0000${quad.subject}\u0000${quad.predicate}\u0000${quad.object}`;
 }
 
 /**
@@ -421,26 +439,38 @@ export async function applyVerifiedSwmRecoveryPlan(params: Readonly<{
     }
 
     if (plan.roots.length > 0) {
-      await ports.replaceMetaForRoots(plan.roots, plan.rootMetaGraphs);
+      const rootMetaGraphs = [
+        ...new Set(plan.verifiedMeta.map((quad) => quad.graph)),
+      ];
+      await ports.replaceMetaForRoots(plan.roots, rootMetaGraphs);
     }
 
     let insertedMetaQuads = 0;
     if (plan.verifiedMeta.length > 0) {
-      const preservedHeadIdRowKeys = new Set(preservedWithholdRows.map(quadKey));
+      const preservedHeadIdRowKeys = new Set(
+        preservedWithholdRows.map(canonicalQuadKey),
+      );
       const canonicalMeta = canonicalizeGraphScopedSwmHeadRows({
         metaQuads: plan.verifiedMeta,
         descriptors: plan.graphAssets.map(({ descriptor }) => descriptor),
       });
       const insertableMeta = preservedHeadIdRowKeys.size === 0
         ? canonicalMeta
-        : canonicalMeta.filter((quad) => !preservedHeadIdRowKeys.has(quadKey(quad)));
+        : canonicalMeta.filter(
+          (quad) => !preservedHeadIdRowKeys.has(canonicalQuadKey(quad)),
+        );
       if (insertableMeta.length > 0) {
         await ports.store.insert([...insertableMeta]);
       }
       insertedMetaQuads = insertableMeta.length;
     }
 
-    for (const { ownershipKey, entity, creator } of plan.ownershipUpdates) {
+    for (const { dataGraph, entity, creator } of plan.roots) {
+      const ownershipKey = sharedMemoryOwnershipKeyFromGraph(
+        plan.contextGraphId,
+        dataGraph,
+      );
+      if (ownershipKey === undefined) continue;
       const ownedMap = ports.ensureOwnedMap(ownershipKey);
       if (!ownedMap.has(entity)) ownedMap.set(entity, creator);
     }

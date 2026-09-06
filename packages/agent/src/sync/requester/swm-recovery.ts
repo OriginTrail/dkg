@@ -11,13 +11,13 @@ import {
 import type { SyncPageFetchOptions, SyncPageResult } from './page-fetch.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import {
+  createVerifiedSwmRecoveryApplyPlan,
   applyVerifiedSwmRecoveryPlan,
   applyVerifiedSwmRecoveryGraphAsset,
   type SwmRecoveryStore,
-  type VerifiedSwmRecoveryApplyPlan,
+  type VerifiedSwmRecoveryGraphApply,
 } from './swm-recovery-apply.js';
 import {
-  sharedMemoryOwnershipKeyFromGraph,
   syncPublicSnapshotsForMeta,
 } from './shared-memory-sync.js';
 import { appendInPlace } from '../append-in-place.js';
@@ -33,6 +33,7 @@ import {
   type RecoveryExecutionAdmission,
   type RecoveryExecutionGuard,
 } from './recovery-execution-guard.js';
+import { canonicalQuadKey } from './quad-key.js';
 import {
   isNamedSubgraphSharedMemoryDataGraph,
   isNamedSubgraphSharedMemoryMetaGraph,
@@ -389,9 +390,7 @@ async function recoverContextGraphSwmUnlocked(
     descriptors.push(descriptor);
     snapshotDescriptorsByRef.set(descriptor.publicSnapshotRef, descriptors);
   }
-  const quadKey = (quad: Quad): string =>
-    `${quad.graph}\u0000${quad.subject}\u0000${quad.predicate}\u0000${quad.object}`;
-  const verifiedMetaKeys = new Set(metadataOnlyProcessed.verifiedMeta.map(quadKey));
+  const verifiedMetaKeys = new Set(metadataOnlyProcessed.verifiedMeta.map(canonicalQuadKey));
   let contextGraphEnsured = false;
 
   const materializeReadySnapshot = async (snapshotRef: string): Promise<void> => {
@@ -405,7 +404,9 @@ async function recoverContextGraphSwmUnlocked(
         continue;
       }
 
-      const verifiedAssetMeta = descriptor.metadataQuads.filter((quad) => verifiedMetaKeys.has(quadKey(quad)));
+      const verifiedAssetMeta = descriptor.metadataQuads.filter(
+        (quad) => verifiedMetaKeys.has(canonicalQuadKey(quad)),
+      );
       if (verifiedAssetMeta.length !== descriptor.metadataQuads.length) {
         throw new Error(`Verified SWM metadata is incomplete for ${descriptor.kaUal}`);
       }
@@ -551,7 +552,7 @@ async function recoverContextGraphSwmUnlocked(
     ))
     : metadataOnlyProcessed;
 
-  const graphAssets: VerifiedSwmRecoveryApplyPlan['graphAssets'][number][] = [];
+  const graphAssets: VerifiedSwmRecoveryGraphApply[] = [];
   for (const descriptor of graphScopedDescriptors) {
     const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
     if (incrementallyReadyGraphs.has(graphKey)) {
@@ -575,29 +576,12 @@ async function recoverContextGraphSwmUnlocked(
     }));
   }
 
-  const ownershipUpdates = processed.entityCreators.flatMap(
-    ({ dataGraph, entity, creator }) => {
-      const ownershipKey = sharedMemoryOwnershipKeyFromGraph(
-        deps.contextGraphId,
-        dataGraph,
-      );
-      return ownershipKey
-        ? [Object.freeze({ ownershipKey, entity, creator })]
-        : [];
-    },
-  );
-  const applyPlan: VerifiedSwmRecoveryApplyPlan = Object.freeze({
+  const applyPlan = createVerifiedSwmRecoveryApplyPlan({
     contextGraphId: deps.contextGraphId,
-    rootData: Object.freeze(processed.verifiedData),
-    roots: Object.freeze(
-      processed.entityCreators.map((root) => Object.freeze({ ...root })),
-    ),
-    graphAssets: Object.freeze(graphAssets),
-    verifiedMeta: Object.freeze(processed.verifiedMeta),
-    rootMetaGraphs: Object.freeze([
-      ...new Set(processed.verifiedMeta.map((quad) => quad.graph)),
-    ]),
-    ownershipUpdates: Object.freeze(ownershipUpdates),
+    rootData: processed.verifiedData,
+    roots: processed.entityCreators,
+    graphAssets,
+    verifiedMeta: processed.verifiedMeta,
   });
   const applied = await applyVerifiedSwmRecoveryPlan({
     plan: applyPlan,

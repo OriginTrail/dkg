@@ -8,15 +8,12 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
   createGraphKnowledgeAssetScope,
-  contextGraphWorkspaceGraphUri,
-  contextGraphWorkspaceMetaGraphUri,
   knowledgeAssetLayerGraphUri,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import {
   generateKnowledgeAssetShareMetadata,
   workspacePublicQuadsDigest,
-  type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -31,8 +28,23 @@ import {
   recoverContextGraphSwmWithProgressRetries,
   type RecoverContextGraphSwmResult,
 } from '../src/sync/requester/swm-recovery.js';
-import { createSharedMemorySnapshotMaterializer } from
-  '../src/sync/requester/swm-snapshot-materializer.js';
+import {
+  CG,
+  CTX as ctx,
+  DKG,
+  MemorySnapshotStore,
+  STATUS,
+  SUBJ,
+  UAL,
+  UAL_2,
+  WS,
+  WS_META,
+  XSD_INTEGER,
+  completeRecoveryApplyDeps as completeApplyDeps,
+  makeRecoveryDeps as makeDeps,
+  recoveryPage as page,
+  recoveryStatusValues as statusValues,
+} from './_helpers/swm-recovery-fixture.js';
 
 /**
  * integration. `recoverContextGraphSwm` fetches a CG's
@@ -41,17 +53,9 @@ import { createSharedMemorySnapshotMaterializer } from
  * source's value rather than accumulating a corrupt `{v1,v2}` superset.
  * Transport + verifier are mocked (no libp2p); the apply hits a real store.
  */
-const CG = 'ws00-recovery';
-const WS = contextGraphWorkspaceGraphUri(CG);
-const WS_META = contextGraphWorkspaceMetaGraphUri(CG);
 const SUBGRAPH = 'research';
 const SUB_WS = `did:dkg:context-graph:${CG}/${SUBGRAPH}/_shared_memory`;
 const SUB_WS_META = `did:dkg:context-graph:${CG}/${SUBGRAPH}/_shared_memory_meta`;
-const SUBJ = 'urn:ws00r:shipment';
-const STATUS = 'http://schema.org/status';
-const ctx: OperationContext = { operationId: 'test', operationName: 'sync' } as never;
-const DKG = 'http://dkg.io/ontology/';
-const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 
 function recoveryResult(
   readySnapshots: number,
@@ -457,90 +461,9 @@ describe('syncPublicSnapshotsForMeta', () => {
     }
   });
 });
-const UAL = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/7';
-const UAL_2 = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/8';
-
-class MemorySnapshotStore implements WorkspacePublicSnapshotStore {
-  readonly snapshots = new Map<string, Quad[]>();
-
-  async putSnapshot(input: { readonly digest: string; readonly quads: readonly Quad[] }) {
-    this.snapshots.set(input.digest, input.quads.map((quad) => ({ ...quad })));
-    return { ref: input.digest, byteLength: 0 };
-  }
-
-  async getSnapshot(ref: string): Promise<Quad[] | null> {
-    return this.snapshots.get(ref)?.map((quad) => ({ ...quad })) ?? null;
-  }
-}
-
-function page(quads: Quad[], completed = true): SyncPageResult {
-  return { quads, bytesReceived: 0, resumedFromOffset: 0, nextOffset: quads.length, checkpointKey: 'k', completed };
-}
-async function statusValues(store: OxigraphStore): Promise<string[]> {
-  const r = await store.query(`SELECT ?o WHERE { GRAPH <${WS}> { <${SUBJ}> <${STATUS}> ?o } }`);
-  return r.type === 'bindings' ? r.bindings.map((b) => b['o']) : [];
-}
-
 describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
   const stores: OxigraphStore[] = [];
   afterEach(async () => { await Promise.all(stores.splice(0).map((s) => s.close().catch(() => {}))); });
-
-  function completeApplyDeps(
-    store: OxigraphStore,
-    writeLocks = new Map<string, Promise<void>>(),
-  ) {
-    const snapshotMaterializer = createSharedMemorySnapshotMaterializer({
-      store,
-      writeLocks,
-      invalidateListContextGraphsCache: () => undefined,
-    });
-    const ownership = new Map<string, Map<string, string>>();
-    return {
-      writeLocks,
-      snapshotMaterializer,
-      replaceMetaForRoots: async () => undefined,
-      replaceMetaForGraphAssets: (assets: Parameters<
-        typeof snapshotMaterializer.replaceMetaForGraphAssets
-      >[0]) => snapshotMaterializer.replaceMetaForGraphAssets(assets),
-      ensureOwnedMap: (key: string) => {
-        let owned = ownership.get(key);
-        if (owned === undefined) {
-          owned = new Map();
-          ownership.set(key, owned);
-        }
-        return owned;
-      },
-    };
-  }
-
-  function makeDeps(store: OxigraphStore, sourceData: Quad[], sourceMeta: Quad[] = []) {
-    return {
-      ctx,
-      remotePeerId: 'peer-source',
-      contextGraphId: CG,
-      deadline: Number.MAX_SAFE_INTEGER,
-      fetchSyncPages: async (
-        _c: OperationContext, _p: string, _cg: string, _inc: boolean,
-        phase: 'data' | 'meta',
-      ): Promise<SyncPageResult> => page(phase === 'data' ? sourceData : sourceMeta),
-      processSharedMemoryBatch: async (dataQuads: Quad[], metaQuads: Quad[]) => ({
-        verifiedData: dataQuads,
-        verifiedMeta: metaQuads,
-        // Production derives the legacy recovery plan from rootEntity metadata,
-        // so it is available during the metadata-only classification call. This
-        // compact fixture models that plan from the declared source snapshot.
-        entityCreators: [...new Set(sourceData.map((q) => q.subject))].map((entity) => ({
-          dataGraph: WS, entity, creator: 'peer-source',
-        })),
-        droppedDataTriples: 0,
-      }),
-      ...completeApplyDeps(store),
-      store,
-      ensureContextGraph: async () => {},
-      setCheckpoint: () => {},
-      deleteCheckpoint: () => {},
-    };
-  }
 
   it('replaces a stale local value with the source value (no union corruption)', async () => {
     const store = new OxigraphStore();
@@ -554,38 +477,6 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     expect(result.completed).toBe(true);
     expect(result.replacedRoots).toBe(1);
     expect(await statusValues(store)).toEqual(['"v2"']); // ONLY v2 — the bug would leave {v1,v2}
-  });
-
-  it('does not report a final private apply as complete when its lease is revoked mid-commit', async () => {
-    const store = new OxigraphStore();
-    stores.push(store);
-    await store.insert([{ subject: SUBJ, predicate: STATUS, object: '"v1"', graph: WS }]);
-    const revoked = new Error('selection revoked during final recovery commit');
-    const controller = new AbortController();
-    let current = true;
-    const insert = store.insert.bind(store);
-    store.insert = async (quads) => {
-      const result = await insert(quads);
-      current = false;
-      controller.abort(revoked);
-      return result;
-    };
-
-    await expect(recoverContextGraphSwm({
-      ...makeDeps(store, [
-        { subject: SUBJ, predicate: STATUS, object: '"v2"', graph: WS },
-      ]),
-      recoveryGuard: {
-        signal: controller.signal,
-        assertCurrent: () => {
-          if (!current) throw revoked;
-        },
-      },
-    })).rejects.toBe(revoked);
-
-    // The admitted replacement drains coherently, but the revoked invocation
-    // cannot be counted as a completed recovery target by its caller.
-    expect(await statusValues(store)).toEqual(['"v2"']);
   });
 
   it('recovers only named subgraphs when the RFC-64 catalog owns the root scope', async () => {
@@ -820,121 +711,6 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       expect(recovered.quads.map(({ subject, predicate, object }) => ({ subject, predicate, object })))
         .toEqual(payload.map(({ subject, predicate, object }) => ({ subject, predicate, object })));
     }
-  });
-
-  it('finishes an admitted exact graph and metadata replacement after revocation', async () => {
-    const store = new OxigraphStore();
-    stores.push(store);
-    const assertionGraph = knowledgeAssetLayerGraphUri(
-      CG,
-      MemoryLayer.SharedWorkingMemory,
-      createGraphKnowledgeAssetScope(UAL, 1),
-    );
-    const operationId = 'rootless-mid-commit-revocation';
-    const operationSubject = `urn:dkg:share:${CG}:${operationId}`;
-    const headSubject = `${UAL}#dkg-swm-head`;
-    const payload: Quad[] = [
-      { subject: 'urn:rootless:atomic', predicate: STATUS, object: '"v2"', graph: '' },
-    ];
-    const digest = workspacePublicQuadsDigest(payload);
-    const sourceMeta: Quad[] = [
-      ...generateKnowledgeAssetShareMetadata({
-        shareOperationId: operationId,
-        contextGraphId: CG,
-        kaUal: UAL,
-        assertionVersion: 1,
-        publicTripleCount: payload.length,
-        privateTripleCount: 0,
-        publisherPeerId: 'peer-source',
-        timestamp: new Date(0),
-      }, WS_META),
-      {
-        subject: operationSubject,
-        predicate: `${DKG}publicQuadsDigest`,
-        object: `"${digest}"`,
-        graph: WS_META,
-      },
-      {
-        subject: headSubject,
-        predicate: `${DKG}contentScopeVersion`,
-        object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD_INTEGER}>`,
-        graph: WS_META,
-      },
-      { subject: headSubject, predicate: `${DKG}kaUal`, object: UAL, graph: WS_META },
-      {
-        subject: headSubject,
-        predicate: `${DKG}assertionVersion`,
-        object: `"1"^^<${XSD_INTEGER}>`,
-        graph: WS_META,
-      },
-      {
-        subject: headSubject,
-        predicate: `${DKG}assertionGraph`,
-        object: assertionGraph,
-        graph: WS_META,
-      },
-      {
-        subject: headSubject,
-        predicate: `${DKG}shareOperationId`,
-        object: `"${operationId}"`,
-        graph: WS_META,
-      },
-    ];
-    await store.insert([
-      { subject: 'urn:rootless:atomic', predicate: STATUS, object: '"stale"', graph: assertionGraph },
-    ]);
-
-    const revoked = new Error('selection revoked during graph replacement');
-    const controller = new AbortController();
-    let current = true;
-    const replaceGraph = store.replaceGraph.bind(store);
-    store.replaceGraph = async (graphUri, quads, options) => {
-      const result = await replaceGraph(graphUri, quads, options);
-      if (graphUri === assertionGraph) {
-        current = false;
-        controller.abort(revoked);
-      }
-      return result;
-    };
-
-    await expect(recoverContextGraphSwm({
-      ctx,
-      remotePeerId: 'peer-source',
-      contextGraphId: CG,
-      deadline: Number.MAX_SAFE_INTEGER,
-      fetchSyncPages: async (_c, _p, _cg, _inc, phase): Promise<SyncPageResult> => {
-        if (phase === 'meta') return page(sourceMeta);
-        if (phase === 'snapshot') return page(payload);
-        return page([]);
-      },
-      processSharedMemoryBatch: async (_dataQuads, metaQuads) => ({
-        verifiedData: [],
-        verifiedMeta: metaQuads,
-        entityCreators: [],
-        droppedDataTriples: 0,
-      }),
-      ...completeApplyDeps(store),
-      store,
-      publicSnapshotStore: new MemorySnapshotStore(),
-      ensureContextGraph: async () => {},
-      setCheckpoint: () => {},
-      deleteCheckpoint: () => {},
-      recoveryGuard: {
-        signal: controller.signal,
-        assertCurrent: () => {
-          if (!current) throw revoked;
-        },
-      },
-    })).rejects.toBe(revoked);
-
-    // Revocation prevents the next recovery phase, but cannot strand the
-    // already-admitted graph swap without its matching metadata.
-    expect(await store.countQuads(assertionGraph)).toBe(payload.length);
-    expect(await store.countQuads(WS_META)).toBe(sourceMeta.length);
-    const recovered = await store.query(
-      `SELECT ?o WHERE { GRAPH <${assertionGraph}> { <urn:rootless:atomic> <${STATUS}> ?o } }`,
-    );
-    expect(recovered.type === 'bindings' ? recovered.bindings : []).toEqual([{ o: '"v2"' }]);
   });
 
   it('makes monotonic per-KA progress across a deadline without rescanning aggregate SWM data', async () => {

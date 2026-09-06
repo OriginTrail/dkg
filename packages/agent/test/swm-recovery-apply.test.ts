@@ -3,9 +3,9 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   applySwmRecovery,
   applyVerifiedSwmRecoveryPlan,
+  createVerifiedSwmRecoveryApplyPlan,
   type SwmRecoveryStore,
   type VerifiedSwmRecoveryApplyPorts,
-  type VerifiedSwmRecoveryApplyPlan,
 } from '../src/sync/requester/swm-recovery-apply.js';
 import { createRecoveryExecutionAdmission } from
   '../src/sync/requester/recovery-execution-guard.js';
@@ -222,17 +222,13 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
         publisherPeerId: '12D3KooWRecoveryRetryProvider',
         metadataQuads: [],
       };
-      const plan: VerifiedSwmRecoveryApplyPlan = {
-        contextGraphId: 'retry-cg',
+      const plan = createVerifiedSwmRecoveryApplyPlan({
+        contextGraphId: 'ws00',
         rootData,
         roots: [{ dataGraph: G, entity: SUBJ, creator: 'did:example:creator' }],
         graphAssets: [{ kind: 'replace', descriptor, replacementQuads: graphData }],
         verifiedMeta,
-        rootMetaGraphs: [metaGraph],
-        ownershipUpdates: [{
-          ownershipKey: 'retry-cg', entity: SUBJ, creator: 'did:example:creator',
-        }],
-      };
+      });
 
       let rows: Quad[] = [
         { subject: SUBJ, predicate: STATUS, object: '"stale"', graph: G },
@@ -244,6 +240,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       let contextGraphReady = false;
       let graphMetaCurrent = false;
       let rootMetaCurrent = false;
+      let appliedRootMetaGraphs: readonly string[] = [];
       let failed = false;
       const owned = new Map<string, Map<string, string>>();
       const failAfter = (point: string): void => {
@@ -289,8 +286,9 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
           contextGraphReady = true;
           failAfter('ensure-context-graph');
         },
-        replaceMetaForRoots: async () => {
+        replaceMetaForRoots: async (_roots, metaGraphs) => {
           rootMetaCurrent = true;
+          appliedRootMetaGraphs = [...metaGraphs];
           failAfter('replace-root-meta');
         },
         replaceMetaForGraphAssets: async () => {
@@ -325,10 +323,11 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       expect(contextGraphReady).toBe(true);
       expect(graphMetaCurrent).toBe(true);
       expect(rootMetaCurrent).toBe(true);
+      expect(appliedRootMetaGraphs).toEqual([metaGraph]);
       expect(rows.filter((quad) => quad.graph === G)).toEqual(rootData);
       expect(rows.filter((quad) => quad.graph === metaGraph)).toEqual(verifiedMeta);
       expect(graphRows).toEqual(graphData);
-      expect(owned.get('retry-cg')?.get(SUBJ)).toBe('did:example:creator');
+      expect(owned.get('ws00')?.get(SUBJ)).toBe('did:example:creator');
     },
   );
 
@@ -367,15 +366,13 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
     };
 
     await expect(applyVerifiedSwmRecoveryPlan({
-      plan: {
+      plan: createVerifiedSwmRecoveryApplyPlan({
         contextGraphId: 'witness-cg',
         rootData: [],
         roots: [],
         graphAssets: [{ kind: 'replace', descriptor, replacementQuads: graphData }],
         verifiedMeta: [],
-        rootMetaGraphs: [],
-        ownershipUpdates: [],
-      },
+      }),
       ports,
       executionBoundary: createRecoveryExecutionAdmission(),
     })).resolves.toMatchObject({ replacedGraphs: 1, insertedGraphQuads: 1 });
