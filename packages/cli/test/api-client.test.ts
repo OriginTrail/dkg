@@ -339,6 +339,34 @@ describe('ApiClient', () => {
       expect((calls[0].opts.headers as any).Authorization).toBeUndefined();
     });
 
+    it('classifies a fetch-failure message even when the transport omits an error code', async () => {
+      process.env.DKG_HOME = tempDir;
+      delete process.env.DKG_API_PORT;
+      await writeFile(join(tempDir, 'config.json'), JSON.stringify({ name: 'isolated', apiPort: 9317 }));
+      const { fetch } = createRejectingFetch(new TypeError('fetch failed'));
+      globalThis.fetch = fetch;
+
+      const connected = await ApiClient.connect({ allowConfigFallback: true });
+      await expect(connected.status()).rejects.toThrow('Daemon is not running. Start it with: dkg start');
+    });
+
+    it('does not let a hostile nested error getter escape transport classification', async () => {
+      process.env.DKG_HOME = tempDir;
+      delete process.env.DKG_API_PORT;
+      await writeFile(join(tempDir, 'config.json'), JSON.stringify({ name: 'isolated', apiPort: 9317 }));
+      const hostileCause = new Proxy({}, {
+        get: () => { throw new Error('hostile getter'); },
+      });
+      const transportError = Object.assign(new TypeError('unclassified transport error'), {
+        cause: hostileCause,
+      });
+      const { fetch } = createRejectingFetch(transportError);
+      globalThis.fetch = fetch;
+
+      const connected = await ApiClient.connect({ allowConfigFallback: true });
+      await expect(connected.status()).rejects.toBe(transportError);
+    });
+
     it('agents() calls /api/agents', async () => {
       const body = { agents: [{ agentUri: 'urn:a', name: 'A', peerId: 'p1' }] };
       const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });

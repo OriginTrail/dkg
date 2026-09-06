@@ -1,4 +1,4 @@
-import { createServer, get, type Server } from 'node:http';
+import { createServer, get, type Server, type ServerResponse } from 'node:http';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -11,6 +11,7 @@ import {
 import {
   closeDaemonHttpServer,
   createDaemonDetachedResponseRegistry,
+  createDaemonSseRegistry,
   type DaemonDetachedResponseRegistry,
 } from '../src/daemon/http-lifecycle.js';
 import type { RoutePlugin } from '../src/daemon/plugin-api.js';
@@ -66,6 +67,39 @@ function shutdownCleanup(
 }
 
 describe('HTTP callback draining during bounded shutdown', () => {
+  it('keeps healthy SSE clients live while pruning and closing broken streams', () => {
+    const registry = createDaemonSseRegistry();
+    const writes: string[] = [];
+    let healthyEnds = 0;
+    const healthy = {
+      write: (message: string) => { writes.push(message); },
+      end: () => { healthyEnds += 1; },
+    } as unknown as ServerResponse;
+    const brokenWrite = {
+      write: () => { throw new Error('stream write failed'); },
+      end: () => { throw new Error('pruned stream must not be closed twice'); },
+    } as unknown as ServerResponse;
+    const brokenEnd = {
+      write: () => undefined,
+      end: () => { throw new Error('stream close failed'); },
+    } as unknown as ServerResponse;
+
+    registry.add(healthy);
+    registry.add(brokenWrite);
+    expect(registry.size).toBe(2);
+    registry.broadcast('event: test\n\n');
+    expect(writes).toEqual(['event: test\n\n']);
+    expect(registry.size).toBe(1);
+
+    registry.delete(healthy);
+    expect(registry.size).toBe(0);
+    registry.add(healthy);
+    registry.add(brokenEnd);
+    expect(() => registry.closeAll()).not.toThrow();
+    expect(healthyEnds).toBe(1);
+    expect(registry.size).toBe(0);
+  });
+
   it('ends the real daemon SSE stream and exits cleanly before its hard timeout', async () => {
     let daemon: LiveDaemon | undefined;
     let stream: Awaited<ReturnType<typeof openEventStream>> | undefined;
