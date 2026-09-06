@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphMetaGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
+import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
 import { SYNC_TOTAL_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
+import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 import {
   buildAuthoritativePrivateMetaAskQuery,
   hasAuthoritativePrivateMetaDefinition,
@@ -971,6 +973,117 @@ describe('refreshMetaFromCurator', () => {
         onChainHash: freshOnChainHash.toLowerCase(),
       });
       expect(persistedBindings).toBe(1);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it.each([
+    {
+      boundary: 'root activation',
+      failedSubject: 'root',
+      expectedAgent: 'stale',
+      rejectedAgent: 'fresh',
+    },
+    {
+      boundary: 'stale delegation retirement',
+      failedSubject: 'stale',
+      expectedAgent: 'fresh',
+      rejectedAgent: 'stale',
+    },
+  ] as const)('keeps delegated authorization fail closed across $boundary failure', async ({
+    failedSubject,
+    expectedAgent,
+    rejectedAgent,
+  }) => {
+    const contextGraphId = `private/partial-curator-replacement-${failedSubject}`;
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+    const staleAgent = '0x0000000000000000000000000000000000000011';
+    const freshAgent = '0x0000000000000000000000000000000000000022';
+    const staleDelegation = `did:dkg:agent-delegation:${contextGraphId}:${staleAgent}`;
+    const stalePeer = '12D3KooWStaleDelegationPeer';
+    const freshPeer = '12D3KooWFreshDelegationPeer';
+    const nowMs = Date.now();
+    const store = new OxigraphStore();
+    try {
+      await store.insert([
+        ...authoritativePrivateMetaQuads(contextGraphId),
+        ...activeMemberMetaQuads(
+          contextGraphId,
+          staleAgent,
+          stalePeer,
+          '0x00000000000000000000000000000000000000a1',
+          nowMs,
+        ),
+      ]);
+      const freshSnapshot: Quad[] = [
+        ...authoritativePrivateMetaQuads(contextGraphId),
+        ...activeMemberMetaQuads(
+          contextGraphId,
+          freshAgent,
+          freshPeer,
+          '0x00000000000000000000000000000000000000a2',
+          nowMs,
+        ),
+      ];
+      const projection = new ContextGraphMetaProjection(store);
+      const readAllowedPeers = () => WorkspaceCryptoMethods.prototype
+        .getContextGraphAllowedDelegateePeers.call({
+          getCgMeta: (id: string, options?: { signal?: AbortSignal }) => projection.get(
+            id,
+            options?.signal === undefined ? {} : { signal: options.signal },
+          ),
+        } as never, contextGraphId);
+      expect(await readAllowedPeers()).toEqual(new Map([[staleAgent, [stalePeer]]]));
+
+      const originalReplaceSubject = store.replaceSubject.bind(store);
+      store.replaceSubject = async (graph, subject, quads, options) => {
+        if (
+          (failedSubject === 'root' && subject === contextGraphUri)
+          || (failedSubject === 'stale' && subject === staleDelegation)
+        ) {
+          throw new Error(`simulated ${failedSubject} replacement failure`);
+        }
+        return originalReplaceSubject(graph, subject, quads, options);
+      };
+      let listInvalidations = 0;
+      const agent = {
+        metaRefreshTimestamps: new Map<string, number>(),
+        runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
+        peerId: 'local-peer',
+        node: {
+          libp2p: {
+            getConnections: () => [{ remotePeer: { toString: () => CURATOR_PEER_ID } }],
+          },
+        },
+        discovery: {},
+        fetchSyncPages: async () => ({
+          quads: freshSnapshot,
+          checkpointKey: `partial-curator-replacement-${failedSubject}`,
+          resumedFromOffset: 0,
+          completed: true,
+        }),
+        store,
+        oversizeTombstoneLog: { record: noop },
+        invalidateListContextGraphsCache: () => { listInvalidations += 1; },
+        contextGraphMetaProjection: projection,
+        syncCheckpoints: new Map<string, number>(),
+        log: { warn: noop, info: noop },
+      };
+
+      await expect(ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
+        agent as never,
+        contextGraphId,
+        { trustedCuratorPeerId: CURATOR_PEER_ID, force: true },
+      )).resolves.toBe(false);
+
+      const allowedPeers = await readAllowedPeers();
+      const expectedAddress = expectedAgent === 'fresh' ? freshAgent : staleAgent;
+      const expectedPeer = expectedAgent === 'fresh' ? freshPeer : stalePeer;
+      const rejectedAddress = rejectedAgent === 'fresh' ? freshAgent : staleAgent;
+      expect(allowedPeers).toEqual(new Map([[expectedAddress, [expectedPeer]]]));
+      expect(allowedPeers.has(rejectedAddress)).toBe(false);
+      expect(listInvalidations).toBe(2);
     } finally {
       await store.close();
     }
