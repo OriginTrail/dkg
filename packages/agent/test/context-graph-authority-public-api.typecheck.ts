@@ -62,15 +62,27 @@ type GateAuthorityResultStaysInternal =
 type AuthorityMarkerStaysInternal =
   // @ts-expect-error The marker is consumed only by the internal promote boundary.
   import('@origintrail-official/dkg-agent').ContextGraphAuthorityUnavailableMarker;
+type RootRegisteredAuthority = import(
+  '@origintrail-official/dkg-agent'
+).RegisteredContextGraphAuthority;
+type LegacyDeepRegisteredAuthority = import(
+  '@origintrail-official/dkg-agent/dist/dkg-agent-cg-resolve.js'
+).RegisteredContextGraphAuthority;
+type LegacyAuthorityMatchesRoot = AssertTrue<
+  LegacyDeepRegisteredAuthority extends RootRegisteredAuthority ? true : false
+>;
+type RootAuthorityMatchesLegacy = AssertTrue<
+  RootRegisteredAuthority extends LegacyDeepRegisteredAuthority ? true : false
+>;
 type DeepAuthorityStaysInternal =
   // @ts-expect-error The export map blocks authority implementation deep imports.
-  typeof import('@origintrail-official/dkg-agent/dist/context-graph-authority.js');
+  typeof import('@origintrail-official/dkg-agent/dist/internal/context-graph-authority/context-graph-authority.js');
 type DeepGateResolverStaysInternal =
   // @ts-expect-error The export map blocks authority implementation deep imports.
-  typeof import('@origintrail-official/dkg-agent/dist/context-graph-agent-gate-authority.js');
+  typeof import('@origintrail-official/dkg-agent/dist/internal/context-graph-authority/context-graph-agent-gate-authority.js');
 type DeepPolicyResolverStaysInternal =
   // @ts-expect-error The export map blocks authority implementation deep imports.
-  typeof import('@origintrail-official/dkg-agent/dist/context-graph-access-policy.js');
+  typeof import('@origintrail-official/dkg-agent/dist/internal/context-graph-authority/context-graph-access-policy.js');
 
 export type {
   PromoteOptionsMatchFacade,
@@ -86,6 +98,8 @@ export type {
   AuthorityErrorNameStaysInternal,
   AuthorityErrorStaysInternal,
   AuthorityGuardStaysInternal,
+  LegacyAuthorityMatchesRoot,
+  RootAuthorityMatchesLegacy,
   GateAuthorityResultStaysInternal,
   AuthorityMarkerStaysInternal,
   DeepAuthorityStaysInternal,

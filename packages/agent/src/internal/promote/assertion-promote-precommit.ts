@@ -9,7 +9,7 @@ import {
 import {
   isContextGraphAuthorityUnavailableMarker,
   type ContextGraphAgentGateUnavailableReason,
-} from '../../context-graph-authority.js';
+} from '../context-graph-authority/context-graph-authority.js';
 import type { DKGAgent } from '../../dkg-agent.js';
 import type { AssertionPromoteOptions } from '../../dkg-agent-types.js';
 type GossipSigner = Awaited<

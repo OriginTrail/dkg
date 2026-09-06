@@ -60,28 +60,27 @@ if (
 ) {
   throw new Error('internal authority marker machinery leaked from the package root');
 }
-const internalModules = [
-  'internal/promote/assertion-promote-precommit',
-  'context-graph-authority',
-  'context-graph-agent-gate-authority',
-  'context-graph-access-policy',
-];
-// Check runtime imports and generated declaration/map paths against the built package.
-for (const internalModule of internalModules) {
-  for (const extension of ['js', 'd.ts', 'js.map', 'd.ts.map']) {
-    const specifier = `@origintrail-official/dkg-agent/dist/${internalModule}.${extension}`;
-    try {
-      await import(specifier);
-      throw new Error(`internal module unexpectedly resolved: ${specifier}`);
-    } catch (error) {
-      if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
-    }
-    try {
-      require.resolve(specifier);
-      throw new Error(`internal module unexpectedly resolved via require: ${specifier}`);
-    } catch (error) {
-      if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
-    }
+const emittedInternalFiles = await listEmittedFiles(
+  new URL('../dist/internal/', import.meta.url),
+);
+if (emittedInternalFiles.length === 0) {
+  throw new Error('built package did not emit the internal namespace');
+}
+// The structural export rule must block every emitted internal artifact,
+// including future modules and generated declarations/maps.
+for (const path of emittedInternalFiles) {
+  const specifier = `@origintrail-official/dkg-agent/dist/internal/${path}`;
+  try {
+    await import(specifier);
+    throw new Error(`internal module unexpectedly resolved: ${specifier}`);
+  } catch (error) {
+    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+  }
+  try {
+    require.resolve(specifier);
+    throw new Error(`internal module unexpectedly resolved via require: ${specifier}`);
+  } catch (error) {
+    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
   }
 }
 const legacySynchronizationError = new legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1(
@@ -308,6 +307,9 @@ const blockedRfc64Modules = [
   'serialized-scope-runtime-v1.js',
 ];
 const packageExports = packageManifest.exports;
+if (packageExports['./dist/internal/*'] !== null) {
+  throw new Error('the internal namespace is not structurally blocked');
+}
 const emittedRfc64Modules = await listEmittedRfc64Modules();
 const classifiedRfc64Modules = new Set([
   ...publicRfc64Modules,
@@ -370,4 +372,23 @@ async function listEmittedRfc64Modules() {
     }
   }
   return modules.sort();
+}
+
+async function listEmittedFiles(rootUrl) {
+  const rootPath = fileURLToPath(rootUrl);
+  const pending = [rootPath];
+  const files = [];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      const entryPath = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(entryPath);
+      } else if (entry.isFile()) {
+        files.push(relative(rootPath, entryPath).split(sep).join('/'));
+      }
+    }
+  }
+  return files.sort();
 }

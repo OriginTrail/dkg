@@ -66,15 +66,15 @@ import {
 } from './active-public-context-graph-chain-proof.js';
 import {
   resolveContextGraphAgentGateAuthorityDecision,
-} from './context-graph-agent-gate-authority.js';
+} from './internal/context-graph-authority/context-graph-agent-gate-authority.js';
 import {
   resolveLiveOnChainAccessPolicyState as resolveLiveAccessPolicyState,
-} from './context-graph-access-policy.js';
+} from './internal/context-graph-authority/context-graph-access-policy.js';
 import {
   createContextGraphAuthorityError,
   type ContextGraphAgentGateAuthority,
   type LiveOnChainAccessPolicyState,
-} from './context-graph-authority.js';
+} from './internal/context-graph-authority/context-graph-authority.js';
 
 import { FANOUT_RESPONSE_REJECTED, FANOUT_RESPONSE_RETRYABLE } from './swm/substrate-fanout.js';
 
