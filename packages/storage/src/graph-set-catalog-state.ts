@@ -1,7 +1,15 @@
-import { createSortedUniqueStringCatalog } from '@origintrail-official/dkg-core';
+import {
+  createSortedUniqueStringCatalog,
+  insertSortedUniqueStringCatalog,
+  removeSortedUniqueStringCatalog,
+} from '@origintrail-official/dkg-core';
 import type { SortedGraphCatalog } from './graph-set-index-store.js';
 
-/** Owns graph membership and the invalidation of its immutable sorted view. */
+/**
+ * Owns two synchronized representations of one graph set: `members` is the
+ * mutable authority, while `ordered` is either null or its exact immutable,
+ * unique, Unicode-code-point-sorted projection.
+ */
 export class GraphSetCatalogState {
   private members: Set<string> | null = null;
   private ordered: SortedGraphCatalog | null = null;
@@ -32,17 +40,37 @@ export class GraphSetCatalogState {
     return { added, removed };
   }
 
-  add(graph: string): boolean {
-    if (!this.members || this.members.has(graph)) return false;
-    this.members.add(graph);
-    this.ordered = null;
-    return true;
-  }
-
-  remove(graph: string): boolean {
-    if (!this.members?.delete(graph)) return false;
-    this.ordered = null;
-    return true;
+  /** Apply one mixed presence reconciliation with at most one projection rebuild. */
+  reconcile(
+    graphPresence: Iterable<Readonly<{ graph: string; present: boolean }>>,
+  ): { added: string[]; removed: string[] } {
+    if (!this.members) return { added: [], removed: [] };
+    const desiredPresence = new Map<string, boolean>();
+    for (const { graph, present } of graphPresence) {
+      desiredPresence.set(graph, present);
+    }
+    const added: string[] = [];
+    const removed: string[] = [];
+    for (const [graph, present] of desiredPresence) {
+      if (present) {
+        if (this.members.has(graph)) continue;
+        this.members.add(graph);
+        added.push(graph);
+      } else if (this.members.delete(graph)) {
+        removed.push(graph);
+      }
+    }
+    if (this.ordered) {
+      const mutationCount = added.length + removed.length;
+      if (mutationCount === 1) {
+        this.ordered = added.length === 1
+          ? insertSortedUniqueStringCatalog(this.ordered, added[0]!)
+          : removeSortedUniqueStringCatalog(this.ordered, removed[0]!);
+      } else if (mutationCount > 1) {
+        this.ordered = createSortedUniqueStringCatalog(this.members);
+      }
+    }
+    return { added, removed };
   }
 
   /**
