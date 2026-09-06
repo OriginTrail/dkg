@@ -9,7 +9,7 @@
  * the distinction between an authoritative denial and unavailable authority.
  */
 
-import type { RegisteredContextGraphAuthority } from './dkg-agent-cg-resolve.js';
+import type { RegisteredContextGraphAuthority } from './context-graph-authority.js';
 
 export type ContextGraphReadAuthorityOutcome = 'allowed' | 'denied' | 'unavailable';
 

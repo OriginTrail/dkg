@@ -8,7 +8,8 @@ import {
 
 import {
   isContextGraphAuthorityUnavailableMarker,
-} from './context-graph-agent-gate-authority.js';
+  type ContextGraphAgentGateUnavailableReason,
+} from '../../context-graph-authority.js';
 import type { DKGAgent } from '../../dkg-agent.js';
 import type { AssertionPromoteOptions } from '../../dkg-agent-types.js';
 type GossipSigner = Awaited<
@@ -46,12 +47,28 @@ type AssertionPromotePreCommitResult = {
   publisherOptions: PublisherAssertionPromoteOptions;
 };
 
+const CONTEXT_GRAPH_AUTHORITY_PROMOTE_RETRY = {
+  'chain-name-binding-unavailable': true,
+  'local-chain-binding-unavailable': true,
+  'local-existence-unavailable': true,
+  'chain-access-policy-unavailable': true,
+  'chain-access-policy-timeout': true,
+  'chain-access-policy-unknown': false,
+  'chain-participant-authority-unsupported': false,
+  'chain-participant-authority-unavailable': true,
+  'chain-participant-authority-invalid': false,
+  'rfc64-private-read-roster-unavailable': true,
+} as const satisfies Record<ContextGraphAgentGateUnavailableReason, boolean>;
+
 /** Retry translation belongs to these concrete agent prerequisite callbacks. */
 async function resolvePromoteAuthority<T>(resolve: () => Promise<T>): Promise<T> {
   try {
     return await resolve();
   } catch (error) {
-    if (isContextGraphAuthorityUnavailableMarker(error) && error.retryable) {
+    if (
+      isContextGraphAuthorityUnavailableMarker(error)
+      && CONTEXT_GRAPH_AUTHORITY_PROMOTE_RETRY[error.reason]
+    ) {
       throw createPromoteRetryableFailure(error);
     }
     throw error;
