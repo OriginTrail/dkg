@@ -794,6 +794,15 @@ function catalogOperationalTarget(
   }) as Rfc64PublicCatalogHeadAnnouncementV1;
 }
 
+function hasSafeBootstrapRecoveryOrdering(events: readonly string[]): boolean {
+  const finalCatalogStart = events.lastIndexOf('catalog-start');
+  const finalCatalogComplete = events.lastIndexOf('catalog-complete');
+  return finalCatalogStart > 0
+    && events[finalCatalogStart - 1] === 'connect'
+    && finalCatalogComplete === finalCatalogStart + 1
+    && events.indexOf('swm') === finalCatalogComplete + 1;
+}
+
 ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring', () => {
   it.each([
     {
@@ -3328,6 +3337,19 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     } as unknown as Rfc64PublicCatalogBootstrapConfigV1)).toThrow(/unknown or missing fields/u);
   });
 
+  it('rejects SWM recovery escaping from a stale bootstrap pass', () => {
+    expect(hasSafeBootstrapRecoveryOrdering([
+      'connect',
+      'catalog-start',
+      'catalog-complete',
+      'swm',
+      'connect',
+      'catalog-start',
+      'catalog-complete',
+      'swm',
+    ])).toBe(false);
+  });
+
   it('dials and schedules every graph-complete SWM provider during bootstrap', async () => {
     const policy = buildOpenOwnerContextGraphPolicyV1({
       networkId: NETWORK_ID,
@@ -3413,13 +3435,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     // started before selection. Regardless of that race, the replacement
     // must dial first and no recovery work may escape before its catalog
     // phase has completed.
-    expect(ordering).toContain('connect');
-    expect(ordering.slice(-4)).toEqual([
-      'connect',
-      'catalog-start',
-      'catalog-complete',
-      'swm',
-    ]);
+    expect(hasSafeBootstrapRecoveryOrdering(ordering)).toBe(true);
     await receiver.stop();
     expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(false);
   });
