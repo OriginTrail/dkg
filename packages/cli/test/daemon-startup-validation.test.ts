@@ -7,6 +7,7 @@ import { buildEvmDeploymentId } from '@origintrail-official/dkg-chain';
 import {
   DEFAULT_DAEMON_LOG_MAX_BYTES,
 } from '../src/daemon/log-rotation.js';
+import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 
 const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
@@ -122,7 +123,7 @@ describe('daemon startup network validation', () => {
       networkConfig: 'mainnet-base',
       listenPort: 0,
       nodeRole: 'edge',
-    } as any, Date.now())).rejects.toThrow('process.exit:1');
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('process.exit:1');
 
     expect(mocks.loadNetworkConfig).toHaveBeenCalledWith('mainnet-base');
     expect(mocks.agentCreate).not.toHaveBeenCalled();
@@ -156,7 +157,7 @@ describe('daemon startup network validation', () => {
       networkConfig: 'missing-mainnet',
       listenPort: 0,
       nodeRole: 'edge',
-    } as any, Date.now())).rejects.toThrow('process.exit:1');
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('process.exit:1');
 
     expect((await stat(daemonLog)).size).toBeLessThan(DEFAULT_DAEMON_LOG_MAX_BYTES);
     let tail = '';
@@ -192,7 +193,7 @@ describe('daemon startup network validation', () => {
       networkConfig: 'missing-mainnet',
       listenPort: 0,
       nodeRole: 'edge',
-    } as any, Date.now())).rejects.toThrow('process.exit:1');
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('process.exit:1');
 
     expect(mocks.loadNetworkConfig).toHaveBeenCalledWith('missing-mainnet');
     expect(mocks.agentCreate).not.toHaveBeenCalled();
@@ -231,7 +232,7 @@ describe('daemon startup network validation', () => {
         hubAddress: '0x1234567890123456789012345678901234567890',
         chainId: 'gnosis:100',
       },
-    } as any, Date.now())).rejects.toThrow('after-agent-create');
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('after-agent-create');
 
     expect(mocks.loadNetworkConfig).toHaveBeenCalledWith('mainnet-gnosis');
     expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
@@ -284,7 +285,7 @@ describe('daemon startup network validation', () => {
         rpcUrl: 'https://private-rpc.example',
         hubAddress: '0x2234567890123456789012345678901234567890',
       },
-    } as any, Date.now())).rejects.toThrow('after-agent-create');
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('after-agent-create');
 
     expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
     const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;

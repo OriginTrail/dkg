@@ -132,6 +132,8 @@ try {
   }
 }
 const requiredCatalogMethods = [
+  'startRfc64PublicCatalogServiceV1',
+  'closeRfc64PublicCatalogServiceV1',
   'acceptRfc64CatalogAccessSnapshotV1',
   'publishAuthorCatalogGenesisV1',
   'publishAuthorCatalogExactSetSuccessorV1',
@@ -247,6 +249,8 @@ const blockedRfc64Modules = [
   'catalog-synchronization-error-v1.js',
   'catalog-access-policy-v1.js',
   'catalog-authority-config-v1.js',
+  'catalog-authority-refresh-loop-v1.js',
+  'public-catalog-workload-owner-v1.js',
   'catalog-responsibility-registry-v1.js',
   'release-native-catalog-authority-v1.js',
   'legacy-swm-boundary-v1.js',

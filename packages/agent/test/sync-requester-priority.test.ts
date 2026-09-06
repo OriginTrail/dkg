@@ -14,6 +14,8 @@ import {
 } from '../src/sync/backpressure.js';
 import { syncPriorityClass } from '../src/sync/policy.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import { createSwmTargetExecutorSessionFactoryForTest } from
+  './_helpers/swm-target-executor-session-fixture.js';
 
 const ctx = createOperationContext('sync');
 const noop = () => {};
@@ -236,6 +238,9 @@ describe('requester per-CG priority admission', () => {
     const admissions: string[] = [];
     const warnings: string[] = [];
     const contextGraphIds = ['first', 'second', 'third'];
+    let createTargetExecutorSession:
+      | ReturnType<typeof createSwmTargetExecutorSessionFactoryForTest>
+      | undefined;
     const agent = {
       config: { syncContextGraphPriorities: {} },
       store: {},
@@ -284,6 +289,11 @@ describe('requester per-CG priority admission', () => {
       },
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
       resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+      createSwmTargetExecutorSessionV1: () => {
+        createTargetExecutorSession ??=
+          createSwmTargetExecutorSessionFactoryForTest(agent as never);
+        return createTargetExecutorSession();
+      },
       syncSharedMemoryFromPeerDetailedExecution:
         LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     };
@@ -310,6 +320,9 @@ describe('requester per-CG priority admission', () => {
 
   it('counts several failed Context Graphs from one remote as one failed peer', async () => {
     const contextGraphIds = ['private-a', 'private-b'];
+    let createTargetExecutorSession:
+      | ReturnType<typeof createSwmTargetExecutorSessionFactoryForTest>
+      | undefined;
     const agent = {
       config: { syncContextGraphPriorities: {} },
       store: {},
@@ -326,6 +339,11 @@ describe('requester per-CG priority admission', () => {
       workspaceOwnedEntities: new Map(),
       log: { info: noop, warn: noop, debug: noop },
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
+      createSwmTargetExecutorSessionV1: () => {
+        createTargetExecutorSession ??=
+          createSwmTargetExecutorSessionFactoryForTest(agent as never);
+        return createTargetExecutorSession();
+      },
       syncSharedMemoryFromPeerDetailedExecution:
         LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     };
@@ -377,6 +395,7 @@ describe('requester per-CG priority admission', () => {
         operationId: contextGraphId,
         run: async () => {
           await runSharedMemorySync({
+            mode: { kind: 'ordinary' },
             ctx,
             remotePeerId: 'peer',
             contextGraphIds: [contextGraphId],

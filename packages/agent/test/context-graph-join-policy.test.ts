@@ -1013,6 +1013,62 @@ describe('context graph open enrollment policy', () => {
     expect(await agent.getJoinRequestStatus(contextGraphId, joiner.agentAddress)).toBe('approved');
   }, 30_000);
 
+  it('repairs a post-commit authority-profile failure without duplicate admission accounting', async () => {
+    const { agent, owner, policyStore } = await boot();
+    const contextGraphId = 'private-policy-profile-publication-repair';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    await agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 5,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress);
+    const joiner = await agent.registerAgent('profile-publication-repair-joiner', {
+      framework: 'test',
+    });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    const publishProfile = vi.spyOn(agent, 'reannounceApprovalAuthorityProfile')
+      .mockRejectedValueOnce(new Error('simulated profile publication failure'))
+      .mockResolvedValue(undefined);
+    const notifyApproval = vi.spyOn(agent, 'notifyJoinApproval');
+
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      joiner.name,
+      agent.peerId,
+    )).rejects.toMatchObject({
+      name: 'RetryableJoinAdmissionError',
+      message: expect.stringContaining('simulated profile publication failure'),
+    });
+    expect(await agent.getJoinRequestStatus(contextGraphId, joiner.agentAddress)).toBe('approved');
+    expect((await agent.getContextGraphAllowedAgents(contextGraphId)).map(
+      (address) => address.toLowerCase(),
+    )).toContain(joiner.agentAddress.toLowerCase());
+    expect(agent.hasRetryableContextGraphJoinAdmission(contextGraphId, delegation)).toBe(true);
+    expect(notifyApproval).not.toHaveBeenCalled();
+
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      joiner.name,
+      agent.peerId,
+    )).resolves.toMatchObject({
+      status: 'approved',
+      autoApproved: true,
+      alreadyMember: true,
+    });
+    expect(publishProfile).toHaveBeenCalledTimes(2);
+    expect(notifyApproval).toHaveBeenCalledTimes(1);
+    expect(agent.hasRetryableContextGraphJoinAdmission(contextGraphId, delegation)).toBe(false);
+    expect(policyStore.audit.filter(
+      (event) => event.eventType === 'join_auto_reservation',
+    )).toHaveLength(1);
+    expect(policyStore.audit.filter(
+      (event) => event.eventType === 'join_admission_committed',
+    )).toHaveLength(1);
+  }, 30_000);
+
   it('supports adapters whose awaited writes are durable without a flush method', async () => {
     const { agent, owner } = await boot();
     const contextGraphId = 'private-policy-no-flush-adapter';

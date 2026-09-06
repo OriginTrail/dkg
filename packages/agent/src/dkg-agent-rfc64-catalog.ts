@@ -63,6 +63,7 @@ import type { DKGAgent } from './dkg-agent.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
 import {
+  RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1,
   snapshotRfc64CatalogDeploymentProfileV1,
 } from './rfc64/catalog-authority-config-v1.js';
 import type { AcceptedOpenCatalogPolicyV1 } from './rfc64/open-catalog-policy-v1.js';
@@ -458,11 +459,6 @@ const rfc64CatalogAuthorityProgressV1 =
 const rfc64CatalogAuthorityRevisionsV1 =
   new WeakMap<DKGAgent, Map<string, number>>();
 const rfc64DirectAcceptedCompatibilityV1 = new WeakMap<DKGAgent, Set<string>>();
-const RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1 = 5 * 60_000;
-const rfc64CatalogAuthorityRefreshV1 = new WeakMap<DKGAgent, Readonly<{
-  timer: ReturnType<typeof setInterval>;
-  state: { inFlight: Promise<void> | null; controller: AbortController | null };
-}>>();
 const rfc64SystemContextGraphIdsV1 = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_V1 = 64;
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_PER_PEER_V1 = 4;
@@ -1387,7 +1383,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           ? 'current' as const
           : progress?.state === 'accepted'
             && Date.now() - progress.updatedAtMs
-              <= RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1 * 4
+              <= RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs
+                * RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.freshnessIntervalCount
             ? 'current' as const
             : 'unknown' as const;
       const legacyReadOnlyCount = readRfc64LegacySwmBoundaryCountV1(
@@ -1782,8 +1779,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       if (transition.changed) {
         this.handleRfc64CatalogReceiverSelectionTransitionV1(
           contextGraphId,
-          transition.previous.active && transition.previous.mode !== 'legacy',
-          transition.next.active && transition.next.mode !== 'legacy',
+          {
+            kind: 'responsibility',
+            previousReceiverActive:
+              transition.previous.active && transition.previous.mode !== 'legacy',
+            nextReceiverActive:
+              transition.next.active && transition.next.mode !== 'legacy',
+          },
         );
       }
       return transition.next;
@@ -2198,16 +2200,33 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     });
   }
 
+  /** Start the complete agent-owned RFC-64 catalog runtime. */
+  startRfc64CatalogRuntimeV1(this: DKGAgent, ctx: OperationContext): void {
+    this.rfc64CatalogRuntimeV1.start(ctx);
+  }
+
   /**
-   * Construct + start the public catalog service on the production router.
-   * No-op when RFC-64 persistence is dormant (no `dataDir`) or already started.
-   */
+   * @deprecated Use `startRfc64CatalogRuntimeV1`. Kept as a patch-release
+   * compatibility alias while the complete runtime owns the service lifecycle.
+  */
   startRfc64PublicCatalogServiceV1(this: DKGAgent, ctx: OperationContext): void {
-    if (this.rfc64PublicCatalogServiceV1 !== undefined) return;
-    this.rfc64CatalogMutationCoordinatorV1.reopen();
+    // Preserve the patch-release alias's former readiness contract. Calling it
+    // before agent.start() must not commit the aggregate runtime to a dormant
+    // started state merely because persistence has not opened yet. Intentional
+    // kill-switch and legacy-mode dormancy are still decided by the aggregate
+    // once persistence is available.
+    if (this.rfc64PersistenceV1 === undefined) return;
+    this.startRfc64CatalogRuntimeV1(ctx);
+  }
+
+  /** Construct the transport, or return null while RFC-64 is dormant. */
+  createRfc64PublicCatalogServiceV1(
+    this: DKGAgent,
+    ctx: OperationContext,
+  ): Rfc64PublicCatalogServiceV1 | null {
     if (this.config.rfc64CatalogExecutionPlan.killSwitchActive) {
       this.log.warn(ctx, 'RFC-64 catalog kill switch is active; Track-2 protocols are dormant');
-      return;
+      return null;
     }
     if (
       !this.config.rfc64CatalogExecutionPlan.standaloneTrack2Enabled
@@ -2215,10 +2234,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       && this.config.rfc64CatalogExecutionPlan.track2ContextGraphs.length === 0
     ) {
       this.log.info(ctx, 'RFC-64 catalog protocols are dormant; every selected CG is legacy-mode');
-      return;
+      return null;
     }
     const persistence = this.rfc64PersistenceV1;
-    if (persistence === undefined) return;
+    if (persistence === undefined) return null;
     const verifyIssuerSignature = verifyControlEnvelopeIssuerSignatureV1;
     let nextReconciliationAttemptToken = 0;
     const reconciliationAttempts = new Map<number, Readonly<{
@@ -2380,97 +2399,40 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         return admission;
       },
     });
-    service.start();
-    this.rfc64PublicCatalogServiceV1 = service;
-    for (const responsibility of this.readRfc64CatalogResponsibilitiesV1()) {
-      if (!responsibility.active || responsibility.mode === 'legacy') continue;
-      void this.reconcileRfc64CatalogAccessAuthorityV1(
-        responsibility.contextGraphId,
-      ).catch((error) => {
-        this.log.warn(
-          ctx,
-          `RFC-64 authority bootstrap failed for "${responsibility.contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
-    }
-    if (!rfc64CatalogAuthorityRefreshV1.has(this)) {
-      const state: {
-        inFlight: Promise<void> | null;
-        controller: AbortController | null;
-      } = { inFlight: null, controller: null };
-      const refresh = (): void => {
-        if (state.inFlight !== null || this.rfc64PublicCatalogServiceV1 === undefined) return;
-        const controller = new AbortController();
-        state.controller = controller;
-        const run = (async (): Promise<void> => {
-          // Sequential refresh is an intentional global bound. A large Core
-          // responsibility set cannot turn one timer tick into an RPC burst,
-          // and a later tick coalesces while this pass is still running.
-          for (const responsibility of this.readRfc64CatalogResponsibilitiesV1()) {
-            if (!responsibility.active || responsibility.mode === 'legacy') continue;
-            await this.reconcileRfc64CatalogAccessAuthorityV1(
-              responsibility.contextGraphId,
-              controller.signal,
-            ).catch((error) => {
-              if (controller.signal.aborted) return;
-              this.log.warn(
-                createOperationContext('system'),
-                `RFC-64 authority refresh incomplete for "${responsibility.contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
-              );
-            });
-          }
-        })();
-        state.inFlight = run;
-        void run.finally(() => {
-          if (state.inFlight === run) {
-            state.inFlight = null;
-            state.controller = null;
-          }
-        }).catch(() => undefined);
-      };
-      const timer = setInterval(refresh,
-        RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1);
-      timer.unref?.();
-      rfc64CatalogAuthorityRefreshV1.set(this, Object.freeze({ timer, state }));
-    }
-    this.log.info(ctx, 'RFC-64 public author-catalog transport started');
+    return service;
   }
 
   /** Fence receiver admission while keeping local authoring transports live. */
   async closeRfc64PublicCatalogReceiverAdmissionV1(this: DKGAgent): Promise<void> {
-    await this.rfc64PublicCatalogServiceV1?.closeReceiverAdmissionAndDrain();
+    await this.rfc64PublicCatalogOwnerV1.closeReceiverAdmission();
   }
 
-  /** Stop serving and drain in-flight receiver work. Idempotent + undefined-safe. */
-  async closeRfc64PublicCatalogServiceV1(this: DKGAgent): Promise<void> {
-    const authorityRefresh = rfc64CatalogAuthorityRefreshV1.get(this);
-    if (authorityRefresh !== undefined) {
-      clearInterval(authorityRefresh.timer);
-      rfc64CatalogAuthorityRefreshV1.delete(this);
-      authorityRefresh.state.controller?.abort(
-        new Error('RFC-64 authority refresh stopped during agent shutdown'),
-      );
-    }
-    const service = this.rfc64PublicCatalogServiceV1;
-    this.rfc64PublicCatalogServiceV1 = undefined;
+  /** Close the complete agent-owned RFC-64 catalog runtime. */
+  closeRfc64CatalogRuntimeV1(this: DKGAgent): Promise<void> {
+    return this.rfc64CatalogRuntimeV1.close();
+  }
+
+  /**
+   * @deprecated Use `closeRfc64CatalogRuntimeV1`. Kept as a patch-release
+   * compatibility alias while preserving the complete physical drain.
+   */
+  closeRfc64PublicCatalogServiceV1(this: DKGAgent): Promise<void> {
+    return this.closeRfc64CatalogRuntimeV1();
+  }
+
+  /** Final runtime stage after transport and every workload physically retire. */
+  async closeRfc64PublicCatalogMutationPersistenceV1(this: DKGAgent): Promise<void> {
     try {
-      await service?.close();
+      await this.rfc64CatalogMutationCoordinatorV1.closeAndDrain();
     } finally {
-      try {
-        // Service close fences remote admission. The explicit coordinator then
-        // waits for any non-cooperative physical mutation that outlived an
-        // aborted caller before persistence can be released.
-        await this.rfc64CatalogMutationCoordinatorV1.closeAndDrain();
-      } finally {
-        this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
-        this.rfc64PublicCatalogReconciliationFailuresV1.clear();
-        rfc64DirectAcceptedCompatibilityV1.delete(this);
-        rfc64CatalogReplayRuntimesV1.delete(this);
-        rfc64CatalogReplayProgressV1.delete(this);
-        rfc64CatalogReplayStatusRevisionV1.delete(this);
-        rfc64CatalogTargetAnnouncementsV1.get(this)?.resetAll();
-        rfc64CatalogTargetAnnouncementsV1.delete(this);
-      }
+      this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
+      this.rfc64PublicCatalogReconciliationFailuresV1.clear();
+      rfc64DirectAcceptedCompatibilityV1.delete(this);
+      rfc64CatalogReplayRuntimesV1.delete(this);
+      rfc64CatalogReplayProgressV1.delete(this);
+      rfc64CatalogReplayStatusRevisionV1.delete(this);
+      rfc64CatalogTargetAnnouncementsV1.get(this)?.resetAll();
+      rfc64CatalogTargetAnnouncementsV1.delete(this);
     }
   }
 
