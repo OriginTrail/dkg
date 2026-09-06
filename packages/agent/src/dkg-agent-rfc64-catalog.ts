@@ -2203,8 +2203,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   /**
    * @deprecated Use `startRfc64CatalogRuntimeV1`. Kept as a patch-release
    * compatibility alias while the complete runtime owns the service lifecycle.
-   */
+  */
   startRfc64PublicCatalogServiceV1(this: DKGAgent, ctx: OperationContext): void {
+    // Preserve the patch-release alias's former readiness contract. Calling it
+    // before agent.start() must not commit the aggregate runtime to a dormant
+    // started state merely because persistence has not opened yet. Intentional
+    // kill-switch and legacy-mode dormancy are still decided by the aggregate
+    // once persistence is available.
+    if (this.rfc64PersistenceV1 === undefined) return;
     this.startRfc64CatalogRuntimeV1(ctx);
   }
 

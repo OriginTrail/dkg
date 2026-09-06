@@ -2076,6 +2076,24 @@ describe('RFC-64 rollout authority integration', () => {
     expect(stopped.rfc64PublicCatalogStatsV1()).toBeNull();
   });
 
+  it('keeps the compatibility start dormant until RFC-64 persistence opens', async () => {
+    const agent = await startAgent(
+      'compatibility-pre-persistence-start',
+      undefined,
+      undefined,
+      undefined,
+      (created) => {
+        expect((created as any).rfc64PersistenceV1).toBeUndefined();
+        created.startRfc64PublicCatalogServiceV1(createOperationContext('connect'));
+        expect(created.rfc64PublicCatalogStatsV1()).toBeNull();
+      },
+    );
+
+    expect(agent.rfc64PublicCatalogStatsV1()).toMatchObject({ started: true });
+    agent.startRfc64PublicCatalogServiceV1(createOperationContext('connect'));
+    expect(agent.rfc64PublicCatalogStatsV1()).toMatchObject({ started: true });
+  });
+
   it('retains catalog-mode member transport only for the named-subgraph compatibility lane', async () => {
     const catalog = await startAgent('catalog-metadata-refresh-fence', activation('catalog'));
     catalog.subscribeToContextGraph(CONTEXT_GRAPH_ID);
