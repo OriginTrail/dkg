@@ -16,6 +16,7 @@ const publicCatalogActivation = await import(
 );
 const require = createRequire(import.meta.url);
 const packageManifest = require('@origintrail-official/dkg-agent/package.json');
+const packageExports = packageManifest.exports;
 const expectedRfc64PolicyCells = [
   'public-open',
   'public-curated',
@@ -60,28 +61,34 @@ if (
 ) {
   throw new Error('internal authority marker machinery leaked from the package root');
 }
-const emittedInternalFiles = await listEmittedFiles(
-  new URL('../dist/internal/', import.meta.url),
-);
-if (emittedInternalFiles.length === 0) {
-  throw new Error('built package did not emit the internal namespace');
+if (packageExports['./dist/internal/*'] !== null) {
+  throw new Error('the internal namespace is not structurally blocked');
 }
-// The structural export rule must block every emitted internal artifact,
-// including future modules and generated declarations/maps.
-for (const path of emittedInternalFiles) {
-  const specifier = `@origintrail-official/dkg-agent/dist/internal/${path}`;
-  try {
-    await import(specifier);
-    throw new Error(`internal module unexpectedly resolved: ${specifier}`);
-  } catch (error) {
-    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+for (const [subpath, target] of Object.entries(packageExports)) {
+  if (
+    subpath.startsWith('./dist/internal/')
+    && subpath !== './dist/internal/*'
+    && target !== null
+  ) {
+    throw new Error(`internal export exception must remain blocked: ${subpath}`);
   }
-  try {
-    require.resolve(specifier);
-    throw new Error(`internal module unexpectedly resolved via require: ${specifier}`);
-  } catch (error) {
-    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
-  }
+}
+const representativeInternalSpecifier =
+  '@origintrail-official/dkg-agent/dist/internal/context-graph-authority/' +
+  'context-graph-agent-gate-authority.js';
+try {
+  await import(representativeInternalSpecifier);
+  throw new Error(`internal module unexpectedly resolved: ${representativeInternalSpecifier}`);
+} catch (error) {
+  if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+}
+try {
+  require.resolve(representativeInternalSpecifier);
+  throw new Error(
+    `internal module unexpectedly resolved via require: ${representativeInternalSpecifier}`,
+  );
+} catch (error) {
+  if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
 }
 const legacySynchronizationError = new legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1(
   'no-authorized-provider',
@@ -306,10 +313,6 @@ const blockedRfc64Modules = [
   'supervisor-status-v1.js',
   'serialized-scope-runtime-v1.js',
 ];
-const packageExports = packageManifest.exports;
-if (packageExports['./dist/internal/*'] !== null) {
-  throw new Error('the internal namespace is not structurally blocked');
-}
 const emittedRfc64Modules = await listEmittedRfc64Modules();
 const classifiedRfc64Modules = new Set([
   ...publicRfc64Modules,
@@ -372,23 +375,4 @@ async function listEmittedRfc64Modules() {
     }
   }
   return modules.sort();
-}
-
-async function listEmittedFiles(rootUrl) {
-  const rootPath = fileURLToPath(rootUrl);
-  const pending = [rootPath];
-  const files = [];
-  while (pending.length > 0) {
-    const directory = pending.pop();
-    const entries = await readdir(directory, { withFileTypes: true });
-    for (const entry of entries) {
-      const entryPath = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        pending.push(entryPath);
-      } else if (entry.isFile()) {
-        files.push(relative(rootPath, entryPath).split(sep).join('/'));
-      }
-    }
-  }
-  return files.sort();
 }

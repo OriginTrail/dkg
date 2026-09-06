@@ -85,13 +85,13 @@ import { SYNC_PAGE_SIZE, SYNC_AUTH_MAX_AGE_MS, CHAIN_POLICY_READ_TIMEOUT_MS } fr
 
 import { createAbortError, runBoundedOperation } from './bounded-operation.js';
 import type {
-  LiveOnChainAccessPolicyState,
   RegisteredContextGraphAuthority,
-} from './internal/context-graph-authority/context-graph-authority.js';
-// Keep the historical dist/dkg-agent-cg-resolve.js type entry point while the
-// authority implementation remains under the package's internal namespace.
+  LiveOnChainAccessPolicyState,
+} from './registered-context-graph-authority.js';
+// Keep the historical dist/dkg-agent-cg-resolve.js type entry point backed by
+// the same stable public contract as the package root.
 export type { RegisteredContextGraphAuthority } from
-  './internal/context-graph-authority/context-graph-authority.js';
+  './registered-context-graph-authority.js';
 import {
   type SyncRequestEnvelope,
   type ContextGraphSub,

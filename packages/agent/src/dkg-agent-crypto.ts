@@ -73,8 +73,9 @@ import {
 import {
   createContextGraphAuthorityError,
   type ContextGraphAgentGateAuthority,
-  type LiveOnChainAccessPolicyState,
 } from './internal/context-graph-authority/context-graph-authority.js';
+import type { LiveOnChainAccessPolicyState } from
+  './registered-context-graph-authority.js';
 
 import { FANOUT_RESPONSE_REJECTED, FANOUT_RESPONSE_RETRYABLE } from './swm/substrate-fanout.js';
 

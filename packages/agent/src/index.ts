@@ -290,7 +290,7 @@ export type {
   ContextGraphReadAuthoritySource,
 } from './context-graph-read-authority.js';
 export type { RegisteredContextGraphAuthority } from
-  './internal/context-graph-authority/context-graph-authority.js';
+  './registered-context-graph-authority.js';
 export type { ContextGraphRegistrationBinding } from './dkg-agent-cg-registry.js';
 export {
   ContextGraphNotFoundError,
