@@ -58,6 +58,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       undefined,
       recoveryConfig,
     );
+    const deleteProvider = vi.fn();
     const runtime = new Rfc64SwmRecoveryRuntimeV1({
       authority: {
         resolveRuntimeSelection: () => selection,
@@ -76,11 +77,17 @@ describe('RFC-64 recovery-plan queue authorization', () => {
         resolveRecoveryConfig: () => normalizedRecoveryConfig,
       },
       admission: { invalidateContextGraph: () => [] },
-      cooldown: { deleteProvider: () => undefined },
+      cooldown: { deleteProvider },
     });
 
     expect(runtime.resolveRuntimeAuthority(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
       .toMatchObject({ active: true, lane: 'selected-public' });
+    expect(runtime.resolveConfiguredCompleteProviderPeerIds(
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+    )).toEqual([PEER_A]);
+    expect(runtime.resolveActiveCompleteProviderPeerIds(
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+    )).toEqual([PEER_A]);
     expect(runtime.projectSubscriptionTransition(RFC64_ROLLOUT_CONTEXT_GRAPH_ID, {
       previousSubscribed: true,
       nextSubscribed: false,
@@ -93,6 +100,15 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     selection = { ...selection, selectedContextGraphs: [] };
     expect(runtime.resolveRuntimeAuthority(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
       .toMatchObject({ active: false, lane: 'selected-public' });
+    expect(runtime.resolveConfiguredCompleteProviderPeerIds(
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+    )).toEqual([PEER_A]);
+    expect(runtime.resolveActiveCompleteProviderPeerIds(
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+    )).toEqual([]);
+    expect(runtime.invalidateSelectionState(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
+      .toEqual([PEER_A]);
+    expect(deleteProvider).toHaveBeenCalledWith(PEER_A);
     expect(runtime.projectSubscriptionTransition(RFC64_ROLLOUT_CONTEXT_GRAPH_ID, {
       previousSubscribed: false,
       nextSubscribed: true,
@@ -265,9 +281,12 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     agent.selectedSwmBootstrapAdmission.request(PEER_A, ['existing-cg']);
     agent.rfc64ExactCatchupOnConnectAt.set(PEER_A, Date.now());
 
-    expect(agent.resolveRfc64CompleteSwmProviderPeerIdsV1(
+    expect(agent.rfc64SwmRecoveryRuntimeV1.resolveConfiguredCompleteProviderPeerIds(
       RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
     )).toEqual([PEER_A]);
+    expect(agent.resolveRfc64CompleteSwmProviderPeerIdsV1(
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+    )).toEqual([]);
 
     expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
       authorized,

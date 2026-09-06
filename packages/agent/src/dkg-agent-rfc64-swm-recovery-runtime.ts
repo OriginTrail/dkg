@@ -184,13 +184,20 @@ export class Rfc64SwmRecoveryRuntimeV1 {
     ));
   }
 
-  resolveCompleteProviderPeerIds(contextGraphId: string): readonly string[] {
+  /** Raw configured pins, retained for selection invalidation and cooldown reset. */
+  resolveConfiguredCompleteProviderPeerIds(contextGraphId: string): readonly string[] {
     const config = this.ports.authority.resolveRecoveryConfig();
     if (config === undefined) return Object.freeze([]);
     const policy = config.acceptedPolicies.find(
       ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
     );
     return policy?.completeSwmProviders ?? Object.freeze([]);
+  }
+
+  /** Pins that currently own recovery and may fence ordinary synchronization. */
+  resolveActiveCompleteProviderPeerIds(contextGraphId: string): readonly string[] {
+    if (!this.resolveRuntimeAuthority(contextGraphId).active) return Object.freeze([]);
+    return this.resolveConfiguredCompleteProviderPeerIds(contextGraphId);
   }
 
   invalidateSelectionState(contextGraphId: string): readonly string[] {
@@ -202,7 +209,7 @@ export class Rfc64SwmRecoveryRuntimeV1 {
 
     const affectedProviders = new Set([
       ...this.ports.admission.invalidateContextGraph(contextGraphId),
-      ...this.resolveCompleteProviderPeerIds(contextGraphId),
+      ...this.resolveConfiguredCompleteProviderPeerIds(contextGraphId),
     ]);
     for (const providerPeerId of affectedProviders) {
       this.ports.cooldown.deleteProvider(providerPeerId);
@@ -270,7 +277,7 @@ export class Rfc64SwmRecoveryRuntimeMethods extends DKGAgentBase {
     contextGraphId: string,
   ): readonly string[] {
     return this.rfc64SwmRecoveryRuntimeV1
-      .resolveCompleteProviderPeerIds(contextGraphId);
+      .resolveActiveCompleteProviderPeerIds(contextGraphId);
   }
 
   invalidateRfc64SwmRecoverySelectionStateV1(

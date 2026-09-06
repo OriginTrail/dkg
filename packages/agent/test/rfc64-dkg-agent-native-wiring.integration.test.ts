@@ -3307,9 +3307,11 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       admission: { invalidateContextGraph: () => [] },
       cooldown: { deleteProvider: () => undefined },
     });
-    expect(providerResolver.resolveCompleteProviderPeerIds(CONTEXT_GRAPH_ID))
+    expect(providerResolver.resolveConfiguredCompleteProviderPeerIds(CONTEXT_GRAPH_ID))
       .toEqual(['12D3KooCompleteSwm']);
-    expect(providerResolver.resolveCompleteProviderPeerIds(
+    expect(providerResolver.resolveActiveCompleteProviderPeerIds(CONTEXT_GRAPH_ID))
+      .toEqual([]);
+    expect(providerResolver.resolveConfiguredCompleteProviderPeerIds(
       '0x2222222222222222222222222222222222222222/other' as ContextGraphIdV1,
     )).toEqual([]);
     expect(() => snapshotRfc64PublicCatalogBootstrapConfigV1({

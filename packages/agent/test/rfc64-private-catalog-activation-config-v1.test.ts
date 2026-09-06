@@ -254,7 +254,9 @@ describe('RFC-64 private catalog activation', () => {
       bootstrap,
       '12D3KooUnconfiguredPrivateProvider',
     )).toEqual([]);
-    expect(resolver.resolveCompleteProviderPeerIds(PRIVATE_CG))
+    expect(resolver.resolveConfiguredCompleteProviderPeerIds(PRIVATE_CG))
+      .toEqual([PROVIDER_PEER]);
+    expect(resolver.resolveActiveCompleteProviderPeerIds(PRIVATE_CG))
       .toEqual([PROVIDER_PEER]);
   });
 

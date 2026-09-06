@@ -25,6 +25,8 @@ import {
 } from
   '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import { SwmTargetExecutorCompositionMethods } from
+  '../src/dkg-agent-swm-target-executor.js';
 import {
   type SelectedSwmMetaContinuation,
 } from '../src/sync/selected-swm-meta-fetcher.js';
@@ -525,6 +527,8 @@ export interface SelectedSwmLifecycleAgentFixture {
   resolveRfc64CatalogReceiverAuthorityV1: (
     contextGraphId: string,
   ) => { legacySyncAllowed: boolean };
+  createSwmTargetExecutorV1:
+    typeof SwmTargetExecutorCompositionMethods.prototype.createSwmTargetExecutorV1;
   syncSharedMemoryFromPeerDetailedExecution:
     typeof LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution;
 }
@@ -864,6 +868,8 @@ export function createSelectedSwmLifecycleHarness(
       );
     },
     resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+    createSwmTargetExecutorV1:
+      SwmTargetExecutorCompositionMethods.prototype.createSwmTargetExecutorV1,
     syncSharedMemoryFromPeerDetailedExecution:
       LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     getSelectedSwmMetaTransfers: () => {
