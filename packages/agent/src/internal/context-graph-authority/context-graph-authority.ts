@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /** Fail-closed outcomes from the live on-chain access-policy read. */
+export const LIVE_ON_CHAIN_ACCESS_POLICY_UNAVAILABLE_REASONS = Object.freeze([
+  'chain-access-policy-timeout',
+  'chain-access-policy-unknown',
+] as const);
+
 export type LiveOnChainAccessPolicyUnavailableReason =
-  | 'chain-access-policy-timeout'
-  | 'chain-access-policy-unknown';
+  (typeof LIVE_ON_CHAIN_ACCESS_POLICY_UNAVAILABLE_REASONS)[number];
 
 export type LiveOnChainAccessPolicyUnavailable = {
   kind: 'unavailable';
@@ -16,15 +20,19 @@ export type LiveOnChainAccessPolicyState =
   | LiveOnChainAccessPolicyUnavailable;
 
 /** Every unavailable outcome emitted by registered Context Graph authority. */
+export const REGISTERED_CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS = Object.freeze([
+  'chain-name-binding-unavailable',
+  'local-chain-binding-unavailable',
+  'local-existence-unavailable',
+  'chain-access-policy-unavailable',
+  ...LIVE_ON_CHAIN_ACCESS_POLICY_UNAVAILABLE_REASONS,
+  'chain-participant-authority-unsupported',
+  'chain-participant-authority-unavailable',
+  'chain-participant-authority-invalid',
+] as const);
+
 export type RegisteredContextGraphAuthorityUnavailableReason =
-  | 'chain-name-binding-unavailable'
-  | 'local-chain-binding-unavailable'
-  | 'local-existence-unavailable'
-  | 'chain-access-policy-unavailable'
-  | LiveOnChainAccessPolicyUnavailableReason
-  | 'chain-participant-authority-unsupported'
-  | 'chain-participant-authority-unavailable'
-  | 'chain-participant-authority-invalid';
+  (typeof REGISTERED_CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS)[number];
 
 /** Canonical registered Context Graph authority state. */
 export type RegisteredContextGraphAuthority =
@@ -42,9 +50,13 @@ export type RegisteredContextGraphAuthority =
       detail?: string;
     };
 
+export const CONTEXT_GRAPH_AGENT_GATE_UNAVAILABLE_REASONS = Object.freeze([
+  ...REGISTERED_CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS,
+  'rfc64-private-read-roster-unavailable',
+] as const);
+
 export type ContextGraphAgentGateUnavailableReason =
-  | RegisteredContextGraphAuthorityUnavailableReason
-  | 'rfc64-private-read-roster-unavailable';
+  (typeof CONTEXT_GRAPH_AGENT_GATE_UNAVAILABLE_REASONS)[number];
 
 export type ContextGraphAgentGateAuthority =
   | { kind: 'ungated' }
@@ -61,20 +73,9 @@ export const CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE =
 export const CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME =
   'ContextGraphAuthorityUnavailableError' as const;
 
-const CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS = new Set<
-  ContextGraphAgentGateUnavailableReason
->([
-  'chain-name-binding-unavailable',
-  'local-chain-binding-unavailable',
-  'local-existence-unavailable',
-  'chain-access-policy-unavailable',
-  'chain-access-policy-timeout',
-  'chain-access-policy-unknown',
-  'chain-participant-authority-unsupported',
-  'chain-participant-authority-unavailable',
-  'chain-participant-authority-invalid',
-  'rfc64-private-read-roster-unavailable',
-]);
+const contextGraphAuthorityUnavailableReasonSet = new Set<string>(
+  CONTEXT_GRAPH_AGENT_GATE_UNAVAILABLE_REASONS,
+);
 
 /** Serialization-safe authority failure without caller-specific retry policy. */
 export type ContextGraphAuthorityUnavailableMarker = {
@@ -109,9 +110,7 @@ export function isContextGraphAuthorityUnavailableMarker(
     if (Reflect.get(value, 'code') !== CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE) return false;
     const reason = Reflect.get(value, 'reason');
     return typeof reason === 'string'
-      && CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS.has(
-        reason as ContextGraphAgentGateUnavailableReason,
-      );
+      && contextGraphAuthorityUnavailableReasonSet.has(reason);
   } catch {
     return false;
   }

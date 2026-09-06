@@ -139,15 +139,15 @@ import {
 } from './active-public-context-graph-chain-proof.js';
 import {
   resolveContextGraphAgentGateAuthorityDecision,
-} from './context-graph-agent-gate-authority.js';
+} from './internal/context-graph-authority/context-graph-agent-gate-authority.js';
 import {
   resolveLiveOnChainAccessPolicyState as resolveLiveAccessPolicyState,
-} from './context-graph-access-policy.js';
+} from './internal/context-graph-authority/context-graph-access-policy.js';
 import {
   createContextGraphAuthorityError,
   type ContextGraphAgentGateAuthority,
   type LiveOnChainAccessPolicyState,
-} from './context-graph-authority.js';
+} from './internal/context-graph-authority/context-graph-authority.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';

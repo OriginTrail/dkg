@@ -343,7 +343,11 @@ import { createAbortError, runBoundedOperation } from './bounded-operation.js';
 import type {
   LiveOnChainAccessPolicyState,
   RegisteredContextGraphAuthority,
-} from './context-graph-authority.js';
+} from './internal/context-graph-authority/context-graph-authority.js';
+// Keep the historical dist/dkg-agent-cg-resolve.js type entry point while the
+// authority implementation remains under the package's internal namespace.
+export type { RegisteredContextGraphAuthority } from
+  './internal/context-graph-authority/context-graph-authority.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
   ContextGraphNotFoundError,

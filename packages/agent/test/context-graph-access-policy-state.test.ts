@@ -2,9 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   resolveLiveOnChainAccessPolicyState,
   type LiveOnChainAccessPolicyDependencies,
-} from '../src/context-graph-access-policy.js';
-import { ContextGraphAuthorityUnavailableError } from
-  '../src/context-graph-authority.js';
+} from '../src/internal/context-graph-authority/context-graph-access-policy.js';
+import {
+  CONTEXT_GRAPH_AGENT_GATE_UNAVAILABLE_REASONS,
+  ContextGraphAuthorityUnavailableError,
+  isContextGraphAuthorityUnavailableMarker,
+} from
+  '../src/internal/context-graph-authority/context-graph-authority.js';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
 
@@ -23,6 +27,23 @@ function policyDependencies(
 }
 
 describe('live access policy to registered authority boundary', () => {
+  it.each(CONTEXT_GRAPH_AGENT_GATE_UNAVAILABLE_REASONS)(
+    'recognizes canonical authority reason %s at the runtime marker boundary',
+    (reason) => {
+      expect(isContextGraphAuthorityUnavailableMarker({
+        code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+        reason,
+      })).toBe(true);
+    },
+  );
+
+  it('rejects reasons outside the canonical runtime registry', () => {
+    expect(isContextGraphAuthorityUnavailableMarker({
+      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+      reason: 'unknown-authority-reason',
+    })).toBe(false);
+  });
+
   it.each([
     ['malformed numeric id', 'not-a-number', {}],
     ['zero id', '0', {}],
