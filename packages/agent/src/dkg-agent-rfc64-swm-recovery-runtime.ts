@@ -7,6 +7,7 @@ import type { DKGAgent } from './dkg-agent.js';
 import {
   projectRfc64CatalogReceiverAuthorityV1,
   type Rfc64CatalogAuthorityPolicyV1,
+  type Rfc64RuntimeCatalogBootstrapConfigV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 import {
   resolveRfc64ActivePeerSwmRecoveryPlanV1,
@@ -19,10 +20,6 @@ import {
 import type { RecoveryExecutionGuard } from
   './sync/requester/recovery-execution-guard.js';
 
-type Rfc64RecoveryConfigV1 = Parameters<
-  typeof resolveRfc64ActivePeerSwmRecoveryPlanV1
->[0];
-
 export interface Rfc64SwmRecoverySelectionV1 {
   /** The single canonical answer consumed by both public and private lanes. */
   readonly selected: boolean;
@@ -32,6 +29,18 @@ interface Rfc64SwmRecoveryRuntimeSelectionV1 {
   readonly selectedContextGraphs: readonly string[];
   readonly eligibleContextGraphs: readonly string[];
   readonly subscriptionDriven: boolean;
+}
+
+export interface Rfc64CatalogSubscriptionTransitionV1 {
+  readonly previousSubscribed: boolean;
+  readonly nextSubscribed: boolean;
+}
+
+export interface Rfc64CatalogSubscriptionTransitionEffectsV1 {
+  readonly previousReceiverActive: boolean;
+  readonly nextReceiverActive: boolean;
+  readonly receiverChanged: boolean;
+  readonly recoveryChanged: boolean;
 }
 
 export class Rfc64SwmRecoveryTargetRevokedErrorV1 extends Error {
@@ -88,7 +97,7 @@ export interface Rfc64SwmRecoveryRuntimePortsV1 {
     resolveConfigured: (
       contextGraphId: string,
     ) => Readonly<Rfc64CatalogAuthorityPolicyV1>;
-    resolveRecoveryConfig: () => Rfc64RecoveryConfigV1;
+    resolveRecoveryConfig: () => Readonly<Rfc64RuntimeCatalogBootstrapConfigV1> | undefined;
   }>;
   readonly admission: Readonly<{
     invalidateContextGraph: (contextGraphId: string) => readonly string[];
@@ -118,21 +127,29 @@ export class Rfc64SwmRecoveryRuntimeV1 {
     );
   }
 
-  selectionChanged(
+  projectSubscriptionTransition(
     contextGraphId: string,
-    transition: Readonly<{
-      previousSubscribed: boolean;
-      nextSubscribed: boolean;
-    }>,
-  ): boolean {
+    transition: Readonly<Rfc64CatalogSubscriptionTransitionV1>,
+  ): Readonly<Rfc64CatalogSubscriptionTransitionEffectsV1> {
+    const configured = this.ports.authority.resolveConfigured(contextGraphId);
     const selection = this.ports.authority.resolveRuntimeSelection();
     const eligible = selection.eligibleContextGraphs.includes(contextGraphId);
-    const authorityFor = (subscribed: boolean) => this.projectAuthority(
+    const recoveryAuthorityFor = (subscribed: boolean) => this.projectAuthority(
       contextGraphId,
       eligible && (!selection.subscriptionDriven || subscribed),
     );
-    return authorityFor(transition.previousSubscribed).active
-      !== authorityFor(transition.nextSubscribed).active;
+    const receiverActiveFor = (subscribed: boolean) => (
+      projectRfc64CatalogReceiverAuthorityV1(configured, { active: subscribed }).active
+    );
+    const previousReceiverActive = receiverActiveFor(transition.previousSubscribed);
+    const nextReceiverActive = receiverActiveFor(transition.nextSubscribed);
+    return Object.freeze({
+      previousReceiverActive,
+      nextReceiverActive,
+      receiverChanged: previousReceiverActive !== nextReceiverActive,
+      recoveryChanged: recoveryAuthorityFor(transition.previousSubscribed).active
+        !== recoveryAuthorityFor(transition.nextSubscribed).active,
+    });
   }
 
   resolveActivePlan(
@@ -170,10 +187,7 @@ export class Rfc64SwmRecoveryRuntimeV1 {
   resolveCompleteProviderPeerIds(contextGraphId: string): readonly string[] {
     const config = this.ports.authority.resolveRecoveryConfig();
     if (config === undefined) return Object.freeze([]);
-    const policies = 'acceptedPolicies' in config
-      ? config.acceptedPolicies
-      : config.acceptedPublicPolicies;
-    const policy = policies.find(
+    const policy = config.acceptedPolicies.find(
       ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
     );
     return policy?.completeSwmProviders ?? Object.freeze([]);
@@ -226,15 +240,12 @@ export class Rfc64SwmRecoveryRuntimeMethods extends DKGAgentBase {
     return this.rfc64SwmRecoveryRuntimeV1.resolveRuntimeAuthority(contextGraphId);
   }
 
-  rfc64SwmRecoverySelectionChangedV1(
+  projectRfc64CatalogSubscriptionTransitionV1(
     this: DKGAgent,
     contextGraphId: string,
-    transition: Readonly<{
-      previousSubscribed: boolean;
-      nextSubscribed: boolean;
-    }>,
-  ): boolean {
-    return this.rfc64SwmRecoveryRuntimeV1.selectionChanged(
+    transition: Readonly<Rfc64CatalogSubscriptionTransitionV1>,
+  ): Readonly<Rfc64CatalogSubscriptionTransitionEffectsV1> {
+    return this.rfc64SwmRecoveryRuntimeV1.projectSubscriptionTransition(
       contextGraphId,
       transition,
     );

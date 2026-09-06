@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type {
-  Rfc64CatalogBootstrapConfigV1,
-  Rfc64CatalogBootstrapPolicyV1,
-  Rfc64PublicCatalogBootstrapConfigV1,
-} from '../dkg-agent-types.js';
+import type { Rfc64RuntimeCatalogBootstrapConfigV1 } from
+  './public-catalog-activation-config-v1.js';
 
 export type Rfc64SwmRecoveryLaneV1 = 'ordinary-private' | 'selected-public';
 
@@ -29,9 +26,7 @@ export interface Rfc64AuthorizedSwmRecoveryPlanV1 {
   readonly targets: readonly Readonly<Rfc64SwmRecoveryTargetV1>[];
 }
 
-type Rfc64RecoveryConfigV1 = Readonly<
-  Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1
->;
+type Rfc64RecoveryConfigV1 = Readonly<Rfc64RuntimeCatalogBootstrapConfigV1>;
 
 export interface Rfc64SwmRecoveryRuntimeAuthorityV1 {
   readonly kind: 'rfc64-swm-recovery-runtime-authority-v1';
@@ -98,7 +93,7 @@ export function resolveRfc64SelectedRecoveryContextGraphIdsV1(
   config: Rfc64RecoveryConfigV1 | undefined,
 ): readonly string[] {
   if (config === undefined) return Object.freeze([]);
-  return Object.freeze(acceptedPoliciesV1(config)
+  return Object.freeze(config.acceptedPolicies
     .filter(({ completeSwmProviders = [] }) => completeSwmProviders.length > 0)
     .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
 }
@@ -108,7 +103,7 @@ export function resolveRfc64PrivateRecoveryContextGraphIdsV1(
   config: Rfc64RecoveryConfigV1 | undefined,
 ): readonly string[] {
   if (config === undefined) return Object.freeze([]);
-  return Object.freeze(acceptedPoliciesV1(config)
+  return Object.freeze(config.acceptedPolicies
     .filter(({ policyEnvelope, completeSwmProviders = [] }) => (
       policyEnvelope.payload.accessPolicy === 1
       && completeSwmProviders.length > 0
@@ -123,7 +118,7 @@ export function resolveRfc64PeerSwmRecoveryPlanV1(
 ): Readonly<Rfc64PeerSwmRecoveryPlanV1> {
   const byContextGraph = new Map<string, Rfc64SwmRecoveryLaneV1>();
   if (config !== undefined) {
-    for (const { policyEnvelope, completeSwmProviders = [] } of acceptedPoliciesV1(config)) {
+    for (const { policyEnvelope, completeSwmProviders = [] } of config.acceptedPolicies) {
       if (!completeSwmProviders.includes(providerPeerId)) continue;
       const lane = policyEnvelope.payload.accessPolicy === 1
         ? 'ordinary-private'
@@ -177,7 +172,7 @@ export function resolveRfc64SwmRecoveryLaneV1(
   contextGraphId: string,
 ): Rfc64SwmRecoveryLaneV1 | undefined {
   if (config === undefined) return undefined;
-  const policy = acceptedPoliciesV1(config).find(
+  const policy = config.acceptedPolicies.find(
     ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
   );
   if (policy === undefined) return undefined;
@@ -192,7 +187,7 @@ export function resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
   providerPeerId: string,
 ): readonly string[] {
   if (config === undefined) return Object.freeze([]);
-  return Object.freeze(acceptedPoliciesV1(config)
+  return Object.freeze(config.acceptedPolicies
     .filter(({ completeSwmProviders = [] }) => completeSwmProviders.includes(providerPeerId))
     .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
 }
@@ -222,12 +217,4 @@ export function sameRfc64SwmRecoveryTargetsV1(
       && target.contextGraphId === expected.contextGraphId
       && target.lane === expected.lane;
   });
-}
-
-function acceptedPoliciesV1(
-  config: Rfc64RecoveryConfigV1,
-): readonly Rfc64CatalogBootstrapPolicyV1[] {
-  return 'acceptedPolicies' in config
-    ? config.acceptedPolicies
-    : config.acceptedPublicPolicies;
 }

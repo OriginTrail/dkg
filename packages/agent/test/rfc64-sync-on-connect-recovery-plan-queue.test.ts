@@ -7,8 +7,11 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { computeNetworkId, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS } from '../src/dkg-agent-constants.js';
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { Rfc64SwmRecoveryRuntimeV1 } from
   '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
+import { resolveRfc64RuntimeCatalogBootstrapConfigV1 } from
+  '../src/rfc64/public-catalog-activation-config-v1.js';
 import { SwmTargetExecutorV1 } from '../src/sync/requester/swm-target-executor.js';
 import { SyncOnConnectPeerScheduler } from '../src/sync/on-connect/peer-scheduler.js';
 import {
@@ -51,6 +54,10 @@ describe('RFC-64 recovery-plan queue authorization', () => {
         completeSwmProviders: [PEER_A],
       }],
     };
+    const normalizedRecoveryConfig = resolveRfc64RuntimeCatalogBootstrapConfigV1(
+      undefined,
+      recoveryConfig,
+    );
     const runtime = new Rfc64SwmRecoveryRuntimeV1({
       authority: {
         resolveRuntimeSelection: () => selection,
@@ -66,7 +73,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
           authoringAllowed: true,
           reconciliationLane: 'catalog-apply',
         }),
-        resolveRecoveryConfig: () => recoveryConfig,
+        resolveRecoveryConfig: () => normalizedRecoveryConfig,
       },
       admission: { invalidateContextGraph: () => [] },
       cooldown: { deleteProvider: () => undefined },
@@ -74,18 +81,91 @@ describe('RFC-64 recovery-plan queue authorization', () => {
 
     expect(runtime.resolveRuntimeAuthority(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
       .toMatchObject({ active: true, lane: 'selected-public' });
-    expect(runtime.selectionChanged(RFC64_ROLLOUT_CONTEXT_GRAPH_ID, {
+    expect(runtime.projectSubscriptionTransition(RFC64_ROLLOUT_CONTEXT_GRAPH_ID, {
       previousSubscribed: true,
       nextSubscribed: false,
-    })).toBe(true);
+    })).toMatchObject({
+      receiverChanged: true,
+      recoveryChanged: true,
+      nextReceiverActive: false,
+    });
 
     selection = { ...selection, selectedContextGraphs: [] };
     expect(runtime.resolveRuntimeAuthority(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
       .toMatchObject({ active: false, lane: 'selected-public' });
-    expect(runtime.selectionChanged(RFC64_ROLLOUT_CONTEXT_GRAPH_ID, {
+    expect(runtime.projectSubscriptionTransition(RFC64_ROLLOUT_CONTEXT_GRAPH_ID, {
       previousSubscribed: false,
       nextSubscribed: true,
-    })).toBe(true);
+    })).toMatchObject({
+      receiverChanged: true,
+      recoveryChanged: true,
+      nextReceiverActive: true,
+    });
+  });
+
+  it('projects every subscription lifecycle effect from one transition snapshot', () => {
+    const project = vi.fn()
+      .mockReturnValueOnce({
+        previousReceiverActive: true,
+        nextReceiverActive: false,
+        receiverChanged: true,
+        recoveryChanged: true,
+      })
+      .mockReturnValueOnce({
+        previousReceiverActive: false,
+        nextReceiverActive: true,
+        receiverChanged: true,
+        recoveryChanged: true,
+      });
+    const deactivate = vi.fn();
+    const clearTargets = vi.fn();
+    const invalidate = vi.fn();
+    const queueGossip = vi.fn();
+    const replay = vi.fn(async () => ({ requested: 0, failed: 0 }));
+    const startSupervisor = vi.fn();
+    const agent = {
+      projectRfc64CatalogSubscriptionTransitionV1: project,
+      rfc64PublicCatalogServiceV1: {
+        deactivateReceiverContextGraph: deactivate,
+      },
+      clearRfc64CatalogOperationalTargetsV1: clearTargets,
+      invalidateRfc64PublicCatalogBootstrapPassV1: invalidate,
+      queueSharedMemoryGossipSubscription: queueGossip,
+      requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+      startRfc64SwmCatalogProjectionSupervisorV1: startSupervisor,
+    };
+    const handle = LifecycleSyncMethods.prototype
+      .handleRfc64CatalogReceiverSelectionTransitionV1;
+    const unsubscribe = {
+      kind: 'subscription' as const,
+      previousSubscribed: true,
+      nextSubscribed: false,
+    };
+    const subscribe = {
+      kind: 'subscription' as const,
+      previousSubscribed: false,
+      nextSubscribed: true,
+    };
+
+    handle.call(agent as never, RFC64_ROLLOUT_CONTEXT_GRAPH_ID, unsubscribe);
+    handle.call(agent as never, RFC64_ROLLOUT_CONTEXT_GRAPH_ID, subscribe);
+
+    expect(project).toHaveBeenNthCalledWith(
+      1,
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+      unsubscribe,
+    );
+    expect(project).toHaveBeenNthCalledWith(
+      2,
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+      subscribe,
+    );
+    expect(deactivate).toHaveBeenCalledOnce();
+    expect(clearTargets).toHaveBeenCalledOnce();
+    expect(invalidate).toHaveBeenCalledTimes(2);
+    expect(queueGossip).toHaveBeenCalledTimes(2);
+    expect(replay).toHaveBeenCalledOnce();
+    expect(startSupervisor).toHaveBeenCalledOnce();
   });
 
   it('creates a fresh SWM target executor for each synchronization session', async () => {

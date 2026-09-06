@@ -99,6 +99,7 @@ describe('runSharedMemorySync ownership hydration', () => {
     const owned = new Map<string, string>();
 
     const summary = await runSharedMemorySync({
+      mode: { kind: 'selected-recovery', recoveryGuard: guard },
       ctx: createOperationContext('sync'),
       remotePeerId: '12D3KooWRequesterAtomicApply',
       contextGraphIds: [CG_ID],
@@ -130,7 +131,6 @@ describe('runSharedMemorySync ownership hydration', () => {
       deleteCheckpoint: () => {},
       setCheckpoint: () => {},
       ensureOwnedMap: () => owned,
-      recoveryGuard: guard,
       logInfo: () => {},
       logWarn: () => {},
       logDebug: () => {},
@@ -150,6 +150,7 @@ describe('runSharedMemorySync ownership hydration', () => {
     const subMeta = { graph: SUB_GRAPH_META, subject: 'urn:op:sub', predicate: RDF_TYPE, object: `${DKG}WorkspaceOperation` };
 
     const summary = await runSharedMemorySync({
+      mode: { kind: 'ordinary' },
       ctx: createOperationContext('sync'),
       remotePeerId: '12D3KooWNamedSubgraphCompatibility',
       contextGraphIds: [CG_ID],
@@ -197,6 +198,7 @@ describe('runSharedMemorySync ownership hydration', () => {
     ];
 
     const summary = await runSharedMemorySync({
+      mode: { kind: 'ordinary' },
       ctx: createOperationContext('sync'),
       remotePeerId: '12D3KooWRequesterOwnership',
       contextGraphIds: [CG_ID],
@@ -259,6 +261,7 @@ describe('runSharedMemorySync ownership hydration', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterReplicatedRegistration',
         contextGraphIds: [CG_ID],
@@ -322,6 +325,7 @@ describe('runSharedMemorySync ownership hydration', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterColdSubgraph',
         contextGraphIds: [CG_ID],
@@ -378,6 +382,7 @@ describe('runSharedMemorySync ownership hydration', () => {
     try {
       await durableStore.insert(subGraphRegistrationMeta(SUB_GRAPH));
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterDurableRegisteredSub',
         contextGraphIds: [CG_ID],
@@ -459,6 +464,7 @@ describe('runSharedMemorySync ownership hydration', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterForgedRegistration',
         contextGraphIds: [CG_ID],
@@ -509,6 +515,7 @@ describe('runSharedMemorySync ownership hydration', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterExcludedRegistration',
         contextGraphIds: [CG_ID],
@@ -567,6 +574,7 @@ describe('runSharedMemorySync ownership hydration', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterDescendantSwm',
         contextGraphIds: [CG_ID],
@@ -622,6 +630,7 @@ describe('runSharedMemorySync ownership hydration', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterMalformedDescendant',
         contextGraphIds: [CG_ID],
@@ -664,6 +673,7 @@ describe('runSharedMemorySync ownership hydration', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterFakeMeta',
         contextGraphIds: [CG_ID],
@@ -706,6 +716,7 @@ describe('runSharedMemorySync ownership hydration', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterNestedFake',
         contextGraphIds: [CG_ID],
@@ -748,6 +759,7 @@ describe('runSharedMemorySync ownership hydration', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx: createOperationContext('sync'),
         remotePeerId: '12D3KooWRequesterChildCgFake',
         contextGraphIds: [CG_ID],

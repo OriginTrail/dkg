@@ -181,9 +181,28 @@ export class SwmTargetExecutorV1 {
   async syncPublicTarget(
     target: PublicSwmTargetV1,
   ): Promise<SharedMemorySyncSummary> {
-    const recoveryGuard = target.mode.kind === 'selected-recovery'
-      ? target.mode.recoveryGuard
-      : undefined;
+    const mode = target.mode.kind === 'selected-recovery'
+      ? {
+        kind: 'selected-recovery' as const,
+        recoveryGuard: target.mode.recoveryGuard,
+        metadataFetcher: target.mode.metadataFetcher,
+        snapshotEvidencePolicy: {
+          accepts: ({
+            verifiedMetadataTriples,
+            snapshotReferences,
+            graphBackedOperations,
+          }: {
+            verifiedMetadataTriples: number;
+            snapshotReferences: number;
+            graphBackedOperations: number;
+          }) => (
+            verifiedMetadataTriples === 0
+            || (snapshotReferences > 0 && graphBackedOperations === 0)
+          ),
+        },
+        snapshotRecoveryOrder: 'recent-balanced' as const,
+      }
+      : { kind: 'ordinary' as const };
     const storeInsert = async (quads: Quad[]) => {
       const inserted = await insertWithOversizeGuard(
         (kept) => this.#ports.store.insert(kept, {
@@ -197,6 +216,7 @@ export class SwmTargetExecutorV1 {
       this.#ports.markMetaProjectionDirty(inserted);
     };
     return runSharedMemorySync({
+      mode,
       ctx: target.ctx,
       remotePeerId: target.remotePeerId,
       contextGraphIds: [target.contextGraphId],
@@ -215,24 +235,6 @@ export class SwmTargetExecutorV1 {
       ).excluded,
       includeRootScope: target.includeRootScope,
       stopOnBackoffWorthyFailure: target.stopOnBackoffWorthyFailure,
-      snapshotEvidencePolicy: target.mode.kind === 'selected-recovery'
-        ? {
-          accepts: ({
-            verifiedMetadataTriples,
-            snapshotReferences,
-            graphBackedOperations,
-          }) => (
-            verifiedMetadataTriples === 0
-            || (snapshotReferences > 0 && graphBackedOperations === 0)
-          ),
-        }
-        : undefined,
-      metadataFetcher: target.mode.kind === 'selected-recovery'
-        ? target.mode.metadataFetcher
-        : undefined,
-      snapshotRecoveryOrder: target.mode.kind === 'selected-recovery'
-        ? 'recent-balanced'
-        : 'manifest',
       ensureContextGraph: (contextGraphId) => this.#ensureContextGraph(contextGraphId),
       snapshotMaterializer: this.#snapshotMaterializer,
       reconcileFinalizedTwin: async (contextGraphId, descriptor) => {
@@ -259,7 +261,6 @@ export class SwmTargetExecutorV1 {
       deleteCheckpoint: this.#ports.deletePublicCheckpoint,
       setCheckpoint: this.#ports.setCheckpoint,
       ensureOwnedMap: this.#ports.ensureOwnedMap,
-      recoveryGuard,
       logInfo: this.#ports.logInfo,
       logWarn: this.#ports.logWarn,
       logDebug: this.#ports.logDebug,

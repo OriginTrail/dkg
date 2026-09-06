@@ -383,6 +383,7 @@ describe('requester per-CG priority admission', () => {
         operationId: contextGraphId,
         run: async () => {
           await runSharedMemorySync({
+            mode: { kind: 'ordinary' },
             ctx,
             remotePeerId: 'peer',
             contextGraphIds: [contextGraphId],

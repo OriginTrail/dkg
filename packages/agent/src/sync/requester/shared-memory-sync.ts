@@ -388,7 +388,29 @@ export function selectSwmSnapshotCoverage(
   return a.peerIdSuffix <= b.peerIdSuffix ? a : b;
 }
 
+export interface SharedMemorySyncSnapshotEvidencePolicy {
+  readonly accepts: (evidence: {
+    verifiedMetadataTriples: number;
+    snapshotReferences: number;
+    graphBackedOperations: number;
+  }) => boolean;
+}
+
+/** The only two valid requester algorithm modes. */
+export type SharedMemorySyncMode = Readonly<
+  | { kind: 'ordinary' }
+  | {
+    kind: 'selected-recovery';
+    recoveryGuard: RecoveryExecutionGuard;
+    metadataFetcher?: SharedMemoryMetadataFetcher;
+    snapshotEvidencePolicy?: SharedMemorySyncSnapshotEvidencePolicy;
+    snapshotRecoveryOrder?: 'manifest' | 'recent-balanced';
+  }
+>;
+
 export interface SharedMemorySyncContext {
+  /** One discriminant owns every selected-recovery-only capability. */
+  mode: SharedMemorySyncMode;
   ctx: OperationContext;
   remotePeerId: string;
   contextGraphIds: string[];
@@ -449,23 +471,6 @@ export interface SharedMemorySyncContext {
    */
   includeRootScope?: boolean;
   stopOnBackoffWorthyFailure?: boolean;
-  /** Optional lane-owned policy for deciding whether snapshot evidence is sufficient. */
-  snapshotEvidencePolicy?: {
-    accepts: (evidence: {
-      verifiedMetadataTriples: number;
-      snapshotReferences: number;
-      graphBackedOperations: number;
-    }) => boolean;
-  };
-  /** Optional metadata retrieval strategy; ordinary callers use page fetch. */
-  metadataFetcher?: SharedMemoryMetadataFetcher;
-  /**
-   * Selected cold-join recovery may interleave recent snapshots with the
-   * oldest outstanding history. Ordinary sync preserves manifest order.
-   */
-  snapshotRecoveryOrder?: 'manifest' | 'recent-balanced';
-  /** Current-authority capability for selected recovery; ordinary sync omits it. */
-  recoveryGuard?: RecoveryExecutionGuard;
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
   ensureOwnedMap: (ownershipKey: string) => Map<string, string>;
@@ -506,10 +511,6 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     getExcludedSubGraphNames,
     includeRootScope = true,
     stopOnBackoffWorthyFailure = false,
-    snapshotEvidencePolicy,
-    metadataFetcher,
-    snapshotRecoveryOrder = 'manifest',
-    recoveryGuard,
     deleteCheckpoint,
     setCheckpoint,
     ensureOwnedMap,
@@ -517,6 +518,18 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     logWarn,
     logDebug,
   } = context;
+  const snapshotEvidencePolicy = context.mode.kind === 'selected-recovery'
+    ? context.mode.snapshotEvidencePolicy
+    : undefined;
+  const metadataFetcher = context.mode.kind === 'selected-recovery'
+    ? context.mode.metadataFetcher
+    : undefined;
+  const snapshotRecoveryOrder = context.mode.kind === 'selected-recovery'
+    ? context.mode.snapshotRecoveryOrder ?? 'manifest'
+    : 'manifest';
+  const recoveryGuard = context.mode.kind === 'selected-recovery'
+    ? context.mode.recoveryGuard
+    : undefined;
   const recoveryBoundary = createRecoveryExecutionBoundary(recoveryGuard);
   recoveryBoundary.assertCurrent();
   const fetchRecoveryPages = (

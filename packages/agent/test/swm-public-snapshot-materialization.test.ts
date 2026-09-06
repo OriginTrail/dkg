@@ -158,7 +158,20 @@ function harness(overrides: HarnessOverrides = {}) {
     if (overrides.preseedSnapshot !== false) {
       await snapshotStore.putSnapshot({ digest: fx.digest, quads: fx.payload });
     }
+    const selectedMode = overrides.metadataFetcher !== undefined
+      || overrides.recoveryGuard !== undefined;
     return runSharedMemorySync({
+      mode: selectedMode
+        ? {
+          kind: 'selected-recovery',
+          recoveryGuard: overrides.recoveryGuard ?? {
+            signal: new AbortController().signal,
+            assertCurrent: () => undefined,
+          },
+          metadataFetcher: overrides.metadataFetcher,
+          snapshotRecoveryOrder: 'recent-balanced',
+        }
+        : { kind: 'ordinary' },
       ctx,
       remotePeerId: 'peer-source',
       contextGraphIds: [CG],
@@ -182,7 +195,6 @@ function harness(overrides: HarnessOverrides = {}) {
         emptyResponses: 0,
         entityCreators: [],
       }),
-      ...(overrides.metadataFetcher ? { metadataFetcher: overrides.metadataFetcher } : {}),
       ...(overrides.subGraphName
         ? {
             getRegisteredSubGraphNames: async () => [overrides.subGraphName!],
@@ -248,7 +260,6 @@ function harness(overrides: HarnessOverrides = {}) {
       deleteCheckpoint: () => {},
       setCheckpoint: () => {},
       ensureOwnedMap: () => new Map(),
-      recoveryGuard: overrides.recoveryGuard,
       logInfo: () => {},
       logWarn: () => {},
       logDebug: () => {},

@@ -682,6 +682,7 @@ import {
 } from './rfc64/swm-recovery-plan-v1.js';
 import {
   rfc64ExecutionPlanAllowsLegacySyncV1,
+  resolveRfc64RuntimeCatalogBootstrapConfigV1,
 } from
   './rfc64/public-catalog-activation-config-v1.js';
 import { reconcileRfc64CatalogAuthorityPlanV1 } from
@@ -709,7 +710,10 @@ function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
     ...config,
     selectedRecoveryContextGraphIds: [...new Set([
       ...resolveRfc64SelectedRecoveryContextGraphIdsV1(
-        config.rfc64CatalogBootstrap ?? config.rfc64PublicCatalogBootstrap,
+        resolveRfc64RuntimeCatalogBootstrapConfigV1(
+          config.rfc64CatalogBootstrap,
+          config.rfc64PublicCatalogBootstrap,
+        ),
       ).filter((contextGraphId) => rfc64ExecutionPlanAllowsLegacySyncV1(
         config.rfc64CatalogExecutionPlan,
         contextGraphId,
@@ -4953,7 +4957,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...(this.config.syncContextGraphs ?? []),
       ...namedSubgraphCompatibilityContextGraphIds,
       ...resolveRfc64PrivateRecoveryContextGraphIdsV1(
-        this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
+        resolveRfc64RuntimeCatalogBootstrapConfigV1(
+          this.config.rfc64CatalogBootstrap,
+          this.config.rfc64PublicCatalogBootstrap,
+        ),
       ).filter((contextGraphId) => this.resolveRfc64CatalogReceiverAuthorityV1(
         contextGraphId,
       ).legacySyncAllowed),
@@ -5229,7 +5236,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         contextGraphId,
       );
       const acceptedRecoveryLane = resolveRfc64SwmRecoveryLaneV1(
-        this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
+        resolveRfc64RuntimeCatalogBootstrapConfigV1(
+          this.config.rfc64CatalogBootstrap,
+          this.config.rfc64PublicCatalogBootstrap,
+        ),
         contextGraphId,
       );
       const legacyRootSyncAllowed = authority.legacySyncAllowed;
@@ -5316,9 +5326,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // recovery runtime. Keeping it in this generic planner would let ordinary
       // on-connect/manual sync duplicate that work without the runtime lease
       // which fences unsubscribe and configuration changes. Catalog graphs
-      // without an accepted recovery policy still use this planner for the
+      // without a graph-complete provider still use this planner for the
       // rootless named-subgraph compatibility lane above.
-      if (!legacyRootSyncAllowed && acceptedRecoveryLane === 'selected-public') {
+      if (
+        !legacyRootSyncAllowed
+        && acceptedRecoveryLane === 'selected-public'
+        && completeSwmProviders.length > 0
+      ) {
         continue;
       }
       if (
@@ -9279,15 +9293,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // acquired and the dynamic responsibility registry remains fail-closed.
       this.handleRfc64CatalogReceiverSelectionTransitionV1(
         contextGraphId,
-        previous?.subscribed === true && (
-          configuredRfc64Authority.track2Enabled
-          || configuredRfc64Authority.legacySyncAllowed
-        ),
-        canonicalNext.subscribed === true && (
-          configuredRfc64Authority.track2Enabled
-          || configuredRfc64Authority.legacySyncAllowed
-        ),
         {
+          kind: 'subscription',
           previousSubscribed: previous?.subscribed === true,
           nextSubscribed: canonicalNext.subscribed === true,
         },
@@ -9574,12 +9581,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ) {
         this.handleRfc64CatalogReceiverSelectionTransitionV1(
           contextGraphId,
-          previous?.subscribed === true && (
-            configuredRfc64Authority.track2Enabled
-            || configuredRfc64Authority.legacySyncAllowed
-          ),
-          false,
           {
+            kind: 'subscription',
             previousSubscribed: previous?.subscribed === true,
             nextSubscribed: false,
           },
@@ -9598,18 +9601,32 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   handleRfc64CatalogReceiverSelectionTransitionV1(
     this: DKGAgent,
     contextGraphId: string,
-    previousReceiverActive: boolean,
-    nextReceiverActive: boolean,
-    recoveryTransition?: Readonly<{
-      previousSubscribed: boolean;
-      nextSubscribed: boolean;
-    }>,
+    transition: Readonly<
+      | {
+        kind: 'subscription';
+        previousSubscribed: boolean;
+        nextSubscribed: boolean;
+      }
+      | {
+        kind: 'responsibility';
+        previousReceiverActive: boolean;
+        nextReceiverActive: boolean;
+      }
+    >,
   ): void {
-    const receiverSelectionChanged = previousReceiverActive !== nextReceiverActive;
-    const recoverySelectionChanged = recoveryTransition !== undefined
-      && this.rfc64SwmRecoverySelectionChangedV1(contextGraphId, recoveryTransition);
+    const effects = transition.kind === 'subscription'
+      ? this.projectRfc64CatalogSubscriptionTransitionV1(contextGraphId, transition)
+      : {
+        previousReceiverActive: transition.previousReceiverActive,
+        nextReceiverActive: transition.nextReceiverActive,
+        receiverChanged:
+          transition.previousReceiverActive !== transition.nextReceiverActive,
+        recoveryChanged: false,
+      };
+    const receiverSelectionChanged = effects.receiverChanged;
+    const recoverySelectionChanged = effects.recoveryChanged;
     if (!receiverSelectionChanged && !recoverySelectionChanged) return;
-    if (receiverSelectionChanged && !nextReceiverActive) {
+    if (receiverSelectionChanged && !effects.nextReceiverActive) {
       this.rfc64PublicCatalogServiceV1?.deactivateReceiverContextGraph(contextGraphId);
       this.clearRfc64CatalogOperationalTargetsV1(contextGraphId);
     }
@@ -9617,7 +9634,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (receiverSelectionChanged) {
       this.queueSharedMemoryGossipSubscription(contextGraphId);
     }
-    if (receiverSelectionChanged && nextReceiverActive
+    if (receiverSelectionChanged && effects.nextReceiverActive
       && this.rfc64PublicCatalogServiceV1 !== undefined) {
       void this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId)
         .catch(() => undefined);

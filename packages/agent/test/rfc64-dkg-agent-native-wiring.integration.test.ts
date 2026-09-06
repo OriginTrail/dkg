@@ -87,6 +87,7 @@ import {
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogActivationConfigV1,
   resolveRfc64PublicCatalogControlsV1,
+  resolveRfc64RuntimeCatalogBootstrapConfigV1,
   snapshotRfc64CatalogAutoPublishConfigV1,
   type Rfc64CatalogActivationInputV1,
   type Rfc64PublicCatalogActivationInputV1,
@@ -3264,6 +3265,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       retryIntervalMs: 1_000,
     };
     const snapshot = snapshotRfc64PublicCatalogBootstrapConfigV1(callerOwned)!;
+    const normalizedSnapshot = resolveRfc64RuntimeCatalogBootstrapConfigV1(
+      undefined,
+      snapshot,
+    );
     providers.push('12D3KooLateMutation');
     completeSwmProviders.push('12D3KooLateSwmMutation');
 
@@ -3297,7 +3302,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           authoringAllowed: true,
           reconciliationLane: 'catalog-apply',
         }),
-        resolveRecoveryConfig: () => snapshot,
+        resolveRecoveryConfig: () => normalizedSnapshot,
       },
       admission: { invalidateContextGraph: () => [] },
       cooldown: { deleteProvider: () => undefined },
