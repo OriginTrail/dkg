@@ -1,19 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import {
-  LIVE_ON_CHAIN_ACCESS_POLICY_UNAVAILABLE_REASONS,
-} from './context-graph-access-policy.js';
+import type { RegisteredContextGraphAuthority } from
+  '../../registered-context-graph-authority.js';
 
-const REGISTERED_CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS = Object.freeze([
-  'chain-name-binding-unavailable',
-  'local-chain-binding-unavailable',
-  'local-existence-unavailable',
-  'chain-access-policy-unavailable',
-  ...LIVE_ON_CHAIN_ACCESS_POLICY_UNAVAILABLE_REASONS,
-  'chain-participant-authority-unsupported',
-  'chain-participant-authority-unavailable',
-  'chain-participant-authority-invalid',
-] as const);
+type RegisteredContextGraphAuthorityUnavailableReason = Extract<
+  RegisteredContextGraphAuthority,
+  { kind: 'unavailable' }
+>['reason'];
+
+const REGISTERED_CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASON_REGISTRY = Object.freeze({
+  'chain-name-binding-unavailable': true,
+  'local-chain-binding-unavailable': true,
+  'local-existence-unavailable': true,
+  'chain-access-policy-unavailable': true,
+  'chain-access-policy-timeout': true,
+  'chain-access-policy-unknown': true,
+  'chain-participant-authority-unsupported': true,
+  'chain-participant-authority-unavailable': true,
+  'chain-participant-authority-invalid': true,
+} as const satisfies Record<RegisteredContextGraphAuthorityUnavailableReason, true>);
+
+const REGISTERED_CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS = Object.freeze(
+  Object.keys(REGISTERED_CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASON_REGISTRY) as
+    RegisteredContextGraphAuthorityUnavailableReason[],
+);
 
 export const CONTEXT_GRAPH_AGENT_GATE_UNAVAILABLE_REASONS = Object.freeze([
   ...REGISTERED_CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS,

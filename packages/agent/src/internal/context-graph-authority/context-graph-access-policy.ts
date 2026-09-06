@@ -4,20 +4,18 @@ import { createOperationContext, type OperationContext } from
   '@origintrail-official/dkg-core';
 
 import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../../dkg-agent-constants.js';
+import type { RegisteredContextGraphAuthority } from
+  '../../registered-context-graph-authority.js';
 
-export const LIVE_ON_CHAIN_ACCESS_POLICY_UNAVAILABLE_REASONS = Object.freeze([
-  'chain-access-policy-timeout',
-  'chain-access-policy-unknown',
-] as const);
+type RegisteredPolicyUnavailable = Extract<
+  RegisteredContextGraphAuthority,
+  { kind: 'unavailable'; onChainId: bigint }
+>;
 
-export type LiveOnChainAccessPolicyUnavailableReason =
-  (typeof LIVE_ON_CHAIN_ACCESS_POLICY_UNAVAILABLE_REASONS)[number];
-
-export type LiveOnChainAccessPolicyUnavailable = {
-  kind: 'unavailable';
-  reason: LiveOnChainAccessPolicyUnavailableReason;
-  detail?: string;
-};
+export type LiveOnChainAccessPolicyUnavailable = Omit<
+  RegisteredPolicyUnavailable,
+  'onChainId'
+>;
 
 export type LiveOnChainAccessPolicyState =
   | { kind: 'available'; accessPolicy: 0 | 1 }
