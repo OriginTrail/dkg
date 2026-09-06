@@ -2140,8 +2140,14 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
     })).toBeNull();
+    const authorPeerId = author.peerId;
     await author.stop();
     agents.splice(agents.indexOf(author), 1);
+    await vi.waitFor(() => {
+      expect(provider.node.libp2p.getConnections().some(
+        ({ remotePeer }) => remotePeer.toString() === authorPeerId,
+      )).toBe(false);
+    }, { timeout: 10_000, interval: 10 });
 
     let markStartupProjectionEntered!: () => void;
     let releaseStartupProjection!: () => void;
