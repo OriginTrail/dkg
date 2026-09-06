@@ -8,32 +8,19 @@
 // `pendingOpenClawUiAttachJobs` is module-private working memory
 // and is intentionally not exported.
 
-import { join, resolve } from 'node:path';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { execFile, exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
 import { createRequire } from 'node:module';
-import { fileURLToPath } from 'node:url';
+
 import { createHash } from 'node:crypto';
 
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import {
-  contextGraphAssertionUri,
-  contextGraphMetaUri,
-  isSafeIri,
-  validateSubGraphName,
-  type Logger,
-} from '@origintrail-official/dkg-core';
-import {
-  dkgDir,
-  saveConfig,
-  loadConfig,
-  type DkgConfig,
-  type LocalAgentIntegrationConfig,
-  type LocalAgentIntegrationTransport,
-} from '../config.js';
+import { contextGraphMetaUri, isSafeIri, validateSubGraphName } from '@origintrail-official/dkg-core';
+import { dkgDir, type DkgConfig, type LocalAgentIntegrationTransport } from '../config.js';
 import {
   type ExtractionStatusRecord,
   getExtractionStatusRecord,
@@ -174,7 +161,6 @@ export async function loadBridgeAuthToken(): Promise<string | undefined> {
     return undefined;
   }
 }
-
 
 export function getOpenClawChannelTargets(config: DkgConfig): OpenClawChannelTarget[] {
   const storedOpenClawIntegration = getStoredLocalAgentIntegrations(config).openclaw;
@@ -504,7 +490,6 @@ export function cancelPendingLocalAgentAttachJob(integrationId: string): void {
 export function isOpenClawUiAttachCancelled(job: PendingOpenClawUiAttachJob): boolean {
   return isAttachJobCancelledImpl(job);
 }
-
 
 export function shouldTryNextOpenClawTarget(status: number): boolean {
   return status === 404 || status === 405 || status === 501 || status === 503;

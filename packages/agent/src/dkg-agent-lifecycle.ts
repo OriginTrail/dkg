@@ -8,99 +8,62 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
-import { createHash } from 'node:crypto';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
-  DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
-  LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
+  ProtocolRouter,
+  GossipSubManager,
+  DKGEvent,
+  LibP2PNetwork,
+  PeerResolver,
+  StubNetworkStateRegistry,
+  PROTOCOL_ACCESS,
+  PROTOCOL_PUBLISH,
+  PROTOCOL_SYNC,
+  PROTOCOL_SYNC_POOLED,
+  PROTOCOL_SYNC_CHANGELOG,
+  PROTOCOL_QUERY_REMOTE,
+  PROTOCOL_STORAGE_ACK,
+  PROTOCOL_STORAGE_ACK_V2,
+  PROTOCOL_STORAGE_UPDATE_ACK,
+  PROTOCOL_STORAGE_UPDATE_ACK_V2,
+  PROTOCOL_GET_CIPHERTEXT_CHUNK,
+  PROTOCOL_VERIFY_PROPOSAL,
+  PROTOCOL_JOIN_REQUEST,
   PROTOCOL_NETWORK_IDENTITY,
-  PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
-  contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
-  contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
+  PROTOCOL_SWM_SENDER_KEY,
+  PROTOCOL_SWM_UPDATE,
+  PROTOCOL_SWM_SHARE_ACK,
+  PROTOCOL_SWM_HOST_CATCHUP,
+  PROTOCOL_MESSAGE,
+  contextGraphDataGraphUri,
+  contextGraphMetaGraphUri,
+  contextGraphWorkspaceMetaGraphUri,
   contextGraphSharedMemoryUri,
-  contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
-  contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
   deriveCuratorDidFromCgId,
-  MemoryLayer,
-  computeACKDigest,
-  encodePublishRequest,
-  encodeKAUpdateRequest,
-  encodeGossipEnvelope,
-  computeGossipSigningPayload,
-  GOSSIP_ENVELOPE_VERSION,
-  GOSSIP_TYPE_WORKSPACE_PUBLISH,
-  encodeFinalizationMessage, type FinalizationMessageMsg,
-  decodeGossipEnvelope, type GossipEnvelopeMsg,
-  decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
-  decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
-  getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
+  SYSTEM_CONTEXT_GRAPHS,
+  DKG_ONTOLOGY,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   validateSubGraphName,
-  Logger, createOperationContext, isKaPublishLifecycleDebugLoggingEnabled, isStorageACKDecline, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
-  TrustLevel,
-  TRUST_LEVEL_PREDICATE,
-  buildTrustLevelQuads,
-  isTrustLevelQuad,
-  buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, type AuthorAttestationTypedData,
-  buildAssertionSealQuads, buildAssertionPublishReceiptQuads,
-  parseAssertionSealQuads, type AssertionSeal,
-  WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
-  WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE,
-  computeWorkspaceAgentEncryptionKeyProofPayload,
-  computeWorkspaceAgentEncryptionKeyRevocationPayload,
-  decodeWorkspaceEncryptionKey,
-  encodeWorkspaceEncryptionKey,
-  workspaceAgentEncryptionKeyId,
-  SWM_SENDER_KEY_PACKAGE_ACK_TYPE,
-  SWM_SENDER_KEY_PACKAGE_ACK_RETRYABLE_REASON_CODES,
-  SWM_SENDER_KEY_PACKAGE_VERSION,
-  computeSwmSenderKeyMembershipHash,
-  computeSwmSenderKeyPackageAAD,
-  decodeWorkspacePublishRequest,
-  decodeSwmSenderKeyPackage,
-  decodeSwmSenderKeyPackageAck,
-  decryptSwmSenderKeyMessage,
-  decryptSwmSenderKeyPackage,
-  encodeSwmSenderKeyMessage,
-  encodeSwmSenderKeyPackage,
-  encodeSwmSenderKeyPackageAck,
-  encodeSwmShareAck,
-  decodeSwmShareAck,
-  encryptSwmSenderKeyMessage,
-  encryptSwmSenderKeyPackage,
-  generateEd25519Keypair,
-  generateSwmSenderChainKey,
-  generateSwmSenderEpochId,
-  ratchetSwmSenderChainKey,
-  uint64ForProto,
-  SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
-  type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
-  type SwmSenderKeyMessageMsg,
-  type SwmSenderKeyPackageAckReasonCode,
-  type SwmSenderKeyPackageMsg,
-  type WorkspaceRecipientEncryptionKey,
+  createOperationContext,
+  isKaPublishLifecycleDebugLoggingEnabled,
+  isStorageACKDecline,
+  isSafeIri,
+  assertSafeIri,
+  type OperationContext,
   InMemoryMessageIdempotencyStore,
   InMemoryProtocolOutboxStore,
-  type MessageIdempotencyStore,
-  type ProtocolOutboxStore,
-  type ProtocolOutboxEntry,
-  encryptV10PublishPayload,
-  encryptChunked,
-  buildCiphertextChunksRoot,
-  computeGossipSigningPayloadV2,
-  GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
-  ciphertextChunkStoreGraph,
-  ciphertextChunkStoreSubject,
-  CIPHERTEXT_CHUNK_PREDICATE,
-  type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
-  pickNetworkTunables,
   tripleContentV10,
   withRetry,
 } from '@origintrail-official/dkg-core';
 import type { RandomSamplingRepairOperation } from '@origintrail-official/dkg-random-sampling';
-import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, type ChangelogReader, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager,
+  asChangelogReader,
+  type ChangelogReader,
+  type TripleStore,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 import { readChangelogDeltaPage } from './sync/responder/graph-plan.js';
 import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelog/wire.js';
 import { runChangelogSync, planPageApply } from './sync/requester/changelog-sync.js';
@@ -117,56 +80,23 @@ import {
   reconcileFinalizedSwmTwin,
   type FinalizedSwmTwinRetirement,
 } from './sync/requester/finalized-swm-twin-reconciliation.js';
+import { createRpcTimeoutError, isChainRpcTransportError, type ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
-  EVMChainAdapter,
-  NoChainAdapter,
-  buildKnowledgeAssetUal,
-  createRpcTimeoutError,
-  enrichEvmError,
-  isChainRpcTransportError,
-  type ChainAdapter,
-  type CreateContextGraphParams,
-  type CreateOnChainContextGraphParams,
-  type CreateOnChainContextGraphResult,
-  type EVMAdapterConfig,
-  type TxResult,
-  type V10PublishingConvictionAccountInfo,
-} from '@origintrail-official/dkg-chain';
-import {
-  DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
-  PublishJournal, StaleWriteError,
-  ACKCollector, StorageACKHandler, createStorageAckLifecycleObserver, withSignerRegistrationCache,
-  VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
-  resolveWorkspaceAgentRecipients,
-  computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
-  canonicalPublishPayload,
-  resolveLiftWorkspaceSlice,
-  validateLiftPublishPayload,
-  subtractFinalizedExactQuads,
-  TripleStoreAsyncLiftPublisher,
-  TripleStoreAsyncPromoteQueue,
-  FileWorkspacePublicSnapshotStore,
+  PublishHandler,
+  ChainEventPoller,
+  AccessHandler,
+  PublishJournal,
+  StorageACKHandler,
+  createStorageAckLifecycleObserver,
+  withSignerRegistrationCache,
+  VerifyProposalHandler,
   parseWorkspacePublicSnapshotNQuads,
-  type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
-  type PromoteJob, type PromoteListFilter,
-  wrapAsRpcPreconditionIfApplicable,
-  type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  type CollectedACK,
-  type WorkspaceAgentRecipient,
-  type WorkspaceAgentRecipientResolution,
-  type WorkspaceAgentRecipientResolverInput,
-  type WorkspaceSenderKeyEncryptInput,
-  type SharedMemoryPublicSnapshotStorageConfig,
+  type PhaseCallback,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
-import { join } from 'node:path';
-import {
-  DKGQueryEngine, QueryHandler,
-  emptyQueryResultForKind,
-  validateReadOnlySparql,
-  type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
-} from '@origintrail-official/dkg-query';
-import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+
+import { QueryHandler, type QueryAccessConfig } from '@origintrail-official/dkg-query';
+
 import { repairCreatorPublicMetaProjections } from './context-graph-public-meta-repair.js';
 import {
   startRandomSamplingExactRepair,
@@ -179,16 +109,10 @@ import {
 } from './configured-context-graph-metadata-reconciliation.js';
 import { confirmContextGraphMetadataV1 } from './context-graph-meta-confirmation.js';
 
-import { ProfileManager } from './profile-manager.js';
-import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
-import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck } from './messaging.js';
-import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
-import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, collectPublishableMultiaddrs, type AgentProfileConfig } from './profile.js';
-import {
-  signAgentDelegation,
-  verifyAgentDelegation,
-  type SignedAgentDelegation,
-} from './auth/agent-delegation.js';
+import { MessageHandler } from './messaging.js';
+import { ed25519ToX25519Private } from './encryption.js';
+
+import { type SignedAgentDelegation } from './auth/agent-delegation.js';
 import {
   SyncVerifyWorker,
   type DurableBatchProcessResult,
@@ -199,11 +123,12 @@ import {
   bindRandomSampling,
   RandomSamplingShutdownTimeoutError,
   stopRandomSamplingHandleWithin,
-  type RandomSamplingHandle,
-  type RandomSamplingStatus,
 } from './random-sampling-bind.js';
-import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
-import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
+import {
+  ensurePeerConnected as ensurePeerConnectedAtom,
+  primeCatchupConnections as primeCatchupConnectionsAtom,
+} from './p2p/peer-connect.js';
+import { Messenger } from './p2p/messenger.js';
 import { createSingleUseSyncSender } from './p2p/sync-transport.js';
 import { NetworkAdmissionService } from './p2p/network-admission.js';
 import {
@@ -211,62 +136,9 @@ import {
   NetworkAdmissionRejectedError,
 } from './p2p/network-admission-coordinator.js';
 import { createNetworkAdmissionRouterPolicy } from './p2p/network-admission-protocol-adapter.js';
-import {
-  createCGMemberEnumerator,
-  type CGMemberEnumerator,
-} from './swm/enumerate-cg-members.js';
-import {
-  chooseFanOutTier,
-  executeSubstrateFanOut,
-  classifySendResult,
-  FANOUT_RESPONSE_REJECTED,
-  FANOUT_RESPONSE_RETRYABLE,
-  type FanOutBookkeeper,
-  type FanOutPeerRecord,
-  type FanOutPlan,
-} from './swm/substrate-fanout.js';
-import {
-  createSwmAckQuorum,
-  type SwmAckQuorum,
-} from './swm/ack-quorum.js';
-import { SwmHostModeStore, type SwmHostModeStoreLimits } from './swm/host-mode-store.js';
-import {
-  BEACON_ACCESS_POLICY_CURATED,
-  BEACON_REANNOUNCE_INTERVAL_MS,
-  DKG_CG_DISCOVERY_TOPIC,
-  decodeCgDiscoveryBeacon,
-  encodeCgDiscoveryBeacon,
-  mintCgDiscoveryBeacon,
-  verifyCgDiscoveryBeacon,
-} from './swm/cg-discovery-beacon.js';
-import { DiscoveryRateLimit } from './swm/discovery-rate-limit.js';
-import {
-  decodeSwmHostCatchupRequest,
-  encodeSwmHostCatchupRequest,
-  encodeSwmHostCatchupResponse,
-  decodeSwmHostCatchupResponse,
-  DEFAULT_MAX_BYTES as SWM_HOST_CATCHUP_DEFAULT_MAX_BYTES,
-  DEFAULT_MAX_ENTRIES as SWM_HOST_CATCHUP_DEFAULT_MAX_ENTRIES,
-  SWM_HOST_CATCHUP_WIRE_VERSION,
-  type SwmHostCatchupResponseEntry,
-} from './swm/host-catchup-wire.js';
-import {
-  CatchupReplayGuard,
-  mintSignedCatchupRequest,
-  verifySignedCatchupRequest,
-} from './swm/host-catchup-sign.js';
-import {
-  createCiphertextChunkCatchupReplayGuard,
-  decodeCiphertextChunkCatchupRequest,
-  encodeCiphertextChunkCatchupRequest,
-  encodeCiphertextChunkCatchupResponse,
-  decodeCiphertextChunkCatchupResponse,
-  mintSignedCiphertextChunkCatchupRequest,
-  verifySignedCiphertextChunkCatchupRequest,
-  CIPHERTEXT_CHUNK_CATCHUP_WIRE_VERSION,
-  type CiphertextChunkCatchupRequest,
-  type CiphertextChunkCatchupResponse,
-} from './swm/ciphertext-chunk-catchup.js';
+
+import { BEACON_REANNOUNCE_INTERVAL_MS, DKG_CG_DISCOVERY_TOPIC } from './swm/cg-discovery-beacon.js';
+
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
@@ -289,9 +161,7 @@ import {
 } from './sync/exact-assets.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import {
-  getSyncCheckpointKey,
   MemorySyncCheckpointStore,
-  type DurableManifestDigest,
   type SelectedSwmMetaRetentionScope,
   type SyncCheckpointScope,
 } from './sync/checkpoint/state.js';
@@ -345,8 +215,8 @@ import {
   recoverContextGraphSwmWithProgressRetries,
   type RecoverContextGraphSwmResult,
 } from './sync/requester/swm-recovery.js';
-import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
-import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
+import { type SyncPhase } from './sync/auth/request-build.js';
+
 import {
   registerSyncHandler,
   resolveSyncResponderSnapshotPolicy,
@@ -421,7 +291,6 @@ import {
 import {
   getSyncBackpressureSnapshot,
   getSyncBackpressureBusyError,
-  resolveNonNegativeIntegerSwitch,
   resolveBooleanSwitch,
   resolveSyncReconcilerEnabled,
   resolveSyncGlobalBackpressure,
@@ -434,7 +303,6 @@ import {
   orderContextGraphIdsByPriority,
   syncPriorityClass,
   type SyncAdmissionSource,
-  type SyncSchedulerLane,
 } from './sync/policy.js';
 import { automaticDurableSyncContextGraphs } from './sync/system-context-graph-policy.js';
 import {
@@ -448,31 +316,13 @@ import {
   recordSyncSingleFlightJoin,
   syncAttemptAttributes,
   syncOperationRejectionReason,
-  syncPlaneFor,
   withSyncAdmissionSource,
   type SyncAttemptOutcome,
   type SyncOperationLane,
   type SyncOperationOutcome,
   type SyncSingleFlightScope,
 } from './sync/attempt-telemetry.js';
-import {
-  generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
-  ensureWorkspaceEncryptionKey,
-  hashAgentToken,
-  activeWorkspaceEncryptionKeys,
-  appendCustodialWorkspaceEncryptionKey,
-  revokeCustodialWorkspaceEncryptionKey,
-  attachRevocationToWorkspaceEncryptionKey,
-  migrateLegacyWorkspaceEncryptionFields,
-  refreshDefaultEncryptionKeyView,
-  type AgentKeyRecord,
-  type KeystoreEntry,
-  type WorkspaceEncryptionKeyEntry,
-} from './agent-keystore.js';
-import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
-import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
-import { createCursorState, type CursorState } from './reconcile-cursor.js';
+
 import { resolveStorageAckLifecycleAssetUalFromLocalSwm } from './storage-ack-lifecycle-identity.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
@@ -512,16 +362,9 @@ type JoinApprovalRetryEntry = {
   lastError: string;
 };
 import { multiaddr } from '@multiformats/multiaddr';
-import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
-import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
-import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
-import { buildManualCclFacts, resolveFactsFromSnapshot, type CclFactResolutionMode } from './ccl-fact-resolution.js';
+
+import { stripLiteral } from './dkg-agent-utils.js';
 import {
-  strip, stripLiteral, jsonLdToQuads,
-  type JsonLdContent,
-} from './dkg-agent-utils.js';
-import {
-  PRIVATE_DATA_ANCHOR,
   SYNC_BYTE_BUDGET_MAX_ROWS,
   SYNC_PAGE_SIZE,
   SYNC_REQUEST_PAGE_SIZE,
@@ -532,16 +375,7 @@ import {
   SYNC_ROUTER_ATTEMPTS,
   SYNC_PROTOCOL_CHECK_ATTEMPTS,
   SYNC_PROTOCOL_CHECK_DELAY_MS,
-  SYNC_AUTH_MAX_AGE_MS,
-  JOIN_DELEGATION_VALIDITY_MS,
-  JOIN_REQUEST_SEND_TIMEOUT_MS,
   SYNC_ACCESS_DENIED_MARKER,
-  LOCAL_ACCESS_OPEN,
-  LOCAL_ACCESS_CURATED,
-  EVM_PUBLISH_CURATED,
-  EVM_PUBLISH_OPEN,
-  MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS,
-  META_REFRESH_COOLDOWN_MS,
   DEBUG_SYNC_PROGRESS,
   DEFAULT_SWM_TTL_MS,
   SWM_CLEANUP_INTERVAL_MS,
@@ -550,14 +384,8 @@ import {
   GOSSIP_DIAL_TIMEOUT_MS,
   CATCHUP_ON_CONNECT_COOLDOWN_MS,
   SYNC_RECONNECT_FLAP_GRACE_MS,
-  SYNC_RECONCILER_INTERVAL_MS,
-  SYNC_STALENESS_THRESHOLD_MS,
-  SYNC_BACKOFF_BASE_MS,
-  SYNC_BACKOFF_MAX_MS,
-  SYNC_BACKOFF_JITTER,
   RANDOM_SAMPLING_BIND_RETRY_MS,
   STORAGE_ACK_REGISTRATION_RETRY_MS,
-  JOIN_APPROVAL_RETRY_TICK_MS,
   MESSAGE_OUTBOX_TICK_MS,
   AGENT_PROFILE_HEARTBEAT_MS,
   AGENT_PROFILE_STALE_THRESHOLD_MS,
@@ -566,57 +394,26 @@ import {
   WARM_CORE_MAX,
   WARM_CORE_KEEPALIVE_TAG,
   WARM_CORE_DIAL_TIMEOUT_MS,
-  CIPHERTEXT_CHUNK_SIZE_BYTES,
   BOOT_CHAIN_IDENTITY_TIMEOUT_MS,
   MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
-  TIMEOUT_SENTINEL,
-  ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
-  CHAIN_POLICY_READ_TIMEOUT_MS,
-  SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
-import * as diagnostics from './dkg-agent-diagnostics.js';
+
 import {
-  ContextGraphNotFoundError,
-  InvalidContentError,
-  StaleSenderKeyTargetError,
-  SwmSenderKeySetupRejectionError,
-  SyncAccessDeniedError,
-  type PreSignedAuthorAttestation,
-  type LocalSwmSenderKeySendState,
-  type LocalSwmSenderKeyReceiveState,
-  type PendingSenderKeyEntry,
   type RandomSamplingStartResult,
-  type ACKSignerResolution,
   type SyncRequestEnvelope,
-  type CclPublishedResultEntry,
-  type CclPublishedEvaluationRecord,
-  type PublishOpts,
-  type PublishAsyncOpts,
-  type PublishAsyncQuadEnvelope,
-  type PublishAsyncContent,
-  type PeerHealth,
-  type PeerConnectionSnapshot,
-  type PeerDiagnostics,
-  type ChatSendResult,
   type ContextGraphSub,
   type ContextGraphSubInput,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
-  type ContextGraphSubscriptionStore,
   type ContextGraphMemberPrincipalType,
-  type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
-  type ContextGraphMembershipStore,
-  type DurableSyncDiagnostics,
-  type SharedMemorySyncDiagnostics,
   type CatchupSyncDiagnostics,
   type DurableSyncResult,
   type SharedMemorySyncResult,
   type SwmSnapshotCoverage,
   type DKGAgentConfig,
   type ResolvedDKGAgentConfig,
-  type ReplicationEvent,
   type SyncReconcilerProbe,
   type SyncReconcilerBackoff,
 } from './dkg-agent-types.js';
@@ -629,37 +426,8 @@ import {
   resolveCuratorSyncPeer,
   type SyncPeerResolution,
 } from './dkg-agent-cg-resolve.js';
-import {
-  normalizePublishContextGraphId,
-  isPublishAsyncQuadEnvelope,
-  assertQuadArray,
-  normalizeAgentDid,
-  joinDelegationScope,
-  normalizeSyncPhase,
-  normalizeAdapterPublisherAddress,
-  recoverCompactSigner,
-  adapterOperationalPrivateKeyAddress,
-  adapterHasOperationalPrivateKey,
-  adapterGenericSignMessageMatchesAddress,
-  adapterAdvertisesPublisherSigner,
-  privateKeyAddress,
-  inferAdapterPublisherAddress,
-  defaultLargeLiteralStorage,
-  createPublicSnapshotStore,
-  applyDefaultLargeLiteralStorage,
-  isLocalOxigraphConfig,
-  sliceIntoCiphertextChunks,
-} from './dkg-agent-helpers.js';
-import {
-  swmSenderStateKey,
-  swmReceiverStateKey,
-  serializeSwmSenderSendState,
-  serializeSwmSenderReceiveState,
-  serializePendingSenderKeyEntry,
-  deserializeSwmSenderSendState,
-  deserializeSwmSenderReceiveState,
-  deserializePendingSenderKeyEntry,
-} from './dkg-agent-swm-state.js';
+import { normalizeAgentDid, inferAdapterPublisherAddress } from './dkg-agent-helpers.js';
+
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { Rfc64SwmRecoveryTargetLeaseV1 } from
   './dkg-agent-rfc64-swm-recovery-runtime.js';

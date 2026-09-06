@@ -6,14 +6,12 @@
 // routing logic lives here.
 
 import { dirname, resolve, join } from 'node:path';
-import { createHash } from 'node:crypto';
+
 import {
   existsSync, readFileSync, openSync, closeSync, unlinkSync,
   writeFileSync as fsWriteFileSync,
 } from 'node:fs';
-import {
-  appendFile, chmod, copyFile, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile,
-} from 'node:fs/promises';
+import { chmod, copyFile, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { execSync, exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createRequire } from 'node:module';
@@ -22,15 +20,7 @@ import * as osModule from 'node:os';
 const { homedir } = osModule;
 import type { IncomingMessage } from 'node:http';
 
-import {
-  CLI_NPM_PACKAGE,
-  dkgDir,
-  releasesDir,
-  activeSlot,
-  inactiveSlot,
-  swapSlot,
-  type AutoUpdateConfig,
-} from '../config.js';
+import { dkgDir, releasesDir, activeSlot, inactiveSlot, swapSlot } from '../config.js';
 import { resolveDaemonNodeCommand } from '../daemon-entrypoint.js';
 import {
   expectedBundledMarkItDownBuildMetadata,
@@ -779,7 +769,6 @@ export {
   type SkillTokenValues,
 } from "../skill-template.js";
 
-
 let cachedImporterSkillMd: string | null = null;
 
 export function loadImporterSkillTemplate(): string {
@@ -789,8 +778,6 @@ export function loadImporterSkillTemplate(): string {
   cachedImporterSkillMd = content;
   return content;
 }
-
-
 
 export const DAEMON_EXIT_CODE_RESTART = 75;
 

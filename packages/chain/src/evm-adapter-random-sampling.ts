@@ -11,10 +11,15 @@
 
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers } from 'ethers';
-import { NoEligibleContextGraphError, NoEligibleKnowledgeCollectionError, ChallengeNoLongerActiveError, MerkleRootMismatchError } from './chain-adapter.js';
+import {
+  NoEligibleContextGraphError,
+  NoEligibleKnowledgeCollectionError,
+  ChallengeNoLongerActiveError,
+  MerkleRootMismatchError,
+} from './chain-adapter.js';
 import type { NodeChallenge, CreateChallengeResult, TxResult, ProofPeriodStatus } from './chain-adapter.js';
 import { enrichEvmError } from './evm-adapter-errors.js';
-import { withTimeout } from './evm-adapter-rpc.js';
+
 import { MAX_PROBE_AGE_MS, DURATION_PROBE_TIMEOUT_MS } from './evm-adapter-constants.js';
 
 export class RandomSamplingMethods extends EVMChainAdapterBase {

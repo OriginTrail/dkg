@@ -8,17 +8,11 @@
 // (definitions, records, statuses) doesn't pollute the openclaw
 // module.
 
-import { writeFile, mkdir, readFile, unlink } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
-import { join, resolve, dirname } from 'node:path';
-import { homedir } from 'node:os';
+
 import { createRequire } from 'node:module';
 
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
-  loadConfig,
-  saveConfig,
-  dkgDir,
   type DkgConfig,
   type LocalAgentIntegrationCapabilities,
   type LocalAgentIntegrationConfig,
@@ -32,25 +26,17 @@ import { daemonState } from './state.js';
 // module-private helpers that handle-request and these flows reach
 // into.
 import {
-  OpenClawChannelTarget,
-  OpenClawChannelHealthReport,
   OpenClawUiAttachDeps,
-  cancelPendingLocalAgentAttachJob,
   scheduleOpenClawUiAttachJob,
   isOpenClawUiAttachCancelled,
   formatOpenClawUiAttachFailure,
-  getOpenClawChannelTargets,
   isOpenClawMemorySlotElected,
   probeOpenClawChannelHealth,
   runOpenClawUiSetup,
   restartOpenClawGateway,
   waitForOpenClawChatReady,
   transportPatchFromOpenClawTarget,
-  ensureOpenClawBridgeAvailable,
-  buildOpenClawChannelHeaders,
   trimTrailingSlashes,
-  buildOpenClawGatewayBase,
-  loadBridgeAuthToken,
   localOpenclawConfigPath,
 } from './openclaw.js';
 import {
@@ -161,7 +147,6 @@ export const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentInteg
     },
   },
 };
-
 
 export function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);

@@ -2549,26 +2549,6 @@ async function readAdmittedAssertionGraphs(
   return new Set(res.bindings.map((row) => row['g']).filter(Boolean));
 }
 
-async function readRowsAcrossGraphs(
-  store: TripleStore,
-  graphs: readonly string[],
-  signal?: AbortSignal,
-): Promise<SyncRow[]> {
-  const values = graphValues(graphs);
-  if (!values) return [];
-  const res = await store.query(`
-    SELECT ?g ?s ?p ?o WHERE {
-      VALUES ?g { ${values} }
-      GRAPH ?g { ?s ?p ?o }
-    }
-  `, syncResponderStoreOptions(signal, 'sync.responder.readRowsAcrossGraphs'));
-  if (res.type !== 'bindings') return [];
-  return res.bindings
-    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
-    .filter((row) => row.s && row.p && row.o && row.g)
-    .sort(compareRows);
-}
-
 async function readRowsAcrossGraphsExcludingSubjectPrefix(
   store: TripleStore,
   graphs: readonly string[],
@@ -3281,38 +3261,6 @@ async function readBoundedFreshSwmMetaSnapshot(
   return filterSwmMetaSnapshotRows(rows, cutoffIso);
 }
 
-// NOTE: keep in sync with its page-safe twin {@link readFreshSwmDataRowsPage} —
-// both MUST return the same SET of rows (see readDurableMetaRows note).
-async function readFreshSwmDataRows(
-  store: TripleStore,
-  dataGraphs: readonly string[],
-  graphMembership: GraphMembershipSnapshot,
-  candidateGraphsFor: (graph: string) => string[],
-  cutoffIso: string,
-  signal?: AbortSignal,
-): Promise<SyncRow[]> {
-  const rows: SyncRow[] = [];
-  for (const graph of dataGraphs) {
-    const metaGraph = `${graph}_meta`;
-    if (!graphMembership.has(metaGraph)) continue;
-    const roots = await readFreshSwmRoots(store, metaGraph, cutoffIso, signal);
-    if (roots.size === 0) continue;
-    const rootPrefixes = [...roots].map((root) => `${root}/.well-known/genid/`);
-    const graphRows = await readRowsAcrossGraphs(store, candidateGraphsFor(graph), signal);
-    // Append only matching rows, one at a time — never `rows.push(...matches)`.
-    // The spread passes every element as a call argument, so a shared-memory
-    // graph with more than V8's argument-count limit (~1.25e5) of matching rows
-    // throws `RangeError: Maximum call stack size exceeded` mid-serve. The loop
-    // also avoids allocating a filtered intermediary before appending.
-    for (const row of graphRows) {
-      if (roots.has(row.s) || rootPrefixes.some((prefix) => row.s.startsWith(prefix))) {
-        rows.push(row);
-      }
-    }
-  }
-  return rows.sort(compareRows);
-}
-
 const FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK = 100;
 
 function chunkValues<T>(values: readonly T[], size: number): T[][] {
@@ -3350,7 +3298,7 @@ function parseSparqlInteger(value: string | undefined): number {
  * empty result tens of thousands of times. Work here is proportional to the
  * fresh root set instead of the historical graph count. Paging then touches
  * one or two concrete graphs at a time with `VALUES ?root`, preserving the
- * exact root/skolem filter used by {@link readFreshSwmDataRows}.
+ * same root/skolem closure as the bounded SWM snapshot reader.
  */
 async function buildFreshSwmDataGraphPlan(
   store: TripleStore,
@@ -3599,26 +3547,6 @@ async function queryDurableMetaRows(
   return window?.kind === 'page' ? rows : rows.sort(compareRows);
 }
 
-/**
- * Read admitted durable metadata from one store snapshot. The delegation
- * credential and its allow/revoke facts are evaluated in the same query, so
- * an ACL mutation cannot race a separately materialized JavaScript subject set.
- */
-async function readDurableMetaRows(
-  store: TripleStore,
-  contextGraphId: string,
-  registeredSubGraphNames: readonly string[],
-  signal?: AbortSignal,
-): Promise<SyncRow[]> {
-  return queryDurableMetaRows(
-    store,
-    contextGraphId,
-    registeredSubGraphNames,
-    undefined,
-    signal,
-  );
-}
-
 async function readBoundedDurableMetaSnapshot(
   store: TripleStore,
   contextGraphId: string,
@@ -3806,14 +3734,14 @@ function filterDurableMetaSnapshotRows(
 }
 
 /**
- * Store-bounded, page-safe equivalent of {@link readDurableMetaRows} used as the
+ * Store-bounded, page-safe durable metadata reader used as the
  * oversized-snapshot fallback. It pushes the entire subject-membership predicate
  * into the store (the graph-scaling non-working-lifecycle / event-subject sets
  * are expressed as `EXISTS`, never materialized in Node) and pages with
  * `OFFSET`/`LIMIT`, so an intrinsically-oversized durable-meta snapshot syncs
  * without buffering the complete filtered set in heap.
  *
- * INVARIANT: this MUST return the same SET of rows as {@link readDurableMetaRows}.
+ * INVARIANT: this MUST return the same SET of rows as {@link readBoundedDurableMetaSnapshot}.
  * The two encode the same filter and MUST be edited together. Row ORDER may
  * differ (SPARQL term order vs `compareRows` code-point order diverge on the
  * object tiebreaker); that is safe because only one path runs within a single
@@ -3984,29 +3912,6 @@ async function readDurableDeltaRowsPageAcrossGraphs(
   return res.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
     .filter((row) => row.s && row.p && row.o && row.g);
-}
-
-async function readDurableDeltaRowsAcrossGraphs(
-  store: TripleStore,
-  graphs: readonly string[],
-  metaGraphs: readonly string[],
-  sinceBatchId: bigint,
-  signal?: AbortSignal,
-): Promise<SyncRow[]> {
-  const values = graphValues(graphs);
-  if (!values) return [];
-  const res = await store.query(`
-    PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
-    SELECT ?g ?s ?p ?o WHERE {
-      ${durableDeltaWhereClauseForGraphs(values, metaGraphs)}
-    }
-    ${durableDeltaGroupClause(metaGraphs, sinceBatchId, true)}
-  `, syncResponderStoreOptions(signal, 'sync.responder.readDurableDeltaRowsAcrossGraphs'));
-  if (res.type !== 'bindings') return [];
-  return res.bindings
-    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
-    .filter((row) => row.s && row.p && row.o && row.g)
-    .sort(compareRows);
 }
 
 function durableDeltaWhereClauseForGraphs(

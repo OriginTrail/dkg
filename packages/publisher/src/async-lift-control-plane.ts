@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { AdmissionJournalEntry, LiftJob, LiftJobHex, LiftJobRequest, PersistedJournalKind, PersistedLiftJob } from './lift-job.js';
+import type {
+  AdmissionJournalEntry,
+  LiftJob,
+  LiftJobRequest,
+  PersistedJournalKind,
+  PersistedLiftJob,
+} from './lift-job.js';
 import {
   encodeCurrentLiftJobPayload,
   encodeLegacyV0LiftJobPayload,

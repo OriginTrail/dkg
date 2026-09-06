@@ -28,7 +28,11 @@ import type {
   TxResult,
   V10UpdateKAParams,
 } from './chain-adapter.js';
-import { floorPublishTokenAmount, computeUpdateACKDigest, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
+import {
+  floorPublishTokenAmount,
+  computeUpdateACKDigest,
+  AUTHOR_SCHEME_VERSION_V1,
+} from '@origintrail-official/dkg-core';
 import {
   resolveQuotedPublisherCandidatePricing,
   type PublisherConvictionPlanReader,
@@ -374,8 +378,7 @@ export class PublishMethods extends EVMChainAdapterBase {
           try {
             const parsed = kas.interface.parseLog({ topics: [...log.topics], data: log.data });
             if (
-              (parsed?.name === 'KnowledgeAssetUpdated' ||
-                parsed?.name === 'KnowledgeAssetUpdated') &&
+              parsed?.name === 'KnowledgeAssetUpdated' &&
               BigInt(parsed.args.id) === batchId
             ) {
               onChainMerkleRoot = ethers.getBytes(parsed.args.merkleRoot);

@@ -19,7 +19,6 @@ import {
   pcaSettle,
   type CreatePcaResult,
   type PcaAddAgentResult,
-  type PcaContracts,
   type PcaRemoveAgentResult,
   type PcaTopUpResult,
 } from '../api.js';

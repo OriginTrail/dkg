@@ -1,11 +1,17 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { api } from '../../../api-wrapper.js';
-import { listJoinRequests, approveJoinRequest, rejectJoinRequest, type AgentIdentity, type PendingJoinRequest } from '../../../api.js';
+
+import {
+  listJoinRequests,
+  approveJoinRequest,
+  rejectJoinRequest,
+  type AgentIdentity,
+  type PendingJoinRequest,
+} from '../../../api.js';
 import { useMemoryEntities } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfile } from '../../../hooks/useProjectProfile.js';
-import { SubGraphBar } from '../../../components/SubGraphBar.js';
+
 import { canonicalAgentDid, normalizeAccessPolicy } from '../../../lib/contextGraphSidebar.js';
-import { layerNoun, useLayerTriples, useCanonicalTriples, type LayerView } from '../helpers.js';
+import { layerNoun, useCanonicalTriples, type LayerView } from '../helpers.js';
 import { StatStrip } from '../../../components/ContextGraphPrimitives.js';
 import { useNodeEvents } from '../../../hooks/useNodeEvents.js';
 

@@ -8,11 +8,7 @@
 // The router (`handleRequest`) is in `./handle-request.ts` and
 // imported here purely so `createServer` can wire it up.
 
-import {
-  createServer,
-  type IncomingMessage,
-} from "node:http";
-import { createHash, randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 import {
   buildContextGraphDeclarationsSparql,
   contextGraphIdsFromDeclarationBindings,
@@ -24,19 +20,11 @@ import {
   shadowContextGraphIdsFromMetricSubscriptionCandidates,
 } from "./metrics-queries.js";
 import { createMetricsPresence } from "./metrics-presence.js";
-import {
-  chmod,
-  copyFile,
-  mkdir,
-  rename,
-  rm,
-  stat,
-  unlink,
-} from "node:fs/promises";
-import { execSync, exec, execFile } from "node:child_process";
+import { stat } from "node:fs/promises";
+import { exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join, dirname, resolve } from 'node:path';
-import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSync as fsWriteFileSync, unlinkSync } from 'node:fs';
+
 // Namespace import: our Phase-8 install-context builder (~line 290) calls
 // `osModule.homedir()`, and the later agent-identity probe (~line 6851)
 // uses `osModule.hostname()` + `osModule.userInfo()`. v10-rc's new
@@ -50,7 +38,6 @@ import { resolveUpdateTelemetryVersionStatus } from './update-telemetry-status.j
 const { homedir } = osModule;
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { ethers } from 'ethers';
 
 // Lazy resolver used by the manifest-install flow: find the
 // @origintrail-official/dkg-mcp package via Node's own resolution
@@ -69,11 +56,22 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
-import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
-  DEFAULT_REQUIRED_ACKS,
-  findReservedSubjectPrefix,
-  isSkolemizedUri,
+  BackpressureMonitor,
+  computeNetworkId,
+  createOperationContext,
+  createLogRedactor,
+  DKGEvent,
+  Logger,
+  PayloadTooLargeError,
+  DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS,
+  DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS,
+  pickNetworkTunables,
+  isKaPublishLifecycleDebugLoggingEnabled,
+  setKaPublishLifecycleDebugLoggingEnabled,
+  SYSTEM_CONTEXT_GRAPHS,
+} from '@origintrail-official/dkg-core';
+import {
   selectACKCandidatePeers,
   type AsyncKnowledgeAssetVmPublishExecutionInput,
   type AsyncKnowledgeAssetVmPublishRecoveryInput,
@@ -84,13 +82,11 @@ import {
   MetricsCollector,
   OperationTracker,
   handleNodeUIRequest,
-  ChatMemoryManager,
   LogPushWorker,
   OtlpLogWorker,
   initTelemetry,
   shutdownTelemetry,
   flushTelemetry,
-  LlmClient,
   SqliteMessageIdempotencyStore,
   SqliteProtocolOutboxStore,
   SqliteSyncCheckpointStore,
@@ -116,13 +112,6 @@ import {
   TELEMETRY_ENDPOINTS,
   type DkgConfig,
   type NetworkConfig,
-  type AutoUpdateConfig,
-  type LocalAgentIntegrationCapabilities,
-  type LocalAgentIntegrationConfig,
-  type LocalAgentIntegrationManifest,
-  type LocalAgentIntegrationRuntime,
-  type LocalAgentIntegrationStatus,
-  type LocalAgentIntegrationTransport,
   resolveContextGraphs,
   resolveContextGraphSubscriptionRehydrationEnabled,
   resolveNetworkDefaultContextGraphs,
@@ -133,16 +122,7 @@ import {
   resolveSharedMemoryTtlMs,
   resolveStorageAckTiming,
   repoDir,
-  releasesDir,
-  activeSlot,
-  inactiveSlot,
-  swapSlot,
-  gitCommandEnv,
-  gitCommandArgs,
-  isStandaloneInstall,
   resolveAutoUpdateSource,
-  slotEntryPoint,
-  CLI_NPM_PACKAGE,
   exitOnStoreConfigErrors,
   validateNetworkConfigReadiness,
 } from '../config.js';
@@ -187,9 +167,16 @@ import {
   decodeVmReconcileNegativeRow,
   encodeVmReconcileNegativeRow,
 } from './vm-reconcile-negative-store-adapter.js';
-import { createAdmissionRecoveryCapabilityProbe, createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
+import {
+  createAdmissionRecoveryCapabilityProbe,
+  createInitialPublisherState,
+  createPublicSnapshotStore,
+  createPublisherControlFromStore,
+  startPublisherRuntimeWithOutcome,
+  type PublisherState,
+} from '../publisher-runner.js';
 import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill.js';
-import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
+import { createCatchupRunner } from '../catchup-runner.js';
 import {
   migrateLegacyContextGraphReadiness,
   reconcileConfiguredContextGraphMetadata,
@@ -199,37 +186,16 @@ import {
 } from '../context-graph-readiness.js';
 import { authenticateHttpRequest, loadTokens } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
-import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
-import {
-  expectedBundledMarkItDownBuildMetadata,
-  readCliPackageVersion,
-  type BundledMarkItDownMetadata,
-} from "../extraction/markitdown-bundle-metadata.js";
-import {
-  checksumPathFor as markItDownChecksumPath,
-  hasVerifiedBundledBinary as hasVerifiedBundledMarkItDownBinary,
-  metadataPathFor as markItDownMetadataPath,
-} from '../../scripts/markitdown-bundle-validation.mjs';
-import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from '../extraction-status.js';
+import { MarkItDownConverter, isMarkItDownAvailable } from '../extraction/index.js';
+
+import { type ExtractionStatusRecord } from '../extraction-status.js';
 import { FileStore } from '../file-store.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../vector-store.js';
-import { parseBoundary, parseMultipart, MultipartParseError } from '../http/multipart.js';
+
 // Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
 // reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
 // format stays identical between curator/joiner/CLI paths.
-import {
-  publishManifest as publishManifestImpl,
-  assembleStandardTemplates,
-} from '@origintrail-official/dkg-mcp/manifest/publish';
-import { fetchManifest as fetchManifestImpl } from '@origintrail-official/dkg-mcp/manifest/fetch';
-import {
-  planInstall as planInstallImpl,
-  writeInstall as writeInstallImpl,
-  buildReviewMarkdown as buildReviewMarkdownImpl,
-  type InstallContext,
-} from '@origintrail-official/dkg-mcp/manifest/install';
-import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 
 // Daemon sub-module imports — every public symbol from sibling
 // modules is pulled in here because the legacy monolithic file used
@@ -241,12 +207,7 @@ import {
   resolveAutoUpdatePollingMode,
   type CorsAllowlist,
 } from './state.js';
-import {
-  type CatchupJobState,
-  type CatchupJob,
-  type CatchupTracker,
-  toCatchupStatusResponse,
-} from './types.js';
+import { type CatchupTracker } from './types.js';
 import { drainCatchupJobs } from './catchup-telemetry.js';
 import {
   beginGracefulShutdown,
@@ -260,36 +221,12 @@ import {
   createDaemonSseRegistry,
 } from './http-lifecycle.js';
 import {
-  type MarkItDownTarget,
-  manifestRepoRoot,
-  type McpDkgAssets,
-  resolveMcpDkgAssets,
-  readMcpDkgVersion,
-  parseSemver,
-  cmpSemverForRange,
-  versionSatisfiesRange,
-  manifestNetworkLabel,
-  formatDaemonAuthority,
-  manifestSelfClient,
-  manifestPublisherUri,
-  type SupportedTool,
-  nicknameToSlug,
-  buildManifestInstallContext,
   _autoUpdateIo,
-  loadMarkItDownTargets,
   getNodeVersion,
   getCurrentCommitShort,
   loadBuildInfo,
   detectInstallMode,
-  loadSkillTemplate,
-  buildSkillMd,
-  skillEtag,
   DAEMON_EXIT_CODE_RESTART,
-  parseRequiredSignatures,
-  normalizeDetectedContentType,
-  currentBundledMarkItDownAssetName,
-  bindingValue,
-  carryForwardBundledMarkItDownBinary,
 } from './manifest.js';
 import {
   encodeForcedShutdownExitCode,
@@ -300,22 +237,9 @@ import {
   daemonRuntimeState,
 } from './shutdown-wait.js';
 import {
-  resolveNameToPeerId,
   jsonResponse,
-  safeDecodeURIComponent,
-  safeParseJson,
-  validateOptionalSubGraphName,
-  validateRequiredContextGraphId,
-  validateEntities,
-  validateConditions,
-  MAX_BODY_BYTES,
   SMALL_BODY_BYTES,
-  MAX_UPLOAD_BYTES,
-  type ImportFileExtractionPayload,
-  buildImportFileResponse,
-  unregisteredSubGraphError,
   readBody,
-  readBodyBuffer,
   buildCorsAllowlist,
   resolveCorsOrigin,
   corsHeaders,
@@ -325,32 +249,13 @@ import {
   admitRequest,
   resolveIntSetting,
   applyServerLimits,
-  isLoopbackClientIp,
-  isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
   shortId,
   sleep,
-  deriveBlockExplorerUrl,
   respondWithDaemonError,
 } from './http-utils.js';
-import {
-  normalizeRepo,
-  isValidRepoSpec,
-  repoToFetchUrl,
-  githubRepoForApi,
-  resolveRemoteCommitSha,
-  type PendingUpdateState,
-  type CommitCheckStatus,
-  readPendingUpdateState,
-  clearPendingUpdateState,
-  writePendingUpdateState,
-  type NpmVersionResult,
-  resolveLatestNpmVersion,
-  compareSemver,
-  acquireUpdateLock,
-  releaseUpdateLock,
-} from './auto-update.js';
-import { formatAutoUpdateTagVerificationWarning, isValidRef, resolveAutoUpdateGitRefPlan } from '../auto-update-ref.js';
+import { repoToFetchUrl } from './auto-update.js';
+import { formatAutoUpdateTagVerificationWarning, resolveAutoUpdateGitRefPlan } from '../auto-update-ref.js';
 import { resolveUpdateJitterMs, createUpdateHoldoffGate } from './auto-update-jitter.js';
 import { createGitUpdateRunCheck, createNpmUpdateRunCheck } from './auto-update-runner.js';
 import {
@@ -369,87 +274,9 @@ import { startManagedOxigraph } from './oxigraph-managed.js';
 import { buildAgentRuntimeStoreConfig } from './agent-runtime-store-config.js';
 import type { OxigraphServerHandle } from './oxigraph-server.js';
 import { resetNatStatus, startNatStatusWatcher } from './nat-status.js';
-import {
-  OPENCLAW_UI_CONNECT_TIMEOUT_MS,
-  OPENCLAW_UI_CONNECT_POLL_MS,
-  OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
-  type PendingOpenClawUiAttachJob,
-  isOpenClawBridgeHealthCacheValid,
-  type OpenClawChannelTarget,
-  trimTrailingSlashes,
-  buildOpenClawGatewayBase,
-  loadBridgeAuthToken,
-  getOpenClawChannelTargets,
-  type OpenClawBridgeHealthState,
-  type OpenClawGatewayHealthState,
-  type OpenClawChannelHealthReport,
-  transportPatchFromOpenClawTarget,
-  probeOpenClawChannelHealth,
-  runOpenClawUiSetup,
-  localOpenclawConfigPath,
-  isOpenClawMemorySlotElected,
-  restartOpenClawGateway,
-  waitForOpenClawChatReady,
-  type OpenClawUiAttachDeps,
-  formatOpenClawUiAttachFailure,
-  scheduleOpenClawUiAttachJob,
-  cancelPendingLocalAgentAttachJob,
-  isOpenClawUiAttachCancelled,
-  shouldTryNextOpenClawTarget,
-  buildOpenClawChannelHeaders,
-  ensureOpenClawBridgeAvailable,
-  type OpenClawStreamRequest,
-  type OpenClawStreamResponse,
-  type OpenClawStreamReader,
-  writeOpenClawStreamChunk,
-  pipeOpenClawStream,
-  isValidOpenClawPersistTurnPayload,
-  type OpenClawAttachmentRef,
-  normalizeOpenClawAttachmentRef,
-  normalizeOpenClawAttachmentRefs,
-  type OpenClawChatContextEntry,
-  normalizeOpenClawChatContextEntry,
-  normalizeOpenClawChatContextEntries,
-  hasOpenClawChatTurnContent,
-  unescapeOpenClawAttachmentLiteralBody,
-  stripOpenClawAttachmentLiteral,
-  parseOpenClawAttachmentTripleCount,
-  isOpenClawAttachmentAssertionUriForContextGraph,
-  extractionRecordMatchesOpenClawAttachmentRef,
-  verifyOpenClawAttachmentRefsProvenance,
-} from './openclaw.js';
+import { loadBridgeAuthToken } from './openclaw.js';
 import { buildChatAcl } from './chat-acl.js';
 import { recordAssertionActivity, localNodeInvolvedInContextGraph } from './activity-notification.js';
-import {
-  type LocalAgentIntegrationDefinition,
-  type LocalAgentIntegrationRecord,
-  LOCAL_AGENT_INTEGRATION_DEFINITIONS,
-  isPlainRecord,
-  normalizeIntegrationId,
-  normalizeLocalAgentTransport,
-  normalizeLocalAgentCapabilities,
-  normalizeLocalAgentManifest,
-  normalizeLocalAgentRuntime,
-  isLocalAgentExplicitlyUserDisabled,
-  isExplicitLocalAgentDisconnectPatch,
-  normalizeExplicitLocalAgentDisconnectBody,
-  mergeLocalAgentIntegrationConfig,
-  getStoredLocalAgentIntegrations,
-  computeLocalAgentIntegrationStatus,
-  buildLocalAgentIntegrationRecord,
-  listLocalAgentIntegrations,
-  getLocalAgentIntegration,
-  pruneLegacyOpenClawConfig,
-  extractLocalAgentIntegrationPatch,
-  connectLocalAgentIntegration,
-  updateLocalAgentIntegration,
-  hasConfiguredLocalAgentChat,
-  hasStoredLocalAgentTransportConfig,
-  connectLocalAgentIntegrationFromUi,
-  type ReverseLocalAgentSetupDeps,
-  reverseLocalAgentSetupForUi,
-  refreshLocalAgentIntegrationFromUi,
-} from './local-agents.js';
 
 import { handleRequest } from './handle-request.js';
 import { configureApiQueryPriority } from './api-query-priority.js';
