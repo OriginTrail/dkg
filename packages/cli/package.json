@@ -26,7 +26,7 @@
   "scripts": {
     "build": "pnpm run build:prerequisites && pnpm run build:prepared",
     "build:prerequisites": "node scripts/build-prerequisites.mjs",
-    "build:prepared": "tsc && node scripts/test-catchup-worker-package-boundary.mjs && node ../../scripts/copy-cli-runtime-assets.mjs",
+    "build:prepared": "tsc && pnpm run test:types && node scripts/test-catchup-worker-package-boundary.mjs && node ../../scripts/copy-cli-runtime-assets.mjs",
     "prepack": "node ../../scripts/copy-cli-runtime-assets.mjs",
     "benchmark:catchup-runner": "node scripts/catchup-runner-benchmark.cjs",
     "benchmark:daemon-responsiveness": "node scripts/daemon-responsiveness-benchmark.cjs",
@@ -37,8 +37,9 @@
     "markitdown:build": "node ./scripts/bundle-markitdown-binaries.mjs --build-current-platform",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
+    "test:types": "tsc --project tsconfig.type-tests.json",
     "test:benchmark:publish-async-get": "vitest run --config vitest.benchmark.config.ts",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs cli",
     "clean": "node -e \"const fs=require('fs');for(const d of['dist','network']){fs.rmSync(d,{recursive:true,force:true})};fs.rmSync('tsconfig.tsbuildinfo',{force:true})\""
   },
   "dependencies": {

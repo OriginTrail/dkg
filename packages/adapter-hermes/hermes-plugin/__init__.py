@@ -16,6 +16,7 @@ Config via $HERMES_HOME/dkg.json:
 from __future__ import annotations
 
 import json
+import urllib.parse
 import logging
 import os
 import hashlib
@@ -325,6 +326,24 @@ DKG_FIND_AGENTS_SCHEMA = {
             "skill_type": {
                 "type": "string",
                 "description": "Filter by skill URI to find agents offering a specific capability.",
+            },
+            "connection_status": {
+                "type": "string",
+                "enum": ["self", "connected", "disconnected"],
+                "description": "Only agents in this live connection state.",
+            },
+            "local": {
+                "type": "boolean",
+                "description": "Only this node's own agents — the cheap way to learn your own agent address.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Page size (positive integer); the response carries nextCursor while more rows remain.",
+            },
+            "cursor": {
+                "type": "string",
+                "description": "Opaque cursor from a previous response; repeat the same filters.",
             },
         },
         "required": [],
@@ -1655,15 +1674,38 @@ class DKGMemoryProvider(MemoryProvider):
             return json.dumps({**result, "contextGraphs": filtered, "count": len(filtered), "scope": scope})
         return json.dumps({"contextGraphs": filtered, "count": len(filtered), "scope": scope})
 
+    _FIND_AGENTS_ARG_TO_WIRE = {
+        "framework": "framework",
+        "skill_type": "skill_type",
+        "connection_status": "connectionStatus",
+        "local": "local",
+        "limit": "limit",
+        "cursor": "cursor",
+    }
+
     def _handle_find_agents(self, args: Dict[str, Any]) -> str:
         if self._offline:
             return tool_error("DKG daemon is offline. Cannot discover agents.")
-        params = {}
-        if args.get("framework"):
-            params["framework"] = args["framework"]
-        if args.get("skill_type"):
-            params["skill_type"] = args["skill_type"]
-        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        # EVERY supplied argument reaches the daemon — the single validator.
+        # Known names translate to their wire spelling; unknown names are
+        # forwarded AS-IS so a misspelled key surfaces the daemon's
+        # unknown-parameter 400 instead of silently widening the query.
+        # Supplied values are forwarded verbatim, empty strings included
+        # (an empty cursor must produce the daemon's 400, not page one).
+        # Only None means "absent" — the JSON-Schema omit-or-null convention.
+        params = []
+        for key, value in args.items():
+            if value is None:
+                continue
+            wire = self._FIND_AGENTS_ARG_TO_WIRE.get(key, key)
+            if value is True:
+                text = "true"
+            elif value is False:
+                text = "false"
+            else:
+                text = str(value)
+            params.append((wire, text))
+        qs = urllib.parse.urlencode(params)
         path = f"/api/agents?{qs}" if qs else "/api/agents"
         return json.dumps(self._client._get(path))
 

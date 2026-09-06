@@ -34,7 +34,7 @@ import {
   KA_VM_KA_UAL,
   kaVmPublishRequest,
   stageKnowledgeAssetShareSnapshot,
-} from './_helpers/ka-vm-publish.js';
+} from '../../../scripts/testing/ka-vm-publish.js';
 
 // Read the journal kinds (seq-ordered) straight from the node-local journal graph.
 async function journalKinds(store: OxigraphStore): Promise<string[]> {

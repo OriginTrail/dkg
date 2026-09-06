@@ -7,6 +7,13 @@
  */
 
 import { loadAuthTokenSync } from '@origintrail-official/dkg-core';
+import {
+  serializeAgentListOptions,
+  serializeRawAgentListArgs,
+  type AgentListOptions,
+} from './agent-list.js';
+
+export type { AgentListOptions } from './agent-list.js';
 
 /**
  * Typed daemon HTTP error. Carries the response `status` and the parsed JSON
@@ -968,12 +975,30 @@ export class DkgDaemonClient {
   // Agents & skills discovery
   // ---------------------------------------------------------------------------
 
-  async getAgents(filter?: { framework?: string; skill_type?: string }): Promise<{ agents: any[] }> {
-    const params = new URLSearchParams();
-    if (filter?.framework) params.set('framework', filter.framework);
-    if (filter?.skill_type) params.set('skill_type', filter.skill_type);
-    const qs = params.toString();
-    return this.get(`/api/agents${qs ? `?${qs}` : ''}`);
+  /**
+   * List agents (GH#310), strictly typed for SDK callers. Serialization
+   * lives in the agent-list boundary module (src/agent-list.ts) and is
+   * shared with {@link getAgentsUnvalidated}, so both paths speak one wire
+   * vocabulary. The deprecated `skill_type` alias keeps pre-GH#310 callers
+   * working.
+   */
+  async getAgents(options?: AgentListOptions): Promise<{ agents: any[]; nextCursor?: string }> {
+    return this.agentsRequest(serializeAgentListOptions(options ?? {}));
+  }
+
+  /**
+   * The dkg_find_agents tool boundary: UNVALIDATED model-produced arguments,
+   * serialized verbatim by the shared boundary module, so the daemon — the
+   * single validator — sees exactly what the model supplied and its 400 is
+   * the caller's signal. `limit: 0` coerced or dropped client-side would
+   * instead return the full ~150 KB registry.
+   */
+  async getAgentsUnvalidated(args: Record<string, unknown>): Promise<{ agents: any[]; nextCursor?: string }> {
+    return this.agentsRequest(serializeRawAgentListArgs(args));
+  }
+
+  private async agentsRequest(queryString: string): Promise<{ agents: any[]; nextCursor?: string }> {
+    return this.get(`/api/agents${queryString ? `?${queryString}` : ''}`);
   }
 
   async getSkills(filter?: { skillType?: string }): Promise<{ skills: any[] }> {

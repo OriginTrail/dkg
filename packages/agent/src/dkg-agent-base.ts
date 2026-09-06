@@ -16,6 +16,8 @@ import { openSqliteFinalizationRecoveryStore } from './finalization-recovery-sql
 import type { FinalizationRecoveryHealth } from './finalization-recovery-store.js';
 import { FinalizationRuntime } from './finalization-runtime.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
+import type { Rfc64PublicCatalogWorkloadOwnerV1 } from
+  './rfc64/public-catalog-workload-owner-v1.js';
 import type { Rfc64CatalogSynchronizationEvidenceV1 } from './rfc64/catalog-synchronization-evidence-v1.js';
 import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 import { Rfc64CatalogMutationCoordinatorV1 } from './rfc64/catalog-mutation-runtime-v1.js';
@@ -915,12 +917,12 @@ export class DKGAgentBase {
   protected rfc64PersistenceV1?: Rfc64PersistenceV1;
   /** Explicit owner for finalization persistence and network identity lifetimes. */
   protected readonly finalizationRuntime = new FinalizationRuntime();
-  /**
-   * RFC-64 Gate 1 public author-catalog service, wired onto the production
-   * router during `start()` when {@link rfc64PersistenceV1} is open. Undefined
-   * while dormant (no dataDir) or after `stop()`.
-   */
-  protected rfc64PublicCatalogServiceV1?: Rfc64PublicCatalogServiceV1;
+  /** Single owner for RFC-64 public transport, authority refresh, and persistence. */
+  protected rfc64PublicCatalogOwnerV1!: Rfc64PublicCatalogWorkloadOwnerV1;
+  /** Compatibility view for catalog methods that operate on the active service. */
+  protected get rfc64PublicCatalogServiceV1(): Rfc64PublicCatalogServiceV1 | undefined {
+    return this.rfc64PublicCatalogOwnerV1?.service;
+  }
   /** One explicit serializer and physical drain boundary for every catalog mutation. */
   protected readonly rfc64CatalogMutationCoordinatorV1 =
     new Rfc64CatalogMutationCoordinatorV1();

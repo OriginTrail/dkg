@@ -47,7 +47,7 @@
     "build": "tsc && pnpm run test:types",
     "test:types": "tsc --project tsconfig.type-tests.json",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs core",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {

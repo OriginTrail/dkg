@@ -18,7 +18,7 @@ import {
   KA_VM_INCLUSION,
   KA_VM_VALIDATION,
   kaVmPublishRequest,
-} from './_helpers/ka-vm-publish.js';
+} from '../../../scripts/testing/ka-vm-publish.js';
 
 // #1829 chunk 2-3 — appendJournal hooked into writeJob: per-lineageKey monotonic seq,
 // explicit kinds, daemon-only gating, and #1849 defensiveness (a legacy U+001F job

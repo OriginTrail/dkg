@@ -20,7 +20,7 @@ import {
   KA_VM_INCLUSION,
   KA_VM_VALIDATION,
   kaVmPublishRequest,
-} from './_helpers/ka-vm-publish.js';
+} from '../../../scripts/testing/ka-vm-publish.js';
 
 // #1828 — durable-admission recovery: exact intent lookup keyed on the lifecycle
 // facts a client retains, with a materialized index and deterministic

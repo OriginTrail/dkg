@@ -15,13 +15,13 @@
  *   - inline `did:dkg:31337/<author>/7` / `ROOTLESS_UAL`   → `KA_VM_KA_UAL`
  *   - `` `sha256:${'ab'.repeat(32)}` `` / `'sha256:' + …`  → template literal
  */
-import { GraphManager, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
-import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
+import { GraphManager, type TripleStore, type Quad } from '../../packages/storage/dist/index.js';
+import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '../../packages/core/dist/index.js';
 import {
   storeKnowledgeAssetOperationPublicQuads,
   type KnowledgeAssetVmPublishRequest,
   type LiftJobValidationMetadata,
-} from '../../src/index.js';
+} from '../../packages/publisher/dist/index.js';
 
 /** Fixed KA author address shared by every VM-publish fixture request. */
 export const KA_VM_AUTHOR_ADDRESS = '0x1111111111111111111111111111111111111111';
@@ -151,7 +151,7 @@ export const KA_VM_EXECUTOR_TX_HASH = (`0x${'cd'.repeat(32)}`) as `0x${string}`;
 import type {
   AsyncKnowledgeAssetVmPublishRecoveryEvidence,
   AsyncLiftChainProofResolution,
-} from '../../src/index.js';
+} from '../../packages/publisher/dist/index.js';
 
 export function recoveredResolution(
   txHash: `0x${string}` = KA_VM_EXECUTOR_TX_HASH,

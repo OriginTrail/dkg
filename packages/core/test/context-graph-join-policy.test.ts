@@ -38,6 +38,7 @@ describe('context graph join policy validation', () => {
     { label: 'a future version', patch: { version: 2 } },
     { label: 'an empty owner', patch: { ownerDid: '' } },
     { label: 'a non-finite update time', patch: { updatedAt: Number.NaN } },
+    { label: 'a non-number update time', patch: { updatedAt: '1234' } },
     { label: 'a missing member cap', patch: { maxMembers: undefined } },
     { label: 'an excessive member cap', patch: { maxMembers: OPEN_ENROLLMENT_MAX_MEMBERS + 1 } },
     { label: 'a fractional rate cap', patch: { maxApprovalsPerHour: 1.5 } },
@@ -82,6 +83,11 @@ describe('context graph join policy validation', () => {
     const array = Object.assign([], { ...base, mode: 'manual' });
     expect(parseContextGraphJoinPolicyRecord(array)).toBeNull();
     expect(isBoundedOpenEnrollmentPolicy(array)).toBe(false);
+  });
+
+  it('rejects null without attempting to read policy fields', () => {
+    expect(parseContextGraphJoinPolicyRecord(null)).toBeNull();
+    expect(isBoundedOpenEnrollmentPolicy(null)).toBe(false);
   });
 
   it('rejects functions carrying otherwise valid policy fields', () => {

@@ -33,7 +33,7 @@
  *
  * Mocks policy: ZERO blockchain mocks. The daemon is wired against the
  * SHARED HARDHAT NODE spun up by `packages/chain/test/hardhat-global-setup.ts`
- * on `process.env.HARDHAT_PORT` (9548 for the CLI lane). The daemon uses a
+ * on an OS-assigned port from the isolated context file. The daemon uses a
  * real `EVMChainAdapter` against that node with the real Hub address and the
  * pre-registered `CORE_OP` operational wallet (its identityId was posted on
  * chain by the harness' profile setup). None of the tests in this file
@@ -43,6 +43,7 @@
  * a real chain") enforced in CI.
  */
 
+import { TEST_SNAPSHOT_STORAGE } from '../../../scripts/testing/snapshot-storage.js';
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -108,6 +109,7 @@ async function writeDaemonConfig(
   await writeFile(
     join(home, 'config.json'),
     JSON.stringify({
+      sharedMemoryPublicSnapshotStorage: TEST_SNAPSHOT_STORAGE,
       name: 'daemon-extra-test',
       apiPort,
       listenPort,

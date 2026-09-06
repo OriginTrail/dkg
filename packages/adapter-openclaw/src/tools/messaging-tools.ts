@@ -6,6 +6,7 @@
  * `handle*` methods (see {@link DkgToolHost}). No behavior change.
  */
 import type { OpenClawTool } from '../types.js';
+import { FIND_AGENTS_TOOL_SCHEMA_PROPERTIES } from '../agent-list.js';
 import type { DkgToolHost } from './tool-host.js';
 
 export function buildMessagingTools(ctx: DkgToolHost): OpenClawTool[] {
@@ -18,10 +19,10 @@ export function buildMessagingTools(ctx: DkgToolHost): OpenClawTool[] {
         'their last-seen `connectionStatus` even when no peers are currently reachable.',
       parameters: {
         type: 'object',
-        properties: {
-          framework: { type: 'string', description: 'Filter by framework (e.g. "OpenClaw", "ElizaOS").' },
-          skill_type: { type: 'string', description: 'Filter by skill type URI (e.g. "ImageAnalysis").' },
-        },
+        // THE boundary's canonical declaration, assigned directly — the
+        // advertised vocabulary and the serializer mapping are derived from
+        // this same object, so they cannot drift apart.
+        properties: FIND_AGENTS_TOOL_SCHEMA_PROPERTIES,
         required: [],
       },
       execute: async (_toolCallId, args) => ctx.handleFindAgents(args),

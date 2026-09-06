@@ -1,12 +1,11 @@
 import { defineConfig } from 'vitest/config';
+import { hardhatTestEnvironment } from '../../scripts/lib/hardhat-test-env.mjs';
 
 const runsDaemonHttpBehavior = process.argv.some((arg) =>
   arg.includes('daemon-http-behavior-extra.test.ts'),
 );
 
-if (runsDaemonHttpBehavior) {
-  process.env.HARDHAT_PORT = '9548';
-}
+const hardhatEnv = runsDaemonHttpBehavior ? hardhatTestEnvironment() : undefined;
 
 export default defineConfig({
   test: {
@@ -14,6 +13,7 @@ export default defineConfig({
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
           'test/api-client.test.ts',
+          'test/live-daemon-isolation.test.ts',
           'test/async-vm-publish-registration.test.ts',
           // #1828 — durable-admission recovery lookup route (pure handler, no hardhat).
           'test/publisher-job-by-intent-route.test.ts',
@@ -106,6 +106,8 @@ export default defineConfig({
           // including preserving a known transaction hash on endpoint exhaustion.
           'test/chain-rpc-transport-status.test.ts',
           'test/async-promote-worker.test.ts',
+          'test/async-promote-error-classification.test.ts',
+          'test/async-promote-publisher-recovery.test.ts',
           'test/async-promote-bookkeeping-recovery.test.ts',
           'test/async-promote-queue-e2e.test.ts',
           'test/knowledge-assets-1116-share-errors.test.ts',
@@ -219,7 +221,7 @@ export default defineConfig({
         ],
     testTimeout: runsDaemonHttpBehavior ? 120_000 : 60_000,
     globalSetup: runsDaemonHttpBehavior ? ['../chain/test/hardhat-global-setup.ts'] : [],
-    env: runsDaemonHttpBehavior ? { HARDHAT_PORT: '9548' } : undefined,
+    env: hardhatEnv,
     maxWorkers: 1,
   },
 });

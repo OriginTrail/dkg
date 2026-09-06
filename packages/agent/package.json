@@ -19,6 +19,7 @@
       "default": "./dist/rfc64/public-catalog-activation-config-v1.js"
     },
     "./package.json": "./package.json",
+    "./dist/internal/*": null,
     "./dist/rfc64/author-catalog-producer.js": "./dist/rfc64/author-catalog-producer.js",
     "./dist/rfc64/catalog-row-authorship.js": "./dist/rfc64/catalog-row-authorship.js",
     "./dist/rfc64/inventory-v1/candidate.js": "./dist/rfc64/inventory-v1/candidate.js",
@@ -44,6 +45,8 @@
     "./dist/rfc64/control-object-store-v1.js": null,
     "./dist/rfc64/catalog-access-policy-v1.js": null,
     "./dist/rfc64/catalog-authority-config-v1.js": null,
+    "./dist/rfc64/catalog-authority-refresh-loop-v1.js": null,
+    "./dist/rfc64/public-catalog-workload-owner-v1.js": null,
     "./dist/rfc64/catalog-rollout-authority-v1.js": null,
     "./dist/rfc64/catalog-responsibility-registry-v1.js": null,
     "./dist/rfc64/release-native-catalog-authority-v1.js": null,
@@ -120,7 +123,7 @@
     "test:rfc64-m0-recovery:unit": "node --test scripts/run-rfc64-m0-recovery-scenario.test.mjs",
     "test:types": "tsc --project tsconfig.type-tests.json",
     "test:package-root": "node scripts/test-package-root.mjs",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs agent",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {

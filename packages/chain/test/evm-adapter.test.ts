@@ -14,11 +14,11 @@ let ctx: HardhatContext;
 
 describe('EVMChainAdapter integration', () => {
   beforeAll(async () => {
-    ctx = await spawnHardhatEnv(8545);
+    ctx = await spawnHardhatEnv();
   }, 60_000);
 
-  afterAll(() => {
-    killHardhat(ctx);
+  afterAll(async () => {
+    await killHardhat(ctx);
   });
 
   it('should connect and resolve V10 contracts from Hub', async () => {

@@ -22,8 +22,8 @@
   ],
   "scripts": {
     "build": "pnpm clean && tsc",
-    "test": "vitest run --passWithNoTests",
-    "test:coverage": "vitest run --coverage --passWithNoTests",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs adapter-openclaw",
     "clean": "node -e \"const fs=require('fs'); for (const p of ['dist','tsconfig.tsbuildinfo']) fs.rmSync(p,{recursive:true,force:true});\""
   },
   "dependencies": {

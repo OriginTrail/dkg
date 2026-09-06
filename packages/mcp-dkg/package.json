@@ -39,7 +39,8 @@
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs mcp-dkg"
   },
   "dependencies": {
     "@origintrail-official/dkg-core": "workspace:*",

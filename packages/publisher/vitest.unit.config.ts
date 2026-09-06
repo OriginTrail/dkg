@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'test/graph-publish-envelope.test.ts',
       'test/ka-update-submit-failure.test.ts',
       'test/ack-peer-selection.test.ts',
       'test/trust-metadata.test.ts',
@@ -51,6 +52,7 @@ export default defineConfig({
       'test/access-verification.test.ts',
       'test/promote-step-tag.test.ts',
       'test/promote-replay-safety.test.ts',
+      'test/promote-operation-intent.test.ts',
       'test/ka-graph-skolemization.test.ts',
       'test/ka-graph-workspace-snapshot.test.ts',
       'test/ka-graph-workspace-receiver.test.ts',

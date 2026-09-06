@@ -22,7 +22,7 @@ import {
   kaVmRecoveryEvidence,
   recoveredResolution,
   stageKnowledgeAssetShareSnapshot,
-} from './ka-vm-publish.js';
+} from '../../../../scripts/testing/ka-vm-publish.js';
 
 export function createReceiptHintHarness() {
   const state = { now: 1_000, ids: 0 };

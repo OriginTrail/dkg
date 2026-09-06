@@ -8,7 +8,7 @@
     "build": "tsc",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs chain",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {

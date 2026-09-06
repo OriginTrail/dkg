@@ -13,6 +13,12 @@ const registeredBinding = (onChainId: bigint) => ({
   provenance: 'numeric-id' as const,
 });
 
+const mockLivePolicy = (agent: DKGAgent, accessPolicy: 0 | 1) =>
+  vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState').mockResolvedValue({
+    kind: 'available',
+    accessPolicy,
+  });
+
 describe('private read authorization uses the on-chain participant roster', () => {
   let agent: DKGAgent | null = null;
 
@@ -32,7 +38,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     vi.spyOn(agent, 'isPrivateContextGraph').mockResolvedValue(true);
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue(registeredBinding(7n));
-    vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(1);
+    mockLivePolicy(agent, 1);
     const chainRoster = vi.spyOn(chain, 'getContextGraphParticipantAgents')
       .mockResolvedValue([MEMBER]);
     const localGate = vi.spyOn(agent, 'getContextGraphAgentGateAddresses')
@@ -59,7 +65,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     vi.spyOn(agent, 'resolveRfc64PrivateReadRosterV1').mockReturnValue(undefined);
     const resolveByNameHash = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
       .mockResolvedValue(7n);
-    vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(1);
+    mockLivePolicy(agent, 1);
     vi.spyOn(chain, 'getContextGraphParticipantAgents').mockResolvedValue([MEMBER]);
     const localPolicy = vi.spyOn(agent, 'isPrivateContextGraph').mockResolvedValue(false);
 
@@ -130,7 +136,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
     vi.spyOn(agent, 'resolveRfc64PrivateReadRosterV1').mockReturnValue(undefined);
     vi.spyOn(chain, 'resolveContextGraphIdByNameHash').mockResolvedValue(8n);
-    vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(0);
+    mockLivePolicy(agent, 0);
     const chainRoster = vi.spyOn(chain, 'getContextGraphParticipantAgents');
     const localPolicy = vi.spyOn(agent, 'isPrivateContextGraph').mockResolvedValue(true);
 
@@ -154,7 +160,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     vi.spyOn(agent, 'isPrivateContextGraph').mockResolvedValue(true);
     vi.spyOn(agent, 'getContextGraphAllowedPeers').mockResolvedValue(null);
     vi.spyOn(agent, 'getContextGraphAgentGateAddresses').mockResolvedValue([MEMBER]);
-    const chainPolicy = vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(0);
+    const chainPolicy = mockLivePolicy(agent, 0);
 
     await expect(agent.resolveContextGraphReadAuthority('42', {
       callerAgentAddress: NON_MEMBER,
@@ -175,7 +181,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue(registeredBinding(8n));
-    vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(0);
+    mockLivePolicy(agent, 0);
     const legacyPeers = vi.spyOn(agent, 'getContextGraphAllowedPeers')
       .mockRejectedValue(new Error('local metadata store unavailable'));
 
@@ -198,7 +204,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue(registeredBinding(7n));
-    vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(1);
+    mockLivePolicy(agent, 1);
     vi.spyOn(chain, 'getContextGraphParticipantAgents').mockResolvedValue([MEMBER]);
     vi.spyOn(agent, 'getContextGraphAllowedPeers')
       .mockResolvedValue(['12D3KooWAnotherAuthorizedPeer']);
@@ -223,7 +229,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue(registeredBinding(7n));
-    vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(1);
+    mockLivePolicy(agent, 1);
     vi.spyOn(chain, 'getContextGraphParticipantAgents').mockResolvedValue([MEMBER]);
     vi.spyOn(agent, 'getContextGraphAllowedPeers')
       .mockRejectedValue(new Error('peer metadata unavailable'));
@@ -247,7 +253,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
     const resolveByNameHash = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
       .mockResolvedValue(9n);
-    vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(1);
+    mockLivePolicy(agent, 1);
     vi.spyOn(chain, 'getContextGraphParticipantAgents').mockResolvedValue([MEMBER]);
     const rfc64Roster = vi.spyOn(agent, 'resolveRfc64PrivateReadRosterV1')
       .mockReturnValue([NON_MEMBER]);
@@ -270,7 +276,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue(registeredBinding(8n));
-    vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(0);
+    mockLivePolicy(agent, 0);
     const chainRoster = vi.spyOn(chain, 'getContextGraphParticipantAgents')
       .mockResolvedValue([NON_MEMBER]);
     vi.spyOn(agent, 'resolveRfc64PrivateReadRosterV1').mockReturnValue(undefined);
@@ -365,7 +371,7 @@ describe('private read authorization uses the on-chain participant roster', () =
       vi.spyOn(agent, 'isPrivateContextGraph').mockResolvedValue(true);
       vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
         .mockResolvedValue(registeredBinding(7n));
-      vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(1);
+      mockLivePolicy(agent, 1);
       vi.spyOn(agent, 'getContextGraphAgentGateAddresses').mockResolvedValue([MEMBER]);
       const chainRoster = vi.spyOn(chain, 'getContextGraphParticipantAgents');
       if (mode === 'empty') chainRoster.mockResolvedValue([]);
@@ -386,7 +392,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue(registeredBinding(7n));
-    vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(1);
+    mockLivePolicy(agent, 1);
     vi.spyOn(chain, 'getContextGraphParticipantAgents')
       .mockReturnValue(new Promise<string[]>(() => undefined));
     vi.useFakeTimers();
@@ -412,7 +418,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue(registeredBinding(7n));
-    vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(1);
+    mockLivePolicy(agent, 1);
     vi.spyOn(chain, 'getContextGraphParticipantAgents')
       .mockReturnValue(new Promise<string[]>(() => undefined));
     const controller = new AbortController();
@@ -503,7 +509,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue(registeredBinding(7n));
-    vi.spyOn(agent, 'readLiveOnChainAccessPolicy').mockResolvedValue(1);
+    mockLivePolicy(agent, 1);
     vi.spyOn(chain, 'getContextGraphParticipantAgents')
       .mockReturnValue(new Promise<string[]>(() => undefined));
     let watchdog: ReturnType<typeof setTimeout> | undefined;

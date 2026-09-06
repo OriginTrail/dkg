@@ -42,6 +42,7 @@ import type {
   UnsignedMemberRosterEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import type {
+  PublisherAssertionPromoteOptions,
   PhaseCallback,
   SharedMemoryPublicSnapshotStorageConfig,
   StorageAckTiming,
@@ -76,6 +77,19 @@ import type {
 import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
 
 // ── File-local structural types ─────────────────────────────────────
+
+/** Public options for the agent assertion-promote facade. */
+export interface AssertionPromoteOptions extends Pick<
+  PublisherAssertionPromoteOptions,
+  'entities' | 'subGraphName' | 'accessPolicy' | 'allowedPeers'
+> {
+  agentAddress?: string;
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: PreSignedAuthorAttestation;
+  awaitCuratorAck?: boolean;
+  curatorAckTimeoutMs?: number;
+  skipSeal?: boolean;
+}
 
 /**
  * Pre-signed AuthorAttestation payload supplied at finalize-time by
