@@ -64,7 +64,13 @@ type AuthorityMarkerStaysInternal =
   import('@origintrail-official/dkg-agent').ContextGraphAuthorityUnavailableMarker;
 type DeepAuthorityStaysInternal =
   // @ts-expect-error The export map blocks authority implementation deep imports.
-  typeof import('@origintrail-official/dkg-agent/dist/internal/promote/context-graph-agent-gate-authority.js');
+  typeof import('@origintrail-official/dkg-agent/dist/context-graph-authority.js');
+type DeepGateResolverStaysInternal =
+  // @ts-expect-error The export map blocks authority implementation deep imports.
+  typeof import('@origintrail-official/dkg-agent/dist/context-graph-agent-gate-authority.js');
+type DeepPolicyResolverStaysInternal =
+  // @ts-expect-error The export map blocks authority implementation deep imports.
+  typeof import('@origintrail-official/dkg-agent/dist/context-graph-access-policy.js');
 
 export type {
   PromoteOptionsMatchFacade,
@@ -83,4 +89,6 @@ export type {
   GateAuthorityResultStaysInternal,
   AuthorityMarkerStaysInternal,
   DeepAuthorityStaysInternal,
+  DeepGateResolverStaysInternal,
+  DeepPolicyResolverStaysInternal,
 };

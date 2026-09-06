@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   resolveLiveOnChainAccessPolicyState,
   type LiveOnChainAccessPolicyDependencies,
-} from '../src/internal/promote/context-graph-access-policy-state.js';
+} from '../src/context-graph-access-policy.js';
 import { ContextGraphAuthorityUnavailableError } from
-  '../src/internal/promote/context-graph-agent-gate-authority.js';
+  '../src/context-graph-authority.js';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
 
@@ -49,8 +49,9 @@ describe('live access policy to registered authority boundary', () => {
         .resolveRegisteredContextGraphAuthority.call(receiver as never, 'cg-1');
       expect(authority).toEqual({ ...state, onChainId: 7n });
       if (authority.kind !== 'unavailable') throw new Error('Expected unavailable authority');
-      expect(new ContextGraphAuthorityUnavailableError('policy unavailable', authority).retryable)
-        .toBe(false);
+      const error = new ContextGraphAuthorityUnavailableError('policy unavailable', authority);
+      expect(error).toMatchObject({ reason: 'chain-access-policy-unknown' });
+      expect('retryable' in error).toBe(false);
       await expect(WorkspaceCryptoMethods.prototype.readLiveOnChainAccessPolicy.call(
         receiver as never, onChainId,
       )).resolves.toBeNull();
@@ -86,8 +87,12 @@ describe('live access policy to registered authority boundary', () => {
         .resolveRegisteredContextGraphAuthority.call(receiver as never, 'cg-1');
       expect(authority).toEqual({ ...state, onChainId: 7n });
       if (authority.kind !== 'unavailable') throw new Error('Expected unavailable authority');
-      expect(new ContextGraphAuthorityUnavailableError('policy unavailable', authority).retryable)
-        .toBe(true);
+      const error = new ContextGraphAuthorityUnavailableError('policy unavailable', authority);
+      expect(error).toMatchObject({
+        reason: 'chain-access-policy-timeout',
+        detail: expect.stringContaining(`${readName}(7) timed out`),
+      });
+      expect('retryable' in error).toBe(false);
       await expect(WorkspaceCryptoMethods.prototype.readLiveOnChainAccessPolicy.call(
         receiver as never, '7',
       )).resolves.toBeNull();
