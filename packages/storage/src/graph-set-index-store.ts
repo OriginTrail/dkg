@@ -1,6 +1,6 @@
 import { performance } from 'node:perf_hooks';
 import {
-  compareCodePoint,
+  codePointLowerBound,
   createSortedUniqueStringCatalog,
   isSparqlUpdateOperation,
   type SortedUniqueStringCatalog,
@@ -605,7 +605,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       return graphs.filter((graph) => graph.startsWith(prefix));
     }
     const matches: string[] = [];
-    for (let index = lowerBound(graphs, prefix); index < graphs.length; index += 1) {
+    for (let index = codePointLowerBound(graphs, prefix); index < graphs.length; index += 1) {
       const graph = graphs[index]!;
       if (!graph.startsWith(prefix)) break;
       matches.push(graph);
@@ -772,13 +772,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         if (generation !== this.mutationGeneration) {
           continue;
         }
-        for (const { graph, present } of graphPresence) {
-          if (present) {
-            this.addGraphs([graph], source);
-          } else {
-            this.removeGraphs([graph], source);
-          }
-        }
+        this.reconcileGraphs(graphPresence, source);
         return;
       } catch {
         this.clearIndex();
@@ -831,17 +825,26 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   private addGraphs(graphs: string[], source: GraphSetMutationSource): void {
-    if (!this.catalog.initialized) return;
-    for (const graph of graphs) {
-      if (!graph || isAtomicGraphReplaceStagingGraph(graph) || !this.catalog.add(graph)) continue;
-      this.emit({ type: 'graph-added', graph, source });
-    }
+    this.reconcileGraphs(graphs.map((graph) => ({ graph, present: true })), source);
   }
 
   private removeGraphs(graphs: string[], source: GraphSetMutationSource): void {
+    this.reconcileGraphs(graphs.map((graph) => ({ graph, present: false })), source);
+  }
+
+  private reconcileGraphs(
+    graphPresence: ReadonlyArray<Readonly<{ graph: string; present: boolean }>>,
+    source: GraphSetMutationSource,
+  ): void {
     if (!this.catalog.initialized) return;
-    for (const graph of graphs) {
-      if (!graph || !this.catalog.remove(graph)) continue;
+    const eligible = graphPresence.filter(
+      ({ graph, present }) => graph && (!present || !isAtomicGraphReplaceStagingGraph(graph)),
+    );
+    const { added, removed } = this.catalog.reconcile(eligible);
+    for (const graph of added) {
+      this.emit({ type: 'graph-added', graph, source });
+    }
+    for (const graph of removed) {
       this.emit({ type: 'graph-removed', graph, source });
     }
   }
@@ -888,17 +891,6 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
 
 function namedGraphsFromQuads(quads: Quad[]): string[] {
   return [...new Set(quads.map((quad) => quad.graph).filter(Boolean))];
-}
-
-function lowerBound(values: readonly string[], target: string): number {
-  let low = 0;
-  let high = values.length;
-  while (low < high) {
-    const middle = low + Math.floor((high - low) / 2);
-    if (compareCodePoint(values[middle]!, target) < 0) low = middle + 1;
-    else high = middle;
-  }
-  return low;
 }
 
 function endsWithHighSurrogate(value: string): boolean {
