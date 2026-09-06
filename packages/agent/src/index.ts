@@ -289,8 +289,13 @@ export type {
   ContextGraphReadAuthorityOutcome,
   ContextGraphReadAuthoritySource,
 } from './context-graph-read-authority.js';
-export type { RegisteredContextGraphAuthority } from
-  './registered-context-graph-authority.js';
+export type {
+  LiveOnChainAccessPolicyUnavailable,
+  LiveOnChainAccessPolicyUnavailableReason,
+  RegisteredContextGraphAuthority,
+  RegisteredContextGraphAuthorityUnavailable,
+  RegisteredContextGraphAuthorityUnavailableReason,
+} from './registered-context-graph-authority.js';
 export type { ContextGraphRegistrationBinding } from './dkg-agent-cg-registry.js';
 export {
   ContextGraphNotFoundError,
