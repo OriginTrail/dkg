@@ -1235,6 +1235,19 @@ export class MockChainAdapter implements ChainAdapter {
     if (publishPolicy !== 0 && publishPolicy !== 1) {
       throw new Error('Mock: invalid publishPolicy');
     }
+    const registrationDepositPolicy = params.registrationDepositPolicy ?? { mode: 'legacy' as const };
+    switch (registrationDepositPolicy.mode) {
+      case 'legacy':
+      case 'paid':
+        break;
+      case 'pca':
+        if (registrationDepositPolicy.accountId <= 0n) {
+          throw new Error('Mock: PCA registration-deposit policy requires a positive accountId');
+        }
+        break;
+      default:
+        throw new Error('Mock: unsupported Context Graph registration-deposit policy');
+    }
     let publishAuthority = params.publishAuthority ?? ethers.ZeroAddress;
     let publishAuthorityAccountId = params.publishAuthorityAccountId ?? 0n;
     if (!ethers.isAddress(publishAuthority)) {

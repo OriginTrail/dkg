@@ -20,6 +20,10 @@ import {
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
+import {
+  resolveContextGraphCreateDispatch,
+  type ContextGraphLegacyCreateArgs,
+} from './context-graph-registration-dispatch.js';
 
 type ContextGraphRegistryScanPlan =
   | {
@@ -454,7 +458,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     }
 
     const contextGraphs = this.contracts.contextGraphs;
-    const createArgs = [
+    const legacyCreateArgs: ContextGraphLegacyCreateArgs = [
       params.participantAgents ?? [],
       params.metadataBatchId ?? 0n,
       params.accessPolicy,
@@ -467,11 +471,15 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       // chain-event-driven host-mode auto-subscribe path.
       params.nameHash ?? ethers.ZeroHash,
     ];
+    const createDispatch = resolveContextGraphCreateDispatch(
+      legacyCreateArgs,
+      params.registrationDepositPolicy,
+    );
     const submitCreate = () =>
       this.sendContractTransaction(
         contextGraphs,
-        'createContextGraph',
-        createArgs,
+        createDispatch.method,
+        createDispatch.args,
         this.signer,
         'create on-chain context graph',
       );
