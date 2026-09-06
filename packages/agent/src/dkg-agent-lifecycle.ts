@@ -5376,6 +5376,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
         continue;
       }
+      // Catalog-authoritative public recovery is owned by the dedicated RFC-64
+      // recovery runtime. Keeping it in this generic planner would let ordinary
+      // on-connect/manual sync duplicate that work without the runtime lease
+      // which fences unsubscribe and configuration changes. Catalog graphs
+      // without an accepted recovery policy still use this planner for the
+      // rootless named-subgraph compatibility lane above.
+      if (!legacyRootSyncAllowed && acceptedRecoveryLane === 'selected-public') {
+        continue;
+      }
       if (
         options.requireCompleteProviderMatch
         && (
