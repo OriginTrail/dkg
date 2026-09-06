@@ -14,7 +14,6 @@ import {
   parseCanonicalContextGraphPolicyPayloadV1,
   parseCanonicalMemberRosterPayloadV1,
   type ChainIdV1,
-  type ContextGraphIdV1,
   type DecimalU256V1,
   type ContextGraphPolicyV1,
   type DecimalU64V1,
@@ -22,7 +21,6 @@ import {
   type EvmAddressV1,
   type KaIdV1,
   type NetworkIdV1,
-  type SubGraphNameV1,
 } from '@origintrail-official/dkg-core';
 import {
   scanFinalizedVmChainInventoryInSnapshotV1,

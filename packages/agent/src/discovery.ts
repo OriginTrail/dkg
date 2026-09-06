@@ -1,11 +1,5 @@
-import type { QueryEngine, QueryResult } from '@origintrail-official/dkg-query';
-import {
-  DKG_ONTOLOGY,
-  escapeSparqlLiteral,
-  assertSafeIri,
-  normalizeAgentDid,
-  sparqlIri,
-} from '@origintrail-official/dkg-core';
+import type { QueryEngine } from '@origintrail-official/dkg-query';
+import { escapeSparqlLiteral, assertSafeIri, normalizeAgentDid, sparqlIri } from '@origintrail-official/dkg-core';
 import { AGENT_REGISTRY_CONTEXT_GRAPH } from './profile.js';
 
 const SKILL = 'https://dkg.origintrail.io/skill#';

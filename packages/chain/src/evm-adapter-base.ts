@@ -12,7 +12,11 @@
  */
 
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
-import { createFilterErrorSilencer, installFilterNotFoundConsoleSuppressor, formatProviderError } from './filter-error-silencer.js';
+import {
+  createFilterErrorSilencer,
+  installFilterNotFoundConsoleSuppressor,
+  formatProviderError,
+} from './filter-error-silencer.js';
 import type { FilterErrorSilencer } from './filter-error-silencer.js';
 import { DEFAULT_APPROVAL_POLICY, buildEvmDeploymentId } from './chain-adapter.js';
 import type {
@@ -28,14 +32,30 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
-import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
+import {
+  errorCode,
+  errorMessage,
+  errorStatus,
+  isTooLowAllowanceError,
+  enrichEvmError,
+  getPcaLogicInterface,
+  HUB_STALE_ERROR_MARKERS,
+  isInsufficientFundsError,
+  InsufficientPublisherFundsError,
+  formatNoFundedPublisherWalletMessage,
+  type PublisherWalletBalance,
+} from './evm-adapter-errors.js';
+import { resolveRpcUrls, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './rpc-failover-client.js';
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
 import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
-import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
+import {
+  computeApprovalAction,
+  effectivePublishAllowance,
+  V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE,
+} from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
@@ -3910,7 +3930,7 @@ export class EVMChainAdapterBase {
         if (logAddr !== storageAddress) continue;
         try {
           const parsed = kas.interface.parseLog({ topics: [...log.topics], data: log.data });
-          if (parsed?.name === 'KnowledgeAssetCreated' || parsed?.name === 'KnowledgeAssetCreated') {
+          if (parsed?.name === 'KnowledgeAssetCreated') {
             kaId = BigInt(parsed.args.id);
             authorAddress = String(parsed.args.author);
             startKAId = kaId;

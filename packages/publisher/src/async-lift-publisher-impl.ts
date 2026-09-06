@@ -15,7 +15,7 @@ import {
   LegacyKnowledgeAssetReadOnlyError,
   createGraphKnowledgeAssetScope,
 } from '@origintrail-official/dkg-core';
-import type { PhaseCallback, PublishResult } from './publisher.js';
+import type { PublishResult } from './publisher.js';
 import { resolveEffectiveAsyncLiftRetryTuning } from './async-lift-retry-tuning.js';
 import {
   LIFT_JOB_STATES,
@@ -31,7 +31,6 @@ import {
   type LiftJobIncluded,
   type LiftJobInclusionMetadata,
   type LiftJobFinalizationInput,
-  type LiftJobRecoveryMetadata,
   type LiftJobRequest,
   type LiftJobState,
   type KnowledgeAssetVmPublishRequest,
@@ -83,7 +82,6 @@ import {
   deriveLiftJobRetryProjection,
   isAutomaticallyRetryableLiftJob,
   isBulkClearableTerminalLiftJob,
-  isClearableTerminalLiftJob,
   isTargetedClearableLiftJob,
   decideChainProofDisposition,
   hasAutomaticRecoveryExit,
@@ -106,7 +104,11 @@ import {
   mapPublishResultToLiftJobSuccess,
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
-import { prepareAsyncPublishPayload, type AsyncPreparedPublishPayload, type LiftResolvedPublishSlice } from './async-lift-publish-options.js';
+import {
+  prepareAsyncPublishPayload,
+  type AsyncPreparedPublishPayload,
+  type LiftResolvedPublishSlice,
+} from './async-lift-publish-options.js';
 import { validateLiftPublishPayload } from './async-lift-validation.js';
 import { computePrivateRootV10 } from './merkle.js';
 import { subtractFinalizedExactQuads } from './async-lift-subtraction.js';
@@ -737,7 +739,6 @@ export class TripleStoreAsyncLiftPublisher
       return jobId;
     });
   }
-
 
   async claimNext(walletId: string): Promise<ActiveLiftJobClaim | null> {
     return await this.claimCoordinator.claimNext(walletId);

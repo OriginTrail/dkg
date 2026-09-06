@@ -1,4 +1,4 @@
-import type { GraphNode, GraphEdge } from './types.js';
+import type { GraphNode } from './types.js';
 import type { GraphModel } from './graph-model.js';
 import type { ColorPalette } from './palette.js';
 import type { TemporalConfig } from './temporal-filter.js';

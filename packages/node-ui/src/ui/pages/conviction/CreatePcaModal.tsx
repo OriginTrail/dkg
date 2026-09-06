@@ -26,7 +26,6 @@ import {
   DeviceConfirmProgress,
   DiscountTierLadder,
   WalletConnectControl,
-  WalletPill,
   WalletRow,
   formatPcaTrac,
   discountTierForTrac,

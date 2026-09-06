@@ -1,5 +1,5 @@
 import type { PeerId } from '@origintrail-official/dkg-core';
-import { contextGraphDataUri, assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
+import { contextGraphDataUri, assertSafeIri } from '@origintrail-official/dkg-core';
 import {
   isStoreSchedulerBusyError,
   quadsToNQuads,

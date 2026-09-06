@@ -1,7 +1,21 @@
 import React, { useMemo, useState, Suspense } from 'react';
-import { api } from '../../../api-wrapper.js';
-import { promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublish, partialPublishWarning, PARTIAL_PUBLISH_STATUS_SUFFIX, type PromoteOutcome, type PublishResult } from '../../../api.js';
-import { useMemoryEntities, canonicalEntityUri, isFirstClassEntity, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
+
+import {
+  promoteAssertion,
+  describePromoteResult,
+  describePromoteError,
+  knowledgeAssetPublish,
+  partialPublishWarning,
+  PARTIAL_PUBLISH_STATUS_SUFFIX,
+  type PromoteOutcome,
+  type PublishResult,
+} from '../../../api.js';
+import {
+  canonicalEntityUri,
+  isFirstClassEntity,
+  type MemoryEntity,
+  type Triple,
+} from '../../../hooks/useMemoryEntities.js';
 import { decodeRdfStringLiteral } from '../../../../rdf-literal.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext, type AgentSummary } from '../../../hooks/useAgents.js';
@@ -10,11 +24,24 @@ import { VerifiedIdentityBanner } from '../../../components/VerifiedIdentityBann
 import { GenUIEntityPanel } from '../../../genui/index.js';
 import { memoryGraphLabels } from '../../../lib/memoryLabels.js';
 import { useLayoutStore } from '../../../stores/layout.js';
-import { TRUST_COLORS, entityAuthorUri, transitionAgentUri, transitionAtISO, shortPred, entityMeta, getDescription, neighborhoodTriples, neutraliseBuiltinNamespaces, layerNoun, filterTriplesToEntities, formatTrailTimestamp, type KAPane } from '../helpers.js';
+import {
+  TRUST_COLORS,
+  entityAuthorUri,
+  transitionAgentUri,
+  transitionAtISO,
+  shortPred,
+  entityMeta,
+  getDescription,
+  neighborhoodTriples,
+  neutraliseBuiltinNamespaces,
+  layerNoun,
+  filterTriplesToEntities,
+  formatTrailTimestamp,
+  type KAPane,
+} from '../helpers.js';
 import { GraphSurface, RdfGraph } from './graph.js';
 
 // ─── KA Detail View (split-pane: content+triples+graph | provenance) ─────
-
 
 // Small sub-graph badge rendered next to cross-references so the user
 // sees "oh, this link takes me to the github sub-graph" before clicking.

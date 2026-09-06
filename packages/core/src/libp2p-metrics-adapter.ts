@@ -283,12 +283,7 @@ export class RelayMetricsAdapter implements Metrics {
     const originalSend = stream.send.bind(stream);
     stream.send = (data: any) => {
       const n = chunkByteLength(data);
-      let result: any;
-      try {
-        result = originalSend(data);
-      } catch (err) {
-        throw err;
-      }
+      const result: any = originalSend(data);
       if (result && typeof result.then === 'function') {
         return result.then((v: boolean) => {
           if (n > 0) this.bytesOut += BigInt(n);

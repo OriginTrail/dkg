@@ -15,7 +15,6 @@ import {
   SWM_SENDER_KEY_PACKAGE_VERSION,
   SWM_SENDER_KEY_SETUP_KEY_AGREEMENT_ALGORITHM,
   computeSwmSenderKeyMessageAAD,
-  computeSwmSenderKeyPackageAAD,
   computeSwmSenderKeyPackageEncryptionAAD,
   computeSwmSenderKeySignaturePayload,
   decodeSwmSenderKeySecret,

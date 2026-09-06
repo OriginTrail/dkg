@@ -1,15 +1,86 @@
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
-import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
+import type { ChainAdapter, OnChainPublishResult, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
 import type { PreBroadcastRecord } from './publisher.js';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
-import { GraphManager, deleteByPatternWithoutCount, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
+import {
+  DKGEvent,
+  Logger,
+  createOperationContext,
+  encodeWorkspacePublishRequest,
+  encodeEncryptedWorkspacePayload,
+  encryptWorkspacePayload,
+  contextGraphDataUri,
+  contextGraphDataGraphUri,
+  contextGraphMetaUri,
+  contextGraphPrivateUri,
+  contextGraphAssertionUri,
+  contextGraphLayerUri,
+  MemoryLayer,
+  assertionLifecycleUri,
+  contextGraphSubGraphUri,
+  contextGraphSubGraphPrivateUri,
+  SYSTEM_CONTEXT_GRAPHS,
+  validateSubGraphName,
+  assertSafeIri,
+  assertSafeRdfTerm,
+  assertQuadLiteralsMutf8Safe,
+  DKG_GOSSIP_MAX_MESSAGE_BYTES,
+  SwmGossipPayloadTooLargeError,
+  STORAGE_ACK_MAX_STAGING_BYTES,
+  type Ed25519Keypair,
+  buildAuthorAttestationTypedData,
+  buildUpdateAuthorAttestationTypedData,
+  TrustLevel,
+  TRUST_LEVEL_PREDICATE,
+  assertNoUserAuthoredTrustLevelQuads,
+  buildTrustLevelQuads,
+  isTrustLevelQuad,
+  isSwmMerkleExcludedQuad,
+  WORKSPACE_OWNER_PREDICATE,
+  DKG_ENTITY,
+  DKG_ROOT_ENTITY_LEGACY,
+  ENTITY_PRED_ALT,
+  parseAssertionSealQuads,
+  ASSERTION_SEAL_PREDICATES,
+  DKG_ONTOLOGY,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  isAllocatableKaAuthorV1,
+  LegacyKnowledgeAssetReadOnlyError,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+} from '@origintrail-official/dkg-core';
+import {
+  GraphManager,
+  deleteByPatternWithoutCount,
+  PrivateContentStore,
+  loadSharedMemoryQuadsForScope,
+  loadSelectedSharedMemoryQuads,
+  resolveSharedMemoryScopeGraphs,
+  tryReplaceGraphAndSubjectAtomically,
+  tryReplaceGraphAtomically,
+} from '@origintrail-official/dkg-storage';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
-import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishLifecycleHooks, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
-import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
+import {
+  MAX_PUBLISH_EPOCHS,
+  type Publisher,
+  type PublishOptions,
+  type PublishLifecycleHooks,
+  type PublishResult,
+  type KAManifestEntry,
+  type PhaseCallback,
+  type V10CoreNodeACK,
+  type V10ACKProviderParams,
+  type V10ACKProviderObject,
+  type LegacyV10ACKProvider,
+} from './publisher.js';
+import {
+  assertNoUserAuthoredKnowledgeAssetSkolemTerms,
+  skolemizeByEntity,
+  skolemizeKnowledgeAssetParts,
+} from './auto-partition.js';
 import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
 import { withKeyedLocks } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
@@ -26,24 +97,25 @@ import {
 import { canonicalPublishPayload } from './canonical-publish-payload.js';
 import {
   assertTrustedCatalogTriplesAreGeneratedFloor,
-  catalogTripleKey,
   generatedPrivateCatalogFloorQuads,
   splitTrustedGeneratedCatalogRootMap,
   trustedCatalogTripleKeySet,
 } from './catalog-trust.js';
-import { partitionCatalogQuads, catalogCommittedLeaves, computeCatalogRoot, contextGraphCatalogUri, isAgentRegistryContextGraph } from '@origintrail-official/dkg-core';
-import { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
+import {
+  partitionCatalogQuads,
+  catalogCommittedLeaves,
+  computeCatalogRoot,
+  contextGraphCatalogUri,
+  isAgentRegistryContextGraph,
+} from '@origintrail-official/dkg-core';
+import { findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 import { skolemize } from './skolemize.js';
 import {
-  computeTripleHashV10 as computeTripleHash,
   computePrivateRootV10 as computePrivateRoot,
   computeFlatKCRootV10 as computeFlatKCRoot,
   computeFlatKCMerkleLeafCountV10,
 } from './merkle.js';
-import {
-  validateCanonicalGraphScopedKnowledgeAssetPayload,
-  validatePublishRequest,
-} from './validation.js';
+import { validateCanonicalGraphScopedKnowledgeAssetPayload, validatePublishRequest } from './validation.js';
 import { isFailClosedInlineEncrypt } from './async-lift-publish-options.js';
 import {
   assertionOriginalGraph,
@@ -66,7 +138,6 @@ import {
   VM_CURRENT_ASSERTION_PRED,
   SHARE_OPERATION_ID_PRED,
   PROMOTE_OPERATION_INTENT_PRED,
-  toHex,
   buildScopedMinimalMeta,
   resolveUalByBatchId,
   promoteUpdatedKaToPerCgId,

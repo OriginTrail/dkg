@@ -31,9 +31,14 @@ import { existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import {
   Quad,
-  DEVGRAPH_NS, RDF_TYPE_IRI, DEFAULT_GRAPH,
-  uri, literal, intLiteral, boolLiteral,
-  moduleUri, packageUri,
+  DEVGRAPH_NS,
+  RDF_TYPE_IRI,
+  DEFAULT_GRAPH,
+  uri,
+  literal,
+  boolLiteral,
+  moduleUri,
+  packageUri,
 } from './indexer.js';
 
 // ---------------------------------------------------------------------------
