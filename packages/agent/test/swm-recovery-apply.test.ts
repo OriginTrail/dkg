@@ -2,9 +2,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   applySwmRecovery,
+  applyVerifiedSwmRecoveryPlan,
   type SwmRecoveryStore,
+  type VerifiedSwmRecoveryApplyPorts,
+  type VerifiedSwmRecoveryApplyPlan,
 } from '../src/sync/requester/swm-recovery-apply.js';
-import { createRecoveryExecutionBoundary } from
+import { createRecoveryExecutionAdmission } from
   '../src/sync/requester/recovery-execution-guard.js';
 
 /**
@@ -125,7 +128,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
         return 1;
       },
     };
-    const executionBoundary = createRecoveryExecutionBoundary({
+    const executionBoundary = createRecoveryExecutionAdmission({
       signal: controller.signal,
       assertCurrent: () => {
         if (!current) throw revoked;
@@ -165,7 +168,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
         return 0;
       },
     };
-    const executionBoundary = createRecoveryExecutionBoundary({
+    const executionBoundary = createRecoveryExecutionAdmission({
       signal: controller.signal,
       assertCurrent: () => { throw revoked; },
     });
@@ -177,5 +180,205 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       executionBoundary,
     })).rejects.toBe(revoked);
     expect(operations).toEqual([]);
+  });
+
+  const PLAN_MUTATIONS = [
+    'ensure-context-graph',
+    'delete-root',
+    'delete-children',
+    'insert-root-data',
+    'replace-graph',
+    'replace-graph-meta',
+    'replace-root-meta',
+    'insert-verified-meta',
+  ] as const;
+
+  it.each(PLAN_MUTATIONS)(
+    'resumes the exact plan after %s commits and then rejects',
+    async (failurePoint) => {
+      const assertionGraph = `${G}/asset`;
+      const metaGraph = `${G}_meta`;
+      const rootData: Quad[] = [
+        { subject: SUBJ, predicate: STATUS, object: '"v2"', graph: G },
+        { subject: CHILD, predicate: VALUE, object: '"new-leg"', graph: G },
+      ];
+      const graphData: Quad[] = [{
+        subject: 'urn:asset', predicate: STATUS, object: '"current"', graph: assertionGraph,
+      }];
+      const verifiedMeta: Quad[] = [{
+        subject: 'urn:head', predicate: STATUS, object: '"current"', graph: metaGraph,
+      }];
+      const descriptor = {
+        metaGraph,
+        headSubject: 'urn:head',
+        operationSubject: 'urn:operation',
+        kaUal: 'did:dkg:ka:retry',
+        assertionVersion: '1',
+        assertionGraph,
+        shareOperationId: 'retry-operation',
+        publicQuadsDigest: `sha256:${'a'.repeat(64)}`,
+        publicQuadsCount: graphData.length,
+        privateTripleCount: 0,
+        publisherPeerId: '12D3KooWRecoveryRetryProvider',
+        metadataQuads: [],
+      };
+      const plan: VerifiedSwmRecoveryApplyPlan = {
+        contextGraphId: 'retry-cg',
+        rootData,
+        roots: [{ dataGraph: G, entity: SUBJ, creator: 'did:example:creator' }],
+        graphAssets: [{ kind: 'replace', descriptor, replacementQuads: graphData }],
+        verifiedMeta,
+        rootMetaGraphs: [metaGraph],
+        ownershipUpdates: [{
+          ownershipKey: 'retry-cg', entity: SUBJ, creator: 'did:example:creator',
+        }],
+      };
+
+      let rows: Quad[] = [
+        { subject: SUBJ, predicate: STATUS, object: '"stale"', graph: G },
+        { subject: CHILD, predicate: VALUE, object: '"stale-leg"', graph: G },
+      ];
+      let graphRows: Quad[] = [{
+        subject: 'urn:asset', predicate: STATUS, object: '"stale"', graph: assertionGraph,
+      }];
+      let contextGraphReady = false;
+      let graphMetaCurrent = false;
+      let rootMetaCurrent = false;
+      let failed = false;
+      const owned = new Map<string, Map<string, string>>();
+      const failAfter = (point: string): void => {
+        if (!failed && point === failurePoint) {
+          failed = true;
+          throw new Error(`post-commit failure: ${point}`);
+        }
+      };
+      const store: SwmRecoveryStore = {
+        insert: async (quads) => {
+          const point = quads.every((quad) => quad.graph === G)
+            ? 'insert-root-data'
+            : 'insert-verified-meta';
+          const existing = new Set(rows.map((quad) => JSON.stringify(quad)));
+          for (const quad of quads) {
+            if (!existing.has(JSON.stringify(quad))) rows.push(quad);
+          }
+          failAfter(point);
+        },
+        replaceGraph: async (_graph, quads) => {
+          graphRows = [...quads];
+          failAfter('replace-graph');
+        },
+        deleteByPattern: async (pattern) => {
+          if (pattern.graph === G && pattern.subject === SUBJ) {
+            rows = rows.filter((quad) => !(
+              quad.graph === pattern.graph && quad.subject === pattern.subject
+            ));
+            failAfter('delete-root');
+          }
+        },
+        deleteBySubjectPrefix: async (graph, prefix) => {
+          rows = rows.filter((quad) => !(
+            quad.graph === graph && quad.subject.startsWith(prefix)
+          ));
+          failAfter('delete-children');
+          return 1;
+        },
+      };
+      const ports: VerifiedSwmRecoveryApplyPorts = {
+        store,
+        ensureContextGraph: async () => {
+          contextGraphReady = true;
+          failAfter('ensure-context-graph');
+        },
+        replaceMetaForRoots: async () => {
+          rootMetaCurrent = true;
+          failAfter('replace-root-meta');
+        },
+        replaceMetaForGraphAssets: async () => {
+          graphMetaCurrent = true;
+          failAfter('replace-graph-meta');
+        },
+        snapshotMaterializer: {} as never,
+        ensureOwnedMap: (key) => {
+          let map = owned.get(key);
+          if (map === undefined) {
+            map = new Map();
+            owned.set(key, map);
+          }
+          return map;
+        },
+      };
+      const executionBoundary = createRecoveryExecutionAdmission();
+
+      await expect(applyVerifiedSwmRecoveryPlan({
+        plan, ports, executionBoundary,
+      })).rejects.toThrow(`post-commit failure: ${failurePoint}`);
+      await expect(applyVerifiedSwmRecoveryPlan({
+        plan, ports, executionBoundary,
+      })).resolves.toEqual({
+        replacedRoots: 1,
+        replacedGraphs: 1,
+        insertedRootQuads: rootData.length,
+        insertedGraphQuads: graphData.length,
+        insertedMetaQuads: verifiedMeta.length,
+      });
+
+      expect(contextGraphReady).toBe(true);
+      expect(graphMetaCurrent).toBe(true);
+      expect(rootMetaCurrent).toBe(true);
+      expect(rows.filter((quad) => quad.graph === G)).toEqual(rootData);
+      expect(rows.filter((quad) => quad.graph === metaGraph)).toEqual(verifiedMeta);
+      expect(graphRows).toEqual(graphData);
+      expect(owned.get('retry-cg')?.get(SUBJ)).toBe('did:example:creator');
+    },
+  );
+
+  it('keeps witness invalidation best-effort after an atomic graph replacement', async () => {
+    const assertionGraph = `${G}/asset`;
+    const graphData: Quad[] = [{
+      subject: 'urn:asset', predicate: STATUS, object: '"current"', graph: assertionGraph,
+    }];
+    let graphRows: Quad[] = [];
+    const ports: VerifiedSwmRecoveryApplyPorts = {
+      store: {
+        insert: async () => undefined,
+        replaceGraph: async (_graph, quads) => { graphRows = [...quads]; },
+        deleteByPattern: async () => { throw new Error('witness backend unavailable'); },
+        deleteBySubjectPrefix: async () => 0,
+      },
+      ensureContextGraph: async () => undefined,
+      replaceMetaForRoots: async () => undefined,
+      replaceMetaForGraphAssets: async () => undefined,
+      snapshotMaterializer: {} as never,
+      ensureOwnedMap: () => new Map(),
+    };
+    const descriptor = {
+      metaGraph: `${G}_meta`,
+      headSubject: 'urn:head',
+      operationSubject: 'urn:operation',
+      kaUal: 'did:dkg:ka:witness',
+      assertionVersion: '1',
+      assertionGraph,
+      shareOperationId: 'witness-operation',
+      publicQuadsDigest: `sha256:${'b'.repeat(64)}`,
+      publicQuadsCount: 1,
+      privateTripleCount: 0,
+      publisherPeerId: '12D3KooWWitnessProvider',
+      metadataQuads: [],
+    };
+
+    await expect(applyVerifiedSwmRecoveryPlan({
+      plan: {
+        contextGraphId: 'witness-cg',
+        rootData: [],
+        roots: [],
+        graphAssets: [{ kind: 'replace', descriptor, replacementQuads: graphData }],
+        verifiedMeta: [],
+        rootMetaGraphs: [],
+        ownershipUpdates: [],
+      },
+      ports,
+      executionBoundary: createRecoveryExecutionAdmission(),
+    })).resolves.toMatchObject({ replacedGraphs: 1, insertedGraphQuads: 1 });
+    expect(graphRows).toEqual(graphData);
   });
 });

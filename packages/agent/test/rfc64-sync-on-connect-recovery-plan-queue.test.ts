@@ -12,7 +12,6 @@ import { Rfc64SwmRecoveryRuntimeV1 } from
   '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 import { resolveRfc64RuntimeCatalogBootstrapConfigV1 } from
   '../src/rfc64/public-catalog-activation-config-v1.js';
-import { SwmTargetExecutorV1 } from '../src/sync/requester/swm-target-executor.js';
 import { SyncOnConnectPeerScheduler } from '../src/sync/on-connect/peer-scheduler.js';
 import {
   allowAllNetworkAdmission,
@@ -182,16 +181,6 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     expect(queueGossip).toHaveBeenCalledTimes(2);
     expect(replay).toHaveBeenCalledOnce();
     expect(startSupervisor).toHaveBeenCalledOnce();
-  });
-
-  it('creates a fresh SWM target executor for each synchronization session', async () => {
-    const agent = await createUnstartedAgent('SwmTargetExecutorComposition');
-
-    const first = agent.createSwmTargetExecutorV1();
-    const second = agent.createSwmTargetExecutorV1();
-
-    expect(first).toBeInstanceOf(SwmTargetExecutorV1);
-    expect(second).not.toBe(first);
   });
 
   it('wires runtime authority into one-way coordinator admission and revalidation', async () => {

@@ -3,36 +3,37 @@
  *
  * RFC-64 owns the concrete authority and revocation policy. Requester
  * algorithms receive only this execution capability and enforce it at their
- * actual await and commit boundaries.
+ * cancellable-read and mutation-admission boundaries.
  */
 export interface RecoveryExecutionGuard {
   readonly signal: AbortSignal;
   assertCurrent(): void;
 }
 
-export interface RecoveryExecutionBoundary {
+export interface RecoveryExecutionAdmission {
   readonly signal: AbortSignal | undefined;
   assertCurrent(): void;
   /** Cancellable/read-only await: authority is checked before and after it. */
   read<T>(operation: () => Promise<T>): Promise<T>;
   /**
-   * One synchronous durability unit. Authority is checked exactly once at
-   * admission; the operation is then allowed to drain without another lease
-   * check being hidden inside this boundary.
+   * Admit one synchronous mutation against current authority, then let it
+   * drain without another lease check. This is not a transaction and provides
+   * no rollback; a multi-step caller must be idempotent and resumable.
    */
-  commitSync<T>(operation: () => T): T;
+  admitSyncMutation<T>(operation: () => T): T;
   /**
-   * One asynchronous durability unit. Authority is checked exactly once at
-   * admission; an admitted promise is never interrupted between its related
-   * mutations.
+   * Admit one asynchronous mutation sequence against current authority, then
+   * let it drain without another lease check. This is not atomic and provides
+   * no rollback; an error may follow earlier durable effects, so callers must
+   * make the sequence safe to retry from any awaited step.
    */
-  commitAsync<T>(operation: () => Promise<T>): Promise<T>;
+  admitAsyncMutation<T>(operation: () => Promise<T>): Promise<T>;
 }
 
-/** Build one owned boundary for a complete requester recovery invocation. */
-export function createRecoveryExecutionBoundary(
+/** Build one authority-admission capability for a requester recovery. */
+export function createRecoveryExecutionAdmission(
   guard?: RecoveryExecutionGuard,
-): RecoveryExecutionBoundary {
+): RecoveryExecutionAdmission {
   const assertCurrent = (): void => guard?.assertCurrent();
   return Object.freeze({
     signal: guard?.signal,
@@ -50,11 +51,11 @@ export function createRecoveryExecutionBoundary(
         throw error;
       }
     },
-    commitSync<T>(operation: () => T): T {
+    admitSyncMutation<T>(operation: () => T): T {
       guard?.assertCurrent();
       return operation();
     },
-    async commitAsync<T>(operation: () => Promise<T>): Promise<T> {
+    async admitAsyncMutation<T>(operation: () => Promise<T>): Promise<T> {
       guard?.assertCurrent();
       return operation();
     },

@@ -23,8 +23,8 @@ import {
 } from '../graph-scoped-swm-recovery.js';
 import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
 import {
-  createRecoveryExecutionBoundary,
-  type RecoveryExecutionBoundary,
+  createRecoveryExecutionAdmission,
+  type RecoveryExecutionAdmission,
   type RecoveryExecutionGuard,
 } from './recovery-execution-guard.js';
 
@@ -530,7 +530,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
   const recoveryGuard = context.mode.kind === 'selected-recovery'
     ? context.mode.recoveryGuard
     : undefined;
-  const recoveryBoundary = createRecoveryExecutionBoundary(recoveryGuard);
+  const recoveryBoundary = createRecoveryExecutionAdmission(recoveryGuard);
   recoveryBoundary.assertCurrent();
   const fetchRecoveryPages = (
     contextGraphId: string,
@@ -599,9 +599,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     if (result.nextOffset > result.resumedFromOffset) {
       summary.checkpointAdvances += 1;
     }
-    if (result.completed) recoveryBoundary.commitSync(() => deleteCheckpoint(result.checkpointKey));
+    if (result.completed) recoveryBoundary.admitSyncMutation(() => deleteCheckpoint(result.checkpointKey));
     else if (result.nextOffset > 0 || result.resumedFromOffset > 0) {
-      recoveryBoundary.commitSync(() => setCheckpoint(result.checkpointKey, result.nextOffset));
+      recoveryBoundary.admitSyncMutation(() => setCheckpoint(result.checkpointKey, result.nextOffset));
     }
   };
 
@@ -809,7 +809,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           && !wsDataResult.timedOut
         ) {
           if (metadataFetcher) {
-            recoveryBoundary.commitSync(() => metadataFetcher.release(pid));
+            recoveryBoundary.admitSyncMutation(() => metadataFetcher.release(pid));
           }
         }
         if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
@@ -1075,7 +1075,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
           if (materializedKeys.has(graphKey)) continue;
           try {
-            await recoveryBoundary.commitAsync(() => snapshotMaterializer.withKaWriteLock(
+            await recoveryBoundary.admitAsyncMutation(() => snapshotMaterializer.withKaWriteLock(
               pid,
               descriptor.subGraphName,
               descriptor.kaUal,
@@ -1228,7 +1228,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             // arrives. Reconcile only after releasing the materialization
             // lock; the production callback reacquires the same per-KA lock
             // and re-verifies current head + both graph digests before delete.
-            await recoveryBoundary.commitAsync(() => snapshotCommit.reconcileAfterMaterialization({
+            await recoveryBoundary.admitAsyncMutation(() => snapshotCommit.reconcileAfterMaterialization({
               contextGraphId: pid,
               descriptor,
               onDeferred: (cause) => logWarn(
@@ -1439,7 +1439,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // up with dangling/missing public snapshot state.
         summary.failedPhases += 1;
         if (validWsQuads.length > 0) {
-          await recoveryBoundary.commitAsync(async () => {
+          await recoveryBoundary.admitAsyncMutation(async () => {
             await ensureContextGraph(pid);
             await storeInsert(validWsQuads);
             // Ownership belongs to the same admitted logical write as the
@@ -1495,7 +1495,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // mutation starts, a selection revocation is deliberately observed only
       // after all three effects drain, preventing a stale invocation from
       // leaving a data-only or metadata-without-ownership state.
-      await recoveryBoundary.commitAsync(async () => {
+      await recoveryBoundary.admitAsyncMutation(async () => {
         await ensureContextGraph(pid);
         if (validWsQuads.length > 0) await storeInsert(validWsQuads);
         if (metaForBulkInsert.length > 0) await storeInsert(metaForBulkInsert);
@@ -1511,7 +1511,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       recordPhaseOutcome(wsMetaResult);
       recordPhaseOutcome(wsDataResult);
       if (metadataFetcher) {
-        recoveryBoundary.commitSync(() => metadataFetcher.release(pid));
+        recoveryBoundary.admitSyncMutation(() => metadataFetcher.release(pid));
       }
       if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
         break;
@@ -1624,7 +1624,7 @@ export async function syncPublicSnapshotsForMeta(params: {
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
   /** Shared with the owning requester invocation so every effect uses one guard. */
-  executionBoundary?: RecoveryExecutionBoundary;
+  executionBoundary?: RecoveryExecutionAdmission;
   /**
    * Optional recovery hook invoked only after the complete immutable snapshot
    * has passed its signed digest/count check. Callers may make that one KA
@@ -1661,7 +1661,7 @@ export async function syncPublicSnapshotsForMeta(params: {
   yieldedAtDeadline: boolean;
 }> {
   const executionBoundary = params.executionBoundary
-    ?? createRecoveryExecutionBoundary();
+    ?? createRecoveryExecutionAdmission();
   executionBoundary.assertCurrent();
   const manifestSnapshots = params.snapshotWalk
     ? []
@@ -1792,7 +1792,7 @@ export async function syncPublicSnapshotsForMeta(params: {
       resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
       timedOutPhases += result.timedOut ? 1 : 0;
       if (result.completed) {
-        executionBoundary.commitSync(() => params.deleteCheckpoint(result.checkpointKey));
+        executionBoundary.admitSyncMutation(() => params.deleteCheckpoint(result.checkpointKey));
       }
       else {
         // `fetchSyncPages` returns only the quads fetched during THIS call. We do
@@ -1802,7 +1802,7 @@ export async function syncPublicSnapshotsForMeta(params: {
         // already completed snapshots remain cached and are skipped, preserving
         // monotonic recovery progress across the CG without accepting a partial
         // asset.
-        executionBoundary.commitSync(() => params.deleteCheckpoint(result.checkpointKey));
+        executionBoundary.admitSyncMutation(() => params.deleteCheckpoint(result.checkpointKey));
         abandonFrom(index);
         break;
       }
@@ -1824,7 +1824,7 @@ export async function syncPublicSnapshotsForMeta(params: {
         // repeat-pass design to a fixed point at zero progress. Skipping costs
         // this KA and nothing else — it stays uncached and unapplied, and is
         // retried from offset zero next pass.
-        executionBoundary.commitSync(() => params.deleteCheckpoint(result.checkpointKey));
+        executionBoundary.admitSyncMutation(() => params.deleteCheckpoint(result.checkpointKey));
         noteMissing(snapshot.ref);
         continue;
       }
@@ -1835,7 +1835,7 @@ export async function syncPublicSnapshotsForMeta(params: {
           `(expected ${snapshot.digest}/${snapshot.count}, got ${actualDigest}/${snapshotQuads.length})`,
         );
       }
-      await executionBoundary.commitAsync(() => params.publicSnapshotStore!.putSnapshot({
+      await executionBoundary.admitAsyncMutation(() => params.publicSnapshotStore!.putSnapshot({
         digest: snapshot.digest,
         quads: snapshotQuads,
       }));

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 const compositionMocks = vi.hoisted(() => ({
-  capturedPorts: undefined as unknown,
+  capturedPorts: [] as unknown[],
   createContextGraphSyncDeadline: vi.fn(() => 12_345),
   deleteSyncPageCheckpoint: vi.fn(),
 }));
@@ -17,18 +17,18 @@ vi.mock('../src/sync/requester/page-fetch.js', () => ({
 vi.mock('../src/sync/requester/swm-target-executor.js', () => ({
   SwmTargetExecutorV1: class {
     constructor(ports: unknown) {
-      compositionMocks.capturedPorts = ports;
+      compositionMocks.capturedPorts.push(ports);
     }
   },
 }));
 
-import { SwmTargetExecutorCompositionMethods } from
+import { createSwmTargetExecutorSessionV1 } from
   '../src/dkg-agent-swm-target-executor.js';
 import type { SwmTargetExecutorPortsV1 } from
   '../src/sync/requester/swm-target-executor.js';
 
-describe('DKGAgent SWM target executor composition', () => {
-  it('binds every narrow requester port and keeps ownership maps session-safe', async () => {
+describe('internal DKGAgent SWM target executor service', () => {
+  it('binds stable narrow ports while returning an isolated executor per session', async () => {
     const listSubGraphs = vi.fn(async () => [{ name: 'named' }]);
     const fetchSyncPages = vi.fn(async () => ({ completed: true }));
     const processSharedMemoryBatch = vi.fn(async () => ({ verifiedData: [] }));
@@ -57,10 +57,13 @@ describe('DKGAgent SWM target executor composition', () => {
       log: { info: logInfo, warn: logWarn, debug: logDebug },
     };
 
-    SwmTargetExecutorCompositionMethods.prototype.createSwmTargetExecutorV1.call(
-      agentLike as never,
-    );
-    const ports = compositionMocks.capturedPorts as SwmTargetExecutorPortsV1;
+    const first = createSwmTargetExecutorSessionV1(agentLike as never);
+    const second = createSwmTargetExecutorSessionV1(agentLike as never);
+    const [ports, secondPorts] = compositionMocks.capturedPorts as
+      SwmTargetExecutorPortsV1[];
+
+    expect(second).not.toBe(first);
+    expect(secondPorts).toBe(ports);
 
     expect(ports.store).toBe(agentLike.store);
     expect(ports.writeLocks).toBe(agentLike.writeLocks);

@@ -29,8 +29,8 @@ import {
 } from '../graph-scoped-swm-recovery.js';
 import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
 import {
-  createRecoveryExecutionBoundary,
-  type RecoveryExecutionBoundary,
+  createRecoveryExecutionAdmission,
+  type RecoveryExecutionAdmission,
   type RecoveryExecutionGuard,
 } from './recovery-execution-guard.js';
 import {
@@ -104,7 +104,7 @@ export interface RecoverContextGraphSwmDeps {
   ) => Promise<ProcessedSwmBatch>;
   /**
    * Agent-owned lock domain shared by every authoritative recovery caller.
-   * One complete provider transaction for a Context Graph must finish before
+   * One complete provider recovery sequence for a Context Graph must finish before
    * another provider can fetch/apply a competing head for that same graph.
    */
   readonly writeLocks: Map<string, Promise<void>>;
@@ -242,7 +242,7 @@ const DEFAULT_MAX_PAGES_PER_PHASE = 1000;
 
 async function fetchPhaseFully(
   deps: RecoverContextGraphSwmDeps,
-  boundary: RecoveryExecutionBoundary,
+  boundary: RecoveryExecutionAdmission,
   phase: RecoverableSyncPhase,
   graphUri: string,
 ): Promise<{ quads: Quad[]; completed: boolean }> {
@@ -263,12 +263,12 @@ async function fetchPhaseFully(
     appendInPlace(all, page.quads);
     lastCheckpointKey = page.checkpointKey;
     if (page.completed) {
-      boundary.commitSync(() => deps.deleteCheckpoint(page.checkpointKey));
+      boundary.admitSyncMutation(() => deps.deleteCheckpoint(page.checkpointKey));
       return { quads: all, completed: true };
     }
     // Not completed (deadline or partial). Stop if no forward progress.
     if (page.nextOffset <= page.resumedFromOffset) break;
-    boundary.commitSync(() => deps.setCheckpoint(page.checkpointKey, page.nextOffset));
+    boundary.admitSyncMutation(() => deps.setCheckpoint(page.checkpointKey, page.nextOffset));
   }
   // Incomplete: the accumulated `all` is a prefix that the caller MUST NOT
   // apply (a tail root may be truncated mid-stream). `all` is local to this
@@ -277,7 +277,7 @@ async function fetchPhaseFully(
   // offset 0 (which makes the responder re-read from the start of its row
   // list) and rebuild the COMPLETE state before the apply gate can pass.
   if (lastCheckpointKey !== undefined) {
-    boundary.commitSync(() => deps.deleteCheckpoint(lastCheckpointKey!));
+    boundary.admitSyncMutation(() => deps.deleteCheckpoint(lastCheckpointKey!));
   }
   return { quads: all, completed: false };
 }
@@ -285,7 +285,7 @@ async function fetchPhaseFully(
 export async function recoverContextGraphSwm(
   deps: RecoverContextGraphSwmDeps,
 ): Promise<RecoverContextGraphSwmResult> {
-  const boundary = createRecoveryExecutionBoundary(deps.recoveryGuard);
+  const boundary = createRecoveryExecutionAdmission(deps.recoveryGuard);
   boundary.assertCurrent();
   return withKeyedLocks(
     deps.writeLocks,
@@ -297,7 +297,7 @@ export async function recoverContextGraphSwm(
 /**
  * Recovery-level lock key. Per-KA materialization keeps using the canonical
  * publisher lock, while this coarser key elects exactly one authoritative
- * provider transaction for a Context Graph at a time.
+ * provider recovery sequence for a Context Graph at a time.
  */
 export function contextGraphSwmRecoveryWriteLockKey(contextGraphId: string): string {
   return `${contextGraphId}\u0000swm-recovery`;
@@ -305,7 +305,7 @@ export function contextGraphSwmRecoveryWriteLockKey(contextGraphId: string): str
 
 async function recoverContextGraphSwmUnlocked(
   deps: RecoverContextGraphSwmDeps,
-  boundary: RecoveryExecutionBoundary,
+  boundary: RecoveryExecutionAdmission,
 ): Promise<RecoverContextGraphSwmResult> {
   boundary.assertCurrent();
   const wsGraph = contextGraphWorkspaceGraphUri(deps.contextGraphId);
@@ -414,10 +414,10 @@ async function recoverContextGraphSwmUnlocked(
         fetchedDataQuads: [],
         publicSnapshotStore: deps.publicSnapshotStore,
       }));
-      // One graph+metadata durability unit. A lease revoked before admission
-      // prevents every mutation; one revoked after replacement starts cannot
-      // interrupt the related witness/meta writes and strand a torn asset.
-      await boundary.commitAsync(async () => {
+      // Admit the retry-safe graph+metadata sequence once. A lease revoked
+      // before admission prevents every mutation; one revoked after graph
+      // replacement starts cannot interrupt the related witness/meta writes.
+      await boundary.admitAsyncMutation(async () => {
         if (!contextGraphEnsured) {
           await deps.ensureContextGraph(deps.contextGraphId);
           contextGraphEnsured = true;
@@ -611,7 +611,7 @@ async function recoverContextGraphSwmUnlocked(
       ensureOwnedMap: deps.ensureOwnedMap,
     },
   });
-  // The admitted durability unit must drain after revocation, but a stale
+  // The admitted mutation sequence must drain after revocation, but a stale
   // invocation must never be accounted as a completed recovery target.
   boundary.assertCurrent();
 

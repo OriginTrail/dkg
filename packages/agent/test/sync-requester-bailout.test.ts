@@ -16,8 +16,6 @@ import { SyncBackpressureBusyError } from '../src/sync/backpressure.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
-import { SwmTargetExecutorCompositionMethods } from
-  '../src/dkg-agent-swm-target-executor.js';
 
 const ctx = { kind: 'system', id: 'test', startedAt: 0 } as OperationContext;
 const noop = () => {};
@@ -547,8 +545,6 @@ describe('lifecycle shared-memory fanout isolation', () => {
       // selected scope.
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
       resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
-      createSwmTargetExecutorV1:
-        SwmTargetExecutorCompositionMethods.prototype.createSwmTargetExecutorV1,
       syncSharedMemoryFromPeerDetailedExecution:
         LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     };

@@ -7,7 +7,7 @@ import {
   canonicalizeGraphScopedSwmHeadRows,
   type GraphScopedSwmRecoveryDescriptor,
 } from '../graph-scoped-swm-recovery.js';
-import type { RecoveryExecutionBoundary } from './recovery-execution-guard.js';
+import type { RecoveryExecutionAdmission } from './recovery-execution-guard.js';
 import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
 
 /**
@@ -79,7 +79,7 @@ export interface VerifiedSwmRecoveryOwnershipUpdate {
   readonly creator: string;
 }
 
-/** Immutable, fully verified inputs for one complete recovery durability unit. */
+/** Immutable, fully verified inputs for one complete, retryable recovery apply. */
 export interface VerifiedSwmRecoveryApplyPlan {
   readonly contextGraphId: string;
   readonly rootData: readonly Quad[];
@@ -122,7 +122,10 @@ const SKOLEM_CHILD_INFIX = '/.well-known/genid/';
 
 /**
  * Replace-apply the verified current state of a CG's `_shared_memory` from an
- * authoritative source. `verifiedData` is the FULL fetched state (all pages,
+ * authoritative source. The delete/delete/insert sequence is intentionally
+ * convergent rather than transactional: a rejected store call may leave an
+ * earlier effect durable, and retrying the same verified input completes the
+ * replacement safely. `verifiedData` is the FULL fetched state (all pages,
  * already verified + subject-validated upstream, so every subject is a listed
  * root or a skolemized child of one). `roots` is the set of root entities the
  * source provided (the sync verifier's `entityCreators`).
@@ -131,7 +134,7 @@ export async function applySwmRecovery(params: {
   readonly store: SwmRecoveryStore;
   readonly verifiedData: readonly Quad[];
   readonly roots: readonly SwmRecoveryRoot[];
-  readonly executionBoundary?: RecoveryExecutionBoundary;
+  readonly executionBoundary?: RecoveryExecutionAdmission;
 }): Promise<SwmRecoveryApplyResult> {
   const apply = async (): Promise<SwmRecoveryApplyResult> => {
     // Clear each (graph, root) exactly once — root rows + its skolemized children.
@@ -157,10 +160,10 @@ export async function applySwmRecovery(params: {
     return { replacedRoots: cleared.size, insertedQuads: params.verifiedData.length };
   };
 
-  // One per-recovery durability unit. If authority is revoked before this
-  // point nothing mutates; if it is revoked after the first delete, the whole
-  // root set still reaches its insert instead of being stranded half-applied.
-  return params.executionBoundary?.commitAsync(apply) ?? apply();
+  // Authority is checked once before the sequence starts. Revocation after
+  // admission does not interrupt it, but a store failure can leave a partial
+  // replacement; the delete/delete/insert sequence above is safe to retry.
+  return params.executionBoundary?.admitAsyncMutation(apply) ?? apply();
 }
 
 function quadKey(quad: Quad): string {
@@ -217,17 +220,25 @@ export async function applyVerifiedSwmRecoveryGraphAsset(params: Readonly<{
 }
 
 /**
- * Own the complete verified recovery write transaction. Fetching,
- * verification and plan construction happen upstream; every related root,
- * graph, metadata and ownership mutation is admitted exactly once here.
+ * Apply one fully verified recovery plan as a sequence of independently
+ * durable, convergent steps. This is not a storage transaction: if a backend
+ * rejects after committing a mutation, earlier effects are not rolled back.
+ * Replaying the exact immutable plan resumes safely because context creation,
+ * root/graph/meta replacement, RDF insertion and ownership initialization are
+ * idempotent for the same verified input.
+ *
+ * Authority is checked exactly once before the sequence begins. Once admitted,
+ * it drains without further lease checks so revocation cannot deliberately
+ * strand a root between delete and insert; backend failures are recovered by
+ * retrying the same plan.
  */
 export async function applyVerifiedSwmRecoveryPlan(params: Readonly<{
   plan: VerifiedSwmRecoveryApplyPlan;
   ports: VerifiedSwmRecoveryApplyPorts;
-  executionBoundary: RecoveryExecutionBoundary;
+  executionBoundary: RecoveryExecutionAdmission;
 }>): Promise<VerifiedSwmRecoveryApplyResult> {
   const { plan, ports } = params;
-  return params.executionBoundary.commitAsync(async () => {
+  return params.executionBoundary.admitAsyncMutation(async () => {
     await ports.ensureContextGraph(plan.contextGraphId);
 
     const roots = await applySwmRecovery({

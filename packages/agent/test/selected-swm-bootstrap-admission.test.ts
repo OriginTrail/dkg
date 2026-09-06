@@ -77,7 +77,9 @@ describe('SelectedSwmBootstrapAdmission', () => {
       phase: 'terminal',
     });
     expect(admission.markTransferTerminal(staleOwner, 2_000)).toBe(false);
-    expect(admission.requestRefresh(PEER, ['cg-a', 'cg-b'], 10_000, 2_001)).toBe(true);
+    expect(admission.requestRefresh(PEER, ['cg-b'], 10_000, 10_999)).toBe(false);
+    expect(admission.requestRefresh(PEER, ['cg-b'], 10_000, 11_000)).toBe(true);
+    expect(admission.requestRefresh(PEER, ['cg-a', 'cg-b'], 10_000, 11_001)).toBe(true);
     expect(admission.snapshot(PEER)).toEqual({
       contextGraphIds: ['cg-a', 'cg-b'],
       phase: 'retry-required',

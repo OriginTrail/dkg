@@ -14,8 +14,6 @@ import {
 } from '../src/sync/backpressure.js';
 import { syncPriorityClass } from '../src/sync/policy.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
-import { SwmTargetExecutorCompositionMethods } from
-  '../src/dkg-agent-swm-target-executor.js';
 
 const ctx = createOperationContext('sync');
 const noop = () => {};
@@ -286,8 +284,6 @@ describe('requester per-CG priority admission', () => {
       },
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
       resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
-      createSwmTargetExecutorV1:
-        SwmTargetExecutorCompositionMethods.prototype.createSwmTargetExecutorV1,
       syncSharedMemoryFromPeerDetailedExecution:
         LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     };
@@ -330,8 +326,6 @@ describe('requester per-CG priority admission', () => {
       workspaceOwnedEntities: new Map(),
       log: { info: noop, warn: noop, debug: noop },
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
-      createSwmTargetExecutorV1:
-        SwmTargetExecutorCompositionMethods.prototype.createSwmTargetExecutorV1,
       syncSharedMemoryFromPeerDetailedExecution:
         LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     };

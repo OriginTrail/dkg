@@ -10,6 +10,8 @@
 
 import { createHash } from 'node:crypto';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
+import { createSwmTargetExecutorSessionV1 } from
+  './dkg-agent-swm-target-executor.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -7479,7 +7481,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.log.warn(ctx, `Skipping shared-memory sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
       return execution(emptySharedMemorySyncResult());
     }
-    const recoveryExecutor = this.createSwmTargetExecutorV1();
+    const recoveryExecutor = createSwmTargetExecutorSessionV1(this);
     const recoverPrivateContextGraph = (
       contextGraphId: string,
       recoveryLease?: Rfc64SwmRecoveryTargetLeaseV1,
@@ -7925,7 +7927,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphId,
       'swm_recovery',
       `swm-recovery:${contextGraphId}:${remotePeerId.slice(-8)}`,
-      () => this.createSwmTargetExecutorV1()
+      () => createSwmTargetExecutorSessionV1(this)
         .recoverPrivateTarget({
           remotePeerId,
           contextGraphId,

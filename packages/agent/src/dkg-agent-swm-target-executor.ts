@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-/** Composition-root wiring for graph-complete SWM target execution sessions. */
+/** Internal composition-root wiring for graph-complete SWM execution sessions. */
 
-import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import { createContextGraphSyncDeadline } from
   './sync/requester/durable-sync-budget.js';
@@ -10,16 +9,40 @@ import { deleteSyncPageCheckpoint } from './sync/requester/page-fetch.js';
 import { SwmTargetExecutorV1 } from
   './sync/requester/swm-target-executor.js';
 
-/**
- * Build one execution-scoped requester. A fresh instance deliberately gives
- * each multi-target synchronization its own subgraph-admission cache.
- */
-export class SwmTargetExecutorCompositionMethods extends DKGAgentBase {
-  createSwmTargetExecutorV1(this: DKGAgent): SwmTargetExecutorV1 {
-    return new SwmTargetExecutorV1({
-      store: this.store,
-      writeLocks: this.writeLocks,
-      listSubGraphs: (contextGraphId) => this.listSubGraphs(contextGraphId),
+type SwmTargetExecutorPortsV1 = ConstructorParameters<typeof SwmTargetExecutorV1>[0];
+
+/** Runtime-owned state intentionally kept off the public DKGAgent type. */
+interface SwmTargetExecutorAgentRuntimeV1 {
+  readonly writeLocks: SwmTargetExecutorPortsV1['writeLocks'];
+  readonly publicSnapshotStore: SwmTargetExecutorPortsV1['publicSnapshotStore'];
+  readonly oversizeTombstoneLog: {
+    record: SwmTargetExecutorPortsV1['recordDrops'];
+  };
+  readonly contextGraphMetaProjection: {
+    markDirtyFromQuads: SwmTargetExecutorPortsV1['markMetaProjectionDirty'];
+  };
+  readonly syncCheckpoints: Parameters<typeof deleteSyncPageCheckpoint>[0];
+  readonly workspaceOwnedEntities: Map<
+    string,
+    ReturnType<SwmTargetExecutorPortsV1['ensureOwnedMap']>
+  >;
+  readonly log: {
+    info: SwmTargetExecutorPortsV1['logInfo'];
+    warn: SwmTargetExecutorPortsV1['logWarn'];
+    debug: SwmTargetExecutorPortsV1['logDebug'];
+  };
+  invalidateListContextGraphsCache(): void;
+}
+
+class SwmTargetExecutorServiceV1 {
+  readonly #ports: SwmTargetExecutorPortsV1;
+
+  constructor(agent: DKGAgent) {
+    const runtime = agent as unknown as SwmTargetExecutorAgentRuntimeV1;
+    this.#ports = {
+      store: agent.store,
+      writeLocks: runtime.writeLocks,
+      listSubGraphs: (contextGraphId) => agent.listSubGraphs(contextGraphId),
       createContextGraphSyncDeadline: (remainingContextGraphs) => (
         createContextGraphSyncDeadline({ remainingContextGraphs })
       ),
@@ -32,7 +55,7 @@ export class SwmTargetExecutorCompositionMethods extends DKGAgentBase {
         graphUri,
         deadline,
         options,
-      ) => this.fetchSyncPages(
+      ) => agent.fetchSyncPages(
         ctx,
         peerId,
         contextGraphId,
@@ -43,7 +66,7 @@ export class SwmTargetExecutorCompositionMethods extends DKGAgentBase {
         options,
       ),
       processSharedMemoryBatch: (data, meta, contextGraphId, registered, excluded) => (
-        this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(
+        agent.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(
           data,
           meta,
           contextGraphId,
@@ -51,27 +74,50 @@ export class SwmTargetExecutorCompositionMethods extends DKGAgentBase {
           excluded,
         )
       ),
-      publicSnapshotStore: this.publicSnapshotStore,
-      recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
-      invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
-      markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection.markDirtyFromQuads(quads),
-      setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
-      deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
-      deletePublicCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
+      publicSnapshotStore: runtime.publicSnapshotStore,
+      recordDrops: (drops, seam) => runtime.oversizeTombstoneLog.record(drops, seam),
+      invalidateListContextGraphsCache: () => runtime.invalidateListContextGraphsCache(),
+      markMetaProjectionDirty: (quads) => runtime.contextGraphMetaProjection
+        .markDirtyFromQuads(quads),
+      setCheckpoint: (key, offset) => runtime.syncCheckpoints.set(key, offset),
+      deleteCheckpoint: (key) => runtime.syncCheckpoints.delete(key),
+      deletePublicCheckpoint: (key) => deleteSyncPageCheckpoint(runtime.syncCheckpoints, key),
       ensureOwnedMap: (ownershipKey) => {
-        let owned = this.workspaceOwnedEntities.get(ownershipKey);
+        let owned = runtime.workspaceOwnedEntities.get(ownershipKey);
         if (owned === undefined) {
           owned = new Map();
-          this.workspaceOwnedEntities.set(ownershipKey, owned);
+          runtime.workspaceOwnedEntities.set(ownershipKey, owned);
         }
         return owned;
       },
       retireFinalizedSwmTwin: (candidate, ctx) => (
-        this.retireFinalizedSwmTwinCandidate(candidate, ctx)
+        agent.retireFinalizedSwmTwinCandidate(candidate, ctx)
       ),
-      logInfo: (ctx, message) => this.log.info(ctx, message),
-      logWarn: (ctx, message) => this.log.warn(ctx, message),
-      logDebug: (ctx, message) => this.log.debug(ctx, message),
-    });
+      logInfo: (ctx, message) => runtime.log.info(ctx, message),
+      logWarn: (ctx, message) => runtime.log.warn(ctx, message),
+      logDebug: (ctx, message) => runtime.log.debug(ctx, message),
+    };
   }
+
+  /** A fresh executor keeps mutable subgraph admission scoped to one sync. */
+  createSession(): SwmTargetExecutorV1 {
+    return new SwmTargetExecutorV1(this.#ports);
+  }
+}
+
+const services = new WeakMap<object, SwmTargetExecutorServiceV1>();
+
+/**
+ * Return an execution-scoped requester from the agent's internal stable-port
+ * service. This is deliberately not mixed into the public `DKGAgent` API.
+ */
+export function createSwmTargetExecutorSessionV1(
+  agent: DKGAgent,
+): SwmTargetExecutorV1 {
+  let service = services.get(agent);
+  if (service === undefined) {
+    service = new SwmTargetExecutorServiceV1(agent);
+    services.set(agent, service);
+  }
+  return service.createSession();
 }
