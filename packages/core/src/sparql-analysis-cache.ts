@@ -1,7 +1,7 @@
 import { BoundedLruCache } from './bounded-lru-cache.js';
 
-export type SparqlAnalysisCacheAdmission = Readonly<{
-  /** The caller proved the large source is complete enough to retain. */
+/** Cohesive analyzer result retained by the cache and inspected for admission. */
+export type SparqlAnalysisCacheEntry = Readonly<{
   largeCacheable: boolean;
 }>;
 
@@ -12,7 +12,7 @@ const LARGE_MAX_SOURCE_LENGTH = 2 * 1024 * 1024;
 
 type CacheTier = 'small' | 'large';
 
-function createTiers<Value>() {
+function createTiers<Value extends SparqlAnalysisCacheEntry>() {
   return {
     small: new BoundedLruCache<string, Value>(
       SMALL_MAX_ENTRIES,
@@ -20,14 +20,15 @@ function createTiers<Value>() {
     ),
     large: new BoundedLruCache<string, Value>(
       LARGE_MAX_ENTRIES,
-      (source) => source.length > SMALL_MAX_SOURCE_LENGTH
-        && source.length <= LARGE_MAX_SOURCE_LENGTH,
+      (source, value) => source.length > SMALL_MAX_SOURCE_LENGTH
+        && source.length <= LARGE_MAX_SOURCE_LENGTH
+        && value.largeCacheable,
     ),
   };
 }
 
 /** Package-internal cache boundary; intentionally not re-exported by core's root. */
-export class SparqlAnalysisCache<Value> {
+export class SparqlAnalysisCache<Value extends SparqlAnalysisCacheEntry> {
   private readonly tiers = createTiers<Value>();
 
   private tierFor(source: string): CacheTier {
@@ -38,13 +39,7 @@ export class SparqlAnalysisCache<Value> {
     return this.tiers[this.tierFor(source)].get(source);
   }
 
-  set(
-    source: string,
-    value: Value,
-    admission: SparqlAnalysisCacheAdmission,
-  ): void {
-    const tier = this.tierFor(source);
-    if (tier === 'large' && !admission.largeCacheable) return;
-    this.tiers[tier].set(source, value);
+  set(source: string, value: Value): void {
+    this.tiers[this.tierFor(source)].set(source, value);
   }
 }
