@@ -11,7 +11,7 @@ vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
 });
 
 describe('GraphSetCatalogState', () => {
-  it('maintains an existing immutable sorted projection across point mutations', () => {
+  it('maintains an existing immutable sorted projection across singleton reconciliations', () => {
     const createSortedCatalog = vi.mocked(createSortedUniqueStringCatalog);
     createSortedCatalog.mockClear();
     const state = new GraphSetCatalogState();
@@ -22,9 +22,18 @@ describe('GraphSetCatalogState', () => {
     expect(initial).toEqual(['urn:b', 'urn:d']);
     expect(Object.isFrozen(initial)).toBe(true);
 
-    expect(state.add('urn:c')).toBe(true);
-    expect(state.add('urn:a')).toBe(true);
-    expect(state.remove('urn:d')).toBe(true);
+    expect(state.reconcile([{ graph: 'urn:c', present: true }])).toEqual({
+      added: ['urn:c'],
+      removed: [],
+    });
+    expect(state.reconcile([{ graph: 'urn:a', present: true }])).toEqual({
+      added: ['urn:a'],
+      removed: [],
+    });
+    expect(state.reconcile([{ graph: 'urn:d', present: false }])).toEqual({
+      added: [],
+      removed: ['urn:d'],
+    });
     const updated = state.sortedFor(members)!;
 
     expect(updated).toEqual(['urn:a', 'urn:b', 'urn:c']);
@@ -39,9 +48,15 @@ describe('GraphSetCatalogState', () => {
     const members = state.current!;
     expect(state.sortedFor(members)).toEqual(['urn:a', 'urn:\u{10000}']);
 
-    state.add('urn:\uE000');
+    expect(state.reconcile([{ graph: 'urn:\uE000', present: true }])).toEqual({
+      added: ['urn:\uE000'],
+      removed: [],
+    });
     expect(state.sortedFor(members)).toEqual(['urn:a', 'urn:\uE000', 'urn:\u{10000}']);
-    state.remove('urn:\uE000');
+    expect(state.reconcile([{ graph: 'urn:\uE000', present: false }])).toEqual({
+      added: [],
+      removed: ['urn:\uE000'],
+    });
     expect(state.sortedFor(members)).toEqual(['urn:a', 'urn:\u{10000}']);
   });
 
@@ -51,8 +66,14 @@ describe('GraphSetCatalogState', () => {
     const members = state.current!;
     const initial = state.sortedFor(members);
 
-    expect(state.add('urn:a')).toBe(false);
-    expect(state.remove('urn:missing')).toBe(false);
+    expect(state.reconcile([{ graph: 'urn:a', present: true }])).toEqual({
+      added: [],
+      removed: [],
+    });
+    expect(state.reconcile([{ graph: 'urn:missing', present: false }])).toEqual({
+      added: [],
+      removed: [],
+    });
     expect(state.sortedFor(members)).toBe(initial);
   });
 

@@ -40,14 +40,6 @@ export class GraphSetCatalogState {
     return { added, removed };
   }
 
-  add(graph: string): boolean {
-    return this.reconcile([{ graph, present: true }]).added.length === 1;
-  }
-
-  remove(graph: string): boolean {
-    return this.reconcile([{ graph, present: false }]).removed.length === 1;
-  }
-
   /** Apply one mixed presence reconciliation with at most one projection rebuild. */
   reconcile(
     graphPresence: Iterable<Readonly<{ graph: string; present: boolean }>>,
