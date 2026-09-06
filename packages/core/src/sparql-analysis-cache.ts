@@ -20,9 +20,8 @@ function createTiers<Value extends SparqlAnalysisCacheEntry>() {
     ),
     large: new BoundedLruCache<string, Value>(
       LARGE_MAX_ENTRIES,
-      (source, value) => source.length > SMALL_MAX_SOURCE_LENGTH
-        && source.length <= LARGE_MAX_SOURCE_LENGTH
-        && value.largeCacheable,
+      (source) => source.length > SMALL_MAX_SOURCE_LENGTH
+        && source.length <= LARGE_MAX_SOURCE_LENGTH,
     ),
   };
 }
@@ -40,6 +39,8 @@ export class SparqlAnalysisCache<Value extends SparqlAnalysisCacheEntry> {
   }
 
   set(source: string, value: Value): void {
-    this.tiers[this.tierFor(source)].set(source, value);
+    const tier = this.tierFor(source);
+    if (tier === 'large' && !value.largeCacheable) return;
+    this.tiers[tier].set(source, value);
   }
 }

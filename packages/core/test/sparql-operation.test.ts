@@ -130,6 +130,21 @@ describe('bounded SPARQL analysis cache policy', () => {
     expect(cache.get('b')).toBe(3);
   });
 
+  it('replaces an admitted key using the shared key-only policy', () => {
+    const cache = new BoundedLruCache<string, number>(
+      1,
+      (key) => key !== 'blocked',
+    );
+
+    cache.set('kept', 1);
+    cache.set('kept', 2);
+    cache.set('blocked', 3);
+
+    expect(cache.size).toBe(1);
+    expect(cache.get('kept')).toBe(2);
+    expect(cache.has('blocked')).toBe(false);
+  });
+
   const smallMaxSourceLength = 64 * 1024;
   const largeMaxSourceLength = 2 * 1024 * 1024;
   const largeQuery = (suffix: string, padding = smallMaxSourceLength) => (

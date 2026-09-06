@@ -109,9 +109,7 @@ function analyzePreparedSparql(scan: PreparedSparql): PreparedSparqlOperationAna
     // established bounded reuse behavior.
     largeCacheable: form !== 'UNKNOWN'
       && !scan.unterminated
-      && query.structure.braces.balanced
-      && query.structure.parentheses.balanced
-      && query.structure.brackets.balanced,
+      && query.structure.balanced,
   });
 }
 

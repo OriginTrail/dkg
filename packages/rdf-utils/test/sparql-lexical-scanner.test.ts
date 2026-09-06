@@ -132,6 +132,7 @@ describe('canonical SPARQL lexical scanner', () => {
 
     expect(structure.braces.balanced).toBe(true);
     expect(structure.parentheses.balanced).toBe(true);
+    expect(structure.balanced).toBe(true);
     expect(openingIndexes).toHaveLength(2);
     expect(structure.braces.matchingTokenIndexes[openingIndexes[0]])
       .toBeGreaterThan(openingIndexes[1]);
@@ -146,6 +147,17 @@ describe('canonical SPARQL lexical scanner', () => {
       openingIndexes[1] + 1,
       structure.braces.matchingTokenIndexes[openingIndexes[1]],
     ).length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    { family: 'braces', source: 'SELECT * WHERE { ?s ?p ?o' },
+    { family: 'parentheses', source: 'SELECT * WHERE { FILTER(?o > 1 }' },
+    { family: 'brackets', source: 'SELECT * WHERE { [ <urn:p> ?o . }' },
+  ] as const)('reports aggregate imbalance for $family', ({ family, source }) => {
+    const structure = indexSparqlStructure(prepareSparql(source));
+
+    expect(structure[family].balanced).toBe(false);
+    expect(structure.balanced).toBe(false);
   });
 
   it('derives an IRI value without promoting UCHAR payload to delimiters', () => {
