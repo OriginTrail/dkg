@@ -14,8 +14,12 @@ const legacyCatalogSync = await import(
 const publicCatalogActivation = await import(
   '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1'
 );
+const registeredAuthorityContract = await import(
+  '@origintrail-official/dkg-agent/dist/registered-context-graph-authority.js'
+);
 const require = createRequire(import.meta.url);
 const packageManifest = require('@origintrail-official/dkg-agent/package.json');
+const packageExports = packageManifest.exports;
 const expectedRfc64PolicyCells = [
   'public-open',
   'public-curated',
@@ -60,23 +64,37 @@ if (
 ) {
   throw new Error('internal authority marker machinery leaked from the package root');
 }
-const internalPromoteModule = 'internal/promote/context-graph-agent-gate-authority';
-// One structural namespace rule protects current and future implementation files.
-// Check runtime imports and generated declaration/map paths against the built package.
-for (const extension of ['js', 'd.ts', 'js.map', 'd.ts.map']) {
-  const specifier = `@origintrail-official/dkg-agent/dist/${internalPromoteModule}.${extension}`;
-  try {
-    await import(specifier);
-    throw new Error(`internal promote module unexpectedly resolved: ${specifier}`);
-  } catch (error) {
-    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+if (Object.keys(registeredAuthorityContract).length !== 0) {
+  throw new Error('the registered authority contract must remain type-only at runtime');
+}
+if (packageExports['./dist/internal/*'] !== null) {
+  throw new Error('the internal namespace is not structurally blocked');
+}
+for (const [subpath, target] of Object.entries(packageExports)) {
+  if (
+    subpath.startsWith('./dist/internal/')
+    && subpath !== './dist/internal/*'
+    && target !== null
+  ) {
+    throw new Error(`internal export exception must remain blocked: ${subpath}`);
   }
-  try {
-    require.resolve(specifier);
-    throw new Error(`internal promote module unexpectedly resolved via require: ${specifier}`);
-  } catch (error) {
-    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
-  }
+}
+const representativeInternalSpecifier =
+  '@origintrail-official/dkg-agent/dist/internal/context-graph-authority/' +
+  'context-graph-agent-gate-authority.js';
+try {
+  await import(representativeInternalSpecifier);
+  throw new Error(`internal module unexpectedly resolved: ${representativeInternalSpecifier}`);
+} catch (error) {
+  if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+}
+try {
+  require.resolve(representativeInternalSpecifier);
+  throw new Error(
+    `internal module unexpectedly resolved via require: ${representativeInternalSpecifier}`,
+  );
+} catch (error) {
+  if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
 }
 const legacySynchronizationError = new legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1(
   'no-authorized-provider',
@@ -305,7 +323,6 @@ const blockedRfc64Modules = [
   'supervisor-status-v1.js',
   'serialized-scope-runtime-v1.js',
 ];
-const packageExports = packageManifest.exports;
 const emittedRfc64Modules = await listEmittedRfc64Modules();
 const classifiedRfc64Modules = new Set([
   ...publicRfc64Modules,

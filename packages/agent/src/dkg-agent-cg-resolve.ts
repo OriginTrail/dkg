@@ -340,10 +340,14 @@ import {
 } from './dkg-agent-constants.js';
 import { isTransientBootChainError } from './dkg-agent-boot.js';
 import { createAbortError, runBoundedOperation } from './bounded-operation.js';
-import type {
-  LiveOnChainAccessPolicyState,
-  LiveOnChainAccessPolicyUnavailable,
-} from './internal/promote/context-graph-access-policy-state.js';
+import type { RegisteredContextGraphAuthority } from
+  './registered-context-graph-authority.js';
+import type { LiveOnChainAccessPolicyState } from
+  './internal/context-graph-authority/context-graph-access-policy.js';
+// Keep the historical dist/dkg-agent-cg-resolve.js type entry point backed by
+// the same stable public contract as the package root.
+export type { RegisteredContextGraphAuthority } from
+  './registered-context-graph-authority.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
   ContextGraphNotFoundError,
@@ -705,25 +709,6 @@ export async function resolveCuratorSyncPeer(
   bootstrapHints.delete(contextGraphId);
   return { peerId: curatorPeerId, provenance };
 }
-
-export type RegisteredContextGraphAuthority =
-  | { kind: 'unregistered' }
-  | { kind: 'public'; onChainId: bigint }
-  | { kind: 'private'; onChainId: bigint; participantAgents: string[] }
-  | (LiveOnChainAccessPolicyUnavailable & { onChainId: bigint })
-  | {
-      kind: 'unavailable';
-      reason:
-        | 'chain-name-binding-unavailable'
-        | 'local-chain-binding-unavailable'
-        | 'local-existence-unavailable'
-        | 'chain-access-policy-unavailable'
-        | 'chain-participant-authority-unsupported'
-        | 'chain-participant-authority-unavailable'
-        | 'chain-participant-authority-invalid';
-      onChainId?: bigint;
-      detail?: string;
-    };
 
 export class ContextGraphResolveMethods extends DKGAgentBase {
   async getCgMeta(

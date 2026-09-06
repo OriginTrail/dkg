@@ -2,7 +2,8 @@
 
 import type { ChainAdapter, TxResult } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
-import type { RegisteredContextGraphAuthority } from './dkg-agent-cg-resolve.js';
+import type { RegisteredContextGraphAuthority } from
+  './registered-context-graph-authority.js';
 
 export type RegisteredParticipantMutationOperation = 'add' | 'remove';
 
