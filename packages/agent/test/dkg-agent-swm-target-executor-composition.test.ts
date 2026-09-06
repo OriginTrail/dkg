@@ -1,120 +1,75 @@
 import { describe, expect, it, vi } from 'vitest';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 
-const compositionMocks = vi.hoisted(() => ({
-  capturedPorts: [] as unknown[],
-  createContextGraphSyncDeadline: vi.fn(() => 12_345),
-  deleteSyncPageCheckpoint: vi.fn(),
-}));
+import {
+  SwmTargetExecutorV1,
+  SwmTargetExecutorSessionFactoryV1,
+  type SwmTargetExecutorPortsV1,
+} from '../src/sync/requester/swm-target-executor.js';
+import { createSwmRecoveryMutationRuntimeV1 } from
+  '../src/sync/requester/swm-recovery-apply.js';
 
-vi.mock('../src/sync/requester/durable-sync-budget.js', () => ({
-  createContextGraphSyncDeadline: compositionMocks.createContextGraphSyncDeadline,
-}));
-
-vi.mock('../src/sync/requester/page-fetch.js', () => ({
-  deleteSyncPageCheckpoint: compositionMocks.deleteSyncPageCheckpoint,
-}));
-
-vi.mock('../src/sync/requester/swm-target-executor.js', () => ({
-  SwmTargetExecutorV1: class {
-    constructor(ports: unknown) {
-      compositionMocks.capturedPorts.push(ports);
-    }
-  },
-}));
-
-import { createSwmTargetExecutorSessionV1 } from
-  '../src/dkg-agent-swm-target-executor.js';
-import type { SwmTargetExecutorPortsV1 } from
-  '../src/sync/requester/swm-target-executor.js';
-
-describe('internal DKGAgent SWM target executor service', () => {
-  it('binds stable narrow ports while returning an isolated executor per session', async () => {
-    const listSubGraphs = vi.fn(async () => [{ name: 'named' }]);
-    const fetchSyncPages = vi.fn(async () => ({ completed: true }));
-    const processSharedMemoryBatch = vi.fn(async () => ({ verifiedData: [] }));
-    const recordDrops = vi.fn();
-    const invalidateListContextGraphsCache = vi.fn();
-    const markDirtyFromQuads = vi.fn();
-    const retireFinalizedSwmTwinCandidate = vi.fn(async () => undefined);
-    const logInfo = vi.fn();
-    const logWarn = vi.fn();
-    const logDebug = vi.fn();
-    const syncCheckpoints = new Map();
-    const workspaceOwnedEntities = new Map();
-    const agentLike = {
-      store: { kind: 'store' },
+describe('SWM target executor session factory', () => {
+  it('reuses typed stable ports while isolating each session cache', async () => {
+    const store = new OxigraphStore();
+    const listSubGraphs = vi.fn(async () => []);
+    const ports: SwmTargetExecutorPortsV1 = {
+      store,
       writeLocks: new Map(),
       listSubGraphs,
-      fetchSyncPages,
-      getOrCreateSyncVerifyWorker: () => ({ processSharedMemoryBatch }),
-      publicSnapshotStore: { kind: 'snapshots' },
-      oversizeTombstoneLog: { record: recordDrops },
-      invalidateListContextGraphsCache,
-      contextGraphMetaProjection: { markDirtyFromQuads },
-      syncCheckpoints,
-      workspaceOwnedEntities,
-      retireFinalizedSwmTwinCandidate,
-      log: { info: logInfo, warn: logWarn, debug: logDebug },
+      createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
+      fetchSyncPages: async (_ctx, _peer, _cg, _swm, phase) => ({
+        quads: [],
+        bytesReceived: 0,
+        resumedFromOffset: 0,
+        nextOffset: 0,
+        checkpointKey: `factory:${phase}`,
+        completed: true,
+      }),
+      processSharedMemoryBatch: async () => ({
+        verifiedData: [],
+        verifiedMeta: [],
+        totalFetchedDataQuads: 0,
+        totalFetchedMetaQuads: 0,
+        droppedDataTriples: 0,
+        emptyResponses: 0,
+        entityCreators: [],
+      }),
+      recordDrops: () => {},
+      invalidateListContextGraphsCache: () => {},
+      markMetaProjectionDirty: () => {},
+      recoveryMutation: createSwmRecoveryMutationRuntimeV1({
+        store,
+        recordDrops: () => {},
+        invalidateListContextGraphsCache: () => {},
+        markMetaProjectionDirty: () => {},
+      }),
+      setCheckpoint: () => {},
+      deleteCheckpoint: () => {},
+      deletePublicCheckpoint: () => {},
+      ensureOwnedMap: () => new Map(),
+      retireFinalizedSwmTwin: async () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
     };
+    const factory = new SwmTargetExecutorSessionFactoryV1(ports);
 
-    const first = createSwmTargetExecutorSessionV1(agentLike as never);
-    const second = createSwmTargetExecutorSessionV1(agentLike as never);
-    const [ports, secondPorts] = compositionMocks.capturedPorts as
-      SwmTargetExecutorPortsV1[];
+    const first = factory.createSession();
+    const second = factory.createSession();
 
+    expect(first).toBeInstanceOf(SwmTargetExecutorV1);
+    expect(second).toBeInstanceOf(SwmTargetExecutorV1);
     expect(second).not.toBe(first);
-    expect(secondPorts).toBe(ports);
-
-    expect(ports.store).toBe(agentLike.store);
-    expect(ports.writeLocks).toBe(agentLike.writeLocks);
-    expect(ports.publicSnapshotStore).toBe(agentLike.publicSnapshotStore);
-    await expect(ports.listSubGraphs('cg')).resolves.toEqual([{ name: 'named' }]);
-    expect(ports.createContextGraphSyncDeadline(3)).toBe(12_345);
-    expect(compositionMocks.createContextGraphSyncDeadline)
-      .toHaveBeenCalledWith({ remainingContextGraphs: 3 });
-
-    const fetchArgs = [
-      { operationName: 'sync' },
-      'peer',
-      'cg',
-      true,
-      'meta',
-      'urn:graph',
-      12_345,
-      { recovery: true },
-    ] as const;
-    await ports.fetchSyncPages(...fetchArgs as never);
-    expect(fetchSyncPages).toHaveBeenCalledWith(...fetchArgs);
-    await ports.processSharedMemoryBatch([], [], 'cg', [], []);
-    expect(processSharedMemoryBatch).toHaveBeenCalledWith([], [], 'cg', [], []);
-
-    ports.recordDrops([] as never, 'swm-sync');
-    ports.invalidateListContextGraphsCache();
-    ports.markMetaProjectionDirty([]);
-    ports.setCheckpoint('checkpoint' as never, 4);
-    ports.deleteCheckpoint('checkpoint' as never);
-    ports.deletePublicCheckpoint('public-checkpoint' as never);
-    expect(recordDrops).toHaveBeenCalledWith([], 'swm-sync');
-    expect(invalidateListContextGraphsCache).toHaveBeenCalledOnce();
-    expect(markDirtyFromQuads).toHaveBeenCalledWith([]);
-    expect(syncCheckpoints.has('checkpoint')).toBe(false);
-    expect(compositionMocks.deleteSyncPageCheckpoint)
-      .toHaveBeenCalledWith(syncCheckpoints, 'public-checkpoint');
-
-    const firstOwned = ports.ensureOwnedMap('ownership');
-    const secondOwned = ports.ensureOwnedMap('ownership');
-    expect(secondOwned).toBe(firstOwned);
-    expect(workspaceOwnedEntities.get('ownership')).toBe(firstOwned);
-
-    const retirement = { contextGraphId: 'cg' };
-    const ctx = { operationName: 'sync' };
-    await ports.retireFinalizedSwmTwin(retirement as never, ctx as never);
-    ports.logInfo(ctx as never, 'info');
-    ports.logWarn(ctx as never, 'warn');
-    ports.logDebug(ctx as never, 'debug');
-    expect(retireFinalizedSwmTwinCandidate).toHaveBeenCalledWith(retirement, ctx);
-    expect(logInfo).toHaveBeenCalledWith(ctx, 'info');
-    expect(logWarn).toHaveBeenCalledWith(ctx, 'warn');
-    expect(logDebug).toHaveBeenCalledWith(ctx, 'debug');
+    await first.recoverPrivateTarget({
+      remotePeerId: '12D3KooWFactoryProvider',
+      contextGraphId: 'factory-cg',
+    });
+    await second.recoverPrivateTarget({
+      remotePeerId: '12D3KooWFactoryProvider',
+      contextGraphId: 'factory-cg',
+    });
+    expect(listSubGraphs).toHaveBeenCalledTimes(2);
+    await store.close();
   });
 });

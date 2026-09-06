@@ -1959,6 +1959,7 @@ describe('RFC-64 rollout authority integration', () => {
   it('retains manifest-wide RFC-64 selection on core nodes', async () => {
     const providerPeerId = '12D3KooWCoreManifestWideCatalogProvider';
     let synchronize!: ReturnType<typeof vi.spyOn>;
+    let queueRecovery!: ReturnType<typeof vi.spyOn>;
     const core = await startAgent({
       name: 'core-manifest-selection',
       activation: {
@@ -1967,10 +1968,16 @@ describe('RFC-64 rollout authority integration', () => {
           acceptedPublicPolicies: [{
             policyEnvelope: policyEnvelope(),
             targets: [{ authorAddress: AUTHOR, providers: [providerPeerId] }],
+            completeSwmProviders: [providerPeerId],
           }],
         },
       },
       beforeStart: (agent) => {
+        vi.spyOn(agent, 'connectToPeerId').mockResolvedValue();
+        queueRecovery = vi.spyOn(
+          agent,
+          'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect',
+        ).mockReturnValue(true);
         synchronize = vi.spyOn(agent, 'synchronizeRfc64CatalogRolloutFromProvidersV1')
           .mockResolvedValue(null);
       },
@@ -1989,6 +1996,14 @@ describe('RFC-64 rollout authority integration', () => {
         contextGraphId: CONTEXT_GRAPH_ID,
       }),
     }));
+    const queuedRecoveryPasses = queueRecovery.mock.calls.length;
+    expect(queuedRecoveryPasses).toBeGreaterThan(0);
+    const lease = core.acquireRfc64SwmRecoveryTargetLeaseV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      lane: 'selected-public',
+    });
+    expect(lease.isCurrent()).toBe(true);
+    expect(lease.signal.aborted).toBe(false);
 
     // An ordinary host-only transition cannot abort manifest-wide core work.
     const deactivate = vi.spyOn(
@@ -2000,6 +2015,10 @@ describe('RFC-64 rollout authority integration', () => {
     await core.whenRfc64PublicCatalogBootstrapIdleV1();
     expect(deactivate).not.toHaveBeenCalled();
     expect(synchronize).toHaveBeenCalledTimes(1);
+    expect(queueRecovery).toHaveBeenCalledTimes(queuedRecoveryPasses);
+    expect(lease.isCurrent()).toBe(true);
+    expect(lease.signal.aborted).toBe(false);
+    expect(() => lease.assertCurrent()).not.toThrow();
   });
 
   it('enforces legacy, shadow, catalog, and kill-switch authority at startup', async () => {

@@ -1,12 +1,23 @@
 import {
+  DKG_ENTITY,
+  DKG_ROOT_ENTITY_LEGACY,
+  ENTITY_PRED_ALT,
+  contextGraphWorkspaceMetaGraphUri,
+} from '@origintrail-official/dkg-core';
+import {
+  GraphManager,
   deleteByPatternWithoutCount,
   invalidateSwmMaterializationWitness,
+  tryReplaceGraphAtomically,
   type Quad,
+  type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
   canonicalizeGraphScopedSwmHeadRows,
   type GraphScopedSwmRecoveryDescriptor,
 } from '../graph-scoped-swm-recovery.js';
+import { insertWithOversizeGuard, type OversizeGuardHooks } from
+  '../oversize-filter.js';
 import type { RecoveryExecutionAdmission } from './recovery-execution-guard.js';
 import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
 
@@ -52,6 +63,154 @@ export interface SwmRecoveryRoot {
 export interface SwmRecoveryApplyResult {
   readonly replacedRoots: number;
   readonly insertedQuads: number;
+}
+
+/** Store policy and root-metadata cleanup owned by recovery apply. */
+export interface SwmRecoveryMutationRuntimeV1 {
+  readonly store: SwmRecoveryStore;
+  readonly ensureContextGraph: (contextGraphId: string) => Promise<void>;
+  readonly replaceMetaForRoots: (
+    contextGraphId: string,
+    roots: readonly { readonly entity: string }[],
+    metaGraphs: readonly string[],
+  ) => Promise<void>;
+}
+
+/**
+ * Bind the production storage policy used by recovery plans. Target
+ * orchestration receives this cohesive apply runtime instead of owning query,
+ * cleanup, oversize, cache-invalidation, and atomic-replace mechanics itself.
+ */
+export function createSwmRecoveryMutationRuntimeV1(params: Readonly<{
+  store: TripleStore;
+  recordDrops: OversizeGuardHooks['recordDrops'];
+  invalidateListContextGraphsCache: () => void;
+  markMetaProjectionDirty: (quads: Quad[]) => void;
+}>): SwmRecoveryMutationRuntimeV1 {
+  const graphManager = new GraphManager(params.store);
+  const store: SwmRecoveryStore = {
+    insert: async (quads) => {
+      const inserted = await insertWithOversizeGuard(
+        (kept) => params.store.insert(kept, {
+          priority: 'background',
+          source: 'agent.swmRecovery.insert',
+        }),
+        quads,
+        { recordDrops: params.recordDrops },
+        'swm-recovery',
+      );
+      if (inserted.length > 0) {
+        params.invalidateListContextGraphsCache();
+        params.markMetaProjectionDirty(inserted);
+      }
+    },
+    replaceGraph: async (graph, quads) => {
+      const replaced = await tryReplaceGraphAtomically(
+        params.store,
+        graph,
+        quads,
+        {
+          priority: 'background',
+          source: 'agent.swmRecovery.graphScopedReplace',
+        },
+      );
+      if (!replaced) {
+        throw Object.assign(
+          new Error('Graph-scoped SWM recovery requires atomic TripleStore.replaceGraph() support'),
+          { code: 'SWM_ATOMIC_REPLACE_UNSUPPORTED' },
+        );
+      }
+      params.invalidateListContextGraphsCache();
+    },
+    deleteByPattern: (pattern) => params.store.deleteByPattern(pattern, {
+      priority: 'background',
+      source: 'agent.swmRecovery.deleteByPattern',
+    }),
+    deleteBySubjectPrefix: (graph, prefix) => params.store.deleteBySubjectPrefix(
+      graph,
+      prefix,
+      {
+        priority: 'background',
+        source: 'agent.swmRecovery.deleteBySubjectPrefix',
+      },
+    ),
+  };
+
+  return Object.freeze({
+    store,
+    ensureContextGraph: (contextGraphId: string) => (
+      graphManager.ensureContextGraph(contextGraphId)
+    ),
+    replaceMetaForRoots: async (
+      contextGraphId: string,
+      roots: readonly { readonly entity: string }[],
+      metaGraphs: readonly string[],
+    ): Promise<void> => {
+      const graphs = metaGraphs.length > 0
+        ? metaGraphs
+        : [contextGraphWorkspaceMetaGraphUri(contextGraphId)];
+      const entities = [...new Set(roots.map(({ entity }) => entity))];
+      for (const metaGraph of graphs) {
+        for (const entity of entities) {
+          const operations = await params.store.query(
+            `SELECT DISTINCT ?op WHERE { GRAPH <${metaGraph}> { ?op ${ENTITY_PRED_ALT} <${entity}> } }`,
+            {
+              priority: 'background',
+              source: 'agent.swmRecovery.replaceMetaForRoots.findOps',
+            },
+          );
+          if (operations.type !== 'bindings') continue;
+          for (const row of operations.bindings) {
+            const operation = row['op'];
+            if (!operation) continue;
+            await params.store.delete(
+              [
+                {
+                  subject: operation,
+                  predicate: DKG_ROOT_ENTITY_LEGACY,
+                  object: entity,
+                  graph: metaGraph,
+                },
+                {
+                  subject: operation,
+                  predicate: DKG_ENTITY,
+                  object: entity,
+                  graph: metaGraph,
+                },
+              ],
+              {
+                priority: 'background',
+                source: 'agent.swmRecovery.replaceMetaForRoots.deleteLinks',
+              },
+            );
+            const remaining = await params.store.query(
+              `SELECT (COUNT(DISTINCT ?r) AS ?c) WHERE { GRAPH <${metaGraph}> { <${operation}> ${ENTITY_PRED_ALT} ?r } }`,
+              {
+                priority: 'background',
+                source: 'agent.swmRecovery.replaceMetaForRoots.countRoots',
+              },
+            );
+            const raw = remaining.type === 'bindings'
+              ? remaining.bindings[0]?.['c']
+              : undefined;
+            const count = raw
+              ? Number.parseInt(String(raw).match(/\d+/u)?.[0] ?? '0', 10)
+              : 0;
+            if (count === 0) {
+              await deleteByPatternWithoutCount(
+                params.store,
+                { graph: metaGraph, subject: operation },
+                {
+                  priority: 'background',
+                  source: 'agent.swmRecovery.replaceMetaForRoots.deleteOp',
+                },
+              );
+            }
+          }
+        }
+      }
+    },
+  });
 }
 
 export type VerifiedSwmRecoveryGraphApply = Readonly<

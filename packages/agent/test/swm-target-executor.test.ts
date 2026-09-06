@@ -9,6 +9,8 @@ import {
   SwmTargetExecutorV1,
   type SwmTargetExecutorPortsV1,
 } from '../src/sync/requester/swm-target-executor.js';
+import { createSwmRecoveryMutationRuntimeV1 } from
+  '../src/sync/requester/swm-recovery-apply.js';
 
 describe('SwmTargetExecutorV1 private recovery wiring', () => {
   const stores: OxigraphStore[] = [];
@@ -49,6 +51,12 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
       recordDrops: () => undefined,
       invalidateListContextGraphsCache: () => undefined,
       markMetaProjectionDirty: () => undefined,
+      recoveryMutation: createSwmRecoveryMutationRuntimeV1({
+        store,
+        recordDrops: () => undefined,
+        invalidateListContextGraphsCache: () => undefined,
+        markMetaProjectionDirty: () => undefined,
+      }),
       setCheckpoint: () => undefined,
       deleteCheckpoint: () => undefined,
       deletePublicCheckpoint: () => undefined,
@@ -173,6 +181,12 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
       recordDrops: () => undefined,
       invalidateListContextGraphsCache: () => undefined,
       markMetaProjectionDirty: () => undefined,
+      recoveryMutation: createSwmRecoveryMutationRuntimeV1({
+        store,
+        recordDrops: () => undefined,
+        invalidateListContextGraphsCache: () => undefined,
+        markMetaProjectionDirty: () => undefined,
+      }),
       setCheckpoint: () => undefined,
       deleteCheckpoint: () => undefined,
       deletePublicCheckpoint: () => undefined,

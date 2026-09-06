@@ -3,21 +3,14 @@
 /** Stable public/private target executor for graph-complete SWM recovery. */
 
 import {
-  DKG_ENTITY,
   DKG_ONTOLOGY,
-  DKG_ROOT_ENTITY_LEGACY,
-  ENTITY_PRED_ALT,
   assertSafeIri,
   contextGraphDataGraphUri,
-  contextGraphWorkspaceMetaGraphUri,
   createOperationContext,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import {
-  GraphManager,
-  deleteByPatternWithoutCount,
-  tryReplaceGraphAtomically,
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
@@ -40,6 +33,9 @@ import {
   recoverContextGraphSwm,
   type RecoverContextGraphSwmResult,
 } from './swm-recovery.js';
+import {
+  type SwmRecoveryMutationRuntimeV1,
+} from './swm-recovery-apply.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from '../oversize-filter.js';
 
 type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0];
@@ -57,6 +53,7 @@ export interface SwmTargetExecutorPortsV1 {
   readonly recordDrops: OversizeGuardHooks['recordDrops'];
   readonly invalidateListContextGraphsCache: () => void;
   readonly markMetaProjectionDirty: (quads: Quad[]) => void;
+  readonly recoveryMutation: SwmRecoveryMutationRuntimeV1;
   readonly setCheckpoint: RecoverContextGraphSwmOptions['setCheckpoint'];
   readonly deleteCheckpoint: RecoverContextGraphSwmOptions['deleteCheckpoint'];
   readonly deletePublicCheckpoint: RecoverContextGraphSwmOptions['deleteCheckpoint'];
@@ -108,6 +105,7 @@ export interface PrivateSwmRecoveryTargetV1 {
 export class SwmTargetExecutorV1 {
   readonly #ports: SwmTargetExecutorPortsV1;
   readonly #snapshotMaterializer: SharedMemorySnapshotMaterializer;
+  readonly #recoveryMutation: SwmRecoveryMutationRuntimeV1;
   readonly #subGraphAdmission = new Map<
     string,
     Promise<{ registered: string[]; excluded: string[] }>
@@ -120,6 +118,7 @@ export class SwmTargetExecutorV1 {
       writeLocks: ports.writeLocks,
       invalidateListContextGraphsCache: ports.invalidateListContextGraphsCache,
     });
+    this.#recoveryMutation = ports.recoveryMutation;
   }
 
   async recoverPrivateTarget(
@@ -155,16 +154,17 @@ export class SwmTargetExecutorV1 {
       writeLocks: this.#ports.writeLocks,
       publicSnapshotStore: this.#ports.publicSnapshotStore,
       snapshotMaterializer: this.#snapshotMaterializer,
-      store: this.#privateRecoveryStore(),
-      replaceMetaForRoots: (roots, metaGraphs) => this.#replaceMetaForRoots(
-        target.contextGraphId,
-        roots,
-        metaGraphs,
-      ),
+      store: this.#recoveryMutation.store,
+      replaceMetaForRoots: (roots, metaGraphs) => this.#recoveryMutation
+        .replaceMetaForRoots(
+          target.contextGraphId,
+          roots,
+          metaGraphs,
+        ),
       replaceMetaForGraphAssets: (assets) => (
         this.#snapshotMaterializer.replaceMetaForGraphAssets(assets)
       ),
-      ensureContextGraph: (contextGraphId) => this.#ensureContextGraph(contextGraphId),
+      ensureContextGraph: this.#recoveryMutation.ensureContextGraph,
       setCheckpoint: this.#ports.setCheckpoint,
       deleteCheckpoint: this.#ports.deleteCheckpoint,
       getRegisteredSubGraphNames: async () => (await admission()).registered,
@@ -235,7 +235,7 @@ export class SwmTargetExecutorV1 {
       ).excluded,
       includeRootScope: target.includeRootScope,
       stopOnBackoffWorthyFailure: target.stopOnBackoffWorthyFailure,
-      ensureContextGraph: (contextGraphId) => this.#ensureContextGraph(contextGraphId),
+      ensureContextGraph: this.#recoveryMutation.ensureContextGraph,
       snapshotMaterializer: this.#snapshotMaterializer,
       reconcileFinalizedTwin: async (contextGraphId, descriptor) => {
         const retirement = await reconcileFinalizedSwmTwinFromDescriptor({
@@ -281,130 +281,18 @@ export class SwmTargetExecutorV1 {
     }
     return current;
   }
+}
 
-  async #ensureContextGraph(contextGraphId: string): Promise<void> {
-    const graphManager = new GraphManager(this.#ports.store);
-    await graphManager.ensureContextGraph(contextGraphId);
+/** Stable typed composition; each call creates isolated session state. */
+export class SwmTargetExecutorSessionFactoryV1 {
+  readonly #ports: SwmTargetExecutorPortsV1;
+
+  constructor(ports: SwmTargetExecutorPortsV1) {
+    this.#ports = ports;
   }
 
-  #privateRecoveryStore(): RecoverContextGraphSwmOptions['store'] {
-    return {
-      insert: async (quads) => {
-        const inserted = await insertWithOversizeGuard(
-          (kept) => this.#ports.store.insert(kept, {
-            priority: 'background',
-            source: 'agent.swmRecovery.insert',
-          }),
-          quads,
-          { recordDrops: this.#ports.recordDrops },
-          'swm-recovery',
-        );
-        if (inserted.length > 0) {
-          this.#ports.invalidateListContextGraphsCache();
-          this.#ports.markMetaProjectionDirty(inserted);
-        }
-      },
-      replaceGraph: async (graph, quads) => {
-        const replaced = await tryReplaceGraphAtomically(
-          this.#ports.store,
-          graph,
-          quads,
-          {
-            priority: 'background',
-            source: 'agent.swmRecovery.graphScopedReplace',
-          },
-        );
-        if (!replaced) {
-          throw Object.assign(
-            new Error('Graph-scoped SWM recovery requires atomic TripleStore.replaceGraph() support'),
-            { code: 'SWM_ATOMIC_REPLACE_UNSUPPORTED' },
-          );
-        }
-        this.#ports.invalidateListContextGraphsCache();
-      },
-      deleteByPattern: (pattern) => this.#ports.store.deleteByPattern(pattern, {
-        priority: 'background',
-        source: 'agent.swmRecovery.deleteByPattern',
-      }),
-      deleteBySubjectPrefix: (graph, prefix) => this.#ports.store.deleteBySubjectPrefix(
-        graph,
-        prefix,
-        {
-          priority: 'background',
-          source: 'agent.swmRecovery.deleteBySubjectPrefix',
-        },
-      ),
-    };
-  }
-
-  async #replaceMetaForRoots(
-    contextGraphId: string,
-    roots: readonly { readonly entity: string }[],
-    metaGraphs: readonly string[],
-  ): Promise<void> {
-    const graphs = metaGraphs.length > 0
-      ? metaGraphs
-      : [contextGraphWorkspaceMetaGraphUri(contextGraphId)];
-    const entities = [...new Set(roots.map(({ entity }) => entity))];
-    for (const metaGraph of graphs) {
-      for (const entity of entities) {
-        const operations = await this.#ports.store.query(
-          `SELECT DISTINCT ?op WHERE { GRAPH <${metaGraph}> { ?op ${ENTITY_PRED_ALT} <${entity}> } }`,
-          {
-            priority: 'background',
-            source: 'agent.swmRecovery.replaceMetaForRoots.findOps',
-          },
-        );
-        if (operations.type !== 'bindings') continue;
-        for (const row of operations.bindings) {
-          const operation = row['op'];
-          if (!operation) continue;
-          await this.#ports.store.delete(
-            [
-              {
-                subject: operation,
-                predicate: DKG_ROOT_ENTITY_LEGACY,
-                object: entity,
-                graph: metaGraph,
-              },
-              {
-                subject: operation,
-                predicate: DKG_ENTITY,
-                object: entity,
-                graph: metaGraph,
-              },
-            ],
-            {
-              priority: 'background',
-              source: 'agent.swmRecovery.replaceMetaForRoots.deleteLinks',
-            },
-          );
-          const remaining = await this.#ports.store.query(
-            `SELECT (COUNT(DISTINCT ?r) AS ?c) WHERE { GRAPH <${metaGraph}> { <${operation}> ${ENTITY_PRED_ALT} ?r } }`,
-            {
-              priority: 'background',
-              source: 'agent.swmRecovery.replaceMetaForRoots.countRoots',
-            },
-          );
-          const raw = remaining.type === 'bindings'
-            ? remaining.bindings[0]?.['c']
-            : undefined;
-          const count = raw
-            ? Number.parseInt(String(raw).match(/\d+/u)?.[0] ?? '0', 10)
-            : 0;
-          if (count === 0) {
-            await deleteByPatternWithoutCount(
-              this.#ports.store,
-              { graph: metaGraph, subject: operation },
-              {
-                priority: 'background',
-                source: 'agent.swmRecovery.replaceMetaForRoots.deleteOp',
-              },
-            );
-          }
-        }
-      }
-    }
+  createSession(): SwmTargetExecutorV1 {
+    return new SwmTargetExecutorV1(this.#ports);
   }
 }
 

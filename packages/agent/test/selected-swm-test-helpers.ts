@@ -25,6 +25,10 @@ import {
 } from
   '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import type { SwmTargetExecutorV1 } from
+  '../src/sync/requester/swm-target-executor.js';
+import { createSwmTargetExecutorSessionFactoryForTest } from
+  './_helpers/swm-target-executor-session-fixture.js';
 import {
   type SelectedSwmMetaContinuation,
 } from '../src/sync/selected-swm-meta-fetcher.js';
@@ -475,7 +479,9 @@ export interface SelectedSwmLifecycleAgentFixture {
     getSnapshot: (ref: string) => Promise<Quad[] | null>;
     putSnapshot: (input: { digest: string }) => Promise<{ ref: string; byteLength: number }>;
   };
-  listSubGraphs: () => Promise<string[]>;
+  listSubGraphs: (
+    contextGraphId: string,
+  ) => Promise<Array<{ name: string; uri?: string }>>;
   createContextGraphSyncDeadline: () => number;
   fetchSyncPages: (
     ctx: unknown,
@@ -525,6 +531,7 @@ export interface SelectedSwmLifecycleAgentFixture {
   resolveRfc64CatalogReceiverAuthorityV1: (
     contextGraphId: string,
   ) => { legacySyncAllowed: boolean };
+  createSwmTargetExecutorSessionV1: () => SwmTargetExecutorV1;
   syncSharedMemoryFromPeerDetailedExecution:
     typeof LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution;
 }
@@ -660,6 +667,7 @@ export function createSelectedSwmLifecycleHarness(
   const processedMetaBatches: Quad[][] = [];
   const dateNow = vi.spyOn(Date, 'now').mockImplementation(options.clock.now);
   let selectedSwmMetaTransfers: SelectedSwmMetaTransferCoordinator | undefined;
+  let createTargetExecutorSession: (() => SwmTargetExecutorV1) | undefined;
 
   const agent: SelectedSwmLifecycleAgentFixture = {
     config: {
@@ -864,6 +872,11 @@ export function createSelectedSwmLifecycleHarness(
       );
     },
     resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+    createSwmTargetExecutorSessionV1: () => {
+      createTargetExecutorSession ??=
+        createSwmTargetExecutorSessionFactoryForTest(agent as never);
+      return createTargetExecutorSession();
+    },
     syncSharedMemoryFromPeerDetailedExecution:
       LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     getSelectedSwmMetaTransfers: () => {

@@ -221,9 +221,17 @@ import {
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
-import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
+import {
+  deleteSyncPageCheckpoint,
+  fetchSyncPages,
+  type SyncPageResult,
+} from './sync/requester/page-fetch.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
+import { createContextGraphSyncDeadline } from
+  './sync/requester/durable-sync-budget.js';
+import { createSwmRecoveryMutationRuntimeV1 } from
+  './sync/requester/swm-recovery-apply.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
@@ -857,6 +865,71 @@ export class DKGAgent extends DKGAgentBase {
       writeLocks,
       publicSnapshotStore,
     );
+    this.configureSwmTargetExecutorSessionsV1({
+      store: this.store,
+      writeLocks: this.writeLocks,
+      listSubGraphs: (contextGraphId) => this.listSubGraphs(contextGraphId),
+      createContextGraphSyncDeadline: (remainingContextGraphs) => (
+        createContextGraphSyncDeadline({ remainingContextGraphs })
+      ),
+      fetchSyncPages: (
+        ctx,
+        peerId,
+        contextGraphId,
+        includeSharedMemory,
+        phase,
+        graphUri,
+        deadline,
+        options,
+      ) => this.fetchSyncPages(
+        ctx,
+        peerId,
+        contextGraphId,
+        includeSharedMemory,
+        phase,
+        graphUri,
+        deadline,
+        options,
+      ),
+      processSharedMemoryBatch: (data, meta, contextGraphId, registered, excluded) => (
+        this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(
+          data,
+          meta,
+          contextGraphId,
+          registered,
+          excluded,
+        )
+      ),
+      publicSnapshotStore: this.publicSnapshotStore,
+      recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
+      invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
+      markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection
+        .markDirtyFromQuads(quads),
+      recoveryMutation: createSwmRecoveryMutationRuntimeV1({
+        store: this.store,
+        recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
+        invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
+        markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection
+          .markDirtyFromQuads(quads),
+      }),
+      setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
+      deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
+      deletePublicCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
+      ensureOwnedMap: (ownershipKey) => {
+        let owned = this.workspaceOwnedEntities.get(ownershipKey);
+        if (owned === undefined) {
+          owned = new Map();
+          this.workspaceOwnedEntities.set(ownershipKey, owned);
+        }
+        return owned;
+      },
+      retireFinalizedSwmTwin: (candidate, ctx) => (
+        this.retireFinalizedSwmTwinCandidate(candidate, ctx)
+      ),
+      logInfo: (ctx, message) => this.log.info(ctx, message),
+      logWarn: (ctx, message) => this.log.warn(ctx, message),
+      logDebug: (ctx, message) => this.log.debug(ctx, message),
+    });
     const resolveCatalogPartition = () => {
       const bootstrap = resolveRfc64RuntimeCatalogBootstrapConfigV1(
         this.config.rfc64CatalogBootstrap,
