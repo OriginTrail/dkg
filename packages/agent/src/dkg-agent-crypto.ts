@@ -146,8 +146,9 @@ import {
 import {
   createContextGraphAuthorityError,
   type ContextGraphAgentGateAuthority,
-  type LiveOnChainAccessPolicyState,
 } from './internal/context-graph-authority/context-graph-authority.js';
+import type { LiveOnChainAccessPolicyState } from
+  './registered-context-graph-authority.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';

@@ -10,7 +10,7 @@
  */
 
 import type { RegisteredContextGraphAuthority } from
-  './internal/context-graph-authority/context-graph-authority.js';
+  './registered-context-graph-authority.js';
 
 export type ContextGraphReadAuthorityOutcome = 'allowed' | 'denied' | 'unavailable';
 

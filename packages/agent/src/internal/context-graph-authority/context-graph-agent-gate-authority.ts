@@ -5,8 +5,9 @@ import { ethers } from 'ethers';
 import type {
   ContextGraphAgentGateAuthority,
   ContextGraphAgentGateUnavailableReason,
-  RegisteredContextGraphAuthority,
 } from './context-graph-authority.js';
+import type { RegisteredContextGraphAuthority } from
+  '../../registered-context-graph-authority.js';
 
 export interface ContextGraphAgentGateAuthorityInput {
   contextGraphId: string;
