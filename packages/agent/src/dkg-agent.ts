@@ -445,6 +445,10 @@ import {
 } from './dkg-agent-rfc64-catalog-bootstrap.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
 import { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
+import { Rfc64CatalogAuthorityRefreshLoopV1 } from
+  './rfc64/catalog-authority-refresh-loop-v1.js';
+import { Rfc64PublicCatalogWorkloadOwnerV1 } from
+  './rfc64/public-catalog-workload-owner-v1.js';
 import {
   resolveRfc64RuntimeCatalogBootstrapConfigV1,
   resolveRfc64CatalogExecutionPlanV1,
@@ -941,20 +945,44 @@ export class DKGAgent extends DKGAgentBase {
         warn: (ctx, message) => this.log.warn(ctx, message),
       }),
     );
+    const authorityRefreshOwner = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => this.readRfc64CatalogResponsibilitiesV1()
+        .filter(({ active, mode }) => active && mode !== 'legacy')
+        .map(({ contextGraphId }) => contextGraphId),
+      onActiveContextGraphIdsReadFailure: (error) => {
+        this.log.warn(
+          createOperationContext('system'),
+          `RFC-64 authority refresh could not enumerate active context graphs: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+      refreshContextGraph: (contextGraphId, signal) => (
+        this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal)
+      ),
+      onRefreshFailure: (contextGraphId, error) => {
+        this.log.warn(
+          createOperationContext('system'),
+          `RFC-64 authority refresh incomplete for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+    });
+    this.rfc64PublicCatalogOwnerV1 = new Rfc64PublicCatalogWorkloadOwnerV1({
+      createService: (ctx) => this.createRfc64PublicCatalogServiceV1(ctx),
+      authorityRefresh: authorityRefreshOwner,
+      onServiceStarted: (ctx) => {
+        this.log.info(ctx, 'RFC-64 public author-catalog transport started');
+      },
+    });
     this.rfc64CatalogRuntimeV1 = new Rfc64CatalogRuntimeV1({
       inventoryObservers: {
         open: () => this.openRfc64SwmInventoryObserversV1(),
         close: () => this.closeRfc64SwmInventoryObserversV1(),
       },
-      service: {
-        start: (ctx) => this.startRfc64PublicCatalogServiceV1(ctx),
-        close: () => this.closeRfc64PublicCatalogServiceV1(),
+      mutationPersistence: {
+        open: () => this.rfc64CatalogMutationCoordinatorV1.reopen(),
+        close: () => this.closeRfc64PublicCatalogMutationPersistenceV1(),
       },
-      receiverAdmission: {
-        close: () => this.closeRfc64PublicCatalogReceiverAdmissionV1(),
-      },
-      bootstrap: bootstrapOwner,
-      projection: projectionOwner,
+      publicCatalog: this.rfc64PublicCatalogOwnerV1,
+      workloads: [bootstrapOwner, projectionOwner],
     });
     this.rfc64SwmRecoveryCoordinatorV1 = new Rfc64SwmRecoveryCoordinatorV1({
       admission: {
@@ -2371,11 +2399,11 @@ export class DKGAgent extends DKGAgentBase {
       // and authoring transports remain live. Receiver close then proves that
       // no later applied-head callback can enqueue work. Only after both
       // producer classes are quiet may the projection owner drain and close.
-      await this.rfc64CatalogRuntimeV1.close();
+      await this.closeRfc64CatalogRuntimeV1();
     } catch (err) {
       this.log.warn(
         createOperationContext('connect'),
-        `RFC-64 public catalog service close failed: ${err instanceof Error ? err.message : String(err)}`,
+        `RFC-64 catalog runtime close failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
 
