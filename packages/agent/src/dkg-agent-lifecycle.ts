@@ -1,3 +1,4 @@
+import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
 import { RandomSamplingRuntime } from './random-sampling-runtime.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -582,7 +583,6 @@ import {
   type LocalSwmSenderKeySendState,
   type LocalSwmSenderKeyReceiveState,
   type PendingSenderKeyEntry,
-  type RandomSamplingStartResult,
   type ACKSignerResolution,
   type SyncRequestEnvelope,
   type CclPublishedResultEntry,
@@ -4371,7 +4371,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   createRandomSamplingRuntime(this: DKGAgent, ctx: OperationContext): RandomSamplingRuntime {
     return new RandomSamplingRuntime({
       role: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
-      chain: this.chain,
+      resolveEligibility: createRandomSamplingEligibilityResolver({
+        role: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
+        chain: this.chain, log: { warn: (message) => this.log.warn(ctx, message) },
+      }),
       shutdownTimeoutMs: () => DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS,
       log: {
         info: (message) => this.log.info(ctx, message),
@@ -4386,11 +4389,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         repairMissingKnowledgeAsset: (input) => this.repairRandomSamplingKnowledgeAsset(input),
       }),
     });
-  }
-
-  /** Recheck authoritative eligibility through the serialized runtime owner. */
-  reconcileRandomSamplingProver(this: DKGAgent, _ctx: OperationContext): Promise<RandomSamplingStartResult> {
-    return this.randomSamplingRuntime?.reconcile() ?? Promise.resolve('disabled');
   }
 
   clearStorageACKRegistrationRetry(this: DKGAgent): void {

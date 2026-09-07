@@ -10,3 +10,8 @@ const legacyStatus: RandomSamplingStatus = {
 };
 
 void legacyStatus;
+
+import type { DKGAgent } from '../src/index.js';
+// Runtime reconciliation stays off the public agent API.
+const noPublicReconcile: 'reconcileRandomSamplingProver' extends keyof DKGAgent ? false : true = true;
+void noPublicReconcile;

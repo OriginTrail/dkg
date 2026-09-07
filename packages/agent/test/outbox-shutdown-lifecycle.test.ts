@@ -67,7 +67,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       clearStorageACKRegistrationRetry: vi.fn(),
       storageACKRegistrationRetryInFlight: false,
       randomSamplingRuntime: new RandomSamplingRuntime({
-        role: 'core', chain: { chainId: 'mock:0', getIdentityId: async () => 52n, isShardingTableMember: async () => true },
+        role: 'core', resolveEligibility: async () => ({ kind: 'eligible', identityId: 52n }),
         createHandle: async () => handle,
         log: { info: vi.fn(), warn: vi.fn() },
         shutdownTimeoutMs: () => DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS,

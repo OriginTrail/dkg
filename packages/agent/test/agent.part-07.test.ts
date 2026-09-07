@@ -19,7 +19,7 @@ function observeRandomSamplingRuntime(agent: DKGAgent) {
   return () => {
     const call = factory.mock.results.at(-1);
     if (!call || call.type !== 'return') throw new Error('Random Sampling runtime was not constructed');
-    return call.value.getLifecycleSnapshot();
+    return call.value;
   };
 }
 
@@ -55,10 +55,10 @@ describe('Random Sampling lifecycle gating', () => {
         loop: null,
       });
 
-      expect(runtimeState().reconciliationScheduled).toBe(true);
+      expect(runtimeState().getLifecycleSnapshot().reconciliationScheduled).toBe(true);
 
       sharded = true;
-      await agent.reconcileRandomSamplingProver({ operationName: 'sync', operationId: 'rs-gating-test' });
+      await runtimeState().reconcile();
       await vi.waitFor(
         () => expect(agent.getRandomSamplingStatus().enabled).toBe(true),
         { timeout: 2_000, interval: 10 },
@@ -68,7 +68,7 @@ describe('Random Sampling lifecycle gating', () => {
         identityId: '52',
         disabledReason: null,
       });
-      expect(runtimeState().reconciliationScheduled).toBe(true);
+      expect(runtimeState().getLifecycleSnapshot().reconciliationScheduled).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -103,7 +103,7 @@ describe('Random Sampling lifecycle gating', () => {
         identityId: '53',
         disabledReason: 'contracts_not_deployed',
       });
-      expect(runtimeState().reconciliationScheduled).toBe(false);
+      expect(runtimeState().getLifecycleSnapshot().reconciliationScheduled).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -139,9 +139,9 @@ describe('Random Sampling lifecycle gating', () => {
         disabledReason: 'eligibility_lookup_failed',
       });
 
-      expect(runtimeState().reconciliationScheduled).toBe(true);
+      expect(runtimeState().getLifecycleSnapshot().reconciliationScheduled).toBe(true);
 
-      await agent.reconcileRandomSamplingProver({ operationName: 'sync', operationId: 'rs-gating-test' });
+      await runtimeState().reconcile();
       await vi.waitFor(
         () => expect(agent.getRandomSamplingStatus().enabled).toBe(true),
         { timeout: 2_000, interval: 10 },
@@ -152,7 +152,7 @@ describe('Random Sampling lifecycle gating', () => {
         identityId: '56',
         disabledReason: null,
       });
-      expect(runtimeState().reconciliationScheduled).toBe(true);
+      expect(runtimeState().getLifecycleSnapshot().reconciliationScheduled).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -185,7 +185,7 @@ describe('Random Sampling lifecycle gating', () => {
         identityId: '54',
         disabledReason: 'contracts_not_deployed',
       });
-      expect(runtimeState().reconciliationScheduled).toBe(false);
+      expect(runtimeState().getLifecycleSnapshot().reconciliationScheduled).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -218,7 +218,7 @@ describe('Random Sampling lifecycle gating', () => {
         identityId: '55',
         disabledReason: 'bind_failed',
       });
-      expect(runtimeState().reconciliationScheduled).toBe(true);
+      expect(runtimeState().getLifecycleSnapshot().reconciliationScheduled).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }

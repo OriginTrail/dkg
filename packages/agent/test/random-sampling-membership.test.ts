@@ -1,9 +1,14 @@
-import { RandomSamplingRuntime } from '../src/random-sampling-runtime.js';
+import { createRandomSamplingEligibilityResolver, type RandomSamplingEligibilityChain } from '../src/random-sampling-eligibility.js';
+import { RandomSamplingRuntime, type RandomSamplingRuntimeOptions } from '../src/random-sampling-runtime.js';
 import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import type { RandomSamplingHandle } from '../src/random-sampling-bind.js';
+
+function createRuntime(options: Omit<RandomSamplingRuntimeOptions, 'resolveEligibility'> & { chain: RandomSamplingEligibilityChain }) {
+  return new RandomSamplingRuntime({ ...options, resolveEligibility: createRandomSamplingEligibilityResolver(options) });
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -36,10 +41,10 @@ async function startCore(initialMembership = true) {
     if (!result || result.type !== 'return') throw new Error('Runtime was not constructed');
     return result.value;
   };
-  let pending: ReturnType<DKGAgent['reconcileRandomSamplingProver']> | undefined;
+  let pending: Promise<void> | undefined;
   const beginTick = () => {
     expect(runtime().getLifecycleSnapshot().reconciliationScheduled).toBe(true);
-    pending = agent.reconcileRandomSamplingProver({ operationName: 'sync', operationId: 'rs-membership-test' });
+    pending = runtime().reconcile();
     return pending;
   };
   const settleTick = async () => { await pending; };
@@ -50,6 +55,153 @@ async function startCore(initialMembership = true) {
 }
 
 describe('Random Sampling membership reconciliation', () => {
+  it.each([
+    { active: false, missing: false, phase: 'waiting', stopped: 0, scheduled: true },
+    { active: true, missing: false, phase: 'running', stopped: 0, scheduled: true },
+    { active: false, missing: true, phase: 'disabled', stopped: 0, scheduled: false },
+    { active: true, missing: true, phase: 'waiting', stopped: 1, scheduled: true },
+  ])('applies typed chain outcomes: active=$active missing=$missing', async ({ active, missing, phase, stopped, scheduled }) => {
+    const failure = new Error(missing ? 'Contract "ShardingTableStorage" not found in Hub at 0x1' : 'temporary RPC outage');
+    const membership = vi.fn(async () => true);
+    const stop = vi.fn(async () => {});
+    const runtime = createRuntime({
+      role: 'core', chain: { chainId: 'mock:0', getIdentityId: async () => 52n, isShardingTableMember: membership },
+      createHandle: async () => ({ enabled: true, start: vi.fn(), stop,
+        getStatus: () => ({ enabled: true, role: 'core', identityId: '52', disabledReason: null, loop: null }) }),
+      log: { info: vi.fn(), warn: vi.fn() }, shutdownTimeoutMs: () => 100,
+    });
+    try {
+      if (active) await runtime.start();
+      membership.mockRejectedValue(failure);
+      await runtime.reconcile();
+      expect(runtime.getLifecycleSnapshot()).toMatchObject({ phase, reconciliationScheduled: scheduled });
+      expect(stop).toHaveBeenCalledTimes(stopped);
+      expect(runtime.getStatus().enabled).toBe(active && !missing);
+    } finally { await runtime.stop(); }
+  });
+
+  it.each(['shutdown', 'membership'] as const)('waits for a failing close to settle during %s, then permits a fresh lifecycle', async (stage) => {
+    const f = await startCore();
+    const gate = deferred<void>();
+    const entered = deferred<void>();
+    const original = f.handles.at(-1)!;
+    const realStop = original.stop.bind(original);
+    const stop = vi.spyOn(original, 'stop').mockImplementation(async () => {
+      await realStop();
+      entered.resolve();
+      await gate.promise;
+      throw new Error('WAL close failed');
+    });
+    const stopNode = vi.spyOn(f.agent.node, 'stop');
+    const closeStore = vi.spyOn(f.agent.store, 'close');
+    try {
+      if (stage === 'membership') f.setMember(false);
+      const settling = stage === 'shutdown' ? f.agent.stop() : f.tick();
+      await entered.promise;
+      expect(stopNode).not.toHaveBeenCalled();
+      expect(closeStore).not.toHaveBeenCalled();
+      expect(f.agent.getRandomSamplingStatus().disabledReason).toBe('retiring');
+      gate.resolve();
+      await settling;
+      expect(stop).toHaveBeenCalledOnce();
+      if (stage === 'shutdown') {
+        expect(stopNode).toHaveBeenCalledOnce();
+        expect(closeStore).toHaveBeenCalledOnce();
+        await f.agent.stop();
+        await f.agent.start();
+      } else {
+        expect(f.agent.getRandomSamplingStatus().disabledReason).toBe('awaiting_sharding_table');
+        expect(stopNode).not.toHaveBeenCalled();
+        f.setMember(true);
+        await f.tick();
+      }
+      expect(f.create).toHaveBeenCalledTimes(2);
+      expect(f.agent.getRandomSamplingStatus().enabled).toBe(true);
+    } finally { gate.resolve(); await f.agent.stop(); }
+  });
+
+  it('continues draining physical retirement when its reconciliation deadline expires during shutdown', async () => {
+    let member = true;
+    const gate = deferred<void>();
+    const entered = deferred<void>();
+    const runtime = createRuntime({
+      role: 'core', chain: { chainId: 'mock:0', getIdentityId: async () => 52n, isShardingTableMember: async () => member },
+      createHandle: async () => ({ enabled: true, start: vi.fn(), stop: async () => { entered.resolve(); await gate.promise; },
+        getStatus: () => ({ enabled: true, role: 'core', identityId: '52', disabledReason: null, loop: null }) }),
+      log: { info: vi.fn(), warn: vi.fn() }, shutdownTimeoutMs: () => 10,
+    });
+    try {
+      await runtime.start();
+      member = false;
+      const reconciling = runtime.reconcile();
+      await entered.promise;
+      await expect(runtime.stop()).rejects.toMatchObject({ name: 'RandomSamplingShutdownTimeoutError' });
+      await reconciling;
+      expect(runtime.getLifecycleSnapshot().phase).toBe('retiring');
+      gate.resolve();
+      await expect(runtime.stop()).resolves.toBeUndefined();
+      expect(runtime.getLifecycleSnapshot().phase).toBe('stopped');
+    } finally { gate.resolve(); await runtime.stop(); }
+  });
+
+  it('rechecks invalidated contract handles and binds afresh after contracts return', async () => {
+    vi.useFakeTimers();
+    let ready = true;
+    let deployed = true;
+    const refresh = vi.fn(async () => { ready = deployed; return { active: true }; });
+    const handles: RandomSamplingHandle[] = [];
+    const runtime = createRuntime({
+      role: 'core', chain: {
+        chainId: 'mock:0', getIdentityId: async () => 52n,
+        isRandomSamplingReady: () => ready, isShardingTableMember: async () => true,
+        getActiveProofPeriodStatus: refresh,
+      },
+      createHandle: async () => {
+        const handle: RandomSamplingHandle = {
+          enabled: true, start: vi.fn(), stop: vi.fn(async () => {}),
+          getStatus: () => ({ enabled: true, role: 'core', identityId: '52', disabledReason: null, loop: null }),
+        };
+        handles.push(handle);
+        return handle;
+      },
+      log: { info: vi.fn(), warn: vi.fn() }, shutdownTimeoutMs: () => 100,
+    });
+    try {
+      await runtime.start();
+      ready = false;
+      deployed = false;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(handles[0].stop).toHaveBeenCalledOnce();
+      expect(runtime.getLifecycleSnapshot().reconciliationScheduled).toBe(true);
+      deployed = true;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(refresh).toHaveBeenCalledTimes(2);
+      expect(handles).toHaveLength(2);
+      expect(handles[1].start).toHaveBeenCalledOnce();
+      expect(runtime.getStatus().enabled).toBe(true);
+    } finally { await runtime.stop(); vi.useRealTimers(); }
+  });
+
+  it('releases settled failed cleanup instead of caching a rejected shutdown forever', async () => {
+    const stop = vi.fn(async () => { throw new Error('WAL close failed'); });
+    const warn = vi.fn();
+    const runtime = createRuntime({
+      role: 'core', chain: { chainId: 'mock:0', getIdentityId: async () => 52n, isShardingTableMember: async () => true },
+      createHandle: async () => ({ enabled: true, start: vi.fn(), stop,
+        getStatus: () => ({ enabled: true, role: 'core', identityId: '52', disabledReason: null, loop: null }) }),
+      log: { info: vi.fn(), warn }, shutdownTimeoutMs: () => 100,
+    });
+    try {
+      await runtime.start();
+      await expect(runtime.stop()).resolves.toBeUndefined();
+      await expect(runtime.stop()).resolves.toBeUndefined();
+      expect(stop).toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('WAL close failed'));
+      expect(runtime.getLifecycleSnapshot().phase).toBe('stopped');
+      expect(runtime.getStatus().enabled).toBe(false);
+    } finally { await runtime.stop().catch(() => {}); }
+  });
+
   it.each(['bind', 'start'] as const)('retires acquired resources and retries after a %s failure', async (stage) => {
     const handle: RandomSamplingHandle = {
       enabled: true, start: vi.fn(), stop: vi.fn(async () => {}),
@@ -62,15 +214,15 @@ describe('Random Sampling membership reconciliation', () => {
       vi.mocked(handle.start).mockImplementationOnce(() => { throw new Error('loop start failed'); });
       createHandle.mockResolvedValueOnce(handle);
     }
-    const runtime = new RandomSamplingRuntime({
+    const runtime = createRuntime({
       role: 'core', chain: { chainId: 'mock:0', getIdentityId: async () => 52n, isShardingTableMember: async () => true },
       createHandle, log: { info: vi.fn(), warn: vi.fn() }, shutdownTimeoutMs: () => 100,
     });
     try {
-      await expect(runtime.reconcile()).resolves.toBe('retryable');
+      await expect(runtime.reconcile()).resolves.toBeUndefined();
       expect(runtime.getStatus()).toMatchObject({ enabled: false, disabledReason: 'bind_failed' });
       expect(handle.stop).toHaveBeenCalledTimes(stage === 'start' ? 1 : 0);
-      await expect(runtime.reconcile()).resolves.toBe('started');
+      await expect(runtime.reconcile()).resolves.toBeUndefined();
       expect(replacement.start).toHaveBeenCalledOnce();
     } finally { await runtime.stop(); }
   });
@@ -80,16 +232,41 @@ describe('Random Sampling membership reconciliation', () => {
       enabled: false, start: vi.fn(), stop: vi.fn(async () => {}),
       getStatus: () => ({ enabled: false, role: 'core', identityId: '52', disabledReason: 'unsupported_chain', loop: null }),
     };
-    const runtime = new RandomSamplingRuntime({
+    const runtime = createRuntime({
       role: 'core', chain: { chainId: 'mock:0', getIdentityId: async () => 52n, isShardingTableMember: async () => true },
       createHandle: async () => handle, log: { info: vi.fn(), warn: vi.fn() }, shutdownTimeoutMs: () => 100,
     });
     try {
-      await expect(runtime.start()).resolves.toBe('disabled');
+      await expect(runtime.start()).resolves.toBeUndefined();
       expect(handle.start).not.toHaveBeenCalled();
       expect(handle.stop).toHaveBeenCalledOnce();
       expect(runtime.getStatus()).toMatchObject({ enabled: false, disabledReason: 'unsupported_chain' });
       expect(runtime.getLifecycleSnapshot().reconciliationScheduled).toBe(false);
+    } finally { await runtime.stop(); }
+  });
+
+  it('retries contract invalidation between eligibility and binding', async () => {
+    const disabled: RandomSamplingHandle = {
+      enabled: false, start: vi.fn(), stop: vi.fn(async () => {}),
+      getStatus: () => ({ enabled: false, role: 'core', identityId: '52', disabledReason: 'contracts_not_deployed', loop: null }),
+    };
+    const enabled: RandomSamplingHandle = {
+      enabled: true, start: vi.fn(), stop: vi.fn(async () => {}),
+      getStatus: () => ({ enabled: true, role: 'core', identityId: '52', disabledReason: null, loop: null }),
+    };
+    const createHandle = vi.fn(async () => enabled).mockResolvedValueOnce(disabled);
+    const runtime = createRuntime({
+      role: 'core', chain: { chainId: 'mock:0', getIdentityId: async () => 52n, isShardingTableMember: async () => true },
+      createHandle, log: { info: vi.fn(), warn: vi.fn() }, shutdownTimeoutMs: () => 100,
+    });
+    try {
+      await runtime.start();
+      expect(disabled.start).not.toHaveBeenCalled();
+      expect(disabled.stop).toHaveBeenCalledOnce();
+      expect(runtime.getLifecycleSnapshot()).toMatchObject({ phase: 'waiting', reconciliationScheduled: true });
+      await runtime.reconcile();
+      expect(enabled.start).toHaveBeenCalledOnce();
+      expect(runtime.getStatus().enabled).toBe(true);
     } finally { await runtime.stop(); }
   });
 
@@ -102,7 +279,7 @@ describe('Random Sampling membership reconciliation', () => {
       getStatus: () => ({ enabled: true, role: 'core', identityId: '52', disabledReason: null, loop: null }),
     };
     const createHandle = vi.fn(async () => handle);
-    const runtime = new RandomSamplingRuntime({
+    const runtime = createRuntime({
       role: 'core', chain: { chainId: 'mock:0', getIdentityId: async () => 52n, isShardingTableMember: membership },
       createHandle, log: { info: vi.fn(), warn: vi.fn() }, shutdownTimeoutMs: () => 100,
     });

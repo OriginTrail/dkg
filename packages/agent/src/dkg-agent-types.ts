@@ -177,8 +177,6 @@ export type PendingSenderKeyEntry = {
   createdAtMs: number;
 };
 
-export type RandomSamplingStartResult = 'started' | 'retryable' | 'disabled';
-
 export type ACKSignerResolution = {
   wallet: ethers.Wallet | null;
   retryable: boolean;

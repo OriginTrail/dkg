@@ -678,19 +678,19 @@ describe('Random Sampling proof-time exact repair', () => {
     const createHandle = vi.fn().mockResolvedValueOnce(oldHandle).mockResolvedValueOnce(replacement);
     const getIdentityId = vi.fn(async () => 41n);
     const runtime = new RandomSamplingRuntime({
-      role: 'core', chain: { chainId: 'base:8453', getIdentityId, isShardingTableMember: async () => true },
+      role: 'core', resolveEligibility: async () => ({ kind: 'eligible', identityId: await getIdentityId() }),
       createHandle, log: { info: vi.fn(), warn: vi.fn() }, shutdownTimeoutMs: () => 10,
     });
     try {
-      await expect(runtime.start()).resolves.toBe('started');
+      await expect(runtime.start()).resolves.toBeUndefined();
       getIdentityId.mockResolvedValue(42n);
-      await expect(runtime.reconcile()).resolves.toBe('retryable');
+      await expect(runtime.reconcile()).resolves.toBeUndefined();
       expect(runtime.getStatus()).toMatchObject({ enabled: false, disabledReason: 'retiring', identityId: '41' });
       expect(oldStop).toHaveBeenCalledOnce();
       expect(createHandle).toHaveBeenCalledOnce();
       expect(replacement.start).not.toHaveBeenCalled();
       settleOld();
-      await expect(runtime.reconcile()).resolves.toBe('started');
+      await expect(runtime.reconcile()).resolves.toBeUndefined();
       expect(oldStop).toHaveBeenCalledOnce();
       expect(createHandle).toHaveBeenCalledTimes(2);
       expect(replacement.start).toHaveBeenCalledOnce();
@@ -752,7 +752,7 @@ describe('Random Sampling proof-time exact repair', () => {
     const runtime: RandomSamplingRuntime = (LifecycleSyncMethods.prototype.createRandomSamplingRuntime as any).call(
       agentLike, { operationName: 'connect', operationId: 'rs-bind-test' },
     );
-    await expect(runtime.start()).resolves.toBe('started');
+    await expect(runtime.start()).resolves.toBeUndefined();
     await vi.waitFor(() => expect(repairRandomSamplingKnowledgeAsset).toHaveBeenCalledOnce());
     expect(repairRandomSamplingKnowledgeAsset).toHaveBeenCalledWith({
       kaId: 7n,
