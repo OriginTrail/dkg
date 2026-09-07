@@ -1,5 +1,5 @@
 import {
-  compareCodePoint,
+  codePointLowerBound,
   createSortedUniqueStringCatalog,
   type SortedUniqueStringCatalog,
 } from '@origintrail-official/dkg-core';
@@ -19,17 +19,6 @@ export interface GraphMembershipSnapshot {
 }
 
 const acceptEveryGraph = () => true;
-
-function lowerBound(graphs: readonly string[], target: string): number {
-  let low = 0;
-  let high = graphs.length;
-  while (low < high) {
-    const middle = low + Math.floor((high - low) / 2);
-    if (compareCodePoint(graphs[middle]!, target) < 0) low = middle + 1;
-    else high = middle;
-  }
-  return low;
-}
 
 export function createGraphMembershipSnapshot(
   sourceGraphs: readonly string[],
@@ -83,7 +72,7 @@ function buildGraphMembershipSnapshot(
       if (membershipIndex.has(graph) && accept(graph)) selected.push(graph);
 
       const prefix = `${graph}/`;
-      for (let index = lowerBound(graphs, prefix); index < graphs.length; index += 1) {
+      for (let index = codePointLowerBound(graphs, prefix); index < graphs.length; index += 1) {
         const candidate = graphs[index]!;
         if (!candidate.startsWith(prefix)) break;
         if (accept(candidate)) selected.push(candidate);

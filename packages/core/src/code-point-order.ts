@@ -31,6 +31,45 @@ export function createSortedUniqueStringCatalog(
   return Object.freeze([...new Set(values)].sort(compareCodePoint)) as SortedUniqueStringCatalog;
 }
 
+/** First code-point-ordered position whose value is not less than `target`. */
+export function codePointLowerBound(
+  source: readonly string[],
+  target: string,
+): number {
+  let low = 0;
+  let high = source.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    if (compareCodePoint(source[middle]!, target) < 0) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+/** Insert immutably; an existing value returns the original catalog. */
+export function insertSortedUniqueStringCatalog(
+  source: SortedUniqueStringCatalog,
+  value: string,
+): SortedUniqueStringCatalog {
+  const index = codePointLowerBound(source, value);
+  if (source[index] === value) return source;
+  const next = [...source];
+  next.splice(index, 0, value);
+  return Object.freeze(next) as SortedUniqueStringCatalog;
+}
+
+/** Remove immutably; a missing value returns the original catalog. */
+export function removeSortedUniqueStringCatalog(
+  source: SortedUniqueStringCatalog,
+  value: string,
+): SortedUniqueStringCatalog {
+  const index = codePointLowerBound(source, value);
+  if (source[index] !== value) return source;
+  const next = [...source];
+  next.splice(index, 1);
+  return Object.freeze(next) as SortedUniqueStringCatalog;
+}
+
 /** Filtering preserves the source catalog's ordering and uniqueness proof. */
 export function filterSortedUniqueStringCatalog(
   source: SortedUniqueStringCatalog,

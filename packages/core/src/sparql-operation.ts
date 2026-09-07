@@ -1,4 +1,4 @@
-import { BoundedLruCache } from './bounded-lru-cache.js';
+import { SparqlAnalysisCache } from './sparql-analysis-cache.js';
 import {
   prepareSparql,
   prepareSparqlQuery,
@@ -32,24 +32,17 @@ export interface SparqlOperationAnalysis {
   mutatingKeyword: string | null;
 }
 
-type SparqlOperationFacts = Readonly<{
+export type SparqlOperationFacts = Readonly<{
   form: SparqlDetectedOperation;
   mutatingKeyword: string | null;
 }>;
 
-const SPARQL_ANALYSIS_CACHE_MAX_ENTRIES = 256;
-const SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH = 64 * 1024;
+type PreparedSparqlOperationAnalysis = Readonly<{
+  facts: SparqlOperationFacts;
+  largeCacheable: boolean;
+}>;
 
-// A single query traverses several store decorators (agent invalidation,
-// changelog, graph index, then the adapter), each of which needs the same safe
-// classification. Exact-string memoization makes that scan/allocation happen
-// once and also covers repeated scoring queries. Bound both cardinality and
-// source size so an untrusted query stream cannot turn this into an unbounded
-// retention surface.
-const sparqlAnalysisCache = new BoundedLruCache<string, SparqlOperationFacts>(
-  SPARQL_ANALYSIS_CACHE_MAX_ENTRIES,
-  (source) => source.length <= SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
-);
+const sparqlAnalysisCache = new SparqlAnalysisCache<PreparedSparqlOperationAnalysis>();
 
 const MUTATING_KEYWORD_SET = new Set<string>(SPARQL_MUTATING_KEYWORDS);
 const UPDATE_OPERATION_SET = new Set<string>(SPARQL_UPDATE_OPERATIONS);
@@ -90,9 +83,12 @@ function materializeSparqlOperationAnalysis(
   };
 }
 
-function analyzePreparedSparql(scan: PreparedSparql): SparqlOperationFacts {
+function analyzePreparedSparql(scan: PreparedSparql): PreparedSparqlOperationAnalysis {
   if (scan.status !== 'valid') {
-    return { form: 'UNKNOWN', mutatingKeyword: null };
+    return Object.freeze({
+      facts: Object.freeze({ form: 'UNKNOWN' as const, mutatingKeyword: null }),
+      largeCacheable: false,
+    });
   }
   const query = prepareSparqlQuery(scan);
   const form = detectSparqlOperationForm(query);
@@ -100,30 +96,42 @@ function analyzePreparedSparql(scan: PreparedSparql): SparqlOperationFacts {
     (token) => token.kind === 'word'
       && MUTATING_KEYWORD_SET.has(token.upper),
   );
-  return {
-    form,
-    mutatingKeyword: mutatingToken?.kind === 'word'
-      ? mutatingToken.raw
-      : null,
-  };
+  return Object.freeze({
+    facts: Object.freeze({
+      form,
+      mutatingKeyword: mutatingToken?.kind === 'word'
+        ? mutatingToken.raw
+        : null,
+    }),
+    // Recognition of SELECT/INSERT alone is not validity evidence. Retain a
+    // large source only when the lexical artifact is complete and every
+    // structural delimiter family is balanced. Small UNKNOWN inputs keep the
+    // established bounded reuse behavior.
+    largeCacheable: form !== 'UNKNOWN'
+      && !scan.unterminated
+      && query.structure.balanced,
+  });
 }
 
 export function analyzeSparqlOperation(
   input: string | PreparedSparql,
 ): SparqlOperationAnalysis {
   if (typeof input !== 'string') {
-    return materializeSparqlOperationAnalysis(analyzePreparedSparql(input));
+    return materializeSparqlOperationAnalysis(analyzePreparedSparql(input).facts);
   }
 
   const cached = sparqlAnalysisCache.get(input);
-  if (cached) return materializeSparqlOperationAnalysis(cached);
+  if (cached) return materializeSparqlOperationAnalysis(cached.facts);
 
-  const facts = analyzePreparedSparql(prepareSparql(input));
+  const analysis = analyzePreparedSparql(prepareSparql(input));
 
-  sparqlAnalysisCache.set(input, facts);
+  // Each tier owns its complete admission policy. In particular, short
+  // UNKNOWN inputs retain their established reuse while malformed large
+  // inputs cannot churn the four-entry large-query cache.
+  sparqlAnalysisCache.set(input, analysis);
   // The cache owns only immutable scalar facts. Materializing at the public
   // boundary preserves the API's mutable, caller-isolated response objects.
-  return materializeSparqlOperationAnalysis(facts);
+  return materializeSparqlOperationAnalysis(analysis.facts);
 }
 
 export function classifySparqlOperation(sparql: string): SparqlOperationClassification {
