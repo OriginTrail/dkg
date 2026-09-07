@@ -27,7 +27,10 @@ function event(
   return { blockNumber, index, blockHash, args };
 }
 
-function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}) {
+function makeEvmAuthorityAdapter(options: {
+  reorg?: boolean;
+  zeroNameHash?: boolean;
+} = {}) {
   const adapter: any = new EVMChainAdapter({
     rpcUrl: 'http://127.0.0.1:1',
     hubAddress: GOVERNANCE,
@@ -48,7 +51,11 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}) {
   };
 
   const logs: Record<string, readonly ReturnType<typeof event>[]> = {
-    ContextGraphCreated: [event(10, 1, CREATION_HASH, [9n, OWNER, NAME_HASH])],
+    ContextGraphCreated: [event(10, 1, CREATION_HASH, [
+      9n,
+      OWNER,
+      options.zeroNameHash ? ethers.ZeroHash : NAME_HASH,
+    ])],
     Transfer: [
       event(10, 0, CREATION_HASH, [ethers.ZeroAddress, OWNER, 9n]),
       event(15, 0, `0x${'99'.repeat(32)}`, [SECOND_MEMBER, OWNER, 9n]),
@@ -100,7 +107,9 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}) {
     getNameHash: {
       staticCall: async (_contextGraphId: bigint, readOptions: { blockTag: number }) => {
         evidence.nameHashCalls.push(readOptions.blockTag);
-        return readOptions.blockTag < 10 ? ethers.ZeroHash : NAME_HASH;
+        return options.zeroNameHash || readOptions.blockTag < 10
+          ? ethers.ZeroHash
+          : NAME_HASH;
       },
     },
     getAddress: async () => GOVERNANCE,
@@ -192,6 +201,22 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     await expect(makeEvmAuthorityAdapter({ reorg: true })
       .getContextGraphAuthoritySnapshot(9n))
       .rejects.toThrow('anchor changed');
+  });
+
+  it('preserves authority snapshots for registered zero-name-hash graphs', async () => {
+    const adapter = makeEvmAuthorityAdapter({ zeroNameHash: true });
+
+    await expect(adapter.getContextGraphAuthoritySnapshot(9n)).resolves.toMatchObject({
+      contextGraphId: '9',
+      owner: OWNER,
+      active: true,
+      nameHash: ethers.ZeroHash,
+    });
+
+    const evidence = (adapter as any).authorityEvidence;
+    expect(evidence.nameHashCalls).toEqual([30]);
+    expect(evidence.ranges.slice(0, 3)).toEqual([[7, 16], [17, 26], [27, 30]]);
+    expect(evidence.ranges.slice(3)).toHaveLength(15);
   });
 
   it('provides the same authority surface in offline mock-chain mode', async () => {

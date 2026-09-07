@@ -170,6 +170,74 @@ function buildCursorContextGraphRegistryScanPlan(
   throw new Error(`Unsupported ContextGraphNameRegistry scan mode: ${JSON.stringify(exhaustive)}`);
 }
 
+interface ContextGraphCreationAtAnchor {
+  readonly creationBlock: number;
+  readonly created: readonly (ethers.EventLog | ethers.Log)[];
+}
+
+/**
+ * Locate the one immutable creation event at a fixed finalized anchor.
+ *
+ * A non-zero name commitment is monotonic and supports a logarithmic block
+ * search. Zero is also a valid, curator-selected commitment, so that rare
+ * opt-out case falls back to bounded deployment-anchored event pages instead
+ * of confusing it with an unregistered numeric slot.
+ */
+async function locateContextGraphCreationAtAnchor(params: Readonly<{
+  contextGraphId: bigint;
+  fromBlock: number;
+  finalizedBlock: number;
+  pageSize: number;
+  signal?: AbortSignal;
+  readNameHashAt: (blockTag: number) => Promise<string>;
+  readCreated: (
+    fromBlock: number,
+    toBlock: number,
+  ) => Promise<readonly (ethers.EventLog | ethers.Log)[]>;
+}>): Promise<ContextGraphCreationAtAnchor> {
+  const finalizedNameHash = await params.readNameHashAt(params.finalizedBlock);
+  if (finalizedNameHash === ethers.ZeroHash) {
+    const created: Array<ethers.EventLog | ethers.Log> = [];
+    for (
+      let lo = params.fromBlock;
+      lo <= params.finalizedBlock;
+      lo += params.pageSize
+    ) {
+      params.signal?.throwIfAborted();
+      const hi = Math.min(lo + params.pageSize - 1, params.finalizedBlock);
+      created.push(...await params.readCreated(lo, hi));
+    }
+    if (created.length !== 1) {
+      throw new Error(
+        `Context Graph ${params.contextGraphId.toString()} has ${created.length} finalized creation events`,
+      );
+    }
+    return Object.freeze({
+      creationBlock: created[0]!.blockNumber,
+      created: Object.freeze(created),
+    });
+  }
+
+  let creationBlock = params.fromBlock;
+  let creationUpperBound = params.finalizedBlock;
+  while (creationBlock < creationUpperBound) {
+    params.signal?.throwIfAborted();
+    const midpoint = Math.floor((creationBlock + creationUpperBound) / 2);
+    if (await params.readNameHashAt(midpoint) === ethers.ZeroHash) {
+      creationBlock = midpoint + 1;
+    } else {
+      creationUpperBound = midpoint;
+    }
+  }
+  const created = await params.readCreated(creationBlock, creationBlock);
+  if (created.length !== 1) {
+    throw new Error(
+      `Context Graph ${params.contextGraphId.toString()} has ${created.length} finalized creation events`,
+    );
+  }
+  return Object.freeze({ creationBlock, created: Object.freeze([...created]) });
+}
+
 export class ContextGraphMethods extends EVMChainAdapterBase {
   /**
    * Legacy cost-independent authorized signer selection. New publish flows use
@@ -954,44 +1022,25 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           }
           return logs;
         };
-        // Locate the immutable creation block with logarithmic historical
-        // getNameHash reads. Scanning every deployment-era page just to find
-        // one indexed creation event still overwhelms public RPCs once the
-        // registry has lived for millions of blocks. The name commitment is
-        // zero before creation and immutable afterwards, so this search stays
-        // exact at the one finalized provider/anchor selected above.
         const readNameHashAt = async (blockTag: number): Promise<string> => String(
           await (contract as any).getNameHash.staticCall(
             contextGraphId,
             { blockTag },
           ),
         ).toLowerCase();
-        if (await readNameHashAt(finalized.number) === ethers.ZeroHash) {
-          throw new Error(
-            `Context Graph ${contextGraphId.toString()} has 0 finalized creation events`,
-          );
-        }
-        let creationBlock = fromBlock;
-        let creationUpperBound = finalized.number;
-        while (creationBlock < creationUpperBound) {
-          options.signal?.throwIfAborted();
-          const midpoint = Math.floor((creationBlock + creationUpperBound) / 2);
-          if (await readNameHashAt(midpoint) === ethers.ZeroHash) {
-            creationBlock = midpoint + 1;
-          } else {
-            creationUpperBound = midpoint;
-          }
-        }
-        const created = await contract.queryFilter(
-          filters.ContextGraphCreated!(contextGraphId),
-          creationBlock,
-          creationBlock,
-        );
-        if (created.length !== 1) {
-          throw new Error(
-            `Context Graph ${contextGraphId.toString()} has ${created.length} finalized creation events`,
-          );
-        }
+        const { creationBlock, created } = await locateContextGraphCreationAtAnchor({
+          contextGraphId,
+          fromBlock,
+          finalizedBlock: finalized.number,
+          pageSize: this.cgRegistryScanPageSize,
+          signal: options.signal,
+          readNameHashAt,
+          readCreated: (startBlock, endBlock) => contract.queryFilter(
+            filters.ContextGraphCreated!(contextGraphId),
+            startBlock,
+            endBlock,
+          ),
+        });
         const [
           current,
           transfers,

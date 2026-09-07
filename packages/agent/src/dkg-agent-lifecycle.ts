@@ -663,6 +663,8 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { Rfc64SwmRecoveryTargetLeaseV1 } from
   './dkg-agent-rfc64-swm-recovery-runtime.js';
+import type { Rfc64CatalogReplayPeerFenceLeaseV1 } from
+  './dkg-agent-rfc64-catalog.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import type { DKGAgent } from './dkg-agent.js';
@@ -833,33 +835,55 @@ const syncPageSizeProfilesByAgent = new WeakMap<DKGAgent, SyncPageSizeProfileCac
 const alreadyMemberDelegationRefreshChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const durableContextGraphSyncChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const durableRecoveryRunnersByAgent = new WeakMap<DKGAgent, DurableRecoveryRunner>();
-const rfc64CatalogReplayConnectionDebounceByAgent = new WeakMap<DKGAgent, Map<string, number>>();
+interface Rfc64CatalogReplayConnectionReservation {
+  commit(): void;
+  release(): void;
+}
+
+interface Rfc64CatalogReplayConnectionDebounceEntry {
+  readonly startedAt: number;
+  readonly token: object;
+}
+
+const rfc64CatalogReplayConnectionDebounceByAgent =
+  new WeakMap<DKGAgent, Map<string, Rfc64CatalogReplayConnectionDebounceEntry>>();
 const RFC64_CATALOG_REPLAY_CONNECTION_DEBOUNCE_MS = 60_000;
 const RFC64_CATALOG_REPLAY_CONNECTION_DEBOUNCE_MAX_PEERS = 256;
 
-function shouldStartRfc64CatalogReplayForConnection(
+function reserveRfc64CatalogReplayForConnection(
   agent: DKGAgent,
   peerId: string,
   nowMs = Date.now(),
-): boolean {
+): Rfc64CatalogReplayConnectionReservation | null {
   let byPeer = rfc64CatalogReplayConnectionDebounceByAgent.get(agent);
   if (byPeer === undefined) {
-    byPeer = new Map<string, number>();
+    byPeer = new Map<string, Rfc64CatalogReplayConnectionDebounceEntry>();
     rfc64CatalogReplayConnectionDebounceByAgent.set(agent, byPeer);
   }
   const previous = byPeer.get(peerId);
   if (
     previous !== undefined
-    && nowMs - previous < RFC64_CATALOG_REPLAY_CONNECTION_DEBOUNCE_MS
-  ) return false;
+    && nowMs - previous.startedAt < RFC64_CATALOG_REPLAY_CONNECTION_DEBOUNCE_MS
+  ) return null;
   byPeer.delete(peerId);
   while (byPeer.size >= RFC64_CATALOG_REPLAY_CONNECTION_DEBOUNCE_MAX_PEERS) {
     const oldestPeerId = byPeer.keys().next().value as string | undefined;
     if (oldestPeerId === undefined) break;
     byPeer.delete(oldestPeerId);
   }
-  byPeer.set(peerId, nowMs);
-  return true;
+  const token = Object.freeze({});
+  byPeer.set(peerId, Object.freeze({ startedAt: nowMs, token }));
+  let settled = false;
+  return Object.freeze({
+    commit: () => {
+      settled = true;
+    },
+    release: () => {
+      if (settled) return;
+      settled = true;
+      if (byPeer?.get(peerId)?.token === token) byPeer.delete(peerId);
+    },
+  });
 }
 
 function durableRecoveryRunnerFor(agent: DKGAgent): DurableRecoveryRunner {
@@ -3903,10 +3927,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // the receiver can remain permanently fenced in `applying`. A later
       // reconnect still gets a fresh pass after the bounded debounce window;
       // ordinary head announcements remain live throughout the window.
-      const replayContextGraphIds = shouldStartRfc64CatalogReplayForConnection(
+      const replayReservation = reserveRfc64CatalogReplayForConnection(
         this,
         remotePeer,
-      )
+      );
+      const replayContextGraphIds = replayReservation !== null
         ? [...new Set([
           ...this.readRfc64CatalogResponsibilitiesV1()
             .filter((responsibility) => responsibility.active && responsibility.mode !== 'legacy')
@@ -3918,9 +3943,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             }),
         ])].sort()
         : [];
-      const replayFenceGenerations = new Map<string, number | null>();
+      if (replayContextGraphIds.length === 0) replayReservation?.release();
+      const replayFenceLeases = new Map<
+        string,
+        Rfc64CatalogReplayPeerFenceLeaseV1 | null
+      >();
       for (const contextGraphId of replayContextGraphIds) {
-        replayFenceGenerations.set(
+        replayFenceLeases.set(
           contextGraphId,
           this.markRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer),
         );
@@ -3950,25 +3979,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           this.log.warn(ctx, `Network admission probe failed for ${remotePeer.slice(-8)} on connect: ${message}`);
-          for (const contextGraphId of replayContextGraphIds) {
-            this.clearRfc64CatalogReplayPeerPendingV1(
-              contextGraphId,
-              remotePeer,
-              replayFenceGenerations.get(contextGraphId),
-            );
-          }
+          for (const lease of replayFenceLeases.values()) lease?.release();
+          replayReservation?.release();
           return;
         }
         if (!admitted) {
-          for (const contextGraphId of replayContextGraphIds) {
-            this.clearRfc64CatalogReplayPeerPendingV1(
-              contextGraphId,
-              remotePeer,
-              replayFenceGenerations.get(contextGraphId),
-            );
-          }
+          for (const lease of replayFenceLeases.values()) lease?.release();
+          replayReservation?.release();
           return;
         }
+        replayReservation?.commit();
         try {
           await this.enrichPeerStoreFromInboundCircuit(evt.detail);
         } catch (err: unknown) {

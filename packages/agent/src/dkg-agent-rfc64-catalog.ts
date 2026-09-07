@@ -515,6 +515,10 @@ const rfc64CatalogReplayRuntimesV1 = new WeakMap<DKGAgent, Rfc64CatalogReplayRun
 interface Rfc64CatalogReplayProgressV1 {
   readonly policyDigest: Digest32V1;
   readonly peerWorklist: Rfc64CatalogReplayPeerWorklistV1;
+  /** Provider-specific failures survive later scoped connection runs. */
+  readonly unresolvedPeers: Set<string>;
+  /** Unattributed parity/overflow failures require one successful full pass. */
+  requiresFullReplay: boolean;
   token: number;
   active: boolean;
   failed: boolean;
@@ -524,6 +528,11 @@ interface Rfc64CatalogReplayProgressV1 {
 interface Rfc64CatalogReplayPeerDemandV1 {
   readonly peerId: string;
   readonly generation: number;
+}
+
+/** Opaque, idempotent ownership of one exact reconnect demand. */
+export interface Rfc64CatalogReplayPeerFenceLeaseV1 {
+  release(): void;
 }
 
 /**
@@ -543,22 +552,31 @@ class Rfc64CatalogReplayPeerWorklistV1 {
     this.#remaining = RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1;
   }
 
-  enqueue(peerId: string): number | null {
-    const generation = ++this.#nextGeneration;
+  acquire(peerId: string): Rfc64CatalogReplayPeerFenceLeaseV1 | null {
     if (!this.#pending.has(peerId)
       && this.#pending.size >= RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1) {
       this.#overflowed = true;
       return null;
     }
+    const generation = ++this.#nextGeneration;
     this.#pending.set(peerId, generation);
-    return generation;
+    let released = false;
+    return Object.freeze({
+      release: () => {
+        if (released) return;
+        released = true;
+        if (this.#pending.get(peerId) === generation) this.#pending.delete(peerId);
+      },
+    });
   }
 
-  clear(peerId: string, generation?: number | null): void {
-    const current = this.#pending.get(peerId);
-    if (current === undefined) return;
-    if (generation !== undefined && generation !== null && current !== generation) return;
-    this.#pending.delete(peerId);
+  seed(peerId: string): void {
+    if (this.#pending.has(peerId)) return;
+    if (this.#pending.size >= RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1) {
+      this.#overflowed = true;
+      return;
+    }
+    this.#pending.set(peerId, ++this.#nextGeneration);
   }
 
   drain(): readonly Rfc64CatalogReplayPeerDemandV1[] {
@@ -614,6 +632,8 @@ function rfc64CatalogReplayProgressForV1(
     progress = {
       policyDigest,
       peerWorklist: new Rfc64CatalogReplayPeerWorklistV1(),
+      unresolvedPeers: new Set(),
+      requiresFullReplay: false,
       token: 0,
       active: false,
       failed: false,
@@ -1256,7 +1276,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
     peerId: string,
-  ): number | null {
+  ): Rfc64CatalogReplayPeerFenceLeaseV1 | null {
     const service = this.rfc64PublicCatalogServiceV1;
     const networkId = (
       this.config.rfc64CatalogDeploymentProfile?.networkId
@@ -1273,29 +1293,27 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       contextGraphId,
       accepted.policyDigest,
     );
-    const generation = progress.peerWorklist.enqueue(peerId);
+    const worklistLease = progress.peerWorklist.acquire(peerId);
+    if (worklistLease === null) return null;
     if (!progress.active) {
       progress.active = true;
       progress.failed = false;
       bumpRfc64CatalogReplayStatusRevisionV1(this);
     }
-    return generation;
-  }
-
-  /** Release a synchronous connection fence when admission rejects that peer. */
-  clearRfc64CatalogReplayPeerPendingV1(
-    this: DKGAgent,
-    contextGraphId: string,
-    peerId: string,
-    generation?: number | null,
-  ): void {
-    const progress = rfc64CatalogReplayProgressV1.get(this)?.get(contextGraphId);
-    if (progress === undefined) return;
-    progress.peerWorklist.clear(peerId, generation);
-    if (!progress.peerWorklist.hasPending && progress.completion === null && progress.active) {
-      progress.active = false;
-      bumpRfc64CatalogReplayStatusRevisionV1(this);
-    }
+    let released = false;
+    return Object.freeze({
+      release: () => {
+        if (released) return;
+        released = true;
+        worklistLease.release();
+        const current = rfc64CatalogReplayProgressV1.get(this)?.get(contextGraphId);
+        if (current !== progress) return;
+        if (!progress.peerWorklist.hasPending && progress.completion === null && progress.active) {
+          progress.active = false;
+          bumpRfc64CatalogReplayStatusRevisionV1(this);
+        }
+      },
+    });
   }
 
   /** Desired RFC-64 selection derived from the normal live CG lifecycle. */
@@ -2898,7 +2916,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1,
         ),
       );
-      for (const peer of peers) replayProgress.peerWorklist.enqueue(peer);
+      for (const peer of peers) replayProgress.peerWorklist.seed(peer);
+    }
+    for (const peer of replayProgress.unresolvedPeers) {
+      replayProgress.peerWorklist.seed(peer);
     }
     if (!replayProgress.peerWorklist.hasPending) {
       return Object.freeze({ requested: 0, failed: 0 });
@@ -2908,12 +2929,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     replayProgress.token += 1;
     const token = replayProgress.token;
     replayProgress.active = true;
-    replayProgress.failed = false;
     bumpRfc64CatalogReplayStatusRevisionV1(this);
     const run = (async (): Promise<Readonly<{ requested: number; failed: number }>> => {
       let requested = 0;
       let failed = 0;
       let replayFailed = true;
+      let requiresFullReplay = false;
       try {
         const manifests: Rfc64PublicCatalogHeadAnnouncementV1[][] = [];
         for (;;) {
@@ -2928,6 +2949,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
                 });
                 manifests.push([...completion.heads]);
                 requested += 1;
+                replayProgress.unresolvedPeers.delete(remotePeerId);
                 return;
               } catch (error) {
                 // A connected peer that does not hold the current CG is not a
@@ -2938,8 +2960,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
                 if (
                   error instanceof Rfc64PublicCatalogTransportErrorV1
                   && error.code === 'catalog-transport-policy-denied'
-                ) return;
-                if (attempt === 1) failed += 1;
+                ) {
+                  replayProgress.unresolvedPeers.delete(remotePeerId);
+                  return;
+                }
+                if (attempt === 1) {
+                  replayProgress.unresolvedPeers.add(remotePeerId);
+                  failed += 1;
+                }
               }
             }
           }));
@@ -2947,6 +2975,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // promised announcement is synchronously admitted at this receiver.
           await service.whenReceiverIdle();
           if (replayProgress.peerWorklist.exhausted) {
+            requiresFullReplay = true;
             failed += 1;
             break;
           }
@@ -2985,23 +3014,30 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // snapshot owns another replay pass, including a reconnect from the
           // same peer. The worklist budget keeps that conservative fence finite.
           if (replayProgress.peerWorklist.exhausted) {
+            requiresFullReplay = true;
             failed += 1;
             break;
           }
           if (replayProgress.peerWorklist.hasPending) continue;
           failed += parityFailures;
+          if (parityFailures > 0) requiresFullReplay = true;
           break;
         }
         replayFailed = failed > 0;
         return Object.freeze({ requested, failed });
       } catch {
+        requiresFullReplay = true;
         failed += 1;
         return Object.freeze({ requested, failed });
       } finally {
         const current = rfc64CatalogReplayProgressV1.get(this)?.get(contextGraphId);
         if (current === replayProgress && current.token === token) {
           current.active = false;
-          current.failed = replayFailed;
+          if (requiresFullReplay) current.requiresFullReplay = true;
+          if (!replayFailed && options.seedConnectedPeers !== false) {
+            current.requiresFullReplay = false;
+          }
+          current.failed = current.unresolvedPeers.size > 0 || current.requiresFullReplay;
           current.completion = null;
           current.peerWorklist.settleOverflow();
           bumpRfc64CatalogReplayStatusRevisionV1(this);
