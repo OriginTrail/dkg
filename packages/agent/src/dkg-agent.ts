@@ -1,4 +1,5 @@
-import { ResourceConfigWarnings } from './resource-limits.js';
+import { AGENT_RESOURCE_ENV } from './resource-runtime.js';
+import { resolveStartupResourcePolicy } from './resource-policy.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -413,7 +414,6 @@ import {
   isLocalOxigraphConfig,
   sliceIntoCiphertextChunks,
 } from './dkg-agent-helpers.js';
-import { resolveSyncReconcilerTiming } from './sync/reconciler-timing.js';
 import {
   swmSenderStateKey,
   swmReceiverStateKey,
@@ -1385,8 +1385,7 @@ export class DKGAgent extends DKGAgentBase {
     delete configWithoutRfc64CatalogControls.syncBackoffBaseMs;
     delete configWithoutRfc64CatalogControls.syncBackoffMaxMs;
     delete configWithoutRfc64CatalogControls.syncBackoffJitter;
-    const numericWarnings = new ResourceConfigWarnings();
-    const syncReconcilerTiming = resolveSyncReconcilerTiming(config, numericWarnings.reject);
+    const resourcePolicy = resolveStartupResourcePolicy(config, process.env, AGENT_RESOURCE_ENV);
     const resolvedConfig: ResolvedDKGAgentConfig = {
       ...configWithoutRfc64CatalogControls,
       genesisId,
@@ -1398,8 +1397,8 @@ export class DKGAgent extends DKGAgentBase {
       rfc64CatalogExecutionPlan,
       rfc64PublicCatalogBootstrap,
       contextGraphSubscriptionRehydrationEnabled,
-      syncReconcilerTiming,
-      numericConfigRejectedSettings: numericWarnings.settings,
+      syncReconcilerTiming: resourcePolicy.reconcilerTiming,
+      resourcePolicy,
     };
 
     const port = config.listenPort ?? 0;

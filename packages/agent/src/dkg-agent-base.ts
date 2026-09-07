@@ -28,7 +28,7 @@ import type { Rfc64CatalogSynchronizationEvidenceV1 } from
 import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 import { Rfc64CatalogMutationCoordinatorV1 } from './rfc64/catalog-mutation-runtime-v1.js';
 import type { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
-import { AGENT_RESOURCE_ENV } from './resource-limits.js';
+import { AGENT_RESOURCE_ENV } from './resource-runtime.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';

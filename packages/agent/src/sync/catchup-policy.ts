@@ -1,4 +1,5 @@
-import { AGENT_RESOURCE_ENV, AGENT_RESOURCE_ENV_SPECS, RESOURCE_MAX, resourceIntegerEnv } from '../resource-limits.js';
+import { AGENT_RESOURCE_ENV } from '../resource-runtime.js';
+import { AGENT_RESOURCE_ENV_SPECS, RESOURCE_MAX, resourceIntegerEnv } from '../resource-limits.js';
 import { normalizeSyncAdmissionSource, type SyncAdmissionSource } from './policy.js';
 
 export type CatchupMode = 'background' | 'foreground';

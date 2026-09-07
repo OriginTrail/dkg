@@ -1,3 +1,5 @@
+import { resolveStartupResourcePolicy, type StartupResourcePolicy } from '../src/resource-policy.js';
+import { resolveAgentResourceEnvironment } from '../src/resource-limits.js';
 import { vi } from 'vitest';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -466,6 +468,7 @@ export interface SelectedSwmLifecycleHarnessOptions {
 
 export interface SelectedSwmLifecycleAgentFixture {
   config: {
+    resourcePolicy: StartupResourcePolicy;
     syncContextGraphPriorities: Readonly<Record<string, number>>;
     syncResponderSnapshotLimits?: {
       global?: { rows?: number; bytesEstimate?: number };
@@ -669,8 +672,7 @@ export function createSelectedSwmLifecycleHarness(
   let selectedSwmMetaTransfers: SelectedSwmMetaTransferCoordinator | undefined;
   let createTargetExecutorSession: (() => SwmTargetExecutorV1) | undefined;
 
-  const agent: SelectedSwmLifecycleAgentFixture = {
-    config: {
+  const config = {
       syncContextGraphPriorities: options.priorities ?? {},
       ...(options.metaContinuationLimits
         ? {
@@ -691,7 +693,9 @@ export function createSelectedSwmLifecycleHarness(
           },
         }
         : {}),
-    },
+    };
+  const agent: SelectedSwmLifecycleAgentFixture = {
+    config: { ...config, resourcePolicy: resolveStartupResourcePolicy(config, process.env, resolveAgentResourceEnvironment(process.env)) },
     selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
     store,
     writeLocks: new Map(),

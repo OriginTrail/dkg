@@ -15,6 +15,7 @@
  */
 
 import type { ethers } from 'ethers';
+import type { StartupResourcePolicy } from './resource-policy.js';
 import type { CatchupPassDecisionReason } from './sync/catchup-pass-policy.js';
 import type {
   Quad,
@@ -1962,8 +1963,8 @@ export type ResolvedDKGAgentConfig =
     contextGraphSubscriptionRehydrationEnabled: boolean;
     storageAckTiming: StorageAckTiming;
     syncReconcilerTiming: SyncReconcilerTiming;
-    /** Bounded diagnostic names retained from constructor-time parsing, never raw values. */
-    numericConfigRejectedSettings?: readonly string[];
+    /** Executable startup resource policy and the diagnostics derived from it. */
+    resourcePolicy: StartupResourcePolicy;
     rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
     rfc64CatalogBootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
     /** Sole immutable restart-stable D17/D18 runtime authority for this boot. */

@@ -45,17 +45,30 @@ export function resourceIntegerEnv(
 /** Per-startup diagnostics: bounded cardinality/length, no raw values, no logging in parsers. */
 export class ResourceConfigWarnings {
   private readonly names = new Set<string>();
+  private readonly clamped = new Set<string>();
   private truncated = false;
-  readonly reject: RejectedResourceSetting = (name) => {
+  private retain(name: string, target: Set<string>): void {
     const label = name.replace(/[^a-zA-Z0-9_.]/g, '_').slice(0, 100);
-    if (this.names.has(label)) return;
-    if (this.names.size < 24) this.names.add(label);
+    if (target.has(label)) return;
+    if (this.names.size + this.clamped.size < 24) target.add(label);
     else this.truncated = true;
-  };
+  }
+  readonly reject: RejectedResourceSetting = (name) => this.retain(name, this.names);
+  readonly clamp: RejectedResourceSetting = (name) => this.retain(name, this.clamped);
   get settings(): readonly string[] { return [...this.names]; }
   message(): string | undefined {
-    if (this.names.size === 0) return undefined;
-    return `Ignored invalid resource settings; using resolved fallback policy: ${[...this.names].join(', ')}${this.truncated ? ', ...' : ''}`;
+    if (this.names.size + this.clamped.size === 0) return undefined;
+    const parts = [];
+    if (this.names.size) parts.push(`Ignored invalid resource settings; using resolved fallback policy: ${[...this.names].join(', ')}`);
+    if (this.clamped.size) parts.push(`Clamped resource settings to global limits: ${[...this.clamped].join(', ')}`);
+    return `${parts.join('; ')}${this.truncated ? ', ...' : ''}`;
+  }
+  snapshot() {
+    return Object.freeze({
+      rejected: Object.freeze([...this.names]),
+      clamped: Object.freeze([...this.clamped]),
+      warning: this.message(),
+    });
   }
 }
 
@@ -90,8 +103,5 @@ export function resolveAgentResourceEnvironment(env: Readonly<Record<string, str
   const startupMaxDelayMs = resourceIntegerEnv(env.DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS,
     { min: 0, max: RESOURCE_MAX.timerMs }, 'DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS', warnings.reject)
     ?? values.DKG_VM_RECONCILE_INTERVAL_MS;
-  return Object.freeze({ values: Object.freeze(values), startupMaxDelayMs, rejected: warnings.settings });
+  return Object.freeze({ values: Object.freeze(values), startupMaxDelayMs, rejected: Object.freeze(warnings.settings) });
 }
-
-/** These existing static settings remain restart-scoped. The same snapshot supplies diagnostics. */
-export const AGENT_RESOURCE_ENV = resolveAgentResourceEnvironment(process.env);

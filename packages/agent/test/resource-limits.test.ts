@@ -8,6 +8,7 @@ import {
   getSyncBackpressureSnapshot, resolveNonNegativeIntegerSwitch, resolvePositiveIntegerSwitch,
   resolveSyncGlobalBackpressure, withGlobalSyncBackpressure,
 } from '../src/sync/backpressure.js';
+import { resolveStartupResourcePolicy } from '../src/resource-policy.js';
 import { resolveSyncReconcilerTiming } from '../src/sync/reconciler-timing.js';
 import { resolveSyncResponderSnapshotPolicy } from '../src/sync/responder/sync-handler.js';
 import { resolveCatchupBackpressureMaxWaitMs } from '../src/sync/catchup-policy.js';
@@ -43,6 +44,15 @@ describe('bounded resource integers', () => {
     expect(new ResourceConfigWarnings().message()).toBeUndefined();
   });
 
+  it('sanitizes retained names before rendering diagnostics', () => {
+    const warnings = new ResourceConfigWarnings();
+    warnings.reject('bad\nname'.repeat(50));
+    expect(warnings.settings).toEqual([('bad_name'.repeat(50)).slice(0, 100)]);
+    expect(warnings.settings[0]).toHaveLength(100);
+    expect(warnings.message()).toContain(warnings.settings[0]);
+    expect(warnings.message()).not.toContain('\n');
+  });
+
   it('bounds diagnostics independently of invalid value size and repeated resolutions', () => {
     const warnings = new ResourceConfigWarnings();
     const secret = 'secret-value'.repeat(20_000);
@@ -53,8 +63,7 @@ describe('bounded resource integers', () => {
     expect(warnings.message()).toContain('...');
     expect(warnings.message()!.length).toBeLessThan(2_600);
     expect(warnings.message()).not.toContain('secret-value');
-    warnings.reject('bad\nname'.repeat(50));
-    expect(warnings.message()).not.toContain('\n');
+
   });
 });
 
@@ -139,6 +148,18 @@ describe('resolved sync policy and production pressure reporting', () => {
     expect(() => resolveSyncGlobalBackpressure({ syncAdmission: { globalMaxInflight: 1, fast: { maxInflight: 2 } } })).toThrow('must not exceed');
   });
 
+  it('caps the aggregate queue even when every partition leaf is valid', () => {
+    for (const key of ['DKG_SYNC_GLOBAL_MAX_INFLIGHT', 'DKG_SYNC_GLOBAL_LIMIT', 'DKG_SYNC_GLOBAL_QUEUE_LIMIT']) vi.stubEnv(key, '');
+    const policy = resolveSyncGlobalBackpressure({ syncAdmission: {
+      mode: 'partitioned', globalMaxInflight: 4,
+      fast: { maxInflight: 1, queueLimit: RESOURCE_MAX.queue },
+      slow: { maxInflight: 3, foregroundReserved: 1, backgroundMaxInflight: 2,
+        foregroundQueueLimit: RESOURCE_MAX.queue, backgroundQueueLimit: RESOURCE_MAX.queue },
+    } });
+    expect(policy.queueLimit).toBe(RESOURCE_MAX.queue);
+    expect(getSyncBackpressureSnapshot(policy).queueLimit).toBe(RESOURCE_MAX.queue);
+  });
+
   it('bounds generic integer switches with an explicit tighter owner ceiling', () => {
     vi.stubEnv('DKG_TEST_RESOURCE', 'Infinity');
     expect(resolveNonNegativeIntegerSwitch(0, 'DKG_TEST_RESOURCE', 100)).toBe(0);
@@ -148,6 +169,37 @@ describe('resolved sync policy and production pressure reporting', () => {
     vi.stubEnv('DKG_TEST_RESOURCE', '100');
     expect(resolvePositiveIntegerSwitch(5, 'DKG_TEST_RESOURCE', 100)).toBe(100);
   });
+});
+
+it('composes bounded executable policy and immutable diagnostics using the supplied environment', () => {
+  vi.stubEnv('DKG_SYNC_GLOBAL_MAX_INFLIGHT', '100');
+  const env = { DKG_SYNC_GLOBAL_MAX_INFLIGHT: 'invalid', DKG_SYNC_GLOBAL_QUEUE_LIMIT: '12' };
+  const policy = resolveStartupResourcePolicy({
+    syncGlobalMaxInflight: 3,
+    syncReconcilerIntervalMs: 12.5,
+    syncResponderSnapshotLimits: { global: { rows: 100 }, local: { rows: 101 } },
+  }, env, resolveAgentResourceEnvironment({ DKG_VM_RECONCILE_BATCH_SIZE: '20' }));
+  expect(policy.admission).toMatchObject({ limit: 3, queueLimit: 12 });
+  expect(policy.summary).toMatchObject({ syncGlobalInflightLimit: policy.admission.limit,
+    snapshotGlobalRows: policy.snapshot.budget.maxRows,
+    vmReconcileLimits: policy.vm.values });
+  expect(policy.diagnostics.rejected).toEqual(['syncReconcilerIntervalMs', 'DKG_SYNC_GLOBAL_MAX_INFLIGHT']);
+  expect(policy.diagnostics.clamped).toEqual(['syncResponderSnapshotLimits.local.rows']);
+  expect(policy.diagnostics.warning).toContain('Clamped resource settings');
+  expect(Object.isFrozen(policy.snapshot.budget)).toBe(true);
+});
+
+it('uses the diagnosed SWM startup policy until the job settings change, without repeating diagnostics', () => {
+  const env = { DKG_SWM_CATCHUP_PASS_BUDGET_MS: 'invalid', DKG_SWM_CATCHUP_MAX_PASSES: '3' };
+  const policy = resolveStartupResourcePolicy({}, env, resolveAgentResourceEnvironment({}));
+  expect(policy.swmPassForJob(env)).toBe(policy.summary.swmCatchupPassAtStartup);
+  expect(policy.swmPassForJob(env)).toEqual({ budgetMs: 600_000, maxPasses: 3 });
+  expect(policy.diagnostics.rejected).toEqual(['DKG_SWM_CATCHUP_PASS_BUDGET_MS']);
+  const next = policy.swmPassForJob({ ...env, DKG_SWM_CATCHUP_PASS_BUDGET_MS: '0' });
+  expect(next).toEqual({ budgetMs: 0, maxPasses: 3 });
+  expect(Object.isFrozen(next)).toBe(true);
+  expect(policy.summary.swmCatchupPassAtStartup.budgetMs).toBe(600_000);
+  expect(policy.diagnostics.rejected).toEqual(['DKG_SWM_CATCHUP_PASS_BUDGET_MS']);
 });
 
 describe('snapshot and retry/timing budgets', () => {

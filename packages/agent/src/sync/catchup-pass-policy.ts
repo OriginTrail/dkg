@@ -525,9 +525,9 @@ export function resolveSwmCatchupPassConfig(environment: {
 } = {
   DKG_SWM_CATCHUP_PASS_BUDGET_MS: process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS,
   DKG_SWM_CATCHUP_MAX_PASSES: process.env.DKG_SWM_CATCHUP_MAX_PASSES,
-}): CatchupPassConfig {
+}, onRejected?: RejectedResourceSetting): CatchupPassConfig {
   return {
-    budgetMs: resolveSwmCatchupPassBudgetMs(environment.DKG_SWM_CATCHUP_PASS_BUDGET_MS),
-    maxPasses: resolveSwmCatchupMaxPasses(environment.DKG_SWM_CATCHUP_MAX_PASSES),
+    budgetMs: resolveSwmCatchupPassBudgetMs(environment.DKG_SWM_CATCHUP_PASS_BUDGET_MS, onRejected),
+    maxPasses: resolveSwmCatchupMaxPasses(environment.DKG_SWM_CATCHUP_MAX_PASSES, onRejected),
   };
 }

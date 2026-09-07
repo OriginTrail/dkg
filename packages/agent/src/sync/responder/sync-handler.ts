@@ -1,4 +1,4 @@
-import { RESOURCE_MAX, resourceInteger, resourceIntegerEnv } from '../../resource-limits.js';
+import { RESOURCE_MAX, resourceInteger, resourceIntegerEnv, type RejectedResourceSetting } from '../../resource-limits.js';
 import {
   createOperationContext,
   DEFAULT_MAX_READ_BYTES,
@@ -157,6 +157,7 @@ export function resolveSyncResponderSnapshotPolicy(
   config?: SyncResponderSnapshotLimitsConfig,
   env: Readonly<Record<string, string | undefined>> = process.env,
   onWarning: (message: string) => void = () => {},
+  onRejected?: RejectedResourceSetting,
 ): ResolvedSyncResponderSnapshotPolicy {
   validateSyncResponderSnapshotLimitsConfig(config);
   const warnings = new Set<string>();
@@ -168,7 +169,7 @@ export function resolveSyncResponderSnapshotPolicy(
   const resolve = (key: keyof typeof SNAPSHOT_BUDGET_ENV, configured: number | undefined,
     fallback: number, path: string, maximum: number) => {
     const bounds = { min: 1, max: maximum } as const;
-    const reject = (name: string) => warnOnce(`Ignoring invalid resource setting ${name}; using fallback`);
+    const reject = onRejected ?? ((name: string) => warnOnce(`Ignoring invalid resource setting ${name}; using fallback`));
     return resourceIntegerEnv(env[SNAPSHOT_BUDGET_ENV[key]], bounds, SNAPSHOT_BUDGET_ENV[key], reject)
       ?? resourceInteger(configured, bounds, path, reject) ?? fallback;
   };

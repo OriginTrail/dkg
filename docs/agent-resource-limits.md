@@ -37,15 +37,22 @@ partition timeout `0` preserves the existing no-timeout setting, VM startup dela
 passes. A disabled sync-global limiter is represented as `null` in the legacy
 pressure snapshot and `0` in W1 capacity, as before.
 
-The startup log emits at most one combined resource-configuration warning,
-capped at 4,096 characters, containing setting names and safe fallback/clamp
-information. It never includes the rejected values. Repeated admission or status
-reads do not log configuration warnings. VM/catch-up static settings and their
-rejection names share one immutable import-time snapshot; restart the process to
-change them. SWM pass configuration continues to resolve at each job boundary.
-The `Resolved sync policy` startup record includes the effective VM limits,
-reconciler timing, snapshot budgets, and admission limits. Legacy sync status and
-W1 use the executable resolved admission policy, including fallback values.
+`resolveStartupResourcePolicy` resolves executable admission, snapshot and
+reconciler settings when the agent is constructed and owns their immutable
+diagnostics. The startup log emits at most one resource warning with at most
+24 sanitized setting names (100 characters each), including fallback/clamp
+information and never rejected values. Repeated admission/status reads use the
+resolved numeric policy without reparsing or logging. Selected recovery scopes
+can still evolve as an Edge subscribes to graphs.
+
+VM/catch-up static settings live in the explicit `resource-runtime.ts` process
+snapshot; importing `resource-limits.ts` or a pure startup-jitter parser does not
+initialize it. Restart the process to change static settings, and construct a new
+agent to change its admission/snapshot/reconciler policy. SWM pass configuration
+uses the diagnosed startup policy while its environment values are unchanged;
+changed values resolve quietly at the next job boundary. The startup record
+labels its SWM values as the initial policy, rather than a permanent job limit. The `Resolved sync policy` record is derived from the same
+values used by execution, status and W1.
 
 Existing independently bounded controls remain in their owners: RS-heal limits
 clamp to 64 items and 10,000 CG cursors; exact-recovery peer/roster counts use fixed

@@ -1,4 +1,5 @@
-import { AGENT_RESOURCE_ENV, RESOURCE_MAX, resourceInteger } from '../resource-limits.js';
+import { AGENT_RESOURCE_ENV } from '../resource-runtime.js';
+import { RESOURCE_MAX, resourceInteger } from '../resource-limits.js';
 
 /** Sync-owned catch-up policy; generic worker-pool mechanics live separately. */
 export const CATCHUP_MAX_CONCURRENT_PEER_SYNCS: number =

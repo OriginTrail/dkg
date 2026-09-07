@@ -565,13 +565,15 @@ function configInteger(value: number | undefined, name: string, max: number,
 }
 
 function envInteger(name: string, max: number,
-  onRejected?: RejectedResourceSetting): number | undefined {
-  return resourceIntegerEnv(process.env[name], { min: 0, max }, name, onRejected);
+  onRejected?: RejectedResourceSetting,
+  env: Readonly<Record<string, string | undefined>> = process.env): number | undefined {
+  return resourceIntegerEnv(env[name], { min: 0, max }, name, onRejected);
 }
 
 export function resolveSyncGlobalBackpressure(
   config: SyncGlobalBackpressureConfig,
   onRejected?: RejectedResourceSetting,
+  env: Readonly<Record<string, string | undefined>> = process.env,
 ): SyncGlobalBackpressurePolicy {
   validateSyncAdmissionConfig(config.syncAdmission);
   const selectedRecoveryIds = new Set(
@@ -581,11 +583,11 @@ export function resolveSyncGlobalBackpressure(
   );
   if (config.syncAdmission !== undefined && config.syncAdmission.mode !== 'shared') {
     return configureResolvedSyncGlobalPolicy(
-      resolvePartitionedSyncGlobalBackpressure(config, selectedRecoveryIds, onRejected),
+      resolvePartitionedSyncGlobalBackpressure(config, selectedRecoveryIds, onRejected, env),
     );
   }
-  const limit = envInteger('DKG_SYNC_GLOBAL_MAX_INFLIGHT', RESOURCE_MAX.concurrency, onRejected)
-    ?? envInteger('DKG_SYNC_GLOBAL_LIMIT', RESOURCE_MAX.concurrency, onRejected)
+  const limit = envInteger('DKG_SYNC_GLOBAL_MAX_INFLIGHT', RESOURCE_MAX.concurrency, onRejected, env)
+    ?? envInteger('DKG_SYNC_GLOBAL_LIMIT', RESOURCE_MAX.concurrency, onRejected, env)
     ?? configInteger(config.syncGlobalMaxInflight, 'syncGlobalMaxInflight', RESOURCE_MAX.concurrency, onRejected)
     ?? configInteger(config.syncGlobalLimit, 'syncGlobalLimit', RESOURCE_MAX.concurrency, onRejected)
     ?? DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT;
@@ -597,7 +599,7 @@ export function resolveSyncGlobalBackpressure(
     }) as SyncGlobalBackpressurePolicy);
   }
 
-  const queueLimit = envInteger('DKG_SYNC_GLOBAL_QUEUE_LIMIT', RESOURCE_MAX.queue, onRejected)
+  const queueLimit = envInteger('DKG_SYNC_GLOBAL_QUEUE_LIMIT', RESOURCE_MAX.queue, onRejected, env)
     ?? configInteger(config.syncGlobalQueueLimit, 'syncGlobalQueueLimit', RESOURCE_MAX.queue, onRejected)
     ?? limit * DEFAULT_SYNC_GLOBAL_QUEUE_LIMIT_MULTIPLIER;
   const policy = Object.freeze({
@@ -650,13 +652,14 @@ function resolvePartitionedSyncGlobalBackpressure(
   globalConfig: SyncGlobalBackpressureConfig,
   selectedRecoveryIds: ReadonlySet<string>,
   onRejected?: RejectedResourceSetting,
+  env: Readonly<Record<string, string | undefined>> = process.env,
 ): SyncGlobalBackpressurePolicy {
   const config = globalConfig.syncAdmission;
   if (config === undefined) {
     throw new TypeError('Invalid syncAdmission: partitioned mode requires a config object');
   }
-  const envLimit = envInteger('DKG_SYNC_GLOBAL_MAX_INFLIGHT', RESOURCE_MAX.concurrency, onRejected)
-    ?? envInteger('DKG_SYNC_GLOBAL_LIMIT', RESOURCE_MAX.concurrency, onRejected);
+  const envLimit = envInteger('DKG_SYNC_GLOBAL_MAX_INFLIGHT', RESOURCE_MAX.concurrency, onRejected, env)
+    ?? envInteger('DKG_SYNC_GLOBAL_LIMIT', RESOURCE_MAX.concurrency, onRejected, env);
   const limit = envLimit
     ?? configInteger(globalConfig.syncGlobalMaxInflight, 'syncGlobalMaxInflight', RESOURCE_MAX.concurrency, onRejected)
     ?? configInteger(globalConfig.syncGlobalLimit, 'syncGlobalLimit', RESOURCE_MAX.concurrency, onRejected)
@@ -767,7 +770,7 @@ function resolvePartitionedSyncGlobalBackpressure(
   const partitionQueueLimit = fast.queueLimit
     + slow.foregroundQueueLimit
     + slow.backgroundQueueLimit;
-  const queueLimit = envInteger('DKG_SYNC_GLOBAL_QUEUE_LIMIT', RESOURCE_MAX.queue, onRejected)
+  const queueLimit = envInteger('DKG_SYNC_GLOBAL_QUEUE_LIMIT', RESOURCE_MAX.queue, onRejected, env)
     ?? configInteger(globalConfig.syncGlobalQueueLimit, 'syncGlobalQueueLimit', RESOURCE_MAX.queue, onRejected)
     ?? Math.min(partitionQueueLimit, RESOURCE_MAX.queue);
   const policy = Object.freeze({
@@ -779,6 +782,20 @@ function resolvePartitionedSyncGlobalBackpressure(
   automaticBackgroundLimits.set(policy, selectedRecoveryIds.size > 0 && limit > 1 ? limit - 1 : limit);
   selectedRecoveryScopeIds.set(policy, selectedRecoveryIds);
   return policy;
+}
+
+/** Keep numeric startup policy fixed while operator-selected recovery scopes evolve. */
+export function withSelectedSyncRecoveryScopes(
+  base: SyncGlobalBackpressurePolicy,
+  contextGraphIds: readonly string[],
+): SyncGlobalBackpressurePolicy {
+  const policy = Object.freeze({ ...base }) as SyncGlobalBackpressurePolicy;
+  const selected = new Set(contextGraphIds.filter((id) => typeof id === 'string' && id.length > 0));
+  if (policy.limit !== undefined) {
+    automaticBackgroundLimits.set(policy, selected.size > 0 && policy.limit > 1 ? policy.limit - 1 : policy.limit);
+  }
+  selectedRecoveryScopeIds.set(policy, selected);
+  return configureResolvedSyncGlobalPolicy(policy);
 }
 
 export function getSyncBackpressureSnapshot(

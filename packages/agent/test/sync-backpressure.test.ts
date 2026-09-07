@@ -1,3 +1,5 @@
+import { resolveStartupResourcePolicy } from '../src/resource-policy.js';
+import { resolveAgentResourceEnvironment } from '../src/resource-limits.js';
 import { describe, expect, it } from 'vitest';
 import {
   backpressureRegistry,
@@ -19,6 +21,10 @@ import {
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { resolveRfc64CatalogExecutionPlanV1 } from
   '../src/rfc64/public-catalog-activation-config-v1.js';
+
+function withResourcePolicy<T extends Parameters<typeof resolveStartupResourcePolicy>[0]>(config: T) {
+  return { ...config, resourcePolicy: resolveStartupResourcePolicy(config, {}, resolveAgentResourceEnvironment({})) };
+}
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -299,7 +305,7 @@ describe('sync global backpressure', () => {
     // /api/diagnostics/backpressure, which is the attribution issue #2006 had to
     // reconstruct from daemon logs.
     const agentLike = {
-      config: { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 1 },
+      config: withResourcePolicy({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 1 }),
       node: { stopSignal: undefined },
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
@@ -1907,7 +1913,7 @@ describe('sync global backpressure', () => {
   it('derives the selected reservation from RFC-64 config and excludes unrelated recovery', async () => {
     const selectedCg = 'urn:cg:rfc64-selected';
     const agentLike = {
-      config: {
+      config: withResourcePolicy({
         syncGlobalMaxInflight: 2,
         syncGlobalQueueLimit: 6,
         rfc64PublicCatalogBootstrap: {
@@ -1928,7 +1934,7 @@ describe('sync global backpressure', () => {
             },
           },
         }),
-      },
+      }),
       node: { stopSignal: undefined },
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
@@ -2008,12 +2014,12 @@ describe('sync global backpressure', () => {
   ])('reserves $label capacity for a runtime-selected Context Graph', async ({ nodeRole }) => {
     const selectedCg = 'urn:cg:edge-selected';
     const agentLike = {
-      config: {
+      config: withResourcePolicy({
         ...(nodeRole === undefined ? {} : { nodeRole }),
         syncContextGraphs: [selectedCg],
         syncGlobalMaxInflight: 2,
         syncGlobalQueueLimit: 6,
-      },
+      }),
       node: { stopSignal: undefined },
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
@@ -2082,12 +2088,12 @@ describe('sync global backpressure', () => {
   it('does not reserve Core capacity for its all-CG sync inventory', async () => {
     const trackedCg = 'urn:cg:core-hosted';
     const agentLike = {
-      config: {
+      config: withResourcePolicy({
         nodeRole: 'core',
         syncContextGraphs: [trackedCg],
         syncGlobalMaxInflight: 2,
         syncGlobalQueueLimit: 4,
-      },
+      }),
       node: { stopSignal: undefined },
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
@@ -2122,7 +2128,7 @@ describe('sync global backpressure', () => {
   it('does not derive a reservation from an RFC-64 policy without complete providers', async () => {
     const contextGraphId = 'urn:cg:rfc64-no-complete-provider';
     const agentLike = {
-      config: {
+      config: withResourcePolicy({
         syncGlobalMaxInflight: 2,
         syncGlobalQueueLimit: 4,
         rfc64PublicCatalogBootstrap: {
@@ -2131,7 +2137,7 @@ describe('sync global backpressure', () => {
             completeSwmProviders: [],
           }],
         },
-      },
+      }),
       node: { stopSignal: undefined },
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
