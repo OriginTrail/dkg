@@ -2111,24 +2111,24 @@ export async function swapSlot(target: 'a' | 'b'): Promise<void> {
   await writeFile(join(rDir, 'active'), target);
 }
 
-export function configPath(): string {
-  return join(dkgDir(), 'config.json');
+export function configPath(home: string = dkgDir()): string {
+  return join(home, 'config.json');
 }
 
-export function configYamlPath(): string {
-  return join(dkgDir(), 'config.yaml');
+export function configYamlPath(home: string = dkgDir()): string {
+  return join(home, 'config.yaml');
 }
 
-export function pidPath(): string {
-  return join(dkgDir(), 'daemon.pid');
+export function pidPath(home: string = dkgDir()): string {
+  return join(home, 'daemon.pid');
 }
 
 export function logPath(): string {
   return join(dkgDir(), 'daemon.log');
 }
 
-export function apiPortPath(): string {
-  return join(dkgDir(), 'api.port');
+export function apiPortPath(home: string = dkgDir()): string {
+  return join(home, 'api.port');
 }
 
 export async function ensureDkgDir(): Promise<void> {
@@ -2164,16 +2164,16 @@ export function readNodeRoleFromConfigSync(): 'edge' | 'core' {
   }
 }
 
-export async function loadConfig(): Promise<DkgConfig> {
+export async function loadConfig(home: string = dkgDir()): Promise<DkgConfig> {
   try {
-    const raw = await readFile(configPath(), 'utf-8');
+    const raw = await readFile(configPath(home), 'utf-8');
     return mergePersistedConfig(JSON.parse(raw));
   } catch (err) {
     if (!isEnoent(err)) throw err;
   }
 
   try {
-    const raw = await readFile(configYamlPath(), 'utf-8');
+    const raw = await readFile(configYamlPath(home), 'utf-8');
     return mergePersistedConfig(yaml.load(raw));
   } catch (err) {
     if (!isEnoent(err)) throw err;
@@ -2318,13 +2318,13 @@ export async function saveConfig(config: DkgConfig): Promise<void> {
   await writeFile(configPath(), JSON.stringify(config, null, 2) + '\n');
 }
 
-export function configExists(): boolean {
-  return existsSync(configPath()) || existsSync(configYamlPath());
+export function configExists(home: string = dkgDir()): boolean {
+  return existsSync(configPath(home)) || existsSync(configYamlPath(home));
 }
 
-export async function readPid(): Promise<number | null> {
+export async function readPid(home: string = dkgDir()): Promise<number | null> {
   try {
-    const raw = await readFile(pidPath(), 'utf-8');
+    const raw = await readFile(pidPath(home), 'utf-8');
     return parseInt(raw.trim(), 10);
   } catch {
     return null;
@@ -2345,9 +2345,9 @@ export async function removePid(): Promise<void> {
   }
 }
 
-export async function readApiPort(): Promise<number | null> {
+export async function readApiPort(home: string = dkgDir()): Promise<number | null> {
   try {
-    const raw = await readFile(apiPortPath(), 'utf-8');
+    const raw = await readFile(apiPortPath(home), 'utf-8');
     return parseInt(raw.trim(), 10);
   } catch {
     return null;

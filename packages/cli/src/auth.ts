@@ -179,6 +179,16 @@ function generateToken(): string {
  * Returns the set of valid tokens.
  */
 export async function loadTokens(authConfig?: AuthConfig): Promise<Set<string>> {
+  return loadTokensFromFile(tokenFilePath(), authConfig);
+}
+
+/** Resolve one client credential from an explicit home using the normal load/generate policy. */
+export async function loadApiClientToken(home: string): Promise<string | undefined> {
+  const tokens = await loadTokensFromFile(join(home, 'auth.token'));
+  return tokens.values().next().value;
+}
+
+async function loadTokensFromFile(filePath: string, authConfig?: AuthConfig): Promise<Set<string>> {
   const tokens = new Set<string>();
   const fileTokens = new Set<string>();
   // auth.ts:203). Track config-pinned
@@ -198,7 +208,6 @@ export async function loadTokens(authConfig?: AuthConfig): Promise<Set<string>> 
   }
 
   // Load or generate the file-based token
-  const filePath = tokenFilePath();
   if (existsSync(filePath)) {
     try {
       const raw = await readFile(filePath, 'utf-8');

@@ -1,7 +1,7 @@
 import * as configModule from '../src/config.js';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ApiClient } from '../src/api-client.js';
@@ -160,6 +160,55 @@ describe('ApiClient', () => {
       expect(result.status).toBe('unreachable');
       expect(result.jobStatus).toBe('partial');
     });
+
+    it.each(['persisted', 'fallback-json', 'fallback-yaml'] as const)(
+      'connect() keeps every local read in one home across a delayed read (%s)', async (mode) => {
+        const otherHome = join(tempDir, 'other-home');
+        await mkdir(otherHome);
+        process.env.DKG_HOME = tempDir;
+        delete process.env.DKG_API_PORT;
+        await writeFile(join(tempDir, 'daemon.pid'), '12345');
+        await writeFile(join(tempDir, 'auth.token'), 'home-a-token\n');
+        await writeFile(join(otherHome, 'auth.token'), 'home-b-token\n');
+        await writeFile(join(otherHome, 'config.json'), JSON.stringify({ name: 'node-b', apiPort: 9444, apiHost: '192.0.2.20' }));
+        if (mode === 'fallback-yaml') {
+          await writeFile(join(tempDir, 'config.yaml'), 'name: node-a\napiPort: 9317\napiHost: 192.0.2.10\n');
+        } else {
+          await writeFile(join(tempDir, 'config.json'), JSON.stringify({ name: 'node-a', apiPort: 9317, apiHost: '192.0.2.10' }));
+        }
+        if (mode === 'persisted') await writeFile(join(tempDir, 'api.port'), '9317');
+        let release!: () => void;
+        let markEntered!: () => void;
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+        const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+        const readPort = configModule.readApiPort;
+        const read = vi.spyOn(configModule, 'readApiPort').mockImplementation(async (...args) => {
+          const value = await readPort(...args);
+          markEntered();
+          await gate;
+          return value;
+        });
+        const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { agents: [] } });
+        globalThis.fetch = fetch;
+        try {
+          const connecting = ApiClient.connect({ allowConfigFallback: true });
+          await entered;
+          process.env.DKG_HOME = otherHome;
+          release();
+          const connected = await connecting;
+          await connected.agents();
+          expect(calls[0].url).toBe('http://192.0.2.10:9317/api/agents');
+          expect(new Headers(calls[0].opts.headers).get('Authorization')).toBe('Bearer home-a-token');
+          if (mode !== 'persisted') {
+            expect(connected.controlPlaneWarning).toContain('api.port');
+            expect(connected.controlPlaneWarning).not.toContain('daemon.pid');
+          }
+        } finally {
+          release();
+          read.mockRestore();
+        }
+      },
+    );
 
     it('connect() gives DKG_AUTH_TOKEN precedence over the selected home token file', async () => {
       process.env.DKG_HOME = tempDir;

@@ -23,7 +23,7 @@ import {
   serializeAgentListOptions,
   type AgentListPageOptions,
 } from '@origintrail-official/dkg-core';
-import { loadTokens } from './auth.js';
+import { loadApiClientToken } from './auth.js';
 import {
   finalizedPublishOptionsPayload,
   type KnowledgeAssetFinalizedPublishOptions,
@@ -588,12 +588,13 @@ export class ApiClient {
 
   static async connect(opts: ApiClientConnectOptions = {}): Promise<ApiClient> {
     const selectedHome = dkgDir();
+    const environmentToken = process.env.DKG_AUTH_TOKEN?.trim();
     const hasEnvPort = process.env.DKG_API_PORT !== undefined && process.env.DKG_API_PORT !== '';
     const envPort = hasEnvPort
       ? parseInt(process.env.DKG_API_PORT as string, 10)
       : null;
 
-    const filePort = hasEnvPort ? null : await readApiPort();
+    const filePort = hasEnvPort ? null : await readApiPort(selectedHome);
     let port = envPort ?? filePort;
     let configFallback: ConfigFallbackContext | undefined;
     let config: Awaited<ReturnType<typeof loadConfig>> | null = null;
@@ -601,14 +602,14 @@ export class ApiClient {
     // A persisted api.port contains only the bound port. Pair it with the
     // configured bind host so CLI commands reach daemons bound to a specific
     // non-loopback address. Keep the port usable if config parsing fails.
-    if (!hasEnvPort && filePort && configExists()) {
-      config = await loadConfig().catch(() => null);
+    if (!hasEnvPort && filePort && configExists(selectedHome)) {
+      config = await loadConfig(selectedHome).catch(() => null);
     }
 
     if (!port) {
-      const pid = await readPid();
-      if (opts.allowConfigFallback && !hasEnvPort && configExists()) {
-        config = config ?? await loadConfig();
+      const pid = await readPid(selectedHome);
+      if (opts.allowConfigFallback && !hasEnvPort && configExists(selectedHome)) {
+        config = config ?? await loadConfig(selectedHome);
         const configuredPort = Number.isFinite(config.apiPort) && config.apiPort > 0 ? config.apiPort : null;
         if (configuredPort && !isAmbiguousFallbackName(config.name)) {
           const missingFiles = ['api.port', ...(pid ? [] : ['daemon.pid'])];
@@ -620,16 +621,15 @@ export class ApiClient {
     }
 
     if (!port) {
-      const pid = await readPid();
+      const pid = await readPid(selectedHome);
       if (!pid || !isProcessRunning(pid)) {
         throw new Error(daemonNotRunningMessage(selectedHome));
       }
       throw new Error('Cannot read API port. Set DKG_API_PORT or restart: dkg stop && dkg start');
     }
 
-    const tokens = await loadTokens();
-    const environmentToken = process.env.DKG_AUTH_TOKEN?.trim();
-    const token = environmentToken || (tokens.size > 0 ? tokens.values().next().value : undefined);
+    const homeToken = await loadApiClientToken(selectedHome);
+    const token = environmentToken || homeToken;
     const portOrBaseUrl = !hasEnvPort && config
       ? configuredApiBaseUrl(config.apiHost, port)
       : port;
