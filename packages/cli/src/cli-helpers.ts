@@ -1,4 +1,4 @@
-import type { RdfParseOptions } from './rdf-parser.js';
+import type { ParsedRdf, SimpleQuad } from './rdf-parser.js';
 import { Command } from 'commander';
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -149,11 +149,10 @@ function loadStructuredFile(filePath: string): any {
   return yaml.load(content);
 }
 
-async function loadQuadsFromInput(
+async function loadRdfFromInput(
   opts: ActionOpts,
   defaultGraph: string,
-  parseOptions?: RdfParseOptions,
-): Promise<Array<{ subject: string; predicate: string; object: string; graph: string }>> {
+): Promise<ParsedRdf> {
   const rdfParser = await import('./rdf-parser.js');
 
   if (opts.file) {
@@ -161,29 +160,33 @@ async function loadQuadsFromInput(
     const { pathToFileURL } = await import('node:url');
     const raw = await readFile(opts.file, 'utf-8');
     const format = opts.format ?? rdfParser.detectFormat(opts.file);
-    const quads = await rdfParser.parseRdf(raw, format, defaultGraph, pathToFileURL(opts.file).href, parseOptions);
-    console.log(`Parsed ${quads.length} quad(s) from ${opts.file} (${format})`);
-    return quads;
+    const input = await rdfParser.parseRdfInput(raw, format, defaultGraph, pathToFileURL(opts.file).href);
+    console.log(`Parsed ${input.quads.length} quad(s) from ${opts.file} (${format})`);
+    return input;
   }
 
   if (opts.triples) {
     const parsed = JSON.parse(opts.triples);
-    return parsed.map((q: Record<string, string>) => ({ ...q, graph: q.graph || defaultGraph }));
+    return { sourceKind: 'legacy-quads', quads: parsed.map((q: Record<string, string>) => ({ ...q, graph: q.graph || defaultGraph })) };
   }
 
   if (opts.subject && opts.predicate && opts.object) {
-    return [{
+    return { sourceKind: 'legacy-quads', quads: [{
       subject: opts.subject,
       predicate: opts.predicate,
       object: opts.object.startsWith('"') || opts.object.startsWith('http') || opts.object.startsWith('did:')
         ? opts.object
         : `"${opts.object}"`,
       graph: defaultGraph,
-    }];
+    }] };
   }
 
   console.error(`Provide --file (${rdfParser.supportedExtensions().join(', ')}), --triples, or --subject/--predicate/--object`);
   process.exit(1);
+}
+
+async function loadQuadsFromInput(opts: ActionOpts, defaultGraph: string): Promise<SimpleQuad[]> {
+  return (await loadRdfFromInput(opts, defaultGraph)).quads;
 }
 
 function probeHostForApiHost(apiHost: string | undefined): string {
@@ -377,6 +380,7 @@ export {
   parseOptionalVerifyTimeoutOption,
   loadStructuredFile,
   loadQuadsFromInput,
+  loadRdfFromInput,
   resolveDaemonEntryPoint,
   probeHostForApiHost,
   selectedDkgHomeForEnv,

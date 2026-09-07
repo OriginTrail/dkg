@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { Parser } from 'n3';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { detectFormat, supportedExtensions, parseRdf } from '../src/rdf-parser.js';
+import { detectFormat, supportedExtensions, parseRdf, parseRdfInput } from '../src/rdf-parser.js';
 
 describe('detectFormat', () => {
   it.each([
@@ -121,6 +121,17 @@ describe('parseRdf', () => {
       expect(await parseRdf(content, 'jsonld', DEFAULT_GRAPH)).toEqual([
         { subject: 'urn:person:alice', predicate: 'https://schema.org/name', object: '"Alice"', graph: DEFAULT_GRAPH },
       ]);
+    });
+
+    it('reports syntax provenance while preserving named graphs independently of lifecycle policy', async () => {
+      const quads = [{ subject: 'urn:s', predicate: 'urn:p', object: '"v"', graph: 'urn:g' }];
+      const document = { '@id': 'urn:g', '@graph': [{ '@id': 'urn:s', 'urn:p': 'v' }] };
+      expect(await parseRdfInput(JSON.stringify(document), 'jsonld', DEFAULT_GRAPH))
+        .toEqual({ sourceKind: 'jsonld', quads });
+      expect(await parseRdfInput(JSON.stringify(quads), 'jsonld', DEFAULT_GRAPH))
+        .toEqual({ sourceKind: 'legacy-quads', quads });
+      expect(await parseRdfInput('<urn:s> <urn:p> "v" <urn:g> .', 'nquads', DEFAULT_GRAPH))
+        .toEqual({ sourceKind: 'rdf', quads });
     });
 
     it('preserves named graphs, language/datatype literals and nested blank-node links', async () => {

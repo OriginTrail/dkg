@@ -48,7 +48,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
     }));
     await writeFile(join(dkgHome, 'legacy.jsonld'), JSON.stringify([{
       subject: 'urn:company:legacy', predicate: 'http://schema.org/name',
-      object: '"Legacy"', graph: '',
+      object: '"Legacy"', graph: 'urn:graph:legacy',
     }]));
     await writeFile(
       join(dkgHome, 'attestation.json'),
@@ -377,7 +377,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
     });
   }, 30000);
 
-  it('still submits legacy JSON-LD quad arrays for default-finalizing create', async () => {
+  it('still submits legacy JSON-LD named-graph quad arrays for default-finalizing create', async () => {
     calls = [];
     await runCli([
       'ka', 'create', 'legacy', '-c', 'research', '-f', join(dkgHome, 'legacy.jsonld'),
@@ -386,7 +386,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
     expect(body?.finalize).toBeUndefined();
     expect(body?.quads).toEqual([{
       subject: 'urn:company:legacy', predicate: 'http://schema.org/name',
-      object: '"Legacy"', graph: '',
+      object: '"Legacy"', graph: 'urn:graph:legacy',
     }]);
   }, 30000);
 
