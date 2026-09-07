@@ -462,6 +462,7 @@ const rfc64DirectAcceptedCompatibilityV1 = new WeakMap<DKGAgent, Set<string>>();
 const rfc64SystemContextGraphIdsV1 = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_V1 = 64;
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_PER_PEER_V1 = 4;
+const RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1 = 64;
 export const RFC64_CATALOG_TARGET_MAX_ENTRIES_V1 = 1_024;
 export const RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 = 64;
 export const RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1 = 64;
@@ -2816,7 +2817,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       return Object.freeze({ requested: 0, failed: 0 });
     }
     const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(
-      this.node.libp2p.getPeers().map((peer) => peer.toString()).slice(0, 64),
+      this.node.libp2p.getPeers().map((peer) => peer.toString()).slice(
+        0,
+        RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1,
+      ),
     );
     const replayProgress = rfc64CatalogReplayProgressForV1(
       this,
@@ -2837,11 +2841,22 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       let requested = 0;
       let failed = 0;
       let replayFailed = true;
+      const attemptedPeers = new Set<string>();
+      const hasPendingUnattemptedPeer = (): boolean => (
+        attemptedPeers.size < RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1
+        && [...replayProgress.pendingPeers].some((peer) => !attemptedPeers.has(peer))
+      );
       try {
         const manifests: Rfc64PublicCatalogHeadAnnouncementV1[][] = [];
         for (;;) {
-          const replayPeers = [...replayProgress.pendingPeers];
+          const replayPeers = [...replayProgress.pendingPeers]
+            .filter((peer) => !attemptedPeers.has(peer))
+            .slice(
+              0,
+              RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1 - attemptedPeers.size,
+            );
           replayProgress.pendingPeers.clear();
+          for (const peer of replayPeers) attemptedPeers.add(peer);
           await Promise.all(replayPeers.map(async (remotePeerId) => {
             for (let attempt = 0; attempt < 2; attempt += 1) {
               try {
@@ -2870,7 +2885,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // Completion-capable provider responses are returned only after every
           // promised announcement is synchronously admitted at this receiver.
           await service.whenReceiverIdle();
-          if (replayProgress.pendingPeers.size > 0) continue;
+          if (hasPendingUnattemptedPeer()) continue;
+          // Reconnect churn can re-add a peer already covered by this
+          // completion. Those duplicate fences must not keep authority
+          // bootstrap (and therefore Context Graph creation) pending forever.
+          replayProgress.pendingPeers.clear();
 
           const promisedByIdentity = new Map<string, Rfc64PublicCatalogHeadAnnouncementV1>();
           for (const target of manifests.flat()) {
@@ -2901,9 +2920,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             });
             if (unsatisfied) parityFailures = 1;
           }
-          // A connection arriving during the asynchronous durable parity read
-          // owns another replay pass; never settle the coalesced run around it.
-          if (replayProgress.pendingPeers.size > 0) continue;
+          // A genuinely new connection arriving during the asynchronous
+          // durable parity read owns another replay pass. A reconnect from an
+          // already-attempted peer is covered by this completion.
+          if (hasPendingUnattemptedPeer()) continue;
+          replayProgress.pendingPeers.clear();
           failed += parityFailures;
           break;
         }

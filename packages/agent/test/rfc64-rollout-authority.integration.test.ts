@@ -555,6 +555,31 @@ describe('RFC-64 rollout authority integration', () => {
     ))).toEqual([peerA, peerB]);
   });
 
+  it('settles a replay when reconnect churn re-adds an already-attempted peer', async () => {
+    const edge = await startAgent({
+      name: 'replay-duplicate-peer-churn-bound',
+      activation: activation('catalog'),
+    });
+    const peer = '12D3KooWReplayDuplicateReconnectPeer';
+    vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([
+      { toString: () => peer },
+    ] as never);
+    const service = (edge as any).rfc64PublicCatalogServiceV1;
+    const requestReplay = vi.spyOn(service, 'requestCatalogHeadReplay')
+      .mockImplementation(async () => {
+        edge.markRfc64CatalogReplayPeerPendingV1(CONTEXT_GRAPH_ID, peer);
+        return Object.freeze({
+          kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+          heads: Object.freeze([]),
+        });
+      });
+
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual({ requested: 1, failed: 0 });
+    expect(requestReplay).toHaveBeenCalledOnce();
+  });
+
   it('treats replay policy denial as negative provider discovery without hiding wire failure', async () => {
     const edge = await startAgent({
       name: 'replay-provider-discovery-boundary',
