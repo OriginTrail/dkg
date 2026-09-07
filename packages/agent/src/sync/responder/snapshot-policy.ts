@@ -111,11 +111,19 @@ export function resolveSyncResponderSnapshotPolicy(
   });
 }
 
-/** Compatibility validation uses the same shape and numeric resolution boundary. */
+/** Strict public validation; runtime resolution separately supports per-leaf fallbacks. */
 export function validateSyncResponderSnapshotLimitsConfig(
   config: SyncResponderSnapshotLimitsConfig | undefined,
 ): void {
-  resolveSyncResponderSnapshotPolicy(config, {});
+  assertSyncResponderSnapshotLimitsShape(config);
+  for (const scope of ['global', 'local'] as const) {
+    for (const [field, maximum] of [['rows', RESOURCE_MAX.rows], ['bytesEstimate', RESOURCE_MAX.bytes]] as const) {
+      resourceInteger(config?.[scope]?.[field], { min: 1, max: maximum },
+        `syncResponderSnapshotLimits.${scope}.${field}`, (setting) => {
+          throw new TypeError(`Invalid ${setting}: expected a positive safe integer at most ${maximum}`);
+        });
+    }
+  }
 }
 
 /** Production snapshot limits, with explicit config and environment overrides in rows/bytes. */

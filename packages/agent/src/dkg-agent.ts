@@ -240,8 +240,8 @@ import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import {
   resolveSyncContextGraphPriorities,
-  validateSyncResponderSnapshotLimitsConfig,
 } from './sync/policy.js';
+import { resolveSyncResponderSnapshotPolicy } from './sync/responder/snapshot-policy.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
@@ -1155,7 +1155,7 @@ export class DKGAgent extends DKGAgentBase {
         'DKGAgentConfig.contextGraphSubscriptionRehydrationEnabled must be a boolean',
       );
     }
-    validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
+    resolveSyncResponderSnapshotPolicy(inputConfig.syncResponderSnapshotLimits, {});
     const normalizedConfig = normalizeStorageAckConfig({
       ...inputConfig,
       syncContextGraphPriorities: resolveSyncContextGraphPriorities(

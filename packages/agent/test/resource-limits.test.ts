@@ -8,6 +8,7 @@ import {
   getSyncBackpressureSnapshot, resolveNonNegativeIntegerSwitch, resolvePositiveIntegerSwitch,
   resolveSyncGlobalBackpressure, withGlobalSyncBackpressure,
 } from '../src/sync/backpressure.js';
+import { validateSyncResponderSnapshotLimitsConfig as validatePublicSnapshotConfig } from '../src/index.js';
 import { resolveStartupResourcePolicy } from '../src/resource-policy.js';
 import { resolveSyncReconcilerTiming } from '../src/sync/reconciler-timing.js';
 import { resolveSyncResponderSnapshotPolicy } from '../src/sync/responder/snapshot-policy.js';
@@ -202,6 +203,21 @@ it('keeps initial SWM diagnostics immutable while job-scoped resolution refreshe
 });
 
 describe('snapshot and retry/timing budgets', () => {
+  it.each(['global', 'local'] as const)('keeps the package-root %s validator strict while runtime resolution falls back', (scope) => {
+    for (const [field, maximum] of [['rows', RESOURCE_MAX.rows], ['bytesEstimate', RESOURCE_MAX.bytes]] as const) {
+      for (const value of [0, ...invalidNumbers, maximum + 1]) {
+        const config = { [scope]: { [field]: value } };
+        expect(() => validatePublicSnapshotConfig(config)).toThrow(TypeError);
+        expect(resolveSyncResponderSnapshotPolicy(config, {}).diagnostics).toContainEqual({
+          kind: 'rejected', setting: `syncResponderSnapshotLimits.${scope}.${field}`,
+        });
+      }
+      for (const value of [1, maximum]) {
+        expect(() => validatePublicSnapshotConfig({ [scope]: { [field]: value } })).not.toThrow();
+      }
+    }
+  });
+
   it('resolves invalid snapshot numeric leaves to defaults without disclosing raw values', () => {
     const baseline = resolveSyncResponderSnapshotPolicy(undefined, {});
     const resolved = resolveSyncResponderSnapshotPolicy({

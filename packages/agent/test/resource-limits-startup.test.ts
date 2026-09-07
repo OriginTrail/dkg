@@ -43,7 +43,7 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
       rfc64CatalogActivation: { enabled: false },
       syncGlobalMaxInflight: 3, syncGlobalQueueLimit: 6,
       syncReconcilerIntervalMs: Infinity,
-      syncResponderSnapshotLimits: { global: { rows: 1234 } },
+      syncResponderSnapshotLimits: { global: { rows: 1234 }, local: { rows: 0 } },
     });
     const effective = (agent as unknown as { config: { resourcePolicy: StartupResourcePolicy } }).config.resourcePolicy;
     // Construction owns numeric resolution. Later environment edits cannot
@@ -55,6 +55,7 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
     expect(warnings).toHaveLength(1);
     expect(warnings[0].message).toContain('DKG_VM_RECONCILE_CONCURRENCY');
     expect(warnings[0].message).toContain('syncReconcilerIntervalMs');
+    expect(warnings[0].message).toContain('syncResponderSnapshotLimits.local.rows');
     expect(warnings[0].message).toContain('DKG_SWM_CATCHUP_MAX_PASSES');
     expect(warnings[0].message.length).toBeLessThanOrEqual(4_096);
     expect(warnings[0].message).not.toContain('secret-invalid-value');
