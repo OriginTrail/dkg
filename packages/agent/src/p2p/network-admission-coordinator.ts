@@ -311,6 +311,10 @@ export class NetworkAdmissionCoordinator {
         new TextEncoder().encode(JSON.stringify(request)),
         { timeoutMs: this.probeTimeoutMs, signal },
       );
+      // A peer stopping mid-probe can close its stream before sending bytes.
+      // Treat that EOF like other interrupted transport attempts; no identity
+      // document arrived to justify the longer malformed-response cooldown.
+      if (response.byteLength === 0) throw new Error('identity probe ended without a response');
     } catch (err) {
       if (signal.aborted) throw abortErrorFromSignal(signal.reason);
       const message = err instanceof Error ? err.message : String(err);

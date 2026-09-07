@@ -330,6 +330,44 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(sendIdentityProbe).toHaveBeenCalledTimes(3);
   });
 
+  it('retries empty identity responses on the bounded transport schedule and requires a signed proof', async () => {
+    let now = 1_000;
+    let attempts = 0;
+    const sendIdentityProbe = vi.fn(async (_peerId: string, data: Uint8Array) => {
+      if (++attempts <= 3) return new Uint8Array();
+      const response = await signNetworkIdentityResponse({
+        request: JSON.parse(new TextDecoder().decode(data)),
+        identity,
+        responderPeerId: REMOTE_PEER_ID,
+        sign: (payload) => ed25519Sign(payload, REMOTE_PRIVATE_KEY_SEED),
+      });
+      return new TextEncoder().encode(JSON.stringify(response));
+    });
+    const fixture = buildCoordinator({
+      identity, sendIdentityProbe, now: () => now,
+      probeBackoff: { transientBaseMs: 100, transientMaxMs: 150 },
+    });
+    for (const [index, delay] of [100, 150, 150].entries()) {
+      await expect(fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')))
+        .rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+      expect(fixture.admission.getRetryableProbeBackoff(REMOTE_PEER_ID))
+        .toMatchObject({ kind: 'transient', retryAfterMs: delay, failures: index + 1 });
+      expect(fixture.coordinator.isAcceptedPeer(REMOTE_PEER_ID)).toBe(false);
+      expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(false);
+      now += delay - 1;
+      await expect(fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')))
+        .rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+      expect(sendIdentityProbe).toHaveBeenCalledTimes(index + 1);
+      now += 1;
+    }
+    await expect(fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')))
+      .resolves.toBe(true);
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(4);
+    expect(fixture.admission.getRetryableProbeBackoff(REMOTE_PEER_ID)).toBeUndefined();
+    expect(fixture.coordinator.isAcceptedPeer(REMOTE_PEER_ID)).toBe(true);
+    expect(fixture.deletePeerFromPeerStore).not.toHaveBeenCalled();
+  });
+
   it('uses unreadable-response backoff before retrying malformed probe responses', async () => {
     let now = 1_000;
     const sendIdentityProbe = vi.fn(async () => new TextEncoder().encode('REMOTE_SENTINEL_NOT_JSON'));
