@@ -44,7 +44,7 @@
       "packages/cli/src/daemon/routes/shared-assertion-helpers.ts": {
         "{\"message\":\"Unexpected control characters\",\"evidence\":[{\"label\":\"'U+0000' is a control character.\",\"source\":\"\\\\x00\"},{\"label\":\"'U+0007' is a control character.\",\"source\":\"\\\\x07\"},{\"label\":\"'U+000B' is a control character.\",\"source\":\"\\\\x0B\"},{\"label\":\"'U+000E' is a control character.\",\"source\":\"\\\\x0E\"},{\"label\":\"'U+001F' is a control character.\",\"source\":\"\\\\x1F\"}]}": 1
       },
-      "packages/cli/test/context-graph-catchup-readiness.test.ts": {
+      "packages/cli/test/context-graph-readiness-swm-shortfall.test.ts": {
         "{\"message\":\"Unexpected control characters\",\"evidence\":[{\"label\":\"'U+0000' is a control character.\",\"source\":\"\\\\u0000\"},{\"label\":\"'U+001F' is a control character.\",\"source\":\"\\\\u001F\"}]}": 1
       },
       "packages/core/src/assertion-seal.ts": {
