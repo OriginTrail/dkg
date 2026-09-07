@@ -1,4 +1,5 @@
-import { EpcisQueryError } from './query-error.js';
+import { EpcisQueryValidationError } from './query-validation.js';
+import type { EpcisPageParams } from './types.js';
 
 /** Bounds for the legacy offset-based SimpleEventQuery API. */
 export const MAX_EPCIS_PAGE_SIZE = 1_000;
@@ -6,22 +7,15 @@ export const MAX_EPCIS_OFFSET = 10_000;
 export const DEFAULT_EPCIS_QUERY_LIMIT = 100;
 export const DEFAULT_EPCIS_HTTP_PAGE_SIZE = 30;
 
-export class EpcisPaginationError extends EpcisQueryError {
-  constructor(message: string) {
-    super(message, 400);
-    this.name = 'EpcisPaginationError';
-  }
-}
-
 function resolveEpcisPageSize(value: number): number {
-  if (!Number.isSafeInteger(value)) throw new EpcisPaginationError('EPCIS page size must be a safe integer');
+  if (!Number.isSafeInteger(value)) throw new EpcisQueryValidationError('EPCIS page size must be a safe integer');
   return Math.min(Math.max(value, 1), MAX_EPCIS_PAGE_SIZE);
 }
 
 function resolveEpcisOffset(value: number | undefined): number {
   const offset = value ?? 0;
   if (!Number.isSafeInteger(offset) || offset > MAX_EPCIS_OFFSET) {
-    throw new EpcisPaginationError(`EPCIS offset must be a safe integer no greater than ${MAX_EPCIS_OFFSET}; narrow the event or time filters`);
+    throw new EpcisQueryValidationError(`EPCIS offset must be a safe integer no greater than ${MAX_EPCIS_OFFSET}; narrow the event or time filters`);
   }
   return Math.max(offset, 0);
 }
@@ -44,7 +38,7 @@ export class EpcisHttpPage {
   readonly queryWindow: EpcisQueryWindow;
   private readonly pageSize: number;
 
-  constructor(input: { perPage?: number; offset?: number }) {
+  constructor(input: EpcisPageParams) {
     const page = resolveEpcisQueryWindow({
       limit: input.perPage ?? DEFAULT_EPCIS_HTTP_PAGE_SIZE,
       offset: input.offset,
@@ -58,7 +52,7 @@ export class EpcisHttpPage {
     if (rows.length <= this.pageSize) return { bindings: rows };
     const nextOffset = this.queryWindow.offset + this.pageSize;
     if (nextOffset > MAX_EPCIS_OFFSET) {
-      throw new EpcisPaginationError('EPCIS pagination limit reached; narrow the event or time filters to retrieve the remaining events');
+      throw new EpcisQueryValidationError('EPCIS pagination limit reached; narrow the event or time filters to retrieve the remaining events');
     }
     return { bindings: rows.slice(0, this.pageSize), nextOffset };
   }

@@ -66,7 +66,7 @@ export interface AsyncPublisher {
 
 // --- Events query types ---
 
-export interface EpcisQueryParams {
+export interface EpcisEventFilters {
   eventID?: string;
   epc?: string;
   bizStep?: string;
@@ -86,9 +86,21 @@ export interface EpcisQueryParams {
   readPoint?: string;
   finalized?: boolean;
   subGraphName?: string;
+}
+
+export interface EpcisPageParams {
   perPage?: number;
-  limit?: number;
   offset?: number;
+}
+
+export interface EpcisEventsRequest {
+  filters: EpcisEventFilters;
+  page: EpcisPageParams;
+}
+
+/** Historical flat builder/parser contract. HTTP handlers use EpcisEventsRequest. */
+export interface EpcisQueryParams extends EpcisEventFilters, EpcisPageParams {
+  limit?: number;
 }
 
 /** Dependency-inversion boundary: the EPCIS package needs something that can run SPARQL queries. */

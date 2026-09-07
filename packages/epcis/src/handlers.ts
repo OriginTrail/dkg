@@ -1,10 +1,11 @@
 import { EpcisQueryError } from './query-error.js';
+import { EpcisQueryValidationError } from './query-validation.js';
 export { EpcisQueryError } from './query-error.js';
 import { EpcisHttpPage } from './pagination.js';
 import { compactEpcisEventType } from './epcis-vocabulary.js';
 import { createValidator } from './validation.js';
 import { renderEpcisQuery } from './query-builder.js';
-import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js';
+import { parseEventsRequest, hasValidDateRange, encodePageToken } from './utils.js';
 import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
 
 export interface AsyncCaptureConfig {
@@ -165,21 +166,33 @@ const DKG_CONTEXT = {
   shipmentId: `${DKG_BASE_IRI}epcis/shipmentId`,
 };
 
+/** Translate only request validation; engine errors retain their original identity. */
+function queryRequestBoundary<T>(operation: () => T): T {
+  try { return operation(); }
+  catch (error) {
+    if (error instanceof EpcisQueryValidationError) throw new EpcisQueryError(error.message, 400);
+    throw error;
+  }
+}
+
 export async function handleEventsQuery(
   searchParams: URLSearchParams,
   config: EventsQueryConfig,
 ): Promise<EventsQueryResult> {
-  const params = parseQueryParams(searchParams);
-
-  if (!hasValidDateRange(params)) {
-    throw new EpcisQueryError('Invalid date range: "from" must be before or equal to "to"', 400);
-  }
-
-  const { perPage, offset, limit: _limit, ...filters } = params;
-  const page = new EpcisHttpPage({ perPage, offset });
-  const sparql = renderEpcisQuery(
-    { ...filters, subGraphName: config.subGraphName }, config.contextGraphId, page.queryWindow,
-  );
+  const { filters, page, sparql } = queryRequestBoundary(() => {
+    const request = parseEventsRequest(searchParams);
+    if (!hasValidDateRange(request.filters)) {
+      throw new EpcisQueryValidationError('Invalid date range: "from" must be before or equal to "to"');
+    }
+    const page = new EpcisHttpPage(request.page);
+    return {
+      filters: request.filters,
+      page,
+      sparql: renderEpcisQuery(
+        { ...request.filters, subGraphName: config.subGraphName }, config.contextGraphId, page.queryWindow,
+      ),
+    };
+  });
   // The engine's scope guard rejects any explicit GRAPH IRI outside the
   // allow-set it derives from the query options, so the options MUST match
   // exactly the graphs `buildEpcisQuery` references for this route:
@@ -197,11 +210,11 @@ export async function handleEventsQuery(
   const result = await config.queryEngine.query(sparql, {
     contextGraphId: config.contextGraphId,
     subGraphName: config.subGraphName,
-    graphSuffix: params.finalized === false ? '_shared_memory' : undefined,
+    graphSuffix: filters.finalized === false ? '_shared_memory' : undefined,
     includePrivate: true,
   });
 
-  const { bindings, nextOffset } = page.take(result.bindings);
+  const { bindings, nextOffset } = queryRequestBoundary(() => page.take(result.bindings));
   const eventList = bindings.map(toEpcisEvent);
 
   const body: EPCISQueryDocumentResponse = {

@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { parseQueryParams, hasAtLeastOneFilter, hasValidDateRange } from '../src/utils.js';
+import { parseEventsRequest, parseQueryParams, hasAtLeastOneFilter, hasValidDateRange } from '../src/utils.js';
+
+it('normalizes aliases once into disjoint filters and HTTP paging', () => {
+  const sp = new URLSearchParams('MATCH_epc=urn:standard&epc=urn:alias&limit=50&perPage=10&offset=200&finalized=false');
+  const request = parseEventsRequest(sp);
+  expect(request).toEqual({ filters: { epc: 'urn:standard', finalized: false }, page: { perPage: 10, offset: 200 } });
+  expect(parseQueryParams(sp)).toEqual({ ...request.filters, ...request.page });
+  expect(parseEventsRequest(new URLSearchParams())).toEqual({ filters: { finalized: true }, page: {} });
+});
 
 describe('parseQueryParams', () => {
   it('extracts string params from URLSearchParams', () => {

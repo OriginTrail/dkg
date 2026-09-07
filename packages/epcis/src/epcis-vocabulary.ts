@@ -1,5 +1,5 @@
 import { isSafeIri } from '@origintrail-official/dkg-core';
-import { EpcisQueryError } from './query-error.js';
+import { EpcisQueryValidationError } from './query-validation.js';
 
 export const EPCIS_TYPE_PREFIX = 'https://gs1.github.io/EPCIS/';
 export const EPCIS_STANDARD_EVENT_TYPES = Object.freeze([
@@ -18,13 +18,6 @@ export function compactEpcisEventType(value: string): string {
   return standardEpcisEventType(value) ?? value;
 }
 
-export class EpcisEventTypeError extends EpcisQueryError {
-  constructor() {
-    super('eventType must be a standard EPCIS event name or an absolute event type IRI', 400);
-    this.name = 'EpcisEventTypeError';
-  }
-}
-
 /** Canonicalize query types, including the legacy compact extension-name form. */
 export function normalizeEpcisEventType(value: string): string {
   const standard = standardEpcisEventType(value);
@@ -33,5 +26,5 @@ export function normalizeEpcisEventType(value: string): string {
   // Older responses compacted every class in this namespace. Retain those
   // local-name filters without mistaking them for standard schema classes.
   if (/^[A-Za-z][A-Za-z0-9._-]*$/.test(value)) return `${EPCIS_TYPE_PREFIX}${value}`;
-  throw new EpcisEventTypeError();
+  throw new EpcisQueryValidationError('eventType must be a standard EPCIS event name or an absolute event type IRI');
 }

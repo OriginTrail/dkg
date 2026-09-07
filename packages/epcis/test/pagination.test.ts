@@ -1,3 +1,4 @@
+import { EpcisQueryValidationError } from '../src/query-validation.js';
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { buildEpcisQuery, renderEpcisQuery } from '../src/query-builder.js';
@@ -12,6 +13,12 @@ it.each([NaN, Infinity, -Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1, MAX_EPCIS_O
 );
 it.each([NaN, Infinity, -Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1])('rejects unsafe page size %s', (limit) => {
   expect(() => buildEpcisQuery({ limit }, 'pagination')).toThrow('page size must be a safe integer');
+});
+it.each([{ eventType: 'not an event name' }, { limit: 1.5 }])('keeps direct builder validation transport-neutral: %o', (params) => {
+  let caught: unknown;
+  try { buildEpcisQuery(params, 'pagination'); } catch (error) { caught = error; }
+  expect(caught).toBeInstanceOf(EpcisQueryValidationError);
+  expect(caught).not.toHaveProperty('statusCode');
 });
 it('bounds lookahead independently of the public page-size cap', () => {
   expect(buildEpcisQuery({ limit: MAX_EPCIS_PAGE_SIZE, offset: MAX_EPCIS_OFFSET }, 'pagination'))
@@ -28,8 +35,7 @@ it('keeps direct-query and HTTP defaults explicit in the rendered window', async
   expect(queries).toHaveLength(1);
   expect(queries[0]).toContain('LIMIT 31\nOFFSET 0');
 });
-it('propagates query-engine failures unchanged', async () => {
-  const failure = new Error('store unavailable');
+it.each([new Error('store unavailable'), new EpcisQueryValidationError('engine-owned validation failure')])('propagates query-engine failures unchanged: %s', async (failure) => {
   await expect(handleEventsQuery(new URLSearchParams(), {
     contextGraphId: 'pagination', basePath: '/epcis/events',
     queryEngine: { query: async () => { throw failure; } },

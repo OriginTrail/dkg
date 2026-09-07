@@ -9,7 +9,7 @@ import {
   contextGraphSubGraphUri,
   sparqlIri,
 } from '@origintrail-official/dkg-core';
-import type { EpcisQueryParams } from './types.js';
+import type { EpcisQueryParams, EpcisEventFilters } from './types.js';
 import { EPCIS_TYPE_PREFIX, EPCIS_STANDARD_EVENT_TYPES, normalizeEpcisEventType } from './epcis-vocabulary.js';
 
 const PREFIXES = `
@@ -64,8 +64,6 @@ function extensionLocalNameFilter(predicateVariable: string, localName: string):
 export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string): string {
   return renderEpcisQuery(params, contextGraphId, resolveEpcisQueryWindow(params));
 }
-
-type EpcisEventFilters = Omit<EpcisQueryParams, 'limit' | 'offset' | 'perPage'>;
 
 /** Render one explicit row window, including any lookahead requested by the caller. */
 export function renderEpcisQuery(
