@@ -1167,38 +1167,131 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
     }
   });
 
-  it('does not resume connection work after admission completes during shutdown', async () => {
-    const agent = await DKGAgent.create({
-      name: 'PeerAdmissionShutdown',
-      listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
-    });
-    const admission = deferred<boolean>();
-    try {
-      await agent.start();
-      const internals = agent as unknown as {
-        networkAdmissionCoordinator: { ensureAdmitted(peer: string, ctx: OperationContext): Promise<boolean> };
-        enrichPeerStoreFromInboundCircuit(connection: unknown): Promise<void>;
-        queueSyncFromPeerOnConnect(peer: string, onError: unknown): void;
-      };
-      const ensureAdmitted = vi.spyOn(internals.networkAdmissionCoordinator, 'ensureAdmitted')
-        .mockReturnValue(admission.promise);
-      const enrich = vi.spyOn(internals, 'enrichPeerStoreFromInboundCircuit');
-      const queue = vi.spyOn(internals, 'queueSyncFromPeerOnConnect');
-      agent.node.libp2p.dispatchEvent(new CustomEvent('connection:open', {
-        detail: { remotePeer: peerIdFromString(freshPeerIdString()) },
-      }));
-      expect(ensureAdmitted).toHaveBeenCalledOnce();
-      await agent.stop();
-      admission.resolve(true);
-      await flushMicrotasks();
-      expect(enrich).not.toHaveBeenCalled();
-      expect(queue).not.toHaveBeenCalled();
-    } finally {
-      admission.resolve(false);
-      await agent.stop();
-    }
-  });
+  it.each(['admission', 'admission abort', 'timer', 'probe'] as const)(
+    'does not resume peer-update work after shutdown at %s', async (stage) => {
+      const agent = await DKGAgent.create({
+        name: 'PeerUpdateInFlightShutdown', listenHost: '127.0.0.1', chainAdapter: new MockChainAdapter(),
+      });
+      const admission = deferred<boolean>();
+      const probe = deferred<unknown>();
+      try {
+        await agent.start();
+        const peer = freshPeerIdString();
+        const internals = agent as unknown as {
+          networkAdmissionCoordinator: {
+            isAcceptedPeer(peer: string): boolean;
+            isRejectedPeer(peer: string): boolean;
+            ensureAdmitted(peer: string, ctx: OperationContext, options?: { signal?: AbortSignal }): Promise<boolean>;
+          };
+          skippedNoSyncPeers: Set<string>;
+          getSyncReconcilerProbe(peer: string): Promise<unknown>;
+          attemptSyncFromPeerWithReconcilerAccounting(...args: unknown[]): Promise<unknown>;
+        };
+        vi.spyOn(internals.networkAdmissionCoordinator, 'isAcceptedPeer').mockReturnValue(false);
+        vi.spyOn(internals.networkAdmissionCoordinator, 'isRejectedPeer').mockReturnValue(false);
+        const ensure = vi.spyOn(internals.networkAdmissionCoordinator, 'ensureAdmitted')
+          .mockImplementation((_peer, _ctx, options) => {
+            if (stage === 'admission abort') {
+              options?.signal?.addEventListener('abort', () => admission.reject(new Error('admission cancelled')), { once: true });
+            }
+            return stage.startsWith('admission') ? admission.promise : Promise.resolve(true);
+          });
+        const getProbe = vi.spyOn(internals, 'getSyncReconcilerProbe').mockReturnValue(probe.promise);
+        const attempt = vi.spyOn(internals, 'attemptSyncFromPeerWithReconcilerAccounting').mockResolvedValue(undefined);
+        internals.skippedNoSyncPeers.add(peer);
+        const removeSkipped = vi.spyOn(internals.skippedNoSyncPeers, 'delete');
+        agent.node.libp2p.dispatchEvent(new CustomEvent('peer:update', {
+          detail: { peer: { id: { toString: () => peer }, protocols: [PROTOCOL_SYNC] } },
+        }));
+        await flushMicrotasks();
+        expect(ensure).toHaveBeenCalledOnce();
+        // Microtasks schedule the zero-delay callback without running it. Only
+        // the probe stage yields to that timer before beginning shutdown.
+        if (stage === 'probe') await waitFor(() => getProbe.mock.calls.length > 0);
+        removeSkipped.mockClear();
+        const stopping = agent.stop();
+        admission.resolve(true);
+        probe.resolve({});
+        await stopping;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await flushMicrotasks();
+        expect(removeSkipped).not.toHaveBeenCalled();
+        expect(attempt).not.toHaveBeenCalled();
+        if (stage !== 'probe') expect(getProbe).not.toHaveBeenCalled();
+        expect(ensure.mock.calls[0][2]?.signal?.aborted).toBe(true);
+      } finally {
+        admission.resolve(false);
+        probe.resolve({});
+        await agent.stop();
+      }
+    },
+  );
+
+  it.each(['event', 'admission', 'enrichment', 'sender-key'] as const)(
+    'does not resume connection work after shutdown at %s', async (stage) => {
+      const agent = await DKGAgent.create({
+        name: 'PeerConnectionShutdown', listenHost: '127.0.0.1', chainAdapter: new MockChainAdapter(),
+      });
+      const gate = deferred<void>();
+      try {
+        await agent.start();
+        const transport = agent.node.libp2p;
+        const internals = agent as unknown as {
+          networkAdmissionCoordinator: { ensureAdmitted(peer: string, ctx: OperationContext): Promise<boolean> };
+          enrichPeerStoreFromInboundCircuit(connection: unknown): Promise<void>;
+          drainPendingSenderKeyForPeer(...args: unknown[]): Promise<number>;
+          queueSyncFromPeerOnConnect(...args: unknown[]): void;
+          reannounceRfc64CatalogHeadsToPeerV1(...args: unknown[]): Promise<unknown>;
+          requestRfc64CatalogHeadReplaysFromConnectedPeersV1(...args: unknown[]): Promise<unknown>;
+        };
+        vi.spyOn(agent, 'readRfc64CatalogResponsibilitiesV1').mockReturnValue([{
+          contextGraphId: 'shutdown-catalog', responsible: true, active: true, mode: 'catalog',
+          responsibilityReason: 'private-membership', selectionSource: 'default',
+        }]);
+        const ensure = vi.spyOn(internals.networkAdmissionCoordinator, 'ensureAdmitted').mockImplementation(async () => {
+          if (stage === 'admission') await gate.promise;
+          return true;
+        });
+        const enrich = vi.spyOn(internals, 'enrichPeerStoreFromInboundCircuit').mockImplementation(async () => {
+          if (stage === 'enrichment') await gate.promise;
+        });
+        const drain = vi.spyOn(internals, 'drainPendingSenderKeyForPeer').mockImplementation(async () => {
+          if (stage === 'sender-key') await gate.promise;
+          return 0;
+        });
+        const queue = vi.spyOn(internals, 'queueSyncFromPeerOnConnect').mockImplementation(() => {});
+        const reannounce = vi.spyOn(internals, 'reannounceRfc64CatalogHeadsToPeerV1').mockResolvedValue(undefined);
+        const replay = vi.spyOn(internals, 'requestRfc64CatalogHeadReplaysFromConnectedPeersV1').mockResolvedValue({ failed: 0 });
+        const dispatch = () => transport.dispatchEvent(new CustomEvent('connection:open', {
+          detail: { remotePeer: peerIdFromString(freshPeerIdString()) },
+        }));
+        let stopping: Promise<void>;
+        if (stage === 'event') {
+          stopping = agent.stop();
+          dispatch();
+        } else {
+          dispatch();
+          await flushMicrotasks();
+          expect(ensure).toHaveBeenCalledOnce();
+          if (stage === 'enrichment') expect(enrich).toHaveBeenCalledOnce();
+          if (stage === 'sender-key') expect(drain).toHaveBeenCalledOnce();
+          stopping = agent.stop();
+        }
+        await stopping;
+        gate.resolve();
+        await flushMicrotasks();
+        if (stage === 'event') expect(ensure).not.toHaveBeenCalled();
+        if (stage === 'event' || stage === 'admission') expect(enrich).not.toHaveBeenCalled();
+        if (stage !== 'sender-key') expect(drain).not.toHaveBeenCalled();
+        expect(reannounce).not.toHaveBeenCalled();
+        expect(replay).not.toHaveBeenCalled();
+        expect(queue).not.toHaveBeenCalled();
+      } finally {
+        gate.resolve();
+        await agent.stop();
+      }
+    },
+  );
 
   it('retries trySyncFromPeer when a previously-skipped peer now advertises PROTOCOL_SYNC', async () => {
     const agent = await DKGAgent.create({

@@ -3906,8 +3906,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       void (async () => {
         let admitted = false;
         try {
-          admitted = await this.networkAdmissionCoordinator.ensureAdmitted(remotePeer, ctx);
+          admitted = await this.networkAdmissionCoordinator.ensureAdmitted(remotePeer, ctx, { signal });
         } catch (err: unknown) {
+          if (signal.aborted) return;
           const message = err instanceof Error ? err.message : String(err);
           this.log.warn(ctx, `Network admission probe failed for ${remotePeer.slice(-8)} on connect: ${message}`);
           for (const contextGraphId of replayContextGraphIds) {
@@ -4011,7 +4012,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const peerIdObj = detail?.peer?.id;
       if (!peerIdObj) return;
       const protocols = detail.peer?.protocols ?? [];
-      this.handlePeerUpdateForSyncRetry(peerIdObj.toString(), protocols);
+      this.handlePeerUpdateForSyncRetry(peerIdObj.toString(), protocols, signal);
     }, { signal });
 
     // Reconnect-on-gossip: when a gossip message arrives from a peer we're
@@ -5407,7 +5408,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * once it arrives), and the periodic reconciler is the safety net for
    * delivery failures of this event itself.
    */
-  handlePeerUpdateForSyncRetry(this: DKGAgent, peerId: string, protocols: readonly string[]): void {
+  handlePeerUpdateForSyncRetry(
+    this: DKGAgent,
+    peerId: string,
+    protocols: readonly string[],
+    signal = this.syncPeerEvents?.signal,
+  ): void {
+    if (signal?.aborted) return;
     if (peerId === this.node.libp2p.peerId.toString()) return;
     // #1093: keep the confirmed-core set fresh from `peer:update` too.
     // `runSyncOnConnect` reads the protocol list exactly once, racing
@@ -5434,25 +5441,32 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const ctx = createOperationContext('sync');
     const shortPeer = peerId.slice(-8);
     void (async () => {
-      const admitted = await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'Peer:update sync retry');
-      if (!admitted) return;
+      const admitted = await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'Peer:update sync retry', signal);
+      if (signal?.aborted || !admitted) return;
       if (!this.skippedNoSyncPeers.has(peerId)) return;
       this.skippedNoSyncPeers.delete(peerId);
       this.log.info(ctx, `Peer ${shortPeer} now advertises sync protocol — retrying sync-on-connect`);
       setTimeout(() => {
+        if (signal?.aborted) return;
         void (async () => {
           const probe = await this.getSyncReconcilerProbe(peerId);
+          if (signal?.aborted) return;
           await this.attemptSyncFromPeerWithReconcilerAccounting(
             peerId,
             probe,
             'on-connect',
           );
         })().catch((err: unknown) => {
+          if (signal?.aborted) return;
           const message = err instanceof Error ? err.message : String(err);
           this.log.warn(ctx, `Sync retry after peer:update failed for ${shortPeer}: ${message}`);
         });
       }, 0);
-    })();
+    })().catch((err: unknown) => {
+      if (signal?.aborted) return;
+      const message = err instanceof Error ? err.message : String(err);
+      this.log.warn(ctx, `Sync retry admission after peer:update failed for ${shortPeer}: ${message}`);
+    });
   }
 
   /**
