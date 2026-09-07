@@ -483,13 +483,13 @@ function planKnowledgeAssetVmPublication(input: {
   return { kind: 'initial', pricingPolicy: input.pricingPolicy };
 }
 
-type KnowledgeAssetVmPublishRequestWithoutIntentKey = Omit<
+export type KnowledgeAssetVmPublishRequestWithoutIntentKey = Omit<
   KnowledgeAssetVmPublishRequest,
   'intentKey'
 >;
 
 /** Canonical immutable projection of the persisted queued-publish request. */
-function createKnowledgeAssetVmPublishIntentKey(
+export function createKnowledgeAssetVmPublishIntentKey(
   request: KnowledgeAssetVmPublishRequestWithoutIntentKey,
 ): string {
   const canonicalIntent = {

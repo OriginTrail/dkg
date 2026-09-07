@@ -24,9 +24,15 @@ void establishedName;
 const update: UpdateOptions = base;
 void update;
 
-// Established callers commonly annotate a reusable variable with PublishOptions.
-// Structural assignment remains source-compatible when no initial-only field is set.
-const legacyUpdateOptions: PublishOptions = { ...base };
+// Established callers commonly annotate update inputs with PublishOptions and
+// use indexed access for the update seal. Both historical patterns must remain
+// source-compatible even though Publisher.update itself accepts UpdateOptions.
+type LegacyUpdateAttestation = PublishOptions['precomputedUpdateAttestation'];
+const legacyUpdateAttestation = null as unknown as NonNullable<LegacyUpdateAttestation>;
+const legacyUpdateOptions: PublishOptions = {
+  ...base,
+  precomputedUpdateAttestation: legacyUpdateAttestation,
+};
 
 // @ts-expect-error pricingPolicy is initial-publication-only.
 const invalidUpdate: UpdateOptions = { ...base, pricingPolicy: 'full-content' };

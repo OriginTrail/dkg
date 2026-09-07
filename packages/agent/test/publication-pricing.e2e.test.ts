@@ -28,6 +28,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
+import {
+  createKnowledgeAssetVmPublishIntentKey,
+  type KnowledgeAssetVmPublishRequestWithoutIntentKey,
+} from '../src/dkg-agent-publish.js';
 
 type DKGAgent = RealDKGAgent;
 const DKGAgent = {
@@ -88,6 +92,55 @@ async function createAgent(name: string, overrides: Partial<DKGAgentConfig> = {}
 }
 
 describe('agent publication pricing integration', () => {
+  it('preserves the pre-pricing queued intent hash for a fixed legacy request', () => {
+    const legacyRequest = {
+      contextGraphId: 'legacy-context-graph',
+      name: 'legacy-knowledge-asset',
+      agentAddress: '0x1111111111111111111111111111111111111111',
+      callerAgentAddress: '0x2222222222222222222222222222222222222222',
+      subGraphName: 'legacy-subgraph',
+      shareOperationId: 'legacy-share-operation',
+      roots: ['urn:legacy:root:a', 'urn:legacy:root:b'],
+      contentScopeVersion: 2,
+      kaUal: 'did:dkg:hardhat:31337/0x3333333333333333333333333333333333333333/42',
+      assertionVersion: '7',
+      publicTripleCount: 11,
+      privateMerkleRoot: `0x${'AB'.repeat(32)}`,
+      privateTripleCount: 5,
+      accessPolicy: 'allowList',
+      allowedPeers: ['12D3KooWLegacyPeerA', '12D3KooWLegacyPeerB'],
+      entityProofs: true,
+      seal: {
+        merkleRoot: `0x${'cd'.repeat(32)}`,
+        authorAddress: '0x4444444444444444444444444444444444444444',
+        signature: {
+          r: `0x${'55'.repeat(32)}`,
+          vs: `0x${'66'.repeat(32)}`,
+        },
+        schemeVersion: 1,
+        reservedKaId: '123456789',
+      },
+      sealChainId: '31337',
+      sealKav10Address: '0x7777777777777777777777777777777777777777',
+      sealFinalizedAtIso: '2026-01-02T03:04:05.678Z',
+      sealMerkleRoot: `0x${'EF'.repeat(32)}`,
+      wmCurrentAssertion: 'wm-legacy-assertion',
+      swmCurrentAssertion: 'swm-legacy-assertion',
+      vmCurrentAssertion: '0xlegacy-vm-assertion',
+      kaNumber: '42',
+      reservedUal: 'did:dkg:hardhat:31337/0x3333333333333333333333333333333333333333/42',
+      publishEpochs: 12,
+      clearSharedMemoryAfter: true,
+      publisherNodeIdentityIdOverride: '9',
+    } satisfies KnowledgeAssetVmPublishRequestWithoutIntentKey;
+
+    // Golden value produced by the exact pre-pricing canonical projection.
+    // callerAgentAddress was already deliberately excluded from that projection.
+    expect(createKnowledgeAssetVmPublishIntentKey(legacyRequest)).toBe(
+      'sha256:6539905940eff8e5a181f014902f367d08ac56516d4eef8ca035cfafcc9844a1',
+    );
+  });
+
   it('forwards full-content pricing through public publish and publishAsync entry points', async () => {
     const contextGraphId = 'publication-pricing-public-api';
     const agent = await createAgent('FullContentPricingPublicApiBot');

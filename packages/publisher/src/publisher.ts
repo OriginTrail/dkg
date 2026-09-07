@@ -463,12 +463,6 @@ export interface InitialPublishOptions extends BasePublicationOptions {
   pricingPolicy?: PublicationPricingPolicy;
 }
 
-/**
- * Options for publishing a new asset. Kept as the established public name for
- * source compatibility; update callers use the distinct {@link UpdateOptions}.
- */
-export type PublishOptions = InitialPublishOptions;
-
 /** Options for updating an existing asset. */
 export interface UpdateOptions extends BasePublicationOptions {
   /** V10 update ACK provider — quorum signatures before on-chain update. */
@@ -476,6 +470,17 @@ export interface UpdateOptions extends BasePublicationOptions {
   /** Pre-computed owner seal for an on-chain update. */
   precomputedUpdateAttestation?: PrecomputedUpdateAttestation;
 }
+
+/**
+ * Historical broad publication options shape.
+ *
+ * @deprecated Prefer {@link InitialPublishOptions} for `publish` and
+ * {@link UpdateOptions} for `update`. This compatibility export intentionally
+ * retains both established field sets so existing annotations and indexed
+ * access types continue to compile; the operation-specific entry points above
+ * remain narrow and enforce their own contracts.
+ */
+export type PublishOptions = InitialPublishOptions & UpdateOptions;
 
 export interface PublishResult {
   kaId: bigint;
