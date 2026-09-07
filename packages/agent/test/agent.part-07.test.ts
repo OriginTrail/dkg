@@ -14,10 +14,13 @@ afterAll(async () => {
   await revertSnapshot(_fileSnapshot);
 });
 
-function randomSamplingRetryTimer(agent: DKGAgent): ReturnType<typeof setInterval> | null {
-  return (agent as unknown as {
-    randomSamplingBindRetryTimer: ReturnType<typeof setInterval> | null;
-  }).randomSamplingBindRetryTimer;
+function observeRandomSamplingRuntime(agent: DKGAgent) {
+  const factory = vi.spyOn(agent, 'createRandomSamplingRuntime');
+  return () => {
+    const call = factory.mock.results.at(-1);
+    if (!call || call.type !== 'return') throw new Error('Random Sampling runtime was not constructed');
+    return call.value.getLifecycleSnapshot();
+  };
 }
 
 describe('Random Sampling lifecycle gating', () => {
@@ -37,22 +40,11 @@ describe('Random Sampling lifecycle gating', () => {
       randomSamplingUseWorkerThread: false,
       randomSamplingTickIntervalMs: 60_000,
     });
-    const realSetInterval = globalThis.setInterval;
-    const intervalCallbacks = new Map<
-      ReturnType<typeof setInterval>,
-      (...args: unknown[]) => void
-    >();
-    const intervalSpy = vi.spyOn(globalThis, 'setInterval').mockImplementation((
-      (callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
-        const handle = realSetInterval(callback, delay, ...args);
-        intervalCallbacks.set(handle, callback);
-        return handle;
-      }
-    ) as typeof setInterval);
+    const runtimeState = observeRandomSamplingRuntime(agent);
+
 
     try {
       await agent.start();
-      intervalSpy.mockRestore();
 
       expect(membership).toHaveBeenCalledWith(52n);
       expect(agent.getRandomSamplingStatus()).toMatchObject({
@@ -63,13 +55,10 @@ describe('Random Sampling lifecycle gating', () => {
         loop: null,
       });
 
-      const retryTimer = randomSamplingRetryTimer(agent);
-      expect(retryTimer).not.toBeNull();
-      const retryTick = retryTimer ? intervalCallbacks.get(retryTimer) : undefined;
-      expect(retryTick).toBeTypeOf('function');
+      expect(runtimeState().reconciliationScheduled).toBe(true);
 
       sharded = true;
-      retryTick?.();
+      await agent.reconcileRandomSamplingProver({ operationName: 'sync', operationId: 'rs-gating-test' });
       await vi.waitFor(
         () => expect(agent.getRandomSamplingStatus().enabled).toBe(true),
         { timeout: 2_000, interval: 10 },
@@ -79,9 +68,8 @@ describe('Random Sampling lifecycle gating', () => {
         identityId: '52',
         disabledReason: null,
       });
-      expect(randomSamplingRetryTimer(agent)).not.toBeNull();
+      expect(runtimeState().reconciliationScheduled).toBe(true);
     } finally {
-      intervalSpy.mockRestore();
       await agent.stop().catch(() => {});
     }
   });
@@ -105,6 +93,7 @@ describe('Random Sampling lifecycle gating', () => {
       nodeRole: 'core',
       randomSamplingUseWorkerThread: false,
     });
+    const runtimeState = observeRandomSamplingRuntime(agent);
 
     try {
       await agent.start();
@@ -114,7 +103,7 @@ describe('Random Sampling lifecycle gating', () => {
         identityId: '53',
         disabledReason: 'contracts_not_deployed',
       });
-      expect(randomSamplingRetryTimer(agent)).toBeNull();
+      expect(runtimeState().reconciliationScheduled).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -137,22 +126,11 @@ describe('Random Sampling lifecycle gating', () => {
       randomSamplingUseWorkerThread: false,
       randomSamplingTickIntervalMs: 60_000,
     });
-    const realSetInterval = globalThis.setInterval;
-    const intervalCallbacks = new Map<
-      ReturnType<typeof setInterval>,
-      (...args: unknown[]) => void
-    >();
-    const intervalSpy = vi.spyOn(globalThis, 'setInterval').mockImplementation((
-      (callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
-        const handle = realSetInterval(callback, delay, ...args);
-        intervalCallbacks.set(handle, callback);
-        return handle;
-      }
-    ) as typeof setInterval);
+    const runtimeState = observeRandomSamplingRuntime(agent);
+
 
     try {
       await expect(agent.start()).resolves.toBeUndefined();
-      intervalSpy.mockRestore();
 
       expect(membership).toHaveBeenNthCalledWith(1, 56n);
       expect(agent.getRandomSamplingStatus()).toMatchObject({
@@ -161,12 +139,9 @@ describe('Random Sampling lifecycle gating', () => {
         disabledReason: 'eligibility_lookup_failed',
       });
 
-      const retryTimer = randomSamplingRetryTimer(agent);
-      expect(retryTimer).not.toBeNull();
-      const retryTick = retryTimer ? intervalCallbacks.get(retryTimer) : undefined;
-      expect(retryTick).toBeTypeOf('function');
+      expect(runtimeState().reconciliationScheduled).toBe(true);
 
-      retryTick?.();
+      await agent.reconcileRandomSamplingProver({ operationName: 'sync', operationId: 'rs-gating-test' });
       await vi.waitFor(
         () => expect(agent.getRandomSamplingStatus().enabled).toBe(true),
         { timeout: 2_000, interval: 10 },
@@ -177,9 +152,8 @@ describe('Random Sampling lifecycle gating', () => {
         identityId: '56',
         disabledReason: null,
       });
-      expect(randomSamplingRetryTimer(agent)).not.toBeNull();
+      expect(runtimeState().reconciliationScheduled).toBe(true);
     } finally {
-      intervalSpy.mockRestore();
       await agent.stop().catch(() => {});
     }
   });
@@ -200,6 +174,7 @@ describe('Random Sampling lifecycle gating', () => {
       nodeRole: 'core',
       randomSamplingUseWorkerThread: false,
     });
+    const runtimeState = observeRandomSamplingRuntime(agent);
 
     try {
       await agent.start();
@@ -210,7 +185,7 @@ describe('Random Sampling lifecycle gating', () => {
         identityId: '54',
         disabledReason: 'contracts_not_deployed',
       });
-      expect(randomSamplingRetryTimer(agent)).toBeNull();
+      expect(runtimeState().reconciliationScheduled).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -232,6 +207,7 @@ describe('Random Sampling lifecycle gating', () => {
       nodeRole: 'core',
       randomSamplingUseWorkerThread: false,
     });
+    const runtimeState = observeRandomSamplingRuntime(agent);
 
     try {
       await expect(agent.start()).resolves.toBeUndefined();
@@ -242,7 +218,7 @@ describe('Random Sampling lifecycle gating', () => {
         identityId: '55',
         disabledReason: 'bind_failed',
       });
-      expect(randomSamplingRetryTimer(agent)).not.toBeNull();
+      expect(runtimeState().reconciliationScheduled).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }

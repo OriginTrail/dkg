@@ -98,7 +98,8 @@ export type RandomSamplingDisabledReason =
   | 'eligibility_lookup_failed'
   | 'unsupported_chain'
   | 'contracts_not_deployed'
-  | 'bind_failed';
+  | 'bind_failed'
+  | 'retiring';
 
 /**
  * Handle returned by {@link bindRandomSampling}. The agent owns its
@@ -134,6 +135,14 @@ export async function stopRandomSamplingHandleWithin(
   handle: RandomSamplingHandle,
   timeoutMs: number,
 ): Promise<void> {
+  return waitForRandomSamplingShutdownWithin(handle.stop(), timeoutMs);
+}
+
+/** Bound the wait while retaining ownership of the underlying physical drain. */
+export async function waitForRandomSamplingShutdownWithin(
+  retirement: Promise<void>,
+  timeoutMs: number,
+): Promise<void> {
   let timedOut = false;
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<void>((resolve) => {
@@ -144,7 +153,7 @@ export async function stopRandomSamplingHandleWithin(
     timeoutHandle.unref?.();
   });
   try {
-    await Promise.race([handle.stop(), timeout]);
+    await Promise.race([retirement, timeout]);
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
   }

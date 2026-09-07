@@ -1,3 +1,5 @@
+import { RandomSamplingRuntime } from '../src/random-sampling-runtime.js';
+import type { RandomSamplingHandle } from '../src/random-sampling-bind.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   MemoryLayer,
@@ -17,7 +19,6 @@ import {
   LifecycleSyncMethods,
   authenticateChallengePinnedGraphScopedAssetWithinDeadline,
 } from '../src/dkg-agent-lifecycle.js';
-import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 import {
   runRandomSamplingExactRepair,
@@ -664,88 +665,36 @@ describe('Random Sampling proof-time exact repair', () => {
     expect(resolveCandidatePeerIds).not.toHaveBeenCalled();
   });
 
-  it('keeps a timed-out prover installed and starts only a later replacement after it settles', async () => {
-    const originalTimeout = DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS;
-    Object.defineProperty(DKGAgentBase, 'RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS', {
-      configurable: true,
-      value: 10,
-    });
+  it('keeps a timed-out prover quarantined and creates its replacement only after close', async () => {
     let settleOld!: () => void;
     const oldSettled = new Promise<void>((resolve) => { settleOld = resolve; });
     const oldStop = vi.fn(() => oldSettled);
-    const oldHandle = {
-      enabled: true,
-      start: vi.fn(),
-      stop: oldStop,
-      getStatus: vi.fn(() => ({ disabledReason: null })),
-    };
-    const freshAfterTimeout = {
-      enabled: true,
-      start: vi.fn(),
-      stop: vi.fn(async () => undefined),
-      getStatus: vi.fn(() => ({ disabledReason: null })),
-    };
-    const installedReplacement = {
-      enabled: true,
-      start: vi.fn(),
-      stop: vi.fn(async () => undefined),
-      getStatus: vi.fn(() => ({ disabledReason: null })),
-    };
-    const createRandomSamplingHandle = vi.fn()
-      .mockResolvedValueOnce(freshAfterTimeout)
-      .mockResolvedValueOnce(installedReplacement);
-    const agentLike = {
-      started: true,
-      config: { nodeRole: 'core' },
-      chain: {
-        chainId: 'base:8453',
-        isRandomSamplingReady: () => true,
-        getIdentityId: vi.fn(async () => 42n),
-        isShardingTableMember: vi.fn(async () => true),
-      },
-      store: {},
-      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-      randomSamplingHandle: oldHandle,
-      randomSamplingIdentityId: 0n,
-      randomSamplingDisabledReason: 'not_started',
-      randomSamplingLogger: vi.fn(() => ({
-        info: vi.fn(), warn: vi.fn(), error: vi.fn(),
-      })),
-      createRandomSamplingHandle,
-      repairRandomSamplingKnowledgeAsset: vi.fn(),
-      clearRandomSamplingBindRetry: vi.fn(),
-    };
-
+    const makeHandle = (identityId: string): RandomSamplingHandle => ({
+      enabled: true, start: vi.fn(), stop: vi.fn(async () => undefined),
+      getStatus: () => ({ enabled: true, role: 'core', identityId, disabledReason: null, loop: null }),
+    });
+    const oldHandle = { ...makeHandle('41'), stop: oldStop };
+    const replacement = makeHandle('42');
+    const createHandle = vi.fn().mockResolvedValueOnce(oldHandle).mockResolvedValueOnce(replacement);
+    const getIdentityId = vi.fn(async () => 41n);
+    const runtime = new RandomSamplingRuntime({
+      role: 'core', chain: { chainId: 'base:8453', getIdentityId, isShardingTableMember: async () => true },
+      createHandle, log: { info: vi.fn(), warn: vi.fn() }, shutdownTimeoutMs: () => 10,
+    });
     try {
-      await expect(
-        (LifecycleSyncMethods.prototype.tryStartRandomSamplingProver as any).call(
-          agentLike,
-          { operation: 'start', id: 'rs-replacement-timeout' },
-          false,
-        ),
-      ).resolves.toBe('retryable');
-      expect(agentLike.randomSamplingHandle).toBe(oldHandle);
+      await expect(runtime.start()).resolves.toBe('started');
+      getIdentityId.mockResolvedValue(42n);
+      await expect(runtime.reconcile()).resolves.toBe('retryable');
+      expect(runtime.getStatus()).toMatchObject({ enabled: false, disabledReason: 'retiring', identityId: '41' });
       expect(oldStop).toHaveBeenCalledOnce();
-      expect(freshAfterTimeout.stop).toHaveBeenCalledOnce();
-      expect(freshAfterTimeout.start).not.toHaveBeenCalled();
-
+      expect(createHandle).toHaveBeenCalledOnce();
+      expect(replacement.start).not.toHaveBeenCalled();
       settleOld();
-      await expect(
-        (LifecycleSyncMethods.prototype.tryStartRandomSamplingProver as any).call(
-          agentLike,
-          { operation: 'start', id: 'rs-replacement-retry' },
-          false,
-        ),
-      ).resolves.toBe('started');
-      expect(oldStop).toHaveBeenCalledTimes(2);
-      expect(agentLike.randomSamplingHandle).toBe(installedReplacement);
-      expect(installedReplacement.start).toHaveBeenCalledOnce();
-    } finally {
-      Object.defineProperty(DKGAgentBase, 'RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS', {
-        configurable: true,
-        value: originalTimeout,
-      });
-    }
+      await expect(runtime.reconcile()).resolves.toBe('started');
+      expect(oldStop).toHaveBeenCalledOnce();
+      expect(createHandle).toHaveBeenCalledTimes(2);
+      expect(replacement.start).toHaveBeenCalledOnce();
+    } finally { settleOld(); await runtime.stop(); }
   });
 
   it('wires the lifecycle repair callback through the production prover binding', async () => {
@@ -795,22 +744,15 @@ describe('Random Sampling proof-time exact repair', () => {
       },
       store: new OxigraphStore(),
       log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-      randomSamplingHandle: null,
-      randomSamplingIdentityId: 0n,
-      randomSamplingDisabledReason: 'not_started',
       randomSamplingLogger: LifecycleSyncMethods.prototype.randomSamplingLogger,
       createRandomSamplingHandle: LifecycleSyncMethods.prototype.createRandomSamplingHandle,
       repairRandomSamplingKnowledgeAsset,
-      clearRandomSamplingBindRetry: vi.fn(),
     };
 
-    await expect(
-      (LifecycleSyncMethods.prototype.tryStartRandomSamplingProver as any).call(
-        agentLike,
-        { operation: 'start', id: 'rs-bind-test' },
-        true,
-      ),
-    ).resolves.toBe('started');
+    const runtime: RandomSamplingRuntime = (LifecycleSyncMethods.prototype.createRandomSamplingRuntime as any).call(
+      agentLike, { operationName: 'connect', operationId: 'rs-bind-test' },
+    );
+    await expect(runtime.start()).resolves.toBe('started');
     await vi.waitFor(() => expect(repairRandomSamplingKnowledgeAsset).toHaveBeenCalledOnce());
     expect(repairRandomSamplingKnowledgeAsset).toHaveBeenCalledWith({
       kaId: 7n,
@@ -818,6 +760,6 @@ describe('Random Sampling proof-time exact repair', () => {
       expectedRoot,
       expectedLeafCount: 1n,
     });
-    await agentLike.randomSamplingHandle!.stop();
+    await runtime.stop();
   });
 });

@@ -15,6 +15,7 @@ const DISABLED_REASON_MESSAGES: Record<RandomSamplingDisabledReason, string> = {
   unsupported_chain: 'chain adapter does not support Random Sampling',
   contracts_not_deployed: 'Random Sampling contracts are not available on this network',
   bind_failed: 'prover setup failed; inspect daemon logs',
+  retiring: 'prover disabled; waiting for physical resource cleanup',
   not_started: 'prover has not started yet',
 };
 
