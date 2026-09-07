@@ -3864,6 +3864,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // `trySyncFromPeer` for every new peer (one from each handler),
     // doubling initial catch-up traffic and racing the sync/store
     // path on first-contact peers. Codex tier-4g finding on this line.
+    // Abort synchronously at the start of stop(), before libp2p tears down.
+    // A signal belongs to this node lifetime, including pending continuations.
+    this.syncPeerEvents?.abort();
+    this.syncPeerEvents = new AbortController();
+    const { signal } = this.syncPeerEvents;
     this.node.libp2p.addEventListener('connection:open', (evt) => {
       const remotePeer = evt.detail.remotePeer.toString();
       if (remotePeer === this.node.libp2p.peerId.toString()) return;
@@ -3910,6 +3915,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           }
           return;
         }
+        if (signal.aborted) return;
         if (!admitted) {
           for (const contextGraphId of replayContextGraphIds) {
             this.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
@@ -3922,6 +3928,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           const message = err instanceof Error ? err.message : String(err);
           this.log.warn(ctx, `Reverse-path peerStore enrichment failed for ${remotePeer}: ${message}`);
         }
+        if (signal.aborted) return;
         // PR-2 (SWM-fanout plan): drain pending sender-key packages
         // that were queued because the recipient had no advertised
         // peerId at publish time. Tolerant of profile-lookup failure
@@ -3935,6 +3942,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           const message = err instanceof Error ? err.message : String(err);
           this.log.warn(ctx, `Pending SWM sender-key drain on connect failed for ${remotePeer}: ${message}`);
         }
+        if (signal.aborted) return;
         // The receiver owns replay completeness. Provider-initiated pushes do
         // not carry a promised-head manifest and can otherwise leave a brief
         // A-applied/B-undiscovered window reporting complete. Request every
@@ -3970,7 +3978,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
         this.queueSyncFromPeerOnConnect(remotePeer, handleSyncError);
       })();
-    });
+    }, { signal });
 
     // Remember when the last live connection to a peer is gone. A3 keeps
     // `lastSuccessfulSyncAt` and reconciler backoff across relay flaps, but
@@ -3987,7 +3995,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (stillConnected) return;
       this.skippedNoSyncPeers.delete(remotePeer);
       this.lastSyncDisconnectedAt.set(remotePeer, Date.now());
-    });
+    }, { signal });
 
     // Event-driven sync-retry: libp2p emits `peer:update` whenever a
     // peer record changes — including (and most importantly) when
@@ -4004,7 +4012,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (!peerIdObj) return;
       const protocols = detail.peer?.protocols ?? [];
       this.handlePeerUpdateForSyncRetry(peerIdObj.toString(), protocols);
-    });
+    }, { signal });
 
     // Reconnect-on-gossip: when a gossip message arrives from a peer we're
     // not currently connected to, best-effort dial them. This catches the

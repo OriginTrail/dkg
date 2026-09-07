@@ -1131,6 +1131,75 @@ describe('runSyncOnConnect callbacks', () => {
 });
 
 describe('DKGAgent sync retry — event-driven via peer:update', () => {
+  it('retires peer-update admission synchronously when shutdown begins', async () => {
+    const agent = await DKGAgent.create({
+      name: 'PeerUpdateShutdown',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+    let stopping: Promise<void> | undefined;
+    try {
+      await agent.start();
+      const transport = agent.node.libp2p;
+      const peer = freshPeerIdString();
+      const internals = agent as unknown as {
+        handlePeerUpdateForSyncRetry(peerId: string, protocols: readonly string[]): void;
+        knownCorePeerIds: Set<string>;
+      };
+      const handleUpdate = vi.spyOn(internals, 'handlePeerUpdateForSyncRetry');
+      const update = () => transport.dispatchEvent(new CustomEvent('peer:update', {
+        detail: { peer: { id: { toString: () => peer }, protocols: [PROTOCOL_STORAGE_ACK] } },
+      }));
+      update();
+      expect(handleUpdate).toHaveBeenCalledOnce();
+      expect(internals.knownCorePeerIds.has(peer)).toBe(true);
+
+      // The spy avoids an uncaught EventTarget exception on the unfixed code,
+      // while proving the installed production listener no longer admits work.
+      handleUpdate.mockClear().mockImplementation(() => {});
+      stopping = agent.stop();
+      update();
+      await stopping;
+      update();
+      expect(handleUpdate).not.toHaveBeenCalled();
+    } finally {
+      await (stopping ?? agent.stop());
+    }
+  });
+
+  it('does not resume connection work after admission completes during shutdown', async () => {
+    const agent = await DKGAgent.create({
+      name: 'PeerAdmissionShutdown',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+    const admission = deferred<boolean>();
+    try {
+      await agent.start();
+      const internals = agent as unknown as {
+        networkAdmissionCoordinator: { ensureAdmitted(peer: string, ctx: OperationContext): Promise<boolean> };
+        enrichPeerStoreFromInboundCircuit(connection: unknown): Promise<void>;
+        queueSyncFromPeerOnConnect(peer: string, onError: unknown): void;
+      };
+      const ensureAdmitted = vi.spyOn(internals.networkAdmissionCoordinator, 'ensureAdmitted')
+        .mockReturnValue(admission.promise);
+      const enrich = vi.spyOn(internals, 'enrichPeerStoreFromInboundCircuit');
+      const queue = vi.spyOn(internals, 'queueSyncFromPeerOnConnect');
+      agent.node.libp2p.dispatchEvent(new CustomEvent('connection:open', {
+        detail: { remotePeer: peerIdFromString(freshPeerIdString()) },
+      }));
+      expect(ensureAdmitted).toHaveBeenCalledOnce();
+      await agent.stop();
+      admission.resolve(true);
+      await flushMicrotasks();
+      expect(enrich).not.toHaveBeenCalled();
+      expect(queue).not.toHaveBeenCalled();
+    } finally {
+      admission.resolve(false);
+      await agent.stop();
+    }
+  });
+
   it('retries trySyncFromPeer when a previously-skipped peer now advertises PROTOCOL_SYNC', async () => {
     const agent = await DKGAgent.create({
       name: 'PeerUpdateRetry',
