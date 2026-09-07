@@ -4,19 +4,25 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import TOML from '@iarna/toml';
 import { inspectRegistration, removeRegistration } from '../src/mcp-client-config.js';
-import { type ClientTarget, type McpClientId } from '../src/mcp-client-registry.js';
+import { type ClientTarget, type McpClientId, type McpClientConfigShape } from '../src/mcp-client-registry.js';
 import { dkgDir, configPath } from '../src/config.js';
 import { dkgAuthTokenPath } from '@origintrail-official/dkg-core';
 import { mcpUninstallAction } from '../src/mcp-uninstall.js';
+import { createInterface } from 'node:readline/promises';
+
+vi.mock('node:readline/promises', () => ({ createInterface: vi.fn() }));
 
 let root: string;
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'dkg-mcp-uninstall-')); });
 afterEach(() => { vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
 
-function target(name: string, container = 'mcpServers', format: 'json' | 'toml' = 'json'): ClientTarget {
+function target(name: string, container: 'mcpServers' | 'servers' | 'mcp_servers' = 'mcpServers', format: 'json' | 'toml' = 'json'): ClientTarget {
   const configPath = join(root, `${name}.${format}`);
   const id = ({ Cursor: 'cursor', 'Claude Code': 'claude-code', 'Claude Desktop': 'claude-desktop', Windsurf: 'windsurf', VSCode: 'vscode', Cline: 'cline', 'Codex CLI': 'codex-cli' } as Record<string, McpClientId>)[name] ?? 'cursor';
-  return { id, location: 'native', name, configPath, displayPath: configPath, entryPath: `${container}.dkg`, format };
+  const shape: McpClientConfigShape = format === 'toml'
+    ? { format, entryPath: 'mcp_servers.dkg' }
+    : { format, entryPath: container === 'servers' ? 'servers.dkg' : 'mcpServers.dkg' };
+  return { ...shape, id, location: 'native', name, configPath, displayPath: configPath };
 }
 function seed(client: ClientTarget, onlyDkg = false): void {
   const container = client.entryPath!.split('.')[0];
@@ -71,6 +77,30 @@ describe('MCP registration removal', () => {
     writeFileSync(client.configPath, 'setting = "keep"\nmcp_servers = { dkg = { command = "dkg" }, other = { command = "other" } }\n');
     expect(removeRegistration(client)).toBe(true);
     expect(read(client)).toEqual({ setting: 'keep', mcp_servers: { other: { command: 'other' } } });
+  });
+
+  it('preserves escaped multiline TOML content that resembles an owned table', () => {
+    const client = target('Codex CLI', 'mcp_servers', 'toml');
+    const prefix = String.raw`# keep this comment
+note = """
+Escaped triple quote: \"""
+[mcp_servers.dkg]
+this_is_string_content = true
+"""
+
+`;
+    const sibling = '[mcp_servers.other]\ncommand = "other"\n';
+    const raw = prefix + '[mcp_servers.dkg]\ncommand = "dkg"\n\n' + sibling;
+    const expected = TOML.parse(raw);
+    delete (expected.mcp_servers as TOML.JsonMap).dkg;
+    writeFileSync(client.configPath, raw);
+    expect(removeRegistration(client)).toBe(true);
+    const output = readFileSync(client.configPath, 'utf8');
+    expect(TOML.parse(output)).toEqual(expected);
+    expect(output.startsWith(prefix)).toBe(true);
+    expect(output.endsWith(sibling)).toBe(true);
+    expect(removeRegistration(client)).toBe(false);
+    expect(readFileSync(client.configPath, 'utf8')).toBe(output);
   });
 
   it('does not create a missing config', () => {
@@ -145,10 +175,29 @@ describe('mcpUninstallAction', () => {
     expect(readFileSync(authToken, 'utf8')).toBe('sentinel-token');
   });
 
-  it('preserves declined clients and continues with later confirmations', async () => {
+  it('preserves explicit readline declines and continues with later confirmations', async () => {
     const { clients, deps } = fixture();
-    await mcpUninstallAction({}, { ...deps, confirmTargets: async (planned) => planned.filter((_target, index) => index !== 1) });
-    expect(clients.map((client) => inspectRegistration(client))).toEqual([false, true, false]);
+    const originals = clients.map((client) => readFileSync(client.configPath, 'utf8'));
+    const question = vi.fn().mockResolvedValueOnce('n').mockResolvedValueOnce(' NO ').mockResolvedValueOnce('yes');
+    const close = vi.fn();
+    vi.mocked(createInterface).mockReturnValue({ question, close } as ReturnType<typeof createInterface>);
+    const streams = [process.stdin, process.stdout];
+    const descriptors = streams.map((stream) => Object.getOwnPropertyDescriptor(stream, 'isTTY'));
+    streams.forEach((stream) => Object.defineProperty(stream, 'isTTY', { configurable: true, value: true }));
+    try {
+      await mcpUninstallAction({}, deps);
+      expect(question).toHaveBeenCalledTimes(3);
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(clients.map((client) => inspectRegistration(client))).toEqual([true, true, false]);
+      expect(clients.slice(0, 2).map((client) => readFileSync(client.configPath, 'utf8'))).toEqual(originals.slice(0, 2));
+    } finally {
+      streams.forEach((stream, index) => {
+        const descriptor = descriptors[index];
+        if (descriptor) Object.defineProperty(stream, 'isTTY', descriptor);
+        else Reflect.deleteProperty(stream, 'isTTY');
+      });
+      vi.mocked(createInterface).mockReset();
+    }
   });
 
   it('reports no clients as a successful no-op', async () => {

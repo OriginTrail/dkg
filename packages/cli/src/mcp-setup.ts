@@ -1,4 +1,4 @@
-import { detectClients, tildify, type ClientTarget } from './mcp-client-registry.js';
+import { detectClients, tildify, clientSkillPath, type ClientTarget } from './mcp-client-registry.js';
 import { readRegistration, writeRegistration } from './mcp-client-config.js';
 export { detectClients, expandHome, type ClientTarget } from './mcp-client-registry.js';
 export { readRegisteredServerKeys, type RegisteredMcpServer, type ServerKeyProbe } from './mcp-client-config.js';
@@ -584,25 +584,6 @@ function classify(
  * Code to fixed destinations; other client targets get `null`
  * and the caller skips the copy step).
  */
-function skillTargetForClient(target: ClientTarget, home: string): string | null {
-  // Stable IDs preserve skill delivery for WSL2-side variants independently of display wording.
-  // Both Cursor and Claude Code keep skills under `~/.cursor/skills/` and
-  // `~/.claude/skills/` respectively on the operator's primary OS — for the
-  // WSL2 case the operator runs the GUI client on Windows so the Linux-side
-  // ~/.cursor/skills/ they have inside WSL is the right destination iff
-  // they ALSO run a Cursor instance against WSL. Erring on the side of "deliver
-  // to the Linux-side too" is safe — extra files in skill dirs are inert,
-  // and a corresponding miss is what RFC-41 specifies the operator should
-  // notice via SKILL.md being absent.
-  if (target.id === 'cursor') {
-    return join(home, '.cursor', 'skills', 'dkg-node', 'SKILL.md');
-  }
-  if (target.id === 'claude-code') {
-    return join(home, '.claude', 'skills', 'dkg-node', 'SKILL.md');
-  }
-  return null;
-}
-
 
 /**
  * Copy the bundled SKILL.md into the per-client skills directory if
@@ -621,7 +602,7 @@ function skillTargetForClient(target: ClientTarget, home: string): string | null
  */
 function deliverSkillToClient(target: ClientTarget): string | null {
   const home = homedir();
-  const skillPath = skillTargetForClient(target, home);
+  const skillPath = clientSkillPath(target.id, home);
   if (!skillPath) return null;
   try {
     const skillContent = renderStandaloneDkgNodeSkill();

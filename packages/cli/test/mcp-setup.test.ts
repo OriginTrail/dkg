@@ -3005,9 +3005,9 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       );
       // If the WSL helpers succeed in this environment, the
       // entry is present with the canonical mcpServers.dkg shape
-      // (no entryPath override) and the path includes `.cursor`.
+      // (explicit mcpServers container) and the path includes `.cursor`.
       for (const entry of cursorWslEntries) {
-        expect(entry.entryPath).toBeUndefined();
+        expect(entry.entryPath).toBe('mcpServers.dkg');
         expect(entry.configPath).toContain('.cursor');
       }
     } finally {

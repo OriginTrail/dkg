@@ -1,11 +1,8 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import TOML from '@iarna/toml';
+import { isDeepStrictEqual } from 'node:util';
 import { tildify, type ClientTarget } from './mcp-client-registry.js';
-
-
-const DEFAULT_FORMAT: NonNullable<ClientTarget['format']> = 'json';
-const DEFAULT_ENTRY_PATH = 'mcpServers.dkg';
 
 /**
  * Resolve a dotted entry-path (`'mcpServers.dkg'`, `'servers.dkg'`,
@@ -13,8 +10,8 @@ const DEFAULT_ENTRY_PATH = 'mcpServers.dkg';
  * both classify (read) and writeRegistration (write) to navigate the
  * parsed config object identically.
  */
-function splitEntryPath(entryPath: string | undefined): { head: string[]; leaf: string } {
-  const path = entryPath ?? DEFAULT_ENTRY_PATH;
+function splitEntryPath(entryPath: ClientTarget['entryPath']): { head: string[]; leaf: string } {
+  const path = entryPath;
   const parts = path.split('.').filter(Boolean);
   if (parts.length === 0) {
     throw new Error(`Invalid entryPath "${entryPath}": must be a non-empty dotted path`);
@@ -56,7 +53,7 @@ function ensurePathContainer(
  */
 function readEntryAt(
   body: Record<string, unknown>,
-  entryPath: string | undefined,
+  entryPath: ClientTarget['entryPath'],
 ): unknown {
   const { head, leaf } = splitEntryPath(entryPath);
   let cursor: unknown = body;
@@ -118,32 +115,19 @@ function readToml(path: string): Record<string, unknown> {
 
 /**
  * Read the parsed body of a per-client config, dispatching on
- * `target.format`. JSON is the default + most-common format. TOML
- * (Codex CLI) uses `@iarna/toml`. The YAML branch is a reserved
- * stub today — see `ClientTarget.format` for the PR #443 history.
+ * `target.format`. JSON is the most common format. TOML
+ * (Codex CLI) uses `@iarna/toml`. Unsupported shapes cannot be targets.
  * Missing-file is normalised to `{}` for the live formats so
  * first-write callers don't have to special-case
  * detection-via-parent-dir candidates.
  */
 function readConfigBody(target: ClientTarget): Record<string, unknown> {
-  const format = target.format ?? DEFAULT_FORMAT;
+  const format = target.format;
   switch (format) {
     case 'json':
       return readJson(target.configPath);
     case 'toml':
       return readToml(target.configPath);
-    case 'yaml':
-      // YAML branch is reserved for a future client (PR #443
-      // attempted Continue here, then reverted because Continue's
-      // MCP config is workspace-local, not user-global). Re-adding
-      // a YAML client is purely additive: declare the candidate
-      // with `format: 'yaml'` and replace this stub with the
-      // `js-yaml.load` call. Throwing eagerly here means a future
-      // candidate that ships pre-stub-replacement trips cleanly at
-      // registration time rather than silently writing garbage.
-      throw new Error(
-        `YAML config format not yet implemented (target: ${target.name}).`,
-      );
     default:
       throw new Error(`Unknown client config format: ${String(format)}`);
   }
@@ -365,10 +349,16 @@ function advanceTomlMultilineDelimiter(
 
   while (i < line.length) {
     if (state) {
-      const end = line.indexOf(state, i);
-      if (end === -1) return state;
-      i = end + state.length;
-      state = null;
+      // In a multiline basic string, an escaped quote cannot begin the
+      // closing delimiter. Literal multiline strings have no escapes.
+      if (state === '"""' && line[i] === '\\') {
+        i += 2;
+      } else if (line.startsWith(state, i)) {
+        i += state.length;
+        state = null;
+      } else {
+        i++;
+      }
       continue;
     }
 
@@ -529,7 +519,7 @@ function readPathAt(body: Record<string, unknown>, path: string | undefined): un
   return cursor;
 }
 
-function tomlRawHasEntry(raw: string, entryPath: string | undefined): boolean {
+function tomlRawHasEntry(raw: string, entryPath: ClientTarget['entryPath']): boolean {
   if (!raw.trim()) return false;
   try {
     const parsed = TOML.parse(raw) as Record<string, unknown>;
@@ -559,7 +549,7 @@ function writeTomlConfigBody(
   const raw = existsSync(target.configPath)
     ? readFileSync(target.configPath, 'utf8')
     : '';
-  const ownedPath = target.entryPath ?? DEFAULT_ENTRY_PATH;
+  const ownedPath = target.entryPath;
   const ownedParentPath = tomlParentPath(ownedPath) ?? undefined;
   const tableEdit = edit.kind === 'remove' ? edit
     : { kind: 'upsert' as const, block: serialiseTomlEntryOnly(target, body) };
@@ -577,6 +567,15 @@ function writeTomlConfigBody(
     ensurePathContainer(parentOnly, splitEntryPath(target.entryPath).head);
     patched = appendTomlTable(patched, TOML.stringify(parentOnly as TOML.JsonMap),
       raw.includes('\r\n') ? '\r\n' : '\n');
+  }
+  // The parser is authoritative: a formatting-preserving patch must describe
+  // exactly the intended edit, including all unrelated string/table values.
+  if (patched !== null) {
+    try {
+      if (!isDeepStrictEqual(TOML.parse(patched), body)) patched = null;
+    } catch {
+      patched = null;
+    }
   }
   if (patched === null) {
     process.stderr.write(
@@ -596,8 +595,7 @@ function writeTomlConfigBody(
  * Serialize a parsed body to disk, dispatching on `target.format`.
  * Mirrors `readConfigBody`'s dispatch shape. JSON output keeps the
  * pre-refactor formatting (2-space indent, trailing newline)
- * byte-for-byte. TOML patches only the owned MCP table. YAML is a
- * reserved-stub branch today.
+ * byte-for-byte. TOML patches only the owned MCP table.
  *
  * FIX 26 merge: format-agnostic. The merge in `writeRegistration`
  * operates on the parsed body object before it reaches this writer,
@@ -605,7 +603,7 @@ function writeTomlConfigBody(
  * logic.
  */
 function writeConfigBody(target: ClientTarget, body: Record<string, unknown>, edit: RegistrationEdit): void {
-  const format = target.format ?? DEFAULT_FORMAT;
+  const format = target.format;
   const dir = dirname(target.configPath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   switch (format) {
@@ -615,13 +613,6 @@ function writeConfigBody(target: ClientTarget, body: Record<string, unknown>, ed
     case 'toml':
       writeTomlConfigBody(target, body, edit);
       return;
-    case 'yaml':
-      // Mirror `readConfigBody`'s YAML stub. See the comment there
-      // for the rationale (PR #443 Continue revert; YAML branch
-      // reserved for a future client).
-      throw new Error(
-        `YAML config format not yet implemented (target: ${target.name}).`,
-      );
     default:
       throw new Error(`Unknown client config format: ${String(format)}`);
   }

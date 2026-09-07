@@ -1,3 +1,4 @@
+import type { McpClientConfigShape } from '../src/mcp-client-registry.js';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -28,11 +29,11 @@ afterEach(async () => {
 async function target(
   filename: string,
   body: string,
-  extra: Partial<ClientTarget> = {},
+  shape: McpClientConfigShape = { format: 'json', entryPath: 'mcpServers.dkg' },
 ): Promise<ClientTarget> {
   const configPath = join(dir, filename);
   await writeFile(configPath, body, 'utf8');
-  return { id: 'cursor', location: 'native', name: 'Test', configPath, displayPath: configPath, ...extra };
+  return { ...shape, id: 'cursor', location: 'native', name: 'Test', configPath, displayPath: configPath };
 }
 
 /** Fails loudly with the probe's own reason instead of a bare undefined. */
@@ -57,7 +58,7 @@ describe('readRegisteredServerKeys', () => {
   // A detector hardcoding `mcpServers` would silently report nothing here.
   it('honours a non-default entryPath container', async () => {
     const t = await target('vscode.json', JSON.stringify({ servers: { dkg: blk(), mine: blk() } }), {
-      entryPath: 'servers.dkg',
+      format: 'json', entryPath: 'servers.dkg',
     });
     expect(keysOf(readRegisteredServerKeys(t))).toEqual(['dkg', 'mine']);
   });
@@ -106,7 +107,7 @@ describe('readRegisteredServerKeys', () => {
   it('treats an absent config file as a SUCCESSFUL probe with no servers', async () => {
     // Nothing to read is a real answer: this client registered nothing.
     const t: ClientTarget = {
-      id: 'cursor', location: 'native',
+      id: 'cursor', location: 'native', format: 'json', entryPath: 'mcpServers.dkg',
       name: 'Absent',
       configPath: join(dir, 'nope.json'),
       displayPath: 'nope.json',

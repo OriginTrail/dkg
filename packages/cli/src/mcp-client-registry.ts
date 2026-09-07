@@ -4,9 +4,65 @@ import { homedir, platform, release as osRelease } from 'node:os';
 import { execSync } from 'node:child_process';
 
 
-export const MCP_CLIENT_IDS = ['cursor', 'claude-code', 'claude-desktop', 'windsurf', 'vscode', 'cline', 'codex-cli'] as const;
-export type McpClientId = typeof MCP_CLIENT_IDS[number];
+/** The three config shapes currently supported by setup and uninstall. */
+export type McpClientConfigShape =
+  | { readonly format: 'json'; readonly entryPath: 'mcpServers.dkg' | 'servers.dkg' }
+  | { readonly format: 'toml'; readonly entryPath: 'mcp_servers.dkg' };
 export type McpClientLocation = 'native' | 'windows-wsl';
+type WindowsPaths = { USERPROFILE: string | null; APPDATA: string | null };
+
+function homePaths(home: string, ...parts: string[]) {
+  const configPath = join(home, ...parts);
+  return { configPath, displayPath: tildify(configPath) };
+}
+
+const JSON_MCP = { format: 'json', entryPath: 'mcpServers.dkg' } as const;
+const JSON_SERVERS = { format: 'json', entryPath: 'servers.dkg' } as const;
+const TOML_SERVERS = { format: 'toml', entryPath: 'mcp_servers.dkg' } as const;
+
+/** One entry owns each client's identity, storage shape, paths and skill delivery. */
+const MCP_CLIENT_REGISTRY = [
+  { id: 'cursor', name: 'Cursor', config: JSON_MCP,
+    nativePaths: (home: string) => homePaths(home, '.cursor', 'mcp.json'),
+    windowsPath: (env: WindowsPaths) => env.USERPROFILE && join(env.USERPROFILE, '.cursor', 'mcp.json'),
+    skillPath: ['.cursor', 'skills', 'dkg-node', 'SKILL.md'],
+  },
+  { id: 'claude-code', name: 'Claude Code', config: JSON_MCP,
+    nativePaths: (home: string) => homePaths(home, '.claude.json'),
+    skillPath: ['.claude', 'skills', 'dkg-node', 'SKILL.md'],
+  },
+  { id: 'claude-desktop', name: 'Claude Desktop', config: JSON_MCP,
+    nativePaths: claudeDesktopPaths,
+    windowsPath: (env: WindowsPaths) => env.APPDATA && join(env.APPDATA, 'Claude', 'claude_desktop_config.json'),
+  },
+  { id: 'windsurf', name: 'Windsurf', config: JSON_MCP,
+    nativePaths: (home: string) => homePaths(home, '.codeium', 'windsurf', 'mcp_config.json'),
+    windowsPath: (env: WindowsPaths) => env.USERPROFILE && join(env.USERPROFILE, '.codeium', 'windsurf', 'mcp_config.json'),
+  },
+  { id: 'vscode', name: 'VSCode', config: JSON_SERVERS,
+    nativePaths: vscodeMcpPaths,
+    windowsPath: (env: WindowsPaths) => env.APPDATA && join(env.APPDATA, 'Code', 'User', 'mcp.json'),
+  },
+  { id: 'cline', name: 'Cline', config: JSON_MCP,
+    nativePaths: clineMcpPaths,
+    windowsPath: (env: WindowsPaths) => env.APPDATA && join(env.APPDATA, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json'),
+  },
+  { id: 'codex-cli', name: 'Codex CLI', config: TOML_SERVERS,
+    nativePaths: (home: string) => homePaths(home, '.codex', 'config.toml'),
+    // A WSL process has no Windows-compatible Node/CLI launch command for Codex.
+  },
+] as const;
+
+export type McpClientId = typeof MCP_CLIENT_REGISTRY[number]['id'];
+export const MCP_CLIENT_IDS = Object.freeze(MCP_CLIENT_REGISTRY.map((client) => client.id));
+export type ClientTarget = McpClientConfigShape & {
+  id: McpClientId;
+  location: McpClientLocation;
+  name: string;
+  configPath: string;
+  /** Pretty path for display, with `~` substituted back in. */
+  displayPath: string;
+};
 
 /** Stable selector identity is independent of display names and detection results. */
 export function parseMcpClientSelector(value: string): { id: McpClientId; location?: McpClientLocation } {
@@ -18,35 +74,9 @@ export function parseMcpClientSelector(value: string): { id: McpClientId; locati
   return { id: id as McpClientId, location: location as McpClientLocation | undefined };
 }
 
-export interface ClientTarget {
-  id: McpClientId;
-  location: McpClientLocation;
-  name: string;
-  configPath: string;
-  /** Pretty path for display, with `~` substituted back in. */
-  displayPath: string;
-  /**
-   * Per-client config-file format. Defaults to `'json'` so the existing
-   * Cursor + Claude Code targets stay byte-identical post-refactor.
-   * Codex CLI uses `'toml'`. The `'yaml'` variant is reserved for
-   * future clients (Continue was attempted in PR #443 then reverted
-   * because its MCP config is workspace-local, not user-global —
-   * structural mismatch with `dkg mcp setup`'s machine-wide UX);
-   * `readConfigBody` / `writeConfigBody` keep `NotImplementedError`
-   * stubs for the YAML branch so re-adding a YAML client is purely
-   * additive when the time comes.
-   */
-  format?: 'json' | 'toml' | 'yaml';
-  /**
-   * Dotted path to the per-server entry inside the parsed config.
-   * Defaults to `'mcpServers.dkg'` — the shape Cursor / Claude Code /
-   * Claude Desktop / Windsurf / Cline all use. Clients diverging from
-   * that shape (VSCode + Copilot Chat uses `servers.dkg`; Codex CLI
-   * uses `mcp_servers.dkg` under TOML) declare the alternate path
-   * here so a single registration helper covers all surfaces without
-   * per-client write logic.
-   */
-  entryPath?: string;
+export function clientSkillPath(id: McpClientId, home: string): string | null {
+  const client = MCP_CLIENT_REGISTRY.find((entry) => entry.id === id);
+  return client && 'skillPath' in client ? join(home, ...client.skillPath) : null;
 }
 
 export function expandHome(p: string): string {
@@ -254,148 +284,30 @@ export function detectClients(
     wslWindowsEnvPath,
 ): ClientTarget[] {
   const home = homedir();
-  const claudeDesktop = claudeDesktopPaths(home);
-  const vscodeMcp = vscodeMcpPaths(home);
-  const candidates: ClientTarget[] = [
-    {
-      id: 'cursor' as const, location: 'native' as const,
-      name: 'Cursor',
-      configPath: join(home, '.cursor', 'mcp.json'),
-      displayPath: '~/.cursor/mcp.json',
-    },
-    {
-      id: 'claude-code' as const, location: 'native' as const,
-      name: 'Claude Code',
-      configPath: join(home, '.claude.json'),
-      displayPath: '~/.claude.json',
-    },
-    {
-      id: 'claude-desktop' as const, location: 'native' as const,
-      name: 'Claude Desktop',
-      configPath: claudeDesktop.configPath,
-      displayPath: claudeDesktop.displayPath,
-    },
-    {
-      id: 'windsurf' as const, location: 'native' as const,
-      name: 'Windsurf',
-      configPath: join(home, '.codeium', 'windsurf', 'mcp_config.json'),
-      displayPath: '~/.codeium/windsurf/mcp_config.json',
-    },
-    {
-      id: 'vscode' as const, location: 'native' as const,
-      name: 'VSCode',
-      configPath: vscodeMcp.configPath,
-      displayPath: vscodeMcp.displayPath,
-      // Copilot Chat's MCP wiring keys under `servers`, not the
-      // canonical `mcpServers`. Phase-1 entryPath dispatch handles
-      // it without per-client write logic.
-      entryPath: 'servers.dkg',
-    },
-    (() => {
-      const cline = clineMcpPaths(home);
-      return {
-        id: 'cline' as const, location: 'native' as const,
-        name: 'Cline',
-        configPath: cline.configPath,
-        displayPath: cline.displayPath,
-        // Cline uses the canonical `mcpServers.dkg` shape; only the
-        // path is unusual (deep-nested under VSCode's per-extension
-        // globalStorage). entryPath defaults to `mcpServers.dkg`
-        // so no override needed.
-      };
-    })(),
-    {
-      // Codex CLI (OpenAI). Config: `~/.codex/config.toml`. Entry path:
-      // `[mcp_servers.<name>]` table — Codex CLI's canonical naming
-      // (note `mcp_servers`, snake-cased, distinct from the
-      // `mcpServers` JSON convention used by every other client).
-      // Verified against Codex CLI docs at
-      // https://github.com/openai/codex (issue #437, 2026-05-08).
-      id: 'codex-cli' as const, location: 'native' as const,
-      name: 'Codex CLI',
-      configPath: join(home, '.codex', 'config.toml'),
-      displayPath: '~/.codex/config.toml',
-      format: 'toml',
-      entryPath: 'mcp_servers.dkg',
-    },
-  ];
-
-  // Codex Round-13 Fix 20: when running inside WSL2, ALSO probe the
-  // Windows-side config locations for the four GUI clients users
-  // typically run on Windows even when their dev shell is in WSL.
-  // Linux-side entries above are preserved (some WSL users run
-  // native Linux GUI clients too); the new entries are additive
-  // with disambiguated names so the operator-facing log is clear.
+  const candidates: ClientTarget[] = MCP_CLIENT_REGISTRY.map((client) => ({
+    ...client.config,
+    id: client.id,
+    name: client.name,
+    location: 'native',
+    ...client.nativePaths(home),
+  }));
   if (isWSL()) {
-    const winUserProfile = resolveWslWindowsEnvPath('USERPROFILE');
-    const winAppData = resolveWslWindowsEnvPath('APPDATA');
-    if (winAppData) {
-      // Claude Desktop on Windows: %APPDATA%\Claude\claude_desktop_config.json.
-      const claudeWinPath = join(winAppData, 'Claude', 'claude_desktop_config.json');
+    const windows = {
+      USERPROFILE: resolveWslWindowsEnvPath('USERPROFILE'),
+      APPDATA: resolveWslWindowsEnvPath('APPDATA'),
+    };
+    for (const client of MCP_CLIENT_REGISTRY) {
+      const configPath = 'windowsPath' in client ? client.windowsPath(windows) : null;
+      if (!configPath) continue;
       candidates.push({
-        id: 'claude-desktop', location: 'windows-wsl',
-        name: 'Claude Desktop (Windows-side via WSL)',
-        configPath: claudeWinPath,
-        displayPath: claudeWinPath,
+        ...client.config,
+        id: client.id,
+        name: `${client.name} (Windows-side via WSL)`,
+        location: 'windows-wsl',
+        configPath,
+        displayPath: configPath,
       });
-      // VSCode + Copilot Chat on Windows: %APPDATA%\Code\User\mcp.json.
-      const vscodeWinPath = join(winAppData, 'Code', 'User', 'mcp.json');
-      candidates.push({
-        id: 'vscode', location: 'windows-wsl',
-        name: 'VSCode (Windows-side via WSL)',
-        configPath: vscodeWinPath,
-        displayPath: vscodeWinPath,
-        entryPath: 'servers.dkg',
-      });
-      // Cline on Windows: %APPDATA%\Code\User\globalStorage\
-      // saoudrizwan.claude-dev\settings\cline_mcp_settings.json.
-      const clineWinPath = join(
-        winAppData, 'Code', 'User',
-        'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json',
-      );
-      candidates.push({
-        id: 'cline', location: 'windows-wsl',
-        name: 'Cline (Windows-side via WSL)',
-        configPath: clineWinPath,
-        displayPath: clineWinPath,
-      });
-    }
-    if (winUserProfile) {
-      // Windsurf on Windows: %USERPROFILE%\.codeium\windsurf\mcp_config.json
-      // (the `~/.codeium/...` path resolves under USERPROFILE on Windows,
-      // not APPDATA).
-      const windsurfWinPath = join(winUserProfile, '.codeium', 'windsurf', 'mcp_config.json');
-      candidates.push({
-        id: 'windsurf', location: 'windows-wsl',
-        name: 'Windsurf (Windows-side via WSL)',
-        configPath: windsurfWinPath,
-        displayPath: windsurfWinPath,
-      });
-      // Codex Round-17 Fix 23: Cursor on Windows — same shape as
-      // Linux Cursor (~/.cursor/mcp.json + canonical mcpServers.dkg
-      // entry), just resolved through %USERPROFILE%. Round-13 FIX 20
-      // skipped this; "Windows Cursor + WSL shell" is a common dev
-      // setup that was silently unregistered until now even though
-      // Cursor's been in the detection set since round 1.
-      const cursorWinPath = join(winUserProfile, '.cursor', 'mcp.json');
-      candidates.push({
-        id: 'cursor', location: 'windows-wsl',
-        name: 'Cursor (Windows-side via WSL)',
-        configPath: cursorWinPath,
-        displayPath: cursorWinPath,
-      });
-      // PR #443 local review: do not register Windows-side Codex
-      // from a WSL process yet. The canonical entry is computed from
-      // the current Linux/WSL Node + CLI paths; writing that into
-      // %USERPROFILE%\.codex\config.toml would leave Windows Codex
-      // unable to spawn the MCP server. Add this only once we emit a
-      // Windows-compatible wrapper command, e.g. via wsl.exe.
     }
   }
-
-  return candidates.filter((c) => {
-    if (existsSync(c.configPath)) return true;
-    if (existsSync(dirname(c.configPath))) return true;
-    return false;
-  });
+  return candidates.filter((client) => existsSync(client.configPath) || existsSync(dirname(client.configPath)));
 }
