@@ -44,11 +44,13 @@ export async function mcpUninstallAction(
   const log = deps.log ?? console.log;
   // Validate against the stable catalog before consulting machine state.
   const selector = opts.client !== undefined ? parseMcpClientSelector(opts.client) : undefined;
-  const clients = [...new Map((deps.detectClients ?? detectClients)()
-    .map((target) => [target.configPath, target])).values()];
-  const selected = selector
+  const clients = (deps.detectClients ?? detectClients)();
+  const matching = selector
     ? clients.filter((target) => target.id === selector.id && (!selector.location || target.location === selector.location))
     : clients;
+  // Preserve explicit location selectors when native and WSL homes overlap,
+  // then plan only one read, confirmation and write for each selected file.
+  const selected = [...new Map(matching.map((target) => [target.configPath, target])).values()];
 
   const planned: ClientTarget[] = [];
   const failures: string[] = [];

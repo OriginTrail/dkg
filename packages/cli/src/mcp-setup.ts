@@ -1,7 +1,5 @@
 import { detectClients, tildify, clientSkillPath, type ClientTarget } from './mcp-client-registry.js';
 import { readRegistration, writeRegistration } from './mcp-client-config.js';
-export { detectClients, expandHome, type ClientTarget } from './mcp-client-registry.js';
-export { readRegisteredServerKeys, type RegisteredMcpServer, type ServerKeyProbe } from './mcp-client-config.js';
 /**
  * `dkg mcp setup` — bundled init + daemon-start + MCP-client registration.
  *

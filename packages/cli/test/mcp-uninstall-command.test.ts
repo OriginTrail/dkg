@@ -198,3 +198,29 @@ it.each(['cursor', 'claude-desktop', 'windsurf', 'vscode', 'cline'])(
     });
   },
 );
+
+it.each(['cursor:native', 'cursor:windows-wsl', 'cursor', undefined])(
+  'preserves overlapping native/WSL identities for selector %s and writes each path once', async (client) => {
+    fixture.platform = 'linux';
+    vi.stubEnv('WSL_DISTRO_NAME', 'Fixture');
+    const { detectClients } = await import('../src/mcp-client-registry.js');
+    const { mcpUninstallAction } = await import('../src/mcp-uninstall.js');
+    // A WSL shell may use its Windows profile as HOME. Both real resolver
+    // candidates then describe the same file, but retain different selectors.
+    const resolver = (name: string) => name === 'USERPROFILE' ? fixture.home : null;
+    expect(detectClients(resolver).filter((target) => target.id === 'cursor'))
+      .toMatchObject([
+        { location: 'native', configPath: cursor },
+        { location: 'windows-wsl', configPath: cursor },
+      ]);
+    const messages: string[] = [];
+    await mcpUninstallAction({ yes: true, client }, {
+      detectClients: () => detectClients(resolver),
+      log: (message) => messages.push(message),
+    });
+    expect(JSON.parse(readFileSync(cursor, 'utf8'))).toEqual({ mcpServers: { other: { command: 'keep' } } });
+    expect(messages.filter((message) => message.startsWith('Found DKG MCP: Cursor'))).toHaveLength(1);
+    expect(messages.filter((message) => message.startsWith('Removed DKG MCP from Cursor'))).toHaveLength(1);
+    expect(messages.some((message) => message.startsWith('Already unregistered:'))).toBe(false);
+  },
+);

@@ -1,4 +1,4 @@
-import type { McpClientConfigShape } from '../src/mcp-client-registry.js';
+import type { McpClientConfigShape, ClientTarget } from '../src/mcp-client-registry.js';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -6,9 +6,8 @@ import { join } from 'node:path';
 
 import {
   readRegisteredServerKeys,
-  type ClientTarget,
   type ServerKeyProbe,
-} from '../src/mcp-setup.js';
+} from '../src/mcp-client-config.js';
 
 // `dkg integration installed` reads MCP client configs through this helper to
 // decide whether an integration is wired into a client. The detectInstalled

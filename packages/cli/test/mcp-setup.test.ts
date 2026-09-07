@@ -2690,7 +2690,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     delete process.env.WSL_DISTRO_NAME;
     delete process.env.WSL_INTEROP;
     try {
-      const { detectClients } = await import('../src/mcp-setup.js');
+      const { detectClients } = await import('../src/mcp-client-registry.js');
       const detected = detectClients();
       // No "(Windows-side via WSL)" entries on plain Linux.
       const wslEntries = detected.filter((c) => c.name.includes('Windows-side via WSL'));
@@ -2721,7 +2721,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       // What we CAN verify: isWSL() detection fired correctly and
       // detectClients didn't throw or hang; it just returned the
       // base set when wsl path resolution failed.
-      const { detectClients } = await import('../src/mcp-setup.js');
+      const { detectClients } = await import('../src/mcp-client-registry.js');
       const detected = detectClients();
       // The detector found at least the Linux-side defaults that
       // exist on this test runner (probably Cursor's parent if
@@ -2753,7 +2753,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
         // detectClients should NOT add Windows-side entries on
         // Windows (the detector's `if (platform() !== 'linux')
         // return false` guard).
-        const { detectClients } = await import('../src/mcp-setup.js');
+        const { detectClients } = await import('../src/mcp-client-registry.js');
         const detected = detectClients();
         const wslEntries = detected.filter((c) => c.name.includes('Windows-side via WSL'));
         expect(wslEntries.length).toBe(0);
@@ -2779,7 +2779,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     saveWslEnv();
     process.env.WSL_DISTRO_NAME = 'TestDistro';
     try {
-      const { detectClients } = await import('../src/mcp-setup.js');
+      const { detectClients } = await import('../src/mcp-client-registry.js');
       // Should not throw despite WSL being "detected" while
       // cmd.exe/wslpath are unavailable in the test environment.
       const detected = detectClients();
@@ -2991,7 +2991,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     saveWslEnv();
     process.env.WSL_DISTRO_NAME = 'TestDistro';
     try {
-      const { detectClients } = await import('../src/mcp-setup.js');
+      const { detectClients } = await import('../src/mcp-client-registry.js');
       const detected = detectClients();
       // We can't fake cmd.exe / wslpath in this test env, so the
       // Windows-side entries (including Cursor) won't actually be
@@ -3026,7 +3026,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     saveWslEnv();
     process.env.WSL_DISTRO_NAME = 'TestDistro';
     try {
-      const { detectClients } = await import('../src/mcp-setup.js');
+      const { detectClients } = await import('../src/mcp-client-registry.js');
       const detected = detectClients();
       // No crash. Every entry is well-formed.
       expect(Array.isArray(detected)).toBe(true);
@@ -3054,7 +3054,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       mkdirSync(join(winUserProfile, '.cursor'), { recursive: true });
       mkdirSync(join(winUserProfile, '.codex'), { recursive: true });
 
-      const { detectClients } = await import('../src/mcp-setup.js');
+      const { detectClients } = await import('../src/mcp-client-registry.js');
       const detected = detectClients((envVarName) => {
         if (envVarName === 'USERPROFILE') return winUserProfile;
         if (envVarName === 'APPDATA') return winAppData;
