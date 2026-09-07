@@ -20,6 +20,14 @@ export const DEFAULT_PUBLISH_EPOCHS = 12;
 /** PublishIntent encodes epochs as uint32; reject larger overrides before wire encoding. */
 export const MAX_PUBLISH_EPOCHS = 0xffffffff;
 
+/**
+ * Optional pricing basis for a publication. The default keeps the established
+ * network-visible byte-size basis. `full-content` quotes from the canonical
+ * public and private RDF held by the publisher without changing what replicas
+ * receive or what `publicByteSize` attests.
+ */
+export type PublicationPricingPolicy = 'full-content';
+
 export interface KAManifestEntry {
   tokenId: bigint;
   rootEntity: string;
@@ -232,6 +240,13 @@ export interface PublishOptions {
   contextGraphId: string;
   quads: Quad[];
   privateQuads?: Quad[];
+  /**
+   * Select an alternate token-pricing basis. `full-content` is supported for
+   * graph-scoped initial publications and charges for canonical public plus
+   * private RDF bytes. It does not change ACK payloads, replication, catalog
+   * commitments, or the on-chain byte-size attestation.
+   */
+  pricingPolicy?: PublicationPricingPolicy;
   /**
    * Content-scope discriminator for the rootless KA model. Supplying any of
    * the graph-scope fields requires version 2; legacy root-scoped KAs are

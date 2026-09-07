@@ -1597,6 +1597,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             ? { selectedAuthorAgentAddress: asyncSelectedAuthor.value }
             : {}),
           ...(publishOptions.publishEpochs !== undefined ? { publishEpochs: publishOptions.publishEpochs } : {}),
+          ...(publishOptions.pricingPolicy !== undefined ? { pricingPolicy: publishOptions.pricingPolicy } : {}),
           ...(publishOptions.clearSharedMemoryAfter !== undefined
             ? { clearSharedMemoryAfter: publishOptions.clearSharedMemoryAfter }
             : {}),

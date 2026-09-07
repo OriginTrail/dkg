@@ -26,6 +26,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import {
+  computePrivateRootV10,
   generatedPrivateCatalogTripleKeys,
   parseSimpleNQuads,
 } from '../src/index.js';
@@ -241,6 +242,7 @@ interface AckEpochCapture {
   epochs?: number;
   tokenAmount?: bigint;
   publicByteSize?: bigint;
+  stagingByteLength?: number;
 }
 
 function captureACKInputs(capture: AckEpochCapture): V10ACKProvider {
@@ -249,6 +251,7 @@ function captureACKInputs(capture: AckEpochCapture): V10ACKProvider {
     capture.epochs = params.epochs;
     capture.tokenAmount = params.tokenAmount;
     capture.publicByteSize = params.publicByteSize;
+    capture.stagingByteLength = params.stagingQuads?.length;
     return provider(params);
   };
 }
@@ -1792,6 +1795,8 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
   it('prices curated publishes from the exact public catalog bytes across plan, ACK, and tx', async () => {
     const wallet = new ethers.Wallet(TEST_KEY);
     const chain = new CatalogPlanningChain(wallet);
+    (chain as unknown as { getContextGraphAccessPolicy: () => Promise<number> })
+      .getContextGraphAccessPolicy = async () => 1;
     const publisher = await makeEpochPublisher(chain, wallet);
     const ack: AckEpochCapture = {};
     const contextGraphDid = 'did:dkg:context-graph:1';
@@ -1831,6 +1836,104 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     expect(chain.capturedCreateParams).toMatchObject({
       byteSize: expectedCatalogByteSize,
       tokenAmount: expectedCatalogByteSize,
+    });
+  });
+
+  it('prices graph-scoped curated publishes from full canonical content without changing replica bytes', async () => {
+    const wallet = new ethers.Wallet(TEST_KEY);
+    const chain = new CatalogPlanningChain(wallet);
+    (chain as unknown as { getContextGraphAccessPolicy: () => Promise<number> })
+      .getContextGraphAccessPolicy = async () => 1;
+    const publisher = await makeEpochPublisher(chain, wallet);
+    const store = (publisher as unknown as { store: OxigraphStore }).store;
+    const privateStore = (publisher as unknown as {
+      privateStore: {
+        replaceKnowledgeAssetPrivateTriples(
+          contextGraphId: string,
+          scope: ReturnType<typeof createGraphKnowledgeAssetScope>,
+          quads: Array<{ subject: string; predicate: string; object: string; graph: string }>,
+        ): Promise<void>;
+      };
+    }).privateStore;
+    const ack: AckEpochCapture = {};
+    const contextGraphId = '1';
+    const publicQuad = {
+      subject: 'urn:test:full-content-pricing',
+      predicate: 'http://schema.org/name',
+      object: '"public"',
+      graph: '',
+    };
+    const privateQuad = {
+      subject: publicQuad.subject,
+      predicate: 'http://schema.org/description',
+      object: `"${'private-payload-'.repeat(32)}"`,
+      graph: '',
+    };
+    const seal = await buildSeal({
+      quads: [publicQuad],
+      privateQuads: [privateQuad],
+      author: wallet,
+      contextGraphId,
+      ctx: mockSealCtx(),
+    });
+    const kaNumber = seal.reservedKaId! & ((1n << 96n) - 1n);
+    const ual = `did:dkg:31337/${wallet.address}/${kaNumber}`;
+    const scope = createGraphKnowledgeAssetScope(ual, 1);
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      MemoryLayer.SharedWorkingMemory,
+      scope,
+    );
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      MemoryLayer.VerifiableMemory,
+      scope,
+    );
+    await store.insert([{ ...publicQuad, graph: swmGraph }]);
+    await privateStore.replaceKnowledgeAssetPrivateTriples(
+      contextGraphId,
+      scope,
+      [privateQuad],
+    );
+
+    const result = await publisher.publishFromSharedMemory(contextGraphId, 'all', {
+      onChainContextGraphId: contextGraphId,
+      sharedMemoryScope: {
+        kind: 'named-lifecycle',
+        identity: { agentAddress: wallet.address, kaNumber },
+      },
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: ual,
+      assertionVersion: 1,
+      publicTripleCount: 1,
+      privateMerkleRoot: computePrivateRootV10([privateQuad]),
+      privateTripleCount: 1,
+      trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(contextGraphId),
+      publisherPeerId: 'test-publisher-peer',
+      precomputedAttestation: seal,
+      encryptInlinePayload: async (plaintext) => plaintext,
+      pricingPolicy: 'full-content',
+      v10ACKProvider: captureACKInputs(ack),
+    });
+
+    const serialize = (quad: typeof publicQuad) =>
+      `<${quad.subject}> <${quad.predicate}> ${quad.object} <${vmGraph}> .`;
+    const expectedPricingByteSize = BigInt(new TextEncoder().encode(
+      `${serialize(publicQuad)}\n${serialize(privateQuad)}`,
+    ).length);
+    const expectedReplicaByteSize = BigInt(ack.stagingByteLength ?? -1);
+
+    expect(result.status).toBe('confirmed');
+    expect(expectedPricingByteSize).toBeGreaterThan(expectedReplicaByteSize);
+    expect(chain.planRequests).toHaveLength(1);
+    expect(chain.planRequests[0].effectiveByteSize).toBe(expectedPricingByteSize);
+    expect(ack).toMatchObject({
+      publicByteSize: expectedReplicaByteSize,
+      tokenAmount: expectedPricingByteSize,
+    });
+    expect(chain.capturedCreateParams).toMatchObject({
+      byteSize: expectedReplicaByteSize,
+      tokenAmount: expectedPricingByteSize,
     });
   });
 

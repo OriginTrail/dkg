@@ -1611,6 +1611,7 @@ export class PublishMethods extends DKGAgentBase {
         agentAddress: lifecycleAgentAddress,
         subGraphName: opts?.subGraphName,
         publishEpochs: opts?.publishEpochs,
+        pricingPolicy: opts?.pricingPolicy,
         accessPolicy,
         allowedPeers,
         entityProofs: opts?.entityProofs,
@@ -1857,6 +1858,7 @@ export class PublishMethods extends DKGAgentBase {
       publisherNodeIdentityIdOverride: opts?.publisherNodeIdentityIdOverride,
       publishContextGraphId: onChainId ?? undefined,
       publishEpochs: opts?.publishEpochs,
+      pricingPolicy: opts?.pricingPolicy,
       precomputedAttestation,
       trustedNonManifestCatalogTriples:
         trustedNonManifestCatalogTriples,
@@ -4393,6 +4395,7 @@ export class PublishMethods extends DKGAgentBase {
        */
       selectedAuthorAgentAddress?: string;
       publishEpochs?: number;
+      pricingPolicy?: PublishOptions['pricingPolicy'];
       clearSharedMemoryAfter?: boolean;
       accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
       allowedPeers?: readonly string[];
@@ -4444,6 +4447,11 @@ export class PublishMethods extends DKGAgentBase {
         }
       }
       if (refuse) throw updateAttestationNotCustodialError(agentAddress);
+    }
+    if (history.vmCurrentAssertion && opts?.pricingPolicy !== undefined) {
+      throw new Error(
+        'pricingPolicy is currently supported only for initial VM publications, not updates',
+      );
     }
     if (!(await publisher.hasSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName))) {
       throw Object.assign(
@@ -4589,6 +4597,7 @@ export class PublishMethods extends DKGAgentBase {
       kaNumber: history.kaNumber ?? null,
       reservedUal: history.reservedUal ?? null,
       publishEpochs: opts?.publishEpochs ?? null,
+      pricingPolicy: opts?.pricingPolicy ?? null,
       clearSharedMemoryAfter: opts?.clearSharedMemoryAfter ?? null,
       publisherNodeIdentityIdOverride: publisherOverrideString ?? null,
     };
@@ -4629,6 +4638,7 @@ export class PublishMethods extends DKGAgentBase {
       ...(history.kaNumber ? { kaNumber: history.kaNumber } : {}),
       ...(history.reservedUal ? { reservedUal: history.reservedUal } : {}),
       ...(opts?.publishEpochs !== undefined ? { publishEpochs: opts.publishEpochs } : {}),
+      ...(opts?.pricingPolicy !== undefined ? { pricingPolicy: opts.pricingPolicy } : {}),
       ...(opts?.clearSharedMemoryAfter !== undefined ? { clearSharedMemoryAfter: opts.clearSharedMemoryAfter } : {}),
       ...(publisherOverrideString !== undefined ? { publisherNodeIdentityIdOverride: publisherOverrideString } : {}),
     };
@@ -5344,6 +5354,11 @@ export class PublishMethods extends DKGAgentBase {
     const stripLit = (v?: string) => v?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
     const pointerRow = pointerRes.type === 'bindings' ? pointerRes.bindings[0] : undefined;
     const vmCurrent = request.vmCurrentAssertion ?? stripLit(pointerRow?.['vm']);
+    if (vmCurrent && request.pricingPolicy !== undefined) {
+      throw new Error(
+        'pricingPolicy is currently supported only for initial VM publications, not updates',
+      );
+    }
     const stampedNumberStr = request.kaNumber ?? stripLit(pointerRow?.['kaNum']);
 
     if (graphScope.agentAddress.toLowerCase() !== seal.authorAddress.toLowerCase()) {
@@ -5565,6 +5580,7 @@ export class PublishMethods extends DKGAgentBase {
         skipContextGraphEnsure: true,
         v10ACKProvider: publishOptions.v10ACKProvider ?? this.createV10ACKProvider(request.contextGraphId),
         publishEpochs: request.publishEpochs ?? publishOptions.publishEpochs,
+        pricingPolicy: request.pricingPolicy ?? publishOptions.pricingPolicy,
         publisherNodeIdentityIdOverride: request.publisherNodeIdentityIdOverride !== undefined
           ? BigInt(request.publisherNodeIdentityIdOverride)
           : publishOptions.publisherNodeIdentityIdOverride,
@@ -5734,6 +5750,7 @@ export class PublishMethods extends DKGAgentBase {
       onPhase?: PhaseCallback;
       publisherNodeIdentityIdOverride?: bigint;
       publishEpochs?: number;
+      pricingPolicy?: PublishOptions['pricingPolicy'];
       clearSharedMemoryAfter?: boolean;
       publisherOverride?: DKGPublisher;
     },
@@ -5870,6 +5887,11 @@ export class PublishMethods extends DKGAgentBase {
     const stripLit = (v?: string) => v?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
     const pointerRow = pointerRes.type === 'bindings' ? pointerRes.bindings[0] : undefined;
     const vmCurrent = stripLit(pointerRow?.['vm']);
+    if (vmCurrent && opts?.pricingPolicy !== undefined) {
+      throw new Error(
+        'pricingPolicy is currently supported only for initial VM publications, not updates',
+      );
+    }
     const stampedNumberStr = stripLit(pointerRow?.['kaNum']);
 
     if (graphScope.agentAddress.toLowerCase() !== seal.authorAddress.toLowerCase()) {
@@ -6084,6 +6106,7 @@ export class PublishMethods extends DKGAgentBase {
           subGraphName: opts?.subGraphName,
           publisherNodeIdentityIdOverride: opts?.publisherNodeIdentityIdOverride,
           publishEpochs: opts?.publishEpochs,
+          pricingPolicy: opts?.pricingPolicy,
           reservedKaId: recoveredReservedKaId,
           sharedMemoryScope,
           contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -6586,6 +6609,7 @@ export class PublishMethods extends DKGAgentBase {
        */
       publisherNodeIdentityIdOverride?: bigint;
       publishEpochs?: number;
+      pricingPolicy?: PublishOptions['pricingPolicy'];
       /**
        * OT-RFC-43 A2 (decision 1) — precomputed packed kaId stamped at
        * `assertionFinalize` (ALLOCATE-AT-FINALIZE). When set, the publisher's
@@ -6787,6 +6811,7 @@ export class PublishMethods extends DKGAgentBase {
       subGraphName: options?.subGraphName,
       publisherNodeIdentityIdOverride: options?.publisherNodeIdentityIdOverride,
       publishEpochs: options?.publishEpochs,
+      pricingPolicy: options?.pricingPolicy,
       precomputedAttestation: resolvedSeal,
       // OT-RFC-43 A2 — reuse the finalize-stamped packed kaId (no re-allocate).
       reservedKaId: options?.reservedKaId,

@@ -3,12 +3,14 @@ import { MAX_UINT72_DECIMAL, parseUint72Decimal } from '@origintrail-official/dk
 export interface KnowledgeAssetFinalizedPublishOptions {
   clearAfter?: boolean;
   publishEpochs?: number;
+  pricingPolicy?: 'full-content';
   publisherNodeIdentityIdOverride?: bigint;
 }
 
 export interface NormalizedFinalizedPublishOptions {
   clearSharedMemoryAfter?: boolean;
   publishEpochs?: number;
+  pricingPolicy?: 'full-content';
   publisherNodeIdentityIdOverride?: bigint;
 }
 
@@ -18,7 +20,8 @@ export type FinalizedPublishOptionParseError =
   | { kind: 'number-too-large'; field: string }
   | { kind: 'max'; field: string; max: number }
   | { kind: 'uint72'; field: string }
-  | { kind: 'boolean'; field: string };
+  | { kind: 'boolean'; field: string }
+  | { kind: 'pricing-policy'; field: string };
 
 export type FinalizedPublishOptionParseResult<TOptions> =
   | { ok: true; options: TOptions }
@@ -27,6 +30,7 @@ export type FinalizedPublishOptionParseResult<TOptions> =
 const SDK_FINALIZED_PUBLISH_OPTION_KEYS = new Set([
   'clearAfter',
   'publishEpochs',
+  'pricingPolicy',
   'publisherNodeIdentityIdOverride',
 ]);
 
@@ -34,10 +38,13 @@ const MAX_PUBLISH_EPOCHS = 0xffffffff;
 
 export function parseCliFinalizedPublishOptions(raw: {
   publishEpochs?: unknown;
+  pricingPolicy?: unknown;
   publisherNodeIdentityId?: unknown;
 }): FinalizedPublishOptionParseResult<KnowledgeAssetFinalizedPublishOptions> {
   const publishEpochs = parsePublishEpochs(raw.publishEpochs, 'publishEpochs');
   if (!publishEpochs.ok) return publishEpochs;
+  const pricingPolicy = parsePricingPolicy(raw.pricingPolicy, 'pricingPolicy');
+  if (!pricingPolicy.ok) return pricingPolicy;
   const publisherNodeIdentityIdOverride = parsePublishUint72IdentityId(
     raw.publisherNodeIdentityId,
     'publisherNodeIdentityIdOverride',
@@ -48,6 +55,7 @@ export function parseCliFinalizedPublishOptions(raw: {
     ok: true,
     options: {
       ...(publishEpochs.value !== undefined ? { publishEpochs: publishEpochs.value } : {}),
+      ...(pricingPolicy.value !== undefined ? { pricingPolicy: pricingPolicy.value } : {}),
       ...(publisherNodeIdentityIdOverride.value !== undefined
         ? { publisherNodeIdentityIdOverride: publisherNodeIdentityIdOverride.value }
         : {}),
@@ -68,6 +76,8 @@ export function parseHttpFinalizedPublishOptions(
     hasPublishEpochs ? 'publishEpochs' : 'epochs',
   );
   if (!publishEpochs.ok) return publishEpochs;
+  const pricingPolicy = parsePricingPolicy(source.pricingPolicy, 'pricingPolicy');
+  if (!pricingPolicy.ok) return pricingPolicy;
   const publisherNodeIdentityIdOverride = parsePublishUint72IdentityId(
     source.publisherNodeIdentityIdOverride,
     'publisherNodeIdentityIdOverride',
@@ -81,6 +91,7 @@ export function parseHttpFinalizedPublishOptions(
         ? { clearSharedMemoryAfter: clearSharedMemoryAfter.value }
         : {}),
       ...(publishEpochs.value !== undefined ? { publishEpochs: publishEpochs.value } : {}),
+      ...(pricingPolicy.value !== undefined ? { pricingPolicy: pricingPolicy.value } : {}),
       ...(publisherNodeIdentityIdOverride.value !== undefined
         ? { publisherNodeIdentityIdOverride: publisherNodeIdentityIdOverride.value }
         : {}),
@@ -112,6 +123,8 @@ function parseSdkFinalizedPublishOptions(
   if (!clearAfter.ok) return clearAfter;
   const publishEpochs = parsePublishEpochs(options.publishEpochs, 'publishEpochs');
   if (!publishEpochs.ok) return publishEpochs;
+  const pricingPolicy = parsePricingPolicy(options.pricingPolicy, 'pricingPolicy');
+  if (!pricingPolicy.ok) return pricingPolicy;
   const publisherNodeIdentityIdOverride = parsePublishUint72IdentityId(
     options.publisherNodeIdentityIdOverride,
     'publisherNodeIdentityIdOverride',
@@ -123,6 +136,7 @@ function parseSdkFinalizedPublishOptions(
     options: {
       ...(clearAfter.value !== undefined ? { clearAfter: clearAfter.value } : {}),
       ...(publishEpochs.value !== undefined ? { publishEpochs: publishEpochs.value } : {}),
+      ...(pricingPolicy.value !== undefined ? { pricingPolicy: pricingPolicy.value } : {}),
       ...(publisherNodeIdentityIdOverride.value !== undefined
         ? { publisherNodeIdentityIdOverride: publisherNodeIdentityIdOverride.value }
         : {}),
@@ -139,6 +153,9 @@ function finalizedPublishSdkPayload(
   }
   if (options.publishEpochs !== undefined) {
     payload.publishEpochs = options.publishEpochs;
+  }
+  if (options.pricingPolicy !== undefined) {
+    payload.pricingPolicy = options.pricingPolicy;
   }
   if (options.publisherNodeIdentityIdOverride !== undefined) {
     payload.publisherNodeIdentityIdOverride = options.publisherNodeIdentityIdOverride.toString();
@@ -166,7 +183,20 @@ export function formatFinalizedPublishOptionError(
       return `${field} must be between 0 and ${MAX_UINT72_DECIMAL} (uint72)`;
     case 'boolean':
       return `${field} must be a boolean when supplied`;
+    case 'pricing-policy':
+      return `${field} must be "full-content" when supplied`;
   }
+}
+
+function parsePricingPolicy(
+  value: unknown,
+  field: string,
+): { ok: true; value?: 'full-content' } | { ok: false; error: FinalizedPublishOptionParseError } {
+  if (value === undefined) return { ok: true };
+  if (value !== 'full-content') {
+    return { ok: false, error: { kind: 'pricing-policy', field } };
+  }
+  return { ok: true, value };
 }
 
 function publishIntegerString(

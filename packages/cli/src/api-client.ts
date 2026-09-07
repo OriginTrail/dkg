@@ -1098,6 +1098,7 @@ export class ApiClient {
     options?: KnowledgeAssetPublishAuthorSelection & {
       clearAfter?: boolean;
       publishEpochs?: number;
+      pricingPolicy?: 'full-content';
       publisherNodeIdentityIdOverride?: bigint;
     },
   ): Promise<{
@@ -1144,6 +1145,7 @@ export class ApiClient {
       schemeVersion?: number;
       clearAfter?: boolean;
       publishEpochs?: number;
+      pricingPolicy?: 'full-content';
       publisherNodeIdentityIdOverride?: bigint;
     },
   ): Promise<{
@@ -1181,6 +1183,9 @@ export class ApiClient {
           : {}),
         ...(options?.publishEpochs !== undefined
           ? { publishEpochs: options.publishEpochs }
+          : {}),
+        ...(options?.pricingPolicy !== undefined
+          ? { pricingPolicy: options.pricingPolicy }
           : {}),
         ...(options?.publisherNodeIdentityIdOverride !== undefined
           ? { publisherNodeIdentityIdOverride: options.publisherNodeIdentityIdOverride }

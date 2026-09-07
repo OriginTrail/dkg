@@ -1242,9 +1242,9 @@ export class StorageACKHandler {
       const claimedByteSize = typeof intent.publicByteSize === 'number'
         ? intent.publicByteSize
         : Number(intent.publicByteSize);
-      // byteSize parity: the curated CG prices off the catalog footprint, so
-      // the inline catalog bytes MUST equal the claimed `publicByteSize`
-      // (same honesty guard the plaintext path applies to its quads).
+      // byteSize parity: the inline catalog bytes MUST equal the claimed
+      // `publicByteSize` (the same honesty guard the plaintext path applies to
+      // its quads). A publisher may independently choose a higher tokenAmount.
       if (intent.stagingQuads.length !== claimedByteSize) {
         return this.encodeDecline(
           cgId,
@@ -1591,11 +1591,12 @@ export class StorageACKHandler {
     // by the merkle-root check above (computeFlatKCRoot over the SWM quads).
     const verifiedKACount = 1;
 
-    // byteSize pin: `publicByteSize` is signed into the ACK digest and prices the
-    // publish on-chain (`ask · byteSize · epochs`); nothing on-chain can see the
-    // content, so without this an under-claim (e.g. `byteSize = 1` for real
-    // content) drives the cost toward zero regardless of the ask. The publisher
-    // computes it as the UTF-8 byte length of the N-Quads serialization
+    // byteSize pin: `publicByteSize` is signed into the ACK digest and establishes
+    // the minimum publish price on-chain (`ask · byteSize · epochs`). Publishers
+    // may independently choose a higher tokenAmount, but nothing on-chain can see
+    // the content, so without this floor an under-claim (e.g. `byteSize = 1` for
+    // real content) drives the minimum toward zero regardless of the ask. The
+    // publisher computes it as the UTF-8 byte length of the N-Quads serialization
     // (`TextEncoder().encode(nquads).length`), so the floor is in UTF-8 bytes:
     //   - INLINE path (`stagingQuads` present): the core received the EXACT
     //     serialized payload, so require the claim to cover its full byte length

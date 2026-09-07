@@ -841,6 +841,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
           intentKey: `sha256:${'bc'.repeat(32)}`,
           publishEpochs: opts.publishEpochs,
           clearSharedMemoryAfter: opts.clearSharedMemoryAfter,
+          pricingPolicy: opts.pricingPolicy,
           publisherNodeIdentityIdOverride: opts.publisherNodeIdentityIdOverride?.toString(),
         };
       },
@@ -857,6 +858,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       options: {
         publishEpochs: 2,
         clearSharedMemoryAfter: true,
+        pricingPolicy: 'full-content',
         publisherNodeIdentityIdOverride: '0',
       },
     });
@@ -867,11 +869,13 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(seenResolveOptions[0]).toMatchObject({
       publishEpochs: 2,
       clearSharedMemoryAfter: true,
+      pricingPolicy: 'full-content',
       publisherNodeIdentityIdOverride: 0n,
     });
     expect(enqueuedIntents[0]).toMatchObject({
       publishEpochs: 2,
       clearSharedMemoryAfter: true,
+      pricingPolicy: 'full-content',
       publisherNodeIdentityIdOverride: '0',
     });
 
@@ -1906,6 +1910,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         alsoPublishVm: {
           agentAddress: attackerAgentAddress,
           clearAfter: false,
+          pricingPolicy: 'full-content',
         },
       });
 
@@ -1919,6 +1924,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(seenOpts[0]).toMatchObject({
         agentAddress: tokenAgentAddress,
         clearSharedMemoryAfter: false,
+        pricingPolicy: 'full-content',
       });
     });
 
@@ -2177,6 +2183,25 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(unsafeIdentityRes.status).toBe(400);
       expect(String(unsafeIdentityRes.body.error)).toContain('publisherNodeIdentityIdOverride');
       expect(String(unsafeIdentityRes.body.error)).toContain('uint72');
+      expect(createCalls).toHaveLength(0);
+
+      const pricingPolicyRes = await postRoot({
+        contextGraphId: CG_ID,
+        name: 'atomic-invalid-pricing-policy',
+        quads: [{
+          subject: 'did:dkg:test:InvalidPricingPolicy',
+          predicate: 'http://schema.org/name',
+          object: '"Invalid pricing policy"',
+          graph: '',
+        }],
+        finalize: true,
+        alsoPublishVm: {
+          pricingPolicy: 'unsupported',
+        },
+      });
+
+      expect(pricingPolicyRes.status).toBe(400);
+      expect(String(pricingPolicyRes.body.error)).toContain('pricingPolicy');
       expect(createCalls).toHaveLength(0);
     });
 

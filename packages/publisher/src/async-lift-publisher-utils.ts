@@ -17,6 +17,8 @@ import type {
   RawLiftRequest,
 } from './lift-job.js';
 import { parseLiteral } from './async-lift-control-plane.js';
+
+const PUBLICATION_PRICING_POLICIES = ['full-content'] as const;
 export {
   CONTROL_CLAIM_TOKEN,
   CONTROL_LOCKED_JOB,
@@ -342,6 +344,7 @@ export function createKnowledgeAssetVmPublishSnapshotRequest(
       : {}),
     ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
     ...(request.publishEpochs !== undefined ? { publishEpochs: request.publishEpochs } : {}),
+    ...(request.pricingPolicy !== undefined ? { pricingPolicy: request.pricingPolicy } : {}),
     ...(request.publisherNodeIdentityIdOverride !== undefined
       ? { publisherNodeIdentityIdOverride: request.publisherNodeIdentityIdOverride }
       : {}),
@@ -481,6 +484,7 @@ function parseRawLiftRequest(value: unknown, path: string): RawLiftRequest {
     ...optionalStringArrayField(record, 'allowedPeers', path),
     ...optionalBooleanField(record, 'entityProofs', path),
     ...optionalNumberField(record, 'publishEpochs', path),
+    ...optionalEnumField(record, 'pricingPolicy', PUBLICATION_PRICING_POLICIES, path),
     ...optionalBigIntStringField(record, 'publisherNodeIdentityIdOverride', path),
     ...optionalSealField(record, 'seal', path),
   };
@@ -520,6 +524,7 @@ function parseKnowledgeAssetVmPublishRequest(value: unknown, path: string): Know
     ...optionalStringField(record, 'kaNumber', path),
     ...optionalStringField(record, 'reservedUal', path),
     ...optionalNumberField(record, 'publishEpochs', path),
+    ...optionalEnumField(record, 'pricingPolicy', PUBLICATION_PRICING_POLICIES, path),
     ...optionalBooleanField(record, 'clearSharedMemoryAfter', path),
     ...optionalBigIntStringField(record, 'publisherNodeIdentityIdOverride', path),
   };
@@ -621,6 +626,18 @@ function optionalStringField<T extends string>(
     throw new Error(`${path}.${field} must be a string when supplied`);
   }
   return { [field]: value } as Partial<Record<T, string>>;
+}
+
+function optionalEnumField<TField extends string, TAllowed extends readonly string[]>(
+  record: Record<string, unknown>,
+  field: TField,
+  allowed: TAllowed,
+  path: string,
+): Partial<Record<TField, TAllowed[number]>> {
+  if (record[field] === undefined) return {};
+  return {
+    [field]: expectEnum(record, field, allowed, path),
+  } as Partial<Record<TField, TAllowed[number]>>;
 }
 
 function optionalNumberField<T extends string>(

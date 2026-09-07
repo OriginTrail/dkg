@@ -74,12 +74,14 @@ describe('ApiClient', () => {
     const options: KnowledgeAssetFinalizedPublishOptions = {
       clearAfter: true,
       publishEpochs: 1,
+      pricingPolicy: 'full-content',
       publisherNodeIdentityIdOverride: 0n,
     };
 
     expect(options).toMatchObject({
       clearAfter: true,
       publishEpochs: 1,
+      pricingPolicy: 'full-content',
       publisherNodeIdentityIdOverride: 0n,
     });
   });
@@ -1101,6 +1103,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       alsoPublishVm: {
         clearAfter: false,
         publishEpochs: 9,
+        pricingPolicy: 'full-content',
         publisherNodeIdentityIdOverride: 7n,
       },
     });
@@ -1113,6 +1116,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       alsoPublishVm: {
         clearSharedMemoryAfter: false,
         publishEpochs: 9,
+        pricingPolicy: 'full-content',
         publisherNodeIdentityIdOverride: '7',
       },
     });
@@ -1302,6 +1306,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       selectedAuthorAgentAddress: selected,
       subGraphName: 'notes',
       publishEpochs: 12,
+      pricingPolicy: 'full-content',
     });
 
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/vm/publish`);
@@ -1310,7 +1315,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       contextGraphId: 'cg',
       subGraphName: 'notes',
       selectedAuthorAgentAddress: selected,
-      options: { publishEpochs: 12 },
+      options: { publishEpochs: 12, pricingPolicy: 'full-content' },
     });
     // Same nesting hazard as the direct lane: a selector inside `options` is silently
     // ignored by parseHttpFinalizedPublishOptions and would publish a different author.

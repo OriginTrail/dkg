@@ -8,7 +8,7 @@ import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublis
 import { GraphManager, deleteByPatternWithoutCount, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
-import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishLifecycleHooks, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
+import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublicationPricingPolicy, type PublishOptions, type PublishLifecycleHooks, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
 import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
 import { withKeyedLocks } from './keyed-lock.js';
@@ -594,6 +594,22 @@ function resolvePublishEpochsOverride(value: number | undefined): number | undef
     throw new Error(`publishEpochs must be a positive uint32 integer, got ${String(value)}`);
   }
   return value;
+}
+
+function resolvePublicationPricingPolicy(
+  value: PublicationPricingPolicy | undefined,
+): PublicationPricingPolicy | undefined {
+  if (value === undefined || value === 'full-content') return value;
+  throw new Error(`pricingPolicy must be "full-content" when supplied, got ${String(value)}`);
+}
+
+function serializeQuadsForBytePricing(quads: readonly Quad[], fallbackGraph: string): string {
+  return quads
+    .map(
+      (q) =>
+        `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph || fallbackGraph}> .`,
+    )
+    .join('\n');
 }
 
 function isLegacyV10ACKProvider(
@@ -2209,6 +2225,7 @@ export class DKGPublisher implements Publisher {
       publicTripleCount?: PublishOptions['publicTripleCount'];
       privateMerkleRoot?: PublishOptions['privateMerkleRoot'];
       privateTripleCount?: PublishOptions['privateTripleCount'];
+      pricingPolicy?: PublishOptions['pricingPolicy'];
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
@@ -2223,6 +2240,7 @@ export class DKGPublisher implements Publisher {
       publicTripleCount: options?.publicTripleCount,
       privateMerkleRoot: options?.privateMerkleRoot,
       privateTripleCount: options?.privateTripleCount,
+      pricingPolicy: options?.pricingPolicy,
     });
     if (graphPublish && (selection !== 'all' || sharedMemoryScope.kind !== 'named-lifecycle')) {
       throw new Error(
@@ -2375,6 +2393,7 @@ export class DKGPublisher implements Publisher {
       publicTripleCount: options?.publicTripleCount,
       privateMerkleRoot: options?.privateMerkleRoot,
       privateTripleCount: options?.privateTripleCount,
+      pricingPolicy: options?.pricingPolicy,
       [INTERNAL_ORIGIN_TOKEN]: true,
       [PUBLIC_ACK_STAGING_MODE_TOKEN]: 'inline-small-swm',
       ...(hasTrustedCatalogTriples ? { [TRUSTED_CATALOG_ORIGIN_TOKEN]: true } : {}),
@@ -2668,6 +2687,7 @@ export class DKGPublisher implements Publisher {
 
   async publish(options: PublishOptions): Promise<PublishResult> {
     const explicitPublishEpochs = resolvePublishEpochsOverride(options.publishEpochs);
+    const pricingPolicy = resolvePublicationPricingPolicy(options.pricingPolicy);
 
     // Sub-graph routing: data triples go to `did:dkg:context-graph:{id}/{subGraph}`.
     // KC metadata (status, authorship proofs) stays in the root `_meta` graph so that
@@ -2725,6 +2745,11 @@ export class DKGPublisher implements Publisher {
     const normalizedAllowedPeers = [...new Set((allowedPeers ?? []).map((p) => p.trim()).filter(Boolean))];
     const normalizedPublisherPeerId = publisherPeerId.trim();
     const graphPublish = resolveGraphScopedPublishDescriptor(options);
+    if (pricingPolicy === 'full-content' && !graphPublish) {
+      throw new Error(
+        'pricingPolicy "full-content" requires a graph-scoped initial publication',
+      );
+    }
     const onChainContextGraphId = options.onChainContextGraphId ?? options.publishContextGraphId;
     let publisherContextGraphId: bigint | undefined;
     try {
@@ -3006,12 +3031,7 @@ export class DKGPublisher implements Publisher {
     onPhase?.('store', 'end');
 
     // Compute publicByteSize early — needed for signature collection
-    const nquadsStr = allSkolemizedQuads
-      .map(
-        (q) =>
-          `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph || dataGraph}> .`,
-      )
-      .join('\n');
+    const nquadsStr = serializeQuadsForBytePricing(allSkolemizedQuads, dataGraph);
     const publicNquadsBytes = new TextEncoder().encode(nquadsStr);
     const publicByteSize = BigInt(publicNquadsBytes.length);
 
@@ -3160,9 +3180,23 @@ export class DKGPublisher implements Publisher {
       ? catalogByteSize
       : publicByteSize;
     const effectiveByteSize = useEncryptedInline ? stagingByteSize : publicByteSize;
+    // Pricing and storage attestation are deliberately separate. The opt-in
+    // policy computes a higher token quote from the publisher's canonical
+    // public+private payload while ACKs and the chain continue to attest the
+    // exact network-visible catalog/public bytes in `effectiveByteSize`.
+    const fullContentByteSize = pricingPolicy === 'full-content'
+      ? publicByteSize
+        + BigInt(new TextEncoder().encode(
+            serializeQuadsForBytePricing(canonicalPrivateQuads, dataGraph),
+          ).length)
+        + (allSkolemizedQuads.length > 0 && canonicalPrivateQuads.length > 0 ? 1n : 0n)
+      : effectiveByteSize;
+    const pricingByteSize = fullContentByteSize > effectiveByteSize
+      ? fullContentByteSize
+      : effectiveByteSize;
     const finalizedPublisherPlan = await publisherPlanning.finalize({
       explicitPublishEpochs,
-      effectiveByteSize,
+      effectiveByteSize: pricingByteSize,
       ctx,
     });
     const publisherSigner = finalizedPublisherPlan.kind === 'on-chain'
@@ -3296,6 +3330,8 @@ export class DKGPublisher implements Publisher {
         source: options.fromSharedMemory ? 'shared_memory' : 'inline',
         recordCount: allSkolemizedQuads.length,
         byteSize: effectiveByteSize.toString(),
+        pricingByteSize: pricingByteSize.toString(),
+        pricingPolicy: pricingPolicy ?? 'network-visible',
         encryptedInline: useEncryptedInline,
         catalogCommitment: useCuratedCatalog ? 'present' : 'absent',
       },
@@ -3346,10 +3382,9 @@ export class DKGPublisher implements Publisher {
         const reservedAckKaId =
           (options as PublishOptions).reservedKaId ?? options.precomputedAttestation?.reservedKaId;
         const assetUal = await lifecycle.rememberAssetUal(reservedAckKaId);
-        // OT-RFC-49 / WS-D: for curated CGs the publisher pays / signs against
-        // the catalog footprint (`effectiveByteSize` == `catalogByteSize`) and
-        // the curated commitment is `catalogCommitment`. For public CGs nothing
-        // changed — `effectiveByteSize === publicByteSize` and no catalog.
+        // Replicas always attest the exact network-visible catalog/public byte
+        // size. An opt-in pricing policy may independently raise tokenAmount;
+        // no additional private bytes or claimed storage are sent to cores.
         const commonACKParams = {
           merkleRoot: kcMerkleRoot,
           contextGraphId: v10CgDomain,
@@ -3830,7 +3865,7 @@ export class DKGPublisher implements Publisher {
         signStarted = false;
         onPhase?.('chain:submit', 'start');
         submitStarted = true;
-        this.log.info(ctx, `Submitting V10 on-chain publish tx (${kaCount} KAs, byteSize=${effectiveByteSize}${useCuratedCatalog ? ' [catalog]' : ''}, tokenAmount=${tokenAmount})`);
+        this.log.info(ctx, `Submitting V10 on-chain publish tx (${kaCount} KAs, byteSize=${effectiveByteSize}${useCuratedCatalog ? ' [catalog]' : ''}, pricingByteSize=${pricingByteSize}, pricingPolicy=${pricingPolicy ?? 'network-visible'}, tokenAmount=${tokenAmount})`);
 
         if (!v10ACKs || v10ACKs.length === 0) {
           throw new Error('V10 ACKs required for on-chain publish — no ACKs collected');
@@ -3991,6 +4026,8 @@ export class DKGPublisher implements Publisher {
               contextGraphId: v10CgId.toString(),
               kaId: reservedKaId?.toString(),
               byteSize: effectiveByteSize.toString(),
+              pricingByteSize: pricingByteSize.toString(),
+              pricingPolicy: pricingPolicy ?? 'network-visible',
               tokenAmount: tokenAmount.toString(),
               ackCount: v10ACKs.length,
               merkleLeafCount: kcMerkleLeafCount,
