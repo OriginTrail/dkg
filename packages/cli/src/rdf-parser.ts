@@ -66,22 +66,24 @@ export async function parseRdf(
     }
     const { default: jsonld } = await import('jsonld');
     const remoteContextError = new Error('Remote JSON-LD contexts are disabled; embed an inline @context before ingesting the file');
+    let remoteLoadAttempted = false;
     // jsonld.js 8 supports safe mode; the older upstream declaration omits it.
     const options: JsonLdOptions.ToRdf & { safe: true } = {
       format: 'application/n-quads',
       base: baseIRI,
       safe: true,
-      documentLoader: async () => { throw remoteContextError; },
+      documentLoader: async () => {
+        remoteLoadAttempted = true;
+        throw remoteContextError;
+      },
     };
     let nquads: object | string;
     try {
       // jsonld.js validates the JSON-LD grammar and rejects lossy expansion.
       nquads = await jsonld.toRDF(parsed as JsonLdDocument, options);
     } catch (error) {
-      // Preserve the actionable policy error that jsonld.js wraps while loading.
-      if (isRecord(error) && isRecord(error.details) && error.details.cause === remoteContextError) {
-        throw remoteContextError;
-      }
+      // The loader owns this policy error, regardless of how jsonld.js wraps it.
+      if (remoteLoadAttempted) throw remoteContextError;
       throw error;
     }
     if (typeof nquads !== 'string') throw new Error('JSON-LD conversion did not return N-Quads');
