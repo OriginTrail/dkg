@@ -217,6 +217,24 @@ export type ParticipantSignatureProvider = (
   merkleRoot: string,
 ) => Promise<ReceiverSignature[]>;
 
+/** Pre-computed author seal for an initial on-chain publication. */
+export interface PrecomputedPublishAttestation {
+  expectedMerkleRoot: Uint8Array;
+  authorAddress: string;
+  signature: { r: Uint8Array; vs: Uint8Array };
+  schemeVersion: number;
+  /** Packed KA id covered by the author attestation. */
+  reservedKaId: bigint;
+}
+
+/** Pre-computed owner seal for an on-chain update. */
+export interface PrecomputedUpdateAttestation {
+  expectedNewMerkleRoot: Uint8Array;
+  authorAddress: string;
+  signature: { r: Uint8Array; vs: Uint8Array };
+  schemeVersion: number;
+}
+
 
 /**
  * r10 (3877910013) — the canonical transaction-lifecycle hook contract: the subset of
@@ -229,8 +247,8 @@ export type PublishLifecycleHooks = Pick<
   'onPhase' | 'onBeforeBroadcast' | 'onBroadcastAccepted' | 'onPublishConfirmed'
 >;
 
-/** Complete option shape used to derive operation-specific public contracts. */
-interface PublicationOptionsShape {
+/** Fields genuinely shared by initial publications and updates. */
+export interface BasePublicationOptions {
   contextGraphId: string;
   quads: Quad[];
   privateQuads?: Quad[];
@@ -316,15 +334,6 @@ interface PublicationOptionsShape {
    * convention-based partitions — no on-chain enforcement in V10.0.
    */
   subGraphName?: string;
-  /** @deprecated V9 receiver signatures removed — use v10ACKProvider instead. */
-  receiverSignatureProvider?: ReceiverSignatureProvider;
-  /**
-   * V10 ACK provider: collects core node StorageACKs via P2P.
-   * When provided, ACKs are collected and stored in the result.
-   */
-  v10ACKProvider?: V10ACKProvider;
-  /** V10 update ACK provider — quorum signatures before on-chain update. */
-  v10UpdateACKProvider?: V10UpdateACKProvider;
   /**
    * When publishing into a specific context graph (publishFromSharedMemory),
    * this overrides contextGraphId as the ACK domain and on-chain contextGraphId.
@@ -433,100 +442,18 @@ interface PublicationOptionsShape {
    * so concurrent publishes with conflicting overrides are safe.
    */
   publisherNodeIdentityIdOverride?: bigint;
-  /**
-   * RFC-001 §9.x — pre-computed AuthorAttestation produced at the
-   * `agent.assertion.finalize()` boundary. This is the canonical
-   * (and, post-Phase-C, the *only*) way to attribute authorship for
-   * an on-chain publish.
-   *
-   * The caller has already:
-   *   1. Computed `expectedMerkleRoot` over the same quads it is
-   *      now asking the publisher to publish (computed via
-   *      `computeFlatKCRoot` / `skolemizeByEntity` semantics).
-   *   2. Signed (or collected a signature for) the typed data
-   *      `buildAuthorAttestationTypedData({ chainId, kav10Address,
-   *      merkleRoot: expectedMerkleRoot, authorAddress, reservedKaId })`
-   *      (#1116: the attestation no longer binds `contextGraphId`).
-   *
-   * The publisher independently re-derives `kcMerkleRoot` from the
-   * supplied `quads` and asserts equality with
-   * `expectedMerkleRoot`. Mismatch = throw, because either the
-   * caller's compute path drifted from the publisher's, or the
-   * quads were mutated between finalize and publish.
-   *
-   * The compact `(r, vs)` and `authorAddress` are forwarded to
-   * KAv10 verbatim. The publisher NEVER signs the AuthorAttestation
-   * itself.
-   *
-   * For publish flows where no agent is provided, the agent layer
-   * falls back to signing with the publisher's own EOA (via
-   * `signAuthorAttestationAsPublisher`) at finalize-time, so the
-   * publisher EOA still becomes `KC.author` in that case — but the
-   * signature is produced by the agent layer, not by `publish()`.
-   */
-  precomputedAttestation?: {
-    expectedMerkleRoot: Uint8Array;
-    authorAddress: string;
-    signature: { r: Uint8Array; vs: Uint8Array };
-    schemeVersion: number;
-    /**
-     * OT-RFC-43 §F2 — the packed reservedKaId the agent signed the
-     * AuthorAttestation over. The publisher REBUILDS the digest with this exact
-     * value to verify the seal, and mints with it, so the on-chain id matches
-     * the recovered signature. The agent is the single allocation point.
-     */
-    reservedKaId: bigint;
-  };
-  /**
-   * RFC-001 greenfield — owner seal for on-chain `update`, produced before
-   * the hosted API call (mirror of `precomputedAttestation` on publish).
-   * Publisher verifies `expectedNewMerkleRoot` and forwards `(authorR, authorVS)`
-   * to the chain adapter; it never signs the update attestation itself.
-   */
-  precomputedUpdateAttestation?: {
-    expectedNewMerkleRoot: Uint8Array;
-    authorAddress: string;
-    signature: { r: Uint8Array; vs: Uint8Array };
-    schemeVersion: number;
-  };
-  /**
-   * OT-RFC-43 A2 (decision 1) — precomputed packed kaId
-   * `(uint160(author) << 96) | number` reserved at `assertionFinalize`
-   * (ALLOCATE-AT-FINALIZE). When supplied, the publisher's `ensureReservedKaId`
-   * REUSES this id and SKIPS allocation, so a finalize→publish for one KA mints
-   * exactly the stamped id with no second allocation. Undefined for direct /
-   * mock publishes — the publisher then keeps its allocate-at-publish behavior
-   * (back-compat).
-   */
-  reservedKaId?: bigint;
 }
-
-type InitialPublicationOnlyKey =
-  | 'receiverSignatureProvider'
-  | 'v10ACKProvider'
-  | 'precomputedAttestation'
-  | 'reservedKaId';
-
-type UpdatePublicationOnlyKey =
-  | 'v10UpdateACKProvider'
-  | 'precomputedUpdateAttestation';
-
-/** Fields genuinely shared by initial publications and updates. */
-export type BasePublicationOptions = Omit<
-  PublicationOptionsShape,
-  InitialPublicationOnlyKey | UpdatePublicationOnlyKey
->;
 
 /** Options for minting a new publication. */
 export interface InitialPublishOptions extends BasePublicationOptions {
   /** @deprecated V9 receiver signatures removed — use v10ACKProvider instead. */
-  receiverSignatureProvider?: PublicationOptionsShape['receiverSignatureProvider'];
+  receiverSignatureProvider?: ReceiverSignatureProvider;
   /** V10 ACK provider: collects core node StorageACKs via P2P. */
-  v10ACKProvider?: PublicationOptionsShape['v10ACKProvider'];
+  v10ACKProvider?: V10ACKProvider;
   /** Pre-computed author seal for an initial on-chain publication. */
-  precomputedAttestation?: PublicationOptionsShape['precomputedAttestation'];
+  precomputedAttestation?: PrecomputedPublishAttestation;
   /** Packed KA id allocated at assertion-finalize time. */
-  reservedKaId?: PublicationOptionsShape['reservedKaId'];
+  reservedKaId?: bigint;
   /**
    * Select an alternate token-pricing basis. `full-content` is supported for
    * graph-scoped initial publications and charges for canonical public plus
@@ -545,9 +472,9 @@ export type PublishOptions = InitialPublishOptions;
 /** Options for updating an existing asset. */
 export interface UpdateOptions extends BasePublicationOptions {
   /** V10 update ACK provider — quorum signatures before on-chain update. */
-  v10UpdateACKProvider?: PublicationOptionsShape['v10UpdateACKProvider'];
+  v10UpdateACKProvider?: V10UpdateACKProvider;
   /** Pre-computed owner seal for an on-chain update. */
-  precomputedUpdateAttestation?: PublicationOptionsShape['precomputedUpdateAttestation'];
+  precomputedUpdateAttestation?: PrecomputedUpdateAttestation;
 }
 
 export interface PublishResult {

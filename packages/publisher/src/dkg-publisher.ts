@@ -847,6 +847,10 @@ interface GraphScopedPublishDescriptor {
   expectedPrivateMerkleRoot?: Uint8Array;
 }
 
+type GraphScopedPublicationOperation =
+  | { kind: 'initial'; options: InitialPublishOptions }
+  | { kind: 'update'; options: UpdateOptions };
+
 /**
  * Return the numeric EIP-155 suffix carried by a DKG chain label.
  *
@@ -893,8 +897,9 @@ function graphScopeTargetsChain(
  * legacy version is a stable read-only error rather than a fallback to roots.
  */
 function resolveGraphScopedPublishDescriptor(
-  options: InitialPublishOptions | UpdateOptions,
+  operation: GraphScopedPublicationOperation,
 ): GraphScopedPublishDescriptor | undefined {
+  const options = operation.options;
   const hasGraphScopeField =
     options.contentScopeVersion !== undefined
     || options.kaUal !== undefined
@@ -943,10 +948,9 @@ function resolveGraphScopedPublishDescriptor(
   // Reject conflicting caller-supplied identity before planner, chain, or
   // storage work. Discovering it only after mint would strand an on-chain KA
   // that can never materialize under the requested UAL.
-  const initialOptions = options as InitialPublishOptions;
-  const updateOptions = options as UpdateOptions;
-  const suppliedReservedKaId =
-    initialOptions.reservedKaId ?? initialOptions.precomputedAttestation?.reservedKaId;
+  const suppliedReservedKaId = operation.kind === 'initial'
+    ? operation.options.reservedKaId ?? operation.options.precomputedAttestation?.reservedKaId
+    : undefined;
   if (suppliedReservedKaId !== undefined) {
     if (suppliedReservedKaId !== expectedPackedKaId) {
       throw new Error(
@@ -955,9 +959,9 @@ function resolveGraphScopedPublishDescriptor(
       );
     }
   }
-  const attestationAuthor =
-    initialOptions.precomputedAttestation?.authorAddress
-    ?? updateOptions.precomputedUpdateAttestation?.authorAddress;
+  const attestationAuthor = operation.kind === 'initial'
+    ? operation.options.precomputedAttestation?.authorAddress
+    : operation.options.precomputedUpdateAttestation?.authorAddress;
   if (
     attestationAuthor !== undefined
     && attestationAuthor.toLowerCase() !== scope.agentAddress
@@ -2229,14 +2233,17 @@ export class DKGPublisher implements Publisher {
     const sharedMemoryScope: SharedMemoryGraphScope = options?.sharedMemoryScope
       ?? { kind: 'complete-family' };
     const graphPublish = resolveGraphScopedPublishDescriptor({
-      contextGraphId,
-      quads: [],
-      contentScopeVersion: options?.contentScopeVersion,
-      kaUal: options?.kaUal,
-      assertionVersion: options?.assertionVersion,
-      publicTripleCount: options?.publicTripleCount,
-      privateMerkleRoot: options?.privateMerkleRoot,
-      privateTripleCount: options?.privateTripleCount,
+      kind: 'initial',
+      options: {
+        contextGraphId,
+        quads: [],
+        contentScopeVersion: options?.contentScopeVersion,
+        kaUal: options?.kaUal,
+        assertionVersion: options?.assertionVersion,
+        publicTripleCount: options?.publicTripleCount,
+        privateMerkleRoot: options?.privateMerkleRoot,
+        privateTripleCount: options?.privateTripleCount,
+      },
     });
     if (graphPublish && (selection !== 'all' || sharedMemoryScope.kind !== 'named-lifecycle')) {
       throw new Error(
@@ -2746,7 +2753,7 @@ export class DKGPublisher implements Publisher {
     const effectiveAccessPolicy = accessPolicy ?? (privateQuads.length > 0 ? 'ownerOnly' : 'public');
     const normalizedAllowedPeers = [...new Set((allowedPeers ?? []).map((p) => p.trim()).filter(Boolean))];
     const normalizedPublisherPeerId = publisherPeerId.trim();
-    const graphPublish = resolveGraphScopedPublishDescriptor(options);
+    const graphPublish = resolveGraphScopedPublishDescriptor({ kind: 'initial', options });
     assertPublicationPricingPolicyApplicable(pricingPolicy, {
       kind: 'initial',
       graphScoped: graphPublish !== undefined,
@@ -4504,8 +4511,8 @@ export class DKGPublisher implements Publisher {
     options: Omit<UpdateOptions, 'quads'>,
   ): Promise<PublishResult> {
     const descriptor = resolveGraphScopedPublishDescriptor({
-      ...options,
-      quads: [],
+      kind: 'update',
+      options: { ...options, quads: [] },
     });
     if (!descriptor) {
       throw new Error('Graph-scoped SWM update requires a complete V2 content envelope');
@@ -4549,8 +4556,8 @@ export class DKGPublisher implements Publisher {
   ): Promise<PublishResult> {
     const { stagedOperation, ...publishOptions } = options;
     const descriptor = resolveGraphScopedPublishDescriptor({
-      ...publishOptions,
-      quads: [],
+      kind: 'update',
+      options: { ...publishOptions, quads: [] },
     });
     if (!descriptor) {
       throw new Error('Graph-scoped staged SWM update requires a complete V2 content envelope');
@@ -4729,7 +4736,7 @@ export class DKGPublisher implements Publisher {
     const onBroadcastAccepted = options.onBroadcastAccepted;
     const onPublishConfirmed = options.onPublishConfirmed;
     const { contextGraphId, quads, privateQuads = [], operationCtx, onPhase } = options;
-    const graphUpdate = resolveGraphScopedPublishDescriptor(options);
+    const graphUpdate = resolveGraphScopedPublishDescriptor({ kind: 'update', options });
     if (graphUpdate) {
       if (graphUpdate.expectedPackedKaId !== kaId) {
         throw new Error(
