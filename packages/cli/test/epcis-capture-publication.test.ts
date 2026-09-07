@@ -3,11 +3,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DKGAgent, KaNumberAllocator } from '@origintrail-official/dkg-agent';
-import { handleCaptureAsync, type EPCISDocument } from '@origintrail-official/dkg-epcis';
+import { buildEpcisQuery, handleCaptureAsync, toEpcisEvent, type EPCISDocument } from '@origintrail-official/dkg-epcis';
 import { DashboardDB, SqliteKaNumberStore } from '@origintrail-official/dkg-node-ui';
 import { GraphManager, OxigraphStore, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
-import { createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
+import { contextGraphDataUri, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import { createEVMAdapter, takeSnapshot, revertSnapshot } from '../../chain/test/evm-test-context.js';
 import { TEST_SNAPSHOT_STORAGE } from '../../../scripts/testing/snapshot-storage.js';
 
@@ -62,6 +62,20 @@ function document(type: string, eventID: string): EPCISDocument {
 // The CLI composes EPCIS with the agent. Use its real async publication path,
 // allocator, publisher and store; localOnly keeps network ACKs out of this test.
 describe('EPCIS capture through agent publication', () => {
+  it.each(['urn:epcis:CustomEvent', 'https://example.org/CustomEvent'])(
+    'round-trips an external RDF class through the returned event-type filter: %s', async (eventType) => {
+      const graph = contextGraphDataUri('epcis-type-filter');
+      const event = `urn:event:${encodeURIComponent(eventType)}`;
+      await store.insert([{
+        subject: event, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: eventType, graph,
+      }]);
+      const responseType = toEpcisEvent({ eventType }).type as string;
+      const result = await store.query(buildEpcisQuery({ eventType: responseType }, 'epcis-type-filter'));
+      if (result.type !== 'bindings') throw new Error('Expected event bindings');
+      expect(result.bindings.map((row) => row.event)).toEqual([event]);
+    },
+  );
+
   it.each(cases)('stores the standard RDF class for $type ($visibility)', async ({ visibility, type }) => {
     const publicId = `urn:epcis:${visibility}:${type.endsWith('/ObjectEvent') ? 'canonical' : 'compact'}:public`;
     const privateId = publicId.replace(/:public$/, ':private');
@@ -84,16 +98,23 @@ describe('EPCIS capture through agent publication', () => {
     const request = job.request.knowledgeAssetVmPublish;
     const scope = createGraphKnowledgeAssetScope(request.kaUal!, request.assertionVersion!);
     const graph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, scope);
-    const publicClass = await store.query(`ASK { GRAPH <${graph}> {
-      <${publicId}> a <https://gs1.github.io/EPCIS/ObjectEvent>
-    } }`);
-    expect(publicClass).toEqual({ type: 'boolean', value: visibility === 'public' || visibility === 'both' });
     const privateQuads = await new PrivateContentStore(store, new GraphManager(store))
       .getKnowledgeAssetPrivateTriples(CG, scope);
-    const privateTypes = privateQuads.filter((quad) => quad.subject === privateId
-      && quad.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type');
-    expect(privateTypes).toEqual(visibility === 'public' ? [] : [expect.objectContaining({
-      object: 'https://gs1.github.io/EPCIS/ObjectEvent',
-    })]);
+    // Check both submitted subjects in both layers. In particular, a private
+    // subject must never appear publicly, even in a private-only capture.
+    for (const [subject, expectedPublic, expectedPrivate] of [
+      [publicId, visibility === 'public' || visibility === 'both', false],
+      [privateId, false, visibility !== 'public'],
+    ] as const) {
+      const publicClass = await store.query(`ASK { GRAPH <${graph}> {
+        <${subject}> a <https://gs1.github.io/EPCIS/ObjectEvent>
+      } }`);
+      expect(publicClass).toEqual({ type: 'boolean', value: expectedPublic });
+      const privateTypes = privateQuads.filter((quad) => quad.subject === subject
+        && quad.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type');
+      expect(privateTypes).toEqual(expectedPrivate ? [expect.objectContaining({
+        object: 'https://gs1.github.io/EPCIS/ObjectEvent',
+      })] : []);
+    }
   }, 120_000);
 });

@@ -3,3 +3,4 @@ export { handleCaptureAsync, EpcisValidationError, handleEventsQuery, EpcisQuery
 export { buildEpcisQuery, escapeSparql, normalizeBizStep, normalizeGs1Vocabulary } from './query-builder.js';
 export { parseQueryParams, hasAtLeastOneFilter, hasValidDateRange, encodePageToken, decodePageToken } from './utils.js';
 export type { EPCISDocument, EPCISEvent, ValidationResult, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, AsyncPublisher, EpcisQueryParams, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
+export { EpcisQueryInputError } from './query-input.js';

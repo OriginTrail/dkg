@@ -17,20 +17,13 @@ export function compactEpcisEventType(value: string): string {
   return standardEpcisEventType(value) ?? value;
 }
 
-export class EpcisEventTypeError extends Error {
-  constructor() {
-    super('eventType must be a standard EPCIS event name or an absolute event type IRI');
-    this.name = 'EpcisEventTypeError';
-  }
-}
-
 /** Canonicalize query types, including the legacy compact extension-name form. */
-export function normalizeEpcisEventType(value: string): string {
+export function normalizeEpcisEventType(value: string): string | undefined {
   const standard = standardEpcisEventType(value);
   if (standard) return `${EPCIS_TYPE_PREFIX}${standard}`;
   if (isSafeIri(value)) return value;
   // Older responses compacted every class in this namespace. Retain those
   // local-name filters without mistaking them for standard schema classes.
   if (/^[A-Za-z][A-Za-z0-9._-]*$/.test(value)) return `${EPCIS_TYPE_PREFIX}${value}`;
-  throw new EpcisEventTypeError();
+  return undefined;
 }

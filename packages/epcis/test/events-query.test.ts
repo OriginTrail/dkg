@@ -1,4 +1,5 @@
 import { buildEpcisQuery } from '../src/query-builder.js';
+import { EpcisQueryInputError } from '../src/index.js';
 import { describe, it, expect } from 'vitest';
 import { handleEventsQuery, EpcisQueryError, toEpcisEvent, unwrapLiteral } from '../src/handlers.js';
 import type { QueryEngine } from '../src/types.js';
@@ -58,6 +59,7 @@ describe('handleEventsQuery', () => {
   });
 
   it.each(['https://example.org/Event>', '_:blank', 'bad type'])('rejects unsafe eventType before querying: %s', async (eventType) => {
+    expect(() => buildEpcisQuery({ eventType }, CONTEXT_GRAPH_ID)).toThrow(EpcisQueryInputError);
     const { engine, calls } = createTrackingQueryEngine([]);
     await expect(handleEventsQuery(new URLSearchParams({ eventType }), {
       contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH,

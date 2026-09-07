@@ -1,6 +1,6 @@
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
-import epcisSchema from './schemas/epcis-json-schema.json' with { type: 'json' };
+import { createEpcisValidationSchema } from './validation-schema.js';
 import type { EPCISDocument, EPCISEvent, ValidationResult } from './types.js';
 
 export interface EpcisValidator {
@@ -67,7 +67,7 @@ export function createValidator(): EpcisValidator {
     validateFormats: true,
   });
   (addFormats as unknown as typeof addFormats.default)(ajv);
-  const validateSchema = ajv.compile(epcisSchema);
+  const validateSchema = ajv.compile(createEpcisValidationSchema());
 
   return {
     validate(document: unknown): ValidationResult {

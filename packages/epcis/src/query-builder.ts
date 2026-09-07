@@ -1,4 +1,5 @@
-import { EPCIS_TYPE_PREFIX, normalizeEpcisEventType } from './epcis-vocabulary.js';
+import { EPCIS_TYPE_PREFIX } from './epcis-vocabulary.js';
+import { normalizeEpcisQueryInput, EpcisQueryInputError, type NormalizedEpcisQuery } from './query-input.js';
 import {
   contextGraphDataUri,
   contextGraphMetaUri,
@@ -60,6 +61,14 @@ function extensionLocalNameFilter(predicateVariable: string, localName: string):
  * - Groups by ?event (the event URI) instead of ?ual (the graph URI)
  */
 export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string): string {
+  const input = normalizeEpcisQueryInput(params);
+  if (!input.ok) throw new EpcisQueryInputError(input.message);
+  return renderEpcisQuery(input.value, contextGraphId);
+}
+
+/** Render the normalized query input shared by HTTP and the public builder. */
+export function renderEpcisQuery(input: NormalizedEpcisQuery, contextGraphId: string): string {
+  const { params, eventTypeIri } = input;
   const partition = params.finalized === false ? 'swm' : 'finalized';
   // Finalized data lands at `<cg>/<sub>` when a sub-graph is targeted —
   // see `packages/agent/src/finalization-handler.ts:358-362`, which
@@ -90,8 +99,10 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   // Base pattern — always present
   wherePatterns.push('?event a ?eventType .');
 
-  // Must be an EPCIS event type
-  filterClauses.push(`FILTER(STRSTARTS(STR(?eventType), "${EPCIS_TYPE_PREFIX}"))`);
+  // An exact validated type is authoritative, including external namespaces.
+  if (!eventTypeIri) {
+    filterClauses.push(`FILTER(STRSTARTS(STR(?eventType), "${EPCIS_TYPE_PREFIX}"))`);
+  }
 
   // eventID filter — matches the RDF subject (the event's @id / rootEntity)
   if (params.eventID) {
@@ -99,8 +110,8 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   }
 
   // eventType filter — narrow to a specific EPCIS event type
-  if (params.eventType) {
-    filterClauses.push(`FILTER(?eventType = ${sparqlIri(normalizeEpcisEventType(params.eventType))})`);
+  if (eventTypeIri) {
+    filterClauses.push(`FILTER(?eventType = ${sparqlIri(eventTypeIri)})`);
   }
 
   // EPC filter — match epcList OR childEPCs per Section 8.2.7.1.
