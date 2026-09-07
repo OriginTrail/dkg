@@ -2242,7 +2242,9 @@ export class PublishMethods extends DKGAgentBase {
         ? generatedPrivateCatalogTripleKeys(contextGraphId)
         : undefined;
 
-      const publisherUpdateOptions = {
+      const publisherUpdateOptions: Parameters<
+        DKGPublisher['updateKnowledgeAssetFromStagedSharedWorkingMemoryV1']
+      >[1] = {
         contextGraphId,
         privateQuads: canonicalParts.privateQuads,
         publisherPeerId: this.node.peerId.toString(),

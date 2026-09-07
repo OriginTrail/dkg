@@ -220,26 +220,20 @@ export type ParticipantSignatureProvider = (
 
 /**
  * r10 (3877910013) — the canonical transaction-lifecycle hook contract: the subset of
- * {@link PublishOptions} that must travel UNCHANGED through every publish boundary (agent
+ * {@link BasePublicationOptions} that must travel UNCHANGED through every publish boundary (agent
  * queued execution, update forwarding, publisher entry points). Boundaries carry this as one
  * unit via the internal `pickPublishLifecycleHooks` helper instead of naming fields by hand.
  */
 export type PublishLifecycleHooks = Pick<
-  PublishOptions,
+  BasePublicationOptions,
   'onPhase' | 'onBeforeBroadcast' | 'onBroadcastAccepted' | 'onPublishConfirmed'
 >;
 
-export interface PublishOptions {
+/** Fields shared by initial publications and updates. */
+export interface BasePublicationOptions {
   contextGraphId: string;
   quads: Quad[];
   privateQuads?: Quad[];
-  /**
-   * Select an alternate token-pricing basis. `full-content` is supported for
-   * graph-scoped initial publications and charges for canonical public plus
-   * private RDF bytes. It does not change ACK payloads, replication, catalog
-   * commitments, or the on-chain byte-size attestation.
-   */
-  pricingPolicy?: PublicationPricingPolicy;
   /**
    * Content-scope discriminator for the rootless KA model. Supplying any of
    * the graph-scope fields requires version 2; legacy root-scoped KAs are
@@ -507,6 +501,28 @@ export interface PublishOptions {
   reservedKaId?: bigint;
 }
 
+/** Options for minting a new publication. */
+export interface InitialPublishOptions extends BasePublicationOptions {
+  /**
+   * Select an alternate token-pricing basis. `full-content` is supported for
+   * graph-scoped initial publications and charges for canonical public plus
+   * private RDF bytes. It does not change ACK payloads, replication, catalog
+   * commitments, or the on-chain byte-size attestation.
+   */
+  pricingPolicy?: PublicationPricingPolicy;
+}
+
+/**
+ * Options for publishing a new asset. Kept as the established public name for
+ * source compatibility; update callers use the distinct {@link UpdateOptions}.
+ */
+export type PublishOptions = InitialPublishOptions;
+
+/** Options for updating an existing asset. Initial-only pricing is invalid. */
+export interface UpdateOptions extends BasePublicationOptions {
+  pricingPolicy?: never;
+}
+
 export interface PublishResult {
   kaId: bigint;
   /** The UAL assigned to this KC (tentative or confirmed). */
@@ -545,8 +561,8 @@ export interface PublishResult {
 }
 
 export interface Publisher {
-  publish(options: PublishOptions): Promise<PublishResult>;
-  update(kaId: bigint, options: PublishOptions): Promise<PublishResult>;
+  publish(options: InitialPublishOptions): Promise<PublishResult>;
+  update(kaId: bigint, options: UpdateOptions): Promise<PublishResult>;
   skolemizeByEntity(quads: Quad[]): KAManifestEntry[];
   /** @deprecated Use skolemizeByEntity. */
   autoPartition(quads: Quad[]): KAManifestEntry[];

@@ -6,6 +6,21 @@ export const PUBLICATION_PRICING_POLICIES = ['full-content'] as const;
 
 export type PublicationPricingPolicy = (typeof PUBLICATION_PRICING_POLICIES)[number];
 
+export type EffectivePublicationPricingPolicy =
+  | 'network-visible'
+  | PublicationPricingPolicy;
+
+/**
+ * The two byte quantities a publication carries through planning. Network-visible
+ * bytes remain the ACK and on-chain attestation value. Billable bytes are used
+ * only for token quoting and can never fall below the network-visible footprint.
+ */
+export interface PublicationPricing {
+  readonly policy: EffectivePublicationPricingPolicy;
+  readonly networkVisibleByteSize: bigint;
+  readonly billableByteSize: bigint;
+}
+
 export type PublicationPricingPolicyParseResult =
   | { readonly ok: true; readonly value?: PublicationPricingPolicy }
   | { readonly ok: false };
@@ -73,21 +88,25 @@ function fullContentPricingByteSize(
   return BigInt(UTF8_ENCODER.encode(quadsToNQuads(scoped)).length);
 }
 
-export function resolvePublicationPricingByteSize(input: {
+export function resolvePublicationPricing(input: {
   readonly policy: PublicationPricingPolicy | undefined;
   readonly networkVisibleByteSize: bigint;
   readonly publicQuads: readonly Quad[];
   readonly privateQuads: readonly Quad[];
   readonly fallbackGraph: string;
-}): bigint {
-  switch (input.policy) {
-    case undefined:
-      return input.networkVisibleByteSize;
-    case 'full-content':
-      return fullContentPricingByteSize(
+}): PublicationPricing {
+  const requestedBillableByteSize = input.policy === 'full-content'
+    ? fullContentPricingByteSize(
         input.publicQuads,
         input.privateQuads,
         input.fallbackGraph,
-      );
-  }
+      )
+    : input.networkVisibleByteSize;
+  return {
+    policy: input.policy ?? 'network-visible',
+    networkVisibleByteSize: input.networkVisibleByteSize,
+    billableByteSize: requestedBillableByteSize > input.networkVisibleByteSize
+      ? requestedBillableByteSize
+      : input.networkVisibleByteSize,
+  };
 }

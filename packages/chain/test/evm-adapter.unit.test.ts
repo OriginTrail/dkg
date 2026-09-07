@@ -4168,7 +4168,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       (a as any).quoteRequiredPublishTokenAmount = recorder(async () => 1_000n);
       await expect(a.resolvePublisherPublishPlan({
         contextGraphId: CG,
-        effectiveByteSize: 100n,
+        billableByteSize: 100n,
         explicitPublishEpochs: 12,
         defaultPublishEpochs: 12,
       })).rejects.toMatchObject({ code: 'NO_FUNDED_PUBLISHER_WALLET' });
@@ -4331,7 +4331,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     (a as any).quoteRequiredPublishTokenAmount = recorder(async () => 1_000n);
     await expect(a.resolvePublisherPublishPlan({
       contextGraphId: CG,
-      effectiveByteSize: 100n,
+      billableByteSize: 100n,
       explicitPublishEpochs: 2,
       defaultPublishEpochs: 12,
     })).rejects.toMatchObject({
@@ -4350,7 +4350,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
 
     await expect(a.resolvePublisherPublishPlan({
       contextGraphId: CG,
-      effectiveByteSize: 100n,
+      billableByteSize: 100n,
       explicitPublishEpochs: 2,
       defaultPublishEpochs: 12,
     })).resolves.toMatchObject({ publisherAddress: walletA.address, publishEpochs: 2, tokenAmount: 1_000n });
@@ -4364,7 +4364,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
 
     const plan = await a.resolvePublisherPublishPlan({
       contextGraphId: CG,
-      effectiveByteSize: 100n,
+      billableByteSize: 100n,
       explicitPublishEpochs: 2,
       defaultPublishEpochs: 12,
     });
@@ -4380,7 +4380,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
 
     await expect(a.resolvePublisherPublishPlan({
       contextGraphId: CG,
-      effectiveByteSize: 100n,
+      billableByteSize: 100n,
       explicitPublishEpochs: 2,
       defaultPublishEpochs: 12,
       publisherAddress: walletA.address,
@@ -4389,7 +4389,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     tracByAddr.set(lc(walletA.address), 2_000n);
     await expect(a.resolvePublisherPublishPlan({
       contextGraphId: CG,
-      effectiveByteSize: 100n,
+      billableByteSize: 100n,
       explicitPublishEpochs: 2,
       defaultPublishEpochs: 12,
       publisherAddress: walletA.address,
@@ -4406,7 +4406,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
 
     await expect(a.resolvePublisherPublishPlan({
       contextGraphId: CG,
-      effectiveByteSize: 100n,
+      billableByteSize: 100n,
       explicitPublishEpochs: 2,
       defaultPublishEpochs: 12,
       publisherAddress: walletA.address,
@@ -4546,7 +4546,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
 
     await expect(a.resolvePublisherPublishPlan({
       contextGraphId: CG,
-      effectiveByteSize: 100n,
+      billableByteSize: 100n,
       explicitPublishEpochs: 5,
       defaultPublishEpochs: 12,
     })).resolves.toMatchObject({ publisherAddress: walletB.address, publishEpochs: 5, tokenAmount: 1_000n });
@@ -4599,7 +4599,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
 
     await expect(a.resolvePublisherPublishPlan({
       contextGraphId: CG,
-      effectiveByteSize: 100n,
+      billableByteSize: 100n,
       defaultPublishEpochs: 12,
     })).resolves.toMatchObject({
       publisherAddress: walletA.address,
@@ -4629,7 +4629,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
 
     await expect(a.resolvePublisherPublishPlan({
       contextGraphId: CG,
-      effectiveByteSize: 100n,
+      billableByteSize: 100n,
       defaultPublishEpochs: 12,
     })).resolves.toMatchObject({ publisherAddress: walletB.address, publishEpochs: 24, tokenAmount: 24n });
     expect(coverCalls.some((call) => call.accountId === 41n && call.cost === 12n)).toBe(true);
@@ -4656,7 +4656,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
 
     await expect(a.resolvePublisherPublishPlan({
       contextGraphId: CG,
-      effectiveByteSize: 100n,
+      billableByteSize: 100n,
       defaultPublishEpochs: 12,
     })).resolves.toMatchObject({
       publisherAddress: walletA.address,

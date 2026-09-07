@@ -7,7 +7,7 @@ import {
   assertPublicationPricingPolicyApplicable,
   formatPublicationPricingPolicyRequirement,
   parsePublicationPricingPolicy,
-  resolvePublicationPricingByteSize,
+  resolvePublicationPricing,
 } from '../src/publication-pricing.js';
 
 describe('publication pricing policy', () => {
@@ -59,24 +59,47 @@ describe('publication pricing policy', () => {
     };
     const networkVisibleByteSize = 123n;
 
-    expect(resolvePublicationPricingByteSize({
+    expect(resolvePublicationPricing({
       policy: undefined,
       networkVisibleByteSize,
       publicQuads: [publicQuad],
       privateQuads: [privateQuad],
       fallbackGraph,
-    })).toBe(networkVisibleByteSize);
+    })).toEqual({
+      policy: 'network-visible',
+      networkVisibleByteSize,
+      billableByteSize: networkVisibleByteSize,
+    });
 
     const expectedDocument = quadsToNQuads([
       { ...publicQuad, graph: fallbackGraph },
       privateQuad,
     ]);
-    expect(resolvePublicationPricingByteSize({
+    const fullContentByteSize = BigInt(new TextEncoder().encode(expectedDocument).length);
+    expect(resolvePublicationPricing({
       policy: 'full-content',
-      networkVisibleByteSize,
+      networkVisibleByteSize: 1n,
       publicQuads: [publicQuad],
       privateQuads: [privateQuad],
       fallbackGraph,
-    })).toBe(BigInt(new TextEncoder().encode(expectedDocument).length));
+    })).toEqual({
+      policy: 'full-content',
+      networkVisibleByteSize: 1n,
+      billableByteSize: fullContentByteSize,
+    });
+  });
+
+  it('floors full-content pricing at the network-visible footprint', () => {
+    expect(resolvePublicationPricing({
+      policy: 'full-content',
+      networkVisibleByteSize: 1_000n,
+      publicQuads: [],
+      privateQuads: [],
+      fallbackGraph: 'did:dkg:context-graph:1/_data',
+    })).toEqual({
+      policy: 'full-content',
+      networkVisibleByteSize: 1_000n,
+      billableByteSize: 1_000n,
+    });
   });
 });

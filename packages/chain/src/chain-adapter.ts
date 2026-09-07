@@ -21,7 +21,8 @@ export interface ConvictionReader {
 /** Inputs for one adapter-owned, cost-aware publisher planning decision. */
 export interface PublisherPublishPlanRequest {
   contextGraphId: bigint;
-  effectiveByteSize: bigint;
+  /** Exact byte quantity used for token quoting and fundability checks. */
+  billableByteSize: bigint;
   /** Caller override. When omitted, a covering PCA may select its own lock. */
   explicitPublishEpochs?: number;
   /** Direct-spend lifetime used when no covering PCA-specific plan applies. */

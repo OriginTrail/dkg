@@ -152,7 +152,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       const cacheKey = `${purpose}:${epochs}`;
       const cached = quoteCache.get(cacheKey);
       if (cached) return cached;
-      const pending = this.quoteRequiredPublishTokenAmount(request.effectiveByteSize, epochs)
+      const pending = this.quoteRequiredPublishTokenAmount(request.billableByteSize, epochs)
         .catch((error) => {
           // A transient PCA-lock quote failure must not poison the fallback
           // direct-spend quote for the same numeric lifetime.

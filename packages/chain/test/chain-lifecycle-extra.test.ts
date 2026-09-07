@@ -577,7 +577,7 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
 
       const plan = await adapter.resolvePublisherPublishPlan!({
         contextGraphId,
-        effectiveByteSize: 256n,
+        billableByteSize: 256n,
         explicitPublishEpochs: 2,
         defaultPublishEpochs: 12,
       });
