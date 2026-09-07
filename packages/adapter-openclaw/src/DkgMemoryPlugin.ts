@@ -29,6 +29,7 @@
  * `21_TRI_MODAL_MEMORY.md §5`.
  */
 
+import { sparqlString } from '@origintrail-official/dkg-core';
 import type { DkgDaemonClient } from './dkg-client.js';
 import type {
   DkgOpenClawConfig,
@@ -224,7 +225,7 @@ export class DkgMemorySearchManager implements MemorySearchManager {
       return [];
     }
     const filter = keywords
-      .map(k => `CONTAINS(LCASE(STR(?text)), "${escapeSparqlString(k)}")`)
+      .map(k => `CONTAINS(LCASE(STR(?text)), ${sparqlString(k)})`)
       .join(' || ');
 
     // Permissive SPARQL shape: find any subject with any literal object of
@@ -1104,13 +1105,4 @@ function bindingValue(v: unknown): string | undefined {
     return v;
   }
   return String(v);
-}
-
-function escapeSparqlString(value: string): string {
-  return value
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, '\\n')
-    .replace(/\r/g, '\\r')
-    .replace(/\t/g, '\\t');
 }
