@@ -4,8 +4,8 @@ import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
 // Positive registrations may be reused for five minutes. Only the node's
 // signer gets a short negative cache; arbitrary-address misses must observe
 // external registration immediately on the next lookup.
-const IDENTITY_ID_POSITIVE_TTL_MS = 5 * 60 * 1000;
-const SIGNER_IDENTITY_ID_ZERO_TTL_MS = 15 * 1000;
+export const IDENTITY_ID_POSITIVE_TTL_MS = 5 * 60 * 1000;
+export const SIGNER_IDENTITY_ID_ZERO_TTL_MS = 15 * 1000;
 
 type IdentityIdCacheEntry = {
   identityId: bigint;
@@ -17,7 +17,15 @@ export class IdentityIdCache {
     ttlMs: (entry) => entry.ttlMs,
   });
 
-  constructor(private readonly signerCacheKey: string) {}
+  private readonly signerCacheKey: string;
+
+  constructor(
+    signerAddress: string,
+    private readonly positiveTtlMs = IDENTITY_ID_POSITIVE_TTL_MS,
+    private readonly signerZeroTtlMs = SIGNER_IDENTITY_ID_ZERO_TTL_MS,
+  ) {
+    this.signerCacheKey = identityCacheKey(signerAddress);
+  }
 
   async getOrLoad(
     address: string,
@@ -25,7 +33,7 @@ export class IdentityIdCache {
   ): Promise<bigint> {
     if (!ethers.isAddress(address)) return 0n;
     const checksum = ethers.getAddress(address);
-    const cacheKey = checksum.toLowerCase();
+    const cacheKey = identityCacheKey(checksum);
     const entry = await this.values.getOrLoad(cacheKey, cacheKey, async () => {
       const identityId = await load(checksum);
       return this.entry(cacheKey, identityId);
@@ -34,12 +42,12 @@ export class IdentityIdCache {
   }
 
   seed(address: string, identityId: bigint): void {
-    const cacheKey = ethers.getAddress(address).toLowerCase();
+    const cacheKey = identityCacheKey(address);
     this.values.seed(cacheKey, this.entry(cacheKey, identityId));
   }
 
   invalidate(address: string): void {
-    const cacheKey = ethers.getAddress(address).toLowerCase();
+    const cacheKey = identityCacheKey(address);
     this.values.invalidate(cacheKey);
   }
 
@@ -49,11 +57,15 @@ export class IdentityIdCache {
 
   private entry(cacheKey: string, identityId: bigint): IdentityIdCacheEntry {
     const ttlMs = identityId > 0n
-      ? IDENTITY_ID_POSITIVE_TTL_MS
+      ? this.positiveTtlMs
       : cacheKey === this.signerCacheKey
-        ? SIGNER_IDENTITY_ID_ZERO_TTL_MS
+        ? this.signerZeroTtlMs
         : 0;
     return { identityId, ttlMs };
   }
 }
 
+
+function identityCacheKey(address: string): string {
+  return ethers.getAddress(address).toLowerCase();
+}

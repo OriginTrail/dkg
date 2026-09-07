@@ -38,7 +38,7 @@ import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } f
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
-import { IdentityIdCache } from './identity-id-cache.js';
+import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
@@ -744,6 +744,12 @@ export class EVMChainAdapterBase {
    */
   protected identityIdCache!: IdentityIdCache;
 
+  /** @deprecated Retained for subclasses; cache policy is owned by IdentityIdCache. */
+  protected static readonly IDENTITY_ID_POSITIVE_TTL_MS = IDENTITY_ID_POSITIVE_TTL_MS;
+
+  /** @deprecated Retained for subclasses; cache policy is owned by IdentityIdCache. */
+  protected static readonly SIGNER_IDENTITY_ID_ZERO_TTL_MS = SIGNER_IDENTITY_ID_ZERO_TTL_MS;
+
   protected readonly pcaReadCache = new PcaReadCache();
 
   /**
@@ -1239,7 +1245,11 @@ export class EVMChainAdapterBase {
         throw new Error('EVM adminPrivateKey must be distinct from operational keys');
       }
     }
-    this.identityIdCache = new IdentityIdCache(this.signer.address.toLowerCase());
+    this.identityIdCache = new IdentityIdCache(
+      this.signer.address,
+      EVMChainAdapterBase.IDENTITY_ID_POSITIVE_TTL_MS,
+      EVMChainAdapterBase.SIGNER_IDENTITY_ID_ZERO_TTL_MS,
+    );
     // #1583 — resolved-contract-address memo, 30s TTL backstop
     // (RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS — bounds a poller-missed rotation).
     this.resolvedContractAddressCache = new ReadThroughTtlCache<string, string>({
