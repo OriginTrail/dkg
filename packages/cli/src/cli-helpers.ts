@@ -1,3 +1,4 @@
+import type { RdfParseOptions } from './rdf-parser.js';
 import { Command } from 'commander';
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -151,6 +152,7 @@ function loadStructuredFile(filePath: string): any {
 async function loadQuadsFromInput(
   opts: ActionOpts,
   defaultGraph: string,
+  parseOptions?: RdfParseOptions,
 ): Promise<Array<{ subject: string; predicate: string; object: string; graph: string }>> {
   const rdfParser = await import('./rdf-parser.js');
 
@@ -159,7 +161,7 @@ async function loadQuadsFromInput(
     const { pathToFileURL } = await import('node:url');
     const raw = await readFile(opts.file, 'utf-8');
     const format = opts.format ?? rdfParser.detectFormat(opts.file);
-    const quads = await rdfParser.parseRdf(raw, format, defaultGraph, pathToFileURL(opts.file).href);
+    const quads = await rdfParser.parseRdf(raw, format, defaultGraph, pathToFileURL(opts.file).href, parseOptions);
     console.log(`Parsed ${quads.length} quad(s) from ${opts.file} (${format})`);
     return quads;
   }

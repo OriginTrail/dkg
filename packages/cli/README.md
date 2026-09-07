@@ -72,6 +72,11 @@ supports inline `@context`, lists, named graphs and typed/language literals.
 Relative identifiers resolve against the input file's `file:` URL unless an
 inline `@base` overrides it. Expansion that would discard statements fails.
 
+JSON-LD named graphs can be stored in Working Memory with `dkg ka create --no-finalize`.
+A default-finalizing create rejects them before contacting the daemon: sealing, SWM
+sharing and VM publication do not yet preserve named-graph identity. Rewrite the
+document into the default graph to use those transitions.
+
 JSON-LD ingestion does not fetch remote contexts or `@import` URLs. Embed the
 required context inline before importing a file. Existing simple quad arrays
 remain supported in both `.json` and `.jsonld` files.

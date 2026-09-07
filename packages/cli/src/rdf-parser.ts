@@ -9,6 +9,11 @@ export interface SimpleQuad {
   graph: string;
 }
 
+export interface RdfParseOptions {
+  /** Sealing cannot preserve JSON-LD named graphs; legacy quad inputs keep their existing contract. */
+  jsonLdNamedGraphs?: 'preserve' | 'reject';
+}
+
 export type RdfFormat = 'nquads' | 'ntriples' | 'turtle' | 'trig' | 'json' | 'jsonld';
 
 const EXTENSION_MAP: Record<string, RdfFormat> = {
@@ -46,6 +51,7 @@ export async function parseRdf(
   format: RdfFormat,
   defaultGraph: string,
   baseIRI?: string,
+  parseOptions: RdfParseOptions = {},
 ): Promise<SimpleQuad[]> {
   if (format === 'json' || format === 'jsonld') {
     const parsed: unknown = JSON.parse(content);
@@ -79,7 +85,15 @@ export async function parseRdf(
       throw error;
     }
     if (typeof nquads !== 'string') throw new Error('JSON-LD conversion did not return N-Quads');
-    return parseRdf(nquads, 'nquads', defaultGraph);
+    // Inspect graph identity before applying the caller's default placement graph.
+    const quads = await parseRdf(nquads, 'nquads', '');
+    if (parseOptions.jsonLdNamedGraphs === 'reject' && quads.some((quad) => quad.graph !== '')) {
+      throw new Error(
+        'JSON-LD named graphs cannot be finalized yet. Use ka create --no-finalize to keep them in Working Memory, '
+        + 'or rewrite the document into the default graph before finalizing or sharing.',
+      );
+    }
+    return quads.map((quad) => ({ ...quad, graph: quad.graph || defaultGraph }));
   }
 
   // N3 parser handles N-Triples, N-Quads, Turtle, TriG
