@@ -2865,6 +2865,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   async requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
     this: DKGAgent,
     contextGraphId: string,
+    options: Readonly<{ seedConnectedPeers?: boolean }> = {},
   ): Promise<Readonly<{ requested: number; failed: number }>> {
     const service = this.rfc64PublicCatalogServiceV1;
     const networkId = (
@@ -2885,18 +2886,20 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     ) {
       return Object.freeze({ requested: 0, failed: 0 });
     }
-    const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(
-      this.node.libp2p.getPeers().map((peer) => peer.toString()).slice(
-        0,
-        RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1,
-      ),
-    );
     const replayProgress = rfc64CatalogReplayProgressForV1(
       this,
       contextGraphId,
       accepted.policyDigest,
     );
-    for (const peer of peers) replayProgress.peerWorklist.enqueue(peer);
+    if (options.seedConnectedPeers !== false) {
+      const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(
+        this.node.libp2p.getPeers().map((peer) => peer.toString()).slice(
+          0,
+          RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1,
+        ),
+      );
+      for (const peer of peers) replayProgress.peerWorklist.enqueue(peer);
+    }
     if (!replayProgress.peerWorklist.hasPending) {
       return Object.freeze({ requested: 0, failed: 0 });
     }

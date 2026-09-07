@@ -833,6 +833,34 @@ const syncPageSizeProfilesByAgent = new WeakMap<DKGAgent, SyncPageSizeProfileCac
 const alreadyMemberDelegationRefreshChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const durableContextGraphSyncChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const durableRecoveryRunnersByAgent = new WeakMap<DKGAgent, DurableRecoveryRunner>();
+const rfc64CatalogReplayConnectionDebounceByAgent = new WeakMap<DKGAgent, Map<string, number>>();
+const RFC64_CATALOG_REPLAY_CONNECTION_DEBOUNCE_MS = 60_000;
+const RFC64_CATALOG_REPLAY_CONNECTION_DEBOUNCE_MAX_PEERS = 256;
+
+function shouldStartRfc64CatalogReplayForConnection(
+  agent: DKGAgent,
+  peerId: string,
+  nowMs = Date.now(),
+): boolean {
+  let byPeer = rfc64CatalogReplayConnectionDebounceByAgent.get(agent);
+  if (byPeer === undefined) {
+    byPeer = new Map<string, number>();
+    rfc64CatalogReplayConnectionDebounceByAgent.set(agent, byPeer);
+  }
+  const previous = byPeer.get(peerId);
+  if (
+    previous !== undefined
+    && nowMs - previous < RFC64_CATALOG_REPLAY_CONNECTION_DEBOUNCE_MS
+  ) return false;
+  byPeer.delete(peerId);
+  while (byPeer.size >= RFC64_CATALOG_REPLAY_CONNECTION_DEBOUNCE_MAX_PEERS) {
+    const oldestPeerId = byPeer.keys().next().value as string | undefined;
+    if (oldestPeerId === undefined) break;
+    byPeer.delete(oldestPeerId);
+  }
+  byPeer.set(peerId, nowMs);
+  return true;
+}
 
 function durableRecoveryRunnerFor(agent: DKGAgent): DurableRecoveryRunner {
   let runner = durableRecoveryRunnersByAgent.get(agent);
@@ -3867,16 +3895,27 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.node.libp2p.addEventListener('connection:open', (evt) => {
       const remotePeer = evt.detail.remotePeer.toString();
       if (remotePeer === this.node.libp2p.peerId.toString()) return;
-      const replayContextGraphIds = [...new Set([
-        ...this.readRfc64CatalogResponsibilitiesV1()
-          .filter((responsibility) => responsibility.active && responsibility.mode !== 'legacy')
-          .map((responsibility) => responsibility.contextGraphId),
-        ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority)
-          .filter((contextGraphId) => {
-            const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
-            return authority.active && authority.mode !== 'legacy';
-          }),
-      ])].sort();
+      // Protocol dials can themselves open short-lived libp2p connections.
+      // Without this per-peer live-session debounce, requesting a catalog
+      // replay opens another connection, which requests another replay, and
+      // the receiver can remain permanently fenced in `applying`. A later
+      // reconnect still gets a fresh pass after the bounded debounce window;
+      // ordinary head announcements remain live throughout the window.
+      const replayContextGraphIds = shouldStartRfc64CatalogReplayForConnection(
+        this,
+        remotePeer,
+      )
+        ? [...new Set([
+          ...this.readRfc64CatalogResponsibilitiesV1()
+            .filter((responsibility) => responsibility.active && responsibility.mode !== 'legacy')
+            .map((responsibility) => responsibility.contextGraphId),
+          ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority)
+            .filter((contextGraphId) => {
+              const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
+              return authority.active && authority.mode !== 'legacy';
+            }),
+        ])].sort()
+        : [];
       const replayFenceGenerations = new Map<string, number | null>();
       for (const contextGraphId of replayContextGraphIds) {
         replayFenceGenerations.set(
@@ -3955,16 +3994,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // cannot request V2 completion, but they can still consume ordinary
         // head announcements. Upgraded receivers remain fenced by the scoped
         // pull below and never interpret this compatibility push as complete.
-        void this.reannounceRfc64CatalogHeadsToPeerV1(remotePeer).catch((err: unknown) => {
-          const message = err instanceof Error ? err.message : String(err);
-          this.log.warn(
-            ctx,
-            `RFC-64 compatibility re-announcement failed for ${remotePeer.slice(-8)}: ${message}`,
-          );
-        });
+        if (replayContextGraphIds.length > 0) {
+          void this.reannounceRfc64CatalogHeadsToPeerV1(remotePeer).catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : String(err);
+            this.log.warn(
+              ctx,
+              `RFC-64 compatibility re-announcement failed for ${remotePeer.slice(-8)}: ${message}`,
+            );
+          });
+        }
         for (const contextGraphId of replayContextGraphIds) {
           void this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
             contextGraphId,
+            { seedConnectedPeers: false },
           ).then((result) => {
             if (result.failed > 0) {
               this.log.warn(

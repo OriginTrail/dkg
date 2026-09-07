@@ -886,6 +886,48 @@ describe('RFC-64 rollout authority integration', () => {
     });
   }, 15_000);
 
+  it('coalesces protocol-dial connection churn into one scoped replay pass', async () => {
+    const edge = await startAgent({
+      name: 'replay-protocol-dial-connection-debounce',
+      activation: activation('catalog'),
+    });
+    const peerId = '12D3KooWReplayProtocolDialConnectionPeer';
+    const remotePeer = { toString: () => peerId };
+    vi.spyOn(
+      (edge as any).networkAdmissionCoordinator,
+      'ensureAdmitted',
+    ).mockResolvedValue(true);
+    vi.spyOn(edge as any, 'enrichPeerStoreFromInboundCircuit')
+      .mockResolvedValue(undefined);
+    vi.spyOn(edge as any, 'drainPendingSenderKeyForPeer')
+      .mockResolvedValue(0);
+    const markPending = vi.spyOn(edge, 'markRfc64CatalogReplayPeerPendingV1');
+    const replay = vi.spyOn(edge, 'requestRfc64CatalogHeadReplaysFromConnectedPeersV1')
+      .mockResolvedValue(Object.freeze({ requested: 1, failed: 0 }));
+    const reannounce = vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1')
+      .mockResolvedValue(Object.freeze({ announced: 0, failed: 0, manifest: Object.freeze([]) }));
+    const event = () => new CustomEvent('connection:open', {
+      detail: {
+        remotePeer,
+        remoteAddr: { toString: () => '/ip4/127.0.0.1/tcp/1' },
+        direction: 'outbound',
+        timeline: { open: Date.now() },
+      },
+    } as any);
+
+    edge.node.libp2p.dispatchEvent(event());
+    edge.node.libp2p.dispatchEvent(event());
+
+    await vi.waitFor(() => expect(replay).toHaveBeenCalledTimes(1));
+    expect(markPending).toHaveBeenCalledTimes(1);
+    expect(markPending).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, peerId);
+    expect(replay).toHaveBeenCalledWith(
+      CONTEXT_GRAPH_ID,
+      { seedConnectedPeers: false },
+    );
+    expect(reannounce).toHaveBeenCalledTimes(1);
+  }, 15_000);
+
   it('connection replay sends public and authorized private heads without disclosing private metadata to a nonmember', async () => {
     const privateContextGraphId = `${AUTHOR}/private-connection-replay` as ContextGraphIdV1;
     const memberPeerId = '12D3KooWConnectionReplayMember';
