@@ -35,7 +35,10 @@ sync-global inflight `0` disables that limiter, queue `0` disables queueing,
 partition timeout `0` preserves the existing no-timeout setting, VM startup delay
 `0` starts immediately, and catch-up wait/pass budget `0` disables retries/extra
 passes. A disabled sync-global limiter is represented as `null` in the legacy
-pressure snapshot and `0` in W1 capacity, as before.
+pressure snapshot. W1 describes the process-wide queue's live admissions. It
+reports exact capacity when live entries agree, and `null` ceilings when the queue
+is idle or contains work governed by different policies. Disabled admission
+bypasses the queue and does not overwrite another agent's reported capacity.
 
 `resolveStartupResourcePolicy` resolves executable admission, snapshot and
 reconciler settings when the agent is constructed and owns their immutable
@@ -43,14 +46,19 @@ diagnostics. The startup log emits at most one resource warning with at most
 24 sanitized setting names (100 characters each), including fallback/clamp
 information and never rejected values. Repeated admission/status reads use the
 resolved numeric policy without reparsing or logging. Selected recovery scopes
-can still evolve as an Edge subscribes to graphs.
+can still evolve as an Edge subscribes to graphs. The lifecycle owner projects
+immutable RFC-64 selections once and reads live Edge subscriptions as a predicate,
+passing only reservation booleans into admission. The legacy standalone resolver
+still accepts configured scope IDs for compatibility. Resolving policies never
+installs scheduler state; queued and running work own its reported capacity.
 
 VM/catch-up static settings live in the explicit `resource-runtime.ts` process
 snapshot; importing `resource-limits.ts` or a pure startup-jitter parser does not
 initialize it. Restart the process to change static settings, and construct a new
 agent to change its admission/snapshot/reconciler policy. SWM pass configuration
-resolves a fresh immutable value from the explicitly supplied environment at each
-job boundary. The startup policy retains only its initial SWM values and diagnostics;
+resolves a fresh value from the explicitly supplied environment at each job
+boundary. The published resolver remains mutable for callers that customize a
+pass; the startup policy freezes its private initial SWM values and diagnostics;
 it contains no live environment reader. The `Resolved sync policy` record logs
 canonical nested policy objects, including `initialSwmPass`, instead of a separate
 flattened mirror. Structural resource validation runs before wallet or store allocation.

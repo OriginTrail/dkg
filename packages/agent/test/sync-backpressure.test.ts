@@ -1585,6 +1585,15 @@ describe('sync global backpressure', () => {
     });
   });
 
+  it('preserves explicit capacity installation for standalone queues', () => {
+    const queue = new PriorityAdmissionQueue<string>({
+      canRun: () => true, onStart: () => () => {},
+      observability: { scheduler: 'test-capacity-installation', operation: (entry) => entry.payload },
+    });
+    queue.configureObservabilityCapacity({ capacityModel: 'shared', inflightLimit: 3, queueLimit: 6 });
+    expect(queue.getBackpressureSnapshot()).toMatchObject({ totals: { inflightLimit: 3, queueLimit: 6 } });
+  });
+
   it('keeps an explicitly disabled partitioned scheduler healthy while idle', () => {
     const queue = new PriorityAdmissionQueue<string>({
       canRun: () => false,
@@ -1611,53 +1620,53 @@ describe('sync global backpressure', () => {
     });
   });
 
-  it('publishes the resolved partitioned policy before its first admission', () => {
-    resolveSyncGlobalBackpressure({ syncAdmission: {} });
-
-    const snapshot = backpressureRegistry.capture().schedulers.find(
-      (scheduler) => scheduler.scheduler === 'sync-global',
-    );
-    expect(snapshot).toMatchObject({
-      capacityModel: 'partitioned',
-      totals: { queueLimit: 72, inflightLimit: 10, inflight: 0 },
-    });
-    expect(snapshot!.lanes.find((lane) => lane.lane === 'fast')).toMatchObject({
-      capacityModel: 'partitioned',
-      queueLimit: 64,
-      inflightLimit: 8,
-    });
-    expect(snapshot!.lanes.find((lane) => lane.lane === 'slow')).toMatchObject({
-      capacityModel: 'partitioned',
-      queueLimit: 8,
-      inflightLimit: 2,
+  it('publishes the resolved partitioned policy while its admission is live', async () => {
+    const policy = resolveSyncGlobalBackpressure({ syncAdmission: {} });
+    await withGlobalSyncBackpressure({ policy, ctx: createOperationContext('sync'), label: 'changelog:partitioned', lane: 'changelog' }, async () => {
+      const snapshot = backpressureRegistry.capture().schedulers.find((entry) => entry.scheduler === 'sync-global');
+      expect(snapshot).toMatchObject({ capacityModel: 'partitioned', totals: { queueLimit: 72, inflightLimit: 10, inflight: 1 } });
+      expect(snapshot!.lanes.find((lane) => lane.lane === 'fast')).toMatchObject({ capacityModel: 'partitioned', queueLimit: 64, inflightLimit: 8 });
+      expect(snapshot!.lanes.find((lane) => lane.lane === 'slow')).toMatchObject({ capacityModel: 'partitioned', queueLimit: 8, inflightLimit: 2 });
     });
   });
 
-  it('preserves partitioned diagnostics when global admission is disabled', () => {
-    const policy = resolveSyncGlobalBackpressure({
-      syncAdmission: { globalMaxInflight: 0 },
-    });
+  it('resolving disabled admission leaves registered scheduler capacity unchanged', () => {
+    const capture = () => backpressureRegistry.capture().schedulers.find((entry) => entry.scheduler === 'sync-global');
+    const before = capture();
+    const policy = resolveSyncGlobalBackpressure({ syncAdmission: { globalMaxInflight: 0 } });
+    expect(policy).toEqual({ mode: 'partitioned', limit: undefined, queueLimit: undefined });
+    expect(capture()).toMatchObject({ capacityModel: before!.capacityModel, totals: {
+      queueLimit: before!.totals.queueLimit, inflightLimit: before!.totals.inflightLimit,
+    } });
+  });
 
-    expect(policy).toEqual({
-      mode: 'partitioned',
-      limit: undefined,
-      queueLimit: undefined,
-    });
-    const snapshot = backpressureRegistry.capture().schedulers.find(
-      (scheduler) => scheduler.scheduler === 'sync-global',
-    );
-    expect(snapshot).toMatchObject({
-      capacityModel: 'partitioned',
-      totals: { queueLimit: 0, inflightLimit: 0, inflight: 0 },
-    });
-    expect(snapshot!.lanes.find((lane) => lane.lane === 'fast')).toMatchObject({
-      queueLimit: 0,
-      inflightLimit: 0,
-    });
-    expect(snapshot!.lanes.find((lane) => lane.lane === 'slow')).toMatchObject({
-      queueLimit: 0,
-      inflightLimit: 0,
-    });
+  it('reports live owner policies across interleaved admission and release', async () => {
+    const first = resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 2 });
+    const second = resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 10, syncGlobalQueueLimit: 20 });
+    const capacity = () => backpressureRegistry.capture().schedulers.find((entry) => entry.scheduler === 'sync-global')!.totals;
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const runningFirst = withGlobalSyncBackpressure({ policy: first, ctx: createOperationContext('sync'), label: 'durable:first' },
+      () => new Promise<void>((resolve) => { releaseFirst = resolve; }));
+    await tick();
+    let runningSecond: Promise<void> | undefined;
+    try {
+      expect(capacity()).toMatchObject({ inflight: 1, inflightLimit: 1, queueLimit: 2 });
+      runningSecond = withGlobalSyncBackpressure({ policy: second, ctx: createOperationContext('sync'), label: 'durable:second' },
+        () => new Promise<void>((resolve) => { releaseSecond = resolve; }));
+      await tick();
+      // Both owners retain their established per-entry admission semantics.
+      // There is no truthful single ceiling for this mixed set of live work.
+      expect(capacity()).toMatchObject({ inflight: 2, inflightLimit: null, queueLimit: null });
+      releaseSecond();
+      await runningSecond;
+      expect(capacity()).toMatchObject({ inflight: 1, inflightLimit: 1, queueLimit: 2 });
+    } finally {
+      releaseFirst();
+      releaseSecond?.();
+      await Promise.all([runningFirst, runningSecond]);
+    }
+    expect(capacity()).toMatchObject({ inflight: 0, inflightLimit: null, queueLimit: null });
   });
 
   it('publishes the shared-pool capacity model from the production sync-global queue', async () => {

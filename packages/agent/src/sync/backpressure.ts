@@ -15,6 +15,7 @@ import {
 import {
   PriorityAdmissionQueue,
   type PriorityAdmission,
+  type PriorityAdmissionEntry,
 } from './priority-admission-queue.js';
 
 export interface SyncBackpressureSnapshot {
@@ -341,7 +342,7 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
     // them to a fixed operation class, paired with the bounded admission
     // source, before node-wide diagnostics/logging.
     operation: (entry) => syncAdmissionOperation(entry.payload),
-    inflightLimit: (entry) => entry.payload.limit,
+    capacity: syncGlobalActivePressureCapacity,
     thresholds: {
       degradedQueueAgeMs: DEFAULT_SYNC_PRIORITY_AGING_MS / 2,
       stalledActiveAgeMs: 120_000,
@@ -351,22 +352,8 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
 });
 
 function syncGlobalPressureCapacity(
-  policy: SyncGlobalBackpressurePolicy,
+  policy: GlobalQueuePayload['policy'],
 ): SchedulerPressureCapacity {
-  if (policy.limit === undefined) {
-    if (policy.mode === 'shared') {
-      return { capacityModel: 'shared', queueLimit: 0, inflightLimit: 0 };
-    }
-    return {
-      capacityModel: 'partitioned',
-      queueLimit: 0,
-      inflightLimit: 0,
-      lanes: {
-        fast: { queueLimit: 0, inflightLimit: 0 },
-        slow: { queueLimit: 0, inflightLimit: 0 },
-      },
-    };
-  }
   if (!isPartitionedPolicy(policy)) {
     return {
       capacityModel: 'shared',
@@ -392,11 +379,31 @@ function syncGlobalPressureCapacity(
   };
 }
 
-function configureResolvedSyncGlobalPolicy(
-  policy: SyncGlobalBackpressurePolicy,
-): SyncGlobalBackpressurePolicy {
-  queue.configureObservabilityCapacity(syncGlobalPressureCapacity(policy));
-  return policy;
+/**
+ * The process-wide queue admits each entry under its owner's fixed policy.
+ * A single live policy has exact ceilings; heterogeneous live policies have
+ * no single ceiling. Report unknown capacity in that case rather than claiming
+ * the last constructor/caller owns everybody else's active work.
+ */
+function syncGlobalActivePressureCapacity(
+  entries: Iterable<PriorityAdmissionEntry<GlobalQueuePayload>>,
+): SchedulerPressureCapacity {
+  let capacity: SchedulerPressureCapacity | undefined;
+  let key: string | undefined;
+  for (const entry of entries) {
+    const next = syncGlobalPressureCapacity(entry.payload.policy);
+    const nextKey = JSON.stringify(next);
+    if (key !== undefined && nextKey !== key) return { capacityModel: 'shared' };
+    capacity = next;
+    key = nextKey;
+  }
+  return capacity ?? { capacityModel: 'shared' };
+}
+
+/** Compact admission state computed by the recovery-scope owner. */
+export interface SyncRecoveryReservation {
+  readonly reservationActive: boolean;
+  readonly selectedRecoveryScope: boolean;
 }
 
 export type SyncBackpressureBusyReason = 'queue_full' | 'queue_timeout' | 'displaced';
@@ -435,7 +442,7 @@ function acquire(
     priorityClass: SyncPriorityClass;
     source: SyncAdmissionSource;
     selectedSwmPriority: boolean;
-    selectedRecoveryContextGraphIds?: readonly string[];
+    recoveryReservation?: SyncRecoveryReservation;
     signal?: AbortSignal;
     agingThresholdMs: number;
   },
@@ -445,12 +452,12 @@ function acquire(
   const { queueLimit } = policy;
   const normalizedSource = normalizeSyncAdmissionSource(options.source);
   const configuredScopes = policy.selectedRecoveryContextGraphIds ?? [];
-  const runtimeScopes = options.selectedRecoveryContextGraphIds ?? [];
+  const reservation = options.recoveryReservation;
   const selectedRecoveryScope = options.contextGraphId !== undefined
-    && (configuredScopes.includes(options.contextGraphId) || runtimeScopes.includes(options.contextGraphId));
+    && (configuredScopes.includes(options.contextGraphId) || reservation?.selectedRecoveryScope === true);
   // Selected recovery keeps one slot outside automatic background work. The
-  // numeric policy is fixed; the caller supplies current operator selections.
-  const automaticBackgroundLimit = (configuredScopes.length > 0 || runtimeScopes.length > 0) && limit > 1
+  // numeric policy is fixed; the owner supplies a compact live reservation.
+  const automaticBackgroundLimit = (configuredScopes.length > 0 || reservation?.reservationActive === true) && limit > 1
     ? limit - 1 : limit;
   const capacityClaim = capacityTracker.classify({
     contextGraphId: options.contextGraphId,
@@ -590,9 +597,7 @@ export function resolveSyncGlobalBackpressure(
     ) ?? [],
   )]);
   if (config.syncAdmission !== undefined && config.syncAdmission.mode !== 'shared') {
-    return configureResolvedSyncGlobalPolicy(
-      resolvePartitionedSyncGlobalBackpressure(config, selectedRecoveryIds, onRejected, env),
-    );
+    return resolvePartitionedSyncGlobalBackpressure(config, selectedRecoveryIds, onRejected, env);
   }
   const limit = envInteger('DKG_SYNC_GLOBAL_MAX_INFLIGHT', RESOURCE_MAX.concurrency, onRejected, env)
     ?? envInteger('DKG_SYNC_GLOBAL_LIMIT', RESOURCE_MAX.concurrency, onRejected, env)
@@ -600,12 +605,12 @@ export function resolveSyncGlobalBackpressure(
     ?? configInteger(config.syncGlobalLimit, 'syncGlobalLimit', RESOURCE_MAX.concurrency, onRejected)
     ?? DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT;
   if (limit === 0) {
-    return configureResolvedSyncGlobalPolicy(Object.freeze({
+    return Object.freeze({
       mode: 'shared',
       ...(selectedRecoveryIds.length ? { selectedRecoveryContextGraphIds: selectedRecoveryIds } : {}),
       limit: undefined,
       queueLimit: undefined,
-    }) as SyncGlobalBackpressurePolicy);
+    }) as SyncGlobalBackpressurePolicy;
   }
 
   const queueLimit = envInteger('DKG_SYNC_GLOBAL_QUEUE_LIMIT', RESOURCE_MAX.queue, onRejected, env)
@@ -617,7 +622,7 @@ export function resolveSyncGlobalBackpressure(
     limit,
     queueLimit,
   }) as SyncGlobalBackpressurePolicy;
-  return configureResolvedSyncGlobalPolicy(policy);
+  return policy;
 }
 
 function validateSyncAdmissionConfig(config: SyncAdmissionConfig | undefined): void {
@@ -824,8 +829,8 @@ export async function withGlobalSyncBackpressure<T>(
     source?: SyncAdmissionSource;
     /** The selected graph-complete RFC-64 SWM transfer may use the reserved slot. */
     selectedSwmPriority?: boolean;
-    /** Current recovery scopes supplied by the owning agent at admission. */
-    selectedRecoveryContextGraphIds?: readonly string[];
+    /** Current recovery reservation supplied by the owning agent at admission. */
+    recoveryReservation?: SyncRecoveryReservation;
     signal?: AbortSignal;
     agingThresholdMs?: number;
     logInfo?: (ctx: OperationContext, message: string) => void;
@@ -856,7 +861,7 @@ export async function withGlobalSyncBackpressure<T>(
       priorityClass,
       source: normalizeSyncAdmissionSource(options.source),
       selectedSwmPriority: options.selectedSwmPriority === true,
-      selectedRecoveryContextGraphIds: options.selectedRecoveryContextGraphIds,
+      recoveryReservation: options.recoveryReservation,
       signal: options.signal,
       agingThresholdMs: options.agingThresholdMs ?? DEFAULT_SYNC_PRIORITY_AGING_MS,
     });

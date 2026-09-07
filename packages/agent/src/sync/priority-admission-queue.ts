@@ -62,8 +62,8 @@ export interface PriorityAdmissionQueueHooks<Payload> {
     scheduler: string;
     operation: (entry: PriorityAdmissionEntry<Payload>) => string;
     inflightLimit?: (entry: PriorityAdmissionEntry<Payload>) => number | null;
-    /** Static scheduler capacity. Omit only when acquire options define a shared pool. */
-    capacity?: SchedulerPressureCapacity;
+    /** Fixed capacity, or a projection of the queue's live admitted work. */
+    capacity?: SchedulerPressureCapacity | ((entries: Iterable<PriorityAdmissionEntry<Payload>>) => SchedulerPressureCapacity);
     thresholds?: SchedulerPressureThresholds;
     register?: boolean;
   };
@@ -110,10 +110,10 @@ function abortError(reason: unknown): Error {
 export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
   private readonly queue: InternalEntry<Payload>[] = [];
   private readonly handoffReservations = new Map<number, HandoffReservation>();
-  private readonly pressureTickets = new WeakMap<PriorityAdmissionEntry<Payload>, SchedulerPressureTicket>();
+  private readonly pressureTickets = new Map<PriorityAdmissionEntry<Payload>, SchedulerPressureTicket>();
   private readonly hooks: PriorityAdmissionQueueHooks<Payload>;
   private readonly now: () => number;
-  private hasStaticObservabilityCapacity: boolean;
+  private observabilityCapacity: NonNullable<PriorityAdmissionQueueHooks<Payload>['observability']>['capacity'];
   private nextSequence = 0;
   private agedTurnOwed = false;
 
@@ -123,19 +123,28 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       scheduler: hooks.observability?.scheduler ?? 'priority-admission',
       thresholds: hooks.observability?.thresholds,
       now,
-      capacity: hooks.observability?.capacity ?? { capacityModel: 'shared' },
+      capacity: typeof hooks.observability?.capacity === 'object'
+        ? hooks.observability.capacity : { capacityModel: 'shared' },
     });
     this.hooks = hooks;
     this.now = now;
-    this.hasStaticObservabilityCapacity = hooks.observability?.capacity !== undefined;
+    this.observabilityCapacity = hooks.observability?.capacity;
     if (hooks.observability?.register) backpressureRegistry.register(this);
   }
 
-  /** Configure one scheduler-wide capacity model before any admission. */
+  /** Explicit capacity installation retained for standalone queue callers. */
   configureObservabilityCapacity(capacity: SchedulerPressureCapacity): void {
     if (!this.hooks.observability) return;
-    this.hasStaticObservabilityCapacity = true;
+    this.observabilityCapacity = capacity;
     this.updatePressureCapacity(capacity);
+  }
+
+  override getBackpressureSnapshot() {
+    const capacity = this.observabilityCapacity;
+    if (typeof capacity === 'function') {
+      this.updatePressureCapacity(capacity(this.pressureTickets.keys()));
+    }
+    return super.getBackpressureSnapshot();
   }
 
   get length(): number {
@@ -186,7 +195,7 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       enqueuedAt: this.now(),
       agingThresholdMs: options.agingThresholdMs,
     };
-    if (this.hooks.observability && !this.hasStaticObservabilityCapacity) {
+    if (this.hooks.observability && !this.observabilityCapacity) {
       this.updatePressureCapacity({
         queueLimit: options.queueLimit,
         inflightLimit: this.hooks.observability.inflightLimit?.(base) ?? null,

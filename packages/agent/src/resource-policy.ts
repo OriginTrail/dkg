@@ -26,7 +26,7 @@ export function resolveStartupResourcePolicy(
     if (diagnostic.kind === 'rejected') warnings.reject(diagnostic.setting);
     else warnings.clamp(diagnostic.setting);
   }
-  const initialSwmPass = resolveSwmCatchupPassConfig(env, warnings.reject);
+  const initialSwmPass = Object.freeze(resolveSwmCatchupPassConfig(env, warnings.reject));
   return Object.freeze({ vm, reconcilerTiming, admission, snapshot, initialSwmPass, diagnostics: warnings.snapshot() });
 }
 

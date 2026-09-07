@@ -691,33 +691,30 @@ import { initializeRfc64LegacySwmBoundaryV1 } from
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
 
-function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
-  // `trackSyncContextGraph()` mutates this list when an Edge explicitly
-  // subscribes or starts a foreground catch-up. Those operator-selected graphs
-  // need the same admission guarantee as an RFC-64 pinned scope: otherwise a
-  // mature Edge can fill every global slot with unrelated background VM
-  // recovery and repeatedly reject the graph the user just selected.
-  //
-  // Keep this Edge-only. Core nodes intentionally host the public corpus and
-  // grow `syncContextGraphs` through discovery; treating that all-CG inventory
-  // as one selected scope would permanently reduce Core background throughput.
-  const edgeSelectedContextGraphIds = (config.nodeRole ?? 'edge') === 'edge'
-    ? config.syncContextGraphs ?? []
-    : [];
+// Boot selections are immutable and projected once per agent. Edge subscriptions
+// are a live predicate over the agent's replaceable sync list: subscribe/unsubscribe
+// changes are visible immediately without carrying inventories into the queue.
+const startupRecoveryScopes = new WeakMap<ResolvedDKGAgentConfig, ReadonlySet<string>>();
+
+function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig, contextGraphId: string) {
+  let startupScopes = startupRecoveryScopes.get(config);
+  if (!startupScopes) {
+    startupScopes = new Set(resolveRfc64SelectedRecoveryContextGraphIdsV1(
+      resolveRfc64RuntimeCatalogBootstrapConfigV1(
+        config.rfc64CatalogBootstrap,
+        config.rfc64PublicCatalogBootstrap,
+      ),
+    ).filter((id) => rfc64ExecutionPlanAllowsLegacySyncV1(config.rfc64CatalogExecutionPlan, id)));
+    startupRecoveryScopes.set(config, startupScopes);
+  }
+  // Core's discovered all-CG corpus is not an operator recovery selection.
+  const edgeScopes = (config.nodeRole ?? 'edge') === 'edge' ? config.syncContextGraphs : undefined;
   return {
     policy: config.resourcePolicy.admission,
-    selectedRecoveryContextGraphIds: [...new Set([
-      ...resolveRfc64SelectedRecoveryContextGraphIdsV1(
-        resolveRfc64RuntimeCatalogBootstrapConfigV1(
-          config.rfc64CatalogBootstrap,
-          config.rfc64PublicCatalogBootstrap,
-        ),
-      ).filter((contextGraphId) => rfc64ExecutionPlanAllowsLegacySyncV1(
-        config.rfc64CatalogExecutionPlan,
-        contextGraphId,
-      )),
-      ...edgeSelectedContextGraphIds,
-    ].filter((id) => typeof id === 'string' && id.length > 0))],
+    recoveryReservation: {
+      reservationActive: startupScopes.size > 0 || (edgeScopes?.some((id) => typeof id === 'string' && id.length > 0) ?? false),
+      selectedRecoveryScope: startupScopes.has(contextGraphId) || (edgeScopes?.includes(contextGraphId) ?? false),
+    },
   };
 }
 
@@ -1960,7 +1957,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     try {
       return await withGlobalSyncBackpressure(
         {
-          ...resolveAgentSyncGlobalBackpressure(this.config),
+          ...resolveAgentSyncGlobalBackpressure(this.config, contextGraphId),
           ctx,
           label,
           contextGraphId,

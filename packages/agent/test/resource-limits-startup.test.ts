@@ -49,6 +49,9 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
     });
     expect(resolveSnapshot).toHaveBeenCalledOnce();
     const effective = (agent as unknown as { config: { resourcePolicy: StartupResourcePolicy } }).config.resourcePolicy;
+    for (const input of ['syncGlobalMaxInflight', 'syncGlobalLimit', 'syncGlobalQueueLimit', 'syncAdmission', 'syncResponderSnapshotLimits']) {
+      expect((agent as unknown as { config: object }).config).not.toHaveProperty(input);
+    }
     // Construction owns numeric resolution. Later environment edits cannot
     // make execution disagree with the policy that startup will report.
     vi.stubEnv('DKG_SYNC_GLOBAL_MAX_INFLIGHT', '7');
@@ -143,3 +146,47 @@ it.each([null, [], { local: [] }, { global: null }])(
     }
   },
 );
+
+
+it.each(['constructed', 'failed'] as const)('a %s second agent cannot overwrite live admission capacity', async (second) => {
+  const { DKGAgent } = await import('../src/dkg-agent.js');
+  const dataDir = await mkdtemp(join(tmpdir(), 'dkg-resource-ownership-'));
+  const stores = [new OxigraphStore(), new OxigraphStore()];
+  const agents: Agent[] = [];
+  try {
+    for (const [index, limit] of (second === 'constructed' ? [1, 10] : [1]).entries()) {
+      agents.push(await DKGAgent.create({
+        name: `Admission owner ${index}`, dataDir: join(dataDir, String(index)),
+        listenPort: 0, listenHost: '127.0.0.1', nodeRole: 'edge', skills: [],
+        store: stores[index], chainAdapter: new NoChainAdapter(),
+        rfc64CatalogActivation: { enabled: false },
+        syncGlobalMaxInflight: limit, syncGlobalQueueLimit: limit * 2,
+      }));
+    }
+    await agents[0].start();
+    await (agents[0] as any).runContextGraphSyncWithBackpressure(
+      createOperationContext('sync'), 'ownership', 'durable', 'ownership', async () => {
+        const capacity = () => backpressureRegistry.capture().schedulers.find((entry) => entry.scheduler === 'sync-global')!.totals;
+        expect(capacity()).toMatchObject({ inflight: 1, inflightLimit: 1, queueLimit: 2 });
+        if (second === 'failed') {
+          const { DKGAgentWallet } = await import('../src/agent-wallet.js');
+          const generate = vi.spyOn(DKGAgentWallet, 'generate').mockRejectedValueOnce(new Error('wallet unavailable'));
+          try {
+            // This valid policy resolves before wallet allocation fails.
+            await expect(DKGAgent.create({
+              name: 'Failed owner', chainAdapter: new NoChainAdapter(),
+              rfc64CatalogActivation: { enabled: false },
+              syncGlobalMaxInflight: 20, syncGlobalQueueLimit: 40,
+            })).rejects.toThrow('wallet unavailable');
+            expect(generate).toHaveBeenCalledOnce();
+          } finally { generate.mockRestore(); }
+        }
+        expect(capacity()).toMatchObject({ inflight: 1, inflightLimit: 1, queueLimit: 2 });
+      }, { source: 'reconcile' },
+    );
+  } finally {
+    await Promise.allSettled(agents.map((agent) => agent.stop()));
+    await Promise.all(stores.map((store) => store.close()));
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});

@@ -197,7 +197,10 @@ it('keeps initial SWM diagnostics immutable while job-scoped resolution refreshe
   expect(policy.diagnostics.rejected).toEqual(['DKG_SWM_CATCHUP_PASS_BUDGET_MS']);
   const next = resolveSwmCatchupPassConfig({ ...env, DKG_SWM_CATCHUP_PASS_BUDGET_MS: '0' });
   expect(next).toEqual({ budgetMs: 0, maxPasses: 3 });
-  expect(Object.isFrozen(next)).toBe(true);
+  next.maxPasses = 2;
+  next.budgetMs = 123;
+  expect(next).toEqual({ maxPasses: 2, budgetMs: 123 });
+  expect(Object.isFrozen(policy.initialSwmPass)).toBe(true);
   expect(policy.initialSwmPass.budgetMs).toBe(600_000);
   expect(policy.diagnostics.rejected).toEqual(['DKG_SWM_CATCHUP_PASS_BUDGET_MS']);
 });
@@ -208,6 +211,7 @@ describe('snapshot and retry/timing budgets', () => {
       for (const value of [0, ...invalidNumbers, maximum + 1]) {
         const config = { [scope]: { [field]: value } };
         expect(() => validatePublicSnapshotConfig(config)).toThrow(TypeError);
+        expect(() => validatePublicSnapshotConfig(config)).toThrow(`syncResponderSnapshotLimits.${scope}.${field}`);
         expect(resolveSyncResponderSnapshotDiagnostics(config, {}).diagnostics).toContainEqual({
           kind: 'rejected', setting: `syncResponderSnapshotLimits.${scope}.${field}`,
         });

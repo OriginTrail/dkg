@@ -27,6 +27,10 @@ assert.equal(defaultSnapshotPolicy.localBytesEstimateClamped, false);
 assert.throws(() => snapshotPolicyCompat.resolveSyncResponderSnapshotPolicy({ local: { rows: 0 } }, {}), TypeError);
 
 const root = await import('@origintrail-official/dkg-agent');
+const customizedPass = root.resolveSwmCatchupPassConfig({});
+customizedPass.maxPasses = 2;
+customizedPass.budgetMs = 123;
+assert.deepEqual(customizedPass, { maxPasses: 2, budgetMs: 123 });
 const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent.js');
 const legacyChainReconciler = await import(
   '@origintrail-official/dkg-agent/dist/chain-reconciler.js'

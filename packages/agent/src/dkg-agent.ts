@@ -1387,6 +1387,11 @@ export class DKGAgent extends DKGAgentBase {
     delete configWithoutRfc64CatalogControls.syncBackoffBaseMs;
     delete configWithoutRfc64CatalogControls.syncBackoffMaxMs;
     delete configWithoutRfc64CatalogControls.syncBackoffJitter;
+    delete configWithoutRfc64CatalogControls.syncGlobalMaxInflight;
+    delete configWithoutRfc64CatalogControls.syncGlobalLimit;
+    delete configWithoutRfc64CatalogControls.syncGlobalQueueLimit;
+    delete configWithoutRfc64CatalogControls.syncAdmission;
+    delete configWithoutRfc64CatalogControls.syncResponderSnapshotLimits;
     const resolvedConfig: ResolvedDKGAgentConfig = {
       ...configWithoutRfc64CatalogControls,
       genesisId,
