@@ -13,11 +13,12 @@ import type {
   CurrentFinalizedEvmBlockReferenceProfileV1,
   DeadlineScopeV1,
   FinalizedAnchorV1,
+  StrictFinalizedEndpointSessionV1,
 } from './strict-current-finalized-evm-types.js';
 
 export interface StrictFinalizedEndpointRunnerProfileV1 {
   readonly chainId: ChainIdV1;
-  readonly endpoints: readonly string[];
+  readonly endpoints: StrictFinalizedEndpointSessionV1;
   readonly totalDeadlineMs: number;
   readonly attemptTimeoutMs: number;
   readonly messages: StrictFinalizedEndpointRunnerMessagesV1;
