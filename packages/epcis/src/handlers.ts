@@ -1,7 +1,7 @@
 import { createValidator } from './validation.js';
 import { buildEpcisQuery } from './query-builder.js';
 import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js';
-import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
+import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EpcisEventBinding, EPCISQueryEvent, EPCISQueryDocumentResponse } from './types.js';
 
 export interface AsyncCaptureConfig {
   contextGraphId: string;
@@ -102,14 +102,8 @@ export function unwrapLiteral(value: string): string {
 }
 
 /** Reconstruct a proper EPCIS event object from flat SPARQL bindings. */
-export function toEpcisEvent(binding: Record<string, string>): Record<string, unknown> {
-  const event: Record<string, unknown> = {};
-
-  // Current captures preserve the caller's RDF root; older captures may have
-  // a canonical DKG root. Expose the stored identifier so either can be used
-  // unchanged with the eventID query filter.
-  const eventID = unwrapLiteral(binding['event']);
-  if (eventID) event.eventID = eventID;
+export function toEpcisEvent(binding: EpcisEventBinding): EPCISQueryEvent {
+  const event: EPCISQueryEvent = { eventID: binding.event };
 
   // Strip eventType URI prefix to short name
   const rawType = unwrapLiteral(binding['eventType'] ?? '');
@@ -227,7 +221,12 @@ export async function handleEventsQuery(
 
   const hasMore = result.bindings.length > perPage;
   const bindings = hasMore ? result.bindings.slice(0, perPage) : result.bindings;
-  const eventList = bindings.map(toEpcisEvent);
+  const eventList = bindings.map((binding) => {
+    if (typeof binding.event !== 'string' || binding.event.length === 0) {
+      throw new EpcisQueryError('Events query returned a result without an event identifier', 502);
+    }
+    return toEpcisEvent({ ...binding, event: binding.event });
+  });
 
   const body: EPCISQueryDocumentResponse = {
     '@context': [GS1_EPCIS_CONTEXT, DKG_CONTEXT],

@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { handleEventsQuery, EpcisQueryError, toEpcisEvent, unwrapLiteral } from '../src/handlers.js';
-import type { QueryEngine } from '../src/types.js';
-import { OxigraphStore } from '../../storage/src/adapters/oxigraph.js';
+import type { QueryEngine, EpcisEventBinding } from '../src/types.js';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphSubGraphUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri, type Quad } from '@origintrail-official/dkg-core';
 
 const CONTEXT_GRAPH_ID = 'test-cg';
 const BASE_PATH = '/api/epcis/events';
@@ -22,7 +23,7 @@ function createTrackingQueryEngine(bindings: Record<string, string>[] = []): { e
   return { engine, calls };
 }
 
-function makeBindings(overrides: Partial<Record<string, string>> = {}): Record<string, string> {
+function makeBindings(overrides: Record<string, string> = {}): EpcisEventBinding {
   return {
     event: 'urn:uuid:event-1',
     eventType: 'https://gs1.github.io/EPCIS/ObjectEvent',
@@ -50,8 +51,12 @@ describe('handleEventsQuery', () => {
     { finalized: false, subGraphName: 'supply-chain' },
   ])('returns queryable event IDs for caller and historical roots: %j', async (params) => {
     const store = new OxigraphStore();
-    const scope = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}${params.subGraphName ? `/${params.subGraphName}` : ''}`;
-    const graph = params.finalized ? scope : `${scope}/_shared_memory`;
+    const graph = params.finalized
+      ? params.subGraphName ? contextGraphSubGraphUri(CONTEXT_GRAPH_ID, params.subGraphName) : contextGraphDataUri(CONTEXT_GRAPH_ID)
+      : contextGraphSharedMemoryUri(CONTEXT_GRAPH_ID, params.subGraphName);
+    const privateGraph = params.subGraphName
+      ? contextGraphSubGraphPrivateUri(CONTEXT_GRAPH_ID, params.subGraphName)
+      : contextGraphPrivateUri(CONTEXT_GRAPH_ID);
     const roots = ['urn:epc:id:event:caller-id', 'dkg:test-cg:async-publish:context-graph/legacy-hash'];
     const engine: QueryEngine = {
       async query(sparql) {
@@ -62,12 +67,16 @@ describe('handleEventsQuery', () => {
     };
     const config = { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH, subGraphName: params.subGraphName };
     try {
-      for (const [index, subject] of roots.entries()) {
-        await store.insert([{ subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'https://gs1.github.io/EPCIS/ObjectEvent', graph: index === 0 ? graph : `${scope}/_private` }]);
-        if (index !== 0) {
-          await store.insert([{ subject, predicate: 'http://dkg.io/ontology/privateDataAnchor', object: '"true"', graph }]);
-        }
-      }
+      const quads: Quad[] = roots.flatMap((subject, index) => {
+        const dataGraph = index === 0 ? graph : privateGraph;
+        return [
+          { subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'https://gs1.github.io/EPCIS/ObjectEvent', graph: dataGraph },
+          { subject, predicate: 'https://gs1.github.io/EPCIS/eventTime', object: '"2024-03-01T08:00:00Z"', graph: dataGraph },
+          { subject, predicate: 'https://gs1.github.io/EPCIS/eventTimeZoneOffset', object: '"+00:00"', graph: dataGraph },
+          ...(index === 0 ? [] : [{ subject, predicate: 'http://dkg.io/ontology/privateDataAnchor', object: '"true"', graph }]),
+        ];
+      });
+      await store.insert(quads);
       const paramsFor = (eventID?: string) => new URLSearchParams({
         finalized: String(params.finalized), ...(eventID ? { eventID } : {}),
       });
@@ -75,7 +84,7 @@ describe('handleEventsQuery', () => {
       const events = all.body.epcisBody.queryResults.resultsBody.eventList;
       expect(events.map((event) => event.eventID).sort()).toEqual([...roots].sort());
       for (const event of events) {
-        const found = await handleEventsQuery(paramsFor(event.eventID as string), config);
+        const found = await handleEventsQuery(paramsFor(event.eventID), config);
         expect(found.body.epcisBody.queryResults.resultsBody.eventList).toEqual([event]);
       }
       const missing = await handleEventsQuery(paramsFor('urn:epc:id:event:missing'), config);
@@ -83,6 +92,13 @@ describe('handleEventsQuery', () => {
     } finally {
       await store.close();
     }
+  });
+
+  it.each([{}, { event: '' }])('rejects a query result without a reusable subject: %j', async (binding) => {
+    const { engine } = createTrackingQueryEngine([binding]);
+    await expect(handleEventsQuery(new URLSearchParams(), {
+      contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH,
+    })).rejects.toMatchObject({ statusCode: 502 });
   });
 
   it('returns EPCISQueryDocument envelope with reconstructed events', async () => {
