@@ -577,7 +577,8 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
 
       const plan = await adapter.resolvePublisherPublishPlan!({
         contextGraphId,
-        billableByteSize: 256n,
+        // Legacy callers can continue sending only the deprecated alias.
+        effectiveByteSize: 256n,
         explicitPublishEpochs: 2,
         defaultPublishEpochs: 12,
       });

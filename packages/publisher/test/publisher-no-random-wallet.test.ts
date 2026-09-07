@@ -46,6 +46,7 @@ import {
   type ChainAdapter,
   type OnChainPublishResult,
   type PublisherPublishPlanRequest,
+  publisherPublishPlanByteSize,
   type TxResult,
   type V10PublishDirectParams,
   type V10UpdateKAParams,
@@ -183,6 +184,7 @@ class LegacyEpochCapturingChain extends AdapterSigningChain {
 class EpochCapturingChain extends LegacyEpochCapturingChain {
   async resolvePublisherPublishPlan(request: PublisherPublishPlanRequest) {
     const publisherAddress = request.publisherAddress ?? this.signerAddress;
+    const billableByteSize = publisherPublishPlanByteSize(request);
     let publishEpochs = request.explicitPublishEpochs ?? request.defaultPublishEpochs;
     let tokenAmount: bigint | undefined;
     if (request.explicitPublishEpochs === undefined) {
@@ -192,7 +194,7 @@ class EpochCapturingChain extends LegacyEpochCapturingChain {
           ? await this.getConvictionAccountLockDurationEpochs(accountId)
           : 0;
         if (lockEpochs > 0) {
-          const quoted = await this.getRequiredPublishTokenAmount(request.billableByteSize, lockEpochs);
+          const quoted = await this.getRequiredPublishTokenAmount(billableByteSize, lockEpochs);
           const exact = quoted > BigInt(lockEpochs) ? quoted : BigInt(lockEpochs);
           if (await this.convictionAccountCanCover(accountId, exact)) {
             publishEpochs = lockEpochs;
@@ -205,7 +207,7 @@ class EpochCapturingChain extends LegacyEpochCapturingChain {
     }
     if (tokenAmount === undefined) {
       try {
-        const quoted = await this.getRequiredPublishTokenAmount(request.billableByteSize, publishEpochs);
+        const quoted = await this.getRequiredPublishTokenAmount(billableByteSize, publishEpochs);
         tokenAmount = quoted > BigInt(publishEpochs) ? quoted : BigInt(publishEpochs);
       } catch {
         tokenAmount = BigInt(publishEpochs);
@@ -224,7 +226,7 @@ class CatalogPlanningChain extends LegacyEpochCapturingChain {
     return {
       publisherAddress: this.signerAddress,
       publishEpochs,
-      tokenAmount: request.billableByteSize,
+      tokenAmount: publisherPublishPlanByteSize(request),
     };
   }
 }

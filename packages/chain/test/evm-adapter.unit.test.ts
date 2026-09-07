@@ -23,6 +23,7 @@ import {
   DEFAULT_APPROVAL_POLICY,
   DEFAULT_REPLENISH_TARGET_ALLOWANCE,
   DEFAULT_REFILL_BELOW_FRACTION,
+  publisherPublishPlanByteSize,
   type ApprovalPolicy,
 } from '../src/chain-adapter.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
@@ -47,6 +48,20 @@ import { connectable } from './connectable.js';
 // failover-log lines are observed against a clean slate (otReviewAgent #1329).
 beforeEach(() => {
   _resetRpcFailoverStatsForTest();
+});
+
+it('normalizes legacy and current publisher planning byte-size names', () => {
+  const legacyRequest = {
+    contextGraphId: 1n,
+    effectiveByteSize: 256n,
+    defaultPublishEpochs: 12,
+  };
+  expect(publisherPublishPlanByteSize(legacyRequest)).toBe(256n);
+  expect(publisherPublishPlanByteSize({ ...legacyRequest, billableByteSize: 256n })).toBe(256n);
+  expect(() => publisherPublishPlanByteSize({
+    ...legacyRequest,
+    billableByteSize: 257n,
+  })).toThrow(/byte-size aliases must carry the same value/);
 });
 
 it('defaults an omitted receipt deadline to ten minutes', () => {
