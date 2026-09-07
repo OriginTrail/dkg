@@ -1167,7 +1167,7 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
     }
   });
 
-  it.each(['admission', 'admission abort', 'timer', 'probe'] as const)(
+  it.each(['admission', 'admission abort', 'timer', 'probe', 'probe abort'] as const)(
     'does not resume peer-update work after shutdown at %s', async (stage) => {
       const agent = await DKGAgent.create({
         name: 'PeerUpdateInFlightShutdown', listenHost: '127.0.0.1', chainAdapter: new MockChainAdapter(),
@@ -1207,17 +1207,18 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
         expect(ensure).toHaveBeenCalledOnce();
         // Microtasks schedule the zero-delay callback without running it. Only
         // the probe stage yields to that timer before beginning shutdown.
-        if (stage === 'probe') await waitFor(() => getProbe.mock.calls.length > 0);
+        if (stage.startsWith('probe')) await waitFor(() => getProbe.mock.calls.length > 0);
         removeSkipped.mockClear();
         const stopping = agent.stop();
         admission.resolve(true);
-        probe.resolve({});
+        if (stage === 'probe abort') probe.reject(new Error('probe cancelled'));
+        else probe.resolve({});
         await stopping;
         await new Promise((resolve) => setTimeout(resolve, 0));
         await flushMicrotasks();
         expect(removeSkipped).not.toHaveBeenCalled();
         expect(attempt).not.toHaveBeenCalled();
-        if (stage !== 'probe') expect(getProbe).not.toHaveBeenCalled();
+        if (!stage.startsWith('probe')) expect(getProbe).not.toHaveBeenCalled();
         expect(ensure.mock.calls[0][2]?.signal?.aborted).toBe(true);
       } finally {
         admission.resolve(false);
@@ -1227,7 +1228,7 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
     },
   );
 
-  it.each(['event', 'admission', 'enrichment', 'sender-key'] as const)(
+  it.each(['event', 'admission', 'admission abort', 'enrichment', 'sender-key'] as const)(
     'does not resume connection work after shutdown at %s', async (stage) => {
       const agent = await DKGAgent.create({
         name: 'PeerConnectionShutdown', listenHost: '127.0.0.1', chainAdapter: new MockChainAdapter(),
@@ -1237,7 +1238,7 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
         await agent.start();
         const transport = agent.node.libp2p;
         const internals = agent as unknown as {
-          networkAdmissionCoordinator: { ensureAdmitted(peer: string, ctx: OperationContext): Promise<boolean> };
+          networkAdmissionCoordinator: { ensureAdmitted(peer: string, ctx: OperationContext, options?: { signal?: AbortSignal }): Promise<boolean> };
           enrichPeerStoreFromInboundCircuit(connection: unknown): Promise<void>;
           drainPendingSenderKeyForPeer(...args: unknown[]): Promise<number>;
           queueSyncFromPeerOnConnect(...args: unknown[]): void;
@@ -1248,8 +1249,11 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
           contextGraphId: 'shutdown-catalog', responsible: true, active: true, mode: 'catalog',
           responsibilityReason: 'private-membership', selectionSource: 'default',
         }]);
-        const ensure = vi.spyOn(internals.networkAdmissionCoordinator, 'ensureAdmitted').mockImplementation(async () => {
-          if (stage === 'admission') await gate.promise;
+        const ensure = vi.spyOn(internals.networkAdmissionCoordinator, 'ensureAdmitted').mockImplementation(async (_peer, _ctx, options) => {
+          if (stage === 'admission abort') {
+            options?.signal?.addEventListener('abort', () => gate.reject(new Error('admission cancelled')), { once: true });
+          }
+          if (stage.startsWith('admission')) await gate.promise;
           return true;
         });
         const enrich = vi.spyOn(internals, 'enrichPeerStoreFromInboundCircuit').mockImplementation(async () => {
@@ -1281,13 +1285,53 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
         gate.resolve();
         await flushMicrotasks();
         if (stage === 'event') expect(ensure).not.toHaveBeenCalled();
-        if (stage === 'event' || stage === 'admission') expect(enrich).not.toHaveBeenCalled();
+        if (stage === 'event' || stage.startsWith('admission')) expect(enrich).not.toHaveBeenCalled();
         if (stage !== 'sender-key') expect(drain).not.toHaveBeenCalled();
         expect(reannounce).not.toHaveBeenCalled();
         expect(replay).not.toHaveBeenCalled();
         expect(queue).not.toHaveBeenCalled();
       } finally {
         gate.resolve();
+        await agent.stop();
+      }
+    },
+  );
+
+  it.each(['admission', 'probe'] as const)(
+    'reports an unexpected peer-update %s failure without attempting sync', async (stage) => {
+      const agent = await DKGAgent.create({
+        name: 'PeerUpdateFailure', listenHost: '127.0.0.1', chainAdapter: new MockChainAdapter(),
+      });
+      try {
+        await agent.start();
+        const peer = freshPeerIdString();
+        const internals = agent as unknown as {
+          ensurePeerAdmittedForRecovery(...args: unknown[]): Promise<boolean>;
+          getSyncReconcilerProbe(peer: string): Promise<unknown>;
+          attemptSyncFromPeerWithReconcilerAccounting(...args: unknown[]): Promise<unknown>;
+          skippedNoSyncPeers: Set<string>;
+          log: { warn(ctx: OperationContext, message: string): void };
+        };
+        const failure = new Error(`${stage} fixture failure`);
+        const admission = vi.spyOn(internals, 'ensurePeerAdmittedForRecovery');
+        if (stage === 'admission') admission.mockRejectedValue(failure);
+        else admission.mockResolvedValue(true);
+        const probe = vi.spyOn(internals, 'getSyncReconcilerProbe').mockRejectedValue(failure);
+        const attempt = vi.spyOn(internals, 'attemptSyncFromPeerWithReconcilerAccounting').mockResolvedValue(undefined);
+        const warn = vi.spyOn(internals.log, 'warn').mockImplementation(() => {});
+        internals.skippedNoSyncPeers.add(peer);
+        agent.node.libp2p.dispatchEvent(new CustomEvent('peer:update', {
+          detail: { peer: { id: { toString: () => peer }, protocols: [PROTOCOL_SYNC] } },
+        }));
+        await waitFor(() => warn.mock.calls.some(([, message]) => message.includes(failure.message)));
+        expect(warn).toHaveBeenCalledWith(expect.anything(), stage === 'admission'
+          ? `Sync retry admission after peer:update failed for ${peer.slice(-8)}: admission fixture failure`
+          : `Sync retry after peer:update failed for ${peer.slice(-8)}: probe fixture failure`);
+        expect(attempt).not.toHaveBeenCalled();
+        expect(internals.skippedNoSyncPeers.has(peer)).toBe(stage === 'admission');
+        if (stage === 'admission') expect(probe).not.toHaveBeenCalled();
+        else expect(probe).toHaveBeenCalledOnce();
+      } finally {
         await agent.stop();
       }
     },
