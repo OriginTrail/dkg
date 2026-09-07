@@ -428,7 +428,7 @@ function daemonNotRunningMessage(selectedHome: string): string {
   return `Daemon is not running at ${selectedHome}.\n`
     + 'DKG_HOME selects the node directory checked by this command.\n'
     + 'Start a daemon in that directory with: dkg start\n'
-    + 'For an existing devnet, select a node instead: DKG_HOME=.devnet/node1 dkg <command>';
+    + 'For an existing devnet, set DKG_HOME to its node directory (for example .devnet/node1), then rerun this command.';
 }
 const DEFAULT_NODE_NAME = 'dkg-node';
 
@@ -563,25 +563,27 @@ export interface KnowledgeAssetPublishAuthorSelection {
   selectedAuthorAgentAddress?: string;
 }
 
+interface ConfigFallbackContext {
+  readonly expectedStatusName: string;
+  readonly selectedHome: string;
+  readonly controlPlaneWarning: string | undefined;
+}
+
 export class ApiClient {
   private baseUrl: string;
   private token?: string;
-  private expectedStatusName?: string;
-  private selectedHome: string;
+  private readonly configFallback?: Readonly<ConfigFallbackContext>;
   readonly controlPlaneWarning?: string;
 
   constructor(portOrBaseUrl: number | string, token?: string, opts?: {
-    controlPlaneWarning?: string;
-    expectedStatusName?: string;
-    selectedHome?: string;
+    configFallback?: ConfigFallbackContext;
   }) {
     this.baseUrl = typeof portOrBaseUrl === 'number'
       ? `http://127.0.0.1:${portOrBaseUrl}`
       : portOrBaseUrl.replace(/\/+$/, '');
     this.token = token;
-    this.expectedStatusName = opts?.expectedStatusName;
-    this.selectedHome = opts?.selectedHome ?? dkgDir();
-    this.controlPlaneWarning = opts?.controlPlaneWarning;
+    this.configFallback = opts?.configFallback && Object.freeze({ ...opts.configFallback });
+    this.controlPlaneWarning = this.configFallback?.controlPlaneWarning;
   }
 
   static async connect(opts: ApiClientConnectOptions = {}): Promise<ApiClient> {
@@ -593,8 +595,7 @@ export class ApiClient {
 
     const filePort = hasEnvPort ? null : await readApiPort();
     let port = envPort ?? filePort;
-    let warning: string | undefined;
-    let expectedStatusName: string | undefined;
+    let configFallback: ConfigFallbackContext | undefined;
     let config: Awaited<ReturnType<typeof loadConfig>> | null = null;
 
     // A persisted api.port contains only the bound port. Pair it with the
@@ -612,8 +613,8 @@ export class ApiClient {
         if (configuredPort && !isAmbiguousFallbackName(config.name)) {
           const missingFiles = ['api.port', ...(pid ? [] : ['daemon.pid'])];
           port = configuredPort;
-          expectedStatusName = config.name;
-          warning = controlPlaneWarning(missingFiles);
+          configFallback = { expectedStatusName: config.name, selectedHome,
+            controlPlaneWarning: controlPlaneWarning(missingFiles) };
         }
       }
     }
@@ -632,7 +633,7 @@ export class ApiClient {
     const portOrBaseUrl = !hasEnvPort && config
       ? configuredApiBaseUrl(config.apiHost, port)
       : port;
-    return new ApiClient(portOrBaseUrl, token, { controlPlaneWarning: warning, expectedStatusName, selectedHome });
+    return new ApiClient(portOrBaseUrl, token, { configFallback });
   }
 
   async status(): Promise<DaemonStatusResponse> {
@@ -640,12 +641,12 @@ export class ApiClient {
     try {
       status = await this.get<unknown>('/api/status', { auth: false });
     } catch (err) {
-      if (this.expectedStatusName && isConnectionFailure(err)) {
-        throw new Error(daemonNotRunningMessage(this.selectedHome));
+      if (this.configFallback && isConnectionFailure(err)) {
+        throw new Error(daemonNotRunningMessage(this.configFallback.selectedHome));
       }
       throw err;
     }
-    return requireDaemonStatusResponse(status, this.expectedStatusName);
+    return requireDaemonStatusResponse(status, this.configFallback?.expectedStatusName);
   }
 
   /**

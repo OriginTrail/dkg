@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as configModule from '../src/config.js';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -101,6 +102,18 @@ describe('ApiClient', () => {
     if (originalDkgAuthToken === undefined) delete process.env.DKG_AUTH_TOKEN;
     else process.env.DKG_AUTH_TOKEN = originalDkgAuthToken;
     await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('constructs direct remote clients without reading the local DKG home', () => {
+    const home = vi.spyOn(configModule, 'dkgDir').mockImplementation(() => {
+      throw new Error('unexpected local-home lookup');
+    });
+    try {
+      expect(() => new ApiClient('https://remote.example')).not.toThrow();
+      expect(home).not.toHaveBeenCalled();
+    } finally {
+      home.mockRestore();
+    }
   });
 
   describe('GET endpoints', () => {
@@ -303,7 +316,7 @@ describe('ApiClient', () => {
         .rejects.toThrow(`Daemon is not running at ${tempDir}.\n`
           + 'DKG_HOME selects the node directory checked by this command.\n'
           + 'Start a daemon in that directory with: dkg start\n'
-          + 'For an existing devnet, select a node instead: DKG_HOME=.devnet/node1 dkg <command>');
+          + 'For an existing devnet, set DKG_HOME to its node directory (for example .devnet/node1), then rerun this command.');
       expect(calls).toHaveLength(0);
       expect(existsSync(join(tempDir, 'api.port'))).toBe(false);
       expect(existsSync(join(tempDir, 'daemon.pid'))).toBe(false);
