@@ -2,7 +2,7 @@ import { isSafeIri } from '@origintrail-official/dkg-core';
 import { createValidator } from './validation.js';
 import { buildEpcisQuery } from './query-builder.js';
 import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js';
-import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryEvent, EPCISQueryDocumentResponse } from './types.js';
+import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryBinding, EPCISQueryEvent, EPCISQueryDocumentResponse } from './types.js';
 
 export interface AsyncCaptureConfig {
   contextGraphId: string;
@@ -78,7 +78,9 @@ const EPCIS_TYPE_PREFIX = 'https://gs1.github.io/EPCIS/';
  * remote triplestore, that is reachable input. The linear parser below
  * runs in O(n) regardless of input shape.
  */
-export function unwrapLiteral(value: string): string {
+export function unwrapLiteral(value: string): string;
+export function unwrapLiteral(value: string | undefined): string | undefined;
+export function unwrapLiteral(value: string | undefined): string | undefined {
   if (!value || value.length < 2 || value.charCodeAt(0) !== 34 /* '"' */) {
     return value;
   }
@@ -102,8 +104,13 @@ export function unwrapLiteral(value: string): string {
   return value;
 }
 
+function parseGroupConcat(value: string | undefined): string[] | undefined {
+  const text = unwrapLiteral(value);
+  return text ? text.split(', ').map((item) => item.trim()).filter(Boolean) : undefined;
+}
+
 /** Reconstruct a proper EPCIS event object from flat SPARQL bindings. */
-export function toEpcisEvent(binding: Record<string, string>): EPCISQueryEvent {
+export function toEpcisEvent(binding: EPCISQueryBinding): EPCISQueryEvent {
   if (typeof binding.event !== 'string' || !isSafeIri(binding.event)) {
     throw new EpcisQueryError('Events query returned a result without a reusable event IRI', 502);
   }
@@ -142,14 +149,14 @@ export function toEpcisEvent(binding: Record<string, string>): EPCISQueryEvent {
   const bizLocation = unwrapLiteral(binding.bizLocation);
   if (bizLocation) event.bizLocation = { id: bizLocation };
 
-  const epcList = unwrapLiteral(binding.epcList);
-  if (epcList) event.epcList = epcList.split(', ').map((s) => s.trim()).filter(Boolean);
-  const childEPCs = unwrapLiteral(binding.childEPCList);
-  if (childEPCs) event.childEPCs = childEPCs.split(', ').map((s) => s.trim()).filter(Boolean);
-  const inputEPCList = unwrapLiteral(binding.inputEPCs);
-  if (inputEPCList) event.inputEPCList = inputEPCList.split(', ').map((s) => s.trim()).filter(Boolean);
-  const outputEPCList = unwrapLiteral(binding.outputEPCs);
-  if (outputEPCList) event.outputEPCList = outputEPCList.split(', ').map((s) => s.trim()).filter(Boolean);
+  const epcList = parseGroupConcat(binding.epcList);
+  if (epcList) event.epcList = epcList;
+  const childEPCs = parseGroupConcat(binding.childEPCList);
+  if (childEPCs) event.childEPCs = childEPCs;
+  const inputEPCList = parseGroupConcat(binding.inputEPCs);
+  if (inputEPCList) event.inputEPCList = inputEPCList;
+  const outputEPCList = parseGroupConcat(binding.outputEPCs);
+  if (outputEPCList) event.outputEPCList = outputEPCList;
 
   return event;
 }

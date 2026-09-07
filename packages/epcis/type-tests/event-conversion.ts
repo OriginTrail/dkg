@@ -1,4 +1,4 @@
-import { toEpcisEvent, handleEventsQuery, type EPCISQueryEvent } from '../dist/index.js';
+import { toEpcisEvent, handleEventsQuery, type EPCISQueryEvent, type EPCISQueryBinding, type QueryEngine } from '../dist/index.js';
 
 // Existing QueryEngine consumers pass generic rows to this public helper.
 const row: Record<string, string> = { event: 'urn:event:1' };
@@ -36,3 +36,12 @@ void [responseId, responseTime, responseLocation, responseEpcs];
 responseEvent.eventTime = 42;
 // @ts-expect-error Unsupported capture fields are absent through the public response.
 void responseEvent.sensorElementList;
+
+// Raw query rows do not promise that OPTIONAL or even required aliases were bound.
+const sparseRow: EPCISQueryBinding = { event: undefined, eventTime: undefined };
+// @ts-expect-error The raw store boundary requires validation before using the event ID.
+const uncheckedId: string = sparseRow.event;
+void uncheckedId;
+const genericEngine: QueryEngine = { query: async () => ({ bindings: [row] }) };
+const sparseEngine: QueryEngine = { query: async () => ({ bindings: [sparseRow] }) };
+void [genericEngine, sparseEngine];

@@ -96,6 +96,27 @@ export interface EpcisQueryParams {
   offset?: number;
 }
 
+/** Raw SELECT row. Projected aliases may be unbound; generic engine columns remain accepted. */
+export interface EPCISQueryBinding extends Record<string, string | undefined> {
+  event?: string;
+  eventType?: string;
+  eventTime?: string;
+  eventTimeZoneOffset?: string;
+  action?: string;
+  bizStep?: string;
+  disposition?: string;
+  readPoint?: string;
+  bizLocation?: string;
+  epcList?: string;
+  parentID?: string;
+  childEPCList?: string;
+  inputEPCs?: string;
+  outputEPCs?: string;
+  configurationId?: string;
+  shipmentId?: string;
+  ual?: string;
+}
+
 /** Dependency-inversion boundary: the EPCIS package needs something that can run SPARQL queries. */
 export interface QueryEngine {
   query(
@@ -122,7 +143,7 @@ export interface QueryEngine {
        */
       includePrivate?: boolean;
     },
-  ): Promise<{ bindings: Record<string, string>[] }>;
+  ): Promise<{ bindings: EPCISQueryBinding[] }>;
 }
 
 /** Closed query response, independent of the extensible capture document model. */

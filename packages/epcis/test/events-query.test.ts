@@ -118,7 +118,7 @@ describe('handleEventsQuery', () => {
     }
   });
 
-  it.each([{}, { event: '' }, { event: '_:b0' }, { event: 'relative' }, { event: 'https://example.org/event>' }])('rejects a query result without a reusable subject: %j', async (binding) => {
+  it.each([{}, { event: undefined }, { event: '' }, { event: '_:b0' }, { event: 'relative' }, { event: 'https://example.org/event>' }])('rejects a query result without a reusable subject: %j', async (binding) => {
     const { engine } = createTrackingQueryEngine([binding]);
     await expect(handleEventsQuery(new URLSearchParams(), {
       contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH,
@@ -523,6 +523,17 @@ describe('toEpcisEvent', () => {
     expect(event.epcList).toEqual(['urn:epc:id:sgtin:001.001.001', 'urn:epc:id:sgtin:001.001.002']);
   });
 
+  it.each([
+    ['epcList', 'epcList'], ['childEPCList', 'childEPCs'],
+    ['inputEPCs', 'inputEPCList'], ['outputEPCs', 'outputEPCList'],
+  ] as const)('normalizes the %s group-concat binding consistently', (bindingKey, outputKey) => {
+    const event = toEpcisEvent({
+      event: 'urn:event:1',
+      [bindingKey]: '" urn:epc:one, , urn:epc:two "^^<http://www.w3.org/2001/XMLSchema#string>',
+    });
+    expect(event[outputKey]).toEqual(['urn:epc:one', 'urn:epc:two']);
+  });
+
   it('splits single epcList value into single-element array', () => {
     const binding = makeBindings({ epcList: 'urn:epc:id:sgtin:001.001.001' });
     const event = toEpcisEvent(binding);
@@ -757,7 +768,7 @@ describe('unwrapLiteral (CodeQL ReDoS regression)', () => {
 
   it('returns empty / falsy inputs unchanged', () => {
     expect(unwrapLiteral('')).toBe('');
-    expect(unwrapLiteral(undefined as unknown as string)).toBeUndefined();
+    expect(unwrapLiteral(undefined)).toBeUndefined();
   });
 
   it('returns bare unquoted strings unchanged (URI bindings)', () => {
