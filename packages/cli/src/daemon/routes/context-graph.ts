@@ -1908,6 +1908,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       readAuthority = await agent.resolveContextGraphReadAuthority(contextGraphId, {
         callerAgentAddress: callerAddr,
         allowSubscriptionFallback: false,
+        // This explicit admission boundary may spend a bounded cold lookup to
+        // populate the chain adapter's reverse name-hash index. Ordinary
+        // queries and restart rehydration retain the short fail-closed timeout.
+        allowColdRegistrationBinding: true,
       });
     } catch {
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);

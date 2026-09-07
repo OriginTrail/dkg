@@ -623,8 +623,19 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async resolveContextGraphRegistrationBinding(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal } = {},
+    options: {
+      signal?: AbortSignal;
+      /**
+       * Explicit subscription/bootstrap work may populate the adapter's
+       * bounded reverse index before admitting the graph. Ordinary reads and
+       * restart rehydration remain on the short fail-closed policy deadline.
+       */
+      allowColdNameHashResolution?: boolean;
+    } = {},
   ): Promise<ContextGraphRegistrationBinding> {
+    const nameHashResolutionTimeoutMs = options.allowColdNameHashResolution === true
+      ? CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS
+      : CHAIN_POLICY_READ_TIMEOUT_MS;
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return { kind: 'unregistered' };
     }
@@ -639,7 +650,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           }),
           {
             label: `resolveContextGraphOnChainIdBinding(${contextGraphId})`,
-            timeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
+            timeoutMs: nameHashResolutionTimeoutMs,
             signal: options.signal,
           },
         );
@@ -693,7 +704,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         (signal) => resolveByNameHash.call(this.chain, nameHash, { signal }),
         {
           label: `resolveContextGraphIdByNameHash(${nameHash})`,
-          timeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
+          timeoutMs: nameHashResolutionTimeoutMs,
           signal: options.signal,
         },
       );

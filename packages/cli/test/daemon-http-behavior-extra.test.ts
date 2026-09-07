@@ -2476,11 +2476,16 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
         const agent = {
           resolveContextGraphReadAuthority: async (
             _id: string,
-            readOpts: { callerAgentAddress?: string; allowSubscriptionFallback?: boolean },
+            readOpts: {
+              callerAgentAddress?: string;
+              allowSubscriptionFallback?: boolean;
+              allowColdRegistrationBinding?: boolean;
+            },
           ) => {
             expect(readOpts).toEqual({
               callerAgentAddress: CALLER,
               allowSubscriptionFallback: false,
+              allowColdRegistrationBinding: true,
             });
             if (opts.authority === 'throw') throw new Error('authority read failed');
             return {

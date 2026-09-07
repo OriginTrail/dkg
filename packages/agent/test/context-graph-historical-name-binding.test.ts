@@ -265,7 +265,10 @@ describe('cold current-state Context Graph name binding', () => {
         new Promise<bigint | null>((resolve) => { complete = resolve; }),
       );
 
-      const binding = fixture.agent.resolveContextGraphRegistrationBinding('cold-cleartext');
+      const binding = fixture.agent.resolveContextGraphRegistrationBinding(
+        'cold-cleartext',
+        { allowColdNameHashResolution: true },
+      );
       await vi.advanceTimersByTimeAsync(2_501);
 
       const operationSignal = fixture.resolveContextGraphIdByNameHash.mock.calls[0]?.[1]?.signal;

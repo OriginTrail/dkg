@@ -49,7 +49,10 @@ export type Rfc64PublicCatalogReconcileResultV1 = 'applied' | 'not-found' | 'sta
 
 /** Full semantic reconciliation supplied by the wired service. */
 export interface Rfc64PublicCatalogReceiverReconcilerV1 {
-  /** True only when this exact inventory head is durably recorded as applied. */
+  /**
+   * True when this exact head is durable or a newer same-scope durable head
+   * strictly supersedes it. Equal-version conflicts are never deduplicated.
+   */
   isHeadApplied(announcement: Rfc64PublicCatalogHeadAnnouncementV1): Promise<boolean>;
   /**
    * Fetch, verify, activate, exact-post-read, then durably commit applied state.

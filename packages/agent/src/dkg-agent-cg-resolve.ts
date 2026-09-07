@@ -1523,11 +1523,18 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   async resolveRegisteredContextGraphAuthority(
     this: DKGAgent,
     contextGraphId: string,
-    options: { allowCachedRoster?: boolean; signal?: AbortSignal } = {},
+    options: {
+      allowCachedRoster?: boolean;
+      signal?: AbortSignal;
+      allowColdNameHashResolution?: boolean;
+    } = {},
   ): Promise<RegisteredContextGraphAuthority> {
     const registration = await this.resolveContextGraphRegistrationBinding(
       contextGraphId,
-      { signal: options.signal },
+      {
+        signal: options.signal,
+        allowColdNameHashResolution: options.allowColdNameHashResolution,
+      },
     );
     if (registration.kind !== 'registered') return registration;
     const { onChainId } = registration;

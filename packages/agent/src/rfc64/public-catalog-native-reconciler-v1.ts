@@ -108,9 +108,6 @@ export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
   async isHeadApplied(
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
   ): Promise<boolean> {
-    if (this.options.requiresAppliedHeadPrecommit?.(announcement) === true) {
-      return false;
-    }
     const trustedCatalogScope = this.options.resolveTrustedCatalogScope(announcement);
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(
       trustedCatalogScope,
@@ -120,15 +117,29 @@ export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
       announcement.authorAddress,
     );
     if (current === null) return false;
+    if (
+      current.catalogScopeDigest !== catalogScopeDigest
+      || current.authorAddress !== announcement.authorAddress
+    ) {
+      return false;
+    }
+    // A previously queued announcement can begin after a newer same-scope
+    // head has already committed. It is then durably dominated, not a history
+    // failure. Equal-version/different-digest announcements still proceed to
+    // the native receiver and fail the strict fork/history checks.
+    if (BigInt(current.catalogVersion) > BigInt(announcement.catalogVersion)) {
+      return true;
+    }
+    if (this.options.requiresAppliedHeadPrecommit?.(announcement) === true) {
+      return false;
+    }
     const expectedInventoryRowCount = await this.readExpectedInventoryRowCount(
       announcement,
       trustedCatalogScope,
       current.inventoryRowCount,
     );
     if (expectedInventoryRowCount === null) return false;
-    return current.catalogScopeDigest === catalogScopeDigest
-      && current.authorAddress === announcement.authorAddress
-      && current.currentCatalogHeadDigest === announcement.catalogHeadObjectDigest
+    return current.currentCatalogHeadDigest === announcement.catalogHeadObjectDigest
       && current.catalogVersion === announcement.catalogVersion
       && current.inventoryRowCount === expectedInventoryRowCount;
   }

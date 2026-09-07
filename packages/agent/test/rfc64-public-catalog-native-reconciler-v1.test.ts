@@ -192,13 +192,14 @@ describe('RFC-64 bounded public root native reconciler v1', () => {
 
     for (const mismatch of [
       { currentCatalogHeadDigest: `0x${'aa'.repeat(32)}` as Digest32V1 },
-      { catalogVersion: '2' },
       { catalogScopeDigest: `0x${'bb'.repeat(32)}` as Digest32V1 },
       { authorAddress: '0xcccccccccccccccccccccccccccccccccccccccc' as EvmAddressV1 },
     ] satisfies Array<Partial<AppliedCatalogHeadSnapshotV1>>) {
       readAppliedCatalogHeadV1.mockReturnValue(snapshot(successor, mismatch));
       await expect(reconciler.isHeadApplied(successor)).resolves.toBe(false);
     }
+    readAppliedCatalogHeadV1.mockReturnValue(snapshot(successor, { catalogVersion: '2' }));
+    await expect(reconciler.isHeadApplied(successor)).resolves.toBe(true);
 
     const expectedScopeDigest = computeAuthorCatalogScopeDigestV1(
       deriveRfc64PublicOpenCatalogScopeV1(successor, ACCEPTED_POLICY),
@@ -207,6 +208,33 @@ describe('RFC-64 bounded public root native reconciler v1', () => {
     expect(() => deriveRfc64PublicOpenCatalogScopeV1(announcement('1', {
       subGraphName: 'not-root' as never,
     }), ACCEPTED_POLICY)).toThrow('accepted null-governance owner policy');
+  });
+
+  it('retires a stale announcement only when a newer same-scope head is durable', async () => {
+    const stale = announcement('7', {
+      catalogHeadObjectDigest: `0x${'17'.repeat(32)}` as Digest32V1,
+    });
+    const newer = announcement('8', {
+      catalogHeadObjectDigest: `0x${'18'.repeat(32)}` as Digest32V1,
+    });
+    const readAppliedCatalogHeadV1 = vi.fn(() => snapshot(newer));
+    const requiresAppliedHeadPrecommit = vi.fn(() => true);
+    const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
+      nativeReceiver: receiver(vi.fn()),
+      inventory: { readAppliedCatalogHeadV1 },
+      resolveTrustedCatalogScope,
+      resolveDeployment: async () => DEPLOYMENT,
+      requiresAppliedHeadPrecommit,
+    });
+
+    await expect(reconciler.isHeadApplied(stale)).resolves.toBe(true);
+    expect(requiresAppliedHeadPrecommit).not.toHaveBeenCalled();
+
+    const conflicting = announcement('8', {
+      catalogHeadObjectDigest: `0x${'19'.repeat(32)}` as Digest32V1,
+    });
+    await expect(reconciler.isHeadApplied(conflicting)).resolves.toBe(false);
+    expect(requiresAppliedHeadPrecommit).toHaveBeenCalledWith(conflicting);
   });
 
   it('replays a durable private finalized head when current chain inventory changes', async () => {
@@ -247,7 +275,7 @@ describe('RFC-64 bounded public root native reconciler v1', () => {
     expect(classifyRfc64CatalogReconciliationTerminalReasonV1(incomplete))
       .toBe('no-authorized-provider');
     expect(requiresAppliedHeadPrecommit).toHaveBeenCalledWith(current);
-    expect(readAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(readAppliedCatalogHeadV1).toHaveBeenCalledTimes(2);
     expect(synchronize).toHaveBeenCalledTimes(2);
   });
 
