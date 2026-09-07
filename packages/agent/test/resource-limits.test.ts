@@ -204,13 +204,20 @@ it('keeps initial SWM diagnostics immutable while job-scoped resolution refreshe
 describe('snapshot and retry/timing budgets', () => {
   it('resolves invalid snapshot numeric leaves to defaults without disclosing raw values', () => {
     const baseline = resolveSyncResponderSnapshotPolicy(undefined, {});
-    const warnings: string[] = [];
-    expect(resolveSyncResponderSnapshotPolicy({
+    const resolved = resolveSyncResponderSnapshotPolicy({
       global: { rows: RESOURCE_MAX.rows + 1, bytesEstimate: Infinity },
       local: { rows: -1, bytesEstimate: RESOURCE_MAX.bytes + 1 },
-    }, { DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT: 'secret' }, (message) => warnings.push(message))).toEqual(baseline);
-    expect(warnings).toHaveLength(5);
-    expect(warnings.join(' ')).not.toContain('secret');
+    }, { DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT: 'secret' });
+    expect(resolved.budget).toEqual(baseline.budget);
+    expect(resolved.diagnostics).toEqual([
+      'DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT',
+      'syncResponderSnapshotLimits.global.rows',
+      'syncResponderSnapshotLimits.global.bytesEstimate',
+      'syncResponderSnapshotLimits.local.rows',
+      'syncResponderSnapshotLimits.local.bytesEstimate',
+    ].map((setting) => ({ kind: 'rejected', setting })));
+    expect(JSON.stringify(resolved.diagnostics)).not.toContain('secret');
+    expect(Object.isFrozen(resolved.diagnostics)).toBe(true);
     expect(() => resolveSyncResponderSnapshotPolicy({ global: [] } as never, {})).toThrow('global');
   });
 

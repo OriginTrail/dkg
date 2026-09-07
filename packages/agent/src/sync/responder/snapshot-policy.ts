@@ -1,4 +1,4 @@
-import { RESOURCE_MAX, resourceInteger, resourceIntegerEnv, type RejectedResourceSetting } from '../../resource-limits.js';
+import { RESOURCE_MAX, resourceInteger, resourceIntegerEnv } from '../../resource-limits.js';
 import type { SyncResponderSnapshotBudgetOptions } from './snapshot-budget.js';
 
 export interface SyncResponderSnapshotLimitsConfig {
@@ -14,7 +14,7 @@ export interface SyncResponderSnapshotLimitsConfig {
 }
 
 /** Validate container shape; numeric leaves resolve through the bounded snapshot policy. */
-export function validateSyncResponderSnapshotLimitsConfig(
+function assertSyncResponderSnapshotLimitsShape(
   config: SyncResponderSnapshotLimitsConfig | undefined,
 ): void {
   if (config === undefined) return;
@@ -53,30 +53,31 @@ const SNAPSHOT_BUDGET_ENV = {
   maxSnapshotBytesEstimate: 'DKG_SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT',
 } as const;
 
+export type SnapshotPolicyDiagnostic =
+  | Readonly<{ kind: 'rejected'; setting: string }>
+  | Readonly<{
+    kind: 'clamped';
+    setting: 'syncResponderSnapshotLimits.local.rows' | 'syncResponderSnapshotLimits.local.bytesEstimate';
+    configured: number;
+    effective: number;
+  }>;
+
 export interface ResolvedSyncResponderSnapshotPolicy {
-  budget: SyncResponderSnapshotBudgetOptions;
-  localRowsClamped: boolean;
-  localBytesEstimateClamped: boolean;
+  readonly budget: Readonly<SyncResponderSnapshotBudgetOptions>;
+  readonly diagnostics: readonly SnapshotPolicyDiagnostic[];
 }
 
 /** Resolve each leaf independently: environment, then config, then the compatibility default. */
 export function resolveSyncResponderSnapshotPolicy(
   config?: SyncResponderSnapshotLimitsConfig,
   env: Readonly<Record<string, string | undefined>> = process.env,
-  onWarning: (message: string) => void = () => {},
-  onRejected?: RejectedResourceSetting,
 ): ResolvedSyncResponderSnapshotPolicy {
-  validateSyncResponderSnapshotLimitsConfig(config);
-  const warnings = new Set<string>();
-  const warnOnce = (message: string) => {
-    if (warnings.has(message)) return;
-    warnings.add(message);
-    onWarning(message);
-  };
+  assertSyncResponderSnapshotLimitsShape(config);
+  const diagnostics: SnapshotPolicyDiagnostic[] = [];
+  const reject = (setting: string) => diagnostics.push(Object.freeze({ kind: 'rejected' as const, setting }));
   const resolve = (key: keyof typeof SNAPSHOT_BUDGET_ENV, configured: number | undefined,
     fallback: number, path: string, maximum: number) => {
     const bounds = { min: 1, max: maximum } as const;
-    const reject = onRejected ?? ((name: string) => warnOnce(`Ignoring invalid resource setting ${name}; using fallback`));
     return resourceIntegerEnv(env[SNAPSHOT_BUDGET_ENV[key]], bounds, SNAPSHOT_BUDGET_ENV[key], reject)
       ?? resourceInteger(configured, bounds, path, reject) ?? fallback;
   };
@@ -92,28 +93,29 @@ export function resolveSyncResponderSnapshotPolicy(
     'syncResponderSnapshotLimits.local.bytesEstimate', RESOURCE_MAX.bytes);
   const maxSnapshotRows = Math.min(configuredMaxSnapshotRows, maxRows);
   const maxSnapshotBytesEstimate = Math.min(configuredMaxSnapshotBytesEstimate, maxBytesEstimate);
-  const localRowsClamped = maxSnapshotRows !== configuredMaxSnapshotRows;
-  const localBytesEstimateClamped = maxSnapshotBytesEstimate !== configuredMaxSnapshotBytesEstimate;
-  if (localRowsClamped) {
-    warnOnce(
-      `Clamped syncResponderSnapshotLimits.local.rows from ${configuredMaxSnapshotRows} to global.rows ${maxRows}`,
-    );
+  if (maxSnapshotRows !== configuredMaxSnapshotRows) {
+    diagnostics.push(Object.freeze({
+      kind: 'clamped', setting: 'syncResponderSnapshotLimits.local.rows',
+      configured: configuredMaxSnapshotRows, effective: maxRows,
+    }));
   }
-  if (localBytesEstimateClamped) {
-    warnOnce(
-      `Clamped syncResponderSnapshotLimits.local.bytesEstimate from ${configuredMaxSnapshotBytesEstimate} to global.bytesEstimate ${maxBytesEstimate}`,
-    );
+  if (maxSnapshotBytesEstimate !== configuredMaxSnapshotBytesEstimate) {
+    diagnostics.push(Object.freeze({
+      kind: 'clamped', setting: 'syncResponderSnapshotLimits.local.bytesEstimate',
+      configured: configuredMaxSnapshotBytesEstimate, effective: maxBytesEstimate,
+    }));
   }
-  return {
-    budget: {
-      maxRows,
-      maxBytesEstimate,
-      maxSnapshotRows,
-      maxSnapshotBytesEstimate,
-    },
-    localRowsClamped,
-    localBytesEstimateClamped,
-  };
+  return Object.freeze({
+    budget: Object.freeze({ maxRows, maxBytesEstimate, maxSnapshotRows, maxSnapshotBytesEstimate }),
+    diagnostics: Object.freeze(diagnostics),
+  });
+}
+
+/** Compatibility validation uses the same shape and numeric resolution boundary. */
+export function validateSyncResponderSnapshotLimitsConfig(
+  config: SyncResponderSnapshotLimitsConfig | undefined,
+): void {
+  resolveSyncResponderSnapshotPolicy(config, {});
 }
 
 /** Production snapshot limits, with explicit config and environment overrides in rows/bytes. */
@@ -122,6 +124,15 @@ export function resolveSyncResponderSnapshotBudgetOptions(
   env: Readonly<Record<string, string | undefined>> = process.env,
   onWarning?: (message: string) => void,
 ): SyncResponderSnapshotBudgetOptions {
-  return resolveSyncResponderSnapshotPolicy(config, env, onWarning).budget;
+  const { budget, diagnostics } = resolveSyncResponderSnapshotPolicy(config, env);
+  for (const diagnostic of diagnostics) {
+    if (diagnostic.kind === 'rejected') {
+      onWarning?.(`Ignoring invalid resource setting ${diagnostic.setting}; using fallback`);
+    } else {
+      const globalSetting = diagnostic.setting.replace('syncResponderSnapshotLimits.local.', 'global.');
+      onWarning?.(`Clamped ${diagnostic.setting} from ${diagnostic.configured} to ${globalSetting} ${diagnostic.effective}`);
+    }
+  }
+  return { ...budget };
 }
 

@@ -423,7 +423,6 @@ import {
   resolveNonNegativeIntegerSwitch,
   resolveBooleanSwitch,
   resolveSyncReconcilerEnabled,
-  withSelectedSyncRecoveryScopes,
   withGlobalSyncBackpressure,
 } from './sync/backpressure.js';
 import {
@@ -705,18 +704,21 @@ function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
   const edgeSelectedContextGraphIds = (config.nodeRole ?? 'edge') === 'edge'
     ? config.syncContextGraphs ?? []
     : [];
-  return withSelectedSyncRecoveryScopes(config.resourcePolicy.admission, [...new Set([
-    ...resolveRfc64SelectedRecoveryContextGraphIdsV1(
-      resolveRfc64RuntimeCatalogBootstrapConfigV1(
-        config.rfc64CatalogBootstrap,
-        config.rfc64PublicCatalogBootstrap,
-      ),
-    ).filter((contextGraphId) => rfc64ExecutionPlanAllowsLegacySyncV1(
-      config.rfc64CatalogExecutionPlan,
-      contextGraphId,
-    )),
-    ...edgeSelectedContextGraphIds,
-  ])]);
+  return {
+    policy: config.resourcePolicy.admission,
+    selectedRecoveryContextGraphIds: [...new Set([
+      ...resolveRfc64SelectedRecoveryContextGraphIdsV1(
+        resolveRfc64RuntimeCatalogBootstrapConfigV1(
+          config.rfc64CatalogBootstrap,
+          config.rfc64PublicCatalogBootstrap,
+        ),
+      ).filter((contextGraphId) => rfc64ExecutionPlanAllowsLegacySyncV1(
+        config.rfc64CatalogExecutionPlan,
+        contextGraphId,
+      )),
+      ...edgeSelectedContextGraphIds,
+    ].filter((id) => typeof id === 'string' && id.length > 0))],
+  };
 }
 
 interface SharedMemorySyncFromPeerOptions {
@@ -1958,7 +1960,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     try {
       return await withGlobalSyncBackpressure(
         {
-          policy: resolveAgentSyncGlobalBackpressure(this.config),
+          ...resolveAgentSyncGlobalBackpressure(this.config),
           ctx,
           label,
           contextGraphId,
@@ -2786,7 +2788,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 );
               },
               onDecline: (details) => {
-                const syncPressure = getSyncBackpressureSnapshot(resolveAgentSyncGlobalBackpressure(this.config));
+                const syncPressure = getSyncBackpressureSnapshot(this.config.resourcePolicy.admission);
                 const syncPressureLabel =
                   `syncGlobalInflight=${syncPressure.inflight} ` +
                   `syncGlobalQueued=${syncPressure.queued} ` +

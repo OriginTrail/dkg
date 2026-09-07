@@ -1783,14 +1783,17 @@ describe('sync global backpressure', () => {
     ]);
   });
 
-  it('keeps one selected-scope slot available while foreground catch-up fans out', async () => {
+  it.each(['resolved', 'copied'] as const)('keeps selected-scope reservation in the %s policy', async (representation) => {
     const ctx = createOperationContext('sync');
     const selectedCg = 'urn:cg:selected';
-    const policy = resolveSyncGlobalBackpressure({
+    const resolved = resolveSyncGlobalBackpressure({
       syncGlobalMaxInflight: 2,
       syncGlobalQueueLimit: 6,
       selectedRecoveryContextGraphIds: [selectedCg],
     });
+    expect(JSON.parse(JSON.stringify(resolved)).selectedRecoveryContextGraphIds).toEqual([selectedCg]);
+    expect(Object.isFrozen(resolved.selectedRecoveryContextGraphIds)).toBe(true);
+    const policy = representation === 'copied' ? { ...resolved } : resolved;
     const events: string[] = [];
     let releaseFirst!: () => void;
     let releaseRecovery!: () => void;
@@ -2263,6 +2266,56 @@ describe('sync global backpressure', () => {
       releaseForeground?.();
       releaseFast?.();
       await Promise.all([background, foreground, fast]);
+    }
+  });
+
+  it('applies changing Edge recovery scopes to the immutable partitioned startup policy', async () => {
+    const selectedCg = 'urn:cg:runtime-partitioned';
+    const agentLike = {
+      config: withResourcePolicy({
+        nodeRole: 'edge', syncContextGraphs: [] as string[],
+        syncAdmission: {
+          globalMaxInflight: 3,
+          fast: { maxInflight: 1, queueLimit: 0, queueTimeoutMs: 100 },
+          slow: {
+            maxInflight: 2, foregroundReserved: 1, foregroundQueueLimit: 0,
+            backgroundMaxInflight: 1, backgroundQueueLimit: 0,
+          },
+        },
+      }),
+      node: { stopSignal: undefined },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+    const policy = agentLike.config.resourcePolicy.admission;
+    const serialized = JSON.stringify(policy);
+    const run = (contextGraphId: string, work: () => Promise<void>) =>
+      LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure.call(
+        agentLike as never, createOperationContext('sync'), contextGraphId,
+        'durable' as never, 'durable:runtime-selection', work, { source: 'vm-recovery' },
+      );
+    let releaseBackground!: () => void;
+    const background = run('urn:cg:background', () => new Promise<void>((resolve) => { releaseBackground = resolve; }));
+    await tick();
+    const starts: string[] = [];
+    try {
+      // Selection changes after startup and after background work occupies its slot.
+      agentLike.config.syncContextGraphs.push(selectedCg);
+      await run(selectedCg, async () => {
+        starts.push(selectedCg);
+        expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 2, queued: 0, limit: 3, queueLimit: 0 });
+      });
+      await expect(run('urn:cg:unrelated', async () => { starts.push('unrelated'); }))
+        .rejects.toMatchObject({ reason: 'queue_full' });
+      agentLike.config.syncContextGraphs.length = 0;
+      await expect(run(selectedCg, async () => { starts.push('removed-selection'); }))
+        .rejects.toMatchObject({ reason: 'queue_full' });
+      expect(starts).toEqual([selectedCg]);
+      expect(agentLike.config.resourcePolicy.admission).toBe(policy);
+      expect(JSON.stringify(policy)).toBe(serialized);
+      expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 0, limit: 3, queueLimit: 0 });
+    } finally {
+      releaseBackground();
+      await background;
     }
   });
 

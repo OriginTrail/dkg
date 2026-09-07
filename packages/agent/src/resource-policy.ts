@@ -21,12 +21,11 @@ export function resolveStartupResourcePolicy(
   for (const name of vm.rejected) warnings.reject(name);
   const reconcilerTiming = Object.freeze(resolveSyncReconcilerTiming(config, warnings.reject));
   const admission = resolveSyncGlobalBackpressure(config, warnings.reject, env);
-  const resolvedSnapshot = resolveSyncResponderSnapshotPolicy(
-    config.syncResponderSnapshotLimits, env, undefined, warnings.reject,
-  );
-  if (resolvedSnapshot.localRowsClamped) warnings.clamp('syncResponderSnapshotLimits.local.rows');
-  if (resolvedSnapshot.localBytesEstimateClamped) warnings.clamp('syncResponderSnapshotLimits.local.bytesEstimate');
-  const snapshot = Object.freeze({ ...resolvedSnapshot, budget: Object.freeze(resolvedSnapshot.budget) });
+  const snapshot = resolveSyncResponderSnapshotPolicy(config.syncResponderSnapshotLimits, env);
+  for (const diagnostic of snapshot.diagnostics) {
+    if (diagnostic.kind === 'rejected') warnings.reject(diagnostic.setting);
+    else warnings.clamp(diagnostic.setting);
+  }
   const initialSwmPass = resolveSwmCatchupPassConfig(env, warnings.reject);
   return Object.freeze({ vm, reconcilerTiming, admission, snapshot, initialSwmPass, diagnostics: warnings.snapshot() });
 }

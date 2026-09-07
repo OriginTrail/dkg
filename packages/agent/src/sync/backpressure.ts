@@ -62,7 +62,10 @@ export type SyncGlobalBackpressurePolicy = Readonly<(
     partitions: SyncAdmissionPartitions;
   }
   | { mode: 'shared' | 'partitioned'; limit: undefined; queueLimit: undefined; partitions?: never }
-) & { [syncGlobalBackpressurePolicyBrand]: true }>;
+) & {
+  [syncGlobalBackpressurePolicyBrand]: true;
+  readonly selectedRecoveryContextGraphIds?: readonly string[];
+}>;
 
 export type SyncAdmissionClass = 'fast' | 'slow_foreground' | 'slow_background';
 
@@ -395,8 +398,6 @@ function configureResolvedSyncGlobalPolicy(
   queue.configureObservabilityCapacity(syncGlobalPressureCapacity(policy));
   return policy;
 }
-const automaticBackgroundLimits = new WeakMap<object, number>();
-const selectedRecoveryScopeIds = new WeakMap<object, ReadonlySet<string>>();
 
 export type SyncBackpressureBusyReason = 'queue_full' | 'queue_timeout' | 'displaced';
 
@@ -434,6 +435,7 @@ function acquire(
     priorityClass: SyncPriorityClass;
     source: SyncAdmissionSource;
     selectedSwmPriority: boolean;
+    selectedRecoveryContextGraphIds?: readonly string[];
     signal?: AbortSignal;
     agingThresholdMs: number;
   },
@@ -442,8 +444,14 @@ function acquire(
   if (limit === undefined) throw new Error('disabled sync backpressure policy cannot acquire');
   const { queueLimit } = policy;
   const normalizedSource = normalizeSyncAdmissionSource(options.source);
+  const configuredScopes = policy.selectedRecoveryContextGraphIds ?? [];
+  const runtimeScopes = options.selectedRecoveryContextGraphIds ?? [];
   const selectedRecoveryScope = options.contextGraphId !== undefined
-    && (selectedRecoveryScopeIds.get(policy)?.has(options.contextGraphId) ?? false);
+    && (configuredScopes.includes(options.contextGraphId) || runtimeScopes.includes(options.contextGraphId));
+  // Selected recovery keeps one slot outside automatic background work. The
+  // numeric policy is fixed; the caller supplies current operator selections.
+  const automaticBackgroundLimit = (configuredScopes.length > 0 || runtimeScopes.length > 0) && limit > 1
+    ? limit - 1 : limit;
   const capacityClaim = capacityTracker.classify({
     contextGraphId: options.contextGraphId,
     source: normalizedSource,
@@ -481,7 +489,7 @@ function acquire(
       policy: policy as GlobalQueuePayload['policy'],
       admissionClass,
       limit,
-      automaticBackgroundLimit: automaticBackgroundLimits.get(policy) ?? limit,
+      automaticBackgroundLimit,
       label: options.label,
       contextGraphId: options.contextGraphId,
       source: normalizedSource,
@@ -576,11 +584,11 @@ export function resolveSyncGlobalBackpressure(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): SyncGlobalBackpressurePolicy {
   validateSyncAdmissionConfig(config.syncAdmission);
-  const selectedRecoveryIds = new Set(
+  const selectedRecoveryIds = Object.freeze([...new Set(
     config.selectedRecoveryContextGraphIds?.filter(
       (contextGraphId) => typeof contextGraphId === 'string' && contextGraphId.length > 0,
     ) ?? [],
-  );
+  )]);
   if (config.syncAdmission !== undefined && config.syncAdmission.mode !== 'shared') {
     return configureResolvedSyncGlobalPolicy(
       resolvePartitionedSyncGlobalBackpressure(config, selectedRecoveryIds, onRejected, env),
@@ -594,6 +602,7 @@ export function resolveSyncGlobalBackpressure(
   if (limit === 0) {
     return configureResolvedSyncGlobalPolicy(Object.freeze({
       mode: 'shared',
+      ...(selectedRecoveryIds.length ? { selectedRecoveryContextGraphIds: selectedRecoveryIds } : {}),
       limit: undefined,
       queueLimit: undefined,
     }) as SyncGlobalBackpressurePolicy);
@@ -604,17 +613,10 @@ export function resolveSyncGlobalBackpressure(
     ?? limit * DEFAULT_SYNC_GLOBAL_QUEUE_LIMIT_MULTIPLIER;
   const policy = Object.freeze({
     mode: 'shared',
+    ...(selectedRecoveryIds.length ? { selectedRecoveryContextGraphIds: selectedRecoveryIds } : {}),
     limit,
     queueLimit,
   }) as SyncGlobalBackpressurePolicy;
-  // A selected complete SWM provider is useful only if its transfer can enter
-  // the scheduler. Keep one slot out of every automatic background source
-  // because those sources can start during daemon bootstrap before the
-  // selected Edge provider becomes dialable. For the selected CG itself, the
-  // scope-aware guard above also prevents explicit fallback fanout from
-  // consuming that slot before exact VM or selected-SWM recovery arrives.
-  automaticBackgroundLimits.set(policy, selectedRecoveryIds.size > 0 && limit > 1 ? limit - 1 : limit);
-  selectedRecoveryScopeIds.set(policy, selectedRecoveryIds);
   return configureResolvedSyncGlobalPolicy(policy);
 }
 
@@ -650,7 +652,7 @@ function resolvedPartitionValue(
 
 function resolvePartitionedSyncGlobalBackpressure(
   globalConfig: SyncGlobalBackpressureConfig,
-  selectedRecoveryIds: ReadonlySet<string>,
+  selectedRecoveryIds: readonly string[],
   onRejected?: RejectedResourceSetting,
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): SyncGlobalBackpressurePolicy {
@@ -673,6 +675,7 @@ function resolvePartitionedSyncGlobalBackpressure(
   if (limit === 0) {
     return Object.freeze({
       mode: 'partitioned',
+      ...(selectedRecoveryIds.length ? { selectedRecoveryContextGraphIds: selectedRecoveryIds } : {}),
       limit: undefined,
       queueLimit: undefined,
     }) as SyncGlobalBackpressurePolicy;
@@ -775,27 +778,12 @@ function resolvePartitionedSyncGlobalBackpressure(
     ?? Math.min(partitionQueueLimit, RESOURCE_MAX.queue);
   const policy = Object.freeze({
     mode: 'partitioned',
+    ...(selectedRecoveryIds.length ? { selectedRecoveryContextGraphIds: selectedRecoveryIds } : {}),
     limit,
     queueLimit,
     partitions: Object.freeze({ fast, slow }),
   }) as SyncGlobalBackpressurePolicy;
-  automaticBackgroundLimits.set(policy, selectedRecoveryIds.size > 0 && limit > 1 ? limit - 1 : limit);
-  selectedRecoveryScopeIds.set(policy, selectedRecoveryIds);
   return policy;
-}
-
-/** Keep numeric startup policy fixed while operator-selected recovery scopes evolve. */
-export function withSelectedSyncRecoveryScopes(
-  base: SyncGlobalBackpressurePolicy,
-  contextGraphIds: readonly string[],
-): SyncGlobalBackpressurePolicy {
-  const policy = Object.freeze({ ...base }) as SyncGlobalBackpressurePolicy;
-  const selected = new Set(contextGraphIds.filter((id) => typeof id === 'string' && id.length > 0));
-  if (policy.limit !== undefined) {
-    automaticBackgroundLimits.set(policy, selected.size > 0 && policy.limit > 1 ? policy.limit - 1 : policy.limit);
-  }
-  selectedRecoveryScopeIds.set(policy, selected);
-  return configureResolvedSyncGlobalPolicy(policy);
 }
 
 export function getSyncBackpressureSnapshot(
@@ -836,13 +824,15 @@ export async function withGlobalSyncBackpressure<T>(
     source?: SyncAdmissionSource;
     /** The selected graph-complete RFC-64 SWM transfer may use the reserved slot. */
     selectedSwmPriority?: boolean;
+    /** Current recovery scopes supplied by the owning agent at admission. */
+    selectedRecoveryContextGraphIds?: readonly string[];
     signal?: AbortSignal;
     agingThresholdMs?: number;
     logInfo?: (ctx: OperationContext, message: string) => void;
   },
   work: () => Promise<T>,
 ): Promise<T> {
-  const { limit, queueLimit } = options.policy;
+  const { limit, queueLimit } = configureResolvedSyncGlobalPolicy(options.policy);
   if (limit === undefined) {
     lastLimit = null;
     lastQueueLimit = null;
@@ -866,6 +856,7 @@ export async function withGlobalSyncBackpressure<T>(
       priorityClass,
       source: normalizeSyncAdmissionSource(options.source),
       selectedSwmPriority: options.selectedSwmPriority === true,
+      selectedRecoveryContextGraphIds: options.selectedRecoveryContextGraphIds,
       signal: options.signal,
       agingThresholdMs: options.agingThresholdMs ?? DEFAULT_SYNC_PRIORITY_AGING_MS,
     });
