@@ -1245,11 +1245,7 @@ export class EVMChainAdapterBase {
         throw new Error('EVM adminPrivateKey must be distinct from operational keys');
       }
     }
-    this.identityIdCache = new IdentityIdCache(
-      this.signer.address,
-      EVMChainAdapterBase.IDENTITY_ID_POSITIVE_TTL_MS,
-      EVMChainAdapterBase.SIGNER_IDENTITY_ID_ZERO_TTL_MS,
-    );
+    this.identityIdCache = new IdentityIdCache(this.signer.address);
     // #1583 — resolved-contract-address memo, 30s TTL backstop
     // (RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS — bounds a poller-missed rotation).
     this.resolvedContractAddressCache = new ReadThroughTtlCache<string, string>({
