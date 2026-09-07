@@ -104,15 +104,25 @@ describe('ApiClient', () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  it('constructs direct remote clients without reading the local DKG home', () => {
-    const home = vi.spyOn(configModule, 'dkgDir').mockImplementation(() => {
-      throw new Error('unexpected local-home lookup');
-    });
+  it('constructs direct remote clients without reading the local DKG home', async () => {
+    const home = vi.fn(() => { throw new Error('unexpected local-home context'); });
+    vi.resetModules();
+    vi.doMock('../src/config.js', () => ({
+      ...configModule,
+      DkgHomeFiles: class {
+        constructor() { home(); }
+      },
+    }));
     try {
-      expect(() => new ApiClient('https://remote.example')).not.toThrow();
+      const { ApiClient: RemoteApiClient } = await import('../src/api-client.js');
+      const mockedConfig = await import('../src/config.js');
+      expect(() => new mockedConfig.DkgHomeFiles()).toThrow('unexpected local-home context');
+      home.mockClear();
+      expect(() => new RemoteApiClient('https://remote.example')).not.toThrow();
       expect(home).not.toHaveBeenCalled();
     } finally {
-      home.mockRestore();
+      vi.doUnmock('../src/config.js');
+      vi.resetModules();
     }
   });
 
