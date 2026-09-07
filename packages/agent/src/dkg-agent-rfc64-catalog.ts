@@ -514,11 +514,78 @@ const rfc64CatalogReplayRuntimesV1 = new WeakMap<DKGAgent, Rfc64CatalogReplayRun
 
 interface Rfc64CatalogReplayProgressV1 {
   readonly policyDigest: Digest32V1;
-  readonly pendingPeers: Set<string>;
+  readonly peerWorklist: Rfc64CatalogReplayPeerWorklistV1;
   token: number;
   active: boolean;
   failed: boolean;
   completion: Promise<Readonly<{ requested: number; failed: number }>> | null;
+}
+
+interface Rfc64CatalogReplayPeerDemandV1 {
+  readonly peerId: string;
+  readonly generation: number;
+}
+
+/**
+ * One owner for reconnect generations, pending-peer deduplication, and the
+ * finite amount of peer work a coalesced replay may perform. A peer ID is not
+ * itself a completion token: enqueueing the same peer after its earlier demand
+ * was drained creates a newer generation that must be replayed or left
+ * fail-closed when the run budget is exhausted.
+ */
+class Rfc64CatalogReplayPeerWorklistV1 {
+  readonly #pending = new Map<string, number>();
+  #nextGeneration = 0;
+  #remaining = RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1;
+  #overflowed = false;
+
+  beginRun(): void {
+    this.#remaining = RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1;
+  }
+
+  enqueue(peerId: string): number | null {
+    const generation = ++this.#nextGeneration;
+    if (!this.#pending.has(peerId)
+      && this.#pending.size >= RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1) {
+      this.#overflowed = true;
+      return null;
+    }
+    this.#pending.set(peerId, generation);
+    return generation;
+  }
+
+  clear(peerId: string, generation?: number | null): void {
+    const current = this.#pending.get(peerId);
+    if (current === undefined) return;
+    if (generation !== undefined && generation !== null && current !== generation) return;
+    this.#pending.delete(peerId);
+  }
+
+  drain(): readonly Rfc64CatalogReplayPeerDemandV1[] {
+    if (this.#remaining === 0) return Object.freeze([]);
+    const demands = [...this.#pending.entries()]
+      .slice(0, this.#remaining)
+      .map(([peerId, generation]) => Object.freeze({ peerId, generation }));
+    for (const demand of demands) {
+      if (this.#pending.get(demand.peerId) === demand.generation) {
+        this.#pending.delete(demand.peerId);
+      }
+    }
+    this.#remaining -= demands.length;
+    return Object.freeze(demands);
+  }
+
+  get hasPending(): boolean {
+    return this.#pending.size > 0;
+  }
+
+  get exhausted(): boolean {
+    return this.#overflowed || (this.#remaining === 0 && this.hasPending);
+  }
+
+  settleOverflow(): void {
+    this.#overflowed = false;
+  }
 }
 
 const rfc64CatalogReplayProgressV1 =
@@ -546,7 +613,7 @@ function rfc64CatalogReplayProgressForV1(
   if (progress === undefined || progress.policyDigest !== policyDigest) {
     progress = {
       policyDigest,
-      pendingPeers: new Set(),
+      peerWorklist: new Rfc64CatalogReplayPeerWorklistV1(),
       token: 0,
       active: false,
       failed: false,
@@ -1189,29 +1256,30 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
     peerId: string,
-  ): void {
+  ): number | null {
     const service = this.rfc64PublicCatalogServiceV1;
     const networkId = (
       this.config.rfc64CatalogDeploymentProfile?.networkId
       ?? this.config.networkIdentity?.chainId
     ) as NetworkIdV1 | undefined;
-    if (service === undefined || networkId === undefined || networkId === 'none') return;
+    if (service === undefined || networkId === undefined || networkId === 'none') return null;
     const accepted = service.acceptedPolicySnapshot(
       networkId,
       contextGraphId as ContextGraphIdV1,
     );
-    if (accepted === null) return;
+    if (accepted === null) return null;
     const progress = rfc64CatalogReplayProgressForV1(
       this,
       contextGraphId,
       accepted.policyDigest,
     );
-    progress.pendingPeers.add(peerId);
+    const generation = progress.peerWorklist.enqueue(peerId);
     if (!progress.active) {
       progress.active = true;
       progress.failed = false;
       bumpRfc64CatalogReplayStatusRevisionV1(this);
     }
+    return generation;
   }
 
   /** Release a synchronous connection fence when admission rejects that peer. */
@@ -1219,11 +1287,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
     peerId: string,
+    generation?: number | null,
   ): void {
     const progress = rfc64CatalogReplayProgressV1.get(this)?.get(contextGraphId);
     if (progress === undefined) return;
-    progress.pendingPeers.delete(peerId);
-    if (progress.pendingPeers.size === 0 && progress.completion === null && progress.active) {
+    progress.peerWorklist.clear(peerId, generation);
+    if (!progress.peerWorklist.hasPending && progress.completion === null && progress.active) {
       progress.active = false;
       bumpRfc64CatalogReplayStatusRevisionV1(this);
     }
@@ -2827,11 +2896,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       contextGraphId,
       accepted.policyDigest,
     );
-    for (const peer of peers) replayProgress.pendingPeers.add(peer);
-    if (replayProgress.pendingPeers.size === 0) {
+    for (const peer of peers) replayProgress.peerWorklist.enqueue(peer);
+    if (!replayProgress.peerWorklist.hasPending) {
       return Object.freeze({ requested: 0, failed: 0 });
     }
     if (replayProgress.completion !== null) return replayProgress.completion;
+    replayProgress.peerWorklist.beginRun();
     replayProgress.token += 1;
     const token = replayProgress.token;
     replayProgress.active = true;
@@ -2841,23 +2911,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       let requested = 0;
       let failed = 0;
       let replayFailed = true;
-      const attemptedPeers = new Set<string>();
-      const hasPendingUnattemptedPeer = (): boolean => (
-        attemptedPeers.size < RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1
-        && [...replayProgress.pendingPeers].some((peer) => !attemptedPeers.has(peer))
-      );
       try {
         const manifests: Rfc64PublicCatalogHeadAnnouncementV1[][] = [];
         for (;;) {
-          const replayPeers = [...replayProgress.pendingPeers]
-            .filter((peer) => !attemptedPeers.has(peer))
-            .slice(
-              0,
-              RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1 - attemptedPeers.size,
-            );
-          replayProgress.pendingPeers.clear();
-          for (const peer of replayPeers) attemptedPeers.add(peer);
-          await Promise.all(replayPeers.map(async (remotePeerId) => {
+          const replayDemands = replayProgress.peerWorklist.drain();
+          if (replayDemands.length === 0 && replayProgress.peerWorklist.exhausted) {
+            failed += 1;
+            break;
+          }
+          await Promise.all(replayDemands.map(async ({ peerId: remotePeerId }) => {
             for (let attempt = 0; attempt < 2; attempt += 1) {
               try {
                 const completion = await service.requestCatalogHeadReplay({
@@ -2885,11 +2947,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // Completion-capable provider responses are returned only after every
           // promised announcement is synchronously admitted at this receiver.
           await service.whenReceiverIdle();
-          if (hasPendingUnattemptedPeer()) continue;
-          // Reconnect churn can re-add a peer already covered by this
-          // completion. Those duplicate fences must not keep authority
-          // bootstrap (and therefore Context Graph creation) pending forever.
-          replayProgress.pendingPeers.clear();
+          if (replayProgress.peerWorklist.exhausted) {
+            failed += 1;
+            break;
+          }
+          if (replayProgress.peerWorklist.hasPending) continue;
 
           const promisedByIdentity = new Map<string, Rfc64PublicCatalogHeadAnnouncementV1>();
           for (const target of manifests.flat()) {
@@ -2920,11 +2982,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             });
             if (unsatisfied) parityFailures = 1;
           }
-          // A genuinely new connection arriving during the asynchronous
-          // durable parity read owns another replay pass. A reconnect from an
-          // already-attempted peer is covered by this completion.
-          if (hasPendingUnattemptedPeer()) continue;
-          replayProgress.pendingPeers.clear();
+          // Any connection generation arriving after the provider completion
+          // snapshot owns another replay pass, including a reconnect from the
+          // same peer. The worklist budget keeps that conservative fence finite.
+          if (replayProgress.peerWorklist.exhausted) {
+            failed += 1;
+            break;
+          }
+          if (replayProgress.peerWorklist.hasPending) continue;
           failed += parityFailures;
           break;
         }
@@ -2939,6 +3004,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           current.active = false;
           current.failed = replayFailed;
           current.completion = null;
+          current.peerWorklist.settleOverflow();
           bumpRfc64CatalogReplayStatusRevisionV1(this);
         }
       }

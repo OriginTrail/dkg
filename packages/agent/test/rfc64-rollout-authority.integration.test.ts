@@ -555,9 +555,9 @@ describe('RFC-64 rollout authority integration', () => {
     ))).toEqual([peerA, peerB]);
   });
 
-  it('settles a replay when reconnect churn re-adds an already-attempted peer', async () => {
+  it('replays a newer same-peer generation raised after its completion snapshot', async () => {
     const edge = await startAgent({
-      name: 'replay-duplicate-peer-churn-bound',
+      name: 'replay-same-peer-new-generation',
       activation: activation('catalog'),
     });
     const peer = '12D3KooWReplayDuplicateReconnectPeer';
@@ -566,8 +566,73 @@ describe('RFC-64 rollout authority integration', () => {
     ] as never);
     const service = (edge as any).rfc64PublicCatalogServiceV1;
     const requestReplay = vi.spyOn(service, 'requestCatalogHeadReplay')
-      .mockImplementation(async () => {
+      .mockResolvedValue(Object.freeze({
+        kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+        heads: Object.freeze([]),
+      }));
+    let idleCalls = 0;
+    vi.spyOn(service, 'whenReceiverIdle').mockImplementation(async () => {
+      idleCalls += 1;
+      if (idleCalls === 1) {
         edge.markRfc64CatalogReplayPeerPendingV1(CONTEXT_GRAPH_ID, peer);
+      }
+    });
+
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual({ requested: 2, failed: 0 });
+    expect(requestReplay).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails closed after the bounded worklist is exhausted by same-peer reconnect churn', async () => {
+    const edge = await startAgent({
+      name: 'replay-duplicate-peer-churn-bound',
+      activation: activation('catalog'),
+    });
+    const peer = '12D3KooWReplayContinuousReconnectPeer';
+    vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([
+      { toString: () => peer },
+    ] as never);
+    const service = (edge as any).rfc64PublicCatalogServiceV1;
+    const requestReplay = vi.spyOn(service, 'requestCatalogHeadReplay')
+      .mockImplementation(async () => {
+        return Object.freeze({
+          kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+          heads: Object.freeze([]),
+        });
+      });
+    vi.spyOn(service, 'whenReceiverIdle').mockImplementation(async () => {
+      edge.markRfc64CatalogReplayPeerPendingV1(CONTEXT_GRAPH_ID, peer);
+    });
+
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual({ requested: 64, failed: 1 });
+    expect(requestReplay).toHaveBeenCalledTimes(64);
+    await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        phase: 'blocked',
+        stableReason: 'catalog-replay-incomplete',
+      }),
+    );
+  });
+
+  it('fails closed at the 64-request boundary under distinct-peer churn', async () => {
+    const edge = await startAgent({
+      name: 'replay-distinct-peer-churn-bound',
+      activation: activation('catalog'),
+    });
+    const peer = (index: number) => `12D3KooWReplayDistinctPeer${index}`;
+    vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([
+      { toString: () => peer(0) },
+    ] as never);
+    const service = (edge as any).rfc64PublicCatalogServiceV1;
+    let replayCalls = 0;
+    const requestReplay = vi.spyOn(service, 'requestCatalogHeadReplay')
+      .mockImplementation(async () => {
+        replayCalls += 1;
+        edge.markRfc64CatalogReplayPeerPendingV1(CONTEXT_GRAPH_ID, peer(replayCalls));
         return Object.freeze({
           kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
           heads: Object.freeze([]),
@@ -576,8 +641,48 @@ describe('RFC-64 rollout authority integration', () => {
 
     await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
       CONTEXT_GRAPH_ID,
-    )).resolves.toEqual({ requested: 1, failed: 0 });
-    expect(requestReplay).toHaveBeenCalledOnce();
+    )).resolves.toEqual({ requested: 64, failed: 1 });
+    expect(requestReplay).toHaveBeenCalledTimes(64);
+  });
+
+  it('replays a new peer generation raised during the durable parity read', async () => {
+    const edge = await startAgent({
+      name: 'replay-post-parity-peer-fence',
+      activation: activation('catalog'),
+    });
+    const peerA = '12D3KooWReplayParityPeerA';
+    const peerB = '12D3KooWReplayParityPeerB';
+    vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([
+      { toString: () => peerA },
+    ] as never);
+    const service = (edge as any).rfc64PublicCatalogServiceV1;
+    const requestReplay = vi.spyOn(service, 'requestCatalogHeadReplay')
+      .mockResolvedValue(Object.freeze({
+        kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+        heads: Object.freeze([]),
+      }));
+    const persistence = (edge as any).rfc64PersistenceV1;
+    let parityReads = 0;
+    (edge as any).rfc64PersistenceV1 = Object.freeze({
+      ...persistence,
+      inventory: Object.freeze({
+        ...persistence.inventory,
+        listAppliedCatalogHeadsV1: () => {
+          parityReads += 1;
+          if (parityReads === 1) {
+            edge.markRfc64CatalogReplayPeerPendingV1(CONTEXT_GRAPH_ID, peerB);
+          }
+          return [];
+        },
+      }),
+    });
+
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual({ requested: 2, failed: 0 });
+    expect(requestReplay.mock.calls.map(([{ remotePeerId }]: [{ remotePeerId: string }]) => (
+      remotePeerId
+    ))).toEqual([peerA, peerB]);
   });
 
   it('treats replay policy denial as negative provider discovery without hiding wire failure', async () => {
@@ -661,7 +766,11 @@ describe('RFC-64 rollout authority integration', () => {
     } as any));
     expect(markPending).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, peer.peerId);
     await vi.waitFor(() => {
-      expect(clearPending).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, peer.peerId);
+      expect(clearPending).toHaveBeenCalledWith(
+        CONTEXT_GRAPH_ID,
+        peer.peerId,
+        expect.any(Number),
+      );
     });
     expect(markPending.mock.invocationCallOrder[0]).toBeLessThan(
       admission.mock.invocationCallOrder[0]!,

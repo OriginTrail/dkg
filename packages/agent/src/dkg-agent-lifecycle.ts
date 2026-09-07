@@ -3877,8 +3877,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             return authority.active && authority.mode !== 'legacy';
           }),
       ])].sort();
+      const replayFenceGenerations = new Map<string, number | null>();
       for (const contextGraphId of replayContextGraphIds) {
-        this.markRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
+        replayFenceGenerations.set(
+          contextGraphId,
+          this.markRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer),
+        );
       }
       // Reverse-path peerStore enrichment for inbound circuit-relay
       // connections.
@@ -3906,13 +3910,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           const message = err instanceof Error ? err.message : String(err);
           this.log.warn(ctx, `Network admission probe failed for ${remotePeer.slice(-8)} on connect: ${message}`);
           for (const contextGraphId of replayContextGraphIds) {
-            this.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
+            this.clearRfc64CatalogReplayPeerPendingV1(
+              contextGraphId,
+              remotePeer,
+              replayFenceGenerations.get(contextGraphId),
+            );
           }
           return;
         }
         if (!admitted) {
           for (const contextGraphId of replayContextGraphIds) {
-            this.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
+            this.clearRfc64CatalogReplayPeerPendingV1(
+              contextGraphId,
+              remotePeer,
+              replayFenceGenerations.get(contextGraphId),
+            );
           }
           return;
         }
