@@ -537,11 +537,14 @@ test('packing OpenClaw from source builds consumable JavaScript and declarations
   const manifest = JSON.parse(fs.readFileSync(path.join(source, 'package.json'), 'utf8'));
   const { packageManager } = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
   writePackage(root, '.', { name: 'openclaw-pack-fixture', private: true, packageManager });
-  fs.mkdirSync(cleanPackage, { recursive: true });
-  for (const entry of ['src', 'package.json', 'tsconfig.json', ...manifest.files.filter((entry) => entry !== 'dist')]) {
-    const from = path.join(source, entry);
-    if (fs.existsSync(from)) fs.cpSync(from, path.join(cleanPackage, entry), { recursive: true });
-  }
+  // Copy the source checkout, including unpublished build scripts/configs.
+  // Published `files` entries are a separate contract from prepack inputs.
+  const generatedEntries = new Set(['dist', 'node_modules', 'coverage', 'test-results', '.git']);
+  fs.cpSync(source, cleanPackage, {
+    recursive: true,
+    filter: (entry) => !generatedEntries.has(path.basename(entry))
+      && !entry.endsWith('.tsbuildinfo'),
+  });
   fs.copyFileSync(path.join(REPO_ROOT, 'tsconfig.base.json'), path.join(root, 'tsconfig.base.json'));
   // Use the installed build tools and built workspace dependencies. The adapter
   // itself starts without any build output, independently of the CI build.
