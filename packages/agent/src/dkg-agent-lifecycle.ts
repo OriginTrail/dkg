@@ -2063,6 +2063,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     this.started = true;
+    this.randomSamplingLifecycle?.abort();
+    this.randomSamplingLifecycle = new AbortController();
+    this.randomSamplingBindRetryInFlight = false;
     this.openVmReconcileRotationState();
     this.finalizationRuntime.markStarted({
       localPeerId: this.peerId,
@@ -4173,7 +4176,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // one flaky `getIdentityId()` call does not disable proving until the
     // next process restart.
     const rsStart = await this.tryStartRandomSamplingProver(ctx, true);
-    if (rsStart === 'retryable') {
+    if (rsStart === 'retryable' || rsStart === 'started') {
       this.scheduleRandomSamplingBindRetry(ctx);
     }
 
@@ -4388,7 +4391,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     ctx: OperationContext,
     logDisabled: boolean,
   ): Promise<RandomSamplingStartResult> {
-    if (!this.started) return 'disabled';
+    const lifecycle = this.randomSamplingLifecycle;
+    const isCurrent = () => this.started && !lifecycle?.signal.aborted;
+    if (!isCurrent()) return 'disabled';
     const rsRole: 'core' | 'edge' = (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge';
     if (rsRole !== 'core') {
       this.randomSamplingIdentityId = 0n;
@@ -4404,6 +4409,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     try {
       rsIdentityId = await this.chain.getIdentityId();
     } catch (err) {
+      if (!isCurrent()) return 'disabled';
       this.randomSamplingDisabledReason = 'identity_lookup_failed';
       this.log.warn(
         ctx,
@@ -4413,6 +4419,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
       return 'retryable';
     }
+    if (!isCurrent()) return 'disabled';
     this.randomSamplingIdentityId = rsIdentityId;
 
     if (rsIdentityId === 0n) {
@@ -4435,6 +4442,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           return 'disabled';
         }
       } catch (err) {
+        if (!isCurrent()) return 'disabled';
         this.randomSamplingDisabledReason = 'bind_failed';
         this.log.warn(
           ctx,
@@ -4457,7 +4465,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     try {
-      if (!(await membershipProbe(rsIdentityId))) {
+      const member = await membershipProbe(rsIdentityId);
+      if (!isCurrent()) return 'disabled';
+      if (!member) {
         this.randomSamplingDisabledReason = 'awaiting_sharding_table';
         if (logDisabled) {
           this.log.info(
@@ -4469,6 +4479,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return 'retryable';
       }
     } catch (err) {
+      if (!isCurrent()) return 'disabled';
       if (isMissingShardingTableContractError(err)) {
         this.randomSamplingDisabledReason = 'contracts_not_deployed';
         this.log.warn(
@@ -4488,7 +4499,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
       return 'retryable';
     }
-    if (!this.started) return 'disabled';
+    if (!isCurrent()) return 'disabled';
 
     try {
       const handle = await this.createRandomSamplingHandle({
@@ -4503,7 +4514,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         repairMissingKnowledgeAsset: (input) =>
           this.repairRandomSamplingKnowledgeAsset(input),
       });
+      if (!isCurrent()) {
+        try { await handle.stop(); } catch { /* best-effort unused-handle cleanup */ }
+        return 'disabled';
+      }
       if (this.randomSamplingHandle && this.randomSamplingHandle !== handle) {
+        this.randomSamplingHandleRetiring = true;
         try {
           await stopRandomSamplingHandleWithin(
             this.randomSamplingHandle,
@@ -4525,15 +4541,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           );
         }
       }
+      if (!isCurrent()) {
+        try { await handle.stop(); } catch { /* best-effort unused-handle cleanup */ }
+        return 'disabled';
+      }
       this.randomSamplingHandle = handle;
+      this.randomSamplingHandleRetiring = false;
       if (handle.enabled) {
-        if (!this.started) {
-          try { await handle.stop(); } catch { /* swallow shutdown race cleanup */ }
-          return 'disabled';
-        }
         this.randomSamplingDisabledReason = 'not_started';
         handle.start();
-        this.clearRandomSamplingBindRetry();
         this.log.info(ctx, `V10 Random Sampling prover started (identityId=${rsIdentityId})`);
         return 'started';
       }
@@ -4543,21 +4559,72 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
       return 'disabled';
     } catch (err) {
+      if (!isCurrent()) return 'disabled';
       this.randomSamplingDisabledReason = 'bind_failed';
       this.log.warn(ctx, `Failed to bind V10 Random Sampling prover: ${err instanceof Error ? err.message : String(err)}`);
       return 'retryable';
     }
   }
 
+  async reconcileRandomSamplingProver(this: DKGAgent,
+    ctx: OperationContext,
+  ): Promise<RandomSamplingStartResult> {
+    const lifecycle = this.randomSamplingLifecycle;
+    const isCurrent = () => this.started && !lifecycle?.signal.aborted;
+    if (!isCurrent()) return 'disabled';
+    const handle = this.randomSamplingHandle;
+    if (handle?.enabled && !this.randomSamplingHandleRetiring) {
+      try {
+        const identityId = await this.chain.getIdentityId();
+        if (!isCurrent()) return 'disabled';
+        const member = identityId !== 0n
+          && await this.chain.isShardingTableMember!(identityId);
+        if (!isCurrent()) return 'disabled';
+        if (member && identityId === this.randomSamplingIdentityId) return 'started';
+        // Only an authoritative eligibility change retires a healthy prover.
+        // Transient RPC failures keep its current handle and status intact.
+        this.randomSamplingHandleRetiring = true;
+      } catch (error) {
+        if (!isCurrent()) return 'disabled';
+        this.log.warn(ctx, `V10 Random Sampling eligibility recheck failed; keeping active prover: ${
+          error instanceof Error ? error.message : String(error)
+        }`);
+        return 'started';
+      }
+    }
+    if (handle && this.randomSamplingHandleRetiring) {
+      try {
+        await stopRandomSamplingHandleWithin(handle, DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS);
+      } catch (error) {
+        if (!isCurrent()) return 'disabled';
+        // Even readmission cannot reuse a handle whose physical close started.
+        // Keep it quarantined and retry that same close before creating another.
+        this.log.warn(ctx, `V10 Random Sampling retirement pending; replacement will retry: ${
+          error instanceof Error ? error.message : String(error)
+        }`);
+        return 'retryable';
+      }
+      if (!isCurrent()) return 'disabled';
+      if (this.randomSamplingHandle === handle) {
+        this.randomSamplingHandle = null;
+        this.randomSamplingHandleRetiring = false;
+      }
+    }
+    return this.tryStartRandomSamplingProver(ctx, false);
+  }
+
   scheduleRandomSamplingBindRetry(this: DKGAgent, ctx: OperationContext): void {
-    if (this.randomSamplingBindRetryTimer) return;
-    this.log.warn(ctx, `V10 Random Sampling prover bind will retry every ${RANDOM_SAMPLING_BIND_RETRY_MS}ms`);
+    const lifecycle = this.randomSamplingLifecycle;
+    if (!this.started || lifecycle?.signal.aborted || this.randomSamplingBindRetryTimer) return;
+    if (!this.randomSamplingHandle?.enabled) {
+      this.log.warn(ctx, `V10 Random Sampling prover bind will retry every ${RANDOM_SAMPLING_BIND_RETRY_MS}ms`);
+    }
     this.randomSamplingBindRetryTimer = setInterval(() => {
-      if (!this.started || this.randomSamplingBindRetryInFlight || this.randomSamplingHandle?.enabled) return;
+      if (!this.started || lifecycle?.signal.aborted || this.randomSamplingBindRetryInFlight) return;
       this.randomSamplingBindRetryInFlight = true;
-      this.tryStartRandomSamplingProver(ctx, false)
+      this.reconcileRandomSamplingProver(ctx)
         .then((result) => {
-          if (result === 'started' || result === 'disabled') {
+          if (result === 'disabled' && this.randomSamplingLifecycle === lifecycle) {
             this.clearRandomSamplingBindRetry();
           }
         })
@@ -4565,7 +4632,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this.log.warn(ctx, `V10 Random Sampling prover retry failed: ${err instanceof Error ? err.message : String(err)}`);
         })
         .finally(() => {
-          this.randomSamplingBindRetryInFlight = false;
+          if (this.randomSamplingLifecycle === lifecycle) this.randomSamplingBindRetryInFlight = false;
         });
     }, RANDOM_SAMPLING_BIND_RETRY_MS);
     if (this.randomSamplingBindRetryTimer.unref) this.randomSamplingBindRetryTimer.unref();

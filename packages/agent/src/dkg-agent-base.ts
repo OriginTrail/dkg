@@ -1192,6 +1192,8 @@ export class DKGAgentBase {
    */
   protected messengerOutboxTimer: ReturnType<typeof setInterval> | null = null;
   protected randomSamplingHandle: RandomSamplingHandle | null = null;
+  protected randomSamplingHandleRetiring = false;
+  protected randomSamplingLifecycle = new AbortController();
   protected randomSamplingIdentityId = 0n;
   protected randomSamplingDisabledReason: RandomSamplingDisabledReason = 'not_started';
   protected randomSamplingBindRetryTimer: ReturnType<typeof setInterval> | null = null;

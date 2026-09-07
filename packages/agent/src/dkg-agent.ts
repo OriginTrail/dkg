@@ -2231,6 +2231,9 @@ export class DKGAgent extends DKGAgentBase {
 
   async stop(): Promise<void> {
     if (!this.started) return;
+    // Fence delayed eligibility lookups and handle creation before any shutdown await.
+    this.randomSamplingLifecycle?.abort();
+    this.clearRandomSamplingBindRetry();
     // Fence membership persistence before any network callback can enqueue
     // more work; the physical drain below completes before store teardown.
     const membershipPersistDrain = this.contextGraphMembershipPersistence?.closeAndDrain()
@@ -2398,11 +2401,11 @@ export class DKGAgent extends DKGAgentBase {
     // rc.9 PR-10: joinApprovalRetryTimer + joinApprovalRetryQueue
     // deleted; substrate outbox owns retry state and drains itself
     // via the messengerOutboxTimer cleared just above.
-    this.clearRandomSamplingBindRetry();
     this.clearStorageACKRegistrationRetry();
     this.storageACKRegistrationRetryInFlight = false;
     if (this.randomSamplingHandle) {
       const handle = this.randomSamplingHandle;
+      this.randomSamplingHandleRetiring = true;
       try {
         await stopRandomSamplingHandleWithin(
           handle,
@@ -2429,6 +2432,7 @@ export class DKGAgent extends DKGAgentBase {
       }
       if (this.randomSamplingHandle === handle) {
         this.randomSamplingHandle = null;
+        this.randomSamplingHandleRetiring = false;
       }
     }
     // rc.9 PR-G codex follow-up #G3: drain background substrate
