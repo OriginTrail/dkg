@@ -281,7 +281,12 @@ describe('EPCIS async capture publisher readiness', () => {
     expect(published).toEqual([
       {
         contextGraphId: 'epcis-test',
-        content: { private: VALID_OBJECT_EVENT_DOC },
+        content: { private: {
+          ...VALID_OBJECT_EVENT_DOC,
+          epcisBody: { eventList: VALID_OBJECT_EVENT_DOC.epcisBody!.eventList.map((event) => ({
+            ...event, '@type': ['https://gs1.github.io/EPCIS/ObjectEvent'],
+          })) },
+        } },
         // 3825614158 — the authenticated submitter is stamped as the admission owner on every
         // capture, beside the client's publish options.
         opts: { accessPolicy: 'allowList', allowedPeers: ['peer-a'], admittedByAgentAddress: '0x0' },
@@ -312,7 +317,12 @@ describe('EPCIS async capture publisher readiness', () => {
     expect(published).toEqual([
       {
         contextGraphId: 'per-request-cg',
-        content: { private: VALID_OBJECT_EVENT_DOC },
+        content: { private: {
+          ...VALID_OBJECT_EVENT_DOC,
+          epcisBody: { eventList: VALID_OBJECT_EVENT_DOC.epcisBody!.eventList.map((event) => ({
+            ...event, '@type': ['https://gs1.github.io/EPCIS/ObjectEvent'],
+          })) },
+        } },
         opts: { subGraphName: 'research', admittedByAgentAddress: '0x0' },
       },
     ]);

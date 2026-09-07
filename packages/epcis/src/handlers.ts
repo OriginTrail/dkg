@@ -261,6 +261,26 @@ export async function handleEventsQuery(
 
 const validator = createValidator();
 
+// The selected document is schema-validated before publication. A secondary
+// private slot may contain a partial JSON-LD document, so slot contents remain
+// unknown at this boundary; only these two named visibility slots are handled.
+interface CaptureContent {
+  public?: unknown;
+  private?: unknown;
+}
+
+interface ResolvedCaptureContent {
+  document: unknown;
+  content: CaptureContent;
+}
+
+function normalizeCaptureContent(content: CaptureContent): CaptureContent {
+  return {
+    ...('public' in content ? { public: normalizeCaptureEventTypes(content.public) } : {}),
+    ...('private' in content ? { private: normalizeCaptureEventTypes(content.private) } : {}),
+  };
+}
+
 export async function handleCaptureAsync(
   request: CaptureRequest,
   config: AsyncCaptureConfig,
@@ -282,12 +302,7 @@ export async function handleCaptureAsync(
       }
     : undefined;
 
-  const normalizedContent = Object.fromEntries(
-    Object.entries(content as Record<string, unknown>).map(([visibility, doc]) => [
-      visibility, normalizeCaptureEventTypes(doc),
-    ]),
-  );
-  const result = await config.publisher.publishAsync(effectiveContextGraphId, normalizedContent, opts);
+  const result = await config.publisher.publishAsync(effectiveContextGraphId, normalizeCaptureContent(content), opts);
 
   return {
     captureID: result.captureID,
@@ -297,7 +312,7 @@ export async function handleCaptureAsync(
   };
 }
 
-function resolveCaptureContent(epcisDocument: unknown): { document: unknown; content: unknown } {
+function resolveCaptureContent(epcisDocument: unknown): ResolvedCaptureContent {
   if (!epcisDocument || typeof epcisDocument !== 'object' || Array.isArray(epcisDocument)) {
     return { document: epcisDocument, content: { private: epcisDocument } };
   }
@@ -319,7 +334,7 @@ function resolveCaptureContent(epcisDocument: unknown): { document: unknown; con
     throw new EpcisValidationError(['Privacy envelope requires a public or private EPCIS document']);
   }
 
-  const content: Record<string, unknown> = {};
+  const content: CaptureContent = {};
   if (hasPublic) {
     content.public = publicDoc;
   }
