@@ -43,6 +43,7 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}) {
     ranges: [] as Array<readonly [number, number]>,
     staticCalls: [] as Array<readonly [bigint, { blockTag: number }]>,
     deploymentReads: [] as Array<readonly [string, string, string]>,
+    readPolicies: [] as unknown[],
   };
 
   const logs: Record<string, readonly ReturnType<typeof event>[]> = {
@@ -109,7 +110,11 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}) {
   adapter.readTipProvider = async (
     _label: string,
     read: (selectedProvider: typeof provider) => Promise<unknown>,
-  ) => read(provider);
+    options: unknown,
+  ) => {
+    evidence.readPolicies.push(options);
+    return read(provider);
+  };
   adapter.resolveContractDeployBlock = async (
     address: string,
     operation: string,
@@ -154,6 +159,10 @@ describe('RFC-64 Context Graph authority snapshots', () => {
       'getContextGraphAuthoritySnapshot',
       'ContextGraphStorage',
     ]]);
+    expect(evidence.readPolicies).toEqual([{
+      signal: undefined,
+      policy: 'wideLogScan',
+    }]);
     expect(evidence.filters).toEqual([
       ['ContextGraphCreated', 9n],
       ['Transfer', null, null, 9n],

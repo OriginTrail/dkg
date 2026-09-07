@@ -1040,7 +1040,11 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           sourceBlockHash: source.blockHash.toLowerCase(),
         });
       },
-      { signal: options.signal },
+      // This one stable snapshot includes a deployment-anchored creation-log
+      // lookup plus post-creation event pages. It is a bounded log scan, not a
+      // point read, so the generic 4s multi-RPC attempt cap is too short on a
+      // mature public registry.
+      { signal: options.signal, policy: 'wideLogScan' },
     );
   }
 
