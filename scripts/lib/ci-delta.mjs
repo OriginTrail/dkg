@@ -151,8 +151,8 @@ export const WORKSPACE_RULES = Object.freeze({
     evmScopes: [],
   },
   'packages/epcis': {
-    lanes: ['bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
-    evmScopes: [],
+    lanes: ['tornado_agent', 'bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    evmScopes: ['agent'],
   },
   'packages/mcp-dkg': {
     lanes: ['bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
