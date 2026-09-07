@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import TOML from '@iarna/toml';
 import { inspectRegistration, removeRegistration } from '../src/mcp-client-config.js';
+import { writeMcpConfigAtomic } from '../src/mcp-config-file.js';
 import { type ClientTarget, type McpClientId, type McpClientConfigShape } from '../src/mcp-client-registry.js';
 import { dkgDir, configPath } from '../src/config.js';
 import { dkgAuthTokenPath } from '@origintrail-official/dkg-core';
@@ -46,6 +47,45 @@ function read(client: ClientTarget): Record<string, any> {
 }
 
 describe('MCP registration removal', () => {
+  it('refuses to replace a dangling config symlink during a write', () => {
+    const client = target('dangling');
+    fs.symlinkSync('missing-target.json', client.configPath);
+    const entries = fs.readdirSync(root);
+    expect(() => writeMcpConfigAtomic(client.configPath, '{}\n')).toThrow();
+    expect(fs.lstatSync(client.configPath).isSymbolicLink()).toBe(true);
+    expect(fs.readlinkSync(client.configPath)).toBe('missing-target.json');
+    expect(fs.readdirSync(root)).toEqual(entries);
+  });
+
+  it('updates a symlink target while retaining the config link and leaving no temporary file', () => {
+    const client = target('linked');
+    const real = target('real');
+    seed(real);
+    fs.symlinkSync(real.configPath, client.configPath);
+    const entries = fs.readdirSync(root);
+    expect(removeRegistration(client)).toBe(true);
+    expect(fs.lstatSync(client.configPath).isSymbolicLink()).toBe(true);
+    expect(fs.readlinkSync(client.configPath)).toBe(real.configPath);
+    expect(read(real).mcpServers).toEqual({ other: { command: 'other-server', custom: 'keep' } });
+    expect(fs.readdirSync(root)).toEqual(entries);
+  });
+
+  it.each([
+    '"dkg":{"command":"dkg"},"other":{"clientId":9007199254740993}',
+    '"other":{"clientId":9007199254740993},"dkg":{"command":"dkg"}',
+    '"dkg":{"command":"dkg"}',
+  ])('retains unrelated numeric lexemes when removing strict JSON registration: %s', (servers) => {
+    const client = target('lossless');
+    const raw = `{\n "clientId":9007199254740993, "ratio":1.2300e+06, "mcpServers":{${servers}}\n}\n`;
+    writeFileSync(client.configPath, raw);
+    expect(removeRegistration(client)).toBe(true);
+    const result = readFileSync(client.configPath, 'utf8');
+    expect(result).toContain('"clientId":9007199254740993');
+    expect(result).toContain('"ratio":1.2300e+06');
+    expect(JSON.parse(result).mcpServers).not.toHaveProperty('dkg');
+    if (servers.includes('"other"')) expect(result).toContain('"other":{"clientId":9007199254740993}');
+  });
+
   it('removes DKG from VS Code JSONC while preserving comments, trailing commas and siblings', async () => {
     const client = target('VSCode', 'servers', 'jsonc');
     const raw = '{\n  // operator preference\n  "setting": "keep",\n  "servers": {\n    "dkg": { "command": "dkg" },\n    // unrelated server\n    "other": { "command": "other" },\n  },\n}\n';
