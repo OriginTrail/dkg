@@ -1,3 +1,4 @@
+import { EPCIS_TYPE_PREFIX } from './epcis-vocabulary.js';
 import {
   contextGraphDataUri,
   contextGraphMetaUri,
@@ -10,7 +11,7 @@ import {
 import type { EpcisQueryParams } from './types.js';
 
 const PREFIXES = `
-PREFIX epcis: <https://gs1.github.io/EPCIS/>
+PREFIX epcis: <${EPCIS_TYPE_PREFIX}>
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 PREFIX dkg: <http://dkg.io/ontology/>
 `;
@@ -89,7 +90,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   wherePatterns.push('?event a ?eventType .');
 
   // Must be an EPCIS event type
-  filterClauses.push('FILTER(STRSTARTS(STR(?eventType), "https://gs1.github.io/EPCIS/"))');
+  filterClauses.push(`FILTER(STRSTARTS(STR(?eventType), "${EPCIS_TYPE_PREFIX}"))`);
 
   // eventID filter — matches the RDF subject (the event's @id / rootEntity)
   if (params.eventID) {
@@ -98,7 +99,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
 
   // eventType filter — narrow to a specific EPCIS event type
   if (params.eventType) {
-    filterClauses.push(`FILTER(?eventType = <https://gs1.github.io/EPCIS/${escapeSparql(params.eventType)}>)`);
+    filterClauses.push(`FILTER(?eventType = <${EPCIS_TYPE_PREFIX}${escapeSparql(params.eventType)}>)`);
   }
 
   // EPC filter — match epcList OR childEPCs per Section 8.2.7.1.

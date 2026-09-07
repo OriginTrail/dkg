@@ -421,6 +421,11 @@ describe('toEpcisEvent', () => {
     expect(event.type).toBe('ObjectEvent');
   });
 
+  it('preserves the namespace of a GS1 extended event type in responses', () => {
+    expect(toEpcisEvent(makeBindings({ eventType: 'https://gs1.github.io/EPCIS/CustomEvent' })).type)
+      .toBe('https://gs1.github.io/EPCIS/CustomEvent');
+  });
+
   it('strips AggregationEvent URI to short name', () => {
     const binding = makeBindings({ eventType: 'https://gs1.github.io/EPCIS/AggregationEvent' });
     const event = toEpcisEvent(binding);

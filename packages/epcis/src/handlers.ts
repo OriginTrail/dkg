@@ -1,3 +1,4 @@
+import { compactEpcisEventType } from './epcis-vocabulary.js';
 import { createValidator } from './validation.js';
 import { normalizeCaptureEventTypes } from './capture-event-types.js';
 import { buildEpcisQuery } from './query-builder.js';
@@ -64,7 +65,6 @@ export interface EventsQueryResult {
 const DEFAULT_PER_PAGE = 30;
 const MAX_PER_PAGE = 1000;
 
-const EPCIS_TYPE_PREFIX = 'https://gs1.github.io/EPCIS/';
 
 /**
  * Strip N-Quads literal wrapping from a SPARQL binding value.
@@ -108,11 +108,7 @@ export function toEpcisEvent(binding: Record<string, string>): Record<string, un
 
   // Strip eventType URI prefix to short name
   const rawType = unwrapLiteral(binding['eventType'] ?? '');
-  if (rawType.startsWith(EPCIS_TYPE_PREFIX)) {
-    event.type = rawType.slice(EPCIS_TYPE_PREFIX.length);
-  } else if (rawType) {
-    event.type = rawType;
-  }
+  if (rawType) event.type = compactEpcisEventType(rawType);
 
   // Simple string fields — unwrap N-Quads literal quoting, include only when non-empty
   const eventTime = unwrapLiteral(binding['eventTime']);

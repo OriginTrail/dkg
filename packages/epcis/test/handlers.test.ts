@@ -1,5 +1,6 @@
+import { compactEpcisEventType } from '../src/epcis-vocabulary.js';
 import { describe, it, expect } from 'vitest';
-import { handleCaptureAsync } from '../src/handlers.js';
+import { handleCaptureAsync, EpcisValidationError } from '../src/handlers.js';
 import { normalizeCaptureEventTypes } from '../src/capture-event-types.js';
 import type { AsyncPublisher } from '../src/types.js';
 import { VALID_OBJECT_EVENT_DOC, INVALID_DOC, EMPTY_EVENT_LIST_DOC } from './fixtures/bicycle-story.js';
@@ -32,6 +33,7 @@ describe('handleCaptureAsync', () => {
       const document = {
         epcisBody: { eventList: [{ type, '@type': 'urn:example:ExistingType', eventTime: '2024-03-01T08:00:00Z' }] },
       };
+      expect(compactEpcisEventType(type)).toBe(name);
       const before = structuredClone(document);
       expect(normalizeCaptureEventTypes(document)).toEqual({
         epcisBody: { eventList: [{ ...document.epcisBody.eventList[0],
@@ -41,6 +43,39 @@ describe('handleCaptureAsync', () => {
       expect(document).toEqual(before);
     },
   );
+
+  const standardShapes = [
+    { name: 'ObjectEvent', fields: { action: 'OBSERVE', epcList: [] }, invalid: { action: 'INVALID' } },
+    { name: 'AggregationEvent', fields: { action: 'ADD', childEPCs: ['urn:epc:id:sgtin:1.2.3'] }, invalid: { action: 'INVALID' } },
+    { name: 'TransactionEvent', fields: { action: 'OBSERVE', epcList: [], bizTransactionList: [{ type: 'https://ref.gs1.org/cbv/BTT-po', bizTransaction: 'urn:example:order:1' }] }, invalid: { action: 'INVALID' } },
+    { name: 'TransformationEvent', fields: { inputEPCList: ['urn:epc:id:sgtin:1.2.3'], outputEPCList: ['urn:epc:id:sgtin:1.2.4'] }, invalid: { inputEPCList: 'not-an-array' } },
+    { name: 'AssociationEvent', fields: { action: 'ADD', parentID: 'urn:epc:id:sscc:1.2', childEPCs: ['urn:epc:id:sgtin:1.2.3'] }, invalid: { action: 'INVALID' } },
+  ].flatMap((entry) => [entry.name, `https://gs1.github.io/EPCIS/${entry.name}`].map((type) => ({ ...entry, type })));
+
+  it.each(standardShapes)('validates the standard shape for $type before publication', async ({ name, type, fields, invalid }) => {
+    const event = { type, eventTime: '2024-03-01T08:00:00Z', eventTimeZoneOffset: '+00:00', ...fields };
+    const document = { ...VALID_OBJECT_EVENT_DOC, epcisBody: { eventList: [event] } };
+    const before = structuredClone(document);
+    const publisher = trackingAsyncPublisher();
+    await handleCaptureAsync({ epcisDocument: document }, { contextGraphId: CONTEXT_GRAPH_ID, publisher });
+    expect(publisher.calls[0].doc.private.epcisBody.eventList[0]).toMatchObject({ type, '@type': [`https://gs1.github.io/EPCIS/${name}`] });
+    expect(document).toEqual(before);
+    const invalidPublisher = trackingAsyncPublisher();
+    await expect(handleCaptureAsync({ epcisDocument: { ...document, epcisBody: { eventList: [{ ...event, ...invalid }] } } }, {
+      contextGraphId: CONTEXT_GRAPH_ID, publisher: invalidPublisher,
+    })).rejects.toThrow(EpcisValidationError);
+    expect(invalidPublisher.calls).toHaveLength(0);
+  });
+
+  it('rejects a canonical ObjectEvent without its required action before publication', async () => {
+    const document = structuredClone(VALID_OBJECT_EVENT_DOC);
+    document.epcisBody!.eventList[0].type = 'https://gs1.github.io/EPCIS/ObjectEvent';
+    delete document.epcisBody!.eventList[0].action;
+    const publisher = trackingAsyncPublisher();
+    await expect(handleCaptureAsync({ epcisDocument: document }, { contextGraphId: CONTEXT_GRAPH_ID, publisher }))
+      .rejects.toThrow(EpcisValidationError);
+    expect(publisher.calls).toHaveLength(0);
+  });
 
   it('preserves explicit extra RDF types when normalizing an envelope fragment', async () => {
     const document = structuredClone(VALID_OBJECT_EVENT_DOC);
