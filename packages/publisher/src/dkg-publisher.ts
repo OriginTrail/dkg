@@ -5,10 +5,16 @@ import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
-import { GraphManager, deleteByPatternWithoutCount, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
+import { GraphManager, deleteByPatternWithoutCount, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, quadsToNQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
-import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublicationPricingPolicy, type PublishOptions, type PublishLifecycleHooks, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
+import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishLifecycleHooks, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
+import {
+  assertPublicationPricingPolicyApplicable,
+  formatPublicationPricingPolicyRequirement,
+  parsePublicationPricingPolicy,
+  resolvePublicationPricingByteSize,
+} from './publication-pricing.js';
 import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
 import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
 import { withKeyedLocks } from './keyed-lock.js';
@@ -594,22 +600,6 @@ function resolvePublishEpochsOverride(value: number | undefined): number | undef
     throw new Error(`publishEpochs must be a positive uint32 integer, got ${String(value)}`);
   }
   return value;
-}
-
-function resolvePublicationPricingPolicy(
-  value: PublicationPricingPolicy | undefined,
-): PublicationPricingPolicy | undefined {
-  if (value === undefined || value === 'full-content') return value;
-  throw new Error(`pricingPolicy must be "full-content" when supplied, got ${String(value)}`);
-}
-
-function serializeQuadsForBytePricing(quads: readonly Quad[], fallbackGraph: string): string {
-  return quads
-    .map(
-      (q) =>
-        `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph || fallbackGraph}> .`,
-    )
-    .join('\n');
 }
 
 function isLegacyV10ACKProvider(
@@ -2687,7 +2677,13 @@ export class DKGPublisher implements Publisher {
 
   async publish(options: PublishOptions): Promise<PublishResult> {
     const explicitPublishEpochs = resolvePublishEpochsOverride(options.publishEpochs);
-    const pricingPolicy = resolvePublicationPricingPolicy(options.pricingPolicy);
+    const pricingPolicyResult = parsePublicationPricingPolicy(options.pricingPolicy);
+    if (!pricingPolicyResult.ok) {
+      throw new Error(
+        `${formatPublicationPricingPolicyRequirement('pricingPolicy')}, got ${String(options.pricingPolicy)}`,
+      );
+    }
+    const pricingPolicy = pricingPolicyResult.value;
 
     // Sub-graph routing: data triples go to `did:dkg:context-graph:{id}/{subGraph}`.
     // KC metadata (status, authorship proofs) stays in the root `_meta` graph so that
@@ -2745,11 +2741,10 @@ export class DKGPublisher implements Publisher {
     const normalizedAllowedPeers = [...new Set((allowedPeers ?? []).map((p) => p.trim()).filter(Boolean))];
     const normalizedPublisherPeerId = publisherPeerId.trim();
     const graphPublish = resolveGraphScopedPublishDescriptor(options);
-    if (pricingPolicy === 'full-content' && !graphPublish) {
-      throw new Error(
-        'pricingPolicy "full-content" requires a graph-scoped initial publication',
-      );
-    }
+    assertPublicationPricingPolicyApplicable(pricingPolicy, {
+      kind: 'initial',
+      graphScoped: graphPublish !== undefined,
+    });
     const onChainContextGraphId = options.onChainContextGraphId ?? options.publishContextGraphId;
     let publisherContextGraphId: bigint | undefined;
     try {
@@ -3031,7 +3026,11 @@ export class DKGPublisher implements Publisher {
     onPhase?.('store', 'end');
 
     // Compute publicByteSize early — needed for signature collection
-    const nquadsStr = serializeQuadsForBytePricing(allSkolemizedQuads, dataGraph);
+    const nquadsStr = quadsToNQuads(
+      allSkolemizedQuads.map((quad) => (
+        quad.graph ? quad : { ...quad, graph: dataGraph }
+      )),
+    );
     const publicNquadsBytes = new TextEncoder().encode(nquadsStr);
     const publicByteSize = BigInt(publicNquadsBytes.length);
 
@@ -3184,15 +3183,15 @@ export class DKGPublisher implements Publisher {
     // policy computes a higher token quote from the publisher's canonical
     // public+private payload while ACKs and the chain continue to attest the
     // exact network-visible catalog/public bytes in `effectiveByteSize`.
-    const fullContentByteSize = pricingPolicy === 'full-content'
-      ? publicByteSize
-        + BigInt(new TextEncoder().encode(
-            serializeQuadsForBytePricing(canonicalPrivateQuads, dataGraph),
-          ).length)
-        + (allSkolemizedQuads.length > 0 && canonicalPrivateQuads.length > 0 ? 1n : 0n)
-      : effectiveByteSize;
-    const pricingByteSize = fullContentByteSize > effectiveByteSize
-      ? fullContentByteSize
+    const requestedPricingByteSize = resolvePublicationPricingByteSize({
+      policy: pricingPolicy,
+      networkVisibleByteSize: effectiveByteSize,
+      publicQuads: allSkolemizedQuads,
+      privateQuads: canonicalPrivateQuads,
+      fallbackGraph: dataGraph,
+    });
+    const pricingByteSize = requestedPricingByteSize > effectiveByteSize
+      ? requestedPricingByteSize
       : effectiveByteSize;
     const finalizedPublisherPlan = await publisherPlanning.finalize({
       explicitPublishEpochs,

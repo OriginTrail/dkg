@@ -45,6 +45,7 @@ import type {
 } from '@origintrail-official/dkg-core';
 import type {
   PublisherAssertionPromoteOptions,
+  PublicationPricingPolicy,
   PhaseCallback,
   SharedMemoryPublicSnapshotStorageConfig,
   StorageAckTiming,
@@ -357,7 +358,7 @@ export interface PublishOpts {
   /** Optional on-chain publish lifetime override in epochs. */
   publishEpochs?: number;
   /** Optional token-pricing basis for graph-scoped initial publications. */
-  pricingPolicy?: 'full-content';
+  pricingPolicy?: PublicationPricingPolicy;
   /** Optional known numeric on-chain context graph id for direct publish callers. */
   onChainContextGraphId?: string;
   /** RFC-001 §4 per-publish attribution override; `0n` = mode d. */

@@ -12,6 +12,7 @@ import type {
   JournalReadResult,
   LiftJobRetryProjection,
   PersistedLiftJob,
+  PublicationPricingPolicy,
 } from '@origintrail-official/dkg-publisher';
 import {
   isSafeJobId,
@@ -1098,7 +1099,7 @@ export class ApiClient {
     options?: KnowledgeAssetPublishAuthorSelection & {
       clearAfter?: boolean;
       publishEpochs?: number;
-      pricingPolicy?: 'full-content';
+      pricingPolicy?: PublicationPricingPolicy;
       publisherNodeIdentityIdOverride?: bigint;
     },
   ): Promise<{
@@ -1145,7 +1146,7 @@ export class ApiClient {
       schemeVersion?: number;
       clearAfter?: boolean;
       publishEpochs?: number;
-      pricingPolicy?: 'full-content';
+      pricingPolicy?: PublicationPricingPolicy;
       publisherNodeIdentityIdOverride?: bigint;
     },
   ): Promise<{

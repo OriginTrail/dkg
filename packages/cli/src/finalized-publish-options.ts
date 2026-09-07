@@ -1,16 +1,21 @@
 import { MAX_UINT72_DECIMAL, parseUint72Decimal } from '@origintrail-official/dkg-core';
+import {
+  formatPublicationPricingPolicyRequirement,
+  parsePublicationPricingPolicy,
+  type PublicationPricingPolicy,
+} from '@origintrail-official/dkg-publisher';
 
 export interface KnowledgeAssetFinalizedPublishOptions {
   clearAfter?: boolean;
   publishEpochs?: number;
-  pricingPolicy?: 'full-content';
+  pricingPolicy?: PublicationPricingPolicy;
   publisherNodeIdentityIdOverride?: bigint;
 }
 
 export interface NormalizedFinalizedPublishOptions {
   clearSharedMemoryAfter?: boolean;
   publishEpochs?: number;
-  pricingPolicy?: 'full-content';
+  pricingPolicy?: PublicationPricingPolicy;
   publisherNodeIdentityIdOverride?: bigint;
 }
 
@@ -43,7 +48,7 @@ export function parseCliFinalizedPublishOptions(raw: {
 }): FinalizedPublishOptionParseResult<KnowledgeAssetFinalizedPublishOptions> {
   const publishEpochs = parsePublishEpochs(raw.publishEpochs, 'publishEpochs');
   if (!publishEpochs.ok) return publishEpochs;
-  const pricingPolicy = parsePricingPolicy(raw.pricingPolicy, 'pricingPolicy');
+  const pricingPolicy = parseFinalizedPublishPricingPolicy(raw.pricingPolicy, 'pricingPolicy');
   if (!pricingPolicy.ok) return pricingPolicy;
   const publisherNodeIdentityIdOverride = parsePublishUint72IdentityId(
     raw.publisherNodeIdentityId,
@@ -76,7 +81,7 @@ export function parseHttpFinalizedPublishOptions(
     hasPublishEpochs ? 'publishEpochs' : 'epochs',
   );
   if (!publishEpochs.ok) return publishEpochs;
-  const pricingPolicy = parsePricingPolicy(source.pricingPolicy, 'pricingPolicy');
+  const pricingPolicy = parseFinalizedPublishPricingPolicy(source.pricingPolicy, 'pricingPolicy');
   if (!pricingPolicy.ok) return pricingPolicy;
   const publisherNodeIdentityIdOverride = parsePublishUint72IdentityId(
     source.publisherNodeIdentityIdOverride,
@@ -123,7 +128,7 @@ function parseSdkFinalizedPublishOptions(
   if (!clearAfter.ok) return clearAfter;
   const publishEpochs = parsePublishEpochs(options.publishEpochs, 'publishEpochs');
   if (!publishEpochs.ok) return publishEpochs;
-  const pricingPolicy = parsePricingPolicy(options.pricingPolicy, 'pricingPolicy');
+  const pricingPolicy = parseFinalizedPublishPricingPolicy(options.pricingPolicy, 'pricingPolicy');
   if (!pricingPolicy.ok) return pricingPolicy;
   const publisherNodeIdentityIdOverride = parsePublishUint72IdentityId(
     options.publisherNodeIdentityIdOverride,
@@ -184,19 +189,17 @@ export function formatFinalizedPublishOptionError(
     case 'boolean':
       return `${field} must be a boolean when supplied`;
     case 'pricing-policy':
-      return `${field} must be "full-content" when supplied`;
+      return formatPublicationPricingPolicyRequirement(field);
   }
 }
 
-function parsePricingPolicy(
+function parseFinalizedPublishPricingPolicy(
   value: unknown,
   field: string,
-): { ok: true; value?: 'full-content' } | { ok: false; error: FinalizedPublishOptionParseError } {
-  if (value === undefined) return { ok: true };
-  if (value !== 'full-content') {
-    return { ok: false, error: { kind: 'pricing-policy', field } };
-  }
-  return { ok: true, value };
+): { ok: true; value?: PublicationPricingPolicy } | { ok: false; error: FinalizedPublishOptionParseError } {
+  const parsed = parsePublicationPricingPolicy(value);
+  if (!parsed.ok) return { ok: false, error: { kind: 'pricing-policy', field } };
+  return parsed;
 }
 
 function publishIntegerString(

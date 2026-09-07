@@ -1,4 +1,5 @@
 import { Command } from 'commander';
+import { PUBLICATION_PRICING_POLICIES } from '@origintrail-official/dkg-publisher';
 import {
   formatFinalizedPublishOptionError,
   type KnowledgeAssetFinalizedPublishOptions,
@@ -9,7 +10,10 @@ import type { ActionOpts } from '../cli-helpers.js';
 export function addFinalizedPublishOptions(command: Command): Command {
   return command
     .option('--publish-epochs <count>', 'On-chain publish lifetime in epochs (default: 12; PCA-funded publishes may coerce to PCA lock duration)')
-    .option('--pricing-policy <policy>', 'Token pricing basis (supported: full-content)')
+    .option(
+      '--pricing-policy <policy>',
+      `Token pricing basis (supported: ${PUBLICATION_PRICING_POLICIES.join(', ')})`,
+    )
     .option('--publisher-node-identity-id <id>', 'Publisher node identity id override; use 0 for no-attribution');
 }
 

@@ -169,6 +169,7 @@ import {
   type WorkspaceSenderKeyEncryptInput,
   createResolveCurrentWorkspaceGossipPayload,
   parseEncodedWorkspaceGossipPayload,
+  assertPublicationPricingPolicyApplicable,
   type EncodedWorkspaceGossipPayload,
   type SharedMemoryPublicSnapshotStorageConfig,
 } from '@origintrail-official/dkg-publisher';
@@ -4448,10 +4449,8 @@ export class PublishMethods extends DKGAgentBase {
       }
       if (refuse) throw updateAttestationNotCustodialError(agentAddress);
     }
-    if (history.vmCurrentAssertion && opts?.pricingPolicy !== undefined) {
-      throw new Error(
-        'pricingPolicy is currently supported only for initial VM publications, not updates',
-      );
+    if (history.vmCurrentAssertion) {
+      assertPublicationPricingPolicyApplicable(opts?.pricingPolicy, { kind: 'update' });
     }
     if (!(await publisher.hasSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName))) {
       throw Object.assign(
@@ -5354,10 +5353,8 @@ export class PublishMethods extends DKGAgentBase {
     const stripLit = (v?: string) => v?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
     const pointerRow = pointerRes.type === 'bindings' ? pointerRes.bindings[0] : undefined;
     const vmCurrent = request.vmCurrentAssertion ?? stripLit(pointerRow?.['vm']);
-    if (vmCurrent && request.pricingPolicy !== undefined) {
-      throw new Error(
-        'pricingPolicy is currently supported only for initial VM publications, not updates',
-      );
+    if (vmCurrent) {
+      assertPublicationPricingPolicyApplicable(request.pricingPolicy, { kind: 'update' });
     }
     const stampedNumberStr = request.kaNumber ?? stripLit(pointerRow?.['kaNum']);
 
@@ -5887,10 +5884,8 @@ export class PublishMethods extends DKGAgentBase {
     const stripLit = (v?: string) => v?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
     const pointerRow = pointerRes.type === 'bindings' ? pointerRes.bindings[0] : undefined;
     const vmCurrent = stripLit(pointerRow?.['vm']);
-    if (vmCurrent && opts?.pricingPolicy !== undefined) {
-      throw new Error(
-        'pricingPolicy is currently supported only for initial VM publications, not updates',
-      );
+    if (vmCurrent) {
+      assertPublicationPricingPolicyApplicable(opts?.pricingPolicy, { kind: 'update' });
     }
     const stampedNumberStr = stripLit(pointerRow?.['kaNum']);
 

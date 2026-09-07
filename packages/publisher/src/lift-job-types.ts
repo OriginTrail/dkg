@@ -6,7 +6,7 @@ import type {
   LiftTransitionType,
 } from './lift-job-states.js';
 import type { LiftJobFailureMetadata } from './lift-job-failures.js';
-import type { PublicationPricingPolicy } from './publisher.js';
+import type { PublicationPricingPolicy } from './publication-pricing.js';
 
 export type LiftJobHex = `0x${string}`;
 

@@ -33,6 +33,7 @@ import {
 import {
   AsyncLiftJobConflictError,
   LiftJobPendingChainProofError,
+  PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE,
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
   resolveLiftWorkspaceSlice,
@@ -1213,6 +1214,38 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     });
 
     for (const lane of ['vm/publish', 'vm/publish-async'] as const) {
+      it(`${lane} maps update-only pricing misuse to 409 and performs no async enqueue`, async () => {
+        const attempted: string[] = [];
+        const unsupportedUpdate = () => {
+          attempted.push(lane);
+          throw Object.assign(
+            new Error('pricingPolicy is currently supported only for initial VM publications, not updates'),
+            { code: PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE },
+          );
+        };
+        const enqueued: unknown[] = [];
+        await startWith({}, {
+          publishFromFinalizedAssertion: unsupportedUpdate,
+          resolveFinalizedAssertionVmPublishIntent: unsupportedUpdate,
+        }, {}, {
+          enqueueKnowledgeAssetVmPublish: async (intent: unknown) => {
+            enqueued.push(intent);
+            return 'job-should-not-exist';
+          },
+        });
+
+        const res = await post(lane, {
+          contextGraphId: CG_ID,
+          options: { pricingPolicy: 'full-content' },
+        });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe(PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE);
+        expect(String(res.body.error)).toMatch(/initial VM publications/);
+        expect(attempted).toEqual([lane]);
+        expect(enqueued).toHaveLength(0);
+      });
+
       it(`${lane} answers a non-resident selection with 409 + candidates, not a generic 500`, async () => {
         const candidates = [SELECTED, '0x00000000000000000000000000000000000000b8'];
         const notResident = () => {

@@ -15,18 +15,11 @@ export interface PreBroadcastRecord extends PreBroadcastSignal {
 }
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { TrustedCatalogTripleKeys } from './catalog-trust.js';
+import type { PublicationPricingPolicy } from './publication-pricing.js';
 
 export const DEFAULT_PUBLISH_EPOCHS = 12;
 /** PublishIntent encodes epochs as uint32; reject larger overrides before wire encoding. */
 export const MAX_PUBLISH_EPOCHS = 0xffffffff;
-
-/**
- * Optional pricing basis for a publication. The default keeps the established
- * network-visible byte-size basis. `full-content` quotes from the canonical
- * public and private RDF held by the publisher without changing what replicas
- * receive or what `publicByteSize` attests.
- */
-export type PublicationPricingPolicy = 'full-content';
 
 export interface KAManifestEntry {
   tokenId: bigint;

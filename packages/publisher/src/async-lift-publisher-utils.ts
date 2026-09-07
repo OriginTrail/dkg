@@ -17,8 +17,7 @@ import type {
   RawLiftRequest,
 } from './lift-job.js';
 import { parseLiteral } from './async-lift-control-plane.js';
-
-const PUBLICATION_PRICING_POLICIES = ['full-content'] as const;
+import { PUBLICATION_PRICING_POLICIES } from './publication-pricing.js';
 export {
   CONTROL_CLAIM_TOKEN,
   CONTROL_LOCKED_JOB,
