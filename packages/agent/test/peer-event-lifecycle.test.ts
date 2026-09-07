@@ -6,6 +6,57 @@ import { createPeerEventFixture, deferred, flushMicrotasks } from './_helpers/pe
 const PROBE = { protocolsKey: null, connectionKey: null } satisfies Awaited<ReturnType<DKGAgent['getSyncReconcilerProbe']>>;
 
 describe('peer-event lifecycle', () => {
+  it.each(['denied', 'failed'] as const)('clears pending replay when connection admission is %s', async (outcome) => {
+    const f = await createPeerEventFixture();
+    try {
+      vi.spyOn(f.agent, 'readRfc64CatalogResponsibilitiesV1').mockReturnValue([{
+        contextGraphId: 'connection-catalog', responsible: true, active: true, mode: 'catalog',
+        responsibilityReason: 'private-membership', selectionSource: 'default',
+      }]);
+      const admission = vi.spyOn(f.agent.networkAdmissionCoordinator, 'ensureAdmitted');
+      if (outcome === 'denied') admission.mockResolvedValue(false);
+      else admission.mockRejectedValue(new Error('admission unavailable'));
+      const markPending = vi.spyOn(f.agent, 'markRfc64CatalogReplayPeerPendingV1');
+      const clearPending = vi.spyOn(f.agent, 'clearRfc64CatalogReplayPeerPendingV1');
+      const enrich = vi.spyOn(f.agent, 'enrichPeerStoreFromInboundCircuit');
+      const queue = vi.spyOn(f.agent, 'queueSyncFromPeerOnConnect');
+      const warn = vi.spyOn(f.state.log, 'warn').mockImplementation(() => {});
+      f.dispatchOpen();
+      await vi.waitFor(() => expect(clearPending).toHaveBeenCalledWith('connection-catalog', f.peerId));
+      expect(markPending).toHaveBeenCalledWith('connection-catalog', f.peerId);
+      expect(enrich).not.toHaveBeenCalled();
+      expect(queue).not.toHaveBeenCalled();
+      if (outcome === 'failed') expect(warn).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('admission unavailable'));
+    } finally { await f.close(); }
+  });
+
+  it.each(['enrichment', 'sender-key'] as const)('continues catch-up after a best-effort %s failure', async (stage) => {
+    const f = await createPeerEventFixture();
+    try {
+      vi.spyOn(f.agent, 'readRfc64CatalogResponsibilitiesV1').mockReturnValue([{
+        contextGraphId: 'connection-catalog', responsible: true, active: true, mode: 'catalog',
+        responsibilityReason: 'private-membership', selectionSource: 'default',
+      }]);
+      vi.spyOn(f.agent.networkAdmissionCoordinator, 'ensureAdmitted').mockResolvedValue(true);
+      const enrich = vi.spyOn(f.agent, 'enrichPeerStoreFromInboundCircuit').mockResolvedValue();
+      const drain = vi.spyOn(f.agent, 'drainPendingSenderKeyForPeer').mockResolvedValue(2);
+      if (stage === 'enrichment') enrich.mockRejectedValue(new Error('enrichment unavailable'));
+      else drain.mockRejectedValue(new Error('sender-key unavailable'));
+      vi.spyOn(f.agent, 'reannounceRfc64CatalogHeadsToPeerV1').mockResolvedValue({ announced: 0, failed: 0, manifest: [] });
+      const replay = vi.spyOn(f.agent, 'requestRfc64CatalogHeadReplaysFromConnectedPeersV1')
+        .mockRejectedValue(new Error('replay unavailable'));
+      const queue = vi.spyOn(f.agent, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
+      const warn = vi.spyOn(f.state.log, 'warn').mockImplementation(() => {});
+      f.dispatchOpen();
+      await vi.waitFor(() => expect(queue).toHaveBeenCalledWith(f.peerId, expect.any(Function)));
+      await flushMicrotasks();
+      expect(drain).toHaveBeenCalledWith(f.peerId, expect.anything());
+      expect(replay).toHaveBeenCalledWith('connection-catalog');
+      expect(warn).toHaveBeenCalledWith(expect.anything(), expect.stringContaining(`${stage} unavailable`));
+      expect(warn).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('replay unavailable'));
+    } finally { await f.close(); }
+  });
+
   it('records the offline boundary so a same-instance restart immediately queues catch-up', async () => {
     const f = await createPeerEventFixture();
     try {
