@@ -428,7 +428,7 @@ export class Rfc64PublicCatalogServiceV1 {
         verifyIssuerSignature: this.#verifyIssuerSignature,
       });
     const stagingReconciler = {
-      isHeadApplied: async () => false,
+      isHeadSatisfied: async () => false,
       reconcileHead: (remotePeerId, announcement, signal) =>
         this.#stageHeadOnly(remotePeerId, announcement, signal, options.onHeadStaged),
     } satisfies Rfc64PublicCatalogReceiverReconcilerV1;
@@ -455,13 +455,13 @@ export class Rfc64PublicCatalogServiceV1 {
     const reconciler: Rfc64PublicCatalogReceiverReconcilerV1 = nativeReconciler === undefined
       ? stagingReconciler
       : {
-        isHeadApplied: (announcement) => (
+        isHeadSatisfied: (announcement) => (
           this.#resolveContextGraphAuthority(
             announcement.contextGraphId,
             'receiving',
           ).reconciliationLane
             === 'catalog-apply'
-            ? nativeReconciler.isHeadApplied(announcement)
+            ? nativeReconciler.isHeadSatisfied(announcement)
             : Promise.resolve(false)
         ),
         reconcileHead: (remotePeerId, announcement, signal) => {
@@ -480,7 +480,7 @@ export class Rfc64PublicCatalogServiceV1 {
             // enters the semantic mutation lane. Re-check while holding that
             // lane so an ambient hint and an awaited bootstrap cannot both
             // run post-commit lifecycle work for the same durable head.
-            if (await nativeReconciler.isHeadApplied(announcement)) {
+            if (await nativeReconciler.isHeadSatisfied(announcement)) {
               return 'applied' as const;
             }
             return nativeReconciler.reconcileHead(

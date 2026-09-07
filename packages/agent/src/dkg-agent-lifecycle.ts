@@ -4307,10 +4307,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.contextGraphSubscriptionAuthorityRetryTimer = null;
       if (!this.started || controller.signal.aborted) return;
       this.contextGraphSubscriptionAuthorityRetryInFlight = true;
-      this.rehydrateContextGraphSubscriptions({
-        allowColdRegistrationBinding: true,
-        signal: controller.signal,
-      })
+      this.retryUnavailableContextGraphSubscriptionAuthorities(controller.signal)
         .catch((error: unknown) => {
           if (controller.signal.aborted) return;
           this.log.warn(
@@ -10207,13 +10204,140 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     };
   }
 
-  async rehydrateContextGraphSubscriptions(
+  /**
+   * Retry only startup rows that remain dormant because authority was
+   * unavailable. This is deliberately not a second startup rehydration pass:
+   * active/capped rows are left untouched, and every candidate is checked
+   * against current dormancy, the persistence revision, and a fresh durable
+   * row immediately before activation.
+   */
+  async retryUnavailableContextGraphSubscriptionAuthorities(
     this: DKGAgent,
-    options: {
-      allowColdRegistrationBinding?: boolean;
-      signal?: AbortSignal;
-    } = {},
+    signal: AbortSignal,
   ): Promise<void> {
+    const store = this.config.contextGraphSubscriptionStore;
+    const status = this.contextGraphSubscriptionRehydrationStatus;
+    if (!store || !status?.rehydrationEnabled || signal.aborted) return;
+    const ctx = createOperationContext('init');
+    const candidates = [...this.contextGraphSubscriptionDormancyById]
+      .filter(([, reason]) => reason === 'authorityUnavailable')
+      .map(([id]) => id)
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+    const touchStatus = (): void => {
+      const current = this.contextGraphSubscriptionRehydrationStatus;
+      if (current === null) return;
+      this.contextGraphSubscriptionRehydrationStatus = {
+        ...current,
+        updatedAt: Date.now(),
+      };
+    };
+    const loadRow = async (contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null> => (
+      (await store.loadAll()).find((row) => row.id === contextGraphId) ?? null
+    );
+
+    for (const contextGraphId of candidates) {
+      if (signal.aborted) return;
+      if (
+        this.contextGraphSubscriptionDormancyById.get(contextGraphId)
+          !== 'authorityUnavailable'
+      ) continue;
+      const revision = this.contextGraphSubscriptionPersistRevisions.get(contextGraphId) ?? 0;
+      const candidate = await loadRow(contextGraphId);
+      if (candidate === null) {
+        this.updateContextGraphSubscriptionRehydrationStatusAfterClear([contextGraphId]);
+        continue;
+      }
+
+      const readAuthority = await this.resolveContextGraphReadAuthority(contextGraphId, {
+        allowSubscriptionFallback: false,
+        allowColdRegistrationBinding: true,
+        signal,
+      }).catch(() => ({
+        outcome: 'unavailable' as const,
+        source: 'legacy-local' as const,
+        reason: 'unexpected-authority-error',
+        metadataBootstrap: 'eligible' as const,
+      }));
+      if (signal.aborted) return;
+      if (
+        this.contextGraphSubscriptionDormancyById.get(contextGraphId)
+          !== 'authorityUnavailable'
+        || (this.contextGraphSubscriptionPersistRevisions.get(contextGraphId) ?? 0)
+          !== revision
+      ) continue;
+      if (readAuthority.outcome !== 'allowed') {
+        if (readAuthority.outcome === 'denied') {
+          this.contextGraphSubscriptionDormancyById.set(contextGraphId, 'authorityDenied');
+          touchStatus();
+        }
+        continue;
+      }
+
+      const currentRow = await loadRow(contextGraphId);
+      if (signal.aborted) return;
+      if (
+        currentRow === null
+        || this.contextGraphSubscriptionDormancyById.get(contextGraphId)
+          !== 'authorityUnavailable'
+        || (this.contextGraphSubscriptionPersistRevisions.get(contextGraphId) ?? 0)
+          !== revision
+        || this.subscribedContextGraphs.has(contextGraphId)
+      ) {
+        if (currentRow === null) {
+          this.updateContextGraphSubscriptionRehydrationStatusAfterClear([contextGraphId]);
+        }
+        continue;
+      }
+
+      const currentStatus = this.contextGraphSubscriptionRehydrationStatus;
+      const activatedUserRows = currentStatus === null
+        ? 0
+        : Math.max(0, currentStatus.activated - currentStatus.hostedActivated);
+      if (
+        currentRow.coreHosted !== true
+        && currentStatus !== null
+        && currentStatus.activationCap > 0
+        && activatedUserRows >= currentStatus.activationCap
+      ) {
+        this.contextGraphSubscriptionDormancyById.set(contextGraphId, 'activationCap');
+        touchStatus();
+        continue;
+      }
+
+      this.setContextGraphSubscription(contextGraphId, {
+        name: currentRow.name,
+        syncMode: 'always-on',
+        subscribed: currentRow.subscribed,
+        synced: currentRow.synced,
+        sharedMemorySynced: currentRow.sharedMemorySynced,
+        metaSynced: currentRow.metaSynced,
+        onChainId: currentRow.onChainId,
+        onChainHash: currentRow.onChainHash,
+        lastReconciledOrdinal: currentRow.lastReconciledOrdinal,
+        coreHosted: currentRow.coreHosted,
+      }, { persist: false, updateRehydrationStatus: false });
+      if (currentRow.syncScoped) this.trackSyncContextGraph(contextGraphId);
+      if (currentRow.subscribed) {
+        this.subscribeToContextGraph(contextGraphId, {
+          trackSyncScope: false,
+          persist: false,
+          syncMode: 'always-on',
+        });
+        this.persistLocalNodeMembership(contextGraphId, 'rehydrated-subscription');
+      }
+      this.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, {
+        subscribed: currentRow.subscribed,
+        coreHosted: currentRow.coreHosted,
+      });
+      this.log.info(
+        ctx,
+        `Activated persisted context-graph subscription "${contextGraphId}" after authority recovery`,
+      );
+    }
+  }
+
+  async rehydrateContextGraphSubscriptions(this: DKGAgent): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
     if (!store) return;
     const ctx = createOperationContext('init');
@@ -10371,7 +10495,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const activatedRows: ContextGraphSubscriptionRecord[] = [];
       let activatedUserRows = 0;
       for (let i = 0; i < toActivate.length; i++) {
-        if (options.signal?.aborted) return;
         const row = toActivate[i];
         // The cap limits successful non-hosted activations, not candidates.
         // A denied/unavailable row therefore cannot consume capacity that a
@@ -10409,10 +10532,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // resolver subsequently returns `allowed`.
         const readAuthority = await this.resolveContextGraphReadAuthority(row.id, {
           allowSubscriptionFallback: false,
-          ...(options.allowColdRegistrationBinding === true
-            ? { allowColdRegistrationBinding: true }
-            : {}),
-          ...(options.signal ? { signal: options.signal } : {}),
         }).catch(() => ({
           outcome: 'unavailable' as const,
           source: 'legacy-local' as const,

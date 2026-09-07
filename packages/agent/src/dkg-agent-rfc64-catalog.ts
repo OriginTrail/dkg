@@ -3575,9 +3575,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           },
         });
         const deploymentAwareReconciler: Rfc64PublicCatalogReceiverReconcilerV1 = {
-          isHeadApplied: (announcement) => {
+          isHeadSatisfied: (announcement) => {
             this.assertRfc64CatalogNetworkMatchesTrustedSourceV1(announcement.networkId);
-            return reconciler.isHeadApplied(announcement);
+            return reconciler.isHeadSatisfied(announcement);
           },
           reconcileHead: (remotePeerId, announcement, signal) =>
             reconciler.reconcileHead(remotePeerId, announcement, signal),

@@ -53,7 +53,7 @@ export interface Rfc64PublicCatalogReceiverReconcilerV1 {
    * True when this exact head is durable or a newer same-scope durable head
    * strictly supersedes it. Equal-version conflicts are never deduplicated.
    */
-  isHeadApplied(announcement: Rfc64PublicCatalogHeadAnnouncementV1): Promise<boolean>;
+  isHeadSatisfied(announcement: Rfc64PublicCatalogHeadAnnouncementV1): Promise<boolean>;
   /**
    * Fetch, verify, activate, exact-post-read, then durably commit applied state.
    * The operation must be idempotent so a restart can repair the semantic-store
@@ -950,7 +950,7 @@ export class Rfc64PublicCatalogReceiverV1 {
         task.lastProviderKey = provider.key;
       };
       try {
-        if (await this.#reconciler.isHeadApplied(provider.announcement)) {
+        if (await this.#reconciler.isHeadSatisfied(provider.announcement)) {
           recordProviderAttempt();
           return { kind: 'already-applied', announcement: provider.announcement };
         }

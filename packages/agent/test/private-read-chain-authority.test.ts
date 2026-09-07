@@ -589,16 +589,14 @@ describe('private read authorization uses the on-chain participant roster', () =
   it('retries a cold persisted binding after startup and restores the subscription', async () => {
     const contextGraphId = 'persisted-cold-binding-retry';
     const chain = new MockChainAdapter();
-    const registered = await chain.createOnChainContextGraph({
-      accessPolicy: 0,
-      publishPolicy: 0,
-      nameHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
-    });
     let attempt = 0;
+    let completeColdRetry!: (value: bigint | null) => void;
     const resolveByNameHash = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
       .mockImplementation((_nameHash, options) => {
         attempt += 1;
-        if (attempt > 1) return Promise.resolve(registered.contextGraphId);
+        if (attempt > 1) {
+          return new Promise<bigint | null>((resolve) => { completeColdRetry = resolve; });
+        }
         return new Promise<bigint | null>((resolve) => {
           const signal = options?.signal;
           if (signal?.aborted) {
@@ -625,16 +623,24 @@ describe('private read authorization uses the on-chain participant roster', () =
       },
       contextGraphSubscriptionRehydrationEnabled: true,
     });
-    const rehydrate = vi.spyOn(agent, 'rehydrateContextGraphSubscriptions');
+    mockLivePolicy(agent, 0);
+    const retry = vi.spyOn(agent, 'retryUnavailableContextGraphSubscriptionAuthorities');
 
     await agent.start();
+    await vi.waitFor(() => expect(resolveByNameHash).toHaveBeenCalledTimes(2));
+    const retrySignal = resolveByNameHash.mock.calls[1]?.[1]?.signal;
+    expect(retrySignal?.aborted).toBe(false);
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, CHAIN_POLICY_READ_TIMEOUT_MS + 1);
+    });
+    expect(retrySignal?.aborted).toBe(false);
+    completeColdRetry(7n);
     await vi.waitFor(
       () => expect(agent.getSubscribedContextGraphs().has(contextGraphId)).toBe(true),
       { timeout: 2_000 },
     );
 
-    expect(rehydrate.mock.calls.length).toBeGreaterThanOrEqual(2);
-    expect(resolveByNameHash).toHaveBeenCalled();
+    expect(retry).toHaveBeenCalledOnce();
     expect(resolveByNameHash.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
     expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
       activated: 1,
@@ -644,7 +650,222 @@ describe('private read authorization uses the on-chain participant roster', () =
         authorityUnavailable: [],
       },
     });
-  }, CHAIN_POLICY_READ_TIMEOUT_MS + 4_000);
+  }, (2 * CHAIN_POLICY_READ_TIMEOUT_MS) + 4_000);
+
+  it('does not resurrect a different subscription deleted during authority retry', async () => {
+    const coldContextGraphId = 'persisted-cold-target';
+    const liveContextGraphId = 'persisted-live-deleted';
+    const rows = new Map<string, any>([
+      [coldContextGraphId, {
+        id: coldContextGraphId,
+        subscribed: true,
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+        syncScoped: true,
+      }],
+      [liveContextGraphId, {
+        id: liveContextGraphId,
+        subscribed: true,
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+        syncScoped: true,
+      }],
+    ]);
+    agent = await DKGAgent.create({
+      name: 'PrivateReadScopedAuthorityRetryDeleteRace',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...rows.values()],
+        save: async (row) => { rows.set(row.id, row); },
+        delete: async (id) => { rows.delete(id); },
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+    });
+    let coldAttempts = 0;
+    let releaseRetry!: () => void;
+    let enteredRetry!: () => void;
+    const retryGate = new Promise<void>((resolve) => { releaseRetry = resolve; });
+    const retryStarted = new Promise<void>((resolve) => { enteredRetry = resolve; });
+    vi.spyOn(agent, 'resolveContextGraphReadAuthority')
+      .mockImplementation(async (contextGraphId) => {
+        if (contextGraphId === liveContextGraphId) {
+          return {
+            outcome: 'allowed',
+            source: 'registered-chain',
+            reason: 'open-context-graph',
+            metadataBootstrap: 'not-needed',
+          } as const;
+        }
+        coldAttempts += 1;
+        if (coldAttempts === 1) {
+          return {
+            outcome: 'unavailable',
+            source: 'registered-chain',
+            reason: 'temporary-authority-outage',
+            metadataBootstrap: 'eligible',
+          } as const;
+        }
+        enteredRetry();
+        await retryGate;
+        return {
+          outcome: 'allowed',
+          source: 'registered-chain',
+          reason: 'open-context-graph',
+          metadataBootstrap: 'not-needed',
+        } as const;
+      });
+
+    await agent.start();
+    await retryStarted;
+    agent.unsubscribeFromContextGraph(liveContextGraphId);
+    await vi.waitFor(() => expect(rows.has(liveContextGraphId)).toBe(false));
+    releaseRetry();
+
+    await vi.waitFor(() => {
+      expect(agent!.getSubscribedContextGraphs().has(coldContextGraphId)).toBe(true);
+    });
+    expect(agent.getSubscribedContextGraphs().get(liveContextGraphId)).toMatchObject({
+      subscribed: false,
+    });
+    expect(rows.has(liveContextGraphId)).toBe(false);
+  }, 15_000);
+
+  it('does not activate the authority-retry target after it is deleted', async () => {
+    const contextGraphId = 'persisted-cold-deleted-during-retry';
+    const rows = new Map<string, any>([[contextGraphId, {
+      id: contextGraphId,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+    }]]);
+    agent = await DKGAgent.create({
+      name: 'PrivateReadScopedAuthorityRetryTargetDeleteRace',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...rows.values()],
+        save: async (row) => { rows.set(row.id, row); },
+        delete: async (id) => { rows.delete(id); },
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+    });
+    let attempts = 0;
+    let releaseRetry!: () => void;
+    let enteredRetry!: () => void;
+    const retryGate = new Promise<void>((resolve) => { releaseRetry = resolve; });
+    const retryStarted = new Promise<void>((resolve) => { enteredRetry = resolve; });
+    vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockImplementation(async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return {
+          outcome: 'unavailable',
+          source: 'registered-chain',
+          reason: 'temporary-authority-outage',
+          metadataBootstrap: 'eligible',
+        } as const;
+      }
+      enteredRetry();
+      await retryGate;
+      return {
+        outcome: 'allowed',
+        source: 'registered-chain',
+        reason: 'open-context-graph',
+        metadataBootstrap: 'not-needed',
+      } as const;
+    });
+
+    await agent.start();
+    await retryStarted;
+    rows.delete(contextGraphId);
+    releaseRetry();
+
+    await vi.waitFor(() => expect(
+      agent!.getContextGraphSubscriptionRehydrationStatus(),
+    ).toMatchObject({
+      activated: 0,
+      persistedTotal: 0,
+      dormant: 0,
+      dormantIds: [],
+    }));
+    expect(agent.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);
+  }, 15_000);
+
+  it('preserves the active row when recovered authority reaches the activation cap', async () => {
+    const coldContextGraphId = 'persisted-cold-cap-target';
+    const liveContextGraphId = 'persisted-live-cap-owner';
+    const rows = [coldContextGraphId, liveContextGraphId].map((id) => ({
+      id,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+    }));
+    agent = await DKGAgent.create({
+      name: 'PrivateReadScopedAuthorityRetryCap',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: {
+        loadAll: async () => rows,
+        save: async () => undefined,
+        delete: async () => undefined,
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+      maxRehydratedContextGraphSubscriptions: 1,
+    });
+    let coldAttempts = 0;
+    let releaseRetry!: () => void;
+    let enteredRetry!: () => void;
+    const retryGate = new Promise<void>((resolve) => { releaseRetry = resolve; });
+    const retryStarted = new Promise<void>((resolve) => { enteredRetry = resolve; });
+    vi.spyOn(agent, 'resolveContextGraphReadAuthority')
+      .mockImplementation(async (contextGraphId) => {
+        if (contextGraphId === liveContextGraphId) {
+          return {
+            outcome: 'allowed',
+            source: 'registered-chain',
+            reason: 'open-context-graph',
+            metadataBootstrap: 'not-needed',
+          } as const;
+        }
+        coldAttempts += 1;
+        if (coldAttempts === 1) {
+          return {
+            outcome: 'unavailable',
+            source: 'registered-chain',
+            reason: 'temporary-authority-outage',
+            metadataBootstrap: 'eligible',
+          } as const;
+        }
+        enteredRetry();
+        await retryGate;
+        return {
+          outcome: 'allowed',
+          source: 'registered-chain',
+          reason: 'open-context-graph',
+          metadataBootstrap: 'not-needed',
+        } as const;
+      });
+
+    await agent.start();
+    await retryStarted;
+    expect(agent.getSubscribedContextGraphs().has(liveContextGraphId)).toBe(true);
+    releaseRetry();
+
+    await vi.waitFor(() => expect(
+      agent!.getContextGraphSubscriptionRehydrationStatus(),
+    ).toMatchObject({
+      activated: 1,
+      dormantReasons: {
+        activationCap: [coldContextGraphId],
+        authorityUnavailable: [],
+      },
+    }));
+    expect(agent.getSubscribedContextGraphs().has(liveContextGraphId)).toBe(true);
+    expect(agent.getSubscribedContextGraphs().has(coldContextGraphId)).toBe(false);
+  }, 15_000);
 
   it('leaves a persisted subscription dormant when startup cannot prove current read authority', async () => {
     const contextGraphId = 'persisted-private-poison';

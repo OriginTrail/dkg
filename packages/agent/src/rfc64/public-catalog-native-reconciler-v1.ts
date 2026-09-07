@@ -105,7 +105,7 @@ export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
     }
   }
 
-  async isHeadApplied(
+  async isHeadSatisfied(
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
   ): Promise<boolean> {
     const trustedCatalogScope = this.options.resolveTrustedCatalogScope(announcement);

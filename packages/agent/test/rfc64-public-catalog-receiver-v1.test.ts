@@ -48,9 +48,9 @@ function deferred<T>(): {
 
 function reconciler(
   reconcileHead: Rfc64PublicCatalogReceiverReconcilerV1['reconcileHead'],
-  isHeadApplied: Rfc64PublicCatalogReceiverReconcilerV1['isHeadApplied'] = async () => false,
+  isHeadSatisfied: Rfc64PublicCatalogReceiverReconcilerV1['isHeadSatisfied'] = async () => false,
 ): Rfc64PublicCatalogReceiverReconcilerV1 {
-  return { isHeadApplied, reconcileHead };
+  return { isHeadSatisfied, reconcileHead };
 }
 
 /** Small deterministic script for multi-provider scheduler scenarios. */
