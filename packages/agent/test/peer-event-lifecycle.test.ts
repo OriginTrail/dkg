@@ -30,7 +30,7 @@ describe('peer-event lifecycle', () => {
     } finally { await f.close(); }
   });
 
-  it.each(['enrichment', 'sender-key'] as const)('continues catch-up after a best-effort %s failure', async (stage) => {
+  it.each(['enrichment', 'sender-key', 'reannouncement', 'replay incomplete'] as const)('continues catch-up after a best-effort %s failure', async (stage) => {
     const f = await createPeerEventFixture();
     try {
       vi.spyOn(f.agent, 'readRfc64CatalogResponsibilitiesV1').mockReturnValue([{
@@ -41,33 +41,94 @@ describe('peer-event lifecycle', () => {
       const enrich = vi.spyOn(f.agent, 'enrichPeerStoreFromInboundCircuit').mockResolvedValue();
       const drain = vi.spyOn(f.agent, 'drainPendingSenderKeyForPeer').mockResolvedValue(2);
       if (stage === 'enrichment') enrich.mockRejectedValue(new Error('enrichment unavailable'));
-      else drain.mockRejectedValue(new Error('sender-key unavailable'));
-      vi.spyOn(f.agent, 'reannounceRfc64CatalogHeadsToPeerV1').mockResolvedValue({ announced: 0, failed: 0, manifest: [] });
+      else if (stage === 'sender-key') drain.mockRejectedValue(new Error('sender-key unavailable'));
+      const reannounce = vi.spyOn(f.agent, 'reannounceRfc64CatalogHeadsToPeerV1').mockResolvedValue({ announced: 0, failed: 0, manifest: [] });
+      if (stage === 'reannouncement') reannounce.mockRejectedValue(new Error('reannouncement unavailable'));
       const replay = vi.spyOn(f.agent, 'requestRfc64CatalogHeadReplaysFromConnectedPeersV1')
         .mockRejectedValue(new Error('replay unavailable'));
+      if (stage === 'replay incomplete') replay.mockResolvedValue({ requested: 1, failed: 1 });
       const queue = vi.spyOn(f.agent, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
       const warn = vi.spyOn(f.state.log, 'warn').mockImplementation(() => {});
       f.dispatchOpen();
       await vi.waitFor(() => expect(queue).toHaveBeenCalledWith(f.peerId, expect.any(Function)));
       await flushMicrotasks();
       expect(drain).toHaveBeenCalledWith(f.peerId, expect.anything());
+      expect(reannounce).toHaveBeenCalledExactlyOnceWith(f.peerId);
       expect(replay).toHaveBeenCalledWith('connection-catalog');
-      expect(warn).toHaveBeenCalledWith(expect.anything(), expect.stringContaining(`${stage} unavailable`));
-      expect(warn).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('replay unavailable'));
+      if (stage === 'replay incomplete') {
+        expect(warn).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('catalog replay incomplete'));
+      } else {
+        expect(warn).toHaveBeenCalledWith(expect.anything(), expect.stringContaining(`${stage} unavailable`));
+        expect(warn).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('replay unavailable'));
+      }
     } finally { await f.close(); }
   });
+
+  it.each(['reannouncement rejection', 'replay rejection', 'replay incomplete'] as const)(
+    'ignores old terminal %s after shutdown and restart', async (stage) => {
+      const f = await createPeerEventFixture();
+      const announcementGate = deferred<Awaited<ReturnType<DKGAgent['reannounceRfc64CatalogHeadsToPeerV1']>>>();
+      const replayGate = deferred<Awaited<ReturnType<DKGAgent['requestRfc64CatalogHeadReplaysFromConnectedPeersV1']>>>();
+      try {
+        vi.spyOn(f.agent, 'readRfc64CatalogResponsibilitiesV1').mockReturnValue([{
+          contextGraphId: 'terminal-catalog', responsible: true, active: true, mode: 'catalog',
+          responsibilityReason: 'private-membership', selectionSource: 'default',
+        }]);
+        vi.spyOn(f.agent.networkAdmissionCoordinator, 'ensureAdmitted').mockResolvedValue(true);
+        vi.spyOn(f.agent, 'enrichPeerStoreFromInboundCircuit').mockResolvedValue();
+        vi.spyOn(f.agent, 'drainPendingSenderKeyForPeer').mockResolvedValue(0);
+        const markPending = vi.spyOn(f.agent, 'markRfc64CatalogReplayPeerPendingV1');
+        const clearPending = vi.spyOn(f.agent, 'clearRfc64CatalogReplayPeerPendingV1');
+        const reannounce = vi.spyOn(f.agent, 'reannounceRfc64CatalogHeadsToPeerV1')
+          .mockReturnValue(announcementGate.promise);
+        const replay = vi.spyOn(f.agent, 'requestRfc64CatalogHeadReplaysFromConnectedPeersV1')
+          .mockReturnValue(replayGate.promise);
+        const queue = vi.spyOn(f.agent, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
+        const warn = vi.spyOn(f.state.log, 'warn').mockImplementation(() => {});
+        f.dispatchOpen();
+        await vi.waitFor(() => expect(queue).toHaveBeenCalledOnce());
+        expect(reannounce).toHaveBeenCalledExactlyOnceWith(f.peerId);
+        expect(replay).toHaveBeenCalledExactlyOnceWith('terminal-catalog');
+        expect(markPending).toHaveBeenCalledExactlyOnceWith('terminal-catalog', f.peerId);
+        await f.agent.stop();
+        expect(clearPending).toHaveBeenCalledExactlyOnceWith('terminal-catalog', f.peerId);
+        await f.agent.start();
+        // A new lifetime may already have acquired another pending-peer fence.
+        f.agent.markRfc64CatalogReplayPeerPendingV1('terminal-catalog', f.peerId);
+        clearPending.mockClear();
+        warn.mockClear();
+        queue.mockClear();
+        if (stage === 'reannouncement rejection') announcementGate.reject(new Error('old announcement'));
+        else announcementGate.resolve({ announced: 1, failed: 0, manifest: [] });
+        if (stage === 'replay rejection') replayGate.reject(new Error('old replay'));
+        else replayGate.resolve({ requested: 1, failed: 1 });
+        await flushMicrotasks();
+        expect(warn).not.toHaveBeenCalled();
+        expect(queue).not.toHaveBeenCalled();
+        expect(clearPending).not.toHaveBeenCalled();
+        expect(replay).toHaveBeenCalledOnce();
+        expect(reannounce).toHaveBeenCalledOnce();
+      } finally {
+        announcementGate.resolve({ announced: 0, failed: 0, manifest: [] });
+        replayGate.resolve({ requested: 0, failed: 0 });
+        await f.close();
+      }
+    },
+  );
 
   it('records the offline boundary so a same-instance restart immediately queues catch-up', async () => {
     const f = await createPeerEventFixture();
     try {
       f.state.lastSuccessfulSyncAt.set(f.peerId, Date.now() - 1_000);
+      f.state.catchupOnConnectAt.set(f.peerId, Date.now() - 500);
       const peers = vi.spyOn(f.agent.node.libp2p, 'getPeers').mockReturnValue([f.peer]);
       await f.agent.stop();
       peers.mockRestore();
       const disconnected = f.state.lastSyncDisconnectedAt.get(f.peerId);
       expect(disconnected).toBeTypeOf('number');
       await f.agent.start();
-      vi.spyOn(Date, 'now').mockReturnValue(disconnected! + 60_000);
+      // Stay within ordinary connection flap grace: a node lifetime is different.
+      expect(Date.now() - disconnected!).toBeLessThan(15_000);
       vi.spyOn(f.agent.networkAdmissionCoordinator, 'isAcceptedPeer').mockReturnValue(true);
       expect(f.agent.queueSyncFromPeerOnConnect(f.peerId, () => {}, 60_000)).toBe(true);
     } finally { await f.close(); }
@@ -152,6 +213,8 @@ describe('peer-event lifecycle', () => {
         contextGraphId: 'shutdown-catalog', responsible: true, active: true, mode: 'catalog',
         responsibilityReason: 'private-membership', selectionSource: 'default',
       }]);
+      const markPending = vi.spyOn(f.agent, 'markRfc64CatalogReplayPeerPendingV1');
+      const clearPending = vi.spyOn(f.agent, 'clearRfc64CatalogReplayPeerPendingV1');
       const admission = vi.spyOn(f.agent.networkAdmissionCoordinator, 'ensureAdmitted').mockImplementation(async (_peer, _ctx, options) => {
         if (scenario.reject) {
           options?.signal?.addEventListener('abort', () => admissionGate.reject(new Error('admission cancelled')), { once: true });
@@ -182,6 +245,10 @@ describe('peer-event lifecycle', () => {
         stopping = f.agent.stop();
       }
       await stopping;
+      if (scenario.gate !== 'event') {
+        expect(markPending).toHaveBeenCalledExactlyOnceWith('shutdown-catalog', f.peerId);
+        expect(clearPending).toHaveBeenCalledExactlyOnceWith('shutdown-catalog', f.peerId);
+      }
       admissionGate.resolve();
       enrichmentGate.resolve();
       senderKeyGate.resolve();

@@ -20,6 +20,7 @@ interface PeerEventState {
   knownCorePeerIds: Set<string>;
   skippedNoSyncPeers: Set<string>;
   lastSuccessfulSyncAt: Map<string, number>;
+  catchupOnConnectAt: Map<string, number>;
   lastSyncDisconnectedAt: Map<string, number>;
   log: { warn(ctx: OperationContext, message: string): void };
 }
