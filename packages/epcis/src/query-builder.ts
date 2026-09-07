@@ -6,6 +6,7 @@ import {
   contextGraphSharedMemoryMetaUri,
   contextGraphSubGraphPrivateUri,
   contextGraphSubGraphUri,
+  isSafeIri,
 } from '@origintrail-official/dkg-core';
 import type { EpcisQueryParams } from './types.js';
 
@@ -87,11 +88,13 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
 
   // Base pattern — always present
   wherePatterns.push('?event a ?eventType .');
+  wherePatterns.push('?event epcis:eventTime ?eventTime .');
+  wherePatterns.push('?event epcis:eventTimeZoneOffset ?eventTimeZoneOffset .');
 
-  // The EPCIS namespace also contains document and vocabulary resources.
-  // Restrict both public and private branches to the five event classes
-  // accepted by the EPCIS 2.0 capture schema.
-  filterClauses.push('FILTER(?eventType IN (epcis:ObjectEvent, epcis:AggregationEvent, epcis:TransactionEvent, epcis:TransformationEvent, epcis:AssociationEvent))');
+  // Both built-in and Extended-Event records require eventTime and
+  // eventTimeZoneOffset in the capture schema. Their type may be any full IRI;
+  // namespace membership alone also admits document and vocabulary resources.
+  filterClauses.push('FILTER(isIRI(?eventType) && ?eventType NOT IN (epcis:EPCISDocument, epcis:EPCISQueryDocument))');
 
   // eventID filter — matches the RDF subject (the event's @id / rootEntity)
   if (params.eventID) {
@@ -100,7 +103,11 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
 
   // eventType filter — narrow to a specific EPCIS event type
   if (params.eventType) {
-    filterClauses.push(`FILTER(?eventType = <https://gs1.github.io/EPCIS/${escapeSparql(params.eventType)}>)`);
+    const typeIri = params.eventType.includes(':')
+      ? params.eventType
+      : `https://gs1.github.io/EPCIS/${params.eventType}`;
+    if (!isSafeIri(typeIri)) throw new Error('Invalid EPCIS event type IRI');
+    filterClauses.push(`FILTER(?eventType = <${typeIri}>)`);
   }
 
   // EPC filter — match epcList OR childEPCs per Section 8.2.7.1.
@@ -164,7 +171,6 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
 
   // Time range filter
   if (params.from || params.to) {
-    wherePatterns.push('?event epcis:eventTime ?eventTime .');
     if (params.from && params.to) {
       filterClauses.push(
         `FILTER(xsd:dateTime(?eventTime) >= xsd:dateTime("${escapeSparql(params.from)}") && xsd:dateTime(?eventTime) < xsd:dateTime("${escapeSparql(params.to)}"))`,
@@ -174,10 +180,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
     } else if (params.to) {
       filterClauses.push(`FILTER(xsd:dateTime(?eventTime) < xsd:dateTime("${escapeSparql(params.to)}"))`);
     }
-  } else {
-    optionalClauses.push('OPTIONAL { ?event epcis:eventTime ?eventTime . }');
   }
-  optionalClauses.push('OPTIONAL { ?event epcis:eventTimeZoneOffset ?eventTimeZoneOffset . }');
 
   // Action filter — required when filtered, OPTIONAL otherwise
   if (params.action) {

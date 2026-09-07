@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { buildEpcisQuery, escapeSparql, normalizeBizStep, normalizeGs1Vocabulary } from '../src/query-builder.js';
-import { OxigraphStore } from '../../storage/src/adapters/oxigraph.js';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import jsonld from 'jsonld';
+import { handleCaptureAsync } from '../src/handlers.js';
 
 const CONTEXT_GRAPH_ID = 'test-cg';
 const DATA_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}`;
@@ -22,15 +24,18 @@ describe('buildEpcisQuery', () => {
     const eventTypes = ['ObjectEvent', 'AggregationEvent', 'TransactionEvent', 'TransformationEvent', 'AssociationEvent'];
     const types = [...eventTypes, 'EPCISDocument', 'EPCISQueryDocument', 'SensorElement'];
     try {
-      for (const graph of [publicGraph, privateGraph]) {
-        for (const type of types) {
-          const subject = `urn:test:${graph === publicGraph ? 'public' : 'private'}:${type}`;
-          await store.insert([{ subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: `https://gs1.github.io/EPCIS/${type}`, graph }]);
-          if (graph === privateGraph) {
-            await store.insert([{ subject, predicate: 'http://dkg.io/ontology/privateDataAnchor', object: '"true"', graph: publicGraph }]);
-          }
-        }
-      }
+      const quads: Quad[] = [publicGraph, privateGraph].flatMap((graph) => types.flatMap((type) => {
+        const subject = `urn:test:${graph === publicGraph ? 'public' : 'private'}:${type}`;
+        return [
+          { subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: `https://gs1.github.io/EPCIS/${type}`, graph },
+          ...(type !== 'SensorElement' ? [
+            { subject, predicate: 'https://gs1.github.io/EPCIS/eventTime', object: '"2024-03-01T08:00:00Z"', graph },
+            { subject, predicate: 'https://gs1.github.io/EPCIS/eventTimeZoneOffset', object: '"+00:00"', graph },
+          ] : []),
+          ...(graph === privateGraph ? [{ subject, predicate: 'http://dkg.io/ontology/privateDataAnchor', object: '"true"', graph: publicGraph }] : []),
+        ];
+      }));
+      await store.insert(quads);
       const all = await store.query(buildEpcisQuery(params, CONTEXT_GRAPH_ID));
       expect(all.type).toBe('bindings');
       if (all.type !== 'bindings') throw new Error('Expected event bindings');
@@ -47,6 +52,53 @@ describe('buildEpcisQuery', () => {
     } finally {
       await store.close();
     }
+  });
+
+  it.each(['public', 'private'] as const)('captures and queries schema-valid extended events in %s data', async (visibility) => {
+    const store = new OxigraphStore();
+    const eventTypes = ['https://gs1.github.io/EPCIS/CustomEvent', 'https://example.org/Observation', 'urn:epcis:Observation'];
+    const document = {
+      '@context': { '@vocab': 'https://gs1.github.io/EPCIS/', type: '@type', eventID: '@id' },
+      type: 'EPCISDocument', schemaVersion: '2.0', creationDate: '2024-03-01T08:00:00Z',
+      epcisBody: { eventList: eventTypes.map((type, index) => ({
+        type, eventID: `urn:uuid:extended-${index}`,
+        eventTime: '2024-03-01T08:00:00Z', eventTimeZoneOffset: '+00:00',
+      })) },
+    };
+    try {
+      const result = await handleCaptureAsync({ epcisDocument: { [visibility]: document } }, {
+        contextGraphId: CONTEXT_GRAPH_ID,
+        publisher: {
+          async publishAsync(_cg, content) {
+            const nquads = await jsonld.toRDF((content as Record<string, unknown>)[visibility], { format: 'application/n-quads' });
+            const graph = visibility === 'public' ? DATA_GRAPH : PRIVATE_GRAPH;
+            await store.update(`INSERT DATA { GRAPH <${graph}> { ${nquads} } }`);
+            if (visibility === 'private') {
+              await store.insert(document.epcisBody.eventList.map((event) => ({
+                subject: event.eventID, predicate: 'http://dkg.io/ontology/privateDataAnchor', object: '"true"', graph: DATA_GRAPH,
+              })));
+            }
+            return { captureID: 'extended-capture' };
+          },
+        },
+      });
+      expect(result).toMatchObject({ status: 'accepted', eventCount: 3 });
+      const all = await store.query(buildEpcisQuery({}, CONTEXT_GRAPH_ID));
+      expect(all.type).toBe('bindings');
+      if (all.type !== 'bindings') throw new Error('Expected event bindings');
+      expect(all.bindings.map((row) => row.eventType).sort()).toEqual([...eventTypes].sort());
+      for (const eventType of eventTypes) {
+        const filtered = await store.query(buildEpcisQuery({ eventType }, CONTEXT_GRAPH_ID));
+        expect(filtered).toMatchObject({ type: 'bindings', bindings: [expect.objectContaining({ eventType })] });
+      }
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('rejects an unsafe extended event type before interpolating it into SPARQL', () => {
+    expect(() => buildEpcisQuery({ eventType: 'https://example.org/Event> ?s ?p ?o' }, CONTEXT_GRAPH_ID))
+      .toThrow('Invalid EPCIS event type IRI');
   });
 
   it('generates SPARQL with explicit GRAPH for a single EPC filter', () => {
@@ -198,7 +250,7 @@ describe('buildEpcisQuery', () => {
   it('projects optional eventTimeZoneOffset without changing eventTime ordering', () => {
     const sparql = buildEpcisQuery({ epc: 'urn:test' }, CONTEXT_GRAPH_ID);
 
-    expect(sparql).toContain('OPTIONAL { ?event epcis:eventTimeZoneOffset ?eventTimeZoneOffset . }');
+    expect(sparql).toContain('?event epcis:eventTimeZoneOffset ?eventTimeZoneOffset .');
     expect(sparql).toContain('SELECT ?event ?eventType ?eventTime ?eventTimeZoneOffset ?bizStep');
     expect(sparql).toContain('GROUP BY ?event ?eventType ?eventTime ?eventTimeZoneOffset ?bizStep');
     expect(sparql).toContain('ORDER BY DESC(?eventTime) ?event');

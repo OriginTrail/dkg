@@ -16,7 +16,9 @@
     "ajv-formats": "^3"
   },
   "devDependencies": {
+    "@origintrail-official/dkg-storage": "workspace:*",
     "@vitest/coverage-v8": "^4.0.18",
+    "jsonld": "8.3.3",
     "vitest": "^4.0.18"
   },
   "publishConfig": {
