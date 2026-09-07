@@ -38,6 +38,7 @@ import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } f
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
+import { IdentityIdCache } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
@@ -211,59 +212,6 @@ const KA_HIGH_WATER_VIEW_SIGNATURE = 'getMaxKaNumberForAuthor(address)';
 // their existing gas policy.
 const V10_WRITE_GAS_LIMIT_BUFFER_BPS = 2_500;
 
-type IdentityIdCacheEntry = {
-  identityId: bigint;
-  ttlMs: number;
-};
-
-class IdentityIdCache {
-  private readonly values = new ReadThroughTtlCache<string, IdentityIdCacheEntry>({
-    ttlMs: (entry) => entry.ttlMs,
-  });
-
-  constructor(
-    private readonly signerCacheKey: string,
-    private readonly positiveTtlMs: number,
-    private readonly signerZeroTtlMs: number,
-  ) {}
-
-  async getOrLoad(
-    address: string,
-    load: (checksumAddress: string) => Promise<bigint>,
-  ): Promise<bigint> {
-    if (!ethers.isAddress(address)) return 0n;
-    const checksum = ethers.getAddress(address);
-    const cacheKey = checksum.toLowerCase();
-    const entry = await this.values.getOrLoad(cacheKey, cacheKey, async () => {
-      const identityId = await load(checksum);
-      return this.entry(cacheKey, identityId);
-    });
-    return entry.identityId;
-  }
-
-  seed(address: string, identityId: bigint): void {
-    const cacheKey = ethers.getAddress(address).toLowerCase();
-    this.values.seed(cacheKey, this.entry(cacheKey, identityId));
-  }
-
-  invalidate(address: string): void {
-    const cacheKey = ethers.getAddress(address).toLowerCase();
-    this.values.invalidate(cacheKey);
-  }
-
-  invalidateAll(): void {
-    this.values.invalidateAll();
-  }
-
-  private entry(cacheKey: string, identityId: bigint): IdentityIdCacheEntry {
-    const ttlMs = identityId > 0n
-      ? this.positiveTtlMs
-      : cacheKey === this.signerCacheKey
-        ? this.signerZeroTtlMs
-        : 0;
-    return { identityId, ttlMs };
-  }
-}
 
 /**
  * Upper bound on the pre-10.0.4 KnowledgeAssetCreated fallback scan, in
@@ -787,10 +735,6 @@ export class EVMChainAdapterBase {
    */
   protected readonly randomSamplingPairCache: HubResolutionCache<{ rs: Contract; rss: Contract }>;
 
-  protected static readonly IDENTITY_ID_POSITIVE_TTL_MS = 5 * 60 * 1000;
-
-  protected static readonly SIGNER_IDENTITY_ID_ZERO_TTL_MS = 15 * 1000;
-
   /**
    * OT-RFC-39 — per-process identity-id cache. Positive hits are memoised with
    * a bounded TTL; arbitrary-address negative hits are only single-flighted so
@@ -1295,11 +1239,7 @@ export class EVMChainAdapterBase {
         throw new Error('EVM adminPrivateKey must be distinct from operational keys');
       }
     }
-    this.identityIdCache = new IdentityIdCache(
-      this.signer.address.toLowerCase(),
-      EVMChainAdapterBase.IDENTITY_ID_POSITIVE_TTL_MS,
-      EVMChainAdapterBase.SIGNER_IDENTITY_ID_ZERO_TTL_MS,
-    );
+    this.identityIdCache = new IdentityIdCache(this.signer.address.toLowerCase());
     // #1583 — resolved-contract-address memo, 30s TTL backstop
     // (RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS — bounds a poller-missed rotation).
     this.resolvedContractAddressCache = new ReadThroughTtlCache<string, string>({
