@@ -163,11 +163,17 @@ describe('RFC-64 Context Graph authority snapshots', () => {
       ['AgentParticipantRemoved', 9n],
     ]);
     expect(evidence.ranges).toHaveLength(18);
-    expect(evidence.ranges).toEqual(expect.arrayContaining([
+    expect(evidence.ranges.slice(0, 3)).toEqual([
       [7, 16],
       [17, 26],
       [27, 30],
-    ]));
+    ]);
+    expect(evidence.ranges.slice(3)).toHaveLength(15);
+    for (const range of [[10, 19], [20, 29], [30, 30]] as const) {
+      expect(evidence.ranges.slice(3).filter(
+        ([from, to]) => from === range[0] && to === range[1],
+      )).toHaveLength(5);
+    }
   });
 
   it('rejects a finalized anchor that changes while the generation is read', async () => {

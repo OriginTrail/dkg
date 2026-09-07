@@ -929,7 +929,11 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           'getContextGraphAuthoritySnapshot',
           'ContextGraphStorage',
         );
-        const readLogs = async (name: string, ...args: unknown[]) => {
+        const readLogs = async (
+          name: string,
+          startBlock: number,
+          ...args: unknown[]
+        ) => {
           const filter = filters[name]!(...args);
           const logs: Array<ethers.EventLog | ethers.Log> = [];
           // Production RPCs commonly cap eth_getLogs ranges. Keep every read
@@ -937,7 +941,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           // results remain pinned to the single finalized anchor selected
           // above. The exact Context Graph stays encoded in each filter.
           for (
-            let lo = fromBlock;
+            let lo = startBlock;
             lo <= finalized.number;
             lo += this.cgRegistryScanPageSize
           ) {
@@ -950,9 +954,23 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           }
           return logs;
         };
+        // Discover the graph's own creation event first. Every later
+        // authority mutation for this token must be at or after that block,
+        // so rescanning the contract's entire deployment history for the five
+        // remaining exact-id filters only adds RPC work and throttling risk.
+        const created = await readLogs(
+          'ContextGraphCreated',
+          fromBlock,
+          contextGraphId,
+        );
+        if (created.length !== 1) {
+          throw new Error(
+            `Context Graph ${contextGraphId.toString()} has ${created.length} finalized creation events`,
+          );
+        }
+        const creationBlock = created[0]!.blockNumber;
         const [
           current,
-          created,
           transfers,
           publishPolicyUpdates,
           publishAuthorityUpdates,
@@ -963,19 +981,13 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             contextGraphId,
             { blockTag: finalized.number },
           ),
-          readLogs('ContextGraphCreated', contextGraphId),
-          readLogs('Transfer', null, null, contextGraphId),
-          readLogs('PublishPolicyUpdated', contextGraphId),
-          readLogs('PublishAuthorityUpdated', contextGraphId),
-          readLogs('AgentParticipantAdded', contextGraphId),
-          readLogs('AgentParticipantRemoved', contextGraphId),
+          readLogs('Transfer', creationBlock, null, null, contextGraphId),
+          readLogs('PublishPolicyUpdated', creationBlock, contextGraphId),
+          readLogs('PublishAuthorityUpdated', creationBlock, contextGraphId),
+          readLogs('AgentParticipantAdded', creationBlock, contextGraphId),
+          readLogs('AgentParticipantRemoved', creationBlock, contextGraphId),
         ]);
         options.signal?.throwIfAborted();
-        if (created.length !== 1) {
-          throw new Error(
-            `Context Graph ${contextGraphId.toString()} has ${created.length} finalized creation events`,
-          );
-        }
         const creationEvent = created[0] as ethers.EventLog;
         const post = await provider.getBlock(finalized.number);
         if (post?.hash?.toLowerCase() !== finalized.hash.toLowerCase()) {
