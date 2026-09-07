@@ -10305,18 +10305,53 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         continue;
       }
 
-      this.setContextGraphSubscription(contextGraphId, {
+      const recoveredOnChainId = readAuthority.onChainId?.toString()
+        ?? currentRow.onChainId;
+      const recoveredSubscription = this.setContextGraphSubscription(contextGraphId, {
         name: currentRow.name,
         syncMode: 'always-on',
         subscribed: currentRow.subscribed,
         synced: currentRow.synced,
         sharedMemorySynced: currentRow.sharedMemorySynced,
         metaSynced: currentRow.metaSynced,
-        onChainId: currentRow.onChainId,
+        onChainId: recoveredOnChainId,
         onChainHash: currentRow.onChainHash,
         lastReconciledOrdinal: currentRow.lastReconciledOrdinal,
         coreHosted: currentRow.coreHosted,
       }, { persist: false, updateRehydrationStatus: false });
+      try {
+        // Cold registration discovery is itself the authoritative binding
+        // proof. Carry that proof into the canonical subscription before
+        // responsibility reconciliation; otherwise an empty public CG can
+        // resume legacy subscription work while remaining absent from the
+        // default RFC-64 selection registry. Await the responsibility boundary
+        // and durably self-heal the binding before reporting recovery complete.
+        await this.reconcileRfc64CatalogResponsibilityV1(contextGraphId);
+        await this.persistContextGraphSubscriptionStrict(
+          contextGraphId,
+          recoveredSubscription,
+          currentRow.syncScoped,
+          () => (
+            !signal.aborted
+            && this.subscribedContextGraphs.get(contextGraphId) === recoveredSubscription
+            && this.contextGraphSubscriptionDormancyById.get(contextGraphId)
+              === 'authorityUnavailable'
+            && (this.contextGraphSubscriptionPersistRevisions.get(contextGraphId) ?? 0)
+              === revision
+          ),
+        );
+      } catch (error) {
+        if (this.subscribedContextGraphs.get(contextGraphId) === recoveredSubscription) {
+          this.deleteContextGraphSubscription(contextGraphId);
+        }
+        if (!signal.aborted) {
+          this.log.warn(
+            ctx,
+            `Deferred persisted context-graph subscription "${contextGraphId}" after authority recovery: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        continue;
+      }
       if (currentRow.syncScoped) this.trackSyncContextGraph(contextGraphId);
       if (currentRow.subscribed) {
         this.subscribeToContextGraph(contextGraphId, {

@@ -589,6 +589,14 @@ describe('private read authorization uses the on-chain participant roster', () =
   it('retries a cold persisted binding after startup and restores the subscription', async () => {
     const contextGraphId = 'persisted-cold-binding-retry';
     const chain = new MockChainAdapter();
+    const rows = new Map<string, any>([[contextGraphId, {
+      id: contextGraphId,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+    }]]);
     let attempt = 0;
     let completeColdRetry!: (value: bigint | null) => void;
     const resolveByNameHash = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
@@ -610,16 +618,9 @@ describe('private read authorization uses the on-chain participant roster', () =
       name: 'PrivateReadColdBindingBackgroundRetry',
       chainAdapter: chain,
       contextGraphSubscriptionStore: {
-        loadAll: async () => [{
-          id: contextGraphId,
-          subscribed: true,
-          synced: true,
-          sharedMemorySynced: true,
-          metaSynced: true,
-          syncScoped: true,
-        }],
-        save: async () => undefined,
-        delete: async () => undefined,
+        loadAll: async () => [...rows.values()],
+        save: async (row) => { rows.set(row.id, row); },
+        delete: async (id) => { rows.delete(id); },
       },
       contextGraphSubscriptionRehydrationEnabled: true,
     });
@@ -637,11 +638,28 @@ describe('private read authorization uses the on-chain participant roster', () =
     completeColdRetry(7n);
     await vi.waitFor(
       () => expect(agent.getSubscribedContextGraphs().has(contextGraphId)).toBe(true),
-      { timeout: 2_000 },
+      // Recovery now remains intentionally hidden until RFC-64 responsibility
+      // and the healed chain binding are both durable. Under the integration
+      // shard's concurrent node load that boundary can exceed the old 2s UI-
+      // style polling window even though the authority retry itself completed.
+      { timeout: 10_000 },
     );
 
     expect(retry).toHaveBeenCalledOnce();
     expect(resolveByNameHash.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+    expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+      subscribed: true,
+      onChainId: '7',
+    });
+    expect(rows.get(contextGraphId)).toMatchObject({
+      subscribed: true,
+      onChainId: '7',
+    });
+    expect(rows.get(contextGraphId)?.onChainHash).toBeUndefined();
+    expect(agent.readRfc64CatalogRuntimeSelectionV1()).toMatchObject({
+      eligibleContextGraphs: [contextGraphId],
+      selectedContextGraphs: [contextGraphId],
+    });
     expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
       activated: 1,
       dormant: 0,
@@ -650,7 +668,7 @@ describe('private read authorization uses the on-chain participant roster', () =
         authorityUnavailable: [],
       },
     });
-  }, (2 * CHAIN_POLICY_READ_TIMEOUT_MS) + 4_000);
+  }, (2 * CHAIN_POLICY_READ_TIMEOUT_MS) + 14_000);
 
   it('does not resurrect a different subscription deleted during authority retry', async () => {
     const coldContextGraphId = 'persisted-cold-target';
@@ -730,6 +748,63 @@ describe('private read authorization uses the on-chain participant roster', () =
       subscribed: false,
     });
     expect(rows.has(liveContextGraphId)).toBe(false);
+  }, 15_000);
+
+  it('keeps the recovered row dormant when binding persistence fails', async () => {
+    const contextGraphId = 'persisted-cold-binding-save-failure';
+    const row = {
+      id: contextGraphId,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+    };
+    agent = await DKGAgent.create({
+      name: 'PrivateReadScopedAuthorityRetrySaveFailure',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [row],
+        save: async () => { throw new Error('binding store unavailable'); },
+        delete: async () => undefined,
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+    });
+    let attempts = 0;
+    vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockImplementation(async () => {
+      attempts += 1;
+      return attempts === 1
+        ? {
+          outcome: 'unavailable',
+          source: 'registered-chain',
+          reason: 'temporary-authority-outage',
+          metadataBootstrap: 'eligible',
+        } as const
+        : {
+          outcome: 'allowed',
+          source: 'registered-chain',
+          reason: 'open-context-graph',
+          metadataBootstrap: 'eligible',
+          onChainId: 7n,
+        } as const;
+    });
+
+    await agent.start();
+    await vi.waitFor(() => expect(attempts).toBeGreaterThanOrEqual(2));
+    await vi.waitFor(() => expect(agent!.getSubscribedContextGraphs().has(contextGraphId))
+      .toBe(false));
+
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      activated: 0,
+      dormantIds: [contextGraphId],
+      dormantReasons: {
+        authorityUnavailable: [contextGraphId],
+      },
+    });
+    expect(agent.readRfc64CatalogRuntimeSelectionV1()).toMatchObject({
+      eligibleContextGraphs: [],
+      selectedContextGraphs: [],
+    });
   }, 15_000);
 
   it('does not activate the authority-retry target after it is deleted', async () => {
