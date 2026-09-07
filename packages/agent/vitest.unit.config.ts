@@ -24,7 +24,6 @@ export default defineConfig({
       "test/e2e-dht-dial.test.ts",
       "test/generic-sql-source.test.ts",
       "test/imported-artifact.test.ts",
-      "test/epcis-capture-conversion.test.ts",
       "test/publish-finalized-agent-lane.test.ts",
       "test/publish-foreign-author-resolution.test.ts",
       "test/durable-integrity-seal-assertion-version.test.ts",

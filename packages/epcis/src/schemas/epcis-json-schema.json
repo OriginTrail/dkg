@@ -47,7 +47,8 @@
         "properties": {
           "type": {
             "enum": [
-              "ObjectEvent"
+              "ObjectEvent",
+              "https://gs1.github.io/EPCIS/ObjectEvent"
             ]
           }
         }
@@ -69,7 +70,8 @@
         "properties": {
           "type": {
             "enum": [
-              "AggregationEvent"
+              "AggregationEvent",
+              "https://gs1.github.io/EPCIS/AggregationEvent"
             ]
           }
         }
@@ -91,7 +93,8 @@
         "properties": {
           "type": {
             "enum": [
-              "AssociationEvent"
+              "AssociationEvent",
+              "https://gs1.github.io/EPCIS/AssociationEvent"
             ]
           }
         }
@@ -113,7 +116,8 @@
         "properties": {
           "type": {
             "enum": [
-              "TransformationEvent"
+              "TransformationEvent",
+              "https://gs1.github.io/EPCIS/TransformationEvent"
             ]
           }
         }
@@ -135,7 +139,8 @@
         "properties": {
           "type": {
             "enum": [
-              "TransactionEvent"
+              "TransactionEvent",
+              "https://gs1.github.io/EPCIS/TransactionEvent"
             ]
           }
         }
@@ -159,10 +164,15 @@
             "type": {
               "enum": [
                 "AssociationEvent",
+                "https://gs1.github.io/EPCIS/AssociationEvent",
                 "ObjectEvent",
+                "https://gs1.github.io/EPCIS/ObjectEvent",
                 "AggregationEvent",
+                "https://gs1.github.io/EPCIS/AggregationEvent",
                 "TransactionEvent",
+                "https://gs1.github.io/EPCIS/TransactionEvent",
                 "TransformationEvent",
+                "https://gs1.github.io/EPCIS/TransformationEvent",
                 "EPCISQueryDocument",
                 "EPCISDocument"
               ]
@@ -542,10 +552,15 @@
           "type": "string",
           "enum": [
             "ObjectEvent",
+            "https://gs1.github.io/EPCIS/ObjectEvent",
             "AggregationEvent",
+            "https://gs1.github.io/EPCIS/AggregationEvent",
             "AssociationEvent",
+            "https://gs1.github.io/EPCIS/AssociationEvent",
             "TransformationEvent",
-            "TransactionEvent"
+            "https://gs1.github.io/EPCIS/TransformationEvent",
+            "TransactionEvent",
+            "https://gs1.github.io/EPCIS/TransactionEvent"
           ]
         },
         {
@@ -1316,7 +1331,8 @@
             "properties": {
               "type": {
                 "enum": [
-                  "ObjectEvent"
+                  "ObjectEvent",
+                  "https://gs1.github.io/EPCIS/ObjectEvent"
                 ]
               }
             }
@@ -1331,7 +1347,8 @@
             "properties": {
               "type": {
                 "enum": [
-                  "AggregationEvent"
+                  "AggregationEvent",
+                  "https://gs1.github.io/EPCIS/AggregationEvent"
                 ]
               }
             }
@@ -1346,7 +1363,8 @@
             "properties": {
               "type": {
                 "enum": [
-                  "TransactionEvent"
+                  "TransactionEvent",
+                  "https://gs1.github.io/EPCIS/TransactionEvent"
                 ]
               }
             }
@@ -1360,7 +1378,8 @@
             "properties": {
               "type": {
                 "enum": [
-                  "TransformationEvent"
+                  "TransformationEvent",
+                  "https://gs1.github.io/EPCIS/TransformationEvent"
                 ]
               }
             }
@@ -1375,7 +1394,8 @@
             "properties": {
               "type": {
                 "enum": [
-                  "AssociationEvent"
+                  "AssociationEvent",
+                  "https://gs1.github.io/EPCIS/AssociationEvent"
                 ]
               }
             }
@@ -1392,10 +1412,15 @@
                 "type": {
                   "enum": [
                     "AssociationEvent",
+                    "https://gs1.github.io/EPCIS/AssociationEvent",
                     "ObjectEvent",
+                    "https://gs1.github.io/EPCIS/ObjectEvent",
                     "AggregationEvent",
+                    "https://gs1.github.io/EPCIS/AggregationEvent",
                     "TransactionEvent",
-                    "TransformationEvent"
+                    "https://gs1.github.io/EPCIS/TransactionEvent",
+                    "TransformationEvent",
+                    "https://gs1.github.io/EPCIS/TransformationEvent"
                   ]
                 }
               }
@@ -1423,7 +1448,8 @@
             "type": {
               "type": "string",
               "enum": [
-                "ObjectEvent"
+                "ObjectEvent",
+                "https://gs1.github.io/EPCIS/ObjectEvent"
               ]
             },
             "epcList": {
@@ -1675,7 +1701,8 @@
             "type": {
               "type": "string",
               "enum": [
-                "AggregationEvent"
+                "AggregationEvent",
+                "https://gs1.github.io/EPCIS/AggregationEvent"
               ]
             },
             "parentID": {
@@ -1819,7 +1846,8 @@
             "type": {
               "type": "string",
               "enum": [
-                "TransactionEvent"
+                "TransactionEvent",
+                "https://gs1.github.io/EPCIS/TransactionEvent"
               ]
             },
             "bizTransactionList": {
@@ -1965,7 +1993,8 @@
             "type": {
               "type": "string",
               "enum": [
-                "TransformationEvent"
+                "TransformationEvent",
+                "https://gs1.github.io/EPCIS/TransformationEvent"
               ]
             },
             "inputEPCList": {
@@ -2214,7 +2243,8 @@
             "type": {
               "type": "string",
               "enum": [
-                "AssociationEvent"
+                "AssociationEvent",
+                "https://gs1.github.io/EPCIS/AssociationEvent"
               ]
             },
             "parentID": {

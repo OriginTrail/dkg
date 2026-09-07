@@ -619,9 +619,6 @@ importers:
       '@opentelemetry/sdk-metrics':
         specifier: ^2.8.0
         version: 2.8.0(@opentelemetry/api@1.9.1)
-      '@origintrail-official/dkg-epcis':
-        specifier: workspace:*
-        version: link:../epcis
       '@types/js-yaml':
         specifier: ^4.0.9
         version: 4.0.9

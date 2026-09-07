@@ -15,15 +15,6 @@ export function normalizeCaptureEventTypes(document: unknown): unknown {
   });
 }
 
-/** Canonical standard type IRIs must select their standard schema, not Extended-Event. */
-export function normalizeValidationEventTypes(document: unknown): unknown {
-  return mapEpcisEventList(document, (event) => {
-    if (typeof event.type !== 'string') return event;
-    const type = standardEpcisEventType(event.type);
-    return type ? { ...event, type } : event;
-  });
-}
-
 function mapEpcisEventList(
   document: unknown,
   transform: (event: Record<string, unknown>) => Record<string, unknown>,

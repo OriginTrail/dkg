@@ -1,4 +1,4 @@
-import { EPCIS_TYPE_PREFIX } from './epcis-vocabulary.js';
+import { EPCIS_TYPE_PREFIX, normalizeEpcisEventType } from './epcis-vocabulary.js';
 import {
   contextGraphDataUri,
   contextGraphMetaUri,
@@ -7,6 +7,7 @@ import {
   contextGraphSharedMemoryMetaUri,
   contextGraphSubGraphPrivateUri,
   contextGraphSubGraphUri,
+  sparqlIri,
 } from '@origintrail-official/dkg-core';
 import type { EpcisQueryParams } from './types.js';
 
@@ -99,7 +100,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
 
   // eventType filter — narrow to a specific EPCIS event type
   if (params.eventType) {
-    filterClauses.push(`FILTER(?eventType = <${EPCIS_TYPE_PREFIX}${escapeSparql(params.eventType)}>)`);
+    filterClauses.push(`FILTER(?eventType = ${sparqlIri(normalizeEpcisEventType(params.eventType))})`);
   }
 
   // EPC filter — match epcList OR childEPCs per Section 8.2.7.1.

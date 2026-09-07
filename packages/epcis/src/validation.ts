@@ -1,4 +1,3 @@
-import { normalizeValidationEventTypes } from './capture-event-types.js';
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
 import epcisSchema from './schemas/epcis-json-schema.json' with { type: 'json' };
@@ -84,7 +83,7 @@ export function createValidator(): EpcisValidator {
         };
       }
 
-      const isValid = validateSchema(normalizeValidationEventTypes(document));
+      const isValid = validateSchema(document);
 
       if (!isValid) {
         const errors = validateSchema.errors?.map(
