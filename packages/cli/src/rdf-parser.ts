@@ -9,9 +9,10 @@ export interface SimpleQuad {
   graph: string;
 }
 
-export interface RdfParseOptions {
-  /** Sealing cannot preserve JSON-LD named graphs; legacy quad inputs keep their existing contract. */
-  jsonLdNamedGraphs?: 'preserve' | 'reject';
+/** Neutral syntax provenance; consumers own policies for the resulting dataset. */
+export interface ParsedRdf {
+  sourceKind: 'jsonld' | 'legacy-quads' | 'rdf';
+  quads: SimpleQuad[];
 }
 
 export type RdfFormat = 'nquads' | 'ntriples' | 'turtle' | 'trig' | 'json' | 'jsonld';
@@ -46,20 +47,19 @@ export function supportedExtensions(): string[] {
  * For formats without named graph support (N-Triples, Turtle),
  * the defaultGraph is used.
  */
-export async function parseRdf(
+export async function parseRdfInput(
   content: string,
   format: RdfFormat,
   defaultGraph: string,
   baseIRI?: string,
-  parseOptions: RdfParseOptions = {},
-): Promise<SimpleQuad[]> {
+): Promise<ParsedRdf> {
   if (format === 'json' || format === 'jsonld') {
     const parsed: unknown = JSON.parse(content);
     const legacy = decodeLegacyQuads(
       format === 'json' && isRecord(parsed) ? parsed.quads : parsed,
       defaultGraph,
     );
-    if (legacy) return legacy;
+    if (legacy) return { sourceKind: 'legacy-quads', quads: legacy };
     if (format === 'json') throw new Error('JSON input must contain an array of subject/predicate/object quads');
     if (parsed === null || typeof parsed !== 'object') {
       throw new Error('JSON-LD input must be an object or array');
@@ -87,15 +87,7 @@ export async function parseRdf(
       throw error;
     }
     if (typeof nquads !== 'string') throw new Error('JSON-LD conversion did not return N-Quads');
-    // Inspect graph identity before applying the caller's default placement graph.
-    const quads = await parseRdf(nquads, 'nquads', '');
-    if (parseOptions.jsonLdNamedGraphs === 'reject' && quads.some((quad) => quad.graph !== '')) {
-      throw new Error(
-        'JSON-LD named graphs cannot be finalized yet. Use ka create --no-finalize to keep them in Working Memory, '
-        + 'or rewrite the document into the default graph before finalizing or sharing.',
-      );
-    }
-    return quads.map((quad) => ({ ...quad, graph: quad.graph || defaultGraph }));
+    return { sourceKind: 'jsonld', quads: await parseRdf(nquads, 'nquads', defaultGraph) };
   }
 
   // N3 parser handles N-Triples, N-Quads, Turtle, TriG
@@ -108,7 +100,7 @@ export async function parseRdf(
 
     parser.parse(content, (error: Error | null, quad: N3Quad | null) => {
       if (error) { reject(error); return; }
-      if (!quad) { resolve(quads); return; }
+      if (!quad) { resolve({ sourceKind: 'rdf', quads }); return; }
 
       quads.push({
         subject: termToString(quad.subject),
@@ -118,6 +110,16 @@ export async function parseRdf(
       });
     });
   });
+}
+
+/** Array-only compatibility facade for callers that do not need source provenance. */
+export async function parseRdf(
+  content: string,
+  format: RdfFormat,
+  defaultGraph: string,
+  baseIRI?: string,
+): Promise<SimpleQuad[]> {
+  return (await parseRdfInput(content, format, defaultGraph, baseIRI)).quads;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
