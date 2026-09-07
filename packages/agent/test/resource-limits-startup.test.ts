@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it, vi } from 'vitest';
@@ -61,12 +61,13 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
     const resolved = records.find((record) => record.message.startsWith('Resolved sync policy '));
     expect(resolved).toBeDefined();
     expect(JSON.parse(resolved!.message.slice('Resolved sync policy '.length))).toMatchObject({
-      syncGlobalInflightLimit: 3, syncGlobalQueueLimit: 6, snapshotGlobalRows: 1234,
-      vmReconcileLimits: { DKG_VM_RECONCILE_BATCH_SIZE: DKGAgent.VM_RECONCILE_BATCH_SIZE },
+      admission: { limit: 3, queueLimit: 6 },
+      snapshot: { budget: { maxRows: 1234 } },
+      vm: { values: { DKG_VM_RECONCILE_BATCH_SIZE: DKGAgent.VM_RECONCILE_BATCH_SIZE } },
     });
-    expect(JSON.parse(resolved!.message.slice('Resolved sync policy '.length))).toMatchObject(JSON.parse(JSON.stringify(effective.summary)));
-    expect(effective.reconcilerTiming).toBe(effective.summary.syncReconcilerTiming);
-    expect(effective.snapshot.budget.maxRows).toBe(effective.summary.snapshotGlobalRows);
+    const { diagnostics: _diagnostics, ...canonicalPolicy } = effective;
+    expect(JSON.parse(resolved!.message.slice('Resolved sync policy '.length)))
+      .toMatchObject(JSON.parse(JSON.stringify(canonicalPolicy)));
     expect(Object.isFrozen(effective.diagnostics.rejected)).toBe(true);
     const { getSyncBackpressureSnapshot } = await import('../src/sync/backpressure.js');
     // Enter the real agent admission path, including its evolving selected-CG
@@ -86,5 +87,25 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
       await store.close();
       await rm(dataDir, { recursive: true, force: true });
     }
+  }
+});
+
+it('rejects invalid admission before allocating a wallet or internally owned store', async () => {
+  const storage = await import('@origintrail-official/dkg-storage');
+  const createStore = vi.spyOn(storage, 'createTripleStore')
+    .mockRejectedValue(new Error('unexpected store allocation'));
+  const dataDir = await mkdtemp(join(tmpdir(), 'dkg-resource-preflight-'));
+  try {
+    const { DKGAgent } = await import('../src/dkg-agent.js');
+    await expect(DKGAgent.create({
+      name: 'Invalid admission', dataDir, chainAdapter: new NoChainAdapter(),
+      rfc64CatalogActivation: { enabled: false },
+      syncAdmission: { mode: 'partitioned', globalMaxInflight: 1 },
+    })).rejects.toThrow(/global.*inflight|globalMaxInflight/i);
+    expect(createStore).not.toHaveBeenCalled();
+    expect(await readdir(dataDir)).toEqual([]);
+  } finally {
+    createStore.mockRestore();
+    await rm(dataDir, { recursive: true, force: true });
   }
 });

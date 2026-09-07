@@ -49,10 +49,11 @@ VM/catch-up static settings live in the explicit `resource-runtime.ts` process
 snapshot; importing `resource-limits.ts` or a pure startup-jitter parser does not
 initialize it. Restart the process to change static settings, and construct a new
 agent to change its admission/snapshot/reconciler policy. SWM pass configuration
-uses the diagnosed startup policy while its environment values are unchanged;
-changed values resolve quietly at the next job boundary. The startup record
-labels its SWM values as the initial policy, rather than a permanent job limit. The `Resolved sync policy` record is derived from the same
-values used by execution, status and W1.
+resolves a fresh immutable value from the explicitly supplied environment at each
+job boundary. The startup policy retains only its initial SWM values and diagnostics;
+it contains no live environment reader. The `Resolved sync policy` record logs
+canonical nested policy objects, including `initialSwmPass`, instead of a separate
+flattened mirror. Structural resource validation runs before wallet or store allocation.
 
 Existing independently bounded controls remain in their owners: RS-heal limits
 clamp to 64 items and 10,000 CG cursors; exact-recovery peer/roster counts use fixed

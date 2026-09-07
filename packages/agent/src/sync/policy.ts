@@ -1,16 +1,5 @@
+export { validateSyncResponderSnapshotLimitsConfig, type SyncResponderSnapshotLimitsConfig } from './responder/snapshot-policy.js';
 import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
-
-export interface SyncResponderSnapshotLimitsConfig {
-  global?: {
-    rows?: number;
-    bytesEstimate?: number;
-  };
-  /** Per retained responder snapshot (peer/session/phase/Context Graph). */
-  local?: {
-    rows?: number;
-    bytesEstimate?: number;
-  };
-}
 
 export interface SyncContextGraphPriorityConfig {
   [contextGraphId: string]: number;
@@ -104,25 +93,6 @@ export function normalizeSyncAdmissionSource(
   return source !== undefined && SYNC_ADMISSION_SOURCE_SET.has(source)
     ? source as SyncAdmissionSource
     : 'unspecified';
-}
-
-/** Validate container shape; numeric leaves resolve through the bounded snapshot policy. */
-export function validateSyncResponderSnapshotLimitsConfig(
-  config: SyncResponderSnapshotLimitsConfig | undefined,
-): void {
-  if (config === undefined) return;
-  if (config === null || typeof config !== 'object' || Array.isArray(config)) {
-    throw new TypeError('Invalid syncResponderSnapshotLimits: expected an object');
-  }
-  for (const scope of ['global', 'local'] as const) {
-    const nested = config[scope];
-    if (nested === undefined) continue;
-    if (nested === null || typeof nested !== 'object' || Array.isArray(nested)) {
-      throw new TypeError(`Invalid syncResponderSnapshotLimits.${scope}: expected an object`);
-    }
-    // Numeric leaves resolve independently through the bounded policy parser.
-    // This boundary still rejects malformed object/container shapes.
-  }
 }
 
 export function normalizeSyncContextGraphPriorities(

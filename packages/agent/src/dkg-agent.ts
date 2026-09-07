@@ -1313,6 +1313,8 @@ export class DKGAgent extends DKGAgentBase {
       legacyPublicFallback: rfc64PublicCatalogControls.autoPublishPolicy,
       acceptedPolicies: rfc64CatalogBootstrap?.acceptedPolicies ?? [],
     });
+    // Reject structural resource-policy errors before allocating a wallet or store.
+    const resourcePolicy = resolveStartupResourcePolicy(config, process.env, AGENT_RESOURCE_ENV);
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {
@@ -1385,7 +1387,6 @@ export class DKGAgent extends DKGAgentBase {
     delete configWithoutRfc64CatalogControls.syncBackoffBaseMs;
     delete configWithoutRfc64CatalogControls.syncBackoffMaxMs;
     delete configWithoutRfc64CatalogControls.syncBackoffJitter;
-    const resourcePolicy = resolveStartupResourcePolicy(config, process.env, AGENT_RESOURCE_ENV);
     const resolvedConfig: ResolvedDKGAgentConfig = {
       ...configWithoutRfc64CatalogControls,
       genesisId,

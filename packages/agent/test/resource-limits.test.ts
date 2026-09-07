@@ -10,9 +10,9 @@ import {
 } from '../src/sync/backpressure.js';
 import { resolveStartupResourcePolicy } from '../src/resource-policy.js';
 import { resolveSyncReconcilerTiming } from '../src/sync/reconciler-timing.js';
-import { resolveSyncResponderSnapshotPolicy } from '../src/sync/responder/sync-handler.js';
+import { resolveSyncResponderSnapshotPolicy } from '../src/sync/responder/snapshot-policy.js';
 import { resolveCatchupBackpressureMaxWaitMs } from '../src/sync/catchup-policy.js';
-import { resolveSwmCatchupMaxPasses, resolveSwmCatchupPassBudgetMs } from '../src/sync/catchup-pass-policy.js';
+import { resolveSwmCatchupMaxPasses, resolveSwmCatchupPassBudgetMs, resolveSwmCatchupPassConfig } from '../src/sync/catchup-pass-policy.js';
 
 const invalidNumbers = [NaN, Infinity, -Infinity, 1.5, -1, Number.MAX_SAFE_INTEGER + 1];
 afterEach(() => vi.unstubAllEnvs());
@@ -180,25 +180,24 @@ it('composes bounded executable policy and immutable diagnostics using the suppl
     syncResponderSnapshotLimits: { global: { rows: 100 }, local: { rows: 101 } },
   }, env, resolveAgentResourceEnvironment({ DKG_VM_RECONCILE_BATCH_SIZE: '20' }));
   expect(policy.admission).toMatchObject({ limit: 3, queueLimit: 12 });
-  expect(policy.summary).toMatchObject({ syncGlobalInflightLimit: policy.admission.limit,
-    snapshotGlobalRows: policy.snapshot.budget.maxRows,
-    vmReconcileLimits: policy.vm.values });
+  expect(policy.snapshot.budget.maxRows).toBe(100);
+  expect(policy.vm.values.DKG_VM_RECONCILE_BATCH_SIZE).toBe(20);
   expect(policy.diagnostics.rejected).toEqual(['syncReconcilerIntervalMs', 'DKG_SYNC_GLOBAL_MAX_INFLIGHT']);
   expect(policy.diagnostics.clamped).toEqual(['syncResponderSnapshotLimits.local.rows']);
   expect(policy.diagnostics.warning).toContain('Clamped resource settings');
   expect(Object.isFrozen(policy.snapshot.budget)).toBe(true);
 });
 
-it('uses the diagnosed SWM startup policy until the job settings change, without repeating diagnostics', () => {
+it('keeps initial SWM diagnostics immutable while job-scoped resolution refreshes explicitly', () => {
   const env = { DKG_SWM_CATCHUP_PASS_BUDGET_MS: 'invalid', DKG_SWM_CATCHUP_MAX_PASSES: '3' };
   const policy = resolveStartupResourcePolicy({}, env, resolveAgentResourceEnvironment({}));
-  expect(policy.swmPassForJob(env)).toBe(policy.summary.swmCatchupPassAtStartup);
-  expect(policy.swmPassForJob(env)).toEqual({ budgetMs: 600_000, maxPasses: 3 });
+  expect(resolveSwmCatchupPassConfig(env)).toEqual(policy.initialSwmPass);
+  expect(policy.initialSwmPass).toEqual({ budgetMs: 600_000, maxPasses: 3 });
   expect(policy.diagnostics.rejected).toEqual(['DKG_SWM_CATCHUP_PASS_BUDGET_MS']);
-  const next = policy.swmPassForJob({ ...env, DKG_SWM_CATCHUP_PASS_BUDGET_MS: '0' });
+  const next = resolveSwmCatchupPassConfig({ ...env, DKG_SWM_CATCHUP_PASS_BUDGET_MS: '0' });
   expect(next).toEqual({ budgetMs: 0, maxPasses: 3 });
   expect(Object.isFrozen(next)).toBe(true);
-  expect(policy.summary.swmCatchupPassAtStartup.budgetMs).toBe(600_000);
+  expect(policy.initialSwmPass.budgetMs).toBe(600_000);
   expect(policy.diagnostics.rejected).toEqual(['DKG_SWM_CATCHUP_PASS_BUDGET_MS']);
 });
 

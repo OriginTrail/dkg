@@ -1,3 +1,4 @@
+import { RESOURCE_MAX } from '../src/resource-limits.js';
 import { describe, expect, it } from 'vitest';
 import {
   CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
@@ -52,15 +53,16 @@ describe('catchupWaveSizes', () => {
     expect(catchupWaveSizes(-2, 4)).toEqual([]);
   });
 
+  it('accepts the concurrency ceiling and falls back to serial waves above it', () => {
+    expect(catchupWaveSizes(3, RESOURCE_MAX.concurrency)).toEqual([1, 2]);
+    expect(catchupWaveSizes(3, RESOURCE_MAX.concurrency + 1)).toEqual([1, 1, 1]);
+  });
+
   it('resolves the shared fan-out cap to a positive integer', () => {
-    // Deliberately NOT asserting an upper bound: the constant is
-    // env-overridable and production applies no clamp, so pinning an arbitrary
-    // ceiling here would fail a validly configured node
-    // (`DKG_CATCHUP_MAX_CONCURRENT_PEERS=32`) while proving nothing about the
-    // code. The real contract is the parse: a positive integer, else the
-    // default.
+    // Environment overrides obey the same resource ceiling as explicit caps.
     expect(Number.isInteger(CATCHUP_MAX_CONCURRENT_PEER_SYNCS)).toBe(true);
     expect(CATCHUP_MAX_CONCURRENT_PEER_SYNCS).toBeGreaterThan(0);
+    expect(CATCHUP_MAX_CONCURRENT_PEER_SYNCS).toBeLessThanOrEqual(RESOURCE_MAX.concurrency);
   });
 });
 

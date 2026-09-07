@@ -387,6 +387,7 @@ import {
   SwmCatchupPassTracker,
   catchupPassNowMs,
   runSwmCatchupContinuations,
+  resolveSwmCatchupPassConfig,
   type CatchupPassConfig,
 } from './sync/catchup-pass-policy.js';
 import {
@@ -3286,8 +3287,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const resourcePolicy = this.config.resourcePolicy;
     if (resourcePolicy.diagnostics.warning) this.log.warn(ctx, resourcePolicy.diagnostics.warning);
     const snapshotPolicy = resourcePolicy.snapshot;
+    const { diagnostics: _diagnostics, ...resolvedResourcePolicy } = resourcePolicy;
     this.log.info(ctx, `Resolved sync policy ${JSON.stringify({
-      ...resourcePolicy.summary,
+      ...resolvedResourcePolicy,
       configuredPriorities: countSyncPriorityClasses(this.config.syncContextGraphPriorities),
     })}`);
     // Keep one framed sync stream (and therefore its circuit-relay connection)
@@ -7767,7 +7769,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         providerPeerId: remotePeerId,
         units: selectedContinuationUnits,
         priorities: this.config.syncContextGraphPriorities,
-        passConfig: this.config.resourcePolicy.swmPassForJob(),
+        passConfig: resolveSwmCatchupPassConfig(process.env),
         nowMs: catchupPassNowMs,
         emptyResult: emptySharedMemorySyncResult,
         runWithAdmission: (item, run) => this.runContextGraphSyncWithBackpressure(
@@ -8623,7 +8625,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     };
 
     if (includeSharedMemory) {
-      const passConfig = stats?.swmCatchupPassConfig ?? this.config.resourcePolicy.swmPassForJob();
+      const passConfig = stats?.swmCatchupPassConfig ?? resolveSwmCatchupPassConfig(process.env);
       const execution = await runSwmCatchupContinuations({
         units: [{
           key: contextGraphId,
