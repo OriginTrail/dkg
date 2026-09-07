@@ -1,18 +1,22 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import TOML from '@iarna/toml';
-import { removeRegistration, type ClientTarget } from '../src/mcp-setup.js';
+import { inspectRegistration, removeRegistration } from '../src/mcp-client-config.js';
+import { type ClientTarget, type McpClientId } from '../src/mcp-client-registry.js';
+import { dkgDir, configPath } from '../src/config.js';
+import { dkgAuthTokenPath } from '@origintrail-official/dkg-core';
 import { mcpUninstallAction } from '../src/mcp-uninstall.js';
 
 let root: string;
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'dkg-mcp-uninstall-')); });
-afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
 
 function target(name: string, container = 'mcpServers', format: 'json' | 'toml' = 'json'): ClientTarget {
   const configPath = join(root, `${name}.${format}`);
-  return { name, configPath, displayPath: configPath, entryPath: `${container}.dkg`, format };
+  const id = ({ Cursor: 'cursor', 'Claude Code': 'claude-code', 'Claude Desktop': 'claude-desktop', Windsurf: 'windsurf', VSCode: 'vscode', Cline: 'cline', 'Codex CLI': 'codex-cli' } as Record<string, McpClientId>)[name] ?? 'cursor';
+  return { id, location: 'native', name, configPath, displayPath: configPath, entryPath: `${container}.dkg`, format };
 }
 function seed(client: ClientTarget, onlyDkg = false): void {
   const container = client.entryPath!.split('.')[0];
@@ -103,7 +107,7 @@ describe('mcpUninstallAction', () => {
   it('--yes removes every registration without prompting, then reruns as a no-op', async () => {
     const { clients, messages, deps } = fixture();
     await mcpUninstallAction({ yes: true }, deps);
-    expect(clients.every((client) => !removeRegistration(client, true))).toBe(true);
+    expect(clients.every((client) => !inspectRegistration(client))).toBe(true);
     await mcpUninstallAction({ yes: true }, deps);
     expect(messages.at(-1)).toBe('No DKG MCP registrations found.');
   });
@@ -112,26 +116,28 @@ describe('mcpUninstallAction', () => {
     const { clients, deps } = fixture();
     expect(process.stdin.isTTY).toBeFalsy();
     await expect(mcpUninstallAction({}, deps)).rejects.toThrow('requires --yes');
-    expect(clients.every((client) => removeRegistration(client, true))).toBe(true);
+    expect(clients.every((client) => inspectRegistration(client))).toBe(true);
   });
 
   it('--client selects one canonical client name', async () => {
     const { clients, deps } = fixture();
     const untouched = readFileSync(clients[0].configPath, 'utf8');
     await mcpUninstallAction({ yes: true, client: 'claude-code' }, deps);
-    expect(removeRegistration(clients[1], true)).toBe(false);
+    expect(inspectRegistration(clients[1])).toBe(false);
     expect(readFileSync(clients[0].configPath, 'utf8')).toBe(untouched);
-    expect(removeRegistration(clients[2], true)).toBe(true);
+    expect(inspectRegistration(clients[2])).toBe(true);
   });
 
   it('--dry-run reports without prompting, changing bytes, or touching node files', async () => {
     const { clients, messages, deps } = fixture();
     const originals = clients.map((client) => readFileSync(client.configPath, 'utf8'));
-    const nodeConfig = join(root, 'config.yaml');
-    const authToken = join(root, 'auth.token');
+    vi.stubEnv('DKG_HOME', root);
+    expect(dkgDir()).toBe(root);
+    const nodeConfig = configPath();
+    const authToken = dkgAuthTokenPath(dkgDir());
     writeFileSync(nodeConfig, 'sentinel-config'); writeFileSync(authToken, 'sentinel-token');
     await mcpUninstallAction({ dryRun: true }, {
-      ...deps, confirmPlan: async () => { throw new Error('dry-run must not prompt'); },
+      ...deps, confirmTargets: async () => { throw new Error('dry-run must not prompt'); },
     });
     expect(clients.map((client) => readFileSync(client.configPath, 'utf8'))).toEqual(originals);
     expect(messages.every((message) => message.startsWith('Would remove'))).toBe(true);
@@ -141,10 +147,8 @@ describe('mcpUninstallAction', () => {
 
   it('preserves declined clients and continues with later confirmations', async () => {
     const { clients, deps } = fixture();
-    await mcpUninstallAction({}, { ...deps, confirmPlan: async (planned) => planned.map((item, index) => ({
-      ...item, action: index === 1 ? 'skip' : 'remove',
-    })) });
-    expect(clients.map((client) => removeRegistration(client, true))).toEqual([false, true, false]);
+    await mcpUninstallAction({}, { ...deps, confirmTargets: async (planned) => planned.filter((_target, index) => index !== 1) });
+    expect(clients.map((client) => inspectRegistration(client))).toEqual([false, true, false]);
   });
 
   it('reports no clients as a successful no-op', async () => {
@@ -155,8 +159,8 @@ describe('mcpUninstallAction', () => {
 
   it('rejects an unknown client without modifying any registration', async () => {
     const { clients, deps } = fixture();
-    await expect(mcpUninstallAction({ yes: true, client: 'typo' }, deps)).rejects.toThrow('No detected client matches');
-    expect(clients.every((client) => removeRegistration(client, true))).toBe(true);
+    await expect(mcpUninstallAction({ yes: true, client: 'typo' }, deps)).rejects.toThrow('Unsupported MCP client selector');
+    expect(clients.every((client) => inspectRegistration(client))).toBe(true);
   });
 
   it('reports unreadable configuration and still processes other confirmed clients', async () => {
@@ -164,6 +168,31 @@ describe('mcpUninstallAction', () => {
     writeFileSync(clients[0].configPath, '{bad');
     await expect(mcpUninstallAction({ yes: true }, deps)).rejects.toThrow('Could not remove 1');
     expect(readFileSync(clients[0].configPath, 'utf8')).toBe('{bad');
-    expect(clients.slice(1).every((client) => !removeRegistration(client, true))).toBe(true);
+    expect(clients.slice(1).every((client) => !inspectRegistration(client))).toBe(true);
+  });
+});
+
+
+describe('stable client selectors', () => {
+  it('selects a Windows-side-only WSL target with the canonical client ID', async () => {
+    const client = { ...target('Cursor'), name: 'Cursor (Windows-side via WSL)', location: 'windows-wsl' as const };
+    seed(client);
+    await mcpUninstallAction({ yes: true, client: 'cursor' }, { detectClients: () => [client], log: () => {} });
+    expect(inspectRegistration(client)).toBe(false);
+  });
+
+  it.each(['cursor', 'cursor:windows-wsl', 'cursor:native'])('selects native/WSL variants explicitly with %s', async (selector) => {
+    const native = target('Cursor');
+    const windows = { ...target('windows'), name: 'A renamed Windows display label', location: 'windows-wsl' as const };
+    seed(native); seed(windows);
+    await mcpUninstallAction({ yes: true, client: selector }, { detectClients: () => [native, windows], log: () => {} });
+    expect(inspectRegistration(native)).toBe(selector === 'cursor:windows-wsl');
+    expect(inspectRegistration(windows)).toBe(selector === 'cursor:native');
+  });
+
+  it('rejects unsupported selectors even when no clients are detected', async () => {
+    const detect = vi.fn(() => []);
+    await expect(mcpUninstallAction({ yes: true, client: 'typo' }, { detectClients: detect })).rejects.toThrow('Unsupported MCP client selector');
+    expect(detect).not.toHaveBeenCalled();
   });
 });

@@ -21,13 +21,8 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import {
-  detectClients,
-  readRegisteredServerKeys,
-  type ClientTarget,
-  type RegisteredMcpServer,
-  type ServerKeyProbe,
-} from '../mcp-setup.js';
+import { detectClients, type ClientTarget } from '../mcp-client-registry.js';
+import { readRegisteredServerKeys, type RegisteredMcpServer, type ServerKeyProbe } from '../mcp-client-config.js';
 import {
   resolveNpmGlobalService,
   type InstallMcp,

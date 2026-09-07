@@ -139,7 +139,7 @@ mcpCmd
   .command('uninstall')
   .description('Remove the DKG MCP registration from selected clients')
   .option('--yes', 'Confirm removal without interactive prompts')
-  .option('--client <name>', 'Only this client (for example: cursor, claude-code, vscode, codex-cli)')
+  .option('--client <id>', 'Client ID (cursor, claude-code, claude-desktop, windsurf, vscode, cline, codex-cli); optionally append :native or :windows-wsl')
   .option('--dry-run', 'Preview registrations to remove without writing files')
   .action(async (opts) => {
     const { mcpUninstallAction } = await import('../mcp-uninstall.js');

@@ -261,7 +261,7 @@ describe('detectInstalled', () => {
     ({ ...baseEntry, slug, install }) as unknown as IntegrationEntry;
 
   const clients = [
-    { name: 'Cursor', configPath: '/fake/cursor.json', displayPath: '~/cursor.json' },
+    { id: 'cursor' as const, location: 'native' as const, name: 'Cursor', configPath: '/fake/cursor.json', displayPath: '~/cursor.json' },
     { name: 'Windsurf', configPath: '/fake/windsurf.json', displayPath: '~/windsurf.json' },
   ] as never;
 

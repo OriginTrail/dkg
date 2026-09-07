@@ -32,7 +32,7 @@ async function target(
 ): Promise<ClientTarget> {
   const configPath = join(dir, filename);
   await writeFile(configPath, body, 'utf8');
-  return { name: 'Test', configPath, displayPath: configPath, ...extra };
+  return { id: 'cursor', location: 'native', name: 'Test', configPath, displayPath: configPath, ...extra };
 }
 
 /** Fails loudly with the probe's own reason instead of a bare undefined. */
@@ -106,6 +106,7 @@ describe('readRegisteredServerKeys', () => {
   it('treats an absent config file as a SUCCESSFUL probe with no servers', async () => {
     // Nothing to read is a real answer: this client registered nothing.
     const t: ClientTarget = {
+      id: 'cursor', location: 'native',
       name: 'Absent',
       configPath: join(dir, 'nope.json'),
       displayPath: 'nope.json',

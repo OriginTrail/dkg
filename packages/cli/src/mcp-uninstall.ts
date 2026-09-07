@@ -1,4 +1,5 @@
-import { confirmPlan, detectClients, removeRegistration, type PlannedItem } from './mcp-setup.js';
+import { detectClients, parseMcpClientSelector, type ClientTarget } from './mcp-client-registry.js';
+import { inspectRegistration, removeRegistration } from './mcp-client-config.js';
 
 export interface McpUninstallCliOptions {
   yes?: boolean;
@@ -8,12 +9,31 @@ export interface McpUninstallCliOptions {
 
 export interface McpUninstallDeps {
   detectClients?: typeof detectClients;
-  confirmPlan?: typeof confirmPlan;
+  confirmTargets?: typeof confirmUninstallTargets;
   log?: (message: string) => void;
 }
 
-function clientKey(name: string): string {
-  return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+/** Uninstall owns its confirmation policy; setup continues to auto-confirm non-TTY runs. */
+export async function confirmUninstallTargets(
+  targets: readonly ClientTarget[],
+  options: { yes: boolean },
+): Promise<readonly ClientTarget[]> {
+  if (options.yes || targets.length === 0) return targets;
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error('Non-interactive MCP uninstall requires --yes; use --dry-run to preview.');
+  }
+  const { createInterface } = await import('node:readline/promises');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const confirmed: ClientTarget[] = [];
+  try {
+    for (const target of targets) {
+      const answer = (await rl.question(`Remove DKG MCP from ${target.name} (${target.displayPath})? [Y/n] `)).trim().toLowerCase();
+      if (answer !== 'n' && answer !== 'no') confirmed.push(target);
+    }
+    return confirmed;
+  } finally {
+    rl.close();
+  }
 }
 
 /** Client configuration teardown only; does not initialize or stop a DKG node. */
@@ -22,21 +42,20 @@ export async function mcpUninstallAction(
   deps: McpUninstallDeps = {},
 ): Promise<void> {
   const log = deps.log ?? console.log;
+  // Validate against the stable catalog before consulting machine state.
+  const selector = opts.client !== undefined ? parseMcpClientSelector(opts.client) : undefined;
   const clients = [...new Map((deps.detectClients ?? detectClients)()
     .map((target) => [target.configPath, target])).values()];
-  const selected = opts.client
-    ? clients.filter((target) => clientKey(target.name) === clientKey(opts.client!))
+  const selected = selector
+    ? clients.filter((target) => target.id === selector.id && (!selector.location || target.location === selector.location))
     : clients;
-  if (opts.client && clients.length > 0 && selected.length === 0) {
-    throw new Error(`No detected client matches "${opts.client}". Available: ${clients.map((target) => clientKey(target.name)).join(', ')}`);
-  }
 
-  const planned: PlannedItem[] = [];
+  const planned: ClientTarget[] = [];
   const failures: string[] = [];
   for (const target of selected) {
     try {
-      if (removeRegistration(target, true)) {
-        planned.push({ s: { target, state: 'registered', current: null }, action: 'remove' });
+      if (inspectRegistration(target)) {
+        planned.push(target);
         log(`${opts.dryRun ? 'Would remove' : 'Found'} DKG MCP: ${target.name} (${target.displayPath})`);
       }
     } catch (error) {
@@ -48,16 +67,13 @@ export async function mcpUninstallAction(
     return;
   }
   if (!opts.dryRun) {
-    const confirmed = await (deps.confirmPlan ?? confirmPlan)(planned, {
-      yes: opts.yes === true, requireYesInNonTty: true,
-    });
-    for (const item of confirmed) {
-      if (item.action === 'skip') continue;
+    const confirmed = await (deps.confirmTargets ?? confirmUninstallTargets)(planned, { yes: opts.yes === true });
+    for (const target of confirmed) {
       try {
-        const removed = removeRegistration(item.s.target);
-        log(`${removed ? 'Removed DKG MCP from' : 'Already unregistered:'} ${item.s.target.name}`);
+        const removed = removeRegistration(target);
+        log(`${removed ? 'Removed DKG MCP from' : 'Already unregistered:'} ${target.name}`);
       } catch (error) {
-        failures.push(`${item.s.target.name}: ${error instanceof Error ? error.message : 'Unable to write config'}`);
+        failures.push(`${target.name}: ${error instanceof Error ? error.message : 'Unable to write config'}`);
       }
     }
   }
