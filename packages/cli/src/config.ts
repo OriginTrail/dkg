@@ -26,6 +26,7 @@ import {
   blueGreenSlotReady,
   findPackageRepoDir,
   isDkgMonorepoRoot,
+  hasErrorCode,
   resolveDkgConfigHome,
   SELECTABLE_SETUP_NETWORKS,
 } from '@origintrail-official/dkg-core';
@@ -2109,8 +2110,7 @@ export async function swapSlot(target: 'a' | 'b'): Promise<void> {
   try {
     await symlink(target, tmpLink);
   } catch (error) {
-    if (process.platform === 'win32' && error && typeof error === 'object'
-      && 'code' in error && error.code === 'EPERM') {
+    if (process.platform === 'win32' && hasErrorCode(error, 'EPERM')) {
       throw Object.assign(new Error(
         `Cannot create the DKG release-slot link at ${tmpLink}. Windows requires permission to create symbolic links. `
         + 'Enable Developer Mode in Windows Settings (search for "Developer Mode"), then retry the command. '
