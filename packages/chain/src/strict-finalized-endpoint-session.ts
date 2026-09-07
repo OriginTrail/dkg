@@ -1,12 +1,14 @@
 import { normalizeEndpointOrigin } from '@origintrail-official/dkg-core';
 import { CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1 } from './current-finalized-evm-read-profile.js';
 import { snapshotDenseDataArray } from './strict-local-data.js';
+import type { StrictFinalizedEndpointSessionV1 } from './strict-current-finalized-evm-types.js';
 
-const SLOTS = 2;
-type AssertPolicyMatchesCeiling =
-  [typeof CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1] extends [typeof SLOTS] ? true : never;
-const _assertPolicyMatchesCeiling: AssertPolicyMatchesCeiling = true;
-void _assertPolicyMatchesCeiling;
+// Tie the constructed tuple lengths to the generic finalized-read ceiling.
+type AssertSessionMatchesCeiling =
+  StrictFinalizedEndpointSessionV1['length'] extends 1 | typeof CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1
+    ? true : never;
+const _assertSessionMatchesCeiling: AssertSessionMatchesCeiling = true;
+void _assertSessionMatchesCeiling;
 
 interface NormalizedEndpoint {
   readonly href: string;
@@ -19,7 +21,7 @@ interface NormalizedEndpoint {
  * The first distinct origin is preferred; a same-origin second URL preserves
  * failover when the pool contains only one provider.
  */
-export function snapshotStrictFinalizedEndpointSessionV1(input: unknown): readonly string[] {
+export function snapshotStrictFinalizedEndpointSessionV1(input: unknown): StrictFinalizedEndpointSessionV1 {
   const normalized: NormalizedEndpoint[] = [];
   const seen = new Set<string>();
   try {
@@ -43,7 +45,9 @@ export function snapshotStrictFinalizedEndpointSessionV1(input: unknown): readon
   // ceiling owned by this boundary, without a second module's postcondition.
   const first = normalized[0]!;
   const second = normalized.find((endpoint) => endpoint.origin !== first.origin) ?? normalized[1];
-  return Object.freeze(second === undefined ? [first.href] : [first.href, second.href]);
+  return second === undefined
+    ? Object.freeze([first.href] as const)
+    : Object.freeze([first.href, second.href] as const);
 }
 
 function normalizeEndpoint(input: unknown): NormalizedEndpoint {
