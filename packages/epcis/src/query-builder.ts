@@ -9,11 +9,11 @@ import {
   sparqlIri,
 } from '@origintrail-official/dkg-core';
 import type { EpcisQueryParams } from './types.js';
-import { EPCIS_TYPE_PREFIX, EPCIS_STANDARD_EVENT_TYPES } from './epcis-vocabulary.js';
-import { normalizeEpcisEventType } from './utils.js';
+import { EPCIS_TYPE_PREFIX, EPCIS_STANDARD_EVENT_TYPES, normalizeEpcisEventType } from './epcis-vocabulary.js';
 
 const PREFIXES = `
 PREFIX epcis: <${EPCIS_TYPE_PREFIX}>
+PREFIX epcisCurrent: <https://ref.gs1.org/epcis/>
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 PREFIX dkg: <http://dkg.io/ontology/>
 `;
@@ -92,7 +92,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   // EPCIS document membership is the positive discriminator for extended
   // event classes. It also distinguishes a nested typed extension, even when
   // that extension has both event timestamp fields.
-  wherePatterns.push(`FILTER(EXISTS { ?_eventList epcis:eventList ?event . }
+  wherePatterns.push(`FILTER(EXISTS { ?_eventList (epcis:eventList|epcisCurrent:eventList) ?event . }
     || (${legacyStandaloneEventPattern()}))`);
   optionalClauses.push('OPTIONAL { ?event epcis:eventTime ?eventTime . }');
   optionalClauses.push('OPTIONAL { ?event epcis:eventTimeZoneOffset ?eventTimeZoneOffset . }');
@@ -257,9 +257,7 @@ WHERE {
       ?event dkg:privateDataAnchor "true" .
     }
     GRAPH <${privateGraph}> {
-      ?event a ?eventType .
-      ${wherePatterns.slice(1).join('\n      ')}
-      ${optionalClauses.join('\n      ')}
+      ${graphBody}
     }
   }
   ${filterClauses.join('\n  ')}
@@ -280,8 +278,12 @@ OFFSET ${offset}`;
 /** Compatibility for standard event roots published directly as RDF before document capture. */
 function legacyStandaloneEventPattern(): string {
   const classes = EPCIS_STANDARD_EVENT_TYPES.map((name) => sparqlIri(`${EPCIS_TYPE_PREFIX}${name}`));
-  // A nested resource has an incoming edge in the data graph. Such a resource
-  // requires actual event-list membership, even when typed as a standard event.
+  // Legacy RDF has no event-list identity. Only EPCIS containment predicates
+  // disqualify a standard class here; an arbitrary incoming relationship cannot
+  // distinguish a nested object from a reference to an independent event.
+  const containment = ['sensorElementList', 'sensorMetadata', 'sensorReport',
+    'sourceList', 'destinationList', 'bizTransactionList', 'errorDeclaration']
+    .flatMap((name) => [`epcis:${name}`, `epcisCurrent:${name}`]).join('|');
   return `?eventType IN (${classes.join(', ')})
-    && NOT EXISTS { ?_parent ?_relation ?event . }`;
+    && NOT EXISTS { ?_parent (${containment}) ?event . }`;
 }

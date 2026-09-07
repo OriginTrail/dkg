@@ -39,8 +39,8 @@ describe('buildEpcisQuery', () => {
           { subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: type, graph },
           { subject, predicate: 'https://gs1.github.io/EPCIS/eventTime', object: '"2024-03-01T08:00:00Z"', graph },
           { subject, predicate: 'https://gs1.github.io/EPCIS/eventTimeZoneOffset', object: '"+00:00"', graph },
-          ...(member ? [{ subject: `urn:test:${visibility}:body`, predicate: 'https://gs1.github.io/EPCIS/eventList', object: subject, graph }] : []),
-          ...(subject.includes('nested-') ? [{ subject: subjectFor(7), predicate: 'https://example.org/detail', object: subject, graph }] : []),
+          ...(member ? [{ subject: `urn:test:${visibility}:body`, predicate: `${visibility === 'public' ? 'https://gs1.github.io/EPCIS/' : 'https://ref.gs1.org/epcis/'}eventList`, object: subject, graph }] : []),
+          ...(subject.includes('nested-') ? [{ subject: subjectFor(7), predicate: subject.endsWith('nested-standard') ? 'https://gs1.github.io/EPCIS/sensorElementList' : 'https://example.org/detail', object: subject, graph }] : []),
           ...(graph === privateGraph ? [{ subject, predicate: 'http://dkg.io/ontology/privateDataAnchor', object: '"true"', graph: publicGraph }] : []),
         ]);
       });
@@ -52,6 +52,13 @@ describe('buildEpcisQuery', () => {
       expect(all.bindings.map((row) => row.event).sort()).toEqual(
         ['public', 'private'].flatMap((partition) => eventTypes.map((_type, index) => `urn:test:${partition}:event-${index}`)).sort(),
       );
+      // A different publisher can reference a legacy event without hiding it.
+      await store.insert([publicGraph, privateGraph].map((graph) => ({
+        subject: 'urn:shipment:unrelated', predicate: 'https://example.org/relatedEvent',
+        object: `urn:test:${graph === publicGraph ? 'public' : 'private'}:event-1`, graph,
+      })));
+      const referenced = await store.query(buildEpcisQuery(params, CONTEXT_GRAPH_ID));
+      expect(referenced).toEqual(all);
       const filtered = await store.query(buildEpcisQuery({ ...params, eventType: 'ObjectEvent' }, CONTEXT_GRAPH_ID));
       expect(filtered.type).toBe('bindings');
       if (filtered.type !== 'bindings') throw new Error('Expected event bindings');

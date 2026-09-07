@@ -1,6 +1,4 @@
-import { isSafeIri } from '@origintrail-official/dkg-core';
 import type { EpcisQueryParams } from './types.js';
-import { EPCIS_TYPE_PREFIX, standardEpcisEventType } from './epcis-vocabulary.js';
 
 /** Decode a base64 nextPageToken ("offset:N") to its numeric offset, or null if invalid. */
 export function decodePageToken(token: string): number | null {
@@ -126,19 +124,4 @@ export function hasAtLeastOneFilter(params: EpcisQueryParams): boolean {
 export function hasValidDateRange(params: Pick<EpcisQueryParams, 'from' | 'to'>): boolean {
   if (!params.from || !params.to) return true;
   return Date.parse(params.from) <= Date.parse(params.to);
-}
-
-export class EpcisEventTypeError extends Error {
-  constructor() {
-    super('eventType must be a standard EPCIS event name or an absolute event type IRI');
-    this.name = 'EpcisEventTypeError';
-  }
-}
-
-/** Expand only defined EPCIS short names; other inputs must already be absolute IRIs. */
-export function normalizeEpcisEventType(value: string): string {
-  const standard = standardEpcisEventType(value);
-  if (standard) return `${EPCIS_TYPE_PREFIX}${standard}`;
-  if (!isSafeIri(value)) throw new EpcisEventTypeError();
-  return value;
 }

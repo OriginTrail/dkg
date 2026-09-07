@@ -1,5 +1,3 @@
-import { compactEpcisEventType } from '../src/epcis-vocabulary.js';
-import { normalizeEpcisEventType } from '../src/utils.js';
 import { describe, it, expect } from 'vitest';
 import { parseQueryParams, hasAtLeastOneFilter, hasValidDateRange } from '../src/utils.js';
 
@@ -242,22 +240,4 @@ describe('hasValidDateRange', () => {
   it('returns false when from > to', () => {
     expect(hasValidDateRange({ from: '2024-12-31T00:00:00Z', to: '2024-01-01T00:00:00Z' })).toBe(false);
   });
-});
-
-describe('EPCIS event type normalization', () => {
-  it.each(['ObjectEvent', 'AggregationEvent', 'TransactionEvent', 'TransformationEvent', 'AssociationEvent'])(
-    'expands the standard short name %s', (name) => {
-      expect(normalizeEpcisEventType(name)).toBe(`https://gs1.github.io/EPCIS/${name}`);
-      expect(compactEpcisEventType(normalizeEpcisEventType(name))).toBe(name);
-    },
-  );
-  it.each(['https://gs1.github.io/EPCIS/ObjectEvent', 'https://example.org/Observation', 'urn:epcis:Observation'])(
-    'preserves an absolute event type IRI %s', (iri) => {
-      expect(normalizeEpcisEventType(iri)).toBe(iri);
-      expect(normalizeEpcisEventType(compactEpcisEventType(iri))).toBe(iri);
-    },
-  );
-  it.each(['UnknownEvent', '', 'https://example.org/Event>', 'urn:epcis:bad type'])(
-    'rejects an undefined short name or unsafe IRI %s', (value) => expect(() => normalizeEpcisEventType(value)).toThrow(),
-  );
 });

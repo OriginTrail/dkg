@@ -1,7 +1,7 @@
-import { compactEpcisEventType } from './epcis-vocabulary.js';
+import { compactEpcisEventType, EpcisEventTypeError } from './epcis-vocabulary.js';
 import { createValidator } from './validation.js';
 import { buildEpcisQuery } from './query-builder.js';
-import { parseQueryParams, hasValidDateRange, encodePageToken, EpcisEventTypeError } from './utils.js';
+import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js';
 import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
 
 export interface AsyncCaptureConfig {
