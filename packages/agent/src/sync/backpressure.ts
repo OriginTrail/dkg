@@ -832,7 +832,7 @@ export async function withGlobalSyncBackpressure<T>(
   },
   work: () => Promise<T>,
 ): Promise<T> {
-  const { limit, queueLimit } = configureResolvedSyncGlobalPolicy(options.policy);
+  const { limit, queueLimit } = options.policy;
   if (limit === undefined) {
     lastLimit = null;
     lastQueueLimit = null;
