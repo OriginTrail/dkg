@@ -1,3 +1,4 @@
+import { RESOURCE_MAX, resourceInteger, resourceIntegerEnv } from '../../resource-limits.js';
 import {
   createOperationContext,
   DEFAULT_MAX_READ_BYTES,
@@ -145,20 +146,6 @@ const SNAPSHOT_BUDGET_ENV = {
   maxSnapshotBytesEstimate: 'DKG_SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT',
 } as const;
 
-function positiveIntegerEnv(
-  env: Readonly<Record<string, string | undefined>>,
-  name: string,
-  fallback: number,
-  warn: (message: string) => void,
-): number {
-  const raw = env[name]?.trim();
-  if (!raw) return fallback;
-  const parsed = Number(raw);
-  if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
-  warn(`Ignoring invalid ${name}="${raw}"; expected a positive safe integer`);
-  return fallback;
-}
-
 export interface ResolvedSyncResponderSnapshotPolicy {
   budget: SyncResponderSnapshotBudgetOptions;
   localRowsClamped: boolean;
@@ -178,30 +165,23 @@ export function resolveSyncResponderSnapshotPolicy(
     warnings.add(message);
     onWarning(message);
   };
-  const maxRows = positiveIntegerEnv(
-    env,
-    SNAPSHOT_BUDGET_ENV.maxRows,
-    config?.global?.rows ?? SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT,
-    warnOnce,
-  );
-  const maxBytesEstimate = positiveIntegerEnv(
-    env,
-    SNAPSHOT_BUDGET_ENV.maxBytesEstimate,
-    config?.global?.bytesEstimate ?? SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
-    warnOnce,
-  );
-  const configuredMaxSnapshotRows = positiveIntegerEnv(
-    env,
-    SNAPSHOT_BUDGET_ENV.maxSnapshotRows,
-    config?.local?.rows ?? SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT,
-    warnOnce,
-  );
-  const configuredMaxSnapshotBytesEstimate = positiveIntegerEnv(
-    env,
-    SNAPSHOT_BUDGET_ENV.maxSnapshotBytesEstimate,
-    config?.local?.bytesEstimate ?? SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
-    warnOnce,
-  );
+  const resolve = (key: keyof typeof SNAPSHOT_BUDGET_ENV, configured: number | undefined,
+    fallback: number, path: string, maximum: number) => {
+    const bounds = { min: 1, max: maximum } as const;
+    const reject = (name: string) => warnOnce(`Ignoring invalid resource setting ${name}; using fallback`);
+    return resourceIntegerEnv(env[SNAPSHOT_BUDGET_ENV[key]], bounds, SNAPSHOT_BUDGET_ENV[key], reject)
+      ?? resourceInteger(configured, bounds, path, reject) ?? fallback;
+  };
+  const maxRows = resolve('maxRows', config?.global?.rows, SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT,
+    'syncResponderSnapshotLimits.global.rows', RESOURCE_MAX.rows);
+  const maxBytesEstimate = resolve('maxBytesEstimate', config?.global?.bytesEstimate,
+    SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
+    'syncResponderSnapshotLimits.global.bytesEstimate', RESOURCE_MAX.bytes);
+  const configuredMaxSnapshotRows = resolve('maxSnapshotRows', config?.local?.rows,
+    SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT, 'syncResponderSnapshotLimits.local.rows', RESOURCE_MAX.rows);
+  const configuredMaxSnapshotBytesEstimate = resolve('maxSnapshotBytesEstimate', config?.local?.bytesEstimate,
+    SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
+    'syncResponderSnapshotLimits.local.bytesEstimate', RESOURCE_MAX.bytes);
   const maxSnapshotRows = Math.min(configuredMaxSnapshotRows, maxRows);
   const maxSnapshotBytesEstimate = Math.min(configuredMaxSnapshotBytesEstimate, maxBytesEstimate);
   const localRowsClamped = maxSnapshotRows !== configuredMaxSnapshotRows;

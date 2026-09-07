@@ -106,13 +106,7 @@ export function normalizeSyncAdmissionSource(
     : 'unspecified';
 }
 
-const SNAPSHOT_LIMIT_PATHS = [
-  ['global', 'rows'],
-  ['global', 'bytesEstimate'],
-  ['local', 'rows'],
-  ['local', 'bytesEstimate'],
-] as const;
-
+/** Validate container shape; numeric leaves resolve through the bounded snapshot policy. */
 export function validateSyncResponderSnapshotLimitsConfig(
   config: SyncResponderSnapshotLimitsConfig | undefined,
 ): void {
@@ -120,18 +114,14 @@ export function validateSyncResponderSnapshotLimitsConfig(
   if (config === null || typeof config !== 'object' || Array.isArray(config)) {
     throw new TypeError('Invalid syncResponderSnapshotLimits: expected an object');
   }
-  for (const [scope, leaf] of SNAPSHOT_LIMIT_PATHS) {
+  for (const scope of ['global', 'local'] as const) {
     const nested = config[scope];
     if (nested === undefined) continue;
     if (nested === null || typeof nested !== 'object' || Array.isArray(nested)) {
       throw new TypeError(`Invalid syncResponderSnapshotLimits.${scope}: expected an object`);
     }
-    const value = nested[leaf];
-    if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) {
-      throw new TypeError(
-        `Invalid syncResponderSnapshotLimits.${scope}.${leaf}: expected a positive safe integer`,
-      );
-    }
+    // Numeric leaves resolve independently through the bounded policy parser.
+    // This boundary still rejects malformed object/container shapes.
   }
 }
 

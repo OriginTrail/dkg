@@ -1,3 +1,5 @@
+import { AGENT_RESOURCE_ENV, ResourceConfigWarnings, type RejectedResourceSetting } from './resource-limits.js';
+import { resolveSwmCatchupPassBudgetMs, resolveSwmCatchupMaxPasses } from './sync/catchup-pass-policy.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -693,7 +695,7 @@ import { initializeRfc64LegacySwmBoundaryV1 } from
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
 
-function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
+function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig, onRejected?: RejectedResourceSetting) {
   // `trackSyncContextGraph()` mutates this list when an Edge explicitly
   // subscribes or starts a foreground catch-up. Those operator-selected graphs
   // need the same admission guarantee as an RFC-64 pinned scope: otherwise a
@@ -720,7 +722,7 @@ function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
       )),
       ...edgeSelectedContextGraphIds,
     ])],
-  });
+  }, onRejected);
 }
 
 interface SharedMemorySyncFromPeerOptions {
@@ -3288,18 +3290,31 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // parseSyncRequest expects — and the adapter re-exposes the string
     // peerId contract registerSyncHandler relies on. (Reverts rc.9 PR-E
     // for sync only; other substrate protocols keep their dedup.)
+    // Collect once at startup; runtime policy/status reads remain quiet.
+    const numericWarnings = new ResourceConfigWarnings();
+    for (const name of [...AGENT_RESOURCE_ENV.rejected, ...this.config.numericConfigRejectedSettings ?? []]) {
+      numericWarnings.reject(name);
+    }
+    resolveSwmCatchupPassBudgetMs(process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS, numericWarnings.reject);
+    resolveSwmCatchupMaxPasses(process.env.DKG_SWM_CATCHUP_MAX_PASSES, numericWarnings.reject);
+    const snapshotWarnings: string[] = [];
     const snapshotPolicy = resolveSyncResponderSnapshotPolicy(
       this.config.syncResponderSnapshotLimits,
       process.env,
-      (message) => this.log.warn(ctx, message),
+      (message) => snapshotWarnings.push(message),
     );
-    const syncGlobalPolicy = resolveAgentSyncGlobalBackpressure(this.config);
+    const syncGlobalPolicy = resolveAgentSyncGlobalBackpressure(this.config, numericWarnings.reject);
+    const resourceWarnings = [numericWarnings.message(), ...snapshotWarnings].filter(Boolean);
+    if (resourceWarnings.length > 0) this.log.warn(ctx, resourceWarnings.join('; ').slice(0, 4_096));
     const syncPartitions = syncGlobalPolicy.mode === 'partitioned'
       && syncGlobalPolicy.limit !== undefined
       ? syncGlobalPolicy.partitions
       : undefined;
     const configuredPriorityCounts = countSyncPriorityClasses(this.config.syncContextGraphPriorities);
     this.log.info(ctx, `Resolved sync policy ${JSON.stringify({
+      vmReconcileLimits: AGENT_RESOURCE_ENV.values,
+      vmReconcileStartupMaxDelayMs: AGENT_RESOURCE_ENV.startupMaxDelayMs,
+      syncReconcilerTiming: this.config.syncReconcilerTiming,
       syncAdmissionMode: syncGlobalPolicy.mode,
       snapshotGlobalRows: snapshotPolicy.budget.maxRows,
       snapshotGlobalBytesEstimate: snapshotPolicy.budget.maxBytesEstimate,

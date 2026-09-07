@@ -1,3 +1,4 @@
+import { RESOURCE_MAX, resourceIntegerEnv, type RejectedResourceSetting } from '../resource-limits.js';
 /**
  * The stop rule for the bounded, progress-aware repeat of the public SWM peer
  * walk (issue #2050).
@@ -491,16 +492,9 @@ export const DEFAULT_SWM_CATCHUP_MAX_PASSES = 4;
  * leave the node with exactly the #2050 behaviour the operator was trying to fix.
  * Blank is unset; an explicit `0` still means "no extra passes".
  */
-export function resolveSwmCatchupPassBudgetMs(raw: string | undefined): number {
-  const trimmed = raw?.trim();
-  if (!trimmed) return DEFAULT_SWM_CATCHUP_PASS_BUDGET_MS;
-  const parsed = Number(trimmed);
-  // `Number.isInteger` alone accepts `1e308`, an integer by IEEE-754 and a budget
-  // no operator meant. Require a SAFE integer so an unusable value falls back to
-  // the documented default instead of becoming an effectively unbounded loop.
-  return Number.isSafeInteger(parsed) && parsed >= 0
-    ? parsed
-    : DEFAULT_SWM_CATCHUP_PASS_BUDGET_MS;
+export function resolveSwmCatchupPassBudgetMs(raw: string | undefined, onRejected?: RejectedResourceSetting): number {
+  return resourceIntegerEnv(raw, { min: 0, max: RESOURCE_MAX.retryMs },
+    'DKG_SWM_CATCHUP_PASS_BUDGET_MS', onRejected) ?? DEFAULT_SWM_CATCHUP_PASS_BUDGET_MS;
 }
 
 /**
@@ -511,13 +505,9 @@ export function resolveSwmCatchupPassBudgetMs(raw: string | undefined): number {
  * — so a `0` here is a misconfiguration rather than a kill switch, and falls back
  * to the default. Disabling repeats is the budget's job.
  */
-export function resolveSwmCatchupMaxPasses(raw: string | undefined): number {
-  const trimmed = raw?.trim();
-  if (!trimmed) return DEFAULT_SWM_CATCHUP_MAX_PASSES;
-  const parsed = Number(trimmed);
-  return Number.isSafeInteger(parsed) && parsed >= 1
-    ? parsed
-    : DEFAULT_SWM_CATCHUP_MAX_PASSES;
+export function resolveSwmCatchupMaxPasses(raw: string | undefined, onRejected?: RejectedResourceSetting): number {
+  return resourceIntegerEnv(raw, { min: 1, max: RESOURCE_MAX.passes },
+    'DKG_SWM_CATCHUP_MAX_PASSES', onRejected) ?? DEFAULT_SWM_CATCHUP_MAX_PASSES;
 }
 
 /**

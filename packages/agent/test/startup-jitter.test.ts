@@ -56,7 +56,7 @@ describe('resolveVmReconcileStartupMaxDelayMs', () => {
     expect(resolveVmReconcileStartupMaxDelayMs('', 3_600_000)).toBe(3_600_000);
     expect(resolveVmReconcileStartupMaxDelayMs('invalid', 3_600_000)).toBe(3_600_000);
     expect(resolveVmReconcileStartupMaxDelayMs('0', 3_600_000)).toBe(0);
-    expect(resolveVmReconcileStartupMaxDelayMs('-1', 3_600_000)).toBe(0);
+    expect(resolveVmReconcileStartupMaxDelayMs('-1', 3_600_000)).toBe(3_600_000);
     expect(resolveVmReconcileStartupMaxDelayMs('120000', 3_600_000)).toBe(120_000);
   });
 });

@@ -1,3 +1,4 @@
+import { ResourceConfigWarnings } from './resource-limits.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -1384,6 +1385,8 @@ export class DKGAgent extends DKGAgentBase {
     delete configWithoutRfc64CatalogControls.syncBackoffBaseMs;
     delete configWithoutRfc64CatalogControls.syncBackoffMaxMs;
     delete configWithoutRfc64CatalogControls.syncBackoffJitter;
+    const numericWarnings = new ResourceConfigWarnings();
+    const syncReconcilerTiming = resolveSyncReconcilerTiming(config, numericWarnings.reject);
     const resolvedConfig: ResolvedDKGAgentConfig = {
       ...configWithoutRfc64CatalogControls,
       genesisId,
@@ -1395,7 +1398,8 @@ export class DKGAgent extends DKGAgentBase {
       rfc64CatalogExecutionPlan,
       rfc64PublicCatalogBootstrap,
       contextGraphSubscriptionRehydrationEnabled,
-      syncReconcilerTiming: resolveSyncReconcilerTiming(config),
+      syncReconcilerTiming,
+      numericConfigRejectedSettings: numericWarnings.settings,
     };
 
     const port = config.listenPort ?? 0;

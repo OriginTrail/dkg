@@ -1,3 +1,4 @@
+import { RESOURCE_MAX, resourceInteger, resourceIntegerEnv, type RejectedResourceSetting } from '../resource-limits.js';
 import { performance } from 'node:perf_hooks';
 import {
   getMetrics,
@@ -537,41 +538,40 @@ export function resolveSyncReconcilerEnabled(configValue?: boolean): boolean {
   );
 }
 
-function parseIntegerEnv(name: string): number | undefined {
-  const raw = process.env[name]?.trim();
-  if (!raw) return undefined;
-  const parsed = Number(raw);
-  return Number.isInteger(parsed) ? parsed : undefined;
-}
-
-function positiveInteger(value: number | undefined): number | undefined {
-  return Number.isInteger(value) && typeof value === 'number' && value > 0 ? value : undefined;
-}
-
-function nonNegativeInteger(value: number | undefined): number | undefined {
-  return Number.isInteger(value) && typeof value === 'number' && value >= 0 ? value : undefined;
-}
-
+/** Generic emergency switches are duration-sized unless the owner supplies a tighter ceiling. */
 export function resolvePositiveIntegerSwitch(
   configValue: number | undefined,
   envName: string,
+  maximum = RESOURCE_MAX.timerMs,
 ): number | undefined {
-  const value = parseIntegerEnv(envName) ?? configValue;
-  if (value == null) return undefined;
-  return positiveInteger(value);
+  const bounds = { min: 1, max: maximum } as const;
+  return resourceIntegerEnv(process.env[envName], bounds, envName)
+    ?? resourceInteger(configValue, bounds, envName);
 }
 
 export function resolveNonNegativeIntegerSwitch(
   configValue: number | undefined,
   envName: string,
+  maximum = RESOURCE_MAX.timerMs,
 ): number | undefined {
-  const value = parseIntegerEnv(envName) ?? configValue;
-  if (value == null) return undefined;
-  return nonNegativeInteger(value);
+  const bounds = { min: 0, max: maximum } as const;
+  return resourceIntegerEnv(process.env[envName], bounds, envName)
+    ?? resourceInteger(configValue, bounds, envName);
+}
+
+function configInteger(value: number | undefined, name: string, max: number,
+  onRejected?: RejectedResourceSetting): number | undefined {
+  return resourceInteger(value, { min: 0, max }, name, onRejected);
+}
+
+function envInteger(name: string, max: number,
+  onRejected?: RejectedResourceSetting): number | undefined {
+  return resourceIntegerEnv(process.env[name], { min: 0, max }, name, onRejected);
 }
 
 export function resolveSyncGlobalBackpressure(
   config: SyncGlobalBackpressureConfig,
+  onRejected?: RejectedResourceSetting,
 ): SyncGlobalBackpressurePolicy {
   validateSyncAdmissionConfig(config.syncAdmission);
   const selectedRecoveryIds = new Set(
@@ -581,13 +581,13 @@ export function resolveSyncGlobalBackpressure(
   );
   if (config.syncAdmission !== undefined && config.syncAdmission.mode !== 'shared') {
     return configureResolvedSyncGlobalPolicy(
-      resolvePartitionedSyncGlobalBackpressure(config, selectedRecoveryIds),
+      resolvePartitionedSyncGlobalBackpressure(config, selectedRecoveryIds, onRejected),
     );
   }
-  const limit = nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_MAX_INFLIGHT'))
-    ?? nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_LIMIT'))
-    ?? nonNegativeInteger(config.syncGlobalMaxInflight)
-    ?? nonNegativeInteger(config.syncGlobalLimit)
+  const limit = envInteger('DKG_SYNC_GLOBAL_MAX_INFLIGHT', RESOURCE_MAX.concurrency, onRejected)
+    ?? envInteger('DKG_SYNC_GLOBAL_LIMIT', RESOURCE_MAX.concurrency, onRejected)
+    ?? configInteger(config.syncGlobalMaxInflight, 'syncGlobalMaxInflight', RESOURCE_MAX.concurrency, onRejected)
+    ?? configInteger(config.syncGlobalLimit, 'syncGlobalLimit', RESOURCE_MAX.concurrency, onRejected)
     ?? DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT;
   if (limit === 0) {
     return configureResolvedSyncGlobalPolicy(Object.freeze({
@@ -597,8 +597,8 @@ export function resolveSyncGlobalBackpressure(
     }) as SyncGlobalBackpressurePolicy);
   }
 
-  const queueLimit = nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_QUEUE_LIMIT'))
-    ?? nonNegativeInteger(config.syncGlobalQueueLimit)
+  const queueLimit = envInteger('DKG_SYNC_GLOBAL_QUEUE_LIMIT', RESOURCE_MAX.queue, onRejected)
+    ?? configInteger(config.syncGlobalQueueLimit, 'syncGlobalQueueLimit', RESOURCE_MAX.queue, onRejected)
     ?? limit * DEFAULT_SYNC_GLOBAL_QUEUE_LIMIT_MULTIPLIER;
   const policy = Object.freeze({
     mode: 'shared',
@@ -640,31 +640,32 @@ function resolvedPartitionValue(
   value: number | undefined,
   fallback: number,
   path: string,
+  maximum: number,
+  onRejected?: RejectedResourceSetting,
 ): number {
-  const resolved = value ?? fallback;
-  if (!Number.isSafeInteger(resolved) || resolved < 0) {
-    throw new TypeError(`Invalid ${path}: expected a non-negative safe integer`);
-  }
-  return resolved;
+  return configInteger(value, path, maximum, onRejected) ?? fallback;
 }
 
 function resolvePartitionedSyncGlobalBackpressure(
   globalConfig: SyncGlobalBackpressureConfig,
   selectedRecoveryIds: ReadonlySet<string>,
+  onRejected?: RejectedResourceSetting,
 ): SyncGlobalBackpressurePolicy {
   const config = globalConfig.syncAdmission;
   if (config === undefined) {
     throw new TypeError('Invalid syncAdmission: partitioned mode requires a config object');
   }
-  const envLimit = nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_MAX_INFLIGHT'))
-    ?? nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_LIMIT'));
+  const envLimit = envInteger('DKG_SYNC_GLOBAL_MAX_INFLIGHT', RESOURCE_MAX.concurrency, onRejected)
+    ?? envInteger('DKG_SYNC_GLOBAL_LIMIT', RESOURCE_MAX.concurrency, onRejected);
   const limit = envLimit
-    ?? nonNegativeInteger(globalConfig.syncGlobalMaxInflight)
-    ?? nonNegativeInteger(globalConfig.syncGlobalLimit)
+    ?? configInteger(globalConfig.syncGlobalMaxInflight, 'syncGlobalMaxInflight', RESOURCE_MAX.concurrency, onRejected)
+    ?? configInteger(globalConfig.syncGlobalLimit, 'syncGlobalLimit', RESOURCE_MAX.concurrency, onRejected)
     ?? resolvedPartitionValue(
       config.globalMaxInflight,
       DEFAULT_SYNC_PARTITIONED_GLOBAL_MAX_INFLIGHT,
       'syncAdmission.globalMaxInflight',
+      RESOURCE_MAX.concurrency,
+      onRejected,
     );
   if (limit === 0) {
     return Object.freeze({
@@ -679,27 +680,37 @@ function resolvePartitionedSyncGlobalBackpressure(
       config.fast?.maxInflight,
       DEFAULT_SYNC_FAST_MAX_INFLIGHT,
       'syncAdmission.fast.maxInflight',
+      RESOURCE_MAX.concurrency,
+      onRejected,
     ),
     queueLimit: resolvedPartitionValue(
       config.fast?.queueLimit,
       DEFAULT_SYNC_FAST_QUEUE_LIMIT,
       'syncAdmission.fast.queueLimit',
+      RESOURCE_MAX.queue,
+      onRejected,
     ),
     queueTimeoutMs: resolvedPartitionValue(
       config.fast?.queueTimeoutMs,
       DEFAULT_SYNC_FAST_QUEUE_TIMEOUT_MS,
       'syncAdmission.fast.queueTimeoutMs',
+      RESOURCE_MAX.timerMs,
+      onRejected,
     ),
   });
   const slowMaxInflight = resolvedPartitionValue(
     config.slow?.maxInflight,
     DEFAULT_SYNC_SLOW_MAX_INFLIGHT,
     'syncAdmission.slow.maxInflight',
+    RESOURCE_MAX.concurrency,
+    onRejected,
   );
   const foregroundReserved = resolvedPartitionValue(
     config.slow?.foregroundReserved,
     DEFAULT_SYNC_SLOW_FOREGROUND_RESERVED,
     'syncAdmission.slow.foregroundReserved',
+    RESOURCE_MAX.concurrency,
+    onRejected,
   );
   const slow = Object.freeze({
     maxInflight: slowMaxInflight,
@@ -708,16 +719,22 @@ function resolvePartitionedSyncGlobalBackpressure(
       config.slow?.foregroundQueueLimit,
       DEFAULT_SYNC_SLOW_FOREGROUND_QUEUE_LIMIT,
       'syncAdmission.slow.foregroundQueueLimit',
+      RESOURCE_MAX.queue,
+      onRejected,
     ),
     backgroundMaxInflight: resolvedPartitionValue(
       config.slow?.backgroundMaxInflight,
       Math.max(0, slowMaxInflight - foregroundReserved),
       'syncAdmission.slow.backgroundMaxInflight',
+      RESOURCE_MAX.concurrency,
+      onRejected,
     ),
     backgroundQueueLimit: resolvedPartitionValue(
       config.slow?.backgroundQueueLimit,
       DEFAULT_SYNC_SLOW_BACKGROUND_QUEUE_LIMIT,
       'syncAdmission.slow.backgroundQueueLimit',
+      RESOURCE_MAX.queue,
+      onRejected,
     ),
   });
 
@@ -750,9 +767,9 @@ function resolvePartitionedSyncGlobalBackpressure(
   const partitionQueueLimit = fast.queueLimit
     + slow.foregroundQueueLimit
     + slow.backgroundQueueLimit;
-  const queueLimit = nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_QUEUE_LIMIT'))
-    ?? nonNegativeInteger(globalConfig.syncGlobalQueueLimit)
-    ?? partitionQueueLimit;
+  const queueLimit = envInteger('DKG_SYNC_GLOBAL_QUEUE_LIMIT', RESOURCE_MAX.queue, onRejected)
+    ?? configInteger(globalConfig.syncGlobalQueueLimit, 'syncGlobalQueueLimit', RESOURCE_MAX.queue, onRejected)
+    ?? Math.min(partitionQueueLimit, RESOURCE_MAX.queue);
   const policy = Object.freeze({
     mode: 'partitioned',
     limit,
