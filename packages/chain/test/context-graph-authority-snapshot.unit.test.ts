@@ -42,6 +42,7 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}) {
     filters: [] as Array<readonly [string, ...unknown[]]>,
     ranges: [] as Array<readonly [number, number]>,
     staticCalls: [] as Array<readonly [bigint, { blockTag: number }]>,
+    nameHashCalls: [] as number[],
     deploymentReads: [] as Array<readonly [string, string, string]>,
     readPolicies: [] as unknown[],
   };
@@ -94,6 +95,12 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}) {
         expect(contextGraphId).toBe(9n);
         expect(readOptions).toEqual({ blockTag: 30 });
         return current;
+      },
+    },
+    getNameHash: {
+      staticCall: async (_contextGraphId: bigint, readOptions: { blockTag: number }) => {
+        evidence.nameHashCalls.push(readOptions.blockTag);
+        return readOptions.blockTag < 10 ? ethers.ZeroHash : NAME_HASH;
       },
     },
     getAddress: async () => GOVERNANCE,
@@ -171,15 +178,11 @@ describe('RFC-64 Context Graph authority snapshots', () => {
       ['AgentParticipantAdded', 9n],
       ['AgentParticipantRemoved', 9n],
     ]);
-    expect(evidence.ranges).toHaveLength(18);
-    expect(evidence.ranges.slice(0, 3)).toEqual([
-      [7, 16],
-      [17, 26],
-      [27, 30],
-    ]);
-    expect(evidence.ranges.slice(3)).toHaveLength(15);
+    expect(evidence.nameHashCalls).toEqual([30, 18, 12, 9, 11, 10]);
+    expect(evidence.ranges[0]).toEqual([10, 10]);
+    expect(evidence.ranges.slice(1)).toHaveLength(15);
     for (const range of [[10, 19], [20, 29], [30, 30]] as const) {
-      expect(evidence.ranges.slice(3).filter(
+      expect(evidence.ranges.slice(1).filter(
         ([from, to]) => from === range[0] && to === range[1],
       )).toHaveLength(5);
     }

@@ -954,21 +954,44 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           }
           return logs;
         };
-        // Discover the graph's own creation event first. Every later
-        // authority mutation for this token must be at or after that block,
-        // so rescanning the contract's entire deployment history for the five
-        // remaining exact-id filters only adds RPC work and throttling risk.
-        const created = await readLogs(
-          'ContextGraphCreated',
-          fromBlock,
-          contextGraphId,
+        // Locate the immutable creation block with logarithmic historical
+        // getNameHash reads. Scanning every deployment-era page just to find
+        // one indexed creation event still overwhelms public RPCs once the
+        // registry has lived for millions of blocks. The name commitment is
+        // zero before creation and immutable afterwards, so this search stays
+        // exact at the one finalized provider/anchor selected above.
+        const readNameHashAt = async (blockTag: number): Promise<string> => String(
+          await (contract as any).getNameHash.staticCall(
+            contextGraphId,
+            { blockTag },
+          ),
+        ).toLowerCase();
+        if (await readNameHashAt(finalized.number) === ethers.ZeroHash) {
+          throw new Error(
+            `Context Graph ${contextGraphId.toString()} has 0 finalized creation events`,
+          );
+        }
+        let creationBlock = fromBlock;
+        let creationUpperBound = finalized.number;
+        while (creationBlock < creationUpperBound) {
+          options.signal?.throwIfAborted();
+          const midpoint = Math.floor((creationBlock + creationUpperBound) / 2);
+          if (await readNameHashAt(midpoint) === ethers.ZeroHash) {
+            creationBlock = midpoint + 1;
+          } else {
+            creationUpperBound = midpoint;
+          }
+        }
+        const created = await contract.queryFilter(
+          filters.ContextGraphCreated!(contextGraphId),
+          creationBlock,
+          creationBlock,
         );
         if (created.length !== 1) {
           throw new Error(
             `Context Graph ${contextGraphId.toString()} has ${created.length} finalized creation events`,
           );
         }
-        const creationBlock = created[0]!.blockNumber;
         const [
           current,
           transfers,
