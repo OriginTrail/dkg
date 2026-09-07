@@ -1,7 +1,16 @@
 import { describe, expect, it } from 'vitest';
+import { catchupReadinessResult } from './_helpers/catchup-readiness-fixtures.js';
 import type { CatchupJobResult } from '../src/catchup-runner.js';
 import type { SwmSnapshotCoverage } from '@origintrail-official/dkg-agent';
 import { classifyContextGraphCatchupReadiness, swmShortfallClause } from '../src/context-graph-readiness.js';
+
+
+function respondingResult() {
+  return catchupReadinessResult({
+    connectedPeers: 1, totalPeers: 1, selectedPeers: 1, syncCapablePeers: 1,
+    peersTried: 1, peersResponded: 1, peersSucceeded: 1,
+  });
+}
 
 
 /**
@@ -158,27 +167,13 @@ describe('T16b — the shared-memory shortfall clause (#2050)', () => {
 
   /** A responding round that stored verified SWM data without completing the plane. */
   function swmIncompleteProgress(): CatchupJobResult {
-    const plane = () => ({
-      fetchedMetaTriples: 0, fetchedDataTriples: 0, insertedMetaTriples: 0,
-      insertedDataTriples: 0, bytesReceived: 0, resumedPhases: 0, timedOutPhases: 0,
-      completedPhases: 0, checkpointAdvances: 0, emptyResponses: 0, metaOnlyResponses: 0,
-      dataRejectedMissingMeta: 0, rejectedKcs: 0, droppedDataTriples: 0,
-      failedPeers: 0, failedPhases: 0, deniedPhases: 0,
-    });
-    const result = {
-      connectedPeers: 1, totalPeers: 1, selectedPeers: 1, syncCapablePeers: 1,
-      peersTried: 1, peersResponded: 1, peersSucceeded: 1,
-      dataSynced: 0, sharedMemorySynced: 5, denied: false, deniedPeers: 0,
-      cleanPlaneCompletions: {
-        durable: { verifiedDataPeers: 0, emptyPeers: 0 },
-        sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0 },
-      },
-      diagnostics: { noProtocolPeers: 0, durable: plane(), sharedMemory: plane() },
-    } as unknown as CatchupJobResult;
+    const result = respondingResult();
+    result.sharedMemorySynced = 5;
     // Progress without proof: this is what `madeIncompleteProgress` reads.
-    result.diagnostics!.sharedMemory.insertedDataTriples = 5;
+    result.diagnostics.sharedMemory.insertedDataTriples = 5;
     return result;
   }
+
 });
 
 /**
@@ -205,15 +200,10 @@ describe('T16b — the shortfall clause reaches the terminal message', () => {
     resolved: number; total: number; missingCount: number; missingSample: string[];
     manifestComplete: boolean; continuationPasses: number;
   }> = {}): CatchupJobResult {
-    const r = unresponsiveBase();
+    const r = respondingResult();
     r.dataSynced = 5;
     r.diagnostics!.durable.insertedDataTriples = 5;
     r.diagnostics!.durable.timedOutPhases = 1;
-    // Typed, NOT an untyped literal behind the Record cast. The cast is needed
-    // to assign onto the diagnostics bag, but letting it swallow the literal too
-    // meant this fixture omitted `materializationFailures` — a required field —
-    // and would have kept compiling if the production shape grew another one.
-    // The cast belongs on the assignment target, never on the value.
     const coverage: SwmSnapshotCoverage = {
       contextGraphId: 'cg-under-test',
       peerIdSuffix: 'abcd1234',
@@ -224,30 +214,9 @@ describe('T16b — the shortfall clause reaches the terminal message', () => {
       missingSample: over.missingSample ?? ['ref-a', 'ref-b'],
       materializationFailures: 0,
     };
-    const sm = r.diagnostics!.sharedMemory as Record<string, unknown>;
-    sm['swmCoverage'] = coverage;
-    sm['continuationPasses'] = over.continuationPasses ?? 2;
+    r.diagnostics.sharedMemory.swmCoverage = coverage;
+    r.diagnostics.sharedMemory.continuationPasses = over.continuationPasses ?? 2;
     return r;
-  }
-
-  function unresponsiveBase(): CatchupJobResult {
-    const plane = () => ({
-      fetchedMetaTriples: 0, fetchedDataTriples: 0, insertedMetaTriples: 0,
-      insertedDataTriples: 0, bytesReceived: 0, resumedPhases: 0, timedOutPhases: 0,
-      completedPhases: 0, checkpointAdvances: 0, emptyResponses: 0, metaOnlyResponses: 0,
-      dataRejectedMissingMeta: 0, rejectedKcs: 0, droppedDataTriples: 0,
-      failedPeers: 0, failedPhases: 0, deniedPhases: 0,
-    });
-    return {
-      connectedPeers: 1, totalPeers: 1, selectedPeers: 1, syncCapablePeers: 1,
-      peersTried: 1, peersResponded: 1, peersSucceeded: 1,
-      dataSynced: 0, sharedMemorySynced: 0, denied: false, deniedPeers: 0,
-      cleanPlaneCompletions: {
-        durable: { verifiedDataPeers: 0, emptyPeers: 0 },
-        sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0 },
-      },
-      diagnostics: { noProtocolPeers: 0, durable: plane(), sharedMemory: plane() },
-    };
   }
 
   const errorFor = (result: CatchupJobResult) => classifyContextGraphCatchupReadiness({

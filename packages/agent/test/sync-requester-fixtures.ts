@@ -3,7 +3,7 @@ import { type Quad } from '@origintrail-official/dkg-storage';
 import { type SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
 
-export const ctx = { kind: 'system', id: 'test', startedAt: 0 } as OperationContext;
+export const ctx = { operationId: 'test', operationName: 'sync' } satisfies OperationContext;
 
 export const noop = () => {};
 
@@ -36,7 +36,7 @@ export function quad(subject: string): Quad {
     predicate: 'http://example.com/p',
     object: 'http://example.com/o',
     graph: 'http://example.com/g',
-  } as Quad;
+  } satisfies Quad;
 }
 
 export function sharedMemoryProcessResult() {

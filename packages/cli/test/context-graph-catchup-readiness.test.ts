@@ -1,62 +1,24 @@
 import { describe, expect, it } from 'vitest';
+import { catchupReadinessResult, durableDiagnostics, sharedMemoryDiagnostics } from './_helpers/catchup-readiness-fixtures.js';
 import type { CatchupJobResult } from '../src/catchup-runner.js';
 import { CONTEXT_GRAPH_READINESS_VERSION, classifyContextGraphCatchupReadiness } from '../src/context-graph-readiness.js';
 
 function mixedPeerResult(verifiedDataPeers: number): CatchupJobResult {
-  return {
-    connectedPeers: 2,
-    totalPeers: 2,
-    selectedPeers: 2,
-    syncCapablePeers: 2,
-    peersTried: 2,
-    peersResponded: 2,
-    peersSucceeded: verifiedDataPeers > 0 ? 1 : 0,
-    dataSynced: 5,
-    sharedMemorySynced: 0,
-    denied: true,
-    deniedPeers: 1,
+  return catchupReadinessResult({
+    connectedPeers: 2, totalPeers: 2, selectedPeers: 2, syncCapablePeers: 2,
+    peersTried: 2, peersResponded: 2, peersSucceeded: verifiedDataPeers > 0 ? 1 : 0,
+    dataSynced: 5, denied: true, deniedPeers: 1,
     cleanPlaneCompletions: {
-      durable: { verifiedDataPeers, emptyPeers: 0 },
+      durable: { verifiedDataPeers, verifiedPrivateOnlyPeers: 0, emptyPeers: 0 },
       sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0 },
     },
     diagnostics: {
       noProtocolPeers: 0,
-      durable: {
-        fetchedMetaTriples: 0,
-        fetchedDataTriples: 5,
-        insertedMetaTriples: 0,
-        insertedDataTriples: 5,
-        bytesReceived: 50,
-        resumedPhases: 0,
-        timedOutPhases: 1,
-        completedPhases: 1,
-        checkpointAdvances: 0,
-        emptyResponses: 0,
-        metaOnlyResponses: 0,
-        dataRejectedMissingMeta: 0,
-        rejectedKcs: 0,
-        failedPeers: 0,
-        failedPhases: 0,
-        deniedPhases: 1,
-      },
-      sharedMemory: {
-        fetchedMetaTriples: 0,
-        fetchedDataTriples: 0,
-        insertedMetaTriples: 0,
-        insertedDataTriples: 0,
-        bytesReceived: 0,
-        resumedPhases: 0,
-        timedOutPhases: 0,
-        completedPhases: 0,
-        checkpointAdvances: 0,
-        emptyResponses: 0,
-        droppedDataTriples: 0,
-        failedPeers: 0,
-        failedPhases: 0,
-        deniedPhases: 0,
-      },
+      durable: durableDiagnostics({ fetchedDataTriples: 5, insertedDataTriples: 5,
+        bytesReceived: 50, timedOutPhases: 1, completedPhases: 1, deniedPhases: 1 }),
+      sharedMemory: sharedMemoryDiagnostics(),
     },
-  };
+  });
 }
 
 function durableMetaOnlyResult(): CatchupJobResult {
@@ -684,28 +646,9 @@ describe('context graph catch-up readiness classification', () => {
 describe('T16 — terminal readiness strings are byte-identical', () => {
   const before = { version: 0, durableVerified: false, sharedMemoryVerified: false, updatedAt: 0 };
 
-  function zeroPlane() {
-    return {
-      fetchedMetaTriples: 0, fetchedDataTriples: 0, insertedMetaTriples: 0,
-      insertedDataTriples: 0, bytesReceived: 0, resumedPhases: 0, timedOutPhases: 0,
-      completedPhases: 0, checkpointAdvances: 0, emptyResponses: 0, metaOnlyResponses: 0,
-      dataRejectedMissingMeta: 0, rejectedKcs: 0, droppedDataTriples: 0,
-      failedPeers: 0, failedPhases: 0, deniedPhases: 0,
-    };
-  }
-
-  /** Every disjunct of `catchupResultHasCleanResponse` false — what the tail branches need. */
-  function unresponsive(): CatchupJobResult {
-    return {
-      connectedPeers: 0, totalPeers: 0, selectedPeers: 0, syncCapablePeers: 0,
-      peersTried: 0, peersResponded: 0, peersSucceeded: 0,
-      dataSynced: 0, sharedMemorySynced: 0, denied: false, deniedPeers: 0,
-      cleanPlaneCompletions: {
-        durable: { verifiedDataPeers: 0, emptyPeers: 0 },
-        sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0 },
-      },
-      diagnostics: { noProtocolPeers: 0, durable: zeroPlane(), sharedMemory: zeroPlane() },
-    };
+  /** Every clean-response disjunct is false, reaching the tail branches. */
+  function unresponsive() {
+    return catchupReadinessResult();
   }
 
   function responding(): CatchupJobResult {

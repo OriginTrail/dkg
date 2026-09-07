@@ -30,98 +30,6 @@ describe('public SWM snapshot coverage (#2050)', () => {
     ];
   }
 
-  // The external review's M2 case, verbatim: independent maxima over ready and
-  // total turn these two peers into `200/250` — a graph state neither reported.
-  const partialOfLarge: SwmSnapshotCoverage = {
-    contextGraphId: COVERAGE_CG,
-    peerIdSuffix: 'aaaa1111',
-    snapshotsResolved: 178,
-    snapshotsTotal: 250,
-    manifestComplete: true,
-    missingCount: 72,
-    missingSample: ['did:dkg:ka:from-the-large-manifest'],
-    materializationFailures: 0,
-  };
-  const completeSmaller: SwmSnapshotCoverage = {
-    contextGraphId: COVERAGE_CG,
-    peerIdSuffix: 'bbbb2222',
-    snapshotsResolved: 200,
-    snapshotsTotal: 200,
-    manifestComplete: true,
-    missingCount: 0,
-    missingSample: [],
-    materializationFailures: 0,
-  };
-
-  it('reports the shortfall against the largest manifest, not the best fraction', () => {
-    const bothOrders = [
-      selectSwmSnapshotCoverage(partialOfLarge, completeSmaller),
-      selectSwmSnapshotCoverage(completeSmaller, partialOfLarge),
-    ];
-
-    for (const selected of bothOrders) {
-      // Whole record from ONE peer: reducing numerator and denominator
-      // independently would give 200/250, which equals neither input and
-      // carries a sample from neither manifest.
-      expect([partialOfLarge, completeSmaller]).toContainEqual(selected);
-      expect(selected).not.toMatchObject({ snapshotsResolved: 200, snapshotsTotal: 250 });
-      // And the winner must be the peer that knows the graph is 250 KAs, not
-      // the one whose smaller view is fully resolved. Picking `200/200` would
-      // report "0 outstanding" on a job that is 72 short — self-consistent,
-      // undetectable downstream, and worse than the synthetic pair above.
-      expect(selected).toEqual(partialOfLarge);
-      expect(selected?.missingCount).toBe(72);
-    }
-    expect(bothOrders[0]).toEqual(bothOrders[1]);
-  });
-
-  it('prefers authority evidence even when another peer knows a larger manifest', () => {
-    // Deliberately the record that LOSES on every later rule: smaller total,
-    // fewer outstanding. Only the authority rule can select it, so this fails
-    // if authority stops sorting first.
-    const authoritySmaller: SwmSnapshotCoverage = { ...completeSmaller, fromAuthority: true };
-
-    expect(selectSwmSnapshotCoverage(authoritySmaller, partialOfLarge)).toEqual(authoritySmaller);
-    expect(selectSwmSnapshotCoverage(partialOfLarge, authoritySmaller)).toEqual(authoritySmaller);
-  });
-
-  it('prefers a complete manifest, whose denominator is not merely a lower bound', () => {
-    // Larger total than `partialOfLarge`, so the largest-manifest rule alone
-    // would select it; only `manifestComplete` rejects it.
-    const truncatedButLarger: SwmSnapshotCoverage = {
-      contextGraphId: COVERAGE_CG,
-      peerIdSuffix: 'cccc3333',
-      snapshotsResolved: 9,
-      snapshotsTotal: 300,
-      manifestComplete: false,
-      missingCount: 291,
-      missingSample: [],
-      materializationFailures: 0,
-    };
-
-    expect(selectSwmSnapshotCoverage(truncatedButLarger, partialOfLarge)).toEqual(partialOfLarge);
-    expect(selectSwmSnapshotCoverage(partialOfLarge, truncatedButLarger)).toEqual(partialOfLarge);
-  });
-
-  it('prefers the most resolved when two peers report the same manifest size', () => {
-    const behind: SwmSnapshotCoverage = {
-      ...partialOfLarge,
-      peerIdSuffix: 'dddd4444',
-      snapshotsResolved: 12,
-      missingCount: 238,
-    };
-
-    expect(selectSwmSnapshotCoverage(behind, partialOfLarge)).toEqual(partialOfLarge);
-    expect(selectSwmSnapshotCoverage(partialOfLarge, behind)).toEqual(partialOfLarge);
-  });
-
-  it('breaks a genuine tie deterministically on the peer id', () => {
-    const later: SwmSnapshotCoverage = { ...partialOfLarge, peerIdSuffix: 'zzzz9999' };
-
-    expect(selectSwmSnapshotCoverage(partialOfLarge, later)).toEqual(partialOfLarge);
-    expect(selectSwmSnapshotCoverage(later, partialOfLarge)).toEqual(partialOfLarge);
-  });
-
   it('carries the round coverage onto the summary when the snapshot phase does not finish', async () => {
     const cachedQuads = [quad('cached-snapshot-row')];
     const cachedDigest = workspacePublicQuadsDigest(cachedQuads);
@@ -758,101 +666,50 @@ describe('public SWM snapshot coverage (#2050)', () => {
   });
 });
 
-/**
- * T13 (#2050) — the coverage reduction reduces COHERENTLY and selects the
- * record that names the shortfall.
- *
- * Two properties, and the second is the one that matters. Every return in
- * `selectSwmSnapshotCoverage` yields `a` or `b` — it never constructs — so a
- * whole-record assertion is satisfied BY CONSTRUCTION and cannot fail for any
- * mutation confined to the comparison logic. It dies only under a mutant that
- * SYNTHESIZES a record. That is real coverage of the no-synthesis property and
- * it is worth keeping, but it is not what AC-5 depends on.
- *
- * The defect it cannot see: ranking by `resolved/total` returns `200/200` with
- * `missingCount: 0` for a job 72 Knowledge Assets short — a real record, from a
- * real peer, internally self-consistent, and wrong. Assert selection too, or the
- * ordering is untested.
- */
-function t13Coverage(over: Partial<SwmSnapshotCoverage> & {
-  peerIdSuffix: string; snapshotsResolved: number; snapshotsTotal: number;
-}): SwmSnapshotCoverage {
-  return {
-    contextGraphId: 'cg-t13',
-    manifestComplete: true,
-    missingCount: over.snapshotsTotal - over.snapshotsResolved,
-    missingSample: [],
-    ...over,
+/** Ranking operates on whole records: counts and missing samples must stay together. */
+describe('SWM snapshot coverage selection', () => {
+  const shortfall: SwmSnapshotCoverage = {
+    contextGraphId: 'coverage-swm', peerIdSuffix: 'aaaa1111',
+    snapshotsResolved: 178, snapshotsTotal: 250, manifestComplete: true,
+    missingCount: 72, missingSample: ['did:dkg:ka:from-the-large-manifest'], materializationFailures: 0,
   };
-}
-
-describe('T13 — swmCoverage reduction', () => {
-  /** The r26 shape: the peer that actually holds the graph, 72 short. */
-  const shortfallPeer = t13Coverage({ peerIdSuffix: 'aaaa1111', snapshotsResolved: 178, snapshotsTotal: 250 });
-  /** A peer hosting a SMALLER view of the same graph, fully resolved against it. */
-  const smallerPeer = t13Coverage({ peerIdSuffix: 'bbbb2222', snapshotsResolved: 200, snapshotsTotal: 200 });
-
-  it('never synthesizes a pair: the result is always one whole input record', () => {
-    for (const [a, b] of [[shortfallPeer, smallerPeer], [smallerPeer, shortfallPeer]] as const) {
-      expect([a, b]).toContainEqual(selectSwmSnapshotCoverage(a, b));
+  const smaller: SwmSnapshotCoverage = {
+    ...shortfall, peerIdSuffix: 'bbbb2222', snapshotsResolved: 200, snapshotsTotal: 200,
+    missingCount: 0, missingSample: [],
+  };
+  const tiny: SwmSnapshotCoverage = { ...smaller, peerIdSuffix: 'cccc3333', snapshotsResolved: 1, snapshotsTotal: 1 };
+  const truncated: SwmSnapshotCoverage = {
+    ...shortfall, peerIdSuffix: 'dddd4444', snapshotsResolved: 250, snapshotsTotal: 400,
+    manifestComplete: false, missingCount: 150,
+  };
+  const authority: SwmSnapshotCoverage = {
+    ...tiny, peerIdSuffix: '9999cccc', snapshotsResolved: 5, snapshotsTotal: 5, fromAuthority: true,
+  };
+  const behind: SwmSnapshotCoverage = { ...shortfall, peerIdSuffix: 'eeee5555', snapshotsResolved: 12, missingCount: 238 };
+  const later: SwmSnapshotCoverage = { ...shortfall, peerIdSuffix: 'zzzz9999' };
+  const cases: { name: string; a: SwmSnapshotCoverage | undefined; b: SwmSnapshotCoverage | undefined; expected: SwmSnapshotCoverage | undefined }[] = [
+    { name: 'largest manifest over a better fraction', a: shortfall, b: smaller, expected: shortfall },
+    { name: 'large partial manifest over a tiny complete one', a: shortfall, b: tiny, expected: shortfall },
+    { name: 'authority evidence before manifest size', a: authority, b: shortfall, expected: authority },
+    { name: 'complete manifest before a larger lower bound', a: shortfall, b: truncated, expected: shortfall },
+    { name: 'most resolved within the same manifest size', a: shortfall, b: behind, expected: shortfall },
+    { name: 'deterministic peer suffix on a tie', a: shortfall, b: later, expected: shortfall },
+    { name: 'known record with an absent operand', a: shortfall, b: undefined, expected: shortfall },
+    { name: 'both operands absent', a: undefined, b: undefined, expected: undefined },
+  ];
+  it.each(cases)('$name', ({ a, b, expected }) => {
+    for (const [first, second] of [[a, b], [b, a]]) {
+      // Identity pins the entire input record; synthesized counts cannot pass.
+      expect(selectSwmSnapshotCoverage(first, second)).toBe(expected);
     }
   });
 
-  it('selects the record that NAMES THE SHORTFALL, not the best-looking fraction', () => {
-    for (const [a, b] of [[shortfallPeer, smallerPeer], [smallerPeer, shortfallPeer]] as const) {
-      const selected = selectSwmSnapshotCoverage(a, b);
-      expect(selected).toEqual(shortfallPeer);
-      expect(selected?.missingCount).toBe(72);
-      expect(selected?.peerIdSuffix).toBe('aaaa1111');
-    }
-  });
-
-  it('prefers a large partial manifest over a tiny complete one', () => {
-    // The residual the original implementation accepted in its own doc comment:
-    // `1/1` is complete and fully resolved, and reporting it would tell the
-    // operator the graph had converged.
-    const tiny = t13Coverage({ peerIdSuffix: 'cccc3333', snapshotsResolved: 1, snapshotsTotal: 1 });
-    expect(selectSwmSnapshotCoverage(tiny, shortfallPeer)).toEqual(shortfallPeer);
-    expect(selectSwmSnapshotCoverage(shortfallPeer, tiny)).toEqual(shortfallPeer);
-  });
-
-  it('prefers a complete manifest over an incomplete one, whatever the counts', () => {
-    // An incomplete manifest's denominator is only a lower bound, so its
-    // shortfall is not comparable. Completeness outranks size.
-    const truncatedButBigger = t13Coverage({
-      peerIdSuffix: 'dddd4444', snapshotsResolved: 250, snapshotsTotal: 400, manifestComplete: false,
-    });
-    expect(selectSwmSnapshotCoverage(truncatedButBigger, shortfallPeer)).toEqual(shortfallPeer);
-    expect(selectSwmSnapshotCoverage(shortfallPeer, truncatedButBigger)).toEqual(shortfallPeer);
-  });
-
-  it('lets authority evidence outrank everything below it', () => {
-    // Residual, stated deliberately: a stale or smaller CURATOR manifest still
-    // reports converged. Accepted — the curator is definitionally authoritative
-    // about its own graph's inventory — but it is a property of trusting the
-    // curator, not an artefact of the reduction.
-    const curator = t13Coverage({ peerIdSuffix: '9999cccc', snapshotsResolved: 5, snapshotsTotal: 5, fromAuthority: true });
-    expect(selectSwmSnapshotCoverage(curator, shortfallPeer)).toEqual(curator);
-    expect(selectSwmSnapshotCoverage(shortfallPeer, curator)).toEqual(curator);
-  });
-
-  it('is order-independent across records with DISTINCT peer suffixes', () => {
-    // Scoped to distinct suffixes, which is what this asserts and all it
-    // asserts — the final tiebreak is only asymmetric when they differ.
-    const records = [shortfallPeer, smallerPeer,
-      t13Coverage({ peerIdSuffix: 'cccc3333', snapshotsResolved: 1, snapshotsTotal: 1 }),
-      t13Coverage({ peerIdSuffix: 'dddd4444', snapshotsResolved: 250, snapshotsTotal: 400, manifestComplete: false }),
-    ];
+  it('is order-independent across the distinct peer suffixes in the original matrix', () => {
+    const records = [shortfall, smaller, tiny, truncated];
     for (const a of records) {
       for (const b of records) {
-        expect(selectSwmSnapshotCoverage(a, b)).toEqual(selectSwmSnapshotCoverage(b, a));
+        expect(selectSwmSnapshotCoverage(a, b)).toBe(selectSwmSnapshotCoverage(b, a));
       }
     }
-  });
-
-  it('passes absent operands through rather than erasing the known record', () => {
-    expect(selectSwmSnapshotCoverage(undefined, shortfallPeer)).toEqual(shortfallPeer);
-    expect(selectSwmSnapshotCoverage(shortfallPeer, undefined)).toEqual(shortfallPeer);
-    expect(selectSwmSnapshotCoverage(undefined, undefined)).toBeUndefined();
   });
 });
