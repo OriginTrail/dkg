@@ -172,10 +172,10 @@ describe('[K-6] EPCIS capture → query contract (always runs, no devnet)', () =
       expect(result.eventCount).toBe(1);
     });
 
-    it('publisher received submitted JSON-LD documents as private content', () => {
+    it('publisher received private content preserving the submitted event fields', () => {
       expect(store.length).toBeGreaterThanOrEqual(2);
-      expect(store[0].content).toEqual({ private: VALID_OBJECT_EVENT_DOC });
-      expect(store[1].content).toEqual({ private: VALID_TRANSFORMATION_EVENT_DOC });
+      expect(store[0].content).toMatchObject({ private: VALID_OBJECT_EVENT_DOC });
+      expect(store[1].content).toMatchObject({ private: VALID_TRANSFORMATION_EVENT_DOC });
     });
   });
 

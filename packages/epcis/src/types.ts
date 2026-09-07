@@ -1,7 +1,7 @@
 // EPCIS Document types based on GS1 EPCIS 2.0
 
 export interface EPCISDocument {
-  '@context': string | string[] | Record<string, unknown>;
+  '@context': string | Array<string | Record<string, unknown>> | Record<string, unknown>;
   type: 'EPCISDocument';
   schemaVersion: string;
   creationDate: string;

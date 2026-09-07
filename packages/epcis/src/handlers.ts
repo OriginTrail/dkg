@@ -1,4 +1,5 @@
 import { createValidator } from './validation.js';
+import { normalizeCaptureEventTypes } from './capture-event-types.js';
 import { buildEpcisQuery } from './query-builder.js';
 import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js';
 import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
@@ -281,7 +282,12 @@ export async function handleCaptureAsync(
       }
     : undefined;
 
-  const result = await config.publisher.publishAsync(effectiveContextGraphId, content, opts);
+  const normalizedContent = Object.fromEntries(
+    Object.entries(content as Record<string, unknown>).map(([visibility, doc]) => [
+      visibility, normalizeCaptureEventTypes(doc),
+    ]),
+  );
+  const result = await config.publisher.publishAsync(effectiveContextGraphId, normalizedContent, opts);
 
   return {
     captureID: result.captureID,
