@@ -1,3 +1,4 @@
+import { formatCanonicalRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { Parser, type Quad as N3Quad } from 'n3';
 
 export interface SimpleQuad {
@@ -56,11 +57,11 @@ export async function parseRdf(
   }
 
   if (format === 'jsonld') {
-    // JSON-LD → N-Quads conversion would require the jsonld library.
-    // For now, treat as our JSON quad format if it has subject/predicate/object,
-    // otherwise report unsupported.
+    // Keep the historical quad-array input while supporting ordinary JSON-LD.
     const parsed = JSON.parse(content);
-    if (Array.isArray(parsed) && parsed[0]?.subject) {
+    if (Array.isArray(parsed) && parsed.length > 0 && parsed.every((q) => q
+      && typeof q.subject === 'string' && typeof q.predicate === 'string' && typeof q.object === 'string'
+      && !Object.keys(q).some((key) => key.startsWith('@')))) {
       return parsed.map((q: any) => ({
         subject: q.subject,
         predicate: q.predicate,
@@ -68,7 +69,13 @@ export async function parseRdf(
         graph: q.graph || defaultGraph,
       }));
     }
-    throw new Error('JSON-LD with @context requires the jsonld library. Use .nq, .nt, .ttl, or .trig instead.');
+    if (parsed === null || typeof parsed !== 'object') {
+      throw new Error('JSON-LD input must be an object or array');
+    }
+    const { default: jsonld } = await import('jsonld');
+    const nquads = await jsonld.toRDF(parsed, { format: 'application/n-quads' });
+    if (typeof nquads !== 'string') throw new Error('JSON-LD conversion did not return N-Quads');
+    return parseRdf(nquads, 'nquads', defaultGraph);
   }
 
   // N3 parser handles N-Triples, N-Quads, Turtle, TriG
@@ -95,11 +102,11 @@ export async function parseRdf(
 
 function termToString(term: { termType: string; value: string; language?: string; datatype?: { value: string } }): string {
   if (term.termType === 'Literal') {
-    if (term.language) return `"${term.value}"@${term.language}`;
-    if (term.datatype && term.datatype.value !== 'http://www.w3.org/2001/XMLSchema#string') {
-      return `"${term.value}"^^<${term.datatype.value}>`;
-    }
-    return `"${term.value}"`;
+    return formatCanonicalRdfLiteralTerm(term.language
+      ? { kind: 'language', value: term.value, language: term.language }
+      : term.datatype
+        ? { kind: 'typed', value: term.value, datatype: term.datatype.value }
+        : { kind: 'plain', value: term.value });
   }
   if (term.termType === 'BlankNode') return `_:${term.value}`;
   return term.value;
