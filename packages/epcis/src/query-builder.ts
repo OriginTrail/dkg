@@ -103,7 +103,19 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   // Base pattern — always present
   wherePatterns.push('?event a ?eventType .');
 
-  // Exact external classes additionally require the minimum EPCIS event shape below.
+  // External classes need both EPCIS timing fields to distinguish events from
+  // ordinary RDF. Date filtering also needs eventTime; bind each field once.
+  const timingFields = [
+    { field: 'eventTime', required: externalEventType || Boolean(params.from || params.to) },
+    { field: 'eventTimeZoneOffset', required: externalEventType },
+  ] as const;
+  for (const { field, required } of timingFields) {
+    const binding = `?event epcis:${field} ?${field} .`;
+    if (required) wherePatterns.push(binding);
+    else optionalClauses.push(`OPTIONAL { ${binding} }`);
+  }
+
+  // Unfiltered queries retain the default EPCIS namespace boundary.
   if (!eventTypeIri) {
     filterClauses.push(`FILTER(STRSTARTS(STR(?eventType), "${EPCIS_TYPE_PREFIX}"))`);
   }
@@ -177,25 +189,15 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
     optionalClauses.push('OPTIONAL { ?event epcis:bizLocation ?bizLocation . }');
   }
 
-  // Time range filter
-  if (params.from || params.to || externalEventType) {
-    wherePatterns.push('?event epcis:eventTime ?eventTime .');
-    if (params.from && params.to) {
-      filterClauses.push(
-        `FILTER(xsd:dateTime(?eventTime) >= xsd:dateTime("${escapeSparql(params.from)}") && xsd:dateTime(?eventTime) < xsd:dateTime("${escapeSparql(params.to)}"))`,
-      );
-    } else if (params.from) {
-      filterClauses.push(`FILTER(xsd:dateTime(?eventTime) >= xsd:dateTime("${escapeSparql(params.from)}"))`);
-    } else if (params.to) {
-      filterClauses.push(`FILTER(xsd:dateTime(?eventTime) < xsd:dateTime("${escapeSparql(params.to)}"))`);
-    }
-  } else {
-    optionalClauses.push('OPTIONAL { ?event epcis:eventTime ?eventTime . }');
-  }
-  if (externalEventType) {
-    wherePatterns.push('?event epcis:eventTimeZoneOffset ?eventTimeZoneOffset .');
-  } else {
-    optionalClauses.push('OPTIONAL { ?event epcis:eventTimeZoneOffset ?eventTimeZoneOffset . }');
+  // Time range filters use the eventTime binding established above.
+  if (params.from && params.to) {
+    filterClauses.push(
+      `FILTER(xsd:dateTime(?eventTime) >= xsd:dateTime("${escapeSparql(params.from)}") && xsd:dateTime(?eventTime) < xsd:dateTime("${escapeSparql(params.to)}"))`,
+    );
+  } else if (params.from) {
+    filterClauses.push(`FILTER(xsd:dateTime(?eventTime) >= xsd:dateTime("${escapeSparql(params.from)}"))`);
+  } else if (params.to) {
+    filterClauses.push(`FILTER(xsd:dateTime(?eventTime) < xsd:dateTime("${escapeSparql(params.to)}"))`);
   }
 
   // Action filter — required when filtered, OPTIONAL otherwise

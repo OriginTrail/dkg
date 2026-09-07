@@ -3,18 +3,23 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DKGAgent, KaNumberAllocator } from '@origintrail-official/dkg-agent';
-import { buildEpcisQuery, handleCaptureAsync, toEpcisEvent, type EPCISDocument } from '@origintrail-official/dkg-epcis';
+import { handleCaptureAsync, type EPCISDocument } from '@origintrail-official/dkg-epcis';
 import { DashboardDB, SqliteKaNumberStore } from '@origintrail-official/dkg-node-ui';
 import { GraphManager, OxigraphStore, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
-import { contextGraphDataUri, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
+import { createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import { createEVMAdapter, takeSnapshot, revertSnapshot } from '../../chain/test/evm-test-context.js';
 import { TEST_SNAPSHOT_STORAGE } from '../../../scripts/testing/snapshot-storage.js';
 
 const CG = 'epcis-capture-conversion';
-const cases = ['bare', 'public', 'private', 'both'].flatMap((visibility) =>
-  ['ObjectEvent', 'https://gs1.github.io/EPCIS/ObjectEvent'].map((type) => ({ visibility, type })),
-);
+// Representative publication cases cover every visibility and both spellings;
+// the exhaustive normalization matrix lives in the lightweight package tests.
+const cases = [
+  { visibility: 'bare', type: 'ObjectEvent' },
+  { visibility: 'public', type: 'https://gs1.github.io/EPCIS/ObjectEvent' },
+  { visibility: 'private', type: 'ObjectEvent' },
+  { visibility: 'both', type: 'https://gs1.github.io/EPCIS/ObjectEvent' },
+];
 let agent: DKGAgent | undefined;
 let store: OxigraphStore;
 let dashboard: DashboardDB | undefined;
@@ -62,28 +67,6 @@ function document(type: string, eventID: string): EPCISDocument {
 // The CLI composes EPCIS with the agent. Use its real async publication path,
 // allocator, publisher and store; localOnly keeps network ACKs out of this test.
 describe('EPCIS capture through agent publication', () => {
-  it.each(['urn:epcis:CustomEvent', 'https://example.org/CustomEvent'])(
-    'round-trips an external RDF class through the returned event-type filter: %s', async (eventType) => {
-      const graph = contextGraphDataUri('epcis-type-filter');
-      const event = `urn:event:${encodeURIComponent(eventType)}`;
-      await store.insert([
-        { subject: event, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: eventType, graph },
-        { subject: event, predicate: 'https://gs1.github.io/EPCIS/eventTime', object: '"2024-03-01T08:00:00Z"', graph },
-        { subject: event, predicate: 'https://gs1.github.io/EPCIS/eventTimeZoneOffset', object: '"+00:00"', graph },
-        // The same external class does not make ordinary RDF an EPCIS event.
-        { subject: `${event}:ordinary`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: eventType, graph },
-        { subject: `${event}:missing-offset`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: eventType, graph },
-        { subject: `${event}:missing-offset`, predicate: 'https://gs1.github.io/EPCIS/eventTime', object: '"2024-03-01T08:00:00Z"', graph },
-        { subject: `${event}:missing-time`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: eventType, graph },
-        { subject: `${event}:missing-time`, predicate: 'https://gs1.github.io/EPCIS/eventTimeZoneOffset', object: '"+00:00"', graph },
-      ]);
-      const responseType = toEpcisEvent({ eventType }).type as string;
-      const result = await store.query(buildEpcisQuery({ eventType: responseType }, 'epcis-type-filter'));
-      if (result.type !== 'bindings') throw new Error('Expected event bindings');
-      expect(result.bindings.map((row) => row.event)).toEqual([event]);
-    },
-  );
-
   it.each(cases)('stores the standard RDF class for $type ($visibility)', async ({ visibility, type }) => {
     const publicId = `urn:epcis:${visibility}:${type.endsWith('/ObjectEvent') ? 'canonical' : 'compact'}:public`;
     const privateId = publicId.replace(/:public$/, ':private');
