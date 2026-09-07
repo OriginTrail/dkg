@@ -97,13 +97,11 @@ function packAndInstallFixture({
     shell: process.platform === 'win32',
   });
   assert.equal(packed.status, 0, `npm pack failed for ${installedPackageName}: ${packed.stderr}`);
-  const report = JSON.parse(packed.stdout);
-  const filename = (Array.isArray(report) ? report[0] : report)?.filename;
-  assert.equal(
-    typeof filename,
-    'string',
-    `npm pack did not report a tarball filename for ${installedPackageName}`,
-  );
+  // Lifecycle scripts may write to stdout even with npm's --json flag.
+  // Each fixture owns a fresh destination, so inspect the actual packed artifact.
+  const tarballs = fs.readdirSync(packDir).filter((entry) => entry.endsWith('.tgz'));
+  assert.equal(tarballs.length, 1, `expected one tarball for ${installedPackageName}`);
+  const [filename] = tarballs;
   const extracted = spawnSync('tar', [
     '-xzf',
     path.join(packDir, filename),
@@ -529,6 +527,66 @@ test('the packed CLI resolves the typed Blazegraph runtime subpath for a consume
       getNewLine: () => '\n',
     }),
   );
+}));
+
+test('packing OpenClaw from source builds consumable JavaScript and declarations', () => withFixture((root) => {
+  const source = path.join(REPO_ROOT, 'packages', 'adapter-openclaw');
+  const cleanPackage = path.join(root, 'packages', 'adapter-openclaw');
+  const manifest = JSON.parse(fs.readFileSync(path.join(source, 'package.json'), 'utf8'));
+  const { packageManager } = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
+  writePackage(root, '.', { name: 'openclaw-pack-fixture', private: true, packageManager });
+  fs.mkdirSync(cleanPackage, { recursive: true });
+  for (const entry of ['src', 'package.json', 'tsconfig.json', ...manifest.files.filter((entry) => entry !== 'dist')]) {
+    const from = path.join(source, entry);
+    if (fs.existsSync(from)) fs.cpSync(from, path.join(cleanPackage, entry), { recursive: true });
+  }
+  fs.copyFileSync(path.join(REPO_ROOT, 'tsconfig.base.json'), path.join(root, 'tsconfig.base.json'));
+  // Use the installed build tools and built workspace dependencies. The adapter
+  // itself starts without any build output, independently of the CI build.
+  fs.symlinkSync(path.join(REPO_ROOT, 'node_modules'), path.join(root, 'node_modules'), 'junction');
+  assert.equal(fs.existsSync(path.join(cleanPackage, 'dist')), false);
+  assert.equal(fs.existsSync(path.join(cleanPackage, 'tsconfig.tsbuildinfo')), false);
+
+  const { consumerDir, installedPackageDir } = packAndInstallFixture({
+    root,
+    fixtureName: 'openclaw',
+    sourcePackageDir: cleanPackage,
+    installedPackageName: manifest.name,
+  });
+  assert.ok(fs.existsSync(path.join(installedPackageDir, 'dist', 'index.js')));
+  assert.ok(fs.existsSync(path.join(installedPackageDir, 'dist', 'index.d.ts')));
+
+  const consumer = path.join(consumerDir, 'consumer.mjs');
+  fs.writeFileSync(consumer, [
+    "import { DkgDaemonClient } from '@origintrail-official/dkg-adapter-openclaw';",
+    "if (typeof DkgDaemonClient !== 'function') throw new Error('missing client export');",
+    '',
+  ].join('\n'));
+  const imported = spawnSync(process.execPath, [consumer], { cwd: consumerDir, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(imported.status, 0, `packed OpenClaw import failed: ${imported.stderr}`);
+
+  const typedConsumer = path.join(consumerDir, 'consumer.mts');
+  fs.writeFileSync(typedConsumer, [
+    "import { DkgDaemonClient, type DkgClientOptions } from '@origintrail-official/dkg-adapter-openclaw';",
+    'export function createClient(options: DkgClientOptions): DkgDaemonClient {',
+    '  return new DkgDaemonClient(options);',
+    '}',
+    '',
+  ].join('\n'));
+  const program = ts.createProgram([typedConsumer], {
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    target: ts.ScriptTarget.ES2022,
+    noEmit: true,
+    skipLibCheck: true,
+    strict: true,
+  });
+  const diagnostics = ts.getPreEmitDiagnostics(program);
+  assert.equal(diagnostics.length, 0, ts.formatDiagnosticsWithColorAndContext(diagnostics, {
+    getCanonicalFileName: (file) => file,
+    getCurrentDirectory: () => consumerDir,
+    getNewLine: () => '\n',
+  }));
 }));
 
 test('the packed storage package preserves representative legacy dist imports', {
