@@ -1,9 +1,9 @@
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { buildEpcisQuery } from '../src/query-builder.js';
+import { buildEpcisQuery, buildEpcisPageQuery } from '../src/query-builder.js';
 import { handleEventsQuery } from '../src/handlers.js';
 import { encodePageToken } from '../src/utils.js';
-import { MAX_EPCIS_OFFSET, MAX_EPCIS_PAGE_SIZE } from '../src/pagination.js';
+import { MAX_EPCIS_OFFSET, MAX_EPCIS_PAGE_SIZE, EpcisPaginationPlan } from '../src/pagination.js';
 
 it.each([NaN, Infinity, -Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1, MAX_EPCIS_OFFSET + 1])(
   'rejects invalid/deep builder offset %s', (offset) => {
@@ -16,7 +16,7 @@ it.each([NaN, Infinity, -Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1])('rejects u
 it('bounds lookahead independently of the public page-size cap', () => {
   expect(buildEpcisQuery({ limit: MAX_EPCIS_PAGE_SIZE, offset: MAX_EPCIS_OFFSET }, 'pagination'))
     .toContain('LIMIT 1000\nOFFSET 10000');
-  expect(buildEpcisQuery({ limit: MAX_EPCIS_PAGE_SIZE }, 'pagination', { lookahead: true })).toContain('LIMIT 1001');
+  expect(buildEpcisPageQuery({}, 'pagination', new EpcisPaginationPlan(MAX_EPCIS_PAGE_SIZE, 0))).toContain('LIMIT 1001');
 });
 it.each([
   `offset=${MAX_EPCIS_OFFSET + 1}`,

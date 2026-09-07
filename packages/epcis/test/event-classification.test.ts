@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { describe, it, expect } from 'vitest';
 import { BlazegraphStore, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { buildEpcisQuery } from '../src/query-builder.js';
+import type { EpcisQueryParams } from '../src/types.js';
 
 const blazegraphUrl = process.env.BLAZEGRAPH_TEST_URL;
 if (process.env.DKG_REQUIRE_BLAZEGRAPH === '1' && !blazegraphUrl) {
@@ -13,6 +14,86 @@ const backends: Array<{ name: string; create: () => TripleStore }> = [
 // Local runs always exercise Oxigraph. The live CI profile adds Blazegraph;
 // its required-URL guard above prevents a green run with the backend missing.
 if (blazegraphUrl) backends.push({ name: 'Blazegraph', create: () => new BlazegraphStore(blazegraphUrl) });
+
+const EPCIS = 'https://gs1.github.io/EPCIS/';
+const DKG = 'http://dkg.io/ontology/';
+const VISIBILITIES = ['public', 'private'] as const;
+type Visibility = typeof VISIBILITIES[number];
+interface EventCase {
+  id: string;
+  type: string;
+  membership: 'event-list' | 'none';
+  provenance: 'none' | 'root-only' | 'per-token' | 'collapsed-ual';
+  expected: boolean;
+  nestedUnder?: string;
+}
+const EVENT_CASES: readonly EventCase[] = [
+  { id: 'object-member', type: `${EPCIS}ObjectEvent`, membership: 'event-list', provenance: 'none', expected: true },
+  { id: 'aggregation-per-token', type: `${EPCIS}AggregationEvent`, membership: 'none', provenance: 'per-token', expected: true },
+  { id: 'transaction-collapsed', type: `${EPCIS}TransactionEvent`, membership: 'none', provenance: 'collapsed-ual', expected: true },
+  { id: 'transformation-root', type: `${EPCIS}TransformationEvent`, membership: 'none', provenance: 'root-only', expected: true },
+  { id: 'association-root', type: `${EPCIS}AssociationEvent`, membership: 'none', provenance: 'root-only', expected: true },
+  { id: 'custom-member', type: `${EPCIS}CustomEvent`, membership: 'event-list', provenance: 'none', expected: true },
+  { id: 'https-member', type: 'https://example.org/Observation', membership: 'event-list', provenance: 'none', expected: true },
+  { id: 'urn-member', type: 'urn:epcis:Observation', membership: 'event-list', provenance: 'none', expected: true },
+  { id: 'document', type: `${EPCIS}EPCISDocument`, membership: 'none', provenance: 'none', expected: false },
+  { id: 'query-document', type: `${EPCIS}EPCISQueryDocument`, membership: 'none', provenance: 'none', expected: false },
+  { id: 'sensor-element', type: `${EPCIS}SensorElement`, membership: 'none', provenance: 'none', expected: false },
+  { id: 'orphan-standard', type: `${EPCIS}ObjectEvent`, membership: 'none', provenance: 'none', expected: false },
+  { id: 'nested-custom', type: 'https://example.org/Observation', membership: 'none', provenance: 'none', expected: false, nestedUnder: 'urn-member' },
+  { id: 'nested-standard', type: `${EPCIS}ObjectEvent`, membership: 'none', provenance: 'none', expected: false, nestedUnder: 'urn-member' },
+];
+interface FixtureGraphs {
+  public: string;
+  private: string;
+  meta: string;
+}
+function eventSubject(visibility: Visibility, id: string): string {
+  return `urn:test:${visibility}:${id}`;
+}
+function publicationSubject(visibility: Visibility, id: string): string {
+  return `urn:publication:${eventSubject(visibility, id)}`;
+}
+function eventQuads(event: EventCase, visibility: Visibility, graphs: FixtureGraphs): Quad[] {
+  const subject = eventSubject(visibility, event.id);
+  const graph = graphs[visibility];
+  const quads: Quad[] = [
+    { subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: event.type, graph },
+    { subject, predicate: `${EPCIS}eventTime`, object: '"2024-03-01T08:00:00Z"', graph },
+    { subject, predicate: `${EPCIS}eventTimeZoneOffset`, object: '"+00:00"', graph },
+  ];
+  if (event.provenance !== 'none') {
+    const publication = publicationSubject(visibility, event.id);
+    quads.push({ subject: publication, predicate: `${DKG}rootEntity`, object: subject, graph: graphs.meta });
+    if (event.provenance === 'per-token') {
+      quads.push({ subject: publication, predicate: `${DKG}partOf`, object: 'urn:legacy:ual', graph: graphs.meta });
+    } else if (event.provenance === 'collapsed-ual') {
+      quads.push({ subject: publication, predicate: `${DKG}batchId`, object: '"1"', graph: graphs.meta });
+    }
+  }
+  if (event.membership === 'event-list') {
+    // Exercise historical and current event-list namespaces in the same query.
+    const namespace = visibility === 'public' ? EPCIS : 'https://ref.gs1.org/epcis/';
+    quads.push({ subject: `urn:test:${visibility}:body`, predicate: `${namespace}eventList`, object: subject, graph });
+  }
+  if (event.nestedUnder) {
+    quads.push({ subject: eventSubject(visibility, event.nestedUnder), predicate: 'https://example.org/detail', object: subject, graph });
+  }
+  if (visibility === 'private') {
+    quads.push({ subject, predicate: `${DKG}privateDataAnchor`, object: '"true"', graph: graphs.public });
+  }
+  return quads;
+}
+function expectedSubjects(): string[] {
+  return VISIBILITIES.flatMap((visibility) => EVENT_CASES
+    .filter((event) => event.expected)
+    .map((event) => eventSubject(visibility, event.id))).sort();
+}
+async function queryEvents(store: TripleStore, cg: string, params: EpcisQueryParams) {
+  const result = await store.query(buildEpcisQuery(params, cg));
+  if (result.type !== 'bindings') throw new Error('Expected event bindings');
+  return result.bindings;
+}
 
 for (const backend of backends) {
   describe(`EPCIS event classification (${backend.name})`, () => {
@@ -26,83 +107,46 @@ for (const backend of backends) {
       const cg = `epcis-classification-${randomUUID()}`;
       const dataGraph = `did:dkg:context-graph:${cg}`;
       const scope = `${dataGraph}${params.subGraphName ? `/${params.subGraphName}` : ''}`;
-      const publicGraph = params.finalized ? scope : `${scope}/_shared_memory`;
-      const privateGraph = `${scope}/_private`;
-      const metaGraph = params.finalized ? `${dataGraph}/_meta` : `${scope}/_shared_memory_meta`;
-      const standardTypes = ['ObjectEvent', 'AggregationEvent', 'TransactionEvent', 'TransformationEvent', 'AssociationEvent'];
-      const eventTypes = [...standardTypes.map((type) => `https://gs1.github.io/EPCIS/${type}`),
-        'https://gs1.github.io/EPCIS/CustomEvent', 'https://example.org/Observation', 'urn:epcis:Observation'];
+      const graphs: FixtureGraphs = {
+        public: params.finalized ? scope : `${scope}/_shared_memory`,
+        private: `${scope}/_private`,
+        meta: params.finalized ? `${dataGraph}/_meta` : `${scope}/_shared_memory_meta`,
+      };
       try {
-        const quads: Quad[] = [publicGraph, privateGraph].flatMap((graph) => {
-          const visibility = graph === publicGraph ? 'public' : 'private';
-          const subjectFor = (index: number) => `urn:test:${visibility}:event-${index}`;
-          const records = [
-            ...eventTypes.map((type, index) => ({ subject: subjectFor(index), type, member: index === 0 || index >= standardTypes.length, root: index > 0 && index < standardTypes.length })),
-            ...['EPCISDocument', 'EPCISQueryDocument', 'SensorElement'].map((name) => ({
-              subject: `urn:test:${visibility}:${name}`, type: `https://gs1.github.io/EPCIS/${name}`, member: false, root: false,
-            })),
-            { subject: `urn:test:${visibility}:orphan-standard`, type: eventTypes[0], member: false, root: false },
-            // Both nested resources have type/time/offset; neither belongs to eventList.
-            { subject: `urn:test:${visibility}:nested-custom`, type: 'https://example.org/Observation', member: false, root: false },
-            { subject: `urn:test:${visibility}:nested-standard`, type: eventTypes[0], member: false, root: false },
-          ];
-          return records.flatMap(({ subject, type, member, root }) => [
-            { subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: type, graph },
-            { subject, predicate: 'https://gs1.github.io/EPCIS/eventTime', object: '"2024-03-01T08:00:00Z"', graph },
-            { subject, predicate: 'https://gs1.github.io/EPCIS/eventTimeZoneOffset', object: '"+00:00"', graph },
-            ...(root ? [
-              { subject: `urn:publication:${subject}`, predicate: 'http://dkg.io/ontology/rootEntity', object: subject, graph: metaGraph },
-              ...(subject.endsWith('event-1') ? [{ subject: `urn:publication:${subject}`, predicate: 'http://dkg.io/ontology/partOf', object: 'urn:legacy:ual', graph: metaGraph }] : []),
-              ...(subject.endsWith('event-2') ? [{ subject: `urn:publication:${subject}`, predicate: 'http://dkg.io/ontology/batchId', object: '"1"', graph: metaGraph }] : []),
-            ] : []),
-            ...(member ? [{ subject: `urn:test:${visibility}:body`, predicate: `${visibility === 'public' ? 'https://gs1.github.io/EPCIS/' : 'https://ref.gs1.org/epcis/'}eventList`, object: subject, graph }] : []),
-            ...(subject.includes('nested-') ? [{ subject: subjectFor(7), predicate: 'https://example.org/detail', object: subject, graph }] : []),
-            ...(graph === privateGraph ? [{ subject, predicate: 'http://dkg.io/ontology/privateDataAnchor', object: '"true"', graph: publicGraph }] : []),
-          ]);
-        });
-        await store.insert(quads);
-        const all = await store.query(buildEpcisQuery(params, cg));
-        expect(all.type).toBe('bindings');
-        if (all.type !== 'bindings') throw new Error('Expected event bindings');
-        expect(all.bindings).toHaveLength(eventTypes.length * 2);
-        expect(all.bindings.map((row) => row.event).sort()).toEqual(
-          ['public', 'private'].flatMap((partition) => eventTypes.map((_type, index) => `urn:test:${partition}:event-${index}`)).sort(),
-        );
-        // Both supported historical provenance layouts still resolve their UAL.
-        for (const visibility of ['public', 'private']) {
-          expect(all.bindings.find((row) => row.event === `urn:test:${visibility}:event-1`)?.ual)
-            .toBe('urn:legacy:ual');
-          expect(all.bindings.find((row) => row.event === `urn:test:${visibility}:event-2`)?.ual)
-            .toBe(`urn:publication:urn:test:${visibility}:event-2`);
+        await store.insert(VISIBILITIES.flatMap((visibility) => EVENT_CASES.flatMap((event) => eventQuads(event, visibility, graphs))));
+        const all = await queryEvents(store, cg, params);
+        expect(all.map((row) => row.event).sort()).toEqual(expectedSubjects());
+
+        // Both historical provenance layouts resolve a UAL in both partitions.
+        for (const visibility of VISIBILITIES) {
+          expect(all.find((row) => row.event === eventSubject(visibility, 'aggregation-per-token'))?.ual).toBe('urn:legacy:ual');
+          expect(all.find((row) => row.event === eventSubject(visibility, 'transaction-collapsed'))?.ual)
+            .toBe(publicationSubject(visibility, 'transaction-collapsed'));
         }
-        // A different publisher can reference a legacy event without hiding it.
-        await store.insert([publicGraph, privateGraph].map((graph) => ({
+
+        // An unrelated publisher's incoming link must not hide a legacy root.
+        await store.insert(VISIBILITIES.map((visibility) => ({
           subject: 'urn:shipment:unrelated', predicate: 'https://example.org/relatedEvent',
-          object: `urn:test:${graph === publicGraph ? 'public' : 'private'}:event-1`, graph,
+          object: eventSubject(visibility, 'aggregation-per-token'), graph: graphs[visibility],
         })));
-        const referenced = await store.query(buildEpcisQuery(params, cg));
-        expect(referenced).toEqual(all);
-        const filtered = await store.query(buildEpcisQuery({ ...params, eventType: 'ObjectEvent' }, cg));
-        expect(filtered.type).toBe('bindings');
-        if (filtered.type !== 'bindings') throw new Error('Expected event bindings');
-        expect(filtered.bindings.map((row) => row.event).sort()).toEqual(['urn:test:private:event-0', 'urn:test:public:event-0']);
-        for (const eventType of eventTypes) {
-          const result = await store.query(buildEpcisQuery({ ...params, eventType }, cg));
-          expect(result.type).toBe('bindings');
-          if (result.type !== 'bindings') throw new Error('Expected event bindings');
-          expect(result.bindings).toHaveLength(2);
-          expect(result.bindings.every((row) => row.eventType === eventType)).toBe(true);
+        expect(await queryEvents(store, cg, params)).toEqual(all);
+
+        const filtered = await queryEvents(store, cg, { ...params, eventType: 'ObjectEvent' });
+        expect(filtered.map((row) => row.event).sort())
+          .toEqual(VISIBILITIES.map((visibility) => eventSubject(visibility, 'object-member')).sort());
+        for (const event of EVENT_CASES.filter((event) => event.expected)) {
+          const rows = await queryEvents(store, cg, { ...params, eventType: event.type });
+          expect(rows).toHaveLength(2);
+          expect(rows.every((row) => row.eventType === event.type)).toBe(true);
         }
-        const documents = await store.query(buildEpcisQuery({ ...params, eventType: 'https://gs1.github.io/EPCIS/EPCISDocument' }, cg));
-        expect(documents).toMatchObject({ type: 'bindings', bindings: [] });
+        expect(await queryEvents(store, cg, { ...params, eventType: `${EPCIS}EPCISDocument` })).toEqual([]);
       } finally {
         try {
-          for (const graph of [publicGraph, privateGraph, metaGraph]) await store.dropGraph(graph);
+          for (const graph of Object.values(graphs)) await store.dropGraph(graph);
         } finally {
           await store.close();
         }
       }
     }, 60_000);
-
   });
 }
