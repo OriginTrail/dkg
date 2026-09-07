@@ -3,12 +3,15 @@ import { CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1 } from './current-finalized-
 import { snapshotDenseDataArray } from './strict-local-data.js';
 import type { StrictFinalizedEndpointSessionV1 } from './strict-current-finalized-evm-types.js';
 
-// Tie the constructed tuple lengths to the generic finalized-read ceiling.
-type AssertSessionMatchesCeiling =
-  StrictFinalizedEndpointSessionV1['length'] extends 1 | typeof CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1
-    ? true : never;
-const _assertSessionMatchesCeiling: AssertSessionMatchesCeiling = true;
-void _assertSessionMatchesCeiling;
+// The selection algorithm below has exactly two slots. A widened `number`
+// profile must not erase the link between that algorithm and its public bound.
+const SESSION_ENDPOINT_CAPACITY = 2;
+const _assertProfileCeiling: typeof SESSION_ENDPOINT_CAPACITY = CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1;
+type Exact<A, B> = [A] extends [B] ? [B] extends [A] ? true : never : never;
+const _assertSessionMatchesCeiling: Exact<
+  StrictFinalizedEndpointSessionV1['length'], 1 | typeof SESSION_ENDPOINT_CAPACITY
+> = true;
+void [_assertProfileCeiling, _assertSessionMatchesCeiling];
 
 interface NormalizedEndpoint {
   readonly href: string;
