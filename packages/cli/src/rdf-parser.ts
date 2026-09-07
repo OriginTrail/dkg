@@ -1,5 +1,6 @@
 import { formatCanonicalRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { Parser, type Quad as N3Quad } from 'n3';
+import type { JsonLdDocument, Options as JsonLdOptions } from 'jsonld';
 
 export interface SimpleQuad {
   subject: string;
@@ -44,36 +45,39 @@ export async function parseRdf(
   content: string,
   format: RdfFormat,
   defaultGraph: string,
+  baseIRI?: string,
 ): Promise<SimpleQuad[]> {
-  if (format === 'json') {
-    const parsed = JSON.parse(content);
-    const arr = Array.isArray(parsed) ? parsed : parsed.quads;
-    return arr.map((q: any) => ({
-      subject: q.subject,
-      predicate: q.predicate,
-      object: q.object,
-      graph: q.graph || defaultGraph,
-    }));
-  }
-
-  if (format === 'jsonld') {
-    // Keep the historical quad-array input while supporting ordinary JSON-LD.
-    const parsed = JSON.parse(content);
-    if (Array.isArray(parsed) && parsed.length > 0 && parsed.every((q) => q
-      && typeof q.subject === 'string' && typeof q.predicate === 'string' && typeof q.object === 'string'
-      && !Object.keys(q).some((key) => key.startsWith('@')))) {
-      return parsed.map((q: any) => ({
-        subject: q.subject,
-        predicate: q.predicate,
-        object: q.object,
-        graph: q.graph || defaultGraph,
-      }));
-    }
+  if (format === 'json' || format === 'jsonld') {
+    const parsed: unknown = JSON.parse(content);
+    const legacy = decodeLegacyQuads(
+      format === 'json' && isRecord(parsed) ? parsed.quads : parsed,
+      defaultGraph,
+    );
+    if (legacy) return legacy;
+    if (format === 'json') throw new Error('JSON input must contain an array of subject/predicate/object quads');
     if (parsed === null || typeof parsed !== 'object') {
       throw new Error('JSON-LD input must be an object or array');
     }
     const { default: jsonld } = await import('jsonld');
-    const nquads = await jsonld.toRDF(parsed, { format: 'application/n-quads' });
+    const remoteContextError = new Error('Remote JSON-LD contexts are disabled; embed an inline @context before ingesting the file');
+    // jsonld.js 8 supports safe mode; the older upstream declaration omits it.
+    const options: JsonLdOptions.ToRdf & { safe: true } = {
+      format: 'application/n-quads',
+      base: baseIRI,
+      safe: true,
+      documentLoader: async () => { throw remoteContextError; },
+    };
+    let nquads: object | string;
+    try {
+      // jsonld.js validates the JSON-LD grammar and rejects lossy expansion.
+      nquads = await jsonld.toRDF(parsed as JsonLdDocument, options);
+    } catch (error) {
+      // Preserve the actionable policy error that jsonld.js wraps while loading.
+      if (isRecord(error) && isRecord(error.details) && error.details.cause === remoteContextError) {
+        throw remoteContextError;
+      }
+      throw error;
+    }
     if (typeof nquads !== 'string') throw new Error('JSON-LD conversion did not return N-Quads');
     return parseRdf(nquads, 'nquads', defaultGraph);
   }
@@ -98,6 +102,28 @@ export async function parseRdf(
       });
     });
   });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+type LegacyQuad = Omit<SimpleQuad, 'graph'> & { graph?: string | null };
+
+function isLegacyQuad(value: unknown): value is LegacyQuad {
+  return isRecord(value)
+    && typeof value.subject === 'string'
+    && typeof value.predicate === 'string'
+    && typeof value.object === 'string'
+    && (value.graph == null || typeof value.graph === 'string')
+    && !Object.keys(value).some((key) => key.startsWith('@'));
+}
+
+function decodeLegacyQuads(value: unknown, defaultGraph: string): SimpleQuad[] | undefined {
+  if (!Array.isArray(value) || !value.every(isLegacyQuad)) return undefined;
+  return value.map(({ subject, predicate, object, graph }) => ({
+    subject, predicate, object, graph: graph || defaultGraph,
+  }));
 }
 
 function termToString(term: { termType: string; value: string; language?: string; datatype?: { value: string } }): string {

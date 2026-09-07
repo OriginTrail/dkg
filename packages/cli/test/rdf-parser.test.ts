@@ -4,6 +4,8 @@ import { once } from 'node:events';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
+import { Parser } from 'n3';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { detectFormat, supportedExtensions, parseRdf } from '../src/rdf-parser.js';
 
@@ -152,7 +154,7 @@ describe('parseRdf', () => {
       expect(quads).toContainEqual({ subject: 'urn:other', predicate: 'https://example.org/label', object: '"Other"', graph: DEFAULT_GRAPH });
     });
 
-    it('loads a referenced JSON-LD context through the standard document loader', async () => {
+    it.each(['context', 'import'])('rejects remote %s loading without requesting the local endpoint', async (kind) => {
       let requests = 0;
       const server = createServer((_req, res) => {
         requests++;
@@ -165,9 +167,9 @@ describe('parseRdf', () => {
       if (!address || typeof address === 'string') throw new Error('Expected a TCP listener');
       try {
         const context = `http://127.0.0.1:${address.port}/context`;
-        const quads = await parseRdf(JSON.stringify({ '@context': context, '@id': 'urn:event', label: 'Remote context' }), 'jsonld', DEFAULT_GRAPH);
-        expect(requests).toBe(1);
-        expect(quads).toEqual([{ subject: 'urn:event', predicate: 'https://example.org/label', object: '"Remote context"', graph: DEFAULT_GRAPH }]);
+        const input = { '@context': kind === 'context' ? context : { '@import': context }, '@id': 'urn:event', label: 'Remote context' };
+        await expect(parseRdf(JSON.stringify(input), 'jsonld', DEFAULT_GRAPH)).rejects.toThrow(/Remote JSON-LD contexts are disabled/);
+        expect(requests).toBe(0);
       } finally {
         await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
       }
@@ -181,6 +183,9 @@ describe('parseRdf', () => {
         await store.insert(quads);
         const result = await store.query(`SELECT ?text WHERE { GRAPH <${DEFAULT_GRAPH}> { <urn:event> <https://example.org/text> ?text } }`);
         expect(result).toMatchObject({ type: 'bindings', bindings: [{ text: quads[0].object }] });
+        if (result.type !== 'bindings') throw new Error('Expected literal bindings');
+        const stored = new Parser({ format: 'N-Triples' }).parse(`<urn:event> <https://example.org/text> ${result.bindings[0].text} .`);
+        expect(stored[0].object.value).toBe(text);
         // The canonical lexical form escapes once; it remains valid N-Quads.
         expect(await parseRdf(`<urn:event> <https://example.org/text> ${quads[0].object} .`, 'ntriples', DEFAULT_GRAPH)).toEqual(quads);
       } finally {
@@ -188,8 +193,22 @@ describe('parseRdf', () => {
       }
     });
 
+    it('honors an inline base for document-relative identifiers', async () => {
+      const input = { '@context': { '@base': 'https://example.org/data/', name: 'https://schema.org/name' }, '@id': 'asset/1', name: 'Alice' };
+      expect(await parseRdf(JSON.stringify(input), 'jsonld', DEFAULT_GRAPH, 'file:///tmp/input.jsonld')).toEqual([
+        { subject: 'https://example.org/data/asset/1', predicate: 'https://schema.org/name', object: '"Alice"', graph: DEFAULT_GRAPH },
+      ]);
+    });
+
     it.each(['null', '42', '"https://example.org/not-a-document"'])('rejects scalar JSON-LD %s', async (content) => {
       await expect(parseRdf(content, 'jsonld', DEFAULT_GRAPH)).rejects.toThrow('JSON-LD input must be an object or array');
+    });
+
+    it.each([
+      { '@id': 'asset/1', 'https://schema.org/name': 'Alice' },
+      { '@id': 'urn:event', name: 'Unmapped property' },
+    ])('rejects lossy JSON-LD conversion without silently omitting statements', async (input) => {
+      await expect(parseRdf(JSON.stringify(input), 'jsonld', DEFAULT_GRAPH)).rejects.toThrow(/Safe mode validation/);
     });
 
     it('rejects malformed JSON-LD contexts', async () => {
@@ -214,27 +233,27 @@ describe('parseRdf', () => {
       ]);
     });
 
-    it('loads an advertised .jsonld file through the CLI input boundary', async () => {
+    it.each(['urn:event', 'asset/1'])('loads a JSON-LD file with identifier %s through the CLI input boundary', async (id) => {
       const { loadQuadsFromInput } = await import('../src/cli-helpers.js');
       const directory = await mkdtemp(join(tmpdir(), 'dkg-jsonld-ingest-'));
       try {
         const file = join(directory, 'event.jsonld');
-        await writeFile(file, JSON.stringify({ '@context': { name: 'https://schema.org/name' }, '@id': 'urn:event', name: 'CLI input' }));
+        await writeFile(file, JSON.stringify({ '@context': { name: 'https://schema.org/name' }, '@id': id, name: 'CLI input' }));
         expect(await loadQuadsFromInput({ file }, DEFAULT_GRAPH)).toEqual([
-          { subject: 'urn:event', predicate: 'https://schema.org/name', object: '"CLI input"', graph: DEFAULT_GRAPH },
+          { subject: new URL(id, pathToFileURL(file)).href, predicate: 'https://schema.org/name', object: '"CLI input"', graph: DEFAULT_GRAPH },
         ]);
       } finally {
         await rm(directory, { recursive: true, force: true });
       }
     });
 
-    it('accepts JSON-LD that has subject/predicate/object shape', async () => {
-      const content = JSON.stringify([
-        { subject: 'urn:a', predicate: 'urn:p', object: '"val"' },
-      ]);
-      const quads = await parseRdf(content, 'jsonld', DEFAULT_GRAPH);
-      expect(quads).toHaveLength(1);
+    it.each([undefined, '', 'urn:named'])('keeps legacy JSON and JSON-LD graph handling identical (%s)', async (graph) => {
+      const content = JSON.stringify([{ subject: 'urn:a', predicate: 'urn:p', object: '"val"', graph }]);
+      const expected = [{ subject: 'urn:a', predicate: 'urn:p', object: '"val"', graph: graph || DEFAULT_GRAPH }];
+      expect(await parseRdf(content, 'jsonld', DEFAULT_GRAPH)).toEqual(expected);
+      expect(await parseRdf(content, 'json', DEFAULT_GRAPH)).toEqual(expected);
     });
+
   });
 
   describe('error handling', () => {
