@@ -4,16 +4,23 @@ import type { ChainAdapter, ChainEvent, EventFilter } from '@origintrail-officia
 import { PublishHandler } from '../../src/publish-handler.js';
 import type { JournalEntry } from '../../src/publish-journal.js';
 
-export function makeChain(head: number, events: ChainEvent[]): {
+interface ChainFixtureOptions {
+  head: number | (() => number);
+  events?: readonly ChainEvent[];
+  onListen?: (filter: EventFilter) => void;
+}
+
+export function makeChain({ head, events = [], onListen }: ChainFixtureOptions): {
   adapter: ChainAdapter;
   filters: EventFilter[];
 } {
   const filters: EventFilter[] = [];
   const adapter = {
     chainId: 'mock:0',
-    getBlockNumber: async () => head,
+    getBlockNumber: async () => typeof head === 'function' ? head() : head,
     listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
       filters.push(f);
+      onListen?.(f);
       const fromBlock = f.fromBlock ?? 0;
       const toBlock = f.toBlock ?? Number.MAX_SAFE_INTEGER;
       for (const evt of events) {

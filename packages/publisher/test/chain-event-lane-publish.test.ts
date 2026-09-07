@@ -1,5 +1,3 @@
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
-import type { EventFilter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { describe, expect, it } from 'vitest';
@@ -25,7 +23,7 @@ describe('ChainEventPoller publish', () => {
         txIndex: 0,
       },
     };
-    const { adapter, filters } = makeChain(10_000, [oldCreate]);
+    const { adapter, filters } = makeChain({ head: 10_000, events: [oldCreate] });
     const handler = makeHandler();
     markPending(handler, true);
     const confirmed: unknown[] = [];
@@ -37,7 +35,7 @@ describe('ChainEventPoller publish', () => {
     const poller = new ChainEventPoller({ chain: adapter, publishHandler: handler, intervalMs: 60_000 });
 
     await poller.start();
-    await new Promise((r) => setTimeout(r, 50));
+    await poller.waitForCurrentPoll();
     await poller.stop();
 
     expect(filters).toHaveLength(1);
@@ -63,7 +61,7 @@ describe('ChainEventPoller publish', () => {
         txIndex: 0,
       },
     };
-    const { adapter, filters } = makeChain(10_000, [oldCreate]);
+    const { adapter, filters } = makeChain({ head: 10_000, events: [oldCreate] });
     const journal = {
       load: async () => [journalEntry({ expectedMerkleRoot: merkleRoot })],
       save: async () => { /* sink */ },
@@ -81,7 +79,7 @@ describe('ChainEventPoller publish', () => {
     const poller = new ChainEventPoller({ chain: adapter, publishHandler: handler, intervalMs: 60_000 });
     try {
       await poller.start();
-      await new Promise((r) => setTimeout(r, 50));
+      await poller.waitForCurrentPoll();
       await poller.stop();
     } finally {
       const pending = (handler as unknown as {
@@ -99,15 +97,10 @@ describe('ChainEventPoller publish', () => {
   });
 
   it('seeds a newly-active live publish lane near the current head after idle', async () => {
-    const filters: EventFilter[] = [];
     let head = 20_000_000;
-    const adapter = {
-      chainId: 'mock:0',
-      getBlockNumber: async () => head,
-      listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
-        filters.push(f);
-      },
-    } as unknown as ChainAdapter;
+    const { adapter, filters } = makeChain({
+      head: () => head,
+    });
     const handler = makeHandler();
     const poller = new ChainEventPoller({
       chain: adapter,
@@ -147,7 +140,7 @@ describe('ChainEventPoller publish', () => {
         txIndex: 0,
       },
     };
-    const { adapter, filters } = makeChain(10_000, [oldCreate]);
+    const { adapter, filters } = makeChain({ head: 10_000, events: [oldCreate] });
     const handler = makeHandler();
     markPending(handler, false);
     const confirmed: unknown[] = [];
@@ -203,7 +196,7 @@ describe('ChainEventPoller publish', () => {
         },
       },
     ];
-    const { adapter, filters } = makeChain(2_000_000, events);
+    const { adapter, filters } = makeChain({ head: 2_000_000, events });
     const handler = makeHandler();
     markPending(handler, true);
     markPending(handler, false);

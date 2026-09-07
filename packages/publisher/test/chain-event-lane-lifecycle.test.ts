@@ -5,7 +5,7 @@ import { makeChain, makeHandler, markPending } from './helpers/chain-event-lane-
 
 describe('ChainEventPoller lifecycle', () => {
   it('does not install a timer or initial poll when stopped during async startup restore', async () => {
-    const { adapter, filters } = makeChain(100, []);
+    const { adapter, filters } = makeChain({ head: 100, events: [] });
     const handler = makeHandler();
     markPending(handler, true);
     let releaseRestore: () => void = () => {};

@@ -30,7 +30,7 @@ describe('ChainEventPoller allocator backfill', () => {
         txIndex: 0,
       },
     };
-    const { adapter, filters } = makeChain(12_000, [oldCreate]);
+    const { adapter, filters } = makeChain({ head: 12_000, events: [oldCreate] });
     const seen: bigint[] = [];
     const poller = new ChainEventPoller({
       chain: adapter,
@@ -41,7 +41,7 @@ describe('ChainEventPoller allocator backfill', () => {
     });
 
     await poller.start();
-    await new Promise((r) => setTimeout(r, 50));
+    await poller.waitForCurrentPoll();
     await poller.stop();
 
     expect(filters[0].eventTypes).toContain('KCCreated');
@@ -61,7 +61,7 @@ describe('ChainEventPoller allocator backfill', () => {
         this.loaded = n;
       },
     };
-    const { adapter, filters } = makeChain(1_210_000, []);
+    const { adapter, filters } = makeChain({ head: 1_210_000, events: [] });
     const handler = makeHandler();
     markPending(handler, true);
     const poller = new ChainEventPoller({
@@ -73,7 +73,7 @@ describe('ChainEventPoller allocator backfill', () => {
     });
 
     await poller.start();
-    await new Promise((r) => setTimeout(r, 50));
+    await poller.waitForCurrentPoll();
     await poller.stop();
 
     expect(filters.map((f) => f.eventTypes)).toEqual([
@@ -115,7 +115,7 @@ describe('ChainEventPoller allocator backfill', () => {
         txIndex: 0,
       },
     };
-    const { adapter, filters } = makeChain(12_000, [oldCreate]);
+    const { adapter, filters } = makeChain({ head: 12_000, events: [oldCreate] });
     const seen: bigint[] = [];
     const poller = new ChainEventPoller({
       chain: adapter,
@@ -126,7 +126,7 @@ describe('ChainEventPoller allocator backfill', () => {
     });
 
     await poller.start();
-    await new Promise((r) => setTimeout(r, 50));
+    await poller.waitForCurrentPoll();
     await poller.stop();
 
     expect(loadCalls).toEqual(['allocatorReconcile']);

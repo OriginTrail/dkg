@@ -13,7 +13,7 @@ describe('ChainEventPoller collection updates', () => {
         batchId: '42',
       },
     };
-    const { adapter, filters } = makeChain(100, [event]);
+    const { adapter, filters } = makeChain({ head: 100, events: [event] });
     const saveCalls: Array<{ lane: ChainEventPollerLane; block: number }> = [];
     const cursor: LaneCursorPersistence = {
       async loadLane() { return undefined; },
@@ -29,7 +29,7 @@ describe('ChainEventPoller collection updates', () => {
     });
 
     await poller.start();
-    await new Promise((r) => setTimeout(r, 50));
+    await poller.waitForCurrentPoll();
     await poller.stop();
 
     expect(filters[0].eventTypes).toEqual(['KnowledgeAssetUpdated']);

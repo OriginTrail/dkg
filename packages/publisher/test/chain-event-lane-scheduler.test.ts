@@ -1,5 +1,3 @@
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
-import type { EventFilter } from '@origintrail-official/dkg-chain';
 import { describe, expect, it } from 'vitest';
 import type { ChainEvent } from '@origintrail-official/dkg-chain';
 import { ChainEventPoller } from '../src/chain-event-poller.js';
@@ -11,7 +9,7 @@ import { makeChain, makeHandler } from './helpers/chain-event-lane-fixture.js';
 
 describe('ChainEventPoller scheduler', () => {
   it('live-tails context graph discovery near the current head on cold start', async () => {
-    const { adapter, filters } = makeChain(10_000, []);
+    const { adapter, filters } = makeChain({ head: 10_000, events: [] });
     const poller = new ChainEventPoller({
       chain: adapter,
       publishHandler: makeHandler(),
@@ -20,7 +18,7 @@ describe('ChainEventPoller scheduler', () => {
     });
 
     await poller.start();
-    await new Promise((r) => setTimeout(r, 50));
+    await poller.waitForCurrentPoll();
     await poller.stop();
 
     expect(filters.length).toBeGreaterThanOrEqual(1);
@@ -41,7 +39,7 @@ describe('ChainEventPoller scheduler', () => {
         nameHash: '0x' + 'ab'.repeat(32),
       },
     };
-    const { adapter, filters } = makeChain(20_000_000, [event]);
+    const { adapter, filters } = makeChain({ head: 20_000_000, events: [event] });
     const seen: Array<{ contextGraphId: string; blockNumber: number }> = [];
     const poller = new ChainEventPoller({
       chain: adapter,
@@ -51,7 +49,7 @@ describe('ChainEventPoller scheduler', () => {
     });
 
     await poller.start();
-    await new Promise((r) => setTimeout(r, 50));
+    await poller.waitForCurrentPoll();
     await poller.stop();
 
     expect(filters[0].eventTypes).toEqual(['NameClaimed', 'ContextGraphCreated']);
@@ -61,20 +59,15 @@ describe('ChainEventPoller scheduler', () => {
   });
 
   it('tails context graph discovery on the normal poll cadence', async () => {
-    const filters: EventFilter[] = [];
     let now = 0;
     let head = 1000;
     let blockNumberCalls = 0;
-    const adapter = {
-      chainId: 'mock:0',
-      getBlockNumber: async () => {
+    const { adapter, filters } = makeChain({
+      head: () => {
         blockNumberCalls++;
         return head;
       },
-      listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
-        filters.push(f);
-      },
-    } as unknown as ChainAdapter;
+    });
     const poller = new ChainEventPoller({
       chain: adapter,
       publishHandler: makeHandler(),
@@ -108,19 +101,16 @@ describe('ChainEventPoller scheduler', () => {
   });
 
   it('backs off a failed context graph discovery lane and retries the same range later', async () => {
-    const filters: EventFilter[] = [];
     const saveCalls: Array<{ lane: ChainEventPollerLane; block: number }> = [];
     let calls = 0;
     let now = 0;
-    const adapter = {
-      chainId: 'mock:0',
-      getBlockNumber: async () => 100,
-      listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
-        filters.push(f);
+    const { adapter, filters } = makeChain({
+      head: 100,
+      onListen: () => {
         calls++;
         if (calls === 1) throw new Error('rpc down');
       },
-    } as unknown as ChainAdapter;
+    });
     const cursor: LaneCursorPersistence = {
       async loadLane() { return undefined; },
       async saveLane(lane, block) { saveCalls.push({ lane, block }); },
@@ -153,20 +143,17 @@ describe('ChainEventPoller scheduler', () => {
   });
 
   it('exponentially backs off repeated lane failures and resets after success', async () => {
-    const filters: EventFilter[] = [];
     const saveCalls: Array<{ lane: ChainEventPollerLane; block: number }> = [];
     let calls = 0;
     let head = 100;
     let now = 0;
-    const adapter = {
-      chainId: 'mock:0',
-      getBlockNumber: async () => head,
-      listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
-        filters.push(f);
+    const { adapter, filters } = makeChain({
+      head: () => head,
+      onListen: () => {
         calls++;
         if (calls === 1 || calls === 2 || calls === 4) throw new Error('rpc down');
       },
-    } as unknown as ChainAdapter;
+    });
     const cursor: LaneCursorPersistence = {
       async loadLane() { return undefined; },
       async saveLane(lane, block) { saveCalls.push({ lane, block }); },
@@ -217,18 +204,15 @@ describe('ChainEventPoller scheduler', () => {
   });
 
   it('caps repeated lane failures at the internal max backoff', async () => {
-    const filters: EventFilter[] = [];
     let calls = 0;
     let now = 0;
-    const adapter = {
-      chainId: 'mock:0',
-      getBlockNumber: async () => 100,
-      listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
-        filters.push(f);
+    const { adapter, filters } = makeChain({
+      head: 100,
+      onListen: () => {
         calls++;
         if (calls <= 5) throw new Error('rpc down');
       },
-    } as unknown as ChainAdapter;
+    });
     const lane: ChainEventPollerLaneSpec = {
       name: 'contextGraphDiscovery',
       enabled: () => true,
@@ -278,14 +262,9 @@ describe('ChainEventPoller scheduler', () => {
   });
 
   it('keeps headless scans due until a known head proves the lane is caught up', async () => {
-    const filters: EventFilter[] = [];
-    const adapter = {
-      chainId: 'mock:0',
-      getBlockNumber: async () => { throw new Error('head unavailable'); },
-      listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
-        filters.push(f);
-      },
-    } as unknown as ChainAdapter;
+    const { adapter, filters } = makeChain({
+      head: () => { throw new Error('head unavailable'); },
+    });
     const poller = new ChainEventPoller({
       chain: adapter,
       publishHandler: makeHandler(),

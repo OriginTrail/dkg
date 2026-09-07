@@ -1,7 +1,4 @@
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
-import type { EventFilter } from '@origintrail-official/dkg-chain';
 import { describe, expect, it } from 'vitest';
-import type { ChainEvent } from '@origintrail-official/dkg-chain';
 import { ChainEventPoller } from '../src/chain-event-poller.js';
 import type { ChainEventPollerLane } from '../src/chain-event-poller.js';
 import type { LaneCursorPersistence } from '../src/chain-event-poller.js';
@@ -18,7 +15,7 @@ describe('ChainEventPoller cursor persistence', () => {
         this.loaded = n;
       },
     };
-    const first = makeChain(10_000, []);
+    const first = makeChain({ head: 10_000, events: [] });
     const handler = makeHandler();
     const firstPoller = new ChainEventPoller({
       chain: first.adapter,
@@ -30,7 +27,7 @@ describe('ChainEventPoller cursor persistence', () => {
     });
 
     await firstPoller.start();
-    await new Promise((r) => setTimeout(r, 50));
+    await firstPoller.waitForCurrentPoll();
     await firstPoller.stop();
 
     expect(first.filters.map((f) => f.eventTypes)).toEqual([
@@ -43,7 +40,7 @@ describe('ChainEventPoller cursor persistence', () => {
     expect(first.filters[1].toBlock).toBe(10_000);
     expect(cursor.saved).toEqual([10_000]);
 
-    const restart = makeChain(10_000, []);
+    const restart = makeChain({ head: 10_000, events: [] });
     const restartPoller = new ChainEventPoller({
       chain: restart.adapter,
       publishHandler: handler,
@@ -53,14 +50,13 @@ describe('ChainEventPoller cursor persistence', () => {
     });
 
     await restartPoller.start();
-    await new Promise((r) => setTimeout(r, 50));
+    await restartPoller.waitForCurrentPoll();
     await restartPoller.stop();
 
     expect(restart.filters).toHaveLength(0);
   });
 
   it('does not advance a legacy aggregate cursor past a failed active lane', async () => {
-    const filters: EventFilter[] = [];
     const cursor = {
       saved: [] as number[],
       async load() { return undefined; },
@@ -68,16 +64,14 @@ describe('ChainEventPoller cursor persistence', () => {
     };
     let failContextLane = true;
     let now = 0;
-    const adapter = {
-      chainId: 'mock:0',
-      getBlockNumber: async () => 100,
-      listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
-        filters.push(f);
+    const { adapter, filters } = makeChain({
+      head: 100,
+      onListen: (f) => {
         if (f.eventTypes.includes('ContextGraphCreated') && failContextLane) {
           throw new Error('context lane unavailable');
         }
       },
-    } as unknown as ChainAdapter;
+    });
     const poller = new ChainEventPoller({
       chain: adapter,
       publishHandler: makeHandler(),
@@ -120,7 +114,7 @@ describe('ChainEventPoller cursor persistence', () => {
         this.loaded = n;
       },
     };
-    const first = makeChain(100, []);
+    const first = makeChain({ head: 100, events: [] });
     const handler = makeHandler();
     const firstPoller = new ChainEventPoller({
       chain: first.adapter,
@@ -131,7 +125,7 @@ describe('ChainEventPoller cursor persistence', () => {
     });
 
     await firstPoller.start();
-    await new Promise((r) => setTimeout(r, 50));
+    await firstPoller.waitForCurrentPoll();
     await firstPoller.stop();
 
     expect(first.filters[0].eventTypes).toEqual(['KnowledgeAssetRegisteredToContextGraph']);
@@ -139,7 +133,7 @@ describe('ChainEventPoller cursor persistence', () => {
     expect(first.filters[0].toBlock).toBe(100);
     expect(cursor.saved).toEqual([100]);
 
-    const restart = makeChain(150, []);
+    const restart = makeChain({ head: 150, events: [] });
     const restartPoller = new ChainEventPoller({
       chain: restart.adapter,
       publishHandler: handler,
@@ -149,7 +143,7 @@ describe('ChainEventPoller cursor persistence', () => {
     });
 
     await restartPoller.start();
-    await new Promise((r) => setTimeout(r, 50));
+    await restartPoller.waitForCurrentPoll();
     await restartPoller.stop();
 
     expect(restart.filters[0].eventTypes).toEqual(['KnowledgeAssetRegisteredToContextGraph']);
@@ -175,7 +169,7 @@ describe('ChainEventPoller cursor persistence', () => {
         saved.set(lane, block);
       },
     };
-    const { adapter, filters } = makeChain(10_000, []);
+    const { adapter, filters } = makeChain({ head: 10_000, events: [] });
     const poller = new ChainEventPoller({
       chain: adapter,
       publishHandler: makeHandler(),
@@ -186,7 +180,7 @@ describe('ChainEventPoller cursor persistence', () => {
     });
 
     await poller.start();
-    await new Promise((r) => setTimeout(r, 50));
+    await poller.waitForCurrentPoll();
     await poller.stop();
 
     expect(loadCalls).toEqual(['contextGraphDiscovery', 'vmReconcile']);
@@ -219,7 +213,7 @@ describe('ChainEventPoller cursor persistence', () => {
         saved.set(lane, block);
       },
     };
-    const { adapter, filters } = makeChain(13_000, []);
+    const { adapter, filters } = makeChain({ head: 13_000, events: [] });
     const handler = makeHandler();
     const poller = new ChainEventPoller({
       chain: adapter,
@@ -230,7 +224,7 @@ describe('ChainEventPoller cursor persistence', () => {
     });
 
     await poller.start();
-    await new Promise((r) => setTimeout(r, 50));
+    await poller.waitForCurrentPoll();
     markPending(handler, true);
     await new Promise((r) => setTimeout(r, 80));
     await poller.stop();
