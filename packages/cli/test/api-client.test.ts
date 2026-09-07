@@ -300,7 +300,10 @@ describe('ApiClient', () => {
       globalThis.fetch = fetch;
 
       await expect(ApiClient.connect({ allowConfigFallback: true }))
-        .rejects.toThrow('Daemon is not running. Start it with: dkg start');
+        .rejects.toThrow(`Daemon is not running at ${tempDir}.\n`
+          + 'DKG_HOME selects the node directory checked by this command.\n'
+          + 'Start a daemon in that directory with: dkg start\n'
+          + 'For an existing devnet, select a node instead: DKG_HOME=.devnet/node1 dkg <command>');
       expect(calls).toHaveLength(0);
       expect(existsSync(join(tempDir, 'api.port'))).toBe(false);
       expect(existsSync(join(tempDir, 'daemon.pid'))).toBe(false);
@@ -335,7 +338,10 @@ describe('ApiClient', () => {
 
       const connected = await ApiClient.connect({ allowConfigFallback: true });
 
-      await expect(connected.status()).rejects.toThrow('Daemon is not running. Start it with: dkg start');
+      // A client reports the home it connected through, even if a later command
+      // changes the process-wide selection before this request fails.
+      process.env.DKG_HOME = join(tempDir, 'another-node');
+      await expect(connected.status()).rejects.toThrow(`Daemon is not running at ${tempDir}.`);
       expect(calls).toHaveLength(1);
       expect(calls[0].url).toBe('http://127.0.0.1:9317/api/status');
       expect((calls[0].opts.headers as any).Authorization).toBeUndefined();
@@ -349,7 +355,7 @@ describe('ApiClient', () => {
       globalThis.fetch = fetch;
 
       const connected = await ApiClient.connect({ allowConfigFallback: true });
-      await expect(connected.status()).rejects.toThrow('Daemon is not running. Start it with: dkg start');
+      await expect(connected.status()).rejects.toThrow(`Daemon is not running at ${tempDir}.`);
     });
 
     it('does not let a hostile nested error getter escape transport classification', async () => {

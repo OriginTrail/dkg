@@ -18,7 +18,7 @@ import {
   isSafeJobId,
   SAFE_JOB_ID_ERROR,
 } from '@origintrail-official/dkg-publisher';
-import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
+import { readApiPort, readPid, isProcessRunning, configExists, loadConfig, dkgDir } from './config.js';
 import {
   serializeAgentListOptions,
   type AgentListPageOptions,
@@ -424,7 +424,12 @@ export interface ApiClientConnectOptions {
   allowConfigFallback?: boolean;
 }
 
-const DAEMON_NOT_RUNNING_MESSAGE = 'Daemon is not running. Start it with: dkg start';
+function daemonNotRunningMessage(selectedHome: string): string {
+  return `Daemon is not running at ${selectedHome}.\n`
+    + 'DKG_HOME selects the node directory checked by this command.\n'
+    + 'Start a daemon in that directory with: dkg start\n'
+    + 'For an existing devnet, select a node instead: DKG_HOME=.devnet/node1 dkg <command>';
+}
 const DEFAULT_NODE_NAME = 'dkg-node';
 
 function controlPlaneWarning(missingFiles: string[]): string | undefined {
@@ -562,21 +567,25 @@ export class ApiClient {
   private baseUrl: string;
   private token?: string;
   private expectedStatusName?: string;
+  private selectedHome: string;
   readonly controlPlaneWarning?: string;
 
   constructor(portOrBaseUrl: number | string, token?: string, opts?: {
     controlPlaneWarning?: string;
     expectedStatusName?: string;
+    selectedHome?: string;
   }) {
     this.baseUrl = typeof portOrBaseUrl === 'number'
       ? `http://127.0.0.1:${portOrBaseUrl}`
       : portOrBaseUrl.replace(/\/+$/, '');
     this.token = token;
     this.expectedStatusName = opts?.expectedStatusName;
+    this.selectedHome = opts?.selectedHome ?? dkgDir();
     this.controlPlaneWarning = opts?.controlPlaneWarning;
   }
 
   static async connect(opts: ApiClientConnectOptions = {}): Promise<ApiClient> {
+    const selectedHome = dkgDir();
     const hasEnvPort = process.env.DKG_API_PORT !== undefined && process.env.DKG_API_PORT !== '';
     const envPort = hasEnvPort
       ? parseInt(process.env.DKG_API_PORT as string, 10)
@@ -612,7 +621,7 @@ export class ApiClient {
     if (!port) {
       const pid = await readPid();
       if (!pid || !isProcessRunning(pid)) {
-        throw new Error(DAEMON_NOT_RUNNING_MESSAGE);
+        throw new Error(daemonNotRunningMessage(selectedHome));
       }
       throw new Error('Cannot read API port. Set DKG_API_PORT or restart: dkg stop && dkg start');
     }
@@ -623,7 +632,7 @@ export class ApiClient {
     const portOrBaseUrl = !hasEnvPort && config
       ? configuredApiBaseUrl(config.apiHost, port)
       : port;
-    return new ApiClient(portOrBaseUrl, token, { controlPlaneWarning: warning, expectedStatusName });
+    return new ApiClient(portOrBaseUrl, token, { controlPlaneWarning: warning, expectedStatusName, selectedHome });
   }
 
   async status(): Promise<DaemonStatusResponse> {
@@ -632,7 +641,7 @@ export class ApiClient {
       status = await this.get<unknown>('/api/status', { auth: false });
     } catch (err) {
       if (this.expectedStatusName && isConnectionFailure(err)) {
-        throw new Error(DAEMON_NOT_RUNNING_MESSAGE);
+        throw new Error(daemonNotRunningMessage(this.selectedHome));
       }
       throw err;
     }
