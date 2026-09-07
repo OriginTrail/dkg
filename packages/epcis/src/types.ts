@@ -14,11 +14,16 @@ export interface EPCISDocument {
 
 export interface EPCISEvent {
   type: string;
+  eventID?: string;
   eventTime: string;
   eventTimeZoneOffset?: string;
   configurationId?: string;
   shipmentId?: string;
   epcList?: string[];
+  parentID?: string;
+  childEPCs?: string[];
+  inputEPCList?: string[];
+  outputEPCList?: string[];
   action?: string;
   bizStep?: string;
   disposition?: string;
@@ -120,9 +125,14 @@ export interface QueryEngine {
   ): Promise<{ bindings: Record<string, string>[] }>;
 }
 
-/** Every returned event carries an identifier accepted by the eventID filter. */
-export interface EPCISQueryEvent extends Record<string, unknown> {
+/**
+ * Query reconstruction can omit fields absent from stored RDF, but keeps the
+ * capture model's field types and extension surface. The subject is always a
+ * reusable identifier accepted by the eventID filter.
+ */
+export interface EPCISQueryEvent extends Partial<EPCISEvent> {
   eventID: string;
+  'dkg:ual'?: string;
 }
 
 export interface EPCISQueryDocumentResponse {
