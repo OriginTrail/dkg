@@ -34,12 +34,11 @@ async function startCore(initialMembership = true) {
     handles.push(handle);
     return handle;
   });
-  const runtimeFactory = vi.spyOn(agent, 'createRandomSamplingRuntime');
   await agent.start();
-  const runtime = (): ReturnType<DKGAgent['createRandomSamplingRuntime']> => {
-    const result = runtimeFactory.mock.results.at(-1);
-    if (!result || result.type !== 'return') throw new Error('Runtime was not constructed');
-    return result.value;
+  const runtime = (): RandomSamplingRuntime => {
+    const owned = (agent as unknown as { randomSamplingRuntime: RandomSamplingRuntime | null }).randomSamplingRuntime;
+    if (!owned) throw new Error('Runtime was not constructed');
+    return owned;
   };
   let pending: Promise<void> | undefined;
   const beginTick = () => {
@@ -148,13 +147,17 @@ describe('Random Sampling membership reconciliation', () => {
     vi.useFakeTimers();
     let ready = true;
     let deployed = true;
-    const refresh = vi.fn(async () => { ready = deployed; return { active: true }; });
+    const refresh = vi.fn(async () => {
+      ready = deployed;
+      return ready ? { kind: 'available' as const, member: true }
+        : { kind: 'unavailable' as const, reason: 'contracts_not_deployed' as const };
+    });
     const handles: RandomSamplingHandle[] = [];
     const runtime = createRuntime({
       role: 'core', chain: {
         chainId: 'mock:0', getIdentityId: async () => 52n,
         isRandomSamplingReady: () => ready, isShardingTableMember: async () => true,
-        getActiveProofPeriodStatus: refresh,
+        resolveRandomSamplingAvailability: refresh,
       },
       createHandle: async () => {
         const handle: RandomSamplingHandle = {
@@ -175,7 +178,7 @@ describe('Random Sampling membership reconciliation', () => {
       expect(runtime.getLifecycleSnapshot().reconciliationScheduled).toBe(true);
       deployed = true;
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(refresh).toHaveBeenCalledTimes(2);
+      expect(refresh).toHaveBeenCalledTimes(3);
       expect(handles).toHaveLength(2);
       expect(handles[1].start).toHaveBeenCalledOnce();
       expect(runtime.getStatus().enabled).toBe(true);

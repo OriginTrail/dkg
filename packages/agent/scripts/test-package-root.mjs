@@ -4,6 +4,9 @@ import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = await import('@origintrail-official/dkg-agent');
+if ('createRandomSamplingRuntime' in root.DKGAgent.prototype) {
+  throw new Error('internal Random Sampling runtime factory leaked from the agent surface');
+}
 const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent.js');
 const legacyChainReconciler = await import(
   '@origintrail-official/dkg-agent/dist/chain-reconciler.js'

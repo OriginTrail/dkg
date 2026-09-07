@@ -15,9 +15,23 @@ import { NoEligibleContextGraphError, NoEligibleKnowledgeCollectionError, Challe
 import type { NodeChallenge, CreateChallengeResult, TxResult, ProofPeriodStatus } from './chain-adapter.js';
 import { enrichEvmError } from './evm-adapter-errors.js';
 import { withTimeout } from './evm-adapter-rpc.js';
+import type { EVMChainAdapter } from './evm-adapter.js';
+import { probeRandomSamplingAvailability, type RandomSamplingAvailability } from './random-sampling-availability.js';
 import { MAX_PROBE_AGE_MS, DURATION_PROBE_TIMEOUT_MS } from './evm-adapter-constants.js';
 
 export class RandomSamplingMethods extends EVMChainAdapterBase {
+  async resolveRandomSamplingAvailability(this: EVMChainAdapter, identityId: bigint): Promise<RandomSamplingAvailability> {
+    return probeRandomSamplingAvailability(async () => {
+      await this.init();
+      await this.getRandomSampling();
+      const member = await this.isShardingTableMember(identityId);
+      if (!this.isRandomSamplingReady()) {
+        throw new Error('RandomSampling bindings changed during eligibility lookup');
+      }
+      return member;
+    });
+  }
+
   /**
    * Map a caught chain error onto a typed prover error when the revert
    * matches one of the documented retry-next-period / non-retryable

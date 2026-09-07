@@ -1,5 +1,6 @@
 import { RandomSamplingRuntime } from '../src/random-sampling-runtime.js';
-import type { RandomSamplingHandle } from '../src/random-sampling-bind.js';
+import { bindRandomSampling, type RandomSamplingHandle } from '../src/random-sampling-bind.js';
+import { createRandomSamplingEligibilityResolver } from '../src/random-sampling-eligibility.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   MemoryLayer,
@@ -697,19 +698,13 @@ describe('Random Sampling proof-time exact repair', () => {
     } finally { settleOld(); await runtime.stop(); }
   });
 
-  it('wires the lifecycle repair callback through the production prover binding', async () => {
+  it('wires the runtime repair callback through the production prover binding', async () => {
     const expectedRoot = new Uint8Array(32).fill(0x33);
     const repairRandomSamplingKnowledgeAsset = vi.fn(() =>
       createRandomSamplingRepairOperation(async () => {
         throw new Error('expected test repair miss');
       }));
-    const agentLike = {
-      started: true,
-      config: {
-        nodeRole: 'core',
-        randomSamplingUseWorkerThread: false,
-        randomSamplingTickIntervalMs: 60_000,
-      },
+    const bindingFixture = {
       chain: {
         chainId: 'base:8453',
         isRandomSamplingReady: () => true,
@@ -744,22 +739,28 @@ describe('Random Sampling proof-time exact repair', () => {
       },
       store: new OxigraphStore(),
       log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-      randomSamplingLogger: LifecycleSyncMethods.prototype.randomSamplingLogger,
-      createRandomSamplingHandle: LifecycleSyncMethods.prototype.createRandomSamplingHandle,
-      repairRandomSamplingKnowledgeAsset,
     };
 
-    const runtime: RandomSamplingRuntime = (LifecycleSyncMethods.prototype.createRandomSamplingRuntime as any).call(
-      agentLike, { operationName: 'connect', operationId: 'rs-bind-test' },
-    );
-    await expect(runtime.start()).resolves.toBeUndefined();
-    await vi.waitFor(() => expect(repairRandomSamplingKnowledgeAsset).toHaveBeenCalledOnce());
-    expect(repairRandomSamplingKnowledgeAsset).toHaveBeenCalledWith({
-      kaId: 7n,
-      cgId: 1n,
-      expectedRoot,
-      expectedLeafCount: 1n,
+    const runtime = new RandomSamplingRuntime({
+      role: 'core',
+      resolveEligibility: createRandomSamplingEligibilityResolver({ role: 'core', chain: bindingFixture.chain, log: bindingFixture.log }),
+      shutdownTimeoutMs: () => 5_000,
+      log: bindingFixture.log,
+      createHandle: (identityId) => bindRandomSampling({
+        role: 'core', chain: bindingFixture.chain as never, store: bindingFixture.store, identityId,
+        useWorkerThread: false, tickIntervalMs: 60_000,
+        repairMissingKnowledgeAsset: repairRandomSamplingKnowledgeAsset,
+      }),
     });
-    await runtime.stop();
+    try {
+      await expect(runtime.start()).resolves.toBeUndefined();
+      await vi.waitFor(() => expect(repairRandomSamplingKnowledgeAsset).toHaveBeenCalledOnce());
+      expect(repairRandomSamplingKnowledgeAsset).toHaveBeenCalledWith({
+        kaId: 7n, cgId: 1n, expectedRoot, expectedLeafCount: 1n,
+      });
+    } finally {
+      await runtime.stop();
+      await bindingFixture.store.close();
+    }
   });
 });

@@ -2049,7 +2049,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     this.started = true;
-    this.randomSamplingRuntime = this.createRandomSamplingRuntime(ctx);
+    this.randomSamplingRuntime = new RandomSamplingRuntime({
+      role: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
+      resolveEligibility: createRandomSamplingEligibilityResolver({
+        role: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
+        chain: this.chain, log: { warn: (message) => this.log.warn(ctx, message) },
+      }),
+      shutdownTimeoutMs: () => DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS,
+      log: {
+        info: (message) => this.log.info(ctx, message),
+        warn: (message) => this.log.warn(ctx, message),
+      },
+      createHandle: (identityId) => this.createRandomSamplingHandle({
+        role: 'core', chain: this.chain, store: this.store, identityId,
+        walPath: this.config.randomSamplingWalPath,
+        useWorkerThread: this.config.randomSamplingUseWorkerThread ?? true,
+        tickIntervalMs: this.config.randomSamplingTickIntervalMs,
+        log: this.randomSamplingLogger(ctx),
+        repairMissingKnowledgeAsset: (input) => this.repairRandomSamplingKnowledgeAsset(input),
+      }),
+    });
     this.openVmReconcileRotationState();
     this.finalizationRuntime.markStarted({
       localPeerId: this.peerId,
@@ -4366,29 +4385,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       logInfo: (message) => this.log.info(ctx, message),
     } satisfies RandomSamplingExactRepairDependencies;
     return startRandomSamplingExactRepair(dependencies, input);
-  }
-
-  createRandomSamplingRuntime(this: DKGAgent, ctx: OperationContext): RandomSamplingRuntime {
-    return new RandomSamplingRuntime({
-      role: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
-      resolveEligibility: createRandomSamplingEligibilityResolver({
-        role: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
-        chain: this.chain, log: { warn: (message) => this.log.warn(ctx, message) },
-      }),
-      shutdownTimeoutMs: () => DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS,
-      log: {
-        info: (message) => this.log.info(ctx, message),
-        warn: (message) => this.log.warn(ctx, message),
-      },
-      createHandle: (identityId) => this.createRandomSamplingHandle({
-        role: 'core', chain: this.chain, store: this.store, identityId,
-        walPath: this.config.randomSamplingWalPath,
-        useWorkerThread: this.config.randomSamplingUseWorkerThread ?? true,
-        tickIntervalMs: this.config.randomSamplingTickIntervalMs,
-        log: this.randomSamplingLogger(ctx),
-        repairMissingKnowledgeAsset: (input) => this.repairRandomSamplingKnowledgeAsset(input),
-      }),
-    });
   }
 
   clearStorageACKRegistrationRetry(this: DKGAgent): void {

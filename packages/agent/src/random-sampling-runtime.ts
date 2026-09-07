@@ -6,7 +6,7 @@ import {
   type RandomSamplingStatus,
 } from './random-sampling-bind.js';
 import { RANDOM_SAMPLING_BIND_RETRY_MS } from './dkg-agent-constants.js';
-import type { RandomSamplingEligibility } from './random-sampling-eligibility.js';
+import { classifyRandomSamplingBindingFailure, type RandomSamplingEligibility, type RandomSamplingUnavailable } from './random-sampling-eligibility.js';
 
 type State =
   | { kind: 'stopped'; identityId: bigint }
@@ -28,7 +28,6 @@ export class RandomSamplingRuntime {
   private state: State = { kind: 'waiting', identityId: 0n, reason: 'not_started' };
   private readonly lifecycle = new AbortController();
   private inFlight: Promise<void> | null = null;
-  private contractsWereReady = false;
   private shutdownDrain: Promise<void> | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
 
@@ -124,10 +123,8 @@ export class RandomSamplingRuntime {
     this.state = { kind: 'stopped', identityId: this.state.identityId };
   }
 
-  private recordUnavailable(eligibility: { kind: 'ineligible' | 'unsupported'; identityId: bigint; reason: RandomSamplingDisabledReason }): void {
-    const retry = eligibility.kind === 'ineligible'
-      || (eligibility.reason === 'contracts_not_deployed' && this.contractsWereReady);
-    this.state = { kind: retry ? 'waiting' : 'disabled', identityId: eligibility.identityId, reason: eligibility.reason };
+  private recordUnavailable(eligibility: RandomSamplingUnavailable): void {
+    this.state = { kind: eligibility.retry === 'poll' ? 'waiting' : 'disabled', identityId: eligibility.identityId, reason: eligibility.reason };
   }
 
   private async reconcileOnce(): Promise<void> {
@@ -142,9 +139,6 @@ export class RandomSamplingRuntime {
         if (this.state.kind === 'running') return;
         this.state = { kind: 'waiting', identityId: eligibility.identityId ?? this.state.identityId, reason: eligibility.reason };
         return;
-      }
-      if (eligibility.kind === 'eligible' || (eligibility.kind === 'ineligible' && eligibility.reason === 'awaiting_sharding_table')) {
-        this.contractsWereReady = true;
       }
       if (this.state.kind === 'running') {
         if (eligibility.kind === 'eligible' && eligibility.identityId === this.state.identityId) return;
@@ -161,9 +155,9 @@ export class RandomSamplingRuntime {
       if (signal.aborted || !handle.enabled) {
         this.beginRetirement(handle, identityId);
         await this.finishRetirement(false);
-        if (!signal.aborted) this.recordUnavailable({
-          kind: 'unsupported', identityId, reason: handle.getStatus().disabledReason ?? 'bind_failed',
-        });
+        if (!signal.aborted) this.recordUnavailable(classifyRandomSamplingBindingFailure(
+          handle.getStatus().disabledReason, identityId,
+        ));
         return;
       }
       this.state = { kind: 'running', identityId, handle };

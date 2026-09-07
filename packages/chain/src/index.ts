@@ -190,3 +190,9 @@ export {
   type TransactionReceiptEndpoint,
   type TransactionReceiptWaitOptions,
 } from './rpc-failover-client.js';
+
+export {
+  resolveRandomSamplingAvailability,
+  type RandomSamplingAvailability,
+  type RandomSamplingAvailabilityReader,
+} from './random-sampling-availability.js';

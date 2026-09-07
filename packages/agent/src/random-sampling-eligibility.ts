@@ -1,23 +1,26 @@
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import { resolveRandomSamplingAvailability, type ChainAdapter, type RandomSamplingAvailabilityReader } from '@origintrail-official/dkg-chain';
 import type { AgentRole, RandomSamplingDisabledReason } from './random-sampling-bind.js';
+
+export type RandomSamplingUnavailable =
+  | { kind: 'unavailable'; retry: 'never'; identityId: bigint; reason: 'edge_node' | 'unsupported_chain' | 'contracts_not_deployed' }
+  | { kind: 'unavailable'; retry: 'poll'; identityId: bigint; reason: 'no_identity' | 'awaiting_sharding_table' | 'contracts_not_deployed' | 'bind_failed' };
 
 export type RandomSamplingEligibility =
   | { kind: 'eligible'; identityId: bigint }
-  | { kind: 'ineligible' | 'unsupported'; identityId: bigint; reason: RandomSamplingDisabledReason }
-  | { kind: 'indeterminate'; reason: RandomSamplingDisabledReason; identityId?: bigint };
+  | RandomSamplingUnavailable
+  | { kind: 'indeterminate'; retry: 'poll'; reason: 'identity_lookup_failed' | 'eligibility_lookup_failed'; identityId?: bigint };
 
-export type RandomSamplingEligibilityChain = Pick<ChainAdapter,
-  'chainId' | 'getIdentityId' | 'isRandomSamplingReady' | 'isShardingTableMember'> & {
-  /** Read-only probe which also refreshes invalidated RandomSampling handles. */
-  getActiveProofPeriodStatus?: () => Promise<unknown>;
-};
+export type RandomSamplingEligibilityChain = Pick<ChainAdapter, 'chainId' | 'getIdentityId'> & RandomSamplingAvailabilityReader;
 
-/** Adapter error normalization stays at the chain boundary, independent of runtime state. */
-export function classifyRandomSamplingChainError(error: unknown): 'missing-contracts' | 'indeterminate' {
-  const message = error instanceof Error ? error.message : String(error);
-  return ((message.includes('ShardingTableStorage') || message.includes('RandomSampling'))
-    && (message.includes('not found in Hub') || message.includes('not resolvable') || message.includes('not deployed in this Hub')))
-    ? 'missing-contracts' : 'indeterminate';
+/** Binding follows a positive eligibility result, so disappearing contracts remain retryable. */
+export function classifyRandomSamplingBindingFailure(reason: RandomSamplingDisabledReason | null | undefined, identityId: bigint): RandomSamplingUnavailable {
+  if (reason === 'edge_node' || reason === 'unsupported_chain') {
+    return { kind: 'unavailable', retry: 'never', identityId, reason };
+  }
+  return {
+    kind: 'unavailable', retry: 'poll', identityId,
+    reason: reason === 'contracts_not_deployed' || reason === 'no_identity' || reason === 'awaiting_sharding_table' ? reason : 'bind_failed',
+  };
 }
 
 export function createRandomSamplingEligibilityResolver(options: {
@@ -26,39 +29,33 @@ export function createRandomSamplingEligibilityResolver(options: {
   log: { warn(message: string): void };
 }): () => Promise<RandomSamplingEligibility> {
   const { role, chain, log } = options;
+  let deploymentObserved = false;
   return async () => {
-    if (role !== 'core') return { kind: 'unsupported', identityId: 0n, reason: 'edge_node' };
-    if (chain.chainId === 'none') {
-      return { kind: 'unsupported', identityId: 0n, reason: 'unsupported_chain' };
-    }
+    if (role !== 'core') return { kind: 'unavailable', retry: 'never', identityId: 0n, reason: 'edge_node' };
+    if (chain.chainId === 'none') return { kind: 'unavailable', retry: 'never', identityId: 0n, reason: 'unsupported_chain' };
     let identityId: bigint;
     try { identityId = await chain.getIdentityId(); }
     catch (error) {
       log.warn(`V10 Random Sampling identity lookup failed; will retry: ${String(error)}`);
-      return { kind: 'indeterminate', reason: 'identity_lookup_failed' };
+      return { kind: 'indeterminate', retry: 'poll', reason: 'identity_lookup_failed' };
     }
-    if (identityId === 0n) return { kind: 'ineligible', identityId, reason: 'no_identity' };
-    let failureReason: RandomSamplingDisabledReason = 'bind_failed';
+    if (identityId === 0n) return { kind: 'unavailable', retry: 'poll', identityId, reason: 'no_identity' };
     try {
-      // EVM readiness is a cache snapshot. After Hub rotation, a read through
-      // the adapter must re-resolve the pair before treating it as absent.
-      if (chain.isRandomSamplingReady && !chain.isRandomSamplingReady()) {
-        await chain.getActiveProofPeriodStatus?.();
-        if (!chain.isRandomSamplingReady()) {
-          return { kind: 'unsupported', identityId, reason: 'contracts_not_deployed' };
+      const availability = await resolveRandomSamplingAvailability(chain, identityId);
+      if (availability.kind === 'indeterminate') throw availability.error;
+      if (availability.kind === 'unavailable') {
+        if (availability.reason === 'contracts_not_deployed' && deploymentObserved) {
+          return { kind: 'unavailable', retry: 'poll', identityId, reason: availability.reason };
         }
+        return { kind: 'unavailable', retry: 'never', identityId, reason: availability.reason };
       }
-      if (!chain.isShardingTableMember) return { kind: 'unsupported', identityId, reason: 'unsupported_chain' };
-      failureReason = 'eligibility_lookup_failed';
-      return await chain.isShardingTableMember(identityId)
+      deploymentObserved = true;
+      return availability.member
         ? { kind: 'eligible', identityId }
-        : { kind: 'ineligible', identityId, reason: 'awaiting_sharding_table' };
+        : { kind: 'unavailable', retry: 'poll', identityId, reason: 'awaiting_sharding_table' };
     } catch (error) {
-      if (classifyRandomSamplingChainError(error) === 'missing-contracts') {
-        return { kind: 'unsupported', identityId, reason: 'contracts_not_deployed' };
-      }
       log.warn(`V10 Random Sampling eligibility lookup failed; will retry: ${String(error)}`);
-      return { kind: 'indeterminate', reason: failureReason, identityId };
+      return { kind: 'indeterminate', retry: 'poll', reason: 'eligibility_lookup_failed', identityId };
     }
   };
 }
