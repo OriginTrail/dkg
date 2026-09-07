@@ -9,6 +9,8 @@
  */
 
 import { createHash } from 'node:crypto';
+import { setTimeout as waitForPeerEventTurn } from 'node:timers/promises';
+import { PeerEventTasks } from './p2p/peer-event-tasks.js';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -3867,118 +3869,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Abort synchronously at the start of stop(), before libp2p tears down.
     // A signal belongs to this node lifetime, including pending continuations.
     this.syncPeerEvents?.abort();
-    this.syncPeerEvents = new AbortController();
-    const { signal } = this.syncPeerEvents;
+    this.syncPeerEvents = new PeerEventTasks();
+    const peerEvents = this.syncPeerEvents;
+    const { signal } = peerEvents;
     this.node.libp2p.addEventListener('connection:open', (evt) => {
-      const remotePeer = evt.detail.remotePeer.toString();
-      if (remotePeer === this.node.libp2p.peerId.toString()) return;
-      const replayContextGraphIds = [...new Set([
-        ...this.readRfc64CatalogResponsibilitiesV1()
-          .filter((responsibility) => responsibility.active && responsibility.mode !== 'legacy')
-          .map((responsibility) => responsibility.contextGraphId),
-        ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority)
-          .filter((contextGraphId) => {
-            const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
-            return authority.active && authority.mode !== 'legacy';
-          }),
-      ])].sort();
-      for (const contextGraphId of replayContextGraphIds) {
-        this.markRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
-      }
-      // Reverse-path peerStore enrichment for inbound circuit-relay
-      // connections.
-      //
-      // Closes the "Window D" class from the May 2026 Miles↔Lex 6h
-      // soak postmortem: an inbound circuit connection from peer P
-      // via relay R was open and live, but every
-      // `dialProtocol(P, ...)` retry on our side failed with "no
-      // valid addresses for peer" because P's identify-push didn't
-      // replicate the reservation address into our peerStore.
-      // Echoing the inbound circuit's relay back as an outbound
-      // multiaddr for P (`<R>/p2p-circuit/p2p/<P>`) lets the next
-      // dialProtocol find an address and try it.
-      //
-      // User review on PR #536 caught the original ordering bug:
-      // The whole chain runs as a fire-and-forget IIFE so the
-      // listener itself doesn't await — libp2p's
-      // `connection:open` emitter is synchronous and we don't
-      // want to slow down other listeners.
-      void (async () => {
-        let admitted = false;
-        try {
-          admitted = await this.networkAdmissionCoordinator.ensureAdmitted(remotePeer, ctx, { signal });
-        } catch (err: unknown) {
-          if (signal.aborted) return;
-          const message = err instanceof Error ? err.message : String(err);
-          this.log.warn(ctx, `Network admission probe failed for ${remotePeer.slice(-8)} on connect: ${message}`);
-          for (const contextGraphId of replayContextGraphIds) {
-            this.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
-          }
-          return;
-        }
-        if (signal.aborted) return;
-        if (!admitted) {
-          for (const contextGraphId of replayContextGraphIds) {
-            this.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
-          }
-          return;
-        }
-        try {
-          await this.enrichPeerStoreFromInboundCircuit(evt.detail);
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          this.log.warn(ctx, `Reverse-path peerStore enrichment failed for ${remotePeer}: ${message}`);
-        }
-        if (signal.aborted) return;
-        // PR-2 (SWM-fanout plan): drain pending sender-key packages
-        // that were queued because the recipient had no advertised
-        // peerId at publish time. Tolerant of profile-lookup failure
-        // (the next connection:open will retry).
-        try {
-          const drained = await this.drainPendingSenderKeyForPeer(remotePeer, ctx);
-          if (drained > 0) {
-            this.log.info(ctx, `Drained ${drained} pending SWM sender-key package(s) for ${remotePeer}`);
-          }
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          this.log.warn(ctx, `Pending SWM sender-key drain on connect failed for ${remotePeer}: ${message}`);
-        }
-        if (signal.aborted) return;
-        // The receiver owns replay completeness. Provider-initiated pushes do
-        // not carry a promised-head manifest and can otherwise leave a brief
-        // A-applied/B-undiscovered window reporting complete. Request every
-        // active CG through the completion-capable scoped protocol instead.
-        // Keep the 10.0.15 rolling-upgrade direction alive: legacy receivers
-        // cannot request V2 completion, but they can still consume ordinary
-        // head announcements. Upgraded receivers remain fenced by the scoped
-        // pull below and never interpret this compatibility push as complete.
-        void this.reannounceRfc64CatalogHeadsToPeerV1(remotePeer).catch((err: unknown) => {
-          const message = err instanceof Error ? err.message : String(err);
-          this.log.warn(
-            ctx,
-            `RFC-64 compatibility re-announcement failed for ${remotePeer.slice(-8)}: ${message}`,
-          );
-        });
-        for (const contextGraphId of replayContextGraphIds) {
-          void this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
-            contextGraphId,
-          ).then((result) => {
-            if (result.failed > 0) {
-              this.log.warn(
-                ctx,
-                `RFC-64 catalog replay incomplete for "${contextGraphId}" after ${remotePeer.slice(-8)} connected`,
-              );
-            }
-          }).catch((err: unknown) => {
-            const message = err instanceof Error ? err.message : String(err);
-            this.log.warn(
-              ctx,
-              `RFC-64 catalog replay failed after ${remotePeer.slice(-8)} connected: ${message}`,
-            );
-          });
-        }
-        this.queueSyncFromPeerOnConnect(remotePeer, handleSyncError);
-      })();
+      peerEvents.run(
+        (taskSignal) => this.syncAfterPeerConnection(evt.detail, ctx, taskSignal),
+        (error) => handleSyncError(evt.detail.remotePeer.toString(), error),
+      );
     }, { signal });
 
     // Remember when the last live connection to a peer is gone. A3 keeps
@@ -4012,7 +3910,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const peerIdObj = detail?.peer?.id;
       if (!peerIdObj) return;
       const protocols = detail.peer?.protocols ?? [];
-      this.handlePeerUpdateForSyncRetry(peerIdObj.toString(), protocols, signal);
+      this.handlePeerUpdateForSyncRetry(peerIdObj.toString(), protocols);
     }, { signal });
 
     // Reconnect-on-gossip: when a gossip message arrives from a peer we're
@@ -5394,6 +5292,108 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
   }
 
+  /** Admission, relay enrichment and recovery for one connection-open event. */
+  async syncAfterPeerConnection(this: DKGAgent,
+    connection: Parameters<DKGAgent['enrichPeerStoreFromInboundCircuit']>[0],
+    ctx: OperationContext,
+    signal: AbortSignal,
+  ): Promise<void> {
+    signal.throwIfAborted();
+    const remotePeer = connection.remotePeer.toString();
+    if (remotePeer === this.node.libp2p.peerId.toString()) return;
+    const replayContextGraphIds = [...new Set([
+      ...this.readRfc64CatalogResponsibilitiesV1()
+        .filter((responsibility) => responsibility.active && responsibility.mode !== 'legacy')
+        .map((responsibility) => responsibility.contextGraphId),
+      ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority)
+        .filter((contextGraphId) => {
+          const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
+          return authority.active && authority.mode !== 'legacy';
+        }),
+    ])].sort();
+    for (const contextGraphId of replayContextGraphIds) {
+      this.markRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
+    }
+    let admitted = false;
+    try {
+      admitted = await this.networkAdmissionCoordinator.ensureAdmitted(remotePeer, ctx, { signal });
+    } catch (err: unknown) {
+      signal.throwIfAborted();
+      const message = err instanceof Error ? err.message : String(err);
+      this.log.warn(ctx, `Network admission probe failed for ${remotePeer.slice(-8)} on connect: ${message}`);
+      for (const contextGraphId of replayContextGraphIds) {
+        this.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
+      }
+      return;
+    }
+    signal.throwIfAborted();
+    if (!admitted) {
+      for (const contextGraphId of replayContextGraphIds) {
+        this.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
+      }
+      return;
+    }
+    try {
+      await this.enrichPeerStoreFromInboundCircuit(connection);
+    } catch (err: unknown) {
+      signal.throwIfAborted();
+      const message = err instanceof Error ? err.message : String(err);
+      this.log.warn(ctx, `Reverse-path peerStore enrichment failed for ${remotePeer}: ${message}`);
+    }
+    signal.throwIfAborted();
+    // PR-2 (SWM-fanout plan): drain pending sender-key packages
+    // that were queued because the recipient had no advertised
+    // peerId at publish time. Tolerant of profile-lookup failure
+    // (the next connection:open will retry).
+    try {
+      const drained = await this.drainPendingSenderKeyForPeer(remotePeer, ctx);
+      if (drained > 0) {
+        this.log.info(ctx, `Drained ${drained} pending SWM sender-key package(s) for ${remotePeer}`);
+      }
+    } catch (err: unknown) {
+      signal.throwIfAborted();
+      const message = err instanceof Error ? err.message : String(err);
+      this.log.warn(ctx, `Pending SWM sender-key drain on connect failed for ${remotePeer}: ${message}`);
+    }
+    signal.throwIfAborted();
+    // The receiver owns replay completeness. Provider-initiated pushes do
+    // not carry a promised-head manifest and can otherwise leave a brief
+    // A-applied/B-undiscovered window reporting complete. Request every
+    // active CG through the completion-capable scoped protocol instead.
+    // Keep the 10.0.15 rolling-upgrade direction alive: legacy receivers
+    // cannot request V2 completion, but they can still consume ordinary
+    // head announcements. Upgraded receivers remain fenced by the scoped
+    // pull below and never interpret this compatibility push as complete.
+    void this.reannounceRfc64CatalogHeadsToPeerV1(remotePeer).catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      this.log.warn(
+        ctx,
+        `RFC-64 compatibility re-announcement failed for ${remotePeer.slice(-8)}: ${message}`,
+      );
+    });
+    for (const contextGraphId of replayContextGraphIds) {
+      void this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+        contextGraphId,
+      ).then((result) => {
+        if (result.failed > 0) {
+          this.log.warn(
+            ctx,
+            `RFC-64 catalog replay incomplete for "${contextGraphId}" after ${remotePeer.slice(-8)} connected`,
+          );
+        }
+      }).catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        this.log.warn(
+          ctx,
+          `RFC-64 catalog replay failed after ${remotePeer.slice(-8)} connected: ${message}`,
+        );
+      });
+    }
+    this.queueSyncFromPeerOnConnect(remotePeer, (peer, error) => {
+      this.log.warn(ctx, `Sync-on-connect failed for ${peer.slice(-8)}: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
+
   /**
    * Event-driven retry path for the libp2p identify race that otherwise
    * leaves a peer permanently in `skippedNoSyncPeers`. libp2p emits
@@ -5412,9 +5412,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     peerId: string,
     protocols: readonly string[],
-    signal = this.syncPeerEvents?.signal,
   ): void {
-    if (signal?.aborted) return;
+    const peerEvents = this.syncPeerEvents;
+    if (peerEvents?.signal.aborted) return;
     if (peerId === this.node.libp2p.peerId.toString()) return;
     // #1093: keep the confirmed-core set fresh from `peer:update` too.
     // `runSyncOnConnect` reads the protocol list exactly once, racing
@@ -5438,35 +5438,31 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!this.skippedNoSyncPeers.has(peerId)) return;
     if (!syncOnConnectEnabled(this.config)) return;
     if (!protocols.includes(PROTOCOL_SYNC)) return;
+    if (!peerEvents) return;
     const ctx = createOperationContext('sync');
-    const shortPeer = peerId.slice(-8);
-    void (async () => {
-      const admitted = await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'Peer:update sync retry', signal);
-      if (signal?.aborted || !admitted) return;
-      if (!this.skippedNoSyncPeers.has(peerId)) return;
-      this.skippedNoSyncPeers.delete(peerId);
-      this.log.info(ctx, `Peer ${shortPeer} now advertises sync protocol — retrying sync-on-connect`);
-      setTimeout(() => {
-        if (signal?.aborted) return;
-        void (async () => {
-          const probe = await this.getSyncReconcilerProbe(peerId);
-          if (signal?.aborted) return;
-          await this.attemptSyncFromPeerWithReconcilerAccounting(
-            peerId,
-            probe,
-            'on-connect',
-          );
-        })().catch((err: unknown) => {
-          if (signal?.aborted) return;
-          const message = err instanceof Error ? err.message : String(err);
-          this.log.warn(ctx, `Sync retry after peer:update failed for ${shortPeer}: ${message}`);
-        });
-      }, 0);
-    })().catch((err: unknown) => {
-      if (signal?.aborted) return;
-      const message = err instanceof Error ? err.message : String(err);
-      this.log.warn(ctx, `Sync retry admission after peer:update failed for ${shortPeer}: ${message}`);
-    });
+    peerEvents.run(
+      (signal) => this.retrySyncAfterPeerUpdate(peerId, ctx, signal),
+      (error) => this.log.warn(ctx, `Sync retry after peer:update failed for ${peerId.slice(-8)}: ${
+        error instanceof Error ? error.message : String(error)
+      }`),
+    );
+  }
+
+  async retrySyncAfterPeerUpdate(this: DKGAgent,
+    peerId: string,
+    ctx: OperationContext,
+    signal: AbortSignal,
+  ): Promise<void> {
+    signal.throwIfAborted();
+    const admitted = await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'Peer:update sync retry', signal);
+    signal.throwIfAborted();
+    if (!admitted || !this.skippedNoSyncPeers.has(peerId)) return;
+    this.skippedNoSyncPeers.delete(peerId);
+    this.log.info(ctx, `Peer ${peerId.slice(-8)} now advertises sync protocol — retrying sync-on-connect`);
+    await waitForPeerEventTurn(0, undefined, { signal });
+    const probe = await this.getSyncReconcilerProbe(peerId);
+    signal.throwIfAborted();
+    await this.attemptSyncFromPeerWithReconcilerAccounting(peerId, probe, 'on-connect');
   }
 
   /**

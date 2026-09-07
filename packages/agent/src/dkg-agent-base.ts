@@ -11,6 +11,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import type { PeerEventTasks } from './p2p/peer-event-tasks.js';
 import {
   openRfc64PersistenceV1,
   type Rfc64PersistenceV1,
@@ -1075,7 +1076,7 @@ export class DKGAgentBase {
   protected messageHandler: MessageHandler | null = null;
   protected chainPoller: ChainEventPoller | null = null;
   /** Owns peer-event admission for the current node lifetime. */
-  protected syncPeerEvents?: AbortController;
+  protected syncPeerEvents?: PeerEventTasks;
   protected swmCleanupTimer: ReturnType<typeof setInterval> | null = null;
   /** Phase B — periodic chain-driven VM reconciliation sweep timer. */
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;

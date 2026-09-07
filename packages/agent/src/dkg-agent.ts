@@ -2231,8 +2231,17 @@ export class DKGAgent extends DKGAgentBase {
 
   async stop(): Promise<void> {
     if (!this.started) return;
+    if (this.syncPeerEvents && !this.syncPeerEvents.signal.aborted) {
+      // The listeners retire before libp2p emits shutdown disconnects. Record
+      // that boundary now so a same-instance restart cannot reuse old freshness.
+      const disconnectedAt = Date.now();
+      for (const peer of this.node.libp2p.getPeers()) {
+        const peerId = peer.toString();
+        this.skippedNoSyncPeers.delete(peerId);
+        this.lastSyncDisconnectedAt.set(peerId, disconnectedAt);
+      }
+    }
     this.syncPeerEvents?.abort();
-    this.syncPeerEvents = undefined;
     // Fence membership persistence before any network callback can enqueue
     // more work; the physical drain below completes before store teardown.
     const membershipPersistDrain = this.contextGraphMembershipPersistence?.closeAndDrain()

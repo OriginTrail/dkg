@@ -133,6 +133,7 @@ export default defineConfig({
       "test/swm-snapshot-sync.test.ts",
       "test/sync-responder-protection.test.ts",
       "test/sync-on-connect-retry.test.ts",
+      "test/peer-event-lifecycle.test.ts",
       "test/sync-on-connect-churn.test.ts",
       "test/rfc64-sync-on-connect-recovery-plan-queue.test.ts",
       "test/rfc64-sync-on-connect-peer-job-accounting.test.ts",
