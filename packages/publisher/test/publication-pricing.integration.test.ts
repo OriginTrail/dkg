@@ -84,6 +84,26 @@ class PricingCaptureChain extends MockChainAdapter {
   }
 }
 
+class LegacyPricingCaptureChain extends PricingCaptureChain {
+  readonly quoteRequests: Array<{ byteSize: bigint; epochs: number }> = [];
+
+  constructor(wallet: ethers.Wallet) {
+    super(wallet);
+    Object.defineProperty(this, 'resolvePublisherPublishPlan', {
+      configurable: true,
+      value: undefined,
+    });
+  }
+
+  override async getRequiredPublishTokenAmount(
+    byteSize: bigint,
+    epochs: number,
+  ): Promise<bigint> {
+    this.quoteRequests.push({ byteSize, epochs });
+    return byteSize;
+  }
+}
+
 interface PricingFixture {
   publisher: DKGPublisher;
   chain: PricingCaptureChain;
@@ -94,6 +114,20 @@ interface PricingFixture {
 async function createPricingFixture(): Promise<PricingFixture> {
   const wallet = new ethers.Wallet(TEST_KEY);
   const chain = new PricingCaptureChain(wallet);
+  const store = new OxigraphStore();
+  const publisher = new DKGPublisher({
+    store,
+    chain,
+    eventBus: new TypedEventBus(),
+    keypair: await generateEd25519Keypair(),
+    publisherNodeIdentityId: 1n,
+  });
+  return { publisher, chain, store, wallet };
+}
+
+async function createLegacyPricingFixture() {
+  const wallet = new ethers.Wallet(TEST_KEY);
+  const chain = new LegacyPricingCaptureChain(wallet);
   const store = new OxigraphStore();
   const publisher = new DKGPublisher({
     store,
@@ -233,6 +267,39 @@ describe('publication pricing integration', () => {
     ]);
     expect(published.ack.tokenAmount).toBe(published.fullContentByteSize);
     expect(published.chain.capturedCreateParams).toMatchObject({
+      byteSize: published.networkVisibleByteSize,
+      tokenAmount: published.fullContentByteSize,
+    });
+  });
+
+  it('bills full content through the legacy adapter planning fallback', async () => {
+    const fixture = await createLegacyPricingFixture();
+    const publicQuad: Quad = {
+      subject: 'urn:test:legacy-full-content-pricing',
+      predicate: 'http://schema.org/name',
+      object: '"public"',
+      graph: '',
+    };
+    const privateQuad: Quad = {
+      subject: publicQuad.subject,
+      predicate: 'http://schema.org/description',
+      object: `"${'legacy-private-payload-'.repeat(32)}"`,
+      graph: '',
+    };
+
+    const published = await publishCuratedGraphScoped({
+      fixture,
+      publicQuad,
+      privateQuads: [privateQuad],
+    });
+
+    expect(published.fullContentByteSize).toBeGreaterThan(published.networkVisibleByteSize);
+    expect(fixture.chain.quoteRequests).toEqual([{
+      byteSize: published.fullContentByteSize,
+      epochs: published.ack.epochs,
+    }]);
+    expect(published.ack.tokenAmount).toBe(published.fullContentByteSize);
+    expect(fixture.chain.capturedCreateParams).toMatchObject({
       byteSize: published.networkVisibleByteSize,
       tokenAmount: published.fullContentByteSize,
     });

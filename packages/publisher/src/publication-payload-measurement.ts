@@ -31,19 +31,27 @@ function scopeGraphlessQuads(
  */
 export function measureCanonicalPublicationPayload(input: {
   readonly publicQuads: readonly Quad[];
-  readonly privateQuads: readonly Quad[];
+  /** Supply only when full-content pricing needs private-byte measurement. */
+  readonly privateQuads?: readonly Quad[];
   readonly fallbackGraph: string;
 }): CanonicalPublicationPayloadMeasurement {
   const publicQuads = scopeGraphlessQuads(input.publicQuads, input.fallbackGraph);
-  const privateQuads = scopeGraphlessQuads(input.privateQuads, input.fallbackGraph);
   const publicNQuads = quadsToNQuads(publicQuads);
-  const fullContentNQuads = quadsToNQuads([...publicQuads, ...privateQuads]);
   const publicBytes = UTF8_ENCODER.encode(publicNQuads);
+  const privateNQuads = input.privateQuads && input.privateQuads.length > 0
+    ? quadsToNQuads(scopeGraphlessQuads(input.privateQuads, input.fallbackGraph))
+    : '';
+  const privateByteSize = privateNQuads.length > 0
+    ? UTF8_ENCODER.encode(privateNQuads).length
+    : 0;
+  const separatorByteSize = publicBytes.length > 0 && privateByteSize > 0 ? 1 : 0;
 
   return {
     publicNQuads,
     publicBytes,
     publicByteSize: BigInt(publicBytes.length),
-    fullContentByteSize: BigInt(UTF8_ENCODER.encode(fullContentNQuads).length),
+    fullContentByteSize: BigInt(
+      publicBytes.length + separatorByteSize + privateByteSize,
+    ),
   };
 }

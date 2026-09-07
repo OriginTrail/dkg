@@ -3042,7 +3042,9 @@ export class DKGPublisher implements Publisher {
     // one place before ACK and pricing planning consume the resulting values.
     const payloadMeasurement = measureCanonicalPublicationPayload({
       publicQuads: allSkolemizedQuads,
-      privateQuads: canonicalPrivateQuads,
+      ...(pricingPolicy === 'full-content'
+        ? { privateQuads: canonicalPrivateQuads }
+        : {}),
       fallbackGraph: dataGraph,
     });
     const nquadsStr = payloadMeasurement.publicNQuads;

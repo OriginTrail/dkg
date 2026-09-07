@@ -79,6 +79,53 @@ describe('publication pricing policy', () => {
       .toBe(BigInt(new TextEncoder().encode(expectedFullDocument).length));
   });
 
+  it.each([
+    ['empty', [], []],
+    ['public only', [{
+      subject: 'urn:test:public-only',
+      predicate: 'http://schema.org/name',
+      object: '"café"@fr',
+      graph: '',
+    }], []],
+    ['private only', [], [{
+      subject: 'urn:test:private-only',
+      predicate: 'http://schema.org/value',
+      object: '"秘密"',
+      graph: '',
+    }]],
+    ['public and private', [{
+      subject: 'urn:test:public',
+      predicate: 'http://schema.org/name',
+      object: '"public"',
+      graph: '',
+    }], [{
+      subject: 'urn:test:private',
+      predicate: 'http://schema.org/value',
+      object: '"private"',
+      graph: '',
+    }]],
+  ] as Array<[string, Quad[], Quad[]]>)('preserves exact UTF-8 totals for %s payloads', (
+    _label,
+    publicQuads,
+    privateQuads,
+  ) => {
+    const fallbackGraph = 'did:dkg:context-graph:measurement/_data';
+    const scopedPublic = publicQuads.map((quad) => ({ ...quad, graph: quad.graph || fallbackGraph }));
+    const scopedPrivate = privateQuads.map((quad) => ({ ...quad, graph: quad.graph || fallbackGraph }));
+    const expectedPublic = quadsToNQuads(scopedPublic);
+    const expectedFull = quadsToNQuads([...scopedPublic, ...scopedPrivate]);
+    const measurement = measureCanonicalPublicationPayload({
+      publicQuads,
+      ...(privateQuads.length > 0 ? { privateQuads } : {}),
+      fallbackGraph,
+    });
+
+    expect(measurement.publicByteSize)
+      .toBe(BigInt(new TextEncoder().encode(expectedPublic).length));
+    expect(measurement.fullContentByteSize)
+      .toBe(BigInt(new TextEncoder().encode(expectedFull).length));
+  });
+
   it('selects the precomputed pricing quantity without serializing content', () => {
     const networkVisibleByteSize = 123n;
     expect(resolvePublicationPricing({
