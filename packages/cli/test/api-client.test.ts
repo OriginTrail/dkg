@@ -1522,7 +1522,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       'cg',
       'asset2',
       [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: '' }],
-      { clearAfter: false, subGraphName: 'sg2' },
+      { clearAfter: false, subGraphName: 'sg2', pricingPolicy: 'full-content' },
     );
     // 1st call creates (finalize+share to SWM); the sequence ENDS at the per-KA vm/publish route
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets`);
@@ -1537,6 +1537,9 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(last.opts.method).toBe('POST');
     const published = JSON.parse(last.opts.body as string);
     expect(published.subGraphName).toBe('sg2');
-    expect(published.options).toEqual({ clearSharedMemoryAfter: false });
+    expect(published.options).toEqual({
+      clearSharedMemoryAfter: false,
+      pricingPolicy: 'full-content',
+    });
   });
 });

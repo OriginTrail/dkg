@@ -483,6 +483,53 @@ function planKnowledgeAssetVmPublication(input: {
   return { kind: 'initial', pricingPolicy: input.pricingPolicy };
 }
 
+type KnowledgeAssetVmPublishRequestWithoutIntentKey = Omit<
+  KnowledgeAssetVmPublishRequest,
+  'intentKey'
+>;
+
+/** Canonical immutable projection of the persisted queued-publish request. */
+function createKnowledgeAssetVmPublishIntentKey(
+  request: KnowledgeAssetVmPublishRequestWithoutIntentKey,
+): string {
+  const canonicalIntent = {
+    contextGraphId: request.contextGraphId,
+    name: request.name,
+    agentAddress: request.agentAddress ?? null,
+    subGraphName: request.subGraphName ?? null,
+    shareOperationId: request.shareOperationId,
+    roots: request.roots,
+    contentScopeVersion: request.contentScopeVersion ?? null,
+    kaUal: request.kaUal ?? null,
+    assertionVersion: request.assertionVersion ?? null,
+    publicTripleCount: request.publicTripleCount ?? null,
+    privateMerkleRoot: request.privateMerkleRoot?.toLowerCase() ?? null,
+    privateTripleCount: request.privateTripleCount ?? null,
+    accessPolicy: request.accessPolicy ?? null,
+    allowedPeers: request.allowedPeers ?? [],
+    entityProofs: request.entityProofs ?? null,
+    sealMerkleRoot: request.sealMerkleRoot.toLowerCase(),
+    seal: request.seal,
+    sealChainId: request.sealChainId,
+    sealKav10Address: request.sealKav10Address,
+    sealFinalizedAtIso: request.sealFinalizedAtIso,
+    wmCurrentAssertion: request.wmCurrentAssertion ?? null,
+    swmCurrentAssertion: request.swmCurrentAssertion ?? null,
+    vmCurrentAssertion: request.vmCurrentAssertion ?? null,
+    kaNumber: request.kaNumber ?? null,
+    reservedUal: request.reservedUal ?? null,
+    publishEpochs: request.publishEpochs ?? null,
+    // Keep the pre-feature canonical JSON unchanged when the policy is omitted.
+    ...(request.pricingPolicy !== undefined
+      ? { pricingPolicy: request.pricingPolicy }
+      : {}),
+    clearSharedMemoryAfter: request.clearSharedMemoryAfter ?? null,
+    publisherNodeIdentityIdOverride:
+      request.publisherNodeIdentityIdOverride ?? null,
+  };
+  return `sha256:${createHash('sha256').update(JSON.stringify(canonicalIntent)).digest('hex')}`;
+}
+
 /**
  * #1116 (round 11) — stable code tagged on the `assertionFinalize` throws that are
  * recoverable SIGNING/CHAIN CAPABILITY GAPS (no local signing key, non-V10 chain
@@ -4596,53 +4643,12 @@ export class PublishMethods extends DKGAgentBase {
     const publisherOverrideString = opts?.publisherNodeIdentityIdOverride !== undefined
       ? opts.publisherNodeIdentityIdOverride.toString() as `${bigint}`
       : undefined;
-    const canonicalIntent = {
+    const request = {
       contextGraphId,
       name,
       agentAddress,
-      subGraphName: opts?.subGraphName ?? null,
-      shareOperationId,
-      roots: [],
-      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-      kaUal: seal.kaUal,
-      assertionVersion: seal.assertionVersion,
-      publicTripleCount: seal.publicTripleCount,
-      privateMerkleRoot: seal.privateMerkleRoot
-        ? ethers.hexlify(seal.privateMerkleRoot).toLowerCase()
-        : null,
-      privateTripleCount: seal.privateTripleCount,
-      accessPolicy,
-      allowedPeers,
-      entityProofs: opts?.entityProofs ?? null,
-      sealMerkleRoot: sealMerkleRoot.toLowerCase(),
-      seal: queuedSeal,
-      sealChainId: seal.chainId.toString(),
-      sealKav10Address: ethers.getAddress(seal.kav10Address),
-      sealFinalizedAtIso: seal.finalizedAtIso,
-      wmCurrentAssertion: history.wmCurrentAssertion ?? null,
-      swmCurrentAssertion: history.swmCurrentAssertion ?? null,
-      vmCurrentAssertion: operationPlan.kind === 'update'
-        ? operationPlan.vmCurrentAssertion
-        : null,
-      kaNumber: history.kaNumber ?? null,
-      reservedUal: history.reservedUal ?? null,
-      publishEpochs: opts?.publishEpochs ?? null,
-      pricingPolicy: operationPlan.kind === 'initial'
-        ? operationPlan.pricingPolicy ?? null
-        : null,
-      clearSharedMemoryAfter: opts?.clearSharedMemoryAfter ?? null,
-      publisherNodeIdentityIdOverride: publisherOverrideString ?? null,
-    };
-    const intentKey = `sha256:${createHash('sha256').update(JSON.stringify(canonicalIntent)).digest('hex')}`;
-
-    return {
-      contextGraphId,
-      name,
-      agentAddress,
-      // GH#1778 — carried for caller-scoped async execution (CG-register curator
-      // stamp). Deliberately NOT part of canonicalIntent/intentKey above: the
-      // caller must not fork job dedup, so deduped jobs share one caller (the
-      // first enqueuer), matching the sync lane's first-writer-wins registration.
+      // GH#1778 — caller identity is persisted for execution but deliberately
+      // excluded from the canonical projection so dedup remains first-writer-wins.
       ...(callerAgentAddress ? { callerAgentAddress } : {}),
       ...(opts?.subGraphName ? { subGraphName: opts.subGraphName } : {}),
       shareOperationId,
@@ -4663,7 +4669,6 @@ export class PublishMethods extends DKGAgentBase {
       sealKav10Address: ethers.getAddress(seal.kav10Address) as `0x${string}`,
       sealFinalizedAtIso: seal.finalizedAtIso,
       sealMerkleRoot,
-      intentKey,
       ...(history.wmCurrentAssertion ? { wmCurrentAssertion: history.wmCurrentAssertion } : {}),
       ...(history.swmCurrentAssertion ? { swmCurrentAssertion: history.swmCurrentAssertion } : {}),
       ...(operationPlan.kind === 'update'
@@ -4677,6 +4682,11 @@ export class PublishMethods extends DKGAgentBase {
         : {}),
       ...(opts?.clearSharedMemoryAfter !== undefined ? { clearSharedMemoryAfter: opts.clearSharedMemoryAfter } : {}),
       ...(publisherOverrideString !== undefined ? { publisherNodeIdentityIdOverride: publisherOverrideString } : {}),
+    } satisfies KnowledgeAssetVmPublishRequestWithoutIntentKey;
+
+    return {
+      ...request,
+      intentKey: createKnowledgeAssetVmPublishIntentKey(request),
     };
   }
 
@@ -5254,6 +5264,17 @@ export class PublishMethods extends DKGAgentBase {
       ...pickPublishLifecycleHooks(publishOptions),
       onPhase: opts?.onPhase ?? publishOptions.onPhase,
     };
+    const capturedPricingPolicy = request.pricingPolicy ?? 'network-visible';
+    const executionPricingPolicy = publishOptions.pricingPolicy ?? capturedPricingPolicy;
+    if (executionPricingPolicy !== capturedPricingPolicy) {
+      throw Object.assign(
+        new Error(
+          `Queued VM publish for "${request.name}" has pricingPolicy=${executionPricingPolicy}, `
+            + `but its immutable request captured pricingPolicy=${capturedPricingPolicy}.`,
+        ),
+        { code: 'PUBLISH_INTENT_STALE' },
+      );
+    }
     if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
@@ -5392,7 +5413,7 @@ export class PublishMethods extends DKGAgentBase {
     const vmCurrent = request.vmCurrentAssertion ?? stripLit(pointerRow?.['vm']);
     const operationPlan = planKnowledgeAssetVmPublication({
       vmCurrentAssertion: vmCurrent,
-      pricingPolicy: request.pricingPolicy ?? publishOptions.pricingPolicy,
+      pricingPolicy: request.pricingPolicy,
     });
     const stampedNumberStr = request.kaNumber ?? stripLit(pointerRow?.['kaNum']);
 

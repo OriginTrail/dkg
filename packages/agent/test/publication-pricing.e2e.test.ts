@@ -301,6 +301,46 @@ describe('agent publication pricing integration', () => {
         agent.store,
         new GraphManager(agent.store),
       ).getKnowledgeAssetPrivateTriples(contextGraphId, queuedScope);
+
+      const callerA = ethers.Wallet.createRandom().address;
+      const callerB = ethers.Wallet.createRandom().address;
+      const defaultIntentA = await agent.resolveFinalizedAssertionVmPublishIntent(
+        contextGraphId,
+        'full-content-queued',
+        {
+          callerAgentAddress: callerA,
+          selectedAuthorAgentAddress: queued.intent.agentAddress!,
+        },
+      );
+      const defaultIntentB = await agent.resolveFinalizedAssertionVmPublishIntent(
+        contextGraphId,
+        'full-content-queued',
+        {
+          callerAgentAddress: callerB,
+          selectedAuthorAgentAddress: queued.intent.agentAddress!,
+        },
+      );
+      expect(defaultIntentA.pricingPolicy).toBeUndefined();
+      expect(defaultIntentA.callerAgentAddress).toBe(callerA);
+      expect(defaultIntentB.callerAgentAddress).toBe(callerB);
+      expect(defaultIntentA.intentKey).toBe(defaultIntentB.intentKey);
+      expect(queued.intent.intentKey).not.toBe(defaultIntentA.intentKey);
+
+      await expect(agent.publishQueuedKnowledgeAssetVmPublish(
+        defaultIntentA,
+        {
+          quads: publicSnapshot.quads,
+          privateQuads: privateSnapshot,
+          publisherPeerId: publicSnapshot.publisherPeerId,
+          pricingPolicy: 'full-content',
+        },
+      )).rejects.toMatchObject({
+        code: 'PUBLISH_INTENT_STALE',
+        message: expect.stringMatching(/immutable request captured pricingPolicy=network-visible/),
+      });
+      expect(planSpy).not.toHaveBeenCalled();
+      expect(createSpy).not.toHaveBeenCalled();
+
       const queuedResult = await agent.publishQueuedKnowledgeAssetVmPublish(
         queued.intent,
         {
