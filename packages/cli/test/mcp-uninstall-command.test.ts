@@ -124,7 +124,7 @@ function seedNativeClients(selectedPlatform: string) {
     { id: 'claude-code', configPath: join(fixture.home, '.claude.json'), format: 'json', entryPath: 'mcpServers.dkg' },
     { id: 'claude-desktop', configPath: join(guiRoot, 'Claude', 'claude_desktop_config.json'), format: 'json', entryPath: 'mcpServers.dkg' },
     { id: 'windsurf', configPath: join(fixture.home, '.codeium', 'windsurf', 'mcp_config.json'), format: 'json', entryPath: 'mcpServers.dkg' },
-    { id: 'vscode', configPath: join(guiRoot, 'Code', 'User', 'mcp.json'), format: 'json', entryPath: 'servers.dkg' },
+    { id: 'vscode', configPath: join(guiRoot, 'Code', 'User', 'mcp.json'), format: 'jsonc', entryPath: 'servers.dkg' },
     { id: 'cline', configPath: join(guiRoot, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json'), format: 'json', entryPath: 'mcpServers.dkg' },
     { id: 'codex-cli', configPath: join(fixture.home, '.codex', 'config.toml'), format: 'toml', entryPath: 'mcp_servers.dkg' },
   ] as const;
@@ -184,7 +184,7 @@ it.each(['cursor', 'claude-desktop', 'windsurf', 'vscode', 'cline'])(
     const targets = detectClients(resolver);
     expect(targets.filter((target) => target.location === 'windows-wsl')
       .map(({ id, location, configPath, format, entryPath }) => ({ id, location, configPath, format, entryPath })))
-      .toEqual(expected.map((spec) => ({ ...spec, location: 'windows-wsl', format: 'json' })));
+      .toEqual(expected.map((spec) => ({ ...spec, location: 'windows-wsl', format: spec.id === 'vscode' ? 'jsonc' : 'json' })));
     expect(targets).toHaveLength(12);
     const before = targets.map((target) => readFileSync(target.configPath, 'utf8'));
     await mcpUninstallAction({ yes: true, client: `${id}:windows-wsl` }, { detectClients: () => detectClients(resolver), log: () => {} });

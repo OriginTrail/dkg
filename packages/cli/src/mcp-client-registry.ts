@@ -4,9 +4,10 @@ import { homedir, platform, release as osRelease } from 'node:os';
 import { execSync } from 'node:child_process';
 
 
-/** The three config shapes currently supported by setup and uninstall. */
+/** Client config syntax and owned registration paths. */
 export type McpClientConfigShape =
   | { readonly format: 'json'; readonly entryPath: 'mcpServers.dkg' | 'servers.dkg' }
+  | { readonly format: 'jsonc'; readonly entryPath: 'servers.dkg' }
   | { readonly format: 'toml'; readonly entryPath: 'mcp_servers.dkg' };
 export type McpClientLocation = 'native' | 'windows-wsl';
 type WindowsPaths = { USERPROFILE: string | null; APPDATA: string | null };
@@ -17,7 +18,7 @@ function homePaths(home: string, ...parts: string[]) {
 }
 
 const JSON_MCP = { format: 'json', entryPath: 'mcpServers.dkg' } as const;
-const JSON_SERVERS = { format: 'json', entryPath: 'servers.dkg' } as const;
+const JSONC_SERVERS = { format: 'jsonc', entryPath: 'servers.dkg' } as const;
 const TOML_SERVERS = { format: 'toml', entryPath: 'mcp_servers.dkg' } as const;
 
 /** One entry owns each client's identity, storage shape, paths and skill delivery. */
@@ -39,7 +40,7 @@ const MCP_CLIENT_REGISTRY = [
     nativePaths: (home: string) => homePaths(home, '.codeium', 'windsurf', 'mcp_config.json'),
     windowsPath: (env: WindowsPaths) => env.USERPROFILE && join(env.USERPROFILE, '.codeium', 'windsurf', 'mcp_config.json'),
   },
-  { id: 'vscode', name: 'VSCode', config: JSON_SERVERS,
+  { id: 'vscode', name: 'VSCode', config: JSONC_SERVERS,
     nativePaths: vscodeMcpPaths,
     windowsPath: (env: WindowsPaths) => env.APPDATA && join(env.APPDATA, 'Code', 'User', 'mcp.json'),
   },

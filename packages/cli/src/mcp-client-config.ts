@@ -1,7 +1,9 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import TOML from '@iarna/toml';
 import { isDeepStrictEqual } from 'node:util';
+import { applyEdits, createScanner, findNodeAtLocation, modify, parse as parseJsonc, parseTree, type Edit, type ParseError } from 'jsonc-parser';
+import { writeMcpConfigAtomic } from './mcp-config-file.js';
 import { tildify, type ClientTarget } from './mcp-client-registry.js';
 
 /**
@@ -69,18 +71,22 @@ function readEntryAt(
   return (cursor as Record<string, unknown>)[leaf];
 }
 
-function readJson(path: string): Record<string, unknown> {
+function readJson(path: string, format: 'json' | 'jsonc' = 'json'): Record<string, unknown> {
   if (!existsSync(path)) return {};
   const raw = readFileSync(path, 'utf8').trim();
   if (!raw) return {};
   try {
-    const parsed = JSON.parse(raw);
+    const errors: ParseError[] = [];
+    const parsed = format === 'jsonc'
+      ? parseJsonc(raw, errors, { allowTrailingComma: true })
+      : JSON.parse(raw);
+    if (errors.length > 0) throw new Error('Invalid JSONC');
     return typeof parsed === 'object' && parsed !== null
       ? (parsed as Record<string, unknown>)
       : {};
   } catch {
     throw new Error(
-      `Existing file is not valid JSON: ${tildify(path)}. Move it aside and re-run.`,
+      `Existing file is not valid ${format.toUpperCase()}: ${tildify(path)}. Move it aside and re-run.`,
     );
   }
 }
@@ -125,7 +131,8 @@ function readConfigBody(target: ClientTarget): Record<string, unknown> {
   const format = target.format;
   switch (format) {
     case 'json':
-      return readJson(target.configPath);
+    case 'jsonc':
+      return readJson(target.configPath, format);
     case 'toml':
       return readToml(target.configPath);
     default:
@@ -585,10 +592,42 @@ function writeTomlConfigBody(
         'Comments/formatting outside this entry may not be preserved.\n',
     );
   }
-  writeFileSync(
+  writeMcpConfigAtomic(
     target.configPath,
     patched ?? TOML.stringify(body as TOML.JsonMap),
   );
+}
+
+/** Remove the owned property/comma only; comments preceding siblings belong to them. */
+function removeJsoncEntry(raw: string, path: string[]): string {
+  const tree = parseTree(raw, [], { allowTrailingComma: true });
+  const property = tree && findNodeAtLocation(tree, path)?.parent;
+  if (property?.type !== 'property') throw new Error('JSONC registration property was not found');
+  const edits: Edit[] = [{ offset: property.offset, length: property.length, content: '' }];
+  const scanner = createScanner(raw, true);
+  scanner.setPosition(property.offset + property.length);
+  scanner.scan();
+  if (raw.slice(scanner.getTokenOffset(), scanner.getTokenOffset() + scanner.getTokenLength()) === ',') {
+    edits.push({ offset: scanner.getTokenOffset(), length: scanner.getTokenLength(), content: '' });
+  }
+  // A preceding comma can remain as a valid JSONC trailing comma. Avoid
+  // deleting the intervening whitespace or comments owned by another entry.
+  return applyEdits(raw, edits);
+}
+
+/** Edit the owned JSONC path while retaining unrelated comments and formatting. */
+function writeJsoncConfigBody(target: ClientTarget, body: Record<string, unknown>, edit: RegistrationEdit): void {
+  const raw = existsSync(target.configPath) ? readFileSync(target.configPath, 'utf8') : '{}';
+  const patched = edit.kind === 'remove' ? removeJsoncEntry(raw, target.entryPath.split('.'))
+    : applyEdits(raw, modify(raw, target.entryPath.split('.'), readEntryAt(body, target.entryPath), {
+    formattingOptions: { insertSpaces: true, tabSize: 2, eol: raw.includes('\r\n') ? '\r\n' : '\n' },
+  }));
+  const errors: ParseError[] = [];
+  const parsed = parseJsonc(patched, errors, { allowTrailingComma: true });
+  if (errors.length > 0 || !isDeepStrictEqual(parsed, body)) {
+    throw new Error(`Cannot safely edit JSONC registration in ${target.displayPath}`);
+  }
+  writeMcpConfigAtomic(target.configPath, patched);
 }
 
 /**
@@ -608,7 +647,10 @@ function writeConfigBody(target: ClientTarget, body: Record<string, unknown>, ed
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   switch (format) {
     case 'json':
-      writeFileSync(target.configPath, JSON.stringify(body, null, 2) + '\n');
+      writeMcpConfigAtomic(target.configPath, JSON.stringify(body, null, 2) + '\n');
+      return;
+    case 'jsonc':
+      writeJsoncConfigBody(target, body, edit);
       return;
     case 'toml':
       writeTomlConfigBody(target, body, edit);

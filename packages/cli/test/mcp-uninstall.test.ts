@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs';
+import { parse as parseJsonc } from 'jsonc-parser';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,17 +12,23 @@ import { dkgAuthTokenPath } from '@origintrail-official/dkg-core';
 import { mcpUninstallAction } from '../src/mcp-uninstall.js';
 import { createInterface } from 'node:readline/promises';
 
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual, renameSync: vi.fn(actual.renameSync) };
+});
+
 vi.mock('node:readline/promises', () => ({ createInterface: vi.fn() }));
 
 let root: string;
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'dkg-mcp-uninstall-')); });
-afterEach(() => { vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); vi.mocked(fs.renameSync).mockReset(); vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
 
-function target(name: string, container: 'mcpServers' | 'servers' | 'mcp_servers' = 'mcpServers', format: 'json' | 'toml' = 'json'): ClientTarget {
+function target(name: string, container: 'mcpServers' | 'servers' | 'mcp_servers' = 'mcpServers', format: 'json' | 'jsonc' | 'toml' = 'json'): ClientTarget {
   const configPath = join(root, `${name}.${format}`);
   const id = ({ Cursor: 'cursor', 'Claude Code': 'claude-code', 'Claude Desktop': 'claude-desktop', Windsurf: 'windsurf', VSCode: 'vscode', Cline: 'cline', 'Codex CLI': 'codex-cli' } as Record<string, McpClientId>)[name] ?? 'cursor';
   const shape: McpClientConfigShape = format === 'toml'
     ? { format, entryPath: 'mcp_servers.dkg' }
+    : format === 'jsonc' ? { format, entryPath: 'servers.dkg' }
     : { format, entryPath: container === 'servers' ? 'servers.dkg' : 'mcpServers.dkg' };
   return { ...shape, id, location: 'native', name, configPath, displayPath: configPath };
 }
@@ -34,10 +42,55 @@ function seed(client: ClientTarget, onlyDkg = false): void {
 }
 function read(client: ClientTarget): Record<string, any> {
   const raw = readFileSync(client.configPath, 'utf8');
-  return client.format === 'toml' ? TOML.parse(raw) : JSON.parse(raw);
+  return client.format === 'toml' ? TOML.parse(raw) : client.format === 'jsonc' ? parseJsonc(raw) : JSON.parse(raw);
 }
 
 describe('MCP registration removal', () => {
+  it('removes DKG from VS Code JSONC while preserving comments, trailing commas and siblings', async () => {
+    const client = target('VSCode', 'servers', 'jsonc');
+    const raw = '{\n  // operator preference\n  "setting": "keep",\n  "servers": {\n    "dkg": { "command": "dkg" },\n    // unrelated server\n    "other": { "command": "other" },\n  },\n}\n';
+    writeFileSync(client.configPath, raw);
+    await mcpUninstallAction({ yes: true, client: 'vscode' }, { detectClients: () => [client], log: () => {} });
+    const output = readFileSync(client.configPath, 'utf8');
+    expect(read(client)).toEqual({ setting: 'keep', servers: { other: { command: 'other' } } });
+    expect(output).toContain('// operator preference');
+    expect(output).toContain('// unrelated server');
+    expect(output).toContain('"other": { "command": "other" },');
+  });
+
+  it.each([
+    '{ "servers": { "other": { "command": "other" }, /* keep */ "dkg": {} } }',
+    '{ "servers": { /* keep */ "dkg": {}, } }',
+  ])('preserves JSONC comments when removing a last or only registration', (raw) => {
+    const client = target('VSCode', 'servers', 'jsonc');
+    writeFileSync(client.configPath, raw);
+    const expected = parseJsonc(raw);
+    delete expected.servers.dkg;
+    expect(removeRegistration(client)).toBe(true);
+    expect(read(client)).toEqual(expected);
+    expect(readFileSync(client.configPath, 'utf8')).toContain('/* keep */');
+  });
+
+  it.each(['json', 'jsonc', 'toml'] as const)('preserves the original %s config and cleans temporary files when replacement fails', (format) => {
+    const client = target('atomic', format === 'toml' ? 'mcp_servers' : format === 'jsonc' ? 'servers' : 'mcpServers', format);
+    seed(client);
+    const original = readFileSync(client.configPath, 'utf8');
+    const files = fs.readdirSync(root);
+    const rename = vi.mocked(fs.renameSync).mockImplementationOnce(() => { throw new Error('replacement failed'); });
+    expect(() => removeRegistration(client)).toThrow('replacement failed');
+    expect(rename).toHaveBeenCalledOnce();
+    expect(readFileSync(client.configPath, 'utf8')).toBe(original);
+    expect(fs.readdirSync(root)).toEqual(files);
+  });
+
+  it('preserves existing config permissions after successful replacement', () => {
+    const client = target('permissions');
+    seed(client);
+    fs.chmodSync(client.configPath, 0o640);
+    expect(removeRegistration(client)).toBe(true);
+    if (process.platform !== 'win32') expect(fs.statSync(client.configPath).mode & 0o777).toBe(0o640);
+  });
+
   it.each([
     ['Cursor', 'mcpServers', 'json'], ['Claude Code', 'mcpServers', 'json'],
     ['Claude Desktop', 'mcpServers', 'json'], ['Windsurf', 'mcpServers', 'json'],
@@ -210,6 +263,21 @@ describe('mcpUninstallAction', () => {
     const { clients, deps } = fixture();
     await expect(mcpUninstallAction({ yes: true, client: 'typo' }, deps)).rejects.toThrow('Unsupported MCP client selector');
     expect(clients.every((client) => inspectRegistration(client))).toBe(true);
+  });
+
+  it('continues processing confirmed clients after a config fails during removal', async () => {
+    const { clients, deps } = fixture();
+    const original = readFileSync(clients[0].configPath, 'utf8');
+    await expect(mcpUninstallAction({ yes: true }, {
+      ...deps,
+      confirmTargets: async (planned) => {
+        expect(planned).toHaveLength(clients.length);
+        vi.mocked(fs.renameSync).mockImplementationOnce(() => { throw new Error('replacement failed'); });
+        return planned;
+      },
+    })).rejects.toThrow('Could not remove 1');
+    expect(readFileSync(clients[0].configPath, 'utf8')).toBe(original);
+    expect(clients.slice(1).every((client) => !inspectRegistration(client))).toBe(true);
   });
 
   it('reports unreadable configuration and still processes other confirmed clients', async () => {

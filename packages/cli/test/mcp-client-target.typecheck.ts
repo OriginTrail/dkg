@@ -2,7 +2,7 @@ import type { ClientTarget } from '../src/mcp-client-registry.js';
 
 declare const base: Pick<ClientTarget, 'id' | 'name' | 'location' | 'configPath' | 'displayPath'>;
 const standard: ClientTarget = { ...base, format: 'json', entryPath: 'mcpServers.dkg' };
-const vscode: ClientTarget = { ...base, format: 'json', entryPath: 'servers.dkg' };
+const vscode: ClientTarget = { ...base, format: 'jsonc', entryPath: 'servers.dkg' };
 const codex: ClientTarget = { ...base, format: 'toml', entryPath: 'mcp_servers.dkg' };
 // @ts-expect-error Unsupported formats cannot enter registration operations.
 const yaml: ClientTarget = { ...base, format: 'yaml', entryPath: 'mcpServers.dkg' };
