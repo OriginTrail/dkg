@@ -285,6 +285,16 @@ export class NetworkAdmissionCoordinator {
     }
   }
 
+  private transientProbeFailure(
+    remotePeer: CanonicalPeerId,
+    ctx: OperationContext,
+    message: string,
+  ): NetworkAdmissionProbeError {
+    this.admission.rememberRetryableProbeFailure(remotePeer, message, 'transient');
+    this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} failed retryably: ${message}`);
+    return new NetworkAdmissionProbeError(remotePeer, message);
+  }
+
   private async probePeer(
     remotePeer: CanonicalPeerId,
     ctx: OperationContext,
@@ -311,10 +321,6 @@ export class NetworkAdmissionCoordinator {
         new TextEncoder().encode(JSON.stringify(request)),
         { timeoutMs: this.probeTimeoutMs, signal },
       );
-      // A peer stopping mid-probe can close its stream before sending bytes.
-      // Treat that EOF like other interrupted transport attempts; no identity
-      // document arrived to justify the longer malformed-response cooldown.
-      if (response.byteLength === 0) throw new Error('identity probe ended without a response');
     } catch (err) {
       if (signal.aborted) throw abortErrorFromSignal(signal.reason);
       const message = err instanceof Error ? err.message : String(err);
@@ -327,11 +333,14 @@ export class NetworkAdmissionCoordinator {
       // reject a healthy restarting peer across *every* protocol for minutes
       // (the admission gate is protocol-agnostic). The exponential transient
       // backoff lets a booting peer recover on its next probe instead.
-      this.admission.rememberRetryableProbeFailure(remotePeer, message, 'transient');
-      this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} failed retryably: ${message}`);
-      throw new NetworkAdmissionProbeError(remotePeer, message);
+      throw this.transientProbeFailure(remotePeer, ctx, message);
     }
     if (signal.aborted) throw abortErrorFromSignal(signal.reason);
+    // A stream can close before sending an identity document. This is retryable
+    // transport interruption; only a nonempty malformed document is unreadable.
+    if (response.byteLength === 0) {
+      throw this.transientProbeFailure(remotePeer, ctx, 'identity probe ended without a response');
+    }
 
     let claimed: unknown;
     try {
