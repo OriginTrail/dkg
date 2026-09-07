@@ -43,6 +43,11 @@ const NPM_AVAILABLE = (() => {
   }
 })();
 const TAR_AVAILABLE = spawnSync('tar', ['--version'], { encoding: 'utf8' }).status === 0;
+const GIT_AVAILABLE = spawnSync('git', ['--version'], { encoding: 'utf8' }).status === 0;
+const REPO_CHECKOUT_AVAILABLE = GIT_AVAILABLE && spawnSync('git', [
+  '-C', REPO_ROOT, 'rev-parse', '--is-inside-work-tree',
+], { encoding: 'utf8' }).stdout?.trim() === 'true';
+
 
 const SCRIPT_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../release-packages.mjs');
 
@@ -63,6 +68,19 @@ function withFixture(fn) {
     return fn(root);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** Git owns the source inventory; read working-tree contents so pending edits are exercised. */
+function materializeTrackedPackage(sourceRoot, relativePackage, destination) {
+  const tracked = spawnSync('git', ['-C', sourceRoot, 'ls-files', '-z', '--', relativePackage], { encoding: 'utf8' });
+  assert.equal(tracked.status, 0, `cannot enumerate tracked package inputs: ${tracked.stderr}`);
+  const files = tracked.stdout.split('\0').filter(Boolean);
+  assert.ok(files.length > 0, 'the source package must have tracked inputs');
+  for (const relative of files) {
+    const target = path.join(destination, path.relative(relativePackage, relative));
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(sourceRoot, relative), target);
   }
 }
 
@@ -529,26 +547,45 @@ test('the packed CLI resolves the typed Blazegraph runtime subpath for a consume
   assertTypeScriptConsumer(consumerPath, { esModuleInterop: true });
 }));
 
+test('tracked package fixtures include unpublished build inputs and exclude generated state', {
+  skip: GIT_AVAILABLE ? false : 'git is required',
+}, () => withFixture((root) => {
+  const sourceRoot = path.join(root, 'source');
+  const relativePackage = 'packages/fixture';
+  const source = path.join(sourceRoot, relativePackage);
+  writePackage(sourceRoot, relativePackage, { name: 'fixture', files: ['dist'] });
+  fs.writeFileSync(path.join(source, 'tsconfig.build.json'), '{"compilerOptions":{}}');
+  fs.writeFileSync(path.join(sourceRoot, '.gitignore'), '.turbo/\ndist/\n*.tsbuildinfo\n');
+  assert.equal(spawnSync('git', ['init', '-q', sourceRoot]).status, 0);
+  assert.equal(spawnSync('git', ['-C', sourceRoot, 'add', '.gitignore', relativePackage]).status, 0);
+  // A pending edit must be used instead of the staged version.
+  const editedConfig = '{"compilerOptions":{"strict":true}}';
+  fs.writeFileSync(path.join(source, 'tsconfig.build.json'), editedConfig);
+  for (const generated of ['.turbo/cache', 'dist/index.js', 'tsconfig.tsbuildinfo']) {
+    fs.mkdirSync(path.dirname(path.join(source, generated)), { recursive: true });
+    fs.writeFileSync(path.join(source, generated), 'generated');
+  }
+  const target = path.join(root, 'checkout');
+  materializeTrackedPackage(sourceRoot, relativePackage, target);
+  assert.deepEqual(fs.readdirSync(target).sort(), ['package.json', 'tsconfig.build.json']);
+  assert.equal(fs.readFileSync(path.join(target, 'tsconfig.build.json'), 'utf8'), editedConfig);
+}));
+
 test('packing OpenClaw from source builds consumable JavaScript and declarations', {
-  skip: NPM_AVAILABLE && TAR_AVAILABLE ? false : 'npm and tar are required',
+  skip: NPM_AVAILABLE && TAR_AVAILABLE && REPO_CHECKOUT_AVAILABLE ? false : 'npm, tar and a Git checkout are required',
 }, () => withFixture((root) => {
   const source = path.join(REPO_ROOT, 'packages', 'adapter-openclaw');
   const cleanPackage = path.join(root, 'packages', 'adapter-openclaw');
   const manifest = JSON.parse(fs.readFileSync(path.join(source, 'package.json'), 'utf8'));
   const { packageManager } = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
   writePackage(root, '.', { name: 'openclaw-pack-fixture', private: true, packageManager });
-  // Copy the source checkout, including unpublished build scripts/configs.
-  // Published `files` entries are a separate contract from prepack inputs.
-  const generatedEntries = new Set(['dist', 'node_modules', 'coverage', 'test-results', '.git']);
-  fs.cpSync(source, cleanPackage, {
-    recursive: true,
-    filter: (entry) => !generatedEntries.has(path.basename(entry))
-      && !entry.endsWith('.tsbuildinfo'),
-  });
+  materializeTrackedPackage(REPO_ROOT, 'packages/adapter-openclaw', cleanPackage);
   fs.copyFileSync(path.join(REPO_ROOT, 'tsconfig.base.json'), path.join(root, 'tsconfig.base.json'));
   // Use the installed build tools and built workspace dependencies. The adapter
   // itself starts without any build output, independently of the CI build.
   fs.symlinkSync(path.join(REPO_ROOT, 'node_modules'), path.join(root, 'node_modules'), 'junction');
+  assert.ok(fs.existsSync(path.join(cleanPackage, 'tsconfig.json')), 'unpublished build config is required');
+  assert.equal(fs.existsSync(path.join(cleanPackage, '.turbo')), false);
   assert.equal(fs.existsSync(path.join(cleanPackage, 'dist')), false);
   assert.equal(fs.existsSync(path.join(cleanPackage, 'tsconfig.tsbuildinfo')), false);
 
