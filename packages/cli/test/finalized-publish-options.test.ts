@@ -35,7 +35,7 @@ describe('finalized publication pricing options', () => {
 });
 
 describe('finalized publish boundary contracts', () => {
-  it('derives command flags and typed values from the shared options', () => {
+  it('preserves command flags and typed parsed values', () => {
     const command = addFinalizedPublishOptions(new Command());
     expect(command.options.map((option) => option.flags)).toEqual([
       '--publish-epochs <count>', '--pricing-policy <policy>', '--publisher-node-identity-id <id>',

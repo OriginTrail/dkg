@@ -1,10 +1,26 @@
 import { Command } from 'commander';
+import { PUBLICATION_PRICING_POLICIES } from '@origintrail-official/dkg-publisher';
 import {
-  FINALIZED_PUBLISH_CLI_OPTIONS,
   formatFinalizedPublishOptionError,
   type KnowledgeAssetFinalizedPublishOptions,
+  type CliFinalizedPublishInput,
   parseCliFinalizedPublishOptions,
 } from '../finalized-publish-options.js';
+
+const FINALIZED_PUBLISH_CLI_OPTIONS = [
+  {
+    errorField: 'publishEpochs', flags: '--publish-epochs <count>',
+    description: 'On-chain publish lifetime in epochs (default: 12; PCA-funded publishes may coerce to PCA lock duration)',
+  },
+  {
+    errorField: 'pricingPolicy', flags: '--pricing-policy <policy>',
+    description: `Token pricing basis (supported: ${PUBLICATION_PRICING_POLICIES.join(', ')})`,
+  },
+  {
+    errorField: 'publisherNodeIdentityIdOverride', flags: '--publisher-node-identity-id <id>',
+    description: 'Publisher node identity id override; use 0 for no-attribution',
+  },
+];
 
 export function addFinalizedPublishOptions(command: Command): Command {
   for (const option of FINALIZED_PUBLISH_CLI_OPTIONS) {
@@ -13,7 +29,7 @@ export function addFinalizedPublishOptions(command: Command): Command {
   return command;
 }
 
-export function parseFinalizedPublishOptions(opts: Record<string, unknown>): KnowledgeAssetFinalizedPublishOptions {
+export function parseFinalizedPublishOptions(opts: CliFinalizedPublishInput): KnowledgeAssetFinalizedPublishOptions {
   const parsed = parseCliFinalizedPublishOptions(opts);
   if (!parsed.ok) {
     const labels = Object.fromEntries(FINALIZED_PUBLISH_CLI_OPTIONS.map((option) =>

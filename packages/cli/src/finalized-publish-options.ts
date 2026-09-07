@@ -1,6 +1,5 @@
 import { MAX_UINT72_DECIMAL, parseUint72Decimal } from '@origintrail-official/dkg-core';
 import {
-  PUBLICATION_PRICING_POLICIES,
   formatPublicationPricingPolicyRequirement,
   parsePublicationPricingPolicy,
   type PublicationPricingPolicy,
@@ -34,142 +33,81 @@ export type FinalizedPublishOptionParseResult<TOptions> =
   | { ok: false; error: FinalizedPublishOptionParseError };
 
 const MAX_PUBLISH_EPOCHS = 0xffffffff;
-type PublishBoundary = 'cli' | 'http' | 'sdk';
-interface ParsedPublishOptions {
-  sdk: KnowledgeAssetFinalizedPublishOptions;
-  normalized: NormalizedFinalizedPublishOptions;
-  payload: Record<string, unknown>;
-}
-
-/** Capture each option's value type before collecting heterogeneous definitions. */
-function definePublishOption<
-  SdkKey extends keyof KnowledgeAssetFinalizedPublishOptions,
-  OutputKey extends keyof NormalizedFinalizedPublishOptions,
->(definition: {
-  sdkKey: SdkKey;
-  outputKey: OutputKey;
-  parse: (value: unknown, field: string) => FinalizedPublishParsedOption<
-    KnowledgeAssetFinalizedPublishOptions[SdkKey] & NormalizedFinalizedPublishOptions[OutputKey]
-  >;
-  http?: { aliases: readonly string[]; nullishFallback?: boolean; validateAllAliases?: boolean };
-  cli?: { inputKey: string; flags: string; description: string };
-}) {
-  return {
-    sdkKey: definition.sdkKey,
-    cli: definition.cli,
-    parseInto(
-      source: Record<string, unknown>,
-      boundary: PublishBoundary,
-      target: ParsedPublishOptions,
-    ): FinalizedPublishOptionParseError | undefined {
-      if (boundary === 'cli' && !definition.cli) return;
-      const keys = boundary === 'http'
-        ? [definition.sdkKey, ...(definition.http?.aliases ?? [])]
-        : [boundary === 'cli' ? definition.cli!.inputKey : definition.sdkKey];
-      // HTTP clear-memory aliases are both validated, even when the preferred
-      // alias wins. Epochs use nullish fallback but keep the first defined label.
-      if (boundary === 'http' && definition.http?.validateAllAliases) {
-        for (const key of keys) {
-          const checked = definition.parse(source[key], key);
-          if (!checked.ok) return checked.error;
-        }
-      }
-      const valueKey = keys.find((key) => boundary === 'http' && definition.http?.nullishFallback
-        ? source[key] != null
-        : source[key] !== undefined);
-      const field = boundary === 'http'
-        ? keys.find((key) => source[key] !== undefined) ?? definition.sdkKey
-        : definition.sdkKey;
-      const parsed = definition.parse(valueKey === undefined ? undefined : source[valueKey], field);
-      if (!parsed.ok) return parsed.error;
-      if (parsed.value !== undefined) {
-        target.sdk[definition.sdkKey] = parsed.value;
-        target.normalized[definition.outputKey] = parsed.value;
-        target.payload[definition.outputKey] = typeof parsed.value === 'bigint'
-          ? parsed.value.toString()
-          : parsed.value;
-      }
-    },
-  };
-}
-
-const FINALIZED_PUBLISH_OPTIONS = [
-  definePublishOption({
-    sdkKey: 'clearAfter', outputKey: 'clearSharedMemoryAfter', parse: parseClearSharedMemoryAfter,
-    http: { aliases: ['clearSharedMemoryAfter'], validateAllAliases: true },
-  }),
-  definePublishOption({
-    sdkKey: 'publishEpochs', outputKey: 'publishEpochs', parse: parsePublishEpochs,
-    http: { aliases: ['epochs'], nullishFallback: true },
-    cli: {
-      inputKey: 'publishEpochs', flags: '--publish-epochs <count>',
-      description: 'On-chain publish lifetime in epochs (default: 12; PCA-funded publishes may coerce to PCA lock duration)',
-    },
-  }),
-  definePublishOption({
-    sdkKey: 'pricingPolicy', outputKey: 'pricingPolicy', parse: parseFinalizedPublishPricingPolicy,
-    cli: {
-      inputKey: 'pricingPolicy', flags: '--pricing-policy <policy>',
-      description: `Token pricing basis (supported: ${PUBLICATION_PRICING_POLICIES.join(', ')})`,
-    },
-  }),
-  definePublishOption({
-    sdkKey: 'publisherNodeIdentityIdOverride', outputKey: 'publisherNodeIdentityIdOverride',
-    parse: parsePublishUint72IdentityId,
-    cli: {
-      inputKey: 'publisherNodeIdentityId', flags: '--publisher-node-identity-id <id>',
-      description: 'Publisher node identity id override; use 0 for no-attribution',
-    },
-  }),
-];
-
-export const FINALIZED_PUBLISH_CLI_OPTIONS = FINALIZED_PUBLISH_OPTIONS.flatMap((option) =>
-  option.cli ? [{ ...option.cli, errorField: option.sdkKey }] : [],
-);
-const SDK_FINALIZED_PUBLISH_OPTION_KEYS = new Set<string>(
-  FINALIZED_PUBLISH_OPTIONS.map((option) => option.sdkKey),
-);
-
-function normalizeFinalizedPublishOptions(
-  source: Record<string, unknown>,
-  boundary: PublishBoundary,
-): FinalizedPublishOptionParseResult<ParsedPublishOptions> {
-  const options: ParsedPublishOptions = { sdk: {}, normalized: {}, payload: {} };
-  for (const definition of FINALIZED_PUBLISH_OPTIONS) {
-    const error = definition.parseInto(source, boundary, options);
-    if (error) return { ok: false, error };
-  }
-  return { ok: true, options };
+export interface CliFinalizedPublishInput {
+  publishEpochs?: unknown;
+  pricingPolicy?: unknown;
+  publisherNodeIdentityId?: unknown;
 }
 
 export function parseCliFinalizedPublishOptions(
-  raw: Record<string, unknown>,
+  raw: CliFinalizedPublishInput,
 ): FinalizedPublishOptionParseResult<KnowledgeAssetFinalizedPublishOptions> {
-  const parsed = normalizeFinalizedPublishOptions(raw, 'cli');
-  return parsed.ok ? { ok: true, options: parsed.options.sdk } : parsed;
+  const epochs = parsePublishEpochs(raw.publishEpochs, 'publishEpochs');
+  if (!epochs.ok) return epochs;
+  const pricing = parseFinalizedPublishPricingPolicy(raw.pricingPolicy, 'pricingPolicy');
+  if (!pricing.ok) return pricing;
+  const identity = parsePublishUint72IdentityId(raw.publisherNodeIdentityId, 'publisherNodeIdentityIdOverride');
+  if (!identity.ok) return identity;
+  return { ok: true, options: {
+    ...(epochs.value === undefined ? {} : { publishEpochs: epochs.value }),
+    ...(pricing.value === undefined ? {} : { pricingPolicy: pricing.value }),
+    ...(identity.value === undefined ? {} : { publisherNodeIdentityIdOverride: identity.value }),
+  } };
 }
 
 export function parseHttpFinalizedPublishOptions(
   raw: unknown,
 ): FinalizedPublishOptionParseResult<NormalizedFinalizedPublishOptions> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: true, options: {} };
-  const parsed = normalizeFinalizedPublishOptions(raw as Record<string, unknown>, 'http');
-  return parsed.ok ? { ok: true, options: parsed.options.normalized } : parsed;
+  const input = raw as Record<string, unknown>;
+  // Validate both clear-memory aliases even when clearAfter takes precedence.
+  const clear = parseClearSharedMemoryAfter(input.clearAfter, 'clearAfter');
+  if (!clear.ok) return clear;
+  const legacyClear = parseClearSharedMemoryAfter(input.clearSharedMemoryAfter, 'clearSharedMemoryAfter');
+  if (!legacyClear.ok) return legacyClear;
+  const epochs = parsePublishEpochs(input.publishEpochs ?? input.epochs,
+    input.publishEpochs === undefined && input.epochs !== undefined ? 'epochs' : 'publishEpochs');
+  if (!epochs.ok) return epochs;
+  const pricing = parseFinalizedPublishPricingPolicy(input.pricingPolicy, 'pricingPolicy');
+  if (!pricing.ok) return pricing;
+  const identity = parsePublishUint72IdentityId(input.publisherNodeIdentityIdOverride, 'publisherNodeIdentityIdOverride');
+  if (!identity.ok) return identity;
+  const clearSharedMemoryAfter = clear.value ?? legacyClear.value;
+  return { ok: true, options: {
+    ...(clearSharedMemoryAfter === undefined ? {} : { clearSharedMemoryAfter }),
+    ...(epochs.value === undefined ? {} : { publishEpochs: epochs.value }),
+    ...(pricing.value === undefined ? {} : { pricingPolicy: pricing.value }),
+    ...(identity.value === undefined ? {} : { publisherNodeIdentityIdOverride: identity.value }),
+  } };
+}
+
+const SDK_FINALIZED_PUBLISH_OPTION_KEYS = new Set<string>([
+  'clearAfter', 'publishEpochs', 'pricingPolicy', 'publisherNodeIdentityIdOverride',
+] satisfies Array<keyof KnowledgeAssetFinalizedPublishOptions>);
+
+function sdkOptionValue<T>(parsed: FinalizedPublishParsedOption<T>): T | undefined {
+  if (!parsed.ok) throw new Error(formatFinalizedPublishOptionError(parsed.error));
+  return parsed.value;
 }
 
 export function finalizedPublishOptionsPayload(
   options?: KnowledgeAssetFinalizedPublishOptions,
 ): Record<string, unknown> | undefined {
   if (!options) return undefined;
-  const unsupportedKeys = Object.keys(options).filter(
-    (key) => !SDK_FINALIZED_PUBLISH_OPTION_KEYS.has(key),
-  );
+  const unsupportedKeys = Object.keys(options).filter((key) => !SDK_FINALIZED_PUBLISH_OPTION_KEYS.has(key));
   if (unsupportedKeys.length > 0) {
     throw new Error(`Unsupported finalized publish option(s): ${unsupportedKeys.join(', ')}`);
   }
-  const parsed = normalizeFinalizedPublishOptions(options as Record<string, unknown>, 'sdk');
-  if (!parsed.ok) throw new Error(formatFinalizedPublishOptionError(parsed.error));
-  const { payload } = parsed.options;
+  const clear = sdkOptionValue(parseClearSharedMemoryAfter(options.clearAfter, 'clearAfter'));
+  const epochs = sdkOptionValue(parsePublishEpochs(options.publishEpochs, 'publishEpochs'));
+  const pricing = sdkOptionValue(parseFinalizedPublishPricingPolicy(options.pricingPolicy, 'pricingPolicy'));
+  const identity = sdkOptionValue(parsePublishUint72IdentityId(options.publisherNodeIdentityIdOverride, 'publisherNodeIdentityIdOverride'));
+  const payload = {
+    ...(clear === undefined ? {} : { clearSharedMemoryAfter: clear }),
+    ...(epochs === undefined ? {} : { publishEpochs: epochs }),
+    ...(pricing === undefined ? {} : { pricingPolicy: pricing }),
+    ...(identity === undefined ? {} : { publisherNodeIdentityIdOverride: identity.toString() }),
+  };
   return Object.keys(payload).length > 0 ? payload : undefined;
 }
 
