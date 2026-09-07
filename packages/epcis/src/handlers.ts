@@ -1,7 +1,8 @@
+import { isSafeIri } from '@origintrail-official/dkg-core';
 import { createValidator } from './validation.js';
 import { buildEpcisQuery } from './query-builder.js';
 import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js';
-import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EpcisEventBinding, EPCISQueryEvent, EPCISQueryDocumentResponse } from './types.js';
+import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryEvent, EPCISQueryDocumentResponse } from './types.js';
 
 export interface AsyncCaptureConfig {
   contextGraphId: string;
@@ -102,7 +103,10 @@ export function unwrapLiteral(value: string): string {
 }
 
 /** Reconstruct a proper EPCIS event object from flat SPARQL bindings. */
-export function toEpcisEvent(binding: EpcisEventBinding): EPCISQueryEvent {
+export function toEpcisEvent(binding: Record<string, string>): EPCISQueryEvent {
+  if (typeof binding.event !== 'string' || !isSafeIri(binding.event)) {
+    throw new EpcisQueryError('Events query returned a result without a reusable event IRI', 502);
+  }
   const event: EPCISQueryEvent = { eventID: binding.event };
 
   // Strip eventType URI prefix to short name
@@ -221,12 +225,7 @@ export async function handleEventsQuery(
 
   const hasMore = result.bindings.length > perPage;
   const bindings = hasMore ? result.bindings.slice(0, perPage) : result.bindings;
-  const eventList = bindings.map((binding) => {
-    if (typeof binding.event !== 'string' || binding.event.length === 0) {
-      throw new EpcisQueryError('Events query returned a result without an event identifier', 502);
-    }
-    return toEpcisEvent({ ...binding, event: binding.event });
-  });
+  const eventList = bindings.map(toEpcisEvent);
 
   const body: EPCISQueryDocumentResponse = {
     '@context': [GS1_EPCIS_CONTEXT, DKG_CONTEXT],

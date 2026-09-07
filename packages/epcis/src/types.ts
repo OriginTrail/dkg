@@ -120,11 +120,6 @@ export interface QueryEngine {
   ): Promise<{ bindings: Record<string, string>[] }>;
 }
 
-/** The required subject projected by the events query. */
-export interface EpcisEventBinding extends Record<string, string> {
-  event: string;
-}
-
 /** Every returned event carries an identifier accepted by the eventID filter. */
 export interface EPCISQueryEvent extends Record<string, unknown> {
   eventID: string;

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { handleEventsQuery, EpcisQueryError, toEpcisEvent, unwrapLiteral } from '../src/handlers.js';
-import type { QueryEngine, EpcisEventBinding } from '../src/types.js';
+import type { QueryEngine } from '../src/types.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphSubGraphUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri, type Quad } from '@origintrail-official/dkg-core';
 
@@ -23,7 +23,7 @@ function createTrackingQueryEngine(bindings: Record<string, string>[] = []): { e
   return { engine, calls };
 }
 
-function makeBindings(overrides: Record<string, string> = {}): EpcisEventBinding {
+function makeBindings(overrides: Record<string, string> = {}): Record<string, string> {
   return {
     event: 'urn:uuid:event-1',
     eventType: 'https://gs1.github.io/EPCIS/ObjectEvent',
@@ -94,7 +94,31 @@ describe('handleEventsQuery', () => {
     }
   });
 
-  it.each([{}, { event: '' }])('rejects a query result without a reusable subject: %j', async (binding) => {
+  it('rejects an actual blank-node event subject returned by the store', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert([{
+        subject: '_:event', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        object: 'https://gs1.github.io/EPCIS/ObjectEvent', graph: contextGraphDataUri(CONTEXT_GRAPH_ID),
+      }]);
+      const queryEngine: QueryEngine = {
+        async query(sparql) {
+          const result = await store.query(sparql);
+          if (result.type !== 'bindings') throw new Error('Expected event bindings');
+          expect(result.bindings).toHaveLength(1);
+          expect(result.bindings[0].event).toMatch(/^_:/);
+          return result;
+        },
+      };
+      await expect(handleEventsQuery(new URLSearchParams(), {
+        contextGraphId: CONTEXT_GRAPH_ID, queryEngine, basePath: BASE_PATH,
+      })).rejects.toMatchObject({ statusCode: 502 });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it.each([{}, { event: '' }, { event: '_:b0' }, { event: 'relative' }, { event: 'https://example.org/event>' }])('rejects a query result without a reusable subject: %j', async (binding) => {
     const { engine } = createTrackingQueryEngine([binding]);
     await expect(handleEventsQuery(new URLSearchParams(), {
       contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH,
@@ -474,6 +498,13 @@ describe('handleEventsQuery', () => {
 });
 
 describe('toEpcisEvent', () => {
+  it.each([{}, { event: '' }, { event: '_:b0' }, { event: 'relative' }, { event: 'urn:event:bad id' }])('rejects a non-reusable subject directly: %j', (binding) => {
+    expect(() => toEpcisEvent(binding)).toThrow(EpcisQueryError);
+    try { toEpcisEvent(binding); } catch (error) {
+      expect(error).toMatchObject({ statusCode: 502 });
+    }
+  });
+
   it('strips eventType URI prefix to short name', () => {
     const binding = makeBindings({ eventType: 'https://gs1.github.io/EPCIS/ObjectEvent' });
     const event = toEpcisEvent(binding);
