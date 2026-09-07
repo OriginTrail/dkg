@@ -3275,6 +3275,7 @@ describe('Query views', () => {
     expect(mergedSubjects.some((s: string) => s.includes('shared'))).toBe(true);
   }, 15_000);
 
+
   /**
    * GH#2270 PR-3 r3 — the pre-send write-ahead must survive the REAL queued-agent handler, on
    * BOTH of its branches.

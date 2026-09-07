@@ -28,6 +28,7 @@ import type {
   TxResult,
   V10UpdateKAParams,
 } from './chain-adapter.js';
+import { publisherPublishPlanByteSize } from './chain-adapter.js';
 import { floorPublishTokenAmount, computeUpdateACKDigest, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import {
   resolveQuotedPublisherCandidatePricing,
@@ -152,7 +153,10 @@ export class PublishMethods extends EVMChainAdapterBase {
       const cacheKey = `${purpose}:${epochs}`;
       const cached = quoteCache.get(cacheKey);
       if (cached) return cached;
-      const pending = this.quoteRequiredPublishTokenAmount(request.effectiveByteSize, epochs)
+      const pending = this.quoteRequiredPublishTokenAmount(
+        publisherPublishPlanByteSize(request),
+        epochs,
+      )
         .catch((error) => {
           // A transient PCA-lock quote failure must not poison the fallback
           // direct-spend quote for the same numeric lifetime.

@@ -6,6 +6,7 @@ import type {
   LiftTransitionType,
 } from './lift-job-states.js';
 import type { LiftJobFailureMetadata } from './lift-job-failures.js';
+import type { PublicationPricingPolicy } from './publication-pricing.js';
 
 export type LiftJobHex = `0x${string}`;
 
@@ -87,6 +88,8 @@ export interface KnowledgeAssetVmPublishRequest {
   readonly kaNumber?: string;
   readonly reservedUal?: string;
   readonly publishEpochs?: number;
+  /** Immutable token-pricing basis captured when the queued publish is admitted. */
+  readonly pricingPolicy?: PublicationPricingPolicy;
   readonly clearSharedMemoryAfter?: boolean;
   readonly publisherNodeIdentityIdOverride?: LiftJobBigInt;
 }
@@ -110,6 +113,8 @@ export interface LiftPublishSnapshotRequest {
   readonly entityProofs?: boolean;
   /** Optional on-chain publish lifetime override in epochs. */
   readonly publishEpochs?: number;
+  /** Optional token-pricing basis for this immutable publication snapshot. */
+  readonly pricingPolicy?: PublicationPricingPolicy;
   /** RFC-001 §4 attribution; stringified bigint, `'0'` = mode d (no attribution). */
   readonly publisherNodeIdentityIdOverride?: LiftJobBigInt;
   /** Agent-signed seal. Publisher rejects on-chain publish if absent on V10. */

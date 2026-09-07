@@ -335,12 +335,12 @@ import { classifyAgentConnectError } from './agent-connect-error.js';
 import type { RequestContext } from './context.js';
 import { actorFromRequestContext } from './context.js';
 import { handleAgentsListRoute } from './agents-list.js';
-import type { PublishOptions } from '@origintrail-official/dkg-publisher';
+import type { UpdateOptions } from '@origintrail-official/dkg-publisher';
 
 function parsePrecomputedUpdateAttestation(
   raw: unknown,
   res: ServerResponse,
-): PublishOptions['precomputedUpdateAttestation'] | undefined {
+): UpdateOptions['precomputedUpdateAttestation'] | undefined {
   if (raw === undefined) return undefined;
   if (raw === null || typeof raw !== 'object') {
     jsonResponse(res, 400, {

@@ -75,7 +75,13 @@ import {
   isSameAgentAddress,
   scopedTokenPromoteLane,
 } from "./shared-assertion-helpers.js";
-import { AsyncLiftJobConflictError, LiftJobPendingChainProofError, PromoteJobConflictError, isKnowledgeAssetWorkspaceHeadCorruptError } from "@origintrail-official/dkg-publisher";
+import {
+  AsyncLiftJobConflictError,
+  LiftJobPendingChainProofError,
+  PromoteJobConflictError,
+  PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE,
+  isKnowledgeAssetWorkspaceHeadCorruptError,
+} from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
 import {
   validateAssertionName,
@@ -208,6 +214,15 @@ function respondAuthorSelectionError(res: RequestContext["res"], e: any): boolea
     code: e.code,
     error: e.message ?? String(e),
     ...(e.candidates ? { candidates: e.candidates } : {}),
+  });
+  return true;
+}
+
+function respondPublicationPricingPolicyError(res: RequestContext["res"], e: any): boolean {
+  if (e?.code !== PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE) return false;
+  jsonResponse(res, 409, {
+    code: e.code,
+    error: e.message ?? String(e),
   });
   return true;
 }
@@ -1597,6 +1612,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             ? { selectedAuthorAgentAddress: asyncSelectedAuthor.value }
             : {}),
           ...(publishOptions.publishEpochs !== undefined ? { publishEpochs: publishOptions.publishEpochs } : {}),
+          ...(publishOptions.pricingPolicy !== undefined ? { pricingPolicy: publishOptions.pricingPolicy } : {}),
           ...(publishOptions.clearSharedMemoryAfter !== undefined
             ? { clearSharedMemoryAfter: publishOptions.clearSharedMemoryAfter }
             : {}),
@@ -1635,6 +1651,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(subGraphName ? { subGraphName } : {}),
         });
       } catch (err: any) {
+        if (respondPublicationPricingPolicyError(res, err)) return;
         if (err instanceof AsyncLiftJobConflictError) {
           return jsonResponse(res, 409, {
             error: err.message,
@@ -1798,6 +1815,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // GH#1786 — must precede the precondition branch below, which would otherwise
         // relabel an author-selection failure whose message happens to contain
         // "is not finalized" as a generic VM_PUBLISH_PRECONDITION.
+        if (respondPublicationPricingPolicyError(res, e)) return;
         if (respondAuthorSelectionError(res, e)) return;
         if (respondIfStoreUnavailable(res, e)) return;
         if (e?.code === "PUBLISH_NOT_FULL_SHARE" || /is not finalized/.test(msg) || /No quads in shared memory/.test(msg) || /has no private payload/.test(msg)) {

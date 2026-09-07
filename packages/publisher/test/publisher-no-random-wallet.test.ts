@@ -46,6 +46,7 @@ import {
   type ChainAdapter,
   type OnChainPublishResult,
   type PublisherPublishPlanRequest,
+  publisherPublishPlanByteSize,
   type TxResult,
   type V10PublishDirectParams,
   type V10UpdateKAParams,
@@ -183,6 +184,7 @@ class LegacyEpochCapturingChain extends AdapterSigningChain {
 class EpochCapturingChain extends LegacyEpochCapturingChain {
   async resolvePublisherPublishPlan(request: PublisherPublishPlanRequest) {
     const publisherAddress = request.publisherAddress ?? this.signerAddress;
+    const billableByteSize = publisherPublishPlanByteSize(request);
     let publishEpochs = request.explicitPublishEpochs ?? request.defaultPublishEpochs;
     let tokenAmount: bigint | undefined;
     if (request.explicitPublishEpochs === undefined) {
@@ -192,7 +194,7 @@ class EpochCapturingChain extends LegacyEpochCapturingChain {
           ? await this.getConvictionAccountLockDurationEpochs(accountId)
           : 0;
         if (lockEpochs > 0) {
-          const quoted = await this.getRequiredPublishTokenAmount(request.effectiveByteSize, lockEpochs);
+          const quoted = await this.getRequiredPublishTokenAmount(billableByteSize, lockEpochs);
           const exact = quoted > BigInt(lockEpochs) ? quoted : BigInt(lockEpochs);
           if (await this.convictionAccountCanCover(accountId, exact)) {
             publishEpochs = lockEpochs;
@@ -205,7 +207,7 @@ class EpochCapturingChain extends LegacyEpochCapturingChain {
     }
     if (tokenAmount === undefined) {
       try {
-        const quoted = await this.getRequiredPublishTokenAmount(request.effectiveByteSize, publishEpochs);
+        const quoted = await this.getRequiredPublishTokenAmount(billableByteSize, publishEpochs);
         tokenAmount = quoted > BigInt(publishEpochs) ? quoted : BigInt(publishEpochs);
       } catch {
         tokenAmount = BigInt(publishEpochs);
@@ -224,7 +226,7 @@ class CatalogPlanningChain extends LegacyEpochCapturingChain {
     return {
       publisherAddress: this.signerAddress,
       publishEpochs,
-      tokenAmount: request.effectiveByteSize,
+      tokenAmount: publisherPublishPlanByteSize(request),
     };
   }
 }
@@ -1371,7 +1373,7 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
       defaultPublishEpochs: DEFAULT_PUBLISH_EPOCHS,
       publisherAddress: undefined,
     });
-    expect(chain.planRequests[0].effectiveByteSize).toBeGreaterThan(0n);
+    expect(chain.planRequests[0].billableByteSize).toBeGreaterThan(0n);
     expect(ack).toMatchObject({ epochs: 24, tokenAmount: 24n });
     expect(chain.capturedCreateParams).toMatchObject({
       publisherAddress: fundedPca.address,
@@ -1792,6 +1794,8 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
   it('prices curated publishes from the exact public catalog bytes across plan, ACK, and tx', async () => {
     const wallet = new ethers.Wallet(TEST_KEY);
     const chain = new CatalogPlanningChain(wallet);
+    (chain as unknown as { getContextGraphAccessPolicy: () => Promise<number> })
+      .getContextGraphAccessPolicy = async () => 1;
     const publisher = await makeEpochPublisher(chain, wallet);
     const ack: AckEpochCapture = {};
     const contextGraphDid = 'did:dkg:context-graph:1';
@@ -1823,7 +1827,7 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
 
     expect(result.status).toBe('confirmed');
     expect(chain.planRequests).toHaveLength(1);
-    expect(chain.planRequests[0].effectiveByteSize).toBe(expectedCatalogByteSize);
+    expect(chain.planRequests[0].billableByteSize).toBe(expectedCatalogByteSize);
     expect(ack).toMatchObject({
       publicByteSize: expectedCatalogByteSize,
       tokenAmount: expectedCatalogByteSize,

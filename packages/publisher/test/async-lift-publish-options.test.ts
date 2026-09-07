@@ -521,6 +521,22 @@ describe('mapLiftRequestToPublishOptions', () => {
     expect(options.publishEpochs).toBe(7);
   });
 
+  it('forwards the immutable full-content pricing policy to PublishOptions', () => {
+    const options = mapLiftRequestToPublishOptions({
+      ...baseInput(),
+      request: {
+        ...baseInput().request,
+        pricingPolicy: 'full-content',
+      },
+      resolved: {
+        ...baseInput().resolved,
+        publisherPeerId: '12D3KooWPublisher',
+      },
+    });
+
+    expect(options.pricingPolicy).toBe('full-content');
+  });
+
   it('rejects invalid request.publishEpochs before building PublishOptions', () => {
     expect(() =>
       mapLiftRequestToPublishOptions({

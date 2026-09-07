@@ -67,7 +67,7 @@ export type FinalizedPublisherPlan =
 
 export interface PublisherPlanningFinalizeInput {
   explicitPublishEpochs: number | undefined;
-  effectiveByteSize: bigint;
+  billableByteSize: bigint;
   ctx: OperationContext;
 }
 
@@ -160,12 +160,12 @@ export class PublisherPlanner {
   private async resolveLegacyPublishPricing(input: {
     publisherAddress: string;
     explicitPublishEpochs: number | undefined;
-    effectiveByteSize: bigint;
+    billableByteSize: bigint;
     ctx: OperationContext;
   }): Promise<{ publishEpochs: number; precomputedTokenAmount: bigint }> {
     const chain = this.dependencies.chain;
     const quote = typeof chain.getRequiredPublishTokenAmount === 'function'
-      ? (epochs: number) => chain.getRequiredPublishTokenAmount!(input.effectiveByteSize, epochs)
+      ? (epochs: number) => chain.getRequiredPublishTokenAmount!(input.billableByteSize, epochs)
       : undefined;
     const conviction =
       typeof chain.getConvictionAgentAccountId === 'function'
@@ -240,7 +240,7 @@ export class PublisherPlanner {
     pinnedPublisherAddress?: string;
     pinnedPublisherLabel?: string;
     explicitPublishEpochs: number | undefined;
-    effectiveByteSize: bigint;
+    billableByteSize: bigint;
     ctx: OperationContext;
   }): Promise<{
     signer: PublisherSigner;
@@ -254,7 +254,7 @@ export class PublisherPlanner {
       const pricing = await this.resolveLegacyPublishPricing({
         publisherAddress: input.initialSigner.address,
         explicitPublishEpochs: input.explicitPublishEpochs,
-        effectiveByteSize: input.effectiveByteSize,
+        billableByteSize: input.billableByteSize,
         ctx: input.ctx,
       });
       return {
@@ -269,7 +269,8 @@ export class PublisherPlanner {
     const pinnedPublisherLabel = input.pinnedPublisherLabel ?? 'publisher address';
     const resolvedPlan = await chain.resolvePublisherPublishPlan({
       contextGraphId: input.contextGraphId,
-      effectiveByteSize: input.effectiveByteSize,
+      billableByteSize: input.billableByteSize,
+      effectiveByteSize: input.billableByteSize,
       explicitPublishEpochs: input.explicitPublishEpochs,
       defaultPublishEpochs: DEFAULT_PUBLISH_EPOCHS,
       publisherAddress: pinnedPublisherAddress,
@@ -320,7 +321,7 @@ export class PublisherPlanner {
       pinnedPublisherAddress: state.selection.planningPin,
       pinnedPublisherLabel: state.selection.planningPinLabel,
       explicitPublishEpochs: input.explicitPublishEpochs,
-      effectiveByteSize: input.effectiveByteSize,
+      billableByteSize: input.billableByteSize,
       ctx: input.ctx,
     });
     return { kind: 'on-chain', ...plan };
