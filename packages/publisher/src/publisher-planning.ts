@@ -270,6 +270,7 @@ export class PublisherPlanner {
     const resolvedPlan = await chain.resolvePublisherPublishPlan({
       contextGraphId: input.contextGraphId,
       billableByteSize: input.billableByteSize,
+      effectiveByteSize: input.billableByteSize,
       explicitPublishEpochs: input.explicitPublishEpochs,
       defaultPublishEpochs: DEFAULT_PUBLISH_EPOCHS,
       publisherAddress: pinnedPublisherAddress,

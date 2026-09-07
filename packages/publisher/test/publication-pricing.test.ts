@@ -9,6 +9,7 @@ import {
   parsePublicationPricingPolicy,
   resolvePublicationPricing,
 } from '../src/publication-pricing.js';
+import { measureCanonicalPublicationPayload } from '../src/publication-payload-measurement.js';
 
 describe('publication pricing policy', () => {
   it('owns the accepted vocabulary and parser contract', () => {
@@ -43,7 +44,7 @@ describe('publication pricing policy', () => {
     }));
   });
 
-  it('uses the storage serializer once for the combined public and private document', () => {
+  it('canonically scopes, serializes, and measures public and full payloads', () => {
     const fallbackGraph = 'did:dkg:context-graph:1/_data';
     const publicQuad: Quad = {
       subject: 'urn:test:public',
@@ -57,35 +58,47 @@ describe('publication pricing policy', () => {
       object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
       graph: 'urn:test:already-scoped',
     };
-    const networkVisibleByteSize = 123n;
-
-    expect(resolvePublicationPricing({
-      policy: undefined,
-      networkVisibleByteSize,
+    const expectedPublicDocument = quadsToNQuads([
+      { ...publicQuad, graph: fallbackGraph },
+    ]);
+    const expectedFullDocument = quadsToNQuads([
+      { ...publicQuad, graph: fallbackGraph },
+      privateQuad,
+    ]);
+    const measurement = measureCanonicalPublicationPayload({
       publicQuads: [publicQuad],
       privateQuads: [privateQuad],
       fallbackGraph,
+    });
+
+    expect(measurement.publicNQuads).toBe(expectedPublicDocument);
+    expect(measurement.publicBytes).toEqual(new TextEncoder().encode(expectedPublicDocument));
+    expect(measurement.publicByteSize)
+      .toBe(BigInt(new TextEncoder().encode(expectedPublicDocument).length));
+    expect(measurement.fullContentByteSize)
+      .toBe(BigInt(new TextEncoder().encode(expectedFullDocument).length));
+  });
+
+  it('selects the precomputed pricing quantity without serializing content', () => {
+    const networkVisibleByteSize = 123n;
+    expect(resolvePublicationPricing({
+      policy: undefined,
+      networkVisibleByteSize,
+      fullContentByteSize: 456n,
     })).toEqual({
       policy: 'network-visible',
       networkVisibleByteSize,
       billableByteSize: networkVisibleByteSize,
     });
 
-    const expectedDocument = quadsToNQuads([
-      { ...publicQuad, graph: fallbackGraph },
-      privateQuad,
-    ]);
-    const fullContentByteSize = BigInt(new TextEncoder().encode(expectedDocument).length);
     expect(resolvePublicationPricing({
       policy: 'full-content',
       networkVisibleByteSize: 1n,
-      publicQuads: [publicQuad],
-      privateQuads: [privateQuad],
-      fallbackGraph,
+      fullContentByteSize: 456n,
     })).toEqual({
       policy: 'full-content',
       networkVisibleByteSize: 1n,
-      billableByteSize: fullContentByteSize,
+      billableByteSize: 456n,
     });
   });
 
@@ -93,9 +106,7 @@ describe('publication pricing policy', () => {
     expect(resolvePublicationPricing({
       policy: 'full-content',
       networkVisibleByteSize: 1_000n,
-      publicQuads: [],
-      privateQuads: [],
-      fallbackGraph: 'did:dkg:context-graph:1/_data',
+      fullContentByteSize: 0n,
     })).toEqual({
       policy: 'full-content',
       networkVisibleByteSize: 1_000n,

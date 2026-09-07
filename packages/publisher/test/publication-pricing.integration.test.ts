@@ -70,7 +70,9 @@ class PricingCaptureChain extends MockChainAdapter {
     return {
       publisherAddress: this.wallet.address,
       publishEpochs: request.explicitPublishEpochs ?? request.defaultPublishEpochs,
-      tokenAmount: request.billableByteSize,
+      // Compatibility proof: an adapter written against the previous request
+      // name can continue to plan without reading the new field.
+      tokenAmount: request.effectiveByteSize,
     };
   }
 
@@ -188,9 +190,7 @@ async function publishCuratedGraphScoped(input: {
     pricing: resolvePublicationPricing({
       policy: 'full-content',
       networkVisibleByteSize,
-      publicQuads: [input.publicQuad],
-      privateQuads,
-      fallbackGraph: vmGraph,
+      fullContentByteSize,
     }),
     chain,
   };
@@ -226,7 +226,10 @@ describe('publication pricing integration', () => {
       billableByteSize: published.fullContentByteSize,
     });
     expect(published.chain.planRequests).toEqual([
-      expect.objectContaining({ billableByteSize: published.fullContentByteSize }),
+      expect.objectContaining({
+        billableByteSize: published.fullContentByteSize,
+        effectiveByteSize: published.fullContentByteSize,
+      }),
     ]);
     expect(published.ack.tokenAmount).toBe(published.fullContentByteSize);
     expect(published.chain.capturedCreateParams).toMatchObject({
@@ -250,7 +253,10 @@ describe('publication pricing integration', () => {
     expect(published.fullContentByteSize).toBeLessThan(published.networkVisibleByteSize);
     expect(published.pricing.billableByteSize).toBe(published.networkVisibleByteSize);
     expect(published.chain.planRequests).toEqual([
-      expect.objectContaining({ billableByteSize: published.networkVisibleByteSize }),
+      expect.objectContaining({
+        billableByteSize: published.networkVisibleByteSize,
+        effectiveByteSize: published.networkVisibleByteSize,
+      }),
     ]);
     expect(published.ack.tokenAmount).toBe(published.networkVisibleByteSize);
     expect(published.chain.capturedCreateParams).toMatchObject({

@@ -5,16 +5,17 @@ import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
-import { GraphManager, deleteByPatternWithoutCount, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, quadsToNQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
+import { GraphManager, deleteByPatternWithoutCount, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
-import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type BasePublicationOptions, type PublishOptions, type UpdateOptions, type PublishLifecycleHooks, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
+import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type BasePublicationOptions, type InitialPublishOptions, type PublishOptions, type UpdateOptions, type PublishLifecycleHooks, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import {
   assertPublicationPricingPolicyApplicable,
   formatPublicationPricingPolicyRequirement,
   parsePublicationPricingPolicy,
   resolvePublicationPricing,
 } from './publication-pricing.js';
+import { measureCanonicalPublicationPayload } from './publication-payload-measurement.js';
 import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
 import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
 import { withKeyedLocks } from './keyed-lock.js';
@@ -234,7 +235,7 @@ export async function assertValidPrecomputedUpdateAttestation(
   chain: ChainAdapter,
   kaId: bigint,
   merkleRoot: Uint8Array,
-  updateSeal: NonNullable<PublishOptions['precomputedUpdateAttestation']>,
+  updateSeal: NonNullable<UpdateOptions['precomputedUpdateAttestation']>,
 ): Promise<void> {
   const expected = updateSeal.expectedNewMerkleRoot;
   if (
@@ -892,7 +893,7 @@ function graphScopeTargetsChain(
  * legacy version is a stable read-only error rather than a fallback to roots.
  */
 function resolveGraphScopedPublishDescriptor(
-  options: BasePublicationOptions,
+  options: InitialPublishOptions | UpdateOptions,
 ): GraphScopedPublishDescriptor | undefined {
   const hasGraphScopeField =
     options.contentScopeVersion !== undefined
@@ -942,8 +943,10 @@ function resolveGraphScopedPublishDescriptor(
   // Reject conflicting caller-supplied identity before planner, chain, or
   // storage work. Discovering it only after mint would strand an on-chain KA
   // that can never materialize under the requested UAL.
+  const initialOptions = options as InitialPublishOptions;
+  const updateOptions = options as UpdateOptions;
   const suppliedReservedKaId =
-    options.reservedKaId ?? options.precomputedAttestation?.reservedKaId;
+    initialOptions.reservedKaId ?? initialOptions.precomputedAttestation?.reservedKaId;
   if (suppliedReservedKaId !== undefined) {
     if (suppliedReservedKaId !== expectedPackedKaId) {
       throw new Error(
@@ -953,8 +956,8 @@ function resolveGraphScopedPublishDescriptor(
     }
   }
   const attestationAuthor =
-    options.precomputedAttestation?.authorAddress
-    ?? options.precomputedUpdateAttestation?.authorAddress;
+    initialOptions.precomputedAttestation?.authorAddress
+    ?? updateOptions.precomputedUpdateAttestation?.authorAddress;
   if (
     attestationAuthor !== undefined
     && attestationAuthor.toLowerCase() !== scope.agentAddress
@@ -3028,14 +3031,16 @@ export class DKGPublisher implements Publisher {
 
     onPhase?.('store', 'end');
 
-    // Compute publicByteSize early — needed for signature collection
-    const nquadsStr = quadsToNQuads(
-      allSkolemizedQuads.map((quad) => (
-        quad.graph ? quad : { ...quad, graph: dataGraph }
-      )),
-    );
-    const publicNquadsBytes = new TextEncoder().encode(nquadsStr);
-    const publicByteSize = BigInt(publicNquadsBytes.length);
+    // Canonical graph scoping, serialization, and byte measurement happen in
+    // one place before ACK and pricing planning consume the resulting values.
+    const payloadMeasurement = measureCanonicalPublicationPayload({
+      publicQuads: allSkolemizedQuads,
+      privateQuads: canonicalPrivateQuads,
+      fallbackGraph: dataGraph,
+    });
+    const nquadsStr = payloadMeasurement.publicNQuads;
+    const publicNquadsBytes = payloadMeasurement.publicBytes;
+    const publicByteSize = payloadMeasurement.publicByteSize;
 
     // Legacy payloads retain the combined catalog model. V2 graph-scoped KAs
     // use a detached protocol-owned floor: their KC Merkle root and exact
@@ -3189,9 +3194,7 @@ export class DKGPublisher implements Publisher {
     const publicationPricing = resolvePublicationPricing({
       policy: pricingPolicy,
       networkVisibleByteSize,
-      publicQuads: allSkolemizedQuads,
-      privateQuads: canonicalPrivateQuads,
-      fallbackGraph: dataGraph,
+      fullContentByteSize: payloadMeasurement.fullContentByteSize,
     });
     const finalizedPublisherPlan = await publisherPlanning.finalize({
       explicitPublishEpochs,

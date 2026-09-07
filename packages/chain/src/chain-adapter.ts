@@ -23,12 +23,31 @@ export interface PublisherPublishPlanRequest {
   contextGraphId: bigint;
   /** Exact byte quantity used for token quoting and fundability checks. */
   billableByteSize: bigint;
+  /**
+   * @deprecated Use billableByteSize. Kept as a required compatibility alias
+   * for adapters compiled against the previous planning request shape.
+   */
+  effectiveByteSize: bigint;
   /** Caller override. When omitted, a covering PCA may select its own lock. */
   explicitPublishEpochs?: number;
   /** Direct-spend lifetime used when no covering PCA-specific plan applies. */
   defaultPublishEpochs: number;
   /** Exact signer pin for an explicit publisher address/private key. */
   publisherAddress?: string;
+}
+
+/** Normalize the current and deprecated planning names to one exact quantity. */
+export function publisherPublishPlanByteSize(
+  request: PublisherPublishPlanRequest,
+): bigint {
+  if (request.billableByteSize !== request.effectiveByteSize) {
+    throw new Error(
+      'Publisher publish plan byte-size aliases must carry the same value: ' +
+      `billableByteSize=${request.billableByteSize.toString()}, ` +
+      `effectiveByteSize=${request.effectiveByteSize.toString()}`,
+    );
+  }
+  return request.billableByteSize;
 }
 
 /** Final signer-dependent values that must be fixed before publish side effects. */

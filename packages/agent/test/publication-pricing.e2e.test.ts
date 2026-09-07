@@ -14,8 +14,10 @@ import {
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import {
   PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE,
+  measureCanonicalPublicationPayload,
   resolveKnowledgeAssetOperationPublicQuads,
   resolvePublicationPricing,
+  TripleStoreAsyncLiftPublisher,
   type V10ACKProviderParams,
 } from '@origintrail-official/dkg-publisher';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
@@ -86,6 +88,107 @@ async function createAgent(name: string, overrides: Partial<DKGAgentConfig> = {}
 }
 
 describe('agent publication pricing integration', () => {
+  it('forwards full-content pricing through public publish and publishAsync entry points', async () => {
+    const contextGraphId = 'publication-pricing-public-api';
+    const agent = await createAgent('FullContentPricingPublicApiBot');
+    await agent.createContextGraph({ id: contextGraphId, name: 'Full-content public API' });
+    await agent.registerContextGraph(contextGraphId);
+
+    const chain = (agent as any).chain;
+    const planSpy = vi.spyOn(chain, 'resolvePublisherPublishPlan');
+    const createSpy = vi.spyOn(chain, 'createKnowledgeAssets');
+    const ackInputs: V10ACKProviderParams[] = [];
+    const baseAckProvider = (agent as any).createV10ACKProvider(contextGraphId);
+    Object.defineProperty(agent, 'createV10ACKProvider', {
+      configurable: true,
+      value: () => async (params: V10ACKProviderParams) => {
+        ackInputs.push(params);
+        return baseAckProvider(params);
+      },
+    });
+
+    const content = (suffix: string) => {
+      const subject = `urn:test:publication-pricing:public-api:${suffix}`;
+      return {
+        publicQuads: [{
+          subject,
+          predicate: 'http://schema.org/name',
+          object: `"${suffix}"`,
+          graph: '',
+        }],
+        privateQuads: [{
+          subject,
+          predicate: 'http://schema.org/description',
+          object: `"${`private-${suffix}-`.repeat(128)}"`,
+          graph: '',
+        }],
+      };
+    };
+    const assertLatestPublicBoundary = async () => {
+      expect(planSpy).toHaveBeenCalledTimes(1);
+      expect(createSpy).toHaveBeenCalledTimes(1);
+      expect(ackInputs).toHaveLength(1);
+      const plan = planSpy.mock.calls[0]![0];
+      const transaction = createSpy.mock.calls[0]![0];
+      const ack = ackInputs[0]!;
+      expect(plan.effectiveByteSize).toBe(plan.billableByteSize);
+      expect(plan.billableByteSize).toBeGreaterThan(ack.publicByteSize);
+      const expectedTokenAmount = await chain.getRequiredPublishTokenAmount(
+        plan.billableByteSize,
+        ack.epochs,
+      );
+      expect(ack.tokenAmount).toBe(expectedTokenAmount);
+      expect(transaction.byteSize).toBe(ack.publicByteSize);
+      expect(transaction.tokenAmount).toBe(expectedTokenAmount);
+    };
+
+    try {
+      const directContent = content('sync');
+      const direct = await agent.publish(
+        contextGraphId,
+        directContent.publicQuads,
+        directContent.privateQuads,
+        { pricingPolicy: 'full-content' },
+      );
+      expect(direct.status).toBe('confirmed');
+      await assertLatestPublicBoundary();
+
+      planSpy.mockClear();
+      createSpy.mockClear();
+      ackInputs.length = 0;
+
+      const queuedContent = content('async');
+      const accepted = await agent.publishAsync(
+        contextGraphId,
+        queuedContent,
+        { pricingPolicy: 'full-content' },
+      );
+      const queue = new TripleStoreAsyncLiftPublisher(agent.store, {
+        publicSnapshotStore: (agent as any).publicSnapshotStore,
+        knowledgeAssetVmPublishHandler: {
+          preflight: ({ request }) =>
+            agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
+          execute: ({ request, publishOptions }) =>
+            agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+        },
+      });
+      const persisted = await queue.list();
+      const acceptedJob = persisted.find((job) => job.jobId === accepted.captureID);
+      expect(acceptedJob?.status).toBe('accepted');
+      const persistedVmRequest = (acceptedJob?.request as any)?.knowledgeAssetVmPublish;
+      expect(persistedVmRequest?.pricingPolicy).toBe('full-content');
+      expect(persistedVmRequest?.privateTripleCount).toBe(1);
+
+      const processed = await queue.processNext('publication-pricing-public-api-worker');
+      expect(processed?.jobId).toBe(accepted.captureID);
+      expect(processed?.status).toBe('finalized');
+      await assertLatestPublicBoundary();
+    } finally {
+      planSpy.mockRestore();
+      createSpy.mockRestore();
+    }
+  }, 180_000);
+
   it('threads billable full-content bytes through real sync and queued publication', async () => {
     const contextGraphId = 'publication-pricing-boundary';
     const entityBase = 'urn:test:publication-pricing';
@@ -140,9 +243,11 @@ describe('agent publication pricing integration', () => {
       const expectedPricing = resolvePublicationPricing({
         policy: 'full-content',
         networkVisibleByteSize: 0n,
-        publicQuads: [publicQuad],
-        privateQuads: [privateQuad],
-        fallbackGraph: graph,
+        fullContentByteSize: measureCanonicalPublicationPayload({
+          publicQuads: [publicQuad],
+          privateQuads: [privateQuad],
+          fallbackGraph: graph,
+        }).fullContentByteSize,
       });
       return { intent, expectedBillableByteSize: expectedPricing.billableByteSize };
     };

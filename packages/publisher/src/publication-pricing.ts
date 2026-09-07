@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { quadsToNQuads, type Quad } from '@origintrail-official/dkg-storage';
-
 export const PUBLICATION_PRICING_POLICIES = ['full-content'] as const;
 
 export type PublicationPricingPolicy = (typeof PUBLICATION_PRICING_POLICIES)[number];
@@ -70,37 +68,13 @@ export function assertPublicationPricingPolicyApplicable(
   }
 }
 
-const UTF8_ENCODER = new TextEncoder();
-
-/**
- * Price the publisher-owned canonical public and private RDF as one N-Quads
- * document. Graphless canonical quads are scoped exactly once before the
- * storage package's canonical serializer owns RDF-term and newline framing.
- */
-function fullContentPricingByteSize(
-  publicQuads: readonly Quad[],
-  privateQuads: readonly Quad[],
-  fallbackGraph: string,
-): bigint {
-  const scoped = [...publicQuads, ...privateQuads].map((quad) => (
-    quad.graph ? quad : { ...quad, graph: fallbackGraph }
-  ));
-  return BigInt(UTF8_ENCODER.encode(quadsToNQuads(scoped)).length);
-}
-
 export function resolvePublicationPricing(input: {
   readonly policy: PublicationPricingPolicy | undefined;
   readonly networkVisibleByteSize: bigint;
-  readonly publicQuads: readonly Quad[];
-  readonly privateQuads: readonly Quad[];
-  readonly fallbackGraph: string;
+  readonly fullContentByteSize: bigint;
 }): PublicationPricing {
   const requestedBillableByteSize = input.policy === 'full-content'
-    ? fullContentPricingByteSize(
-        input.publicQuads,
-        input.privateQuads,
-        input.fallbackGraph,
-      )
+    ? input.fullContentByteSize
     : input.networkVisibleByteSize;
   return {
     policy: input.policy ?? 'network-visible',

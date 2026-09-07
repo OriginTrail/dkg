@@ -229,8 +229,8 @@ export type PublishLifecycleHooks = Pick<
   'onPhase' | 'onBeforeBroadcast' | 'onBroadcastAccepted' | 'onPublishConfirmed'
 >;
 
-/** Fields shared by initial publications and updates. */
-export interface BasePublicationOptions {
+/** Complete option shape used to derive operation-specific public contracts. */
+interface PublicationOptionsShape {
   contextGraphId: string;
   quads: Quad[];
   privateQuads?: Quad[];
@@ -501,8 +501,32 @@ export interface BasePublicationOptions {
   reservedKaId?: bigint;
 }
 
+type InitialPublicationOnlyKey =
+  | 'receiverSignatureProvider'
+  | 'v10ACKProvider'
+  | 'precomputedAttestation'
+  | 'reservedKaId';
+
+type UpdatePublicationOnlyKey =
+  | 'v10UpdateACKProvider'
+  | 'precomputedUpdateAttestation';
+
+/** Fields genuinely shared by initial publications and updates. */
+export type BasePublicationOptions = Omit<
+  PublicationOptionsShape,
+  InitialPublicationOnlyKey | UpdatePublicationOnlyKey
+>;
+
 /** Options for minting a new publication. */
 export interface InitialPublishOptions extends BasePublicationOptions {
+  /** @deprecated V9 receiver signatures removed — use v10ACKProvider instead. */
+  receiverSignatureProvider?: PublicationOptionsShape['receiverSignatureProvider'];
+  /** V10 ACK provider: collects core node StorageACKs via P2P. */
+  v10ACKProvider?: PublicationOptionsShape['v10ACKProvider'];
+  /** Pre-computed author seal for an initial on-chain publication. */
+  precomputedAttestation?: PublicationOptionsShape['precomputedAttestation'];
+  /** Packed KA id allocated at assertion-finalize time. */
+  reservedKaId?: PublicationOptionsShape['reservedKaId'];
   /**
    * Select an alternate token-pricing basis. `full-content` is supported for
    * graph-scoped initial publications and charges for canonical public plus
@@ -518,9 +542,12 @@ export interface InitialPublishOptions extends BasePublicationOptions {
  */
 export type PublishOptions = InitialPublishOptions;
 
-/** Options for updating an existing asset. Initial-only pricing is invalid. */
+/** Options for updating an existing asset. */
 export interface UpdateOptions extends BasePublicationOptions {
-  pricingPolicy?: never;
+  /** V10 update ACK provider — quorum signatures before on-chain update. */
+  v10UpdateACKProvider?: PublicationOptionsShape['v10UpdateACKProvider'];
+  /** Pre-computed owner seal for an on-chain update. */
+  precomputedUpdateAttestation?: PublicationOptionsShape['precomputedUpdateAttestation'];
 }
 
 export interface PublishResult {

@@ -155,7 +155,7 @@ import {
   type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
-  type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
+  type PublishOptions, type UpdateOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   // OT-RFC-43 A2 — per-layer pointer + KA-id predicates and stamp helpers.
   KA_ID_PRED, RESERVED_UAL_PRED,
   WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED,
@@ -456,6 +456,32 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+
+type KnowledgeAssetVmPublicationOperationPlan =
+  | {
+      readonly kind: 'initial';
+      readonly pricingPolicy: PublishOptions['pricingPolicy'];
+    }
+  | {
+      readonly kind: 'update';
+      readonly vmCurrentAssertion: string;
+    };
+
+/** One operation discriminator shared by admission, sync, and queued execution. */
+function planKnowledgeAssetVmPublication(input: {
+  readonly vmCurrentAssertion?: string;
+  readonly pricingPolicy?: PublishOptions['pricingPolicy'];
+}): KnowledgeAssetVmPublicationOperationPlan {
+  if (input.vmCurrentAssertion) {
+    assertPublicationPricingPolicyApplicable(input.pricingPolicy, { kind: 'update' });
+    return { kind: 'update', vmCurrentAssertion: input.vmCurrentAssertion };
+  }
+  assertPublicationPricingPolicyApplicable(input.pricingPolicy, {
+    kind: 'initial',
+    graphScoped: true,
+  });
+  return { kind: 'initial', pricingPolicy: input.pricingPolicy };
+}
 
 /**
  * #1116 (round 11) — stable code tagged on the `assertionFinalize` throws that are
@@ -1984,7 +2010,7 @@ export class PublishMethods extends DKGAgentBase {
     // added to PublishLifecycleHooks flows through this boundary without editing this list.
     opts?: PublishLifecycleHooks & {
       operationCtx?: OperationContext;
-      precomputedUpdateAttestation?: PublishOptions['precomputedUpdateAttestation'];
+      precomputedUpdateAttestation?: UpdateOptions['precomputedUpdateAttestation'];
       publisherOverride?: DKGPublisher;
       subGraphName?: string;
       contentScopeVersion?: PublishOptions['contentScopeVersion'];
@@ -4438,7 +4464,11 @@ export class PublishMethods extends DKGAgentBase {
     // signed. So the EOA arm is only consulted when the caller named the publisher that
     // will actually execute (`publisherOverride`); otherwise capability is INDETERMINATE and
     // the enqueue proceeds with the worker authoritative, exactly as when the lookup fails.
-    if (history.vmCurrentAssertion && !this.getCustodialAgentPrivateKey(agentAddress)) {
+    const operationPlan = planKnowledgeAssetVmPublication({
+      vmCurrentAssertion: history.vmCurrentAssertion,
+      pricingPolicy: opts?.pricingPolicy,
+    });
+    if (operationPlan.kind === 'update' && !this.getCustodialAgentPrivateKey(agentAddress)) {
       let refuse = false;
       if (opts?.publisherOverride) {
         try {
@@ -4450,9 +4480,6 @@ export class PublishMethods extends DKGAgentBase {
         }
       }
       if (refuse) throw updateAttestationNotCustodialError(agentAddress);
-    }
-    if (history.vmCurrentAssertion) {
-      assertPublicationPricingPolicyApplicable(opts?.pricingPolicy, { kind: 'update' });
     }
     if (!(await publisher.hasSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName))) {
       throw Object.assign(
@@ -4594,11 +4621,15 @@ export class PublishMethods extends DKGAgentBase {
       sealFinalizedAtIso: seal.finalizedAtIso,
       wmCurrentAssertion: history.wmCurrentAssertion ?? null,
       swmCurrentAssertion: history.swmCurrentAssertion ?? null,
-      vmCurrentAssertion: history.vmCurrentAssertion ?? null,
+      vmCurrentAssertion: operationPlan.kind === 'update'
+        ? operationPlan.vmCurrentAssertion
+        : null,
       kaNumber: history.kaNumber ?? null,
       reservedUal: history.reservedUal ?? null,
       publishEpochs: opts?.publishEpochs ?? null,
-      pricingPolicy: opts?.pricingPolicy ?? null,
+      pricingPolicy: operationPlan.kind === 'initial'
+        ? operationPlan.pricingPolicy ?? null
+        : null,
       clearSharedMemoryAfter: opts?.clearSharedMemoryAfter ?? null,
       publisherNodeIdentityIdOverride: publisherOverrideString ?? null,
     };
@@ -4635,11 +4666,15 @@ export class PublishMethods extends DKGAgentBase {
       intentKey,
       ...(history.wmCurrentAssertion ? { wmCurrentAssertion: history.wmCurrentAssertion } : {}),
       ...(history.swmCurrentAssertion ? { swmCurrentAssertion: history.swmCurrentAssertion } : {}),
-      ...(history.vmCurrentAssertion ? { vmCurrentAssertion: history.vmCurrentAssertion } : {}),
+      ...(operationPlan.kind === 'update'
+        ? { vmCurrentAssertion: operationPlan.vmCurrentAssertion }
+        : {}),
       ...(history.kaNumber ? { kaNumber: history.kaNumber } : {}),
       ...(history.reservedUal ? { reservedUal: history.reservedUal } : {}),
       ...(opts?.publishEpochs !== undefined ? { publishEpochs: opts.publishEpochs } : {}),
-      ...(opts?.pricingPolicy !== undefined ? { pricingPolicy: opts.pricingPolicy } : {}),
+      ...(operationPlan.kind === 'initial' && operationPlan.pricingPolicy !== undefined
+        ? { pricingPolicy: operationPlan.pricingPolicy }
+        : {}),
       ...(opts?.clearSharedMemoryAfter !== undefined ? { clearSharedMemoryAfter: opts.clearSharedMemoryAfter } : {}),
       ...(publisherOverrideString !== undefined ? { publisherNodeIdentityIdOverride: publisherOverrideString } : {}),
     };
@@ -5355,9 +5390,10 @@ export class PublishMethods extends DKGAgentBase {
     const stripLit = (v?: string) => v?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
     const pointerRow = pointerRes.type === 'bindings' ? pointerRes.bindings[0] : undefined;
     const vmCurrent = request.vmCurrentAssertion ?? stripLit(pointerRow?.['vm']);
-    if (vmCurrent) {
-      assertPublicationPricingPolicyApplicable(request.pricingPolicy, { kind: 'update' });
-    }
+    const operationPlan = planKnowledgeAssetVmPublication({
+      vmCurrentAssertion: vmCurrent,
+      pricingPolicy: request.pricingPolicy ?? publishOptions.pricingPolicy,
+    });
     const stampedNumberStr = request.kaNumber ?? stripLit(pointerRow?.['kaNum']);
 
     if (graphScope.agentAddress.toLowerCase() !== seal.authorAddress.toLowerCase()) {
@@ -5425,7 +5461,7 @@ export class PublishMethods extends DKGAgentBase {
       typeof this.chain.getKnowledgeAssetsLifecycleAddress === 'function';
     let queuedOnChainContextGraphId: string | undefined;
 
-    if (vmCurrent && packedKaId !== undefined) {
+    if (operationPlan.kind === 'update') {
       const updateAttestation = await this._buildPrecomputedUpdateAttestationForSeal(
         packedKaId,
         seal,
@@ -5470,7 +5506,9 @@ export class PublishMethods extends DKGAgentBase {
 
       if (result.status === 'confirmed') {
         try {
-          const priorBare = vmCurrent.startsWith('0x') ? vmCurrent.slice(2) : vmCurrent;
+          const priorBare = operationPlan.vmCurrentAssertion.startsWith('0x')
+            ? operationPlan.vmCurrentAssertion.slice(2)
+            : operationPlan.vmCurrentAssertion;
           const priorUri = `${lifecycleUri}#assertion-${priorBare}`;
           await this._stampPointer(lifecycleUri, VM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
           await this._stampPointerIfDivergedFromVm(lifecycleUri, WM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
@@ -5579,7 +5617,7 @@ export class PublishMethods extends DKGAgentBase {
         skipContextGraphEnsure: true,
         v10ACKProvider: publishOptions.v10ACKProvider ?? this.createV10ACKProvider(request.contextGraphId),
         publishEpochs: request.publishEpochs ?? publishOptions.publishEpochs,
-        pricingPolicy: request.pricingPolicy ?? publishOptions.pricingPolicy,
+        pricingPolicy: operationPlan.pricingPolicy,
         publisherNodeIdentityIdOverride: request.publisherNodeIdentityIdOverride !== undefined
           ? BigInt(request.publisherNodeIdentityIdOverride)
           : publishOptions.publisherNodeIdentityIdOverride,
@@ -5886,9 +5924,10 @@ export class PublishMethods extends DKGAgentBase {
     const stripLit = (v?: string) => v?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
     const pointerRow = pointerRes.type === 'bindings' ? pointerRes.bindings[0] : undefined;
     const vmCurrent = stripLit(pointerRow?.['vm']);
-    if (vmCurrent) {
-      assertPublicationPricingPolicyApplicable(opts?.pricingPolicy, { kind: 'update' });
-    }
+    const operationPlan = planKnowledgeAssetVmPublication({
+      vmCurrentAssertion: vmCurrent,
+      pricingPolicy: opts?.pricingPolicy,
+    });
     const stampedNumberStr = stripLit(pointerRow?.['kaNum']);
 
     if (graphScope.agentAddress.toLowerCase() !== seal.authorAddress.toLowerCase()) {
@@ -5987,7 +6026,7 @@ export class PublishMethods extends DKGAgentBase {
     }
 
     let result: PublishResult;
-    if (vmCurrent) {
+    if (operationPlan.kind === 'update') {
       // ── UPDATE PATH ──
       // The name already has a confirmed VM version. Reuse its kaId and call
       // the on-chain update primitive. The publisher's update path recomputes
@@ -6047,7 +6086,9 @@ export class PublishMethods extends DKGAgentBase {
       // Stamp UPDATE provenance + re-stamp VM/WM pointers to the new merkle.
       if (result.status === 'confirmed' || result.status === 'tentative') {
         try {
-          const priorBare = vmCurrent.startsWith('0x') ? vmCurrent.slice(2) : vmCurrent;
+          const priorBare = operationPlan.vmCurrentAssertion.startsWith('0x')
+            ? operationPlan.vmCurrentAssertion.slice(2)
+            : operationPlan.vmCurrentAssertion;
           const priorUri = `${lifecycleUri}#assertion-${priorBare}`;
           // Re-point VM to the new merkle (drop-then-set), then record the
           // revision chain via prov:wasRevisionOf <prior>. RFC ka-metadata-trim
@@ -6103,7 +6144,7 @@ export class PublishMethods extends DKGAgentBase {
           subGraphName: opts?.subGraphName,
           publisherNodeIdentityIdOverride: opts?.publisherNodeIdentityIdOverride,
           publishEpochs: opts?.publishEpochs,
-          pricingPolicy: opts?.pricingPolicy,
+          pricingPolicy: operationPlan.pricingPolicy,
           reservedKaId: recoveredReservedKaId,
           sharedMemoryScope,
           contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -6352,7 +6393,7 @@ export class PublishMethods extends DKGAgentBase {
     kaId: bigint,
     seal: AssertionSeal,
     publisherOverride?: DKGPublisher,
-  ): Promise<NonNullable<PublishOptions['precomputedUpdateAttestation']>> {
+  ): Promise<NonNullable<UpdateOptions['precomputedUpdateAttestation']>> {
     const typedData = buildUpdateAuthorAttestationTypedData({
       chainId: seal.chainId,
       kav10Address: seal.kav10Address,
