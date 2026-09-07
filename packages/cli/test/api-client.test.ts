@@ -161,7 +161,7 @@ describe('ApiClient', () => {
       expect(result.jobStatus).toBe('partial');
     });
 
-    it.each(['persisted', 'fallback-json', 'fallback-yaml'] as const)(
+    it.each(['persisted', 'persisted-env-token', 'fallback-json', 'fallback-yaml'] as const)(
       'connect() keeps every local read in one home across a delayed read (%s)', async (mode) => {
         const otherHome = join(tempDir, 'other-home');
         await mkdir(otherHome);
@@ -176,14 +176,15 @@ describe('ApiClient', () => {
         } else {
           await writeFile(join(tempDir, 'config.json'), JSON.stringify({ name: 'node-a', apiPort: 9317, apiHost: '192.0.2.10' }));
         }
-        if (mode === 'persisted') await writeFile(join(tempDir, 'api.port'), '9317');
+        if (mode === 'persisted-env-token') process.env.DKG_AUTH_TOKEN = 'token-a';
+        if (mode.startsWith('persisted')) await writeFile(join(tempDir, 'api.port'), '9317');
         let release!: () => void;
         let markEntered!: () => void;
         const gate = new Promise<void>((resolve) => { release = resolve; });
         const entered = new Promise<void>((resolve) => { markEntered = resolve; });
-        const readPort = configModule.readApiPort;
-        const read = vi.spyOn(configModule, 'readApiPort').mockImplementation(async (...args) => {
-          const value = await readPort(...args);
+        const readPort = configModule.DkgHomeFiles.prototype.readApiPort;
+        const read = vi.spyOn(configModule.DkgHomeFiles.prototype, 'readApiPort').mockImplementation(async function () {
+          const value = await readPort.call(this);
           markEntered();
           await gate;
           return value;
@@ -194,12 +195,13 @@ describe('ApiClient', () => {
           const connecting = ApiClient.connect({ allowConfigFallback: true });
           await entered;
           process.env.DKG_HOME = otherHome;
+          if (mode === 'persisted-env-token') process.env.DKG_AUTH_TOKEN = 'token-b';
           release();
           const connected = await connecting;
           await connected.agents();
           expect(calls[0].url).toBe('http://192.0.2.10:9317/api/agents');
-          expect(new Headers(calls[0].opts.headers).get('Authorization')).toBe('Bearer home-a-token');
-          if (mode !== 'persisted') {
+          expect(new Headers(calls[0].opts.headers).get('Authorization')).toBe(mode === 'persisted-env-token' ? 'Bearer token-a' : 'Bearer home-a-token');
+          if (!mode.startsWith('persisted')) {
             expect(connected.controlPlaneWarning).toContain('api.port');
             expect(connected.controlPlaneWarning).not.toContain('daemon.pid');
           }

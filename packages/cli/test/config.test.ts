@@ -9,6 +9,7 @@ import { computeNetworkId } from '../../core/src/genesis.js';
 import {
   loadNetworkConfig,
   loadConfig,
+  DkgHomeFiles,
   removePid,
   removeApiPort,
   saveConfig,
@@ -709,6 +710,35 @@ describe('localAgentIntegrations config round-trip', () => {
     if (origHome === undefined) delete process.env.DKG_HOME;
     else process.env.DKG_HOME = origHome;
     if (tempDir) await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('keeps symmetric control-file operations bound to one immutable home', async () => {
+    const files = new DkgHomeFiles();
+    const otherHome = join(tempDir, 'other-home');
+    await mkdir(otherHome);
+    process.env.DKG_HOME = otherHome;
+    expect(Object.isFrozen(files)).toBe(true);
+    expect(files.home).toBe(tempDir);
+    expect(files.tokenPath).toBe(dkgAuthTokenPath(tempDir));
+    await writePid(222);
+    await writeApiPort(9444);
+    await files.writePid(111);
+    await files.writeApiPort(9333);
+    await files.saveConfig({ ...await files.loadConfig(), name: 'home-a' });
+    expect(files.configExists()).toBe(true);
+    expect((await files.loadConfig()).name).toBe('home-a');
+    expect(files.readConfigSync()).toMatchObject({ name: 'home-a' });
+    expect(await files.readPid()).toBe(111);
+    expect(await files.readApiPort()).toBe(9333);
+    expect(await readPid()).toBe(222);
+    expect(await readApiPort()).toBe(9444);
+    expect(configExists()).toBe(false);
+    await files.removePid();
+    await files.removeApiPort();
+    expect(await files.readPid()).toBeNull();
+    expect(await files.readApiPort()).toBeNull();
+    expect(await readPid()).toBe(222);
+    expect(await readApiPort()).toBe(9444);
   });
 
   it('persists the generic local agent integration registry', async () => {
