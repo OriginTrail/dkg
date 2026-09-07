@@ -1,8 +1,7 @@
 import { compactEpcisEventType } from './epcis-vocabulary.js';
 import { createValidator } from './validation.js';
 import { normalizeCaptureEventTypes } from './capture-event-types.js';
-import { renderEpcisQuery } from './query-builder.js';
-import { normalizeEpcisQueryInput } from './query-input.js';
+import { buildEpcisQuery, EpcisQueryInputError } from './query-builder.js';
 import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js';
 import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
 
@@ -192,9 +191,13 @@ export async function handleEventsQuery(
   // selection is per-request (route-level), not derivable from the
   // SPARQL query string, so it lives on the config rather than in
   // `params`.
-  const input = normalizeEpcisQueryInput({ ...params, subGraphName: config.subGraphName, limit: perPage + 1, offset });
-  if (!input.ok) throw new EpcisQueryError(input.message, 400);
-  const sparql = renderEpcisQuery(input.value, config.contextGraphId);
+  let sparql: string;
+  try {
+    sparql = buildEpcisQuery({ ...params, subGraphName: config.subGraphName, limit: perPage + 1, offset }, config.contextGraphId);
+  } catch (error) {
+    if (error instanceof EpcisQueryInputError) throw new EpcisQueryError(error.message, 400);
+    throw error;
+  }
   // The engine's scope guard rejects any explicit GRAPH IRI outside the
   // allow-set it derives from the query options, so the options MUST match
   // exactly the graphs `buildEpcisQuery` references for this route:

@@ -1,5 +1,4 @@
-import { EPCIS_TYPE_PREFIX } from './epcis-vocabulary.js';
-import { normalizeEpcisQueryInput, EpcisQueryInputError, type NormalizedEpcisQuery } from './query-input.js';
+import { EPCIS_TYPE_PREFIX, normalizeEpcisEventType } from './epcis-vocabulary.js';
 import {
   contextGraphDataUri,
   contextGraphMetaUri,
@@ -11,6 +10,14 @@ import {
   sparqlIri,
 } from '@origintrail-official/dkg-core';
 import type { EpcisQueryParams } from './types.js';
+
+/** Invalid EPCIS query input, translated to HTTP 400 by the route boundary. */
+export class EpcisQueryInputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'EpcisQueryInputError';
+  }
+}
 
 const PREFIXES = `
 PREFIX epcis: <${EPCIS_TYPE_PREFIX}>
@@ -61,14 +68,11 @@ function extensionLocalNameFilter(predicateVariable: string, localName: string):
  * - Groups by ?event (the event URI) instead of ?ual (the graph URI)
  */
 export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string): string {
-  const input = normalizeEpcisQueryInput(params);
-  if (!input.ok) throw new EpcisQueryInputError(input.message);
-  return renderEpcisQuery(input.value, contextGraphId);
-}
-
-/** Render the normalized query input shared by HTTP and the public builder. */
-export function renderEpcisQuery(input: NormalizedEpcisQuery, contextGraphId: string): string {
-  const { params, eventTypeIri } = input;
+  const eventTypeIri = params.eventType ? normalizeEpcisEventType(params.eventType) : undefined;
+  if (params.eventType && !eventTypeIri) {
+    throw new EpcisQueryInputError('eventType must be an EPCIS event name or an absolute event type IRI');
+  }
+  const externalEventType = eventTypeIri !== undefined && !eventTypeIri.startsWith(EPCIS_TYPE_PREFIX);
   const partition = params.finalized === false ? 'swm' : 'finalized';
   // Finalized data lands at `<cg>/<sub>` when a sub-graph is targeted —
   // see `packages/agent/src/finalization-handler.ts:358-362`, which
@@ -99,7 +103,7 @@ export function renderEpcisQuery(input: NormalizedEpcisQuery, contextGraphId: st
   // Base pattern — always present
   wherePatterns.push('?event a ?eventType .');
 
-  // An exact validated type is authoritative, including external namespaces.
+  // Exact external classes additionally require the minimum EPCIS event shape below.
   if (!eventTypeIri) {
     filterClauses.push(`FILTER(STRSTARTS(STR(?eventType), "${EPCIS_TYPE_PREFIX}"))`);
   }
@@ -174,7 +178,7 @@ export function renderEpcisQuery(input: NormalizedEpcisQuery, contextGraphId: st
   }
 
   // Time range filter
-  if (params.from || params.to) {
+  if (params.from || params.to || externalEventType) {
     wherePatterns.push('?event epcis:eventTime ?eventTime .');
     if (params.from && params.to) {
       filterClauses.push(
@@ -188,7 +192,11 @@ export function renderEpcisQuery(input: NormalizedEpcisQuery, contextGraphId: st
   } else {
     optionalClauses.push('OPTIONAL { ?event epcis:eventTime ?eventTime . }');
   }
-  optionalClauses.push('OPTIONAL { ?event epcis:eventTimeZoneOffset ?eventTimeZoneOffset . }');
+  if (externalEventType) {
+    wherePatterns.push('?event epcis:eventTimeZoneOffset ?eventTimeZoneOffset .');
+  } else {
+    optionalClauses.push('OPTIONAL { ?event epcis:eventTimeZoneOffset ?eventTimeZoneOffset . }');
+  }
 
   // Action filter — required when filtered, OPTIONAL otherwise
   if (params.action) {

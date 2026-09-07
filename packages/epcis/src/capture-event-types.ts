@@ -15,6 +15,14 @@ export function normalizeCaptureEventTypes(document: unknown): unknown {
   });
 }
 
+/** Adapt only event-list discriminators for the unmodified bundled GS1 schema. */
+export function epcisDocumentForValidation(document: unknown): unknown {
+  return mapEpcisEventList(document, (event) => {
+    const name = typeof event.type === 'string' ? standardEpcisEventType(event.type) : undefined;
+    return name ? { ...event, type: name } : event;
+  });
+}
+
 function mapEpcisEventList(
   document: unknown,
   transform: (event: Record<string, unknown>) => Record<string, unknown>,

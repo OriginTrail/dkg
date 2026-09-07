@@ -66,9 +66,17 @@ describe('EPCIS capture through agent publication', () => {
     'round-trips an external RDF class through the returned event-type filter: %s', async (eventType) => {
       const graph = contextGraphDataUri('epcis-type-filter');
       const event = `urn:event:${encodeURIComponent(eventType)}`;
-      await store.insert([{
-        subject: event, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: eventType, graph,
-      }]);
+      await store.insert([
+        { subject: event, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: eventType, graph },
+        { subject: event, predicate: 'https://gs1.github.io/EPCIS/eventTime', object: '"2024-03-01T08:00:00Z"', graph },
+        { subject: event, predicate: 'https://gs1.github.io/EPCIS/eventTimeZoneOffset', object: '"+00:00"', graph },
+        // The same external class does not make ordinary RDF an EPCIS event.
+        { subject: `${event}:ordinary`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: eventType, graph },
+        { subject: `${event}:missing-offset`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: eventType, graph },
+        { subject: `${event}:missing-offset`, predicate: 'https://gs1.github.io/EPCIS/eventTime', object: '"2024-03-01T08:00:00Z"', graph },
+        { subject: `${event}:missing-time`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: eventType, graph },
+        { subject: `${event}:missing-time`, predicate: 'https://gs1.github.io/EPCIS/eventTimeZoneOffset', object: '"+00:00"', graph },
+      ]);
       const responseType = toEpcisEvent({ eventType }).type as string;
       const result = await store.query(buildEpcisQuery({ eventType: responseType }, 'epcis-type-filter'));
       if (result.type !== 'bindings') throw new Error('Expected event bindings');
