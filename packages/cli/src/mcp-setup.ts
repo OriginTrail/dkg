@@ -144,7 +144,7 @@ export type SetupContext = 'installed' | 'monorepo';
  * without re-declaring the shape inside the action body. `Action`
  * mirrors the local enum the planning loop produces.
  */
-export type PlannedAction = 'register' | 'refresh' | 'skip';
+export type PlannedAction = 'register' | 'refresh' | 'remove' | 'skip';
 export interface PlannedItem {
   s: ClientState;
   action: PlannedAction;
@@ -364,9 +364,13 @@ function detectEphemeralInstallPath(absPath: string): string | null {
  */
 export async function confirmPlan(
   planned: readonly PlannedItem[],
-  opts: { yes: boolean },
+  opts: { yes: boolean; requireYesInNonTty?: boolean },
 ): Promise<PlannedItem[]> {
   const writes = planned.filter((p) => p.action !== 'skip');
+  if (writes.length > 0 && !opts.yes && opts.requireYesInNonTty
+      && (!process.stdin.isTTY || !process.stdout.isTTY)) {
+    throw new Error('Non-interactive MCP uninstall requires --yes; use --dry-run to preview.');
+  }
   if (
     opts.yes ||
     !process.stdin.isTTY ||
@@ -384,10 +388,10 @@ export async function confirmPlan(
         result.push(p);
         continue;
       }
-      const verb = p.action === 'register' ? 'Register' : 'Refresh';
+      const verb = { register: 'Register', refresh: 'Refresh', remove: 'Remove' }[p.action];
       const ans = (
         await rl.question(
-          `${verb} DKG MCP with ${p.s.target.name} (${p.s.target.displayPath})? [Y/n] `,
+          `${verb} DKG MCP ${p.action === 'remove' ? 'from' : 'with'} ${p.s.target.name} (${p.s.target.displayPath})? [Y/n] `,
         )
       )
         .trim()
@@ -1314,7 +1318,7 @@ function replaceTomlTable(
   const normalisedParentPathKey = parentPathKey
     ? normaliseTomlOwnedPath(parentPathKey)
     : null;
-  const replacementBlock = normaliseNewlines(
+  const replacementBlock = replacement === '' ? '' : normaliseNewlines(
     replacement.endsWith('\n') || replacement.endsWith('\r')
       ? replacement
       : replacement + newline,
@@ -1358,7 +1362,7 @@ function replaceTomlTable(
   }
 
   if (ranges.length === 0) {
-    return appendTomlTable(raw, replacementBlock, newline);
+    return replacementBlock ? appendTomlTable(raw, replacementBlock, newline) : raw;
   }
 
   let inserted = false;
@@ -1422,14 +1426,23 @@ function writeTomlConfigBody(
     : '';
   const ownedPath = target.entryPath ?? DEFAULT_ENTRY_PATH;
   const ownedParentPath = tomlParentPath(ownedPath) ?? undefined;
-  const serialisedEntry = serialiseTomlEntryOnly(target, body);
-  const patched = replaceTomlTable(
+  const removing = readEntryAt(body, target.entryPath) === undefined;
+  const serialisedEntry = removing ? '' : serialiseTomlEntryOnly(target, body);
+  let patched = replaceTomlTable(
     raw,
     ownedPath,
     serialisedEntry,
     tomlRawHasEntry(raw, target.entryPath),
     tomlRawHasPath(raw, ownedParentPath),
   );
+  if (removing && patched !== null && ownedParentPath
+      && !tomlRawHasPath(patched, ownedParentPath)) {
+    // Keep the empty server container when its last child table was removed.
+    const parentOnly: Record<string, unknown> = {};
+    ensurePathContainer(parentOnly, splitEntryPath(target.entryPath).head);
+    patched = appendTomlTable(patched, TOML.stringify(parentOnly as TOML.JsonMap),
+      raw.includes('\r\n') ? '\r\n' : '\n');
+  }
   if (patched === null) {
     process.stderr.write(
       `[setup] WARNING: ${target.name} config at ${tildify(target.configPath)} ` +
@@ -1544,6 +1557,30 @@ function classify(
     state: matches ? 'registered' : 'stale',
     current: current ?? null,
   };
+}
+
+/** Remove only the client's canonical DKG entry; dryRun performs the same read checks. */
+export function removeRegistration(target: ClientTarget, dryRun = false): boolean {
+  const body = readConfigBody(target);
+  const { head, leaf } = splitEntryPath(target.entryPath);
+  let cursor: unknown = body;
+  for (const segment of head) {
+    if (cursor === undefined) return false;
+    if (cursor === null || typeof cursor !== 'object' || Array.isArray(cursor)) {
+      throw new Error(`Malformed MCP server container in ${target.displayPath}`);
+    }
+    cursor = (cursor as Record<string, unknown>)[segment];
+  }
+  if (cursor === undefined) return false;
+  if (cursor === null || typeof cursor !== 'object' || Array.isArray(cursor)) {
+    throw new Error(`Malformed MCP server container in ${target.displayPath}`);
+  }
+  if (!Object.hasOwn(cursor, leaf)) return false;
+  if (!dryRun) {
+    delete (cursor as Record<string, unknown>)[leaf];
+    writeConfigBody(target, body);
+  }
+  return true;
 }
 
 function writeRegistration(

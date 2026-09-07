@@ -136,6 +136,22 @@ mcpCmd
   });
 
 mcpCmd
+  .command('uninstall')
+  .description('Remove the DKG MCP registration from selected clients')
+  .option('--yes', 'Confirm removal without interactive prompts')
+  .option('--client <name>', 'Only this client (for example: cursor, claude-code, vscode, codex-cli)')
+  .option('--dry-run', 'Preview registrations to remove without writing files')
+  .action(async (opts) => {
+    const { mcpUninstallAction } = await import('../mcp-uninstall.js');
+    try {
+      await mcpUninstallAction(opts);
+    } catch (err: unknown) {
+      console.error(`\n[dkg mcp uninstall] ERROR: ${toErrorMessage(err)}\n`);
+      process.exitCode = 1;
+    }
+  });
+
+mcpCmd
   .command('setup')
   .description('Bundled init + daemon-start + MCP-client registration (idempotent, safe to re-run)')
   .option('--port <port>', 'Override daemon API port (default: 9200)')

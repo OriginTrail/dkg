@@ -87,6 +87,9 @@ dkg openclaw setup                       # install & configure the OpenClaw adap
 dkg hermes setup                         # install & configure the Hermes adapter
 dkg mcp setup                            # register the MCP server with Cursor / Claude Code / Claude Desktop / Windsurf / VSCode + Copilot / Cline / Codex CLI
 dkg mcp serve                            # run the MCP server on stdio (invoked by the client; not run manually)
+dkg mcp uninstall                        # confirm DKG registration removal per client
+dkg mcp uninstall --yes --client cursor  # remove only Cursor registration without prompting
+dkg mcp uninstall --dry-run              # preview removal without writing client configs
 
 # Community integrations (registry: OriginTrail/dkg-integrations)
 dkg integration list [--tier community]  # default tier filter is `verified`+
