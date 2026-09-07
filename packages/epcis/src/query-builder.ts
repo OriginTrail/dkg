@@ -88,8 +88,10 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   // Base pattern — always present
   wherePatterns.push('?event a ?eventType .');
 
-  // Must be an EPCIS event type
-  filterClauses.push('FILTER(STRSTARTS(STR(?eventType), "https://gs1.github.io/EPCIS/"))');
+  // The EPCIS namespace also contains document and vocabulary resources.
+  // Restrict both public and private branches to the five event classes
+  // accepted by the EPCIS 2.0 capture schema.
+  filterClauses.push('FILTER(?eventType IN (epcis:ObjectEvent, epcis:AggregationEvent, epcis:TransactionEvent, epcis:TransformationEvent, epcis:AssociationEvent))');
 
   // eventID filter — matches the RDF subject (the event's @id / rootEntity)
   if (params.eventID) {

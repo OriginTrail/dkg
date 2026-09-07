@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { buildEpcisQuery, escapeSparql, normalizeBizStep, normalizeGs1Vocabulary } from '../src/query-builder.js';
+import { OxigraphStore } from '../../storage/src/adapters/oxigraph.js';
 
 const CONTEXT_GRAPH_ID = 'test-cg';
 const DATA_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}`;
@@ -8,6 +9,46 @@ const SHARED_MEMORY_GRAPH = `${DATA_GRAPH}/_shared_memory`;
 const PRIVATE_GRAPH = `${DATA_GRAPH}/_private`;
 
 describe('buildEpcisQuery', () => {
+  it.each([
+    { finalized: true },
+    { finalized: false },
+    { finalized: true, subGraphName: 'supply-chain' },
+    { finalized: false, subGraphName: 'supply-chain' },
+  ])('returns only event classes in public and anchored private data: %j', async (params) => {
+    const store = new OxigraphStore();
+    const scope = `${DATA_GRAPH}${params.subGraphName ? `/${params.subGraphName}` : ''}`;
+    const publicGraph = params.finalized ? scope : `${scope}/_shared_memory`;
+    const privateGraph = `${scope}/_private`;
+    const eventTypes = ['ObjectEvent', 'AggregationEvent', 'TransactionEvent', 'TransformationEvent', 'AssociationEvent'];
+    const types = [...eventTypes, 'EPCISDocument', 'EPCISQueryDocument', 'SensorElement'];
+    try {
+      for (const graph of [publicGraph, privateGraph]) {
+        for (const type of types) {
+          const subject = `urn:test:${graph === publicGraph ? 'public' : 'private'}:${type}`;
+          await store.insert([{ subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: `https://gs1.github.io/EPCIS/${type}`, graph }]);
+          if (graph === privateGraph) {
+            await store.insert([{ subject, predicate: 'http://dkg.io/ontology/privateDataAnchor', object: '"true"', graph: publicGraph }]);
+          }
+        }
+      }
+      const all = await store.query(buildEpcisQuery(params, CONTEXT_GRAPH_ID));
+      expect(all.type).toBe('bindings');
+      if (all.type !== 'bindings') throw new Error('Expected event bindings');
+      expect(all.bindings).toHaveLength(eventTypes.length * 2);
+      expect(all.bindings.map((row) => row.event).sort()).toEqual(
+        ['public', 'private'].flatMap((partition) => eventTypes.map((type) => `urn:test:${partition}:${type}`)).sort(),
+      );
+      const filtered = await store.query(buildEpcisQuery({ ...params, eventType: 'ObjectEvent' }, CONTEXT_GRAPH_ID));
+      expect(filtered.type).toBe('bindings');
+      if (filtered.type !== 'bindings') throw new Error('Expected event bindings');
+      expect(filtered.bindings.map((row) => row.event).sort()).toEqual(['urn:test:private:ObjectEvent', 'urn:test:public:ObjectEvent']);
+      const documents = await store.query(buildEpcisQuery({ ...params, eventType: 'EPCISDocument' }, CONTEXT_GRAPH_ID));
+      expect(documents).toMatchObject({ type: 'bindings', bindings: [] });
+    } finally {
+      await store.close();
+    }
+  });
+
   it('generates SPARQL with explicit GRAPH for a single EPC filter', () => {
     const sparql = buildEpcisQuery({ epc: 'urn:epc:id:sgtin:4012345.011111.1001' }, CONTEXT_GRAPH_ID);
 
