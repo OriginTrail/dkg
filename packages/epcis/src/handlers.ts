@@ -1,3 +1,4 @@
+import { EpcisPaginationError, MAX_EPCIS_OFFSET, resolveEpcisPageSize, resolveEpcisOffset } from './pagination.js';
 import { compactEpcisEventType, EpcisEventTypeError } from './epcis-vocabulary.js';
 import { createValidator } from './validation.js';
 import { buildEpcisQuery } from './query-builder.js';
@@ -62,7 +63,6 @@ export interface EventsQueryResult {
 }
 
 const DEFAULT_PER_PAGE = 30;
-const MAX_PER_PAGE = 1000;
 
 
 
@@ -184,21 +184,22 @@ export async function handleEventsQuery(
     throw new EpcisQueryError('Invalid date range: "from" must be before or equal to "to"', 400);
   }
 
-  const perPage = Math.min(Math.max(params.perPage ?? DEFAULT_PER_PAGE, 1), MAX_PER_PAGE);
-  const offset = Math.max(params.offset ?? 0, 0);
-
-  // Request one extra row to detect if more pages exist. Sub-graph
-  // selection is per-request (route-level), not derivable from the
-  // SPARQL query string, so it lives on the config rather than in
-  // `params`.
+  let perPage: number;
+  let offset: number;
   let sparql: string;
   try {
+    perPage = resolveEpcisPageSize(params.perPage, DEFAULT_PER_PAGE);
+    offset = resolveEpcisOffset(params.offset);
+    // The builder adds the lookahead AFTER applying the public page-size cap.
     sparql = buildEpcisQuery(
-      { ...params, subGraphName: config.subGraphName, limit: perPage + 1, offset },
+      { ...params, subGraphName: config.subGraphName, limit: perPage, offset },
       config.contextGraphId,
+      { lookahead: true },
     );
   } catch (error) {
-    if (error instanceof EpcisEventTypeError) throw new EpcisQueryError(error.message, 400);
+    if (error instanceof EpcisEventTypeError || error instanceof EpcisPaginationError) {
+      throw new EpcisQueryError(error.message, 400);
+    }
     throw error;
   }
   // The engine's scope guard rejects any explicit GRAPH IRI outside the
@@ -246,6 +247,10 @@ export async function handleEventsQuery(
 
   // Build Link header with nextPageToken
   const nextOffset = offset + perPage;
+  if (nextOffset > MAX_EPCIS_OFFSET) {
+    // Do not silently truncate the result or issue a continuation that cannot run.
+    throw new EpcisQueryError('EPCIS pagination limit reached; narrow the event or time filters to retrieve the remaining events', 400);
+  }
   const nextToken = encodePageToken(nextOffset);
   const url = new URL(config.basePath, 'http://localhost');
   // Preserve original query params

@@ -1,3 +1,4 @@
+import { resolveEpcisPageSize, resolveEpcisOffset } from './pagination.js';
 import {
   contextGraphDataUri,
   contextGraphMetaUri,
@@ -60,7 +61,11 @@ function extensionLocalNameFilter(predicateVariable: string, localName: string):
  * - UAL provenance is resolved via OPTIONAL join to GRAPH <did:dkg:context-graph:{id}/_meta>
  * - Groups by ?event (the event URI) instead of ?ual (the graph URI)
  */
-export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string): string {
+export function buildEpcisQuery(
+  params: EpcisQueryParams,
+  contextGraphId: string,
+  options: { lookahead?: boolean } = {},
+): string {
   const partition = params.finalized === false ? 'swm' : 'finalized';
   // Finalized data lands at `<cg>/<sub>` when a sub-graph is targeted —
   // see `packages/agent/src/finalization-handler.ts:358-362`, which
@@ -232,13 +237,14 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   }
 
   // Pagination
-  const limit = Math.min(Math.max(params.limit ?? 100, 1), 1000);
-  const offset = Math.max(params.offset ?? 0, 0);
+  const limit = resolveEpcisPageSize(params.limit, 100) + (options.lookahead ? 1 : 0);
+  const offset = resolveEpcisOffset(params.offset);
   const graphBody = [
     ...wherePatterns,
     ...optionalClauses,
   ].join('\n      ');
 
+  // sparql-scan-allow: R3 -- legacy offset is validated <= 10000, page <= 1000 (+1 lookahead); deeper walks fail and require narrower filters.
   return `${PREFIXES}
 SELECT ?event ?eventType ?eventTime ?eventTimeZoneOffset ?bizStep ?bizLocation ?disposition ?readPoint ?action ?parentID ?configurationId ?shipmentId ?ual
   (GROUP_CONCAT(DISTINCT ?epc; SEPARATOR=", ") AS ?epcList)

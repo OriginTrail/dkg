@@ -14,7 +14,14 @@ describe('EPCIS event type normalization', () => {
       expect(normalizeEpcisEventType(compactEpcisEventType(iri))).toBe(iri);
     },
   );
-  it.each(['UnknownEvent', '', 'https://example.org/Event>', 'urn:epcis:bad type'])(
-    'rejects an undefined short name or unsafe IRI %s', (value) => expect(() => normalizeEpcisEventType(value)).toThrow(),
+  it.each(['not an event name', '', 'https://example.org/Event>', 'urn:epcis:bad type'])(
+    'rejects an unsafe short name or IRI %s', (value) => expect(() => normalizeEpcisEventType(value)).toThrow(),
   );
+});
+
+
+it('retains the historical compact extension-name query spelling', () => {
+  expect(normalizeEpcisEventType('CustomEvent')).toBe('https://gs1.github.io/EPCIS/CustomEvent');
+  expect(normalizeEpcisEventType(compactEpcisEventType('https://gs1.github.io/EPCIS/CustomEvent')))
+    .toBe('https://gs1.github.io/EPCIS/CustomEvent');
 });

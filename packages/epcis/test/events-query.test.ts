@@ -42,7 +42,7 @@ function makeBindings(overrides: Partial<Record<string, string>> = {}): Record<s
 }
 
 describe('handleEventsQuery', () => {
-  it.each(['UnknownEvent', 'https://example.org/Event>', 'urn:epcis:bad type'])('rejects invalid eventType %s with 400 before querying', async (eventType) => {
+  it.each(['not an event name', 'https://example.org/Event>', 'urn:epcis:bad type'])('rejects invalid eventType %s with 400 before querying', async (eventType) => {
     const { engine, calls } = createTrackingQueryEngine();
     await expect(handleEventsQuery(new URLSearchParams({ eventType }), {
       contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH,
