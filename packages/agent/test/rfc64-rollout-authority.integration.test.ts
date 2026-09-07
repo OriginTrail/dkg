@@ -645,6 +645,78 @@ describe('RFC-64 rollout authority integration', () => {
     expect(requestReplay).toHaveBeenCalledTimes(64);
   });
 
+  it('rejects a 65th queued peer before a bounded replay run starts', async () => {
+    const edge = await startAgent({
+      name: 'replay-prequeued-peer-overflow-bound',
+      activation: activation('catalog'),
+    });
+    vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([] as never);
+    const service = (edge as any).rfc64PublicCatalogServiceV1;
+    const requestReplay = vi.spyOn(service, 'requestCatalogHeadReplay')
+      .mockResolvedValue(Object.freeze({
+        kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+        heads: Object.freeze([]),
+      }));
+    for (let index = 0; index < 64; index += 1) {
+      expect(edge.markRfc64CatalogReplayPeerPendingV1(
+        CONTEXT_GRAPH_ID,
+        `12D3KooWReplayPrequeuedPeer${index}`,
+      )).toEqual(expect.any(Number));
+    }
+    expect(edge.markRfc64CatalogReplayPeerPendingV1(
+      CONTEXT_GRAPH_ID,
+      '12D3KooWReplayPrequeuedPeerOverflow',
+    )).toBeNull();
+
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual({ requested: 64, failed: 1 });
+    expect(requestReplay).toHaveBeenCalledTimes(64);
+  });
+
+  it('fails closed when a 65th peer arrives during the durable parity read', async () => {
+    const edge = await startAgent({
+      name: 'replay-post-parity-peer-overflow-bound',
+      activation: activation('catalog'),
+    });
+    const peers = Array.from(
+      { length: 64 },
+      (_, index) => `12D3KooWReplayParityBoundaryPeer${index}`,
+    );
+    vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue(peers.map((peer) => ({
+      toString: () => peer,
+    })) as never);
+    const service = (edge as any).rfc64PublicCatalogServiceV1;
+    const requestReplay = vi.spyOn(service, 'requestCatalogHeadReplay')
+      .mockResolvedValue(Object.freeze({
+        kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+        heads: Object.freeze([]),
+      }));
+    const persistence = (edge as any).rfc64PersistenceV1;
+    let parityReads = 0;
+    (edge as any).rfc64PersistenceV1 = Object.freeze({
+      ...persistence,
+      inventory: Object.freeze({
+        ...persistence.inventory,
+        listAppliedCatalogHeadsV1: () => {
+          parityReads += 1;
+          if (parityReads === 1) {
+            edge.markRfc64CatalogReplayPeerPendingV1(
+              CONTEXT_GRAPH_ID,
+              '12D3KooWReplayParityBoundaryPeer64',
+            );
+          }
+          return [];
+        },
+      }),
+    });
+
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual({ requested: 64, failed: 1 });
+    expect(requestReplay).toHaveBeenCalledTimes(64);
+  });
+
   it('replays a new peer generation raised during the durable parity read', async () => {
     const edge = await startAgent({
       name: 'replay-post-parity-peer-fence',
@@ -782,6 +854,36 @@ describe('RFC-64 rollout authority integration', () => {
       expect.objectContaining({ contextGraphId: CONTEXT_GRAPH_ID, phase: 'bootstrapping' }),
     );
     expect(requestReplay).not.toHaveBeenCalled();
+  }, 15_000);
+
+  it('clears the matching connection replay generation when admission probing fails', async () => {
+    const peer = await startAgent({ name: 'replay-failed-admission-peer' });
+    const edge = await startAgent({
+      name: 'replay-failed-admission-edge',
+      activation: activation('catalog'),
+    });
+    vi.spyOn(
+      (edge as any).networkAdmissionCoordinator,
+      'ensureAdmitted',
+    ).mockRejectedValue(new Error('admission transport unavailable'));
+    const markPending = vi.spyOn(edge, 'markRfc64CatalogReplayPeerPendingV1');
+    const clearPending = vi.spyOn(edge, 'clearRfc64CatalogReplayPeerPendingV1');
+    edge.node.libp2p.dispatchEvent(new CustomEvent('connection:open', {
+      detail: {
+        remotePeer: peer.node.libp2p.peerId,
+        remoteAddr: { toString: () => '/ip4/127.0.0.1/tcp/1' },
+        direction: 'inbound',
+        timeline: { open: Date.now() },
+      },
+    } as any));
+    expect(markPending).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, peer.peerId);
+    await vi.waitFor(() => {
+      expect(clearPending).toHaveBeenCalledWith(
+        CONTEXT_GRAPH_ID,
+        peer.peerId,
+        expect.any(Number),
+      );
+    });
   }, 15_000);
 
   it('connection replay sends public and authorized private heads without disclosing private metadata to a nonmember', async () => {

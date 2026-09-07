@@ -2915,10 +2915,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         const manifests: Rfc64PublicCatalogHeadAnnouncementV1[][] = [];
         for (;;) {
           const replayDemands = replayProgress.peerWorklist.drain();
-          if (replayDemands.length === 0 && replayProgress.peerWorklist.exhausted) {
-            failed += 1;
-            break;
-          }
           await Promise.all(replayDemands.map(async ({ peerId: remotePeerId }) => {
             for (let attempt = 0; attempt < 2; attempt += 1) {
               try {

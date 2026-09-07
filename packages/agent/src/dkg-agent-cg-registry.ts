@@ -300,6 +300,7 @@ import {
   TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
   CHAIN_POLICY_READ_TIMEOUT_MS,
+  CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { runBoundedOperation } from './bounded-operation.js';
@@ -638,7 +639,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           }),
           {
             label: `resolveContextGraphOnChainIdBinding(${contextGraphId})`,
-            timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+            timeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
             signal: options.signal,
           },
         );
@@ -692,7 +693,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         (signal) => resolveByNameHash.call(this.chain, nameHash, { signal }),
         {
           label: `resolveContextGraphIdByNameHash(${nameHash})`,
-          timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+          timeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
           signal: options.signal,
         },
       );

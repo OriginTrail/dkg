@@ -253,6 +253,34 @@ describe('cold current-state Context Graph name binding', () => {
     );
   });
 
+  it('does not apply the hot-path policy deadline to a cold reverse-index build', async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = selectedFixture();
+      fixture.agent.subscribedContextGraphs.clear();
+      fixture.agent.wireIdToLocalCgId.clear();
+      fixture.agent.contextGraphNameCommitment = () => NAME_HASH;
+      let complete!: (value: bigint | null) => void;
+      fixture.resolveContextGraphIdByNameHash.mockReturnValueOnce(
+        new Promise<bigint | null>((resolve) => { complete = resolve; }),
+      );
+
+      const binding = fixture.agent.resolveContextGraphRegistrationBinding('cold-cleartext');
+      await vi.advanceTimersByTimeAsync(2_501);
+
+      const operationSignal = fixture.resolveContextGraphIdByNameHash.mock.calls[0]?.[1]?.signal;
+      expect(operationSignal?.aborted).toBe(false);
+      complete(42n);
+      await expect(binding).resolves.toEqual({
+        kind: 'registered',
+        onChainId: 42n,
+        provenance: 'name-hash',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('preserves selected revalidation failures as unavailable', async () => {
     const fixture = selectedFixture();
     fixture.resolveContextGraphIdByNameHash.mockRejectedValueOnce(
