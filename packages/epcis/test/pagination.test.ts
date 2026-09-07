@@ -1,9 +1,9 @@
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { buildEpcisQuery, buildEpcisPageQuery } from '../src/query-builder.js';
+import { buildEpcisQuery, renderEpcisQuery } from '../src/query-builder.js';
 import { handleEventsQuery } from '../src/handlers.js';
 import { encodePageToken } from '../src/utils.js';
-import { MAX_EPCIS_OFFSET, MAX_EPCIS_PAGE_SIZE, EpcisPaginationPlan } from '../src/pagination.js';
+import { MAX_EPCIS_OFFSET, MAX_EPCIS_PAGE_SIZE, EpcisHttpPage } from '../src/pagination.js';
 
 it.each([NaN, Infinity, -Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1, MAX_EPCIS_OFFSET + 1])(
   'rejects invalid/deep builder offset %s', (offset) => {
@@ -16,12 +16,36 @@ it.each([NaN, Infinity, -Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1])('rejects u
 it('bounds lookahead independently of the public page-size cap', () => {
   expect(buildEpcisQuery({ limit: MAX_EPCIS_PAGE_SIZE, offset: MAX_EPCIS_OFFSET }, 'pagination'))
     .toContain('LIMIT 1000\nOFFSET 10000');
-  expect(buildEpcisPageQuery({}, 'pagination', new EpcisPaginationPlan(MAX_EPCIS_PAGE_SIZE, 0))).toContain('LIMIT 1001');
+  expect(renderEpcisQuery({}, 'pagination', new EpcisHttpPage({ perPage: MAX_EPCIS_PAGE_SIZE, offset: 0 }).queryWindow)).toContain('LIMIT 1001');
+});
+it('keeps direct-query and HTTP defaults explicit in the rendered window', async () => {
+  expect(buildEpcisQuery({}, 'pagination')).toContain('LIMIT 100\nOFFSET 0');
+  const queries: string[] = [];
+  await handleEventsQuery(new URLSearchParams(), {
+    contextGraphId: 'pagination', basePath: '/epcis/events',
+    queryEngine: { query: async (query) => { queries.push(query); return { bindings: [] }; } },
+  });
+  expect(queries).toHaveLength(1);
+  expect(queries[0]).toContain('LIMIT 31\nOFFSET 0');
+});
+it('propagates query-engine failures unchanged', async () => {
+  const failure = new Error('store unavailable');
+  await expect(handleEventsQuery(new URLSearchParams(), {
+    contextGraphId: 'pagination', basePath: '/epcis/events',
+    queryEngine: { query: async () => { throw failure; } },
+  })).rejects.toBe(failure);
+  expect(failure).not.toHaveProperty('statusCode');
 });
 it.each([
   `offset=${MAX_EPCIS_OFFSET + 1}`,
   `nextPageToken=${encodeURIComponent(encodePageToken(MAX_EPCIS_OFFSET + 1))}`,
   'offset=9007199254740992',
+  'offset=1.5',
+  'perPage=1.5',
+  'limit=1.5',
+  'offset=abc',
+  'perPage=',
+  'perPage=1.5&limit=20',
   `perPage=${'9'.repeat(400)}`,
 ])('returns 400 before querying for %s', async (params) => {
   let queries = 0;

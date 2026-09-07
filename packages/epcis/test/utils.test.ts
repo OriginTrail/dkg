@@ -42,11 +42,8 @@ describe('parseQueryParams', () => {
     expect(params.offset).toBe(200);
   });
 
-  it('ignores non-numeric limit/offset', () => {
-    const params = parseQueryParams(new URLSearchParams('limit=abc&offset=xyz'));
-
-    expect(params.perPage).toBeUndefined();
-    expect(params.offset).toBeUndefined();
+  it.each(['limit=abc', 'offset=xyz'])('rejects non-numeric pagination %s', (params) => {
+    expect(() => parseQueryParams(new URLSearchParams(params))).toThrow('safe integer');
   });
 
   it('returns only defined params (no undefined keys polluting the object)', () => {

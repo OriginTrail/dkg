@@ -1,16 +1,19 @@
+import { EpcisQueryError } from './query-error.js';
+
 /** Bounds for the legacy offset-based SimpleEventQuery API. */
 export const MAX_EPCIS_PAGE_SIZE = 1_000;
 export const MAX_EPCIS_OFFSET = 10_000;
+export const DEFAULT_EPCIS_QUERY_LIMIT = 100;
+export const DEFAULT_EPCIS_HTTP_PAGE_SIZE = 30;
 
-export class EpcisPaginationError extends Error {
+export class EpcisPaginationError extends EpcisQueryError {
   constructor(message: string) {
-    super(message);
+    super(message, 400);
     this.name = 'EpcisPaginationError';
   }
 }
 
-function resolveEpcisPageSize(value: number | undefined, fallback: number): number {
-  value ??= fallback;
+function resolveEpcisPageSize(value: number): number {
   if (!Number.isSafeInteger(value)) throw new EpcisPaginationError('EPCIS page size must be a safe integer');
   return Math.min(Math.max(value, 1), MAX_EPCIS_PAGE_SIZE);
 }
@@ -23,22 +26,37 @@ function resolveEpcisOffset(value: number | undefined): number {
   return Math.max(offset, 0);
 }
 
-/** A normalized request page, including its lookahead and continuation policy. */
-export class EpcisPaginationPlan {
-  readonly pageSize: number;
+/** Explicit row window consumed by the canonical SPARQL renderer. */
+export interface EpcisQueryWindow {
+  readonly limit: number;
   readonly offset: number;
-  readonly queryRowLimit: number;
+}
 
-  constructor(pageSize: number | undefined, offset: number | undefined, defaultPageSize = 30) {
-    this.pageSize = resolveEpcisPageSize(pageSize, defaultPageSize);
-    this.offset = resolveEpcisOffset(offset);
-    this.queryRowLimit = this.pageSize + 1;
+export function resolveEpcisQueryWindow(input: { limit?: number; offset?: number }): EpcisQueryWindow {
+  return Object.freeze({
+    limit: resolveEpcisPageSize(input.limit ?? DEFAULT_EPCIS_QUERY_LIMIT),
+    offset: resolveEpcisOffset(input.offset),
+  });
+}
+
+/** HTTP-only lookahead and continuation policy around a normalized query window. */
+export class EpcisHttpPage {
+  readonly queryWindow: EpcisQueryWindow;
+  private readonly pageSize: number;
+
+  constructor(input: { perPage?: number; offset?: number }) {
+    const page = resolveEpcisQueryWindow({
+      limit: input.perPage ?? DEFAULT_EPCIS_HTTP_PAGE_SIZE,
+      offset: input.offset,
+    });
+    this.pageSize = page.limit;
+    this.queryWindow = Object.freeze({ limit: page.limit + 1, offset: page.offset });
     Object.freeze(this);
   }
 
   take<T>(rows: T[]): { bindings: T[]; nextOffset?: number } {
     if (rows.length <= this.pageSize) return { bindings: rows };
-    const nextOffset = this.offset + this.pageSize;
+    const nextOffset = this.queryWindow.offset + this.pageSize;
     if (nextOffset > MAX_EPCIS_OFFSET) {
       throw new EpcisPaginationError('EPCIS pagination limit reached; narrow the event or time filters to retrieve the remaining events');
     }

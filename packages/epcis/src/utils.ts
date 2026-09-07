@@ -1,3 +1,4 @@
+import { EpcisPaginationError } from './pagination.js';
 import type { EpcisQueryParams } from './types.js';
 
 /** Decode a base64 nextPageToken ("offset:N") to its numeric offset, or null if invalid. */
@@ -50,6 +51,14 @@ function resolveParam(sp: URLSearchParams, canonical: string): string | undefine
   return undefined;
 }
 
+/** A supplied numeric field must not silently become an omitted field. */
+function parsePaginationInteger(value: string, name: string): number {
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new EpcisPaginationError(`EPCIS ${name} must be a nonnegative safe integer`);
+  }
+  return Number(value);
+}
+
 /** Parse URLSearchParams into typed EpcisQueryParams. */
 export function parseQueryParams(sp: URLSearchParams): EpcisQueryParams {
   const params: EpcisQueryParams = { finalized: true };
@@ -81,16 +90,9 @@ export function parseQueryParams(sp: URLSearchParams): EpcisQueryParams {
     }
   }
 
-  const perPage = sp.get('perPage');
-  if (perPage != null && /^\d+$/.test(perPage)) {
-    params.perPage = Number.parseInt(perPage, 10);
-  }
-
-  // limit is an alias for perPage — only applies if perPage wasn't explicitly set
-  const limit = sp.get('limit');
-  if (params.perPage == null && limit != null && /^\d+$/.test(limit)) {
-    params.perPage = Number.parseInt(limit, 10);
-  }
+  // The explicit perPage value wins over its limit alias, including invalid input.
+  const perPage = sp.get('perPage') ?? sp.get('limit');
+  if (perPage !== null) params.perPage = parsePaginationInteger(perPage, 'page size');
 
   // nextPageToken is a base64-encoded "offset:N" — takes precedence over raw offset
   const nextPageToken = sp.get('nextPageToken');
@@ -103,8 +105,8 @@ export function parseQueryParams(sp: URLSearchParams): EpcisQueryParams {
 
   if (params.offset == null) {
     const offset = sp.get('offset');
-    if (offset != null && /^\d+$/.test(offset)) {
-      params.offset = Number.parseInt(offset, 10);
+    if (offset !== null) {
+      params.offset = parsePaginationInteger(offset, 'offset');
     }
   }
 

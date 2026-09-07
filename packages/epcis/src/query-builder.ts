@@ -1,4 +1,4 @@
-import { EpcisPaginationPlan } from './pagination.js';
+import { resolveEpcisQueryWindow, type EpcisQueryWindow } from './pagination.js';
 import {
   contextGraphDataUri,
   contextGraphMetaUri,
@@ -62,26 +62,16 @@ function extensionLocalNameFilter(predicateVariable: string, localName: string):
  * - Groups by ?event (the event URI) instead of ?ual (the graph URI)
  */
 export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string): string {
-  const page = new EpcisPaginationPlan(params.limit, params.offset, 100);
-  return renderEpcisQuery(params, contextGraphId, page.pageSize, page.offset);
+  return renderEpcisQuery(params, contextGraphId, resolveEpcisQueryWindow(params));
 }
 
 type EpcisEventFilters = Omit<EpcisQueryParams, 'limit' | 'offset' | 'perPage'>;
 
-/** Build a request page from its already-normalized plan; no wire pagination is re-read. */
-export function buildEpcisPageQuery(
-  filters: EpcisEventFilters,
-  contextGraphId: string,
-  page: EpcisPaginationPlan,
-): string {
-  return renderEpcisQuery(filters, contextGraphId, page.queryRowLimit, page.offset);
-}
-
-function renderEpcisQuery(
+/** Render one explicit row window, including any lookahead requested by the caller. */
+export function renderEpcisQuery(
   params: EpcisEventFilters,
   contextGraphId: string,
-  limit: number,
-  offset: number,
+  { limit, offset }: EpcisQueryWindow,
 ): string {
   const partition = params.finalized === false ? 'swm' : 'finalized';
   // Finalized data lands at `<cg>/<sub>` when a sub-graph is targeted —

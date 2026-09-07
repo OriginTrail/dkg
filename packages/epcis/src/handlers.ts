@@ -1,7 +1,9 @@
-import { EpcisPaginationError, EpcisPaginationPlan } from './pagination.js';
-import { compactEpcisEventType, EpcisEventTypeError } from './epcis-vocabulary.js';
+import { EpcisQueryError } from './query-error.js';
+export { EpcisQueryError } from './query-error.js';
+import { EpcisHttpPage } from './pagination.js';
+import { compactEpcisEventType } from './epcis-vocabulary.js';
 import { createValidator } from './validation.js';
-import { buildEpcisPageQuery } from './query-builder.js';
+import { renderEpcisQuery } from './query-builder.js';
 import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js';
 import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
 
@@ -31,16 +33,6 @@ export class EpcisValidationError extends Error {
   constructor(public readonly errors: string[]) {
     super(`EPCIS validation failed: ${errors.join('; ')}`);
     this.name = 'EpcisValidationError';
-  }
-}
-
-export class EpcisQueryError extends Error {
-  constructor(
-    message: string,
-    public readonly statusCode: number,
-  ) {
-    super(message);
-    this.name = 'EpcisQueryError';
   }
 }
 
@@ -177,80 +169,73 @@ export async function handleEventsQuery(
   searchParams: URLSearchParams,
   config: EventsQueryConfig,
 ): Promise<EventsQueryResult> {
-  try {
-    const params = parseQueryParams(searchParams);
+  const params = parseQueryParams(searchParams);
 
-    if (!hasValidDateRange(params)) {
-      throw new EpcisQueryError('Invalid date range: "from" must be before or equal to "to"', 400);
-    }
+  if (!hasValidDateRange(params)) {
+    throw new EpcisQueryError('Invalid date range: "from" must be before or equal to "to"', 400);
+  }
 
-    const { perPage, offset, limit: _limit, ...filters } = params;
-    const page = new EpcisPaginationPlan(perPage, offset);
-    const sparql = buildEpcisPageQuery(
-      { ...filters, subGraphName: config.subGraphName }, config.contextGraphId, page,
-    );
-    // The engine's scope guard rejects any explicit GRAPH IRI outside the
-    // allow-set it derives from the query options, so the options MUST match
-    // exactly the graphs `buildEpcisQuery` references for this route:
-    //   - `includePrivate`        → the `<cg>[/<sub>]/_private` partition the
-    //                               private-anchored-events branch always names.
-    //   - `subGraphName`          → reads `<cg>/<sub>` (finalized) /
-    //                               `<cg>/<sub>/_shared_memory` (SWM) plus the
-    //                               sub-graph private/meta graphs.
-    //   - `graphSuffix:'_shared_memory'` (finalized=false) → reads the SWM
-    //                               partition (`…/_shared_memory[_meta]`) instead
-    //                               of the canonical data graph.
-    // Omitting any of these makes the guard reject the query with
-    // "GRAPH <…> is outside the allowed graph set" (it fails for every
-    // sub-graph or non-finalized request, on every store backend).
-    const result = await config.queryEngine.query(sparql, {
-      contextGraphId: config.contextGraphId,
-      subGraphName: config.subGraphName,
-      graphSuffix: params.finalized === false ? '_shared_memory' : undefined,
-      includePrivate: true,
-    });
+  const { perPage, offset, limit: _limit, ...filters } = params;
+  const page = new EpcisHttpPage({ perPage, offset });
+  const sparql = renderEpcisQuery(
+    { ...filters, subGraphName: config.subGraphName }, config.contextGraphId, page.queryWindow,
+  );
+  // The engine's scope guard rejects any explicit GRAPH IRI outside the
+  // allow-set it derives from the query options, so the options MUST match
+  // exactly the graphs `buildEpcisQuery` references for this route:
+  //   - `includePrivate`        → the `<cg>[/<sub>]/_private` partition the
+  //                               private-anchored-events branch always names.
+  //   - `subGraphName`          → reads `<cg>/<sub>` (finalized) /
+  //                               `<cg>/<sub>/_shared_memory` (SWM) plus the
+  //                               sub-graph private/meta graphs.
+  //   - `graphSuffix:'_shared_memory'` (finalized=false) → reads the SWM
+  //                               partition (`…/_shared_memory[_meta]`) instead
+  //                               of the canonical data graph.
+  // Omitting any of these makes the guard reject the query with
+  // "GRAPH <…> is outside the allowed graph set" (it fails for every
+  // sub-graph or non-finalized request, on every store backend).
+  const result = await config.queryEngine.query(sparql, {
+    contextGraphId: config.contextGraphId,
+    subGraphName: config.subGraphName,
+    graphSuffix: params.finalized === false ? '_shared_memory' : undefined,
+    includePrivate: true,
+  });
 
-    const { bindings, nextOffset } = page.take(result.bindings);
-    const eventList = bindings.map(toEpcisEvent);
+  const { bindings, nextOffset } = page.take(result.bindings);
+  const eventList = bindings.map(toEpcisEvent);
 
-    const body: EPCISQueryDocumentResponse = {
-      '@context': [GS1_EPCIS_CONTEXT, DKG_CONTEXT],
-      type: 'EPCISQueryDocument',
-      schemaVersion: '2.0',
-      epcisBody: {
-        queryResults: {
-          queryName: 'SimpleEventQuery',
-          resultsBody: {
-            eventList,
-          },
+  const body: EPCISQueryDocumentResponse = {
+    '@context': [GS1_EPCIS_CONTEXT, DKG_CONTEXT],
+    type: 'EPCISQueryDocument',
+    schemaVersion: '2.0',
+    epcisBody: {
+      queryResults: {
+        queryName: 'SimpleEventQuery',
+        resultsBody: {
+          eventList,
         },
       },
-    };
+    },
+  };
 
-    if (nextOffset === undefined) {
-      return { body };
-    }
-
-    // Build Link header with nextPageToken
-    const nextToken = encodePageToken(nextOffset);
-    const url = new URL(config.basePath, 'http://localhost');
-    // Preserve original query params
-    searchParams.forEach((value, key) => {
-      if (key !== 'nextPageToken' && key !== 'offset') {
-        url.searchParams.set(key, value);
-      }
-    });
-    url.searchParams.set('nextPageToken', nextToken);
-
-    const link = `<${url.pathname}?${url.searchParams.toString()}>; rel="next"`;
-
-    return { body, headers: { link } };
-  } catch (error) {
-    if (error instanceof EpcisEventTypeError || error instanceof EpcisPaginationError) {
-      throw new EpcisQueryError(error.message, 400);
-    }
-    throw error;
+  if (nextOffset === undefined) {
+    return { body };
   }
+
+  // Build Link header with nextPageToken
+  const nextToken = encodePageToken(nextOffset);
+  const url = new URL(config.basePath, 'http://localhost');
+  // Preserve original query params
+  searchParams.forEach((value, key) => {
+    if (key !== 'nextPageToken' && key !== 'offset') {
+      url.searchParams.set(key, value);
+    }
+  });
+  url.searchParams.set('nextPageToken', nextToken);
+
+  const link = `<${url.pathname}?${url.searchParams.toString()}>; rel="next"`;
+
+  return { body, headers: { link } };
 }
 
 const validator = createValidator();
