@@ -89,17 +89,19 @@ export function buildEpcisQuery(
     ? contextGraphSubGraphPrivateUri(contextGraphId, params.subGraphName)
     : contextGraphPrivateUri(contextGraphId);
 
+  const rootMembership = '?rootPublication dkg:rootEntity ?event .';
+  const standardClasses = EPCIS_STANDARD_EVENT_TYPES.map((name) => sparqlIri(`${EPCIS_TYPE_PREFIX}${name}`));
   const wherePatterns: string[] = [];
   const filterClauses: string[] = [];
   const optionalClauses: string[] = [];
 
   wherePatterns.push('?event a ?eventType .');
-  // EPCIS document membership is the positive discriminator for extended
-  // event classes. It also distinguishes a nested typed extension, even when
-  // that extension has both event timestamp fields.
+  // Modern captures identify their event-list members explicitly. Historical
+  // direct-RDF publications identify standard event roots in canonical metadata
+  // (both per-token and collapsed UAL subjects retain dkg:rootEntity).
   wherePatterns.push(`FILTER(EXISTS { ?_eventList (epcis:eventList|epcisCurrent:eventList) ?event . }
-    || (${legacyStandaloneEventPattern()}))`);
-  optionalClauses.push('OPTIONAL { ?event epcis:eventTime ?eventTime . }');
+    || (?eventType IN (${standardClasses.join(', ')})
+      && EXISTS { GRAPH <${metaGraph}> { ${rootMembership} } }))`);
   optionalClauses.push('OPTIONAL { ?event epcis:eventTimeZoneOffset ?eventTimeZoneOffset . }');
 
   // eventID filter — matches the RDF subject (the event's @id / rootEntity)
@@ -184,6 +186,8 @@ export function buildEpcisQuery(
     } else if (params.to) {
       filterClauses.push(`FILTER(xsd:dateTime(?eventTime) < xsd:dateTime("${escapeSparql(params.to)}"))`);
     }
+  } else {
+    optionalClauses.push('OPTIONAL { ?event epcis:eventTime ?eventTime . }');
   }
 
   // Action filter — required when filtered, OPTIONAL otherwise
@@ -269,9 +273,10 @@ WHERE {
   ${filterClauses.join('\n  ')}
   OPTIONAL {
     GRAPH <${metaGraph}> {
-      { ?ka dkg:rootEntity ?event . ?ka dkg:partOf ?ual . }
+      ${rootMembership}
+      { ?rootPublication dkg:partOf ?ual . }
       union
-      { ?ual dkg:rootEntity ?event . ?ual dkg:batchId ?ualBid . }
+      { ?rootPublication dkg:batchId ?ualBid . BIND(?rootPublication AS ?ual) }
     }
   }
 }
@@ -279,17 +284,4 @@ GROUP BY ?event ?eventType ?eventTime ?eventTimeZoneOffset ?bizStep ?bizLocation
 ORDER BY DESC(?eventTime) ?event
 LIMIT ${limit}
 OFFSET ${offset}`;
-}
-
-/** Compatibility for standard event roots published directly as RDF before document capture. */
-function legacyStandaloneEventPattern(): string {
-  const classes = EPCIS_STANDARD_EVENT_TYPES.map((name) => sparqlIri(`${EPCIS_TYPE_PREFIX}${name}`));
-  // Legacy RDF has no event-list identity. Only EPCIS containment predicates
-  // disqualify a standard class here; an arbitrary incoming relationship cannot
-  // distinguish a nested object from a reference to an independent event.
-  const containment = ['sensorElementList', 'sensorMetadata', 'sensorReport',
-    'sourceList', 'destinationList', 'bizTransactionList', 'errorDeclaration']
-    .flatMap((name) => [`epcis:${name}`, `epcisCurrent:${name}`]).join('|');
-  return `?eventType IN (${classes.join(', ')})
-    && NOT EXISTS { ?_parent (${containment}) ?event . }`;
 }

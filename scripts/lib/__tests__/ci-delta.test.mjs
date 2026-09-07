@@ -246,6 +246,12 @@ test('code and config files under documentation trees fail closed', () => {
   assert.equal(pullRequestPlan([change('docs/diagram.png')]).mode, 'docs-only');
 });
 
+test('EPCIS source and query fixtures select the live Blazegraph owner', () => {
+  for (const file of ['packages/epcis/src/query-builder.ts', 'packages/epcis/test/event-classification.test.ts']) {
+    assert.ok(pullRequestPlan([change(file)]).lanes.tornado_blazegraph);
+  }
+});
+
 test('leaf and shared package snapshots include conservative downstream consumers', () => {
   const agent = pullRequestPlan([change('packages/agent/src/agent.ts')]);
   assert.deepEqual(selectedLanes(agent), [

@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import { buildEpcisQuery, escapeSparql, normalizeBizStep, normalizeGs1Vocabulary } from '../src/query-builder.js';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 
 const CONTEXT_GRAPH_ID = 'test-cg';
 const DATA_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}`;
@@ -9,74 +8,6 @@ const SHARED_MEMORY_GRAPH = `${DATA_GRAPH}/_shared_memory`;
 const PRIVATE_GRAPH = `${DATA_GRAPH}/_private`;
 
 describe('buildEpcisQuery', () => {
-  it.each([
-    { finalized: true },
-    { finalized: false },
-    { finalized: true, subGraphName: 'supply-chain' },
-    { finalized: false, subGraphName: 'supply-chain' },
-  ])('returns only event classes in public and anchored private data: %j', async (params) => {
-    const store = new OxigraphStore();
-    const scope = `${DATA_GRAPH}${params.subGraphName ? `/${params.subGraphName}` : ''}`;
-    const publicGraph = params.finalized ? scope : `${scope}/_shared_memory`;
-    const privateGraph = `${scope}/_private`;
-    const standardTypes = ['ObjectEvent', 'AggregationEvent', 'TransactionEvent', 'TransformationEvent', 'AssociationEvent'];
-    const eventTypes = [...standardTypes.map((type) => `https://gs1.github.io/EPCIS/${type}`),
-      'https://gs1.github.io/EPCIS/CustomEvent', 'https://example.org/Observation', 'urn:epcis:Observation'];
-    try {
-      const quads: Quad[] = [publicGraph, privateGraph].flatMap((graph) => {
-        const visibility = graph === publicGraph ? 'public' : 'private';
-        const subjectFor = (index: number) => `urn:test:${visibility}:event-${index}`;
-        const records = [
-          ...eventTypes.map((type, index) => ({ subject: subjectFor(index), type, member: index === 0 || index >= standardTypes.length })),
-          ...['EPCISDocument', 'EPCISQueryDocument', 'SensorElement'].map((name) => ({
-            subject: `urn:test:${visibility}:${name}`, type: `https://gs1.github.io/EPCIS/${name}`, member: false,
-          })),
-          // Both nested resources have type/time/offset; neither belongs to eventList.
-          { subject: `urn:test:${visibility}:nested-custom`, type: 'https://example.org/Observation', member: false },
-          { subject: `urn:test:${visibility}:nested-standard`, type: eventTypes[0], member: false },
-        ];
-        return records.flatMap(({ subject, type, member }) => [
-          { subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: type, graph },
-          { subject, predicate: 'https://gs1.github.io/EPCIS/eventTime', object: '"2024-03-01T08:00:00Z"', graph },
-          { subject, predicate: 'https://gs1.github.io/EPCIS/eventTimeZoneOffset', object: '"+00:00"', graph },
-          ...(member ? [{ subject: `urn:test:${visibility}:body`, predicate: `${visibility === 'public' ? 'https://gs1.github.io/EPCIS/' : 'https://ref.gs1.org/epcis/'}eventList`, object: subject, graph }] : []),
-          ...(subject.includes('nested-') ? [{ subject: subjectFor(7), predicate: subject.endsWith('nested-standard') ? 'https://gs1.github.io/EPCIS/sensorElementList' : 'https://example.org/detail', object: subject, graph }] : []),
-          ...(graph === privateGraph ? [{ subject, predicate: 'http://dkg.io/ontology/privateDataAnchor', object: '"true"', graph: publicGraph }] : []),
-        ]);
-      });
-      await store.insert(quads);
-      const all = await store.query(buildEpcisQuery(params, CONTEXT_GRAPH_ID));
-      expect(all.type).toBe('bindings');
-      if (all.type !== 'bindings') throw new Error('Expected event bindings');
-      expect(all.bindings).toHaveLength(eventTypes.length * 2);
-      expect(all.bindings.map((row) => row.event).sort()).toEqual(
-        ['public', 'private'].flatMap((partition) => eventTypes.map((_type, index) => `urn:test:${partition}:event-${index}`)).sort(),
-      );
-      // A different publisher can reference a legacy event without hiding it.
-      await store.insert([publicGraph, privateGraph].map((graph) => ({
-        subject: 'urn:shipment:unrelated', predicate: 'https://example.org/relatedEvent',
-        object: `urn:test:${graph === publicGraph ? 'public' : 'private'}:event-1`, graph,
-      })));
-      const referenced = await store.query(buildEpcisQuery(params, CONTEXT_GRAPH_ID));
-      expect(referenced).toEqual(all);
-      const filtered = await store.query(buildEpcisQuery({ ...params, eventType: 'ObjectEvent' }, CONTEXT_GRAPH_ID));
-      expect(filtered.type).toBe('bindings');
-      if (filtered.type !== 'bindings') throw new Error('Expected event bindings');
-      expect(filtered.bindings.map((row) => row.event).sort()).toEqual(['urn:test:private:event-0', 'urn:test:public:event-0']);
-      for (const eventType of eventTypes) {
-        const result = await store.query(buildEpcisQuery({ ...params, eventType }, CONTEXT_GRAPH_ID));
-        expect(result.type).toBe('bindings');
-        if (result.type !== 'bindings') throw new Error('Expected event bindings');
-        expect(result.bindings).toHaveLength(2);
-        expect(result.bindings.every((row) => row.eventType === eventType)).toBe(true);
-      }
-      const documents = await store.query(buildEpcisQuery({ ...params, eventType: 'https://gs1.github.io/EPCIS/EPCISDocument' }, CONTEXT_GRAPH_ID));
-      expect(documents).toMatchObject({ type: 'bindings', bindings: [] });
-    } finally {
-      await store.close();
-    }
-  });
-
   it('rejects an unsafe extended event type before interpolating it into SPARQL', () => {
     expect(() => buildEpcisQuery({ eventType: 'https://example.org/Event> ?s ?p ?o' }, CONTEXT_GRAPH_ID))
       .toThrow('eventType must be a standard EPCIS event name or an absolute event type IRI');

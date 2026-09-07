@@ -1,9 +1,12 @@
 # EPCIS event queries
 
 The events endpoint returns document event-list members, including extended
-classes, and supports legacy standalone standard event roots. EPCIS containers
-and known contained sensor/source/destination structures are excluded. Arbitrary
-incoming RDF relationships do not hide an otherwise valid legacy event.
+classes. A legacy standalone standard event requires a `dkg:rootEntity` row in
+the selected publication metadata graph. Both historical per-token and collapsed
+UAL metadata retain that predicate. A standard RDF type alone is insufficient:
+orphan rows and nested typed extension resources are excluded. Arbitrary incoming
+relationships do not hide a published legacy root. Restoring raw RDF without its
+publication metadata does not restore this legacy event identity.
 
 Standard event types use their short names. Extended types are returned as full
 IRIs, which can be reused in the `eventType` filter. Historical compact GS1
