@@ -696,6 +696,7 @@ export class QueryMethods extends DKGAgentBase {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
       allowColdRegistrationBinding?: boolean;
+      signal?: AbortSignal;
     } = {},
   ): Promise<boolean> {
     return (await this.resolveContextGraphReadAuthority(contextGraphId, opts)).outcome === 'allowed';
@@ -711,6 +712,7 @@ export class QueryMethods extends DKGAgentBase {
        * sensitive ordinary reads keep the short fail-closed chain deadline.
        */
       allowColdRegistrationBinding?: boolean;
+      signal?: AbortSignal;
     } = {},
   ): Promise<ContextGraphReadAuthorityDecision> {
     const acceptedPublicPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
@@ -725,7 +727,10 @@ export class QueryMethods extends DKGAgentBase {
       getAllowedPeers: () => this.getContextGraphAllowedPeers(contextGraphId),
       getRegisteredAuthority: () => this.resolveRegisteredContextGraphAuthority(
         contextGraphId,
-        { allowColdNameHashResolution: opts.allowColdRegistrationBinding },
+        {
+          allowColdNameHashResolution: opts.allowColdRegistrationBinding,
+          signal: opts.signal,
+        },
       ),
       isAgentAllowed: (agentAddress, roster) => this.isAgentAddressAllowed(agentAddress, roster),
       hasLocalAgentInRoster: (roster) => this.hasLocalAgentInGate(roster),

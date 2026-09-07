@@ -2030,6 +2030,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     if (this.started) return;
+    this.clearContextGraphSubscriptionAuthorityRetry();
+    this.contextGraphSubscriptionAuthorityRetryAbortController = new AbortController();
     this.contextGraphMembershipPersistence.reopen();
     this.vmReconcileRuntimeReady = false;
     this.graphScopedStoreClosed = false;
@@ -4262,6 +4264,65 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (this.vmReconcileStartupTimer.unref) this.vmReconcileStartupTimer.unref();
       this.log.info(ctx, `Chain-driven VM reconciliation armed (startupDelay ${startupDelayMs}ms, sweep ${DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS}ms, depth ${DKGAgentBase.VM_RECONCILE_CONFIRMATION_DEPTH})`);
     }
+    this.scheduleContextGraphSubscriptionAuthorityRetry(ctx);
+  }
+
+  scheduleContextGraphSubscriptionAuthorityRetry(
+    this: DKGAgent,
+    ctx: OperationContext,
+    delayMs = 0,
+  ): void {
+    if (
+      !this.started
+      || this.contextGraphSubscriptionAuthorityRetryTimer !== null
+      || this.contextGraphSubscriptionAuthorityRetryInFlight
+      || !this.getContextGraphSubscriptionRehydrationStatus()
+        ?.dormantReasons.authorityUnavailable.length
+    ) {
+      return;
+    }
+    const controller = this.contextGraphSubscriptionAuthorityRetryAbortController;
+    if (!controller || controller.signal.aborted) return;
+    this.contextGraphSubscriptionAuthorityRetryTimer = setTimeout(() => {
+      this.contextGraphSubscriptionAuthorityRetryTimer = null;
+      if (!this.started || controller.signal.aborted) return;
+      this.contextGraphSubscriptionAuthorityRetryInFlight = true;
+      this.rehydrateContextGraphSubscriptions({
+        allowColdRegistrationBinding: true,
+        signal: controller.signal,
+      })
+        .catch((error: unknown) => {
+          if (controller.signal.aborted) return;
+          this.log.warn(
+            ctx,
+            `Background context-graph subscription authority retry failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        })
+        .finally(() => {
+          if (this.contextGraphSubscriptionAuthorityRetryAbortController !== controller) return;
+          this.contextGraphSubscriptionAuthorityRetryInFlight = false;
+          if (!this.started || controller.signal.aborted) return;
+          if (
+            this.getContextGraphSubscriptionRehydrationStatus()
+              ?.dormantReasons.authorityUnavailable.length
+          ) {
+            this.scheduleContextGraphSubscriptionAuthorityRetry(ctx, 30_000);
+          }
+        });
+    }, Math.max(0, delayMs));
+    this.contextGraphSubscriptionAuthorityRetryTimer.unref?.();
+  }
+
+  clearContextGraphSubscriptionAuthorityRetry(this: DKGAgent): void {
+    if (this.contextGraphSubscriptionAuthorityRetryTimer !== null) {
+      clearTimeout(this.contextGraphSubscriptionAuthorityRetryTimer);
+      this.contextGraphSubscriptionAuthorityRetryTimer = null;
+    }
+    this.contextGraphSubscriptionAuthorityRetryAbortController?.abort();
+    this.contextGraphSubscriptionAuthorityRetryAbortController = null;
+    this.contextGraphSubscriptionAuthorityRetryInFlight = false;
   }
 
   /**
@@ -10126,7 +10187,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     };
   }
 
-  async rehydrateContextGraphSubscriptions(this: DKGAgent): Promise<void> {
+  async rehydrateContextGraphSubscriptions(
+    this: DKGAgent,
+    options: {
+      allowColdRegistrationBinding?: boolean;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
     if (!store) return;
     const ctx = createOperationContext('init');
@@ -10284,6 +10351,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const activatedRows: ContextGraphSubscriptionRecord[] = [];
       let activatedUserRows = 0;
       for (let i = 0; i < toActivate.length; i++) {
+        if (options.signal?.aborted) return;
         const row = toActivate[i];
         // The cap limits successful non-hosted activations, not candidates.
         // A denied/unavailable row therefore cannot consume capacity that a
@@ -10321,6 +10389,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // resolver subsequently returns `allowed`.
         const readAuthority = await this.resolveContextGraphReadAuthority(row.id, {
           allowSubscriptionFallback: false,
+          ...(options.allowColdRegistrationBinding === true
+            ? { allowColdRegistrationBinding: true }
+            : {}),
+          ...(options.signal ? { signal: options.signal } : {}),
         }).catch(() => ({
           outcome: 'unavailable' as const,
           source: 'legacy-local' as const,

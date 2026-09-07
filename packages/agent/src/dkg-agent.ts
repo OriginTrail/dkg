@@ -2231,6 +2231,7 @@ export class DKGAgent extends DKGAgentBase {
 
   async stop(): Promise<void> {
     if (!this.started) return;
+    this.clearContextGraphSubscriptionAuthorityRetry();
     // Fence membership persistence before any network callback can enqueue
     // more work; the physical drain below completes before store teardown.
     const membershipPersistDrain = this.contextGraphMembershipPersistence?.closeAndDrain()

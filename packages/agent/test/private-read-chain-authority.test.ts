@@ -586,6 +586,66 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
   }, CHAIN_POLICY_READ_TIMEOUT_MS + 3_500);
 
+  it('retries a cold persisted binding after startup and restores the subscription', async () => {
+    const contextGraphId = 'persisted-cold-binding-retry';
+    const chain = new MockChainAdapter();
+    const registered = await chain.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 0,
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+    });
+    let attempt = 0;
+    const resolveByNameHash = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
+      .mockImplementation((_nameHash, options) => {
+        attempt += 1;
+        if (attempt > 1) return Promise.resolve(registered.contextGraphId);
+        return new Promise<bigint | null>((resolve) => {
+          const signal = options?.signal;
+          if (signal?.aborted) {
+            resolve(null);
+            return;
+          }
+          signal?.addEventListener('abort', () => resolve(null), { once: true });
+        });
+      });
+    agent = await DKGAgent.create({
+      name: 'PrivateReadColdBindingBackgroundRetry',
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [{
+          id: contextGraphId,
+          subscribed: true,
+          synced: true,
+          sharedMemorySynced: true,
+          metaSynced: true,
+          syncScoped: true,
+        }],
+        save: async () => undefined,
+        delete: async () => undefined,
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+    });
+    const rehydrate = vi.spyOn(agent, 'rehydrateContextGraphSubscriptions');
+
+    await agent.start();
+    await vi.waitFor(
+      () => expect(agent.getSubscribedContextGraphs().has(contextGraphId)).toBe(true),
+      { timeout: 2_000 },
+    );
+
+    expect(rehydrate.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(resolveByNameHash).toHaveBeenCalled();
+    expect(resolveByNameHash.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      activated: 1,
+      dormant: 0,
+      dormantIds: [],
+      dormantReasons: {
+        authorityUnavailable: [],
+      },
+    });
+  }, CHAIN_POLICY_READ_TIMEOUT_MS + 4_000);
+
   it('leaves a persisted subscription dormant when startup cannot prove current read authority', async () => {
     const contextGraphId = 'persisted-private-poison';
     const chain = new MockChainAdapter();

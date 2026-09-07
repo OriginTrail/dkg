@@ -1237,6 +1237,15 @@ export class DKGAgentBase {
   /** Canonical dormant classification; public status arrays are projections. */
   protected readonly contextGraphSubscriptionDormancyById =
     new Map<string, ContextGraphDormancyReason>();
+  /**
+   * Startup authority reads stay short and fail closed. This detached owner
+   * retries only the persisted rows that were consequently left dormant,
+   * allowing one bounded cold registration-index build after startup without
+   * extending the daemon readiness path.
+   */
+  protected contextGraphSubscriptionAuthorityRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  protected contextGraphSubscriptionAuthorityRetryAbortController: AbortController | null = null;
+  protected contextGraphSubscriptionAuthorityRetryInFlight = false;
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
