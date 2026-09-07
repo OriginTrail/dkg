@@ -23,6 +23,22 @@ describe('EPCIS validation', () => {
     expect(result.errors).toBeUndefined();
   });
 
+  it.each(['https://gs1.github.io/EPCIS/CustomEvent', 'https://example.org/Observation', 'urn:epcis:Observation'])(
+    'accepts an extended event with a nested timestamped resource: %s', (type) => {
+      const result = validator.validate({
+        ...VALID_OBJECT_EVENT_DOC,
+        epcisBody: { eventList: [{
+          type, eventTime: '2024-03-01T08:00:00Z', eventTimeZoneOffset: '+00:00',
+          detail: {
+            '@id': 'urn:detail:1', type: 'https://example.org/Observation',
+            eventTime: '2024-03-01T08:00:00Z', eventTimeZoneOffset: '+00:00',
+          },
+        }] },
+      });
+      expect(result).toMatchObject({ valid: true, eventCount: 1 });
+    },
+  );
+
   it('rejects an invalid document with error details', () => {
     const result = validator.validate(INVALID_DOC);
     expect(result.valid).toBe(false);

@@ -6,12 +6,14 @@ import {
   contextGraphSharedMemoryMetaUri,
   contextGraphSubGraphPrivateUri,
   contextGraphSubGraphUri,
-  isSafeIri,
+  sparqlIri,
 } from '@origintrail-official/dkg-core';
 import type { EpcisQueryParams } from './types.js';
+import { EPCIS_TYPE_PREFIX, EPCIS_STANDARD_EVENT_TYPES } from './epcis-vocabulary.js';
+import { normalizeEpcisEventType } from './utils.js';
 
 const PREFIXES = `
-PREFIX epcis: <https://gs1.github.io/EPCIS/>
+PREFIX epcis: <${EPCIS_TYPE_PREFIX}>
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 PREFIX dkg: <http://dkg.io/ontology/>
 `;
@@ -86,15 +88,14 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   const filterClauses: string[] = [];
   const optionalClauses: string[] = [];
 
-  // Base pattern — always present
   wherePatterns.push('?event a ?eventType .');
-  wherePatterns.push('?event epcis:eventTime ?eventTime .');
-  wherePatterns.push('?event epcis:eventTimeZoneOffset ?eventTimeZoneOffset .');
-
-  // Both built-in and Extended-Event records require eventTime and
-  // eventTimeZoneOffset in the capture schema. Their type may be any full IRI;
-  // namespace membership alone also admits document and vocabulary resources.
-  filterClauses.push('FILTER(isIRI(?eventType) && ?eventType NOT IN (epcis:EPCISDocument, epcis:EPCISQueryDocument))');
+  // EPCIS document membership is the positive discriminator for extended
+  // event classes. It also distinguishes a nested typed extension, even when
+  // that extension has both event timestamp fields.
+  wherePatterns.push(`FILTER(EXISTS { ?_eventList epcis:eventList ?event . }
+    || (${legacyStandaloneEventPattern()}))`);
+  optionalClauses.push('OPTIONAL { ?event epcis:eventTime ?eventTime . }');
+  optionalClauses.push('OPTIONAL { ?event epcis:eventTimeZoneOffset ?eventTimeZoneOffset . }');
 
   // eventID filter — matches the RDF subject (the event's @id / rootEntity)
   if (params.eventID) {
@@ -103,11 +104,8 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
 
   // eventType filter — narrow to a specific EPCIS event type
   if (params.eventType) {
-    const typeIri = params.eventType.includes(':')
-      ? params.eventType
-      : `https://gs1.github.io/EPCIS/${params.eventType}`;
-    if (!isSafeIri(typeIri)) throw new Error('Invalid EPCIS event type IRI');
-    filterClauses.push(`FILTER(?eventType = <${typeIri}>)`);
+    const typeIri = normalizeEpcisEventType(params.eventType);
+    filterClauses.push(`FILTER(?eventType = ${sparqlIri(typeIri)})`);
   }
 
   // EPC filter — match epcList OR childEPCs per Section 8.2.7.1.
@@ -171,6 +169,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
 
   // Time range filter
   if (params.from || params.to) {
+    wherePatterns.push('?event epcis:eventTime ?eventTime .');
     if (params.from && params.to) {
       filterClauses.push(
         `FILTER(xsd:dateTime(?eventTime) >= xsd:dateTime("${escapeSparql(params.from)}") && xsd:dateTime(?eventTime) < xsd:dateTime("${escapeSparql(params.to)}"))`,
@@ -276,4 +275,13 @@ GROUP BY ?event ?eventType ?eventTime ?eventTimeZoneOffset ?bizStep ?bizLocation
 ORDER BY DESC(?eventTime) ?event
 LIMIT ${limit}
 OFFSET ${offset}`;
+}
+
+/** Compatibility for standard event roots published directly as RDF before document capture. */
+function legacyStandaloneEventPattern(): string {
+  const classes = EPCIS_STANDARD_EVENT_TYPES.map((name) => sparqlIri(`${EPCIS_TYPE_PREFIX}${name}`));
+  // A nested resource has an incoming edge in the data graph. Such a resource
+  // requires actual event-list membership, even when typed as a standard event.
+  return `?eventType IN (${classes.join(', ')})
+    && NOT EXISTS { ?_parent ?_relation ?event . }`;
 }

@@ -1,6 +1,7 @@
+import { compactEpcisEventType } from './epcis-vocabulary.js';
 import { createValidator } from './validation.js';
 import { buildEpcisQuery } from './query-builder.js';
-import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js';
+import { parseQueryParams, hasValidDateRange, encodePageToken, EpcisEventTypeError } from './utils.js';
 import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
 
 export interface AsyncCaptureConfig {
@@ -63,7 +64,7 @@ export interface EventsQueryResult {
 const DEFAULT_PER_PAGE = 30;
 const MAX_PER_PAGE = 1000;
 
-const EPCIS_TYPE_PREFIX = 'https://gs1.github.io/EPCIS/';
+
 
 /**
  * Strip N-Quads literal wrapping from a SPARQL binding value.
@@ -107,11 +108,7 @@ export function toEpcisEvent(binding: Record<string, string>): Record<string, un
 
   // Strip eventType URI prefix to short name
   const rawType = unwrapLiteral(binding['eventType'] ?? '');
-  if (rawType.startsWith(EPCIS_TYPE_PREFIX)) {
-    event.type = rawType.slice(EPCIS_TYPE_PREFIX.length);
-  } else if (rawType) {
-    event.type = rawType;
-  }
+  if (rawType) event.type = compactEpcisEventType(rawType);
 
   // Simple string fields — unwrap N-Quads literal quoting, include only when non-empty
   const eventTime = unwrapLiteral(binding['eventTime']);
@@ -194,10 +191,16 @@ export async function handleEventsQuery(
   // selection is per-request (route-level), not derivable from the
   // SPARQL query string, so it lives on the config rather than in
   // `params`.
-  const sparql = buildEpcisQuery(
-    { ...params, subGraphName: config.subGraphName, limit: perPage + 1, offset },
-    config.contextGraphId,
-  );
+  let sparql: string;
+  try {
+    sparql = buildEpcisQuery(
+      { ...params, subGraphName: config.subGraphName, limit: perPage + 1, offset },
+      config.contextGraphId,
+    );
+  } catch (error) {
+    if (error instanceof EpcisEventTypeError) throw new EpcisQueryError(error.message, 400);
+    throw error;
+  }
   // The engine's scope guard rejects any explicit GRAPH IRI outside the
   // allow-set it derives from the query options, so the options MUST match
   // exactly the graphs `buildEpcisQuery` references for this route:

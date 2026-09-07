@@ -42,6 +42,14 @@ function makeBindings(overrides: Partial<Record<string, string>> = {}): Record<s
 }
 
 describe('handleEventsQuery', () => {
+  it.each(['UnknownEvent', 'https://example.org/Event>', 'urn:epcis:bad type'])('rejects invalid eventType %s with 400 before querying', async (eventType) => {
+    const { engine, calls } = createTrackingQueryEngine();
+    await expect(handleEventsQuery(new URLSearchParams({ eventType }), {
+      contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH,
+    })).rejects.toMatchObject({ statusCode: 400 });
+    expect(calls).toHaveLength(0);
+  });
+
   it('returns EPCISQueryDocument envelope with reconstructed events', async () => {
     const { engine, calls } = createTrackingQueryEngine([
       makeBindings({
@@ -419,6 +427,11 @@ describe('toEpcisEvent', () => {
     const binding = makeBindings({ eventType: 'https://gs1.github.io/EPCIS/ObjectEvent' });
     const event = toEpcisEvent(binding);
     expect(event.type).toBe('ObjectEvent');
+  });
+
+  it('preserves the namespace of a GS1 extended event type in responses', () => {
+    expect(toEpcisEvent(makeBindings({ eventType: 'https://gs1.github.io/EPCIS/CustomEvent' })).type)
+      .toBe('https://gs1.github.io/EPCIS/CustomEvent');
   });
 
   it('strips AggregationEvent URI to short name', () => {
