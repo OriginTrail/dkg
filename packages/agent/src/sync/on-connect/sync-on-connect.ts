@@ -56,6 +56,7 @@ export type SyncOnConnectPeerOutcome =
     };
 
 export interface SyncOnConnectContext {
+  signal?: AbortSignal;
   remotePeer: string;
   syncingPeers: Set<string>;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
@@ -101,6 +102,7 @@ export interface SyncOnConnectContext {
  * changed later.
  */
 interface SelectedSharedMemoryRetryContext {
+  signal?: AbortSignal;
   remotePeer: string;
   syncingPeers: Set<string>;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
@@ -209,12 +211,16 @@ export async function runSelectedSharedMemoryRetry(
   const ctx = createOperationContext('sync');
   const shortPeer = remotePeer.slice(-8);
 
+  context.signal?.throwIfAborted();
   if (syncingPeers.has(remotePeer)) return 'already-syncing';
   syncingPeers.add(remotePeer);
 
   const runNonTransportStep = async <T>(step: () => Promise<T>): Promise<T> => {
     try {
-      return await step();
+      context.signal?.throwIfAborted();
+      const result = await step();
+      context.signal?.throwIfAborted();
+      return result;
     } catch (err) {
       throw new SyncOnConnectPostSyncError(remotePeer, err, { backoffEligible: false });
     }
@@ -222,6 +228,7 @@ export async function runSelectedSharedMemoryRetry(
 
   try {
     const protocols = await getPeerProtocols(remotePeer);
+    context.signal?.throwIfAborted();
     if (!protocols.includes(PROTOCOL_SYNC)) {
       logInfo(
         ctx,
@@ -241,6 +248,7 @@ export async function runSelectedSharedMemoryRetry(
       `Retrying ${admittedWork.contextGraphIds.length} selected shared-memory Context Graph(s) from ${shortPeer}`,
     );
     const selected = await admittedWork.syncFromPeer();
+    context.signal?.throwIfAborted();
     const accounting = classifySyncResult(
       selected.shared,
       'shared',
@@ -305,6 +313,7 @@ export async function runSyncOnConnect(
   const ctx = createOperationContext('sync');
   const shortPeer = remotePeer.slice(-8);
 
+  context.signal?.throwIfAborted();
   if (syncingPeers.has(remotePeer)) return 'already-syncing';
   syncingPeers.add(remotePeer);
 
@@ -384,7 +393,10 @@ export async function runSyncOnConnect(
   };
   const runNonTransportStep = async <T>(step: () => Promise<T>): Promise<T> => {
     try {
-      return await step();
+      context.signal?.throwIfAborted();
+      const result = await step();
+      context.signal?.throwIfAborted();
+      return result;
     } catch (err) {
       throw new SyncOnConnectPostSyncError(remotePeer, err, { backoffEligible: false });
     }
@@ -392,6 +404,7 @@ export async function runSyncOnConnect(
 
   try {
     const protocols = await getPeerProtocols(remotePeer);
+    context.signal?.throwIfAborted();
 
     if (protocols.includes(PROTOCOL_STORAGE_ACK)) {
       knownCorePeerIds.add(remotePeer);
@@ -427,6 +440,7 @@ export async function runSyncOnConnect(
       const synced = getDurableSyncContextGraphs
         ? await syncFromPeer(remotePeer, durableContextGraphIds)
         : await syncFromPeer(remotePeer);
+      context.signal?.throwIfAborted();
       const syncedAccounting = recordSyncAccounting(synced, 'durable');
       logInfo(ctx, `Synced ${syncedAccounting.insertedTriples} data triples from peer ${shortPeer}`);
       if (syncedAccounting.deferredByBackpressure) {
@@ -466,6 +480,7 @@ export async function runSyncOnConnect(
     if (newlyDiscovered.length > 0) {
       logInfo(ctx, `Discovered ${newlyDiscovered.length} new CG(s) — syncing durable data from ${shortPeer}`);
       const discoverSynced = await syncFromPeer(remotePeer, newlyDiscovered);
+      context.signal?.throwIfAborted();
       const discoverAccounting = recordSyncAccounting(discoverSynced, 'durable');
       logInfo(ctx, `Synced ${discoverAccounting.insertedTriples} durable triples for newly discovered CG(s) from ${shortPeer}`);
       if (discoverAccounting.deferredByBackpressure) {
@@ -489,6 +504,7 @@ export async function runSyncOnConnect(
       const wsContextGraphIds = ordinarySharedMemoryWork.contextGraphIds;
       if (wsContextGraphIds.length === 0) return finishSyncAccounting();
       const wsSynced = await ordinarySharedMemoryWork.syncFromPeer();
+      context.signal?.throwIfAborted();
       const sharedAccounting = recordSyncAccounting(wsSynced, 'shared');
       logInfo(ctx, `Synced ${sharedAccounting.insertedTriples} shared memory triples from peer ${shortPeer}`);
       if (sharedAccounting.deferredByBackpressure) {

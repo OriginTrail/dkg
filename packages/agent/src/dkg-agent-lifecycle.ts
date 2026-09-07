@@ -10,7 +10,7 @@
 
 import { createHash } from 'node:crypto';
 import { setTimeout as waitForPeerEventTurn } from 'node:timers/promises';
-import { PeerEventTasks } from './p2p/peer-event-tasks.js';
+import { PeerConnectionCoordinator } from './p2p/peer-connection-coordinator.js';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -1807,12 +1807,6 @@ function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
     totalSnapshots: 0,
     completed: true,
   };
-}
-
-interface PeerSyncConnection {
-  direction: 'inbound' | 'outbound';
-  remoteAddr?: { toString(): string };
-  remotePeer: { toString(): string };
 }
 
 export class LifecycleSyncMethods extends DKGAgentBase {
@@ -3875,25 +3869,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Abort synchronously at the start of stop(), before libp2p tears down.
     // A signal belongs to this node lifetime, including pending continuations.
     this.syncPeerEvents?.close();
-    this.syncPeerEvents = new PeerEventTasks(() => {
-      const disconnectedAt = Date.now();
-      for (const peer of this.node.libp2p.getPeers()) {
-        this.lastSyncDisconnectedAt.set(peer.toString(), disconnectedAt);
-      }
-      // A node lifetime is not a transport flap. Discard both freshness and
-      // enqueue cooldowns immediately, even when restart takes under 15 seconds.
-      this.lastSuccessfulSyncAt.clear();
-      this.lastSyncProgressAt.clear();
-      this.catchupOnConnectAt.clear();
-      this.skippedNoSyncPeers.clear();
-    });
+    this.syncPeerEvents = this.createPeerConnectionCoordinator(ctx);
     const peerEvents = this.syncPeerEvents;
     const { signal } = peerEvents;
     this.node.libp2p.addEventListener('connection:open', (evt) => {
-      peerEvents.run(
-        () => this.syncAfterPeerConnection(evt.detail, ctx, peerEvents),
-        (error) => handleSyncError(evt.detail.remotePeer.toString(), error),
-      );
+      peerEvents.connectionOpened(evt.detail);
     }, { signal });
 
     // Remember when the last live connection to a peer is gone. A3 keeps
@@ -4718,7 +4698,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           `Deferring sync from peer ${remotePeer.slice(-8)} due to local backpressure${detail}`,
         );
       },
-    }, options);
+    }, { ...options, signal: this.syncPeerEvents?.signal });
   }
 
   queueSyncFromPeerOnConnect(
@@ -4731,6 +4711,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       rfc64RecoveryPlan?: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>;
     } = {},
   ): boolean {
+    if (this.syncPeerEvents?.signal.aborted) return false;
     const syncTiming = this.config.syncReconcilerTiming;
     const selectedSwmRetryRequired = options.rfc64RecoveryPlan !== undefined
       || (
@@ -4812,6 +4793,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     probe: SyncReconcilerProbe,
     source: SyncAdmissionSource = 'on-connect',
   ): Promise<SyncReconcilerAttemptOutcome> {
+    if (this.syncPeerEvents?.signal.aborted) return 'not-started';
     if (!syncOnConnectEnabled(this.config)) return 'not-started';
     const runner = this.createSyncOnConnectPeerJobRunner(remotePeer, {
       initialProbe: probe,
@@ -4831,6 +4813,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     source: SyncAdmissionSource = 'on-connect',
     recoveryPlan?: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
   ): Promise<SyncReconcilerAttemptOutcome> {
+    if (this.syncPeerEvents?.signal.aborted) return 'not-started';
     if (
       recoveryPlan === undefined
       && !this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer)
@@ -4857,6 +4840,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
     source: SyncAdmissionSource = 'on-connect',
   ): Promise<SyncOnConnectOutcome | 'not-started'> {
+    const signal = this.syncPeerEvents?.signal;
+    if (signal?.aborted) return 'not-started';
     if (!this.started || !syncOnConnectEnabled(this.config)) return 'not-started';
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
       return 'not-started';
@@ -4917,6 +4902,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return runSyncOnConnect({
       remotePeer,
       syncingPeers: this.syncingPeers,
+      signal,
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
       knownCorePeerIds: this.knownCorePeerIds,
       knownCorePeerIdsV2: this.knownCorePeerIdsV2,
@@ -4950,6 +4936,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
         const accumulator = createDurableSyncAccumulator();
         for (const contextGraphId of coordinated) {
+          signal?.throwIfAborted();
           if (typeof this.syncDurableRecoveryContextGraph === 'function') {
             const recovery = await this.syncDurableRecoveryContextGraph(contextGraphId, {
               candidatePeerIds: [peerId],
@@ -4973,6 +4960,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             );
           }
         }
+        signal?.throwIfAborted();
         if (ordinary.length > 0) {
           mergeDurableSyncResultIntoAccumulator(
             accumulator,
@@ -5014,11 +5002,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       },
       syncSharedMemoryOnConnect: syncOnConnectEnabled(this.config)
         && (this.config.syncSharedMemoryOnConnect ?? true),
-      logInfo: (ctx, message) => this.log.info(ctx, message),
+      logInfo: (ctx, message) => { if (!signal?.aborted) this.log.info(ctx, message); },
       onPeerSkippedNoSync: (peerId) => {
-        this.skippedNoSyncPeers.add(peerId);
+        if (!signal?.aborted) this.skippedNoSyncPeers.add(peerId);
       },
       onSyncAccounting: (peerId, outcome) => {
+        if (signal?.aborted) return;
         if (onSyncAccounting) {
           onSyncAccounting(outcome);
         } else {
@@ -5035,6 +5024,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     source: SyncAdmissionSource = 'on-connect',
     recoveryPlan?: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
   ): Promise<SyncOnConnectOutcome | 'not-started'> {
+    const signal = this.syncPeerEvents?.signal;
+    if (signal?.aborted) return 'not-started';
     if (!this.started) return 'not-started';
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
       return 'not-started';
@@ -5075,6 +5066,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return runSelectedSharedMemoryRetry({
       remotePeer,
       syncingPeers: this.syncingPeers,
+      signal,
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
       selectedSharedMemoryLane: {
         admitWork: () => Object.freeze({
@@ -5094,11 +5086,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ),
         }),
       },
-      logInfo: (ctx, message) => this.log.info(ctx, message),
+      logInfo: (ctx, message) => { if (!signal?.aborted) this.log.info(ctx, message); },
       onPeerSkippedNoSync: (peerId) => {
-        this.skippedNoSyncPeers.add(peerId);
+        if (!signal?.aborted) this.skippedNoSyncPeers.add(peerId);
       },
       onSyncAccounting: (peerId, outcome) => {
+        if (signal?.aborted) return;
         if (onSyncAccounting) {
           onSyncAccounting(outcome);
         } else {
@@ -5309,123 +5302,49 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
   }
 
-  /** Admission, relay enrichment and recovery for one connection-open event. */
-  protected async syncAfterPeerConnection(this: DKGAgent,
-    connection: PeerSyncConnection,
-    ctx: OperationContext,
-    peerEvents: PeerEventTasks,
-  ): Promise<void> {
-    const { signal } = peerEvents;
-    signal.throwIfAborted();
-    const remotePeer = connection.remotePeer.toString();
-    if (remotePeer === this.node.libp2p.peerId.toString()) return;
-    const replayContextGraphIds = [...new Set([
-      ...this.readRfc64CatalogResponsibilitiesV1()
-        .filter((responsibility) => responsibility.active && responsibility.mode !== 'legacy')
-        .map((responsibility) => responsibility.contextGraphId),
-      ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority)
-        .filter((contextGraphId) => {
-          const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
-          return authority.active && authority.mode !== 'legacy';
-        }),
-    ])].sort();
-    for (const contextGraphId of replayContextGraphIds) {
-      this.markRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
-    }
-    const releaseCleanup = peerEvents.onClose(() => {
-      for (const contextGraphId of replayContextGraphIds) {
-        this.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
-      }
+  protected createPeerConnectionCoordinator(this: DKGAgent, ctx: OperationContext): PeerConnectionCoordinator {
+    return new PeerConnectionCoordinator({
+      localPeerId: () => this.node.libp2p.peerId.toString(),
+      replayContextGraphIds: () => {
+        const replayContextGraphIds = [...new Set([
+          ...this.readRfc64CatalogResponsibilitiesV1()
+            .filter((responsibility) => responsibility.active && responsibility.mode !== 'legacy')
+            .map((responsibility) => responsibility.contextGraphId),
+          ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority)
+            .filter((contextGraphId) => {
+              const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
+              return authority.active && authority.mode !== 'legacy';
+            }),
+        ])].sort();
+        return replayContextGraphIds;
+      },
+      markReplayPending: (cg, peer) => this.markRfc64CatalogReplayPeerPendingV1(cg, peer),
+      clearReplayPending: (cg, peer) => this.clearRfc64CatalogReplayPeerPendingV1(cg, peer),
+      ensureAdmitted: (peer, signal) => this.networkAdmissionCoordinator.ensureAdmitted(peer, ctx, { signal }),
+      enrich: (connection) => this.enrichPeerStoreFromInboundCircuit(connection),
+      drainSenderKeys: (peer) => this.drainPendingSenderKeyForPeer(peer, ctx),
+      reannounce: (peer) => this.reannounceRfc64CatalogHeadsToPeerV1(peer),
+      requestReplays: (cg) => this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(cg),
+      queueSync: (peer, onError) => this.queueSyncFromPeerOnConnect(peer, onError),
+      log: { info: (message) => this.log.info(ctx, message), warn: (message) => this.log.warn(ctx, message) },
+      retireSyncState: () => {
+        this.syncOnConnectPeerScheduler?.close();
+        this.syncOnConnectPeerScheduler = null;
+        // Active operations retain the old set; their finalizers cannot delete
+        // a same-peer operation admitted by the next node lifetime.
+        this.syncingPeers = new Set();
+        const disconnectedAt = Date.now();
+        for (const peer of this.node.libp2p.getPeers()) {
+          this.lastSyncDisconnectedAt.set(peer.toString(), disconnectedAt);
+        }
+        this.lastSuccessfulSyncAt.clear();
+        this.lastSyncProgressAt.clear();
+        this.catchupOnConnectAt.clear();
+        this.rfc64ExactCatchupOnConnectAt.clear();
+        this.syncReconcilerBackoff.clear();
+        this.skippedNoSyncPeers.clear();
+      },
     });
-    try {
-      let admitted = false;
-      try {
-        admitted = await this.networkAdmissionCoordinator.ensureAdmitted(remotePeer, ctx, { signal });
-      } catch (err: unknown) {
-        signal.throwIfAborted();
-        const message = err instanceof Error ? err.message : String(err);
-        this.log.warn(ctx, `Network admission probe failed for ${remotePeer.slice(-8)} on connect: ${message}`);
-        for (const contextGraphId of replayContextGraphIds) {
-          this.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
-        }
-        return;
-      }
-      signal.throwIfAborted();
-      if (!admitted) {
-        for (const contextGraphId of replayContextGraphIds) {
-          this.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
-        }
-        return;
-      }
-      try {
-        await this.enrichPeerStoreFromInboundCircuit(connection);
-      } catch (err: unknown) {
-        signal.throwIfAborted();
-        const message = err instanceof Error ? err.message : String(err);
-        this.log.warn(ctx, `Reverse-path peerStore enrichment failed for ${remotePeer}: ${message}`);
-      }
-      signal.throwIfAborted();
-      // PR-2 (SWM-fanout plan): drain pending sender-key packages
-      // that were queued because the recipient had no advertised
-      // peerId at publish time. Tolerant of profile-lookup failure
-      // (the next connection:open will retry).
-      try {
-        const drained = await this.drainPendingSenderKeyForPeer(remotePeer, ctx);
-        signal.throwIfAborted();
-        if (drained > 0) {
-          this.log.info(ctx, `Drained ${drained} pending SWM sender-key package(s) for ${remotePeer}`);
-        }
-      } catch (err: unknown) {
-        signal.throwIfAborted();
-        const message = err instanceof Error ? err.message : String(err);
-        this.log.warn(ctx, `Pending SWM sender-key drain on connect failed for ${remotePeer}: ${message}`);
-      }
-      signal.throwIfAborted();
-      // The receiver owns replay completeness. Provider-initiated pushes do
-      // not carry a promised-head manifest and can otherwise leave a brief
-      // A-applied/B-undiscovered window reporting complete. Request every
-      // active CG through the completion-capable scoped protocol instead.
-      // Keep the 10.0.15 rolling-upgrade direction alive: legacy receivers
-      // cannot request V2 completion, but they can still consume ordinary
-      // head announcements. Upgraded receivers remain fenced by the scoped
-      // pull below and never interpret this compatibility push as complete.
-      const reannouncement = this.reannounceRfc64CatalogHeadsToPeerV1(remotePeer).catch((err: unknown) => {
-        if (signal.aborted) return;
-        const message = err instanceof Error ? err.message : String(err);
-        this.log.warn(
-          ctx,
-          `RFC-64 compatibility re-announcement failed for ${remotePeer.slice(-8)}: ${message}`,
-        );
-      });
-      const replays = replayContextGraphIds.map((contextGraphId) =>
-        this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
-          contextGraphId,
-        ).then((result) => {
-          if (signal.aborted) return;
-          if (result.failed > 0) {
-            this.log.warn(
-              ctx,
-              `RFC-64 catalog replay incomplete for "${contextGraphId}" after ${remotePeer.slice(-8)} connected`,
-            );
-          }
-        }).catch((err: unknown) => {
-          if (signal.aborted) return;
-          const message = err instanceof Error ? err.message : String(err);
-          this.log.warn(
-            ctx,
-            `RFC-64 catalog replay failed after ${remotePeer.slice(-8)} connected: ${message}`,
-          );
-        }),
-      );
-      this.queueSyncFromPeerOnConnect(remotePeer, (peer, error) => {
-        this.log.warn(ctx, `Sync-on-connect failed for ${peer.slice(-8)}: ${error instanceof Error ? error.message : String(error)}`);
-      });
-      // Catalog operations have their own runtime drain. Keep this connection's
-      // pending-fence cleanup registered until those terminal promises settle.
-      await Promise.all([reannouncement, ...replays]);
-    } finally {
-      releaseCleanup();
-    }
   }
 
   /**
@@ -5515,6 +5434,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * — `runSyncOnConnect` itself is idempotent via `syncingPeers`.
    */
   async reconcileSyncFromConnectedPeers(this: DKGAgent): Promise<void> {
+    const signal = this.syncPeerEvents?.signal;
+    if (signal?.aborted) return;
     if (!this.started) return;
     if (!syncReconcilerEnabled(this.config) || !syncOnConnectEnabled(this.config)) return;
     const now = Date.now();
@@ -5545,18 +5466,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // peers are never delayed.
       const backoff = this.syncReconcilerBackoff.get(peerId);
       const probe = await this.getSyncReconcilerProbe(peerId);
+      if (signal?.aborted) return;
       if (backoff && now < backoff.nextRetryAt) {
         if (!this.hasSyncReconcilerProbeChanged(backoff, probe)) {
           continue;
         }
         this.syncReconcilerBackoff.delete(peerId);
       }
-      if (!(await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'Sync reconciler'))) continue;
+      const admitted = await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'Sync reconciler', signal);
+      if (signal?.aborted) return;
+      if (!admitted) continue;
       const shortPeer = peerId.slice(-8);
       this.log.info(ctx, `Sync reconciler retrying ${shortPeer} (last success: ${lastOk == null ? 'never' : `${Math.round((now - lastOk) / 1000)}s ago`}${backoff ? `, prior failures: ${backoff.failures}` : ''})`);
       this.attemptSyncFromPeerWithReconcilerAccounting(peerId, probe, 'reconcile')
         .then(() => undefined)
         .catch((err: unknown) => {
+          if (signal?.aborted) return;
           const message = err instanceof Error ? err.message : String(err);
           if (err instanceof SyncOnConnectPostSyncError) {
             const backoffNote = err.backoffEligible ? 'growing peer backoff' : 'retrying without growing peer backoff';

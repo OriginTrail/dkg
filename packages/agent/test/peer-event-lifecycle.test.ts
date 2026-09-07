@@ -6,6 +6,125 @@ import { createPeerEventFixture, deferred, flushMicrotasks } from './_helpers/pe
 const PROBE = { protocolsKey: null, connectionKey: null } satisfies Awaited<ReturnType<DKGAgent['getSyncReconcilerProbe']>>;
 
 describe('peer-event lifecycle', () => {
+  it('keeps active-peer ownership separate when old work settles after a new lifetime starts', async () => {
+    const f = await createPeerEventFixture();
+    const oldGate = deferred<string[]>();
+    const newGate = deferred<string[]>();
+    try {
+      vi.spyOn(f.agent.networkAdmissionCoordinator, 'isAcceptedPeer').mockReturnValue(true);
+      const protocols = vi.spyOn(f.agent, 'getPeerProtocols')
+        .mockReturnValueOnce(oldGate.promise).mockReturnValueOnce(newGate.promise);
+      const oldAttempt = f.agent.trySyncFromPeer(f.peerId).catch(() => undefined);
+      await f.agent.stop();
+      await f.agent.start();
+      vi.spyOn(f.agent.networkAdmissionCoordinator, 'isAcceptedPeer').mockReturnValue(true);
+      const newAttempt = f.agent.trySyncFromPeer(f.peerId);
+      expect(protocols).toHaveBeenCalledTimes(2);
+      oldGate.resolve([]);
+      await oldAttempt;
+      await expect(f.agent.trySyncFromPeer(f.peerId)).resolves.toBe('already-syncing');
+      expect(protocols).toHaveBeenCalledTimes(2);
+      newGate.resolve([]);
+      await expect(newAttempt).resolves.toBe('skipped-no-sync');
+    } finally { oldGate.resolve([]); newGate.resolve([]); await f.close(); }
+  });
+
+  it('cancels queued catch-up synchronously before slow shutdown and permits a new queue after restart', async () => {
+    const f = await createPeerEventFixture();
+    const gate = deferred<void>();
+    try {
+      vi.spyOn(f.agent.networkAdmissionCoordinator, 'isAcceptedPeer').mockReturnValue(true);
+      vi.spyOn(f.agent, 'getSyncReconcilerProbe').mockResolvedValue(PROBE);
+      const attempt = vi.spyOn(f.agent, 'trySyncFromPeer').mockResolvedValue('synced');
+      vi.spyOn(f.agent, 'drainCoreHostRecordings').mockReturnValueOnce(gate.promise);
+      expect(f.agent.queueSyncFromPeerOnConnect(f.peerId, () => {}, 10)).toBe(true);
+      const stopping = f.agent.stop();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(attempt).not.toHaveBeenCalled();
+      gate.resolve();
+      await stopping;
+      await f.agent.start();
+      vi.spyOn(f.agent.networkAdmissionCoordinator, 'isAcceptedPeer').mockReturnValue(true);
+      expect(f.agent.queueSyncFromPeerOnConnect(f.peerId, () => {}, 0)).toBe(true);
+      await vi.waitFor(() => expect(attempt).toHaveBeenCalledOnce());
+    } finally { gate.resolve(); await f.close(); }
+  });
+
+  it.each([
+    { entry: 'scheduler', disposition: 'clear' },
+    { entry: 'scheduler', disposition: 'retry' },
+    { entry: 'peer-update', disposition: 'clear' },
+    { entry: 'peer-update', disposition: 'retry' },
+  ] as const)('discards late $entry $disposition accounting across node lifetimes', async ({ entry, disposition }) => {
+    const f = await createPeerEventFixture();
+    const gate = deferred<void>();
+    const entered = deferred<void>();
+    try {
+      vi.spyOn(f.agent.networkAdmissionCoordinator, 'isAcceptedPeer').mockReturnValue(true);
+      vi.spyOn(f.agent, 'getSyncReconcilerProbe').mockResolvedValue(PROBE);
+      const attempt = vi.spyOn(f.agent, 'trySyncFromPeer').mockImplementationOnce(async (_peer, account) => {
+        entered.resolve();
+        await gate.promise;
+        account?.(disposition === 'clear'
+          ? { fresh: true, progress: true, reconcilerDisposition: 'clear' }
+          : { fresh: false, progress: true, reconcilerDisposition: 'retry' });
+        return 'synced';
+      }).mockResolvedValue('synced');
+      vi.spyOn(f.agent, 'isPeerConnectedForSyncBackoff').mockReturnValue(true);
+      if (entry === 'scheduler') f.agent.queueSyncFromPeerOnConnect(f.peerId, () => {}, 0);
+      else { f.state.skippedNoSyncPeers.add(f.peerId); f.dispatchUpdate(); }
+      await entered.promise;
+      await f.agent.stop();
+      await f.agent.start();
+      vi.spyOn(f.agent.networkAdmissionCoordinator, 'isAcceptedPeer').mockReturnValue(true);
+      gate.resolve();
+      await flushMicrotasks();
+      expect(f.state.lastSuccessfulSyncAt.has(f.peerId)).toBe(false);
+      expect(f.state.lastSyncProgressAt.has(f.peerId)).toBe(false);
+      expect(f.state.syncReconcilerBackoff.has(f.peerId)).toBe(false);
+      expect(f.agent.queueSyncFromPeerOnConnect(f.peerId, () => {}, 0)).toBe(true);
+      await vi.waitFor(() => expect(attempt).toHaveBeenCalledTimes(2));
+    } finally { gate.resolve(); await f.close(); }
+  });
+
+  it('does not mark a peer skipped when an old protocol lookup settles after restart', async () => {
+    const f = await createPeerEventFixture();
+    const gate = deferred<string[]>();
+    try {
+      vi.spyOn(f.agent.networkAdmissionCoordinator, 'isAcceptedPeer').mockReturnValue(true);
+      const protocols = vi.spyOn(f.agent, 'getPeerProtocols').mockReturnValueOnce(gate.promise);
+      const oldAttempt = f.agent.trySyncFromPeer(f.peerId).catch(() => undefined);
+      expect(protocols).toHaveBeenCalledOnce();
+      await f.agent.stop();
+      await f.agent.start();
+      gate.resolve([]);
+      await oldAttempt;
+      expect(f.state.skippedNoSyncPeers.has(f.peerId)).toBe(false);
+      expect(f.state.lastSyncProgressAt.has(f.peerId)).toBe(false);
+    } finally { gate.resolve([]); await f.close(); }
+  });
+
+  it('clears freshness and cooldown state for a peer absent from the stop-time connection list', async () => {
+    const f = await createPeerEventFixture();
+    try {
+      const now = Date.now();
+      f.state.lastSuccessfulSyncAt.set(f.peerId, now);
+      f.state.lastSyncProgressAt.set(f.peerId, now);
+      f.state.catchupOnConnectAt.set(f.peerId, now);
+      f.state.syncReconcilerBackoff.set(f.peerId, { failures: 1, nextRetryAt: now + 60_000, ...PROBE });
+      expect(f.agent.node.libp2p.getPeers()).not.toContainEqual(f.peer);
+      await f.agent.stop();
+      expect(f.state.lastSuccessfulSyncAt.has(f.peerId)).toBe(false);
+      expect(f.state.lastSyncProgressAt.has(f.peerId)).toBe(false);
+      expect(f.state.catchupOnConnectAt.has(f.peerId)).toBe(false);
+      expect(f.state.syncReconcilerBackoff.has(f.peerId)).toBe(false);
+      expect(f.state.lastSyncDisconnectedAt.has(f.peerId)).toBe(false);
+      await f.agent.start();
+      vi.spyOn(f.agent.networkAdmissionCoordinator, 'isAcceptedPeer').mockReturnValue(true);
+      expect(f.agent.queueSyncFromPeerOnConnect(f.peerId, () => {}, 60_000)).toBe(true);
+    } finally { await f.close(); }
+  });
+
   it.each(['denied', 'failed'] as const)('clears pending replay when connection admission is %s', async (outcome) => {
     const f = await createPeerEventFixture();
     try {
@@ -120,9 +239,13 @@ describe('peer-event lifecycle', () => {
     const f = await createPeerEventFixture();
     try {
       f.state.lastSuccessfulSyncAt.set(f.peerId, Date.now() - 1_000);
+      f.state.lastSyncProgressAt.set(f.peerId, Date.now() - 750);
       f.state.catchupOnConnectAt.set(f.peerId, Date.now() - 500);
       const peers = vi.spyOn(f.agent.node.libp2p, 'getPeers').mockReturnValue([f.peer]);
       await f.agent.stop();
+      expect(f.state.lastSuccessfulSyncAt.has(f.peerId)).toBe(false);
+      expect(f.state.lastSyncProgressAt.has(f.peerId)).toBe(false);
+      expect(f.state.catchupOnConnectAt.has(f.peerId)).toBe(false);
       peers.mockRestore();
       const disconnected = f.state.lastSyncDisconnectedAt.get(f.peerId);
       expect(disconnected).toBeTypeOf('number');
