@@ -1,4 +1,3 @@
-import { EPCIS_QUERY_STRING_FIELDS, EPCIS_QUERY_LOCATION_FIELDS, EPCIS_QUERY_ARRAY_BINDINGS } from './query-event-fields.js';
 import { isSafeIri } from '@origintrail-official/dkg-core';
 import { createValidator } from './validation.js';
 import { buildEpcisQuery } from './query-builder.js';
@@ -118,30 +117,39 @@ export function toEpcisEvent(binding: Record<string, string>): EPCISQueryEvent {
     event.type = rawType;
   }
 
-  for (const field of EPCIS_QUERY_STRING_FIELDS) {
-    const value = unwrapLiteral(binding[field]);
-    if (value) event[field] = value;
-  }
+  const eventTime = unwrapLiteral(binding.eventTime);
+  if (eventTime) event.eventTime = eventTime;
+  const eventTimeZoneOffset = unwrapLiteral(binding.eventTimeZoneOffset);
+  if (eventTimeZoneOffset) event.eventTimeZoneOffset = eventTimeZoneOffset;
+  const action = unwrapLiteral(binding.action);
+  if (action) event.action = action;
+  const bizStep = unwrapLiteral(binding.bizStep);
+  if (bizStep) event.bizStep = bizStep;
+  const disposition = unwrapLiteral(binding.disposition);
+  if (disposition) event.disposition = disposition;
+  const parentID = unwrapLiteral(binding.parentID);
+  if (parentID) event.parentID = parentID;
+  const configurationId = unwrapLiteral(binding.configurationId);
+  if (configurationId) event.configurationId = configurationId;
+  const shipmentId = unwrapLiteral(binding.shipmentId);
+  if (shipmentId) event.shipmentId = shipmentId;
 
-  // DKG provenance — namespaced field
-  const ual = unwrapLiteral(binding['ual']);
+  const ual = unwrapLiteral(binding.ual);
   if (ual) event['dkg:ual'] = ual;
 
-  for (const field of EPCIS_QUERY_LOCATION_FIELDS) {
-    const id = unwrapLiteral(binding[field]);
-    if (id) event[field] = { id };
-  }
+  const readPoint = unwrapLiteral(binding.readPoint);
+  if (readPoint) event.readPoint = { id: readPoint };
+  const bizLocation = unwrapLiteral(binding.bizLocation);
+  if (bizLocation) event.bizLocation = { id: bizLocation };
 
-  type ArrayField = {
-    [K in keyof EPCISQueryEvent]-?: NonNullable<EPCISQueryEvent[K]> extends string[] ? K : never;
-  }[keyof EPCISQueryEvent];
-  const concatFields = EPCIS_QUERY_ARRAY_BINDINGS satisfies readonly (readonly [string, ArrayField])[];
-  for (const [bindingKey, eventKey] of concatFields) {
-    const val = unwrapLiteral(binding[bindingKey]);
-    if (val) {
-      event[eventKey] = val.split(', ').map((s) => s.trim()).filter(Boolean);
-    }
-  }
+  const epcList = unwrapLiteral(binding.epcList);
+  if (epcList) event.epcList = epcList.split(', ').map((s) => s.trim()).filter(Boolean);
+  const childEPCs = unwrapLiteral(binding.childEPCList);
+  if (childEPCs) event.childEPCs = childEPCs.split(', ').map((s) => s.trim()).filter(Boolean);
+  const inputEPCList = unwrapLiteral(binding.inputEPCs);
+  if (inputEPCList) event.inputEPCList = inputEPCList.split(', ').map((s) => s.trim()).filter(Boolean);
+  const outputEPCList = unwrapLiteral(binding.outputEPCs);
+  if (outputEPCList) event.outputEPCList = outputEPCList.split(', ').map((s) => s.trim()).filter(Boolean);
 
   return event;
 }

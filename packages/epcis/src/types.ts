@@ -1,5 +1,3 @@
-import type { EpcisReconstructedField } from './query-event-fields.js';
-
 // EPCIS Document types based on GS1 EPCIS 2.0
 
 export interface EPCISDocument {
@@ -127,14 +125,24 @@ export interface QueryEngine {
   ): Promise<{ bindings: Record<string, string>[] }>;
 }
 
-// Remove the capture model's open extension index before selecting known fields.
-type StandardEpcisEvent = {
-  [K in keyof EPCISEvent as string extends K ? never : number extends K ? never : K]: EPCISEvent[K];
-};
-
-/** Only fields reconstructed by the query converter, with a reusable subject identifier. */
-export interface EPCISQueryEvent extends Partial<Pick<StandardEpcisEvent, EpcisReconstructedField>> {
+/** Closed query response, independent of the extensible capture document model. */
+export interface EPCISQueryEvent {
   eventID: string;
+  type?: string;
+  eventTime?: string;
+  eventTimeZoneOffset?: string;
+  action?: string;
+  bizStep?: string;
+  disposition?: string;
+  parentID?: string;
+  configurationId?: string;
+  shipmentId?: string;
+  readPoint?: { id: string };
+  bizLocation?: { id: string };
+  epcList?: string[];
+  childEPCs?: string[];
+  inputEPCList?: string[];
+  outputEPCList?: string[];
   'dkg:ual'?: string;
 }
 
