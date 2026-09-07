@@ -129,6 +129,8 @@ export default defineConfig({
       "test/rootless-lifecycle-graph.test.ts",
       "test/swm-recovery.test.ts",
       "test/swm-recovery-identity-preservation.test.ts",
+      // #2083: standalone runtime/type baseline established before adoption.
+      "test/shared-memory-sync-ownership.test.ts",
       "test/dkg-agent-snapshot-store-injection.test.ts",
       "test/swm-snapshot-sync.test.ts",
       "test/sync-responder-protection.test.ts",
