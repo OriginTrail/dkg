@@ -105,6 +105,12 @@ export function unwrapLiteral(value: string): string {
 export function toEpcisEvent(binding: Record<string, string>): Record<string, unknown> {
   const event: Record<string, unknown> = {};
 
+  // Current captures preserve the caller's RDF root; older captures may have
+  // a canonical DKG root. Expose the stored identifier so either can be used
+  // unchanged with the eventID query filter.
+  const eventID = unwrapLiteral(binding['event']);
+  if (eventID) event.eventID = eventID;
+
   // Strip eventType URI prefix to short name
   const rawType = unwrapLiteral(binding['eventType'] ?? '');
   if (rawType.startsWith(EPCIS_TYPE_PREFIX)) {
