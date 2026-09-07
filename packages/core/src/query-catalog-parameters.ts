@@ -10,6 +10,7 @@
  */
 
 import { isSafeIri, sparqlString } from './sparql-safe.js';
+import { prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 
 export const QUERY_CATALOG_PARAMETER_TYPES = [
   'string',
@@ -222,82 +223,30 @@ function isMissing(value: unknown): value is undefined | null {
 function scanQueryCatalogTemplatePlaceholders(
   template: string,
 ): QueryCatalogTemplatePlaceholder[] {
-  const placeholders: QueryCatalogTemplatePlaceholder[] = [];
-  let index = 0;
-  let quote: "'" | '"' | "'''" | '"""' | undefined;
-  let inComment = false;
-  let inIri = false;
+  // Placeholders are not SPARQL syntax. Substitute an inert RDF term of the
+  // same UTF-16 length only for lexical analysis. This also lets the canonical
+  // scanner mask IRI bodies containing placeholder-looking text, without
+  // teaching the SPARQL lexer a query-catalog-specific syntax extension.
+  const candidates = [...template.matchAll(/\{\{([A-Za-z][A-Za-z0-9_]*)\}\}/g)];
+  const lexicalSource = template.replace(/\{\{([A-Za-z][A-Za-z0-9_]*)\}\}/g,
+    (placeholder) => '0'.repeat(placeholder.length));
+  const prepared = prepareSparql(lexicalSource);
+  if (prepared.status !== 'valid') {
+    throw new Error('SPARQL template contains invalid lexical syntax.');
+  }
 
-  while (index < template.length) {
-    const char = template[index];
-    if (inComment) {
-      if (char === '\n' || char === '\r') inComment = false;
-      index += 1;
-      continue;
+  const placeholders: QueryCatalogTemplatePlaceholder[] = [];
+  for (const match of candidates) {
+    const start = match.index;
+    if (prepared.masked[start] === ' ') continue;
+    const end = start + match[0].length;
+    const before = template[start - 1];
+    const after = template[end];
+    if ((before && /[A-Za-z0-9_?:.%~-]/.test(before))
+      || (after && /[A-Za-z0-9_?:.%~-]/.test(after))) {
+      throw new Error(`Query parameter ${match[1]} must occupy a complete SPARQL term position.`);
     }
-    if (quote) {
-      if (char === '\\') {
-        index += 2;
-        continue;
-      }
-      if (template.startsWith(quote, index)) {
-        index += quote.length;
-        quote = undefined;
-      } else {
-        index += 1;
-      }
-      continue;
-    }
-    if (inIri) {
-      if (char === '\\') {
-        index += 2;
-        continue;
-      }
-      if (char === '>') inIri = false;
-      index += 1;
-      continue;
-    }
-    if (char === '#') {
-      inComment = true;
-      index += 1;
-      continue;
-    }
-    if (template.startsWith("'''", index) || template.startsWith('"""', index)) {
-      quote = template.slice(index, index + 3) as "'''" | '"""';
-      index += 3;
-      continue;
-    }
-    if (char === "'" || char === '"') {
-      quote = char;
-      index += 1;
-      continue;
-    }
-    if (
-      char === '<'
-      && template[index + 1] !== '='
-      && template[index + 1] !== '{'
-      && !/\s/.test(template[index + 1] ?? '')
-    ) {
-      inIri = true;
-      index += 1;
-      continue;
-    }
-    if (template.startsWith('{{', index)) {
-      const match = template.slice(index).match(/^\{\{([A-Za-z][A-Za-z0-9_]*)\}\}/);
-      if (match) {
-        const end = index + match[0].length;
-        const before = template[index - 1];
-        const after = template[end];
-        if ((before && /[A-Za-z0-9_?:.%~-]/.test(before))
-          || (after && /[A-Za-z0-9_?:.%~-]/.test(after))) {
-          throw new Error(`Query parameter ${match[1]} must occupy a complete SPARQL term position.`);
-        }
-        placeholders.push({ name: match[1], start: index, end });
-        index = end;
-        continue;
-      }
-    }
-    index += 1;
+    placeholders.push({ name: match[1], start, end });
   }
   return placeholders;
 }
