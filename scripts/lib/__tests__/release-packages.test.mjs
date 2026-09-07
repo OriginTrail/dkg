@@ -529,7 +529,9 @@ test('the packed CLI resolves the typed Blazegraph runtime subpath for a consume
   assertTypeScriptConsumer(consumerPath, { esModuleInterop: true });
 }));
 
-test('packing OpenClaw from source builds consumable JavaScript and declarations', () => withFixture((root) => {
+test('packing OpenClaw from source builds consumable JavaScript and declarations', {
+  skip: NPM_AVAILABLE && TAR_AVAILABLE ? false : 'npm and tar are required',
+}, () => withFixture((root) => {
   const source = path.join(REPO_ROOT, 'packages', 'adapter-openclaw');
   const cleanPackage = path.join(root, 'packages', 'adapter-openclaw');
   const manifest = JSON.parse(fs.readFileSync(path.join(source, 'package.json'), 'utf8'));
