@@ -156,9 +156,10 @@ async function loadQuadsFromInput(
 
   if (opts.file) {
     const { readFile } = await import('node:fs/promises');
+    const { pathToFileURL } = await import('node:url');
     const raw = await readFile(opts.file, 'utf-8');
     const format = opts.format ?? rdfParser.detectFormat(opts.file);
-    const quads = await rdfParser.parseRdf(raw, format, defaultGraph);
+    const quads = await rdfParser.parseRdf(raw, format, defaultGraph, pathToFileURL(opts.file).href);
     console.log(`Parsed ${quads.length} quad(s) from ${opts.file} (${format})`);
     return quads;
   }
