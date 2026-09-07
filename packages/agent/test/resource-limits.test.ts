@@ -11,7 +11,7 @@ import {
 import { validateSyncResponderSnapshotLimitsConfig as validatePublicSnapshotConfig } from '../src/index.js';
 import { resolveStartupResourcePolicy } from '../src/resource-policy.js';
 import { resolveSyncReconcilerTiming } from '../src/sync/reconciler-timing.js';
-import { resolveSyncResponderSnapshotPolicy } from '../src/sync/responder/snapshot-policy.js';
+import { resolveSyncResponderSnapshotDiagnostics } from '../src/sync/responder/snapshot-policy.js';
 import { resolveCatchupBackpressureMaxWaitMs } from '../src/sync/catchup-policy.js';
 import { resolveSwmCatchupMaxPasses, resolveSwmCatchupPassBudgetMs, resolveSwmCatchupPassConfig } from '../src/sync/catchup-pass-policy.js';
 
@@ -208,7 +208,7 @@ describe('snapshot and retry/timing budgets', () => {
       for (const value of [0, ...invalidNumbers, maximum + 1]) {
         const config = { [scope]: { [field]: value } };
         expect(() => validatePublicSnapshotConfig(config)).toThrow(TypeError);
-        expect(resolveSyncResponderSnapshotPolicy(config, {}).diagnostics).toContainEqual({
+        expect(resolveSyncResponderSnapshotDiagnostics(config, {}).diagnostics).toContainEqual({
           kind: 'rejected', setting: `syncResponderSnapshotLimits.${scope}.${field}`,
         });
       }
@@ -219,8 +219,8 @@ describe('snapshot and retry/timing budgets', () => {
   });
 
   it('resolves invalid snapshot numeric leaves to defaults without disclosing raw values', () => {
-    const baseline = resolveSyncResponderSnapshotPolicy(undefined, {});
-    const resolved = resolveSyncResponderSnapshotPolicy({
+    const baseline = resolveSyncResponderSnapshotDiagnostics(undefined, {});
+    const resolved = resolveSyncResponderSnapshotDiagnostics({
       global: { rows: RESOURCE_MAX.rows + 1, bytesEstimate: Infinity },
       local: { rows: -1, bytesEstimate: RESOURCE_MAX.bytes + 1 },
     }, { DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT: 'secret' });
@@ -234,11 +234,11 @@ describe('snapshot and retry/timing budgets', () => {
     ].map((setting) => ({ kind: 'rejected', setting })));
     expect(JSON.stringify(resolved.diagnostics)).not.toContain('secret');
     expect(Object.isFrozen(resolved.diagnostics)).toBe(true);
-    expect(() => resolveSyncResponderSnapshotPolicy({ global: [] } as never, {})).toThrow('global');
+    expect(() => resolveSyncResponderSnapshotDiagnostics({ global: [] } as never, {})).toThrow('global');
   });
 
   it('accepts snapshot ceilings and keeps the per-snapshot budget within the global budget', () => {
-    expect(resolveSyncResponderSnapshotPolicy({ global: { rows: RESOURCE_MAX.rows, bytesEstimate: RESOURCE_MAX.bytes },
+    expect(resolveSyncResponderSnapshotDiagnostics({ global: { rows: RESOURCE_MAX.rows, bytesEstimate: RESOURCE_MAX.bytes },
       local: { rows: RESOURCE_MAX.rows, bytesEstimate: RESOURCE_MAX.bytes } }, {}).budget)
       .toEqual({ maxRows: RESOURCE_MAX.rows, maxSnapshotRows: RESOURCE_MAX.rows,
         maxBytesEstimate: RESOURCE_MAX.bytes, maxSnapshotBytesEstimate: RESOURCE_MAX.bytes });

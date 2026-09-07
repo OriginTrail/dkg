@@ -14,7 +14,7 @@ export interface SyncResponderSnapshotLimitsConfig {
 }
 
 /** Validate container shape; numeric leaves resolve through the bounded snapshot policy. */
-function assertSyncResponderSnapshotLimitsShape(
+export function assertSyncResponderSnapshotLimitsShape(
   config: SyncResponderSnapshotLimitsConfig | undefined,
 ): void {
   if (config === undefined) return;
@@ -62,16 +62,16 @@ export type SnapshotPolicyDiagnostic =
     effective: number;
   }>;
 
-export interface ResolvedSyncResponderSnapshotPolicy {
+export interface ResolvedSyncResponderSnapshotDiagnostics {
   readonly budget: Readonly<SyncResponderSnapshotBudgetOptions>;
   readonly diagnostics: readonly SnapshotPolicyDiagnostic[];
 }
 
 /** Resolve each leaf independently: environment, then config, then the compatibility default. */
-export function resolveSyncResponderSnapshotPolicy(
+export function resolveSyncResponderSnapshotDiagnostics(
   config?: SyncResponderSnapshotLimitsConfig,
   env: Readonly<Record<string, string | undefined>> = process.env,
-): ResolvedSyncResponderSnapshotPolicy {
+): ResolvedSyncResponderSnapshotDiagnostics {
   assertSyncResponderSnapshotLimitsShape(config);
   const diagnostics: SnapshotPolicyDiagnostic[] = [];
   const reject = (setting: string) => diagnostics.push(Object.freeze({ kind: 'rejected' as const, setting }));
@@ -126,21 +126,43 @@ export function validateSyncResponderSnapshotLimitsConfig(
   }
 }
 
+/** Compatibility result retained by the published sync-handler package subpath. */
+export interface ResolvedSyncResponderSnapshotPolicy {
+  budget: SyncResponderSnapshotBudgetOptions;
+  localRowsClamped: boolean;
+  localBytesEstimateClamped: boolean;
+}
+
+/** Legacy public resolver: strict config validation, callback diagnostics and clamp flags. */
+export function resolveSyncResponderSnapshotPolicy(
+  config?: SyncResponderSnapshotLimitsConfig,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  onWarning: (message: string) => void = () => {},
+): ResolvedSyncResponderSnapshotPolicy {
+  validateSyncResponderSnapshotLimitsConfig(config);
+  const { budget, diagnostics } = resolveSyncResponderSnapshotDiagnostics(config, env);
+  for (const diagnostic of diagnostics) {
+    if (diagnostic.kind === 'rejected') {
+      onWarning(`Ignoring invalid resource setting ${diagnostic.setting}; using fallback`);
+    } else {
+      const globalSetting = diagnostic.setting.replace('syncResponderSnapshotLimits.local.', 'global.');
+      onWarning(`Clamped ${diagnostic.setting} from ${diagnostic.configured} to ${globalSetting} ${diagnostic.effective}`);
+    }
+  }
+  return {
+    budget: { ...budget },
+    localRowsClamped: diagnostics.some((item) => item.kind === 'clamped'
+      && item.setting === 'syncResponderSnapshotLimits.local.rows'),
+    localBytesEstimateClamped: diagnostics.some((item) => item.kind === 'clamped'
+      && item.setting === 'syncResponderSnapshotLimits.local.bytesEstimate'),
+  };
+}
+
 /** Production snapshot limits, with explicit config and environment overrides in rows/bytes. */
 export function resolveSyncResponderSnapshotBudgetOptions(
   config?: SyncResponderSnapshotLimitsConfig,
   env: Readonly<Record<string, string | undefined>> = process.env,
   onWarning?: (message: string) => void,
 ): SyncResponderSnapshotBudgetOptions {
-  const { budget, diagnostics } = resolveSyncResponderSnapshotPolicy(config, env);
-  for (const diagnostic of diagnostics) {
-    if (diagnostic.kind === 'rejected') {
-      onWarning?.(`Ignoring invalid resource setting ${diagnostic.setting}; using fallback`);
-    } else {
-      const globalSetting = diagnostic.setting.replace('syncResponderSnapshotLimits.local.', 'global.');
-      onWarning?.(`Clamped ${diagnostic.setting} from ${diagnostic.configured} to ${globalSetting} ${diagnostic.effective}`);
-    }
-  }
-  return { ...budget };
+  return resolveSyncResponderSnapshotPolicy(config, env, onWarning).budget;
 }
-

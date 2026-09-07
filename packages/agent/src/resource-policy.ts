@@ -5,7 +5,7 @@ import {
 import { resolveSwmCatchupPassConfig } from './sync/catchup-pass-policy.js';
 import { resolveSyncGlobalBackpressure, type SyncGlobalBackpressureConfig } from './sync/backpressure.js';
 import { resolveSyncReconcilerTiming, type SyncReconcilerTimingConfig } from './sync/reconciler-timing.js';
-import { resolveSyncResponderSnapshotPolicy, type SyncResponderSnapshotLimitsConfig } from './sync/responder/snapshot-policy.js';
+import { resolveSyncResponderSnapshotDiagnostics, type SyncResponderSnapshotLimitsConfig } from './sync/responder/snapshot-policy.js';
 
 interface StartupResourceConfig extends SyncGlobalBackpressureConfig, SyncReconcilerTimingConfig {
   syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
@@ -21,7 +21,7 @@ export function resolveStartupResourcePolicy(
   for (const name of vm.rejected) warnings.reject(name);
   const reconcilerTiming = Object.freeze(resolveSyncReconcilerTiming(config, warnings.reject));
   const admission = resolveSyncGlobalBackpressure(config, warnings.reject, env);
-  const snapshot = resolveSyncResponderSnapshotPolicy(config.syncResponderSnapshotLimits, env);
+  const snapshot = resolveSyncResponderSnapshotDiagnostics(config.syncResponderSnapshotLimits, env);
   for (const diagnostic of snapshot.diagnostics) {
     if (diagnostic.kind === 'rejected') warnings.reject(diagnostic.setting);
     else warnings.clamp(diagnostic.setting);

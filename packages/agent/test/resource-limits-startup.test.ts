@@ -28,6 +28,8 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
   Logger.setSink((record) => records.push(record));
   const dataDir = await mkdtemp(join(tmpdir(), 'dkg-resource-limits-'));
   const store = new OxigraphStore();
+  const snapshotPolicy = await import('../src/sync/responder/snapshot-policy.js');
+  const resolveSnapshot = vi.spyOn(snapshotPolicy, 'resolveSyncResponderSnapshotDiagnostics');
   let agent: Agent | undefined;
   try {
     const { DKGAgent } = await import('../src/dkg-agent.js');
@@ -45,12 +47,14 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
       syncReconcilerIntervalMs: Infinity,
       syncResponderSnapshotLimits: { global: { rows: 1234 }, local: { rows: 0 } },
     });
+    expect(resolveSnapshot).toHaveBeenCalledOnce();
     const effective = (agent as unknown as { config: { resourcePolicy: StartupResourcePolicy } }).config.resourcePolicy;
     // Construction owns numeric resolution. Later environment edits cannot
     // make execution disagree with the policy that startup will report.
     vi.stubEnv('DKG_SYNC_GLOBAL_MAX_INFLIGHT', '7');
     vi.stubEnv('DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT', '9999');
     await agent.start();
+    expect(resolveSnapshot).toHaveBeenCalledOnce();
     const warnings = records.filter((record) => record.level === 'warn' && record.message.includes('resource setting'));
     expect(warnings).toHaveLength(1);
     expect(warnings[0].message).toContain('DKG_VM_RECONCILE_CONCURRENCY');
@@ -83,6 +87,7 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
     expect(records.filter((record) => record.level === 'warn' && record.message.includes('resource setting'))).toHaveLength(1);
   } finally {
     try { await agent?.stop(); } finally {
+      resolveSnapshot.mockRestore();
       Logger.setSink(null);
       vi.unstubAllEnvs();
       await store.close();
@@ -110,3 +115,31 @@ it('rejects invalid admission before allocating a wallet or internally owned sto
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+it.each([null, [], { local: [] }, { global: null }])(
+  'rejects malformed snapshot containers before wallet/store allocation: %j', async (shape) => {
+    const storage = await import('@origintrail-official/dkg-storage');
+    const { DKGAgentWallet } = await import('../src/agent-wallet.js');
+    const createStore = vi.spyOn(storage, 'createTripleStore');
+    const loadWallet = vi.spyOn(DKGAgentWallet, 'load');
+    const generateWallet = vi.spyOn(DKGAgentWallet, 'generate');
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-snapshot-preflight-'));
+    try {
+      const { DKGAgent } = await import('../src/dkg-agent.js');
+      await expect(DKGAgent.create({
+        name: 'Invalid snapshot shape', dataDir, chainAdapter: new NoChainAdapter(),
+        rfc64CatalogActivation: { enabled: false },
+        syncResponderSnapshotLimits: shape as never,
+      })).rejects.toThrow(/Invalid syncResponderSnapshotLimits/);
+      expect(createStore).not.toHaveBeenCalled();
+      expect(loadWallet).not.toHaveBeenCalled();
+      expect(generateWallet).not.toHaveBeenCalled();
+      expect(await readdir(dataDir)).toEqual([]);
+    } finally {
+      createStore.mockRestore();
+      loadWallet.mockRestore();
+      generateWallet.mockRestore();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  },
+);

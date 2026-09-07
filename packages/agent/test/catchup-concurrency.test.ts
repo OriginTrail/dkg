@@ -54,7 +54,8 @@ describe('catchupWaveSizes', () => {
   });
 
   it('accepts the concurrency ceiling and falls back to serial waves above it', () => {
-    expect(catchupWaveSizes(3, RESOURCE_MAX.concurrency)).toEqual([1, 2]);
+    expect(catchupWaveSizes(RESOURCE_MAX.concurrency + 1, RESOURCE_MAX.concurrency, RESOURCE_MAX.concurrency))
+      .toEqual([RESOURCE_MAX.concurrency, 1]);
     expect(catchupWaveSizes(3, RESOURCE_MAX.concurrency + 1)).toEqual([1, 1, 1]);
   });
 

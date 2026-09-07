@@ -166,7 +166,7 @@ describe('sync responder snapshot budget defaults', () => {
     });
   });
 
-  it('returns one diagnostic model for rejected and clamped leaves, with compatible warning text', () => {
+  it('retains legacy clamp flags and warning callbacks at the sync-handler boundary', () => {
     const config = {
       global: { rows: 100, bytesEstimate: 200 },
       local: { rows: 150, bytesEstimate: 250 },
@@ -181,11 +181,8 @@ describe('sync responder snapshot budget defaults', () => {
         maxRows: 100, maxBytesEstimate: 200,
         maxSnapshotRows: 100, maxSnapshotBytesEstimate: 200,
       },
-      diagnostics: [
-        { kind: 'rejected', setting: 'DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT' },
-        { kind: 'clamped', setting: 'syncResponderSnapshotLimits.local.rows', configured: 150, effective: 100 },
-        { kind: 'clamped', setting: 'syncResponderSnapshotLimits.local.bytesEstimate', configured: 250, effective: 200 },
-      ],
+      localRowsClamped: true,
+      localBytesEstimateClamped: true,
     });
     const warnings: string[] = [];
     expect(resolveSyncResponderSnapshotBudgetOptions(config, env, (message) => warnings.push(message)))
