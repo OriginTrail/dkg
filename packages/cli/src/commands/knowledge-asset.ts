@@ -1,3 +1,4 @@
+import type { RdfParseOptions } from '../rdf-parser.js';
 import { Command } from 'commander';
 import { toErrorMessage } from '@origintrail-official/dkg-core';
 import {
@@ -53,13 +54,14 @@ function hasQuadInput(opts: ActionOpts): boolean {
   );
 }
 
-async function loadWritableQuads(opts: ActionOpts): Promise<KnowledgeAssetWritableQuad[]> {
+async function loadWritableQuads(opts: ActionOpts, parseOptions?: RdfParseOptions): Promise<KnowledgeAssetWritableQuad[]> {
   const quads = await loadQuadsFromInput(
     {
       ...opts,
       file: inputFilePath(opts),
     },
     '',
+    parseOptions,
   );
   return quads.map((quad) => ({
     subject: quad.subject,
@@ -243,7 +245,9 @@ export function registerKnowledgeAssetCommand(program: Command): void {
   ))))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
       const contextGraphId = requiredContextGraphId(opts);
-      const quads = hasQuadInput(opts) ? await loadWritableQuads(opts) : undefined;
+      const quads = hasQuadInput(opts)
+        ? await loadWritableQuads(opts, { jsonLdNamedGraphs: opts.finalize === false ? 'preserve' : 'reject' })
+        : undefined;
       if (opts.share === true && (!quads || quads.length === 0 || opts.finalize === false)) {
         throw new Error('--share requires non-empty payload quads and finalize enabled');
       }
