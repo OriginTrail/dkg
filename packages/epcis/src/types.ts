@@ -1,3 +1,5 @@
+import type { EpcisReconstructedField } from './query-event-fields.js';
+
 // EPCIS Document types based on GS1 EPCIS 2.0
 
 export interface EPCISDocument {
@@ -125,12 +127,13 @@ export interface QueryEngine {
   ): Promise<{ bindings: Record<string, string>[] }>;
 }
 
-/**
- * Query reconstruction can omit fields absent from stored RDF, but keeps the
- * capture model's field types and extension surface. The subject is always a
- * reusable identifier accepted by the eventID filter.
- */
-export interface EPCISQueryEvent extends Partial<EPCISEvent> {
+// Remove the capture model's open extension index before selecting known fields.
+type StandardEpcisEvent = {
+  [K in keyof EPCISEvent as string extends K ? never : number extends K ? never : K]: EPCISEvent[K];
+};
+
+/** Only fields reconstructed by the query converter, with a reusable subject identifier. */
+export interface EPCISQueryEvent extends Partial<Pick<StandardEpcisEvent, EpcisReconstructedField>> {
   eventID: string;
   'dkg:ual'?: string;
 }

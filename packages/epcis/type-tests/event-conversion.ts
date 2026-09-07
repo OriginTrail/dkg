@@ -1,4 +1,4 @@
-import { toEpcisEvent, type EPCISQueryEvent } from '../dist/index.js';
+import { toEpcisEvent, handleEventsQuery, type EPCISQueryEvent } from '../dist/index.js';
 
 // Existing QueryEngine consumers pass generic rows to this public helper.
 const row: Record<string, string> = { event: 'urn:event:1' };
@@ -6,12 +6,16 @@ const event: EPCISQueryEvent = toEpcisEvent(row);
 const reusableId: string = event.eventID;
 void reusableId;
 
-// Reconstructed standard fields retain the capture model's useful types.
+// Reconstructed standard fields retain their useful types.
 const timestamp: string | undefined = event.eventTime?.toUpperCase();
 const readPoint: string | undefined = event.readPoint?.id;
 const firstChild: string | undefined = event.childEPCs?.[0];
 const provenance: string | undefined = event['dkg:ual'];
-const extension: unknown = event['example:extension'];
+// @ts-expect-error Arbitrary capture extensions are not reconstructed.
+const extension = event['example:extension'];
+// @ts-expect-error Capture transactions are not reconstructed.
+const transactions = event.bizTransactionList;
+void transactions;
 void [timestamp, readPoint, firstChild, provenance, extension];
 
 // @ts-expect-error Standard fields cannot drift to untyped extension values.
@@ -19,3 +23,16 @@ event.readPoint = 'urn:location:1';
 // @ts-expect-error Every query result requires its reusable identifier.
 const missingId: EPCISQueryEvent = { eventTime: '2026-09-07T00:00:00Z' };
 void missingId;
+
+// Exercise the complete public response path, not just the standalone event type.
+declare const response: Awaited<ReturnType<typeof handleEventsQuery>>;
+const responseEvent = response.body.epcisBody.queryResults.resultsBody.eventList[0];
+const responseId: string = responseEvent.eventID;
+const responseTime: string | undefined = responseEvent.eventTime;
+const responseLocation: { id: string } | undefined = responseEvent.bizLocation;
+const responseEpcs: string[] | undefined = responseEvent.epcList;
+void [responseId, responseTime, responseLocation, responseEpcs];
+// @ts-expect-error The response must not widen back to generic record values.
+responseEvent.eventTime = 42;
+// @ts-expect-error Unsupported capture fields are absent through the public response.
+void responseEvent.sensorElementList;
