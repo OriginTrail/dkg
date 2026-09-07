@@ -66,6 +66,24 @@ function withFixture(fn) {
   }
 }
 
+function assertTypeScriptConsumer(consumerPath, compilerOptions = {}) {
+  const program = ts.createProgram([consumerPath], {
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    target: ts.ScriptTarget.ES2022,
+    noEmit: true,
+    strict: true,
+    skipLibCheck: false,
+    ...compilerOptions,
+  });
+  const diagnostics = ts.getPreEmitDiagnostics(program);
+  assert.equal(diagnostics.length, 0, ts.formatDiagnosticsWithColorAndContext(diagnostics, {
+    getCanonicalFileName: (file) => file,
+    getCurrentDirectory: () => path.dirname(consumerPath),
+    getNewLine: () => '\n',
+  }));
+}
+
 function packAndInstallFixture({
   root,
   fixtureName,
@@ -508,25 +526,7 @@ test('the packed CLI resolves the typed Blazegraph runtime subpath for a consume
     'void metadata;',
     '',
   ].join('\n'));
-  const program = ts.createProgram([consumerPath], {
-    esModuleInterop: true,
-    module: ts.ModuleKind.NodeNext,
-    moduleResolution: ts.ModuleResolutionKind.NodeNext,
-    noEmit: true,
-    skipLibCheck: false,
-    strict: true,
-    target: ts.ScriptTarget.ES2022,
-  });
-  const diagnostics = ts.getPreEmitDiagnostics(program);
-  assert.equal(
-    diagnostics.length,
-    0,
-    ts.formatDiagnosticsWithColorAndContext(diagnostics, {
-      getCanonicalFileName: (file) => file,
-      getCurrentDirectory: () => consumerDir,
-      getNewLine: () => '\n',
-    }),
-  );
+  assertTypeScriptConsumer(consumerPath, { esModuleInterop: true });
 }));
 
 test('packing OpenClaw from source builds consumable JavaScript and declarations', () => withFixture((root) => {
@@ -573,20 +573,7 @@ test('packing OpenClaw from source builds consumable JavaScript and declarations
     '}',
     '',
   ].join('\n'));
-  const program = ts.createProgram([typedConsumer], {
-    module: ts.ModuleKind.NodeNext,
-    moduleResolution: ts.ModuleResolutionKind.NodeNext,
-    target: ts.ScriptTarget.ES2022,
-    noEmit: true,
-    skipLibCheck: true,
-    strict: true,
-  });
-  const diagnostics = ts.getPreEmitDiagnostics(program);
-  assert.equal(diagnostics.length, 0, ts.formatDiagnosticsWithColorAndContext(diagnostics, {
-    getCanonicalFileName: (file) => file,
-    getCurrentDirectory: () => consumerDir,
-    getNewLine: () => '\n',
-  }));
+  assertTypeScriptConsumer(typedConsumer, { skipLibCheck: true });
 }));
 
 test('the packed storage package preserves representative legacy dist imports', {
