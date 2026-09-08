@@ -7,6 +7,7 @@ export class SwmExpiryCleanupWorker {
   private closed = false;
   private generation = 0;
   private timer: ReturnType<typeof setInterval> | undefined;
+  private continuationTimer: ReturnType<typeof setTimeout> | undefined;
   private inFlight: Promise<number> | undefined;
   private nextMetaGraph: string | undefined;
 
@@ -28,22 +29,26 @@ export class SwmExpiryCleanupWorker {
 
   setTtl(ttlMs: number): void {
     this.ttlMs = ttlMs;
-    if (ttlMs <= 0) this.clearTimer();
+    if (ttlMs <= 0) { this.clearTimer(); this.clearContinuation(); }
     else if (this.started && !this.closed && !this.timer) this.startTimer();
   }
 
   runNow(): Promise<number> {
     if (this.closed || this.ttlMs <= 0) return Promise.resolve(0);
     if (this.inFlight) return this.inFlight;
+    this.clearContinuation();
     const generation = this.generation;
     const ttl = this.ttlMs;
     const run = Promise.resolve().then((): SwmExpiryCleanupResult | Promise<SwmExpiryCleanupResult> => this.closed || this.generation !== generation
-      ? { triplesDeleted: 0 } : this.processPass(
+      ? { triplesDeleted: 0, budgetExhausted: false } : this.processPass(
       ttl,
       () => this.closed || this.generation !== generation,
       this.nextMetaGraph,
     )).then(result => {
-      if (!this.closed && this.generation === generation) this.nextMetaGraph = result.nextMetaGraph;
+      if (!this.closed && this.generation === generation) {
+        this.nextMetaGraph = result.nextMetaGraph;
+        if (result.budgetExhausted && this.ttlMs > 0) this.scheduleContinuation(generation);
+      }
       return result.triplesDeleted;
     });
     this.inFlight = run;
@@ -58,7 +63,24 @@ export class SwmExpiryCleanupWorker {
     this.generation++;
     this.nextMetaGraph = undefined;
     this.clearTimer();
+    this.clearContinuation();
     await this.inFlight?.catch(() => undefined);
+  }
+
+  /** Yield between bounded passes, including work explicitly requested before start(). */
+  private scheduleContinuation(generation: number): void {
+    this.clearContinuation();
+    this.continuationTimer = setTimeout(() => {
+      this.continuationTimer = undefined;
+      if (this.closed || this.generation !== generation || this.ttlMs <= 0) return;
+      void this.runNow().catch(() => undefined);
+    }, 10);
+    this.continuationTimer.unref?.();
+  }
+
+  private clearContinuation(): void {
+    if (this.continuationTimer) clearTimeout(this.continuationTimer);
+    this.continuationTimer = undefined;
   }
 
   private startTimer(): void {

@@ -10651,7 +10651,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /**
-   * Remove expired shared memory operations and their data.
+   * Remove one bounded pass of expired shared memory operations and their data.
+   * Returns triples deleted by this pass; remaining backlog continues after a
+   * short yield, without waiting for the regular maintenance interval.
    * Queries SWM meta for operations with publishedAt older than the TTL,
    * deletes the corresponding triples from shared memory and SWM meta,
    * and removes the root entities from workspaceOwnedEntities.

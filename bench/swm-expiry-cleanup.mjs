@@ -26,9 +26,9 @@ const store = {
       assert.equal(limit, SWM_CLEANUP_BATCH_SIZE);
       const rows = Array.from(operations).slice(0, limit);
       stats.largestBatch = Math.max(stats.largestBatch, rows.length);
-      return { type: 'bindings', bindings: rows.map(op => ({ op })) };
+      return { type: 'bindings', bindings: rows.map(op => ({ op, re: 'urn:expiry:root' })) };
     }
-    return { type: 'bindings', bindings: options?.source === 'agent.swmCleanup.operationRoots' ? [{ re: 'urn:expiry:root' }] : [] };
+    return { type: 'bindings', bindings: [] };
   },
   async deleteByPattern(pattern) {
     return pattern.graph === meta && operations.delete(pattern.subject) ? 3 : 0;

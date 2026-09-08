@@ -17,6 +17,8 @@ export interface SwmExpiryCleanupContext {
 }
 export interface SwmExpiryCleanupResult {
   triplesDeleted: number;
+  /** The bounded pass made progress but exhausted its allowance; another pass must probe/drain the remainder. */
+  budgetExhausted: boolean;
   nextMetaGraph?: string;
 }
 interface CleanupTarget { contextGraphId: string; metaGraph: string }
@@ -37,7 +39,7 @@ export async function runSwmExpiryCleanup(
   const { store, log, isClosed } = context;
   const ctx = createOperationContext('share');
   const cutoff = new Date(Date.now() - ttlMs).toISOString();
-  const result: SwmExpiryCleanupResult = { triplesDeleted: 0, nextMetaGraph };
+  const result: SwmExpiryCleanupResult = { triplesDeleted: 0, budgetExhausted: false, nextMetaGraph };
   const counts = new Map<string, { triples: number; operations: number }>();
   try {
     const targets: CleanupTarget[] = [];
@@ -49,6 +51,7 @@ export async function runSwmExpiryCleanup(
     }
     const start = Math.max(0, targets.findIndex(target => target.metaGraph === nextMetaGraph));
     let batches = 0;
+    let operationsDeleted = 0;
     for (let offset = 0; offset < targets.length && !isClosed() && batches < SWM_CLEANUP_MAX_BATCHES; offset++) {
       const index = (start + offset) % targets.length;
       const target = targets[index]!;
@@ -62,14 +65,13 @@ export async function runSwmExpiryCleanup(
         // page so later arrivals cannot lose metadata while leaving their data.
         const family = await resolveGraphFamily(store, target);
         let metadataProgress = 0;
-        for (const uri of operations) {
+        for (const operation of operations) {
           if (isClosed()) break;
-          const operation = await decodeExpiredOperation(store, target.metaGraph, uri);
           const outcome = await cleanupExpiredOperation(context, target, family, operation);
           result.triplesDeleted += outcome.triplesDeleted;
           const count = counts.get(target.contextGraphId) ?? { triples: 0, operations: 0 };
           count.triples += outcome.triplesDeleted;
-          if (outcome.metadataDeleted > 0) { count.operations++; metadataProgress++; }
+          if (outcome.metadataDeleted > 0) { count.operations++; metadataProgress++; operationsDeleted++; }
           counts.set(target.contextGraphId, count);
         }
         if (isClosed()) break;
@@ -79,6 +81,7 @@ export async function runSwmExpiryCleanup(
         }
       }
     }
+    result.budgetExhausted = !isClosed() && batches === SWM_CLEANUP_MAX_BATCHES && operationsDeleted > 0;
     for (const [id, count] of counts) {
       if (count.operations > 0) log.info(ctx, `SWM cleanup for "${id}": evicted ${count.operations} expired operation(s), ${count.triples} triples`);
     }
@@ -88,15 +91,46 @@ export async function runSwmExpiryCleanup(
   return result;
 }
 
-async function loadExpiredBatch(store: TripleStore, metaGraph: string, cutoff: string): Promise<string[]> {
-  const result = await store.query(`SELECT DISTINCT ?op WHERE {
+/** Limit distinct operations before expanding their roots and scope metadata. */
+async function loadExpiredBatch(store: TripleStore, metaGraph: string, cutoff: string): Promise<ExpiredOperation[]> {
+  const result = await store.query(`SELECT ?op ?re ?scopeVersion ?kaUal ?snapshotGraph WHERE {
+    { SELECT DISTINCT ?op WHERE {
+      GRAPH <${metaGraph}> {
+        ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
+        ?op <http://dkg.io/ontology/publishedAt> ?ts .
+        FILTER(?ts < "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+      }
+    } LIMIT ${SWM_CLEANUP_BATCH_SIZE} }
     GRAPH <${metaGraph}> {
-      ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
-      ?op <http://dkg.io/ontology/publishedAt> ?ts .
-      FILTER(?ts < "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+      OPTIONAL { ?op <http://dkg.io/ontology/rootEntity> ?re }
+      OPTIONAL {
+        ?op <http://dkg.io/ontology/contentScopeVersion> ?scopeVersion .
+        OPTIONAL { ?op <http://dkg.io/ontology/kaUal> ?kaUal }
+        OPTIONAL { ?op <http://dkg.io/ontology/publicSnapshotGraph> ?snapshotGraph }
+      }
     }
-  } LIMIT ${SWM_CLEANUP_BATCH_SIZE}`, { source: 'agent.swmCleanup.expiredOperations' });
-  return result.type === 'bindings' ? result.bindings.flatMap(row => row.op ? [row.op] : []) : [];
+  }`, { source: 'agent.swmCleanup.expiredOperations' });
+  const operations = new Map<string, { operation: ExpiredOperation; roots: Set<string> }>();
+  if (result.type !== 'bindings') return [];
+  for (const row of result.bindings) {
+    if (!row.op) continue;
+    let entry = operations.get(row.op);
+    if (!entry) {
+      const version = row.scopeVersion === undefined ? NaN : Number(stripLiteral(row.scopeVersion));
+      entry = {
+        operation: {
+          uri: row.op, roots: [],
+          scope: version === GRAPH_KA_CONTENT_SCOPE_VERSION
+            ? { kind: 'graph-v2', kaUal: row.kaUal, snapshotGraph: row.snapshotGraph }
+            : { kind: 'legacy' },
+        },
+        roots: new Set(),
+      };
+      operations.set(row.op, entry);
+    }
+    if (row.re) entry.roots.add(row.re);
+  }
+  return [...operations.values()].map(({ operation, roots }) => ({ ...operation, roots: [...roots] }));
 }
 
 async function resolveGraphFamily(store: TripleStore, target: CleanupTarget): Promise<GraphFamily> {
@@ -107,28 +141,6 @@ async function resolveGraphFamily(store: TripleStore, target: CleanupTarget): Pr
     if (key) ownershipKeys.add(key);
   }
   return { graphs, ownershipKeys };
-}
-
-async function decodeExpiredOperation(store: TripleStore, metaGraph: string, uri: string): Promise<ExpiredOperation> {
-  const roots = await store.query(`SELECT ?re WHERE {
-    GRAPH <${metaGraph}> { <${uri}> <http://dkg.io/ontology/rootEntity> ?re . }
-  }`, { source: 'agent.swmCleanup.operationRoots' });
-  const metadata = await store.query(`SELECT ?scopeVersion ?kaUal ?snapshotGraph WHERE {
-    GRAPH <${metaGraph}> {
-      <${uri}> <http://dkg.io/ontology/contentScopeVersion> ?scopeVersion .
-      OPTIONAL { <${uri}> <http://dkg.io/ontology/kaUal> ?kaUal }
-      OPTIONAL { <${uri}> <http://dkg.io/ontology/publicSnapshotGraph> ?snapshotGraph }
-    }
-  } LIMIT 1`, { source: 'agent.swmCleanup.graphScopedMetadata' });
-  const row = metadata.type === 'bindings' ? metadata.bindings[0] : undefined;
-  const version = row?.scopeVersion === undefined ? NaN : Number(stripLiteral(row.scopeVersion));
-  return {
-    uri,
-    roots: roots.type === 'bindings' ? roots.bindings.flatMap(row => row.re ? [row.re] : []) : [],
-    scope: version === GRAPH_KA_CONTENT_SCOPE_VERSION
-      ? { kind: 'graph-v2', kaUal: row?.kaUal, snapshotGraph: row?.snapshotGraph }
-      : { kind: 'legacy' },
-  };
 }
 
 /** Finish one operation before yielding; stop joins this physical work before closing storage. */

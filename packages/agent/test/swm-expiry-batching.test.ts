@@ -12,18 +12,16 @@ interface Internals {
   log: Logger;
   workspaceOwnedEntities: Map<string, Map<string, string>>;
 }
-const stores: TripleStore[] = [];
 const agents: DKGAgent[] = [];
 afterEach(async () => {
   await Promise.all(agents.splice(0).map(agent => agent.stop()));
   vi.restoreAllMocks();
-  await Promise.all(stores.splice(0).map(store => store.close()));
 });
 
 async function fixture(count: number, noProgress = false, dataDeleted = 0) {
   const agent = await DKGAgent.create({ name: 'expiry-batches', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 60_000 });
   const { store, log } = agent as unknown as Internals;
-  stores.push(store);
+  agents.push(agent);
   const operations = new Set(Array.from({ length: count }, (_, i) => `urn:expiry:op:${i}`));
   const stats = { largestBatch: 0, familyLists: 0, selections: 0, active: 0, maxActive: 0 };
   const warning = vi.spyOn(log, 'warn').mockImplementation(() => {});
@@ -47,7 +45,7 @@ async function fixture(count: number, noProgress = false, dataDeleted = 0) {
       const rows = [...operations].slice(0, limit ? Number(limit[1]) : undefined);
       stats.largestBatch = Math.max(stats.largestBatch, rows.length);
       stats.active--;
-      return { type: 'bindings', bindings: rows.map(op => ({ op })) };
+      return { type: 'bindings', bindings: rows.map(op => ({ op, re: 'urn:expiry:root' })) };
     }
     if (options?.source === 'agent.swmCleanup.operationRoots') {
       return { type: 'bindings', bindings: [{ re: 'urn:expiry:root' }] };
@@ -94,7 +92,7 @@ describe('bounded SWM expiry through DKGAgent', () => {
 it.each([true, false])('reads distinct bounded real-store batches with prefix listing %s', async prefixListing => {
   const agent = await DKGAgent.create({ name: 'expiry-real-store', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 60_000 });
   const { store } = agent as unknown as Internals;
-  stores.push(store);
+  agents.push(agent);
   if (!prefixListing) Object.defineProperty(store, 'listGraphsByPrefix', { value: undefined });
   const rdfType = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
   const dkg = 'http://dkg.io/ontology/';
@@ -201,7 +199,7 @@ it('ends an invocation under continuous expired arrivals and resumes on the next
 it('refreshes family graphs for an expired operation arriving between live batches', async () => {
   const agent = await DKGAgent.create({ name: 'expiry-family-arrival', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 60_000 });
   const { store } = agent as unknown as Internals;
-  stores.push(store);
+  agents.push(agent);
   const rdfType = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
   const dkg = 'http://dkg.io/ontology/';
   const timestamp = '"2020-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>';
@@ -254,4 +252,47 @@ it('rotates graph priority so a continuously busy graph cannot starve another CG
   expect(selected[0]).toBe(otherMeta);
   expect(otherPending).toBe(false);
   expect(f.warning).not.toHaveBeenCalled();
+});
+
+
+it('hydrates operation metadata with query count proportional to pages', async () => {
+  const f = await fixture(501);
+  await f.agent.cleanupExpiredSharedMemory();
+  const metadataReads = vi.mocked(f.store.query).mock.calls.filter(([, options]) => options?.source?.startsWith('agent.swmCleanup.'));
+  expect(f.operations.size).toBe(0);
+  expect(metadataReads.length).toBeLessThanOrEqual(4);
+});
+
+
+it('automatically continues a real cleanup pass after a manual 1000-operation result', async () => {
+  const f = await fixture(1001);
+  vi.useFakeTimers();
+  try {
+    expect(await f.agent.cleanupExpiredSharedMemory()).toBe(3000);
+    expect(f.operations.size).toBe(1);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(f.operations.size).toBe(0);
+    expect(f.stats.maxActive).toBe(1);
+    expect(f.stats.largestBatch).toBe(250);
+  } finally { vi.useRealTimers(); }
+});
+
+it('hydrates every root in a real-store batch without duplicating operation deletion', async () => {
+  const agent = await DKGAgent.create({ name: 'expiry-multi-root', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 60_000 });
+  agents.push(agent);
+  const { store } = agent as unknown as Internals;
+  const dkg = 'http://dkg.io/ontology/';
+  const op = 'urn:expiry:multi-root';
+  await store.insert([
+    { subject: op, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: `${dkg}WorkspaceOperation`, graph: META },
+    { subject: op, predicate: `${dkg}publishedAt`, object: '"2020-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>', graph: META },
+    ...['urn:root:a', 'urn:root:b'].flatMap(root => [
+      { subject: op, predicate: `${dkg}rootEntity`, object: root, graph: META },
+      { subject: root, predicate: 'urn:value', object: '"expired"', graph: WS },
+    ]),
+  ]);
+  const remove = vi.spyOn(store, 'deleteByPattern');
+  expect(await agent.cleanupExpiredSharedMemory()).toBe(6);
+  expect(remove.mock.calls.filter(([pattern]) => pattern.subject === op)).toHaveLength(1);
+  expect(await store.query(`SELECT ?s WHERE { GRAPH <${WS}> { ?s ?p ?o } }`)).toMatchObject({ bindings: [] });
 });
