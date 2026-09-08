@@ -795,13 +795,13 @@ export class VmReconcileDispatcher<T> {
         this.mergeWork(state.trailing, source);
         return { kind: 'coalesced', completion: state.trailing.promise };
       }
-      const trailing = this.createQueuedWork(key, source, false);
+      const trailing = this.createQueuedWork(key, source, 'trailing');
       if (!trailing) return { kind: 'full' };
       state.trailing = trailing;
       return { kind: 'admitted', completion: trailing.promise };
     }
 
-    const work = this.createQueuedWork(key, source, this.active < this.concurrency);
+    const work = this.createQueuedWork(key, source, 'pending');
     if (!work) {
       if (state.hold === 'ready') this.states.delete(key);
       return { kind: 'full' };
@@ -816,8 +816,9 @@ export class VmReconcileDispatcher<T> {
   private createQueuedWork(
     key: string,
     source: VmReconcileSource,
-    immediatelyRunnable: boolean,
+    placement: 'pending' | 'trailing',
   ): VmReconcileDispatchWork<T> | undefined {
+    const immediatelyRunnable = placement === 'pending' && this.active < this.concurrency;
     const pendingLimit = source === 'periodic' && !immediatelyRunnable
       ? this.maxPending - 1 : this.maxPending;
     if (this.queued >= pendingLimit) return undefined;
