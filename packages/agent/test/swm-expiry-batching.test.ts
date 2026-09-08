@@ -3,11 +3,14 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import type { Logger } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
+import { runSwmExpiryCleanup } from '../src/swm-expiry-cleanup.js';
+import type { SwmExpiryCleanupWorker } from '../src/swm-expiry-cleanup-worker.js';
 
 const CG = 'expiry-batches';
 const WS = `did:dkg:context-graph:${CG}/_shared_memory`;
 const META = `${WS}_meta`;
 interface Internals {
+  swmExpiryCleanupWorker: SwmExpiryCleanupWorker;
   store: TripleStore;
   log: Logger;
   workspaceOwnedEntities: Map<string, Map<string, string>>;
@@ -16,6 +19,7 @@ const agents: DKGAgent[] = [];
 afterEach(async () => {
   await Promise.all(agents.splice(0).map(agent => agent.stop()));
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 async function fixture(count: number, noProgress = false, dataDeleted = 0) {
@@ -169,7 +173,7 @@ it('drains an in-flight expiry selection before closing the real agent store', a
   expect(await agent.cleanupExpiredSharedMemory()).toBe(0);
 });
 
-it('ends an invocation under continuous expired arrivals and resumes on the next invocation', async () => {
+it('bounds periodic ticks under continuous expired arrivals', async () => {
   const f = await fixture(1);
   const query = vi.mocked(f.store.query).getMockImplementation()!;
   const remove = vi.mocked(f.store.deleteByPattern).getMockImplementation()!;
@@ -186,11 +190,13 @@ it('ends an invocation under continuous expired arrivals and resumes on the next
     if (wasOperation) f.operations.add(`urn:expiry:arrival:${next++}`);
     return deleted;
   });
-  await f.agent.cleanupExpiredSharedMemory();
+  vi.useFakeTimers();
+  (f.agent as unknown as Internals).swmExpiryCleanupWorker.start();
+  await vi.advanceTimersByTimeAsync(0);
   expect(f.stats.selections).toBeLessThanOrEqual(4);
   expect(f.operations.size).toBe(1);
   const previous = next;
-  await f.agent.cleanupExpiredSharedMemory();
+  await vi.advanceTimersByTimeAsync(10);
   expect(next).toBeGreaterThan(previous);
   expect(f.stats.selections).toBeLessThanOrEqual(8);
   expect(f.warning).not.toHaveBeenCalled();
@@ -244,11 +250,13 @@ it('rotates graph priority so a continuously busy graph cannot starve another CG
     if (pattern.graph === otherMeta) otherPending = false;
     return 1;
   });
-  await f.agent.cleanupExpiredSharedMemory();
+  vi.useFakeTimers();
+  (f.agent as unknown as Internals).swmExpiryCleanupWorker.start();
+  await vi.advanceTimersByTimeAsync(0);
   expect(selected).toEqual([META, META, META, META]);
   expect(otherPending).toBe(true);
   selected.length = 0;
-  await f.agent.cleanupExpiredSharedMemory();
+  await vi.advanceTimersByTimeAsync(10);
   expect(selected[0]).toBe(otherMeta);
   expect(otherPending).toBe(false);
   expect(f.warning).not.toHaveBeenCalled();
@@ -264,11 +272,12 @@ it('hydrates operation metadata with query count proportional to pages', async (
 });
 
 
-it('automatically continues a real cleanup pass after a manual 1000-operation result', async () => {
+it('automatically continues periodic cleanup after a bounded 1000-operation pass', async () => {
   const f = await fixture(1001);
   vi.useFakeTimers();
   try {
-    expect(await f.agent.cleanupExpiredSharedMemory()).toBe(3000);
+    (f.agent as unknown as Internals).swmExpiryCleanupWorker.start();
+    await vi.advanceTimersByTimeAsync(0);
     expect(f.operations.size).toBe(1);
     await vi.advanceTimersByTimeAsync(100);
     expect(f.operations.size).toBe(0);
@@ -295,4 +304,84 @@ it('hydrates every root in a real-store batch without duplicating operation dele
   expect(await agent.cleanupExpiredSharedMemory()).toBe(6);
   expect(remove.mock.calls.filter(([pattern]) => pattern.subject === op)).toHaveLength(1);
   expect(await store.query(`SELECT ?s WHERE { GRAPH <${WS}> { ?s ?p ?o } }`)).toMatchObject({ bindings: [] });
+});
+
+
+it('awaits all 1001 initially expired operations and includes every deletion in the public result', async () => {
+  const f = await fixture(1001);
+  expect(await f.agent.cleanupExpiredSharedMemory()).toBe(3003);
+  expect(f.operations.size).toBe(0);
+  expect(f.stats.maxActive).toBe(1);
+  expect(f.stats.largestBatch).toBe(250);
+});
+
+it('rejects Date-out-of-range TTL at creation and before mutating a running configuration', async () => {
+  const creation = DKGAgent.create({ name: 'invalid-expiry', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 1e20 })
+    .then(agent => { agents.push(agent); return agent; });
+  await expect(creation).rejects.toThrow('sharedMemoryTtlMs');
+  const f = await fixture(1);
+  expect(() => f.agent.setSharedMemoryTtlMs(1e20)).toThrow('sharedMemoryTtlMs');
+  expect(await f.agent.cleanupExpiredSharedMemory()).toBe(3);
+});
+
+it('stops a never-started agent during manual cleanup without admitting a backlog continuation', async () => {
+  const f = await fixture(1001);
+  const remove = vi.mocked(f.store.deleteByPattern).getMockImplementation()!;
+  let entered!: () => void;
+  const atLastOperation = new Promise<void>(resolve => { entered = resolve; });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  vi.mocked(f.store.deleteByPattern).mockImplementation(async pattern => {
+    const deleted = await remove(pattern);
+    if (pattern.graph === META && deleted === 3 && f.operations.size === 1) {
+      entered(); await gate;
+    }
+    return deleted;
+  });
+  const cleanup = f.agent.cleanupExpiredSharedMemory();
+  await atLastOperation;
+  let stopped = false;
+  const stop = f.agent.stop().then(() => { stopped = true; });
+  await Promise.resolve();
+  const stoppedBeforeRelease = stopped;
+  release();
+  await Promise.all([cleanup, stop]);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  expect(stoppedBeforeRelease).toBe(false);
+  expect(f.operations.size).toBe(1);
+  expect(f.stats.selections).toBe(4);
+});
+
+
+it('logs cutoff conversion failures and resolves through the cleanup error contract', async () => {
+  const f = await fixture(1);
+  const internals = f.agent as unknown as Internals;
+  await expect(runSwmExpiryCleanup({
+    store: f.store, log: internals.log, workspaceOwnedEntities: internals.workspaceOwnedEntities, isClosed: () => false,
+  }, 1e20)).resolves.toMatchObject({ triplesDeleted: 0, budgetExhausted: false });
+  expect(f.warning).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('Invalid time value'));
+});
+
+it.each([undefined, 'research'])('evicts only expired ownership in graph family %s', async subGraph => {
+  const agent = await DKGAgent.create({ name: 'expiry-ownership', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 60_000 });
+  agents.push(agent);
+  const { store, workspaceOwnedEntities } = agent as unknown as Internals;
+  // Oxigraph ignores empty graph creation; seed the parent CG registration.
+  await store.insert([{ subject: `did:dkg:context-graph:${CG}`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/ContextGraph', graph: `did:dkg:context-graph:${CG}/_meta` }]);
+  const graph = subGraph ? `did:dkg:context-graph:${CG}/${subGraph}/_shared_memory` : WS;
+  const key = subGraph ? `${CG}\0${subGraph}` : CG;
+  const otherKey = 'unrelated-context';
+  workspaceOwnedEntities.set(key, new Map([['urn:expired', 'peer'], ['urn:retained', 'peer']]));
+  workspaceOwnedEntities.set(otherKey, new Map([['urn:expired', 'other-peer']]));
+  await store.insert([
+    { subject: 'urn:op:ownership', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation', graph: `${graph}_meta` },
+    { subject: 'urn:op:ownership', predicate: 'http://dkg.io/ontology/publishedAt', object: '"2020-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>', graph: `${graph}_meta` },
+    { subject: 'urn:op:ownership', predicate: 'http://dkg.io/ontology/rootEntity', object: 'urn:expired', graph: `${graph}_meta` },
+    { subject: 'urn:expired', predicate: 'urn:p', object: '"expired"', graph },
+    { subject: 'urn:retained', predicate: 'urn:p', object: '"keep"', graph },
+  ]);
+  await agent.cleanupExpiredSharedMemory();
+  expect(workspaceOwnedEntities.get(key)?.has('urn:expired')).toBe(false);
+  expect(workspaceOwnedEntities.get(key)?.get('urn:retained')).toBe('peer');
+  expect(workspaceOwnedEntities.get(otherKey)?.get('urn:expired')).toBe('other-peer');
 });

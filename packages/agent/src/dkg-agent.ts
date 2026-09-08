@@ -1,3 +1,4 @@
+import { validateSharedMemoryTtlMs } from './swm-expiry-cleanup.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -1145,6 +1146,7 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
+    validateSharedMemoryTtlMs(inputConfig.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS);
     const contextGraphSubscriptionRehydrationEnabled =
       inputConfig.contextGraphSubscriptionRehydrationEnabled === undefined
         ? true
@@ -2230,7 +2232,9 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   async stop(): Promise<void> {
-    if (!this.started) return;
+    // Explicit cleanup can own physical work even before start().
+    const swmCleanupDrain = this.swmExpiryCleanupWorker?.stop();
+    if (!this.started) { await swmCleanupDrain; return; }
     // Fence membership persistence before any network callback can enqueue
     // more work; the physical drain below completes before store teardown.
     const membershipPersistDrain = this.contextGraphMembershipPersistence?.closeAndDrain()
@@ -2247,7 +2251,6 @@ export class DKGAgent extends DKGAgentBase {
     // ignores cancellation must quarantine shutdown instead of preventing the
     // retirement timeout from ever being reached.
     const chainPollerDrain = chainPoller?.stop();
-    const swmCleanupDrain = this.swmExpiryCleanupWorker?.stop();
     if (this.hostModeReconcilerTimer) {
       clearInterval(this.hostModeReconcilerTimer);
       this.hostModeReconcilerTimer = null;

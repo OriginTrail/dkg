@@ -1829,9 +1829,9 @@ export class DKGAgentBase {
     this.queryEngine = queryEngine;
     this.workspaceOwnedEntities = workspaceOwnedEntities;
     this.swmExpiryCleanupWorker = new SwmExpiryCleanupWorker(
-      (ttlMs, isClosed, nextMetaGraph) => runSwmExpiryCleanup({
+      (ttlMs, isClosed, nextMetaGraph, cutoffMs) => runSwmExpiryCleanup({
         store: this.store, workspaceOwnedEntities: this.workspaceOwnedEntities, log: this.log, isClosed,
-      }, ttlMs, nextMetaGraph),
+      }, ttlMs, nextMetaGraph, cutoffMs),
       config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS,
       SWM_CLEANUP_INTERVAL_MS,
     );

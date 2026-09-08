@@ -10646,14 +10646,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * and the next cleanup cycle without requiring a restart.
    */
   setSharedMemoryTtlMs(this: DKGAgent, ttlMs: number): void {
-    (this.config as any).sharedMemoryTtlMs = ttlMs;
     this.swmExpiryCleanupWorker.setTtl(ttlMs);
+    (this.config as any).sharedMemoryTtlMs = ttlMs;
   }
 
   /**
-   * Remove one bounded pass of expired shared memory operations and their data.
-   * Returns triples deleted by this pass; remaining backlog continues after a
-   * short yield, without waiting for the regular maintenance interval.
+   * Drain expired shared memory operations and return the total triples deleted.
+   * Physical passes are bounded and yield between batches. The returned promise
+   * includes every continuation; periodic maintenance independently uses bounded
+   * ticks. The manual drain pins its cutoff and stops if TTL is disabled or the
+   * agent is stopped.
    * Queries SWM meta for operations with publishedAt older than the TTL,
    * deletes the corresponding triples from shared memory and SWM meta,
    * and removes the root entities from workspaceOwnedEntities.

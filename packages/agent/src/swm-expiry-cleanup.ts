@@ -6,6 +6,13 @@ import {
 import { stripLiteral } from './dkg-agent-utils.js';
 import { sharedMemoryOwnershipKeyFromGraph } from './sync/shared-memory-graphs.js';
 
+/** Keep every accepted duration representable by JavaScript Date. Zero disables TTL. */
+export function validateSharedMemoryTtlMs(ttlMs: number): void {
+  if (!Number.isFinite(ttlMs) || ttlMs < 0 || ttlMs > 8_640_000_000_000_000) {
+    throw new RangeError('sharedMemoryTtlMs must be finite, non-negative and at most 8640000000000000');
+  }
+}
+
 export const SWM_CLEANUP_BATCH_SIZE = 250;
 export const SWM_CLEANUP_MAX_BATCHES = 4;
 
@@ -35,13 +42,14 @@ export async function runSwmExpiryCleanup(
   context: SwmExpiryCleanupContext,
   ttlMs: number,
   nextMetaGraph?: string,
+  cutoffMs?: number,
 ): Promise<SwmExpiryCleanupResult> {
   const { store, log, isClosed } = context;
   const ctx = createOperationContext('share');
-  const cutoff = new Date(Date.now() - ttlMs).toISOString();
   const result: SwmExpiryCleanupResult = { triplesDeleted: 0, budgetExhausted: false, nextMetaGraph };
   const counts = new Map<string, { triples: number; operations: number }>();
   try {
+    const cutoff = new Date(cutoffMs ?? Date.now() - ttlMs).toISOString();
     const targets: CleanupTarget[] = [];
     for (const contextGraphId of await new GraphManager(store).listContextGraphs()) {
       if (isClosed()) return result;
