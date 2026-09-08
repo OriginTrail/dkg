@@ -1154,6 +1154,7 @@ async function _performUpdateInner(
   const timeouts = resolveBuildTimeouts(au);
 
   try {
+    await _autoUpdateIo.cleanStaleWorkspacePackages(targetDir, log);
     await runBuildStep(execAsync, "pnpm install --frozen-lockfile", {
       cwd: targetDir,
       timeoutMs: timeouts.install,

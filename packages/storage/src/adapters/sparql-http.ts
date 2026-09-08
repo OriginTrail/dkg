@@ -227,7 +227,8 @@ export interface SparqlHttpStoreOptions {
    * closed instead of failing boot; it never grants managed guarantees.
    */
   managedOxigraph?: boolean;
-  /** Runtime-only recovery hook invoked when the HTTP client deadline fires. */
+  /** Runtime-only recovery hook for a client deadline, including a cancelled
+   * managed read reaching its retained deadline with server work unconfirmed. */
   onClientTimeout?: (operation: string) => void;
   /** Runtime-only managed-server state used to classify restart collateral. */
   getRecoveryState?: () => SparqlHttpRecoveryState;
@@ -291,6 +292,12 @@ export class SparqlHttpStore implements TripleStore {
   private readonly slowQuerySampleRate: number;
   private readonly onSlowQuery?: (event: SparqlHttpSlowQueryEvent) => void;
   private readonly workLifecycle = new AbortableStoreWorkLifecycle();
+  private abandonedReadEpoch = 0;
+  private abandonedReadRecovery?: {
+    timer: ReturnType<typeof setTimeout>;
+    deadline: number;
+    generation: number;
+  };
   private listGraphsCache: string[] | null = null;
   private listGraphsCachedAt = 0;
   private listGraphsGeneration = 0;
@@ -476,6 +483,35 @@ export class SparqlHttpStore implements TripleStore {
     }
   }
 
+  private recoverAbandonedRead(
+    operation: 'query' | 'construct',
+    started: SparqlHttpRecoveryState | null,
+    deadline: number,
+    epoch: number,
+  ): void {
+    if (!this.managedOxigraph || !this.onClientTimeout || !started
+      || epoch !== this.abandonedReadEpoch) return;
+    // Closing an HTTP connection does not cancel Oxigraph 0.5 evaluation.
+    // Preserve the caller's cancellation, but retain the original deadline
+    // for the possibly abandoned server work. One timer per adapter suffices;
+    // an arbitrary number of cancelled reads must not accumulate timers.
+    const pending = this.abandonedReadRecovery;
+    if (pending?.generation === started.generation && pending.deadline <= deadline) return;
+    clearTimeout(pending?.timer);
+    const timer = setTimeout(() => {
+      this.abandonedReadRecovery = undefined;
+      const current = this.readRecoveryState();
+      // A completed restart already discarded this evaluation. Never kill a
+      // replacement process on behalf of an earlier store generation.
+      if (epoch === this.abandonedReadEpoch && current
+        && !current.recovering && current.generation === started.generation) {
+        this.notifyClientTimeout(operation);
+      }
+    }, Math.max(0, deadline - this.now()));
+    timer.unref?.();
+    this.abandonedReadRecovery = { timer, deadline, generation: started.generation };
+  }
+
   getPressureSnapshot(): StorePressureSnapshot {
     return this.scheduler.snapshot;
   }
@@ -513,9 +549,14 @@ export class SparqlHttpStore implements TripleStore {
     // mojibake-ing any non-ASCII character in the query. UTF-8 is what the
     // SPARQL protocol prescribes.
     const timeoutSignal = AbortSignal.timeout(this.timeout);
+    const deadline = this.now() + this.timeout;
+    const epoch = this.abandonedReadEpoch;
     const signalScope = composeAbortSignals(options?.signal, timeoutSignal);
     const signal = signalScope.signal ?? timeoutSignal;
+    let dispatched = false;
     try {
+      throwIfAborted(signal);
+      dispatched = true;
       const response = await fetch(this.queryEndpoint, {
         method: 'POST',
         headers: { ...this.headers, 'Content-Type': SPARQL_QUERY_CONTENT_TYPE, Accept: accept },
@@ -542,6 +583,9 @@ export class SparqlHttpStore implements TripleStore {
           timeoutMs: this.timeout,
           cause: error,
         });
+      }
+      if (dispatched && signal.aborted) {
+        this.recoverAbandonedRead(operation, recoveryAtStart, deadline, epoch);
       }
       if (this.recoveryInterrupted(recoveryAtStart)) {
         throw this.recoveryError(storeOperation, 'indeterminate', error);
@@ -1238,6 +1282,9 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async close(): Promise<void> {
+    this.abandonedReadEpoch += 1;
+    clearTimeout(this.abandonedReadRecovery?.timer);
+    this.abandonedReadRecovery = undefined;
     // A managed endpoint is stopped immediately after store.close(). The
     // lifecycle owns one complete generation, aborting and draining every
     // operation admitted before close while rejecting work attempted during

@@ -32,6 +32,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { resolveDaemonNodeCommand } from '../daemon-entrypoint.js';
+import { cleanStaleWorkspacePackages } from './auto-update-workspace-clean.js';
 import {
   expectedBundledMarkItDownBuildMetadata,
   readCliPackageVersion,
@@ -534,6 +535,7 @@ export function buildManifestInstallContext(
 }
 
 export const _autoUpdateIo = {
+  cleanStaleWorkspacePackages,
   readFile,
   readdir: readdir as (...args: any[]) => Promise<any[]>,
   writeFile,
