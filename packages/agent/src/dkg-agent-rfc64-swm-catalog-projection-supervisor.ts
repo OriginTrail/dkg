@@ -28,7 +28,7 @@ import {
 } from './rfc64/supervisor-status-v1.js';
 
 const MAX_CONCURRENT_REPAIRS_V1 = 4;
-const FINALIZED_PRIVATE_RETRY_INTERVAL_MS_V1 = 5_000;
+const DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1 = 5_000;
 
 export type Rfc64PublicCatalogAuthorRepairOutcomeV1 =
   | 'pending'
@@ -138,7 +138,6 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       },
     );
     const hasFinalizedPrivateRepairs = this.#dependencies.listFinalizedPrivateRepairs().length > 0;
-    if (repairs.length === 0 && !hasFinalizedPrivateRepairs) return;
     const existing = this.#state;
     if (existing !== undefined) {
       if (existing.runner.closed || existing.finalizedPrivateRunner.closed) return;
@@ -159,14 +158,29 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
           publicRepairRequested = true;
         }
       }
+      // Release-native/default selection has no bootstrap partition to seed
+      // `repairs`. An authority transition must still revive a repair that
+      // failed while the lane was temporarily inactive.
+      for (const current of existing.repairs) {
+        if (
+          !repairKeys.has(`${current.contextGraphId}\n${current.authorAddress}`)
+          && current.outcome === 'failed'
+          && this.#dependencies.acceptsPublicRootLane(current.contextGraphId)
+        ) {
+          current.dirty = true;
+          publicRepairRequested = true;
+        }
+      }
       if (publicRepairRequested) existing.runner.request();
       if (hasFinalizedPrivateRepairs) existing.finalizedPrivateRunner.request();
       return;
     }
-    const retryIntervalMs = partition?.retryIntervalMs;
+    if (repairs.length === 0 && !hasFinalizedPrivateRepairs) return;
+    const retryIntervalMs = partition?.retryIntervalMs
+      ?? DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1;
     this.#state = this.#createState(
       retryIntervalMs,
-      retryIntervalMs ?? FINALIZED_PRIVATE_RETRY_INTERVAL_MS_V1,
+      retryIntervalMs,
       repairs,
       ctx,
     );
@@ -183,10 +197,11 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     if (!this.#dependencies.acceptsPublicRootLane(params.contextGraphId)) return false;
     let state = this.#state;
     if (state === undefined) {
+      const retryIntervalMs = this.#dependencies.resolvePartition()?.retryIntervalMs
+        ?? DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1;
       state = this.#createState(
-        this.#dependencies.resolvePartition()?.retryIntervalMs,
-        this.#dependencies.resolvePartition()?.retryIntervalMs
-          ?? FINALIZED_PRIVATE_RETRY_INTERVAL_MS_V1,
+        retryIntervalMs,
+        retryIntervalMs,
         [],
         params.ctx,
       );
@@ -222,7 +237,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     let state = this.#state;
     if (state === undefined) {
       const retryIntervalMs = this.#dependencies.resolvePartition()?.retryIntervalMs
-        ?? FINALIZED_PRIVATE_RETRY_INTERVAL_MS_V1;
+        ?? DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1;
       state = this.#createState(retryIntervalMs, retryIntervalMs, [], params.ctx);
       this.#state = state;
     }
@@ -292,7 +307,12 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
         );
       },
       beforePeriodicPass: () => {
-        for (const repair of state.repairs) repair.dirty = true;
+        // Live inventory mutations already dirty their exact scope. The timer
+        // is the bounded liveness path for failures, not a reason to rebuild
+        // every healthy catalog from its complete inventory every five seconds.
+        for (const repair of state.repairs) {
+          if (repair.outcome === 'failed') repair.dirty = true;
+        }
       },
       closingMessage: 'RFC-64 SWM catalog projection closing',
     });
@@ -366,6 +386,9 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
   async #reconcile(repair: MutableAuthorRepairStatusV1, signal: AbortSignal): Promise<void> {
     repair.attempts += 1;
     try {
+      if (!this.#dependencies.acceptsPublicRootLane(repair.contextGraphId)) {
+        throw new Error('RFC-64 SWM catalog projection lane is temporarily inactive');
+      }
       const reconciliation = await this.#dependencies.reconcile({
         contextGraphId: repair.contextGraphId,
         authorAddress: repair.authorAddress,

@@ -264,11 +264,11 @@ function installHarnessCatalogFailureDiagnostics(created: DKGAgent): void {
  */
 function installHarnessBundleServeDelay(created: DKGAgent, delayMs: number): void {
   const surface = created as unknown as Record<string, unknown>;
-  const originalStart = surface.startRfc64PublicCatalogServiceV1;
+  const originalStart = surface.startRfc64CatalogRuntimeV1;
   if (typeof originalStart !== 'function') {
-    throw new Error('catalog service start hook is unavailable');
+    throw new Error('catalog runtime start hook is unavailable');
   }
-  surface.startRfc64PublicCatalogServiceV1 = function delayedCatalogStart(
+  surface.startRfc64CatalogRuntimeV1 = function delayedCatalogStart(
     this: Record<string, unknown>,
     context: unknown,
   ): unknown {

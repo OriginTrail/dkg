@@ -256,3 +256,7 @@ Instrumentation is fail-open:
   hiding healthy sources;
 - log callback failures do not stop the monitor;
 - the monitor timer is unreferenced and is stopped during daemon shutdown.
+
+### Shared-pool lane triage
+
+Shared-pool lane rows include `stateReasons`: all active `depth`, `age`, `rejection`, and `active_age` signals. A full pool can make several lanes `saturated`, but only a lane whose oldest queued operation exceeds the configured age threshold includes `age`. Read this field in `/api/diagnostics/backpressure` and `[backpressure]` log records to distinguish delayed lanes without calculating thresholds. State precedence and partitioned store rows are unchanged.

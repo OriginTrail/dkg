@@ -191,6 +191,7 @@ describe('LiftJob request and record types', () => {
       accessPolicy: 'allowList',
       allowedPeers: ['peer-a', 'peer-b'],
       entityProofs: true,
+      pricingPolicy: 'full-content',
     });
 
     const snapshot = createKnowledgeAssetVmPublishSnapshotRequest(request);
@@ -210,6 +211,7 @@ describe('LiftJob request and record types', () => {
       accessPolicy: 'allowList',
       allowedPeers: ['peer-a', 'peer-b'],
       entityProofs: true,
+      pricingPolicy: 'full-content',
       seal: request.seal,
     });
     for (const rawOnlyField of ['jobType', 'swmId', 'namespace', 'scope', 'transitionType', 'authority']) {
@@ -235,6 +237,13 @@ describe('LiftJob request and record types', () => {
       jobType: 'knowledge-asset-vm-publish',
       knowledgeAssetVmPublish: kaVmPublish({ clearSharedMemoryAfter: false }),
     });
+
+    expect(() => normalizePersistedLiftJobRequest({
+      jobType: 'knowledge-asset-vm-publish',
+      knowledgeAssetVmPublish: kaVmPublish({
+        pricingPolicy: 'invalid' as 'full-content',
+      }),
+    })).toThrow(/pricingPolicy must be one of: full-content/);
   });
 
   it('rejects malformed persisted raw and KA job payloads at the read boundary', () => {

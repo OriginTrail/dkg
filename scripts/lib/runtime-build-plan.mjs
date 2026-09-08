@@ -22,6 +22,8 @@ export const RUNTIME_BUILD_EXCLUSIONS = Object.freeze([
   '@origintrail-official/dkg-evm-module',
 ]);
 
+export const RUNTIME_CLI_PACKAGE = '@origintrail-official/dkg';
+
 export function runtimeBuildFilterArgs() {
   return [
     '-r',
@@ -32,4 +34,42 @@ export function runtimeBuildFilterArgs() {
 
 export function runtimeBuildPnpmArgs(operation = ['run', 'build']) {
   return [...runtimeBuildFilterArgs(), ...operation];
+}
+
+function runtimeCliPrerequisiteBuildPnpmArgs(operation) {
+  return [
+    '-r',
+    '--filter', `${RUNTIME_CLI_PACKAGE}...`,
+    '--filter', `!${RUNTIME_CLI_PACKAGE}`,
+    ...RUNTIME_BUILD_EXCLUSIONS.flatMap((packageName) => ['--filter', `!${packageName}`]),
+    ...operation,
+  ];
+}
+
+function runtimeDependentBuildPnpmArgs(operation) {
+  return [
+    ...runtimeBuildFilterArgs(),
+    '--filter', `!${RUNTIME_CLI_PACKAGE}...`,
+    ...operation,
+  ];
+}
+
+export function runtimeBuildPhases({
+  runtimeOperation = ['run', 'build'],
+  preparedCliOperation = ['run', 'build:prepared'],
+} = {}) {
+  return [
+    {
+      label: 'CLI prerequisite build',
+      args: runtimeCliPrerequisiteBuildPnpmArgs(runtimeOperation),
+    },
+    {
+      label: 'prepared CLI build',
+      args: ['--filter', RUNTIME_CLI_PACKAGE, ...preparedCliOperation],
+    },
+    {
+      label: 'runtime dependent build',
+      args: runtimeDependentBuildPnpmArgs(runtimeOperation),
+    },
+  ];
 }

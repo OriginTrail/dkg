@@ -22,9 +22,7 @@ function scanMinTrustBody(scope: PreparedSparqlQuery): MinTrustBodyScan | null {
   const { where } = scope;
   if (
     !where
-    || !scope.structure.braces.balanced
-    || !scope.structure.parentheses.balanced
-    || !scope.structure.brackets.balanced
+    || !scope.structure.balanced
   ) return null;
 
   const { tokens } = scope.prepared;

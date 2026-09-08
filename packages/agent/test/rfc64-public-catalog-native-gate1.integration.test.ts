@@ -95,6 +95,36 @@ function appliedHeadLifecycleV1(
   });
 }
 
+function appliedHeadLifecycleAbortingBeforeCasV1(
+  controller: AbortController,
+  abortReason: unknown,
+  transaction: Rfc64PublicCatalogNativePrecommitTransactionV1,
+): Readonly<{
+  lifecycle: Rfc64PublicCatalogNativeAppliedHeadLifecycleV1;
+  afterAppliedHeadReadCount: () => number;
+}> {
+  let afterAppliedHeadReadCount = 0;
+  const lifecycle: Rfc64PublicCatalogNativeAppliedHeadLifecycleV1 = Object.freeze({
+    kind: 'rfc64-public-catalog-native-applied-head-lifecycle-v1',
+    transaction,
+    get afterAppliedHead() {
+      afterAppliedHeadReadCount += 1;
+      // The first read is the lifecycle type guard. Returning null makes that
+      // branch short-circuit after one read. The second read assigns the
+      // normalized lifecycle; its microtask runs after runBeforeAppliedHeadCommitV1's
+      // trailing abort check but before the awaiting receiver resumes at CAS.
+      if (afterAppliedHeadReadCount === 2) {
+        queueMicrotask(() => controller.abort(abortReason));
+      }
+      return null;
+    },
+  });
+  return Object.freeze({
+    lifecycle,
+    afterAppliedHeadReadCount: () => afterAppliedHeadReadCount,
+  });
+}
+
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'66'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
@@ -1370,6 +1400,123 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
         expect(call.at(-1)).toEqual({ timeoutMs: 10_000, signal });
       }
     }
+  }, 30_000);
+
+  it('rolls back genesis cancellation in the precommit-to-CAS gap', async () => {
+    const fixture = await setupLiveReceiver();
+    await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+    const controller = new AbortController();
+    const abortReason = new Error('cancel genesis after precommit semantic work');
+    const compareAndSwapAppliedCatalogHeadV1 = vi.fn(
+      fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1.bind(
+        fixture.receiverPersistence.inventory,
+      ),
+    );
+    const commit = vi.fn();
+    const rollback = vi.fn();
+    const cancellationBoundary = appliedHeadLifecycleAbortingBeforeCasV1(
+      controller,
+      abortReason,
+      {
+        commit,
+        rollback: async (cause) => {
+          rollback(cause);
+          await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+        },
+      },
+    );
+    const receiver = fixture.createReceiver({
+      readAppliedCatalogHeadV1:
+        fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
+          fixture.receiverPersistence.inventory,
+        ),
+      compareAndSwapAppliedCatalogHeadV1,
+    }, undefined, undefined, fixture.receiverStore, async (_plan, signal) => {
+      expect(signal).toBe(controller.signal);
+      await setTransactionTestVmGeneration(fixture.receiverStore, 'target');
+      return cancellationBoundary.lifecycle;
+    });
+
+    await expect(fixture.bootstrap(
+      fixture.genesisAnnouncement,
+      receiver,
+      controller.signal,
+    )).rejects.toBe(abortReason);
+    expect(cancellationBoundary.afterAppliedHeadReadCount()).toBe(2);
+    expect(controller.signal.reason).toBe(abortReason);
+    expect(compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toBeNull();
+    await expect(readTransactionTestVmGeneration(fixture.receiverStore))
+      .resolves.toBe('predecessor');
+    expect(rollback).toHaveBeenCalledOnce();
+    expect(rollback).toHaveBeenCalledWith(abortReason);
+    expect(commit).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it('restores the predecessor after successor cancellation in the precommit-to-CAS gap', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+    const controller = new AbortController();
+    const abortReason = new Error('cancel successor after precommit semantic work');
+    const compareAndSwapAppliedCatalogHeadV1 = vi.fn(
+      fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1.bind(
+        fixture.receiverPersistence.inventory,
+      ),
+    );
+    const commit = vi.fn();
+    const rollback = vi.fn();
+    let targetWasActiveWhenLifecycleReturned = false;
+    const cancellationBoundary = appliedHeadLifecycleAbortingBeforeCasV1(
+      controller,
+      abortReason,
+      {
+        commit,
+        rollback: async (cause) => {
+          rollback(cause);
+          await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+        },
+      },
+    );
+    const receiver = fixture.createReceiver({
+      readAppliedCatalogHeadV1:
+        fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
+          fixture.receiverPersistence.inventory,
+        ),
+      compareAndSwapAppliedCatalogHeadV1,
+    }, undefined, undefined, fixture.receiverStore, async (_plan, signal) => {
+      expect(signal).toBe(controller.signal);
+      await setTransactionTestVmGeneration(fixture.receiverStore, 'target');
+      targetWasActiveWhenLifecycleReturned = await fixture.receiverStore.hasGraph(
+        `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${KA_NUMBER}`,
+      );
+      return cancellationBoundary.lifecycle;
+    });
+
+    await expect(fixture.synchronize(
+      fixture.announcement,
+      receiver,
+      controller.signal,
+    )).rejects.toBe(abortReason);
+    expect(cancellationBoundary.afterAppliedHeadReadCount()).toBe(2);
+    expect(controller.signal.reason).toBe(abortReason);
+    expect(targetWasActiveWhenLifecycleReturned).toBe(true);
+    expect(compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.genesis.head.objectDigest);
+    await expect(fixture.receiverStore.hasGraph(
+      `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${KA_NUMBER}`,
+    )).resolves.toBe(false);
+    await expect(readTransactionTestVmGeneration(fixture.receiverStore))
+      .resolves.toBe('predecessor');
+    expect(rollback).toHaveBeenCalledOnce();
+    expect(rollback).toHaveBeenCalledWith(abortReason);
+    expect(commit).not.toHaveBeenCalled();
   }, 30_000);
 
   it('rejects a genesis head with no delegation without staging it durably', async () => {

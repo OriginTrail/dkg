@@ -26,6 +26,8 @@ describe('RFC-64 peer-job accounting and order', () => {
         completeSwmProviders: [PEER_A],
       }],
     };
+    vi.spyOn(agent, 'selectedSwmBootstrapContextGraphIdsForPeer')
+      .mockReturnValue(['selected-cg']);
     agent.getSyncReconcilerProbe = async () => ({
       protocolsKey: PROTOCOL_SYNC,
       connectionKey: null,
@@ -70,6 +72,8 @@ describe('RFC-64 peer-job accounting and order', () => {
         completeSwmProviders: [PEER_A],
       }],
     };
+    vi.spyOn(agent, 'selectedSwmBootstrapContextGraphIdsForPeer')
+      .mockReturnValue(['selected-cg']);
     agent.syncReconcilerBackoff.set(PEER_A, {
       failures: 2,
       nextRetryAt: Date.now() + 60_000,
@@ -118,6 +122,8 @@ describe('RFC-64 peer-job accounting and order', () => {
         completeSwmProviders: [PEER_A],
       }],
     };
+    vi.spyOn(agent, 'selectedSwmBootstrapContextGraphIdsForPeer')
+      .mockReturnValue(['selected-cg']);
     agent.getSyncReconcilerProbe = async () => ({
       protocolsKey: PROTOCOL_SYNC,
       connectionKey: null,
@@ -164,6 +170,8 @@ describe('RFC-64 peer-job accounting and order', () => {
         completeSwmProviders: [PEER_A],
       }],
     };
+    vi.spyOn(agent, 'selectedSwmBootstrapContextGraphIdsForPeer')
+      .mockReturnValue(['selected-cg']);
     agent.getSyncReconcilerProbe = async () => ({
       connected: true,
       hasSyncProtocol: true,
@@ -455,6 +463,8 @@ describe('RFC-64 peer-job accounting and order', () => {
         completeSwmProviders: [PEER_A],
       }],
     };
+    vi.spyOn(agent, 'selectedSwmBootstrapContextGraphIdsForPeer')
+      .mockReturnValue(['selected-cg']);
     agent.getSyncReconcilerProbe = async () => ({
       protocolsKey: PROTOCOL_SYNC,
       connectionKey: null,

@@ -8,7 +8,7 @@ import {
   kaVmPublishRequest,
   kaVmRecoveryEvidence,
   recoveredResolution,
-} from './_helpers/ka-vm-publish.js';
+} from '../../../scripts/testing/ka-vm-publish.js';
 import { createReceiptHintHarness } from './_helpers/receipt-hint-scenario.js';
 
 describe('receipt-hint lane: core and evidence', () => {

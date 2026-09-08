@@ -74,12 +74,14 @@ describe('ApiClient', () => {
     const options: KnowledgeAssetFinalizedPublishOptions = {
       clearAfter: true,
       publishEpochs: 1,
+      pricingPolicy: 'full-content',
       publisherNodeIdentityIdOverride: 0n,
     };
 
     expect(options).toMatchObject({
       clearAfter: true,
       publishEpochs: 1,
+      pricingPolicy: 'full-content',
       publisherNodeIdentityIdOverride: 0n,
     });
   });
@@ -325,7 +327,10 @@ describe('ApiClient', () => {
       delete process.env.DKG_API_PORT;
       await writeFile(join(tempDir, 'config.json'), JSON.stringify({ name: 'isolated', apiPort: 9317 }));
       await writeFile(join(tempDir, 'auth.token'), 'local-token\n', 'utf8');
-      const { fetch, calls } = createRejectingFetch(new TypeError('fetch failed'));
+      const { fetch, calls } = createRejectingFetch(Object.assign(
+        new TypeError('request transport failed'),
+        { cause: { code: 'ECONNREFUSED' } },
+      ));
       globalThis.fetch = fetch;
 
       const connected = await ApiClient.connect({ allowConfigFallback: true });
@@ -336,12 +341,81 @@ describe('ApiClient', () => {
       expect((calls[0].opts.headers as any).Authorization).toBeUndefined();
     });
 
+    it('classifies a fetch-failure message even when the transport omits an error code', async () => {
+      process.env.DKG_HOME = tempDir;
+      delete process.env.DKG_API_PORT;
+      await writeFile(join(tempDir, 'config.json'), JSON.stringify({ name: 'isolated', apiPort: 9317 }));
+      const { fetch } = createRejectingFetch(new TypeError('fetch failed'));
+      globalThis.fetch = fetch;
+
+      const connected = await ApiClient.connect({ allowConfigFallback: true });
+      await expect(connected.status()).rejects.toThrow('Daemon is not running. Start it with: dkg start');
+    });
+
+    it('does not let a hostile nested error getter escape transport classification', async () => {
+      process.env.DKG_HOME = tempDir;
+      delete process.env.DKG_API_PORT;
+      await writeFile(join(tempDir, 'config.json'), JSON.stringify({ name: 'isolated', apiPort: 9317 }));
+      const hostileCause = new Proxy({}, {
+        get: () => { throw new Error('hostile getter'); },
+      });
+      const transportError = Object.assign(new TypeError('unclassified transport error'), {
+        cause: hostileCause,
+      });
+      const { fetch } = createRejectingFetch(transportError);
+      globalThis.fetch = fetch;
+
+      const connected = await ApiClient.connect({ allowConfigFallback: true });
+      await expect(connected.status()).rejects.toBe(transportError);
+    });
+
     it('agents() calls /api/agents', async () => {
       const body = { agents: [{ agentUri: 'urn:a', name: 'A', peerId: 'p1' }] };
-      const { fetch } = createTrackingFetch({ ok: true, status: 200, body });
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
       globalThis.fetch = fetch;
       const result = await client.agents();
       expect(result.agents).toHaveLength(1);
+      // The parameterless call keeps the bare path — no stray '?' that a
+      // strict daemon-side unknown-parameter check could trip over.
+      expect(calls[0].url.endsWith('/api/agents')).toBe(true);
+    });
+
+    it('agents() forwards the GH#310 filters and pagination params', async () => {
+      const body = { agents: [], nextCursor: 'next-1' };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+      const result = await client.agents({
+        framework: 'eliza',
+        skillType: 'ImageAnalysis',
+        connectionStatus: 'connected',
+        local: true,
+        limit: 5,
+        cursor: 'c123',
+      });
+      // Exact query entries — substring checks are spoofable by a prefixed
+      // key, and the parameter NAMES are the contract (the daemon 400s on
+      // unknown names). The route's parameter is snake_case skill_type; the
+      // option is camelCase.
+      const entries = Object.fromEntries(new URLSearchParams(calls[0].url.split('?')[1] ?? ''));
+      expect(entries).toEqual({
+        framework: 'eliza',
+        skill_type: 'ImageAnalysis',
+        connectionStatus: 'connected',
+        local: 'true',
+        limit: '5',
+        cursor: 'c123',
+      });
+      expect(result.nextCursor).toBe('next-1');
+    });
+
+    it('agents({ local: false }) sends local=false, not nothing', async () => {
+      // false must reach the daemon — dropping it silently would flip the
+      // call from "everyone else's agents" to "everyone's agents".
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { agents: [] } });
+      globalThis.fetch = fetch;
+      await client.agents({ local: false });
+      expect(Object.fromEntries(new URLSearchParams(calls[0].url.split('?')[1] ?? '')))
+        .toEqual({ local: 'false' });
     });
 
     it('skills() calls /api/skills', async () => {
@@ -867,8 +941,30 @@ describe('ApiClient', () => {
 
   describe('shutdown', () => {
     it('does not throw even if connection closes', async () => {
-      globalThis.fetch = (async () => { throw new Error('connection reset'); }) as any;
+      globalThis.fetch = (async () => {
+        throw Object.assign(new Error('fetch failed'), { cause: { code: 'ECONNRESET' } });
+      }) as any;
       await expect(client.shutdown()).resolves.toBeUndefined();
+    });
+
+    it('propagates a definite HTTP rejection', async () => {
+      const { fetch } = createTrackingFetch({
+        ok: false,
+        status: 401,
+        body: { error: 'Unauthorized' },
+      });
+      globalThis.fetch = fetch;
+      await expect(client.shutdown()).rejects.toMatchObject({
+        message: 'Unauthorized',
+        httpStatus: 401,
+      });
+    });
+
+    it('propagates a definite pre-request connection failure', async () => {
+      globalThis.fetch = (async () => {
+        throw Object.assign(new Error('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
+      }) as any;
+      await expect(client.shutdown()).rejects.toMatchObject({ message: 'fetch failed' });
     });
   });
 
@@ -1007,6 +1103,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       alsoPublishVm: {
         clearAfter: false,
         publishEpochs: 9,
+        pricingPolicy: 'full-content',
         publisherNodeIdentityIdOverride: 7n,
       },
     });
@@ -1019,6 +1116,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       alsoPublishVm: {
         clearSharedMemoryAfter: false,
         publishEpochs: 9,
+        pricingPolicy: 'full-content',
         publisherNodeIdentityIdOverride: '7',
       },
     });
@@ -1208,6 +1306,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       selectedAuthorAgentAddress: selected,
       subGraphName: 'notes',
       publishEpochs: 12,
+      pricingPolicy: 'full-content',
     });
 
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/vm/publish`);
@@ -1216,7 +1315,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       contextGraphId: 'cg',
       subGraphName: 'notes',
       selectedAuthorAgentAddress: selected,
-      options: { publishEpochs: 12 },
+      options: { publishEpochs: 12, pricingPolicy: 'full-content' },
     });
     // Same nesting hazard as the direct lane: a selector inside `options` is silently
     // ignored by parseHttpFinalizedPublishOptions and would publish a different author.
@@ -1423,7 +1522,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       'cg',
       'asset2',
       [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: '' }],
-      { clearAfter: false, subGraphName: 'sg2' },
+      { clearAfter: false, subGraphName: 'sg2', pricingPolicy: 'full-content' },
     );
     // 1st call creates (finalize+share to SWM); the sequence ENDS at the per-KA vm/publish route
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets`);
@@ -1438,6 +1537,9 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(last.opts.method).toBe('POST');
     const published = JSON.parse(last.opts.body as string);
     expect(published.subGraphName).toBe('sg2');
-    expect(published.options).toEqual({ clearSharedMemoryAfter: false });
+    expect(published.options).toEqual({
+      clearSharedMemoryAfter: false,
+      pricingPolicy: 'full-content',
+    });
   });
 });

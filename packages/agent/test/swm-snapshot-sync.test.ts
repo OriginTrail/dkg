@@ -1,3 +1,4 @@
+import { TEST_SNAPSHOT_STORAGE } from '../../../scripts/testing/snapshot-storage.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,8 +34,8 @@ describe('SWM snapshot catch-up sync', () => {
     const nodeBDataDir = await tempDataDir();
     const nodeA = await createAgent(nodeADataDir, 'SnapshotSyncA');
     const nodeB = await createAgent(nodeBDataDir, 'SnapshotSyncB');
-    const sourceSnapshots = new FileWorkspacePublicSnapshotStore(join(nodeADataDir, 'swm-public-snapshots'));
-    const targetSnapshots = new FileWorkspacePublicSnapshotStore(join(nodeBDataDir, 'swm-public-snapshots'));
+    const sourceSnapshots = new FileWorkspacePublicSnapshotStore(join(nodeADataDir, 'swm-public-snapshots'), undefined, TEST_SNAPSHOT_STORAGE);
+    const targetSnapshots = new FileWorkspacePublicSnapshotStore(join(nodeBDataDir, 'swm-public-snapshots'), undefined, TEST_SNAPSHOT_STORAGE);
 
     const write = await nodeA.publisher.writeToWorkspace(CONTEXT_GRAPH, [
       { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Synced Snapshot"', graph: '' },
@@ -105,7 +106,7 @@ describe('SWM snapshot catch-up sync', () => {
     const nodeBDataDir = await tempDataDir();
     const nodeA = await createAgent(nodeADataDir, 'SnapshotSyncMissingA');
     const nodeB = await createAgent(nodeBDataDir, 'SnapshotSyncMissingB');
-    const sourceSnapshots = new FileWorkspacePublicSnapshotStore(join(nodeADataDir, 'swm-public-snapshots'));
+    const sourceSnapshots = new FileWorkspacePublicSnapshotStore(join(nodeADataDir, 'swm-public-snapshots'), undefined, TEST_SNAPSHOT_STORAGE);
 
     await nodeA.publisher.writeToWorkspace(CONTEXT_GRAPH, [
       { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Missing Snapshot"', graph: '' },
@@ -162,8 +163,13 @@ describe('SWM snapshot catch-up sync', () => {
     const agent = await DKGAgent.create({
       name,
       dataDir,
+      sharedMemoryPublicSnapshotStorage: TEST_SNAPSHOT_STORAGE,
       listenHost: '127.0.0.1',
+      rfc64CatalogActivation: { enabled: false },
     });
+    (agent as unknown as {
+      resolveRfc64CatalogReceiverAuthorityV1: () => { legacySyncAllowed: boolean };
+    }).resolveRfc64CatalogReceiverAuthorityV1 = () => ({ legacySyncAllowed: true });
     agents.push(agent);
     return agent;
   }

@@ -157,7 +157,10 @@ describe('exact Context Graph asset fetch', () => {
       resolveRegisteredContextGraphAuthority:
         DKGAgent.prototype.resolveRegisteredContextGraphAuthority,
       onChainParticipantAgentsCache: new Map<string, string[]>(),
-      readLiveOnChainAccessPolicy: vi.fn(async () => 1 as const),
+      resolveLiveOnChainAccessPolicyState: vi.fn(async () => ({
+        kind: 'available' as const,
+        accessPolicy: 1 as const,
+      })),
       resolveRfc64PrivateReadRosterV1: vi.fn(() => undefined),
       isAgentAddressAllowed: QueryMethods.prototype.isAgentAddressAllowed,
       hasLocalAgentInGate: WorkspaceCryptoMethods.prototype.hasLocalAgentInGate,

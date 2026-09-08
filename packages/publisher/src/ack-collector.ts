@@ -26,6 +26,7 @@ import {
 import { ethers } from 'ethers';
 import { QuorumUnmetError, type PeerOutcome } from './ack-errors.js';
 import type { V10ACKMode } from './publisher.js';
+import { hasValidGraphScopedContent } from './graph-publish-envelope.js';
 
 /**
  * Why an ACK signer pre-flight rejected a recovered signer. Mirrors
@@ -476,15 +477,11 @@ export class ACKCollector {
       if (graphScope.ual !== params.kaUal || graphScope.assertionVersion !== '1') {
         throw new Error('ACK collection failed: graph-scoped publish requires a canonical version-1 UAL');
       }
-      if (
-        !Number.isSafeInteger(params.publicTripleCount)
-        || params.publicTripleCount < 0
-        || !Number.isSafeInteger(params.privateTripleCount)
-        || params.privateTripleCount < 0
-        || (params.publicTripleCount === 0 && params.privateTripleCount === 0)
-        || (params.privateTripleCount > 0 && params.privateMerkleRoot?.length !== 32)
-        || (params.privateTripleCount === 0 && params.privateMerkleRoot !== undefined)
-      ) {
+      if (!hasValidGraphScopedContent(
+        params.publicTripleCount,
+        params.privateTripleCount,
+        params.privateMerkleRoot,
+      )) {
         throw new Error('ACK collection failed: graph-scoped publish has an invalid content envelope');
       }
       if (

@@ -19,7 +19,8 @@
  * Stdout contains only paths relative to the package root, one per line.
  * A short diagnostic summary is written to stderr.
  */
-import { readdirSync } from 'node:fs';
+import { PACKAGE_SHARD_COUNTS } from '../lib/ci-lanes.mjs';
+import { discoverVitestFiles } from './discover-vitest-files.mjs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -285,14 +286,12 @@ const CHAIN_BODY_MS = Object.freeze({
 export const PACKAGE_SPECS = Object.freeze({
   cli: Object.freeze({
     packageDirectory: 'packages/cli',
-    shardCount: 4,
-    excludedPrefixes: Object.freeze([]),
+    shardCount: PACKAGE_SHARD_COUNTS.cli,
     bodyWeightsMs: CLI_BODY_MS,
   }),
   chain: Object.freeze({
     packageDirectory: 'packages/chain',
-    shardCount: 3,
-    excludedPrefixes: Object.freeze(['test/archive/']),
+    shardCount: PACKAGE_SHARD_COUNTS.chain,
     bodyWeightsMs: CHAIN_BODY_MS,
   }),
 });
@@ -303,38 +302,12 @@ function compareAscii(left, right) {
   return 0;
 }
 
-function walk(directory, packageRoot, output) {
-  const entries = readdirSync(directory, { withFileTypes: true })
-    .sort((left, right) => compareAscii(left.name, right.name));
-
-  for (const entry of entries) {
-    const absolutePath = path.join(directory, entry.name);
-    if (entry.isDirectory()) {
-      walk(absolutePath, packageRoot, output);
-    } else if (entry.isFile() && entry.name.endsWith('.test.ts')) {
-      const relativePath = path.relative(packageRoot, absolutePath).split(path.sep).join('/');
-      if (relativePath.includes('\n') || relativePath.includes('\r')) {
-        throw new Error('Test file paths may not contain newlines: ' + relativePath);
-      }
-      output.push(relativePath);
-    }
-  }
-}
-
 export function discoverEligibleTestFiles(packageName, repoRoot) {
   const spec = PACKAGE_SPECS[packageName];
   if (!spec) {
     throw new Error('Unsupported package ' + packageName + '; expected cli or chain');
   }
-
-  const packageRoot = path.join(repoRoot, spec.packageDirectory);
-  const testRoot = path.join(packageRoot, 'test');
-  const files = [];
-  walk(testRoot, packageRoot, files);
-
-  return files
-    .filter((file) => !spec.excludedPrefixes.some((prefix) => file.startsWith(prefix)))
-    .sort(compareAscii);
+  return discoverVitestFiles(path.join(repoRoot, spec.packageDirectory));
 }
 
 export function planWeightedShards({
@@ -343,6 +316,7 @@ export function planWeightedShards({
   shardCount,
   perFileOverheadMs = PER_FILE_OVERHEAD_MS,
   unknownFileBodyMs = UNKNOWN_FILE_BODY_MS,
+  shardOverheadMs,
 }) {
   if (!Number.isInteger(shardCount) || shardCount < 1) {
     throw new Error('shardCount must be a positive integer');
@@ -352,6 +326,11 @@ export function planWeightedShards({
   }
   if (new Set(files).size !== files.length) {
     throw new Error('Eligible test file list contains duplicates');
+  }
+  const overhead = shardOverheadMs ?? Array(shardCount).fill(0);
+  if (!Array.isArray(overhead) || overhead.length !== shardCount
+      || overhead.some((value) => !Number.isFinite(value) || value < 0)) {
+    throw new Error('Expected one non-negative overhead per shard');
   }
 
   const weightedFiles = files.map((file) => {
@@ -371,7 +350,7 @@ export function planWeightedShards({
 
   const shards = Array.from({ length: shardCount }, (_, index) => ({
     index: index + 1,
-    estimatedMs: 0,
+    estimatedMs: overhead[index],
     files: [],
     unknownFiles: [],
   }));
@@ -430,7 +409,7 @@ function runCli() {
   ) {
     console.error(
       'Usage: node scripts/ci/plan-vitest-shard.mjs <cli|chain> <shard>; '
-      + 'CLI has 4 shards and chain has 3 shards.',
+      + `CLI has ${PACKAGE_SHARD_COUNTS.cli} shards and chain has ${PACKAGE_SHARD_COUNTS.chain} shards.`,
     );
     process.exitCode = 2;
     return;

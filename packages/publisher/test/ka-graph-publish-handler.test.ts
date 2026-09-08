@@ -30,7 +30,7 @@ const SWM_GRAPH = knowledgeAssetLayerGraphUri(
 );
 const PEER = { toString: () => '12D3KooWPublisher' };
 
-function request(graph = VM_GRAPH): Uint8Array {
+function request(graph = VM_GRAPH, overrides: Partial<Parameters<typeof encodePublishRequest>[0]> = {}): Uint8Array {
   return encodePublishRequest({
     ual: UAL,
     nquads: new TextEncoder().encode(
@@ -51,10 +51,25 @@ function request(graph = VM_GRAPH): Uint8Array {
     privateTripleCount: 0,
     accessPolicy: 'allowList',
     allowedPeers: ['12D3KooWReader'],
+    ...overrides,
   });
 }
 
 describe('PublishHandler graph-scoped protocol', () => {
+  it.each([
+    [{ publicTripleCount: 0, privateTripleCount: 0, accessPolicy: '' }, 'invalid content envelope'],
+    [{ accessPolicy: '', allowedPeers: ['reader', 'reader'] }, 'invalid accessPolicy'],
+    [{ allowedPeers: ['reader', ' reader '] }, 'invalid access-policy peer envelope'],
+    [{ accessPolicy: 'public', allowedPeers: ['reader'] }, 'invalid access-policy peer envelope'],
+  ])('retains rejection precedence and avoids writes for %j', async (overrides, reason) => {
+    const store = new OxigraphStore();
+    const handler = new PublishHandler(store, new TypedEventBus());
+    const ack = decodePublishAck(await handler.handler(request(VM_GRAPH, overrides), PEER));
+    expect(ack.accepted).toBe(false);
+    expect(ack.rejectionReason).toContain(reason);
+    expect(await store.countQuads(VM_GRAPH)).toBe(0);
+  });
+
   it('stores one exact tentative VM graph, confirms it, and drops exact SWM', async () => {
     const store = new OxigraphStore();
     const handler = new PublishHandler(store, new TypedEventBus());

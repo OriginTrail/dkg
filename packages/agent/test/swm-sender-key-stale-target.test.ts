@@ -31,6 +31,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   Logger,
   computeSwmSenderKeyPackageAAD,
+  decodeSwmSenderKeyPackageAck,
   encodeSwmSenderKeyPackage,
   encryptSwmSenderKeyPackage,
   generateEd25519Keypair,
@@ -61,6 +62,10 @@ interface DKGAgentInternals {
   // full context graph + membership snapshot just to drive the
   // sender-key bootstrap path.
   getContextGraphAgentGateAddresses(contextGraphId: string): Promise<string[] | null>;
+  getContextGraphOnChainPolicy(contextGraphId: string): Promise<{
+    accessPolicy: number | null;
+    publishPolicy: number | null;
+  }>;
   getContextGraphAllowedPeers(contextGraphId: string): Promise<string[] | null>;
   readonly peerId: string;
 }
@@ -197,6 +202,49 @@ describe('acceptSwmSenderKeyPackage: stale-target throw type', () => {
         operationName: 'share',
       }),
     ).rejects.toBeInstanceOf(StaleSenderKeyTargetError);
+  });
+
+  it('returns a retryable pending ACK when a chain-proven private gate is still materializing', async () => {
+    const { internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
+    const activeKeyId = recipient.workspaceEncryptionKeys[0].encryptionKeyId;
+    const pkg = await buildSignedPackage({
+      senderWallet,
+      recipientAgentAddress: recipient.agentAddress,
+      recipientKeyId: activeKeyId,
+    });
+    internals.getContextGraphAgentGateAddresses = async () => null;
+    internals.getContextGraphOnChainPolicy = async () => ({
+      accessPolicy: 1,
+      publishPolicy: 0,
+    });
+
+    const ack = decodeSwmSenderKeyPackageAck(
+      await internals.handleSwmSenderKeyPackage(encodeSwmSenderKeyPackage(pkg), FROM_PEER_ID),
+    );
+    expect(ack.accepted).toBe(false);
+    expect(ack.reasonCode).toBe('agent-gate-pending');
+    expect(ack.reason).toContain('private agent gate is not materialized yet');
+  });
+
+  it('keeps a missing gate terminal when private chain authority is absent', async () => {
+    const { internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
+    const activeKeyId = recipient.workspaceEncryptionKeys[0].encryptionKeyId;
+    const pkg = await buildSignedPackage({
+      senderWallet,
+      recipientAgentAddress: recipient.agentAddress,
+      recipientKeyId: activeKeyId,
+    });
+    internals.getContextGraphAgentGateAddresses = async () => null;
+    internals.getContextGraphOnChainPolicy = async () => ({
+      accessPolicy: null,
+      publishPolicy: null,
+    });
+
+    const ack = decodeSwmSenderKeyPackageAck(
+      await internals.handleSwmSenderKeyPackage(encodeSwmSenderKeyPackage(pkg), FROM_PEER_ID),
+    );
+    expect(ack.accepted).toBe(false);
+    expect(ack.reasonCode).toBe('not-agent-gated');
   });
 
   it('does NOT throw StaleSenderKeyTargetError for an active key (decrypt failure path)', async () => {

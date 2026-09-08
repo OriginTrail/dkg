@@ -7,6 +7,8 @@ import type { SnapshotPageIndexRecord } from '@origintrail-official/dkg-publishe
 import { SqliteSnapshotPageIndexStore } from '../src/daemon/snapshot-page-index-store.js';
 import { createPublicSnapshotStore } from '../src/publisher-runner.js';
 
+import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.js';
+
 const DIGEST = `sha256:${'c'.repeat(64)}`;
 
 describe('SqliteSnapshotPageIndexStore', () => {
@@ -45,7 +47,7 @@ describe('SqliteSnapshotPageIndexStore', () => {
     directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-index-db-'));
     dashboard = new DashboardDB({ dataDir: directory });
     const pageIndexes = new SqliteSnapshotPageIndexStore(dashboard);
-    const snapshots = createPublicSnapshotStore(directory, undefined, pageIndexes)!;
+    const snapshots = createPublicSnapshotStore(directory, TEST_SNAPSHOT_CONFIG, pageIndexes)!;
     const quads = Array.from({ length: 300 }, (_, index) => ({
       subject: `urn:snapshot:sqlite:reopen:${index}`,
       predicate: 'http://schema.org/value',
@@ -69,7 +71,7 @@ describe('SqliteSnapshotPageIndexStore', () => {
     dashboard = new DashboardDB({ dataDir: directory });
     const reopenedSnapshots = createPublicSnapshotStore(
       directory,
-      undefined,
+      TEST_SNAPSHOT_CONFIG,
       new SqliteSnapshotPageIndexStore(dashboard),
     )!;
     await expect(reopenedSnapshots.getSnapshotPage!(DIGEST, 257, 20))
@@ -102,12 +104,12 @@ describe('SqliteSnapshotPageIndexStore', () => {
       object: `"${index}"`,
       graph: '',
     }));
-    await createPublicSnapshotStore(directory, undefined, pageIndexes)!
+    await createPublicSnapshotStore(directory, TEST_SNAPSHOT_CONFIG, pageIndexes)!
       .putSnapshot({ digest: DIGEST, quads });
     dashboard.close();
     dashboard = undefined;
 
-    const fallbackStore = createPublicSnapshotStore(directory, undefined, pageIndexes)!;
+    const fallbackStore = createPublicSnapshotStore(directory, TEST_SNAPSHOT_CONFIG, pageIndexes)!;
     await expect(fallbackStore.getSnapshotPage!(DIGEST, 257, 20))
       .resolves.toEqual(quads.slice(257));
     await expect(fallbackStore.putSnapshot({

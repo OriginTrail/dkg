@@ -14,8 +14,12 @@ const legacyCatalogSync = await import(
 const publicCatalogActivation = await import(
   '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1'
 );
+const registeredAuthorityContract = await import(
+  '@origintrail-official/dkg-agent/dist/registered-context-graph-authority.js'
+);
 const require = createRequire(import.meta.url);
 const packageManifest = require('@origintrail-official/dkg-agent/package.json');
+const packageExports = packageManifest.exports;
 const expectedRfc64PolicyCells = [
   'public-open',
   'public-curated',
@@ -47,9 +51,50 @@ if (
   || typeof root.Rfc64SwmAuthorInventoryProducerErrorV1 !== 'function'
   || typeof root.Rfc64CatalogReconciliationTerminalErrorV1 !== 'function'
   || typeof root.Rfc64CatalogSynchronizationErrorV1 !== 'function'
+  || typeof root.Rfc64CatalogResponsibilityRegistryV1 !== 'function'
   || typeof legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1 !== 'function'
 ) {
   throw new Error('published agent entry points did not expose required root APIs');
+}
+if (
+  'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE' in root
+  || 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME' in root
+  || 'ContextGraphAuthorityUnavailableError' in root
+  || 'isContextGraphAuthorityUnavailableMarker' in root
+) {
+  throw new Error('internal authority marker machinery leaked from the package root');
+}
+if (Object.keys(registeredAuthorityContract).length !== 0) {
+  throw new Error('the registered authority contract must remain type-only at runtime');
+}
+if (packageExports['./dist/internal/*'] !== null) {
+  throw new Error('the internal namespace is not structurally blocked');
+}
+for (const [subpath, target] of Object.entries(packageExports)) {
+  if (
+    subpath.startsWith('./dist/internal/')
+    && subpath !== './dist/internal/*'
+    && target !== null
+  ) {
+    throw new Error(`internal export exception must remain blocked: ${subpath}`);
+  }
+}
+const representativeInternalSpecifier =
+  '@origintrail-official/dkg-agent/dist/internal/context-graph-authority/' +
+  'context-graph-agent-gate-authority.js';
+try {
+  await import(representativeInternalSpecifier);
+  throw new Error(`internal module unexpectedly resolved: ${representativeInternalSpecifier}`);
+} catch (error) {
+  if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+}
+try {
+  require.resolve(representativeInternalSpecifier);
+  throw new Error(
+    `internal module unexpectedly resolved via require: ${representativeInternalSpecifier}`,
+  );
+} catch (error) {
+  if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
 }
 const legacySynchronizationError = new legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1(
   'no-authorized-provider',
@@ -87,6 +132,8 @@ try {
   }
 }
 const requiredCatalogMethods = [
+  'startRfc64PublicCatalogServiceV1',
+  'closeRfc64PublicCatalogServiceV1',
   'acceptRfc64CatalogAccessSnapshotV1',
   'publishAuthorCatalogGenesisV1',
   'publishAuthorCatalogExactSetSuccessorV1',
@@ -202,6 +249,11 @@ const blockedRfc64Modules = [
   'catalog-synchronization-error-v1.js',
   'catalog-access-policy-v1.js',
   'catalog-authority-config-v1.js',
+  'catalog-authority-refresh-loop-v1.js',
+  'public-catalog-workload-owner-v1.js',
+  'catalog-responsibility-registry-v1.js',
+  'release-native-catalog-authority-v1.js',
+  'legacy-swm-boundary-v1.js',
   'catalog-rollout-authority-v1.js',
   'catalog-rollout-authority-reconciliation-v1.js',
   'applied-catalog-authority-transition-v1.js',
@@ -266,12 +318,12 @@ const blockedRfc64Modules = [
   'swm-inventory-shadow-runtime-v1.js',
   'abort-v1.js',
   'catalog-mutation-runtime-v1.js',
+  'catalog-replay-snapshot-runtime-v1.js',
   'catalog-runtime-v1.js',
   'coalescing-supervisor-v1.js',
   'supervisor-status-v1.js',
   'serialized-scope-runtime-v1.js',
 ];
-const packageExports = packageManifest.exports;
 const emittedRfc64Modules = await listEmittedRfc64Modules();
 const classifiedRfc64Modules = new Set([
   ...publicRfc64Modules,

@@ -1048,6 +1048,42 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
     expect(internals.pendingSenderKeyByAgent.size).toBe(0);
   });
 
+  it('queues a chain-proven private gate that has not materialized on the receiver yet', async () => {
+    const boot = await bootAgent();
+    agent = boot.agent;
+    const internals = boot.internals;
+
+    const sender = agentFromPrivateKey(
+      ethers.Wallet.createRandom().privateKey,
+      'sender',
+    ) as AgentKeyRecord & { privateKey: string };
+    const recipient = makeFakeRecipient({ peerId: '12D3KooWPrivateGatePendingPeer' });
+    installStubMessenger(internals, async (): Promise<ReliableSendResult> => ({
+      delivered: true,
+      response: senderKeyAck(
+        false,
+        'private agent gate is not materialized yet',
+        'agent-gate-pending',
+      ),
+      attempts: 1,
+      messageId: 'm-private-gate-pending',
+    }));
+
+    await expect(
+      internals.createAndDistributeSwmSenderKeyEpoch({
+        contextGraphId: 'test-cg/private-gate-pending',
+        sender,
+        recipients: [recipient],
+        membershipHash: 'sha256:private-gate-pending',
+        ctx: { operationId: 'test-op', operationName: 'share' },
+      }),
+    ).resolves.toBeTruthy();
+
+    const queue = internals.pendingSenderKeyByAgent.get(recipient.agentAddress.toLowerCase());
+    expect(queue).toHaveLength(1);
+    expect(queue![0].messageId).toMatch(/^swm-sender-key:[0-9a-f]{64}:[0-9a-f-]{36}$/);
+  });
+
   it('keeps unknown future negative ACK codes fatal', async () => {
     const boot = await bootAgent();
     agent = boot.agent;

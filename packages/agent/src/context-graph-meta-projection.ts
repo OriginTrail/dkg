@@ -166,12 +166,12 @@ export class ContextGraphMetaProjection {
 
   async get(contextGraphId: string, options: QueryOptions = {}): Promise<ContextGraphMetaRecord> {
     const existing = this.entries.get(contextGraphId);
-    if (existing?.value && !existing.dirty) return cloneMetaRecord(existing.value);
     if (existing?.inflight) {
       if (!existing.dirty) return cloneMetaRecord(await raceAgainstAbort(existing.inflight, options.signal));
       await raceAgainstAbort(existing.inflight, options.signal);
       return this.get(contextGraphId, options);
     }
+    if (existing?.value && !existing.dirty) return cloneMetaRecord(existing.value);
 
     const entry = existing ?? { dirty: true, invalidationVersion: 0 };
     const rebuildVersion = entry.invalidationVersion;

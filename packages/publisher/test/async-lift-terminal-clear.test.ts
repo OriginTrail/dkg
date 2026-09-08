@@ -14,7 +14,7 @@ import {
   KA_VM_INCLUSION,
   KA_VM_VALIDATION,
   kaVmPublishRequest,
-} from './_helpers/ka-vm-publish.js';
+} from '../../../scripts/testing/ka-vm-publish.js';
 
 // #1837 — atomic by-exact-jobId TERMINAL clear for the async publisher (lift) queue.
 describe('#1837 lift publisher clearTerminalJob', () => {

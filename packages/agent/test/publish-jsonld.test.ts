@@ -1,3 +1,4 @@
+import { TEST_SNAPSHOT_STORAGE } from '../../../scripts/testing/snapshot-storage.js';
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -57,13 +58,18 @@ async function createTempDataDir(prefix: string): Promise<string> {
 async function createAgent(name: string, overrides: Partial<DKGAgentConfig> = {}) {
   const store = overrides.store ?? new OxigraphStore();
   const agent = await DKGAgent.create({
-      kaNumberAllocator: makeTestKaNumberAllocator(),
+    kaNumberAllocator: makeTestKaNumberAllocator(),
     name,
     listenPort: 0,
     listenHost: '127.0.0.1',
     skills: [],
     chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
-    nodeRole: 'core',
+    // These tests inject their own ACK provider and do not exercise relay
+    // behavior. Edge mode avoids carrying a relay-server lifecycle between
+    // sequential publishing fixtures.
+    nodeRole: 'edge',
+    rfc64CatalogActivation: { enabled: false },
+    sharedMemoryPublicSnapshotStorage: TEST_SNAPSHOT_STORAGE,
     ...overrides,
     store,
   });

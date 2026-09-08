@@ -16,7 +16,7 @@ import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DKGAgent } from '../src/index.js';
+import { DKGAgent as RealDKGAgent } from '../src/index.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import {
@@ -30,6 +30,16 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { AccessClient, AccessHandler, DKGPublisher } from '@origintrail-official/dkg-publisher';
 import { InMemoryMessageIdempotencyStore, InMemoryProtocolOutboxStore } from '@origintrail-official/dkg-core';
 import { Messenger } from '../src/p2p/messenger.js';
+
+type DKGAgent = RealDKGAgent;
+const DKGAgent = {
+  create(config: Parameters<typeof RealDKGAgent.create>[0]) {
+    return RealDKGAgent.create({
+      rfc64CatalogActivation: { enabled: false },
+      ...config,
+    });
+  },
+};
 
 // rc.9 PR-8: PROTOCOL_ACCESS migrated onto the Universal Messenger
 // substrate (wire prefix bumped to /dkg/10.0.1/private-access). The

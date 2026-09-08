@@ -6,6 +6,7 @@ import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   assertionLifecycleUri,
   contextGraphMetaUri,
+  parseDeterministicKnowledgeAssetUal,
 } from '@origintrail-official/dkg-core';
 import type { KaNumberAllocator } from '../src/allocator.js';
 import {
@@ -68,9 +69,10 @@ describe('OT-RFC-43 A2/B3 — finalize-stamp, divergence, create-vs-update, B3 (
   let CG_ID: string;
   let agentAddress: string;
   let sharedAllocator: KaNumberAllocator;
+  let chainAdapter: EVMChainAdapter | undefined;
 
   beforeAll(async () => {
-    ctx = await spawnHardhatEnv(8551);
+    ctx = await spawnHardhatEnv();
     // Two connected agent cores (mirrors e2e-chain.test.ts) so the V10 ACK
     // quorum is met and publishes reach `confirmed`. agentA is the publisher;
     // agentB just supplies ACKs.
@@ -108,7 +110,7 @@ describe('OT-RFC-43 A2/B3 — finalize-stamp, divergence, create-vs-update, B3 (
     await new Promise((r) => setTimeout(r, 2000));
     agentAddress = agent.defaultAgentAddress ?? agent.peerId;
 
-    const chainAdapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.EXTRA1));
+    chainAdapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.EXTRA1));
     const cgResult = await chainAdapter.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1 });
     CG_ID = String(cgResult.contextGraphId);
     for (const a of agents) {
@@ -127,127 +129,140 @@ describe('OT-RFC-43 A2/B3 — finalize-stamp, divergence, create-vs-update, B3 (
     for (const a of agents) {
       try { await a.stop(); } catch { /* best-effort */ }
     }
-    killHardhat(ctx);
+    try { await chainAdapter?.destroy(); } finally { await killHardhat(ctx); }
   });
 
-  it('(a) finalize stamps kaId/reservedUal/wmCurrentAssertion; publish mints EXACTLY that id (no double-allocation)', async () => {
-    const agent = agents[0];
-    const NAME = 'paper-1';
-    const lifecycleUri = assertionLifecycleUri(CG_ID, agentAddress, NAME);
-    const metaGraph = contextGraphMetaUri(CG_ID);
+  it('preserves identity and addressing through finalize, publish, reopen and on-chain update', async () => {
+    // (a) finalize stamps kaId/reservedUal/wmCurrentAssertion; publish mints EXACTLY that id (no double-allocation)
+    {
+      const agent = agents[0];
+      const NAME = 'paper-1';
+      const lifecycleUri = assertionLifecycleUri(CG_ID, agentAddress, NAME);
+      const metaGraph = contextGraphMetaUri(CG_ID);
 
-    await agent.assertion.create(CG_ID, NAME);
-    await agent.assertion.write(CG_ID, NAME, [
-      { subject: 'urn:a2:alice', predicate: 'http://schema.org/name', object: '"Alice"' },
-    ]);
-    const seal = await agent.assertion.finalize(CG_ID, NAME);
+      await agent.assertion.create(CG_ID, NAME);
+      await agent.assertion.write(CG_ID, NAME, [
+        { subject: 'urn:a2:alice', predicate: 'http://schema.org/name', object: '"Alice"' },
+      ]);
+      const seal = await agent.assertion.finalize(CG_ID, NAME);
 
-    // Finalize stamped the three values on the lifecycle URN.
-    const stampedNumber = await readPointer(agent, lifecycleUri, metaGraph, KA_ID_PRED);
-    const reservedUal = await readPointer(agent, lifecycleUri, metaGraph, RESERVED_UAL_PRED);
-    const wmPointer = await readPointer(agent, lifecycleUri, metaGraph, WM_PRED);
-    expect(stampedNumber).toBeDefined();
-    expect(reservedUal).toContain(`/${agentAddress.toLowerCase()}/${stampedNumber}`);
-    expect(wmPointer).toBe(ethers.hexlify(seal.merkleRoot).slice(2));
+      // Finalize stamped the three values on the lifecycle URN.
+      const stampedNumber = await readPointer(agent, lifecycleUri, metaGraph, KA_ID_PRED);
+      const reservedUal = await readPointer(agent, lifecycleUri, metaGraph, RESERVED_UAL_PRED);
+      const wmPointer = await readPointer(agent, lifecycleUri, metaGraph, WM_PRED);
+      expect(stampedNumber).toBeDefined();
+      expect(reservedUal).toContain(`/${agentAddress.toLowerCase()}/${stampedNumber}`);
+      expect(wmPointer).toBe(ethers.hexlify(seal.merkleRoot).slice(2));
 
-    // The expected FULL packed id the publish must mint.
-    const expectedPacked = (BigInt(ethers.getAddress(agentAddress)) << 96n) | BigInt(stampedNumber!);
+      // The expected FULL packed id the publish must mint.
+      const expectedPacked = (BigInt(ethers.getAddress(agentAddress)) << 96n) | BigInt(stampedNumber!);
 
-    await agent.assertion.promote(CG_ID, NAME);
-    const pub = await agent.publishFromFinalizedAssertion(CG_ID, NAME);
-    expect(pub.status).toBe('confirmed');
-    // Minted exactly the finalize-stamped id (re-pack), no second allocation.
-    expect(pub.kaId).toBe(expectedPacked);
-    expect(pub.onChainResult!.batchId).toBe(expectedPacked);
+      await agent.assertion.promote(CG_ID, NAME);
+      const pub = await agent.publishFromFinalizedAssertion(CG_ID, NAME);
+      expect(pub.status).toBe('confirmed');
+      // Minted exactly the finalize-stamped id (re-pack), no second allocation.
+      expect(pub.kaId).toBe(expectedPacked);
+      expect(pub.onChainResult!.batchId).toBe(expectedPacked);
 
-    // VM pointer stamped == WM pointer (same version, converged).
-    const vmPointer = await readPointer(agent, lifecycleUri, metaGraph, VM_PRED);
-    expect(vmPointer).toBe(wmPointer);
-  }, 120_000);
+      // VM pointer stamped == WM pointer (same version, converged).
+      const vmPointer = await readPointer(agent, lifecycleUri, metaGraph, VM_PRED);
+      expect(vmPointer).toBe(wmPointer);
+    }
 
-  it('(b) divergence: a NEW finalize advances WM ahead of VM (wmCurrentAssertion != vmCurrentAssertion)', async () => {
-    const agent = agents[0];
-    const NAME = 'paper-1';
-    const lifecycleUri = assertionLifecycleUri(CG_ID, agentAddress, NAME);
-    const metaGraph = contextGraphMetaUri(CG_ID);
+    // (b) divergence: a NEW finalize advances WM ahead of VM (wmCurrentAssertion != vmCurrentAssertion)
+    {
+      const agent = agents[0];
+      const NAME = 'paper-1';
+      const lifecycleUri = assertionLifecycleUri(CG_ID, agentAddress, NAME);
+      const metaGraph = contextGraphMetaUri(CG_ID);
 
-    // New content => new merkle. Discard the published draft (clears the
-    // assertion-graph seal), re-create + write NEW content + finalize. The
-    // lifecycle URN's kaId/vmCurrentAssertion survive the discard, so the
-    // kaId stays STABLE (no re-allocation) and WM advances past VM.
-    await agent.assertion.discard(CG_ID, NAME);
-    await agent.assertion.create(CG_ID, NAME);
-    await agent.assertion.write(CG_ID, NAME, [
-      { subject: 'urn:a2:alice', predicate: 'http://schema.org/name', object: '"Alice v2"' },
-    ]);
-    const seal2 = await agent.assertion.finalize(CG_ID, NAME);
+      // Reopen the published VM revision through the current public lifecycle API.
+      // The existing identity and VM pointer must survive the new WM revision.
+      const reopened = await agent.assertion.pullFrom(CG_ID, NAME, 'vm', { onConflict: 'replace' });
+      expect(reopened.seeded).toBe(1);
+      await agent.assertion.write(CG_ID, NAME, [
+        { subject: 'urn:a2:alice', predicate: 'http://schema.org/name', object: '"Alice v2"' },
+      ]);
+      const seal2 = await agent.assertion.finalize(CG_ID, NAME);
 
-    const wmPointer = await readPointer(agent, lifecycleUri, metaGraph, WM_PRED);
-    const vmPointer = await readPointer(agent, lifecycleUri, metaGraph, VM_PRED);
-    expect(wmPointer).toBe(ethers.hexlify(seal2.merkleRoot).slice(2));
-    // VM is still on v1 — divergence is observable.
-    expect(wmPointer).not.toBe(vmPointer);
+      const wmPointer = await readPointer(agent, lifecycleUri, metaGraph, WM_PRED);
+      const vmPointer = await readPointer(agent, lifecycleUri, metaGraph, VM_PRED);
+      expect(wmPointer).toBe(ethers.hexlify(seal2.merkleRoot).slice(2));
+      // VM is still on v1 — divergence is observable.
+      expect(wmPointer).not.toBe(vmPointer);
 
-    // The history facade surfaces both pointers + a per-layer status.
-    const hist = await agent.assertion.history(CG_ID, NAME);
-    expect(hist!.wmCurrentAssertion).toBe(wmPointer);
-    expect(hist!.vmCurrentAssertion).toBe(vmPointer);
-  }, 120_000);
+      // The history facade surfaces both pointers + a per-layer status.
+      const hist = await agent.assertion.history(CG_ID, NAME);
+      expect(hist!.wmCurrentAssertion).toBe(wmPointer);
+      expect(hist!.vmCurrentAssertion).toBe(vmPointer);
+    }
 
-  it('(c) create-vs-update: publishing the SAME name twice does an UPDATE (kaId reused, not re-minted)', async () => {
-    const agent = agents[0];
-    const NAME = 'paper-1';
-    const lifecycleUri = assertionLifecycleUri(CG_ID, agentAddress, NAME);
-    const metaGraph = contextGraphMetaUri(CG_ID);
+    // (c) create-vs-update: publishing the SAME name twice does an UPDATE (kaId reused, not re-minted)
+    {
+      const agent = agents[0];
+      const NAME = 'paper-1';
+      const lifecycleUri = assertionLifecycleUri(CG_ID, agentAddress, NAME);
+      const metaGraph = contextGraphMetaUri(CG_ID);
 
-    const stampedNumber = await readPointer(agent, lifecycleUri, metaGraph, KA_ID_PRED);
-    const vmBefore = await readPointer(agent, lifecycleUri, metaGraph, VM_PRED);
-    // The minted kaId + confirmed-VM pointer survive the discard+recreate of
-    // the divergence step (assertionCreate preserves A2 identity), so the next
-    // publish routes to UPDATE (vmCurrentAssertion set) reusing the SAME id.
-    expect(stampedNumber).toBeDefined();
-    expect(vmBefore).toBeDefined();
-    const expectedPacked = (BigInt(ethers.getAddress(agentAddress)) << 96n) | BigInt(stampedNumber!);
+      const stampedNumber = await readPointer(agent, lifecycleUri, metaGraph, KA_ID_PRED);
+      const vmBefore = await readPointer(agent, lifecycleUri, metaGraph, VM_PRED);
+      // The minted kaId + confirmed-VM pointer survive the reopen of
+      // the divergence step (assertionCreate preserves A2 identity), so the next
+      // publish routes to UPDATE (vmCurrentAssertion set) reusing the SAME id.
+      expect(stampedNumber).toBeDefined();
+      expect(vmBefore).toBeDefined();
+      const expectedPacked = (BigInt(ethers.getAddress(agentAddress)) << 96n) | BigInt(stampedNumber!);
 
-    await agent.assertion.promote(CG_ID, NAME);
-    const pub2 = await agent.publishFromFinalizedAssertion(CG_ID, NAME);
-    expect(pub2.status).toBe('confirmed');
-    // UPDATE reuses the SAME kaId (no fresh mint).
-    expect(pub2.kaId).toBe(expectedPacked);
+      const sealedRoot = await readPointer(agent, lifecycleUri, metaGraph, WM_PRED);
+      expect(sealedRoot).toBeDefined();
+      await agent.assertion.promote(CG_ID, NAME);
+      const pub2 = await agent.publishFromFinalizedAssertion(CG_ID, NAME);
+      expect(pub2.status).toBe('confirmed');
+      // UPDATE reuses the SAME kaId (no fresh mint).
+      expect(pub2.kaId).toBe(expectedPacked);
+      expect(await chainAdapter!.getMerkleRootCount(expectedPacked)).toBe(2n);
+      expect(ethers.hexlify(await chainAdapter!.getLatestMerkleRoot(expectedPacked)).slice(2))
+        .toBe(sealedRoot);
 
-    // VM now points at the new merkle and WM == VM (converged after update).
-    const wmPointer = await readPointer(agent, lifecycleUri, metaGraph, WM_PRED);
-    const vmPointer = await readPointer(agent, lifecycleUri, metaGraph, VM_PRED);
-    expect(vmPointer).toBe(wmPointer);
+      // VM now points at the new merkle; the consumed WM draft is no longer active.
+      const wmPointer = await readPointer(agent, lifecycleUri, metaGraph, WM_PRED);
+      const vmPointer = await readPointer(agent, lifecycleUri, metaGraph, VM_PRED);
+      expect(vmPointer).toBe(sealedRoot);
+      expect(wmPointer).toBeUndefined();
 
-    // prov:wasRevisionOf records the version chain.
-    const revRes = await (agent as any).store.query(
-      `SELECT ?prior WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <http://www.w3.org/ns/prov#wasRevisionOf> ?prior } }`,
-    );
-    expect(revRes.type).toBe('bindings');
-    expect(revRes.bindings.length).toBeGreaterThan(0);
-  }, 120_000);
+      // prov:wasRevisionOf records the version chain.
+      const revRes = await (agent as any).store.query(
+        `SELECT ?prior WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <http://www.w3.org/ns/prov#wasRevisionOf> ?prior } }`,
+      );
+      expect(revRes.type).toBe('bindings');
+      expect(revRes.bindings.length).toBeGreaterThan(0);
+    }
 
-  it('(d) B3: resolve by (agent, number) and by did:dkg UAL — same descriptor as by name', async () => {
-    const agent = agents[0];
-    const NAME = 'paper-1';
-    const lifecycleUri = assertionLifecycleUri(CG_ID, agentAddress, NAME);
-    const metaGraph = contextGraphMetaUri(CG_ID);
-    const stampedNumber = await readPointer(agent, lifecycleUri, metaGraph, KA_ID_PRED);
-    const packed = (BigInt(ethers.getAddress(agentAddress)) << 96n) | BigInt(stampedNumber!);
+    // (d) B3: resolve by (agent, number) and by did:dkg UAL — same descriptor as by name
+    {
+      const agent = agents[0];
+      const NAME = 'paper-1';
+      const lifecycleUri = assertionLifecycleUri(CG_ID, agentAddress, NAME);
+      const metaGraph = contextGraphMetaUri(CG_ID);
+      const stampedNumber = await readPointer(agent, lifecycleUri, metaGraph, KA_ID_PRED);
+      const packed = (BigInt(ethers.getAddress(agentAddress)) << 96n) | BigInt(stampedNumber!);
 
-    const byName = await agent.assertion.history(CG_ID, NAME);
-    const byKaId = await (agent as any).assertion.resolveByKaId(CG_ID, packed);
-    // (agent, number) → kaId resolves to the SAME lifecycle descriptor.
-    expect(byKaId).toBeTruthy();
-    expect(byKaId.name).toBe(byName!.name);
-    expect(byKaId.vmCurrentAssertion).toBe(byName!.vmCurrentAssertion);
-    expect(byKaId.kaNumber).toBe(byName!.kaNumber);
+      const byName = await agent.assertion.history(CG_ID, NAME);
+      const byKaId = await agent.assertion.resolveByKaId(CG_ID, packed);
+      // (agent, number) → kaId resolves to the SAME lifecycle descriptor.
+      expect(byKaId).toBeTruthy();
+      expect(byKaId.name).toBe(byName!.name);
+      expect(byKaId.vmCurrentAssertion).toBe(byName!.vmCurrentAssertion);
+      expect(byKaId.kaNumber).toBe(byName!.kaNumber);
 
-    // A did:dkg UAL carrying the same packed id resolves identically (the
-    // route classifier unpacks the trailing /<id>); here we drive the
-    // resolver directly with the same packed id.
-    const byUal = await (agent as any).assertion.resolveByKaId(CG_ID, packed);
-    expect(byUal.name).toBe(byName!.name);
-  }, 60_000);
+      // A did:dkg UAL carrying the same packed id resolves identically (the
+      // public UAL parser recovers the author and number before resolution).
+      const ual = await readPointer(agent, lifecycleUri, metaGraph, RESERVED_UAL_PRED);
+      const parsed = parseDeterministicKnowledgeAssetUal(ual!);
+      const fromUal = (BigInt(parsed.agentAddress) << 96n) | BigInt(parsed.kaNumber);
+      expect(fromUal).toBe(packed);
+      const byUal = await agent.assertion.resolveByKaId(CG_ID, fromUal);
+      expect(byUal.name).toBe(byName!.name);
+    }
+  }, 240_000);
 });

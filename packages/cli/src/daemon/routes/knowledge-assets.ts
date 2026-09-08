@@ -75,7 +75,13 @@ import {
   isSameAgentAddress,
   scopedTokenPromoteLane,
 } from "./shared-assertion-helpers.js";
-import { AsyncLiftJobConflictError, LiftJobPendingChainProofError, PromoteJobConflictError, isKnowledgeAssetWorkspaceHeadCorruptError } from "@origintrail-official/dkg-publisher";
+import {
+  AsyncLiftJobConflictError,
+  LiftJobPendingChainProofError,
+  PromoteJobConflictError,
+  PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE,
+  isKnowledgeAssetWorkspaceHeadCorruptError,
+} from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
 import {
   validateAssertionName,
@@ -208,6 +214,15 @@ function respondAuthorSelectionError(res: RequestContext["res"], e: any): boolea
     code: e.code,
     error: e.message ?? String(e),
     ...(e.candidates ? { candidates: e.candidates } : {}),
+  });
+  return true;
+}
+
+function respondPublicationPricingPolicyError(res: RequestContext["res"], e: any): boolean {
+  if (e?.code !== PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE) return false;
+  jsonResponse(res, 409, {
+    code: e.code,
+    error: e.message ?? String(e),
   });
   return true;
 }
@@ -588,14 +603,15 @@ async function resolveFinalizeStorageLane(
 //   confirmed, no contextGraphError → 200 (fully done)
 //   confirmed + contextGraphError   → 207 (partial: KA minted on-chain, context-graph binding failed)
 //   tentative | failed              → 502 (publish did not confirm)
-function classifyVmPublish(pub: unknown): { httpStatus: 200 | 207 | 502; reason?: string } {
-  const p = (pub ?? {}) as { status?: unknown; contextGraphError?: unknown };
+function classifyVmPublish(p: FinalizedPublishResult): { httpStatus: 200 | 207 | 502; reason?: string } {
   const cgError = typeof p.contextGraphError === "string" && p.contextGraphError.length > 0 ? p.contextGraphError : undefined;
   if (p.status === "confirmed" && !cgError) return { httpStatus: 200 };
   if (p.status === "confirmed") return { httpStatus: 207, reason: cgError };
   return {
     httpStatus: 502,
-    reason: cgError ?? `VM publish did not confirm (status: ${typeof p.status === "string" ? p.status : "unknown"})`,
+    reason: cgError ?? (p.status === "tentative" && p.localChainSkipReason === "no-chain"
+      ? "VM publish stayed local: no on-chain context graph was resolved or the chain adapter is not V10-ready. Check context graph registration and chain configuration."
+      : `VM publish did not confirm (status: ${typeof p.status === "string" ? p.status : "unknown"})`),
   };
 }
 
@@ -1596,6 +1612,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             ? { selectedAuthorAgentAddress: asyncSelectedAuthor.value }
             : {}),
           ...(publishOptions.publishEpochs !== undefined ? { publishEpochs: publishOptions.publishEpochs } : {}),
+          ...(publishOptions.pricingPolicy !== undefined ? { pricingPolicy: publishOptions.pricingPolicy } : {}),
           ...(publishOptions.clearSharedMemoryAfter !== undefined
             ? { clearSharedMemoryAfter: publishOptions.clearSharedMemoryAfter }
             : {}),
@@ -1634,6 +1651,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(subGraphName ? { subGraphName } : {}),
         });
       } catch (err: any) {
+        if (respondPublicationPricingPolicyError(res, err)) return;
         if (err instanceof AsyncLiftJobConflictError) {
           return jsonResponse(res, 409, {
             error: err.message,
@@ -1797,6 +1815,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // GH#1786 — must precede the precondition branch below, which would otherwise
         // relabel an author-selection failure whose message happens to contain
         // "is not finalized" as a generic VM_PUBLISH_PRECONDITION.
+        if (respondPublicationPricingPolicyError(res, e)) return;
         if (respondAuthorSelectionError(res, e)) return;
         if (respondIfStoreUnavailable(res, e)) return;
         if (e?.code === "PUBLISH_NOT_FULL_SHARE" || /is not finalized/.test(msg) || /No quads in shared memory/.test(msg) || /has no private payload/.test(msg)) {

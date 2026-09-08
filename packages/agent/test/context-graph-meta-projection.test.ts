@@ -267,6 +267,50 @@ describe('ContextGraphMetaProjection', () => {
     expect(queryCalls).toBeGreaterThan(4);
   });
 
+  it('joins a clean in-flight refresh instead of serving its stale cached authorization', async () => {
+    let policy = 'public';
+    let blockNextQuery = false;
+    let refreshStarted!: () => void;
+    const started = new Promise<void>((resolve) => { refreshStarted = resolve; });
+    let releaseRefresh!: () => void;
+    const blocked = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    const store = {
+      async query(sparql: string) {
+        if (blockNextQuery) {
+          blockNextQuery = false;
+          refreshStarted();
+          await blocked;
+        }
+        if (sparql.includes(`<${agentsGraph}>`)) {
+          return {
+            type: 'bindings',
+            bindings: [{ p: DKG_ONTOLOGY.DKG_ACCESS_POLICY, o: `"${policy}"` }],
+          };
+        }
+        return { type: 'bindings', bindings: [] };
+      },
+    } as unknown as TripleStore;
+    const projection = new ContextGraphMetaProjection(store);
+    const id = 'projection-clean-inflight-refresh';
+
+    expect((await projection.get(id)).accessPolicy).toBe('public');
+    policy = 'private';
+    projection.markDirty(id);
+    blockNextQuery = true;
+    const refresh = projection.get(id);
+    await started;
+
+    let concurrentSettled = false;
+    const concurrent = projection.get(id).finally(() => { concurrentSettled = true; });
+    await Promise.resolve();
+    expect(concurrentSettled).toBe(false);
+
+    releaseRefresh();
+    expect((await refresh).accessPolicy).toBe('private');
+    expect((await concurrent).accessPolicy).toBe('private');
+  });
+
   it('honors caller cancellation while waiting on a shared in-flight rebuild', async () => {
     let releaseQuery!: () => void;
     const blockedQuery = new Promise<void>((resolve) => { releaseQuery = resolve; });

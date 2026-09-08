@@ -1,6 +1,6 @@
 import { access, readFile, writeFile } from 'node:fs/promises';
 import { dirname, relative, sep } from 'node:path';
-import { defineConfig, htmlReporter, rawReporter, textReporter } from 'esbench/host';
+import { defineConfig, htmlReporter, NodeExecutor, rawReporter, textReporter } from 'esbench/host';
 
 const resultFile = process.env.ESBENCH_RESULT ?? 'bench/results/latest.json';
 const htmlFile = process.env.ESBENCH_HTML_FILE ?? 'bench/results/latest.html';
@@ -15,6 +15,18 @@ export const publishAsyncGetPages = [
   ['upload payload to local working memory', 'bench/results/publish-async-get/working-memory-upload.html'],
   ['lift local working memory to shared working memory', 'bench/results/publish-async-get/working-to-shared-memory.html'],
 ];
+
+export function createBenchmarkToolchain(env = process.env) {
+  return {
+    include: ['bench/**/*.bench.ts'],
+    // Regular runs isolate suites because they load different source and built
+    // workspace views. Profiling stays in this process so --cpu-prof observes
+    // the measured workload instead of only the ESBench host.
+    ...(env.DKG_ESBENCH_IN_PROCESS === '1'
+      ? {}
+      : { executors: [new NodeExecutor({ execArgv: ['--import', 'tsx'] })] }),
+  };
+}
 const reporters = [
   textReporter(),
   rawReporter(resultFile),
@@ -36,11 +48,7 @@ export default defineConfig({
   tags: {
     node: process.version,
   },
-  toolchains: [
-    {
-      include: ['bench/**/*.bench.ts'],
-    },
-  ],
+  toolchains: [createBenchmarkToolchain()],
   reporters,
 });
 

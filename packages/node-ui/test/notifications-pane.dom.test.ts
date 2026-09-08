@@ -317,6 +317,24 @@ describe('NotificationsPane — interaction + a11y (happy-dom)', () => {
     expect(container.textContent).toContain('You added 3 assertions');
     expect(container.querySelector('.v10-notif-by-self')).toBeTruthy();
   });
+
+  it('approved and activity rows open their graph, while rejected rows cannot navigate', () => {
+    const open = vi.fn();
+    const feed = makeFeed({ activity: [
+      { kind: 'join_approved', id: 20, cgId: 'cg:approved', contextGraphName: 'Approved', ts: 1, read: false },
+      { kind: 'join_rejected', id: 21, cgId: 'cg:rejected', contextGraphName: 'Rejected', ts: 2, read: false },
+      { kind: 'digest', id: 'digest', cgId: 'cg:activity', contextGraphName: 'Activity', event: 'created', count: 1, ts: 3, read: false },
+    ] });
+    act(() => root.render(React.createElement(NotificationsPane, { feed, onOpenContextGraph: open })));
+    const navigable = [...container.querySelectorAll<HTMLElement>('[role="button"], button')]
+      .filter((element) => /Approved|Activity/.test(element.textContent ?? '') && element.getAttribute('aria-disabled') !== 'true');
+    act(() => { for (const element of navigable) element.click(); });
+    expect(open.mock.calls.map(([graph]) => graph)).toEqual(expect.arrayContaining(['cg:approved', 'cg:activity']));
+    const rejected = container.querySelector<HTMLElement>('[aria-disabled="true"]');
+    expect(rejected).not.toBeNull();
+    act(() => rejected!.click());
+    expect(open).not.toHaveBeenCalledWith('cg:rejected');
+  });
 });
 
 describe('NotificationsBell — disclosure keyboard + focus (happy-dom)', () => {

@@ -1,6 +1,6 @@
 /**
  * Regression tests for the durability contract documented in
- * docs/bugs/wm-persistence-regression.md.
+ * packages/storage/README.md#oxigraph-persistence-contract.
  *
  * These cases exist because the original failure was a silent one — the
  * daemon happily reported a clean shutdown while torn writes / parse
@@ -9,10 +9,9 @@
  * scripts/repro/wm-persistence-regression.mjs.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   existsSync,
-  mkdirSync,
   mkdtempSync,
   readdirSync,
   rmSync,
@@ -22,6 +21,34 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import type { Quad } from '../src/triple-store.js';
+
+const flushBarrier = vi.hoisted(() => ({
+  tmpPath: null as string | null,
+  onSnapshotCaptured: null as (() => void) | null,
+  releaseSnapshot: null as Promise<void> | null,
+  onSnapshotCommitted: null as (() => void) | null,
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    open: async (...args: unknown[]) => {
+      if (flushBarrier.tmpPath && String(args[0]) === flushBarrier.tmpPath && args[1] === 'w') {
+        flushBarrier.onSnapshotCaptured?.();
+        if (flushBarrier.releaseSnapshot) await flushBarrier.releaseSnapshot;
+      }
+      return Reflect.apply(actual.open, undefined, args);
+    },
+    rename: async (...args: unknown[]) => {
+      await Reflect.apply(actual.rename, undefined, args);
+      if (flushBarrier.tmpPath && String(args[0]) === flushBarrier.tmpPath) {
+        flushBarrier.tmpPath = null;
+        flushBarrier.onSnapshotCommitted?.();
+      }
+    },
+  };
+});
 
 const SAMPLE: Quad[] = [
   {
@@ -46,6 +73,10 @@ describe('OxigraphStore persistence', () => {
   });
 
   afterEach(() => {
+    flushBarrier.tmpPath = null;
+    flushBarrier.onSnapshotCaptured = null;
+    flushBarrier.releaseSnapshot = null;
+    flushBarrier.onSnapshotCommitted = null;
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* */ }
   });
 
@@ -109,30 +140,54 @@ describe('OxigraphStore persistence', () => {
     await expect(store.close()).rejects.toThrow();
   });
 
-  it('multiple inserts followed by close() all survive — no debounce-race loss', async () => {
-    // This is the secondary regression: after the atomic-write fix,
-    // close() short-circuited if a debounced flush was already in
-    // flight, so the last batch of inserts could be silently dropped.
-    // The fix is to await `flushing` before close()'s own flushNow().
+  it('close() flushes writes added after an in-flight snapshot was captured', async () => {
     const path = join(dir, 'store.nq');
+    const tmpPath = `${path}.tmp`;
+
+    let markSnapshotCaptured!: () => void;
+    const snapshotCaptured = new Promise<void>((resolve) => {
+      markSnapshotCaptured = resolve;
+    });
+    let releaseSnapshot!: () => void;
+    const snapshotRelease = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
+    let markSnapshotCommitted!: () => void;
+    const snapshotCommitted = new Promise<void>((resolve) => {
+      markSnapshotCommitted = resolve;
+    });
+
+    flushBarrier.tmpPath = tmpPath;
+    flushBarrier.onSnapshotCaptured = markSnapshotCaptured;
+    flushBarrier.releaseSnapshot = snapshotRelease;
+    flushBarrier.onSnapshotCommitted = markSnapshotCommitted;
 
     const first = new OxigraphStore(path);
-    // Fire many small inserts in rapid succession so the debounced
-    // flush is likely in flight when we call close().
-    for (let i = 0; i < 100; i++) {
-      await first.insert([
-        {
-          subject: `http://ex.org/n${i}`,
-          predicate: 'http://ex.org/p',
-          object: `"v${i}"`,
-          graph: 'http://ex.org/g1',
-        },
-      ]);
-    }
-    await first.close();
+    await first.insert(SAMPLE);
+
+    // The mocked tmp-file open occurs after flushNow() captures the first
+    // N-Quads snapshot. Hold it there, then add a sentinel that cannot be in
+    // that snapshot and start close() while the background flush is in flight.
+    await snapshotCaptured;
+    const sentinel: Quad = {
+      subject: 'http://ex.org/after-snapshot',
+      predicate: 'http://ex.org/p',
+      object: '"must-survive-close"',
+      graph: 'http://ex.org/g1',
+    };
+    await first.insert([sentinel]);
+    const closePromise = first.close();
+
+    releaseSnapshot();
+    await snapshotCommitted;
+    await closePromise;
 
     const second = new OxigraphStore(path);
-    expect(await second.countQuads()).toBe(100);
+    expect(await second.countQuads()).toBe(SAMPLE.length + 1);
+    const result = await second.query(
+      'ASK { GRAPH <http://ex.org/g1> { <http://ex.org/after-snapshot> <http://ex.org/p> "must-survive-close" } }',
+    );
+    expect(result).toEqual({ type: 'boolean', value: true });
     await second.close();
   });
 

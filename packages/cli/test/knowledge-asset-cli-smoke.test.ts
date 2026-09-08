@@ -290,10 +290,12 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 
     const publish = await runCli(['ka', 'publish', '--help'], env);
     expect(publish.stdout).toContain('--publish-epochs <count>');
+    expect(publish.stdout).toContain('--pricing-policy <policy>');
     expect(publish.stdout).not.toContain('--clear-after');
 
     const publishAsync = await runCli(['ka', 'publish-async', '--help'], env);
     expect(publishAsync.stdout).toContain('--publish-epochs <count>');
+    expect(publishAsync.stdout).toContain('--pricing-policy <policy>');
     expect(publishAsync.stdout).not.toContain('--clear-after');
   }, 30000);
 
@@ -434,6 +436,42 @@ describe.sequential('knowledge-asset CLI smoke', () => {
       });
     expect(calls).toEqual([]);
   }, 30000);
+
+  it('forwards valid pricing policy and rejects invalid policy before daemon requests', async () => {
+    calls = [];
+    const env = testEnv(dkgHome, smokeApiPort);
+
+    await runCli([
+      'ka', 'publish', 'paper', '-c', 'research',
+      '--pricing-policy', 'full-content',
+    ], env);
+    await runCli([
+      'ka', 'publish-async', 'paper', '-c', 'research',
+      '--pricing-policy', 'full-content',
+    ], env);
+
+    expect(calls.find((call) => call.url === '/api/knowledge-assets/paper/vm/publish')?.body)
+      .toMatchObject({ options: { pricingPolicy: 'full-content' } });
+    expect(calls.find((call) => call.url === '/api/knowledge-assets/paper/vm/publish-async')?.body)
+      .toMatchObject({ options: { pricingPolicy: 'full-content' } });
+
+    calls = [];
+    await expect(runCli([
+      'ka', 'publish', 'paper', '-c', 'research',
+      '--pricing-policy', 'caller-reported',
+    ], env)).rejects.toMatchObject({
+      stderr: expect.stringContaining('--pricing-policy must be "full-content" when supplied'),
+    });
+    expect(calls).toEqual([]);
+
+    await expect(runCli([
+      'ka', 'publish-async', 'paper', '-c', 'research',
+      '--pricing-policy', 'caller-reported',
+    ], env)).rejects.toMatchObject({
+      stderr: expect.stringContaining('--pricing-policy must be "full-content" when supplied'),
+    });
+    expect(calls).toEqual([]);
+  }, 60000);
 
   it('maps author attestation flags through CLI parsing and rejects conflicts', async () => {
     calls = [];

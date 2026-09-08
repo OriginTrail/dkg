@@ -21,13 +21,39 @@ export interface ConvictionReader {
 /** Inputs for one adapter-owned, cost-aware publisher planning decision. */
 export interface PublisherPublishPlanRequest {
   contextGraphId: bigint;
+  /**
+   * @deprecated Prefer billableByteSize in new code. Kept required so callers
+   * and adapters compiled against the previous planning shape remain valid.
+   */
   effectiveByteSize: bigint;
+  /**
+   * Exact byte quantity used for token quoting and fundability checks.
+   * Publisher calls supply both names while the deprecated alias is supported.
+   */
+  billableByteSize?: bigint;
   /** Caller override. When omitted, a covering PCA may select its own lock. */
   explicitPublishEpochs?: number;
   /** Direct-spend lifetime used when no covering PCA-specific plan applies. */
   defaultPublishEpochs: number;
   /** Exact signer pin for an explicit publisher address/private key. */
   publisherAddress?: string;
+}
+
+/** Normalize the current and deprecated planning names to one exact quantity. */
+export function publisherPublishPlanByteSize(
+  request: PublisherPublishPlanRequest,
+): bigint {
+  if (
+    request.billableByteSize !== undefined &&
+    request.billableByteSize !== request.effectiveByteSize
+  ) {
+    throw new Error(
+      'Publisher publish plan byte-size aliases must carry the same value: ' +
+      `billableByteSize=${request.billableByteSize.toString()}, ` +
+      `effectiveByteSize=${request.effectiveByteSize.toString()}`,
+    );
+  }
+  return request.billableByteSize ?? request.effectiveByteSize;
 }
 
 /** Final signer-dependent values that must be fixed before publish side effects. */
@@ -468,6 +494,26 @@ export interface ContextGraphOnChain {
   name?: string;
   /** Only set if metadata was revealed on-chain. */
   description?: string;
+}
+
+/** Deterministic finalized authority generation used by RFC-64 policy composition. */
+export interface ContextGraphAuthoritySnapshot {
+  readonly chainId: string;
+  readonly governanceContract: string;
+  readonly contextGraphId: string;
+  readonly owner: string;
+  readonly active: boolean;
+  readonly accessPolicy: number;
+  readonly publishPolicy: number;
+  readonly publishAuthority: string | null;
+  readonly publishAuthorityAccountId: string;
+  readonly participantAgents: readonly string[];
+  readonly nameHash: string;
+  readonly ownershipEra: string;
+  readonly policyVersion: string;
+  readonly rosterVersion: string;
+  readonly sourceBlockNumber: string;
+  readonly sourceBlockHash: string;
 }
 
 export class ContextGraphChainScanPartialError extends Error {
@@ -1311,6 +1357,16 @@ export interface ChainAdapter {
     scanContextGraphRegistryPages?(options: ContextGraphRegistryScanOptions): AsyncIterable<ContextGraphRegistryScanPage>;
     /** True when the adapter has a registry scan watermark for its currently bound ContextGraphNameRegistry. */
     hasContextGraphRegistryScanWatermark?(): Promise<boolean>;
+    /**
+     * Resolve one graph's current policy and roster at a stable finalized
+     * anchor. Optional for NoChain and legacy adapters; default RFC-64 callers
+     * must bind the explicit ContextGraphAuthorityReader capability instead of
+     * probing this member in individual workflows.
+     */
+    getContextGraphAuthoritySnapshot?(
+      contextGraphId: bigint,
+      options?: ChainReadOptions,
+    ): Promise<ContextGraphAuthoritySnapshot>;
 
   /**
    * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.

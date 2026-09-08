@@ -340,6 +340,14 @@ import {
 } from './dkg-agent-constants.js';
 import { isTransientBootChainError } from './dkg-agent-boot.js';
 import { createAbortError, runBoundedOperation } from './bounded-operation.js';
+import type { RegisteredContextGraphAuthority } from
+  './registered-context-graph-authority.js';
+import type { LiveOnChainAccessPolicyState } from
+  './internal/context-graph-authority/context-graph-access-policy.js';
+// Keep the historical dist/dkg-agent-cg-resolve.js type entry point backed by
+// the same stable public contract as the package root.
+export type { RegisteredContextGraphAuthority } from
+  './registered-context-graph-authority.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
   ContextGraphNotFoundError,
@@ -701,25 +709,6 @@ export async function resolveCuratorSyncPeer(
   bootstrapHints.delete(contextGraphId);
   return { peerId: curatorPeerId, provenance };
 }
-
-export type RegisteredContextGraphAuthority =
-  | { kind: 'unregistered' }
-  | { kind: 'public'; onChainId: bigint }
-  | { kind: 'private'; onChainId: bigint; participantAgents: string[] }
-  | {
-      kind: 'unavailable';
-      reason:
-        | 'chain-name-binding-unavailable'
-        | 'local-chain-binding-unavailable'
-        | 'local-existence-unavailable'
-        | 'chain-access-policy-unavailable'
-        | 'chain-access-policy-unknown'
-        | 'chain-participant-authority-unsupported'
-        | 'chain-participant-authority-unavailable'
-        | 'chain-participant-authority-invalid';
-      onChainId?: bigint;
-      detail?: string;
-    };
 
 export class ContextGraphResolveMethods extends DKGAgentBase {
   async getCgMeta(
@@ -1543,9 +1532,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     if (registration.kind !== 'registered') return registration;
     const { onChainId } = registration;
 
-    let accessPolicy: 0 | 1 | null;
+    let accessPolicyState: LiveOnChainAccessPolicyState;
     try {
-      accessPolicy = await this.readLiveOnChainAccessPolicy(
+      accessPolicyState = await this.resolveLiveOnChainAccessPolicyState(
         onChainId.toString(),
         createOperationContext('system'),
         { signal: options.signal },
@@ -1558,9 +1547,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         detail: err instanceof Error ? err.message : String(err),
       };
     }
-    if (accessPolicy === null) {
-      return { kind: 'unavailable', onChainId, reason: 'chain-access-policy-unknown' };
+    if (accessPolicyState.kind === 'unavailable') {
+      return { ...accessPolicyState, onChainId };
     }
+    const accessPolicy = accessPolicyState.accessPolicy;
     if (accessPolicy === 0) return { kind: 'public', onChainId };
 
     const cacheKey = onChainId.toString();
@@ -1991,6 +1981,49 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     next.onChainHash = wireId;
     this.setContextGraphSubscription(localId, next, options);
     return localId;
+  }
+
+  /**
+   * Retain a finalized name-hash binding even when its cleartext subscription
+   * has not arrived yet. The chain event can legitimately win that race on a
+   * cold Edge. A process-local wire-only placeholder lets the canonical
+   * subscription setter promote the binding once an explicit create/join/
+   * subscribe path supplies the matching cleartext id.
+   *
+   * Never infer that an existing hash-shaped local id is a placeholder. It is
+   * safe to stage only when the reverse index already authenticates the row,
+   * or when neither the reverse index nor the subscription map uses the wire
+   * string. This preserves the hash-shaped-cleartext collision fence.
+   */
+  stageOnChainContextGraphBindingFromNameHash(
+    this: DKGAgent,
+    nameHash: string,
+    onChainContextGraphId: string,
+    options?: { persist?: boolean },
+  ): string | null {
+    const wireId = this.contextGraphWireId(nameHash);
+    const alreadyBound = this.bindOnChainContextGraphIdFromNameHash(
+      wireId,
+      onChainContextGraphId,
+      options,
+    );
+    if (alreadyBound !== null) return alreadyBound;
+
+    const indexedLocalId = this.wireIdToLocalCgId.get(wireId);
+    if (indexedLocalId !== undefined) return null;
+    if (this.subscribedContextGraphs.has(wireId)) return null;
+
+    this.setContextGraphSubscription(wireId, {
+      subscribed: false,
+      synced: false,
+      onChainHash: wireId,
+      pendingMeta: true,
+    }, { persist: false });
+    return this.bindOnChainContextGraphIdFromNameHash(
+      wireId,
+      onChainContextGraphId,
+      { persist: false },
+    );
   }
 
   /**

@@ -16,18 +16,14 @@
  * shape: anything that leaves the HTTP listener dead while the process
  * remains alive. Defense-in-depth.
  *
- * # Why TCP-connect rather than HTTP
+ * # HTTP response liveness
  *
- * The cheapest possible "is the server alive" check is a plain TCP connect.
- *   - No HTTP request body to parse.
- *   - No auth token to load (saves us from threading config / loadTokens
- *     into the supervisor).
- *   - No 404/405/etc to special-case (any response = alive).
- *   - Cancellable cleanly via socket.destroy().
- *
- * If the TCP connection refuses or times out, the worker either died
- * silently (listener gone) or is in the wedged-event-loop state we're
- * trying to detect. Either way, SIGKILL + respawn is the right response.
+ * The kernel can complete a TCP handshake while the worker's JavaScript
+ * event loop is stuck. Require an HTTP response to a cheap, unknown API
+ * HEAD route. Any status (including 401/404/503) proves request handling
+ * progressed, without credentials or a database/chain health dependency.
+ * A single absolute deadline bounds connecting and receiving the status
+ * line, and the socket is destroyed on every outcome.
  *
  * # Env gate
  *
@@ -41,20 +37,32 @@
  * probe. Defaults to on so production benefits; tests opt out.
  */
 
-import { connect, type Socket } from 'node:net';
+import { request, type ClientRequest } from 'node:http';
+import { SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS } from './shutdown.js';
+
+/** Default total HTTP liveness deadline — 5s. */
+export const LIVENESS_PROBE_TIMEOUT_MS = 5_000;
+export const DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS = 30_000;
 
 /** Default tick — 30s. Picked to be longer than typical request handling but short enough that a 5-failure quorum triggers within ~2.5 min. */
 export const LIVENESS_PROBE_INTERVAL_MS = 30_000;
 
-/** Default per-probe TCP-connect timeout — 5s. Production daemons handle most requests in <100ms; 5s is many SDs above the long-tail. */
-export const LIVENESS_PROBE_TIMEOUT_MS = 5_000;
-
 /** Default trigger threshold — 5 consecutive failures. With 30s tick → ~2.5 min unresponsive before SIGKILL. */
 export const LIVENESS_CONSECUTIVE_FAILURES_TO_KILL = 5;
 
+/** Derive watchdog grace from the already-validated worker hard timeout. */
+export function resolveLivenessShutdownGraceMs(hardTimeoutMs: number): number {
+  return Math.max(
+    DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS,
+    hardTimeoutMs + SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS + LIVENESS_PROBE_TIMEOUT_MS,
+  );
+}
+
 /**
- * One-shot probe: connect to `host:port`, return `true` on success, `false`
- * on refusal / timeout / any error. Never throws.
+ * One-shot probe: require an HTTP status line from `host:port`; a TCP
+ * connection alone is insufficient. Node owns HTTP framing and status
+ * parsing; this policy accepts any parsed response. Returns false on any
+ * error or timeout.
  *
  * The socket is force-destroyed on every outcome (success or failure) to
  * avoid leaking file descriptors when the supervisor probes the worker
@@ -67,30 +75,39 @@ export async function probeWorkerAlive(
 ): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     let settled = false;
-    const settle = (alive: boolean, socket: Socket | null) => {
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    let probe: ClientRequest | null = null;
+    const settle = (alive: boolean) => {
       if (settled) return;
       settled = true;
+      clearTimeout(deadline);
       try {
-        socket?.destroy();
+        probe?.destroy();
       } catch {
-        /* socket may already be destroyed; ignore */
+        /* request may already be destroyed; ignore */
       }
       resolve(alive);
     };
-    let socket: Socket;
     try {
-      socket = connect({ port, host });
-    } catch (err) {
-      // Synchronous throw from `connect` is unusual (it's normally async)
-      // but possible on invalid port. Treat as not-alive.
-      void err;
-      resolve(false);
+      probe = request({
+        host,
+        port,
+        method: 'HEAD',
+        path: '/api/__dkg_liveness_probe__',
+        agent: false,
+      }, (response) => {
+        response.resume();
+        settle(response.statusCode !== undefined);
+      });
+    } catch {
+      settle(false);
       return;
     }
-    socket.setTimeout(timeoutMs);
-    socket.once('connect', () => settle(true, socket));
-    socket.once('timeout', () => settle(false, socket));
-    socket.once('error', () => settle(false, socket));
+    deadline = setTimeout(() => settle(false), timeoutMs);
+    deadline.unref?.();
+    probe.once('error', () => settle(false));
+    probe.once('close', () => settle(false));
+    probe.end();
   });
 }
 
@@ -152,11 +169,10 @@ export interface LivenessWatcherOpts {
   /**
    * Maximum time to wait after the worker enters graceful shutdown before
    * the watcher resumes counting failures toward `consecutiveFailuresToKill`.
-   * Default is 2× `SHUTDOWN_HARD_TIMEOUT_MS` (30s) — comfortably longer than
-   * the daemon's own self-force-exit deadline so a healthy graceful shutdown
-   * finishes inside the window; only a wedged teardown reaches the SIGKILL
-   * path. Set to a negative value to disable the bounded fallback (legacy
-   * "disarm forever" behavior).
+   * Default remains 30s. The CLI supervisor supplies a value derived from the
+   * worker's resolved hard timeout so an operator override cannot be
+   * preempted. Set to a negative value to disable the bounded fallback
+   * (legacy "disarm forever" behavior).
    */
   shutdownGraceMs?: number;
 }
@@ -177,9 +193,7 @@ export function startLivenessWatcher(opts: LivenessWatcherOpts): { stop(): void 
   const threshold = opts.consecutiveFailuresToKill ?? LIVENESS_CONSECUTIVE_FAILURES_TO_KILL;
   const probe = opts.probe ?? probeWorkerAlive;
   const host = opts.host ?? '127.0.0.1';
-  // Default to 2× the worker's own hard-shutdown deadline; if the worker's
-  // self-force-exit fires first the watcher never needs to kill anyway.
-  const shutdownGraceMs = opts.shutdownGraceMs ?? 2 * 15_000;
+  const shutdownGraceMs = opts.shutdownGraceMs ?? DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS;
 
   let consecutiveFailures = 0;
   let probing = false;

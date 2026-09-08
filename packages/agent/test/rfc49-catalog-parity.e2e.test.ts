@@ -26,6 +26,7 @@
  * also free proof of the producer/collector/handler three-way ACK-digest
  * agreement over the catalog fields.
  */
+import { TEST_SNAPSHOT_STORAGE } from '../../../scripts/testing/snapshot-storage.js';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -121,17 +122,19 @@ describe('OT-RFC-49 WS-D — catalog producer↔extractor↔chain parity', () =>
   let curator: string;
 
   beforeAll(async () => {
-    ctx = await spawnHardhatEnv(8554);
+    ctx = await spawnHardhatEnv();
     await setMinimumRequiredSignatures(ctx.provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, 1);
 
     publisher = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(), name: 'ParityPublisher', nodeRole: 'core', listenPort: 0, skills: [],
       dataDir: mkDataDir('pub'),
+      sharedMemoryPublicSnapshotStorage: TEST_SNAPSHOT_STORAGE,
       chainConfig: chainConfig(HARDHAT_KEYS.CORE_OP, HARDHAT_KEYS.CORE_ADMIN),
     });
     ackCore = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(), name: 'ParityAckCore', nodeRole: 'core', listenPort: 0, skills: [],
       dataDir: mkDataDir('ack'),
+      sharedMemoryPublicSnapshotStorage: TEST_SNAPSHOT_STORAGE,
       chainConfig: chainConfig(HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC1_ADMIN),
     });
     agents.push(publisher, ackCore);
@@ -143,7 +146,7 @@ describe('OT-RFC-49 WS-D — catalog producer↔extractor↔chain parity', () =>
 
   afterAll(async () => {
     for (const a of agents) { try { await a.stop(); } catch {} }
-    killHardhat(ctx);
+    await killHardhat(ctx);
   });
 
   it('curated publish: rebuilt catalog root == on-chain getCatalogRoot (and committedRoot is excluded)', async () => {
