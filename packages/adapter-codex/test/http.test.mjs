@@ -12,8 +12,8 @@ test('UI cookie authorizes requests, cross-origin and missing CSRF fail, SSE sta
   const bridge = new EventEmitter();
   bridge.events = [];
   bridge.status = async () => ({ connected: true });
-  bridge.select = async ({}) => ({ ok: true });
-  // Reserve an OS-selected free port, then make that the accepted Host port.
+  bridge.select = async () => ({ ok: true });
+  // Match the loopback listener and the accepted Host port.
   const server = createServer({ bridge, uiDir: dir, dkgHome: dir, port: 19219, sessionToken: 'a'.repeat(64) });
   await new Promise((done) => server.listen(19219, '127.0.0.1', done));
   t.after(() => { server.closeAllConnections(); server.close(); rmSync(dir, { recursive: true, force: true }); });

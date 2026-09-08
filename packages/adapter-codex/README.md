@@ -14,8 +14,10 @@ DKG UI and native Codex. The adapter never automatically shares or publishes the
 ## Runtime
 
 Node 22+, the Codex CLI, a running DKG node, and a built `packages/node-ui/dist-ui`
-are required. This implementation was verified against Codex Desktop 0.153.1 and
-DKG 10.0.15 (244f6943fe7a909a23fe3671c9da088de942f8ed).
+are required. Live chat and graph persistence were verified against Codex Desktop
+0.153.1 and DKG 10.0.15 (244f6943fe7a909a23fe3671c9da088de942f8ed). The PR also
+integrates `testnet-canary` at 514bf9bcd, with focused tests and a production UI
+build on that base; live validation against its DKG 10.0.16 node is still pending.
 
 Set `DKG_CODEX_CONFIG` to an absolute JSON config path, then run
 `node packages/adapter-codex/src/server.mjs`. The config accepts:

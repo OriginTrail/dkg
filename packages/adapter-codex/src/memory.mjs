@@ -81,7 +81,7 @@ export class DkgMemory extends EventEmitter {
     this.emit('update', { threadId: record.threadId, record: this.publicRecord(record) });
     return record;
   }
-  publicRecord(r) { const { quads, text, ...rest } = r; return rest; }
+  publicRecord(r) { const { quads: _quads, text: _text, ...rest } = r; return rest; }
   snapshot(threadId) {
     return { settings: this.settings, records: [...this.records.values()].filter((r) => r.threadId === threadId)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt)).map((r) => this.publicRecord(r)),
