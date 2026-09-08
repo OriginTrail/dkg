@@ -142,6 +142,7 @@ function selectedFixture(resolved: bigint | null = 42n) {
     vmReconcileEnabled: () => false,
     vmReconcileLifecycleGeneration: 0,
     vmReconcileRotationClosed: false,
+    vmReconcilePhysicalRuns: new Set<Promise<unknown>>(),
     resolveLocalCgIdByOnChainId: (_onChainId: string) => null as string | null,
     vmReconcileDispatcher: { triggerLive: vi.fn() },
     onChainParticipantAgentsCache: new Map(),
