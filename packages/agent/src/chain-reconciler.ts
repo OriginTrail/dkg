@@ -23,6 +23,7 @@
  *     with a single trailing re-run if more events land mid-sweep.
  */
 
+import { registerVmReconcileSweepAdmission } from './internal/vm-reconcile-sweep-admission.js';
 import {
   type CursorState,
   recordCompletion,
@@ -628,6 +629,11 @@ export class VmReconcileDispatcher<T> {
     this.concurrency = concurrency;
     this.maxPending = maxPending;
     this.maxForegroundBurst = maxForegroundBurst;
+    registerVmReconcileSweepAdmission(this, {
+      tryAdmit: key => this.tryDispatchPeriodic(key),
+      waitForChange: signal => this.waitForPeriodicStateChange(signal),
+      isClosed: () => this.closed,
+    });
   }
 
   /** Enqueue a low-latency chain-event nudge; suppressed until a sweep after failure. */
@@ -659,24 +665,6 @@ export class VmReconcileDispatcher<T> {
     if (!('completion' in outcome)) return undefined;
     void outcome.completion.catch(() => undefined);
     return outcome.completion;
-  }
-
-  /**
-   * Wait for this key's admission, then return its coalesced/trailing completion.
-   * Failed admission waits for a real transition, never a fresh-key capacity
-   * predicate: an active key needs a trailing slot even when a worker is free.
-   * Cancellation ends only admission waiting; admitted work owns its lifetime.
-   */
-  async schedulePeriodicWhenAvailable(
-    key: string,
-    signal?: AbortSignal,
-  ): Promise<Readonly<{ completion: Promise<T> }> | undefined> {
-    while (!this.closed && !signal?.aborted) {
-      const completion = this.tryDispatchPeriodic(key);
-      if (completion) return { completion };
-      await this.waitForPeriodicStateChange(signal);
-    }
-    return undefined;
   }
 
   private waitForPeriodicStateChange(signal?: AbortSignal): Promise<void> {

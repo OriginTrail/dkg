@@ -1,3 +1,5 @@
+import { vmReconcileSweepAdmission } from '../src/internal/vm-reconcile-sweep-admission.js';
+import { VmReconcileSweepPlanner } from '../src/vm-reconcile-sweep.js';
 import { describe, it, expect, vi } from 'vitest';
 import {
   reconcileContextGraph,
@@ -1290,7 +1292,9 @@ describe('capacity-aware periodic admission', () => {
     const dispatcher = new VmReconcileDispatcher(async () => blocked, () => undefined, { maxPending: 1 });
     const controller = new AbortController();
     const active = dispatcher.triggerManual('active');
-    const admission = dispatcher.schedulePeriodicWhenAvailable('waiting', controller.signal);
+    const port = vmReconcileSweepAdmission(dispatcher);
+    expect(port.tryAdmit('waiting')).toBeUndefined();
+    const admission = port.waitForChange(controller.signal);
     const closing = action === 'close' ? dispatcher.close() : undefined;
     if (action === 'abort') controller.abort();
     try {
@@ -1298,14 +1302,14 @@ describe('capacity-aware periodic admission', () => {
       expect(dispatcher.isInFlight('waiting')).toBe(false);
       expect(dispatcher.isInFlight('active')).toBe(true);
     } finally { release(); await active; await closing; await dispatcher.close(); }
-    await expect(dispatcher.schedulePeriodicWhenAvailable('closed')).resolves.toBeUndefined();
+    expect(port.tryAdmit('closed')).toBeUndefined();
   });
 
   it('admits no work for an already-aborted caller', async () => {
     const run = vi.fn(async () => undefined);
     const dispatcher = new VmReconcileDispatcher(run, () => undefined);
     const controller = new AbortController(); controller.abort();
-    await expect(dispatcher.schedulePeriodicWhenAvailable('cancelled', controller.signal)).resolves.toBeUndefined();
+    await new VmReconcileSweepPlanner(0).complete(['cancelled'], [], vmReconcileSweepAdmission(dispatcher), () => true, controller.signal);
     expect(run).not.toHaveBeenCalled();
     await dispatcher.close();
   });
@@ -1324,12 +1328,14 @@ it('coalesces a waiting periodic request when a foreground trailing pass becomes
   await new Promise(resolve => setTimeout(resolve, 0));
   dispatcher.triggerLive('A');
   gates.get('C')!(); await dispatcher.waitForIdle('C');
-  let accepted: Readonly<{ completion: Promise<string> }> | undefined;
-  const waiting = dispatcher.schedulePeriodicWhenAvailable('B').then(result => { accepted = result; });
+  const port = vmReconcileSweepAdmission(dispatcher);
+  expect(port.tryAdmit('B')).toBeUndefined();
+  let completion: Promise<string> | undefined;
+  const waiting = port.waitForChange().then(() => { completion = port.tryAdmit('B'); });
   const manual = dispatcher.triggerManual('B');
   try {
     await new Promise(resolve => setTimeout(resolve, 5));
-    expect(accepted?.completion).toBe(manual);
+    expect(completion).toBe(manual);
   } finally {
     gates.get('A')!(); gates.get('B')!();
     await waiting; await manual; await dispatcher.close();

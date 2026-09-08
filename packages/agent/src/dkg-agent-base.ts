@@ -9,6 +9,7 @@
  * unchanged. The constructor is `protected` (was `private`) so subclasses can
  * be declared; external construction still goes through `DKGAgent.create`.
  */
+import { vmReconcileSweepAdmission } from './internal/vm-reconcile-sweep-admission.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import {
@@ -1096,7 +1097,7 @@ export class DKGAgentBase {
     const dispatcher = this.vmReconcileDispatcher;
     if (!isLifecycleCurrent() || !this.vmReconcileEnabled() || !dispatcher) return;
     // Admission is synchronous. The dispatcher owns physical concurrency,
-    // per-CG coalescing, error containment and shutdown; no sweep awaits a worker.
+    // per-CG coalescing, error containment and shutdown; timer ticks never await workers.
     const bound = new Set<string>();
     const unbound: string[] = [];
     for (const [localCgId, sub] of this.subscribedContextGraphs) {
@@ -1119,7 +1120,7 @@ export class DKGAgentBase {
     const sweep = this.prepareVmReconcileSweep();
     if (!sweep) return;
     this.vmReconcileSweepPlanner.admit(sweep.bound, sweep.unbound,
-      key => sweep.isLifecycleCurrent() && sweep.dispatcher.tryTriggerPeriodic(key));
+      key => sweep.isLifecycleCurrent() ? vmReconcileSweepAdmission(sweep.dispatcher).tryAdmit(key) : undefined);
   }
 
   /** Admitted authenticated graph-scoped stores must physically drain before backing-store teardown. */

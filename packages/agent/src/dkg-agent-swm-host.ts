@@ -8,6 +8,7 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
+import { vmReconcileSweepAdmission } from './internal/vm-reconcile-sweep-admission.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { performance } from 'node:perf_hooks';
@@ -686,25 +687,6 @@ function trackVmReconcilePhysicalRun<T>(runs: Set<Promise<unknown>>, run: Promis
   const retire = () => { runs.delete(run); };
   void run.then(retire, retire);
   return run;
-}
-
-/** Complete only the selected/coalesced admissions, retrying after capacity changes. */
-async function completeVmReconcileSweep<T>(
-  keys: readonly string[],
-  dispatcher: VmReconcileDispatcher<T>,
-  isCurrent: () => boolean,
-  signal?: AbortSignal,
-): Promise<void> {
-  const completions: Promise<unknown>[] = [];
-  for (const key of keys) {
-    if (!isCurrent()) break;
-    const admission = await dispatcher.schedulePeriodicWhenAvailable(key, signal);
-    if (!admission) break;
-    // The dispatcher reports automatic failures; one failed CG must not strand
-    // the rest of the selection. Keep only this sweep's completion boundaries.
-    completions.push(admission.completion.catch(() => undefined));
-  }
-  await Promise.all(completions);
 }
 
 export class SwmHostModeMethods extends DKGAgentBase {
@@ -2986,12 +2968,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
   async runVmReconcileSweep(this: DKGAgent): Promise<void> {
     const sweep = this.prepareVmReconcileSweep();
     if (!sweep) return;
-    const keys: string[] = [];
-    this.vmReconcileSweepPlanner.admit(sweep.bound, sweep.unbound, key => {
-      keys.push(key);
-      return true;
-    });
-    await completeVmReconcileSweep(keys, sweep.dispatcher, sweep.isLifecycleCurrent, sweep.lifecycleSignal);
+    await this.vmReconcileSweepPlanner.complete(
+      sweep.bound, sweep.unbound, vmReconcileSweepAdmission(sweep.dispatcher),
+      sweep.isLifecycleCurrent, sweep.lifecycleSignal,
+    );
   }
 
   /**

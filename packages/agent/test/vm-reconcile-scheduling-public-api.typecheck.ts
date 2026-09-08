@@ -12,3 +12,13 @@ const completed: Promise<void> = agent.runVmReconcileSweep();
 void admitted;
 void targeted;
 void completed;
+
+// @ts-expect-error Sweep capacity waiting is internal, not a supported dispatcher operation.
+dispatcher.schedulePeriodicWhenAvailable('cg');
+// @ts-expect-error Internal admission capabilities must not be exported at the package root.
+import { vmReconcileSweepAdmission } from '@origintrail-official/dkg-agent';
+void vmReconcileSweepAdmission;
+
+// @ts-expect-error internal sweep capability subpaths are deliberately blocked
+import { vmReconcileSweepAdmission as internalAdmission } from '@origintrail-official/dkg-agent/dist/internal/vm-reconcile-sweep-admission.js';
+void internalAdmission;

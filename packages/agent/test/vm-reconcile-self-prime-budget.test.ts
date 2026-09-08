@@ -477,3 +477,94 @@ it.each(['pending', 'active'] as const)('awaits the exact %s coalesced or traili
     await sweep;
   }
 });
+
+it('joins the leading admission of a timer turn resumed by a public sweep', async () => {
+  const { internals } = await fixture(1);
+  internals.subscribedContextGraphs.set('A', { subscribed: true, onChainId: '1' });
+  internals.subscribedContextGraphs.set('B', { subscribed: true, onChainId: '2' });
+  let releaseX!: () => void;
+  let releaseA!: () => void;
+  const x = new Promise<void>(resolve => { releaseX = resolve; });
+  const a = new Promise<void>(resolve => { releaseA = resolve; });
+  const ran: string[] = [];
+  const dispatcher = new VmReconcileDispatcher(async key => {
+    ran.push(key);
+    if (key === 'X') await x;
+    if (key === 'A') await a;
+    return true;
+  }, () => {}, { concurrency: 2, maxPending: 1 });
+  dispatchers.push(dispatcher); internals.vmReconcileDispatcher = dispatcher;
+  const unrelated = dispatcher.triggerManual('X');
+  internals.scheduleVmReconcileSweep();
+  let settled = false;
+  const sweep = internals.runVmReconcileSweep().then(() => { settled = true; });
+  try {
+    await vi.waitFor(() => expect(ran).toEqual(['X', 'A']));
+    internals.scheduleVmReconcileSweep();
+    releaseX(); await unrelated;
+    await vi.waitFor(() => expect(ran).toContain('B'));
+    await dispatcher.waitForIdle('B');
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(ran).toContain('cg-0');
+    expect(settled).toBe(false);
+    expect(dispatcher.isInFlight('A')).toBe(true);
+    releaseA(); await sweep;
+  } finally { releaseX(); releaseA(); await sweep; }
+});
+
+it('gives overlapping public sweeps their own admitted completion boundaries', async () => {
+  const { internals } = await fixture(1);
+  internals.subscribedContextGraphs.set('A', { subscribed: true, onChainId: '1' });
+  const release: Array<() => void> = [];
+  const ran: string[] = [];
+  let draining = false;
+  const dispatcher = new VmReconcileDispatcher(async key => {
+    ran.push(key);
+    if (key === 'A' && !draining) await new Promise<void>(resolve => { release.push(resolve); });
+    return true;
+  }, () => {}, { concurrency: 1, maxPending: 4 });
+  dispatchers.push(dispatcher); internals.vmReconcileDispatcher = dispatcher;
+  let firstSettled = false, secondSettled = false;
+  const first = internals.runVmReconcileSweep().then(() => { firstSettled = true; });
+  const second = internals.runVmReconcileSweep().then(() => { secondSettled = true; });
+  try {
+    await vi.waitFor(() => expect(release).toHaveLength(1));
+    expect(firstSettled).toBe(false); expect(secondSettled).toBe(false);
+    release[0]!();
+    await vi.waitFor(() => expect(release).toHaveLength(2));
+    await vi.waitFor(() => expect(firstSettled).toBe(true), { timeout: 300 });
+    expect(secondSettled).toBe(false);
+    expect(ran).toEqual(['A', 'cg-0', 'A']);
+    release[1]!(); await second;
+  } finally {
+    draining = true;
+    for (const done of release) done();
+    await Promise.all([first, second]);
+  }
+});
+
+it('joins overlapping public calls and timer ticks on one retained one-slot admission turn', async () => {
+  const { internals } = await fixture(1);
+  internals.subscribedContextGraphs.set('A', { subscribed: true, onChainId: '1' });
+  let releaseA!: () => void, releaseU!: () => void;
+  const a = new Promise<void>(resolve => { releaseA = resolve; });
+  const u = new Promise<void>(resolve => { releaseU = resolve; });
+  const ran: string[] = [];
+  const dispatcher = new VmReconcileDispatcher(async key => {
+    ran.push(key); await (key === 'A' ? a : u); return true;
+  }, () => {}, { concurrency: 1, maxPending: 1 });
+  dispatchers.push(dispatcher); internals.vmReconcileDispatcher = dispatcher;
+  let completed = 0;
+  const first = internals.runVmReconcileSweep().then(() => { completed++; });
+  const second = internals.runVmReconcileSweep().then(() => { completed++; });
+  internals.scheduleVmReconcileSweep();
+  try {
+    await vi.waitFor(() => expect(ran).toEqual(['A']));
+    releaseA();
+    await vi.waitFor(() => expect(ran).toEqual(['A', 'cg-0']));
+    expect(completed).toBe(0);
+    releaseU(); await Promise.all([first, second]);
+    expect(completed).toBe(2);
+    expect(ran).toEqual(['A', 'cg-0']);
+  } finally { releaseA(); releaseU(); await Promise.all([first, second]); }
+});
