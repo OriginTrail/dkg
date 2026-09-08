@@ -18,6 +18,7 @@
  *
  * Per QA policy: no production-code edits.
  */
+import { createRequire } from 'node:module';
 import { describe, it, expect, beforeAll } from 'vitest';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -61,12 +62,20 @@ function inMemoryPublisher(store: Captured[]): AsyncPublisher {
   };
 }
 
-function capturedDocument(content: unknown): EPCISDocument {
-  if (content && typeof content === 'object' && !Array.isArray(content)) {
-    const envelope = content as { public?: unknown; private?: unknown };
-    return (envelope.public ?? envelope.private ?? content) as EPCISDocument;
-  }
-  return content as EPCISDocument;
+const jsonld = createRequire(import.meta.url)('jsonld') as {
+  compact(document: unknown, context: unknown): Promise<unknown>;
+  toRDF(document: unknown, options: { format: string }): Promise<string>;
+};
+async function capturedDocument(content: unknown): Promise<EPCISDocument> {
+  const envelope = content as { public?: unknown; private?: unknown };
+  // The capture boundary supplies expanded JSON-LD. Compact only inside this
+  // small contract fixture; real RDF query coverage lives in external-event-query.
+  const context = {
+    ...VALID_OBJECT_EVENT_DOC['@context'] as Record<string, unknown>,
+    ...Object.fromEntries(['eventList', 'epcList', 'childEPCs', 'inputEPCList', 'outputEPCList'].map(key =>
+      [key, { '@id': `https://gs1.github.io/EPCIS/${key}`, '@container': '@set' }])),
+  };
+  return await jsonld.compact(envelope.public ?? envelope.private ?? content, context) as EPCISDocument;
 }
 
 /**
@@ -90,7 +99,7 @@ function inMemoryQueryEngine(store: Captured[]): QueryEngine & { lastSparql?: st
       const epcPredMatch = sparql.match(/\?event \?_epcPred "([^"]+)"/);
       const wantEpc = epcPredMatch?.[1];
       for (const c of store) {
-        const doc = capturedDocument(c.content);
+        const doc = await capturedDocument(c.content);
         const events = doc.epcisBody?.eventList ?? doc.eventList ?? [];
         for (const e of events) {
           if (
@@ -103,7 +112,7 @@ function inMemoryQueryEngine(store: Captured[]): QueryEngine & { lastSparql?: st
 
           bindings.push({
             event: `urn:uuid:fixture-${bindings.length}`,
-            eventType: `https://gs1.github.io/EPCIS/${String(e.type)}`,
+            eventType: `https://gs1.github.io/EPCIS/${String(Array.isArray(e.type) ? e.type[0] : e.type)}`,
             eventTime: String(e.eventTime ?? ''),
             action: String(e.action ?? ''),
             bizStep: String(e.bizStep ?? ''),
@@ -172,10 +181,16 @@ describe('[K-6] EPCIS capture → query contract (always runs, no devnet)', () =
       expect(result.eventCount).toBe(1);
     });
 
-    it('publisher received private content preserving the submitted event fields', () => {
+    it('publisher received private content preserving the submitted event fields', async () => {
       expect(store.length).toBeGreaterThanOrEqual(2);
-      expect(store[0].content).toMatchObject({ private: VALID_OBJECT_EVENT_DOC });
-      expect(store[1].content).toMatchObject({ private: VALID_TRANSFORMATION_EVENT_DOC });
+      const actual = await jsonld.toRDF((store[0].content as { private: unknown }).private, { format: 'application/n-quads' });
+      const original = await jsonld.toRDF(VALID_OBJECT_EVENT_DOC, { format: 'application/n-quads' });
+      expect(actual.split('\n').filter(line => !line.includes('<http://dkg.io/ontology/epcisEventType>')).sort())
+        .toEqual(original.split('\n').sort());
+const transformed = await jsonld.toRDF((store[1].content as { private: unknown }).private, { format: 'application/n-quads' });
+      const transformation = await jsonld.toRDF(VALID_TRANSFORMATION_EVENT_DOC, { format: 'application/n-quads' });
+      expect(transformed.split('\n').filter(line => !line.includes('<http://dkg.io/ontology/epcisEventType>')).sort())
+        .toEqual(transformation.split('\n').sort());
     });
   });
 

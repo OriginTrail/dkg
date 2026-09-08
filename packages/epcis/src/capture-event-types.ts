@@ -5,7 +5,7 @@ export function normalizeCaptureEventTypes(document: unknown): unknown {
   return mapEpcisEventList(document, (record) => {
     if (typeof record.type !== 'string') return record;
     const resolved = resolveEpcisEventType(record.type);
-    if (!resolved || resolved.kind === 'legacy-gs1-extension') return record;
+    if (!resolved) return record;
     const type = resolved.iri;
     // Full IRIs and the JSON-LD keyword are independent of @vocab and of
     // document-, property-, or event-scoped aliases for the `type` key.

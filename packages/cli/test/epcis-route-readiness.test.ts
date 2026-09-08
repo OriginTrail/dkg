@@ -2,8 +2,23 @@ import { describe, expect, it } from 'vitest';
 import type { ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import { handleEpcisRoutes } from '../src/daemon/routes/epcis.js';
-import type { RequestContext } from '../src/daemon/routes/context.js';
+import { createRequestActor, type RequestContext, type RequestContextInputFields } from '../src/daemon/routes/context.js';
+import { resolveRfc64PublicCatalogActivation, resolveRfc64PublicCatalogActivationChainIdentityV1 } from '../src/config.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
+
+function expectCapturedEvent(content: unknown): void {
+  expect(content).toEqual({ private: expect.any(Array) });
+  expect(content).toMatchObject({ private: [expect.objectContaining({
+    'https://gs1.github.io/EPCIS/epcisBody': [expect.objectContaining({
+      'https://gs1.github.io/EPCIS/eventList': [expect.objectContaining({
+        '@id': 'urn:uuid:fixture-obj-1',
+        '@type': expect.arrayContaining(['https://gs1.github.io/EPCIS/ObjectEvent']),
+        'http://dkg.io/ontology/epcisEventType': [{ '@id': 'https://gs1.github.io/EPCIS/ObjectEvent' }],
+      })],
+    })],
+  })] });
+  expect(JSON.stringify(content)).not.toContain('"@context"');
+}
 
 const VALID_OBJECT_EVENT_DOC = {
   '@context': {
@@ -107,7 +122,7 @@ function readyPublisherState(): RequestContext['publisherState'] {
 
 function createContext(overrides: Partial<RequestContext> = {}): RequestContext {
   const url = new URL('http://127.0.0.1/api/epcis/capture');
-  const context: RequestContext = {
+  const context: Omit<RequestContextInputFields, 'actor'> = {
     req: createRequest(),
     res: createResponse() as unknown as ServerResponse,
     agent: {
@@ -116,6 +131,7 @@ function createContext(overrides: Partial<RequestContext> = {}): RequestContext 
       },
     } as unknown as RequestContext['agent'],
     publisherControl: {} as RequestContext['publisherControl'],
+    rfc64PublicCatalog: resolveRfc64PublicCatalogActivation({}, resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430')),
     publisherState: unavailablePublisherState('publisher_startup_failed'),
     config: {
       epcis: { contextGraphId: 'epcis-test' },
@@ -140,6 +156,8 @@ function createContext(overrides: Partial<RequestContext> = {}): RequestContext 
     validTokens: new Set(),
     apiHost: '127.0.0.1',
     apiPortRef: { value: 0 },
+    routePlugins: [],
+    admission: {} as RequestContext['admission'],
     url,
     path: url.pathname,
     authentication: requestAuthentication({ kind: 'anonymous' }),
@@ -151,7 +169,8 @@ function createContext(overrides: Partial<RequestContext> = {}): RequestContext 
       ? unavailablePublisherState('publisher_startup_failed')
       : unavailablePublisherState('publisher_disabled');
   }
-  return context;
+  // This fixture supplies authentication directly instead of dispatching HTTP.
+  return { ...context, actor: overrides.actor ?? createRequestActor(context.authentication, () => context.requestAgentAddress) } as RequestContext;
 }
 
 function responseBody(ctx: RequestContext): Record<string, unknown> {
@@ -278,16 +297,11 @@ describe('EPCIS async capture publisher readiness', () => {
       status: 'accepted',
       eventCount: 1,
     });
+    expectCapturedEvent(published[0]?.content);
     expect(published).toEqual([
       {
         contextGraphId: 'epcis-test',
-        content: { private: {
-          ...VALID_OBJECT_EVENT_DOC,
-          epcisBody: { eventList: VALID_OBJECT_EVENT_DOC.epcisBody!.eventList.map((event) => ({
-            ...event, '@type': ['https://gs1.github.io/EPCIS/ObjectEvent'],
-            'http://dkg.io/ontology/epcisEventType': { '@id': 'https://gs1.github.io/EPCIS/ObjectEvent' },
-          })) },
-        } },
+        content: { private: expect.any(Array) },
         // 3825614158 — the authenticated submitter is stamped as the admission owner on every
         // capture, beside the client's publish options.
         opts: { accessPolicy: 'allowList', allowedPeers: ['peer-a'], admittedByAgentAddress: '0x0' },
@@ -315,16 +329,11 @@ describe('EPCIS async capture publisher readiness', () => {
     await handleEpcisRoutes(ctx);
 
     expect(ctx.res.statusCode).toBe(202);
+    expectCapturedEvent(published[0]?.content);
     expect(published).toEqual([
       {
         contextGraphId: 'per-request-cg',
-        content: { private: {
-          ...VALID_OBJECT_EVENT_DOC,
-          epcisBody: { eventList: VALID_OBJECT_EVENT_DOC.epcisBody!.eventList.map((event) => ({
-            ...event, '@type': ['https://gs1.github.io/EPCIS/ObjectEvent'],
-            'http://dkg.io/ontology/epcisEventType': { '@id': 'https://gs1.github.io/EPCIS/ObjectEvent' },
-          })) },
-        } },
+        content: { private: expect.any(Array) },
         opts: { subGraphName: 'research', admittedByAgentAddress: '0x0' },
       },
     ]);

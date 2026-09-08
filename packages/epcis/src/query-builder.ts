@@ -1,4 +1,4 @@
-import { EPCIS_DECLARED_EVENT_TYPE, EPCIS_TYPE_PREFIX, resolveEpcisEventType } from './epcis-vocabulary.js';
+import { EPCIS_DECLARED_EVENT_TYPE, EPCIS_TYPE_PREFIX, resolveEpcisQueryEventType } from './epcis-vocabulary.js';
 import {
   contextGraphDataUri,
   contextGraphMetaUri,
@@ -68,7 +68,7 @@ function extensionLocalNameFilter(predicateVariable: string, localName: string):
  * - Groups by ?event (the event URI) instead of ?ual (the graph URI)
  */
 export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string): string {
-  const eventType = params.eventType ? resolveEpcisEventType(params.eventType) : undefined;
+  const eventType = params.eventType ? resolveEpcisQueryEventType(params.eventType) : undefined;
   const eventTypeIri = eventType?.iri;
   if (params.eventType && !eventTypeIri) {
     throw new EpcisQueryInputError('eventType must be an EPCIS event name or an absolute event type IRI');
@@ -120,9 +120,10 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
     else optionalClauses.push(`OPTIONAL { ${binding} }`);
   }
 
-  // Unfiltered queries retain the default EPCIS namespace boundary.
+  // Declared captures include every accepted namespace. Only unmarked legacy
+  // RDF retains the GS1 namespace boundary.
   if (!eventTypeIri) {
-    filterClauses.push(`FILTER(STRSTARTS(STR(?eventType), "${EPCIS_TYPE_PREFIX}"))`);
+    filterClauses.push(`FILTER(BOUND(?_declaredEventType) || STRSTARTS(STR(?eventType), "${EPCIS_TYPE_PREFIX}"))`);
   }
 
   // eventID filter — matches the RDF subject (the event's @id / rootEntity)

@@ -57,6 +57,7 @@ export interface PublisherCaptureOpts extends CaptureOptions {
 }
 
 export interface AsyncPublisher {
+  /** Capture supplies visibility slots containing inspected, expanded JSON-LD. */
   publishAsync(
     contextGraphId: string,
     content: unknown,

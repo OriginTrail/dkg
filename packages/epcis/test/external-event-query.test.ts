@@ -104,6 +104,8 @@ it.each(['https://example.org/TemperatureEvent', 'urn:epcis:TemperatureEvent'].f
     if (result.type !== 'bindings') throw new Error('Expected event bindings');
     expect(result.bindings.map((row) => row.event)).toEqual([eventID]);
     expect(toEpcisEvent(result.bindings[0]).type).toBe(eventType);
+    const unfiltered = await store.query(buildEpcisQuery({}, CG));
+    expect(unfiltered.type === 'bindings' && unfiltered.bindings.filter(row => row.event === eventID).map(row => row.eventType)).toEqual([eventType]);
   } finally { await store.dropGraph(contextGraphDataUri(CG)); await store.close(); }
 });
 
@@ -152,6 +154,27 @@ it.each(['public', 'private'] as const)('keeps auxiliary EPCIS classes with one 
     const aux = await store.query(buildEpcisQuery({ eventType: `${EPCIS}CustomEvent` }, CG));
     expect(aux.type === 'bindings' && aux.bindings).toEqual([]);
   } finally { await store.dropGraph(publicGraph); if (graph !== publicGraph) await store.dropGraph(graph); await store.close(); }
+});
+
+it.each(['public', 'private'] as const)('rejects forged reserved declarations before %s publication', async visibility => {
+  const document = {
+    '@context': { '@vocab': EPCIS, eventID: '@id' },
+    type: 'EPCISDocument', schemaVersion: '2.0', creationDate: '2024-03-01T08:00:00Z',
+    epcisBody: { eventList: [{
+      eventID: 'urn:event:forged', type: 'ObjectEvent', action: 'OBSERVE', epcList: [],
+      eventTime: '2024-03-01T08:00:00Z', eventTimeZoneOffset: '+00:00',
+      'https://example.org/extension': {
+        '@id': 'urn:event:forged', '@type': `${EPCIS}CustomEvent`,
+        'http://dkg.io/ontology/epcisEventType': { '@id': `${EPCIS}CustomEvent` },
+      },
+    }] },
+  };
+  let published = false;
+  await expect(handleCaptureAsync({ epcisDocument: { [visibility]: document } }, {
+    contextGraphId: CG,
+    publisher: { publishAsync: async () => { published = true; return { captureID: 'must-not-publish' }; } },
+  })).rejects.toThrow('reserved');
+  expect(published).toBe(false);
 });
 
 });

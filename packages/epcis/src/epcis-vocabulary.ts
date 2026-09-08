@@ -12,21 +12,22 @@ export type StandardEpcisEventType = typeof EPCIS_STANDARD_EVENT_TYPES[number];
 
 export type ResolvedEpcisEventType =
   | { kind: 'standard'; iri: string; name: StandardEpcisEventType }
-  | { kind: 'gs1-extension' | 'external' | 'legacy-gs1-extension'; iri: string };
+  | { kind: 'gs1-extension' | 'external'; iri: string };
 
-/** Own canonical identity and category, including query-only legacy local names. */
+/** Resolve only valid capture discriminators to their canonical identity. */
 export function resolveEpcisEventType(value: string): ResolvedEpcisEventType | undefined {
   const name = EPCIS_STANDARD_EVENT_TYPES.find((name) => value === name || value === `${EPCIS_TYPE_PREFIX}${name}`);
   if (name) return { kind: 'standard', name, iri: `${EPCIS_TYPE_PREFIX}${name}` };
   if (isSafeIri(value)) return {
     kind: value.startsWith(EPCIS_TYPE_PREFIX) ? 'gs1-extension' : 'external', iri: value,
   };
-  // Historical responses compacted every GS1 class. Accept their query aliases,
-  // while keeping them distinct from valid capture discriminators.
-  if (/^[A-Za-z][A-Za-z0-9._-]*$/.test(value)) {
-    return { kind: 'legacy-gs1-extension', iri: `${EPCIS_TYPE_PREFIX}${value}` };
-  }
   return undefined;
+}
+
+/** Historical responses compacted GS1 extensions; accept those aliases only in queries. */
+export function resolveEpcisQueryEventType(value: string): ResolvedEpcisEventType | undefined {
+  return resolveEpcisEventType(value) ?? (/^[A-Za-z][A-Za-z0-9._-]*$/.test(value)
+    ? { kind: 'gs1-extension', iri: `${EPCIS_TYPE_PREFIX}${value}` } : undefined);
 }
 
 /** Recognize only standard schema discriminators, in compact or canonical form. */

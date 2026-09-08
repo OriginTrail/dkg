@@ -1,6 +1,6 @@
 import { compactEpcisEventType } from './epcis-vocabulary.js';
 import { createValidator } from './validation.js';
-import { normalizeCaptureEventTypes } from './capture-event-types.js';
+import { prepareCaptureContentRdf } from './capture-rdf.js';
 import { buildEpcisQuery, EpcisQueryInputError } from './query-builder.js';
 import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js';
 import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
@@ -273,11 +273,12 @@ interface ResolvedCaptureContent {
   content: CaptureContent;
 }
 
-function normalizeCaptureContent(content: CaptureContent): CaptureContent {
-  return {
-    ...('public' in content ? { public: normalizeCaptureEventTypes(content.public) } : {}),
-    ...('private' in content ? { private: normalizeCaptureEventTypes(content.private) } : {}),
-  };
+async function normalizeCaptureContent(content: CaptureContent): Promise<CaptureContent> {
+  try {
+    return await prepareCaptureContentRdf(content);
+  } catch (error) {
+    throw new EpcisValidationError([error instanceof Error ? error.message : String(error)]);
+  }
 }
 
 export async function handleCaptureAsync(
@@ -301,7 +302,7 @@ export async function handleCaptureAsync(
       }
     : undefined;
 
-  const result = await config.publisher.publishAsync(effectiveContextGraphId, normalizeCaptureContent(content), opts);
+  const result = await config.publisher.publishAsync(effectiveContextGraphId, await normalizeCaptureContent(content), opts);
 
   return {
     captureID: result.captureID,

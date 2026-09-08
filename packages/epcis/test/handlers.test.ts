@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import { compactEpcisEventType } from '../src/epcis-vocabulary.js';
 import { describe, it, expect } from 'vitest';
 import { handleCaptureAsync, EpcisValidationError } from '../src/handlers.js';
@@ -5,8 +6,9 @@ import { normalizeCaptureEventTypes } from '../src/capture-event-types.js';
 import type { AsyncPublisher } from '../src/types.js';
 import { VALID_OBJECT_EVENT_DOC, INVALID_DOC, EMPTY_EVENT_LIST_DOC } from './fixtures/bicycle-story.js';
 
+const jsonld = createRequire(import.meta.url)('jsonld') as { expand(document: unknown): Promise<unknown[]> };
 const CONTEXT_GRAPH_ID = 'test-cg';
-const NORMALIZED_OBJECT_EVENT_DOC = {
+const NORMALIZED_OBJECT_EVENT_DOC = await jsonld.expand({
   ...VALID_OBJECT_EVENT_DOC,
   epcisBody: {
     eventList: VALID_OBJECT_EVENT_DOC.epcisBody!.eventList.map((event) => ({
@@ -14,7 +16,7 @@ const NORMALIZED_OBJECT_EVENT_DOC = {
       'http://dkg.io/ontology/epcisEventType': { '@id': 'https://gs1.github.io/EPCIS/ObjectEvent' },
     })),
   },
-};
+});
 
 function trackingAsyncPublisher(): AsyncPublisher & { calls: Array<{ contextGraphId: string; doc: any; options?: any }> } {
   const calls: Array<{ contextGraphId: string; doc: any; options?: any }> = [];
@@ -60,7 +62,8 @@ describe('handleCaptureAsync', () => {
     const before = structuredClone(document);
     const publisher = trackingAsyncPublisher();
     await handleCaptureAsync({ epcisDocument: document }, { contextGraphId: CONTEXT_GRAPH_ID, publisher });
-    expect(publisher.calls[0].doc.private.epcisBody.eventList[0]).toMatchObject({ type, '@type': [`https://gs1.github.io/EPCIS/${name}`] });
+    expect(JSON.stringify(publisher.calls[0].doc.private)).toContain(`https://gs1.github.io/EPCIS/${name}`);
+    expect(JSON.stringify(publisher.calls[0].doc.private)).toContain('http://dkg.io/ontology/epcisEventType');
     expect(document).toEqual(before);
     const invalidPublisher = trackingAsyncPublisher();
     await expect(handleCaptureAsync({ epcisDocument: { ...document, epcisBody: { eventList: [{ ...event, ...invalid }] } } }, {
@@ -101,10 +104,10 @@ describe('handleCaptureAsync', () => {
     document.epcisBody!.eventList[0]!.type = 'https://example.org/Observation';
     const publisher = trackingAsyncPublisher();
     await handleCaptureAsync({ epcisDocument: document }, { contextGraphId: CONTEXT_GRAPH_ID, publisher });
-    expect(publisher.calls[0]!.doc).toEqual({ private: { ...document, epcisBody: { eventList: [{
+    expect(publisher.calls[0]!.doc).toEqual({ private: await jsonld.expand({ ...document, epcisBody: { eventList: [{
       ...document.epcisBody!.eventList[0], '@type': ['https://example.org/Observation'],
       'http://dkg.io/ontology/epcisEventType': { '@id': 'https://example.org/Observation' },
-    }] } } });
+    }] } }) });
 
   });
 
@@ -116,7 +119,7 @@ describe('handleCaptureAsync', () => {
     const publisher = trackingAsyncPublisher();
     await handleCaptureAsync({ epcisDocument: { public: VALID_OBJECT_EVENT_DOC, private: privateFragment } },
       { contextGraphId: CONTEXT_GRAPH_ID, publisher });
-    expect(publisher.calls[0]!.doc).toEqual({ public: NORMALIZED_OBJECT_EVENT_DOC, private: privateFragment });
+    expect(publisher.calls[0]!.doc).toEqual({ public: NORMALIZED_OBJECT_EVENT_DOC, private: await jsonld.expand(privateFragment) });
   });
 
   it('returns validation errors for an invalid document', async () => {
@@ -175,7 +178,7 @@ describe('handleCaptureAsync', () => {
   it('passes through public and private envelope content', async () => {
     const publisher = trackingAsyncPublisher();
     const privateDoc = {
-      '@context': 'https://ref.gs1.org/standards/epcis/epcis-context.jsonld',
+      '@context': VALID_OBJECT_EVENT_DOC['@context'],
       type: 'EPCISDocument',
       schemaVersion: '2.0',
       creationDate: '2024-01-01T00:00:00Z',
@@ -195,7 +198,7 @@ describe('handleCaptureAsync', () => {
     expect(result.eventCount).toBe(1);
     expect(publisher.calls[0]?.doc).toEqual({
       public: NORMALIZED_OBJECT_EVENT_DOC,
-      private: privateDoc,
+      private: await jsonld.expand(privateDoc),
     });
   });
 
