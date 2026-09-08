@@ -105,4 +105,20 @@ describe('managed abandoned read recovery', () => {
       expect(recover).not.toHaveBeenCalled();
     } finally { await store.close(); }
   });
+
+  it('starts a clean retained-deadline generation after reusable close', async () => {
+    const { store, recover, abandon } = harness();
+    try {
+      await abandon();
+      await store.close();
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(recover).not.toHaveBeenCalled();
+
+      await abandon();
+      await vi.advanceTimersByTimeAsync(899);
+      expect(recover).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(recover).toHaveBeenCalledExactlyOnceWith('query');
+    } finally { await store.close(); }
+  });
 });

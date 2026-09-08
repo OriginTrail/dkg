@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { AutoUpdateConfig } from '../src/config.js';
-import { _autoUpdateIo } from '../src/daemon.js';
+import { _autoUpdateDependencies, _autoUpdateIo } from '../src/daemon.js';
 
 const MARKITDOWN_TARGETS_JSON = JSON.stringify([
   { platform: 'linux', arch: 'x64', assetName: 'markitdown-linux-x64', runner: 'ubuntu-latest' },
@@ -52,6 +52,7 @@ function mockReadFileSyncValue(path: unknown): string {
 
 // Save original _autoUpdateIo values for restoration
 const origIo = { ..._autoUpdateIo };
+const origDependencies = { ..._autoUpdateDependencies };
 
 // Tracking arrays
 let readFileCalls: [any, ...any[]][] = [];
@@ -134,7 +135,7 @@ function resetMocks() {
 }
 
 function installMocks() {
-  _autoUpdateIo.cleanStaleWorkspacePackages = async () => {};
+  _autoUpdateDependencies.cleanStaleWorkspacePackages = async () => {};
   _autoUpdateIo.readFile = (async (path: any, ...rest: any[]) => {
     readFileCalls.push([path, ...rest]);
     return readFileImpl(path, ...rest);
@@ -193,6 +194,7 @@ function installMocks() {
 
 function restoreIo() {
   Object.assign(_autoUpdateIo, origIo);
+  Object.assign(_autoUpdateDependencies, origDependencies);
 }
 
 import {
@@ -2230,7 +2232,7 @@ describe('autoupdater hardening', () => {
     readFileImpl = async () => 'aaa111';
     makeFetchOk('bbb222');
     const events: string[] = [];
-    _autoUpdateIo.cleanStaleWorkspacePackages = async (slot) => {
+    _autoUpdateDependencies.cleanStaleWorkspacePackages = async (slot) => {
       expect(slot).toMatch(/\/releases\/b$/);
       events.push('clean');
     };
@@ -2245,7 +2247,9 @@ describe('autoupdater hardening', () => {
   it('does not install or activate when stale workspace cleanup fails', async () => {
     readFileImpl = async () => 'aaa111';
     makeFetchOk('bbb222');
-    _autoUpdateIo.cleanStaleWorkspacePackages = async () => { throw new Error('quarantine failed'); };
+    _autoUpdateDependencies.cleanStaleWorkspacePackages = async () => {
+      throw new Error('quarantine failed');
+    };
     expect(await performUpdate(AU, () => {})).toBe(false);
     expect(execCalls.some(({ cmd }) => cmd.includes('pnpm install'))).toBe(false);
     expect(swapSlotCalls).toEqual([]);

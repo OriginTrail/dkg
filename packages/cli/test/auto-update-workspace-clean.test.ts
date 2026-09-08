@@ -83,4 +83,26 @@ describe('inactive git slot workspace cleanup', () => {
     expect(await readFile(join(installed, 'package.json'), 'utf8')).toContain('10.0.5');
     expect(await readdir(outside)).toEqual([]);
   });
+
+  it.each([
+    '../packages',
+    '@origintrail-official/../escape',
+    '@origintrail-official/',
+    'Bad Package',
+  ])('rejects unsafe workspace package name %j before moving files', async (name) => {
+    const { slot, source, installed } = await fixture();
+    const outside = await mkdtemp(join(tmpdir(), 'dkg-workspace-sentinel-'));
+    temps.push(outside);
+    await writeFile(join(outside, 'keep'), 'untouched');
+    await writeFile(join(source, 'package.json'), JSON.stringify({ name }));
+
+    await expect(cleanStaleWorkspacePackages(slot, () => {}))
+      .rejects.toThrow('Invalid workspace package name');
+
+    expect(await readFile(join(installed, 'package.json'), 'utf8')).toContain('10.0.5');
+    expect(await readdir(join(slot, 'packages'))).toContain('publisher');
+    expect(await readFile(join(outside, 'keep'), 'utf8')).toBe('untouched');
+    await expect(readdir(join(slot, '.dkg-stale-workspace-dependencies')))
+      .rejects.toMatchObject({ code: 'ENOENT' });
+  });
 });

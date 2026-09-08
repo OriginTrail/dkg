@@ -17,7 +17,6 @@ export interface OxigraphParentWatchdogOptions {
   args: readonly string[];
   pollIntervalMs?: number;
   stopGraceMs?: number;
-  platform?: NodeJS.Platform;
   spawnChild?: typeof spawn;
   isProcessAlive?: (pid: number) => boolean;
   readOomSnapshot?: (pid: number) => CgroupOomSnapshot | null;
@@ -35,6 +34,37 @@ export interface OxigraphParentWatchdogHandle {
   child: ChildProcess;
   result: Promise<OxigraphParentWatchdogResult>;
   stop(signal?: NodeJS.Signals): void;
+}
+
+export interface OxigraphWatchdogLaunchPlan {
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly protectedByParentDeathSignal: boolean;
+}
+
+/** Pure host-policy seam; runtime callers cannot select a different platform. */
+export function buildOxigraphWatchdogLaunchPlan(
+  platform: NodeJS.Platform,
+  watchdogPid: number,
+  command: string,
+  args: readonly string[],
+): OxigraphWatchdogLaunchPlan {
+  if (platform !== 'linux') {
+    return Object.freeze({
+      command,
+      args: Object.freeze([...args]),
+      protectedByParentDeathSignal: false,
+    });
+  }
+  return Object.freeze({
+    command: 'setpriv',
+    args: Object.freeze([
+      '--pdeathsig', 'SIGKILL', '--', '/bin/sh', '-c',
+      '[ "$PPID" = "$1" ] || exit 125; shift; exec "$@"',
+      'dkg-oxigraph-child', String(watchdogPid), command, ...args,
+    ]),
+    protectedByParentDeathSignal: true,
+  });
 }
 
 function processIsAlive(pid: number): boolean {
@@ -75,14 +105,13 @@ export function startOxigraphParentWatchdog(
   // All variable values are positional arguments, never shell source.
   // Fail closed if util-linux setpriv is unavailable; do not launch an
   // unprotected store in a sibling systemd scope.
-  const linux = (opts.platform ?? process.platform) === 'linux';
-  const child = linux
-    ? spawnChild('setpriv', [
-        '--pdeathsig', 'SIGKILL', '--', '/bin/sh', '-c',
-        '[ "$PPID" = "$1" ] || exit 125; shift; exec "$@"',
-        'dkg-oxigraph-child', String(process.pid), opts.command, ...opts.args,
-      ], { stdio: 'inherit' })
-    : spawnChild(opts.command, [...opts.args], { stdio: 'inherit' });
+  const launch = buildOxigraphWatchdogLaunchPlan(
+    process.platform,
+    process.pid,
+    opts.command,
+    opts.args,
+  );
+  const child = spawnChild(launch.command, [...launch.args], { stdio: 'inherit' });
   // The watchdog already runs inside the transient scope, so it can retain a
   // valid baseline and re-read memory.events while the scope still contains
   // this process. The parent supervisor cannot reliably do that after exit:
@@ -120,7 +149,12 @@ export function startOxigraphParentWatchdog(
     };
     child.once('error', (error) => {
       cleanup();
-      reject(new Error(`Could not start protected Oxigraph child${linux ? ' (requires util-linux setpriv)' : ''}: ${error.message}`, { cause: error }));
+      reject(new Error(
+        `Could not start protected Oxigraph child${launch.protectedByParentDeathSignal
+          ? ' (requires util-linux setpriv)'
+          : ''}: ${error.message}`,
+        { cause: error },
+      ));
     });
     child.once('exit', (code, signal) => {
       cleanup();

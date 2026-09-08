@@ -37,7 +37,7 @@
  * probe. Defaults to on so production benefits; tests opt out.
  */
 
-import { connect, type Socket } from 'node:net';
+import { request, type ClientRequest } from 'node:http';
 import { SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS } from './shutdown.js';
 
 /** Default total HTTP liveness deadline — 5s. */
@@ -60,7 +60,9 @@ export function resolveLivenessShutdownGraceMs(hardTimeoutMs: number): number {
 
 /**
  * One-shot probe: require an HTTP status line from `host:port`; a TCP
- * connection alone is insufficient. Returns false on any error or timeout.
+ * connection alone is insufficient. Node owns HTTP framing and status
+ * parsing; this policy accepts any parsed response. Returns false on any
+ * error or timeout.
  *
  * The socket is force-destroyed on every outcome (success or failure) to
  * avoid leaking file descriptors when the supervisor probes the worker
@@ -74,43 +76,38 @@ export async function probeWorkerAlive(
   return new Promise<boolean>((resolve) => {
     let settled = false;
     let deadline: ReturnType<typeof setTimeout> | undefined;
-    const settle = (alive: boolean, socket: Socket | null) => {
+    let probe: ClientRequest | null = null;
+    const settle = (alive: boolean) => {
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
       try {
-        socket?.destroy();
+        probe?.destroy();
       } catch {
-        /* socket may already be destroyed; ignore */
+        /* request may already be destroyed; ignore */
       }
       resolve(alive);
     };
-    let socket: Socket;
     try {
-      socket = connect({ port, host });
-    } catch (err) {
-      // Synchronous throw from `connect` is unusual (it's normally async)
-      // but possible on invalid port. Treat as not-alive.
-      void err;
-      resolve(false);
+      probe = request({
+        host,
+        port,
+        method: 'HEAD',
+        path: '/api/__dkg_liveness_probe__',
+        agent: false,
+      }, (response) => {
+        response.resume();
+        settle(response.statusCode !== undefined);
+      });
+    } catch {
+      settle(false);
       return;
     }
-    deadline = setTimeout(() => settle(false, socket), timeoutMs);
+    deadline = setTimeout(() => settle(false), timeoutMs);
     deadline.unref?.();
-    socket.once('connect', () => {
-      socket.write('HEAD /api/__dkg_liveness_probe__ HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n');
-    });
-    let statusLine = '';
-    socket.on('data', (chunk: Buffer) => {
-      if (settled) return;
-      statusLine += chunk.toString('latin1', 0, Math.min(chunk.length, 4096 - statusLine.length));
-      const end = statusLine.indexOf('\r\n');
-      if (end >= 0) settle(/^HTTP\/1\.[01] [1-5]\d{2}(?: |$)/.test(statusLine.slice(0, end)), socket);
-      else if (statusLine.length >= 4096) settle(false, socket);
-    });
-    socket.once('end', () => settle(false, socket));
-    socket.once('close', () => settle(false, socket));
-    socket.once('error', () => settle(false, socket));
+    probe.once('error', () => settle(false));
+    probe.once('close', () => settle(false));
+    probe.end();
   });
 }
 

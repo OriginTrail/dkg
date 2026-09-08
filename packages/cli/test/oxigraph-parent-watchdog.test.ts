@@ -1,14 +1,45 @@
 import { describe, expect, it, vi } from 'vitest';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { connect } from 'node:net';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { delimiter, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
+  buildOxigraphWatchdogLaunchPlan,
   conventionalSignalExitCode,
   parseOxigraphParentWatchdogArgs,
   startOxigraphParentWatchdog,
 } from '../src/daemon/oxigraph-parent-watchdog.js';
 
 describe('Oxigraph parent watchdog', () => {
+  it('derives protected Linux and direct non-Linux launch plans internally', () => {
+    expect(buildOxigraphWatchdogLaunchPlan(
+      'linux',
+      42,
+      '/opt/oxigraph',
+      ['serve', '--location', '/data'],
+    )).toEqual({
+      command: 'setpriv',
+      args: [
+        '--pdeathsig', 'SIGKILL', '--', '/bin/sh', '-c',
+        '[ "$PPID" = "$1" ] || exit 125; shift; exec "$@"',
+        'dkg-oxigraph-child', '42', '/opt/oxigraph', 'serve', '--location', '/data',
+      ],
+      protectedByParentDeathSignal: true,
+    });
+    expect(buildOxigraphWatchdogLaunchPlan(
+      'darwin',
+      42,
+      '/opt/oxigraph',
+      ['serve'],
+    )).toEqual({
+      command: '/opt/oxigraph',
+      args: ['serve'],
+      protectedByParentDeathSignal: false,
+    });
+  });
+
   it.each(['parent-loss', 'shutdown'] as const)('kills a TERM-resistant child after %s grace expires', async (mode) => {
     let parentAlive = true;
     const handle = startOxigraphParentWatchdog({
@@ -40,7 +71,11 @@ describe('Oxigraph parent watchdog', () => {
         parentPid: process.pid,
         command: '/no-such-dkg-watchdog-test-command',
         args: [],
-        platform: 'darwin',
+        spawnChild: ((_command, _args, options) => spawn(
+          '/no-such-dkg-watchdog-test-command',
+          [],
+          options,
+        )) as typeof spawn,
       });
       await expect(handle.result).rejects.toThrow('Could not start protected Oxigraph child');
       expect(vi.getTimerCount()).toBe(0);
@@ -80,6 +115,51 @@ describe('Oxigraph parent watchdog', () => {
     } finally {
       watchdog.kill('SIGKILL');
       if (databasePid) { try { process.kill(databasePid, 'SIGKILL'); } catch {} }
+    }
+  });
+
+  it('refuses to launch the database when the watchdog dies before pdeathsig setup on Linux', async () => {
+    // This assertion runs the real process chain on Linux CI. Other hosts
+    // exercise the pure launch policy above because setpriv/pdeathsig do not
+    // exist there.
+    if (process.platform !== 'linux') return;
+    const setpriv = spawnSync('which', ['setpriv'], { encoding: 'utf8' }).stdout.trim();
+    expect(setpriv).not.toBe('');
+    const root = await mkdtemp(join(tmpdir(), 'dkg-watchdog-launch-race-'));
+    const bin = join(root, 'bin');
+    const entered = join(root, 'setpriv-entered');
+    const marker = join(root, 'database-started');
+    await mkdir(bin);
+    await writeFile(join(bin, 'setpriv'), [
+      '#!/bin/sh',
+      `: > '${entered}'`,
+      'sleep 0.25',
+      `exec '${setpriv}' "$@"`,
+      '',
+    ].join('\n'), { mode: 0o755 });
+
+    const watchdog = spawn(process.execPath, [
+      '--import', 'tsx',
+      new URL('../src/daemon/oxigraph-parent-watchdog.ts', import.meta.url).pathname,
+      String(process.pid), process.execPath, '-e',
+      `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'started')`,
+    ], {
+      stdio: ['ignore', 'ignore', 'inherit'],
+      env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH ?? ''}` },
+    });
+    try {
+      await vi.waitFor(async () => {
+        await expect(access(entered)).resolves.toBeUndefined();
+      });
+      const exited = once(watchdog, 'exit');
+      watchdog.kill('SIGKILL');
+      await exited;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(readFile(entered, 'utf8')).resolves.toBe('');
+    } finally {
+      watchdog.kill('SIGKILL');
+      await rm(root, { recursive: true, force: true });
     }
   });
 
