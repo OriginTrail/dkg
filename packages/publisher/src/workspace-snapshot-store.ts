@@ -285,8 +285,8 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
 
   async getSnapshot(ref: string): Promise<Quad[] | null> {
     const hash = snapshotHash(ref);
-    return this.withActiveSnapshot(hash, () => withSnapshotSource(this.directory, hash, async source =>
-      source === null ? null : this.readSnapshot(source, ref)));
+    return this.withActiveSnapshotSource(hash, async source =>
+      source === null ? null : this.readSnapshot(source, ref));
   }
 
   /** Lease-free primitive over the source already opened by the owning operation. */
@@ -302,8 +302,7 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     let hash: string;
     try { hash = snapshotHash(ref); } catch { return false; }
     try {
-      // The lease protects source selection, validation and descriptor retirement.
-      return await this.withActiveSnapshot(hash, () => withSnapshotSource(this.directory, hash, async source => {
+      return await this.withActiveSnapshotSource(hash, async source => {
         if (source === null) { this.validationCache.delete(hash); return false; }
         const cached = this.validationCache.get(hash);
         if (cached && sameSnapshotSource(cached.source, source.reference)) {
@@ -316,7 +315,7 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
         await source.assertCurrent();
         this.validationCache.set(hash, { source: source.reference, digest: expectedDigest, count: expectedCount });
         return true;
-      }));
+      });
     } catch {
       this.validationCache.delete(hash);
       // Missing/unreadable/corrupt or changed sources remain recovery candidates.
@@ -334,7 +333,7 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     const safeLimit = Math.max(0, Math.floor(limit));
     if (safeLimit === 0) return [];
     const hash = snapshotHash(ref);
-    return this.withActiveSnapshot(hash, () => withSnapshotSource(this.directory, hash, async source => {
+    return this.withActiveSnapshotSource(hash, async source => {
       if (source === null) return null;
       if (source.reference.format === 'json') {
         const legacy = await this.readSnapshot(source, ref);
@@ -366,7 +365,7 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
         }
         return page;
       });
-    }));
+    });
   }
 
   stopGarbageCollection(): void {
@@ -523,6 +522,14 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     ) {
       this.logGarbageCollection(result);
     }
+  }
+
+  /** Keep the GC lease from source selection through descriptor retirement. */
+  private withActiveSnapshotSource<T>(
+    hash: string,
+    operation: (source: OpenedSnapshotSource | null) => Promise<T>,
+  ): Promise<T> {
+    return this.withActiveSnapshot(hash, () => withSnapshotSource(this.directory, hash, operation));
   }
 
   private async withActiveSnapshot<T>(hash: string, operation: () => Promise<T>): Promise<T> {
