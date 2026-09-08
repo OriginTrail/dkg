@@ -91,8 +91,10 @@ interface RegisterSyncHandlerParams {
   protocolSync: string;
   syncDeniedResponse: string;
   syncPageSize: number;
-  /** Read for each workspace request; the agent binds its live resolved setting. */
-  sharedMemoryTtlMs: number;
+  /** Explicit live provider, read for each workspace request. */
+  getSharedMemoryTtlMs?: () => number;
+  /** @deprecated Static test/compatibility setting; prefer getSharedMemoryTtlMs. */
+  sharedMemoryTtlMs?: number;
   store: TripleStore;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   peerId: string;
@@ -650,7 +652,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         );
       }
       if (isWorkspace) {
-        const sharedMemoryTtlMs = params.sharedMemoryTtlMs;
+        const sharedMemoryTtlMs = params.getSharedMemoryTtlMs?.() ?? params.sharedMemoryTtlMs ?? 0;
         const cutoff = sharedMemoryTtlMs > 0 ? new Date(Date.now() - sharedMemoryTtlMs).toISOString() : null;
         if (phase === 'snapshot') {
           const snapshotRef = request.snapshotRef?.trim();

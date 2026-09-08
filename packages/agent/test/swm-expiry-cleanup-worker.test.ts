@@ -203,6 +203,29 @@ it('joins a periodic pass then completes the manual cutoff without detached work
   await worker.stop();
 });
 
+it('runs a fresh manual sweep when TTL shortens during an active manual drain', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
+  const blocked = deferred<SwmExpiryCleanupResult>();
+  const pass = vi.fn<ConstructorParameters<typeof SwmExpiryCleanupWorker>[0]>()
+    .mockReturnValueOnce(blocked.promise)
+    .mockResolvedValue({ triplesDeleted: 7 });
+  const worker = new SwmExpiryCleanupWorker(pass, { sharedMemoryTtlMs: 48 * 60 * 60 * 1000 });
+  const first = worker.runNow();
+  await Promise.resolve();
+  worker.setTtl(60 * 60 * 1000);
+  const newerCutoff = Date.now() - 60 * 60 * 1000;
+  const second = worker.runNow();
+  expect(second).toBe(first);
+
+  blocked.resolve({ triplesDeleted: 3 });
+
+  expect(await second).toBe(10);
+  expect(pass).toHaveBeenCalledTimes(2);
+  expect(pass.mock.calls[1]![3]).toBe(newerCutoff);
+  await worker.stop();
+});
+
 it('starts a fresh sweep when a manual request upgrades a queued periodic continuation', async () => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
   const pass = vi.fn<ConstructorParameters<typeof SwmExpiryCleanupWorker>[0]>()

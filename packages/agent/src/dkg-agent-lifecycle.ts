@@ -3324,14 +3324,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       });
       this.log.info(ctx, `[sync] pooled wire variant ${PROTOCOL_SYNC_POOLED} enabled`);
     }
-    const swmSettings = this.config;
     registerSyncHandler({
       register: (protocol, handler) =>
         this.router.register(protocol, (data, peerIdObj, options) => handler(data, peerIdObj.toString(), options)),
       protocolSync: PROTOCOL_SYNC,
       syncDeniedResponse: SYNC_DENIED_RESPONSE,
       syncPageSize: SYNC_PAGE_SIZE,
-      get sharedMemoryTtlMs() { return swmSettings.sharedMemoryTtlMs; },
+      getSharedMemoryTtlMs: () => this.config.sharedMemoryTtlMs,
       store: this.store,
       publicSnapshotStore: this.publicSnapshotStore,
       peerId: this.peerId,

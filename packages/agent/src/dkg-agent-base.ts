@@ -1829,9 +1829,13 @@ export class DKGAgentBase {
     this.workspaceOwnedEntities = workspaceOwnedEntities;
     this.swmExpiryCleanupWorker = new SwmExpiryCleanupWorker(
       (ttlMs, isClosed, continuation, cutoffMs) => runSwmExpiryCleanup({
-        store: this.store, workspaceOwnedEntities: this.workspaceOwnedEntities, log: this.log, isClosed,
+        store: this.store, workspaceOwnedEntities: this.workspaceOwnedEntities,
+        writeLocks, log: this.log, isClosed,
       }, ttlMs, continuation, cutoffMs),
-      config,
+      {
+        getSharedMemoryTtlMs: () => this.config.sharedMemoryTtlMs,
+        setSharedMemoryTtlMs: (ttlMs) => { this.config.sharedMemoryTtlMs = ttlMs; },
+      },
       SWM_CLEANUP_INTERVAL_MS,
     );
     this.writeLocks = writeLocks;

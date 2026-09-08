@@ -4,6 +4,7 @@ import type { Logger } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import { runSwmExpiryCleanup } from '../src/swm-expiry-cleanup.js';
+import { withKeyedLocks } from '@origintrail-official/dkg-publisher';
 import type { SwmExpiryCleanupWorker } from '../src/swm-expiry-cleanup-worker.js';
 import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
 import { captureSyncHandler, workspaceOpQuads } from './_helpers/sync-responder.js';
@@ -21,6 +22,7 @@ interface Internals {
   store: TripleStore;
   log: Logger;
   workspaceOwnedEntities: Map<string, Map<string, string>>;
+  writeLocks: Map<string, Promise<void>>;
 }
 const agents: DKGAgent[] = [];
 afterEach(async () => {
@@ -92,6 +94,9 @@ async function fixture(count: number, noProgress = false, dataDeleted = 0) {
   });
   vi.spyOn(store, 'hasGraph').mockResolvedValue(true);
   vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+    if (options?.source === 'agent.swmCleanup.revalidateOperation') {
+      return { type: 'bindings', bindings: [...operations].map(op => ({ op, re: 'urn:expiry:root' })) };
+    }
     if (options?.source === 'agent.swmCleanup.expiredOperations') {
       stats.selections++;
       if (stats.selections > count + 4) throw new Error('fixture detected an unbounded no-progress loop');
@@ -235,7 +240,7 @@ it('bounds periodic ticks under continuous expired arrivals', async () => {
     if (options?.source !== 'agent.swmCleanup.expiredOperations') return query(sparql, options);
     f.stats.selections++;
     if (f.stats.selections > 8) throw new Error('fixture stopped an endless arrival stream');
-    return { type: 'bindings', bindings: [...f.operations].map(op => ({ op })) };
+    return { type: 'bindings', bindings: [...f.operations].map(op => ({ op, re: 'urn:expiry:root' })) };
   });
   vi.mocked(f.store.deleteByPattern).mockImplementation(async pattern => {
     const wasOperation = pattern.graph === META && pattern.subject && f.operations.has(pattern.subject);
@@ -286,6 +291,63 @@ it('refreshes family graphs for an expired operation arriving between live batch
   expect(await query(`SELECT ?p WHERE { GRAPH <${META}> { <urn:expiry:late> ?p ?o } }`)).toMatchObject({ bindings: [] });
 });
 
+it('revalidates a hydrated batch after a concurrent replacement releases its write lock', async () => {
+  const agent = await DKGAgent.create({ name: 'expiry-revalidation', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 60_000 });
+  agents.push(agent);
+  const { store, writeLocks } = agent as unknown as Internals;
+  const rdfType = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+  const dkg = 'http://dkg.io/ontology/';
+  const expiredAt = '"2020-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>';
+  const rootA = 'urn:expiry:blocked:a';
+  const rootB = 'urn:expiry:blocked:b';
+  const opA = 'urn:expiry:blocked:op:a';
+  const opB = 'urn:expiry:blocked:op:b';
+  const freshOp = 'urn:expiry:fresh:op:b';
+  await store.insert(
+    [opA, opB].flatMap((op, index) => [
+      { subject: op, predicate: rdfType, object: `${dkg}WorkspaceOperation`, graph: META },
+      { subject: op, predicate: `${dkg}publishedAt`, object: expiredAt, graph: META },
+      { subject: op, predicate: `${dkg}rootEntity`, object: index === 0 ? rootA : rootB, graph: META },
+      { subject: index === 0 ? rootA : rootB, predicate: 'urn:value', object: '"expired"', graph: WS },
+    ]),
+  );
+  let releaseWriter!: () => void;
+  const writerGate = new Promise<void>(resolve => { releaseWriter = resolve; });
+  let writerHeld!: () => void;
+  const writerHasLock = new Promise<void>(resolve => { writerHeld = resolve; });
+  const replacement = withKeyedLocks(writeLocks, [`${CG}\0${rootB}`], async () => {
+    writerHeld();
+    await writerGate;
+    await store.deleteByPattern({ graph: META, subject: opB });
+    await store.deleteByPattern({ graph: WS, subject: rootB });
+    await store.insert([
+      { subject: freshOp, predicate: rdfType, object: `${dkg}WorkspaceOperation`, graph: META },
+      { subject: freshOp, predicate: `${dkg}publishedAt`, object: `"${new Date().toISOString()}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`, graph: META },
+      { subject: freshOp, predicate: `${dkg}rootEntity`, object: rootB, graph: META },
+      { subject: rootB, predicate: 'urn:value', object: '"fresh"', graph: WS },
+    ]);
+  });
+  await writerHasLock;
+  let selected!: () => void;
+  const batchSelected = new Promise<void>(resolve => { selected = resolve; });
+  const query = store.query.bind(store);
+  vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+    const result = await query(sparql, options);
+    if (options?.source === 'agent.swmCleanup.expiredOperations' && result.type === 'bindings' && result.bindings.length > 0) selected();
+    return result;
+  });
+
+  const cleanup = agent.cleanupExpiredSharedMemory();
+  await batchSelected;
+  releaseWriter();
+  await Promise.all([replacement, cleanup]);
+
+  expect(await query(`SELECT ?o WHERE { GRAPH <${WS}> { <${rootB}> <urn:value> ?o } }`))
+    .toMatchObject({ bindings: [{ o: '"fresh"' }] });
+  expect(await query(`SELECT ?p WHERE { GRAPH <${META}> { <${freshOp}> ?p ?o } }`))
+    .toMatchObject({ type: 'bindings' });
+});
+
 it('rotates graph priority so a continuously busy graph cannot starve another CG', async () => {
   const f = await fixture(1);
   const otherMeta = 'did:dkg:context-graph:other-expiry/_shared_memory_meta';
@@ -294,6 +356,7 @@ it('rotates graph priority so a continuously busy graph cannot starve another CG
   vi.mocked(f.store.listGraphsByPrefix!).mockImplementation(async prefix =>
     [META, otherMeta].filter(graph => graph.startsWith(prefix)));
   vi.mocked(f.store.query).mockImplementation(async (sparql, options) => {
+    if (options?.source === 'agent.swmCleanup.revalidateOperation') return { type: 'bindings', bindings: [{ op: 'urn:busy' }] };
     if (options?.source !== 'agent.swmCleanup.expiredOperations') return { type: 'bindings', bindings: [] };
     const graph = sparql.includes(`<${otherMeta}>`) ? otherMeta : META;
     selected.push(graph);
@@ -323,6 +386,7 @@ it('discovers a newly added graph while an older graph continuously fills its pa
   vi.mocked(f.store.listGraphsByPrefix!).mockImplementation(async prefix =>
     (added ? [META, otherMeta] : [META]).filter(graph => graph.startsWith(prefix)));
   vi.mocked(f.store.query).mockImplementation(async (sparql, options) => {
+    if (options?.source === 'agent.swmCleanup.revalidateOperation') return { type: 'bindings', bindings: [{ op: 'urn:busy' }] };
     if (options?.source !== 'agent.swmCleanup.expiredOperations') return { type: 'bindings', bindings: [] };
     return { type: 'bindings', bindings: !sparql.includes(`<${otherMeta}>`) || pending ? [{ op: 'urn:busy' }] : [] };
   });
@@ -349,6 +413,10 @@ it.each([
   const selected: string[] = [];
   vi.mocked(f.store.listGraphsByPrefix!).mockImplementation(async prefix => graphs.filter(graph => graph.startsWith(prefix)));
   vi.mocked(f.store.query).mockImplementation(async (sparql, options) => {
+    if (options?.source === 'agent.swmCleanup.revalidateOperation') {
+      const graph = graphs.find(value => sparql.includes(`<${value}>`));
+      return { type: 'bindings', bindings: graph ? [{ op: `urn:stalled:${graphs.indexOf(graph)}` }] : [] };
+    }
     if (options?.source !== 'agent.swmCleanup.expiredOperations') return { type: 'bindings', bindings: [] };
     const graph = graphs.find(value => sparql.includes(`<${value}>`));
     if (!graph) throw new Error('Unknown cleanup target');
@@ -381,7 +449,7 @@ it('hydrates operation metadata with query count proportional to pages', async (
   await f.agent.cleanupExpiredSharedMemory();
   const metadataReads = vi.mocked(f.store.query).mock.calls.filter(([, options]) => options?.source?.startsWith('agent.swmCleanup.'));
   expect(f.operations.size).toBe(0);
-  expect(metadataReads.length).toBeLessThanOrEqual(4);
+  expect(metadataReads.length).toBeLessThanOrEqual(8);
 });
 
 
@@ -470,7 +538,8 @@ it('logs cutoff conversion failures and resolves through the cleanup error contr
   const f = await fixture(1);
   const internals = f.agent as unknown as Internals;
   await expect(runSwmExpiryCleanup({
-    store: f.store, log: internals.log, workspaceOwnedEntities: internals.workspaceOwnedEntities, isClosed: () => false,
+    store: f.store, log: internals.log, workspaceOwnedEntities: internals.workspaceOwnedEntities,
+    writeLocks: new Map(), isClosed: () => false,
   }, 1e20)).resolves.toMatchObject({ triplesDeleted: 0 });
   expect(f.warning).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('Invalid time value'));
 });

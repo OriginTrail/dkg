@@ -3,6 +3,7 @@ import {
   createOperationContext, GRAPH_KA_CONTENT_SCOPE_VERSION, isSafeIri,
   contextGraphWorkspaceMetaGraphUri, validateSubGraphName, type Logger,
 } from '@origintrail-official/dkg-core';
+import { swmKaWriteLockKey, withKeyedLocks } from '@origintrail-official/dkg-publisher';
 import { stripLiteral } from './dkg-agent-utils.js';
 import { sharedMemoryOwnershipKeyFromGraph } from './sync/shared-memory-graphs.js';
 
@@ -19,6 +20,8 @@ export const SWM_CLEANUP_MAX_BATCHES = 4;
 export interface SwmExpiryCleanupContext {
   store: TripleStore;
   workspaceOwnedEntities: Map<string, Map<string, string>>;
+  /** The same lock domain used by live and local SWM writers. */
+  writeLocks: Map<string, Promise<void>>;
   log: Pick<Logger, 'info' | 'warn'>;
   isClosed: () => boolean;
 }
@@ -78,11 +81,9 @@ export async function runSwmExpiryCleanup(
         batches++;
         // Metadata selection is live: discover graphs again for every selected
         // page so later arrivals cannot lose metadata while leaving their data.
-        const family = await resolveGraphFamily(store, target);
         let metadataProgress = 0;
-        for (const operation of operations) {
-          if (isClosed()) break;
-          const outcome = await cleanupExpiredOperation(context, target, family, operation);
+        const cleaned = await cleanupExpiredBatch(context, target, cutoff, operations);
+        for (const { outcome } of cleaned) {
           result.triplesDeleted += outcome.triplesDeleted;
           const count = counts.get(target.contextGraphId) ?? { triples: 0, operations: 0 };
           count.triples += outcome.triplesDeleted;
@@ -132,6 +133,38 @@ async function loadExpiredBatch(store: TripleStore, metaGraph: string, cutoff: s
       }
     }
   }`, { source: 'agent.swmCleanup.expiredOperations' });
+  return decodeExpiredOperations(result);
+}
+
+/** Revalidate one lock-protected hydrated page immediately before deletion. */
+async function loadExpiredOperations(
+  store: TripleStore,
+  metaGraph: string,
+  cutoff: string,
+  operationUris: readonly string[],
+): Promise<ExpiredOperation[]> {
+  const safeUris = operationUris.filter(isSafeIri);
+  if (safeUris.length === 0) return [];
+  const result = await store.query(`SELECT ?op ?re ?scopeVersion ?kaUal ?snapshotGraph WHERE {
+    GRAPH <${metaGraph}> {
+      VALUES ?op { ${safeUris.map(uri => `<${uri}>`).join(' ')} }
+      ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
+      ?op <http://dkg.io/ontology/publishedAt> ?ts .
+      FILTER(?ts < "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+      OPTIONAL { ?op <http://dkg.io/ontology/rootEntity> ?re }
+      OPTIONAL {
+        ?op <http://dkg.io/ontology/contentScopeVersion> ?scopeVersion .
+        OPTIONAL { ?op <http://dkg.io/ontology/kaUal> ?kaUal }
+        OPTIONAL { ?op <http://dkg.io/ontology/publicSnapshotGraph> ?snapshotGraph }
+      }
+    }
+  }`, { source: 'agent.swmCleanup.revalidateOperation' });
+  return decodeExpiredOperations(result);
+}
+
+function decodeExpiredOperations(
+  result: Awaited<ReturnType<TripleStore['query']>>,
+): ExpiredOperation[] {
   const operations = new Map<string, { operation: ExpiredOperation; roots: Set<string> }>();
   if (result.type !== 'bindings') return [];
   for (const row of result.bindings) {
@@ -153,6 +186,66 @@ async function loadExpiredBatch(store: TripleStore, metaGraph: string, cutoff: s
     if (row.re) entry.roots.add(row.re);
   }
   return [...operations.values()].map(({ operation, roots }) => ({ ...operation, roots: [...roots] }));
+}
+
+function sameExpiredOperation(left: ExpiredOperation, right: ExpiredOperation): boolean {
+  if (left.uri !== right.uri || left.scope.kind !== right.scope.kind) return false;
+  if (left.roots.length !== right.roots.length
+    || [...left.roots].sort().some((root, index) => root !== [...right.roots].sort()[index])) return false;
+  return left.scope.kind === 'legacy' || (
+    right.scope.kind === 'graph-v2'
+    && left.scope.kaUal === right.scope.kaUal
+    && left.scope.snapshotGraph === right.scope.snapshotGraph
+  );
+}
+
+async function cleanupExpiredBatch(
+  context: SwmExpiryCleanupContext,
+  target: CleanupTarget,
+  cutoff: string,
+  candidates: readonly ExpiredOperation[],
+): Promise<Array<{ operation: ExpiredOperation; outcome: CleanupOutcome }>> {
+  const lockKeys = candidates.flatMap(operation => cleanupWriteLockKeys(target, operation));
+  return withKeyedLocks(context.writeLocks, lockKeys, async () => {
+    const family = await resolveGraphFamily(context.store, target);
+    const currentByUri = new Map(
+      (await loadExpiredOperations(
+        context.store, target.metaGraph, cutoff, candidates.map(operation => operation.uri),
+      )).map(operation => [operation.uri, operation]),
+    );
+    const cleaned: Array<{ operation: ExpiredOperation; outcome: CleanupOutcome }> = [];
+    for (const candidate of candidates) {
+      if (context.isClosed()) break;
+      const current = currentByUri.get(candidate.uri);
+      if (!current || !sameExpiredOperation(current, candidate)) continue;
+      cleaned.push({
+        operation: current,
+        outcome: await cleanupExpiredOperation(context, target, family, current),
+      });
+    }
+    return cleaned;
+  });
+}
+
+function cleanupWriteLockKeys(target: CleanupTarget, operation: ExpiredOperation): string[] {
+  const subGraphName = subGraphNameFromMetaGraph(target.contextGraphId, target.metaGraph);
+  const namespace = subGraphName ? `${target.contextGraphId}\0${subGraphName}` : target.contextGraphId;
+  return [
+    ...operation.roots.map(root => `${namespace}\0${root}`),
+    ...(operation.scope.kind === 'graph-v2' && operation.scope.kaUal
+      ? [swmKaWriteLockKey(target.contextGraphId, subGraphName, operation.scope.kaUal)]
+      : []),
+  ];
+}
+
+function subGraphNameFromMetaGraph(contextGraphId: string, metaGraph: string): string | undefined {
+  const rootMetaGraph = contextGraphWorkspaceMetaGraphUri(contextGraphId);
+  if (metaGraph === rootMetaGraph) return undefined;
+  const prefix = `did:dkg:context-graph:${contextGraphId}/`;
+  const suffix = '/_shared_memory_meta';
+  if (!metaGraph.startsWith(prefix) || !metaGraph.endsWith(suffix)) return undefined;
+  const candidate = metaGraph.slice(prefix.length, -suffix.length);
+  return validateSubGraphName(candidate).valid ? candidate : undefined;
 }
 
 async function resolveGraphFamily(store: TripleStore, target: CleanupTarget): Promise<GraphFamily> {
