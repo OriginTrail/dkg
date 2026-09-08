@@ -1,4 +1,4 @@
-import { resolveEpcisEventType, standardEpcisEventType } from './epcis-vocabulary.js';
+import { resolveEpcisEventType, standardEpcisEventType, EPCIS_DECLARED_EVENT_TYPE } from './epcis-vocabulary.js';
 
 /** Preserve caller vocabulary mappings while making accepted EPCIS event types explicit. */
 export function normalizeCaptureEventTypes(document: unknown): unknown {
@@ -11,7 +11,11 @@ export function normalizeCaptureEventTypes(document: unknown): unknown {
     // document-, property-, or event-scoped aliases for the `type` key.
     const existing = record['@type'];
     const types = existing === undefined ? [] : Array.isArray(existing) ? existing : [existing];
-    return { ...record, '@type': [...new Set([...types, type])] };
+    return {
+      ...record,
+      '@type': [...new Set([...types, type])],
+      [EPCIS_DECLARED_EVENT_TYPE]: { '@id': type },
+    };
   });
 }
 

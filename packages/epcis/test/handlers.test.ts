@@ -11,6 +11,7 @@ const NORMALIZED_OBJECT_EVENT_DOC = {
   epcisBody: {
     eventList: VALID_OBJECT_EVENT_DOC.epcisBody!.eventList.map((event) => ({
       ...event, '@type': ['https://gs1.github.io/EPCIS/ObjectEvent'],
+      'http://dkg.io/ontology/epcisEventType': { '@id': 'https://gs1.github.io/EPCIS/ObjectEvent' },
     })),
   },
 };
@@ -38,6 +39,7 @@ describe('handleCaptureAsync', () => {
       expect(normalizeCaptureEventTypes(document)).toEqual({
         epcisBody: { eventList: [{ ...document.epcisBody.eventList[0],
           '@type': ['urn:example:ExistingType', `https://gs1.github.io/EPCIS/${name}`],
+          'http://dkg.io/ontology/epcisEventType': { '@id': `https://gs1.github.io/EPCIS/${name}` },
         }] },
       });
       expect(document).toEqual(before);
@@ -101,6 +103,7 @@ describe('handleCaptureAsync', () => {
     await handleCaptureAsync({ epcisDocument: document }, { contextGraphId: CONTEXT_GRAPH_ID, publisher });
     expect(publisher.calls[0]!.doc).toEqual({ private: { ...document, epcisBody: { eventList: [{
       ...document.epcisBody!.eventList[0], '@type': ['https://example.org/Observation'],
+      'http://dkg.io/ontology/epcisEventType': { '@id': 'https://example.org/Observation' },
     }] } } });
 
   });

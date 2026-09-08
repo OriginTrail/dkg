@@ -1,4 +1,4 @@
-import { EPCIS_TYPE_PREFIX, resolveEpcisEventType } from './epcis-vocabulary.js';
+import { EPCIS_DECLARED_EVENT_TYPE, EPCIS_TYPE_PREFIX, resolveEpcisEventType } from './epcis-vocabulary.js';
 import {
   contextGraphDataUri,
   contextGraphMetaUri,
@@ -103,6 +103,10 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
 
   // Base pattern — always present
   wherePatterns.push('?event a ?eventType .');
+  // New captures retain auxiliary RDF classes but declare exactly one EPCIS
+  // discriminator. Historical rows without that declaration keep their behavior.
+  wherePatterns.push(`OPTIONAL { ?event <${EPCIS_DECLARED_EVENT_TYPE}> ?_declaredEventType . }`);
+  filterClauses.push('FILTER(!BOUND(?_declaredEventType) || ?eventType = ?_declaredEventType)');
 
   // External classes need both EPCIS timing fields to distinguish events from
   // ordinary RDF. Date filtering also needs eventTime; bind each field once.

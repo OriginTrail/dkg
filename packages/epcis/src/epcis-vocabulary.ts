@@ -1,5 +1,8 @@
 import { isSafeIri } from '@origintrail-official/dkg-core';
 
+/** Capture discriminator, independent of auxiliary rdf:type assertions. */
+export const EPCIS_DECLARED_EVENT_TYPE = 'http://dkg.io/ontology/epcisEventType';
+
 export const EPCIS_TYPE_PREFIX = 'https://gs1.github.io/EPCIS/';
 export const EPCIS_STANDARD_EVENT_TYPES = Object.freeze([
   'ObjectEvent', 'AggregationEvent', 'TransactionEvent', 'TransformationEvent', 'AssociationEvent',

@@ -1,9 +1,9 @@
 import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 import { contextGraphDataUri } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, BlazegraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { buildEpcisQuery } from '../src/query-builder.js';
-import { handleCaptureAsync, toEpcisEvent } from '../src/handlers.js';
+import { handleCaptureAsync, handleEventsQuery, toEpcisEvent } from '../src/handlers.js';
 
 const CG = 'external-epcis-type';
 const EPCIS = 'https://gs1.github.io/EPCIS/';
@@ -24,9 +24,17 @@ function eventRows(id: string, eventType: string, time?: string, offset?: string
   ];
 }
 
+const blazegraphUrl = process.env.BLAZEGRAPH_TEST_URL;
+if (process.env.DKG_REQUIRE_BLAZEGRAPH === '1' && !blazegraphUrl) throw new Error('BLAZEGRAPH_TEST_URL is required');
+const backends: Array<{ name: string; create: () => OxigraphStore | BlazegraphStore }> = [
+  { name: 'Oxigraph', create: () => new OxigraphStore() },
+];
+if (blazegraphUrl) backends.push({ name: 'Blazegraph', create: () => new BlazegraphStore(blazegraphUrl) });
+
+describe.each(backends)('$name capture/query', ({ create }) => {
 describe.each(['urn:epcis:CustomEvent', 'https://example.org/CustomEvent'])('external event class %s', (eventType) => {
   it.each(DATE_CASES)('requires event shape and preserves exact filtering $name', async ({ filters, expected }) => {
-    const store = new OxigraphStore();
+    const store = create();
     try {
       await store.insert([
         ...eventRows('event', eventType, '2024-03-01T08:00:00Z', '+00:00'),
@@ -55,7 +63,7 @@ describe.each(['urn:epcis:CustomEvent', 'https://example.org/CustomEvent'])('ext
       if (defaultResult.type !== 'bindings') throw new Error('Expected default event bindings');
       expect(defaultResult.bindings.map((row) => row.event)).toEqual(['urn:event:standard']);
     } finally {
-      await store.close();
+      await store.dropGraph(contextGraphDataUri(CG)); await store.close();
     }
   });
 });
@@ -67,7 +75,7 @@ const jsonld = createRequire(import.meta.url)('jsonld') as {
 it.each(['https://example.org/TemperatureEvent', 'urn:epcis:TemperatureEvent'].flatMap((eventType) =>
   ['overridden', 'omitted'].map((mapping) => ({ eventType, mapping })),
 ))('captures and queries the exact external class $eventType with type mapping $mapping', async ({ eventType, mapping }) => {
-  const store = new OxigraphStore();
+  const store = create();
   const eventID = 'urn:event:external-captured';
   const document = {
     '@context': { '@vocab': EPCIS, eventID: '@id', ...(mapping === 'overridden' ? { type: '@type' } : {}) },
@@ -96,5 +104,54 @@ it.each(['https://example.org/TemperatureEvent', 'urn:epcis:TemperatureEvent'].f
     if (result.type !== 'bindings') throw new Error('Expected event bindings');
     expect(result.bindings.map((row) => row.event)).toEqual([eventID]);
     expect(toEpcisEvent(result.bindings[0]).type).toBe(eventType);
-  } finally { await store.close(); }
+  } finally { await store.dropGraph(contextGraphDataUri(CG)); await store.close(); }
+});
+
+it.each(['public', 'private'] as const)('keeps auxiliary EPCIS classes with one declared event per page after %s capture', async visibility => {
+  const store = create();
+  const publicGraph = contextGraphDataUri(CG);
+  const graph = visibility === 'private' ? `${publicGraph}/_private` : publicGraph;
+  const events = [
+    { eventID: 'urn:declared:first', type: `${EPCIS}DeclaredEvent`, action: 'OBSERVE', epcList: ['urn:item:first'], '@type': `${EPCIS}CustomEvent`, eventTime: '2024-03-02T08:00:00Z', eventTimeZoneOffset: '+00:00' },
+    { eventID: 'urn:declared:second', type: `${EPCIS}DeclaredEvent`, action: 'OBSERVE', epcList: ['urn:item:second'], '@type': [`${EPCIS}AssociationEvent`, 'urn:example:Auxiliary'], eventTime: '2024-03-01T08:00:00Z', eventTimeZoneOffset: '+00:00' },
+  ];
+  const document = {
+    '@context': { '@vocab': EPCIS, eventID: '@id' },
+    type: 'EPCISDocument', schemaVersion: '2.0', creationDate: '2024-03-02T08:00:00Z',
+    epcisBody: { eventList: events },
+  };
+  try {
+    await handleCaptureAsync({ epcisDocument: { [visibility]: document } }, {
+      contextGraphId: CG,
+      publisher: { publishAsync: async (_cg, content) => {
+        const nquads = await jsonld.toRDF((content as Record<string, unknown>)[visibility], { format: 'application/n-quads' });
+        await store.update(`INSERT DATA { GRAPH <${graph}> { ${nquads} } }`);
+        if (visibility === 'private') await store.insert(events.map(event => ({
+          subject: event.eventID, predicate: 'http://dkg.io/ontology/privateDataAnchor', object: '"true"', graph: publicGraph,
+        })));
+        return { captureID: 'capture-discriminator' };
+      } },
+    });
+    const classes = await store.query(`SELECT ?type WHERE { GRAPH <${graph}> { <urn:declared:first> a ?type } }`);
+    expect(classes.type === 'bindings' && classes.bindings.map(row => row.type).sort())
+      .toEqual([`${EPCIS}CustomEvent`, `${EPCIS}DeclaredEvent`]);
+    const all = await store.query(buildEpcisQuery({}, CG));
+    expect(all.type === 'bindings' && all.bindings.map(row => row.event)).toEqual(events.map(event => event.eventID));
+    const queryEngine = { query: async (sparql: string) => {
+      const result = await store.query(sparql);
+      if (result.type !== 'bindings') throw new Error('Expected event bindings');
+      return { bindings: result.bindings };
+    } };
+    const config = { contextGraphId: CG, queryEngine, basePath: '/api/epcis/events' };
+    const first = await handleEventsQuery(new URLSearchParams('perPage=1'), config);
+    const second = await handleEventsQuery(new URLSearchParams('perPage=1&offset=1'), config);
+    const rows = [first, second].map(page => page.body.epcisBody.queryResults.resultsBody.eventList);
+    expect(rows.map(events => events.map(event => event.type))).toEqual([[`${EPCIS}DeclaredEvent`], [`${EPCIS}DeclaredEvent`]]);
+    expect(first.headers?.link).toBeDefined();
+    expect(second.headers?.link).toBeUndefined();
+    const aux = await store.query(buildEpcisQuery({ eventType: `${EPCIS}CustomEvent` }, CG));
+    expect(aux.type === 'bindings' && aux.bindings).toEqual([]);
+  } finally { await store.dropGraph(publicGraph); if (graph !== publicGraph) await store.dropGraph(graph); await store.close(); }
+});
+
 });
