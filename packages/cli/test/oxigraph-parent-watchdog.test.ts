@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { connect } from 'node:net';
 import {
   conventionalSignalExitCode,
   parseOxigraphParentWatchdogArgs,
@@ -48,30 +49,33 @@ describe('Oxigraph parent watchdog', () => {
     }
   });
 
-  it.skipIf(process.platform !== 'linux')('kills the database when its watchdog is SIGKILLed', async () => {
+  it('releases the child listener when its watchdog terminates', async () => {
     const watchdog = spawn(process.execPath, [
       '--import', 'tsx',
       new URL('../src/daemon/oxigraph-parent-watchdog.ts', import.meta.url).pathname,
       String(process.pid), process.execPath, '-e',
-      'console.log(process.pid); setInterval(() => {}, 1000)',
+      'const s = require("node:net").createServer(); s.listen(0, "127.0.0.1", () => console.log(JSON.stringify({ pid: process.pid, port: s.address().port })))',
     ], { stdio: ['ignore', 'pipe', 'inherit'] });
     let databasePid: number | undefined;
     try {
       const [chunk] = await once(watchdog.stdout!, 'data');
-      databasePid = Number(String(chunk).trim());
+      const listening = JSON.parse(String(chunk).trim());
+      databasePid = listening.pid;
       expect(databasePid).toBeGreaterThan(1);
       const exited = once(watchdog, 'exit');
-      watchdog.kill('SIGKILL');
+      // Linux must survive uncatchable watchdog death through pdeathsig.
+      // Other platforms exercise the signal-forwarding fallback instead.
+      watchdog.kill(process.platform === 'linux' ? 'SIGKILL' : 'SIGTERM');
       await exited;
-      // PID 1 can take time to reap a zombie; it no longer holds a DB lock.
-      const { readFile } = await import('node:fs/promises');
+      // A released listener proves the child no longer owns resources even
+      // when PID 1 has not yet reaped it. This works without Linux /proc.
       await vi.waitFor(async () => {
-        try {
-          const stat = await readFile(`/proc/${databasePid}/stat`, 'utf8');
-          expect(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0]).toBe('Z');
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        }
+        const alive = await new Promise<boolean>((resolve) => {
+          const socket = connect({ host: '127.0.0.1', port: listening.port });
+          socket.once('connect', () => { socket.destroy(); resolve(true); });
+          socket.once('error', () => { socket.destroy(); resolve(false); });
+        });
+        expect(alive).toBe(false);
       });
     } finally {
       watchdog.kill('SIGKILL');
