@@ -4,9 +4,9 @@ import { parseEventsRequest, parseQueryParams, hasAtLeastOneFilter, hasValidDate
 it('normalizes aliases once into disjoint filters and HTTP paging', () => {
   const sp = new URLSearchParams('MATCH_epc=urn:standard&epc=urn:alias&limit=50&perPage=10&offset=200&finalized=false');
   const request = parseEventsRequest(sp);
-  expect(request).toEqual({ filters: { epc: 'urn:standard', finalized: false }, page: { perPage: 10, offset: 200 } });
-  expect(parseQueryParams(sp)).toEqual({ ...request.filters, ...request.page });
-  expect(parseEventsRequest(new URLSearchParams())).toEqual({ filters: { finalized: true }, page: {} });
+  expect(request).toEqual({ filters: { epc: 'urn:standard' }, page: { perPage: 10, offset: 200 }, finalized: false });
+  expect(parseQueryParams(sp)).toEqual({ ...request.filters, ...request.page, finalized: request.finalized });
+  expect(parseEventsRequest(new URLSearchParams())).toEqual({ filters: {}, page: {}, finalized: true });
 });
 
 describe('parseQueryParams', () => {
@@ -39,7 +39,7 @@ describe('parseQueryParams', () => {
 
   it('fullTrace=true without epc has no effect (fullTrace is resolved, not passed through)', () => {
     const params = parseQueryParams(new URLSearchParams('fullTrace=true'));
-    expect(params.fullTrace).toBeUndefined();
+    expect(params).not.toHaveProperty('fullTrace');
     expect(params.anyEPC).toBeUndefined();
   });
 
@@ -106,7 +106,7 @@ describe('parseQueryParams', () => {
 
     expect(params.anyEPC).toBe('urn:epc:trace');
     expect(params.epc).toBeUndefined();
-    expect(params.fullTrace).toBeUndefined();
+    expect(params).not.toHaveProperty('fullTrace');
   });
 
   it('MATCH_anyEPC takes precedence over epc+fullTrace combo', () => {

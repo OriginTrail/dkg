@@ -874,26 +874,11 @@ describe('EPCIS API E2E', () => {
       30_000,
     );
 
-    it(
-      'very large offset → 200 with 0 events',
-      async () => {
-        const events = await fetchEvents(
-          `/api/epcis/events?MATCH_anyEPC=${encodeURIComponent(EPC.frame)}&offset=999999`,
-        );
-        expect(events).toHaveLength(0);
-      },
-      30_000,
-    );
-
-    it(
-      'non-numeric limit → ignored, uses default perPage',
-      async () => {
-        const expected = [getCapturedUal('objectEvent'), getCapturedUal('transformationEvent')].sort();
-        const { events, headers } = await fetchQuery(
-          `/api/epcis/events?MATCH_anyEPC=${encodeURIComponent(EPC.frame)}&limit=abc`,
-        );
-        expect(eventUals(events)).toEqual(expected);
-        expect(headers.get('link')).toBeNull();
+    it.each(['offset=999999', 'limit=abc', 'perPage=1.5'])(
+      'invalid pagination %s returns 400', async (pagination) => {
+        const res = await authedFetch('GET', `/api/epcis/events?MATCH_anyEPC=${encodeURIComponent(EPC.frame)}&${pagination}`);
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({ error: expect.stringContaining('EPCIS') });
       },
       30_000,
     );

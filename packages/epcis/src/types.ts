@@ -84,7 +84,11 @@ export interface EpcisEventFilters {
   action?: string;
   disposition?: string;
   readPoint?: string;
-  finalized?: boolean;
+}
+
+export interface EpcisQueryScope {
+  contextGraphId: string;
+  finalized: boolean;
   subGraphName?: string;
 }
 
@@ -96,11 +100,14 @@ export interface EpcisPageParams {
 export interface EpcisEventsRequest {
   filters: EpcisEventFilters;
   page: EpcisPageParams;
+  finalized: boolean;
 }
 
 /** Historical flat builder/parser contract. HTTP handlers use EpcisEventsRequest. */
 export interface EpcisQueryParams extends EpcisEventFilters, EpcisPageParams {
   limit?: number;
+  finalized?: boolean;
+  subGraphName?: string;
 }
 
 /** Dependency-inversion boundary: the EPCIS package needs something that can run SPARQL queries. */

@@ -1,7 +1,7 @@
-import { EpcisQueryValidationError } from '../src/query-validation.js';
+import { buildEpcisQuery, EpcisQueryValidationError } from '../src/index.js';
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { buildEpcisQuery, renderEpcisQuery } from '../src/query-builder.js';
+import { createEpcisQueryPlan } from '../src/query-builder.js';
 import { handleEventsQuery } from '../src/handlers.js';
 import { encodePageToken } from '../src/utils.js';
 import { MAX_EPCIS_OFFSET, MAX_EPCIS_PAGE_SIZE, EpcisHttpPage } from '../src/pagination.js';
@@ -23,7 +23,7 @@ it.each([{ eventType: 'not an event name' }, { limit: 1.5 }])('keeps direct buil
 it('bounds lookahead independently of the public page-size cap', () => {
   expect(buildEpcisQuery({ limit: MAX_EPCIS_PAGE_SIZE, offset: MAX_EPCIS_OFFSET }, 'pagination'))
     .toContain('LIMIT 1000\nOFFSET 10000');
-  expect(renderEpcisQuery({}, 'pagination', new EpcisHttpPage({ perPage: MAX_EPCIS_PAGE_SIZE, offset: 0 }).queryWindow)).toContain('LIMIT 1001');
+  expect(createEpcisQueryPlan({}, { contextGraphId: 'pagination', finalized: true }, new EpcisHttpPage({ perPage: MAX_EPCIS_PAGE_SIZE, offset: 0 }).queryWindow).sparql).toContain('LIMIT 1001');
 });
 it('keeps direct-query and HTTP defaults explicit in the rendered window', async () => {
   expect(buildEpcisQuery({}, 'pagination')).toContain('LIMIT 100\nOFFSET 0');

@@ -4,7 +4,7 @@ export { EpcisQueryError } from './query-error.js';
 import { EpcisHttpPage } from './pagination.js';
 import { compactEpcisEventType } from './epcis-vocabulary.js';
 import { createValidator } from './validation.js';
-import { renderEpcisQuery } from './query-builder.js';
+import { createEpcisQueryPlan } from './query-builder.js';
 import { parseEventsRequest, hasValidDateRange, encodePageToken } from './utils.js';
 import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
 
@@ -179,40 +179,22 @@ export async function handleEventsQuery(
   searchParams: URLSearchParams,
   config: EventsQueryConfig,
 ): Promise<EventsQueryResult> {
-  const { filters, page, sparql } = queryRequestBoundary(() => {
+  const { page, plan } = queryRequestBoundary(() => {
     const request = parseEventsRequest(searchParams);
     if (!hasValidDateRange(request.filters)) {
       throw new EpcisQueryValidationError('Invalid date range: "from" must be before or equal to "to"');
     }
     const page = new EpcisHttpPage(request.page);
     return {
-      filters: request.filters,
       page,
-      sparql: renderEpcisQuery(
-        { ...request.filters, subGraphName: config.subGraphName }, config.contextGraphId, page.queryWindow,
-      ),
+      plan: createEpcisQueryPlan(request.filters, {
+        contextGraphId: config.contextGraphId,
+        subGraphName: config.subGraphName,
+        finalized: request.finalized,
+      }, page.queryWindow),
     };
   });
-  // The engine's scope guard rejects any explicit GRAPH IRI outside the
-  // allow-set it derives from the query options, so the options MUST match
-  // exactly the graphs `buildEpcisQuery` references for this route:
-  //   - `includePrivate`        → the `<cg>[/<sub>]/_private` partition the
-  //                               private-anchored-events branch always names.
-  //   - `subGraphName`          → reads `<cg>/<sub>` (finalized) /
-  //                               `<cg>/<sub>/_shared_memory` (SWM) plus the
-  //                               sub-graph private/meta graphs.
-  //   - `graphSuffix:'_shared_memory'` (finalized=false) → reads the SWM
-  //                               partition (`…/_shared_memory[_meta]`) instead
-  //                               of the canonical data graph.
-  // Omitting any of these makes the guard reject the query with
-  // "GRAPH <…> is outside the allowed graph set" (it fails for every
-  // sub-graph or non-finalized request, on every store backend).
-  const result = await config.queryEngine.query(sparql, {
-    contextGraphId: config.contextGraphId,
-    subGraphName: config.subGraphName,
-    graphSuffix: filters.finalized === false ? '_shared_memory' : undefined,
-    includePrivate: true,
-  });
+  const result = await config.queryEngine.query(plan.sparql, plan.options);
 
   const { bindings, nextOffset } = queryRequestBoundary(() => page.take(result.bindings));
   const eventList = bindings.map(toEpcisEvent);

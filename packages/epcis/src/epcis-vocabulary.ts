@@ -2,6 +2,8 @@ import { isSafeIri } from '@origintrail-official/dkg-core';
 import { EpcisQueryValidationError } from './query-validation.js';
 
 export const EPCIS_TYPE_PREFIX = 'https://gs1.github.io/EPCIS/';
+export const EPCIS_CURRENT_PREFIX = 'https://ref.gs1.org/epcis/';
+export const EPCIS_NAMESPACES = [EPCIS_TYPE_PREFIX, EPCIS_CURRENT_PREFIX] as const;
 export const EPCIS_STANDARD_EVENT_TYPES = Object.freeze([
   'ObjectEvent', 'AggregationEvent', 'TransactionEvent', 'TransformationEvent', 'AssociationEvent',
 ] as const);
@@ -10,7 +12,7 @@ export type StandardEpcisEventType = typeof EPCIS_STANDARD_EVENT_TYPES[number];
 
 /** Recognize only the five standard classes, in compact or canonical form. */
 export function standardEpcisEventType(value: string): StandardEpcisEventType | undefined {
-  return EPCIS_STANDARD_EVENT_TYPES.find((name) => value === name || value === `${EPCIS_TYPE_PREFIX}${name}`);
+  return EPCIS_STANDARD_EVENT_TYPES.find((name) => value === name || EPCIS_NAMESPACES.some(prefix => value === `${prefix}${name}`));
 }
 
 /** Extended event IRIs retain their namespace when returned by the query API. */

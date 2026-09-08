@@ -209,7 +209,7 @@ describe('handleEventsQuery', () => {
       { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
     );
 
-    expect(calls[0].sparql).toContain('FILTER(?eventType = <https://gs1.github.io/EPCIS/ObjectEvent>)');
+    expect(calls[0].sparql).toContain('FILTER(?eventType IN (<https://gs1.github.io/EPCIS/ObjectEvent>, <https://ref.gs1.org/epcis/ObjectEvent>))');
   });
 
   it('passes action filter through to SPARQL query via alias', async () => {
@@ -242,7 +242,7 @@ describe('handleEventsQuery', () => {
       { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
     );
 
-    expect(calls[0].sparql).toContain('epcis:readPoint <urn:epc:id:sgln:4012345.00001.0>');
+    expect(calls[0].sparql).toContain('?_epcis_readPoint_filter <urn:epc:id:sgln:4012345.00001.0>');
   });
 
   it('passes extension configurationId and shipmentId filters through to SPARQL', async () => {

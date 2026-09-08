@@ -73,21 +73,16 @@ function capturedDocument(content: unknown): EPCISDocument {
  * Tiny SPARQL-ish query engine: inspects the SPARQL text from buildEpcisQuery,
  * then returns bindings corresponding to stored events. We only need enough
  * behaviour to exercise the shape contract — filter correctness itself is
- * covered by query-builder.test.ts and events-query.test.ts.
+ * covered against real RDF stores in event-classification.test.ts.
  */
 function inMemoryQueryEngine(store: Captured[]): QueryEngine & { lastSparql?: string } {
   const engine: QueryEngine & { lastSparql?: string } = {
     async query(sparql) {
       engine.lastSparql = sparql;
       const bindings: Record<string, string>[] = [];
-      // Blazegraph-compat rewrite (#789): the real buildEpcisQuery now
-      // emits a VALUES-bound predicate variable for the epc= param —
-      // `{ VALUES ?_epcPred { epcis:epcList epcis:childEPCs } ?event
-      // ?_epcPred "<epc>" . }` — instead of the old
-      // `{ ?event epcis:epcList "<epc>" }` UNION form. Parse the new
-      // shape so our fake engine narrows results the way the daemon
-      // would (match on epcList OR childEPCs, mirroring the VALUES set).
-      const epcPredMatch = sparql.match(/\?event \?_epcPred "([^"]+)"/);
+      // This shape-only fake follows the literal/IRI-neutral EPC filter.
+      // Actual filter semantics are covered by event-classification.test.ts.
+      const epcPredMatch = sparql.match(/FILTER\(STR\(\?_epcValue\) = "([^"]+)"\)/);
       const wantEpc = epcPredMatch?.[1];
       for (const c of store) {
         const doc = capturedDocument(c.content);

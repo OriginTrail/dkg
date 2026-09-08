@@ -61,7 +61,7 @@ function parsePaginationInteger(value: string, name: string): number {
 
 /** Normalize HTTP aliases once, keeping event filters separate from paging. */
 export function parseEventsRequest(sp: URLSearchParams): EpcisEventsRequest {
-  const filters: EpcisEventFilters = { finalized: true };
+  const filters: EpcisEventFilters = {};
   const page: EpcisPageParams = {};
 
   for (const key of FILTER_KEYS) {
@@ -111,21 +111,17 @@ export function parseEventsRequest(sp: URLSearchParams): EpcisEventsRequest {
     }
   }
 
-  if (sp.get('finalized') === 'false') {
-    filters.finalized = false;
-  }
-
-  return { filters, page };
+  return { filters, page, finalized: sp.get('finalized') !== 'false' };
 }
 
 /** Compatibility facade for the exported historical flat parser result. */
 export function parseQueryParams(sp: URLSearchParams): EpcisQueryParams {
-  const { filters, page } = parseEventsRequest(sp);
-  return { ...filters, ...page };
+  const { filters, page, finalized } = parseEventsRequest(sp);
+  return { ...filters, ...page, finalized };
 }
 
 /** Returns true if at least one actual filter param is set (excludes fullTrace, limit, offset). */
-export function hasAtLeastOneFilter(params: EpcisEventFilters): boolean {
+export function hasAtLeastOneFilter(params: EpcisQueryParams): boolean {
   return FILTER_KEYS.some((key) => params[key] !== undefined);
 }
 

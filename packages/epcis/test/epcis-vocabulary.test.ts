@@ -25,3 +25,11 @@ it('retains the historical compact extension-name query spelling', () => {
   expect(normalizeEpcisEventType(compactEpcisEventType('https://gs1.github.io/EPCIS/CustomEvent')))
     .toBe('https://gs1.github.io/EPCIS/CustomEvent');
 });
+
+it.each(['ObjectEvent', 'AggregationEvent', 'TransactionEvent', 'TransformationEvent', 'AssociationEvent'])(
+  'recognizes current-namespace standard class %s', name => {
+    const current = `https://ref.gs1.org/epcis/${name}`;
+    expect(compactEpcisEventType(current)).toBe(name);
+    expect(normalizeEpcisEventType(current)).toBe(`https://gs1.github.io/EPCIS/${name}`);
+  },
+);
