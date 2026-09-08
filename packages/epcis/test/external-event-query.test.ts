@@ -49,6 +49,7 @@ describe.each(['urn:epcis:CustomEvent', 'https://example.org/CustomEvent'])('ext
       expect(responseType).toBe(eventType);
       const sparql = buildEpcisQuery({ ...filters, eventType: responseType }, CG);
       expect(sparql).toContain(`FILTER(?eventType = <${eventType}>)`);
+      expect(sparql.split('OPTIONAL { ?event <http://dkg.io/ontology/epcisEventType> ?_declaredEventType . }')).toHaveLength(3);
       for (const field of ['eventTime', 'eventTimeZoneOffset']) {
         expect(sparql).not.toContain(`OPTIONAL { ?event epcis:${field} ?${field} . }`);
         // One binding in each public/private graph branch, even with date filters.

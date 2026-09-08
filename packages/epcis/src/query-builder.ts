@@ -97,15 +97,13 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
     ? contextGraphSubGraphPrivateUri(contextGraphId, params.subGraphName)
     : contextGraphPrivateUri(contextGraphId);
 
-  const wherePatterns: string[] = [];
+  const sharedRequiredPatterns: string[] = [];
   const filterClauses: string[] = [];
   const optionalClauses: string[] = [];
 
-  // Base pattern — always present
-  wherePatterns.push('?event a ?eventType .');
   // New captures retain auxiliary RDF classes but declare exactly one EPCIS
   // discriminator. Historical rows without that declaration keep their behavior.
-  wherePatterns.push(`OPTIONAL { ?event <${EPCIS_DECLARED_EVENT_TYPE}> ?_declaredEventType . }`);
+  sharedRequiredPatterns.push(`OPTIONAL { ?event <${EPCIS_DECLARED_EVENT_TYPE}> ?_declaredEventType . }`);
   filterClauses.push('FILTER(!BOUND(?_declaredEventType) || ?eventType = ?_declaredEventType)');
 
   // External classes need both EPCIS timing fields to distinguish events from
@@ -116,7 +114,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   ] as const;
   for (const { field, required } of timingFields) {
     const binding = `?event epcis:${field} ?${field} .`;
-    if (required) wherePatterns.push(binding);
+    if (required) sharedRequiredPatterns.push(binding);
     else optionalClauses.push(`OPTIONAL { ${binding} }`);
   }
 
@@ -144,7 +142,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   // the two predicate variables never collide when both are set.
   if (params.epc) {
     const epcValue = escapeSparql(params.epc);
-    wherePatterns.push(`{ VALUES ?_epcPred { epcis:epcList epcis:childEPCs }
+    sharedRequiredPatterns.push(`{ VALUES ?_epcPred { epcis:epcList epcis:childEPCs }
       ?event ?_epcPred "${epcValue}" . }`);
   }
 
@@ -152,35 +150,35 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   // own variable name to avoid collision with the epc filter above)
   if (params.anyEPC) {
     const epcValue = escapeSparql(params.anyEPC);
-    wherePatterns.push(`{ VALUES ?_anyEpcPred { epcis:epcList epcis:childEPCs epcis:parentID epcis:inputEPCList epcis:outputEPCList }
+    sharedRequiredPatterns.push(`{ VALUES ?_anyEpcPred { epcis:epcList epcis:childEPCs epcis:parentID epcis:inputEPCList epcis:outputEPCList }
       ?event ?_anyEpcPred "${epcValue}" . }`);
   }
   optionalClauses.push('OPTIONAL { ?event epcis:epcList ?epc . }');
 
   // Parent ID filter (AggregationEvent)
   if (params.parentID) {
-    wherePatterns.push(`?event epcis:parentID "${escapeSparql(params.parentID)}" .`);
+    sharedRequiredPatterns.push(`?event epcis:parentID "${escapeSparql(params.parentID)}" .`);
   }
 
   // Child EPCs filter (AggregationEvent)
   if (params.childEPC) {
-    wherePatterns.push(`?event epcis:childEPCs "${escapeSparql(params.childEPC)}" .`);
+    sharedRequiredPatterns.push(`?event epcis:childEPCs "${escapeSparql(params.childEPC)}" .`);
   }
 
   // Input EPCs filter (TransformationEvent)
   if (params.inputEPC) {
-    wherePatterns.push(`?event epcis:inputEPCList "${escapeSparql(params.inputEPC)}" .`);
+    sharedRequiredPatterns.push(`?event epcis:inputEPCList "${escapeSparql(params.inputEPC)}" .`);
   }
 
   // Output EPCs filter (TransformationEvent)
   if (params.outputEPC) {
-    wherePatterns.push(`?event epcis:outputEPCList "${escapeSparql(params.outputEPC)}" .`);
+    sharedRequiredPatterns.push(`?event epcis:outputEPCList "${escapeSparql(params.outputEPC)}" .`);
   }
 
   // BizStep filter
   if (params.bizStep) {
     const bizStepUri = normalizeBizStep(params.bizStep);
-    wherePatterns.push('?event epcis:bizStep ?bizStep .');
+    sharedRequiredPatterns.push('?event epcis:bizStep ?bizStep .');
     filterClauses.push(`FILTER(STR(?bizStep) = "${escapeSparql(bizStepUri)}")`);
   } else {
     optionalClauses.push('OPTIONAL { ?event epcis:bizStep ?bizStep . }');
@@ -189,7 +187,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   // BizLocation filter — JSON-LD stores bizLocation as a URI node, match with angle brackets.
   // Also bind ?bizLocation so it appears in SELECT results for toEpcisEvent.
   if (params.bizLocation) {
-    wherePatterns.push(`?event epcis:bizLocation <${escapeSparql(params.bizLocation)}> .`);
+    sharedRequiredPatterns.push(`?event epcis:bizLocation <${escapeSparql(params.bizLocation)}> .`);
     optionalClauses.push('OPTIONAL { ?event epcis:bizLocation ?bizLocation . }');
   } else {
     optionalClauses.push('OPTIONAL { ?event epcis:bizLocation ?bizLocation . }');
@@ -208,7 +206,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
 
   // Action filter — required when filtered, OPTIONAL otherwise
   if (params.action) {
-    wherePatterns.push('?event epcis:action ?action .');
+    sharedRequiredPatterns.push('?event epcis:action ?action .');
     filterClauses.push(`FILTER(STR(?action) = "${escapeSparql(params.action)}")`);
   } else {
     optionalClauses.push('OPTIONAL { ?event epcis:action ?action . }');
@@ -217,7 +215,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   // Disposition filter — required when filtered, OPTIONAL otherwise
   if (params.disposition) {
     const dispUri = normalizeGs1Vocabulary('Disp', params.disposition);
-    wherePatterns.push('?event epcis:disposition ?disposition .');
+    sharedRequiredPatterns.push('?event epcis:disposition ?disposition .');
     filterClauses.push(`FILTER(STR(?disposition) = "${escapeSparql(dispUri)}")`);
   } else {
     optionalClauses.push('OPTIONAL { ?event epcis:disposition ?disposition . }');
@@ -226,7 +224,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   // ReadPoint filter — JSON-LD stores readPoint as a URI node, match with angle brackets.
   // Also bind ?readPoint so it appears in SELECT results for toEpcisEvent.
   if (params.readPoint) {
-    wherePatterns.push(`?event epcis:readPoint <${escapeSparql(params.readPoint)}> .`);
+    sharedRequiredPatterns.push(`?event epcis:readPoint <${escapeSparql(params.readPoint)}> .`);
     optionalClauses.push('OPTIONAL { ?event epcis:readPoint ?readPoint . }');
   } else {
     optionalClauses.push('OPTIONAL { ?event epcis:readPoint ?readPoint . }');
@@ -239,7 +237,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   // Extension identifiers carried as JSON-LD triples. Match by predicate local
   // name so project-specific ontologies stay outside the generic DKG EPCIS API.
   if (params.configurationId) {
-    wherePatterns.push(`?event ?configurationIdPredicate ?configurationId .
+    sharedRequiredPatterns.push(`?event ?configurationIdPredicate ?configurationId .
       ${extensionLocalNameFilter('configurationIdPredicate', 'configurationId')}`);
     filterClauses.push(`FILTER(STR(?configurationId) = "${escapeSparql(params.configurationId)}")`);
   } else {
@@ -248,7 +246,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   }
 
   if (params.shipmentId) {
-    wherePatterns.push(`?event ?shipmentIdPredicate ?shipmentId .
+    sharedRequiredPatterns.push(`?event ?shipmentIdPredicate ?shipmentId .
       ${extensionLocalNameFilter('shipmentIdPredicate', 'shipmentId')}`);
     filterClauses.push(`FILTER(STR(?shipmentId) = "${escapeSparql(params.shipmentId)}")`);
   } else {
@@ -260,7 +258,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   const limit = Math.min(Math.max(params.limit ?? 100, 1), 1000);
   const offset = Math.max(params.offset ?? 0, 0);
   const graphBody = [
-    ...wherePatterns,
+    ...sharedRequiredPatterns,
     ...optionalClauses,
   ].join('\n      ');
 
@@ -273,6 +271,7 @@ SELECT ?event ?eventType ?eventTime ?eventTimeZoneOffset ?bizStep ?bizLocation ?
 WHERE {
   {
     GRAPH <${publicGraph}> {
+      ?event a ?eventType .
       ${graphBody}
     }
   }
@@ -283,8 +282,7 @@ WHERE {
     }
     GRAPH <${privateGraph}> {
       ?event a ?eventType .
-      ${wherePatterns.slice(1).join('\n      ')}
-      ${optionalClauses.join('\n      ')}
+      ${graphBody}
     }
   }
   ${filterClauses.join('\n  ')}
