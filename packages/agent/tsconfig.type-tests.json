@@ -10,7 +10,7 @@
   },
   "include": [
     "test/**/*.typecheck.ts",
-    "src/jsonld.d.ts",
-    "test/shared-memory-sync-ownership.test.ts"
+    "test/**/*.typechecked.test.ts",
+    "src/jsonld.d.ts"
   ]
 }
