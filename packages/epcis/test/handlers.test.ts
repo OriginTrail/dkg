@@ -99,7 +99,9 @@ describe('handleCaptureAsync', () => {
     document.epcisBody!.eventList[0]!.type = 'https://example.org/Observation';
     const publisher = trackingAsyncPublisher();
     await handleCaptureAsync({ epcisDocument: document }, { contextGraphId: CONTEXT_GRAPH_ID, publisher });
-    expect(publisher.calls[0]!.doc).toEqual({ private: document });
+    expect(publisher.calls[0]!.doc).toEqual({ private: { ...document, epcisBody: { eventList: [{
+      ...document.epcisBody!.eventList[0], '@type': ['https://example.org/Observation'],
+    }] } } });
 
   });
 

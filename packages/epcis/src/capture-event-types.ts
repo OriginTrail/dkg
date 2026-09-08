@@ -1,12 +1,12 @@
-import { EPCIS_TYPE_PREFIX, standardEpcisEventType } from './epcis-vocabulary.js';
+import { resolveEpcisEventType, standardEpcisEventType } from './epcis-vocabulary.js';
 
-/** Preserve caller vocabulary mappings while making standard EPCIS event types explicit. */
+/** Preserve caller vocabulary mappings while making accepted EPCIS event types explicit. */
 export function normalizeCaptureEventTypes(document: unknown): unknown {
   return mapEpcisEventList(document, (record) => {
     if (typeof record.type !== 'string') return record;
-    const name = standardEpcisEventType(record.type);
-    if (!name) return record;
-    const type = `${EPCIS_TYPE_PREFIX}${name}`;
+    const resolved = resolveEpcisEventType(record.type);
+    if (!resolved || resolved.kind === 'legacy-gs1-extension') return record;
+    const type = resolved.iri;
     // Full IRIs and the JSON-LD keyword are independent of @vocab and of
     // document-, property-, or event-scoped aliases for the `type` key.
     const existing = record['@type'];

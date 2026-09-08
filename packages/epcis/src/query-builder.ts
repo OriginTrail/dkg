@@ -1,4 +1,4 @@
-import { EPCIS_TYPE_PREFIX, normalizeEpcisEventType } from './epcis-vocabulary.js';
+import { EPCIS_TYPE_PREFIX, resolveEpcisEventType } from './epcis-vocabulary.js';
 import {
   contextGraphDataUri,
   contextGraphMetaUri,
@@ -68,11 +68,12 @@ function extensionLocalNameFilter(predicateVariable: string, localName: string):
  * - Groups by ?event (the event URI) instead of ?ual (the graph URI)
  */
 export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string): string {
-  const eventTypeIri = params.eventType ? normalizeEpcisEventType(params.eventType) : undefined;
+  const eventType = params.eventType ? resolveEpcisEventType(params.eventType) : undefined;
+  const eventTypeIri = eventType?.iri;
   if (params.eventType && !eventTypeIri) {
     throw new EpcisQueryInputError('eventType must be an EPCIS event name or an absolute event type IRI');
   }
-  const externalEventType = eventTypeIri !== undefined && !eventTypeIri.startsWith(EPCIS_TYPE_PREFIX);
+  const externalEventType = eventType?.kind === 'external';
   const partition = params.finalized === false ? 'swm' : 'finalized';
   // Finalized data lands at `<cg>/<sub>` when a sub-graph is targeted —
   // see `packages/agent/src/finalization-handler.ts:358-362`, which
