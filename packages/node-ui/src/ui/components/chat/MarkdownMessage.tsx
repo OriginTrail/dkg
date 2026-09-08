@@ -6,6 +6,7 @@ import { CodeBlock } from './CodeBlock.js';
 
 interface MarkdownMessageProps {
   content: string;
+  localFileHref?: (path: string) => string;
   /** When true, a blinking caret is rendered inline after the last
    *  streamed text node (not as a block sibling below the content). */
   streaming?: boolean;
@@ -118,7 +119,7 @@ function classifyHref(href: string | undefined): 'http' | 'mailto' | 'inert' {
   return 'inert';
 }
 
-export function MarkdownMessage({ content, streaming }: MarkdownMessageProps) {
+export function MarkdownMessage({ content, streaming, localFileHref }: MarkdownMessageProps) {
   return (
     <div className="v10-md">
       <ReactMarkdown
@@ -132,7 +133,9 @@ export function MarkdownMessage({ content, streaming }: MarkdownMessageProps) {
           // surfaces the alt text + URL so the user can decide whether to
           // open it manually — `disallowedElements` would just drop the
           // node, including its alt text.
-          img: ({ src, alt, title }) => (
+          img: ({ src, alt, title }) => localFileHref && typeof src === 'string' && src.startsWith('/') && !src.startsWith('//') && /\.(png|jpe?g|webp|gif)$/i.test(src) ? (
+            <a href={localFileHref(src)} target="_blank" rel="noopener noreferrer"><img src={localFileHref(src)} alt={alt || ''} title={title} style={{ maxWidth: '100%', borderRadius: 8 }} /></a>
+          ) : (
             <span
               className="v10-md-image-placeholder"
               title={title || (typeof src === 'string' ? src : undefined)}
@@ -151,6 +154,9 @@ export function MarkdownMessage({ content, streaming }: MarkdownMessageProps) {
           ol: ({ children }) => <ol className="v10-md-ol">{children}</ol>,
           li: ({ children }) => <li className="v10-md-li">{children}</li>,
           a: ({ href, children }) => {
+            if (localFileHref && href?.startsWith('/') && !href.startsWith('//')) {
+              return <a className="v10-md-link" href={localFileHref(href)} target="_blank" rel="noopener noreferrer">{children}</a>;
+            }
             const kind = classifyHref(href);
             if (kind === 'http') {
               return (

@@ -130,6 +130,7 @@ function useDragResizeV(onDrag: (delta: number) => void) {
 }
 
 function AppShell() {
+  const isCodex = useTabsStore((s) => s.activeTabId === 'codex');
   useLiveStatus();
   useKeyboardShortcuts();
   useShellRouting();
@@ -215,7 +216,7 @@ function AppShell() {
           <PanelBottom />
         </div>
 
-        {!rightCollapsed && (
+        {!rightCollapsed && !isCodex && (
           <>
             <div className="v10-resize-handle-h" ref={rightHandle} />
             <div className="v10-panel-right" style={{ width: rightWidth }}>

@@ -8,11 +8,13 @@ import { useTabsStore } from '../stores/tabs.js';
 // open, but a fresh navigation to e.g. `/observability` opens that tab on
 // mount and clicking the tab pushes the corresponding URL.
 export const URL_PATH_TO_TAB: Record<string, { id: string; label: string }> = {
+  '/codex': { id: 'codex', label: 'Codex' },
   '/observability': { id: 'operations', label: 'Observability' },
   '/operations': { id: 'operations', label: 'Observability' },
   '/settings': { id: 'settings', label: 'Settings' },
 };
 export const TAB_TO_URL_PATH: Record<string, string> = {
+  codex: '/codex',
   operations: '/observability',
   settings: '/settings',
   dashboard: '/',

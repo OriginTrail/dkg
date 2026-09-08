@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { codexEnabled } from '../codex/enabled.js';
 
 export interface CenterTab {
   id: string;
@@ -18,11 +19,12 @@ interface TabsState {
 
 const INITIAL_TABS: CenterTab[] = [
   { id: 'dashboard', label: 'Dashboard', closable: false },
+  ...(codexEnabled ? [{ id: 'codex', label: 'Codex', closable: false }] : []),
 ];
 
 export const useTabsStore = create<TabsState>((set, get) => ({
   tabs: INITIAL_TABS,
-  activeTabId: 'dashboard',
+  activeTabId: codexEnabled ? 'codex' : 'dashboard',
 
   openTab: (tab) => {
     const { tabs } = get();
