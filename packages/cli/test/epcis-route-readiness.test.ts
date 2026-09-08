@@ -285,6 +285,7 @@ describe('EPCIS async capture publisher readiness', () => {
           ...VALID_OBJECT_EVENT_DOC,
           epcisBody: { eventList: VALID_OBJECT_EVENT_DOC.epcisBody!.eventList.map((event) => ({
             ...event, '@type': ['https://gs1.github.io/EPCIS/ObjectEvent'],
+            'http://dkg.io/ontology/epcisEventType': { '@id': 'https://gs1.github.io/EPCIS/ObjectEvent' },
           })) },
         } },
         // 3825614158 — the authenticated submitter is stamped as the admission owner on every
@@ -321,6 +322,7 @@ describe('EPCIS async capture publisher readiness', () => {
           ...VALID_OBJECT_EVENT_DOC,
           epcisBody: { eventList: VALID_OBJECT_EVENT_DOC.epcisBody!.eventList.map((event) => ({
             ...event, '@type': ['https://gs1.github.io/EPCIS/ObjectEvent'],
+            'http://dkg.io/ontology/epcisEventType': { '@id': 'https://gs1.github.io/EPCIS/ObjectEvent' },
           })) },
         } },
         opts: { subGraphName: 'research', admittedByAgentAddress: '0x0' },
