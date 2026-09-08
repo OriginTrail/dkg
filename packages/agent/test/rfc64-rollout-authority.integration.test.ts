@@ -9,6 +9,7 @@ import {
   computeAuthorCatalogScopeDigestV1,
   createOperationContext,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
+  encodeCanonicalCgSharedPublicRootProjectionV1,
   projectCanonicalGraphScopedAuthorSealRowsV1,
   SYSTEM_CONTEXT_GRAPHS,
   type AssertionSeal,
@@ -826,6 +827,71 @@ describe('RFC-64 rollout authority integration', () => {
     await heldMutation;
 
     await expect(replay).rejects.toThrow(/inventory changed before replay snapshot/u);
+  });
+
+  it('refreshes a scoped replay after its current head advances before lock acquisition', async () => {
+    const { provider, persistence, publication, scope, applied } =
+      await startAppliedOpenReplayProvider('scoped-replay-head-race');
+    const signer = Object.freeze({
+      address: AUTHOR,
+      signMessage: (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest),
+    });
+    const successor = await provider.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+      scope,
+      author: signer,
+      asset: Object.freeze({
+        assertionCoordinate: 'scoped-replay-head-race' as never,
+        projectionBytes: encodeCanonicalCgSharedPublicRootProjectionV1(PROJECTION_QUADS),
+        seal: await authorSeal(101n),
+      }),
+      deployment: DEPLOYMENT,
+      peers: [],
+      catalogIssuerDelegationEffectiveAt: '1773899999000' as TimestampMsV1,
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    });
+    persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+      ...applied,
+      expectedCurrentCatalogHeadDigest: successor.currentCatalogHeadDigest,
+    });
+    vi.spyOn((provider as any).router, 'send').mockResolvedValue(Uint8Array.of(1));
+
+    let releaseMutation!: () => void;
+    let markMutationEntered!: () => void;
+    const mutationGate = new Promise<void>((resolve) => { releaseMutation = resolve; });
+    const mutationEntered = new Promise<void>((resolve) => { markMutationEntered = resolve; });
+    const heldMutation = (provider as any).rfc64CatalogMutationCoordinatorV1.run(
+      scope,
+      async () => {
+        markMutationEntered();
+        await mutationGate;
+      },
+    );
+    await mutationEntered;
+
+    const replay = provider.reannounceRfc64CatalogHeadsToPeerV1(
+      '12D3KooWScopedReplayHeadRacePeer',
+      Object.freeze({
+        kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        policyDigest: publication.announcement.policyDigest,
+      }),
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+      ...successor,
+      expectedCurrentCatalogHeadDigest: applied.currentCatalogHeadDigest,
+    });
+    releaseMutation();
+    await heldMutation;
+
+    await expect(replay).resolves.toMatchObject({
+      announced: 1,
+      failed: 0,
+      manifest: [expect.objectContaining({
+        catalogHeadObjectDigest: successor.currentCatalogHeadDigest,
+      })],
+    });
   });
 
   it('keeps system control graphs on durable sync under default catalog responsibility', async () => {

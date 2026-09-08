@@ -500,6 +500,25 @@ function rfc64CatalogReplayInventoryFingerprintV1(
     .join('\n');
 }
 
+function rfc64CatalogReplayEntriesFingerprintV1(
+  entries: readonly Rfc64CatalogReplayHeadV1[],
+): string {
+  return entries
+    .map(({ head }) => [
+      computeAuthorCatalogScopeDigestV1(deriveAuthorCatalogScopeFromHeadV1(head.payload)),
+      head.payload.authorAddress,
+      head.objectDigest,
+    ].join(':'))
+    .sort()
+    .join('\n');
+}
+
+function rfc64CatalogReplayMutationScopeKeyV1(
+  scope: Readonly<AuthorCatalogScopeV1>,
+): string {
+  return `${computeAuthorCatalogScopeDigestV1(scope)}\0${scope.authorAddress}`;
+}
+
 type Rfc64CatalogReplayAdmissionV1 = Readonly<{
   status: 'admitted';
   /** True only for the caller that created and owns the unique completion. */
@@ -2681,20 +2700,25 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }
     let announced = 0;
     let failed = 0;
-    const replayInventoryFingerprint = rfc64CatalogReplayInventoryFingerprintV1(
-      persistence.inventory.listAppliedCatalogHeadsV1(),
-    );
+    const replayInventoryFingerprint = requestedScope === undefined
+      ? rfc64CatalogReplayInventoryFingerprintV1(
+          persistence.inventory.listAppliedCatalogHeadsV1(),
+        )
+      : null;
     const index = await this.readRfc64CatalogReplayIndexV1();
-    const entries = requestedScope === undefined
+    const replayScopeKey = requestedScope === undefined
+      ? null
+      : rfc64CatalogReplayScopeKeyV1(
+          requestedScope.networkId,
+          requestedScope.contextGraphId,
+        );
+    const entries = replayScopeKey === null
       ? [...index.values()].flat()
-      : index.get(rfc64CatalogReplayScopeKeyV1(
-        requestedScope.networkId,
-        requestedScope.contextGraphId,
-      )) ?? [];
+      : index.get(replayScopeKey) ?? [];
     const replayScopes = [...new Map(entries.map(({ head }) => {
       const scope = deriveAuthorCatalogScopeFromHeadV1(head.payload);
       return [
-        `${computeAuthorCatalogScopeDigestV1(scope)}\0${scope.authorAddress}`,
+        rfc64CatalogReplayMutationScopeKeyV1(scope),
         scope,
       ] as const;
     })).entries()]
@@ -2712,13 +2736,35 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       );
     };
     return runWithReplayScopesLocked(0, async () => {
-      if (rfc64CatalogReplayInventoryFingerprintV1(
-        persistence.inventory.listAppliedCatalogHeadsV1(),
-      ) !== replayInventoryFingerprint) {
-        throw new Error('RFC-64 durable catalog inventory changed before replay snapshot');
+      let replayEntries = entries;
+      let scopedReplayFingerprint: string | null = null;
+      if (replayScopeKey === null) {
+        if (rfc64CatalogReplayInventoryFingerprintV1(
+          persistence.inventory.listAppliedCatalogHeadsV1(),
+        ) !== replayInventoryFingerprint) {
+          throw new Error('RFC-64 durable catalog inventory changed before replay snapshot');
+        }
+      } else {
+        // The first index read discovers the author scopes whose mutation locks
+        // must be held. Once they are held, refresh the requested CG so a head
+        // advance that raced lock acquisition is replayed instead of leaving
+        // the receiver permanently fenced until a later peer event.
+        replayEntries = (await this.readRfc64CatalogReplayIndexV1())
+          .get(replayScopeKey) ?? [];
+        const lockedScopes = new Set(replayScopes.map(
+          (scope) => rfc64CatalogReplayMutationScopeKeyV1(scope),
+        ));
+        if (replayEntries.some(({ head }) => !lockedScopes.has(
+          rfc64CatalogReplayMutationScopeKeyV1(
+            deriveAuthorCatalogScopeFromHeadV1(head.payload),
+          ),
+        ))) {
+          throw new Error('RFC-64 scoped catalog inventory changed before replay snapshot');
+        }
+        scopedReplayFingerprint = rfc64CatalogReplayEntriesFingerprintV1(replayEntries);
       }
       const manifest: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
-      for (const { head } of entries) {
+      for (const { head } of replayEntries) {
         const servingAuthority = this.resolveRfc64CatalogServingAuthorityV1(
           head.payload.contextGraphId,
         );
@@ -2778,10 +2824,19 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           failed += 1;
         }
       }
-      if (rfc64CatalogReplayInventoryFingerprintV1(
-        persistence.inventory.listAppliedCatalogHeadsV1(),
-      ) !== replayInventoryFingerprint) {
-        throw new Error('RFC-64 durable catalog inventory changed during replay');
+      if (replayScopeKey === null) {
+        if (rfc64CatalogReplayInventoryFingerprintV1(
+          persistence.inventory.listAppliedCatalogHeadsV1(),
+        ) !== replayInventoryFingerprint) {
+          throw new Error('RFC-64 durable catalog inventory changed during replay');
+        }
+      } else {
+        const currentEntries = (await this.readRfc64CatalogReplayIndexV1())
+          .get(replayScopeKey) ?? [];
+        if (rfc64CatalogReplayEntriesFingerprintV1(currentEntries)
+          !== scopedReplayFingerprint) {
+          throw new Error('RFC-64 scoped catalog inventory changed during replay');
+        }
       }
       return Object.freeze({
         announced,
