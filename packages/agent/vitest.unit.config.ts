@@ -18,6 +18,10 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      "test/private-swm-recovery-budget.test.ts",
+      "test/private-swm-recovery-lifecycle-budget.test.ts",
+      "test/sync-work-admission.test.ts",
+      "test/sync-work-admission-lifecycle.test.ts",
       ...RFC64_UNIT_TESTS,
       "test/endorse.test.ts",
       "test/ack-candidate-pool.test.ts",

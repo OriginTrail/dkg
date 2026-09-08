@@ -1,11 +1,13 @@
 import { monotonicNow } from '../catchup-policy.js';
+import { createSyncWorkAdmission, UNRESTRICTED_SYNC_WORK, type SyncWorkAdmission } from '../work-admission.js';
 
 export const DEFAULT_PRIVATE_SWM_RECOVERY_BUDGET_MS = 600_000;
 
 /** One elapsed-time allowance shared by all rounds/pages in a recovery job. */
-export interface SwmRecoveryTimeBudget {
-  readonly remainingMs: () => number;
-}
+export type PrivateSwmRecoveryWindow = SyncWorkAdmission & Readonly<{
+  kind: 'budgeted' | 'initial-round-only';
+  canStartRound: (round: number) => boolean;
+}>;
 
 export function resolvePrivateSwmRecoveryBudgetMs(
   raw: string | undefined = process.env.DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS,
@@ -19,15 +21,17 @@ export function resolvePrivateSwmRecoveryBudgetMs(
 }
 
 /** Zero disables extra rounds; the initial round retains its existing deadline. */
-export function createPrivateSwmRecoveryTimeBudget(
-  budgetMs = resolvePrivateSwmRecoveryBudgetMs(),
-): SwmRecoveryTimeBudget | undefined {
-  if (budgetMs === 0) return undefined;
+export function createPrivateSwmRecoveryWindow(budgetMs: number): PrivateSwmRecoveryWindow {
+  if (budgetMs === 0) return Object.freeze({
+    ...UNRESTRICTED_SYNC_WORK,
+    kind: 'initial-round-only',
+    canStartRound: (round: number) => round === 1,
+  });
   const expiresAt = monotonicNow() + budgetMs;
-  return Object.freeze({ remainingMs: () => Math.max(0, expiresAt - monotonicNow()) });
-}
-
-/** Transport deadlines use wall time; rebuild the cap from the remaining duration. */
-export function recoveryFetchDeadline(deadline: number, budget?: SwmRecoveryTimeBudget): number {
-  return budget === undefined ? deadline : Math.min(deadline, Date.now() + budget.remainingMs());
+  const remainingMs = () => Math.max(0, expiresAt - monotonicNow());
+  return Object.freeze({
+    ...createSyncWorkAdmission(remainingMs),
+    kind: 'budgeted',
+    canStartRound: (round: number) => round === 1 || remainingMs() > 0,
+  });
 }

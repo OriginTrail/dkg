@@ -8,7 +8,6 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
-import type { SwmRecoveryTimeBudget } from './sync/requester/private-swm-recovery-budget.js';
 import { createHash } from 'node:crypto';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
@@ -343,7 +342,6 @@ import {
   type ContextGraphSyncWork,
 } from './sync/requester/ordered-sync.js';
 import {
-  recoverContextGraphSwmWithProgressRetries,
   type RecoverContextGraphSwmResult,
 } from './sync/requester/swm-recovery.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
@@ -7082,6 +7080,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       manifestDigest,
       manifestPrefixDigestAtOffset,
       shouldStopAfterPage,
+      workAdmission,
       // Exact VM recovery filter. Included in checkpoint, coalescing, wire and
       // responder-session identities so offsets never cross asset batches.
       assetUals,
@@ -7099,8 +7098,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       : exactSyncPhaseAccumulationLimits(assetUals);
     // A caller signal defines an operation-owned cancellation contract. Do not
     // place those fetches in the shared page map: even equal wall-clock
-    // deadlines do not make independently abortable operations compatible.
-    const coalescingKey = signal || shouldStopAfterPage
+    // deadlines do not make independently abortable or budgeted operations compatible.
+    const coalescingKey = signal || shouldStopAfterPage || workAdmission
       ? null
       : syncPageFetchCoalescingKey({
         remotePeerId,
@@ -7203,6 +7202,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       manifestDigest,
       manifestPrefixDigestAtOffset,
       shouldStopAfterPage,
+      workAdmission,
       buildSyncRequest: this.buildSyncRequest.bind(this),
       parseAndFilter: (nquadsText, targetGraphUri, targetContextGraphId) => {
         if (phase === 'snapshot') {
@@ -7484,14 +7484,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const recoverPrivateContextGraph = (
       contextGraphId: string,
       recoveryLease?: Rfc64SwmRecoveryTargetLeaseV1,
-      timeBudget?: SwmRecoveryTimeBudget,
+      onRetry?: Parameters<typeof recoveryExecutor.recoverPrivateTarget>[0]['onRetry'],
     ) => recoveryExecutor.recoverPrivateTarget({
       remotePeerId,
       contextGraphId,
       includeRootScope: requestedScope !== null
         || this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed,
       recoveryGuard: recoveryLease,
-      timeBudget,
+      onRetry,
     });
     if (
       requestedTargets !== null
@@ -7677,30 +7677,33 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           run: async (): Promise<SharedMemorySyncResult> => {
             const recoveryLease = recoveryLeaseFor(contextGraphId);
             try {
-              const recovered = await recoverContextGraphSwmWithProgressRetries({
-                recover: (timeBudget) => recoverPrivateContextGraph(contextGraphId, recoveryLease, timeBudget),
-                onRetry: ({ completedRound, readySnapshots, totalSnapshots }) => {
+              const recovered = await recoverPrivateContextGraph(
+                contextGraphId, recoveryLease,
+                ({ completedRound, readySnapshots, totalSnapshots }) => {
                   this.log.info(
                     ctx,
                     `Continuing private SWM recovery for "${contextGraphId}" from ${remotePeerId.slice(-8)} `
                     + `after round ${completedRound}: snapshots=${readySnapshots}/${totalSnapshots}`,
                   );
                 },
-              });
+              );
               const result = emptySharedMemorySyncResult();
               result.insertedDataTriples = recovered.insertedDataQuads;
               result.insertedMetaTriples = recovered.insertedMetaQuads;
               result.insertedTriples = recovered.insertedDataQuads + recovered.insertedMetaQuads;
               result.droppedDataTriples = recovered.droppedDataTriples;
-              // A deadline-bounded recovery returns `completed=false` without
-              // mutating the store. Keep that retry signal inside this work item
-              // so every requester lane shares the same orchestration loop.
+              // An incomplete recovery can retain whole verified KAs, but must
+              // remain retryable. A local admission yield is not a peer failure.
               if (recovered.completed) {
                 result.completedPhases = 1;
                 completedTargetKeys.add(sharedMemoryRecoveryTargetKey(target));
               } else {
                 result.failedPhases = 1;
-                result.backoffWorthyFailures = 1;
+                if (recovered.incompleteReason === 'local-budget-yield') {
+                  result.snapshotPlaneIncomplete = 1;
+                } else {
+                  result.backoffWorthyFailures = 1;
+                }
               }
               return result;
             } catch (error) {

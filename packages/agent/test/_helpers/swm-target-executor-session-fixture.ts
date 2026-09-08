@@ -1,3 +1,4 @@
+import { resolvePrivateSwmRecoveryBudgetMs } from '../../src/sync/requester/private-swm-recovery-budget.js';
 import { deleteSyncPageCheckpoint } from
   '../../src/sync/requester/page-fetch.js';
 import {
@@ -44,6 +45,7 @@ export function createSwmTargetExecutorSessionFactoryForTest(owner: {
   };
 }): () => SwmTargetExecutorV1 {
   const factory = new SwmTargetExecutorSessionFactoryV1({
+      privateRecoveryBudgetMs: resolvePrivateSwmRecoveryBudgetMs(),
     store: owner.store,
     writeLocks: owner.writeLocks ?? new Map(),
     listSubGraphs: owner.listSubGraphs,

@@ -1,3 +1,4 @@
+import { assertSyncWorkAdmission, SyncWorkAdmissionExhaustedError, UNRESTRICTED_SYNC_WORK, type SyncWorkAdmission } from '../sync/work-admission.js';
 import { randomUUID } from 'node:crypto';
 import { withRetry, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import {
@@ -90,6 +91,7 @@ export function createSingleUseSyncSender(
  * cached stale denial from replaying onto a later attempt.
  */
 interface SyncSendParams {
+  readonly workAdmission?: SyncWorkAdmission;
   remotePeerId: string;
   timeoutMs: number;
   retryAttempts: number;
@@ -130,6 +132,13 @@ interface SyncSendParams {
 }
 
 export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Array> {
+  const workAdmission = params.workAdmission ?? UNRESTRICTED_SYNC_WORK;
+  // A budget expiring during backoff must not hide the send that already failed.
+  let lastAttemptFailure: unknown;
+  const admitAttempt = () => {
+    if (!workAdmission.canAdmitWork() && lastAttemptFailure !== undefined) throw lastAttemptFailure;
+    assertSyncWorkAdmission(workAdmission);
+  };
   return withSpan(
     'sync.request',
     async () => {
@@ -154,6 +163,7 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
       let outcome: SyncAttemptOutcome | undefined;
       try {
         throwIfAborted(params.signal);
+        admitAttempt();
         let requestBytes: Uint8Array;
         try {
           requestBytes = await params.requestFactory();
@@ -164,6 +174,9 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
           throw toSyncLocalRequestFailureError(error);
         }
         throwIfAborted(params.signal);
+        admitAttempt();
+        const timeoutMs = workAdmission.capTimeout(params.timeoutMs);
+        if (timeoutMs <= 0) throw lastAttemptFailure ?? new SyncWorkAdmissionExhaustedError();
         const messageId = randomUUID();
         let responseBytes: Uint8Array;
         sendStarted = true;
@@ -173,7 +186,7 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
             params.remotePeerId,
             params.protocolId,
             requestBytes,
-            params.timeoutMs,
+            timeoutMs,
             messageId,
             params.signal,
           );
@@ -203,6 +216,7 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
         outcome = 'response';
         return responseBytes;
       } catch (error) {
+        lastAttemptFailure = error;
         if (outcome === undefined && responded) {
           // The send resolved, so this is a post-receipt failure. Only the
           // validator's own rejection is `validation_rejected`; everything else
@@ -230,7 +244,9 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
       maxAttempts: params.retryAttempts,
       baseDelayMs: 1000,
       signal: params.signal,
-      isRetryable: () => params.signal?.aborted !== true,
+      isRetryable: (error) => params.signal?.aborted !== true
+        && !(error instanceof SyncWorkAdmissionExhaustedError)
+        && workAdmission.canAdmitWork(),
       onRetry: params.onRetry,
     },
         );

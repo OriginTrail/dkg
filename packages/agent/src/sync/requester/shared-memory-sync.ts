@@ -1,4 +1,4 @@
-import { recoveryFetchDeadline, type SwmRecoveryTimeBudget } from './private-swm-recovery-budget.js';
+import { UNRESTRICTED_SYNC_WORK, type SyncWorkAdmission } from '../work-admission.js';
 import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -1593,8 +1593,8 @@ export async function syncPublicSnapshotsForMeta(params: {
   remotePeerId: string;
   contextGraphId: string;
   deadline: number;
-  /** Optional monotonic private-recovery budget, shared across rounds. */
-  timeBudget?: SwmRecoveryTimeBudget;
+  /** Admission owned by the enclosing operation, shared by cache checks and transport. */
+  workAdmission?: SyncWorkAdmission;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   deleteCheckpoint: (key: string) => void;
@@ -1636,6 +1636,7 @@ export async function syncPublicSnapshotsForMeta(params: {
    */
   yieldedAtDeadline: boolean;
 }> {
+  const workAdmission = params.workAdmission ?? UNRESTRICTED_SYNC_WORK;
   const executionBoundary = params.executionBoundary
     ?? createRecoveryExecutionAdmission();
   executionBoundary.assertCurrent();
@@ -1733,7 +1734,7 @@ export async function syncPublicSnapshotsForMeta(params: {
     //
     // Never mid-KA: a snapshot is applied whole or not at all, so stopping here
     // can never leave a partially materialized asset.
-    if (Date.now() >= params.deadline || (params.timeBudget?.remainingMs() ?? Infinity) <= 0) {
+    if (Date.now() >= params.deadline || !workAdmission.canAdmitWork()) {
       yieldedAtDeadline = true;
       abandonFrom(index);
       break;
@@ -1753,15 +1754,15 @@ export async function syncPublicSnapshotsForMeta(params: {
 
       // Cache validation can consume the allowance without producing a hit.
       // Admit no new transport after that local work exhausts the budget.
-      if (Date.now() >= params.deadline || (params.timeBudget?.remainingMs() ?? Infinity) <= 0) {
+      if (Date.now() >= params.deadline || !workAdmission.canAdmitWork()) {
         yieldedAtDeadline = true;
         abandonFrom(index);
         break;
       }
 
       const snapshotOptions: SyncPageFetchOptions = executionBoundary.signal === undefined
-        ? { snapshotRef: snapshot.ref }
-        : { snapshotRef: snapshot.ref, signal: executionBoundary.signal };
+        ? { snapshotRef: snapshot.ref, ...(params.workAdmission ? { workAdmission } : {}) }
+        : { snapshotRef: snapshot.ref, signal: executionBoundary.signal, ...(params.workAdmission ? { workAdmission } : {}) };
       const result = await executionBoundary.read(() => params.fetchSyncPages(
         params.ctx,
         params.remotePeerId,
@@ -1769,12 +1770,13 @@ export async function syncPublicSnapshotsForMeta(params: {
         true,
         'snapshot',
         '',
-        recoveryFetchDeadline(params.deadline, params.timeBudget),
+        workAdmission.capDeadline(params.deadline),
         snapshotOptions,
       ));
       bytesReceived += result.bytesReceived;
       resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
       timedOutPhases += result.timedOut ? 1 : 0;
+      yieldedAtDeadline ||= result.localBudgetYielded === true;
       if (result.completed) {
         executionBoundary.admitSyncMutation(() => params.deleteCheckpoint(result.checkpointKey));
       }

@@ -1,3 +1,4 @@
+import { assertSyncWorkAdmission, SyncWorkAdmissionExhaustedError, UNRESTRICTED_SYNC_WORK, type SyncWorkAdmission } from '../work-admission.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
@@ -167,6 +168,8 @@ function createResponderSessionId(includeSharedMemory: boolean, phase: SyncPhase
 }
 
 export interface SyncPageResult {
+  /** Incomplete because the enclosing operation admitted no further work. */
+  localBudgetYielded?: boolean;
   quads: Quad[];
   /** Absolute raw responder row coordinate for every retained quad. */
   quadRawOffsets?: number[];
@@ -379,6 +382,7 @@ class AdaptiveSyncPageSizer {
  * too easy for a new modifier to occupy an older modifier's slot.
  */
 export interface SyncPageFetchOptions {
+  readonly workAdmission?: SyncWorkAdmission;
   readonly snapshotRef?: string;
   readonly sinceBatchId?: string;
   readonly signal?: AbortSignal;
@@ -428,6 +432,7 @@ export class SyncPageAccumulationLimitError extends Error {
 }
 
 interface FetchSyncPagesParams {
+  workAdmission?: SyncWorkAdmission;
   ctx: OperationContext;
   remotePeerId: string;
   contextGraphId: string;
@@ -599,6 +604,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     snapshotRef,
     deadline,
     syncPageTimeoutMs,
+    workAdmission = UNRESTRICTED_SYNC_WORK,
     syncRouterAttempts,
     syncPageRetryAttempts,
     syncPageSize,
@@ -790,6 +796,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
       syncPageTimeoutMs,
       Math.max(2000, Math.floor(Math.max(0, deadline - Date.now()) / syncRouterAttempts)),
     ),
+    workAdmission,
     retryAttempts: syncPageRetryAttempts,
     signal,
     contextGraphId,
@@ -888,6 +895,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
 
     while (true) {
       throwIfAborted(signal);
+      assertSyncWorkAdmission(workAdmission);
       if (Date.now() > deadline) {
         timedOut = true;
         break;
@@ -1030,6 +1038,22 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
       if (!usesByteBudgetPagination && parsed.totalQuads < successfulPageSize) break;
     }
   } catch (err) {
+    if (err instanceof SyncWorkAdmissionExhaustedError) {
+      if (signal?.aborted) {
+        phaseTelemetry.finish('error', allQuads.length);
+        throw asAbortError(signal.reason);
+      }
+      deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
+      phaseTelemetry.finish('local_yield', allQuads.length);
+      return {
+        quads: allQuads,
+        ...(hasCompleteQuadRawOffsetMapping ? { quadRawOffsets: allQuadRawOffsets } : {}),
+        bytesReceived, resumedFromOffset, rawResumedFromOffset, responderSessionStartedFresh,
+        ...(manifestDigest ? { manifestDigest } : {}),
+        nextOffset: offset, rawNextOffset: offset, checkpointKey,
+        completed: false, timedOut: false, localBudgetYielded: true,
+      };
+    }
     // The transport retry helper has no onRetry callback after its terminal
     // attempt. Persist one final backoff step so the next bounded continuation
     // does not repeat the same known-failing page size from scratch.

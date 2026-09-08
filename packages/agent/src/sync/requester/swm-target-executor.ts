@@ -1,4 +1,3 @@
-import type { SwmRecoveryTimeBudget } from './private-swm-recovery-budget.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /** Stable public/private target executor for graph-complete SWM recovery. */
@@ -30,8 +29,11 @@ import {
   createSharedMemorySnapshotMaterializer,
   type SharedMemorySnapshotMaterializer,
 } from './swm-snapshot-materializer.js';
+import { createPrivateSwmRecoveryWindow } from './private-swm-recovery-budget.js';
 import {
   recoverContextGraphSwm,
+  recoverContextGraphSwmWithProgressRetries,
+  type SwmRecoveryProgress,
   type RecoverContextGraphSwmResult,
 } from './swm-recovery.js';
 import {
@@ -42,6 +44,7 @@ import { insertWithOversizeGuard, type OversizeGuardHooks } from '../oversize-fi
 type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0];
 
 export interface SwmTargetExecutorPortsV1 {
+  readonly privateRecoveryBudgetMs: number;
   readonly store: TripleStore;
   readonly writeLocks: Map<string, Promise<void>>;
   readonly listSubGraphs: (
@@ -90,7 +93,7 @@ export type PublicSwmTargetV1 = Readonly<PublicSwmTargetBaseV1 & {
 }>;
 
 export interface PrivateSwmRecoveryTargetV1 {
-  readonly timeBudget?: SwmRecoveryTimeBudget;
+  readonly onRetry?: (progress: SwmRecoveryProgress) => void;
   readonly remotePeerId: string;
   readonly contextGraphId: string;
   readonly recoveryGuard?: RecoveryExecutionGuard;
@@ -126,14 +129,13 @@ export class SwmTargetExecutorV1 {
   async recoverPrivateTarget(
     target: PrivateSwmRecoveryTargetV1,
   ): Promise<RecoverContextGraphSwmResult> {
+    const window = createPrivateSwmRecoveryWindow(this.#ports.privateRecoveryBudgetMs);
     const ctx = createOperationContext('sync');
     const admission = () => this.#getSubGraphAdmission(target.contextGraphId);
-    const options: RecoverContextGraphSwmOptions = {
+    const options: Omit<RecoverContextGraphSwmOptions, 'deadline' | 'workAdmission'> = {
       ctx,
       remotePeerId: target.remotePeerId,
       contextGraphId: target.contextGraphId,
-      deadline: this.#ports.createContextGraphSyncDeadline(1),
-      timeBudget: target.timeBudget,
       fetchSyncPages: (
         requestCtx,
         peerId,
@@ -178,7 +180,15 @@ export class SwmTargetExecutorV1 {
       logWarn: this.#ports.logWarn,
       recoveryGuard: target.recoveryGuard,
     };
-    return recoverContextGraphSwm(options);
+    return recoverContextGraphSwmWithProgressRetries({
+      window,
+      onRetry: target.onRetry,
+      recover: (workAdmission) => recoverContextGraphSwm({
+        ...options,
+        deadline: this.#ports.createContextGraphSyncDeadline(1),
+        workAdmission,
+      }),
+    });
   }
 
   async syncPublicTarget(

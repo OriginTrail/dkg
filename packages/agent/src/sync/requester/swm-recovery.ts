@@ -34,11 +34,8 @@ import {
   type RecoveryExecutionGuard,
 } from './recovery-execution-guard.js';
 import { canonicalQuadKey } from './quad-key.js';
-import {
-  createPrivateSwmRecoveryTimeBudget,
-  recoveryFetchDeadline,
-  type SwmRecoveryTimeBudget,
-} from './private-swm-recovery-budget.js';
+import type { PrivateSwmRecoveryWindow } from './private-swm-recovery-budget.js';
+import { UNRESTRICTED_SYNC_WORK, type SyncWorkAdmission } from '../work-admission.js';
 import {
   isNamedSubgraphSharedMemoryDataGraph,
   isNamedSubgraphSharedMemoryMetaGraph,
@@ -89,8 +86,8 @@ export interface RecoverContextGraphSwmDeps {
   readonly contextGraphId: string;
   /** Absolute wall-clock deadline (ms) for the whole recovery. */
   readonly deadline: number;
-  /** Shared monotonic job budget; direct callers receive a fresh configured budget. */
-  readonly timeBudget?: SwmRecoveryTimeBudget;
+  /** Admission policy supplied by the owning executor. Direct rounds use their deadline. */
+  readonly workAdmission?: SyncWorkAdmission;
   readonly fetchSyncPages: (
     ctx: OperationContext,
     remotePeerId: string,
@@ -168,6 +165,8 @@ export interface RecoverContextGraphSwmDeps {
 }
 
 export interface RecoverContextGraphSwmResult {
+  /** Explicit local yield, independent of any peer response or transport failure. */
+  readonly incompleteReason?: 'local-budget-yield';
   readonly replacedRoots: number;
   readonly replacedGraphs: number;
   readonly insertedDataQuads: number;
@@ -179,6 +178,12 @@ export interface RecoverContextGraphSwmResult {
   readonly totalSnapshots: number;
   /** false if a phase hit the deadline without completing — partial, safe to retry. */
   readonly completed: boolean;
+}
+
+export interface SwmRecoveryProgress {
+  readonly completedRound: number;
+  readonly readySnapshots: number;
+  readonly totalSnapshots: number;
 }
 
 export const DEFAULT_PRIVATE_SWM_RECOVERY_MAX_ROUNDS = 6;
@@ -206,15 +211,11 @@ export const ABSOLUTE_PRIVATE_SWM_RECOVERY_MAX_ROUNDS = 24;
  * or treats an incomplete metadata/data prefix as authoritative.
  */
 export async function recoverContextGraphSwmWithProgressRetries(params: {
-  readonly recover: (timeBudget: SwmRecoveryTimeBudget | undefined) => Promise<RecoverContextGraphSwmResult>;
+  readonly window: PrivateSwmRecoveryWindow;
+  readonly recover: (workAdmission: SyncWorkAdmission) => Promise<RecoverContextGraphSwmResult>;
   readonly maxRounds?: number;
-  readonly onRetry?: (progress: {
-    readonly completedRound: number;
-    readonly readySnapshots: number;
-    readonly totalSnapshots: number;
-  }) => void;
+  readonly onRetry?: (progress: SwmRecoveryProgress) => void;
 }): Promise<RecoverContextGraphSwmResult> {
-  const timeBudget = createPrivateSwmRecoveryTimeBudget();
   const explicitMaxRounds = params.maxRounds === undefined
     ? undefined
     : Math.max(1, Math.floor(params.maxRounds));
@@ -225,8 +226,8 @@ export async function recoverContextGraphSwmWithProgressRetries(params: {
 
   for (let round = 1; round <= maxRounds; round += 1) {
     // Recheck after the retry observer too: logging must not admit a late round.
-    if (round > 1 && (timeBudget === undefined || timeBudget.remainingMs() <= 0)) break;
-    result = await params.recover(timeBudget);
+    if (!params.window.canStartRound(round)) break;
+    result = await params.recover(params.window);
     if (result.completed) return result;
 
     if (explicitMaxRounds === undefined && Number.isSafeInteger(result.totalSnapshots)) {
@@ -239,7 +240,7 @@ export async function recoverContextGraphSwmWithProgressRetries(params: {
     const madeProgress = result.readySnapshots > previousReadySnapshots;
     consecutiveNoProgressRounds = madeProgress ? 0 : consecutiveNoProgressRounds + 1;
     if (round >= maxRounds || consecutiveNoProgressRounds >= 2
-      || timeBudget === undefined || timeBudget.remainingMs() <= 0) return result;
+      || !params.window.canStartRound(round + 1)) return result;
 
     previousReadySnapshots = result.readySnapshots;
     params.onRetry?.({
@@ -260,12 +261,17 @@ async function fetchPhaseFully(
   boundary: RecoveryExecutionAdmission,
   phase: RecoverableSyncPhase,
   graphUri: string,
-): Promise<{ quads: Quad[]; completed: boolean }> {
+): Promise<{ quads: Quad[]; completed: boolean; localBudgetYielded?: boolean }> {
+  const workAdmission = deps.workAdmission ?? UNRESTRICTED_SYNC_WORK;
+  let localBudgetYielded = false;
   const maxPages = deps.maxPagesPerPhase ?? DEFAULT_MAX_PAGES_PER_PHASE;
   const all: Quad[] = [];
   let lastCheckpointKey: string | undefined;
   for (let i = 0; i < maxPages; i++) {
-    if (Date.now() >= deps.deadline || (deps.timeBudget?.remainingMs() ?? Infinity) <= 0) break;
+    if (Date.now() >= deps.deadline || !workAdmission.canAdmitWork()) {
+      localBudgetYielded = true;
+      break;
+    }
     const page = await boundary.read(() => deps.fetchSyncPages(
       deps.ctx,
       deps.remotePeerId,
@@ -273,9 +279,10 @@ async function fetchPhaseFully(
       true,
       phase,
       graphUri,
-      recoveryFetchDeadline(deps.deadline, deps.timeBudget),
-      { signal: boundary.signal },
+      workAdmission.capDeadline(deps.deadline),
+      { signal: boundary.signal, workAdmission },
     ));
+    localBudgetYielded ||= page.localBudgetYielded === true;
     appendInPlace(all, page.quads);
     lastCheckpointKey = page.checkpointKey;
     if (page.completed) {
@@ -283,7 +290,7 @@ async function fetchPhaseFully(
       return { quads: all, completed: true };
     }
     // Not completed (deadline or partial). Stop if no forward progress.
-    if (page.nextOffset <= page.resumedFromOffset) break;
+    if (page.localBudgetYielded || page.timedOut || page.nextOffset <= page.resumedFromOffset) break;
     boundary.admitSyncMutation(() => deps.setCheckpoint(page.checkpointKey, page.nextOffset));
   }
   // Incomplete: the accumulated `all` is a prefix that the caller MUST NOT
@@ -295,19 +302,18 @@ async function fetchPhaseFully(
   if (lastCheckpointKey !== undefined) {
     boundary.admitSyncMutation(() => deps.deleteCheckpoint(lastCheckpointKey!));
   }
-  return { quads: all, completed: false };
+  return { quads: all, completed: false, localBudgetYielded };
 }
 
 export async function recoverContextGraphSwm(
   deps: RecoverContextGraphSwmDeps,
 ): Promise<RecoverContextGraphSwmResult> {
-  const budgetedDeps = { ...deps, timeBudget: deps.timeBudget ?? createPrivateSwmRecoveryTimeBudget() };
   const boundary = createRecoveryExecutionAdmission(deps.recoveryGuard);
   boundary.assertCurrent();
   return withKeyedLocks(
     deps.writeLocks,
     [contextGraphSwmRecoveryWriteLockKey(deps.contextGraphId)],
-    () => recoverContextGraphSwmUnlocked(budgetedDeps, boundary),
+    () => recoverContextGraphSwmUnlocked(deps, boundary),
   );
 }
 
@@ -346,6 +352,7 @@ async function recoverContextGraphSwmUnlocked(
       droppedDataTriples: 0,
       readySnapshots: 0,
       totalSnapshots: 0,
+      ...(meta.localBudgetYielded ? { incompleteReason: 'local-budget-yield' as const } : {}),
       completed: false,
     };
   }
@@ -483,7 +490,7 @@ async function recoverContextGraphSwmUnlocked(
       remotePeerId: deps.remotePeerId,
       contextGraphId: deps.contextGraphId,
       deadline: deps.deadline,
-      timeBudget: deps.timeBudget,
+      workAdmission: deps.workAdmission,
       metaQuads: activeGraphMeta,
       publicSnapshotStore: deps.publicSnapshotStore,
       // Raw ports: syncPublicSnapshotsForMeta is the sole owner of admission,
@@ -511,6 +518,7 @@ async function recoverContextGraphSwmUnlocked(
         insertedMetaQuads: incrementallyInsertedMetaQuads,
         droppedDataTriples: 0,
         ...snapshotProgress,
+        ...(snapshotSync.yieldedAtDeadline ? { incompleteReason: 'local-budget-yield' as const } : {}),
         completed: false,
       };
     }
@@ -522,7 +530,7 @@ async function recoverContextGraphSwmUnlocked(
   const needsAggregateData = hasLegacyRoots || hasGraphBackedSnapshots;
   const data = needsAggregateData
     ? await fetchPhaseFully(deps, boundary, 'data', wsGraph)
-    : { quads: [] as Quad[], completed: true };
+    : { quads: [] as Quad[], completed: true, localBudgetYielded: false };
 
   // Legacy row pagination can cut a root (or a graph-backed snapshot) in the
   // middle. Preserve the existing all-or-nothing gate for that compatibility
@@ -540,6 +548,7 @@ async function recoverContextGraphSwmUnlocked(
       insertedMetaQuads: incrementallyInsertedMetaQuads,
       droppedDataTriples: 0,
       ...snapshotProgress,
+      ...(data.localBudgetYielded ? { incompleteReason: 'local-budget-yield' as const } : {}),
       completed: false,
     };
   }

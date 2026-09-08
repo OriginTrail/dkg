@@ -1,3 +1,4 @@
+import { resolvePrivateSwmRecoveryBudgetMs } from '../src/sync/requester/private-swm-recovery-budget.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
@@ -16,10 +17,12 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
   const stores: OxigraphStore[] = [];
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await Promise.all(stores.splice(0).map((store) => store.close()));
   });
 
   it('pins recovery authorization and the lease signal on private page fetches', async () => {
+    vi.spyOn(performance, 'now').mockReturnValue(0);
     const store = new OxigraphStore();
     stores.push(store);
     const controller = new AbortController();
@@ -35,6 +38,7 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
       }),
     );
     const executor = new SwmTargetExecutorV1({
+      privateRecoveryBudgetMs: 50,
       store,
       writeLocks: new Map(),
       listSubGraphs: async () => [],
@@ -70,7 +74,6 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
 
     const startedAt = Date.now();
     await expect(executor.recoverPrivateTarget({
-      timeBudget: { remainingMs: () => 50 },
       remotePeerId: '12D3KooWCompletePrivateProvider',
       contextGraphId: 'private-rfc64-context-graph',
       recoveryGuard: {
@@ -153,6 +156,7 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
       return owned;
     };
     const executor = new SwmTargetExecutorV1({
+      privateRecoveryBudgetMs: resolvePrivateSwmRecoveryBudgetMs(),
       store,
       writeLocks: new Map(),
       listSubGraphs: async () => [],

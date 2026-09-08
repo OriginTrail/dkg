@@ -1,3 +1,4 @@
+import { resolvePrivateSwmRecoveryBudgetMs } from '../src/sync/requester/private-swm-recovery-budget.js';
 import { describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 
@@ -14,6 +15,7 @@ describe('SWM target executor session factory', () => {
     const store = new OxigraphStore();
     const listSubGraphs = vi.fn(async () => []);
     const ports: SwmTargetExecutorPortsV1 = {
+      privateRecoveryBudgetMs: resolvePrivateSwmRecoveryBudgetMs(),
       store,
       writeLocks: new Map(),
       listSubGraphs,
@@ -25,6 +27,7 @@ describe('SWM target executor session factory', () => {
         nextOffset: 0,
         checkpointKey: `factory:${phase}`,
         completed: true,
+        timedOut: false,
       }),
       processSharedMemoryBatch: async () => ({
         verifiedData: [],
