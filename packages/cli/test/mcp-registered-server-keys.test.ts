@@ -28,7 +28,7 @@ afterEach(async () => {
 async function target(
   filename: string,
   body: string,
-  shape: McpClientConfigShape = { format: 'json', entryPath: 'mcpServers.dkg' },
+  shape: McpClientConfigShape = { format: 'json', serverContainer: 'mcpServers' },
 ): Promise<ClientTarget> {
   const configPath = join(dir, filename);
   await writeFile(configPath, body, 'utf8');
@@ -55,9 +55,9 @@ describe('readRegisteredServerKeys', () => {
 
   // VSCode + Copilot Chat uses `servers.<name>` rather than `mcpServers.<name>`.
   // A detector hardcoding `mcpServers` would silently report nothing here.
-  it('honours a non-default entryPath container', async () => {
+  it('honours a non-default serverContainer container', async () => {
     const t = await target('vscode.json', JSON.stringify({ servers: { dkg: blk(), mine: blk() } }), {
-      format: 'json', entryPath: 'servers.dkg',
+      format: 'json', serverContainer: 'servers',
     });
     expect(keysOf(readRegisteredServerKeys(t))).toEqual(['dkg', 'mine']);
   });
@@ -66,7 +66,7 @@ describe('readRegisteredServerKeys', () => {
   it('reads a TOML config with its own container', async () => {
     const t = await target('codex.toml', '[mcp_servers.dkg]\ncommand = "x"\n\n[mcp_servers.mine]\ncommand = "y"\n', {
       format: 'toml',
-      entryPath: 'mcp_servers.dkg',
+      serverContainer: 'mcp_servers',
     });
     expect(keysOf(readRegisteredServerKeys(t))).toEqual(['dkg', 'mine']);
   });
@@ -106,7 +106,7 @@ describe('readRegisteredServerKeys', () => {
   it('treats an absent config file as a SUCCESSFUL probe with no servers', async () => {
     // Nothing to read is a real answer: this client registered nothing.
     const t: ClientTarget = {
-      id: 'cursor', location: 'native', format: 'json', entryPath: 'mcpServers.dkg',
+      id: 'cursor', location: 'native', format: 'json', serverContainer: 'mcpServers',
       name: 'Absent',
       configPath: join(dir, 'nope.json'),
       displayPath: 'nope.json',

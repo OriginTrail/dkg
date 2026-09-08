@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { parse as parseJsonc } from 'jsonc-parser';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -28,13 +29,13 @@ function target(name: string, container: 'mcpServers' | 'servers' | 'mcp_servers
   const configPath = join(root, `${name}.${format}`);
   const id = ({ Cursor: 'cursor', 'Claude Code': 'claude-code', 'Claude Desktop': 'claude-desktop', Windsurf: 'windsurf', VSCode: 'vscode', Cline: 'cline', 'Codex CLI': 'codex-cli' } as Record<string, McpClientId>)[name] ?? 'cursor';
   const shape: McpClientConfigShape = format === 'toml'
-    ? { format, entryPath: 'mcp_servers.dkg' }
-    : format === 'jsonc' ? { format, entryPath: 'servers.dkg' }
-    : { format, entryPath: container === 'servers' ? 'servers.dkg' : 'mcpServers.dkg' };
+    ? { format, serverContainer: 'mcp_servers' }
+    : format === 'jsonc' ? { format, serverContainer: 'servers' }
+    : { format, serverContainer: container === 'servers' ? 'servers' : 'mcpServers' };
   return { ...shape, id, location: 'native', name, configPath, displayPath: configPath };
 }
 function seed(client: ClientTarget, onlyDkg = false): void {
-  const container = client.entryPath!.split('.')[0];
+  const container = client.serverContainer;
   const body = { setting: 'keep', [container]: {
     dkg: { command: 'dkg', args: ['mcp', 'serve'] },
     ...(onlyDkg ? {} : { other: { command: 'other-server', custom: 'keep' } }),
@@ -68,6 +69,62 @@ describe('MCP registration removal', () => {
     expect(fs.readlinkSync(client.configPath)).toBe(real.configPath);
     expect(read(real).mcpServers).toEqual({ other: { command: 'other-server', custom: 'keep' } });
     expect(fs.readdirSync(root)).toEqual(entries);
+  });
+
+  it.each([false, true])('preserves destination ownership across an atomic edit (symlink=%s)', (symlink) => {
+    const real = target('owner-real');
+    seed(real);
+    const original = fs.statSync(real.configPath);
+    if (process.platform !== 'win32') {
+      const alternateGroup = (process.getgroups?.() ?? []).find((gid) => gid !== original.gid);
+      if (alternateGroup !== undefined) fs.chownSync(real.configPath, original.uid, alternateGroup);
+    }
+    const before = fs.statSync(real.configPath);
+    const path = symlink ? join(root, 'owner-link.json') : real.configPath;
+    if (symlink) fs.symlinkSync(real.configPath, path);
+    const entries = fs.readdirSync(root);
+    writeMcpConfigAtomic(path, '{}\n');
+    const after = fs.statSync(real.configPath);
+    expect({ uid: after.uid, gid: after.gid, mode: after.mode }).toEqual({ uid: before.uid, gid: before.gid, mode: before.mode });
+    expect(readFileSync(real.configPath, 'utf8')).toBe('{}\n');
+    if (symlink) expect(fs.lstatSync(path).isSymbolicLink()).toBe(true);
+    expect(fs.readdirSync(root)).toEqual(entries);
+  });
+
+  it('leaves the original and symlink intact when ownership preservation fails', () => {
+    if (process.platform === 'win32') return;
+    const client = target('ownership-failure');
+    seed(client);
+    const link = join(root, 'ownership-link.json');
+    fs.symlinkSync(client.configPath, link);
+    const raw = readFileSync(client.configPath, 'utf8');
+    const files = fs.readdirSync(root);
+    const actualFstat = fs.fstatSync;
+    vi.spyOn(fs, 'fstatSync').mockImplementationOnce((fd) => {
+      const copied = actualFstat(fd);
+      copied.uid += 1;
+      return copied;
+    });
+    vi.spyOn(fs, 'fchownSync').mockImplementationOnce(() => { throw new Error('ownership preservation denied'); });
+    expect(() => writeMcpConfigAtomic(link, '{}\n')).toThrow('ownership preservation denied');
+    expect(fs.renameSync).not.toHaveBeenCalled();
+    expect(readFileSync(client.configPath, 'utf8')).toBe(raw);
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(fs.readdirSync(root)).toEqual(files);
+  });
+
+  it('preserves macOS ACL and extended attributes on the replacement inode', () => {
+    if (process.platform !== 'darwin') return;
+    const client = target('metadata');
+    seed(client);
+    execFileSync('/bin/chmod', ['+a', 'everyone allow read', client.configPath]);
+    execFileSync('/usr/bin/xattr', ['-w', 'org.origintrail.fixture', 'retained', client.configPath]);
+    const acl = () => execFileSync('/bin/ls', ['-le', client.configPath], { encoding: 'utf8' }).split('\n').slice(1).join('\n');
+    const beforeAcl = acl();
+    expect(beforeAcl).toContain('everyone allow read');
+    writeMcpConfigAtomic(client.configPath, '{}\n');
+    expect(acl()).toBe(beforeAcl);
+    expect(execFileSync('/usr/bin/xattr', ['-p', 'org.origintrail.fixture', client.configPath], { encoding: 'utf8' }).trim()).toBe('retained');
   });
 
   it.each([
@@ -273,7 +330,7 @@ describe('mcpUninstallAction', () => {
     const originals = clients.map((client) => readFileSync(client.configPath, 'utf8'));
     const question = vi.fn().mockResolvedValueOnce('n').mockResolvedValueOnce(' NO ').mockResolvedValueOnce('yes');
     const close = vi.fn();
-    vi.mocked(createInterface).mockReturnValue({ question, close } as ReturnType<typeof createInterface>);
+    vi.mocked(createInterface).mockReturnValue({ question, close } as unknown as ReturnType<typeof createInterface>);
     const streams = [process.stdin, process.stdout];
     const descriptors = streams.map((stream) => Object.getOwnPropertyDescriptor(stream, 'isTTY'));
     streams.forEach((stream) => Object.defineProperty(stream, 'isTTY', { configurable: true, value: true }));

@@ -3,9 +3,8 @@ import { dirname } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { applyEdits, createScanner, findNodeAtLocation, modify, parse as parseJsonc, parseTree, type Edit, type ParseError } from 'jsonc-parser';
 import { writeMcpConfigAtomic, type RegistrationEdit } from './mcp-config-file.js';
-import { splitEntryPath, ensurePathContainer, readEntryAt } from './mcp-config-path.js';
-import { TomlRegistrationDocument } from './mcp-toml-document.js';
-import { tildify, type ClientTarget } from './mcp-client-registry.js';
+import { readToml, writeTomlConfigBody } from './mcp-toml-document.js';
+import { DKG_SERVER_KEY, tildify, type ClientTarget } from './mcp-client-registry.js';
 
 function readJson(path: string, format: 'json' | 'jsonc' = 'json'): Record<string, unknown> {
   if (!existsSync(path)) return {};
@@ -42,7 +41,7 @@ function readConfigBody(target: ClientTarget): Record<string, unknown> {
     case 'jsonc':
       return readJson(target.configPath, format);
     case 'toml':
-      return new TomlRegistrationDocument(target).read();
+      return readToml(target.configPath);
     default:
       throw new Error(`Unknown client config format: ${String(format)}`);
   }
@@ -104,12 +103,7 @@ export function readRegisteredServerKeys(target: ClientTarget): ServerKeyProbe {
     if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return { ok: true, servers: {} };
     return { ok: false, reason: `could not read ${target.displayPath}` };
   }
-  const { head } = splitEntryPath(target.entryPath);
-  let cursor: unknown = body;
-  for (const segment of head) {
-    if (cursor === null || typeof cursor !== 'object') return { ok: true, servers: {} };
-    cursor = (cursor as Record<string, unknown>)[segment];
-  }
+  const cursor = body[target.serverContainer];
   // Missing container: readable config, nothing registered.
   if (cursor === undefined) return { ok: true, servers: {} };
   // Present but not a KEYED object: malformed exactly where we needed to read.
@@ -184,8 +178,8 @@ function removeJsonEntry(raw: string, path: string[], allowTrailingComma: boolea
 function writeJsonDocumentBody(target: ClientTarget, body: Record<string, unknown>, edit: RegistrationEdit): void {
   const raw = existsSync(target.configPath) ? readFileSync(target.configPath, 'utf8') : '{}';
   const allowTrailingComma = target.format === 'jsonc';
-  const patched = edit.kind === 'remove' ? removeJsonEntry(raw, target.entryPath.split('.'), allowTrailingComma)
-    : applyEdits(raw, modify(raw, target.entryPath.split('.'), readEntryAt(body, target.entryPath), {
+  const patched = edit.kind === 'remove' ? removeJsonEntry(raw, [target.serverContainer, DKG_SERVER_KEY], allowTrailingComma)
+    : applyEdits(raw, modify(raw, [target.serverContainer, DKG_SERVER_KEY], readOwnedRegistration(body, target), {
     formattingOptions: { insertSpaces: true, tabSize: 2, eol: raw.includes('\r\n') ? '\r\n' : '\n' },
   }));
   const errors: ParseError[] = [];
@@ -220,7 +214,7 @@ function writeConfigBody(target: ClientTarget, body: Record<string, unknown>, ed
       writeJsonDocumentBody(target, body, edit);
       return;
     case 'toml':
-      new TomlRegistrationDocument(target).write(body, edit);
+      writeTomlConfigBody(target, body, edit);
       return;
     default:
       throw new Error(`Unknown client config format: ${String(format)}`);
@@ -229,24 +223,16 @@ function writeConfigBody(target: ClientTarget, body: Record<string, unknown>, ed
 
 /** Resolve the owned leaf and its mutable container from a fresh config read. */
 function registrationLocation(target: ClientTarget): {
-  body: Record<string, unknown>; container: Record<string, unknown>; leaf: string;
+  body: Record<string, unknown>; container: Record<string, unknown>;
 } | undefined {
   const body = readConfigBody(target);
-  const { head, leaf } = splitEntryPath(target.entryPath);
-  let cursor: unknown = body;
-  for (const segment of head) {
-    if (cursor === undefined) return undefined;
-    if (cursor === null || typeof cursor !== 'object' || Array.isArray(cursor)) {
-      throw new Error(`Malformed MCP server container in ${target.displayPath}`);
-    }
-    cursor = (cursor as Record<string, unknown>)[segment];
-  }
+  const cursor = body[target.serverContainer];
   if (cursor === undefined) return undefined;
   if (cursor === null || typeof cursor !== 'object' || Array.isArray(cursor)) {
     throw new Error(`Malformed MCP server container in ${target.displayPath}`);
   }
-  if (!Object.hasOwn(cursor, leaf)) return undefined;
-  return { body, container: cursor as Record<string, unknown>, leaf };
+  if (!Object.hasOwn(cursor, DKG_SERVER_KEY)) return undefined;
+  return { body, container: cursor as Record<string, unknown> };
 }
 
 /** Inspect only: stale/null entries still count as an owned registration. */
@@ -258,7 +244,7 @@ export function inspectRegistration(target: ClientTarget): boolean {
 export function removeRegistration(target: ClientTarget): boolean {
   const location = registrationLocation(target);
   if (!location) return false;
-  delete location.container[location.leaf];
+  delete location.container[DKG_SERVER_KEY];
   writeConfigBody(target, location.body, { kind: 'remove' });
   return true;
 }
@@ -284,9 +270,12 @@ export function writeRegistration(
   // Everything else passes through from the existing entry
   // unchanged: arbitrary top-level keys (cwd, restartPolicy, …)
   // and arbitrary env keys (NODE_OPTIONS, HTTPS_PROXY, …).
-  const { head, leaf } = splitEntryPath(target.entryPath);
-  const container = ensurePathContainer(body, head);
-  const currentEntry = container[leaf];
+  const currentContainer = body[target.serverContainer];
+  const container = currentContainer !== null && typeof currentContainer === 'object' && !Array.isArray(currentContainer)
+    ? currentContainer as Record<string, unknown>
+    : {};
+  body[target.serverContainer] = container;
+  const currentEntry = container[DKG_SERVER_KEY];
   const currentEntryObj =
     currentEntry && typeof currentEntry === 'object'
       ? (currentEntry as Record<string, unknown>)
@@ -304,11 +293,18 @@ export function writeRegistration(
     ...entry,
     env: { ...currentEnv, ...expectedEnv },
   };
-  container[leaf] = mergedEntry;
+  container[DKG_SERVER_KEY] = mergedEntry;
   writeConfigBody(target, body, { kind: 'upsert' });
 }
 
 /** Read the owned entry for setup classification; no mutation. */
 export function readRegistration(target: ClientTarget): unknown {
-  return readEntryAt(readConfigBody(target), target.entryPath);
+  return readOwnedRegistration(readConfigBody(target), target);
+}
+
+function readOwnedRegistration(body: Record<string, unknown>, target: ClientTarget): unknown {
+  const container = body[target.serverContainer];
+  return container !== null && typeof container === 'object' && !Array.isArray(container)
+    ? (container as Record<string, unknown>)[DKG_SERVER_KEY]
+    : undefined;
 }

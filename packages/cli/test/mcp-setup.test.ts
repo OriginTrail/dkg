@@ -898,7 +898,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     expect(existsSync(vscodePath)).toBe(true);
     const written = JSON.parse(readFileSync(vscodePath, 'utf-8'));
     // VSCode + Copilot Chat keys under `servers`, NOT `mcpServers`.
-    // Pins the entryPath dispatch wired in phase 1.
+    // Pins the serverContainer dispatch wired in phase 1.
     expect(written.servers?.dkg).toEqual(EXPECTED_INSTALLED_ENTRY());
     // The canonical `mcpServers.dkg` shape MUST NOT be present in
     // VSCode's file — that would be the wrong key for Copilot Chat.
@@ -965,7 +965,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     expect(existsSync(clinePath)).toBe(true);
     const written = JSON.parse(readFileSync(clinePath, 'utf-8'));
     // Cline keys under canonical `mcpServers.dkg` (unlike VSCode's
-    // `servers.dkg`), so no entryPath override on the candidate.
+    // `servers.dkg`), so no serverContainer override on the candidate.
     expect(written.mcpServers.dkg).toEqual(EXPECTED_INSTALLED_ENTRY());
   });
 
@@ -3007,7 +3007,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       // entry is present with the canonical mcpServers.dkg shape
       // (explicit mcpServers container) and the path includes `.cursor`.
       for (const entry of cursorWslEntries) {
-        expect(entry.entryPath).toBe('mcpServers.dkg');
+        expect(entry.serverContainer).toBe('mcpServers');
         expect(entry.configPath).toContain('.cursor');
       }
     } finally {
@@ -3220,11 +3220,11 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const rawContent = readFileSync(codexPath, 'utf-8');
     const written = TOML.parse(rawContent);
     // Codex CLI's canonical key is `mcp_servers.<name>` (snake-case),
-    // not the JSON-world `mcpServers.<name>`. entryPath dispatch
+    // not the JSON-world `mcpServers.<name>`. serverContainer dispatch
     // routes the entry to the right table.
     expect((written as any).mcp_servers?.dkg).toEqual(EXPECTED_INSTALLED_ENTRY());
     // And the canonical JSON-world key MUST NOT appear in TOML output
-    // — that would mean entryPath fell through to default.
+    // — that would mean serverContainer fell through to default.
     expect((written as any).mcpServers).toBeUndefined();
 
     // PR #443 round-4 Codex Review: parsing-and-comparing the

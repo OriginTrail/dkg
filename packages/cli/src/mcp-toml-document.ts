@@ -1,22 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import TOML from '@iarna/toml';
-import { tildify, type ClientTarget } from './mcp-client-registry.js';
-import { splitEntryPath, ensurePathContainer, readEntryAt } from './mcp-config-path.js';
+import { DKG_SERVER_KEY, tildify, type ClientTarget } from './mcp-client-registry.js';
 import { writeMcpConfigAtomic, type RegistrationEdit } from './mcp-config-file.js';
-
-/** TOML syntax, source preservation and parser-validated fallback live behind this adapter. */
-export class TomlRegistrationDocument {
-  constructor(private readonly target: ClientTarget) {}
-
-  read(): Record<string, unknown> {
-    return readToml(this.target.configPath);
-  }
-
-  write(body: Record<string, unknown>, edit: RegistrationEdit): void {
-    writeTomlConfigBody(this.target, body, edit);
-  }
-}
 
 /**
  * PR #443 round-5 Codex Review: mirror `readJson`'s friendly-recovery
@@ -28,7 +14,7 @@ export class TomlRegistrationDocument {
  * operator-facing error names the file and the move-it-aside
  * recovery procedure.
  */
-function readToml(path: string): Record<string, unknown> {
+export function readToml(path: string): Record<string, unknown> {
   if (!existsSync(path)) return {};
   const raw = readFileSync(path, 'utf8');
   // `@iarna/toml`'s parser returns `{}` for an all-whitespace file
@@ -50,10 +36,10 @@ function serialiseTomlEntryOnly(
   target: ClientTarget,
   body: Record<string, unknown>,
 ): string {
-  const nested: Record<string, unknown> = {};
-  const { head, leaf } = splitEntryPath(target.entryPath);
-  const container = ensurePathContainer(nested, head);
-  container[leaf] = readEntryAt(body, target.entryPath) ?? {};
+  const container = body[target.serverContainer] as Record<string, unknown>;
+  const nested: Record<string, unknown> = {
+    [target.serverContainer]: { [DKG_SERVER_KEY]: container[DKG_SERVER_KEY] ?? {} },
+  };
   return TOML.stringify(nested as TOML.JsonMap);
 }
 
@@ -123,16 +109,6 @@ const TOML_PATH_SEPARATOR = '\0';
 
 function normaliseTomlHeaderPath(path: string): string {
   return splitTomlKeyPath(path).join(TOML_PATH_SEPARATOR);
-}
-
-function normaliseTomlOwnedPath(path: string): string {
-  return path.split('.').filter(Boolean).join(TOML_PATH_SEPARATOR);
-}
-
-function tomlParentPath(path: string): string | null {
-  const parts = path.split('.').filter(Boolean);
-  if (parts.length <= 1) return null;
-  return parts.slice(0, -1).join('.');
 }
 
 function tomlTableHeaderPath(line: string): string | null {
@@ -239,17 +215,14 @@ function appendTomlTable(raw: string, replacement: string, newline: string): str
 
 function replaceTomlTable(
   raw: string,
-  ownedPath: string,
+  serverContainer: ClientTarget['serverContainer'],
   edit: { kind: 'upsert'; block: string } | { kind: 'remove' },
   parsedRawHasOwnedEntry: boolean,
   parsedRawHasOwnedParent: boolean,
 ): string | null {
   const newline = raw.includes('\r\n') ? '\r\n' : '\n';
-  const ownedPathKey = normaliseTomlOwnedPath(ownedPath);
-  const parentPathKey = tomlParentPath(ownedPath);
-  const normalisedParentPathKey = parentPathKey
-    ? normaliseTomlOwnedPath(parentPathKey)
-    : null;
+  const ownedPathKey = `${serverContainer}${TOML_PATH_SEPARATOR}${DKG_SERVER_KEY}`;
+  const normalisedParentPathKey = serverContainer;
   const replacementBlock = edit.kind === 'remove' ? '' : normaliseNewlines(
     edit.block.endsWith('\n') || edit.block.endsWith('\r')
       ? edit.block
@@ -260,15 +233,12 @@ function replaceTomlTable(
   const headerPaths = tomlTableHeaderPaths(lines);
   const ranges: { start: number; end: number }[] = [];
   let hasRootTable = false;
-  let hasParentTableFamily = normalisedParentPathKey === null;
+  let hasParentTableFamily = false;
 
   for (let i = 0; i < lines.length; i++) {
     const headerPath = headerPaths[i];
     if (!headerPath) continue;
-    if (
-      normalisedParentPathKey &&
-      ownsTomlTablePath(headerPath, normalisedParentPathKey)
-    ) {
+    if (ownsTomlTablePath(headerPath, normalisedParentPathKey)) {
       hasParentTableFamily = true;
     }
     if (!ownsTomlTablePath(headerPath, ownedPathKey)) continue;
@@ -317,39 +287,12 @@ function replaceTomlTable(
   return out;
 }
 
-function readPathAt(body: Record<string, unknown>, path: string | undefined): unknown {
-  if (!path) return undefined;
-  let cursor: unknown = body;
-  for (const segment of path.split('.').filter(Boolean)) {
-    if (cursor === undefined || cursor === null || typeof cursor !== 'object') {
-      return undefined;
-    }
-    cursor = (cursor as Record<string, unknown>)[segment];
-  }
-  return cursor;
+function tomlRawHasContainer(raw: string, container: ClientTarget['serverContainer']): boolean {
+  try { return raw.trim() !== '' && TOML.parse(raw)[container] !== undefined; }
+  catch { return false; }
 }
 
-function tomlRawHasEntry(raw: string, entryPath: ClientTarget['entryPath']): boolean {
-  if (!raw.trim()) return false;
-  try {
-    const parsed = TOML.parse(raw) as Record<string, unknown>;
-    return readEntryAt(parsed, entryPath) !== undefined;
-  } catch {
-    return false;
-  }
-}
-
-function tomlRawHasPath(raw: string, path: string | undefined): boolean {
-  if (!raw.trim()) return false;
-  try {
-    const parsed = TOML.parse(raw) as Record<string, unknown>;
-    return readPathAt(parsed, path) !== undefined;
-  } catch {
-    return false;
-  }
-}
-
-function writeTomlConfigBody(
+export function writeTomlConfigBody(
   target: ClientTarget,
   body: Record<string, unknown>,
   edit: RegistrationEdit,
@@ -357,22 +300,21 @@ function writeTomlConfigBody(
   const raw = existsSync(target.configPath)
     ? readFileSync(target.configPath, 'utf8')
     : '';
-  const ownedPath = target.entryPath;
-  const ownedParentPath = tomlParentPath(ownedPath) ?? undefined;
+  const ownedPath = `${target.serverContainer}.${DKG_SERVER_KEY}`;
   const tableEdit = edit.kind === 'remove' ? edit
     : { kind: 'upsert' as const, block: serialiseTomlEntryOnly(target, body) };
+  const rawContainer = raw.trim() ? TOML.parse(raw)[target.serverContainer] : undefined;
   let patched = replaceTomlTable(
     raw,
-    ownedPath,
+    target.serverContainer,
     tableEdit,
-    tomlRawHasEntry(raw, target.entryPath),
-    tomlRawHasPath(raw, ownedParentPath),
+    rawContainer !== null && typeof rawContainer === 'object' && Object.hasOwn(rawContainer, DKG_SERVER_KEY),
+    rawContainer !== undefined,
   );
-  if (edit.kind === 'remove' && patched !== null && ownedParentPath
-      && !tomlRawHasPath(patched, ownedParentPath)) {
+  if (edit.kind === 'remove' && patched !== null
+      && !tomlRawHasContainer(patched, target.serverContainer)) {
     // Keep the empty server container when its last child table was removed.
-    const parentOnly: Record<string, unknown> = {};
-    ensurePathContainer(parentOnly, splitEntryPath(target.entryPath).head);
+    const parentOnly = { [target.serverContainer]: {} };
     patched = appendTomlTable(patched, TOML.stringify(parentOnly as TOML.JsonMap),
       raw.includes('\r\n') ? '\r\n' : '\n');
   }

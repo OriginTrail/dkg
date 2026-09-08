@@ -40,7 +40,7 @@ import { readRegistration, writeRegistration } from './mcp-client-config.js';
  * Per-client format / entry-shape dispatch (phase 1): Cursor, Claude
  * Code, Claude Desktop, Windsurf, and Cline all use canonical
  * `mcpServers.dkg` JSON. VSCode + Copilot Chat keys under
- * `servers.dkg` instead. The `format` + `entryPath` fields on
+ * `servers.dkg` instead. The `format` + `serverContainer` fields on
  * `ClientTarget` describe each client's contract; `writeRegistration`
  * and `classify` dispatch on those without per-client write logic.
  *

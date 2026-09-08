@@ -120,17 +120,17 @@ function seedNativeClients(selectedPlatform: string) {
     ? join(fixture.home, 'Library', 'Application Support')
     : selectedPlatform === 'win32' ? appData : xdg;
   const specs = [
-    { id: 'cursor', configPath: join(fixture.home, '.cursor', 'mcp.json'), format: 'json', entryPath: 'mcpServers.dkg' },
-    { id: 'claude-code', configPath: join(fixture.home, '.claude.json'), format: 'json', entryPath: 'mcpServers.dkg' },
-    { id: 'claude-desktop', configPath: join(guiRoot, 'Claude', 'claude_desktop_config.json'), format: 'json', entryPath: 'mcpServers.dkg' },
-    { id: 'windsurf', configPath: join(fixture.home, '.codeium', 'windsurf', 'mcp_config.json'), format: 'json', entryPath: 'mcpServers.dkg' },
-    { id: 'vscode', configPath: join(guiRoot, 'Code', 'User', 'mcp.json'), format: 'jsonc', entryPath: 'servers.dkg' },
-    { id: 'cline', configPath: join(guiRoot, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json'), format: 'json', entryPath: 'mcpServers.dkg' },
-    { id: 'codex-cli', configPath: join(fixture.home, '.codex', 'config.toml'), format: 'toml', entryPath: 'mcp_servers.dkg' },
+    { id: 'cursor', configPath: join(fixture.home, '.cursor', 'mcp.json'), format: 'json', serverContainer: 'mcpServers' },
+    { id: 'claude-code', configPath: join(fixture.home, '.claude.json'), format: 'json', serverContainer: 'mcpServers' },
+    { id: 'claude-desktop', configPath: join(guiRoot, 'Claude', 'claude_desktop_config.json'), format: 'json', serverContainer: 'mcpServers' },
+    { id: 'windsurf', configPath: join(fixture.home, '.codeium', 'windsurf', 'mcp_config.json'), format: 'json', serverContainer: 'mcpServers' },
+    { id: 'vscode', configPath: join(guiRoot, 'Code', 'User', 'mcp.json'), format: 'jsonc', serverContainer: 'servers' },
+    { id: 'cline', configPath: join(guiRoot, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json'), format: 'json', serverContainer: 'mcpServers' },
+    { id: 'codex-cli', configPath: join(fixture.home, '.codex', 'config.toml'), format: 'toml', serverContainer: 'mcp_servers' },
   ] as const;
   for (const spec of specs) {
     mkdirSync(dirname(spec.configPath), { recursive: true });
-    const body = { [spec.entryPath.split('.')[0]]: { dkg: { command: 'dkg' }, other: { command: 'keep' } } };
+    const body = { [spec.serverContainer]: { dkg: { command: 'dkg' }, other: { command: 'keep' } } };
     writeFileSync(spec.configPath, spec.format === 'toml' ? TOML.stringify(body) : JSON.stringify(body));
   }
   return specs;
@@ -139,7 +139,7 @@ function seedNativeClients(selectedPlatform: string) {
 it.each(['darwin', 'linux', 'win32'])('detects every native client with its stable ID and explicit config shape on %s', async (selectedPlatform) => {
   const expected = seedNativeClients(selectedPlatform);
   const { detectClients } = await import('../src/mcp-client-registry.js');
-  const actual = detectClients().map(({ id, location, configPath, format, entryPath }) => ({ id, location, configPath, format, entryPath }));
+  const actual = detectClients().map(({ id, location, configPath, format, serverContainer }) => ({ id, location, configPath, format, serverContainer }));
   expect(actual).toEqual(expected.map((spec) => ({ ...spec, location: 'native' })));
 });
 
@@ -155,7 +155,7 @@ it.each(['cursor', 'claude-code', 'claude-desktop', 'windsurf', 'vscode', 'cline
         expect(raw).toBe(before[index]);
       } else {
         const body = spec.format === 'toml' ? TOML.parse(raw) : JSON.parse(raw);
-        expect(body[spec.entryPath.split('.')[0]]).toEqual({ other: { command: 'keep' } });
+        expect(body[spec.serverContainer]).toEqual({ other: { command: 'keep' } });
       }
     });
   },
@@ -168,22 +168,22 @@ it.each(['cursor', 'claude-desktop', 'windsurf', 'vscode', 'cline'])(
     const windowsHome = join(fixture.home, 'windows-user');
     const appData = join(windowsHome, 'AppData', 'Roaming');
     const expected = [
-      { id: 'cursor', configPath: join(windowsHome, '.cursor', 'mcp.json'), entryPath: 'mcpServers.dkg' },
-      { id: 'claude-desktop', configPath: join(appData, 'Claude', 'claude_desktop_config.json'), entryPath: 'mcpServers.dkg' },
-      { id: 'windsurf', configPath: join(windowsHome, '.codeium', 'windsurf', 'mcp_config.json'), entryPath: 'mcpServers.dkg' },
-      { id: 'vscode', configPath: join(appData, 'Code', 'User', 'mcp.json'), entryPath: 'servers.dkg' },
-      { id: 'cline', configPath: join(appData, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json'), entryPath: 'mcpServers.dkg' },
+      { id: 'cursor', configPath: join(windowsHome, '.cursor', 'mcp.json'), serverContainer: 'mcpServers' },
+      { id: 'claude-desktop', configPath: join(appData, 'Claude', 'claude_desktop_config.json'), serverContainer: 'mcpServers' },
+      { id: 'windsurf', configPath: join(windowsHome, '.codeium', 'windsurf', 'mcp_config.json'), serverContainer: 'mcpServers' },
+      { id: 'vscode', configPath: join(appData, 'Code', 'User', 'mcp.json'), serverContainer: 'servers' },
+      { id: 'cline', configPath: join(appData, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json'), serverContainer: 'mcpServers' },
     ];
     for (const spec of expected) {
       mkdirSync(dirname(spec.configPath), { recursive: true });
-      writeFileSync(spec.configPath, JSON.stringify({ [spec.entryPath.split('.')[0]]: { dkg: { command: 'dkg' }, other: { command: 'keep' } } }));
+      writeFileSync(spec.configPath, JSON.stringify({ [spec.serverContainer]: { dkg: { command: 'dkg' }, other: { command: 'keep' } } }));
     }
     const { detectClients } = await import('../src/mcp-client-registry.js');
     const { mcpUninstallAction } = await import('../src/mcp-uninstall.js');
     const resolver = (name: string) => name === 'USERPROFILE' ? windowsHome : appData;
     const targets = detectClients(resolver);
     expect(targets.filter((target) => target.location === 'windows-wsl')
-      .map(({ id, location, configPath, format, entryPath }) => ({ id, location, configPath, format, entryPath })))
+      .map(({ id, location, configPath, format, serverContainer }) => ({ id, location, configPath, format, serverContainer })))
       .toEqual(expected.map((spec) => ({ ...spec, location: 'windows-wsl', format: spec.id === 'vscode' ? 'jsonc' : 'json' })));
     expect(targets).toHaveLength(12);
     const before = targets.map((target) => readFileSync(target.configPath, 'utf8'));
@@ -191,7 +191,7 @@ it.each(['cursor', 'claude-desktop', 'windsurf', 'vscode', 'cline'])(
     targets.forEach((target, index) => {
       const raw = readFileSync(target.configPath, 'utf8');
       if (target.id === id && target.location === 'windows-wsl') {
-        expect(JSON.parse(raw)[target.entryPath.split('.')[0]]).toEqual({ other: { command: 'keep' } });
+        expect(JSON.parse(raw)[target.serverContainer]).toEqual({ other: { command: 'keep' } });
       } else {
         expect(raw).toBe(before[index]);
       }

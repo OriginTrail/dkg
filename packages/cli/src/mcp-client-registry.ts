@@ -4,11 +4,12 @@ import { homedir, platform, release as osRelease } from 'node:os';
 import { execSync } from 'node:child_process';
 
 
-/** Client config syntax and owned registration paths. */
+/** DKG owns one fixed server entry inside each client's declared container. */
+export const DKG_SERVER_KEY = 'dkg';
 export type McpClientConfigShape =
-  | { readonly format: 'json'; readonly entryPath: 'mcpServers.dkg' | 'servers.dkg' }
-  | { readonly format: 'jsonc'; readonly entryPath: 'servers.dkg' }
-  | { readonly format: 'toml'; readonly entryPath: 'mcp_servers.dkg' };
+  | { readonly format: 'json'; readonly serverContainer: 'mcpServers' | 'servers' }
+  | { readonly format: 'jsonc'; readonly serverContainer: 'servers' }
+  | { readonly format: 'toml'; readonly serverContainer: 'mcp_servers' };
 export type McpClientLocation = 'native' | 'windows-wsl';
 type WindowsPaths = { USERPROFILE: string | null; APPDATA: string | null };
 
@@ -17,9 +18,9 @@ function homePaths(home: string, ...parts: string[]) {
   return { configPath, displayPath: tildify(configPath) };
 }
 
-const JSON_MCP = { format: 'json', entryPath: 'mcpServers.dkg' } as const;
-const JSONC_SERVERS = { format: 'jsonc', entryPath: 'servers.dkg' } as const;
-const TOML_SERVERS = { format: 'toml', entryPath: 'mcp_servers.dkg' } as const;
+const JSON_MCP = { format: 'json', serverContainer: 'mcpServers' } as const;
+const JSONC_SERVERS = { format: 'jsonc', serverContainer: 'servers' } as const;
+const TOML_SERVERS = { format: 'toml', serverContainer: 'mcp_servers' } as const;
 
 /** One entry owns each client's identity, storage shape, paths and skill delivery. */
 const MCP_CLIENT_REGISTRY = [
@@ -139,7 +140,7 @@ function claudeDesktopPaths(home: string): { configPath: string; displayPath: st
  * (cross-workspace) config, not the per-workspace `.vscode/mcp.json`.
  *
  * Diverges from the canonical `mcpServers.dkg` shape: Copilot Chat's
- * MCP wiring uses `servers.dkg` instead. The phase-1 entryPath
+ * MCP wiring uses `servers.dkg` instead. The phase-1 serverContainer
  * dispatch handles that without per-client write logic.
  */
 function vscodeMcpPaths(home: string): { configPath: string; displayPath: string } {

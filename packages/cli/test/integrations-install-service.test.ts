@@ -262,8 +262,8 @@ describe('detectInstalled', () => {
     ({ ...baseEntry, slug, install }) as unknown as IntegrationEntry;
 
   const clients = [
-    { id: 'cursor', location: 'native', format: 'json', entryPath: 'mcpServers.dkg', name: 'Cursor', configPath: '/fake/cursor.json', displayPath: '~/cursor.json' },
-    { id: 'windsurf', location: 'native', format: 'json', entryPath: 'mcpServers.dkg', name: 'Windsurf', configPath: '/fake/windsurf.json', displayPath: '~/windsurf.json' },
+    { id: 'cursor', location: 'native', format: 'json', serverContainer: 'mcpServers', name: 'Cursor', configPath: '/fake/cursor.json', displayPath: '~/cursor.json' },
+    { id: 'windsurf', location: 'native', format: 'json', serverContainer: 'mcpServers', name: 'Windsurf', configPath: '/fake/windsurf.json', displayPath: '~/windsurf.json' },
   ] satisfies ClientTarget[];
 
   it('reports cli and npm-global service entries from the global npm map', async () => {
