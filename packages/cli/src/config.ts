@@ -26,6 +26,7 @@ import {
   blueGreenSlotReady,
   findPackageRepoDir,
   isDkgMonorepoRoot,
+  hasErrorCode,
   resolveDkgConfigHome,
   SELECTABLE_SETUP_NETWORKS,
 } from '@origintrail-official/dkg-core';
@@ -2106,7 +2107,19 @@ export async function swapSlot(target: 'a' | 'b'): Promise<void> {
   } catch { /* link doesn't exist yet */ }
 
   try { await unlink(tmpLink); } catch { /* ok if missing */ }
-  await symlink(target, tmpLink);
+  try {
+    await symlink(target, tmpLink);
+  } catch (error) {
+    if (process.platform === 'win32' && hasErrorCode(error, 'EPERM')) {
+      throw Object.assign(new Error(
+        `Cannot create the DKG release-slot link at ${tmpLink}. Windows requires permission to create symbolic links. `
+        + 'Enable Developer Mode in Windows Settings (search for "Developer Mode"), then retry the command. '
+        + 'Alternatively, retry from an Administrator terminal. The active release was not changed.',
+        { cause: error },
+      ), { code: 'EPERM' });
+    }
+    throw error;
+  }
   await rename(tmpLink, currentLink);
   await writeFile(join(rDir, 'active'), target);
 }
