@@ -15,6 +15,7 @@ import {
   type AssertionSeal,
   type AuthorCatalogScopeV1,
   type CanonicalGraphScopedAuthorSealV1,
+  type ContextGraphIdV1,
   type Digest32V1,
   type EvmAddressV1,
   type TimestampMsV1,
@@ -971,6 +972,93 @@ describe('RFC-64 rollout authority integration', () => {
     releaseDelivery();
 
     await expect(replay).rejects.toThrow(/scoped catalog inventory changed during replay/u);
+  });
+
+  it('keeps a scoped replay valid when an unrelated catalog advances during delivery', async () => {
+    const { provider, persistence, publication } =
+      await startAppliedOpenReplayProvider('scoped-replay-unrelated-race');
+    const signer = Object.freeze({
+      address: AUTHOR,
+      signMessage: (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest),
+    });
+    const unrelatedContextGraphId = `${AUTHOR}/unrelated-replay` as ContextGraphIdV1;
+    const unrelatedPublication = await provider.publishOpenAuthorCatalogGenesisV1({
+      networkId: NETWORK_ID,
+      contextGraphId: unrelatedContextGraphId,
+      author: signer,
+      peers: [],
+      issuedAt: '1773900000100' as TimestampMsV1,
+      catalogIssuerDelegationEffectiveAt: '1773899999000' as TimestampMsV1,
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    });
+    const unrelatedScope = Object.freeze({
+      networkId: NETWORK_ID,
+      contextGraphId: unrelatedContextGraphId,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+      bucketCount: '1',
+    }) as AuthorCatalogScopeV1;
+    const unrelatedScopeDigest = computeAuthorCatalogScopeDigestV1(unrelatedScope);
+    persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+      catalogScopeDigest: unrelatedScopeDigest,
+      authorAddress: AUTHOR,
+      expectedCurrentCatalogHeadDigest: null,
+      currentCatalogHeadDigest: unrelatedPublication.headObjectDigest,
+      appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({
+        catalogScopeDigest: unrelatedScopeDigest,
+        rows: [],
+      }),
+      catalogVersion: unrelatedPublication.announcement.catalogVersion,
+      inventoryRowCount: '0',
+    });
+
+    let releaseDelivery!: () => void;
+    let markDeliveryEntered!: () => void;
+    const deliveryGate = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+    const deliveryEntered = new Promise<void>((resolve) => { markDeliveryEntered = resolve; });
+    vi.spyOn((provider as any).router, 'send').mockImplementation(async () => {
+      markDeliveryEntered();
+      await deliveryGate;
+      return Uint8Array.of(1);
+    });
+
+    const replay = provider.reannounceRfc64CatalogHeadsToPeerV1(
+      '12D3KooWScopedReplayUnrelatedRacePeer',
+      Object.freeze({
+        kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        policyDigest: publication.announcement.policyDigest,
+      }),
+    );
+    await deliveryEntered;
+    await provider.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+      scope: unrelatedScope,
+      author: signer,
+      asset: Object.freeze({
+        assertionCoordinate: 'scoped-replay-unrelated-race' as never,
+        projectionBytes: encodeCanonicalCgSharedPublicRootProjectionV1(PROJECTION_QUADS),
+        seal: await authorSeal(103n),
+      }),
+      deployment: DEPLOYMENT,
+      peers: [],
+      catalogIssuerDelegationEffectiveAt: '1773899999000' as TimestampMsV1,
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    });
+    releaseDelivery();
+
+    await expect(replay).resolves.toMatchObject({
+      announced: 1,
+      failed: 0,
+      manifest: [expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        catalogHeadObjectDigest: publication.headObjectDigest,
+      })],
+    });
   });
 
   it('keeps system control graphs on durable sync under default catalog responsibility', async () => {

@@ -7,6 +7,12 @@ import {
 
 import { Rfc64SerializedScopeRuntimeV1 } from './serialized-scope-runtime-v1.js';
 
+export function rfc64CatalogMutationScopeKeyV1(
+  scope: Readonly<AuthorCatalogScopeV1>,
+): string {
+  return `${computeAuthorCatalogScopeDigestV1(scope)}\n${scope.authorAddress}`;
+}
+
 /**
  * Explicit agent-owned coordinator shared by local authoring and remote apply.
  * Its lifecycle is drained before the catalog service and persistence close.
@@ -21,8 +27,27 @@ export class Rfc64CatalogMutationCoordinatorV1 {
     operation: () => Promise<T>,
     signal?: AbortSignal,
   ): Promise<T> {
-    const key = `${computeAuthorCatalogScopeDigestV1(scope)}\n${scope.authorAddress}`;
-    return this.#runtime.run(key, operation, signal);
+    return this.#runtime.run(rfc64CatalogMutationScopeKeyV1(scope), operation, signal);
+  }
+
+  /** Acquire a unique scope set in canonical order before starting the operation. */
+  runMany<T>(
+    scopes: readonly Readonly<AuthorCatalogScopeV1>[],
+    operation: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const orderedScopes = [...new Map(scopes.map((scope) => [
+      rfc64CatalogMutationScopeKeyV1(scope),
+      scope,
+    ] as const)).entries()]
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([, scope]) => scope);
+    const acquire = (scopeIndex: number): Promise<T> => {
+      const scope = orderedScopes[scopeIndex];
+      if (scope === undefined) return operation();
+      return this.run(scope, () => acquire(scopeIndex + 1), signal);
+    };
+    return acquire(0);
   }
 
   reopen(): void {
