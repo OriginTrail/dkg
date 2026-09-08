@@ -20,6 +20,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
+import { VmReconcileDispatcher } from '../src/chain-reconciler.js';
 import { resolveRfc64CatalogExecutionPlanV1 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 
 function deferred<T>(): {
@@ -38,7 +39,6 @@ interface AgentInternals {
   selfPrimeSubscriptionOnChainId(
     localCgId: string,
     sub: { subscribed: boolean; coreHosted?: boolean; onChainId?: string },
-    targetOnChainId?: bigint,
     isCurrent?: () => boolean,
     signal?: AbortSignal,
   ): Promise<string | null>;
@@ -67,6 +67,18 @@ function stubNode(agent: DKGAgent): void {
     peerId: '12D3KooWSelfPrimeTestPeer',
     libp2p: { getPeers: () => [] },
   };
+}
+
+/** Exercise admission through the real dispatcher and canonical authorization/binding owner. */
+function targetDispatcher(internals: AgentInternals) {
+  const triggered: string[] = [];
+  const dispatcher = new VmReconcileDispatcher(async (cg, source) => {
+    await internals.resolveVmReconcileTarget(cg);
+    triggered.push(`${source}:${cg}`);
+    return true;
+  }, () => undefined, { concurrency: 2, maxPending: 32 });
+  internals.vmReconcileDispatcher = dispatcher;
+  return { dispatcher, triggered };
 }
 
 describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscribed CG', () => {
@@ -102,24 +114,13 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     // The #1098 state: a pre-subscribed member CG with NO onChainId bound.
     internals.subscribedContextGraphs.set(LOCAL, { subscribed: true });
 
-    const triggered: string[] = [];
-    internals.vmReconcileDispatcher = {
-      dispatch: async (cg: string, reason: 'live' | 'periodic') => {
-        triggered.push(`${reason}:${cg}`);
-        return true;
-      },
-      triggerLive: (cg: string) => { triggered.push(`live:${cg}`); },
-      triggerPeriodic: (cg: string) => { triggered.push(`periodic:${cg}`); },
-      tryTriggerPeriodic: (cg: string) => {
-        triggered.push(`periodic:${cg}`);
-        return true;
-      },
-    };
+    const { dispatcher, triggered } = targetDispatcher(internals);
 
     // Precondition: unbound before the sweep (so the assertion below is meaningful).
     expect(internals.subscribedContextGraphs.get(LOCAL)?.onChainId).toBeUndefined();
 
     await internals.runVmReconcileSweep();
+    await dispatcher.waitForIdle();
 
     // Post-fix: the sweep self-primed onChainId from the ontology quad and then
     // — no longer skipped by the `!onChainId` guard — triggered its reconcile.
@@ -132,6 +133,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     agent = await DKGAgent.create({ name: 'SelfPrimeRejectsInvalidIds', chainAdapter: chain });
     stubNode(agent);
     const internals = agent as unknown as AgentInternals;
+    vi.spyOn(agent, 'canReadContextGraph').mockResolvedValue(true);
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const invalidBindings = [
       ['gh1098-empty-id', ''],
@@ -150,17 +152,12 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       internals.subscribedContextGraphs.set(localCgId, { subscribed: true });
     }
 
-    const dispatch = vi.fn(async () => true);
-    internals.vmReconcileDispatcher = {
-      dispatch,
-      triggerLive: vi.fn(),
-      triggerPeriodic: vi.fn(),
-      tryTriggerPeriodic: vi.fn(() => true),
-    };
+    const { dispatcher, triggered } = targetDispatcher(internals);
 
     await internals.runVmReconcileSweep();
+    await dispatcher.waitForIdle();
 
-    expect(dispatch).not.toHaveBeenCalled();
+    expect(triggered).toEqual([]);
     for (const [localCgId] of invalidBindings) {
       expect(internals.subscribedContextGraphs.get(localCgId)?.onChainId).toBeUndefined();
     }
@@ -176,22 +173,16 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     internals.subscribedContextGraphs.set(denied, { subscribed: true, onChainId: '401' });
     internals.subscribedContextGraphs.set(member, { subscribed: true, onChainId: '402' });
     vi.spyOn(agent, 'canReadContextGraph').mockImplementation(async (contextGraphId, opts) => {
-      expect(opts.allowSubscriptionFallback).toBe(false);
+      expect(opts?.allowSubscriptionFallback).toBe(false);
       return contextGraphId === member;
     });
 
-    const dispatch = vi.fn(async () => true);
-    internals.vmReconcileDispatcher = {
-      dispatch,
-      triggerLive: vi.fn(),
-      triggerPeriodic: vi.fn(),
-      tryTriggerPeriodic: vi.fn(() => true),
-    };
+    const { dispatcher, triggered } = targetDispatcher(internals);
 
     await internals.runVmReconcileSweep();
+    await dispatcher.waitForIdle();
 
-    expect(dispatch).toHaveBeenCalledTimes(1);
-    expect(dispatch).toHaveBeenCalledWith(member, 'periodic');
+    expect(triggered).toEqual([`periodic:${member}`]);
     await expect(internals.resolveVmReconcileTarget(denied))
       .rejects.toMatchObject({ code: 'ContextGraphNotFound' });
     await expect(internals.fetchContextGraphAssets(denied, [
@@ -244,7 +235,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       },
       triggerLive: () => undefined,
       triggerPeriodic: () => undefined,
-      tryTriggerPeriodic: () => true,
+      tryTriggerPeriodic: (cg: string) => { triggered.push(`periodic:${cg}`); return true; },
     };
 
     await internals.runVmReconcileSweep();
@@ -286,12 +277,12 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
         }],
       };
       internals.subscribedContextGraphs.clear();
-      const dispatch = vi.fn(async () => true);
+      const dispatch = vi.fn(async (_cg: string, _reason: 'live' | 'periodic') => true);
       internals.vmReconcileDispatcher = {
         dispatch,
         triggerLive: vi.fn(),
         triggerPeriodic: vi.fn(),
-        tryTriggerPeriodic: vi.fn(() => true),
+        tryTriggerPeriodic: (cg: string) => { void dispatch(cg, 'periodic'); return true; },
       };
 
       await internals.runVmReconcileSweep();
@@ -449,7 +440,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     const resolveOnChainId = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
       .mockResolvedValue(298n);
     chain.getContextGraphKCCount = vi.fn(async () => 1n);
-    chain.getBlockNumber = vi.fn(async () => 100);
+    Object.assign(chain, { getBlockNumber: vi.fn(async () => 100) });
     const reconcileOrdinal = vi.fn(async (
       _localCgId: string,
       _onChainCgId: bigint,
@@ -530,7 +521,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       .mockResolvedValueOnce(298n)
       .mockResolvedValueOnce(299n);
     chain.getContextGraphKCCount = vi.fn(async () => 1n);
-    chain.getBlockNumber = vi.fn(async () => 100);
+    Object.assign(chain, { getBlockNumber: vi.fn(async () => 100) });
     chain.getContextGraphKCAt = vi.fn(async () => 42n);
     chain.getLatestMerkleRoot = vi.fn(async () => new Uint8Array(32).fill(7));
     chain.getLatestMerkleRootPublisher = vi.fn(async () => `0x${'11'.repeat(20)}`);
@@ -834,12 +825,12 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
         targets: [],
       }],
     };
-    const dispatch = vi.fn(async () => true);
+    const dispatch = vi.fn(async (_cg: string, _reason: 'live' | 'periodic') => true);
     internals.vmReconcileDispatcher = {
       dispatch,
       triggerLive: vi.fn(),
       triggerPeriodic: vi.fn(),
-      tryTriggerPeriodic: vi.fn(() => true),
+      tryTriggerPeriodic: (cg: string) => { void dispatch(cg, 'periodic'); return true; },
     };
     const resolveOnChainId = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
       .mockResolvedValue(298n);
@@ -908,36 +899,6 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(internals.subscribedContextGraphs.size).toBe(0);
   });
 
-  it('the optional self-prime target binds only a matching numeric id', async () => {
-    // Preserve the helper's optional target contract independently of scheduling.
-    const chain = new MockChainAdapter();
-    agent = await DKGAgent.create({ name: 'SelfPrimeTargeted', chainAdapter: chain });
-    stubNode(agent);
-    const internals = agent as unknown as AgentInternals;
-
-    const CG_MATCH = 'gh1098-match';
-    const CG_OTHER = 'gh1098-other';
-    const ON_MATCH = '500';
-    const ON_OTHER = '600';
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-    await internals.store.insert([
-      { subject: `did:dkg:context-graph:${CG_MATCH}`, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${ON_MATCH}"`, graph: ontologyGraph },
-      { subject: `did:dkg:context-graph:${CG_OTHER}`, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${ON_OTHER}"`, graph: ontologyGraph },
-    ]);
-    internals.subscribedContextGraphs.set(CG_MATCH, { subscribed: true });
-    internals.subscribedContextGraphs.set(CG_OTHER, { subscribed: true });
-
-    // Event for ON_MATCH: the other CG (resolves to ON_OTHER) must NOT bind.
-    const other = await internals.selfPrimeSubscriptionOnChainId(CG_OTHER, internals.subscribedContextGraphs.get(CG_OTHER)!, BigInt(ON_MATCH));
-    expect(other).toBeNull();
-    expect(internals.subscribedContextGraphs.get(CG_OTHER)?.onChainId).toBeUndefined();
-
-    // The matching CG binds.
-    const matched = await internals.selfPrimeSubscriptionOnChainId(CG_MATCH, internals.subscribedContextGraphs.get(CG_MATCH)!, BigInt(ON_MATCH));
-    expect(matched).toBe(ON_MATCH);
-    expect(internals.subscribedContextGraphs.get(CG_MATCH)?.onChainId).toBe(ON_MATCH);
-  });
-
   it('does not bind or persist a replacement subscription after delayed self-prime is invalidated', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'SelfPrimeLifecycleFence', chainAdapter: chain });
@@ -968,7 +929,6 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     const prime = internals.selfPrimeSubscriptionOnChainId(
       localCgId,
       original,
-      undefined,
       () => current,
       controller.signal,
     );
@@ -1111,7 +1071,6 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     const prime = internals.selfPrimeSubscriptionOnChainId(
       localCgId,
       original,
-      undefined,
       () => !controller.signal.aborted,
       controller.signal,
     );
@@ -1147,13 +1106,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     internals.subscribedContextGraphs.set(CG_MISS_A, { subscribed: true });
     internals.subscribedContextGraphs.set(CG_MISS_B, { subscribed: true });
 
-    const triggered: string[] = [];
-    internals.vmReconcileDispatcher = {
-      dispatch: async (cg: string) => { triggered.push(`periodic:${cg}`); return true; },
-      triggerLive: (cg: string) => { triggered.push(`live:${cg}`); },
-      triggerPeriodic: (cg: string) => { triggered.push(`periodic:${cg}`); },
-      tryTriggerPeriodic: () => true,
-    };
+    const { dispatcher, triggered } = targetDispatcher(internals);
 
     // The event names ON_HIT's on-chain id. None is bound yet.
     const reconciled = await internals.handleKARegisteredNudge(ON_HIT, 99n, createOperationContext('system'));
@@ -1162,6 +1115,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(triggered).toEqual([]);
     expect(internals.subscribedContextGraphs.get(CG_HIT)?.onChainId).toBeUndefined();
     await internals.runVmReconcileSweep();
+    await dispatcher.waitForIdle();
     expect(internals.subscribedContextGraphs.get(CG_HIT)?.onChainId).toBe(ON_HIT);
     expect(internals.subscribedContextGraphs.get(CG_MISS_A)?.onChainId).toBe(ON_MISS_A);
     expect(internals.subscribedContextGraphs.get(CG_MISS_B)?.onChainId).toBe(ON_MISS_B);

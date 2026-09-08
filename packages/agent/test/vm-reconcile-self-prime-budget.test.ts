@@ -2,15 +2,15 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
+import { VmReconcileDispatcher } from '../src/chain-reconciler.js';
 
 type Subscription = { subscribed: boolean; coreHosted?: boolean; onChainId?: string };
 interface Internals {
   subscribedContextGraphs: Map<string, Subscription>;
   node: unknown;
-  vmReconcileDispatcher: {
-    dispatch(cg: string, source: string): Promise<boolean>;
-    triggerLive(cg: string): void;
-  };
+  vmReconcileDispatcher: VmReconcileDispatcher<boolean>;
+  vmReconcileLifecycleController: AbortController;
+  resolveVmReconcileTarget(cg: string, isCurrent?: () => boolean, signal?: AbortSignal): Promise<unknown>;
   runVmReconcileSweep(): Promise<void>;
   handleKARegisteredNudge(id: string, ka: bigint, context: ReturnType<typeof createOperationContext>): Promise<string | null>;
   openVmReconcileRotationState(): void;
@@ -18,11 +18,13 @@ interface Internals {
   resolveContextGraphOnChainIdBinding(id: string): Promise<{ onChainId: string; provenance: 'ontology' } | null>;
 }
 const agents: DKGAgent[] = [];
+const dispatchers: VmReconcileDispatcher<boolean>[] = [];
 afterEach(async () => {
+  for (const dispatcher of dispatchers.splice(0)) await dispatcher.close();
   for (const agent of agents.splice(0)) await agent.stop();
   vi.restoreAllMocks();
 });
-async function fixture(unbound: number) {
+async function fixture(unbound: number, maxPending = 64) {
   const agent = await DKGAgent.create({ name: 'BoundedSelfPrime', chainAdapter: new MockChainAdapter() });
   agents.push(agent);
   const internals = agent as unknown as Internals;
@@ -30,14 +32,24 @@ async function fixture(unbound: number) {
   internals.openVmReconcileRotationState();
   for (let i = 0; i < unbound; i++) internals.subscribedContextGraphs.set(`cg-${i}`, { subscribed: true });
   const order: string[] = [];
-  const dispatch = vi.fn(async (cg: string) => { order.push(`dispatch:${cg}`); return true; });
-  const triggerLive = vi.fn();
-  internals.vmReconcileDispatcher = { dispatch, triggerLive };
   const canRead = vi.spyOn(agent, 'canReadContextGraph').mockResolvedValue(true);
   const resolve = vi.spyOn(internals, 'resolveContextGraphOnChainIdBinding').mockImplementation(async (id) => {
     order.push(`resolve:${id}`); return null;
   });
-  return { internals, resolve, canRead, order, dispatch, triggerLive };
+  const installDispatcher = () => {
+    const signal = internals.vmReconcileLifecycleController.signal;
+    const dispatcher = new VmReconcileDispatcher(async (cg) => {
+      order.push(`dispatch:${cg}`);
+      await internals.resolveVmReconcileTarget(cg, () => !signal.aborted, signal);
+      return true;
+    }, () => undefined, { concurrency: 1, maxPending });
+    dispatchers.push(dispatcher);
+    internals.vmReconcileDispatcher = dispatcher;
+    return dispatcher;
+  };
+  installDispatcher();
+  const triggerLive = vi.spyOn(internals.vmReconcileDispatcher, 'triggerLive');
+  return { internals, resolve, canRead, order, triggerLive, installDispatcher };
 }
 
 it('performs zero unbound resolution calls for a burst of unmatched live events', async () => {
@@ -60,6 +72,7 @@ it.each([3, 8, 16, 26])('covers %i stable unbound subscriptions fairly with at m
     for (let round = 0; round < rounds; round++) {
       resolve.mockClear();
       await internals.runVmReconcileSweep();
+      await internals.vmReconcileDispatcher.waitForIdle();
       expect(resolve.mock.calls.length).toBeLessThanOrEqual(8);
       const ids = resolve.mock.calls.map(([id]) => id);
       expect(new Set(ids).size).toBe(ids.length);
@@ -73,6 +86,7 @@ it('admits already-bound reconciliation before unbound resolution work', async (
   const { internals, order } = await fixture(30);
   internals.subscribedContextGraphs.set('bound', { subscribed: true, onChainId: '31' });
   await internals.runVmReconcileSweep();
+  await internals.vmReconcileDispatcher.waitForIdle();
   expect(order[0]).toBe('dispatch:bound');
 });
 
@@ -80,6 +94,7 @@ it('counts denied read-authority checks against the unbound attempt budget', asy
   const { internals, canRead, resolve } = await fixture(30);
   canRead.mockResolvedValue(false);
   await internals.runVmReconcileSweep();
+  await internals.vmReconcileDispatcher.waitForIdle();
   expect(canRead).toHaveBeenCalledTimes(8);
   expect(resolve).not.toHaveBeenCalled();
 });
@@ -87,13 +102,16 @@ it('counts denied read-authority checks against the unbound attempt budget', asy
 it('handles deletion, binding, replacement and appended subscriptions without skipping surviving candidates', async () => {
   const { internals, resolve } = await fixture(20);
   await internals.runVmReconcileSweep();
+  await internals.vmReconcileDispatcher.waitForIdle();
   internals.subscribedContextGraphs.delete('cg-8');
   internals.subscribedContextGraphs.set('cg-9', { subscribed: true });
   internals.subscribedContextGraphs.set('cg-10', { subscribed: true, onChainId: '110' });
   for (let i = 20; i < 23; i++) internals.subscribedContextGraphs.set(`cg-${i}`, { subscribed: true });
   resolve.mockClear();
   await internals.runVmReconcileSweep();
+  await internals.vmReconcileDispatcher.waitForIdle();
   await internals.runVmReconcileSweep();
+  await internals.vmReconcileDispatcher.waitForIdle();
   const ids = resolve.mock.calls.map(([id]) => id);
   expect(ids).not.toContain('cg-8');
   expect(ids).not.toContain('cg-10');
@@ -107,11 +125,12 @@ it('fences a subscription replaced during its read-authority lookup', async () =
     return true;
   });
   await internals.runVmReconcileSweep();
+  await internals.vmReconcileDispatcher.waitForIdle();
   expect(resolve).not.toHaveBeenCalled();
 });
 
 it.each(['binding', 'read-authority'])('stops during %s lookup and starts a new cursor when reopened', async (stage) => {
-  const { internals, resolve, canRead } = await fixture(20);
+  const { internals, resolve, canRead, installDispatcher } = await fixture(20);
   let release!: () => void;
   const pending = new Promise<void>((done) => { release = done; });
   const blocked = stage === 'binding' ? resolve : canRead;
@@ -121,11 +140,63 @@ it.each(['binding', 'read-authority'])('stops during %s lookup and starts a new 
     const sweep = internals.runVmReconcileSweep();
     await vi.waitFor(() => expect(blocked.mock.calls.length).toBe(1));
     internals.closeVmReconcileRotationState();
+    await internals.vmReconcileDispatcher.close();
     await sweep;
     expect(resolve.mock.calls.length).toBe(stage === 'binding' ? 1 : 0);
     internals.openVmReconcileRotationState();
+    installDispatcher();
     resolve.mockClear();
     await internals.runVmReconcileSweep();
+    await internals.vmReconcileDispatcher.waitForIdle();
     expect(resolve.mock.calls.map(([id]) => id)).toEqual(Array.from({ length: 8 }, (_, i) => `cg-${i}`));
   } finally { release(); }
+});
+
+it.each(['bound', 'cg-0'])('keeps bounded discovery progressing while %s reconciliation never settles', async (blockedId) => {
+  const { internals, canRead, resolve, order } = await fixture(24);
+  internals.subscribedContextGraphs.set('bound', { subscribed: true, onChainId: '42' });
+  let release!: () => void;
+  const pending = new Promise<void>((done) => { release = done; });
+  const targetResolver = internals as unknown as { resolveVmReconcileTarget(id: string): Promise<unknown> };
+  resolve.mockImplementation(async (id) => {
+    order.push(`resolve:${id}`);
+    return id === 'cg-0' ? { onChainId: '43', provenance: 'ontology' } : null;
+  });
+  const dispatcher = new VmReconcileDispatcher(async (id) => {
+    await targetResolver.resolveVmReconcileTarget(id);
+    if (id === blockedId) await pending;
+    return true;
+  }, () => undefined, { concurrency: 2, maxPending: 32 });
+  internals.vmReconcileDispatcher = dispatcher;
+  let sweep = internals.runVmReconcileSweep();
+  try {
+    await vi.waitFor(() => expect(new Set(resolve.mock.calls.map(([id]) => id)).size).toBe(8), { timeout: 300 });
+    await sweep;
+    expect(canRead.mock.calls.filter(([id]) => id === 'cg-0')).toHaveLength(1);
+    resolve.mockClear();
+    sweep = internals.runVmReconcileSweep();
+    await vi.waitFor(() => expect(new Set(resolve.mock.calls.map(([id]) => id)).size).toBe(8), { timeout: 300 });
+    await sweep;
+    expect(resolve.mock.calls.map(([id]) => id)).toEqual(Array.from({ length: 8 }, (_, i) => `cg-${i + 8}`));
+  } finally {
+    release();
+    await sweep;
+    await dispatcher.close();
+  }
+});
+
+it('keeps discovery fair when the bound set exceeds queue capacity', async () => {
+  const { internals, resolve, order } = await fixture(20, 3);
+  for (let i = 0; i < 100; i++) internals.subscribedContextGraphs.set(`bound-${i}`, { subscribed: true, onChainId: String(i + 1) });
+  const seen = new Set<string>();
+  for (let sweep = 0; sweep < 10; sweep++) {
+    resolve.mockClear();
+    await internals.runVmReconcileSweep();
+    expect(internals.vmReconcileDispatcher.snapshot().queued).toBeLessThanOrEqual(3);
+    await internals.vmReconcileDispatcher.waitForIdle();
+    expect(resolve.mock.calls.length).toBeLessThanOrEqual(8);
+    for (const [id] of resolve.mock.calls) seen.add(id);
+  }
+  expect(order[0]).toBe('dispatch:bound-0');
+  expect(seen).toEqual(new Set(Array.from({ length: 20 }, (_, i) => `cg-${i}`)));
 });

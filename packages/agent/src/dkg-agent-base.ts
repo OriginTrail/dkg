@@ -284,6 +284,7 @@ import {
 } from './chain-reconciler.js';
 import type { ContextGraphReconcileResult } from './vm-reconcile-service.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
+import { VmReconcileSweepSelector } from './vm-reconcile-sweep.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
 // type alias so listPendingJoinApprovalRetries() retains its old
@@ -1092,14 +1093,11 @@ export class DKGAgentBase {
   protected vmReconcileRuntimeReady = false;
   /** A timed-out physical retirement quarantines this instance until stop is retried. */
   protected vmReconcileShutdownBlocked = false;
-  /** Next eligible CG index for bounded periodic-sweep admission. */
-  protected vmReconcileSweepCursor = 0;
-  /** Live Map cursor: deletion skips entries and additions join the next rotation. */
-  protected vmReconcileUnboundCursor: Iterator<string, undefined> | null = null;
+  /** Independent fair admission cursors, reset with the reconcile lifecycle. */
+  protected readonly vmReconcileBoundSweep = new VmReconcileSweepSelector();
+  protected readonly vmReconcileUnboundSweep = new VmReconcileSweepSelector();
   /** Deterministically staggered cold-start prime, separate from the interval. */
   protected vmReconcileStartupTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Process-wide sweep single-flight; interval/startup callers join this promise. */
-  protected vmReconcileSweepInFlight: Promise<void> | null = null;
   /** Phase B — in-memory reconcile cursor per local CG id (watermark + `ahead`). */
   protected readonly reconcileCursors = new Map<string, CursorState>();
   /**

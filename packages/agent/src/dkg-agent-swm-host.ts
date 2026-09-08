@@ -2966,98 +2966,42 @@ export class SwmHostModeMethods extends DKGAgentBase {
       && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
     const dispatcher = this.vmReconcileDispatcher;
     if (!isLifecycleCurrent() || !this.vmReconcileEnabled() || !dispatcher) return;
-    if (this.vmReconcileSweepInFlight) return this.vmReconcileSweepInFlight;
-    const running = (async () => {
-      const eligible: string[] = [];
-      for (const [localCgId, sub] of this.subscribedContextGraphs) {
-        if (!isLifecycleCurrent()) return;
-        // Passive discovery rows carry neither member nor host intent. Public
-        // RFC-64 selection is handled by the accepted-policy loop below.
-        if ((!sub.subscribed && !sub.coreHosted)
-          || !this.contextGraphBindingState.hasBindingCandidate(localCgId, sub)) continue;
-        // A durable subscription row is synchronization intent, never an
-        // authorization credential. In particular, an older daemon may have
-        // persisted a private-CG row before the subscribe admission gate became
-        // fail-closed. Do not even enqueue VM work unless current policy
-        // authority positively proves this node can read the CG.
-        const canRead = await this.canReadContextGraph(localCgId, {
-          allowSubscriptionFallback: false,
-        }).catch(() => false);
-        if (!isLifecycleCurrent()) return;
-        if (!canRead) continue;
-        eligible.push(localCgId);
-      }
-
-      // Selected RFC-64 public CGs are also explicit operator sync scope. They
-      // intentionally do not become member subscriptions (no gossip fan-out or
-      // durable subscription row), but finalized VM must still be reconciled
-      // from the canonical on-chain ordinal inventory.
-      const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
-        ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
-        ?? [];
-      for (const { policyEnvelope } of acceptedPolicies) {
-        const localCgId = policyEnvelope.payload.contextGraphId;
-        if (
-          !eligible.includes(localCgId)
-          && this.isRfc64SelectedVmReconcileTargetAllowed(localCgId)
-        ) {
-          eligible.push(localCgId);
-        }
-      }
-
-      if (eligible.length === 0) {
-        this.vmReconcileSweepCursor = 0;
-      } else {
-        // Admit existing bound work before attempting background self-prime.
-        const start = this.vmReconcileSweepCursor % eligible.length;
-        for (let offset = 0; offset < eligible.length; offset += 1) {
-          if (!isLifecycleCurrent()) return;
-          const index = (start + offset) % eligible.length;
-          await dispatcher.dispatch(eligible[index]!, 'periodic').catch(() => undefined);
-        }
-        if (!isLifecycleCurrent()) return;
-        this.vmReconcileSweepCursor = (start + 1) % eligible.length;
-      }
-
-      // Retain one cursor over the existing subscription map, not a second
-      // queue. Scan at most one map-sized rotation and attempt at most B
-      // active unbound records; denied authority consumes the same budget.
-      const scanLimit = this.subscribedContextGraphs.size;
-      const attempted = new Set<string>();
-      let inspected = 0;
-      while (inspected < scanLimit && attempted.size < DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE) {
-        if (!isLifecycleCurrent()) return;
-        this.vmReconcileUnboundCursor ??= this.subscribedContextGraphs.keys();
-        const entry = this.vmReconcileUnboundCursor.next();
-        if (entry.done) {
-          this.vmReconcileUnboundCursor = null;
-          if (this.subscribedContextGraphs.size === 0) break;
-          continue;
-        }
-        inspected++;
-        const localCgId = entry.value;
-        const sub = this.subscribedContextGraphs.get(localCgId);
-        if (!sub?.subscribed || attempted.has(localCgId)
-          || this.contextGraphBindingState.hasBindingCandidate(localCgId, sub)) continue;
-        attempted.add(localCgId);
-        const canRead = await raceVmReconcileAbort(this.canReadContextGraph(localCgId, {
-          allowSubscriptionFallback: false,
-        }), lifecycleSignal).catch(() => false);
-        if (!isLifecycleCurrent()) return;
-        if (!canRead) continue;
-        const bound = await this.selfPrimeSubscriptionOnChainId(
-          localCgId, sub, undefined, isLifecycleCurrent, lifecycleSignal,
-        );
-        if (!isLifecycleCurrent()) return;
-        if (bound) await dispatcher.dispatch(localCgId, 'periodic').catch(() => undefined);
-      }
-    })();
-    this.vmReconcileSweepInFlight = running;
-    try {
-      await running;
-    } finally {
-      if (this.vmReconcileSweepInFlight === running) this.vmReconcileSweepInFlight = null;
+    // Admission is synchronous. The dispatcher owns physical concurrency,
+    // per-CG coalescing, error containment and shutdown; no sweep awaits a worker.
+    const bound = new Set<string>();
+    for (const [localCgId, sub] of this.subscribedContextGraphs) {
+      if ((sub.subscribed || sub.coreHosted)
+        && this.contextGraphBindingState.hasBindingCandidate(localCgId, sub)) bound.add(localCgId);
     }
+    const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
+      ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
+      ?? [];
+    for (const { policyEnvelope } of acceptedPolicies) {
+      const localCgId = policyEnvelope.payload.contextGraphId;
+      if (this.isRfc64SelectedVmReconcileTargetAllowed(localCgId)) bound.add(localCgId);
+    }
+    const boundKeys = [...bound];
+    const admittedBound = new Set<string>();
+    const admitBound = (key: string) => {
+      if (!isLifecycleCurrent() || !dispatcher.tryTriggerPeriodic(key)) return false;
+      admittedBound.add(key);
+      return true;
+    };
+    // Give bound work the first slot, then reserve a bounded discovery turn
+    // before filling the remaining queue. A large bound set cannot starve discovery.
+    this.vmReconcileBoundSweep.admit(boundKeys, 1, () => true, admitBound);
+    this.vmReconcileUnboundSweep.admit(
+      [...this.subscribedContextGraphs.keys()],
+      DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE,
+      (key) => {
+        const sub = this.subscribedContextGraphs.get(key);
+        return sub?.subscribed === true
+          && !this.contextGraphBindingState.hasBindingCandidate(key, sub);
+      },
+      (key) => isLifecycleCurrent() && dispatcher.tryTriggerPeriodic(key),
+    );
+    this.vmReconcileBoundSweep.admit(boundKeys, boundKeys.length,
+      (key) => !admittedBound.has(key), admitBound);
   }
 
   /**
@@ -3067,10 +3011,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * binds CURATED CGs and the ACK-signer hook only fires for cores in a
    * publish's storage-ACK set, so a pre-subscribed PUBLIC member would otherwise
    * stay unbound — stranded on the unreliable one-shot finalization gossip.
-   * Shared by periodic self-prime and explicit VM target resolution so binding,
-   * strict persistence and cursor resets retain one owner. The optional target
-   * restricts binding to a particular numeric id; periodic calls accept any
-   * non-null id —
+   * Canonical VM target resolution owns binding, strict persistence and cursor
+   * resets for periodic, live and explicit requests. It accepts any non-null id:
    * `getContextGraphOnChainId` never falls back to `localCgId`, so a
    * `resolved === localCgId` match is legitimate for a direct CG. Best-effort:
    * a store/RPC hiccup yields null instead of throwing. Returns the bound id.
@@ -3079,7 +3021,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this: DKGAgent,
     localCgId: string,
     sub: ContextGraphSub,
-    targetOnChainId?: bigint,
     isCurrent: () => boolean = () => true,
     signal?: AbortSignal,
   ): Promise<string | null> {
@@ -3106,12 +3047,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return null;
     }
     if (!isSubscriptionCurrent() || !resolved) return null;
-    if (targetOnChainId !== undefined) {
-      let resolvedNum: bigint | null = null;
-      try { resolvedNum = BigInt(resolved.onChainId); } catch { return null; }
-      if (resolvedNum !== targetOnChainId) return null;
-    }
-    if (!isSubscriptionCurrent()) return null;
     if (resolved.provenance !== 'reverse-name-hash') {
       try {
         await this.persistContextGraphSubscriptionStrict(
@@ -3537,12 +3472,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return this.resolveSelectedVmReconcileTarget(localCgId, isCurrent, signal);
     }
     // Central defense for periodic, live-chain, and manual reconciliation.
-    // The outer sweep also filters unauthorized rows to avoid queue churn, but
-    // every dispatcher entry point converges here and must independently prove
+    // Every dispatcher entry point converges here and must independently prove
     // read authority. Never let a persisted subscription authorize itself.
-    const canRead = await this.canReadContextGraph(localCgId, {
+    const canRead = await raceVmReconcileAbort(this.canReadContextGraph(localCgId, {
       allowSubscriptionFallback: false,
-    }).catch(() => false);
+    }), signal).catch(() => false);
     if (!isCurrent()) throw new VmReconcileQueueClosedError();
     if (!canRead) throw new ContextGraphNotFoundError(localCgId);
     if (
@@ -3552,7 +3486,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
       await this.selfPrimeSubscriptionOnChainId(
         localCgId,
         sub,
-        undefined,
         isCurrent,
         signal,
       );
@@ -5180,7 +5113,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.vmReconcileLifecycleController?.abort();
     this.vmReconcileLifecycleGeneration = (this.vmReconcileLifecycleGeneration ?? 0) + 1;
     this.vmReconcileRotationClosed = true;
-    this.vmReconcileUnboundCursor = null;
+    this.vmReconcileBoundSweep?.reset();
+    this.vmReconcileUnboundSweep?.reset();
     // Some lifecycle tests intentionally construct a narrow partial agent
     // without running the base constructor. Shutdown must remain best-effort
     // for that supported test seam and never mask later teardown failures.

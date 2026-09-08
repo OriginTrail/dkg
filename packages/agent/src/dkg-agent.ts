@@ -2291,7 +2291,6 @@ export class DKGAgent extends DKGAgentBase {
     // Exact-absence rotations were cleared before stopping the chain poller,
     // so a late in-flight response cannot restore process-local suppression.
     const vmReconcileDispatcher = this.vmReconcileDispatcher;
-    const vmReconcileSweep = this.vmReconcileSweepInFlight;
     const priorRetirement = this.vmReconcileRetirement;
     // close() fences admission synchronously before the physical-set drain is
     // sampled, so no dispatcher worker can appear behind an observed empty set.
@@ -2314,15 +2313,11 @@ export class DKGAgent extends DKGAgentBase {
     if (chainPollerDrain) drains.push(chainPollerDrain);
     if (priorRetirement) drains.push(priorRetirement.catch(() => undefined));
     if (dispatcherDrain) drains.push(dispatcherDrain);
-    if (vmReconcileSweep) drains.push(vmReconcileSweep.catch(() => undefined));
 
     let retirement!: Promise<void>;
     retirement = Promise.allSettled(drains).then(() => {
       if (this.vmReconcileDispatcher === vmReconcileDispatcher) {
         this.vmReconcileDispatcher = undefined;
-      }
-      if (this.vmReconcileSweepInFlight === vmReconcileSweep) {
-        this.vmReconcileSweepInFlight = null;
       }
       if (this.chainPoller === chainPoller) {
         this.chainPoller = null;
