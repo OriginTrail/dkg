@@ -46,6 +46,10 @@ describe.sequential('knowledge-asset CLI smoke', () => {
       '@id': 'urn:graph:named',
       '@graph': [{ '@id': 'urn:company:named', name: 'Named' }],
     }));
+    await writeFile(join(dkgHome, 'mixed.jsonld'), JSON.stringify([
+      { '@id': 'urn:company:default', 'http://schema.org/name': 'Default' },
+      { '@id': 'urn:graph:named', '@graph': [{ '@id': 'urn:company:named', 'http://schema.org/name': 'Named' }] },
+    ]));
     await writeFile(join(dkgHome, 'legacy.jsonld'), JSON.stringify([{
       subject: 'urn:company:legacy', predicate: 'http://schema.org/name',
       object: '"Legacy"', graph: 'urn:graph:legacy',
@@ -361,6 +365,26 @@ describe.sequential('knowledge-asset CLI smoke', () => {
     ], testEnv(dkgHome, smokeApiPort))).rejects.toMatchObject({
       stderr: expect.stringContaining('--no-finalize'),
     });
+    expect(calls).toEqual([]);
+  }, 30000);
+
+  it('rejects a mixed default/named JSON-LD dataset before any daemon request', async () => {
+    calls = [];
+    await expect(runCli([
+      'ka', 'create', 'mixed', '-c', 'research', '-f', join(dkgHome, 'mixed.jsonld'),
+    ], testEnv(dkgHome, smokeApiPort))).rejects.toMatchObject({ stderr: expect.stringContaining('--no-finalize') });
+    expect(calls).toEqual([]);
+  }, 30000);
+
+  it.each([null, [{ subject: 'urn:invalid', object: '"missing predicate"' }]])('uses the same legacy validation for JSON files and --triples: %j', async (input) => {
+    calls = [];
+    const raw = JSON.stringify(input);
+    const path = join(dkgHome, 'invalid-quads.json');
+    await writeFile(path, raw);
+    for (const inputArgs of [['--file', path], ['--triples', raw]]) {
+      await expect(runCli(['ka', 'write', 'invalid', '-c', 'research', ...inputArgs], testEnv(dkgHome, smokeApiPort)))
+        .rejects.toMatchObject({ stderr: expect.stringContaining('JSON input must contain an array of subject/predicate/object quads') });
+    }
     expect(calls).toEqual([]);
   }, 30000);
 
