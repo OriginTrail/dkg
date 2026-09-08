@@ -2,6 +2,9 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { VmReconcileShutdownTimeoutError } from '../src/vm-reconcile-service.js';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { VmReconcileDispatcher } from '../src/chain-reconciler.js';
 
 type Subscription = { subscribed: boolean; coreHosted?: boolean; onChainId?: string };
@@ -12,6 +15,7 @@ interface Internals {
   vmReconcileLifecycleController: AbortController;
   resolveVmReconcileTarget(cg: string, isCurrent?: () => boolean, signal?: AbortSignal): Promise<unknown>;
   runVmReconcileSweep(): Promise<void>;
+  scheduleVmReconcileSweep(): void;
   handleKARegisteredNudge(id: string, ka: bigint, context: ReturnType<typeof createOperationContext>): Promise<string | null>;
   openVmReconcileRotationState(): void;
   closeVmReconcileRotationState(): void;
@@ -71,7 +75,7 @@ it.each([3, 8, 16, 26])('covers %i stable unbound subscriptions fairly with at m
     const seen = new Set<string>();
     for (let round = 0; round < rounds; round++) {
       resolve.mockClear();
-      await internals.runVmReconcileSweep();
+      internals.scheduleVmReconcileSweep();
       await internals.vmReconcileDispatcher.waitForIdle();
       expect(resolve.mock.calls.length).toBeLessThanOrEqual(8);
       const ids = resolve.mock.calls.map(([id]) => id);
@@ -85,7 +89,7 @@ it.each([3, 8, 16, 26])('covers %i stable unbound subscriptions fairly with at m
 it('admits already-bound reconciliation before unbound resolution work', async () => {
   const { internals, order } = await fixture(30);
   internals.subscribedContextGraphs.set('bound', { subscribed: true, onChainId: '31' });
-  await internals.runVmReconcileSweep();
+  internals.scheduleVmReconcileSweep();
   await internals.vmReconcileDispatcher.waitForIdle();
   expect(order[0]).toBe('dispatch:bound');
 });
@@ -93,7 +97,7 @@ it('admits already-bound reconciliation before unbound resolution work', async (
 it('counts denied read-authority checks against the unbound attempt budget', async () => {
   const { internals, canRead, resolve } = await fixture(30);
   canRead.mockResolvedValue(false);
-  await internals.runVmReconcileSweep();
+  internals.scheduleVmReconcileSweep();
   await internals.vmReconcileDispatcher.waitForIdle();
   expect(canRead).toHaveBeenCalledTimes(8);
   expect(resolve).not.toHaveBeenCalled();
@@ -101,16 +105,16 @@ it('counts denied read-authority checks against the unbound attempt budget', asy
 
 it('handles deletion, binding, replacement and appended subscriptions without skipping surviving candidates', async () => {
   const { internals, resolve } = await fixture(20);
-  await internals.runVmReconcileSweep();
+  internals.scheduleVmReconcileSweep();
   await internals.vmReconcileDispatcher.waitForIdle();
   internals.subscribedContextGraphs.delete('cg-8');
   internals.subscribedContextGraphs.set('cg-9', { subscribed: true });
   internals.subscribedContextGraphs.set('cg-10', { subscribed: true, onChainId: '110' });
   for (let i = 20; i < 23; i++) internals.subscribedContextGraphs.set(`cg-${i}`, { subscribed: true });
   resolve.mockClear();
-  await internals.runVmReconcileSweep();
+  internals.scheduleVmReconcileSweep();
   await internals.vmReconcileDispatcher.waitForIdle();
-  await internals.runVmReconcileSweep();
+  internals.scheduleVmReconcileSweep();
   await internals.vmReconcileDispatcher.waitForIdle();
   const ids = resolve.mock.calls.map(([id]) => id);
   expect(ids).not.toContain('cg-8');
@@ -124,7 +128,7 @@ it('fences a subscription replaced during its read-authority lookup', async () =
     internals.subscribedContextGraphs.set('cg-0', { subscribed: false });
     return true;
   });
-  await internals.runVmReconcileSweep();
+  internals.scheduleVmReconcileSweep();
   await internals.vmReconcileDispatcher.waitForIdle();
   expect(resolve).not.toHaveBeenCalled();
 });
@@ -137,16 +141,15 @@ it.each(['binding', 'read-authority'])('stops during %s lookup and starts a new 
   if (stage === 'binding') resolve.mockReturnValueOnce(pending.then(() => null));
   else canRead.mockReturnValueOnce(pending.then(() => true));
   try {
-    const sweep = internals.runVmReconcileSweep();
+    internals.scheduleVmReconcileSweep();
     await vi.waitFor(() => expect(blocked.mock.calls.length).toBe(1));
     internals.closeVmReconcileRotationState();
     await internals.vmReconcileDispatcher.close();
-    await sweep;
     expect(resolve.mock.calls.length).toBe(stage === 'binding' ? 1 : 0);
     internals.openVmReconcileRotationState();
     installDispatcher();
     resolve.mockClear();
-    await internals.runVmReconcileSweep();
+    internals.scheduleVmReconcileSweep();
     await internals.vmReconcileDispatcher.waitForIdle();
     expect(resolve.mock.calls.map(([id]) => id)).toEqual(Array.from({ length: 8 }, (_, i) => `cg-${i}`));
   } finally { release(); }
@@ -168,19 +171,16 @@ it.each(['bound', 'cg-0'])('keeps bounded discovery progressing while %s reconci
     return true;
   }, () => undefined, { concurrency: 2, maxPending: 32 });
   internals.vmReconcileDispatcher = dispatcher;
-  let sweep = internals.runVmReconcileSweep();
+  internals.scheduleVmReconcileSweep();
   try {
     await vi.waitFor(() => expect(new Set(resolve.mock.calls.map(([id]) => id)).size).toBe(8), { timeout: 300 });
-    await sweep;
     expect(canRead.mock.calls.filter(([id]) => id === 'cg-0')).toHaveLength(1);
     resolve.mockClear();
-    sweep = internals.runVmReconcileSweep();
+    internals.scheduleVmReconcileSweep();
     await vi.waitFor(() => expect(new Set(resolve.mock.calls.map(([id]) => id)).size).toBe(8), { timeout: 300 });
-    await sweep;
     expect(resolve.mock.calls.map(([id]) => id)).toEqual(Array.from({ length: 8 }, (_, i) => `cg-${i + 8}`));
   } finally {
     release();
-    await sweep;
     await dispatcher.close();
   }
 });
@@ -191,7 +191,7 @@ it('keeps discovery fair when the bound set exceeds queue capacity', async () =>
   const seen = new Set<string>();
   for (let sweep = 0; sweep < 10; sweep++) {
     resolve.mockClear();
-    await internals.runVmReconcileSweep();
+    internals.scheduleVmReconcileSweep();
     expect(internals.vmReconcileDispatcher.snapshot().queued).toBeLessThanOrEqual(3);
     await internals.vmReconcileDispatcher.waitForIdle();
     expect(resolve.mock.calls.length).toBeLessThanOrEqual(8);
@@ -216,7 +216,7 @@ it('advances discovery under a sustained bound backlog without waiting for idle'
   internals.vmReconcileDispatcher = dispatcher;
   try {
     for (let tick = 0; tick < 100; tick++) {
-      await internals.runVmReconcileSweep();
+      internals.scheduleVmReconcileSweep();
       await vi.waitFor(() => expect(releases).toHaveLength(1));
       releases.shift()!(); // Exactly one completion; the queue stays backlogged.
       if (new Set(resolve.mock.calls.map(([id]) => id)).size === 20) break;
@@ -244,13 +244,13 @@ it.each([1, 3])('reserves foreground admission with maxPending=%i while the swee
   }, () => undefined, { concurrency: 1, maxPending });
   internals.vmReconcileDispatcher = dispatcher;
   try {
-    await internals.runVmReconcileSweep();
+    internals.scheduleVmReconcileSweep();
     const failures: unknown[] = [];
     const foreground = dispatcher.triggerManual('foreground').catch(error => { failures.push(error); });
     for (let tick = 0; tick < 4 && !started.includes('foreground'); tick++) {
       await vi.waitFor(() => expect(releases).toHaveLength(1));
       releases.shift()!();
-      await internals.runVmReconcileSweep();
+      internals.scheduleVmReconcileSweep();
     }
     expect(failures).toEqual([]);
     expect(started).toContain('foreground');
@@ -261,5 +261,56 @@ it.each([1, 3])('reserves foreground admission with maxPending=%i while the swee
     paused = false;
     for (const release of releases.splice(0)) release();
     await dispatcher.close();
+  }
+});
+
+it('keeps the public sweep completion pending until its admitted work finishes', async () => {
+  const { internals, canRead, resolve } = await fixture(1);
+  let release!: () => void;
+  const authority = new Promise<boolean>(done => { release = () => done(true); });
+  canRead.mockReturnValueOnce(authority);
+  let completed = false;
+  const sweep = internals.runVmReconcileSweep().then(() => { completed = true; });
+  try {
+    await vi.waitFor(() => expect(canRead).toHaveBeenCalledOnce());
+    expect(completed).toBe(false);
+    expect(resolve).not.toHaveBeenCalled();
+    release();
+    await sweep;
+    expect(resolve).toHaveBeenCalledOnce();
+    expect(internals.vmReconcileDispatcher.snapshot()).toMatchObject({ active: 0, queued: 0 });
+  } finally { release(); await sweep; }
+});
+
+it('keeps a non-cooperative authority lookup in physical shutdown retirement', async () => {
+  const agent = await DKGAgent.create({ name: 'AuthorityRetirement', chainAdapter: new MockChainAdapter() });
+  agents.push(agent);
+  await agent.start();
+  const internals = agent as unknown as Internals & { store: TripleStore; node: { stop(): Promise<void> } };
+  internals.subscribedContextGraphs.set('authority-pending', { subscribed: true, onChainId: '42' });
+  let release!: () => void;
+  const authority = new Promise<boolean>(done => { release = () => done(true); });
+  const canRead = vi.spyOn(agent, 'canReadContextGraph').mockReturnValue(authority);
+  const closeStore = vi.spyOn(internals.store, 'close');
+  const stopNode = vi.spyOn(internals.node, 'stop');
+  const originalTimeout = DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS;
+  Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS', { configurable: true, value: 20 });
+  const sweep = internals.runVmReconcileSweep();
+  try {
+    await vi.waitFor(() => expect(canRead).toHaveBeenCalled());
+    await expect(agent.stop()).rejects.toBeInstanceOf(VmReconcileShutdownTimeoutError);
+    expect(closeStore).not.toHaveBeenCalled();
+    expect(stopNode).not.toHaveBeenCalled();
+    await expect(agent.start()).rejects.toBeInstanceOf(VmReconcileShutdownTimeoutError);
+    release();
+    await sweep;
+    await agent.stop();
+    expect(closeStore).toHaveBeenCalledOnce();
+    expect(stopNode).toHaveBeenCalledOnce();
+  } finally {
+    release();
+    await sweep;
+    Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS', { configurable: true, value: originalTimeout });
+    await agent.stop();
   }
 });

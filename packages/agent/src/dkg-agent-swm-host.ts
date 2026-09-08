@@ -2952,12 +2952,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   /**
    * Trigger a coalesced reconcile sweep for every subscribed/core-hosted CG
-   * with an on-chain id, plus every operator-selected RFC-64 public CG. Used by
-   * the periodic timer + startup prime. Per-CG work is single-flighted by
+   * with an on-chain id, plus operator-selected RFC-64 public CGs, and await
+   * dispatcher completion. Per-CG work is single-flighted by
    * {@link vmReconcileDispatcher} so overlapping ticks (or a burst of live
    * nudges) collapse into one sweep per CG.
    */
   async runVmReconcileSweep(this: DKGAgent): Promise<void> {
+    const dispatcher = this.vmReconcileDispatcher;
+    this.scheduleVmReconcileSweep();
+    // Preserve the public completion boundary, including coalesced/trailing work.
+    // Timers use the synchronous admission API so slow workers cannot stall ticks.
+    await dispatcher?.waitForIdle();
+  }
+
+  /** Synchronously admit one bounded sweep turn; the dispatcher owns completion. */
+  scheduleVmReconcileSweep(this: DKGAgent): void {
     if (this.started && !this.vmReconcileRuntimeReady) return;
     const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
     const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
@@ -2985,7 +2994,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.vmReconcileSweepPlanner.admit(
       [...bound],
       unbound.filter((key) => !bound.has(key)),
-      (key) => isLifecycleCurrent() ? dispatcher.tryTriggerPeriodic(key) : 'closed',
+      (key) => isLifecycleCurrent() && dispatcher.tryTriggerPeriodic(key),
     );
   }
 
@@ -3459,9 +3468,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Central defense for periodic, live-chain, and manual reconciliation.
     // Every dispatcher entry point converges here and must independently prove
     // read authority. Never let a persisted subscription authorize itself.
-    const canRead = await raceVmReconcileAbort(this.canReadContextGraph(localCgId, {
+    const authorityRead = this.canReadContextGraph(localCgId, {
       allowSubscriptionFallback: false,
-    }), signal).catch(() => false);
+    });
+    // Cancellation releases the dispatcher worker, but an underlying store/RPC
+    // read may ignore it. Keep that physical dependency in the shutdown drain.
+    this.vmReconcilePhysicalRuns.add(authorityRead);
+    const retireAuthorityRead = () => { this.vmReconcilePhysicalRuns.delete(authorityRead); };
+    void authorityRead.then(retireAuthorityRead, retireAuthorityRead);
+    const canRead = await raceVmReconcileAbort(authorityRead, signal).catch(() => false);
     if (!isCurrent()) throw new VmReconcileQueueClosedError();
     if (!canRead) throw new ContextGraphNotFoundError(localCgId);
     if (

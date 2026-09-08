@@ -87,7 +87,6 @@ export { GossipPublishHandler, type GossipPublishHandlerCallbacks } from './goss
 export { FinalizationHandler } from './finalization-handler.js';
 export {
   VmReconcileDispatcher,
-  type VmReconcileAdmissionStatus,
 } from './chain-reconciler.js';
 export { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
 export {

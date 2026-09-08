@@ -46,7 +46,7 @@ it.each(['explicit', 'empty'])('resets after %s lifecycle reset', (kind) => {
 it('admits bound first, up to eight discovery candidates, then the rest of the bound rotation once', () => {
   const planner = new VmReconcileSweepPlanner(8);
   const admitted: string[] = [];
-  planner.admit(['b0', 'b1', 'b2'], Array.from({ length: 10 }, (_, i) => `u${i}`), key => { admitted.push(key); return 'admitted'; });
+  planner.admit(['b0', 'b1', 'b2'], Array.from({ length: 10 }, (_, i) => `u${i}`), key => { admitted.push(key); return true; });
   expect(admitted).toEqual(['b0', ...Array.from({ length: 8 }, (_, i) => `u${i}`), 'b1', 'b2']);
 });
 
@@ -54,11 +54,11 @@ it('keeps a partial discovery turn ahead of bound fills, then resumes bound prog
   const planner = new VmReconcileSweepPlanner(2);
   const admitted: string[] = [];
   let capacity = 2;
-  const admit = (key: string): 'admitted' | 'full' => {
-    if (capacity === 0) return 'full';
+  const admit = (key: string): boolean => {
+    if (capacity === 0) return false;
     capacity--;
     admitted.push(key);
-    return 'admitted';
+    return true;
   };
   planner.admit(['b0', 'b1'], ['u0', 'u1', 'u2'], admit);
   expect(admitted).toEqual(['b0', 'u0']);
@@ -74,32 +74,32 @@ it('does not repeat the leading bound graph when discovery finishes on a later c
   const planner = new VmReconcileSweepPlanner(2);
   const admitted: string[] = [];
   planner.admit(['b0', 'b1'], ['u0', 'u1'], key => {
-    if (admitted.length === 2) return 'full';
+    if (admitted.length === 2) return false;
     admitted.push(key);
-    return 'admitted';
+    return true;
   });
-  planner.admit(['b0', 'b1'], ['u0', 'u1'], key => { admitted.push(key); return 'admitted'; });
+  planner.admit(['b0', 'b1'], ['u0', 'u1'], key => { admitted.push(key); return true; });
   expect(admitted).toEqual(['b0', 'u0', 'u1', 'b1']);
 });
 
 it('resets an unfinished discovery turn on lifecycle restart', () => {
   const planner = new VmReconcileSweepPlanner(8);
-  planner.admit(['b0', 'b1'], ['u0', 'u1'], key => key === 'b0' ? 'admitted' : 'full');
+  planner.admit(['b0', 'b1'], ['u0', 'u1'], key => key === 'b0' ? true : false);
   planner.reset();
   const admitted: string[] = [];
-  planner.admit(['b0', 'b1'], ['u0', 'u1'], key => { admitted.push(key); return 'admitted'; });
+  planner.admit(['b0', 'b1'], ['u0', 'u1'], key => { admitted.push(key); return true; });
   expect(admitted).toEqual(['b0', 'u0', 'u1', 'b1']);
 });
 
 it('handles disappearing discovery candidates and retains a rejected bound candidate', () => {
   const planner = new VmReconcileSweepPlanner(8);
-  planner.admit(['b0', 'b1'], ['u0', 'u1'], key => key === 'b0' ? 'admitted' : 'full');
+  planner.admit(['b0', 'b1'], ['u0', 'u1'], key => key === 'b0' ? true : false);
   const admitted: string[] = [];
-  planner.admit(['b0', 'b1'], [], key => { admitted.push(key); return 'admitted'; });
+  planner.admit(['b0', 'b1'], [], key => { admitted.push(key); return true; });
   expect(admitted).toEqual(['b1']);
-  planner.admit(['b0', 'b1'], [], () => 'full');
+  planner.admit(['b0', 'b1'], [], () => false);
   admitted.length = 0;
-  planner.admit(['b0', 'b1'], [], key => { admitted.push(key); return 'admitted'; });
+  planner.admit(['b0', 'b1'], [], key => { admitted.push(key); return true; });
   expect(admitted).toEqual(['b1', 'b0']);
 });
 
@@ -109,22 +109,22 @@ it.each([
 ])('handles a $name leading bound key while discovery is paused', ({ keys, expected }) => {
   const planner = new VmReconcileSweepPlanner(2);
   let capacity = 2;
-  planner.admit(['b0', 'b1', 'b2'], ['u0', 'u1'], () => capacity-- > 0 ? 'admitted' : 'full');
+  planner.admit(['b0', 'b1', 'b2'], ['u0', 'u1'], () => capacity-- > 0 ? true : false);
   const admitted: string[] = [];
-  planner.admit(keys, ['u0', 'u1'], key => { admitted.push(key); return 'admitted'; });
+  planner.admit(keys, ['u0', 'u1'], key => { admitted.push(key); return true; });
   expect(admitted[0]).toBe('u1');
   expect(admitted.slice(1).sort()).toEqual(expected);
 });
 
-it.each(['full', 'closed'] as const)('does not advance after %s but advances coalesced work', (rejection) => {
+it('does not advance after rejection but advances accepted or coalesced work', () => {
   const planner = new VmReconcileSweepPlanner(2);
   const attempted: string[] = [];
   planner.admit(['b0', 'b1'], [], key => {
     attempted.push(key);
-    return key === 'b0' ? 'coalesced' : rejection;
+    return key === 'b0';
   });
   expect(attempted).toEqual(['b0', 'b1']);
   attempted.length = 0;
-  planner.admit(['b0', 'b1'], [], key => { attempted.push(key); return 'admitted'; });
+  planner.admit(['b0', 'b1'], [], key => { attempted.push(key); return true; });
   expect(attempted[0]).toBe('b1');
 });

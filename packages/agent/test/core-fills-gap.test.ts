@@ -100,7 +100,8 @@ interface AgentInternals {
   vmReconcileDispatcher: {
     triggerLive: (cg: string) => void;
     triggerPeriodic: (cg: string) => void;
-    tryTriggerPeriodic: (cg: string) => 'admitted' | 'coalesced' | 'full' | 'closed';
+    tryTriggerPeriodic: (cg: string) => boolean;
+    waitForIdle(): Promise<void>;
     dispatch?: (cg: string, source: 'live' | 'periodic' | 'manual') => Promise<unknown>;
   } | null;
   store: TripleStore;
@@ -2298,9 +2299,10 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     internals.vmReconcileDispatcher = {
       triggerLive: (cg: string) => { liveTriggered.push(cg); },
       triggerPeriodic: (cg: string) => { periodicTriggered.push(cg); },
+      waitForIdle: async () => undefined,
       tryTriggerPeriodic: (cg: string) => {
         periodicTriggered.push(cg);
-        return 'admitted';
+        return true;
       },
       dispatch: async (cg: string, source: 'live' | 'periodic' | 'manual') => {
         if (source === 'periodic') periodicTriggered.push(cg);
@@ -2509,7 +2511,8 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     internals.vmReconcileDispatcher = {
       triggerLive: (contextGraphId: string) => { liveTriggered.push(contextGraphId); },
       triggerPeriodic: () => undefined,
-      tryTriggerPeriodic: () => 'admitted',
+      waitForIdle: async () => undefined,
+      tryTriggerPeriodic: () => true,
       dispatch: async () => ({}),
     };
 

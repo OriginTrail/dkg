@@ -4185,9 +4185,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (this.vmReconcileEnabled()) {
       this.ensureVmReconcileDispatcher();
       const runSweep = (): void => {
-        this.runVmReconcileSweep().catch((err: unknown) => {
+        try { this.scheduleVmReconcileSweep(); }
+        catch (err) {
           this.log.warn(ctx, `VM reconcile sweep failed: ${err instanceof Error ? err.message : String(err)}`);
-        });
+        }
       };
       const startupDelayMs = deterministicStartupJitterMs(
         `${this.node.peerId.toString()}\0${this.chain.chainId}`,

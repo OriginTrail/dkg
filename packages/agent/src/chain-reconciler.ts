@@ -567,8 +567,6 @@ interface VmReconcileDispatchState<T> {
   trailing?: VmReconcileDispatchWork<T>;
 }
 
-export type VmReconcileAdmissionStatus = 'admitted' | 'coalesced' | 'full' | 'closed';
-
 type VmReconcileAdmission<T> =
   | { kind: 'admitted' | 'coalesced'; completion: Promise<T> }
   | { kind: 'full' | 'closed' };
@@ -650,10 +648,10 @@ export class VmReconcileDispatcher<T> {
    * one pending slot for manual/live work; immediately runnable background work
    * and coalescing do not consume that reserve.
    */
-  tryTriggerPeriodic(key: string): VmReconcileAdmissionStatus {
-    const outcome = this.admit(key, 'periodic', true);
+  tryTriggerPeriodic(key: string): boolean {
+    const outcome = this.admit(key, 'periodic');
     if ('completion' in outcome) void outcome.completion.catch(() => undefined);
-    return outcome.kind;
+    return 'completion' in outcome;
   }
 
   /** Operator path; errors and the typed domain result propagate to the API. */
@@ -734,7 +732,7 @@ export class VmReconcileDispatcher<T> {
   }
 
   /** One synchronous transition owns coalescing, capacity and source reservation. */
-  private admit(key: string, source: VmReconcileSource, reserveForeground = false): VmReconcileAdmission<T> {
+  private admit(key: string, source: VmReconcileSource): VmReconcileAdmission<T> {
     if (this.closed) return { kind: 'closed' };
     const state = this.stateFor(key);
 
@@ -756,13 +754,13 @@ export class VmReconcileDispatcher<T> {
         this.mergeWork(state.trailing, source);
         return { kind: 'coalesced', completion: state.trailing.promise };
       }
-      const trailing = this.createQueuedWork(key, source, reserveForeground, false);
+      const trailing = this.createQueuedWork(key, source, false);
       if (!trailing) return { kind: 'full' };
       state.trailing = trailing;
       return { kind: 'admitted', completion: trailing.promise };
     }
 
-    const work = this.createQueuedWork(key, source, reserveForeground, this.active < this.concurrency);
+    const work = this.createQueuedWork(key, source, this.active < this.concurrency);
     if (!work) {
       if (state.hold === 'ready') this.states.delete(key);
       return { kind: 'full' };
@@ -777,10 +775,9 @@ export class VmReconcileDispatcher<T> {
   private createQueuedWork(
     key: string,
     source: VmReconcileSource,
-    reserveForeground: boolean,
     immediatelyRunnable: boolean,
   ): VmReconcileDispatchWork<T> | undefined {
-    const pendingLimit = reserveForeground && !immediatelyRunnable
+    const pendingLimit = source === 'periodic' && !immediatelyRunnable
       ? this.maxPending - 1 : this.maxPending;
     if (this.queued >= pendingLimit) return undefined;
     let resolveWork!: (value: T) => void;

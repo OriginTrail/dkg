@@ -1,5 +1,3 @@
-import type { VmReconcileAdmissionStatus } from './chain-reconciler.js';
-
 /** A scalar round-robin cursor over candidates already classified by the host. */
 export class VmReconcileSweepSelector {
   private nextKey: string | undefined;
@@ -45,11 +43,7 @@ export class VmReconcileSweepPlanner {
     this.turn = { phase: 'ready' };
   }
 
-  admit(boundKeys: readonly string[], unboundKeys: readonly string[], tryAdmit: (key: string) => VmReconcileAdmissionStatus): void {
-    const accepted = (key: string) => {
-      const outcome = tryAdmit(key);
-      return outcome === 'admitted' || outcome === 'coalesced';
-    };
+  admit(boundKeys: readonly string[], unboundKeys: readonly string[], accepted: (key: string) => boolean): void {
     if (this.turn.phase === 'ready') {
       let leadingBoundKey: string | undefined;
       const count = this.bound.admit(boundKeys, 1, key => {

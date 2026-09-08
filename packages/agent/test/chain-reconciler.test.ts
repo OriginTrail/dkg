@@ -975,20 +975,42 @@ describe('VmReconcileDispatcher scheduling', () => {
 });
 
 describe('VmReconcileDispatcher admission', () => {
-  it('returns atomic periodic outcomes and preserves the foreground reserve', async () => {
+  it.each(['tryTriggerPeriodic', 'triggerPeriodic', 'dispatch'] as const)('keeps the same foreground reserve through %s', async entry => {
+    let release!: () => void;
+    const blocked = new Promise<void>(done => { release = done; });
+    const ran: string[] = [];
+    const dispatcher = new VmReconcileDispatcher(async key => { ran.push(key); await blocked; }, () => undefined, { maxPending: 2 });
+    const admit = (key: string) => entry === 'dispatch'
+      ? void dispatcher.dispatch(key, 'periodic').catch(() => undefined)
+      : void dispatcher[entry](key);
+    try {
+      admit('active'); admit('queued'); admit('overflow');
+      expect(dispatcher.snapshot()).toEqual({ active: 1, queued: 1, closed: false });
+      expect(dispatcher.tryTriggerPeriodic('overflow')).toBe(false);
+      const foreground = dispatcher.triggerManual('foreground');
+      release();
+      await foreground;
+      await dispatcher.waitForIdle();
+      expect(ran).toEqual(['active', 'foreground', 'queued']);
+      await dispatcher.close();
+      expect(dispatcher.tryTriggerPeriodic('closed')).toBe(false);
+    } finally { release(); await dispatcher.close(); }
+  });
+
+  it('returns boolean periodic admission outcomes and preserves the foreground reserve', async () => {
     let release!: () => void;
     const blocked = new Promise<void>(resolve => { release = resolve; });
     const dispatcher = new VmReconcileDispatcher(async () => blocked, () => undefined, { maxPending: 2 });
-    expect(dispatcher.tryTriggerPeriodic('active')).toBe('admitted');
-    expect(dispatcher.tryTriggerPeriodic('queued')).toBe('admitted');
-    expect(dispatcher.tryTriggerPeriodic('queued')).toBe('coalesced');
-    expect(dispatcher.tryTriggerPeriodic('overflow')).toBe('full');
+    expect(dispatcher.tryTriggerPeriodic('active')).toBe(true);
+    expect(dispatcher.tryTriggerPeriodic('queued')).toBe(true);
+    expect(dispatcher.tryTriggerPeriodic('queued')).toBe(true);
+    expect(dispatcher.tryTriggerPeriodic('overflow')).toBe(false);
     expect(dispatcher.snapshot()).toEqual({ active: 1, queued: 1, closed: false });
     const foreground = dispatcher.triggerManual('foreground').catch(error => error);
     expect(dispatcher.snapshot().queued).toBe(2);
-    expect(dispatcher.tryTriggerPeriodic('queued')).toBe('coalesced');
+    expect(dispatcher.tryTriggerPeriodic('queued')).toBe(true);
     const closed = dispatcher.close();
-    expect(dispatcher.tryTriggerPeriodic('new')).toBe('closed');
+    expect(dispatcher.tryTriggerPeriodic('new')).toBe(false);
     expect(await foreground).toBeInstanceOf(VmReconcileQueueClosedError);
     release();
     await closed;
@@ -998,10 +1020,10 @@ describe('VmReconcileDispatcher admission', () => {
     let release!: () => void;
     const blocked = new Promise<void>(resolve => { release = resolve; });
     const dispatcher = new VmReconcileDispatcher(async () => blocked, () => undefined, { maxPending: 2 });
-    expect(dispatcher.tryTriggerPeriodic('active')).toBe('admitted');
-    expect(dispatcher.tryTriggerPeriodic('active')).toBe('admitted');
-    expect(dispatcher.tryTriggerPeriodic('active')).toBe('coalesced');
-    expect(dispatcher.tryTriggerPeriodic('other')).toBe('full');
+    expect(dispatcher.tryTriggerPeriodic('active')).toBe(true);
+    expect(dispatcher.tryTriggerPeriodic('active')).toBe(true);
+    expect(dispatcher.tryTriggerPeriodic('active')).toBe(true);
+    expect(dispatcher.tryTriggerPeriodic('other')).toBe(false);
     expect(dispatcher.snapshot().queued).toBe(1);
     release();
     await dispatcher.waitForIdle();
