@@ -1,3 +1,4 @@
+import type { RandomSamplingRuntime } from '../src/random-sampling-runtime.js';
 import { describe, it, expect, beforeAll, afterAll, vi, DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy, OxigraphStore, getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, contextGraphMetaUri, sparqlString, DKGQueryEngine, sha256, EVMChainAdapter, MockChainAdapter, createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS, mintTokens, ethers, tmpdir, mkdtemp, readFile, readdir, rm, join, fileURLToPath, _wrapAgentPublisherForSeal, CapturingContextGraphChainAdapter, AsyncSignerAddressContextGraphChainAdapter, SignerListContextGraphChainAdapter, PcaCuratedRegistrationChainAdapter, NonRegisteringACKChainAdapter, FlakyRegistrationACKChainAdapter, TransientIdentityFailureChainAdapter, BrandNewCoreTransientChainAdapter, PermanentProfileFailureChainAdapter, RetryPathPermanentFailureChainAdapter, ContextAuthorizedPublisherChainAdapter, buildSnapshotFactQuads, ReferenceEvaluator, loadYaml, CCL_FACT_NS, OperationalKeyOnlyPublishChainAdapter, ExternalOperationalKeyPublishChainAdapter, AddressOnlyExternalOperationalKeyPublishChainAdapter, AsyncAddressSignMessageAsPublishChainAdapter, GenericSignMessageExternalOperationalKeyPublishChainAdapter, MultiSignerGenericSignMessagePublishChainAdapter, SingleAddressMismatchedGenericSignMessagePublishChainAdapter, SingleSignerAdapterPublishChainAdapter, ReservingAuthorityContextGraphChainAdapter, type Quad, type ChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type OnChainPublishResult, type V10PublishDirectParams } from './agent.shared';
 
 
@@ -15,11 +16,10 @@ afterAll(async () => {
 });
 
 function observeRandomSamplingRuntime(agent: DKGAgent) {
-  const factory = vi.spyOn(agent, 'createRandomSamplingRuntime');
   return () => {
-    const call = factory.mock.results.at(-1);
-    if (!call || call.type !== 'return') throw new Error('Random Sampling runtime was not constructed');
-    return call.value;
+    const runtime = (agent as unknown as { randomSamplingRuntime: RandomSamplingRuntime | null }).randomSamplingRuntime;
+    if (!runtime) throw new Error('Random Sampling runtime was not constructed');
+    return runtime;
   };
 }
 
@@ -195,7 +195,7 @@ describe('Random Sampling lifecycle gating', () => {
     const primary = ethers.Wallet.createRandom();
     const chain = new MockChainAdapter('mock:31337', primary.address);
     chain.seedIdentity(primary.address, 55n);
-    vi.spyOn(chain, 'isRandomSamplingReady').mockImplementation(() => {
+    const readiness = vi.spyOn(chain, 'isRandomSamplingReady').mockImplementation(() => {
       throw new Error('temporary readiness probe failure');
     });
     const membership = vi.spyOn(chain, 'isShardingTableMember');
@@ -216,9 +216,13 @@ describe('Random Sampling lifecycle gating', () => {
       expect(agent.getRandomSamplingStatus()).toMatchObject({
         enabled: false,
         identityId: '55',
-        disabledReason: 'bind_failed',
+        disabledReason: 'eligibility_lookup_failed',
       });
       expect(runtimeState().getLifecycleSnapshot().reconciliationScheduled).toBe(true);
+      readiness.mockReturnValue(true);
+      await runtimeState().reconcile();
+      expect(membership).toHaveBeenCalledWith(55n);
+      expect(agent.getRandomSamplingStatus()).toMatchObject({ enabled: true, identityId: '55' });
     } finally {
       await agent.stop().catch(() => {});
     }

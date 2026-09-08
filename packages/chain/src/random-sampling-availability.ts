@@ -32,10 +32,14 @@ export async function resolveRandomSamplingAvailability(
   chain: RandomSamplingAvailabilityReader,
   identityId: bigint,
 ): Promise<RandomSamplingAvailability> {
-  if (chain.resolveRandomSamplingAvailability) return chain.resolveRandomSamplingAvailability(identityId);
-  if (!chain.isShardingTableMember) return { kind: 'unavailable', reason: 'unsupported_chain' };
-  if (chain.isRandomSamplingReady && !chain.isRandomSamplingReady()) {
-    return { kind: 'unavailable', reason: 'contracts_not_deployed' };
+  try {
+    if (chain.resolveRandomSamplingAvailability) return await chain.resolveRandomSamplingAvailability(identityId);
+    if (!chain.isShardingTableMember) return { kind: 'unavailable', reason: 'unsupported_chain' };
+    if (chain.isRandomSamplingReady && !chain.isRandomSamplingReady()) {
+      return { kind: 'unavailable', reason: 'contracts_not_deployed' };
+    }
+    return await probeRandomSamplingAvailability(() => chain.isShardingTableMember!(identityId));
+  } catch (error) {
+    return { kind: 'indeterminate', error };
   }
-  return probeRandomSamplingAvailability(() => chain.isShardingTableMember!(identityId));
 }

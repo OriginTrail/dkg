@@ -1,3 +1,4 @@
+import { MockChainAdapter } from '../src/mock-adapter.js';
 import { Contract } from 'ethers';
 import { afterEach, expect, it, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
@@ -89,4 +90,17 @@ it('preserves legacy readiness and membership capabilities', async () => {
   expect(await resolveRandomSamplingAvailability({}, 52n)).toEqual({ kind: 'unavailable', reason: 'unsupported_chain' });
   expect(await resolveRandomSamplingAvailability({ isShardingTableMember: async () => true, isRandomSamplingReady: () => false }, 52n))
     .toEqual({ kind: 'unavailable', reason: 'contracts_not_deployed' });
+});
+
+it('implements typed availability for the offline adapter', async () => {
+  const chain = new MockChainAdapter();
+  expect(await chain.resolveRandomSamplingAvailability(0n)).toEqual({ kind: 'available', member: false });
+  expect(await chain.resolveRandomSamplingAvailability(52n)).toEqual({ kind: 'available', member: true });
+});
+it.each(['readiness', 'capability'])('contains an unexpected %s failure as an indeterminate fact', async (source) => {
+  const error = new Error('temporary read failure');
+  const chain = source === 'readiness'
+    ? { isShardingTableMember: async () => true, isRandomSamplingReady: () => { throw error; } }
+    : { resolveRandomSamplingAvailability: async () => { throw error; } };
+  expect(await resolveRandomSamplingAvailability(chain, 52n)).toEqual({ kind: 'indeterminate', error });
 });

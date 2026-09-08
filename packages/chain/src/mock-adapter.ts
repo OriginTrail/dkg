@@ -1,3 +1,4 @@
+import { resolveRandomSamplingAvailability, type RandomSamplingAvailability } from './random-sampling-availability.js';
 import type {
   ChainAdapter,
   IdentityProof,
@@ -1520,6 +1521,13 @@ export class MockChainAdapter implements ChainAdapter {
 
   isV10Ready(): boolean {
     return true;
+  }
+
+  async resolveRandomSamplingAvailability(identityId: bigint): Promise<RandomSamplingAvailability> {
+    return resolveRandomSamplingAvailability({
+      isRandomSamplingReady: () => this.isRandomSamplingReady(),
+      isShardingTableMember: (id) => this.isShardingTableMember(id),
+    }, identityId);
   }
 
   isRandomSamplingReady(): boolean {
