@@ -1,12 +1,12 @@
-import { toEpcisEvent, handleEventsQuery, type EPCISEventFields, type EPCISEvent, type EPCISQueryEvent, type SparqlBinding, type QueryEngine } from '../dist/index.js';
+import { toEpcisEvent, handleEventsQuery, type EPCISEventFields, type EPCISEvent, type EPCISQueryEvent, type EPCISEventProjection, type SparqlBinding, type QueryEngine } from '../dist/index.js';
 
 // Existing QueryEngine consumers pass generic rows to this public helper.
 const row: Record<string, string> = { event: 'urn:event:1' };
 const event = toEpcisEvent(row);
-const sparseProjection = toEpcisEvent({ eventTime: '"2026-09-07T00:00:00Z"' });
+const sparseProjection: EPCISEventProjection = toEpcisEvent({ eventTime: '"2026-09-07T00:00:00Z"' });
 const projectedTime: string | undefined = sparseProjection.eventTime;
-// @ts-expect-error The permissive converter does not promise validated query identity.
-const uncheckedProjectionId: string = event.eventID;
+// @ts-expect-error The sparse converter never reconstructs eventID, even as an optional property.
+const uncheckedProjectionId = event.eventID;
 void [projectedTime, uncheckedProjectionId];
 
 // Reconstructed standard fields retain their useful types.

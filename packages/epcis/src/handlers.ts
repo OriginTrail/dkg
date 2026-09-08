@@ -2,7 +2,7 @@ import { isSafeIri } from '@origintrail-official/dkg-core';
 import { createValidator } from './validation.js';
 import { buildEpcisQuery } from './query-builder.js';
 import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js';
-import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, SparqlBinding, EPCISQueryEvent, EPCISQueryDocumentResponse } from './types.js';
+import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, SparqlBinding, EPCISQueryEvent, EPCISEventProjection, EPCISQueryDocumentResponse } from './types.js';
 
 export interface AsyncCaptureConfig {
   contextGraphId: string;
@@ -119,8 +119,8 @@ function decodeQueryEvent(binding: SparqlBinding): EPCISQueryEvent {
 }
 
 /** Reconstruct available fields from a sparse projection; query identity is validated separately. */
-export function toEpcisEvent(binding: SparqlBinding): Partial<EPCISQueryEvent> {
-  const event: Partial<EPCISQueryEvent> = {};
+export function toEpcisEvent(binding: SparqlBinding): EPCISEventProjection {
+  const event: EPCISEventProjection = {};
 
   // Strip eventType URI prefix to short name
   const rawType = unwrapLiteral(binding['eventType'] ?? '');

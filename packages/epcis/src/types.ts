@@ -140,6 +140,9 @@ export interface EPCISQueryEvent extends EPCISEventFields {
   'dkg:ual'?: string;
 }
 
+/** Fields reconstructed from a sparse projection, without validated query identity. */
+export type EPCISEventProjection = Partial<Omit<EPCISQueryEvent, 'eventID'>>;
+
 export interface EPCISQueryDocumentResponse {
   '@context': Array<string | Record<string, string>>;
   type: 'EPCISQueryDocument';
