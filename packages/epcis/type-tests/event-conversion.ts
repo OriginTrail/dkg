@@ -5,8 +5,8 @@ const row: Record<string, string> = { event: 'urn:event:1' };
 const event = toEpcisEvent(row);
 const sparseProjection: EPCISEventProjection = toEpcisEvent({ eventTime: '"2026-09-07T00:00:00Z"' });
 const projectedTime: string | undefined = sparseProjection.eventTime;
-// @ts-expect-error The sparse converter never reconstructs eventID, even as an optional property.
-const uncheckedProjectionId = event.eventID;
+// @ts-expect-error Dynamic inspection does not promise a validated string identity.
+const uncheckedProjectionId: string = event.eventID;
 void [projectedTime, uncheckedProjectionId];
 
 // Reconstructed standard fields retain their useful types.
@@ -14,10 +14,9 @@ const timestamp: string | undefined = event.eventTime?.toUpperCase();
 const readPoint: string | undefined = event.readPoint?.id;
 const firstChild: string | undefined = event.childEPCs?.[0];
 const provenance: string | undefined = event['dkg:ual'];
-// @ts-expect-error Arbitrary capture extensions are not reconstructed.
-const extension = event['example:extension'];
-// @ts-expect-error Capture transactions are not reconstructed.
-const transactions = event.bizTransactionList;
+// Legacy dynamic extension inspection remains unknown.
+const extension: unknown = event['example:extension'];
+const transactions: unknown = event.bizTransactionList;
 void transactions;
 void [timestamp, readPoint, firstChild, provenance, extension];
 
@@ -37,8 +36,8 @@ const responseEpcs: string[] | undefined = responseEvent.epcList;
 void [responseId, responseTime, responseLocation, responseEpcs];
 // @ts-expect-error The response must not widen back to generic record values.
 responseEvent.eventTime = 42;
-// @ts-expect-error Unsupported capture fields are absent through the public response.
-void responseEvent.sensorElementList;
+const responseExtensions: unknown = responseEvent.sensorElementList;
+void responseExtensions;
 
 // Raw query rows do not promise that OPTIONAL or even required aliases were bound.
 const sparseRow: SparqlBinding = { event: undefined, eventTime: undefined };
@@ -53,10 +52,18 @@ void [genericEngine, sparseEngine];
 const countEngine: QueryEngine = { query: async () => ({ bindings: [{ count: '1' }] }) };
 void countEngine;
 
-// Capture and query share standard field types without sharing extensibility or requirements.
+// Capture and query share standard field types while retaining different requirements.
 declare const fields: EPCISEventFields;
 const capture: EPCISEvent = { ...fields, type: 'ObjectEvent', eventTime: '2026-09-07T00:00:00Z', 'example:extension': 42 };
 const projected: EPCISQueryEvent = { ...fields, eventID: 'urn:event:1' };
 // @ts-expect-error Capture still requires its event type and timestamp.
 const incompleteCapture: EPCISEvent = { eventID: 'urn:event:1' };
 void [capture, projected, incompleteCapture];
+
+// Keep legacy dynamic inspection while known fields retain their precise shapes.
+declare const dynamicField: string;
+declare const queryEvent: EPCISQueryEvent;
+const dynamicProjectionValue: unknown = event[dynamicField];
+const dynamicQueryValue: unknown = queryEvent[dynamicField];
+const typedQueryReadPoint: string | undefined = queryEvent.readPoint?.id;
+void [dynamicProjectionValue, dynamicQueryValue, typedQueryReadPoint];

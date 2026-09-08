@@ -134,14 +134,16 @@ export interface QueryEngine {
   ): Promise<{ bindings: SparqlBinding[] }>;
 }
 
-/** Closed query response with a required reusable ID and query-only provenance. */
-export interface EPCISQueryEvent extends EPCISEventFields {
-  eventID: string;
+/** Legacy sparse projection: typed known fields plus dynamically inspected extension fields. */
+export interface EPCISEventProjection extends Omit<EPCISEventFields, 'eventID'> {
   'dkg:ual'?: string;
+  [key: string]: unknown;
 }
 
-/** Fields reconstructed from a sparse projection, without validated query identity. */
-export type EPCISEventProjection = Partial<Omit<EPCISQueryEvent, 'eventID'>>;
+/** Query response adds the validated reusable identity to the open projection contract. */
+export interface EPCISQueryEvent extends EPCISEventProjection {
+  eventID: string;
+}
 
 export interface EPCISQueryDocumentResponse {
   '@context': Array<string | Record<string, string>>;

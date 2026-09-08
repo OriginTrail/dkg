@@ -498,7 +498,7 @@ describe('handleEventsQuery', () => {
 });
 
 describe('toEpcisEvent', () => {
-  it.each([{}, { event: undefined }, { event: '' }, { event: '_:b0' }, { event: 'relative' }, { event: 'urn:event:bad id' }])('preserves the legacy sparse projection contract: %j', (binding) => {
+  it.each([{}, { event: undefined }, { event: '' }, { event: '_:b0' }, { event: 'relative' }, { event: 'urn:event:bad id' }, { event: 'urn:event:1' }, { event: 'https://example.org/event/1' }])('preserves the legacy sparse projection contract: %j', (binding) => {
     expect(toEpcisEvent({ ...binding, eventTime: '"2026-09-07T00:00:00Z"' })).toEqual({ eventTime: '2026-09-07T00:00:00Z' });
   });
 
