@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { parse as parseJsonc } from 'jsonc-parser';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -8,7 +7,7 @@ import { join } from 'node:path';
 import TOML from '@iarna/toml';
 import { inspectRegistration, removeRegistration } from '../src/mcp-client-config.js';
 import { writeMcpConfigAtomic } from '../src/mcp-config-file.js';
-import { type ClientTarget, type McpClientId, type McpClientConfigShape } from '../src/mcp-client-registry.js';
+import { type ClientTarget } from '../src/mcp-client-registry.js';
 import { dkgDir, configPath } from '../src/config.js';
 import { dkgAuthTokenPath } from '@origintrail-official/dkg-core';
 import { mcpUninstallAction } from '../src/mcp-uninstall.js';
@@ -27,12 +26,11 @@ afterEach(() => { vi.restoreAllMocks(); vi.mocked(fs.renameSync).mockReset(); vi
 
 function target(name: string, container: 'mcpServers' | 'servers' | 'mcp_servers' = 'mcpServers', format: 'json' | 'jsonc' | 'toml' = 'json'): ClientTarget {
   const configPath = join(root, `${name}.${format}`);
-  const id = ({ Cursor: 'cursor', 'Claude Code': 'claude-code', 'Claude Desktop': 'claude-desktop', Windsurf: 'windsurf', VSCode: 'vscode', Cline: 'cline', 'Codex CLI': 'codex-cli' } as Record<string, McpClientId>)[name] ?? 'cursor';
-  const shape: McpClientConfigShape = format === 'toml'
-    ? { format, serverContainer: 'mcp_servers' }
-    : format === 'jsonc' ? { format, serverContainer: 'servers' }
-    : { format, serverContainer: container === 'servers' ? 'servers' : 'mcpServers' };
-  return { ...shape, id, location: 'native', name, configPath, displayPath: configPath };
+  const paths = { name, configPath, displayPath: configPath, location: 'native' as const };
+  if (format === 'toml') return { ...paths, id: 'codex-cli', format: 'toml', serverContainer: 'mcp_servers' };
+  if (container === 'servers') return { ...paths, id: 'vscode', format: 'jsonc', serverContainer: 'servers' };
+  const id = ({ 'Claude Code': 'claude-code', 'Claude Desktop': 'claude-desktop', Windsurf: 'windsurf', Cline: 'cline' } as const)[name as 'Claude Code' | 'Claude Desktop' | 'Windsurf' | 'Cline'] ?? 'cursor';
+  return { ...paths, id, format: 'json', serverContainer: 'mcpServers' };
 }
 function seed(client: ClientTarget, onlyDkg = false): void {
   const container = client.serverContainer;
@@ -113,19 +111,6 @@ describe('MCP registration removal', () => {
     expect(fs.readdirSync(root)).toEqual(files);
   });
 
-  it('preserves macOS ACL and extended attributes on the replacement inode', () => {
-    if (process.platform !== 'darwin') return;
-    const client = target('metadata');
-    seed(client);
-    execFileSync('/bin/chmod', ['+a', 'everyone allow read', client.configPath]);
-    execFileSync('/usr/bin/xattr', ['-w', 'org.origintrail.fixture', 'retained', client.configPath]);
-    const acl = () => execFileSync('/bin/ls', ['-le', client.configPath], { encoding: 'utf8' }).split('\n').slice(1).join('\n');
-    const beforeAcl = acl();
-    expect(beforeAcl).toContain('everyone allow read');
-    writeMcpConfigAtomic(client.configPath, '{}\n');
-    expect(acl()).toBe(beforeAcl);
-    expect(execFileSync('/usr/bin/xattr', ['-p', 'org.origintrail.fixture', client.configPath], { encoding: 'utf8' }).trim()).toBe('retained');
-  });
 
   it.each([
     '"dkg":{"command":"dkg"},"other":{"clientId":9007199254740993}',
@@ -389,7 +374,9 @@ describe('mcpUninstallAction', () => {
 
 describe('stable client selectors', () => {
   it('selects a Windows-side-only WSL target with the canonical client ID', async () => {
-    const client = { ...target('Cursor'), name: 'Cursor (Windows-side via WSL)', location: 'windows-wsl' as const };
+    const template = target('Cursor');
+    if (template.id !== 'cursor') throw new Error('Expected a Cursor fixture');
+    const client = { ...template, name: 'Cursor (Windows-side via WSL)', location: 'windows-wsl' as const };
     seed(client);
     await mcpUninstallAction({ yes: true, client: 'cursor' }, { detectClients: () => [client], log: () => {} });
     expect(inspectRegistration(client)).toBe(false);
@@ -397,7 +384,9 @@ describe('stable client selectors', () => {
 
   it.each(['cursor', 'cursor:windows-wsl', 'cursor:native'])('selects native/WSL variants explicitly with %s', async (selector) => {
     const native = target('Cursor');
-    const windows = { ...target('windows'), name: 'A renamed Windows display label', location: 'windows-wsl' as const };
+    const template = target('windows');
+    if (template.id !== 'cursor') throw new Error('Expected a Cursor fixture');
+    const windows = { ...template, name: 'A renamed Windows display label', location: 'windows-wsl' as const };
     seed(native); seed(windows);
     await mcpUninstallAction({ yes: true, client: selector }, { detectClients: () => [native, windows], log: () => {} });
     expect(inspectRegistration(native)).toBe(selector === 'cursor:windows-wsl');

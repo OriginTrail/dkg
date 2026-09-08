@@ -32,7 +32,10 @@ async function target(
 ): Promise<ClientTarget> {
   const configPath = join(dir, filename);
   await writeFile(configPath, body, 'utf8');
-  return { ...shape, id: 'cursor', location: 'native', name: 'Test', configPath, displayPath: configPath };
+  const paths = { location: 'native' as const, name: 'Test', configPath, displayPath: configPath };
+  if (shape.format === 'toml') return { ...paths, id: 'codex-cli', ...shape };
+  if (shape.serverContainer === 'servers') return { ...paths, id: 'vscode', format: 'jsonc', serverContainer: 'servers' };
+  return { ...paths, id: 'cursor', format: 'json', serverContainer: 'mcpServers' };
 }
 
 /** Fails loudly with the probe's own reason instead of a bare undefined. */

@@ -24,43 +24,45 @@ const TOML_SERVERS = { format: 'toml', serverContainer: 'mcp_servers' } as const
 
 /** One entry owns each client's identity, storage shape, paths and skill delivery. */
 const MCP_CLIENT_REGISTRY = [
-  { id: 'cursor', name: 'Cursor', config: JSON_MCP,
+  { target: { id: 'cursor', name: 'Cursor', ...JSON_MCP },
     nativePaths: (home: string) => homePaths(home, '.cursor', 'mcp.json'),
     windowsPath: (env: WindowsPaths) => env.USERPROFILE && join(env.USERPROFILE, '.cursor', 'mcp.json'),
     skillPath: ['.cursor', 'skills', 'dkg-node', 'SKILL.md'],
   },
-  { id: 'claude-code', name: 'Claude Code', config: JSON_MCP,
+  { target: { id: 'claude-code', name: 'Claude Code', ...JSON_MCP },
     nativePaths: (home: string) => homePaths(home, '.claude.json'),
     skillPath: ['.claude', 'skills', 'dkg-node', 'SKILL.md'],
   },
-  { id: 'claude-desktop', name: 'Claude Desktop', config: JSON_MCP,
+  { target: { id: 'claude-desktop', name: 'Claude Desktop', ...JSON_MCP },
     nativePaths: claudeDesktopPaths,
     windowsPath: (env: WindowsPaths) => env.APPDATA && join(env.APPDATA, 'Claude', 'claude_desktop_config.json'),
   },
-  { id: 'windsurf', name: 'Windsurf', config: JSON_MCP,
+  { target: { id: 'windsurf', name: 'Windsurf', ...JSON_MCP },
     nativePaths: (home: string) => homePaths(home, '.codeium', 'windsurf', 'mcp_config.json'),
     windowsPath: (env: WindowsPaths) => env.USERPROFILE && join(env.USERPROFILE, '.codeium', 'windsurf', 'mcp_config.json'),
   },
-  { id: 'vscode', name: 'VSCode', config: JSONC_SERVERS,
+  { target: { id: 'vscode', name: 'VSCode', ...JSONC_SERVERS },
     nativePaths: vscodeMcpPaths,
     windowsPath: (env: WindowsPaths) => env.APPDATA && join(env.APPDATA, 'Code', 'User', 'mcp.json'),
   },
-  { id: 'cline', name: 'Cline', config: JSON_MCP,
+  { target: { id: 'cline', name: 'Cline', ...JSON_MCP },
     nativePaths: clineMcpPaths,
     windowsPath: (env: WindowsPaths) => env.APPDATA && join(env.APPDATA, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json'),
   },
-  { id: 'codex-cli', name: 'Codex CLI', config: TOML_SERVERS,
+  { target: { id: 'codex-cli', name: 'Codex CLI', ...TOML_SERVERS },
     nativePaths: (home: string) => homePaths(home, '.codex', 'config.toml'),
     // A WSL process has no Windows-compatible Node/CLI launch command for Codex.
   },
 ] as const;
 
-export type McpClientId = typeof MCP_CLIENT_REGISTRY[number]['id'];
-export const MCP_CLIENT_IDS = Object.freeze(MCP_CLIENT_REGISTRY.map((client) => client.id));
-export type ClientTarget = McpClientConfigShape & {
-  id: McpClientId;
-  location: McpClientLocation;
-  name: string;
+type McpClientDefinition = typeof MCP_CLIENT_REGISTRY[number];
+export type McpClientId = McpClientDefinition['target']['id'];
+export const MCP_CLIENT_IDS = Object.freeze(MCP_CLIENT_REGISTRY.map((client) => client.target.id));
+type NativeTarget = McpClientDefinition['target'] & { location: 'native' };
+type WindowsTarget = Extract<McpClientDefinition, { windowsPath: unknown }>['target'] & { location: 'windows-wsl' };
+/** Identity determines its config shape and supported locations in the registry. */
+type WithDisplayName<T> = T extends unknown ? Omit<T, 'name'> & { name: string } : never;
+export type ClientTarget = WithDisplayName<NativeTarget | WindowsTarget> & {
   configPath: string;
   /** Pretty path for display, with `~` substituted back in. */
   displayPath: string;
@@ -77,7 +79,7 @@ export function parseMcpClientSelector(value: string): { id: McpClientId; locati
 }
 
 export function clientSkillPath(id: McpClientId, home: string): string | null {
-  const client = MCP_CLIENT_REGISTRY.find((entry) => entry.id === id);
+  const client = MCP_CLIENT_REGISTRY.find((entry) => entry.target.id === id);
   return client && 'skillPath' in client ? join(home, ...client.skillPath) : null;
 }
 
@@ -287,9 +289,7 @@ export function detectClients(
 ): ClientTarget[] {
   const home = homedir();
   const candidates: ClientTarget[] = MCP_CLIENT_REGISTRY.map((client) => ({
-    ...client.config,
-    id: client.id,
-    name: client.name,
+    ...client.target,
     location: 'native',
     ...client.nativePaths(home),
   }));
@@ -299,12 +299,12 @@ export function detectClients(
       APPDATA: resolveWslWindowsEnvPath('APPDATA'),
     };
     for (const client of MCP_CLIENT_REGISTRY) {
-      const configPath = 'windowsPath' in client ? client.windowsPath(windows) : null;
+      if (!('windowsPath' in client)) continue;
+      const configPath = client.windowsPath(windows);
       if (!configPath) continue;
       candidates.push({
-        ...client.config,
-        id: client.id,
-        name: `${client.name} (Windows-side via WSL)`,
+        ...client.target,
+        name: `${client.target.name} (Windows-side via WSL)`,
         location: 'windows-wsl',
         configPath,
         displayPath: configPath,

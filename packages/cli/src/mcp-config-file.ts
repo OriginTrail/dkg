@@ -2,6 +2,7 @@ import { closeSync, existsSync, fchmodSync, fchownSync, fstatSync, fsyncSync, ft
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
+import { linuxMetadataCopyCommand, runMcpConfigPowerShell } from './mcp-config-metadata.js';
 
 export type RegistrationEdit = { kind: 'upsert' } | { kind: 'remove' };
 
@@ -11,6 +12,8 @@ export function writeMcpConfigAtomic(configPath: string, content: string): void 
   // preserving the user's link instead of renaming a regular file over it.
   const destination = lstatSync(configPath, { throwIfNoEntry: false }) ? realpathSync(configPath) : configPath;
   const original = existsSync(destination) ? statSync(destination) : undefined;
+  // Probe before creating a temporary file. BusyBox cp lacks these guarantees.
+  const copyCommand = original && process.platform === 'linux' ? linuxMetadataCopyCommand() : 'cp';
   const mode = original ? original.mode & 0o7777 : 0o600;
   const temporary = join(dirname(destination), `.${basename(destination)}.${randomUUID()}.tmp`);
   try {
@@ -24,7 +27,7 @@ export function writeMcpConfigAtomic(configPath: string, content: string): void 
         const args = process.platform === 'linux'
           ? ['--preserve=mode,ownership,xattr', destination, temporary]
           : ['-p', destination, temporary];
-        execFileSync('cp', args, { stdio: 'pipe' });
+        execFileSync(copyCommand, args, { stdio: 'pipe' });
         const copied = fstatSync(fd);
         // BSD cp may silently fail to retain UID/GID: verify and repair before publishing.
         if (copied.uid !== original.uid || copied.gid !== original.gid) {
@@ -35,6 +38,13 @@ export function writeMcpConfigAtomic(configPath: string, content: string): void 
           throw new Error(`Cannot preserve MCP config ownership: ${configPath}`);
         }
       }
+      if (original && process.platform === 'win32') {
+        // The temporary inode must have the original access policy before it
+        // receives config contents; a permissive parent must not expose secrets.
+        runMcpConfigPowerShell('Get-Acl -LiteralPath $env:DKG_MCP_FILE_SOURCE | Set-Acl -LiteralPath $env:DKG_MCP_FILE_DESTINATION', {
+          source: destination, destination: temporary,
+        });
+      }
       ftruncateSync(fd, 0);
       writeFileSync(fd, content, 'utf8');
       fchmodSync(fd, mode);
@@ -42,7 +52,26 @@ export function writeMcpConfigAtomic(configPath: string, content: string): void 
     } finally {
       closeSync(fd);
     }
-    renameSync(temporary, destination);
+    if (original && process.platform === 'win32') {
+      const backup = `${temporary}.backup`;
+      try {
+        // File.Replace uses ReplaceFileW, merging the destination's access
+        // metadata. false rejects metadata merge errors instead of ignoring them.
+        runMcpConfigPowerShell('[System.IO.File]::Replace($env:DKG_MCP_FILE_SOURCE, $env:DKG_MCP_FILE_DESTINATION, $env:DKG_MCP_FILE_BACKUP, $false)', {
+          source: temporary, destination, backup,
+        });
+      } catch (error) {
+        // ReplaceFileW can move the old file before a later rename fails.
+        if (!existsSync(destination) && existsSync(backup)) renameSync(backup, destination);
+        if (existsSync(backup)) {
+          throw new Error(`MCP config replacement failed; the original backup is retained at ${backup}`, { cause: error });
+        }
+        throw error;
+      }
+      rmSync(backup, { force: true });
+    } else {
+      renameSync(temporary, destination);
+    }
   } finally {
     rmSync(temporary, { force: true });
   }
