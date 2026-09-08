@@ -257,11 +257,15 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   // Pagination
   const limit = Math.min(Math.max(params.limit ?? 100, 1), 1000);
   const offset = Math.max(params.offset ?? 0, 0);
+  if (!Number.isSafeInteger(offset) || offset > 10_000) {
+    throw new EpcisQueryInputError('offset must be a safe integer no greater than 10000');
+  }
   const graphBody = [
     ...sharedRequiredPatterns,
     ...optionalClauses,
   ].join('\n      ');
 
+  // sparql-scan-allow: R3 -- Exact CG graphs, LIMIT <=1000 and checked OFFSET <=10000 bound each request.
   return `${PREFIXES}
 SELECT ?event ?eventType ?eventTime ?eventTimeZoneOffset ?bizStep ?bizLocation ?disposition ?readPoint ?action ?parentID ?configurationId ?shipmentId ?ual
   (GROUP_CONCAT(DISTINCT ?epc; SEPARATOR=", ") AS ?epcList)
