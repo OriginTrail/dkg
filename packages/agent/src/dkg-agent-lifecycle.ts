@@ -672,16 +672,12 @@ import {
 import {
   isRfc64PrivateRecoveryOwnerV1,
   resolveRfc64PrivateRecoveryContextGraphIdsV1,
-  resolveRfc64SelectedRecoveryContextGraphIdsV1,
   resolveRfc64SwmRecoveryLaneV1,
   type Rfc64AuthorizedSwmRecoveryPlanV1,
   type Rfc64PeerSwmRecoveryPlanV1,
   type Rfc64SwmRecoveryTargetV1,
 } from './rfc64/swm-recovery-plan-v1.js';
-import {
-  rfc64ExecutionPlanAllowsLegacySyncV1,
-  resolveRfc64RuntimeCatalogBootstrapConfigV1,
-} from
+import { resolveRfc64RuntimeCatalogBootstrapConfigV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
 import { reconcileRfc64CatalogAuthorityPlanV1 } from
   './rfc64/catalog-rollout-authority-reconciliation-v1.js';
@@ -691,29 +687,15 @@ import { initializeRfc64LegacySwmBoundaryV1 } from
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
 
-// Boot selections are immutable and projected once per agent. Edge subscriptions
-// are a live predicate over the agent's replaceable sync list: subscribe/unsubscribe
-// changes are visible immediately without carrying inventories into the queue.
-const startupRecoveryScopes = new WeakMap<ResolvedDKGAgentConfig, ReadonlySet<string>>();
-
 function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig, contextGraphId: string) {
-  let startupScopes = startupRecoveryScopes.get(config);
-  if (!startupScopes) {
-    startupScopes = new Set(resolveRfc64SelectedRecoveryContextGraphIdsV1(
-      resolveRfc64RuntimeCatalogBootstrapConfigV1(
-        config.rfc64CatalogBootstrap,
-        config.rfc64PublicCatalogBootstrap,
-      ),
-    ).filter((id) => rfc64ExecutionPlanAllowsLegacySyncV1(config.rfc64CatalogExecutionPlan, id)));
-    startupRecoveryScopes.set(config, startupScopes);
-  }
+  const startupScopes = config.resourcePolicy.admission.selectedRecoveryContextGraphIds ?? [];
   // Core's discovered all-CG corpus is not an operator recovery selection.
   const edgeScopes = (config.nodeRole ?? 'edge') === 'edge' ? config.syncContextGraphs : undefined;
   return {
     policy: config.resourcePolicy.admission,
     recoveryReservation: {
-      reservationActive: startupScopes.size > 0 || (edgeScopes?.some((id) => typeof id === 'string' && id.length > 0) ?? false),
-      selectedRecoveryScope: startupScopes.has(contextGraphId) || (edgeScopes?.includes(contextGraphId) ?? false),
+      reservationActive: startupScopes.length > 0 || (edgeScopes?.some((id) => typeof id === 'string' && id.length > 0) ?? false),
+      selectedRecoveryScope: startupScopes.includes(contextGraphId) || (edgeScopes?.includes(contextGraphId) ?? false),
     },
   };
 }

@@ -459,11 +459,14 @@ import {
 } from './dkg-agent-rfc64-swm-recovery-runtime.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
 import { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
+import { resolveRfc64SelectedRecoveryContextGraphIdsV1 } from
+  './rfc64/swm-recovery-plan-v1.js';
 import { Rfc64CatalogAuthorityRefreshLoopV1 } from
   './rfc64/catalog-authority-refresh-loop-v1.js';
 import { Rfc64PublicCatalogWorkloadOwnerV1 } from
   './rfc64/public-catalog-workload-owner-v1.js';
 import {
+  rfc64ExecutionPlanAllowsLegacySyncV1,
   resolveRfc64RuntimeCatalogBootstrapConfigV1,
   resolveRfc64CatalogExecutionPlanV1,
   resolveRfc64CatalogActivationsV1,
@@ -1314,8 +1317,21 @@ export class DKGAgent extends DKGAgentBase {
       legacyPublicFallback: rfc64PublicCatalogControls.autoPublishPolicy,
       acceptedPolicies: rfc64CatalogBootstrap?.acceptedPolicies ?? [],
     });
+    const selectedRecoveryContextGraphIds = resolveRfc64SelectedRecoveryContextGraphIdsV1(
+      resolveRfc64RuntimeCatalogBootstrapConfigV1(
+        rfc64CatalogBootstrap,
+        rfc64PublicCatalogBootstrap,
+      ),
+    ).filter((contextGraphId) => (
+      rfc64ExecutionPlanAllowsLegacySyncV1(rfc64CatalogExecutionPlan, contextGraphId)
+    ));
     // Reject structural resource-policy errors before allocating a wallet or store.
-    const resourcePolicy = resolveStartupResourcePolicy(config, process.env, AGENT_RESOURCE_ENV);
+    // Immutable RFC-64 recovery scope is part of the canonical startup policy;
+    // only live Edge subscriptions are overlaid at admission time.
+    const resourcePolicy = resolveStartupResourcePolicy({
+      ...config,
+      selectedRecoveryContextGraphIds,
+    }, process.env, AGENT_RESOURCE_ENV);
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {

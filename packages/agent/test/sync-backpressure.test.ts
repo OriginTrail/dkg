@@ -1595,6 +1595,53 @@ describe('sync global backpressure', () => {
     expect(queue.getBackpressureSnapshot()).toMatchObject({ totals: { inflightLimit: 3, queueLimit: 6 } });
   });
 
+  it('forgets dynamic capacity and pumps queued work even when a release hook throws', async () => {
+    let running = 0;
+    const queue = new PriorityAdmissionQueue<'first' | 'second'>({
+      canRun: () => running < 1,
+      onStart: (entry) => {
+        running += 1;
+        return () => {
+          running -= 1;
+          if (entry.payload === 'first') throw new Error('release failed');
+        };
+      },
+      observability: {
+        scheduler: 'test-release-cleanup',
+        operation: (entry) => entry.payload,
+        capacityFor: (entry) => ({
+          capacityModel: 'shared',
+          inflightLimit: entry.payload === 'first' ? 1 : 3,
+          queueLimit: entry.payload === 'first' ? 2 : 6,
+        }),
+      },
+    });
+    const options = (payload: 'first' | 'second'): PriorityAdmissionAcquireOptions<'first' | 'second'> => ({
+      payload,
+      lane: 'durable',
+      priority: 0,
+      priorityClass: 'default',
+      queueLimit: 6,
+      agingThresholdMs: 30_000,
+      createBusyError: () => new Error('full'),
+      createDisplacedError: () => new Error('displaced'),
+    });
+
+    const first = queue.acquire(options('first'));
+    const releaseFirst = await first.release;
+    const second = queue.acquire(options('second'));
+    expect(() => releaseFirst()).toThrow('release failed');
+
+    const releaseSecond = await second.release;
+    expect(queue.getBackpressureSnapshot()).toMatchObject({
+      totals: { inflight: 1, inflightLimit: 3, queueLimit: 6 },
+    });
+    releaseSecond();
+    expect(queue.getBackpressureSnapshot()).toMatchObject({
+      totals: { inflight: 0, inflightLimit: null, queueLimit: null },
+    });
+  });
+
   it('keeps an explicitly disabled partitioned scheduler healthy while idle', () => {
     const queue = new PriorityAdmissionQueue<string>({
       canRun: () => false,
@@ -1923,12 +1970,13 @@ describe('sync global backpressure', () => {
     ]);
   });
 
-  it('derives the selected reservation from RFC-64 config and excludes unrelated recovery', async () => {
+  it('uses the startup-selected RFC-64 reservation and excludes unrelated recovery', async () => {
     const selectedCg = 'urn:cg:rfc64-selected';
     const agentLike = {
       config: withResourcePolicy({
         syncGlobalMaxInflight: 2,
         syncGlobalQueueLimit: 6,
+        selectedRecoveryContextGraphIds: [selectedCg],
         rfc64PublicCatalogBootstrap: {
           acceptedPublicPolicies: [{
             policyEnvelope: { payload: { contextGraphId: selectedCg, accessPolicy: 0 } },
@@ -2277,6 +2325,56 @@ describe('sync global backpressure', () => {
       releaseFast?.();
       await Promise.all([background, foreground, fast]);
     }
+  });
+
+  it('treats a zero fast queue timeout as unbounded waiting', async () => {
+    const ctx = createOperationContext('sync');
+    const policy = resolveSyncGlobalBackpressure({
+      syncAdmission: {
+        globalMaxInflight: 1,
+        fast: { maxInflight: 1, queueLimit: 1, queueTimeoutMs: 0 },
+        slow: {
+          maxInflight: 0,
+          foregroundReserved: 0,
+          foregroundQueueLimit: 0,
+          backgroundMaxInflight: 0,
+          backgroundQueueLimit: 0,
+        },
+      },
+    });
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    let secondSettled = false;
+    const first = withGlobalSyncBackpressure({
+      policy, ctx, label: 'changelog:first', lane: 'changelog', source: 'reconcile',
+    }, async () => new Promise<void>((resolve) => {
+      events.push('first-start');
+      releaseFirst = resolve;
+    }));
+    await tick();
+    const second = withGlobalSyncBackpressure({
+      policy, ctx, label: 'changelog:second', lane: 'changelog', source: 'reconcile',
+    }, async () => new Promise<void>((resolve) => {
+      events.push('second-start');
+      releaseSecond = resolve;
+    }));
+    void second.then(
+      () => { secondSettled = true; },
+      () => { secondSettled = true; },
+    );
+    await tick();
+    await tick();
+    expect(events).toEqual(['first-start']);
+    expect(secondSettled).toBe(false);
+    expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 1 });
+
+    releaseFirst();
+    await first;
+    await tick();
+    expect(events).toEqual(['first-start', 'second-start']);
+    releaseSecond();
+    await second;
   });
 
   it('applies changing Edge recovery scopes to the immutable partitioned startup policy', async () => {

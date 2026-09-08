@@ -15,7 +15,6 @@ import {
 import {
   PriorityAdmissionQueue,
   type PriorityAdmission,
-  type PriorityAdmissionEntry,
 } from './priority-admission-queue.js';
 
 export interface SyncBackpressureSnapshot {
@@ -342,7 +341,7 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
     // them to a fixed operation class, paired with the bounded admission
     // source, before node-wide diagnostics/logging.
     operation: (entry) => syncAdmissionOperation(entry.payload),
-    capacity: syncGlobalActivePressureCapacity,
+    capacityFor: (entry) => syncGlobalPressureCapacity(entry.payload.policy),
     thresholds: {
       degradedQueueAgeMs: DEFAULT_SYNC_PRIORITY_AGING_MS / 2,
       stalledActiveAgeMs: 120_000,
@@ -377,27 +376,6 @@ function syncGlobalPressureCapacity(
       },
     },
   };
-}
-
-/**
- * The process-wide queue admits each entry under its owner's fixed policy.
- * A single live policy has exact ceilings; heterogeneous live policies have
- * no single ceiling. Report unknown capacity in that case rather than claiming
- * the last constructor/caller owns everybody else's active work.
- */
-function syncGlobalActivePressureCapacity(
-  entries: Iterable<PriorityAdmissionEntry<GlobalQueuePayload>>,
-): SchedulerPressureCapacity {
-  let capacity: SchedulerPressureCapacity | undefined;
-  let key: string | undefined;
-  for (const entry of entries) {
-    const next = syncGlobalPressureCapacity(entry.payload.policy);
-    const nextKey = JSON.stringify(next);
-    if (key !== undefined && nextKey !== key) return { capacityModel: 'shared' };
-    capacity = next;
-    key = nextKey;
-  }
-  return capacity ?? { capacityModel: 'shared' };
 }
 
 /** Compact admission state computed by the recovery-scope owner. */
@@ -486,7 +464,7 @@ function acquire(
         ? policy.partitions.slow.foregroundQueueLimit
         : policy.partitions.slow.backgroundQueueLimit;
   const queueTimeoutMs = isPartitionedPolicy(policy) && admissionClass === 'fast'
-    ? policy.partitions.fast.queueTimeoutMs
+    ? policy.partitions.fast.queueTimeoutMs || undefined
     : undefined;
   lastLimit = limit;
   lastQueueLimit = queueLimit;
