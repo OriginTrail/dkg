@@ -235,8 +235,8 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
     ...optionalClauses,
   ].join('\n      ');
 
-  // The explicit projection is reconstructed by toEpcisEvent into the closed
-  // EPCISQueryEvent response. Capture extensions do not expand this contract.
+  // Query decoding exposes only these selected fields at runtime. Public types
+  // retain unknown-valued dynamic keys for compatibility with legacy consumers.
   return `${PREFIXES}
 SELECT ?event ?eventType ?eventTime ?eventTimeZoneOffset ?bizStep ?bizLocation ?disposition ?readPoint ?action ?parentID ?configurationId ?shipmentId ?ual
   (GROUP_CONCAT(DISTINCT ?epc; SEPARATOR=", ") AS ?epcList)
