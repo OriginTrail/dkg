@@ -1720,8 +1720,8 @@ export async function syncPublicSnapshotsForMeta(params: {
     // Yield BETWEEN Knowledge Assets, and check the clock BEFORE doing any work
     // for this one. Both halves matter:
     //
-    // - Before, not after: a cache "hit" is O(KA size) — a full `.nq` read plus
-    //   a SHA-256 — and a miss is a network round trip. Checking afterwards
+    // - Before, not after: first or changed-file validation can require a full
+    //   read and digest, and a miss is a network round trip. Checking afterwards
     //   would let one KA overrun the budget it was supposed to respect.
     // - Before the fetch specifically: no `SyncPageResult` exists yet, so
     //   `timedOutPhases` structurally CANNOT move on this path. That is what
@@ -2015,6 +2015,9 @@ async function hasValidSnapshot(
 ): Promise<boolean> {
   let quads: Quad[] | null;
   try {
+    if (publicSnapshotStore.validateSnapshot) {
+      return await publicSnapshotStore.validateSnapshot(snapshot.ref, snapshot.digest, snapshot.count);
+    }
     quads = await publicSnapshotStore.getSnapshot(snapshot.ref);
   } catch {
     return false;

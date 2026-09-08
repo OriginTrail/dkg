@@ -70,6 +70,12 @@ export interface WorkspacePublicSnapshotStore {
     readonly quads: readonly Quad[];
   }): Promise<{ readonly ref: string; readonly byteLength: number }>;
   getSnapshot(ref: string): Promise<Quad[] | null>;
+  /** Validate complete contents, optionally reusing unchanged file evidence. */
+  validateSnapshot?(
+    ref: string,
+    expectedDigest: string,
+    expectedCount: number,
+  ): Promise<boolean>;
   /**
    * Read one immutable snapshot page without materializing the complete file.
    * Optional for compatibility with custom/legacy stores; sync responders fall
@@ -102,6 +108,7 @@ export interface SnapshotPageIndexStore {
 const SNAPSHOT_PAGE_INDEX_VERSION = 1;
 const SNAPSHOT_PAGE_INDEX_STRIDE = 128;
 const SNAPSHOT_PAGE_INDEX_CACHE_MAX = 64;
+const SNAPSHOT_VALIDATION_CACHE_MAX = 2048;
 const GIB = 1024 ** 3;
 const DEFAULT_SNAPSHOT_GC_INTERVAL_MS = 5 * 60 * 1_000;
 const DEFAULT_SNAPSHOT_GC_TRIGGER_FREE_BYTES = 15 * GIB;
@@ -168,6 +175,7 @@ interface SnapshotFileFingerprint {
 }
 
 export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshotStore {
+  private readonly validationCache = new Map<string, string>();
   private readonly pageIndexCache = new Map<string, Promise<SnapshotPageIndexCore>>();
   private readonly pendingWrites = new Map<
     string,
@@ -298,6 +306,42 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
 
       return parseWorkspacePublicSnapshotNQuads(raw, ref);
     });
+  }
+
+  async validateSnapshot(ref: string, expectedDigest: string, expectedCount: number): Promise<boolean> {
+    if (!Number.isSafeInteger(expectedCount) || expectedCount < 0) return false;
+    try {
+      const hash = snapshotHash(ref);
+      const key = JSON.stringify([hash, expectedDigest, expectedCount]);
+      // Keep GC away throughout the stat/read/stat interval, including nested
+      // getSnapshot reads. putSnapshot never establishes validation evidence.
+      return await this.withActiveSnapshot(hash, async () => {
+        const cached = this.validationCache.get(key);
+        this.validationCache.delete(key);
+        const before = await snapshotValidationFingerprint(this.directory, hash);
+        if (before === null) return false;
+        if (cached === before) {
+          this.validationCache.set(key, before);
+          return true;
+        }
+        const quads = await this.getSnapshot(ref);
+        if (quads === null || quads.length !== expectedCount
+          || workspacePublicQuadsDigest(quads) !== expectedDigest) return false;
+        // Do not certify bytes read across a replacement, concurrent write or
+        // JSON-to-N-Quads migration. The next attempt must validate them anew.
+        if (await snapshotValidationFingerprint(this.directory, hash) !== before) return false;
+        this.validationCache.set(key, before);
+        if (this.validationCache.size > SNAPSHOT_VALIDATION_CACHE_MAX) {
+          const oldest = this.validationCache.keys().next().value;
+          if (oldest !== undefined) this.validationCache.delete(oldest);
+        }
+        return true;
+      });
+    } catch {
+      // A missing, unreadable or corrupt file follows the requester's existing
+      // recovery path. Only successful full validations enter the cache.
+      return false;
+    }
   }
 
   async getSnapshotPage(
@@ -661,6 +705,21 @@ function canonicalSnapshotDigest(ref: string): string {
 
 function snapshotPath(directory: string, hash: string, extension: 'json' | 'nq'): string {
   return join(directory, hash.slice(0, 2), hash.slice(2, 4), `${hash}.${extension}`);
+}
+
+/** Same N-Quads-first selection as getSnapshot, with native nanosecond stats. */
+async function snapshotValidationFingerprint(directory: string, hash: string): Promise<string | null> {
+  for (const extension of ['nq', 'json'] as const) {
+    const path = snapshotPath(directory, hash, extension);
+    try {
+      const file = await stat(path, { bigint: true });
+      if (!file.isFile()) return null;
+      return `${path}\0${file.dev}:${file.ino}:${file.size}:${file.mtimeNs}:${file.ctimeNs}`;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  return null;
 }
 
 function resolveSnapshotGarbageCollectionConfig(

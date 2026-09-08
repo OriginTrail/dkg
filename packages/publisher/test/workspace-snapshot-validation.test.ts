@@ -1,0 +1,202 @@
+import { mkdtemp, mkdir, readFile, rename, rm, stat, symlink, truncate, utimes, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  FileWorkspacePublicSnapshotStore,
+  workspacePublicQuadsDigest,
+} from '../src/workspace-snapshot-store.js';
+
+const quads = [{ subject: 'urn:validation:subject', predicate: 'urn:predicate', object: '"value"', graph: '' }];
+const digest = workspacePublicQuadsDigest(quads);
+const tempDirs: string[] = [];
+const options = { gc: { enabled: false } };
+
+async function fixture() {
+  const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-validation-'));
+  tempDirs.push(directory);
+  const store = new FileWorkspacePublicSnapshotStore(directory, undefined, options);
+  const hash = digest.slice(7);
+  const path = join(directory, hash.slice(0, 2), hash.slice(2, 4), `${hash}.nq`);
+  await store.putSnapshot({ digest, quads });
+  const load = vi.spyOn(store, 'getSnapshot');
+  return { directory, store, path, load, validate: () => store.validateSnapshot(digest, digest, quads.length) };
+}
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await Promise.all(tempDirs.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+});
+
+describe('immutable snapshot validation cache', () => {
+  it('fully validates after put, then reuses evidence without materializing quads', async () => {
+    const f = await fixture();
+    for (let i = 0; i < 4; i++) await expect(f.validate()).resolves.toBe(true);
+    expect(f.load).toHaveBeenCalledTimes(1);
+    // A new instance has no previous validation evidence, even in this process.
+    const restarted = new FileWorkspacePublicSnapshotStore(f.directory, undefined, options);
+    const load = vi.spyOn(restarted, 'getSnapshot');
+    await expect(restarted.validateSnapshot(digest, digest, 1)).resolves.toBe(true);
+    expect(load).toHaveBeenCalledOnce();
+  });
+
+  it.each(['delete', 'truncate', 'corrupt', 'replace', 'same-size-restored-mtime'] as const)(
+    'rejects %s after a successful validation and does not retain failed evidence', async (change) => {
+      const f = await fixture();
+      expect(await f.validate()).toBe(true);
+      const original = await readFile(f.path, 'utf8');
+      const before = await stat(f.path);
+      if (change === 'delete') await rm(f.path);
+      if (change === 'truncate') await truncate(f.path, 0);
+      if (change === 'corrupt') await writeFile(f.path, 'invalid N-Quads');
+      if (change === 'replace') {
+        await writeFile(`${f.path}.replacement`, original.replace('value', 'other'));
+        await rename(`${f.path}.replacement`, f.path);
+      }
+      if (change === 'same-size-restored-mtime') {
+        await writeFile(f.path, original.replace('value', 'other'));
+        await utimes(f.path, before.atime, before.mtime);
+      }
+      await expect(f.validate()).resolves.toBe(false);
+      const reads = f.load.mock.calls.length;
+      await expect(f.validate()).resolves.toBe(false);
+      expect(f.load).toHaveBeenCalledTimes(change === 'delete' ? reads : reads + 1);
+      await writeFile(f.path, original);
+      await expect(f.validate()).resolves.toBe(true);
+      const recoveredReads = f.load.mock.calls.length;
+      await expect(f.validate()).resolves.toBe(true);
+      expect(f.load).toHaveBeenCalledTimes(recoveredReads);
+    },
+  );
+
+  it('revalidates an identical replacement instead of reusing the old inode evidence', async () => {
+    const f = await fixture();
+    expect(await f.validate()).toBe(true);
+    const original = await readFile(f.path);
+    const before = await stat(f.path);
+    await writeFile(`${f.path}.replacement`, original);
+    await utimes(`${f.path}.replacement`, before.atime, before.mtime);
+    await rename(`${f.path}.replacement`, f.path);
+    await expect(f.validate()).resolves.toBe(true);
+    expect(f.load).toHaveBeenCalledTimes(2);
+    await expect(f.validate()).resolves.toBe(true);
+    expect(f.load).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not reuse evidence for a different expected digest or count', async () => {
+    const f = await fixture();
+    expect(await f.validate()).toBe(true);
+    await expect(f.store.validateSnapshot(digest, `sha256:${'0'.repeat(64)}`, 1)).resolves.toBe(false);
+    await expect(f.store.validateSnapshot(digest, digest, 2)).resolves.toBe(false);
+    expect(f.load).toHaveBeenCalledTimes(3);
+    await expect(f.validate()).resolves.toBe(true);
+    expect(f.load).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])('rejects invalid count %s', async (count) => {
+    const f = await fixture();
+    await expect(f.store.validateSnapshot(digest, digest, count)).resolves.toBe(false);
+    expect(f.load).not.toHaveBeenCalled();
+  });
+
+  it('returns false for an invalid ref and a directory where a snapshot should be', async () => {
+    const f = await fixture();
+    await expect(f.store.validateSnapshot('../escape', digest, 1)).resolves.toBe(false);
+    await rm(f.path);
+    await mkdir(f.path);
+    await expect(f.validate()).resolves.toBe(false);
+    expect(f.load).not.toHaveBeenCalled();
+  });
+
+  it('validates legacy JSON and rechecks when N-Quads takes precedence', async () => {
+    const f = await fixture();
+    const raw = await readFile(f.path);
+    await rm(f.path);
+    await writeFile(f.path.replace(/\.nq$/, '.json'), JSON.stringify(quads.map(q => [q.subject, q.predicate, q.object])));
+    await expect(f.validate()).resolves.toBe(true);
+    await expect(f.validate()).resolves.toBe(true);
+    expect(f.load).toHaveBeenCalledOnce();
+    await writeFile(f.path, raw);
+    await expect(f.validate()).resolves.toBe(true);
+    expect(f.load).toHaveBeenCalledTimes(2);
+    await writeFile(f.path, 'invalid');
+    await expect(f.validate()).resolves.toBe(false); // Do not fall back past corrupt N-Quads.
+    await rm(f.path);
+    await expect(f.validate()).resolves.toBe(true);
+    expect(f.load).toHaveBeenCalledTimes(4);
+  });
+
+  it.each(['modify', 'delete', 'replace-identical'] as const)('rejects %s during a full validation', async (change) => {
+    const f = await fixture();
+    f.load.mockRestore();
+    const originalLoad = f.store.getSnapshot.bind(f.store);
+    const load = vi.spyOn(f.store, 'getSnapshot').mockImplementationOnce(async (ref) => {
+      const result = await originalLoad(ref);
+      if (change === 'modify') await writeFile(f.path, (await readFile(f.path, 'utf8')).replace('value', 'other'));
+      if (change === 'delete') await rm(f.path);
+      if (change === 'replace-identical') {
+        await writeFile(`${f.path}.replacement`, await readFile(f.path));
+        await rename(`${f.path}.replacement`, f.path);
+      }
+      return result;
+    });
+    await expect(f.validate()).resolves.toBe(false);
+    await expect(f.validate()).resolves.toBe(change === 'replace-identical');
+    expect(load).toHaveBeenCalledTimes(change === 'delete' ? 1 : 2);
+  });
+
+  it('rejects stat errors and validates an empty snapshot', async () => {
+    const f = await fixture();
+    expect(await f.validate()).toBe(true);
+    await rm(f.path);
+    await symlink(f.path, f.path);
+    await expect(f.validate()).resolves.toBe(false);
+    const emptyDigest = workspacePublicQuadsDigest([]);
+    await f.store.putSnapshot({ digest: emptyDigest, quads: [] });
+    await expect(f.store.validateSnapshot(emptyDigest, emptyDigest, 0)).resolves.toBe(true);
+    await expect(f.store.validateSnapshot(emptyDigest, emptyDigest, 0)).resolves.toBe(true);
+    expect(f.load).toHaveBeenCalledTimes(2);
+  });
+
+  it('protects the whole validation interval from garbage collection', async () => {
+    const f = await fixture();
+    await utimes(f.path, new Date(0), new Date(0));
+    const gcStore = new FileWorkspacePublicSnapshotStore(f.directory, undefined, {
+      gc: { enabled: true, minAgeMs: 0, triggerFreeBytes: 100, targetFreeBytes: 200, hardReserveBytes: 0 },
+      getAvailableBytes: async () => 0,
+    });
+    let duringValidation: Awaited<ReturnType<typeof gcStore.collectGarbage>> | undefined;
+    const originalLoad = gcStore.getSnapshot.bind(gcStore);
+    vi.spyOn(gcStore, 'getSnapshot').mockImplementationOnce(async (ref) => {
+      const quads = await originalLoad(ref);
+      // getSnapshot's own active-read lease has ended; validation still owns one.
+      duringValidation = await gcStore.collectGarbage();
+      return quads;
+    });
+    try {
+      await expect(gcStore.validateSnapshot(digest, digest, 1)).resolves.toBe(true);
+      expect(duringValidation).toMatchObject({ deletedSnapshots: 0, skippedActiveFiles: 1 });
+      expect((await gcStore.collectGarbage()).deletedSnapshots).toBe(1);
+      await expect(gcStore.validateSnapshot(digest, digest, 1)).resolves.toBe(false);
+    } finally { gcStore.stopGarbageCollection(); }
+  });
+
+  it('keeps at most 2048 successful entries and refreshes LRU order on a hit', async () => {
+    const f = await fixture();
+    const refs: string[] = [];
+    for (let i = 0; i < 2048; i++) {
+      const ref = `sha256:${i.toString(16).padStart(64, '0')}`;
+      await f.store.putSnapshot({ digest: ref, quads });
+      expect(await f.store.validateSnapshot(ref, digest, 1)).toBe(true);
+      refs.push(ref);
+    }
+    expect(f.load).toHaveBeenCalledTimes(2048);
+    expect(await f.store.validateSnapshot(refs[0]!, digest, 1)).toBe(true);
+    expect(await f.validate()).toBe(true); // Entry 2049 evicts refs[1], not refreshed refs[0].
+    expect(f.load).toHaveBeenCalledTimes(2049);
+    expect(await f.store.validateSnapshot(refs[0]!, digest, 1)).toBe(true);
+    expect(f.load).toHaveBeenCalledTimes(2049);
+    expect(await f.store.validateSnapshot(refs[1]!, digest, 1)).toBe(true);
+    expect(f.load).toHaveBeenCalledTimes(2050);
+  });
+});
