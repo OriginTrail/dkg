@@ -981,6 +981,8 @@ export class DKGAgentBase {
       ? configured
       : 10 * 60_000;
   })();
+  /** Maximum unbound subscription read-authority/binding attempts per periodic sweep. */
+  static readonly VM_RECONCILE_UNBOUND_BATCH_SIZE = 8;
   static readonly VM_RECONCILE_CACHE_MAX_ENTRIES = readPositiveSafeIntegerEnv(
     'DKG_VM_RECONCILE_CACHE_MAX_ENTRIES',
     1_000,
@@ -1092,6 +1094,8 @@ export class DKGAgentBase {
   protected vmReconcileShutdownBlocked = false;
   /** Next eligible CG index for bounded periodic-sweep admission. */
   protected vmReconcileSweepCursor = 0;
+  /** Live Map cursor: deletion skips entries and additions join the next rotation. */
+  protected vmReconcileUnboundCursor: Iterator<string, undefined> | null = null;
   /** Deterministically staggered cold-start prime, separate from the interval. */
   protected vmReconcileStartupTimer: ReturnType<typeof setTimeout> | null = null;
   /** Process-wide sweep single-flight; interval/startup callers join this promise. */

@@ -2973,7 +2973,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
         if (!isLifecycleCurrent()) return;
         // Passive discovery rows carry neither member nor host intent. Public
         // RFC-64 selection is handled by the accepted-policy loop below.
-        if (!sub.subscribed && !sub.coreHosted) continue;
+        if ((!sub.subscribed && !sub.coreHosted)
+          || !this.contextGraphBindingState.hasBindingCandidate(localCgId, sub)) continue;
         // A durable subscription row is synchronization intent, never an
         // authorization credential. In particular, an older daemon may have
         // persisted a private-CG row before the subscribe admission gate became
@@ -2984,28 +2985,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
         }).catch(() => false);
         if (!isLifecycleCurrent()) return;
         if (!canRead) continue;
-        // GH #1098 — self-prime onChainId for a pre-subscribed PUBLIC member CG
-        // (subscribed BEFORE its first publish, so unbound) before the skip-gate
-        // below would pass it over. Shared with the live KACG nudge.
-        const hasVmBindingCandidate = this.contextGraphBindingState.hasBindingCandidate(
-          localCgId,
-          sub,
-        );
-        if (sub.subscribed && !hasVmBindingCandidate) {
-          await this.selfPrimeSubscriptionOnChainId(
-            localCgId,
-            sub,
-            undefined,
-            isLifecycleCurrent,
-            lifecycleSignal,
-          );
-          if (!isLifecycleCurrent()) return;
-        }
-        // Member subscriptions AND Phase D core-hosted public CGs get swept.
-        if (
-          (!sub.subscribed && !sub.coreHosted)
-          || !this.contextGraphBindingState.hasBindingCandidate(localCgId, sub)
-        ) continue;
         eligible.push(localCgId);
       }
 
@@ -3028,20 +3007,50 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
       if (eligible.length === 0) {
         this.vmReconcileSweepCursor = 0;
-        return;
+      } else {
+        // Admit existing bound work before attempting background self-prime.
+        const start = this.vmReconcileSweepCursor % eligible.length;
+        for (let offset = 0; offset < eligible.length; offset += 1) {
+          if (!isLifecycleCurrent()) return;
+          const index = (start + offset) % eligible.length;
+          await dispatcher.dispatch(eligible[index]!, 'periodic').catch(() => undefined);
+        }
+        if (!isLifecycleCurrent()) return;
+        this.vmReconcileSweepCursor = (start + 1) % eligible.length;
       }
 
-      // Per-CG coalescing alone still let a cold start enqueue one expensive
-      // scan per subscription. Admit and await periodic work one CG at a time;
-      // foreground live/manual work can still enter the unified dispatcher.
-      const start = this.vmReconcileSweepCursor % eligible.length;
-      for (let offset = 0; offset < eligible.length; offset += 1) {
+      // Retain one cursor over the existing subscription map, not a second
+      // queue. Scan at most one map-sized rotation and attempt at most B
+      // active unbound records; denied authority consumes the same budget.
+      const scanLimit = this.subscribedContextGraphs.size;
+      const attempted = new Set<string>();
+      let inspected = 0;
+      while (inspected < scanLimit && attempted.size < DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE) {
         if (!isLifecycleCurrent()) return;
-        const index = (start + offset) % eligible.length;
-        await dispatcher.dispatch(eligible[index]!, 'periodic').catch(() => undefined);
+        this.vmReconcileUnboundCursor ??= this.subscribedContextGraphs.keys();
+        const entry = this.vmReconcileUnboundCursor.next();
+        if (entry.done) {
+          this.vmReconcileUnboundCursor = null;
+          if (this.subscribedContextGraphs.size === 0) break;
+          continue;
+        }
+        inspected++;
+        const localCgId = entry.value;
+        const sub = this.subscribedContextGraphs.get(localCgId);
+        if (!sub?.subscribed || attempted.has(localCgId)
+          || this.contextGraphBindingState.hasBindingCandidate(localCgId, sub)) continue;
+        attempted.add(localCgId);
+        const canRead = await raceVmReconcileAbort(this.canReadContextGraph(localCgId, {
+          allowSubscriptionFallback: false,
+        }), lifecycleSignal).catch(() => false);
+        if (!isLifecycleCurrent()) return;
+        if (!canRead) continue;
+        const bound = await this.selfPrimeSubscriptionOnChainId(
+          localCgId, sub, undefined, isLifecycleCurrent, lifecycleSignal,
+        );
+        if (!isLifecycleCurrent()) return;
+        if (bound) await dispatcher.dispatch(localCgId, 'periodic').catch(() => undefined);
       }
-      if (!isLifecycleCurrent()) return;
-      this.vmReconcileSweepCursor = (start + 1) % eligible.length;
     })();
     this.vmReconcileSweepInFlight = running;
     try {
@@ -3058,10 +3067,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * binds CURATED CGs and the ACK-signer hook only fires for cores in a
    * publish's storage-ACK set, so a pre-subscribed PUBLIC member would otherwise
    * stay unbound — stranded on the unreliable one-shot finalization gossip.
-   * SHARED by the periodic sweep and the live KACG nudge so the bind / persist /
-   * cursor-reset semantics (in {@link bindSubscriptionOnChainId}) live in ONE
-   * place. `targetOnChainId`: when set (the nudge), bind only if the resolved id
-   * matches THIS event; when omitted (the sweep), bind any non-null id —
+   * Shared by periodic self-prime and explicit VM target resolution so binding,
+   * strict persistence and cursor resets retain one owner. The optional target
+   * restricts binding to a particular numeric id; periodic calls accept any
+   * non-null id —
    * `getContextGraphOnChainId` never falls back to `localCgId`, so a
    * `resolved === localCgId` match is legitimate for a direct CG. Best-effort:
    * a store/RPC hiccup yields null instead of throwing. Returns the bound id.
@@ -3138,11 +3147,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
    *
    *  1. The on-chain id is already bound to a local CG → trigger its reconcile
    *     (when subscribed or core-hosted).
-   *  2. The id is unbound but a pre-subscribed PUBLIC member CG resolves to it
-   *     (subscribed BEFORE its first publish; only curated CGs bind on the
-   *     ContextGraphCreated event and ACK-signers bind via the storage-ACK hook)
-   *     → self-prime + bind ONLY the CG whose resolved id matches THIS event,
-   *     then reconcile it. Unrelated subscribed-unbound CGs are left untouched.
+   *  2. A known reverse-binding candidate matches the id → schedule its existing
+   *     revalidation path. Unknown ids cause no unbound store lookups; the
+   *     bounded periodic safety net resolves pre-subscribed public graphs.
    *
    * Best-effort and idempotent: a missed nudge heals on the periodic sweep.
    * Returns the local CG id that was reconciled, or null if none matched.
@@ -3164,11 +3171,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
     const localCgId = targetOnChain === null ? null : this.resolveLocalCgIdByOnChainId(targetOnChain);
     if (!localCgId) {
-      // Find the subscribed-but-unbound CG whose locally-resolved on-chain id
-      // matches THIS event and bind + reconcile only it — targeted, not a global
-      // sweep, so an unrelated KA registration touches nothing. Uses the SAME
-      // self-prime helper as the periodic sweep (single bind/persist/cursor-reset
-      // path); the sweep remains the safety net for a CG whose quad hasn't arrived.
+      // Reverse candidates are in-memory scheduling hints. Do not resolve
+      // every unbound subscription for an unrelated live registration.
       if (targetOnChain !== null) {
         for (const [lcg, sub] of this.subscribedContextGraphs) {
           if (!isLifecycleCurrent()) return null;
@@ -3192,21 +3196,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
             }
             return lcg;
           }
-          const bound = await this.selfPrimeSubscriptionOnChainId(
-            lcg,
-            sub,
-            targetOnChain,
-            isLifecycleCurrent,
-            lifecycleSignal,
-          );
-          if (!isLifecycleCurrent()) return null;
-          if (bound) {
-            this.log.info(ctx, `Phase B: KACG nudge cg=${onChainId} ka=${kaId} -> bound + reconcile pre-subscribed "${lcg}"`);
-            if (this.vmReconcileDispatcher && isLifecycleCurrent()) {
-              void this.vmReconcileDispatcher.triggerLive(lcg);
-            }
-            return lcg;
-          }
+
         }
       }
       return null; // chain replay hasn't resolved the cleartext CG yet; periodic sweep is the safety net
@@ -5190,6 +5180,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.vmReconcileLifecycleController?.abort();
     this.vmReconcileLifecycleGeneration = (this.vmReconcileLifecycleGeneration ?? 0) + 1;
     this.vmReconcileRotationClosed = true;
+    this.vmReconcileUnboundCursor = null;
     // Some lifecycle tests intentionally construct a narrow partial agent
     // without running the base constructor. Shutdown must remain best-effort
     // for that supported test seam and never mask later teardown failures.

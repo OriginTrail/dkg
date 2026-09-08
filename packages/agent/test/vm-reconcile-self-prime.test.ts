@@ -908,11 +908,8 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(internals.subscribedContextGraphs.size).toBe(0);
   });
 
-  it('KACG nudge targeting: binds ONLY the unbound CG whose on-chain id matches the event, not an unrelated one', async () => {
-    // This exercises the SAME `selfPrimeSubscriptionOnChainId` helper the live
-    // onKARegisteredToContextGraph nudge delegates to, with a `targetOnChainId`
-    // (the event's CG id). The nudge loops subscribed-unbound CGs and binds the
-    // one whose resolved id matches the event — so an unrelated CG must NOT bind.
+  it('the optional self-prime target binds only a matching numeric id', async () => {
+    // Preserve the helper's optional target contract independently of scheduling.
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'SelfPrimeTargeted', chainAdapter: chain });
     stubNode(agent);
@@ -1125,16 +1122,13 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(persist).not.toHaveBeenCalled();
   });
 
-  it('live KACG nudge handler: with multiple subscribed-unbound CGs, binds + reconciles ONLY the one matching the event id', async () => {
-    // Exercises the EXACT branch the live `onKARegisteredToContextGraph` poller
-    // hook runs (extracted to `handleKARegisteredNudge`), not just the underlying
-    // self-prime helper — so the loop-and-target logic is covered end to end.
-    // Three pre-subscribed PUBLIC member CGs are unbound (the #1098 state); a KA
-    // registration arrives for ONE of their on-chain ids. Only that CG must bind
-    // and reconcile; the other two are left untouched.
+  it('an ignored live event heals through the bounded periodic sweep once ontology metadata is available', async () => {
+    // An unknown numeric event does no global lookup. The periodic safety net
+    // still resolves and strictly persists all three already-present bindings.
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'KacgNudgeLive', chainAdapter: chain });
     stubNode(agent);
+    vi.spyOn(agent, 'canReadContextGraph').mockResolvedValue(true);
     const internals = agent as unknown as AgentInternals;
 
     const CG_HIT = 'gh1098-nudge-hit';
@@ -1155,7 +1149,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
 
     const triggered: string[] = [];
     internals.vmReconcileDispatcher = {
-      dispatch: async () => true,
+      dispatch: async (cg: string) => { triggered.push(`periodic:${cg}`); return true; },
       triggerLive: (cg: string) => { triggered.push(`live:${cg}`); },
       triggerPeriodic: (cg: string) => { triggered.push(`periodic:${cg}`); },
       tryTriggerPeriodic: () => true,
@@ -1164,12 +1158,14 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     // The event names ON_HIT's on-chain id. None is bound yet.
     const reconciled = await internals.handleKARegisteredNudge(ON_HIT, 99n, createOperationContext('system'));
 
-    expect(reconciled).toBe(CG_HIT);
+    expect(reconciled).toBeNull();
+    expect(triggered).toEqual([]);
+    expect(internals.subscribedContextGraphs.get(CG_HIT)?.onChainId).toBeUndefined();
+    await internals.runVmReconcileSweep();
     expect(internals.subscribedContextGraphs.get(CG_HIT)?.onChainId).toBe(ON_HIT);
-    // The other two pre-subscribed CGs were NOT bound and NOT reconciled.
-    expect(internals.subscribedContextGraphs.get(CG_MISS_A)?.onChainId).toBeUndefined();
-    expect(internals.subscribedContextGraphs.get(CG_MISS_B)?.onChainId).toBeUndefined();
-    expect(triggered).toEqual([`live:${CG_HIT}`]);
+    expect(internals.subscribedContextGraphs.get(CG_MISS_A)?.onChainId).toBe(ON_MISS_A);
+    expect(internals.subscribedContextGraphs.get(CG_MISS_B)?.onChainId).toBe(ON_MISS_B);
+    expect(triggered).toEqual([CG_HIT, CG_MISS_A, CG_MISS_B].map((cg) => `periodic:${cg}`));
   });
 
   it('live KACG nudge handler: an already-bound CG reconciles directly without a self-prime scan', async () => {

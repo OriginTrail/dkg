@@ -151,6 +151,7 @@ export default defineConfig({
       "test/chain-cursor-wiring.test.ts",
       "test/chain-reconciler.test.ts",
       "test/vm-reconcile-self-prime.test.ts",
+      "test/vm-reconcile-self-prime-budget.test.ts",
       "test/core-fills-gap.test.ts",
       "test/vm-recovery-microbatch-planner.test.ts",
       "test/vm-recovery-provider-policy.test.ts",
