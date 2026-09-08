@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   reconcileContextGraph,
   VmReconcileDispatcher,
@@ -1281,4 +1281,58 @@ describe('RecentUalSet', () => {
     expect(set.has('cg-a\0ual#02')).toBe(false);
     expect(set.has('cg-b\0ual#01')).toBe(true);
   });
+});
+
+describe('capacity-aware periodic admission', () => {
+  it.each(['abort', 'close'] as const)('releases a one-slot wait on %s while active work stays owned', async action => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const dispatcher = new VmReconcileDispatcher(async () => blocked, () => undefined, { maxPending: 1 });
+    const controller = new AbortController();
+    const active = dispatcher.triggerManual('active');
+    const admission = dispatcher.schedulePeriodicWhenAvailable('waiting', controller.signal);
+    const closing = action === 'close' ? dispatcher.close() : undefined;
+    if (action === 'abort') controller.abort();
+    try {
+      await expect(admission).resolves.toBeUndefined();
+      expect(dispatcher.isInFlight('waiting')).toBe(false);
+      expect(dispatcher.isInFlight('active')).toBe(true);
+    } finally { release(); await active; await closing; await dispatcher.close(); }
+    await expect(dispatcher.schedulePeriodicWhenAvailable('closed')).resolves.toBeUndefined();
+  });
+
+  it('admits no work for an already-aborted caller', async () => {
+    const run = vi.fn(async () => undefined);
+    const dispatcher = new VmReconcileDispatcher(run, () => undefined);
+    const controller = new AbortController(); controller.abort();
+    await expect(dispatcher.schedulePeriodicWhenAvailable('cancelled', controller.signal)).resolves.toBeUndefined();
+    expect(run).not.toHaveBeenCalled();
+    await dispatcher.close();
+  });
+});
+
+
+it('coalesces a waiting periodic request when a foreground trailing pass becomes available', async () => {
+  const gates = new Map<string, () => void>();
+  const counts = new Map<string, number>();
+  const dispatcher = new VmReconcileDispatcher(async key => {
+    const count = (counts.get(key) ?? 0) + 1; counts.set(key, count);
+    if (count === 1) await new Promise<void>(resolve => { gates.set(key, resolve); });
+    return key;
+  }, () => undefined, { concurrency: 3, maxPending: 2 });
+  for (const key of ['A', 'B', 'C']) dispatcher.triggerLive(key);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  dispatcher.triggerLive('A');
+  gates.get('C')!(); await dispatcher.waitForIdle('C');
+  let accepted: Readonly<{ completion: Promise<string> }> | undefined;
+  const waiting = dispatcher.schedulePeriodicWhenAvailable('B').then(result => { accepted = result; });
+  const manual = dispatcher.triggerManual('B');
+  try {
+    await new Promise(resolve => setTimeout(resolve, 5));
+    expect(accepted?.completion).toBe(manual);
+  } finally {
+    gates.get('A')!(); gates.get('B')!();
+    await waiting; await manual; await dispatcher.close();
+  }
+  expect(counts.get('B')).toBe(2);
 });

@@ -693,20 +693,16 @@ async function completeVmReconcileSweep<T>(
   keys: readonly string[],
   dispatcher: VmReconcileDispatcher<T>,
   isCurrent: () => boolean,
+  signal?: AbortSignal,
 ): Promise<void> {
   const completions: Promise<unknown>[] = [];
   for (const key of keys) {
-    while (isCurrent() && !dispatcher.snapshot().closed) {
-      const completion = dispatcher.tryDispatchPeriodic(key);
-      if (completion) {
-        // The dispatcher reports automatic failures; retain completion without
-        // letting one failed CG strand the rest of this finite selection.
-        completions.push(completion.catch(() => undefined));
-        break;
-      }
-      await dispatcher.waitForPeriodicCapacity();
-    }
-    if (!isCurrent() || dispatcher.snapshot().closed) break;
+    if (!isCurrent()) break;
+    const admission = await dispatcher.schedulePeriodicWhenAvailable(key, signal);
+    if (!admission) break;
+    // The dispatcher reports automatic failures; one failed CG must not strand
+    // the rest of the selection. Keep only this sweep's completion boundaries.
+    completions.push(admission.completion.catch(() => undefined));
   }
   await Promise.all(completions);
 }
@@ -2995,7 +2991,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       keys.push(key);
       return true;
     });
-    await completeVmReconcileSweep(keys, sweep.dispatcher, sweep.isLifecycleCurrent);
+    await completeVmReconcileSweep(keys, sweep.dispatcher, sweep.isLifecycleCurrent, sweep.lifecycleSignal);
   }
 
   /**

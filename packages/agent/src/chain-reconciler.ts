@@ -600,7 +600,7 @@ export class VmReconcileDispatcher<T> {
   private readonly states = new Map<string, VmReconcileDispatchState<T>>();
   private readonly pending: Array<VmReconcileDispatchWork<T>> = [];
   private readonly idleWaiters = new Set<() => void>();
-  private readonly periodicCapacityWaiters = new Set<() => void>();
+  private readonly periodicStateWaiters = new Set<() => void>();
   private readonly keyIdleWaiters = new Map<string, Set<() => void>>();
   private readonly concurrency: number;
   private readonly maxPending: number;
@@ -654,27 +654,47 @@ export class VmReconcileDispatcher<T> {
   }
 
   /** Periodic admission with its exact completion handle; undefined means no admission. */
-  tryDispatchPeriodic(key: string): Promise<T> | undefined {
+  private tryDispatchPeriodic(key: string): Promise<T> | undefined {
     const outcome = this.admit(key, 'periodic');
     if (!('completion' in outcome)) return undefined;
     void outcome.completion.catch(() => undefined);
     return outcome.completion;
   }
 
-  /** Wait for a fresh periodic key's capacity, or closure, without waiting for global idle. */
-  waitForPeriodicCapacity(): Promise<void> {
-    if (this.hasPeriodicCapacity()) return Promise.resolve();
-    return new Promise<void>(resolve => this.periodicCapacityWaiters.add(resolve));
+  /**
+   * Wait for this key's admission, then return its coalesced/trailing completion.
+   * Failed admission waits for a real transition, never a fresh-key capacity
+   * predicate: an active key needs a trailing slot even when a worker is free.
+   * Cancellation ends only admission waiting; admitted work owns its lifetime.
+   */
+  async schedulePeriodicWhenAvailable(
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<Readonly<{ completion: Promise<T> }> | undefined> {
+    while (!this.closed && !signal?.aborted) {
+      const completion = this.tryDispatchPeriodic(key);
+      if (completion) return { completion };
+      await this.waitForPeriodicStateChange(signal);
+    }
+    return undefined;
   }
 
-  private hasPeriodicCapacity(): boolean {
-    return this.closed || this.queued < (this.active < this.concurrency ? this.maxPending : this.maxPending - 1);
+  private waitForPeriodicStateChange(signal?: AbortSignal): Promise<void> {
+    return new Promise<void>(resolve => {
+      const finish = () => {
+        this.periodicStateWaiters.delete(finish);
+        signal?.removeEventListener('abort', finish);
+        resolve();
+      };
+      this.periodicStateWaiters.add(finish);
+      signal?.addEventListener('abort', finish, { once: true });
+      if (this.closed || signal?.aborted) finish();
+    });
   }
 
-  private resolvePeriodicCapacityWaiters(): void {
-    if (!this.hasPeriodicCapacity()) return;
-    for (const resolve of this.periodicCapacityWaiters) resolve();
-    this.periodicCapacityWaiters.clear();
+  private resolvePeriodicStateWaiters(): void {
+    for (const resolve of this.periodicStateWaiters) resolve();
+    this.periodicStateWaiters.clear();
   }
 
   /** Operator path; errors and the typed domain result propagate to the API. */
@@ -723,7 +743,7 @@ export class VmReconcileDispatcher<T> {
         this.resolveKeyIdleWaiters(key);
       }
       this.queued = 0;
-      this.resolvePeriodicCapacityWaiters();
+      this.resolvePeriodicStateWaiters();
       this.resolveIdleWaiters();
     }
     return this.waitForIdle();
@@ -757,6 +777,15 @@ export class VmReconcileDispatcher<T> {
 
   /** One synchronous transition owns coalescing, capacity and source reservation. */
   private admit(key: string, source: VmReconcileSource): VmReconcileAdmission<T> {
+    const outcome = this.admitState(key, source);
+    // A newly admitted foreground trailing pass can make a waiting periodic
+    // request coalescible without freeing queue capacity. Failed attempts never
+    // wake other rejected attempts, which would recreate a retry spin.
+    if ('completion' in outcome) this.resolvePeriodicStateWaiters();
+    return outcome;
+  }
+
+  private admitState(key: string, source: VmReconcileSource): VmReconcileAdmission<T> {
     if (this.closed) return { kind: 'closed' };
     const state = this.stateFor(key);
 
@@ -925,7 +954,7 @@ export class VmReconcileDispatcher<T> {
             this.states.delete(work.key);
           }
           this.drain();
-          this.resolvePeriodicCapacityWaiters();
+          this.resolvePeriodicStateWaiters();
           this.resolveIdleWaiters();
           this.resolveKeyIdleWaiters(work.key);
         });

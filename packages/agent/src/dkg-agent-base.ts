@@ -1111,7 +1111,7 @@ export class DKGAgentBase {
       const localCgId = policyEnvelope.payload.contextGraphId;
       if (this.isRfc64SelectedVmReconcileTargetAllowed(localCgId)) bound.add(localCgId);
     }
-    return { dispatcher, isLifecycleCurrent, bound: [...bound], unbound: unbound.filter(key => !bound.has(key)) };
+    return { dispatcher, isLifecycleCurrent, lifecycleSignal, bound: [...bound], unbound: unbound.filter(key => !bound.has(key)) };
   }
 
   /** Timer-only admission turn; physical workers never serialize later ticks. */

@@ -410,3 +410,70 @@ it('releases a capacity-waiting sweep on lifecycle closure without admitting its
     expect(order.filter(key => key.startsWith('dispatch:'))).toEqual(['dispatch:bound-0']);
   } finally { release(); await sweep; }
 });
+
+it('waits for relevant trailing capacity without spinning when another worker is free', async () => {
+  const { internals } = await fixture(0);
+  internals.subscribedContextGraphs.set('B', { subscribed: true, onChainId: '2' });
+  const gates = new Map<string, () => void>();
+  const runs = new Map<string, number>();
+  const dispatcher = new VmReconcileDispatcher(async key => {
+    const count = (runs.get(key) ?? 0) + 1; runs.set(key, count);
+    if (count === 1) await new Promise<void>(resolve => { gates.set(key, resolve); });
+    return true;
+  }, () => undefined, { concurrency: 3, maxPending: 2 });
+  dispatchers.push(dispatcher); internals.vmReconcileDispatcher = dispatcher;
+  for (const key of ['A', 'B', 'C']) dispatcher.triggerLive(key);
+  await vi.waitFor(() => expect(gates.size).toBe(3));
+  dispatcher.triggerLive('A');
+  gates.get('C')!(); await dispatcher.waitForIdle('C');
+  expect(dispatcher.snapshot()).toMatchObject({ active: 2, queued: 1 });
+  // Cap attempts so a regression reports a failure instead of hanging Vitest's event loop.
+  const admission = dispatcher as unknown as { admit(key: string, source: string): unknown };
+  const original = admission.admit.bind(dispatcher);
+  const attempts = vi.spyOn(admission, 'admit').mockImplementation((key, source) => {
+    if (attempts.mock.calls.length > 10) throw new Error('periodic admission busy-spin');
+    return original(key, source);
+  });
+  let failure: unknown;
+  const sweep = internals.runVmReconcileSweep().catch(error => { failure = error; });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 5)); // event-loop heartbeat must run
+    expect(failure).toBeUndefined();
+    expect(attempts).toHaveBeenCalledTimes(1);
+  } finally {
+    gates.get('A')!(); gates.get('B')!();
+    await sweep;
+    await dispatcher.waitForIdle();
+  }
+  expect(runs.get('B')).toBe(2);
+});
+
+it.each(['pending', 'active'] as const)('awaits the exact %s coalesced or trailing target completion', async state => {
+  const { internals } = await fixture(0);
+  internals.subscribedContextGraphs.set('selected', { subscribed: true, onChainId: '2' });
+  const releases: Array<() => void> = [];
+  const sources: string[] = [];
+  const dispatcher = new VmReconcileDispatcher(async (key, source) => {
+    sources.push(`${key}:${source}`);
+    await new Promise<void>(resolve => { releases.push(resolve); });
+    return true;
+  }, () => undefined, { concurrency: 1, maxPending: 4 });
+  dispatchers.push(dispatcher); internals.vmReconcileDispatcher = dispatcher;
+  if (state === 'pending') dispatcher.triggerLive('blocker');
+  dispatcher.triggerLive('selected');
+  await vi.waitFor(() => expect(releases).toHaveLength(1));
+  let settled = false;
+  const sweep = internals.runVmReconcileSweep().then(() => { settled = true; });
+  try {
+    await Promise.resolve(); expect(settled).toBe(false);
+    releases[0]!();
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    expect(settled).toBe(false);
+    releases[1]!(); await sweep;
+    expect(sources).toEqual(state === 'pending'
+      ? ['blocker:live', 'selected:live'] : ['selected:live', 'selected:periodic']);
+  } finally {
+    for (const release of releases) release();
+    await sweep;
+  }
+});
