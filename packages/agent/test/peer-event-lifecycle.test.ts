@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PeerEventLifetime } from '../src/p2p/peer-event-lifetime.js';
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { syncOpenedPeerConnection } from '../src/sync/peer-connection.js';
@@ -5,7 +8,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { createOperationContext, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK } from '@origintrail-official/dkg-core';
 import { NetworkAdmissionCoordinator } from '../src/p2p/network-admission-coordinator.js';
 import { runSyncOnConnect, runSelectedSharedMemoryRetry, type SyncOnConnectContext } from '../src/sync/on-connect/sync-on-connect.js';
-import type { DKGAgent } from '../src/index.js';
+import { DKGAgent } from '../src/index.js';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { asSyncOnConnectTestAgent, allowAllNetworkAdmission } from './_helpers/sync-on-connect-test-fixture.js';
 import { createPeerEventFixture, deferred, flushMicrotasks } from './_helpers/peer-event-lifecycle.js';
 
 const PROBE = { protocolsKey: null, connectionKey: null } satisfies Awaited<ReturnType<DKGAgent['getSyncReconcilerProbe']>>;
@@ -59,6 +64,52 @@ describe('peer-event lifecycle', () => {
       reportError(f.peerId, failure);
       expect(log.warn).not.toHaveBeenCalled();
     } finally { session.close(); await f.close(); }
+  });
+
+  it('accepts bootstrap-authorized recovery before listener registration with ordinary sync and retries disabled', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-early-bootstrap-session-'));
+    const agent = await DKGAgent.create({
+      name: 'EarlyBootstrapPeerSession',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+      dataDir,
+      syncOnConnectEnabled: false,
+      syncReconcilerEnabled: false,
+      rfc64PublicCatalogBootstrap: { retryIntervalMs: 0, acceptedPublicPolicies: [] },
+    });
+    const internal = asSyncOnConnectTestAgent(agent);
+    const plan = {
+      kind: 'rfc64-authorized-swm-recovery-v1' as const,
+      providerPeerId: '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M',
+      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' as const }],
+    };
+    const selected = vi.spyOn(agent, 'trySelectedSwmRetryFromPeer').mockResolvedValue('not-started');
+    const ordinary = vi.spyOn(agent, 'trySyncFromPeer').mockResolvedValue('not-started');
+    vi.spyOn(agent, 'getSyncReconcilerProbe').mockResolvedValue(PROBE);
+    const errors = vi.fn();
+    let admitted: boolean | undefined;
+    let producerSession: PeerSyncSession | undefined;
+    vi.spyOn(agent, 'startRfc64CatalogRuntimeV1').mockImplementation(() => {
+      // A fast catalog bootstrap produces an already-authorized plan at this
+      // real startup position, before the later connection listeners are installed.
+      allowAllNetworkAdmission(internal);
+      producerSession = internal.peerSyncSession;
+      admitted = agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(plan, errors, 0);
+    });
+    try {
+      await agent.start();
+      expect(admitted).toBe(true);
+      expect(internal.peerSyncSession).toBe(producerSession);
+      await vi.waitFor(() => expect(selected).toHaveBeenCalledExactlyOnceWith(
+        plan.providerPeerId, expect.any(Function), 'on-connect', plan,
+      ));
+      expect(ordinary).not.toHaveBeenCalled();
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+      await agent.stop();
+      await rm(dataDir, { recursive: true, force: true });
+    }
   });
 
   it('rejects direct scheduler admission while stopped and opens a fresh scheduler at restart', async () => {

@@ -2066,6 +2066,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     this.started = true;
+    // Open the lifetime before catalog bootstrap or any other startup producer
+    // can enqueue recovery. Connection listeners below retain this same session.
+    this.peerSyncSession.close();
+    const peerEvents = this.peerSyncSession = new PeerSyncSession();
     this.openVmReconcileRotationState();
     this.finalizationRuntime.markStarted({
       localPeerId: this.peerId,
@@ -3869,8 +3873,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // path on first-contact peers. Codex tier-4g finding on this line.
     // Abort synchronously at the start of stop(), before libp2p tears down.
     // A signal belongs to this node lifetime, including pending continuations.
-    this.peerSyncSession.close();
-    const peerEvents = this.peerSyncSession = new PeerSyncSession();
     const { signal } = peerEvents;
     this.node.libp2p.addEventListener('connection:open', (evt) => {
       void peerEvents.run(() => syncOpenedPeerConnection({
