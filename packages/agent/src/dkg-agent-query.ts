@@ -334,6 +334,7 @@ import {
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
   type ContextGraphMembershipStore,
+  type ContextGraphRegistrationResolution,
   type DurableSyncDiagnostics,
   type SharedMemorySyncDiagnostics,
   type CatchupSyncDiagnostics,
@@ -695,7 +696,7 @@ export class QueryMethods extends DKGAgentBase {
     opts: {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
-      allowColdRegistrationBinding?: boolean;
+      registrationResolution?: ContextGraphRegistrationResolution;
       signal?: AbortSignal;
     } = {},
   ): Promise<boolean> {
@@ -711,7 +712,7 @@ export class QueryMethods extends DKGAgentBase {
        * Opt in only at an explicit subscription/bootstrap boundary. Security-
        * sensitive ordinary reads keep the short fail-closed chain deadline.
        */
-      allowColdRegistrationBinding?: boolean;
+      registrationResolution?: ContextGraphRegistrationResolution;
       signal?: AbortSignal;
     } = {},
   ): Promise<ContextGraphReadAuthorityDecision> {
@@ -728,7 +729,7 @@ export class QueryMethods extends DKGAgentBase {
       getRegisteredAuthority: () => this.resolveRegisteredContextGraphAuthority(
         contextGraphId,
         {
-          allowColdNameHashResolution: opts.allowColdRegistrationBinding,
+          registrationResolution: opts.registrationResolution,
           signal: opts.signal,
         },
       ),

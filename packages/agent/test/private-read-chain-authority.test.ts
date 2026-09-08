@@ -597,6 +597,8 @@ describe('private read authorization uses the on-chain participant roster', () =
       metaSynced: true,
       syncScoped: true,
     }]]);
+    const loadAll = vi.fn(async () => [...rows.values()]);
+    const load = vi.fn(async (id: string) => rows.get(id) ?? null);
     let attempt = 0;
     let completeColdRetry!: (value: bigint | null) => void;
     const resolveByNameHash = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
@@ -618,7 +620,8 @@ describe('private read authorization uses the on-chain participant roster', () =
       name: 'PrivateReadColdBindingBackgroundRetry',
       chainAdapter: chain,
       contextGraphSubscriptionStore: {
-        loadAll: async () => [...rows.values()],
+        loadAll,
+        load,
         save: async (row) => { rows.set(row.id, row); },
         delete: async (id) => { rows.delete(id); },
       },
@@ -646,6 +649,10 @@ describe('private read authorization uses the on-chain participant roster', () =
     );
 
     expect(retry).toHaveBeenCalledOnce();
+    expect(loadAll).toHaveBeenCalledOnce();
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(load).toHaveBeenNthCalledWith(1, contextGraphId);
+    expect(load).toHaveBeenNthCalledWith(2, contextGraphId);
     expect(resolveByNameHash.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
     expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
       subscribed: true,
@@ -669,6 +676,79 @@ describe('private read authorization uses the on-chain participant roster', () =
       },
     });
   }, (2 * CHAIN_POLICY_READ_TIMEOUT_MS) + 14_000);
+
+  it('retries unavailable subscription authority again at the exact recurring boundary', async () => {
+    const contextGraphId = 'persisted-recurring-authority-retry';
+    const rows = new Map<string, any>([[contextGraphId, {
+      id: contextGraphId,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+    }]]);
+    agent = await DKGAgent.create({
+      name: 'PrivateReadRecurringAuthorityRetry',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...rows.values()],
+        load: async (id) => rows.get(id) ?? null,
+        save: async (row) => { rows.set(row.id, row); },
+        delete: async (id) => { rows.delete(id); },
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+    });
+    let authorityAvailable = false;
+    const resolveAuthority = vi.spyOn(agent, 'resolveContextGraphReadAuthority')
+      .mockImplementation(async (candidateId) => {
+      if (candidateId === contextGraphId && !authorityAvailable) {
+        return {
+          outcome: 'unavailable',
+          source: 'registered-chain',
+          reason: 'temporary-authority-outage',
+          metadataBootstrap: 'eligible',
+        } as const;
+      }
+      return {
+        outcome: 'allowed',
+        source: 'registered-chain',
+        reason: 'open-context-graph',
+        metadataBootstrap: 'eligible',
+        onChainId: 7n,
+      } as const;
+    });
+    const targetAttempts = () => resolveAuthority.mock.calls
+      .filter(([candidateId]) => candidateId === contextGraphId).length;
+    const retry = vi.spyOn(agent, 'retryUnavailableContextGraphSubscriptionAuthorities');
+    vi.useFakeTimers();
+
+    await agent.start();
+    expect(targetAttempts()).toBe(1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(targetAttempts()).toBe(2);
+    expect(retry).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(targetAttempts()).toBe(2);
+    expect(retry).toHaveBeenCalledOnce();
+    authorityAvailable = true;
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(retry).toHaveBeenCalledTimes(2);
+
+    expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+      subscribed: true,
+      onChainId: '7',
+    });
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      activated: 1,
+      dormant: 0,
+      dormantReasons: { authorityUnavailable: [] },
+    });
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(retry).toHaveBeenCalledTimes(2);
+  });
 
   it('does not resurrect a different subscription deleted during authority retry', async () => {
     const coldContextGraphId = 'persisted-cold-target';

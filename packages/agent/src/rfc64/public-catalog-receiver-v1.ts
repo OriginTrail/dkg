@@ -47,13 +47,11 @@ export type {
 
 export type Rfc64PublicCatalogReconcileResultV1 = 'applied' | 'not-found' | 'staged-only';
 
-/** Full semantic reconciliation supplied by the wired service. */
-export interface Rfc64PublicCatalogReceiverReconcilerV1 {
-  /**
-   * True when this exact head is durable or a newer same-scope durable head
-   * strictly supersedes it. Equal-version conflicts are never deduplicated.
-   */
-  isHeadSatisfied(announcement: Rfc64PublicCatalogHeadAnnouncementV1): Promise<boolean>;
+export type Rfc64PublicCatalogHeadSatisfactionCheckV1 = (
+  announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+) => Promise<boolean>;
+
+interface Rfc64PublicCatalogReceiverReconcilerBaseV1 {
   /**
    * Fetch, verify, activate, exact-post-read, then durably commit applied state.
    * The operation must be idempotent so a restart can repair the semantic-store
@@ -65,6 +63,26 @@ export interface Rfc64PublicCatalogReceiverReconcilerV1 {
     signal: AbortSignal,
   ): Promise<Rfc64PublicCatalogReconcileResultV1>;
 }
+
+/** Full semantic reconciliation supplied by the wired service. */
+export interface Rfc64PublicCatalogReceiverReconcilerV1
+  extends Rfc64PublicCatalogReceiverReconcilerBaseV1 {
+  /**
+   * True when this exact head is durable or a newer same-scope durable head
+   * strictly supersedes it. Equal-version conflicts are never deduplicated.
+   */
+  isHeadSatisfied: Rfc64PublicCatalogHeadSatisfactionCheckV1;
+  /** @deprecated Use isHeadSatisfied for its explicit supersession semantics. */
+  isHeadApplied?: Rfc64PublicCatalogHeadSatisfactionCheckV1;
+}
+
+/** Constructor compatibility for implementations compiled against the V1 name. */
+export type Rfc64PublicCatalogLegacyReceiverReconcilerV1 =
+  Rfc64PublicCatalogReceiverReconcilerBaseV1 & {
+    /** @deprecated V1 compatibility name; use isHeadSatisfied in new code. */
+    isHeadApplied: Rfc64PublicCatalogHeadSatisfactionCheckV1;
+    isHeadSatisfied?: Rfc64PublicCatalogHeadSatisfactionCheckV1;
+  };
 
 export interface Rfc64PublicCatalogReceiverOptionsV1 {
   /** Max concurrent fetch/stage chains. Default 4. */
@@ -276,7 +294,8 @@ const DEFAULTS = Object.freeze({
 const DEFAULT_DEFERRABLE_ERROR = isFinalizedChainAdmissionContention;
 
 export class Rfc64PublicCatalogReceiverV1 {
-  readonly #reconciler: Rfc64PublicCatalogReceiverReconcilerV1;
+  readonly #reconciler: Rfc64PublicCatalogReceiverReconcilerBaseV1;
+  readonly #isHeadSatisfied: Rfc64PublicCatalogHeadSatisfactionCheckV1;
   readonly #maxConcurrent: number;
   readonly #maxQueue: number;
   readonly #maxAttempts: number;
@@ -329,10 +348,17 @@ export class Rfc64PublicCatalogReceiverV1 {
   #providerBackoffMs = 0;
 
   constructor(
-    reconciler: Rfc64PublicCatalogReceiverReconcilerV1,
+    reconciler: Rfc64PublicCatalogReceiverReconcilerV1
+      | Rfc64PublicCatalogLegacyReceiverReconcilerV1,
     options: Rfc64PublicCatalogReceiverOptionsV1 = {},
   ) {
     this.#reconciler = reconciler;
+    // The V1 constructor accepted isHeadApplied. Normalize that public
+    // compatibility contract once so the scheduler has one semantic check.
+    const legacyCheck = 'isHeadApplied' in reconciler
+      ? reconciler.isHeadApplied
+      : undefined;
+    this.#isHeadSatisfied = reconciler.isHeadSatisfied ?? legacyCheck!;
     this.#maxConcurrent = rfc64ReceiverPositiveIntV1(
       options.maxConcurrent,
       DEFAULTS.maxConcurrent,
@@ -950,7 +976,7 @@ export class Rfc64PublicCatalogReceiverV1 {
         task.lastProviderKey = provider.key;
       };
       try {
-        if (await this.#reconciler.isHeadSatisfied(provider.announcement)) {
+        if (await this.#isHeadSatisfied(provider.announcement)) {
           recordProviderAttempt();
           return { kind: 'already-applied', announcement: provider.announcement };
         }

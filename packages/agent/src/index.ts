@@ -309,6 +309,7 @@ export {
   type Rfc64CatalogBootstrapPolicyV1,
   type DKGAgentACKTransportOptions,
   type ContextGraphSub,
+  type ContextGraphRegistrationResolution,
   type ContextGraphSyncMode,
   type ContextGraphDiscoveryMetadata,
   type ContextGraphDiscoveryOptions,

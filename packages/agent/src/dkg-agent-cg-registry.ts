@@ -336,6 +336,7 @@ import {
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
   type ContextGraphMembershipStore,
+  type ContextGraphRegistrationResolution,
   type DurableSyncDiagnostics,
   type SharedMemorySyncDiagnostics,
   type CatchupSyncDiagnostics,
@@ -625,15 +626,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     contextGraphId: string,
     options: {
       signal?: AbortSignal;
-      /**
-       * Explicit subscription/bootstrap work may populate the adapter's
-       * bounded reverse index before admitting the graph. Ordinary reads and
-       * restart rehydration remain on the short fail-closed policy deadline.
-       */
-      allowColdNameHashResolution?: boolean;
+      registrationResolution?: ContextGraphRegistrationResolution;
     } = {},
   ): Promise<ContextGraphRegistrationBinding> {
-    const nameHashResolutionTimeoutMs = options.allowColdNameHashResolution === true
+    const registrationResolution = options.registrationResolution ?? 'policy-read';
+    const registrationResolutionTimeoutMs = registrationResolution === 'bootstrap-scan'
       ? CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS
       : CHAIN_POLICY_READ_TIMEOUT_MS;
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
@@ -650,7 +647,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           }),
           {
             label: `resolveContextGraphOnChainIdBinding(${contextGraphId})`,
-            timeoutMs: nameHashResolutionTimeoutMs,
+            timeoutMs: registrationResolutionTimeoutMs,
             signal: options.signal,
           },
         );
@@ -704,7 +701,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         (signal) => resolveByNameHash.call(this.chain, nameHash, { signal }),
         {
           label: `resolveContextGraphIdByNameHash(${nameHash})`,
-          timeoutMs: nameHashResolutionTimeoutMs,
+          timeoutMs: registrationResolutionTimeoutMs,
           signal: options.signal,
         },
       );

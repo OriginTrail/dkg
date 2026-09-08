@@ -10,12 +10,14 @@ import {
   computeContextGraphPolicyObjectDigestV1,
   createOperationContext,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
+  encodeCanonicalCgSharedPublicRootProjectionV1,
   projectCanonicalGraphScopedAuthorSealRowsV1,
   SYSTEM_CONTEXT_GRAPHS,
   type AssertionSeal,
   type AuthorCatalogScopeV1,
   type CanonicalGraphScopedAuthorSealV1,
   type ContextGraphPolicyV1,
+  type ContextGraphIdV1,
   type Digest32V1,
   type EvmAddressV1,
   type TimestampMsV1,
@@ -1329,40 +1331,111 @@ describe('RFC-64 rollout authority integration', () => {
     )).rejects.toThrow(/durable catalog head is missing or unverifiable/u);
   });
 
-  it('rejects a replay snapshot when the durable inventory changes during head loading', async () => {
-    const { provider, persistence, scope, applied } =
-      await startAppliedOpenReplayProvider('replay-inventory-race');
-    vi.spyOn((provider as any).router, 'send').mockResolvedValue(Uint8Array.of(1));
-    await provider.reannounceRfc64CatalogHeadsToPeerV1(
-      '12D3KooWReplayInventoryWarmupPeer',
-    );
-    let releaseMutation!: () => void;
-    let markMutationEntered!: () => void;
-    const mutationGate = new Promise<void>((resolve) => { releaseMutation = resolve; });
-    const mutationEntered = new Promise<void>((resolve) => { markMutationEntered = resolve; });
-    const heldMutation = (provider as any).rfc64CatalogMutationCoordinatorV1.run(
-      scope,
-      async () => {
-        markMutationEntered();
-        await mutationGate;
+  it('refreshes scoped provider replay after its head advances while the scope lock waits', async () => {
+    const { provider, persistence, publication, scope, applied } =
+      await startAppliedOpenReplayProvider('scoped-replay-lock-race');
+    const successor = await provider.publishOpenAuthorCatalogExactSetSuccessorV1({
+      previousHead: {
+        objectDigest: publication.headObjectDigest,
+        signatureVariantDigest: publication.signatureVariantDigest,
       },
+      author: Object.freeze({
+        address: AUTHOR,
+        signMessage: (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest),
+      }),
+      catalogIssuerAuthorization: publication.catalogIssuerAuthorization,
+      assets: [{
+        assertionCoordinate: 'scoped-replay-lock-race' as never,
+        projectionBytes: encodeCanonicalCgSharedPublicRootProjectionV1(PROJECTION_QUADS),
+        seal: await authorSeal(91n),
+      }],
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900000001' as TimestampMsV1,
+      peers: [],
+    });
+    const [successorAsset] = successor.assets;
+    if (successorAsset === undefined) throw new Error('successor has no asset evidence');
+
+    const coordinator = (provider as any).rfc64CatalogMutationCoordinatorV1;
+    let releaseScope!: () => void;
+    let markScopeEntered!: () => void;
+    const scopeGate = new Promise<void>((resolve) => { releaseScope = resolve; });
+    const scopeEntered = new Promise<void>((resolve) => { markScopeEntered = resolve; });
+    const heldScope = coordinator.run(scope, async () => {
+      markScopeEntered();
+      await scopeGate;
+    });
+    await scopeEntered;
+
+    const runMany = vi.spyOn(coordinator, 'runMany');
+    const send = vi.spyOn((provider as any).router, 'send')
+      .mockResolvedValue(Uint8Array.of(1));
+    const replay = provider.reannounceRfc64CatalogHeadsToPeerV1(
+      '12D3KooWScopedReplayLockRacePeer',
+      Object.freeze({
+        kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        policyDigest: publication.announcement.policyDigest,
+      }),
     );
-    await mutationEntered;
+    try {
+      await vi.waitFor(() => expect(runMany).toHaveBeenCalledTimes(1));
+      persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+        ...applied,
+        expectedCurrentCatalogHeadDigest: applied.currentCatalogHeadDigest,
+        currentCatalogHeadDigest: successor.headObjectDigest,
+        appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({
+          catalogScopeDigest: successor.catalogScopeDigest,
+          rows: [successorAsset],
+        }),
+        catalogVersion: successor.announcement.catalogVersion,
+        inventoryRowCount: successor.inventoryRowCount,
+      });
+    } finally {
+      releaseScope();
+    }
+    await heldScope;
+
+    await expect(replay).resolves.toMatchObject({
+      announced: 1,
+      failed: 0,
+      manifest: [{ catalogHeadObjectDigest: successor.headObjectDigest }],
+    });
+    const sentAnnouncements = send.mock.calls
+      .filter(([, protocolId]) => protocolId === RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1)
+      .map(([, , data]) => parseRfc64PublicCatalogHeadAnnouncementV1(data));
+    expect(sentAnnouncements).toMatchObject([
+      { catalogHeadObjectDigest: successor.headObjectDigest },
+    ]);
+  });
+
+  it('rejects provider replay when durable inventory changes during delivery', async () => {
+    const { provider, persistence, applied } =
+      await startAppliedOpenReplayProvider('replay-delivery-race');
+    let releaseDelivery!: () => void;
+    let markDeliveryEntered!: () => void;
+    const deliveryGate = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+    const deliveryEntered = new Promise<void>((resolve) => { markDeliveryEntered = resolve; });
+    vi.spyOn((provider as any).router, 'send').mockImplementation(async () => {
+      markDeliveryEntered();
+      await deliveryGate;
+      return Uint8Array.of(1);
+    });
 
     const replay = provider.reannounceRfc64CatalogHeadsToPeerV1(
-      '12D3KooWReplayInventoryRacePeer',
+      '12D3KooWReplayDeliveryRacePeer',
     );
-    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    await deliveryEntered;
     persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
       ...applied,
       expectedCurrentCatalogHeadDigest: applied.currentCatalogHeadDigest,
       currentCatalogHeadDigest: `0x${'cd'.repeat(32)}`,
       catalogVersion: '1',
     });
-    releaseMutation();
-    await heldMutation;
+    releaseDelivery();
 
-    await expect(replay).rejects.toThrow(/inventory changed before replay snapshot/u);
+    await expect(replay).rejects.toThrow(/durable catalog inventory changed during replay/u);
   });
 
   it('keeps system control graphs on durable sync under default catalog responsibility', async () => {

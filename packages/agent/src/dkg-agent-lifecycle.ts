@@ -663,8 +663,6 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { Rfc64SwmRecoveryTargetLeaseV1 } from
   './dkg-agent-rfc64-swm-recovery-runtime.js';
-import type { Rfc64CatalogReplayPeerFenceLeaseV1 } from
-  './dkg-agent-rfc64-catalog.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import type { DKGAgent } from './dkg-agent.js';
@@ -835,57 +833,6 @@ const syncPageSizeProfilesByAgent = new WeakMap<DKGAgent, SyncPageSizeProfileCac
 const alreadyMemberDelegationRefreshChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const durableContextGraphSyncChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const durableRecoveryRunnersByAgent = new WeakMap<DKGAgent, DurableRecoveryRunner>();
-interface Rfc64CatalogReplayConnectionReservation {
-  commit(): void;
-  release(): void;
-}
-
-interface Rfc64CatalogReplayConnectionDebounceEntry {
-  readonly startedAt: number;
-  readonly token: object;
-}
-
-const rfc64CatalogReplayConnectionDebounceByAgent =
-  new WeakMap<DKGAgent, Map<string, Rfc64CatalogReplayConnectionDebounceEntry>>();
-const RFC64_CATALOG_REPLAY_CONNECTION_DEBOUNCE_MS = 60_000;
-const RFC64_CATALOG_REPLAY_CONNECTION_DEBOUNCE_MAX_PEERS = 256;
-
-function reserveRfc64CatalogReplayForConnection(
-  agent: DKGAgent,
-  peerId: string,
-  nowMs = Date.now(),
-): Rfc64CatalogReplayConnectionReservation | null {
-  let byPeer = rfc64CatalogReplayConnectionDebounceByAgent.get(agent);
-  if (byPeer === undefined) {
-    byPeer = new Map<string, Rfc64CatalogReplayConnectionDebounceEntry>();
-    rfc64CatalogReplayConnectionDebounceByAgent.set(agent, byPeer);
-  }
-  const previous = byPeer.get(peerId);
-  if (
-    previous !== undefined
-    && nowMs - previous.startedAt < RFC64_CATALOG_REPLAY_CONNECTION_DEBOUNCE_MS
-  ) return null;
-  byPeer.delete(peerId);
-  while (byPeer.size >= RFC64_CATALOG_REPLAY_CONNECTION_DEBOUNCE_MAX_PEERS) {
-    const oldestPeerId = byPeer.keys().next().value as string | undefined;
-    if (oldestPeerId === undefined) break;
-    byPeer.delete(oldestPeerId);
-  }
-  const token = Object.freeze({});
-  byPeer.set(peerId, Object.freeze({ startedAt: nowMs, token }));
-  let settled = false;
-  return Object.freeze({
-    commit: () => {
-      settled = true;
-    },
-    release: () => {
-      if (settled) return;
-      settled = true;
-      if (byPeer?.get(peerId)?.token === token) byPeer.delete(peerId);
-    },
-  });
-}
-
 function durableRecoveryRunnerFor(agent: DKGAgent): DurableRecoveryRunner {
   let runner = durableRecoveryRunnersByAgent.get(agent);
   if (!runner) {
@@ -3927,33 +3874,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // the receiver can remain permanently fenced in `applying`. A later
       // reconnect still gets a fresh pass after the bounded debounce window;
       // ordinary head announcements remain live throughout the window.
-      const replayReservation = reserveRfc64CatalogReplayForConnection(
-        this,
-        remotePeer,
-      );
-      const replayContextGraphIds = replayReservation !== null
-        ? [...new Set([
-          ...this.readRfc64CatalogResponsibilitiesV1()
-            .filter((responsibility) => responsibility.active && responsibility.mode !== 'legacy')
-            .map((responsibility) => responsibility.contextGraphId),
-          ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority)
-            .filter((contextGraphId) => {
-              const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
-              return authority.active && authority.mode !== 'legacy';
-            }),
-        ])].sort()
-        : [];
-      if (replayContextGraphIds.length === 0) replayReservation?.release();
-      const replayFenceLeases = new Map<
-        string,
-        Rfc64CatalogReplayPeerFenceLeaseV1 | null
-      >();
-      for (const contextGraphId of replayContextGraphIds) {
-        replayFenceLeases.set(
-          contextGraphId,
-          this.markRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer),
-        );
-      }
+      const catalogReplay = this.prepareRfc64CatalogConnectionReplayV1(remotePeer);
       // Reverse-path peerStore enrichment for inbound circuit-relay
       // connections.
       //
@@ -3979,16 +3900,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           this.log.warn(ctx, `Network admission probe failed for ${remotePeer.slice(-8)} on connect: ${message}`);
-          for (const lease of replayFenceLeases.values()) lease?.release();
-          replayReservation?.release();
+          catalogReplay?.reject();
           return;
         }
         if (!admitted) {
-          for (const lease of replayFenceLeases.values()) lease?.release();
-          replayReservation?.release();
+          catalogReplay?.reject();
           return;
         }
-        replayReservation?.commit();
+        catalogReplay?.admit();
         try {
           await this.enrichPeerStoreFromInboundCircuit(evt.detail);
         } catch (err: unknown) {
@@ -4007,42 +3926,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           this.log.warn(ctx, `Pending SWM sender-key drain on connect failed for ${remotePeer}: ${message}`);
-        }
-        // The receiver owns replay completeness. Provider-initiated pushes do
-        // not carry a promised-head manifest and can otherwise leave a brief
-        // A-applied/B-undiscovered window reporting complete. Request every
-        // active CG through the completion-capable scoped protocol instead.
-        // Keep the 10.0.15 rolling-upgrade direction alive: legacy receivers
-        // cannot request V2 completion, but they can still consume ordinary
-        // head announcements. Upgraded receivers remain fenced by the scoped
-        // pull below and never interpret this compatibility push as complete.
-        if (replayContextGraphIds.length > 0) {
-          void this.reannounceRfc64CatalogHeadsToPeerV1(remotePeer).catch((err: unknown) => {
-            const message = err instanceof Error ? err.message : String(err);
-            this.log.warn(
-              ctx,
-              `RFC-64 compatibility re-announcement failed for ${remotePeer.slice(-8)}: ${message}`,
-            );
-          });
-        }
-        for (const contextGraphId of replayContextGraphIds) {
-          void this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
-            contextGraphId,
-            { seedConnectedPeers: false },
-          ).then((result) => {
-            if (result.failed > 0) {
-              this.log.warn(
-                ctx,
-                `RFC-64 catalog replay incomplete for "${contextGraphId}" after ${remotePeer.slice(-8)} connected`,
-              );
-            }
-          }).catch((err: unknown) => {
-            const message = err instanceof Error ? err.message : String(err);
-            this.log.warn(
-              ctx,
-              `RFC-64 catalog replay failed after ${remotePeer.slice(-8)} connected: ${message}`,
-            );
-          });
         }
         this.queueSyncFromPeerOnConnect(remotePeer, handleSyncError);
       })();
@@ -10232,8 +10115,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         updatedAt: Date.now(),
       };
     };
-    const loadRow = async (contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null> => (
-      (await store.loadAll()).find((row) => row.id === contextGraphId) ?? null
+    const loadRow = async (
+      contextGraphId: string,
+    ): Promise<ContextGraphSubscriptionRecord | null> => (
+      store.load
+        ? store.load(contextGraphId)
+        : store.loadAll().then((rows) => rows.find((row) => row.id === contextGraphId) ?? null)
     );
 
     for (const contextGraphId of candidates) {
@@ -10251,7 +10138,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
       const readAuthority = await this.resolveContextGraphReadAuthority(contextGraphId, {
         allowSubscriptionFallback: false,
-        allowColdRegistrationBinding: true,
+        registrationResolution: 'bootstrap-scan',
         signal,
       }).catch(() => ({
         outcome: 'unavailable' as const,
