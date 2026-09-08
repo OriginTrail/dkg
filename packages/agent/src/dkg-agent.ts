@@ -960,7 +960,7 @@ export class DKGAgent extends DKGAgentBase {
       },
       cooldown: {
         deleteProvider: (providerPeerId) => {
-          this.rfc64ExactCatchupOnConnectAt.delete(providerPeerId);
+          this.peerSyncSession.rfc64ExactCatchupOnConnectAt.delete(providerPeerId);
         },
       },
     });
@@ -1775,8 +1775,8 @@ export class DKGAgent extends DKGAgentBase {
         node: this.node,
         messenger: this.messenger,
         peerHealth: this.peerHealth,
-        lastSuccessfulSyncAt: this.lastSuccessfulSyncAt,
-        syncReconcilerBackoff: this.syncReconcilerBackoff,
+        lastSuccessfulSyncAt: this.peerSyncSession.lastSuccessfulSyncAt,
+        syncReconcilerBackoff: this.peerSyncSession.syncReconcilerBackoff,
       },
       peerId,
     );
@@ -2231,7 +2231,12 @@ export class DKGAgent extends DKGAgentBase {
 
   async stop(): Promise<void> {
     if (!this.started) return;
-    this.syncPeerEvents?.close();
+    this.peerSyncSession.close();
+    // Disconnect history survives sessions; transient freshness and cooldowns do not.
+    const disconnectedAt = Date.now();
+    for (const peer of this.node.libp2p.getPeers()) {
+      this.lastSyncDisconnectedAt.set(peer.toString(), disconnectedAt);
+    }
     // Fence membership persistence before any network callback can enqueue
     // more work; the physical drain below completes before store teardown.
     const membershipPersistDrain = this.contextGraphMembershipPersistence?.closeAndDrain()

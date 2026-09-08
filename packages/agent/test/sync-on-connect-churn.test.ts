@@ -1,3 +1,4 @@
+import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { describe, expect, it } from 'vitest';
 import { PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS, SYNC_RECONNECT_FLAP_GRACE_MS } from '../src/dkg-agent-constants.js';
@@ -105,6 +106,7 @@ describe('sync-on-connect churn gates', () => {
     const agent = await createUnstartedAgent(`AutomaticSystemScope-${nodeRole}`);
     allowAllNetworkAdmission(agent);
     agent.started = true;
+    agent.peerSyncSession = new PeerSyncSession();
     agent.config.nodeRole = nodeRole;
     agent.config.syncContextGraphs = ['selected-cg'];
     agent.config.syncSharedMemoryOnConnect = false;
@@ -151,12 +153,12 @@ describe('sync-on-connect churn gates', () => {
 
     const handleSyncError = () => undefined;
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
-    const firstQueuedAt = agent.catchupOnConnectAt.get(PEER_A);
+    const firstQueuedAt = agent.peerSyncSession.catchupOnConnectAt.get(PEER_A);
 
     agent.lastSyncDisconnectedAt.set(PEER_A, Date.now() - Math.floor(SYNC_RECONNECT_FLAP_GRACE_MS / 2));
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(false);
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(false);
-    expect(agent.catchupOnConnectAt.get(PEER_A)).toBe(firstQueuedAt);
+    expect(agent.peerSyncSession.catchupOnConnectAt.get(PEER_A)).toBe(firstQueuedAt);
 
     await flushTimers();
     expect(calls).toEqual([PEER_A]);
@@ -172,12 +174,12 @@ describe('sync-on-connect churn gates', () => {
 
     const lastDisconnected = Date.now() - SYNC_RECONNECT_FLAP_GRACE_MS - 100;
     const beforeDisconnect = lastDisconnected - 1;
-    agent.lastSuccessfulSyncAt.set(PEER_A, beforeDisconnect);
-    agent.catchupOnConnectAt.set(PEER_A, beforeDisconnect);
+    agent.peerSyncSession.lastSuccessfulSyncAt.set(PEER_A, beforeDisconnect);
+    agent.peerSyncSession.catchupOnConnectAt.set(PEER_A, beforeDisconnect);
     agent.lastSyncDisconnectedAt.set(PEER_A, lastDisconnected);
 
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(true);
-    expect(agent.catchupOnConnectAt.get(PEER_A)).toBeGreaterThan(lastDisconnected);
+    expect(agent.peerSyncSession.catchupOnConnectAt.get(PEER_A)).toBeGreaterThan(lastDisconnected);
 
     await flushTimers();
     expect(calls).toEqual([PEER_A]);
@@ -190,6 +192,7 @@ describe('sync-on-connect churn gates', () => {
     // relabel most sync-global pressure on the operator dashboards.
     const agent = await createUnstartedAgent('SyncOnConnectSourceLabel');
     agent.started = true;
+    agent.peerSyncSession = new PeerSyncSession();
     const sources: unknown[] = [];
     agent.trySyncFromPeer = async (
       _peer: string,
@@ -211,6 +214,7 @@ describe('sync-on-connect churn gates', () => {
   it('reconciler still retries stale connected peers', async () => {
     const agent = await createUnstartedAgent('SyncReconcilerStillRetries');
     agent.started = true;
+    agent.peerSyncSession = new PeerSyncSession();
     agent.node.node = {
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
@@ -241,12 +245,13 @@ describe('sync-on-connect churn gates', () => {
       syncBackoffJitter: 0,
     });
     agent.started = true;
+    agent.peerSyncSession = new PeerSyncSession();
     agent.node.node = {
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
     };
     agent.getPeerProtocols = async () => [PROTOCOL_SYNC];
-    agent.lastSuccessfulSyncAt.set(PEER_A, Date.now() - 30_000);
+    agent.peerSyncSession.lastSuccessfulSyncAt.set(PEER_A, Date.now() - 30_000);
     const trySyncFromPeer = recorder(async () => undefined);
     agent.trySyncFromPeer = trySyncFromPeer;
     const before = Date.now();
@@ -255,7 +260,7 @@ describe('sync-on-connect churn gates', () => {
     await flushTimers();
 
     expect(trySyncFromPeer.calls).toHaveLength(1);
-    const backoff = agent.syncReconcilerBackoff.get(PEER_A);
+    const backoff = agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A);
     expect(backoff?.failures).toBe(1);
     expect(backoff?.nextRetryAt - before).toBeGreaterThanOrEqual(5_000);
     expect(backoff?.nextRetryAt - before).toBeLessThan(5_100);
@@ -264,6 +269,7 @@ describe('sync-on-connect churn gates', () => {
   it('records backoff after a failed sync round and blocks connection-open rescheduling', async () => {
     const agent = await createUnstartedAgent('SyncReconnectBackoff');
     agent.started = true;
+    agent.peerSyncSession = new PeerSyncSession();
     agent.node.node = {
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
@@ -276,14 +282,14 @@ describe('sync-on-connect churn gates', () => {
       connectionKey: null,
     });
 
-    const backoff = agent.syncReconcilerBackoff.get(PEER_A);
+    const backoff = agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A);
     expect(backoff?.failures).toBe(1);
     expect(backoff?.nextRetryAt).toBeGreaterThan(Date.now());
 
     const staleQueuedAt = Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1;
-    agent.catchupOnConnectAt.set(PEER_A, staleQueuedAt);
+    agent.peerSyncSession.catchupOnConnectAt.set(PEER_A, staleQueuedAt);
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(false);
-    expect(agent.catchupOnConnectAt.get(PEER_A)).toBe(staleQueuedAt);
+    expect(agent.peerSyncSession.catchupOnConnectAt.get(PEER_A)).toBe(staleQueuedAt);
   });
 
   it('retains progress while backing off a mixed progress-and-failure round', async () => {
@@ -293,6 +299,7 @@ describe('sync-on-connect churn gates', () => {
     });
     allowAllNetworkAdmission(agent);
     (agent as any).started = true;
+    (agent as any).peerSyncSession = new PeerSyncSession();
     (agent.node as any).node = {
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [{
@@ -314,7 +321,7 @@ describe('sync-on-connect churn gates', () => {
     (agent as any).refreshMetaSyncedFlags = async () => undefined;
     (agent as any).discoverContextGraphsFromStore = async () => 0;
     (agent as any).planSharedMemorySyncContextGraphs = async () => ({ targets: [] });
-    (agent as any).syncReconcilerBackoff.set(PEER_A, {
+    (agent as any).peerSyncSession.syncReconcilerBackoff.set(PEER_A, {
       failures: 2,
       nextRetryAt: Date.now() - 1,
       protocolsKey: null,
@@ -326,13 +333,13 @@ describe('sync-on-connect churn gates', () => {
       connectionKey: null,
     });
 
-    expect((agent as any).lastSyncProgressAt.get(PEER_A)).toBeGreaterThan(0);
-    expect((agent as any).lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
-    const backoff = (agent as any).syncReconcilerBackoff.get(PEER_A);
+    expect((agent as any).peerSyncSession.lastSyncProgressAt.get(PEER_A)).toBeGreaterThan(0);
+    expect((agent as any).peerSyncSession.lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
+    const backoff = (agent as any).peerSyncSession.syncReconcilerBackoff.get(PEER_A);
     expect(backoff?.failures).toBe(3);
     expect(backoff?.nextRetryAt).toBeGreaterThan(Date.now());
 
-    (agent as any).catchupOnConnectAt.set(
+    (agent as any).peerSyncSession.catchupOnConnectAt.set(
       PEER_A,
       Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
     );
@@ -363,8 +370,9 @@ describe('sync-on-connect churn gates', () => {
     async ({ disposition, fresh, expectedFailures, expectedFresh }) => {
       const agent = await createUnstartedAgent(`SyncAccounting-${disposition}`);
       (agent as any).started = true;
+    (agent as any).peerSyncSession = new PeerSyncSession();
       (agent as any).isPeerConnectedForSyncBackoff = () => true;
-      (agent as any).syncReconcilerBackoff.set(PEER_A, {
+      (agent as any).peerSyncSession.syncReconcilerBackoff.set(PEER_A, {
         failures: 2,
         nextRetryAt: Date.now() - 1,
         protocolsKey: null,
@@ -381,9 +389,9 @@ describe('sync-on-connect churn gates', () => {
         { protocolsKey: PROTOCOL_SYNC, connectionKey: 'accounting-test' },
       );
 
-      expect((agent as any).lastSyncProgressAt.get(PEER_A)).toBeGreaterThan(0);
-      expect((agent as any).lastSuccessfulSyncAt.has(PEER_A)).toBe(expectedFresh);
-      expect((agent as any).syncReconcilerBackoff.get(PEER_A)?.failures)
+      expect((agent as any).peerSyncSession.lastSyncProgressAt.get(PEER_A)).toBeGreaterThan(0);
+      expect((agent as any).peerSyncSession.lastSuccessfulSyncAt.has(PEER_A)).toBe(expectedFresh);
+      expect((agent as any).peerSyncSession.syncReconcilerBackoff.get(PEER_A)?.failures)
         .toBe(expectedFailures);
     },
   );
@@ -391,6 +399,7 @@ describe('sync-on-connect churn gates', () => {
   it('records reconciler backoff when selected SWM is explicitly incomplete without progress', async () => {
     const agent = await createUnstartedAgent('SelectedSwmIncompleteBackoff');
     agent.started = true;
+    agent.peerSyncSession = new PeerSyncSession();
     agent.node.node = {
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
@@ -432,12 +441,12 @@ describe('sync-on-connect churn gates', () => {
       hasSyncProtocol: true,
     });
 
-    expect(agent.lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
-    expect(agent.lastSyncProgressAt.has(PEER_A)).toBe(false);
-    expect(agent.syncReconcilerBackoff.get(PEER_A)).toMatchObject({
+    expect(agent.peerSyncSession.lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
+    expect(agent.peerSyncSession.lastSyncProgressAt.has(PEER_A)).toBe(false);
+    expect(agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A)).toMatchObject({
       failures: 1,
     });
-    expect(agent.syncReconcilerBackoff.get(PEER_A).nextRetryAt)
+    expect(agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A).nextRetryAt)
       .toBeGreaterThan(Date.now());
   });
 
@@ -445,6 +454,7 @@ describe('sync-on-connect churn gates', () => {
     const agent = await createUnstartedAgent('SelectedSwmIncompleteProgress');
     allowAllNetworkAdmission(agent);
     agent.started = true;
+    agent.peerSyncSession = new PeerSyncSession();
     agent.config.syncContextGraphs = ['selected-cg'];
     agent.config.rfc64PublicCatalogBootstrap = {
       acceptedPublicPolicies: [{ completeSwmProviders: [PEER_A] }],
@@ -476,7 +486,7 @@ describe('sync-on-connect churn gates', () => {
     });
     agent.selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
     agent.selectedSwmBootstrapContextGraphIdsForPeer = () => ['selected-cg'];
-    agent.syncReconcilerBackoff.set(PEER_A, {
+    agent.peerSyncSession.syncReconcilerBackoff.set(PEER_A, {
       failures: 1,
       nextRetryAt: Date.now() + 60_000,
     });
@@ -486,9 +496,9 @@ describe('sync-on-connect churn gates', () => {
       hasSyncProtocol: true,
     });
 
-    expect(agent.lastSyncProgressAt.has(PEER_A)).toBe(true);
-    expect(agent.lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
-    expect(agent.syncReconcilerBackoff.get(PEER_A)?.failures).toBe(1);
+    expect(agent.peerSyncSession.lastSyncProgressAt.has(PEER_A)).toBe(true);
+    expect(agent.peerSyncSession.lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
+    expect(agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A)?.failures).toBe(1);
 
     const calls: string[] = [];
     const runSelected = async (peerId: string) => {
@@ -502,7 +512,7 @@ describe('sync-on-connect churn gates', () => {
       0,
       { selectedSwmRetry: true },
     )).toBe(false);
-    (agent as any).syncReconcilerBackoff.get(PEER_A).nextRetryAt = Date.now() - 1;
+    (agent as any).peerSyncSession.syncReconcilerBackoff.get(PEER_A).nextRetryAt = Date.now() - 1;
     expect((agent as any).queueSyncFromPeerOnConnect(
       PEER_A,
       handleSyncError,
@@ -522,7 +532,7 @@ describe('sync-on-connect churn gates', () => {
   it('does not let one peer backoff suppress connection-open sync for another peer', async () => {
     const agent = await createUnstartedAgent('SyncReconnectBackoffPeerScoped');
     const calls: string[] = [];
-    agent.syncReconcilerBackoff.set(PEER_A, {
+    agent.peerSyncSession.syncReconcilerBackoff.set(PEER_A, {
       failures: 1,
       nextRetryAt: Date.now() + CATCHUP_ON_CONNECT_COOLDOWN_MS,
       protocolsKey: null,
@@ -543,7 +553,7 @@ describe('sync-on-connect churn gates', () => {
   it('allows connection-open sync after peer backoff cooldown expires', async () => {
     const agent = await createUnstartedAgent('SyncReconnectBackoffExpiry');
     const calls: string[] = [];
-    agent.syncReconcilerBackoff.set(PEER_A, {
+    agent.peerSyncSession.syncReconcilerBackoff.set(PEER_A, {
       failures: 1,
       nextRetryAt: Date.now() - 1,
       protocolsKey: null,
@@ -564,6 +574,7 @@ describe('sync-on-connect churn gates', () => {
     const agent = await createUnstartedAgent('SyncOnConnectDisabled');
     agent.config.syncOnConnectEnabled = false;
     agent.started = true;
+    agent.peerSyncSession = new PeerSyncSession();
     const calls: string[] = [];
     const runOrdinary = async (peerId: string) => {
       calls.push(peerId);

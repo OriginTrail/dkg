@@ -1,3 +1,4 @@
+import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import {
@@ -47,7 +48,7 @@ describe('RFC-64 SWM lane partition and admission', () => {
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
     releaseExact();
 
-    await vi.waitFor(() => expect(agent.syncOnConnectPeerScheduler.size).toBe(0));
+    await vi.waitFor(() => expect(agent.getSyncOnConnectPeerScheduler().size).toBe(0));
     expect(ordinaryRun).toHaveBeenCalledWith(PEER_A);
     expect(ordering).toEqual(['exact-in-flight', 'ordinary']);
   });
@@ -77,7 +78,8 @@ describe('RFC-64 SWM lane partition and admission', () => {
       .toBe(true);
     await flushTimers();
     expect(queuedRun).toHaveBeenCalledOnce();
-    agent.syncOnConnectPeerScheduler = null;
+    agent.peerSyncSession.close();
+    agent.peerSyncSession = new PeerSyncSession();
 
     agent.getPeerProtocols = async () => [PROTOCOL_SYNC];
     agent.planSharedMemorySyncContextGraphs = async () => ({

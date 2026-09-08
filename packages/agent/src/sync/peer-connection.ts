@@ -1,0 +1,124 @@
+import type { Logger, OperationContext } from '@origintrail-official/dkg-core';
+import type { DKGAgent } from '../dkg-agent.js';
+import type { PeerSyncSession } from './peer-sync-session.js';
+
+export interface PeerSyncConnection {
+  direction: 'inbound' | 'outbound';
+  remoteAddr?: { toString(): string };
+  remotePeer: { toString(): string };
+}
+
+interface PeerConnectionSyncContext {
+  agent: DKGAgent;
+  session: PeerSyncSession;
+  ctx: OperationContext;
+  log: Pick<Logger, 'info' | 'warn'>;
+  authorityContextGraphIds: readonly string[];
+}
+
+/** Connection policy belongs to sync; the generic lifetime owns only supervision. */
+export async function syncOpenedPeerConnection(
+  context: PeerConnectionSyncContext,
+  connection: PeerSyncConnection,
+): Promise<void> {
+  const { agent, session, ctx, log, authorityContextGraphIds } = context;
+  const { signal } = session;
+  signal.throwIfAborted();
+  const remotePeer = connection.remotePeer.toString();
+  if (remotePeer === agent.node.libp2p.peerId.toString()) return;
+  const replayContextGraphIds = [...new Set([
+    ...agent.readRfc64CatalogResponsibilitiesV1()
+      .filter((responsibility) => responsibility.active && responsibility.mode !== 'legacy')
+      .map((responsibility) => responsibility.contextGraphId),
+    ...authorityContextGraphIds.filter((cg) => {
+      const authority = agent.resolveRfc64CatalogReceiverAuthorityV1(cg);
+      return authority.active && authority.mode !== 'legacy';
+    }),
+  ])].sort();
+  for (const contextGraphId of replayContextGraphIds) {
+    agent.markRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
+  }
+  const releaseCleanup = session.onClose(() => {
+    for (const contextGraphId of replayContextGraphIds) {
+      agent.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
+    }
+  });
+  try {
+    let admitted = false;
+    try {
+      admitted = await agent.networkAdmissionCoordinator.ensureAdmitted(remotePeer, ctx, { signal });
+    } catch (err: unknown) {
+      signal.throwIfAborted();
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn(ctx, `Network admission probe failed for ${remotePeer.slice(-8)} on connect: ${message}`);
+      for (const contextGraphId of replayContextGraphIds) {
+        agent.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
+      }
+      return;
+    }
+    signal.throwIfAborted();
+    if (!admitted) {
+      for (const contextGraphId of replayContextGraphIds) {
+        agent.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
+      }
+      return;
+    }
+    try {
+      await agent.enrichPeerStoreFromInboundCircuit(connection);
+    } catch (err: unknown) {
+      signal.throwIfAborted();
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn(ctx, `Reverse-path peerStore enrichment failed for ${remotePeer}: ${message}`);
+    }
+    signal.throwIfAborted();
+    // PR-2 (SWM-fanout plan): drain pending sender-key packages
+    // that were queued because the recipient had no advertised
+    // peerId at publish time. Tolerant of profile-lookup failure
+    // (the next connection:open will retry).
+    try {
+      const drained = await agent.drainPendingSenderKeyForPeer(remotePeer, ctx);
+      signal.throwIfAborted();
+      if (drained > 0) {
+        log.info(ctx, `Drained ${drained} pending SWM sender-key package(s) for ${remotePeer}`);
+      }
+    } catch (err: unknown) {
+      signal.throwIfAborted();
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn(ctx, `Pending SWM sender-key drain on connect failed for ${remotePeer}: ${message}`);
+    }
+    signal.throwIfAborted();
+    // The receiver owns replay completeness. Provider-initiated pushes do
+    // not carry a promised-head manifest and can otherwise leave a brief
+    // A-applied/B-undiscovered window reporting complete. Request every
+    // active CG through the completion-capable scoped protocol instead.
+    // Keep the 10.0.15 rolling-upgrade direction alive: legacy receivers
+    // cannot request V2 completion, but they can still consume ordinary
+    // head announcements. Upgraded receivers remain fenced by the scoped
+    // pull below and never interpret this compatibility push as complete.
+    const reannouncement = agent.reannounceRfc64CatalogHeadsToPeerV1(remotePeer).catch((err: unknown) => {
+      if (signal.aborted) return;
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn(ctx, `RFC-64 compatibility re-announcement failed for ${remotePeer.slice(-8)}: ${message}`);
+    });
+    const replays = replayContextGraphIds.map((contextGraphId) =>
+      agent.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId).then((result) => {
+        if (signal.aborted) return;
+        if (result.failed > 0) {
+          log.warn(ctx, `RFC-64 catalog replay incomplete for "${contextGraphId}" after ${remotePeer.slice(-8)} connected`);
+        }
+      }).catch((err: unknown) => {
+        if (signal.aborted) return;
+        const message = err instanceof Error ? err.message : String(err);
+        log.warn(ctx, `RFC-64 catalog replay failed after ${remotePeer.slice(-8)} connected: ${message}`);
+      }),
+    );
+    agent.queueSyncFromPeerOnConnect(remotePeer, (peer, error) => session.commit(() => {
+      log.warn(ctx, `Sync-on-connect failed for ${peer.slice(-8)}: ${error instanceof Error ? error.message : String(error)}`);
+    }));
+    // Catalog operations have their own runtime drain. Keep this connection's
+    // pending-fence cleanup registered until those terminal promises settle.
+    await Promise.all([reannouncement, ...replays]);
+  } finally {
+    releaseCleanup();
+  }
+}

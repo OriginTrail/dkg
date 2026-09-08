@@ -21,7 +21,7 @@ describe('RFC-64 selected retry lifecycle', () => {
     };
     installSyncOnConnectPeerJobStub(agent, { runSelected: selectedRun });
     const handleSyncError = () => undefined;
-    agent.lastSuccessfulSyncAt.set(PEER_A, Date.now());
+    agent.peerSyncSession.lastSuccessfulSyncAt.set(PEER_A, Date.now());
 
     // Generic fresh-success suppression remains authoritative until the
     // selected lane explicitly records incomplete exact coverage.
@@ -40,7 +40,7 @@ describe('RFC-64 selected retry lifecycle', () => {
       handleSyncError,
       0,
     )).toBe(false);
-    agent.syncReconcilerBackoff.set(PEER_A, {
+    agent.peerSyncSession.syncReconcilerBackoff.set(PEER_A, {
       failures: 1,
       nextRetryAt: Date.now() + 60_000,
     });
@@ -50,7 +50,7 @@ describe('RFC-64 selected retry lifecycle', () => {
       0,
       { selectedSwmRetry: true },
     )).toBe(false);
-    agent.syncReconcilerBackoff.delete(PEER_A);
+    agent.peerSyncSession.syncReconcilerBackoff.delete(PEER_A);
     expect(agent.queueSyncFromPeerOnConnect(
       PEER_A,
       handleSyncError,
@@ -74,7 +74,7 @@ describe('RFC-64 selected retry lifecycle', () => {
       ['selected-cg'],
     );
     agent.selectedSwmBootstrapAdmission.markTransferTerminal(completedOwner);
-    agent.catchupOnConnectAt.set(
+    agent.peerSyncSession.catchupOnConnectAt.set(
       PEER_A,
       Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
     );
@@ -132,7 +132,7 @@ describe('RFC-64 selected retry lifecycle', () => {
     const handleSyncError = (_peerId: string, error: unknown) => {
       errors.push(error);
     };
-    agent.lastSuccessfulSyncAt.set(PEER_A, Date.now());
+    agent.peerSyncSession.lastSuccessfulSyncAt.set(PEER_A, Date.now());
     expect(agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER_A)).toBe(false);
 
     expect(agent.queueSyncFromPeerOnConnect(
@@ -155,7 +155,7 @@ describe('RFC-64 selected retry lifecycle', () => {
     expect(durableSync.calls).toEqual([]);
     expect(ordinarySharedSync.calls).toEqual([]);
     expect(discoverContextGraphsFromStore.calls).toEqual([]);
-    expect(agent.lastSuccessfulSyncAt.has(PEER_A)).toBe(true);
+    expect(agent.peerSyncSession.lastSuccessfulSyncAt.has(PEER_A)).toBe(true);
   });
 
   it('clears selected SWM retry state when network admission rejects a peer', async () => {
@@ -174,12 +174,12 @@ describe('RFC-64 selected retry lifecycle', () => {
       () => undefined,
       50,
     )).toBe(true);
-    expect(agent.syncOnConnectPeerScheduler.has(PEER_A)).toBe(true);
+    expect(agent.getSyncOnConnectPeerScheduler().has(PEER_A)).toBe(true);
 
     agent.clearNetworkRejectedPeerState(PEER_A);
 
     expect(agent.selectedSwmBootstrapAdmission.snapshot(PEER_A)).toBeNull();
-    expect(agent.syncOnConnectPeerScheduler.has(PEER_A)).toBe(false);
+    expect(agent.getSyncOnConnectPeerScheduler().has(PEER_A)).toBe(false);
     await new Promise((resolve) => setTimeout(resolve, 75));
     expect(runs).toEqual([]);
   });

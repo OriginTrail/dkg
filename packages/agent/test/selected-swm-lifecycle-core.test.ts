@@ -1,3 +1,4 @@
+import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
@@ -9,7 +10,6 @@ import {
   captureSyncOnConnectAttempt,
   executeSyncOnConnectAttempt,
 } from '../src/sync/on-connect/attempt-accounting.js';
-import { SyncOnConnectPeerScheduler } from '../src/sync/on-connect/peer-scheduler.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
 import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
 import {
@@ -65,16 +65,14 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         ordinaryPrivate: { completed: 1, total: 1 },
       });
 
-      const backoff = new Map<string, unknown>();
+      const session = new PeerSyncSession();
+      const backoff = session.syncReconcilerBackoff;
       const accountingAgent = {
-        lastSuccessfulSyncAt: new Map<string, number>(),
-        lastSyncProgressAt: new Map<string, number>(),
-        skippedNoSyncPeers: new Set<string>(),
-        syncReconcilerBackoff: backoff,
+        peerSyncSession: session,
         applySyncOnConnectAccounting:
           LifecycleSyncMethods.prototype.applySyncOnConnectAccounting,
         recordSyncReconcilerFailure: (peerId: string) => {
-          backoff.set(peerId, { failures: 1 });
+          backoff.set(peerId, { failures: 1, nextRetryAt: 0 });
         },
         log: { info: () => {} },
       };
@@ -364,13 +362,9 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         },
       },
       networkAdmissionCoordinator: { isAcceptedPeer: () => true },
-      syncingPeers: new Set<string>(),
+      peerSyncSession: new PeerSyncSession(),
       knownCorePeerIds: new Set<string>(),
       knownCorePeerIdsV2: new Set<string>(),
-      skippedNoSyncPeers: new Set<string>(),
-      lastSuccessfulSyncAt: new Map<string, number>(),
-      lastSyncProgressAt: new Map<string, number>(),
-      syncReconcilerBackoff: new Map<string, unknown>(),
       applySyncOnConnectAccounting:
         LifecycleSyncMethods.prototype.applySyncOnConnectAccounting,
       selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
@@ -473,13 +467,9 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         },
       },
       networkAdmissionCoordinator: { isAcceptedPeer: () => true },
-      syncingPeers: new Set<string>(),
+      peerSyncSession: new PeerSyncSession(),
       knownCorePeerIds: new Set<string>(),
       knownCorePeerIdsV2: new Set<string>(),
-      skippedNoSyncPeers: new Set<string>(),
-      lastSuccessfulSyncAt: new Map<string, number>(),
-      lastSyncProgressAt: new Map<string, number>(),
-      syncReconcilerBackoff: new Map<string, unknown>(),
       applySyncOnConnectAccounting:
         LifecycleSyncMethods.prototype.applySyncOnConnectAccounting,
       selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
@@ -529,7 +519,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
     await callTrySyncFromPeer.call(agent, PEER, (outcome) => accounting.push(outcome));
 
     expect(agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(true);
-    expect(agent.lastSuccessfulSyncAt.has(PEER)).toBe(false);
+    expect(agent.peerSyncSession.lastSuccessfulSyncAt.has(PEER)).toBe(false);
     expect(accounting).toEqual([{
       reconcilerDisposition: 'retry',
       fresh: false,
@@ -780,11 +770,10 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       const queuedPeers: string[] = [];
       const queueAgent = harness.agent as SelectedSwmLifecycleAgentFixture & Record<string, any>;
       queueAgent.networkAdmissionCoordinator = { isAcceptedPeer: () => true };
-      queueAgent.lastSuccessfulSyncAt = new Map([[PEER, Date.now()]]);
+      queueAgent.peerSyncSession = new PeerSyncSession();
+      queueAgent.peerSyncSession.lastSuccessfulSyncAt.set(PEER, Date.now());
       queueAgent.lastSyncDisconnectedAt = new Map<string, number>();
-      queueAgent.catchupOnConnectAt = new Map<string, number>();
-      queueAgent.rfc64ExactCatchupOnConnectAt = new Map<string, number>();
-      queueAgent.syncOnConnectPeerScheduler = new SyncOnConnectPeerScheduler({
+      queueAgent.peerSyncSession.getScheduler({
         createJob: (peerId) => ({
           runAutomaticSelectedThenOrdinary: async () => 'not-started',
           runSelected: async () => {
@@ -798,7 +787,6 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       });
       queueAgent.getSyncOnConnectPeerScheduler =
         LifecycleSyncMethods.prototype.getSyncOnConnectPeerScheduler;
-      queueAgent.syncReconcilerBackoff = new Map<string, unknown>();
       queueAgent.syncOnConnectDisconnectBoundary =
         LifecycleSyncMethods.prototype.syncOnConnectDisconnectBoundary;
       expect(LifecycleSyncMethods.prototype.queueSyncFromPeerOnConnect.call(

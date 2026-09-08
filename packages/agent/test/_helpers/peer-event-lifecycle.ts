@@ -2,6 +2,7 @@ import { vi } from 'vitest';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { PROTOCOL_SYNC, type OperationContext } from '@origintrail-official/dkg-core';
+import type { PeerSyncSession } from '../../src/sync/peer-sync-session.js';
 import { DKGAgent } from '../../src/index.js';
 
 export function deferred<T>() {
@@ -18,11 +19,7 @@ export async function flushMicrotasks(): Promise<void> {
 // Expose protected state once. All workflow spies use DKGAgent's real signatures.
 interface PeerEventState {
   knownCorePeerIds: Set<string>;
-  skippedNoSyncPeers: Set<string>;
-  lastSuccessfulSyncAt: Map<string, number>;
-  lastSyncProgressAt: Map<string, number>;
-  syncReconcilerBackoff: Map<string, { failures: number; nextRetryAt: number; protocolsKey: string | null; connectionKey: string | null }>;
-  catchupOnConnectAt: Map<string, number>;
+  peerSyncSession: PeerSyncSession;
   lastSyncDisconnectedAt: Map<string, number>;
   log: { warn(ctx: OperationContext, message: string): void };
 }
@@ -37,7 +34,11 @@ export async function createPeerEventFixture() {
   const peer = peerIdFromString('12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M');
   const peerId = peer.toString();
   return {
-    agent, state, peer, peerId,
+    agent, peer, peerId,
+    get state() {
+      return { ...state.peerSyncSession, knownCorePeerIds: state.knownCorePeerIds,
+        lastSyncDisconnectedAt: state.lastSyncDisconnectedAt, log: state.log };
+    },
     dispatchUpdate(protocols: readonly string[] = [PROTOCOL_SYNC]) {
       transport.dispatchEvent(new CustomEvent('peer:update', { detail: { peer: { id: peer, protocols } } }));
     },

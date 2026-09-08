@@ -1,4 +1,4 @@
-import type { PeerSyncConnection } from './p2p/peer-connection-coordinator.js';
+import type { PeerSyncConnection } from './sync/peer-connection.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**

@@ -1152,7 +1152,7 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
       coordinator.ensureAdmitted = ensureAdmitted;
       // Pretend sync-on-connect ran earlier and skipped this peer because
       // identify hadn't completed (the libp2p race we're fixing).
-      (agent as any).skippedNoSyncPeers.add(remotePeer);
+      (agent as any).peerSyncSession.skippedNoSyncPeers.add(remotePeer);
 
       const calls: string[] = [];
       (agent as any).trySyncFromPeer = async (peerId: string) => {
@@ -1178,7 +1178,7 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
 
       expect(calls).toEqual([remotePeer]);
       expect(ensureAdmitted.calls.map(([peerId]) => peerId)).toEqual([remotePeer]);
-      expect((agent as any).skippedNoSyncPeers.has(remotePeer)).toBe(false);
+      expect((agent as any).peerSyncSession.skippedNoSyncPeers.has(remotePeer)).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1194,7 +1194,7 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
       await agent.start();
       const remotePeer = freshPeerIdString();
       allowAllNetworkAdmission(agent);
-      (agent as any).skippedNoSyncPeers.add(remotePeer);
+      (agent as any).peerSyncSession.skippedNoSyncPeers.add(remotePeer);
       (agent as any).isPeerConnectedForSyncBackoff = () => true;
       (agent as any).getSyncReconcilerProbe = async () => ({
         protocolsKey: PROTOCOL_SYNC,
@@ -1225,11 +1225,11 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
         },
       } as any));
 
-      for (let i = 0; i < 50 && !(agent as any).syncReconcilerBackoff.has(remotePeer); i++) {
+      for (let i = 0; i < 50 && !(agent as any).peerSyncSession.syncReconcilerBackoff.has(remotePeer); i++) {
         await new Promise(r => setTimeout(r, 10));
       }
 
-      const backoff = (agent as any).syncReconcilerBackoff.get(remotePeer);
+      const backoff = (agent as any).peerSyncSession.syncReconcilerBackoff.get(remotePeer);
       expect(backoff?.failures).toBe(1);
       expect(backoff?.nextRetryAt).toBeGreaterThan(Date.now());
     } finally {
@@ -1248,7 +1248,7 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
       allowAllNetworkAdmission(agent);
 
       const remotePeer = freshPeerIdString();
-      (agent as any).skippedNoSyncPeers.add(remotePeer);
+      (agent as any).peerSyncSession.skippedNoSyncPeers.add(remotePeer);
 
       const calls: string[] = [];
       (agent as any).trySyncFromPeer = async (peerId: string) => {
@@ -1269,7 +1269,7 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
 
       expect(calls).toEqual([]);
       // peer is still in the skipped set so the reconciler can decide later
-      expect((agent as any).skippedNoSyncPeers.has(remotePeer)).toBe(true);
+      expect((agent as any).peerSyncSession.skippedNoSyncPeers.has(remotePeer)).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1366,9 +1366,9 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       );
 
       // freshPeer synced 30s ago — within the 10-minute threshold
-      (agent as any).lastSuccessfulSyncAt.set(freshPeer, Date.now() - 30_000);
+      (agent as any).peerSyncSession.lastSuccessfulSyncAt.set(freshPeer, Date.now() - 30_000);
       // stalePeer synced 20 minutes ago — well past the threshold
-      (agent as any).lastSuccessfulSyncAt.set(stalePeer, Date.now() - 20 * 60_000);
+      (agent as any).peerSyncSession.lastSuccessfulSyncAt.set(stalePeer, Date.now() - 20 * 60_000);
 
       const calls: string[] = [];
       (agent as any).trySyncFromPeer = async (peerId: string) => {
@@ -1401,7 +1401,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       );
 
       const now = Date.now();
-      (agent as any).lastSuccessfulSyncAt.set(remotePeer, now - 30_000);
+      (agent as any).peerSyncSession.lastSuccessfulSyncAt.set(remotePeer, now - 30_000);
       (agent as any).lastSyncDisconnectedAt.set(remotePeer, now - 30_000);
 
       const calls: string[] = [];
@@ -1436,7 +1436,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       );
 
       // Simulate a sync already in flight for this peer.
-      (agent as any).syncingPeers.add(peerA);
+      (agent as any).peerSyncSession.syncingPeers.add(peerA);
 
       const calls: string[] = [];
       (agent as any).trySyncFromPeer = async (peerId: string) => {
@@ -1476,7 +1476,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
         calls.push(peerId);
       };
 
-      const backoffMap = (agent as any).syncReconcilerBackoff as Map<
+      const backoffMap = (agent as any).peerSyncSession.syncReconcilerBackoff as Map<
         string,
         { failures: number; nextRetryAt: number }
       >;
@@ -1534,7 +1534,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       const trySync = recorder(async () => undefined);
       (agent as any).trySyncFromPeer = trySync;
 
-      const backoffMap = (agent as any).syncReconcilerBackoff as Map<
+      const backoffMap = (agent as any).peerSyncSession.syncReconcilerBackoff as Map<
         string,
         { failures: number; nextRetryAt: number; protocolsKey?: string | null; connectionKey?: string | null }
       >;
@@ -1577,7 +1577,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       const trySync = recorder((...a: unknown[]) => origTrySync(...a));
       (agent as any).trySyncFromPeer = trySync;
 
-      const backoffMap = (agent as any).syncReconcilerBackoff as Map<
+      const backoffMap = (agent as any).peerSyncSession.syncReconcilerBackoff as Map<
         string,
         { failures: number; nextRetryAt: number }
       >;
@@ -1589,7 +1589,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
 
       expect(trySync.calls).toHaveLength(2);
       expect(getPeerProtocols.calls.length).toBeGreaterThanOrEqual(2);
-      expect((agent as any).skippedNoSyncPeers.has(peerA)).toBe(true);
+      expect((agent as any).peerSyncSession.skippedNoSyncPeers.has(peerA)).toBe(true);
       expect(backoffMap.has(peerA)).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
@@ -1617,7 +1617,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();
 
-      expect((agent as any).syncReconcilerBackoff.has(peerA)).toBe(false);
+      expect((agent as any).peerSyncSession.syncReconcilerBackoff.has(peerA)).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1671,7 +1671,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       });
       expect(outcome).toBe('deferred-backpressure');
       expect(trySync.calls).toHaveLength(1);
-      expect((agent as any).syncReconcilerBackoff.has(peerA)).toBe(false);
+      expect((agent as any).peerSyncSession.syncReconcilerBackoff.has(peerA)).toBe(false);
 
       occupiedFetch.resolve(emptySyncPage('meta'));
       await occupiedSlot;
@@ -1681,7 +1681,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       await waitFor(() => trySync.calls.length === 2);
 
       expect(trySync.calls).toHaveLength(2);
-      expect((agent as any).syncReconcilerBackoff.has(peerA)).toBe(false);
+      expect((agent as any).peerSyncSession.syncReconcilerBackoff.has(peerA)).toBe(false);
     } finally {
       occupiedFetch.resolve(emptySyncPage('meta'));
       await occupiedSlot?.catch(() => {});
@@ -1747,7 +1747,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       });
       expect(outcome).toBe('deferred-backpressure');
       expect(recoverContextGraphSwmFromPeer.calls).toEqual([]);
-      expect((agent as any).syncReconcilerBackoff.has(peerA)).toBe(false);
+      expect((agent as any).peerSyncSession.syncReconcilerBackoff.has(peerA)).toBe(false);
     } finally {
       releaseOccupiedSlot?.();
       await occupiedSlot?.catch(() => {});
@@ -1778,7 +1778,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();
 
-      expect((agent as any).syncReconcilerBackoff.has(peerA)).toBe(false);
+      expect((agent as any).peerSyncSession.syncReconcilerBackoff.has(peerA)).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1807,7 +1807,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();
 
-      const backoff = (agent as any).syncReconcilerBackoff.get(peerA);
+      const backoff = (agent as any).peerSyncSession.syncReconcilerBackoff.get(peerA);
       expect(backoff?.failures).toBe(1);
       expect(backoff?.nextRetryAt).toBeGreaterThan(Date.now());
     } finally {
@@ -1845,11 +1845,11 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       // Simulate connection:close winning the race before the
       // fire-and-forget sync attempt resolves without progress.
       connectedPeers = [];
-      (agent as any).syncReconcilerBackoff.delete(peerA);
+      (agent as any).peerSyncSession.syncReconcilerBackoff.delete(peerA);
       resolveAttempt();
       await flushMicrotasks();
 
-      expect((agent as any).syncReconcilerBackoff.has(peerA)).toBe(false);
+      expect((agent as any).peerSyncSession.syncReconcilerBackoff.has(peerA)).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1868,9 +1868,9 @@ describe('DKGAgent sync state lifecycle', () => {
       allowAllNetworkAdmission(agent);
 
       const remotePeer = freshPeerIdString();
-      (agent as any).skippedNoSyncPeers.add(remotePeer);
-      (agent as any).lastSuccessfulSyncAt.set(remotePeer, Date.now());
-      (agent as any).syncReconcilerBackoff.set(remotePeer, { failures: 3, nextRetryAt: Date.now() + 100_000 });
+      (agent as any).peerSyncSession.skippedNoSyncPeers.add(remotePeer);
+      (agent as any).peerSyncSession.lastSuccessfulSyncAt.set(remotePeer, Date.now());
+      (agent as any).peerSyncSession.syncReconcilerBackoff.set(remotePeer, { failures: 3, nextRetryAt: Date.now() + 100_000 });
 
       // Stub getPeers so the close handler considers the peer fully gone.
       (agent.node.libp2p as any).getPeers = recorder(() => []);
@@ -1884,9 +1884,9 @@ describe('DKGAgent sync state lifecycle', () => {
         },
       } as any));
 
-      expect((agent as any).skippedNoSyncPeers.has(remotePeer)).toBe(false);
-      expect((agent as any).lastSuccessfulSyncAt.has(remotePeer)).toBe(true);
-      expect((agent as any).syncReconcilerBackoff.has(remotePeer)).toBe(true);
+      expect((agent as any).peerSyncSession.skippedNoSyncPeers.has(remotePeer)).toBe(false);
+      expect((agent as any).peerSyncSession.lastSuccessfulSyncAt.has(remotePeer)).toBe(true);
+      expect((agent as any).peerSyncSession.syncReconcilerBackoff.has(remotePeer)).toBe(true);
       expect((agent as any).lastSyncDisconnectedAt.has(remotePeer)).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
@@ -1904,7 +1904,7 @@ describe('DKGAgent sync state lifecycle', () => {
       allowAllNetworkAdmission(agent);
 
       const remotePeer = freshPeerIdString();
-      (agent as any).lastSuccessfulSyncAt.set(remotePeer, Date.now() - 30_000);
+      (agent as any).peerSyncSession.lastSuccessfulSyncAt.set(remotePeer, Date.now() - 30_000);
       const calls: string[] = [];
       (agent as any).trySyncFromPeer = async (peerId: string) => {
         calls.push(peerId);
@@ -1919,7 +1919,7 @@ describe('DKGAgent sync state lifecycle', () => {
         },
       } as any));
 
-      expect((agent as any).catchupOnConnectAt.has(remotePeer)).toBe(false);
+      expect((agent as any).peerSyncSession.catchupOnConnectAt.has(remotePeer)).toBe(false);
       await new Promise(r => setTimeout(r, 100));
       expect(calls).toEqual([]);
     } finally {
@@ -1939,8 +1939,8 @@ describe('DKGAgent sync state lifecycle', () => {
 
       const remotePeer = freshPeerIdString();
       const sameTickBoundary = Date.now() - 30_000;
-      (agent as any).lastSuccessfulSyncAt.set(remotePeer, sameTickBoundary);
-      (agent as any).catchupOnConnectAt.set(remotePeer, sameTickBoundary);
+      (agent as any).peerSyncSession.lastSuccessfulSyncAt.set(remotePeer, sameTickBoundary);
+      (agent as any).peerSyncSession.catchupOnConnectAt.set(remotePeer, sameTickBoundary);
       (agent as any).lastSyncDisconnectedAt.set(remotePeer, sameTickBoundary);
       const calls: string[] = [];
       (agent as any).trySyncFromPeer = async (peerId: string) => {
@@ -1956,7 +1956,7 @@ describe('DKGAgent sync state lifecycle', () => {
         },
       } as any));
 
-      expect((agent as any).catchupOnConnectAt.get(remotePeer)).toBeGreaterThanOrEqual(sameTickBoundary);
+      expect((agent as any).peerSyncSession.catchupOnConnectAt.get(remotePeer)).toBeGreaterThanOrEqual(sameTickBoundary);
       await new Promise(r => setTimeout(r, 3100));
       expect(calls).toEqual([remotePeer]);
     } finally {
@@ -1976,10 +1976,10 @@ describe('DKGAgent sync state lifecycle', () => {
 
       const remotePeer = freshPeerIdString();
       const now = Date.now();
-      (agent as any).catchupOnConnectAt.set(remotePeer, now - 20 * 60_000);
-      (agent as any).lastSuccessfulSyncAt.set(remotePeer, now - 20 * 60_000);
-      (agent as any).lastSyncProgressAt.set(remotePeer, now - 20 * 60_000);
-      (agent as any).syncReconcilerBackoff.set(remotePeer, {
+      (agent as any).peerSyncSession.catchupOnConnectAt.set(remotePeer, now - 20 * 60_000);
+      (agent as any).peerSyncSession.lastSuccessfulSyncAt.set(remotePeer, now - 20 * 60_000);
+      (agent as any).peerSyncSession.lastSyncProgressAt.set(remotePeer, now - 20 * 60_000);
+      (agent as any).peerSyncSession.syncReconcilerBackoff.set(remotePeer, {
         failures: 2,
         nextRetryAt: now - 20 * 60_000,
       });
@@ -1988,10 +1988,10 @@ describe('DKGAgent sync state lifecycle', () => {
 
       (agent as any).pruneSyncReconcilerState(now);
 
-      expect((agent as any).catchupOnConnectAt.has(remotePeer)).toBe(false);
-      expect((agent as any).lastSuccessfulSyncAt.has(remotePeer)).toBe(false);
-      expect((agent as any).lastSyncProgressAt.has(remotePeer)).toBe(false);
-      expect((agent as any).syncReconcilerBackoff.has(remotePeer)).toBe(false);
+      expect((agent as any).peerSyncSession.catchupOnConnectAt.has(remotePeer)).toBe(false);
+      expect((agent as any).peerSyncSession.lastSuccessfulSyncAt.has(remotePeer)).toBe(false);
+      expect((agent as any).peerSyncSession.lastSyncProgressAt.has(remotePeer)).toBe(false);
+      expect((agent as any).peerSyncSession.syncReconcilerBackoff.has(remotePeer)).toBe(false);
       expect((agent as any).lastSyncDisconnectedAt.has(remotePeer)).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
@@ -2012,8 +2012,8 @@ describe('DKGAgent sync state lifecycle', () => {
       const remotePeer = freshPeerIdString();
       (agent.node.libp2p as any).getPeers = recorder(() => [peerIdFromString(remotePeer)]);
       (agent as any).getPeerProtocols = recorder(async () => [PROTOCOL_SYNC]);
-      (agent as any).skippedNoSyncPeers.add(remotePeer);
-      (agent as any).syncReconcilerBackoff.set(remotePeer, {
+      (agent as any).peerSyncSession.skippedNoSyncPeers.add(remotePeer);
+      (agent as any).peerSyncSession.syncReconcilerBackoff.set(remotePeer, {
         failures: 2,
         nextRetryAt: Date.now() - 60_000,
       });
@@ -2063,19 +2063,19 @@ describe('DKGAgent sync state lifecycle', () => {
       await new Promise(r => setTimeout(r, 0));
 
       expect(syncFromPeerDetailed.calls).toHaveLength(1);
-      expect((agent as any).skippedNoSyncPeers.has(remotePeer)).toBe(false);
-      expect((agent as any).syncReconcilerBackoff.has(remotePeer)).toBe(false);
-      expect((agent as any).lastSuccessfulSyncAt.has(remotePeer)).toBe(false);
-      expect((agent as any).lastSyncProgressAt.has(remotePeer)).toBe(false);
+      expect((agent as any).peerSyncSession.skippedNoSyncPeers.has(remotePeer)).toBe(false);
+      expect((agent as any).peerSyncSession.syncReconcilerBackoff.has(remotePeer)).toBe(false);
+      expect((agent as any).peerSyncSession.lastSuccessfulSyncAt.has(remotePeer)).toBe(false);
+      expect((agent as any).peerSyncSession.lastSyncProgressAt.has(remotePeer)).toBe(false);
 
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();
       await new Promise(r => setTimeout(r, 0));
 
       expect(syncFromPeerDetailed.calls).toHaveLength(2);
-      expect((agent as any).syncReconcilerBackoff.has(remotePeer)).toBe(false);
-      expect((agent as any).lastSuccessfulSyncAt.has(remotePeer)).toBe(false);
-      expect((agent as any).lastSyncProgressAt.has(remotePeer)).toBe(false);
+      expect((agent as any).peerSyncSession.syncReconcilerBackoff.has(remotePeer)).toBe(false);
+      expect((agent as any).peerSyncSession.lastSuccessfulSyncAt.has(remotePeer)).toBe(false);
+      expect((agent as any).peerSyncSession.lastSyncProgressAt.has(remotePeer)).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -2115,9 +2115,9 @@ describe('DKGAgent sync state lifecycle', () => {
       await flushMicrotasks();
 
       expect(calls).toEqual([peerA]);
-      expect((agent as any).lastSuccessfulSyncAt.has(peerA)).toBe(false);
-      expect((agent as any).lastSyncProgressAt.has(peerA)).toBe(true);
-      expect((agent as any).syncReconcilerBackoff.has(peerA)).toBe(false);
+      expect((agent as any).peerSyncSession.lastSuccessfulSyncAt.has(peerA)).toBe(false);
+      expect((agent as any).peerSyncSession.lastSyncProgressAt.has(peerA)).toBe(true);
+      expect((agent as any).peerSyncSession.syncReconcilerBackoff.has(peerA)).toBe(false);
 
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();

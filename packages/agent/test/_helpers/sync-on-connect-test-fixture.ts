@@ -1,13 +1,13 @@
+import { PeerSyncSession } from '../../src/sync/peer-sync-session.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 
 import { DKGAgent, type DKGAgentConfig } from '../../src/index.js';
-import type { ContextGraphSub, SyncReconcilerBackoff } from '../../src/dkg-agent-types.js';
+import type { ContextGraphSub } from '../../src/dkg-agent-types.js';
 import type { Rfc64SwmRecoveryCoordinatorV1 } from '../../src/rfc64/swm-recovery-coordinator-v1.js';
 import type { Rfc64SwmRecoveryRuntimeV1 } from '../../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 import type { Rfc64AuthorizedSwmRecoveryPlanV1 } from '../../src/rfc64/swm-recovery-plan-v1.js';
 import type { SelectedSwmBootstrapAdmission } from '../../src/sync/selected-swm-bootstrap-admission.js';
 import {
-  SyncOnConnectPeerScheduler,
   type SyncOnConnectPeerJobRunner,
 } from '../../src/sync/on-connect/peer-scheduler.js';
 
@@ -18,6 +18,7 @@ type Rfc64CoordinatorTestPort = Pick<
 
 interface SyncOnConnectPrivateSeam {
   started: boolean;
+  peerSyncSession: PeerSyncSession;
   config: DKGAgentConfig;
   node: {
     node: {
@@ -30,18 +31,10 @@ interface SyncOnConnectPrivateSeam {
     isRejectedPeer: (peerId: string) => boolean;
     ensureAdmitted: (peerId: string) => Promise<boolean>;
   };
-  catchupOnConnectAt: Map<string, number>;
-  rfc64ExactCatchupOnConnectAt: Map<string, number>;
-  lastSuccessfulSyncAt: Map<string, number>;
   lastSyncDisconnectedAt: Map<string, number>;
-  lastSyncProgressAt: Map<string, number>;
-  syncReconcilerBackoff: Map<string, SyncReconcilerBackoff>;
   subscribedContextGraphs: Map<string, ContextGraphSub>;
   selectedSwmBootstrapAdmission: SelectedSwmBootstrapAdmission;
   rfc64SwmRecoveryRuntimeV1: Rfc64SwmRecoveryRuntimeV1;
-  syncOnConnectPeerScheduler: SyncOnConnectPeerScheduler<
-    Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>
-  > | null;
   rfc64SwmRecoveryCoordinatorV1: Rfc64CoordinatorTestPort;
 }
 
@@ -95,7 +88,7 @@ export function installSyncOnConnectPeerJobStub(
     finish?: (remotePeer: string) => void;
   }>,
 ): void {
-  agent.syncOnConnectPeerScheduler = new SyncOnConnectPeerScheduler({
+  agent.peerSyncSession.getScheduler({
     createJob: (remotePeer) => ({
       runAutomaticSelectedThenOrdinary: async () => {
         await callbacks.runOrdinary?.(remotePeer);
@@ -116,12 +109,15 @@ export async function createUnstartedAgent(
   name: string,
   overrides: Partial<DKGAgentConfig> = {},
 ): Promise<SyncOnConnectTestAgent> {
-  return asSyncOnConnectTestAgent(await DKGAgent.create({
+  const agent = asSyncOnConnectTestAgent(await DKGAgent.create({
     name,
     listenHost: '127.0.0.1',
     chainAdapter: new MockChainAdapter(),
     ...overrides,
   }));
+  // These orchestration fixtures explicitly open a session without networking.
+  agent.peerSyncSession = new PeerSyncSession();
+  return agent;
 }
 
 export function allowAllNetworkAdmission(agent: SyncOnConnectTestAgent): void {
