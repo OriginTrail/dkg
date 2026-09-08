@@ -91,7 +91,7 @@ describe('GH #306 — POST /api/knowledge-assets/{name}/wm/write quad-shape vali
  * an absolute IRI (e.g. a bare word `hello`, a number `123`) passes the shape
  * guard (isWritableQuad checks only that the fields are strings) but then crashes
  * the RDF parser with an uncaught "No scheme found in an absolute IRI" → HTTP 500.
- * The fix runs `validateQuadObjectTerms` on the write routes too (it already ran
+ * The fix runs `validateWritableQuadTerms` on the write routes too (it already ran
  * on publish), so these now return an actionable 400.
  */
 describe('GH #306/#787 follow-up — malformed object TERM is 4xx, not a 500 parser crash', () => {

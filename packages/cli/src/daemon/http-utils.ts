@@ -266,26 +266,31 @@ export function validateWritableQuadLiteralSizes(
   }
 }
 
-/**
- * GH #306 / #787 (follow-up) — validate each quad's `object` term is either a
- * quoted RDF literal (`"…"`) or an absolute IRI. Shared by lifecycle write
- * routes and other quad-accepting validation paths: the shape guard
- * ({@link isWritableQuad}) only checks that fields
- * are strings, so an object that is neither a literal nor an IRI (e.g. a bare
- * word `hello` or a number `123`) slips past them and crashes the RDF parser
- * with an uncaught "No scheme found in an absolute IRI" → HTTP 500 instead of an
- * actionable 400.
- */
-export function validateQuadObjectTerms(
+// N-Triples BLANK_NODE_LABEL (including its Unicode name ranges).
+// https://www.w3.org/TR/n-triples/#grammar-production-BLANK_NODE_LABEL
+const PN_CHARS_BASE = String.raw`A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\u{10000}-\u{EFFFF}`;
+const PN_CHARS_U = `${PN_CHARS_BASE}_:`;
+const PN_CHARS = String.raw`${PN_CHARS_U}0-9\-\u00B7\u0300-\u036F\u203F-\u2040`;
+const BLANK_NODE_LABEL = new RegExp(`^_:[${PN_CHARS_U}0-9](?:[${PN_CHARS}.]*[${PN_CHARS}])?$`, 'u');
+
+/** Preserve valid RDF blank-node links while rejecting unsafe labels before storage. */
+export function validateWritableQuadTerms(
   label: string,
-  quads: ReadonlyArray<{ object: string }>,
+  quads: ReadonlyArray<{ subject: string; object: string }>,
 ): string | null {
-  const badIndex = quads.findIndex((q) => {
-    const object = q.object.trim();
-    return !object.startsWith('"') && !isSafeIri(object);
-  });
-  if (badIndex === -1) return null;
-  return `Invalid "${label}[${badIndex}].object": RDF object must be a quoted literal term or absolute IRI`;
+  for (const [index, quad] of quads.entries()) {
+    if (quad.subject.trim().startsWith('_:') && !BLANK_NODE_LABEL.test(quad.subject)) {
+      return `Invalid "${label}[${index}].subject": RDF blank node must have a valid blank-node label`;
+    }
+    const object = quad.object.trim();
+    const validObject = object.startsWith('_:')
+      ? BLANK_NODE_LABEL.test(quad.object)
+      : object.startsWith('"') || isSafeIri(object);
+    if (!validObject) {
+      return `Invalid "${label}[${index}].object": RDF object must be a quoted literal term, absolute IRI, or valid blank-node label`;
+    }
+  }
+  return null;
 }
 
 /**

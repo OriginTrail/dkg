@@ -166,8 +166,7 @@ async function loadRdfFromInput(
   }
 
   if (opts.triples) {
-    const parsed = JSON.parse(opts.triples);
-    return { sourceKind: 'legacy-quads', quads: parsed.map((q: Record<string, string>) => ({ ...q, graph: q.graph || defaultGraph })) };
+    return rdfParser.parseRdfInput(opts.triples, 'json', defaultGraph);
   }
 
   if (opts.subject && opts.predicate && opts.object) {
