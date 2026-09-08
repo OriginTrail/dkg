@@ -59,7 +59,7 @@ describe('immutable snapshot validation cache', () => {
   });
 
   it.each(['delete', 'truncate', 'corrupt', 'replace', 'same-size-restored-mtime'] as const)(
-    'rejects %s after a successful validation and does not retain failed evidence', async (change) => {
+    'rejects %s after a successful validation and caches any parseable observed facts', async (change) => {
       const f = await fixture();
       expect(await f.validate()).toBe(true);
       const original = await readFile(f.path, 'utf8');
@@ -78,7 +78,7 @@ describe('immutable snapshot validation cache', () => {
       await expect(f.validate()).resolves.toBe(false);
       const reads = f.load.mock.calls.length;
       await expect(f.validate()).resolves.toBe(false);
-      expect(f.load).toHaveBeenCalledTimes(change === 'delete' ? reads : reads + 1);
+      expect(f.load).toHaveBeenCalledTimes(change === 'corrupt' ? reads + 1 : reads);
       await writeFile(f.path, original);
       await expect(f.validate()).resolves.toBe(true);
       const recoveredReads = f.load.mock.calls.length;
@@ -108,6 +108,14 @@ describe('immutable snapshot validation cache', () => {
     await expect(f.store.validateSnapshot(digest, digest, 2)).resolves.toBe(false);
     expect(f.load).toHaveBeenCalledTimes(1);
     await expect(f.validate()).resolves.toBe(true);
+    expect(f.load).toHaveBeenCalledTimes(1);
+  });
+
+  it('caches observed facts when the first caller supplies mismatched expectations', async () => {
+    const f = await fixture();
+    await expect(f.store.validateSnapshot(digest, `sha256:${'0'.repeat(64)}`, 2)).resolves.toBe(false);
+    await expect(f.validate()).resolves.toBe(true);
+    await expect(f.store.validateSnapshot(digest, digest, 2)).resolves.toBe(false);
     expect(f.load).toHaveBeenCalledTimes(1);
   });
 

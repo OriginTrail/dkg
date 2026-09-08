@@ -311,10 +311,11 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
         }
         this.validationCache.delete(hash);
         const quads = await this.readSnapshot(source, ref);
-        if (quads === null || quads.length !== expectedCount || workspacePublicQuadsDigest(quads) !== expectedDigest) return false;
+        if (quads === null) return false;
+        const observed = { count: quads.length, digest: workspacePublicQuadsDigest(quads) };
         await source.assertCurrent();
-        this.validationCache.set(hash, { source: source.reference, digest: expectedDigest, count: expectedCount });
-        return true;
+        this.validationCache.set(hash, { source: source.reference, ...observed });
+        return observed.digest === expectedDigest && observed.count === expectedCount;
       });
     } catch {
       this.validationCache.delete(hash);

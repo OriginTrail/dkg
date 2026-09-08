@@ -1,6 +1,8 @@
 import { mkdtemp, mkdir, open, rename, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, expect, it, vi } from 'vitest';
 import { readSnapshotSource, openSnapshotSource, snapshotPath } from '../src/workspace-snapshot-source.js';
 
@@ -9,6 +11,19 @@ vi.mock('node:fs/promises', async importOriginal => {
   return { ...actual, open: vi.fn(actual.open) };
 });
 afterEach(() => { vi.mocked(open).mockReset(); });
+
+it('rejects a FIFO without waiting for a writer', async () => {
+  // Windows does not expose POSIX FIFOs; the safeguard applies to Unix file descriptors.
+  if (process.platform === 'win32') return;
+  const directory = await mkdtemp(join(tmpdir(), 'snapshot-source-fifo-'));
+  const hash = '0'.repeat(64);
+  const path = snapshotPath(directory, hash, 'nq');
+  try {
+    await mkdir(dirname(path), { recursive: true });
+    await promisify(execFile)('mkfifo', [path]);
+    await expect(openSnapshotSource(directory, hash)).rejects.toThrow('not a regular file');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 it('rejects bytes from a different inode than the selected source', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'snapshot-source-swap-'));
