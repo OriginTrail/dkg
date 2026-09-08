@@ -5,6 +5,13 @@ import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import { runSwmExpiryCleanup } from '../src/swm-expiry-cleanup.js';
 import type { SwmExpiryCleanupWorker } from '../src/swm-expiry-cleanup-worker.js';
+import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
+import { captureSyncHandler, workspaceOpQuads } from './_helpers/sync-responder.js';
+
+vi.mock('../src/sync/responder/sync-handler.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/sync/responder/sync-handler.js')>();
+  return { ...actual, registerSyncHandler: vi.fn(actual.registerSyncHandler) };
+});
 
 const CG = 'expiry-batches';
 const WS = `did:dkg:context-graph:${CG}/_shared_memory`;
@@ -19,7 +26,53 @@ const agents: DKGAgent[] = [];
 afterEach(async () => {
   await Promise.all(agents.splice(0).map(agent => agent.stop()));
   vi.restoreAllMocks();
+  vi.mocked(registerSyncHandler).mockReset();
   vi.useRealTimers();
+});
+
+it('uses one runtime TTL update for the registered responder cutoff and automatic cleanup', async () => {
+  const cap = captureSyncHandler();
+  const actual = await vi.importActual<typeof import('../src/sync/responder/sync-handler.js')>('../src/sync/responder/sync-handler.js');
+  vi.mocked(registerSyncHandler).mockImplementationOnce(params => {
+    // Keep the real lifecycle's settings binding and real responder. Only wire
+    // the transport into this test and admit its local fixture peer.
+    params.register = cap.register;
+    params.authorizeSyncRequest = async () => true;
+    actual.registerSyncHandler(params);
+  });
+  const agent = await DKGAgent.create({ name: 'expiry-runtime-ttl', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 0 });
+  agents.push(agent);
+  await agent.start();
+  const { store } = agent as unknown as Internals;
+  const stale = workspaceOpQuads(CG, 'stale', 'urn:ttl:stale', META, new Date(Date.now() - 120_000).toISOString());
+  await store.insert([
+    ...stale,
+    ...workspaceOpQuads(CG, 'fresh', 'urn:ttl:fresh', META, new Date().toISOString()),
+    { subject: 'urn:ttl:stale', predicate: 'urn:p', object: '"stale"', graph: WS },
+    { subject: 'urn:ttl:fresh', predicate: 'urn:p', object: '"fresh"', graph: WS },
+  ]);
+  const request = { contextGraphId: CG, includeSharedMemory: true, phase: 'meta' as const, offset: 0, limit: 1000 };
+  const query = vi.spyOn(store, 'query');
+  const cleanupQueries = () => query.mock.calls.filter(([, options]) => options?.source === 'agent.swmCleanup.expiredOperations').length;
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  try {
+    expect(await cap.invoke({ ...request, syncSessionId: 'ttl-disabled' })).toContain(stale[0]!.subject);
+    agent.setSharedMemoryTtlMs(60_000);
+    // The scheduled cleanup has not run yet; serving must already use the new TTL.
+    expect(cleanupQueries()).toBe(0);
+    const filtered = await cap.invoke({ ...request, syncSessionId: 'ttl-enabled' });
+    expect(filtered).not.toContain(stale[0]!.subject);
+    expect(filtered).toContain(`urn:dkg:share:${CG}:fresh`);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cleanupQueries()).toBeGreaterThan(0);
+    expect(await store.query(`SELECT ?p WHERE { GRAPH <${META}> { <${stale[0]!.subject}> ?p ?o } }`)).toMatchObject({ bindings: [] });
+    agent.setSharedMemoryTtlMs(0);
+    await store.insert(stale);
+    const afterDisable = cleanupQueries();
+    await vi.advanceTimersByTimeAsync(900_001);
+    expect(cleanupQueries()).toBe(afterDisable);
+    expect(await cap.invoke({ ...request, syncSessionId: 'ttl-disabled-again' })).toContain(stale[0]!.subject);
+  } finally { vi.useRealTimers(); }
 });
 
 async function fixture(count: number, noProgress = false, dataDeleted = 0) {
@@ -262,6 +315,66 @@ it('rotates graph priority so a continuously busy graph cannot starve another CG
   expect(f.warning).not.toHaveBeenCalled();
 });
 
+it('discovers a newly added graph while an older graph continuously fills its pass budget', async () => {
+  const f = await fixture(1);
+  const otherMeta = 'did:dkg:context-graph:late-expiry/_shared_memory_meta';
+  let added = false;
+  let pending = true;
+  vi.mocked(f.store.listGraphsByPrefix!).mockImplementation(async prefix =>
+    (added ? [META, otherMeta] : [META]).filter(graph => graph.startsWith(prefix)));
+  vi.mocked(f.store.query).mockImplementation(async (sparql, options) => {
+    if (options?.source !== 'agent.swmCleanup.expiredOperations') return { type: 'bindings', bindings: [] };
+    return { type: 'bindings', bindings: !sparql.includes(`<${otherMeta}>`) || pending ? [{ op: 'urn:busy' }] : [] };
+  });
+  vi.mocked(f.store.deleteByPattern).mockImplementation(async pattern => {
+    if (pattern.graph === otherMeta) pending = false;
+    return 1;
+  });
+  vi.useFakeTimers();
+  (f.agent as unknown as Internals).swmExpiryCleanupWorker.start();
+  await vi.advanceTimersByTimeAsync(0);
+  added = true;
+  await vi.advanceTimersByTimeAsync(10);
+  expect(pending).toBe(false);
+});
+
+it.each([
+  { deletable: true, periodic: false }, { deletable: false, periodic: false },
+  { deletable: true, periodic: true }, { deletable: false, periodic: true },
+])('finishes a full sweep past four stalled graphs (deletable=$deletable, periodic=$periodic)', async ({ deletable, periodic }) => {
+  const f = await fixture(1, true);
+  const graphs = [META, ...Array.from({ length: 4 }, (_, index) => `did:dkg:context-graph:expiry-later-${index}/_shared_memory_meta`)];
+  const last = graphs[4]!;
+  let pending = deletable;
+  const selected: string[] = [];
+  vi.mocked(f.store.listGraphsByPrefix!).mockImplementation(async prefix => graphs.filter(graph => graph.startsWith(prefix)));
+  vi.mocked(f.store.query).mockImplementation(async (sparql, options) => {
+    if (options?.source !== 'agent.swmCleanup.expiredOperations') return { type: 'bindings', bindings: [] };
+    const graph = graphs.find(value => sparql.includes(`<${value}>`));
+    if (!graph) throw new Error('Unknown cleanup target');
+    selected.push(graph);
+    if (selected.length > 12) throw new Error('Repeated a permanently stalled sweep');
+    return { type: 'bindings', bindings: graph === last && deletable && !pending ? [] : [{ op: `urn:stalled:${graphs.indexOf(graph)}` }] };
+  });
+  vi.mocked(f.store.deleteByPattern).mockImplementation(async pattern => {
+    if (pattern.graph === last && pending) { pending = false; return 3; }
+    return 0;
+  });
+  if (periodic) {
+    vi.useFakeTimers();
+    (f.agent as unknown as Internals).swmExpiryCleanupWorker.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(new Set(selected).size).toBe(4);
+    await vi.advanceTimersByTimeAsync(100);
+  } else {
+    expect(await f.agent.cleanupExpiredSharedMemory()).toBe(deletable ? 3 : 0);
+  }
+  expect(pending).toBe(false);
+  expect(new Set(selected)).toEqual(new Set(graphs));
+  for (const graph of graphs.slice(0, 4)) expect(selected.filter(value => value === graph)).toHaveLength(1);
+  if (!deletable) expect(selected).toHaveLength(5);
+});
+
 
 it('hydrates operation metadata with query count proportional to pages', async () => {
   const f = await fixture(501);
@@ -358,7 +471,7 @@ it('logs cutoff conversion failures and resolves through the cleanup error contr
   const internals = f.agent as unknown as Internals;
   await expect(runSwmExpiryCleanup({
     store: f.store, log: internals.log, workspaceOwnedEntities: internals.workspaceOwnedEntities, isClosed: () => false,
-  }, 1e20)).resolves.toMatchObject({ triplesDeleted: 0, budgetExhausted: false });
+  }, 1e20)).resolves.toMatchObject({ triplesDeleted: 0 });
   expect(f.warning).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('Invalid time value'));
 });
 

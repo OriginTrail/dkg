@@ -24,11 +24,15 @@ export interface SwmExpiryCleanupContext {
 }
 export interface SwmExpiryCleanupResult {
   triplesDeleted: number;
-  /** The bounded pass made progress but exhausted its allowance; another pass must probe/drain the remainder. */
-  budgetExhausted: boolean;
-  nextMetaGraph?: string;
+  /** Unvisited or still-progressing targets from this finite sweep. */
+  continuation?: SwmExpiryCleanupContinuation;
 }
-interface CleanupTarget { contextGraphId: string; metaGraph: string }
+export interface SwmExpiryCleanupContinuation {
+  readonly remainingTargets: readonly CleanupTarget[];
+  /** After finishing these targets, rediscover and rotate past this still-busy graph. */
+  readonly restartAfter?: string;
+}
+interface CleanupTarget { readonly contextGraphId: string; readonly metaGraph: string }
 interface GraphFamily { graphs: string[]; ownershipKeys: Set<string> }
 interface ExpiredOperation {
   uri: string;
@@ -41,33 +45,36 @@ interface CleanupOutcome { triplesDeleted: number; metadataDeleted: number }
 export async function runSwmExpiryCleanup(
   context: SwmExpiryCleanupContext,
   ttlMs: number,
-  nextMetaGraph?: string,
+  continuation?: SwmExpiryCleanupContinuation,
   cutoffMs?: number,
 ): Promise<SwmExpiryCleanupResult> {
   const { store, log, isClosed } = context;
   const ctx = createOperationContext('share');
-  const result: SwmExpiryCleanupResult = { triplesDeleted: 0, budgetExhausted: false, nextMetaGraph };
+  const result: SwmExpiryCleanupResult = { triplesDeleted: 0 };
   const counts = new Map<string, { triples: number; operations: number }>();
   try {
     const cutoff = new Date(cutoffMs ?? Date.now() - ttlMs).toISOString();
-    const targets: CleanupTarget[] = [];
-    for (const contextGraphId of await new GraphManager(store).listContextGraphs()) {
-      if (isClosed()) return result;
-      for (const metaGraph of await listSharedMemoryMetaGraphs(store, contextGraphId)) {
-        targets.push({ contextGraphId, metaGraph });
+    const continuing = continuation !== undefined && continuation.remainingTargets.length > 0;
+    const targets: CleanupTarget[] = continuing ? [...continuation.remainingTargets] : [];
+    let restartAfter = continuing ? continuation.restartAfter : undefined;
+    if (!continuing) {
+      for (const contextGraphId of await new GraphManager(store).listContextGraphs()) {
+        if (isClosed()) return result;
+        for (const metaGraph of await listSharedMemoryMetaGraphs(store, contextGraphId)) {
+          targets.push({ contextGraphId, metaGraph });
+        }
       }
+      const previous = targets.findIndex(target => target.metaGraph === continuation?.restartAfter);
+      if (previous >= 0) targets.push(...targets.splice(0, previous + 1));
     }
-    const start = Math.max(0, targets.findIndex(target => target.metaGraph === nextMetaGraph));
     let batches = 0;
-    let operationsDeleted = 0;
-    for (let offset = 0; offset < targets.length && !isClosed() && batches < SWM_CLEANUP_MAX_BATCHES; offset++) {
-      const index = (start + offset) % targets.length;
-      const target = targets[index]!;
-      // A perpetually busy graph cannot consume the first budget on every run.
-      result.nextMetaGraph = targets[(index + 1) % targets.length]?.metaGraph;
+    let visited = 0;
+    for (; visited < targets.length && !isClosed() && batches < SWM_CLEANUP_MAX_BATCHES; visited++) {
+      const target = targets[visited]!;
+      let madeProgress = false;
       while (!isClosed() && batches < SWM_CLEANUP_MAX_BATCHES) {
         const operations = await loadExpiredBatch(store, target.metaGraph, cutoff);
-        if (isClosed() || operations.length === 0) break;
+        if (isClosed() || operations.length === 0) { madeProgress = false; break; }
         batches++;
         // Metadata selection is live: discover graphs again for every selected
         // page so later arrivals cannot lose metadata while leaving their data.
@@ -79,17 +86,24 @@ export async function runSwmExpiryCleanup(
           result.triplesDeleted += outcome.triplesDeleted;
           const count = counts.get(target.contextGraphId) ?? { triples: 0, operations: 0 };
           count.triples += outcome.triplesDeleted;
-          if (outcome.metadataDeleted > 0) { count.operations++; metadataProgress++; operationsDeleted++; }
+          if (outcome.metadataDeleted > 0) { count.operations++; metadataProgress++; }
           counts.set(target.contextGraphId, count);
         }
+        madeProgress = metadataProgress > 0;
         if (isClosed()) break;
-        if (metadataProgress === 0) {
+        if (!madeProgress) {
           log.warn(ctx, `SWM cleanup stopped for "${target.metaGraph}": batch of ${operations.length} expired operation(s) deleted no operation metadata`);
           break;
         }
       }
+      // Finish unvisited targets before rediscovering. Fresh discovery on every
+      // progressing rotation also admits new CGs under continuous arrivals.
+      if (madeProgress) restartAfter = target.metaGraph;
     }
-    result.budgetExhausted = !isClosed() && batches === SWM_CLEANUP_MAX_BATCHES && operationsDeleted > 0;
+    const remainingTargets = targets.slice(visited);
+    if (!isClosed() && (remainingTargets.length > 0 || restartAfter !== undefined)) {
+      result.continuation = { remainingTargets, restartAfter };
+    }
     for (const [id, count] of counts) {
       if (count.operations > 0) log.info(ctx, `SWM cleanup for "${id}": evicted ${count.operations} expired operation(s), ${count.triples} triples`);
     }

@@ -1146,7 +1146,8 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
-    validateSharedMemoryTtlMs(inputConfig.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS);
+    const sharedMemoryTtlMs = inputConfig.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
+    validateSharedMemoryTtlMs(sharedMemoryTtlMs);
     const contextGraphSubscriptionRehydrationEnabled =
       inputConfig.contextGraphSubscriptionRehydrationEnabled === undefined
         ? true
@@ -1388,6 +1389,7 @@ export class DKGAgent extends DKGAgentBase {
     delete configWithoutRfc64CatalogControls.syncBackoffJitter;
     const resolvedConfig: ResolvedDKGAgentConfig = {
       ...configWithoutRfc64CatalogControls,
+      sharedMemoryTtlMs,
       genesisId,
       networkIdentity,
       rfc64CatalogAccessPolicyAuthority,

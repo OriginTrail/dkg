@@ -540,7 +540,6 @@ import {
   MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS,
   META_REFRESH_COOLDOWN_MS,
   DEBUG_SYNC_PROGRESS,
-  DEFAULT_SWM_TTL_MS,
   SYNC_DENIED_RESPONSE,
   GOSSIP_DIAL_COOLDOWN_MS,
   GOSSIP_DIAL_TIMEOUT_MS,
@@ -3325,13 +3324,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       });
       this.log.info(ctx, `[sync] pooled wire variant ${PROTOCOL_SYNC_POOLED} enabled`);
     }
+    const swmSettings = this.config;
     registerSyncHandler({
       register: (protocol, handler) =>
         this.router.register(protocol, (data, peerIdObj, options) => handler(data, peerIdObj.toString(), options)),
       protocolSync: PROTOCOL_SYNC,
       syncDeniedResponse: SYNC_DENIED_RESPONSE,
       syncPageSize: SYNC_PAGE_SIZE,
-      sharedMemoryTtlMs: this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS,
+      get sharedMemoryTtlMs() { return swmSettings.sharedMemoryTtlMs; },
       store: this.store,
       publicSnapshotStore: this.publicSnapshotStore,
       peerId: this.peerId,
@@ -10647,7 +10647,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    */
   setSharedMemoryTtlMs(this: DKGAgent, ttlMs: number): void {
     this.swmExpiryCleanupWorker.setTtl(ttlMs);
-    (this.config as any).sharedMemoryTtlMs = ttlMs;
   }
 
   /**

@@ -330,7 +330,6 @@ import {
   META_REFRESH_COOLDOWN_MS,
   SYNC_MIN_GRAPH_BUDGET_MS,
   DEBUG_SYNC_PROGRESS,
-  DEFAULT_SWM_TTL_MS,
   SWM_CLEANUP_INTERVAL_MS,
   SYNC_DENIED_RESPONSE,
   GOSSIP_DIAL_COOLDOWN_MS,
@@ -1829,10 +1828,10 @@ export class DKGAgentBase {
     this.queryEngine = queryEngine;
     this.workspaceOwnedEntities = workspaceOwnedEntities;
     this.swmExpiryCleanupWorker = new SwmExpiryCleanupWorker(
-      (ttlMs, isClosed, nextMetaGraph, cutoffMs) => runSwmExpiryCleanup({
+      (ttlMs, isClosed, continuation, cutoffMs) => runSwmExpiryCleanup({
         store: this.store, workspaceOwnedEntities: this.workspaceOwnedEntities, log: this.log, isClosed,
-      }, ttlMs, nextMetaGraph, cutoffMs),
-      config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS,
+      }, ttlMs, continuation, cutoffMs),
+      config,
       SWM_CLEANUP_INTERVAL_MS,
     );
     this.writeLocks = writeLocks;
