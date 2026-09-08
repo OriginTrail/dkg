@@ -252,3 +252,23 @@ it('preserves the legacy non-array JSON null result across validation and paging
   await expect(f.validate()).resolves.toBe(false);
   await expect(f.store.getSnapshotPage(digest, 0, 1)).resolves.toBeNull();
 });
+
+it('does not certify an invalid inode temporarily replaced by valid bytes during its read', async () => {
+  const f = await fixture();
+  const valid = await readFile(f.path);
+  await writeFile(f.path, 'invalid snapshot');
+  const replacement = `${f.path}.valid`;
+  const original = `${f.path}.invalid`;
+  await writeFile(replacement, valid);
+  const source = await import('../src/workspace-snapshot-source.js');
+  const actual = await vi.importActual<typeof source>('../src/workspace-snapshot-source.js');
+  f.load.mockImplementationOnce(async selected => {
+    await rename(f.path, original);
+    await rename(replacement, f.path);
+    try { return await actual.readSnapshotSource(selected); }
+    finally { await rename(f.path, replacement); await rename(original, f.path); }
+  });
+  await expect(f.validate()).resolves.toBe(false);
+  await expect(f.validate()).resolves.toBe(false);
+  expect(await readFile(f.path, 'utf8')).toBe('invalid snapshot');
+});

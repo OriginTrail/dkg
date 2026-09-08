@@ -900,3 +900,24 @@ describe('FileWorkspacePublicSnapshotStore GC v1', () => {
     })).toThrow('targetFreeBytes must be greater than or equal to triggerFreeBytes');
   });
 });
+
+it('invalidates an already-warm page index after replacement with different row offsets', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-index-swap-'));
+  const pageIndexes = new MemoryPageIndexStore();
+  const store = new FileWorkspacePublicSnapshotStore(directory, pageIndexes, { gc: { enabled: false } });
+  const quads = makeQuads(300, 'before');
+  try {
+    await store.putSnapshot({ digest: DIGEST, quads });
+    await expect(store.getSnapshotPage(DIGEST, 257, 20)).resolves.toEqual(quads.slice(257, 277));
+    expect(pageIndexes.reads).toBe(0);
+    const replacement = new FileWorkspacePublicSnapshotStore(`${directory}/replacement`, undefined, { gc: { enabled: false } });
+    const changed = makeQuads(300, 'a-much-longer-label-after');
+    await replacement.putSnapshot({ digest: DIGEST, quads: changed });
+    await rename(snapshotPath(`${directory}/replacement`), snapshotPath(directory));
+    await expect(store.getSnapshotPage(DIGEST, 257, 20)).resolves.toEqual(changed.slice(257, 277));
+    expect(pageIndexes.reads).toBe(1);
+    expect(pageIndexes.writes).toBe(2);
+    await expect(store.getSnapshotPage(DIGEST, 280, 5)).resolves.toEqual(changed.slice(280, 285));
+    expect(pageIndexes.reads).toBe(1);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
