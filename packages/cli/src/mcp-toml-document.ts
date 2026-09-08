@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import TOML from '@iarna/toml';
 import { DKG_SERVER_KEY, tildify, type ClientTarget } from './mcp-client-registry.js';
-import { writeMcpConfigAtomic, type RegistrationEdit } from './mcp-config-file.js';
+import { writeMcpConfigAtomic } from './mcp-config-file.js';
 
 /**
  * PR #443 round-5 Codex Review: mirror `readJson`'s friendly-recovery
@@ -295,13 +295,13 @@ function tomlRawHasContainer(raw: string, container: ClientTarget['serverContain
 export function writeTomlConfigBody(
   target: ClientTarget,
   body: Record<string, unknown>,
-  edit: RegistrationEdit,
 ): void {
   const raw = existsSync(target.configPath)
     ? readFileSync(target.configPath, 'utf8')
     : '';
   const ownedPath = `${target.serverContainer}.${DKG_SERVER_KEY}`;
-  const tableEdit = edit.kind === 'remove' ? edit
+  const removing = !Object.hasOwn(body[target.serverContainer] as Record<string, unknown>, DKG_SERVER_KEY);
+  const tableEdit = removing ? { kind: 'remove' as const }
     : { kind: 'upsert' as const, block: serialiseTomlEntryOnly(target, body) };
   const rawContainer = raw.trim() ? TOML.parse(raw)[target.serverContainer] : undefined;
   let patched = replaceTomlTable(
@@ -311,7 +311,7 @@ export function writeTomlConfigBody(
     rawContainer !== null && typeof rawContainer === 'object' && Object.hasOwn(rawContainer, DKG_SERVER_KEY),
     rawContainer !== undefined,
   );
-  if (edit.kind === 'remove' && patched !== null
+  if (removing && patched !== null
       && !tomlRawHasContainer(patched, target.serverContainer)) {
     // Keep the empty server container when its last child table was removed.
     const parentOnly = { [target.serverContainer]: {} };
@@ -338,5 +338,6 @@ export function writeTomlConfigBody(
   writeMcpConfigAtomic(
     target.configPath,
     patched ?? TOML.stringify(body as TOML.JsonMap),
+    target.location,
   );
 }

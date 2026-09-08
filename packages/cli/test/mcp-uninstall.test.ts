@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import TOML from '@iarna/toml';
-import { inspectRegistration, removeRegistration } from '../src/mcp-client-config.js';
+import { inspectRegistration, removeRegistration, readRegistration, classifyRegistration, writeRegistration } from '../src/mcp-client-config.js';
 import { writeMcpConfigAtomic } from '../src/mcp-config-file.js';
 import { type ClientTarget } from '../src/mcp-client-registry.js';
 import { dkgDir, configPath } from '../src/config.js';
@@ -16,6 +16,13 @@ import { createInterface } from 'node:readline/promises';
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return { ...actual, renameSync: vi.fn(actual.renameSync) };
+});
+
+// Selector cases exercise routing with synthetic WSL targets on any host. Native
+// Windows/WSL metadata is verified separately by the mandatory OS fixture.
+vi.mock('../src/mcp-config-file.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/mcp-config-file.js')>();
+  return { ...actual, writeMcpConfigAtomic: vi.fn((path: string, content: string) => actual.writeMcpConfigAtomic(path, content)) };
 });
 
 vi.mock('node:readline/promises', () => ({ createInterface: vi.fn() }));
@@ -380,6 +387,7 @@ describe('stable client selectors', () => {
     seed(client);
     await mcpUninstallAction({ yes: true, client: 'cursor' }, { detectClients: () => [client], log: () => {} });
     expect(inspectRegistration(client)).toBe(false);
+    expect(writeMcpConfigAtomic).toHaveBeenCalledWith(client.configPath, expect.any(String), 'windows-wsl');
   });
 
   it.each(['cursor', 'cursor:windows-wsl', 'cursor:native'])('selects native/WSL variants explicitly with %s', async (selector) => {
@@ -393,9 +401,44 @@ describe('stable client selectors', () => {
     expect(inspectRegistration(windows)).toBe(selector === 'cursor:native');
   });
 
-  it('rejects unsupported selectors even when no clients are detected', async () => {
+  it.each(['typo', 'codex-cli:windows-wsl', 'claude-code:windows-wsl'])('rejects unsupported selector %s before detection', async selector => {
     const detect = vi.fn(() => []);
-    await expect(mcpUninstallAction({ yes: true, client: 'typo' }, { detectClients: detect })).rejects.toThrow('Unsupported MCP client selector');
+    await expect(mcpUninstallAction({ yes: true, client: selector }, { detectClients: detect })).rejects.toThrow('Unsupported MCP client selector');
     expect(detect).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('typed owned-registration boundary', () => {
+  const expected = { command: 'node', args: ['cli.js'], env: { DKG_HOME: '/dkg' } };
+  it.each([
+    { value: undefined, kind: 'absent', state: 'not-registered' },
+    { value: null, kind: 'absent', state: 'not-registered' },
+    { value: 'stale', kind: 'invalid', state: 'stale' },
+    { value: [], kind: 'invalid', state: 'stale' },
+    { value: {}, kind: 'entry', state: 'stale' },
+    { value: { ...expected, command: 1 }, kind: 'invalid', state: 'stale' },
+    { value: { ...expected, args: [1] }, kind: 'invalid', state: 'stale' },
+    { value: { ...expected, env: [] }, kind: 'invalid', state: 'stale' },
+    { value: { ...expected, env: { DKG_HOME: 1 } }, kind: 'invalid', state: 'stale' },
+    { value: expected, kind: 'entry', state: 'registered' },
+    { value: { ...expected, env: { ...expected.env, EXTRA: 'keep' } }, kind: 'entry', state: 'registered' },
+  ])('classifies $kind/$state without exposing raw owned fields', ({ value, kind, state }) => {
+    const client = target('Cursor');
+    writeFileSync(client.configPath, JSON.stringify({ mcpServers: { dkg: value } }));
+    const read = readRegistration(client);
+    expect(read.kind).toBe(kind);
+    expect(classifyRegistration(read, expected)).toBe(state);
+  });
+
+  it.each([{ value: ['array-entry'] }, { value: { command: 'old', env: ['array-env'], cwd: '/keep' } }])('does not merge array indices into owned registration records', ({ value }) => {
+    const client = target('Cursor');
+    writeFileSync(client.configPath, JSON.stringify({ mcpServers: { dkg: value } }));
+    writeRegistration(client, expected);
+    const entry = JSON.parse(readFileSync(client.configPath, 'utf8')).mcpServers.dkg;
+    expect(entry).not.toHaveProperty('0');
+    expect(entry.env).toEqual(expected.env);
+    if (!Array.isArray(value)) expect(entry.cwd).toBe('/keep');
+    expect(classifyRegistration(readRegistration(client), expected)).toBe('registered');
   });
 });

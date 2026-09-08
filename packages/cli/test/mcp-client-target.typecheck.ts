@@ -5,7 +5,7 @@ const standard: ClientTarget = { ...paths, id: 'cursor', location: 'native', for
 const vscode: ClientTarget = { ...paths, id: 'vscode', location: 'windows-wsl', format: 'jsonc', serverContainer: 'servers' };
 const codex: ClientTarget = { ...paths, id: 'codex-cli', location: 'native', format: 'toml', serverContainer: 'mcp_servers' };
 // @ts-expect-error A Codex target cannot carry another client's JSONC shape.
-const wrongCodex: ClientTarget = { ...vscode, id: 'codex-cli' };
+const wrongCodex: ClientTarget = { ...vscode, id: 'codex-cli', location: 'native' };
 // @ts-expect-error Cursor's identity determines its JSON mcpServers container.
 const wrongCursor: ClientTarget = { ...codex, id: 'cursor' };
 // @ts-expect-error Codex has no Windows-side WSL registration target.

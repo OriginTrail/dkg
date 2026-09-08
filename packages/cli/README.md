@@ -607,6 +607,8 @@ support. Minimal BusyBox installations must install `coreutils`, for example
 leaves the original file unchanged when it is unavailable. macOS uses its system
 metadata-preserving copy. Windows uses Windows PowerShell and the native file
 replacement API, preserving the existing access policy before writing contents.
+Windows-side targets selected from WSL use that same Windows mechanism through
+`wslpath` and Windows PowerShell; Linux-native targets retain Linux metadata.
 
 ## Extending the Node
 

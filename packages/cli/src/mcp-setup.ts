@@ -1,5 +1,5 @@
 import { detectClients, tildify, clientSkillPath, type ClientTarget } from './mcp-client-registry.js';
-import { readRegistration, writeRegistration } from './mcp-client-config.js';
+import { readRegistration, classifyRegistration, writeRegistration, type RegistrationRead } from './mcp-client-config.js';
 /**
  * `dkg mcp setup` — bundled init + daemon-start + MCP-client registration.
  *
@@ -497,73 +497,15 @@ type RegistrationState = 'registered' | 'stale' | 'not-registered';
 interface ClientState {
   target: ClientTarget;
   state: RegistrationState;
-  current: unknown;
+  current: RegistrationRead;
 }
 
 function classify(
   target: ClientTarget,
   expected: Record<string, unknown>,
 ): ClientState {
-  const current = readRegistration(target) as
-    | Record<string, unknown>
-    | null
-    | undefined;
-  // Treat both `undefined` (key absent) and `null` (key present but
-  // explicitly nulled) as "not-registered". Pre-F7 a `{ dkg: null }`
-  // entry classified as `stale`, which made the operator-facing
-  // log line claim there was a current value to refresh — there
-  // wasn't. Same registration outcome under `--force`; clearer log.
-  if (current === undefined || current === null) {
-    return { target, state: 'not-registered', current: null };
-  }
-  // Codex Round-4 staleness contract: pure string equality. The
-  // canonical entry is now uniform `process.execPath + cli.js path`
-  // for both installed and monorepo modes (round-4 unified the
-  // shape), so all earlier asymmetric equivalence rules collapse
-  // to a single check. Any divergence — legacy bare-`"dkg"`,
-  // resolved-`/usr/local/bin/dkg`, a stale repo-root path from a
-  // moved checkout, etc. — classifies as `stale` and refreshes to
-  // the new shape on stock re-run. Auto-migration fires for free.
-  const expectedCommand = expected.command;
-  const currentCommand = (current as Record<string, unknown>).command;
-  const commandMatches = currentCommand === expectedCommand;
-  const argsMatch =
-    Array.isArray((current as Record<string, unknown>).args) &&
-    JSON.stringify((current as Record<string, unknown>).args) ===
-      JSON.stringify(expected.args);
-  // Codex Round-9 Fix 16 + Round-15 Fix 22: compare ONLY the
-  // `env.DKG_HOME` field, not the whole env object. Round-9 used
-  // strict JSON.stringify equality on env, but that turned any
-  // user-added MCP env var (NODE_OPTIONS, HTTPS_PROXY, custom
-  // debug flags) into spurious "stale drift" — and combined with
-  // writeRegistration's full-entry replace, those user vars got
-  // silently wiped on every re-run. Post-fix: only DKG_HOME
-  // matters for staleness; user-added keys are preserved by the
-  // write-time merge in writeRegistration. A pre-Fix-16 entry
-  // lacking `env` entirely classifies as `stale` (currentDkgHome
-  // === undefined !== expectedDkgHome) and migrates forward.
-  const currentEnvObj =
-    (current as Record<string, unknown>).env &&
-    typeof (current as Record<string, unknown>).env === 'object'
-      ? ((current as Record<string, unknown>).env as Record<string, unknown>)
-      : undefined;
-  const currentDkgHome = currentEnvObj?.DKG_HOME;
-  const expectedDkgHome =
-    expected.env && typeof expected.env === 'object'
-      ? (expected.env as Record<string, unknown>).DKG_HOME
-      : undefined;
-  const envMatch = currentDkgHome === expectedDkgHome;
-  const matches =
-    typeof current === 'object' &&
-    current !== null &&
-    commandMatches &&
-    argsMatch &&
-    envMatch;
-  return {
-    target,
-    state: matches ? 'registered' : 'stale',
-    current: current ?? null,
-  };
+  const current = readRegistration(target);
+  return { target, state: classifyRegistration(current, expected), current };
 }
 
 /**
@@ -1065,7 +1007,7 @@ export async function mcpSetupAction(
         `[setup] WARNING: ${c.name} classify failed (${err?.message ?? err}); skipping this client.\n`,
       );
       classifyFailed.add(c.name);
-      return { target: c, state: 'not-registered', current: null };
+      return { target: c, state: 'not-registered', current: { kind: 'absent' } };
     }
   });
   const planned: PlannedItem[] = states.map((s) => {

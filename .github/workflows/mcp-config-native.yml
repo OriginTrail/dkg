@@ -3,7 +3,10 @@ name: MCP config native metadata
 on:
   pull_request:
     paths:
-      - 'packages/cli/src/mcp-config-*.ts'
+      - 'packages/cli/src/mcp-*.ts'
+      - 'packages/cli/test/fixtures/mcp-config-wsl.fixture.ts'
+      - 'packages/cli/scripts/run-mcp-config-wsl.sh'
+      - 'packages/cli/package.json'
       - 'packages/cli/test/mcp-config-metadata.test.ts'
       - 'packages/cli/vitest.unit.config.ts'
       - 'pnpm-lock.yaml'
@@ -44,3 +47,26 @@ jobs:
         env:
           DKG_REQUIRE_NATIVE_MCP_METADATA: '1'
         run: pnpm --dir packages/cli exec vitest run --config vitest.unit.config.ts test/mcp-config-metadata.test.ts
+
+      - name: Prepare native WSL fixture
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          pnpm --dir packages/cli exec esbuild test/fixtures/mcp-config-wsl.fixture.ts --bundle --platform=node --format=cjs --target=node22 --outfile="$env:RUNNER_TEMP/mcp-config-wsl.cjs"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          wsl --set-default-version 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          wsl --install --distribution Ubuntu-24.04 --no-launch --web-download
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify protected Windows config through real WSL setup and uninstall
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bundle = (wsl --distribution Ubuntu-24.04 --user root -- wslpath -u "$env:RUNNER_TEMP/mcp-config-wsl.cjs").Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $temporary = (wsl --distribution Ubuntu-24.04 --user root -- wslpath -u "$env:RUNNER_TEMP").Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $script = (wsl --distribution Ubuntu-24.04 --user root -- wslpath -u "$env:GITHUB_WORKSPACE/packages/cli/scripts/run-mcp-config-wsl.sh").Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          wsl --distribution Ubuntu-24.04 --user root -- bash $script $bundle $temporary
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

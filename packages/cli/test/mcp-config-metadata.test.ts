@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, statSync, copyFileSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeMcpConfigAtomic } from '../src/mcp-config-file.js';
@@ -66,14 +66,18 @@ it.each(['acl', 'replace', 'restore-backup', 'retain-backup'] as const)('preserv
 });
 
 // test-disable-allow: D1 #425 -- owner=branarakic lane=mcp-config-native-macos expires=2026-10-08 Native ACL/xattr case runs on macos-latest in mcp-config-native.yml.
-it.runIf(nativeMetadata && process.platform === 'darwin')('preserves macOS ACLs and extended attributes', () => {
+it.runIf(nativeMetadata && process.platform === 'darwin')('preserves macOS permissions, ownership, ACLs and extended attributes', () => {
+  chmodSync(path, 0o640);
   execFileSync('/bin/chmod', ['+a', 'everyone allow read', path]);
   execFileSync('/usr/bin/xattr', ['-w', 'org.origintrail.fixture', 'retained', path]);
   const acl = () => execFileSync('/bin/ls', ['-le', path], { encoding: 'utf8' }).split('\n').slice(1).join('\n');
   const before = acl();
+  const { mode, uid, gid } = statSync(path);
+  expect(mode & 0o777).toBe(0o640);
   expect(before).toContain('everyone allow read');
   writeMcpConfigAtomic(path, '{}\n');
   expect(acl()).toBe(before);
+  expect(statSync(path)).toMatchObject({ mode, uid, gid });
   expect(execFileSync('/usr/bin/xattr', ['-p', 'org.origintrail.fixture', path], { encoding: 'utf8' }).trim()).toBe('retained');
   expect(readdirSync(directory)).toEqual(["config 'quoted'.json"]);
 });
@@ -104,4 +108,39 @@ it.runIf(nativeMetadata && process.platform === 'win32')('preserves a protected 
   expect(descriptor()).toBe(before);
   expect(readFileSync(path, 'utf8')).toBe('{"replacement":true}\n');
   expect(readdirSync(directory)).toEqual(["config 'quoted'.json"]);
+});
+
+
+it('routes Windows-side WSL replacements through converted paths and Windows security APIs', () => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  const converted = new Map<string, string>();
+  const scripts: string[] = [];
+  vi.mocked(execFileSync).mockImplementation((command, args, options) => {
+    if (command === 'wslpath') {
+      expect(args?.[0]).toBe('-w');
+      const native = String(args?.[1]);
+      const windows = `C:\\fixture\\${converted.size}`;
+      converted.set(windows, native);
+      return windows;
+    }
+    expect(command).toBe('powershell.exe');
+    const environment = (options as { env: NodeJS.ProcessEnv }).env;
+    for (const name of ['DKG_MCP_FILE_SOURCE', 'DKG_MCP_FILE_DESTINATION', 'DKG_MCP_FILE_BACKUP']) {
+      expect(environment.WSLENV?.split(':')).toContain(name);
+    }
+    const script = String(args?.[args.length - 1]);
+    scripts.push(script);
+    const source = converted.get(environment.DKG_MCP_FILE_SOURCE!)!;
+    const destination = converted.get(environment.DKG_MCP_FILE_DESTINATION!)!;
+    if (script.includes('::Replace')) renameSync(source, destination);
+    return Buffer.from('');
+  });
+  try {
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    writeMcpConfigAtomic(path, '{"wsl":true}\n', 'windows-wsl');
+    expect(scripts).toHaveLength(2);
+    expect(scripts[0]).toContain('Get-Acl');
+    expect(scripts[1]).toContain('::Replace');
+    expect(readFileSync(path, 'utf8')).toBe('{"wsl":true}\n');
+  } finally { Object.defineProperty(process, 'platform', platform); }
 });

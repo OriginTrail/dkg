@@ -71,11 +71,13 @@ export type ClientTarget = WithDisplayName<NativeTarget | WindowsTarget> & {
 /** Stable selector identity is independent of display names and detection results. */
 export function parseMcpClientSelector(value: string): { id: McpClientId; location?: McpClientLocation } {
   const [id, location, extra] = value.trim().toLowerCase().split(':');
-  if (!(MCP_CLIENT_IDS as readonly string[]).includes(id) || extra !== undefined
+  const client = MCP_CLIENT_REGISTRY.find(entry => entry.target.id === id);
+  if (!client || extra !== undefined
+      || (location === 'windows-wsl' && !('windowsPath' in client))
       || (location !== undefined && location !== 'native' && location !== 'windows-wsl')) {
     throw new Error(`Unsupported MCP client selector "${value}". Use ${MCP_CLIENT_IDS.join(', ')}, optionally followed by :native or :windows-wsl.`);
   }
-  return { id: id as McpClientId, location: location as McpClientLocation | undefined };
+  return { id: client.target.id, location };
 }
 
 export function clientSkillPath(id: McpClientId, home: string): string | null {

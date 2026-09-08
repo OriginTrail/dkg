@@ -2,9 +2,51 @@ import { existsSync, readFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { applyEdits, createScanner, findNodeAtLocation, modify, parse as parseJsonc, parseTree, type Edit, type ParseError } from 'jsonc-parser';
-import { writeMcpConfigAtomic, type RegistrationEdit } from './mcp-config-file.js';
+import { writeMcpConfigAtomic } from './mcp-config-file.js';
 import { readToml, writeTomlConfigBody } from './mcp-toml-document.js';
 import { DKG_SERVER_KEY, tildify, type ClientTarget } from './mcp-client-registry.js';
+
+/** Parsed config objects have named fields; arrays/scalars are never mergeable records. */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object') return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+export interface McpRegistration {
+  command?: string;
+  args?: string[];
+  dkgHome?: string;
+}
+export type RegistrationRead =
+  | { kind: 'absent' }
+  | { kind: 'invalid' }
+  | { kind: 'entry'; registration: McpRegistration };
+
+function normalizeRegistration(value: unknown): RegistrationRead {
+  if (value === undefined || value === null) return { kind: 'absent' };
+  if (!isPlainRecord(value)
+      || (value.command !== undefined && typeof value.command !== 'string')
+      || (value.args !== undefined && (!Array.isArray(value.args) || !value.args.every(arg => typeof arg === 'string')))
+      || (value.env !== undefined && !isPlainRecord(value.env))) return { kind: 'invalid' };
+  const env = isPlainRecord(value.env) ? value.env : undefined;
+  if (env?.DKG_HOME !== undefined && typeof env.DKG_HOME !== 'string') return { kind: 'invalid' };
+  return { kind: 'entry', registration: {
+    command: typeof value.command === 'string' ? value.command : undefined,
+    args: Array.isArray(value.args) ? value.args : undefined,
+    dkgHome: typeof env?.DKG_HOME === 'string' ? env.DKG_HOME : undefined,
+  } };
+}
+
+export function classifyRegistration(current: RegistrationRead, expected: Record<string, unknown>): 'registered' | 'stale' | 'not-registered' {
+  if (current.kind === 'absent') return 'not-registered';
+  const wanted = normalizeRegistration(expected);
+  if (current.kind !== 'entry' || wanted.kind !== 'entry') return 'stale';
+  return current.registration.command === wanted.registration.command
+    && current.registration.args !== undefined
+    && isDeepStrictEqual(current.registration.args, wanted.registration.args)
+    && current.registration.dkgHome === wanted.registration.dkgHome ? 'registered' : 'stale';
+}
 
 function readJson(path: string, format: 'json' | 'jsonc' = 'json'): Record<string, unknown> {
   if (!existsSync(path)) return {};
@@ -112,7 +154,7 @@ export function readRegisteredServerKeys(target: ClientTarget): ServerKeyProbe {
   // registered": a confident claim about a container we cannot interpret. The
   // entry-level filter below already rejected arrays; the container needed the
   // same treatment.
-  if (cursor === null || typeof cursor !== 'object' || Array.isArray(cursor)) {
+  if (!isPlainRecord(cursor)) {
     return { ok: false, reason: `malformed server container in ${target.displayPath}` };
   }
   // Only entries that could actually launch count as registrations. `classify`
@@ -122,13 +164,13 @@ export function readRegisteredServerKeys(target: ClientTarget): ServerKeyProbe {
   // is the same non-registration: nothing there can start. Counting one would
   // be a false positive, the opposite failure from the unreadable-config case.
   const servers: Record<string, RegisteredMcpServer> = {};
-  for (const [name, value] of Object.entries(cursor as Record<string, unknown>)) {
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) continue;
-    const block = value as Record<string, unknown>;
+  for (const [name, value] of Object.entries(cursor)) {
+    if (!isPlainRecord(value)) continue;
+    const block = value;
     if (typeof block.command !== 'string') continue;
     const env: Record<string, string> = {};
-    if (block.env !== null && typeof block.env === 'object' && !Array.isArray(block.env)) {
-      for (const [k, val] of Object.entries(block.env as Record<string, unknown>)) {
+    if (isPlainRecord(block.env)) {
+      for (const [k, val] of Object.entries(block.env)) {
         if (typeof val === 'string') env[k] = val;
       }
     }
@@ -175,10 +217,10 @@ function removeJsonEntry(raw: string, path: string[], allowTrailingComma: boolea
 }
 
 /** Edit only the owned source range, preserving numeric lexemes and JSONC trivia. */
-function writeJsonDocumentBody(target: ClientTarget, body: Record<string, unknown>, edit: RegistrationEdit): void {
+function writeJsonDocumentBody(target: ClientTarget, body: Record<string, unknown>): void {
   const raw = existsSync(target.configPath) ? readFileSync(target.configPath, 'utf8') : '{}';
   const allowTrailingComma = target.format === 'jsonc';
-  const patched = edit.kind === 'remove' ? removeJsonEntry(raw, [target.serverContainer, DKG_SERVER_KEY], allowTrailingComma)
+  const patched = !Object.hasOwn(body[target.serverContainer] as Record<string, unknown>, DKG_SERVER_KEY) ? removeJsonEntry(raw, [target.serverContainer, DKG_SERVER_KEY], allowTrailingComma)
     : applyEdits(raw, modify(raw, [target.serverContainer, DKG_SERVER_KEY], readOwnedRegistration(body, target), {
     formattingOptions: { insertSpaces: true, tabSize: 2, eol: raw.includes('\r\n') ? '\r\n' : '\n' },
   }));
@@ -187,7 +229,7 @@ function writeJsonDocumentBody(target: ClientTarget, body: Record<string, unknow
   if (errors.length > 0 || !isDeepStrictEqual(parsed, body)) {
     throw new Error(`Cannot safely edit ${target.format.toUpperCase()} registration in ${target.displayPath}`);
   }
-  writeMcpConfigAtomic(target.configPath, patched);
+  writeMcpConfigAtomic(target.configPath, patched, target.location);
 }
 
 /**
@@ -201,20 +243,20 @@ function writeJsonDocumentBody(target: ClientTarget, body: Record<string, unknow
  * so the per-format spread/stringify path here never sees the merge
  * logic.
  */
-function writeConfigBody(target: ClientTarget, body: Record<string, unknown>, edit: RegistrationEdit): void {
+function writeConfigBody(target: ClientTarget, body: Record<string, unknown>): void {
   const format = target.format;
   const dir = dirname(target.configPath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   switch (format) {
     case 'json':
-      if (edit.kind === 'remove') writeJsonDocumentBody(target, body, edit);
-      else writeMcpConfigAtomic(target.configPath, JSON.stringify(body, null, 2) + '\n');
+      if (!Object.hasOwn(body[target.serverContainer] as Record<string, unknown>, DKG_SERVER_KEY)) writeJsonDocumentBody(target, body);
+      else writeMcpConfigAtomic(target.configPath, JSON.stringify(body, null, 2) + '\n', target.location);
       return;
     case 'jsonc':
-      writeJsonDocumentBody(target, body, edit);
+      writeJsonDocumentBody(target, body);
       return;
     case 'toml':
-      writeTomlConfigBody(target, body, edit);
+      writeTomlConfigBody(target, body);
       return;
     default:
       throw new Error(`Unknown client config format: ${String(format)}`);
@@ -228,11 +270,11 @@ function registrationLocation(target: ClientTarget): {
   const body = readConfigBody(target);
   const cursor = body[target.serverContainer];
   if (cursor === undefined) return undefined;
-  if (cursor === null || typeof cursor !== 'object' || Array.isArray(cursor)) {
+  if (!isPlainRecord(cursor)) {
     throw new Error(`Malformed MCP server container in ${target.displayPath}`);
   }
   if (!Object.hasOwn(cursor, DKG_SERVER_KEY)) return undefined;
-  return { body, container: cursor as Record<string, unknown> };
+  return { body, container: cursor };
 }
 
 /** Inspect only: stale/null entries still count as an owned registration. */
@@ -245,7 +287,7 @@ export function removeRegistration(target: ClientTarget): boolean {
   const location = registrationLocation(target);
   if (!location) return false;
   delete location.container[DKG_SERVER_KEY];
-  writeConfigBody(target, location.body, { kind: 'remove' });
+  writeConfigBody(target, location.body);
   return true;
 }
 
@@ -271,40 +313,29 @@ export function writeRegistration(
   // unchanged: arbitrary top-level keys (cwd, restartPolicy, …)
   // and arbitrary env keys (NODE_OPTIONS, HTTPS_PROXY, …).
   const currentContainer = body[target.serverContainer];
-  const container = currentContainer !== null && typeof currentContainer === 'object' && !Array.isArray(currentContainer)
-    ? currentContainer as Record<string, unknown>
-    : {};
+  const container = isPlainRecord(currentContainer) ? currentContainer : {};
   body[target.serverContainer] = container;
   const currentEntry = container[DKG_SERVER_KEY];
-  const currentEntryObj =
-    currentEntry && typeof currentEntry === 'object'
-      ? (currentEntry as Record<string, unknown>)
-      : {};
-  const currentEnv =
-    currentEntryObj.env && typeof currentEntryObj.env === 'object'
-      ? (currentEntryObj.env as Record<string, unknown>)
-      : {};
-  const expectedEnv =
-    entry.env && typeof entry.env === 'object'
-      ? (entry.env as Record<string, unknown>)
-      : {};
+  const currentEntryObj = isPlainRecord(currentEntry) ? currentEntry : {};
+  const currentEnv = isPlainRecord(currentEntryObj.env) ? currentEntryObj.env : {};
+  const expectedEnv = isPlainRecord(entry.env) ? entry.env : {};
   const mergedEntry: Record<string, unknown> = {
     ...currentEntryObj,
     ...entry,
     env: { ...currentEnv, ...expectedEnv },
   };
   container[DKG_SERVER_KEY] = mergedEntry;
-  writeConfigBody(target, body, { kind: 'upsert' });
+  writeConfigBody(target, body);
 }
 
 /** Read the owned entry for setup classification; no mutation. */
-export function readRegistration(target: ClientTarget): unknown {
-  return readOwnedRegistration(readConfigBody(target), target);
+export function readRegistration(target: ClientTarget): RegistrationRead {
+  return normalizeRegistration(readOwnedRegistration(readConfigBody(target), target));
 }
 
 function readOwnedRegistration(body: Record<string, unknown>, target: ClientTarget): unknown {
   const container = body[target.serverContainer];
-  return container !== null && typeof container === 'object' && !Array.isArray(container)
-    ? (container as Record<string, unknown>)[DKG_SERVER_KEY]
+  return isPlainRecord(container)
+    ? container[DKG_SERVER_KEY]
     : undefined;
 }

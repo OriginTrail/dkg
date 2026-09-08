@@ -8,6 +8,13 @@ import { dirname, join } from 'node:path';
 const fixture = vi.hoisted(() => ({ home: '', platform: 'darwin' }));
 // Isolate the actual client-path resolver without mocking detection, config writes,
 // the uninstall action, or Commander. The process's real home stays untouched.
+// Windows-side selector fixtures use temporary host files; the separate native
+// WSL scenario exercises the real metadata boundary with Windows security APIs.
+vi.mock('../src/mcp-config-file.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/mcp-config-file.js')>();
+  return { ...actual, writeMcpConfigAtomic: vi.fn((path: string, content: string) => actual.writeMcpConfigAtomic(path, content)) };
+});
+
 vi.mock('node:os', async (original) => ({
   ...await original<typeof import('node:os')>(),
   homedir: () => fixture.home,

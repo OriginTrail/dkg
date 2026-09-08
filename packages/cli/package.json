@@ -73,6 +73,7 @@
     "@types/n3": "^1.26.1",
     "@types/semver": "^7.8.0",
     "@vitest/coverage-v8": "^4.0.18",
+    "esbuild": "0.27.7",
     "vitest": "^4.0.18"
   },
   "publishConfig": {
