@@ -1,3 +1,4 @@
+import { SwmSubstrateMethods } from '../src/dkg-agent-swm-substrate.js';
 import { resolveStartupResourcePolicy } from '../src/resource-policy.js';
 import { resolveAgentResourceEnvironment } from '../src/resource-limits.js';
 import { describe, expect, it } from 'vitest';
@@ -2293,6 +2294,7 @@ describe('sync global backpressure', () => {
         },
       }),
       node: { stopSignal: undefined },
+      rfc64LegacySwmGossipAllowedForContextGraph: () => true,
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
     const policy = agentLike.config.resourcePolicy.admission;
@@ -2308,14 +2310,19 @@ describe('sync global backpressure', () => {
     const starts: string[] = [];
     try {
       // Selection changes after startup and after background work occupies its slot.
-      agentLike.config.syncContextGraphs.push(selectedCg);
+      const originalScopes = agentLike.config.syncContextGraphs;
+      expect(SwmSubstrateMethods.prototype.trackSyncContextGraph.call(agentLike as never, selectedCg)).toBe(true);
+      expect(agentLike.config.syncContextGraphs).not.toBe(originalScopes);
       await run(selectedCg, async () => {
         starts.push(selectedCg);
         expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 2, queued: 0, limit: 3, queueLimit: 0 });
       });
       await expect(run('urn:cg:unrelated', async () => { starts.push('unrelated'); }))
         .rejects.toMatchObject({ reason: 'queue_full' });
-      agentLike.config.syncContextGraphs.length = 0;
+      const selectedScopes = agentLike.config.syncContextGraphs;
+      // Unsubscribe replaces this array after removing the selected graph.
+      agentLike.config.syncContextGraphs = selectedScopes.filter((cg) => cg !== selectedCg);
+      expect(agentLike.config.syncContextGraphs).not.toBe(selectedScopes);
       await expect(run(selectedCg, async () => { starts.push('removed-selection'); }))
         .rejects.toMatchObject({ reason: 'queue_full' });
       expect(starts).toEqual([selectedCg]);

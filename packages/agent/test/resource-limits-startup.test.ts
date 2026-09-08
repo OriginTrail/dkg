@@ -1,3 +1,4 @@
+import { RAW_RESOURCE_CONFIG_KEYS } from '../src/resolved-agent-config.js';
 import { mkdtemp, rm, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -49,7 +50,7 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
     });
     expect(resolveSnapshot).toHaveBeenCalledOnce();
     const effective = (agent as unknown as { config: { resourcePolicy: StartupResourcePolicy } }).config.resourcePolicy;
-    for (const input of ['syncGlobalMaxInflight', 'syncGlobalLimit', 'syncGlobalQueueLimit', 'syncAdmission', 'syncResponderSnapshotLimits']) {
+    for (const input of RAW_RESOURCE_CONFIG_KEYS) {
       expect((agent as unknown as { config: object }).config).not.toHaveProperty(input);
     }
     // Construction owns numeric resolution. Later environment edits cannot

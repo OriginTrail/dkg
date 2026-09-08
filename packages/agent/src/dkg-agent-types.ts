@@ -15,6 +15,7 @@
  */
 
 import type { ethers } from 'ethers';
+import type { AgentConfigResolutionInputKey } from './resolved-agent-config.js';
 import type { StartupResourcePolicy } from './resource-policy.js';
 import type { CatchupPassDecisionReason } from './sync/catchup-pass-policy.js';
 import type {
@@ -1948,22 +1949,7 @@ export type ResolvedDKGAgentConfig =
     | 'storageAckTiming'
     | 'ackHandlerDeadlineMs'
     | 'ackSendTimeoutMs'
-    | 'syncReconcilerIntervalMs'
-    | 'syncStalenessThresholdMs'
-    | 'syncBackoffBaseMs'
-    | 'syncBackoffMaxMs'
-    | 'syncBackoffJitter'
-    | 'syncGlobalMaxInflight'
-    | 'syncGlobalLimit'
-    | 'syncGlobalQueueLimit'
-    | 'syncAdmission'
-    | 'syncResponderSnapshotLimits'
-    | 'rfc64CatalogActivation'
-    | 'rfc64PublicCatalogActivation'
-    | 'rfc64PublicCatalogAutoPublish'
-    | 'rfc64PublicCatalogBootstrap'
-    | 'rfc64CatalogDeploymentProfile'
-    | 'contextGraphSubscriptionRehydrationEnabled'
+    | AgentConfigResolutionInputKey
   > & {
     contextGraphSubscriptionRehydrationEnabled: boolean;
     storageAckTiming: StorageAckTiming;

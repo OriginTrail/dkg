@@ -1,3 +1,4 @@
+import { omitAgentConfigResolutionInputs } from './resolved-agent-config.js';
 import { AGENT_RESOURCE_ENV } from './resource-runtime.js';
 import { resolveStartupResourcePolicy } from './resource-policy.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -1375,25 +1376,8 @@ export class DKGAgent extends DKGAgentBase {
       networkId: computedNetworkId,
       chainId: constructedAgentChainId,
     };
-    const configWithoutRfc64CatalogControls = { ...config };
-    delete configWithoutRfc64CatalogControls.rfc64PublicCatalogActivation;
-    delete configWithoutRfc64CatalogControls.rfc64CatalogActivation;
-    delete configWithoutRfc64CatalogControls.rfc64CatalogDeploymentProfile;
-    delete configWithoutRfc64CatalogControls.rfc64PublicCatalogAutoPublish;
-    delete configWithoutRfc64CatalogControls.rfc64PublicCatalogBootstrap;
-    delete configWithoutRfc64CatalogControls.contextGraphSubscriptionRehydrationEnabled;
-    delete configWithoutRfc64CatalogControls.syncReconcilerIntervalMs;
-    delete configWithoutRfc64CatalogControls.syncStalenessThresholdMs;
-    delete configWithoutRfc64CatalogControls.syncBackoffBaseMs;
-    delete configWithoutRfc64CatalogControls.syncBackoffMaxMs;
-    delete configWithoutRfc64CatalogControls.syncBackoffJitter;
-    delete configWithoutRfc64CatalogControls.syncGlobalMaxInflight;
-    delete configWithoutRfc64CatalogControls.syncGlobalLimit;
-    delete configWithoutRfc64CatalogControls.syncGlobalQueueLimit;
-    delete configWithoutRfc64CatalogControls.syncAdmission;
-    delete configWithoutRfc64CatalogControls.syncResponderSnapshotLimits;
     const resolvedConfig: ResolvedDKGAgentConfig = {
-      ...configWithoutRfc64CatalogControls,
+      ...omitAgentConfigResolutionInputs(config),
       genesisId,
       networkIdentity,
       rfc64CatalogAccessPolicyAuthority,
