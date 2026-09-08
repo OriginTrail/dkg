@@ -2,9 +2,12 @@ import { toEpcisEvent, handleEventsQuery, type EPCISEventFields, type EPCISEvent
 
 // Existing QueryEngine consumers pass generic rows to this public helper.
 const row: Record<string, string> = { event: 'urn:event:1' };
-const event: EPCISQueryEvent = toEpcisEvent(row);
-const reusableId: string = event.eventID;
-void reusableId;
+const event = toEpcisEvent(row);
+const sparseProjection = toEpcisEvent({ eventTime: '"2026-09-07T00:00:00Z"' });
+const projectedTime: string | undefined = sparseProjection.eventTime;
+// @ts-expect-error The permissive converter does not promise validated query identity.
+const uncheckedProjectionId: string = event.eventID;
+void [projectedTime, uncheckedProjectionId];
 
 // Reconstructed standard fields retain their useful types.
 const timestamp: string | undefined = event.eventTime?.toUpperCase();

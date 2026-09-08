@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { handleEventsQuery, EpcisQueryError, toEpcisEvent, unwrapLiteral } from '../src/handlers.js';
-import type { QueryEngine } from '../src/types.js';
+import type { QueryEngine, SparqlBinding } from '../src/types.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphSubGraphUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri, type Quad } from '@origintrail-official/dkg-core';
 
@@ -12,7 +12,7 @@ interface QueryCall {
   opts: any;
 }
 
-function createTrackingQueryEngine(bindings: Record<string, string>[] = []): { engine: QueryEngine; calls: QueryCall[] } {
+function createTrackingQueryEngine(bindings: SparqlBinding[] = []): { engine: QueryEngine; calls: QueryCall[] } {
   const calls: QueryCall[] = [];
   const engine: QueryEngine = {
     query: async (sparql: string, opts?: any) => {
@@ -498,11 +498,8 @@ describe('handleEventsQuery', () => {
 });
 
 describe('toEpcisEvent', () => {
-  it.each([{}, { event: '' }, { event: '_:b0' }, { event: 'relative' }, { event: 'urn:event:bad id' }])('rejects a non-reusable subject directly: %j', (binding) => {
-    expect(() => toEpcisEvent(binding)).toThrow(EpcisQueryError);
-    try { toEpcisEvent(binding); } catch (error) {
-      expect(error).toMatchObject({ statusCode: 502 });
-    }
+  it.each([{}, { event: undefined }, { event: '' }, { event: '_:b0' }, { event: 'relative' }, { event: 'urn:event:bad id' }])('preserves the legacy sparse projection contract: %j', (binding) => {
+    expect(toEpcisEvent({ ...binding, eventTime: '"2026-09-07T00:00:00Z"' })).toEqual({ eventTime: '2026-09-07T00:00:00Z' });
   });
 
   it('strips eventType URI prefix to short name', () => {

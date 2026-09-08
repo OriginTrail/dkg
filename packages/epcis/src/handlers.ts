@@ -109,12 +109,18 @@ function parseGroupConcat(value: string | undefined): string[] | undefined {
   return text ? text.split(', ').map((item) => item.trim()).filter(Boolean) : undefined;
 }
 
-/** Reconstruct a proper EPCIS event object from flat SPARQL bindings. */
-export function toEpcisEvent(binding: SparqlBinding): EPCISQueryEvent {
-  if (typeof binding.event !== 'string' || !isSafeIri(binding.event)) {
+/** Only query responses promise an event identifier reusable for filtering. */
+function decodeQueryEvent(binding: SparqlBinding): EPCISQueryEvent {
+  const eventID = binding.event;
+  if (typeof eventID !== 'string' || !isSafeIri(eventID)) {
     throw new EpcisQueryError('Events query returned a result without a reusable event IRI', 502);
   }
-  const event: EPCISQueryEvent = { eventID: binding.event };
+  return { ...toEpcisEvent(binding), eventID };
+}
+
+/** Reconstruct available fields from a sparse projection; query identity is validated separately. */
+export function toEpcisEvent(binding: SparqlBinding): Partial<EPCISQueryEvent> {
+  const event: Partial<EPCISQueryEvent> = {};
 
   // Strip eventType URI prefix to short name
   const rawType = unwrapLiteral(binding['eventType'] ?? '');
@@ -213,7 +219,7 @@ export async function handleEventsQuery(
 
   const hasMore = result.bindings.length > perPage;
   const bindings = hasMore ? result.bindings.slice(0, perPage) : result.bindings;
-  const eventList = bindings.map(toEpcisEvent);
+  const eventList = bindings.map(decodeQueryEvent);
 
   const body: EPCISQueryDocumentResponse = {
     '@context': [GS1_EPCIS_CONTEXT, DKG_CONTEXT],
