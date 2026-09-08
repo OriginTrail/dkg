@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     include: [
       'test/workspace-snapshot-source.test.ts',
+      'test/workspace-snapshot-page-index.test.ts',
       'test/graph-publish-envelope.test.ts',
       'test/ka-update-submit-failure.test.ts',
       'test/ack-peer-selection.test.ts',
