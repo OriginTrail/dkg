@@ -95,6 +95,7 @@ interface AgentInternals {
     source: 'live' | 'periodic' | 'manual',
   ): Promise<ContextGraphReconcileResult>;
   runVmReconcileSweep(): Promise<void>;
+  scheduleVmReconcileSweep(): void;
   subscribedContextGraphs: Map<string, { subscribed: boolean; syncMode?: 'on-demand' | 'always-on'; coreHosted?: boolean; onChainId?: string; lastReconciledOrdinal?: number }>;
   gossipRegistered: Set<string>;
   vmReconcileDispatcher: {
@@ -2296,20 +2297,11 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
     const liveTriggered: string[] = [];
     const periodicTriggered: string[] = [];
-    internals.vmReconcileDispatcher = {
-      triggerLive: (cg: string) => { liveTriggered.push(cg); },
-      triggerPeriodic: (cg: string) => { periodicTriggered.push(cg); },
-      waitForIdle: async () => undefined,
-      tryTriggerPeriodic: (cg: string) => {
-        periodicTriggered.push(cg);
-        return true;
-      },
-      dispatch: async (cg: string, source: 'live' | 'periodic' | 'manual') => {
-        if (source === 'periodic') periodicTriggered.push(cg);
-        else if (source === 'live') liveTriggered.push(cg);
-        return {};
-      },
-    };
+    internals.vmReconcileDispatcher = new VmReconcileDispatcher(async (cg, source) => {
+      if (source === 'periodic') periodicTriggered.push(cg);
+      else if (source === 'live') liveTriggered.push(cg);
+      return {};
+    }, () => undefined);
 
     await internals.runVmReconcileSweep();
 
@@ -2343,7 +2335,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     internals.vmReconcileDispatcher = dispatcher;
 
     for (let sweep = 0; sweep < contextGraphIds.length; sweep += 1) {
-      await internals.runVmReconcileSweep();
+      internals.scheduleVmReconcileSweep();
       // maxPending=1 is reserved for foreground work: only the active slot is
       // available to this background-only sweep, so one CG advances per tick.
       expect(dispatcher.snapshot().queued).toBe(0);

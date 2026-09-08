@@ -680,6 +680,37 @@ async function raceVmReconcileAbort<T>(
   }
 }
 
+/** Track the raw dependency even if an abort race releases its caller first. */
+function trackVmReconcilePhysicalRun<T>(runs: Set<Promise<unknown>>, run: Promise<T>): Promise<T> {
+  runs.add(run);
+  const retire = () => { runs.delete(run); };
+  void run.then(retire, retire);
+  return run;
+}
+
+/** Complete only the selected/coalesced admissions, retrying after capacity changes. */
+async function completeVmReconcileSweep<T>(
+  keys: readonly string[],
+  dispatcher: VmReconcileDispatcher<T>,
+  isCurrent: () => boolean,
+): Promise<void> {
+  const completions: Promise<unknown>[] = [];
+  for (const key of keys) {
+    while (isCurrent() && !dispatcher.snapshot().closed) {
+      const completion = dispatcher.tryDispatchPeriodic(key);
+      if (completion) {
+        // The dispatcher reports automatic failures; retain completion without
+        // letting one failed CG strand the rest of this finite selection.
+        completions.push(completion.catch(() => undefined));
+        break;
+      }
+      await dispatcher.waitForPeriodicCapacity();
+    }
+    if (!isCurrent() || dispatcher.snapshot().closed) break;
+  }
+  await Promise.all(completions);
+}
+
 export class SwmHostModeMethods extends DKGAgentBase {
   /**
    * OT-RFC-38 LU-6 — initialize the on-disk opaque ciphertext store
@@ -2951,51 +2982,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
-   * Trigger a coalesced reconcile sweep for every subscribed/core-hosted CG
-   * with an on-chain id, plus operator-selected RFC-64 public CGs, and await
-   * dispatcher completion. Per-CG work is single-flighted by
-   * {@link vmReconcileDispatcher} so overlapping ticks (or a burst of live
-   * nudges) collapse into one sweep per CG.
+   * Complete one bound-CG rotation and its bounded unbound discovery allowance.
+   * Selection/admission starts synchronously; queue pressure delays remaining
+   * selected keys instead of dropping them. Only this sweep's completions are
+   * awaited, so unrelated foreground work does not define its boundary.
    */
   async runVmReconcileSweep(this: DKGAgent): Promise<void> {
-    const dispatcher = this.vmReconcileDispatcher;
-    this.scheduleVmReconcileSweep();
-    // Preserve the public completion boundary, including coalesced/trailing work.
-    // Timers use the synchronous admission API so slow workers cannot stall ticks.
-    await dispatcher?.waitForIdle();
-  }
-
-  /** Synchronously admit one bounded sweep turn; the dispatcher owns completion. */
-  scheduleVmReconcileSweep(this: DKGAgent): void {
-    if (this.started && !this.vmReconcileRuntimeReady) return;
-    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
-    const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
-    const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
-      && !lifecycleSignal?.aborted
-      && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
-    const dispatcher = this.vmReconcileDispatcher;
-    if (!isLifecycleCurrent() || !this.vmReconcileEnabled() || !dispatcher) return;
-    // Admission is synchronous. The dispatcher owns physical concurrency,
-    // per-CG coalescing, error containment and shutdown; no sweep awaits a worker.
-    const bound = new Set<string>();
-    const unbound: string[] = [];
-    for (const [localCgId, sub] of this.subscribedContextGraphs) {
-      if (!sub.subscribed && !sub.coreHosted) continue;
-      if (this.contextGraphBindingState.hasBindingCandidate(localCgId, sub)) bound.add(localCgId);
-      else if (sub.subscribed) unbound.push(localCgId);
-    }
-    const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
-      ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
-      ?? [];
-    for (const { policyEnvelope } of acceptedPolicies) {
-      const localCgId = policyEnvelope.payload.contextGraphId;
-      if (this.isRfc64SelectedVmReconcileTargetAllowed(localCgId)) bound.add(localCgId);
-    }
-    this.vmReconcileSweepPlanner.admit(
-      [...bound],
-      unbound.filter((key) => !bound.has(key)),
-      (key) => isLifecycleCurrent() && dispatcher.tryTriggerPeriodic(key),
-    );
+    const sweep = this.prepareVmReconcileSweep();
+    if (!sweep) return;
+    const keys: string[] = [];
+    this.vmReconcileSweepPlanner.admit(sweep.bound, sweep.unbound, key => {
+      keys.push(key);
+      return true;
+    });
+    await completeVmReconcileSweep(keys, sweep.dispatcher, sweep.isLifecycleCurrent);
   }
 
   /**
@@ -3015,6 +3015,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this: DKGAgent,
     localCgId: string,
     sub: ContextGraphSub,
+    targetOnChainId?: bigint,
     isCurrent: () => boolean = () => true,
     signal?: AbortSignal,
   ): Promise<string | null> {
@@ -3041,6 +3042,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return null;
     }
     if (!isSubscriptionCurrent() || !resolved) return null;
+    if (targetOnChainId !== undefined && resolved.onChainId !== String(targetOnChainId)) return null;
     if (resolved.provenance !== 'reverse-name-hash') {
       try {
         await this.persistContextGraphSubscriptionStrict(
@@ -3304,10 +3306,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       throw error;
     });
 
-    this.vmReconcilePhysicalRuns.add(physicalRun);
-    void physicalRun.finally(() => {
-      this.vmReconcilePhysicalRuns.delete(physicalRun);
-    }).catch(() => undefined);
+    trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, physicalRun);
     return raceVmReconcileAbort(physicalRun, signal);
   }
 
@@ -3434,10 +3433,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
       return response;
     })();
-    this.vmReconcilePhysicalRuns.add(physicalRun);
-    void physicalRun.finally(() => {
-      this.vmReconcilePhysicalRuns.delete(physicalRun);
-    }).catch(() => undefined);
+    trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, physicalRun);
     return raceVmReconcileAbort(physicalRun, lifecycleSignal);
   }
 
@@ -3473,9 +3469,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     });
     // Cancellation releases the dispatcher worker, but an underlying store/RPC
     // read may ignore it. Keep that physical dependency in the shutdown drain.
-    this.vmReconcilePhysicalRuns.add(authorityRead);
-    const retireAuthorityRead = () => { this.vmReconcilePhysicalRuns.delete(authorityRead); };
-    void authorityRead.then(retireAuthorityRead, retireAuthorityRead);
+    trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, authorityRead);
     const canRead = await raceVmReconcileAbort(authorityRead, signal).catch(() => false);
     if (!isCurrent()) throw new VmReconcileQueueClosedError();
     if (!canRead) throw new ContextGraphNotFoundError(localCgId);
@@ -3486,6 +3480,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       await this.selfPrimeSubscriptionOnChainId(
         localCgId,
         sub,
+        undefined,
         isCurrent,
         signal,
       );

@@ -600,6 +600,7 @@ export class VmReconcileDispatcher<T> {
   private readonly states = new Map<string, VmReconcileDispatchState<T>>();
   private readonly pending: Array<VmReconcileDispatchWork<T>> = [];
   private readonly idleWaiters = new Set<() => void>();
+  private readonly periodicCapacityWaiters = new Set<() => void>();
   private readonly keyIdleWaiters = new Map<string, Set<() => void>>();
   private readonly concurrency: number;
   private readonly maxPending: number;
@@ -649,9 +650,31 @@ export class VmReconcileDispatcher<T> {
    * and coalescing do not consume that reserve.
    */
   tryTriggerPeriodic(key: string): boolean {
+    return this.tryDispatchPeriodic(key) !== undefined;
+  }
+
+  /** Periodic admission with its exact completion handle; undefined means no admission. */
+  tryDispatchPeriodic(key: string): Promise<T> | undefined {
     const outcome = this.admit(key, 'periodic');
-    if ('completion' in outcome) void outcome.completion.catch(() => undefined);
-    return 'completion' in outcome;
+    if (!('completion' in outcome)) return undefined;
+    void outcome.completion.catch(() => undefined);
+    return outcome.completion;
+  }
+
+  /** Wait for a fresh periodic key's capacity, or closure, without waiting for global idle. */
+  waitForPeriodicCapacity(): Promise<void> {
+    if (this.hasPeriodicCapacity()) return Promise.resolve();
+    return new Promise<void>(resolve => this.periodicCapacityWaiters.add(resolve));
+  }
+
+  private hasPeriodicCapacity(): boolean {
+    return this.closed || this.queued < (this.active < this.concurrency ? this.maxPending : this.maxPending - 1);
+  }
+
+  private resolvePeriodicCapacityWaiters(): void {
+    if (!this.hasPeriodicCapacity()) return;
+    for (const resolve of this.periodicCapacityWaiters) resolve();
+    this.periodicCapacityWaiters.clear();
   }
 
   /** Operator path; errors and the typed domain result propagate to the API. */
@@ -700,6 +723,7 @@ export class VmReconcileDispatcher<T> {
         this.resolveKeyIdleWaiters(key);
       }
       this.queued = 0;
+      this.resolvePeriodicCapacityWaiters();
       this.resolveIdleWaiters();
     }
     return this.waitForIdle();
@@ -901,6 +925,7 @@ export class VmReconcileDispatcher<T> {
             this.states.delete(work.key);
           }
           this.drain();
+          this.resolvePeriodicCapacityWaiters();
           this.resolveIdleWaiters();
           this.resolveKeyIdleWaiters(work.key);
         });

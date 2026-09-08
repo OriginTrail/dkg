@@ -1086,6 +1086,42 @@ export class DKGAgentBase {
   protected vmReconcileRetirement: Promise<void> | null = null;
   /** Reconcile engines may outlive a caller's abort race; stop drains these before store teardown. */
   protected readonly vmReconcilePhysicalRuns = new Set<Promise<unknown>>();
+  protected prepareVmReconcileSweep(this: DKGAgent) {
+    if (this.started && !this.vmReconcileRuntimeReady) return;
+    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
+    const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
+    const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
+      && !lifecycleSignal?.aborted
+      && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
+    const dispatcher = this.vmReconcileDispatcher;
+    if (!isLifecycleCurrent() || !this.vmReconcileEnabled() || !dispatcher) return;
+    // Admission is synchronous. The dispatcher owns physical concurrency,
+    // per-CG coalescing, error containment and shutdown; no sweep awaits a worker.
+    const bound = new Set<string>();
+    const unbound: string[] = [];
+    for (const [localCgId, sub] of this.subscribedContextGraphs) {
+      if (!sub.subscribed && !sub.coreHosted) continue;
+      if (this.contextGraphBindingState.hasBindingCandidate(localCgId, sub)) bound.add(localCgId);
+      else if (sub.subscribed) unbound.push(localCgId);
+    }
+    const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
+      ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
+      ?? [];
+    for (const { policyEnvelope } of acceptedPolicies) {
+      const localCgId = policyEnvelope.payload.contextGraphId;
+      if (this.isRfc64SelectedVmReconcileTargetAllowed(localCgId)) bound.add(localCgId);
+    }
+    return { dispatcher, isLifecycleCurrent, bound: [...bound], unbound: unbound.filter(key => !bound.has(key)) };
+  }
+
+  /** Timer-only admission turn; physical workers never serialize later ticks. */
+  protected scheduleVmReconcileSweep(this: DKGAgent): void {
+    const sweep = this.prepareVmReconcileSweep();
+    if (!sweep) return;
+    this.vmReconcileSweepPlanner.admit(sweep.bound, sweep.unbound,
+      key => sweep.isLifecycleCurrent() && sweep.dispatcher.tryTriggerPeriodic(key));
+  }
+
   /** Admitted authenticated graph-scoped stores must physically drain before backing-store teardown. */
   protected readonly graphScopedStorePhysicalRuns = new Set<Promise<unknown>>();
   protected graphScopedStoreClosed = false;

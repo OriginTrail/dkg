@@ -13,6 +13,7 @@ interface Internals {
   node: unknown;
   vmReconcileDispatcher: VmReconcileDispatcher<boolean>;
   vmReconcileLifecycleController: AbortController;
+  vmReconcilePhysicalRuns: Set<Promise<unknown>>;
   resolveVmReconcileTarget(cg: string, isCurrent?: () => boolean, signal?: AbortSignal): Promise<unknown>;
   runVmReconcileSweep(): Promise<void>;
   scheduleVmReconcileSweep(): void;
@@ -313,4 +314,99 @@ it('keeps a non-cooperative authority lookup in physical shutdown retirement', a
     Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS', { configurable: true, value: originalTimeout });
     await agent.stop();
   }
+});
+
+
+it('completes every selected bound target when capacity is smaller than the sweep', async () => {
+  const { internals, order } = await fixture(0, 1);
+  for (let i = 0; i < 5; i++) internals.subscribedContextGraphs.set(`bound-${i}`, { subscribed: true, onChainId: String(i + 1) });
+  await internals.runVmReconcileSweep();
+  expect(order.filter(id => id.startsWith('dispatch:'))).toEqual(Array.from({ length: 5 }, (_, i) => `dispatch:bound-${i}`));
+});
+
+it('completes an empty sweep without waiting for unrelated manual work', async () => {
+  const { internals } = await fixture(0);
+  let release!: () => void;
+  const blocked = new Promise<void>(done => { release = done; });
+  const dispatcher = new VmReconcileDispatcher(async () => { await blocked; return true; }, () => undefined);
+  internals.vmReconcileDispatcher = dispatcher;
+  const manual = dispatcher.triggerManual('unrelated');
+  let completed = false;
+  const sweep = internals.runVmReconcileSweep().then(() => { completed = true; });
+  try {
+    await vi.waitFor(() => expect(completed).toBe(true), { timeout: 100 });
+    expect(dispatcher.isInFlight('unrelated')).toBe(true);
+  } finally { release(); await manual; await sweep; await dispatcher.close(); }
+});
+
+it.each(['fulfilled', 'rejected'])('retires a %s authority read before shutdown', async outcome => {
+  const { internals, canRead } = await fixture(1);
+  let fulfill!: (value: boolean) => void;
+  let reject!: (reason: Error) => void;
+  const authority = new Promise<boolean>((yes, no) => { fulfill = yes; reject = no; });
+  canRead.mockReturnValueOnce(authority);
+  const run = internals.resolveVmReconcileTarget('cg-0').catch(() => undefined);
+  try {
+    expect(internals.vmReconcilePhysicalRuns.has(authority)).toBe(true);
+    if (outcome === 'fulfilled') fulfill(true);
+    else reject(new Error('authority unavailable'));
+    await run;
+    expect(internals.vmReconcilePhysicalRuns.size).toBe(0);
+  } finally { fulfill(false); await run; }
+});
+
+it.each([500n, 501n])('preserves the public bigint target argument %s and binds only a matching ID', async target => {
+  const { internals, resolve } = await fixture(1);
+  resolve.mockResolvedValue({ onChainId: '500', provenance: 'ontology' });
+  const agent = internals as unknown as DKGAgent;
+  const sub = internals.subscribedContextGraphs.get('cg-0')!;
+  await expect(agent.selfPrimeSubscriptionOnChainId('cg-0', sub as Parameters<DKGAgent['selfPrimeSubscriptionOnChainId']>[1], target)).resolves.toBe(target === 500n ? '500' : null);
+  expect(sub.onChainId).toBe(target === 500n ? '500' : undefined);
+});
+
+
+it('finishes its admitted targets while an unrelated concurrent manual task remains active', async () => {
+  const { internals } = await fixture(0);
+  internals.subscribedContextGraphs.set('bound', { subscribed: true, onChainId: '1' });
+  let release!: () => void;
+  const blocked = new Promise<void>(done => { release = done; });
+  const ran: string[] = [];
+  const dispatcher = new VmReconcileDispatcher(async key => {
+    ran.push(key);
+    if (key === 'unrelated') await blocked;
+    return true;
+  }, () => undefined, { concurrency: 2 });
+  internals.vmReconcileDispatcher = dispatcher;
+  const manual = dispatcher.triggerManual('unrelated');
+  let completed = false;
+  const sweep = internals.runVmReconcileSweep().then(() => { completed = true; });
+  try {
+    await vi.waitFor(() => expect(completed).toBe(true), { timeout: 200 });
+    expect(ran).toContain('bound');
+    expect(dispatcher.isInFlight('unrelated')).toBe(true);
+  } finally { release(); await manual; await sweep; await dispatcher.close(); }
+});
+
+it('completes one bounded discovery allowance despite a one-slot queue', async () => {
+  const { internals, resolve } = await fixture(20, 1);
+  await internals.runVmReconcileSweep();
+  expect(resolve.mock.calls.map(([key]) => key)).toEqual(Array.from({ length: 8 }, (_, i) => `cg-${i}`));
+  resolve.mockClear();
+  await internals.runVmReconcileSweep();
+  expect(resolve.mock.calls.map(([key]) => key)).toEqual(Array.from({ length: 8 }, (_, i) => `cg-${i + 8}`));
+});
+
+it('releases a capacity-waiting sweep on lifecycle closure without admitting its remaining keys', async () => {
+  const { internals, canRead, order } = await fixture(0, 1);
+  for (let i = 0; i < 3; i++) internals.subscribedContextGraphs.set(`bound-${i}`, { subscribed: true, onChainId: String(i + 1) });
+  let release!: () => void;
+  canRead.mockReturnValueOnce(new Promise<boolean>(done => { release = () => done(true); }));
+  const sweep = internals.runVmReconcileSweep();
+  try {
+    await vi.waitFor(() => expect(canRead).toHaveBeenCalledOnce());
+    internals.closeVmReconcileRotationState();
+    await internals.vmReconcileDispatcher.close();
+    await sweep;
+    expect(order.filter(key => key.startsWith('dispatch:'))).toEqual(['dispatch:bound-0']);
+  } finally { release(); await sweep; }
 });

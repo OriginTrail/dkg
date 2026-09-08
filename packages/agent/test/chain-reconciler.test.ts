@@ -975,7 +975,9 @@ describe('VmReconcileDispatcher scheduling', () => {
 });
 
 describe('VmReconcileDispatcher admission', () => {
-  it.each(['tryTriggerPeriodic', 'triggerPeriodic', 'dispatch'] as const)('keeps the same foreground reserve through %s', async entry => {
+  it.each((['tryTriggerPeriodic', 'triggerPeriodic', 'dispatch'] as const).flatMap(entry =>
+    (['manual', 'live'] as const).map(source => ({ entry, source })),
+  ))('keeps the $source foreground reserve through $entry', async ({ entry, source }) => {
     let release!: () => void;
     const blocked = new Promise<void>(done => { release = done; });
     const ran: string[] = [];
@@ -987,7 +989,10 @@ describe('VmReconcileDispatcher admission', () => {
       admit('active'); admit('queued'); admit('overflow');
       expect(dispatcher.snapshot()).toEqual({ active: 1, queued: 1, closed: false });
       expect(dispatcher.tryTriggerPeriodic('overflow')).toBe(false);
-      const foreground = dispatcher.triggerManual('foreground');
+      const foreground = source === 'manual'
+        ? dispatcher.triggerManual('foreground')
+        : (dispatcher.triggerLive('foreground'), dispatcher.waitForIdle('foreground'));
+      expect(dispatcher.isInFlight('foreground')).toBe(true);
       release();
       await foreground;
       await dispatcher.waitForIdle();
