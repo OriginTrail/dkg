@@ -54,7 +54,7 @@ jobs:
         run: |
           pnpm --dir packages/cli exec esbuild test/fixtures/mcp-config-wsl.fixture.ts --bundle --platform=node --format=cjs --target=node22 --outfile="$env:RUNNER_TEMP/mcp-config-wsl.cjs"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          wsl --set-default-version 1
+          wsl --set-default-version 2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           wsl --install --distribution Ubuntu-24.04 --no-launch --web-download
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -62,11 +62,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $bundle = (wsl --distribution Ubuntu-24.04 --user root -- wslpath -u "$env:RUNNER_TEMP/mcp-config-wsl.cjs").Trim()
+          $bundle = (wsl --distribution Ubuntu-24.04 --user root --exec wslpath -u "$env:RUNNER_TEMP/mcp-config-wsl.cjs").Trim()
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $temporary = (wsl --distribution Ubuntu-24.04 --user root -- wslpath -u "$env:RUNNER_TEMP").Trim()
+          $temporary = (wsl --distribution Ubuntu-24.04 --user root --exec wslpath -u "$env:RUNNER_TEMP").Trim()
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $script = (wsl --distribution Ubuntu-24.04 --user root -- wslpath -u "$env:GITHUB_WORKSPACE/packages/cli/scripts/run-mcp-config-wsl.sh").Trim()
+          $script = (wsl --distribution Ubuntu-24.04 --user root --exec wslpath -u "$env:GITHUB_WORKSPACE/packages/cli/scripts/run-mcp-config-wsl.sh").Trim()
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          wsl --distribution Ubuntu-24.04 --user root -- bash $script $bundle $temporary
+          wsl --distribution Ubuntu-24.04 --user root --exec bash $script $bundle $temporary
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
