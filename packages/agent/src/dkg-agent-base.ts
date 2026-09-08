@@ -10,6 +10,8 @@
  * be declared; external construction still goes through `DKGAgent.create`.
  */
 import { createHash, randomUUID } from 'node:crypto';
+import { SwmExpiryCleanupWorker } from './swm-expiry-cleanup-worker.js';
+import { runSwmExpiryCleanup } from './swm-expiry-cleanup.js';
 import { performance } from 'node:perf_hooks';
 import {
   openRfc64PersistenceV1,
@@ -1074,8 +1076,7 @@ export class DKGAgentBase {
 
   protected messageHandler: MessageHandler | null = null;
   protected chainPoller: ChainEventPoller | null = null;
-  protected swmCleanupInFlight?: Promise<number>;
-  protected swmCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  protected readonly swmExpiryCleanupWorker: SwmExpiryCleanupWorker;
   /** Phase B — periodic chain-driven VM reconciliation sweep timer. */
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;
   /** Phase B — unified per-CG coalescing and node-wide admission policy. */
@@ -1827,6 +1828,13 @@ export class DKGAgentBase {
     this.publisher = publisher;
     this.queryEngine = queryEngine;
     this.workspaceOwnedEntities = workspaceOwnedEntities;
+    this.swmExpiryCleanupWorker = new SwmExpiryCleanupWorker(
+      (ttlMs, isClosed, nextMetaGraph) => runSwmExpiryCleanup({
+        store: this.store, workspaceOwnedEntities: this.workspaceOwnedEntities, log: this.log, isClosed,
+      }, ttlMs, nextMetaGraph),
+      config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS,
+      SWM_CLEANUP_INTERVAL_MS,
+    );
     this.writeLocks = writeLocks;
     this.publicSnapshotStore = publicSnapshotStore;
     this.eventBus = eventBus;

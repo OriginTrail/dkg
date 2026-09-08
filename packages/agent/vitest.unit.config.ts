@@ -21,6 +21,7 @@ export default defineConfig({
       ...RFC64_UNIT_TESTS,
       "test/endorse.test.ts",
       "test/swm-expiry-batching.test.ts",
+      "test/swm-expiry-cleanup-worker.test.ts",
       "test/ack-candidate-pool.test.ts",
       "test/e2e-dht-dial.test.ts",
       "test/generic-sql-source.test.ts",

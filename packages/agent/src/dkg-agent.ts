@@ -2247,10 +2247,7 @@ export class DKGAgent extends DKGAgentBase {
     // ignores cancellation must quarantine shutdown instead of preventing the
     // retirement timeout from ever being reached.
     const chainPollerDrain = chainPoller?.stop();
-    if (this.swmCleanupTimer) {
-      clearInterval(this.swmCleanupTimer);
-      this.swmCleanupTimer = null;
-    }
+    const swmCleanupDrain = this.swmExpiryCleanupWorker?.stop();
     if (this.hostModeReconcilerTimer) {
       clearInterval(this.hostModeReconcilerTimer);
       this.hostModeReconcilerTimer = null;
@@ -2312,7 +2309,7 @@ export class DKGAgent extends DKGAgentBase {
     };
     const drains: Promise<unknown>[] = [drainPhysicalRuns()];
     if (chainPollerDrain) drains.push(chainPollerDrain);
-    if (this.swmCleanupInFlight) drains.push(this.swmCleanupInFlight);
+    if (swmCleanupDrain) drains.push(swmCleanupDrain);
     if (priorRetirement) drains.push(priorRetirement.catch(() => undefined));
     if (dispatcherDrain) drains.push(dispatcherDrain);
     if (vmReconcileSweep) drains.push(vmReconcileSweep.catch(() => undefined));

@@ -7,207 +7,192 @@ import { stripLiteral } from './dkg-agent-utils.js';
 import { sharedMemoryOwnershipKeyFromGraph } from './sync/shared-memory-graphs.js';
 
 export const SWM_CLEANUP_BATCH_SIZE = 250;
+export const SWM_CLEANUP_MAX_BATCHES = 4;
 
-interface SwmExpiryCleanupContext {
+export interface SwmExpiryCleanupContext {
   store: TripleStore;
   workspaceOwnedEntities: Map<string, Map<string, string>>;
   log: Pick<Logger, 'info' | 'warn'>;
   isClosed: () => boolean;
 }
+export interface SwmExpiryCleanupResult {
+  triplesDeleted: number;
+  nextMetaGraph?: string;
+}
+interface CleanupTarget { contextGraphId: string; metaGraph: string }
+interface GraphFamily { graphs: string[]; ownershipKeys: Set<string> }
+interface ExpiredOperation {
+  uri: string;
+  roots: string[];
+  scope: { kind: 'legacy' } | { kind: 'graph-v2'; kaUal?: string; snapshotGraph?: string };
+}
+interface CleanupOutcome { triplesDeleted: number; metadataDeleted: number }
 
-/** Bounded expiry pass. The agent owns single-flight admission and shutdown draining. */
+/** At most four nonempty pages per invocation; continuation rotates graph priority. */
 export async function runSwmExpiryCleanup(
-  { store, workspaceOwnedEntities, log, isClosed }: SwmExpiryCleanupContext,
+  context: SwmExpiryCleanupContext,
   ttlMs: number,
-): Promise<number> {
+  nextMetaGraph?: string,
+): Promise<SwmExpiryCleanupResult> {
+  const { store, log, isClosed } = context;
   const ctx = createOperationContext('share');
   const cutoff = new Date(Date.now() - ttlMs).toISOString();
-  let totalDeleted = 0;
-
+  const result: SwmExpiryCleanupResult = { triplesDeleted: 0, nextMetaGraph };
+  const counts = new Map<string, { triples: number; operations: number }>();
   try {
-    const graphManager = new GraphManager(store);
-    const contextGraphs = await graphManager.listContextGraphs();
-
-    for (const pid of contextGraphs) {
-      if (isClosed()) break;
-      let graphDeleted = 0;
-      let expiredOpsCount = 0;
-
-      // Graph-scoped V2 operations and heads for sub-graph shares live in
-      // per-subgraph `…/{subGraph}/_shared_memory_meta` graphs (see
-      // GraphManager.sharedMemoryMetaUri), not only in the root
-      // `…/_shared_memory_meta` bucket — expire every meta graph.
-      const wsMetaGraphs = await listSharedMemoryMetaGraphs(store, pid);
-
-      for (const wsMetaGraph of wsMetaGraphs) {
-        if (isClosed()) break;
-        // Each meta graph describes exactly one SWM data bucket:
-        // `…/_shared_memory_meta` ↔ `…/_shared_memory` (root or per-subgraph).
-        const wsGraph = wsMetaGraph.slice(0, -'_meta'.length);
-
-        let family: { graphs: string[]; ownershipKeys: Set<string> } | undefined;
-        while (!isClosed()) {
-          const expiredOps = await store.query(
-            `SELECT DISTINCT ?op WHERE {
-            GRAPH <${wsMetaGraph}> {
-              ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
-              ?op <http://dkg.io/ontology/publishedAt> ?ts .
-              FILTER(?ts < "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
-            }
-          } LIMIT ${SWM_CLEANUP_BATCH_SIZE}`,
-            { source: 'agent.swmCleanup.expiredOperations' },
-          );
-
-          if (expiredOps.type !== 'bindings' || expiredOps.bindings.length === 0) break;
-          if (!family) {
-            const graphs = await listGraphFamily(store, wsGraph);
-            const ownershipKeys = new Set<string>();
-            for (const graph of graphs) {
-              const key = sharedMemoryOwnershipKeyFromGraph(pid, graph);
-              if (key) ownershipKeys.add(key);
-            }
-            family = { graphs, ownershipKeys };
-          }
-          const wsGraphs = family.graphs;
-          let metadataProgress = 0;
-
-          for (const row of expiredOps.bindings) {
-            if (isClosed()) break;
-            const opUri = row['op'];
-            if (!opUri) continue;
-
-            const rootEntitiesResult = await store.query(
-              `SELECT ?re WHERE {
-              GRAPH <${wsMetaGraph}> {
-                <${opUri}> <http://dkg.io/ontology/rootEntity> ?re .
-              }
-            }`,
-              { source: 'agent.swmCleanup.operationRoots' },
-            );
-
-            const rootEntities: string[] = [];
-            if (rootEntitiesResult.type === 'bindings') {
-              for (const r of rootEntitiesResult.bindings) {
-                if (r['re']) rootEntities.push(r['re']);
-              }
-            }
-
-            // Uniform layout: span the per-KA …/_shared_memory/{addr}/{number} graphs + bucket.
-            for (const re of rootEntities) {
-              for (const g of wsGraphs) {
-                // Exact root only; then skolemized descendants only (prefix would over-delete e.g. urn:foo vs urn:foobar)
-                const exactDeleted = await store.deleteByPattern({ graph: g, subject: re });
-                graphDeleted += exactDeleted;
-                const childPrefix = `${re}/.well-known/genid/`;
-                const childDeleted = await store.deleteBySubjectPrefix(g, childPrefix);
-                graphDeleted += childDeleted;
-              }
-            }
-
-            // Graph-scoped V2 operations (dkg:contentScopeVersion=2) have no
-            // rootEntity rows, so the legacy sweep above no-ops for them and
-            // the generic op-subject delete below would strand the rest of the
-            // KA: the per-KA SWM assertion graph, the `${kaUal}#dkg-swm-head`
-            // subject and the operation's public snapshot graph. Discard them
-            // here. The snapshot graph always dies with its operation; the
-            // head and assertion graph die only when the head still points at
-            // THIS operation — when a newer operation owns the head they carry
-            // live data, and a surviving head whose operation rows are gone
-            // reads as CORRUPT in resolveKnowledgeAssetWorkspaceHead.
-            const v2Meta = await store.query(
-              `SELECT ?scopeVersion ?kaUal ?snapshotGraph WHERE {
-              GRAPH <${wsMetaGraph}> {
-                <${opUri}> <http://dkg.io/ontology/contentScopeVersion> ?scopeVersion .
-                OPTIONAL { <${opUri}> <http://dkg.io/ontology/kaUal> ?kaUal }
-                OPTIONAL { <${opUri}> <http://dkg.io/ontology/publicSnapshotGraph> ?snapshotGraph }
-              }
-            } LIMIT 1`,
-              { source: 'agent.swmCleanup.graphScopedMetadata' },
-            );
-            const v2Row = v2Meta.type === 'bindings' ? v2Meta.bindings[0] : undefined;
-            const scopeVersion = v2Row?.['scopeVersion'] === undefined ? NaN : Number(stripLiteral(v2Row['scopeVersion']));
-            if (scopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION) {
-              const kaUal = v2Row?.['kaUal'];
-              const headSubject = kaUal ? `${kaUal}#dkg-swm-head` : '';
-              if (headSubject && isSafeIri(headSubject)) {
-                // The head is owned by exactly one operation. Join on the
-                // dkg:shareOperationId literal (both rows are written by the
-                // same `lit()` serializer) so this op's expiry only tears the
-                // head down when the head still references it.
-                const headOwned = await store.query(
-                  `SELECT ?assertionGraph WHERE {
-                  GRAPH <${wsMetaGraph}> {
-                    <${opUri}> <http://dkg.io/ontology/shareOperationId> ?opId .
-                    <${headSubject}> <http://dkg.io/ontology/shareOperationId> ?opId .
-                    OPTIONAL { <${headSubject}> <http://dkg.io/ontology/assertionGraph> ?assertionGraph }
-                  }
-                } LIMIT 1`,
-                  { source: 'agent.swmCleanup.currentHeadOwner' },
-                );
-                if (headOwned.type === 'bindings' && headOwned.bindings.length > 0) {
-                  // Whole KA expired: drop the per-KA SWM assertion graph and
-                  // the current-head subject with the operation.
-                  const assertionGraph = headOwned.bindings[0]?.['assertionGraph'];
-                  if (assertionGraph && isSafeIri(assertionGraph)) {
-                    graphDeleted += await store.deleteByPattern({ graph: assertionGraph });
-                    await store.dropGraph(assertionGraph);
-                  }
-                  graphDeleted += await store.deleteByPattern({ graph: wsMetaGraph, subject: headSubject });
-                }
-              }
-              const snapshotGraph = v2Row?.['snapshotGraph'];
-              if (snapshotGraph && isSafeIri(snapshotGraph)) {
-                graphDeleted += await store.deleteByPattern({ graph: snapshotGraph });
-                await store.dropGraph(snapshotGraph);
-              }
-            }
-
-            // Exact subject delete for this operation's metadata (prefix would match opUri that are prefixes of others, e.g. ...:ws-123 vs ...:ws-1234)
-            const metaDeleted = await store.deleteByPattern({ graph: wsMetaGraph, subject: opUri });
-            graphDeleted += metaDeleted;
-            if (metaDeleted > 0) { metadataProgress++; expiredOpsCount++; }
-
-            for (const re of rootEntities) {
-              const ownerDeleted = await store.deleteByPattern({
-                graph: wsMetaGraph, subject: re, predicate: 'http://dkg.io/ontology/workspaceOwner',
-              });
-              graphDeleted += ownerDeleted;
-            }
-
-            // Evict every per-subgraph ownership key for the expired roots.
-            // SWM data now spans the root workspace graph plus the per-KA /
-            // subgraph `…/_shared_memory/{addr}/{number}` graphs (wsGraphs), and
-            // ownership is cached under one key per graph family:
-            // `pid` for the root/bucket and `${pid}\0${subGraph}` for per-subgraph
-            // graphs (see sharedMemoryOwnershipKeyFromGraph). Only clearing the
-            // `pid`-keyed map would leave the per-subgraph entries behind, so an
-            // expired root could still look owned and mis-arbitrate later writes.
-            for (const ownershipKey of family.ownershipKeys) {
-              const ownedSet = workspaceOwnedEntities.get(ownershipKey);
-              if (!ownedSet) continue;
-              for (const re of rootEntities) {
-                ownedSet.delete(re);
-              }
-            }
-          }
-          if (isClosed()) break;
-          if (metadataProgress === 0) {
-            log.warn(ctx, `SWM cleanup stopped for "${wsMetaGraph}": batch of ${expiredOps.bindings.length} expired operation(s) deleted no operation metadata`);
-            break;
-          }
-        }
-      }
-
-      totalDeleted += graphDeleted;
-      if (expiredOpsCount > 0) {
-        log.info(ctx, `SWM cleanup for "${pid}": evicted ${expiredOpsCount} expired operation(s), ${graphDeleted} triples`);
+    const targets: CleanupTarget[] = [];
+    for (const contextGraphId of await new GraphManager(store).listContextGraphs()) {
+      if (isClosed()) return result;
+      for (const metaGraph of await listSharedMemoryMetaGraphs(store, contextGraphId)) {
+        targets.push({ contextGraphId, metaGraph });
       }
     }
-  } catch (err) {
-    log.warn(ctx, `SWM cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
+    const start = Math.max(0, targets.findIndex(target => target.metaGraph === nextMetaGraph));
+    let batches = 0;
+    for (let offset = 0; offset < targets.length && !isClosed() && batches < SWM_CLEANUP_MAX_BATCHES; offset++) {
+      const index = (start + offset) % targets.length;
+      const target = targets[index]!;
+      // A perpetually busy graph cannot consume the first budget on every run.
+      result.nextMetaGraph = targets[(index + 1) % targets.length]?.metaGraph;
+      while (!isClosed() && batches < SWM_CLEANUP_MAX_BATCHES) {
+        const operations = await loadExpiredBatch(store, target.metaGraph, cutoff);
+        if (isClosed() || operations.length === 0) break;
+        batches++;
+        // Metadata selection is live: discover graphs again for every selected
+        // page so later arrivals cannot lose metadata while leaving their data.
+        const family = await resolveGraphFamily(store, target);
+        let metadataProgress = 0;
+        for (const uri of operations) {
+          if (isClosed()) break;
+          const operation = await decodeExpiredOperation(store, target.metaGraph, uri);
+          const outcome = await cleanupExpiredOperation(context, target, family, operation);
+          result.triplesDeleted += outcome.triplesDeleted;
+          const count = counts.get(target.contextGraphId) ?? { triples: 0, operations: 0 };
+          count.triples += outcome.triplesDeleted;
+          if (outcome.metadataDeleted > 0) { count.operations++; metadataProgress++; }
+          counts.set(target.contextGraphId, count);
+        }
+        if (isClosed()) break;
+        if (metadataProgress === 0) {
+          log.warn(ctx, `SWM cleanup stopped for "${target.metaGraph}": batch of ${operations.length} expired operation(s) deleted no operation metadata`);
+          break;
+        }
+      }
+    }
+    for (const [id, count] of counts) {
+      if (count.operations > 0) log.info(ctx, `SWM cleanup for "${id}": evicted ${count.operations} expired operation(s), ${count.triples} triples`);
+    }
+  } catch (error) {
+    log.warn(ctx, `SWM cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
   }
+  return result;
+}
 
-  return totalDeleted;
+async function loadExpiredBatch(store: TripleStore, metaGraph: string, cutoff: string): Promise<string[]> {
+  const result = await store.query(`SELECT DISTINCT ?op WHERE {
+    GRAPH <${metaGraph}> {
+      ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
+      ?op <http://dkg.io/ontology/publishedAt> ?ts .
+      FILTER(?ts < "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+    }
+  } LIMIT ${SWM_CLEANUP_BATCH_SIZE}`, { source: 'agent.swmCleanup.expiredOperations' });
+  return result.type === 'bindings' ? result.bindings.flatMap(row => row.op ? [row.op] : []) : [];
+}
+
+async function resolveGraphFamily(store: TripleStore, target: CleanupTarget): Promise<GraphFamily> {
+  const graphs = await listGraphFamily(store, target.metaGraph.slice(0, -'_meta'.length));
+  const ownershipKeys = new Set<string>();
+  for (const graph of graphs) {
+    const key = sharedMemoryOwnershipKeyFromGraph(target.contextGraphId, graph);
+    if (key) ownershipKeys.add(key);
+  }
+  return { graphs, ownershipKeys };
+}
+
+async function decodeExpiredOperation(store: TripleStore, metaGraph: string, uri: string): Promise<ExpiredOperation> {
+  const roots = await store.query(`SELECT ?re WHERE {
+    GRAPH <${metaGraph}> { <${uri}> <http://dkg.io/ontology/rootEntity> ?re . }
+  }`, { source: 'agent.swmCleanup.operationRoots' });
+  const metadata = await store.query(`SELECT ?scopeVersion ?kaUal ?snapshotGraph WHERE {
+    GRAPH <${metaGraph}> {
+      <${uri}> <http://dkg.io/ontology/contentScopeVersion> ?scopeVersion .
+      OPTIONAL { <${uri}> <http://dkg.io/ontology/kaUal> ?kaUal }
+      OPTIONAL { <${uri}> <http://dkg.io/ontology/publicSnapshotGraph> ?snapshotGraph }
+    }
+  } LIMIT 1`, { source: 'agent.swmCleanup.graphScopedMetadata' });
+  const row = metadata.type === 'bindings' ? metadata.bindings[0] : undefined;
+  const version = row?.scopeVersion === undefined ? NaN : Number(stripLiteral(row.scopeVersion));
+  return {
+    uri,
+    roots: roots.type === 'bindings' ? roots.bindings.flatMap(row => row.re ? [row.re] : []) : [],
+    scope: version === GRAPH_KA_CONTENT_SCOPE_VERSION
+      ? { kind: 'graph-v2', kaUal: row?.kaUal, snapshotGraph: row?.snapshotGraph }
+      : { kind: 'legacy' },
+  };
+}
+
+/** Finish one operation before yielding; stop joins this physical work before closing storage. */
+async function cleanupExpiredOperation(
+  { store, workspaceOwnedEntities }: SwmExpiryCleanupContext,
+  target: CleanupTarget,
+  family: GraphFamily,
+  operation: ExpiredOperation,
+): Promise<CleanupOutcome> {
+  let triplesDeleted = await cleanupLegacyRoots(store, family.graphs, operation.roots);
+  if (operation.scope.kind === 'graph-v2') {
+    triplesDeleted += await cleanupGraphScopedOperation(store, target.metaGraph, operation.uri, operation.scope);
+  }
+  const metadataDeleted = await store.deleteByPattern({ graph: target.metaGraph, subject: operation.uri });
+  triplesDeleted += metadataDeleted;
+  for (const root of operation.roots) {
+    triplesDeleted += await store.deleteByPattern({ graph: target.metaGraph, subject: root, predicate: 'http://dkg.io/ontology/workspaceOwner' });
+    for (const key of family.ownershipKeys) workspaceOwnedEntities.get(key)?.delete(root);
+  }
+  return { triplesDeleted, metadataDeleted };
+}
+
+async function cleanupLegacyRoots(store: TripleStore, graphs: readonly string[], roots: readonly string[]): Promise<number> {
+  let deleted = 0;
+  for (const root of roots) {
+    for (const graph of graphs) {
+      deleted += await store.deleteByPattern({ graph, subject: root });
+      deleted += await store.deleteBySubjectPrefix(graph, `${root}/.well-known/genid/`);
+    }
+  }
+  return deleted;
+}
+
+async function cleanupGraphScopedOperation(
+  store: TripleStore,
+  metaGraph: string,
+  uri: string,
+  scope: Extract<ExpiredOperation['scope'], { kind: 'graph-v2' }>,
+): Promise<number> {
+  let deleted = 0;
+  const head = scope.kaUal ? `${scope.kaUal}#dkg-swm-head` : '';
+  if (head && isSafeIri(head)) {
+    // A newer operation owns its live head/assertion graph independently of this expiry.
+    const owner = await store.query(`SELECT ?assertionGraph WHERE {
+      GRAPH <${metaGraph}> {
+        <${uri}> <http://dkg.io/ontology/shareOperationId> ?opId .
+        <${head}> <http://dkg.io/ontology/shareOperationId> ?opId .
+        OPTIONAL { <${head}> <http://dkg.io/ontology/assertionGraph> ?assertionGraph }
+      }
+    } LIMIT 1`, { source: 'agent.swmCleanup.currentHeadOwner' });
+    if (owner.type === 'bindings' && owner.bindings.length > 0) {
+      const graph = owner.bindings[0]?.assertionGraph;
+      if (graph && isSafeIri(graph)) {
+        deleted += await store.deleteByPattern({ graph });
+        await store.dropGraph(graph);
+      }
+      deleted += await store.deleteByPattern({ graph: metaGraph, subject: head });
+    }
+  }
+  if (scope.snapshotGraph && isSafeIri(scope.snapshotGraph)) {
+    deleted += await store.deleteByPattern({ graph: scope.snapshotGraph });
+    await store.dropGraph(scope.snapshotGraph);
+  }
+  return deleted;
 }
 
 async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<string[]> {

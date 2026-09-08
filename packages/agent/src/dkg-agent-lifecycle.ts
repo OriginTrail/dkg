@@ -1,4 +1,3 @@
-import { runSwmExpiryCleanup } from './swm-expiry-cleanup.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -542,7 +541,6 @@ import {
   META_REFRESH_COOLDOWN_MS,
   DEBUG_SYNC_PROGRESS,
   DEFAULT_SWM_TTL_MS,
-  SWM_CLEANUP_INTERVAL_MS,
   SYNC_DENIED_RESPONSE,
   GOSSIP_DIAL_COOLDOWN_MS,
   GOSSIP_DIAL_TIMEOUT_MS,
@@ -4034,15 +4032,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         });
     }
 
-    // Start periodic shared memory cleanup
-    const ttl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
-    if (ttl > 0) {
-      this.cleanupExpiredSharedMemory().catch(() => {});
-      this.swmCleanupTimer = setInterval(() => {
-        this.cleanupExpiredSharedMemory().catch(() => {});
-      }, SWM_CLEANUP_INTERVAL_MS);
-      if (this.swmCleanupTimer.unref) this.swmCleanupTimer.unref();
-    }
+    // The worker owns immediate startup, interval scheduling and its shutdown fence.
+    this.swmExpiryCleanupWorker.start();
 
     // OT-RFC-38 LU-6: periodic reconciler that ensures the local
     // node is subscribed in host-mode to every locally-known
@@ -10655,19 +10646,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * and the next cleanup cycle without requiring a restart.
    */
   setSharedMemoryTtlMs(this: DKGAgent, ttlMs: number): void {
-    const oldTtl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
     (this.config as any).sharedMemoryTtlMs = ttlMs;
-
-    if (oldTtl <= 0 && ttlMs > 0 && !this.swmCleanupTimer) {
-      this.cleanupExpiredSharedMemory().catch(() => {});
-      this.swmCleanupTimer = setInterval(() => {
-        this.cleanupExpiredSharedMemory().catch(() => {});
-      }, SWM_CLEANUP_INTERVAL_MS);
-      if (this.swmCleanupTimer.unref) this.swmCleanupTimer.unref();
-    } else if (ttlMs <= 0 && this.swmCleanupTimer) {
-      clearInterval(this.swmCleanupTimer);
-      this.swmCleanupTimer = null;
-    }
+    this.swmExpiryCleanupWorker.setTtl(ttlMs);
   }
 
   /**
@@ -10676,19 +10656,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * deletes the corresponding triples from shared memory and SWM meta,
    * and removes the root entities from workspaceOwnedEntities.
    */
-  async cleanupExpiredSharedMemory(this: DKGAgent): Promise<number> {
-    if (this.swmCleanupInFlight) return this.swmCleanupInFlight;
-    const ttl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
-    if (ttl <= 0 || this.graphScopedStoreClosed) return 0;
-    const run = runSwmExpiryCleanup({
-      store: this.store,
-      workspaceOwnedEntities: this.workspaceOwnedEntities,
-      log: this.log,
-      isClosed: () => this.graphScopedStoreClosed,
-    }, ttl);
-    this.swmCleanupInFlight = run;
-    try { return await run; }
-    finally { if (this.swmCleanupInFlight === run) this.swmCleanupInFlight = undefined; }
+  cleanupExpiredSharedMemory(this: DKGAgent): Promise<number> {
+    return this.swmExpiryCleanupWorker.runNow();
   }
 
 }
