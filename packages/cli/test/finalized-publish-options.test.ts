@@ -48,6 +48,17 @@ describe('finalized publish boundary contracts', () => {
     });
   });
 
+  it.each([1, 12, 4294967295])('emits SDK publishEpochs=%i under its canonical field', (publishEpochs) => {
+    expect(finalizedPublishOptionsPayload({ publishEpochs })).toEqual({ publishEpochs });
+  });
+
+  it.each([
+    [0, '"publishEpochs" must be a positive safe integer (string or number)'],
+    [4294967296, '"publishEpochs" must be less than or equal to 4294967295'],
+  ] as const)('rejects SDK publishEpochs=%i using the SDK field label', (publishEpochs, message) => {
+    expect(() => finalizedPublishOptionsPayload({ publishEpochs })).toThrow(message);
+  });
+
   it('preserves false, zero attribution, and exact uint72 serialization', () => {
     expect(finalizedPublishOptionsPayload({ clearAfter: false, publisherNodeIdentityIdOverride: 0n }))
       .toEqual({ clearSharedMemoryAfter: false, publisherNodeIdentityIdOverride: '0' });

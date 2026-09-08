@@ -7,40 +7,23 @@ import {
   parseCliFinalizedPublishOptions,
 } from '../finalized-publish-options.js';
 
-const FINALIZED_PUBLISH_CLI_OPTIONS = [
-  {
-    errorField: 'publishEpochs', flags: '--publish-epochs <count>', errorLabel: '--publish-epochs',
-    description: 'On-chain publish lifetime in epochs (default: 12; PCA-funded publishes may coerce to PCA lock duration)',
-  },
-  {
-    errorField: 'pricingPolicy', flags: '--pricing-policy <policy>', errorLabel: '--pricing-policy',
-    description: `Token pricing basis (supported: ${PUBLICATION_PRICING_POLICIES.join(', ')})`,
-  },
-  {
-    errorField: 'publisherNodeIdentityIdOverride', flags: '--publisher-node-identity-id <id>', errorLabel: '--publisher-node-identity-id',
-    description: 'Publisher node identity id override; use 0 for no-attribution',
-  },
-] as const satisfies readonly {
-  errorField: keyof KnowledgeAssetFinalizedPublishOptions;
-  flags: string;
-  errorLabel: string;
-  description: string;
-}[];
+const CLI_ERROR_LABELS: Partial<Record<keyof KnowledgeAssetFinalizedPublishOptions, string>> = {
+  publishEpochs: '--publish-epochs',
+  pricingPolicy: '--pricing-policy',
+  publisherNodeIdentityIdOverride: '--publisher-node-identity-id',
+};
 
 export function addFinalizedPublishOptions(command: Command): Command {
-  for (const option of FINALIZED_PUBLISH_CLI_OPTIONS) {
-    command.option(option.flags, option.description);
-  }
-  return command;
+  return command
+    .option('--publish-epochs <count>', 'On-chain publish lifetime in epochs (default: 12; PCA-funded publishes may coerce to PCA lock duration)')
+    .option('--pricing-policy <policy>', `Token pricing basis (supported: ${PUBLICATION_PRICING_POLICIES.join(', ')})`)
+    .option('--publisher-node-identity-id <id>', 'Publisher node identity id override; use 0 for no-attribution');
 }
 
 export function parseFinalizedPublishOptions(opts: CliFinalizedPublishInput): KnowledgeAssetFinalizedPublishOptions {
   const parsed = parseCliFinalizedPublishOptions(opts);
   if (!parsed.ok) {
-    const labels = Object.fromEntries(FINALIZED_PUBLISH_CLI_OPTIONS.map((option) =>
-      [option.errorField, option.errorLabel],
-    ));
-    throw new Error(formatFinalizedPublishOptionError(parsed.error, labels, { quoteField: false }));
+    throw new Error(formatFinalizedPublishOptionError(parsed.error, CLI_ERROR_LABELS, { quoteField: false }));
   }
   return parsed.options;
 }
