@@ -7081,6 +7081,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       manifestPrefixDigestAtOffset,
       shouldStopAfterPage,
       workAdmission,
+      coalescing = 'shared',
       // Exact VM recovery filter. Included in checkpoint, coalescing, wire and
       // responder-session identities so offsets never cross asset batches.
       assetUals,
@@ -7096,10 +7097,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const exactAccumulationLimits = assetUals === undefined
       ? undefined
       : exactSyncPhaseAccumulationLimits(assetUals);
-    // A caller signal defines an operation-owned cancellation contract. Do not
-    // place those fetches in the shared page map: even equal wall-clock
-    // deadlines do not make independently abortable or budgeted operations compatible.
-    const coalescingKey = signal || shouldStopAfterPage || workAdmission
+    // A caller signal defines an operation-owned cancellation contract. The
+    // admission policy's presence is deliberately not a sentinel: callers
+    // state compatibility explicitly through `coalescing`.
+    const coalescingKey = signal || shouldStopAfterPage || coalescing === 'isolated'
       ? null
       : syncPageFetchCoalescingKey({
         remotePeerId,

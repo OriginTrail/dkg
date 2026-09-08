@@ -93,4 +93,32 @@ describe('page and transport admission within one operation', () => {
     expect(isSyncTransportFailure(await outcome)).toBe(true);
     expect(send).toHaveBeenCalledTimes(1);
   });
+
+  it('floors a fractional allowance before passing it to the transport', async () => {
+    let elapsed = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+    const workAdmission = createPrivateSwmRecoveryWindow(100);
+    elapsed = 0.5;
+    const send = vi.fn(async () => new Uint8Array());
+
+    await request({ workAdmission, send });
+
+    expect(send).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(), expect.anything(),
+      99, expect.anything(), undefined,
+    );
+  });
+
+  it('yields locally when less than one whole millisecond remains', async () => {
+    let elapsed = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+    const workAdmission = createPrivateSwmRecoveryWindow(1);
+    elapsed = 0.5;
+    const send = vi.fn(async () => new Uint8Array());
+
+    const result = await request({ workAdmission, send });
+
+    expect(send).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ completed: false, localBudgetYielded: true });
+  });
 });

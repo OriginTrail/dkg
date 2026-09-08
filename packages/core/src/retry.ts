@@ -11,11 +11,19 @@ export interface RetryOptions {
   isRetryable?: (err: unknown) => boolean;
   /** Called on each retry with attempt number and delay (for logging). */
   onRetry?: (attempt: number, delayMs: number, err: unknown) => void;
+  /**
+   * Recheck whether a retry should proceed after its backoff has elapsed.
+   * Returning false preserves the error from the admitted prior attempt.
+   */
+  shouldContinueAfterBackoff?: (nextAttempt: number, err: unknown) => boolean;
   /** Optional signal to abort retries and backoff sleeps. */
   signal?: AbortSignal;
 }
 
-const DEFAULTS: Required<Omit<RetryOptions, 'isRetryable' | 'onRetry' | 'signal'>> = {
+const DEFAULTS: Required<Omit<
+  RetryOptions,
+  'isRetryable' | 'onRetry' | 'shouldContinueAfterBackoff' | 'signal'
+>> = {
   maxAttempts: 3,
   baseDelayMs: 500,
   maxDelayMs: 30_000,
@@ -37,6 +45,7 @@ export async function withRetry<T>(
   const jitterFactor = opts.jitter ?? DEFAULTS.jitter;
   const isRetryable = opts.isRetryable;
   const onRetry = opts.onRetry;
+  const shouldContinueAfterBackoff = opts.shouldContinueAfterBackoff;
   const signal = opts.signal;
 
   let lastErr: unknown;
@@ -57,6 +66,9 @@ export async function withRetry<T>(
 
       onRetry?.(attempt + 1, delay, err);
       await sleep(delay, signal);
+      if (shouldContinueAfterBackoff && !shouldContinueAfterBackoff(attempt + 1, err)) {
+        throw err;
+      }
     }
   }
 

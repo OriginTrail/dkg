@@ -15,7 +15,12 @@ export function createSyncWorkAdmission(remainingMs: () => number): SyncWorkAdmi
   return Object.freeze({
     canAdmitWork: () => remainingMs() > 0,
     capDeadline: (deadline: number) => Math.min(deadline, Date.now() + remainingMs()),
-    capTimeout: (timeoutMs: number) => Math.min(timeoutMs, remainingMs()),
+    // Node's timer APIs reject fractional delays. Flooring also guarantees the
+    // capped value never grants more time than the operation still owns.
+    capTimeout: (timeoutMs: number) => Math.max(
+      0,
+      Math.floor(Math.min(timeoutMs, remainingMs())),
+    ),
   });
 }
 

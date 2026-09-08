@@ -1760,9 +1760,12 @@ export async function syncPublicSnapshotsForMeta(params: {
         break;
       }
 
-      const snapshotOptions: SyncPageFetchOptions = executionBoundary.signal === undefined
-        ? { snapshotRef: snapshot.ref, ...(params.workAdmission ? { workAdmission } : {}) }
-        : { snapshotRef: snapshot.ref, signal: executionBoundary.signal, ...(params.workAdmission ? { workAdmission } : {}) };
+      const snapshotOptions: SyncPageFetchOptions = {
+        snapshotRef: snapshot.ref,
+        workAdmission,
+        coalescing: params.workAdmission ? 'isolated' : 'shared',
+        ...(executionBoundary.signal === undefined ? {} : { signal: executionBoundary.signal }),
+      };
       const result = await executionBoundary.read(() => params.fetchSyncPages(
         params.ctx,
         params.remotePeerId,

@@ -21,6 +21,7 @@ import {
   type SyncCheckpointScope,
 } from '../src/sync/checkpoint/state.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import { UNRESTRICTED_SYNC_WORK, createSyncWorkAdmission } from '../src/sync/work-admission.js';
 import {
   createChallengePinnedExactAssetSelection,
   createUalOnlyExactAssetSelection,
@@ -53,6 +54,8 @@ type FetchArgs = {
   requesterScope?: SyncCheckpointScope;
   maxAcceptedQuads?: number;
   maxAcceptedHeapBytesEstimate?: number;
+  workAdmission?: typeof UNRESTRICTED_SYNC_WORK;
+  coalescing?: 'shared' | 'isolated';
 };
 
 const EXACT_UAL_7 = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
@@ -276,6 +279,8 @@ function fetchPages(agent: DKGAgent, args: FetchArgs = {}): Promise<SyncPageResu
       requesterScope: args.requesterScope,
       maxAcceptedQuads: args.maxAcceptedQuads,
       maxAcceptedHeapBytesEstimate: args.maxAcceptedHeapBytesEstimate,
+      workAdmission: args.workAdmission,
+      coalescing: args.coalescing,
     },
   );
 }
@@ -340,6 +345,37 @@ describe('DKGAgent sync fetch coalescing', () => {
       const [firstResult, secondResult] = await Promise.all([first, second]);
       expect(firstResult).toBe(secondResult);
       expect(firstResult.quads).toEqual([]);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('coalesces explicit unrestricted policies but isolates distinct budget owners', async () => {
+    const response = deferred<Uint8Array>();
+    let sends = 0;
+    const agent = await createAgentWithSend(async () => {
+      sends += 1;
+      return response.promise;
+    });
+
+    try {
+      const first = fetchPages(agent, { workAdmission: UNRESTRICTED_SYNC_WORK });
+      await flushMicrotasks();
+      const second = fetchPages(agent, { workAdmission: UNRESTRICTED_SYNC_WORK });
+      await flushMicrotasks();
+      expect(sends).toBe(1);
+
+      const isolatedA = fetchPages(agent, {
+        workAdmission: createSyncWorkAdmission(() => 1_000), coalescing: 'isolated',
+      });
+      const isolatedB = fetchPages(agent, {
+        workAdmission: createSyncWorkAdmission(() => 1_000), coalescing: 'isolated',
+      });
+      await flushMicrotasks();
+      expect(sends).toBe(3);
+
+      response.resolve(new Uint8Array());
+      await Promise.all([first, second, isolatedA, isolatedB]);
     } finally {
       await agent.stop().catch(() => {});
     }

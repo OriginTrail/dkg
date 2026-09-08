@@ -9,7 +9,7 @@ import type { SyncWorkAdmission } from '../src/sync/work-admission.js';
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
 import { createSwmTargetExecutorSessionFactoryForTest } from './_helpers/swm-target-executor-session-fixture.js';
-import { CG, WS_META, UAL, DKG, XSD_INTEGER, recoveryPage as page } from './_helpers/swm-recovery-fixture.js';
+import { CG, WS, WS_META, UAL, DKG, XSD_INTEGER, recoveryPage as page } from './_helpers/swm-recovery-fixture.js';
 
 function snapshotMetadata(): Quad[] {
   const payload = [{ subject: 'urn:s', predicate: 'urn:p', object: '"new"', graph: '' }];
@@ -31,8 +31,16 @@ function snapshotMetadata(): Quad[] {
   ];
 }
 
+function legacyMetadata(): Quad[] {
+  const operation = `urn:dkg:share:${CG}:legacy-budget-recovery`;
+  return [
+    { subject: operation, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: `${DKG}WorkspaceOperation`, graph: WS_META },
+    { subject: operation, predicate: `${DKG}rootEntity`, object: 'urn:legacy:budget-root', graph: WS_META },
+  ];
+}
+
 const stores: OxigraphStore[] = [];
-function harness(publicSnapshotStore?: WorkspacePublicSnapshotStore) {
+function harness(publicSnapshotStore?: WorkspacePublicSnapshotStore, detectLegacyRoots = false) {
   const store = new OxigraphStore(); stores.push(store);
   const fetchSyncPages = vi.fn<SwmTargetExecutorPortsV1['fetchSyncPages']>();
   const host = {
@@ -43,7 +51,10 @@ function harness(publicSnapshotStore?: WorkspacePublicSnapshotStore) {
     getOrCreateSyncVerifyWorker: () => ({
       processSharedMemoryBatch: async (data: Quad[], meta: Quad[]) => ({
         verifiedData: data, verifiedMeta: meta, totalFetchedDataQuads: data.length,
-        totalFetchedMetaQuads: meta.length, droppedDataTriples: 0, emptyResponses: 0, entityCreators: [],
+        totalFetchedMetaQuads: meta.length, droppedDataTriples: 0, emptyResponses: 0,
+        entityCreators: detectLegacyRoots
+          ? [{ dataGraph: WS, entity: 'urn:legacy:budget-root', creator: 'peer-source' }]
+          : [],
       }),
     }),
     runContextGraphSyncWithBackpressure: async (
@@ -115,6 +126,35 @@ describe('private recovery job ownership and lifecycle outcome', () => {
       failedPeers: 0, backoffWorthyFailures: 0, insertedTriples: 0,
     });
   });
+
+  it.each(['meta', 'data'] as const)(
+    'classifies a local %s-page budget yield without peer backoff',
+    async yieldedPhase => {
+      vi.stubEnv('DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS', '100');
+      let elapsed = 0;
+      vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+      const { run, fetchSyncPages } = harness(undefined, yieldedPhase === 'data');
+      fetchSyncPages.mockImplementation(async (_ctx, _peer, _cg, _swm, phase) => {
+        if (phase === 'meta' && yieldedPhase === 'data') return page(legacyMetadata());
+        expect(phase).toBe(yieldedPhase);
+        elapsed = 100;
+        return { ...page([], false), localBudgetYielded: true };
+      });
+
+      const result = await run();
+
+      expect(fetchSyncPages.mock.calls.map(call => call[4]))
+        .toEqual(yieldedPhase === 'meta' ? ['meta'] : ['meta', 'data']);
+      expect(result).toMatchObject({
+        completedPhases: 0,
+        failedPhases: 1,
+        snapshotPlaneIncomplete: 1,
+        failedPeers: 0,
+        backoffWorthyFailures: 0,
+        insertedTriples: 0,
+      });
+    },
+  );
 
   it('retains peer backoff for an admitted snapshot transport timeout', async () => {
     vi.stubEnv('DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS', '100');
