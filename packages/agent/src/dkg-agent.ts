@@ -2312,6 +2312,7 @@ export class DKGAgent extends DKGAgentBase {
     };
     const drains: Promise<unknown>[] = [drainPhysicalRuns()];
     if (chainPollerDrain) drains.push(chainPollerDrain);
+    if (this.swmCleanupInFlight) drains.push(this.swmCleanupInFlight);
     if (priorRetirement) drains.push(priorRetirement.catch(() => undefined));
     if (dispatcherDrain) drains.push(dispatcherDrain);
     if (vmReconcileSweep) drains.push(vmReconcileSweep.catch(() => undefined));

@@ -1074,6 +1074,7 @@ export class DKGAgentBase {
 
   protected messageHandler: MessageHandler | null = null;
   protected chainPoller: ChainEventPoller | null = null;
+  protected swmCleanupInFlight?: Promise<number>;
   protected swmCleanupTimer: ReturnType<typeof setInterval> | null = null;
   /** Phase B — periodic chain-driven VM reconciliation sweep timer. */
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;
