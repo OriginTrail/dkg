@@ -1,4 +1,4 @@
-import { toEpcisEvent, handleEventsQuery, type EPCISQueryEvent, type EPCISQueryBinding, type QueryEngine } from '../dist/index.js';
+import { toEpcisEvent, handleEventsQuery, type EPCISEventFields, type EPCISEvent, type EPCISQueryEvent, type SparqlBinding, type QueryEngine } from '../dist/index.js';
 
 // Existing QueryEngine consumers pass generic rows to this public helper.
 const row: Record<string, string> = { event: 'urn:event:1' };
@@ -38,10 +38,22 @@ responseEvent.eventTime = 42;
 void responseEvent.sensorElementList;
 
 // Raw query rows do not promise that OPTIONAL or even required aliases were bound.
-const sparseRow: EPCISQueryBinding = { event: undefined, eventTime: undefined };
+const sparseRow: SparqlBinding = { event: undefined, eventTime: undefined };
 // @ts-expect-error The raw store boundary requires validation before using the event ID.
 const uncheckedId: string = sparseRow.event;
 void uncheckedId;
 const genericEngine: QueryEngine = { query: async () => ({ bindings: [row] }) };
 const sparseEngine: QueryEngine = { query: async () => ({ bindings: [sparseRow] }) };
 void [genericEngine, sparseEngine];
+
+// The generic engine accepts unrelated projections; EPCIS aliases belong to decoding.
+const countEngine: QueryEngine = { query: async () => ({ bindings: [{ count: '1' }] }) };
+void countEngine;
+
+// Capture and query share standard field types without sharing extensibility or requirements.
+declare const fields: EPCISEventFields;
+const capture: EPCISEvent = { ...fields, type: 'ObjectEvent', eventTime: '2026-09-07T00:00:00Z', 'example:extension': 42 };
+const projected: EPCISQueryEvent = { ...fields, eventID: 'urn:event:1' };
+// @ts-expect-error Capture still requires its event type and timestamp.
+const incompleteCapture: EPCISEvent = { eventID: 'urn:event:1' };
+void [capture, projected, incompleteCapture];

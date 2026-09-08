@@ -12,10 +12,11 @@ export interface EPCISDocument {
   [key: string]: unknown;
 }
 
-export interface EPCISEvent {
-  type: string;
+/** Standard event fields reconstructed by queries and accepted by captures. */
+export interface EPCISEventFields {
   eventID?: string;
-  eventTime: string;
+  type?: string;
+  eventTime?: string;
   eventTimeZoneOffset?: string;
   configurationId?: string;
   shipmentId?: string;
@@ -29,6 +30,11 @@ export interface EPCISEvent {
   disposition?: string;
   readPoint?: { id: string };
   bizLocation?: { id: string };
+}
+
+export interface EPCISEvent extends EPCISEventFields {
+  type: string;
+  eventTime: string;
   bizTransactionList?: Array<{ type: string; bizTransaction: string }>;
   sensorElementList?: unknown[];
   [key: string]: unknown;
@@ -96,26 +102,8 @@ export interface EpcisQueryParams {
   offset?: number;
 }
 
-/** Raw SELECT row. Projected aliases may be unbound; generic engine columns remain accepted. */
-export interface EPCISQueryBinding extends Record<string, string | undefined> {
-  event?: string;
-  eventType?: string;
-  eventTime?: string;
-  eventTimeZoneOffset?: string;
-  action?: string;
-  bizStep?: string;
-  disposition?: string;
-  readPoint?: string;
-  bizLocation?: string;
-  epcList?: string;
-  parentID?: string;
-  childEPCList?: string;
-  inputEPCs?: string;
-  outputEPCs?: string;
-  configurationId?: string;
-  shipmentId?: string;
-  ual?: string;
-}
+/** Generic SELECT row; unbound columns remain undefined until a consumer decodes them. */
+export type SparqlBinding = Record<string, string | undefined>;
 
 /** Dependency-inversion boundary: the EPCIS package needs something that can run SPARQL queries. */
 export interface QueryEngine {
@@ -143,27 +131,12 @@ export interface QueryEngine {
        */
       includePrivate?: boolean;
     },
-  ): Promise<{ bindings: EPCISQueryBinding[] }>;
+  ): Promise<{ bindings: SparqlBinding[] }>;
 }
 
-/** Closed query response, independent of the extensible capture document model. */
-export interface EPCISQueryEvent {
+/** Closed query response with a required reusable ID and query-only provenance. */
+export interface EPCISQueryEvent extends EPCISEventFields {
   eventID: string;
-  type?: string;
-  eventTime?: string;
-  eventTimeZoneOffset?: string;
-  action?: string;
-  bizStep?: string;
-  disposition?: string;
-  parentID?: string;
-  configurationId?: string;
-  shipmentId?: string;
-  readPoint?: { id: string };
-  bizLocation?: { id: string };
-  epcList?: string[];
-  childEPCs?: string[];
-  inputEPCList?: string[];
-  outputEPCList?: string[];
   'dkg:ual'?: string;
 }
 

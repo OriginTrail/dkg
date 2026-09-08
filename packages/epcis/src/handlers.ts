@@ -2,7 +2,7 @@ import { isSafeIri } from '@origintrail-official/dkg-core';
 import { createValidator } from './validation.js';
 import { buildEpcisQuery } from './query-builder.js';
 import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js';
-import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryBinding, EPCISQueryEvent, EPCISQueryDocumentResponse } from './types.js';
+import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, SparqlBinding, EPCISQueryEvent, EPCISQueryDocumentResponse } from './types.js';
 
 export interface AsyncCaptureConfig {
   contextGraphId: string;
@@ -110,7 +110,7 @@ function parseGroupConcat(value: string | undefined): string[] | undefined {
 }
 
 /** Reconstruct a proper EPCIS event object from flat SPARQL bindings. */
-export function toEpcisEvent(binding: EPCISQueryBinding): EPCISQueryEvent {
+export function toEpcisEvent(binding: SparqlBinding): EPCISQueryEvent {
   if (typeof binding.event !== 'string' || !isSafeIri(binding.event)) {
     throw new EpcisQueryError('Events query returned a result without a reusable event IRI', 502);
   }
