@@ -27,6 +27,7 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
       async (_ctx, _peerId, _contextGraphId, _includeSharedMemory, phase) => ({
         quads: [],
         bytesReceived: 0,
+        timedOut: false,
         resumedFromOffset: 0,
         nextOffset: 0,
         checkpointKey: `private:${phase}`,
@@ -67,7 +68,9 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
       logDebug: () => undefined,
     });
 
+    const startedAt = Date.now();
     await expect(executor.recoverPrivateTarget({
+      timeBudget: { remainingMs: () => 50 },
       remotePeerId: '12D3KooWCompletePrivateProvider',
       contextGraphId: 'private-rfc64-context-graph',
       recoveryGuard: {
@@ -78,6 +81,8 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
 
     expect(fetchSyncPages).toHaveBeenCalled();
     for (const call of fetchSyncPages.mock.calls) {
+      expect(call[6]).toBeGreaterThanOrEqual(startedAt);
+      expect(call[6]).toBeLessThanOrEqual(Date.now() + 50);
       expect(call[7]).toMatchObject({
         recovery: true,
         signal: controller.signal,
@@ -163,6 +168,7 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
         return {
           quads,
           bytesReceived: 0,
+        timedOut: false,
           resumedFromOffset: 0,
           nextOffset: quads.length,
           checkpointKey: `private:${phase}`,

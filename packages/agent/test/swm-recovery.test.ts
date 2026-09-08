@@ -16,6 +16,7 @@ import {
   workspacePublicQuadsDigest,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import type { SyncPhase } from '../src/sync/auth/request-build.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import {
   collectPublicSnapshotMetadata,
@@ -23,6 +24,7 @@ import {
   syncPublicSnapshotsForMeta,
   type PublicSnapshotMetadata,
 } from '../src/sync/requester/shared-memory-sync.js';
+import { createPrivateSwmRecoveryTimeBudget, recoveryFetchDeadline, resolvePrivateSwmRecoveryBudgetMs } from '../src/sync/requester/private-swm-recovery-budget.js';
 import {
   recoverContextGraphSwm,
   recoverContextGraphSwmWithProgressRetries,
@@ -74,7 +76,69 @@ function recoveryResult(
   };
 }
 
+describe('private SWM recovery budget', () => {
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+
+  it.each(['', ' ', '-1', 'NaN', 'Infinity', '0.1', '1e20'])('defaults invalid or blank value %j', (raw) => {
+    expect(resolvePrivateSwmRecoveryBudgetMs(raw)).toBe(600_000);
+  });
+  it.each(['0', ' 15 ', '600000'])('accepts the configured duration %j', (raw) => {
+    expect(resolvePrivateSwmRecoveryBudgetMs(raw)).toBe(Number(raw));
+  });
+  it('shares one frozen monotonic allowance and caps each transport deadline', () => {
+    let now = 100;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    vi.spyOn(Date, 'now').mockReturnValue(1_000);
+    const budget = createPrivateSwmRecoveryTimeBudget(50)!;
+    expect(Object.isFrozen(budget)).toBe(true);
+    expect(budget.remainingMs()).toBe(50);
+    expect(recoveryFetchDeadline(2_000, budget)).toBe(1_050);
+    expect(recoveryFetchDeadline(1_020, budget)).toBe(1_020);
+    expect(recoveryFetchDeadline(2_000)).toBe(2_000);
+    now = 160;
+    expect(budget.remainingMs()).toBe(0);
+    expect(createPrivateSwmRecoveryTimeBudget(0)).toBeUndefined();
+  });
+});
+
 describe('recoverContextGraphSwmWithProgressRetries', () => {
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+
+  it('stops progressing retries at one job budget despite a wall-clock rollback', async () => {
+    vi.stubEnv('DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS', '100');
+    let elapsed = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+    vi.spyOn(Date, 'now').mockImplementation(() => 10_000 - elapsed);
+    let calls = 0;
+    const onRetry = vi.fn();
+    const result = await recoverContextGraphSwmWithProgressRetries({
+      recover: async () => { elapsed += 40; return recoveryResult(++calls, 100); },
+      onRetry,
+    });
+    expect(result).toMatchObject({ completed: false, readySnapshots: 3 });
+    expect(calls).toBe(3);
+    expect(onRetry).toHaveBeenCalledTimes(2);
+  });
+
+  it('rechecks the fixed job budget after a slow retry observer', async () => {
+    vi.stubEnv('DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS', '10');
+    let elapsed = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+    const recover = vi.fn(async () => recoveryResult(1, 20));
+    await recoverContextGraphSwmWithProgressRetries({
+      recover,
+      onRetry: () => { elapsed = 10; vi.stubEnv('DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS', '1000'); },
+    });
+    expect(recover).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses zero to disable extra rounds while preserving the initial recovery', async () => {
+    vi.stubEnv('DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS', '0');
+    const recover = vi.fn(async () => recoveryResult(1, 20));
+    await recoverContextGraphSwmWithProgressRetries({ recover });
+    expect(recover).toHaveBeenCalledTimes(1);
+  });
+
   it('consumes monotonic immutable-snapshot progress inside one bounded catch-up job', async () => {
     const outcomes = [
       recoveryResult(5, 20),
@@ -174,6 +238,29 @@ describe('recoverContextGraphSwmWithProgressRetries', () => {
 });
 
 describe('syncPublicSnapshotsForMeta', () => {
+  it('does not start a network fetch when cache validation consumes the remaining budget', async () => {
+    const quads: Quad[] = [{ subject: SUBJ, predicate: STATUS, object: '"new"', graph: '' }];
+    const digest = workspacePublicQuadsDigest(quads);
+    let remaining = 5;
+    const fetchSyncPages = vi.fn(async () => page(quads));
+    const result = await syncPublicSnapshotsForMeta({
+      ctx, remotePeerId: 'peer-source', contextGraphId: CG,
+      deadline: Number.MAX_SAFE_INTEGER,
+      timeBudget: { remainingMs: () => remaining },
+      metaQuads: [
+        { subject: 'urn:share:budget', predicate: `${DKG}publicQuadsDigest`, object: `"${digest}"`, graph: WS_META },
+        { subject: 'urn:share:budget', predicate: `${DKG}publicQuadsCount`, object: '"1"', graph: WS_META },
+      ],
+      publicSnapshotStore: {
+        getSnapshot: async () => { remaining = 0; return null; },
+        putSnapshot: async () => ({ ref: digest, byteLength: 0 }),
+      },
+      fetchSyncPages, deleteCheckpoint: () => {}, setCheckpoint: () => {},
+    });
+    expect(fetchSyncPages).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ completed: false, readySnapshots: 0, timedOutPhases: 0, yieldedAtDeadline: true });
+  });
+
   it('prioritizes three recent snapshots for every historical snapshot', () => {
     const snapshots: PublicSnapshotMetadata[] = Array.from({ length: 8 }, (_, index) => ({
       ref: `sha256:${index.toString(16).padStart(64, '0')}`,
@@ -465,6 +552,28 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
   const stores: OxigraphStore[] = [];
   afterEach(async () => { await Promise.all(stores.splice(0).map((s) => s.close().catch(() => {}))); });
 
+  it('yields between progressing metadata pages and clears the unusable prefix checkpoint', async () => {
+    const store = new OxigraphStore(); stores.push(store);
+    await store.insert([{ subject: SUBJ, predicate: STATUS, object: '"old"', graph: WS }]);
+    let remaining = 5;
+    const fetchSyncPages = vi.fn(async () => {
+      remaining = 0;
+      return page([{ subject: SUBJ, predicate: STATUS, object: '"prefix"', graph: WS_META }], false);
+    });
+    const checkpoints = new Map<string, number>();
+    const result = await recoverContextGraphSwm({
+      ...makeDeps(store, []),
+      timeBudget: { remainingMs: () => remaining },
+      fetchSyncPages,
+      setCheckpoint: (key, offset) => { checkpoints.set(key, offset); },
+      deleteCheckpoint: (key) => { checkpoints.delete(key); },
+    });
+    expect(result.completed).toBe(false);
+    expect(fetchSyncPages).toHaveBeenCalledTimes(1);
+    expect(checkpoints.size).toBe(0);
+    expect(await statusValues(store)).toEqual(['"old"']);
+  });
+
   it('replaces a stale local value with the source value (no union corruption)', async () => {
     const store = new OxigraphStore();
     stores.push(store);
@@ -497,7 +606,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       includeRootScope: false,
       fetchSyncPages: async (
         _c: OperationContext, _p: string, _cg: string, _inc: boolean,
-        phase: 'data' | 'meta',
+        phase: SyncPhase,
       ): Promise<SyncPageResult> => page(
         phase === 'data' ? [rootData, subData] : [rootMeta, subMeta],
       ),
@@ -594,7 +703,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     const partialDeps = {
       ...deps,
       fetchSyncPages: async (
-        _c: OperationContext, _p: string, _cg: string, _inc: boolean, phase: 'data' | 'meta',
+        _c: OperationContext, _p: string, _cg: string, _inc: boolean, phase: SyncPhase,
       ): Promise<SyncPageResult> =>
         phase === 'data'
           ? { ...page([{ subject: SUBJ, predicate: STATUS, object: '"v2"', graph: WS }], false), nextOffset: 0, resumedFromOffset: 0 }
@@ -713,7 +822,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     }
   });
 
-  it('makes monotonic per-KA progress across a deadline without rescanning aggregate SWM data', async () => {
+  it.each(['transport', 'time-budget'] as const)('makes per-KA progress across %s expiry without rescanning aggregate SWM data', async (expiry) => {
     const store = new OxigraphStore();
     stores.push(store);
     const assets = [
@@ -760,6 +869,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     const sourceMeta = assets.flatMap((asset) => asset.meta);
     const snapshotStore = new MemorySnapshotStore();
     const snapshotFetches = new Map<string, number>();
+    let remaining = 10;
     let round = 1;
     let dataFetches = 0;
     const recover = () => recoverContextGraphSwm({
@@ -767,6 +877,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       remotePeerId: 'peer-source',
       contextGraphId: CG,
       deadline: Number.MAX_SAFE_INTEGER,
+      timeBudget: expiry === 'time-budget' ? { remainingMs: () => remaining } : undefined,
       fetchSyncPages: async (
         _c, _p, _cg, _inc, phase, _graph, _deadline, fetchOptions,
       ): Promise<SyncPageResult> => {
@@ -780,9 +891,10 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
         );
         if (!asset) throw new Error(`Unexpected snapshot ref ${fetchOptions?.snapshotRef}`);
         snapshotFetches.set(asset.digest, (snapshotFetches.get(asset.digest) ?? 0) + 1);
-        if (round === 1 && asset === assets[1]) {
+        if (expiry === 'transport' && round === 1 && asset === assets[1]) {
           return { ...page([], false), checkpointKey: `snapshot:${asset.digest}` };
         }
+        if (expiry === 'time-budget' && round === 1) remaining = 0;
         return { ...page(asset.payload), checkpointKey: `snapshot:${asset.digest}` };
       },
       processSharedMemoryBatch: async (_dataQuads, metaQuads) => ({
@@ -811,10 +923,11 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     expect(secondStillHidden.type === 'bindings' ? secondStillHidden.bindings : []).toHaveLength(0);
 
     round = 2;
+    remaining = 10;
     const completed = await recover();
     expect(completed).toMatchObject({ completed: true, replacedGraphs: 2, insertedDataQuads: 2 });
     expect(snapshotFetches.get(assets[0]!.digest)).toBe(1);
-    expect(snapshotFetches.get(assets[1]!.digest)).toBe(2);
+    expect(snapshotFetches.get(assets[1]!.digest)).toBe(expiry === 'transport' ? 2 : 1);
     expect(dataFetches).toBe(0);
     for (const asset of assets) {
       const result = await store.query(

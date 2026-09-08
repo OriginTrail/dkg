@@ -1,3 +1,4 @@
+import type { SwmRecoveryTimeBudget } from './private-swm-recovery-budget.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /** Stable public/private target executor for graph-complete SWM recovery. */
@@ -89,6 +90,7 @@ export type PublicSwmTargetV1 = Readonly<PublicSwmTargetBaseV1 & {
 }>;
 
 export interface PrivateSwmRecoveryTargetV1 {
+  readonly timeBudget?: SwmRecoveryTimeBudget;
   readonly remotePeerId: string;
   readonly contextGraphId: string;
   readonly recoveryGuard?: RecoveryExecutionGuard;
@@ -131,6 +133,7 @@ export class SwmTargetExecutorV1 {
       remotePeerId: target.remotePeerId,
       contextGraphId: target.contextGraphId,
       deadline: this.#ports.createContextGraphSyncDeadline(1),
+      timeBudget: target.timeBudget,
       fetchSyncPages: (
         requestCtx,
         peerId,

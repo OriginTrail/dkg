@@ -8,6 +8,7 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
+import type { SwmRecoveryTimeBudget } from './sync/requester/private-swm-recovery-budget.js';
 import { createHash } from 'node:crypto';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
@@ -7483,12 +7484,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const recoverPrivateContextGraph = (
       contextGraphId: string,
       recoveryLease?: Rfc64SwmRecoveryTargetLeaseV1,
+      timeBudget?: SwmRecoveryTimeBudget,
     ) => recoveryExecutor.recoverPrivateTarget({
       remotePeerId,
       contextGraphId,
       includeRootScope: requestedScope !== null
         || this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed,
       recoveryGuard: recoveryLease,
+      timeBudget,
     });
     if (
       requestedTargets !== null
@@ -7675,7 +7678,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             const recoveryLease = recoveryLeaseFor(contextGraphId);
             try {
               const recovered = await recoverContextGraphSwmWithProgressRetries({
-                recover: () => recoverPrivateContextGraph(contextGraphId, recoveryLease),
+                recover: (timeBudget) => recoverPrivateContextGraph(contextGraphId, recoveryLease, timeBudget),
                 onRetry: ({ completedRound, readySnapshots, totalSnapshots }) => {
                   this.log.info(
                     ctx,

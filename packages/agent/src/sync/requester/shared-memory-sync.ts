@@ -1,3 +1,4 @@
+import { recoveryFetchDeadline, type SwmRecoveryTimeBudget } from './private-swm-recovery-budget.js';
 import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -1592,6 +1593,8 @@ export async function syncPublicSnapshotsForMeta(params: {
   remotePeerId: string;
   contextGraphId: string;
   deadline: number;
+  /** Optional monotonic private-recovery budget, shared across rounds. */
+  timeBudget?: SwmRecoveryTimeBudget;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   deleteCheckpoint: (key: string) => void;
@@ -1730,7 +1733,7 @@ export async function syncPublicSnapshotsForMeta(params: {
     //
     // Never mid-KA: a snapshot is applied whole or not at all, so stopping here
     // can never leave a partially materialized asset.
-    if (Date.now() >= params.deadline) {
+    if (Date.now() >= params.deadline || (params.timeBudget?.remainingMs() ?? Infinity) <= 0) {
       yieldedAtDeadline = true;
       abandonFrom(index);
       break;
@@ -1748,6 +1751,14 @@ export async function syncPublicSnapshotsForMeta(params: {
         continue;
       }
 
+      // Cache validation can consume the allowance without producing a hit.
+      // Admit no new transport after that local work exhausts the budget.
+      if (Date.now() >= params.deadline || (params.timeBudget?.remainingMs() ?? Infinity) <= 0) {
+        yieldedAtDeadline = true;
+        abandonFrom(index);
+        break;
+      }
+
       const snapshotOptions: SyncPageFetchOptions = executionBoundary.signal === undefined
         ? { snapshotRef: snapshot.ref }
         : { snapshotRef: snapshot.ref, signal: executionBoundary.signal };
@@ -1758,7 +1769,7 @@ export async function syncPublicSnapshotsForMeta(params: {
         true,
         'snapshot',
         '',
-        params.deadline,
+        recoveryFetchDeadline(params.deadline, params.timeBudget),
         snapshotOptions,
       ));
       bytesReceived += result.bytesReceived;

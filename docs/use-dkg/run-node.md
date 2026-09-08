@@ -185,3 +185,24 @@ If an agent gets auth errors, first identify the caller:
 TOKEN=$(dkg auth show)
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9200/api/agent/identity
 ```
+
+## Private shared-memory recovery time budget
+
+`DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS` sets the elapsed-time allowance for one
+private shared-memory recovery job. It defaults to `600000` (10 minutes), is
+read when the job starts, and uses a monotonic clock so a wall-clock correction
+cannot renew the allowance. Blank, negative, fractional, non-finite and unsafe
+integer values fall back to the default.
+
+The same allowance covers all recovery rounds, metadata/data pages and snapshot
+fetches. Once it is exhausted, the worker admits no new page, snapshot fetch or
+retry round. Transport deadlines are capped by the remaining allowance. Work
+already admitted, including a verified asset's atomic write, is allowed to
+finish; this is an admission budget, not a promise to interrupt a store write at
+an exact instant. Verified snapshots remain reusable on the next recovery job;
+incomplete metadata/data prefixes are discarded and their checkpoints reset.
+
+An explicit `0` disables extra recovery rounds while preserving the initial
+round and its existing transport deadline. The page and round count limits
+remain active for every setting. The public recovery lane retains its separate
+`DKG_SWM_CATCHUP_PASS_BUDGET_MS` setting.

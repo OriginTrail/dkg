@@ -35,6 +35,11 @@ import {
 } from './recovery-execution-guard.js';
 import { canonicalQuadKey } from './quad-key.js';
 import {
+  createPrivateSwmRecoveryTimeBudget,
+  recoveryFetchDeadline,
+  type SwmRecoveryTimeBudget,
+} from './private-swm-recovery-budget.js';
+import {
   isNamedSubgraphSharedMemoryDataGraph,
   isNamedSubgraphSharedMemoryMetaGraph,
 } from '../shared-memory-graphs.js';
@@ -84,6 +89,8 @@ export interface RecoverContextGraphSwmDeps {
   readonly contextGraphId: string;
   /** Absolute wall-clock deadline (ms) for the whole recovery. */
   readonly deadline: number;
+  /** Shared monotonic job budget; direct callers receive a fresh configured budget. */
+  readonly timeBudget?: SwmRecoveryTimeBudget;
   readonly fetchSyncPages: (
     ctx: OperationContext,
     remotePeerId: string,
@@ -193,10 +200,13 @@ export const ABSOLUTE_PRIVATE_SWM_RECOVERY_MAX_ROUNDS = 24;
  * transport cushion, bounded by an absolute ceiling. That lets a finite CG
  * finish when a lossy relay yields only one new verified snapshot per round,
  * without allowing an arbitrarily large CG to monopolise a worker. An explicit
- * `maxRounds` remains authoritative for callers and tests.
+ * `maxRounds` remains authoritative for callers and tests. One monotonic budget
+ * also limits admission across the entire job (including every page and KA).
+ * Admitted transport and atomic asset writes drain; expiry never races a write
+ * or treats an incomplete metadata/data prefix as authoritative.
  */
 export async function recoverContextGraphSwmWithProgressRetries(params: {
-  readonly recover: () => Promise<RecoverContextGraphSwmResult>;
+  readonly recover: (timeBudget: SwmRecoveryTimeBudget | undefined) => Promise<RecoverContextGraphSwmResult>;
   readonly maxRounds?: number;
   readonly onRetry?: (progress: {
     readonly completedRound: number;
@@ -204,6 +214,7 @@ export async function recoverContextGraphSwmWithProgressRetries(params: {
     readonly totalSnapshots: number;
   }) => void;
 }): Promise<RecoverContextGraphSwmResult> {
+  const timeBudget = createPrivateSwmRecoveryTimeBudget();
   const explicitMaxRounds = params.maxRounds === undefined
     ? undefined
     : Math.max(1, Math.floor(params.maxRounds));
@@ -213,7 +224,9 @@ export async function recoverContextGraphSwmWithProgressRetries(params: {
   let result: RecoverContextGraphSwmResult | undefined;
 
   for (let round = 1; round <= maxRounds; round += 1) {
-    result = await params.recover();
+    // Recheck after the retry observer too: logging must not admit a late round.
+    if (round > 1 && (timeBudget === undefined || timeBudget.remainingMs() <= 0)) break;
+    result = await params.recover(timeBudget);
     if (result.completed) return result;
 
     if (explicitMaxRounds === undefined && Number.isSafeInteger(result.totalSnapshots)) {
@@ -225,7 +238,8 @@ export async function recoverContextGraphSwmWithProgressRetries(params: {
 
     const madeProgress = result.readySnapshots > previousReadySnapshots;
     consecutiveNoProgressRounds = madeProgress ? 0 : consecutiveNoProgressRounds + 1;
-    if (round >= maxRounds || consecutiveNoProgressRounds >= 2) return result;
+    if (round >= maxRounds || consecutiveNoProgressRounds >= 2
+      || timeBudget === undefined || timeBudget.remainingMs() <= 0) return result;
 
     previousReadySnapshots = result.readySnapshots;
     params.onRetry?.({
@@ -251,6 +265,7 @@ async function fetchPhaseFully(
   const all: Quad[] = [];
   let lastCheckpointKey: string | undefined;
   for (let i = 0; i < maxPages; i++) {
+    if (Date.now() >= deps.deadline || (deps.timeBudget?.remainingMs() ?? Infinity) <= 0) break;
     const page = await boundary.read(() => deps.fetchSyncPages(
       deps.ctx,
       deps.remotePeerId,
@@ -258,7 +273,7 @@ async function fetchPhaseFully(
       true,
       phase,
       graphUri,
-      deps.deadline,
+      recoveryFetchDeadline(deps.deadline, deps.timeBudget),
       { signal: boundary.signal },
     ));
     appendInPlace(all, page.quads);
@@ -286,12 +301,13 @@ async function fetchPhaseFully(
 export async function recoverContextGraphSwm(
   deps: RecoverContextGraphSwmDeps,
 ): Promise<RecoverContextGraphSwmResult> {
+  const budgetedDeps = { ...deps, timeBudget: deps.timeBudget ?? createPrivateSwmRecoveryTimeBudget() };
   const boundary = createRecoveryExecutionAdmission(deps.recoveryGuard);
   boundary.assertCurrent();
   return withKeyedLocks(
     deps.writeLocks,
     [contextGraphSwmRecoveryWriteLockKey(deps.contextGraphId)],
-    () => recoverContextGraphSwmUnlocked(deps, boundary),
+    () => recoverContextGraphSwmUnlocked(budgetedDeps, boundary),
   );
 }
 
@@ -467,6 +483,7 @@ async function recoverContextGraphSwmUnlocked(
       remotePeerId: deps.remotePeerId,
       contextGraphId: deps.contextGraphId,
       deadline: deps.deadline,
+      timeBudget: deps.timeBudget,
       metaQuads: activeGraphMeta,
       publicSnapshotStore: deps.publicSnapshotStore,
       // Raw ports: syncPublicSnapshotsForMeta is the sole owner of admission,
