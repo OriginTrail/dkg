@@ -1,7 +1,6 @@
 import {
   mkdir,
   open,
-  readFile,
   readdir,
   rename,
   stat,
@@ -14,6 +13,8 @@ import type { Dirent } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { resolveSnapshotSource, readSnapshotSource, snapshotPath } from './workspace-snapshot-source.js';
+import { SnapshotValidationCache } from './workspace-snapshot-validation.js';
 
 export interface SharedMemoryPublicSnapshotStorageConfig {
   enabled?: boolean;
@@ -108,7 +109,6 @@ export interface SnapshotPageIndexStore {
 const SNAPSHOT_PAGE_INDEX_VERSION = 1;
 const SNAPSHOT_PAGE_INDEX_STRIDE = 128;
 const SNAPSHOT_PAGE_INDEX_CACHE_MAX = 64;
-const SNAPSHOT_VALIDATION_CACHE_MAX = 2048;
 const GIB = 1024 ** 3;
 const DEFAULT_SNAPSHOT_GC_INTERVAL_MS = 5 * 60 * 1_000;
 const DEFAULT_SNAPSHOT_GC_TRIGGER_FREE_BYTES = 15 * GIB;
@@ -175,7 +175,7 @@ interface SnapshotFileFingerprint {
 }
 
 export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshotStore {
-  private readonly validationCache = new Map<string, string>();
+  private readonly validationCache: SnapshotValidationCache;
   private readonly pageIndexCache = new Map<string, Promise<SnapshotPageIndexCore>>();
   private readonly pendingWrites = new Map<
     string,
@@ -198,6 +198,7 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     private readonly pageIndexStore?: SnapshotPageIndexStore,
     options: FileWorkspacePublicSnapshotStoreOptions = {},
   ) {
+    this.validationCache = new SnapshotValidationCache(directory);
     this.gcConfig = resolveSnapshotGarbageCollectionConfig(options.gc);
     this.log = options.log;
     const getAvailableBytes = options.getAvailableBytes;
@@ -295,16 +296,12 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
   async getSnapshot(ref: string): Promise<Quad[] | null> {
     const hash = snapshotHash(ref);
     return this.withActiveSnapshot(hash, async () => {
-      const nquadsPath = snapshotPath(this.directory, hash, 'nq');
-      let raw: string;
-      try {
-        raw = await readFile(nquadsPath, 'utf8');
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        return this.getLegacyJsonSnapshot(ref, hash);
-      }
-
-      return parseWorkspacePublicSnapshotNQuads(raw, ref);
+      const source = await resolveSnapshotSource(this.directory, hash);
+      if (source === null) return null;
+      const raw = await readSnapshotSource(source);
+      return source.format === 'nq'
+        ? parseWorkspacePublicSnapshotNQuads(raw, ref)
+        : parseLegacyJsonSnapshot(raw, ref);
     });
   }
 
@@ -312,31 +309,14 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     if (!Number.isSafeInteger(expectedCount) || expectedCount < 0) return false;
     try {
       const hash = snapshotHash(ref);
-      const key = JSON.stringify([hash, expectedDigest, expectedCount]);
-      // Keep GC away throughout the stat/read/stat interval, including nested
-      // getSnapshot reads. putSnapshot never establishes validation evidence.
-      return await this.withActiveSnapshot(hash, async () => {
-        const cached = this.validationCache.get(key);
-        this.validationCache.delete(key);
-        const before = await snapshotValidationFingerprint(this.directory, hash);
-        if (before === null) return false;
-        if (cached === before) {
-          this.validationCache.set(key, before);
-          return true;
-        }
-        const quads = await this.getSnapshot(ref);
-        if (quads === null || quads.length !== expectedCount
-          || workspacePublicQuadsDigest(quads) !== expectedDigest) return false;
-        // Do not certify bytes read across a replacement, concurrent write or
-        // JSON-to-N-Quads migration. The next attempt must validate them anew.
-        if (await snapshotValidationFingerprint(this.directory, hash) !== before) return false;
-        this.validationCache.set(key, before);
-        if (this.validationCache.size > SNAPSHOT_VALIDATION_CACHE_MAX) {
-          const oldest = this.validationCache.keys().next().value;
-          if (oldest !== undefined) this.validationCache.delete(oldest);
-        }
-        return true;
-      });
+      // Keep GC away across source resolution, full reads and the final stat.
+      return await this.withActiveSnapshot(hash, () => this.validationCache.validate(
+        hash, expectedDigest, expectedCount, async () => {
+          const quads = await this.getSnapshot(ref);
+          return quads !== null && quads.length === expectedCount
+            && workspacePublicQuadsDigest(quads) === expectedDigest;
+        },
+      ));
     } catch {
       // A missing, unreadable or corrupt file follows the requester's existing
       // recovery path. Only successful full validations enter the cache.
@@ -361,7 +341,7 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
         file = await open(nquadsPath, 'r');
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        const legacy = await this.getLegacyJsonSnapshot(ref, hash);
+        const legacy = await this.getSnapshot(ref);
         return legacy?.slice(safeOffset, safeOffset + safeLimit) ?? null;
       }
 
@@ -664,30 +644,22 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     }
   }
 
-  private async getLegacyJsonSnapshot(ref: string, hash: string): Promise<Quad[] | null> {
-    const jsonPath = snapshotPath(this.directory, hash, 'json');
-    let raw: string;
-    try {
-      raw = await readFile(jsonPath, 'utf8');
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
-      throw err;
-    }
+}
 
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return null;
-    return parsed.map((entry) => {
-      if (!Array.isArray(entry) || entry.length < 3) {
-        throw new Error(`Invalid shared-memory public snapshot blob ${ref}`);
-      }
-      return {
-        subject: String(entry[0]),
-        predicate: String(entry[1]),
-        object: String(entry[2]),
-        graph: '',
-      };
-    });
-  }
+function parseLegacyJsonSnapshot(raw: string, ref: string): Quad[] | null {
+  const parsed = JSON.parse(raw) as unknown;
+  if (!Array.isArray(parsed)) return null;
+  return parsed.map((entry) => {
+    if (!Array.isArray(entry) || entry.length < 3) {
+      throw new Error(`Invalid shared-memory public snapshot blob ${ref}`);
+    }
+    return {
+      subject: String(entry[0]),
+      predicate: String(entry[1]),
+      object: String(entry[2]),
+      graph: '',
+    };
+  });
 }
 
 function snapshotHash(ref: string): string {
@@ -701,25 +673,6 @@ function snapshotHash(ref: string): string {
 
 function canonicalSnapshotDigest(ref: string): string {
   return `sha256:${snapshotHash(ref)}`;
-}
-
-function snapshotPath(directory: string, hash: string, extension: 'json' | 'nq'): string {
-  return join(directory, hash.slice(0, 2), hash.slice(2, 4), `${hash}.${extension}`);
-}
-
-/** Same N-Quads-first selection as getSnapshot, with native nanosecond stats. */
-async function snapshotValidationFingerprint(directory: string, hash: string): Promise<string | null> {
-  for (const extension of ['nq', 'json'] as const) {
-    const path = snapshotPath(directory, hash, extension);
-    try {
-      const file = await stat(path, { bigint: true });
-      if (!file.isFile()) return null;
-      return `${path}\0${file.dev}:${file.ino}:${file.size}:${file.mtimeNs}:${file.ctimeNs}`;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
-  }
-  return null;
 }
 
 function resolveSnapshotGarbageCollectionConfig(

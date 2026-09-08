@@ -40,6 +40,14 @@ describe('immutable snapshot validation cache', () => {
     expect(load).toHaveBeenCalledOnce();
   });
 
+  it('retains warm evidence throughout concurrent fingerprint reads', async () => {
+    const f = await fixture();
+    await expect(f.validate()).resolves.toBe(true);
+    expect(f.load).toHaveBeenCalledOnce();
+    await expect(Promise.all([f.validate(), f.validate()])).resolves.toEqual([true, true]);
+    expect(f.load).toHaveBeenCalledOnce();
+  });
+
   it.each(['delete', 'truncate', 'corrupt', 'replace', 'same-size-restored-mtime'] as const)(
     'rejects %s after a successful validation and does not retain failed evidence', async (change) => {
       const f = await fixture();
@@ -124,6 +132,18 @@ describe('immutable snapshot validation cache', () => {
     await rm(f.path);
     await expect(f.validate()).resolves.toBe(true);
     expect(f.load).toHaveBeenCalledTimes(4);
+  });
+
+  it('uses the same non-regular N-Quads precedence for reading and validation', async () => {
+    const f = await fixture();
+    await rm(f.path);
+    await writeFile(f.path.replace(/\.nq$/, '.json'), JSON.stringify(quads.map(q => [q.subject, q.predicate, q.object])));
+    await mkdir(f.path);
+    await expect(f.store.getSnapshot(digest)).rejects.toThrow('not a regular file');
+    await expect(f.validate()).resolves.toBe(false);
+    await rm(f.path, { recursive: true });
+    await expect(f.store.getSnapshot(digest)).resolves.toEqual(quads);
+    await expect(f.validate()).resolves.toBe(true);
   });
 
   it.each(['modify', 'delete', 'replace-identical'] as const)('rejects %s during a full validation', async (change) => {
