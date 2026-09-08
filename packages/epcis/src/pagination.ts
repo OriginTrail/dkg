@@ -20,10 +20,20 @@ function resolveEpcisOffset(value: number | undefined): number {
   return Math.max(offset, 0);
 }
 
-/** Explicit row window consumed by the canonical SPARQL renderer. */
+/** Explicit row window: 1..1001 rows (including optional HTTP lookahead), offset 0..10000. */
 export interface EpcisQueryWindow {
   readonly limit: number;
   readonly offset: number;
+}
+
+/** Validate explicit renderer windows without stripping the HTTP lookahead row. */
+export function assertEpcisQueryWindow(window: EpcisQueryWindow): void {
+  if (!Number.isSafeInteger(window.limit) || window.limit < 1 || window.limit > MAX_EPCIS_PAGE_SIZE + 1) {
+    throw new EpcisQueryValidationError(`EPCIS query limit must be a safe integer from 1 to ${MAX_EPCIS_PAGE_SIZE + 1}`);
+  }
+  if (!Number.isSafeInteger(window.offset) || window.offset < 0 || window.offset > MAX_EPCIS_OFFSET) {
+    throw new EpcisQueryValidationError(`EPCIS query offset must be a safe integer from 0 to ${MAX_EPCIS_OFFSET}`);
+  }
 }
 
 export function resolveEpcisQueryWindow(input: { limit?: number; offset?: number }): EpcisQueryWindow {

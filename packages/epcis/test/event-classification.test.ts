@@ -179,7 +179,8 @@ for (const backend of backends) {
         expect((await query({ to: '2024-03-01T08:00:00Z' })).body.epcisBody.queryResults.resultsBody.eventList).toEqual([]);
         expect((await query({ anyEPC: 'urn:epc:absent' })).body.epcisBody.queryResults.resultsBody.eventList).toEqual([]);
       } finally { await store.dropGraph(graph); await store.close(); }
-    });
+    // Each case makes more than twenty sequential backend requests.
+    }, backend.name === 'Blazegraph' ? 30_000 : 5_000);
 
     it.each([
       { finalized: true },

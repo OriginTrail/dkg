@@ -1,7 +1,6 @@
-import { buildEpcisQuery, EpcisQueryValidationError } from '../src/index.js';
+import { buildEpcisQuery, createEpcisQueryPlan, EpcisQueryValidationError } from '../src/index.js';
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { createEpcisQueryPlan } from '../src/query-builder.js';
 import { handleEventsQuery } from '../src/handlers.js';
 import { encodePageToken } from '../src/utils.js';
 import { MAX_EPCIS_OFFSET, MAX_EPCIS_PAGE_SIZE, EpcisHttpPage } from '../src/pagination.js';
@@ -109,4 +108,17 @@ describe('offset boundaries through real EPCIS queries', () => {
     await expect(handleEventsQuery(new URLSearchParams('offset=10000&perPage=1'), config))
       .rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining('pagination limit reached') });
   });
+});
+
+it.each([
+  { limit: NaN, offset: 0 }, { limit: 1002, offset: 0 }, { limit: 0, offset: 0 },
+  { limit: 1, offset: -1 }, { limit: 1, offset: 10001 }, { limit: 1, offset: 0.5 },
+])('rejects an invalid explicit public query window: %j', window => {
+  expect(() => createEpcisQueryPlan({}, { contextGraphId: 'pagination', finalized: true }, window))
+    .toThrow(EpcisQueryValidationError);
+});
+it('supports separated public query input with a bounded default window', () => {
+  const plan = createEpcisQueryPlan({ action: 'ADD' }, { contextGraphId: 'pagination', finalized: false });
+  expect(plan.sparql).toContain('LIMIT 100\nOFFSET 0');
+  expect(plan.options).toMatchObject({ contextGraphId: 'pagination', graphSuffix: '_shared_memory' });
 });

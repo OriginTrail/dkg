@@ -1,4 +1,4 @@
-import { resolveEpcisQueryWindow, type EpcisQueryWindow } from './pagination.js';
+import { assertEpcisQueryWindow, resolveEpcisQueryWindow, type EpcisQueryWindow } from './pagination.js';
 import {
   contextGraphDataUri,
   contextGraphMetaUri,
@@ -61,6 +61,7 @@ function extensionLocalNameFilter(predicateVariable: string, localName: string):
 }
 
 /**
+ * @deprecated Use createEpcisQueryPlan with separate filters, scope and row window.
  * Build a composite SPARQL query for EPCIS events.
  *
  * Adapted for v9's flat data graph model:
@@ -106,8 +107,9 @@ function resolveEpcisQueryScope(scope: EpcisQueryScope) {
 export function createEpcisQueryPlan(
   filters: EpcisEventFilters,
   scope: EpcisQueryScope,
-  window: EpcisQueryWindow,
+  window: EpcisQueryWindow = resolveEpcisQueryWindow({}),
 ) {
+  assertEpcisQueryWindow(window);
   const target = resolveEpcisQueryScope(scope);
   return { sparql: renderEpcisQuery(filters, target, window), options: target.options };
 }

@@ -114,7 +114,7 @@ export function parseEventsRequest(sp: URLSearchParams): EpcisEventsRequest {
   return { filters, page, finalized: sp.get('finalized') !== 'false' };
 }
 
-/** Compatibility facade for the exported historical flat parser result. */
+/** @deprecated Use parseEventsRequest for separate filters, page and scope input. */
 export function parseQueryParams(sp: URLSearchParams): EpcisQueryParams {
   const { filters, page, finalized } = parseEventsRequest(sp);
   return { ...filters, ...page, finalized };
