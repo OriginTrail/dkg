@@ -93,7 +93,7 @@ it.runIf(nativeMetadata && process.platform === 'linux')('preserves Linux ACLs a
 
 // test-disable-allow: D1 #425 -- owner=branarakic lane=mcp-config-native-windows expires=2026-10-08 Native security-descriptor case runs on windows-latest in mcp-config-native.yml.
 it.runIf(nativeMetadata && process.platform === 'win32')('preserves a protected Windows DACL and owner through replacement', () => {
-  const powershell = (script: string) => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference='Stop'; ${script}`], {
+  const powershell = (script: string) => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference='Stop'; $env:PSModulePath = $PSHOME + '\\Modules'; ${script}`], {
     encoding: 'utf8', env: { ...process.env, DKG_MCP_NATIVE_PATH: path }, windowsHide: true,
   }).trim();
   powershell("$acl=Get-Acl -LiteralPath $env:DKG_MCP_NATIVE_PATH; $acl.SetAccessRuleProtection($true,$false); $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; $rule=[System.Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','Allow'); $acl.SetAccessRule($rule); Set-Acl -LiteralPath $env:DKG_MCP_NATIVE_PATH -AclObject $acl");

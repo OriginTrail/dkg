@@ -11,9 +11,12 @@ export function linuxMetadataCopyCommand(): string {
   throw new Error('Updating existing MCP configs on Linux requires GNU coreutils cp or gcp with ACL/xattr preservation. Install coreutils (for example, apk add coreutils on Alpine). The original config was not changed.');
 }
 
-/** Use the Windows system runtime; paths are data, never interpolated script text. */
+/** Use the Windows system runtime; paths are data, never interpolated script text.
+ * Restrict module discovery to this runtime's built-ins. A Node process launched
+ * by PowerShell 7 otherwise forwards incompatible PS7 modules to powershell.exe.
+ */
 export function runMcpConfigPowerShell(script: string, paths: { source: string; destination: string; backup?: string }): void {
-  execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference = 'Stop'; ${script}`], {
+  execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference = 'Stop'; $env:PSModulePath = $PSHOME + '\\Modules'; ${script}`], {
     stdio: 'pipe',
     windowsHide: true,
     env: {
