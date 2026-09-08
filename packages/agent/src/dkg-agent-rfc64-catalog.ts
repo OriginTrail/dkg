@@ -143,11 +143,10 @@ import {
 } from './rfc64/release-native-catalog-authority-v1.js';
 import { readRfc64LegacySwmBoundaryCountV1 } from
   './rfc64/legacy-swm-boundary-v1.js';
+import type { Rfc64CatalogMutationCoordinatorV1 } from
+  './rfc64/catalog-mutation-runtime-v1.js';
 import {
-  rfc64CatalogReplayInventoryFingerprintV1,
-  rfc64CatalogReplayScopeKeyV1,
-  withLockedRfc64CatalogReplaySnapshotV1,
-  type Rfc64CatalogReplayHeadV1,
+  Rfc64CatalogReplaySnapshotRuntimeV1,
 } from './rfc64/catalog-replay-snapshot-runtime-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
@@ -476,8 +475,11 @@ interface Rfc64CatalogReplayRuntimeV1 {
   tail: Promise<void>;
   readonly pending: Map<string, Promise<Readonly<Rfc64CatalogReplayResultV1>>>;
   readonly pendingByPeer: Map<string, number>;
-  indexFingerprint: string | null;
-  indexByScope: ReadonlyMap<string, readonly Rfc64CatalogReplayHeadV1[]>;
+}
+
+interface Rfc64CatalogReplaySnapshotRuntimeOwnerV1 {
+  readonly persistence: Rfc64PersistenceV1;
+  readonly runtime: Rfc64CatalogReplaySnapshotRuntimeV1;
 }
 
 interface Rfc64CatalogReplayResultV1 {
@@ -496,6 +498,8 @@ type Rfc64CatalogReplayAdmissionV1 = Readonly<{
 }>;
 
 const rfc64CatalogReplayRuntimesV1 = new WeakMap<DKGAgent, Rfc64CatalogReplayRuntimeV1>();
+const rfc64CatalogReplaySnapshotRuntimesV1 =
+  new WeakMap<DKGAgent, Rfc64CatalogReplaySnapshotRuntimeOwnerV1>();
 
 interface Rfc64CatalogReplayProgressV1 {
   readonly policyDigest: Digest32V1;
@@ -933,11 +937,24 @@ function rfc64CatalogReplayRuntimeForV1(agent: DKGAgent): Rfc64CatalogReplayRunt
       tail: Promise.resolve(),
       pending: new Map(),
       pendingByPeer: new Map(),
-      indexFingerprint: null,
-      indexByScope: new Map(),
     };
     rfc64CatalogReplayRuntimesV1.set(agent, runtime);
   }
+  return runtime;
+}
+
+function rfc64CatalogReplaySnapshotRuntimeForV1(
+  agent: DKGAgent,
+  persistence: Rfc64PersistenceV1,
+  mutationCoordinator: Rfc64CatalogMutationCoordinatorV1,
+): Rfc64CatalogReplaySnapshotRuntimeV1 {
+  const owned = rfc64CatalogReplaySnapshotRuntimesV1.get(agent);
+  if (owned?.persistence === persistence) return owned.runtime;
+  const runtime = new Rfc64CatalogReplaySnapshotRuntimeV1(
+    persistence,
+    mutationCoordinator,
+  );
+  rfc64CatalogReplaySnapshotRuntimesV1.set(agent, Object.freeze({ persistence, runtime }));
   return runtime;
 }
 
@@ -2597,57 +2614,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     return Object.freeze({ status: 'admitted', newlyQueued: true, completion: run });
   }
 
-  private async readRfc64CatalogReplayIndexV1(
-    this: DKGAgent,
-  ): Promise<ReadonlyMap<string, readonly Rfc64CatalogReplayHeadV1[]>> {
-    const persistence = this.rfc64PersistenceV1;
-    if (persistence === undefined) return new Map();
-    const runtime = rfc64CatalogReplayRuntimeForV1(this);
-    const snapshots = persistence.inventory.listAppliedCatalogHeadsV1();
-    const fingerprint = rfc64CatalogReplayInventoryFingerprintV1(snapshots);
-    if (runtime.indexFingerprint === fingerprint) return runtime.indexByScope;
-
-    const index = new Map<string, Rfc64CatalogReplayHeadV1[]>();
-    for (const applied of snapshots) {
-      const stored = await persistence.controlObjects.getVerifiedObjectByDigest({
-        objectDigest: applied.currentCatalogHeadDigest,
-        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-      }).catch(() => null);
-      if (stored === null) {
-        throw new Error('RFC-64 durable catalog head is missing or unverifiable');
-      }
-      try {
-        assertSignedAuthorCatalogHeadEnvelopeV1(stored.envelope);
-        const head = stored.envelope;
-        const scope = deriveAuthorCatalogScopeFromHeadV1(head.payload);
-        if (
-          computeAuthorCatalogScopeDigestV1(scope) !== applied.catalogScopeDigest
-          || head.payload.authorAddress !== applied.authorAddress
-          || head.payload.version !== applied.catalogVersion
-        ) {
-          throw new Error('RFC-64 durable catalog head does not match its applied inventory row');
-        }
-        const key = rfc64CatalogReplayScopeKeyV1(
-          head.payload.networkId,
-          head.payload.contextGraphId,
-        );
-        const entries = index.get(key) ?? [];
-        entries.push(Object.freeze({ head }));
-        index.set(key, entries);
-      } catch (cause) {
-        throw new Error('RFC-64 durable catalog inventory contains an invalid head', {
-          cause,
-        });
-      }
-    }
-    runtime.indexFingerprint = fingerprint;
-    runtime.indexByScope = new Map([...index].map(([key, entries]) => [
-      key,
-      Object.freeze(entries),
-    ]));
-    return runtime.indexByScope;
-  }
-
   async reannounceRfc64CatalogHeadsToPeerV1(
     this: DKGAgent,
     peerId: string,
@@ -2663,11 +2629,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }
     let announced = 0;
     let failed = 0;
-    return withLockedRfc64CatalogReplaySnapshotV1({
+    const replaySnapshotRuntime = rfc64CatalogReplaySnapshotRuntimeForV1(
+      this,
       persistence,
-      mutationCoordinator: this.rfc64CatalogMutationCoordinatorV1,
+      this.rfc64CatalogMutationCoordinatorV1,
+    );
+    return replaySnapshotRuntime.withSnapshot({
       requestedScope,
-      readIndex: () => this.readRfc64CatalogReplayIndexV1(),
       operation: async (replayEntries) => {
         const manifest: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
         for (const { head } of replayEntries) {
