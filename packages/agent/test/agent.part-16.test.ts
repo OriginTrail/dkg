@@ -1549,7 +1549,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
         releaseSync?.();
         await Promise.all([first, second]);
-        expect((agent as any).syncingPeers.has(remotePeer)).toBe(false);
+        expect((agent as any).peerSyncSession.syncingPeers.has(remotePeer)).toBe(false);
 
         await (agent as any).trySyncFromPeer(remotePeer);
         expect(syncCallCount).toBe(2);

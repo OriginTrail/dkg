@@ -18,6 +18,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { PROTOCOL_MESSAGE, PROTOCOL_SYNC, type ProtocolOutboxEntry } from '@origintrail-official/dkg-core';
 
 /**
@@ -129,6 +130,9 @@ function makeAgentLike({
   syncReconcilerBackoff?: Map<string, { failures: number; nextRetryAt: number }>;
   peerIds?: string[];
 }): any {
+  const peerSyncSession = new PeerSyncSession();
+  for (const [peer, time] of lastSuccessfulSyncAt ?? []) peerSyncSession.lastSuccessfulSyncAt.set(peer, time);
+  for (const [peer, backoff] of syncReconcilerBackoff ?? []) peerSyncSession.syncReconcilerBackoff.set(peer, backoff);
   return {
     node: {
       libp2p: {
@@ -150,8 +154,7 @@ function makeAgentLike({
     },
     messenger: makeOutboxStub(outboxEntries ?? []),
     peerHealth: health ?? new Map(),
-    lastSuccessfulSyncAt: lastSuccessfulSyncAt ?? new Map(),
-    syncReconcilerBackoff: syncReconcilerBackoff ?? new Map(),
+    peerSyncSession,
   };
 }
 
