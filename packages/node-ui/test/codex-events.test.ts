@@ -21,4 +21,35 @@ describe('Codex conversation events', () => {
     const final = applyEvent(thread, { sequence: 2, method: 'turn/completed', params: { threadId: 'a', turn: { id: 't', status: 'completed', items: [] } } });
     expect(final.turns[0].items[0].text).toBe('Saved');
   });
+
+  it('applies thread metadata, item lifecycle, and bounded command output updates', () => {
+    const event = (method: string, params: any) => ({ sequence: 1, method, params });
+    let thread: Thread = {
+      id: 'a',
+      cwd: '/tmp',
+      turns: [{ id: 't', status: 'inProgress', items: [{ id: 'other', type: 'reasoning' }] }],
+    };
+
+    thread = applyEvent(thread, event('thread/name/updated', { threadId: 'a', threadName: 'Renamed' }));
+    expect(thread.name).toBe('Renamed');
+    thread = applyEvent(thread, event('item/started', {
+      threadId: 'a', turnId: 't', item: { id: 'command', type: 'commandExecution', aggregatedOutput: '' },
+    }));
+    thread = applyEvent(thread, event('item/commandExecution/outputDelta', {
+      threadId: 'a', turnId: 't', itemId: 'command', delta: 'x'.repeat(100_001),
+    }));
+    const command = thread.turns[0].items.find((item) => item.id === 'command');
+    expect(command?.aggregatedOutput).toHaveLength(100_000);
+    thread = applyEvent(thread, event('item/completed', {
+      threadId: 'a', turnId: 't', item: { id: 'command', type: 'commandExecution', status: 'completed' },
+    }));
+    expect(thread.turns[0].items.find((item) => item.id === 'command')?.status).toBe('completed');
+
+    expect(applyEvent(thread, event('unknown', { threadId: 'a' }))).toBe(thread);
+    expect(applyEvent(thread, event('unknown', { threadId: 'a', turnId: 't' })).turns).toEqual(thread.turns);
+    const unrelatedTurn = applyEvent(thread, event('item/started', {
+      threadId: 'a', turnId: 'missing', item: { id: 'new', type: 'fileChange' },
+    }));
+    expect(unrelatedTurn.turns).toEqual(thread.turns);
+  });
 });

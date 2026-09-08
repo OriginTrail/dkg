@@ -7,6 +7,11 @@ const S = 'http://schema.org/';
 const D = 'http://dkg.io/ontology/';
 const TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const VIEWS = { WM: 'working-memory', SWM: 'shared-working-memory', VM: 'verifiable-memory' };
+const SEARCH_PREDICATES = [
+  S + 'text', S + 'name', S + 'description',
+  'https://schema.org/text', 'https://schema.org/name', 'https://schema.org/description',
+  'http://www.w3.org/2000/01/rdf-schema#label', D + 'content',
+];
 const STOP = new Set(('the and for that this with from your you our are was were have has had what which when where would could should about into also just like please look find tell show know does can how now its let lets each any all only some more most then than them they their there here build built want need use using get make new existing question answer message feature features something think').split(' '));
 const hash = (s) => createHash('sha256').update(s).digest('hex').slice(0, 32);
 const literal = (s) => JSON.stringify(String(s)).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
@@ -141,9 +146,12 @@ export class DkgMemory extends EventEmitter {
       const plans = [...ids].slice(0, 32).flatMap((contextGraphId) => Object.keys(VIEWS).map((layer) => ({ contextGraphId, layer })));
       const filter = result.keywords.map((word) => `CONTAINS(LCASE(STR(?text)), ${literal(word)})`).join(' || ');
       const exclude = excludeThreadId ? `FILTER NOT EXISTS { ?entity <${S}isPartOf> <urn:dkg:codex:conversation:${hash(excludeThreadId)}> }` : '';
-      const sparql = `SELECT ?entity ?predicate ?text ?g WHERE { GRAPH ?g { ?entity ?predicate ?text .
+      const predicatePatterns = SEARCH_PREDICATES
+        .map((predicate) => `{ ?entity <${predicate}> ?text . BIND(<${predicate}> AS ?predicate) }`)
+        .join(' UNION ');
+      const sparql = `SELECT ?entity ?predicate ?text ?g WHERE {
+        GRAPH ?g { ${predicatePatterns}
         FILTER(isLiteral(?text)) FILTER(STRLEN(STR(?text)) >= 3) FILTER(${filter})
-        FILTER(?predicate IN (<${S}text>, <${S}name>, <${S}description>, <https://schema.org/text>, <https://schema.org/name>, <https://schema.org/description>, <http://www.w3.org/2000/01/rdf-schema#label>, <${D}content>))
         ${exclude} } } LIMIT 64`;
       await this.identify();
       // Four concurrent requests bound load on the local graph store.
@@ -231,6 +239,7 @@ export class DkgMemory extends EventEmitter {
       }
       const subjects = [...new Set(r.quads.map((q) => q.subject))];
       const checkedSubjects = [...new Set([...subjects, conversation])];
+      // sparql-scan-allow: R1 -- VALUES binds the small message write-set and the API scopes one context graph
       const rows = await this.query(`SELECT DISTINCT ?s WHERE { VALUES ?s { ${checkedSubjects.map((s) => `<${s}>`).join(' ')} } ?s ?p ?o }`, r.contextGraphId);
       const oldSubjects = new Set(rows.map((b) => value(b.s)));
       // Preserve the original delta when a previous write succeeded but its
