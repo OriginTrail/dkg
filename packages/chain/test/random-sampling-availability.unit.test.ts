@@ -2,7 +2,8 @@ import { MockChainAdapter } from '../src/mock-adapter.js';
 import { Contract } from 'ethers';
 import { afterEach, expect, it, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
-import { resolveRandomSamplingAvailability } from '../src/random-sampling-availability.js';
+import { RandomSamplingContractsUnavailableError, resolveRandomSamplingAvailability } from '../src/random-sampling-availability.js';
+import { HubContractNotFoundError } from '../src/hub-contract-not-found-error.js';
 
 // Exercise the real public capability with deterministic contract-resolution
 // ports. Hub cache rotation itself also has a real-chain integration witness.
@@ -61,9 +62,9 @@ it('refreshes invalidated EVM bindings before returning membership', async () =>
 
 it.each(['bindingFailure', 'membershipFailure'] as const)('normalizes missing contracts at %s', async (failure) => {
   const chain = adapter();
-  chain[failure] = new Error(failure === 'bindingFailure'
-    ? 'RandomSampling / RandomSamplingStorage not deployed in this Hub'
-    : 'Contract "ShardingTableStorage" not found in Hub at 0x1');
+  chain[failure] = failure === 'bindingFailure'
+    ? new RandomSamplingContractsUnavailableError()
+    : new HubContractNotFoundError('ShardingTableStorage', '0x1');
   expect(await chain.resolveRandomSamplingAvailability(52n)).toEqual({ kind: 'unavailable', reason: 'contracts_not_deployed' });
 });
 

@@ -43,6 +43,8 @@ import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fence.js';
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
+import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
+import { RandomSamplingContractsUnavailableError } from './random-sampling-availability.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE, requiredHeadBlockForReceipt,
   TX_SERIALIZER_OBSERVE_AFTER_MS,
@@ -2793,12 +2795,12 @@ export class EVMChainAdapterBase {
       );
     } catch (err) {
       if (this.isContractMissingRevert(err)) {
-        throw new Error(`Contract "${name}" not found in Hub at ${this.hubAddress}`, { cause: err });
+        throw new HubContractNotFoundError(name, this.hubAddress, { cause: err });
       }
       throw err;
     }
     if (address === ethers.ZeroAddress) {
-      throw new Error(`Contract "${name}" not found in Hub at ${this.hubAddress}`);
+      throw new HubContractNotFoundError(name, this.hubAddress);
     }
     return address;
   }
@@ -4049,13 +4051,8 @@ export class EVMChainAdapterBase {
     try {
       return await this.resolveAndAssignRandomSamplingPair();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('not found in Hub at')) {
-        throw new Error(
-          'RandomSampling / RandomSamplingStorage not deployed in this Hub. ' +
-          'The deployer is responsible for shipping these alongside V10 publish.',
-          { cause: err },
-        );
+      if (err instanceof HubContractNotFoundError) {
+        throw new RandomSamplingContractsUnavailableError({ cause: err });
       }
       throw err;
     }

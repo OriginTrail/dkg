@@ -60,18 +60,23 @@ describe('Random Sampling membership reconciliation', () => {
     { active: false, missing: true, phase: 'disabled', stopped: 0, scheduled: false },
     { active: true, missing: true, phase: 'waiting', stopped: 1, scheduled: true },
   ])('applies typed chain outcomes: active=$active missing=$missing', async ({ active, missing, phase, stopped, scheduled }) => {
-    const failure = new Error(missing ? 'Contract "ShardingTableStorage" not found in Hub at 0x1' : 'temporary RPC outage');
-    const membership = vi.fn(async () => true);
+    const failure = new Error('temporary RPC outage');
+    const availability = vi.fn(async () => ({ kind: 'available' as const, member: true }));
     const stop = vi.fn(async () => {});
     const runtime = createRuntime({
-      role: 'core', chain: { chainId: 'mock:0', getIdentityId: async () => 52n, isShardingTableMember: membership },
+      role: 'core', chain: {
+        chainId: 'mock:0', getIdentityId: async () => 52n,
+        resolveRandomSamplingAvailability: availability,
+      },
       createHandle: async () => ({ enabled: true, start: vi.fn(), stop,
         getStatus: () => ({ enabled: true, role: 'core', identityId: '52', disabledReason: null, loop: null }) }),
       log: { info: vi.fn(), warn: vi.fn() }, shutdownTimeoutMs: () => 100,
     });
     try {
       if (active) await runtime.start();
-      membership.mockRejectedValue(failure);
+      availability.mockResolvedValue(missing
+        ? { kind: 'unavailable', reason: 'contracts_not_deployed' }
+        : { kind: 'indeterminate', error: failure });
       await runtime.reconcile();
       expect(runtime.getLifecycleSnapshot()).toMatchObject({ phase, reconciliationScheduled: scheduled });
       expect(stop).toHaveBeenCalledTimes(stopped);

@@ -371,6 +371,19 @@ if (packageExports['./dist/*'] !== './dist/*') {
   throw new Error('historical non-RFC-64 ./dist/* compatibility was not preserved');
 }
 
+for (const path of ['random-sampling-runtime.js', 'random-sampling-eligibility.js']) {
+  const subpath = `./dist/${path}`;
+  if (packageExports[subpath] !== null) {
+    throw new Error(`internal Random Sampling module is not explicitly blocked: ${path}`);
+  }
+  try {
+    await import(`@origintrail-official/dkg-agent/dist/${path}`);
+    throw new Error(`internal Random Sampling module unexpectedly resolved: ${path}`);
+  } catch (error) {
+    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+  }
+}
+
 async function listEmittedRfc64Modules() {
   const rootPath = fileURLToPath(new URL('../dist/rfc64/', import.meta.url));
   const pending = [rootPath];

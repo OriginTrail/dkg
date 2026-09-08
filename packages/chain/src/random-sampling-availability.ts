@@ -9,19 +9,24 @@ export type RandomSamplingAvailability =
 export type RandomSamplingAvailabilityReader = Pick<ChainAdapter,
   'isRandomSamplingReady' | 'isShardingTableMember' | 'resolveRandomSamplingAvailability'>;
 
-/** Normalize deployment lookup errors where the adapter's vendor contract is owned. */
+/** Typed deployment miss emitted by adapters that own Random Sampling bindings. */
+export class RandomSamplingContractsUnavailableError extends Error {
+  constructor(options?: ErrorOptions) {
+    super(
+      'RandomSampling / RandomSamplingStorage not deployed in this Hub. '
+      + 'The deployer is responsible for shipping these alongside V10 publish.',
+      options,
+    );
+    this.name = 'RandomSamplingContractsUnavailableError';
+  }
+}
+
+/** Vendor-neutral compatibility probe for adapters without the typed capability. */
 export async function probeRandomSamplingAvailability(
   probe: () => Promise<boolean>,
 ): Promise<RandomSamplingAvailability> {
   try { return { kind: 'available', member: await probe() }; }
-  catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if ((message.includes('ShardingTableStorage') || message.includes('RandomSampling'))
-      && (message.includes('not found in Hub') || message.includes('not resolvable') || message.includes('not deployed in this Hub'))) {
-      return { kind: 'unavailable', reason: 'contracts_not_deployed' };
-    }
-    return { kind: 'indeterminate', error };
-  }
+  catch (error) { return { kind: 'indeterminate', error }; }
 }
 
 /**
