@@ -59,7 +59,7 @@
     "react": "^19",
     "react-dom": "^19",
     "react-router-dom": "^7",
-    "recharts": "^2",
+    "recharts": "^3",
     "three": "^0.184.0",
     "typescript": "^5.7",
     "vite": "^6",
