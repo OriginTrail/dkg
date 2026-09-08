@@ -94,4 +94,53 @@ describe('RFC-64 catalog mutation coordinator', () => {
     expect(omegaContenderEntered).toBe(true);
     expect(coordinator.activeScopeCount).toBe(0);
   });
+
+  it('keeps every acquired scope locked after caller cancellation until physical completion', async () => {
+    const coordinator = new Rfc64CatalogMutationCoordinatorV1();
+    const alpha = catalogScope(`${AUTHOR}/alpha`);
+    const omega = catalogScope(`${AUTHOR}/omega`);
+    const controller = new AbortController();
+    const abortReason = new Error('caller stopped waiting');
+    let releaseOperation!: () => void;
+    let markOperationEntered!: () => void;
+    const operationGate = new Promise<void>((resolve) => { releaseOperation = resolve; });
+    const operationEntered = new Promise<void>((resolve) => { markOperationEntered = resolve; });
+    const canceled = coordinator.runMany([omega, alpha], async () => {
+      markOperationEntered();
+      await operationGate;
+    }, controller.signal);
+    await operationEntered;
+
+    controller.abort(abortReason);
+    await expect(canceled).rejects.toBe(abortReason);
+    let alphaContenderEntered = false;
+    let omegaContenderEntered = false;
+    const contenders = [
+      coordinator.run(alpha, async () => { alphaContenderEntered = true; }),
+      coordinator.run(omega, async () => { omegaContenderEntered = true; }),
+    ];
+    await new Promise<void>((resolve) => { setImmediate(resolve); });
+    expect(alphaContenderEntered).toBe(false);
+    expect(omegaContenderEntered).toBe(false);
+
+    releaseOperation();
+    await expect(Promise.all(contenders)).resolves.toEqual([undefined, undefined]);
+    expect(alphaContenderEntered).toBe(true);
+    expect(omegaContenderEntered).toBe(true);
+    expect(coordinator.activeScopeCount).toBe(0);
+  });
+
+  it('does not start an empty-scope operation for an already aborted caller', async () => {
+    const coordinator = new Rfc64CatalogMutationCoordinatorV1();
+    const controller = new AbortController();
+    const abortReason = new Error('caller already stopped');
+    let operationStarted = false;
+    controller.abort(abortReason);
+
+    await expect(coordinator.runMany([], async () => {
+      operationStarted = true;
+    }, controller.signal)).rejects.toBe(abortReason);
+    expect(operationStarted).toBe(false);
+    expect(coordinator.activeScopeCount).toBe(0);
+  });
 });

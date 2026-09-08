@@ -5,25 +5,38 @@ import {
   computeAuthorCatalogScopeDigestV1,
   deriveAuthorCatalogScopeFromHeadV1,
   type AuthorCatalogScopeV1,
+  type Digest32V1,
   type SignedAuthorCatalogHeadEnvelopeV1,
+  type SignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
-import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
 import {
   rfc64CatalogMutationScopeKeyV1,
   type Rfc64CatalogMutationCoordinatorV1,
 } from './catalog-mutation-runtime-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './inventory-v1/index.js';
-import type { Rfc64PersistenceV1 } from './persistence-v1.js';
-import type { Rfc64PublicCatalogHeadReplayRequestV1 } from
-  './public-catalog-transport-v1.js';
 
 export interface Rfc64CatalogReplayHeadV1 {
   readonly head: SignedAuthorCatalogHeadEnvelopeV1;
 }
 
+export type Rfc64CatalogReplaySelectionV1 = Readonly<{
+  readonly kind: 'all';
+}> | Readonly<{
+  readonly kind: 'scope';
+  readonly networkId: string;
+  readonly contextGraphId: string;
+}>;
+
+export interface Rfc64CatalogReplaySnapshotStorageV1 {
+  listAppliedCatalogHeadsV1(): readonly AppliedCatalogHeadSnapshotV1[];
+  readVerifiedCatalogHeadV1(
+    objectDigest: Digest32V1,
+  ): Promise<SignedControlEnvelopeV1 | null>;
+}
+
 interface WithRfc64CatalogReplaySnapshotInputV1<T> {
-  readonly requestedScope: Readonly<Rfc64PublicCatalogHeadReplayRequestV1> | undefined;
+  readonly selection: Rfc64CatalogReplaySelectionV1;
   operation(entries: readonly Rfc64CatalogReplayHeadV1[]): Promise<T>;
 }
 
@@ -74,25 +87,25 @@ function rfc64CatalogReplayMutationScopesV1(
 
 /** Own index construction, cache invalidation, and the complete locked snapshot protocol. */
 export class Rfc64CatalogReplaySnapshotRuntimeV1 {
-  readonly #persistence: Rfc64PersistenceV1;
+  readonly #storage: Rfc64CatalogReplaySnapshotStorageV1;
   readonly #mutationCoordinator: Rfc64CatalogMutationCoordinatorV1;
   #indexFingerprint: string | null = null;
   #indexByScope: ReadonlyMap<string, readonly Rfc64CatalogReplayHeadV1[]> = new Map();
 
   constructor(
-    persistence: Rfc64PersistenceV1,
+    storage: Rfc64CatalogReplaySnapshotStorageV1,
     mutationCoordinator: Rfc64CatalogMutationCoordinatorV1,
   ) {
-    this.#persistence = persistence;
+    this.#storage = storage;
     this.#mutationCoordinator = mutationCoordinator;
   }
 
   async withSnapshot<T>(
     input: Readonly<WithRfc64CatalogReplaySnapshotInputV1<T>>,
   ): Promise<T> {
-    if (input.requestedScope === undefined) {
+    if (input.selection.kind === 'all') {
       const inventoryFingerprint = rfc64CatalogReplayInventoryFingerprintV1(
-        this.#persistence.inventory.listAppliedCatalogHeadsV1(),
+        this.#storage.listAppliedCatalogHeadsV1(),
       );
       const entries = Object.freeze([
         ...(await this.#readIndex()).values(),
@@ -101,13 +114,13 @@ export class Rfc64CatalogReplaySnapshotRuntimeV1 {
         rfc64CatalogReplayMutationScopesV1(entries),
         async () => {
           if (rfc64CatalogReplayInventoryFingerprintV1(
-            this.#persistence.inventory.listAppliedCatalogHeadsV1(),
+            this.#storage.listAppliedCatalogHeadsV1(),
           ) !== inventoryFingerprint) {
             throw new Error('RFC-64 durable catalog inventory changed before replay snapshot');
           }
           const result = await input.operation(entries);
           if (rfc64CatalogReplayInventoryFingerprintV1(
-            this.#persistence.inventory.listAppliedCatalogHeadsV1(),
+            this.#storage.listAppliedCatalogHeadsV1(),
           ) !== inventoryFingerprint) {
             throw new Error('RFC-64 durable catalog inventory changed during replay');
           }
@@ -117,8 +130,8 @@ export class Rfc64CatalogReplaySnapshotRuntimeV1 {
     }
 
     const replayScopeKey = rfc64CatalogReplayScopeKeyV1(
-      input.requestedScope.networkId,
-      input.requestedScope.contextGraphId,
+      input.selection.networkId,
+      input.selection.contextGraphId,
     );
     const discoveredEntries = (await this.#readIndex()).get(replayScopeKey) ?? [];
     const mutationScopes = rfc64CatalogReplayMutationScopesV1(discoveredEntries);
@@ -147,22 +160,20 @@ export class Rfc64CatalogReplaySnapshotRuntimeV1 {
   }
 
   async #readIndex(): Promise<ReadonlyMap<string, readonly Rfc64CatalogReplayHeadV1[]>> {
-    const snapshots = this.#persistence.inventory.listAppliedCatalogHeadsV1();
+    const snapshots = this.#storage.listAppliedCatalogHeadsV1();
     const fingerprint = rfc64CatalogReplayInventoryFingerprintV1(snapshots);
     if (this.#indexFingerprint === fingerprint) return this.#indexByScope;
 
     const index = new Map<string, Rfc64CatalogReplayHeadV1[]>();
     for (const applied of snapshots) {
-      const stored = await this.#persistence.controlObjects.getVerifiedObjectByDigest({
-        objectDigest: applied.currentCatalogHeadDigest,
-        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-      }).catch(() => null);
-      if (stored === null) {
+      const head = await this.#storage.readVerifiedCatalogHeadV1(
+        applied.currentCatalogHeadDigest,
+      ).catch(() => null);
+      if (head === null) {
         throw new Error('RFC-64 durable catalog head is missing or unverifiable');
       }
       try {
-        assertSignedAuthorCatalogHeadEnvelopeV1(stored.envelope);
-        const head = stored.envelope;
+        assertSignedAuthorCatalogHeadEnvelopeV1(head);
         const scope = deriveAuthorCatalogScopeFromHeadV1(head.payload);
         if (
           computeAuthorCatalogScopeDigestV1(scope) !== applied.catalogScopeDigest

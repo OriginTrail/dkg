@@ -951,7 +951,15 @@ function rfc64CatalogReplaySnapshotRuntimeForV1(
   const owned = rfc64CatalogReplaySnapshotRuntimesV1.get(agent);
   if (owned?.persistence === persistence) return owned.runtime;
   const runtime = new Rfc64CatalogReplaySnapshotRuntimeV1(
-    persistence,
+    Object.freeze({
+      listAppliedCatalogHeadsV1: () => persistence.inventory.listAppliedCatalogHeadsV1(),
+      readVerifiedCatalogHeadV1: async (objectDigest: Digest32V1) => (
+        await persistence.controlObjects.getVerifiedObjectByDigest({
+          objectDigest,
+          verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+        }).catch(() => null)
+      )?.envelope ?? null,
+    }),
     mutationCoordinator,
   );
   rfc64CatalogReplaySnapshotRuntimesV1.set(agent, Object.freeze({ persistence, runtime }));
@@ -2635,7 +2643,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       this.rfc64CatalogMutationCoordinatorV1,
     );
     return replaySnapshotRuntime.withSnapshot({
-      requestedScope,
+      selection: requestedScope === undefined
+        ? Object.freeze({ kind: 'all' })
+        : Object.freeze({
+            kind: 'scope',
+            networkId: requestedScope.networkId,
+            contextGraphId: requestedScope.contextGraphId,
+          }),
       operation: async (replayEntries) => {
         const manifest: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
         for (const { head } of replayEntries) {

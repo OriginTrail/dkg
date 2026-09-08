@@ -16,10 +16,11 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { Rfc64CatalogMutationCoordinatorV1 } from
   '../src/rfc64/catalog-mutation-runtime-v1.js';
-import { Rfc64CatalogReplaySnapshotRuntimeV1 } from
-  '../src/rfc64/catalog-replay-snapshot-runtime-v1.js';
+import {
+  Rfc64CatalogReplaySnapshotRuntimeV1,
+  type Rfc64CatalogReplaySnapshotStorageV1,
+} from '../src/rfc64/catalog-replay-snapshot-runtime-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from '../src/rfc64/inventory-v1/index.js';
-import type { Rfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
 
 const NETWORK_ID = 'hardhat1';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -92,12 +93,11 @@ function appliedSnapshot(
   });
 }
 
-function replayRequest(contextGraphId = CONTEXT_GRAPH_ID) {
+function scopedSelection(contextGraphId = CONTEXT_GRAPH_ID) {
   return Object.freeze({
-    kind: 'Rfc64PublicCatalogHeadReplayV1' as const,
+    kind: 'scope' as const,
     networkId: NETWORK_ID,
     contextGraphId,
-    policyDigest: DELEGATION_DIGEST,
   });
 }
 
@@ -106,27 +106,18 @@ function createReplayFixture(initialHeads: readonly SignedAuthorCatalogHeadEnvel
   const storedHeads = new Map<string, SignedAuthorCatalogHeadEnvelopeV1>(
     initialHeads.map((head) => [head.objectDigest, head]),
   );
-  const getVerifiedObjectByDigest = vi.fn(async (
-    input: Readonly<{ objectDigest: Digest32V1 }>,
-  ) => {
-    const envelope = storedHeads.get(input.objectDigest);
-    if (envelope === undefined) return null;
-    return Object.freeze({
-      envelope,
-      issuerSignature: Object.freeze({}),
-    });
+  const readVerifiedCatalogHeadV1 = vi.fn(async (objectDigest: Digest32V1) => (
+    storedHeads.get(objectDigest) ?? null
+  ));
+  const storage: Rfc64CatalogReplaySnapshotStorageV1 = Object.freeze({
+    listAppliedCatalogHeadsV1: () => inventory,
+    readVerifiedCatalogHeadV1,
   });
-  const persistence = Object.freeze({
-    inventory: Object.freeze({
-      listAppliedCatalogHeadsV1: () => inventory,
-    }),
-    controlObjects: Object.freeze({ getVerifiedObjectByDigest }),
-  }) as unknown as Rfc64PersistenceV1;
   const coordinator = new Rfc64CatalogMutationCoordinatorV1();
-  const runtime = new Rfc64CatalogReplaySnapshotRuntimeV1(persistence, coordinator);
+  const runtime = new Rfc64CatalogReplaySnapshotRuntimeV1(storage, coordinator);
   return Object.freeze({
     coordinator,
-    getVerifiedObjectByDigest,
+    readVerifiedCatalogHeadV1,
     runtime,
     stage(head: SignedAuthorCatalogHeadEnvelopeV1): void {
       storedHeads.set(head.objectDigest, head);
@@ -166,17 +157,17 @@ describe('RFC-64 catalog replay snapshot runtime', () => {
     const successor = signedHead(catalogScope(CONTEXT_GRAPH_ID), '1');
     const fixture = createReplayFixture([initial]);
     const readDigests = async () => fixture.runtime.withSnapshot({
-      requestedScope: replayRequest(),
+      selection: scopedSelection(),
       operation: async (entries) => entries.map(({ head }) => head.objectDigest),
     });
 
     await expect(readDigests()).resolves.toEqual([initial.objectDigest]);
     await expect(readDigests()).resolves.toEqual([initial.objectDigest]);
-    expect(fixture.getVerifiedObjectByDigest).toHaveBeenCalledTimes(1);
+    expect(fixture.readVerifiedCatalogHeadV1).toHaveBeenCalledTimes(1);
 
     fixture.replaceAppliedHeads([successor]);
     await expect(readDigests()).resolves.toEqual([successor.objectDigest]);
-    expect(fixture.getVerifiedObjectByDigest).toHaveBeenCalledTimes(2);
+    expect(fixture.readVerifiedCatalogHeadV1).toHaveBeenCalledTimes(2);
   });
 
   it('rejects an unscoped replay when inventory changes before the locks settle', async () => {
@@ -187,9 +178,12 @@ describe('RFC-64 catalog replay snapshot runtime', () => {
     const held = await holdScope(fixture.coordinator, scope);
     const operation = vi.fn(async () => 'delivered');
 
-    const replay = fixture.runtime.withSnapshot({ requestedScope: undefined, operation });
+    const replay = fixture.runtime.withSnapshot({
+      selection: Object.freeze({ kind: 'all' }),
+      operation,
+    });
     await vi.waitFor(() => {
-      expect(fixture.getVerifiedObjectByDigest).toHaveBeenCalledTimes(1);
+      expect(fixture.readVerifiedCatalogHeadV1).toHaveBeenCalledTimes(1);
     });
     fixture.replaceAppliedHeads([successor]);
     held.release();
@@ -205,7 +199,7 @@ describe('RFC-64 catalog replay snapshot runtime', () => {
     const fixture = createReplayFixture([initial]);
 
     await expect(fixture.runtime.withSnapshot({
-      requestedScope: undefined,
+      selection: Object.freeze({ kind: 'all' }),
       operation: async () => {
         fixture.replaceAppliedHeads([successor]);
         return 'delivered';
@@ -222,11 +216,11 @@ describe('RFC-64 catalog replay snapshot runtime', () => {
     const held = await holdScope(fixture.coordinator, scope);
 
     const replay = fixture.runtime.withSnapshot({
-      requestedScope: replayRequest(),
+      selection: scopedSelection(),
       operation: async (entries) => entries.map(({ head }) => head.objectDigest),
     });
     await vi.waitFor(() => {
-      expect(fixture.getVerifiedObjectByDigest).toHaveBeenCalledTimes(1);
+      expect(fixture.readVerifiedCatalogHeadV1).toHaveBeenCalledTimes(1);
     });
     fixture.replaceAppliedHeads([successor]);
     held.release();
@@ -245,11 +239,11 @@ describe('RFC-64 catalog replay snapshot runtime', () => {
     const operation = vi.fn(async () => 'delivered');
 
     const replay = fixture.runtime.withSnapshot({
-      requestedScope: replayRequest(),
+      selection: scopedSelection(),
       operation,
     });
     await vi.waitFor(() => {
-      expect(fixture.getVerifiedObjectByDigest).toHaveBeenCalledTimes(1);
+      expect(fixture.readVerifiedCatalogHeadV1).toHaveBeenCalledTimes(1);
     });
     fixture.replaceAppliedHeads([initial, late]);
     held.release();
@@ -266,7 +260,7 @@ describe('RFC-64 catalog replay snapshot runtime', () => {
     const fixture = createReplayFixture([initial]);
 
     await expect(fixture.runtime.withSnapshot({
-      requestedScope: replayRequest(),
+      selection: scopedSelection(),
       operation: async () => {
         fixture.replaceAppliedHeads([successor]);
         return 'delivered';
@@ -282,7 +276,7 @@ describe('RFC-64 catalog replay snapshot runtime', () => {
     const fixture = createReplayFixture([requested, unrelated]);
 
     await expect(fixture.runtime.withSnapshot({
-      requestedScope: replayRequest(),
+      selection: scopedSelection(),
       operation: async (entries) => {
         fixture.replaceAppliedHeads([requested, unrelatedSuccessor]);
         return entries.map(({ head }) => head.objectDigest);
@@ -296,14 +290,14 @@ describe('RFC-64 catalog replay snapshot runtime', () => {
     const missingFixture = createReplayFixture([initial]);
     missingFixture.remove(initial.objectDigest);
     await expect(missingFixture.runtime.withSnapshot({
-      requestedScope: replayRequest(),
+      selection: scopedSelection(),
       operation: async () => undefined,
     })).rejects.toThrow(/durable catalog head is missing or unverifiable/u);
 
     const mismatchFixture = createReplayFixture([initial]);
     mismatchFixture.storeAtDigest(initial.objectDigest, mismatched);
     await expect(mismatchFixture.runtime.withSnapshot({
-      requestedScope: replayRequest(),
+      selection: scopedSelection(),
       operation: async () => undefined,
     })).rejects.toThrow(/durable catalog inventory contains an invalid head/u);
   });
