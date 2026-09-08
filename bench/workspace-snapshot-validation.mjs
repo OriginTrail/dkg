@@ -13,8 +13,9 @@ import {
 class MeasuredStore extends FileWorkspacePublicSnapshotStore {
   loads = 0;
   rows = 0;
-  async getSnapshot(ref) {
-    const quads = await super.getSnapshot(ref);
+  // Instrument the lease-free read primitive used by both public operations.
+  async readSnapshot(source, ref) {
+    const quads = await super.readSnapshot(source, ref);
     this.loads++;
     this.rows += quads?.length ?? 0;
     return quads;

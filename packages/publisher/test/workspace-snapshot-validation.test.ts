@@ -7,6 +7,13 @@ import {
   workspacePublicQuadsDigest,
 } from '../src/workspace-snapshot-store.js';
 
+import { readSnapshotSource } from '../src/workspace-snapshot-source.js';
+
+vi.mock('../src/workspace-snapshot-source.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/workspace-snapshot-source.js')>();
+  return { ...actual, readSnapshotSource: vi.fn(actual.readSnapshotSource) };
+});
+
 const quads = [{ subject: 'urn:validation:subject', predicate: 'urn:predicate', object: '"value"', graph: '' }];
 const digest = workspacePublicQuadsDigest(quads);
 const tempDirs: string[] = [];
@@ -19,12 +26,14 @@ async function fixture() {
   const hash = digest.slice(7);
   const path = join(directory, hash.slice(0, 2), hash.slice(2, 4), `${hash}.nq`);
   await store.putSnapshot({ digest, quads });
-  const load = vi.spyOn(store, 'getSnapshot');
+  const load = vi.mocked(readSnapshotSource);
+  load.mockClear();
   return { directory, store, path, load, validate: () => store.validateSnapshot(digest, digest, quads.length) };
 }
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.mocked(readSnapshotSource).mockReset();
   await Promise.all(tempDirs.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
@@ -35,7 +44,8 @@ describe('immutable snapshot validation cache', () => {
     expect(f.load).toHaveBeenCalledTimes(1);
     // A new instance has no previous validation evidence, even in this process.
     const restarted = new FileWorkspacePublicSnapshotStore(f.directory, undefined, options);
-    const load = vi.spyOn(restarted, 'getSnapshot');
+    const load = vi.mocked(readSnapshotSource);
+    load.mockClear();
     await expect(restarted.validateSnapshot(digest, digest, 1)).resolves.toBe(true);
     expect(load).toHaveBeenCalledOnce();
   });
@@ -148,10 +158,10 @@ describe('immutable snapshot validation cache', () => {
 
   it.each(['modify', 'delete', 'replace-identical'] as const)('rejects %s during a full validation', async (change) => {
     const f = await fixture();
-    f.load.mockRestore();
-    const originalLoad = f.store.getSnapshot.bind(f.store);
-    const load = vi.spyOn(f.store, 'getSnapshot').mockImplementationOnce(async (ref) => {
-      const result = await originalLoad(ref);
+    f.load.mockReset();
+    const originalLoad = f.load.getMockImplementation()!;
+    const load = f.load.mockImplementationOnce(async (source) => {
+      const result = await originalLoad(source);
       if (change === 'modify') await writeFile(f.path, (await readFile(f.path, 'utf8')).replace('value', 'other'));
       if (change === 'delete') await rm(f.path);
       if (change === 'replace-identical') {
@@ -186,10 +196,10 @@ describe('immutable snapshot validation cache', () => {
       getAvailableBytes: async () => 0,
     });
     let duringValidation: Awaited<ReturnType<typeof gcStore.collectGarbage>> | undefined;
-    const originalLoad = gcStore.getSnapshot.bind(gcStore);
-    vi.spyOn(gcStore, 'getSnapshot').mockImplementationOnce(async (ref) => {
-      const quads = await originalLoad(ref);
-      // getSnapshot's own active-read lease has ended; validation still owns one.
+    const originalLoad = f.load.getMockImplementation()!;
+    f.load.mockImplementationOnce(async (source) => {
+      const quads = await originalLoad(source);
+      // The lease-free read has finished; the validation operation still owns its lease.
       duringValidation = await gcStore.collectGarbage();
       return quads;
     });
@@ -219,4 +229,26 @@ describe('immutable snapshot validation cache', () => {
     expect(await f.store.validateSnapshot(refs[1]!, digest, 1)).toBe(true);
     expect(f.load).toHaveBeenCalledTimes(2050);
   });
+});
+
+it.each(['nq', 'json'] as const)('keeps %s validation and page fallback inside their owning store operation', async format => {
+  const f = await fixture();
+  if (format === 'json') {
+    await rm(f.path);
+    await writeFile(f.path.replace(/\.nq$/, '.json'), JSON.stringify(quads.map(q => [q.subject, q.predicate, q.object])));
+  }
+  f.load.mockReset();
+  const publicRead = vi.spyOn(f.store, 'getSnapshot').mockRejectedValue(new Error('public re-entry'));
+  await expect(f.validate()).resolves.toBe(true);
+  await expect(f.store.getSnapshotPage(digest, 0, 1)).resolves.toEqual(quads);
+  expect(publicRead).not.toHaveBeenCalled();
+});
+
+it('preserves the legacy non-array JSON null result across validation and paging', async () => {
+  const f = await fixture();
+  await rm(f.path);
+  await writeFile(f.path.replace(/\.nq$/, '.json'), '{}');
+  await expect(f.store.getSnapshot(digest)).resolves.toBeNull();
+  await expect(f.validate()).resolves.toBe(false);
+  await expect(f.store.getSnapshotPage(digest, 0, 1)).resolves.toBeNull();
 });

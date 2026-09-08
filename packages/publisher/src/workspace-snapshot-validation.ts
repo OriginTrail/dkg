@@ -1,45 +1,25 @@
-import { resolveSnapshotSource } from './workspace-snapshot-source.js';
-
 const MAX_VALIDATIONS = 2048;
+export type SnapshotValidationKey = readonly [hash: string, expectedDigest: string, expectedCount: number];
 
-/** Positive evidence only. The caller holds the snapshot's GC lease throughout. */
+/** Bounded positive evidence only; the store owns all filesystem I/O and leases. */
 export class SnapshotValidationCache {
   private readonly entries = new Map<string, string>();
 
-  constructor(private readonly directory: string) {}
-
-  async validate(
-    hash: string,
-    expectedDigest: string,
-    expectedCount: number,
-    validateContents: () => Promise<boolean>,
-  ): Promise<boolean> {
-    const key = JSON.stringify([hash, expectedDigest, expectedCount]);
-    try {
-      const before = await resolveSnapshotSource(this.directory, hash);
-      // No asynchronous gap may expose a temporarily missing warm entry.
-      const cached = this.entries.get(key);
-      this.entries.delete(key);
-      if (before === null) return false;
-      if (cached === before.fingerprint) {
-        this.remember(key, before.fingerprint);
-        return true;
-      }
-      if (!await validateContents()) return false;
-      // Reject replacement, concurrent writes and JSON-to-N-Quads migration.
-      const after = await resolveSnapshotSource(this.directory, hash);
-      if (after?.fingerprint !== before.fingerprint) return false;
-      this.remember(key, before.fingerprint);
-      return true;
-    } catch {
-      this.entries.delete(key);
-      return false;
-    }
+  lookup(key: SnapshotValidationKey, fingerprint: string): boolean {
+    const cached = this.entries.get(JSON.stringify(key));
+    this.invalidate(key);
+    if (cached !== fingerprint) return false;
+    this.remember(key, fingerprint);
+    return true;
   }
 
-  private remember(key: string, fingerprint: string): void {
-    this.entries.delete(key);
-    this.entries.set(key, fingerprint);
+  invalidate(key: SnapshotValidationKey): void {
+    this.entries.delete(JSON.stringify(key));
+  }
+
+  remember(key: SnapshotValidationKey, fingerprint: string): void {
+    this.invalidate(key);
+    this.entries.set(JSON.stringify(key), fingerprint);
     if (this.entries.size > MAX_VALIDATIONS) {
       const oldest = this.entries.keys().next().value;
       if (oldest !== undefined) this.entries.delete(oldest);

@@ -13,7 +13,7 @@ import type { Dirent } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { resolveSnapshotSource, readSnapshotSource, snapshotPath } from './workspace-snapshot-source.js';
+import { resolveSnapshotSource, readSnapshotSource, snapshotPath, type SnapshotFileSource } from './workspace-snapshot-source.js';
 import { SnapshotValidationCache } from './workspace-snapshot-validation.js';
 
 export interface SharedMemoryPublicSnapshotStorageConfig {
@@ -198,7 +198,7 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     private readonly pageIndexStore?: SnapshotPageIndexStore,
     options: FileWorkspacePublicSnapshotStoreOptions = {},
   ) {
-    this.validationCache = new SnapshotValidationCache(directory);
+    this.validationCache = new SnapshotValidationCache();
     this.gcConfig = resolveSnapshotGarbageCollectionConfig(options.gc);
     this.log = options.log;
     const getAvailableBytes = options.getAvailableBytes;
@@ -298,11 +298,16 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     return this.withActiveSnapshot(hash, async () => {
       const source = await resolveSnapshotSource(this.directory, hash);
       if (source === null) return null;
-      const raw = await readSnapshotSource(source);
-      return source.format === 'nq'
-        ? parseWorkspacePublicSnapshotNQuads(raw, ref)
-        : parseLegacyJsonSnapshot(raw, ref);
+      return this.readSnapshot(source, ref);
     });
+  }
+
+  /** Lease-free primitive: the public operation has already selected and protected the source. */
+  private async readSnapshot(source: SnapshotFileSource, ref: string): Promise<Quad[] | null> {
+    const raw = await readSnapshotSource(source);
+    return source.format === 'nq'
+      ? parseWorkspacePublicSnapshotNQuads(raw, ref)
+      : parseLegacyJsonSnapshot(raw, ref);
   }
 
   async validateSnapshot(ref: string, expectedDigest: string, expectedCount: number): Promise<boolean> {
@@ -310,13 +315,24 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     try {
       const hash = snapshotHash(ref);
       // Keep GC away across source resolution, full reads and the final stat.
-      return await this.withActiveSnapshot(hash, () => this.validationCache.validate(
-        hash, expectedDigest, expectedCount, async () => {
-          const quads = await this.getSnapshot(ref);
-          return quads !== null && quads.length === expectedCount
-            && workspacePublicQuadsDigest(quads) === expectedDigest;
-        },
-      ));
+      const key = [hash, expectedDigest, expectedCount] as const;
+      return await this.withActiveSnapshot(hash, async () => {
+        try {
+          const before = await resolveSnapshotSource(this.directory, hash);
+          if (before === null) { this.validationCache.invalidate(key); return false; }
+          if (this.validationCache.lookup(key, before.fingerprint)) return true;
+          const quads = await this.readSnapshot(before, ref);
+          if (quads === null || quads.length !== expectedCount || workspacePublicQuadsDigest(quads) !== expectedDigest) return false;
+          // The second resolution detects mutation, replacement and JSON-to-NQ migration.
+          const after = await resolveSnapshotSource(this.directory, hash);
+          if (after?.fingerprint !== before.fingerprint) return false;
+          this.validationCache.remember(key, before.fingerprint);
+          return true;
+        } catch {
+          this.validationCache.invalidate(key);
+          return false;
+        }
+      });
     } catch {
       // A missing, unreadable or corrupt file follows the requester's existing
       // recovery path. Only successful full validations enter the cache.
@@ -335,15 +351,14 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     if (safeLimit === 0) return [];
     const hash = snapshotHash(ref);
     return this.withActiveSnapshot(hash, async () => {
-      const nquadsPath = snapshotPath(this.directory, hash, 'nq');
-      let file: Awaited<ReturnType<typeof open>>;
-      try {
-        file = await open(nquadsPath, 'r');
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        const legacy = await this.getSnapshot(ref);
+      const source = await resolveSnapshotSource(this.directory, hash);
+      if (source === null) return null;
+      if (source.format === 'json') {
+        const legacy = await this.readSnapshot(source, ref);
         return legacy?.slice(safeOffset, safeOffset + safeLimit) ?? null;
       }
+      const nquadsPath = source.path;
+      const file = await open(nquadsPath, 'r');
 
       let startRow = 0;
       let startByte = 0;
