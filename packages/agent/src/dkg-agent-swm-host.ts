@@ -2969,9 +2969,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Admission is synchronous. The dispatcher owns physical concurrency,
     // per-CG coalescing, error containment and shutdown; no sweep awaits a worker.
     const bound = new Set<string>();
+    const unbound: string[] = [];
     for (const [localCgId, sub] of this.subscribedContextGraphs) {
-      if ((sub.subscribed || sub.coreHosted)
-        && this.contextGraphBindingState.hasBindingCandidate(localCgId, sub)) bound.add(localCgId);
+      if (!sub.subscribed && !sub.coreHosted) continue;
+      if (this.contextGraphBindingState.hasBindingCandidate(localCgId, sub)) bound.add(localCgId);
+      else if (sub.subscribed) unbound.push(localCgId);
     }
     const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
@@ -2980,28 +2982,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const localCgId = policyEnvelope.payload.contextGraphId;
       if (this.isRfc64SelectedVmReconcileTargetAllowed(localCgId)) bound.add(localCgId);
     }
-    const boundKeys = [...bound];
-    const admittedBound = new Set<string>();
-    const admitBound = (key: string) => {
-      if (!isLifecycleCurrent() || !dispatcher.tryTriggerPeriodic(key)) return false;
-      admittedBound.add(key);
-      return true;
-    };
-    // Give bound work the first slot, then reserve a bounded discovery turn
-    // before filling the remaining queue. A large bound set cannot starve discovery.
-    this.vmReconcileBoundSweep.admit(boundKeys, 1, () => true, admitBound);
-    this.vmReconcileUnboundSweep.admit(
-      [...this.subscribedContextGraphs.keys()],
-      DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE,
-      (key) => {
-        const sub = this.subscribedContextGraphs.get(key);
-        return sub?.subscribed === true
-          && !this.contextGraphBindingState.hasBindingCandidate(key, sub);
-      },
+    this.vmReconcileSweepPlanner.admit(
+      [...bound],
+      unbound.filter((key) => !bound.has(key)),
       (key) => isLifecycleCurrent() && dispatcher.tryTriggerPeriodic(key),
     );
-    this.vmReconcileBoundSweep.admit(boundKeys, boundKeys.length,
-      (key) => !admittedBound.has(key), admitBound);
   }
 
   /**
@@ -5113,8 +5098,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.vmReconcileLifecycleController?.abort();
     this.vmReconcileLifecycleGeneration = (this.vmReconcileLifecycleGeneration ?? 0) + 1;
     this.vmReconcileRotationClosed = true;
-    this.vmReconcileBoundSweep?.reset();
-    this.vmReconcileUnboundSweep?.reset();
+    this.vmReconcileSweepPlanner?.reset();
     // Some lifecycle tests intentionally construct a narrow partial agent
     // without running the base constructor. Shutdown must remain best-effort
     // for that supported test seam and never mask later teardown failures.

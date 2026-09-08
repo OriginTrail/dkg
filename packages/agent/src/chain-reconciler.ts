@@ -640,10 +640,12 @@ export class VmReconcileDispatcher<T> {
    * Attempt periodic admission without hiding bounded-queue overflow.
    *
    * Sweep orchestration retains its round-robin cursor at the first rejected
-   * key, so stable iteration order cannot permanently starve the tail.
+   * key, so stable iteration order cannot permanently starve the tail. Keep
+   * one pending slot for manual/live work; immediately runnable background work
+   * and coalescing do not consume that reserve.
    */
   tryTriggerPeriodic(key: string): boolean {
-    if (!this.canAdmitWithoutOverflow(key)) return false;
+    if (!this.canAdmitPeriodic(key)) return false;
     void this.admit(key, 'periodic').catch(() => undefined);
     return true;
   }
@@ -721,11 +723,13 @@ export class VmReconcileDispatcher<T> {
     return state;
   }
 
-  private canAdmitWithoutOverflow(key: string): boolean {
+  private canAdmitPeriodic(key: string): boolean {
     if (this.closed) return false;
     const state = this.states.get(key);
     if (state?.pending || state?.trailing) return true;
-    return this.queued < this.maxPending;
+    if (this.queued >= this.maxPending) return false;
+    if (!state?.active && this.active < this.concurrency) return true;
+    return this.queued < this.maxPending - 1;
   }
 
   private admit(key: string, source: VmReconcileSource): Promise<T> {

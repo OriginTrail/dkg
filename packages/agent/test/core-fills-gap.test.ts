@@ -2340,9 +2340,13 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     );
     internals.vmReconcileDispatcher = dispatcher;
 
-    for (let sweep = 0; sweep < 4; sweep += 1) {
+    for (let sweep = 0; sweep < contextGraphIds.length; sweep += 1) {
       await internals.runVmReconcileSweep();
+      // maxPending=1 is reserved for foreground work: only the active slot is
+      // available to this background-only sweep, so one CG advances per tick.
+      expect(dispatcher.snapshot().queued).toBe(0);
       await dispatcher.waitForIdle();
+      expect(swept).toHaveLength(sweep + 1);
     }
 
     expect(new Set(swept)).toEqual(new Set(contextGraphIds));

@@ -200,3 +200,66 @@ it('keeps discovery fair when the bound set exceeds queue capacity', async () =>
   expect(order[0]).toBe('dispatch:bound-0');
   expect(seen).toEqual(new Set(Array.from({ length: 20 }, (_, i) => `cg-${i}`)));
 });
+
+it('advances discovery under a sustained bound backlog without waiting for idle', async () => {
+  const { internals, resolve } = await fixture(20, 3);
+  for (let i = 0; i < 100; i++) internals.subscribedContextGraphs.set(`bound-${i}`, { subscribed: true, onChainId: String(i + 1) });
+  const releases: Array<() => void> = [];
+  const started: string[] = [];
+  let paused = true;
+  const dispatcher = new VmReconcileDispatcher(async (id) => {
+    started.push(id);
+    try { await internals.resolveVmReconcileTarget(id); }
+    finally { if (paused) await new Promise<void>(done => releases.push(done)); }
+    return true;
+  }, () => undefined, { concurrency: 1, maxPending: 3 });
+  internals.vmReconcileDispatcher = dispatcher;
+  try {
+    for (let tick = 0; tick < 100; tick++) {
+      await internals.runVmReconcileSweep();
+      await vi.waitFor(() => expect(releases).toHaveLength(1));
+      releases.shift()!(); // Exactly one completion; the queue stays backlogged.
+      if (new Set(resolve.mock.calls.map(([id]) => id)).size === 20) break;
+    }
+    expect(started[0]).toBe('bound-0');
+    expect(new Set(resolve.mock.calls.map(([id]) => id))).toEqual(new Set(Array.from({ length: 20 }, (_, i) => `cg-${i}`)));
+    expect(new Set(started.filter(id => id.startsWith('bound-'))).size).toBeGreaterThan(1);
+  } finally {
+    paused = false;
+    for (const release of releases.splice(0)) release();
+    await dispatcher.close();
+  }
+});
+
+it.each([1, 3])('reserves foreground admission with maxPending=%i while the sweep is backlogged', async (maxPending) => {
+  const { internals } = await fixture(20, maxPending);
+  for (let i = 0; i < 100; i++) internals.subscribedContextGraphs.set(`bound-${i}`, { subscribed: true, onChainId: String(i + 1) });
+  const releases: Array<() => void> = [];
+  const started: string[] = [];
+  let paused = true;
+  const dispatcher = new VmReconcileDispatcher(async (id) => {
+    started.push(id);
+    if (paused) await new Promise<void>(done => releases.push(done));
+    return true;
+  }, () => undefined, { concurrency: 1, maxPending });
+  internals.vmReconcileDispatcher = dispatcher;
+  try {
+    await internals.runVmReconcileSweep();
+    const failures: unknown[] = [];
+    const foreground = dispatcher.triggerManual('foreground').catch(error => { failures.push(error); });
+    for (let tick = 0; tick < 4 && !started.includes('foreground'); tick++) {
+      await vi.waitFor(() => expect(releases).toHaveLength(1));
+      releases.shift()!();
+      await internals.runVmReconcileSweep();
+    }
+    expect(failures).toEqual([]);
+    expect(started).toContain('foreground');
+    paused = false;
+    for (const release of releases.splice(0)) release();
+    await foreground;
+  } finally {
+    paused = false;
+    for (const release of releases.splice(0)) release();
+    await dispatcher.close();
+  }
+});

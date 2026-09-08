@@ -284,7 +284,7 @@ import {
 } from './chain-reconciler.js';
 import type { ContextGraphReconcileResult } from './vm-reconcile-service.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
-import { VmReconcileSweepSelector } from './vm-reconcile-sweep.js';
+import { VmReconcileSweepPlanner } from './vm-reconcile-sweep.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
 // type alias so listPendingJoinApprovalRetries() retains its old
@@ -1094,8 +1094,9 @@ export class DKGAgentBase {
   /** A timed-out physical retirement quarantines this instance until stop is retried. */
   protected vmReconcileShutdownBlocked = false;
   /** Independent fair admission cursors, reset with the reconcile lifecycle. */
-  protected readonly vmReconcileBoundSweep = new VmReconcileSweepSelector();
-  protected readonly vmReconcileUnboundSweep = new VmReconcileSweepSelector();
+  protected readonly vmReconcileSweepPlanner = new VmReconcileSweepPlanner(
+    DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE,
+  );
   /** Deterministically staggered cold-start prime, separate from the interval. */
   protected vmReconcileStartupTimer: ReturnType<typeof setTimeout> | null = null;
   /** Phase B — in-memory reconcile cursor per local CG id (watermark + `ahead`). */
