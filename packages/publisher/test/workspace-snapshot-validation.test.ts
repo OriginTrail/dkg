@@ -101,14 +101,14 @@ describe('immutable snapshot validation cache', () => {
     expect(f.load).toHaveBeenCalledTimes(2);
   });
 
-  it('does not reuse evidence for a different expected digest or count', async () => {
+  it('answers mismatched expectations from unchanged cached evidence without rereading', async () => {
     const f = await fixture();
     expect(await f.validate()).toBe(true);
     await expect(f.store.validateSnapshot(digest, `sha256:${'0'.repeat(64)}`, 1)).resolves.toBe(false);
     await expect(f.store.validateSnapshot(digest, digest, 2)).resolves.toBe(false);
-    expect(f.load).toHaveBeenCalledTimes(3);
+    expect(f.load).toHaveBeenCalledTimes(1);
     await expect(f.validate()).resolves.toBe(true);
-    expect(f.load).toHaveBeenCalledTimes(3);
+    expect(f.load).toHaveBeenCalledTimes(1);
   });
 
   it.each([-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])('rejects invalid count %s', async (count) => {
