@@ -567,6 +567,12 @@ interface VmReconcileDispatchState<T> {
   trailing?: VmReconcileDispatchWork<T>;
 }
 
+export type VmReconcileAdmissionStatus = 'admitted' | 'coalesced' | 'full' | 'closed';
+
+type VmReconcileAdmission<T> =
+  | { kind: 'admitted' | 'coalesced'; completion: Promise<T> }
+  | { kind: 'full' | 'closed' };
+
 export interface VmReconcileDispatcherOptions {
   concurrency?: number;
   maxPending?: number;
@@ -628,12 +634,12 @@ export class VmReconcileDispatcher<T> {
   /** Enqueue a low-latency chain-event nudge; suppressed until a sweep after failure. */
   triggerLive(key: string): void {
     if (this.states.get(key)?.hold === 'live-blocked') return;
-    void this.admit(key, 'live').catch(() => undefined);
+    void this.dispatch(key, 'live').catch(() => undefined);
   }
 
   /** Enqueue the reliability path; every periodic sweep gets one failure retry. */
   triggerPeriodic(key: string): void {
-    void this.admit(key, 'periodic').catch(() => undefined);
+    void this.dispatch(key, 'periodic').catch(() => undefined);
   }
 
   /**
@@ -644,10 +650,10 @@ export class VmReconcileDispatcher<T> {
    * one pending slot for manual/live work; immediately runnable background work
    * and coalescing do not consume that reserve.
    */
-  tryTriggerPeriodic(key: string): boolean {
-    if (!this.canAdmitPeriodic(key)) return false;
-    void this.admit(key, 'periodic').catch(() => undefined);
-    return true;
+  tryTriggerPeriodic(key: string): VmReconcileAdmissionStatus {
+    const outcome = this.admit(key, 'periodic', true);
+    if ('completion' in outcome) void outcome.completion.catch(() => undefined);
+    return outcome.kind;
   }
 
   /** Operator path; errors and the typed domain result propagate to the API. */
@@ -657,7 +663,11 @@ export class VmReconcileDispatcher<T> {
 
   /** Typed admission used by the canonical agent operation and focused tests. */
   dispatch(key: string, source: VmReconcileSource): Promise<T> {
-    return this.admit(key, source);
+    const outcome = this.admit(key, source);
+    if ('completion' in outcome) return outcome.completion;
+    return Promise.reject(outcome.kind === 'closed'
+      ? new VmReconcileQueueClosedError()
+      : new VmReconcileQueueFullError(this.maxPending));
   }
 
   isInFlight(key: string): boolean {
@@ -723,23 +733,15 @@ export class VmReconcileDispatcher<T> {
     return state;
   }
 
-  private canAdmitPeriodic(key: string): boolean {
-    if (this.closed) return false;
-    const state = this.states.get(key);
-    if (state?.pending || state?.trailing) return true;
-    if (this.queued >= this.maxPending) return false;
-    if (!state?.active && this.active < this.concurrency) return true;
-    return this.queued < this.maxPending - 1;
-  }
-
-  private admit(key: string, source: VmReconcileSource): Promise<T> {
-    if (this.closed) return Promise.reject(new VmReconcileQueueClosedError());
+  /** One synchronous transition owns coalescing, capacity and source reservation. */
+  private admit(key: string, source: VmReconcileSource, reserveForeground = false): VmReconcileAdmission<T> {
+    if (this.closed) return { kind: 'closed' };
     const state = this.stateFor(key);
 
     if (state.pending) {
       this.mergeWork(state.pending, source);
       this.sortPending();
-      return state.pending.promise;
+      return { kind: 'coalesced', completion: state.pending.promise };
     }
 
     if (state.active) {
@@ -748,35 +750,39 @@ export class VmReconcileDispatcher<T> {
       // an older automatic pass. In that case it joins or creates one fresh
       // trailing pass; repeated operator requests coalesce there.
       if (source === 'manual' && state.active.source === 'manual') {
-        return state.active.promise;
+        return { kind: 'coalesced', completion: state.active.promise };
       }
       if (state.trailing) {
         this.mergeWork(state.trailing, source);
-        return state.trailing.promise;
+        return { kind: 'coalesced', completion: state.trailing.promise };
       }
-      const trailing = this.createQueuedWork(key, source);
-      if (!trailing) return Promise.reject(new VmReconcileQueueFullError(this.maxPending));
+      const trailing = this.createQueuedWork(key, source, reserveForeground, false);
+      if (!trailing) return { kind: 'full' };
       state.trailing = trailing;
-      return trailing.promise;
+      return { kind: 'admitted', completion: trailing.promise };
     }
 
-    const work = this.createQueuedWork(key, source);
+    const work = this.createQueuedWork(key, source, reserveForeground, this.active < this.concurrency);
     if (!work) {
       if (state.hold === 'ready') this.states.delete(key);
-      return Promise.reject(new VmReconcileQueueFullError(this.maxPending));
+      return { kind: 'full' };
     }
     state.pending = work;
     this.pending.push(work);
     this.sortPending();
     this.drain();
-    return work.promise;
+    return { kind: 'admitted', completion: work.promise };
   }
 
   private createQueuedWork(
     key: string,
     source: VmReconcileSource,
+    reserveForeground: boolean,
+    immediatelyRunnable: boolean,
   ): VmReconcileDispatchWork<T> | undefined {
-    if (this.queued >= this.maxPending) return undefined;
+    const pendingLimit = reserveForeground && !immediatelyRunnable
+      ? this.maxPending - 1 : this.maxPending;
+    if (this.queued >= pendingLimit) return undefined;
     let resolveWork!: (value: T) => void;
     let rejectWork!: (error: unknown) => void;
     const promise = new Promise<T>((resolve, reject) => {

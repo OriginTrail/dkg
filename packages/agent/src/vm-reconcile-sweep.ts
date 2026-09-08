@@ -1,3 +1,5 @@
+import type { VmReconcileAdmissionStatus } from './chain-reconciler.js';
+
 /** A scalar round-robin cursor over candidates already classified by the host. */
 export class VmReconcileSweepSelector {
   private nextKey: string | undefined;
@@ -25,34 +27,52 @@ export class VmReconcileSweepSelector {
   }
 }
 
-/** Own both cursors and the unfinished discovery turn across backlogged sweeps. */
+type SweepTurn =
+  | { phase: 'ready' }
+  | { phase: 'discovery'; leadingBoundKey: string | undefined; remaining: number };
+
+/** Own the complete discovery turn, including its leading bound admission. */
 export class VmReconcileSweepPlanner {
   private readonly bound = new VmReconcileSweepSelector();
   private readonly unbound = new VmReconcileSweepSelector();
-  private remainingDiscovery = 0;
+  private turn: SweepTurn = { phase: 'ready' };
 
   constructor(private readonly discoveryBatchSize: number) {}
 
   reset(): void {
     this.bound.reset();
     this.unbound.reset();
-    this.remainingDiscovery = 0;
+    this.turn = { phase: 'ready' };
   }
 
-  admit(boundKeys: readonly string[], unboundKeys: readonly string[], tryAdmit: (key: string) => boolean): void {
-    let firstBound = 0;
-    if (this.remainingDiscovery === 0) {
-      // Start each turn with bound work. A capacity-limited discovery turn then
-      // keeps priority until its bounded allowance is spent, even across ticks.
-      firstBound = this.bound.admit(boundKeys, 1, tryAdmit);
-      if (boundKeys.length > 0 && firstBound === 0) return;
-      this.remainingDiscovery = Math.min(this.discoveryBatchSize, unboundKeys.length);
+  admit(boundKeys: readonly string[], unboundKeys: readonly string[], tryAdmit: (key: string) => VmReconcileAdmissionStatus): void {
+    const accepted = (key: string) => {
+      const outcome = tryAdmit(key);
+      return outcome === 'admitted' || outcome === 'coalesced';
+    };
+    if (this.turn.phase === 'ready') {
+      let leadingBoundKey: string | undefined;
+      const count = this.bound.admit(boundKeys, 1, key => {
+        if (!accepted(key)) return false;
+        leadingBoundKey = key;
+        return true;
+      });
+      if (boundKeys.length > 0 && count === 0) return;
+      this.turn = {
+        phase: 'discovery', leadingBoundKey,
+        remaining: Math.min(this.discoveryBatchSize, unboundKeys.length),
+      };
     }
-    this.remainingDiscovery = Math.min(this.remainingDiscovery, unboundKeys.length);
-    this.remainingDiscovery -= this.unbound.admit(unboundKeys, this.remainingDiscovery, tryAdmit);
-    if (this.remainingDiscovery > 0) return;
-    // A single bound rotation needs no exclusion set: the first admission has
-    // already advanced its cursor. The dispatcher preserves foreground room.
-    this.bound.admit(boundKeys, boundKeys.length - firstBound, tryAdmit);
+    const turn = this.turn;
+    turn.remaining = Math.min(turn.remaining, unboundKeys.length);
+    turn.remaining -= this.unbound.admit(unboundKeys, turn.remaining, accepted);
+    if (turn.remaining > 0) return;
+    this.turn = { phase: 'ready' };
+    // Candidates can disappear or reorder while discovery is paused. Exclude
+    // the actual leading key, rather than reconstructing its position/count.
+    const tail = boundKeys.filter(key => key !== turn.leadingBoundKey);
+    this.bound.admit(tail, tail.length, accepted);
+    // A rejected tail key leads the next turn. Do not let an arbitrarily large
+    // bound backlog postpone the next bounded discovery allowance indefinitely.
   }
 }

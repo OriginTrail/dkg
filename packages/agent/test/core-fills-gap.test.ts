@@ -100,7 +100,7 @@ interface AgentInternals {
   vmReconcileDispatcher: {
     triggerLive: (cg: string) => void;
     triggerPeriodic: (cg: string) => void;
-    tryTriggerPeriodic: (cg: string) => boolean;
+    tryTriggerPeriodic: (cg: string) => 'admitted' | 'coalesced' | 'full' | 'closed';
     dispatch?: (cg: string, source: 'live' | 'periodic' | 'manual') => Promise<unknown>;
   } | null;
   store: TripleStore;
@@ -2300,7 +2300,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       triggerPeriodic: (cg: string) => { periodicTriggered.push(cg); },
       tryTriggerPeriodic: (cg: string) => {
         periodicTriggered.push(cg);
-        return true;
+        return 'admitted';
       },
       dispatch: async (cg: string, source: 'live' | 'periodic' | 'manual') => {
         if (source === 'periodic') periodicTriggered.push(cg);
@@ -2509,7 +2509,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     internals.vmReconcileDispatcher = {
       triggerLive: (contextGraphId: string) => { liveTriggered.push(contextGraphId); },
       triggerPeriodic: () => undefined,
-      tryTriggerPeriodic: () => true,
+      tryTriggerPeriodic: () => 'admitted',
       dispatch: async () => ({}),
     };
 

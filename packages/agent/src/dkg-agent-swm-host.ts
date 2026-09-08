@@ -2985,7 +2985,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.vmReconcileSweepPlanner.admit(
       [...bound],
       unbound.filter((key) => !bound.has(key)),
-      (key) => isLifecycleCurrent() && dispatcher.tryTriggerPeriodic(key),
+      (key) => isLifecycleCurrent() ? dispatcher.tryTriggerPeriodic(key) : 'closed',
     );
   }
 

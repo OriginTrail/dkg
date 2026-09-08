@@ -975,6 +975,38 @@ describe('VmReconcileDispatcher scheduling', () => {
 });
 
 describe('VmReconcileDispatcher admission', () => {
+  it('returns atomic periodic outcomes and preserves the foreground reserve', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const dispatcher = new VmReconcileDispatcher(async () => blocked, () => undefined, { maxPending: 2 });
+    expect(dispatcher.tryTriggerPeriodic('active')).toBe('admitted');
+    expect(dispatcher.tryTriggerPeriodic('queued')).toBe('admitted');
+    expect(dispatcher.tryTriggerPeriodic('queued')).toBe('coalesced');
+    expect(dispatcher.tryTriggerPeriodic('overflow')).toBe('full');
+    expect(dispatcher.snapshot()).toEqual({ active: 1, queued: 1, closed: false });
+    const foreground = dispatcher.triggerManual('foreground').catch(error => error);
+    expect(dispatcher.snapshot().queued).toBe(2);
+    expect(dispatcher.tryTriggerPeriodic('queued')).toBe('coalesced');
+    const closed = dispatcher.close();
+    expect(dispatcher.tryTriggerPeriodic('new')).toBe('closed');
+    expect(await foreground).toBeInstanceOf(VmReconcileQueueClosedError);
+    release();
+    await closed;
+  });
+
+  it('reports one new trailing admission and subsequent coalescing without spending another slot', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const dispatcher = new VmReconcileDispatcher(async () => blocked, () => undefined, { maxPending: 2 });
+    expect(dispatcher.tryTriggerPeriodic('active')).toBe('admitted');
+    expect(dispatcher.tryTriggerPeriodic('active')).toBe('admitted');
+    expect(dispatcher.tryTriggerPeriodic('active')).toBe('coalesced');
+    expect(dispatcher.tryTriggerPeriodic('other')).toBe('full');
+    expect(dispatcher.snapshot().queued).toBe(1);
+    release();
+    await dispatcher.waitForIdle();
+  });
+
   it('serializes cross-CG work and lets foreground work pass periodic backlog', async () => {
     const order: string[] = [];
     let releaseFirst!: () => void;

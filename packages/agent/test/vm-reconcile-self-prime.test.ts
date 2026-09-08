@@ -55,7 +55,7 @@ interface AgentInternals {
     dispatch: (cg: string, reason: 'live' | 'periodic') => Promise<boolean>;
     triggerLive: (cg: string) => void;
     triggerPeriodic: (cg: string) => void;
-    tryTriggerPeriodic: (cg: string) => boolean;
+    tryTriggerPeriodic: (cg: string) => 'admitted' | 'coalesced' | 'full' | 'closed';
   } | null;
   store: TripleStore;
 }
@@ -235,7 +235,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       },
       triggerLive: () => undefined,
       triggerPeriodic: () => undefined,
-      tryTriggerPeriodic: (cg: string) => { triggered.push(`periodic:${cg}`); return true; },
+      tryTriggerPeriodic: (cg: string) => { triggered.push(`periodic:${cg}`); return 'admitted'; },
     };
 
     await internals.runVmReconcileSweep();
@@ -282,7 +282,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
         dispatch,
         triggerLive: vi.fn(),
         triggerPeriodic: vi.fn(),
-        tryTriggerPeriodic: (cg: string) => { void dispatch(cg, 'periodic'); return true; },
+        tryTriggerPeriodic: (cg: string) => { void dispatch(cg, 'periodic'); return 'admitted'; },
       };
 
       await internals.runVmReconcileSweep();
@@ -830,7 +830,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       dispatch,
       triggerLive: vi.fn(),
       triggerPeriodic: vi.fn(),
-      tryTriggerPeriodic: (cg: string) => { void dispatch(cg, 'periodic'); return true; },
+      tryTriggerPeriodic: (cg: string) => { void dispatch(cg, 'periodic'); return 'admitted'; },
     };
     const resolveOnChainId = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
       .mockResolvedValue(298n);
@@ -1140,7 +1140,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       dispatch: async () => true,
       triggerLive: (cg: string) => { triggered.push(`live:${cg}`); },
       triggerPeriodic: (cg: string) => { triggered.push(`periodic:${cg}`); },
-      tryTriggerPeriodic: () => true,
+      tryTriggerPeriodic: () => 'admitted',
     };
 
     const reconciled = await internals.handleKARegisteredNudge(ON_BOUND, 1n, createOperationContext('system'));
