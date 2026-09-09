@@ -138,6 +138,13 @@ export function buildGate1RolloutActivation(
   return Object.freeze(activation);
 }
 
+export function isGate1VmChainInventorySelected(
+  agent: DKGAgent,
+  contextGraphId: string,
+): boolean {
+  return agent.rfc64SelectedVmReconcileTargetIds().includes(contextGraphId);
+}
+
 /**
  * Rollout-only adapter support. The shared process adapter owns process I/O;
  * this fixture owns activation, chain instrumentation, event accounting, and
@@ -185,7 +192,7 @@ export class Gate1RolloutAdapterFixture {
             currentAgent.getSyncContextGraphIds().includes(input.contextGraphId),
           manualLegacySwmTargetCount: manualSwmPlan.targets.length,
           vmChainInventorySelected:
-            this.config.contextGraphId === input.contextGraphId,
+            isGate1VmChainInventorySelected(currentAgent, input.contextGraphId),
         });
       },
       vmReconcile: (currentAgent, input) => (

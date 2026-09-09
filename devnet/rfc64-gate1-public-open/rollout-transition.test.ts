@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import process from 'node:process';
 import { after, test } from 'node:test';
 
+import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   MemoryLayer,
   computeAuthorCatalogScopeDigestV1,
@@ -44,6 +45,7 @@ import {
   ROLLOUT_STORE_BACKEND_ENV,
   rolloutStoreBindingToEnv,
 } from './rollout-store-config.js';
+import { isGate1VmChainInventorySelected } from './rollout-adapter-fixture.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const ADAPTER_PROCESS = join(import.meta.dirname, 'adapter-process.ts');
@@ -97,6 +99,23 @@ test('routes every registered rollout command through its own output decoder', (
       assert.throws(() => parseGate1RolloutCommandOutput(command, outputs[otherCommand]));
     }
   }
+});
+
+test('rollout VM evidence reflects the running agent selection', () => {
+  const selected = {
+    rfc64SelectedVmReconcileTargetIds: () => [CONTEXT_GRAPH_ID],
+  };
+  const unselected = {
+    rfc64SelectedVmReconcileTargetIds: () => [],
+  };
+  assert.equal(
+    isGate1VmChainInventorySelected(selected as unknown as DKGAgent, CONTEXT_GRAPH_ID),
+    true,
+  );
+  assert.equal(
+    isGate1VmChainInventorySelected(unselected as unknown as DKGAgent, CONTEXT_GRAPH_ID),
+    false,
+  );
 });
 
 test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy authority on ${STORE_BACKEND}`, {
