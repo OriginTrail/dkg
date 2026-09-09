@@ -8,6 +8,11 @@ import type { SwmTargetExecutorPortsV1 } from '../src/sync/requester/swm-target-
 import { PrivateSwmSnapshotWalkRegistry } from
   '../src/sync/requester/private-swm-snapshot-walk-registry.js';
 import type { SyncWorkAdmission } from '../src/sync/work-admission.js';
+import {
+  collectPublicSnapshotMetadata,
+  type SharedMemorySnapshotMaterializer,
+} from '../src/sync/requester/shared-memory-sync.js';
+import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
 import { createSwmTargetExecutorSessionFactoryForTest } from './_helpers/swm-target-executor-session-fixture.js';
@@ -137,6 +142,72 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     });
   });
 
+  it('bounds retained-reference revalidation and discards unvalidated completion evidence', async () => {
+    const fixtures = [snapshotFixture(9), snapshotFixture(8), snapshotFixture(7)];
+    const meta = fixtures.flatMap(({ metadata }) => metadata);
+    const manifest = collectPublicSnapshotMetadata(meta);
+    const owner = { contextGraphId: CG, remotePeerId: 'peer-source' };
+    const registry = new PrivateSwmSnapshotWalkRegistry();
+    const retained = registry.open(owner, manifest);
+    for (const { ref } of manifest) retained.markResolved(ref);
+    // Completion releases an entry, so seed the same retained prefix without
+    // marking the final ref; this models an incomplete prior bounded job.
+    const retainedPrefix = registry.open(owner, manifest);
+    for (const { ref } of manifest.slice(0, -1)) retainedPrefix.markResolved(ref);
+
+    let canAdmit = true;
+    const isGraphAssetMaterialized = vi.fn(async () => {
+      canAdmit = false;
+      return true;
+    });
+    const store = new OxigraphStore(); stores.push(store);
+    const result = await recoverContextGraphSwm({
+      ctx: { operationName: 'sync', operationId: 'retained-revalidation-budget' },
+      remotePeerId: owner.remotePeerId,
+      contextGraphId: owner.contextGraphId,
+      deadline: Number.MAX_SAFE_INTEGER,
+      workAdmission: {
+        canAdmitWork: () => canAdmit,
+        capDeadline: (deadline) => deadline,
+        capTimeout: (timeout) => timeout,
+      },
+      fetchSyncPages: async (_ctx, _peer, _cg, _swm, phase) => {
+        if (phase !== 'meta') throw new Error('Budget yield must precede snapshot transport');
+        return page(meta);
+      },
+      processSharedMemoryBatch: async () => ({
+        verifiedData: [], verifiedMeta: meta,
+        totalFetchedDataQuads: 0, totalFetchedMetaQuads: meta.length,
+        droppedDataTriples: 0, emptyResponses: 0, entityCreators: [],
+      }),
+      writeLocks: new Map(),
+      publicSnapshotStore: {
+        getSnapshot: async () => null,
+        putSnapshot: async () => { throw new Error('No snapshot write expected'); },
+      },
+      snapshotMaterializer: {
+        isGraphAssetMaterialized,
+      } as unknown as SharedMemorySnapshotMaterializer,
+      snapshotWalk: (orderedManifest) => registry.open(owner, orderedManifest),
+      store,
+      replaceMetaForRoots: async () => undefined,
+      replaceMetaForGraphAssets: async () => undefined,
+      ensureContextGraph: async () => undefined,
+      setCheckpoint: () => undefined,
+      deleteCheckpoint: () => undefined,
+      ensureOwnedMap: () => new Map(),
+    });
+
+    expect(result).toMatchObject({
+      completed: false,
+      incompleteReason: 'local-budget-yield',
+      readySnapshots: 1,
+      totalSnapshots: 3,
+    });
+    expect(isGraphAssetMaterialized).toHaveBeenCalledOnce();
+    expect(registry.open(owner, manifest).resolvedCount()).toBe(1);
+  });
+
   it('skips a verified cached prefix across jobs and eventually fetches the manifest tail', async () => {
     vi.stubEnv('DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS', '100');
     let elapsed = 0;
@@ -247,19 +318,53 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     const walkA = registry.open(ownerA, manifest);
     walkA.markResolved('a');
     expect(registry.open(ownerA, manifest).isResolved('a')).toBe(true);
-    expect(registry.open(ownerA, [...manifest].reverse()).isResolved('a')).toBe(false);
-    expect(registry.open({ ...ownerA, remotePeerId: 'peer-b' }, manifest).isResolved('a')).toBe(false);
+    const reversedA = registry.open(ownerA, [...manifest].reverse());
+    expect(reversedA.isResolved('a')).toBe(false);
+    const ownerB = { ...ownerA, remotePeerId: 'peer-b' };
+    const walkB = registry.open(ownerB, manifest);
+    expect(walkB.isResolved('a')).toBe(false);
 
     const ownerC = { contextGraphId: 'cg-c', remotePeerId: 'peer-c' };
-    registry.open(ownerC, manifest);
+    const detachedC = registry.open(ownerC, [{ ref: 'only', digest: 'only', count: 1 }]);
+    detachedC.markResolved('only');
     expect(registry.retainedTargetCount).toBe(2);
-    expect(registry.open(ownerA, manifest)).not.toBe(walkA);
+    expect(registry.open(ownerB, manifest)).toBe(walkB);
 
+    reversedA.markResolved('a');
+    reversedA.markResolved('b');
+    expect(registry.retainedTargetCount).toBe(1);
     const completing = registry.open(ownerC, [{ ref: 'only', digest: 'only', count: 1 }]);
     completing.markResolved('only');
     expect(registry.retainedTargetCount).toBe(1);
     now = 11;
     expect(registry.retainedTargetCount).toBe(0);
+  });
+
+  it('converges cyclic maxTargets+1 owners without evicting active progress', () => {
+    const registry = new PrivateSwmSnapshotWalkRegistry({ maxTargets: 2 });
+    const manifest = ['a', 'b', 'c'].map((ref) => ({ ref, digest: ref, count: 1 }));
+    const owners = ['a', 'b', 'c'].map((suffix) => ({
+      contextGraphId: `cg-${suffix}`,
+      remotePeerId: `peer-${suffix}`,
+    }));
+    const completed = new Set<string>();
+
+    // One newly resolved ref is the entire per-owner budget. The overflow
+    // owner waits detached until an admitted owner completes and releases a
+    // slot; active owners never lose their only monotonic position.
+    for (let cycle = 0; cycle < 6 && completed.size < owners.length; cycle += 1) {
+      for (const owner of owners) {
+        if (completed.has(owner.contextGraphId)) continue;
+        const walk = registry.open(owner, manifest);
+        const next = manifest.find(({ ref }) => !walk.isResolved(ref));
+        if (!next) throw new Error('Incomplete owner has no remaining ref');
+        walk.markResolved(next.ref);
+        if (walk.resolvedCount() === manifest.length) completed.add(owner.contextGraphId);
+        expect(registry.retainedTargetCount).toBeLessThanOrEqual(2);
+      }
+    }
+
+    expect([...completed].sort()).toEqual(owners.map(({ contextGraphId }) => contextGraphId));
   });
 
   it.each(['meta', 'data'] as const)(

@@ -504,7 +504,35 @@ async function recoverContextGraphSwmUnlocked(
     const orderedManifest = collectPublicSnapshotMetadata(activeGraphMeta);
     snapshotWalk = deps.snapshotWalk?.(orderedManifest);
     if (snapshotWalk?.invalidateResolved) {
-      for (const resolvedRef of snapshotWalk.resolvedRefsSnapshot()) {
+      const retainedRefs = snapshotWalk.resolvedRefsSnapshot();
+      let validatedRetainedRefs = 0;
+      const workAdmission = deps.workAdmission ?? UNRESTRICTED_SYNC_WORK;
+      for (const [index, resolvedRef] of retainedRefs.entries()) {
+        // Retained evidence is still per-KA work: validating a blob and its
+        // materialized graph can be as expensive as fetching one. Yield at the
+        // same boundary as the snapshot walk and discard unvalidated evidence
+        // so it cannot be counted as completion on a later pass.
+        if (Date.now() >= deps.deadline || !workAdmission.canAdmitWork()) {
+          for (const unvalidatedRef of retainedRefs.slice(index)) {
+            snapshotWalk.invalidateResolved(unvalidatedRef);
+          }
+          deps.logInfo?.(
+            deps.ctx,
+            `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: `
+            + 'retained snapshot validation exhausted the local budget — will retry',
+          );
+          return {
+            incompleteReason: 'local-budget-yield',
+            replacedRoots: 0,
+            replacedGraphs: 0,
+            insertedDataQuads: 0,
+            insertedMetaQuads: 0,
+            droppedDataTriples: 0,
+            readySnapshots: validatedRetainedRefs,
+            totalSnapshots: orderedManifest.length,
+            completed: false,
+          };
+        }
         const descriptors = snapshotDescriptorsByRef.get(resolvedRef) ?? [];
         let stillMaterialized = descriptors.length > 0;
         for (const descriptor of descriptors) {
@@ -514,6 +542,7 @@ async function recoverContextGraphSwmUnlocked(
           ));
         }
         if (!stillMaterialized) snapshotWalk.invalidateResolved(resolvedRef);
+        else validatedRetainedRefs += 1;
       }
     }
     boundary.assertCurrent();

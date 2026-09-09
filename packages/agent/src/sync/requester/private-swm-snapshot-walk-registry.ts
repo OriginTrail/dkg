@@ -14,7 +14,6 @@ export interface PrivateSwmSnapshotWalkOwner {
 interface RetainedPrivateSnapshotWalk {
   readonly manifestKey: string;
   readonly walk: SharedMemorySnapshotWalkContinuation;
-  readonly ordinal: number;
   expiresAtMs: number;
 }
 
@@ -22,15 +21,16 @@ const DEFAULT_MAX_RETAINED_PRIVATE_SNAPSHOT_WALKS = 256;
 
 /**
  * Bounded, owner-isolated progress for an incomplete private snapshot walk.
- * Completed, expired, changed-manifest, and capacity-evicted walks are never
- * retained as evidence for a later recovery job.
+ * Completed, expired, and changed-manifest walks are never retained as
+ * evidence for a later recovery job. Capacity saturation returns a detached
+ * walk instead of evicting an active owner: admitted owners therefore keep
+ * monotonic progress and eventually release slots for the waiting targets.
  */
 export class PrivateSwmSnapshotWalkRegistry {
   readonly #walks = new Map<string, RetainedPrivateSnapshotWalk>();
   readonly #now: () => number;
   readonly #retentionTtlMs: number;
   readonly #maxTargets: number;
-  #nextOrdinal = 0;
 
   constructor(options: {
     readonly now?: () => number;
@@ -60,10 +60,9 @@ export class PrivateSwmSnapshotWalkRegistry {
     if (retained?.manifestKey === manifestKey) return retained.walk;
     if (retained) this.#walks.delete(ownerKey);
 
-    while (this.#walks.size >= this.#maxTargets) this.#evictOldest();
     const allowedRefs = new Set(manifest.map(({ ref }) => ref));
     const resolvedRefs = new Set<string>();
-    let entry: RetainedPrivateSnapshotWalk;
+    let entry: RetainedPrivateSnapshotWalk | undefined;
     const walk: SharedMemorySnapshotWalkContinuation = {
       orderedManifestSnapshot: () => manifest,
       isResolved: (ref) => resolvedRefs.has(ref),
@@ -71,26 +70,33 @@ export class PrivateSwmSnapshotWalkRegistry {
       resolvedRefsSnapshot: () => Object.freeze([...resolvedRefs]),
       suppressedMetadataRows: () => [],
       invalidateResolved: (ref) => {
-        if (this.#walks.get(ownerKey) !== entry || !resolvedRefs.delete(ref)) return;
-        entry.expiresAtMs = this.#now() + this.#retentionTtlMs;
+        if (!resolvedRefs.delete(ref)) return;
+        if (entry && this.#walks.get(ownerKey) === entry) {
+          entry.expiresAtMs = this.#now() + this.#retentionTtlMs;
+        }
       },
       markResolved: (ref) => {
-        if (this.#walks.get(ownerKey) !== entry || !allowedRefs.has(ref)) return;
+        if (!allowedRefs.has(ref)) return;
         resolvedRefs.add(ref);
         if (resolvedRefs.size === manifest.length) {
-          this.#walks.delete(ownerKey);
+          if (entry && this.#walks.get(ownerKey) === entry) this.#walks.delete(ownerKey);
           return;
         }
-        entry.expiresAtMs = this.#now() + this.#retentionTtlMs;
+        if (entry && this.#walks.get(ownerKey) === entry) {
+          entry.expiresAtMs = this.#now() + this.#retentionTtlMs;
+        }
       },
     };
+    // Do not evict an active target. A saturated caller gets useful in-job
+    // state but no cross-job evidence; retained owners continue advancing and
+    // completion opens capacity for cyclically waiting owners.
+    if (manifest.length === 0 || this.#walks.size >= this.#maxTargets) return walk;
     entry = {
       manifestKey,
       walk,
-      ordinal: this.#nextOrdinal++,
       expiresAtMs: this.#now() + this.#retentionTtlMs,
     };
-    if (manifest.length > 0) this.#walks.set(ownerKey, entry);
+    this.#walks.set(ownerKey, entry);
     return walk;
   }
 
@@ -108,14 +114,6 @@ export class PrivateSwmSnapshotWalkRegistry {
     for (const [ownerKey, retained] of this.#walks) {
       if (retained.expiresAtMs <= now) this.#walks.delete(ownerKey);
     }
-  }
-
-  #evictOldest(): void {
-    let oldest: [string, RetainedPrivateSnapshotWalk] | undefined;
-    for (const candidate of this.#walks) {
-      if (!oldest || candidate[1].ordinal < oldest[1].ordinal) oldest = candidate;
-    }
-    if (oldest) this.#walks.delete(oldest[0]);
   }
 }
 

@@ -1190,20 +1190,26 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
   it('keeps a peer eligible after the detailed route reports a local budget yield', async () => {
     const cgId = 'typed-local-yield-route-cg';
     const peerId = 'peer-local-yield';
-    const syncSharedMemoryFromPeerDetailed = vi.fn()
-      .mockResolvedValueOnce({
+    const unknownPeer = 'peer-unknown-competitor';
+    let connectedPeers = [peerId];
+    let yieldingPeerCalls = 0;
+    const syncSharedMemoryFromPeerDetailed = vi.fn(async (selectedPeerId: string) => {
+      if (selectedPeerId === peerId && yieldingPeerCalls++ === 0) return {
         insertedTriples: 0,
         incompleteReason: 'local-budget-yield',
         failedPhases: 1,
         snapshotPlaneIncomplete: 1,
         backoffWorthyFailures: 0,
-      })
-      .mockResolvedValueOnce({ insertedTriples: 0 });
+      };
+      return { insertedTriples: 0 };
+    });
     const agent = {
       peerId: 'self-peer',
       node: {
         libp2p: {
-          getConnections: () => [{ remotePeer: { toString: () => peerId } }],
+          getConnections: () => connectedPeers.map((connectedPeerId) => ({
+            remotePeer: { toString: () => connectedPeerId },
+          })),
         },
       },
       canUseSharedMemoryForContextGraph: vi.fn(async () => true),
@@ -1217,10 +1223,14 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     await handleMemoryRoutes(first.ctx);
     expect(first.res.statusCode).toBe(200);
 
+    // A transport-negative cache entry would make the selector prefer only
+    // this unknown competitor. A local yield must leave the original peer in
+    // the eligible set and cause it to be invoked again.
+    connectedPeers = [peerId, unknownPeer];
     const second = buildCatchupCtx({ contextGraphId: cgId, hostCatchupFallback: false }, agent);
     await handleMemoryRoutes(second.ctx);
     expect(second.res.statusCode).toBe(200);
-    expect(syncSharedMemoryFromPeerDetailed).toHaveBeenCalledTimes(2);
-    expect(syncSharedMemoryFromPeerDetailed).toHaveBeenNthCalledWith(2, peerId, [cgId]);
+    expect(syncSharedMemoryFromPeerDetailed.mock.calls
+      .filter(([selectedPeerId]) => selectedPeerId === peerId)).toHaveLength(2);
   });
 });
