@@ -572,12 +572,6 @@ async function captureRfc64LegacySwmBoundaryV1(
             kaUal,
           }),
         );
-        if (entries.size > RFC64_LEGACY_SWM_HEAD_LIMIT_V1) {
-          throw new Error(
-            `RFC-64 legacy SWM boundary exceeds head limit ` +
-            `${RFC64_LEGACY_SWM_HEAD_LIMIT_V1}`,
-          );
-        }
       }
     }
   }

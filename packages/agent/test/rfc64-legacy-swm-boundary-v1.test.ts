@@ -8,7 +8,11 @@ import {
   contextGraphSharedMemoryMetaUri,
   contextGraphWorkspaceMetaGraphUri,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  OxigraphStore,
+  type QueryResult,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -309,6 +313,85 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     expect(headQueryCall![0]).not.toContain('queryHints#');
   });
 
+  it.each([
+    {
+      name: 'a non-binding operation result',
+      operationResult: { type: 'boolean', value: true } as const,
+      headResult: { type: 'bindings', bindings: [] } as const,
+      error: 'operation query did not return bindings',
+    },
+    {
+      name: 'an incomplete operation binding',
+      operationResult: {
+        type: 'bindings',
+        bindings: [{
+          metaGraph: META_GRAPH,
+          ual: UAL_ONE,
+          contextGraphId: `"${CONTEXT_GRAPH_ID}"`,
+        }],
+      } as const,
+      headResult: { type: 'bindings', bindings: [] } as const,
+      error: 'returned an incomplete operation',
+    },
+    {
+      name: 'a malformed share-operation literal',
+      operationResult: {
+        type: 'bindings',
+        bindings: [{
+          metaGraph: META_GRAPH,
+          ual: UAL_ONE,
+          shareId: '"unterminated',
+          contextGraphId: `"${CONTEXT_GRAPH_ID}"`,
+        }],
+      } as const,
+      headResult: { type: 'bindings', bindings: [] } as const,
+      error: 'contains a malformed share operation ID',
+    },
+    {
+      name: 'a non-binding exact-head result',
+      operationResult: captureOperationResult(),
+      headResult: { type: 'boolean', value: true } as const,
+      error: 'head query did not return bindings',
+    },
+    {
+      name: 'more exact-head rows than the bounded batch',
+      operationResult: captureOperationResult(),
+      headResult: {
+        type: 'bindings',
+        bindings: [captureHeadBinding(), captureHeadBinding()],
+      } as const,
+      error: 'head query exceeded its batch',
+    },
+    {
+      name: 'an incomplete exact-head binding',
+      operationResult: captureOperationResult(),
+      headResult: {
+        type: 'bindings',
+        bindings: [{ head: `${UAL_ONE}#dkg-swm-head` }],
+      } as const,
+      error: 'returned an incomplete head',
+    },
+    {
+      name: 'an exact-head binding outside the requested batch',
+      operationResult: captureOperationResult(),
+      headResult: {
+        type: 'bindings',
+        bindings: [{ head: `${UAL_TWO}#dkg-swm-head`, ual: UAL_TWO }],
+      } as const,
+      error: 'returned an unrequested head',
+    },
+  ])('fails closed on $name', async ({ operationResult, headResult, error }) => {
+    const root = await secureTempRoot(roots);
+    const store = scriptedCaptureStore(
+      operationResult as QueryResult,
+      headResult as QueryResult,
+    );
+
+    await expect(
+      initializeRfc64LegacySwmBoundaryV1({}, root, store),
+    ).rejects.toThrow(error);
+  });
+
   it('does not query a named metadata graph that could exhaust the root head cap', async () => {
     const root = await secureTempRoot(roots);
     const operationBinding = {
@@ -430,6 +513,41 @@ function fakeStore(
             ual,
           })),
         };
+      }
+      return { type: 'bindings' as const, bindings: [] };
+    }),
+  } as unknown as TripleStore;
+}
+
+function captureOperationResult(): QueryResult {
+  return {
+    type: 'bindings',
+    bindings: [{
+      metaGraph: META_GRAPH,
+      ual: UAL_ONE,
+      shareId: '"share-one"',
+      contextGraphId: `"${CONTEXT_GRAPH_ID}"`,
+    }],
+  };
+}
+
+function captureHeadBinding(): Record<string, string> {
+  return { head: `${UAL_ONE}#dkg-swm-head`, ual: UAL_ONE };
+}
+
+function scriptedCaptureStore(
+  operationResult: QueryResult,
+  headResult: QueryResult,
+): TripleStore {
+  return {
+    query: vi.fn(async (_sparql: string, options?: { source?: string }) => {
+      if (
+        options?.source === 'agent.rfc64.legacySwmBoundary.readOperations'
+      ) {
+        return operationResult;
+      }
+      if (options?.source === 'agent.rfc64.legacySwmBoundary.readHeads') {
+        return headResult;
       }
       return { type: 'bindings' as const, bindings: [] };
     }),
