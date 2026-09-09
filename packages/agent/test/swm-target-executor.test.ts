@@ -21,8 +21,15 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
     await Promise.all(stores.splice(0).map((store) => store.close()));
   });
 
-  it('pins recovery authorization and the lease signal on private page fetches', async () => {
-    vi.spyOn(performance, 'now').mockReturnValue(0);
+  it.each([
+    { limit: 'job window', budgetMs: 50, roundMs: 500, outcome: 'local_yield' },
+    { limit: 'round deadline', budgetMs: 500, roundMs: 50, outcome: 'timed_out' },
+    { limit: 'initial round only', budgetMs: 0, roundMs: 50, outcome: 'timed_out' },
+  ])('pins authorization, lease signal and $limit on private page fetches', async ({ budgetMs, roundMs, outcome }) => {
+    let elapsedMs = 0;
+    const startedAt = Date.now();
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsedMs);
+    vi.spyOn(Date, 'now').mockImplementation(() => startedAt + elapsedMs);
     const store = new OxigraphStore();
     stores.push(store);
     const controller = new AbortController();
@@ -38,11 +45,11 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
       }),
     );
     const executor = new SwmTargetExecutorV1({
-      privateRecoveryBudgetMs: 50,
+      privateRecoveryBudgetMs: budgetMs,
       store,
       writeLocks: new Map(),
       listSubGraphs: async () => [],
-      createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
+      createContextGraphSyncDeadline: () => startedAt + roundMs,
       fetchSyncPages,
       processSharedMemoryBatch: async () => ({
         verifiedData: [],
@@ -72,7 +79,6 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
       logDebug: () => undefined,
     });
 
-    const startedAt = Date.now();
     await expect(executor.recoverPrivateTarget({
       remotePeerId: '12D3KooWCompletePrivateProvider',
       contextGraphId: 'private-rfc64-context-graph',
@@ -84,12 +90,24 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
 
     expect(fetchSyncPages).toHaveBeenCalled();
     for (const call of fetchSyncPages.mock.calls) {
-      expect(call[6]).toBeGreaterThanOrEqual(startedAt);
-      expect(call[6]).toBeLessThanOrEqual(Date.now() + 50);
       expect(call[7]).toMatchObject({
         recovery: true,
         signal: controller.signal,
       });
+      // The composed capability owns both bounds at the transport boundary.
+      expect(call[7]?.workAdmission?.capTimeout(1_000)).toBe(50);
+    }
+    elapsedMs = 20;
+    for (const call of fetchSyncPages.mock.calls) {
+      expect(call[7]?.workAdmission?.capTimeout(1_000)).toBe(30);
+      expect(call[7]?.workAdmission?.capTimeout(7)).toBe(7);
+    }
+    elapsedMs = 51;
+    for (const call of fetchSyncPages.mock.calls) {
+      const work = call[7]!.workAdmission!;
+      expect(work.canAdmitWork()).toBe(false);
+      expect(work.capTimeout(1_000)).toBe(0);
+      expect(() => work.assertCurrent()).toThrowError(expect.objectContaining({ outcome }));
     }
   });
 
