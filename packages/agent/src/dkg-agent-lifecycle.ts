@@ -277,7 +277,7 @@ import {
   type SyncPageFetchOptions,
   type SyncPageResult,
 } from './sync/requester/page-fetch.js';
-import { UNRESTRICTED_SYNC_WORK } from './sync/work-admission.js';
+import { composeSyncWorkAdmission } from './sync/work-admission.js';
 import {
   createChallengePinnedExactAssetSelection,
   createUalOnlyExactAssetSelection,
@@ -7095,15 +7095,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       maxAcceptedQuads,
       maxAcceptedHeapBytesEstimate,
     } = options;
+    const effectiveWorkAdmission = workAdmission ?? composeSyncWorkAdmission({
+      deadline,
+      scope: { sharing: 'coalescible', key: 'default-page-fetch' },
+    });
     const exactAccumulationLimits = assetUals === undefined
       ? undefined
       : exactSyncPhaseAccumulationLimits(assetUals);
-    // A finite admission belongs to one recovery operation and must never
-    // inherit another operation's clock or result. Only absence of a policy or
-    // the canonical unrestricted singleton is shareable.
-    const operationOwnsAdmission = workAdmission !== undefined
-      && workAdmission !== UNRESTRICTED_SYNC_WORK;
-    const coalescingKey = signal || shouldStopAfterPage || operationOwnsAdmission
+    // Coalescing is declared by the capability, never inferred from singleton
+    // identity. Exclusive private rounds cannot inherit another job's clock.
+    const coalescingScopeKey = effectiveWorkAdmission.scope.sharing === 'coalescible'
+      ? effectiveWorkAdmission.scope.key
+      : null;
+    const coalescingKeyBase = signal || shouldStopAfterPage || coalescingScopeKey === null
       ? null
       : syncPageFetchCoalescingKey({
         remotePeerId,
@@ -7122,6 +7126,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         maxAcceptedQuads,
         maxAcceptedHeapBytesEstimate,
       });
+    const coalescingKey = coalescingKeyBase === null
+      ? null
+      : `${coalescingKeyBase}|admission:${coalescingScopeKey}`;
     const inFlight = inFlightSyncPageFetchesFor(this);
     // Read once, here: this fetch runs inside the admitted operation, so the
     // ambient source is the trigger that both a join and the shared fetch's
@@ -7206,7 +7213,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       manifestDigest,
       manifestPrefixDigestAtOffset,
       shouldStopAfterPage,
-      workAdmission,
+      workAdmission: effectiveWorkAdmission,
       buildSyncRequest: this.buildSyncRequest.bind(this),
       parseAndFilter: (nquadsText, targetGraphUri, targetContextGraphId) => {
         if (phase === 'snapshot') {

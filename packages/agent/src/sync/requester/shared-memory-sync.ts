@@ -1,4 +1,7 @@
-import { UNRESTRICTED_SYNC_WORK, type SyncWorkAdmission } from '../work-admission.js';
+import {
+  composeSyncWorkAdmission,
+  type SyncWorkAdmission,
+} from '../work-admission.js';
 import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -1656,7 +1659,10 @@ export async function syncPublicSnapshotsForMeta(params: {
    */
   localYield?: SharedMemoryLocalYield;
 }> {
-  const workAdmission = params.workAdmission ?? UNRESTRICTED_SYNC_WORK;
+  const workAdmission = params.workAdmission ?? composeSyncWorkAdmission({
+    deadline: params.deadline,
+    scope: { sharing: 'coalescible', key: 'public-snapshot-round' },
+  });
   const executionBoundary = params.executionBoundary
     ?? createRecoveryExecutionAdmission();
   executionBoundary.assertCurrent();
@@ -1750,7 +1756,7 @@ export async function syncPublicSnapshotsForMeta(params: {
     //
     // Never mid-KA: a snapshot is applied whole or not at all, so stopping here
     // can never leave a partially materialized asset.
-    if (Date.now() >= params.deadline || !workAdmission.canAdmitWork()) {
+    if (!workAdmission.canAdmitWork()) {
       localYield = sharedMemoryLocalYield();
       abandonFrom(index);
       break;
@@ -1770,7 +1776,7 @@ export async function syncPublicSnapshotsForMeta(params: {
 
       // Cache validation can consume the allowance without producing a hit.
       // Admit no new transport after that local work exhausts the budget.
-      if (Date.now() >= params.deadline || !workAdmission.canAdmitWork()) {
+      if (!workAdmission.canAdmitWork()) {
         localYield = sharedMemoryLocalYield();
         abandonFrom(index);
         break;
@@ -1788,7 +1794,7 @@ export async function syncPublicSnapshotsForMeta(params: {
         true,
         'snapshot',
         '',
-        workAdmission.capDeadline(params.deadline),
+        params.deadline,
         snapshotOptions,
       ));
       bytesReceived += result.bytesReceived;

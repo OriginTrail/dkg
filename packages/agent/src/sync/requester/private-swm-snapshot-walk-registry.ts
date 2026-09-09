@@ -1,29 +1,100 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../durable-session.js';
+import type { SyncWorkAdmission } from '../work-admission.js';
 import type {
   PublicSnapshotMetadata,
-  RetainedSharedMemorySnapshotWalkContinuation,
+  PublicSnapshotWalkPlan,
 } from './shared-memory-sync.js';
-import { ManifestBoundSnapshotWalk } from './manifest-bound-snapshot-walk.js';
+import {
+  ManifestBoundSnapshotProgress,
+  prepareManifestBoundSnapshotWalk,
+} from './manifest-bound-snapshot-walk.js';
 
 export interface PrivateSwmSnapshotWalkOwner {
   readonly contextGraphId: string;
   readonly remotePeerId: string;
 }
 
+export type PrivateSwmSnapshotWalkPreparation =
+  | {
+    readonly kind: 'prepared';
+    readonly plan: PublicSnapshotWalkPlan;
+    readonly validatedRefs: number;
+  }
+  | {
+    readonly kind: 'local-budget-yield';
+    readonly validatedRefs: number;
+  };
+
+/** Private retained-walk policy composed over the narrow manifest progress core. */
+export class PrivateSwmSnapshotWalkCoordinator {
+  constructor(readonly progress: ManifestBoundSnapshotProgress) {}
+
+  matches(manifest: readonly PublicSnapshotMetadata[]): boolean {
+    return this.progress.matches(manifest);
+  }
+
+  get expiresAtMs(): number {
+    return this.progress.expiresAtMs;
+  }
+
+  isResolved(ref: string): boolean {
+    return this.progress.isResolved(ref);
+  }
+
+  resolvedCount(): number {
+    return this.progress.resolvedCount();
+  }
+
+  markResolved(ref: string): void {
+    this.progress.markResolved(ref);
+  }
+
+  /**
+   * Own private-only retained validation and unresolved-first preparation.
+   * A caller receives either one usable plan or a fail-closed local yield.
+   */
+  async prepare(options: {
+    readonly workAdmission: SyncWorkAdmission;
+    readonly validateRef: (ref: string) => Promise<boolean>;
+  }): Promise<PrivateSwmSnapshotWalkPreparation> {
+    const manifest = this.progress.orderedManifestSnapshot();
+    const hasUnresolved = manifest.some(({ ref }) => !this.progress.isResolved(ref));
+    const validatedRefs = new Set<string>();
+    if (!hasUnresolved) {
+      const retainedRefs = this.progress.resolvedRefsSnapshot();
+      for (const [index, ref] of retainedRefs.entries()) {
+        if (!options.workAdmission.canAdmitWork()) {
+          for (const unvalidatedRef of retainedRefs.slice(index)) {
+            this.progress.invalidateResolved(unvalidatedRef);
+          }
+          return { kind: 'local-budget-yield', validatedRefs: validatedRefs.size };
+        }
+        if (await options.validateRef(ref)) validatedRefs.add(ref);
+        else this.progress.invalidateResolved(ref);
+      }
+    }
+    return {
+      kind: 'prepared',
+      validatedRefs: validatedRefs.size,
+      plan: prepareManifestBoundSnapshotWalk(this.progress, {
+        order: 'unresolved-first',
+        canReuseResolved: ref => validatedRefs.has(ref),
+      }),
+    };
+  }
+}
+
 interface RetainedPrivateSnapshotWalk {
-  readonly walk: ManifestBoundSnapshotWalk;
+  readonly coordinator: PrivateSwmSnapshotWalkCoordinator;
 }
 
 const DEFAULT_MAX_RETAINED_PRIVATE_SNAPSHOT_WALKS = 256;
 
 /**
- * Bounded, owner-isolated progress for an incomplete private snapshot walk.
- * Completed, expired, and changed-manifest walks are never retained as
- * evidence for a later recovery job. Capacity saturation returns a detached
- * walk instead of evicting an active owner: admitted owners therefore keep
- * monotonic progress and eventually release slots for the waiting targets.
+ * Bounded, owner-isolated private coordinators. Capacity saturation returns a
+ * detached coordinator rather than evicting another owner's active progress.
  */
 export class PrivateSwmSnapshotWalkRegistry {
   readonly #walks = new Map<string, RetainedPrivateSnapshotWalk>();
@@ -50,24 +121,24 @@ export class PrivateSwmSnapshotWalkRegistry {
   open(
     owner: PrivateSwmSnapshotWalkOwner,
     orderedManifest: readonly PublicSnapshotMetadata[],
-  ): RetainedSharedMemorySnapshotWalkContinuation {
+  ): PrivateSwmSnapshotWalkCoordinator {
     this.#pruneExpired();
     const ownerKey = privateSnapshotWalkOwnerKey(owner);
     const retained = this.#walks.get(ownerKey);
-    if (retained?.walk.matches(orderedManifest)) return retained.walk;
+    if (retained?.coordinator.matches(orderedManifest)) return retained.coordinator;
     if (retained) this.#walks.delete(ownerKey);
 
-    const walk = new ManifestBoundSnapshotWalk(orderedManifest, {
-      now: this.#now,
-      retentionTtlMs: this.#retentionTtlMs,
-    });
-    // Do not evict an active target. A saturated caller gets useful in-job
-    // state but no cross-job evidence; retained owners continue advancing and
-    // completion opens capacity for cyclically waiting owners.
-    if (orderedManifest.length === 0 || this.#walks.size >= this.#maxTargets) return walk;
-    const entry = { walk };
-    this.#walks.set(ownerKey, entry);
-    return walk;
+    const coordinator = new PrivateSwmSnapshotWalkCoordinator(
+      new ManifestBoundSnapshotProgress(orderedManifest, {
+        now: this.#now,
+        retentionTtlMs: this.#retentionTtlMs,
+      }),
+    );
+    if (orderedManifest.length === 0 || this.#walks.size >= this.#maxTargets) {
+      return coordinator;
+    }
+    this.#walks.set(ownerKey, { coordinator });
+    return coordinator;
   }
 
   release(owner: PrivateSwmSnapshotWalkOwner): void {
@@ -82,7 +153,7 @@ export class PrivateSwmSnapshotWalkRegistry {
   #pruneExpired(): void {
     const now = this.#now();
     for (const [ownerKey, retained] of this.#walks) {
-      if (retained.walk.expiresAtMs <= now) this.#walks.delete(ownerKey);
+      if (retained.coordinator.expiresAtMs <= now) this.#walks.delete(ownerKey);
     }
   }
 }

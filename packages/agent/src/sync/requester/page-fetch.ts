@@ -1,4 +1,9 @@
-import { assertSyncWorkAdmission, SyncWorkAdmissionExhaustedError, UNRESTRICTED_SYNC_WORK, type SyncWorkAdmission } from '../work-admission.js';
+import {
+  assertSyncWorkAdmission,
+  composeSyncWorkAdmission,
+  SyncWorkAdmissionExhaustedError,
+  type SyncWorkAdmission,
+} from '../work-admission.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
@@ -442,7 +447,7 @@ export class SyncPageAccumulationLimitError extends Error {
 }
 
 interface FetchSyncPagesParams {
-  workAdmission?: SyncWorkAdmission;
+  workAdmission: SyncWorkAdmission;
   ctx: OperationContext;
   remotePeerId: string;
   contextGraphId: string;
@@ -595,11 +600,25 @@ function checkpointKeyForFetch(params: FetchSyncPagesParams): string {
 }
 
 export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<SyncPageResult> {
-  if (params.ephemeralRequesterState !== true) return fetchSyncPagesWithState(params);
+  // Runtime compatibility for callers compiled against the older optional
+  // field; internal boundaries always receive a concrete capability.
+  const admittedParams: FetchSyncPagesParams = {
+    ...params,
+    workAdmission: params.workAdmission ?? composeSyncWorkAdmission({
+      deadline: params.deadline,
+      scope: { sharing: 'coalescible', key: 'direct-page-fetch' },
+    }),
+  };
+  if (admittedParams.ephemeralRequesterState !== true) {
+    return fetchSyncPagesWithState(admittedParams);
+  }
   try {
-    return await fetchSyncPagesWithState(params);
+    return await fetchSyncPagesWithState(admittedParams);
   } finally {
-    deleteSyncPageCheckpoint(params.checkpointStore, checkpointKeyForFetch(params));
+    deleteSyncPageCheckpoint(
+      admittedParams.checkpointStore,
+      checkpointKeyForFetch(admittedParams),
+    );
   }
 }
 
@@ -612,10 +631,8 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     phase,
     graphUri,
     snapshotRef,
-    deadline,
     syncPageTimeoutMs,
-    workAdmission = UNRESTRICTED_SYNC_WORK,
-    syncRouterAttempts,
+    workAdmission,
     syncPageRetryAttempts,
     syncPageSize,
     syncDeniedResponse,
@@ -802,10 +819,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     onRetry: (attempt: number, delay: number, error: unknown) => void,
   ): Promise<Uint8Array> => sendSyncRequest({
     remotePeerId,
-    timeoutMs: Math.min(
-      syncPageTimeoutMs,
-      Math.max(2000, Math.floor(Math.max(0, deadline - Date.now()) / syncRouterAttempts)),
-    ),
+    timeoutMs: syncPageTimeoutMs,
     workAdmission,
     retryAttempts: syncPageRetryAttempts,
     signal,
@@ -842,7 +856,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     onRetry,
   });
 
-  try {
+  fetchPages: try {
     if (
       responderSessionNeedsPriming
       && responderSession
@@ -906,10 +920,6 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     while (true) {
       throwIfAborted(signal);
       assertSyncWorkAdmission(workAdmission);
-      if (Date.now() > deadline) {
-        timedOut = true;
-        break;
-      }
 
       const curOffset = offset;
       const transportStartedAt = Date.now();
@@ -1053,16 +1063,21 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
         phaseTelemetry.finish('error', allQuads.length);
         throw asAbortError(signal.reason);
       }
-      deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
-      phaseTelemetry.finish('local_yield', allQuads.length);
-      return {
-        quads: allQuads,
-        ...(hasCompleteQuadRawOffsetMapping ? { quadRawOffsets: allQuadRawOffsets } : {}),
-        bytesReceived, resumedFromOffset, rawResumedFromOffset, responderSessionStartedFresh,
-        ...(manifestDigest ? { manifestDigest } : {}),
-        nextOffset: offset, rawNextOffset: offset, checkpointKey,
-        completed: false, timedOut: false, localYield: sharedMemoryLocalYield(),
-      };
+      if (err.outcome === 'timed_out') {
+        timedOut = true;
+        break fetchPages;
+      } else {
+        deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
+        phaseTelemetry.finish('local_yield', allQuads.length);
+        return {
+          quads: allQuads,
+          ...(hasCompleteQuadRawOffsetMapping ? { quadRawOffsets: allQuadRawOffsets } : {}),
+          bytesReceived, resumedFromOffset, rawResumedFromOffset, responderSessionStartedFresh,
+          ...(manifestDigest ? { manifestDigest } : {}),
+          nextOffset: offset, rawNextOffset: offset, checkpointKey,
+          completed: false, timedOut: false, localYield: sharedMemoryLocalYield(),
+        };
+      }
     }
     // The transport retry helper has no onRetry callback after its terminal
     // attempt. Persist one final backoff step so the next bounded continuation

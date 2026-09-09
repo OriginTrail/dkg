@@ -4,35 +4,27 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import type {
   PublicSnapshotMetadata,
   PublicSnapshotWalkPlan,
+  SharedMemorySnapshotWalkContinuation,
   SnapshotWalkPreparation,
-  RetainedSharedMemorySnapshotWalkContinuation,
 } from './shared-memory-sync.js';
 
-export interface ManifestBoundSnapshotWalkOptions {
+export interface ManifestBoundSnapshotProgressOptions {
   readonly now: () => number;
   readonly retentionTtlMs: number;
-  readonly onComplete?: () => void;
-  readonly canMutate?: () => boolean;
 }
 
-/**
- * Canonical immutable-manifest walk state shared by selected and private SWM.
- * Manifest identity, progress, invalidation, and sliding expiry live here;
- * owners only decide where the walk is retained and when its slot is released.
- */
-export class ManifestBoundSnapshotWalk implements RetainedSharedMemorySnapshotWalkContinuation {
+/** Immutable manifest identity plus the smallest mutable progress set. */
+export class ManifestBoundSnapshotProgress {
   readonly #manifest: readonly PublicSnapshotMetadata[];
   readonly #allowedRefs: ReadonlySet<string>;
   readonly #resolvedRefs = new Set<string>();
   readonly #now: () => number;
   readonly #retentionTtlMs: number;
-  readonly #onComplete: (() => void) | undefined;
-  readonly #canMutate: () => boolean;
   #expiresAtMs: number;
 
   constructor(
     orderedManifest: readonly PublicSnapshotMetadata[],
-    options: ManifestBoundSnapshotWalkOptions,
+    options: ManifestBoundSnapshotProgressOptions,
   ) {
     if (!Number.isFinite(options.retentionTtlMs) || options.retentionTtlMs <= 0) {
       throw new RangeError('Snapshot-walk retention TTL must be positive');
@@ -41,8 +33,6 @@ export class ManifestBoundSnapshotWalk implements RetainedSharedMemorySnapshotWa
     this.#allowedRefs = new Set(this.#manifest.map(({ ref }) => ref));
     this.#now = options.now;
     this.#retentionTtlMs = options.retentionTtlMs;
-    this.#onComplete = options.onComplete;
-    this.#canMutate = options.canMutate ?? (() => true);
     this.#expiresAtMs = this.#manifest.length > 0
       ? this.#now() + this.#retentionTtlMs
       : 0;
@@ -71,20 +61,6 @@ export class ManifestBoundSnapshotWalk implements RetainedSharedMemorySnapshotWa
     return this.#manifest;
   }
 
-  prepare({ order, canReuseResolved }: SnapshotWalkPreparation): PublicSnapshotWalkPlan {
-    const unresolved: PublicSnapshotMetadata[] = [];
-    const resolved: PublicSnapshotMetadata[] = [];
-    if (order === 'unresolved-first') {
-      for (const snapshot of this.#manifest) {
-        (this.isResolved(snapshot.ref) ? resolved : unresolved).push(snapshot);
-      }
-    }
-    return Object.freeze({
-      snapshots: order === 'manifest' ? this.#manifest : Object.freeze([...unresolved, ...resolved]),
-      canReuse: (ref: string) => this.isResolved(ref) && canReuseResolved(ref),
-    });
-  }
-
   isResolved(ref: string): boolean {
     return this.#resolvedRefs.has(ref);
   }
@@ -97,68 +73,125 @@ export class ManifestBoundSnapshotWalk implements RetainedSharedMemorySnapshotWa
     return Object.freeze([...this.#resolvedRefs]);
   }
 
-  suppressedMetadataRows(_ref: string): readonly Quad[] {
-    return [];
-  }
-
-  invalidateResolved(ref: string): void {
-    if (!this.#canMutate() || !this.#resolvedRefs.delete(ref)) return;
-    this.onInvalidated(ref);
+  invalidateResolved(ref: string): boolean {
+    if (!this.#resolvedRefs.delete(ref)) return false;
     this.#touch();
+    return true;
   }
 
-  markResolved(ref: string, suppressedMetadataRows: readonly Quad[] = []): void {
-    if (!this.#canMutate() || !this.#allowedRefs.has(ref) || this.#resolvedRefs.has(ref)) return;
-    this.onResolved(ref, suppressedMetadataRows);
+  markResolved(ref: string): boolean {
+    if (!this.#allowedRefs.has(ref) || this.#resolvedRefs.has(ref)) return false;
     this.#resolvedRefs.add(ref);
-    if (!this.incomplete) {
-      if (this.#onComplete) {
-        this.#expiresAtMs = 0;
-        this.#onComplete();
-      } else {
-        // Private recovery may resolve the final previously-unresolved ref
-        // before it has revalidated the retained prefix later in this same
-        // reordered walk. Keep the entry alive until its owner observes a
-        // fully successful result and releases it explicitly.
-        this.#touch();
-      }
-      return;
-    }
     this.#touch();
+    return true;
   }
 
-  protected onResolved(_ref: string, _suppressedMetadataRows: readonly Quad[]): void {}
-
-  protected onInvalidated(_ref: string): void {}
+  retire(): void {
+    this.#expiresAtMs = 0;
+  }
 
   #touch(): void {
     this.#expiresAtMs = this.#now() + this.#retentionTtlMs;
   }
 }
 
-/** Selected-provider decoration retaining verified metadata withheld per ref. */
-export class SuppressedMetadataManifestBoundSnapshotWalk extends ManifestBoundSnapshotWalk {
-  readonly #suppressedMetadataRowsByRef = new Map<string, readonly Quad[]>();
+export function prepareManifestBoundSnapshotWalk(
+  progress: ManifestBoundSnapshotProgress,
+  { order, canReuseResolved }: SnapshotWalkPreparation,
+): PublicSnapshotWalkPlan {
+  const manifest = progress.orderedManifestSnapshot();
+  const snapshots = order === 'manifest'
+    ? manifest
+    : Object.freeze([
+      ...manifest.filter(({ ref }) => !progress.isResolved(ref)),
+      ...manifest.filter(({ ref }) => progress.isResolved(ref)),
+    ]);
+  return Object.freeze({
+    snapshots,
+    canReuse: (ref: string) => progress.isResolved(ref) && canReuseResolved(ref),
+  });
+}
 
-  override suppressedMetadataRows(ref: string): readonly Quad[] {
+export interface SelectedManifestBoundSnapshotWalkOptions
+  extends ManifestBoundSnapshotProgressOptions {
+  readonly onComplete?: () => void;
+  readonly canMutate?: () => boolean;
+}
+
+/** Selected-provider policy composed over manifest progress and withheld rows. */
+export class SelectedManifestBoundSnapshotWalk
+implements SharedMemorySnapshotWalkContinuation {
+  readonly #progress: ManifestBoundSnapshotProgress;
+  readonly #suppressedMetadataRowsByRef = new Map<string, readonly Quad[]>();
+  readonly #onComplete: (() => void) | undefined;
+  readonly #canMutate: () => boolean;
+
+  constructor(
+    orderedManifest: readonly PublicSnapshotMetadata[],
+    options: SelectedManifestBoundSnapshotWalkOptions,
+  ) {
+    this.#progress = new ManifestBoundSnapshotProgress(orderedManifest, options);
+    this.#onComplete = options.onComplete;
+    this.#canMutate = options.canMutate ?? (() => true);
+  }
+
+  matches(manifest: readonly PublicSnapshotMetadata[]): boolean {
+    return this.#progress.matches(manifest);
+  }
+
+  get expiresAtMs(): number {
+    return this.#progress.expiresAtMs;
+  }
+
+  get incomplete(): boolean {
+    return this.#progress.incomplete;
+  }
+
+  prepare(options: SnapshotWalkPreparation): PublicSnapshotWalkPlan {
+    return prepareManifestBoundSnapshotWalk(this.#progress, options);
+  }
+
+  orderedManifestSnapshot(): readonly PublicSnapshotMetadata[] {
+    return this.#progress.orderedManifestSnapshot();
+  }
+
+  isResolved(ref: string): boolean {
+    return this.#progress.isResolved(ref);
+  }
+
+  resolvedCount(): number {
+    return this.#progress.resolvedCount();
+  }
+
+  resolvedRefsSnapshot(): readonly string[] {
+    return this.#progress.resolvedRefsSnapshot();
+  }
+
+  suppressedMetadataRows(ref: string): readonly Quad[] {
     return immutableQuadSnapshot(this.#suppressedMetadataRowsByRef.get(ref) ?? []);
   }
 
-  protected override onResolved(ref: string, rows: readonly Quad[]): void {
-    this.#suppressedMetadataRowsByRef.set(ref, immutableQuadSnapshot(rows));
+  invalidateResolved(ref: string): void {
+    if (!this.#canMutate() || !this.#progress.invalidateResolved(ref)) return;
+    this.#suppressedMetadataRowsByRef.delete(ref);
   }
 
-  protected override onInvalidated(ref: string): void {
-    this.#suppressedMetadataRowsByRef.delete(ref);
+  markResolved(ref: string, rows: readonly Quad[] = []): void {
+    if (!this.#canMutate() || !this.#progress.markResolved(ref)) return;
+    this.#suppressedMetadataRowsByRef.set(ref, immutableQuadSnapshot(rows));
+    if (!this.#progress.incomplete && this.#onComplete) {
+      this.#progress.retire();
+      this.#onComplete();
+    }
   }
 }
 
 function immutableManifestSnapshot(
   manifest: readonly PublicSnapshotMetadata[],
 ): readonly PublicSnapshotMetadata[] {
-  return Object.freeze(manifest.map((snapshot) => Object.freeze({ ...snapshot })));
+  return Object.freeze(manifest.map(snapshot => Object.freeze({ ...snapshot })));
 }
 
 function immutableQuadSnapshot(quads: readonly Quad[]): readonly Quad[] {
-  return Object.freeze(quads.map((quad) => Object.freeze({ ...quad })));
+  return Object.freeze(quads.map(quad => Object.freeze({ ...quad })));
 }

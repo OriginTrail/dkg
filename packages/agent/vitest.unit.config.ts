@@ -18,6 +18,7 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      "test/manifest-bound-snapshot-walk.test.ts",
       "test/private-swm-recovery-budget.test.ts",
       "test/private-swm-recovery-lifecycle-budget.test.ts",
       "test/sync-work-admission.test.ts",

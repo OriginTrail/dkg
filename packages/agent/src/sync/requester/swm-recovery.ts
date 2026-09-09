@@ -21,9 +21,8 @@ import {
   collectPublicSnapshotMetadata,
   syncPublicSnapshotsForMeta,
   type PublicSnapshotMetadata,
-  type RetainedSharedMemorySnapshotWalkContinuation,
 } from './shared-memory-sync.js';
-import { validateRetainedSnapshotWalk } from './retained-snapshot-walk-validation.js';
+import type { PrivateSwmSnapshotWalkCoordinator } from './private-swm-snapshot-walk-registry.js';
 import { appendInPlace } from '../append-in-place.js';
 import {
   discoverSwmRecoverySubGraphNames,
@@ -39,7 +38,10 @@ import {
 } from './recovery-execution-guard.js';
 import { canonicalQuadKey } from './quad-key.js';
 import type { PrivateSwmRecoveryWindow } from './private-swm-recovery-budget.js';
-import { UNRESTRICTED_SYNC_WORK, type SyncWorkAdmission } from '../work-admission.js';
+import {
+  composeSyncWorkAdmission,
+  type SyncWorkAdmission,
+} from '../work-admission.js';
 import {
   isNamedSubgraphSharedMemoryDataGraph,
   isNamedSubgraphSharedMemoryMetaGraph,
@@ -152,9 +154,9 @@ export interface RecoverContextGraphSwmDeps {
    */
   readonly snapshotMaterializer: SharedMemorySnapshotMaterializer;
   /** Manifest-bound progress retained by the owning private recovery executor. */
-  readonly snapshotWalk?: (
+  readonly snapshotWalkCoordinator?: (
     orderedManifest: readonly PublicSnapshotMetadata[],
-  ) => RetainedSharedMemorySnapshotWalkContinuation;
+  ) => PrivateSwmSnapshotWalkCoordinator;
   readonly ensureContextGraph: (contextGraphId: string) => Promise<void>;
   readonly setCheckpoint: (key: string, offset: number) => void;
   readonly deleteCheckpoint: (key: string) => void;
@@ -229,7 +231,7 @@ export const ABSOLUTE_PRIVATE_SWM_RECOVERY_MAX_ROUNDS = 24;
  */
 export async function recoverContextGraphSwmWithProgressRetries(params: {
   readonly window: PrivateSwmRecoveryWindow;
-  readonly recover: (workAdmission: SyncWorkAdmission) => Promise<RecoverContextGraphSwmResult>;
+  readonly recover: (round: number) => Promise<RecoverContextGraphSwmResult>;
   readonly maxRounds?: number;
   readonly onRetry?: (progress: SwmRecoveryProgress) => void;
 }): Promise<RecoverContextGraphSwmResult> {
@@ -244,7 +246,7 @@ export async function recoverContextGraphSwmWithProgressRetries(params: {
   for (let round = 1; round <= maxRounds; round += 1) {
     // Recheck after the retry observer too: logging must not admit a late round.
     if (!params.window.canStartRound(round)) break;
-    result = await params.recover(params.window);
+    result = await params.recover(round);
     if (result.completed) return result;
 
     if (explicitMaxRounds === undefined && Number.isSafeInteger(result.totalSnapshots)) {
@@ -274,8 +276,12 @@ export async function recoverContextGraphSwmWithProgressRetries(params: {
 
 const DEFAULT_MAX_PAGES_PER_PHASE = 1000;
 
+type AdmittedRecoverContextGraphSwmDeps = RecoverContextGraphSwmDeps & {
+  readonly workAdmission: SyncWorkAdmission;
+};
+
 async function fetchPhaseFully(
-  deps: RecoverContextGraphSwmDeps,
+  deps: AdmittedRecoverContextGraphSwmDeps,
   boundary: RecoveryExecutionAdmission,
   phase: RecoverableSyncPhase,
   graphUri: string,
@@ -284,13 +290,13 @@ async function fetchPhaseFully(
   completed: boolean;
   localYield?: SharedMemoryLocalYield;
 }> {
-  const workAdmission = deps.workAdmission ?? UNRESTRICTED_SYNC_WORK;
+  const workAdmission = deps.workAdmission;
   let localYield: SharedMemoryLocalYield | undefined;
   const maxPages = deps.maxPagesPerPhase ?? DEFAULT_MAX_PAGES_PER_PHASE;
   const all: Quad[] = [];
   let lastCheckpointKey: string | undefined;
   for (let i = 0; i < maxPages; i++) {
-    if (Date.now() >= deps.deadline || !workAdmission.canAdmitWork()) {
+    if (!workAdmission.canAdmitWork()) {
       localYield = sharedMemoryLocalYield();
       break;
     }
@@ -301,7 +307,7 @@ async function fetchPhaseFully(
       true,
       phase,
       graphUri,
-      workAdmission.capDeadline(deps.deadline),
+      deps.deadline,
       { signal: boundary.signal, workAdmission },
     ));
     localYield = mergeSharedMemoryLocalYield(localYield, page.localYield);
@@ -334,12 +340,19 @@ async function fetchPhaseFully(
 export async function recoverContextGraphSwm(
   deps: RecoverContextGraphSwmDeps,
 ): Promise<RecoverContextGraphSwmResult> {
+  const admittedDeps: AdmittedRecoverContextGraphSwmDeps = {
+    ...deps,
+    workAdmission: deps.workAdmission ?? composeSyncWorkAdmission({
+      deadline: deps.deadline,
+      scope: { sharing: 'exclusive', owner: 'direct-private-swm-round' },
+    }),
+  };
   const boundary = createRecoveryExecutionAdmission(deps.recoveryGuard);
   boundary.assertCurrent();
   return withKeyedLocks(
     deps.writeLocks,
     [contextGraphSwmRecoveryWriteLockKey(deps.contextGraphId)],
-    () => recoverContextGraphSwmUnlocked(deps, boundary),
+    () => recoverContextGraphSwmUnlocked(admittedDeps, boundary),
   );
 }
 
@@ -353,7 +366,7 @@ export function contextGraphSwmRecoveryWriteLockKey(contextGraphId: string): str
 }
 
 async function recoverContextGraphSwmUnlocked(
-  deps: RecoverContextGraphSwmDeps,
+  deps: AdmittedRecoverContextGraphSwmDeps,
   boundary: RecoveryExecutionAdmission,
 ): Promise<RecoverContextGraphSwmResult> {
   boundary.assertCurrent();
@@ -427,7 +440,7 @@ async function recoverContextGraphSwmUnlocked(
   let snapshotProgress: Pick<RecoverContextGraphSwmResult, 'readySnapshots' | 'totalSnapshots' | 'cumulativeResolvedSnapshots'> = {
     readySnapshots: 0, totalSnapshots: 0,
   };
-  let snapshotWalk: RetainedSharedMemorySnapshotWalkContinuation | undefined;
+  let snapshotWalkCoordinator: PrivateSwmSnapshotWalkCoordinator | undefined;
   const incrementallyReadyGraphs = new Set<string>();
   /** Graph keys whose ASSERTION GRAPH was actually (re)written this run. */
   const rewrittenGraphKeys = new Set<string>();
@@ -514,17 +527,10 @@ async function recoverContextGraphSwmUnlocked(
       ...descriptor.metadataQuads,
     ]);
     const orderedManifest = collectPublicSnapshotMetadata(activeGraphMeta);
-    snapshotWalk = deps.snapshotWalk?.(orderedManifest);
-    const hasUnresolvedSnapshots = snapshotWalk !== undefined
-      && orderedManifest.some(({ ref }) => !snapshotWalk!.isResolved(ref));
-    // Private recovery owns retained evidence: unresolved refs run first, and
-    // an unvalidated retained prefix must pass normal materialization checks.
-    let canReuseResolved = (_ref: string): boolean => false;
-    if (snapshotWalk && !hasUnresolvedSnapshots) {
-      const retainedValidation = await validateRetainedSnapshotWalk({
-        walk: snapshotWalk,
-        deadline: deps.deadline,
-        workAdmission: deps.workAdmission ?? UNRESTRICTED_SYNC_WORK,
+    snapshotWalkCoordinator = deps.snapshotWalkCoordinator?.(orderedManifest);
+    const privatePreparation = snapshotWalkCoordinator
+      ? await snapshotWalkCoordinator.prepare({
+        workAdmission: deps.workAdmission,
         validateRef: async (resolvedRef) => {
           const descriptors = snapshotDescriptorsByRef.get(resolvedRef) ?? [];
           let stillMaterialized = descriptors.length > 0;
@@ -536,28 +542,26 @@ async function recoverContextGraphSwmUnlocked(
           }
           return stillMaterialized;
         },
-      });
-      if (retainedValidation.kind === 'local-budget-yield') {
-        deps.logInfo?.(
-          deps.ctx,
-          `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: `
-          + 'retained snapshot validation exhausted the local budget — will retry',
-        );
-        return {
-          localYield: sharedMemoryLocalYield(),
-          replacedRoots: 0,
-          replacedGraphs: 0,
-          insertedDataQuads: 0,
-          insertedMetaQuads: 0,
-          droppedDataTriples: 0,
-          readySnapshots: retainedValidation.validatedRefs,
-          cumulativeResolvedSnapshots: snapshotWalk.resolvedCount(),
-          totalSnapshots: orderedManifest.length,
-          completed: false,
-        };
-      }
-      const validatedRefs = new Set(snapshotWalk.resolvedRefsSnapshot());
-      canReuseResolved = (ref) => validatedRefs.has(ref);
+      })
+      : undefined;
+    if (privatePreparation?.kind === 'local-budget-yield') {
+      deps.logInfo?.(
+        deps.ctx,
+        `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: `
+        + 'retained snapshot validation exhausted the local budget — will retry',
+      );
+      return {
+        localYield: sharedMemoryLocalYield(),
+        replacedRoots: 0,
+        replacedGraphs: 0,
+        insertedDataQuads: 0,
+        insertedMetaQuads: 0,
+        droppedDataTriples: 0,
+        readySnapshots: privatePreparation.validatedRefs,
+        cumulativeResolvedSnapshots: snapshotWalkCoordinator?.resolvedCount(),
+        totalSnapshots: orderedManifest.length,
+        completed: false,
+      };
     }
     boundary.assertCurrent();
     const snapshotSync = await syncPublicSnapshotsForMeta({
@@ -566,8 +570,8 @@ async function recoverContextGraphSwmUnlocked(
       contextGraphId: deps.contextGraphId,
       deadline: deps.deadline,
       workAdmission: deps.workAdmission,
-      ...(snapshotWalk
-        ? { snapshotWalk: snapshotWalk.prepare({ order: 'unresolved-first', canReuseResolved }) }
+      ...(privatePreparation?.kind === 'prepared'
+        ? { snapshotWalk: privatePreparation.plan }
         : { metaQuads: activeGraphMeta }),
       publicSnapshotStore: deps.publicSnapshotStore,
       // Raw ports: syncPublicSnapshotsForMeta is the sole owner of admission,
@@ -578,12 +582,14 @@ async function recoverContextGraphSwmUnlocked(
       executionBoundary: boundary,
       onSnapshotReady: async (snapshot) => {
         await materializeReadySnapshot(snapshot.ref);
-        snapshotWalk?.markResolved(snapshot.ref);
+        snapshotWalkCoordinator?.markResolved(snapshot.ref);
       },
     });
     snapshotProgress = {
       readySnapshots: snapshotSync.readySnapshots,
-      ...(snapshotWalk ? { cumulativeResolvedSnapshots: snapshotWalk.resolvedCount() } : {}),
+      ...(snapshotWalkCoordinator
+        ? { cumulativeResolvedSnapshots: snapshotWalkCoordinator.resolvedCount() }
+        : {}),
       totalSnapshots: snapshotSync.totalSnapshots,
     };
     if (!snapshotSync.completed) {
@@ -665,7 +671,7 @@ async function recoverContextGraphSwmUnlocked(
   for (const descriptor of graphScopedDescriptors) {
     const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
     const retainedReady = descriptor.publicSnapshotRef !== undefined
-      && snapshotWalk?.isResolved(descriptor.publicSnapshotRef) === true;
+      && snapshotWalkCoordinator?.isResolved(descriptor.publicSnapshotRef) === true;
     if (incrementallyReadyGraphs.has(graphKey) || retainedReady) {
       graphAssets.push(Object.freeze({
         descriptor,

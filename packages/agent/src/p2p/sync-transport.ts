@@ -1,4 +1,4 @@
-import { assertSyncWorkAdmission, SyncWorkAdmissionExhaustedError, UNRESTRICTED_SYNC_WORK, type SyncWorkAdmission } from '../sync/work-admission.js';
+import { assertSyncWorkAdmission, SyncWorkAdmissionExhaustedError, type SyncWorkAdmission } from '../sync/work-admission.js';
 import { randomUUID } from 'node:crypto';
 import { withRetry, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import {
@@ -91,7 +91,7 @@ export function createSingleUseSyncSender(
  * cached stale denial from replaying onto a later attempt.
  */
 interface SyncSendParams {
-  readonly workAdmission?: SyncWorkAdmission;
+  readonly workAdmission: SyncWorkAdmission;
   remotePeerId: string;
   timeoutMs: number;
   retryAttempts: number;
@@ -132,7 +132,7 @@ interface SyncSendParams {
 }
 
 export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Array> {
-  const workAdmission = params.workAdmission ?? UNRESTRICTED_SYNC_WORK;
+  const workAdmission = params.workAdmission;
   return withSpan(
     'sync.request',
     async () => {
@@ -170,7 +170,12 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
         throwIfAborted(params.signal);
         assertSyncWorkAdmission(workAdmission);
         const timeoutMs = workAdmission.capTimeout(params.timeoutMs);
-        if (timeoutMs <= 0) throw new SyncWorkAdmissionExhaustedError();
+        if (timeoutMs <= 0) {
+          // Re-assert so a composed capability preserves whether its
+          // wall-clock deadline or monotonic owner window expired.
+          assertSyncWorkAdmission(workAdmission);
+          throw new SyncWorkAdmissionExhaustedError();
+        }
         const messageId = randomUUID();
         let responseBytes: Uint8Array;
         sendStarted = true;

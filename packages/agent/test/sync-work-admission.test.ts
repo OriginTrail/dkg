@@ -5,6 +5,13 @@ import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { createPrivateSwmRecoveryWindow } from '../src/sync/requester/private-swm-recovery-budget.js';
 import { isSyncTransportFailure } from '../src/sync/error-tags.js';
 
+function roundAdmission(budgetMs: number) {
+  return createPrivateSwmRecoveryWindow(budgetMs).admitRound(Date.now() + 60_000, {
+    sharing: 'exclusive',
+    owner: 'sync-work-admission-test',
+  });
+}
+
 function request(overrides: Partial<Parameters<typeof fetchSyncPages>[0]> = {}) {
   return fetchSyncPages({
     ctx: createOperationContext('sync'), remotePeerId: 'budget-peer', contextGraphId: 'budget-cg',
@@ -31,7 +38,7 @@ describe('page and transport admission within one operation', () => {
     let elapsed = 0;
     vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
     vi.spyOn(Date, 'now').mockImplementation(() => 10_000 - elapsed * 100);
-    const workAdmission = createPrivateSwmRecoveryWindow(100);
+    const workAdmission = roundAdmission(100);
     const timeouts: number[] = [];
     const result = await request({
       workAdmission,
@@ -53,7 +60,7 @@ describe('page and transport admission within one operation', () => {
   it('admits no send after authentication consumes the allowance', async () => {
     let elapsed = 0;
     vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
-    const workAdmission = createPrivateSwmRecoveryWindow(100);
+    const workAdmission = roundAdmission(100);
     const send = vi.fn(async () => new Uint8Array());
     const result = await request({
       workAdmission, send,
@@ -74,7 +81,7 @@ describe('page and transport admission within one operation', () => {
     vi.spyOn(Date, 'now').mockImplementation(() => 10_000 - elapsed * 100);
     const timeouts: number[] = [];
     const result = request({
-      workAdmission: createPrivateSwmRecoveryWindow(100),
+      workAdmission: roundAdmission(100),
       send: async (_peer, _protocol, _bytes, timeoutMs) => {
         timeouts.push(timeoutMs);
         if (timeouts.length === 1) { elapsed = 40; throw new Error('request timeout'); }
@@ -97,7 +104,7 @@ describe('page and transport admission within one operation', () => {
     const failure = new Error('request timeout');
     const send = vi.fn(async () => { throw failure; });
     const outcome = request({
-      workAdmission: createPrivateSwmRecoveryWindow(100), send,
+      workAdmission: roundAdmission(100), send,
       logWarn: signalBackoffStarted,
     }).then(() => null, error => error);
     await backoffStarted;
@@ -111,7 +118,7 @@ describe('page and transport admission within one operation', () => {
   it('floors a fractional allowance before passing it to the transport', async () => {
     let elapsed = 0;
     vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
-    const workAdmission = createPrivateSwmRecoveryWindow(100);
+    const workAdmission = roundAdmission(100);
     elapsed = 0.5;
     const send = vi.fn(async () => new Uint8Array());
 
@@ -126,7 +133,7 @@ describe('page and transport admission within one operation', () => {
   it('yields locally when less than one whole millisecond remains', async () => {
     let elapsed = 0;
     vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
-    const workAdmission = createPrivateSwmRecoveryWindow(1);
+    const workAdmission = roundAdmission(1);
     elapsed = 0.5;
     const send = vi.fn(async () => new Uint8Array());
 

@@ -18,8 +18,7 @@ import type {
 import type { SelectedSwmMetaRetentionLease } from './selected-swm-meta-budget.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from './durable-session.js';
 import {
-  ManifestBoundSnapshotWalk,
-  SuppressedMetadataManifestBoundSnapshotWalk,
+  SelectedManifestBoundSnapshotWalk,
 } from './requester/manifest-bound-snapshot-walk.js';
 
 /** Exact metadata prefix retained only by one selected-provider transfer owner. */
@@ -35,7 +34,7 @@ interface SelectedSwmMetaContinuationState {
   /** Prefix expiry; terminal metadata has no prefix retention clock. */
   metadataExpiresAtMs: number;
   /** Independent continuation created only after metadata is complete. */
-  snapshotWalk?: SuppressedMetadataManifestBoundSnapshotWalk;
+  snapshotWalk?: SelectedManifestBoundSnapshotWalk;
   retentionLease: SelectedSwmMetaRetentionLease;
 }
 
@@ -485,17 +484,17 @@ export function createSelectedSwmMetaFetcher(options: {
     snapshotWalk(contextGraphId, orderedManifest) {
       const state = states.get(contextGraphId);
       if (!state?.completed) {
-        return new ManifestBoundSnapshotWalk(orderedManifest, {
+        return new SelectedManifestBoundSnapshotWalk(orderedManifest, {
           now,
           retentionTtlMs,
           canMutate: () => false,
         });
       }
       const retainedWalk = state.snapshotWalk;
-      let walk: SuppressedMetadataManifestBoundSnapshotWalk;
+      let walk: SelectedManifestBoundSnapshotWalk;
       walk = retainedWalk?.matches(orderedManifest)
         ? retainedWalk
-        : new SuppressedMetadataManifestBoundSnapshotWalk(orderedManifest, {
+        : new SelectedManifestBoundSnapshotWalk(orderedManifest, {
           now,
           retentionTtlMs,
           canMutate: () => states.get(contextGraphId) === state

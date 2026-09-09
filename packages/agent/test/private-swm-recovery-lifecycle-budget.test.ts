@@ -5,11 +5,17 @@ import { generateKnowledgeAssetShareMetadata, workspacePublicQuadsDigest, type W
 import type { DKGAgent } from '../src/index.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import type { SwmTargetExecutorPortsV1 } from '../src/sync/requester/swm-target-executor.js';
-import { PrivateSwmSnapshotWalkRegistry } from
+import {
+  PrivateSwmSnapshotWalkCoordinator,
+  PrivateSwmSnapshotWalkRegistry,
+} from
   '../src/sync/requester/private-swm-snapshot-walk-registry.js';
-import { ManifestBoundSnapshotWalk } from
+import { ManifestBoundSnapshotProgress } from
   '../src/sync/requester/manifest-bound-snapshot-walk.js';
-import type { SyncWorkAdmission } from '../src/sync/work-admission.js';
+import {
+  createSyncWorkAdmission,
+  type SyncWorkAdmission,
+} from '../src/sync/work-admission.js';
 import {
   collectPublicSnapshotMetadata,
 } from '../src/sync/requester/shared-memory-sync.js';
@@ -117,9 +123,16 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     const onRetry = vi.fn();
     const result = await executor.recoverPrivateTarget({ contextGraphId: CG, remotePeerId: 'peer-source', onRetry });
     expect(result.completed).toBe(false);
-    expect(allowances).toEqual(budget === 0 ? [Infinity] : [100, 40]);
+    if (budget === 0) expect(allowances[0]).toBeGreaterThan(1_000_000);
+    else expect(allowances).toEqual([100, 40]);
     expect(onRetry).toHaveBeenCalledTimes(budget === 0 ? 0 : 1);
-    if (budget > 0) expect(windows[1]).toBe(windows[0]);
+    if (budget > 0) {
+      expect(windows[1]).not.toBe(windows[0]);
+      expect(windows.map(window => window.scope)).toEqual([
+        { sharing: 'exclusive', owner: `private-swm:${CG}:peer-source:round-1` },
+        { sharing: 'exclusive', owner: `private-swm:${CG}:peer-source:round-2` },
+      ]);
+    }
   });
 
   it('keeps retrying when each bounded round materializes a new snapshot', async () => {
@@ -182,10 +195,12 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     const meta = fixtures.flatMap(({ metadata }) => metadata);
     const manifest = collectPublicSnapshotMetadata(meta);
     const owner = { contextGraphId: CG, remotePeerId: 'peer-source' };
-    const retained = new ManifestBoundSnapshotWalk(manifest, {
-      now: Date.now,
-      retentionTtlMs: 60_000,
-    });
+    const retained = new PrivateSwmSnapshotWalkCoordinator(
+      new ManifestBoundSnapshotProgress(manifest, {
+        now: Date.now,
+        retentionTtlMs: 60_000,
+      }),
+    );
     for (const { ref } of manifest) retained.markResolved(ref);
 
     let canAdmit = true;
@@ -199,11 +214,10 @@ describe('private recovery job ownership and lifecycle outcome', () => {
       remotePeerId: owner.remotePeerId,
       contextGraphId: owner.contextGraphId,
       deadline: Number.MAX_SAFE_INTEGER,
-      workAdmission: {
-        canAdmitWork: () => canAdmit,
-        capDeadline: (deadline) => deadline,
-        capTimeout: (timeout) => timeout,
-      },
+      workAdmission: createSyncWorkAdmission(
+        () => canAdmit ? 1_000 : 0,
+        { sharing: 'exclusive', owner: 'retained-revalidation-test' },
+      ),
       fetchSyncPages: async (_ctx, _peer, _cg, _swm, phase) => {
         if (phase !== 'meta') throw new Error('Budget yield must precede snapshot transport');
         return page(meta);
@@ -221,7 +235,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
       snapshotMaterializer: {
         isGraphAssetMaterialized,
       } as unknown as SharedMemorySnapshotMaterializer,
-      snapshotWalk: () => retained,
+      snapshotWalkCoordinator: () => retained,
       store,
       replaceMetaForRoots: async () => undefined,
       replaceMetaForGraphAssets: async () => undefined,

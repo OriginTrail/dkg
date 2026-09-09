@@ -34,12 +34,19 @@ describe('private SWM recovery budget', () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_000);
     const budget = createPrivateSwmRecoveryWindow(50)!;
     expect(Object.isFrozen(budget)).toBe(true);
-    expect(budget.capTimeout(Infinity)).toBe(50);
-    expect(budget.capDeadline(2_000)).toBe(1_050);
-    expect(budget.capDeadline(1_020)).toBe(1_020);
-    expect(createPrivateSwmRecoveryWindow(0).capDeadline(2_000)).toBe(2_000);
+    const longRound = budget.admitRound(2_000, {
+      sharing: 'exclusive', owner: 'long-round',
+    });
+    const shortRound = budget.admitRound(1_020, {
+      sharing: 'exclusive', owner: 'short-round',
+    });
+    expect(longRound.capTimeout(Infinity)).toBe(50);
+    expect(shortRound.capTimeout(Infinity)).toBe(20);
+    expect(createPrivateSwmRecoveryWindow(0).admitRound(2_000, {
+      sharing: 'exclusive', owner: 'initial-round',
+    }).capTimeout(Infinity)).toBe(1_000);
     now = 160;
-    expect(budget.capTimeout(Infinity)).toBe(0);
+    expect(longRound.capTimeout(Infinity)).toBe(0);
     expect(createPrivateSwmRecoveryWindow(0)).toMatchObject({ kind: 'initial-round-only' });
   });
 });

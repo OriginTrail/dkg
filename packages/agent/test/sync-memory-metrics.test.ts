@@ -15,6 +15,7 @@ import { createSyncResponderSnapshotBudget } from '../src/sync/responder/snapsho
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
 import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
+import { createSyncWorkAdmission } from '../src/sync/work-admission.js';
 
 function createMetricsHarness() {
   const exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
@@ -289,11 +290,10 @@ describe('sync memory attribution metrics', () => {
       debugSyncProgress: false,
       protocolSync: '/dkg/test/sync',
       checkpointStore: new MemorySyncCheckpointStore(),
-      workAdmission: {
-        canAdmitWork: () => admitted,
-        capDeadline: (deadline) => deadline,
-        capTimeout: (timeout) => timeout,
-      },
+      workAdmission: createSyncWorkAdmission(
+        () => admitted ? 1_000 : 0,
+        { sharing: 'exclusive', owner: 'memory-metrics-test' },
+      ),
       buildSyncRequest: async () => encoder.encode('request'),
       parseAndFilter: async () => ({
         quads: [

@@ -23,7 +23,6 @@ import {
   runSharedMemorySync,
   type SharedMemoryMetadataFetcher,
   type PublicSnapshotMetadata,
-  type RetainedSharedMemorySnapshotWalkContinuation,
   type SharedMemorySyncContext,
   type SharedMemorySyncSummary,
 } from './shared-memory-sync.js';
@@ -42,7 +41,10 @@ import {
   type SwmRecoveryMutationRuntimeV1,
 } from './swm-recovery-apply.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from '../oversize-filter.js';
-import { PrivateSwmSnapshotWalkRegistry } from './private-swm-snapshot-walk-registry.js';
+import {
+  PrivateSwmSnapshotWalkRegistry,
+  type PrivateSwmSnapshotWalkCoordinator,
+} from './private-swm-snapshot-walk-registry.js';
 
 type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0];
 
@@ -135,7 +137,7 @@ export class SwmTargetExecutorV1 {
   #privateSnapshotWalk(
     target: PrivateSwmRecoveryTargetV1,
     orderedManifest: readonly PublicSnapshotMetadata[],
-  ): RetainedSharedMemorySnapshotWalkContinuation {
+  ): PrivateSwmSnapshotWalkCoordinator {
     return this.privateSnapshotWalks.open(target, orderedManifest);
   }
 
@@ -189,7 +191,9 @@ export class SwmTargetExecutorV1 {
       getExcludedSubGraphNames: async () => (await admission()).excluded,
       includeRootScope: target.includeRootScope,
       ensureOwnedMap: this.#ports.ensureOwnedMap,
-      snapshotWalk: (orderedManifest) => this.#privateSnapshotWalk(target, orderedManifest),
+      snapshotWalkCoordinator: (orderedManifest) => (
+        this.#privateSnapshotWalk(target, orderedManifest)
+      ),
       logInfo: this.#ports.logInfo,
       logWarn: this.#ports.logWarn,
       recoveryGuard: target.recoveryGuard,
@@ -197,11 +201,14 @@ export class SwmTargetExecutorV1 {
     const result = await recoverContextGraphSwmWithProgressRetries({
       window,
       onRetry: target.onRetry,
-      recover: (workAdmission) => recoverContextGraphSwm({
-        ...options,
-        deadline: this.#ports.createContextGraphSyncDeadline(1),
-        workAdmission,
-      }),
+      recover: (round) => {
+        const deadline = this.#ports.createContextGraphSyncDeadline(1);
+        const workAdmission = window.admitRound(deadline, {
+          sharing: 'exclusive',
+          owner: `private-swm:${target.contextGraphId}:${target.remotePeerId}:round-${round}`,
+        });
+        return recoverContextGraphSwm({ ...options, deadline, workAdmission });
+      },
     });
     if (result.completed) this.privateSnapshotWalks.release(target);
     return result;
