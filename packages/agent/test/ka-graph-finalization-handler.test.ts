@@ -1135,6 +1135,43 @@ describe('graph-scoped finalization handler', () => {
     )).resolves.toMatchObject({ type: 'boolean', value: true });
   });
 
+  it('does not journal finalization for a graph-scoped record this node does not store', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-unowned-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    try {
+      const { message, swmGraph, vmGraph } = await stageGraph();
+      await store.dropGraph(swmGraph);
+      await store.dropGraph(graphManager.sharedMemoryMetaUri(CG));
+      let canonicalReceiptCalls = 0;
+      const chain = legacyFinalizationChain(4, {
+        resolveCanonicalFinalizationReceipt: async () => {
+          canonicalReceiptCalls += 1;
+          return canonicalReceipt(message);
+        },
+      });
+      inbox = await openSqliteFinalizationRecoveryStore(directory);
+      const localOnlyHandler = new FinalizationHandler(
+        store,
+        chain,
+        recoveryOptions(inbox),
+      );
+
+      await localOnlyHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+
+      expect(await inbox.list()).toEqual([]);
+      expect(canonicalReceiptCalls).toBe(0);
+      // The unrelated pre-existing VM row from the fixture is untouched.
+      expect(await store.countQuads(vmGraph)).toBe(1);
+    } finally {
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('falls back to legacy live verification when canonical receipts are unsupported', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-unsupported-live-'));
     let inbox: SqliteFinalizationRecoveryStore | undefined;
@@ -1185,7 +1222,10 @@ describe('graph-scoped finalization handler', () => {
       const retryingHandler = new FinalizationHandler(store, legacyFinalizationChain());
       let busyReads = 1;
       store.query = async (sparql, options) => {
-        if (busyReads > 0) {
+        if (
+          busyReads > 0
+          && options?.source !== 'agent.finalization.localWorkspaceOwnership'
+        ) {
           busyReads -= 1;
           throw new StoreSchedulerBusyError(
             'queue_wait_timeout',
@@ -1248,7 +1288,10 @@ describe('graph-scoped finalization handler', () => {
       const query = store.query.bind(store);
       let busyReads = 2;
       store.query = async (sparql, options) => {
-        if (busyReads > 0) {
+        if (
+          busyReads > 0
+          && options?.source !== 'agent.finalization.localWorkspaceOwnership'
+        ) {
           busyReads -= 1;
           throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'sparql-http.query');
         }
@@ -1372,7 +1415,10 @@ describe('graph-scoped finalization handler', () => {
       );
       let busyReads = 2;
       store.query = async (sparql, options) => {
-        if (busyReads > 0) {
+        if (
+          busyReads > 0
+          && options?.source !== 'agent.finalization.localWorkspaceOwnership'
+        ) {
           busyReads -= 1;
           throw new StoreSchedulerBusyError(
             'queue_wait_timeout',
@@ -1627,7 +1673,9 @@ describe('graph-scoped finalization handler', () => {
       const query = store.query.bind(store);
       let materializationReads = 0;
       store.query = async (sparql, options) => {
-        materializationReads += 1;
+        if (options?.source !== 'agent.finalization.localWorkspaceOwnership') {
+          materializationReads += 1;
+        }
         return query(sparql, options);
       };
       try {

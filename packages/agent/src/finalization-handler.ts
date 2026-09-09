@@ -554,6 +554,16 @@ export class FinalizationHandler {
     let candidate: ParsedGraphScopedFinalization | undefined;
     if (liveAdmission.status === 'admitted') {
       candidate = liveAdmission.input.candidate;
+      if (!await this.hasLocalGraphScopedRecord(liveAdmission.input)) {
+        const ctx = candidate.msg.operationId
+          ? createOperationContext('gossip', candidate.msg.operationId)
+          : createOperationContext('gossip');
+        this.log.info(
+          ctx,
+          `Finalization: ignoring ${candidate.scope.ual}; this node has no local workspace record`,
+        );
+        return;
+      }
       let recoveryResult: FinalizationRecoveryLiveProcessResult;
       try {
         recoveryResult = await this.recovery.processLiveOutcome(liveAdmission.input);
@@ -624,6 +634,63 @@ export class FinalizationHandler {
         );
         throw error;
       }
+    }
+  }
+
+  /**
+   * A finalization broadcast is a repair trigger for nodes that retained the
+   * corresponding graph-scoped workspace record. Merely hearing the Context
+   * Graph topic does not make this node a recovery owner: journaling every
+   * unrelated finalization lets one busy publisher fill every subscriber's
+   * bounded recovery inbox.
+   *
+   * Test only for the durable head subject, rather than resolving it. A
+   * malformed-but-present head still belongs to this node and must remain
+   * eligible for later repair. Store failures fail open so a transient read
+   * outage cannot make us permanently discard a relevant chain command.
+   */
+  private async hasLocalGraphScopedRecord(
+    input: FinalizationRecoveryLiveInput,
+  ): Promise<boolean> {
+    const { candidate, contextGraphId } = input;
+    const ctx = candidate.msg.operationId
+      ? createOperationContext('gossip', candidate.msg.operationId)
+      : createOperationContext('gossip');
+    try {
+      const graphManager = new GraphManager(this.store);
+      const metaGraph = graphManager.sharedMemoryMetaUri(
+        contextGraphId,
+        candidate.msg.subGraphName || undefined,
+      );
+      const vmMetaGraphs = [contextGraphMetaUri(contextGraphId)];
+      if (candidate.msg.targetContextGraphId) {
+        vmMetaGraphs.push(contextGraphMetaUri(
+          contextGraphId,
+          candidate.msg.targetContextGraphId,
+        ));
+      }
+      // Contract shared with workspace-resolution.ts. The candidate parser
+      // has already validated the canonical UAL before this method runs.
+      const headSubject = `${candidate.scope.ual}#dkg-swm-head`;
+      const vmOwnershipPatterns = vmMetaGraphs.map((vmMetaGraph) => (
+        `{ GRAPH <${assertSafeIri(vmMetaGraph)}> { `
+          + `<${assertSafeIri(candidate.scope.ual)}> ?p ?o . } }`
+      ));
+      const result = await this.store.query(
+        `SELECT ?p WHERE { { GRAPH <${assertSafeIri(metaGraph)}> { `
+          + `<${assertSafeIri(headSubject)}> ?p ?o . } } UNION `
+          + `${vmOwnershipPatterns.join(' UNION ')} } LIMIT 1`,
+        { source: 'agent.finalization.localWorkspaceOwnership' },
+      );
+      return result.type === 'bindings' && result.bindings.length > 0;
+    } catch (error) {
+      this.log.warn(
+        ctx,
+        `Finalization: local workspace ownership probe failed for `
+          + `${candidate.scope.ual}; retaining recovery eligibility: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return true;
     }
   }
 
