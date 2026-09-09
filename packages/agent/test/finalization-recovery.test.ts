@@ -30,6 +30,7 @@ import {
   type VerifiedGraphScopedFinalizationEvidence,
 } from '../src/finalization-graph-envelope.js';
 import {
+  FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS,
   FinalizationRecovery,
 } from '../src/finalization-recovery.js';
 import {
@@ -379,6 +380,65 @@ describe('graph-scoped finalization recovery admission', () => {
       busy = false;
       now = deferred.nextAttemptAt!;
       await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+      expect(await store.list()).toMatchObject([{ state: 'SETTLED' }]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('parks a stable deferred failure while chain reconciliation can still wake it', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-stable-failure-'));
+    try {
+      let now = 1_000;
+      let repairReady = false;
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        now: () => now,
+      });
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain(),
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          apply: async () => repairReady ? 'applied' as const : 'deferred' as const,
+          replayVerified: async () => repairReady ? 'promoted' as const : 'no-swm' as const,
+        },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      // The first two identical worker outcomes use the ordinary exponential
+      // delay. The third consecutive identical outcome enters the stable park.
+      await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+      let [entry] = await store.list();
+      expect(entry).toMatchObject({ attemptCount: 1, lastError: 'replay processing deferred' });
+      now = entry!.nextAttemptAt!;
+      await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+      [entry] = await store.list();
+      now = entry!.nextAttemptAt!;
+      await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+      [entry] = await store.list();
+      expect(entry).toMatchObject({ attemptCount: 3, lastError: 'replay processing deferred' });
+      expect(entry!.nextAttemptAt).toBe(now + FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS);
+
+      await expect(recovery.processDueBatch(16)).resolves.toBe(0);
+
+      // An authoritative reconciliation is a state-change trigger and does
+      // not wait for the autonomous retry deadline.
+      repairReady = true;
+      await expect(recovery.replayMatching({
+        chainId: 'base:84532',
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      })).resolves.toBe('recovered');
       expect(await store.list()).toMatchObject([{ state: 'SETTLED' }]);
       await store.close();
     } finally {
@@ -1943,6 +2003,10 @@ describe('graph-scoped finalization recovery admission', () => {
 
       for (let attempt = 0; attempt < 5; attempt += 1) {
         await recovery.processLive(liveInput);
+        const [current] = await store.list();
+        if (current?.state !== 'SETTLED' && current?.nextAttemptAt !== null) {
+          now = current!.nextAttemptAt!;
+        }
       }
       expect(await store.list()).toMatchObject([{
         state: 'SETTLED',

@@ -198,6 +198,8 @@ const SETTLED_RECEIPT_RETRY_MAX_MS = 60_000;
 const SETTLED_NOT_FOUND_RETRY_LIMIT = 5;
 const DEFERRED_RETRY_BASE_MS = 1_000;
 const DEFERRED_RETRY_MAX_MS = 60_000;
+export const FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD = 3;
+export const FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS = 6 * 60 * 60 * 1_000;
 /**
  * At the maximum retry delay this is approximately seven days of autonomous
  * worker attempts. The wall-clock window below must also elapse so duplicate
@@ -248,6 +250,10 @@ export class FinalizationRecovery<
   private readonly liveRetryLimit: number;
   private readonly liveRetryWindowMs: number;
   private readonly now: () => number;
+  private readonly deferredFailureStreaks = new Map<
+    string,
+    { generation: number; reason: string; count: number }
+  >();
 
   constructor(
     store: FinalizationRecoveryStore | FinalizationRecoveryStoreSource | undefined,
@@ -1077,13 +1083,47 @@ export class FinalizationRecovery<
   ): Promise<void> {
     const store = this.getStore();
     if (!store) return;
+    const retryKey = entry.key;
+    const previous = this.deferredFailureStreaks.get(retryKey);
+    const sameInMemoryFailure = previous?.generation === entry.generation
+      && previous.reason === reason;
+    // `lastError` seeds one persisted occurrence after restart. The in-memory
+    // streak then distinguishes consecutive failures from an old high global
+    // attempt count, without widening the durable schema.
+    const failureStreak = sameInMemoryFailure
+      ? previous.count + 1
+      : entry.lastError === reason
+        ? 2
+        : 1;
+    const ordinaryDelay = retryDelayMs ?? deferredRetryDelayMs(entry.attemptCount);
+    let effectiveDelay = failureStreak >= FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD
+      ? Math.max(ordinaryDelay, FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS)
+      : ordinaryDelay;
+    // Parking must not hide an entry past the bounded poison-entry decision.
+    // Once the count budget has been consumed, wake at the wall-clock budget
+    // boundary so replayDueEntryLocked can make the terminal decision.
+    if (
+      entry.attemptCount + 1 >= this.liveRetryLimit
+      && this.liveRetryWindowMs < effectiveDelay
+    ) {
+      const retryWindowRemaining = Math.max(
+        0,
+        entry.createdAt + this.liveRetryWindowMs - this.now(),
+      );
+      effectiveDelay = Math.min(effectiveDelay, retryWindowRemaining);
+    }
     try {
       await store.recordAttempt(
         entry.key,
         entry.generation,
         reason,
-        retryDelayMs,
+        effectiveDelay,
       );
+      this.deferredFailureStreaks.set(retryKey, {
+        generation: entry.generation,
+        reason,
+        count: failureStreak,
+      });
     } catch (error) {
       this.log.warn(
         `Finalization recovery attempt update failed for ${entry.ual}: `
@@ -1602,7 +1642,9 @@ export class FinalizationRecovery<
     const store = this.getStore();
     if (!store) return false;
     try {
-      return await store.transition(entry.key, entry.generation, state, reason);
+      const transitioned = await store.transition(entry.key, entry.generation, state, reason);
+      if (transitioned) this.deferredFailureStreaks.delete(entry.key);
+      return transitioned;
     } catch (error) {
       this.log.warn(
         `Finalization recovery transition to ${state} failed for ${entry.ual}: `
