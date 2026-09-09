@@ -5,6 +5,8 @@ import { generateKnowledgeAssetShareMetadata, workspacePublicQuadsDigest, type W
 import type { DKGAgent } from '../src/index.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import type { SwmTargetExecutorPortsV1 } from '../src/sync/requester/swm-target-executor.js';
+import { PrivateSwmSnapshotWalkRegistry } from
+  '../src/sync/requester/private-swm-snapshot-walk-registry.js';
 import type { SyncWorkAdmission } from '../src/sync/work-admission.js';
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
@@ -31,7 +33,7 @@ function snapshotFixture(kaNumber = 7, value = 'new') {
     { subject: head, predicate: `${DKG}assertionGraph`, object: assertionGraph, graph: WS_META },
     { subject: head, predicate: `${DKG}shareOperationId`, object: `"${operationId}"`, graph: WS_META },
   ];
-  return { digest, metadata, payload };
+  return { assertionGraph, digest, metadata, payload };
 }
 
 function snapshotMetadata(): Quad[] {
@@ -76,7 +78,7 @@ function harness(publicSnapshotStore?: WorkspacePublicSnapshotStore, detectLegac
   };
   const factory = createSwmTargetExecutorSessionFactoryForTest(host);
   return {
-    fetchSyncPages, executor: factory(),
+    fetchSyncPages, executor: factory(), store,
     run: () => LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailed.call(
       host as unknown as DKGAgent, 'peer-source', [CG],
       { sharedMemorySyncPlan: { targets: [{ contextGraphId: CG, lane: 'ordinary-private' }] } },
@@ -193,6 +195,71 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     ]);
     expect(fetchSyncPages.mock.calls.map((call) => call[4]))
       .toEqual(['meta', 'meta', 'meta', 'snapshot']);
+  });
+
+  it('revalidates retained progress and repairs an assertion graph deleted between jobs', async () => {
+    vi.stubEnv('DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS', '100');
+    let elapsed = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+    const fixtures = [snapshotFixture(8, 'repair-me'), snapshotFixture(7, 'tail')];
+    const snapshots = new Map(fixtures.map(({ digest, payload }) => [digest, payload]));
+    const getSnapshot = vi.fn(async (ref: string) => {
+      const value = snapshots.get(ref);
+      if (value) elapsed += 100;
+      return value?.map((quad) => ({ ...quad })) ?? null;
+    });
+    const { run, fetchSyncPages, store } = harness({
+      getSnapshot,
+      putSnapshot: async () => { throw new Error('Every snapshot is cached'); },
+    });
+    fetchSyncPages.mockImplementation(async (_ctx, _peer, _cg, _swm, phase) => {
+      expect(phase).toBe('meta');
+      return page(fixtures.flatMap(({ metadata }) => metadata));
+    });
+
+    await expect(run()).resolves.toMatchObject({
+      completedPhases: 0, incompleteReason: 'local-budget-yield',
+    });
+    expect(await store.countQuads(fixtures[0].assertionGraph)).toBe(1);
+    await store.dropGraph(fixtures[0].assertionGraph);
+    expect(await store.countQuads(fixtures[0].assertionGraph)).toBe(0);
+
+    await expect(run()).resolves.toMatchObject({
+      completedPhases: 0, incompleteReason: 'local-budget-yield',
+    });
+    expect(await store.countQuads(fixtures[0].assertionGraph)).toBe(1);
+    expect(getSnapshot.mock.calls.map(([ref]) => ref))
+      .toEqual(Array(4).fill(fixtures[0].digest));
+  });
+
+  it('isolates, invalidates, expires, completes, and bounds private snapshot walks', () => {
+    let now = 0;
+    const registry = new PrivateSwmSnapshotWalkRegistry({
+      now: () => now,
+      retentionTtlMs: 10,
+      maxTargets: 2,
+    });
+    const manifest = [
+      { ref: 'a', digest: 'a', count: 1 },
+      { ref: 'b', digest: 'b', count: 1 },
+    ];
+    const ownerA = { contextGraphId: 'cg-a', remotePeerId: 'peer-a' };
+    const walkA = registry.open(ownerA, manifest);
+    walkA.markResolved('a');
+    expect(registry.open(ownerA, manifest).isResolved('a')).toBe(true);
+    expect(registry.open(ownerA, [...manifest].reverse()).isResolved('a')).toBe(false);
+    expect(registry.open({ ...ownerA, remotePeerId: 'peer-b' }, manifest).isResolved('a')).toBe(false);
+
+    const ownerC = { contextGraphId: 'cg-c', remotePeerId: 'peer-c' };
+    registry.open(ownerC, manifest);
+    expect(registry.retainedTargetCount).toBe(2);
+    expect(registry.open(ownerA, manifest)).not.toBe(walkA);
+
+    const completing = registry.open(ownerC, [{ ref: 'only', digest: 'only', count: 1 }]);
+    completing.markResolved('only');
+    expect(registry.retainedTargetCount).toBe(1);
+    now = 11;
+    expect(registry.retainedTargetCount).toBe(0);
   });
 
   it.each(['meta', 'data'] as const)(

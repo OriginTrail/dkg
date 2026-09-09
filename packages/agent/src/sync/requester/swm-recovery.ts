@@ -503,6 +503,19 @@ async function recoverContextGraphSwmUnlocked(
     ]);
     const orderedManifest = collectPublicSnapshotMetadata(activeGraphMeta);
     snapshotWalk = deps.snapshotWalk?.(orderedManifest);
+    if (snapshotWalk?.invalidateResolved) {
+      for (const resolvedRef of snapshotWalk.resolvedRefsSnapshot()) {
+        const descriptors = snapshotDescriptorsByRef.get(resolvedRef) ?? [];
+        let stillMaterialized = descriptors.length > 0;
+        for (const descriptor of descriptors) {
+          if (!stillMaterialized) break;
+          stillMaterialized = await boundary.read(() => (
+            deps.snapshotMaterializer.isGraphAssetMaterialized(descriptor)
+          ));
+        }
+        if (!stillMaterialized) snapshotWalk.invalidateResolved(resolvedRef);
+      }
+    }
     boundary.assertCurrent();
     const snapshotSync = await syncPublicSnapshotsForMeta({
       ctx: deps.ctx,

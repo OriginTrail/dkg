@@ -301,6 +301,8 @@ export interface SharedMemorySnapshotWalkContinuation {
   resolvedRefsSnapshot(): readonly string[];
   /** Exact verified metadata rows withheld when this ref was resolved. */
   suppressedMetadataRows(ref: string): readonly Quad[];
+  /** Drop retained evidence when current descriptor/store validation fails. */
+  invalidateResolved?(ref: string): void;
   markResolved(ref: string, suppressedMetadataRows?: readonly Quad[]): void;
 }
 

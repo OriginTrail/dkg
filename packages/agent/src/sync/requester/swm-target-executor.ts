@@ -42,6 +42,7 @@ import {
   type SwmRecoveryMutationRuntimeV1,
 } from './swm-recovery-apply.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from '../oversize-filter.js';
+import { PrivateSwmSnapshotWalkRegistry } from './private-swm-snapshot-walk-registry.js';
 
 type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0];
 
@@ -101,42 +102,6 @@ export interface PrivateSwmRecoveryTargetV1 {
   readonly recoveryGuard?: RecoveryExecutionGuard;
   /** Include the catalog-owned root SWM scope as well as named subgraphs. */
   readonly includeRootScope?: boolean;
-}
-
-/** Factory-owned, manifest-bound progress shared by consecutive recovery jobs. */
-export class PrivateSwmSnapshotWalkRegistry {
-  readonly #walks = new Map<
-    string,
-    { manifestKey: string; walk: SharedMemorySnapshotWalkContinuation }
-  >();
-
-  open(
-    target: PrivateSwmRecoveryTargetV1,
-    orderedManifest: readonly PublicSnapshotMetadata[],
-  ): SharedMemorySnapshotWalkContinuation {
-    const ownerKey = `${target.contextGraphId}\u0000${target.remotePeerId}`;
-    const manifest = Object.freeze(orderedManifest.map((snapshot) => Object.freeze({ ...snapshot })));
-    const manifestKey = manifest.map(({ ref, digest, count }) => `${ref}\u0000${digest}\u0000${count}`).join('\u0001');
-    const retained = this.#walks.get(ownerKey);
-    if (retained?.manifestKey === manifestKey) return retained.walk;
-
-    const allowedRefs = new Set(manifest.map(({ ref }) => ref));
-    const resolvedRefs = new Set<string>();
-    const walk: SharedMemorySnapshotWalkContinuation = {
-      orderedManifestSnapshot: () => manifest,
-      isResolved: (ref) => resolvedRefs.has(ref),
-      resolvedCount: () => resolvedRefs.size,
-      resolvedRefsSnapshot: () => Object.freeze([...resolvedRefs]),
-      suppressedMetadataRows: () => [],
-      markResolved: (ref) => {
-        if (this.#walks.get(ownerKey)?.walk === walk && allowedRefs.has(ref)) {
-          resolvedRefs.add(ref);
-        }
-      },
-    };
-    this.#walks.set(ownerKey, { manifestKey, walk });
-    return walk;
-  }
 }
 
 /**
