@@ -59,6 +59,7 @@ describe('shared-memory freshness classification', () => {
       ...complete,
       failedPhases: 1,
       localYield: sharedMemoryLocalYield(),
+      snapshotPlaneIncomplete: 1,
     };
     const resolved = applySelectedSwmFreshnessResolution(finalRaw, {
       recoverableSnapshotYieldFailures: 1,
@@ -82,10 +83,7 @@ describe('shared-memory freshness classification', () => {
     }).resolvedSnapshotPlaneIncomplete).toBe(0);
     expect(applySelectedSwmFreshnessResolution({
       ...finalRaw,
-      localYield: {
-        kind: 'local-budget-yield',
-        snapshotPlaneIncomplete: -1,
-      } as any,
+      snapshotPlaneIncomplete: -1,
     }, {
       recoverableSnapshotYieldFailures: 1,
     }).resolvedSnapshotPlaneIncomplete).toBe(0);

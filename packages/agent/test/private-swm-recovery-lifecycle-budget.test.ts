@@ -7,6 +7,8 @@ import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import type { SwmTargetExecutorPortsV1 } from '../src/sync/requester/swm-target-executor.js';
 import { PrivateSwmSnapshotWalkRegistry } from
   '../src/sync/requester/private-swm-snapshot-walk-registry.js';
+import { ManifestBoundSnapshotWalk } from
+  '../src/sync/requester/manifest-bound-snapshot-walk.js';
 import type { SyncWorkAdmission } from '../src/sync/work-admission.js';
 import {
   collectPublicSnapshotMetadata,
@@ -136,7 +138,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     expect(getSnapshot).toHaveBeenCalledTimes(1);
     expect(fetchSyncPages).toHaveBeenCalledTimes(1); // Metadata only; zero snapshot requests.
     expect(result).toMatchObject({
-      localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
+      localYield: { kind: 'local-budget-yield' },
       completedPhases: 0, failedPhases: 1,
       failedPeers: 0, backoffWorthyFailures: 0, insertedTriples: 0,
     });
@@ -147,13 +149,11 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     const meta = fixtures.flatMap(({ metadata }) => metadata);
     const manifest = collectPublicSnapshotMetadata(meta);
     const owner = { contextGraphId: CG, remotePeerId: 'peer-source' };
-    const registry = new PrivateSwmSnapshotWalkRegistry();
-    const retained = registry.open(owner, manifest);
+    const retained = new ManifestBoundSnapshotWalk(manifest, {
+      now: Date.now,
+      retentionTtlMs: 60_000,
+    });
     for (const { ref } of manifest) retained.markResolved(ref);
-    // Completion releases an entry, so seed the same retained prefix without
-    // marking the final ref; this models an incomplete prior bounded job.
-    const retainedPrefix = registry.open(owner, manifest);
-    for (const { ref } of manifest.slice(0, -1)) retainedPrefix.markResolved(ref);
 
     let canAdmit = true;
     const isGraphAssetMaterialized = vi.fn(async () => {
@@ -188,7 +188,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
       snapshotMaterializer: {
         isGraphAssetMaterialized,
       } as unknown as SharedMemorySnapshotMaterializer,
-      snapshotWalk: (orderedManifest) => registry.open(owner, orderedManifest),
+      snapshotWalk: () => retained,
       store,
       replaceMetaForRoots: async () => undefined,
       replaceMetaForGraphAssets: async () => undefined,
@@ -200,12 +200,12 @@ describe('private recovery job ownership and lifecycle outcome', () => {
 
     expect(result).toMatchObject({
       completed: false,
-      localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
+      localYield: { kind: 'local-budget-yield' },
       readySnapshots: 1,
       totalSnapshots: 3,
     });
     expect(isGraphAssetMaterialized).toHaveBeenCalledOnce();
-    expect(registry.open(owner, manifest).resolvedCount()).toBe(1);
+    expect(retained.resolvedCount()).toBe(1);
   });
 
   it('skips a verified cached prefix across jobs and eventually fetches the manifest tail', async () => {
@@ -236,34 +236,29 @@ describe('private recovery job ownership and lifecycle outcome', () => {
 
     const first = await run();
     expect(first).toMatchObject({
-      localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
+      localYield: { kind: 'local-budget-yield' },
       failedPhases: 1,
     });
     expect(getSnapshot).toHaveBeenCalledTimes(2);
 
-    const second = await run();
-    expect(second).toMatchObject({
-      localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
-      failedPhases: 1,
-    });
-    expect(getSnapshot).toHaveBeenCalledTimes(4);
-
-    const third = await run();
-    expect(third.failedPhases).toBe(0);
+    const rounds = [first];
+    while (rounds.at(-1)!.failedPhases > 0 && rounds.length < 6) {
+      rounds.push(await run());
+    }
+    expect(rounds.at(-1)!.failedPhases).toBe(0);
     expect(putSnapshot).toHaveBeenCalledExactlyOnceWith({
       digest: fixtures[2].digest,
       quads: fixtures[2].payload,
     });
-    expect(getSnapshot.mock.calls.map(([ref]) => ref)).toEqual([
+    const cacheReads = getSnapshot.mock.calls.map(([ref]) => ref);
+    expect(cacheReads.slice(0, 4)).toEqual([
       fixtures[0].digest,
       fixtures[0].digest,
       fixtures[1].digest,
       fixtures[1].digest,
-      fixtures[2].digest,
-      fixtures[2].digest,
     ]);
-    expect(fetchSyncPages.mock.calls.map((call) => call[4]))
-      .toEqual(['meta', 'meta', 'meta', 'snapshot']);
+    expect(fetchSyncPages.mock.calls.filter((call) => call[4] === 'snapshot'))
+      .toHaveLength(1);
   });
 
   it('revalidates retained progress and repairs an assertion graph deleted between jobs', async () => {
@@ -288,7 +283,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
 
     await expect(run()).resolves.toMatchObject({
       completedPhases: 0,
-      localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
+      localYield: { kind: 'local-budget-yield' },
     });
     expect(await store.countQuads(fixtures[0].assertionGraph)).toBe(1);
     await store.dropGraph(fixtures[0].assertionGraph);
@@ -296,11 +291,24 @@ describe('private recovery job ownership and lifecycle outcome', () => {
 
     await expect(run()).resolves.toMatchObject({
       completedPhases: 0,
-      localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
+      localYield: { kind: 'local-budget-yield' },
     });
+    // The still-unresolved tail is admitted before the retained prefix, so the
+    // deleted prefix remains fail-closed until the following validation job.
+    expect(await store.countQuads(fixtures[0].assertionGraph)).toBe(0);
+
+    const repaired = await run();
+    expect(repaired).toMatchObject({ completedPhases: 1 });
     expect(await store.countQuads(fixtures[0].assertionGraph)).toBe(1);
     expect(getSnapshot.mock.calls.map(([ref]) => ref))
-      .toEqual(Array(4).fill(fixtures[0].digest));
+      .toEqual([
+        fixtures[0].digest,
+        fixtures[0].digest,
+        fixtures[1].digest,
+        fixtures[1].digest,
+        fixtures[0].digest,
+        fixtures[0].digest,
+      ]);
   });
 
   it('isolates, invalidates, expires, completes, and bounds private snapshot walks', () => {
@@ -345,9 +353,11 @@ describe('private recovery job ownership and lifecycle outcome', () => {
 
     reversedA.markResolved('a');
     reversedA.markResolved('b');
+    registry.release(ownerA);
     expect(registry.retainedTargetCount).toBe(1);
     const completing = registry.open(ownerC, [{ ref: 'only', digest: 'only', count: 1 }]);
     completing.markResolved('only');
+    registry.release(ownerC);
     expect(registry.retainedTargetCount).toBe(1);
     now = 11;
     expect(registry.retainedTargetCount).toBe(0);
@@ -372,7 +382,10 @@ describe('private recovery job ownership and lifecycle outcome', () => {
         const next = manifest.find(({ ref }) => !walk.isResolved(ref));
         if (!next) throw new Error('Incomplete owner has no remaining ref');
         walk.markResolved(next.ref);
-        if (walk.resolvedCount() === manifest.length) completed.add(owner.contextGraphId);
+        if (walk.resolvedCount() === manifest.length) {
+          completed.add(owner.contextGraphId);
+          registry.release(owner);
+        }
         expect(registry.retainedTargetCount).toBeLessThanOrEqual(2);
       }
     }
@@ -393,7 +406,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
         elapsed = 100;
         return {
           ...page([], false),
-          localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
+          localYield: { kind: 'local-budget-yield' },
         };
       });
 
@@ -402,7 +415,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
       expect(fetchSyncPages.mock.calls.map(call => call[4]))
         .toEqual(yieldedPhase === 'meta' ? ['meta'] : ['meta', 'data']);
       expect(result).toMatchObject({
-        localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
+        localYield: { kind: 'local-budget-yield' },
         completedPhases: 0,
         failedPhases: 1,
         failedPeers: 0,

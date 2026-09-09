@@ -23,7 +23,7 @@ import {
   runSharedMemorySync,
   type SharedMemoryMetadataFetcher,
   type PublicSnapshotMetadata,
-  type SharedMemorySnapshotWalkContinuation,
+  type RetainedSharedMemorySnapshotWalkContinuation,
   type SharedMemorySyncContext,
   type SharedMemorySyncSummary,
 } from './shared-memory-sync.js';
@@ -135,7 +135,7 @@ export class SwmTargetExecutorV1 {
   #privateSnapshotWalk(
     target: PrivateSwmRecoveryTargetV1,
     orderedManifest: readonly PublicSnapshotMetadata[],
-  ): SharedMemorySnapshotWalkContinuation {
+  ): RetainedSharedMemorySnapshotWalkContinuation {
     return this.privateSnapshotWalks.open(target, orderedManifest);
   }
 
@@ -194,7 +194,7 @@ export class SwmTargetExecutorV1 {
       logWarn: this.#ports.logWarn,
       recoveryGuard: target.recoveryGuard,
     };
-    return recoverContextGraphSwmWithProgressRetries({
+    const result = await recoverContextGraphSwmWithProgressRetries({
       window,
       onRetry: target.onRetry,
       recover: (workAdmission) => recoverContextGraphSwm({
@@ -203,6 +203,8 @@ export class SwmTargetExecutorV1 {
         workAdmission,
       }),
     });
+    if (result.completed) this.privateSnapshotWalks.release(target);
+    return result;
   }
 
   async syncPublicTarget(

@@ -21,7 +21,7 @@ import {
   collectPublicSnapshotMetadata,
   syncPublicSnapshotsForMeta,
   type PublicSnapshotMetadata,
-  type SharedMemorySnapshotWalkContinuation,
+  type RetainedSharedMemorySnapshotWalkContinuation,
 } from './shared-memory-sync.js';
 import { validateRetainedSnapshotWalk } from './retained-snapshot-walk-validation.js';
 import { appendInPlace } from '../append-in-place.js';
@@ -154,7 +154,7 @@ export interface RecoverContextGraphSwmDeps {
   /** Manifest-bound progress retained by the owning private recovery executor. */
   readonly snapshotWalk?: (
     orderedManifest: readonly PublicSnapshotMetadata[],
-  ) => SharedMemorySnapshotWalkContinuation;
+  ) => RetainedSharedMemorySnapshotWalkContinuation;
   readonly ensureContextGraph: (contextGraphId: string) => Promise<void>;
   readonly setCheckpoint: (key: string, offset: number) => void;
   readonly deleteCheckpoint: (key: string) => void;
@@ -422,7 +422,8 @@ async function recoverContextGraphSwmUnlocked(
     (descriptor) => descriptor.publicSnapshotGraph !== undefined,
   );
   let snapshotProgress = { readySnapshots: 0, totalSnapshots: 0 };
-  let snapshotWalk: SharedMemorySnapshotWalkContinuation | undefined;
+  let snapshotWalk: RetainedSharedMemorySnapshotWalkContinuation | undefined;
+  let validatedRetainedRefs: ReadonlySet<string> | undefined;
   const incrementallyReadyGraphs = new Set<string>();
   /** Graph keys whose ASSERTION GRAPH was actually (re)written this run. */
   const rewrittenGraphKeys = new Set<string>();
@@ -510,7 +511,14 @@ async function recoverContextGraphSwmUnlocked(
     ]);
     const orderedManifest = collectPublicSnapshotMetadata(activeGraphMeta);
     snapshotWalk = deps.snapshotWalk?.(orderedManifest);
-    if (snapshotWalk?.invalidateResolved) {
+    const hasUnresolvedSnapshots = snapshotWalk !== undefined
+      && orderedManifest.some(({ ref }) => !snapshotWalk!.isResolved(ref));
+    // A retained prefix must not consume every bounded job before a manifest
+    // tail gets a chance. An empty validation set makes the shared walk try the
+    // unresolved tail first while treating the prefix fail-closed.
+    if (snapshotWalk && hasUnresolvedSnapshots) {
+      validatedRetainedRefs = new Set();
+    } else if (snapshotWalk) {
       const retainedValidation = await validateRetainedSnapshotWalk({
         walk: snapshotWalk,
         deadline: deps.deadline,
@@ -545,6 +553,7 @@ async function recoverContextGraphSwmUnlocked(
           completed: false,
         };
       }
+      validatedRetainedRefs = new Set(snapshotWalk.resolvedRefsSnapshot());
     }
     boundary.assertCurrent();
     const snapshotSync = await syncPublicSnapshotsForMeta({
@@ -554,7 +563,7 @@ async function recoverContextGraphSwmUnlocked(
       deadline: deps.deadline,
       workAdmission: deps.workAdmission,
       ...(snapshotWalk
-        ? { snapshotWalk }
+        ? { snapshotWalk, validatedRetainedRefs: validatedRetainedRefs! }
         : { metaQuads: activeGraphMeta }),
       publicSnapshotStore: deps.publicSnapshotStore,
       // Raw ports: syncPublicSnapshotsForMeta is the sole owner of admission,

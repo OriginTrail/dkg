@@ -8559,6 +8559,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           diagnostics.sharedMemory.localYield,
           r.shared.localYield,
         );
+        diagnostics.sharedMemory.snapshotPlaneIncomplete =
+          (diagnostics.sharedMemory.snapshotPlaneIncomplete ?? 0)
+          + (r.shared.snapshotPlaneIncomplete ?? 0);
         diagnostics.sharedMemory.replayPhaseBytesReceived =
           (diagnostics.sharedMemory.replayPhaseBytesReceived ?? 0)
           + (r.shared.replayPhaseBytesReceived ?? 0);
@@ -8611,6 +8614,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         diagnostics.sharedMemory.localYield,
         shared.localYield,
       );
+      diagnostics.sharedMemory.snapshotPlaneIncomplete =
+        (diagnostics.sharedMemory.snapshotPlaneIncomplete ?? 0)
+        + (shared.snapshotPlaneIncomplete ?? 0);
       diagnostics.sharedMemory.replayPhaseBytesReceived =
         (diagnostics.sharedMemory.replayPhaseBytesReceived ?? 0)
         + (shared.replayPhaseBytesReceived ?? 0);

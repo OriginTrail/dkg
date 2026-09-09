@@ -362,6 +362,7 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
       ...result(ordinaryContextGraphId, 3, 3),
       failedPhases: 2,
       localYield: sharedMemoryLocalYield(),
+      snapshotPlaneIncomplete: 1,
       resolvedSnapshotPlaneIncomplete: 1,
     };
 

@@ -16,6 +16,7 @@ import type { SharedMemoryLocalYield } from './shared-memory-completion.js';
 
 export interface SharedMemoryFreshnessSummary extends DurableProgressSummary {
   readonly localYield?: SharedMemoryLocalYield;
+  readonly snapshotPlaneIncomplete?: number;
   readonly resolvedSnapshotPlaneIncomplete?: number;
   readonly metadataContinuationYields?: number;
   readonly resolvedMetadataContinuationYields?: number;
@@ -103,7 +104,7 @@ export function classifySelectedSwmRoundFreshness(
   const progress = classifyDurableProgress(result);
   const coverage = result.swmCoverage;
   const incomplete = Math.min(
-    result.localYield?.snapshotPlaneIncomplete ?? 0,
+    result.snapshotPlaneIncomplete ?? 0,
     result.failedPhases ?? 0,
   );
   const recoverableSnapshotYieldFailures = incomplete > 0
@@ -149,9 +150,13 @@ export function mergeSharedMemoryFreshnessDiagnostics(
   b: SharedMemorySyncDiagnostics,
 ): Pick<
   SharedMemorySyncDiagnostics,
-  'resolvedSnapshotPlaneIncomplete' | 'resolvedMetadataContinuationYields'
+  | 'snapshotPlaneIncomplete'
+  | 'resolvedSnapshotPlaneIncomplete'
+  | 'resolvedMetadataContinuationYields'
 > {
   return {
+    snapshotPlaneIncomplete:
+      (a.snapshotPlaneIncomplete ?? 0) + (b.snapshotPlaneIncomplete ?? 0),
     resolvedSnapshotPlaneIncomplete:
       (a.resolvedSnapshotPlaneIncomplete ?? 0)
       + (b.resolvedSnapshotPlaneIncomplete ?? 0),
@@ -170,7 +175,7 @@ export function applySelectedSwmFreshnessResolution(
   resolution: SelectedSwmFreshnessResolution,
 ): SharedMemorySyncResult {
   const requested = resolution.recoverableSnapshotYieldFailures;
-  const incomplete = result.localYield?.snapshotPlaneIncomplete ?? 0;
+  const incomplete = result.snapshotPlaneIncomplete ?? 0;
   const failed = result.failedPhases;
   const countersAreValid = Number.isSafeInteger(requested)
     && requested > 0
@@ -219,7 +224,7 @@ export function classifySharedMemoryFreshness(
   options: DurableProgressClassificationOptions = {},
 ): DurableProgressClassification {
   const resolved = result.resolvedSnapshotPlaneIncomplete ?? 0;
-  const incomplete = result.localYield?.snapshotPlaneIncomplete ?? 0;
+  const incomplete = result.snapshotPlaneIncomplete ?? 0;
   const failed = result.failedPhases ?? 0;
   const normalized = Number.isSafeInteger(resolved)
     && resolved > 0

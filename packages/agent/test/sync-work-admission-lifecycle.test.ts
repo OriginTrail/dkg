@@ -33,7 +33,7 @@ it('keeps independently budgeted lifecycle fetches separate and forwards their a
     await vi.waitFor(() => expect(expired).toMatchObject({
       completed: false,
       timedOut: false,
-      localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
+      localYield: { kind: 'local-budget-yield' },
     }));
     expect(sendToPeer).toHaveBeenCalledTimes(1);
     release();

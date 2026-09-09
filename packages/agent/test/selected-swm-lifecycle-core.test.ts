@@ -593,7 +593,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         ordinaryPrivate: { completed: 1, total: 1 },
       });
       expect(summary.continuationPasses).toBe(1);
-      expect(summary.localYield?.snapshotPlaneIncomplete).toBe(1);
+      expect(summary.snapshotPlaneIncomplete).toBe(1);
       expect(summary.failedPhases).toBe(1);
       expect(summary.resolvedSnapshotPlaneIncomplete).toBe(1);
       expect(summary.timedOutPhases).toBe(0);

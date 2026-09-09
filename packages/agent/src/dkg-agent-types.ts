@@ -1237,8 +1237,10 @@ export interface SwmSnapshotCoverage {
 }
 
 export interface SharedMemorySyncDiagnostics {
-  /** Canonical local completion, including its snapshot-plane cardinality. */
+  /** Plane-neutral reason that shared-memory work voluntarily stopped. */
   localYield?: SharedMemoryLocalYield;
+  /** Snapshot phases left incomplete specifically by a local yield. */
+  snapshotPlaneIncomplete?: number;
   fetchedMetaTriples: number;
   fetchedDataTriples: number;
   insertedMetaTriples: number;
@@ -1272,7 +1274,7 @@ export interface SharedMemorySyncDiagnostics {
    * The canonical shared-memory freshness classifier may supersede only this
    * bounded count; transport, timeout, denial and backpressure signals remain
    * independent vetoes. Producers must maintain
-   * `0 <= resolved <= localYield.snapshotPlaneIncomplete <= failedPhases`.
+   * `0 <= resolved <= snapshotPlaneIncomplete <= failedPhases`.
    */
   resolvedSnapshotPlaneIncomplete?: number;
   /** Historical selected metadata yields superseded by exact completion. */

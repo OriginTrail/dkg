@@ -3,7 +3,7 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type {
   PublicSnapshotMetadata,
-  SharedMemorySnapshotWalkContinuation,
+  RetainedSharedMemorySnapshotWalkContinuation,
 } from './shared-memory-sync.js';
 
 export interface ManifestBoundSnapshotWalkOptions {
@@ -18,9 +18,8 @@ export interface ManifestBoundSnapshotWalkOptions {
  * Manifest identity, progress, invalidation, and sliding expiry live here;
  * owners only decide where the walk is retained and when its slot is released.
  */
-export class ManifestBoundSnapshotWalk implements SharedMemorySnapshotWalkContinuation {
+export class ManifestBoundSnapshotWalk implements RetainedSharedMemorySnapshotWalkContinuation {
   readonly #manifest: readonly PublicSnapshotMetadata[];
-  readonly #manifestKey: string;
   readonly #allowedRefs: ReadonlySet<string>;
   readonly #resolvedRefs = new Set<string>();
   readonly #now: () => number;
@@ -37,7 +36,6 @@ export class ManifestBoundSnapshotWalk implements SharedMemorySnapshotWalkContin
       throw new RangeError('Snapshot-walk retention TTL must be positive');
     }
     this.#manifest = immutableManifestSnapshot(orderedManifest);
-    this.#manifestKey = manifestIdentity(this.#manifest);
     this.#allowedRefs = new Set(this.#manifest.map(({ ref }) => ref));
     this.#now = options.now;
     this.#retentionTtlMs = options.retentionTtlMs;
@@ -49,7 +47,14 @@ export class ManifestBoundSnapshotWalk implements SharedMemorySnapshotWalkContin
   }
 
   matches(orderedManifest: readonly PublicSnapshotMetadata[]): boolean {
-    return this.#manifestKey === manifestIdentity(orderedManifest);
+    return this.#manifest.length === orderedManifest.length
+      && this.#manifest.every((snapshot, index) => {
+        const candidate = orderedManifest[index];
+        return candidate !== undefined
+          && snapshot.ref === candidate.ref
+          && snapshot.digest === candidate.digest
+          && snapshot.count === candidate.count;
+      });
   }
 
   get expiresAtMs(): number {
@@ -91,8 +96,16 @@ export class ManifestBoundSnapshotWalk implements SharedMemorySnapshotWalkContin
     this.onResolved(ref, suppressedMetadataRows);
     this.#resolvedRefs.add(ref);
     if (!this.incomplete) {
-      this.#expiresAtMs = 0;
-      this.#onComplete?.();
+      if (this.#onComplete) {
+        this.#expiresAtMs = 0;
+        this.#onComplete();
+      } else {
+        // Private recovery may resolve the final previously-unresolved ref
+        // before it has revalidated the retained prefix later in this same
+        // reordered walk. Keep the entry alive until its owner observes a
+        // fully successful result and releases it explicitly.
+        this.#touch();
+      }
       return;
     }
     this.#touch();
@@ -132,10 +145,4 @@ function immutableManifestSnapshot(
 
 function immutableQuadSnapshot(quads: readonly Quad[]): readonly Quad[] {
   return Object.freeze(quads.map((quad) => Object.freeze({ ...quad })));
-}
-
-function manifestIdentity(manifest: readonly PublicSnapshotMetadata[]): string {
-  return manifest.map(({ ref, digest, count }) => (
-    `${ref}\u0000${digest}\u0000${count}`
-  )).join('\u0001');
 }

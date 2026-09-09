@@ -215,7 +215,9 @@ export function result(
     deniedPhases: 0,
     backoffWorthyFailures: 0,
     deferredBackpressure: options.deferredBackpressure ?? 0,
-    ...(completed ? {} : { localYield: sharedMemoryLocalYield() }),
+    ...(completed
+      ? {}
+      : { localYield: sharedMemoryLocalYield(), snapshotPlaneIncomplete: 1 }),
     replayPhaseBytesReceived: 0,
     snapshotPhaseBytesReceived: 0,
     swmCoverage,

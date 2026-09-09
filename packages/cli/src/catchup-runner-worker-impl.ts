@@ -645,6 +645,9 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         diagnostics.sharedMemory.localYield,
         shared.localYield,
       );
+      diagnostics.sharedMemory.snapshotPlaneIncomplete =
+        (diagnostics.sharedMemory.snapshotPlaneIncomplete ?? 0)
+        + (shared.snapshotPlaneIncomplete ?? 0);
       diagnostics.sharedMemory.replayPhaseBytesReceived += shared.replayPhaseBytesReceived ?? 0;
       diagnostics.sharedMemory.snapshotPhaseBytesReceived += shared.snapshotPhaseBytesReceived ?? 0;
       // The DIAGNOSTIC above counts every deferral, including continuation

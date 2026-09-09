@@ -233,8 +233,10 @@ export function readPublicSnapshotWalkProgress(err: unknown): PublicSnapshotWalk
 }
 
 export interface SharedMemorySyncSummary {
-  /** Canonical local completion, including its snapshot-plane cardinality. */
+  /** Plane-neutral reason that this requester voluntarily stopped local work. */
   localYield?: SharedMemoryLocalYield;
+  /** Snapshot phases left incomplete specifically by a local yield. */
+  snapshotPlaneIncomplete?: number;
   insertedTriples: number;
   fetchedMetaTriples: number;
   fetchedDataTriples: number;
@@ -299,9 +301,14 @@ export interface SharedMemorySnapshotWalkContinuation {
   resolvedRefsSnapshot(): readonly string[];
   /** Exact verified metadata rows withheld when this ref was resolved. */
   suppressedMetadataRows(ref: string): readonly Quad[];
-  /** Drop retained evidence when current descriptor/store validation fails. */
-  invalidateResolved?(ref: string): void;
   markResolved(ref: string, suppressedMetadataRows?: readonly Quad[]): void;
+}
+
+/** Cross-job private continuation whose evidence must be revalidated. */
+export interface RetainedSharedMemorySnapshotWalkContinuation
+  extends SharedMemorySnapshotWalkContinuation {
+  /** Drop retained evidence when current descriptor/store validation fails. */
+  invalidateResolved(ref: string): void;
 }
 
 type PublicSnapshotWalkSource =
@@ -319,6 +326,18 @@ type PublicSnapshotWalkSource =
      * from another.
      */
     readonly snapshotWalk: SharedMemorySnapshotWalkContinuation;
+    readonly validatedRetainedRefs?: never;
+    readonly metaQuads?: never;
+    readonly recoveryOrder?: never;
+  }
+  | {
+    /**
+     * Private retained refs proven against the current store in this job.
+     * When present, resolved refs outside this set are fail-closed and
+     * unresolved refs are attempted first so validation cannot starve a tail.
+     */
+    readonly snapshotWalk: RetainedSharedMemorySnapshotWalkContinuation;
+    readonly validatedRetainedRefs: ReadonlySet<string>;
     readonly metaQuads?: never;
     readonly recoveryOrder?: never;
   };
@@ -1389,6 +1408,8 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           summary.localYield,
           snapshotSync.localYield,
         );
+        summary.snapshotPlaneIncomplete =
+          (summary.snapshotPlaneIncomplete ?? 0) + 1;
         logInfo(ctx, `SWM sync for "${pid}": yielded at the round deadline with `
           + `${snapshotSync.missingCount} of ${snapshotSync.totalSnapshots} snapshot(s) unresolved`);
       }
@@ -1648,11 +1669,17 @@ export async function syncPublicSnapshotsForMeta(params: {
   const manifestSnapshots = params.snapshotWalk
     ? []
     : collectPublicSnapshotMetadata(params.metaQuads);
-  const snapshots = params.snapshotWalk
+  const orderedSnapshots = params.snapshotWalk
     ? params.snapshotWalk.orderedManifestSnapshot()
     : params.recoveryOrder === 'recent-balanced'
       ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
       : manifestSnapshots;
+  const snapshots = params.snapshotWalk && params.validatedRetainedRefs
+    ? [
+      ...orderedSnapshots.filter((snapshot) => !params.snapshotWalk!.isResolved(snapshot.ref)),
+      ...orderedSnapshots.filter((snapshot) => params.snapshotWalk!.isResolved(snapshot.ref)),
+    ]
+    : orderedSnapshots;
   if (snapshots.length === 0) {
     return {
       bytesReceived: 0,
@@ -1721,7 +1748,13 @@ export async function syncPublicSnapshotsForMeta(params: {
     // that O(prefix) replay eventually consumed the whole slice and fixed the
     // continuation at N/N+K forever. The owner is in-memory and resets on any
     // manifest change, expiry, release or process restart.
-    if (params.snapshotWalk?.isResolved(snapshot.ref)) {
+    if (
+      params.snapshotWalk?.isResolved(snapshot.ref)
+      && (
+        params.validatedRetainedRefs === undefined
+        || params.validatedRetainedRefs.has(snapshot.ref)
+      )
+    ) {
       readySnapshots += 1;
       continue;
     }

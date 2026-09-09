@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { SyncWorkAdmission } from '../work-admission.js';
-import type { SharedMemorySnapshotWalkContinuation } from './shared-memory-sync.js';
+import type { RetainedSharedMemorySnapshotWalkContinuation } from './shared-memory-sync.js';
 
 export type RetainedSnapshotWalkValidation =
   | { kind: 'complete'; validatedRefs: number }
@@ -9,7 +9,7 @@ export type RetainedSnapshotWalkValidation =
 
 /** Revalidate cross-job completion evidence before any retained ref is reused. */
 export async function validateRetainedSnapshotWalk(options: {
-  readonly walk: SharedMemorySnapshotWalkContinuation;
+  readonly walk: RetainedSharedMemorySnapshotWalkContinuation;
   readonly deadline: number;
   readonly workAdmission: SyncWorkAdmission;
   readonly validateRef: (ref: string) => Promise<boolean>;
@@ -22,12 +22,12 @@ export async function validateRetainedSnapshotWalk(options: {
   for (const [index, ref] of retainedRefs.entries()) {
     if (now() >= deadline || !workAdmission.canAdmitWork()) {
       for (const unvalidatedRef of retainedRefs.slice(index)) {
-        walk.invalidateResolved?.(unvalidatedRef);
+        walk.invalidateResolved(unvalidatedRef);
       }
       return { kind: 'local-budget-yield', validatedRefs };
     }
     if (await validateRef(ref)) validatedRefs += 1;
-    else walk.invalidateResolved?.(ref);
+    else walk.invalidateResolved(ref);
   }
   return { kind: 'complete', validatedRefs };
 }

@@ -115,7 +115,7 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
       expect(summary.metadataContinuationYields).toBe(1);
       expect(summary.timedOutPhases).toBe(1);
       expect(summary.resolvedMetadataContinuationYields).toBe(1);
-      expect(summary.localYield?.snapshotPlaneIncomplete).toBe(1);
+      expect(summary.snapshotPlaneIncomplete).toBe(1);
       expect(summary.failedPhases).toBe(1);
       expect(summary.resolvedSnapshotPlaneIncomplete).toBe(0);
       const freshness = classifySharedMemoryFreshness(summary);
@@ -182,7 +182,7 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
       expect(summary.continuationPasses).toBe(2);
       expect(summary.metadataContinuationYields).toBe(1);
       expect(summary.resolvedMetadataContinuationYields).toBe(1);
-      expect(summary.localYield?.snapshotPlaneIncomplete).toBe(1);
+      expect(summary.snapshotPlaneIncomplete).toBe(1);
       expect(summary.resolvedSnapshotPlaneIncomplete).toBe(1);
       expect(summary.swmCoverage).toMatchObject({
         snapshotsResolved: 3,

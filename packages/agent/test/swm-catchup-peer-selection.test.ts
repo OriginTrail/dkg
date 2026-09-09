@@ -7,12 +7,9 @@ import {
 import { sharedMemoryLocalYield } from '../src/sync/shared-memory-completion.js';
 
 describe('SWM catchup peer selection', () => {
-  it.each([0, -1, 1.5, Number.NaN])(
-    'rejects contradictory local-yield count %s',
-    (count) => {
-      expect(() => sharedMemoryLocalYield(count)).toThrow(RangeError);
-    },
-  );
+  it('keeps the local-yield reason plane-neutral', () => {
+    expect(sharedMemoryLocalYield()).toEqual({ kind: 'local-budget-yield' });
+  });
 
   it('filters peers known not to advertise the current sync protocol', () => {
     const selector = createSwmCatchupPeerSelector({ fallbackProbeLimit: 3 });
@@ -108,6 +105,11 @@ describe('SWM catchup peer selection', () => {
       localYield: sharedMemoryLocalYield(),
     });
     expect(localYield).toBeUndefined();
+    expect(classifySwmCatchupPeerOutcome({
+      localYield: sharedMemoryLocalYield(),
+      fetchedMetaTriples: 1,
+      failedPhases: 1,
+    })).toBe('good');
     const selector = createSwmCatchupPeerSelector();
     selector.record('cg', 'healthy-peer', 'good', 100);
     if (localYield) selector.record('cg', 'healthy-peer', localYield, 101);

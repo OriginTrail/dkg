@@ -44,4 +44,17 @@ describe.each(implementations)('%s manifest-bound snapshot walk contract', (_own
     expect(walk.isResolved('a')).toBe(false);
     expect(walk.resolvedCount()).toBe(0);
   });
+
+  it('compares unusual ref and digest strings without delimiter collisions', () => {
+    const unusual = new Walk([
+      { ref: 'a\u0000b', digest: 'c', count: 1 },
+    ], {
+      now: () => 100,
+      retentionTtlMs: 1_000,
+    });
+
+    expect(unusual.matches([
+      { ref: 'a', digest: 'b\u0000c', count: 1 },
+    ])).toBe(false);
+  });
 });

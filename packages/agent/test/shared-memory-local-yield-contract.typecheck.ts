@@ -7,17 +7,15 @@ const localYield = sharedMemoryLocalYield();
 
 classifySwmCatchupPeerOutcome({ localYield });
 
-// A local scheduler yield and peer-failure evidence are mutually exclusive at
-// the sole peer-cache boundary.
-// @ts-expect-error contradictory local and peer completion evidence
+// Progress telemetry may coexist with a local scheduler yield. The classifier
+// decides peer health from the telemetry while the yield itself remains neutral.
 classifySwmCatchupPeerOutcome({ localYield, failedPhases: 1 });
 
-// Counts enter the canonical completion only through the positive-count
-// constructor; zero cannot masquerade as a local yield.
+// Plane-specific counts cannot be embedded in the generic completion reason.
 const invalidLocalYield: SharedMemoryLocalYield = {
   kind: 'local-budget-yield',
-  // @ts-expect-error zero is not a branded positive snapshot-plane count
-  snapshotPlaneIncomplete: 0,
+  // @ts-expect-error snapshot cardinality belongs to shared-memory diagnostics
+  snapshotPlaneIncomplete: 1,
 };
 
 void invalidLocalYield;

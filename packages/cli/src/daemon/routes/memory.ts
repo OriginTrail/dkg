@@ -459,8 +459,8 @@ function swmCatchupResultFromInserted(insertedTriples: number): SwmCatchupDetail
 }
 
 function swmCatchupOutcomeInput(result: SwmCatchupDetailedResult, errorMessage?: string) {
-  if (result.localYield) return { localYield: result.localYield } as const;
   return {
+    localYield: result.localYield,
     insertedTriples: result.insertedTriples,
     fetchedDataTriples: result.fetchedDataTriples,
     fetchedMetaTriples: result.fetchedMetaTriples,

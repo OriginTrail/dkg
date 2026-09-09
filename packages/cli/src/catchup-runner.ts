@@ -119,8 +119,10 @@ export interface CatchupJobResult {
        * are attributed to and the missing sample are never mixed across peers.
        */
       swmCoverage?: SwmSnapshotCoverage;
-      /** Canonical local-yield completion and affected snapshot-plane count. */
+      /** Plane-neutral local-yield completion reason. */
       localYield?: SharedMemoryLocalYield;
+      /** Snapshot phases left incomplete specifically by a local yield. */
+      snapshotPlaneIncomplete?: number;
       /** Extra passes over the peer set beyond the first. */
       continuationPasses: number;
       /**

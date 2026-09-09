@@ -3,7 +3,7 @@
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../durable-session.js';
 import type {
   PublicSnapshotMetadata,
-  SharedMemorySnapshotWalkContinuation,
+  RetainedSharedMemorySnapshotWalkContinuation,
 } from './shared-memory-sync.js';
 import { ManifestBoundSnapshotWalk } from './manifest-bound-snapshot-walk.js';
 
@@ -50,26 +50,22 @@ export class PrivateSwmSnapshotWalkRegistry {
   open(
     owner: PrivateSwmSnapshotWalkOwner,
     orderedManifest: readonly PublicSnapshotMetadata[],
-  ): SharedMemorySnapshotWalkContinuation {
+  ): RetainedSharedMemorySnapshotWalkContinuation {
     this.#pruneExpired();
     const ownerKey = privateSnapshotWalkOwnerKey(owner);
     const retained = this.#walks.get(ownerKey);
     if (retained?.walk.matches(orderedManifest)) return retained.walk;
     if (retained) this.#walks.delete(ownerKey);
 
-    let entry: RetainedPrivateSnapshotWalk | undefined;
     const walk = new ManifestBoundSnapshotWalk(orderedManifest, {
       now: this.#now,
       retentionTtlMs: this.#retentionTtlMs,
-      onComplete: () => {
-        if (entry && this.#walks.get(ownerKey) === entry) this.#walks.delete(ownerKey);
-      },
     });
     // Do not evict an active target. A saturated caller gets useful in-job
     // state but no cross-job evidence; retained owners continue advancing and
     // completion opens capacity for cyclically waiting owners.
     if (orderedManifest.length === 0 || this.#walks.size >= this.#maxTargets) return walk;
-    entry = { walk };
+    const entry = { walk };
     this.#walks.set(ownerKey, entry);
     return walk;
   }

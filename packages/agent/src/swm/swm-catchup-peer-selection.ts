@@ -155,26 +155,14 @@ interface SwmCatchupPeerTelemetry {
   errorMessage?: string;
 }
 
-export type SwmCatchupPeerOutcomeInput =
-  | {
-    /** A local scheduler decision is deliberately not peer-health evidence. */
-    localYield: SharedMemoryLocalYield;
-    insertedTriples?: never;
-    fetchedDataTriples?: never;
-    fetchedMetaTriples?: never;
-    deniedPhases?: never;
-    failedPeers?: never;
-    failedPhases?: never;
-    timedOutPhases?: never;
-    backoffWorthyFailures?: never;
-    errorMessage?: never;
-  }
-  | (SwmCatchupPeerTelemetry & { localYield?: never });
+export type SwmCatchupPeerOutcomeInput = SwmCatchupPeerTelemetry & {
+  /** A local scheduler decision is not itself peer-health evidence. */
+  localYield?: SharedMemoryLocalYield;
+};
 
 export function classifySwmCatchupPeerOutcome(
   input: SwmCatchupPeerOutcomeInput,
 ): SwmCatchupPeerOutcome | undefined {
-  if (input.localYield) return undefined;
   if ((input.insertedTriples ?? 0) > 0 || (input.fetchedDataTriples ?? 0) > 0 || (input.fetchedMetaTriples ?? 0) > 0) {
     return 'good';
   }
@@ -185,12 +173,13 @@ export function classifySwmCatchupPeerOutcome(
   if (
     input.errorMessage ||
     (input.failedPeers ?? 0) > 0 ||
-    failedPhases > 0 ||
     (input.timedOutPhases ?? 0) > 0 ||
     (input.backoffWorthyFailures ?? 0) > 0
   ) {
     return 'transportFailed';
   }
+  if (input.localYield) return undefined;
+  if (failedPhases > 0) return 'transportFailed';
   return 'empty';
 }
 
