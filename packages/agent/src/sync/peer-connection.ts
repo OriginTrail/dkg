@@ -4,12 +4,8 @@ import type { PeerSyncSession } from './peer-sync-session.js';
 
 export interface PeerConnectionSyncPorts {
   readonly localPeerId: string;
-  readCatalogResponsibilities(): readonly {
-    contextGraphId: string;
-    active: boolean;
-    mode: string;
-  }[];
-  resolveCatalogAuthority(contextGraphId: string): { active: boolean; mode: string };
+  /** Canonical RFC-64 owner has already applied responsibility and authority policy. */
+  listActiveCatalogReplayContextGraphIds(): readonly string[];
   markReplayPending(contextGraphId: string, remotePeer: string): void;
   clearReplayPending(contextGraphId: string, remotePeer: string): void;
   ensureAdmitted(remotePeer: string, ctx: OperationContext, signal: AbortSignal): Promise<boolean>;
@@ -25,7 +21,6 @@ export interface PeerConnectionSyncContext {
   session: PeerSyncSession;
   ctx: OperationContext;
   log: Pick<Logger, 'info' | 'warn'>;
-  authorityContextGraphIds: readonly string[];
 }
 
 /** Connection policy belongs to sync; the generic lifetime owns only supervision. */
@@ -33,20 +28,12 @@ export async function syncOpenedPeerConnection(
   context: PeerConnectionSyncContext,
   connection: PeerSyncConnection,
 ): Promise<void> {
-  const { ports, session, ctx, log, authorityContextGraphIds } = context;
+  const { ports, session, ctx, log } = context;
   const { signal } = session;
   signal.throwIfAborted();
   const remotePeer = connection.remotePeer.toString();
   if (remotePeer === ports.localPeerId) return;
-  const replayContextGraphIds = [...new Set([
-    ...ports.readCatalogResponsibilities()
-      .filter((responsibility) => responsibility.active && responsibility.mode !== 'legacy')
-      .map((responsibility) => responsibility.contextGraphId),
-    ...authorityContextGraphIds.filter((cg) => {
-      const authority = ports.resolveCatalogAuthority(cg);
-      return authority.active && authority.mode !== 'legacy';
-    }),
-  ])].sort();
+  const replayContextGraphIds = ports.listActiveCatalogReplayContextGraphIds();
   for (const contextGraphId of replayContextGraphIds) {
     ports.markReplayPending(contextGraphId, remotePeer);
   }

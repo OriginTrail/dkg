@@ -1238,6 +1238,20 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     ).snapshot();
   }
 
+  /** Canonical connection-replay targets after responsibility and authority policy. */
+  listActiveRfc64CatalogReplayContextGraphIdsV1(this: DKGAgent): readonly string[] {
+    const responsibilityIds = this.readRfc64CatalogResponsibilitiesV1()
+      .filter((selection) => selection.active && selection.mode !== 'legacy')
+      .map((selection) => selection.contextGraphId);
+    const configuredIds = Object.keys(
+      this.config.rfc64CatalogExecutionPlan.selectedAuthority,
+    ).filter((contextGraphId) => {
+      const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
+      return authority.active && authority.mode !== 'legacy';
+    });
+    return Object.freeze([...new Set([...responsibilityIds, ...configuredIds])].sort());
+  }
+
   /** Local, privacy-safe per-CG release evidence used by status and harnesses. */
   async readRfc64CatalogOperationalStatusV1(
     this: DKGAgent,

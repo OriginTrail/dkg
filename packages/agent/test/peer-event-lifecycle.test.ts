@@ -70,13 +70,8 @@ describe('peer-event lifecycle', () => {
     const f = await createPeerEventFixture();
     const session = activeSessionWithoutJobs();
     try {
-      vi.spyOn(f.agent, 'readRfc64CatalogResponsibilitiesV1').mockReturnValue([]);
-      vi.spyOn(f.agent, 'resolveRfc64CatalogReceiverAuthorityV1').mockImplementation((contextGraphId) => {
-        const common = { contextGraphId, selected: false, eligible: false, killSwitchActive: false } as const;
-        if (contextGraphId === 'legacy') return { ...common, active: true, mode: 'legacy', reconciliationLane: 'legacy', legacySyncAllowed: true, track2Enabled: false, authoringAllowed: false };
-        if (contextGraphId === 'inactive') return { ...common, active: false, mode: 'catalog', reconciliationLane: 'disabled', legacySyncAllowed: true, track2Enabled: false, authoringAllowed: false };
-        return { ...common, active: true, mode: 'catalog', reconciliationLane: 'catalog-apply', legacySyncAllowed: true, track2Enabled: true, authoringAllowed: true };
-      });
+      vi.spyOn(f.agent, 'listActiveRfc64CatalogReplayContextGraphIdsV1')
+        .mockReturnValue(['active']);
       const admission = vi.spyOn(f.agent.networkAdmissionCoordinator, 'ensureAdmitted').mockResolvedValue(true);
       vi.spyOn(f.agent, 'enrichPeerStoreFromInboundCircuit').mockResolvedValue();
       vi.spyOn(f.agent, 'drainPendingSenderKeyForPeer').mockResolvedValue(0);
@@ -87,8 +82,9 @@ describe('peer-event lifecycle', () => {
       const log = { info: vi.fn(), warn: vi.fn() };
       const ports = {
         localPeerId: f.agent.node.libp2p.peerId.toString(),
-        readCatalogResponsibilities: () => f.agent.readRfc64CatalogResponsibilitiesV1(),
-        resolveCatalogAuthority: (contextGraphId: string) => f.agent.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
+        listActiveCatalogReplayContextGraphIds: () => (
+          f.agent.listActiveRfc64CatalogReplayContextGraphIdsV1()
+        ),
         markReplayPending: (contextGraphId: string, remotePeer: string) => f.agent.markRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer),
         clearReplayPending: (contextGraphId: string, remotePeer: string) => f.agent.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer),
         ensureAdmitted: (remotePeer: string, ctx: ReturnType<typeof createOperationContext>, signal: AbortSignal) => (
@@ -106,7 +102,7 @@ describe('peer-event lifecycle', () => {
           f.agent.queueSyncFromPeerOnConnect(remotePeer, onError)
         ),
       };
-      const context = { ports, session, ctx: createOperationContext('sync'), log, authorityContextGraphIds: ['active', 'inactive', 'legacy'] };
+      const context = { ports, session, ctx: createOperationContext('sync'), log };
       await syncOpenedPeerConnection(context, { direction: 'inbound', remotePeer: f.agent.node.libp2p.peerId });
       expect(admission).not.toHaveBeenCalled();
       await syncOpenedPeerConnection(context, { direction: 'inbound', remotePeer: f.peer });

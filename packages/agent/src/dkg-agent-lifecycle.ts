@@ -3887,8 +3887,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const { signal } = peerEvents;
     const connectionSyncPorts: PeerConnectionSyncPorts = {
       localPeerId: this.node.libp2p.peerId.toString(),
-      readCatalogResponsibilities: () => this.readRfc64CatalogResponsibilitiesV1(),
-      resolveCatalogAuthority: (contextGraphId) => this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
+      listActiveCatalogReplayContextGraphIds: () => (
+        this.listActiveRfc64CatalogReplayContextGraphIdsV1()
+      ),
       markReplayPending: (contextGraphId, remotePeer) => this.markRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer),
       clearReplayPending: (contextGraphId, remotePeer) => this.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer),
       ensureAdmitted: (remotePeer, operation, lifetimeSignal) => (
@@ -3903,7 +3904,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.node.libp2p.addEventListener('connection:open', (evt) => {
       void peerEvents.run(() => syncOpenedPeerConnection({
         ports: connectionSyncPorts, session: peerEvents, ctx, log: this.log,
-        authorityContextGraphIds: Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority),
       }, evt.detail), (error) => handleSyncError(evt.detail.remotePeer.toString(), error));
     }, { signal });
 
