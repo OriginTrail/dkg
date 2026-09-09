@@ -4,7 +4,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter, type RandomSamplingAvailability } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
-import type { RandomSamplingHandle } from '../src/random-sampling-bind.js';
+import type { RandomSamplingBindingResult, RandomSamplingHandle } from '../src/random-sampling-bind.js';
+
+function readyBinding(handle: RandomSamplingHandle): RandomSamplingBindingResult {
+  return { kind: 'ready', handle };
+}
 
 function createRuntime(options: Omit<RandomSamplingRuntimeOptions, 'resolveEligibility'> & { chain: RandomSamplingEligibilityChain }) {
   return new RandomSamplingRuntime({ ...options, resolveEligibility: createRandomSamplingEligibilityResolver(options) });
@@ -30,9 +34,9 @@ async function startCore(initialMembership = true) {
   const handles: RandomSamplingHandle[] = [];
   const realCreate = agent.createRandomSamplingHandle.bind(agent);
   const create = vi.spyOn(agent, 'createRandomSamplingHandle').mockImplementation(async (options) => {
-    const handle = await realCreate(options);
-    handles.push(handle);
-    return handle;
+    const binding = await realCreate(options);
+    if (binding.kind === 'ready') handles.push(binding.handle);
+    return binding;
   });
   await agent.start();
   const runtime = (): RandomSamplingRuntime => {
@@ -55,11 +59,11 @@ async function startCore(initialMembership = true) {
 
 describe('Random Sampling membership reconciliation', () => {
   it.each([
-    { active: false, missing: false, phase: 'waiting', stopped: 0, scheduled: true },
-    { active: true, missing: false, phase: 'running', stopped: 0, scheduled: true },
-    { active: false, missing: true, phase: 'disabled', stopped: 0, scheduled: false },
-    { active: true, missing: true, phase: 'waiting', stopped: 1, scheduled: true },
-  ])('applies typed chain outcomes: active=$active missing=$missing', async ({ active, missing, phase, stopped, scheduled }) => {
+    { active: false, missing: false, phase: 'waiting', stopped: 0, scheduled: true, observed: false },
+    { active: true, missing: false, phase: 'running', stopped: 0, scheduled: true, observed: true },
+    { active: false, missing: true, phase: 'disabled', stopped: 0, scheduled: false, observed: false },
+    { active: true, missing: true, phase: 'waiting', stopped: 1, scheduled: true, observed: true },
+  ])('applies typed chain outcomes: active=$active missing=$missing', async ({ active, missing, phase, stopped, scheduled, observed }) => {
     const failure = new Error('temporary RPC outage');
     const availability = vi.fn(async (): Promise<RandomSamplingAvailability> => ({ kind: 'available', member: true }));
     const stop = vi.fn(async () => {});
@@ -68,7 +72,7 @@ describe('Random Sampling membership reconciliation', () => {
         chainId: 'mock:0', getIdentityId: async () => 52n,
         resolveRandomSamplingAvailability: availability,
       },
-      createHandle: async () => ({ enabled: true, start: vi.fn(), stop,
+      createHandle: async () => readyBinding({ enabled: true, start: vi.fn(), stop,
         getStatus: () => ({ enabled: true, role: 'core', identityId: '52', disabledReason: null, loop: null }) }),
       log: { info: vi.fn(), warn: vi.fn() }, shutdownTimeoutMs: () => 100,
     });
@@ -78,7 +82,11 @@ describe('Random Sampling membership reconciliation', () => {
         ? { kind: 'unavailable', reason: 'contracts_not_deployed' }
         : { kind: 'indeterminate', error: failure });
       await runtime.reconcile();
-      expect(runtime.getLifecycleSnapshot()).toMatchObject({ phase, reconciliationScheduled: scheduled });
+      expect(runtime.getLifecycleSnapshot()).toMatchObject({
+        phase,
+        reconciliationScheduled: scheduled,
+        deploymentObserved: observed,
+      });
       expect(stop).toHaveBeenCalledTimes(stopped);
       expect(runtime.getStatus().enabled).toBe(active && !missing);
     } finally { await runtime.stop(); }
@@ -130,7 +138,7 @@ describe('Random Sampling membership reconciliation', () => {
     const entered = deferred<void>();
     const runtime = createRuntime({
       role: 'core', chain: { chainId: 'mock:0', getIdentityId: async () => 52n, isShardingTableMember: async () => member },
-      createHandle: async () => ({ enabled: true, start: vi.fn(), stop: async () => { entered.resolve(); await gate.promise; },
+      createHandle: async () => readyBinding({ enabled: true, start: vi.fn(), stop: async () => { entered.resolve(); await gate.promise; },
         getStatus: () => ({ enabled: true, role: 'core', identityId: '52', disabledReason: null, loop: null }) }),
       log: { info: vi.fn(), warn: vi.fn() }, shutdownTimeoutMs: () => 10,
     });
@@ -170,7 +178,7 @@ describe('Random Sampling membership reconciliation', () => {
           getStatus: () => ({ enabled: true, role: 'core', identityId: '52', disabledReason: null, loop: null }),
         };
         handles.push(handle);
-        return handle;
+        return readyBinding(handle);
       },
       log: { info: vi.fn(), warn: vi.fn() }, shutdownTimeoutMs: () => 100,
     });
@@ -195,7 +203,7 @@ describe('Random Sampling membership reconciliation', () => {
     const warn = vi.fn();
     const runtime = createRuntime({
       role: 'core', chain: { chainId: 'mock:0', getIdentityId: async () => 52n, isShardingTableMember: async () => true },
-      createHandle: async () => ({ enabled: true, start: vi.fn(), stop,
+      createHandle: async () => readyBinding({ enabled: true, start: vi.fn(), stop,
         getStatus: () => ({ enabled: true, role: 'core', identityId: '52', disabledReason: null, loop: null }) }),
       log: { info: vi.fn(), warn }, shutdownTimeoutMs: () => 100,
     });
@@ -216,11 +224,11 @@ describe('Random Sampling membership reconciliation', () => {
       getStatus: () => ({ enabled: true, role: 'core', identityId: '52', disabledReason: null, loop: null }),
     };
     const replacement = { ...handle, start: vi.fn(), stop: vi.fn(async () => {}) };
-    const createHandle = vi.fn<(identityId: bigint) => Promise<RandomSamplingHandle>>(async () => replacement);
+    const createHandle = vi.fn<(identityId: bigint) => Promise<RandomSamplingBindingResult>>(async () => readyBinding(replacement));
     if (stage === 'bind') createHandle.mockRejectedValueOnce(new Error('WAL open failed'));
     else {
       vi.mocked(handle.start).mockImplementationOnce(() => { throw new Error('loop start failed'); });
-      createHandle.mockResolvedValueOnce(handle);
+      createHandle.mockResolvedValueOnce(readyBinding(handle));
     }
     const runtime = createRuntime({
       role: 'core', chain: { chainId: 'mock:0', getIdentityId: async () => 52n, isShardingTableMember: async () => true },
@@ -242,7 +250,10 @@ describe('Random Sampling membership reconciliation', () => {
     };
     const runtime = createRuntime({
       role: 'core', chain: { chainId: 'mock:0', getIdentityId: async () => 52n, isShardingTableMember: async () => true },
-      createHandle: async () => handle, log: { info: vi.fn(), warn: vi.fn() }, shutdownTimeoutMs: () => 100,
+      createHandle: async () => ({
+        kind: 'unavailable', retry: 'never', reason: 'unsupported_chain', handleToClose: handle,
+      }),
+      log: { info: vi.fn(), warn: vi.fn() }, shutdownTimeoutMs: () => 100,
     });
     try {
       await expect(runtime.start()).resolves.toBeUndefined();
@@ -262,7 +273,10 @@ describe('Random Sampling membership reconciliation', () => {
       enabled: true, start: vi.fn(), stop: vi.fn(async () => {}),
       getStatus: () => ({ enabled: true, role: 'core', identityId: '52', disabledReason: null, loop: null }),
     };
-    const createHandle = vi.fn(async () => enabled).mockResolvedValueOnce(disabled);
+    const createHandle = vi.fn(async (): Promise<RandomSamplingBindingResult> => readyBinding(enabled))
+      .mockResolvedValueOnce({
+        kind: 'unavailable', retry: 'poll', reason: 'contracts_not_deployed', handleToClose: disabled,
+      });
     const runtime = createRuntime({
       role: 'core', chain: { chainId: 'mock:0', getIdentityId: async () => 52n, isShardingTableMember: async () => true },
       createHandle, log: { info: vi.fn(), warn: vi.fn() }, shutdownTimeoutMs: () => 100,
@@ -286,7 +300,7 @@ describe('Random Sampling membership reconciliation', () => {
       enabled: true, start: vi.fn(), stop: vi.fn(async () => {}),
       getStatus: () => ({ enabled: true, role: 'core', identityId: '52', disabledReason: null, loop: null }),
     };
-    const createHandle = vi.fn(async () => handle);
+    const createHandle = vi.fn(async () => readyBinding(handle));
     const runtime = createRuntime({
       role: 'core', chain: { chainId: 'mock:0', getIdentityId: async () => 52n, isShardingTableMember: membership },
       createHandle, log: { info: vi.fn(), warn: vi.fn() }, shutdownTimeoutMs: () => 100,
@@ -421,10 +435,11 @@ describe('Random Sampling membership reconciliation', () => {
     const closeGate = deferred<void>();
     try {
       f.create.mockImplementationOnce(async (options) => {
-        const handle = await f.realCreate(options);
-        entered.resolve(handle);
+        const binding = await f.realCreate(options);
+        if (binding.kind !== 'ready') throw new Error('expected ready Random Sampling binding');
+        entered.resolve(binding.handle);
         await gate.promise;
-        return handle;
+        return binding;
       });
       f.setMember(true);
       f.beginTick();
@@ -460,10 +475,11 @@ describe('Random Sampling membership reconciliation', () => {
     Object.defineProperty(DKGAgentBase, 'RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS', { configurable: true, value: 10 });
     try {
       f.create.mockImplementationOnce(async (options) => {
-        const handle = await f.realCreate(options);
-        entered.resolve(handle);
+        const binding = await f.realCreate(options);
+        if (binding.kind !== 'ready') throw new Error('expected ready Random Sampling binding');
+        entered.resolve(binding.handle);
         await gate.promise;
-        return handle;
+        return binding;
       });
       f.setMember(true);
       f.beginTick();

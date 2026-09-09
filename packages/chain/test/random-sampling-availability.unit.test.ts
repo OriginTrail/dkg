@@ -1,9 +1,8 @@
 import { MockChainAdapter } from '../src/mock-adapter.js';
-import { Contract } from 'ethers';
+import { Contract, ZeroAddress } from 'ethers';
 import { afterEach, expect, it, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
-import { RandomSamplingContractsUnavailableError, resolveRandomSamplingAvailability } from '../src/random-sampling-availability.js';
-import { HubContractNotFoundError } from '../src/hub-contract-not-found-error.js';
+import { readRandomSamplingAvailability } from '../src/random-sampling-availability.js';
 
 // Exercise the real public capability with deterministic contract-resolution
 // ports. Hub cache rotation itself also has a real-chain integration witness.
@@ -35,7 +34,37 @@ class AvailabilityAdapter extends EVMChainAdapter {
   }
   invalidateBindings(): void { this.invalidateRandomSamplingPair(); }
 }
-const adapters: AvailabilityAdapter[] = [];
+
+class HubLookupAvailabilityAdapter extends EVMChainAdapter {
+  constructor() {
+    super({ rpcUrl: 'http://127.0.0.1:1', privateKey: '0x' + '22'.repeat(32),
+      hubAddress: '0x0000000000000000000000000000000000000001', chainId: 'evm:31337' });
+  }
+  protected override async init(): Promise<void> { return; }
+}
+
+const deployedAddresses: Readonly<Record<string, string>> = {
+  RandomSampling: '0x0000000000000000000000000000000000000002',
+  RandomSamplingStorage: '0x0000000000000000000000000000000000000003',
+  ShardingTableStorage: '0x0000000000000000000000000000000000000004',
+};
+
+function stubHubReads(
+  chain: HubLookupAvailabilityAdapter,
+  resolveAddress: (name: string) => string,
+) {
+  type ReadContractPort = {
+    readContract(contract: unknown, label: string, method: string, ...args: unknown[]): Promise<unknown>;
+  };
+  return vi.spyOn(chain as unknown as ReadContractPort, 'readContract').mockImplementation(
+    async (_contract, label, _method, ...args) => {
+      if (label.startsWith('Hub.getContractAddress(')) return resolveAddress(String(args[0]));
+      if (label === 'shardingTableStorage.nodeExists') return true;
+      throw new Error(`unexpected contract read: ${label}`);
+    },
+  );
+}
+const adapters: EVMChainAdapter[] = [];
 function adapter() { const value = new AvailabilityAdapter(); adapters.push(value); return value; }
 afterEach(() => { for (const value of adapters.splice(0)) value.getProvider().destroy(); });
 
@@ -43,7 +72,7 @@ it('prefers the typed capability without invoking a proof-period read', async ()
   const capability = vi.fn(async () => ({ kind: 'available' as const, member: true }));
   const proof = vi.fn(async () => { throw new Error('unrelated proof read'); });
   const chain = { resolveRandomSamplingAvailability: capability, isRandomSamplingReady: () => false, getActiveProofPeriodStatus: proof };
-  expect(await resolveRandomSamplingAvailability(chain, 52n)).toEqual({ kind: 'available', member: true });
+  expect(await readRandomSamplingAvailability(chain, 52n)).toEqual({ kind: 'available', member: true });
   expect(capability).toHaveBeenCalledWith(52n);
   expect(proof).not.toHaveBeenCalled();
 });
@@ -60,12 +89,22 @@ it('refreshes invalidated EVM bindings before returning membership', async () =>
   expect(proof).not.toHaveBeenCalled();
 });
 
-it.each(['bindingFailure', 'membershipFailure'] as const)('normalizes missing contracts at %s', async (failure) => {
-  const chain = adapter();
-  chain[failure] = failure === 'bindingFailure'
-    ? new RandomSamplingContractsUnavailableError()
-    : new HubContractNotFoundError('ShardingTableStorage', '0x1');
+it.each(['RandomSampling', 'ShardingTableStorage'] as const)(
+  'normalizes a real Hub zero-address miss for %s',
+  async (missingContract) => {
+  const chain = new HubLookupAvailabilityAdapter();
+  adapters.push(chain);
+  stubHubReads(chain, (name) => name === missingContract ? ZeroAddress : deployedAddresses[name]!);
   expect(await chain.resolveRandomSamplingAvailability(52n)).toEqual({ kind: 'unavailable', reason: 'contracts_not_deployed' });
+  },
+);
+
+it('keeps lookalike provider prose indeterminate instead of parsing its message', async () => {
+  const chain = new HubLookupAvailabilityAdapter();
+  adapters.push(chain);
+  const error = new Error('Contract "RandomSampling" not found in Hub at 0x1');
+  stubHubReads(chain, () => { throw error; });
+  expect(await chain.resolveRandomSamplingAvailability(52n)).toEqual({ kind: 'indeterminate', error });
 });
 
 it.each(['bindingFailure', 'membershipFailure'] as const)('keeps transient %s indeterminate', async (failure) => {
@@ -86,22 +125,22 @@ it('does not publish stale availability when bindings invalidate during the memb
 });
 
 it('preserves legacy readiness and membership capabilities', async () => {
-  expect(await resolveRandomSamplingAvailability({ isShardingTableMember: async () => false }, 52n))
+  expect(await readRandomSamplingAvailability({ isShardingTableMember: async () => false }, 52n))
     .toEqual({ kind: 'available', member: false });
-  expect(await resolveRandomSamplingAvailability({}, 52n)).toEqual({ kind: 'unavailable', reason: 'unsupported_chain' });
-  expect(await resolveRandomSamplingAvailability({ isShardingTableMember: async () => true, isRandomSamplingReady: () => false }, 52n))
+  expect(await readRandomSamplingAvailability({}, 52n)).toEqual({ kind: 'unavailable', reason: 'unsupported_chain' });
+  expect(await readRandomSamplingAvailability({ isShardingTableMember: async () => true, isRandomSamplingReady: () => false }, 52n))
     .toEqual({ kind: 'unavailable', reason: 'contracts_not_deployed' });
 });
 
-it('implements typed availability for the offline adapter', async () => {
+it('dispatches the offline adapter through its legacy readiness and membership capabilities', async () => {
   const chain = new MockChainAdapter();
-  expect(await chain.resolveRandomSamplingAvailability(0n)).toEqual({ kind: 'available', member: false });
-  expect(await chain.resolveRandomSamplingAvailability(52n)).toEqual({ kind: 'available', member: true });
+  expect(await readRandomSamplingAvailability(chain, 0n)).toEqual({ kind: 'available', member: false });
+  expect(await readRandomSamplingAvailability(chain, 52n)).toEqual({ kind: 'available', member: true });
 });
 it.each(['readiness', 'capability'])('contains an unexpected %s failure as an indeterminate fact', async (source) => {
   const error = new Error('temporary read failure');
   const chain = source === 'readiness'
     ? { isShardingTableMember: async () => true, isRandomSamplingReady: () => { throw error; } }
     : { resolveRandomSamplingAvailability: async () => { throw error; } };
-  expect(await resolveRandomSamplingAvailability(chain, 52n)).toEqual({ kind: 'indeterminate', error });
+  expect(await readRandomSamplingAvailability(chain, 52n)).toEqual({ kind: 'indeterminate', error });
 });

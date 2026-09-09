@@ -2,11 +2,12 @@ import {
   waitForRandomSamplingShutdownWithin,
   type AgentRole,
   type RandomSamplingDisabledReason,
+  type RandomSamplingBindingResult,
   type RandomSamplingHandle,
   type RandomSamplingStatus,
 } from './random-sampling-bind.js';
 import { RANDOM_SAMPLING_BIND_RETRY_MS } from './dkg-agent-constants.js';
-import { classifyRandomSamplingBindingFailure, type RandomSamplingEligibility, type RandomSamplingUnavailable } from './random-sampling-eligibility.js';
+import { type RandomSamplingEligibility, type RandomSamplingUnavailable } from './random-sampling-eligibility.js';
 
 type State =
   | { kind: 'stopped'; identityId: bigint }
@@ -18,7 +19,7 @@ type State =
 export interface RandomSamplingRuntimeOptions {
   role: AgentRole;
   resolveEligibility(): Promise<RandomSamplingEligibility>;
-  createHandle(identityId: bigint): Promise<RandomSamplingHandle>;
+  createHandle(identityId: bigint): Promise<RandomSamplingBindingResult>;
   log: { info(message: string): void; warn(message: string): void };
   shutdownTimeoutMs(): number;
 }
@@ -30,6 +31,8 @@ export class RandomSamplingRuntime {
   private inFlight: Promise<void> | null = null;
   private shutdownDrain: Promise<void> | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
+  /** Explicit lifecycle history: a later deployment miss is retryable after one observed deployment. */
+  private deploymentObserved = false;
 
   constructor(private readonly options: RandomSamplingRuntimeOptions) {}
 
@@ -84,7 +87,12 @@ export class RandomSamplingRuntime {
   }
 
   getLifecycleSnapshot() {
-    return { phase: this.state.kind, reconciliationScheduled: this.timer !== null, reconciliationInFlight: this.inFlight !== null };
+    return {
+      phase: this.state.kind,
+      reconciliationScheduled: this.timer !== null,
+      reconciliationInFlight: this.inFlight !== null,
+      deploymentObserved: this.deploymentObserved,
+    };
   }
 
   private clearTimer(): void {
@@ -124,7 +132,11 @@ export class RandomSamplingRuntime {
   }
 
   private recordUnavailable(eligibility: RandomSamplingUnavailable): void {
-    this.state = { kind: eligibility.retry === 'poll' ? 'waiting' : 'disabled', identityId: eligibility.identityId, reason: eligibility.reason };
+    if (eligibility.reason === 'awaiting_sharding_table') this.deploymentObserved = true;
+    const terminal = eligibility.reason === 'edge_node'
+      || eligibility.reason === 'unsupported_chain'
+      || (eligibility.reason === 'contracts_not_deployed' && !this.deploymentObserved);
+    this.state = { kind: terminal ? 'disabled' : 'waiting', identityId: eligibility.identityId, reason: eligibility.reason };
   }
 
   private async reconcileOnce(): Promise<void> {
@@ -150,14 +162,25 @@ export class RandomSamplingRuntime {
         return;
       }
       const { identityId } = eligibility;
+      this.deploymentObserved = true;
       this.state = { kind: 'binding', identityId };
-      const handle = await this.options.createHandle(identityId);
-      if (signal.aborted || !handle.enabled) {
+      const binding = await this.options.createHandle(identityId);
+      if (binding.kind === 'unavailable') {
+        if (binding.handleToClose) {
+          this.beginRetirement(binding.handleToClose, identityId);
+          await this.finishRetirement(false);
+        }
+        if (!signal.aborted) this.state = {
+          kind: binding.retry === 'poll' ? 'waiting' : 'disabled',
+          identityId,
+          reason: binding.reason,
+        };
+        return;
+      }
+      const { handle } = binding;
+      if (signal.aborted) {
         this.beginRetirement(handle, identityId);
         await this.finishRetirement(false);
-        if (!signal.aborted) this.recordUnavailable(classifyRandomSamplingBindingFailure(
-          handle.getStatus().disabledReason, identityId,
-        ));
         return;
       }
       this.state = { kind: 'running', identityId, handle };

@@ -676,7 +676,9 @@ describe('Random Sampling proof-time exact repair', () => {
     });
     const oldHandle = { ...makeHandle('41'), stop: oldStop };
     const replacement = makeHandle('42');
-    const createHandle = vi.fn().mockResolvedValueOnce(oldHandle).mockResolvedValueOnce(replacement);
+    const createHandle = vi.fn()
+      .mockResolvedValueOnce({ kind: 'ready', handle: oldHandle })
+      .mockResolvedValueOnce({ kind: 'ready', handle: replacement });
     const getIdentityId = vi.fn(async () => 41n);
     const runtime = new RandomSamplingRuntime({
       role: 'core', resolveEligibility: async () => ({ kind: 'eligible', identityId: await getIdentityId() }),

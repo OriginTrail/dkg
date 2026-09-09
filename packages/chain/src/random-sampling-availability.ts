@@ -33,7 +33,7 @@ export async function probeRandomSamplingAvailability(
  * Prefer an authoritative adapter refresh. Legacy adapters retain their existing
  * readiness/membership checks; no unrelated read is used for hidden cache effects.
  */
-export async function resolveRandomSamplingAvailability(
+export async function readRandomSamplingAvailability(
   chain: RandomSamplingAvailabilityReader,
   identityId: bigint,
 ): Promise<RandomSamplingAvailability> {

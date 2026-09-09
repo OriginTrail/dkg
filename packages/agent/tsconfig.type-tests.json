@@ -10,7 +10,6 @@
   },
   "include": [
     "test/**/*.typecheck.ts",
-    "src/jsonld.d.ts",
-    "test/random-sampling-membership.test.ts"
+    "src/jsonld.d.ts"
   ]
 }

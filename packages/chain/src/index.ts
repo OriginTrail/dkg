@@ -192,7 +192,7 @@ export {
 } from './rpc-failover-client.js';
 
 export {
-  resolveRandomSamplingAvailability,
+  readRandomSamplingAvailability,
   type RandomSamplingAvailability,
   type RandomSamplingAvailabilityReader,
 } from './random-sampling-availability.js';

@@ -1,0 +1,24 @@
+import type { RandomSamplingAvailability } from '@origintrail-official/dkg-chain';
+import type { RandomSamplingBindingResult, RandomSamplingHandle } from '../src/random-sampling-bind.js';
+
+declare const handle: RandomSamplingHandle;
+
+const ready = { kind: 'ready', handle } satisfies RandomSamplingBindingResult;
+const unavailable = {
+  kind: 'unavailable',
+  retry: 'poll',
+  reason: 'contracts_not_deployed',
+  handleToClose: handle,
+} satisfies RandomSamplingBindingResult;
+
+// Disabled binding outcomes are control-flow inputs and must state their reason.
+// @ts-expect-error unavailable bindings without a reason are invalid
+const missingReason: RandomSamplingBindingResult = { kind: 'unavailable', retry: 'poll' };
+
+// Availability mocks share the canonical chain fact shape.
+const availability = { kind: 'available', member: true } satisfies RandomSamplingAvailability;
+
+void ready;
+void unavailable;
+void missingReason;
+void availability;

@@ -74,14 +74,11 @@ describe('Random Sampling lifecycle gating', () => {
     }
   });
 
-  it('does not retry when sharding-table contract wiring is permanently unavailable', async () => {
+  it('does not retry when a legacy adapter reports Random Sampling contracts unavailable', async () => {
     const primary = ethers.Wallet.createRandom();
     const chain = new MockChainAdapter('mock:31337', primary.address);
     chain.seedIdentity(primary.address, 53n);
-    vi.spyOn(chain, 'resolveRandomSamplingAvailability').mockResolvedValue({
-      kind: 'unavailable',
-      reason: 'contracts_not_deployed',
-    });
+    vi.spyOn(chain, 'isRandomSamplingReady').mockReturnValue(false);
     const agent = await DKGAgent.create({
       name: 'RsMissingShardingTableStorage',
       listenHost: '127.0.0.1',
