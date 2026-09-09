@@ -88,6 +88,15 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
   });
 
   it('boots two real agents, connects them over libp2p, and registers the requesting agents', async () => {
+    const { rpcUrl, hubAddress } = getSharedContext();
+    // The shared adapter handles transactions; finalized catalog recovery also
+    // needs the trusted RPC/Hub configuration to verify its own chain snapshot.
+    const chainConfig = {
+      rpcUrl,
+      hubAddress,
+      chainId: sharedChain.chainId,
+      operationalKeys: [HARDHAT_KEYS.CORE_OP],
+    };
     const curatorDataDir = await mkdtemp(join(tmpdir(), 'dkg-e2e-join-curator-'));
     const joinerDataDir = await mkdtemp(join(tmpdir(), 'dkg-e2e-join-joiner-'));
     tempDirs.push(curatorDataDir, joinerDataDir);
@@ -98,6 +107,7 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
+      chainConfig,
       nodeRole: 'core',
       dataDir: curatorDataDir,
     });
@@ -108,6 +118,7 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
+      chainConfig,
       nodeRole: 'edge',
       dataDir: joinerDataDir,
       contextGraphSubscriptionStore: {
@@ -193,16 +204,20 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
           `SELECT ?name WHERE { <${subject}> <http://schema.org/name> ?name . }`,
           CG,
         );
+        const catalog = (await joiner.readRfc64CatalogOperationalStatusV1())
+          .find(status => status.contextGraphId === CG);
         return {
           subscribed: joiner.getSubscribedContextGraphs().get(CG)?.subscribed === true,
           hasData: data.bindings.length > 0,
+          catalogApplied: catalog?.appliedRowCount === '1'
+            && catalog.appliedCatalogHeadDigest !== null,
         };
       },
-      (state) => state.subscribed && state.hasData,
+      (state) => state.subscribed && state.hasData && state.catalogApplied,
       60_000,
     );
 
-    expect(caughtUp).toEqual({ subscribed: true, hasData: true });
+    expect(caughtUp).toEqual({ subscribed: true, hasData: true, catalogApplied: true });
     // The 10.0.16 default installs RFC-64 catalog responsibility for an
     // approved private member. Catch-up must complete without reviving the
     // legacy GossipSub or durable-sync receiver lanes.
