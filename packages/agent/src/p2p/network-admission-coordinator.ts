@@ -285,6 +285,16 @@ export class NetworkAdmissionCoordinator {
     }
   }
 
+  private throwTransientProbeFailure(
+    remotePeer: CanonicalPeerId,
+    ctx: OperationContext,
+    message: string,
+  ): never {
+    this.admission.rememberRetryableProbeFailure(remotePeer, message, 'transient');
+    this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} failed retryably: ${message}`);
+    throw new NetworkAdmissionProbeError(remotePeer, message);
+  }
+
   private async probePeer(
     remotePeer: CanonicalPeerId,
     ctx: OperationContext,
@@ -323,11 +333,14 @@ export class NetworkAdmissionCoordinator {
       // reject a healthy restarting peer across *every* protocol for minutes
       // (the admission gate is protocol-agnostic). The exponential transient
       // backoff lets a booting peer recover on its next probe instead.
-      this.admission.rememberRetryableProbeFailure(remotePeer, message, 'transient');
-      this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} failed retryably: ${message}`);
-      throw new NetworkAdmissionProbeError(remotePeer, message);
+      this.throwTransientProbeFailure(remotePeer, ctx, message);
     }
     if (signal.aborted) throw abortErrorFromSignal(signal.reason);
+    // A stream can close before sending an identity document. This is retryable
+    // transport interruption; only a nonempty malformed document is unreadable.
+    if (response.byteLength === 0) {
+      this.throwTransientProbeFailure(remotePeer, ctx, 'identity probe ended without a response');
+    }
 
     let claimed: unknown;
     try {

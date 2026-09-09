@@ -1,7 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, writeFile, readFile, readlink, rm } from 'node:fs/promises';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtemp, mkdir, writeFile, readFile, readlink, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, symlink: vi.fn(actual.symlink) };
+});
 
 let tmpDir: string;
 let prevDkgHome: string | undefined;
@@ -99,6 +104,41 @@ describe('slot helpers', () => {
 
     expect(await readlink(join(rDir, 'current'))).toBe('a');
     expect((await readFile(join(rDir, 'active'), 'utf-8')).trim()).toBe('a');
+  });
+
+  it.each([
+    { platform: 'win32', code: 'EPERM', guidance: true },
+    { platform: 'darwin', code: 'EPERM', guidance: false },
+    { platform: 'win32', code: 'EACCES', guidance: false },
+  ])('preserves activation on $platform symlink $code and explains Windows privileges', async ({ platform, code, guidance }) => {
+    const { swapSlot, releasesDir, activeSlot } = await importHelpers();
+    const rDir = releasesDir();
+    await mkdir(join(rDir, 'a'), { recursive: true });
+    await mkdir(join(rDir, 'b'), { recursive: true });
+    await swapSlot('a');
+    const failure = Object.assign(new Error('symlink denied'), { code });
+    vi.mocked(symlink).mockRejectedValueOnce(failure);
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    try {
+      Object.defineProperty(process, 'platform', { value: platform });
+      const attempt = swapSlot('b');
+      if (guidance) {
+        await expect(attempt).rejects.toMatchObject({
+          code: 'EPERM', cause: failure,
+          message: expect.stringContaining(`Cannot create the DKG release-slot link at ${join(rDir, 'current.tmp')}`),
+        });
+        await expect(attempt).rejects.toThrow('Enable Developer Mode');
+        await expect(attempt).rejects.toThrow('Administrator terminal');
+      } else {
+        await expect(attempt).rejects.toBe(failure);
+      }
+    } finally {
+      Object.defineProperty(process, 'platform', descriptor);
+    }
+    expect(await activeSlot()).toBe('a');
+    expect(await readFile(join(rDir, 'active'), 'utf8')).toBe('a');
+    await swapSlot('b');
+    expect(await activeSlot()).toBe('b');
   });
 
   it('repoDir() resolves to the current repo root', async () => {

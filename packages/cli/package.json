@@ -44,6 +44,7 @@
   },
   "dependencies": {
     "@iarna/toml": "^2.2.5",
+    "@modelcontextprotocol/sdk": "^1",
     "@origintrail-official/dkg-adapter-hermes": "workspace:*",
     "@origintrail-official/dkg-adapter-openclaw": "workspace:*",
     "@origintrail-official/dkg-adapter-prime-agent": "workspace:*",
@@ -58,12 +59,13 @@
     "@origintrail-official/dkg-publisher": "workspace:*",
     "@origintrail-official/dkg-rdf-utils": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1",
+    "@toml-tools/parser": "1.0.0",
     "better-sqlite3": "12.11.1",
     "commander": "^13",
     "ethers": "^6",
     "js-yaml": "^4.1.1",
     "jsonld": "^8.3.3",
+    "jsonc-parser": "3.3.1",
     "n3": "^2.0.1",
     "semver": "^7.7.4",
     "typescript": "^5.7"
@@ -75,6 +77,7 @@
     "@types/n3": "^1.26.1",
     "@types/semver": "^7.8.0",
     "@vitest/coverage-v8": "^4.0.18",
+    "esbuild": "0.27.7",
     "vitest": "^4.0.18"
   },
   "publishConfig": {
