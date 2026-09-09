@@ -4,6 +4,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { createOperationContext, PROTOCOL_SYNC, PROTOCOL_ACCESS, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 import { peerIdFromString } from '@libp2p/peer-id';
 import {
+  InMemoryPeerSyncLease,
   runSyncOnConnect,
   SyncOnConnectPostSyncError,
   type SyncOnConnectPeerOutcome,
@@ -121,7 +122,7 @@ describe('runSyncOnConnect callbacks', () => {
     const outcome = await runSyncOnConnect({
       signal: ACTIVE_SYNC_LIFETIME,
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['ordinary'],
@@ -161,7 +162,7 @@ describe('runSyncOnConnect callbacks', () => {
         return 0;
       }),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['first', 'second'],
@@ -192,7 +193,7 @@ describe('runSyncOnConnect callbacks', () => {
       signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['first', 'second'], async () => 0),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['first', 'second'],
@@ -227,7 +228,7 @@ describe('runSyncOnConnect callbacks', () => {
       signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_SYNC],
       knownCorePeerIds,
       getSyncContextGraphs: () => [],
@@ -250,7 +251,7 @@ describe('runSyncOnConnect callbacks', () => {
       signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [],
       knownCorePeerIds,
       knownCorePeerIdsV2,
@@ -268,7 +269,7 @@ describe('runSyncOnConnect callbacks', () => {
       signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC],
       knownCorePeerIds,
       knownCorePeerIdsV2,
@@ -294,7 +295,7 @@ describe('runSyncOnConnect callbacks', () => {
       signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => ['/ipfs/id/1.0.0', '/meshsub/1.1.0'],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => [],
@@ -325,7 +326,7 @@ describe('runSyncOnConnect callbacks', () => {
       signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => [],
@@ -354,7 +355,7 @@ describe('runSyncOnConnect callbacks', () => {
         checkpointAdvances: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => [],
@@ -393,7 +394,7 @@ describe('runSyncOnConnect callbacks', () => {
           deniedPhases: 0,
         })),
         remotePeer,
-        syncingPeers: new Set(),
+        syncingPeers: new InMemoryPeerSyncLease(),
         getPeerProtocols: async () => [PROTOCOL_SYNC],
         knownCorePeerIds: new Set(),
         getSyncContextGraphs: () => ['integrity-rejected-cg'],
@@ -435,7 +436,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['cg-clean-empty'],
@@ -470,7 +471,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['cg-clean-then-timeout'],
@@ -505,7 +506,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => [],
@@ -542,7 +543,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['cg-timeout'],
@@ -576,7 +577,7 @@ describe('runSyncOnConnect callbacks', () => {
         checkpointAdvances: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => [],
@@ -610,7 +611,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => [],
@@ -645,7 +646,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => [],
@@ -682,7 +683,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => [],
@@ -732,7 +733,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => [],
@@ -782,7 +783,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => [],
@@ -850,7 +851,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => contextGraphs,
@@ -896,7 +897,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => [],
@@ -943,7 +944,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['cg-metadata-only'],
@@ -981,7 +982,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['cg-shared-meta-only'],
@@ -1017,7 +1018,7 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['cg-shared-phase-failure'],
@@ -1040,7 +1041,7 @@ describe('runSyncOnConnect callbacks', () => {
 
   it('tags failures that happen after durable sync completes', async () => {
     const remotePeer = freshPeerIdString();
-    const syncingPeers = new Set<string>();
+    const syncingPeers = new InMemoryPeerSyncLease();
     const laterError = new Error('discovery failed');
     const synced: string[] = [];
     let caught: unknown;
@@ -1071,7 +1072,7 @@ describe('runSyncOnConnect callbacks', () => {
     expect((caught as SyncOnConnectPostSyncError).cause).toBe(laterError);
     expect((caught as SyncOnConnectPostSyncError).backoffEligible).toBe(false);
     expect(synced).toEqual([]);
-    expect(syncingPeers.has(remotePeer)).toBe(false);
+    expect(syncingPeers.isHeld(remotePeer)).toBe(false);
   });
 
   it('leaves newly discovered durable sync failures eligible for peer backoff', async () => {
@@ -1093,7 +1094,7 @@ describe('runSyncOnConnect callbacks', () => {
         signal: ACTIVE_SYNC_LIFETIME,
         ordinarySharedMemoryLane: ordinaryLane(() => contextGraphs, async () => 0),
         remotePeer,
-        syncingPeers: new Set(),
+        syncingPeers: new InMemoryPeerSyncLease(),
         getPeerProtocols: async () => [PROTOCOL_SYNC],
         knownCorePeerIds: new Set(),
         getSyncContextGraphs: () => contextGraphs,
@@ -1126,7 +1127,7 @@ describe('runSyncOnConnect callbacks', () => {
       signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(resolveOrdinaryWork, syncSharedMemoryFromPeer),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['devnet-test'],
@@ -1147,7 +1148,7 @@ describe('runSyncOnConnect callbacks', () => {
 
   it('returns already-syncing without running duplicate work', async () => {
     const remotePeer = freshPeerIdString();
-    const syncingPeers = new Set([remotePeer]);
+    const syncingPeers = new InMemoryPeerSyncLease([remotePeer]);
     const syncFromPeer = recorder(async () => 0);
 
     const outcome = await runSyncOnConnect({

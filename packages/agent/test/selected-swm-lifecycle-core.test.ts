@@ -4,6 +4,7 @@ import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { classifySharedMemoryFreshness } from '../src/sync/shared-memory-freshness.js';
 import {
+  InMemoryPeerSyncLease,
   runSelectedSharedMemoryRetry,
 } from '../src/sync/on-connect/sync-on-connect.js';
 import {
@@ -76,13 +77,13 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       });
 
       const session = activeSessionWithoutJobs();
-      const backoff = session.syncReconcilerBackoff;
+      const sessionDriver = new PeerSyncSessionTestDriver(() => session);
       const accountingAgent = {
         peerSyncSession: session,
         applySyncOnConnectAccounting:
           LifecycleSyncMethods.prototype.applySyncOnConnectAccounting,
         recordSyncReconcilerFailure: (peerId: string) => {
-          backoff.set(peerId, { failures: 1, nextRetryAt: 0 });
+          sessionDriver.recordBackoff(peerId, { failures: 1, nextRetryAt: 0 });
         },
         log: { info: () => {} },
       };
@@ -91,7 +92,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
           runSelectedSharedMemoryRetry({
             signal: ACTIVE_SYNC_LIFETIME,
             remotePeer: PEER,
-            syncingPeers: new Set(),
+            syncingPeers: new InMemoryPeerSyncLease(),
             getPeerProtocols: async () => [PROTOCOL_SYNC],
             selectedSharedMemoryLane: {
               admitWork: () => ({
@@ -118,7 +119,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         },
       );
 
-      expect(backoff.has(PEER)).toBe(false);
+      expect(sessionDriver.snapshot(PEER).backoff).toBeUndefined();
     } finally {
       await harness.close();
     }
@@ -617,7 +618,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       const outcome = await runSelectedSharedMemoryRetry({
         signal: ACTIVE_SYNC_LIFETIME,
         remotePeer: PEER,
-        syncingPeers: new Set(),
+        syncingPeers: new InMemoryPeerSyncLease(),
         getPeerProtocols: async () => [PROTOCOL_SYNC],
         selectedSharedMemoryLane: {
           admitWork: () => ({

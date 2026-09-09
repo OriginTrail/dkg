@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
-import { runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
+import { InMemoryPeerSyncLease, runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
 import { ordinaryLane } from './_helpers/run-sync-on-connect.js';
 import {
   PEER,
@@ -370,7 +370,7 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
       signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [ordinaryContextGraphId], async () => shared),
       remotePeer: PEER,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       knownCorePeerIdsV2: new Set(),

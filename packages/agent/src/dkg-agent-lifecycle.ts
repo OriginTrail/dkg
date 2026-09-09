@@ -4914,7 +4914,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
     return runSyncOnConnect({
       remotePeer,
-      syncingPeers: session.syncingPeerRegistry(),
+      syncingPeers: session,
       signal,
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
       knownCorePeerIds: this.knownCorePeerIds,
@@ -5079,7 +5079,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     ) return 'not-started';
     return runSelectedSharedMemoryRetry({
       remotePeer,
-      syncingPeers: session.syncingPeerRegistry(),
+      syncingPeers: session,
       signal,
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
       selectedSharedMemoryLane: {

@@ -6,6 +6,8 @@ import type { PeerSyncSession } from '../../src/sync/peer-sync-session.js';
  * stable session contract instead of reconstructing its private storage.
  */
 export class PeerSyncSessionTestDriver {
+  readonly #syncReleases = new Map<string, () => void>();
+
   constructor(private readonly readSession: () => PeerSyncSession) {}
 
   isActive(): boolean {
@@ -33,11 +35,14 @@ export class PeerSyncSessionTestDriver {
   }
 
   beginSync(peerId: string): void {
-    this.readSession().syncingPeerRegistry().add(peerId);
+    const release = this.readSession().tryAcquirePeer(peerId);
+    if (release === null) throw new Error(`Peer ${peerId} is already syncing`);
+    this.#syncReleases.set(peerId, release);
   }
 
   endSync(peerId: string): void {
-    this.readSession().syncingPeerRegistry().delete(peerId);
+    this.#syncReleases.get(peerId)?.();
+    this.#syncReleases.delete(peerId);
   }
 
   recordBackoff(peerId: string, backoff: SyncReconcilerBackoff): void {

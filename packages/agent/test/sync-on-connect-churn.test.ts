@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS, SYNC_RECONNECT_FLAP_GRACE_MS } from '../src/dkg-agent-constants.js';
 import {
+  InMemoryPeerSyncLease,
   runSelectedSharedMemoryRetry,
   runSyncOnConnect,
 } from '../src/sync/on-connect/sync-on-connect.js';
@@ -32,7 +33,7 @@ describe('sync-on-connect churn gates', () => {
     const outcome = await runSyncOnConnect({
       signal: ACTIVE_SYNC_LIFETIME,
       remotePeer: PEER_A,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => [configuredGraph],
@@ -58,7 +59,7 @@ describe('sync-on-connect churn gates', () => {
     const outcome = await runSyncOnConnect({
       signal: ACTIVE_SYNC_LIFETIME,
       remotePeer: PEER_A,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['selected-cg'],
@@ -83,7 +84,7 @@ describe('sync-on-connect churn gates', () => {
     const outcome = await runSyncOnConnect({
       signal: ACTIVE_SYNC_LIFETIME,
       remotePeer: PEER_A,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => [],
@@ -419,7 +420,7 @@ describe('sync-on-connect churn gates', () => {
     ) => runSelectedSharedMemoryRetry({
       signal: ACTIVE_SYNC_LIFETIME,
       remotePeer: PEER_A,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       selectedSharedMemoryLane: {
         admitWork: () => ({
@@ -703,7 +704,7 @@ describe('sync-on-connect churn gates', () => {
       signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['cg-a'], syncSharedMemoryFromPeer),
       remotePeer: PEER_A,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['cg-a'],
@@ -753,7 +754,7 @@ describe('sync-on-connect churn gates', () => {
       signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['cg-a'], syncSharedMemoryFromPeer),
       remotePeer: PEER_A,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['cg-a'],
@@ -790,7 +791,7 @@ describe('sync-on-connect churn gates', () => {
       signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['unreachable-cg', 'denied-cg'], syncSharedMemoryFromPeer),
       remotePeer: PEER_A,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['unreachable-cg', 'denied-cg'],
@@ -846,7 +847,7 @@ describe('sync-on-connect churn gates', () => {
       signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => contextGraphs, syncSharedMemoryFromPeer),
       remotePeer: PEER_A,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => contextGraphs,
@@ -884,7 +885,7 @@ describe('sync-on-connect churn gates', () => {
       signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], syncSharedMemoryFromPeer),
       remotePeer: PEER_A,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['unauthorized-cg'],
@@ -909,7 +910,7 @@ describe('sync-on-connect churn gates', () => {
         return ['eligible-cg'];
       }, syncSharedMemoryFromPeer),
       remotePeer: PEER_A,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['eligible-cg'],
@@ -931,7 +932,7 @@ describe('sync-on-connect churn gates', () => {
       signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['eligible-cg'], syncSharedMemoryFromPeer),
       remotePeer: PEER_A,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['eligible-cg'],

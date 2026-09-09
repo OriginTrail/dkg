@@ -6,7 +6,12 @@ import {
   type SyncOnConnectPeerJobRunner,
   type SyncOnConnectSchedulerInternalStage,
 } from './on-connect/peer-scheduler.js';
-import type { SyncingPeerRegistry, SyncOnConnectPeerOutcome } from './on-connect/sync-on-connect.js';
+import {
+  InMemoryPeerSyncLease,
+  type PeerSyncLease,
+  type ReleasePeerSyncLease,
+  type SyncOnConnectPeerOutcome,
+} from './on-connect/sync-on-connect.js';
 
 type RecoveryPlan = Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>;
 
@@ -25,8 +30,8 @@ export interface PeerSyncSessionCallbacks {
 }
 
 /** One node start owns all transient peer-sync scheduling and accounting. */
-export class PeerSyncSession extends PeerEventLifetime {
-  private readonly syncingPeers = new Set<string>();
+export class PeerSyncSession extends PeerEventLifetime implements PeerSyncLease {
+  private readonly peerSyncLease = new InMemoryPeerSyncLease();
   private readonly catchupOnConnectAt = new Map<string, number>();
   private readonly rfc64ExactCatchupOnConnectAt = new Map<string, number>();
   private readonly skippedNoSyncPeers = new Set<string>();
@@ -63,15 +68,11 @@ export class PeerSyncSession extends PeerEventLifetime {
 
   clearQueuedPeer(peerId: string): void { this.scheduler?.clear(peerId); }
 
-  syncingPeerRegistry(): SyncingPeerRegistry {
-    return {
-      has: (peerId) => this.syncingPeers.has(peerId),
-      add: (peerId) => this.syncingPeers.add(peerId),
-      delete: (peerId) => this.syncingPeers.delete(peerId),
-    };
+  tryAcquirePeer(peerId: string): ReleasePeerSyncLease | null {
+    return this.peerSyncLease.tryAcquirePeer(peerId);
   }
 
-  isSyncing(peerId: string): boolean { return this.syncingPeers.has(peerId); }
+  isSyncing(peerId: string): boolean { return this.peerSyncLease.isHeld(peerId); }
 
   clearExactCatchupCooldown(peerId: string): void {
     this.rfc64ExactCatchupOnConnectAt.delete(peerId);
@@ -182,7 +183,7 @@ export class PeerSyncSession extends PeerEventLifetime {
   override close(): void {
     super.close();
     this.scheduler?.close();
-    this.syncingPeers.clear();
+    this.peerSyncLease.clear();
     this.catchupOnConnectAt.clear();
     this.rfc64ExactCatchupOnConnectAt.clear();
     this.skippedNoSyncPeers.clear();

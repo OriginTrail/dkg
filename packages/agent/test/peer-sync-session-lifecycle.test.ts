@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
-import { runSyncOnConnect, runSelectedSharedMemoryRetry, type SyncOnConnectContext } from '../src/sync/on-connect/sync-on-connect.js';
+import {
+  InMemoryPeerSyncLease,
+  runSyncOnConnect,
+  runSelectedSharedMemoryRetry,
+  type SyncOnConnectContext,
+} from '../src/sync/on-connect/sync-on-connect.js';
 import { createPeerEventFixture, deferred, flushMicrotasks } from './_helpers/peer-event-lifecycle.js';
 
 const PROBE = { protocolsKey: null, connectionKey: null } satisfies Awaited<ReturnType<DKGAgent['getSyncReconcilerProbe']>>;
@@ -16,7 +21,7 @@ describe('peer sync session lifecycle', () => {
     const controller = new AbortController();
     const gate = deferred<number>();
     const entered = deferred<void>();
-    const syncingPeers = new Set<string>();
+    const syncingPeers = new InMemoryPeerSyncLease();
     const transfer = async () => { entered.resolve(); return gate.promise; };
     let discovered = false;
     const sync = vi.fn(async (_peer: string, cgs?: string[]) => {
@@ -59,14 +64,14 @@ describe('peer sync session lifecycle', () => {
     }) : runSyncOnConnect(context);
     const settled = attempt.then(() => undefined, (error: unknown) => error);
     await entered.promise;
-    expect(syncingPeers.has('peer')).toBe(true);
+    expect(syncingPeers.isHeld('peer')).toBe(true);
     controller.abort();
     for (const callback of [sync, refresh, discover, ordinary, log, account]) callback.mockClear();
     if (reject) gate.reject(new Error('retired transfer failed'));
     else gate.resolve(1);
     expect(await settled).toBeInstanceOf(Error);
     for (const callback of [sync, refresh, discover, ordinary, log, account]) expect(callback).not.toHaveBeenCalled();
-    expect(syncingPeers.size).toBe(0);
+    expect(syncingPeers.activeCount).toBe(0);
   });
 
   it('keeps active-peer ownership separate when old work settles after a new lifetime starts', async () => {

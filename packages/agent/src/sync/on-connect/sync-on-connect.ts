@@ -55,18 +55,42 @@ export type SyncOnConnectPeerOutcome =
       progress: boolean;
     };
 
-/** Minimal active-peer lease used by both a session owner and focused tests. */
-export interface SyncingPeerRegistry {
-  has(peerId: string): boolean;
-  add(peerId: string): unknown;
-  delete(peerId: string): unknown;
+export type ReleasePeerSyncLease = () => void;
+
+/** Atomic ownership of one peer's sync lane. */
+export interface PeerSyncLease {
+  tryAcquirePeer(peerId: string): ReleasePeerSyncLease | null;
+}
+
+/** Standalone lease owner for focused workflow tests. */
+export class InMemoryPeerSyncLease implements PeerSyncLease {
+  readonly #activePeers = new Set<string>();
+
+  constructor(initialPeers: Iterable<string> = []) {
+    for (const peerId of initialPeers) this.#activePeers.add(peerId);
+  }
+
+  tryAcquirePeer(peerId: string): ReleasePeerSyncLease | null {
+    if (this.#activePeers.has(peerId)) return null;
+    this.#activePeers.add(peerId);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.#activePeers.delete(peerId);
+    };
+  }
+
+  isHeld(peerId: string): boolean { return this.#activePeers.has(peerId); }
+  get activeCount(): number { return this.#activePeers.size; }
+  clear(): void { this.#activePeers.clear(); }
 }
 
 export interface SyncOnConnectContext {
   /** Required owner lifetime for every session-scoped continuation. */
   signal: AbortSignal;
   remotePeer: string;
-  syncingPeers: SyncingPeerRegistry;
+  syncingPeers: PeerSyncLease;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2?: Set<string>;
@@ -113,7 +137,7 @@ interface SelectedSharedMemoryRetryContext {
   /** Required owner lifetime for every session-scoped continuation. */
   signal: AbortSignal;
   remotePeer: string;
-  syncingPeers: SyncingPeerRegistry;
+  syncingPeers: PeerSyncLease;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
   selectedSharedMemoryLane: SelectedSharedMemorySyncLane;
   logInfo: (ctx: OperationContext, message: string) => void;
@@ -221,8 +245,8 @@ export async function runSelectedSharedMemoryRetry(
   const shortPeer = remotePeer.slice(-8);
 
   context.signal.throwIfAborted();
-  if (syncingPeers.has(remotePeer)) return 'already-syncing';
-  syncingPeers.add(remotePeer);
+  const releasePeerLease = syncingPeers.tryAcquirePeer(remotePeer);
+  if (releasePeerLease === null) return 'already-syncing';
 
   const runNonTransportStep = async <T>(step: () => Promise<T>): Promise<T> => {
     try {
@@ -296,7 +320,7 @@ export async function runSelectedSharedMemoryRetry(
     }
     return 'synced';
   } finally {
-    syncingPeers.delete(remotePeer);
+    releasePeerLease();
   }
 }
 
@@ -323,8 +347,8 @@ export async function runSyncOnConnect(
   const shortPeer = remotePeer.slice(-8);
 
   context.signal.throwIfAborted();
-  if (syncingPeers.has(remotePeer)) return 'already-syncing';
-  syncingPeers.add(remotePeer);
+  const releasePeerLease = syncingPeers.tryAcquirePeer(remotePeer);
+  if (releasePeerLease === null) return 'already-syncing';
 
   let durableSyncCompleted = false;
   let madeProgress = false;
@@ -531,6 +555,6 @@ export async function runSyncOnConnect(
     }
     throw err;
   } finally {
-    syncingPeers.delete(remotePeer);
+    releasePeerLease();
   }
 }
