@@ -8,7 +8,7 @@ const SQLITE_EXEC_ARGV = [
 export default defineConfig({
   test: {
     allowOnly: false,
-    include: ['test-live/**/*.test.ts'],
+    include: ['test-live/**/*.blazegraph.test.ts'],
     testTimeout: 30_000,
     maxWorkers: 1,
     pool: 'forks',

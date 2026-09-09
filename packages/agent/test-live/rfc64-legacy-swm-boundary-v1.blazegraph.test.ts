@@ -75,7 +75,17 @@ describe('RFC-64 legacy SWM boundary (live Blazegraph)', () => {
         'agent.rfc64.legacySwmBoundary.readHeads',
       );
       expect(firstOperationReadCount).toBe(1);
-      expect(firstHeadReadCount).toBeGreaterThan(0);
+      expect(firstHeadReadCount).toBe(10);
+      const headQueries = querySpy.mock.calls.filter(([, options]) => (
+        options?.source === 'agent.rfc64.legacySwmBoundary.readHeads'
+      )).map(([sparql]) => sparql);
+      for (const sparql of headQueries) {
+        const values = /VALUES \(\?head \?ual \?contextGraphId\) \{ (.+) \} GRAPH/s
+          .exec(sparql)?.[1];
+        expect(values).toBeDefined();
+        expect(values!.match(/\(<did:dkg:/g)).toHaveLength(500);
+        expect(sparql).toContain('LIMIT 501');
+      }
 
       // A second owner represents the next process start. It must load the
       // durable capture rather than repeat either capture query. The late-entry

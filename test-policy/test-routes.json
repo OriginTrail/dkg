@@ -82,7 +82,7 @@
     "command": "DKG_REQUIRE_BLAZEGRAPH=1 pnpm test:conformance"
   },
   {
-    "pattern": "packages/agent/test-live/*.test.ts",
+    "pattern": "packages/agent/test-live/**/*.blazegraph.test.ts",
     "lane": "tornado-blazegraph",
     "reason": "Live Blazegraph regressions required in the existing Tornado Blazegraph CI lane",
     "cadence": "required",

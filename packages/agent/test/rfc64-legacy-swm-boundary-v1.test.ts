@@ -303,14 +303,55 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     expect(operationQueryCall![0]).toContain(
       '?operation <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>',
     );
-    expect(operationQueryCall![0]).not.toContain(
-      '?head <http://dkg.io/ontology/kaUal>',
+    expect(operationQueryCall![0]).toContain(
+      'BIND(IRI(CONCAT(STR(?ual), "#dkg-swm-head")) AS ?head)',
     );
-    expect(headQueryCall![0]).toContain('VALUES (?head ?ual ?shareId)');
+    expect(operationQueryCall![0]).toContain(
+      'FILTER EXISTS { GRAPH ?metaGraph { ?head <http://dkg.io/ontology/kaUal> ?ual } }',
+    );
+    expect(operationQueryCall![0]).toContain('LIMIT 100001');
+    expect(headQueryCall![0]).toContain(
+      'VALUES (?head ?ual ?contextGraphId)',
+    );
     expect(headQueryCall![0]).toContain(`GRAPH <${META_GRAPH}>`);
     expect(headQueryCall![0]).not.toContain('GRAPH ?metaGraph');
-    expect(headQueryCall![0]).not.toContain('?operation ');
+    expect(headQueryCall![0]).toContain(
+      '?operation <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>',
+    );
     expect(headQueryCall![0]).not.toContain('queryHints#');
+  });
+
+  it('does not let 100001 historical operations for one active head consume the head limit', async () => {
+    const root = await secureTempRoot(roots);
+    const historicalOperationCount = 100_001;
+    const store = {
+      query: vi.fn(async (sparql: string, options?: { source?: string }) => {
+        if (
+          options?.source === 'agent.rfc64.legacySwmBoundary.readOperations'
+        ) {
+          // Model the store's DISTINCT projection. Reintroducing shareId into
+          // that projection exposes every historical operation and makes this
+          // fake return the over-limit result that caused the startup bug.
+          if (/SELECT DISTINCT[^{}]*\?shareId/.test(sparql)) {
+            return {
+              type: 'bindings' as const,
+              bindings: { length: historicalOperationCount },
+            };
+          }
+          return captureOperationResult();
+        }
+        if (options?.source === 'agent.rfc64.legacySwmBoundary.readHeads') {
+          return { type: 'bindings' as const, bindings: [captureHeadBinding()] };
+        }
+        return { type: 'bindings' as const, bindings: [] };
+      }),
+    } as unknown as TripleStore;
+
+    const owner = {};
+    await initializeRfc64LegacySwmBoundaryV1(owner, root, store);
+
+    expect(historicalOperationCount).toBeGreaterThan(100_000);
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
   });
 
   it.each([
@@ -334,18 +375,13 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
       error: 'returned an incomplete operation',
     },
     {
-      name: 'a malformed share-operation literal',
+      name: 'more active-head candidates than the head limit',
       operationResult: {
         type: 'bindings',
-        bindings: [{
-          metaGraph: META_GRAPH,
-          ual: UAL_ONE,
-          shareId: '"unterminated',
-          contextGraphId: `"${CONTEXT_GRAPH_ID}"`,
-        }],
-      } as const,
+        bindings: { length: 100_001 },
+      } as unknown as QueryResult,
       headResult: { type: 'bindings', bindings: [] } as const,
-      error: 'contains a malformed share operation ID',
+      error: 'exceeds head limit 100000',
     },
     {
       name: 'a non-binding exact-head result',
@@ -396,8 +432,8 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     const root = await secureTempRoot(roots);
     const operationBinding = {
       metaGraph: META_GRAPH,
+      head: `${UAL_ONE}#dkg-swm-head`,
       ual: UAL_ONE,
-      shareId: '"share-one"',
       contextGraphId: `"${CONTEXT_GRAPH_ID}"`,
     };
     const headBinding = {
@@ -449,6 +485,12 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
       { graph: META_GRAPH, subject: 'urn:dkg:workspace-operation:one', predicate: 'http://dkg.io/ontology/kaUal', object: UAL_ONE },
       { graph: META_GRAPH, subject: 'urn:dkg:workspace-operation:one', predicate: 'http://dkg.io/ontology/shareOperationId', object: '"share-one"' },
       { graph: META_GRAPH, subject: 'urn:dkg:workspace-operation:one', predicate: 'http://dkg.io/ontology/contextGraphId', object: `"${CONTEXT_GRAPH_ID}"` },
+      // Repeated historical shares for the same UAL collapse in the candidate
+      // phase; only the operation matching the current head may capture it.
+      { graph: META_GRAPH, subject: 'urn:dkg:workspace-operation:one-old', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation' },
+      { graph: META_GRAPH, subject: 'urn:dkg:workspace-operation:one-old', predicate: 'http://dkg.io/ontology/kaUal', object: UAL_ONE },
+      { graph: META_GRAPH, subject: 'urn:dkg:workspace-operation:one-old', predicate: 'http://dkg.io/ontology/shareOperationId', object: '"share-one-old"' },
+      { graph: META_GRAPH, subject: 'urn:dkg:workspace-operation:one-old', predicate: 'http://dkg.io/ontology/contextGraphId', object: `"${CONTEXT_GRAPH_ID}"` },
       // This head looks plausible but its operation carries another share id,
       // so the production join must not classify it as a captured legacy row.
       { graph: META_GRAPH, subject: mismatchedHead, predicate: 'http://dkg.io/ontology/kaUal', object: UAL_TWO },
@@ -475,6 +517,48 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     );
     expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(0);
   });
+
+  it('captures and queries two root metadata graphs independently', async () => {
+    const root = await secureTempRoot(roots);
+    const secondContextGraphId =
+      '0x1111111111111111111111111111111111111111/legacy-boundary-two';
+    const secondMetaGraph = contextGraphWorkspaceMetaGraphUri(
+      secondContextGraphId,
+    );
+    const store = new OxigraphStore();
+    await store.insert([
+      ...legacyHeadQuads(META_GRAPH, UAL_ONE, 'root-one'),
+      ...legacyHeadQuads(
+        secondMetaGraph,
+        UAL_TWO,
+        'root-two',
+        secondContextGraphId,
+      ),
+    ]);
+    const querySpy = vi.spyOn(store, 'query');
+
+    const owner = {};
+    await initializeRfc64LegacySwmBoundaryV1(owner, root, store);
+
+    expect(readRfc64LegacySwmBoundaryCountV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+    )).toBe(1);
+    expect(readRfc64LegacySwmBoundaryCountV1(
+      owner,
+      secondContextGraphId,
+    )).toBe(1);
+    const headQueries = querySpy.mock.calls.filter(([, options]) => (
+      options?.source === 'agent.rfc64.legacySwmBoundary.readHeads'
+    )).map(([sparql]) => sparql);
+    expect(headQueries).toHaveLength(2);
+    expect(headQueries.some((sparql) => (
+      sparql.includes(`GRAPH <${META_GRAPH}>`)
+    ))).toBe(true);
+    expect(headQueries.some((sparql) => (
+      sparql.includes(`GRAPH <${secondMetaGraph}>`)
+    ))).toBe(true);
+  });
 });
 
 async function secureTempRoot(roots: string[]): Promise<string> {
@@ -497,10 +581,10 @@ function fakeStore(
       ) {
         return {
           type: 'bindings' as const,
-          bindings: rootHeads.map((ual, index) => ({
+          bindings: rootHeads.map((ual) => ({
             metaGraph: META_GRAPH,
+            head: forcedHead ?? `${ual}#dkg-swm-head`,
             ual,
-            shareId: `"share-${index}"`,
             contextGraphId: `"${CONTEXT_GRAPH_ID}"`,
           })),
         };
@@ -524,8 +608,8 @@ function captureOperationResult(): QueryResult {
     type: 'bindings',
     bindings: [{
       metaGraph: META_GRAPH,
+      head: `${UAL_ONE}#dkg-swm-head`,
       ual: UAL_ONE,
-      shareId: '"share-one"',
       contextGraphId: `"${CONTEXT_GRAPH_ID}"`,
     }],
   };
@@ -554,7 +638,12 @@ function scriptedCaptureStore(
   } as unknown as TripleStore;
 }
 
-function legacyHeadQuads(graph: string, ual: string, id: string) {
+function legacyHeadQuads(
+  graph: string,
+  ual: string,
+  id: string,
+  contextGraphId = CONTEXT_GRAPH_ID,
+) {
   const head = `${ual}#dkg-swm-head`;
   const operation = `urn:dkg:workspace-operation:${id}`;
   const shareId = `"share-${id}"`;
@@ -564,6 +653,6 @@ function legacyHeadQuads(graph: string, ual: string, id: string) {
     { graph, subject: operation, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation' },
     { graph, subject: operation, predicate: 'http://dkg.io/ontology/kaUal', object: ual },
     { graph, subject: operation, predicate: 'http://dkg.io/ontology/shareOperationId', object: shareId },
-    { graph, subject: operation, predicate: 'http://dkg.io/ontology/contextGraphId', object: `"${CONTEXT_GRAPH_ID}"` },
+    { graph, subject: operation, predicate: 'http://dkg.io/ontology/contextGraphId', object: `"${contextGraphId}"` },
   ];
 }
