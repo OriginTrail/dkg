@@ -1,4 +1,9 @@
-import { isEntityPredicate, isSafeIri } from '@origintrail-official/dkg-core';
+import {
+  contextGraphSharedMemoryMetaUri,
+  isEntityPredicate,
+  isSafeIri,
+  validateSubGraphName,
+} from '@origintrail-official/dkg-core';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { isWorkspaceKnowledgeAssetHeadSubject, workspaceOperationPublicSliceSubject, workspaceOperationSubject } from './workspace-metadata-subjects.js';
@@ -12,11 +17,6 @@ const COMMON_FIELDS = [
 const SLICE_FIELDS = new Set([...COMMON_FIELDS, `${DKG}publicSliceRootEntity`,
   `${DKG}publicQuadsDigest`, `${DKG}publicQuadsCount`, `${DKG}publicSnapshotRef`, `${DKG}publicSnapshotGraph`]);
 const OPERATION_FIELDS = new Set([...COMMON_FIELDS, RDF_TYPE]);
-
-/** Local finalization caches are annotations, never peer authority for a snapshot. */
-export const SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE = `${DKG}snapshotMerkleRoot`;
-export const SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE = `${DKG}snapshotContentDigest`;
-const OPERATION_MEMOS = new Set([SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE, SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE]);
 
 interface MetadataSubject { readonly subject: string; readonly graph: string }
 export interface EntityShareSliceDescriptor extends MetadataSubject {
@@ -72,6 +72,8 @@ export function decodeEntityShareMetadata(contextGraphId: string, metadata: read
     const subGraphName = literal(rows, `${DKG}subGraphName`);
     if (cg !== contextGraphId || !operationId
         || (subGraphName === undefined && rows.some(row => row.predicate === `${DKG}subGraphName`))) return other;
+    if ((subGraphName !== undefined && !validateSubGraphName(subGraphName).valid)
+        || graph !== contextGraphSharedMemoryMetaUri(cg, subGraphName)) return other;
     const operation = operationSubject(cg, operationId);
     if (!operation) return other;
     const root = oneValue(rows, `${DKG}publicSliceRootEntity`);
@@ -87,10 +89,10 @@ export function decodeEntityShareMetadata(contextGraphId: string, metadata: read
       return { kind: 'slice', ref, graph, subject, rootEntity: root, operationSubject: operation, subGraphName, metadataRows: rows };
     }
     if (subject !== operation || oneValue(rows, RDF_TYPE) !== `${DKG}WorkspaceOperation`
-        || !rows.every(row => OPERATION_FIELDS.has(row.predicate) || OPERATION_MEMOS.has(row.predicate) || isEntityPredicate(row.predicate))) return other;
+        || !rows.every(row => OPERATION_FIELDS.has(row.predicate) || isEntityPredicate(row.predicate))) return other;
     const rootEntities = [...new Set(rows.filter(row => isEntityPredicate(row.predicate)).map(row => row.object))];
     if (rootEntities.length === 0 || !rootEntities.every(isSafeIri)) return other;
     return { kind: 'operation', graph, subject, rootEntities, subGraphName,
-      metadataRows: rows.filter(row => !OPERATION_MEMOS.has(row.predicate)) };
+      metadataRows: rows };
   });
 }

@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { decodeEntityShareMetadata, SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE, SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE } from '../src/entity-share-metadata.js';
+import { decodeEntityShareMetadata } from '../src/entity-share-metadata.js';
 import { storeWorkspaceOperationPublicQuads } from '../src/workspace-resolution.js';
 import { workspaceKnowledgeAssetHeadSubject, workspaceOperationPublicSliceSubject, workspaceOperationSubject } from '../src/workspace-metadata-subjects.js';
 
@@ -37,19 +37,14 @@ it.each([undefined, 'research'])('decodes publisher output in subgraph %s', asyn
   expect(slices.every(slice => slice.ref.length > 0 && slice.operationSubject === operation?.subject)).toBe(true);
 });
 
-it('projects canonical operation rows and excludes local finalization memos', async () => {
+it('rejects otherwise-valid entity rows from a non-canonical metadata graph', async () => {
   const f = await fixture();
-  const memos = [SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE, SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE]
-    .map(predicate => ({ subject: f.operation, predicate, object: '"peer memo"', graph: f.graph }));
-  const operation = decodeEntityShareMetadata(cg, [...f.metadata, ...memos]).find(record => record.kind === 'operation');
-  expect(operation?.metadataRows).toEqual(f.metadata.filter(quad => quad.subject === f.operation));
-});
-
-it('does not let memo annotations hide graph-scoped commitment fields', async () => {
-  const f = await fixture();
-  const extra = [SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE, `${dkg}kaUal`]
-    .map(predicate => ({ subject: f.operation, predicate, object: '"commitment"', graph: f.graph }));
-  expect(decodeEntityShareMetadata(cg, [...f.metadata, ...extra]).find(record => record.subject === f.operation)?.kind).toBe('other');
+  const wrongGraph = `${f.graph}/wrong`;
+  const records = decodeEntityShareMetadata(
+    cg,
+    f.metadata.map(quad => ({ ...quad, graph: wrongGraph })),
+  );
+  expect(records.every(record => record.kind === 'other')).toBe(true);
 });
 
 type SliceChange = { name: string; mutate(rows: Quad[], subject: string, graph: string): Quad[] };

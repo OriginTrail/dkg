@@ -1,4 +1,7 @@
-import { SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE, SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE } from '@origintrail-official/dkg-publisher';
+import {
+  SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE,
+  SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE,
+} from './finalization-annotations.js';
 import {
   decodeFinalizationMessage,
   contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
@@ -156,7 +159,10 @@ export const KEEP_ROOT_COPY_PREDICATE = `${DKG_NS}keepRootCopyOnLabel`;
  * graph), so stamping these predicates into the meta graph does not perturb the
  * generation signal the negative cache keys on — the two mechanisms don't fight.
  */
-export { SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE, SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE } from '@origintrail-official/dkg-publisher';
+export {
+  SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE,
+  SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE,
+} from './finalization-annotations.js';
 
 
 /**
