@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { chmod, mkdtemp, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -307,7 +307,7 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
       'BIND(IRI(CONCAT(STR(?ual), "#dkg-swm-head")) AS ?head)',
     );
     expect(operationQueryCall![0]).toContain(
-      'FILTER EXISTS { GRAPH ?metaGraph { ?head <http://dkg.io/ontology/kaUal> ?ual } }',
+      '?head <http://dkg.io/ontology/kaUal> ?ual ; <http://dkg.io/ontology/shareOperationId> ?shareId',
     );
     expect(operationQueryCall![0]).toContain('LIMIT 100001');
     expect(headQueryCall![0]).toContain(
@@ -329,10 +329,17 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
         if (
           options?.source === 'agent.rfc64.legacySwmBoundary.readOperations'
         ) {
-          // Model the store's DISTINCT projection. Reintroducing shareId into
-          // that projection exposes every historical operation and makes this
-          // fake return the over-limit result that caused the startup bug.
-          if (/SELECT DISTINCT[^{}]*\?shareId/.test(sparql)) {
+          // Model the store's DISTINCT projection over a fully joined current
+          // head. Dropping DISTINCT, projecting shareId, or separating the two
+          // share bindings exposes every historical operation and returns the
+          // over-limit result that caused the startup bug.
+          const exactProjection = sparql.startsWith(
+            'SELECT DISTINCT ?metaGraph ?head ?ual ?contextGraphId WHERE',
+          );
+          const shareBindings = sparql.match(
+            /<http:\/\/dkg\.io\/ontology\/shareOperationId> \?shareId/g,
+          ) ?? [];
+          if (!exactProjection || shareBindings.length !== 2) {
             return {
               type: 'bindings' as const,
               bindings: { length: historicalOperationCount },
@@ -352,6 +359,105 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
 
     expect(historicalOperationCount).toBeGreaterThan(100_000);
     expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
+  });
+
+  it('does not count 100001 share-mismatched heads across 16385 graphs', async () => {
+    const root = await secureTempRoot(roots);
+    const mismatchedHeadCount = 100_001;
+    const mismatchedGraphCount = 16_385;
+    const store = {
+      query: vi.fn(async (sparql: string, options?: { source?: string }) => {
+        if (
+          options?.source === 'agent.rfc64.legacySwmBoundary.readOperations'
+        ) {
+          const shareBindings = sparql.match(
+            /<http:\/\/dkg\.io\/ontology\/shareOperationId> \?shareId/g,
+          ) ?? [];
+          return shareBindings.length === 2
+            ? { type: 'bindings' as const, bindings: [] }
+            : {
+                type: 'bindings' as const,
+                bindings: { length: mismatchedHeadCount },
+              };
+        }
+        return { type: 'bindings' as const, bindings: [] };
+      }),
+    } as unknown as TripleStore;
+
+    const owner = {};
+    await initializeRfc64LegacySwmBoundaryV1(owner, root, store);
+
+    expect(mismatchedHeadCount).toBeGreaterThan(100_000);
+    expect(mismatchedGraphCount).toBeGreaterThan(16_384);
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(0);
+    expect(store.query).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        source: 'agent.rfc64.legacySwmBoundary.readHeads',
+      }),
+    );
+  });
+
+  it('runs exact-head batches with bounded concurrency and canonical output', async () => {
+    const root = await secureTempRoot(roots);
+    const uals = Array.from({ length: 2_001 }, (_, index) => (
+      `did:dkg:otp:20430/0x1111111111111111111111111111111111111111/${index + 1}`
+    ));
+    let activeHeadReads = 0;
+    let maximumActiveHeadReads = 0;
+    let headReadCount = 0;
+    const store = {
+      query: vi.fn(async (sparql: string, options?: { source?: string }) => {
+        if (
+          options?.source === 'agent.rfc64.legacySwmBoundary.readOperations'
+        ) {
+          return {
+            type: 'bindings' as const,
+            bindings: uals.map((ual) => ({
+              metaGraph: META_GRAPH,
+              head: `${ual}#dkg-swm-head`,
+              ual,
+              contextGraphId: `"${CONTEXT_GRAPH_ID}"`,
+            })),
+          };
+        }
+        if (options?.source === 'agent.rfc64.legacySwmBoundary.readHeads') {
+          headReadCount += 1;
+          activeHeadReads += 1;
+          maximumActiveHeadReads = Math.max(
+            maximumActiveHeadReads,
+            activeHeadReads,
+          );
+          try {
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            const bindings = [...sparql.matchAll(
+              /\(<([^>]+)> <([^>]+)> "(?:[^"\\]|\\.)*"\)/g,
+            )].map((match) => ({ head: match[1]!, ual: match[2]! }));
+            return { type: 'bindings' as const, bindings };
+          } finally {
+            activeHeadReads -= 1;
+          }
+        }
+        return { type: 'bindings' as const, bindings: [] };
+      }),
+    } as unknown as TripleStore;
+
+    const owner = {};
+    await initializeRfc64LegacySwmBoundaryV1(owner, root, store);
+
+    expect(headReadCount).toBe(5);
+    expect(maximumActiveHeadReads).toBe(4);
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(
+      uals.length,
+    );
+    const capture = JSON.parse(await readFile(
+      join(root, 'legacy-swm-boundary-v1/capture.json'),
+      'utf8',
+    )) as { entries: Array<{ contextGraphId: string; kaUal: string }> };
+    expect(capture.entries).toEqual([...capture.entries].sort((left, right) => (
+      left.contextGraphId.localeCompare(right.contextGraphId)
+      || left.kaUal.localeCompare(right.kaUal)
+    )));
   });
 
   it.each([
