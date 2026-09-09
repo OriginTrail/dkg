@@ -2,16 +2,14 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { McpClientConfigShape } from './mcp-config-document.js';
 import { mcpConfigPersistenceStrategy } from './mcp-config-metadata.js';
-import { detectMcpRuntime } from './mcp-runtime.js';
 import { resolveMcpConfigDestination, snapshotMcpConfigSource, writeMcpConfigAtomic, type McpConfigSourceSnapshot } from './mcp-config-file.js';
 
 type ConfigPath = Readonly<{ configPath: string; displayPath: string }>;
 
-/** A selected physical file owns its shape, runtime and live-path validation. */
+/** A selected physical file owns its shape and live-path validation. */
 export class McpPhysicalConfig {
   readonly shape: McpClientConfigShape;
   private readonly paths: readonly ConfigPath[];
-  private readonly runtime = detectMcpRuntime();
 
   constructor(readonly destination: string, shape: McpClientConfigShape, paths: readonly ConfigPath[]) {
     if (paths.length === 0) throw new Error('An MCP config requires a selected path');
@@ -40,7 +38,7 @@ export class McpPhysicalConfig {
   write(content: string, source: McpConfigSourceSnapshot): void {
     this.assertCurrent();
     if (source.destination !== this.destination) throw new Error('MCP config source belongs to a different destination');
-    const persistence = mcpConfigPersistenceStrategy(this.destination, this.runtime);
+    const persistence = mcpConfigPersistenceStrategy(this.destination);
     const directory = dirname(this.destination);
     if (!existsSync(directory)) mkdirSync(directory, { recursive: true });
     writeMcpConfigAtomic(this.destination, content, persistence, source, () => this.assertCurrent());

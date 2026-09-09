@@ -19,7 +19,7 @@ const arbitrary: ClientTarget = { ...standard, serverContainer: 'unrelated.setti
 void [standard, vscode, codex, wrongCodex, wrongCursor, unsupportedCodexLocation, unsupportedClaudeLocation, implicit, arbitrary];
 
 // Mutation requires a selected physical config; a logical target cannot bypass it.
-import { writeRegistration, removeRegistration } from '../src/mcp-client-config.js';
+import { readRegisteredServerKeys, writeRegistration, removeRegistration } from '../src/mcp-client-config.js';
 import type { McpPhysicalConfig } from '../src/mcp-physical-config.js';
 declare const selection: McpConfigSelection;
 declare const registration: Parameters<typeof writeRegistration>[1];
@@ -27,6 +27,9 @@ const file: McpPhysicalConfig = selection.file;
 const selectedClient: ClientTarget | undefined = selection.aliases[0];
 writeRegistration(selection.file, registration);
 removeRegistration(selection.file);
+readRegisteredServerKeys(selection.file);
+// @ts-expect-error Readers also require a selected physical config.
+readRegisteredServerKeys(standard);
 // @ts-expect-error A raw logical target cannot bypass destination ownership.
 writeRegistration(standard, registration);
 // @ts-expect-error Removal also requires the physical mutation boundary.

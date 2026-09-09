@@ -1,11 +1,11 @@
 import { isDeepStrictEqual } from 'node:util';
 import type { McpConfigSourceSnapshot } from './mcp-config-file.js';
-import { McpPhysicalConfig } from './mcp-physical-config.js';
+import type { McpPhysicalConfig } from './mcp-physical-config.js';
 import { tomlDocumentAdapter } from './mcp-toml-document.js';
 import { jsonDocumentAdapter, jsoncDocumentAdapter } from './mcp-json-document.js';
 import { isPlainRecord, type DesiredRegistration, type PersistedRegistration, type RegistrationEdit, type McpConfigDocumentAdapter } from './mcp-config-document.js';
 export type { DesiredRegistration, PersistedRegistration, RegistrationEdit } from './mcp-config-document.js';
-import { DKG_SERVER_KEY, selectMcpClientTargets, type ClientTarget } from './mcp-client-registry.js';
+import { DKG_SERVER_KEY } from './mcp-client-registry.js';
 
 export interface McpRegistration {
   command?: string;
@@ -103,8 +103,7 @@ export type ServerKeyProbe =
  * that as "not installed": it would tell a user an integration is missing when
  * the truth is that their config could not be read.
  */
-export function readRegisteredServerKeys(client: ClientTarget | McpPhysicalConfig): ServerKeyProbe {
-  const target = client instanceof McpPhysicalConfig ? client : selectMcpClientTargets([client])[0]!.file;
+export function readRegisteredServerKeys(target: McpPhysicalConfig): ServerKeyProbe {
   let body: Record<string, unknown>;
   try {
     body = readConfigBody(target);

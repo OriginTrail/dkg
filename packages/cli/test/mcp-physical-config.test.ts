@@ -3,8 +3,14 @@ import { mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, symlinkSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { selectMcpClientTargets, type ClientTarget } from '../src/mcp-client-registry.js';
-import { readRegistration, removeRegistration, writeRegistration } from '../src/mcp-client-config.js';
+import { readRegisteredServerKeys, readRegistration, removeRegistration, writeRegistration } from '../src/mcp-client-config.js';
 import { mcpConfigPersistenceStrategy } from '../src/mcp-config-metadata.js';
+import { detectMcpRuntime } from '../src/mcp-runtime.js';
+
+vi.mock('../src/mcp-runtime.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/mcp-runtime.js')>();
+  return { ...actual, detectMcpRuntime: vi.fn(actual.detectMcpRuntime) };
+});
 
 vi.mock('../src/mcp-config-metadata.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/mcp-config-metadata.js')>();
@@ -72,4 +78,19 @@ it('rejects a source snapshot owned by another physical config', () => {
   const source = file.readSource();
   expect(() => file.write('{}', { ...source, destination: join(directory, 'replacement.json') })).toThrow('different destination');
   assertUnchanged();
+});
+
+it('constructs and reads physical configs without detecting process runtime', () => {
+  const { file } = fixture(false);
+  expect(readRegistration(file).kind).toBe('entry');
+  expect(readRegisteredServerKeys(file).ok).toBe(true);
+  expect(detectMcpRuntime).not.toHaveBeenCalled();
+});
+
+it('detects process runtime when persisting a physical config', () => {
+  const { file } = fixture(false);
+  vi.mocked(detectMcpRuntime).mockClear();
+  writeRegistration(file, desired);
+  expect(detectMcpRuntime).toHaveBeenCalledTimes(1);
+  expect(readRegistration(file)).toMatchObject({ kind: 'entry', registration: { command: desired.command } });
 });
