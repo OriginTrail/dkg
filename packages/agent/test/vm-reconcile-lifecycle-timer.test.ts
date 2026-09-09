@@ -83,3 +83,59 @@ it.each([false, true])('runs lifecycle startup and later interval admissions wit
     vi.restoreAllMocks();
   }
 });
+
+it('pairs a fresh dispatcher with startup admission after a same-instance restart', async () => {
+  const startup = Object.getOwnPropertyDescriptor(DKGAgentBase, 'VM_RECONCILE_STARTUP_MAX_DELAY_MS')!;
+  Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_STARTUP_MAX_DELAY_MS', { ...startup, value: 1 });
+  const agent = await DKGAgent.create({
+    name: 'VmTimerRestartWiring', listenHost: '127.0.0.1',
+    chainAdapter: new MockChainAdapter(), syncReconcilerEnabled: true,
+    rfc64CatalogActivation: { enabled: false },
+  });
+  const internals = agent as unknown as TimerInternals;
+  const execute = vi.spyOn(agent, 'executeVmReconcileForCg').mockImplementation(async (contextGraphId, source) => ({
+    contextGraphId, onChainId: '2', source, status: 'current', attempted: true,
+    headOrdinal: 0, watermarkBefore: 0, watermarkAfter: 0,
+    reconciledOrdinals: 0, unresolvedOrdinals: 0,
+  }));
+  const originalEnsure = agent.ensureVmReconcileDispatcher.bind(agent);
+  const dispatchers: VmReconcileDispatcher<ContextGraphReconcileResult>[] = [];
+  let fakeTimers = false;
+  vi.spyOn(agent, 'ensureVmReconcileDispatcher').mockImplementation(() => {
+    const dispatcher = originalEnsure();
+    if (!dispatchers.includes(dispatcher)) dispatchers.push(dispatcher);
+    if (!fakeTimers) {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+      fakeTimers = true;
+    }
+    return dispatcher;
+  });
+  try {
+    await agent.start();
+    expect(dispatchers).toHaveLength(1);
+    await agent.stop();
+    expect(dispatchers[0].snapshot().closed).toBe(true);
+
+    vi.useRealTimers();
+    fakeTimers = false;
+    await agent.start();
+    expect(dispatchers).toHaveLength(2);
+    expect(dispatchers[1]).not.toBe(dispatchers[0]);
+    internals.subscribedContextGraphs.clear();
+    internals.subscribedContextGraphs.set('restart-bound', { subscribed: true, onChainId: '2' });
+
+    await vi.advanceTimersByTimeAsync(1);
+    await dispatchers[1].waitForIdle('restart-bound');
+    expect(execute).toHaveBeenCalledWith('restart-bound', 'periodic');
+  } finally {
+    if (internals.vmReconcileStartupTimer) clearTimeout(internals.vmReconcileStartupTimer);
+    if (internals.vmReconcileTimer) clearInterval(internals.vmReconcileTimer);
+    internals.vmReconcileStartupTimer = null;
+    internals.vmReconcileTimer = null;
+    await dispatchers.at(-1)?.close();
+    vi.useRealTimers();
+    await agent.stop();
+    Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_STARTUP_MAX_DELAY_MS', startup);
+    vi.restoreAllMocks();
+  }
+});

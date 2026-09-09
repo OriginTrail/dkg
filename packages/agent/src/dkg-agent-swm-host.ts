@@ -2589,6 +2589,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       newOnChainId,
     );
     if (!transition.changed) return;
+    this.vmReconcileDispatcher?.releaseLiveHold(localCgId);
     // Some verified late-binding paths intentionally mutate the canonical
     // in-memory subscription only after their durable write commits. They do
     // not subsequently pass through setContextGraphSubscription(), so without
@@ -2645,6 +2646,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       nameHash,
     );
     if (!transition.changed) return;
+    this.vmReconcileDispatcher?.releaseLiveHold(localCgId);
     const hadProgress =
       (sub.lastReconciledOrdinal ?? 0) > 0 || this.reconcileCursors.has(localCgId);
     if (hadProgress) {

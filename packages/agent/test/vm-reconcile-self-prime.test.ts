@@ -55,6 +55,11 @@ interface AgentInternals {
     provenance: 'authoritative' | 'reverse-name-hash' | 'ontology';
   } | null>;
   handleKARegisteredNudge(onChainId: string, kaId: bigint, ctx: unknown): Promise<string | null>;
+  bindSubscriptionOnChainId(
+    localCgId: string,
+    sub: { subscribed: boolean; coreHosted?: boolean; onChainId?: string },
+    onChainId: string,
+  ): void;
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string }>;
   vmReconcileDispatcher: VmReconcileDispatcher<boolean> | null;
   vmReconcileScheduling: Readonly<VmReconcileDispatcherPair<boolean>>;
@@ -1149,5 +1154,32 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     await internals.vmReconcileDispatcher.waitForIdle();
     expect(reconciled).toBe(CG_BOUND);
     expect(triggered).toEqual([`live:${CG_BOUND}`]);
+  });
+
+  it('releases an unbound discovery failure when a binding lands before the next periodic sweep', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'SelfPrimeBindingReleasesLiveHold', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'gh1098-late-binding';
+    const onChainId = '8081';
+    const sub = { subscribed: true };
+    internals.subscribedContextGraphs.set(localCgId, sub);
+    vi.spyOn(agent, 'canReadContextGraph').mockResolvedValue(true);
+    internals.resolveContextGraphOnChainIdBinding = async () => null;
+    const { dispatcher, triggered } = targetDispatcher(internals);
+
+    await expect(dispatcher.dispatch(localCgId, 'periodic')).rejects.toBeDefined();
+    expect(triggered).toEqual([]);
+
+    internals.bindSubscriptionOnChainId(localCgId, sub, onChainId);
+    await expect(internals.handleKARegisteredNudge(
+      onChainId,
+      1n,
+      createOperationContext('system'),
+    )).resolves.toBe(localCgId);
+    await dispatcher.waitForIdle(localCgId);
+
+    expect(triggered).toEqual([`live:${localCgId}`]);
   });
 });
