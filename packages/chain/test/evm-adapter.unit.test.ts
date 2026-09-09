@@ -1254,6 +1254,19 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(a.getRpcUrls()).toEqual(['https://primary.example', 'https://backup.example']);
   });
 
+  it('owns construction of strict finalized-read scopes', async () => {
+    const a = new EVMChainAdapter(minimalConfig({
+      rpcUrl: 'https://primary.example',
+      rpcUrls: ['https://backup.example'],
+    }));
+    const getEvmChainId = vi.spyOn(a, 'getEvmChainId').mockResolvedValue(31337n);
+
+    const scope = await a.createFinalizedEvmSnapshotScope('rfc64');
+
+    expect(scope).toEqual(expect.any(Function));
+    expect(getEvmChainId).toHaveBeenCalledOnce();
+  });
+
   it('receipt lookup succeeds on backup when primary throws retryable provider error', async () => {
     const a = new EVMChainAdapter(minimalConfig({
       rpcUrl: 'https://primary.example',

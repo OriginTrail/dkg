@@ -1,5 +1,7 @@
 import type { ethers } from 'ethers';
 import type { RpcUsageWindow } from './rpc-usage.js';
+import type { FinalizedChainReadOwnerV1 } from './finalized-chain-read-admission.js';
+import type { StrictCurrentFinalizedEvmSnapshotScopeV1 } from './current-finalized-evm-snapshot.js';
 
 /**
  * The Publishing-Conviction-Account read methods the funded-wallet selector
@@ -1204,13 +1206,10 @@ export interface ChainAdapter {
    */
   drainRpcUsage?(): RpcUsageWindow;
 
-  /**
-   * Trusted RPC endpoints owned by this adapter. Consumers that must perform
-   * strict finalized reads outside the adapter's ordinary read facade use this
-   * capability instead of asking callers to repeat an otherwise ignored
-   * `chainConfig` alongside `chainAdapter`.
-   */
-  getRpcUrls?(): string[];
+  /** Adapter-owned strict finalized-read scope; absent on non-EVM adapters. */
+  createFinalizedEvmSnapshotScope?(
+    owner: FinalizedChainReadOwnerV1,
+  ): Promise<StrictCurrentFinalizedEvmSnapshotScopeV1 | null>;
 
   // Identity
   registerIdentity(proof: IdentityProof): Promise<bigint>;

@@ -26,6 +26,7 @@ import {
 } from './support/rfc64-finalized-vm-placement-fixture.js';
 import {
   acceptedRfc64VmPolicySnapshot,
+  finalizedSnapshotScopeFactory,
   rfc64FinalizedVmPrecommitOptions,
   rfc64FinalizedVmPrecommitPlan,
 } from './support/rfc64-finalized-vm-precommit-fixture.js';
@@ -44,7 +45,7 @@ function options() {
   const fixture = rfc64FinalizedVmPrecommitOptions();
   return {
     acceptedPolicySnapshotForCatalogScope: fixture.acceptedPolicySnapshotForCatalogScope,
-    rpcEndpoints: fixture.rpcEndpoints,
+    createFinalizedSnapshotScope: fixture.createFinalizedSnapshotScope,
     getOnChainContextGraphId: fixture.getOnChainContextGraphId,
     getEvmChainId: fixture.getEvmChainId,
   };
@@ -89,7 +90,10 @@ async function liveOptions(
     }
   });
   return {
-    options: { ...options(), rpcEndpoints: [server.url] },
+    options: {
+      ...options(),
+      createFinalizedSnapshotScope: finalizedSnapshotScopeFactory([server.url]),
+    },
     rpc,
   };
 }
@@ -182,7 +186,7 @@ describe('RFC-64 finalized policy agent precommit', () => {
     const getEvmChainId = vi.fn(async () => BigInt(RFC64_VM_CHAIN_ID));
     const handler = createRfc64FinalizedPolicyAgentPrecommitV1({
       ...options(),
-      rpcEndpoints: [],
+      createFinalizedSnapshotScope: null,
       getOnChainContextGraphId,
       getEvmChainId,
     });

@@ -2367,7 +2367,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
         policyDigest: POLICY_DIGEST,
         roster: null,
       }),
-      rpcEndpoints: [],
+      createFinalizedSnapshotScope: null,
       getOnChainContextGraphId,
       getEvmChainId,
       getKnowledgeAssetStorageAddress,

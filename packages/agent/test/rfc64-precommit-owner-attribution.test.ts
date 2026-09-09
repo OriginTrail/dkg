@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from '../src/rfc64/catalog-access-policy-v1.js';
 import { createRfc64FinalizedVmAgentPrecommitV1 } from '../src/rfc64/finalized-vm-agent-precommit-v1.js';
 import type { Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
+import { finalizedSnapshotScopeFactory } from './support/rfc64-finalized-vm-precommit-fixture.js';
 import {
   RFC64_VM_AUTHOR,
   RFC64_VM_BLOCK_HASH,
@@ -124,7 +125,7 @@ function plan(): Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1 {
 async function options(endpoint: string) {
   return {
     acceptedPolicySnapshotForCatalogScope: () => acceptedPolicy(),
-    rpcEndpoints: [endpoint],
+    createFinalizedSnapshotScope: finalizedSnapshotScopeFactory([endpoint]),
     getOnChainContextGraphId: async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID,
     getEvmChainId: async () => BigInt(RFC64_VM_CHAIN_ID),
     getKnowledgeAssetStorageAddress: async () => RFC64_VM_KA_STORAGE,

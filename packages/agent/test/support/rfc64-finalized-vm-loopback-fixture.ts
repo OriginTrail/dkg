@@ -1,12 +1,16 @@
 import {
+  createStrictCurrentFinalizedEvmSnapshotScopeV1,
   MockChainAdapter,
   MOCK_DEFAULT_SIGNER,
   type ContextGraphAuthoritySnapshot,
+  type FinalizedChainReadOwnerV1,
+  type StrictCurrentFinalizedEvmSnapshotScopeV1,
 } from '@origintrail-official/dkg-chain';
-import type {
-  Digest32V1,
-  EvmAddressV1,
-  NetworkIdV1,
+import {
+  assertCanonicalChainId,
+  type Digest32V1,
+  type EvmAddressV1,
+  type NetworkIdV1,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 
@@ -62,18 +66,27 @@ const KNOWLEDGE_ASSET_INTERFACE = new ethers.Interface([
 /** Mock adapter whose chain identity matches the loopback finalized-RPC lane. */
 export class FinalizedVmLoopbackMockChainAdapterV1 extends MockChainAdapter {
   readonly #fixture: FinalizedVmLoopbackFixtureConfigV1;
-  readonly #rpcUrl: string;
+  readonly #rpcEndpoint: string | undefined;
 
-  constructor(fixture: FinalizedVmLoopbackFixtureConfigV1, rpcUrl: string) {
+  constructor(fixture: FinalizedVmLoopbackFixtureConfigV1, rpcEndpoint?: string) {
     super(fixture.networkId, MOCK_DEFAULT_SIGNER, {
       initialContextGraphId: BigInt(fixture.onChainContextGraphId),
     });
     this.#fixture = fixture;
-    this.#rpcUrl = rpcUrl;
+    this.#rpcEndpoint = rpcEndpoint;
   }
 
-  getRpcUrls(): string[] {
-    return [this.#rpcUrl];
+  override async createFinalizedEvmSnapshotScope(
+    owner: FinalizedChainReadOwnerV1,
+  ): Promise<StrictCurrentFinalizedEvmSnapshotScopeV1 | null> {
+    if (this.#rpcEndpoint === undefined) return null;
+    const chainId = this.#fixture.assertedAtChainId;
+    assertCanonicalChainId(chainId, 'finalized VM fixture chainId');
+    return createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      chainId,
+      endpoints: [this.#rpcEndpoint],
+      owner,
+    });
   }
 
   override async getEvmChainId(): Promise<bigint> {

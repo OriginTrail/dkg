@@ -3,9 +3,9 @@
  *
  * Extracted because two suites need the same plan, accepted-policy snapshot and
  * base options while varying one field each — the shipped-pool regression only
- * varies `rpcEndpoints`. Keeping a second copy meant a change to the plan or
- * policy shape required synchronized edits across files before either suite's
- * actual assertion could run.
+ * varies the adapter-owned snapshot factory. Keeping a second copy meant a
+ * change to the plan or policy shape required synchronized edits across files
+ * before either suite's actual assertion could run.
  *
  * The digests are exported so a caller can assert against them rather than
  * re-deriving the literals.
@@ -16,6 +16,10 @@ import {
   type ContextGraphPolicyV1,
   type Digest32V1,
 } from '@origintrail-official/dkg-core';
+import {
+  createStrictCurrentFinalizedEvmSnapshotScopeV1,
+  type StrictCurrentFinalizedEvmSnapshotScopeV1,
+} from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from '../../src/rfc64/catalog-access-policy-v1.js';
@@ -36,6 +40,16 @@ import {
 
 export const RFC64_VM_CATALOG_HEAD_DIGEST = `0x${'91'.repeat(32)}` as Digest32V1;
 export const RFC64_VM_INVENTORY_DIGEST = `0x${'92'.repeat(32)}` as Digest32V1;
+
+export function finalizedSnapshotScopeFactory(
+  endpoints: readonly string[],
+): () => StrictCurrentFinalizedEvmSnapshotScopeV1 {
+  return () => createStrictCurrentFinalizedEvmSnapshotScopeV1({
+    chainId: RFC64_VM_CHAIN_ID,
+    endpoints,
+    owner: 'rfc64',
+  });
+}
 
 /** The before-applied-head commit plan the precommit is driven with. */
 export function rfc64FinalizedVmPrecommitPlan():
@@ -95,7 +109,7 @@ export function acceptedRfc64VmPolicySnapshot(): AcceptedRfc64CatalogAccessSnaps
 
 /**
  * Base precommit options. Each suite overrides the one field it is about — a
- * single resolver for the noncanonical-input cases, `rpcEndpoints` for the
+ * single resolver for the noncanonical-input cases, the snapshot factory for the
  * shipped-pool regression.
  *
  * A fresh `OxigraphStore` per call: sharing one across tests would let state
@@ -110,7 +124,8 @@ export function rfc64FinalizedVmPrecommitOptions(
 ): Rfc64FinalizedVmAgentPrecommitOptionsV1 {
   return {
     acceptedPolicySnapshotForCatalogScope: () => acceptedRfc64VmPolicySnapshot(),
-    rpcEndpoints: ['http://127.0.0.1:8545'],
+    createFinalizedSnapshotScope:
+      finalizedSnapshotScopeFactory(['http://127.0.0.1:8545']),
     getOnChainContextGraphId: async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID,
     getEvmChainId: async () => BigInt(RFC64_VM_CHAIN_ID),
     getKnowledgeAssetStorageAddress: async () => RFC64_VM_KA_STORAGE,

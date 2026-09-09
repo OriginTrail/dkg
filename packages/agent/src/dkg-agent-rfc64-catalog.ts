@@ -3234,20 +3234,23 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       resolveScopedReadCapability,
       readResourceStats: () => readNativeResourceStats(),
       createReconciler: (clients: Readonly<Rfc64PublicCatalogReconcilerClientsV1>) => {
-        const finalizedReadRpcEndpoints = this.chain.getRpcUrls?.() ?? null;
+        const createFinalizedSnapshotScope =
+          typeof this.chain.createFinalizedEvmSnapshotScope === 'function'
+            ? () => this.chain.createFinalizedEvmSnapshotScope!('rfc64')
+            : null;
         const acceptedPolicySnapshotForCatalogScope = (scope: AuthorCatalogScopeV1) =>
           this.requireRfc64PublicCatalogServiceV1()
             .acceptedPolicySnapshotForCatalogScope(scope);
         const finalizedPolicyPrecommit = createRfc64FinalizedPolicyAgentPrecommitV1({
           acceptedPolicySnapshotForCatalogScope,
-          rpcEndpoints: finalizedReadRpcEndpoints,
+          createFinalizedSnapshotScope,
           getOnChainContextGraphId: (contextGraphId, signal) =>
             this.getContextGraphOnChainId(contextGraphId, { signal }),
           getEvmChainId: () => this.chain.getEvmChainId(),
         });
         const finalizedVmPrecommit = createRfc64FinalizedVmAgentPrecommitV1({
           acceptedPolicySnapshotForCatalogScope,
-          rpcEndpoints: finalizedReadRpcEndpoints,
+          createFinalizedSnapshotScope,
           getOnChainContextGraphId: (contextGraphId, signal) =>
             this.getContextGraphOnChainId(contextGraphId, { signal }),
           getEvmChainId: () => this.chain.getEvmChainId(),

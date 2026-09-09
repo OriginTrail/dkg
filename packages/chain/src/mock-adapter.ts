@@ -265,6 +265,10 @@ export class MockChainAdapter implements ChainAdapter {
     return [];
   }
 
+  async createFinalizedEvmSnapshotScope(): Promise<null> {
+    return null;
+  }
+
   /** RPC-usage capability: the mock has no RPC transport → always-empty window. */
   drainRpcUsage(): RpcUsageWindow {
     return { byMethod: {}, ethCallByConsumer: {}, lifetimeTotal: 0 };

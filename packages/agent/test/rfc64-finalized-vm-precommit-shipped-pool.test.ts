@@ -25,6 +25,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createRfc64FinalizedVmAgentPrecommitV1 } from '../src/rfc64/finalized-vm-agent-precommit-v1.js';
 import {
+  finalizedSnapshotScopeFactory,
   rfc64FinalizedVmPrecommitOptions,
   rfc64FinalizedVmPrecommitPlan,
 } from './support/rfc64-finalized-vm-precommit-fixture.js';
@@ -60,9 +61,11 @@ describe('RFC-64 finalized VM precommit on a shipped RPC pool', () => {
       throw new Error('stubbed transport failure');
     });
 
-    // Only `rpcEndpoints` varies — that is the whole point of this regression.
+    // Only the adapter-owned snapshot factory varies — that is the seam under test.
     const precommit = createRfc64FinalizedVmAgentPrecommitV1(
-      rfc64FinalizedVmPrecommitOptions({ rpcEndpoints: pool }),
+      rfc64FinalizedVmPrecommitOptions({
+        createFinalizedSnapshotScope: finalizedSnapshotScopeFactory(pool),
+      }),
     );
 
     // The precommit still fails — there is no chain behind the stub — but it must
@@ -91,5 +94,4 @@ describe('RFC-64 finalized VM precommit on a shipped RPC pool', () => {
     expect(dialled).not.toContain(href(pool[2]!));
   });
 });
-
 

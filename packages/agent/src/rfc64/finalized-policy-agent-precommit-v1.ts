@@ -12,7 +12,7 @@ import {
   type EvmAddressV1,
   type MemberRosterV1,
 } from '@origintrail-official/dkg-core';
-import { createStrictCurrentFinalizedEvmSnapshotScopeV1 } from '@origintrail-official/dkg-chain';
+import type { StrictCurrentFinalizedEvmSnapshotScopeV1 } from '@origintrail-official/dkg-chain';
 
 import {
   assertAcceptedRfc64CatalogAuthorMembershipV1,
@@ -30,7 +30,10 @@ import type {
 export interface Rfc64FinalizedPolicyAgentPrecommitResolutionOptionsV1 {
   readonly acceptedPolicySnapshotForCatalogScope:
     (scope: Readonly<AuthorCatalogScopeV1>) => AcceptedRfc64CatalogAccessSnapshotV1;
-  readonly rpcEndpoints: readonly string[] | null;
+  readonly createFinalizedSnapshotScope:
+    (() => StrictCurrentFinalizedEvmSnapshotScopeV1
+      | Promise<StrictCurrentFinalizedEvmSnapshotScopeV1 | null>
+      | null) | null;
   readonly getOnChainContextGraphId:
     (contextGraphId: ContextGraphIdV1, signal: AbortSignal) => Promise<string | null>;
   readonly getEvmChainId: () => Promise<bigint>;
@@ -44,7 +47,7 @@ export interface ResolvedRfc64FinalizedPolicyAgentPrecommitV1 {
   readonly chainId: ChainIdV1;
   readonly contextGraphStorageAddress: EvmAddressV1;
   readonly onChainContextGraphId: DecimalU256V1;
-  readonly rpcEndpoints: readonly string[];
+  readonly snapshot: StrictCurrentFinalizedEvmSnapshotScopeV1;
 }
 
 /**
@@ -122,10 +125,10 @@ export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
   ) {
     throw new Error('RFC-64 finalized precommit source differs from its governance binding');
   }
-  if (options.rpcEndpoints === null || options.rpcEndpoints.length === 0) {
+  const snapshot = await options.createFinalizedSnapshotScope?.() ?? null;
+  if (snapshot === null) {
     throw new Error('RFC-64 finalized precommit requires trusted RPC configuration');
   }
-  const rpcEndpoints = Object.freeze([...options.rpcEndpoints]);
 
   const [untrustedContextGraphId, liveChainId] = await Promise.all([
     options.getOnChainContextGraphId(plan.catalogScope.contextGraphId, signal),
@@ -150,7 +153,7 @@ export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
     chainId,
     contextGraphStorageAddress,
     onChainContextGraphId: untrustedContextGraphId,
-    rpcEndpoints,
+    snapshot,
   });
 }
 
@@ -173,14 +176,7 @@ export function createRfc64FinalizedPolicyAgentPrecommitV1(
       assertPlanPolicyAndRosterCurrentV1(options, plan);
       return;
     }
-    const snapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
-      chainId: resolved.chainId,
-      endpoints: resolved.rpcEndpoints,
-      // One process-wide per-chain gate protects concurrent policy and VM
-      // reads even though each precommit owns its own snapshot scope.
-      owner: 'rfc64',
-    });
-    await snapshot(
+    await resolved.snapshot(
       { chainId: resolved.chainId, signal },
       (session) => resolveAndVerifyRfc64FinalizedPolicyInSnapshotV1(
         {

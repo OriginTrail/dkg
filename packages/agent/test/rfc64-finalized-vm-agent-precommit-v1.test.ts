@@ -35,6 +35,7 @@ import {
 } from './support/rfc64-finalized-vm-placement-fixture.js';
 import {
   acceptedRfc64VmPolicySnapshot,
+  finalizedSnapshotScopeFactory,
   rfc64FinalizedVmPrecommitOptions as baseOptions,
   rfc64FinalizedVmPrecommitPlan as plan,
 } from './support/rfc64-finalized-vm-precommit-fixture.js';
@@ -151,7 +152,7 @@ describe('RFC-64 finalized VM agent precommit', () => {
     const coldHandler = createRfc64FinalizedVmAgentPrecommitV1({
       ...options,
       acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
-      rpcEndpoints: [endpoint],
+      createFinalizedSnapshotScope: finalizedSnapshotScopeFactory([endpoint]),
     });
     const newerPlan = Object.freeze({
       ...plan(),
@@ -181,7 +182,7 @@ describe('RFC-64 finalized VM agent precommit', () => {
     const exactHandler = createRfc64FinalizedVmAgentPrecommitV1({
       ...options,
       acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
-      rpcEndpoints: [endpoint],
+      createFinalizedSnapshotScope: finalizedSnapshotScopeFactory([endpoint]),
     });
     const exactTransaction = await exactHandler(Object.freeze({
       ...plan(),
@@ -193,7 +194,7 @@ describe('RFC-64 finalized VM agent precommit', () => {
     const warmHandler = createRfc64FinalizedVmAgentPrecommitV1({
       ...options,
       acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
-      rpcEndpoints: [endpoint],
+      createFinalizedSnapshotScope: finalizedSnapshotScopeFactory([endpoint]),
     });
     const warmTransaction = await warmHandler(newerPlan, new AbortController().signal);
     expect(warmTransaction.materializationReceipts).toEqual([]);
@@ -234,7 +235,8 @@ describe('RFC-64 finalized VM agent precommit', () => {
     const handler = createRfc64FinalizedVmAgentPrecommitV1({
       ...options,
       acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
-      rpcEndpoints: [await liveRpcEndpoint(assertionRoot)],
+      createFinalizedSnapshotScope:
+        finalizedSnapshotScopeFactory([await liveRpcEndpoint(assertionRoot)]),
     });
 
     const transaction = await handler(Object.freeze({
@@ -301,7 +303,7 @@ describe('RFC-64 finalized VM agent precommit', () => {
   it('does not apply the private root-only restriction to a public finalized lane', async () => {
     const handler = createRfc64FinalizedVmAgentPrecommitV1({
       ...baseOptions(),
-      rpcEndpoints: [],
+      createFinalizedSnapshotScope: null,
     });
     const namedPlan = {
       ...plan(),
@@ -335,7 +337,7 @@ describe('RFC-64 finalized VM agent precommit', () => {
     const getKnowledgeAssetStorageAddress = vi.fn(async () => RFC64_VM_KA_STORAGE);
     const handler = createRfc64FinalizedVmAgentPrecommitV1({
       ...baseOptions(),
-      rpcEndpoints: [],
+      createFinalizedSnapshotScope: null,
       getOnChainContextGraphId,
       getEvmChainId,
       getKnowledgeAssetStorageAddress,
@@ -426,7 +428,8 @@ describe('RFC-64 finalized VM agent precommit', () => {
     const handler = createRfc64FinalizedVmAgentPrecommitV1({
       ...options,
       acceptedPolicySnapshotForCatalogScope,
-      rpcEndpoints: [await liveRpcEndpoint(assertionRoot)],
+      createFinalizedSnapshotScope:
+        finalizedSnapshotScopeFactory([await liveRpcEndpoint(assertionRoot)]),
       materialize,
     });
 
@@ -476,7 +479,8 @@ describe('RFC-64 finalized VM agent precommit', () => {
     const handler = createRfc64FinalizedVmAgentPrecommitV1({
       ...baseOptions(),
       acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
-      rpcEndpoints: [await liveRpcEndpoint(assertionRoot)],
+      createFinalizedSnapshotScope:
+        finalizedSnapshotScopeFactory([await liveRpcEndpoint(assertionRoot)]),
       materialize,
     });
 

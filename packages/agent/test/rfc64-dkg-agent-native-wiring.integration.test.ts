@@ -8010,7 +8010,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         resolveRemoteAgentAddress: async (peerId) => authorPeerAddresses.get(peerId) ?? null,
       },
     });
-    const providerAdapter = new FinalizedVmLoopbackMockChainAdapterV1(emptyFixture, providerRpcServer.url);
+    const providerAdapter = new FinalizedVmLoopbackMockChainAdapterV1(
+      emptyFixture,
+      providerRpcServer.url,
+    );
     await providerAdapter.createOnChainContextGraph({
       accessPolicy: 1,
       publishPolicy: 0,
@@ -8101,7 +8104,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         );
       }
     });
-    const authorizedAdapter = new FinalizedVmLoopbackMockChainAdapterV1(providerFixture, authorizedRpcServer.url);
+    const authorizedAdapter = new FinalizedVmLoopbackMockChainAdapterV1(
+      providerFixture,
+      authorizedRpcServer.url,
+    );
     await authorizedAdapter.createOnChainContextGraph({
       accessPolicy: 1,
       publishPolicy: 0,
@@ -8283,7 +8289,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(deniedUnscopedResult.bindings).toEqual([]);
 
     unboundColdAgentAddress = coldAgentAddress;
-    const coldAdapter = new FinalizedVmLoopbackMockChainAdapterV1(coldFixture, coldRpcServer.url);
+    const coldAdapter = new FinalizedVmLoopbackMockChainAdapterV1(
+      coldFixture,
+      coldRpcServer.url,
+    );
     await coldAdapter.createOnChainContextGraph({
       accessPolicy: 1,
       publishPolicy: 0,
