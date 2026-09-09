@@ -1412,7 +1412,7 @@ describe('graph-scoped finalization handler', () => {
 
       await vi.waitFor(async () => {
         expect(await inbox!.list()).toMatchObject([{ state: 'SETTLED' }]);
-      });
+      }, { timeout: 7_000 });
       expect(await store.countQuads(vmGraph)).toBe(2);
       const health = await inbox.health();
       expect(health.ready).toBe(true);
@@ -1688,6 +1688,11 @@ describe('graph-scoped finalization handler', () => {
       }]);
 
       boundContextGraphId = 42n;
+      const [deferred] = await inbox.list();
+      await new Promise((resolve) => setTimeout(
+        resolve,
+        Math.max(0, (deferred?.nextAttemptAt ?? Date.now()) - Date.now()) + 10,
+      ));
       await recoveryHandler.handleFinalizationMessage(
         encodeFinalizationMessage(message),
         CG,

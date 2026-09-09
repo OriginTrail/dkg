@@ -391,6 +391,17 @@ export class FinalizationRecovery<
       // the autonomous retry budget.
       if (!this.isLiveEntry(entry)) return { status: 'handled' };
 
+      // A relay may win admission before the publisher's own delivery arrives.
+      // Preserve that later authority observation even while an autonomous
+      // retry deadline is parked; it is durable evidence, not a retry attempt.
+      if (
+        !entry.trustedPublisherPeerId
+        && input.sourcePeerId !== undefined
+        && input.sourcePeerId !== entry.sourcePeerId
+      ) {
+        await this.recordPendingPublisherAuthority(store, key, input);
+      }
+
       // The worker and reconciliation paths already honor this durable gate.
       // Live duplicate gossip must do the same: the per-entry lock serializes
       // equivalent deliveries, but without this check every queued duplicate
