@@ -1204,6 +1204,14 @@ export interface ChainAdapter {
    */
   drainRpcUsage?(): RpcUsageWindow;
 
+  /**
+   * Trusted RPC endpoints owned by this adapter. Consumers that must perform
+   * strict finalized reads outside the adapter's ordinary read facade use this
+   * capability instead of asking callers to repeat an otherwise ignored
+   * `chainConfig` alongside `chainAdapter`.
+   */
+  getRpcUrls?(): string[];
+
   // Identity
   registerIdentity(proof: IdentityProof): Promise<bigint>;
   getIdentityId(): Promise<bigint>;
