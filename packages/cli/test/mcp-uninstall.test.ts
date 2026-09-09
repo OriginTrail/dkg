@@ -31,7 +31,7 @@ vi.mock('../src/mcp-config-file.js', async importOriginal => {
       content: string,
       _persistence: McpConfigPersistenceStrategy,
       expectedSource: McpConfigSourceSnapshot,
-    ) => actual.writeMcpConfigAtomic(path, content, mcpConfigPersistenceStrategy('native'), expectedSource)),
+    ) => actual.writeMcpConfigAtomic(path, content, mcpConfigPersistenceStrategy('native', path), expectedSource)),
   };
 });
 
@@ -95,7 +95,7 @@ describe('MCP registration removal', () => {
     const client = target('dangling');
     fs.symlinkSync('missing-target.json', client.configPath);
     const entries = fs.readdirSync(root);
-    expect(() => writeMcpConfigAtomic(client.configPath, '{}\n', mcpConfigPersistenceStrategy('native'), snapshotMcpConfigSource(client.configPath))).toThrow();
+    expect(() => writeMcpConfigAtomic(client.configPath, '{}\n', mcpConfigPersistenceStrategy('native', client.configPath), snapshotMcpConfigSource(client.configPath))).toThrow();
     expect(fs.lstatSync(client.configPath).isSymbolicLink()).toBe(true);
     expect(fs.readlinkSync(client.configPath)).toBe('missing-target.json');
     expect(fs.readdirSync(root)).toEqual(entries);
@@ -126,7 +126,7 @@ describe('MCP registration removal', () => {
     const path = symlink ? join(root, 'owner-link.json') : real.configPath;
     if (symlink) fs.symlinkSync(real.configPath, path);
     const entries = fs.readdirSync(root);
-    writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native'), snapshotMcpConfigSource(path));
+    writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native', path), snapshotMcpConfigSource(path));
     const after = fs.statSync(real.configPath);
     expect({ uid: after.uid, gid: after.gid, mode: after.mode }).toEqual({ uid: before.uid, gid: before.gid, mode: before.mode });
     expect(readFileSync(real.configPath, 'utf8')).toBe('{}\n');
@@ -149,7 +149,7 @@ describe('MCP registration removal', () => {
       return copied;
     });
     vi.spyOn(fs, 'fchownSync').mockImplementationOnce(() => { throw new Error('ownership preservation denied'); });
-    expect(() => writeMcpConfigAtomic(link, '{}\n', mcpConfigPersistenceStrategy('native'), snapshotMcpConfigSource(link))).toThrow('ownership preservation denied');
+    expect(() => writeMcpConfigAtomic(link, '{}\n', mcpConfigPersistenceStrategy('native', link), snapshotMcpConfigSource(link))).toThrow('ownership preservation denied');
     expect(fs.renameSync).not.toHaveBeenCalled();
     expect(readFileSync(client.configPath, 'utf8')).toBe(raw);
     expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
@@ -418,6 +418,45 @@ describe('mcpUninstallAction', () => {
 
 
 describe('stable client selectors', () => {
+  it.each(['setup', 'uninstall'] as const)('rejects %s when a selected config alias changes during confirmation', async operation => {
+    const original = target('original');
+    const replacement = target('replacement');
+    seed(original); seed(replacement);
+    const originalBytes = readFileSync(original.configPath, 'utf8');
+    const replacementBytes = readFileSync(replacement.configPath, 'utf8');
+    const alias = target('Cursor');
+    fs.symlinkSync(original.configPath, alias.configPath);
+    const retarget = () => {
+      fs.unlinkSync(alias.configPath);
+      fs.symlinkSync(replacement.configPath, alias.configPath);
+    };
+    const messages: string[] = [];
+    if (operation === 'uninstall') {
+      // The changed alias is second in a deduplicated selection. Both clients
+      // were confirmed, so retaining only the first path would miss this edit.
+      await expect(mcpUninstallAction({}, {
+        detectClients: () => [original, alias], log: message => { messages.push(message); },
+        confirmTargets: async planned => { retarget(); return planned; },
+      })).rejects.toThrow('changed');
+      expect(messages.some(message => message.startsWith('Removed'))).toBe(false);
+    } else {
+      vi.stubEnv('DKG_HOME', root);
+      writeFileSync(join(root, 'config.json'), JSON.stringify({ name: 'Fixture', networkConfig: 'testnet', apiPort: 9200 }));
+      const unexpected = (): never => { throw new Error('Unexpected node mutation'); };
+      await expect(mcpSetupAction({ installed: true, start: false, fund: false, verify: false, force: true }, {
+        detectClients: () => [alias],
+        loadNetworkConfig: unexpected, ensureDkgNodeConfig: unexpected,
+        startDaemon: unexpected, fundWalletsBestEffort: unexpected,
+        loadOpWallets: async () => ({ wallets: [] }), findDkgMonorepoRoot: () => null,
+        resolveKnownNetworkConfigName: () => 'testnet', resolveDkgConfigHome: () => root,
+        confirmPlan: async planned => { retarget(); return [...planned]; },
+      })).rejects.toThrow('changed');
+    }
+    expect(readFileSync(original.configPath, 'utf8')).toBe(originalBytes);
+    expect(readFileSync(replacement.configPath, 'utf8')).toBe(replacementBytes);
+    expect(fs.realpathSync(alias.configPath)).toBe(fs.realpathSync(replacement.configPath));
+  });
+
   it('retains the selected logical client when different IDs share a symlinked config leaf', async () => {
     const cursor = target('Cursor');
     seed(cursor);
@@ -466,7 +505,7 @@ describe('stable client selectors', () => {
     const writes = vi.mocked(writeMcpConfigAtomic).mock.calls.slice(writesBefore);
     expect(writes).toHaveLength(1);
     expect(writes[0]).toEqual([
-      fs.realpathSync(windows.configPath), expect.any(String),
+      native.configPath, expect.any(String),
       expect.objectContaining({ kind: 'windows-wsl' }), expect.any(Object),
     ]);
     expect(read(windows).mcpServers.dkg.command).toBe(process.execPath);
@@ -490,7 +529,7 @@ describe('stable client selectors', () => {
     await mcpUninstallAction({ yes: true, client: 'cursor' }, { detectClients: () => [client], log: () => {} });
     expect(inspectRegistration(client)).toBe(false);
     expect(writeMcpConfigAtomic).toHaveBeenCalledWith(
-      fs.realpathSync(client.configPath),
+      client.configPath,
       expect.any(String),
       expect.objectContaining({ kind: 'windows-wsl' }),
       expect.any(Object),
@@ -520,7 +559,7 @@ describe('stable client selectors', () => {
     expect(inspectRegistration(native)).toBe(false);
     expect(vi.mocked(writeMcpConfigAtomic).mock.calls).toHaveLength(callsBefore + 1);
     expect(writeMcpConfigAtomic).toHaveBeenCalledWith(
-      fs.realpathSync(windows.configPath),
+      native.configPath,
       expect.any(String),
       expect.objectContaining({ kind: 'windows-wsl' }),
       expect.any(Object),

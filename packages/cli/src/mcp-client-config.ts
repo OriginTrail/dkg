@@ -1,10 +1,12 @@
-import { existsSync, readFileSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { applyEdits, createScanner, findNodeAtLocation, modify, parse as parseJsonc, parseTree, type Edit, type ParseError } from 'jsonc-parser';
 import { snapshotMcpConfigSource, writeMcpConfigAtomic, type McpConfigSourceSnapshot } from './mcp-config-file.js';
 import { mcpConfigPersistenceStrategy } from './mcp-config-metadata.js';
-import { readToml, writeTomlConfigEdit } from './mcp-toml-document.js';
+import { tomlDocumentAdapter } from './mcp-toml-document.js';
+import { jsonDocumentAdapter, jsoncDocumentAdapter } from './mcp-json-document.js';
+import type { DesiredRegistration, PersistedRegistration, RegistrationEdit, McpConfigDocumentAdapter } from './mcp-config-document.js';
+export type { DesiredRegistration, PersistedRegistration, RegistrationEdit } from './mcp-config-document.js';
 import { DKG_SERVER_KEY, tildify, type McpConfigEndpoint } from './mcp-client-registry.js';
 
 /** Parsed config objects have named fields; arrays/scalars are never mergeable records. */
@@ -19,26 +21,10 @@ export interface McpRegistration {
   args?: string[];
   dkgHome?: string;
 }
-/** Canonical fields owned by `dkg mcp setup`. */
-export interface DesiredRegistration {
-  command: string;
-  args: string[];
-  env: { DKG_HOME: string };
-}
-/** Persisted client shape at the single extension-preserving merge boundary. */
-export interface PersistedRegistration {
-  command: string;
-  args: string[];
-  env: { DKG_HOME: string; [name: string]: unknown };
-  [name: string]: unknown;
-}
 export type RegistrationRead =
   | { kind: 'absent' }
   | { kind: 'invalid' }
   | { kind: 'entry'; registration: McpRegistration };
-export type RegistrationEdit =
-  | { kind: 'remove' }
-  | { kind: 'upsert'; registration: PersistedRegistration };
 
 function normalizeRegistration(value: unknown): RegistrationRead {
   if (value === undefined || value === null) return { kind: 'absent' };
@@ -57,52 +43,26 @@ function normalizeRegistration(value: unknown): RegistrationRead {
 
 export function classifyRegistration(current: RegistrationRead, expected: DesiredRegistration): 'registered' | 'stale' | 'not-registered' {
   if (current.kind === 'absent') return 'not-registered';
-  const wanted = normalizeRegistration(expected);
-  if (current.kind !== 'entry' || wanted.kind !== 'entry') return 'stale';
-  return current.registration.command === wanted.registration.command
+  if (current.kind !== 'entry') return 'stale';
+  return current.registration.command === expected.command
     && current.registration.args !== undefined
-    && isDeepStrictEqual(current.registration.args, wanted.registration.args)
-    && current.registration.dkgHome === wanted.registration.dkgHome ? 'registered' : 'stale';
+    && isDeepStrictEqual(current.registration.args, expected.args)
+    && current.registration.dkgHome === expected.env.DKG_HOME ? 'registered' : 'stale';
 }
 
-function readJson(path: string, format: 'json' | 'jsonc' = 'json'): Record<string, unknown> {
-  if (!existsSync(path)) return {};
-  const raw = readFileSync(path, 'utf8').trim();
-  if (!raw) return {};
-  try {
-    const errors: ParseError[] = [];
-    const parsed = format === 'jsonc'
-      ? parseJsonc(raw, errors, { allowTrailingComma: true })
-      : JSON.parse(raw);
-    if (errors.length > 0) throw new Error('Invalid JSONC');
-    return typeof parsed === 'object' && parsed !== null
-      ? (parsed as Record<string, unknown>)
-      : {};
-  } catch {
-    throw new Error(
-      `Existing file is not valid ${format.toUpperCase()}: ${tildify(path)}. Move it aside and re-run.`,
-    );
-  }
-}
+const documentAdapters: Record<McpConfigEndpoint['format'], McpConfigDocumentAdapter> = {
+  json: jsonDocumentAdapter,
+  jsonc: jsoncDocumentAdapter,
+  toml: tomlDocumentAdapter,
+};
 
-/**
- * Read the parsed body of a per-client config, dispatching on
- * `target.format`. JSON is the most common format. TOML
- * (Codex CLI) uses `@iarna/toml`. Unsupported shapes cannot be targets.
- * Missing-file is normalised to `{}` for the live formats so
- * first-write callers don't have to special-case
- * detection-via-parent-dir candidates.
- */
-function readConfigBody(target: McpConfigEndpoint): Record<string, unknown> {
-  const format = target.format;
-  switch (format) {
-    case 'json':
-    case 'jsonc':
-      return readJson(target.configPath, format);
-    case 'toml':
-      return readToml(target.configPath);
-    default:
-      throw new Error(`Unknown client config format: ${String(format)}`);
+function readConfigBody(
+  target: McpConfigEndpoint,
+  source: McpConfigSourceSnapshot = snapshotMcpConfigSource(target.configPath),
+): Record<string, unknown> {
+  try { return documentAdapters[target.format].parse(source.content ?? ''); }
+  catch {
+    throw new Error(`Existing file is not valid ${target.format.toUpperCase()}: ${tildify(target.configPath)}. Move it aside and re-run.`);
   }
 }
 
@@ -204,171 +164,37 @@ export function readRegisteredServerKeys(target: McpConfigEndpoint): ServerKeyPr
   return { ok: true, servers };
 }
 
-/** Remove the owned property/comma only; comments preceding siblings belong to them. */
-function removeJsonEntry(raw: string, path: string[], allowTrailingComma: boolean): string {
-  const tree = parseTree(raw, [], { allowTrailingComma, disallowComments: !allowTrailingComma });
-  const property = tree && findNodeAtLocation(tree, path)?.parent;
-  if (property?.type !== 'property') throw new Error('JSON registration property was not found');
-  const edits: Edit[] = [{ offset: property.offset, length: property.length, content: '' }];
-  const scanner = createScanner(raw, true);
-  scanner.setPosition(property.offset + property.length);
-  scanner.scan();
-  if (raw.slice(scanner.getTokenOffset(), scanner.getTokenOffset() + scanner.getTokenLength()) === ',') {
-    edits.push({ offset: scanner.getTokenOffset(), length: scanner.getTokenLength(), content: '' });
-  }
-  else if (!allowTrailingComma) {
-    // Strict JSON cannot retain a preceding comma when the last property goes.
-    const siblings = property.parent?.children ?? [];
-    const previous = siblings[siblings.indexOf(property) - 1];
-    if (previous) {
-      scanner.setPosition(previous.offset + previous.length);
-      scanner.scan();
-      if (raw.slice(scanner.getTokenOffset(), scanner.getTokenOffset() + scanner.getTokenLength()) !== ',') {
-        throw new Error('JSON registration separator was not found');
-      }
-      edits.push({ offset: scanner.getTokenOffset(), length: scanner.getTokenLength(), content: '' });
-    }
-  }
-  // JSONC may retain a preceding trailing comma and adjacent sibling comments.
-  return applyEdits(raw, edits);
-}
-
-/** Add one property without asking jsonc-parser to reformat sibling values. */
-function addJsoncObjectProperty(
-  raw: string,
-  containerPath: string[],
-  name: string,
-  value: unknown,
-): string | null {
-  const tree = parseTree(raw, [], { allowTrailingComma: true });
-  const container = tree && findNodeAtLocation(tree, containerPath);
-  if (container?.type !== 'object') return null;
-  const closingOffset = container.offset + container.length - 1;
-  if (raw[closingOffset] !== '}') return null;
-  const closingLineStart = raw.lastIndexOf('\n', closingOffset - 1) + 1;
-  const closingIndent = raw.slice(closingLineStart, closingOffset);
-  if (!/^[\t ]*$/.test(closingIndent)) return null;
-
-  const properties = container.children ?? [];
-  const first = properties[0];
-  let propertyIndent = `${closingIndent}  `;
-  if (first) {
-    const firstLineStart = raw.lastIndexOf('\n', first.offset - 1) + 1;
-    const candidate = raw.slice(firstLineStart, first.offset);
-    if (!/^[\t ]*$/.test(candidate)) return null;
-    propertyIndent = candidate;
-  }
-
-  const newline = raw.includes('\r\n') ? '\r\n' : '\n';
-  const encodedLines = JSON.stringify(value, null, 2).split('\n');
-  const encoded = encodedLines.join(`${newline}${propertyIndent}`);
-  const edits: Edit[] = [];
-  let retainTrailingComma = false;
-  const last = properties.at(-1);
-  if (last) {
-    const scanner = createScanner(raw, true);
-    scanner.setPosition(last.offset + last.length);
-    scanner.scan();
-    retainTrailingComma = raw.slice(scanner.getTokenOffset(), scanner.getTokenOffset() + scanner.getTokenLength()) === ',';
-    if (!retainTrailingComma) edits.push({ offset: last.offset + last.length, length: 0, content: ',' });
-  }
-  edits.push({
-    offset: closingLineStart,
-    length: 0,
-    content: `${propertyIndent}${JSON.stringify(name)}: ${encoded}${retainTrailingComma ? ',' : ''}${newline}`,
-  });
-  return applyEdits(raw, edits);
-}
-
-/** Edit only the owned source range, preserving numeric lexemes and JSONC trivia. */
-function writeJsonDocumentEdit(
-  target: McpConfigEndpoint,
-  body: Record<string, unknown>,
-  edit: RegistrationEdit,
-  source: McpConfigSourceSnapshot,
-): void {
-  const raw = source.content ?? '{}';
-  const allowTrailingComma = target.format === 'jsonc';
-  let patched: string;
-  if (edit.kind === 'remove') {
-    patched = removeJsonEntry(raw, [target.serverContainer, DKG_SERVER_KEY], allowTrailingComma);
-  } else {
-    const tree = parseTree(raw, [], { allowTrailingComma: true });
-    const existing = tree ? findNodeAtLocation(tree, [target.serverContainer, DKG_SERVER_KEY]) : undefined;
-    const losslessAddition = allowTrailingComma && existing === undefined
-      ? addJsoncObjectProperty(raw, [target.serverContainer], DKG_SERVER_KEY, edit.registration)
-      : null;
-    patched = losslessAddition ?? applyEdits(raw, modify(raw, [target.serverContainer, DKG_SERVER_KEY], edit.registration, {
-      formattingOptions: { insertSpaces: true, tabSize: 2, eol: raw.includes('\r\n') ? '\r\n' : '\n' },
-    }));
-  }
-  const errors: ParseError[] = [];
-  const parsed = parseJsonc(patched, errors, { allowTrailingComma, disallowComments: !allowTrailingComma });
-  if (errors.length > 0 || !isDeepStrictEqual(parsed, body)) {
-    throw new Error(`Cannot safely edit ${target.format.toUpperCase()} registration in ${target.displayPath}`);
-  }
-  writeMcpConfigAtomic(target.configPath, patched, mcpConfigPersistenceStrategy(target.location), source);
-}
-
-/**
- * Serialize a parsed body to disk, dispatching on `target.format`.
- * Mirrors `readConfigBody`'s dispatch shape. JSON setup keeps the existing
- * 2-space indent and trailing newline; removal edits only the owned property.
- * TOML patches only the owned MCP table.
- *
- * FIX 26 merge: format-agnostic. The merge in `writeRegistration`
- * operates on the parsed body object before it reaches this writer,
- * so the per-format spread/stringify path here never sees the merge
- * logic.
- */
+/** Serialize the inspected source once, then persist through one transaction boundary. */
 function applyRegistrationEdit(
   target: McpConfigEndpoint,
   body: Record<string, unknown>,
   edit: RegistrationEdit,
   source: McpConfigSourceSnapshot,
 ): void {
-  const format = target.format;
+  const result = documentAdapters[target.format].applyEdit(source.content ?? '', body, edit, target.serverContainer);
+  if (result.warning) {
+    process.stderr.write(`[mcp-config] WARNING: ${target.format.toUpperCase()} config at ${tildify(target.configPath)} ${result.warning}\n`);
+  }
   const dir = dirname(target.configPath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  switch (format) {
-    case 'json':
-      if (edit.kind === 'remove') writeJsonDocumentEdit(target, body, edit, source);
-      else writeMcpConfigAtomic(target.configPath, JSON.stringify(body, null, 2) + '\n', mcpConfigPersistenceStrategy(target.location), source);
-      return;
-    case 'jsonc':
-      writeJsonDocumentEdit(target, body, edit, source);
-      return;
-    case 'toml':
-      writeTomlConfigEdit(target, body, edit, source);
-      return;
-    default:
-      throw new Error(`Unknown client config format: ${String(format)}`);
-  }
-}
-
-/** Resolve the owned leaf and its mutable container from a fresh config read. */
-function registrationLocation(target: McpConfigEndpoint): {
-  body: Record<string, unknown>; container: Record<string, unknown>;
-} | undefined {
-  const body = readConfigBody(target);
-  const cursor = readServerContainer(body, target);
-  if (cursor === undefined) return undefined;
-  if (!Object.hasOwn(cursor, DKG_SERVER_KEY)) return undefined;
-  return { body, container: cursor };
+  writeMcpConfigAtomic(target.configPath, result.content,
+    mcpConfigPersistenceStrategy(target.location, source.destination), source);
 }
 
 /** Inspect only: stale/null entries still count as an owned registration. */
 export function inspectRegistration(target: McpConfigEndpoint): boolean {
-  return registrationLocation(target) !== undefined;
+  const container = readServerContainer(readConfigBody(target), target);
+  return container !== undefined && Object.hasOwn(container, DKG_SERVER_KEY);
 }
 
-/** Re-read, then remove only the owned leaf; retain unrelated config and empty parent containers. */
+/** Remove only the owned leaf from one source snapshot. */
 export function removeRegistration(target: McpConfigEndpoint): boolean {
   const source = snapshotMcpConfigSource(target.configPath);
-  const location = registrationLocation(target);
-  if (!location) return false;
-  delete location.container[DKG_SERVER_KEY];
-  applyRegistrationEdit(target, location.body, { kind: 'remove' }, source);
+  const body = readConfigBody(target, source);
+  const container = readServerContainer(body, target);
+  if (container === undefined || !Object.hasOwn(container, DKG_SERVER_KEY)) return false;
+  delete container[DKG_SERVER_KEY];
+  applyRegistrationEdit(target, body, { kind: 'remove' }, source);
   return true;
 }
 
@@ -377,7 +203,7 @@ export function writeRegistration(
   entry: DesiredRegistration,
 ): void {
   const source = snapshotMcpConfigSource(target.configPath);
-  const body = readConfigBody(target);
+  const body = readConfigBody(target, source);
 
   // Codex Round-15 Fix 22 + Round-19 Fix 26: when refreshing an
   // existing entry, MERGE the entire existing entry — not just

@@ -1,15 +1,12 @@
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { homedir, platform, release as osRelease } from 'node:os';
 import { execSync } from 'node:child_process';
+import { resolveMcpConfigDestination } from './mcp-config-file.js';
 
 
-/** DKG owns one fixed server entry inside each client's declared container. */
-export const DKG_SERVER_KEY = 'dkg';
-export type McpClientConfigShape =
-  | { readonly format: 'json'; readonly serverContainer: 'mcpServers' | 'servers' }
-  | { readonly format: 'jsonc'; readonly serverContainer: 'servers' }
-  | { readonly format: 'toml'; readonly serverContainer: 'mcp_servers' };
+import { DKG_SERVER_KEY, type McpClientConfigShape } from './mcp-config-document.js';
+export { DKG_SERVER_KEY, type McpClientConfigShape } from './mcp-config-document.js';
 export type McpClientLocation = 'native' | 'windows-wsl';
 type WindowsPaths = { USERPROFILE: string | null; APPDATA: string | null };
 
@@ -89,12 +86,22 @@ export type McpConfigEndpoint = McpClientConfigShape & {
 
 export interface McpConfigSelection {
   readonly endpoint: McpConfigEndpoint;
+  readonly destination: string;
   /** Logical clients selected by the caller; never replaced by a storage alias. */
   readonly aliases: readonly ClientTarget[];
 }
 
 export function mcpConfigClientNames(selection: McpConfigSelection): string {
   return [...new Set(selection.aliases.map(alias => alias.name))].join(', ');
+}
+
+/** Confirmation applies to all selected aliases of the inspected destination. */
+export function assertMcpConfigSelectionCurrent(selection: McpConfigSelection): void {
+  for (const alias of selection.aliases) {
+    if (resolveMcpConfigDestination(alias.configPath) !== selection.destination) {
+      throw new Error(`MCP config path changed since inspection: ${alias.displayPath}. Re-run the command to confirm the current destination.`);
+    }
+  }
 }
 
 /** Select each physical owned leaf once while retaining the selected logical aliases. */
@@ -105,12 +112,8 @@ export function selectMcpClientTargets(
   const groups = new Map<string, { path: string; aliases: ClientTarget[] }>();
   for (const target of clients) {
     let physicalPath: string;
-    try { physicalPath = realpathSync(target.configPath); }
-    catch {
-      // First registration can also arrive through an existing symlinked parent.
-      try { physicalPath = join(realpathSync(dirname(target.configPath)), basename(target.configPath)); }
-      catch { physicalPath = resolve(target.configPath); }
-    }
+    try { physicalPath = resolveMcpConfigDestination(target.configPath); }
+    catch { physicalPath = resolve(target.configPath); }
     const leaf = JSON.stringify([physicalPath, target.serverContainer, DKG_SERVER_KEY]);
     const group = groups.get(leaf) ?? { path: physicalPath, aliases: [] };
     group.aliases.push(target);
@@ -126,7 +129,9 @@ export function selectMcpClientTargets(
     const storage = group.aliases.find(target => target.location === 'windows-wsl') ?? group.aliases[0]!;
     const { id: _id, name: _name, ...endpoint } = storage;
     selected.push({
-      endpoint: { ...endpoint, configPath: group.path },
+      // Keep a selected live path for the atomic transaction's revalidation.
+      endpoint: { ...endpoint, configPath: aliases[0]!.configPath, displayPath: aliases[0]!.displayPath },
+      destination: group.path,
       aliases,
     });
   }

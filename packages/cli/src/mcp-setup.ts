@@ -1,4 +1,4 @@
-import { detectClients, selectMcpClientTargets, mcpConfigClientNames, tildify, clientSkillPath, type ClientTarget, type McpConfigSelection } from './mcp-client-registry.js';
+import { detectClients, selectMcpClientTargets, assertMcpConfigSelectionCurrent, mcpConfigClientNames, tildify, clientSkillPath, type ClientTarget, type McpConfigSelection } from './mcp-client-registry.js';
 import { readRegistration, classifyRegistration, writeRegistration, type DesiredRegistration } from './mcp-client-config.js';
 /**
  * `dkg mcp setup` — bundled init + daemon-start + MCP-client registration.
@@ -1079,6 +1079,7 @@ export async function mcpSetupAction(
     console.log('');
     for (const { s, action } of writes) {
       try {
+        assertMcpConfigSelectionCurrent(s.target);
         writeRegistration(s.target.endpoint, expectedEntry);
         console.log(`  ${action === 'register' ? 'Registered' : 'Refreshed'} ${mcpConfigClientNames(s.target)} → ${s.target.endpoint.displayPath}`);
         // RFC-41 §4.5: explicit SKILL.md delivery for Cursor + Claude Code,

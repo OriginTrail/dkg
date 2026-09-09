@@ -1,4 +1,4 @@
-import { detectClients, parseMcpClientSelector, selectMcpClientTargets, mcpConfigClientNames, type McpConfigSelection } from './mcp-client-registry.js';
+import { detectClients, parseMcpClientSelector, selectMcpClientTargets, assertMcpConfigSelectionCurrent, mcpConfigClientNames, type McpConfigSelection } from './mcp-client-registry.js';
 import { inspectRegistration, removeRegistration } from './mcp-client-config.js';
 
 export interface McpUninstallCliOptions {
@@ -67,6 +67,7 @@ export async function mcpUninstallAction(
     const confirmed = await (deps.confirmTargets ?? confirmUninstallTargets)(planned, { yes: opts.yes === true });
     for (const target of confirmed) {
       try {
+        assertMcpConfigSelectionCurrent(target);
         const removed = removeRegistration(target.endpoint);
         log(`${removed ? 'Removed DKG MCP from' : 'Already unregistered:'} ${mcpConfigClientNames(target)}`);
       } catch (error) {

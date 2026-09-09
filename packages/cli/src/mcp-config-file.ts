@@ -1,6 +1,6 @@
 import { closeSync, existsSync, fsyncSync, ftruncateSync, lstatSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import type { McpConfigPersistenceStrategy } from './mcp-config-metadata.js';
 
 /** The exact source document an edit was derived from. */
@@ -9,11 +9,18 @@ export interface McpConfigSourceSnapshot {
   readonly content: string | undefined;
 }
 
-/** Capture both file identity and bytes before parsing or editing a config. */
-export function snapshotMcpConfigSource(configPath: string): McpConfigSourceSnapshot {
+/** Resolve existing links, including parents of a first-time config path. */
+export function resolveMcpConfigDestination(configPath: string): string {
   // lstat also sees dangling links. Resolving one fails before any write,
   // preserving the user's link instead of renaming a regular file over it.
-  const destination = lstatSync(configPath, { throwIfNoEntry: false }) ? realpathSync(configPath) : configPath;
+  const absolute = resolve(configPath);
+  if (lstatSync(absolute, { throwIfNoEntry: false })) return realpathSync(absolute);
+  return join(resolveMcpConfigDestination(dirname(absolute)), basename(absolute));
+}
+
+/** Capture both file identity and bytes before parsing or editing a config. */
+export function snapshotMcpConfigSource(configPath: string): McpConfigSourceSnapshot {
+  const destination = resolveMcpConfigDestination(configPath);
   return {
     destination,
     content: existsSync(destination) ? readFileSync(destination, 'utf8') : undefined,

@@ -1,4 +1,3 @@
-import { existsSync, readFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import TOML from '@iarna/toml';
 import {
@@ -12,45 +11,19 @@ import {
   type TomlCstNode,
   type ValCstNode,
 } from '@toml-tools/parser';
-import { DKG_SERVER_KEY, tildify, type McpConfigEndpoint } from './mcp-client-registry.js';
-import { writeMcpConfigAtomic, type McpConfigSourceSnapshot } from './mcp-config-file.js';
-import { mcpConfigPersistenceStrategy } from './mcp-config-metadata.js';
-import type { PersistedRegistration, RegistrationEdit } from './mcp-client-config.js';
+import { DKG_SERVER_KEY, type McpClientConfigShape, type McpConfigDocumentAdapter, type McpDocumentEditResult, type PersistedRegistration, type RegistrationEdit } from './mcp-config-document.js';
 
-/**
- * PR #443 round-5 Codex Review: mirror `readJson`'s friendly-recovery
- * wrapping for the TOML branch. `@iarna/toml`'s parse error includes
- * line/column info but no path and no suggested next-step; an
- * operator hitting a malformed `~/.codex/config.toml` would see the
- * raw library message and abort the entire `dkg mcp setup` flow with
- * no clear recovery path. Wrap with the same shape JSON uses so the
- * operator-facing error names the file and the move-it-aside
- * recovery procedure.
- */
-export function readToml(path: string): Record<string, unknown> {
-  if (!existsSync(path)) return {};
-  const raw = readFileSync(path, 'utf8');
-  // `@iarna/toml`'s parser returns `{}` for an all-whitespace file
-  // already, but normalising empty-string up front mirrors readJson
-  // and skips the parse call for the common parent-dir-only-detected
-  // first-write case.
-  if (!raw.trim()) return {};
-  try {
-    const parsed = TOML.parse(raw);
-    return parsed as Record<string, unknown>;
-  } catch {
-    throw new Error(
-      `Existing file is not valid TOML: ${tildify(path)}. Move it aside and re-run.`,
-    );
-  }
-}
+export const tomlDocumentAdapter: McpConfigDocumentAdapter = {
+  parse: source => source.trim() ? TOML.parse(source) as Record<string, unknown> : {},
+  applyEdit: (source, body, edit, container) => applyTomlConfigEdit(container, body, edit, source),
+};
 
 function serialiseTomlEntryOnly(
-  target: McpConfigEndpoint,
+  serverContainer: McpClientConfigShape['serverContainer'],
   registration: PersistedRegistration,
 ): string {
   const nested: Record<string, unknown> = {
-    [target.serverContainer]: { [DKG_SERVER_KEY]: registration },
+    [serverContainer]: { [DKG_SERVER_KEY]: registration },
   };
   return TOML.stringify(nested as TOML.JsonMap);
 }
@@ -174,7 +147,7 @@ function appendTomlTable(raw: string, replacement: string, newline: string): str
 
 function replaceTomlTable(
   raw: string,
-  serverContainer: McpConfigEndpoint['serverContainer'],
+  serverContainer: McpClientConfigShape['serverContainer'],
   edit: { kind: 'upsert'; block: string } | { kind: 'remove' },
   parsedRawHasOwnedEntry: boolean,
   parsedRawHasOwnedParent: boolean,
@@ -243,33 +216,32 @@ function replaceTomlTable(
   return out + raw.slice(cursor);
 }
 
-function tomlRawHasContainer(raw: string, container: McpConfigEndpoint['serverContainer']): boolean {
+function tomlRawHasContainer(raw: string, container: McpClientConfigShape['serverContainer']): boolean {
   try { return raw.trim() !== '' && TOML.parse(raw)[container] !== undefined; }
   catch { return false; }
 }
 
-export function writeTomlConfigEdit(
-  target: McpConfigEndpoint,
+function applyTomlConfigEdit(
+  serverContainer: McpClientConfigShape['serverContainer'],
   body: Record<string, unknown>,
   edit: RegistrationEdit,
-  source: McpConfigSourceSnapshot,
-): void {
-  const raw = source.content ?? '';
-  const ownedPath = `${target.serverContainer}.${DKG_SERVER_KEY}`;
+  raw: string,
+): McpDocumentEditResult {
+  const ownedPath = `${serverContainer}.${DKG_SERVER_KEY}`;
   const tableEdit = edit.kind === 'remove' ? edit
-    : { kind: 'upsert' as const, block: serialiseTomlEntryOnly(target, edit.registration) };
-  const rawContainer = raw.trim() ? TOML.parse(raw)[target.serverContainer] : undefined;
+    : { kind: 'upsert' as const, block: serialiseTomlEntryOnly(serverContainer, edit.registration) };
+  const rawContainer = raw.trim() ? TOML.parse(raw)[serverContainer] : undefined;
   let patched = replaceTomlTable(
     raw,
-    target.serverContainer,
+    serverContainer,
     tableEdit,
     rawContainer !== null && typeof rawContainer === 'object' && Object.hasOwn(rawContainer, DKG_SERVER_KEY),
     rawContainer !== undefined,
   );
   if (edit.kind === 'remove' && patched !== null
-      && !tomlRawHasContainer(patched, target.serverContainer)) {
+      && !tomlRawHasContainer(patched, serverContainer)) {
     // Keep the empty server container when its last child table was removed.
-    const parentOnly = { [target.serverContainer]: {} };
+    const parentOnly = { [serverContainer]: {} };
     patched = appendTomlTable(patched, TOML.stringify(parentOnly as TOML.JsonMap),
       raw.includes('\r\n') ? '\r\n' : '\n');
   }
@@ -282,18 +254,12 @@ export function writeTomlConfigEdit(
       patched = null;
     }
   }
-  if (patched === null) {
-    process.stderr.write(
-      `[mcp-config] WARNING: TOML config at ${tildify(target.configPath)} ` +
-        `uses a TOML shape that cannot be patched safely for ${ownedPath}; ` +
+  return {
+    content: patched ?? TOML.stringify(body as TOML.JsonMap),
+    ...(patched === null ? {
+      warning: `uses a TOML shape that cannot be patched safely for ${ownedPath}; ` +
         'rewriting the TOML file to avoid invalid or duplicate definitions. ' +
-        'Comments/formatting outside this entry may not be preserved.\n',
-    );
-  }
-  writeMcpConfigAtomic(
-    target.configPath,
-    patched ?? TOML.stringify(body as TOML.JsonMap),
-    mcpConfigPersistenceStrategy(target.location),
-    source,
-  );
+        'Comments/formatting outside this entry may not be preserved.',
+    } : {}),
+  };
 }

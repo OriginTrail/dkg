@@ -2405,7 +2405,8 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     }));
     expect(plans).toHaveLength(1);
     expect(plans[0]).toHaveLength(1);
-    expect(plans[0][0].endpoint).toMatchObject({ configPath: realpathSync(configPath), location: 'windows-wsl' });
+    expect(plans[0][0].destination).toBe(realpathSync(configPath));
+    expect(plans[0][0].endpoint).toMatchObject({ configPath, location: 'windows-wsl' });
     expect(plans[0][0].aliases).toEqual(windowsFirst ? [windows, native] : [native, windows]);
     expect(JSON.parse(readFileSync(configPath, 'utf8')).mcpServers.dkg.command).toBe('old');
   });

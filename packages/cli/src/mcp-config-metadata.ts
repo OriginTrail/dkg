@@ -1,4 +1,5 @@
 import { win32, posix } from 'node:path';
+import { release } from 'node:os';
 import type { McpClientLocation } from './mcp-client-registry.js';
 import { execFileSync } from 'node:child_process';
 import { existsSync, fchmodSync, fchownSync, fstatSync, renameSync, rmSync, type Stats } from 'node:fs';
@@ -189,10 +190,20 @@ function windowsPersistence(
   };
 }
 
-/** Resolve client placement and host platform into one atomic-write policy. */
+/** Resolve client placement and the physical destination into one write policy. */
 export function mcpConfigPersistenceStrategy(
   location: McpClientLocation,
+  destination: string,
 ): McpConfigPersistenceStrategy {
+  if (process.platform === 'linux'
+      && (process.env.WSL_DISTRO_NAME || /microsoft/i.test(release()))) {
+    // WSL resolves custom drive mounts and UNC shares too. A Linux-backed path
+    // is exported through the distro share; every other Windows path uses ACLs.
+    const translated = execFileSync('/usr/bin/wslpath', ['-w', destination], { encoding: 'utf8', stdio: 'pipe' }).trim();
+    if (!win32.isAbsolute(translated)) throw new Error('Could not resolve the WSL MCP config destination. The original config was not changed.');
+    return /^\\\\wsl(?:\$|\.localhost)\\/i.test(translated)
+      ? posixPersistence('linux') : windowsPersistence('windows-wsl');
+  }
   if (location === 'windows-wsl') return windowsPersistence('windows-wsl');
   if (process.platform === 'win32') return windowsPersistence('windows-native');
   return posixPersistence(process.platform === 'linux' ? 'linux' : 'posix');
