@@ -16,6 +16,10 @@ export class PeerSyncSessionTestDriver {
     this.readSession().markSkippedNoSync(peerId);
   }
 
+  forgetSkipped(peerId: string): void {
+    this.readSession().forgetSkippedNoSync(peerId);
+  }
+
   isSkipped(peerId: string): boolean {
     return this.readSession().isSkippedNoSync(peerId);
   }
@@ -24,8 +28,38 @@ export class PeerSyncSessionTestDriver {
     this.readSession().recordQueued(peerId, now, exact);
   }
 
+  recordExactQueued(peerId: string, now: number): void {
+    this.readSession().recordExactQueued(peerId, now);
+  }
+
+  beginSync(peerId: string): void {
+    this.readSession().syncingPeerRegistry().add(peerId);
+  }
+
+  endSync(peerId: string): void {
+    this.readSession().syncingPeerRegistry().delete(peerId);
+  }
+
   recordBackoff(peerId: string, backoff: SyncReconcilerBackoff): void {
     this.readSession().recordBackoff(peerId, backoff);
+  }
+
+  clearBackoff(peerId: string): void {
+    this.readSession().clearBackoff(peerId);
+  }
+
+  expireBackoff(peerId: string, now = Date.now()): void {
+    const backoff = this.readSession().backoffFor(peerId);
+    if (backoff !== undefined) {
+      this.readSession().recordBackoff(peerId, {
+        ...backoff,
+        nextRetryAt: now - 1,
+      });
+    }
+  }
+
+  clearPeer(peerId: string): void {
+    this.readSession().clearPeer(peerId);
   }
 
   recordFreshness(peerId: string, input: Readonly<{

@@ -12,6 +12,7 @@ import {
 } from '../src/sync/on-connect/attempt-accounting.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
 import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
+import { PeerSyncSessionTestDriver } from './_helpers/peer-sync-session-driver.js';
 import {
   DKG,
   PEER,
@@ -529,7 +530,8 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
     await callTrySyncFromPeer.call(agent, PEER, (outcome) => accounting.push(outcome));
 
     expect(agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(true);
-    expect(agent.peerSyncSession.lastSuccessfulSyncAt.has(PEER)).toBe(false);
+    expect(new PeerSyncSessionTestDriver(() => agent.peerSyncSession)
+      .snapshot(PEER).lastSuccessfulSync).toBeUndefined();
     expect(accounting).toEqual([{
       reconcilerDisposition: 'retry',
       fresh: false,
@@ -793,7 +795,8 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         }),
         onInternalError: () => undefined,
       });
-      queueAgent.peerSyncSession.lastSuccessfulSyncAt.set(PEER, Date.now());
+      new PeerSyncSessionTestDriver(() => queueAgent.peerSyncSession)
+        .recordFreshness(PEER, { successfulAt: Date.now() });
       queueAgent.lastSyncDisconnectedAt = new Map<string, number>();
       queueAgent.getSyncOnConnectPeerScheduler =
         LifecycleSyncMethods.prototype.getSyncOnConnectPeerScheduler;

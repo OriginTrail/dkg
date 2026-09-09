@@ -9,6 +9,7 @@ import {
   createUnstartedAgent,
   emptyDetailedSync,
   flushTimers,
+  peerSyncSessionDriver,
 } from './_helpers/sync-on-connect-test-fixture.js';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
@@ -73,7 +74,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     };
     vi.spyOn(agent, 'selectedSwmBootstrapContextGraphIdsForPeer')
       .mockReturnValue(['selected-cg']);
-    agent.peerSyncSession.syncReconcilerBackoff.set(PEER_A, {
+    peerSyncSessionDriver(agent).recordBackoff(PEER_A, {
       failures: 2,
       nextRetryAt: Date.now() + 60_000,
       protocolsKey: PROTOCOL_SYNC,
@@ -106,7 +107,7 @@ describe('RFC-64 peer-job accounting and order', () => {
 
     expect(order).toEqual(['selected', 'ordinary']);
     expect(agent.getSyncReconcilerProbe).toHaveBeenCalledOnce();
-    expect(agent.peerSyncSession.syncReconcilerBackoff.has(PEER_A)).toBe(false);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff !== undefined).toBe(false);
   });
 
   it('disables automatic selected SWM without blocking an explicit recovery plan', async () => {
@@ -238,7 +239,7 @@ describe('RFC-64 peer-job accounting and order', () => {
       ['ordinary-private-cg'],
       expect.any(Object),
     );
-    expect(agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A)).toMatchObject({ failures: 1 });
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff).toMatchObject({ failures: 1 });
     expect(errors).toEqual([]);
   });
 
@@ -303,10 +304,10 @@ describe('RFC-64 peer-job accounting and order', () => {
     await vi.waitFor(() => expect(agent.getSyncOnConnectPeerScheduler().size).toBe(0));
     expect(agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER_A))
       .toBe(true);
-    expect(agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A)).toMatchObject({
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff).toMatchObject({
       failures: 1,
     });
-    expect(agent.peerSyncSession.lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSuccessfulSync !== undefined).toBe(false);
     expect(applyJobAccounting).toHaveBeenCalledOnce();
     expect(applyJobAccounting).toHaveBeenCalledWith(
       PEER_A,
@@ -317,8 +318,8 @@ describe('RFC-64 peer-job accounting and order', () => {
 
     // Once the bounded backoff/cooldown expires, the retained selected owner
     // remains directly schedulable instead of being hidden by peer freshness.
-    agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A).nextRetryAt = Date.now() - 1;
-    agent.peerSyncSession.catchupOnConnectAt.set(
+    peerSyncSessionDriver(agent).expireBackoff(PEER_A);
+    peerSyncSessionDriver(agent).recordQueued(
       PEER_A,
       Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
     );
@@ -403,7 +404,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     await runner.runAutomaticSelectedThenOrdinary();
     runner.finish();
 
-    expect(agent.peerSyncSession.lastSuccessfulSyncAt.get(PEER_A)).toBeGreaterThan(0);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSuccessfulSync).toBeGreaterThan(0);
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(false);
   });
 
@@ -419,7 +420,7 @@ describe('RFC-64 peer-job accounting and order', () => {
       protocolsKey: PROTOCOL_SYNC,
       connectionKey: null,
     });
-    agent.peerSyncSession.syncReconcilerBackoff.set(PEER_A, {
+    peerSyncSessionDriver(agent).recordBackoff(PEER_A, {
       failures: 4,
       nextRetryAt: Date.now() - 1,
       protocolsKey: PROTOCOL_SYNC,
@@ -447,7 +448,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     await runner.runSelected();
     runner.finish();
 
-    expect(agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A)).toMatchObject({ failures: 1 });
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff).toMatchObject({ failures: 1 });
   });
 
   it('clears an earlier selected retry when a late selected generation completes', async () => {
@@ -535,7 +536,7 @@ describe('RFC-64 peer-job accounting and order', () => {
       },
       expect.any(Object),
     );
-    expect(agent.peerSyncSession.syncReconcilerBackoff.has(PEER_A)).toBe(false);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff !== undefined).toBe(false);
   });
 
   it('retains an ordinary retry after a later selected generation clears', async () => {
@@ -572,7 +573,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     await runner.runSelected();
     runner.finish();
 
-    expect(agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A)).toMatchObject({ failures: 1 });
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff).toMatchObject({ failures: 1 });
   });
 
   it('omits retry accounting when a peer-job phase throws local backpressure', async () => {
@@ -593,7 +594,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     runner.finish();
 
     expect(applyJobAccounting).not.toHaveBeenCalled();
-    expect(agent.peerSyncSession.syncReconcilerBackoff.has(PEER_A)).toBe(false);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff !== undefined).toBe(false);
   });
 
   it('commits one retry when a queued ordinary phase rejects', async () => {
@@ -634,7 +635,7 @@ describe('RFC-64 peer-job accounting and order', () => {
       },
       expect.any(Object),
     );
-    expect(agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A)).toMatchObject({ failures: 1 });
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff).toMatchObject({ failures: 1 });
   });
 
   it('continues ordinary work after selected rejection and retains retry accounting', async () => {
@@ -694,7 +695,7 @@ describe('RFC-64 peer-job accounting and order', () => {
       },
       expect.any(Object),
     );
-    expect(agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A)).toMatchObject({ failures: 1 });
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff).toMatchObject({ failures: 1 });
   });
 
   it('commits a later ordinary failure against its contemporaneous connection probe', async () => {
@@ -726,13 +727,13 @@ describe('RFC-64 peer-job accounting and order', () => {
     runner.finish();
 
     expect(agent.getSyncReconcilerProbe).toHaveBeenCalledTimes(2);
-    expect(agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A)).toMatchObject({
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff).toMatchObject({
       failures: 1,
       protocolsKey: PROTOCOL_SYNC,
       connectionKey: 'connection-b',
     });
     expect(agent.hasSyncReconcilerProbeChanged(
-      agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A),
+      peerSyncSessionDriver(agent).snapshot(PEER_A).backoff,
       probeB,
     )).toBe(false);
   });
@@ -765,13 +766,13 @@ describe('RFC-64 peer-job accounting and order', () => {
     await runner.runAutomaticSelectedThenOrdinary();
     runner.finish();
 
-    expect(agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A)).toMatchObject({
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff).toMatchObject({
       failures: 1,
       protocolsKey: PROTOCOL_SYNC,
       connectionKey: 'connection-a',
     });
     expect(agent.hasSyncReconcilerProbeChanged(
-      agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A),
+      peerSyncSessionDriver(agent).snapshot(PEER_A).backoff,
       probeB,
     )).toBe(true);
   });
@@ -904,9 +905,11 @@ describe('RFC-64 peer-job accounting and order', () => {
     releaseOrdinary();
     await selectedStarted;
 
-    agent.peerSyncSession.lastSuccessfulSyncAt.set(PEER_A, 1);
-    agent.peerSyncSession.lastSyncProgressAt.set(PEER_A, 1);
-    agent.peerSyncSession.syncReconcilerBackoff.set(PEER_A, {
+    peerSyncSessionDriver(agent).recordFreshness(PEER_A, {
+      successfulAt: 1,
+      progressAt: 1,
+    });
+    peerSyncSessionDriver(agent).recordBackoff(PEER_A, {
       failures: 4,
       nextRetryAt: Date.now() + 60_000,
       protocolsKey: PROTOCOL_SYNC,
@@ -917,8 +920,8 @@ describe('RFC-64 peer-job accounting and order', () => {
     await flushTimers();
 
     expect(applyJobAccounting).not.toHaveBeenCalled();
-    expect(agent.peerSyncSession.lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
-    expect(agent.peerSyncSession.lastSyncProgressAt.has(PEER_A)).toBe(false);
-    expect(agent.peerSyncSession.syncReconcilerBackoff.has(PEER_A)).toBe(false);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSuccessfulSync !== undefined).toBe(false);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSyncProgress !== undefined).toBe(false);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff !== undefined).toBe(false);
   });
 });

@@ -1,5 +1,6 @@
 import { PeerSyncSession } from '../../src/sync/peer-sync-session.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { PeerSyncSessionTestDriver } from './peer-sync-session-driver.js';
 
 import { DKGAgent, type DKGAgentConfig } from '../../src/index.js';
 import type { ContextGraphSub } from '../../src/dkg-agent-types.js';
@@ -85,6 +86,13 @@ export function resetPeerSyncSessionForTest(
   agent.peerSyncSession.close();
   agent.peerSyncSession = session;
   return session;
+}
+
+/** Behavioral seam for seeding and inspecting peer-sync state in tests. */
+export function peerSyncSessionDriver(
+  agent: SyncOnConnectTestAgent,
+): PeerSyncSessionTestDriver {
+  return new PeerSyncSessionTestDriver(() => agent.peerSyncSession);
 }
 
 /** Install scheduler behavior when a fresh, unseeded test session is constructed. */

@@ -21,6 +21,7 @@ import {
   flushTimers,
   installSyncOnConnectPeerJobStub,
   installPeerSyncSessionSchedulerForTest,
+  peerSyncSessionDriver,
 } from './_helpers/sync-on-connect-test-fixture.js';
 import {
   RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
@@ -268,7 +269,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     const selectedRun = vi.fn(async () => undefined);
     installSyncOnConnectPeerJobStub(agent, { runSelected: selectedRun });
     agent.selectedSwmBootstrapAdmission.request(PEER_A, ['existing-cg']);
-    agent.peerSyncSession.rfc64ExactCatchupOnConnectAt.set(PEER_A, Date.now());
+    peerSyncSessionDriver(agent).recordExactQueued(PEER_A, Date.now());
 
     expect(agent.rfc64SwmRecoveryRuntimeV1.resolveConfiguredCompleteProviderPeerIds(
       RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
@@ -286,7 +287,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
     ))
       .toEqual([PEER_A]);
-    expect(agent.peerSyncSession.rfc64ExactCatchupOnConnectAt.has(PEER_A)).toBe(false);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastExactQueued > 0).toBe(false);
     expect(agent.selectedSwmBootstrapAdmission.snapshot(PEER_A)).toEqual({
       contextGraphIds: ['existing-cg'],
       phase: 'retry-required',
@@ -578,7 +579,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       handleSyncError,
       0,
     )).toBe(true);
-    expect(agent.peerSyncSession.catchupOnConnectAt.size).toBe(1);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastQueued).toBeGreaterThan(0);
     expect(agent.getSyncOnConnectPeerScheduler().size).toBe(1);
 
     await vi.waitFor(() => expect(ordinaryRun).toHaveBeenCalledOnce());
@@ -598,7 +599,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     );
     expect(selectedSync.mock.calls[0]![2].requestedScope.plan).toBe(authorized);
     await vi.waitFor(() => expect(agent.getSyncOnConnectPeerScheduler().size).toBe(0));
-    expect(agent.peerSyncSession.syncReconcilerBackoff.has(PEER_A)).toBe(false);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff !== undefined).toBe(false);
     expect(errors).toEqual([]);
     ordinaryRun.mockClear();
 
@@ -610,11 +611,11 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       ordering.push('ordinary-in-flight');
       await ordinaryBlocked;
     });
-    agent.peerSyncSession.catchupOnConnectAt.set(
+    peerSyncSessionDriver(agent).recordQueued(
       PEER_A,
       Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
     );
-    agent.peerSyncSession.rfc64ExactCatchupOnConnectAt.set(
+    peerSyncSessionDriver(agent).recordExactQueued(
       PEER_A,
       Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
     );
@@ -644,11 +645,11 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     // After the real cooldown expires, a generic owner may finish before the
     // catalog plan arrives. That first exact plan still gets one bypass; the
     // next periodic plan in the same window does not.
-    agent.peerSyncSession.catchupOnConnectAt.set(
+    peerSyncSessionDriver(agent).recordQueued(
       PEER_A,
       Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
     );
-    agent.peerSyncSession.rfc64ExactCatchupOnConnectAt.set(
+    peerSyncSessionDriver(agent).recordExactQueued(
       PEER_A,
       Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
     );

@@ -12,6 +12,7 @@ import {
   emptyDetailedSync,
   flushTimers,
   installSyncOnConnectPeerJobStub,
+  peerSyncSessionDriver,
   recorder,
   resetPeerSyncSessionForTest,
 } from './_helpers/sync-on-connect-test-fixture.js';
@@ -157,12 +158,12 @@ describe('sync-on-connect churn gates', () => {
 
     const handleSyncError = () => undefined;
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
-    const firstQueuedAt = agent.peerSyncSession.catchupOnConnectAt.get(PEER_A);
+    const firstQueuedAt = peerSyncSessionDriver(agent).snapshot(PEER_A).lastQueued;
 
     agent.lastSyncDisconnectedAt.set(PEER_A, Date.now() - Math.floor(SYNC_RECONNECT_FLAP_GRACE_MS / 2));
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(false);
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(false);
-    expect(agent.peerSyncSession.catchupOnConnectAt.get(PEER_A)).toBe(firstQueuedAt);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastQueued).toBe(firstQueuedAt);
 
     await flushTimers();
     expect(calls).toEqual([PEER_A]);
@@ -178,12 +179,12 @@ describe('sync-on-connect churn gates', () => {
 
     const lastDisconnected = Date.now() - SYNC_RECONNECT_FLAP_GRACE_MS - 100;
     const beforeDisconnect = lastDisconnected - 1;
-    agent.peerSyncSession.lastSuccessfulSyncAt.set(PEER_A, beforeDisconnect);
-    agent.peerSyncSession.catchupOnConnectAt.set(PEER_A, beforeDisconnect);
+    peerSyncSessionDriver(agent).recordFreshness(PEER_A, { successfulAt: beforeDisconnect });
+    peerSyncSessionDriver(agent).recordQueued(PEER_A, beforeDisconnect);
     agent.lastSyncDisconnectedAt.set(PEER_A, lastDisconnected);
 
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(true);
-    expect(agent.peerSyncSession.catchupOnConnectAt.get(PEER_A)).toBeGreaterThan(lastDisconnected);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastQueued).toBeGreaterThan(lastDisconnected);
 
     await flushTimers();
     expect(calls).toEqual([PEER_A]);
@@ -255,7 +256,9 @@ describe('sync-on-connect churn gates', () => {
       getConnections: () => [],
     };
     agent.getPeerProtocols = async () => [PROTOCOL_SYNC];
-    agent.peerSyncSession.lastSuccessfulSyncAt.set(PEER_A, Date.now() - 30_000);
+    peerSyncSessionDriver(agent).recordFreshness(PEER_A, {
+      successfulAt: Date.now() - 30_000,
+    });
     const trySyncFromPeer = recorder(async () => undefined);
     agent.trySyncFromPeer = trySyncFromPeer;
     const before = Date.now();
@@ -264,7 +267,7 @@ describe('sync-on-connect churn gates', () => {
     await flushTimers();
 
     expect(trySyncFromPeer.calls).toHaveLength(1);
-    const backoff = agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A);
+    const backoff = peerSyncSessionDriver(agent).snapshot(PEER_A).backoff;
     expect(backoff?.failures).toBe(1);
     expect(backoff?.nextRetryAt - before).toBeGreaterThanOrEqual(5_000);
     expect(backoff?.nextRetryAt - before).toBeLessThan(5_100);
@@ -286,14 +289,14 @@ describe('sync-on-connect churn gates', () => {
       connectionKey: null,
     });
 
-    const backoff = agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A);
+    const backoff = peerSyncSessionDriver(agent).snapshot(PEER_A).backoff;
     expect(backoff?.failures).toBe(1);
     expect(backoff?.nextRetryAt).toBeGreaterThan(Date.now());
 
     const staleQueuedAt = Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1;
-    agent.peerSyncSession.catchupOnConnectAt.set(PEER_A, staleQueuedAt);
+    peerSyncSessionDriver(agent).recordQueued(PEER_A, staleQueuedAt);
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(false);
-    expect(agent.peerSyncSession.catchupOnConnectAt.get(PEER_A)).toBe(staleQueuedAt);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastQueued).toBe(staleQueuedAt);
   });
 
   it('retains progress while backing off a mixed progress-and-failure round', async () => {
@@ -325,7 +328,7 @@ describe('sync-on-connect churn gates', () => {
     (agent as any).refreshMetaSyncedFlags = async () => undefined;
     (agent as any).discoverContextGraphsFromStore = async () => 0;
     (agent as any).planSharedMemorySyncContextGraphs = async () => ({ targets: [] });
-    (agent as any).peerSyncSession.syncReconcilerBackoff.set(PEER_A, {
+    peerSyncSessionDriver(agent).recordBackoff(PEER_A, {
       failures: 2,
       nextRetryAt: Date.now() - 1,
       protocolsKey: null,
@@ -337,13 +340,13 @@ describe('sync-on-connect churn gates', () => {
       connectionKey: null,
     });
 
-    expect((agent as any).peerSyncSession.lastSyncProgressAt.get(PEER_A)).toBeGreaterThan(0);
-    expect((agent as any).peerSyncSession.lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
-    const backoff = (agent as any).peerSyncSession.syncReconcilerBackoff.get(PEER_A);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSyncProgress).toBeGreaterThan(0);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSuccessfulSync).toBeUndefined();
+    const backoff = peerSyncSessionDriver(agent).snapshot(PEER_A).backoff;
     expect(backoff?.failures).toBe(3);
     expect(backoff?.nextRetryAt).toBeGreaterThan(Date.now());
 
-    (agent as any).peerSyncSession.catchupOnConnectAt.set(
+    peerSyncSessionDriver(agent).recordQueued(
       PEER_A,
       Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
     );
@@ -376,7 +379,7 @@ describe('sync-on-connect churn gates', () => {
       (agent as any).started = true;
     resetPeerSyncSessionForTest(agent);
       (agent as any).isPeerConnectedForSyncBackoff = () => true;
-      (agent as any).peerSyncSession.syncReconcilerBackoff.set(PEER_A, {
+      peerSyncSessionDriver(agent).recordBackoff(PEER_A, {
         failures: 2,
         nextRetryAt: Date.now() - 1,
         protocolsKey: null,
@@ -393,9 +396,10 @@ describe('sync-on-connect churn gates', () => {
         { protocolsKey: PROTOCOL_SYNC, connectionKey: 'accounting-test' },
       );
 
-      expect((agent as any).peerSyncSession.lastSyncProgressAt.get(PEER_A)).toBeGreaterThan(0);
-      expect((agent as any).peerSyncSession.lastSuccessfulSyncAt.has(PEER_A)).toBe(expectedFresh);
-      expect((agent as any).peerSyncSession.syncReconcilerBackoff.get(PEER_A)?.failures)
+      expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSyncProgress).toBeGreaterThan(0);
+      expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSuccessfulSync !== undefined)
+        .toBe(expectedFresh);
+      expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff?.failures)
         .toBe(expectedFailures);
     },
   );
@@ -446,12 +450,12 @@ describe('sync-on-connect churn gates', () => {
       hasSyncProtocol: true,
     });
 
-    expect(agent.peerSyncSession.lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
-    expect(agent.peerSyncSession.lastSyncProgressAt.has(PEER_A)).toBe(false);
-    expect(agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A)).toMatchObject({
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSuccessfulSync !== undefined).toBe(false);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSyncProgress !== undefined).toBe(false);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff).toMatchObject({
       failures: 1,
     });
-    expect(agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A).nextRetryAt)
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff?.nextRetryAt)
       .toBeGreaterThan(Date.now());
   });
 
@@ -495,7 +499,7 @@ describe('sync-on-connect churn gates', () => {
     });
     agent.selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
     agent.selectedSwmBootstrapContextGraphIdsForPeer = () => ['selected-cg'];
-    agent.peerSyncSession.syncReconcilerBackoff.set(PEER_A, {
+    peerSyncSessionDriver(agent).recordBackoff(PEER_A, {
       failures: 1,
       nextRetryAt: Date.now() + 60_000,
     });
@@ -505,9 +509,9 @@ describe('sync-on-connect churn gates', () => {
       hasSyncProtocol: true,
     });
 
-    expect(agent.peerSyncSession.lastSyncProgressAt.has(PEER_A)).toBe(true);
-    expect(agent.peerSyncSession.lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
-    expect(agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A)?.failures).toBe(1);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSyncProgress !== undefined).toBe(true);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSuccessfulSync !== undefined).toBe(false);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff?.failures).toBe(1);
 
     const handleSyncError = () => undefined;
     expect(agent.queueSyncFromPeerOnConnect(
@@ -516,7 +520,7 @@ describe('sync-on-connect churn gates', () => {
       0,
       { selectedSwmRetry: true },
     )).toBe(false);
-    (agent as any).peerSyncSession.syncReconcilerBackoff.get(PEER_A).nextRetryAt = Date.now() - 1;
+    peerSyncSessionDriver(agent).expireBackoff(PEER_A);
     expect((agent as any).queueSyncFromPeerOnConnect(
       PEER_A,
       handleSyncError,
@@ -540,7 +544,7 @@ describe('sync-on-connect churn gates', () => {
       calls.push(peerId);
     };
     installSyncOnConnectPeerJobStub(agent, { runOrdinary });
-    agent.peerSyncSession.syncReconcilerBackoff.set(PEER_A, {
+    peerSyncSessionDriver(agent).recordBackoff(PEER_A, {
       failures: 1,
       nextRetryAt: Date.now() + CATCHUP_ON_CONNECT_COOLDOWN_MS,
       protocolsKey: null,
@@ -560,7 +564,7 @@ describe('sync-on-connect churn gates', () => {
       calls.push(peerId);
     };
     installSyncOnConnectPeerJobStub(agent, { runOrdinary });
-    agent.peerSyncSession.syncReconcilerBackoff.set(PEER_A, {
+    peerSyncSessionDriver(agent).recordBackoff(PEER_A, {
       failures: 1,
       nextRetryAt: Date.now() - 1,
       protocolsKey: null,
