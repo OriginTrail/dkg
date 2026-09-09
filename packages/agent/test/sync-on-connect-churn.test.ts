@@ -1,4 +1,3 @@
-import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { describe, expect, it } from 'vitest';
 import { PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS, SYNC_RECONNECT_FLAP_GRACE_MS } from '../src/dkg-agent-constants.js';
@@ -14,6 +13,7 @@ import {
   flushTimers,
   installSyncOnConnectPeerJobStub,
   recorder,
+  resetPeerSyncSessionForTest,
 } from './_helpers/sync-on-connect-test-fixture.js';
 import { ordinaryLane } from './_helpers/run-sync-on-connect.js';
 
@@ -106,7 +106,7 @@ describe('sync-on-connect churn gates', () => {
     const agent = await createUnstartedAgent(`AutomaticSystemScope-${nodeRole}`);
     allowAllNetworkAdmission(agent);
     agent.started = true;
-    agent.peerSyncSession = new PeerSyncSession();
+    resetPeerSyncSessionForTest(agent);
     agent.config.nodeRole = nodeRole;
     agent.config.syncContextGraphs = ['selected-cg'];
     agent.config.syncSharedMemoryOnConnect = false;
@@ -192,7 +192,7 @@ describe('sync-on-connect churn gates', () => {
     // relabel most sync-global pressure on the operator dashboards.
     const agent = await createUnstartedAgent('SyncOnConnectSourceLabel');
     agent.started = true;
-    agent.peerSyncSession = new PeerSyncSession();
+    resetPeerSyncSessionForTest(agent);
     const sources: unknown[] = [];
     agent.trySyncFromPeer = async (
       _peer: string,
@@ -214,7 +214,7 @@ describe('sync-on-connect churn gates', () => {
   it('reconciler still retries stale connected peers', async () => {
     const agent = await createUnstartedAgent('SyncReconcilerStillRetries');
     agent.started = true;
-    agent.peerSyncSession = new PeerSyncSession();
+    resetPeerSyncSessionForTest(agent);
     agent.node.node = {
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
@@ -245,7 +245,7 @@ describe('sync-on-connect churn gates', () => {
       syncBackoffJitter: 0,
     });
     agent.started = true;
-    agent.peerSyncSession = new PeerSyncSession();
+    resetPeerSyncSessionForTest(agent);
     agent.node.node = {
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
@@ -269,7 +269,7 @@ describe('sync-on-connect churn gates', () => {
   it('records backoff after a failed sync round and blocks connection-open rescheduling', async () => {
     const agent = await createUnstartedAgent('SyncReconnectBackoff');
     agent.started = true;
-    agent.peerSyncSession = new PeerSyncSession();
+    resetPeerSyncSessionForTest(agent);
     agent.node.node = {
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
@@ -299,7 +299,7 @@ describe('sync-on-connect churn gates', () => {
     });
     allowAllNetworkAdmission(agent);
     (agent as any).started = true;
-    (agent as any).peerSyncSession = new PeerSyncSession();
+    resetPeerSyncSessionForTest(agent);
     (agent.node as any).node = {
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [{
@@ -370,7 +370,7 @@ describe('sync-on-connect churn gates', () => {
     async ({ disposition, fresh, expectedFailures, expectedFresh }) => {
       const agent = await createUnstartedAgent(`SyncAccounting-${disposition}`);
       (agent as any).started = true;
-    (agent as any).peerSyncSession = new PeerSyncSession();
+    resetPeerSyncSessionForTest(agent);
       (agent as any).isPeerConnectedForSyncBackoff = () => true;
       (agent as any).peerSyncSession.syncReconcilerBackoff.set(PEER_A, {
         failures: 2,
@@ -399,7 +399,7 @@ describe('sync-on-connect churn gates', () => {
   it('records reconciler backoff when selected SWM is explicitly incomplete without progress', async () => {
     const agent = await createUnstartedAgent('SelectedSwmIncompleteBackoff');
     agent.started = true;
-    agent.peerSyncSession = new PeerSyncSession();
+    resetPeerSyncSessionForTest(agent);
     agent.node.node = {
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
@@ -454,7 +454,7 @@ describe('sync-on-connect churn gates', () => {
     const agent = await createUnstartedAgent('SelectedSwmIncompleteProgress');
     allowAllNetworkAdmission(agent);
     agent.started = true;
-    agent.peerSyncSession = new PeerSyncSession();
+    resetPeerSyncSessionForTest(agent);
     agent.config.syncContextGraphs = ['selected-cg'];
     agent.config.rfc64PublicCatalogBootstrap = {
       acceptedPublicPolicies: [{ completeSwmProviders: [PEER_A] }],
@@ -574,7 +574,7 @@ describe('sync-on-connect churn gates', () => {
     const agent = await createUnstartedAgent('SyncOnConnectDisabled');
     agent.config.syncOnConnectEnabled = false;
     agent.started = true;
-    agent.peerSyncSession = new PeerSyncSession();
+    resetPeerSyncSessionForTest(agent);
     const calls: string[] = [];
     const runOrdinary = async (peerId: string) => {
       calls.push(peerId);

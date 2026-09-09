@@ -1,15 +1,27 @@
 import type { Logger, OperationContext } from '@origintrail-official/dkg-core';
-import type { DKGAgent } from '../dkg-agent.js';
+import type { PeerSyncConnection } from '../p2p/peer-connection.js';
 import type { PeerSyncSession } from './peer-sync-session.js';
 
-export interface PeerSyncConnection {
-  direction: 'inbound' | 'outbound';
-  remoteAddr?: { toString(): string };
-  remotePeer: { toString(): string };
+export interface PeerConnectionSyncPorts {
+  readonly localPeerId: string;
+  readCatalogResponsibilities(): readonly {
+    contextGraphId: string;
+    active: boolean;
+    mode: string;
+  }[];
+  resolveCatalogAuthority(contextGraphId: string): { active: boolean; mode: string };
+  markReplayPending(contextGraphId: string, remotePeer: string): void;
+  clearReplayPending(contextGraphId: string, remotePeer: string): void;
+  ensureAdmitted(remotePeer: string, ctx: OperationContext, signal: AbortSignal): Promise<boolean>;
+  enrichPeerStore(connection: PeerSyncConnection): Promise<void>;
+  drainPendingSenderKey(remotePeer: string, ctx: OperationContext): Promise<number>;
+  reannounceCatalogHeads(remotePeer: string): Promise<unknown>;
+  requestCatalogReplay(contextGraphId: string): Promise<{ failed: number }>;
+  queueSync(remotePeer: string, onError: (peer: string, error: unknown) => void): boolean;
 }
 
-interface PeerConnectionSyncContext {
-  agent: DKGAgent;
+export interface PeerConnectionSyncContext {
+  ports: PeerConnectionSyncPorts;
   session: PeerSyncSession;
   ctx: OperationContext;
   log: Pick<Logger, 'info' | 'warn'>;
@@ -21,50 +33,49 @@ export async function syncOpenedPeerConnection(
   context: PeerConnectionSyncContext,
   connection: PeerSyncConnection,
 ): Promise<void> {
-  const { agent, session, ctx, log, authorityContextGraphIds } = context;
+  const { ports, session, ctx, log, authorityContextGraphIds } = context;
   const { signal } = session;
   signal.throwIfAborted();
   const remotePeer = connection.remotePeer.toString();
-  if (remotePeer === agent.node.libp2p.peerId.toString()) return;
+  if (remotePeer === ports.localPeerId) return;
   const replayContextGraphIds = [...new Set([
-    ...agent.readRfc64CatalogResponsibilitiesV1()
+    ...ports.readCatalogResponsibilities()
       .filter((responsibility) => responsibility.active && responsibility.mode !== 'legacy')
       .map((responsibility) => responsibility.contextGraphId),
     ...authorityContextGraphIds.filter((cg) => {
-      const authority = agent.resolveRfc64CatalogReceiverAuthorityV1(cg);
+      const authority = ports.resolveCatalogAuthority(cg);
       return authority.active && authority.mode !== 'legacy';
     }),
   ])].sort();
   for (const contextGraphId of replayContextGraphIds) {
-    agent.markRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
+    ports.markReplayPending(contextGraphId, remotePeer);
   }
   const releaseCleanup = session.onClose(() => {
     for (const contextGraphId of replayContextGraphIds) {
-      agent.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
+      ports.clearReplayPending(contextGraphId, remotePeer);
     }
   });
   try {
     let admitted = false;
     try {
-      admitted = await agent.networkAdmissionCoordinator.ensureAdmitted(remotePeer, ctx, { signal });
+      admitted = await session.step(() => ports.ensureAdmitted(remotePeer, ctx, signal));
     } catch (err: unknown) {
       signal.throwIfAborted();
       const message = err instanceof Error ? err.message : String(err);
       log.warn(ctx, `Network admission probe failed for ${remotePeer.slice(-8)} on connect: ${message}`);
       for (const contextGraphId of replayContextGraphIds) {
-        agent.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
+        ports.clearReplayPending(contextGraphId, remotePeer);
       }
       return;
     }
-    signal.throwIfAborted();
     if (!admitted) {
       for (const contextGraphId of replayContextGraphIds) {
-        agent.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer);
+        ports.clearReplayPending(contextGraphId, remotePeer);
       }
       return;
     }
     try {
-      await agent.enrichPeerStoreFromInboundCircuit(connection);
+      await session.step(() => ports.enrichPeerStore(connection));
     } catch (err: unknown) {
       signal.throwIfAborted();
       const message = err instanceof Error ? err.message : String(err);
@@ -76,8 +87,7 @@ export async function syncOpenedPeerConnection(
     // peerId at publish time. Tolerant of profile-lookup failure
     // (the next connection:open will retry).
     try {
-      const drained = await agent.drainPendingSenderKeyForPeer(remotePeer, ctx);
-      signal.throwIfAborted();
+      const drained = await session.step(() => ports.drainPendingSenderKey(remotePeer, ctx));
       if (drained > 0) {
         log.info(ctx, `Drained ${drained} pending SWM sender-key package(s) for ${remotePeer}`);
       }
@@ -86,7 +96,6 @@ export async function syncOpenedPeerConnection(
       const message = err instanceof Error ? err.message : String(err);
       log.warn(ctx, `Pending SWM sender-key drain on connect failed for ${remotePeer}: ${message}`);
     }
-    signal.throwIfAborted();
     // The receiver owns replay completeness. Provider-initiated pushes do
     // not carry a promised-head manifest and can otherwise leave a brief
     // A-applied/B-undiscovered window reporting complete. Request every
@@ -95,29 +104,32 @@ export async function syncOpenedPeerConnection(
     // cannot request V2 completion, but they can still consume ordinary
     // head announcements. Upgraded receivers remain fenced by the scoped
     // pull below and never interpret this compatibility push as complete.
-    const reannouncement = agent.reannounceRfc64CatalogHeadsToPeerV1(remotePeer).catch((err: unknown) => {
-      if (signal.aborted) return;
-      const message = err instanceof Error ? err.message : String(err);
-      log.warn(ctx, `RFC-64 compatibility re-announcement failed for ${remotePeer.slice(-8)}: ${message}`);
+    const reannouncement = ports.reannounceCatalogHeads(remotePeer).catch((err: unknown) => {
+      session.commit(() => {
+        const message = err instanceof Error ? err.message : String(err);
+        log.warn(ctx, `RFC-64 compatibility re-announcement failed for ${remotePeer.slice(-8)}: ${message}`);
+      });
     });
     const replays = replayContextGraphIds.map((contextGraphId) =>
-      agent.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId).then((result) => {
-        if (signal.aborted) return;
-        if (result.failed > 0) {
-          log.warn(ctx, `RFC-64 catalog replay incomplete for "${contextGraphId}" after ${remotePeer.slice(-8)} connected`);
-        }
+      ports.requestCatalogReplay(contextGraphId).then((result) => {
+        session.commit(() => {
+          if (result.failed > 0) {
+            log.warn(ctx, `RFC-64 catalog replay incomplete for "${contextGraphId}" after ${remotePeer.slice(-8)} connected`);
+          }
+        });
       }).catch((err: unknown) => {
-        if (signal.aborted) return;
-        const message = err instanceof Error ? err.message : String(err);
-        log.warn(ctx, `RFC-64 catalog replay failed after ${remotePeer.slice(-8)} connected: ${message}`);
+        session.commit(() => {
+          const message = err instanceof Error ? err.message : String(err);
+          log.warn(ctx, `RFC-64 catalog replay failed after ${remotePeer.slice(-8)} connected: ${message}`);
+        });
       }),
     );
-    agent.queueSyncFromPeerOnConnect(remotePeer, (peer, error) => session.commit(() => {
+    session.commit(() => ports.queueSync(remotePeer, (peer, error) => session.commit(() => {
       log.warn(ctx, `Sync-on-connect failed for ${peer.slice(-8)}: ${error instanceof Error ? error.message : String(error)}`);
-    }));
+    })));
     // Catalog operations have their own runtime drain. Keep this connection's
     // pending-fence cleanup registered until those terminal promises settle.
-    await Promise.all([reannouncement, ...replays]);
+    await session.step(() => Promise.all([reannouncement, ...replays]));
   } finally {
     releaseCleanup();
   }

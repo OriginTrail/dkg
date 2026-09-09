@@ -52,7 +52,28 @@ describe('peer-event lifecycle', () => {
       let reportError!: Parameters<DKGAgent['queueSyncFromPeerOnConnect']>[1];
       vi.spyOn(f.agent, 'queueSyncFromPeerOnConnect').mockImplementation((_peer, onError) => { reportError = onError; return true; });
       const log = { info: vi.fn(), warn: vi.fn() };
-      const context = { agent: f.agent, session, ctx: createOperationContext('sync'), log, authorityContextGraphIds: ['active', 'inactive', 'legacy'] };
+      const ports = {
+        localPeerId: f.agent.node.libp2p.peerId.toString(),
+        readCatalogResponsibilities: () => f.agent.readRfc64CatalogResponsibilitiesV1(),
+        resolveCatalogAuthority: (contextGraphId: string) => f.agent.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
+        markReplayPending: (contextGraphId: string, remotePeer: string) => f.agent.markRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer),
+        clearReplayPending: (contextGraphId: string, remotePeer: string) => f.agent.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer),
+        ensureAdmitted: (remotePeer: string, ctx: ReturnType<typeof createOperationContext>, signal: AbortSignal) => (
+          f.agent.networkAdmissionCoordinator.ensureAdmitted(remotePeer, ctx, { signal })
+        ),
+        enrichPeerStore: (connection: Parameters<DKGAgent['enrichPeerStoreFromInboundCircuit']>[0]) => (
+          f.agent.enrichPeerStoreFromInboundCircuit(connection)
+        ),
+        drainPendingSenderKey: (remotePeer: string, ctx: ReturnType<typeof createOperationContext>) => (
+          f.agent.drainPendingSenderKeyForPeer(remotePeer, ctx)
+        ),
+        reannounceCatalogHeads: (remotePeer: string) => f.agent.reannounceRfc64CatalogHeadsToPeerV1(remotePeer),
+        requestCatalogReplay: (contextGraphId: string) => f.agent.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId),
+        queueSync: (remotePeer: string, onError: Parameters<DKGAgent['queueSyncFromPeerOnConnect']>[1]) => (
+          f.agent.queueSyncFromPeerOnConnect(remotePeer, onError)
+        ),
+      };
+      const context = { ports, session, ctx: createOperationContext('sync'), log, authorityContextGraphIds: ['active', 'inactive', 'legacy'] };
       await syncOpenedPeerConnection(context, { direction: 'inbound', remotePeer: f.agent.node.libp2p.peerId });
       expect(admission).not.toHaveBeenCalled();
       await syncOpenedPeerConnection(context, { direction: 'inbound', remotePeer: f.peer });

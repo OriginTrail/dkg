@@ -9,6 +9,7 @@ import type { Rfc64AuthorizedSwmRecoveryPlanV1 } from '../../src/rfc64/swm-recov
 import type { SelectedSwmBootstrapAdmission } from '../../src/sync/selected-swm-bootstrap-admission.js';
 import {
   type SyncOnConnectPeerJobRunner,
+  type SyncOnConnectPeerSchedulerCallbacks,
 } from '../../src/sync/on-connect/peer-scheduler.js';
 
 type Rfc64CoordinatorTestPort = Pick<
@@ -62,6 +63,53 @@ export function createSyncOnConnectPeerJobRunnerForTest(
   return internalAgent.createSyncOnConnectPeerJobRunner(remotePeer);
 }
 
+/** Open a production-shaped peer-sync session for tests that bypass start(). */
+export function resetPeerSyncSessionForTest(
+  agent: SyncOnConnectTestAgent,
+): PeerSyncSession {
+  const internalAgent = agent as unknown as {
+    createSyncOnConnectPeerJobRunner: (
+      peerId: string,
+      options?: Record<string, never>,
+      session?: PeerSyncSession,
+    ) => SyncOnConnectPeerJobRunner<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>>;
+  };
+  let session!: PeerSyncSession;
+  session = new PeerSyncSession({
+    createJob: (remotePeer) => internalAgent.createSyncOnConnectPeerJobRunner(
+      remotePeer,
+      {},
+      session,
+    ),
+    onInternalError: () => undefined,
+  });
+  agent.peerSyncSession.close();
+  agent.peerSyncSession = session;
+  return session;
+}
+
+/** Replace only scheduler wiring while retaining the session's seeded state. */
+export function replacePeerSyncSessionSchedulerForTest(
+  agent: SyncOnConnectTestAgent,
+  callbacks: SyncOnConnectPeerSchedulerCallbacks<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>>,
+): PeerSyncSession {
+  const previous = agent.peerSyncSession;
+  const session = new PeerSyncSession(callbacks);
+  for (const peerId of previous.syncingPeers) session.syncingPeers.add(peerId);
+  for (const peerId of previous.skippedNoSyncPeers) session.skippedNoSyncPeers.add(peerId);
+  const copyMap = <T>(from: ReadonlyMap<string, T>, to: Map<string, T>) => {
+    for (const [peerId, value] of from) to.set(peerId, value);
+  };
+  copyMap(previous.catchupOnConnectAt, session.catchupOnConnectAt);
+  copyMap(previous.rfc64ExactCatchupOnConnectAt, session.rfc64ExactCatchupOnConnectAt);
+  copyMap(previous.lastSuccessfulSyncAt, session.lastSuccessfulSyncAt);
+  copyMap(previous.lastSyncProgressAt, session.lastSyncProgressAt);
+  copyMap(previous.syncReconcilerBackoff, session.syncReconcilerBackoff);
+  previous.close();
+  agent.peerSyncSession = session;
+  return session;
+}
+
 export function createRfc64CoordinatorStub(
   overrides: Partial<Rfc64CoordinatorTestPort> = {},
 ): Rfc64CoordinatorTestPort {
@@ -88,7 +136,7 @@ export function installSyncOnConnectPeerJobStub(
     finish?: (remotePeer: string) => void;
   }>,
 ): void {
-  agent.peerSyncSession.getScheduler({
+  replacePeerSyncSessionSchedulerForTest(agent, {
     createJob: (remotePeer) => ({
       runAutomaticSelectedThenOrdinary: async () => {
         await callbacks.runOrdinary?.(remotePeer);
@@ -116,7 +164,7 @@ export async function createUnstartedAgent(
     ...overrides,
   }));
   // These orchestration fixtures explicitly open a session without networking.
-  agent.peerSyncSession = new PeerSyncSession();
+  resetPeerSyncSessionForTest(agent);
   return agent;
 }
 

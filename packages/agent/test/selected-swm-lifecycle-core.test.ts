@@ -770,10 +770,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       const queuedPeers: string[] = [];
       const queueAgent = harness.agent as SelectedSwmLifecycleAgentFixture & Record<string, any>;
       queueAgent.networkAdmissionCoordinator = { isAcceptedPeer: () => true };
-      queueAgent.peerSyncSession = new PeerSyncSession();
-      queueAgent.peerSyncSession.lastSuccessfulSyncAt.set(PEER, Date.now());
-      queueAgent.lastSyncDisconnectedAt = new Map<string, number>();
-      queueAgent.peerSyncSession.getScheduler({
+      queueAgent.peerSyncSession = new PeerSyncSession({
         createJob: (peerId) => ({
           runAutomaticSelectedThenOrdinary: async () => 'not-started',
           runSelected: async () => {
@@ -785,6 +782,8 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         }),
         onInternalError: () => undefined,
       });
+      queueAgent.peerSyncSession.lastSuccessfulSyncAt.set(PEER, Date.now());
+      queueAgent.lastSyncDisconnectedAt = new Map<string, number>();
       queueAgent.getSyncOnConnectPeerScheduler =
         LifecycleSyncMethods.prototype.getSyncOnConnectPeerScheduler;
       queueAgent.syncOnConnectDisconnectBoundary =

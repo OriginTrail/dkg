@@ -1,4 +1,3 @@
-import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import {
@@ -8,6 +7,7 @@ import {
   emptyDetailedSync,
   flushTimers,
   installSyncOnConnectPeerJobStub,
+  resetPeerSyncSessionForTest,
 } from './_helpers/sync-on-connect-test-fixture.js';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
@@ -79,7 +79,7 @@ describe('RFC-64 SWM lane partition and admission', () => {
     await flushTimers();
     expect(queuedRun).toHaveBeenCalledOnce();
     agent.peerSyncSession.close();
-    agent.peerSyncSession = new PeerSyncSession();
+    resetPeerSyncSessionForTest(agent);
 
     agent.getPeerProtocols = async () => [PROTOCOL_SYNC];
     agent.planSharedMemorySyncContextGraphs = async () => ({

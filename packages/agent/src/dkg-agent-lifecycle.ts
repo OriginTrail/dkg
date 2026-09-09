@@ -11,7 +11,7 @@
 import { createHash } from 'node:crypto';
 import { setTimeout as waitForPeerEventTurn } from 'node:timers/promises';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
-import { syncOpenedPeerConnection } from './sync/peer-connection.js';
+import { syncOpenedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -2069,7 +2069,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Open the lifetime before catalog bootstrap or any other startup producer
     // can enqueue recovery. Connection listeners below retain this same session.
     this.peerSyncSession.close();
-    const peerEvents = this.peerSyncSession = new PeerSyncSession();
+    let peerEvents!: PeerSyncSession;
+    peerEvents = new PeerSyncSession({
+      createJob: (remotePeer) => this.createSyncOnConnectPeerJobRunner(remotePeer, {}, peerEvents),
+      onInternalError: (remotePeer, error, stage) => {
+        if (!peerEvents.checkpoint()) return;
+        const detail = error instanceof Error ? error.message : String(error);
+        this.log.error(
+          createOperationContext('sync'),
+          `Sync-on-connect scheduler ${stage} failure for ${remotePeer.slice(-8)}: ${detail}`,
+        );
+      },
+    });
+    this.peerSyncSession = peerEvents;
     this.openVmReconcileRotationState();
     this.finalizationRuntime.markStarted({
       localPeerId: this.peerId,
@@ -3874,9 +3886,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Abort synchronously at the start of stop(), before libp2p tears down.
     // A signal belongs to this node lifetime, including pending continuations.
     const { signal } = peerEvents;
+    const connectionSyncPorts: PeerConnectionSyncPorts = {
+      localPeerId: this.node.libp2p.peerId.toString(),
+      readCatalogResponsibilities: () => this.readRfc64CatalogResponsibilitiesV1(),
+      resolveCatalogAuthority: (contextGraphId) => this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
+      markReplayPending: (contextGraphId, remotePeer) => this.markRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer),
+      clearReplayPending: (contextGraphId, remotePeer) => this.clearRfc64CatalogReplayPeerPendingV1(contextGraphId, remotePeer),
+      ensureAdmitted: (remotePeer, operation, lifetimeSignal) => (
+        this.networkAdmissionCoordinator.ensureAdmitted(remotePeer, operation, { signal: lifetimeSignal })
+      ),
+      enrichPeerStore: (connection) => this.enrichPeerStoreFromInboundCircuit(connection),
+      drainPendingSenderKey: (remotePeer, operation) => this.drainPendingSenderKeyForPeer(remotePeer, operation),
+      reannounceCatalogHeads: (remotePeer) => this.reannounceRfc64CatalogHeadsToPeerV1(remotePeer),
+      requestCatalogReplay: (contextGraphId) => this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId),
+      queueSync: (remotePeer, onError) => this.queueSyncFromPeerOnConnect(remotePeer, onError),
+    };
     this.node.libp2p.addEventListener('connection:open', (evt) => {
       void peerEvents.run(() => syncOpenedPeerConnection({
-        agent: this, session: peerEvents, ctx, log: this.log,
+        ports: connectionSyncPorts, session: peerEvents, ctx, log: this.log,
         authorityContextGraphIds: Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority),
       }, evt.detail), (error) => handleSyncError(evt.detail.remotePeer.toString(), error));
     }, { signal });
@@ -3894,7 +3921,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         .getPeers()
         .some((p) => p.toString() === remotePeer);
       if (stillConnected) return;
-      peerEvents.skippedNoSyncPeers.delete(remotePeer);
+      peerEvents.forgetSkippedNoSync(remotePeer);
       this.lastSyncDisconnectedAt.set(remotePeer, Date.now());
     }, { signal });
 
@@ -4500,15 +4527,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   clearNetworkRejectedPeerState(this: DKGAgent, remotePeer: string): void {
     this.knownCorePeerIds.delete(remotePeer);
     this.knownCorePeerIdsV2.delete(remotePeer);
-    this.peerSyncSession.skippedNoSyncPeers.delete(remotePeer);
-    this.peerSyncSession.catchupOnConnectAt.delete(remotePeer);
-    this.peerSyncSession.rfc64ExactCatchupOnConnectAt.delete(remotePeer);
+    this.peerSyncSession.clearPeer(remotePeer);
     this.lastSyncDisconnectedAt.delete(remotePeer);
-    this.peerSyncSession.lastSuccessfulSyncAt.delete(remotePeer);
-    this.peerSyncSession.lastSyncProgressAt.delete(remotePeer);
     this.selectedSwmBootstrapAdmission.clear(remotePeer);
-    this.peerSyncSession.clearQueuedPeer(remotePeer);
-    this.peerSyncSession.syncReconcilerBackoff.delete(remotePeer);
     this.warmedCores.delete(remotePeer);
     this.warmCoreFailedUnpins.delete(remotePeer);
   }
@@ -4618,18 +4639,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   getSyncOnConnectPeerScheduler(
     this: DKGAgent,
   ): SyncOnConnectPeerScheduler<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>> {
-    const session = this.peerSyncSession;
-    return session.getScheduler({
-      createJob: (remotePeer) => this.createSyncOnConnectPeerJobRunner(remotePeer, {}, session),
-      onInternalError: (remotePeer, error, stage) => {
-        if (!session.checkpoint()) return;
-        const detail = error instanceof Error ? error.message : String(error);
-        this.log.error(
-          createOperationContext('sync'),
-          `Sync-on-connect scheduler ${stage} failure for ${remotePeer.slice(-8)}: ${detail}`,
-        );
-      },
-    });
+    return this.peerSyncSession.getScheduler();
   }
 
   protected createSyncOnConnectPeerJobRunner(
@@ -4657,7 +4667,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // backoff that was explicitly bypassed suppress its invariant ordinary
         // phase after optional selected work consumes the initial probe.
         if (!jobAdmittedByInitialProbe) {
-          const backoff = session.syncReconcilerBackoff.get(remotePeer);
+          const backoff = session.backoffFor(remotePeer);
           if (backoff && Date.now() < backoff.nextRetryAt) return null;
         }
         return this.getSyncReconcilerProbe(remotePeer);
@@ -4692,7 +4702,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer)
       ),
       resetBackoffBeforeRetry: () => {
-        session.syncReconcilerBackoff.delete(remotePeer);
+        session.clearBackoff(remotePeer);
       },
       commitAccounting: (outcome, probe) => {
         session.commit(() => this.applySyncOnConnectAccounting(remotePeer, outcome, probe));
@@ -4731,7 +4741,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const now = Date.now();
     const disconnectBoundary = this.syncOnConnectDisconnectBoundary(remotePeer, now);
     const exactRecoveryPlan = options.rfc64RecoveryPlan;
-    const lastExactQueued = this.peerSyncSession.rfc64ExactCatchupOnConnectAt.get(remotePeer) ?? 0;
+    const admissionState = this.peerSyncSession.admissionState(remotePeer);
+    const { lastExactQueued } = admissionState;
     if (
       exactRecoveryPlan !== undefined
       && lastExactQueued > disconnectBoundary
@@ -4739,7 +4750,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     ) {
       return false;
     }
-    const lastSuccessfulSync = this.peerSyncSession.lastSuccessfulSyncAt.get(remotePeer);
+    const { lastSuccessfulSync } = admissionState;
     if (
       !selectedSwmRetryRequired &&
       lastSuccessfulSync != null &&
@@ -4758,7 +4769,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           delayMs,
           exactRecoveryPlan,
         );
-        if (enqueued) this.peerSyncSession.rfc64ExactCatchupOnConnectAt.set(remotePeer, now);
+        if (enqueued) this.peerSyncSession.recordExactQueued(remotePeer, now);
         return enqueued;
       }
       return selectedSwmRetryRequired
@@ -4766,7 +4777,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         : scheduler.enqueueOrdinary(remotePeer, handleSyncError, delayMs);
     }
 
-    const lastQueued = this.peerSyncSession.catchupOnConnectAt.get(remotePeer) ?? 0;
+    const { lastQueued, backoff } = admissionState;
     if (lastQueued > disconnectBoundary && now - lastQueued < CATCHUP_ON_CONNECT_COOLDOWN_MS) {
       // One exact post-catalog recovery may arrive just after an ordinary
       // timer completed. Its dedicated timestamp above permits that upgrade
@@ -4774,15 +4785,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (exactRecoveryPlan === undefined) return false;
     }
 
-    const backoff = this.peerSyncSession.syncReconcilerBackoff.get(remotePeer);
     if (backoff && now < backoff.nextRetryAt) {
       return false;
     }
 
-    this.peerSyncSession.catchupOnConnectAt.set(remotePeer, now);
-    if (exactRecoveryPlan !== undefined) {
-      this.peerSyncSession.rfc64ExactCatchupOnConnectAt.set(remotePeer, now);
-    }
+    this.peerSyncSession.recordQueued(remotePeer, now, exactRecoveryPlan !== undefined);
     return selectedSwmRetryRequired
       ? scheduler.enqueueSelected(
         remotePeer,
@@ -4908,7 +4915,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
     return runSyncOnConnect({
       remotePeer,
-      syncingPeers: session.syncingPeers,
+      syncingPeers: session.syncingPeerRegistry(),
       signal,
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
       knownCorePeerIds: this.knownCorePeerIds,
@@ -5011,7 +5018,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         && (this.config.syncSharedMemoryOnConnect ?? true),
       logInfo: (ctx, message) => session.commit(() => this.log.info(ctx, message)),
       onPeerSkippedNoSync: (peerId) => {
-        session.commit(() => session.skippedNoSyncPeers.add(peerId));
+        session.commit(() => session.markSkippedNoSync(peerId));
       },
       onSyncAccounting: (peerId, outcome) => {
         if (!session.checkpoint()) return;
@@ -5073,7 +5080,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     ) return 'not-started';
     return runSelectedSharedMemoryRetry({
       remotePeer,
-      syncingPeers: session.syncingPeers,
+      syncingPeers: session.syncingPeerRegistry(),
       signal,
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
       selectedSharedMemoryLane: {
@@ -5096,7 +5103,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       },
       logInfo: (ctx, message) => session.commit(() => this.log.info(ctx, message)),
       onPeerSkippedNoSync: (peerId) => {
-        session.commit(() => session.skippedNoSyncPeers.add(peerId));
+        session.commit(() => session.markSkippedNoSync(peerId));
       },
       onSyncAccounting: (peerId, outcome) => {
         if (!session.checkpoint()) return;
@@ -5352,7 +5359,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } else if (protocols.length > 0) {
       this.knownCorePeerIdsV2.delete(peerId);
     }
-    if (!peerEvents.skippedNoSyncPeers.has(peerId)) return;
+    if (!peerEvents.isSkippedNoSync(peerId)) return;
     if (!syncOnConnectEnabled(this.config)) return;
     if (!protocols.includes(PROTOCOL_SYNC)) return;
     const ctx = createOperationContext('sync');
@@ -5373,8 +5380,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     signal.throwIfAborted();
     const admitted = await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'Peer:update sync retry', signal);
     signal.throwIfAborted();
-    if (!admitted || !session.skippedNoSyncPeers.has(peerId)) return;
-    session.skippedNoSyncPeers.delete(peerId);
+    if (!admitted || !session.consumeSkippedNoSync(peerId)) return;
     this.log.info(ctx, `Peer ${peerId.slice(-8)} now advertises sync protocol — retrying sync-on-connect`);
     await waitForPeerEventTurn(0, undefined, { signal });
     const probe = await this.getSyncReconcilerProbe(peerId);
@@ -5409,10 +5415,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       for (const pid of this.node.libp2p.getPeers()) {
         const peerId = pid.toString();
         if (this.networkAdmissionCoordinator.isRejectedPeer(peerId)) continue;
-        if (session.syncingPeers.has(peerId)) continue;
-        const lastOk = session.lastSuccessfulSyncAt.get(peerId);
+        if (session.isSyncing(peerId)) continue;
+        const freshness = session.peerFreshness(peerId);
+        const lastOk = freshness.lastSuccessfulSync;
         const lastDisconnected = this.syncOnConnectDisconnectBoundary(peerId, now);
-        const lastProgress = session.lastSyncProgressAt.get(peerId);
+        const lastProgress = freshness.lastSyncProgress;
         const lastSyncCooldown = Math.max(lastOk ?? 0, lastProgress ?? 0);
         const selectedSwmRetryRequired =
           this.selectedSwmBootstrapAdmission.isRetryRequired(peerId);
@@ -5428,14 +5435,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // applies ONLY to the periodic reconciler — connection:open and
         // peer:update still fire an immediate attempt, so newly-reachable
         // peers are never delayed.
-        const backoff = session.syncReconcilerBackoff.get(peerId);
+        const backoff = session.backoffFor(peerId);
         const probe = await this.getSyncReconcilerProbe(peerId);
         if (!session.checkpoint()) return;
         if (backoff && now < backoff.nextRetryAt) {
           if (!this.hasSyncReconcilerProbeChanged(backoff, probe)) {
             continue;
           }
-          session.syncReconcilerBackoff.delete(peerId);
+          session.clearBackoff(peerId);
         }
         const admitted = await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'Sync reconciler', signal);
         if (!session.checkpoint()) return;
@@ -5462,34 +5469,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const syncTiming = this.config.syncReconcilerTiming;
     this.syncCheckpoints.pruneExpired?.(now);
     const connected = new Set(this.node.libp2p.getPeers().map((pid) => pid.toString()));
-    for (const [peerId, ts] of this.peerSyncSession.catchupOnConnectAt) {
-      if (!connected.has(peerId) && now - ts >= syncTiming.stalenessThresholdMs) {
-        this.peerSyncSession.catchupOnConnectAt.delete(peerId);
-      }
-    }
-    for (const [peerId, ts] of this.peerSyncSession.rfc64ExactCatchupOnConnectAt) {
-      if (!connected.has(peerId) && now - ts >= syncTiming.stalenessThresholdMs) {
-        this.peerSyncSession.rfc64ExactCatchupOnConnectAt.delete(peerId);
-      }
-    }
+    this.peerSyncSession.pruneDisconnected(connected, now, syncTiming.stalenessThresholdMs);
     for (const [peerId, ts] of this.lastSyncDisconnectedAt) {
       if (now - ts >= syncTiming.stalenessThresholdMs) {
         this.lastSyncDisconnectedAt.delete(peerId);
-      }
-    }
-    for (const [peerId, ts] of this.peerSyncSession.lastSuccessfulSyncAt) {
-      if (!connected.has(peerId) && now - ts >= syncTiming.stalenessThresholdMs) {
-        this.peerSyncSession.lastSuccessfulSyncAt.delete(peerId);
-      }
-    }
-    for (const [peerId, ts] of this.peerSyncSession.lastSyncProgressAt) {
-      if (!connected.has(peerId) && now - ts >= syncTiming.stalenessThresholdMs) {
-        this.peerSyncSession.lastSyncProgressAt.delete(peerId);
-      }
-    }
-    for (const [peerId, backoff] of this.peerSyncSession.syncReconcilerBackoff) {
-      if (!connected.has(peerId) && now >= backoff.nextRetryAt + syncTiming.stalenessThresholdMs) {
-        this.peerSyncSession.syncReconcilerBackoff.delete(peerId);
       }
     }
   }
@@ -5540,18 +5523,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     outcome: SyncOnConnectPeerOutcome,
     probe?: SyncReconcilerProbe,
   ): void {
-    const progressAt = Math.max(Date.now(), (this.peerSyncSession.lastSyncProgressAt.get(peerId) ?? 0) + 1);
-    if (outcome.progress) {
-      this.peerSyncSession.lastSyncProgressAt.set(peerId, progressAt);
-    }
-    if (outcome.fresh) {
-      this.peerSyncSession.lastSuccessfulSyncAt.set(peerId, progressAt);
-    }
-    this.peerSyncSession.skippedNoSyncPeers.delete(peerId);
-
-    if (outcome.reconcilerDisposition === 'clear') {
-      this.peerSyncSession.syncReconcilerBackoff.delete(peerId);
-    } else if (outcome.reconcilerDisposition === 'retry' && probe) {
+    if (this.peerSyncSession.applyAccounting(peerId, outcome) && probe) {
       this.recordSyncReconcilerFailure(peerId, probe);
     }
   }
@@ -5568,13 +5540,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    */
   recordSyncReconcilerFailure(this: DKGAgent, peerId: string, probe: SyncReconcilerProbe): void {
     if (!this.started || !this.isPeerConnectedForSyncBackoff(peerId)) return;
-    const failures = (this.peerSyncSession.syncReconcilerBackoff.get(peerId)?.failures ?? 0) + 1;
+    const failures = (this.peerSyncSession.backoffFor(peerId)?.failures ?? 0) + 1;
     const syncTiming = this.config.syncReconcilerTiming;
     // Clamp the exponent so `2 ** exp` can never overflow before the cap.
     const exp = Math.min(failures - 1, 30);
     const delay = Math.min(syncTiming.backoffBaseMs * 2 ** exp, syncTiming.backoffMaxMs);
     const jittered = delay * (1 + (Math.random() * 2 - 1) * syncTiming.backoffJitter);
-    this.peerSyncSession.syncReconcilerBackoff.set(peerId, {
+    this.peerSyncSession.recordBackoff(peerId, {
       failures,
       nextRetryAt: Date.now() + jittered,
       protocolsKey: probe.protocolsKey,

@@ -55,10 +55,17 @@ export type SyncOnConnectPeerOutcome =
       progress: boolean;
     };
 
+/** Minimal active-peer lease used by both a session owner and focused tests. */
+export interface SyncingPeerRegistry {
+  has(peerId: string): boolean;
+  add(peerId: string): unknown;
+  delete(peerId: string): unknown;
+}
+
 export interface SyncOnConnectContext {
   signal?: AbortSignal;
   remotePeer: string;
-  syncingPeers: Set<string>;
+  syncingPeers: SyncingPeerRegistry;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2?: Set<string>;
@@ -104,7 +111,7 @@ export interface SyncOnConnectContext {
 interface SelectedSharedMemoryRetryContext {
   signal?: AbortSignal;
   remotePeer: string;
-  syncingPeers: Set<string>;
+  syncingPeers: SyncingPeerRegistry;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
   selectedSharedMemoryLane: SelectedSharedMemorySyncLane;
   logInfo: (ctx: OperationContext, message: string) => void;

@@ -1,7 +1,6 @@
 /** Cooperative continuation supervision; transports retain physical drain ownership. */
 export class PeerEventLifetime {
   private readonly controller = new AbortController();
-  private readonly cleanups = new Set<() => void>();
   readonly signal = this.controller.signal;
 
   get state(): 'running' | 'stopped' { return this.signal.aborted ? 'stopped' : 'running'; }
@@ -13,14 +12,20 @@ export class PeerEventLifetime {
   close(): void {
     if (!this.checkpoint()) return;
     this.controller.abort();
-    for (const cleanup of this.cleanups) cleanup();
-    this.cleanups.clear();
   }
 
   onClose(cleanup: () => void): () => void {
     if (!this.checkpoint()) { cleanup(); return () => {}; }
-    this.cleanups.add(cleanup);
-    return () => { this.cleanups.delete(cleanup); };
+    this.signal.addEventListener('abort', cleanup, { once: true });
+    return () => { this.signal.removeEventListener('abort', cleanup); };
+  }
+
+  /** Fence both sides of one awaited continuation against this lifetime. */
+  async step<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    this.signal.throwIfAborted();
+    const result = await work(this.signal);
+    this.signal.throwIfAborted();
+    return result;
   }
 
   async run(work: (signal: AbortSignal) => Promise<void>, onError?: (error: unknown) => void): Promise<void> {
