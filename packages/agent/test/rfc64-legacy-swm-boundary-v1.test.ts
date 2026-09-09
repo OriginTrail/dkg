@@ -22,6 +22,8 @@ import {
   markRfc64LegacySwmRepublishedV1,
   readRfc64LegacySwmBoundaryCountV1,
 } from '../src/rfc64/legacy-swm-boundary-v1.js';
+import { legacySwmBoundaryFixtureQuadsV1 } from
+  './_helpers/legacy-swm-boundary-fixture.js';
 
 const CONTEXT_GRAPH_ID = '0x1111111111111111111111111111111111111111/legacy-boundary';
 const META_GRAPH = contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH_ID);
@@ -238,26 +240,17 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     const root = await secureTempRoot(roots);
     const store = new OxigraphStore();
     const corruptHead = `${UAL_TWO}#dkg-swm-head`;
-    await store.insert([
-      {
-        graph: META_GRAPH,
+    await store.insert(legacySwmBoundaryFixtureQuadsV1({
+      graph: META_GRAPH,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ual: UAL_ONE,
+      operation: 'urn:dkg:workspace-operation:corrupt-head',
+      head: {
         subject: corruptHead,
-        predicate: 'http://dkg.io/ontology/kaUal',
-        object: UAL_ONE,
+        shareOperationId: 'corrupt-share',
       },
-      {
-        graph: META_GRAPH,
-        subject: corruptHead,
-        predicate: 'http://dkg.io/ontology/shareOperationId',
-        object: '"corrupt-share"',
-      },
-      ...legacyOperationQuads(
-        META_GRAPH,
-        UAL_ONE,
-        'corrupt-head',
-        'corrupt-share',
-      ),
-    ]);
+      operationShareOperationIds: ['corrupt-share'],
+    }));
 
     await expect(initializeRfc64LegacySwmBoundaryV1({}, root, store)).rejects.toThrow(
       `RFC-64 legacy SWM head identity differs for ${UAL_ONE}`,
@@ -268,8 +261,22 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     const root = await secureTempRoot(roots);
     const store = new OxigraphStore();
     await store.insert([
-      ...legacyHeadQuads(META_GRAPH, UAL_ONE, 'root'),
-      ...legacyHeadQuads(SUBGRAPH_META_GRAPH, UAL_TWO, 'named'),
+      ...legacySwmBoundaryFixtureQuadsV1({
+        graph: META_GRAPH,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        ual: UAL_ONE,
+        operation: 'urn:dkg:workspace-operation:root',
+        head: { shareOperationId: 'share-root' },
+        operationShareOperationIds: ['share-root'],
+      }),
+      ...legacySwmBoundaryFixtureQuadsV1({
+        graph: SUBGRAPH_META_GRAPH,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        ual: UAL_TWO,
+        operation: 'urn:dkg:workspace-operation:named',
+        head: { shareOperationId: 'share-named' },
+        operationShareOperationIds: ['share-named'],
+      }),
     ]);
 
     const owner = {};
@@ -393,33 +400,36 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
   it('captures only fully joined legacy heads through the real Oxigraph query', async () => {
     const root = await secureTempRoot(roots);
     const store = new OxigraphStore();
-    const correctHead = `${UAL_ONE}#dkg-swm-head`;
-    const mismatchedHead = `${UAL_TWO}#dkg-swm-head`;
     const quads: Quad[] = [
-      { graph: META_GRAPH, subject: correctHead, predicate: 'http://dkg.io/ontology/kaUal', object: UAL_ONE },
-      { graph: META_GRAPH, subject: correctHead, predicate: 'http://dkg.io/ontology/shareOperationId', object: '"share-one"' },
-      { graph: META_GRAPH, subject: 'urn:dkg:workspace-operation:one', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation' },
-      { graph: META_GRAPH, subject: 'urn:dkg:workspace-operation:one', predicate: 'http://dkg.io/ontology/kaUal', object: UAL_ONE },
-      { graph: META_GRAPH, subject: 'urn:dkg:workspace-operation:one', predicate: 'http://dkg.io/ontology/shareOperationId', object: '"share-one"' },
-      { graph: META_GRAPH, subject: 'urn:dkg:workspace-operation:one', predicate: 'http://dkg.io/ontology/contextGraphId', object: `"${CONTEXT_GRAPH_ID}"` },
+      ...legacySwmBoundaryFixtureQuadsV1({
+        graph: META_GRAPH,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        ual: UAL_ONE,
+        operation: 'urn:dkg:workspace-operation:one',
+        head: { shareOperationId: 'share-one' },
+        operationShareOperationIds: ['share-one'],
+      }),
       // This head looks plausible but its operation carries another share id,
       // so the production join must not classify it as a captured legacy row.
-      { graph: META_GRAPH, subject: mismatchedHead, predicate: 'http://dkg.io/ontology/kaUal', object: UAL_TWO },
-      { graph: META_GRAPH, subject: mismatchedHead, predicate: 'http://dkg.io/ontology/shareOperationId', object: '"share-two"' },
-      { graph: META_GRAPH, subject: 'urn:dkg:workspace-operation:two', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation' },
-      { graph: META_GRAPH, subject: 'urn:dkg:workspace-operation:two', predicate: 'http://dkg.io/ontology/kaUal', object: UAL_TWO },
-      { graph: META_GRAPH, subject: 'urn:dkg:workspace-operation:two', predicate: 'http://dkg.io/ontology/shareOperationId', object: '"different-share"' },
-      { graph: META_GRAPH, subject: 'urn:dkg:workspace-operation:two', predicate: 'http://dkg.io/ontology/contextGraphId', object: `"${CONTEXT_GRAPH_ID}"` },
+      ...legacySwmBoundaryFixtureQuadsV1({
+        graph: META_GRAPH,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        ual: UAL_TWO,
+        operation: 'urn:dkg:workspace-operation:two',
+        head: { shareOperationId: 'share-two' },
+        operationShareOperationIds: ['different-share'],
+      }),
     ];
     // Concrete repeated history exercises the real store's join and DISTINCT
     // semantics. None of these old share IDs matches the one current head.
     for (let index = 0; index < 512; index += 1) {
-      quads.push(...legacyOperationQuads(
-        META_GRAPH,
-        UAL_ONE,
-        `one-old-${index}`,
-        `share-one-old-${index}`,
-      ));
+      quads.push(...legacySwmBoundaryFixtureQuadsV1({
+        graph: META_GRAPH,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        ual: UAL_ONE,
+        operation: `urn:dkg:workspace-operation:one-old-${index}`,
+        operationShareOperationIds: [`share-one-old-${index}`],
+      }));
     }
     await store.insert(quads);
 
@@ -449,13 +459,22 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     );
     const store = new OxigraphStore();
     await store.insert([
-      ...legacyHeadQuads(META_GRAPH, UAL_ONE, 'root-one'),
-      ...legacyHeadQuads(
-        secondMetaGraph,
-        UAL_TWO,
-        'root-two',
-        secondContextGraphId,
-      ),
+      ...legacySwmBoundaryFixtureQuadsV1({
+        graph: META_GRAPH,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        ual: UAL_ONE,
+        operation: 'urn:dkg:workspace-operation:root-one',
+        head: { shareOperationId: 'share-root-one' },
+        operationShareOperationIds: ['share-root-one'],
+      }),
+      ...legacySwmBoundaryFixtureQuadsV1({
+        graph: secondMetaGraph,
+        contextGraphId: secondContextGraphId,
+        ual: UAL_TWO,
+        operation: 'urn:dkg:workspace-operation:root-two',
+        head: { shareOperationId: 'share-root-two' },
+        operationShareOperationIds: ['share-root-two'],
+      }),
     ]);
     const querySpy = vi.spyOn(store, 'query');
 
@@ -536,35 +555,4 @@ function scriptedCaptureStore(
 
 function testUal(kaNumber: number): string {
   return `did:dkg:otp:20430/0x1111111111111111111111111111111111111111/${kaNumber}`;
-}
-
-function legacyHeadQuads(
-  graph: string,
-  ual: string,
-  id: string,
-  contextGraphId = CONTEXT_GRAPH_ID,
-): Quad[] {
-  const head = `${ual}#dkg-swm-head`;
-  const shareId = `"share-${id}"`;
-  return [
-    { graph, subject: head, predicate: 'http://dkg.io/ontology/kaUal', object: ual },
-    { graph, subject: head, predicate: 'http://dkg.io/ontology/shareOperationId', object: shareId },
-    ...legacyOperationQuads(graph, ual, id, `share-${id}`, contextGraphId),
-  ];
-}
-
-function legacyOperationQuads(
-  graph: string,
-  ual: string,
-  id: string,
-  shareId: string,
-  contextGraphId = CONTEXT_GRAPH_ID,
-): Quad[] {
-  const operation = `urn:dkg:workspace-operation:${id}`;
-  return [
-    { graph, subject: operation, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation' },
-    { graph, subject: operation, predicate: 'http://dkg.io/ontology/kaUal', object: ual },
-    { graph, subject: operation, predicate: 'http://dkg.io/ontology/shareOperationId', object: JSON.stringify(shareId) },
-    { graph, subject: operation, predicate: 'http://dkg.io/ontology/contextGraphId', object: `"${contextGraphId}"` },
-  ];
 }
