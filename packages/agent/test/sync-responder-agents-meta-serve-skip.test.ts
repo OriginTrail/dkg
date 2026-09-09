@@ -4,6 +4,7 @@ import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
+import { mutableSwmExpiryRuntimeSettings } from './_helpers/sync-responder.js';
 
 /**
  * Chunk 2 — responder serve-skip for the agents registry `_meta` graph (#1233).
@@ -95,7 +96,7 @@ describe('sync responder durable-meta phase — injected serve-skip predicate', 
       protocolSync: '/origintrail/dkg/sync/1.0.0',
       syncDeniedResponse: 'sync-denied',
       syncPageSize: 5000,
-      sharedMemoryTtlMs: 0,
+      swmExpiryRuntimeSettings: mutableSwmExpiryRuntimeSettings(0),
       store,
       peerId: 'self-peer',
       parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,

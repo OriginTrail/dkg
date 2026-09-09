@@ -3,6 +3,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
+import { mutableSwmExpiryRuntimeSettings } from './_helpers/sync-responder.js';
 
 /**
  * Phase C — `sinceBatchId` delta sync (responder side).
@@ -71,7 +72,7 @@ describe('sync responder — Phase C sinceBatchId delta filter', () => {
       protocolSync: '/origintrail/dkg/sync/1.0.0',
       syncDeniedResponse: 'sync-denied',
       syncPageSize: 5000,
-      sharedMemoryTtlMs: 0,
+      swmExpiryRuntimeSettings: mutableSwmExpiryRuntimeSettings(0),
       store,
       peerId: 'self-peer',
       parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,

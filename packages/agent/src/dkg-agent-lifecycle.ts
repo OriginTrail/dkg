@@ -3330,7 +3330,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       protocolSync: PROTOCOL_SYNC,
       syncDeniedResponse: SYNC_DENIED_RESPONSE,
       syncPageSize: SYNC_PAGE_SIZE,
-      getSharedMemoryTtlMs: () => this.config.sharedMemoryTtlMs,
+      swmExpiryRuntimeSettings: this.swmExpiryRuntimeSettings,
       store: this.store,
       publicSnapshotStore: this.publicSnapshotStore,
       peerId: this.peerId,

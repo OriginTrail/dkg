@@ -95,7 +95,8 @@ async function fixture(count: number, noProgress = false, dataDeleted = 0) {
   vi.spyOn(store, 'hasGraph').mockResolvedValue(true);
   vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
     if (options?.source === 'agent.swmCleanup.revalidateOperation') {
-      return { type: 'bindings', bindings: [...operations].map(op => ({ op, re: 'urn:expiry:root' })) };
+      const op = [...operations].find(candidate => sparql.includes(`<${candidate}>`));
+      return { type: 'bindings', bindings: op ? [{ op, re: 'urn:expiry:root' }] : [] };
     }
     if (options?.source === 'agent.swmCleanup.expiredOperations') {
       stats.selections++;
@@ -127,14 +128,14 @@ async function fixture(count: number, noProgress = false, dataDeleted = 0) {
 }
 
 describe('bounded SWM expiry through DKGAgent', () => {
-  it.each([0, 1, 250, 251, 501])('removes all %i operations with a fresh graph-family discovery for every batch', async count => {
+  it.each([0, 1, 250, 251, 501])('removes all %i operations with lock-protected graph-family discovery per operation', async count => {
     const f = await fixture(count);
     const [first, joined] = await Promise.all([f.agent.cleanupExpiredSharedMemory(), f.agent.cleanupExpiredSharedMemory()]);
     expect(f.operations.size).toBe(0);
     expect(first).toBe(count * 3);
     expect(joined).toBe(first);
     expect(f.stats.largestBatch).toBeLessThanOrEqual(250);
-    expect(f.stats.familyLists).toBe(Math.ceil(count / 250));
+    expect(f.stats.familyLists).toBe(count);
     expect(f.stats.maxActive).toBe(1);
     const selections = f.stats.selections;
     expect(await f.agent.cleanupExpiredSharedMemory()).toBe(0);
@@ -188,6 +189,46 @@ it('keeps a disabled cleanup from selecting expired operations', async () => {
   f.agent.setSharedMemoryTtlMs(0);
   expect(await f.agent.cleanupExpiredSharedMemory()).toBe(0);
   expect(f.stats.selections).toBe(0);
+});
+
+it('stops a real active cleanup before deletion when TTL is disabled mid-selection', async () => {
+  const agent = await DKGAgent.create({
+    name: 'expiry-disable-active-pass',
+    chainAdapter: new MockChainAdapter(),
+    sharedMemoryTtlMs: 60_000,
+  });
+  agents.push(agent);
+  const internals = agent as unknown as Internals;
+  await internals.store.insert(Array.from({ length: 1001 }, (_, index) => [
+    { subject: `urn:expiry:disable:${index}`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation', graph: META },
+    { subject: `urn:expiry:disable:${index}`, predicate: 'http://dkg.io/ontology/publishedAt', object: '"2020-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>', graph: META },
+  ]).flat());
+  let releaseSelection!: () => void;
+  const selectionGate = new Promise<void>(resolve => { releaseSelection = resolve; });
+  let selectionEntered!: () => void;
+  const selected = new Promise<void>(resolve => { selectionEntered = resolve; });
+  const query = internals.store.query.bind(internals.store);
+  const querySpy = vi.spyOn(internals.store, 'query').mockImplementation(async (sparql, options) => {
+    const result = await query(sparql, options);
+    if (options?.source === 'agent.swmCleanup.expiredOperations') {
+      selectionEntered();
+      await selectionGate;
+    }
+    return result;
+  });
+  const deleted = vi.spyOn(internals.store, 'deleteByPattern');
+  vi.useFakeTimers();
+  internals.swmExpiryCleanupWorker.start();
+  const timerTurn = vi.advanceTimersByTimeAsync(0);
+  await selected;
+  agent.setSharedMemoryTtlMs(0);
+  releaseSelection();
+  await timerTurn;
+  await vi.advanceTimersByTimeAsync(100);
+
+  expect(querySpy.mock.calls.filter(([, options]) =>
+    options?.source === 'agent.swmCleanup.expiredOperations')).toHaveLength(1);
+  expect(deleted).not.toHaveBeenCalled();
 });
 
 it('drains an in-flight expiry selection before closing the real agent store', async () => {
@@ -348,6 +389,59 @@ it('revalidates a hydrated batch after a concurrent replacement releases its wri
     .toMatchObject({ type: 'bindings' });
 });
 
+it('does not let one blocked operation hold an unrelated writer behind the cleanup page', async () => {
+  const agent = await DKGAgent.create({
+    name: 'expiry-independent-operation-locks',
+    chainAdapter: new MockChainAdapter(),
+    sharedMemoryTtlMs: 60_000,
+  });
+  agents.push(agent);
+  const { store, writeLocks } = agent as unknown as Internals;
+  const rdfType = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+  const dkg = 'http://dkg.io/ontology/';
+  const roots = ['urn:expiry:independent:a', 'urn:expiry:independent:b'];
+  await store.insert(roots.flatMap((root, index) => [
+    { subject: `urn:expiry:independent:op:${index}`, predicate: rdfType, object: `${dkg}WorkspaceOperation`, graph: META },
+    { subject: `urn:expiry:independent:op:${index}`, predicate: `${dkg}publishedAt`, object: '"2020-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>', graph: META },
+    { subject: `urn:expiry:independent:op:${index}`, predicate: `${dkg}rootEntity`, object: root, graph: META },
+    { subject: root, predicate: 'urn:value', object: '"expired"', graph: WS },
+  ]));
+
+  let releaseBlockedWriter!: () => void;
+  const blockedWriterGate = new Promise<void>(resolve => { releaseBlockedWriter = resolve; });
+  let blockedWriterEntered!: () => void;
+  const blockedWriterHasLock = new Promise<void>(resolve => { blockedWriterEntered = resolve; });
+  const blockedWriter = withKeyedLocks(writeLocks, [`${CG}\0${roots[0]}`], async () => {
+    blockedWriterEntered();
+    await blockedWriterGate;
+  });
+  await blockedWriterHasLock;
+
+  let pageSelected!: () => void;
+  const selected = new Promise<void>(resolve => { pageSelected = resolve; });
+  const query = store.query.bind(store);
+  vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+    const result = await query(sparql, options);
+    if (options?.source === 'agent.swmCleanup.expiredOperations') pageSelected();
+    return result;
+  });
+  const cleanup = agent.cleanupExpiredSharedMemory();
+  await selected;
+
+  let unrelatedWriterCompleted = false;
+  const unrelatedWriter = withKeyedLocks(writeLocks, [`${CG}\0${roots[1]}`], async () => {
+    unrelatedWriterCompleted = true;
+  });
+  try {
+    await vi.waitFor(() => expect(unrelatedWriterCompleted).toBe(true));
+    expect(await query(`SELECT ?p WHERE { GRAPH <${WS}> { <${roots[1]}> ?p ?o } }`))
+      .toMatchObject({ bindings: [] });
+  } finally {
+    releaseBlockedWriter();
+    await Promise.all([blockedWriter, unrelatedWriter, cleanup]);
+  }
+});
+
 it('rotates graph priority so a continuously busy graph cannot starve another CG', async () => {
   const f = await fixture(1);
   const otherMeta = 'did:dkg:context-graph:other-expiry/_shared_memory_meta';
@@ -444,12 +538,15 @@ it.each([
 });
 
 
-it('hydrates operation metadata with query count proportional to pages', async () => {
+it('revalidates each operation independently after bounded page discovery', async () => {
   const f = await fixture(501);
   await f.agent.cleanupExpiredSharedMemory();
-  const metadataReads = vi.mocked(f.store.query).mock.calls.filter(([, options]) => options?.source?.startsWith('agent.swmCleanup.'));
+  const cleanupReads = vi.mocked(f.store.query).mock.calls.filter(([, options]) => options?.source?.startsWith('agent.swmCleanup.'));
   expect(f.operations.size).toBe(0);
-  expect(metadataReads.length).toBeLessThanOrEqual(8);
+  expect(cleanupReads.filter(([, options]) =>
+    options?.source === 'agent.swmCleanup.expiredOperations')).toHaveLength(4);
+  expect(cleanupReads.filter(([, options]) =>
+    options?.source === 'agent.swmCleanup.revalidateOperation')).toHaveLength(501);
 });
 
 

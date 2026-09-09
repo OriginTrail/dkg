@@ -56,6 +56,7 @@ import {
   type PriorityAdmission,
 } from '../priority-admission-queue.js';
 import { resolveDurableDataRequestPolicy } from './durable-data-request-policy.js';
+import type { SwmExpiryRuntimeSettings } from '../../swm-expiry-runtime-settings.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
 
@@ -91,10 +92,8 @@ interface RegisterSyncHandlerParams {
   protocolSync: string;
   syncDeniedResponse: string;
   syncPageSize: number;
-  /** Explicit live provider, read for each workspace request. */
-  getSharedMemoryTtlMs?: () => number;
-  /** @deprecated Static test/compatibility setting; prefer getSharedMemoryTtlMs. */
-  sharedMemoryTtlMs?: number;
+  /** Required live setting, shared with expiry cleanup and read per workspace request. */
+  swmExpiryRuntimeSettings: SwmExpiryRuntimeSettings;
   store: TripleStore;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   peerId: string;
@@ -652,7 +651,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         );
       }
       if (isWorkspace) {
-        const sharedMemoryTtlMs = params.getSharedMemoryTtlMs?.() ?? params.sharedMemoryTtlMs ?? 0;
+        const sharedMemoryTtlMs = params.swmExpiryRuntimeSettings.getSharedMemoryTtlMs();
         const cutoff = sharedMemoryTtlMs > 0 ? new Date(Date.now() - sharedMemoryTtlMs).toISOString() : null;
         if (phase === 'snapshot') {
           const snapshotRef = request.snapshotRef?.trim();

@@ -3,6 +3,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
+import { mutableSwmExpiryRuntimeSettings } from './_helpers/sync-responder.js';
 
 /**
  * Regression test for the per-cgId meta sync gap.
@@ -113,7 +114,7 @@ describe('sync responder data phase — per-cgId meta inclusion', () => {
       protocolSync: '/origintrail/dkg/sync/1.0.0',
       syncDeniedResponse: 'sync-denied',
       syncPageSize: 5000,
-      sharedMemoryTtlMs: 0,
+      swmExpiryRuntimeSettings: mutableSwmExpiryRuntimeSettings(0),
       store,
       peerId: 'self-peer',
       parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,

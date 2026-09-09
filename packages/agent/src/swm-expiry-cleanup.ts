@@ -1,11 +1,15 @@
 import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   createOperationContext, GRAPH_KA_CONTENT_SCOPE_VERSION, isSafeIri,
-  contextGraphWorkspaceMetaGraphUri, validateSubGraphName, type Logger,
+  type Logger,
 } from '@origintrail-official/dkg-core';
 import { swmKaWriteLockKey, withKeyedLocks } from '@origintrail-official/dkg-publisher';
 import { stripLiteral } from './dkg-agent-utils.js';
-import { sharedMemoryOwnershipKeyFromGraph } from './sync/shared-memory-graphs.js';
+import {
+  describeSharedMemoryGraphs,
+  parseSharedMemoryMetaGraph,
+  type SharedMemoryGraphDescriptor,
+} from './sync/shared-memory-graphs.js';
 
 /** Keep every accepted duration representable by JavaScript Date. Zero disables TTL. */
 export function validateSharedMemoryTtlMs(ttlMs: number): void {
@@ -35,7 +39,7 @@ export interface SwmExpiryCleanupContinuation {
   /** After finishing these targets, rediscover and rotate past this still-busy graph. */
   readonly restartAfter?: string;
 }
-interface CleanupTarget { readonly contextGraphId: string; readonly metaGraph: string }
+type CleanupTarget = SharedMemoryGraphDescriptor;
 interface GraphFamily { graphs: string[]; ownershipKeys: Set<string> }
 interface ExpiredOperation {
   uri: string;
@@ -63,8 +67,8 @@ export async function runSwmExpiryCleanup(
     if (!continuing) {
       for (const contextGraphId of await new GraphManager(store).listContextGraphs()) {
         if (isClosed()) return result;
-        for (const metaGraph of await listSharedMemoryMetaGraphs(store, contextGraphId)) {
-          targets.push({ contextGraphId, metaGraph });
+        for (const target of await listSharedMemoryMetaGraphs(store, contextGraphId)) {
+          targets.push(target);
         }
       }
       const previous = targets.findIndex(target => target.metaGraph === continuation?.restartAfter);
@@ -79,8 +83,8 @@ export async function runSwmExpiryCleanup(
         const operations = await loadExpiredBatch(store, target.metaGraph, cutoff);
         if (isClosed() || operations.length === 0) { madeProgress = false; break; }
         batches++;
-        // Metadata selection is live: discover graphs again for every selected
-        // page so later arrivals cannot lose metadata while leaving their data.
+        // Each operation rediscovers its graph family after acquiring its own
+        // locks so a concurrent writer cannot leave data behind without metadata.
         let metadataProgress = 0;
         const cleaned = await cleanupExpiredBatch(context, target, cutoff, operations);
         for (const { outcome } of cleaned) {
@@ -205,57 +209,42 @@ async function cleanupExpiredBatch(
   cutoff: string,
   candidates: readonly ExpiredOperation[],
 ): Promise<Array<{ operation: ExpiredOperation; outcome: CleanupOutcome }>> {
-  const lockKeys = candidates.flatMap(operation => cleanupWriteLockKeys(target, operation));
-  return withKeyedLocks(context.writeLocks, lockKeys, async () => {
-    const family = await resolveGraphFamily(context.store, target);
-    const currentByUri = new Map(
-      (await loadExpiredOperations(
-        context.store, target.metaGraph, cutoff, candidates.map(operation => operation.uri),
-      )).map(operation => [operation.uri, operation]),
-    );
-    const cleaned: Array<{ operation: ExpiredOperation; outcome: CleanupOutcome }> = [];
-    for (const candidate of candidates) {
-      if (context.isClosed()) break;
-      const current = currentByUri.get(candidate.uri);
-      if (!current || !sameExpiredOperation(current, candidate)) continue;
-      cleaned.push({
+  const cleaned = await Promise.all(candidates.map(candidate => withKeyedLocks(
+    context.writeLocks,
+    cleanupWriteLockKeys(target, candidate),
+    async () => {
+      if (context.isClosed()) return undefined;
+      const [current] = await loadExpiredOperations(
+        context.store, target.metaGraph, cutoff, [candidate.uri],
+      );
+      if (context.isClosed() || !current || !sameExpiredOperation(current, candidate)) {
+        return undefined;
+      }
+      const family = await resolveGraphFamily(context.store, target);
+      if (context.isClosed()) return undefined;
+      return {
         operation: current,
         outcome: await cleanupExpiredOperation(context, target, family, current),
-      });
-    }
-    return cleaned;
-  });
+      };
+    },
+  )));
+  return cleaned.filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
 }
 
 function cleanupWriteLockKeys(target: CleanupTarget, operation: ExpiredOperation): string[] {
-  const subGraphName = subGraphNameFromMetaGraph(target.contextGraphId, target.metaGraph);
-  const namespace = subGraphName ? `${target.contextGraphId}\0${subGraphName}` : target.contextGraphId;
   return [
-    ...operation.roots.map(root => `${namespace}\0${root}`),
+    ...operation.roots.map(root => `${target.ownershipKey}\0${root}`),
     ...(operation.scope.kind === 'graph-v2' && operation.scope.kaUal
-      ? [swmKaWriteLockKey(target.contextGraphId, subGraphName, operation.scope.kaUal)]
+      ? [swmKaWriteLockKey(target.contextGraphId, target.subGraphName, operation.scope.kaUal)]
       : []),
   ];
 }
 
-function subGraphNameFromMetaGraph(contextGraphId: string, metaGraph: string): string | undefined {
-  const rootMetaGraph = contextGraphWorkspaceMetaGraphUri(contextGraphId);
-  if (metaGraph === rootMetaGraph) return undefined;
-  const prefix = `did:dkg:context-graph:${contextGraphId}/`;
-  const suffix = '/_shared_memory_meta';
-  if (!metaGraph.startsWith(prefix) || !metaGraph.endsWith(suffix)) return undefined;
-  const candidate = metaGraph.slice(prefix.length, -suffix.length);
-  return validateSubGraphName(candidate).valid ? candidate : undefined;
-}
-
 async function resolveGraphFamily(store: TripleStore, target: CleanupTarget): Promise<GraphFamily> {
-  const graphs = await listGraphFamily(store, target.metaGraph.slice(0, -'_meta'.length));
-  const ownershipKeys = new Set<string>();
-  for (const graph of graphs) {
-    const key = sharedMemoryOwnershipKeyFromGraph(target.contextGraphId, graph);
-    if (key) ownershipKeys.add(key);
-  }
-  return { graphs, ownershipKeys };
+  return {
+    graphs: await listGraphFamily(store, target.dataGraph),
+    ownershipKeys: new Set([target.ownershipKey]),
+  };
 }
 
 /** Finish one operation before yielding; stop joins this physical work before closing storage. */
@@ -345,16 +334,14 @@ async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<s
  * families such as `…/_verifiable_memory/…` or `…/_shared_memory_snapshots/…`
  * can never be misread as a sub-graph meta graph.
  */
-async function listSharedMemoryMetaGraphs(store: TripleStore, contextGraphId: string): Promise<string[]> {
-  const rootMetaGraph = contextGraphWorkspaceMetaGraphUri(contextGraphId);
+async function listSharedMemoryMetaGraphs(store: TripleStore, contextGraphId: string): Promise<CleanupTarget[]> {
+  const root = describeSharedMemoryGraphs(contextGraphId)!;
   const cgPrefix = `did:dkg:context-graph:${contextGraphId}/`;
-  const metaSuffix = '/_shared_memory_meta';
-  const metaGraphs = [rootMetaGraph];
+  const targets = [root];
   for (const graph of await listGraphsByPrefix(store, cgPrefix)) {
-    if (graph === rootMetaGraph || !graph.endsWith(metaSuffix)) continue;
-    const subGraphName = graph.slice(cgPrefix.length, graph.length - metaSuffix.length);
-    if (!validateSubGraphName(subGraphName).valid) continue;
-    metaGraphs.push(graph);
+    if (graph === root.metaGraph) continue;
+    const target = parseSharedMemoryMetaGraph(contextGraphId, graph);
+    if (target) targets.push(target);
   }
-  return metaGraphs;
+  return targets;
 }

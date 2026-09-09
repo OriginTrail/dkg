@@ -1,19 +1,13 @@
 import { setImmediate } from 'node:timers/promises';
 import { SWM_CLEANUP_INTERVAL_MS } from './dkg-agent-constants.js';
 import { validateSharedMemoryTtlMs, type SwmExpiryCleanupContinuation, type SwmExpiryCleanupResult } from './swm-expiry-cleanup.js';
+import type { SwmExpiryRuntimeSettings } from './swm-expiry-runtime-settings.js';
 
 type MaintenanceMode = 'manual' | 'periodic';
-export interface SwmExpiryRuntimeSettings {
-  getSharedMemoryTtlMs(): number;
-  setSharedMemoryTtlMs(ttlMs: number): void;
-}
-type LegacyMutableSettings = { sharedMemoryTtlMs: number };
 type CleanupRequest = { readonly kind: 'periodic' } | { readonly kind: 'manual'; readonly cutoffMs: number };
 interface CleanupFlight {
-  readonly request: CleanupRequest;
+  request: CleanupRequest;
   readonly completion: Promise<number>;
-  /** Newer explicit requests waiting behind the current physical pass. */
-  pendingManualCutoffMs?: number;
   continuation?: SwmExpiryCleanupContinuation;
 }
 type WorkerState =
@@ -29,19 +23,16 @@ export class SwmExpiryCleanupWorker {
 
   constructor(
     private readonly processPass: (ttlMs: number, isClosed: () => boolean, continuation?: SwmExpiryCleanupContinuation, cutoffMs?: number) => Promise<SwmExpiryCleanupResult>,
-    private readonly settings: SwmExpiryRuntimeSettings | LegacyMutableSettings,
+    private readonly settings: SwmExpiryRuntimeSettings,
     private readonly intervalMs = SWM_CLEANUP_INTERVAL_MS,
   ) { validateSharedMemoryTtlMs(this.ttlMs()); }
 
   private ttlMs(): number {
-    return 'getSharedMemoryTtlMs' in this.settings
-      ? this.settings.getSharedMemoryTtlMs()
-      : this.settings.sharedMemoryTtlMs;
+    return this.settings.getSharedMemoryTtlMs();
   }
 
   private updateTtlMs(ttlMs: number): void {
-    if ('setSharedMemoryTtlMs' in this.settings) this.settings.setSharedMemoryTtlMs(ttlMs);
-    else this.settings.sharedMemoryTtlMs = ttlMs;
+    this.settings.setSharedMemoryTtlMs(ttlMs);
   }
 
   get running(): boolean {
@@ -75,8 +66,9 @@ export class SwmExpiryCleanupWorker {
       const activeCutoff = flight.request.kind === 'manual'
         ? flight.request.cutoffMs
         : Number.NEGATIVE_INFINITY;
-      if (cutoffMs > Math.max(activeCutoff, flight.pendingManualCutoffMs ?? Number.NEGATIVE_INFINITY)) {
-        flight.pendingManualCutoffMs = cutoffMs;
+      if (cutoffMs > activeCutoff) {
+        flight.request = { kind: 'manual', cutoffMs };
+        flight.continuation = undefined;
       }
       return flight.completion;
     }
@@ -103,7 +95,8 @@ export class SwmExpiryCleanupWorker {
     if (this.state.kind !== 'idle') throw new Error('SWM expiry cleanup requires an idle worker');
     const flight: CleanupFlight = {
       request,
-      completion: Promise.resolve().then(() => this.execute(flight, continuation)),
+      continuation,
+      completion: Promise.resolve().then(() => this.execute(flight)),
     };
     this.state = { kind: 'running', mode: this.state.mode, flight };
     return flight.completion;
@@ -113,37 +106,29 @@ export class SwmExpiryCleanupWorker {
     return this.state.kind === 'running' && this.state.flight === flight;
   }
 
-  private async execute(flight: CleanupFlight, pending?: SwmExpiryCleanupContinuation): Promise<number> {
+  private async execute(flight: CleanupFlight): Promise<number> {
     let deleted = 0;
-    let request = flight.request;
-    let continuation = request.kind === 'manual' ? undefined : pending;
-    // A timer may enqueue a periodic flight and a manual caller may join it
-    // before its first physical pass begins. Promote before touching storage.
-    if (flight.pendingManualCutoffMs !== undefined) {
-      request = { kind: 'manual', cutoffMs: flight.pendingManualCutoffMs };
-      flight.pendingManualCutoffMs = undefined;
-      continuation = undefined;
-    }
     try {
       while (this.owns(flight) && this.ttlMs() > 0) {
-        const result = await this.processPass(this.ttlMs(), () => !this.owns(flight), continuation,
+        const request = flight.request;
+        const continuation = flight.continuation;
+        flight.continuation = undefined;
+        const result = await this.processPass(
+          this.ttlMs(),
+          () => !this.owns(flight) || this.ttlMs() === 0,
+          continuation,
           request.kind === 'manual' ? request.cutoffMs : undefined);
         deleted += result.triplesDeleted;
         if (!this.owns(flight) || this.ttlMs() === 0) break;
-        const pendingManualCutoffMs = flight.pendingManualCutoffMs;
-        if (pendingManualCutoffMs !== undefined) {
-          flight.pendingManualCutoffMs = undefined;
-          request = { kind: 'manual', cutoffMs: pendingManualCutoffMs };
-          continuation = undefined;
+        if (flight.request !== request) {
           await setImmediate();
           continue;
         }
+        flight.continuation = result.continuation;
         if (request.kind === 'periodic') {
-          flight.continuation = result.continuation;
           break;
         }
-        continuation = result.continuation;
-        if (!continuation) break;
+        if (!flight.continuation) break;
         await setImmediate();
       }
       return deleted;

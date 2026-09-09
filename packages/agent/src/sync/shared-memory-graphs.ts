@@ -1,8 +1,31 @@
 import {
-  contextGraphWorkspaceGraphUri,
-  contextGraphWorkspaceMetaGraphUri,
+  contextGraphSharedMemoryMetaUri,
+  contextGraphSharedMemoryUri,
   validateSubGraphName,
 } from '@origintrail-official/dkg-core';
+
+export interface SharedMemoryGraphDescriptor {
+  readonly contextGraphId: string;
+  readonly subGraphName?: string;
+  readonly dataGraph: string;
+  readonly metaGraph: string;
+  readonly ownershipKey: string;
+}
+
+/** Construct the canonical addressing and ownership tuple for one SWM scope. */
+export function describeSharedMemoryGraphs(
+  contextGraphId: string,
+  subGraphName?: string,
+): SharedMemoryGraphDescriptor | undefined {
+  if (subGraphName !== undefined && !validateSubGraphName(subGraphName).valid) return undefined;
+  return {
+    contextGraphId,
+    ...(subGraphName === undefined ? {} : { subGraphName }),
+    dataGraph: contextGraphSharedMemoryUri(contextGraphId, subGraphName),
+    metaGraph: contextGraphSharedMemoryMetaUri(contextGraphId, subGraphName),
+    ownershipKey: subGraphName === undefined ? contextGraphId : `${contextGraphId}\0${subGraphName}`,
+  };
+}
 
 export function isSharedMemoryBucketDescendantDataGraph(graph: string, bucketGraph: string): boolean {
   if (!graph.startsWith(`${bucketGraph}/`)) return false;
@@ -10,6 +33,44 @@ export function isSharedMemoryBucketDescendantDataGraph(graph: string, bucketGra
   if (tail.startsWith('staging/')) return false;
   const parts = tail.split('/');
   return parts.length === 2 && parts[0].length > 0 && /^[0-9]+$/.test(parts[1]);
+}
+
+/** Parse an exact root/named metadata graph into its canonical SWM scope. */
+export function parseSharedMemoryMetaGraph(
+  contextGraphId: string,
+  graph: string,
+): SharedMemoryGraphDescriptor | undefined {
+  const root = describeSharedMemoryGraphs(contextGraphId)!;
+  if (graph === root.metaGraph) return root;
+  const prefix = `did:dkg:context-graph:${contextGraphId}/`;
+  const suffix = '/_shared_memory_meta';
+  if (!graph.startsWith(prefix) || !graph.endsWith(suffix)) return undefined;
+  const subGraphName = graph.slice(prefix.length, -suffix.length);
+  const descriptor = describeSharedMemoryGraphs(contextGraphId, subGraphName);
+  return descriptor?.metaGraph === graph ? descriptor : undefined;
+}
+
+/** Parse an aggregate or per-KA data graph into its canonical SWM scope. */
+export function parseSharedMemoryDataGraph(
+  contextGraphId: string,
+  graph: string,
+): SharedMemoryGraphDescriptor | undefined {
+  const root = describeSharedMemoryGraphs(contextGraphId)!;
+  if (graph === root.dataGraph || isSharedMemoryBucketDescendantDataGraph(graph, root.dataGraph)) {
+    return root;
+  }
+  const prefix = `did:dkg:context-graph:${contextGraphId}/`;
+  const marker = '/_shared_memory';
+  if (!graph.startsWith(prefix)) return undefined;
+  const markerAt = graph.indexOf(marker, prefix.length);
+  if (markerAt <= prefix.length) return undefined;
+  const subGraphName = graph.slice(prefix.length, markerAt);
+  const descriptor = describeSharedMemoryGraphs(contextGraphId, subGraphName);
+  if (!descriptor) return undefined;
+  return graph === descriptor.dataGraph
+    || isSharedMemoryBucketDescendantDataGraph(graph, descriptor.dataGraph)
+    ? descriptor
+    : undefined;
 }
 
 /**
@@ -25,22 +86,7 @@ export function isNamedSubgraphSharedMemoryDataGraph(
   contextGraphId: string,
   graph: string,
 ): boolean {
-  const rootGraph = contextGraphWorkspaceGraphUri(contextGraphId);
-  if (graph === rootGraph || isSharedMemoryBucketDescendantDataGraph(graph, rootGraph)) {
-    return false;
-  }
-
-  const prefix = `did:dkg:context-graph:${contextGraphId}/`;
-  const suffix = '/_shared_memory';
-  if (!graph.startsWith(prefix)) return false;
-  const remainder = graph.slice(prefix.length);
-  const suffixAt = remainder.indexOf(suffix);
-  if (suffixAt <= 0) return false;
-  const subGraphName = remainder.slice(0, suffixAt);
-  if (!validateSubGraphName(subGraphName).valid) return false;
-  const bucketGraph = graph.slice(0, prefix.length + suffixAt + suffix.length);
-  const tail = remainder.slice(suffixAt + suffix.length);
-  return tail === '' || isSharedMemoryBucketDescendantDataGraph(graph, bucketGraph);
+  return parseSharedMemoryDataGraph(contextGraphId, graph)?.subGraphName !== undefined;
 }
 
 /** True only for the exact Shared Memory META graph of a valid named subgraph. */
@@ -48,13 +94,7 @@ export function isNamedSubgraphSharedMemoryMetaGraph(
   contextGraphId: string,
   graph: string,
 ): boolean {
-  const rootMetaGraph = contextGraphWorkspaceMetaGraphUri(contextGraphId);
-  if (graph === rootMetaGraph) return false;
-  const prefix = `did:dkg:context-graph:${contextGraphId}/`;
-  const suffix = '/_shared_memory_meta';
-  if (!graph.startsWith(prefix) || !graph.endsWith(suffix)) return false;
-  const subGraphName = graph.slice(prefix.length, graph.length - suffix.length);
-  return validateSubGraphName(subGraphName).valid;
+  return parseSharedMemoryMetaGraph(contextGraphId, graph)?.subGraphName !== undefined;
 }
 
 /** Resolve the in-memory ownership partition for a Shared Memory data graph. */
@@ -62,35 +102,5 @@ export function sharedMemoryOwnershipKeyFromGraph(
   contextGraphId: string,
   dataGraph: string,
 ): string | undefined {
-  const rootGraph = contextGraphWorkspaceGraphUri(contextGraphId);
-  if (
-    dataGraph === rootGraph
-    || isSharedMemoryBucketDescendantDataGraph(dataGraph, rootGraph)
-  ) {
-    return contextGraphId;
-  }
-
-  const prefix = `did:dkg:context-graph:${contextGraphId}/`;
-  const suffix = '/_shared_memory';
-  if (!dataGraph.startsWith(prefix)) return undefined;
-
-  const remainder = dataGraph.slice(prefix.length);
-  const suffixAt = remainder.indexOf(suffix);
-  if (suffixAt <= 0) return undefined;
-  const bucketGraph = dataGraph.slice(0, prefix.length + suffixAt + suffix.length);
-  const subGraphName = remainder.slice(0, suffixAt);
-  const tail = remainder.slice(suffixAt + suffix.length);
-  if (
-    tail
-    && (
-      !tail.startsWith('/')
-      || !isSharedMemoryBucketDescendantDataGraph(dataGraph, bucketGraph)
-    )
-  ) {
-    return undefined;
-  }
-  if (!subGraphName || subGraphName.includes('/')) return undefined;
-  if (!validateSubGraphName(subGraphName).valid) return undefined;
-
-  return `${contextGraphId}\0${subGraphName}`;
+  return parseSharedMemoryDataGraph(contextGraphId, dataGraph)?.ownershipKey;
 }
