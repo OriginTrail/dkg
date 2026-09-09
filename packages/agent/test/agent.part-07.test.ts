@@ -78,13 +78,10 @@ describe('Random Sampling lifecycle gating', () => {
     const primary = ethers.Wallet.createRandom();
     const chain = new MockChainAdapter('mock:31337', primary.address);
     chain.seedIdentity(primary.address, 53n);
-    vi.spyOn(chain, 'isRandomSamplingReady').mockReturnValue(true);
-    vi.spyOn(chain, 'isShardingTableMember').mockRejectedValue(
-      new Error(
-        'Contract "ShardingTableStorage" not found in Hub at ' +
-          '0x0000000000000000000000000000000000000001',
-      ),
-    );
+    vi.spyOn(chain, 'resolveRandomSamplingAvailability').mockResolvedValue({
+      kind: 'unavailable',
+      reason: 'contracts_not_deployed',
+    });
     const agent = await DKGAgent.create({
       name: 'RsMissingShardingTableStorage',
       listenHost: '127.0.0.1',
