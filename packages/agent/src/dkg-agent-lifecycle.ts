@@ -10388,7 +10388,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // in-memory state needed for one authenticated metadata fetch. That
         // restricted path cannot activate data lanes until this same authority
         // resolver subsequently returns `allowed`.
-        const readAuthority = await this.resolveContextGraphSubscriptionBootstrapAuthority(row.id, {
+        const readAuthority = await this.resolveContextGraphReadAuthority(row.id, {
           allowSubscriptionFallback: false,
         }).catch(() => ({
           outcome: 'unavailable' as const,

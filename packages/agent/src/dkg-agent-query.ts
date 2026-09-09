@@ -710,7 +710,8 @@ export class QueryMethods extends DKGAgentBase {
       signal?: AbortSignal;
     } = {},
   ): Promise<ContextGraphReadAuthorityDecision> {
-    return this.resolveContextGraphReadAuthorityWithRegistrationTimeout(
+    return QueryMethods.prototype.resolveContextGraphReadAuthorityWithRegistrationTimeout.call(
+      this,
       contextGraphId,
       opts,
       CHAIN_POLICY_READ_TIMEOUT_MS,
@@ -726,7 +727,8 @@ export class QueryMethods extends DKGAgentBase {
       signal?: AbortSignal;
     } = {},
   ): Promise<ContextGraphReadAuthorityDecision> {
-    return this.resolveContextGraphReadAuthorityWithRegistrationTimeout(
+    return QueryMethods.prototype.resolveContextGraphReadAuthorityWithRegistrationTimeout.call(
+      this,
       contextGraphId,
       opts,
       CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
