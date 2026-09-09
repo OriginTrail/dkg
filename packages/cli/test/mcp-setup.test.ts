@@ -5,9 +5,10 @@ import { join } from 'node:path';
 import TOML from '@iarna/toml';
 import { parse as parseJsonc } from 'jsonc-parser';
 import { SELECTABLE_SETUP_NETWORKS } from '@origintrail-official/dkg-core';
-import { mcpSetupAction, type McpSetupActionDeps } from '../src/mcp-setup.js';
+import { mcpSetupAction, type McpSetupActionDeps, type PlannedItem } from '../src/mcp-setup.js';
 import { listBundledNetworkConfigNames, resolveKnownNetworkConfigName } from '../src/config.js';
 import { REQUIRED_SKILL_TOKENS } from '../src/skill-template.js';
+import type { ClientTarget } from '../src/mcp-client-registry.js';
 
 /**
  * NO MOCKS. `dkg mcp setup` is a pure CLI ORCHESTRATOR over (a) a real
@@ -204,7 +205,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
         JSON.stringify(merged, null, 2),
       );
     });
-    const loadNetworkConfig = recorder((networkName = 'testnet') => ({
+    const loadNetworkConfig = recorder((networkName: string = 'testnet') => ({
       networkName,
       relays: [],
       defaultContextGraphs: ['agent-context'],
@@ -1148,7 +1149,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // stub knows the operator opted into auto-confirm. The stub
     // returns the plan unchanged → all detected clients register.
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
-    const confirmPlan = recorder(async (planned: any) => [...planned]);
+    const confirmPlan = recorder(async (planned: readonly PlannedItem[], _opts: { yes: boolean }) => [...planned]);
     const deps = makeDeps({ confirmPlan });
 
     await mcpSetupAction({ start: false, fund: false, verify: false, yes: true }, deps);
@@ -2385,6 +2386,39 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
   });
 
   // ── Codex Round-8 Fix 15: per-client failure isolation ───────────
+
+  it.each([false, true])('plans one Windows-backed registration when native and WSL targets alias (Windows first: %s)', async (windowsFirst) => {
+    const configPath = join(tmpHome, 'aliased-cursor.json');
+    writeFileSync(configPath, JSON.stringify({ mcpServers: { dkg: { command: 'old' } } }));
+    const native: ClientTarget = {
+      id: 'cursor', name: 'Cursor', configPath, displayPath: configPath,
+      format: 'json', serverContainer: 'mcpServers', location: 'native',
+    };
+    const windows: ClientTarget = { ...native, name: 'Cursor via WSL', location: 'windows-wsl' };
+    const plans: ClientTarget[][] = [];
+    await mcpSetupAction({ start: false, fund: false, verify: false, force: true }, makeDeps({
+      detectClients: () => windowsFirst ? [windows, native] : [native, windows],
+      confirmPlan: async (planned) => {
+        plans.push(planned.filter(item => item.action !== 'skip').map(item => item.s.target));
+        return planned.map(item => ({ ...item, action: 'skip' }));
+      },
+    }));
+    expect(plans).toEqual([[windows]]);
+    expect(JSON.parse(readFileSync(configPath, 'utf8')).mcpServers.dkg.command).toBe('old');
+  });
+
+  it('rejects a malformed server container during setup while registering a healthy client', async () => {
+    const cursorDir = join(tmpHome, '.cursor');
+    mkdirSync(cursorDir, { recursive: true });
+    const configPath = join(cursorDir, 'mcp.json');
+    const original = '{ "mcpServers": [{ "command": "keep" }], "setting": true }\n';
+    writeFileSync(configPath, original);
+    await expect(mcpSetupAction({ start: false, fund: false, verify: false }, makeDeps()))
+      .rejects.toThrow(/1 client\(s\) failed to register; 1 succeeded/);
+    expect(readFileSync(configPath, 'utf8')).toBe(original);
+    expect(JSON.parse(readFileSync(join(tmpHome, '.claude.json'), 'utf8')).mcpServers.dkg)
+      .toEqual(EXPECTED_INSTALLED_ENTRY());
+  });
 
   it('Codex Round-8 Fix 15 + Round-9 Fix 17: classify error on one client → others still attempted, failing client skipped, action throws partial-failure', async () => {
     // Round-8 Fix 15 isolates per-client classify errors so other

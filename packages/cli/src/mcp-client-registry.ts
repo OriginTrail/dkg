@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { homedir, platform, release as osRelease } from 'node:os';
 import { execSync } from 'node:child_process';
 
@@ -78,6 +78,30 @@ export function parseMcpClientSelector(value: string): { id: McpClientId; locati
     throw new Error(`Unsupported MCP client selector "${value}". Use ${MCP_CLIENT_IDS.join(', ')}, optionally followed by :native or :windows-wsl.`);
   }
   return { id: client.target.id, location };
+}
+
+/** Select each physical owned leaf once, retaining its authoritative persistence location. */
+export function selectMcpClientTargets(
+  clients: readonly ClientTarget[],
+  selector?: ReturnType<typeof parseMcpClientSelector>,
+): ClientTarget[] {
+  const groups = new Map<string, ClientTarget[]>();
+  for (const target of clients) {
+    let physicalPath: string;
+    try { physicalPath = realpathSync(target.configPath); }
+    catch { physicalPath = resolve(target.configPath); }
+    const leaf = JSON.stringify([physicalPath, target.serverContainer, DKG_SERVER_KEY]);
+    const group = groups.get(leaf) ?? [];
+    group.push(target);
+    groups.set(leaf, group);
+  }
+  // Match logical aliases before selecting the persistence strategy. A native
+  // WSL HOME can point at the same NTFS file as a Windows-side client target;
+  // even an explicit :native selector must preserve that file's Windows DACL.
+  return [...groups.values()]
+    .filter(group => !selector || group.some(target => target.id === selector.id
+      && (!selector.location || target.location === selector.location)))
+    .map(group => group.find(target => target.location === 'windows-wsl') ?? group[0]!);
 }
 
 export function clientSkillPath(id: McpClientId, home: string): string | null {

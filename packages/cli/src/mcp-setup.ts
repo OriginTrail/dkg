@@ -1,4 +1,4 @@
-import { detectClients, tildify, clientSkillPath, type ClientTarget } from './mcp-client-registry.js';
+import { detectClients, selectMcpClientTargets, tildify, clientSkillPath, type ClientTarget } from './mcp-client-registry.js';
 import { readRegistration, classifyRegistration, writeRegistration, type DesiredRegistration } from './mcp-client-config.js';
 /**
  * `dkg mcp setup` — bundled init + daemon-start + MCP-client registration.
@@ -158,6 +158,8 @@ export interface PlannedItem {
  * passes its real implementations.
  */
 export interface McpSetupActionDeps {
+  /** Client discovery can be supplied by an isolated setup environment. */
+  detectClients?: typeof detectClients;
   loadNetworkConfig: typeof import('@origintrail-official/dkg-adapter-openclaw').loadNetworkConfig;
   /** Canonical persisted-config network resolver, injectable for tests. */
   resolveKnownNetworkConfigName: typeof resolveKnownNetworkConfigName;
@@ -975,7 +977,7 @@ export async function mcpSetupAction(
 
   // ── Step 4: client detection + classification ─────────────────────
   console.log('');
-  const clients = detectClients();
+  const clients = selectMcpClientTargets((deps.detectClients ?? detectClients)());
   if (clients.length === 0) {
     console.log('No MCP-aware clients detected.');
     console.log('  Print the canonical JSON for manual paste:');

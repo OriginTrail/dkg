@@ -351,11 +351,8 @@ function registrationLocation(target: ClientTarget): {
   body: Record<string, unknown>; container: Record<string, unknown>;
 } | undefined {
   const body = readConfigBody(target);
-  const cursor = body[target.serverContainer];
+  const cursor = readServerContainer(body, target);
   if (cursor === undefined) return undefined;
-  if (!isPlainRecord(cursor)) {
-    throw new Error(`Malformed MCP server container in ${target.displayPath}`);
-  }
   if (!Object.hasOwn(cursor, DKG_SERVER_KEY)) return undefined;
   return { body, container: cursor };
 }
@@ -397,8 +394,7 @@ export function writeRegistration(
   // Everything else passes through from the existing entry
   // unchanged: arbitrary top-level keys (cwd, restartPolicy, …)
   // and arbitrary env keys (NODE_OPTIONS, HTTPS_PROXY, …).
-  const currentContainer = body[target.serverContainer];
-  const container = isPlainRecord(currentContainer) ? currentContainer : {};
+  const container = readServerContainer(body, target) ?? {};
   body[target.serverContainer] = container;
   const currentEntry = container[DKG_SERVER_KEY];
   const currentEntryObj = isPlainRecord(currentEntry) ? currentEntry : {};
@@ -418,8 +414,17 @@ export function readRegistration(target: ClientTarget): RegistrationRead {
 }
 
 function readOwnedRegistration(body: Record<string, unknown>, target: ClientTarget): unknown {
+  return readServerContainer(body, target)?.[DKG_SERVER_KEY];
+}
+
+function readServerContainer(
+  body: Record<string, unknown>,
+  target: ClientTarget,
+): Record<string, unknown> | undefined {
+  if (!Object.hasOwn(body, target.serverContainer)) return undefined;
   const container = body[target.serverContainer];
-  return isPlainRecord(container)
-    ? container[DKG_SERVER_KEY]
-    : undefined;
+  if (!isPlainRecord(container)) {
+    throw new Error(`Malformed MCP server container in ${target.displayPath}`);
+  }
+  return container;
 }

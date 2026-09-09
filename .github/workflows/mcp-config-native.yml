@@ -24,7 +24,7 @@ jobs:
   metadata:
     name: MCP metadata (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -52,7 +52,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          pnpm --dir packages/cli exec esbuild test/fixtures/mcp-config-wsl.fixture.ts --bundle --platform=node --main-fields=module,main --format=cjs --target=node22 --outfile="$env:RUNNER_TEMP/mcp-config-wsl.cjs"
+          pnpm --dir packages/cli run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm --dir packages/cli exec esbuild test/fixtures/mcp-config-wsl.fixture.ts --platform=node --format=esm --target=node22 --outfile=dist/fixtures/mcp-config-wsl.fixture.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           wsl --set-default-version 2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -62,11 +64,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $bundle = (wsl --distribution Ubuntu-24.04 --user root --exec wslpath -u "$env:RUNNER_TEMP/mcp-config-wsl.cjs").Trim()
+          $fixture = (wsl --distribution Ubuntu-24.04 --user root --exec wslpath -u "$env:GITHUB_WORKSPACE/packages/cli/dist/fixtures/mcp-config-wsl.fixture.mjs").Trim()
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $temporary = (wsl --distribution Ubuntu-24.04 --user root --exec wslpath -u "$env:RUNNER_TEMP").Trim()
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $script = (wsl --distribution Ubuntu-24.04 --user root --exec wslpath -u "$env:GITHUB_WORKSPACE/packages/cli/scripts/run-mcp-config-wsl.sh").Trim()
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          wsl --distribution Ubuntu-24.04 --user root --exec bash $script $bundle $temporary
+          wsl --distribution Ubuntu-24.04 --user root --exec bash $script $fixture $temporary
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

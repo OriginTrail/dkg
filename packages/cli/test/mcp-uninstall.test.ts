@@ -12,6 +12,7 @@ import { type ClientTarget } from '../src/mcp-client-registry.js';
 import { dkgDir, configPath } from '../src/config.js';
 import { dkgAuthTokenPath } from '@origintrail-official/dkg-core';
 import { mcpUninstallAction } from '../src/mcp-uninstall.js';
+import { mcpSetupAction } from '../src/mcp-setup.js';
 import { createInterface } from 'node:readline/promises';
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -62,6 +63,34 @@ function read(client: ClientTarget): Record<string, any> {
 }
 
 describe('MCP registration removal', () => {
+  it.each([
+    ['array', [{ command: 'keep' }]],
+    ['string', 'keep'],
+    ['number', 42],
+    ['boolean', false],
+    ['null', null],
+  ])('refuses to overwrite a present %s server container during setup', (_name, value) => {
+    for (const client of [target('Cursor'), target('VSCode', 'servers', 'jsonc')]) {
+      const original = JSON.stringify({ [client.serverContainer]: value, setting: 'keep' }) + '\n';
+      writeFileSync(client.configPath, original);
+      const writesBefore = vi.mocked(writeMcpConfigAtomic).mock.calls.length;
+      expect(() => writeRegistration(client, { command: 'node', args: ['dkg.js'], env: { DKG_HOME: '/fixture' } }))
+        .toThrow('Malformed MCP server container');
+      expect(readFileSync(client.configPath, 'utf8')).toBe(original);
+      expect(vi.mocked(writeMcpConfigAtomic).mock.calls).toHaveLength(writesBefore);
+    }
+  });
+
+  it.each(['mcp_servers = [{ command = "keep" }]\n', 'mcp_servers = "keep"\n'])('refuses to overwrite a malformed TOML container: %s', (original) => {
+    const client = target('Codex', 'mcp_servers', 'toml');
+    writeFileSync(client.configPath, original);
+    const writesBefore = vi.mocked(writeMcpConfigAtomic).mock.calls.length;
+    expect(() => writeRegistration(client, { command: 'node', args: ['dkg.js'], env: { DKG_HOME: '/fixture' } }))
+      .toThrow('Malformed MCP server container');
+    expect(readFileSync(client.configPath, 'utf8')).toBe(original);
+    expect(vi.mocked(writeMcpConfigAtomic).mock.calls).toHaveLength(writesBefore);
+  });
+
   it('refuses to replace a dangling config symlink during a write', () => {
     const client = target('dangling');
     fs.symlinkSync('missing-target.json', client.configPath);
@@ -389,6 +418,52 @@ describe('mcpUninstallAction', () => {
 
 
 describe('stable client selectors', () => {
+  it.each([false, true])('setup writes an aliased WSL leaf once using Windows persistence (symlink: %s)', async (symlink) => {
+    vi.stubEnv('HOME', root);
+    vi.stubEnv('USERPROFILE', root);
+    const nodeHome = join(root, 'node');
+    vi.stubEnv('DKG_HOME', nodeHome);
+    fs.mkdirSync(nodeHome);
+    writeFileSync(join(nodeHome, 'config.json'), JSON.stringify({ name: 'Fixture', networkConfig: 'testnet', apiPort: 9200 }));
+    const native = target('Cursor');
+    if (native.id !== 'cursor') throw new Error('Expected a Cursor fixture');
+    const windows = { ...native, name: 'Cursor via WSL', location: 'windows-wsl' as const };
+    seed(native);
+    if (symlink) {
+      const alias = join(root, 'alias.json');
+      fs.symlinkSync(native.configPath, alias);
+      native.configPath = alias;
+    }
+    const unexpected = (): never => { throw new Error('Unexpected node initialization, start, or funding'); };
+    const writesBefore = vi.mocked(writeMcpConfigAtomic).mock.calls.length;
+    await mcpSetupAction({ installed: true, start: false, fund: false, verify: false, force: true, yes: true }, {
+      detectClients: () => [native, windows],
+      loadNetworkConfig: unexpected, ensureDkgNodeConfig: unexpected,
+      startDaemon: unexpected, fundWalletsBestEffort: unexpected,
+      loadOpWallets: async () => ({ wallets: [] }),
+      findDkgMonorepoRoot: () => null,
+      resolveKnownNetworkConfigName: () => 'testnet',
+      resolveDkgConfigHome: () => nodeHome,
+    });
+    const writes = vi.mocked(writeMcpConfigAtomic).mock.calls.slice(writesBefore);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toEqual([
+      windows.configPath, expect.any(String),
+      expect.objectContaining({ kind: 'windows-wsl' }), expect.any(Object),
+    ]);
+    expect(read(windows).mcpServers.dkg.command).toBe(process.execPath);
+    expect(read(windows).mcpServers.other).toEqual({ command: 'other-server', custom: 'keep' });
+    if (symlink) expect(fs.lstatSync(native.configPath).isSymbolicLink()).toBe(true);
+  });
+
+  it('keeps distinct owned containers in the same physical file independently selectable', async () => {
+    const cursor = target('Cursor');
+    const vscode: ClientTarget = { ...target('VSCode', 'servers', 'jsonc'), configPath: cursor.configPath };
+    writeFileSync(cursor.configPath, JSON.stringify({ mcpServers: { dkg: { command: 'cursor' } }, servers: { dkg: { command: 'vscode' }, other: { command: 'keep' } } }));
+    await mcpUninstallAction({ yes: true }, { detectClients: () => [cursor, vscode], log: () => {} });
+    expect(read(cursor)).toEqual({ mcpServers: {}, servers: { other: { command: 'keep' } } });
+  });
+
   it('selects a Windows-side-only WSL target with the canonical client ID', async () => {
     const template = target('Cursor');
     if (template.id !== 'cursor') throw new Error('Expected a Cursor fixture');
@@ -417,6 +492,7 @@ describe('stable client selectors', () => {
 
   it('retains Windows persistence metadata when a native selector aliases the same WSL file', async () => {
     const native = target('Cursor');
+    if (native.id !== 'cursor') throw new Error('Expected a Cursor fixture');
     const windows = { ...native, name: 'Cursor (Windows-side via WSL)', location: 'windows-wsl' as const };
     seed(native);
     const callsBefore = vi.mocked(writeMcpConfigAtomic).mock.calls.length;

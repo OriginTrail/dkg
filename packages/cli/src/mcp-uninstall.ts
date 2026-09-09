@@ -1,6 +1,4 @@
-import { realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { detectClients, parseMcpClientSelector, type ClientTarget } from './mcp-client-registry.js';
+import { detectClients, parseMcpClientSelector, selectMcpClientTargets, type ClientTarget } from './mcp-client-registry.js';
 import { inspectRegistration, removeRegistration } from './mcp-client-config.js';
 
 export interface McpUninstallCliOptions {
@@ -47,23 +45,7 @@ export async function mcpUninstallAction(
   // Validate against the stable catalog before consulting machine state.
   const selector = opts.client !== undefined ? parseMcpClientSelector(opts.client) : undefined;
   const clients = (deps.detectClients ?? detectClients)();
-  // Select logical aliases as a group before discarding location metadata.
-  // A WSL home can resolve its native and Windows-side Cursor candidates to
-  // the same NTFS file. Even `cursor:native` still needs the Windows strategy
-  // for that physical file so its protected DACL remains authoritative.
-  const groups = new Map<string, ClientTarget[]>();
-  for (const target of clients) {
-    let physicalPath: string;
-    try { physicalPath = realpathSync(target.configPath); }
-    catch { physicalPath = resolve(target.configPath); }
-    const group = groups.get(physicalPath) ?? [];
-    group.push(target);
-    groups.set(physicalPath, group);
-  }
-  const selected = [...groups.values()]
-    .filter(group => !selector || group.some(target => target.id === selector.id
-      && (!selector.location || target.location === selector.location)))
-    .map(group => group.find(target => target.location === 'windows-wsl') ?? group[0]!);
+  const selected = selectMcpClientTargets(clients, selector);
 
   const planned: ClientTarget[] = [];
   const failures: string[] = [];
