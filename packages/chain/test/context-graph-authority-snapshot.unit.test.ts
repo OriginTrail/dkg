@@ -14,8 +14,10 @@ const GOVERNANCE = '0x4444444444444444444444444444444444444444';
 const SECOND_MEMBER = '0x5555555555555555555555555555555555555555';
 const SECOND_AUTHORITY = '0x6666666666666666666666666666666666666666';
 const FINALIZED_HASH = `0x${'55'.repeat(32)}`;
+const NEXT_FINALIZED_HASH = `0x${'56'.repeat(32)}`;
 const CREATION_HASH = `0x${'66'.repeat(32)}`;
 const POLICY_HASH = `0x${'77'.repeat(32)}`;
+const NEXT_POLICY_HASH = `0x${'78'.repeat(32)}`;
 const NAME_HASH = `0x${'88'.repeat(32)}`;
 
 function event(
@@ -45,7 +47,10 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}) {
     deploymentReads: [] as Array<readonly [string, string, string]>,
   };
 
-  const logs: Record<string, readonly ReturnType<typeof event>[]> = {
+  let finalizedNumber = 30;
+  let finalizedHash = FINALIZED_HASH;
+  let cachedAnchorReplaced = false;
+  const logs: Record<string, ReturnType<typeof event>[]> = {
     ContextGraphCreated: [event(10, 1, CREATION_HASH, [9n, OWNER, NAME_HASH])],
     Transfer: [
       event(10, 0, CREATION_HASH, [ethers.ZeroAddress, OWNER, 9n]),
@@ -91,16 +96,27 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}) {
       staticCall: async (contextGraphId: bigint, readOptions: { blockTag: number }) => {
         evidence.staticCalls.push([contextGraphId, readOptions]);
         expect(contextGraphId).toBe(9n);
-        expect(readOptions).toEqual({ blockTag: 30 });
+        expect(readOptions).toEqual({ blockTag: finalizedNumber });
         return current;
       },
     },
     getAddress: async () => GOVERNANCE,
   };
   const provider = {
-    getBlock: async (tag: string | number) => tag === 'finalized'
-      ? { number: 30, hash: FINALIZED_HASH }
-      : { number: 30, hash: options.reorg ? `0x${'cc'.repeat(32)}` : FINALIZED_HASH },
+    getBlock: async (tag: string | number) => {
+      if (tag === 'finalized') return { number: finalizedNumber, hash: finalizedHash };
+      const historicalHash = tag === 30 && cachedAnchorReplaced
+        ? `0x${'cc'.repeat(32)}`
+        : tag === 30
+          ? FINALIZED_HASH
+          : finalizedHash;
+      return {
+        number: Number(tag),
+        hash: options.reorg && tag === finalizedNumber
+          ? `0x${'cc'.repeat(32)}`
+          : historicalHash,
+      };
+    },
     getNetwork: async () => ({ chainId: 31337n }),
   };
   adapter.contracts = {
@@ -119,6 +135,16 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}) {
     return { fromBlock: 7, head: 30, scanProviders: [] };
   };
   adapter.authorityEvidence = evidence;
+  adapter.advanceAuthorityHead = () => {
+    finalizedNumber = 35;
+    finalizedHash = NEXT_FINALIZED_HASH;
+    logs.PublishPolicyUpdated.push(event(33, 0, NEXT_POLICY_HASH));
+    current.publishPolicy = 1n;
+    current[6] = 1n;
+  };
+  adapter.replaceCachedAnchor = () => {
+    cachedAnchorReplaced = true;
+  };
   return adapter as EVMChainAdapter;
 }
 
@@ -168,12 +194,59 @@ describe('RFC-64 Context Graph authority snapshots', () => {
       [17, 26],
       [27, 30],
     ]));
+
+    const repeated = await adapter.getContextGraphAuthoritySnapshot(9n);
+    expect(repeated).toEqual(snapshot);
+    expect(evidence.deploymentReads).toHaveLength(1);
+    expect(evidence.ranges).toHaveLength(18);
+    expect(evidence.filters).toHaveLength(6);
+    expect(evidence.staticCalls).toEqual([
+      [9n, { blockTag: 30 }],
+      [9n, { blockTag: 30 }],
+    ]);
+
+    (adapter as any).advanceAuthorityHead();
+    const advanced = await adapter.getContextGraphAuthoritySnapshot(9n);
+    expect(advanced).toMatchObject({
+      publishPolicy: 1,
+      ownershipEra: '1',
+      policyVersion: '4',
+      rosterVersion: '3',
+      sourceBlockNumber: '33',
+      sourceBlockHash: NEXT_POLICY_HASH,
+    });
+    // Five event types are read once over only the unseen suffix. Creation is
+    // immutable and is never scanned again.
+    expect(evidence.ranges.slice(18)).toEqual(Array(5).fill([31, 35]));
+    expect(evidence.deploymentReads).toHaveLength(1);
   });
 
   it('rejects a finalized anchor that changes while the generation is read', async () => {
     await expect(makeEvmAuthorityAdapter({ reorg: true })
       .getContextGraphAuthoritySnapshot(9n))
       .rejects.toThrow('anchor changed');
+  });
+
+  it('discards the incremental watermark when its finalized anchor was replaced', async () => {
+    const adapter = makeEvmAuthorityAdapter();
+    await adapter.getContextGraphAuthoritySnapshot(9n);
+    (adapter as any).advanceAuthorityHead();
+    (adapter as any).replaceCachedAnchor();
+
+    await expect(adapter.getContextGraphAuthoritySnapshot(9n)).resolves.toMatchObject({
+      publishPolicy: 1,
+      policyVersion: '4',
+    });
+    const evidence = (adapter as any).authorityEvidence as {
+      deploymentReads: unknown[];
+      ranges: Array<readonly [number, number]>;
+    };
+    expect(evidence.deploymentReads).toHaveLength(2);
+    expect(evidence.ranges.slice(18)).toEqual([
+      ...Array(6).fill([7, 16]),
+      ...Array(6).fill([17, 26]),
+      ...Array(6).fill([27, 35]),
+    ]);
   });
 
   it('provides the same authority surface in offline mock-chain mode', async () => {

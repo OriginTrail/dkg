@@ -170,7 +170,26 @@ function buildCursorContextGraphRegistryScanPlan(
   throw new Error(`Unsupported ContextGraphNameRegistry scan mode: ${JSON.stringify(exhaustive)}`);
 }
 
+interface ContextGraphAuthorityHistoryCacheEntry {
+  readonly throughBlockNumber: number;
+  readonly throughBlockHash: string;
+  readonly nameHash: string;
+  readonly ownershipEra: number;
+  readonly publishPolicyUpdates: number;
+  readonly publishAuthorityUpdates: number;
+  readonly participantAdds: number;
+  readonly participantRemoves: number;
+  readonly sourceBlockNumber: number;
+  readonly sourceBlockHash: string;
+  readonly sourceLogIndex: number;
+}
+
 export class ContextGraphMethods extends EVMChainAdapterBase {
+  /** Lazily initialized because this class is applied as a mixin. */
+  private contextGraphAuthorityHistoryCache?: Map<
+    string,
+    ContextGraphAuthorityHistoryCacheEntry
+  >;
   /**
    * Legacy cost-independent authorized signer selection. New publish flows use
    * resolvePublisherPublishPlan once byte size is known so signer, lifetime,
@@ -923,19 +942,36 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           string,
           (...args: unknown[]) => ethers.DeferredTopicFilter
         >;
-        const contractAddress = await contract.getAddress();
-        const { fromBlock } = await this.resolveContractDeployBlock(
-          contractAddress,
-          'getContextGraphAuthoritySnapshot',
-          'ContextGraphStorage',
-        );
+        const contractAddress = (await contract.getAddress()).toLowerCase();
+        const cache = this.contextGraphAuthorityHistoryCache ??= new Map();
+        const cacheKey = `${contractAddress}:${contextGraphId.toString(10)}`;
+        let history = cache.get(cacheKey);
+        if (history) {
+          let anchorMatches = false;
+          if (history.throughBlockNumber === finalized.number) {
+            anchorMatches = history.throughBlockHash === finalized.hash.toLowerCase();
+          } else if (history.throughBlockNumber < finalized.number) {
+            const cachedAnchor = await provider.getBlock(history.throughBlockNumber);
+            anchorMatches = cachedAnchor?.hash?.toLowerCase() === history.throughBlockHash;
+          }
+          if (!anchorMatches) history = undefined;
+        }
+        const fromBlock = history
+          ? history.throughBlockNumber + 1
+          : (await this.resolveContractDeployBlock(
+              contractAddress,
+              'getContextGraphAuthoritySnapshot',
+              'ContextGraphStorage',
+            )).fromBlock;
         const readLogs = async (name: string, ...args: unknown[]) => {
-          const filter = filters[name]!(...args);
           const logs: Array<ethers.EventLog | ethers.Log> = [];
+          if (fromBlock > finalized.number) return logs;
+          const filter = filters[name]!(...args);
           // Production RPCs commonly cap eth_getLogs ranges. Keep every read
-          // deployment-anchored and page-bounded while all state and event
-          // results remain pinned to the single finalized anchor selected
-          // above. The exact Context Graph stays encoded in each filter.
+          // page-bounded while all state and event results remain pinned to
+          // one finalized anchor. After the first complete read, `fromBlock`
+          // advances from the cached finalized watermark instead of the
+          // contract deployment block.
           for (
             let lo = fromBlock;
             lo <= finalized.number;
@@ -963,7 +999,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             contextGraphId,
             { blockTag: finalized.number },
           ),
-          readLogs('ContextGraphCreated', contextGraphId),
+          history ? Promise.resolve([]) : readLogs('ContextGraphCreated', contextGraphId),
           readLogs('Transfer', null, null, contextGraphId),
           readLogs('PublishPolicyUpdated', contextGraphId),
           readLogs('PublishAuthorityUpdated', contextGraphId),
@@ -971,12 +1007,11 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           readLogs('AgentParticipantRemoved', contextGraphId),
         ]);
         options.signal?.throwIfAborted();
-        if (created.length !== 1) {
+        if (!history && created.length !== 1) {
           throw new Error(
             `Context Graph ${contextGraphId.toString()} has ${created.length} finalized creation events`,
           );
         }
-        const creationEvent = created[0] as ethers.EventLog;
         const post = await provider.getBlock(finalized.number);
         if (post?.hash?.toLowerCase() !== finalized.hash.toLowerCase()) {
           throw new Error('finalized Context Graph authority anchor changed during resolution');
@@ -995,7 +1030,32 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           ...publishAuthorityUpdates].sort((left, right) => (
           left.blockNumber - right.blockNumber || left.index - right.index
         ));
-        const source = policyEvents.at(-1)!;
+        const latestPolicyEvent = policyEvents.at(-1);
+        const creationEvent = created[0] as ethers.EventLog | undefined;
+        const sourceBlockNumber = latestPolicyEvent?.blockNumber
+          ?? history?.sourceBlockNumber
+          ?? creationEvent!.blockNumber;
+        const sourceBlockHash = latestPolicyEvent?.blockHash?.toLowerCase()
+          ?? history?.sourceBlockHash
+          ?? creationEvent!.blockHash.toLowerCase();
+        const sourceLogIndex = latestPolicyEvent?.index
+          ?? history?.sourceLogIndex
+          ?? creationEvent!.index;
+        const nextHistory: ContextGraphAuthorityHistoryCacheEntry = Object.freeze({
+          throughBlockNumber: finalized.number,
+          throughBlockHash: finalized.hash.toLowerCase(),
+          nameHash: history?.nameHash ?? String(creationEvent!.args[2]).toLowerCase(),
+          ownershipEra: (history?.ownershipEra ?? 0) + ownershipTransfers.length,
+          publishPolicyUpdates:
+            (history?.publishPolicyUpdates ?? 0) + publishPolicyUpdates.length,
+          publishAuthorityUpdates:
+            (history?.publishAuthorityUpdates ?? 0) + publishAuthorityUpdates.length,
+          participantAdds: (history?.participantAdds ?? 0) + participantAdds.length,
+          participantRemoves: (history?.participantRemoves ?? 0) + participantRemoves.length,
+          sourceBlockNumber,
+          sourceBlockHash,
+          sourceLogIndex,
+        });
         const participantAgents = [...(current.participantAgents ?? current[1] ?? [])]
           .map((address) => String(address).toLowerCase())
           .sort();
@@ -1003,10 +1063,14 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         const accessPolicy = Number(BigInt(current.accessPolicy ?? current[5]));
         const publishPolicy = Number(BigInt(current.publishPolicy ?? current[6]));
         const authorityRaw = String(current.publishAuthority ?? current[7]).toLowerCase();
-        const ownershipEra = ownershipTransfers.length;
+        const chainId = (await provider.getNetwork()).chainId.toString(10);
+        // Publish the watermark only after the complete snapshot decoded. A
+        // transient failure in current-state parsing must leave the next call
+        // free to replay the same suffix.
+        cache.set(cacheKey, nextHistory);
         return Object.freeze({
-          chainId: (await provider.getNetwork()).chainId.toString(10),
-          governanceContract: (await contract.getAddress()).toLowerCase(),
+          chainId,
+          governanceContract: contractAddress,
           contextGraphId: contextGraphId.toString(10),
           owner,
           active: Boolean(current.active ?? current[3]),
@@ -1016,16 +1080,20 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           publishAuthorityAccountId:
             BigInt(current.publishAuthorityAccountId ?? current[8]).toString(10),
           participantAgents: Object.freeze(participantAgents),
-          nameHash: String(creationEvent.args[2]).toLowerCase(),
-          ownershipEra: ownershipEra.toString(10),
+          nameHash: nextHistory.nameHash,
+          ownershipEra: nextHistory.ownershipEra.toString(10),
           policyVersion: (
-            ownershipEra + publishPolicyUpdates.length + publishAuthorityUpdates.length
+            nextHistory.ownershipEra
+              + nextHistory.publishPolicyUpdates
+              + nextHistory.publishAuthorityUpdates
           ).toString(10),
           rosterVersion: (
-            ownershipEra + participantAdds.length + participantRemoves.length
+            nextHistory.ownershipEra
+              + nextHistory.participantAdds
+              + nextHistory.participantRemoves
           ).toString(10),
-          sourceBlockNumber: source.blockNumber.toString(10),
-          sourceBlockHash: source.blockHash.toLowerCase(),
+          sourceBlockNumber: nextHistory.sourceBlockNumber.toString(10),
+          sourceBlockHash: nextHistory.sourceBlockHash,
         });
       },
       { signal: options.signal },
