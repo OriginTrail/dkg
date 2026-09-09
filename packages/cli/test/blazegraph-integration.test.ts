@@ -190,7 +190,7 @@ describe.skipIf(!ENABLED)('Blazegraph end-to-end integration', () => {
         options: { url: provisioned!.url, managedByDkg: false },
       },
     });
-    expect(wipe.status).toBe('wiped');
+    expect(wipe.status).toBe('completed');
     expect(wipe.failedFiles).toEqual([]);
 
     expect(await store!.countQuads(V10_GRAPH)).toBe(0);
@@ -220,7 +220,7 @@ describe.skipIf(!ENABLED)('Blazegraph end-to-end integration', () => {
         options: { url: provisioned!.url, managedByDkg: true },
       },
     });
-    expect(wipe.status).toBe('wiped');
+    expect(wipe.status).toBe('completed');
     expect(wipe.failedFiles).toEqual([]);
 
     // Both graphs gone — DROP ALL is unconditional.

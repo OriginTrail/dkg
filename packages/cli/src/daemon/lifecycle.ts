@@ -1572,15 +1572,23 @@ async function runDaemonInnerWithStartupOwnership(
     storeConfig: runtimeStore,
     log,
   });
-  if (wipeResult.status === 'wiped') {
+  if (wipeResult.status === 'completed' || wipeResult.status === 'incomplete' || wipeResult.status === 'marker-write-failed') {
+    const outcome = wipeResult.status === 'completed' ? 'complete' : wipeResult.status;
     log(
-      `Chain-state auto-wipe complete: ${wipeResult.removedFiles.length} file(s) removed, ` +
+      `Chain-state auto-wipe ${outcome}: ${wipeResult.removedFiles.length} file(s) removed, ` +
       `${wipeResult.backedUpFiles.length} backed up ` +
       `(prev marker: ${wipeResult.prevMarker ?? '<none>'}, now: ${network?.chainResetMarker})`,
     );
+    if (wipeResult.status === 'incomplete') {
+      log(`WARN: ${wipeResult.failedFiles.length} wipe target(s) failed; the reset will retry on next boot.`);
+    } else if (wipeResult.status === 'marker-write-failed') {
+      log(`WARN: reset marker could not be saved: ${wipeResult.markerError}. The reset will retry on next boot.`);
+    }
     // A DKG-managed external wipe uses DROP ALL, which also removes the
     // namespace ownership tag verified above. Re-tag before continuing so
-    // this daemon never runs against an unclaimed namespace.
+    // this daemon never runs against an unclaimed namespace. This is required
+    // even when a local deletion or marker write failed: DROP ALL can succeed
+    // independently of those steps.
     if (isExternalBackend(runtimeStore?.backend)) {
       const identity = await checkOrSetStoreIdentity({
         storeConfig: runtimeStore,

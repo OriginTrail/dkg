@@ -160,30 +160,32 @@ interface ChainResetWipeEffects {
    * present (or the rename failed — then the failure is in `failedFiles`).
    */
   backedUpFiles: string[];
-  /**
-   * Files we attempted to wipe but could not remove. When non-empty, the
-   * marker is intentionally not persisted so the wipe retries on next boot.
-   */
-  failedFiles: Array<{ file: string; error: string }>;
 }
+
+interface ChainResetWipeFailure { file: string; error: string }
 
 interface NoChainResetWipeEffects {
   removedFiles: [];
   backedUpFiles: [];
   failedFiles: [];
+  markerError?: never;
 }
 
 /**
  * Inactive means no reset marker is configured; steady means it already matches.
  * A skipped mismatch preserves the old marker so unsetting the opt-out retries.
- * A wiped result records an attempt, which may be partial; failedFiles identifies
- * effects that still need retry.
+ * Completed means all cleanup succeeded and the new marker was saved. Incomplete
+ * cleanup and marker-write failure both retry next boot, but only incomplete
+ * cleanup leaves failedFiles. Every attempted outcome may require re-tagging an
+ * external store whose ownership tag was removed by DROP ALL.
  */
 export type ChainResetWipeResult =
   | ({ status: 'inactive'; prevMarker: null } & NoChainResetWipeEffects)
   | ({ status: 'steady'; prevMarker: string } & NoChainResetWipeEffects)
   | ({ status: 'skipped'; prevMarker: string | null } & NoChainResetWipeEffects)
-  | ({ status: 'wiped'; prevMarker: string | null } & ChainResetWipeEffects);
+  | ({ status: 'completed'; prevMarker: string | null; failedFiles: []; markerError?: never } & ChainResetWipeEffects)
+  | ({ status: 'incomplete'; prevMarker: string | null; failedFiles: [ChainResetWipeFailure, ...ChainResetWipeFailure[]]; markerError?: never } & ChainResetWipeEffects)
+  | ({ status: 'marker-write-failed'; prevMarker: string | null; failedFiles: []; markerError: string } & ChainResetWipeEffects);
 
 export interface ChainResetWipeOptions {
   /** Node data directory (e.g. `~/.dkg`). */
@@ -643,7 +645,6 @@ export async function chainResetWipe(
   let removedFiles: string[] = [];
   let backedUpFiles: string[] = [];
   let failedFiles: Array<{ file: string; error: string }> = [];
-  let markerPersisted = false;
   try {
     ({ removedFiles, backedUpFiles, failedFiles } = performWipe(
       opts.dataDir,
@@ -680,30 +681,28 @@ export async function chainResetWipe(
     }
   }
 
-  if (failedFiles.length === 0) {
-    try {
-      saveState(opts.dataDir, opts.currentMarker);
-      markerPersisted = true;
-    } catch (err) {
-      log(
-        `WARN: failed to persist chain reset marker (${opts.currentMarker}): ${(err as Error).message}. Wipe will retry on next boot.`,
-      );
-    }
-  } else {
+  const firstFailure = failedFiles[0];
+  if (firstFailure) {
     log(
       `WARN: chain-state wipe incomplete (${failedFiles.length} failure${failedFiles.length === 1 ? '' : 's'}). ` +
       'Chain reset marker was not persisted; wipe will retry on next boot.',
     );
-  }
-  if (failedFiles.length === 0 && markerPersisted) {
-    log('Chain-state wipe complete. Continuing boot.');
-  } else if (failedFiles.length === 0) {
-    log('Chain-state wipe complete, but marker was not persisted. Continuing boot; wipe will retry on next boot.');
-  } else {
     log('Chain-state wipe incomplete. Continuing boot so operator can repair filesystem state.');
+    return { status: 'incomplete', prevMarker, removedFiles, backedUpFiles, failedFiles: [firstFailure, ...failedFiles.slice(1)] };
   }
 
-  return { status: 'wiped', prevMarker, removedFiles, backedUpFiles, failedFiles };
+  try {
+    saveState(opts.dataDir, opts.currentMarker);
+  } catch (err) {
+    const markerError = (err as Error).message;
+    log(
+      `WARN: failed to persist chain reset marker (${opts.currentMarker}): ${markerError}. Wipe will retry on next boot.`,
+    );
+    log('Chain-state wipe complete, but marker was not persisted. Continuing boot; wipe will retry on next boot.');
+    return { status: 'marker-write-failed', prevMarker, removedFiles, backedUpFiles, failedFiles: [], markerError };
+  }
+  log('Chain-state wipe complete. Continuing boot.');
+  return { status: 'completed', prevMarker, removedFiles, backedUpFiles, failedFiles: [] };
 }
 
 // =====================================================================

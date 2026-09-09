@@ -5,7 +5,9 @@ const statuses: ChainResetWipeResult[] = [
   { status: 'inactive', prevMarker: null, removedFiles: [], backedUpFiles: [], failedFiles: [] },
   { status: 'steady', prevMarker: 'same', removedFiles: [], backedUpFiles: [], failedFiles: [] },
   { status: 'skipped', prevMarker: 'old', removedFiles: [], backedUpFiles: [], failedFiles: [] },
-  { status: 'wiped', prevMarker: 'old', removedFiles: ['sampling.wal'], backedUpFiles: [], failedFiles: [] },
+  { status: 'completed', prevMarker: 'old', removedFiles: ['sampling.wal'], backedUpFiles: [], failedFiles: [] },
+  { status: 'incomplete', prevMarker: 'old', removedFiles: [], backedUpFiles: [], failedFiles: [{ file: 'store.nq', error: 'denied' }] },
+  { status: 'marker-write-failed', prevMarker: 'old', removedFiles: ['sampling.wal'], backedUpFiles: [], failedFiles: [], markerError: 'denied' },
 ];
 void statuses;
 // @ts-expect-error Conflicting boolean states are no longer representable.
@@ -15,3 +17,16 @@ const inactiveWithEffects: ChainResetWipeResult = { status: 'inactive', prevMark
 // @ts-expect-error A matching marker is necessarily present.
 const steadyWithoutMarker: ChainResetWipeResult = { status: 'steady', prevMarker: null, removedFiles: [], backedUpFiles: [], failedFiles: [] };
 void conflicting; void inactiveWithEffects; void steadyWithoutMarker;
+
+// @ts-expect-error A completed wipe cannot contain failed cleanup targets.
+const completedWithFailures: ChainResetWipeResult = { status: 'completed', prevMarker: null, removedFiles: [], backedUpFiles: [], failedFiles: [{ file: 'store.nq', error: 'denied' }] };
+// @ts-expect-error Incomplete cleanup requires at least one failure.
+const incompleteWithoutFailure: ChainResetWipeResult = { status: 'incomplete', prevMarker: null, removedFiles: [], backedUpFiles: [], failedFiles: [] };
+// @ts-expect-error A marker-write failure must carry its persistence error.
+const missingMarkerError: ChainResetWipeResult = { status: 'marker-write-failed', prevMarker: null, removedFiles: [], backedUpFiles: [], failedFiles: [] };
+const contradictoryCompletion: { status: 'completed'; prevMarker: null; removedFiles: []; backedUpFiles: []; failedFiles: []; markerError: string } = {
+  status: 'completed', prevMarker: null, removedFiles: [], backedUpFiles: [], failedFiles: [], markerError: 'write failed',
+};
+// @ts-expect-error Widened variables cannot represent a marker-write failure as completed.
+const completedWithMarkerError: ChainResetWipeResult = contradictoryCompletion;
+void completedWithFailures; void incompleteWithoutFailure; void missingMarkerError; void completedWithMarkerError;

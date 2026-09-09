@@ -184,7 +184,7 @@ describe('chainResetWipe — dev-loop opt-out (skip, #679)', () => {
 
     // Boot 2: flag unset → the wipe finally runs because the marker never advanced.
     const wiped = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER, skip: false });
-    expect(wiped.status).toBe('wiped');
+    expect(wiped.status).toBe('completed');
 
     expect(existsSync(join(dataDir, 'store.nq'))).toBe(false);
     expect(readPersistedMarker(dataDir)).toBe(NEW_MARKER);
@@ -207,7 +207,7 @@ describe('chainResetWipe — dev-loop opt-out (skip, #679)', () => {
 
     // Boot 2: flag unset → the wipe finally runs, because the marker never advanced.
     const wiped = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER, skip: false });
-    expect(wiped.status).toBe('wiped');
+    expect(wiped.status).toBe('completed');
     expect(existsSync(join(dataDir, 'store.nq'))).toBe(false);
     expect(readPersistedMarker(dataDir)).toBe(NEW_MARKER);
   });
@@ -276,7 +276,7 @@ describe('chainResetWipe — store.nq backup rename (#679)', () => {
       log: (m) => logs.push(m),
     });
 
-    expect(result.status).toBe('wiped');
+    expect(result.status).toBe('completed');
     expect(result.removedFiles).not.toContain('store.nq');
     expect(result.backedUpFiles).toHaveLength(1);
     const backup = result.backedUpFiles[0];
@@ -305,7 +305,7 @@ describe('chainResetWipe — store.nq backup rename (#679)', () => {
 
     const result = await chainResetWipe({ dataDir, currentMarker: DIRTY });
 
-    expect(result.status).toBe('wiped');
+    expect(result.status).toBe('completed');
     expect(result.failedFiles).toEqual([]); // rename did NOT hit a nested-path failure
     expect(result.backedUpFiles).toHaveLength(1);
     // Every non-[A-Za-z0-9._-] char collapsed to `_` (flat filename, no `/`).
@@ -327,7 +327,7 @@ describe('chainResetWipe — store.nq backup rename (#679)', () => {
 
     const result = await chainResetWipe({ dataDir, currentMarker: BIG });
 
-    expect(result.status).toBe('wiped');
+    expect(result.status).toBe('completed');
     expect(result.failedFiles).toEqual([]);
     expect(result.backedUpFiles).toHaveLength(1);
     const backup = result.backedUpFiles[0];
@@ -366,7 +366,7 @@ describe('chainResetWipe — store.nq backup rename (#679)', () => {
     });
 
     // The wipe ran, but the store.nq backup step failed at renameSync...
-    expect(result.status).toBe('wiped');
+    expect(result.status).toBe('incomplete');
     expect(result.backedUpFiles).toEqual([]);
     const storeFailure = result.failedFiles.find((f) => f.file === 'store.nq');
     expect(storeFailure).toBeDefined();
@@ -515,7 +515,7 @@ describe('chainResetWipe — retention via rotation (#679)', () => {
 
     const result = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER });
 
-    expect(result.status).toBe('wiped');
+    expect(result.status).toBe('completed');
     const backups = readdirSync(dataDir).filter((f) => f.startsWith('store.nq.pre-wipe-'));
     // fresh (exempt) + newest 2 OTHERS (old4, old3) = 3; old1 + old2 evicted.
     expect(backups).toHaveLength(3);
@@ -549,7 +549,7 @@ describe('chainResetWipe — retention via rotation (#679)', () => {
       log: (m) => logs.push(m),
     });
 
-    expect(result.status).toBe('wiped');
+    expect(result.status).toBe('completed');
     // A swallowed rotation error is NOT a wipe failure — failedFiles stays empty...
     expect(result.failedFiles).toEqual([]);
     // ...and the marker still advances (no retry-forever).
