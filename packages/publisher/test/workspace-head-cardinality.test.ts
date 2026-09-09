@@ -20,7 +20,9 @@ import { tryResolveKnowledgeAssetWorkspaceHead } from '../src/workspace-resoluti
 // async VM-publish preflight — received an ARBITRARY answer that could change
 // between calls. These rows pin the corrected contract: head-id cardinality
 // is measured as COUNT(DISTINCT shareOperationId) ON THE HEAD SUBJECT, and
-// more than one distinct id fails closed as KA_WORKSPACE_HEAD_CORRUPT.
+// more than one distinct id is accepted only when every referenced operation
+// proves the same content and access envelope. Missing or disagreeing aliases
+// still fail closed as KA_WORKSPACE_HEAD_CORRUPT.
 //
 // The predicate is deliberately NOT `bindings.length` of the main resolver
 // query: that query carries three OPTIONALs on the operation subject
@@ -217,18 +219,31 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
     expect(head?.assertionVersion).toBe('1');
   });
 
-  it('fails closed when the head carries two operation ids and both operation subjects exist', async () => {
+  it('collapses two operation ids that prove the same exact record', async () => {
     const h = makeHarness();
     await seedHealthyHead(h);
     await seedOperation(h, REMOTE_OP);
     await unionInsertSecondHeadId(h);
-    // Pre-fix: LIMIT 1 resolved to whichever of the two full solutions the
-    // store returned first — an answer that could differ between calls on the
-    // same state. The queued VM-publish preflight compared that arbitrary id
-    // against its admission-time id and terminally failed the job as
-    // publish_intent_stale (GH#2273's reported death).
+    const head = await resolveHead(h);
+    // Equal timestamps use the operation id as a deterministic final tie-break.
+    expect(head?.shareOperationId).toBe(REMOTE_OP);
+    expect(head?.publicTripleCount).toBe(CONTENT.length);
+  });
+
+  it('fails closed when two operation ids disagree on content or access semantics', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    await seedOperation(h, REMOTE_OP);
+    await h.store.insert([{
+      subject: `urn:dkg:share:${CONTEXT_GRAPH}:${REMOTE_OP}`,
+      predicate: `${DKG}accessPolicy`,
+      object: '"ownerOnly"',
+      graph: h.metaGraph,
+    }]);
+    await unionInsertSecondHeadId(h);
+
     await expect(resolveHead(h)).rejects.toThrow(KnowledgeAssetWorkspaceHeadCorruptError);
-    await expect(resolveHead(h)).rejects.toThrow(/shareOperationId/);
+    await expect(resolveHead(h)).rejects.toThrow(/ambiguous shareOperationId/);
   });
 
   it('fails closed when the head carries two operation ids even if the second operation subject is absent', async () => {

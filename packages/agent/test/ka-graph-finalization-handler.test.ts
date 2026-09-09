@@ -3747,7 +3747,7 @@ describe('graph-scoped finalization handler', () => {
       graphManager,
       contextGraphId: CG,
       kaUal: UAL,
-    })).rejects.toThrow(/head carries 2 shareOperationId values/);
+    })).rejects.toThrow(/head references a missing share operation/);
 
     const internals = handler as unknown as {
       verifyChainCgBinding: () => Promise<boolean>;
@@ -3766,6 +3766,53 @@ describe('graph-scoped finalization handler', () => {
       authorAddress: AUTHOR,
     }, createOperationContext('system')))
       .resolves.toBe('already-confirmed');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+  });
+
+  it('resolves an equivalent storage-ACK workspace-head alias during finalization', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    const equivalentOperationId = 'storage-ack-equivalent';
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId: equivalentOperationId,
+      kaUal: UAL,
+      assertionVersion: VERSION,
+      quads: [{
+        subject: 'urn:asset:one',
+        predicate: 'urn:predicate:value',
+        object: '"one"',
+        graph: swmGraph,
+      }, {
+        subject: 'urn:asset:two',
+        predicate: 'urn:predicate:value',
+        object: '"two"',
+        graph: swmGraph,
+      }],
+      privateMerkleRoot: message.privateMerkleRoot,
+      privateTripleCount: message.privateTripleCount,
+      publisherPeerId: '12D3KooWPublisher',
+      timestamp: new Date(Date.now() + 1_000),
+    });
+    await store.insert([{
+      graph: graphManager.sharedMemoryMetaUri(CG),
+      subject: `${UAL}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: JSON.stringify(equivalentOperationId),
+    }]);
+
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ shareOperationId: equivalentOperationId });
+    await expect(handler.handleFinalizationMessage(
+      encodeFinalizationMessage(message),
+      CG,
+    )).resolves.toBeUndefined();
 
     expect(await store.countQuads(vmGraph)).toBe(2);
   });

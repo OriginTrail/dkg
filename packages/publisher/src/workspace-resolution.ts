@@ -246,15 +246,15 @@ function makeSingletonReader(
 interface DecodedWorkspaceHead {
   readonly scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
   readonly assertionGraph: string;
-  readonly shareOperationId: string;
-  readonly operationSubject: string;
+  readonly shareOperationIds: readonly string[];
 }
 
 /**
- * Focused decoder for the HEAD subject's rows. Every head predicate is a
- * fail-closed singleton (`makeSingletonReader`); the decoded fields are
- * validated against the expected scope so a mismatched UAL, scope version or
- * derived assertion graph is corruption, never a silently different KA.
+ * Focused decoder for the HEAD subject's rows. Identity and graph predicates
+ * remain fail-closed singletons. `shareOperationId` is the one cardinality
+ * exception: storage-ACK and originator persistence can leave two ids for the
+ * same assertion, so the resolver validates their operation rows together in
+ * phase 2 instead of choosing one here.
  */
 function decodeWorkspaceHeadRows(input: {
   readonly headValues: Map<string, string[]>;
@@ -300,22 +300,26 @@ function decodeWorkspaceHeadRows(input: {
       `Corrupt graph-scoped SWM head for ${input.expectedUal}: assertion graph mismatch`,
     );
   }
-  const shareOperationId = stripLiteral(head.required(`${DKG}shareOperationId`, 'shareOperationId'))?.trim() ?? '';
-  if (!shareOperationId) {
+  const shareOperationIds = [...new Set(
+    (input.headValues.get(`${DKG}shareOperationId`) ?? [])
+      .map((value) => stripLiteral(value)?.trim() ?? ''),
+  )];
+  if (shareOperationIds.length === 0 || shareOperationIds.some((value) => !value)) {
     throw new KnowledgeAssetWorkspaceHeadCorruptError(
       `Corrupt graph-scoped SWM head for ${input.expectedUal}: incomplete head or operation metadata`,
     );
   }
-  let operationSubject = '';
-  try {
-    operationSubject = workspaceOperationSubject(input.contextGraphId, shareOperationId);
-  } catch (error) {
-    throw new KnowledgeAssetWorkspaceHeadCorruptError(
-      `Corrupt graph-scoped SWM head for ${input.expectedUal}: invalid share operation ` +
-      `(${error instanceof Error ? error.message : String(error)})`,
-    );
+  for (const shareOperationId of shareOperationIds) {
+    try {
+      workspaceOperationSubject(input.contextGraphId, shareOperationId);
+    } catch (error) {
+      throw new KnowledgeAssetWorkspaceHeadCorruptError(
+        `Corrupt graph-scoped SWM head for ${input.expectedUal}: invalid share operation ` +
+        `(${error instanceof Error ? error.message : String(error)})`,
+      );
+    }
   }
-  return { scope, assertionGraph, shareOperationId, operationSubject };
+  return { scope, assertionGraph, shareOperationIds };
 }
 
 /** The operation subject's commitment + access envelope, decoded and validated. */
@@ -328,6 +332,22 @@ interface DecodedWorkspaceOperation {
   readonly publishedAtMs: number | undefined;
   readonly accessPolicy: 'public' | 'ownerOnly' | 'allowList' | undefined;
   readonly allowedPeers: string[];
+}
+
+function equivalentWorkspaceOperationKey(
+  operation: DecodedWorkspaceOperation,
+): string {
+  // publishedAt and shareOperationId are persistence provenance, not content
+  // or access semantics. Every other decoded field must agree exactly.
+  return JSON.stringify([
+    operation.publicQuadsDigest,
+    operation.publicTripleCount,
+    operation.privateMerkleRoot?.toLowerCase() ?? null,
+    operation.privateTripleCount,
+    operation.publisherPeerId,
+    operation.accessPolicy ?? null,
+    [...operation.allowedPeers].sort(),
+  ]);
 }
 
 /**
@@ -399,7 +419,7 @@ function decodeWorkspaceOperationRows(input: {
   }
   const allowedPeers = [...new Set((input.operationValues.get(`${DKG}allowedPeer`) ?? [])
     .map((value) => stripLiteral(value)?.trim())
-    .filter((peer): peer is string => Boolean(peer)))];
+    .filter((peer): peer is string => Boolean(peer)))].sort();
   if (
     (accessPolicy === 'allowList' && allowedPeers.length === 0)
     || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
@@ -507,30 +527,53 @@ export async function resolveKnowledgeAssetWorkspaceHead(
   // that state handed every consumer (gossip monotonicity, finalization,
   // access decisions, the queued VM-publish preflight) an arbitrary answer
   // that could change between calls. Reading the head rows first makes the
-  // exactly-one invariant primary: each required head predicate must carry
-  // exactly ONE distinct value, and only a single validated operation id ever
-  // reaches the operation lookup below. Duplicate rows on the OPERATION
-  // subject (two cores ACKing the same content stamp their own clocks onto
-  // the same deterministic operation subject) stay healthy — they never touch
-  // the head subject this phase inspects.
+  // exactly-one invariant primary for content identity and graph placement.
+  // Multiple operation ids are resolved only when all referenced operation
+  // subjects prove the same content and access envelope below.
   const headBindings = rowsBySubject.get(subject) ?? [];
   if (headBindings.length === 0) return undefined;
-  // Phase 1 — decode + validate the head subject's rows (fail-closed
-  // singletons; GH#2273: a multi-valued shareOperationId is the sync
-  // union-insert residue that previously made LIMIT-1 readers arbitrary).
+  // Phase 1 — decode + validate the head subject's rows. All predicates except
+  // shareOperationId are fail-closed singletons.
   const decodedHead = decodeWorkspaceHeadRows({
     headValues: collectSubjectValues(headBindings),
     expectedUal: scope.ual,
     contextGraphId: params.contextGraphId,
     subGraphName,
   });
-  // Phase 2 — decode + validate the single referenced operation's rows from
-  // the same acquisition snapshot.
-  const decodedOperation = decodeWorkspaceOperationRows({
-    operationValues: collectSubjectValues(rowsBySubject.get(decodedHead.operationSubject) ?? []),
-    scope: decodedHead.scope,
-    shareOperationId: decodedHead.shareOperationId,
+  // Phase 2 — decode every referenced operation from the same acquisition
+  // snapshot. Equivalent storage-ACK/originator aliases collapse to one
+  // deterministic newest operation; a missing or semantically different
+  // candidate remains corruption.
+  const candidates = decodedHead.shareOperationIds.map((shareOperationId) => {
+    const operationSubject = workspaceOperationSubject(params.contextGraphId, shareOperationId);
+    const operationRows = rowsBySubject.get(operationSubject) ?? [];
+    if (operationRows.length === 0) {
+      throw new KnowledgeAssetWorkspaceHeadCorruptError(
+        `Corrupt graph-scoped SWM head for ${scope.ual}: head references a missing `
+          + `share operation (${shareOperationId})`,
+      );
+    }
+    const operation = decodeWorkspaceOperationRows({
+      operationValues: collectSubjectValues(operationRows),
+      scope: decodedHead.scope,
+      shareOperationId,
+    });
+    return { shareOperationId, operation };
   });
+  if (new Set(candidates.map(({ operation }) => (
+    equivalentWorkspaceOperationKey(operation)
+  ))).size !== 1) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: ambiguous shareOperationId values`,
+    );
+  }
+  candidates.sort((left, right) => (
+    (right.operation.publishedAtMs ?? Number.NEGATIVE_INFINITY)
+      - (left.operation.publishedAtMs ?? Number.NEGATIVE_INFINITY)
+    || right.shareOperationId.localeCompare(left.shareOperationId)
+  ));
+  const selected = candidates[0]!;
+  const decodedOperation = selected.operation;
   return {
     kaUal: decodedHead.scope.ual,
     assertionVersion: decodedHead.scope.assertionVersion,
@@ -539,7 +582,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     publicTripleCount: decodedOperation.publicTripleCount,
     privateMerkleRoot: decodedOperation.privateMerkleRoot,
     privateTripleCount: decodedOperation.privateTripleCount,
-    shareOperationId: decodedHead.shareOperationId,
+    shareOperationId: selected.shareOperationId,
     ...(decodedOperation.publishedAtMs === undefined
       ? {}
       : { publishedAt: decodedOperation.publishedAtMs.toString() as TimestampMsV1 }),
