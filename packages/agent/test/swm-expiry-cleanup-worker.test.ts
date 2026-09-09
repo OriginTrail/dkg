@@ -50,22 +50,23 @@ it('joins manual and timer calls, then resumes periodic maintenance with the lat
   expect(pass).toHaveBeenCalledTimes(1);
   ttlMs = 200; worker.onTtlChanged();
   blocked.resolve({ triplesDeleted: 5 });
-  expect(await first).toBe(5);
+  expect(await first).toBe(12);
+  expect(pass).toHaveBeenCalledTimes(2);
   await vi.advanceTimersByTimeAsync(10);
   expect(pass).toHaveBeenLastCalledWith(200, expect.any(Function), undefined, undefined);
-  expect(pass).toHaveBeenCalledTimes(2);
+  expect(pass).toHaveBeenCalledTimes(3);
   ttlMs = 0; worker.onTtlChanged();
   expect(worker.running).toBe(false);
   expect(await worker.runNow()).toBe(0);
   await vi.advanceTimersByTimeAsync(50);
-  expect(pass).toHaveBeenCalledTimes(2);
+  expect(pass).toHaveBeenCalledTimes(3);
   ttlMs = 300; worker.onTtlChanged();
   await worker.runNow();
   expect(pass).toHaveBeenLastCalledWith(300, expect.any(Function), undefined, expect.any(Number));
   await worker.stop();
   ttlMs = 400; worker.onTtlChanged();
   await vi.advanceTimersByTimeAsync(100);
-  expect(pass).toHaveBeenCalledTimes(3);
+  expect(pass).toHaveBeenCalledTimes(4);
 });
 
 it('fences stop immediately but joins physical work before allowing a restart', async () => {
@@ -294,4 +295,34 @@ it('pins the public cutoff across yielding passes and does not schedule before s
   await new Promise(resolve => setTimeout(resolve, 20));
   expect(pass).toHaveBeenCalledTimes(2);
   await worker.stop();
+});
+
+it.each(['manual', 'periodic'] as const)('fences TTL changes even when the value changes back during a %s pass', async mode => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  const blocked = deferred<SwmExpiryCleanupResult>();
+  const restarted = deferred<void>();
+  let closed!: () => boolean;
+  const pass = vi.fn<ConstructorParameters<typeof SwmExpiryCleanupWorker>[0]>()
+    .mockImplementationOnce(async (_ttl, isClosed) => { closed = isClosed; return blocked.promise; })
+    .mockImplementationOnce(async () => { restarted.resolve(); return { triplesDeleted: 2 }; });
+  let ttlMs = 100;
+  const worker = new SwmExpiryCleanupWorker(pass, () => ttlMs, 10);
+  let completion: Promise<number> | undefined;
+  if (mode === 'manual') { completion = worker.runNow(); await Promise.resolve(); }
+  else { worker.start(); await vi.advanceTimersByTimeAsync(0); }
+  try {
+    expect(closed()).toBe(false);
+    ttlMs = 200; worker.onTtlChanged();
+    const conservativeCutoff = Date.now() - ttlMs;
+    ttlMs = 100; worker.onTtlChanged();
+    expect(closed()).toBe(true);
+    // Neither the changed configuration nor repeated starts admit a second
+    // physical pass while the cancelled storage work remains in flight.
+    expect(pass).toHaveBeenCalledOnce();
+    blocked.resolve({ triplesDeleted: 1, continuation });
+    await restarted.promise;
+    if (completion) expect(await completion).toBe(3);
+    expect(pass).toHaveBeenCalledTimes(2);
+    expect(pass.mock.calls[1]!.slice(2)).toEqual([undefined, mode === 'manual' ? conservativeCutoff : undefined]);
+  } finally { blocked.resolve({ triplesDeleted: 0 }); await worker.stop(); }
 });

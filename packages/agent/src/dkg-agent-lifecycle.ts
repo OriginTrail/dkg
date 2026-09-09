@@ -10643,7 +10643,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   /**
    * Update the shared memory TTL at runtime. Takes effect immediately for queries
-   * and the next cleanup cycle without requiring a restart.
+   * and invalidates an active cleanup cutoff without requiring a restart.
    */
   setSharedMemoryTtlMs(this: DKGAgent, ttlMs: number): void {
     validateSharedMemoryTtlMs(ttlMs);

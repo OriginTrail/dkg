@@ -19,6 +19,7 @@ type WorkerState =
 /** Each lifecycle state owns its timer or physical flight. The agent owns configuration. */
 export class SwmExpiryCleanupWorker {
   private state: WorkerState = { kind: 'idle', mode: 'manual' };
+  private retentionGeneration = 0;
 
   constructor(
     private readonly processPass: (ttlMs: number, isClosed: () => boolean, continuation?: SwmExpiryCleanupContinuation, cutoffMs?: number) => Promise<SwmExpiryCleanupResult>,
@@ -41,8 +42,20 @@ export class SwmExpiryCleanupWorker {
   }
 
   onTtlChanged(): void {
-    if (this.getSharedMemoryTtlMs() === 0) this.cancelScheduled();
-    else this.schedule(0);
+    // An in-flight query may already have selected rows using the previous
+    // retention boundary. Invalidate that pass, including its lock-protected
+    // revalidation, before another operation can begin mutation.
+    this.retentionGeneration++;
+    const ttlMs = this.getSharedMemoryTtlMs();
+    if (this.state.kind === 'running') {
+      const flight = this.state.flight;
+      flight.continuation = undefined;
+      if (ttlMs > 0 && flight.request.kind === 'manual') {
+        flight.request = { kind: 'manual', cutoffMs: Math.min(flight.request.cutoffMs, Date.now() - ttlMs) };
+      }
+    }
+    this.cancelScheduled();
+    if (ttlMs > 0) this.schedule(0);
   }
 
   /** Join one owned flight; newer manual cutoffs are drained before it resolves. */
@@ -99,17 +112,18 @@ export class SwmExpiryCleanupWorker {
     let deleted = 0;
     try {
       while (this.owns(flight) && this.getSharedMemoryTtlMs() > 0) {
+        const generation = this.retentionGeneration;
         const request = flight.request;
         const continuation = flight.continuation;
         flight.continuation = undefined;
         const result = await this.processPass(
           this.getSharedMemoryTtlMs(),
-          () => !this.owns(flight) || this.getSharedMemoryTtlMs() === 0,
+          () => !this.owns(flight) || this.getSharedMemoryTtlMs() === 0 || generation !== this.retentionGeneration,
           continuation,
           request.kind === 'manual' ? request.cutoffMs : undefined);
         deleted += result.triplesDeleted;
         if (!this.owns(flight) || this.getSharedMemoryTtlMs() === 0) break;
-        if (flight.request !== request) {
+        if (flight.request !== request || generation !== this.retentionGeneration) {
           await setImmediate();
           continue;
         }

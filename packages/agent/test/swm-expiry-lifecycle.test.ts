@@ -240,3 +240,59 @@ it('stops a never-started agent during manual cleanup without admitting a backlo
   expect(f.stats.selections).toBe(4);
 });
 
+
+it.each([
+  'agent.swmCleanup.expiredOperations',
+  'agent.swmCleanup.revalidateOperation',
+])('preserves newly retained operations during an active %s query and serves them through sync', async gatedSource => {
+  const cap = captureSyncHandler();
+  const actual = await vi.importActual<typeof import('../src/sync/responder/sync-handler.js')>('../src/sync/responder/sync-handler.js');
+  vi.mocked(registerSyncHandler).mockImplementationOnce(params => {
+    params.register = cap.register;
+    params.authorizeSyncRequest = async () => true;
+    actual.registerSyncHandler(params);
+  });
+  const hour = 60 * 60 * 1000;
+  const agent = trackSwmExpiryAgent(await DKGAgent.create({
+    name: 'expiry-extend-active-ttl', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 0,
+  }));
+  await agent.start();
+  const { store } = agent as unknown as SwmExpiryTestInternals;
+  const operation = workspaceOpQuads(CG, 'retained', 'urn:ttl:retained', META, new Date(Date.now() - 2 * hour).toISOString());
+  const data = { subject: 'urn:ttl:retained', predicate: 'urn:p', object: '"retained"', graph: WS };
+  await store.insert([...operation, data]);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let entered!: () => void;
+  const selected = new Promise<void>(resolve => { entered = resolve; });
+  const query = store.query.bind(store);
+  let gated = false;
+  vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+    const result = await query(sparql, options);
+    if (!gated && options?.source === gatedSource) {
+      gated = true;
+      entered();
+      await gate;
+    }
+    return result;
+  });
+  const deletes = vi.spyOn(store, 'deleteByPattern');
+  agent.setSharedMemoryTtlMs(hour);
+  const cleanup = agent.cleanupExpiredSharedMemory();
+  try {
+    await selected;
+    agent.setSharedMemoryTtlMs(48 * hour);
+    release();
+    expect(await cleanup).toBe(0);
+    expect(deletes).not.toHaveBeenCalled();
+    expect(await store.query(`SELECT ?p WHERE { GRAPH <${META}> { <${operation[0]!.subject}> ?p ?o } }`))
+      .toMatchObject({ type: 'bindings', bindings: expect.arrayContaining([expect.any(Object)]) });
+    expect(await store.query(`SELECT ?o WHERE { GRAPH <${WS}> { <urn:ttl:retained> <urn:p> ?o } }`))
+      .toMatchObject({ type: 'bindings', bindings: [{ o: '"retained"' }] });
+    expect(await cap.invoke({ contextGraphId: CG, includeSharedMemory: true, phase: 'meta', offset: 0,
+      limit: 1000, syncSessionId: 'ttl-extended' })).toContain(operation[0]!.subject);
+  } finally {
+    release();
+    await cleanup;
+  }
+});

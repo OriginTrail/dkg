@@ -213,6 +213,8 @@ async function cleanupExpiredBatch(
     context.writeLocks,
     cleanupWriteLockKeys(target, candidate),
     async () => {
+      // The worker also fences retention changes here: a pass selected under
+      // an older TTL must not mutate rows after that boundary is invalidated.
       if (context.isClosed()) return undefined;
       const [current] = await loadExpiredOperations(
         context.store, target.metaGraph, cutoff, [candidate.uri],
