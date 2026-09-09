@@ -82,7 +82,6 @@ import type {
 } from './rfc64/catalog-access-policy-v1.js';
 import type {
   Rfc64PublicCatalogCurrentReceiverReconcilerV1,
-  Rfc64PublicCatalogReceiverReconcilerV1,
 } from './rfc64/public-catalog-receiver-v1.js';
 import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
 import {
