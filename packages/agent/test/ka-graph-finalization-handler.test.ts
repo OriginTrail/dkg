@@ -1172,6 +1172,107 @@ describe('graph-scoped finalization handler', () => {
     }
   });
 
+  it('retains recovery eligibility when the ownership probe fails once', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-probe-failure-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    const query = store.query.bind(store);
+    try {
+      const { message, vmGraph } = await stageGraph();
+      inbox = await openSqliteFinalizationRecoveryStore(directory);
+      const recoveryHandler = new FinalizationHandler(
+        store,
+        legacyFinalizationChain(4, {
+          getKAContextGraphId: async () => 42n,
+          resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
+        }),
+        recoveryOptions(inbox),
+      );
+      let probeFailures = 1;
+      store.query = async (sparql, options) => {
+        if (
+          probeFailures > 0
+          && options?.source === 'agent.finalization.localWorkspaceOwnership'
+        ) {
+          probeFailures -= 1;
+          throw new Error('injected ownership probe failure');
+        }
+        return query(sparql, options);
+      };
+
+      await recoveryHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+
+      expect(probeFailures).toBe(0);
+      expect(await store.countQuads(vmGraph)).toBe(2);
+      expect(await inbox.list()).toMatchObject([{ state: 'SETTLED' }]);
+    } finally {
+      store.query = query;
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('waits for an in-flight workspace head replacement before admission', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-head-rewrite-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    try {
+      const { message, vmGraph } = await stageGraph();
+      const writeLocks = new Map<string, Promise<void>>();
+      inbox = await openSqliteFinalizationRecoveryStore(directory);
+      const recoveryHandler = new FinalizationHandler(
+        store,
+        legacyFinalizationChain(4, {
+          getKAContextGraphId: async () => 42n,
+          resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
+        }),
+        { ...recoveryOptions(inbox), workspaceWriteLocks: writeLocks },
+      );
+      const lockKey = swmKaWriteLockKey(CG, undefined, UAL);
+      let markHeadDeleted!: () => void;
+      let allowReplacement!: () => void;
+      const headDeleted = new Promise<void>((resolve) => { markHeadDeleted = resolve; });
+      const replacementAllowed = new Promise<void>((resolve) => { allowReplacement = resolve; });
+      const replacement = withKeyedLocks(writeLocks, [lockKey], async () => {
+        await store.deleteByPattern({
+          graph: graphManager.sharedMemoryMetaUri(CG),
+          subject: `${UAL}#dkg-swm-head`,
+        });
+        markHeadDeleted();
+        await replacementAllowed;
+        await storeKnowledgeAssetWorkspaceHead({
+          store,
+          graphManager,
+          contextGraphId: CG,
+          shareOperationId: SHARE_ID,
+          kaUal: UAL,
+          assertionVersion: VERSION,
+        });
+      });
+      await headDeleted;
+
+      let handlingSettled = false;
+      const handling = recoveryHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      ).finally(() => { handlingSettled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(handlingSettled).toBe(false);
+
+      allowReplacement();
+      await replacement;
+      await handling;
+      expect(await inbox.list()).toMatchObject([{ state: 'SETTLED' }]);
+      expect(await store.countQuads(vmGraph)).toBe(2);
+    } finally {
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('falls back to legacy live verification when canonical receipts are unsupported', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-unsupported-live-'));
     let inbox: SqliteFinalizationRecoveryStore | undefined;

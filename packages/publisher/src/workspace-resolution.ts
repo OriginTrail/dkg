@@ -1432,7 +1432,8 @@ function workspaceOperationSubject(contextGraphId: string, shareOperationId: str
   return subject;
 }
 
-function workspaceKnowledgeAssetHeadSubject(kaUal: string): string {
+/** Canonical durable SWM head locator shared by writers and recovery admission. */
+export function workspaceKnowledgeAssetHeadSubject(kaUal: string): string {
   const scope = createGraphKnowledgeAssetScope(kaUal, 1);
   const subject = `${scope.ual}#dkg-swm-head`;
   assertSafeIri(subject);

@@ -56,6 +56,7 @@ export {
   KnowledgeAssetWorkspaceHeadCorruptError,
   isKnowledgeAssetWorkspaceHeadCorruptError,
   isDecodableWorkspaceOperationRows,
+  workspaceKnowledgeAssetHeadSubject,
   type KnowledgeAssetWorkspaceHead,
   type PublishedKnowledgeAssetWorkspaceHead,
   type ResolveKnowledgeAssetWorkspaceHeadParams,
