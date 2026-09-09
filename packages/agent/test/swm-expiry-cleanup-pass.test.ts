@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
+import { DEFAULT_SWM_TTL_MS } from '../src/dkg-agent-constants.js';
 import { runSwmExpiryCleanup } from '../src/swm-expiry-cleanup.js';
 import { CG, META, WS, createSwmExpiryFixture, stopTrackedSwmExpiryAgents, swmExpiryCleanupContext, trackSwmExpiryAgent, type SwmExpiryTestInternals } from './_helpers/swm-expiry-cleanup.js';
 
@@ -56,6 +57,30 @@ it.each([true, false])('reads distinct bounded real-store batches with prefix li
   });
   expect(await agent.cleanupExpiredSharedMemory()).toBe(753);
   expect(sizes).toEqual([250, 1, 0]);
+});
+
+it('uses the default shared-memory TTL when the option is omitted', async () => {
+  const agent = await DKGAgent.create({ name: 'expiry-default-ttl', chainAdapter: new MockChainAdapter() });
+  const { store } = agent as unknown as SwmExpiryTestInternals;
+  trackSwmExpiryAgent(agent);
+  const dkg = 'http://dkg.io/ontology/';
+  const rdfType = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+  const oldOperation = 'urn:expiry:default-ttl:old';
+  const retainedOperation = 'urn:expiry:default-ttl:retained';
+  const timestamp = (ageMs: number) => `"${new Date(Date.now() - ageMs).toISOString()}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`;
+  await store.insert([
+    { subject: oldOperation, predicate: rdfType, object: `${dkg}WorkspaceOperation`, graph: META },
+    { subject: oldOperation, predicate: `${dkg}publishedAt`, object: timestamp(DEFAULT_SWM_TTL_MS + 60_000), graph: META },
+    { subject: retainedOperation, predicate: rdfType, object: `${dkg}WorkspaceOperation`, graph: META },
+    { subject: retainedOperation, predicate: `${dkg}publishedAt`, object: timestamp(DEFAULT_SWM_TTL_MS - 60_000), graph: META },
+  ]);
+
+  await agent.cleanupExpiredSharedMemory();
+
+  expect(await store.query(`SELECT ?p WHERE { GRAPH <${META}> { <${oldOperation}> ?p ?o } }`)).toMatchObject({ bindings: [] });
+  expect(await store.query(`SELECT ?p WHERE { GRAPH <${META}> { <${retainedOperation}> ?p ?o } }`)).toMatchObject({
+    bindings: expect.arrayContaining([expect.objectContaining({ p: rdfType })]),
+  });
 });
 
 
