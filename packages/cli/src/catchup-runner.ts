@@ -13,6 +13,7 @@ import {
   type DurableSyncDiagnostics,
   type DurableSyncResult,
   type SwmSnapshotCoverage,
+  type SharedMemoryLocalYield,
   type SyncPeerResolution,
 } from '@origintrail-official/dkg-agent';
 import { PROTOCOL_SYNC, createOperationContext } from '@origintrail-official/dkg-core';
@@ -118,8 +119,8 @@ export interface CatchupJobResult {
        * are attributed to and the missing sample are never mixed across peers.
        */
       swmCoverage?: SwmSnapshotCoverage;
-      /** Snapshot phases that yielded on the local clock — see the agent-side field. */
-      snapshotPlaneIncomplete: number;
+      /** Canonical local-yield completion and affected snapshot-plane count. */
+      localYield?: SharedMemoryLocalYield;
       /** Extra passes over the peer set beyond the first. */
       continuationPasses: number;
       /**

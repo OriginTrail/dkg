@@ -61,7 +61,7 @@ import {
   classifySwmCatchupPeerOutcome,
   createSwmCatchupPeerSelector,
   loadOpWallets,
-  type SharedMemoryIncompleteReason,
+  type SharedMemoryLocalYield,
 } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
@@ -443,7 +443,7 @@ function decodeReservedKaId(val: unknown): bigint | undefined {
 const swmCatchupPeerSelector = createSwmCatchupPeerSelector();
 
 type SwmCatchupDetailedResult = {
-  incompleteReason?: SharedMemoryIncompleteReason;
+  localYield?: SharedMemoryLocalYield;
   insertedTriples: number;
   fetchedDataTriples?: number;
   fetchedMetaTriples?: number;
@@ -452,7 +452,6 @@ type SwmCatchupDetailedResult = {
   failedPhases?: number;
   timedOutPhases?: number;
   backoffWorthyFailures?: number;
-  snapshotPlaneIncomplete?: number;
 };
 
 function swmCatchupResultFromInserted(insertedTriples: number): SwmCatchupDetailedResult {
@@ -460,8 +459,8 @@ function swmCatchupResultFromInserted(insertedTriples: number): SwmCatchupDetail
 }
 
 function swmCatchupOutcomeInput(result: SwmCatchupDetailedResult, errorMessage?: string) {
+  if (result.localYield) return { localYield: result.localYield } as const;
   return {
-    incompleteReason: result.incompleteReason,
     insertedTriples: result.insertedTriples,
     fetchedDataTriples: result.fetchedDataTriples,
     fetchedMetaTriples: result.fetchedMetaTriples,
@@ -470,9 +469,20 @@ function swmCatchupOutcomeInput(result: SwmCatchupDetailedResult, errorMessage?:
     failedPhases: result.failedPhases,
     timedOutPhases: result.timedOutPhases,
     backoffWorthyFailures: result.backoffWorthyFailures,
-    snapshotPlaneIncomplete: result.snapshotPlaneIncomplete,
     errorMessage,
   };
+}
+
+function recordSwmCatchupPeerOutcome(
+  contextGraphId: string,
+  peerId: string,
+  result: SwmCatchupDetailedResult,
+  errorMessage?: string,
+): void {
+  const outcome = classifySwmCatchupPeerOutcome(
+    swmCatchupOutcomeInput(result, errorMessage),
+  );
+  if (outcome) swmCatchupPeerSelector.record(contextGraphId, peerId, outcome);
 }
 
 function uniquePeerIds(peerIds: readonly string[]): string[] {
@@ -800,17 +810,18 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
                 `SWM catchup from ${candidate} for ${cgId}`,
               ) as SwmCatchupDetailedResult;
               swm = Number(syncResult.insertedTriples ?? 0);
-              swmCatchupPeerSelector.record(
+              recordSwmCatchupPeerOutcome(
                 cgId,
                 candidate,
-                classifySwmCatchupPeerOutcome(swmCatchupOutcomeInput({ ...syncResult, insertedTriples: swm })),
+                { ...syncResult, insertedTriples: swm },
               );
             } catch (err: any) {
               swmError = err?.message ?? String(err);
-              swmCatchupPeerSelector.record(
+              recordSwmCatchupPeerOutcome(
                 cgId,
                 candidate,
-                classifySwmCatchupPeerOutcome(swmCatchupOutcomeInput({ insertedTriples: 0 }, swmError)),
+                { insertedTriples: 0 },
+                swmError,
               );
             }
           }

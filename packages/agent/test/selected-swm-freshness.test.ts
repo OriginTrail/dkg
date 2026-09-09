@@ -4,6 +4,7 @@ import {
   classifySelectedSwmRoundFreshness,
   classifySharedMemoryFreshness,
 } from '../src/sync/shared-memory-freshness.js';
+import { sharedMemoryLocalYield } from '../src/sync/shared-memory-completion.js';
 import {
   cleanDurableResult,
   result,
@@ -57,7 +58,7 @@ describe('shared-memory freshness classification', () => {
     const finalRaw = {
       ...complete,
       failedPhases: 1,
-      snapshotPlaneIncomplete: 1,
+      localYield: sharedMemoryLocalYield(),
     };
     const resolved = applySelectedSwmFreshnessResolution(finalRaw, {
       recoverableSnapshotYieldFailures: 1,
@@ -81,7 +82,10 @@ describe('shared-memory freshness classification', () => {
     }).resolvedSnapshotPlaneIncomplete).toBe(0);
     expect(applySelectedSwmFreshnessResolution({
       ...finalRaw,
-      snapshotPlaneIncomplete: -1,
+      localYield: {
+        kind: 'local-budget-yield',
+        snapshotPlaneIncomplete: -1,
+      } as any,
     }, {
       recoverableSnapshotYieldFailures: 1,
     }).resolvedSnapshotPlaneIncomplete).toBe(0);

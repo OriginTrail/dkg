@@ -43,7 +43,10 @@ import {
   SYNC_REQUEST_INITIAL_PAGE_SIZE,
   SYNC_REQUEST_SAFE_PAGE_SIZE,
 } from '../../dkg-agent-constants.js';
-import type { SharedMemoryIncompleteReason } from '../shared-memory-completion.js';
+import {
+  sharedMemoryLocalYield,
+  type SharedMemoryLocalYield,
+} from '../shared-memory-completion.js';
 
 const MAX_UNFINISHED_SYNC_RESPONDER_SESSIONS = 4096;
 type UnfinishedSyncResponderSession = {
@@ -168,9 +171,7 @@ function createResponderSessionId(includeSharedMemory: boolean, phase: SyncPhase
   return createSyncResponderSessionId(`${includeSharedMemory ? 'swm' : 'durable'}-${phase}`);
 }
 
-export interface SyncPageResult {
-  /** Semantic reason this page ended before completing its requested scope. */
-  incompleteReason?: SharedMemoryIncompleteReason;
+interface SyncPageResultFields {
   quads: Quad[];
   /** Absolute raw responder row coordinate for every retained quad. */
   quadRawOffsets?: number[];
@@ -191,9 +192,17 @@ export interface SyncPageResult {
   /** Raw responder-session coordinate after the last accepted page. */
   rawNextOffset?: number;
   checkpointKey: string;
-  completed: boolean;
   timedOut: boolean;
 }
+
+/**
+ * Page completion prevents a local scheduler yield from being paired with a
+ * contradictory successful completion at construction time.
+ */
+export type SyncPageResult = SyncPageResultFields & (
+  | { completed: true; localYield?: never }
+  | { completed: false; localYield?: SharedMemoryLocalYield }
+);
 
 export interface SyncPageProgress {
   readonly resumedFromOffset: number;
@@ -1052,7 +1061,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
         bytesReceived, resumedFromOffset, rawResumedFromOffset, responderSessionStartedFresh,
         ...(manifestDigest ? { manifestDigest } : {}),
         nextOffset: offset, rawNextOffset: offset, checkpointKey,
-        completed: false, timedOut: false, incompleteReason: 'local-budget-yield',
+        completed: false, timedOut: false, localYield: sharedMemoryLocalYield(),
       };
     }
     // The transport retry helper has no onRetry callback after its terminal

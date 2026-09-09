@@ -78,7 +78,12 @@ describe('syncPublicSnapshotsForMeta', () => {
       fetchSyncPages, deleteCheckpoint: () => {}, setCheckpoint: () => {},
     });
     expect(fetchSyncPages).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ completed: false, readySnapshots: 0, timedOutPhases: 0, incompleteReason: 'local-budget-yield' });
+    expect(result).toMatchObject({
+      completed: false,
+      readySnapshots: 0,
+      timedOutPhases: 0,
+      localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
+    });
   });
 
   it('prioritizes three recent snapshots for every historical snapshot', () => {
@@ -265,8 +270,8 @@ describe('syncPublicSnapshotsForMeta', () => {
     //
     // The contract being pinned is an ATTRIBUTION rule, not a counting rule:
     // stopping on OUR OWN round budget is a local scheduling decision, so it
-    // must surface as an incomplete snapshot plane (`incompleteReason`, which
-    // the caller in `runSharedMemorySync` turns into `snapshotPlaneIncomplete`
+    // must surface as the canonical local-yield completion (which carries its
+    // snapshot-plane count without a second independently optional field
     // + `failedPhases`) and must NEVER touch `timedOutPhases` — that field
     // feeds `backoffWorthyFailure` in `durable-progress.ts`, so folding a
     // yield into it would back off a perfectly healthy responder for the
@@ -330,8 +335,7 @@ describe('syncPublicSnapshotsForMeta', () => {
       });
 
       expect(result).toMatchObject({
-        // The local yield signal the caller maps to `snapshotPlaneIncomplete`.
-        incompleteReason: 'local-budget-yield',
+        localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
         // A yield is not a clean round: `completed` is derived from
         // `missingCount === 0`, so the abandoned tail keeps the graph from
         // being stamped caught-up while Knowledge Assets are still missing.
@@ -388,7 +392,10 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       deleteCheckpoint: (key) => { checkpoints.delete(key); },
     });
     expect(result.completed).toBe(false);
-    expect(result.incompleteReason).toBe('local-budget-yield');
+    expect(result.localYield).toEqual({
+      kind: 'local-budget-yield',
+      snapshotPlaneIncomplete: 1,
+    });
     expect(fetchSyncPages).toHaveBeenCalledTimes(1);
     expect(checkpoints.size).toBe(0);
     expect(await statusValues(store)).toEqual(['"old"']);

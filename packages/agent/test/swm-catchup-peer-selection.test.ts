@@ -4,8 +4,16 @@ import {
   createSwmCatchupPeerSelector,
   SWM_CATCHUP_PEER_NEGATIVE_TTL_MS,
 } from '../src/swm/swm-catchup-peer-selection.js';
+import { sharedMemoryLocalYield } from '../src/sync/shared-memory-completion.js';
 
 describe('SWM catchup peer selection', () => {
+  it.each([0, -1, 1.5, Number.NaN])(
+    'rejects contradictory local-yield count %s',
+    (count) => {
+      expect(() => sharedMemoryLocalYield(count)).toThrow(RangeError);
+    },
+  );
+
   it('filters peers known not to advertise the current sync protocol', () => {
     const selector = createSwmCatchupPeerSelector({ fallbackProbeLimit: 3 });
 
@@ -97,24 +105,19 @@ describe('SWM catchup peer selection', () => {
     expect(classifySwmCatchupPeerOutcome({ deniedPhases: 1 })).toBe('denied');
     expect(classifySwmCatchupPeerOutcome({ failedPeers: 1 })).toBe('transportFailed');
     const localYield = classifySwmCatchupPeerOutcome({
-      incompleteReason: 'local-budget-yield',
-      failedPhases: 1,
-      snapshotPlaneIncomplete: 1,
-      backoffWorthyFailures: 0,
+      localYield: sharedMemoryLocalYield(),
     });
-    expect(localYield).toBe('localYield');
+    expect(localYield).toBeUndefined();
     const selector = createSwmCatchupPeerSelector();
-    selector.record('cg', 'healthy-peer', localYield, 100);
-    expect(selector.get('cg', 'healthy-peer', 101)).toBeUndefined();
+    selector.record('cg', 'healthy-peer', 'good', 100);
+    if (localYield) selector.record('cg', 'healthy-peer', localYield, 101);
+    expect(selector.get('cg', 'healthy-peer', 102)).toBe('good');
     expect(classifySwmCatchupPeerOutcome({
-      incompleteReason: 'local-budget-yield',
       failedPhases: 1,
-      snapshotPlaneIncomplete: 1,
       backoffWorthyFailures: 1,
     })).toBe('transportFailed');
     expect(classifySwmCatchupPeerOutcome({
       failedPhases: 1,
-      snapshotPlaneIncomplete: 1,
     })).toBe('transportFailed');
     expect(classifySwmCatchupPeerOutcome({})).toBe('empty');
   });

@@ -9,6 +9,7 @@ import {
   classifySharedMemoryFreshness,
   createFailedPeerDurableSyncResult,
   mapWithConcurrency,
+  mergeSharedMemoryLocalYield,
   resolveSwmCatchupPassConfig,
   runCatchupPlaneWithPolicy,
   runCatchupPlanesWithPolicy,
@@ -222,7 +223,6 @@ function emptyShared(): SharedMemorySyncResult {
     failedPhases: 0,
     deniedPhases: 0,
     deferredBackpressure: 0,
-    snapshotPlaneIncomplete: 0,
     replayPhaseBytesReceived: 0,
     snapshotPhaseBytesReceived: 0,
     // `swmCoverage` stays ABSENT here on purpose. This is the fallback for a
@@ -320,7 +320,6 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       failedPhases: 0,
       deferredBackpressure: 0,
       deniedPhases: 0,
-      snapshotPlaneIncomplete: 0,
       continuationPasses: 0,
       replayPhaseBytesReceived: 0,
       snapshotPhaseBytesReceived: 0,
@@ -642,7 +641,10 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       diagnostics.sharedMemory.failedPeers += shared.failedPeers;
       diagnostics.sharedMemory.failedPhases += shared.failedPhases ?? 0;
       diagnostics.sharedMemory.deferredBackpressure += shared.deferredBackpressure ?? 0;
-      diagnostics.sharedMemory.snapshotPlaneIncomplete += shared.snapshotPlaneIncomplete ?? 0;
+      diagnostics.sharedMemory.localYield = mergeSharedMemoryLocalYield(
+        diagnostics.sharedMemory.localYield,
+        shared.localYield,
+      );
       diagnostics.sharedMemory.replayPhaseBytesReceived += shared.replayPhaseBytesReceived ?? 0;
       diagnostics.sharedMemory.snapshotPhaseBytesReceived += shared.snapshotPhaseBytesReceived ?? 0;
       // The DIAGNOSTIC above counts every deferral, including continuation

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { withRetry } from '../src/retry.js';
 
 describe('withRetry', () => {
@@ -163,29 +163,40 @@ describe('withRetry', () => {
   });
 
   it('re-evaluates retry policy after backoff and preserves the admitted failure', async () => {
+    vi.useFakeTimers();
     const admittedFailure = new Error('first attempt failed');
     let calls = 0;
     let retryAllowed = true;
     let policyCalls = 0;
+    let signalBackoffStarted: () => void = () => {};
+    const backoffStarted = new Promise<void>((resolve) => {
+      signalBackoffStarted = resolve;
+    });
     const isRetryable = () => {
       policyCalls += 1;
       return retryAllowed;
     };
 
-    const outcome = await withRetry(async () => {
+    const pending = withRetry(async () => {
       calls += 1;
       throw admittedFailure;
     }, {
       maxAttempts: 3,
-      baseDelayMs: 0,
+      baseDelayMs: 100,
       jitter: 0,
       isRetryable,
-      onRetry: () => { retryAllowed = false; },
+      onRetry: signalBackoffStarted,
     }).then(() => null, error => error);
-
-    expect(outcome).toBe(admittedFailure);
-    expect(calls).toBe(1);
-    expect(policyCalls).toBe(2);
+    try {
+      await backoffStarted;
+      retryAllowed = false;
+      await vi.advanceTimersByTimeAsync(100);
+      expect(await pending).toBe(admittedFailure);
+      expect(calls).toBe(1);
+      expect(policyCalls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not mutate default AbortController reasons while aborting backoff', async () => {

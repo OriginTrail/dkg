@@ -89,7 +89,11 @@ export {
   VmReconcileDispatcher,
 } from './chain-reconciler.js';
 export { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
-export type { SharedMemoryIncompleteReason } from './sync/shared-memory-completion.js';
+export {
+  mergeSharedMemoryLocalYield,
+  sharedMemoryLocalYield,
+  type SharedMemoryLocalYield,
+} from './sync/shared-memory-completion.js';
 export {
   classifySharedMemoryFreshness,
   type SelectedSharedMemorySyncResult,

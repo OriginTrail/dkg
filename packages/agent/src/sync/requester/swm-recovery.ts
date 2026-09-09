@@ -23,6 +23,7 @@ import {
   type PublicSnapshotMetadata,
   type SharedMemorySnapshotWalkContinuation,
 } from './shared-memory-sync.js';
+import { validateRetainedSnapshotWalk } from './retained-snapshot-walk-validation.js';
 import { appendInPlace } from '../append-in-place.js';
 import {
   discoverSwmRecoverySubGraphNames,
@@ -43,7 +44,11 @@ import {
   isNamedSubgraphSharedMemoryDataGraph,
   isNamedSubgraphSharedMemoryMetaGraph,
 } from '../shared-memory-graphs.js';
-import type { SharedMemoryIncompleteReason } from '../shared-memory-completion.js';
+import {
+  mergeSharedMemoryLocalYield,
+  sharedMemoryLocalYield,
+  type SharedMemoryLocalYield,
+} from '../shared-memory-completion.js';
 
 /**
  * recovery entry point. Recovers a CG's
@@ -172,9 +177,7 @@ export interface RecoverContextGraphSwmDeps {
   readonly maxPagesPerPhase?: number;
 }
 
-export interface RecoverContextGraphSwmResult {
-  /** Explicit local yield, independent of any peer response or transport failure. */
-  readonly incompleteReason?: SharedMemoryIncompleteReason;
+interface RecoverContextGraphSwmResultFields {
   readonly replacedRoots: number;
   readonly replacedGraphs: number;
   readonly insertedDataQuads: number;
@@ -184,9 +187,13 @@ export interface RecoverContextGraphSwmResult {
   readonly readySnapshots: number;
   /** Total immutable snapshot refs declared by the recovered SWM metadata. */
   readonly totalSnapshots: number;
-  /** false if a phase hit the deadline without completing — partial, safe to retry. */
-  readonly completed: boolean;
 }
+
+/** Recovery completion cannot simultaneously carry a local-yield outcome. */
+export type RecoverContextGraphSwmResult = RecoverContextGraphSwmResultFields & (
+  | { readonly completed: true; readonly localYield?: never }
+  | { readonly completed: false; readonly localYield?: SharedMemoryLocalYield }
+);
 
 export interface SwmRecoveryProgress {
   readonly completedRound: number;
@@ -272,16 +279,16 @@ async function fetchPhaseFully(
 ): Promise<{
   quads: Quad[];
   completed: boolean;
-  incompleteReason?: SharedMemoryIncompleteReason;
+  localYield?: SharedMemoryLocalYield;
 }> {
   const workAdmission = deps.workAdmission ?? UNRESTRICTED_SYNC_WORK;
-  let incompleteReason: SharedMemoryIncompleteReason | undefined;
+  let localYield: SharedMemoryLocalYield | undefined;
   const maxPages = deps.maxPagesPerPhase ?? DEFAULT_MAX_PAGES_PER_PHASE;
   const all: Quad[] = [];
   let lastCheckpointKey: string | undefined;
   for (let i = 0; i < maxPages; i++) {
     if (Date.now() >= deps.deadline || !workAdmission.canAdmitWork()) {
-      incompleteReason = 'local-budget-yield';
+      localYield = sharedMemoryLocalYield();
       break;
     }
     const page = await boundary.read(() => deps.fetchSyncPages(
@@ -294,7 +301,7 @@ async function fetchPhaseFully(
       workAdmission.capDeadline(deps.deadline),
       { signal: boundary.signal, workAdmission },
     ));
-    incompleteReason ??= page.incompleteReason;
+    localYield = mergeSharedMemoryLocalYield(localYield, page.localYield);
     appendInPlace(all, page.quads);
     lastCheckpointKey = page.checkpointKey;
     if (page.completed) {
@@ -302,7 +309,7 @@ async function fetchPhaseFully(
       return { quads: all, completed: true };
     }
     // Not completed (deadline or partial). Stop if no forward progress.
-    if (page.incompleteReason || page.timedOut || page.nextOffset <= page.resumedFromOffset) break;
+    if (page.localYield || page.timedOut || page.nextOffset <= page.resumedFromOffset) break;
     boundary.admitSyncMutation(() => deps.setCheckpoint(page.checkpointKey, page.nextOffset));
   }
   // Incomplete: the accumulated `all` is a prefix that the caller MUST NOT
@@ -317,7 +324,7 @@ async function fetchPhaseFully(
   return {
     quads: all,
     completed: false,
-    ...(incompleteReason ? { incompleteReason } : {}),
+    ...(localYield ? { localYield } : {}),
   };
 }
 
@@ -368,7 +375,7 @@ async function recoverContextGraphSwmUnlocked(
       droppedDataTriples: 0,
       readySnapshots: 0,
       totalSnapshots: 0,
-      ...(meta.incompleteReason ? { incompleteReason: meta.incompleteReason } : {}),
+      ...(meta.localYield ? { localYield: meta.localYield } : {}),
       completed: false,
     };
   }
@@ -504,45 +511,39 @@ async function recoverContextGraphSwmUnlocked(
     const orderedManifest = collectPublicSnapshotMetadata(activeGraphMeta);
     snapshotWalk = deps.snapshotWalk?.(orderedManifest);
     if (snapshotWalk?.invalidateResolved) {
-      const retainedRefs = snapshotWalk.resolvedRefsSnapshot();
-      let validatedRetainedRefs = 0;
-      const workAdmission = deps.workAdmission ?? UNRESTRICTED_SYNC_WORK;
-      for (const [index, resolvedRef] of retainedRefs.entries()) {
-        // Retained evidence is still per-KA work: validating a blob and its
-        // materialized graph can be as expensive as fetching one. Yield at the
-        // same boundary as the snapshot walk and discard unvalidated evidence
-        // so it cannot be counted as completion on a later pass.
-        if (Date.now() >= deps.deadline || !workAdmission.canAdmitWork()) {
-          for (const unvalidatedRef of retainedRefs.slice(index)) {
-            snapshotWalk.invalidateResolved(unvalidatedRef);
+      const retainedValidation = await validateRetainedSnapshotWalk({
+        walk: snapshotWalk,
+        deadline: deps.deadline,
+        workAdmission: deps.workAdmission ?? UNRESTRICTED_SYNC_WORK,
+        validateRef: async (resolvedRef) => {
+          const descriptors = snapshotDescriptorsByRef.get(resolvedRef) ?? [];
+          let stillMaterialized = descriptors.length > 0;
+          for (const descriptor of descriptors) {
+            if (!stillMaterialized) break;
+            stillMaterialized = await boundary.read(() => (
+              deps.snapshotMaterializer.isGraphAssetMaterialized(descriptor)
+            ));
           }
-          deps.logInfo?.(
-            deps.ctx,
-            `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: `
-            + 'retained snapshot validation exhausted the local budget — will retry',
-          );
-          return {
-            incompleteReason: 'local-budget-yield',
-            replacedRoots: 0,
-            replacedGraphs: 0,
-            insertedDataQuads: 0,
-            insertedMetaQuads: 0,
-            droppedDataTriples: 0,
-            readySnapshots: validatedRetainedRefs,
-            totalSnapshots: orderedManifest.length,
-            completed: false,
-          };
-        }
-        const descriptors = snapshotDescriptorsByRef.get(resolvedRef) ?? [];
-        let stillMaterialized = descriptors.length > 0;
-        for (const descriptor of descriptors) {
-          if (!stillMaterialized) break;
-          stillMaterialized = await boundary.read(() => (
-            deps.snapshotMaterializer.isGraphAssetMaterialized(descriptor)
-          ));
-        }
-        if (!stillMaterialized) snapshotWalk.invalidateResolved(resolvedRef);
-        else validatedRetainedRefs += 1;
+          return stillMaterialized;
+        },
+      });
+      if (retainedValidation.kind === 'local-budget-yield') {
+        deps.logInfo?.(
+          deps.ctx,
+          `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: `
+          + 'retained snapshot validation exhausted the local budget — will retry',
+        );
+        return {
+          localYield: sharedMemoryLocalYield(),
+          replacedRoots: 0,
+          replacedGraphs: 0,
+          insertedDataQuads: 0,
+          insertedMetaQuads: 0,
+          droppedDataTriples: 0,
+          readySnapshots: retainedValidation.validatedRefs,
+          totalSnapshots: orderedManifest.length,
+          completed: false,
+        };
       }
     }
     boundary.assertCurrent();
@@ -584,8 +585,8 @@ async function recoverContextGraphSwmUnlocked(
         insertedMetaQuads: incrementallyInsertedMetaQuads,
         droppedDataTriples: 0,
         ...snapshotProgress,
-        ...(snapshotSync.incompleteReason
-          ? { incompleteReason: snapshotSync.incompleteReason }
+        ...(snapshotSync.localYield
+          ? { localYield: snapshotSync.localYield }
           : {}),
         completed: false,
       };
@@ -616,7 +617,7 @@ async function recoverContextGraphSwmUnlocked(
       insertedMetaQuads: incrementallyInsertedMetaQuads,
       droppedDataTriples: 0,
       ...snapshotProgress,
-      ...(data.incompleteReason ? { incompleteReason: data.incompleteReason } : {}),
+      ...(data.localYield ? { localYield: data.localYield } : {}),
       completed: false,
     };
   }

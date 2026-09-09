@@ -16,7 +16,7 @@
 
 import type { ethers } from 'ethers';
 import type { CatchupPassDecisionReason } from './sync/catchup-pass-policy.js';
-import type { SharedMemoryIncompleteReason } from './sync/shared-memory-completion.js';
+import type { SharedMemoryLocalYield } from './sync/shared-memory-completion.js';
 import type {
   Quad,
   TripleStore,
@@ -1237,8 +1237,8 @@ export interface SwmSnapshotCoverage {
 }
 
 export interface SharedMemorySyncDiagnostics {
-  /** Semantic incomplete outcome preserved end-to-end for peer policy. */
-  incompleteReason?: SharedMemoryIncompleteReason;
+  /** Canonical local completion, including its snapshot-plane cardinality. */
+  localYield?: SharedMemoryLocalYield;
   fetchedMetaTriples: number;
   fetchedDataTriples: number;
   insertedMetaTriples: number;
@@ -1258,14 +1258,6 @@ export interface SharedMemorySyncDiagnostics {
   /** Coverage for the graph this round touched; see {@link SwmSnapshotCoverage}. */
   swmCoverage?: SwmSnapshotCoverage;
   /**
-   * Snapshot phases that stopped on the local clock with unfetched refs
-   * remaining — a VOLUNTARY yield, not a peer fault. Deliberately distinct from
-   * `timedOutPhases`, which marks the round backoff-worthy
-   * (`durable-progress.ts` `backoffWorthyFailure`) and would put a healthy peer
-   * into backoff for our own budget decision.
-   */
-  snapshotPlaneIncomplete?: number;
-  /**
    * Metadata phases that hit their local round deadline only after retaining
    * the exact verified-to-date prefix for an immediate selected continuation.
    */
@@ -1273,14 +1265,14 @@ export interface SharedMemorySyncDiagnostics {
   /** Extra catch-up passes spent over the peer set beyond the first. */
   continuationPasses?: number;
   /**
-   * Historical `snapshotPlaneIncomplete` failures superseded by a later clean,
+   * Historical local-yield failures superseded by a later clean,
    * complete selected-provider continuation in this same invocation.
    *
    * The raw failure and incomplete counters remain intact for telemetry. An
    * The canonical shared-memory freshness classifier may supersede only this
    * bounded count; transport, timeout, denial and backpressure signals remain
    * independent vetoes. Producers must maintain
-   * `0 <= resolved <= snapshotPlaneIncomplete <= failedPhases`.
+   * `0 <= resolved <= localYield.snapshotPlaneIncomplete <= failedPhases`.
    */
   resolvedSnapshotPlaneIncomplete?: number;
   /** Historical selected metadata yields superseded by exact completion. */

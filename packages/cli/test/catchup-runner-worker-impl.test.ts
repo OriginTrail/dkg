@@ -293,7 +293,10 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
                 bytesReceived: 0,
                 emptyResponses: 1,
                 failedPhases: 1,
-                snapshotPlaneIncomplete: 1,
+                localYield: {
+                  kind: 'local-budget-yield',
+                  snapshotPlaneIncomplete: 1,
+                },
                 resolvedSnapshotPlaneIncomplete: 1,
                 timedOutPhases: 1,
                 metadataContinuationYields: 1,

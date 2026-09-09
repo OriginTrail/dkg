@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
-import type { DurableSyncResult } from '@origintrail-official/dkg-agent';
+import {
+  sharedMemoryLocalYield,
+  type DurableSyncResult,
+} from '@origintrail-official/dkg-agent';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
 function fakeRes() {
@@ -1196,9 +1199,8 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     const syncSharedMemoryFromPeerDetailed = vi.fn(async (selectedPeerId: string) => {
       if (selectedPeerId === peerId && yieldingPeerCalls++ === 0) return {
         insertedTriples: 0,
-        incompleteReason: 'local-budget-yield',
+        localYield: sharedMemoryLocalYield(),
         failedPhases: 1,
-        snapshotPlaneIncomplete: 1,
         backoffWorthyFailures: 0,
       };
       return { insertedTriples: 0 };

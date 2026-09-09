@@ -1,6 +1,6 @@
-import type { SharedMemoryIncompleteReason } from '../sync/shared-memory-completion.js';
+import type { SharedMemoryLocalYield } from '../sync/shared-memory-completion.js';
 
-export type SwmCatchupPeerOutcome = 'good' | 'empty' | 'denied' | 'unsupported' | 'transportFailed' | 'localYield';
+export type SwmCatchupPeerOutcome = 'good' | 'empty' | 'denied' | 'unsupported' | 'transportFailed';
 
 export const SWM_CATCHUP_PEER_GOOD_TTL_MS = 10 * 60_000;
 export const SWM_CATCHUP_PEER_NEGATIVE_TTL_MS = 2 * 60_000;
@@ -53,9 +53,6 @@ export class SwmCatchupPeerSelector {
   }
 
   record(contextGraphId: string, peerId: string, outcome: SwmCatchupPeerOutcome, now = Date.now()): void {
-    // A local admission yield says nothing about peer health. Do not add it to
-    // either the positive or negative cache, and do not erase prior evidence.
-    if (outcome === 'localYield') return;
     const ttl = outcome === 'good' ? this.goodTtlMs : this.negativeTtlMs;
     if (ttl <= 0) {
       this.entries.delete(cacheKey(contextGraphId, peerId));
@@ -146,8 +143,7 @@ export function createSwmCatchupPeerSelector(options?: SwmCatchupPeerSelectorOpt
   return new SwmCatchupPeerSelector(options);
 }
 
-export function classifySwmCatchupPeerOutcome(input: {
-  incompleteReason?: SharedMemoryIncompleteReason;
+interface SwmCatchupPeerTelemetry {
   insertedTriples?: number;
   fetchedDataTriples?: number;
   fetchedMetaTriples?: number;
@@ -156,9 +152,29 @@ export function classifySwmCatchupPeerOutcome(input: {
   failedPhases?: number;
   timedOutPhases?: number;
   backoffWorthyFailures?: number;
-  snapshotPlaneIncomplete?: number;
   errorMessage?: string;
-}): SwmCatchupPeerOutcome {
+}
+
+export type SwmCatchupPeerOutcomeInput =
+  | {
+    /** A local scheduler decision is deliberately not peer-health evidence. */
+    localYield: SharedMemoryLocalYield;
+    insertedTriples?: never;
+    fetchedDataTriples?: never;
+    fetchedMetaTriples?: never;
+    deniedPhases?: never;
+    failedPeers?: never;
+    failedPhases?: never;
+    timedOutPhases?: never;
+    backoffWorthyFailures?: never;
+    errorMessage?: never;
+  }
+  | (SwmCatchupPeerTelemetry & { localYield?: never });
+
+export function classifySwmCatchupPeerOutcome(
+  input: SwmCatchupPeerOutcomeInput,
+): SwmCatchupPeerOutcome | undefined {
+  if (input.localYield) return undefined;
   if ((input.insertedTriples ?? 0) > 0 || (input.fetchedDataTriples ?? 0) > 0 || (input.fetchedMetaTriples ?? 0) > 0) {
     return 'good';
   }
@@ -166,15 +182,6 @@ export function classifySwmCatchupPeerOutcome(input: {
     return 'denied';
   }
   const failedPhases = input.failedPhases ?? 0;
-  if (
-    !input.errorMessage
-    && input.incompleteReason === 'local-budget-yield'
-    && (input.failedPeers ?? 0) === 0
-    && (input.timedOutPhases ?? 0) === 0
-    && (input.backoffWorthyFailures ?? 0) === 0
-  ) {
-    return 'localYield';
-  }
   if (
     input.errorMessage ||
     (input.failedPeers ?? 0) > 0 ||

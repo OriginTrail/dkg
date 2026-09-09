@@ -30,7 +30,11 @@ it('keeps independently budgeted lifecycle fetches separate and forwards their a
     await admitted;
     let expired: SyncPageResult | undefined;
     second = fetch(createSyncWorkAdmission(() => 0)).then(result => { expired = result; return result; });
-    await vi.waitFor(() => expect(expired).toMatchObject({ completed: false, timedOut: false, incompleteReason: 'local-budget-yield' }));
+    await vi.waitFor(() => expect(expired).toMatchObject({
+      completed: false,
+      timedOut: false,
+      localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
+    }));
     expect(sendToPeer).toHaveBeenCalledTimes(1);
     release();
     expect(await first).toMatchObject({ completed: true });

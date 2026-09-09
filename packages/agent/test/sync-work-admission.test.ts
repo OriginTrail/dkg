@@ -42,7 +42,11 @@ describe('page and transport admission within one operation', () => {
       },
     });
     expect(timeouts).toEqual([100, 50]);
-    expect(result).toMatchObject({ completed: false, timedOut: false, incompleteReason: 'local-budget-yield' });
+    expect(result).toMatchObject({
+      completed: false,
+      timedOut: false,
+      localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
+    });
     expect(result.quads).toHaveLength(2);
   });
 
@@ -56,7 +60,11 @@ describe('page and transport admission within one operation', () => {
       buildSyncRequest: async () => { elapsed = 100; return new Uint8Array([1]); },
     });
     expect(send).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ completed: false, timedOut: false, incompleteReason: 'local-budget-yield' });
+    expect(result).toMatchObject({
+      completed: false,
+      timedOut: false,
+      localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
+    });
   });
 
   it('recomputes the timeout for each retry after the wall clock rolls back', async () => {
@@ -81,13 +89,19 @@ describe('page and transport admission within one operation', () => {
   it('keeps an admitted transport failure when the allowance expires during retry backoff', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let elapsed = 0;
+    let signalBackoffStarted: () => void = () => {};
+    const backoffStarted = new Promise<void>((resolve) => {
+      signalBackoffStarted = resolve;
+    });
     vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
     const failure = new Error('request timeout');
     const send = vi.fn(async () => { throw failure; });
     const outcome = request({
       workAdmission: createPrivateSwmRecoveryWindow(100), send,
-      logWarn: () => { elapsed = 100; },
+      logWarn: signalBackoffStarted,
     }).then(() => null, error => error);
+    await backoffStarted;
+    elapsed = 100;
     await vi.runAllTimersAsync();
     expect(await outcome).toBe(failure);
     expect(isSyncTransportFailure(await outcome)).toBe(true);
@@ -119,6 +133,9 @@ describe('page and transport admission within one operation', () => {
     const result = await request({ workAdmission, send });
 
     expect(send).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ completed: false, incompleteReason: 'local-budget-yield' });
+    expect(result).toMatchObject({
+      completed: false,
+      localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
+    });
   });
 });

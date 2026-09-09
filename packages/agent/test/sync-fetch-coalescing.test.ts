@@ -22,6 +22,7 @@ import {
 } from '../src/sync/checkpoint/state.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { UNRESTRICTED_SYNC_WORK, createSyncWorkAdmission } from '../src/sync/work-admission.js';
+import { sharedMemoryLocalYield } from '../src/sync/shared-memory-completion.js';
 import {
   createChallengePinnedExactAssetSelection,
   createUalOnlyExactAssetSelection,
@@ -1637,16 +1638,15 @@ describe('DKGAgent sync fetch coalescing', () => {
     // aggregate preserves the documented identity
     // `replayPhaseBytesReceived + snapshotPhaseBytesReceived === bytesReceived`.
     const peerARound = {
-      incompleteReason: 'local-budget-yield' as const,
+      localYield: sharedMemoryLocalYield(1),
       swmCoverage: peerACoverage(),
-      snapshotPlaneIncomplete: 1,
       replayPhaseBytesReceived: 4_096,
       snapshotPhaseBytesReceived: 65_536,
       bytesReceived: 69_632,
     };
     const peerBRound = {
       swmCoverage: peerBCoverage(),
-      snapshotPlaneIncomplete: 2,
+      localYield: sharedMemoryLocalYield(2),
       replayPhaseBytesReceived: 1_024,
       snapshotPhaseBytesReceived: 16_384,
       bytesReceived: 17_408,
@@ -1717,8 +1717,10 @@ describe('DKGAgent sync fetch coalescing', () => {
 
       // SUMMATION across both peers. Each expected value differs from both
       // operands, so neither `=` (last write) nor a dropped forward can produce it.
-      expect(swm.snapshotPlaneIncomplete).toBe(3); // 1 + 2
-      expect(swm.incompleteReason).toBe('local-budget-yield');
+      expect(swm.localYield).toEqual({
+        kind: 'local-budget-yield',
+        snapshotPlaneIncomplete: 3,
+      });
       expect(swm.replayPhaseBytesReceived).toBe(5_120); // 4_096 + 1_024
       expect(swm.snapshotPhaseBytesReceived).toBe(81_920); // 65_536 + 16_384
       // The documented split identity has to survive aggregation, not just hold
@@ -1810,7 +1812,9 @@ describe('DKGAgent sync fetch coalescing', () => {
         return {
           ...cleanSharedMemorySyncResult(),
           completedPhases: 1,
-          ...(resolved < 3 ? { failedPhases: 1, snapshotPlaneIncomplete: 1 } : {}),
+          ...(resolved < 3
+            ? { failedPhases: 1, localYield: sharedMemoryLocalYield() }
+            : {}),
           swmCoverage: coverage(resolved),
         };
       };

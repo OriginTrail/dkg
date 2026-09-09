@@ -136,8 +136,8 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     expect(getSnapshot).toHaveBeenCalledTimes(1);
     expect(fetchSyncPages).toHaveBeenCalledTimes(1); // Metadata only; zero snapshot requests.
     expect(result).toMatchObject({
-      incompleteReason: 'local-budget-yield',
-      completedPhases: 0, failedPhases: 1, snapshotPlaneIncomplete: 1,
+      localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
+      completedPhases: 0, failedPhases: 1,
       failedPeers: 0, backoffWorthyFailures: 0, insertedTriples: 0,
     });
   });
@@ -200,7 +200,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
 
     expect(result).toMatchObject({
       completed: false,
-      incompleteReason: 'local-budget-yield',
+      localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
       readySnapshots: 1,
       totalSnapshots: 3,
     });
@@ -236,17 +236,15 @@ describe('private recovery job ownership and lifecycle outcome', () => {
 
     const first = await run();
     expect(first).toMatchObject({
-      incompleteReason: 'local-budget-yield',
+      localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
       failedPhases: 1,
-      snapshotPlaneIncomplete: 1,
     });
     expect(getSnapshot).toHaveBeenCalledTimes(2);
 
     const second = await run();
     expect(second).toMatchObject({
-      incompleteReason: 'local-budget-yield',
+      localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
       failedPhases: 1,
-      snapshotPlaneIncomplete: 1,
     });
     expect(getSnapshot).toHaveBeenCalledTimes(4);
 
@@ -289,14 +287,16 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     });
 
     await expect(run()).resolves.toMatchObject({
-      completedPhases: 0, incompleteReason: 'local-budget-yield',
+      completedPhases: 0,
+      localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
     });
     expect(await store.countQuads(fixtures[0].assertionGraph)).toBe(1);
     await store.dropGraph(fixtures[0].assertionGraph);
     expect(await store.countQuads(fixtures[0].assertionGraph)).toBe(0);
 
     await expect(run()).resolves.toMatchObject({
-      completedPhases: 0, incompleteReason: 'local-budget-yield',
+      completedPhases: 0,
+      localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
     });
     expect(await store.countQuads(fixtures[0].assertionGraph)).toBe(1);
     expect(getSnapshot.mock.calls.map(([ref]) => ref))
@@ -318,6 +318,19 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     const walkA = registry.open(ownerA, manifest);
     walkA.markResolved('a');
     expect(registry.open(ownerA, manifest).isResolved('a')).toBe(true);
+
+    const changedDigest = manifest.map((snapshot) => (
+      snapshot.ref === 'a' ? { ...snapshot, digest: 'changed-digest' } : snapshot
+    ));
+    expect(registry.open(ownerA, changedDigest).isResolved('a')).toBe(false);
+    registry.open(ownerA, manifest).markResolved('a');
+
+    const changedCount = manifest.map((snapshot) => (
+      snapshot.ref === 'a' ? { ...snapshot, count: 2 } : snapshot
+    ));
+    expect(registry.open(ownerA, changedCount).isResolved('a')).toBe(false);
+    registry.open(ownerA, manifest).markResolved('a');
+
     const reversedA = registry.open(ownerA, [...manifest].reverse());
     expect(reversedA.isResolved('a')).toBe(false);
     const ownerB = { ...ownerA, remotePeerId: 'peer-b' };
@@ -378,7 +391,10 @@ describe('private recovery job ownership and lifecycle outcome', () => {
         if (phase === 'meta' && yieldedPhase === 'data') return page(legacyMetadata());
         expect(phase).toBe(yieldedPhase);
         elapsed = 100;
-        return { ...page([], false), incompleteReason: 'local-budget-yield' };
+        return {
+          ...page([], false),
+          localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
+        };
       });
 
       const result = await run();
@@ -386,10 +402,9 @@ describe('private recovery job ownership and lifecycle outcome', () => {
       expect(fetchSyncPages.mock.calls.map(call => call[4]))
         .toEqual(yieldedPhase === 'meta' ? ['meta'] : ['meta', 'data']);
       expect(result).toMatchObject({
-        incompleteReason: 'local-budget-yield',
+        localYield: { kind: 'local-budget-yield', snapshotPlaneIncomplete: 1 },
         completedPhases: 0,
         failedPhases: 1,
-        snapshotPlaneIncomplete: 1,
         failedPeers: 0,
         backoffWorthyFailures: 0,
         insertedTriples: 0,

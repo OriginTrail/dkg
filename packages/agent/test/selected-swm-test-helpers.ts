@@ -15,6 +15,7 @@ import type {
   SharedMemorySyncResult,
   SwmSnapshotCoverage,
 } from '../src/dkg-agent-types.js';
+import { sharedMemoryLocalYield } from '../src/sync/shared-memory-completion.js';
 import type {
   SelectedSharedMemoryRequestedScope,
   SelectedSharedMemorySyncResult,
@@ -167,7 +168,6 @@ export function cleanDurableResult(): SharedMemorySyncResult {
     deniedPhases: 0,
     backoffWorthyFailures: 0,
     deferredBackpressure: 0,
-    snapshotPlaneIncomplete: 0,
     replayPhaseBytesReceived: 0,
     snapshotPhaseBytesReceived: 0,
   };
@@ -215,7 +215,7 @@ export function result(
     deniedPhases: 0,
     backoffWorthyFailures: 0,
     deferredBackpressure: options.deferredBackpressure ?? 0,
-    snapshotPlaneIncomplete: completed ? 0 : 1,
+    ...(completed ? {} : { localYield: sharedMemoryLocalYield() }),
     replayPhaseBytesReceived: 0,
     snapshotPhaseBytesReceived: 0,
     swmCoverage,

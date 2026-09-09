@@ -403,6 +403,7 @@ import {
   applySelectedSwmFreshnessResolution,
   mergeSharedMemoryFreshnessDiagnostics,
 } from './sync/shared-memory-freshness.js';
+import { mergeSharedMemoryLocalYield } from './sync/shared-memory-completion.js';
 import {
   classifyDurableProgress,
   createDurableSyncAccumulator,
@@ -1746,7 +1747,6 @@ function emptySharedMemorySyncResult(): SharedMemorySyncResult {
     deniedPhases: 0,
     backoffWorthyFailures: 0,
     deferredBackpressure: 0,
-    snapshotPlaneIncomplete: 0,
     metadataContinuationYields: 0,
     replayPhaseBytesReceived: 0,
     snapshotPhaseBytesReceived: 0,
@@ -1759,7 +1759,7 @@ function mergeSharedMemorySyncResults(
 ): SharedMemorySyncResult {
   const swmCoverage = selectSwmSnapshotCoverage(a.swmCoverage, b.swmCoverage);
   return {
-    incompleteReason: a.incompleteReason ?? b.incompleteReason,
+    localYield: mergeSharedMemoryLocalYield(a.localYield, b.localYield),
     insertedTriples: a.insertedTriples + b.insertedTriples,
     fetchedMetaTriples: a.fetchedMetaTriples + b.fetchedMetaTriples,
     fetchedDataTriples: a.fetchedDataTriples + b.fetchedDataTriples,
@@ -1778,7 +1778,6 @@ function mergeSharedMemorySyncResults(
     deniedPhases: a.deniedPhases + b.deniedPhases,
     backoffWorthyFailures: (a.backoffWorthyFailures ?? 0) + (b.backoffWorthyFailures ?? 0),
     deferredBackpressure: (a.deferredBackpressure ?? 0) + (b.deferredBackpressure ?? 0),
-    snapshotPlaneIncomplete: (a.snapshotPlaneIncomplete ?? 0) + (b.snapshotPlaneIncomplete ?? 0),
     metadataContinuationYields:
       (a.metadataContinuationYields ?? 0) + (b.metadataContinuationYields ?? 0),
     continuationPasses: (a.continuationPasses ?? 0) + (b.continuationPasses ?? 0),
@@ -7703,9 +7702,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 completedTargetKeys.add(sharedMemoryRecoveryTargetKey(target));
               } else {
                 result.failedPhases = 1;
-                if (recovered.incompleteReason === 'local-budget-yield') {
-                  result.incompleteReason = recovered.incompleteReason;
-                  result.snapshotPlaneIncomplete = 1;
+                if (recovered.localYield) {
+                  result.localYield = recovered.localYield;
                 } else {
                   result.backoffWorthyFailures = 1;
                 }
@@ -8287,7 +8285,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         failedPeers: 0,
         failedPhases: 0,
         deferredBackpressure: 0,
-        snapshotPlaneIncomplete: 0,
         continuationPasses: 0,
         replayPhaseBytesReceived: 0,
         snapshotPhaseBytesReceived: 0,
@@ -8558,10 +8555,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             r.shared.swmCoverage,
           );
         }
-        diagnostics.sharedMemory.snapshotPlaneIncomplete =
-          (diagnostics.sharedMemory.snapshotPlaneIncomplete ?? 0)
-          + (r.shared.snapshotPlaneIncomplete ?? 0);
-        diagnostics.sharedMemory.incompleteReason ??= r.shared.incompleteReason;
+        diagnostics.sharedMemory.localYield = mergeSharedMemoryLocalYield(
+          diagnostics.sharedMemory.localYield,
+          r.shared.localYield,
+        );
         diagnostics.sharedMemory.replayPhaseBytesReceived =
           (diagnostics.sharedMemory.replayPhaseBytesReceived ?? 0)
           + (r.shared.replayPhaseBytesReceived ?? 0);
@@ -8610,10 +8607,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           shared.swmCoverage,
         );
       }
-      diagnostics.sharedMemory.snapshotPlaneIncomplete =
-        (diagnostics.sharedMemory.snapshotPlaneIncomplete ?? 0)
-        + (shared.snapshotPlaneIncomplete ?? 0);
-      diagnostics.sharedMemory.incompleteReason ??= shared.incompleteReason;
+      diagnostics.sharedMemory.localYield = mergeSharedMemoryLocalYield(
+        diagnostics.sharedMemory.localYield,
+        shared.localYield,
+      );
       diagnostics.sharedMemory.replayPhaseBytesReceived =
         (diagnostics.sharedMemory.replayPhaseBytesReceived ?? 0)
         + (shared.replayPhaseBytesReceived ?? 0);

@@ -3,7 +3,11 @@ import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SwmSnapshotCoverage } from '../../dkg-agent-types.js';
-import type { SharedMemoryIncompleteReason } from '../shared-memory-completion.js';
+import {
+  mergeSharedMemoryLocalYield,
+  sharedMemoryLocalYield,
+  type SharedMemoryLocalYield,
+} from '../shared-memory-completion.js';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import type { SyncPhase } from '../auth/request-build.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
@@ -229,8 +233,8 @@ export function readPublicSnapshotWalkProgress(err: unknown): PublicSnapshotWalk
 }
 
 export interface SharedMemorySyncSummary {
-  /** Semantic incomplete outcome preserved separately from numeric telemetry. */
-  incompleteReason?: SharedMemoryIncompleteReason;
+  /** Canonical local completion, including its snapshot-plane cardinality. */
+  localYield?: SharedMemoryLocalYield;
   insertedTriples: number;
   fetchedMetaTriples: number;
   fetchedDataTriples: number;
@@ -249,12 +253,6 @@ export interface SharedMemorySyncSummary {
   backoffWorthyFailures: number;
   /** Context Graph admissions deferred by local scheduler pressure. */
   deferredBackpressure: number;
-  /**
-   * Snapshot phases that stopped on the local clock with refs still unfetched.
-   * A voluntary yield, NOT a peer fault — see `SwmSnapshotCoverage` and the
-   * note on `SharedMemorySyncDiagnostics.snapshotPlaneIncomplete`.
-   */
-  snapshotPlaneIncomplete: number;
   /** Selected-only metadata deadline yields whose exact prefixes were retained. */
   metadataContinuationYields: number;
   /** Coherent snapshot coverage for this round; reduced only by {@link selectSwmSnapshotCoverage}. */
@@ -572,7 +570,6 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     failedPhases: 0,
     backoffWorthyFailures: 0,
     deferredBackpressure: 0,
-    snapshotPlaneIncomplete: 0,
     metadataContinuationYields: 0,
     replayPhaseBytesReceived: 0,
     snapshotPhaseBytesReceived: 0,
@@ -1387,9 +1384,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // NOT kept out of `failedPhases` below: the round really did not complete
       // the plane, and without that the round classifies as clean and reports
       // the graph `done` while Knowledge Assets are still missing.
-      if (snapshotSync.incompleteReason === 'local-budget-yield') {
-        summary.incompleteReason = snapshotSync.incompleteReason;
-        summary.snapshotPlaneIncomplete += 1;
+      if (snapshotSync.localYield) {
+        summary.localYield = mergeSharedMemoryLocalYield(
+          summary.localYield,
+          snapshotSync.localYield,
+        );
         logInfo(ctx, `SWM sync for "${pid}": yielded at the round deadline with `
           + `${snapshotSync.missingCount} of ${snapshotSync.totalSnapshots} snapshot(s) unresolved`);
       }
@@ -1637,10 +1636,10 @@ export async function syncPublicSnapshotsForMeta(params: {
   /**
    * The round stopped on OUR OWN clock with refs still unfetched — a voluntary
    * yield, not a peer fault. Callers must surface this as
-   * `snapshotPlaneIncomplete` and must NOT fold it into `timedOutPhases`, which
+   * a local-yield completion and must NOT fold it into `timedOutPhases`, which
    * marks the peer backoff-worthy (`durable-progress.ts` `backoffWorthyFailure`).
    */
-  incompleteReason?: SharedMemoryIncompleteReason;
+  localYield?: SharedMemoryLocalYield;
 }> {
   const workAdmission = params.workAdmission ?? UNRESTRICTED_SYNC_WORK;
   const executionBoundary = params.executionBoundary
@@ -1681,7 +1680,7 @@ export async function syncPublicSnapshotsForMeta(params: {
   let checkpointAdvances = 0;
   let readySnapshots = 0;
   let missingCount = 0;
-  let incompleteReason: SharedMemoryIncompleteReason | undefined;
+  let localYield: SharedMemoryLocalYield | undefined;
   const missingSample: string[] = [];
   const noteMissing = (ref: string): void => {
     missingCount += 1;
@@ -1740,7 +1739,7 @@ export async function syncPublicSnapshotsForMeta(params: {
     // Never mid-KA: a snapshot is applied whole or not at all, so stopping here
     // can never leave a partially materialized asset.
     if (Date.now() >= params.deadline || !workAdmission.canAdmitWork()) {
-      incompleteReason = 'local-budget-yield';
+      localYield = sharedMemoryLocalYield();
       abandonFrom(index);
       break;
     }
@@ -1760,7 +1759,7 @@ export async function syncPublicSnapshotsForMeta(params: {
       // Cache validation can consume the allowance without producing a hit.
       // Admit no new transport after that local work exhausts the budget.
       if (Date.now() >= params.deadline || !workAdmission.canAdmitWork()) {
-        incompleteReason = 'local-budget-yield';
+        localYield = sharedMemoryLocalYield();
         abandonFrom(index);
         break;
       }
@@ -1783,7 +1782,7 @@ export async function syncPublicSnapshotsForMeta(params: {
       bytesReceived += result.bytesReceived;
       resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
       timedOutPhases += result.timedOut ? 1 : 0;
-      incompleteReason ??= result.incompleteReason;
+      localYield = mergeSharedMemoryLocalYield(localYield, result.localYield);
       if (result.completed) {
         executionBoundary.admitSyncMutation(() => params.deleteCheckpoint(result.checkpointKey));
       }
@@ -1865,7 +1864,7 @@ export async function syncPublicSnapshotsForMeta(params: {
     completed: missingCount === 0,
     missingCount,
     missingSample,
-    ...(incompleteReason ? { incompleteReason } : {}),
+    ...(localYield ? { localYield } : {}),
   };
 }
 
