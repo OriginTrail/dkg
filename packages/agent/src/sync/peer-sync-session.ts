@@ -139,8 +139,12 @@ export class PeerSyncSession extends PeerEventLifetime {
     };
   }
 
-  applyAccounting(peerId: string, outcome: SyncOnConnectPeerOutcome): boolean {
-    const progressAt = Math.max(Date.now(), (this.lastSyncProgressAt.get(peerId) ?? 0) + 1);
+  applyAccounting(
+    peerId: string,
+    outcome: SyncOnConnectPeerOutcome,
+    now = Date.now(),
+  ): boolean {
+    const progressAt = Math.max(now, (this.lastSyncProgressAt.get(peerId) ?? 0) + 1);
     if (outcome.progress) this.lastSyncProgressAt.set(peerId, progressAt);
     if (outcome.fresh) this.lastSuccessfulSyncAt.set(peerId, progressAt);
     this.skippedNoSyncPeers.delete(peerId);

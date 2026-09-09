@@ -87,23 +87,13 @@ export function resetPeerSyncSessionForTest(
   return session;
 }
 
-/** Replace only scheduler wiring while retaining the session's seeded state. */
-export function replacePeerSyncSessionSchedulerForTest(
+/** Install scheduler behavior when a fresh, unseeded test session is constructed. */
+export function installPeerSyncSessionSchedulerForTest(
   agent: SyncOnConnectTestAgent,
   callbacks: SyncOnConnectPeerSchedulerCallbacks<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>>,
 ): PeerSyncSession {
   const previous = agent.peerSyncSession;
   const session = new PeerSyncSession(callbacks);
-  for (const peerId of previous.syncingPeers) session.syncingPeers.add(peerId);
-  for (const peerId of previous.skippedNoSyncPeers) session.skippedNoSyncPeers.add(peerId);
-  const copyMap = <T>(from: ReadonlyMap<string, T>, to: Map<string, T>) => {
-    for (const [peerId, value] of from) to.set(peerId, value);
-  };
-  copyMap(previous.catchupOnConnectAt, session.catchupOnConnectAt);
-  copyMap(previous.rfc64ExactCatchupOnConnectAt, session.rfc64ExactCatchupOnConnectAt);
-  copyMap(previous.lastSuccessfulSyncAt, session.lastSuccessfulSyncAt);
-  copyMap(previous.lastSyncProgressAt, session.lastSyncProgressAt);
-  copyMap(previous.syncReconcilerBackoff, session.syncReconcilerBackoff);
   previous.close();
   agent.peerSyncSession = session;
   return session;
@@ -135,7 +125,7 @@ export function installSyncOnConnectPeerJobStub(
     finish?: (remotePeer: string) => void;
   }>,
 ): void {
-  replacePeerSyncSessionSchedulerForTest(agent, {
+  installPeerSyncSessionSchedulerForTest(agent, {
     createJob: (remotePeer) => ({
       runAutomaticSelectedThenOrdinary: async () => {
         await callbacks.runOrdinary?.(remotePeer);

@@ -10,6 +10,8 @@ import {
   snapshotManifest,
 } from './selected-swm-test-helpers.js';
 
+const ACTIVE_SYNC_LIFETIME = new AbortController().signal;
+
 describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
   it('does not fetch a selected scope when the caller-supplied plan names a non-provider peer', async () => {
     const publicCg = 'selected-preplanned-non-provider';
@@ -365,6 +367,7 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
     };
 
     await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [ordinaryContextGraphId], async () => shared),
       remotePeer: PEER,
       syncingPeers: new Set(),

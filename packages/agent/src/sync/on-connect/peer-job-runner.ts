@@ -47,7 +47,10 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
       SelectedPlan,
       Probe
     >,
-    private readonly options: Readonly<{ initialProbe?: Probe; signal?: AbortSignal }> = {},
+    private readonly options: Readonly<{
+      signal: AbortSignal;
+      initialProbe?: Probe;
+    }>,
   ) {
     // A job is one explicit phase plan: optional automatic selected work,
     // followed by invariant ordinary work. An explicitly queued selected lane
@@ -56,8 +59,8 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
     this.pendingInitialProbe = options.initialProbe === undefined
       ? null
       : { value: options.initialProbe };
-    if (options.signal?.aborted) this.cancel();
-    else options.signal?.addEventListener('abort', this.cancelForLifetime, { once: true });
+    if (options.signal.aborted) this.cancel();
+    else options.signal.addEventListener('abort', this.cancelForLifetime, { once: true });
   }
 
   async runSelected(recoveryPlan?: SelectedPlan): Promise<SyncReconcilerAttemptOutcome> {
@@ -100,7 +103,7 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
   }
 
   cancel(): void {
-    this.options.signal?.removeEventListener('abort', this.cancelForLifetime);
+    this.options.signal.removeEventListener('abort', this.cancelForLifetime);
     if (this.terminalState !== 'active') return;
     this.terminalState = 'cancelled';
     this.automaticSelectedPhase = null;
@@ -109,7 +112,7 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
   }
 
   finish(): void {
-    this.options.signal?.removeEventListener('abort', this.cancelForLifetime);
+    this.options.signal.removeEventListener('abort', this.cancelForLifetime);
     if (this.terminalState !== 'active') return;
     this.terminalState = 'finished';
     let entries: readonly SyncOnConnectPeerAccountingEntry<Probe>[] =

@@ -4,6 +4,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { PROTOCOL_SYNC, type OperationContext } from '@origintrail-official/dkg-core';
 import type { PeerSyncSession } from '../../src/sync/peer-sync-session.js';
 import { DKGAgent } from '../../src/index.js';
+import { PeerSyncSessionTestDriver } from './peer-sync-session-driver.js';
 
 export function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -33,11 +34,16 @@ export async function createPeerEventFixture() {
   const transport = agent.node.libp2p;
   const peer = peerIdFromString('12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M');
   const peerId = peer.toString();
+  const session = new PeerSyncSessionTestDriver(() => state.peerSyncSession);
   return {
     agent, peer, peerId,
     get state() {
-      return { ...state.peerSyncSession, knownCorePeerIds: state.knownCorePeerIds,
-        lastSyncDisconnectedAt: state.lastSyncDisconnectedAt, log: state.log };
+      return {
+        session,
+        knownCorePeerIds: state.knownCorePeerIds,
+        disconnectTimestamp: (id: string) => state.lastSyncDisconnectedAt.get(id),
+        log: state.log,
+      };
     },
     dispatchUpdate(protocols: readonly string[] = [PROTOCOL_SYNC]) {
       transport.dispatchEvent(new CustomEvent('peer:update', { detail: { peer: { id: peer, protocols } } }));
@@ -45,6 +51,15 @@ export async function createPeerEventFixture() {
     dispatchOpen() {
       transport.dispatchEvent(new CustomEvent('connection:open', {
         detail: { remotePeer: peer, direction: 'inbound' },
+      }));
+    },
+    dispatchClose() {
+      transport.dispatchEvent(new CustomEvent('connection:close', {
+        detail: {
+          remotePeer: peer,
+          remoteAddr: { toString: () => '/ip4/127.0.0.1/tcp/1234' },
+          timeline: { open: 0, close: 1 },
+        },
       }));
     },
     async close() {

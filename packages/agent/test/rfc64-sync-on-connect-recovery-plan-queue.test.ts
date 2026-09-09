@@ -20,7 +20,7 @@ import {
   emptyDetailedSync,
   flushTimers,
   installSyncOnConnectPeerJobStub,
-  replacePeerSyncSessionSchedulerForTest,
+  installPeerSyncSessionSchedulerForTest,
 } from './_helpers/sync-on-connect-test-fixture.js';
 import {
   RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
@@ -555,7 +555,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     });
     agent.syncSelectedSharedMemoryFromPeerDetailed = selectedSync;
     const ordinaryRun = vi.fn(async () => { ordering.push('ordinary'); });
-    replacePeerSyncSessionSchedulerForTest(agent, {
+    installPeerSyncSessionSchedulerForTest(agent, {
       createJob: (remotePeer) => {
         const runner = createSyncOnConnectPeerJobRunnerForTest(agent, remotePeer);
         return {

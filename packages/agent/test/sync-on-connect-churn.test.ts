@@ -19,6 +19,7 @@ import { ordinaryLane } from './_helpers/run-sync-on-connect.js';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 const PEER_B = '12D3KooWRnKxyUg8W3ju7BpxN3e9NAsG1T4d6TuK53LZxD41f3RC';
+const ACTIVE_SYNC_LIFETIME = new AbortController().signal;
 
 const noopLog = (_ctx: OperationContext, _message: string) => {};
 
@@ -28,6 +29,7 @@ describe('sync-on-connect churn gates', () => {
     const configuredGraph = 'configured-default-cg';
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       remotePeer: PEER_A,
       syncingPeers: new Set(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
@@ -53,6 +55,7 @@ describe('sync-on-connect churn gates', () => {
     const refreshMetaSyncedFlags = recorder(async () => undefined);
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       remotePeer: PEER_A,
       syncingPeers: new Set(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
@@ -77,6 +80,7 @@ describe('sync-on-connect churn gates', () => {
     const syncedPeers: Array<{ peerId: string; fresh: boolean; progress?: boolean }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       remotePeer: PEER_A,
       syncingPeers: new Set(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
@@ -409,6 +413,7 @@ describe('sync-on-connect churn gates', () => {
       _peerId: string,
       onSyncAccounting?: (outcome: { fresh: boolean; progress?: boolean }) => void,
     ) => runSelectedSharedMemoryRetry({
+      signal: ACTIVE_SYNC_LIFETIME,
       remotePeer: PEER_A,
       syncingPeers: new Set(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
@@ -452,9 +457,13 @@ describe('sync-on-connect churn gates', () => {
 
   it('records selected SWM progress and preserves a bounded retry backoff', async () => {
     const agent = await createUnstartedAgent('SelectedSwmIncompleteProgress');
+    const calls: string[] = [];
+    const runSelected = async (peerId: string) => {
+      calls.push(peerId);
+    };
+    installSyncOnConnectPeerJobStub(agent, { runSelected });
     allowAllNetworkAdmission(agent);
     agent.started = true;
-    resetPeerSyncSessionForTest(agent);
     agent.config.syncContextGraphs = ['selected-cg'];
     agent.config.rfc64PublicCatalogBootstrap = {
       acceptedPublicPolicies: [{ completeSwmProviders: [PEER_A] }],
@@ -500,11 +509,6 @@ describe('sync-on-connect churn gates', () => {
     expect(agent.peerSyncSession.lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
     expect(agent.peerSyncSession.syncReconcilerBackoff.get(PEER_A)?.failures).toBe(1);
 
-    const calls: string[] = [];
-    const runSelected = async (peerId: string) => {
-      calls.push(peerId);
-    };
-    installSyncOnConnectPeerJobStub(agent, { runSelected });
     const handleSyncError = () => undefined;
     expect(agent.queueSyncFromPeerOnConnect(
       PEER_A,
@@ -532,17 +536,16 @@ describe('sync-on-connect churn gates', () => {
   it('does not let one peer backoff suppress connection-open sync for another peer', async () => {
     const agent = await createUnstartedAgent('SyncReconnectBackoffPeerScoped');
     const calls: string[] = [];
+    const runOrdinary = async (peerId: string) => {
+      calls.push(peerId);
+    };
+    installSyncOnConnectPeerJobStub(agent, { runOrdinary });
     agent.peerSyncSession.syncReconcilerBackoff.set(PEER_A, {
       failures: 1,
       nextRetryAt: Date.now() + CATCHUP_ON_CONNECT_COOLDOWN_MS,
       protocolsKey: null,
       connectionKey: null,
     });
-    const runOrdinary = async (peerId: string) => {
-      calls.push(peerId);
-    };
-    installSyncOnConnectPeerJobStub(agent, { runOrdinary });
-
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(false);
     expect(agent.queueSyncFromPeerOnConnect(PEER_B, () => undefined, 0)).toBe(true);
 
@@ -553,17 +556,16 @@ describe('sync-on-connect churn gates', () => {
   it('allows connection-open sync after peer backoff cooldown expires', async () => {
     const agent = await createUnstartedAgent('SyncReconnectBackoffExpiry');
     const calls: string[] = [];
+    const runOrdinary = async (peerId: string) => {
+      calls.push(peerId);
+    };
+    installSyncOnConnectPeerJobStub(agent, { runOrdinary });
     agent.peerSyncSession.syncReconcilerBackoff.set(PEER_A, {
       failures: 1,
       nextRetryAt: Date.now() - 1,
       protocolsKey: null,
       connectionKey: null,
     });
-    const runOrdinary = async (peerId: string) => {
-      calls.push(peerId);
-    };
-    installSyncOnConnectPeerJobStub(agent, { runOrdinary });
-
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(true);
 
     await flushTimers();
@@ -694,6 +696,7 @@ describe('sync-on-connect churn gates', () => {
     }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['cg-a'], syncSharedMemoryFromPeer),
       remotePeer: PEER_A,
       syncingPeers: new Set(),
@@ -743,6 +746,7 @@ describe('sync-on-connect churn gates', () => {
     const syncedPeers: Array<{ peerId: string; fresh: boolean; progress?: boolean }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['cg-a'], syncSharedMemoryFromPeer),
       remotePeer: PEER_A,
       syncingPeers: new Set(),
@@ -779,6 +783,7 @@ describe('sync-on-connect churn gates', () => {
     const syncSharedMemoryFromPeer = recorder(async () => 0);
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['unreachable-cg', 'denied-cg'], syncSharedMemoryFromPeer),
       remotePeer: PEER_A,
       syncingPeers: new Set(),
@@ -834,6 +839,7 @@ describe('sync-on-connect churn gates', () => {
     });
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => contextGraphs, syncSharedMemoryFromPeer),
       remotePeer: PEER_A,
       syncingPeers: new Set(),
@@ -871,6 +877,7 @@ describe('sync-on-connect churn gates', () => {
     const syncSharedMemoryFromPeer = recorder(async () => 0);
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], syncSharedMemoryFromPeer),
       remotePeer: PEER_A,
       syncingPeers: new Set(),
@@ -892,6 +899,7 @@ describe('sync-on-connect churn gates', () => {
     let selectedForPeer: string | undefined;
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane((peerId) => {
         selectedForPeer = peerId;
         return ['eligible-cg'];
@@ -916,6 +924,7 @@ describe('sync-on-connect churn gates', () => {
     const syncSharedMemoryFromPeer = recorder(async () => 0);
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['eligible-cg'], syncSharedMemoryFromPeer),
       remotePeer: PEER_A,
       syncingPeers: new Set(),

@@ -13,6 +13,8 @@ import { resolveSyncGlobalBackpressure, withGlobalSyncBackpressure } from '../sr
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 
+const ACTIVE_SYNC_LIFETIME = new AbortController().signal;
+
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
   const fn = (...args: A): R => { calls.push(args); return impl(...args); };
@@ -109,6 +111,7 @@ describe('runSyncOnConnect callbacks', () => {
     });
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       remotePeer,
       syncingPeers: new Set(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
@@ -144,6 +147,7 @@ describe('runSyncOnConnect callbacks', () => {
     let sharedRuns = 0;
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['first', 'second'], async () => {
         sharedRuns += 1;
         return 0;
@@ -177,6 +181,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: SyncOnConnectPeerOutcome[] = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['first', 'second'], async () => 0),
       remotePeer,
       syncingPeers: new Set(),
@@ -211,6 +216,7 @@ describe('runSyncOnConnect callbacks', () => {
     const knownCorePeerIds = new Set<string>();
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer,
       syncingPeers: new Set(),
@@ -233,6 +239,7 @@ describe('runSyncOnConnect callbacks', () => {
     const knownCorePeerIdsV2 = new Set<string>([remotePeer]);
 
     const emptyIdentifyOutcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer,
       syncingPeers: new Set(),
@@ -250,6 +257,7 @@ describe('runSyncOnConnect callbacks', () => {
     expect(knownCorePeerIdsV2.has(remotePeer)).toBe(true);
 
     const v1OnlyOutcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer,
       syncingPeers: new Set(),
@@ -275,6 +283,7 @@ describe('runSyncOnConnect callbacks', () => {
     const syncFromPeer = recorder(async () => 0);
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer,
       syncingPeers: new Set(),
@@ -305,6 +314,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer,
       syncingPeers: new Set(),
@@ -329,6 +339,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => ({
         insertedTriples: 0,
         completedPhases: 0,
@@ -366,6 +377,7 @@ describe('runSyncOnConnect callbacks', () => {
       const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
       const outcome = await runSyncOnConnect({
+        signal: ACTIVE_SYNC_LIFETIME,
         ordinarySharedMemoryLane: ordinaryLane(() => ['integrity-rejected-cg'], async () => ({
           insertedTriples: 0,
           timedOutPhases: 0,
@@ -407,6 +419,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['cg-clean-empty'], async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
@@ -439,6 +452,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['cg-clean-then-timeout'], async () => ({
         insertedTriples: 0,
         completedPhases: 0,
@@ -473,6 +487,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined; progress: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => ({
         insertedTriples: 0,
         completedPhases: 0,
@@ -509,6 +524,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['cg-timeout'], async () => ({
         insertedTriples: 0,
         completedPhases: 0,
@@ -545,6 +561,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => ({
         insertedTriples: 0,
         completedPhases: 0,
@@ -575,6 +592,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => ({
         insertedTriples: 0,
         completedPhases: 0,
@@ -611,6 +629,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined; progress: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
@@ -647,6 +666,7 @@ describe('runSyncOnConnect callbacks', () => {
     }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
@@ -696,6 +716,7 @@ describe('runSyncOnConnect callbacks', () => {
     }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
@@ -745,6 +766,7 @@ describe('runSyncOnConnect callbacks', () => {
     }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
@@ -812,6 +834,7 @@ describe('runSyncOnConnect callbacks', () => {
     }));
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => contextGraphs, async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
@@ -857,6 +880,7 @@ describe('runSyncOnConnect callbacks', () => {
     }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
@@ -903,6 +927,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['cg-metadata-only'], async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
@@ -938,6 +963,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['cg-shared-meta-only'], async () => ({
         insertedTriples: 1,
         insertedDataTriples: 0,
@@ -972,6 +998,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['cg-shared-phase-failure'], async () => ({
         insertedTriples: 0,
         insertedDataTriples: 0,
@@ -1012,6 +1039,7 @@ describe('runSyncOnConnect callbacks', () => {
 
     try {
       await runSyncOnConnect({
+        signal: ACTIVE_SYNC_LIFETIME,
         ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
         remotePeer,
         syncingPeers,
@@ -1054,6 +1082,7 @@ describe('runSyncOnConnect callbacks', () => {
 
     try {
       await runSyncOnConnect({
+        signal: ACTIVE_SYNC_LIFETIME,
         ordinarySharedMemoryLane: ordinaryLane(() => contextGraphs, async () => 0),
         remotePeer,
         syncingPeers: new Set(),
@@ -1086,6 +1115,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(resolveOrdinaryWork, syncSharedMemoryFromPeer),
       remotePeer,
       syncingPeers: new Set(),
@@ -1113,6 +1143,7 @@ describe('runSyncOnConnect callbacks', () => {
     const syncFromPeer = recorder(async () => 0);
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer,
       syncingPeers,

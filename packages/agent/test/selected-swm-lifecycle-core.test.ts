@@ -27,6 +27,8 @@ import {
   type SelectedSwmLifecycleAgentFixture,
 } from './selected-swm-test-helpers.js';
 
+const ACTIVE_SYNC_LIFETIME = new AbortController().signal;
+
 function activeSessionWithoutJobs(): PeerSyncSession {
   return new PeerSyncSession({
     createJob: () => { throw new Error('scheduler is outside this fixture'); },
@@ -86,19 +88,20 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       await executeSyncOnConnectAttempt(
         () => captureSyncOnConnectAttempt((onSyncAccounting) => (
           runSelectedSharedMemoryRetry({
-          remotePeer: PEER,
-          syncingPeers: new Set(),
-          getPeerProtocols: async () => [PROTOCOL_SYNC],
-          selectedSharedMemoryLane: {
-            admitWork: () => ({
-              contextGraphIds: [privateCg],
-              syncFromPeer: async () => recovery,
-            }),
-          },
-          onSyncAccounting: (_peerId, outcome) => {
-            if (outcome) onSyncAccounting(outcome);
-          },
-          logInfo: () => {},
+            signal: ACTIVE_SYNC_LIFETIME,
+            remotePeer: PEER,
+            syncingPeers: new Set(),
+            getPeerProtocols: async () => [PROTOCOL_SYNC],
+            selectedSharedMemoryLane: {
+              admitWork: () => ({
+                contextGraphIds: [privateCg],
+                syncFromPeer: async () => recovery,
+              }),
+            },
+            onSyncAccounting: (_peerId, outcome) => {
+              if (outcome) onSyncAccounting(outcome);
+            },
+            logInfo: () => {},
           })
         )),
         {
@@ -610,6 +613,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
 
       const onSyncAccounting = vi.fn();
       const outcome = await runSelectedSharedMemoryRetry({
+        signal: ACTIVE_SYNC_LIFETIME,
         remotePeer: PEER,
         syncingPeers: new Set(),
         getPeerProtocols: async () => [PROTOCOL_SYNC],

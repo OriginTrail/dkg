@@ -10,6 +10,7 @@ import {
 } from '../src/sync/on-connect/sync-on-connect.js';
 
 const PROBE = Object.freeze({ id: 'peer-probe' });
+const ACTIVE_SYNC_LIFETIME = new AbortController().signal;
 
 function completed(accounting: SyncOnConnectPeerOutcome): SyncOnConnectAttemptResult {
   return { outcome: 'synced', accounting };
@@ -36,7 +37,7 @@ function createRunner(input: Readonly<{
     resetBackoffBeforeRetry,
     commitAccounting,
     logBackpressure: () => undefined,
-  });
+  }, { signal: ACTIVE_SYNC_LIFETIME });
   return { runner, commitAccounting, resetBackoffBeforeRetry };
 }
 
