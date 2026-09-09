@@ -36,6 +36,7 @@
     "./dist/rfc64/abort-v1.js": null,
     "./dist/rfc64/catalog-mutation-runtime-v1.js": null,
     "./dist/rfc64/catalog-replay-connection-runtime-v1.js": null,
+    "./dist/rfc64/catalog-replay-recovery-runtime-v1.js": null,
     "./dist/rfc64/catalog-replay-snapshot-runtime-v1.js": null,
     "./dist/rfc64/catalog-runtime-v1.js": null,
     "./dist/rfc64/coalescing-supervisor-v1.js": null,

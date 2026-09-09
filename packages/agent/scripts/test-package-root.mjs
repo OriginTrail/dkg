@@ -319,6 +319,7 @@ const blockedRfc64Modules = [
   'abort-v1.js',
   'catalog-mutation-runtime-v1.js',
   'catalog-replay-connection-runtime-v1.js',
+  'catalog-replay-recovery-runtime-v1.js',
   'catalog-replay-snapshot-runtime-v1.js',
   'catalog-runtime-v1.js',
   'coalescing-supervisor-v1.js',

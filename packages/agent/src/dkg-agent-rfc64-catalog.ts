@@ -64,6 +64,10 @@ import {
   Rfc64CatalogReplayConnectionRuntimeV1,
   type Rfc64CatalogReplayConnectionReservationV1,
 } from './rfc64/catalog-replay-connection-runtime-v1.js';
+import {
+  Rfc64CatalogReplayRecoveryRuntimeV1,
+  type Rfc64CatalogReplayPeerFenceLeaseV1,
+} from './rfc64/catalog-replay-recovery-runtime-v1.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
 import {
@@ -471,8 +475,6 @@ const rfc64DirectAcceptedCompatibilityV1 = new WeakMap<DKGAgent, Set<string>>();
 const rfc64SystemContextGraphIdsV1 = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_V1 = 64;
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_PER_PEER_V1 = 4;
-const RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1 = 64;
-const RFC64_CATALOG_REPLAY_UNRESOLVED_PEER_CAPACITY_V1 = 64;
 export const RFC64_CATALOG_TARGET_MAX_ENTRIES_V1 = 1_024;
 export const RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 = 64;
 export const RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1 = 64;
@@ -508,162 +510,20 @@ const rfc64CatalogReplaySnapshotRuntimesV1 =
   new WeakMap<DKGAgent, Rfc64CatalogReplaySnapshotRuntimeOwnerV1>();
 const rfc64CatalogReplayConnectionRuntimesV1 =
   new WeakMap<DKGAgent, Rfc64CatalogReplayConnectionRuntimeV1>();
+const rfc64CatalogReplayRecoveryRuntimesV1 = new WeakMap<
+  DKGAgent,
+  Rfc64CatalogReplayRecoveryRuntimeV1<Rfc64PublicCatalogHeadAnnouncementV1>
+>();
 
-interface Rfc64CatalogReplayProgressV1 {
-  readonly policyDigest: Digest32V1;
-  readonly peerWorklist: Rfc64CatalogReplayPeerWorklistV1;
-  /** Provider-specific failures survive later scoped connection runs. */
-  readonly unresolvedPeers: Set<string>;
-  /** Unattributed parity/overflow failures require one successful full pass. */
-  requiresFullReplay: boolean;
-  token: number;
-  active: boolean;
-  failed: boolean;
-  completion: Promise<Readonly<{ requested: number; failed: number }>> | null;
-}
-
-/** Retain bounded attribution; overflow survives as a full-replay witness. */
-function retainRfc64CatalogReplayPeerFailureV1(
-  progress: Rfc64CatalogReplayProgressV1,
-  peerId: string,
-): boolean {
-  if (
-    progress.unresolvedPeers.has(peerId)
-    || progress.unresolvedPeers.size < RFC64_CATALOG_REPLAY_UNRESOLVED_PEER_CAPACITY_V1
-  ) {
-    progress.unresolvedPeers.add(peerId);
-    return true;
-  }
-  progress.requiresFullReplay = true;
-  return false;
-}
-
-interface Rfc64CatalogReplayPeerDemandV1 {
-  readonly peerId: string;
-  readonly generation: number;
-}
-
-/** Opaque, idempotent ownership of one exact reconnect demand. */
-export interface Rfc64CatalogReplayPeerFenceLeaseV1 {
-  release(): void;
-}
-
-/**
- * One owner for reconnect generations, pending-peer deduplication, and the
- * finite amount of peer work a coalesced replay may perform. A peer ID is not
- * itself a completion token: enqueueing the same peer after its earlier demand
- * was drained creates a newer generation that must be replayed or left
- * fail-closed when the run budget is exhausted.
- */
-class Rfc64CatalogReplayPeerWorklistV1 {
-  readonly #pending = new Map<string, number>();
-  #nextGeneration = 0;
-  #remaining = RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1;
-  #overflowed = false;
-
-  beginRun(): void {
-    this.#remaining = RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1;
-  }
-
-  acquire(peerId: string): Rfc64CatalogReplayPeerFenceLeaseV1 | null {
-    if (!this.#pending.has(peerId)
-      && this.#pending.size >= RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1) {
-      this.#overflowed = true;
-      return null;
-    }
-    const generation = ++this.#nextGeneration;
-    this.#pending.set(peerId, generation);
-    let released = false;
-    return Object.freeze({
-      release: () => {
-        if (released) return;
-        released = true;
-        if (this.#pending.get(peerId) === generation) this.#pending.delete(peerId);
-      },
-    });
-  }
-
-  seed(peerId: string): void {
-    if (this.#pending.has(peerId)) return;
-    if (this.#pending.size >= RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1) {
-      this.#overflowed = true;
-      return;
-    }
-    this.#pending.set(peerId, ++this.#nextGeneration);
-  }
-
-  drain(): readonly Rfc64CatalogReplayPeerDemandV1[] {
-    if (this.#remaining === 0) return Object.freeze([]);
-    const demands = [...this.#pending.entries()]
-      .slice(0, this.#remaining)
-      .map(([peerId, generation]) => Object.freeze({ peerId, generation }));
-    for (const demand of demands) {
-      if (this.#pending.get(demand.peerId) === demand.generation) {
-        this.#pending.delete(demand.peerId);
-      }
-    }
-    this.#remaining -= demands.length;
-    return Object.freeze(demands);
-  }
-
-  get hasPending(): boolean {
-    return this.#pending.size > 0;
-  }
-
-  get exhausted(): boolean {
-    return this.#overflowed || (this.#remaining === 0 && this.hasPending);
-  }
-
-  settleOverflow(): void {
-    this.#overflowed = false;
-  }
-}
-
-const rfc64CatalogReplayProgressV1 =
-  new WeakMap<DKGAgent, Map<string, Rfc64CatalogReplayProgressV1>>();
-const rfc64CatalogReplayStatusRevisionV1 = new WeakMap<DKGAgent, number>();
-
-function bumpRfc64CatalogReplayStatusRevisionV1(agent: DKGAgent): void {
-  rfc64CatalogReplayStatusRevisionV1.set(
-    agent,
-    (rfc64CatalogReplayStatusRevisionV1.get(agent) ?? 0) + 1,
-  );
-}
-
-function rfc64CatalogReplayProgressForV1(
+function rfc64CatalogReplayRecoveryRuntimeForV1(
   agent: DKGAgent,
-  contextGraphId: string,
-  policyDigest: Digest32V1,
-): Rfc64CatalogReplayProgressV1 {
-  let byContextGraph = rfc64CatalogReplayProgressV1.get(agent);
-  if (byContextGraph === undefined) {
-    byContextGraph = new Map();
-    rfc64CatalogReplayProgressV1.set(agent, byContextGraph);
+): Rfc64CatalogReplayRecoveryRuntimeV1<Rfc64PublicCatalogHeadAnnouncementV1> {
+  let runtime = rfc64CatalogReplayRecoveryRuntimesV1.get(agent);
+  if (runtime === undefined) {
+    runtime = new Rfc64CatalogReplayRecoveryRuntimeV1();
+    rfc64CatalogReplayRecoveryRuntimesV1.set(agent, runtime);
   }
-  let progress = byContextGraph.get(contextGraphId);
-  if (progress === undefined || progress.policyDigest !== policyDigest) {
-    progress = {
-      policyDigest,
-      peerWorklist: new Rfc64CatalogReplayPeerWorklistV1(),
-      unresolvedPeers: new Set(),
-      requiresFullReplay: false,
-      token: 0,
-      active: false,
-      failed: false,
-      completion: null,
-    };
-    byContextGraph.set(contextGraphId, progress);
-  }
-  return progress;
-}
-
-function clearRfc64CatalogReplayProgressV1(
-  agent: DKGAgent,
-  contextGraphId: string,
-): void {
-  if (rfc64CatalogReplayProgressV1.get(agent)?.delete(contextGraphId) === true) {
-    bumpRfc64CatalogReplayStatusRevisionV1(agent);
-  }
+  return runtime;
 }
 
 interface Rfc64CatalogTrackedTargetV1 {
@@ -1344,7 +1204,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     contextGraphId: string,
   ): void {
     rfc64CatalogTargetAnnouncementsV1.get(this)?.clearContextGraph(contextGraphId);
-    clearRfc64CatalogReplayProgressV1(this, contextGraphId);
+    rfc64CatalogReplayRecoveryRuntimeForV1(this).clear(contextGraphId);
   }
 
   /** Fence operational completeness synchronously when a replay-capable peer connects. */
@@ -1364,32 +1224,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       contextGraphId as ContextGraphIdV1,
     );
     if (accepted === null) return null;
-    const progress = rfc64CatalogReplayProgressForV1(
-      this,
+    return rfc64CatalogReplayRecoveryRuntimeForV1(this).markPeerPending(
       contextGraphId,
       accepted.policyDigest,
+      peerId,
     );
-    const worklistLease = progress.peerWorklist.acquire(peerId);
-    if (worklistLease === null) return null;
-    if (!progress.active) {
-      progress.active = true;
-      progress.failed = false;
-      bumpRfc64CatalogReplayStatusRevisionV1(this);
-    }
-    let released = false;
-    return Object.freeze({
-      release: () => {
-        if (released) return;
-        released = true;
-        worklistLease.release();
-        const current = rfc64CatalogReplayProgressV1.get(this)?.get(contextGraphId);
-        if (current !== progress) return;
-        if (!progress.peerWorklist.hasPending && progress.completion === null && progress.active) {
-          progress.active = false;
-          bumpRfc64CatalogReplayStatusRevisionV1(this);
-        }
-      },
-    });
   }
 
   /** Desired RFC-64 selection derived from the normal live CG lifecycle. */
@@ -1436,7 +1275,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           : 'operator-override',
       });
     }));
-    let replaySnapshotRevision = rfc64CatalogReplayStatusRevisionV1.get(this) ?? 0;
+    const replayRecovery = rfc64CatalogReplayRecoveryRuntimeForV1(this);
+    let replaySnapshotRevision = replayRecovery.revision;
     let appliedByContextGraph = persistence === undefined
       ? new Map<string, readonly Readonly<Rfc64OperationalAppliedHeadV1>[]>()
       : groupRfc64OperationalAppliedHeadsV1(
@@ -1444,15 +1284,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         );
     if (
       persistence !== undefined
-      && replaySnapshotRevision !== (rfc64CatalogReplayStatusRevisionV1.get(this) ?? 0)
+      && replaySnapshotRevision !== replayRecovery.revision
     ) {
-      replaySnapshotRevision = rfc64CatalogReplayStatusRevisionV1.get(this) ?? 0;
+      replaySnapshotRevision = replayRecovery.revision;
       appliedByContextGraph = groupRfc64OperationalAppliedHeadsV1(
         await loadRfc64OperationalAppliedHeadsV1(persistence),
       );
     }
-    const replaySnapshotUnstable = replaySnapshotRevision
-      !== (rfc64CatalogReplayStatusRevisionV1.get(this) ?? 0);
+    const replaySnapshotUnstable = replaySnapshotRevision !== replayRecovery.revision;
     const progressByContextGraph = rfc64CatalogAuthorityProgressV1.get(this);
     const receiverStats = service?.stats().receiver;
     return Object.freeze(selections.map((selection) => {
@@ -1463,12 +1302,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         )
         : null;
       const progress = progressByContextGraph?.get(selection.contextGraphId);
-      const replayProgress = rfc64CatalogReplayProgressV1
-        .get(this)?.get(selection.contextGraphId);
-      const currentReplayProgress = accepted !== null
-        && replayProgress?.policyDigest === accepted.policyDigest
-        ? replayProgress
-        : undefined;
+      const currentReplayProgress = accepted === null
+        ? null
+        : replayRecovery.status(selection.contextGraphId, accepted.policyDigest);
       const replayActive = replaySnapshotUnstable || currentReplayProgress?.active === true;
       const replayFailed = currentReplayProgress?.failed === true;
       const replayUnsettled = replayActive || replayFailed;
@@ -2593,8 +2429,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       this.rfc64PublicCatalogReconciliationFailuresV1.clear();
       rfc64DirectAcceptedCompatibilityV1.delete(this);
       rfc64CatalogReplayRuntimesV1.delete(this);
-      rfc64CatalogReplayProgressV1.delete(this);
-      rfc64CatalogReplayStatusRevisionV1.delete(this);
+      rfc64CatalogReplayRecoveryRuntimesV1.get(this)?.reset();
+      rfc64CatalogReplayRecoveryRuntimesV1.delete(this);
       rfc64CatalogTargetAnnouncementsV1.get(this)?.resetAll();
       rfc64CatalogTargetAnnouncementsV1.delete(this);
     }
@@ -2903,153 +2739,59 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     ) {
       return Object.freeze({ requested: 0, failed: 0 });
     }
-    const replayProgress = rfc64CatalogReplayProgressForV1(
-      this,
+    const fullReplay = options.seedConnectedPeers !== false;
+    const seedPeers = fullReplay
+      ? this.node.libp2p.getPeers().map((peer) => peer.toString())
+      : Object.freeze([]);
+    return rfc64CatalogReplayRecoveryRuntimeForV1(this).request({
       contextGraphId,
-      accepted.policyDigest,
-    );
-    if (options.seedConnectedPeers !== false) {
-      const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(
-        this.node.libp2p.getPeers().map((peer) => peer.toString()).slice(
-          0,
-          RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1,
-        ),
-      );
-      for (const peer of peers) replayProgress.peerWorklist.seed(peer);
-    }
-    for (const peer of replayProgress.unresolvedPeers) {
-      replayProgress.peerWorklist.seed(peer);
-    }
-    if (!replayProgress.peerWorklist.hasPending) {
-      return Object.freeze({ requested: 0, failed: 0 });
-    }
-    if (replayProgress.completion !== null) return replayProgress.completion;
-    replayProgress.peerWorklist.beginRun();
-    replayProgress.token += 1;
-    const token = replayProgress.token;
-    replayProgress.active = true;
-    bumpRfc64CatalogReplayStatusRevisionV1(this);
-    const run = (async (): Promise<Readonly<{ requested: number; failed: number }>> => {
-      let requested = 0;
-      let failed = 0;
-      let replayFailed = true;
-      let requiresFullReplay = false;
-      try {
-        const manifests: Rfc64PublicCatalogHeadAnnouncementV1[][] = [];
-        for (;;) {
-          const replayDemands = replayProgress.peerWorklist.drain();
-          await Promise.all(replayDemands.map(async ({ peerId: remotePeerId }) => {
-            for (let attempt = 0; attempt < 2; attempt += 1) {
-              try {
-                const completion = await service.requestCatalogHeadReplay({
-                  remotePeerId,
-                  networkId,
-                  contextGraphId: contextGraphId as ContextGraphIdV1,
-                });
-                manifests.push([...completion.heads]);
-                requested += 1;
-                replayProgress.unresolvedPeers.delete(remotePeerId);
-                return;
-              } catch (error) {
-                // A connected peer that does not hold the current CG is not a
-                // promised provider. Policy denial is therefore a bounded
-                // negative discovery result, while unsupported V2, malformed
-                // completion, transport failure, and provider incompleteness
-                // remain fail-closed.
-                if (
-                  error instanceof Rfc64PublicCatalogTransportErrorV1
-                  && error.code === 'catalog-transport-policy-denied'
-                ) {
-                  replayProgress.unresolvedPeers.delete(remotePeerId);
-                  return;
-                }
-                if (attempt === 1) {
-                  if (!retainRfc64CatalogReplayPeerFailureV1(
-                    replayProgress,
-                    remotePeerId,
-                  )) {
-                    requiresFullReplay = true;
-                  }
-                  failed += 1;
-                }
-              }
-            }
-          }));
-          // Completion-capable provider responses are returned only after every
-          // promised announcement is synchronously admitted at this receiver.
-          await service.whenReceiverIdle();
-          if (replayProgress.peerWorklist.exhausted) {
-            requiresFullReplay = true;
-            failed += 1;
-            break;
-          }
-          if (replayProgress.peerWorklist.hasPending) continue;
-
-          const promisedByIdentity = new Map<string, Rfc64PublicCatalogHeadAnnouncementV1>();
-          for (const target of manifests.flat()) {
-            promisedByIdentity.set(rfc64CatalogTargetExactIdentityKeyV1(target), target);
-          }
-          const promised = [...promisedByIdentity.values()];
-          let parityFailures = 0;
-          if (promised.length > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1) {
-            parityFailures = 1;
-          } else if (this.rfc64PersistenceV1 === undefined) {
-            parityFailures = 1;
-          } else {
-            const applied = new Map(
-              (await loadRfc64OperationalAppliedHeadsV1(this.rfc64PersistenceV1))
-                .filter((head) => head.contextGraphId === contextGraphId)
-                .map((head) => [head.scopeKey, head]),
-            );
-            const unsatisfied = promised.some((target) => {
-              const current = applied.get(rfc64CatalogTargetScopeKeyV1(target));
-              if (current === undefined) return true;
-              const currentVersion = BigInt(current.snapshot.catalogVersion);
-              const promisedVersion = BigInt(target.catalogVersion);
-              return currentVersion < promisedVersion || (
-                currentVersion === promisedVersion
-                && current.snapshot.currentCatalogHeadDigest
-                  !== target.catalogHeadObjectDigest
-              );
-            });
-            if (unsatisfied) parityFailures = 1;
-          }
-          // Any connection generation arriving after the provider completion
-          // snapshot owns another replay pass, including a reconnect from the
-          // same peer. The worklist budget keeps that conservative fence finite.
-          if (replayProgress.peerWorklist.exhausted) {
-            requiresFullReplay = true;
-            failed += 1;
-            break;
-          }
-          if (replayProgress.peerWorklist.hasPending) continue;
-          failed += parityFailures;
-          if (parityFailures > 0) requiresFullReplay = true;
-          break;
+      policyDigest: accepted.policyDigest,
+      seedPeers,
+      fullReplay,
+      requestPeer: async (remotePeerId) => {
+        try {
+          const completion = await service.requestCatalogHeadReplay({
+            remotePeerId,
+            networkId,
+            contextGraphId: contextGraphId as ContextGraphIdV1,
+          });
+          return Object.freeze({
+            status: 'completed' as const,
+            targets: completion.heads,
+          });
+        } catch (error) {
+          // A connected peer that does not hold the current CG is not a
+          // promised provider. Policy denial is a bounded negative discovery;
+          // other transport or provider failures stay fail-closed.
+          if (
+            error instanceof Rfc64PublicCatalogTransportErrorV1
+            && error.code === 'catalog-transport-policy-denied'
+          ) return Object.freeze({ status: 'not-provider' as const });
+          throw error;
         }
-        replayFailed = failed > 0;
-        return Object.freeze({ requested, failed });
-      } catch {
-        requiresFullReplay = true;
-        failed += 1;
-        return Object.freeze({ requested, failed });
-      } finally {
-        const current = rfc64CatalogReplayProgressV1.get(this)?.get(contextGraphId);
-        if (current === replayProgress && current.token === token) {
-          current.active = false;
-          if (requiresFullReplay) current.requiresFullReplay = true;
-          if (!replayFailed && options.seedConnectedPeers !== false) {
-            current.requiresFullReplay = false;
-          }
-          current.failed = current.unresolvedPeers.size > 0 || current.requiresFullReplay;
-          current.completion = null;
-          current.peerWorklist.settleOverflow();
-          bumpRfc64CatalogReplayStatusRevisionV1(this);
-        }
-      }
-    })();
-    replayProgress.completion = run;
-    return run;
+      },
+      whenReceiverIdle: () => service.whenReceiverIdle(),
+      targetIdentity: rfc64CatalogTargetExactIdentityKeyV1,
+      parityFailed: async (promised) => {
+        const persistence = this.rfc64PersistenceV1;
+        if (persistence === undefined) return true;
+        const applied = new Map(
+          (await loadRfc64OperationalAppliedHeadsV1(persistence))
+            .filter((head) => head.contextGraphId === contextGraphId)
+            .map((head) => [head.scopeKey, head]),
+        );
+        return promised.some((target) => {
+          const current = applied.get(rfc64CatalogTargetScopeKeyV1(target));
+          if (current === undefined) return true;
+          const currentVersion = BigInt(current.snapshot.catalogVersion);
+          const promisedVersion = BigInt(target.catalogVersion);
+          return currentVersion < promisedVersion || (
+            currentVersion === promisedVersion
+            && current.snapshot.currentCatalogHeadDigest !== target.catalogHeadObjectDigest
+          );
+        });
+      },
+    });
   }
 
   /**
