@@ -1,10 +1,28 @@
 import { PeerEventLifetime } from '../p2p/peer-event-lifetime.js';
 import type { SyncReconcilerBackoff } from '../dkg-agent-types.js';
 import type { Rfc64AuthorizedSwmRecoveryPlanV1 } from '../rfc64/swm-recovery-plan-v1.js';
-import { SyncOnConnectPeerScheduler, type SyncOnConnectPeerSchedulerCallbacks } from './on-connect/peer-scheduler.js';
+import {
+  SyncOnConnectPeerScheduler,
+  type SyncOnConnectPeerJobRunner,
+  type SyncOnConnectSchedulerInternalStage,
+} from './on-connect/peer-scheduler.js';
 import type { SyncingPeerRegistry, SyncOnConnectPeerOutcome } from './on-connect/sync-on-connect.js';
 
 type RecoveryPlan = Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>;
+
+export interface PeerSyncSessionCallbacks {
+  /** The constructed session is supplied explicitly when the lazy job is created. */
+  readonly createJob: (
+    remotePeer: string,
+    session: PeerSyncSession,
+  ) => SyncOnConnectPeerJobRunner<RecoveryPlan>;
+  readonly onInternalError: (
+    remotePeer: string,
+    error: unknown,
+    stage: SyncOnConnectSchedulerInternalStage,
+    session: PeerSyncSession,
+  ) => void | Promise<void>;
+}
 
 /** One node start owns all transient peer-sync scheduling and accounting. */
 export class PeerSyncSession extends PeerEventLifetime {
@@ -18,7 +36,7 @@ export class PeerSyncSession extends PeerEventLifetime {
   private scheduler: SyncOnConnectPeerScheduler<RecoveryPlan> | null = null;
 
   constructor(
-    private readonly schedulerCallbacks?: SyncOnConnectPeerSchedulerCallbacks<RecoveryPlan>,
+    private readonly schedulerCallbacks?: PeerSyncSessionCallbacks,
   ) { super(); }
 
   static stopped(): PeerSyncSession {
@@ -32,7 +50,12 @@ export class PeerSyncSession extends PeerEventLifetime {
       if (!this.schedulerCallbacks) {
         throw new Error('PeerSyncSession scheduler callbacks must be supplied at construction');
       }
-      this.scheduler = new SyncOnConnectPeerScheduler(this.schedulerCallbacks);
+      this.scheduler = new SyncOnConnectPeerScheduler({
+        createJob: (remotePeer) => this.schedulerCallbacks!.createJob(remotePeer, this),
+        onInternalError: (remotePeer, error, stage) => (
+          this.schedulerCallbacks!.onInternalError(remotePeer, error, stage, this)
+        ),
+      });
       if (!this.checkpoint()) this.scheduler.close();
     }
     return this.scheduler;

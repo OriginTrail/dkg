@@ -74,12 +74,11 @@ export function resetPeerSyncSessionForTest(
       session?: PeerSyncSession,
     ) => SyncOnConnectPeerJobRunner<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>>;
   };
-  let session!: PeerSyncSession;
-  session = new PeerSyncSession({
-    createJob: (remotePeer) => internalAgent.createSyncOnConnectPeerJobRunner(
+  const session = new PeerSyncSession({
+    createJob: (remotePeer, owningSession) => internalAgent.createSyncOnConnectPeerJobRunner(
       remotePeer,
       {},
-      session,
+      owningSession,
     ),
     onInternalError: () => undefined,
   });

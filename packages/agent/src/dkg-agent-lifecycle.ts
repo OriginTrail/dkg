@@ -2069,11 +2069,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Open the lifetime before catalog bootstrap or any other startup producer
     // can enqueue recovery. Connection listeners below retain this same session.
     this.peerSyncSession.close();
-    let peerEvents!: PeerSyncSession;
-    peerEvents = new PeerSyncSession({
-      createJob: (remotePeer) => this.createSyncOnConnectPeerJobRunner(remotePeer, {}, peerEvents),
-      onInternalError: (remotePeer, error, stage) => {
-        if (!peerEvents.checkpoint()) return;
+    const peerEvents = new PeerSyncSession({
+      createJob: (remotePeer, session) => this.createSyncOnConnectPeerJobRunner(remotePeer, {}, session),
+      onInternalError: (remotePeer, error, stage, session) => {
+        if (!session.checkpoint()) return;
         const detail = error instanceof Error ? error.message : String(error);
         this.log.error(
           createOperationContext('sync'),
