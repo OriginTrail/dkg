@@ -4,7 +4,7 @@ import { chmodSync, statSync, copyFileSync, mkdtempSync, readFileSync, readdirSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeMcpConfigAtomic } from '../src/mcp-config-file.js';
-import { linuxMetadataCopyCommand } from '../src/mcp-config-metadata.js';
+import { linuxMetadataCopyCommand, mcpConfigPersistenceStrategy } from '../src/mcp-config-metadata.js';
 
 vi.mock('node:child_process', async importOriginal => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -34,7 +34,7 @@ it('rejects a missing metadata capability before creating files or changing cont
   vi.mocked(execFileSync).mockImplementationOnce(() => { throw new Error('gcp not installed'); });
   try {
     Object.defineProperty(process, 'platform', { value: 'linux' });
-    expect(() => writeMcpConfigAtomic(path, '{}\n')).toThrow('apk add coreutils');
+    expect(() => writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native'))).toThrow('apk add coreutils');
     expect(readFileSync(path, 'utf8')).toBe('{"original":true}\n');
     expect(readdirSync(directory)).toEqual(before);
   } finally { Object.defineProperty(process, 'platform', platform); }
@@ -56,7 +56,7 @@ it.each(['acl', 'replace', 'restore-backup', 'retain-backup'] as const)('preserv
   });
   try {
     Object.defineProperty(process, 'platform', { value: 'win32' });
-    expect(() => writeMcpConfigAtomic(path, '{}\n')).toThrow(stage === 'retain-backup' ? 'backup is retained' : 'failed');
+    expect(() => writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native'))).toThrow(stage === 'retain-backup' ? 'backup is retained' : 'failed');
     expect(readFileSync(path, 'utf8')).toBe('{"original":true}\n');
     const backups = readdirSync(directory).filter(name => name.endsWith('.backup'));
     expect(backups).toHaveLength(stage === 'retain-backup' ? 1 : 0);
@@ -75,7 +75,7 @@ it.runIf(nativeMetadata && process.platform === 'darwin')('preserves macOS permi
   const { mode, uid, gid } = statSync(path);
   expect(mode & 0o777).toBe(0o640);
   expect(before).toContain('everyone allow read');
-  writeMcpConfigAtomic(path, '{}\n');
+  writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native'));
   expect(acl()).toBe(before);
   expect(statSync(path)).toMatchObject({ mode, uid, gid });
   expect(execFileSync('/usr/bin/xattr', ['-p', 'org.origintrail.fixture', path], { encoding: 'utf8' }).trim()).toBe('retained');
@@ -89,7 +89,7 @@ it.runIf(nativeMetadata && process.platform === 'linux')('preserves Linux ACLs a
   const acl = () => execFileSync('getfacl', ['-cn', path], { encoding: 'utf8' });
   const before = acl();
   expect(before).toContain('user:65534:r--');
-  writeMcpConfigAtomic(path, '{}\n');
+  writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native'));
   expect(acl()).toBe(before);
   expect(execFileSync('getfattr', ['--only-values', '-n', 'user.dkg_fixture', path], { encoding: 'utf8' }).trim()).toBe('retained');
   expect(readdirSync(directory)).toEqual(["config 'quoted'.json"]);
@@ -104,7 +104,7 @@ it.runIf(nativeMetadata && process.platform === 'win32')('preserves a protected 
   const descriptor = () => powershell('(Get-Acl -LiteralPath $env:DKG_MCP_NATIVE_PATH).Sddl');
   const before = descriptor();
   expect(powershell('(Get-Acl -LiteralPath $env:DKG_MCP_NATIVE_PATH).AreAccessRulesProtected')).toBe('True');
-  writeMcpConfigAtomic(path, '{"replacement":true}\n');
+  writeMcpConfigAtomic(path, '{"replacement":true}\n', mcpConfigPersistenceStrategy('native'));
   expect(descriptor()).toBe(before);
   expect(readFileSync(path, 'utf8')).toBe('{"replacement":true}\n');
   expect(readdirSync(directory)).toEqual(["config 'quoted'.json"]);
@@ -137,7 +137,7 @@ it('routes Windows-side WSL replacements through converted paths and Windows sec
   });
   try {
     Object.defineProperty(process, 'platform', { value: 'linux' });
-    writeMcpConfigAtomic(path, '{"wsl":true}\n', 'windows-wsl');
+    writeMcpConfigAtomic(path, '{"wsl":true}\n', mcpConfigPersistenceStrategy('windows-wsl'));
     expect(scripts).toHaveLength(2);
     expect(scripts[0]).toContain('Get-Acl');
     expect(scripts[1]).toContain('::Replace');

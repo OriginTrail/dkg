@@ -1,5 +1,5 @@
 import { detectClients, tildify, clientSkillPath, type ClientTarget } from './mcp-client-registry.js';
-import { readRegistration, classifyRegistration, writeRegistration, type DesiredRegistration, type RegistrationRead } from './mcp-client-config.js';
+import { readRegistration, classifyRegistration, writeRegistration, type DesiredRegistration } from './mcp-client-config.js';
 /**
  * `dkg mcp setup` — bundled init + daemon-start + MCP-client registration.
  *
@@ -497,7 +497,6 @@ type RegistrationState = 'registered' | 'stale' | 'not-registered';
 interface ClientState {
   target: ClientTarget;
   state: RegistrationState;
-  current: RegistrationRead;
 }
 
 function classify(
@@ -505,7 +504,7 @@ function classify(
   expected: DesiredRegistration,
 ): ClientState {
   const current = readRegistration(target);
-  return { target, state: classifyRegistration(current, expected), current };
+  return { target, state: classifyRegistration(current, expected) };
 }
 
 /**
@@ -1007,7 +1006,7 @@ export async function mcpSetupAction(
         `[setup] WARNING: ${c.name} classify failed (${err?.message ?? err}); skipping this client.\n`,
       );
       classifyFailed.add(c.name);
-      return { target: c, state: 'not-registered', current: { kind: 'absent' } };
+      return { target: c, state: 'not-registered' };
     }
   });
   const planned: PlannedItem[] = states.map((s) => {

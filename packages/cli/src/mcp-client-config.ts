@@ -3,6 +3,7 @@ import { dirname } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { applyEdits, createScanner, findNodeAtLocation, modify, parse as parseJsonc, parseTree, type Edit, type ParseError } from 'jsonc-parser';
 import { writeMcpConfigAtomic } from './mcp-config-file.js';
+import { mcpConfigPersistenceStrategy } from './mcp-config-metadata.js';
 import { readToml, writeTomlConfigEdit } from './mcp-toml-document.js';
 import { DKG_SERVER_KEY, tildify, type ClientTarget } from './mcp-client-registry.js';
 
@@ -249,7 +250,7 @@ function writeJsonDocumentEdit(
   if (errors.length > 0 || !isDeepStrictEqual(parsed, body)) {
     throw new Error(`Cannot safely edit ${target.format.toUpperCase()} registration in ${target.displayPath}`);
   }
-  writeMcpConfigAtomic(target.configPath, patched, target.location);
+  writeMcpConfigAtomic(target.configPath, patched, mcpConfigPersistenceStrategy(target.location));
 }
 
 /**
@@ -274,7 +275,7 @@ function applyRegistrationEdit(
   switch (format) {
     case 'json':
       if (edit.kind === 'remove') writeJsonDocumentEdit(target, body, edit);
-      else writeMcpConfigAtomic(target.configPath, JSON.stringify(body, null, 2) + '\n', target.location);
+      else writeMcpConfigAtomic(target.configPath, JSON.stringify(body, null, 2) + '\n', mcpConfigPersistenceStrategy(target.location));
       return;
     case 'jsonc':
       writeJsonDocumentEdit(target, body, edit);

@@ -1,9 +1,20 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import TOML from '@iarna/toml';
-import { parse as parseTomlCst, type ExpressionCstNode, type KeyCstNode, type TomlCstNode } from '@toml-tools/parser';
+import {
+  parse as parseTomlCst,
+  type ArrayTableCstNode,
+  type ExpressionCstNode,
+  type KeyCstNode,
+  type KeyvalCstNode,
+  type StdTableCstNode,
+  type TableCstNode,
+  type TomlCstNode,
+  type ValCstNode,
+} from '@toml-tools/parser';
 import { DKG_SERVER_KEY, tildify, type ClientTarget } from './mcp-client-registry.js';
 import { writeMcpConfigAtomic } from './mcp-config-file.js';
+import { mcpConfigPersistenceStrategy } from './mcp-config-metadata.js';
 import type { PersistedRegistration, RegistrationEdit } from './mcp-client-config.js';
 
 /**
@@ -44,11 +55,8 @@ function serialiseTomlEntryOnly(
   return TOML.stringify(nested as TOML.JsonMap);
 }
 
-interface SourceToken {
-  image: string;
-  startOffset: number;
-  endOffset: number;
-}
+type SourceToken = KeyCstNode['children']['IKey'][number];
+type RangedSourceToken = SourceToken & { endOffset: number };
 
 interface TomlTableSection {
   path: string[];
@@ -56,25 +64,60 @@ interface TomlTableSection {
   start: number;
 }
 
-function isSourceToken(value: unknown): value is SourceToken {
-  return value !== null && typeof value === 'object'
-    && typeof (value as SourceToken).image === 'string'
-    && typeof (value as SourceToken).startOffset === 'number'
-    && typeof (value as SourceToken).endOffset === 'number';
+function checkedToken(token: SourceToken | undefined, context: string): RangedSourceToken {
+  const endOffset = token?.endOffset;
+  if (!token || typeof token.image !== 'string'
+      || !Number.isInteger(token.startOffset) || typeof endOffset !== 'number'
+      || !Number.isInteger(endOffset)
+      || token.startOffset < 0 || endOffset < token.startOffset) {
+    throw new Error(`TOML parser returned a missing source range for ${context}`);
+  }
+  return token as RangedSourceToken;
 }
 
-/** Walk a parser-owned CST node; source ranges always come from its tokens. */
-function sourceTokens(value: unknown): SourceToken[] {
-  if (isSourceToken(value)) return [value];
-  if (value === null || typeof value !== 'object') return [];
-  const children = (value as { children?: Record<string, unknown[]> }).children;
-  if (!children) return [];
-  return Object.values(children).flatMap(items => (items ?? []).flatMap(sourceTokens));
+function valueEnd(value: ValCstNode): number {
+  const scalar = [
+    value.children.IString?.[0],
+    value.children.IBoolean?.[0],
+    value.children.IDateTime?.[0],
+    value.children.IFloat?.[0],
+    value.children.IInteger?.[0],
+  ].find((token) => token !== undefined);
+  if (scalar) return checkedToken(scalar, 'scalar value').endOffset + 1;
+  const array = value.children.array?.[0];
+  if (array) return checkedToken(array.children.RSquare?.at(-1), 'array value').endOffset + 1;
+  const inlineTable = value.children.inlineTable?.[0];
+  if (inlineTable) return checkedToken(inlineTable.children.RCurly?.at(-1), 'inline-table value').endOffset + 1;
+  throw new Error('TOML parser returned a value without a source range');
 }
 
+function keyvalEnd(keyval: KeyvalCstNode): number {
+  const value = keyval.children.val?.[0];
+  if (!value) throw new Error('TOML parser returned an incomplete key/value expression');
+  return valueEnd(value);
+}
+
+function tableHeader(table: TableCstNode): StdTableCstNode | ArrayTableCstNode {
+  const header = table.children.stdTable?.[0] ?? table.children.arrayTable?.[0];
+  if (!header) throw new Error('TOML parser returned an incomplete table header');
+  return header;
+}
+
+function tableHeaderStart(header: StdTableCstNode | ArrayTableCstNode): number {
+  return checkedToken(header.children.LSquare?.[0], 'table header').startOffset;
+}
+
+function tableHeaderEnd(header: StdTableCstNode | ArrayTableCstNode): number {
+  return checkedToken(header.children.RSquare?.at(-1), 'table header').endOffset + 1;
+}
+
+/** Read only the documented grammar alternatives used by editable expressions. */
 function expressionEnd(expression: ExpressionCstNode): number {
-  const tokens = sourceTokens(expression);
-  return Math.max(...tokens.map(token => token.endOffset + 1));
+  const keyval = expression.children.keyval?.[0];
+  if (keyval) return keyvalEnd(keyval);
+  const table = expression.children.table?.[0];
+  if (table) return tableHeaderEnd(tableHeader(table));
+  throw new Error('TOML parser returned an expression without a source range');
 }
 
 function endOfSourceLine(raw: string, offset: number): number {
@@ -101,14 +144,13 @@ function tableSections(document: TomlCstNode): TomlTableSection[] {
   for (const [expressionIndex, expression] of (document.children.expression ?? []).entries()) {
     const table = expression.children.table?.[0];
     if (!table) continue;
-    const header = table.children.stdTable?.[0] ?? table.children.arrayTable?.[0];
+    const header = tableHeader(table);
     const key = header?.children.key?.[0];
-    if (!header || !key) throw new Error('TOML parser returned an incomplete table header');
-    const tokens = sourceTokens(header);
+    if (!key) throw new Error('TOML parser returned an incomplete table header');
     sections.push({
       path: tablePath(key),
       expressionIndex,
-      start: Math.min(...tokens.map(token => token.startOffset)),
+      start: tableHeaderStart(header),
     });
   }
   return sections;
@@ -252,6 +294,6 @@ export function writeTomlConfigEdit(
   writeMcpConfigAtomic(
     target.configPath,
     patched ?? TOML.stringify(body as TOML.JsonMap),
-    target.location,
+    mcpConfigPersistenceStrategy(target.location),
   );
 }

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import TOML from '@iarna/toml';
 import { inspectRegistration, removeRegistration, readRegistration, classifyRegistration, writeRegistration } from '../src/mcp-client-config.js';
 import { writeMcpConfigAtomic } from '../src/mcp-config-file.js';
+import { mcpConfigPersistenceStrategy, type McpConfigPersistenceStrategy } from '../src/mcp-config-metadata.js';
 import { type ClientTarget } from '../src/mcp-client-registry.js';
 import { dkgDir, configPath } from '../src/config.js';
 import { dkgAuthTokenPath } from '@origintrail-official/dkg-core';
@@ -22,7 +23,14 @@ vi.mock('node:fs', async (importOriginal) => {
 // Windows/WSL metadata is verified separately by the mandatory OS fixture.
 vi.mock('../src/mcp-config-file.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/mcp-config-file.js')>();
-  return { ...actual, writeMcpConfigAtomic: vi.fn((path: string, content: string) => actual.writeMcpConfigAtomic(path, content)) };
+  return {
+    ...actual,
+    writeMcpConfigAtomic: vi.fn((
+      path: string,
+      content: string,
+      _persistence: McpConfigPersistenceStrategy,
+    ) => actual.writeMcpConfigAtomic(path, content, mcpConfigPersistenceStrategy('native'))),
+  };
 });
 
 vi.mock('node:readline/promises', () => ({ createInterface: vi.fn() }));
@@ -57,7 +65,7 @@ describe('MCP registration removal', () => {
     const client = target('dangling');
     fs.symlinkSync('missing-target.json', client.configPath);
     const entries = fs.readdirSync(root);
-    expect(() => writeMcpConfigAtomic(client.configPath, '{}\n')).toThrow();
+    expect(() => writeMcpConfigAtomic(client.configPath, '{}\n', mcpConfigPersistenceStrategy('native'))).toThrow();
     expect(fs.lstatSync(client.configPath).isSymbolicLink()).toBe(true);
     expect(fs.readlinkSync(client.configPath)).toBe('missing-target.json');
     expect(fs.readdirSync(root)).toEqual(entries);
@@ -88,7 +96,7 @@ describe('MCP registration removal', () => {
     const path = symlink ? join(root, 'owner-link.json') : real.configPath;
     if (symlink) fs.symlinkSync(real.configPath, path);
     const entries = fs.readdirSync(root);
-    writeMcpConfigAtomic(path, '{}\n');
+    writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native'));
     const after = fs.statSync(real.configPath);
     expect({ uid: after.uid, gid: after.gid, mode: after.mode }).toEqual({ uid: before.uid, gid: before.gid, mode: before.mode });
     expect(readFileSync(real.configPath, 'utf8')).toBe('{}\n');
@@ -111,7 +119,7 @@ describe('MCP registration removal', () => {
       return copied;
     });
     vi.spyOn(fs, 'fchownSync').mockImplementationOnce(() => { throw new Error('ownership preservation denied'); });
-    expect(() => writeMcpConfigAtomic(link, '{}\n')).toThrow('ownership preservation denied');
+    expect(() => writeMcpConfigAtomic(link, '{}\n', mcpConfigPersistenceStrategy('native'))).toThrow('ownership preservation denied');
     expect(fs.renameSync).not.toHaveBeenCalled();
     expect(readFileSync(client.configPath, 'utf8')).toBe(raw);
     expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
@@ -387,7 +395,11 @@ describe('stable client selectors', () => {
     seed(client);
     await mcpUninstallAction({ yes: true, client: 'cursor' }, { detectClients: () => [client], log: () => {} });
     expect(inspectRegistration(client)).toBe(false);
-    expect(writeMcpConfigAtomic).toHaveBeenCalledWith(client.configPath, expect.any(String), 'windows-wsl');
+    expect(writeMcpConfigAtomic).toHaveBeenCalledWith(
+      client.configPath,
+      expect.any(String),
+      expect.objectContaining({ kind: 'windows-wsl' }),
+    );
   });
 
   it.each(['cursor', 'cursor:windows-wsl', 'cursor:native'])('selects native/WSL variants explicitly with %s', async (selector) => {

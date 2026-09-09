@@ -4,6 +4,7 @@ import TOML from '@iarna/toml';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { mcpConfigPersistenceStrategy } from '../src/mcp-config-metadata.js';
 
 const fixture = vi.hoisted(() => ({ home: '', platform: 'darwin' }));
 // Isolate the actual client-path resolver without mocking detection, config writes,
@@ -12,7 +13,14 @@ const fixture = vi.hoisted(() => ({ home: '', platform: 'darwin' }));
 // WSL scenario exercises the real metadata boundary with Windows security APIs.
 vi.mock('../src/mcp-config-file.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/mcp-config-file.js')>();
-  return { ...actual, writeMcpConfigAtomic: vi.fn((path: string, content: string) => actual.writeMcpConfigAtomic(path, content)) };
+  return {
+    ...actual,
+    writeMcpConfigAtomic: vi.fn((
+      path: string,
+      content: string,
+      _persistence: Parameters<typeof actual.writeMcpConfigAtomic>[2],
+    ) => actual.writeMcpConfigAtomic(path, content, mcpConfigPersistenceStrategy('native'))),
+  };
 });
 
 vi.mock('node:os', async (original) => ({
