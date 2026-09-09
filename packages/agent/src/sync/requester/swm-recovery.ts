@@ -37,7 +37,7 @@ import { canonicalQuadKey } from './quad-key.js';
 import {
   isNamedSubgraphSharedMemoryDataGraph,
   isNamedSubgraphSharedMemoryMetaGraph,
-} from '../shared-memory-graphs.js';
+} from '../../shared-memory-graphs.js';
 
 /**
  * recovery entry point. Recovers a CG's

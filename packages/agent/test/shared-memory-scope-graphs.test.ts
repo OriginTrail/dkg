@@ -9,7 +9,7 @@ import {
   isNamedSubgraphSharedMemoryMetaGraph,
   parseSharedMemoryDataGraph,
   parseSharedMemoryMetaGraph,
-} from '../src/sync/shared-memory-graphs.js';
+} from '../src/shared-memory-graphs.js';
 
 const CG = '0x0000000000000000000000000000000000000001/scope-test';
 const SUBGRAPH = 'research';

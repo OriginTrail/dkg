@@ -9,8 +9,8 @@ import {
   isNamedSubgraphSharedMemoryDataGraph,
   isNamedSubgraphSharedMemoryMetaGraph,
   sharedMemoryOwnershipKeyFromGraph,
-} from '../shared-memory-graphs.js';
-export { sharedMemoryOwnershipKeyFromGraph } from '../shared-memory-graphs.js';
+} from '../../shared-memory-graphs.js';
+export { sharedMemoryOwnershipKeyFromGraph } from '../../shared-memory-graphs.js';
 import {
   type SyncPageFetchOptions,
   type SyncPageResult,

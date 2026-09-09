@@ -9,7 +9,7 @@ import {
   describeSharedMemoryGraphs,
   parseSharedMemoryMetaGraph,
   type SharedMemoryGraphDescriptor,
-} from './sync/shared-memory-graphs.js';
+} from './shared-memory-graphs.js';
 
 /** Keep every accepted duration representable by JavaScript Date. Zero disables TTL. */
 export function validateSharedMemoryTtlMs(ttlMs: number): void {

@@ -19,7 +19,7 @@ import {
   type ChangeOp,
   type GraphWriteRevision,
 } from '@origintrail-official/dkg-storage';
-import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
+import { isSharedMemoryBucketDescendantDataGraph } from '../../shared-memory-graphs.js';
 import type { SyncRow, SyncRowListMemo } from './snapshot-cache.js';
 import {
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
