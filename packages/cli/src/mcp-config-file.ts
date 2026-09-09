@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import type { McpClientLocation } from './mcp-client-registry.js';
-import { linuxMetadataCopyCommand, runMcpConfigPowerShell } from './mcp-config-metadata.js';
+import { copyWindowsMcpConfigMetadata, linuxMetadataCopyCommand, replaceWindowsMcpConfigFile } from './mcp-config-metadata.js';
 
 /** Replace a complete client config without exposing a truncated file to readers. */
 export function writeMcpConfigAtomic(configPath: string, content: string, location: McpClientLocation = 'native'): void {
@@ -41,9 +41,7 @@ export function writeMcpConfigAtomic(configPath: string, content: string, locati
       if (original && windowsMetadata) {
         // The temporary inode must have the original access policy before it
         // receives config contents; a permissive parent must not expose secrets.
-        runMcpConfigPowerShell('Get-Acl -LiteralPath $env:DKG_MCP_FILE_SOURCE | Set-Acl -LiteralPath $env:DKG_MCP_FILE_DESTINATION', {
-          source: destination, destination: temporary,
-        }, location);
+        copyWindowsMcpConfigMetadata(destination, temporary, location);
       }
       ftruncateSync(fd, 0);
       writeFileSync(fd, content, 'utf8');
@@ -57,9 +55,7 @@ export function writeMcpConfigAtomic(configPath: string, content: string, locati
       try {
         // File.Replace uses ReplaceFileW, merging the destination's access
         // metadata. false rejects metadata merge errors instead of ignoring them.
-        runMcpConfigPowerShell('[System.IO.File]::Replace($env:DKG_MCP_FILE_SOURCE, $env:DKG_MCP_FILE_DESTINATION, $env:DKG_MCP_FILE_BACKUP, $false)', {
-          source: temporary, destination, backup,
-        }, location);
+        replaceWindowsMcpConfigFile(temporary, destination, backup, location);
       } catch (error) {
         // ReplaceFileW can move the old file before a later rename fails.
         if (!existsSync(destination) && existsSync(backup)) renameSync(backup, destination);

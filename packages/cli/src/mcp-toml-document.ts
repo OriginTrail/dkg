@@ -1,8 +1,10 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import TOML from '@iarna/toml';
+import { parse as parseTomlCst, type ExpressionCstNode, type KeyCstNode, type TomlCstNode } from '@toml-tools/parser';
 import { DKG_SERVER_KEY, tildify, type ClientTarget } from './mcp-client-registry.js';
 import { writeMcpConfigAtomic } from './mcp-config-file.js';
+import type { DesiredRegistration, RegistrationEdit } from './mcp-client-config.js';
 
 /**
  * PR #443 round-5 Codex Review: mirror `readJson`'s friendly-recovery
@@ -34,171 +36,86 @@ export function readToml(path: string): Record<string, unknown> {
 
 function serialiseTomlEntryOnly(
   target: ClientTarget,
-  body: Record<string, unknown>,
+  registration: DesiredRegistration,
 ): string {
-  const container = body[target.serverContainer] as Record<string, unknown>;
   const nested: Record<string, unknown> = {
-    [target.serverContainer]: { [DKG_SERVER_KEY]: container[DKG_SERVER_KEY] ?? {} },
+    [target.serverContainer]: { [DKG_SERVER_KEY]: registration },
   };
   return TOML.stringify(nested as TOML.JsonMap);
 }
 
-interface TomlLine {
-  text: string;
-  eol: string;
+interface SourceToken {
+  image: string;
+  startOffset: number;
+  endOffset: number;
 }
 
-function splitTomlLines(raw: string): TomlLine[] {
-  const lines: TomlLine[] = [];
-  const re = /(.*?)(\r\n|\n|\r|$)/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(raw)) !== null) {
-    if (match[0] === '') break;
-    lines.push({ text: match[1], eol: match[2] });
+interface TomlTableSection {
+  path: string[];
+  expressionIndex: number;
+  start: number;
+}
+
+function isSourceToken(value: unknown): value is SourceToken {
+  return value !== null && typeof value === 'object'
+    && typeof (value as SourceToken).image === 'string'
+    && typeof (value as SourceToken).startOffset === 'number'
+    && typeof (value as SourceToken).endOffset === 'number';
+}
+
+/** Walk a parser-owned CST node; source ranges always come from its tokens. */
+function sourceTokens(value: unknown): SourceToken[] {
+  if (isSourceToken(value)) return [value];
+  if (value === null || typeof value !== 'object') return [];
+  const children = (value as { children?: Record<string, unknown[]> }).children;
+  if (!children) return [];
+  return Object.values(children).flatMap(items => (items ?? []).flatMap(sourceTokens));
+}
+
+function expressionEnd(expression: ExpressionCstNode): number {
+  const tokens = sourceTokens(expression);
+  return Math.max(...tokens.map(token => token.endOffset + 1));
+}
+
+function endOfSourceLine(raw: string, offset: number): number {
+  let cursor = offset;
+  while (cursor < raw.length && raw[cursor] !== '\n' && raw[cursor] !== '\r') cursor++;
+  if (raw[cursor] === '\r' && raw[cursor + 1] === '\n') return cursor + 2;
+  return cursor < raw.length ? cursor + 1 : cursor;
+}
+
+/** Decode quoted/unquoted TOML keys with the semantic parser, not local grammar. */
+function decodeTomlKey(keyImage: string): string {
+  const parsed = TOML.parse(`${keyImage} = 0`);
+  const keys = Object.keys(parsed);
+  if (keys.length !== 1) throw new Error('TOML parser returned an invalid table key');
+  return keys[0]!;
+}
+
+function tablePath(key: KeyCstNode): string[] {
+  return key.children.IKey.map(token => decodeTomlKey(token.image));
+}
+
+function tableSections(document: TomlCstNode): TomlTableSection[] {
+  const sections: TomlTableSection[] = [];
+  for (const [expressionIndex, expression] of (document.children.expression ?? []).entries()) {
+    const table = expression.children.table?.[0];
+    if (!table) continue;
+    const header = table.children.stdTable?.[0] ?? table.children.arrayTable?.[0];
+    const key = header?.children.key?.[0];
+    if (!header || !key) throw new Error('TOML parser returned an incomplete table header');
+    const tokens = sourceTokens(header);
+    sections.push({
+      path: tablePath(key),
+      expressionIndex,
+      start: Math.min(...tokens.map(token => token.startOffset)),
+    });
   }
-  return lines;
+  return sections;
 }
 
-function splitTomlKeyPath(path: string): string[] {
-  const parts: string[] = [];
-  let current = '';
-  let quote: '"' | "'" | null = null;
-  let escaped = false;
-  for (const ch of path) {
-    if (escaped) {
-      current += ch;
-      escaped = false;
-      continue;
-    }
-    if (quote === '"' && ch === '\\') {
-      current += ch;
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      current += ch;
-      if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      current += ch;
-      quote = ch;
-      continue;
-    }
-    if (ch === '.') {
-      parts.push(current.trim());
-      current = '';
-      continue;
-    }
-    current += ch;
-  }
-  parts.push(current.trim());
-  return parts.map((part) => {
-    if (
-      part.length >= 2 &&
-      ((part.startsWith('"') && part.endsWith('"')) ||
-        (part.startsWith("'") && part.endsWith("'")))
-    ) {
-      return part.slice(1, -1);
-    }
-    return part;
-  });
-}
-
-const TOML_PATH_SEPARATOR = '\0';
-
-function normaliseTomlHeaderPath(path: string): string {
-  return splitTomlKeyPath(path).join(TOML_PATH_SEPARATOR);
-}
-
-function tomlTableHeaderPath(line: string): string | null {
-  const arrayMatch = line.match(/^\s*\[\[\s*(.+?)\s*\]\]\s*(?:#.*)?$/);
-  if (arrayMatch) return normaliseTomlHeaderPath(arrayMatch[1]);
-  const tableMatch = line.match(/^\s*\[\s*(.+?)\s*\]\s*(?:#.*)?$/);
-  if (tableMatch) return normaliseTomlHeaderPath(tableMatch[1]);
-  return null;
-}
-
-function ownsTomlTablePath(path: string, ownedPath: string): boolean {
-  return path === ownedPath || path.startsWith(`${ownedPath}${TOML_PATH_SEPARATOR}`);
-}
-
-type TomlMultilineDelimiter = '"""' | "'''";
-
-function advanceTomlMultilineDelimiter(
-  line: string,
-  state: TomlMultilineDelimiter | null,
-): TomlMultilineDelimiter | null {
-  let i = 0;
-  let quote: '"' | "'" | null = null;
-  let escaped = false;
-
-  while (i < line.length) {
-    if (state) {
-      // In a multiline basic string, an escaped quote cannot begin the
-      // closing delimiter. Literal multiline strings have no escapes.
-      if (state === '"""' && line[i] === '\\') {
-        i += 2;
-      } else if (line.startsWith(state, i)) {
-        i += state.length;
-        state = null;
-      } else {
-        i++;
-      }
-      continue;
-    }
-
-    const ch = line[i];
-    if (quote === '"') {
-      if (escaped) {
-        escaped = false;
-      } else if (ch === '\\') {
-        escaped = true;
-      } else if (ch === '"') {
-        quote = null;
-      }
-      i++;
-      continue;
-    }
-    if (quote === "'") {
-      if (ch === "'") quote = null;
-      i++;
-      continue;
-    }
-    if (ch === '#') break;
-    if (line.startsWith('"""', i)) {
-      state = '"""';
-      i += 3;
-      continue;
-    }
-    if (line.startsWith("'''", i)) {
-      state = "'''";
-      i += 3;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      i++;
-      continue;
-    }
-    i++;
-  }
-
-  return state;
-}
-
-function tomlTableHeaderPaths(lines: TomlLine[]): Array<string | null> {
-  let multilineDelimiter: TomlMultilineDelimiter | null = null;
-  return lines.map((line) => {
-    const headerPath = multilineDelimiter ? null : tomlTableHeaderPath(line.text);
-    multilineDelimiter = advanceTomlMultilineDelimiter(line.text, multilineDelimiter);
-    return headerPath;
-  });
-}
-
-function isTomlCommentOrBlank(line: TomlLine): boolean {
-  const trimmed = line.text.trim();
-  return trimmed === '' || trimmed.startsWith('#');
+function pathStartsWith(path: string[], prefix: string[]): boolean {
+  return prefix.length <= path.length && prefix.every((part, index) => path[index] === part);
 }
 
 function normaliseNewlines(text: string, newline: string): string {
@@ -221,38 +138,38 @@ function replaceTomlTable(
   parsedRawHasOwnedParent: boolean,
 ): string | null {
   const newline = raw.includes('\r\n') ? '\r\n' : '\n';
-  const ownedPathKey = `${serverContainer}${TOML_PATH_SEPARATOR}${DKG_SERVER_KEY}`;
-  const normalisedParentPathKey = serverContainer;
+  const ownedPath = [serverContainer, DKG_SERVER_KEY];
+  const parentPath = [serverContainer];
   const replacementBlock = edit.kind === 'remove' ? '' : normaliseNewlines(
     edit.block.endsWith('\n') || edit.block.endsWith('\r')
       ? edit.block
       : edit.block + newline,
     newline,
   );
-  const lines = splitTomlLines(raw);
-  const headerPaths = tomlTableHeaderPaths(lines);
+  const document = parseTomlCst(raw) as TomlCstNode;
+  const expressions = document.children.expression ?? [];
+  const sections = tableSections(document);
+  const hasRootTable = sections.some(section => section.path.length === ownedPath.length
+    && pathStartsWith(section.path, ownedPath));
+  const hasParentTableFamily = sections.some(section => pathStartsWith(section.path, parentPath));
   const ranges: { start: number; end: number }[] = [];
-  let hasRootTable = false;
-  let hasParentTableFamily = false;
 
-  for (let i = 0; i < lines.length; i++) {
-    const headerPath = headerPaths[i];
-    if (!headerPath) continue;
-    if (ownsTomlTablePath(headerPath, normalisedParentPathKey)) {
-      hasParentTableFamily = true;
-    }
-    if (!ownsTomlTablePath(headerPath, ownedPathKey)) continue;
-    if (headerPath === ownedPathKey) hasRootTable = true;
-    let end = i + 1;
-    while (end < lines.length && headerPaths[end] === null) {
-      end++;
-    }
-    let replaceEnd = end;
-    while (replaceEnd > i + 1 && isTomlCommentOrBlank(lines[replaceEnd - 1])) {
-      replaceEnd--;
-    }
-    ranges.push({ start: i, end: replaceEnd });
-    i = end - 1;
+  for (const [index, section] of sections.entries()) {
+    if (!pathStartsWith(section.path, ownedPath)) continue;
+    const nextSection = sections[index + 1];
+    const nextIsOwned = nextSection && pathStartsWith(nextSection.path, ownedPath);
+    const sectionExpressionEnd = nextSection?.expressionIndex ?? expressions.length;
+    const substantiveExpressions = expressions
+      .slice(section.expressionIndex, sectionExpressionEnd)
+      .filter(expression => expression.children.table?.length || expression.children.keyval?.length);
+    const lastSubstantive = substantiveExpressions.at(-1);
+    if (!lastSubstantive) throw new Error('TOML parser returned an empty table section');
+    ranges.push({
+      start: section.start,
+      // Trivia between adjacent owned tables is owned too. Before a sibling,
+      // retain standalone comments/blank lines that may document that sibling.
+      end: nextIsOwned ? nextSection.start : endOfSourceLine(raw, expressionEnd(lastSubstantive)),
+    });
   }
 
   if (parsedRawHasOwnedEntry && !hasRootTable) {
@@ -267,24 +184,21 @@ function replaceTomlTable(
     return edit.kind === 'upsert' ? appendTomlTable(raw, replacementBlock, newline) : raw;
   }
 
-  let inserted = false;
-  let rangeIndex = 0;
-  let out = '';
-  for (let i = 0; i < lines.length;) {
-    const range = ranges[rangeIndex];
-    if (range && i === range.start) {
-      if (!inserted) {
-        out += replacementBlock;
-        inserted = true;
-      }
-      i = range.end;
-      rangeIndex++;
-      continue;
-    }
-    out += lines[i].text + lines[i].eol;
-    i++;
+  const mergedRanges: { start: number; end: number }[] = [];
+  for (const range of ranges) {
+    const previous = mergedRanges.at(-1);
+    if (previous && range.start <= previous.end) previous.end = Math.max(previous.end, range.end);
+    else mergedRanges.push({ ...range });
   }
-  return out;
+
+  let out = '';
+  let cursor = 0;
+  for (const [index, range] of mergedRanges.entries()) {
+    out += raw.slice(cursor, range.start);
+    if (index === 0) out += replacementBlock;
+    cursor = range.end;
+  }
+  return out + raw.slice(cursor);
 }
 
 function tomlRawHasContainer(raw: string, container: ClientTarget['serverContainer']): boolean {
@@ -292,17 +206,17 @@ function tomlRawHasContainer(raw: string, container: ClientTarget['serverContain
   catch { return false; }
 }
 
-export function writeTomlConfigBody(
+export function writeTomlConfigEdit(
   target: ClientTarget,
   body: Record<string, unknown>,
+  edit: RegistrationEdit,
 ): void {
   const raw = existsSync(target.configPath)
     ? readFileSync(target.configPath, 'utf8')
     : '';
   const ownedPath = `${target.serverContainer}.${DKG_SERVER_KEY}`;
-  const removing = !Object.hasOwn(body[target.serverContainer] as Record<string, unknown>, DKG_SERVER_KEY);
-  const tableEdit = removing ? { kind: 'remove' as const }
-    : { kind: 'upsert' as const, block: serialiseTomlEntryOnly(target, body) };
+  const tableEdit = edit.kind === 'remove' ? edit
+    : { kind: 'upsert' as const, block: serialiseTomlEntryOnly(target, edit.registration) };
   const rawContainer = raw.trim() ? TOML.parse(raw)[target.serverContainer] : undefined;
   let patched = replaceTomlTable(
     raw,
@@ -311,7 +225,7 @@ export function writeTomlConfigBody(
     rawContainer !== null && typeof rawContainer === 'object' && Object.hasOwn(rawContainer, DKG_SERVER_KEY),
     rawContainer !== undefined,
   );
-  if (removing && patched !== null
+  if (edit.kind === 'remove' && patched !== null
       && !tomlRawHasContainer(patched, target.serverContainer)) {
     // Keep the empty server container when its last child table was removed.
     const parentOnly = { [target.serverContainer]: {} };

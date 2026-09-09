@@ -3,7 +3,7 @@ import { dirname } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { applyEdits, createScanner, findNodeAtLocation, modify, parse as parseJsonc, parseTree, type Edit, type ParseError } from 'jsonc-parser';
 import { writeMcpConfigAtomic } from './mcp-config-file.js';
-import { readToml, writeTomlConfigBody } from './mcp-toml-document.js';
+import { readToml, writeTomlConfigEdit } from './mcp-toml-document.js';
 import { DKG_SERVER_KEY, tildify, type ClientTarget } from './mcp-client-registry.js';
 
 /** Parsed config objects have named fields; arrays/scalars are never mergeable records. */
@@ -18,10 +18,20 @@ export interface McpRegistration {
   args?: string[];
   dkgHome?: string;
 }
+/** Canonical DKG-owned fields; additional client-specific fields are retained. */
+export interface DesiredRegistration {
+  command: string;
+  args: string[];
+  env: { DKG_HOME: string; [name: string]: unknown };
+  [name: string]: unknown;
+}
 export type RegistrationRead =
   | { kind: 'absent' }
   | { kind: 'invalid' }
   | { kind: 'entry'; registration: McpRegistration };
+export type RegistrationEdit =
+  | { kind: 'remove' }
+  | { kind: 'upsert'; registration: DesiredRegistration };
 
 function normalizeRegistration(value: unknown): RegistrationRead {
   if (value === undefined || value === null) return { kind: 'absent' };
@@ -38,7 +48,7 @@ function normalizeRegistration(value: unknown): RegistrationRead {
   } };
 }
 
-export function classifyRegistration(current: RegistrationRead, expected: Record<string, unknown>): 'registered' | 'stale' | 'not-registered' {
+export function classifyRegistration(current: RegistrationRead, expected: DesiredRegistration): 'registered' | 'stale' | 'not-registered' {
   if (current.kind === 'absent') return 'not-registered';
   const wanted = normalizeRegistration(expected);
   if (current.kind !== 'entry' || wanted.kind !== 'entry') return 'stale';
@@ -217,11 +227,15 @@ function removeJsonEntry(raw: string, path: string[], allowTrailingComma: boolea
 }
 
 /** Edit only the owned source range, preserving numeric lexemes and JSONC trivia. */
-function writeJsonDocumentBody(target: ClientTarget, body: Record<string, unknown>): void {
+function writeJsonDocumentEdit(
+  target: ClientTarget,
+  body: Record<string, unknown>,
+  edit: RegistrationEdit,
+): void {
   const raw = existsSync(target.configPath) ? readFileSync(target.configPath, 'utf8') : '{}';
   const allowTrailingComma = target.format === 'jsonc';
-  const patched = !Object.hasOwn(body[target.serverContainer] as Record<string, unknown>, DKG_SERVER_KEY) ? removeJsonEntry(raw, [target.serverContainer, DKG_SERVER_KEY], allowTrailingComma)
-    : applyEdits(raw, modify(raw, [target.serverContainer, DKG_SERVER_KEY], readOwnedRegistration(body, target), {
+  const patched = edit.kind === 'remove' ? removeJsonEntry(raw, [target.serverContainer, DKG_SERVER_KEY], allowTrailingComma)
+    : applyEdits(raw, modify(raw, [target.serverContainer, DKG_SERVER_KEY], edit.registration, {
     formattingOptions: { insertSpaces: true, tabSize: 2, eol: raw.includes('\r\n') ? '\r\n' : '\n' },
   }));
   const errors: ParseError[] = [];
@@ -243,20 +257,24 @@ function writeJsonDocumentBody(target: ClientTarget, body: Record<string, unknow
  * so the per-format spread/stringify path here never sees the merge
  * logic.
  */
-function writeConfigBody(target: ClientTarget, body: Record<string, unknown>): void {
+function applyRegistrationEdit(
+  target: ClientTarget,
+  body: Record<string, unknown>,
+  edit: RegistrationEdit,
+): void {
   const format = target.format;
   const dir = dirname(target.configPath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   switch (format) {
     case 'json':
-      if (!Object.hasOwn(body[target.serverContainer] as Record<string, unknown>, DKG_SERVER_KEY)) writeJsonDocumentBody(target, body);
+      if (edit.kind === 'remove') writeJsonDocumentEdit(target, body, edit);
       else writeMcpConfigAtomic(target.configPath, JSON.stringify(body, null, 2) + '\n', target.location);
       return;
     case 'jsonc':
-      writeJsonDocumentBody(target, body);
+      writeJsonDocumentEdit(target, body, edit);
       return;
     case 'toml':
-      writeTomlConfigBody(target, body);
+      writeTomlConfigEdit(target, body, edit);
       return;
     default:
       throw new Error(`Unknown client config format: ${String(format)}`);
@@ -287,13 +305,13 @@ export function removeRegistration(target: ClientTarget): boolean {
   const location = registrationLocation(target);
   if (!location) return false;
   delete location.container[DKG_SERVER_KEY];
-  writeConfigBody(target, location.body);
+  applyRegistrationEdit(target, location.body, { kind: 'remove' });
   return true;
 }
 
 export function writeRegistration(
   target: ClientTarget,
-  entry: Record<string, unknown>,
+  entry: DesiredRegistration,
 ): void {
   const body = readConfigBody(target);
 
@@ -318,14 +336,13 @@ export function writeRegistration(
   const currentEntry = container[DKG_SERVER_KEY];
   const currentEntryObj = isPlainRecord(currentEntry) ? currentEntry : {};
   const currentEnv = isPlainRecord(currentEntryObj.env) ? currentEntryObj.env : {};
-  const expectedEnv = isPlainRecord(entry.env) ? entry.env : {};
-  const mergedEntry: Record<string, unknown> = {
+  const mergedEntry: DesiredRegistration = {
     ...currentEntryObj,
     ...entry,
-    env: { ...currentEnv, ...expectedEnv },
+    env: { ...currentEnv, ...entry.env, DKG_HOME: entry.env.DKG_HOME },
   };
   container[DKG_SERVER_KEY] = mergedEntry;
-  writeConfigBody(target, body);
+  applyRegistrationEdit(target, body, { kind: 'upsert', registration: mergedEntry });
 }
 
 /** Read the owned entry for setup classification; no mutation. */

@@ -16,7 +16,18 @@ export function linuxMetadataCopyCommand(): string {
  * Restrict module discovery to this runtime's built-ins. A Node process launched
  * by PowerShell 7 otherwise forwards incompatible PS7 modules to powershell.exe.
  */
-export function runMcpConfigPowerShell(script: string, paths: { source: string; destination: string; backup?: string }, location: McpClientLocation = 'native'): void {
+type WindowsMcpConfigOperation = 'copy-metadata' | 'replace-file';
+
+const WINDOWS_MCP_CONFIG_SCRIPTS: Record<WindowsMcpConfigOperation, string> = {
+  'copy-metadata': 'Get-Acl -LiteralPath $env:DKG_MCP_FILE_SOURCE | Set-Acl -LiteralPath $env:DKG_MCP_FILE_DESTINATION',
+  'replace-file': '[System.IO.File]::Replace($env:DKG_MCP_FILE_SOURCE, $env:DKG_MCP_FILE_DESTINATION, $env:DKG_MCP_FILE_BACKUP, $false)',
+};
+
+function runMcpConfigPowerShell(
+  operation: WindowsMcpConfigOperation,
+  paths: { source: string; destination: string; backup?: string },
+  location: McpClientLocation = 'native',
+): void {
   const windowsPath = (path: string) => location === 'windows-wsl'
     ? execFileSync('wslpath', ['-w', path], { encoding: 'utf8', stdio: 'pipe' }).trim()
     : path;
@@ -30,7 +41,7 @@ export function runMcpConfigPowerShell(script: string, paths: { source: string; 
   const forwardedNames = Object.keys(pathEnvironment);
   const wslEnvironment = [...(process.env.WSLENV ?? '').split(':')
     .filter(name => name && !forwardedNames.includes(name.split('/')[0]!)), ...forwardedNames].join(':');
-  execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference = 'Stop'; $env:PSModulePath = $PSHOME + '\\Modules'; ${script}`], {
+  execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference = 'Stop'; $env:PSModulePath = $PSHOME + '\\Modules'; ${WINDOWS_MCP_CONFIG_SCRIPTS[operation]}`], {
     stdio: 'pipe',
     windowsHide: true,
     env: {
@@ -39,4 +50,23 @@ export function runMcpConfigPowerShell(script: string, paths: { source: string; 
       ...(location === 'windows-wsl' ? { WSLENV: wslEnvironment } : {}),
     },
   });
+}
+
+/** Copy the destination file's Windows owner and DACL to a replacement inode. */
+export function copyWindowsMcpConfigMetadata(
+  source: string,
+  destination: string,
+  location: McpClientLocation = 'native',
+): void {
+  runMcpConfigPowerShell('copy-metadata', { source, destination }, location);
+}
+
+/** Atomically replace a Windows config while retaining a recoverable backup. */
+export function replaceWindowsMcpConfigFile(
+  source: string,
+  destination: string,
+  backup: string,
+  location: McpClientLocation = 'native',
+): void {
+  runMcpConfigPowerShell('replace-file', { source, destination, backup }, location);
 }

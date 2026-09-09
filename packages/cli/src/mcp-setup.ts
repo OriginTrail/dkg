@@ -1,5 +1,5 @@
 import { detectClients, tildify, clientSkillPath, type ClientTarget } from './mcp-client-registry.js';
-import { readRegistration, classifyRegistration, writeRegistration, type RegistrationRead } from './mcp-client-config.js';
+import { readRegistration, classifyRegistration, writeRegistration, type DesiredRegistration, type RegistrationRead } from './mcp-client-config.js';
 /**
  * `dkg mcp setup` — bundled init + daemon-start + MCP-client registration.
  *
@@ -259,7 +259,7 @@ function canonicalEntry(
   context: SetupContext,
   monorepoRoot: string | null,
   dkgHome: string,
-): Record<string, unknown> {
+): DesiredRegistration {
   let cliJsPath: string;
   if (context === 'monorepo' && monorepoRoot) {
     cliJsPath = join(monorepoRoot, 'packages', 'cli', 'dist', 'cli.js');
@@ -502,7 +502,7 @@ interface ClientState {
 
 function classify(
   target: ClientTarget,
-  expected: Record<string, unknown>,
+  expected: DesiredRegistration,
 ): ClientState {
   const current = readRegistration(target);
   return { target, state: classifyRegistration(current, expected), current };
@@ -731,7 +731,7 @@ export async function mcpSetupAction(
   // disambiguation note (Round-2 Bug B): operator advisories on
   // stderr; data on stdout. Round-7 originally used console.log
   // and broke --print-only stdout purity for the second time.
-  const entryArgs = (expectedEntry.args as string[]).join(' ');
+  const entryArgs = expectedEntry.args.join(' ');
   process.stderr.write(`[setup] Registering CLI: ${expectedEntry.command} ${entryArgs}\n`);
 
   if (printOnly) {
