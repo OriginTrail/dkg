@@ -64,25 +64,47 @@ interface Rfc64PublicCatalogReceiverReconcilerBaseV1 {
   ): Promise<Rfc64PublicCatalogReconcileResultV1>;
 }
 
-/** Full semantic reconciliation supplied by the wired service. */
-export interface Rfc64PublicCatalogReceiverReconcilerV1
+/** Current full semantic reconciliation supplied by the wired service. */
+export interface Rfc64PublicCatalogCurrentReceiverReconcilerV1
   extends Rfc64PublicCatalogReceiverReconcilerBaseV1 {
   /**
    * True when this exact head is durable or a newer same-scope durable head
    * strictly supersedes it. Equal-version conflicts are never deduplicated.
    */
   isHeadSatisfied: Rfc64PublicCatalogHeadSatisfactionCheckV1;
-  /** @deprecated Use isHeadSatisfied for its explicit supersession semantics. */
-  isHeadApplied?: Rfc64PublicCatalogHeadSatisfactionCheckV1;
 }
 
 /** Constructor compatibility for implementations compiled against the V1 name. */
-export type Rfc64PublicCatalogLegacyReceiverReconcilerV1 =
-  Rfc64PublicCatalogReceiverReconcilerBaseV1 & {
-    /** @deprecated V1 compatibility name; use isHeadSatisfied in new code. */
-    isHeadApplied: Rfc64PublicCatalogHeadSatisfactionCheckV1;
-    isHeadSatisfied?: Rfc64PublicCatalogHeadSatisfactionCheckV1;
-  };
+export interface Rfc64PublicCatalogLegacyReceiverReconcilerV1
+  extends Rfc64PublicCatalogReceiverReconcilerBaseV1 {
+  /** @deprecated V1 compatibility name; use isHeadSatisfied in new code. */
+  isHeadApplied: Rfc64PublicCatalogHeadSatisfactionCheckV1;
+}
+
+/** Public V1 input accepts either the established or current method name. */
+export type Rfc64PublicCatalogReceiverReconcilerV1 =
+  | Rfc64PublicCatalogCurrentReceiverReconcilerV1
+  | Rfc64PublicCatalogLegacyReceiverReconcilerV1;
+
+/** Normalize the compatibility union once at the ownership boundary. */
+export function normalizeRfc64PublicCatalogReceiverReconcilerV1(
+  reconciler: Rfc64PublicCatalogReceiverReconcilerV1,
+): Rfc64PublicCatalogCurrentReceiverReconcilerV1 {
+  if ('isHeadSatisfied' in reconciler) return reconciler;
+  if ('isHeadApplied' in reconciler) {
+    return Object.freeze({
+      reconcileHead: (
+        remotePeerId: string,
+        announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+        signal: AbortSignal,
+      ) =>
+        reconciler.reconcileHead(remotePeerId, announcement, signal),
+      isHeadSatisfied: (announcement: Rfc64PublicCatalogHeadAnnouncementV1) =>
+        reconciler.isHeadApplied(announcement),
+    });
+  }
+  throw new TypeError('RFC-64 receiver reconciler requires a head satisfaction check');
+}
 
 export interface Rfc64PublicCatalogReceiverOptionsV1 {
   /** Max concurrent fetch/stage chains. Default 4. */
@@ -348,17 +370,12 @@ export class Rfc64PublicCatalogReceiverV1 {
   #providerBackoffMs = 0;
 
   constructor(
-    reconciler: Rfc64PublicCatalogReceiverReconcilerV1
-      | Rfc64PublicCatalogLegacyReceiverReconcilerV1,
+    reconciler: Rfc64PublicCatalogReceiverReconcilerV1,
     options: Rfc64PublicCatalogReceiverOptionsV1 = {},
   ) {
-    this.#reconciler = reconciler;
-    // The V1 constructor accepted isHeadApplied. Normalize that public
-    // compatibility contract once so the scheduler has one semantic check.
-    const legacyCheck = 'isHeadApplied' in reconciler
-      ? reconciler.isHeadApplied
-      : undefined;
-    this.#isHeadSatisfied = reconciler.isHeadSatisfied ?? legacyCheck!;
+    const normalizedReconciler = normalizeRfc64PublicCatalogReceiverReconcilerV1(reconciler);
+    this.#reconciler = normalizedReconciler;
+    this.#isHeadSatisfied = normalizedReconciler.isHeadSatisfied;
     this.#maxConcurrent = rfc64ReceiverPositiveIntV1(
       options.maxConcurrent,
       DEFAULTS.maxConcurrent,

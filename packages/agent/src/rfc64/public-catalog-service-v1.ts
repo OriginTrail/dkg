@@ -66,6 +66,7 @@ import {
 import {
   Rfc64PublicCatalogReceiverV1,
   type Rfc64PublicCatalogReceiverReconcilerV1,
+  normalizeRfc64PublicCatalogReceiverReconcilerV1,
   type Rfc64PublicCatalogReceiverOptionsV1,
   type Rfc64PublicCatalogReceiverStatsV1,
 } from './public-catalog-receiver-v1.js';
@@ -434,24 +435,26 @@ export class Rfc64PublicCatalogServiceV1 {
     } satisfies Rfc64PublicCatalogReceiverReconcilerV1;
     const nativeReconciler = options.native === undefined
       ? undefined
-      : options.native.createReconciler(Object.freeze({
-        // Pass explicit capability objects rather than the owned transport
-        // instances. The reconciler may fetch, but cannot start/stop protocols
-        // or retain the router through a runtime-private implementation field.
-        headTransport: Object.freeze({
-          fetchCatalogHead: this.#transport.fetchCatalogHead.bind(this.#transport),
-        }),
-        contentTransport: Object.freeze({
-          fetchCatalogObject: this.#nativeTransport!.fetchCatalogObject.bind(
-            this.#nativeTransport!,
-          ),
-          fetchKaBundle: this.#nativeTransport!.fetchKaBundle.bind(this.#nativeTransport!),
-        }),
-        resolveTrustedCatalogScope: (announcement: Rfc64PublicCatalogHeadAnnouncementV1) =>
-          this.#resolveTrustedCatalogScope(announcement),
-        verifyIssuerSignature: this.#verifyIssuerSignature,
-        transportTimeoutMs: this.#transportTimeoutMs,
-      }));
+      : normalizeRfc64PublicCatalogReceiverReconcilerV1(
+        options.native.createReconciler(Object.freeze({
+          // Pass explicit capability objects rather than the owned transport
+          // instances. The reconciler may fetch, but cannot start/stop protocols
+          // or retain the router through a runtime-private implementation field.
+          headTransport: Object.freeze({
+            fetchCatalogHead: this.#transport.fetchCatalogHead.bind(this.#transport),
+          }),
+          contentTransport: Object.freeze({
+            fetchCatalogObject: this.#nativeTransport!.fetchCatalogObject.bind(
+              this.#nativeTransport!,
+            ),
+            fetchKaBundle: this.#nativeTransport!.fetchKaBundle.bind(this.#nativeTransport!),
+          }),
+          resolveTrustedCatalogScope: (announcement: Rfc64PublicCatalogHeadAnnouncementV1) =>
+            this.#resolveTrustedCatalogScope(announcement),
+          verifyIssuerSignature: this.#verifyIssuerSignature,
+          transportTimeoutMs: this.#transportTimeoutMs,
+        })),
+      );
     const reconciler: Rfc64PublicCatalogReceiverReconcilerV1 = nativeReconciler === undefined
       ? stagingReconciler
       : {

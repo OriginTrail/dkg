@@ -378,9 +378,13 @@ describe('Context Graph subscription authority retry', () => {
     await agent.start();
     await saveStarted;
     const stopping = agent.stop();
+    let stopSettled = false;
+    const observedStop = stopping.then(() => { stopSettled = true; });
     await vi.waitFor(() => expect(retrySignal?.aborted).toBe(true));
+    await Promise.resolve();
+    expect(stopSettled).toBe(false);
     releaseSave();
-    await stopping;
+    await observedStop;
 
     expect(agent.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);
     expect(subscribe.mock.calls.some(([id]) => id === contextGraphId)).toBe(false);
@@ -522,4 +526,3 @@ describe('Context Graph subscription authority retry', () => {
     expect(agent.getSubscribedContextGraphs().has(coldContextGraphId)).toBe(false);
   }, 15_000);
 });
-

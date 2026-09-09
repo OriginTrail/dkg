@@ -4,6 +4,7 @@ import {
   Rfc64PublicCatalogReceiverV1,
   type Rfc64PublicCatalogLegacyReceiverReconcilerV1,
   type Rfc64PublicCatalogReceiverReconcilerV1,
+  type Rfc64PublicCatalogHeadSatisfactionCheckV1,
   type Rfc64PublicCatalogReconcileResultV1,
 } from '../src/rfc64/public-catalog-receiver-v1.js';
 import {
@@ -49,7 +50,7 @@ function deferred<T>(): {
 
 function reconciler(
   reconcileHead: Rfc64PublicCatalogReceiverReconcilerV1['reconcileHead'],
-  isHeadSatisfied: NonNullable<Rfc64PublicCatalogReceiverReconcilerV1['isHeadSatisfied']>
+  isHeadSatisfied: Rfc64PublicCatalogHeadSatisfactionCheckV1
     = async () => false,
 ): Rfc64PublicCatalogReceiverReconcilerV1 {
   return { isHeadSatisfied, reconcileHead };

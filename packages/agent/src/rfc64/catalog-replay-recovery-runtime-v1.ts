@@ -6,13 +6,14 @@ const MAX_REPLAY_PEERS_V1 = 64;
 const MAX_UNRESOLVED_PEERS_V1 = 64;
 const MAX_PROMISED_TARGETS_V1 = 64;
 
-interface ReplayPeerDemandV1 {
+export interface Rfc64CatalogReplayPeerDemandV1 {
   readonly peerId: string;
   readonly generation: number;
 }
 
 /** Opaque, idempotent ownership of one exact reconnect demand. */
-export interface Rfc64CatalogReplayPeerFenceLeaseV1 {
+export interface Rfc64CatalogReplayPeerFenceLeaseV1
+  extends Rfc64CatalogReplayPeerDemandV1 {
   release(): void;
 }
 
@@ -23,16 +24,23 @@ export type Rfc64CatalogReplayPeerResultV1<Target> = Readonly<{
   status: 'not-provider';
 }>;
 
-export interface Rfc64CatalogReplayRecoveryRunV1<Target> {
+export interface Rfc64CatalogReplayRecoveryRunV1 {
   readonly contextGraphId: string;
   readonly policyDigest: string;
   readonly seedPeers: readonly string[];
   /** A successful run with this flag clears an unattributed full-replay witness. */
   readonly fullReplay: boolean;
-  requestPeer(peerId: string): Promise<Rfc64CatalogReplayPeerResultV1<Target>>;
+  readonly replayDemands?: readonly Rfc64CatalogReplayPeerDemandV1[];
+}
+
+export interface Rfc64CatalogReplayRecoveryPortsV1<Target> {
+  requestPeer(
+    contextGraphId: string,
+    peerId: string,
+  ): Promise<Rfc64CatalogReplayPeerResultV1<Target>>;
   whenReceiverIdle(): Promise<void>;
   targetIdentity(target: Target): string;
-  parityFailed(targets: readonly Target[]): Promise<boolean>;
+  parityFailed(contextGraphId: string, targets: readonly Target[]): Promise<boolean>;
 }
 
 export interface Rfc64CatalogReplayRecoveryResultV1 {
@@ -71,6 +79,8 @@ class Rfc64CatalogReplayPeerWorklistV1 {
     this.#pending.set(peerId, generation);
     let released = false;
     return Object.freeze({
+      peerId,
+      generation,
       release: () => {
         if (released) return;
         released = true;
@@ -88,7 +98,15 @@ class Rfc64CatalogReplayPeerWorklistV1 {
     this.#pending.set(peerId, ++this.#nextGeneration);
   }
 
-  drain(): readonly ReplayPeerDemandV1[] {
+  seedDemand(demand: Rfc64CatalogReplayPeerDemandV1): void {
+    const current = this.#pending.get(demand.peerId);
+    if (current === undefined || current < demand.generation) {
+      this.#pending.set(demand.peerId, demand.generation);
+    }
+    this.#nextGeneration = Math.max(this.#nextGeneration, demand.generation);
+  }
+
+  drain(): readonly Rfc64CatalogReplayPeerDemandV1[] {
     if (this.#remaining === 0) return Object.freeze([]);
     const demands = [...this.#pending.entries()]
       .slice(0, this.#remaining)
@@ -122,6 +140,8 @@ interface ReplayProgressV1 {
   readonly unresolvedPeers: Set<string>;
   /** Unattributed parity/overflow failures require one successful full pass. */
   requiresFullReplay: boolean;
+  /** OR-merged across every request that joins the active completion. */
+  requestedFullReplay: boolean;
   token: number;
   active: boolean;
   failed: boolean;
@@ -135,7 +155,12 @@ interface ReplayProgressV1 {
  */
 export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   readonly #byContextGraph = new Map<string, ReplayProgressV1>();
+  readonly #ports: Rfc64CatalogReplayRecoveryPortsV1<Target>;
   #revision = 0;
+
+  constructor(ports: Rfc64CatalogReplayRecoveryPortsV1<Target>) {
+    this.#ports = ports;
+  }
 
   get revision(): number {
     return this.#revision;
@@ -176,6 +201,8 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     }
     let released = false;
     return Object.freeze({
+      peerId: worklistLease.peerId,
+      generation: worklistLease.generation,
       release: () => {
         if (released) return;
         released = true;
@@ -190,14 +217,16 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   }
 
   request(
-    input: Rfc64CatalogReplayRecoveryRunV1<Target>,
+    input: Rfc64CatalogReplayRecoveryRunV1,
   ): Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> {
     const progress = this.#progressFor(input.contextGraphId, input.policyDigest);
     const seedPeers = snapshotRfc64PublicCatalogAnnouncementPeersV1(
       input.seedPeers.slice(0, MAX_REPLAY_PEERS_V1),
     );
     for (const peer of seedPeers) progress.peerWorklist.seed(peer);
+    for (const demand of input.replayDemands ?? []) progress.peerWorklist.seedDemand(demand);
     for (const peer of progress.unresolvedPeers) progress.peerWorklist.seed(peer);
+    progress.requestedFullReplay ||= input.fullReplay;
     // A drained worklist can still have an in-flight provider/parity pass.
     if (progress.completion !== null) return progress.completion;
     if (!progress.peerWorklist.hasPending) {
@@ -214,7 +243,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   }
 
   async #execute(
-    input: Rfc64CatalogReplayRecoveryRunV1<Target>,
+    input: Rfc64CatalogReplayRecoveryRunV1,
     progress: ReplayProgressV1,
     token: number,
   ): Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> {
@@ -229,7 +258,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         await Promise.all(replayDemands.map(async ({ peerId }) => {
           for (let attempt = 0; attempt < 2; attempt += 1) {
             try {
-              const completion = await input.requestPeer(peerId);
+              const completion = await this.#ports.requestPeer(input.contextGraphId, peerId);
               progress.unresolvedPeers.delete(peerId);
               if (completion.status === 'completed') {
                 manifests.push([...completion.targets]);
@@ -246,7 +275,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         }));
         // Completion-capable provider responses are returned only after every
         // promised announcement is synchronously admitted at this receiver.
-        await input.whenReceiverIdle();
+        await this.#ports.whenReceiverIdle();
         if (progress.peerWorklist.exhausted) {
           requiresFullReplay = true;
           failed += 1;
@@ -256,11 +285,11 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
 
         const promisedByIdentity = new Map<string, Target>();
         for (const target of manifests.flat()) {
-          promisedByIdentity.set(input.targetIdentity(target), target);
+          promisedByIdentity.set(this.#ports.targetIdentity(target), target);
         }
         const promised = [...promisedByIdentity.values()];
         const parityFailed = promised.length > MAX_PROMISED_TARGETS_V1
-          || await input.parityFailed(promised);
+          || await this.#ports.parityFailed(input.contextGraphId, promised);
         // A reconnect generation arriving during the durable parity read owns
         // another pass. The worklist budget keeps that fence finite.
         if (progress.peerWorklist.exhausted) {
@@ -286,7 +315,8 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       if (current === progress && current.token === token) {
         current.active = false;
         if (requiresFullReplay) current.requiresFullReplay = true;
-        if (!replayFailed && input.fullReplay) current.requiresFullReplay = false;
+        if (!replayFailed && current.requestedFullReplay) current.requiresFullReplay = false;
+        current.requestedFullReplay = false;
         current.failed = current.unresolvedPeers.size > 0 || current.requiresFullReplay;
         current.completion = null;
         current.peerWorklist.settleOverflow();
@@ -303,6 +333,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         peerWorklist: new Rfc64CatalogReplayPeerWorklistV1(),
         unresolvedPeers: new Set(),
         requiresFullReplay: false,
+        requestedFullReplay: false,
         token: 0,
         active: false,
         failed: false,

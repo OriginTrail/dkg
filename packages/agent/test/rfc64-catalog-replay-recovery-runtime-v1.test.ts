@@ -9,30 +9,18 @@ interface Target {
 function run(
   runtime: Rfc64CatalogReplayRecoveryRuntimeV1<Target>,
   policyDigest: string,
-  requestPeer: (peerId: string) => Promise<Readonly<{
-    status: 'completed';
-    targets: readonly Target[];
-  }>>,
+  fullReplay = false,
 ) {
   return runtime.request({
     contextGraphId: 'public-cg',
     policyDigest,
     seedPeers: Object.freeze([]),
-    fullReplay: false,
-    requestPeer,
-    whenReceiverIdle: async () => undefined,
-    targetIdentity: (target) => target.id,
-    parityFailed: async () => false,
+    fullReplay,
   });
 }
 
 describe('RFC-64 catalog replay recovery runtime', () => {
   it('owns policy replacement leases, coalesced completion, and status projection', async () => {
-    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>();
-    const oldLease = runtime.markPeerPending('public-cg', 'old-policy', 'peer-old');
-    const newLease = runtime.markPeerPending('public-cg', 'new-policy', 'peer-new');
-    oldLease?.release();
-
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const requestPeer = vi.fn(async () => {
@@ -42,8 +30,18 @@ describe('RFC-64 catalog replay recovery runtime', () => {
         targets: Object.freeze([]),
       });
     });
-    const first = run(runtime, 'new-policy', requestPeer);
-    const coalesced = run(runtime, 'new-policy', requestPeer);
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer,
+      whenReceiverIdle: async () => undefined,
+      targetIdentity: (target) => target.id,
+      parityFailed: async () => false,
+    });
+    const oldLease = runtime.markPeerPending('public-cg', 'old-policy', 'peer-old');
+    const newLease = runtime.markPeerPending('public-cg', 'new-policy', 'peer-new');
+    oldLease?.release();
+
+    const first = run(runtime, 'new-policy');
+    const coalesced = run(runtime, 'new-policy');
     expect(coalesced).toBe(first);
     expect(runtime.status('public-cg', 'new-policy')).toEqual({
       active: true,
@@ -59,5 +57,42 @@ describe('RFC-64 catalog replay recovery runtime', () => {
       failed: false,
     });
     newLease?.release();
+  });
+
+  it('OR-merges a joining full replay and clears only its failure witness', async () => {
+    let parityFails = true;
+    let release!: () => void;
+    let gate = Promise.resolve();
+    const requestPeer = vi.fn(async () => {
+      await gate;
+      return Object.freeze({
+        status: 'completed' as const,
+        targets: Object.freeze([{ id: 'target' }]),
+      });
+    });
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer,
+      whenReceiverIdle: async () => undefined,
+      targetIdentity: (target) => target.id,
+      parityFailed: async () => parityFails,
+    });
+
+    runtime.markPeerPending('public-cg', 'policy', 'peer-a');
+    await expect(run(runtime, 'policy')).resolves.toEqual({ requested: 1, failed: 1 });
+    expect(runtime.status('public-cg', 'policy')?.failed).toBe(true);
+
+    parityFails = false;
+    runtime.markPeerPending('public-cg', 'policy', 'peer-b');
+    await expect(run(runtime, 'policy')).resolves.toEqual({ requested: 1, failed: 0 });
+    expect(runtime.status('public-cg', 'policy')?.failed).toBe(true);
+
+    gate = new Promise<void>((resolve) => { release = resolve; });
+    runtime.markPeerPending('public-cg', 'policy', 'peer-c');
+    const scoped = run(runtime, 'policy');
+    const full = run(runtime, 'policy', true);
+    expect(full).toBe(scoped);
+    release();
+    await expect(scoped).resolves.toEqual({ requested: 1, failed: 0 });
+    expect(runtime.status('public-cg', 'policy')?.failed).toBe(false);
   });
 });

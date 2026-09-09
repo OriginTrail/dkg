@@ -1,18 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
-/** Opaque lease that removes one exact pending replay generation. */
-export interface Rfc64CatalogReplayConnectionFenceLeaseV1 {
-  release(): void;
-}
+import type {
+  Rfc64CatalogReplayPeerDemandV1,
+  Rfc64CatalogReplayPeerFenceLeaseV1,
+} from './catalog-replay-recovery-runtime-v1.js';
 
 export interface Rfc64CatalogReplayConnectionRuntimePortsV1 {
   selectContextGraphIds(): readonly string[];
   acquireFence(
     contextGraphId: string,
     peerId: string,
-  ): Rfc64CatalogReplayConnectionFenceLeaseV1 | null;
+  ): Rfc64CatalogReplayPeerFenceLeaseV1 | null;
   reannounce(peerId: string): Promise<unknown>;
-  replay(contextGraphId: string): Promise<Readonly<{ failed: number }>>;
+  replay(
+    contextGraphId: string,
+    demand: Rfc64CatalogReplayPeerDemandV1,
+  ): Promise<Readonly<{ failed: number }>>;
   warn(message: string): void;
 }
 
@@ -56,6 +59,10 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     this.#byPeer.delete(peerId);
   }
 
+  reset(): void {
+    this.#byPeer.clear();
+  }
+
   prepare(
     peerId: string,
     nowMs = Date.now(),
@@ -75,13 +82,15 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
       if (this.#byPeer.get(peerId)?.token === token) this.#byPeer.delete(peerId);
       return null;
     }
-    const leases = contextGraphIds.map((contextGraphId) =>
-      this.#ports.acquireFence(contextGraphId, peerId));
+    const replayDemands = contextGraphIds.flatMap((contextGraphId) => {
+      const demand = this.#ports.acquireFence(contextGraphId, peerId);
+      return demand === null ? [] : [{ contextGraphId, demand }];
+    });
     let settled = false;
     const release = (): void => {
       if (settled) return;
       settled = true;
-      for (const lease of leases) lease?.release();
+      for (const { demand } of replayDemands) demand.release();
       if (this.#byPeer.get(peerId)?.token === token) this.#byPeer.delete(peerId);
     };
     return Object.freeze({
@@ -96,8 +105,8 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
             }`,
           );
         });
-        for (const contextGraphId of contextGraphIds) {
-          void this.#ports.replay(contextGraphId).then((result) => {
+        for (const { contextGraphId, demand } of replayDemands) {
+          void this.#ports.replay(contextGraphId, demand).then((result) => {
             if (result.failed > 0) {
               this.#ports.warn(
                 `RFC-64 catalog replay incomplete for "${contextGraphId}" after ${peerId.slice(-8)} connected`,
