@@ -288,8 +288,6 @@ interface NativeAgentStartOptionsV1 {
   readonly operationalPrivateKey?: string;
   readonly omitLegacyDeployment?: boolean;
   readonly beforeStart?: (agent: DKGAgent) => void | Promise<void>;
-  /** Establish live-node test preconditions before automatic graph subscription. */
-  readonly afterStart?: (agent: DKGAgent) => void | Promise<void>;
 }
 
 async function startNativeAgentWithOptions(
@@ -307,7 +305,6 @@ async function startNativeAgentWithOptions(
     activation,
     persistentStorePath,
     beforeStart,
-    afterStart,
     syncContextGraphs,
     operationalPrivateKey,
     omitLegacyDeployment = false,
@@ -381,7 +378,6 @@ async function startNativeAgentWithOptions(
   agents.push(agent);
   await beforeStart?.(agent);
   await agent.start();
-  await afterStart?.(agent);
   const selectedContextGraphs = syncContextGraphs ?? (catalogActivation !== undefined
     && catalogActivation.enabled !== false
     ? catalogActivation.bootstrap?.acceptedPolicies.map(
@@ -2111,6 +2107,17 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           providerPeerAddresses.get(peerId) ?? null,
       },
     });
+    const seedProviderAdmissionBackoff = (peerId: string) => {
+      provider.networkAdmission.rememberRetryableProbeFailure(
+        peerId, 'restart fixture transient backoff', 'transient',
+      );
+    };
+    const startAuthorWithAdmissionBackoff = async (options: NativeAgentStartOptionsV1) => {
+      const agent = await startNativeAgentWithOptions({ ...options, syncContextGraphs: [] });
+      seedProviderAdmissionBackoff(agent.peerId);
+      agent.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+      return agent;
+    };
     provider.acceptRfc64CatalogAccessSnapshotV1({
       policy: authority.policy,
       policyDigest: authority.policyDigest,
@@ -2122,14 +2129,11 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       authority,
       1_000,
     );
-    const author = await startNativeAgentWithOptions({
+    const author = await startAuthorWithAdmissionBackoff({
       name: 'selected-private-startup-author',
       existingDataDir: dataDir,
       persistentStorePath,
       catalogActivation,
-      afterStart: (agent) => provider.networkAdmission.rememberRetryableProbeFailure(
-        agent.peerId, 'restart fixture transient backoff', 'transient',
-      ),
       beforeStart: (agent) => {
         vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
           AUTHOR_WALLET.privateKey,
@@ -2168,14 +2172,11 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       releaseStartupProjection = resolve;
     });
     let announce: ReturnType<typeof vi.spyOn<DKGAgent, 'announceRfc64PublicCatalogHeadV1'>>;
-    const restarted = await startNativeAgentWithOptions({
+    const restarted = await startAuthorWithAdmissionBackoff({
       name: 'selected-private-startup-author-restarted',
       existingDataDir: dataDir,
       persistentStorePath,
       catalogActivation,
-      afterStart: (agent) => provider.networkAdmission.rememberRetryableProbeFailure(
-        agent.peerId, 'restart fixture transient backoff', 'transient',
-      ),
       beforeStart: (agent) => {
         vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
           AUTHOR_WALLET.privateKey,
@@ -2196,13 +2197,11 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     providerPeerAddresses.set(restarted.peerId, AUTHOR);
     await startupProjectionEntered;
-    expect(restarted.peerId).toBe(authorPeerId);
     try {
+      expect(restarted.peerId).toBe(authorPeerId);
       // Raw libp2p dial only awaits transport. This controlled reconnect must
       // await the public API's signed identity admission before publishing.
-      provider.networkAdmission.rememberRetryableProbeFailure(
-        restarted.peerId, 'restart fixture transient backoff', 'transient',
-      );
+      seedProviderAdmissionBackoff(restarted.peerId);
       await restarted.connectTo(tcpMultiaddr(provider));
       expect(provider.networkAdmission.getRetryableProbeBackoff(restarted.peerId))
         .toMatchObject({ kind: 'transient', retryAfterMs: expect.any(Number) });
