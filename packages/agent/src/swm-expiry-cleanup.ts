@@ -47,6 +47,7 @@ interface ExpiredOperation {
   scope: { kind: 'legacy' } | { kind: 'graph-v2'; kaUal?: string; snapshotGraph?: string };
 }
 interface CleanupOutcome { triplesDeleted: number; metadataDeleted: number }
+interface CleanupBatchResult { outcomes: CleanupOutcome[]; errors: unknown[] }
 
 /** At most four nonempty pages per invocation; continuation rotates graph priority. */
 export async function runSwmExpiryCleanup(
@@ -86,13 +87,19 @@ export async function runSwmExpiryCleanup(
         // Each operation rediscovers its graph family after acquiring its own
         // locks so a concurrent writer cannot leave data behind without metadata.
         let metadataProgress = 0;
-        const cleaned = await cleanupExpiredBatch(context, target, cutoff, operations);
-        for (const { outcome } of cleaned) {
+        const batch = await cleanupExpiredBatch(context, target, cutoff, operations);
+        for (const outcome of batch.outcomes) {
           result.triplesDeleted += outcome.triplesDeleted;
           const count = counts.get(target.contextGraphId) ?? { triples: 0, operations: 0 };
           count.triples += outcome.triplesDeleted;
           if (outcome.metadataDeleted > 0) { count.operations++; metadataProgress++; }
           counts.set(target.contextGraphId, count);
+        }
+        // Account for successful siblings before ending a failed pass. The batch
+        // barrier guarantees no operation can outlive this physical flight.
+        if (batch.errors.length > 0) {
+          throw new AggregateError(batch.errors, batch.errors.map(error =>
+            error instanceof Error ? error.message : String(error)).join('; '));
         }
         madeProgress = metadataProgress > 0;
         if (isClosed()) break;
@@ -208,8 +215,8 @@ async function cleanupExpiredBatch(
   target: CleanupTarget,
   cutoff: string,
   candidates: readonly ExpiredOperation[],
-): Promise<Array<{ operation: ExpiredOperation; outcome: CleanupOutcome }>> {
-  const cleaned = await Promise.all(candidates.map(candidate => withKeyedLocks(
+): Promise<CleanupBatchResult> {
+  const settled = await Promise.allSettled(candidates.map(candidate => withKeyedLocks(
     context.writeLocks,
     cleanupWriteLockKeys(target, candidate),
     async () => {
@@ -222,13 +229,15 @@ async function cleanupExpiredBatch(
       }
       const family = await resolveGraphFamily(context.store, target);
       if (context.isClosed()) return undefined;
-      return {
-        operation: current,
-        outcome: await cleanupExpiredOperation(context, target, family, current),
-      };
+      return cleanupExpiredOperation(context, target, family, current);
     },
   )));
-  return cleaned.filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
+  const batch: CleanupBatchResult = { outcomes: [], errors: [] };
+  for (const result of settled) {
+    if (result.status === 'rejected') batch.errors.push(result.reason);
+    else if (result.value) batch.outcomes.push(result.value);
+  }
+  return batch;
 }
 
 function cleanupWriteLockKeys(target: CleanupTarget, operation: ExpiredOperation): string[] {

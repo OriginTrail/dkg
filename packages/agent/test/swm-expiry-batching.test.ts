@@ -4,7 +4,7 @@ import type { Logger } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import { runSwmExpiryCleanup } from '../src/swm-expiry-cleanup.js';
-import { withKeyedLocks } from '@origintrail-official/dkg-publisher';
+import { swmKaWriteLockKey, withKeyedLocks, type DKGPublisher } from '@origintrail-official/dkg-publisher';
 import type { SwmExpiryCleanupWorker } from '../src/swm-expiry-cleanup-worker.js';
 import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
 import { captureSyncHandler, workspaceOpQuads } from './_helpers/sync-responder.js';
@@ -20,6 +20,7 @@ const META = `${WS}_meta`;
 interface Internals {
   swmExpiryCleanupWorker: SwmExpiryCleanupWorker;
   store: TripleStore;
+  publisher: DKGPublisher;
   log: Logger;
   workspaceOwnedEntities: Map<string, Map<string, string>>;
   writeLocks: Map<string, Promise<void>>;
@@ -332,13 +333,17 @@ it('refreshes family graphs for an expired operation arriving between live batch
   expect(await query(`SELECT ?p WHERE { GRAPH <${META}> { <urn:expiry:late> ?p ?o } }`)).toMatchObject({ bindings: [] });
 });
 
-it('revalidates a hydrated batch after a concurrent replacement releases its write lock', async () => {
+it.each([undefined, 'research'])('revalidates a hydrated batch after its writer releases the lock in subgraph %s', async subGraphName => {
+  const WS = `did:dkg:context-graph:${CG}/${subGraphName ? `${subGraphName}/` : ''}_shared_memory`;
+  const META = `${WS}_meta`;
+  const ownershipKey = subGraphName ? `${CG}\0${subGraphName}` : CG;
   const agent = await DKGAgent.create({ name: 'expiry-revalidation', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 60_000 });
   agents.push(agent);
   const { store, writeLocks } = agent as unknown as Internals;
   const rdfType = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
   const dkg = 'http://dkg.io/ontology/';
   const expiredAt = '"2020-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>';
+  await store.insert([{ subject: `did:dkg:context-graph:${CG}`, predicate: rdfType, object: `${dkg}ContextGraph`, graph: `did:dkg:context-graph:${CG}/_meta` }]);
   const rootA = 'urn:expiry:blocked:a';
   const rootB = 'urn:expiry:blocked:b';
   const opA = 'urn:expiry:blocked:op:a';
@@ -356,7 +361,7 @@ it('revalidates a hydrated batch after a concurrent replacement releases its wri
   const writerGate = new Promise<void>(resolve => { releaseWriter = resolve; });
   let writerHeld!: () => void;
   const writerHasLock = new Promise<void>(resolve => { writerHeld = resolve; });
-  const replacement = withKeyedLocks(writeLocks, [`${CG}\0${rootB}`], async () => {
+  const replacement = withKeyedLocks(writeLocks, [`${ownershipKey}\0${rootB}`], async () => {
     writerHeld();
     await writerGate;
     await store.deleteByPattern({ graph: META, subject: opB });
@@ -663,4 +668,173 @@ it.each([undefined, 'research'])('evicts only expired ownership in graph family 
   expect(workspaceOwnedEntities.get(key)?.has('urn:expired')).toBe(false);
   expect(workspaceOwnedEntities.get(key)?.get('urn:retained')).toBe('peer');
   expect(workspaceOwnedEntities.get(otherKey)?.get('urn:expired')).toBe('other-peer');
+});
+
+
+it.each([false, true])('waits for successful parallel deletions after a sibling fails (shutdown=%s)', async shutdown => {
+  const agent = await DKGAgent.create({ name: 'expiry-parallel-failure', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 60_000 });
+  agents.push(agent);
+  await agent.start();
+  await agent.cleanupExpiredSharedMemory();
+  const { store, log } = agent as unknown as Internals;
+  const failedOp = 'urn:expiry:parallel-failure';
+  const slowOp = 'urn:expiry:parallel-slow';
+  await store.insert([failedOp, slowOp].flatMap(subject => [
+    { subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation', graph: META },
+    { subject, predicate: 'http://dkg.io/ontology/publishedAt', object: '"2020-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>', graph: META },
+  ]));
+  let entered!: () => void, failed!: () => void, release!: () => void;
+  const slowEntered = new Promise<void>(resolve => { entered = resolve; });
+  const failureObserved = new Promise<void>(resolve => { failed = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const remove = store.deleteByPattern.bind(store);
+  let failOnce = true;
+  let siblingFinished = false;
+  vi.spyOn(store, 'deleteByPattern').mockImplementation(async pattern => {
+    if (pattern.subject === failedOp && failOnce) {
+      failOnce = false; failed(); throw new Error('injected parallel deletion failure');
+    }
+    if (pattern.subject === slowOp) { entered(); await gate; }
+    const deleted = await remove(pattern);
+    if (pattern.subject === slowOp) siblingFinished = true;
+    return deleted;
+  });
+  const query = vi.spyOn(store, 'query');
+  const warning = vi.spyOn(log, 'warn').mockImplementation(() => undefined);
+  const close = store.close.bind(store);
+  let closedBeforeSibling = false;
+  const closed = vi.spyOn(store, 'close').mockImplementation(async () => {
+    closedBeforeSibling = !siblingFinished;
+    await close();
+  });
+  // Keep the same cutoff for the joining call: it must join this physical pass.
+  vi.useFakeTimers({ toFake: ['Date'] });
+  let completed = false;
+  const cleanup = agent.cleanupExpiredSharedMemory().then(value => { completed = true; return value; });
+  await Promise.all([slowEntered, failureObserved]);
+  await new Promise(resolve => setImmediate(resolve));
+  const joined = agent.cleanupExpiredSharedMemory();
+  let stopped = false;
+  const stop = shutdown ? agent.stop().then(() => { stopped = true; }) : undefined;
+  try {
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(completed).toBe(false);
+    expect(stopped).toBe(false);
+    expect(closed).not.toHaveBeenCalled();
+    expect(query.mock.calls.filter(([sparql, options]) => options?.source === 'agent.swmCleanup.expiredOperations' && sparql.includes(`GRAPH <${META}>`))).toHaveLength(1);
+  } finally {
+    release();
+    await Promise.allSettled([cleanup, joined, stop]);
+  }
+  expect(await cleanup).toBe(2);
+  expect(await joined).toBe(2);
+  expect(warning).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('injected parallel deletion failure'));
+  if (shutdown) {
+    expect(closed).toHaveBeenCalledOnce();
+    expect(closedBeforeSibling).toBe(false);
+  } else {
+    expect(await agent.cleanupExpiredSharedMemory()).toBe(2);
+    expect(await store.query(`SELECT ?op WHERE { GRAPH <${META}> { ?op ?p ?o } }`)).toMatchObject({ bindings: [] });
+  }
+});
+
+it.each([undefined, 'research'])('serializes V2 expiry with the real KA staging writer in subgraph %s', async subGraphName => {
+  const agent = await DKGAgent.create({ name: 'expiry-ka-race', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 60_000 });
+  agents.push(agent);
+  const { store, publisher } = agent as unknown as Internals;
+  await store.insert([{ subject: `did:dkg:context-graph:${CG}`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/ContextGraph', graph: `did:dkg:context-graph:${CG}/_meta` }]);
+  const kaUal = 'did:dkg:hardhat1:31337/0x1111111111111111111111111111111111111111/1';
+  const stage = (id: string, version: number, timestamp: Date) => publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+    contextGraphId: CG, kaUal, shareOperationId: id, assertionVersion: version, subGraphName,
+    quads: [{ subject: 'urn:expiry:ka-root', predicate: 'urn:value', object: `"${id}"`, graph: '' }], timestamp,
+  });
+  const old = await stage('old', 1, new Date('2020-01-01T00:00:00Z'));
+  const query = store.query.bind(store);
+  let entered!: () => void, release!: () => void;
+  const atOwnerRead = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let held = false;
+  vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+    const result = await query(sparql, options);
+    if (!held && options?.source === 'agent.swmCleanup.currentHeadOwner') {
+      held = true; entered(); await gate;
+    }
+    return result;
+  });
+  const cleanup = agent.cleanupExpiredSharedMemory();
+  let writer: ReturnType<typeof stage> | undefined;
+  try {
+    await atOwnerRead;
+    writer = stage('fresh', 2, new Date());
+    await new Promise(resolve => setImmediate(resolve));
+    release();
+    await Promise.all([cleanup, writer]);
+    expect(await query(`SELECT ?value WHERE { GRAPH <${old.swmGraph}> { <urn:expiry:ka-root> <urn:value> ?value } }`))
+      .toMatchObject({ bindings: [{ value: '"fresh"' }] });
+    const meta = subGraphName ? `did:dkg:context-graph:${CG}/${subGraphName}/_shared_memory_meta` : META;
+    expect(await query(`SELECT ?id WHERE { GRAPH <${meta}> { <${kaUal}#dkg-swm-head> <http://dkg.io/ontology/shareOperationId> ?id } }`))
+      .toMatchObject({ bindings: [{ id: '"fresh"' }] });
+  } finally { release(); await Promise.allSettled([cleanup, writer]); }
+});
+
+
+it.each([undefined, 'research'])('preserves a V2 writer holding the canonical KA lock in subgraph %s', async subGraphName => {
+  const agent = await DKGAgent.create({ name: 'expiry-held-ka-writer', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 60_000 });
+  agents.push(agent);
+  const { store, publisher, writeLocks } = agent as unknown as Internals;
+  await store.insert([{ subject: `did:dkg:context-graph:${CG}`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/ContextGraph', graph: `did:dkg:context-graph:${CG}/_meta` }]);
+  const kaUal = 'did:dkg:hardhat1:31337/0x1111111111111111111111111111111111111111/1';
+  const stage = (id: string, version: number, timestamp: Date) => publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+    contextGraphId: CG, kaUal, shareOperationId: id, assertionVersion: version, subGraphName,
+    quads: [{ subject: 'urn:expiry:held-ka-root', predicate: 'urn:value', object: `"${id}"`, graph: '' }], timestamp,
+  });
+  const old = await stage('old', 1, new Date('2020-01-01T00:00:00Z'));
+  const meta = `did:dkg:context-graph:${CG}/${subGraphName ? `${subGraphName}/` : ''}_shared_memory_meta`;
+  const query = store.query.bind(store);
+  const oldMetadata = await query(`SELECT ?op ?snapshot WHERE { GRAPH <${meta}> {
+    ?op a <http://dkg.io/ontology/WorkspaceOperation> ;
+      <http://dkg.io/ontology/shareOperationId> "old" ;
+      <http://dkg.io/ontology/publicSnapshotGraph> ?snapshot .
+  } }`);
+  expect(oldMetadata).toMatchObject({ type: 'bindings', bindings: [expect.objectContaining({ op: expect.any(String), snapshot: expect.any(String) })] });
+  if (oldMetadata.type !== 'bindings') throw new Error('Expected operation metadata');
+  const oldReference = oldMetadata.bindings[0]!;
+  let writerEntered!: () => void, selected!: () => void, release!: () => void;
+  const atWriterMutation = new Promise<void>(resolve => { writerEntered = resolve; });
+  const atSelection = new Promise<void>(resolve => { selected = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const replace = store.replaceGraph!.bind(store);
+  vi.spyOn(store, 'replaceGraph').mockImplementation(async (graph, quads, options) => {
+    await replace(graph, quads, options);
+    if (graph === old.swmGraph) {
+      // New bytes are visible while the old head still owns the graph. The real
+      // staging writer must retain this exact lock until it commits the new head.
+      expect(writeLocks.has(swmKaWriteLockKey(CG, subGraphName, kaUal))).toBe(true);
+      writerEntered(); await gate;
+    }
+  });
+  const reads = vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+    const result = await query(sparql, options);
+    if (options?.source === 'agent.swmCleanup.expiredOperations' && result.type === 'bindings' && result.bindings.length > 0) selected();
+    return result;
+  });
+  const writer = stage('fresh', 2, new Date());
+  let cleanup: Promise<number> | undefined;
+  try {
+    await atWriterMutation;
+    cleanup = agent.cleanupExpiredSharedMemory();
+    await atSelection;
+    await new Promise(resolve => setImmediate(resolve));
+    expect(reads.mock.calls.filter(([, options]) => options?.source === 'agent.swmCleanup.currentHeadOwner')).toHaveLength(0);
+    release();
+    await Promise.all([writer, cleanup]);
+    expect(await query(`SELECT ?value WHERE { GRAPH <${old.swmGraph}> { <urn:expiry:held-ka-root> <urn:value> ?value } }`))
+      .toMatchObject({ bindings: [{ value: '"fresh"' }] });
+    expect(await query(`SELECT ?id WHERE { GRAPH <${meta}> { <${kaUal}#dkg-swm-head> <http://dkg.io/ontology/shareOperationId> ?id } }`))
+      .toMatchObject({ bindings: [{ id: '"fresh"' }] });
+    expect(await query(`SELECT ?p WHERE { GRAPH <${meta}> { <${oldReference.op}> ?p ?o } }`))
+      .toMatchObject({ bindings: [] });
+    expect(await query(`SELECT ?s WHERE { GRAPH <${oldReference.snapshot}> { ?s ?p ?o } }`))
+      .toMatchObject({ bindings: [] });
+  } finally { release(); await Promise.allSettled([writer, cleanup]); }
 });

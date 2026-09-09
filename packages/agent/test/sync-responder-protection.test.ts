@@ -521,7 +521,7 @@ describe('sync responder protection', () => {
       listGraphs: async (options?: QueryOptions) => {
         listSignal = options?.signal;
         listCalls += 1;
-        return listGate.promise;
+        return [...await listGate.promise];
       },
     }), {
       authorizeSyncRequest: async () => {
