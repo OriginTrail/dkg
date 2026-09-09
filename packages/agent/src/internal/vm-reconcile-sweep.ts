@@ -32,7 +32,8 @@ interface SweepTurn {
   remaining: number;
   /** A public caller claims a complete, finite bound rotation for this turn. */
   fullBoundKeys?: readonly string[];
-  readonly admittedBound: Set<string>;
+  /** Every key admitted in this retained turn, across both candidate classes. */
+  readonly admittedKeys: Set<string>;
   readonly completions: Promise<unknown>[];
   readonly finished: AbortController;
 }
@@ -92,7 +93,7 @@ export class VmReconcileSweepPlanner {
   private currentTurn(): SweepTurn {
     return this.turn ??= {
       phase: 'leading', remaining: this.discoveryBatchSize,
-      admittedBound: new Set(), completions: [], finished: new AbortController(),
+      admittedKeys: new Set(), completions: [], finished: new AbortController(),
     };
   }
 
@@ -121,7 +122,7 @@ export class VmReconcileSweepPlanner {
     if (turn.phase === 'leading') {
       const count = this.bound.admit(boundRotation, 1, key => {
         if (!accept(key)) return false;
-        turn.admittedBound.add(key);
+        turn.admittedKeys.add(key);
         return true;
       });
       if (boundRotation.length > 0 && count === 0) return;
@@ -131,16 +132,17 @@ export class VmReconcileSweepPlanner {
       turn.remaining = Math.min(turn.remaining, unboundKeys.length);
       this.unbound.admit(unboundKeys, turn.remaining, key => {
         if (!accept(key)) return false;
+        turn.admittedKeys.add(key);
         turn.remaining--;
         return true;
       });
       if (turn.remaining > 0) return;
       turn.phase = 'tail';
     }
-    const tail = boundRotation.filter(key => !turn.admittedBound.has(key));
+    const tail = boundRotation.filter(key => !turn.admittedKeys.has(key));
     const count = this.bound.admit(tail, tail.length, key => {
       if (!accept(key)) return false;
-      turn.admittedBound.add(key);
+      turn.admittedKeys.add(key);
       return true;
     });
     if (turn.fullBoundKeys !== undefined && count < tail.length) return;

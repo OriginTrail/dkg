@@ -926,6 +926,32 @@ describe('VmReconcileDispatcher scheduling', () => {
     await scheduler.waitForIdle('cg');
   });
 
+  it('does not let a stale active failure re-block live work released by a rebind', async () => {
+    const runs: string[] = [];
+    let rejectStale!: (error: Error) => void;
+    const scheduler = new VmReconcileDispatcher(
+      async (_key, source) => {
+        runs.push(source);
+        if (runs.length === 1) {
+          await new Promise<void>((_resolve, reject) => { rejectStale = reject; });
+        }
+      },
+      () => undefined,
+    );
+
+    scheduler.triggerPeriodic('cg');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    scheduler.releaseLiveHold('cg');
+    scheduler.triggerLive('cg');
+    rejectStale(new Error('old binding became stale'));
+    await scheduler.waitForIdle('cg');
+
+    expect(runs).toEqual(['periodic', 'live']);
+    scheduler.triggerLive('cg');
+    await scheduler.waitForIdle('cg');
+    expect(runs).toEqual(['periodic', 'live', 'live']);
+  });
+
   it('preserves a periodic retry queued behind a failing live pass', async () => {
     let runs = 0;
     let resolveCurrent!: () => void;

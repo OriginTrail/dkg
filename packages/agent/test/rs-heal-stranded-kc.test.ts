@@ -567,14 +567,16 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     agentLike.contextGraphBindingState = new ContextGraphBindingState();
     agentLike.reconcileCursors = new Map();
     agentLike.vmReconcilePhysicalRuns = new Set();
-    agentLike.vmReconcileDispatcher = {
-      dispatch: async <T>(_key: string, source: string): Promise<T> => {
-        priorities.push(source === 'periodic' ? 'background' : 'foreground');
-        return SwmHostModeMethods.prototype.executeVmReconcileForCg.call(
-          agentLike,
-          TEST_CG,
-          source,
-        ) as Promise<T>;
+    agentLike.vmReconcileScheduling = {
+      dispatcher: {
+        dispatch: async <T>(_key: string, source: string): Promise<T> => {
+          priorities.push(source === 'periodic' ? 'background' : 'foreground');
+          return SwmHostModeMethods.prototype.executeVmReconcileForCg.call(
+            agentLike,
+            TEST_CG,
+            source,
+          ) as Promise<T>;
+        },
       },
     };
     agentLike.vmReconcileEnabled = () => true;

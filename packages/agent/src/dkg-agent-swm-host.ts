@@ -2962,21 +2962,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
-   * Complete one bound-CG rotation and its bounded unbound discovery allowance.
-   * Selection/admission starts synchronously; queue pressure delays remaining
-   * selected keys instead of dropping them. Only this sweep's completions are
-   * awaited, so unrelated foreground work does not define its boundary.
-   */
-  async runVmReconcileSweep(this: DKGAgent): Promise<void> {
-    const sweep = this.prepareVmReconcileSweep();
-    if (!sweep) return;
-    await this.vmReconcileSweepPlanner.complete(
-      sweep.bound, sweep.unbound, sweep.sweepAdmission,
-      sweep.isLifecycleCurrent, sweep.lifecycleSignal,
-    );
-  }
-
-  /**
    * GH #1098 — bind `sub.onChainId` for a subscribed-but-unbound CG from the
    * locally-resolvable OnChainId quad (publisher ontology broadcast / durable
    * _meta sync), then persist. The chain `ContextGraphCreated` handler only
@@ -3294,8 +3279,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (this.started && !this.vmReconcileRuntimeReady) {
       throw new VmReconcileQueueClosedError();
     }
-    if (!this.vmReconcileDispatcher) {
-      const scheduling = createVmReconcileDispatcherPair(
+    let scheduling = this.vmReconcileScheduling;
+    if (!scheduling) {
+      scheduling = createVmReconcileDispatcherPair(
         (localCgId, source) => this.executeVmReconcileForCg(localCgId, source),
         (localCgId, err) => {
           this.log.warn(
@@ -3308,11 +3294,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
           maxPending: DKGAgentBase.VM_RECONCILE_QUEUE_MAX_PENDING,
           maxForegroundBurst: DKGAgentBase.VM_RECONCILE_MAX_FOREGROUND_BURST,
         },
+        DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE,
       );
       this.vmReconcileScheduling = scheduling;
-      this.vmReconcileDispatcher = scheduling.dispatcher;
     }
-    return this.vmReconcileDispatcher;
+    return scheduling.dispatcher;
   }
 
   async executeVmReconcileForCg(
@@ -5088,7 +5074,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.vmReconcileLifecycleController?.abort();
     this.vmReconcileLifecycleGeneration = (this.vmReconcileLifecycleGeneration ?? 0) + 1;
     this.vmReconcileRotationClosed = true;
-    this.vmReconcileSweepPlanner?.reset();
+    this.vmReconcileScheduling?.resetSweep();
     // Some lifecycle tests intentionally construct a narrow partial agent
     // without running the base constructor. Shutdown must remain best-effort
     // for that supported test seam and never mask later teardown failures.

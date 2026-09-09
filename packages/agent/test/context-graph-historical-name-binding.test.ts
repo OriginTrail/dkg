@@ -144,9 +144,11 @@ function selectedFixture(resolved: bigint | null = 42n) {
     vmReconcileRotationClosed: false,
     vmReconcilePhysicalRuns: new Set<Promise<unknown>>(),
     resolveLocalCgIdByOnChainId: (_onChainId: string) => null as string | null,
-    vmReconcileDispatcher: {
-      triggerLive: vi.fn(),
-      releaseLiveHold: vi.fn(),
+    vmReconcileScheduling: {
+      dispatcher: {
+        triggerLive: vi.fn(),
+        releaseLiveHold: vi.fn(),
+      },
     },
     onChainParticipantAgentsCache: new Map(),
     contextGraphExists: vi.fn(async () => false),
@@ -737,9 +739,11 @@ describe('cold current-state Context Graph name binding', () => {
     fixture.agent.vmReconcileRotationClosed = false;
     fixture.agent.resolveLocalCgIdByOnChainId = () => null;
     const triggerLive = vi.fn();
-    fixture.agent.vmReconcileDispatcher = {
-      triggerLive,
-      releaseLiveHold: vi.fn(),
+    fixture.agent.vmReconcileScheduling = {
+      dispatcher: {
+        triggerLive,
+        releaseLiveHold: vi.fn(),
+      },
     };
 
     await expect(fixture.agent.handleKARegisteredNudge(

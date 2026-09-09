@@ -34,7 +34,6 @@ function installVmReconcileScheduling(
   scheduling: Readonly<VmReconcileDispatcherPair<boolean>>,
 ): VmReconcileDispatcher<boolean> {
   internals.vmReconcileScheduling = scheduling;
-  internals.vmReconcileDispatcher = scheduling.dispatcher;
   return scheduling.dispatcher;
 }
 afterEach(async () => {

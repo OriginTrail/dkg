@@ -1,6 +1,7 @@
 /** Agent-owned admission and scheduling for chain-driven VM reconciliation. */
 
 import type { VmReconcileSweepAdmission } from './internal/vm-reconcile-sweep-admission.js';
+import { VmReconcileSweepPlanner } from './internal/vm-reconcile-sweep.js';
 import {
   VmReconcileQueueClosedError,
   VmReconcileQueueFullError,
@@ -38,6 +39,8 @@ interface VmReconcileDispatchWork<T> {
 
 interface VmReconcileDispatchState<T> {
   hold: VmReconcileHold;
+  /** Increments whenever a binding change supplies fresh live-retry evidence. */
+  releaseGeneration: number;
   active?: VmReconcileDispatchWork<T>;
   pending?: VmReconcileDispatchWork<T>;
   trailing?: VmReconcileDispatchWork<T>;
@@ -56,6 +59,19 @@ export interface VmReconcileDispatcherOptions {
 export interface VmReconcileDispatcherPair<T> {
   readonly dispatcher: VmReconcileDispatcher<T>;
   readonly sweepAdmission: VmReconcileSweepAdmission<T>;
+  scheduleSweep(
+    boundKeys: readonly string[],
+    unboundKeys: readonly string[],
+    isCurrent: () => boolean,
+  ): void;
+  completeSweep(
+    boundKeys: readonly string[],
+    unboundKeys: readonly string[],
+    isCurrent: () => boolean,
+    signal?: AbortSignal,
+  ): Promise<void>;
+  resetSweep(): void;
+  close(): Promise<void>;
 }
 
 const VM_RECONCILE_SWEEP_ADMISSION = Symbol('vm-reconcile-sweep-admission');
@@ -128,7 +144,10 @@ export class VmReconcileDispatcher<T> {
   /** A newly established binding is fresh evidence, so its first live nudge must not inherit an old discovery miss. */
   releaseLiveHold(key: string): void {
     const state = this.states.get(key);
-    if (state?.hold !== 'live-blocked') return;
+    if (!state) return;
+    // Record the evidence even while a pass is active. Otherwise that older
+    // pass could fail after the rebind and restore the hold over a fresh nudge.
+    state.releaseGeneration += 1;
     state.hold = 'ready';
     if (!state.active && !state.pending && !state.trailing) this.states.delete(key);
   }
@@ -248,7 +267,7 @@ export class VmReconcileDispatcher<T> {
   private stateFor(key: string): VmReconcileDispatchState<T> {
     let state = this.states.get(key);
     if (!state) {
-      state = { hold: 'ready' };
+      state = { hold: 'ready', releaseGeneration: 0 };
       this.states.set(key, state);
     }
     return state;
@@ -386,6 +405,7 @@ export class VmReconcileDispatcher<T> {
       const state = this.stateFor(work.key);
       state.active = work;
       if (work.periodicRequested) state.hold = 'ready';
+      const releaseGeneration = state.releaseGeneration;
       this.active += 1;
       let failure: unknown;
       void Promise.resolve()
@@ -400,7 +420,9 @@ export class VmReconcileDispatcher<T> {
           (error) => {
             failure = error;
             if (work.automatic) {
-              state.hold = 'live-blocked';
+              if (state.releaseGeneration === releaseGeneration) {
+                state.hold = 'live-blocked';
+              }
               try {
                 this.onFailure(work.key, error);
               } catch {
@@ -447,11 +469,34 @@ export function createVmReconcileDispatcherPair<T>(
   run: (key: string, source: VmReconcileSource) => Promise<T>,
   onFailure: (key: string, error: unknown) => void,
   options: VmReconcileDispatcherOptions = {},
+  discoveryBatchSize = 8,
 ): Readonly<VmReconcileDispatcherPair<T>> {
   const dispatcher = new VmReconcileDispatcher(run, onFailure, options);
+  const planner = new VmReconcileSweepPlanner(discoveryBatchSize);
+  const sweepAdmission = dispatcher[VM_RECONCILE_SWEEP_ADMISSION];
   return Object.freeze({
     dispatcher,
-    sweepAdmission: dispatcher[VM_RECONCILE_SWEEP_ADMISSION],
+    sweepAdmission,
+    scheduleSweep: (
+      boundKeys: readonly string[],
+      unboundKeys: readonly string[],
+      isCurrent: () => boolean,
+    ) => {
+      planner.admit(boundKeys, unboundKeys,
+        key => isCurrent() ? sweepAdmission.tryAdmit(key) : undefined);
+    },
+    completeSweep: (
+      boundKeys: readonly string[],
+      unboundKeys: readonly string[],
+      isCurrent: () => boolean,
+      signal?: AbortSignal,
+    ) => planner.complete(
+      boundKeys, unboundKeys, sweepAdmission, isCurrent, signal,
+    ),
+    resetSweep: () => planner.reset(),
+    close: () => {
+      planner.reset();
+      return dispatcher.close();
+    },
   });
 }
-

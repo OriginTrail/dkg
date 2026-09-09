@@ -277,7 +277,6 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
 import {
   reconcileContextGraph,
-  type VmReconcileDispatcher,
   RecentUalSet,
   type VmReconcileDispatcherPair,
   type ChainReconcilerDeps,
@@ -285,7 +284,6 @@ import {
 } from './chain-reconciler.js';
 import type { ContextGraphReconcileResult } from './vm-reconcile-service.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
-import { VmReconcileSweepPlanner } from './internal/vm-reconcile-sweep.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
 // type alias so listPendingJoinApprovalRetries() retains its old
@@ -1081,66 +1079,17 @@ export class DKGAgentBase {
   protected swmCleanupTimer: ReturnType<typeof setInterval> | null = null;
   /** Phase B — periodic chain-driven VM reconciliation sweep timer. */
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;
-  /** Phase B — unified per-CG coalescing and node-wide admission policy. */
-  protected vmReconcileDispatcher?: VmReconcileDispatcher<ContextGraphReconcileResult>;
-  /** Explicit host-owned pair; capacity/completion operations stay internal. */
+  /** One host-owned runtime for foreground dispatch and retained sweep admission. */
   protected vmReconcileScheduling?: Readonly<
     VmReconcileDispatcherPair<ContextGraphReconcileResult>
   >;
+  protected get vmReconcileDispatcher() {
+    return this.vmReconcileScheduling?.dispatcher;
+  }
   /** Closed dispatcher retained until every physically active worker settles. */
   protected vmReconcileRetirement: Promise<void> | null = null;
   /** Reconcile engines may outlive a caller's abort race; stop drains these before store teardown. */
   protected readonly vmReconcilePhysicalRuns = new Set<Promise<unknown>>();
-  protected prepareVmReconcileSweep(this: DKGAgent) {
-    if (this.started && !this.vmReconcileRuntimeReady) return;
-    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
-    const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
-    const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
-      && !lifecycleSignal?.aborted
-      && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
-    const dispatcher = this.vmReconcileDispatcher;
-    const scheduling = this.vmReconcileScheduling;
-    if (
-      !isLifecycleCurrent()
-      || !this.vmReconcileEnabled()
-      || !dispatcher
-      || scheduling === undefined
-      || scheduling.dispatcher !== dispatcher
-    ) return;
-    // Admission is synchronous. The dispatcher owns physical concurrency,
-    // per-CG coalescing, error containment and shutdown; timer ticks never await workers.
-    const bound = new Set<string>();
-    const unbound: string[] = [];
-    for (const [localCgId, sub] of this.subscribedContextGraphs) {
-      if (!sub.subscribed && !sub.coreHosted) continue;
-      if (this.contextGraphBindingState.hasBindingCandidate(localCgId, sub)) bound.add(localCgId);
-      else if (sub.subscribed) unbound.push(localCgId);
-    }
-    const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
-      ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
-      ?? [];
-    for (const { policyEnvelope } of acceptedPolicies) {
-      const localCgId = policyEnvelope.payload.contextGraphId;
-      if (this.isRfc64SelectedVmReconcileTargetAllowed(localCgId)) bound.add(localCgId);
-    }
-    return {
-      dispatcher,
-      sweepAdmission: scheduling.sweepAdmission,
-      isLifecycleCurrent,
-      lifecycleSignal,
-      bound: [...bound],
-      unbound: unbound.filter(key => !bound.has(key)),
-    };
-  }
-
-  /** Timer-only admission turn; physical workers never serialize later ticks. */
-  protected scheduleVmReconcileSweep(this: DKGAgent): void {
-    const sweep = this.prepareVmReconcileSweep();
-    if (!sweep) return;
-    this.vmReconcileSweepPlanner.admit(sweep.bound, sweep.unbound,
-      key => sweep.isLifecycleCurrent() ? sweep.sweepAdmission.tryAdmit(key) : undefined);
-  }
-
   /** Admitted authenticated graph-scoped stores must physically drain before backing-store teardown. */
   protected readonly graphScopedStorePhysicalRuns = new Set<Promise<unknown>>();
   protected graphScopedStoreClosed = false;
@@ -1148,10 +1097,6 @@ export class DKGAgentBase {
   protected vmReconcileRuntimeReady = false;
   /** A timed-out physical retirement quarantines this instance until stop is retried. */
   protected vmReconcileShutdownBlocked = false;
-  /** Independent fair admission cursors, reset with the reconcile lifecycle. */
-  protected readonly vmReconcileSweepPlanner = new VmReconcileSweepPlanner(
-    DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE,
-  );
   /** Deterministically staggered cold-start prime, separate from the interval. */
   protected vmReconcileStartupTimer: ReturnType<typeof setTimeout> | null = null;
   /** Phase B — in-memory reconcile cursor per local CG id (watermark + `ahead`). */

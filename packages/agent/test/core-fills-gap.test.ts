@@ -2305,7 +2305,6 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       return {};
     }, () => undefined);
     internals.vmReconcileScheduling = scheduling;
-    internals.vmReconcileDispatcher = scheduling.dispatcher;
 
     await internals.runVmReconcileSweep();
 
@@ -2338,7 +2337,6 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     );
     const dispatcher = scheduling.dispatcher;
     internals.vmReconcileScheduling = scheduling;
-    internals.vmReconcileDispatcher = dispatcher;
 
     for (let sweep = 0; sweep < contextGraphIds.length; sweep += 1) {
       internals.scheduleVmReconcileSweep();
@@ -2506,13 +2504,11 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     });
 
     const liveTriggered: string[] = [];
-    internals.vmReconcileDispatcher = {
-      triggerLive: (contextGraphId: string) => { liveTriggered.push(contextGraphId); },
-      triggerPeriodic: () => undefined,
-      waitForIdle: async () => undefined,
-      tryTriggerPeriodic: () => true,
-      dispatch: async () => ({}),
-    };
+    const scheduling = createVmReconcileDispatcherPair(async () => ({}), () => undefined);
+    vi.spyOn(scheduling.dispatcher, 'triggerLive').mockImplementation(
+      (contextGraphId: string) => { liveTriggered.push(contextGraphId); },
+    );
+    internals.vmReconcileScheduling = scheduling;
 
     const pendingResult = await internals.executeVmReconcileForCg(pendingCg, 'periodic');
     expect(pendingResult).toMatchObject({
@@ -5535,12 +5531,13 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     chain.getContextGraphKCCount = async () => 0n;
 
     const sources: string[] = [];
-    (internals as any).vmReconcileDispatcher = {
-      dispatch: async (_key: string, source: string) => {
+    internals.vmReconcileScheduling = createVmReconcileDispatcherPair(
+      async (_key: string, source: string) => {
         sources.push(source);
         return {};
       },
-    };
+      () => undefined,
+    );
 
     await internals.runVmReconcileForCg('priority-current', 'periodic');
     await internals.runVmReconcileForCg('priority-current', 'live');

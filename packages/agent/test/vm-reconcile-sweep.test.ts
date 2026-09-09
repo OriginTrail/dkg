@@ -128,3 +128,21 @@ it('does not advance after rejection but advances accepted or coalesced work', (
   planner.admit(['b0', 'b1'], [], key => { attempted.push(key); return Promise.resolve(); });
   expect(attempted[0]).toBe('b1');
 });
+
+it('does not admit a discovery key twice when it binds before the retained tail resumes', () => {
+  const planner = new VmReconcileSweepPlanner(2);
+  const admitted: string[] = [];
+  let capacity = 2;
+  planner.admit(['b'], ['u0', 'u1'], key => {
+    if (capacity-- <= 0) return undefined;
+    admitted.push(key);
+    return Promise.resolve();
+  });
+
+  planner.admit(['b', 'u0'], ['u1'], key => {
+    admitted.push(key);
+    return Promise.resolve();
+  });
+
+  expect(admitted).toEqual(['b', 'u0', 'u1']);
+});
