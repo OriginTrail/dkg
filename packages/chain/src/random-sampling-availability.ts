@@ -1,13 +1,15 @@
-import type { ChainAdapter } from './chain-adapter.js';
-
 /** Chain facts only; the agent owns whether a missing deployment should be retried. */
 export type RandomSamplingAvailability =
   | { kind: 'available'; member: boolean }
   | { kind: 'unavailable'; reason: 'unsupported_chain' | 'contracts_not_deployed' }
   | { kind: 'indeterminate'; error: unknown };
 
-export type RandomSamplingAvailabilityReader = Pick<ChainAdapter,
-  'isRandomSamplingReady' | 'isShardingTableMember' | 'resolveRandomSamplingAvailability'>;
+/** Narrow capability implemented by adapters that can resolve prover readiness. */
+export interface RandomSamplingAvailabilityReader {
+  isRandomSamplingReady?(): boolean;
+  isShardingTableMember?(identityId: bigint): Promise<boolean>;
+  resolveRandomSamplingAvailability?(identityId: bigint): Promise<RandomSamplingAvailability>;
+}
 
 /** Typed deployment miss emitted by adapters that own Random Sampling bindings. */
 export class RandomSamplingContractsUnavailableError extends Error {

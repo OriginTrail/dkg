@@ -31,6 +31,64 @@ export interface RandomSamplingRuntimeDiagnostics {
   deploymentObserved: boolean;
 }
 
+type BindingUnavailableReason = Extract<RandomSamplingBindingResult, { kind: 'unavailable' }>['reason'];
+
+export type RandomSamplingUnavailableTransitionEvent =
+  | {
+    source: 'eligibility';
+    identityId: bigint;
+    reason: RandomSamplingUnavailable['reason'];
+  }
+  | {
+    source: 'binding';
+    identityId: bigint;
+    reason: BindingUnavailableReason;
+  };
+
+export type RandomSamplingUnavailableTransitionInput =
+  RandomSamplingUnavailableTransitionEvent & { deploymentObserved: boolean };
+
+export interface RandomSamplingUnavailableTransition {
+  phase: 'waiting' | 'disabled';
+  identityId: bigint;
+  reason: RandomSamplingUnavailableTransitionInput['reason'];
+  deploymentObserved: boolean;
+}
+
+/** Pure transition policy shared by eligibility misses and binding declines. */
+export function classifyRandomSamplingUnavailableTransition(
+  input: RandomSamplingUnavailableTransitionInput,
+): RandomSamplingUnavailableTransition {
+  const reason = input.reason;
+  const deploymentObserved = input.deploymentObserved
+    || input.source === 'binding'
+    || reason === 'awaiting_sharding_table';
+  let phase: RandomSamplingUnavailableTransition['phase'];
+  switch (reason) {
+    case 'edge_node':
+    case 'unsupported_chain':
+      phase = 'disabled';
+      break;
+    case 'contracts_not_deployed':
+      phase = deploymentObserved ? 'waiting' : 'disabled';
+      break;
+    case 'no_identity':
+    case 'awaiting_sharding_table':
+      phase = 'waiting';
+      break;
+    default: {
+      const exhaustive: never = reason;
+      throw new Error(`Unhandled Random Sampling unavailable reason: ${String(exhaustive)}`);
+    }
+  }
+  return {
+    phase,
+    identityId: input.identityId,
+    reason,
+    deploymentObserved,
+  };
+}
+
 /** One node lifetime owns eligibility, reconciliation, binding and physical retirement. */
 export class RandomSamplingRuntime {
   private state: State = { kind: 'waiting', identityId: 0n, reason: 'not_started' };
@@ -139,12 +197,19 @@ export class RandomSamplingRuntime {
     this.state = { kind: 'stopped', identityId: this.state.identityId };
   }
 
-  private recordUnavailable(eligibility: RandomSamplingUnavailable): void {
-    if (eligibility.reason === 'awaiting_sharding_table') this.deploymentObserved = true;
-    const terminal = eligibility.reason === 'edge_node'
-      || eligibility.reason === 'unsupported_chain'
-      || (eligibility.reason === 'contracts_not_deployed' && !this.deploymentObserved);
-    this.state = { kind: terminal ? 'disabled' : 'waiting', identityId: eligibility.identityId, reason: eligibility.reason };
+  private applyUnavailable(
+    input: RandomSamplingUnavailableTransitionEvent,
+  ): void {
+    const transition = classifyRandomSamplingUnavailableTransition({
+      ...input,
+      deploymentObserved: this.deploymentObserved,
+    });
+    this.deploymentObserved = transition.deploymentObserved;
+    this.state = {
+      kind: transition.phase,
+      identityId: transition.identityId,
+      reason: transition.reason,
+    };
   }
 
   private async reconcileOnce(): Promise<void> {
@@ -166,7 +231,11 @@ export class RandomSamplingRuntime {
         if (signal.aborted) return;
       }
       if (eligibility.kind !== 'eligible') {
-        this.recordUnavailable(eligibility);
+        this.applyUnavailable({
+          source: 'eligibility',
+          identityId: eligibility.identityId,
+          reason: eligibility.reason,
+        });
         return;
       }
       const { identityId } = eligibility;
@@ -178,13 +247,11 @@ export class RandomSamplingRuntime {
           this.beginRetirement(binding.handleToClose, identityId);
           await this.finishRetirement(false);
         }
-        if (!signal.aborted) this.state = {
-          kind: binding.reason === 'edge_node' || binding.reason === 'unsupported_chain'
-            ? 'disabled'
-            : 'waiting',
+        if (!signal.aborted) this.applyUnavailable({
+          source: 'binding',
           identityId,
           reason: binding.reason,
-        };
+        });
         return;
       }
       const { handle } = binding;

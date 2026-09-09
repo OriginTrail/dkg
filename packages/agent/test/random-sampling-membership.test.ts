@@ -1,5 +1,10 @@
 import { createRandomSamplingEligibilityResolver, type RandomSamplingEligibilityChain } from '../src/random-sampling-eligibility.js';
-import { RandomSamplingRuntime, type RandomSamplingRuntimeOptions } from '../src/random-sampling-runtime.js';
+import {
+  classifyRandomSamplingUnavailableTransition,
+  RandomSamplingRuntime,
+  type RandomSamplingRuntimeOptions,
+  type RandomSamplingUnavailableTransitionInput,
+} from '../src/random-sampling-runtime.js';
 import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter, type RandomSamplingAvailability } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
@@ -64,6 +69,33 @@ async function startCore(initialMembership = true) {
 }
 
 describe('Random Sampling membership reconciliation', () => {
+  it.each([
+    { input: { source: 'eligibility', reason: 'edge_node', identityId: 52n, deploymentObserved: false }, phase: 'disabled', nextObserved: false },
+    { input: { source: 'eligibility', reason: 'unsupported_chain', identityId: 52n, deploymentObserved: false }, phase: 'disabled', nextObserved: false },
+    { input: { source: 'eligibility', reason: 'no_identity', identityId: 52n, deploymentObserved: false }, phase: 'waiting', nextObserved: false },
+    { input: { source: 'eligibility', reason: 'awaiting_sharding_table', identityId: 52n, deploymentObserved: false }, phase: 'waiting', nextObserved: true },
+    { input: { source: 'eligibility', reason: 'contracts_not_deployed', identityId: 52n, deploymentObserved: false }, phase: 'disabled', nextObserved: false },
+    { input: { source: 'eligibility', reason: 'contracts_not_deployed', identityId: 52n, deploymentObserved: true }, phase: 'waiting', nextObserved: true },
+    { input: { source: 'binding', reason: 'edge_node', identityId: 52n, deploymentObserved: false }, phase: 'disabled', nextObserved: true },
+    { input: { source: 'binding', reason: 'unsupported_chain', identityId: 52n, deploymentObserved: false }, phase: 'disabled', nextObserved: true },
+    { input: { source: 'binding', reason: 'no_identity', identityId: 52n, deploymentObserved: false }, phase: 'waiting', nextObserved: true },
+    { input: { source: 'binding', reason: 'contracts_not_deployed', identityId: 52n, deploymentObserved: false }, phase: 'waiting', nextObserved: true },
+  ] satisfies Array<{
+    input: RandomSamplingUnavailableTransitionInput;
+    phase: 'waiting' | 'disabled';
+    nextObserved: boolean;
+  }>)('classifies unavailable transition $input.source/$input.reason (observed=$input.deploymentObserved)', ({
+    input, phase, nextObserved,
+  }) => {
+    const transition = classifyRandomSamplingUnavailableTransition(input);
+    expect(transition).toEqual({
+      phase,
+      identityId: 52n,
+      reason: input.reason,
+      deploymentObserved: nextObserved,
+    });
+  });
+
   it.each([
     {
       name: 'edge role', role: 'edge' as const, identityId: 52n,
