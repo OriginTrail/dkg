@@ -34,6 +34,47 @@ function request(overrides: Partial<Parameters<typeof fetchSyncPages>[0]> = {}) 
 describe('page and transport admission within one operation', () => {
   afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
+  it.each([
+    { name: 'round deadline', jobMs: 30_000, failedAttempts: 1 },
+    { name: 'shorter private job window', jobMs: 5_000, failedAttempts: 1 },
+    { name: 'round deadline with two stalled sends', jobMs: 30_000, failedAttempts: 2 },
+  ])('reserves fresh attempts within the $name after full transport timeouts', async ({ jobMs, failedAttempts }) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'performance'] });
+    vi.setSystemTime(10_000);
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const startedAt = Date.now();
+    const deadline = startedAt + 10_000;
+    const window = createPrivateSwmRecoveryWindow(jobMs);
+    const attempts: Array<{ startedAt: number; timeoutMs: number }> = [];
+    const result = request({
+      deadline,
+      syncPageTimeoutMs: 30_000,
+      workAdmission: window.admitRound(deadline, { sharing: 'exclusive', owner: 'retry-slice' }),
+      send: async (_peer, _protocol, _bytes, timeoutMs) => {
+        attempts.push({ startedAt: Date.now(), timeoutMs });
+        if (attempts.length <= failedAttempts) {
+          await new Promise(resolve => setTimeout(resolve, timeoutMs));
+          throw new Error('request timeout');
+        }
+        await new Promise(resolve => setTimeout(resolve, Math.floor(timeoutMs / 2)));
+        return new Uint8Array();
+      },
+    }).then(value => ({ value }), error => ({ error }));
+
+    await vi.runAllTimersAsync();
+
+    expect(await result).toMatchObject({ value: { completed: true, timedOut: false } });
+    expect(attempts).toHaveLength(failedAttempts + 1);
+    expect(attempts[0].timeoutMs).toBeLessThan(10_000);
+    for (const attempt of attempts) {
+      expect(attempt.timeoutMs).toBeGreaterThan(0);
+      expect(attempt.startedAt + attempt.timeoutMs).toBeLessThanOrEqual(deadline);
+      expect(attempt.startedAt + attempt.timeoutMs).toBeLessThanOrEqual(startedAt + jobMs);
+    }
+    expect(Date.now()).toBeLessThan(deadline);
+    expect(Date.now()).toBeLessThan(startedAt + jobMs);
+  });
+
   it('caps every page using monotonic time after a wall-clock rollback during the fetch', async () => {
     let elapsed = 0;
     vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
@@ -113,6 +154,24 @@ describe('page and transport admission within one operation', () => {
     expect(await outcome).toBe(failure);
     expect(isSyncTransportFailure(await outcome)).toBe(true);
     expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('classifies sub-millisecond round exhaustion after authentication without sending', async () => {
+    let elapsed = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+    vi.spyOn(Date, 'now').mockImplementation(() => 10_000 + elapsed);
+    const deadline = Date.now() + 10;
+    const window = createPrivateSwmRecoveryWindow(30_000);
+    const send = vi.fn(async () => new Uint8Array());
+    const result = await request({
+      deadline,
+      workAdmission: window.admitRound(deadline, { sharing: 'exclusive', owner: 'fractional-round' }),
+      buildSyncRequest: async () => { elapsed = 9.5; return new Uint8Array([1]); },
+      send,
+    });
+    expect(send).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ completed: false, timedOut: true });
+    expect(result.localYield).toBeUndefined();
   });
 
   it('floors a fractional allowance before passing it to the transport', async () => {

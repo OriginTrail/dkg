@@ -9,6 +9,8 @@ export interface SyncWorkAdmission {
   readonly canAdmitWork: () => boolean;
   readonly assertCurrent: () => void;
   readonly capTimeout: (timeoutMs: number) => number;
+  /** Admit one positive whole-millisecond transport timeout or classify exhaustion. */
+  readonly admitTimeout: (timeoutMs: number) => number;
 }
 
 export const UNRESTRICTED_SYNC_WORK: SyncWorkAdmission = Object.freeze({
@@ -16,6 +18,7 @@ export const UNRESTRICTED_SYNC_WORK: SyncWorkAdmission = Object.freeze({
   canAdmitWork: () => true,
   assertCurrent: () => {},
   capTimeout: (timeoutMs: number) => timeoutMs,
+  admitTimeout: (timeoutMs: number) => positiveTimeout(timeoutMs),
 });
 
 export function createSyncWorkAdmission(
@@ -35,6 +38,7 @@ export function createSyncWorkAdmission(
       0,
       Math.floor(Math.min(timeoutMs, remainingMs())),
     ),
+    admitTimeout: (timeoutMs: number) => positiveTimeout(Math.min(timeoutMs, remainingMs())),
   });
 }
 
@@ -66,7 +70,22 @@ export function composeSyncWorkAdmission(options: {
       0,
       Math.floor(Math.min(timeoutMs, remainingMs())),
     ),
+    admitTimeout: (timeoutMs: number) => window.admitTimeout(positiveTimeout(
+      Math.min(timeoutMs, deadlineRemainingMs()),
+      'timed_out',
+    )),
   });
+}
+
+function positiveTimeout(
+  timeoutMs: number,
+  outcome: 'local_yield' | 'timed_out' = 'local_yield',
+): number {
+  const admittedMs = Math.floor(timeoutMs);
+  if (!Number.isFinite(admittedMs) || admittedMs <= 0) {
+    throw new SyncWorkAdmissionExhaustedError(outcome);
+  }
+  return admittedMs;
 }
 
 /** Capability exhaustion; no request needs to have crossed the wire. */

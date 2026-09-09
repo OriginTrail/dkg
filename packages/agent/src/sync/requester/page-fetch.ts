@@ -447,7 +447,7 @@ export class SyncPageAccumulationLimitError extends Error {
 }
 
 interface FetchSyncPagesParams {
-  workAdmission: SyncWorkAdmission;
+  workAdmission?: SyncWorkAdmission;
   ctx: OperationContext;
   remotePeerId: string;
   contextGraphId: string;
@@ -600,9 +600,9 @@ function checkpointKeyForFetch(params: FetchSyncPagesParams): string {
 }
 
 export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<SyncPageResult> {
-  // Runtime compatibility for callers compiled against the older optional
-  // field; internal boundaries always receive a concrete capability.
-  const admittedParams: FetchSyncPagesParams = {
+  // Direct callers may omit admission; internal boundaries always receive the
+  // capability composed from their round deadline.
+  const admittedParams: AdmittedFetchSyncPagesParams = {
     ...params,
     workAdmission: params.workAdmission ?? composeSyncWorkAdmission({
       deadline: params.deadline,
@@ -622,7 +622,11 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   }
 }
 
-async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<SyncPageResult> {
+type AdmittedFetchSyncPagesParams = FetchSyncPagesParams & {
+  workAdmission: SyncWorkAdmission;
+};
+
+async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Promise<SyncPageResult> {
   const {
     ctx,
     remotePeerId,
@@ -819,7 +823,13 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     onRetry: (attempt: number, delay: number, error: unknown) => void,
   ): Promise<Uint8Array> => sendSyncRequest({
     remotePeerId,
-    timeoutMs: syncPageTimeoutMs,
+    // Leave part of this round for a fresh request after a stalled attempt.
+    // Recompute after authentication on every retry; transport admission then
+    // applies the remaining monotonic private-job allowance.
+    timeoutMs: (remainingAttempts) => Math.min(
+      syncPageTimeoutMs,
+      Math.max(1, Math.floor(Math.max(0, params.deadline - Date.now()) / remainingAttempts)),
+    ),
     workAdmission,
     retryAttempts: syncPageRetryAttempts,
     signal,

@@ -93,7 +93,7 @@ export function createSingleUseSyncSender(
 interface SyncSendParams {
   readonly workAdmission: SyncWorkAdmission;
   remotePeerId: string;
-  timeoutMs: number;
+  timeoutMs: number | ((remainingAttempts: number) => number);
   retryAttempts: number;
   signal?: AbortSignal;
   contextGraphId: string;
@@ -137,6 +137,7 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
     'sync.request',
     async () => {
       try {
+        let remainingAttempts = params.retryAttempts;
         const out = await withRetry(
     async () => {
       // Resolved once per attempt so all three W1 points describe the same
@@ -168,14 +169,10 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
           throw toSyncLocalRequestFailureError(error);
         }
         throwIfAborted(params.signal);
-        assertSyncWorkAdmission(workAdmission);
-        const timeoutMs = workAdmission.capTimeout(params.timeoutMs);
-        if (timeoutMs <= 0) {
-          // Re-assert so a composed capability preserves whether its
-          // wall-clock deadline or monotonic owner window expired.
-          assertSyncWorkAdmission(workAdmission);
-          throw new SyncWorkAdmissionExhaustedError();
-        }
+        const requestedTimeoutMs = typeof params.timeoutMs === 'function'
+          ? params.timeoutMs(remainingAttempts)
+          : params.timeoutMs;
+        const timeoutMs = workAdmission.admitTimeout(requestedTimeoutMs);
         const messageId = randomUUID();
         let responseBytes: Uint8Array;
         sendStarted = true;
@@ -224,6 +221,7 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
         }
         throw error;
       } finally {
+        remainingAttempts -= 1;
         // I1 is finalized HERE, in the surrounding per-attempt `finally`, after
         // validation and cancellation classification. An outcome fixed at send
         // resolution could never later become `validation_rejected`.
