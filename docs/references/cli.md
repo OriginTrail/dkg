@@ -87,6 +87,10 @@ dkg openclaw setup                       # install & configure the OpenClaw adap
 dkg hermes setup                         # install & configure the Hermes adapter
 dkg mcp setup                            # register the MCP server with Cursor / Claude Code / Claude Desktop / Windsurf / VSCode + Copilot / Cline / Codex CLI
 dkg mcp serve                            # run the MCP server on stdio (invoked by the client; not run manually)
+dkg mcp uninstall                        # confirm DKG registration removal per client
+dkg mcp uninstall --yes --client cursor  # remove native and Windows-via-WSL Cursor registrations
+dkg mcp uninstall --yes --client cursor:windows-wsl  # select only the Windows-via-WSL variant
+dkg mcp uninstall --dry-run              # preview removal without writing client configs
 
 # Community integrations (registry: OriginTrail/dkg-integrations)
 dkg integration list [--tier community]  # default tier filter is `verified`+
@@ -100,6 +104,13 @@ dkg doctor [--json] [--no-orphan-scan]     # diagnose install state, version ske
 dkg update [--check] [--allow-prerelease]  # update node software
 dkg rollback                               # roll back to previous version
 ```
+
+Uninstall client IDs are `cursor`, `claude-code`, `claude-desktop`, `windsurf`,
+`vscode`, `cline`, and `codex-cli`. An ID selects all detected locations of that
+client. Append `:native` or `:windows-wsl` to select a specific location. IDs are
+independent of display labels; an unsupported selector is always an error,
+including on a machine with no detected clients. A supported but absent client
+is an idempotent no-op. Uninstall removes only the DKG entry in client configs.
 
 ## Context Graph discovery and subscriptions
 

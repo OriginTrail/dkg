@@ -41,6 +41,7 @@ A default-responsibility RFC-64 release. For persistent nodes, when RFC-64 contr
 
 ### Fixed
 
+- Scoped catalog replay now acquires the relevant author mutation locks before refreshing its replay snapshot, then revalidates that snapshot before reporting completion. A catalog head that advances while replay is waiting for a lock can therefore be replayed from current durable state instead of leaving an otherwise converged receiver fenced with unavailable expected-head evidence.
 - Omitted-deployment catalog authority and author inventory use the chain adapter's namespaced network identity, matching deterministic KA UALs instead of the unrelated DKG genesis hash; post-commit inventory warnings retain their bounded cause chain for operator diagnosis.
 - Local devnet snapshot storage keeps capacity admission with explicit low-disk watermarks, avoiding dependence on production-scale free-space reserves during release certification.
 - Subscription catch-up re-evaluates RFC-64 responsibility after authoritative metadata lands, so a cold Edge join cannot remain fully synced but absent from the default catalog status until restart.
