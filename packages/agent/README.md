@@ -45,6 +45,35 @@ const agents = await agent.findAgents();
 const skills = await agent.findSkills({ skillType: 'sentiment-analysis' });
 ```
 
+## Publishing a finalized assertion
+
+The SDK methods `publishFromFinalizedAssertion`, `resolveFinalizedAssertionVmPublishIntent`,
+and `resolveFinalizedAssertionPublishAuthor` share `PublishAuthorSelection`. Put identity
+options inside `authorSelection`; migrate `{ agentAddress: author }` to
+`{ authorSelection: { mode: 'author', agentAddress: author } }`.
+
+```typescript
+await agent.publishFromFinalizedAssertion(contextGraphId, name, {
+  authorSelection: { mode: 'author', agentAddress: author },
+});
+
+const intent = await agent.resolveFinalizedAssertionVmPublishIntent(contextGraphId, name, {
+  authorSelection: {
+    mode: 'residentAuthor',
+    selectedAuthorAgentAddress: member,
+    callerAgentAddress: curator,
+  },
+});
+```
+
+`author` uses the named author directly. `callerHint` accepts a `callerAgentAddress`
+and resolves the author from stored metadata. `residentAuthor` requires the chosen
+author to exist at that coordinate and preserves the optional caller hint for curator
+stamping. Omit `authorSelection`, or use `{ mode: 'default' }`, to resolve with the
+node identity as the hint. Contradictory selections and populated legacy identity option bags
+are rejected before author lookup. HTTP clients continue to send
+`selectedAuthorAgentAddress`; the daemon constructs the SDK selection.
+
 ## Internal Dependencies
 
 - `@origintrail-official/dkg-core` — P2P node, crypto, event bus

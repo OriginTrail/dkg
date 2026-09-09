@@ -991,7 +991,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
           name: ASSERTION_NAME,
           // GH#1778 — the route forwards the token as a CALLER hint; the author
           // is resolved from that (here the caller IS the author).
-          agentAddress: opts.callerAgentAddress,
+          agentAddress: opts.authorSelection.callerAgentAddress,
           shareOperationId: 'share-token-agent',
           roots: ['urn:test:token-agent-root'],
           seal: {
@@ -1025,7 +1025,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.status).toBe(202);
     expect(res.body.jobId).toBe('job-token-agent');
     expect(seenResolveOptions).toHaveLength(1);
-    expect(seenResolveOptions[0]).toMatchObject({ callerAgentAddress: tokenAgentAddress });
+    expect(seenResolveOptions[0]).toMatchObject({ authorSelection: { mode: 'callerHint', callerAgentAddress: tokenAgentAddress } });
     expect(enqueuedIntents[0]).toMatchObject({ agentAddress: tokenAgentAddress });
   });
 
@@ -1135,8 +1135,8 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       // Both identities present: the selector picks the AUTHOR while the token stays
       // the CALLER, so CG registration / curator stamping is unchanged (GH#1778).
       expect(seen[0]).toMatchObject({
-        selectedAuthorAgentAddress: SELECTED,
-        callerAgentAddress: curatorAddress,
+        authorSelection: { mode: 'residentAuthor', selectedAuthorAgentAddress: SELECTED,
+        callerAgentAddress: curatorAddress },
       });
     });
 
@@ -1167,8 +1167,8 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(res.status).toBe(200);
       expect(seen).toHaveLength(2);
       expect(seen[1]).toMatchObject({
-        selectedAuthorAgentAddress: SELECTED,
-        callerAgentAddress: curatorAddress,
+        authorSelection: { mode: 'residentAuthor', selectedAuthorAgentAddress: SELECTED,
+        callerAgentAddress: curatorAddress },
       });
     });
 
@@ -1207,7 +1207,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       });
 
       expect(res.status).toBe(202);
-      expect(seen[0]).toMatchObject({ selectedAuthorAgentAddress: SELECTED });
+      expect(seen[0]).toMatchObject({ authorSelection: { mode: 'residentAuthor', selectedAuthorAgentAddress: SELECTED } });
       // Echoed so a client can verify who will be published, and can detect a daemon
       // that ignored the selector entirely.
       expect(res.body.agentAddress).toBe(SELECTED);
@@ -1366,7 +1366,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       await startWith({}, {
         // The real intent path: no throw — it cannot determine the eventual signer.
         resolveFinalizedAssertionVmPublishIntent: async (_cg: string, _n: string, opts: any) => {
-          expect(opts.selectedAuthorAgentAddress).toBe(SELECTED);
+          expect(opts.authorSelection).toMatchObject({ mode: 'residentAuthor', selectedAuthorAgentAddress: SELECTED });
           // The route never supplies one, which is exactly why the gate stays silent.
           expect(opts.publisherOverride).toBeUndefined();
           return {
@@ -1955,7 +1955,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       ]);
       expect(seenOpts).toHaveLength(1);
       expect(seenOpts[0]).toMatchObject({
-        agentAddress: tokenAgentAddress,
+        authorSelection: { mode: 'author', agentAddress: tokenAgentAddress },
         clearSharedMemoryAfter: false,
         pricingPolicy: 'full-content',
       });
@@ -2266,7 +2266,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(res.status).toBe(200);
       expect(res.body.storageAckPeerIds).toEqual(['12D3KooWStorageCore3']);
       expect(seenOpts).toHaveLength(1);
-      expect(seenOpts[0]).toMatchObject({ callerAgentAddress: tokenAgentAddress });
+      expect(seenOpts[0]).toMatchObject({ authorSelection: { mode: 'callerHint', callerAgentAddress: tokenAgentAddress } });
     });
 
     it('standalone vm/publish accepts uint72 publisher identity overrides into publish options', async () => {

@@ -104,10 +104,10 @@ import {
   getMetrics,
   assertQuadLiteralsMutf8Safe,
   PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
-  PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE,
   formatPublishAuthorNotCustodialMessage,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
+import { readPublishAuthorSelection, publishAuthorCallerIdentity, type PublishAuthorSelectionOptions } from './publish-author-selection.js';
 import {
   deleteByPatternWithoutCount,
   GraphManager,
@@ -1682,7 +1682,7 @@ export class PublishMethods extends DKGAgentBase {
       contextGraphId,
       assertionName,
       {
-        agentAddress: lifecycleAgentAddress,
+        authorSelection: { mode: 'author', agentAddress: lifecycleAgentAddress },
         subGraphName: opts?.subGraphName,
         publishEpochs: opts?.publishEpochs,
         pricingPolicy: opts?.pricingPolicy,
@@ -4372,71 +4372,22 @@ export class PublishMethods extends DKGAgentBase {
     });
   }
 
-  /**
-   * GH#1778 — pick the author identity for a VM publish, shared by both the
-   * sync and async publish entry points so their policy cannot drift.
-   *
-   * `opts.agentAddress` is an AUTHORITATIVE author selector for direct
-   * programmatic callers: when set, exactly that author is published and it is
-   * NEVER silently substituted by a different same-named author (a mismatch
-   * simply falls through to the existing "is not finalized"). The daemon
-   * publish routes instead pass `opts.callerAgentAddress` (the token/caller
-   * identity) and leave the author to be resolved from stored `_meta` — that is
-   * the curator-publishes-a-member-KA flow. With neither, the effective node
-   * identity (default agent → peer) is the caller hint, and resolution prefers
-   * the node's OWN same-named KA before any resident foreign seal.
-   *
-   * GH#1786 — `opts.selectedAuthorAgentAddress` is a third, narrower mode: it
-   * SELECTS among the authors already resident at this coordinate so a curator can
-   * act on an `AMBIGUOUS_ASSERTION_AUTHOR` response. Unlike `agentAddress` it
-   * coexists with `callerAgentAddress` (the caller remains the identity used for CG
-   * registration and curator stamping) and it fails closed rather than falling
-   * through when it names no resident author.
+  /** Resolve an authoritative author, caller hint, or resident selection.
+   * Default selection uses the node identity as its hint; resident selection
+   * preserves the caller while requiring the chosen author to exist locally.
    */
   async resolveFinalizedAssertionPublishAuthor(this: DKGAgent,
     contextGraphId: string,
     name: string,
-    opts?: {
-      subGraphName?: string;
-      agentAddress?: string;
-      callerAgentAddress?: string;
-      selectedAuthorAgentAddress?: string;
-    },
+    opts?: PublishAuthorSelectionOptions & { subGraphName?: string },
   ): Promise<string> {
-    // The two identity fields are mutually exclusive modes: `agentAddress` is an
-    // authoritative author selector, `callerAgentAddress` a resolution hint.
-    // Reject supplying both so the contract is enforced, not just documented.
-    if (opts?.agentAddress && opts?.callerAgentAddress) {
-      throw Object.assign(
-        new Error(
-          'agentAddress (authoritative author selector) and callerAgentAddress ' +
-            '(resolution hint) are mutually exclusive on a VM publish',
-        ),
-        { code: PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE },
-      );
-    }
-    // An authoritative override and a resident-candidate selection are contradictory
-    // requests. Not reachable over HTTP (the publish routes never send
-    // `agentAddress` on the standalone lanes), but enforced for direct callers.
-    // Presence, NOT truthiness, and BEFORE the `agentAddress` fast path below: a caller
-    // that supplied both keys made a contradictory request, and a malformed selector ('' or
-    // null from untyped JS) must not be dropped so the publish quietly proceeds under the
-    // authoritative override. Same presence rule as the resolver and the HTTP boundary.
-    if (opts?.agentAddress && opts?.selectedAuthorAgentAddress !== undefined) {
-      throw Object.assign(
-        new Error(
-          'agentAddress (authoritative author selector) and selectedAuthorAgentAddress ' +
-            '(resident-candidate selection) are mutually exclusive on a VM publish',
-        ),
-        { code: PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE },
-      );
-    }
-    if (opts?.agentAddress) return opts.agentAddress;
-    const callerHint = opts?.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId;
+    const selection = readPublishAuthorSelection(opts);
+    if (selection.mode === 'author') return selection.agentAddress;
+    const callerHint = publishAuthorCallerIdentity(selection) ?? this.defaultAgentAddress ?? this.peerId;
     return (await this.resolveAssertionAuthor(contextGraphId, name, {
       subGraphName: opts?.subGraphName,
       callerAgentAddress: callerHint,
-      selectedAuthorAgentAddress: opts?.selectedAuthorAgentAddress,
+      selectedAuthorAgentAddress: selection.mode === 'residentAuthor' ? selection.selectedAuthorAgentAddress : undefined,
     })) ?? callerHint;
   }
 
@@ -4460,16 +4411,8 @@ export class PublishMethods extends DKGAgentBase {
   async resolveFinalizedAssertionVmPublishIntent(this: DKGAgent,
     contextGraphId: string,
     name: string,
-    opts?: {
+    opts?: PublishAuthorSelectionOptions & {
       subGraphName?: string;
-      agentAddress?: string;
-      /** GH#1778 — token/caller identity hint (routes); NOT an author selector. */
-      callerAgentAddress?: string;
-      /**
-       * GH#1786 — selects among the authors already resident at this coordinate.
-       * Coexists with `callerAgentAddress`; never becomes the persisted caller.
-       */
-      selectedAuthorAgentAddress?: string;
       publishEpochs?: number;
       pricingPolicy?: PublishOptions['pricingPolicy'];
       clearSharedMemoryAfter?: boolean;
@@ -4480,14 +4423,17 @@ export class PublishMethods extends DKGAgentBase {
       publisherOverride?: DKGPublisher;
     },
   ): Promise<KnowledgeAssetVmPublishRequest> {
-    const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
+    const authorSelection = readPublishAuthorSelection(opts);
+    const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, {
+      subGraphName: opts?.subGraphName, authorSelection,
+    });
     // GH#1778 — the ENQUEUING caller (token holder for the route path, or an
     // explicit author selector for a direct caller), persisted alongside the
     // resolved author so the async worker stamps the CG curator with the caller
     // (matching the sync lane), NOT the resolved member author. Left undefined
     // for a tokenless enqueue so `stampAddressCurator` falls back to the node
     // default — again exactly as the sync lane does.
-    const callerAgentAddress = opts?.callerAgentAddress ?? opts?.agentAddress;
+    const callerAgentAddress = publishAuthorCallerIdentity(authorSelection);
     const publisher = opts?.publisherOverride ?? this.publisher;
     const history = await this.assertion.history(contextGraphId, name, {
       agentAddress,
@@ -5794,16 +5740,8 @@ export class PublishMethods extends DKGAgentBase {
   async publishFromFinalizedAssertion(this: DKGAgent,
     contextGraphId: string,
     name: string,
-    opts?: {
+    opts?: PublishAuthorSelectionOptions & {
       subGraphName?: string;
-      agentAddress?: string;
-      /** GH#1778 — token/caller identity hint (routes); NOT an author selector. */
-      callerAgentAddress?: string;
-      /**
-       * GH#1786 — selects among the authors already resident at this coordinate.
-       * Coexists with `callerAgentAddress`; never changes the caller identity.
-       */
-      selectedAuthorAgentAddress?: string;
       operationCtx?: OperationContext;
       onPhase?: PhaseCallback;
       publisherNodeIdentityIdOverride?: bigint;

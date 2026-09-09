@@ -361,16 +361,16 @@ describe('agent publication pricing integration', () => {
         contextGraphId,
         'full-content-queued',
         {
-          callerAgentAddress: callerA,
-          selectedAuthorAgentAddress: queued.intent.agentAddress!,
+          authorSelection: { mode: 'residentAuthor', callerAgentAddress: callerA,
+          selectedAuthorAgentAddress: queued.intent.agentAddress! },
         },
       );
       const defaultIntentB = await agent.resolveFinalizedAssertionVmPublishIntent(
         contextGraphId,
         'full-content-queued',
         {
-          callerAgentAddress: callerB,
-          selectedAuthorAgentAddress: queued.intent.agentAddress!,
+          authorSelection: { mode: 'residentAuthor', callerAgentAddress: callerB,
+          selectedAuthorAgentAddress: queued.intent.agentAddress! },
         },
       );
       expect(defaultIntentA.pricingPolicy).toBeUndefined();

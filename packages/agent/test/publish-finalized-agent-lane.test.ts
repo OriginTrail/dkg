@@ -195,7 +195,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     await expect(agent.publishFromFinalizedAssertion(CG, 'no-such-name')).rejects.toThrow(/is not finalized/);
 
     const result = await agent.publishFromFinalizedAssertion(CG, NAME, {
-      agentAddress: AGENT_B,
+      authorSelection: { mode: 'author', agentAddress: AGENT_B },
       clearSharedMemoryAfter: true,
     });
 
@@ -267,7 +267,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
 
     let thrown: any;
     try {
-      await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AGENT_B });
+      await agent.publishFromFinalizedAssertion(CG, NAME, { authorSelection: { mode: 'author', agentAddress: AGENT_B } });
     } catch (error) {
       thrown = error;
     }
@@ -318,7 +318,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     };
 
     await expect(
-      agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AGENT_B }),
+      agent.publishFromFinalizedAssertion(CG, NAME, { authorSelection: { mode: 'author', agentAddress: AGENT_B } }),
     ).rejects.toMatchObject({ code: 'LEGACY_KA_READ_ONLY' });
     expect(publishCalls).toBe(0);
     const legacy = await store.query(`ASK { GRAPH <${swmGraph}> { <${ROOT}> ?p ?o } }`);
@@ -380,7 +380,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       };
     };
 
-    const result = await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AGENT_B });
+    const result = await agent.publishFromFinalizedAssertion(CG, NAME, { authorSelection: { mode: 'author', agentAddress: AGENT_B } });
 
     expect(result.status).toBe('confirmed');
     expect(updateCalls).toHaveLength(1);
@@ -434,7 +434,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     };
 
     await expect(
-      agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AGENT_B }),
+      agent.publishFromFinalizedAssertion(CG, NAME, { authorSelection: { mode: 'author', agentAddress: AGENT_B } }),
     ).rejects.toThrow(/does not match UAL-derived kaId/i);
     expect(swmLoads).toBe(0);
     expect(publishes).toBe(0);
