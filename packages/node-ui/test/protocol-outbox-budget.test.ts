@@ -48,6 +48,30 @@ describe('production SQLite byte-bounded outbox', () => {
     } finally { prepare.mockRestore(); }
   });
 
+  it('loads the exact admitted keys when candidate eligibility and tie ordering change', () => {
+    const store = new SqliteProtocolOutboxStore(db, { backoffFor: () => 10 });
+    for (const [protocol, id] of [['/other', 'first'], ['/selected', 'a'], ['/selected', 'z']]) {
+      store.enqueue('peer', protocol, id, new Uint8Array(3), 'offline', 0);
+    }
+    const prepare = db.db.prepare.bind(db.db);
+    // Exercise a future candidate-policy change through real SQL. Payload
+    // loading must follow these identities without duplicating that policy.
+    const spy = vi.spyOn(db.db, 'prepare').mockImplementation(sql => prepare(
+      sql.includes('AS payloadBytes') && sql.includes('LIMIT ?')
+        ? sql.replace('WHERE next_attempt_at', "WHERE protocol = '/selected' AND next_attempt_at")
+          .replace('ORDER BY next_attempt_at, first_failure_at, peer_id, protocol, message_id', 'ORDER BY message_id DESC')
+        : sql,
+    ));
+    try {
+      const page = store.readDuePage(10, { maxEntries: 2, maxPayloadBytes: 6 });
+      expect(page.entries.map(entry => [entry.protocol, entry.messageId])).toEqual([
+        ['/selected', 'z'], ['/selected', 'a'],
+      ]);
+      expect(page.entries.reduce((sum, entry) => sum + entry.payload.byteLength, 0)).toBe(6);
+      expect(spy).toHaveBeenCalledTimes(3);
+    } finally { spy.mockRestore(); }
+  });
+
   it('keeps snapshot bytes isolated and updates retries using only metadata', () => {
     const store = new SqliteProtocolOutboxStore(db, { backoffFor: attempts => attempts * 10, maxAgeMs: 100 });
     store.enqueue('peer', '/test', 'id', new Uint8Array([1, 2, 3]), 'offline', 0);
@@ -71,6 +95,18 @@ describe('production SQLite byte-bounded outbox', () => {
     const page = store.readDuePage(10, budget);
     db.close(); db = new DashboardDB({ dataDir: dir });
     expect(new SqliteProtocolOutboxStore(db).readDuePage(10, budget)).toEqual(page);
+  });
+
+  it('keeps metadata and payload expiry projections on the same strict retention rule', () => {
+    for (const store of [new SqliteProtocolOutboxStore(db, { maxAgeMs: 100 }), new InMemoryProtocolOutboxStore({ maxAgeMs: 100 })]) {
+      for (const at of [-1, 0, 1]) store.enqueue('peer', '/test', String(at), new Uint8Array([7]), 'offline', at);
+      const metadata = store.dropExpiredMetadata(100);
+      expect(metadata.map(entry => entry.messageId)).toEqual(['-1']);
+      store.enqueue('peer', '/test', '-1', new Uint8Array([7]), 'offline', -1);
+      const payloads = store.dropExpired(100);
+      expect(payloads.map(({ payload, ...entry }) => ({ ...entry, payloadBytes: payload.byteLength }))).toEqual(metadata);
+      expect(store.listMetadata().map(entry => entry.messageId).sort()).toEqual(['0', '1']);
+    }
   });
 
 

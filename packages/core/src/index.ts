@@ -286,12 +286,16 @@ export {
   type ProtocolOutboxPage,
   type ProtocolOutboxQueueStats,
   type BoundedProtocolOutboxStore,
+  type ProtocolOutboxPersistence,
+  type ProtocolOutboxInspection,
   type KaNumberStore,
   RESPONSE_CACHE_BYTES,
   RESPONSE_GONE_MARKER,
 } from './messenger-types.js';
 export {
   ProtocolOutbox,
+  BoundedProtocolOutbox,
+  assertBoundedProtocolOutboxStore,
   type ProtocolOutboxOptions,
   DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS,
   DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS,

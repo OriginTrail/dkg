@@ -199,7 +199,9 @@ export interface ProtocolOutboxQueueStats {
  * One Messenger owns a store: pages are snapshots, not multi-consumer leases.
  * Rows survive crashes and are removed only after successful delivery or expiry.
  */
-export interface BoundedProtocolOutboxStore extends ProtocolOutboxStore {
+export interface BoundedProtocolOutboxStore extends ProtocolOutboxPersistence {
+  /** Boolean peer-presence lookup for recovery bookkeeping. */
+  hasPendingFor(peer: string): boolean;
   /**
    * Skip rows larger than maxPayloadBytes without loading their payloads;
    * return the longest due prefix that fits both budgets after that filter.
@@ -215,7 +217,8 @@ export interface BoundedProtocolOutboxStore extends ProtocolOutboxStore {
   queueStats(now: number, maxPayloadBytes: number): ProtocolOutboxQueueStats;
 }
 
-interface ProtocolOutboxStoreBase {
+/** Shared enqueue, delivery and row-presence operations. */
+export interface ProtocolOutboxPersistence {
   /**
    * Insert or update an outbox entry for `(peer, protocol, messageId)`.
    * First failure creates the entry with `attempts = 1`. Subsequent
@@ -251,6 +254,12 @@ interface ProtocolOutboxStoreBase {
    */
   hasEntry(peer: string, protocol: string, messageId: string): boolean;
 
+  /** Total entries currently queued. */
+  size(): number;
+}
+
+/** Explicit legacy payload snapshots; automatic retries do not require them. */
+export interface ProtocolOutboxInspection {
   /**
    * All entries whose `nextAttemptAt <= now`.
    *
@@ -279,9 +288,6 @@ interface ProtocolOutboxStoreBase {
    */
   dropExpired(now: number): ProtocolOutboxEntry[];
 
-  /** Total entries currently queued. For diagnostics + tests. */
-  size(): number;
-
   /**
    * Snapshot of every entry in the store. Used by the diagnostics
    * surface (`/api/chat/outbox`, `dkg_outbox_status` MCP tool) so
@@ -302,13 +308,13 @@ interface ProtocolOutboxStoreBase {
 }
 
 /**
- * Current sender-side outbox store contract. Peer bookkeeping uses a boolean
- * fast path; automatic retry selection uses the required bounded capabilities.
+ * Payload-inspection store contract with a boolean peer-presence fast path.
+ * Automatic-only stores implement BoundedProtocolOutboxStore independently.
  *
  * `pendingFor` is an optional compatibility/diagnostic capability. New stores
  * do not need to materialize full payload-bearing peer snapshots.
  */
-export interface ProtocolOutboxStore extends ProtocolOutboxStoreBase {
+export interface ProtocolOutboxStore extends ProtocolOutboxPersistence, ProtocolOutboxInspection {
   /** Whether this peer still has any durable row (DHT recovery bookkeeping). */
   hasPendingFor(peer: string): boolean;
 
@@ -323,7 +329,7 @@ export interface ProtocolOutboxStore extends ProtocolOutboxStoreBase {
  * Pre-#1579 custom-store shape retained at the `ProtocolOutbox` boundary.
  * Legacy stores exposed the full peer snapshot instead of a boolean fast path.
  */
-export interface LegacyProtocolOutboxStore extends ProtocolOutboxStoreBase {
+export interface LegacyProtocolOutboxStore extends ProtocolOutboxPersistence, ProtocolOutboxInspection {
   /** Snapshot of one peer's rows, ordered by `firstFailureAt`. */
   pendingFor(peer: string): ProtocolOutboxEntry[];
 

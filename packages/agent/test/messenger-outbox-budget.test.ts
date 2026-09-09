@@ -1,9 +1,9 @@
 import { expect, it, vi } from 'vitest';
 import { DKGAgent } from '../src/dkg-agent.js';
-import { Messenger } from '../src/p2p/messenger.js';
+import { Messenger, DEFAULT_OUTBOX_DRAIN_MAX_PAYLOAD_BYTES } from '../src/p2p/messenger.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { InMemoryMessageIdempotencyStore, InMemoryProtocolOutboxStore, encodeReliableEnvelope,
-  RELIABLE_ENVELOPE_VERSION, PROTOCOL_MESSAGE, PROTOCOL_SWM_UPDATE, DKG_GOSSIP_MAX_MESSAGE_BYTES, DEFAULT_MAX_READ_BYTES, type LegacyProtocolOutboxStore, type ProtocolRouter } from '@origintrail-official/dkg-core';
+  RELIABLE_ENVELOPE_VERSION, PROTOCOL_MESSAGE, PROTOCOL_SWM_UPDATE, DKG_GOSSIP_MAX_MESSAGE_BYTES, DEFAULT_MAX_READ_BYTES, type BoundedProtocolOutboxStore, type LegacyProtocolOutboxStore, type ProtocolRouter } from '@origintrail-official/dkg-core';
 
 const peer = '12D3KooWAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const protocol = PROTOCOL_MESSAGE;
@@ -138,6 +138,8 @@ it('retries a maximum-size SWM application payload with default drain settings',
 });
 
 it('holds only one transport-sized default page when queued payloads exceed that budget', async () => {
+  expect(DEFAULT_OUTBOX_DRAIN_MAX_PAYLOAD_BYTES).toBe(10 * 1024 * 1024);
+  expect(DEFAULT_OUTBOX_DRAIN_MAX_PAYLOAD_BYTES).toBe(DEFAULT_MAX_READ_BYTES);
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const send = vi.fn(async () => { await gate; return new Uint8Array(); });
@@ -167,4 +169,23 @@ it('returns empty diagnostics when Messenger has no durable substrate', () => {
   expect(messenger.listOutbox()).toEqual([]);
   expect(messenger.listOutboxMetadata()).toEqual([]);
   expect(messenger.getOutboxStats()).toBeUndefined();
+});
+
+it('drains a custom store that implements only automatic retry capabilities', async () => {
+  const backing = new InMemoryProtocolOutboxStore({ backoffs: [10] });
+  const store: BoundedProtocolOutboxStore = {
+    enqueue: backing.enqueue.bind(backing), markDelivered: backing.markDelivered.bind(backing),
+    hasEntry: backing.hasEntry.bind(backing), size: backing.size.bind(backing), hasPendingFor: backing.hasPendingFor.bind(backing),
+    readDuePage: backing.readDuePage.bind(backing), listMetadata: backing.listMetadata.bind(backing),
+    dropExpiredMetadata: backing.dropExpiredMetadata.bind(backing), recordRetryFailure: backing.recordRetryFailure.bind(backing),
+    queueStats: backing.queueStats.bind(backing),
+  };
+  const send = vi.fn(async () => new Uint8Array());
+  const messenger = new Messenger({ router: { send } as unknown as ProtocolRouter, outboxStore: store,
+    idempotencyStore: new InMemoryMessageIdempotencyStore(), clock: () => 10 });
+  store.enqueue(peer, protocol, 'bounded-only', envelope('bounded-only'), 'offline', 0);
+  await messenger.processOutboxTick(10);
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(messenger.outboxSize()).toBe(0);
+  expect(messenger.listOutboxMetadata()).toEqual([]);
 });

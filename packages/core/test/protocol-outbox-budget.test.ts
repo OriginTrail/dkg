@@ -1,9 +1,44 @@
 import { describe, expect, it } from 'vitest';
-import { InMemoryProtocolOutboxStore, ProtocolOutbox } from '../src/protocol-outbox.js';
+import { InMemoryProtocolOutboxStore, BoundedProtocolOutbox, assertBoundedProtocolOutboxStore } from '../src/protocol-outbox.js';
+import type { BoundedProtocolOutboxStore } from '../src/messenger-types.js';
+
+function automaticStore(): BoundedProtocolOutboxStore {
+  const store = new InMemoryProtocolOutboxStore({ backoffs: [10] });
+  return {
+    enqueue: store.enqueue.bind(store), markDelivered: store.markDelivered.bind(store),
+    hasEntry: store.hasEntry.bind(store), size: store.size.bind(store), hasPendingFor: store.hasPendingFor.bind(store),
+    readDuePage: store.readDuePage.bind(store), listMetadata: store.listMetadata.bind(store),
+    dropExpiredMetadata: store.dropExpiredMetadata.bind(store), recordRetryFailure: store.recordRetryFailure.bind(store),
+    queueStats: store.queueStats.bind(store),
+  };
+}
+
+it('uses a bounded-only store without any legacy payload inspection methods', () => {
+  const store = automaticStore();
+  const outbox = new BoundedProtocolOutbox(store);
+  outbox.enqueueFailure('peer', '/test', 'id', new Uint8Array([7]), 'offline', 0);
+  expect(outbox.readDuePage(10, { maxEntries: 1, maxPayloadBytes: 1 }).entries[0].messageId).toBe('id');
+  expect(outbox.hasPendingFor('peer')).toBe(true);
+  expect(() => outbox.list()).toThrow('does not support legacy payload inspection');
+  expect(() => outbox.getEntry('peer', '/test', 'id')).toThrow('does not support legacy payload inspection');
+  outbox.markDelivered('peer', '/test', 'id');
+  expect(outbox.size()).toBe(0);
+});
+
+it('validates every required capability at the core construction boundary', () => {
+  const store = automaticStore();
+  for (const method of Object.keys(store)) {
+    const incomplete = { ...store };
+    Reflect.deleteProperty(incomplete, method);
+    expect(() => assertBoundedProtocolOutboxStore(incomplete)).toThrow(method);
+    expect(() => new BoundedProtocolOutbox(incomplete)).toThrow(method);
+  }
+  expect(() => assertBoundedProtocolOutboxStore(null)).toThrow('readDuePage');
+});
 
 function fixture() {
   const store = new InMemoryProtocolOutboxStore({ backoffs: [10, 20], maxAgeMs: 100 });
-  const outbox = new ProtocolOutbox(store, { backoffs: [10, 20], maxAgeMs: 100 });
+  const outbox = new BoundedProtocolOutbox(store, { backoffs: [10, 20], maxAgeMs: 100 });
   const add = (id: string, bytes: number) => outbox.enqueueFailure('peer', '/test', id, new Uint8Array(bytes).fill(7), 'offline', 0);
   return { store, outbox, add };
 }

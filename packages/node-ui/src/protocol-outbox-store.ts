@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import {
   type BoundedProtocolOutboxStore,
+  type ProtocolOutboxStore,
   type ProtocolOutboxEntry,
   type ProtocolOutboxMetadata,
   type ProtocolOutboxPage,
@@ -63,7 +64,7 @@ const OUTBOX_METADATA_COLUMNS = `peer_id AS peer, protocol, message_id AS messag
   last_attempt_at AS lastAttemptAt, next_attempt_at AS nextAttemptAt,
   coalesce(last_error, '') AS lastError`;
 
-export class SqliteProtocolOutboxStore implements BoundedProtocolOutboxStore {
+export class SqliteProtocolOutboxStore implements BoundedProtocolOutboxStore, ProtocolOutboxStore {
   private readonly db: Database.Database;
   private maxAgeMs = 24 * 60 * 60 * 1000;
   private backoffFor: (attempts: number) => number = (_attempts) => 5_000;
@@ -86,36 +87,13 @@ export class SqliteProtocolOutboxStore implements BoundedProtocolOutboxStore {
     error: string,
     now: number,
   ): ProtocolOutboxEntry {
-    const existing = this.db
-      .prepare(
-        `SELECT * FROM protocol_outbox
-         WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
-      )
-      .get(peer, protocol, messageId) as
-      | SqliteOutboxRow
-      | undefined;
-
+    const existing = this.db.prepare(
+      'SELECT attempts FROM protocol_outbox WHERE peer_id = ? AND protocol = ? AND message_id = ?',
+    ).get(peer, protocol, messageId) as { attempts: number } | undefined;
     if (existing) {
-      const newAttempts = existing.attempts + 1;
-      const nextAttemptAt = now + this.backoffFor(newAttempts);
-      this.db
-        .prepare(
-          `UPDATE protocol_outbox
-           SET attempts = ?, last_attempt_at = ?, next_attempt_at = ?, last_error = ?
-           WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
-        )
-        .run(newAttempts, now, nextAttemptAt, error, peer, protocol, messageId);
-      return {
-        peer,
-        protocol,
-        messageId,
-        payload: new Uint8Array(existing.payload),
-        attempts: newAttempts,
-        firstFailureAt: existing.first_failure_at,
-        lastAttemptAt: now,
-        nextAttemptAt,
-        lastError: error,
-      };
+      return SqliteProtocolOutboxStore.rowToEntry(this.advanceRetry<SqliteOutboxRow>(
+        peer, protocol, messageId, existing.attempts + 1, error, now, '*',
+      )!);
     }
 
     const attempts = 1;
@@ -227,14 +205,21 @@ export class SqliteProtocolOutboxStore implements BoundedProtocolOutboxStore {
         selectedCount++;
         payloadBytes += candidate.payloadBytes;
       }
-      // The same predicate/order and transaction select exactly the admitted
-      // prefix in one payload query, independent of page size.
+      // Carry exact admitted identities and order into one payload query.
+      // JSON binds the bounded key list with one parameter regardless of size;
+      // eligibility and ordering policy belong only to the metadata pass.
+      const admittedKeys = candidates.slice(0, selectedCount)
+        .map(entry => [entry.peer, entry.protocol, entry.messageId]);
       const rows = this.db.prepare(
-        `SELECT * FROM protocol_outbox
-         WHERE next_attempt_at <= ? AND length(payload) <= ?
-         ORDER BY next_attempt_at, first_failure_at, peer_id, protocol, message_id
-         LIMIT ?`,
-      ).all(now, budget.maxPayloadBytes, selectedCount) as SqliteOutboxRow[];
+        `SELECT CAST(admitted.key AS INTEGER) AS admitted_order, queued.* FROM json_each(?) AS admitted
+         JOIN protocol_outbox AS queued
+           ON queued.peer_id = json_extract(admitted.value, '$[0]')
+          AND queued.protocol = json_extract(admitted.value, '$[1]')
+          AND queued.message_id = json_extract(admitted.value, '$[2]')`,
+      ).all(JSON.stringify(admittedKeys)) as Array<SqliteOutboxRow & { admitted_order: number }>;
+      // Sort bounded row references here. A SQL ORDER BY on queued.* would
+      // copy the admitted BLOBs into SQLite's temporary sorter as well.
+      rows.sort((a, b) => a.admitted_order - b.admitted_order);
       const entries = rows.map(SqliteProtocolOutboxStore.rowToEntry);
       const { skippedOversizedEntries } = this.db.prepare(
         'SELECT count(*) AS skippedOversizedEntries FROM protocol_outbox WHERE next_attempt_at <= ? AND length(payload) > ?',
@@ -252,10 +237,14 @@ export class SqliteProtocolOutboxStore implements BoundedProtocolOutboxStore {
     return (peer === undefined ? statement.all() : statement.all(peer)) as ProtocolOutboxMetadata[];
   }
 
-  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
+  private removeExpired<Row>(now: number, columns: string): Row[] {
     return this.db.prepare(
-      `DELETE FROM protocol_outbox WHERE first_failure_at < ? RETURNING ${OUTBOX_METADATA_COLUMNS}`,
-    ).all(now - this.maxAgeMs) as ProtocolOutboxMetadata[];
+      `DELETE FROM protocol_outbox WHERE first_failure_at < ? RETURNING ${columns}`,
+    ).all(now - this.maxAgeMs) as Row[];
+  }
+
+  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
+    return this.removeExpired<ProtocolOutboxMetadata>(now, OUTBOX_METADATA_COLUMNS);
   }
 
   recordRetryFailure(peer: string, protocol: string, messageId: string, error: string, now: number): ProtocolOutboxMetadata | undefined {
@@ -264,12 +253,20 @@ export class SqliteProtocolOutboxStore implements BoundedProtocolOutboxStore {
         'SELECT attempts FROM protocol_outbox WHERE peer_id = ? AND protocol = ? AND message_id = ?',
       ).get(peer, protocol, messageId) as { attempts: number } | undefined;
       if (!current) return undefined;
-      const attempts = current.attempts + 1;
-      return this.db.prepare(
-        `UPDATE protocol_outbox SET attempts = ?, last_attempt_at = ?, next_attempt_at = ?, last_error = ?
-         WHERE peer_id = ? AND protocol = ? AND message_id = ? RETURNING ${OUTBOX_METADATA_COLUMNS}`,
-      ).get(attempts, now, now + this.backoffFor(attempts), error, peer, protocol, messageId) as ProtocolOutboxMetadata;
+      return this.advanceRetry<ProtocolOutboxMetadata>(
+        peer, protocol, messageId, current.attempts + 1, error, now, OUTBOX_METADATA_COLUMNS,
+      );
     }).immediate();
+  }
+
+  private advanceRetry<Row>(
+    peer: string, protocol: string, messageId: string, attempts: number,
+    error: string, now: number, columns: string,
+  ): Row | undefined {
+    return this.db.prepare(
+      `UPDATE protocol_outbox SET attempts = ?, last_attempt_at = ?, next_attempt_at = ?, last_error = ?
+       WHERE peer_id = ? AND protocol = ? AND message_id = ? RETURNING ${columns}`,
+    ).get(attempts, now, now + this.backoffFor(attempts), error, peer, protocol, messageId) as Row | undefined;
   }
 
   queueStats(now: number, maxPayloadBytes: number): ProtocolOutboxQueueStats {
@@ -282,12 +279,7 @@ export class SqliteProtocolOutboxStore implements BoundedProtocolOutboxStore {
   }
 
   dropExpired(now: number): ProtocolOutboxEntry[] {
-    const cutoff = now - this.maxAgeMs;
-    const rows = this.db
-      .prepare(`SELECT * FROM protocol_outbox WHERE first_failure_at < ?`)
-      .all(cutoff) as Array<SqliteOutboxRow>;
-    this.db.prepare(`DELETE FROM protocol_outbox WHERE first_failure_at < ?`).run(cutoff);
-    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
+    return this.removeExpired<SqliteOutboxRow>(now, '*').map(SqliteProtocolOutboxStore.rowToEntry);
   }
 
   size(): number {

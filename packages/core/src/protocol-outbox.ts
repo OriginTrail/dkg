@@ -40,6 +40,8 @@ import type {
   ProtocolOutboxPageBudget,
   ProtocolOutboxQueueStats,
   ProtocolOutboxStore,
+  ProtocolOutboxPersistence,
+  ProtocolOutboxInspection,
 } from './messenger-types.js';
 import { RESPONSE_CACHE_BYTES } from './messenger-types.js';
 
@@ -134,7 +136,7 @@ interface ProtocolOutboxStorePolicy extends ProtocolOutboxOptions {
   backoffFor: (attempts: number) => number;
 }
 
-type PolicyAwareProtocolOutboxStore = CompatibleProtocolOutboxStore & {
+type PolicyAwareProtocolOutboxStore = ProtocolOutboxPersistence & {
   configurePolicy?: (policy: ProtocolOutboxStorePolicy) => void;
 };
 
@@ -160,14 +162,13 @@ function normalizeOutboxStore(store: CompatibleProtocolOutboxStore): ProtocolOut
     pendingFor: legacy.pendingFor.bind(legacy),
   };
   if (legacy.duePage) normalized.duePage = legacy.duePage.bind(legacy);
+  const policy = legacy as PolicyAwareProtocolOutboxStore;
+  if (policy.configurePolicy) (normalized as PolicyAwareProtocolOutboxStore).configurePolicy = policy.configurePolicy.bind(legacy);
   return normalized;
 }
 
-export class ProtocolOutbox<Store extends CompatibleProtocolOutboxStore = CompatibleProtocolOutboxStore> {
-  // Preserve the store type in published declarations so bounded-method this
-  // constraints also reject inspection-only stores in downstream packages.
-  protected readonly inputStore: Store;
-  private readonly store: ProtocolOutboxStore;
+class ProtocolOutboxAttempts<Store extends ProtocolOutboxPersistence> {
+  protected readonly store: Store;
   private readonly backoffs: readonly number[];
   /**
    * Per-key inflight set to prevent concurrent retry attempts for the
@@ -186,7 +187,7 @@ export class ProtocolOutbox<Store extends CompatibleProtocolOutboxStore = Compat
   private readonly inflight = new Set<string>();
 
   constructor(store: Store, options: ProtocolOutboxOptions = {}) {
-    this.inputStore = store;
+    this.store = store;
     const backoffs = options.backoffs ?? DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS;
     if (backoffs.length === 0) {
       throw new Error('ProtocolOutbox: backoffs must be non-empty');
@@ -197,7 +198,6 @@ export class ProtocolOutbox<Store extends CompatibleProtocolOutboxStore = Compat
       maxAgeMs: options.maxAgeMs ?? DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS,
       backoffFor: (attempts) => this.backoffFor(attempts),
     });
-    this.store = normalizeOutboxStore(store);
   }
 
   /**
@@ -263,6 +263,24 @@ export class ProtocolOutbox<Store extends CompatibleProtocolOutboxStore = Compat
     return this.store.hasEntry(peer, protocol, messageId);
   }
 
+  /** Total entries currently queued. */
+  size(): number {
+    return this.store.size();
+  }
+
+  /** Compute backoff for a given attempt count. Exposed for testing. */
+  backoffFor(attempts: number): number {
+    const idx = Math.min(Math.max(attempts - 1, 0), this.backoffs.length - 1);
+    return this.backoffs[idx];
+  }
+}
+
+/** Compatibility facade for explicit payload snapshots and legacy stores. */
+export class ProtocolOutbox extends ProtocolOutboxAttempts<ProtocolOutboxStore> {
+  constructor(store: CompatibleProtocolOutboxStore, options: ProtocolOutboxOptions = {}) {
+    super(normalizeOutboxStore(store), options);
+  }
+
   /** All due entries in deterministic retry order. */
   due(now: number): ProtocolOutboxEntry[] {
     return [...this.store.due(now)].sort(compareDueEntries);
@@ -286,27 +304,6 @@ export class ProtocolOutbox<Store extends CompatibleProtocolOutboxStore = Compat
     return ordered.slice(0, normalizedLimit);
   }
 
-  readDuePage(this: ProtocolOutbox<BoundedProtocolOutboxStore>, now: number, budget: ProtocolOutboxPageBudget): ProtocolOutboxPage {
-    validateProtocolOutboxPageBudget(budget);
-    return this.inputStore.readDuePage(now, budget);
-  }
-
-  listMetadata(this: ProtocolOutbox<BoundedProtocolOutboxStore>, peer?: string): ProtocolOutboxMetadata[] {
-    return this.inputStore.listMetadata(peer);
-  }
-
-  dropExpiredMetadata(this: ProtocolOutbox<BoundedProtocolOutboxStore>, now: number): ProtocolOutboxMetadata[] {
-    return this.inputStore.dropExpiredMetadata(now);
-  }
-
-  recordRetryFailure(this: ProtocolOutbox<BoundedProtocolOutboxStore>, peer: string, protocol: string, messageId: string, error: string, now: number): ProtocolOutboxMetadata | undefined {
-    return this.inputStore.recordRetryFailure(peer, protocol, messageId, error, now);
-  }
-
-  queueStats(this: ProtocolOutbox<BoundedProtocolOutboxStore>, now: number, maxPayloadBytes: number): ProtocolOutboxQueueStats {
-    return this.inputStore.queueStats(now, maxPayloadBytes);
-  }
-
   hasPendingFor(peer: string): boolean {
     return this.store.hasPendingFor(peer);
   }
@@ -328,11 +325,6 @@ export class ProtocolOutbox<Store extends CompatibleProtocolOutboxStore = Compat
     return this.store.dropExpired(now);
   }
 
-  /** Total entries currently queued. */
-  size(): number {
-    return this.store.size();
-  }
-
   /**
    * Snapshot of every entry currently in the underlying store. Used
    * only for explicit payload inspection. Returns
@@ -350,11 +342,79 @@ export class ProtocolOutbox<Store extends CompatibleProtocolOutboxStore = Compat
   getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined {
     return this.store.getEntry(peer, protocol, messageId);
   }
+}
 
-  /** Compute backoff for a given attempt count. Exposed for testing. */
-  backoffFor(attempts: number): number {
-    const idx = Math.min(Math.max(attempts - 1, 0), this.backoffs.length - 1);
-    return this.backoffs[idx];
+/** Compile-time completeness keeps JavaScript validation owned by the store contract. */
+const BOUNDED_STORE_METHODS = {
+  readDuePage: true, listMetadata: true, dropExpiredMetadata: true,
+  recordRetryFailure: true, queueStats: true, hasPendingFor: true,
+  enqueue: true, markDelivered: true, hasEntry: true, size: true,
+} satisfies Record<keyof BoundedProtocolOutboxStore, true>;
+
+export function assertBoundedProtocolOutboxStore(store: unknown): asserts store is BoundedProtocolOutboxStore {
+  for (const method of Object.keys(BOUNDED_STORE_METHODS)) {
+    if (store === null || (typeof store !== 'object' && typeof store !== 'function') || typeof (store as Record<string, unknown>)[method] !== 'function') {
+      throw new Error(`Custom outbox store must implement ${method} for byte-bounded Messenger retries`);
+    }
+  }
+}
+
+type PayloadInspection = Pick<ProtocolOutboxInspection, 'list' | 'getEntry'>;
+
+function optionalPayloadInspection(store: BoundedProtocolOutboxStore): PayloadInspection | undefined {
+  const candidate = store as BoundedProtocolOutboxStore & Partial<PayloadInspection>;
+  return typeof candidate.list === 'function' && typeof candidate.getEntry === 'function'
+    ? candidate as BoundedProtocolOutboxStore & PayloadInspection
+    : undefined;
+}
+
+/** Automatic retries depend only on bounded access and common persistence. */
+export class BoundedProtocolOutbox extends ProtocolOutboxAttempts<BoundedProtocolOutboxStore> {
+  private readonly payloadInspection?: PayloadInspection;
+
+  constructor(store: BoundedProtocolOutboxStore, options: ProtocolOutboxOptions = {}) {
+    assertBoundedProtocolOutboxStore(store);
+    super(store, options);
+    this.payloadInspection = optionalPayloadInspection(store);
+  }
+
+  readDuePage(now: number, budget: ProtocolOutboxPageBudget): ProtocolOutboxPage {
+    validateProtocolOutboxPageBudget(budget);
+    return this.store.readDuePage(now, budget);
+  }
+
+  listMetadata(peer?: string): ProtocolOutboxMetadata[] {
+    return this.store.listMetadata(peer);
+  }
+
+  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
+    return this.store.dropExpiredMetadata(now);
+  }
+
+  recordRetryFailure(peer: string, protocol: string, messageId: string, error: string, now: number): ProtocolOutboxMetadata | undefined {
+    return this.store.recordRetryFailure(peer, protocol, messageId, error, now);
+  }
+
+  queueStats(now: number, maxPayloadBytes: number): ProtocolOutboxQueueStats {
+    return this.store.queueStats(now, maxPayloadBytes);
+  }
+
+  hasPendingFor(peer: string): boolean {
+    return this.store.hasPendingFor(peer);
+  }
+
+  /** Explicit compatibility access; optional on new automatic-retry stores. */
+  list(): ProtocolOutboxEntry[] {
+    return this.requirePayloadInspection().list();
+  }
+
+  getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined {
+    return this.requirePayloadInspection().getEntry(peer, protocol, messageId);
+  }
+
+  private requirePayloadInspection(): PayloadInspection {
+    if (!this.payloadInspection) throw new Error('Outbox store does not support legacy payload inspection');
+    return this.payloadInspection;
   }
 }
 
@@ -368,7 +428,7 @@ export class ProtocolOutbox<Store extends CompatibleProtocolOutboxStore = Compat
  * Implements the same backoff ladder the wrapper `ProtocolOutbox`
  * uses so the test fixture is self-contained.
  */
-export class InMemoryProtocolOutboxStore implements BoundedProtocolOutboxStore {
+export class InMemoryProtocolOutboxStore implements BoundedProtocolOutboxStore, ProtocolOutboxStore {
   private readonly entries = new Map<string, ProtocolOutboxEntry>();
   private backoffs: readonly number[] = DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS;
   private maxAgeMs = DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS;
@@ -406,10 +466,7 @@ export class InMemoryProtocolOutboxStore implements BoundedProtocolOutboxStore {
     const key = InMemoryProtocolOutboxStore.key(peer, protocol, messageId);
     const existing = this.entries.get(key);
     if (existing) {
-      existing.attempts += 1;
-      existing.lastAttemptAt = now;
-      existing.nextAttemptAt = now + this.backoffFor(existing.attempts);
-      existing.lastError = error;
+      this.advanceRetry(existing, error, now);
       return cloneOutboxEntry(existing);
     }
     const entry: ProtocolOutboxEntry = {
@@ -446,31 +503,30 @@ export class InMemoryProtocolOutboxStore implements BoundedProtocolOutboxStore {
       .map(cloneOutboxEntry);
   }
 
-  due(now: number): ProtocolOutboxEntry[] {
+  private dueEntries(now: number): ProtocolOutboxEntry[] {
     return Array.from(this.entries.values())
-      .filter((e) => e.nextAttemptAt <= now)
-      .sort(compareDueEntries)
-      .map(cloneOutboxEntry);
+      .filter(entry => entry.nextAttemptAt <= now)
+      .sort(compareDueEntries);
+  }
+
+  due(now: number): ProtocolOutboxEntry[] {
+    return this.dueEntries(now).map(cloneOutboxEntry);
   }
 
   duePage(now: number, limit: number): ProtocolOutboxEntry[] {
     limit = normalizeDuePageLimit(limit);
-    return Array.from(this.entries.values())
-      .filter(entry => entry.nextAttemptAt <= now)
-      .sort(compareDueEntries).slice(0, limit).map(cloneOutboxEntry);
+    return this.dueEntries(now).slice(0, limit).map(cloneOutboxEntry);
   }
 
   readDuePage(now: number, budget: ProtocolOutboxPageBudget): ProtocolOutboxPage {
     validateProtocolOutboxPageBudget(budget);
     let skippedOversizedEntries = 0;
-    const candidates = Array.from(this.entries.values())
+    const candidates = this.dueEntries(now)
       .filter(entry => {
-        if (entry.nextAttemptAt > now) return false;
         if (entry.payload.byteLength <= budget.maxPayloadBytes) return true;
         skippedOversizedEntries++;
         return false;
-      })
-      .sort(compareDueEntries);
+      });
     const entries: ProtocolOutboxEntry[] = [];
     let payloadBytes = 0;
     let byteBudgetExhausted = false;
@@ -492,25 +548,33 @@ export class InMemoryProtocolOutboxStore implements BoundedProtocolOutboxStore {
       .map(entryMetadata);
   }
 
-  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
-    const dropped: ProtocolOutboxMetadata[] = [];
+  private removeExpired<T>(now: number, project: (entry: ProtocolOutboxEntry) => T): T[] {
+    const dropped: T[] = [];
     for (const [key, entry] of this.entries) {
       if (now - entry.firstFailureAt > this.maxAgeMs) {
-        dropped.push(entryMetadata(entry));
+        dropped.push(project(entry));
         this.entries.delete(key);
       }
     }
     return dropped;
   }
 
+  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
+    return this.removeExpired(now, entryMetadata);
+  }
+
   recordRetryFailure(peer: string, protocol: string, messageId: string, error: string, now: number): ProtocolOutboxMetadata | undefined {
     const entry = this.entries.get(InMemoryProtocolOutboxStore.key(peer, protocol, messageId));
     if (!entry) return undefined;
+    this.advanceRetry(entry, error, now);
+    return entryMetadata(entry);
+  }
+
+  private advanceRetry(entry: ProtocolOutboxEntry, error: string, now: number): void {
     entry.attempts += 1;
     entry.lastAttemptAt = now;
     entry.nextAttemptAt = now + this.backoffFor(entry.attempts);
     entry.lastError = error;
-    return entryMetadata(entry);
   }
 
   queueStats(now: number, maxPayloadBytes: number): ProtocolOutboxQueueStats {
@@ -528,14 +592,7 @@ export class InMemoryProtocolOutboxStore implements BoundedProtocolOutboxStore {
   }
 
   dropExpired(now: number): ProtocolOutboxEntry[] {
-    const dropped: ProtocolOutboxEntry[] = [];
-    for (const [key, entry] of this.entries) {
-      if (now - entry.firstFailureAt > this.maxAgeMs) {
-        dropped.push(cloneOutboxEntry(entry));
-        this.entries.delete(key);
-      }
-    }
-    return dropped;
+    return this.removeExpired(now, cloneOutboxEntry);
   }
 
   size(): number {

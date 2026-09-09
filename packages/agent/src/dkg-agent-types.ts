@@ -1930,7 +1930,7 @@ export interface DKGAgentConfig {
    * Best-effort: the agent never awaits or throws on the sink.
    */
   onReplicationEvent?: ReplicationEventSink;
-  /** In-process outbox admission bounds; default 100 entries / 4 MiB / 4 workers. */
+  /** In-process outbox admission bounds; default 100 entries / 10 MiB / 4 workers (DEFAULT_OUTBOX_DRAIN_MAX_PAYLOAD_BYTES). */
   messengerOutboxDrain?: import('./p2p/outbox-drainer.js').OutboxDrainerOptions;
   messengerStores?: {
     idempotencyStore: MessageIdempotencyStore;

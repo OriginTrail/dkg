@@ -23,3 +23,12 @@ const legacyMessenger: ProtocolOutboxEntry[] = messenger.listOutbox();
 const messengerMetadata: ProtocolOutboxMetadata[] = messenger.listOutboxMetadata();
 const legacyDue: ProtocolOutboxEntry[] = new ProtocolOutbox(unboundedStore).duePage(Date.now());
 void legacyChat; void chatMetadata; void legacyMessenger; void messengerMetadata; void legacyDue;
+
+// Automatic retries do not require legacy full-payload inspection methods.
+type AutomaticStore = Pick<BoundedProtocolOutboxStore,
+  'enqueue' | 'markDelivered' | 'hasEntry' | 'size' | 'hasPendingFor'
+  | 'readDuePage' | 'listMetadata' | 'dropExpiredMetadata' | 'recordRetryFailure' | 'queueStats'>;
+declare const automaticOnly: AutomaticStore;
+new Messenger({ router, outboxStore: automaticOnly });
+const automaticConfig: AgentOutboxStore = automaticOnly;
+void automaticConfig;

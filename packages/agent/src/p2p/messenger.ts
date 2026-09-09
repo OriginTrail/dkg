@@ -5,7 +5,7 @@ import {
   RELIABLE_ENVELOPE_VERSION,
   RESPONSE_GONE_MARKER,
   isRecoverableSendError,
-  ProtocolOutbox,
+  BoundedProtocolOutbox,
   type BoundedProtocolOutboxStore,
   type MessageIdempotencyStore,
   type ProtocolOutboxEntry,
@@ -139,7 +139,7 @@ export interface MessengerDeps {
   /**
    * Substrate sender-side outbox store. Same optionality rules as
    * `idempotencyStore`. The Messenger wraps the store with a
-   * `ProtocolOutbox` internally (which owns the backoff ladder +
+   * `BoundedProtocolOutbox` internally (which owns the backoff ladder +
    * inflight guard).
    */
   outboxStore?: BoundedProtocolOutboxStore;
@@ -384,7 +384,7 @@ export const DEFAULT_SLO_WINDOW_SAMPLES = 1000;
 export class Messenger {
   private readonly router: ProtocolRouter;
   private readonly idempotencyStore?: MessageIdempotencyStore;
-  private readonly outbox?: ProtocolOutbox<BoundedProtocolOutboxStore>;
+  private readonly outbox?: BoundedProtocolOutbox;
   private readonly clock: () => number;
   private readonly resolvePeer?: (peerId: string, opts: { signal: AbortSignal }) => Promise<void>;
   private readonly outboxDrainer?: OutboxDrainer;
@@ -489,14 +489,7 @@ export class Messenger {
     this.router = deps.router;
     this.idempotencyStore = deps.idempotencyStore;
     if (deps.outboxStore) {
-      // Validate JavaScript/custom-store callers once before accepting sends.
-      // Typed callers must supply the complete bounded store contract.
-      for (const method of ['readDuePage', 'listMetadata', 'dropExpiredMetadata', 'recordRetryFailure', 'queueStats', 'hasPendingFor'] as const) {
-        if (typeof deps.outboxStore[method] !== 'function') {
-          throw new Error(`Custom outbox store must implement ${method} for byte-bounded Messenger retries`);
-        }
-      }
-      this.outbox = new ProtocolOutbox(deps.outboxStore, {
+      this.outbox = new BoundedProtocolOutbox(deps.outboxStore, {
         backoffs: deps.backoffs,
         maxAgeMs: deps.maxAgeMs,
       });
