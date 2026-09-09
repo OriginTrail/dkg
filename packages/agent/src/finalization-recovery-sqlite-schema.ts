@@ -28,7 +28,8 @@ import {
 
 const APPLICATION_ID = 0x444b4649; // DKFI
 const LEGACY_USER_VERSION = 1;
-const USER_VERSION = 2;
+const DEFERRED_SPOOL_USER_VERSION = 2;
+const USER_VERSION = 3;
 
 const DDL_V1 = `
 CREATE TABLE finalization_inbox_v1 (
@@ -133,6 +134,13 @@ CREATE INDEX finalization_pending_peer_v2
 `;
 
 const DDL_V2 = `${DDL_V1}\n${PENDING_DDL_V2}`;
+const FAILURE_STREAK_MIGRATION_V3 = `
+ALTER TABLE finalization_inbox_v1
+  ADD COLUMN failure_signature TEXT;
+ALTER TABLE finalization_inbox_v1
+  ADD COLUMN failure_streak INTEGER NOT NULL DEFAULT 0 CHECK (failure_streak >= 0);
+`;
+const DDL_V3 = `${DDL_V2}\n${FAILURE_STREAK_MIGRATION_V3}`;
 
 export interface OpenedFinalizationRecoveryDatabase {
   databasePath: string;
@@ -274,7 +282,7 @@ function initializeFresh(database: DatabaseSync, path: string): void {
     ) {
       throw new Error('Finalization inbox lost its pristine identity before initialization');
     }
-    database.exec(DDL_V2);
+    database.exec(DDL_V3);
     database.exec(`PRAGMA application_id = ${APPLICATION_ID}`);
     database.exec(`PRAGMA user_version = ${USER_VERSION}`);
     database.exec('COMMIT');
@@ -299,7 +307,7 @@ function migrateLegacyV1(database: DatabaseSync, databasePath: string): void {
     database.exec('BEGIN IMMEDIATE');
     transactionOpen = true;
     database.exec(PENDING_DDL_V2);
-    database.exec(`PRAGMA user_version = ${USER_VERSION}`);
+    database.exec(`PRAGMA user_version = ${DEFERRED_SPOOL_USER_VERSION}`);
     database.exec('COMMIT');
     transactionOpen = false;
   } catch (error) {
@@ -313,6 +321,31 @@ function migrateLegacyV1(database: DatabaseSync, databasePath: string): void {
     const checkpoint = database.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
     if (Number(checkpoint?.busy ?? 1) !== 0) {
       throw new Error('Finalization inbox v1 migration WAL checkpoint remained busy');
+    }
+  }
+  fsyncOwnedSqliteFileAndDirectoryV1(databasePath);
+}
+
+function migrateDeferredSpoolV2(database: DatabaseSync, databasePath: string): void {
+  let transactionOpen = false;
+  try {
+    database.exec('BEGIN IMMEDIATE');
+    transactionOpen = true;
+    database.exec(FAILURE_STREAK_MIGRATION_V3);
+    database.exec(`PRAGMA user_version = ${USER_VERSION}`);
+    database.exec('COMMIT');
+    transactionOpen = false;
+  } catch (error) {
+    if (transactionOpen) {
+      try { database.exec('ROLLBACK'); } catch { /* retain migration failure */ }
+    }
+    throw error;
+  }
+  const journalMode = database.prepare('PRAGMA journal_mode').get();
+  if (String(journalMode?.journal_mode).toLowerCase() === 'wal') {
+    const checkpoint = database.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+    if (Number(checkpoint?.busy ?? 1) !== 0) {
+      throw new Error('Finalization inbox v2 migration WAL checkpoint remained busy');
     }
   }
   fsyncOwnedSqliteFileAndDirectoryV1(databasePath);
@@ -333,15 +366,24 @@ export async function openFinalizationRecoveryDatabase(
         'Finalization inbox',
       );
     } catch {
-      // The main-file header can legitimately lag a committed WAL. Accept
-      // exactly the owned v1 header here, then classify from SQLite's recovered
-      // PRAGMA below after the WAL has been replayed.
-      assertOwnedSqliteHeaderIdentityV1(
-        databasePath,
-        APPLICATION_ID,
-        LEGACY_USER_VERSION,
-        'Finalization inbox',
-      );
+      // The main-file header can legitimately lag a committed WAL. Accept an
+      // owned historical header here, then classify from SQLite's recovered
+      // PRAGMA after the WAL has been replayed.
+      try {
+        assertOwnedSqliteHeaderIdentityV1(
+          databasePath,
+          APPLICATION_ID,
+          DEFERRED_SPOOL_USER_VERSION,
+          'Finalization inbox',
+        );
+      } catch {
+        assertOwnedSqliteHeaderIdentityV1(
+          databasePath,
+          APPLICATION_ID,
+          LEGACY_USER_VERSION,
+          'Finalization inbox',
+        );
+      }
     }
   }
   const database = new sqlite.DatabaseSync(databasePath);
@@ -355,10 +397,18 @@ export async function openFinalizationRecoveryDatabase(
         LEGACY_USER_VERSION,
       );
       migrateLegacyV1(database, databasePath);
+      migrateDeferredSpoolV2(database, databasePath);
+    } else if (recoveredVersion === DEFERRED_SPOOL_USER_VERSION) {
+      verifySchema(
+        database,
+        expectedSchema(sqlite.DatabaseSync, DDL_V2),
+        DEFERRED_SPOOL_USER_VERSION,
+      );
+      migrateDeferredSpoolV2(database, databasePath);
     } else if (recoveredVersion !== USER_VERSION) {
       throw new Error('Finalization inbox has a foreign or unsupported recovered version');
     }
-    verifySchema(database, expectedSchema(sqlite.DatabaseSync, DDL_V2));
+    verifySchema(database, expectedSchema(sqlite.DatabaseSync, DDL_V3));
     applyRuntimePragmas(database);
     secureOwnedSqliteFileSetV1(databasePath, 'Finalization inbox');
     return { databasePath, database };

@@ -198,6 +198,7 @@ const SETTLED_RECEIPT_RETRY_MAX_MS = 60_000;
 const SETTLED_NOT_FOUND_RETRY_LIMIT = 5;
 const DEFERRED_RETRY_BASE_MS = 1_000;
 const DEFERRED_RETRY_MAX_MS = 60_000;
+const FAILED_PUBLISHER_AUTHORITY_PROBE_MAX_ENTRIES = 4_096;
 export const FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD = 3;
 export const FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS = 6 * 60 * 60 * 1_000;
 /**
@@ -245,15 +246,12 @@ export class FinalizationRecovery<
     Promise<FinalizationRecoveryReplayOutcome>
   >();
   private readonly entryLockTails = new Map<string, Promise<void>>();
+  private readonly failedPublisherAuthorityProbes = new Map<string, true>();
   private readonly store: FinalizationRecoveryStore | undefined;
   private readonly storeSource: FinalizationRecoveryStoreSource | undefined;
   private readonly liveRetryLimit: number;
   private readonly liveRetryWindowMs: number;
   private readonly now: () => number;
-  private readonly deferredFailureStreaks = new Map<
-    string,
-    { generation: number; reason: string; count: number }
-  >();
 
   constructor(
     store: FinalizationRecoveryStore | FinalizationRecoveryStoreSource | undefined,
@@ -367,7 +365,7 @@ export class FinalizationRecovery<
     return this.withEntryLock(key, async () => {
       const received = await this.receiveOutcome(input);
       if (received.status === 'pending') {
-        await this.recordPendingPublisherAuthority(store, key, input);
+        await this.observePublisherAuthority(store, key, input);
         return { status: 'handled' };
       }
       if (received.status === 'capacity') {
@@ -391,16 +389,10 @@ export class FinalizationRecovery<
       // the autonomous retry budget.
       if (!this.isLiveEntry(entry)) return { status: 'handled' };
 
-      // A relay may win admission before the publisher's own delivery arrives.
-      // Preserve that later authority observation even while an autonomous
-      // retry deadline is parked; it is durable evidence, not a retry attempt.
-      if (
-        !entry.trustedPublisherPeerId
-        && input.sourcePeerId !== undefined
-        && input.sourcePeerId !== entry.sourcePeerId
-      ) {
-        await this.recordPendingPublisherAuthority(store, key, input);
-      }
+      // Every accepted delivery gets one authority-observation phase before
+      // retry scheduling. Its prepared workspace result is reused below when
+      // the materialization gate is open.
+      const authority = await this.observePublisherAuthority(store, key, input, entry);
 
       // The worker and reconciliation paths already honor this durable gate.
       // Live duplicate gossip must do the same: the per-entry lock serializes
@@ -413,7 +405,11 @@ export class FinalizationRecovery<
 
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
-          const outcome = await this.materialize(input, { kind: 'recovery', entry });
+          const outcome = await this.materialize(
+            input,
+            { kind: 'recovery', entry },
+            authority.prepared,
+          );
           if (outcome === 'deferred') {
             await this.recordDeferred(
               entry,
@@ -444,12 +440,15 @@ export class FinalizationRecovery<
     });
   }
 
-  private async recordPendingPublisherAuthority(
+  private async observePublisherAuthority(
     store: FinalizationRecoveryStore,
     key: string,
     input: FinalizationRecoveryLiveInput,
-  ): Promise<void> {
-    if (!input.sourcePeerId) return;
+    entry?: FinalizationRecoveryEntry,
+  ): Promise<{ prepared?: Prepared }> {
+    if (!input.sourcePeerId || entry?.trustedPublisherPeerId) return {};
+    const probeKey = `${key}|${entry?.generation ?? 'pending'}|${input.sourcePeerId}`;
+    if (this.failedPublisherAuthorityProbes.has(probeKey)) return {};
     let prepared: Prepared | undefined;
     try {
       prepared = await this.materializer.prepare(input);
@@ -459,11 +458,33 @@ export class FinalizationRecovery<
           + `${input.candidate.scope.ual}: `
           + `${error instanceof Error ? error.message : String(error)}`,
       );
-      return;
+      return {};
     }
-    if (!prepared || input.sourcePeerId !== prepared.publisherPeerId) return;
+    if (!prepared || input.sourcePeerId !== prepared.publisherPeerId) {
+      this.failedPublisherAuthorityProbes.delete(probeKey);
+      this.failedPublisherAuthorityProbes.set(probeKey, true);
+      while (
+        this.failedPublisherAuthorityProbes.size
+        > FAILED_PUBLISHER_AUTHORITY_PROBE_MAX_ENTRIES
+      ) {
+        const oldest = this.failedPublisherAuthorityProbes.keys().next().value as
+          | string
+          | undefined;
+        if (oldest === undefined) break;
+        this.failedPublisherAuthorityProbes.delete(oldest);
+      }
+      return { prepared };
+    }
     try {
-      if (await store.recordPendingTrustedPublisher(key, prepared.publisherPeerId)) return;
+      if (entry) {
+        if (await store.recordTrustedPublisher(
+          key,
+          entry.generation,
+          prepared.publisherPeerId,
+        )) return { prepared };
+      } else if (await store.recordPendingTrustedPublisher(key, prepared.publisherPeerId)) {
+        return { prepared };
+      }
       // Promotion is serialized by the store but is intentionally independent
       // of the per-entry recovery lock. If it moved this row between admission
       // and the authority CAS, preserve the same monotonic evidence on the live row.
@@ -476,7 +497,7 @@ export class FinalizationRecovery<
           promoted.generation,
           prepared.publisherPeerId,
         )
-      ) return;
+      ) return { prepared };
       this.log.warn(
         `Finalization recovery inbox refused publisher authority for `
           + `${input.candidate.scope.ual}`,
@@ -488,6 +509,7 @@ export class FinalizationRecovery<
           + `${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    return {};
   }
 
   /**
@@ -578,8 +600,11 @@ export class FinalizationRecovery<
     const liveRetryAgeMs = Math.max(0, this.now() - entry.createdAt);
     if (
       this.isLiveEntry(entry)
-      && entry.attemptCount >= this.liveRetryLimit
       && liveRetryAgeMs >= this.liveRetryWindowMs
+      && (
+        entry.attemptCount >= this.liveRetryLimit
+        || entry.failureStreak >= FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD
+      )
     ) {
       const reason = 'autonomous retry budget exhausted after '
         + `${entry.attemptCount} attempts over ${liveRetryAgeMs}ms`;
@@ -956,6 +981,7 @@ export class FinalizationRecovery<
   private async materialize(
     input: FinalizationRecoveryLiveInput,
     context: FinalizationVerificationContext,
+    observedPrepared?: Prepared,
   ): Promise<FinalizationRecoveryApplyOutcome> {
     const preparationInput = context.kind === 'recovery'
       && context.entry.trustedPublisherPeerId
@@ -964,7 +990,7 @@ export class FinalizationRecovery<
           sourcePeerId: context.entry.trustedPublisherPeerId,
         }
       : input;
-    const prepared = await this.materializer.prepare(preparationInput);
+    const prepared = observedPrepared ?? await this.materializer.prepare(preparationInput);
     if (!prepared) return 'deferred';
     if (
       context.kind === 'recovery'
@@ -1094,47 +1120,25 @@ export class FinalizationRecovery<
   ): Promise<void> {
     const store = this.getStore();
     if (!store) return;
-    const retryKey = entry.key;
-    const previous = this.deferredFailureStreaks.get(retryKey);
-    const sameInMemoryFailure = previous?.generation === entry.generation
-      && previous.reason === reason;
-    // `lastError` seeds one persisted occurrence after restart. The in-memory
-    // streak then distinguishes consecutive failures from an old high global
-    // attempt count, without widening the durable schema.
-    const failureStreak = sameInMemoryFailure
-      ? previous.count + 1
-      : entry.lastError === reason
-        ? 2
-        : 1;
     const ordinaryDelay = retryDelayMs ?? deferredRetryDelayMs(entry.attemptCount);
-    let effectiveDelay = failureStreak >= FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD
-      ? Math.max(ordinaryDelay, FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS)
-      : ordinaryDelay;
-    // Parking must not hide an entry past the bounded poison-entry decision.
-    // Once the count budget has been consumed, wake at the wall-clock budget
-    // boundary so replayDueEntryLocked can make the terminal decision.
-    if (
-      entry.attemptCount + 1 >= this.liveRetryLimit
-      && this.liveRetryWindowMs < effectiveDelay
-    ) {
-      const retryWindowRemaining = Math.max(
-        0,
-        entry.createdAt + this.liveRetryWindowMs - this.now(),
-      );
-      effectiveDelay = Math.min(effectiveDelay, retryWindowRemaining);
-    }
     try {
-      await store.recordAttempt(
+      const result = await store.recordAttempt(
         entry.key,
         entry.generation,
         reason,
-        effectiveDelay,
+        {
+          retryDelayMs: ordinaryDelay,
+          failureSignature: reason,
+          stableFailureThreshold: FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD,
+          stableFailureRetryMs: FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS,
+          retryDeadlineAt: entry.createdAt + this.liveRetryWindowMs,
+        },
       );
-      this.deferredFailureStreaks.set(retryKey, {
-        generation: entry.generation,
-        reason,
-        count: failureStreak,
-      });
+      if (result.status === 'stale') {
+        this.log.info(
+          `Finalization recovery ignored stale attempt update for ${entry.ual}`,
+        );
+      }
     } catch (error) {
       this.log.warn(
         `Finalization recovery attempt update failed for ${entry.ual}: `
@@ -1446,7 +1450,7 @@ export class FinalizationRecovery<
         entry.key,
         entry.generation,
         reason,
-        delayMs,
+        { retryDelayMs: delayMs },
       );
     } catch (error) {
       this.log.warn(
@@ -1653,9 +1657,7 @@ export class FinalizationRecovery<
     const store = this.getStore();
     if (!store) return false;
     try {
-      const transitioned = await store.transition(entry.key, entry.generation, state, reason);
-      if (transitioned) this.deferredFailureStreaks.delete(entry.key);
-      return transitioned;
+      return await store.transition(entry.key, entry.generation, state, reason);
     } catch (error) {
       this.log.warn(
         `Finalization recovery transition to ${state} failed for ${entry.ual}: `

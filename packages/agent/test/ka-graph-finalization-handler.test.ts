@@ -1611,7 +1611,7 @@ describe('graph-scoped finalization handler', () => {
         listDue: async () => [],
         listForKnowledgeAsset: async () => [],
         transition: async () => false,
-        recordAttempt: async () => {},
+        recordAttempt: async () => ({ status: 'stale' }),
         health: async () => ({
           available: true,
           closed: false,

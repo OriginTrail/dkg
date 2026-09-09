@@ -115,6 +115,8 @@ async function makeDatabaseV1(databasePath: string): Promise<void> {
     DROP INDEX finalization_pending_graph_v2;
     DROP INDEX finalization_pending_time_v2;
     DROP TABLE finalization_pending_v2;
+    ALTER TABLE finalization_inbox_v1 DROP COLUMN failure_signature;
+    ALTER TABLE finalization_inbox_v1 DROP COLUMN failure_streak;
     PRAGMA user_version = 1;
   `);
   legacy.close();
@@ -130,10 +132,13 @@ describe('SQLite finalization recovery migration and crash recovery', () => {
       const migrated = await openSqliteFinalizationRecoveryStore(directory);
       expect(await migrated.list()).toMatchObject([{ key: 'entry-1', state: 'RECEIVED' }]);
       const schema = new DatabaseSync(databasePath, { readOnly: true });
-      expect(schema.prepare('PRAGMA user_version').get()?.user_version).toBe(2);
+      expect(schema.prepare('PRAGMA user_version').get()?.user_version).toBe(3);
       expect(schema.prepare(
         "SELECT name FROM sqlite_schema WHERE name = 'finalization_pending_v2'",
       ).get()?.name).toBe('finalization_pending_v2');
+      expect(schema.prepare(
+        "SELECT name FROM pragma_table_info('finalization_inbox_v1') WHERE name = 'failure_streak'",
+      ).get()?.name).toBe('failure_streak');
       schema.close();
       await migrated.close();
     } finally {
@@ -153,10 +158,13 @@ describe('SQLite finalization recovery migration and crash recovery', () => {
       const recovered = await openSqliteFinalizationRecoveryStore(directory);
       expect(await recovered.list()).toMatchObject([{ key: 'entry-1', state: 'RECEIVED' }]);
       const schema = new DatabaseSync(databasePath, { readOnly: true });
-      expect(schema.prepare('PRAGMA user_version').get()?.user_version).toBe(2);
+      expect(schema.prepare('PRAGMA user_version').get()?.user_version).toBe(3);
       expect(schema.prepare(
         "SELECT name FROM sqlite_schema WHERE name = 'finalization_pending_v2'",
       ).get()?.name).toBe('finalization_pending_v2');
+      expect(schema.prepare(
+        "SELECT name FROM pragma_table_info('finalization_inbox_v1') WHERE name = 'failure_streak'",
+      ).get()?.name).toBe('failure_streak');
       schema.close();
       await recovered.close();
     } finally {
