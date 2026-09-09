@@ -436,6 +436,12 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(await mock.isShardingTableMember(99999n)).toBe(true);
   });
 
+  it('resolves the mock Random Sampling deployment and membership through the typed capability', async () => {
+    const mock = new MockChainAdapter();
+    expect(await mock.resolveRandomSamplingAvailability(0n)).toEqual({ kind: 'available', member: false });
+    expect(await mock.resolveRandomSamplingAvailability(42n)).toEqual({ kind: 'available', member: true });
+  });
+
   // Codex PR #595 round-5: EVMChainAdapter.getMinimumRequiredSignatures
   // previously returned a hardcoded 3 when ParametersStorage couldn't be
   // resolved. The agent + publisher verify paths trust this value, so a

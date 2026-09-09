@@ -38,6 +38,7 @@ import type {
   ContextGraphAuthoritySnapshot,
 } from './chain-adapter.js';
 import type { RpcUsageWindow } from './rpc-usage.js';
+import type { RandomSamplingAvailability } from './random-sampling-availability.js';
 import {
   NoEligibleContextGraphError,
   NoEligibleKnowledgeCollectionError,
@@ -1524,6 +1525,10 @@ export class MockChainAdapter implements ChainAdapter {
 
   isRandomSamplingReady(): boolean {
     return true;
+  }
+
+  async resolveRandomSamplingAvailability(identityId: bigint): Promise<RandomSamplingAvailability> {
+    return { kind: 'available', member: await this.isShardingTableMember(identityId) };
   }
 
   async verify(params: VerifyParams): Promise<TxResult> {
