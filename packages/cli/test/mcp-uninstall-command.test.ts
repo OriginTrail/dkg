@@ -7,6 +7,21 @@ import { dirname, join } from 'node:path';
 import { mcpConfigPersistenceStrategy } from '../src/mcp-config-metadata.js';
 
 const fixture = vi.hoisted(() => ({ home: '', platform: 'darwin' }));
+vi.mock('node:child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    execFileSync: (...args: Parameters<typeof actual.execFileSync>) => {
+      if (args[0] === '/usr/bin/wslpath' && args[1]?.[0] === '-w'
+          && process.env.WSL_DISTRO_NAME === 'Fixture') {
+        // Synthetic WSL identities still point at host temporary files. Model
+        // that Linux-backed storage here; real Windows ACLs run in the WSL fixture.
+        return '\\\\wsl.localhost\\Fixture' + String(args[1][1]).replace(/\//g, '\\');
+      }
+      return actual.execFileSync(...args);
+    },
+  };
+});
 // Isolate the actual client-path resolver without mocking detection, config writes,
 // the uninstall action, or Commander. The process's real home stays untouched.
 // Windows-side selector fixtures use temporary host files; the separate native
