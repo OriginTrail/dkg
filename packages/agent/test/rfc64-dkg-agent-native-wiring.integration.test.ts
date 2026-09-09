@@ -2107,6 +2107,11 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           providerPeerAddresses.get(peerId) ?? null,
       },
     });
+    // This scenario exercises durable private-catalog restart repair, not the
+    // independent network-identity retry policy. Keep a stopped instance's
+    // in-flight identity probe from suppressing the replacement instance with
+    // the same peer id and obscuring the catalog lifecycle under test.
+    allowAllNetworkAdmissionForTest(provider);
     provider.acceptRfc64CatalogAccessSnapshotV1({
       policy: authority.policy,
       policyDigest: authority.policyDigest,
