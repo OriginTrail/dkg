@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
+import { SYSTEM_CONTEXT_GRAPHS, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   createSharedMemorySnapshotMaterializer,
@@ -22,6 +22,8 @@ import {
   selectSwmSnapshotCoverage,
   syncPublicSnapshotsForMeta,
 } from '../src/sync/requester/shared-memory-sync.js';
+import { createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
+import type { SyncPhase } from '../src/sync/auth/request-build.js';
 import type { SwmSnapshotCoverage } from '../src/dkg-agent-types.js';
 import {
   SyncPageAccumulationLimitError,
@@ -41,7 +43,7 @@ function durableFetchRecorder(
   return recorder(impl);
 }
 
-const ctx = { kind: 'system', id: 'test', startedAt: 0 } as OperationContext;
+const ctx = createOperationContext('sync');
 const noop = () => {};
 const EXACT_UAL = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/7';
 
@@ -50,7 +52,7 @@ function pageResult(
   phase: string,
   overrides: Partial<SyncPageResult> = {},
 ): SyncPageResult {
-  return {
+  const result = {
     quads: [],
     bytesReceived: 0,
     resumedFromOffset: 0,
@@ -61,6 +63,11 @@ function pageResult(
     timedOut: false,
     ...overrides,
   };
+  if (result.localYield) {
+    if (result.completed) throw new Error('A completed fixture page cannot carry a local yield');
+    return { ...result, completed: false, localYield: result.localYield };
+  }
+  return { ...result, localYield: undefined };
 }
 
 function deniedError(): Error & { syncDenied: boolean } {
@@ -130,12 +137,8 @@ describe('selected snapshot walk continuation', () => {
       contextGraphId: 'cg-resume-prefix',
       deadline: Date.now() + 60_000,
       snapshotWalk: {
-        orderedManifestSnapshot: () => snapshots.map((snapshot) => ({ ...snapshot })),
-        isResolved: (ref) => ref === firstDigest,
-        resolvedCount: () => 1,
-        resolvedRefsSnapshot: () => [firstDigest],
-        suppressedMetadataRows: () => [],
-        markResolved: () => {},
+        snapshots,
+        canReuse: (ref) => ref === firstDigest,
       },
       publicSnapshotStore: {
         getSnapshot: async (ref) => {
@@ -191,12 +194,8 @@ describe('selected snapshot walk continuation', () => {
       contextGraphId: 'cg-changed-manifest',
       deadline: Date.now() + 60_000,
       snapshotWalk: {
-        orderedManifestSnapshot: () => snapshots.map((snapshot) => ({ ...snapshot })),
-        isResolved: () => false,
-        resolvedCount: () => 0,
-        resolvedRefsSnapshot: () => [],
-        suppressedMetadataRows: () => [],
-        markResolved: () => {},
+        snapshots,
+        canReuse: () => false,
       },
       publicSnapshotStore: {
         getSnapshot: async () => null,
@@ -1001,7 +1000,7 @@ describe('sync requester progress accounting', () => {
       _peer: string,
       contextGraphId: string,
       _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
+      phase: SyncPhase,
     ) => {
       if (contextGraphId === 'denied-swm') throw deniedError();
       return pageResult(contextGraphId, phase);
@@ -1037,7 +1036,7 @@ describe('sync requester progress accounting', () => {
       _peer: string,
       contextGraphId: string,
       _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
+      phase: SyncPhase,
     ) => {
       if (contextGraphId.startsWith('fail-')) throw transportError(`sync responder busy for ${contextGraphId}`);
       return pageResult(contextGraphId, phase);
@@ -1074,7 +1073,7 @@ describe('sync requester progress accounting', () => {
       _peer: string,
       contextGraphId: string,
       _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
+      phase: SyncPhase,
     ) => pageResult(contextGraphId, phase, {
       quads: phase === 'data' ? [quad(contextGraphId)] : [],
     }));
@@ -1134,7 +1133,7 @@ describe('sync requester progress accounting', () => {
       _peer: string,
       contextGraphId: string,
       _includeSharedMemory: boolean,
-      phase: 'data' | 'meta' | 'snapshot',
+      phase: SyncPhase,
     ) => pageResult(contextGraphId, phase, {
       checkpointKey: phase === 'snapshot' ? `${contextGraphId}:snapshot:bad-ref` : `${contextGraphId}:${phase}`,
       quads: phase === 'snapshot'
@@ -1187,7 +1186,7 @@ describe('sync requester progress accounting', () => {
         _peer: string,
         contextGraphId: string,
         _includeSharedMemory: boolean,
-        phase: 'data' | 'meta',
+        phase: SyncPhase,
       ) => pageResult(contextGraphId, phase),
       processSharedMemoryBatch: async () => sharedMemoryProcessResult(),
       ensureContextGraph: async () => {},
@@ -1216,7 +1215,7 @@ describe('sync requester progress accounting', () => {
         _peer: string,
         contextGraphId: string,
         _includeSharedMemory: boolean,
-        phase: 'data' | 'meta',
+        phase: SyncPhase,
       ) => phase === 'data'
         ? pageResult(contextGraphId, phase, {
             completed: false,
@@ -1270,7 +1269,7 @@ describe('sync requester progress accounting', () => {
       _peer: string,
       contextGraphId: string,
       _includeSharedMemory: boolean,
-      phase: 'data' | 'meta' | 'snapshot',
+      phase: SyncPhase,
     ) => phase === 'snapshot'
       ? pageResult(contextGraphId, phase, {
         checkpointKey: `${contextGraphId}:snapshot:snapshot-ref`,
@@ -1348,7 +1347,7 @@ describe('sync requester progress accounting', () => {
       _peer: string,
       contextGraphId: string,
       _includeSharedMemory: boolean,
-      phase: 'data' | 'meta' | 'snapshot',
+      phase: SyncPhase,
     ) => {
       if (phase === 'snapshot') {
         return pageResult(contextGraphId, phase, {
@@ -1433,7 +1432,7 @@ describe('exact durable fetch disposition', () => {
       remotePeerId: 'exact-peer',
       contextGraphIds: ['exact-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
+      exactAssetSelectionFor: () => createUalOnlyExactAssetSelection([EXACT_UAL]),
       fetchSyncPages: async ({ phase }) => {
         if (options.fetchError) throw options.fetchError;
         const page = pageResult('exact-cg', phase, {
@@ -1472,7 +1471,7 @@ describe('exact durable fetch disposition', () => {
       remotePeerId: 'exact-peer-public',
       contextGraphIds: ['exact-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
+      exactAssetSelectionFor: () => createUalOnlyExactAssetSelection([EXACT_UAL]),
       fetchSyncPages: async ({ phase }) => pageResult('exact-cg', phase),
       processDurableBatchInWorker: async () => durableProcessResult(),
       storeInsert: async () => {},
@@ -1556,7 +1555,7 @@ describe('exact durable fetch disposition', () => {
       remotePeerId: 'legacy-exact-peer',
       contextGraphIds: ['exact-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
+      exactAssetSelectionFor: () => createUalOnlyExactAssetSelection([EXACT_UAL]),
       fetchSyncPages,
       processDurableBatchInWorker,
       storeInsert,
@@ -1583,7 +1582,7 @@ describe('exact durable fetch disposition', () => {
       contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.AGENTS],
       syncAgentsMeta: false,
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
+      exactAssetSelectionFor: () => createUalOnlyExactAssetSelection([EXACT_UAL]),
       fetchSyncPages: async ({ contextGraphId, phase }) => {
         fetchedPhases.push(phase);
         return pageResult(contextGraphId, phase);
@@ -1607,7 +1606,7 @@ describe('exact durable fetch disposition', () => {
       remotePeerId: 'exact-multi-cg-peer',
       contextGraphIds: ['exact-incomplete-cg', 'exact-clean-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
+      exactAssetSelectionFor: () => createUalOnlyExactAssetSelection([EXACT_UAL]),
       fetchSyncPages: async ({ contextGraphId, phase }) => pageResult(contextGraphId, phase, {
         ...(contextGraphId === 'exact-incomplete-cg' && phase === 'data'
           ? { completed: false }
@@ -2266,6 +2265,10 @@ describe('public SWM snapshot coverage (#2050)', () => {
     });
     const replacedGraphs: string[] = [];
     const materializer: SharedMemorySnapshotMaterializer = {
+      selectRepairIdentity: (...args) => real.selectRepairIdentity(...args),
+      repairHeadPreservingIdentity: (...args) => real.repairHeadPreservingIdentity(...args),
+      preserveStoredIdentityForSkippedAsset: (...args) => real.preserveStoredIdentityForSkippedAsset(...args),
+      replaceMetaForGraphAssets: (...args) => real.replaceMetaForGraphAssets(...args),
       withKaWriteLock: (contextGraphId, subGraphName, kaUal, fn) => (
         real.withKaWriteLock(contextGraphId, subGraphName, kaUal, fn)
       ),
@@ -2409,6 +2412,7 @@ function t13Coverage(over: Partial<SwmSnapshotCoverage> & {
   return {
     contextGraphId: 'cg-t13',
     manifestComplete: true,
+    materializationFailures: 0,
     missingCount: over.snapshotsTotal - over.snapshotsResolved,
     missingSample: [],
     ...over,

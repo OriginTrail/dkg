@@ -207,6 +207,8 @@ function harness(overrides: HarnessOverrides = {}) {
         inserted.push(quads);
       },
       snapshotMaterializer: {
+        preserveStoredIdentityForSkippedAsset: async () => { throw new Error('Private identity preservation is outside this selected-sync fixture'); },
+        replaceMetaForGraphAssets: async () => { throw new Error('Private bulk recovery is outside this selected-sync fixture'); },
         withKaWriteLock: async (contextGraphId, subGraphName, kaUal, fn) => {
           events.push('lock-requested');
           overrides.onLockRequested?.();
@@ -348,6 +350,7 @@ describe('public SWM snapshot materialization', () => {
     const resolved = new Set<string>();
     const suppressedByRef = new Map<string, readonly Quad[]>();
     const walk: SharedMemorySnapshotWalkContinuation = {
+      prepare: () => ({ snapshots: manifest, canReuse: (ref) => resolved.has(ref) }),
       orderedManifestSnapshot: () => manifest.map((snapshot) => ({ ...snapshot })),
       isResolved: (ref) => resolved.has(ref),
       resolvedCount: () => resolved.size,

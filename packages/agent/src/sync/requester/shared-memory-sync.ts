@@ -284,14 +284,21 @@ export interface SharedMemoryMetadataFetchOutcome {
   readonly continuationYielded: boolean;
 }
 
-/**
- * Selected-provider snapshot progress bound to one exact, ordered manifest.
- *
- * The owner keeps only refs whose content was already materialized locally.
- * A changed manifest replaces the continuation, and a process restart drops
- * it, so a skipped ref can never outlive the evidence that justified the skip.
- */
+/** A manifest owner prepares the order and evidence policy for one pass. */
+export interface PublicSnapshotWalkPlan {
+  readonly snapshots: readonly PublicSnapshotMetadata[];
+  /** The owner decides which earlier results may be reused in this pass. */
+  canReuse(ref: string): boolean;
+}
+
+export interface SnapshotWalkPreparation {
+  readonly order: 'manifest' | 'unresolved-first';
+  readonly canReuseResolved: (ref: string) => boolean;
+}
+
+/** Progress retained against one immutable manifest by a recovery owner. */
 export interface SharedMemorySnapshotWalkContinuation {
+  prepare(options: SnapshotWalkPreparation): PublicSnapshotWalkPlan;
   /** Take an immutable copy of the exact ordered manifest owning the resolved refs below. */
   orderedManifestSnapshot(): readonly PublicSnapshotMetadata[];
   /** Query live owner state without exposing its mutable backing collection. */
@@ -320,24 +327,10 @@ type PublicSnapshotWalkSource =
   }
   | {
     /**
-     * Selected lanes pass one manifest-bound continuation value. Keeping the
-     * order and its resolved-ref evidence in the same object makes it
-     * impossible to combine metadata from one manifest with skip evidence
-     * from another.
+     * Continuing lanes pass a prepared walk whose owner binds the order and
+     * reuse policy to the same verified manifest.
      */
-    readonly snapshotWalk: SharedMemorySnapshotWalkContinuation;
-    readonly validatedRetainedRefs?: never;
-    readonly metaQuads?: never;
-    readonly recoveryOrder?: never;
-  }
-  | {
-    /**
-     * Private retained refs proven against the current store in this job.
-     * When present, resolved refs outside this set are fail-closed and
-     * unresolved refs are attempted first so validation cannot starve a tail.
-     */
-    readonly snapshotWalk: RetainedSharedMemorySnapshotWalkContinuation;
-    readonly validatedRetainedRefs: ReadonlySet<string>;
+    readonly snapshotWalk: PublicSnapshotWalkPlan;
     readonly metaQuads?: never;
     readonly recoveryOrder?: never;
   };
@@ -1310,7 +1303,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         contextGraphId: pid,
         deadline,
         ...(snapshotWalk
-          ? { snapshotWalk }
+          ? { snapshotWalk: snapshotWalk.prepare({ order: 'manifest', canReuseResolved: () => true }) }
           : {
             metaQuads: processed.verifiedMeta,
             recoveryOrder: snapshotRecoveryOrder,
@@ -1669,17 +1662,11 @@ export async function syncPublicSnapshotsForMeta(params: {
   const manifestSnapshots = params.snapshotWalk
     ? []
     : collectPublicSnapshotMetadata(params.metaQuads);
-  const orderedSnapshots = params.snapshotWalk
-    ? params.snapshotWalk.orderedManifestSnapshot()
+  const snapshots = params.snapshotWalk
+    ? params.snapshotWalk.snapshots
     : params.recoveryOrder === 'recent-balanced'
       ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
       : manifestSnapshots;
-  const snapshots = params.snapshotWalk && params.validatedRetainedRefs
-    ? [
-      ...orderedSnapshots.filter((snapshot) => !params.snapshotWalk!.isResolved(snapshot.ref)),
-      ...orderedSnapshots.filter((snapshot) => params.snapshotWalk!.isResolved(snapshot.ref)),
-    ]
-    : orderedSnapshots;
   if (snapshots.length === 0) {
     return {
       bytesReceived: 0,
@@ -1742,19 +1729,10 @@ export async function syncPublicSnapshotsForMeta(params: {
 
   for (const [index, snapshot] of snapshots.entries()) {
     executionBoundary.assertCurrent();
-    // A selected transfer owner may carry exact, manifest-bound evidence from
-    // an earlier bounded slice. Skipping these refs is intentionally cheaper
-    // than re-reading and re-hashing every snapshot blob and assertion graph:
-    // that O(prefix) replay eventually consumed the whole slice and fixed the
-    // continuation at N/N+K forever. The owner is in-memory and resets on any
-    // manifest change, expiry, release or process restart.
-    if (
-      params.snapshotWalk?.isResolved(snapshot.ref)
-      && (
-        params.validatedRetainedRefs === undefined
-        || params.validatedRetainedRefs.has(snapshot.ref)
-      )
-    ) {
+    // The owner decides which manifest-bound evidence this pass can reuse.
+    // Avoid repeating blob and assertion validation when that owner has
+    // already established it, leaving time for unresolved refs to advance.
+    if (params.snapshotWalk?.canReuse(snapshot.ref)) {
       readySnapshots += 1;
       continue;
     }

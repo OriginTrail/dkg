@@ -97,6 +97,19 @@ describe('SWM catchup peer selection', () => {
     }).selectedPeers).toEqual(['peer-a']);
   });
 
+  it('keeps direct classifier-to-record composition neutral for local yields', () => {
+    const selector = createSwmCatchupPeerSelector({ maxEntries: 1 });
+    selector.record('cg', 'known-peer', 'good', 100);
+    const outcome = classifySwmCatchupPeerOutcome({ localYield: sharedMemoryLocalYield() });
+    // Runtime regression also covers old JavaScript callers without a guard.
+    selector.record('cg', 'new-peer', outcome, 101);
+    expect(selector.get('cg', 'known-peer', 102)).toBe('good');
+    expect(selector.select({ contextGraphId: 'cg', candidatePeers: ['new-peer'], now: 102 }).skippedNegativePeers).toEqual([]);
+    expect(selector.get('cg', 'new-peer', 102)).toBeUndefined();
+    selector.record('cg', 'known-peer', outcome, 103);
+    expect(selector.get('cg', 'known-peer', 104)).toBe('good');
+  });
+
   it('classifies detailed sync outcomes for cache accounting', () => {
     expect(classifySwmCatchupPeerOutcome({ fetchedDataTriples: 1 })).toBe('good');
     expect(classifySwmCatchupPeerOutcome({ deniedPhases: 1 })).toBe('denied');

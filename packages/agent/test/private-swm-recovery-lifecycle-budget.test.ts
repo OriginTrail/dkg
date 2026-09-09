@@ -12,8 +12,8 @@ import { ManifestBoundSnapshotWalk } from
 import type { SyncWorkAdmission } from '../src/sync/work-admission.js';
 import {
   collectPublicSnapshotMetadata,
-  type SharedMemorySnapshotMaterializer,
 } from '../src/sync/requester/shared-memory-sync.js';
+import type { SharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
@@ -56,13 +56,13 @@ function legacyMetadata(): Quad[] {
 }
 
 const stores: OxigraphStore[] = [];
-function harness(publicSnapshotStore?: WorkspacePublicSnapshotStore, detectLegacyRoots = false) {
+function harness(publicSnapshotStore?: WorkspacePublicSnapshotStore, detectLegacyRoots = false, roundBudgetMs = Infinity) {
   const store = new OxigraphStore(); stores.push(store);
   const fetchSyncPages = vi.fn<SwmTargetExecutorPortsV1['fetchSyncPages']>();
   const host = {
     config: { syncContextGraphPriorities: {} }, store, publicSnapshotStore,
     listSubGraphs: async () => [],
-    createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
+    createContextGraphSyncDeadline: () => Number.isFinite(roundBudgetMs) ? Date.now() + roundBudgetMs : Number.MAX_SAFE_INTEGER,
     fetchSyncPages,
     getOrCreateSyncVerifyWorker: () => ({
       processSharedMemoryBatch: async (data: Quad[], meta: Quad[]) => ({
@@ -120,6 +120,39 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     expect(allowances).toEqual(budget === 0 ? [Infinity] : [100, 40]);
     expect(onRetry).toHaveBeenCalledTimes(budget === 0 ? 0 : 1);
     if (budget > 0) expect(windows[1]).toBe(windows[0]);
+  });
+
+  it('keeps retrying when each bounded round materializes a new snapshot', async () => {
+    vi.stubEnv('DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS', '600000');
+    let elapsed = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+    vi.spyOn(Date, 'now').mockImplementation(() => 10_000 + elapsed);
+    const fixtures = [10, 9, 8, 7].map(number => snapshotFixture(number));
+    const snapshots = new Map<string, Quad[]>();
+    const { executor, fetchSyncPages, store } = harness({
+      getSnapshot: async ref => snapshots.get(ref) ?? null,
+      putSnapshot: async ({ digest, quads }) => {
+        snapshots.set(digest, quads.map(quad => ({ ...quad })));
+        return { ref: digest, byteLength: 1 };
+      },
+    }, false, 10);
+    const fetchedRefs: string[] = [];
+    fetchSyncPages.mockImplementation(async (_ctx, _peer, _cg, _swm, phase, _graph, _deadline, options) => {
+      if (phase === 'meta') return page(fixtures.flatMap(({ metadata }) => metadata));
+      expect(phase).toBe('snapshot');
+      const fixture = fixtures.find(({ digest }) => digest === options?.snapshotRef);
+      if (!fixture) throw new Error('Unknown snapshot reference');
+      fetchedRefs.push(fixture.digest);
+      // One complete asset consumes this round, leaving ample overall budget.
+      elapsed += 10;
+      return page(fixture.payload);
+    });
+    const onRetry = vi.fn();
+    const result = await executor.recoverPrivateTarget({ contextGraphId: CG, remotePeerId: 'peer-source', onRetry });
+    expect(result.completed).toBe(true);
+    expect(fetchedRefs).toEqual(fixtures.map(({ digest }) => digest));
+    expect(onRetry.mock.calls.map(([progress]) => progress.readySnapshots)).toEqual([1, 2, 3, 4]);
+    for (const fixture of fixtures) expect(await store.countQuads(fixture.assertionGraph)).toBe(1);
   });
 
   it('reports a local yield with no snapshot send or peer backoff after cache validation consumes the job', async () => {
@@ -406,6 +439,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
         elapsed = 100;
         return {
           ...page([], false),
+          completed: false,
           localYield: { kind: 'local-budget-yield' },
         };
       });

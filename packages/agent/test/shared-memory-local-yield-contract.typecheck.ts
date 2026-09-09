@@ -1,6 +1,6 @@
 import type { SharedMemoryLocalYield } from '../src/sync/shared-memory-completion.js';
 import { sharedMemoryLocalYield } from '../src/sync/shared-memory-completion.js';
-import { classifySwmCatchupPeerOutcome } from '../src/swm/swm-catchup-peer-selection.js';
+import { classifySwmCatchupPeerOutcome, createSwmCatchupPeerSelector, type SwmCatchupPeerOutcome } from '@origintrail-official/dkg-agent';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 
 const localYield = sharedMemoryLocalYield();
@@ -33,3 +33,16 @@ const contradictoryPage: SyncPageResult = {
 };
 
 void contradictoryPage;
+
+// Existing public consumers can classify an old-shaped result and pass the
+// guaranteed outcome directly to the selector, without an undefined guard.
+const selector = createSwmCatchupPeerSelector();
+const legacyResult = { insertedTriples: 0, failedPhases: 0 };
+const legacyOutcome: SwmCatchupPeerOutcome = classifySwmCatchupPeerOutcome(legacyResult);
+selector.record('cg', 'peer', classifySwmCatchupPeerOutcome(legacyResult));
+const emptyOutcome: SwmCatchupPeerOutcome = classifySwmCatchupPeerOutcome({});
+void legacyOutcome;
+void emptyOutcome;
+
+// New local-yield inputs also compose safely; the selector treats no evidence as a no-op.
+selector.record('cg', 'peer', classifySwmCatchupPeerOutcome({ localYield }));

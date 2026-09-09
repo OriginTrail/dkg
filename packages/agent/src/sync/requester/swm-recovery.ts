@@ -185,6 +185,8 @@ interface RecoverContextGraphSwmResultFields {
   readonly droppedDataTriples: number;
   /** Verified immutable snapshot refs ready in the local cache after this round. */
   readonly readySnapshots: number;
+  /** Manifest-bound progress across rounds; retry accounting, not permission to reuse a ref. */
+  readonly cumulativeResolvedSnapshots?: number;
   /** Total immutable snapshot refs declared by the recovered SWM metadata. */
   readonly totalSnapshots: number;
 }
@@ -252,15 +254,16 @@ export async function recoverContextGraphSwmWithProgressRetries(params: {
       );
     }
 
-    const madeProgress = result.readySnapshots > previousReadySnapshots;
+    const readySnapshots = result.cumulativeResolvedSnapshots ?? result.readySnapshots;
+    const madeProgress = readySnapshots > previousReadySnapshots;
     consecutiveNoProgressRounds = madeProgress ? 0 : consecutiveNoProgressRounds + 1;
     if (round >= maxRounds || consecutiveNoProgressRounds >= 2
       || !params.window.canStartRound(round + 1)) return result;
 
-    previousReadySnapshots = result.readySnapshots;
+    previousReadySnapshots = readySnapshots;
     params.onRetry?.({
       completedRound: round,
-      readySnapshots: result.readySnapshots,
+      readySnapshots,
       totalSnapshots: result.totalSnapshots,
     });
   }
@@ -421,9 +424,10 @@ async function recoverContextGraphSwmUnlocked(
   const hasGraphBackedSnapshots = graphScopedDescriptors.some(
     (descriptor) => descriptor.publicSnapshotGraph !== undefined,
   );
-  let snapshotProgress = { readySnapshots: 0, totalSnapshots: 0 };
+  let snapshotProgress: Pick<RecoverContextGraphSwmResult, 'readySnapshots' | 'totalSnapshots' | 'cumulativeResolvedSnapshots'> = {
+    readySnapshots: 0, totalSnapshots: 0,
+  };
   let snapshotWalk: RetainedSharedMemorySnapshotWalkContinuation | undefined;
-  let validatedRetainedRefs: ReadonlySet<string> | undefined;
   const incrementallyReadyGraphs = new Set<string>();
   /** Graph keys whose ASSERTION GRAPH was actually (re)written this run. */
   const rewrittenGraphKeys = new Set<string>();
@@ -513,12 +517,10 @@ async function recoverContextGraphSwmUnlocked(
     snapshotWalk = deps.snapshotWalk?.(orderedManifest);
     const hasUnresolvedSnapshots = snapshotWalk !== undefined
       && orderedManifest.some(({ ref }) => !snapshotWalk!.isResolved(ref));
-    // A retained prefix must not consume every bounded job before a manifest
-    // tail gets a chance. An empty validation set makes the shared walk try the
-    // unresolved tail first while treating the prefix fail-closed.
-    if (snapshotWalk && hasUnresolvedSnapshots) {
-      validatedRetainedRefs = new Set();
-    } else if (snapshotWalk) {
+    // Private recovery owns retained evidence: unresolved refs run first, and
+    // an unvalidated retained prefix must pass normal materialization checks.
+    let canReuseResolved = (_ref: string): boolean => false;
+    if (snapshotWalk && !hasUnresolvedSnapshots) {
       const retainedValidation = await validateRetainedSnapshotWalk({
         walk: snapshotWalk,
         deadline: deps.deadline,
@@ -549,11 +551,13 @@ async function recoverContextGraphSwmUnlocked(
           insertedMetaQuads: 0,
           droppedDataTriples: 0,
           readySnapshots: retainedValidation.validatedRefs,
+          cumulativeResolvedSnapshots: snapshotWalk.resolvedCount(),
           totalSnapshots: orderedManifest.length,
           completed: false,
         };
       }
-      validatedRetainedRefs = new Set(snapshotWalk.resolvedRefsSnapshot());
+      const validatedRefs = new Set(snapshotWalk.resolvedRefsSnapshot());
+      canReuseResolved = (ref) => validatedRefs.has(ref);
     }
     boundary.assertCurrent();
     const snapshotSync = await syncPublicSnapshotsForMeta({
@@ -563,7 +567,7 @@ async function recoverContextGraphSwmUnlocked(
       deadline: deps.deadline,
       workAdmission: deps.workAdmission,
       ...(snapshotWalk
-        ? { snapshotWalk, validatedRetainedRefs: validatedRetainedRefs! }
+        ? { snapshotWalk: snapshotWalk.prepare({ order: 'unresolved-first', canReuseResolved }) }
         : { metaQuads: activeGraphMeta }),
       publicSnapshotStore: deps.publicSnapshotStore,
       // Raw ports: syncPublicSnapshotsForMeta is the sole owner of admission,
@@ -579,6 +583,7 @@ async function recoverContextGraphSwmUnlocked(
     });
     snapshotProgress = {
       readySnapshots: snapshotSync.readySnapshots,
+      ...(snapshotWalk ? { cumulativeResolvedSnapshots: snapshotWalk.resolvedCount() } : {}),
       totalSnapshots: snapshotSync.totalSnapshots,
     };
     if (!snapshotSync.completed) {

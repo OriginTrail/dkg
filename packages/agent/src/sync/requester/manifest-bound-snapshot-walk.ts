@@ -3,6 +3,8 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type {
   PublicSnapshotMetadata,
+  PublicSnapshotWalkPlan,
+  SnapshotWalkPreparation,
   RetainedSharedMemorySnapshotWalkContinuation,
 } from './shared-memory-sync.js';
 
@@ -67,6 +69,20 @@ export class ManifestBoundSnapshotWalk implements RetainedSharedMemorySnapshotWa
 
   orderedManifestSnapshot(): readonly PublicSnapshotMetadata[] {
     return this.#manifest;
+  }
+
+  prepare({ order, canReuseResolved }: SnapshotWalkPreparation): PublicSnapshotWalkPlan {
+    const unresolved: PublicSnapshotMetadata[] = [];
+    const resolved: PublicSnapshotMetadata[] = [];
+    if (order === 'unresolved-first') {
+      for (const snapshot of this.#manifest) {
+        (this.isResolved(snapshot.ref) ? resolved : unresolved).push(snapshot);
+      }
+    }
+    return Object.freeze({
+      snapshots: order === 'manifest' ? this.#manifest : Object.freeze([...unresolved, ...resolved]),
+      canReuse: (ref: string) => this.isResolved(ref) && canReuseResolved(ref),
+    });
   }
 
   isResolved(ref: string): boolean {
