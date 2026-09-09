@@ -27,16 +27,30 @@ export class VmReconcileSweepSelector {
   }
 }
 
-interface SweepTurn {
-  phase: 'leading' | 'discovery' | 'tail' | 'done';
-  remaining: number;
-  /** A public caller claims a complete, finite bound rotation for this turn. */
-  fullBoundKeys?: readonly string[];
+interface SweepTurnBase {
   /** Every key admitted in this retained turn, across both candidate classes. */
   readonly admittedKeys: Set<string>;
   readonly completions: Promise<unknown>[];
   readonly finished: AbortController;
 }
+
+type SweepTurnState =
+  | Readonly<{ phase: 'leading'; remainingDiscovery: number }>
+  | Readonly<{ phase: 'discovery'; remainingDiscovery: number }>
+  | Readonly<{ phase: 'tail' }>;
+
+type SweepTurn = SweepTurnBase & (
+  | {
+    owner: 'timer';
+    state: SweepTurnState;
+  }
+  | {
+    owner: 'completion';
+    /** A public caller claims a complete, finite bound rotation for this turn. */
+    readonly fullBoundKeys: readonly string[];
+    state: SweepTurnState;
+  }
+);
 
 /** Own real admissions and their completion handles throughout a discovery turn. */
 export class VmReconcileSweepPlanner {
@@ -75,8 +89,7 @@ export class VmReconcileSweepPlanner {
   ): Promise<void> {
     const isActive = () => isCurrent() && !signal?.aborted;
     if (!isActive() || admission.isClosed()) return;
-    const turn = this.currentTurn();
-    turn.fullBoundKeys ??= [...boundKeys];
+    const turn = this.claimForCompletion(boundKeys);
     const waitingSignal = signal
       ? AbortSignal.any([signal, turn.finished.signal]) : turn.finished.signal;
     while (!turn.finished.signal.aborted && isActive() && !admission.isClosed()) {
@@ -92,13 +105,25 @@ export class VmReconcileSweepPlanner {
 
   private currentTurn(): SweepTurn {
     return this.turn ??= {
-      phase: 'leading', remaining: this.discoveryBatchSize,
+      owner: 'timer',
+      state: { phase: 'leading', remainingDiscovery: this.discoveryBatchSize },
       admittedKeys: new Set(), completions: [], finished: new AbortController(),
     };
   }
 
+  private claimForCompletion(boundKeys: readonly string[]): SweepTurn {
+    const current = this.currentTurn();
+    if (current.owner === 'completion') return current;
+    const claimed: SweepTurn = {
+      ...current,
+      owner: 'completion',
+      fullBoundKeys: [...boundKeys],
+    };
+    this.turn = claimed;
+    return claimed;
+  }
+
   private finish(turn: SweepTurn): void {
-    turn.phase = 'done';
     turn.finished.abort();
     if (this.turn === turn) this.turn = undefined;
   }
@@ -109,8 +134,8 @@ export class VmReconcileSweepPlanner {
     unboundKeys: readonly string[],
     tryAdmit: (key: string) => Promise<unknown> | undefined,
   ): void {
-    if (turn.phase === 'done') return;
-    const boundRotation = turn.fullBoundKeys ?? boundKeys;
+    if (turn.finished.signal.aborted) return;
+    const boundRotation = turn.owner === 'completion' ? turn.fullBoundKeys : boundKeys;
     const accept = (key: string): boolean => {
       const completion = tryAdmit(key);
       if (completion === undefined) return false;
@@ -119,25 +144,34 @@ export class VmReconcileSweepPlanner {
       turn.completions.push(completion.catch(() => undefined));
       return true;
     };
-    if (turn.phase === 'leading') {
+    if (turn.state.phase === 'leading') {
       const count = this.bound.admit(boundRotation, 1, key => {
         if (!accept(key)) return false;
         turn.admittedKeys.add(key);
         return true;
       });
       if (boundRotation.length > 0 && count === 0) return;
-      turn.phase = 'discovery';
+      turn.state = {
+        phase: 'discovery',
+        remainingDiscovery: turn.state.remainingDiscovery,
+      };
     }
-    if (turn.phase === 'discovery') {
-      turn.remaining = Math.min(turn.remaining, unboundKeys.length);
-      this.unbound.admit(unboundKeys, turn.remaining, key => {
+    if (turn.state.phase === 'discovery') {
+      let remainingDiscovery = Math.min(
+        turn.state.remainingDiscovery,
+        unboundKeys.length,
+      );
+      this.unbound.admit(unboundKeys, remainingDiscovery, key => {
         if (!accept(key)) return false;
         turn.admittedKeys.add(key);
-        turn.remaining--;
+        remainingDiscovery--;
         return true;
       });
-      if (turn.remaining > 0) return;
-      turn.phase = 'tail';
+      if (remainingDiscovery > 0) {
+        turn.state = { phase: 'discovery', remainingDiscovery };
+        return;
+      }
+      turn.state = { phase: 'tail' };
     }
     const tail = boundRotation.filter(key => !turn.admittedKeys.has(key));
     const count = this.bound.admit(tail, tail.length, key => {
@@ -145,7 +179,7 @@ export class VmReconcileSweepPlanner {
       turn.admittedKeys.add(key);
       return true;
     });
-    if (turn.fullBoundKeys !== undefined && count < tail.length) return;
+    if (turn.owner === 'completion' && count < tail.length) return;
     // A timer's rejected tail leads its next discovery turn. Public callers
     // retain the tail until admitted, so their finite selected rotation drains.
     this.finish(turn);

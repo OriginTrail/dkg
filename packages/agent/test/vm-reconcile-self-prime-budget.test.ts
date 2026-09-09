@@ -16,6 +16,7 @@ interface Internals {
   vmReconcileScheduling: VmReconcileSchedulingRuntime<boolean>;
   vmReconcileLifecycleController: AbortController;
   vmReconcilePhysicalRuns: Set<Promise<unknown>>;
+  ensureVmReconcileScheduling(): VmReconcileSchedulingRuntime<boolean>;
   resolveVmReconcileTarget(cg: string, isCurrent?: () => boolean, signal?: AbortSignal): Promise<unknown>;
   runVmReconcileSweep(): Promise<void>;
   scheduleVmReconcileSweep(): void;
@@ -93,6 +94,33 @@ it('performs zero unbound resolution calls for a burst of unmatched live events'
   expect(resolve.mock.calls.length).toBe(0);
   expect(canRead.mock.calls.length).toBe(0);
   expect(triggerLive).not.toHaveBeenCalled();
+});
+
+it('enforces the production unbound batch size through the agent-owned runtime', async () => {
+  const count = DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE + 5;
+  const agent = await DKGAgent.create({
+    name: 'ProductionBoundedSelfPrime',
+    chainAdapter: new MockChainAdapter(),
+    syncReconcilerEnabled: true,
+  });
+  agents.push(agent);
+  const internals = agent as unknown as Internals;
+  internals.node = {
+    peerId: '12D3KooWProductionSelfPrimeBudget',
+    libp2p: { getPeers: () => [] },
+  };
+  internals.openVmReconcileRotationState();
+  for (let i = 0; i < count; i++) {
+    internals.subscribedContextGraphs.set(`production-cg-${i}`, { subscribed: true });
+  }
+  const canRead = vi.spyOn(agent, 'canReadContextGraph').mockResolvedValue(false);
+  const scheduling = internals.ensureVmReconcileScheduling();
+  dispatchers.push(scheduling);
+
+  internals.scheduleVmReconcileSweep();
+  await scheduling.waitForIdle();
+
+  expect(canRead).toHaveBeenCalledTimes(DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE);
 });
 
 it.each([3, 8, 16, 26])('covers %i stable unbound subscriptions fairly with at most eight lookups per sweep', async (count) => {
