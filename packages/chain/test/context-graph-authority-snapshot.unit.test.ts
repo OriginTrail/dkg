@@ -6,6 +6,10 @@ import { ethers } from 'ethers';
 import type { ContextGraphAuthoritySnapshot } from '../src/chain-adapter.js';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
+import {
+  ContextGraphAuthorityHistoryCache,
+  type ContextGraphAuthorityHistoryState,
+} from '../src/context-graph-authority-history.js';
 
 const OWNER = '0x1111111111111111111111111111111111111111';
 const MEMBER = '0x2222222222222222222222222222222222222222';
@@ -29,7 +33,22 @@ function event(
   return { blockNumber, index, blockHash, args };
 }
 
-function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}) {
+interface AuthorityEvidence {
+  readonly filters: Array<readonly [string, ...unknown[]]>;
+  readonly ranges: Array<readonly [number, number]>;
+  readonly staticCalls: Array<readonly [bigint, { blockTag: number }]>;
+  readonly deploymentReads: Array<readonly [string, string, string]>;
+}
+
+interface EvmAuthorityHarness {
+  readonly adapter: EVMChainAdapter;
+  readonly evidence: AuthorityEvidence;
+  advanceAuthorityHead(): void;
+  replaceCachedAnchor(): void;
+  rotateContextGraphStorage(): void;
+}
+
+function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}): EvmAuthorityHarness {
   const adapter: any = new EVMChainAdapter({
     rpcUrl: 'http://127.0.0.1:1',
     hubAddress: GOVERNANCE,
@@ -40,7 +59,7 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}) {
   adapter.initialized = true;
   adapter.init = async () => {};
   adapter.cgRegistryScanPageSize = 10;
-  const evidence = {
+  const evidence: AuthorityEvidence = {
     filters: [] as Array<readonly [string, ...unknown[]]>,
     ranges: [] as Array<readonly [number, number]>,
     staticCalls: [] as Array<readonly [bigint, { blockTag: number }]>,
@@ -134,23 +153,28 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}) {
     evidence.deploymentReads.push([address, operation, label]);
     return { fromBlock: 7, head: 30, scanProviders: [] };
   };
-  adapter.authorityEvidence = evidence;
-  adapter.advanceAuthorityHead = () => {
+  const advanceAuthorityHead = () => {
     finalizedNumber = 35;
     finalizedHash = NEXT_FINALIZED_HASH;
     logs.PublishPolicyUpdated.push(event(33, 0, NEXT_POLICY_HASH));
     current.publishPolicy = 1n;
     current[6] = 1n;
   };
-  adapter.replaceCachedAnchor = () => {
+  const replaceCachedAnchor = () => {
     cachedAnchorReplaced = true;
   };
-  return adapter as EVMChainAdapter;
+  return {
+    adapter: adapter as EVMChainAdapter,
+    evidence,
+    advanceAuthorityHead,
+    replaceCachedAnchor,
+    rotateContextGraphStorage: () => adapter.applyHubRotationEventName('ContextGraphStorage'),
+  };
 }
 
 describe('RFC-64 Context Graph authority snapshots', () => {
   it('reads one stable finalized EVM generation and derives monotonic epochs', async () => {
-    const adapter = makeEvmAuthorityAdapter();
+    const { adapter, evidence, advanceAuthorityHead } = makeEvmAuthorityAdapter();
     const snapshot = await adapter.getContextGraphAuthoritySnapshot(9n);
 
     expect(snapshot).toEqual({
@@ -173,7 +197,6 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     });
     expect(Object.isFrozen(snapshot)).toBe(true);
     expect(Object.isFrozen(snapshot.participantAgents)).toBe(true);
-    const evidence = (adapter as any).authorityEvidence;
     expect(evidence.staticCalls).toEqual([[9n, { blockTag: 30 }]]);
     expect(evidence.deploymentReads).toEqual([[
       GOVERNANCE,
@@ -205,7 +228,7 @@ describe('RFC-64 Context Graph authority snapshots', () => {
       [9n, { blockTag: 30 }],
     ]);
 
-    (adapter as any).advanceAuthorityHead();
+    advanceAuthorityHead();
     const advanced = await adapter.getContextGraphAuthoritySnapshot(9n);
     expect(advanced).toMatchObject({
       publishPolicy: 1,
@@ -222,31 +245,60 @@ describe('RFC-64 Context Graph authority snapshots', () => {
   });
 
   it('rejects a finalized anchor that changes while the generation is read', async () => {
-    await expect(makeEvmAuthorityAdapter({ reorg: true })
+    await expect(makeEvmAuthorityAdapter({ reorg: true }).adapter
       .getContextGraphAuthoritySnapshot(9n))
       .rejects.toThrow('anchor changed');
   });
 
   it('discards the incremental watermark when its finalized anchor was replaced', async () => {
-    const adapter = makeEvmAuthorityAdapter();
+    const { adapter, evidence, advanceAuthorityHead, replaceCachedAnchor } =
+      makeEvmAuthorityAdapter();
     await adapter.getContextGraphAuthoritySnapshot(9n);
-    (adapter as any).advanceAuthorityHead();
-    (adapter as any).replaceCachedAnchor();
+    advanceAuthorityHead();
+    replaceCachedAnchor();
 
     await expect(adapter.getContextGraphAuthoritySnapshot(9n)).resolves.toMatchObject({
       publishPolicy: 1,
       policyVersion: '4',
     });
-    const evidence = (adapter as any).authorityEvidence as {
-      deploymentReads: unknown[];
-      ranges: Array<readonly [number, number]>;
-    };
     expect(evidence.deploymentReads).toHaveLength(2);
     expect(evidence.ranges.slice(18)).toEqual([
       ...Array(6).fill([7, 16]),
       ...Array(6).fill([17, 26]),
       ...Array(6).fill([27, 35]),
     ]);
+  });
+
+  it('clears cached generations when ContextGraphStorage rotates', async () => {
+    const { adapter, evidence, rotateContextGraphStorage } = makeEvmAuthorityAdapter();
+    await adapter.getContextGraphAuthoritySnapshot(9n);
+    rotateContextGraphStorage();
+    await adapter.getContextGraphAuthoritySnapshot(9n);
+    expect(evidence.deploymentReads).toHaveLength(2);
+    expect(evidence.ranges).toHaveLength(36);
+  });
+
+  it('bounds authority history with LRU retention', () => {
+    const cache = new ContextGraphAuthorityHistoryCache(2);
+    const state = (throughBlockNumber: number): ContextGraphAuthorityHistoryState => ({
+      throughBlockNumber,
+      throughBlockHash: `0x${throughBlockNumber}`,
+      nameHash: NAME_HASH,
+      ownershipEra: 0,
+      policyVersion: 0,
+      rosterVersion: 0,
+      sourceBlockNumber: throughBlockNumber,
+      sourceBlockHash: `0x${throughBlockNumber}`,
+      sourceLogIndex: 0,
+    });
+    cache.set('a', state(1));
+    cache.set('b', state(2));
+    expect(cache.get('a')).toEqual(state(1));
+    cache.set('c', state(3));
+    expect(cache.size).toBe(2);
+    expect(cache.get('b')).toBeUndefined();
+    expect(cache.get('a')).toEqual(state(1));
+    expect(cache.get('c')).toEqual(state(3));
   });
 
   it('provides the same authority surface in offline mock-chain mode', async () => {

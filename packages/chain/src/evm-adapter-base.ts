@@ -51,6 +51,7 @@ import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, reso
 } from './evm-adapter-constants.js';
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
 import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
+import { invalidateContextGraphAuthorityHistory } from './context-graph-authority-history.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
 
@@ -4250,6 +4251,9 @@ export class EVMChainAdapterBase {
     // may have moved; flushing all of them is correct and keeps the 30s TTL as a
     // pure missed-rotation backstop.
     this.resolvedContractAddressCache.invalidateAll();
+    if (name === 'ContextGraphStorage') {
+      invalidateContextGraphAuthorityHistory(this);
+    }
     if (name === 'RandomSampling' || name === 'RandomSamplingStorage') {
       this.invalidateRandomSamplingPair();
       return;
@@ -4311,6 +4315,7 @@ export class EVMChainAdapterBase {
     // the entire resolved-address memo along with every bound handle.
     this.resolvedContractAddressCache.invalidateAll();
     this.invalidateRandomSamplingPair();
+    invalidateContextGraphAuthorityHistory(this);
     this.initialized = false;
   }
 
@@ -4345,6 +4350,7 @@ export class EVMChainAdapterBase {
    */
   destroy(): void {
     this.hubRotationPoller.stop();
+    invalidateContextGraphAuthorityHistory(this);
     for (const provider of this.providers) {
       try { provider.destroy(); } catch { /* already destroyed / not destroyable */ }
     }

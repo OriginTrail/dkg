@@ -20,6 +20,11 @@ import {
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
+import {
+  contextGraphAuthorityHistoryCacheFor,
+  resolveContextGraphAuthorityHistory,
+  type ContextGraphAuthorityHistoryEvent,
+} from './context-graph-authority-history.js';
 
 type ContextGraphRegistryScanPlan =
   | {
@@ -170,26 +175,7 @@ function buildCursorContextGraphRegistryScanPlan(
   throw new Error(`Unsupported ContextGraphNameRegistry scan mode: ${JSON.stringify(exhaustive)}`);
 }
 
-interface ContextGraphAuthorityHistoryCacheEntry {
-  readonly throughBlockNumber: number;
-  readonly throughBlockHash: string;
-  readonly nameHash: string;
-  readonly ownershipEra: number;
-  readonly publishPolicyUpdates: number;
-  readonly publishAuthorityUpdates: number;
-  readonly participantAdds: number;
-  readonly participantRemoves: number;
-  readonly sourceBlockNumber: number;
-  readonly sourceBlockHash: string;
-  readonly sourceLogIndex: number;
-}
-
 export class ContextGraphMethods extends EVMChainAdapterBase {
-  /** Lazily initialized because this class is applied as a mixin. */
-  private contextGraphAuthorityHistoryCache?: Map<
-    string,
-    ContextGraphAuthorityHistoryCacheEntry
-  >;
   /**
    * Legacy cost-independent authorized signer selection. New publish flows use
    * resolvePublisherPublishPlan once byte size is known so signer, lifetime,
@@ -943,119 +929,57 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           (...args: unknown[]) => ethers.DeferredTopicFilter
         >;
         const contractAddress = (await contract.getAddress()).toLowerCase();
-        const cache = this.contextGraphAuthorityHistoryCache ??= new Map();
+        const cache = contextGraphAuthorityHistoryCacheFor(this);
         const cacheKey = `${contractAddress}:${contextGraphId.toString(10)}`;
-        let history = cache.get(cacheKey);
-        if (history) {
-          let anchorMatches = false;
-          if (history.throughBlockNumber === finalized.number) {
-            anchorMatches = history.throughBlockHash === finalized.hash.toLowerCase();
-          } else if (history.throughBlockNumber < finalized.number) {
-            const cachedAnchor = await provider.getBlock(history.throughBlockNumber);
-            anchorMatches = cachedAnchor?.hash?.toLowerCase() === history.throughBlockHash;
-          }
-          if (!anchorMatches) history = undefined;
-        }
-        const fromBlock = history
-          ? history.throughBlockNumber + 1
-          : (await this.resolveContractDeployBlock(
-              contractAddress,
-              'getContextGraphAuthoritySnapshot',
-              'ContextGraphStorage',
-            )).fromBlock;
-        const readLogs = async (name: string, ...args: unknown[]) => {
-          const logs: Array<ethers.EventLog | ethers.Log> = [];
-          if (fromBlock > finalized.number) return logs;
-          const filter = filters[name]!(...args);
-          // Production RPCs commonly cap eth_getLogs ranges. Keep every read
-          // page-bounded while all state and event results remain pinned to
-          // one finalized anchor. After the first complete read, `fromBlock`
-          // advances from the cached finalized watermark instead of the
-          // contract deployment block.
-          for (
-            let lo = fromBlock;
-            lo <= finalized.number;
-            lo += this.cgRegistryScanPageSize
-          ) {
-            options.signal?.throwIfAborted();
-            const hi = Math.min(
-              lo + this.cgRegistryScanPageSize - 1,
-              finalized.number,
-            );
-            logs.push(...await contract.queryFilter(filter, lo, hi));
-          }
-          return logs;
-        };
-        const [
-          current,
-          created,
-          transfers,
-          publishPolicyUpdates,
-          publishAuthorityUpdates,
-          participantAdds,
-          participantRemoves,
-        ] = await Promise.all([
+        const authorityFilters = new Map<string, ethers.DeferredTopicFilter>();
+        const [current, historyResolution] = await Promise.all([
           (contract as any).getContextGraph.staticCall(
             contextGraphId,
             { blockTag: finalized.number },
           ),
-          history ? Promise.resolve([]) : readLogs('ContextGraphCreated', contextGraphId),
-          readLogs('Transfer', null, null, contextGraphId),
-          readLogs('PublishPolicyUpdated', contextGraphId),
-          readLogs('PublishAuthorityUpdated', contextGraphId),
-          readLogs('AgentParticipantAdded', contextGraphId),
-          readLogs('AgentParticipantRemoved', contextGraphId),
+          resolveContextGraphAuthorityHistory({
+            cache,
+            cacheKey,
+            contextGraphId,
+            finalized: { number: finalized.number, hash: finalized.hash },
+            pageSize: this.cgRegistryScanPageSize,
+            signal: options.signal,
+            loadColdFromBlock: async () => (await this.resolveContractDeployBlock(
+              contractAddress,
+              'getContextGraphAuthoritySnapshot',
+              'ContextGraphStorage',
+            )).fromBlock,
+            readBlockHash: async (blockNumber) => (
+              (await provider.getBlock(blockNumber))?.hash ?? null
+            ),
+            readEvents: async (name, args, fromBlock, toBlock) => {
+              let filter = authorityFilters.get(name);
+              if (filter === undefined) {
+                filter = filters[name]!(...args);
+                authorityFilters.set(name, filter);
+              }
+              return contract.queryFilter(filter, fromBlock, toBlock) as Promise<
+                readonly ContextGraphAuthorityHistoryEvent[]
+              >;
+            },
+            isOwnershipTransfer: (event) => {
+              const transfer = event as ethers.EventLog;
+              const from = String(transfer.args.from ?? transfer.args[0]).toLowerCase();
+              const to = String(transfer.args.to ?? transfer.args[1]).toLowerCase();
+              return ethers.isAddress(from)
+                && ethers.isAddress(to)
+                && from !== ethers.ZeroAddress
+                && to !== ethers.ZeroAddress
+                && from !== to;
+            },
+            creationNameHash: (event) => {
+              const created = event as ethers.EventLog;
+              return String(created.args[2]).toLowerCase();
+            },
+          }),
         ]);
         options.signal?.throwIfAborted();
-        if (!history && created.length !== 1) {
-          throw new Error(
-            `Context Graph ${contextGraphId.toString()} has ${created.length} finalized creation events`,
-          );
-        }
-        const post = await provider.getBlock(finalized.number);
-        if (post?.hash?.toLowerCase() !== finalized.hash.toLowerCase()) {
-          throw new Error('finalized Context Graph authority anchor changed during resolution');
-        }
-        const ownershipTransfers = transfers.filter((event) => {
-          const transfer = event as ethers.EventLog;
-          const from = String(transfer.args.from ?? transfer.args[0]).toLowerCase();
-          const to = String(transfer.args.to ?? transfer.args[1]).toLowerCase();
-          return ethers.isAddress(from)
-            && ethers.isAddress(to)
-            && from !== ethers.ZeroAddress
-            && to !== ethers.ZeroAddress
-            && from !== to;
-        });
-        const policyEvents = [...created, ...ownershipTransfers, ...publishPolicyUpdates,
-          ...publishAuthorityUpdates].sort((left, right) => (
-          left.blockNumber - right.blockNumber || left.index - right.index
-        ));
-        const latestPolicyEvent = policyEvents.at(-1);
-        const creationEvent = created[0] as ethers.EventLog | undefined;
-        const sourceBlockNumber = latestPolicyEvent?.blockNumber
-          ?? history?.sourceBlockNumber
-          ?? creationEvent!.blockNumber;
-        const sourceBlockHash = latestPolicyEvent?.blockHash?.toLowerCase()
-          ?? history?.sourceBlockHash
-          ?? creationEvent!.blockHash.toLowerCase();
-        const sourceLogIndex = latestPolicyEvent?.index
-          ?? history?.sourceLogIndex
-          ?? creationEvent!.index;
-        const nextHistory: ContextGraphAuthorityHistoryCacheEntry = Object.freeze({
-          throughBlockNumber: finalized.number,
-          throughBlockHash: finalized.hash.toLowerCase(),
-          nameHash: history?.nameHash ?? String(creationEvent!.args[2]).toLowerCase(),
-          ownershipEra: (history?.ownershipEra ?? 0) + ownershipTransfers.length,
-          publishPolicyUpdates:
-            (history?.publishPolicyUpdates ?? 0) + publishPolicyUpdates.length,
-          publishAuthorityUpdates:
-            (history?.publishAuthorityUpdates ?? 0) + publishAuthorityUpdates.length,
-          participantAdds: (history?.participantAdds ?? 0) + participantAdds.length,
-          participantRemoves: (history?.participantRemoves ?? 0) + participantRemoves.length,
-          sourceBlockNumber,
-          sourceBlockHash,
-          sourceLogIndex,
-        });
+        const nextHistory = historyResolution.state;
         const participantAgents = [...(current.participantAgents ?? current[1] ?? [])]
           .map((address) => String(address).toLowerCase())
           .sort();
@@ -1067,7 +991,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         // Publish the watermark only after the complete snapshot decoded. A
         // transient failure in current-state parsing must leave the next call
         // free to replay the same suffix.
-        cache.set(cacheKey, nextHistory);
+        historyResolution.commit();
         return Object.freeze({
           chainId,
           governanceContract: contractAddress,
@@ -1082,16 +1006,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           participantAgents: Object.freeze(participantAgents),
           nameHash: nextHistory.nameHash,
           ownershipEra: nextHistory.ownershipEra.toString(10),
-          policyVersion: (
-            nextHistory.ownershipEra
-              + nextHistory.publishPolicyUpdates
-              + nextHistory.publishAuthorityUpdates
-          ).toString(10),
-          rosterVersion: (
-            nextHistory.ownershipEra
-              + nextHistory.participantAdds
-              + nextHistory.participantRemoves
-          ).toString(10),
+          policyVersion: nextHistory.policyVersion.toString(10),
+          rosterVersion: nextHistory.rosterVersion.toString(10),
           sourceBlockNumber: nextHistory.sourceBlockNumber.toString(10),
           sourceBlockHash: nextHistory.sourceBlockHash,
         });
