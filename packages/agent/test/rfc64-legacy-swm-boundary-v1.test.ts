@@ -236,7 +236,28 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
 
   it('fails closed when a head subject and its canonical UAL differ', async () => {
     const root = await secureTempRoot(roots);
-    const store = fakeStore(new Map([[META_GRAPH, [UAL_ONE]]]), `${UAL_TWO}#dkg-swm-head`);
+    const store = new OxigraphStore();
+    const corruptHead = `${UAL_TWO}#dkg-swm-head`;
+    await store.insert([
+      {
+        graph: META_GRAPH,
+        subject: corruptHead,
+        predicate: 'http://dkg.io/ontology/kaUal',
+        object: UAL_ONE,
+      },
+      {
+        graph: META_GRAPH,
+        subject: corruptHead,
+        predicate: 'http://dkg.io/ontology/shareOperationId',
+        object: '"corrupt-share"',
+      },
+      ...legacyOperationQuads(
+        META_GRAPH,
+        UAL_ONE,
+        'corrupt-head',
+        'corrupt-share',
+      ),
+    ]);
 
     await expect(initializeRfc64LegacySwmBoundaryV1({}, root, store)).rejects.toThrow(
       `RFC-64 legacy SWM head identity differs for ${UAL_ONE}`,
@@ -302,12 +323,15 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
       '?operation <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>',
     );
     expect(captureQuery).toContain(
-      'BIND(IRI(CONCAT(STR(?ual), "#dkg-swm-head")) AS ?head)',
+      'BIND(?operationUal AS ?ual)',
     );
     expect(captureQuery).toContain(
       '?head <http://dkg.io/ontology/kaUal> ?ual ; <http://dkg.io/ontology/shareOperationId> ?shareId',
     );
     expect(captureQuery).toContain('LIMIT 100001');
+    expect(captureQuery).toContain(
+      'FILTER(STRENDS(STR(?head), "#dkg-swm-head"))',
+    );
     expect(captureQuery).not.toContain('VALUES');
     expect(captureQuery).not.toContain('queryHints#');
   });
@@ -463,7 +487,6 @@ async function secureTempRoot(roots: string[]): Promise<string> {
 
 function fakeStore(
   headsByGraph: Map<string, string[]>,
-  forcedHead?: string,
 ): TripleStore {
   return {
     listGraphs: vi.fn(async () => [...headsByGraph.keys()]),
@@ -474,7 +497,7 @@ function fakeStore(
           type: 'bindings' as const,
           bindings: rootHeads.map((ual) => ({
             metaGraph: META_GRAPH,
-            head: forcedHead ?? `${ual}#dkg-swm-head`,
+            head: `${ual}#dkg-swm-head`,
             ual,
             contextGraphId: `"${CONTEXT_GRAPH_ID}"`,
           })),

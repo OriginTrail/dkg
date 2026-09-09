@@ -43,16 +43,16 @@ describe('RFC-64 legacy SWM boundary (live Blazegraph)', () => {
     persistenceRoot = await mkdtemp(join(tmpdir(), 'dkg-rfc64-boundary-blazegraph-'));
     await chmod(persistenceRoot, 0o700);
     await store.dropGraph(META_GRAPH);
-    const fixture = legacyBoundaryFixture();
-    for (
-      let offset = 0;
-      offset < fixture.length;
-      offset += FIXTURE_INSERT_BATCH_SIZE
-    ) {
-      await store.insert(fixture.slice(
-        offset,
-        offset + FIXTURE_INSERT_BATCH_SIZE,
-      ));
+    let batch: Quad[] = [];
+    for (const quad of legacyBoundaryFixture()) {
+      batch.push(quad);
+      if (batch.length === FIXTURE_INSERT_BATCH_SIZE) {
+        await store.insert(batch);
+        batch = [];
+      }
+    }
+    if (batch.length > 0) {
+      await store.insert(batch);
     }
   }, 120_000);
 
@@ -93,7 +93,7 @@ describe('RFC-64 legacy SWM boundary (live Blazegraph)', () => {
       )).map(([sparql]) => sparql);
       expect(captureQueries).toHaveLength(1);
       expect(captureQueries[0]).toContain(
-        'BIND(IRI(CONCAT(STR(?ual), "#dkg-swm-head")) AS ?head)',
+        'BIND(?operationUal AS ?ual)',
       );
       expect(captureQueries[0]!.match(
         /<http:\/\/dkg\.io\/ontology\/shareOperationId> \?shareId/g,
@@ -121,15 +121,14 @@ describe('RFC-64 legacy SWM boundary (live Blazegraph)', () => {
   );
 });
 
-function legacyBoundaryFixture(): Quad[] {
-  const quads: Quad[] = [];
+function* legacyBoundaryFixture(): Generator<Quad> {
   for (let index = 0; index < LEGACY_HEAD_COUNT; index += 1) {
     const ual =
       `did:dkg:otp:20430/0x1111111111111111111111111111111111111111/${index + 1}`;
     const head = `${ual}#dkg-swm-head`;
     const operation = `urn:dkg:workspace-operation:live-boundary:${RUN}:${index}`;
     const shareOperationId = JSON.stringify(`live-boundary-share-${index}`);
-    quads.push(
+    yield* [
       { graph: META_GRAPH, subject: head, predicate: KA_UAL, object: ual },
       {
         graph: META_GRAPH,
@@ -156,7 +155,7 @@ function legacyBoundaryFixture(): Quad[] {
         predicate: CONTEXT_GRAPH_ID_PREDICATE,
         object: JSON.stringify(CONTEXT_GRAPH_ID),
       },
-    );
+    ];
   }
   // These look like legacy heads and have WorkspaceOperations, but their share
   // IDs do not match. They must not consume either semantic capture limit.
@@ -166,7 +165,7 @@ function legacyBoundaryFixture(): Quad[] {
       `did:dkg:otp:20430/0x1111111111111111111111111111111111111111/${kaNumber}`;
     const head = `${ual}#dkg-swm-head`;
     const operation = `urn:dkg:workspace-operation:mismatch:${RUN}:${index}`;
-    quads.push(
+    yield* [
       { graph: META_GRAPH, subject: head, predicate: KA_UAL, object: ual },
       {
         graph: META_GRAPH,
@@ -193,7 +192,7 @@ function legacyBoundaryFixture(): Quad[] {
         predicate: CONTEXT_GRAPH_ID_PREDICATE,
         object: JSON.stringify(CONTEXT_GRAPH_ID),
       },
-    );
+    ];
   }
   // More than 100,000 concrete operation solutions target the first UAL, but
   // every historical share differs from its current head. The exact join must
@@ -207,7 +206,7 @@ function legacyBoundaryFixture(): Quad[] {
   ) {
     const operation =
       `urn:dkg:workspace-operation:history:${RUN}:${operationIndex}`;
-    quads.push(
+    yield* [
       {
         graph: META_GRAPH,
         subject: operation,
@@ -226,21 +225,20 @@ function legacyBoundaryFixture(): Quad[] {
         predicate: CONTEXT_GRAPH_ID_PREDICATE,
         object: JSON.stringify(CONTEXT_GRAPH_ID),
       },
-    );
+    ];
     for (
       let shareIndex = 0;
       shareIndex < HISTORICAL_SHARES_PER_OPERATION;
       shareIndex += 1
     ) {
-      quads.push({
+      yield {
         graph: META_GRAPH,
         subject: operation,
         predicate: SHARE_OPERATION_ID,
         object: JSON.stringify(
           `historical-share-${operationIndex}-${shareIndex}`,
         ),
-      });
+      };
     }
   }
-  return quads;
 }

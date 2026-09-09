@@ -401,10 +401,12 @@ async function readRfc64LateLegacySwmBoundaryEntriesV1(
 async function captureRfc64LegacySwmBoundaryV1(
   store: TripleStore,
 ): Promise<Readonly<Rfc64LegacySwmBoundaryCaptureV1>> {
-  // Derive each canonical head IRI from the selective operation binding before
-  // reading that exact subject. BIND is an explicit SPARQL algebra boundary,
+  // Derive the head-side UAL from the selective operation binding before
+  // reading suffix-bearing heads. BIND is an explicit SPARQL algebra boundary,
   // unlike textual ordering inside one basic graph pattern, so the store never
-  // needs to begin with the broad legacy-head scan that blocked startup.
+  // needs to begin with the broad legacy-head scan that blocked startup. Keep
+  // the head subject variable so corrupt subject/UAL identities remain visible
+  // to the fail-closed validation below.
   // DISTINCT runs after the exact head/operation share-ID correlation: repeated
   // history collapses and the limits count only fully qualified legacy heads.
   // Reject named-subgraph metadata inside the store: URI-only parsing is
@@ -413,15 +415,15 @@ async function captureRfc64LegacySwmBoundaryV1(
     `SELECT DISTINCT ?metaGraph ?head ?ual ?contextGraphId WHERE { ` +
     `GRAPH ?metaGraph { ` +
     `?operation <${RDF_TYPE}> <${WORKSPACE_OPERATION}> ; ` +
-    `<${KA_UAL}> ?ual ; <${SHARE_OPERATION_ID}> ?shareId ; ` +
+    `<${KA_UAL}> ?operationUal ; <${SHARE_OPERATION_ID}> ?shareId ; ` +
     `<${CONTEXT_GRAPH_ID}> ?contextGraphId . ` +
     `} FILTER(STR(?metaGraph) = CONCAT(` +
     `${JSON.stringify(CONTEXT_GRAPH_PREFIX)}, STR(?contextGraphId), ` +
     `${JSON.stringify(SWM_META_SUFFIX)})) ` +
-    `BIND(IRI(CONCAT(STR(?ual), ${JSON.stringify(SWM_HEAD_SUFFIX)})) AS ?head) ` +
+    `BIND(?operationUal AS ?ual) ` +
     `GRAPH ?metaGraph { ` +
     `?head <${KA_UAL}> ?ual ; <${SHARE_OPERATION_ID}> ?shareId . ` +
-    `} ` +
+    `} FILTER(STRENDS(STR(?head), ${JSON.stringify(SWM_HEAD_SUFFIX)})) ` +
     `} LIMIT ${RFC64_LEGACY_SWM_HEAD_LIMIT_V1 + 1}`,
     {
       source: 'agent.rfc64.legacySwmBoundary.readHeads',
