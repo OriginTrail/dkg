@@ -39,6 +39,7 @@ import {
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
   resolveKnowledgeAssetOperationPublicQuads,
   resolvePublishedKnowledgeAssetWorkspaceHead,
+  workspaceHeadIncludesShareOperationId,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
@@ -681,7 +682,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       });
       if (
         head === undefined
-        || head.shareOperationId !== shareOperationId
+        || !workspaceHeadIncludesShareOperationId(head, shareOperationId)
         || head.assertionVersion !== canonicalSeal.assertionVersion
         || head.publicTripleCount !== Number(canonicalSeal.publicTripleCount)
         || head.privateTripleCount !== Number(canonicalSeal.privateTripleCount)

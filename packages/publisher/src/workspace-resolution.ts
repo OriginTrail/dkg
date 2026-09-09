@@ -22,6 +22,10 @@ import {
   computePrivateRootV10 as computePrivateRoot,
 } from './merkle.js';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
+import {
+  selectEquivalentWorkspaceOperation,
+  type WorkspaceOperationModel,
+} from './workspace-operation-equivalence.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
@@ -161,6 +165,8 @@ export interface KnowledgeAssetWorkspaceHead {
   readonly privateMerkleRoot?: string;
   readonly privateTripleCount: number;
   readonly shareOperationId: string;
+  /** Every operation id proven equivalent to the selected display alias. */
+  readonly shareOperationIds: readonly string[];
   /** Canonical durable operation timestamp, normalized to decimal milliseconds. */
   readonly publishedAt?: TimestampMsV1;
   /** Transport owner retained at KA granularity; replaces per-subject ownership rows. */
@@ -323,33 +329,6 @@ function decodeWorkspaceHeadRows(input: {
 }
 
 /** The operation subject's commitment + access envelope, decoded and validated. */
-interface DecodedWorkspaceOperation {
-  readonly publicQuadsDigest: string;
-  readonly publicTripleCount: number;
-  readonly privateMerkleRoot: string | undefined;
-  readonly privateTripleCount: number;
-  readonly publisherPeerId: string;
-  readonly publishedAtMs: number | undefined;
-  readonly accessPolicy: 'public' | 'ownerOnly' | 'allowList' | undefined;
-  readonly allowedPeers: string[];
-}
-
-function equivalentWorkspaceOperationKey(
-  operation: DecodedWorkspaceOperation,
-): string {
-  // publishedAt and shareOperationId are persistence provenance, not content
-  // or access semantics. Every other decoded field must agree exactly.
-  return JSON.stringify([
-    operation.publicQuadsDigest,
-    operation.publicTripleCount,
-    operation.privateMerkleRoot?.toLowerCase() ?? null,
-    operation.privateTripleCount,
-    operation.publisherPeerId,
-    operation.accessPolicy ?? null,
-    [...operation.allowedPeers].sort(),
-  ]);
-}
-
 /**
  * Focused decoder for the OPERATION subject's rows. The cardinality model is
  * exactly three rules: commitment/envelope predicates are fail-closed
@@ -364,7 +343,7 @@ function decodeWorkspaceOperationRows(input: {
   readonly operationValues: Map<string, string[]>;
   readonly scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
   readonly shareOperationId: string;
-}): DecodedWorkspaceOperation {
+}): WorkspaceOperationModel {
   const ual = input.scope.ual;
   const operation = makeSingletonReader(input.operationValues, ual, 'operation');
   const echoedIds = (input.operationValues.get(`${DKG}shareOperationId`) ?? [])
@@ -429,14 +408,19 @@ function decodeWorkspaceOperationRows(input: {
     );
   }
   return {
-    publicQuadsDigest,
-    publicTripleCount,
-    privateMerkleRoot,
-    privateTripleCount,
-    publisherPeerId,
-    publishedAtMs,
-    accessPolicy,
-    allowedPeers,
+    semantics: {
+      publicQuadsDigest,
+      publicTripleCount,
+      ...(privateMerkleRoot === undefined ? {} : { privateMerkleRoot }),
+      privateTripleCount,
+      publisherIdentity: publisherPeerId,
+      ...(accessPolicy === undefined ? {} : { accessPolicy }),
+      allowedPeers,
+    },
+    provenance: {
+      shareOperationId: input.shareOperationId,
+      ...(publishedAtMs === undefined ? {} : { publishedAtMs }),
+    },
   };
 }
 
@@ -477,7 +461,7 @@ export function isDecodableWorkspaceOperationRows(
       scope,
       shareOperationId: expected.shareOperationId,
     });
-    if (expected.requirePublishedAt && decoded.publishedAtMs === undefined) return false;
+    if (expected.requirePublishedAt && decoded.provenance.publishedAtMs === undefined) return false;
     return true;
   } catch {
     return false;
@@ -558,22 +542,14 @@ export async function resolveKnowledgeAssetWorkspaceHead(
       scope: decodedHead.scope,
       shareOperationId,
     });
-    return { shareOperationId, operation };
+    return operation;
   });
-  if (new Set(candidates.map(({ operation }) => (
-    equivalentWorkspaceOperationKey(operation)
-  ))).size !== 1) {
-    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+  const { selected, shareOperationIds } = selectEquivalentWorkspaceOperation(candidates, {
+    ambiguityError: () => new KnowledgeAssetWorkspaceHeadCorruptError(
       `Corrupt graph-scoped SWM head for ${scope.ual}: ambiguous shareOperationId values`,
-    );
-  }
-  candidates.sort((left, right) => (
-    (right.operation.publishedAtMs ?? Number.NEGATIVE_INFINITY)
-      - (left.operation.publishedAtMs ?? Number.NEGATIVE_INFINITY)
-    || right.shareOperationId.localeCompare(left.shareOperationId)
-  ));
-  const selected = candidates[0]!;
-  const decodedOperation = selected.operation;
+    ),
+  });
+  const decodedOperation = selected.semantics;
   return {
     kaUal: decodedHead.scope.ual,
     assertionVersion: decodedHead.scope.assertionVersion,
@@ -582,13 +558,14 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     publicTripleCount: decodedOperation.publicTripleCount,
     privateMerkleRoot: decodedOperation.privateMerkleRoot,
     privateTripleCount: decodedOperation.privateTripleCount,
-    shareOperationId: selected.shareOperationId,
-    ...(decodedOperation.publishedAtMs === undefined
+    shareOperationId: selected.provenance.shareOperationId,
+    shareOperationIds,
+    ...(selected.provenance.publishedAtMs === undefined
       ? {}
-      : { publishedAt: decodedOperation.publishedAtMs.toString() as TimestampMsV1 }),
-    publisherPeerId: decodedOperation.publisherPeerId,
+      : { publishedAt: selected.provenance.publishedAtMs.toString() as TimestampMsV1 }),
+    publisherPeerId: decodedOperation.publisherIdentity!,
     ...(decodedOperation.accessPolicy ? { accessPolicy: decodedOperation.accessPolicy } : {}),
-    allowedPeers: decodedOperation.allowedPeers,
+    allowedPeers: [...decodedOperation.allowedPeers],
   };
 }
 

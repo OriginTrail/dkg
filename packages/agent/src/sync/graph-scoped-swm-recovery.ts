@@ -6,7 +6,9 @@ import {
   validateSubGraphName,
 } from '@origintrail-official/dkg-core';
 import {
+  workspaceOperationSemanticsKey,
   workspacePublicQuadsDigest,
+  type WorkspaceOperationSemantics,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -379,22 +381,30 @@ function normalizeIdentityObject(object: string): string {
  * and originator persistence legitimately produce for one share.
  */
 export function operationIdentityKey(rows: readonly Quad[]): string | null {
-  const parts = new Set<string>();
-  const seenPredicates = new Set<string>();
-  const allowed = new Set<string>([
-    ...OPERATION_IDENTITY_PREDICATES.required,
-    ...OPERATION_IDENTITY_PREDICATES.compared,
-  ]);
-  for (const row of rows) {
-    if (!allowed.has(row.predicate)) continue;
-    // accessPolicy is keyed by its EFFECTIVE value below, not raw presence.
-    if (row.predicate === ACCESS_POLICY) continue;
-    seenPredicates.add(row.predicate);
-    parts.add(`${row.predicate}\u0000${normalizeIdentityObject(row.object)}`);
-  }
-  for (const predicate of OPERATION_IDENTITY_PREDICATES.required) {
-    if (!seenPredicates.has(predicate)) return null;
-  }
+  const values = (predicate: string): string[] => [...new Set(rows
+    .filter((row) => row.predicate === predicate)
+    .map((row) => row.object))];
+  const single = (predicate: string, required: boolean): string | null | undefined => {
+    const found = values(predicate);
+    if (found.length > 1 || (required && found.length === 0)) return null;
+    return found[0];
+  };
+  const required = Object.fromEntries(OPERATION_IDENTITY_PREDICATES.required.map((predicate) => (
+    [predicate, single(predicate, true)]
+  )));
+  if (Object.values(required).some((value) => value === null)) return null;
+  const publicTripleCount = Number(stripLiteral(required[PUBLIC_QUADS_COUNT]!).trim());
+  const privateTripleCount = Number(stripLiteral(required[PRIVATE_TRIPLE_COUNT]!).trim());
+  if (
+    !Number.isSafeInteger(publicTripleCount)
+    || publicTripleCount < 0
+    || !Number.isSafeInteger(privateTripleCount)
+    || privateTripleCount < 0
+  ) return null;
+  const privateMerkleRoot = single(PRIVATE_MERKLE_ROOT, false);
+  const subGraphName = single(SUB_GRAPH_NAME, false);
+  const attributedTo = values(PROV_WAS_ATTRIBUTED_TO).map(normalizeIdentityObject);
+  if (privateMerkleRoot === null || subGraphName === null) return null;
   // EFFECTIVE access policy: an absent row and an explicit default row are
   // the SAME policy under the publisher's own rule
   // (`accessPolicy ?? (privateTripleCount > 0 ? 'ownerOnly' : 'public')` —
@@ -430,14 +440,66 @@ export function operationIdentityKey(rows: readonly Quad[]): string | null {
     if (privateCountValues.size !== 1) return null;
     effectivePolicy = BigInt([...privateCountValues][0]!) > 0n ? 'ownerOnly' : 'public';
   }
-  parts.add(`${ACCESS_POLICY}\u0000${effectivePolicy}`);
-  return [...parts].sort().join('\u0001');
+  return workspaceOperationSemanticsKey({
+    publicQuadsDigest: stripLiteral(required[PUBLIC_QUADS_DIGEST]!).trim(),
+    publicTripleCount,
+    ...(privateMerkleRoot === undefined
+      ? {}
+      : { privateMerkleRoot: stripLiteral(privateMerkleRoot).trim() }),
+    privateTripleCount,
+    accessPolicy: effectivePolicy as 'public' | 'ownerOnly' | 'allowList',
+    allowedPeers: values(ALLOWED_PEER).map((value) => stripLiteral(value).trim()),
+    extensions: {
+      contextGraphId: normalizeIdentityObject(required[CONTEXT_GRAPH_ID]!),
+      contentScopeVersion: normalizeIdentityObject(required[CONTENT_SCOPE_VERSION]!),
+      kaUal: normalizeIdentityObject(required[KA_UAL]!),
+      assertionVersion: normalizeIdentityObject(required[ASSERTION_VERSION]!),
+      ...(subGraphName === undefined
+        ? {}
+        : { subGraphName: normalizeIdentityObject(subGraphName) }),
+      ...(attributedTo.length === 0 ? {} : { attributedTo }),
+    },
+  }, 'cross-store');
 }
 
 interface ResolvedHeadOperation {
   readonly shareOperationId: string;
   readonly operationSubject: string;
   readonly operationRows: readonly Quad[];
+}
+
+function decodedOperationSemantics(
+  rows: readonly Quad[],
+): WorkspaceOperationSemantics {
+  const publicTripleCount = requireSafeInteger(rows, PUBLIC_QUADS_COUNT, 'publicQuadsCount');
+  const privateTripleCount = requireSafeInteger(rows, PRIVATE_TRIPLE_COUNT, 'privateTripleCount');
+  const privateMerkleRoot = optionalLiteral(rows, PRIVATE_MERKLE_ROOT, 'privateMerkleRoot');
+  const accessPolicy = optionalLiteral(rows, ACCESS_POLICY, 'accessPolicy') as
+    | 'public' | 'ownerOnly' | 'allowList' | undefined;
+  return {
+    publicQuadsDigest: requireLiteral(rows, PUBLIC_QUADS_DIGEST, 'publicQuadsDigest'),
+    publicTripleCount,
+    ...(privateMerkleRoot === undefined ? {} : { privateMerkleRoot }),
+    privateTripleCount,
+    publisherIdentity: requireLiteral(rows, PUBLISHER_PEER_ID, 'publisherPeerId'),
+    ...(accessPolicy === undefined ? {} : { accessPolicy }),
+    allowedPeers: distinctObjects(rows, ALLOWED_PEER).map(stripLiteral),
+    extensions: {
+      contextGraphId: requireLiteral(rows, CONTEXT_GRAPH_ID, 'contextGraphId'),
+      contentScopeVersion: requireLiteral(rows, CONTENT_SCOPE_VERSION, 'contentScopeVersion'),
+      kaUal: requireSingle(rows, KA_UAL, 'kaUal'),
+      assertionVersion: requireLiteral(rows, ASSERTION_VERSION, 'assertionVersion'),
+      ...(() => {
+        const subGraphName = optionalLiteral(rows, SUB_GRAPH_NAME, 'subGraphName');
+        return subGraphName === undefined ? {} : { subGraphName };
+      })(),
+      ...(() => {
+        const authorIdentities = distinctObjects(rows, PROV_WAS_ATTRIBUTED_TO)
+          .map(normalizeIdentityObject);
+        return authorIdentities.length === 0 ? {} : { authorIdentities };
+      })(),
+    },
+  };
 }
 
 /**
@@ -489,22 +551,10 @@ function resolveEquivalentHeadOperation(params: {
     if (!Number.isFinite(publishedAtMs)) {
       throw new Error(`Graph-scoped SWM operation ${operationSubject} has an invalid publishedAt`);
     }
-    // SAME-PAYLOAD BYTE-EQUIVALENCE policy — deliberately NOT the same model
-    // as `operationIdentityKey`. This key compares candidate operations that
-    // arrived in ONE payload (one serializer, one canonicalization), so byte
-    // comparison over ALL rows minus id/publishedAt is exact, and its job is
-    // to THROW on genuine ambiguity. `operationIdentityKey` compares rows
-    // across INDEPENDENT stores (wire vs read-back), so it must normalize
-    // lexical forms and restrict itself to the identity allow-list. Folding
-    // either into the other loses a property: normalization here would merge
-    // candidates that genuinely differ on the wire; byte comparison there
-    // would break on store re-canonicalization. Unifying both behind one
-    // policy module with explicit knobs is recorded follow-up F3.
-    const samePayloadByteEquivalenceKey = operationRows
-      .filter((row) => row.predicate !== SHARE_OPERATION_ID && row.predicate !== PUBLISHED_AT)
-      .map((row) => `${row.predicate}\u0000${row.object}\u0000${row.graph}`)
-      .sort()
-      .join('\u0001');
+    const semanticKey = workspaceOperationSemanticsKey(
+      decodedOperationSemantics(operationRows),
+      'decoded',
+    );
     const headShareOperationRow = params.headRows
       .filter((row) => row.predicate === SHARE_OPERATION_ID)
       .find((row) => stripLiteral(row.object).trim() === shareOperationId);
@@ -516,11 +566,11 @@ function resolveEquivalentHeadOperation(params: {
       operationSubject,
       operationRows,
       publishedAtMs,
-      samePayloadByteEquivalenceKey,
+      semanticKey,
     };
   });
 
-  if (new Set(candidates.map((candidate) => candidate.samePayloadByteEquivalenceKey)).size > 1) {
+  if (new Set(candidates.map((candidate) => candidate.semanticKey)).size > 1) {
     throw new Error(`ambiguous shareOperationId`);
   }
   candidates.sort((left, right) =>

@@ -22,6 +22,7 @@ import {
   storeKnowledgeAssetWorkspaceHead,
 } from './workspace-resolution.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
+import { workspaceHeadIncludesShareOperationId } from './workspace-operation-equivalence.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 
 export interface StageKnowledgeAssetSharedWorkingMemoryInputV1 {
@@ -114,7 +115,7 @@ export async function stageKnowledgeAssetSharedWorkingMemoryStorageV1(
       );
       if (
         !head
-        || head.shareOperationId !== input.shareOperationId
+        || !workspaceHeadIncludesShareOperationId(head, input.shareOperationId)
         || head.assertionVersion !== scope.assertionVersion
         || head.publicQuadsDigest !== publicQuadsDigest
         || head.publicTripleCount !== publicQuads.length

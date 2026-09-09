@@ -62,6 +62,15 @@ export {
   type KnowledgeAssetOperationPublicSnapshot,
 } from './workspace-resolution.js';
 export {
+  selectEquivalentWorkspaceOperation,
+  workspaceHeadIncludesShareOperationId,
+  workspaceOperationSemanticsKey,
+  type WorkspaceOperationEquivalenceMode,
+  type WorkspaceOperationModel,
+  type WorkspaceOperationProvenance,
+  type WorkspaceOperationSemantics,
+} from './workspace-operation-equivalence.js';
+export {
   type StageKnowledgeAssetSharedWorkingMemoryInputV1,
   type StagedKnowledgeAssetSharedWorkingMemoryV1,
 } from './knowledge-asset-swm-staging.js';

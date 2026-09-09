@@ -11,6 +11,11 @@ import {
 // resolution wrapper is intra-package API (each internal caller owns its own
 // corruption policy) and is not exported for external consumers.
 import { tryResolveKnowledgeAssetWorkspaceHead } from '../src/workspace-resolution.js';
+import {
+  selectEquivalentWorkspaceOperation,
+  workspaceOperationSemanticsKey,
+  type WorkspaceOperationSemantics,
+} from '../src/workspace-operation-equivalence.js';
 
 // GH#2273: SWM catch-up union-inserts a peer's head `shareOperationId` row
 // beside the local one (shared-memory-sync bulk insert holds no lock and
@@ -65,7 +70,20 @@ function makeHarness(): Harness {
   return { store, graphManager, metaGraph: graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH) };
 }
 
-async function seedOperation(h: Harness, shareOperationId: string): Promise<void> {
+interface SeedOperationOverrides {
+  readonly quads?: readonly Quad[];
+  readonly privateMerkleRoot?: Uint8Array;
+  readonly privateTripleCount?: number;
+  readonly publisherPeerId?: string;
+  readonly accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  readonly allowedPeers?: readonly string[];
+}
+
+async function seedOperation(
+  h: Harness,
+  shareOperationId: string,
+  overrides: SeedOperationOverrides = {},
+): Promise<void> {
   await storeKnowledgeAssetOperationPublicQuads({
     store: h.store,
     graphManager: h.graphManager,
@@ -73,14 +91,22 @@ async function seedOperation(h: Harness, shareOperationId: string): Promise<void
     shareOperationId,
     kaUal: UAL,
     assertionVersion: 1,
-    quads: CONTENT,
-    publisherPeerId: 'peer-1',
+    quads: overrides.quads ?? CONTENT,
+    publisherPeerId: overrides.publisherPeerId ?? 'peer-1',
+    ...(overrides.privateMerkleRoot === undefined
+      ? {}
+      : { privateMerkleRoot: overrides.privateMerkleRoot }),
+    ...(overrides.privateTripleCount === undefined
+      ? {}
+      : { privateTripleCount: overrides.privateTripleCount }),
+    ...(overrides.accessPolicy === undefined ? {} : { accessPolicy: overrides.accessPolicy }),
+    ...(overrides.allowedPeers === undefined ? {} : { allowedPeers: overrides.allowedPeers }),
     timestamp: new Date('2026-08-16T00:00:00.000Z'),
   });
 }
 
-async function seedHealthyHead(h: Harness): Promise<void> {
-  await seedOperation(h, LOCAL_OP);
+async function seedHealthyHead(h: Harness, overrides: SeedOperationOverrides = {}): Promise<void> {
+  await seedOperation(h, LOCAL_OP, overrides);
   await storeKnowledgeAssetWorkspaceHead({
     store: h.store,
     graphManager: h.graphManager,
@@ -114,6 +140,43 @@ function resolveHead(h: Harness) {
     kaUal: UAL,
   });
 }
+
+describe('workspace operation semantic model', () => {
+  const semantics: WorkspaceOperationSemantics = Object.freeze({
+    publicQuadsDigest: `sha256:${'1'.repeat(64)}`,
+    publicTripleCount: 2,
+    privateMerkleRoot: `0x${'2'.repeat(64)}`,
+    privateTripleCount: 1,
+    publisherIdentity: 'peer-a',
+    accessPolicy: 'allowList',
+    allowedPeers: Object.freeze(['peer-a', 'peer-b']),
+  });
+
+  it.each([
+    ['publicQuadsDigest', `sha256:${'3'.repeat(64)}`],
+    ['publicTripleCount', 3],
+    ['privateMerkleRoot', `0x${'4'.repeat(64)}`],
+    ['privateTripleCount', 2],
+    ['publisherIdentity', 'peer-c'],
+    ['accessPolicy', 'ownerOnly'],
+    ['allowedPeers', ['peer-a', 'peer-c']],
+  ] satisfies ReadonlyArray<readonly [keyof WorkspaceOperationSemantics, unknown]>) (
+    'includes semantic field %s in equivalence', (field, value) => {
+      expect(workspaceOperationSemanticsKey({ ...semantics, [field]: value } as WorkspaceOperationSemantics))
+        .not.toBe(workspaceOperationSemanticsKey(semantics));
+    },
+  );
+
+  it('excludes operation id and timestamp provenance from equivalence', () => {
+    expect(selectEquivalentWorkspaceOperation([
+      { semantics, provenance: { shareOperationId: 'originator', publishedAtMs: 1 } },
+      { semantics, provenance: { shareOperationId: 'storage-ack', publishedAtMs: 2 } },
+    ])).toMatchObject({
+      selected: { provenance: { shareOperationId: 'storage-ack' } },
+      shareOperationIds: ['originator', 'storage-ack'],
+    });
+  });
+});
 
 describe('isKnowledgeAssetWorkspaceHeadCorruptError boundary predicate', () => {
   it('recognizes the class, a code-preserving re-wrap, and survives hostile inspection', () => {
@@ -230,16 +293,31 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
     expect(head?.publicTripleCount).toBe(CONTENT.length);
   });
 
-  it('fails closed when two operation ids disagree on content or access semantics', async () => {
+  it.each([
+    {
+      field: 'public content digest',
+      local: {},
+      remote: { quads: CONTENT.map((quad, index) => index === 0 ? { ...quad, object: '"changed"' } : quad) },
+    },
+    {
+      field: 'private commitment',
+      local: { privateTripleCount: 1, privateMerkleRoot: new Uint8Array(32).fill(1) },
+      remote: { privateTripleCount: 1, privateMerkleRoot: new Uint8Array(32).fill(2) },
+    },
+    { field: 'publisher identity', local: {}, remote: { publisherPeerId: 'peer-2' } },
+    {
+      field: 'allowed-peer set',
+      local: { accessPolicy: 'allowList', allowedPeers: ['peer-a'] },
+      remote: { accessPolicy: 'allowList', allowedPeers: ['peer-b'] },
+    },
+  ] satisfies ReadonlyArray<{
+    field: string;
+    local: SeedOperationOverrides;
+    remote: SeedOperationOverrides;
+  }>)('fails closed when equivalent aliases disagree on $field', async ({ local, remote }) => {
     const h = makeHarness();
-    await seedHealthyHead(h);
-    await seedOperation(h, REMOTE_OP);
-    await h.store.insert([{
-      subject: `urn:dkg:share:${CONTEXT_GRAPH}:${REMOTE_OP}`,
-      predicate: `${DKG}accessPolicy`,
-      object: '"ownerOnly"',
-      graph: h.metaGraph,
-    }]);
+    await seedHealthyHead(h, local);
+    await seedOperation(h, REMOTE_OP, remote);
     await unionInsertSecondHeadId(h);
 
     await expect(resolveHead(h)).rejects.toThrow(KnowledgeAssetWorkspaceHeadCorruptError);

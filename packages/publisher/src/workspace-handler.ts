@@ -46,6 +46,7 @@ import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { resolveWorkspaceEncryptionRequirement } from './workspace-encryption-policy.js';
 import { computeFlatKCRootV10 } from './merkle.js';
+import { workspaceHeadIncludesShareOperationId } from './workspace-operation-equivalence.js';
 
 interface WorkspaceGossipDecodeResult {
   request?: WorkspacePublishRequestMsg;
@@ -1524,7 +1525,7 @@ export class SharedMemoryHandler {
           }
           if (incomingVersion === currentVersion) {
             const sameAssertion =
-              currentHead.shareOperationId === shareOperationId &&
+              workspaceHeadIncludesShareOperationId(currentHead, shareOperationId) &&
               currentHead.publisherPeerId === publisherPeerId &&
               currentHead.publicQuadsDigest === publicDigest &&
               currentHead.publicTripleCount === (publicTripleCount ?? 0) &&

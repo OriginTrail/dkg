@@ -28,6 +28,7 @@ import {
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
   resolveKnowledgeAssetOperationPublicQuads,
   resolvePublishedKnowledgeAssetWorkspaceHead,
+  workspaceHeadIncludesShareOperationId,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
@@ -141,7 +142,7 @@ async function resolveDurableCatalogAssetV1(
   const inventoryRowDiffers = resolution.kind === 'inventory-row'
     && head !== undefined
     && (
-      head.shareOperationId !== resolution.row.shareOperationId
+      !workspaceHeadIncludesShareOperationId(head, resolution.row.shareOperationId)
       || head.publicTripleCount !== Number(resolution.row.publicTripleCount)
       || head.privateTripleCount !== Number(resolution.row.privateTripleCount)
     );

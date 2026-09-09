@@ -144,6 +144,7 @@ import {
   resolveLiftWorkspaceSlice,
   resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,
+  workspaceHeadIncludesShareOperationId,
   KnowledgeAssetOperationPublicSnapshotNotFoundError,
   workspacePublicQuadsDigest,
   validateLiftPublishPayload,
@@ -4589,7 +4590,7 @@ export class PublishMethods extends DKGAgentBase {
     });
     if (
       !head
-      || head.shareOperationId !== shareOperationId
+      || !workspaceHeadIncludesShareOperationId(head, shareOperationId)
       || head.assertionVersion !== seal.assertionVersion
       || head.accessPolicy === undefined
     ) {
@@ -4847,7 +4848,7 @@ export class PublishMethods extends DKGAgentBase {
     )].sort();
     if (
       !liveHead
-      || liveHead.shareOperationId !== request.shareOperationId
+      || !workspaceHeadIncludesShareOperationId(liveHead, request.shareOperationId)
       || liveHead.assertionVersion !== request.assertionVersion
       || liveHead.accessPolicy === undefined
       || liveHead.accessPolicy !== request.accessPolicy
