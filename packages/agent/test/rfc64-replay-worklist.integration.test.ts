@@ -133,9 +133,8 @@ describe('RFC-64 replay worklist lifecycle', () => {
     expect(newer).not.toBeNull();
     older!.release();
 
-    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+    await expect(edge.continueRfc64CatalogHeadReplayRecoveryV1(
       CONTEXT_GRAPH_ID,
-      { seedConnectedPeers: false },
     )).resolves.toEqual({ requested: 1, failed: 0 });
     expect(requestReplay).toHaveBeenCalledOnce();
     expect(requestReplay).toHaveBeenCalledWith(expect.objectContaining({ remotePeerId: peer }));
@@ -175,9 +174,8 @@ describe('RFC-64 replay worklist lifecycle', () => {
     expect(newer).not.toBeNull();
     older!.release();
 
-    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+    await expect(edge.continueRfc64CatalogHeadReplayRecoveryV1(
       CONTEXT_GRAPH_ID,
-      { seedConnectedPeers: false },
     )).resolves.toEqual({ requested: 1, failed: 0 });
     expect(requestReplay).toHaveBeenCalledOnce();
     expect(requestReplay).toHaveBeenCalledWith(expect.objectContaining({ remotePeerId: peer }));
@@ -356,4 +354,3 @@ describe('RFC-64 replay worklist lifecycle', () => {
     ))).toEqual([peerA, peerB]);
   });
 });
-

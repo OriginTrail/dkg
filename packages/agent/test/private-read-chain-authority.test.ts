@@ -608,7 +608,7 @@ describe('private read authorization uses the on-chain participant roster', () =
       },
       contextGraphSubscriptionRehydrationEnabled: true,
     });
-    const readAuthority = vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockResolvedValue({
+    const readAuthority = vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority').mockResolvedValue({
       outcome: 'unavailable',
       source: 'registered-chain',
       reason: 'test-chain-unavailable',
@@ -620,6 +620,7 @@ describe('private read authorization uses the on-chain participant roster', () =
 
     expect(readAuthority).toHaveBeenCalledWith(contextGraphId, {
       allowSubscriptionFallback: false,
+      signal: expect.any(AbortSignal),
     });
     expect(subscribe).not.toHaveBeenCalled();
     expect(agent.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);

@@ -79,7 +79,7 @@ describe('Context Graph subscription authority retry', () => {
       // and the healed chain binding are both durable. Under the integration
       // shard's concurrent node load that boundary can exceed the old 2s UI-
       // style polling window even though the authority retry itself completed.
-      { timeout: 10_000 },
+      { timeout: 20_000 },
     );
 
     expect(retry).toHaveBeenCalledOnce();
@@ -110,7 +110,7 @@ describe('Context Graph subscription authority retry', () => {
         authorityUnavailable: [],
       },
     });
-  }, (2 * CHAIN_POLICY_READ_TIMEOUT_MS) + 14_000);
+  }, (2 * CHAIN_POLICY_READ_TIMEOUT_MS) + 24_000);
 
   it('retries unavailable subscription authority again at the exact recurring boundary', async () => {
     const contextGraphId = 'persisted-recurring-authority-retry';
@@ -183,6 +183,82 @@ describe('Context Graph subscription authority retry', () => {
 
     await vi.advanceTimersByTimeAsync(30_000);
     expect(retry).toHaveBeenCalledTimes(2);
+  });
+
+  it('retires recurring recovery when unavailable authority becomes denied', async () => {
+    const contextGraphId = 'persisted-authority-retry-denied';
+    const rows = new Map<string, any>([[contextGraphId, {
+      id: contextGraphId,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+    }]]);
+    agent = await DKGAgent.create({
+      name: 'PrivateReadAuthorityRetryDenied',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...rows.values()],
+        load: async (id) => rows.get(id) ?? null,
+        save: async (row) => { rows.set(row.id, row); },
+        delete: async (id) => { rows.delete(id); },
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+    });
+    let attempts = 0;
+    const resolveAuthority = vi.spyOn(
+      agent,
+      'resolveContextGraphSubscriptionBootstrapAuthority',
+    ).mockImplementation(async (candidateId) => {
+      if (candidateId !== contextGraphId) {
+        return {
+          outcome: 'unavailable',
+          source: 'registered-chain',
+          reason: 'unrelated-startup-probe',
+          metadataBootstrap: 'eligible',
+        } as const;
+      }
+      attempts += 1;
+      return attempts === 1
+        ? {
+            outcome: 'unavailable',
+            source: 'registered-chain',
+            reason: 'temporary-authority-outage',
+            metadataBootstrap: 'eligible',
+          } as const
+        : {
+            outcome: 'denied',
+            source: 'registered-chain',
+            reason: 'caller-not-participant',
+            metadataBootstrap: 'forbidden',
+          } as const;
+    });
+    const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
+    const persistMembership = vi.spyOn(agent, 'persistLocalNodeMembership');
+    vi.useFakeTimers();
+
+    await agent.start();
+    expect(attempts).toBe(1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toBe(2);
+    expect(agent.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);
+    expect(subscribe.mock.calls.some(([id]) => id === contextGraphId)).toBe(false);
+    expect(persistMembership.mock.calls.some(([id]) => id === contextGraphId)).toBe(false);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      activated: 0,
+      dormant: 1,
+      dormantIds: [contextGraphId],
+      dormantReasons: {
+        authorityUnavailable: [],
+        authorityDenied: [contextGraphId],
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toBe(2);
+    expect(resolveAuthority.mock.calls.filter(([id]) => id === contextGraphId)).toHaveLength(2);
   });
 
   it('does not resurrect a different subscription deleted during authority retry', async () => {

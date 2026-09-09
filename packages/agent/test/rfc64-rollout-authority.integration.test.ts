@@ -653,9 +653,8 @@ describe('RFC-64 rollout authority integration', () => {
       newPeer,
     )).not.toBeNull();
 
-    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+    await expect(edge.continueRfc64CatalogHeadReplayRecoveryV1(
       CONTEXT_GRAPH_ID,
-      { seedConnectedPeers: false },
     )).resolves.toEqual({ requested: 2, failed: 0 });
     expect(new Set(requestReplay.mock.calls.map(
       ([{ remotePeerId }]: [{ remotePeerId: string }]) => remotePeerId,
@@ -686,14 +685,12 @@ describe('RFC-64 rollout authority integration', () => {
     };
 
     queueGeneration(0);
-    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+    await expect(edge.continueRfc64CatalogHeadReplayRecoveryV1(
       CONTEXT_GRAPH_ID,
-      { seedConnectedPeers: false },
     )).resolves.toEqual({ requested: 0, failed: 64 });
     queueGeneration(1);
-    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+    await expect(edge.continueRfc64CatalogHeadReplayRecoveryV1(
       CONTEXT_GRAPH_ID,
-      { seedConnectedPeers: false },
     )).resolves.toEqual({ requested: 0, failed: 65 });
 
     requestReplay.mockClear();
@@ -705,9 +702,8 @@ describe('RFC-64 rollout authority integration', () => {
       CONTEXT_GRAPH_ID,
       '12D3KooWReplayFailedGenerationRecoveryPeer',
     )).not.toBeNull();
-    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+    await expect(edge.continueRfc64CatalogHeadReplayRecoveryV1(
       CONTEXT_GRAPH_ID,
-      { seedConnectedPeers: false },
     )).resolves.toEqual({ requested: 64, failed: 1 });
     expect(requestReplay).toHaveBeenCalledTimes(64);
     await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
@@ -797,7 +793,7 @@ describe('RFC-64 rollout authority integration', () => {
       .mockResolvedValue(0);
     const warn = vi.spyOn((edge as any).log, 'warn');
     const markPending = vi.spyOn(edge, 'markRfc64CatalogReplayPeerPendingV1');
-    const replay = vi.spyOn(edge, 'requestRfc64CatalogHeadReplaysFromConnectedPeersV1')
+    const replay = vi.spyOn(edge, 'requestRfc64CatalogHeadReplayForConnectionDemandV1')
       .mockResolvedValue(Object.freeze({ requested: 1, failed: 0 }));
     vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1')
       .mockResolvedValue(Object.freeze({ announced: 0, failed: 0, manifest: Object.freeze([]) }));
@@ -838,7 +834,7 @@ describe('RFC-64 rollout authority integration', () => {
     vi.spyOn(edge as any, 'drainPendingSenderKeyForPeer')
       .mockResolvedValue(0);
     const markPending = vi.spyOn(edge, 'markRfc64CatalogReplayPeerPendingV1');
-    const replay = vi.spyOn(edge, 'requestRfc64CatalogHeadReplaysFromConnectedPeersV1')
+    const replay = vi.spyOn(edge, 'requestRfc64CatalogHeadReplayForConnectionDemandV1')
       .mockResolvedValue(Object.freeze({ requested: 1, failed: 0 }));
     const reannounce = vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1')
       .mockResolvedValue(Object.freeze({ announced: 0, failed: 0, manifest: Object.freeze([]) }));
@@ -860,12 +856,9 @@ describe('RFC-64 rollout authority integration', () => {
     expect(replay).toHaveBeenCalledWith(
       CONTEXT_GRAPH_ID,
       expect.objectContaining({
-        seedConnectedPeers: false,
-        replayDemand: expect.objectContaining({
-          peerId,
-          generation: expect.any(Number),
-          release: expect.any(Function),
-        }),
+        peerId,
+        generation: expect.any(Number),
+        release: expect.any(Function),
       }),
     );
     expect(reannounce).toHaveBeenCalledTimes(1);
@@ -889,7 +882,7 @@ describe('RFC-64 rollout authority integration', () => {
     const markPending = vi.spyOn(edge, 'markRfc64CatalogReplayPeerPendingV1');
     let providerHead = 'head-v1';
     const replayedHeads: string[] = [];
-    const replay = vi.spyOn(edge, 'requestRfc64CatalogHeadReplaysFromConnectedPeersV1')
+    const replay = vi.spyOn(edge, 'requestRfc64CatalogHeadReplayForConnectionDemandV1')
       .mockImplementation(async () => {
         replayedHeads.push(providerHead);
         return Object.freeze({ requested: 1, failed: 0 });
