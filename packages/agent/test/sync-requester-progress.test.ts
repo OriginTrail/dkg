@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
+import { SYSTEM_CONTEXT_GRAPHS, contextGraphWorkspaceGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   createSharedMemorySnapshotMaterializer,
@@ -1975,47 +1975,11 @@ describe('public SWM snapshot coverage (#2050)', () => {
     }
   });
 
-  it('counts a complete manifest with NO descriptor on ANY ref as resolved, so an entity-share Context Graph stops nominating its peer', async () => {
-    // The row above has to build a MIXED manifest — one described ref, one
-    // undescribed — because the old `snapshotDescriptorsByRef.size > 0` guard
-    // wired `onSnapshotReady` only when SOMETHING was described. That guard hid
-    // the larger case: a Context Graph in which NOTHING is described.
-    //
-    // That case is not a corner, it is the primary shared-memory write API.
-    // `storeWorkspaceOperationPublicQuads` (packages/publisher/src/
-    // workspace-resolution.ts) — the entity-level share — writes each root's
-    // public slice under a `urn:dkg:public-stage:<cg>:<subGraph>:<op>:<root>`
-    // subject carrying `dkg:publicQuadsDigest` + `dkg:publicQuadsCount`, and
-    // writes NO `#dkg-swm-head` row at all; heads belong to the graph-scoped KA
-    // path (`storeKnowledgeAssetOperationPublicQuads`). The two readers then
-    // disagree about the very same metadata: `collectPublicSnapshotMetadata`
-    // accepts ANY subject with digest+count, so the slice IS a manifest ref,
-    // while `parseGraphScopedSwmRecoveryDescriptors` anchors ONLY on head
-    // subjects, so it yields nothing. A Context Graph written entirely by
-    // entity shares therefore advertises refs and produces zero descriptors —
-    // for EVERY ref, not just one.
-    //
-    // Pre-fix such a graph could not reach `snapshotsResolved ===
-    // snapshotsTotal` by ANY path: the hook was never wired, so
-    // `materializeReadySnapshot` — and with it the vacuity branch the row above
-    // pins — never ran. `snapshotsResolved < snapshotsTotal` is exactly the
-    // predicate `capablePeersForNextPass` (packages/cli/src/
-    // catchup-runner-worker-impl.ts) reads as "this peer still owes us
-    // Knowledge Assets", so it nominated a peer that owed nothing on every pass
-    // of every catch-up job, at O(KA size) per cached ref, for ever.
-    //
-    // BOTH writers are wired here, and that is the whole difference from
-    // 'carries the round coverage onto the summary when the snapshot phase does
-    // not finish' above, which asserts `0/2` with NO materializer. The two must
-    // stay distinct: missing WIRING means nothing CAN be written, so those refs
-    // are unresolved; no DESCRIPTOR under a COMPLETE manifest means there is
-    // nothing to write, so these are resolved. Wiring the hook unconditionally
-    // must not collapse that.
-    //
-    // The meta graph comes from `swmFixtures(COVERAGE_CG)` — the same builder
-    // whose rows parse into REAL descriptors in the row above — so the empty
-    // descriptor list asserted below is attributable to the subject shape
-    // alone, not to a meta-graph URI the parser refuses to visit.
+  it.each(['clean', 'duplicate-version', 'future-version', 'shared-ref', 'shared-ref-first', 'truncated-entity', 'truncated-ka', 'head-alias', 'truncated-sibling'] as const)('preserves entity-share coverage and metadata beside %s graph-scoped heads', async (headState) => {
+    // Entity-level shares advertise digest-bound slices without per-KA heads.
+    // Malformed KA metadata must not suppress unrelated, ready entity slices.
+    // Shared refs still require KA authority, and a partially fetched multi-root
+    // operation cannot publish membership rows for the missing root.
     const { metaGraph } = swmFixtures(COVERAGE_CG);
     const SHARE_OP = 'op-entity-share-1';
     const ROOT = 'https://example.org/thing/1';
@@ -2063,23 +2027,83 @@ describe('public SWM snapshot coverage (#2050)', () => {
       { subject: sliceSubject, predicate: 'http://dkg.io/ontology/publishedAt', object: `"${new Date(0).toISOString()}"`, graph: metaGraph } as Quad,
     ];
 
+    const siblingRoot = `${ROOT}/sibling`;
+    const siblingPayload: Quad[] = [{ subject: siblingRoot, predicate: 'https://schema.org/name', object: '"Sibling"', graph: '' }];
+    const siblingDigest = workspacePublicQuadsDigest(siblingPayload);
+    if (headState === 'truncated-sibling') {
+      const siblingSubject = sliceSubject.replace(encodeURIComponent(ROOT), encodeURIComponent(siblingRoot));
+      meta.push(...meta.filter((quad) => quad.subject === sliceSubject).map((quad) => ({
+        ...quad,
+        subject: siblingSubject,
+        object: quad.predicate.endsWith('/publicSliceRootEntity') ? siblingRoot
+          : quad.predicate.endsWith('/publicQuadsDigest') ? `"${siblingDigest}"`
+          : quad.predicate.endsWith('/publicQuadsCount') ? '"1"^^<http://www.w3.org/2001/XMLSchema#integer>'
+          : quad.object,
+      })), {
+        subject: `urn:dkg:share:${COVERAGE_CG}:${SHARE_OP}`,
+        predicate: 'http://dkg.io/ontology/rootEntity', object: siblingRoot, graph: metaGraph,
+      });
+    }
+    const entityMeta = [...meta];
+    const sharedRef = headState.startsWith('shared-ref');
+    const entityIncomplete = headState === 'truncated-entity';
+    const poisoned = headState === 'clean' ? undefined : swmFixtures(COVERAGE_CG).manifest(1)[0]!;
+    if (poisoned) {
+      const poisonedRows = poisoned.meta.map((quad) => {
+        if (headState === 'head-alias' && quad.subject === poisoned.headSubject
+          && quad.predicate.endsWith('/shareOperationId')) return { ...quad, object: `"${SHARE_OP}"` };
+        if (headState === 'future-version' && quad.subject === poisoned.headSubject
+          && quad.predicate === 'http://dkg.io/ontology/contentScopeVersion') {
+          return { ...quad, object: '"999"^^<http://www.w3.org/2001/XMLSchema#integer>' };
+        }
+        if (sharedRef && (quad.predicate.endsWith('/publicSnapshotRef')
+          || quad.predicate.endsWith('/publicQuadsDigest'))) return { ...quad, object: `"${digest}"` };
+        if (sharedRef && quad.predicate.endsWith('/publicQuadsCount')) {
+          return { ...quad, object: `"${payload.length}"^^<http://www.w3.org/2001/XMLSchema#integer>` };
+        }
+        return quad;
+      });
+      if (headState === 'shared-ref-first') meta.unshift(...poisonedRows);
+      else meta.push(...poisonedRows);
+      if (headState !== 'future-version') meta.push({
+        subject: poisoned.headSubject,
+        predicate: 'http://dkg.io/ontology/assertionVersion',
+        object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: metaGraph,
+      });
+    }
+
     // Fixture integrity across BOTH readers, asserted before the sync so a
     // fixture that drifted names itself instead of surfacing as an unexplained
     // count. The manifest must really carry this one ref (or `snapshotsTotal:
     // 1` below would be measuring something else), and NOTHING may be
     // described (or this row would silently become a second copy of the mixed
     // row above, travelling the described path it is meant to avoid).
-    expect(collectPublicSnapshotMetadata(meta)).toEqual([{
+    expect(collectPublicSnapshotMetadata(entityMeta)).toEqual([{
       ref: digest,
       digest,
       count: payload.length,
       publishedAtMs: 0,
-    }]);
-    expect(parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: COVERAGE_CG, metaQuads: meta })).toEqual([]);
+    }, ...(headState === 'truncated-sibling' ? [{
+      ref: siblingDigest, digest: siblingDigest, count: siblingPayload.length, publishedAtMs: 0,
+    }] : [])]);
+    if (poisoned) {
+      expect(() => parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: COVERAGE_CG, metaQuads: meta }))
+        .toThrow(headState === 'future-version' ? /unsupported contentScopeVersion/ : /ambiguous assertionVersion/);
+    } else {
+      expect(parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: COVERAGE_CG, metaQuads: meta })).toEqual([]);
+    }
 
     // The blob is already cached: the state of a node whose earlier pass
     // fetched it. Nothing here is missing — the peer owes this node nothing.
     const cached = new Map<string, Quad[]>([[digest, payload]]);
+    if (poisoned) cached.set(poisoned.digest, poisoned.payload);
+    const missingRef = entityIncomplete ? digest : headState === 'truncated-ka' ? poisoned!.digest
+      : headState === 'truncated-sibling' ? siblingDigest : undefined;
+    const expectedMeta = sharedRef || entityIncomplete ? []
+      : headState === 'head-alias' || headState === 'truncated-sibling'
+        ? entityMeta.filter((quad) => quad.subject === sliceSubject) : entityMeta;
+    if (missingRef) cached.delete(missingRef);
     const snapshotFetches: string[] = [];
 
     // A real store and the real materializer, as the rows above use them: with
@@ -2111,7 +2135,10 @@ describe('public SWM snapshot coverage (#2050)', () => {
           fetchOptions?: { snapshotRef?: string },
         ) => {
           const snapshotRef = fetchOptions?.snapshotRef;
-          if (phase === 'snapshot') snapshotFetches.push(String(snapshotRef));
+          if (phase === 'snapshot') {
+            snapshotFetches.push(String(snapshotRef));
+            if (snapshotRef === missingRef) return { ...pageResult(contextGraphId, phase), completed: false, timedOut: true };
+          }
           // Every phase completes cleanly, so `manifestComplete` is true — the
           // other half of the vacuity gate. A truncated meta phase parses no
           // descriptors either, and there "no descriptor" means "not known
@@ -2122,6 +2149,8 @@ describe('public SWM snapshot coverage (#2050)', () => {
           ...sharedMemoryProcessResult(),
           emptyResponses: 0,
           verifiedMeta: meta,
+          verifiedData: poisoned ? payload.map((quad) => ({ ...quad, graph: contextGraphWorkspaceGraphUri(COVERAGE_CG) })) : [],
+          totalFetchedDataQuads: poisoned ? payload.length : 0,
           totalFetchedMetaQuads: meta.length,
         }),
         ensureContextGraph: async () => {},
@@ -2141,13 +2170,10 @@ describe('public SWM snapshot coverage (#2050)', () => {
 
       // Pre-cached, so the ref must not touch the transport; a digest that
       // stopped matching the payload would turn this into a fetch.
-      expect(snapshotFetches).toEqual([]);
-      expect(summary.failedPhases).toBe(0);
-      // The vacuity witness, and what separates this row from the mixed one
-      // above, where the described half genuinely writes: here there is nothing
-      // to write, so nothing IS written. The ref is resolved because a complete
-      // manifest does not describe it — not because a materializer ran.
-      expect(summary.insertedDataTriples).toBe(0);
+      expect(snapshotFetches).toEqual(missingRef ? [missingRef] : []);
+      expect(summary.failedPhases).toBe(poisoned ? 1 : 0);
+      // Entity DATA still lands even while malformed KA heads stay withheld.
+      expect(summary.insertedDataTriples).toBe(poisoned ? payload.length : 0);
       // Pre-fix: `0/1`, `missingCount: 1`, permanently — for a peer this node
       // was fully synced with, and for EVERY Context Graph written by entity
       // shares. `snapshotsResolved === snapshotsTotal` is what makes
@@ -2156,14 +2182,31 @@ describe('public SWM snapshot coverage (#2050)', () => {
       expect(summary.swmCoverage).toEqual({
         contextGraphId: COVERAGE_CG,
         peerIdSuffix: '1a2b3c4d',
-        snapshotsResolved: 1,
-        snapshotsTotal: 1,
+        snapshotsResolved: sharedRef || entityIncomplete ? 0 : 1,
+        snapshotsTotal: headState === 'truncated-sibling' ? 3 : poisoned && !sharedRef ? 2 : 1,
         manifestComplete: true,
-        descriptorsAuthoritative: true,
-        missingCount: 0,
-        missingSample: [],
+        descriptorsAuthoritative: !poisoned,
+        missingCount: entityIncomplete || headState === 'truncated-sibling' ? 2 : poisoned ? 1 : 0,
+        missingSample: entityIncomplete || headState === 'truncated-sibling' ? [missingRef!, poisoned!.digest]
+          : missingRef ? [missingRef] : [],
         materializationFailures: 0,
       });
+      expect(summary.insertedMetaTriples).toBe(expectedMeta.length);
+      const storedMeta = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } }`);
+      expect(storedMeta.type).toBe('quads');
+      if (storedMeta.type === 'quads') {
+        expect(storedMeta.quads).toHaveLength(expectedMeta.length);
+        expect(storedMeta.quads).toEqual(expect.arrayContaining(expectedMeta.map((quad) => ({
+          ...quad,
+          graph: '',
+          // Oxigraph canonicalizes xsd:dateTime lexical representations.
+          object: quad.predicate.endsWith('/publishedAt') ? expect.any(String) : quad.object,
+        }))));
+        if (poisoned) {
+          expect(storedMeta.quads.some((quad) => quad.subject === poisoned.headSubject)).toBe(false);
+          expect(storedMeta.quads.some((quad) => poisoned.meta.some((row) => row.subject === quad.subject))).toBe(false);
+        }
+      }
     } finally {
       await store.close().catch(() => {});
     }

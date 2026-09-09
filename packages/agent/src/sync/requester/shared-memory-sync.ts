@@ -897,7 +897,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       let materializedGraphs = 0;
       let materializationFailures = 0;
       let materializedQuads = 0;
-      const manifestSnapshots = collectPublicSnapshotMetadata(processed.verifiedMeta);
+      const manifest = collectPublicSnapshotManifest(processed.verifiedMeta, !descriptorsAuthoritativeForCg);
+      const manifestSnapshots = manifest.snapshots;
+      const entitySnapshotAuthority = readEntitySnapshotAuthority(
+        pid, processed.verifiedMeta, manifest.sourceSubjectsByRef,
+      );
       const orderedManifestSnapshots = snapshotRecoveryOrder === 'recent-balanced'
         ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
         : manifestSnapshots;
@@ -1037,30 +1041,14 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // UNRESOLVED: a fetched-but-unwritten ref must never look like progress
         // to the continuation loop.
         if (!snapshotMaterializer || !publicSnapshotStore) return;
-        // No descriptors is a DIFFERENT case, and collapsing the two made a
-        // fully-synced peer permanently capable.
-        //
-        // The denominator (`snapshotsTotal`) counts refs in the peer's manifest;
-        // the numerator counts refs we materialized. A manifest ref that this
-        // round's verified metadata does not describe — a superseded
-        // share-operation row, say — has no descriptor, so it could never enter
-        // `materializedRefs`. `snapshotsResolved < snapshotsTotal` then held
-        // FOREVER: `capablePeersForNextPass` kept calling that peer capable, and
-        // every future catch-up job spent its whole pass budget re-walking a
-        // graph that was already complete, at O(KA size) per cached ref.
-        //
-        // When the manifest is complete, "no descriptor" means there is genuinely
-        // nothing to write for this ref, so it is resolved by vacuity. Gated on
-        // `manifestComplete` because a truncated meta phase never parsed
-        // descriptors at all — there "no descriptor" means "not known yet", and
-        // counting it would inflate coverage for a peer that advertised nothing.
+        // A complete, successfully parsed manifest can resolve an undescribed
+        // ref by vacuity. If parsing failed, only refs sourced exclusively from
+        // entity slices have that authority: they never describe per-KA graphs.
+        // Other sources (including a KA sharing the same digest) stay unresolved.
         if (!descriptors?.length) {
-          // `descriptorsAuthoritative` as well as `manifestComplete`: a parse
-          // failure empties this map while the meta phase reports complete, and
-          // treating that as vacuity reports full coverage on a round that wrote
-          // nothing — wrong in the flattering direction, which is the direction
-          // no downstream reader can detect.
-          if (manifestComplete && descriptorsAuthoritativeForCg) {
+          if (manifestComplete && (
+            descriptorsAuthoritativeForCg || entitySnapshotAuthority.refs.has(snapshotRef)
+          )) {
             materializedRefs.add(snapshotRef);
             materializedRefsForCg = materializedRefs.size;
           }
@@ -1434,19 +1422,29 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // lifecycle scheduler retries instead of stamping this peer as caught
         // up with dangling/missing public snapshot state.
         summary.failedPhases += 1;
-        if (validWsQuads.length > 0) {
+        // A permanent descriptor parse failure cannot be repaired by retrying
+        // the same manifest. Preserve independently verified entity-share rows
+        // while withholding every head and graph-scoped operation they could
+        // otherwise certify. Only independently ready entity refs may publish
+        // their metadata; an unrelated snapshot timeout cannot suppress them.
+        const entityMeta = !descriptorsAuthoritativeForCg && snapshotEvidenceAccepted
+          ? entitySnapshotAuthority.metadataFor(materializedRefs)
+          : [];
+        if (validWsQuads.length > 0 || entityMeta.length > 0) {
           await recoveryBoundary.admitAsyncMutation(async () => {
             await ensureContextGraph(pid);
-            await storeInsert(validWsQuads);
+            if (validWsQuads.length > 0) await storeInsert(validWsQuads);
+            if (entityMeta.length > 0) await storeInsert(entityMeta);
             // Ownership belongs to the same admitted logical write as the
             // verified data. Revocation may be observed after this unit, but
             // must never leave inserted entities without their arbitration
             // state merely because it landed during the awaited insert.
             hydrateOwnership();
           });
-          summary.insertedTriples += validWsQuads.length;
+          summary.insertedTriples += validWsQuads.length + entityMeta.length;
+          summary.insertedMetaTriples += entityMeta.length;
           summary.insertedDataTriples += validWsQuads.length;
-          recordPhaseOutcome(wsDataResult);
+          if (validWsQuads.length > 0) recordPhaseOutcome(wsDataResult);
         }
         if (snapshotSync.timedOutPhases > 0 && shouldStopAfterBackoffWorthyFailure(pid, 'snapshot timeout')) {
           break;
@@ -1850,6 +1848,14 @@ export async function syncPublicSnapshotsForMeta(params: {
 }
 
 export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): PublicSnapshotMetadata[] {
+  return collectPublicSnapshotManifest(metaQuads).snapshots;
+}
+
+/** Keep source provenance internal without changing the exported metadata shape. */
+function collectPublicSnapshotManifest(metaQuads: readonly Quad[], captureSources = false): {
+  snapshots: PublicSnapshotMetadata[];
+  sourceSubjectsByRef: Map<string, Set<string>>;
+} {
   const bySubject = new Map<string, {
     ref?: string;
     digest?: string;
@@ -1889,6 +1895,7 @@ export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): Publi
   }
 
   const byRef = new Map<string, PublicSnapshotMetadata>();
+  const sourceSubjectsByRef = new Map<string, Set<string>>();
   for (const [subject, entry] of bySubject) {
     // Read-both (RFC ka-metadata-trim Phase 2): old-store rows carry an
     // explicit `dkg:publicSnapshotRef` (byte-identical to the digest); new
@@ -1908,6 +1915,11 @@ export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): Publi
     }
     if (!entry.digest || !Number.isInteger(entry.count)) {
       throw new Error(`Shared-memory public snapshot metadata for ${subject} is missing digest/count`);
+    }
+    if (captureSources) {
+      const sources = sourceSubjectsByRef.get(ref) ?? new Set<string>();
+      sources.add(subject);
+      sourceSubjectsByRef.set(ref, sources);
     }
     const existing = byRef.get(ref);
     const metadata: PublicSnapshotMetadata = {
@@ -1931,7 +1943,64 @@ export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): Publi
       ...(newerHints.ualOrdinal !== undefined ? { ualOrdinal: newerHints.ualOrdinal } : {}),
     });
   }
-  return [...byRef.values()];
+  return { snapshots: [...byRef.values()], sourceSubjectsByRef };
+}
+
+/**
+ * Entity slices have no graph-scoped descriptor. A ref also advertised by any
+ * other source still requires descriptor authority; digest deduplication must
+ * not let an entity slice hide an unwritten Knowledge Asset with the same blob.
+ */
+function readEntitySnapshotAuthority(
+  contextGraphId: string,
+  metaQuads: readonly Quad[],
+  sourcesByRef: ReadonlyMap<string, ReadonlySet<string>>,
+): { refs: ReadonlySet<string>; metadataFor(readyRefs: ReadonlySet<string>): Quad[] } {
+  const prefix = `urn:dkg:public-stage:${encodeURIComponent(contextGraphId)}:`;
+  const refs = new Set<string>();
+  const sliceSubjects = new Set<string>();
+  for (const [ref, sources] of sourcesByRef) {
+    if (sources.size === 0 || ![...sources].every((subject) => subject.startsWith(prefix))) continue;
+    refs.add(ref);
+    for (const subject of sources) sliceSubjects.add(subject);
+  }
+  return {
+    refs,
+    metadataFor: (readyRefs) => {
+      if (refs.size === 0 || readyRefs.size === 0) return [];
+      const readySlices = new Set<string>();
+      for (const ref of readyRefs) {
+        if (refs.has(ref)) for (const subject of sourcesByRef.get(ref)!) readySlices.add(subject);
+      }
+      const key = (graph: string, subject: string) => `${graph}\u0000${subject}`;
+      const allowed = new Set<string>();
+      const blocked = new Set<string>();
+      const graphScopedFields = new Set([
+        `${DKG}kaUal`, `${DKG}assertionVersion`, `${DKG}assertionGraph`, `${DKG}contentScopeVersion`,
+        `${DKG}publicSnapshotRef`, `${DKG}publicQuadsDigest`, `${DKG}publicQuadsCount`,
+      ]);
+      for (const quad of metaQuads) {
+        const subjectKey = key(quad.graph, quad.subject);
+        const isHead = quad.subject.endsWith('#dkg-swm-head');
+        const isSlice = sliceSubjects.has(quad.subject);
+        const isReadySlice = readySlices.has(quad.subject);
+        if (isReadySlice) allowed.add(subjectKey);
+        if (isHead || (!isSlice && graphScopedFields.has(quad.predicate))) blocked.add(subjectKey);
+        if (quad.predicate !== `${DKG}shareOperationId`) continue;
+        const operationId = stripLiteral(quad.object)?.trim();
+        if (!operationId) continue;
+        const operationKey = key(quad.graph, `urn:dkg:share:${contextGraphId}:${operationId}`);
+        if (isReadySlice) allowed.add(operationKey);
+        // Do not publish a multi-root operation while one of its slices is missing.
+        // An ambiguous head can name several operations; withhold every candidate.
+        if (isHead || (isSlice && !isReadySlice)) blocked.add(operationKey);
+      }
+      return metaQuads.filter((quad) => {
+        const subjectKey = key(quad.graph, quad.subject);
+        return allowed.has(subjectKey) && !blocked.has(subjectKey);
+      });
+    },
+  };
 }
 
 function newerPublicSnapshotRecency(
