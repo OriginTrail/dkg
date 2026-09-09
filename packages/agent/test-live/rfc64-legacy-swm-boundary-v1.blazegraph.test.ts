@@ -6,7 +6,7 @@ import { join } from 'node:path';
 
 import { contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import { BlazegraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
   initializeRfc64LegacySwmBoundaryV1,
@@ -19,6 +19,7 @@ const CONTEXT_GRAPH_ID =
   `0x1111111111111111111111111111111111111111/legacy-boundary-live-${RUN}`;
 const META_GRAPH = contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH_ID);
 const LEGACY_HEAD_COUNT = 5_000;
+const UNRELATED_HEAD_COUNT = 20_000;
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const KA_UAL = 'http://dkg.io/ontology/kaUal';
 const SHARE_OPERATION_ID = 'http://dkg.io/ontology/shareOperationId';
@@ -53,6 +54,7 @@ describe('RFC-64 legacy SWM boundary (live Blazegraph)', () => {
   it(
     'completes the first-upgrade capture under the store deadline and reuses it on restart',
     async () => {
+      const querySpy = vi.spyOn(store, 'query');
       const firstOwner = {};
       await initializeRfc64LegacySwmBoundaryV1(
         firstOwner,
@@ -63,9 +65,21 @@ describe('RFC-64 legacy SWM boundary (live Blazegraph)', () => {
         firstOwner,
         CONTEXT_GRAPH_ID,
       )).toBe(LEGACY_HEAD_COUNT);
+      const captureReadCount = (source: string) => querySpy.mock.calls.filter(
+        ([, options]) => options?.source === source,
+      ).length;
+      const firstOperationReadCount = captureReadCount(
+        'agent.rfc64.legacySwmBoundary.readOperations',
+      );
+      const firstHeadReadCount = captureReadCount(
+        'agent.rfc64.legacySwmBoundary.readHeads',
+      );
+      expect(firstOperationReadCount).toBe(1);
+      expect(firstHeadReadCount).toBeGreaterThan(0);
 
       // A second owner represents the next process start. It must load the
-      // durable capture rather than repeat the production-sized head scan.
+      // durable capture rather than repeat either capture query. The late-entry
+      // marker read still runs on every start, so observe the sources directly.
       const restartedOwner = {};
       await initializeRfc64LegacySwmBoundaryV1(
         restartedOwner,
@@ -76,6 +90,12 @@ describe('RFC-64 legacy SWM boundary (live Blazegraph)', () => {
         restartedOwner,
         CONTEXT_GRAPH_ID,
       )).toBe(LEGACY_HEAD_COUNT);
+      expect(captureReadCount(
+        'agent.rfc64.legacySwmBoundary.readOperations',
+      )).toBe(firstOperationReadCount);
+      expect(captureReadCount(
+        'agent.rfc64.legacySwmBoundary.readHeads',
+      )).toBe(firstHeadReadCount);
     },
     30_000,
   );
@@ -115,6 +135,24 @@ function legacyBoundaryFixture(): Quad[] {
         subject: operation,
         predicate: CONTEXT_GRAPH_ID_PREDICATE,
         object: JSON.stringify(CONTEXT_GRAPH_ID),
+      },
+    );
+  }
+  // These look like legacy heads but have no WorkspaceOperation. Keeping the
+  // unrelated population much larger than the capture proves the bounded
+  // second read does not depend on Blazegraph choosing a favorable join order.
+  for (let index = 0; index < UNRELATED_HEAD_COUNT; index += 1) {
+    const kaNumber = LEGACY_HEAD_COUNT + index + 1;
+    const ual =
+      `did:dkg:otp:20430/0x1111111111111111111111111111111111111111/${kaNumber}`;
+    const head = `${ual}#dkg-swm-head`;
+    quads.push(
+      { graph: META_GRAPH, subject: head, predicate: KA_UAL, object: ual },
+      {
+        graph: META_GRAPH,
+        subject: head,
+        predicate: SHARE_OPERATION_ID,
+        object: JSON.stringify(`unrelated-live-boundary-share-${index}`),
       },
     );
   }

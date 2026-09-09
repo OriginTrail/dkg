@@ -277,44 +277,53 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     expect(store.query).toHaveBeenCalledWith(
       expect.stringContaining('GRAPH ?metaGraph'),
       expect.objectContaining({
-        source: 'agent.rfc64.legacySwmBoundary.readHeads',
+        source: 'agent.rfc64.legacySwmBoundary.readOperations',
       }),
     );
   });
 
-  it('binds the selective workspace operation before joining legacy heads', async () => {
+  it('uses an explicit bounded operation-to-head read boundary', async () => {
     const root = await secureTempRoot(roots);
     const store = fakeStore(new Map([[META_GRAPH, [UAL_ONE]]]));
 
     await initializeRfc64LegacySwmBoundaryV1({}, root, store);
 
-    const captureQueryCall = vi.mocked(store.query).mock.calls.find(([, options]) => (
+    const operationQueryCall = vi.mocked(store.query).mock.calls.find(([, options]) => (
+      options?.source === 'agent.rfc64.legacySwmBoundary.readOperations'
+    ));
+    const headQueryCall = vi.mocked(store.query).mock.calls.find(([, options]) => (
       options?.source === 'agent.rfc64.legacySwmBoundary.readHeads'
     ));
-    expect(captureQueryCall).toBeDefined();
-    const captureQuery = captureQueryCall![0];
-    const operationPattern = captureQuery.indexOf(
+    expect(operationQueryCall).toBeDefined();
+    expect(headQueryCall).toBeDefined();
+    expect(operationQueryCall![0]).toContain(
       '?operation <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>',
     );
-    const headPattern = captureQuery.indexOf(
+    expect(operationQueryCall![0]).not.toContain(
       '?head <http://dkg.io/ontology/kaUal>',
     );
-    expect(operationPattern).toBeGreaterThanOrEqual(0);
-    expect(headPattern).toBeGreaterThan(operationPattern);
-    expect(captureQuery).not.toContain('queryHints#');
+    expect(headQueryCall![0]).toContain('VALUES (?head ?ual ?shareId)');
+    expect(headQueryCall![0]).toContain(`GRAPH <${META_GRAPH}>`);
+    expect(headQueryCall![0]).not.toContain('GRAPH ?metaGraph');
+    expect(headQueryCall![0]).not.toContain('?operation ');
+    expect(headQueryCall![0]).not.toContain('queryHints#');
   });
 
   it('does not query a named metadata graph that could exhaust the root head cap', async () => {
     const root = await secureTempRoot(roots);
-    const rootBinding = {
+    const operationBinding = {
       metaGraph: META_GRAPH,
+      ual: UAL_ONE,
+      shareId: '"share-one"',
+      contextGraphId: `"${CONTEXT_GRAPH_ID}"`,
+    };
+    const headBinding = {
       head: `${UAL_ONE}#dkg-swm-head`,
       ual: UAL_ONE,
-      contextGraphId: `"${CONTEXT_GRAPH_ID}"`,
     };
     const store = {
       listGraphs: vi.fn(async () => [META_GRAPH, SUBGRAPH_META_GRAPH]),
-      query: vi.fn(async (sparql: string) => {
+      query: vi.fn(async (sparql: string, options?: { source?: string }) => {
         if (sparql.includes(`GRAPH <${SUBGRAPH_META_GRAPH}>`)) {
           return {
             type: 'bindings' as const,
@@ -322,8 +331,13 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
             bindings: { length: 100_001 },
           };
         }
-        if (sparql.includes('GRAPH ?metaGraph')) {
-          return { type: 'bindings' as const, bindings: [rootBinding] };
+        if (
+          options?.source === 'agent.rfc64.legacySwmBoundary.readOperations'
+        ) {
+          return { type: 'bindings' as const, bindings: [operationBinding] };
+        }
+        if (options?.source === 'agent.rfc64.legacySwmBoundary.readHeads') {
+          return { type: 'bindings' as const, bindings: [headBinding] };
         }
         return { type: 'bindings' as const, bindings: [] };
       }),
@@ -393,20 +407,31 @@ function fakeStore(
 ): TripleStore {
   return {
     listGraphs: vi.fn(async () => [...headsByGraph.keys()]),
-    query: vi.fn(async (sparql: string) => {
-      if (!sparql.includes('GRAPH ?metaGraph')) {
-        return { type: 'bindings' as const, bindings: [] };
-      }
+    query: vi.fn(async (_sparql: string, options?: { source?: string }) => {
       const rootHeads = headsByGraph.get(META_GRAPH) ?? [];
-      return {
-        type: 'bindings' as const,
-        bindings: rootHeads.map((ual) => ({
-          metaGraph: META_GRAPH,
-          head: forcedHead ?? `${ual}#dkg-swm-head`,
-          ual,
-          contextGraphId: `"${CONTEXT_GRAPH_ID}"`,
-        })),
-      };
+      if (
+        options?.source === 'agent.rfc64.legacySwmBoundary.readOperations'
+      ) {
+        return {
+          type: 'bindings' as const,
+          bindings: rootHeads.map((ual, index) => ({
+            metaGraph: META_GRAPH,
+            ual,
+            shareId: `"share-${index}"`,
+            contextGraphId: `"${CONTEXT_GRAPH_ID}"`,
+          })),
+        };
+      }
+      if (options?.source === 'agent.rfc64.legacySwmBoundary.readHeads') {
+        return {
+          type: 'bindings' as const,
+          bindings: rootHeads.map((ual) => ({
+            head: forcedHead ?? `${ual}#dkg-swm-head`,
+            ual,
+          })),
+        };
+      }
+      return { type: 'bindings' as const, bindings: [] };
     }),
   } as unknown as TripleStore;
 }
