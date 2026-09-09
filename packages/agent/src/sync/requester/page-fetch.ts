@@ -383,8 +383,6 @@ class AdaptiveSyncPageSizer {
  */
 export interface SyncPageFetchOptions {
   readonly workAdmission?: SyncWorkAdmission;
-  /** Whether this invocation may share an in-flight page sequence. */
-  readonly coalescing?: 'shared' | 'isolated';
   readonly snapshotRef?: string;
   readonly sinceBatchId?: string;
   readonly signal?: AbortSignal;

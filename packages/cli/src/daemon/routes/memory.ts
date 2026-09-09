@@ -450,6 +450,7 @@ type SwmCatchupDetailedResult = {
   failedPhases?: number;
   timedOutPhases?: number;
   backoffWorthyFailures?: number;
+  snapshotPlaneIncomplete?: number;
 };
 
 function swmCatchupResultFromInserted(insertedTriples: number): SwmCatchupDetailedResult {
@@ -466,6 +467,7 @@ function swmCatchupOutcomeInput(result: SwmCatchupDetailedResult, errorMessage?:
     failedPhases: result.failedPhases,
     timedOutPhases: result.timedOutPhases,
     backoffWorthyFailures: result.backoffWorthyFailures,
+    snapshotPlaneIncomplete: result.snapshotPlaneIncomplete,
     errorMessage,
   };
 }

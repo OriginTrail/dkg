@@ -1763,7 +1763,6 @@ export async function syncPublicSnapshotsForMeta(params: {
       const snapshotOptions: SyncPageFetchOptions = {
         snapshotRef: snapshot.ref,
         workAdmission,
-        coalescing: params.workAdmission ? 'isolated' : 'shared',
         ...(executionBoundary.signal === undefined ? {} : { signal: executionBoundary.signal }),
       };
       const result = await executionBoundary.read(() => params.fetchSyncPages(

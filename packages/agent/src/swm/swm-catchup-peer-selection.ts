@@ -1,4 +1,4 @@
-export type SwmCatchupPeerOutcome = 'good' | 'empty' | 'denied' | 'unsupported' | 'transportFailed';
+export type SwmCatchupPeerOutcome = 'good' | 'empty' | 'denied' | 'unsupported' | 'transportFailed' | 'localYield';
 
 export const SWM_CATCHUP_PEER_GOOD_TTL_MS = 10 * 60_000;
 export const SWM_CATCHUP_PEER_NEGATIVE_TTL_MS = 2 * 60_000;
@@ -51,6 +51,9 @@ export class SwmCatchupPeerSelector {
   }
 
   record(contextGraphId: string, peerId: string, outcome: SwmCatchupPeerOutcome, now = Date.now()): void {
+    // A local admission yield says nothing about peer health. Do not add it to
+    // either the positive or negative cache, and do not erase prior evidence.
+    if (outcome === 'localYield') return;
     const ttl = outcome === 'good' ? this.goodTtlMs : this.negativeTtlMs;
     if (ttl <= 0) {
       this.entries.delete(cacheKey(contextGraphId, peerId));
@@ -150,6 +153,7 @@ export function classifySwmCatchupPeerOutcome(input: {
   failedPhases?: number;
   timedOutPhases?: number;
   backoffWorthyFailures?: number;
+  snapshotPlaneIncomplete?: number;
   errorMessage?: string;
 }): SwmCatchupPeerOutcome {
   if ((input.insertedTriples ?? 0) > 0 || (input.fetchedDataTriples ?? 0) > 0 || (input.fetchedMetaTriples ?? 0) > 0) {
@@ -158,10 +162,23 @@ export function classifySwmCatchupPeerOutcome(input: {
   if ((input.deniedPhases ?? 0) > 0 || isDeniedMessage(input.errorMessage)) {
     return 'denied';
   }
+  const failedPhases = input.failedPhases ?? 0;
+  const locallyIncomplete = input.snapshotPlaneIncomplete ?? 0;
+  if (
+    !input.errorMessage
+    && locallyIncomplete > 0
+    && failedPhases > 0
+    && failedPhases <= locallyIncomplete
+    && (input.failedPeers ?? 0) === 0
+    && (input.timedOutPhases ?? 0) === 0
+    && (input.backoffWorthyFailures ?? 0) === 0
+  ) {
+    return 'localYield';
+  }
   if (
     input.errorMessage ||
     (input.failedPeers ?? 0) > 0 ||
-    (input.failedPhases ?? 0) > 0 ||
+    failedPhases > 0 ||
     (input.timedOutPhases ?? 0) > 0 ||
     (input.backoffWorthyFailures ?? 0) > 0
   ) {

@@ -389,6 +389,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       deleteCheckpoint: (key) => { checkpoints.delete(key); },
     });
     expect(result.completed).toBe(false);
+    expect(result.incompleteReason).toBe('local-budget-yield');
     expect(fetchSyncPages).toHaveBeenCalledTimes(1);
     expect(checkpoints.size).toBe(0);
     expect(await statusValues(store)).toEqual(['"old"']);

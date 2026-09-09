@@ -55,7 +55,6 @@ type FetchArgs = {
   maxAcceptedQuads?: number;
   maxAcceptedHeapBytesEstimate?: number;
   workAdmission?: typeof UNRESTRICTED_SYNC_WORK;
-  coalescing?: 'shared' | 'isolated';
 };
 
 const EXACT_UAL_7 = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
@@ -280,7 +279,6 @@ function fetchPages(agent: DKGAgent, args: FetchArgs = {}): Promise<SyncPageResu
       maxAcceptedQuads: args.maxAcceptedQuads,
       maxAcceptedHeapBytesEstimate: args.maxAcceptedHeapBytesEstimate,
       workAdmission: args.workAdmission,
-      coalescing: args.coalescing,
     },
   );
 }
@@ -366,10 +364,10 @@ describe('DKGAgent sync fetch coalescing', () => {
       expect(sends).toBe(1);
 
       const isolatedA = fetchPages(agent, {
-        workAdmission: createSyncWorkAdmission(() => 1_000), coalescing: 'isolated',
+        workAdmission: createSyncWorkAdmission(() => 1_000),
       });
       const isolatedB = fetchPages(agent, {
-        workAdmission: createSyncWorkAdmission(() => 1_000), coalescing: 'isolated',
+        workAdmission: createSyncWorkAdmission(() => 1_000),
       });
       await flushMicrotasks();
       expect(sends).toBe(3);

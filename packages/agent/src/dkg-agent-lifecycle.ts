@@ -277,6 +277,7 @@ import {
   type SyncPageFetchOptions,
   type SyncPageResult,
 } from './sync/requester/page-fetch.js';
+import { UNRESTRICTED_SYNC_WORK } from './sync/work-admission.js';
 import {
   createChallengePinnedExactAssetSelection,
   createUalOnlyExactAssetSelection,
@@ -7081,7 +7082,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       manifestPrefixDigestAtOffset,
       shouldStopAfterPage,
       workAdmission,
-      coalescing = 'shared',
       // Exact VM recovery filter. Included in checkpoint, coalescing, wire and
       // responder-session identities so offsets never cross asset batches.
       assetUals,
@@ -7097,10 +7097,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const exactAccumulationLimits = assetUals === undefined
       ? undefined
       : exactSyncPhaseAccumulationLimits(assetUals);
-    // A caller signal defines an operation-owned cancellation contract. The
-    // admission policy's presence is deliberately not a sentinel: callers
-    // state compatibility explicitly through `coalescing`.
-    const coalescingKey = signal || shouldStopAfterPage || coalescing === 'isolated'
+    // A finite admission belongs to one recovery operation and must never
+    // inherit another operation's clock or result. Only absence of a policy or
+    // the canonical unrestricted singleton is shareable.
+    const operationOwnsAdmission = workAdmission !== undefined
+      && workAdmission !== UNRESTRICTED_SYNC_WORK;
+    const coalescingKey = signal || shouldStopAfterPage || operationOwnsAdmission
       ? null
       : syncPageFetchCoalescingKey({
         remotePeerId,
