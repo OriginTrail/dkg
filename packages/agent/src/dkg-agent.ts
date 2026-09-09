@@ -2318,6 +2318,7 @@ export class DKGAgent extends DKGAgentBase {
     retirement = Promise.allSettled(drains).then(() => {
       if (this.vmReconcileDispatcher === vmReconcileDispatcher) {
         this.vmReconcileDispatcher = undefined;
+        this.vmReconcileScheduling = undefined;
       }
       if (this.chainPoller === chainPoller) {
         this.chainPoller = null;

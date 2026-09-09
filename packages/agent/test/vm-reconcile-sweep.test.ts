@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { VmReconcileSweepPlanner, VmReconcileSweepSelector } from '../src/vm-reconcile-sweep.js';
+import { VmReconcileSweepPlanner, VmReconcileSweepSelector } from '../src/internal/vm-reconcile-sweep.js';
 
 it('visits at most one rotation over already-classified candidates and returns admission count', () => {
   const selector = new VmReconcileSweepSelector();

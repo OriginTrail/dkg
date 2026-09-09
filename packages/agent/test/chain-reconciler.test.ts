@@ -1,8 +1,8 @@
-import { vmReconcileSweepAdmission } from '../src/internal/vm-reconcile-sweep-admission.js';
-import { VmReconcileSweepPlanner } from '../src/vm-reconcile-sweep.js';
+import { VmReconcileSweepPlanner } from '../src/internal/vm-reconcile-sweep.js';
 import { describe, it, expect, vi } from 'vitest';
 import {
   reconcileContextGraph,
+  createVmReconcileDispatcherPair,
   VmReconcileDispatcher,
   RecentUalSet,
   type ChainReconcilerDeps,
@@ -1289,10 +1289,13 @@ describe('capacity-aware periodic admission', () => {
   it.each(['abort', 'close'] as const)('releases a one-slot wait on %s while active work stays owned', async action => {
     let release!: () => void;
     const blocked = new Promise<void>(resolve => { release = resolve; });
-    const dispatcher = new VmReconcileDispatcher(async () => blocked, () => undefined, { maxPending: 1 });
+    const { dispatcher, sweepAdmission: port } = createVmReconcileDispatcherPair(
+      async () => blocked,
+      () => undefined,
+      { maxPending: 1 },
+    );
     const controller = new AbortController();
     const active = dispatcher.triggerManual('active');
-    const port = vmReconcileSweepAdmission(dispatcher);
     expect(port.tryAdmit('waiting')).toBeUndefined();
     const admission = port.waitForChange(controller.signal);
     const closing = action === 'close' ? dispatcher.close() : undefined;
@@ -1307,9 +1310,14 @@ describe('capacity-aware periodic admission', () => {
 
   it('admits no work for an already-aborted caller', async () => {
     const run = vi.fn(async () => undefined);
-    const dispatcher = new VmReconcileDispatcher(run, () => undefined);
+    const { dispatcher, sweepAdmission } = createVmReconcileDispatcherPair(
+      run,
+      () => undefined,
+    );
     const controller = new AbortController(); controller.abort();
-    await new VmReconcileSweepPlanner(0).complete(['cancelled'], [], vmReconcileSweepAdmission(dispatcher), () => true, controller.signal);
+    await new VmReconcileSweepPlanner(0).complete(
+      ['cancelled'], [], sweepAdmission, () => true, controller.signal,
+    );
     expect(run).not.toHaveBeenCalled();
     await dispatcher.close();
   });
@@ -1319,7 +1327,7 @@ describe('capacity-aware periodic admission', () => {
 it('coalesces a waiting periodic request when a foreground trailing pass becomes available', async () => {
   const gates = new Map<string, () => void>();
   const counts = new Map<string, number>();
-  const dispatcher = new VmReconcileDispatcher(async key => {
+  const { dispatcher, sweepAdmission: port } = createVmReconcileDispatcherPair(async key => {
     const count = (counts.get(key) ?? 0) + 1; counts.set(key, count);
     if (count === 1) await new Promise<void>(resolve => { gates.set(key, resolve); });
     return key;
@@ -1328,7 +1336,6 @@ it('coalesces a waiting periodic request when a foreground trailing pass becomes
   await new Promise(resolve => setTimeout(resolve, 0));
   dispatcher.triggerLive('A');
   gates.get('C')!(); await dispatcher.waitForIdle('C');
-  const port = vmReconcileSweepAdmission(dispatcher);
   expect(port.tryAdmit('B')).toBeUndefined();
   let completion: Promise<string> | undefined;
   const waiting = port.waitForChange().then(() => { completion = port.tryAdmit('B'); });

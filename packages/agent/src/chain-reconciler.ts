@@ -23,7 +23,7 @@
  *     with a single trailing re-run if more events land mid-sweep.
  */
 
-import { registerVmReconcileSweepAdmission } from './internal/vm-reconcile-sweep-admission.js';
+import type { VmReconcileSweepAdmission } from './internal/vm-reconcile-sweep-admission.js';
 import {
   type CursorState,
   recordCompletion,
@@ -578,6 +578,13 @@ export interface VmReconcileDispatcherOptions {
   maxForegroundBurst?: number;
 }
 
+export interface VmReconcileDispatcherPair<T> {
+  readonly dispatcher: VmReconcileDispatcher<T>;
+  readonly sweepAdmission: VmReconcileSweepAdmission<T>;
+}
+
+const VM_RECONCILE_SWEEP_ADMISSION = Symbol('vm-reconcile-sweep-admission');
+
 function vmReconcileSourceRank(source: VmReconcileSource): number {
   if (source === 'manual') return 2;
   if (source === 'live') return 1;
@@ -606,6 +613,7 @@ export class VmReconcileDispatcher<T> {
   private readonly concurrency: number;
   private readonly maxPending: number;
   private readonly maxForegroundBurst: number;
+  readonly [VM_RECONCILE_SWEEP_ADMISSION]: VmReconcileSweepAdmission<T>;
 
   constructor(
     private readonly run: (key: string, source: VmReconcileSource) => Promise<T>,
@@ -629,9 +637,9 @@ export class VmReconcileDispatcher<T> {
     this.concurrency = concurrency;
     this.maxPending = maxPending;
     this.maxForegroundBurst = maxForegroundBurst;
-    registerVmReconcileSweepAdmission(this, {
-      tryAdmit: key => this.tryDispatchPeriodic(key),
-      waitForChange: signal => this.waitForPeriodicStateChange(signal),
+    this[VM_RECONCILE_SWEEP_ADMISSION] = Object.freeze({
+      tryAdmit: (key: string) => this.tryDispatchPeriodic(key),
+      waitForChange: (signal?: AbortSignal) => this.waitForPeriodicStateChange(signal),
       isClosed: () => this.closed,
     });
   }
@@ -949,6 +957,19 @@ export class VmReconcileDispatcher<T> {
         });
     }
   }
+}
+
+/** Construct the host-owned dispatcher and its internal sweep port together. */
+export function createVmReconcileDispatcherPair<T>(
+  run: (key: string, source: VmReconcileSource) => Promise<T>,
+  onFailure: (key: string, error: unknown) => void,
+  options: VmReconcileDispatcherOptions = {},
+): Readonly<VmReconcileDispatcherPair<T>> {
+  const dispatcher = new VmReconcileDispatcher(run, onFailure, options);
+  return Object.freeze({
+    dispatcher,
+    sweepAdmission: dispatcher[VM_RECONCILE_SWEEP_ADMISSION],
+  });
 }
 
 /**

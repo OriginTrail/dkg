@@ -9,7 +9,6 @@
  * unchanged. The constructor is `protected` (was `private`) so subclasses can
  * be declared; external construction still goes through `DKGAgent.create`.
  */
-import { vmReconcileSweepAdmission } from './internal/vm-reconcile-sweep-admission.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import {
@@ -278,14 +277,15 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
 import {
   reconcileContextGraph,
-  VmReconcileDispatcher,
+  type VmReconcileDispatcher,
   RecentUalSet,
+  type VmReconcileDispatcherPair,
   type ChainReconcilerDeps,
   type OrdinalOutcome,
 } from './chain-reconciler.js';
 import type { ContextGraphReconcileResult } from './vm-reconcile-service.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
-import { VmReconcileSweepPlanner } from './vm-reconcile-sweep.js';
+import { VmReconcileSweepPlanner } from './internal/vm-reconcile-sweep.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
 // type alias so listPendingJoinApprovalRetries() retains its old
@@ -1083,6 +1083,10 @@ export class DKGAgentBase {
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;
   /** Phase B — unified per-CG coalescing and node-wide admission policy. */
   protected vmReconcileDispatcher?: VmReconcileDispatcher<ContextGraphReconcileResult>;
+  /** Explicit host-owned pair; capacity/completion operations stay internal. */
+  protected vmReconcileScheduling?: Readonly<
+    VmReconcileDispatcherPair<ContextGraphReconcileResult>
+  >;
   /** Closed dispatcher retained until every physically active worker settles. */
   protected vmReconcileRetirement: Promise<void> | null = null;
   /** Reconcile engines may outlive a caller's abort race; stop drains these before store teardown. */
@@ -1095,7 +1099,14 @@ export class DKGAgentBase {
       && !lifecycleSignal?.aborted
       && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
     const dispatcher = this.vmReconcileDispatcher;
-    if (!isLifecycleCurrent() || !this.vmReconcileEnabled() || !dispatcher) return;
+    const scheduling = this.vmReconcileScheduling;
+    if (
+      !isLifecycleCurrent()
+      || !this.vmReconcileEnabled()
+      || !dispatcher
+      || scheduling === undefined
+      || scheduling.dispatcher !== dispatcher
+    ) return;
     // Admission is synchronous. The dispatcher owns physical concurrency,
     // per-CG coalescing, error containment and shutdown; timer ticks never await workers.
     const bound = new Set<string>();
@@ -1112,7 +1123,14 @@ export class DKGAgentBase {
       const localCgId = policyEnvelope.payload.contextGraphId;
       if (this.isRfc64SelectedVmReconcileTargetAllowed(localCgId)) bound.add(localCgId);
     }
-    return { dispatcher, isLifecycleCurrent, lifecycleSignal, bound: [...bound], unbound: unbound.filter(key => !bound.has(key)) };
+    return {
+      dispatcher,
+      sweepAdmission: scheduling.sweepAdmission,
+      isLifecycleCurrent,
+      lifecycleSignal,
+      bound: [...bound],
+      unbound: unbound.filter(key => !bound.has(key)),
+    };
   }
 
   /** Timer-only admission turn; physical workers never serialize later ticks. */
@@ -1120,7 +1138,7 @@ export class DKGAgentBase {
     const sweep = this.prepareVmReconcileSweep();
     if (!sweep) return;
     this.vmReconcileSweepPlanner.admit(sweep.bound, sweep.unbound,
-      key => sweep.isLifecycleCurrent() ? vmReconcileSweepAdmission(sweep.dispatcher).tryAdmit(key) : undefined);
+      key => sweep.isLifecycleCurrent() ? sweep.sweepAdmission.tryAdmit(key) : undefined);
   }
 
   /** Admitted authenticated graph-scoped stores must physically drain before backing-store teardown. */

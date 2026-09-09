@@ -20,7 +20,11 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
-import { VmReconcileDispatcher } from '../src/chain-reconciler.js';
+import {
+  createVmReconcileDispatcherPair,
+  VmReconcileDispatcher,
+  type VmReconcileDispatcherPair,
+} from '../src/chain-reconciler.js';
 import { resolveRfc64CatalogExecutionPlanV1 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 
 function deferred<T>(): {
@@ -53,6 +57,7 @@ interface AgentInternals {
   handleKARegisteredNudge(onChainId: string, kaId: bigint, ctx: unknown): Promise<string | null>;
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string }>;
   vmReconcileDispatcher: VmReconcileDispatcher<boolean> | null;
+  vmReconcileScheduling: Readonly<VmReconcileDispatcherPair<boolean>>;
   store: TripleStore;
 }
 
@@ -65,15 +70,23 @@ function stubNode(agent: DKGAgent): void {
   };
 }
 
+function installVmReconcileScheduling(
+  internals: AgentInternals,
+  scheduling: Readonly<VmReconcileDispatcherPair<boolean>>,
+): VmReconcileDispatcher<boolean> {
+  internals.vmReconcileScheduling = scheduling;
+  internals.vmReconcileDispatcher = scheduling.dispatcher;
+  return scheduling.dispatcher;
+}
+
 /** Exercise admission through the real dispatcher and canonical authorization/binding owner. */
 function targetDispatcher(internals: AgentInternals) {
   const triggered: string[] = [];
-  const dispatcher = new VmReconcileDispatcher(async (cg, source) => {
+  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async (cg, source) => {
     await internals.resolveVmReconcileTarget(cg);
     triggered.push(`${source}:${cg}`);
     return true;
-  }, () => undefined, { concurrency: 2, maxPending: 32 });
-  internals.vmReconcileDispatcher = dispatcher;
+  }, () => undefined, { concurrency: 2, maxPending: 32 }));
   return { dispatcher, triggered };
 }
 
@@ -224,10 +237,11 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     internals.subscribedContextGraphs.set(selected, passiveDiscoveryRow);
 
     const triggered: string[] = [];
-    internals.vmReconcileDispatcher = new VmReconcileDispatcher(async (cg, reason) => {
+    const scheduling = createVmReconcileDispatcherPair(async (cg, reason) => {
       triggered.push(`${reason}:${cg}`);
       return true;
     }, () => undefined);
+    installVmReconcileScheduling(internals, scheduling);
 
     await internals.runVmReconcileSweep();
 
@@ -269,7 +283,10 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       };
       internals.subscribedContextGraphs.clear();
       const dispatch = vi.fn(async (_cg: string, _reason: 'live' | 'periodic' | 'manual') => true);
-      internals.vmReconcileDispatcher = new VmReconcileDispatcher(dispatch, () => undefined);
+      installVmReconcileScheduling(
+        internals,
+        createVmReconcileDispatcherPair(dispatch, () => undefined),
+      );
 
       await internals.runVmReconcileSweep();
 
@@ -812,7 +829,10 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       }],
     };
     const dispatch = vi.fn(async (_cg: string, _reason: 'live' | 'periodic' | 'manual') => true);
-    internals.vmReconcileDispatcher = new VmReconcileDispatcher(dispatch, () => undefined);
+    installVmReconcileScheduling(
+      internals,
+      createVmReconcileDispatcherPair(dispatch, () => undefined),
+    );
     const resolveOnChainId = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
       .mockResolvedValue(298n);
 
@@ -1119,10 +1139,11 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     internals.subscribedContextGraphs.set(CG_BOUND, { subscribed: true, onChainId: ON_BOUND });
 
     const triggered: string[] = [];
-    internals.vmReconcileDispatcher = new VmReconcileDispatcher(async (cg, source) => {
+    const scheduling = createVmReconcileDispatcherPair(async (cg, source) => {
       triggered.push(`${source}:${cg}`);
       return true;
     }, () => undefined);
+    installVmReconcileScheduling(internals, scheduling);
 
     const reconciled = await internals.handleKARegisteredNudge(ON_BOUND, 1n, createOperationContext('system'));
     await internals.vmReconcileDispatcher.waitForIdle();

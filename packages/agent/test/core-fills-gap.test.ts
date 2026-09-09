@@ -52,10 +52,11 @@ import type {
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import {
-  VmReconcileDispatcher,
+  createVmReconcileDispatcherPair,
   type OrdinalOutcome,
   type OrdinalRecoveryTarget,
   type PendingOrdinalRecoveryResult,
+  type VmReconcileDispatcherPair,
 } from '../src/chain-reconciler.js';
 import { packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
 import type { ContextGraphReconcileResult } from '../src/vm-reconcile-service.js';
@@ -105,6 +106,7 @@ interface AgentInternals {
     waitForIdle(): Promise<void>;
     dispatch?: (cg: string, source: 'live' | 'periodic' | 'manual') => Promise<unknown>;
   } | null;
+  vmReconcileScheduling: Readonly<VmReconcileDispatcherPair<unknown>>;
   store: TripleStore;
   chain: MockChainAdapter & {
     getContextGraphAccessPolicy?: (id: bigint) => Promise<number>;
@@ -2297,11 +2299,13 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
     const liveTriggered: string[] = [];
     const periodicTriggered: string[] = [];
-    internals.vmReconcileDispatcher = new VmReconcileDispatcher(async (cg, source) => {
+    const scheduling = createVmReconcileDispatcherPair(async (cg, source) => {
       if (source === 'periodic') periodicTriggered.push(cg);
       else if (source === 'live') liveTriggered.push(cg);
       return {};
     }, () => undefined);
+    internals.vmReconcileScheduling = scheduling;
+    internals.vmReconcileDispatcher = scheduling.dispatcher;
 
     await internals.runVmReconcileSweep();
 
@@ -2327,11 +2331,13 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     }
 
     const swept: string[] = [];
-    const dispatcher = new VmReconcileDispatcher(
+    const scheduling = createVmReconcileDispatcherPair(
       async (contextGraphId) => { swept.push(contextGraphId); },
       () => undefined,
       { concurrency: 1, maxPending: 1 },
     );
+    const dispatcher = scheduling.dispatcher;
+    internals.vmReconcileScheduling = scheduling;
     internals.vmReconcileDispatcher = dispatcher;
 
     for (let sweep = 0; sweep < contextGraphIds.length; sweep += 1) {

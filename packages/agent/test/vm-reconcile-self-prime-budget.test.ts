@@ -5,13 +5,18 @@ import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { VmReconcileShutdownTimeoutError } from '../src/vm-reconcile-service.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
-import { VmReconcileDispatcher } from '../src/chain-reconciler.js';
+import {
+  createVmReconcileDispatcherPair,
+  VmReconcileDispatcher,
+  type VmReconcileDispatcherPair,
+} from '../src/chain-reconciler.js';
 
 type Subscription = { subscribed: boolean; coreHosted?: boolean; onChainId?: string };
 interface Internals {
   subscribedContextGraphs: Map<string, Subscription>;
   node: unknown;
   vmReconcileDispatcher: VmReconcileDispatcher<boolean>;
+  vmReconcileScheduling: Readonly<VmReconcileDispatcherPair<boolean>>;
   vmReconcileLifecycleController: AbortController;
   vmReconcilePhysicalRuns: Set<Promise<unknown>>;
   resolveVmReconcileTarget(cg: string, isCurrent?: () => boolean, signal?: AbortSignal): Promise<unknown>;
@@ -24,6 +29,14 @@ interface Internals {
 }
 const agents: DKGAgent[] = [];
 const dispatchers: VmReconcileDispatcher<boolean>[] = [];
+function installVmReconcileScheduling(
+  internals: Internals,
+  scheduling: Readonly<VmReconcileDispatcherPair<boolean>>,
+): VmReconcileDispatcher<boolean> {
+  internals.vmReconcileScheduling = scheduling;
+  internals.vmReconcileDispatcher = scheduling.dispatcher;
+  return scheduling.dispatcher;
+}
 afterEach(async () => {
   for (const dispatcher of dispatchers.splice(0)) await dispatcher.close();
   for (const agent of agents.splice(0)) await agent.stop();
@@ -43,13 +56,12 @@ async function fixture(unbound: number, maxPending = 64) {
   });
   const installDispatcher = () => {
     const signal = internals.vmReconcileLifecycleController.signal;
-    const dispatcher = new VmReconcileDispatcher(async (cg) => {
+    const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async (cg) => {
       order.push(`dispatch:${cg}`);
       await internals.resolveVmReconcileTarget(cg, () => !signal.aborted, signal);
       return true;
-    }, () => undefined, { concurrency: 1, maxPending });
+    }, () => undefined, { concurrency: 1, maxPending }));
     dispatchers.push(dispatcher);
-    internals.vmReconcileDispatcher = dispatcher;
     return dispatcher;
   };
   installDispatcher();
@@ -166,12 +178,11 @@ it.each(['bound', 'cg-0'])('keeps bounded discovery progressing while %s reconci
     order.push(`resolve:${id}`);
     return id === 'cg-0' ? { onChainId: '43', provenance: 'ontology' } : null;
   });
-  const dispatcher = new VmReconcileDispatcher(async (id) => {
+  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async (id) => {
     await targetResolver.resolveVmReconcileTarget(id);
     if (id === blockedId) await pending;
     return true;
-  }, () => undefined, { concurrency: 2, maxPending: 32 });
-  internals.vmReconcileDispatcher = dispatcher;
+  }, () => undefined, { concurrency: 2, maxPending: 32 }));
   internals.scheduleVmReconcileSweep();
   try {
     await vi.waitFor(() => expect(new Set(resolve.mock.calls.map(([id]) => id)).size).toBe(8), { timeout: 300 });
@@ -208,13 +219,12 @@ it('advances discovery under a sustained bound backlog without waiting for idle'
   const releases: Array<() => void> = [];
   const started: string[] = [];
   let paused = true;
-  const dispatcher = new VmReconcileDispatcher(async (id) => {
+  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async (id) => {
     started.push(id);
     try { await internals.resolveVmReconcileTarget(id); }
     finally { if (paused) await new Promise<void>(done => releases.push(done)); }
     return true;
-  }, () => undefined, { concurrency: 1, maxPending: 3 });
-  internals.vmReconcileDispatcher = dispatcher;
+  }, () => undefined, { concurrency: 1, maxPending: 3 }));
   try {
     for (let tick = 0; tick < 100; tick++) {
       internals.scheduleVmReconcileSweep();
@@ -238,12 +248,11 @@ it.each([1, 3])('reserves foreground admission with maxPending=%i while the swee
   const releases: Array<() => void> = [];
   const started: string[] = [];
   let paused = true;
-  const dispatcher = new VmReconcileDispatcher(async (id) => {
+  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async (id) => {
     started.push(id);
     if (paused) await new Promise<void>(done => releases.push(done));
     return true;
-  }, () => undefined, { concurrency: 1, maxPending });
-  internals.vmReconcileDispatcher = dispatcher;
+  }, () => undefined, { concurrency: 1, maxPending }));
   try {
     internals.scheduleVmReconcileSweep();
     const failures: unknown[] = [];
@@ -328,8 +337,10 @@ it('completes an empty sweep without waiting for unrelated manual work', async (
   const { internals } = await fixture(0);
   let release!: () => void;
   const blocked = new Promise<void>(done => { release = done; });
-  const dispatcher = new VmReconcileDispatcher(async () => { await blocked; return true; }, () => undefined);
-  internals.vmReconcileDispatcher = dispatcher;
+  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(
+    async () => { await blocked; return true; },
+    () => undefined,
+  ));
   const manual = dispatcher.triggerManual('unrelated');
   let completed = false;
   const sweep = internals.runVmReconcileSweep().then(() => { completed = true; });
@@ -371,12 +382,11 @@ it('finishes its admitted targets while an unrelated concurrent manual task rema
   let release!: () => void;
   const blocked = new Promise<void>(done => { release = done; });
   const ran: string[] = [];
-  const dispatcher = new VmReconcileDispatcher(async key => {
+  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async key => {
     ran.push(key);
     if (key === 'unrelated') await blocked;
     return true;
-  }, () => undefined, { concurrency: 2 });
-  internals.vmReconcileDispatcher = dispatcher;
+  }, () => undefined, { concurrency: 2 }));
   const manual = dispatcher.triggerManual('unrelated');
   let completed = false;
   const sweep = internals.runVmReconcileSweep().then(() => { completed = true; });
@@ -416,12 +426,12 @@ it('waits for relevant trailing capacity without spinning when another worker is
   internals.subscribedContextGraphs.set('B', { subscribed: true, onChainId: '2' });
   const gates = new Map<string, () => void>();
   const runs = new Map<string, number>();
-  const dispatcher = new VmReconcileDispatcher(async key => {
+  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async key => {
     const count = (runs.get(key) ?? 0) + 1; runs.set(key, count);
     if (count === 1) await new Promise<void>(resolve => { gates.set(key, resolve); });
     return true;
-  }, () => undefined, { concurrency: 3, maxPending: 2 });
-  dispatchers.push(dispatcher); internals.vmReconcileDispatcher = dispatcher;
+  }, () => undefined, { concurrency: 3, maxPending: 2 }));
+  dispatchers.push(dispatcher);
   for (const key of ['A', 'B', 'C']) dispatcher.triggerLive(key);
   await vi.waitFor(() => expect(gates.size).toBe(3));
   dispatcher.triggerLive('A');
@@ -453,12 +463,12 @@ it.each(['pending', 'active'] as const)('awaits the exact %s coalesced or traili
   internals.subscribedContextGraphs.set('selected', { subscribed: true, onChainId: '2' });
   const releases: Array<() => void> = [];
   const sources: string[] = [];
-  const dispatcher = new VmReconcileDispatcher(async (key, source) => {
+  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async (key, source) => {
     sources.push(`${key}:${source}`);
     await new Promise<void>(resolve => { releases.push(resolve); });
     return true;
-  }, () => undefined, { concurrency: 1, maxPending: 4 });
-  dispatchers.push(dispatcher); internals.vmReconcileDispatcher = dispatcher;
+  }, () => undefined, { concurrency: 1, maxPending: 4 }));
+  dispatchers.push(dispatcher);
   if (state === 'pending') dispatcher.triggerLive('blocker');
   dispatcher.triggerLive('selected');
   await vi.waitFor(() => expect(releases).toHaveLength(1));
@@ -487,13 +497,13 @@ it('joins the leading admission of a timer turn resumed by a public sweep', asyn
   const x = new Promise<void>(resolve => { releaseX = resolve; });
   const a = new Promise<void>(resolve => { releaseA = resolve; });
   const ran: string[] = [];
-  const dispatcher = new VmReconcileDispatcher(async key => {
+  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async key => {
     ran.push(key);
     if (key === 'X') await x;
     if (key === 'A') await a;
     return true;
-  }, () => {}, { concurrency: 2, maxPending: 1 });
-  dispatchers.push(dispatcher); internals.vmReconcileDispatcher = dispatcher;
+  }, () => {}, { concurrency: 2, maxPending: 1 }));
+  dispatchers.push(dispatcher);
   const unrelated = dispatcher.triggerManual('X');
   internals.scheduleVmReconcileSweep();
   let settled = false;
@@ -518,12 +528,12 @@ it('gives overlapping public sweeps their own admitted completion boundaries', a
   const release: Array<() => void> = [];
   const ran: string[] = [];
   let draining = false;
-  const dispatcher = new VmReconcileDispatcher(async key => {
+  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async key => {
     ran.push(key);
     if (key === 'A' && !draining) await new Promise<void>(resolve => { release.push(resolve); });
     return true;
-  }, () => {}, { concurrency: 1, maxPending: 4 });
-  dispatchers.push(dispatcher); internals.vmReconcileDispatcher = dispatcher;
+  }, () => {}, { concurrency: 1, maxPending: 4 }));
+  dispatchers.push(dispatcher);
   let firstSettled = false, secondSettled = false;
   const first = internals.runVmReconcileSweep().then(() => { firstSettled = true; });
   const second = internals.runVmReconcileSweep().then(() => { secondSettled = true; });
@@ -550,10 +560,10 @@ it('joins overlapping public calls and timer ticks on one retained one-slot admi
   const a = new Promise<void>(resolve => { releaseA = resolve; });
   const u = new Promise<void>(resolve => { releaseU = resolve; });
   const ran: string[] = [];
-  const dispatcher = new VmReconcileDispatcher(async key => {
+  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async key => {
     ran.push(key); await (key === 'A' ? a : u); return true;
-  }, () => {}, { concurrency: 1, maxPending: 1 });
-  dispatchers.push(dispatcher); internals.vmReconcileDispatcher = dispatcher;
+  }, () => {}, { concurrency: 1, maxPending: 1 }));
+  dispatchers.push(dispatcher);
   let completed = 0;
   const first = internals.runVmReconcileSweep().then(() => { completed++; });
   const second = internals.runVmReconcileSweep().then(() => { completed++; });

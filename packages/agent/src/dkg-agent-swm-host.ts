@@ -8,7 +8,6 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
-import { vmReconcileSweepAdmission } from './internal/vm-reconcile-sweep-admission.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { performance } from 'node:perf_hooks';
@@ -239,8 +238,9 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
 import {
   reconcileContextGraph,
+  createVmReconcileDispatcherPair,
   RecentUalSet,
-  VmReconcileDispatcher,
+  type VmReconcileDispatcher,
   type ChainReconcilerDeps,
   type OrdinalOutcome,
   type PendingOrdinalRecoveryResult,
@@ -2969,7 +2969,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const sweep = this.prepareVmReconcileSweep();
     if (!sweep) return;
     await this.vmReconcileSweepPlanner.complete(
-      sweep.bound, sweep.unbound, vmReconcileSweepAdmission(sweep.dispatcher),
+      sweep.bound, sweep.unbound, sweep.sweepAdmission,
       sweep.isLifecycleCurrent, sweep.lifecycleSignal,
     );
   }
@@ -3293,7 +3293,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       throw new VmReconcileQueueClosedError();
     }
     if (!this.vmReconcileDispatcher) {
-      this.vmReconcileDispatcher = new VmReconcileDispatcher(
+      const scheduling = createVmReconcileDispatcherPair(
         (localCgId, source) => this.executeVmReconcileForCg(localCgId, source),
         (localCgId, err) => {
           this.log.warn(
@@ -3307,6 +3307,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
           maxForegroundBurst: DKGAgentBase.VM_RECONCILE_MAX_FOREGROUND_BURST,
         },
       );
+      this.vmReconcileScheduling = scheduling;
+      this.vmReconcileDispatcher = scheduling.dispatcher;
     }
     return this.vmReconcileDispatcher;
   }

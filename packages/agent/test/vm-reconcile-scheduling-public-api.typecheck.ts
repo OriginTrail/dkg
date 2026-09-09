@@ -22,3 +22,15 @@ void vmReconcileSweepAdmission;
 // @ts-expect-error internal sweep capability subpaths are deliberately blocked
 import { vmReconcileSweepAdmission as internalAdmission } from '@origintrail-official/dkg-agent/dist/internal/vm-reconcile-sweep-admission.js';
 void internalAdmission;
+
+// @ts-expect-error Stateful sweep planning is not a package-root API.
+import { VmReconcileSweepPlanner } from '@origintrail-official/dkg-agent';
+void VmReconcileSweepPlanner;
+
+// @ts-expect-error The former public deep subpath no longer exists.
+import { VmReconcileSweepSelector as legacySelector } from '@origintrail-official/dkg-agent/dist/vm-reconcile-sweep.js';
+void legacySelector;
+
+// @ts-expect-error Internal sweep-planner subpaths are blocked by package exports.
+import { VmReconcileSweepSelector as internalSelector } from '@origintrail-official/dkg-agent/dist/internal/vm-reconcile-sweep.js';
+void internalSelector;

@@ -1,4 +1,4 @@
-import type { VmReconcileSweepAdmission } from './internal/vm-reconcile-sweep-admission.js';
+import type { VmReconcileSweepAdmission } from './vm-reconcile-sweep-admission.js';
 
 /** A scalar round-robin cursor over candidates already classified by the host. */
 export class VmReconcileSweepSelector {
