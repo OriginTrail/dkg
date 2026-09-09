@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 
 const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
@@ -210,7 +211,7 @@ describe('runDaemonInner public snapshot page-index wiring', () => {
         hubAddress: '0x1234567890123456789012345678901234567890',
         chainId: 'evm:100',
       },
-    } as any, Date.now());
+    } as any, Date.now(), resolveShutdownPolicy(undefined));
 
     await vi.advanceTimersByTimeAsync(0);
 

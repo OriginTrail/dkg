@@ -47,7 +47,7 @@ import {
   KA_VM_VALIDATION,
   kaVmPublishRequest,
   stageKnowledgeAssetShareSnapshot,
-} from './_helpers/ka-vm-publish.js';
+} from '../../../scripts/testing/ka-vm-publish.js';
 
 const AUTHOR = '0x1111111111111111111111111111111111111111' as LiftJobHex;
 const MERKLE_ROOT = `0x${'12'.repeat(32)}` as LiftJobHex;

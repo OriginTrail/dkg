@@ -26,6 +26,7 @@ import { parseSimpleNQuads } from './publish-handler.js';
 import { skolemizeByEntity } from './auto-partition.js';
 import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
 import { computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
+import { hasValidGraphScopedContent } from './graph-publish-envelope.js';
 import {
   promoteUpdatedKaToPerCgId,
   resolveUalByBatchId,
@@ -84,15 +85,7 @@ function resolveGraphScopedUpdateRequest(
   }
   const publicTripleCount = request.publicTripleCount ?? 0;
   const privateTripleCount = request.privateTripleCount ?? 0;
-  if (
-    !Number.isSafeInteger(publicTripleCount)
-    || publicTripleCount < 0
-    || !Number.isSafeInteger(privateTripleCount)
-    || privateTripleCount < 0
-    || (publicTripleCount === 0 && privateTripleCount === 0)
-    || (privateTripleCount > 0 && privateMerkleRoot?.length !== 32)
-    || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
-  ) {
+  if (!hasValidGraphScopedContent(publicTripleCount, privateTripleCount, privateMerkleRoot)) {
     throw new Error('KA update has an invalid graph-scoped content envelope');
   }
   const scope = createGraphKnowledgeAssetScope(request.kaUal, request.assertionVersion);

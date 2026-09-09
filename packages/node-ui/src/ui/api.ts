@@ -404,6 +404,12 @@ export interface SignedAgentDelegation {
   delegateePeerId?: string;
   delegateeOpKey?: string;
   signature: string;
+  workspaceEncryptionKeys?: Array<{
+    encryptionKeyAlgorithm: 'X25519';
+    publicEncryptionKey: string;
+    encryptionKeyProof: string;
+  }>;
+  workspaceEncryptionKeysSignature?: string;
 }
 
 // SignJoinResponse is intentionally narrow — `/sign-join` is sign-only
@@ -1955,6 +1961,7 @@ export type LocalAgentChannelTarget = 'bridge' | 'gateway';
 
 export interface LocalAgentHealthResponse {
   ok: boolean;
+  configured?: boolean;
   ready?: boolean;
   reachable?: boolean;
   offline?: boolean;
@@ -2796,7 +2803,9 @@ function hermesDetail(
   return null;
 }
 
-async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecord): Promise<LocalAgentIntegration> {
+async function mapLocalAgentIntegrationRecord(
+  record: LocalAgentIntegrationRecord,
+): Promise<LocalAgentIntegration | null> {
   const id = String(record.id ?? '').toLowerCase();
   const surface = LOCAL_AGENT_SURFACES[id];
   const hasChatBridge = record.capabilities?.localChat === true && surface?.chatSupported === true;
@@ -2807,6 +2816,13 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
   const health = configured && hasChatBridge && surface?.fetchHealth
     ? normalizeLocalAgentHealth(await surface.fetchHealth().catch(() => null))
     : null;
+  // The daemon-owned integration exists in the registry on every node. Keep it
+  // out of the UI when the operator supplied no local-LLM configuration and
+  // the conventional local endpoint was not auto-detected. An explicit but
+  // temporarily offline configuration remains visible so its error is useful.
+  if (id === 'local-llm' && health?.configured === false && health.reachable !== true) {
+    return null;
+  }
   const degraded = isDegradedLocalAgentHealth(runtimeStatus, health);
   const chatReady = health?.ok === true && !degraded;
   const bridgeOnline = chatReady;
@@ -2965,7 +2981,10 @@ export async function fetchRegistryIntegrations(opts: { tier?: RegistryTrustTier
 
 export async function fetchLocalAgentIntegrations(): Promise<{ integrations: LocalAgentIntegration[] }> {
   const response = await get<{ integrations?: LocalAgentIntegrationRecord[] }>('/api/local-agent-integrations');
-  const integrations = await Promise.all((response.integrations ?? []).map(mapLocalAgentIntegrationRecord));
+  const mapped = await Promise.all((response.integrations ?? []).map(mapLocalAgentIntegrationRecord));
+  const integrations = mapped.filter(
+    (integration): integration is LocalAgentIntegration => integration !== null,
+  );
 
   integrations.sort((a, b) => {
     const aPriority = a.id === 'openclaw' ? 0 : 1;

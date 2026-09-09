@@ -20,4 +20,8 @@ Task packs:
 - [Publish and Query](task-packs/publish-query.md)
 - [Operate and Troubleshoot](task-packs/operate-troubleshoot.md)
 
+Reference:
+
+- [Knowledge Asset Publish Lifecycle Language](publish-lifecycle-language.md)
+
 Use only documents marked current for operational context. Historical and archive documents are retained for reference, not as current instructions.

@@ -1,0 +1,401 @@
+{
+  "schemaVersion": 1,
+  "sourceRevision": "580a3607f532f561c8aa7c5f8aab316e418c89fe",
+  "measuredAt": "2026-09-05",
+  "node": "22.23.1",
+  "platform": "darwin-arm64",
+  "scope": "Production src and extension/src; test helpers, declarations and JSON excluded. Whole-package floors round measured percentages down with one point of platform headroom, retaining existing floors where the measured source scope still meets them.",
+  "packages": {
+    "adapter-elizaos": {
+      "measured": {
+        "lines": 39.43,
+        "functions": 39.13,
+        "branches": 15.38,
+        "statements": 39.07
+      },
+      "thresholds": {
+        "lines": 38,
+        "functions": 38,
+        "branches": 14,
+        "statements": 38
+      }
+    },
+    "adapter-hermes": {
+      "measured": {
+        "lines": 83.27,
+        "functions": 91.58,
+        "branches": 76.54,
+        "statements": 81.79
+      },
+      "thresholds": {
+        "lines": 82,
+        "functions": 90,
+        "branches": 75,
+        "statements": 80
+      }
+    },
+    "adapter-openclaw": {
+      "measured": {
+        "lines": 89.35,
+        "functions": 89.09,
+        "branches": 79.08,
+        "statements": 86.11
+      },
+      "thresholds": {
+        "lines": 88,
+        "functions": 88,
+        "branches": 78,
+        "statements": 85
+      }
+    },
+    "adapter-prime-agent": {
+      "measured": {
+        "lines": 76.27,
+        "functions": 73.01,
+        "branches": 68.37,
+        "statements": 73.22
+      },
+      "thresholds": {
+        "lines": 75,
+        "functions": 72,
+        "branches": 67,
+        "statements": 72
+      }
+    },
+    "agent": {
+      "measured": {
+        "lines": 87.41,
+        "functions": 90.74,
+        "branches": 78.1,
+        "statements": 85.51
+      },
+      "thresholds": {
+        "lines": 86,
+        "functions": 89,
+        "branches": 77,
+        "statements": 84
+      }
+    },
+    "chain": {
+      "measured": {
+        "lines": 83.26,
+        "functions": 85.72,
+        "branches": 73.9,
+        "statements": 81.76
+      },
+      "thresholds": {
+        "lines": 82,
+        "functions": 84,
+        "branches": 72,
+        "statements": 80
+      }
+    },
+    "cli": {
+      "measured": {
+        "lines": 66.5,
+        "functions": 69.69,
+        "branches": 61.27,
+        "statements": 64.75
+      },
+      "thresholds": {
+        "lines": 65,
+        "functions": 68,
+        "branches": 60,
+        "statements": 63
+      }
+    },
+    "core": {
+      "measured": {
+        "lines": 87.02,
+        "functions": 90.14,
+        "branches": 75.65,
+        "statements": 85.48
+      },
+      "thresholds": {
+        "lines": 87,
+        "functions": 89,
+        "branches": 74,
+        "statements": 84
+      }
+    },
+    "epcis": {
+      "measured": {
+        "lines": 97.87,
+        "functions": 96.15,
+        "branches": 93.27,
+        "statements": 98.01
+      },
+      "thresholds": {
+        "lines": 97,
+        "functions": 95,
+        "branches": 92,
+        "statements": 97
+      }
+    },
+    "graph-viz": {
+      "measured": {
+        "lines": 24.48,
+        "functions": 21.34,
+        "branches": 21.21,
+        "statements": 23.97
+      },
+      "thresholds": {
+        "lines": 23,
+        "functions": 20,
+        "branches": 20,
+        "statements": 22
+      },
+      "preservedFiles": {
+        "src/core/focus-filter.ts": {
+          "lines": 98,
+          "functions": 100,
+          "branches": 82,
+          "statements": 98
+        },
+        "src/core/graph-model.ts": {
+          "lines": 87,
+          "functions": 90,
+          "branches": 69,
+          "statements": 86
+        },
+        "src/core/label-resolver.ts": {
+          "lines": 63,
+          "functions": 40,
+          "branches": 66,
+          "statements": 61
+        },
+        "src/core/palette.ts": {
+          "lines": 80,
+          "functions": 50,
+          "branches": 100,
+          "statements": 81
+        },
+        "src/core/prefix-manager.ts": {
+          "lines": 76,
+          "functions": 66,
+          "branches": 75,
+          "statements": 74
+        },
+        "src/core/reification-collapser.ts": {
+          "lines": 81,
+          "functions": 100,
+          "branches": 61,
+          "statements": 80
+        },
+        "src/core/temporal-filter.ts": {
+          "lines": 96,
+          "functions": 83,
+          "branches": 95,
+          "statements": 96
+        },
+        "src/core/view-config.ts": {
+          "lines": 86,
+          "functions": 88,
+          "branches": 68,
+          "statements": 82
+        },
+        "src/data-sources/remote-sparql-source.ts": {
+          "lines": 62,
+          "functions": 50,
+          "branches": 53,
+          "statements": 58
+        },
+        "src/parsers/jsonld.ts": {
+          "lines": 21,
+          "functions": 50,
+          "branches": 6,
+          "statements": 20
+        },
+        "src/parsers/ntriples.ts": {
+          "lines": 100,
+          "functions": 100,
+          "branches": 90,
+          "statements": 100
+        },
+        "src/parsers/turtle.ts": {
+          "lines": 100,
+          "functions": 100,
+          "branches": 70,
+          "statements": 100
+        }
+      }
+    },
+    "http-utils": {
+      "measured": {
+        "lines": 100,
+        "functions": 50,
+        "branches": 93.75,
+        "statements": 94.59
+      },
+      "thresholds": {
+        "lines": 99,
+        "functions": 49,
+        "branches": 92,
+        "statements": 93
+      }
+    },
+    "kafka-plugin": {
+      "measured": {
+        "lines": 93.93,
+        "functions": 100,
+        "branches": 82.21,
+        "statements": 91.6
+      },
+      "thresholds": {
+        "lines": 92,
+        "functions": 99,
+        "branches": 81,
+        "statements": 90
+      }
+    },
+    "local-llm": {
+      "measured": {
+        "lines": 90.97,
+        "functions": 89.88,
+        "branches": 80.65,
+        "statements": 87.6
+      },
+      "thresholds": {
+        "lines": 89,
+        "functions": 88,
+        "branches": 79,
+        "statements": 86
+      }
+    },
+    "mcp-dkg": {
+      "measured": {
+        "lines": 59.84,
+        "functions": 68.72,
+        "branches": 52.26,
+        "statements": 57.54
+      },
+      "thresholds": {
+        "lines": 58,
+        "functions": 67,
+        "branches": 51,
+        "statements": 56
+      }
+    },
+    "network-sim": {
+      "measured": {
+        "lines": 8.81,
+        "functions": 7.64,
+        "branches": 6.78,
+        "statements": 8.63
+      },
+      "thresholds": {
+        "lines": 7,
+        "functions": 6,
+        "branches": 5,
+        "statements": 7
+      },
+      "preservedFiles": {
+        "src/server/sim-engine.ts": {
+          "lines": 30,
+          "functions": 32,
+          "branches": 30,
+          "statements": 30
+        }
+      }
+    },
+    "node-ui": {
+      "measured": {
+        "lines": 74.88,
+        "functions": 67.42,
+        "branches": 62.26,
+        "statements": 71.99
+      },
+      "thresholds": {
+        "lines": 73,
+        "functions": 66,
+        "branches": 61,
+        "statements": 70
+      }
+    },
+    "okf": {
+      "measured": {
+        "lines": 98.81,
+        "functions": 100,
+        "branches": 85.31,
+        "statements": 96.93
+      },
+      "thresholds": {
+        "lines": 97,
+        "functions": 99,
+        "branches": 85,
+        "statements": 95
+      }
+    },
+    "publisher": {
+      "measured": {
+        "lines": 88.68,
+        "functions": 93.7,
+        "branches": 78.2,
+        "statements": 87.24
+      },
+      "thresholds": {
+        "lines": 87,
+        "functions": 92,
+        "branches": 77,
+        "statements": 86
+      }
+    },
+    "query": {
+      "measured": {
+        "lines": 93.19,
+        "functions": 95.75,
+        "branches": 82.62,
+        "statements": 90.15
+      },
+      "thresholds": {
+        "lines": 92,
+        "functions": 94,
+        "branches": 81,
+        "statements": 89
+      }
+    },
+    "random-sampling": {
+      "measured": {
+        "lines": 88.99,
+        "functions": 95.19,
+        "branches": 75.47,
+        "statements": 86.7
+      },
+      "thresholds": {
+        "lines": 87,
+        "functions": 94,
+        "branches": 74,
+        "statements": 85
+      }
+    },
+    "rdf-utils": {
+      "measured": {
+        "lines": 91.28,
+        "functions": 94.44,
+        "branches": 80.68,
+        "statements": 87.48
+      },
+      "thresholds": {
+        "lines": 90,
+        "functions": 93,
+        "branches": 79,
+        "statements": 86
+      }
+    },
+    "storage": {
+      "measured": {
+        "lines": 90,
+        "functions": 91.92,
+        "branches": 79.44,
+        "statements": 88.08
+      },
+      "thresholds": {
+        "lines": 89,
+        "functions": 90,
+        "branches": 78,
+        "statements": 87
+      }
+    }
+  },
+  "measurementNote": "Measured on this testing implementation over the sourceRevision base, including the checkFdLimit startup fix. Percentages are local baseline evidence; Linux and Windows candidate CI remain required."
+}

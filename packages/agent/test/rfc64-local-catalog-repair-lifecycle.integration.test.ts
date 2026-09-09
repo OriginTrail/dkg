@@ -19,12 +19,152 @@ import {
   assertionSealV1,
   authorSealV1,
   bootstrapConfigV1,
+  catalogScopeDigestV1,
+  seedDurableWorkspaceAssetV1,
   seedInventoryAssetV1,
   startRepairAgentV1,
   tempDirs,
 } from './support/rfc64-local-catalog-repair-fixture.js';
 
 describe('RFC-64 local SWM catalog projection lifecycle', () => {
+  it('keeps retrying a dormant durable promotion while default responsibility settles', async () => {
+    const agent = await startRepairAgentV1({
+      name: 'dormant-default-responsibility',
+      autoPublish: {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    });
+    const inventoryDigest = `0x${'a0'.repeat(32)}` as Digest32V1;
+    const record = vi.spyOn(agent, 'recordRfc64SwmAuthorInventoryShadowV1')
+      .mockResolvedValueOnce({
+        status: 'dormant',
+        action: 'upsert',
+        attempts: 0,
+        headObjectDigest: null,
+        error: null,
+        dormantReason: 'inactive-lane',
+      })
+      .mockResolvedValueOnce({
+        status: 'dormant',
+        action: 'upsert',
+        attempts: 0,
+        headObjectDigest: null,
+        error: null,
+        dormantReason: 'inactive-lane',
+      })
+      .mockResolvedValueOnce({
+        status: 'applied',
+        action: 'upsert',
+        attempts: 1,
+        headObjectDigest: inventoryDigest,
+        error: null,
+      });
+    const reconcileResponsibility = vi.spyOn(
+      agent,
+      'reconcileRfc64CatalogResponsibilityV1',
+    ).mockResolvedValue({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      responsible: true,
+      responsibilityReason: 'private-membership',
+      active: true,
+      mode: 'catalog',
+      selectionSource: 'default',
+    });
+    const requestProjection = vi.spyOn(agent, 'requestRfc64SwmCatalogProjectionV1')
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+
+    await agent.observeRfc64DurableSwmPromotionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'dormant-default-responsibility',
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: 'dormant-default-responsibility-operation',
+      ctx: createOperationContext('share'),
+    });
+
+    expect(reconcileResponsibility).toHaveBeenCalledTimes(3);
+    expect(reconcileResponsibility).toHaveBeenCalledWith(CONTEXT_GRAPH_ID);
+    expect(record).toHaveBeenCalledTimes(3);
+    expect(requestProjection).toHaveBeenCalledTimes(2);
+  });
+
+  it('retains a committed promotion across a transient default-responsibility rejection', async () => {
+    const agent = await startRepairAgentV1({
+      name: 'transient-default-responsibility',
+      autoPublish: {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    });
+    vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
+      AUTHOR_WALLET.privateKey,
+    );
+    agent.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const seeded = await seedDurableWorkspaceAssetV1(
+      agent,
+      'transient-default-responsibility',
+      36n,
+    );
+    const originalRecord = agent.recordRfc64SwmAuthorInventoryShadowV1.bind(agent);
+    const record = vi.spyOn(agent, 'recordRfc64SwmAuthorInventoryShadowV1')
+      .mockResolvedValueOnce({
+        status: 'dormant',
+        action: 'upsert',
+        attempts: 0,
+        headObjectDigest: null,
+        error: null,
+        dormantReason: 'inactive-lane',
+      })
+      .mockImplementation(originalRecord);
+    const reconcileResponsibility = vi.spyOn(
+      agent,
+      'reconcileRfc64CatalogResponsibilityV1',
+    )
+      .mockRejectedValueOnce(new Error('transient authority read'))
+      .mockResolvedValue({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        responsible: true,
+        responsibilityReason: 'private-membership',
+        active: true,
+        mode: 'catalog',
+        selectionSource: 'default',
+      });
+
+    await agent.observeRfc64DurableSwmPromotionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: seeded.assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: seeded.shareOperationId,
+      ctx: createOperationContext('share'),
+    });
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+
+    expect(reconcileResponsibility).toHaveBeenCalledTimes(2);
+    expect(record).toHaveBeenCalledTimes(2);
+    expect(agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: seeded.scopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      head: { payload: { totalRows: '1' } },
+      rows: [expect.objectContaining({
+        assertionCoordinate: seeded.assertionCoordinate,
+        shareOperationId: seeded.shareOperationId,
+      })],
+    });
+    expect(agent.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigestV1(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      catalogVersion: '1',
+      inventoryRowCount: '1',
+    });
+  });
+
   it('drains an admitted SWM observer before persistence closes and rejects late admission', async () => {
     const autoPublish = {
       peers: [],
@@ -248,6 +388,7 @@ describe('RFC-64 local SWM catalog projection lifecycle', () => {
     await agent.observeRfc64ConfirmedVmV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate: 'same-instance-share',
+      shareOperationId: 'same-instance-operation',
       seal: assertionSealV1(canonicalSeal),
       assertionUri: contextGraphAssertionUri(
         CONTEXT_GRAPH_ID,

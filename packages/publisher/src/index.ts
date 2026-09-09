@@ -1,4 +1,6 @@
 export * from './publisher.js';
+export * from './publication-pricing.js';
+export * from './publication-payload-measurement.js';
 export { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
 export { skolemize, isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } from './skolemize.js';
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
@@ -96,11 +98,14 @@ export {
   CuratorRejectedError,
   assertValidPrecomputedUpdateAttestation,
   type DKGPublisherConfig,
+  type DurableRootPromotionIdentity,
+  type DurableRootPromotionAtomicCompanion,
   type WorkspaceSenderKeyEncryptInput,
   type WorkspaceSenderKeyEncryptor,
   type ShareOptions,
   type ShareResult,
   type ShareConditionalOptions,
+  type PublisherAssertionPromoteOptions,
   type CASCondition,
 } from './dkg-publisher.js';
 export {
@@ -381,8 +386,12 @@ export {
   type PromoteTerminalJobClearer,
 } from './async-promote-queue.js';
 export {
+  createPromotePostCommitFailure,
+  createPromoteRetryableFailure,
   getPromoteReplaySafeErrorDiagnostic,
+  getPromoteFailureDisposition,
   isPromoteReplaySafeError,
+  type PromoteFailureDisposition,
   type PromoteReplaySafeErrorDiagnostic,
 } from './promote-replay-safety.js';
 export { type LegacyWmMigrationResult } from './legacy-wm-migration.js';

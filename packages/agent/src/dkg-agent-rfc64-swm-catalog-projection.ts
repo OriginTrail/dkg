@@ -48,6 +48,13 @@ import {
   resolveRfc64ConfirmedVmRepairCatalogAssetV1,
   resolveRfc64InventoryWorkspaceCatalogAssetV1,
 } from './rfc64/swm-catalog-durable-asset-resolver-v1.js';
+import { markRfc64LegacySwmRepublishedV1 } from
+  './rfc64/legacy-swm-boundary-v1.js';
+import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from
+  './rfc64/catalog-peers-v1.js';
+
+const RFC64_DEFAULT_CATALOG_DELEGATION_EXPIRES_AT_V1 =
+  '253402300799000' as TimestampMsV1;
 
 export interface ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1 {
   readonly contextGraphId: ContextGraphIdV1;
@@ -267,8 +274,8 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     networkId: NetworkIdV1,
   ): Promise<CatalogSealDeploymentProfileV1> {
     let deployment = this.config.rfc64CatalogDeploymentProfile;
-    const trustedNetworkId = deployment?.networkId ?? this.chain.chainId;
-    if (trustedNetworkId === 'none' || trustedNetworkId !== networkId) {
+    const trustedNetworkId = deployment?.networkId ?? this.config.networkIdentity?.chainId;
+    if (trustedNetworkId === undefined || trustedNetworkId !== networkId) {
       throw new Error('RFC-64 auto-publish network differs from the trusted deployment');
     }
     if (deployment === undefined) {
@@ -377,6 +384,14 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         throwIfAbortedV1(params.signal);
         continue;
       }
+      await markRfc64LegacySwmRepublishedV1(
+        this,
+        params.contextGraphId,
+        prepared.assets.map((asset) => Object.freeze({
+          kaUal: asset.seal.kaUal,
+          assertionVersion: asset.seal.assertionVersion,
+        })),
+      );
       const { sourceCurrent: _sourceCurrent, ...result } = reconciled;
       return Object.freeze({
         ...result,
@@ -397,13 +412,12 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     const exactControl = authoringPolicy?.byContextGraph[contextGraphId];
     const publicDefault = authoringPolicy?.publicDefault;
     if (
-      (exactControl === undefined && publicDefault === undefined)
-      || (subGraphName !== undefined && subGraphName !== null)
+      subGraphName !== undefined && subGraphName !== null
     ) return Object.freeze({ status: 'inactive' });
     assertContextGraphIdV1(contextGraphId, 'RFC-64 catalog authoring contextGraphId');
     const networkId = (this.config.rfc64CatalogDeploymentProfile?.networkId
-      ?? this.chain.chainId) as NetworkIdV1;
-    if (networkId === 'none') {
+      ?? this.config.networkIdentity?.chainId) as NetworkIdV1 | undefined;
+    if (networkId === undefined) {
       return Object.freeze({
         status: 'unavailable',
         error: new Error('RFC-64 catalog authoring requires a trusted deployment network'),
@@ -425,10 +439,32 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         ),
       });
     }
-    if (exactControl === undefined && acceptedPolicy.policy.accessPolicy !== 0) {
+    if (
+      exactControl === undefined
+      && publicDefault !== undefined
+      && acceptedPolicy.policy.accessPolicy === 1
+    ) {
+      // The compatibility fallback is intentionally public-only. A private
+      // policy in the same bootstrap manifest is neither an authoring failure
+      // nor an invitation to reinterpret that fallback as private authority.
       return Object.freeze({ status: 'inactive' });
     }
-    const selectedControl = exactControl ?? Object.freeze({
+    const defaultPeers = Object.freeze([...new Set(
+      this.node.libp2p.getConnections()
+        .map((connection) => connection.remotePeer.toString()),
+    )].sort().slice(0, RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1));
+    const selectedControl = exactControl ?? (publicDefault === undefined
+      ? Object.freeze({
+        kind: acceptedPolicy.policy.accessPolicy === 0
+          ? 'selected-public' as const
+          : 'selected-private' as const,
+        contextGraphId,
+        announcementPeers: defaultPeers,
+        catalogIssuerDelegationEffectiveAt: '0' as TimestampMsV1,
+        catalogIssuerDelegationExpiresAt:
+          RFC64_DEFAULT_CATALOG_DELEGATION_EXPIRES_AT_V1,
+      })
+      : Object.freeze({
       kind: 'selected-public' as const,
       contextGraphId,
       announcementPeers: publicDefault!.announcementPeers,
@@ -436,7 +472,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         publicDefault!.catalogIssuerDelegationEffectiveAt,
       catalogIssuerDelegationExpiresAt:
         publicDefault!.catalogIssuerDelegationExpiresAt,
-    });
+    }));
     if (
       (acceptedPolicy.policy.accessPolicy === 0 && selectedControl.kind !== 'selected-public')
       || (acceptedPolicy.policy.accessPolicy === 1

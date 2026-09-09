@@ -254,6 +254,7 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       const run = async () => {
         await snapshotStore.putSnapshot({ digest: served.digest, quads: served.payload });
         return runSharedMemorySync({
+          mode: { kind: 'ordinary' },
           ctx,
           remotePeerId: 'peer-source',
           contextGraphIds: [CG],
@@ -440,6 +441,7 @@ async function runPartial(store: OxigraphStore, shares: ReturnType<typeof manife
   }
   const { materializer } = materializerFor(store);
   return runSharedMemorySync({
+    mode: { kind: 'ordinary' },
     ctx,
     remotePeerId: 'peer-source',
     contextGraphIds: [CG],

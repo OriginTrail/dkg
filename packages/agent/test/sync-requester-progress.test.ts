@@ -1008,6 +1008,7 @@ describe('sync requester progress accounting', () => {
     });
 
     const summary = await runSharedMemorySync({
+      mode: { kind: 'ordinary' },
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['denied-swm', 'open-swm'],
@@ -1043,6 +1044,7 @@ describe('sync requester progress accounting', () => {
     });
 
     const summary = await runSharedMemorySync({
+      mode: { kind: 'ordinary' },
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['fail-one', 'fail-two', 'open-swm'],
@@ -1078,6 +1080,7 @@ describe('sync requester progress accounting', () => {
     }));
 
     const summary = await runSharedMemorySync({
+      mode: { kind: 'ordinary' },
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['verify-fails-swm', 'open-swm'],
@@ -1140,6 +1143,7 @@ describe('sync requester progress accounting', () => {
     }));
 
     const summary = await runSharedMemorySync({
+      mode: { kind: 'ordinary' },
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['bad-snapshot-swm', 'open-swm'],
@@ -1173,6 +1177,7 @@ describe('sync requester progress accounting', () => {
 
   it('counts both clean zero-offset empty shared-memory phases as complete', async () => {
     const summary = await runSharedMemorySync({
+      mode: { kind: 'ordinary' },
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['empty-swm'],
@@ -1201,6 +1206,7 @@ describe('sync requester progress accounting', () => {
 
   it('counts only the clean-empty shared-memory phase when its sibling times out', async () => {
     const summary = await runSharedMemorySync({
+      mode: { kind: 'ordinary' },
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['partial-empty-swm'],
@@ -1275,6 +1281,7 @@ describe('sync requester progress accounting', () => {
       : pageResult(contextGraphId, phase));
 
     const summary = await runSharedMemorySync({
+      mode: { kind: 'ordinary' },
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['large-swm'],
@@ -1366,6 +1373,7 @@ describe('sync requester progress accounting', () => {
     });
 
     const summary = await runSharedMemorySync({
+      mode: { kind: 'ordinary' },
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['large-swm'],
@@ -1752,6 +1760,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
     ];
 
     const summary = await runSharedMemorySync({
+      mode: { kind: 'ordinary' },
       ctx,
       remotePeerId: 'peer-coverage-abcd1234',
       contextGraphIds: [COVERAGE_CG],
@@ -1889,6 +1898,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx,
         remotePeerId: 'peer-resharing-5a5a5a5a',
         contextGraphIds: [COVERAGE_CG],
@@ -2085,6 +2095,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx,
         remotePeerId: 'peer-entity-share-1a2b3c4d',
         contextGraphIds: [COVERAGE_CG],
@@ -2271,6 +2282,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
 
     try {
       const summary = await runSharedMemorySync({
+        mode: { kind: 'ordinary' },
         ctx,
         remotePeerId: 'peer-head-residue-7c7c7c7c',
         contextGraphIds: [COVERAGE_CG],
@@ -2537,6 +2549,7 @@ describe('T14 — a throwing snapshot round still reports what it resolved', () 
     ]);
 
     const summary = await runSharedMemorySync({
+      mode: { kind: 'ordinary' },
       ctx,
       remotePeerId: 'peer-throwing-99887766',
       contextGraphIds: [T14_CG],

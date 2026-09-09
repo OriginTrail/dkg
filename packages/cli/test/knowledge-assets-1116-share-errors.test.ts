@@ -33,6 +33,7 @@ import {
 import {
   AsyncLiftJobConflictError,
   LiftJobPendingChainProofError,
+  PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE,
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
   resolveLiftWorkspaceSlice,
@@ -841,6 +842,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
           intentKey: `sha256:${'bc'.repeat(32)}`,
           publishEpochs: opts.publishEpochs,
           clearSharedMemoryAfter: opts.clearSharedMemoryAfter,
+          pricingPolicy: opts.pricingPolicy,
           publisherNodeIdentityIdOverride: opts.publisherNodeIdentityIdOverride?.toString(),
         };
       },
@@ -857,6 +859,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       options: {
         publishEpochs: 2,
         clearSharedMemoryAfter: true,
+        pricingPolicy: 'full-content',
         publisherNodeIdentityIdOverride: '0',
       },
     });
@@ -867,11 +870,13 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(seenResolveOptions[0]).toMatchObject({
       publishEpochs: 2,
       clearSharedMemoryAfter: true,
+      pricingPolicy: 'full-content',
       publisherNodeIdentityIdOverride: 0n,
     });
     expect(enqueuedIntents[0]).toMatchObject({
       publishEpochs: 2,
       clearSharedMemoryAfter: true,
+      pricingPolicy: 'full-content',
       publisherNodeIdentityIdOverride: '0',
     });
 
@@ -1078,6 +1083,31 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(enqueueCalls[0]?.intent).not.toHaveProperty('callerAgentAddress');
   });
 
+  it('surfaces the local-chain skip reason from vm/publish (#1299)', async () => {
+    await startWith({}, {
+      publishFromFinalizedAssertion: async () => ({ status: 'tentative', localChainSkipReason: 'no-chain' }),
+    });
+    const res = await post('vm/publish', { contextGraphId: CG_ID });
+    expect(res.status).toBe(502);
+    expect(res.body.error).toContain('VM publish stayed local');
+    expect(res.body.error).toContain('chain configuration');
+  });
+
+  it.each([
+    { status: 'confirmed', contextGraphError: undefined, expectedStatus: 200, reason: undefined },
+    { status: 'confirmed', contextGraphError: 'binding failed', expectedStatus: 207, reason: 'binding failed' },
+    { status: 'tentative', contextGraphError: 'binding failed', expectedStatus: 502, reason: 'binding failed' },
+    { status: 'tentative', contextGraphError: undefined, expectedStatus: 502, reason: 'status: tentative' },
+    { status: 'failed', contextGraphError: undefined, expectedStatus: 502, reason: 'status: failed' },
+  ])('maps $status with contextGraphError=$contextGraphError to $expectedStatus', async ({ status, contextGraphError, expectedStatus, reason }) => {
+    await startWith({}, {
+      publishFromFinalizedAssertion: async () => ({ status, contextGraphError }),
+    });
+    const res = await post('vm/publish', { contextGraphId: CG_ID });
+    expect(res.status).toBe(expectedStatus);
+    if (reason) expect(res.body.error).toContain(reason);
+  });
+
   // GH#1786 — the resident-author selector. The load-bearing property is that it can
   // never be silently dropped: a dropped selector publishes the WRONG author with a
   // success status and real TRAC/gas spent.
@@ -1184,6 +1214,38 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     });
 
     for (const lane of ['vm/publish', 'vm/publish-async'] as const) {
+      it(`${lane} maps update-only pricing misuse to 409 and performs no async enqueue`, async () => {
+        const attempted: string[] = [];
+        const unsupportedUpdate = () => {
+          attempted.push(lane);
+          throw Object.assign(
+            new Error('pricingPolicy is currently supported only for initial VM publications, not updates'),
+            { code: PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE },
+          );
+        };
+        const enqueued: unknown[] = [];
+        await startWith({}, {
+          publishFromFinalizedAssertion: unsupportedUpdate,
+          resolveFinalizedAssertionVmPublishIntent: unsupportedUpdate,
+        }, {}, {
+          enqueueKnowledgeAssetVmPublish: async (intent: unknown) => {
+            enqueued.push(intent);
+            return 'job-should-not-exist';
+          },
+        });
+
+        const res = await post(lane, {
+          contextGraphId: CG_ID,
+          options: { pricingPolicy: 'full-content' },
+        });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe(PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE);
+        expect(String(res.body.error)).toMatch(/initial VM publications/);
+        expect(attempted).toEqual([lane]);
+        expect(enqueued).toHaveLength(0);
+      });
+
       it(`${lane} answers a non-resident selection with 409 + candidates, not a generic 500`, async () => {
         const candidates = [SELECTED, '0x00000000000000000000000000000000000000b8'];
         const notResident = () => {
@@ -1881,6 +1943,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         alsoPublishVm: {
           agentAddress: attackerAgentAddress,
           clearAfter: false,
+          pricingPolicy: 'full-content',
         },
       });
 
@@ -1894,6 +1957,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(seenOpts[0]).toMatchObject({
         agentAddress: tokenAgentAddress,
         clearSharedMemoryAfter: false,
+        pricingPolicy: 'full-content',
       });
     });
 
@@ -2152,6 +2216,25 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(unsafeIdentityRes.status).toBe(400);
       expect(String(unsafeIdentityRes.body.error)).toContain('publisherNodeIdentityIdOverride');
       expect(String(unsafeIdentityRes.body.error)).toContain('uint72');
+      expect(createCalls).toHaveLength(0);
+
+      const pricingPolicyRes = await postRoot({
+        contextGraphId: CG_ID,
+        name: 'atomic-invalid-pricing-policy',
+        quads: [{
+          subject: 'did:dkg:test:InvalidPricingPolicy',
+          predicate: 'http://schema.org/name',
+          object: '"Invalid pricing policy"',
+          graph: '',
+        }],
+        finalize: true,
+        alsoPublishVm: {
+          pricingPolicy: 'unsupported',
+        },
+      });
+
+      expect(pricingPolicyRes.status).toBe(400);
+      expect(String(pricingPolicyRes.body.error)).toContain('pricingPolicy');
       expect(createCalls).toHaveLength(0);
     });
 

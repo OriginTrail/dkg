@@ -1,6 +1,7 @@
 import {
   MockChainAdapter,
   MOCK_DEFAULT_SIGNER,
+  type ContextGraphAuthoritySnapshot,
 } from '@origintrail-official/dkg-chain';
 import type {
   Digest32V1,
@@ -79,6 +80,34 @@ export class FinalizedVmLoopbackMockChainAdapterV1 extends MockChainAdapter {
 
   override async getDKGKnowledgeAssetsAddress(): Promise<string> {
     return this.#fixture.knowledgeAssetStorageAddress;
+  }
+
+  override async getContextGraphAuthoritySnapshot(
+    contextGraphId: bigint,
+  ): Promise<ContextGraphAuthoritySnapshot> {
+    if (contextGraphId.toString(10) !== this.#fixture.onChainContextGraphId) {
+      throw new Error(`Finalized VM fixture has no Context Graph ${contextGraphId.toString(10)}`);
+    }
+    return Object.freeze({
+      chainId: this.#fixture.assertedAtChainId,
+      governanceContract: this.#fixture.contextGraphStorageAddress.toLowerCase(),
+      contextGraphId: this.#fixture.onChainContextGraphId,
+      owner: this.#fixture.ownerAddress.toLowerCase(),
+      active: this.#fixture.active,
+      accessPolicy: this.#fixture.accessPolicy,
+      publishPolicy: this.#fixture.publishPolicy,
+      publishAuthority: this.#fixture.publishPolicy === 1
+        ? null
+        : this.#fixture.ownerAddress.toLowerCase(),
+      publishAuthorityAccountId: '0',
+      participantAgents: Object.freeze([]),
+      nameHash: this.#fixture.nameHash.toLowerCase(),
+      ownershipEra: '0',
+      policyVersion: '0',
+      rosterVersion: '0',
+      sourceBlockNumber: BigInt(this.#fixture.blockNumberQuantity).toString(10),
+      sourceBlockHash: this.#fixture.blockHash.toLowerCase(),
+    });
   }
 }
 

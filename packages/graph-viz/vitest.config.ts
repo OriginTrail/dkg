@@ -1,14 +1,10 @@
 import { defineConfig } from 'vitest/config';
-import { kosavaGraphVizCoverage } from '../../vitest.coverage';
+import { coverageForPackage } from '../../vitest.coverage';
 
 export default defineConfig({
   test: {
+    allowOnly: false,
     include: ['tests/**/*.test.ts'],
-    coverage: {
-      provider: 'v8',
-      reporter: ['text', 'html', 'lcov', 'json-summary'],
-      reportsDirectory: './coverage',
-      thresholds: kosavaGraphVizCoverage,
-    },
+    coverage: coverageForPackage('graph-viz'),
   },
 });

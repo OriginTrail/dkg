@@ -43,6 +43,11 @@ const NPM_AVAILABLE = (() => {
   }
 })();
 const TAR_AVAILABLE = spawnSync('tar', ['--version'], { encoding: 'utf8' }).status === 0;
+const GIT_AVAILABLE = spawnSync('git', ['--version'], { encoding: 'utf8' }).status === 0;
+const REPO_CHECKOUT_AVAILABLE = GIT_AVAILABLE && spawnSync('git', [
+  '-C', REPO_ROOT, 'rev-parse', '--is-inside-work-tree',
+], { encoding: 'utf8' }).stdout?.trim() === 'true';
+
 
 const SCRIPT_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../release-packages.mjs');
 
@@ -64,6 +69,37 @@ function withFixture(fn) {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+}
+
+/** Git owns the source inventory; read working-tree contents so pending edits are exercised. */
+function materializeTrackedPackage(sourceRoot, relativePackage, destination) {
+  const tracked = spawnSync('git', ['-C', sourceRoot, 'ls-files', '-z', '--', relativePackage], { encoding: 'utf8' });
+  assert.equal(tracked.status, 0, `cannot enumerate tracked package inputs: ${tracked.stderr}`);
+  const files = tracked.stdout.split('\0').filter(Boolean);
+  assert.ok(files.length > 0, 'the source package must have tracked inputs');
+  for (const relative of files) {
+    const target = path.join(destination, path.relative(relativePackage, relative));
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(sourceRoot, relative), target);
+  }
+}
+
+function assertTypeScriptConsumer(consumerPath, compilerOptions = {}) {
+  const program = ts.createProgram([consumerPath], {
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    target: ts.ScriptTarget.ES2022,
+    noEmit: true,
+    strict: true,
+    skipLibCheck: false,
+    ...compilerOptions,
+  });
+  const diagnostics = ts.getPreEmitDiagnostics(program);
+  assert.equal(diagnostics.length, 0, ts.formatDiagnosticsWithColorAndContext(diagnostics, {
+    getCanonicalFileName: (file) => file,
+    getCurrentDirectory: () => path.dirname(consumerPath),
+    getNewLine: () => '\n',
+  }));
 }
 
 function packAndInstallFixture({
@@ -97,13 +133,11 @@ function packAndInstallFixture({
     shell: process.platform === 'win32',
   });
   assert.equal(packed.status, 0, `npm pack failed for ${installedPackageName}: ${packed.stderr}`);
-  const report = JSON.parse(packed.stdout);
-  const filename = (Array.isArray(report) ? report[0] : report)?.filename;
-  assert.equal(
-    typeof filename,
-    'string',
-    `npm pack did not report a tarball filename for ${installedPackageName}`,
-  );
+  // Lifecycle scripts may write to stdout even with npm's --json flag.
+  // Each fixture owns a fresh destination, so inspect the actual packed artifact.
+  const tarballs = fs.readdirSync(packDir).filter((entry) => entry.endsWith('.tgz'));
+  assert.equal(tarballs.length, 1, `expected one tarball for ${installedPackageName}`);
+  const [filename] = tarballs;
   const extracted = spawnSync('tar', [
     '-xzf',
     path.join(packDir, filename),
@@ -403,7 +437,12 @@ test('copyCliRuntimeAssets fails loudly when a source asset is missing', () => w
 test('packages/cli lifecycle is wired to the copy script (build + prepack)', () => {
   const cliPkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'packages', 'cli', 'package.json'), 'utf8'));
   assert.match(cliPkg.scripts.prepack ?? '', /copy-cli-runtime-assets\.mjs/, 'prepack must run the copy script');
-  assert.match(cliPkg.scripts.build ?? '', /copy-cli-runtime-assets\.mjs/, 'build must run the copy script');
+  assert.match(cliPkg.scripts.build ?? '', /build:prepared/, 'build must run the prepared CLI phase');
+  assert.match(
+    cliPkg.scripts['build:prepared'] ?? '',
+    /copy-cli-runtime-assets\.mjs/,
+    'prepared CLI build must run the copy script',
+  );
 });
 
 test('the manifest distinguishes copied assets from complete pack requirements', () => withFixture((root) => {
@@ -505,25 +544,78 @@ test('the packed CLI resolves the typed Blazegraph runtime subpath for a consume
     'void metadata;',
     '',
   ].join('\n'));
-  const program = ts.createProgram([consumerPath], {
-    esModuleInterop: true,
-    module: ts.ModuleKind.NodeNext,
-    moduleResolution: ts.ModuleResolutionKind.NodeNext,
-    noEmit: true,
-    skipLibCheck: false,
-    strict: true,
-    target: ts.ScriptTarget.ES2022,
+  assertTypeScriptConsumer(consumerPath, { esModuleInterop: true });
+}));
+
+test('tracked package fixtures include unpublished build inputs and exclude generated state', {
+  skip: GIT_AVAILABLE ? false : 'git is required',
+}, () => withFixture((root) => {
+  const sourceRoot = path.join(root, 'source');
+  const relativePackage = 'packages/fixture';
+  const source = path.join(sourceRoot, relativePackage);
+  writePackage(sourceRoot, relativePackage, { name: 'fixture', files: ['dist'] });
+  fs.writeFileSync(path.join(source, 'tsconfig.build.json'), '{"compilerOptions":{}}');
+  fs.writeFileSync(path.join(sourceRoot, '.gitignore'), '.turbo/\ndist/\n*.tsbuildinfo\n');
+  assert.equal(spawnSync('git', ['init', '-q', sourceRoot]).status, 0);
+  assert.equal(spawnSync('git', ['-C', sourceRoot, 'add', '.gitignore', relativePackage]).status, 0);
+  // A pending edit must be used instead of the staged version.
+  const editedConfig = '{"compilerOptions":{"strict":true}}';
+  fs.writeFileSync(path.join(source, 'tsconfig.build.json'), editedConfig);
+  for (const generated of ['.turbo/cache', 'dist/index.js', 'tsconfig.tsbuildinfo']) {
+    fs.mkdirSync(path.dirname(path.join(source, generated)), { recursive: true });
+    fs.writeFileSync(path.join(source, generated), 'generated');
+  }
+  const target = path.join(root, 'checkout');
+  materializeTrackedPackage(sourceRoot, relativePackage, target);
+  assert.deepEqual(fs.readdirSync(target).sort(), ['package.json', 'tsconfig.build.json']);
+  assert.equal(fs.readFileSync(path.join(target, 'tsconfig.build.json'), 'utf8'), editedConfig);
+}));
+
+test('packing OpenClaw from source builds consumable JavaScript and declarations', {
+  skip: NPM_AVAILABLE && TAR_AVAILABLE && REPO_CHECKOUT_AVAILABLE ? false : 'npm, tar and a Git checkout are required',
+}, () => withFixture((root) => {
+  const source = path.join(REPO_ROOT, 'packages', 'adapter-openclaw');
+  const cleanPackage = path.join(root, 'packages', 'adapter-openclaw');
+  const manifest = JSON.parse(fs.readFileSync(path.join(source, 'package.json'), 'utf8'));
+  const { packageManager } = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
+  writePackage(root, '.', { name: 'openclaw-pack-fixture', private: true, packageManager });
+  materializeTrackedPackage(REPO_ROOT, 'packages/adapter-openclaw', cleanPackage);
+  fs.copyFileSync(path.join(REPO_ROOT, 'tsconfig.base.json'), path.join(root, 'tsconfig.base.json'));
+  // Use the installed build tools and built workspace dependencies. The adapter
+  // itself starts without any build output, independently of the CI build.
+  fs.symlinkSync(path.join(REPO_ROOT, 'node_modules'), path.join(root, 'node_modules'), 'junction');
+  assert.ok(fs.existsSync(path.join(cleanPackage, 'tsconfig.json')), 'unpublished build config is required');
+  assert.equal(fs.existsSync(path.join(cleanPackage, '.turbo')), false);
+  assert.equal(fs.existsSync(path.join(cleanPackage, 'dist')), false);
+  assert.equal(fs.existsSync(path.join(cleanPackage, 'tsconfig.tsbuildinfo')), false);
+
+  const { consumerDir, installedPackageDir } = packAndInstallFixture({
+    root,
+    fixtureName: 'openclaw',
+    sourcePackageDir: cleanPackage,
+    installedPackageName: manifest.name,
   });
-  const diagnostics = ts.getPreEmitDiagnostics(program);
-  assert.equal(
-    diagnostics.length,
-    0,
-    ts.formatDiagnosticsWithColorAndContext(diagnostics, {
-      getCanonicalFileName: (file) => file,
-      getCurrentDirectory: () => consumerDir,
-      getNewLine: () => '\n',
-    }),
-  );
+  assert.ok(fs.existsSync(path.join(installedPackageDir, 'dist', 'index.js')));
+  assert.ok(fs.existsSync(path.join(installedPackageDir, 'dist', 'index.d.ts')));
+
+  const consumer = path.join(consumerDir, 'consumer.mjs');
+  fs.writeFileSync(consumer, [
+    "import { DkgDaemonClient } from '@origintrail-official/dkg-adapter-openclaw';",
+    "if (typeof DkgDaemonClient !== 'function') throw new Error('missing client export');",
+    '',
+  ].join('\n'));
+  const imported = spawnSync(process.execPath, [consumer], { cwd: consumerDir, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(imported.status, 0, `packed OpenClaw import failed: ${imported.stderr}`);
+
+  const typedConsumer = path.join(consumerDir, 'consumer.mts');
+  fs.writeFileSync(typedConsumer, [
+    "import { DkgDaemonClient, type DkgClientOptions } from '@origintrail-official/dkg-adapter-openclaw';",
+    'export function createClient(options: DkgClientOptions): DkgDaemonClient {',
+    '  return new DkgDaemonClient(options);',
+    '}',
+    '',
+  ].join('\n'));
+  assertTypeScriptConsumer(typedConsumer, { skipLibCheck: true });
 }));
 
 test('the packed storage package preserves representative legacy dist imports', {

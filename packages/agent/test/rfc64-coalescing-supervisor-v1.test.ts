@@ -12,6 +12,32 @@ afterEach(() => {
 });
 
 describe('RFC-64 coalescing supervisor', () => {
+  it('drops overlapping requests when the workload selects fixed-cadence semantics', async () => {
+    let release!: () => void;
+    let markStarted!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let passes = 0;
+    const runner = new Rfc64CoalescingSupervisorV1({
+      requestWhileRunning: 'drop',
+      runPass: async () => {
+        passes += 1;
+        markStarted();
+        await gate;
+      },
+      onError: () => undefined,
+      closingMessage: 'test closing',
+    });
+
+    expect(runner.request()).toBe(true);
+    await started;
+    expect(runner.request()).toBe(false);
+    release();
+    await runner.whenIdle();
+    expect(passes).toBe(1);
+    await runner.close();
+  });
+
   it('does not let frequent live work postpone a failed scope periodic retry', async () => {
     vi.useFakeTimers();
     const dirty = new Set(['failed-scope', 'live-scope']);

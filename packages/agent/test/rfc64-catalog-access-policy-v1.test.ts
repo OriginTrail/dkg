@@ -5,6 +5,7 @@ import {
   CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   computeContextGraphPolicyObjectDigestV1,
+  type ContextGraphIdV1,
   type ContextGraphPolicyV1,
   type Digest32V1,
   type EvmAddressV1,
@@ -23,15 +24,19 @@ import {
 
 const OWNER = '0x1111111111111111111111111111111111111111' as EvmAddressV1;
 const LOCAL = '0x2222222222222222222222222222222222222222' as EvmAddressV1;
+const LOCAL_OTHER = '0x2222222222222222222222222222222222222223' as EvmAddressV1;
 const REMOTE = '0x3333333333333333333333333333333333333333' as EvmAddressV1;
 const OUTSIDER = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
 const CURATOR = '0x5555555555555555555555555555555555555555' as EvmAddressV1;
 const NETWORK = 'otp:20430' as const;
 const CG = '0x1111111111111111111111111111111111111111/v2-policy' as const;
+const CG_OTHER = '0x1111111111111111111111111111111111111111/v2-policy-other' as const;
 
 const OPERATIONS: readonly Rfc64CatalogAccessOperationV1[] = Object.freeze([
   'announce-outbound',
   'announce-inbound',
+  'head-replay-outbound',
+  'head-replay-inbound',
   'fetch-outbound',
   'fetch-inbound',
   'catalog-object-fetch-outbound',
@@ -40,10 +45,14 @@ const OPERATIONS: readonly Rfc64CatalogAccessOperationV1[] = Object.freeze([
   'ka-bundle-fetch-inbound',
 ]);
 
-function policy(accessPolicy: 0 | 1, publishPolicy: 0 | 1): ContextGraphPolicyV1 {
+function policy(
+  accessPolicy: 0 | 1,
+  publishPolicy: 0 | 1,
+  contextGraphId: ContextGraphIdV1 = CG,
+): ContextGraphPolicyV1 {
   return {
     networkId: NETWORK,
-    contextGraphId: CG,
+    contextGraphId,
     governanceChainId: null,
     governanceContractAddress: null,
     ownershipTransitionDigest: null,
@@ -78,11 +87,16 @@ function digestFor(input: ContextGraphPolicyV1): Digest32V1 {
 
 function roster(
   policyDigest: Digest32V1,
-  options: { localProvider?: boolean; remoteProvider?: boolean } = {},
+  options: {
+    contextGraphId?: ContextGraphIdV1;
+    localAgentAddress?: EvmAddressV1;
+    localProvider?: boolean;
+    remoteProvider?: boolean;
+  } = {},
 ): MemberRosterV1 {
   return {
     networkId: NETWORK,
-    contextGraphId: CG,
+    contextGraphId: options.contextGraphId ?? CG,
     ownershipTransitionDigest: null,
     era: '0',
     version: '0',
@@ -91,7 +105,7 @@ function roster(
     administrativeDelegationDigest: null,
     members: [
       {
-        agentAddress: LOCAL,
+        agentAddress: options.localAgentAddress ?? LOCAL,
         roles: options.localProvider === false ? ['holder'] : ['holder', 'provider'],
       },
       {
@@ -112,12 +126,16 @@ function registry(
   });
 }
 
-function authInput(operation: Rfc64CatalogAccessOperationV1, policyDigest: Digest32V1) {
+function authInput(
+  operation: Rfc64CatalogAccessOperationV1,
+  policyDigest: Digest32V1,
+  contextGraphId: ContextGraphIdV1 = CG,
+) {
   return {
     operation,
     remotePeerId: '12D3KooRemote',
     networkId: NETWORK,
-    contextGraphId: CG,
+    contextGraphId,
     policyDigest,
   } as const;
 }
@@ -216,6 +234,130 @@ describe('RFC-64 D26 catalog access authorization', () => {
         authorAddress: OUTSIDER,
       })).toBe(false);
     }
+  });
+
+  it('passes the exact private Context Graph into peer identity resolution', async () => {
+    const acceptedPolicy = policy(1, 1);
+    const policyDigest = digestFor(acceptedPolicy);
+    const resolutions: Array<{ peerId: string; contextGraphId: string }> = [];
+    const subject = new Rfc64CatalogAccessPolicyRegistryV1({
+      localAgentAddress: LOCAL,
+      resolveRemoteAgentAddress: async (peerId, contextGraphId) => {
+        resolutions.push({ peerId, contextGraphId });
+        return REMOTE;
+      },
+    });
+    subject.accept({ policy: acceptedPolicy, policyDigest, roster: roster(policyDigest) });
+
+    await expect(subject.authorize(authInput('fetch-outbound', policyDigest)))
+      .resolves.toEqual({ accessPolicy: 1, policyDigest });
+    expect(resolutions).toEqual([{ peerId: '12D3KooRemote', contextGraphId: CG }]);
+  });
+
+  it('resolves the local private principal independently for each Context Graph', async () => {
+    const resolutions: string[] = [];
+    const subject = new Rfc64CatalogAccessPolicyRegistryV1({
+      resolveLocalAgentAddress: async (contextGraphId) => {
+        resolutions.push(contextGraphId);
+        return contextGraphId === CG ? LOCAL : LOCAL_OTHER;
+      },
+      resolveRemoteAgentAddress: async () => REMOTE,
+    });
+    const firstPolicy = policy(1, 1);
+    const firstDigest = digestFor(firstPolicy);
+    subject.accept({
+      policy: firstPolicy,
+      policyDigest: firstDigest,
+      roster: roster(firstDigest),
+    });
+    const secondPolicy = policy(1, 1, CG_OTHER);
+    const secondDigest = digestFor(secondPolicy);
+    subject.accept({
+      policy: secondPolicy,
+      policyDigest: secondDigest,
+      roster: roster(secondDigest, {
+        contextGraphId: CG_OTHER,
+        localAgentAddress: LOCAL_OTHER,
+      }),
+    });
+
+    for (const operation of OPERATIONS) {
+      await expect(subject.authorize(authInput(operation, firstDigest)))
+        .resolves.toEqual({ accessPolicy: 1, policyDigest: firstDigest });
+      await expect(subject.authorize(authInput(
+        operation,
+        secondDigest,
+        CG_OTHER,
+      ))).resolves.toEqual({ accessPolicy: 1, policyDigest: secondDigest });
+    }
+    expect(resolutions).toEqual(OPERATIONS.flatMap(() => [CG, CG_OTHER]));
+    expect(subject.isSwmAuthorAuthorized({
+      networkId: NETWORK,
+      contextGraphId: CG_OTHER,
+      policyDigest: secondDigest,
+      authorAddress: LOCAL_OTHER,
+    })).toBe(true);
+  });
+
+  it('fails closed when the per-CG resolver reports no unique local principal', async () => {
+    const acceptedPolicy = policy(1, 1);
+    const policyDigest = digestFor(acceptedPolicy);
+    const subject = new Rfc64CatalogAccessPolicyRegistryV1({
+      // Both no match and multiple ambiguous matches collapse to the registry's
+      // sole fail-closed resolver result.
+      resolveLocalAgentAddress: async () => null,
+      resolveRemoteAgentAddress: async () => REMOTE,
+    });
+    subject.accept({ policy: acceptedPolicy, policyDigest, roster: roster(policyDigest) });
+
+    await expect(subject.authorize(authInput('fetch-inbound', policyDigest)))
+      .resolves.toBeNull();
+  });
+
+  it('rejects a private authorization when policy rotates during local resolution', async () => {
+    let finishLocalResolution: ((address: EvmAddressV1) => void) | undefined;
+    const initialPolicy = policy(1, 1);
+    const initialDigest = digestFor(initialPolicy);
+    const subject = new Rfc64CatalogAccessPolicyRegistryV1({
+      resolveLocalAgentAddress: async () => new Promise<EvmAddressV1>((resolve) => {
+        finishLocalResolution = resolve;
+      }),
+      resolveRemoteAgentAddress: async () => REMOTE,
+    });
+    subject.acceptCurrent({
+      policy: initialPolicy,
+      policyDigest: initialDigest,
+      roster: roster(initialDigest),
+    });
+
+    const authorization = subject.authorize(authInput('fetch-inbound', initialDigest));
+    expect(finishLocalResolution).toBeTypeOf('function');
+    const successorPolicy = {
+      ...policy(1, 1),
+      version: '1',
+      previousPolicyDigest: initialDigest,
+    } satisfies ContextGraphPolicyV1;
+    const successorDigest = digestFor(successorPolicy);
+    subject.acceptCurrent({
+      policy: successorPolicy,
+      policyDigest: successorDigest,
+      roster: roster(successorDigest),
+    });
+    finishLocalResolution!(LOCAL);
+
+    await expect(authorization).resolves.toBeNull();
+    expect(subject.lookup(NETWORK, CG)?.policyDigest).toBe(successorDigest);
+  });
+
+  it('requires exactly one local private-authority source', () => {
+    expect(() => new Rfc64CatalogAccessPolicyRegistryV1({
+      localAgentAddress: LOCAL,
+      resolveLocalAgentAddress: async () => LOCAL,
+      resolveRemoteAgentAddress: async () => REMOTE,
+    } as never)).toThrow(/exactly one/u);
+    expect(() => new Rfc64CatalogAccessPolicyRegistryV1({
+      resolveRemoteAgentAddress: async () => REMOTE,
+    } as never)).toThrow(/exactly one/u);
   });
 
   it('requires the serving side to hold the provider role', async () => {
@@ -430,5 +572,74 @@ describe('RFC-64 D26 catalog access authorization', () => {
       policyDigest: digestFor(unlinked),
     })).toThrow(/exact predecessor digest/u);
     expect(subject.lookup(NETWORK, CG)?.policyDigest).toBe(successorDigest);
+  });
+
+  it('promotes an unregistered authority to finalized chain state exactly one way', () => {
+    const initial = policy(0, 0);
+    const initialDigest = digestFor(initial);
+    const finalized = {
+      ...policy(0, 0),
+      governanceChainId: '31337',
+      governanceContractAddress: '0x6666666666666666666666666666666666666666',
+      ownershipTransitionDigest: `0x${'77'.repeat(32)}` as Digest32V1,
+      source: {
+        kind: 'finalized-chain' as const,
+        chainId: '31337',
+        contractAddress: '0x6666666666666666666666666666666666666666',
+        blockNumber: '42',
+        blockHash: `0x${'88'.repeat(32)}` as Digest32V1,
+      },
+    } satisfies ContextGraphPolicyV1;
+    const finalizedDigest = digestFor(finalized);
+    const subject = registry();
+
+    subject.acceptAuthoritativeCurrent({ policy: initial, policyDigest: initialDigest });
+    expect(subject.acceptAuthoritativeCurrent({
+      policy: finalized,
+      policyDigest: finalizedDigest,
+    }).policyDigest).toBe(finalizedDigest);
+    expect(subject.acceptAuthoritativeCurrent({
+      policy: finalized,
+      policyDigest: finalizedDigest,
+    }).policyDigest).toBe(finalizedDigest);
+
+    expect(() => subject.acceptAuthoritativeCurrent({
+      policy: initial,
+      policyDigest: initialDigest,
+    })).toThrow(/does not advance its high-water/u);
+    expect(subject.lookup(NETWORK, CG)?.policyDigest).toBe(finalizedDigest);
+  });
+
+  it('rejects a stale unregistered roster after a newer curator generation', () => {
+    const privatePolicy = policy(1, 0);
+    const policyDigest = digestFor(privatePolicy);
+    const initialRoster = roster(policyDigest);
+    const newerRoster: MemberRosterV1 = {
+      ...initialRoster,
+      version: '2',
+      members: initialRoster.members.filter(({ agentAddress }) => agentAddress !== REMOTE),
+    };
+    const staleRoster: MemberRosterV1 = {
+      ...initialRoster,
+      version: '1',
+    };
+    const subject = registry();
+
+    subject.acceptAuthoritativeCurrent({
+      policy: privatePolicy,
+      policyDigest,
+      roster: initialRoster,
+    });
+    expect(subject.acceptAuthoritativeCurrent({
+      policy: privatePolicy,
+      policyDigest,
+      roster: newerRoster,
+    }).roster?.version).toBe('2');
+    expect(() => subject.acceptAuthoritativeCurrent({
+      policy: privatePolicy,
+      policyDigest,
+      roster: staleRoster,
+    })).toThrow(/does not advance its high-water/u);
+    expect(subject.lookup(NETWORK, CG)?.roster).toEqual(newerRoster);
   });
 });

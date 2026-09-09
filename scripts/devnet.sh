@@ -36,6 +36,10 @@
 #                 Context graph used by /api/epcis/capture when publisher is enabled
 #   DEVNET_SWM_SYNC_ON_CONNECT=0
 #                 Skip peer-connect SWM catch-up, useful for bulk SWM benchmarks
+#   DEVNET_SNAPSHOT_GC_{HARD_RESERVE,TRIGGER_FREE,TARGET_FREE}_BYTES
+#                 Local snapshot-store watermarks (defaults: 256 MiB, 512 MiB,
+#                 and 1 GiB) so devnet keeps capacity admission without
+#                 requiring production-scale free disk.
 #
 set -euo pipefail
 
@@ -73,6 +77,9 @@ NUM_OP_WALLETS=3
 # mining) for tests that need deterministic block-per-tx semantics.
 HARDHAT_BLOCK_INTERVAL_MS="${HARDHAT_BLOCK_INTERVAL_MS:-1000}"
 DEVNET_DOCKER_NAME_PREFIX="${DEVNET_DOCKER_NAME_PREFIX:-devnet}"
+DEVNET_SNAPSHOT_GC_HARD_RESERVE_BYTES="${DEVNET_SNAPSHOT_GC_HARD_RESERVE_BYTES:-268435456}"
+DEVNET_SNAPSHOT_GC_TRIGGER_FREE_BYTES="${DEVNET_SNAPSHOT_GC_TRIGGER_FREE_BYTES:-536870912}"
+DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES="${DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES:-1073741824}"
 BLAZEGRAPH_PORT="${DEVNET_BLAZEGRAPH_PORT:-9999}"
 BLAZEGRAPH_CONTAINER="${DEVNET_DOCKER_NAME_PREFIX}-blazegraph"
 BLAZEGRAPH_LOG_MAX_SIZE="200m"
@@ -670,6 +677,15 @@ create_node_config() {
   "contextGraphs": ["devnet-test", "devnet-isolation"],
   "localBootstrapContextGraphs": ["devnet-test", "devnet-isolation"],
   ${swm_sync_block}
+  "sharedMemoryPublicSnapshotStorage": {
+    "enabled": true,
+    "directory": "${node_dir}/swm-public-snapshots",
+    "gc": {
+      "hardReserveBytes": ${DEVNET_SNAPSHOT_GC_HARD_RESERVE_BYTES},
+      "triggerFreeBytes": ${DEVNET_SNAPSHOT_GC_TRIGGER_FREE_BYTES},
+      "targetFreeBytes": ${DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES}
+    }
+  },
   "publisher": {
     "enabled": true,
     "pollIntervalMs": 12000,

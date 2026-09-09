@@ -21,6 +21,8 @@ import {
 import type { FinalizationRecoveryHealth } from './finalization-recovery-store.js';
 import { FinalizationRuntime } from './finalization-runtime.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
+import type { Rfc64PublicCatalogWorkloadOwnerV1 } from
+  './rfc64/public-catalog-workload-owner-v1.js';
 import type { Rfc64CatalogSynchronizationEvidenceV1 } from
   './rfc64/catalog-synchronization-evidence-v1.js';
 import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
@@ -32,11 +34,18 @@ import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
 import { SyncOnConnectPeerScheduler } from './sync/on-connect/peer-scheduler.js';
+import {
+  SwmTargetExecutorSessionFactoryV1,
+  type SwmTargetExecutorPortsV1,
+  type SwmTargetExecutorV1,
+} from './sync/requester/swm-target-executor.js';
 import type {
   Rfc64AuthorizedSwmRecoveryPlanV1,
   Rfc64SwmRecoveryCoordinatorV1,
 } from
   './rfc64/swm-recovery-coordinator-v1.js';
+import type { Rfc64SwmRecoveryRuntimeV1 } from
+  './dkg-agent-rfc64-swm-recovery-runtime.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -123,7 +132,7 @@ import {
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource } from '@origintrail-official/dkg-storage';
-import { emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
+import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -672,6 +681,8 @@ export class DKGAgentBase {
   peerResolver!: PeerResolver;
   readonly eventBus: TypedEventBus;
   protected readonly chain: ChainAdapter;
+  /** Finalized-authority support classified once at the adapter boundary. */
+  protected readonly contextGraphAuthorityReaderCapability: ContextGraphAuthorityReaderCapability;
   /** Shared memory-owned root entities per context graph: entity → creatorPeerId. Used by publisher and shared memory handler. */
   protected readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
   protected readonly contextGraphMetaProjection: ContextGraphMetaProjection;
@@ -694,6 +705,7 @@ export class DKGAgentBase {
   /** Shared write locks so gossip writes serialize against local CAS writes. */
   protected readonly writeLocks: Map<string, Promise<void>>;
   protected readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  private swmTargetExecutorSessionFactoryV1?: SwmTargetExecutorSessionFactoryV1;
   protected sharedMemoryHandler?: InstanceType<typeof SharedMemoryHandler>;
   protected gossipPublishHandler?: GossipPublishHandler;
   protected finalizationHandler?: FinalizationHandler;
@@ -1201,12 +1213,12 @@ export class DKGAgentBase {
   protected rfc64PersistenceV1?: Rfc64PersistenceV1;
   /** Explicit owner for finalization persistence and network identity lifetimes. */
   protected readonly finalizationRuntime = new FinalizationRuntime();
-  /**
-   * RFC-64 Gate 1 public author-catalog service, wired onto the production
-   * router during `start()` when {@link rfc64PersistenceV1} is open. Undefined
-   * while dormant (no dataDir) or after `stop()`.
-   */
-  protected rfc64PublicCatalogServiceV1?: Rfc64PublicCatalogServiceV1;
+  /** Single owner for RFC-64 public transport, authority refresh, and persistence. */
+  protected rfc64PublicCatalogOwnerV1!: Rfc64PublicCatalogWorkloadOwnerV1;
+  /** Compatibility view for catalog methods that operate on the active service. */
+  protected get rfc64PublicCatalogServiceV1(): Rfc64PublicCatalogServiceV1 | undefined {
+    return this.rfc64PublicCatalogOwnerV1?.service;
+  }
   /** One explicit serializer and physical drain boundary for every catalog mutation. */
   protected readonly rfc64CatalogMutationCoordinatorV1 =
     new Rfc64CatalogMutationCoordinatorV1();
@@ -1413,6 +1425,13 @@ export class DKGAgentBase {
    * has observed the first result yet.
    */
   protected ensureProfilePublishedInFlight?: Promise<void>;
+  /**
+   * Coalesces the explicit profile reannouncement performed before a private
+   * join approval is exposed. This is intentionally separate from
+   * `ensureProfilePublishedInFlight`: readiness remains idempotent once the
+   * profile exists, while approval must refresh the public authority record.
+   */
+  protected approvalAuthorityProfileReannouncementInFlight?: Promise<void>;
   /**
    * OT-RFC-38 / LU-6 Phase B — sliding-window rate-limiter applied
    * to pre-registration (beacon-discovered) ciphertext writes.
@@ -1664,6 +1683,8 @@ export class DKGAgentBase {
     | null = null;
   /** Typed RFC-64 admission and current-configuration validation boundary. */
   protected rfc64SwmRecoveryCoordinatorV1!: Rfc64SwmRecoveryCoordinatorV1;
+  /** Cohesive owner of RFC-64 recovery authority, leases and selection invalidation. */
+  protected rfc64SwmRecoveryRuntimeV1!: Rfc64SwmRecoveryRuntimeV1;
   /**
    * Per-peer timestamp of the last time all live connections to that peer
    * were gone. Used to avoid suppressing reconnect catch-up with a
@@ -1809,6 +1830,7 @@ export class DKGAgentBase {
     this.publicSnapshotStore = publicSnapshotStore;
     this.eventBus = eventBus;
     this.chain = chain;
+    this.contextGraphAuthorityReaderCapability = bindContextGraphAuthorityReader(chain);
     // OT-RFC-43 A2 — retain the allocator so finalize can allocate-at-finalize
     // (the publisher gets the same instance as `kaAllocator`).
     this.kaNumberAllocator = config.kaNumberAllocator;
@@ -1828,6 +1850,24 @@ export class DKGAgentBase {
     this.publisher.setWorkspaceSenderKeyEncryptor((input) => (this as unknown as DKGAgent).encryptWorkspacePayloadWithSenderKey(input));
     this.syncCheckpoints = config.syncCheckpointStore ?? this.syncCheckpoints;
     this.changelogCursors = config.changelogCursorStore ?? this.changelogCursors;
+  }
+
+  /** Bind stable requester ports once at concrete-agent construction. */
+  protected configureSwmTargetExecutorSessionsV1(
+    ports: SwmTargetExecutorPortsV1,
+  ): void {
+    if (this.swmTargetExecutorSessionFactoryV1 !== undefined) {
+      throw new Error('SWM target executor sessions are already configured');
+    }
+    this.swmTargetExecutorSessionFactoryV1 = new SwmTargetExecutorSessionFactoryV1(ports);
+  }
+
+  /** Create one synchronization-scoped executor with isolated mutable state. */
+  protected createSwmTargetExecutorSessionV1(): SwmTargetExecutorV1 {
+    if (this.swmTargetExecutorSessionFactoryV1 === undefined) {
+      throw new Error('SWM target executor sessions are not configured');
+    }
+    return this.swmTargetExecutorSessionFactoryV1.createSession();
   }
 
   /**

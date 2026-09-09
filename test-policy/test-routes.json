@@ -1,0 +1,142 @@
+[
+  {
+    "pattern": "packages/node-ui/e2e/specs/devnet-local/**",
+    "lane": "browser-local",
+    "reason": "Heavy destructive scenarios use isolated devnet in scheduled main CI or explicit local runs",
+    "cadence": "nightly/manual",
+    "command": "pnpm --dir packages/node-ui test:e2e:devnet-local"
+  },
+  {
+    "pattern": "packages/*/test/archive/**",
+    "lane": "archive",
+    "reason": "Historical V8/V9 fixtures; excluded from V10 deploy set",
+    "cadence": "historical",
+    "command": "git history"
+  },
+  {
+    "pattern": "packages/evm-module/test/**",
+    "lane": "solidity",
+    "reason": "Hardhat resolves the active contract tests; archive route is separate",
+    "cadence": "required",
+    "command": "pnpm --dir packages/evm-module test"
+  },
+  {
+    "pattern": "packages/node-ui/e2e/specs/**",
+    "lane": "browser",
+    "reason": "Four-node browser suite; devnet-local subdirectory has a separate local command",
+    "cadence": "required",
+    "command": "pnpm test:e2e:ui"
+  },
+  {
+    "pattern": "packages/adapter-hermes/pytests/test_*.py",
+    "lane": "python",
+    "reason": "Hermes runtime Python tests required in supporting job",
+    "cadence": "required",
+    "command": "pnpm --dir packages/adapter-hermes test:py"
+  },
+  {
+    "pattern": "scripts/lib/__tests__/*.test.mjs",
+    "lane": "scripts",
+    "reason": "Repository tooling checks run in build gate",
+    "cadence": "required",
+    "command": "pnpm test:scripts",
+    "layer": "repository tooling",
+    "prerequisites": [
+      "pnpm frozen install",
+      "built workspace dependencies"
+    ]
+  },
+  {
+    "pattern": "devnet/**",
+    "lane": "devnet",
+    "reason": "Developer and certification suites; suite manifest and root scripts document prerequisites",
+    "cadence": "manual",
+    "command": "resolve"
+  },
+  {
+    "pattern": "demo/**",
+    "lane": "demo",
+    "reason": "Demo-local smoke tests",
+    "cadence": "manual",
+    "command": "resolve"
+  },
+  {
+    "pattern": "scripts/audit-*.test.mjs",
+    "lane": "audit-tools",
+    "reason": "Node test runner fixtures for diagnostic tools",
+    "cadence": "required",
+    "command": "node --test scripts/audit-*.test.mjs"
+  },
+  {
+    "pattern": "packages/agent/scripts/*.test.mjs",
+    "lane": "recovery-tool",
+    "reason": "Recovery scenario operator script contract",
+    "cadence": "required",
+    "command": "node --test packages/agent/scripts/*.test.mjs"
+  },
+  {
+    "pattern": "test-systems/*.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Native Oxigraph recovery plus real backend conformance; Blazegraph mandatory in CI",
+    "cadence": "required",
+    "command": "DKG_REQUIRE_BLAZEGRAPH=1 pnpm test:conformance"
+  },
+  {
+    "pattern": "tools/observability/w1/*.test.yaml",
+    "lane": "prometheus-rules",
+    "reason": "Promtool rule regression fixtures; requires Prometheus tools",
+    "cadence": "manual",
+    "command": "cd tools/observability/w1 && promtool test rules w1-rules.test.yaml",
+    "layer": "monitoring rules",
+    "prerequisites": [
+      "Prometheus promtool"
+    ]
+  },
+  {
+    "pattern": "scripts/*test*.sh",
+    "lane": "devnet",
+    "reason": "Executable shell test drivers; each script documents its node, chain and environment prerequisites",
+    "cadence": "manual",
+    "command": "bash {file}"
+  },
+  {
+    "pattern": "scripts/ci/verify-blazegraph-image-contract.sh",
+    "lane": "image-contract",
+    "reason": "Native image contract verification in the ARM64 CI lane",
+    "cadence": "required",
+    "command": "bash scripts/ci/verify-blazegraph-image-contract.sh"
+  },
+  {
+    "pattern": "packages/cli/test/fixtures/*.sh",
+    "lane": "shell-fixture",
+    "reason": "CLI test subprocess fixtures; built CLI and isolated temporary devnet required",
+    "cadence": "manual",
+    "command": "bash {file}"
+  },
+  {
+    "pattern": "tools/observability/smoke-test.sh",
+    "lane": "observability",
+    "reason": "Prometheus/Grafana smoke driver; requires its documented observability stack",
+    "cadence": "manual",
+    "command": "bash tools/observability/smoke-test.sh"
+  },
+  {
+    "pattern": "ccl_v0_1/tests/**",
+    "lane": "ccl-python-yaml",
+    "reason": "Python CCL driver loads the YAML case corpus; requires ccl_v0_1/requirements.txt",
+    "cadence": "manual",
+    "command": "cd ccl_v0_1 && python3 tests/run_all_tests.py",
+    "layer": "Python/YAML conformance",
+    "prerequisites": [
+      "Python 3",
+      "ccl_v0_1/requirements.txt"
+    ]
+  },
+  {
+    "pattern": "scripts/*soak*.sh",
+    "lane": "devnet",
+    "reason": "Long-running operator soak drivers for isolated devnets; prerequisites are documented by each script",
+    "cadence": "manual",
+    "command": "bash {file}"
+  }
+]

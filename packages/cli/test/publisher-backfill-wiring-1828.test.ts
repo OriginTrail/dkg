@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 
 // GH #1828 — regression at the daemon-boot WIRING point. The durable-admission
 // intent index only repairs pre-index jobs if runDaemonInner actually calls the
@@ -186,7 +187,7 @@ describe('runDaemonInner VM-publish intent backfill wiring (#1828)', () => {
         hubAddress: '0x1234567890123456789012345678901234567890',
         chainId: 'evm:100',
       },
-    } as any, Date.now())).rejects.toThrow('after-backfill');
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('after-backfill');
 
     closeDashboardDbFromAgentCreateArg(mocks.agentCreate.mock.calls[0]?.[0]);
     // The boot path actually called the backfill (delete the call → this fails)...

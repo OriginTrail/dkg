@@ -85,7 +85,7 @@ export async function startOxigraphSparqlEndpoint(): Promise<OxigraphSparqlEndpo
           res.end();
           return;
         }
-        if (req.url?.includes('/update')) {
+        if (req.url?.includes('/update') || contentType.includes('application/sparql-update')) {
           store.update(body);
           res.writeHead(204);
           res.end();

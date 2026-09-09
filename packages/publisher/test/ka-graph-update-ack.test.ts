@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import {
   MockChainAdapter,
@@ -154,6 +154,30 @@ function intent(
 }
 
 describe('StorageACKHandler graph-scoped updates', () => {
+  it.each([
+    { label: 'no triples', overrides: { publicTripleCount: 0, privateTripleCount: 0 } },
+    {
+      label: 'an undeclared private root',
+      overrides: {
+        publicTripleCount: 1,
+        privateTripleCount: 0,
+        privateMerkleRoot: PRIVATE_ROOT,
+      },
+    },
+  ])('rejects an update intent with $label before signing', async ({ overrides }) => {
+    const wallet = ethers.Wallet.createRandom();
+    const signMessage = vi.spyOn(wallet, 'signMessage');
+    const handler = new StorageACKHandler(
+      new OxigraphStore(),
+      config(wallet),
+      new TypedEventBus(),
+    );
+
+    await expect(handler.updateHandler(intent([], 0, overrides), PEER))
+      .rejects.toThrow('invalid graph-scoped content envelope');
+    expect(signMessage).not.toHaveBeenCalled();
+  });
+
   it('accepts the inline VM payload emitted by a public graph-update producer', async () => {
     const store = new OxigraphStore();
     const publisher = new DKGPublisher({

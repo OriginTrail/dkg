@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
@@ -8,6 +7,10 @@ import {
   renderCpuProfileFlamegraphHtml,
   renderProfileIndexHtml,
 } from './support/cpu-profile-report.mjs';
+import {
+  createProfileEnvironment,
+  runCommand,
+} from './support/profile-process.mjs';
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const profileDir = resolve(rootDir, 'bench/results/profiles');
@@ -38,18 +41,22 @@ const profileArgs = [
   'esbench.config.mjs',
   ...process.argv.slice(2),
 ];
-const env = {
-  ...process.env,
-  ESBENCH_HTML: process.env.ESBENCH_HTML ?? '1',
-  ESBENCH_RESULT: process.env.ESBENCH_RESULT ?? reportJsonPath,
-  ESBENCH_HTML_FILE: process.env.ESBENCH_HTML_FILE ?? reportHtmlPath,
-};
+const env = createProfileEnvironment(process.env, {
+  // The CPU profiler is attached to this ESBench host process. Keep benchmark
+  // execution here so the resulting profile contains the measured workload.
+  reportJsonPath,
+  reportHtmlPath,
+});
 
 console.log(`[bench:profile] payload sizes: ${env.DKG_ESBENCH_PAYLOAD_SIZES || '10kb,100kb,2mb,200mb'}`);
 console.log(`[bench:profile] writing CPU profile: ${relativeFromRoot(profilePath)}`);
 console.log(`[bench:profile] writing ESBench report: ${relativeFromRoot(reportHtmlPath)}`);
 
-const exitCode = await runNode(profileArgs, env);
+const exitCode = await runCommand(process.execPath, profileArgs, {
+  cwd: rootDir,
+  env,
+  label: 'profiler run',
+});
 if (exitCode !== 0) process.exit(exitCode);
 
 const profile = JSON.parse(await readFile(profilePath, 'utf8'));
@@ -69,28 +76,6 @@ await linkExistingBenchmarkReports();
 
 console.log(`[bench:profile] wrote flame graph: ${relativeFromRoot(flamegraphPath)}`);
 console.log(`[bench:profile] wrote profile index: ${relativeFromRoot(resolve(profileDir, 'index.html'))}`);
-
-function runNode(args, env) {
-  return new Promise((resolveExitCode) => {
-    const child = spawn(process.execPath, args, {
-      cwd: rootDir,
-      env,
-      stdio: 'inherit',
-    });
-    child.on('error', (error) => {
-      console.error(error);
-      resolveExitCode(1);
-    });
-    child.on('exit', (code, signal) => {
-      if (signal) {
-        console.error(`[bench:profile] profiler run exited from signal ${signal}`);
-        resolveExitCode(1);
-        return;
-      }
-      resolveExitCode(code ?? 1);
-    });
-  });
-}
 
 async function writeProfileIndex() {
   const files = await readdir(profileDir);
@@ -123,7 +108,11 @@ async function writeProfileIndex() {
 }
 
 async function runMethodAnalysis(env) {
-  const exitCode = await runCommand(process.execPath, ['--experimental-strip-types', 'bench/analyze-publish-async-get.ts'], env);
+  const exitCode = await runCommand(process.execPath, ['--experimental-strip-types', 'bench/analyze-publish-async-get.ts'], {
+    cwd: rootDir,
+    env,
+    label: 'method analysis',
+  });
   if (exitCode !== 0) {
     throw new Error(`Method analysis failed with exit code ${exitCode}`);
   }
@@ -173,28 +162,6 @@ async function linkExistingBenchmarkReports() {
     const html = await readFile(reportPath, 'utf8');
     await writeFile(reportPath, addLinkedReportNavigation(html, file, targets), 'utf8');
   }
-}
-
-function runCommand(command, args, env) {
-  return new Promise((resolveExitCode) => {
-    const child = spawn(command, args, {
-      cwd: rootDir,
-      env,
-      stdio: 'inherit',
-    });
-    child.on('error', (error) => {
-      console.error(error);
-      resolveExitCode(1);
-    });
-    child.on('exit', (code, signal) => {
-      if (signal) {
-        console.error(`[bench:profile] command exited from signal ${signal}`);
-        resolveExitCode(1);
-        return;
-      }
-      resolveExitCode(code ?? 1);
-    });
-  });
 }
 
 function relativeFromRoot(path) {

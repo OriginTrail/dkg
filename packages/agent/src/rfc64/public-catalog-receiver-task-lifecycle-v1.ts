@@ -86,6 +86,10 @@ export class Rfc64ReceiverTaskLifecycleV1<
     return this.#active.size;
   }
 
+  get pendingCount(): number {
+    return this.#pendingByKey.size;
+  }
+
   get isIdle(): boolean {
     return this.#queue.length === 0 && this.#deferred.size === 0 && this.#active.size === 0;
   }
@@ -206,6 +210,34 @@ export class Rfc64ReceiverTaskLifecycleV1<
       if (this.finalize(task, completion(task), beforeSettle, notify)) finalized += 1;
     }
     return finalized;
+  }
+
+  /** Finalize at most one queued or deferred, but never active, task. */
+  finalizeOneNonRunningWhere(
+    predicate: (task: TTask) => boolean,
+    completion: (task: TTask) => Rfc64PublicCatalogReceiverCompletionV1,
+    beforeSettle: (task: TTask) => void,
+    notify: (waiter: () => void) => void,
+  ): boolean {
+    const task = [...this.#pendingByKey.values()].find(
+      (candidate) => candidate.running !== true && predicate(candidate),
+    );
+    return task === undefined
+      ? false
+      : this.finalize(task, completion(task), beforeSettle, notify);
+  }
+
+  /** Finalize at most one queued, but never deferred or active, task. */
+  finalizeOneQueuedWhere(
+    predicate: (task: TTask) => boolean,
+    completion: (task: TTask) => Rfc64PublicCatalogReceiverCompletionV1,
+    beforeSettle: (task: TTask) => void,
+    notify: (waiter: () => void) => void,
+  ): boolean {
+    const task = this.#queue.find(predicate);
+    return task === undefined
+      ? false
+      : this.finalize(task, completion(task), beforeSettle, notify);
   }
 
   finalize(

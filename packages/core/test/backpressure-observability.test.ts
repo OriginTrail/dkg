@@ -46,6 +46,32 @@ function captureMetrics(run: () => void): RecordedMetric[] {
 }
 
 describe('SchedulerPressureTracker', () => {
+  it('distinguishes an aged lane even when shared depth saturates every queued lane (#2109)', () => {
+    let now = 0;
+    const tracker = new SchedulerPressureTracker({
+      scheduler: 'sync-global', now: () => now,
+      capacity: { capacityModel: 'shared', queueLimit: 4, inflightLimit: 2 },
+      thresholds: { degradedQueueAgeMs: 60_000 },
+    });
+    tracker.enqueue({ lane: 'durable', operation: 'durable' });
+    now = 90_000;
+    for (const lane of ['changelog', 'shared_memory', 'swm_recovery']) {
+      tracker.enqueue({ lane, operation: lane });
+    }
+    const lanes = tracker.snapshot().lanes;
+    expect(lanes.every((lane) => lane.state === 'saturated')).toBe(true);
+    expect(lanes.find((lane) => lane.lane === 'durable')?.stateReasons).toEqual(['age', 'depth']);
+    for (const lane of lanes.filter((lane) => lane.lane !== 'durable')) {
+      expect(lane.stateReasons).toEqual(['depth']);
+    }
+  });
+
+  it('leaves partitioned lane wire shape unchanged (#2109)', () => {
+    const tracker = new SchedulerPressureTracker({ scheduler: 'store', capacity: { lanes: { read: { queueLimit: 1 } } } });
+    tracker.enqueue({ lane: 'read', operation: 'read' });
+    expect(tracker.snapshot().lanes[0]).not.toHaveProperty('stateReasons');
+  });
+
   it('tracks queue and active age without owning scheduling policy', () => {
     let now = 1_000;
     const tracker = new SchedulerPressureTracker({
@@ -411,6 +437,51 @@ describe('BackpressureRegistry', () => {
 });
 
 describe('BackpressureMonitor', () => {
+  it.each(['shared', 'partitioned'] as const)('logs pressure transitions from a real %s tracker', (capacityModel) => {
+    let now = 1_000;
+    const tracker = new SchedulerPressureTracker({
+      scheduler: 'sync-global', now: () => now,
+      capacity: { capacityModel, queueLimit: 1, lanes: { durable: { queueLimit: 1 } } },
+      thresholds: { degradedQueueAgeMs: 10_000, stalledActiveAgeMs: 20_000, rejectionStateWindowMs: 30_000 },
+    });
+    const registry = new BackpressureRegistry();
+    registry.register({ backpressureId: 'sync-global', getBackpressureSnapshot: () => tracker.snapshot() });
+    const records: Array<Record<string, unknown>> = [];
+    const monitor = new BackpressureMonitor({
+      registry, now: () => now, intervalMs: 1_000, summaryIntervalMs: 1_000,
+      emit: (_level, message) => records.push(JSON.parse(message.slice('[backpressure] '.length))),
+    });
+    const sample = (state: string, reasons: string[]) => {
+      monitor.sample();
+      const record = records.filter((item) => item.lane === 'durable').at(-1);
+      expect(record).toMatchObject({ state });
+      if (capacityModel === 'shared') expect(record?.stateReasons).toEqual(reasons);
+      else expect(record).not.toHaveProperty('stateReasons');
+    };
+
+    const active = tracker.enqueue({ lane: 'durable', operation: 'active' });
+    tracker.start(active);
+    const queued = tracker.enqueue({ lane: 'durable', operation: 'queued' });
+    sample('saturated', ['depth']);
+    now += 10_000;
+    sample('saturated', ['age', 'depth']);
+    tracker.reject({ lane: 'durable', operation: 'rejected' }, 'queue_full');
+    now += 1_000;
+    sample('saturated', ['rejection', 'age', 'depth']);
+    now += 9_000;
+    sample('stalled', ['active_age', 'rejection', 'age', 'depth']);
+    tracker.finish(active, 'completed');
+    tracker.start(queued);
+    tracker.finish(queued, 'completed');
+    now += 1_000;
+    sample('saturated', ['rejection']);
+    now += 19_000; // The rejection window includes its exact endpoint.
+    sample('saturated', ['rejection']);
+    now += 1;
+    sample('healthy', []);
+    expect(records.filter((item) => item.lane === 'durable')).toHaveLength(7);
+  });
+
   it('logs transitions, rate-limited summaries, and recovery', () => {
     let now = 1_000;
     let state: BackpressureSnapshot['state'] = 'healthy';

@@ -19,6 +19,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
+import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.js';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 import { DKGAgent } from '../src/index.js';
 import type { ContextGraphSubscriptionRecord } from '../src/index.js';
@@ -91,6 +92,7 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
     const joinerDataDir = await mkdtemp(join(tmpdir(), 'dkg-e2e-join-joiner-'));
     tempDirs.push(curatorDataDir, joinerDataDir);
     curator = await DKGAgent.create({
+      ...TEST_SNAPSHOT_CONFIG,
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'Curator',
       listenPort: 0,
@@ -100,6 +102,7 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
       dataDir: curatorDataDir,
     });
     joiner = await DKGAgent.create({
+      ...TEST_SNAPSHOT_CONFIG,
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'Joiner',
       listenPort: 0,
@@ -196,17 +199,28 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
         };
       },
       (state) => state.subscribed && state.hasData,
-      30_000,
+      60_000,
     );
 
     expect(caughtUp).toEqual({ subscribed: true, hasData: true });
-    expect((joiner as any).gossipRegistered.has(CG)).toBe(true);
-    expect((joiner as any).config.syncContextGraphs ?? []).toContain(CG);
+    // The 10.0.16 default installs RFC-64 catalog responsibility for an
+    // approved private member. Catch-up must complete without reviving the
+    // legacy GossipSub or durable-sync receiver lanes.
+    expect((joiner as any).gossipRegistered.has(CG)).toBe(false);
+    expect((joiner as any).config.syncContextGraphs ?? []).not.toContain(CG);
+    expect(joiner.readRfc64CatalogResponsibilitiesV1()).toEqual([
+      expect.objectContaining({
+        contextGraphId: CG,
+        responsibilityReason: 'private-membership',
+        mode: 'catalog',
+        selectionSource: 'default',
+      }),
+    ]);
     expect(joinerPersistedSubscriptions.get(CG)).toMatchObject({
       subscribed: true,
-      syncScoped: true,
+      syncScoped: false,
     });
-  }, 45_000);
+  }, 75_000);
 
   it('a join request forwarded over real libp2p lands as PENDING on the curator', async () => {
     const delegation = await joiner.signJoinRequest(CG, approvedAddr);

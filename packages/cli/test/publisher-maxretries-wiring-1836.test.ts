@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 
 // GH #1836 — regression at the CONFIG→CONSTRUCTION seam. The original bug was
 // that daemon config was not forwarded into the admission-time publisher, so a
@@ -146,7 +147,7 @@ describe('runDaemonInner publisher admission-config wiring (#1836, #2270)', () =
         chainId: 'evm:100',
       },
       ...configOverrides,
-    } as any, Date.now())).rejects.toThrow('after-agent-create');
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('after-agent-create');
     expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
     const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
     closeDashboardDbFromAgentCreateArg(createArg);
@@ -219,7 +220,7 @@ describe('runDaemonInner publisher admission-config wiring (#1836, #2270)', () =
         hubAddress: '0x1234567890123456789012345678901234567890',
         chainId: 'evm:100',
       },
-    } as any, Date.now())).rejects.toThrow('after-publisher-control');
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('after-publisher-control');
 
     closeDashboardDbFromAgentCreateArg(mocks.agentCreate.mock.calls[0]?.[0]);
     expect(mocks.createPublisherControlFromStore).toHaveBeenCalledTimes(1);

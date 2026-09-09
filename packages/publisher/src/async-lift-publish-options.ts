@@ -215,6 +215,9 @@ export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): 
     ...(publishEpochs !== undefined
       ? { publishEpochs }
       : {}),
+    ...(input.request.pricingPolicy !== undefined
+      ? { pricingPolicy: input.request.pricingPolicy }
+      : {}),
     ...(publisherNodeIdentityIdOverride !== undefined
       ? { publisherNodeIdentityIdOverride }
       : {}),

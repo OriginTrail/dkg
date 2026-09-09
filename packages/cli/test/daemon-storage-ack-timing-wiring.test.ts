@@ -15,6 +15,7 @@ import {
   asChangelogReader,
   createManagedOxigraphRuntimeStoreConfigV1,
 } from '@origintrail-official/dkg-storage';
+import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 
 const PRIVATE_RFC64_CONTEXT_GRAPH =
   '0x1111111111111111111111111111111111111111/private-daemon-wiring';
@@ -308,7 +309,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
         receiptTimeoutMs: 1_200_000,
       },
       ...configOverrides,
-    } as any, Date.now())).rejects.toThrow('after-agent-create');
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('after-agent-create');
 
     expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
     const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
@@ -555,7 +556,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
           ],
         },
       },
-    } as any, Date.now())).rejects.toThrow(/policy network differs/u);
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow(/policy network differs/u);
 
     expect(mocks.agentCreate).not.toHaveBeenCalled();
     expect(mocks.chainResetWipe).not.toHaveBeenCalled();
@@ -597,6 +598,35 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     expect(createArg.rfc64PublicCatalogBootstrap).toBeUndefined();
   });
 
+  it('lets unified RFC-64 disable suppress deprecated public selection and runtime controls', async () => {
+    const createArg = await captureCreateArg({
+      contextGraphs: ['ordinary-legacy-sync'],
+      rfc64Catalog: { enabled: false },
+      // The unified gate is authoritative, so even stale deprecated controls
+      // that would be invalid if active must neither extend generic sync nor
+      // reach the agent runtime.
+      rfc64PublicCatalog: {
+        enabled: true,
+        autoPublish: {
+          peers: ['12D3KooIgnoredDeprecatedProvider'],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [
+            rfc64PublicCatalogPolicy('rfc64-deprecated-selection', 'base:84532'),
+          ],
+        },
+      },
+    });
+
+    expect(createArg.syncContextGraphs).toEqual(['ordinary-legacy-sync']);
+    expect(createArg.rfc64CatalogActivation).toEqual({ enabled: false });
+    expect(createArg.rfc64PublicCatalogActivation).toEqual({ enabled: false });
+    expect(createArg.rfc64CatalogDeploymentProfile).toBeUndefined();
+    expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();
+    expect(createArg.rfc64PublicCatalogBootstrap).toBeUndefined();
+  });
+
   it('passes configured StorageACK timing into DKGAgent.create', async () => {
     const createArg = await captureCreateArg({
       storageAck: { handlerDeadlineMs: 55_000, sendTimeoutMs: 60_000 },
@@ -628,7 +658,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       listenPort: 0,
       nodeRole: 'core',
       storageAck: '60000',
-    } as any, Date.now())).rejects.toThrow(/storageAck must be an object/);
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow(/storageAck must be an object/);
 
     expect(mocks.chainResetWipe).not.toHaveBeenCalled();
     expect(mocks.agentCreate).not.toHaveBeenCalled();
@@ -726,7 +756,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
         chainId: 'evm:100',
         receiptTimeoutMs: 1_200_000,
       },
-    } as any, Date.now());
+    } as any, Date.now(), resolveShutdownPolicy(undefined));
 
     await new Promise((resolve) => realSetTimeout(resolve, 0));
     await new Promise((resolve) => realSetTimeout(resolve, 0));

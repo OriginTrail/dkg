@@ -36,6 +36,7 @@ describe('UpdateHandler graph-scoped updates', () => {
   let events: TypedEventBus;
   let chainRoot: Uint8Array;
   let chainRootCount: bigint;
+  let chainVerificationCount: number;
   let handler: UpdateHandler;
   const scope = createGraphKnowledgeAssetScope(UAL, '2');
   const vmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, scope);
@@ -46,15 +47,19 @@ describe('UpdateHandler graph-scoped updates', () => {
     events = new TypedEventBus();
     chainRoot = new Uint8Array(32);
     chainRootCount = 2n;
+    chainVerificationCount = 0;
     const chain = {
       chainId: 'otp:20430',
-      verifyKAUpdate: async () => ({
-        verified: true,
-        onChainMerkleRoot: chainRoot,
-        blockNumber: 20,
-        txIndex: 3,
-        merkleRootCount: chainRootCount,
-      }),
+      verifyKAUpdate: async () => {
+        chainVerificationCount += 1;
+        return {
+          verified: true,
+          onChainMerkleRoot: chainRoot,
+          blockNumber: 20,
+          txIndex: 3,
+          merkleRootCount: chainRootCount,
+        };
+      },
       getKAContextGraphId: async () => 42n,
     } as unknown as ChainAdapter;
     handler = new UpdateHandler(store, chain, events, {
@@ -113,6 +118,25 @@ describe('UpdateHandler graph-scoped updates', () => {
       ...overrides,
     });
   }
+
+  it.each([
+    { label: 'no triples', overrides: { publicTripleCount: 0, privateTripleCount: 0 } },
+    {
+      label: 'an undeclared private root',
+      overrides: {
+        publicTripleCount: 1,
+        privateTripleCount: 0,
+        privateMerkleRoot: new Uint8Array(32),
+      },
+    },
+  ])('rejects a graph-scoped update with $label before chain verification', async ({ overrides }) => {
+    await seedPriorMetadata();
+
+    await handler.handle(message([], [], overrides), 'forwarding-peer');
+
+    expect(chainVerificationCount).toBe(0);
+    expect(await store.countQuads(vmGraph)).toBe(0);
+  });
 
   it('atomically replaces the exact VM graph and preserves KA access metadata', async () => {
     await seedPriorMetadata();

@@ -196,6 +196,7 @@ describe('RFC-64 catalog and SWM ordering', () => {
     harness.installSyncLanes(ordinarySync, selectedSync);
 
     await receiver.start();
+    receiver.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     await catalogStarted;
     harness.allowNetworkAdmission();
     expect(harness.coordinator).toBe(realCoordinator);

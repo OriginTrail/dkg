@@ -32,6 +32,14 @@ const MAX_RFC64_BOOTSTRAP_PROVIDERS_V1 = 8;
 const DEFAULT_RFC64_BOOTSTRAP_RETRY_INTERVAL_MS_V1 = 30_000;
 const MAX_RFC64_BOOTSTRAP_RETRY_INTERVAL_MS_V1 = 3_600_000;
 
+const RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1 = 5 * 60_000;
+/** One policy drives both recurring refresh and operator-visible freshness. */
+export const RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 = Object.freeze({
+  intervalMs: RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1,
+  freshnessIntervalCount: 4,
+  maxConcurrentReads: 4,
+});
+
 /**
  * Detach and validate the additive policy-neutral cold-start manifest.
  *
