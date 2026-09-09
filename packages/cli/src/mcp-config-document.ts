@@ -23,6 +23,28 @@ export type RegistrationEdit =
   | { kind: 'remove' }
   | { kind: 'upsert'; registration: PersistedRegistration };
 
+/** Parsed config objects have named fields; arrays/scalars are never records. */
+export function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object') return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+/** The semantic edit shared by format adapters; the parsed source stays untouched. */
+export function applyRegistrationEditToBody(
+  body: Record<string, unknown>,
+  edit: RegistrationEdit,
+  serverContainer: McpClientConfigShape['serverContainer'],
+): Record<string, unknown> {
+  const current = Object.hasOwn(body, serverContainer) ? body[serverContainer] : {};
+  if (!isPlainRecord(current)) throw new Error('Malformed MCP server container');
+  if (edit.kind === 'remove' && !Object.hasOwn(current, DKG_SERVER_KEY)) return body;
+  const container = { ...current };
+  if (edit.kind === 'remove') delete container[DKG_SERVER_KEY];
+  else container[DKG_SERVER_KEY] = edit.registration;
+  return { ...body, [serverContainer]: container };
+}
+
 export interface McpDocumentEditResult {
   content: string;
   warning?: string;
@@ -33,7 +55,6 @@ export interface McpConfigDocumentAdapter {
   parse(source: string): Record<string, unknown>;
   applyEdit(
     source: string,
-    body: Record<string, unknown>,
     edit: RegistrationEdit,
     serverContainer: McpClientConfigShape['serverContainer'],
   ): McpDocumentEditResult;

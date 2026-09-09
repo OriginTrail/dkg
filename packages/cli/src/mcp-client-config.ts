@@ -5,16 +5,9 @@ import { snapshotMcpConfigSource, writeMcpConfigAtomic, type McpConfigSourceSnap
 import { mcpConfigPersistenceStrategy } from './mcp-config-metadata.js';
 import { tomlDocumentAdapter } from './mcp-toml-document.js';
 import { jsonDocumentAdapter, jsoncDocumentAdapter } from './mcp-json-document.js';
-import type { DesiredRegistration, PersistedRegistration, RegistrationEdit, McpConfigDocumentAdapter } from './mcp-config-document.js';
+import { isPlainRecord, type DesiredRegistration, type PersistedRegistration, type RegistrationEdit, type McpConfigDocumentAdapter } from './mcp-config-document.js';
 export type { DesiredRegistration, PersistedRegistration, RegistrationEdit } from './mcp-config-document.js';
 import { DKG_SERVER_KEY, tildify, type McpConfigEndpoint } from './mcp-client-registry.js';
-
-/** Parsed config objects have named fields; arrays/scalars are never mergeable records. */
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== 'object') return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
 
 export interface McpRegistration {
   command?: string;
@@ -167,11 +160,10 @@ export function readRegisteredServerKeys(target: McpConfigEndpoint): ServerKeyPr
 /** Serialize the inspected source once, then persist through one transaction boundary. */
 function applyRegistrationEdit(
   target: McpConfigEndpoint,
-  body: Record<string, unknown>,
   edit: RegistrationEdit,
   source: McpConfigSourceSnapshot,
 ): void {
-  const result = documentAdapters[target.format].applyEdit(source.content ?? '', body, edit, target.serverContainer);
+  const result = documentAdapters[target.format].applyEdit(source.content ?? '', edit, target.serverContainer);
   if (result.warning) {
     process.stderr.write(`[mcp-config] WARNING: ${target.format.toUpperCase()} config at ${tildify(target.configPath)} ${result.warning}\n`);
   }
@@ -193,8 +185,7 @@ export function removeRegistration(target: McpConfigEndpoint): boolean {
   const body = readConfigBody(target, source);
   const container = readServerContainer(body, target);
   if (container === undefined || !Object.hasOwn(container, DKG_SERVER_KEY)) return false;
-  delete container[DKG_SERVER_KEY];
-  applyRegistrationEdit(target, body, { kind: 'remove' }, source);
+  applyRegistrationEdit(target, { kind: 'remove' }, source);
   return true;
 }
 
@@ -221,7 +212,6 @@ export function writeRegistration(
   // unchanged: arbitrary top-level keys (cwd, restartPolicy, …)
   // and arbitrary env keys (NODE_OPTIONS, HTTPS_PROXY, …).
   const container = readServerContainer(body, target) ?? {};
-  body[target.serverContainer] = container;
   const currentEntry = container[DKG_SERVER_KEY];
   const currentEntryObj = isPlainRecord(currentEntry) ? currentEntry : {};
   const currentEnv = isPlainRecord(currentEntryObj.env) ? currentEntryObj.env : {};
@@ -230,8 +220,7 @@ export function writeRegistration(
     ...entry,
     env: { ...currentEnv, ...entry.env, DKG_HOME: entry.env.DKG_HOME },
   };
-  container[DKG_SERVER_KEY] = mergedEntry;
-  applyRegistrationEdit(target, body, { kind: 'upsert', registration: mergedEntry }, source);
+  applyRegistrationEdit(target, { kind: 'upsert', registration: mergedEntry }, source);
 }
 
 /** Read the owned entry for setup classification; no mutation. */

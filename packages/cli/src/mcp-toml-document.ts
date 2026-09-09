@@ -11,11 +11,16 @@ import {
   type TomlCstNode,
   type ValCstNode,
 } from '@toml-tools/parser';
-import { DKG_SERVER_KEY, type McpClientConfigShape, type McpConfigDocumentAdapter, type McpDocumentEditResult, type PersistedRegistration, type RegistrationEdit } from './mcp-config-document.js';
+import { applyRegistrationEditToBody, DKG_SERVER_KEY, type McpClientConfigShape, type McpConfigDocumentAdapter, type McpDocumentEditResult, type PersistedRegistration, type RegistrationEdit } from './mcp-config-document.js';
 
 export const tomlDocumentAdapter: McpConfigDocumentAdapter = {
-  parse: source => source.trim() ? TOML.parse(source) as Record<string, unknown> : {},
-  applyEdit: (source, body, edit, container) => applyTomlConfigEdit(container, body, edit, source),
+  parse: source => source.trim() ? TOML.parse(source) : {},
+  applyEdit(source, edit, container) {
+    const original = tomlDocumentAdapter.parse(source);
+    const body = applyRegistrationEditToBody(original, edit, container);
+    if (body === original) return { content: source };
+    return applyTomlConfigEdit(container, body, edit, source, original[container]);
+  },
 };
 
 function serialiseTomlEntryOnly(
@@ -226,11 +231,11 @@ function applyTomlConfigEdit(
   body: Record<string, unknown>,
   edit: RegistrationEdit,
   raw: string,
+  rawContainer: unknown,
 ): McpDocumentEditResult {
   const ownedPath = `${serverContainer}.${DKG_SERVER_KEY}`;
   const tableEdit = edit.kind === 'remove' ? edit
     : { kind: 'upsert' as const, block: serialiseTomlEntryOnly(serverContainer, edit.registration) };
-  const rawContainer = raw.trim() ? TOML.parse(raw)[serverContainer] : undefined;
   let patched = replaceTomlTable(
     raw,
     serverContainer,

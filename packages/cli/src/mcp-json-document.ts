@@ -1,18 +1,25 @@
 import { isDeepStrictEqual } from 'node:util';
 import { applyEdits, createScanner, findNodeAtLocation, modify, parse as parseJsonc, parseTree, type Edit, type ParseError } from 'jsonc-parser';
-import { DKG_SERVER_KEY, type McpClientConfigShape, type McpConfigDocumentAdapter, type McpDocumentEditResult, type RegistrationEdit } from './mcp-config-document.js';
+import { applyRegistrationEditToBody, DKG_SERVER_KEY, isPlainRecord, type McpClientConfigShape, type McpConfigDocumentAdapter, type McpDocumentEditResult, type RegistrationEdit } from './mcp-config-document.js';
 
 function jsonAdapter(format: 'json' | 'jsonc'): McpConfigDocumentAdapter {
+  function parse(source: string): Record<string, unknown> {
+    if (!source.trim()) return {};
+    const errors: ParseError[] = [];
+    const parsed: unknown = format === 'jsonc'
+      ? parseJsonc(source, errors, { allowTrailingComma: true }) : JSON.parse(source);
+    if (errors.length > 0) throw new Error('Invalid JSONC');
+    if (!isPlainRecord(parsed)) throw new Error('MCP config root must be an object');
+    return parsed;
+  }
   return {
-    parse(source) {
-      if (!source.trim()) return {};
-      const errors: ParseError[] = [];
-      const parsed = format === 'jsonc'
-        ? parseJsonc(source, errors, { allowTrailingComma: true }) : JSON.parse(source);
-      if (errors.length > 0) throw new Error('Invalid JSONC');
-      return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {};
+    parse,
+    applyEdit(source, edit, container) {
+      const original = parse(source);
+      const body = applyRegistrationEditToBody(original, edit, container);
+      if (body === original) return { content: source };
+      return applyJsonDocumentEdit(format, container, body, edit, source);
     },
-    applyEdit: (source, body, edit, container) => applyJsonDocumentEdit(format, container, body, edit, source),
   };
 }
 
