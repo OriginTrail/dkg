@@ -16,7 +16,7 @@ const SUBGRAPH = 'research';
 
 describe('named-subgraph Shared Memory graph classification', () => {
   it('returns one canonical descriptor for root and named data/meta graphs', () => {
-    const root = describeSharedMemoryGraphs(CG)!;
+    const root = describeSharedMemoryGraphs(CG);
     const named = describeSharedMemoryGraphs(CG, SUBGRAPH)!;
 
     expect(parseSharedMemoryMetaGraph(CG, root.metaGraph)).toEqual(root);

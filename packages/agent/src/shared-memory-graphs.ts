@@ -15,6 +15,13 @@ export interface SharedMemoryGraphDescriptor {
 /** Construct the canonical addressing and ownership tuple for one SWM scope. */
 export function describeSharedMemoryGraphs(
   contextGraphId: string,
+): SharedMemoryGraphDescriptor;
+export function describeSharedMemoryGraphs(
+  contextGraphId: string,
+  subGraphName: string,
+): SharedMemoryGraphDescriptor | undefined;
+export function describeSharedMemoryGraphs(
+  contextGraphId: string,
   subGraphName?: string,
 ): SharedMemoryGraphDescriptor | undefined {
   if (subGraphName !== undefined && !validateSubGraphName(subGraphName).valid) return undefined;
@@ -40,7 +47,7 @@ export function parseSharedMemoryMetaGraph(
   contextGraphId: string,
   graph: string,
 ): SharedMemoryGraphDescriptor | undefined {
-  const root = describeSharedMemoryGraphs(contextGraphId)!;
+  const root = describeSharedMemoryGraphs(contextGraphId);
   if (graph === root.metaGraph) return root;
   const prefix = `did:dkg:context-graph:${contextGraphId}/`;
   const suffix = '/_shared_memory_meta';
@@ -55,7 +62,7 @@ export function parseSharedMemoryDataGraph(
   contextGraphId: string,
   graph: string,
 ): SharedMemoryGraphDescriptor | undefined {
-  const root = describeSharedMemoryGraphs(contextGraphId)!;
+  const root = describeSharedMemoryGraphs(contextGraphId);
   if (graph === root.dataGraph || isSharedMemoryBucketDescendantDataGraph(graph, root.dataGraph)) {
     return root;
   }

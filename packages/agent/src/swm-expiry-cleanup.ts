@@ -339,7 +339,7 @@ async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<s
  * can never be misread as a sub-graph meta graph.
  */
 async function listSharedMemoryMetaGraphs(store: TripleStore, contextGraphId: string): Promise<CleanupTarget[]> {
-  const root = describeSharedMemoryGraphs(contextGraphId)!;
+  const root = describeSharedMemoryGraphs(contextGraphId);
   const cgPrefix = `did:dkg:context-graph:${contextGraphId}/`;
   const targets = [root];
   for (const graph of await listGraphsByPrefix(store, cgPrefix)) {
