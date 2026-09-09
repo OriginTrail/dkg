@@ -3,7 +3,7 @@ import { DKGAgent } from '../src/dkg-agent.js';
 import { Messenger } from '../src/p2p/messenger.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { InMemoryMessageIdempotencyStore, InMemoryProtocolOutboxStore, encodeReliableEnvelope,
-  RELIABLE_ENVELOPE_VERSION, PROTOCOL_MESSAGE, type LegacyProtocolOutboxStore, type ProtocolRouter } from '@origintrail-official/dkg-core';
+  RELIABLE_ENVELOPE_VERSION, PROTOCOL_MESSAGE, PROTOCOL_SWM_UPDATE, DKG_GOSSIP_MAX_MESSAGE_BYTES, DEFAULT_MAX_READ_BYTES, type LegacyProtocolOutboxStore, type ProtocolRouter } from '@origintrail-official/dkg-core';
 
 const peer = '12D3KooWAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const protocol = PROTOCOL_MESSAGE;
@@ -40,7 +40,7 @@ it('holds a byte-bounded page through delivery and skips an oversized head witho
   expect(messenger.getOutboxStats()).toMatchObject({ claimedBytes: 0, queuedEntries: 2, oversizedDueEntries: 1 });
   expect(idempotencyStore.check(peer, protocol, 'b', 'out')).toEqual({ seen: true, cachedResponse: new Uint8Array([42]) });
   await messenger.processOutboxTick(15);
-  expect(messenger.listOutbox().map(entry => entry.messageId)).toEqual(['a']);
+  expect(messenger.listOutboxMetadata().map(entry => entry.messageId)).toEqual(['a']);
   expect(outboxStore.size()).toBe(1);
 });
 
@@ -52,20 +52,21 @@ it('keeps retry updates, summary diagnostics and expiry on metadata-only store m
   vi.spyOn(outboxStore, 'dropExpired').mockImplementation(forbidden);
   vi.spyOn(outboxStore, 'getEntry').mockImplementation(forbidden);
   await messenger.processOutboxTick(15);
-  expect(messenger.listOutbox()).toEqual([{ peer, protocol, messageId: 'entry', payloadBytes: entry.payload.byteLength,
+  expect(messenger.listOutboxMetadata()).toEqual([{ peer, protocol, messageId: 'entry', payloadBytes: entry.payload.byteLength,
     attempts: 2, firstFailureAt: 0, lastAttemptAt: 15, nextAttemptAt: 35, lastError: 'permanent rejection' }]);
   expect(messenger.getOutboxStats()).toMatchObject({ queuedEntries: 1, queuedBytes: entry.payload.byteLength, oldestDueAgeMs: 0 });
   expect(messenger.dropExpiredOutbox(101)).toHaveLength(1);
   expect(messenger.getOutboxStats()).toMatchObject({ queuedEntries: 0, queuedBytes: 0 });
 });
 
-it('loads independently owned payloads only through explicit diagnostic opt-in', () => {
+it('preserves legacy payload inspection and offers metadata-only diagnostics', () => {
   const { messenger, add } = fixture(); const entry = add('entry');
-  expect(messenger.listOutbox()[0]).not.toHaveProperty('payload');
-  const payload = messenger.listOutbox({ includePayload: true })[0]!.payload;
+  expect(messenger.listOutbox()[0].payload).toEqual(entry.payload);
+  expect(messenger.listOutboxMetadata()[0]).not.toHaveProperty('payload');
+  const payload = messenger.listOutbox()[0]!.payload;
   expect(payload).toEqual(entry.payload);
   payload.fill(0);
-  expect(messenger.listOutbox({ includePayload: true })[0]!.payload).toEqual(entry.payload);
+  expect(messenger.listOutbox()[0]!.payload).toEqual(entry.payload);
 });
 
 it('does not resurrect a retry removed while its wire attempt was in flight', async () => {
@@ -89,7 +90,9 @@ it('rejects a legacy store before any unbounded fallback read', () => {
   const store: LegacyProtocolOutboxStore = { enqueue: backing.enqueue.bind(backing), markDelivered: backing.markDelivered.bind(backing),
     hasEntry: backing.hasEntry.bind(backing), pendingFor: forbidden, due: forbidden, dropExpired: forbidden,
     size: backing.size.bind(backing), list: forbidden, getEntry: backing.getEntry.bind(backing) };
-  expect(() => new Messenger({ router: {} as ProtocolRouter, idempotencyStore: new InMemoryMessageIdempotencyStore(), outboxStore: store }))
+  expect(() => new Messenger({ router: {} as ProtocolRouter, idempotencyStore: new InMemoryMessageIdempotencyStore(),
+    // @ts-expect-error JavaScript callers are also rejected before using an unbounded store.
+    outboxStore: store }))
     .toThrow('readDuePage');
   expect(forbidden).not.toHaveBeenCalled();
 });
@@ -105,6 +108,63 @@ it('carries SDK outbox limits into the real Messenger and exposes queue gauges',
     outboxStore.enqueue(peer, protocol, 'entry', envelope('entry'), 'offline', 0);
     expect(agent.getMessengerOutboxStats()).toMatchObject({ batchSize: 3, maxPayloadBytes: 128,
       queuedEntries: 1, queuedBytes: envelope('entry').byteLength, claimedBytes: 0 });
-    expect(agent.listMessageOutbox()[0]).not.toHaveProperty('payload');
+    expect(agent.listMessageOutbox()[0].payload).toEqual(new Uint8Array(envelope('entry')));
+    vi.spyOn(outboxStore, 'list').mockImplementation(() => { throw new Error('metadata diagnostics loaded payloads'); });
+    expect(agent.listMessageOutboxMetadata()[0]).toMatchObject({ messageId: 'entry', payloadBytes: envelope('entry').byteLength });
+    expect(agent.listMessageOutboxMetadata()[0]).not.toHaveProperty('payload');
   } finally { await agent.stop(); }
+});
+
+it('retries a maximum-size SWM application payload with default drain settings', async () => {
+  let now = 0;
+  let online = false;
+  const send = vi.fn(async () => {
+    if (!online) throw new Error('stream reset');
+    return new Uint8Array([42]);
+  });
+  const store = new InMemoryProtocolOutboxStore();
+  const messenger = new Messenger({ router: { send } as unknown as ProtocolRouter,
+    idempotencyStore: new InMemoryMessageIdempotencyStore(), outboxStore: store,
+    clock: () => now, backoffs: [10] });
+  const payload = new Uint8Array(DKG_GOSSIP_MAX_MESSAGE_BYTES);
+  expect(await messenger.sendReliable(peer, PROTOCOL_SWM_UPDATE, payload, { messageId: 'max-swm' }))
+    .toMatchObject({ queued: true });
+  const queued = store.getEntry(peer, PROTOCOL_SWM_UPDATE, 'max-swm')!;
+  expect(queued.payload.byteLength).toBeGreaterThan(payload.byteLength);
+  online = true; now = 10;
+  await messenger.processOutboxTick(now);
+  expect(send).toHaveBeenCalledTimes(2);
+  expect(store.size()).toBe(0);
+});
+
+it('holds only one transport-sized default page when queued payloads exceed that budget', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const send = vi.fn(async () => { await gate; return new Uint8Array(); });
+  const store = new InMemoryProtocolOutboxStore({ backoffs: [10] });
+  const messenger = new Messenger({ router: { send } as unknown as ProtocolRouter,
+    idempotencyStore: new InMemoryMessageIdempotencyStore(), outboxStore: store,
+    clock: () => 10, backoffs: [10] });
+  for (let i = 0; i < 6; i++) {
+    store.enqueue(peer, PROTOCOL_SWM_UPDATE, `max-${i}`, envelope(`max-${i}`, DKG_GOSSIP_MAX_MESSAGE_BYTES), 'offline', 0);
+  }
+  const readPage = vi.spyOn(store, 'readDuePage');
+  const drain = messenger.processOutboxTick(10);
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(readPage).toHaveBeenCalledWith(10, { maxEntries: 100, maxPayloadBytes: DEFAULT_MAX_READ_BYTES });
+    expect(messenger.getOutboxStats()).toMatchObject({ maxPayloadBytes: DEFAULT_MAX_READ_BYTES, claimedEntries: 2, queuedEntries: 6 });
+    expect(messenger.getOutboxStats()!.claimedBytes).toBeGreaterThan(2 * DKG_GOSSIP_MAX_MESSAGE_BYTES);
+    expect(messenger.getOutboxStats()!.claimedBytes).toBeLessThanOrEqual(DEFAULT_MAX_READ_BYTES);
+    expect(send).toHaveBeenCalledTimes(2);
+  } finally { release(); await drain; }
+  expect(store.size()).toBe(4);
+  expect(messenger.getOutboxStats()!.claimedBytes).toBe(0);
+});
+
+it('returns empty diagnostics when Messenger has no durable substrate', () => {
+  const messenger = new Messenger({ router: {} as ProtocolRouter });
+  expect(messenger.listOutbox()).toEqual([]);
+  expect(messenger.listOutboxMetadata()).toEqual([]);
+  expect(messenger.getOutboxStats()).toBeUndefined();
 });

@@ -12,7 +12,7 @@
  *   - **store-backed** — composes any `ProtocolOutboxStore` (in-memory
  *     `InMemoryProtocolOutboxStore` for tests; SQLite-backed
  *     `SqliteProtocolOutboxStore` for the daemon, defined in
- *     `packages/node-ui/src/db.ts`). Adds inflight-lock + backoff +
+ *     `packages/node-ui/src/protocol-outbox-store.ts`). Adds inflight-lock + backoff +
  *     prune logic on top of the raw storage primitive.
  *
  *   - **stale-snapshot-safe** — preserves the `hasEntry` guard from
@@ -160,18 +160,13 @@ function normalizeOutboxStore(store: CompatibleProtocolOutboxStore): ProtocolOut
     pendingFor: legacy.pendingFor.bind(legacy),
   };
   if (legacy.duePage) normalized.duePage = legacy.duePage.bind(legacy);
-  if (legacy.readDuePage) normalized.readDuePage = legacy.readDuePage.bind(legacy);
-  if (legacy.listMetadata) {
-    normalized.listMetadata = legacy.listMetadata.bind(legacy);
-    normalized.hasPendingFor = (peer) => legacy.listMetadata!(peer).length > 0;
-  }
-  if (legacy.dropExpiredMetadata) normalized.dropExpiredMetadata = legacy.dropExpiredMetadata.bind(legacy);
-  if (legacy.recordRetryFailure) normalized.recordRetryFailure = legacy.recordRetryFailure.bind(legacy);
-  if (legacy.queueStats) normalized.queueStats = legacy.queueStats.bind(legacy);
   return normalized;
 }
 
-export class ProtocolOutbox {
+export class ProtocolOutbox<Store extends CompatibleProtocolOutboxStore = CompatibleProtocolOutboxStore> {
+  // Preserve the store type in published declarations so bounded-method this
+  // constraints also reject inspection-only stores in downstream packages.
+  protected readonly inputStore: Store;
   private readonly store: ProtocolOutboxStore;
   private readonly backoffs: readonly number[];
   /**
@@ -190,7 +185,8 @@ export class ProtocolOutbox {
    */
   private readonly inflight = new Set<string>();
 
-  constructor(store: CompatibleProtocolOutboxStore, options: ProtocolOutboxOptions = {}) {
+  constructor(store: Store, options: ProtocolOutboxOptions = {}) {
+    this.inputStore = store;
     const backoffs = options.backoffs ?? DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS;
     if (backoffs.length === 0) {
       throw new Error('ProtocolOutbox: backoffs must be non-empty');
@@ -273,10 +269,12 @@ export class ProtocolOutbox {
   }
 
   /**
-   * Explicit count-limited payload snapshot. Automatic drains use readDuePage
-   * instead. A count request never falls back to loading an unlimited backlog.
+   * Explicit payload snapshot; omitting the limit preserves the all-due API.
+   * Automatic drains use readDuePage instead. A supplied count limit never
+   * falls back to loading an unlimited backlog.
    */
-  duePage(now: number, limit: number): ProtocolOutboxEntry[] {
+  duePage(now: number, limit?: number): ProtocolOutboxEntry[] {
+    if (limit === undefined) return this.due(now);
     const normalizedLimit = normalizeDuePageLimit(limit);
     if (normalizedLimit === 0) return [];
 
@@ -288,39 +286,25 @@ export class ProtocolOutbox {
     return ordered.slice(0, normalizedLimit);
   }
 
-  /** Fail at Messenger construction, before accepting durable sends with an unsafe store. */
-  requireBoundedStore(): void {
-    this.getBoundedStore();
-  }
-
-  private getBoundedStore(): ProtocolOutboxStore & BoundedProtocolOutboxStore {
-    for (const method of ['readDuePage', 'listMetadata', 'dropExpiredMetadata', 'recordRetryFailure', 'queueStats'] as const) {
-      if (typeof this.store[method] !== 'function') {
-        throw new Error(`Custom outbox store must implement ${method} for byte-bounded Messenger retries; payload-snapshot fallback is disabled`);
-      }
-    }
-    return this.store as ProtocolOutboxStore & BoundedProtocolOutboxStore;
-  }
-
-  readDuePage(now: number, budget: ProtocolOutboxPageBudget): ProtocolOutboxPage {
+  readDuePage(this: ProtocolOutbox<BoundedProtocolOutboxStore>, now: number, budget: ProtocolOutboxPageBudget): ProtocolOutboxPage {
     validateProtocolOutboxPageBudget(budget);
-    return this.getBoundedStore().readDuePage(now, budget);
+    return this.inputStore.readDuePage(now, budget);
   }
 
-  listMetadata(peer?: string): ProtocolOutboxMetadata[] {
-    return this.getBoundedStore().listMetadata(peer);
+  listMetadata(this: ProtocolOutbox<BoundedProtocolOutboxStore>, peer?: string): ProtocolOutboxMetadata[] {
+    return this.inputStore.listMetadata(peer);
   }
 
-  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
-    return this.getBoundedStore().dropExpiredMetadata(now);
+  dropExpiredMetadata(this: ProtocolOutbox<BoundedProtocolOutboxStore>, now: number): ProtocolOutboxMetadata[] {
+    return this.inputStore.dropExpiredMetadata(now);
   }
 
-  recordRetryFailure(peer: string, protocol: string, messageId: string, error: string, now: number): ProtocolOutboxMetadata | undefined {
-    return this.getBoundedStore().recordRetryFailure(peer, protocol, messageId, error, now);
+  recordRetryFailure(this: ProtocolOutbox<BoundedProtocolOutboxStore>, peer: string, protocol: string, messageId: string, error: string, now: number): ProtocolOutboxMetadata | undefined {
+    return this.inputStore.recordRetryFailure(peer, protocol, messageId, error, now);
   }
 
-  queueStats(now: number, maxPayloadBytes: number): ProtocolOutboxQueueStats {
-    return this.getBoundedStore().queueStats(now, maxPayloadBytes);
+  queueStats(this: ProtocolOutbox<BoundedProtocolOutboxStore>, now: number, maxPayloadBytes: number): ProtocolOutboxQueueStats {
+    return this.inputStore.queueStats(now, maxPayloadBytes);
   }
 
   hasPendingFor(peer: string): boolean {
@@ -378,13 +362,13 @@ export class ProtocolOutbox {
  * Reference in-memory implementation of `ProtocolOutboxStore`. Used
  * by tests + by the substrate before the SQLite-backed store is
  * wired in `lifecycle.ts` (PR-2). The SQLite-backed implementation
- * lives in `packages/node-ui/src/db.ts` and has the same semantics
+ * lives in `packages/node-ui/src/protocol-outbox-store.ts` and has the same semantics
  * — this class exists as the executable spec for the contract.
  *
  * Implements the same backoff ladder the wrapper `ProtocolOutbox`
  * uses so the test fixture is self-contained.
  */
-export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
+export class InMemoryProtocolOutboxStore implements BoundedProtocolOutboxStore {
   private readonly entries = new Map<string, ProtocolOutboxEntry>();
   private backoffs: readonly number[] = DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS;
   private maxAgeMs = DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS;
@@ -499,7 +483,7 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
       payloadBytes += entry.payload.byteLength;
       entries.push(cloneOutboxEntry(entry));
     }
-    return { entries, payloadBytes, skippedOversizedEntries, byteBudgetExhausted };
+    return { entries, skippedOversizedEntries, byteBudgetExhausted };
   }
 
   listMetadata(peer?: string): ProtocolOutboxMetadata[] {

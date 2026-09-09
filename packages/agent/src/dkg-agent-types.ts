@@ -26,7 +26,7 @@ import type {
   OperationContext,
   AuthorAttestationTypedData,
   DkgNetworkIdentity,
-  CompatibleProtocolOutboxStore,
+  BoundedProtocolOutboxStore,
   MessageIdempotencyStore,
   SwmSenderKeyPackageAckReasonCode,
   ContextGraphJoinPolicyMode as CoreContextGraphJoinPolicyMode,
@@ -1934,7 +1934,7 @@ export interface DKGAgentConfig {
   messengerOutboxDrain?: import('./p2p/outbox-drainer.js').OutboxDrainerOptions;
   messengerStores?: {
     idempotencyStore: MessageIdempotencyStore;
-    outboxStore: CompatibleProtocolOutboxStore;
+    outboxStore: BoundedProtocolOutboxStore;
   };
 }
 

@@ -6,7 +6,7 @@ import {
   RESPONSE_GONE_MARKER,
   isRecoverableSendError,
   ProtocolOutbox,
-  type CompatibleProtocolOutboxStore,
+  type BoundedProtocolOutboxStore,
   type MessageIdempotencyStore,
   type ProtocolOutboxEntry,
   type ProtocolOutboxMetadata,
@@ -142,7 +142,7 @@ export interface MessengerDeps {
    * `ProtocolOutbox` internally (which owns the backoff ladder +
    * inflight guard).
    */
-  outboxStore?: CompatibleProtocolOutboxStore;
+  outboxStore?: BoundedProtocolOutboxStore;
   /**
    * Override the default backoff ladder (5s → 2h, mirrors rc.8 chat
    * outbox). Caller can pass a tighter / looser ladder per Messenger
@@ -384,7 +384,7 @@ export const DEFAULT_SLO_WINDOW_SAMPLES = 1000;
 export class Messenger {
   private readonly router: ProtocolRouter;
   private readonly idempotencyStore?: MessageIdempotencyStore;
-  private readonly outbox?: ProtocolOutbox;
+  private readonly outbox?: ProtocolOutbox<BoundedProtocolOutboxStore>;
   private readonly clock: () => number;
   private readonly resolvePeer?: (peerId: string, opts: { signal: AbortSignal }) => Promise<void>;
   private readonly outboxDrainer?: OutboxDrainer;
@@ -489,6 +489,13 @@ export class Messenger {
     this.router = deps.router;
     this.idempotencyStore = deps.idempotencyStore;
     if (deps.outboxStore) {
+      // Validate JavaScript/custom-store callers once before accepting sends.
+      // Typed callers must supply the complete bounded store contract.
+      for (const method of ['readDuePage', 'listMetadata', 'dropExpiredMetadata', 'recordRetryFailure', 'queueStats', 'hasPendingFor'] as const) {
+        if (typeof deps.outboxStore[method] !== 'function') {
+          throw new Error(`Custom outbox store must implement ${method} for byte-bounded Messenger retries`);
+        }
+      }
       this.outbox = new ProtocolOutbox(deps.outboxStore, {
         backoffs: deps.backoffs,
         maxAgeMs: deps.maxAgeMs,
@@ -498,7 +505,6 @@ export class Messenger {
     this.sloWindowSamples = deps.sloWindowSamples ?? DEFAULT_SLO_WINDOW_SAMPLES;
     this.resolvePeer = deps.resolvePeer;
     if (this.outbox) {
-      this.outbox.requireBoundedStore();
       this.outboxDrainer = new OutboxDrainer(
         (now, budget) => this.outbox!.readDuePage(now, budget),
         (entry) => this.retryOutboxEntry(entry),
@@ -1179,12 +1185,14 @@ export class Messenger {
     return this.outbox?.size() ?? 0;
   }
 
-  /** Diagnostics are metadata-only. Payload snapshots require explicit opt-in. */
-  listOutbox(options?: { includePayload?: false }): ProtocolOutboxMetadata[];
-  listOutbox(options: { includePayload: true }): ProtocolOutboxEntry[];
-  listOutbox(options?: { includePayload?: boolean }): ProtocolOutboxMetadata[] | ProtocolOutboxEntry[] {
-    if (!this.outbox) return [];
-    return options?.includePayload ? this.outbox.list() : this.outbox.listMetadata();
+  /** Explicit legacy payload inspection; operational diagnostics use listOutboxMetadata. */
+  listOutbox(): ProtocolOutboxEntry[] {
+    return this.outbox?.list() ?? [];
+  }
+
+  /** Metadata-only diagnostics never load queued envelopes. */
+  listOutboxMetadata(): ProtocolOutboxMetadata[] {
+    return this.outbox?.listMetadata() ?? [];
   }
 
   /** Fixed-cardinality queue/admission gauges and skip counters for /api/slo. */

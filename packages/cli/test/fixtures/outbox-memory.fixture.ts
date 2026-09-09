@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setImmediate } from 'node:timers/promises';
-import { DashboardDB, SqliteProtocolOutboxStore } from '../../src/db.js';
-import { OutboxDrainer } from '../../../agent/src/p2p/outbox-drainer.js';
+import { DashboardDB, SqliteProtocolOutboxStore } from '@origintrail-official/dkg-node-ui';
+import { OutboxDrainer } from '@origintrail-official/dkg-agent/dist/p2p/outbox-drainer.js';
 
 if (!global.gc) throw new Error('Run the outbox memory fixture with --expose-gc');
 const collect = global.gc;

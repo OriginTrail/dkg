@@ -1,9 +1,11 @@
 import { mapWithConcurrency } from '../map-with-concurrency.js';
-import type { ProtocolOutboxEntry, ProtocolOutboxPage, ProtocolOutboxPageBudget } from '@origintrail-official/dkg-core';
+import { DEFAULT_MAX_READ_BYTES, type ProtocolOutboxEntry, type ProtocolOutboxPage, type ProtocolOutboxPageBudget } from '@origintrail-official/dkg-core';
 
 export const DEFAULT_OUTBOX_DRAIN_BATCH_SIZE = 100;
 export const DEFAULT_OUTBOX_DRAIN_CONCURRENCY = 4;
-export const DEFAULT_OUTBOX_DRAIN_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
+// Retained payloads are encoded reliable envelopes, so allow the complete
+// default transport frame rather than only the SWM application payload.
+export const DEFAULT_OUTBOX_DRAIN_MAX_PAYLOAD_BYTES = DEFAULT_MAX_READ_BYTES;
 
 export interface OutboxDrainerOptions {
   batchSize?: number;
@@ -111,7 +113,7 @@ export class OutboxDrainer {
     const page = this.loadDue(now, { maxEntries: this.options.batchSize, maxPayloadBytes: this.options.maxPayloadBytes });
     const due = page.entries;
     const payloadBytes = due.reduce((sum, entry) => sum + entry.payload.byteLength, 0);
-    if (due.length > this.options.batchSize || payloadBytes > this.options.maxPayloadBytes || payloadBytes !== page.payloadBytes) {
+    if (due.length > this.options.batchSize || payloadBytes > this.options.maxPayloadBytes) {
       throw new Error('Outbox store violated the count or payload-byte page budget');
     }
     if (!Number.isSafeInteger(page.skippedOversizedEntries) || page.skippedOversizedEntries < 0 || typeof page.byteBudgetExhausted !== 'boolean') {

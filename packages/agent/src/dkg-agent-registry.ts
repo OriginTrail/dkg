@@ -82,6 +82,7 @@ import {
   type MessageIdempotencyStore,
   type ProtocolOutboxStore,
   type ProtocolOutboxMetadata,
+  type ProtocolOutboxEntry,
   encryptV10PublishPayload,
   encryptChunked,
   buildCiphertextChunksRoot,
@@ -1832,10 +1833,15 @@ export class AgentRegistryMethods extends DKGAgentBase {
    * protocol so the existing operator surface still talks about
    * "the chat outbox".
    */
-  listMessageOutbox(this: DKGAgent): ProtocolOutboxMetadata[] {
+  listMessageOutbox(this: DKGAgent): ProtocolOutboxEntry[] {
     return this.messenger
       .listOutbox()
       .filter((entry) => entry.protocol === PROTOCOL_MESSAGE);
+  }
+
+  /** Chat retry diagnostics without loading queued envelope payloads. */
+  listMessageOutboxMetadata(this: DKGAgent): ProtocolOutboxMetadata[] {
+    return this.messenger.listOutboxMetadata().filter(entry => entry.protocol === PROTOCOL_MESSAGE);
   }
 
   onChat(this: DKGAgent, handler: ChatHandler): void {

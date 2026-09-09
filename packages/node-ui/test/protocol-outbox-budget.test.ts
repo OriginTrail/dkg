@@ -1,9 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
 import { InMemoryProtocolOutboxStore } from '@origintrail-official/dkg-core';
 import { DashboardDB, SqliteProtocolOutboxStore } from '../src/db.js';
 
@@ -24,13 +22,30 @@ describe('production SQLite byte-bounded outbox', () => {
     const budget = { maxEntries: 100, maxPayloadBytes: 6 };
     const first = sqlite.readDuePage(10, budget);
     expect(first).toEqual(memory.readDuePage(10, budget));
-    expect(first).toMatchObject({ entries: [{ messageId: 'Z' }], payloadBytes: 5, skippedOversizedEntries: 1, byteBudgetExhausted: true });
+    expect(first).toMatchObject({ entries: [{ messageId: 'Z' }], skippedOversizedEntries: 1, byteBudgetExhausted: true });
     sqlite.recordRetryFailure('peer', '/test', 'Z', 'again', 10);
     const second = sqlite.readDuePage(10, budget);
     expect(second.entries.map(entry => entry.messageId)).toEqual(['a', 'Ä', '😀']);
-    expect(second.payloadBytes).toBe(6);
+    expect(second.entries.reduce((bytes, entry) => bytes + entry.payload.byteLength, 0)).toBe(6);
     expect(sqlite.readDuePage(10, { maxEntries: 1, maxPayloadBytes: 6 }).entries).toHaveLength(1);
     expect(sqlite.queueStats(15, 6)).toEqual({ queuedEntries: 5, queuedBytes: 31, oldestDueAgeMs: 5, oversizedDueEntries: 1 });
+  });
+
+  it('loads admitted payloads with a constant query count as the page grows', () => {
+    const store = new SqliteProtocolOutboxStore(db, { backoffFor: () => 10 });
+    for (let i = 0; i < 100; i++) store.enqueue('peer', '/test', String(i).padStart(3, '0'), new Uint8Array(4), 'offline', 0);
+    const prepare = vi.spyOn(db.db, 'prepare');
+    try {
+      const counts: number[] = [];
+      for (const maxEntries of [1, 10, 100]) {
+        prepare.mockClear();
+        const page = store.readDuePage(10, { maxEntries, maxPayloadBytes: 400 });
+        expect(page.entries).toHaveLength(maxEntries);
+        counts.push(prepare.mock.calls.length);
+      }
+      expect(new Set(counts).size).toBe(1);
+      expect(counts[0]).toBeLessThanOrEqual(3);
+    } finally { prepare.mockRestore(); }
   });
 
   it('keeps snapshot bytes isolated and updates retries using only metadata', () => {
@@ -58,15 +73,5 @@ describe('production SQLite byte-bounded outbox', () => {
     expect(new SqliteProtocolOutboxStore(db).readDuePage(10, budget)).toEqual(page);
   });
 
-  it('bounds an actual drain over 512 x 256 KiB rows and a 16 MiB head entry', () => {
-    const result = spawnSync(process.execPath, ['--expose-gc', '--import', import.meta.resolve('tsx/esm'), fileURLToPath(new URL('./fixtures/outbox-memory.fixture.ts', import.meta.url))], { encoding: 'utf8', timeout: 90_000, maxBuffer: 1024 * 1024 });
-    expect(result.status, result.stderr + result.stdout).toBe(0);
-    const line = result.stdout.split('\n').find(text => text.startsWith('OUTBOX_MEMORY_RESULT '));
-    expect(line).toBeDefined();
-    const sample = JSON.parse(line!.slice('OUTBOX_MEMORY_RESULT '.length));
-    expect(sample.rows).toBe(512);
-    expect(sample.rowBytes).toBe(256 * 1024);
-    expect(sample.peakClaimedBytes).toBe(4 * 1024 * 1024);
-    expect(sample.skippedOversizedEntriesTotal).toBe(32);
-  }, 100_000);
+
 });

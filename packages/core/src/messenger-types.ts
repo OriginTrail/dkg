@@ -181,7 +181,6 @@ export interface ProtocolOutboxPageBudget {
 
 export interface ProtocolOutboxPage {
   entries: ProtocolOutboxEntry[];
-  payloadBytes: number;
   skippedOversizedEntries: number;
   byteBudgetExhausted: boolean;
 }
@@ -200,7 +199,7 @@ export interface ProtocolOutboxQueueStats {
  * One Messenger owns a store: pages are snapshots, not multi-consumer leases.
  * Rows survive crashes and are removed only after successful delivery or expiry.
  */
-export interface BoundedProtocolOutboxStore {
+export interface BoundedProtocolOutboxStore extends ProtocolOutboxStore {
   /**
    * Skip rows larger than maxPayloadBytes without loading their payloads;
    * return the longest due prefix that fits both budgets after that filter.
@@ -216,7 +215,7 @@ export interface BoundedProtocolOutboxStore {
   queueStats(now: number, maxPayloadBytes: number): ProtocolOutboxQueueStats;
 }
 
-interface ProtocolOutboxStoreBase extends Partial<BoundedProtocolOutboxStore> {
+interface ProtocolOutboxStoreBase {
   /**
    * Insert or update an outbox entry for `(peer, protocol, messageId)`.
    * First failure creates the entry with `attempts = 1`. Subsequent

@@ -192,8 +192,9 @@ describe('ProtocolOutbox.due / peer presence', () => {
     };
     const outbox = new ProtocolOutbox(legacyStore);
 
+    expect(outbox.duePage(100).map(candidate => candidate.messageId)).toEqual(['z-older-failure', 'a-newer-failure']);
+    expect(outbox.duePage(100, 0)).toEqual([]);
     expect(() => outbox.duePage(100, 1)).toThrow('must implement duePage');
-    expect(() => outbox.requireBoundedStore()).toThrow('must implement readDuePage');
     expect(outbox.due(100).map((candidate) => candidate.messageId))
       .toEqual(['z-older-failure', 'a-newer-failure']);
     expect(outbox.hasPendingFor(PEER_A)).toBe(true);

@@ -327,7 +327,7 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
       expect(immediateSync).not.toHaveBeenCalled();
 
       const pending = await pollUntil(
-        async () => (curator as any).messenger.listOutbox({ includePayload: true })
+        async () => (curator as any).messenger.listOutbox()
           .filter((entry: any) =>
             entry.peer === joiner.peerId && entry.protocol === PROTOCOL_JOIN_REQUEST),
         (entries) => entries.length === 1,

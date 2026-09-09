@@ -5,7 +5,7 @@ import type { ProtocolOutboxPage } from '@origintrail-official/dkg-core';
 function page(ids: (number | string)[], size = 1): ProtocolOutboxPage {
   return {
     entries: ids.map(id => ({ peer: 'peer', protocol: '/test', messageId: String(id), payload: new Uint8Array(size), attempts: 1, firstFailureAt: 0, lastAttemptAt: 0, nextAttemptAt: 0, lastError: 'offline' })),
-    payloadBytes: ids.length * size, skippedOversizedEntries: 0, byteBudgetExhausted: false,
+    skippedOversizedEntries: 0, byteBudgetExhausted: false,
   };
 }
 
@@ -139,7 +139,6 @@ describe('OutboxDrainer', () => {
 
   it.each([
     { name: 'payload sum exceeds budget', loaded: page(['large'], 9) },
-    { name: 'reported bytes differ from payloads', loaded: { ...page(['entry']), payloadBytes: 0 } },
     { name: 'negative oversized outcome', loaded: { ...page(['entry']), skippedOversizedEntries: -1 } },
     { name: 'fractional oversized outcome', loaded: { ...page(['entry']), skippedOversizedEntries: 0.5 } },
   ])('rejects an invalid storage page before sending: $name', async ({ loaded }) => {

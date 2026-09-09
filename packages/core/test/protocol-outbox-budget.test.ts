@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { InMemoryProtocolOutboxStore, ProtocolOutbox } from '../src/protocol-outbox.js';
-import type { LegacyProtocolOutboxStore } from '../src/messenger-types.js';
 
 function fixture() {
   const store = new InMemoryProtocolOutboxStore({ backoffs: [10, 20], maxAgeMs: 100 });
@@ -10,27 +9,12 @@ function fixture() {
 }
 
 describe('byte-bounded outbox access', () => {
-  it('adapts a capable legacy store without using its payload-snapshot presence fallback', () => {
-    const store: LegacyProtocolOutboxStore = new Proxy(new InMemoryProtocolOutboxStore(), {
-      get(target, key, receiver) {
-        if (key === 'hasPendingFor') return undefined;
-        if (key === 'pendingFor') return () => { throw new Error('payload snapshot must not be read'); };
-        return Reflect.get(target, key, receiver);
-      },
-    });
-    const outbox = new ProtocolOutbox(store, { backoffs: [10] });
-    outbox.enqueueFailure('peer', '/test', 'id', new Uint8Array([7]), 'offline', 0);
-    expect(outbox.hasPendingFor('peer')).toBe(true);
-    expect(outbox.hasPendingFor('missing')).toBe(false);
-    expect(outbox.readDuePage(10, { maxEntries: 1, maxPayloadBytes: 1 }).entries[0].payload).toEqual(new Uint8Array([7]));
-  });
-
   it('skips an oversized head and admits later messages within both budgets', () => {
     const { outbox, add } = fixture();
     add('a-large', 9); add('b-small', 3); add('c-small', 5); add('d-next', 1);
     const page = outbox.readDuePage(10, { maxEntries: 2, maxPayloadBytes: 8 });
     expect(page.entries.map(e => e.messageId)).toEqual(['b-small', 'c-small']);
-    expect(page).toMatchObject({ payloadBytes: 8, skippedOversizedEntries: 1 });
+    expect(page).toMatchObject({ skippedOversizedEntries: 1 });
     for (const entry of page.entries) outbox.markDelivered(entry.peer, entry.protocol, entry.messageId);
     expect(outbox.readDuePage(10, { maxEntries: 2, maxPayloadBytes: 8 }).entries.map(e => e.messageId)).toEqual(['d-next']);
     expect(outbox.queueStats(15, 8)).toEqual({ queuedEntries: 2, queuedBytes: 10, oldestDueAgeMs: 5, oversizedDueEntries: 1 });
@@ -40,7 +24,7 @@ describe('byte-bounded outbox access', () => {
   it('retains due-prefix ordering across byte deferral and retry backoff', () => {
     const { outbox, add } = fixture();
     add('a', 5); add('b', 4); add('c', 1);
-    expect(outbox.readDuePage(10, { maxEntries: 100, maxPayloadBytes: 6 })).toMatchObject({ entries: [{ messageId: 'a' }], payloadBytes: 5, byteBudgetExhausted: true });
+    expect(outbox.readDuePage(10, { maxEntries: 100, maxPayloadBytes: 6 })).toMatchObject({ entries: [{ messageId: 'a' }], byteBudgetExhausted: true });
     expect(outbox.recordRetryFailure('peer', '/test', 'a', 'again', 10)).toEqual({ peer: 'peer', protocol: '/test', messageId: 'a', payloadBytes: 5, attempts: 2, firstFailureAt: 0, lastAttemptAt: 10, nextAttemptAt: 30, lastError: 'again' });
     expect(outbox.readDuePage(10, { maxEntries: 100, maxPayloadBytes: 6 }).entries.map(e => e.messageId)).toEqual(['b', 'c']);
   });
