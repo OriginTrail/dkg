@@ -24,7 +24,10 @@ import {
   syncPublicSnapshotsForMeta,
   type PublicSnapshotMetadata,
 } from '../src/sync/requester/shared-memory-sync.js';
-import { createSyncWorkAdmission } from '../src/sync/work-admission.js';
+import {
+  createSyncWorkAdmission,
+  UNRESTRICTED_SYNC_WORK,
+} from '../src/sync/work-admission.js';
 import {
   recoverContextGraphSwm,
 } from '../src/sync/requester/swm-recovery.js';
@@ -139,6 +142,7 @@ describe('syncPublicSnapshotsForMeta', () => {
       remotePeerId: 'peer-source',
       contextGraphId: CG,
       deadline: Number.MAX_SAFE_INTEGER,
+      workAdmission: UNRESTRICTED_SYNC_WORK,
       metaQuads: [
         { subject: snapshotSubject, predicate: `${DKG}publicQuadsDigest`, object: `"${digest}"`, graph: WS_META },
         { subject: snapshotSubject, predicate: `${DKG}publicQuadsCount`, object: `"${expected.length}"^^<${XSD_INTEGER}>`, graph: WS_META },
@@ -207,6 +211,7 @@ describe('syncPublicSnapshotsForMeta', () => {
       // An expired deadline would abandon the tail for an unrelated reason and
       // the row would pass even with the skip reverted.
       deadline: Number.MAX_SAFE_INTEGER,
+      workAdmission: UNRESTRICTED_SYNC_WORK,
       // Digest-only (store-backed) rows: no explicit `dkg:publicSnapshotRef`,
       // so each ref IS its digest. Both rows carry digest AND count — a row
       // missing either is silently dropped from the manifest, which would
@@ -310,6 +315,7 @@ describe('syncPublicSnapshotsForMeta', () => {
         remotePeerId: 'peer-source',
         contextGraphId: CG,
         deadline,
+        workAdmission: createSyncWorkAdmission(() => deadline - Date.now()),
         // Order is load-bearing: the cached ref FIRST, the deferred ref second.
         // The clock is only pushed past the deadline once the first one is
         // resolved, so the walk is forced to stop mid-manifest — which is the

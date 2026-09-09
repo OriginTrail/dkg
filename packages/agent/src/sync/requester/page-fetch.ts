@@ -447,6 +447,7 @@ export class SyncPageAccumulationLimitError extends Error {
 }
 
 interface FetchSyncPagesParams {
+  /** Compatibility entry point only; the stateful implementation requires this. */
   workAdmission?: SyncWorkAdmission;
   ctx: OperationContext;
   remotePeerId: string;
@@ -600,8 +601,9 @@ function checkpointKeyForFetch(params: FetchSyncPagesParams): string {
 }
 
 export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<SyncPageResult> {
-  // Direct callers may omit admission; internal boundaries always receive the
-  // capability composed from their round deadline.
+  // This exported low-level entry point is the deadline-only compatibility
+  // boundary. Every requester above it forwards one already-composed
+  // capability, and the stateful implementation below requires it.
   const admittedParams: AdmittedFetchSyncPagesParams = {
     ...params,
     workAdmission: params.workAdmission ?? composeSyncWorkAdmission({

@@ -43,8 +43,8 @@ import {
 import { insertWithOversizeGuard, type OversizeGuardHooks } from '../oversize-filter.js';
 import {
   PrivateSwmSnapshotWalkRegistry,
-  type PrivateSwmSnapshotWalkCoordinator,
 } from './private-swm-snapshot-walk-registry.js';
+import type { ManifestBoundSnapshotProgress } from './manifest-bound-snapshot-walk.js';
 
 type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0];
 
@@ -137,7 +137,7 @@ export class SwmTargetExecutorV1 {
   #privateSnapshotWalk(
     target: PrivateSwmRecoveryTargetV1,
     orderedManifest: readonly PublicSnapshotMetadata[],
-  ): PrivateSwmSnapshotWalkCoordinator {
+  ): ManifestBoundSnapshotProgress {
     return this.privateSnapshotWalks.open(target, orderedManifest);
   }
 
@@ -191,7 +191,7 @@ export class SwmTargetExecutorV1 {
       getExcludedSubGraphNames: async () => (await admission()).excluded,
       includeRootScope: target.includeRootScope,
       ensureOwnedMap: this.#ports.ensureOwnedMap,
-      snapshotWalkCoordinator: (orderedManifest) => (
+      snapshotWalkProgress: (orderedManifest) => (
         this.#privateSnapshotWalk(target, orderedManifest)
       ),
       logInfo: this.#ports.logInfo,

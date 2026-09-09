@@ -5,7 +5,11 @@ import {
 import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { SwmSnapshotCoverage } from '../../dkg-agent-types.js';
+import type {
+  SharedMemorySyncDiagnostics,
+  SharedMemorySyncResult,
+  SwmSnapshotCoverage,
+} from '../../dkg-agent-types.js';
 import {
   mergeSharedMemoryLocalYield,
   sharedMemoryLocalYield,
@@ -279,6 +283,7 @@ export interface SharedMemoryMetadataFetchRequest {
   readonly contextGraphId: string;
   readonly graphUri: string;
   readonly deadline: number;
+  readonly workAdmission: SyncWorkAdmission;
 }
 
 export interface SharedMemoryMetadataFetchOutcome {
@@ -301,23 +306,11 @@ export interface SnapshotWalkPreparation {
 /** Progress retained against one immutable manifest by a recovery owner. */
 export interface SharedMemorySnapshotWalkContinuation {
   prepare(options: SnapshotWalkPreparation): PublicSnapshotWalkPlan;
-  /** Take an immutable copy of the exact ordered manifest owning the resolved refs below. */
-  orderedManifestSnapshot(): readonly PublicSnapshotMetadata[];
-  /** Query live owner state without exposing its mutable backing collection. */
-  isResolved(ref: string): boolean;
-  resolvedCount(): number;
   /** Take an immutable point-in-time view for reporting or batch setup. */
   resolvedRefsSnapshot(): readonly string[];
   /** Exact verified metadata rows withheld when this ref was resolved. */
   suppressedMetadataRows(ref: string): readonly Quad[];
   markResolved(ref: string, suppressedMetadataRows?: readonly Quad[]): void;
-}
-
-/** Cross-job private continuation whose evidence must be revalidated. */
-export interface RetainedSharedMemorySnapshotWalkContinuation
-  extends SharedMemorySnapshotWalkContinuation {
-  /** Drop retained evidence when current descriptor/store validation fails. */
-  invalidateResolved(ref: string): void;
 }
 
 type PublicSnapshotWalkSource =
@@ -400,6 +393,103 @@ export function selectSwmSnapshotCoverage(
   // to Context Graph iteration order. Deterministic either way, but not
   // because of this comparison.
   return a.peerIdSuffix <= b.peerIdSuffix ? a : b;
+}
+
+/** Canonical zero value for every shared-memory orchestration path. */
+export function emptySharedMemorySyncResult(failedPeers = 0): SharedMemorySyncResult {
+  return {
+    snapshotPlaneIncomplete: 0,
+    insertedTriples: 0,
+    fetchedMetaTriples: 0,
+    fetchedDataTriples: 0,
+    insertedMetaTriples: 0,
+    insertedDataTriples: 0,
+    bytesReceived: 0,
+    resumedPhases: 0,
+    timedOutPhases: 0,
+    completedPhases: 0,
+    checkpointAdvances: 0,
+    emptyResponses: 0,
+    droppedDataTriples: 0,
+    failedPeers,
+    failedPhases: 0,
+    deniedPhases: 0,
+    backoffWorthyFailures: 0,
+    deferredBackpressure: 0,
+    metadataContinuationYields: 0,
+    replayPhaseBytesReceived: 0,
+    snapshotPhaseBytesReceived: 0,
+  };
+}
+
+/**
+ * Canonical diagnostic reduction. Coverage and local-yield records remain
+ * whole, counters add, and same-peer result folds can retain max failure
+ * semantics while fleet-level catch-up diagnostics explicitly sum peers.
+ */
+export function mergeSharedMemorySyncDiagnostics(
+  a: SharedMemorySyncDiagnostics,
+  b: SharedMemorySyncDiagnostics,
+  options: { readonly failedPeers?: 'max' | 'sum' } = {},
+): SharedMemorySyncDiagnostics {
+  type OptionalCounter =
+    | 'backoffWorthyFailures'
+    | 'deferredBackpressure'
+    | 'metadataContinuationYields'
+    | 'continuationPasses'
+    | 'resolvedSnapshotPlaneIncomplete'
+    | 'resolvedMetadataContinuationYields'
+    | 'replayPhaseBytesReceived'
+    | 'snapshotPhaseBytesReceived';
+  const optionalSum = (key: OptionalCounter): number | undefined => {
+    const left = a[key];
+    const right = b[key];
+    return left === undefined && right === undefined
+      ? undefined
+      : (left ?? 0) + (right ?? 0);
+  };
+  const swmCoverage = selectSwmSnapshotCoverage(a.swmCoverage, b.swmCoverage);
+  const backoffWorthyFailures = optionalSum('backoffWorthyFailures');
+  const deferredBackpressure = optionalSum('deferredBackpressure');
+  const metadataContinuationYields = optionalSum('metadataContinuationYields');
+  const continuationPasses = optionalSum('continuationPasses');
+  const resolvedSnapshotPlaneIncomplete = optionalSum('resolvedSnapshotPlaneIncomplete');
+  const resolvedMetadataContinuationYields = optionalSum('resolvedMetadataContinuationYields');
+  const replayPhaseBytesReceived = optionalSum('replayPhaseBytesReceived');
+  const snapshotPhaseBytesReceived = optionalSum('snapshotPhaseBytesReceived');
+  return {
+    localYield: mergeSharedMemoryLocalYield(a.localYield, b.localYield),
+    snapshotPlaneIncomplete: a.snapshotPlaneIncomplete + b.snapshotPlaneIncomplete,
+    fetchedMetaTriples: a.fetchedMetaTriples + b.fetchedMetaTriples,
+    fetchedDataTriples: a.fetchedDataTriples + b.fetchedDataTriples,
+    insertedMetaTriples: a.insertedMetaTriples + b.insertedMetaTriples,
+    insertedDataTriples: a.insertedDataTriples + b.insertedDataTriples,
+    bytesReceived: a.bytesReceived + b.bytesReceived,
+    resumedPhases: a.resumedPhases + b.resumedPhases,
+    timedOutPhases: a.timedOutPhases + b.timedOutPhases,
+    completedPhases: a.completedPhases + b.completedPhases,
+    checkpointAdvances: a.checkpointAdvances + b.checkpointAdvances,
+    emptyResponses: a.emptyResponses + b.emptyResponses,
+    droppedDataTriples: a.droppedDataTriples + b.droppedDataTriples,
+    failedPeers: options.failedPeers === 'sum'
+      ? a.failedPeers + b.failedPeers
+      : Math.max(a.failedPeers, b.failedPeers),
+    failedPhases: a.failedPhases + b.failedPhases,
+    ...(backoffWorthyFailures === undefined ? {} : { backoffWorthyFailures }),
+    ...(deferredBackpressure === undefined ? {} : { deferredBackpressure }),
+    ...(metadataContinuationYields === undefined ? {} : { metadataContinuationYields }),
+    ...(continuationPasses === undefined ? {} : { continuationPasses }),
+    ...(resolvedSnapshotPlaneIncomplete === undefined
+      ? {} : { resolvedSnapshotPlaneIncomplete }),
+    ...(resolvedMetadataContinuationYields === undefined
+      ? {} : { resolvedMetadataContinuationYields }),
+    ...(replayPhaseBytesReceived === undefined ? {} : { replayPhaseBytesReceived }),
+    ...(snapshotPhaseBytesReceived === undefined ? {} : { snapshotPhaseBytesReceived }),
+    ...(swmCoverage ? { swmCoverage } : {}),
+    ...(b.continuationStopReason === undefined && a.continuationStopReason === undefined
+      ? {}
+      : { continuationStopReason: b.continuationStopReason ?? a.continuationStopReason }),
+  };
 }
 
 export interface SharedMemorySyncSnapshotEvidencePolicy {
@@ -551,6 +641,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     phase: SyncPhase,
     graphUri: string,
     deadline: number,
+    workAdmission: SyncWorkAdmission,
   ): Promise<SyncPageResult> => {
     const commonArgs = [
       ctx,
@@ -561,9 +652,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       graphUri,
       deadline,
     ] as const;
-    return recoveryBoundary.signal === undefined
-      ? fetchSyncPages(...commonArgs)
-      : fetchSyncPages(...commonArgs, { signal: recoveryBoundary.signal });
+    return fetchSyncPages(...commonArgs, {
+      workAdmission,
+      ...(recoveryBoundary.signal === undefined ? {} : { signal: recoveryBoundary.signal }),
+    });
   };
 
   const summary: SharedMemorySyncSummary = {
@@ -699,6 +791,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const wsGraph = contextGraphWorkspaceGraphUri(pid);
       const wsMetaGraph = contextGraphWorkspaceMetaGraphUri(pid);
       const deadline = createContextGraphSyncDeadline(contextGraphIds.length - index);
+      const workAdmission = composeSyncWorkAdmission({
+        deadline,
+        scope: { sharing: 'coalescible', key: 'shared-memory-sync' },
+      });
 
       logInfo(ctx, `Syncing shared memory for context graph "${pid}" from ${remotePeerId}`);
 
@@ -710,6 +806,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           contextGraphId: pid,
           graphUri: wsMetaGraph,
           deadline,
+          workAdmission,
         }))
         : {
           result: await recoveryBoundary.read(() => fetchRecoveryPages(
@@ -717,6 +814,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             'meta',
             wsMetaGraph,
             deadline,
+            workAdmission,
           )),
           continuationYielded: false,
         };
@@ -741,6 +839,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         'data',
         wsGraph,
         deadline,
+        workAdmission,
       ));
       peerRespondedForContextGraph = true;
       const fetchDurationMs = Date.now() - fetchStartedAt;
@@ -1305,6 +1404,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         remotePeerId,
         contextGraphId: pid,
         deadline,
+        workAdmission,
         ...(snapshotWalk
           ? { snapshotWalk: snapshotWalk.prepare({ order: 'manifest', canReuseResolved: () => true }) }
           : {
@@ -1616,7 +1716,7 @@ export async function syncPublicSnapshotsForMeta(params: {
   contextGraphId: string;
   deadline: number;
   /** Admission owned by the enclosing operation, shared by cache checks and transport. */
-  workAdmission?: SyncWorkAdmission;
+  workAdmission: SyncWorkAdmission;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   deleteCheckpoint: (key: string) => void;
@@ -1658,10 +1758,7 @@ export async function syncPublicSnapshotsForMeta(params: {
    */
   localYield?: SharedMemoryLocalYield;
 }> {
-  const workAdmission = params.workAdmission ?? composeSyncWorkAdmission({
-    deadline: params.deadline,
-    scope: { sharing: 'coalescible', key: 'public-snapshot-round' },
-  });
+  const workAdmission = params.workAdmission;
   const executionBoundary = params.executionBoundary
     ?? createRecoveryExecutionAdmission();
   executionBoundary.assertCurrent();

@@ -5,7 +5,7 @@ import {
   SelectedManifestBoundSnapshotWalk,
   prepareManifestBoundSnapshotWalk,
 } from '../src/sync/requester/manifest-bound-snapshot-walk.js';
-import { PrivateSwmSnapshotWalkCoordinator } from
+import { preparePrivateSwmSnapshotWalk } from
   '../src/sync/requester/private-swm-snapshot-walk-registry.js';
 import { createSyncWorkAdmission } from '../src/sync/work-admission.js';
 
@@ -101,12 +101,11 @@ describe('private snapshot-walk coordinator', () => {
   it('returns an unresolved-first plan, then revalidates retained refs', async () => {
     const state = progress();
     state.markResolved('a');
-    const coordinator = new PrivateSwmSnapshotWalkCoordinator(state);
     const admission = createSyncWorkAdmission(
       () => 1_000,
       { sharing: 'exclusive', owner: 'private-test' },
     );
-    const unresolved = await coordinator.prepare({
+    const unresolved = await preparePrivateSwmSnapshotWalk(state, {
       workAdmission: admission,
       validateRef: async () => true,
     });
@@ -115,24 +114,23 @@ describe('private snapshot-walk coordinator', () => {
     expect(unresolved.plan.snapshots.map(({ ref }) => ref)).toEqual(['b', 'a']);
     expect(unresolved.plan.reusableRefs.includes('a')).toBe(false);
 
-    coordinator.markResolved('b');
-    const revalidated = await coordinator.prepare({
+    state.markResolved('b');
+    const revalidated = await preparePrivateSwmSnapshotWalk(state, {
       workAdmission: admission,
       validateRef: async ref => ref === 'a',
     });
     expect(revalidated.kind).toBe('prepared');
     if (revalidated.kind !== 'prepared') throw new Error('Expected prepared walk');
     expect(revalidated.plan.reusableRefs.includes('a')).toBe(true);
-    expect(coordinator.isResolved('b')).toBe(false);
+    expect(state.isResolved('b')).toBe(false);
   });
 
   it('returns local yield and invalidates unvalidated retained evidence', async () => {
     const state = progress();
     state.markResolved('a');
     state.markResolved('b');
-    const coordinator = new PrivateSwmSnapshotWalkCoordinator(state);
     let remaining = 1;
-    const result = await coordinator.prepare({
+    const result = await preparePrivateSwmSnapshotWalk(state, {
       workAdmission: createSyncWorkAdmission(
         () => remaining,
         { sharing: 'exclusive', owner: 'bounded-validation' },
@@ -143,7 +141,7 @@ describe('private snapshot-walk coordinator', () => {
       },
     });
     expect(result).toEqual({ kind: 'local-budget-yield', validatedRefs: 1 });
-    expect(coordinator.resolvedCount()).toBe(1);
+    expect(state.resolvedCount()).toBe(1);
   });
 });
 

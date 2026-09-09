@@ -18,6 +18,8 @@ import { generateShareMetadata, workspacePublicQuadsDigest } from '@origintrail-
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import {
   collectPublicSnapshotMetadata,
+  emptySharedMemorySyncResult,
+  mergeSharedMemorySyncDiagnostics,
   runSharedMemorySync,
   selectSwmSnapshotCoverage,
   syncPublicSnapshotsForMeta,
@@ -30,6 +32,7 @@ import {
   type SyncPageResult,
 } from '../src/sync/requester/page-fetch.js';
 import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
+import { UNRESTRICTED_SYNC_WORK } from '../src/sync/work-admission.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -46,6 +49,43 @@ function durableFetchRecorder(
 const ctx = createOperationContext('sync');
 const noop = () => {};
 const EXACT_UAL = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/7';
+
+describe('canonical shared-memory diagnostics reduction', () => {
+  it('adds counters, preserves optionality, selects whole coverage, and makes peer semantics explicit', () => {
+    const largerPartial = {
+      contextGraphId: 'cg-diagnostics', peerIdSuffix: 'peer-a',
+      snapshotsResolved: 2, snapshotsTotal: 3, manifestComplete: true,
+      missingCount: 1, missingSample: ['missing-a'], materializationFailures: 0,
+    };
+    const smallerComplete = {
+      contextGraphId: 'cg-diagnostics', peerIdSuffix: 'peer-b',
+      snapshotsResolved: 2, snapshotsTotal: 2, manifestComplete: true,
+      missingCount: 0, missingSample: [], materializationFailures: 0,
+    };
+    const left = {
+      ...emptySharedMemorySyncResult(1),
+      bytesReceived: 10,
+      backoffWorthyFailures: 2,
+      swmCoverage: largerPartial,
+    };
+    const right = {
+      ...emptySharedMemorySyncResult(2),
+      bytesReceived: 7,
+      metadataContinuationYields: 3,
+      swmCoverage: smallerComplete,
+    };
+
+    expect(mergeSharedMemorySyncDiagnostics(left, right)).toMatchObject({
+      bytesReceived: 17,
+      failedPeers: 2,
+      backoffWorthyFailures: 2,
+      metadataContinuationYields: 3,
+      swmCoverage: largerPartial,
+    });
+    expect(mergeSharedMemorySyncDiagnostics(left, right, { failedPeers: 'sum' }))
+      .toMatchObject({ failedPeers: 3, swmCoverage: largerPartial });
+  });
+});
 
 function pageResult(
   contextGraphId: string,
@@ -136,6 +176,7 @@ describe('selected snapshot walk continuation', () => {
       remotePeerId: 'peer-resume-prefix',
       contextGraphId: 'cg-resume-prefix',
       deadline: Date.now() + 60_000,
+      workAdmission: UNRESTRICTED_SYNC_WORK,
       snapshotWalk: {
         snapshots,
         reusableRefs: [firstDigest],
@@ -193,6 +234,7 @@ describe('selected snapshot walk continuation', () => {
       remotePeerId: 'peer-changed-manifest',
       contextGraphId: 'cg-changed-manifest',
       deadline: Date.now() + 60_000,
+      workAdmission: UNRESTRICTED_SYNC_WORK,
       snapshotWalk: {
         snapshots,
         reusableRefs: [],
@@ -1027,7 +1069,16 @@ describe('sync requester progress accounting', () => {
     expect(summary.deniedPhases).toBe(1);
     expect(summary.failedPeers).toBe(0);
     expect(summary.completedPhases).toBe(2);
-    expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'open-swm', true, 'data', expect.any(String), expect.any(Number)]);
+    expect(fetchSyncPages.calls).toContainEqual([
+      ctx,
+      'peer-a',
+      'open-swm',
+      true,
+      'data',
+      expect.any(String),
+      expect.any(Number),
+      expect.objectContaining({ workAdmission: expect.any(Object) }),
+    ]);
   });
 
   it('counts multiple shared-memory context-graph failures as one failed peer', async () => {
@@ -1064,7 +1115,16 @@ describe('sync requester progress accounting', () => {
     expect(summary.failedPhases).toBe(0);
     expect(summary.deniedPhases).toBe(0);
     expect(summary.completedPhases).toBe(2);
-    expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'open-swm', true, 'data', expect.any(String), expect.any(Number)]);
+    expect(fetchSyncPages.calls).toContainEqual([
+      ctx,
+      'peer-a',
+      'open-swm',
+      true,
+      'data',
+      expect.any(String),
+      expect.any(Number),
+      expect.objectContaining({ workAdmission: expect.any(Object) }),
+    ]);
   });
 
   it('continues shared-memory sync after a post-response verifier failure without marking the peer unreachable', async () => {
@@ -1104,7 +1164,16 @@ describe('sync requester progress accounting', () => {
     expect(summary.failedPeers).toBe(0);
     expect(summary.failedPhases).toBe(1);
     expect(summary.completedPhases).toBe(2);
-    expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'open-swm', true, 'data', expect.any(String), expect.any(Number)]);
+    expect(fetchSyncPages.calls).toContainEqual([
+      ctx,
+      'peer-a',
+      'open-swm',
+      true,
+      'data',
+      expect.any(String),
+      expect.any(Number),
+      expect.objectContaining({ workAdmission: expect.any(Object) }),
+    ]);
   });
 
   it('counts shared-memory snapshot validation failures as phase failures after the peer responded', async () => {
@@ -1171,7 +1240,16 @@ describe('sync requester progress accounting', () => {
     expect(summary.failedPeers).toBe(0);
     expect(summary.failedPhases).toBe(1);
     expect(summary.completedPhases).toBe(2);
-    expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'open-swm', true, 'data', expect.any(String), expect.any(Number)]);
+    expect(fetchSyncPages.calls).toContainEqual([
+      ctx,
+      'peer-a',
+      'open-swm',
+      true,
+      'data',
+      expect.any(String),
+      expect.any(Number),
+      expect.objectContaining({ workAdmission: expect.any(Object) }),
+    ]);
   });
 
   it('counts both clean zero-offset empty shared-memory phases as complete', async () => {

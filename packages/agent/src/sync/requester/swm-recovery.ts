@@ -22,7 +22,8 @@ import {
   syncPublicSnapshotsForMeta,
   type PublicSnapshotMetadata,
 } from './shared-memory-sync.js';
-import type { PrivateSwmSnapshotWalkCoordinator } from './private-swm-snapshot-walk-registry.js';
+import { preparePrivateSwmSnapshotWalk } from './private-swm-snapshot-walk-registry.js';
+import type { ManifestBoundSnapshotProgress } from './manifest-bound-snapshot-walk.js';
 import { appendInPlace } from '../append-in-place.js';
 import {
   discoverSwmRecoverySubGraphNames,
@@ -154,9 +155,9 @@ export interface RecoverContextGraphSwmDeps {
    */
   readonly snapshotMaterializer: SharedMemorySnapshotMaterializer;
   /** Manifest-bound progress retained by the owning private recovery executor. */
-  readonly snapshotWalkCoordinator?: (
+  readonly snapshotWalkProgress?: (
     orderedManifest: readonly PublicSnapshotMetadata[],
-  ) => PrivateSwmSnapshotWalkCoordinator;
+  ) => ManifestBoundSnapshotProgress;
   readonly ensureContextGraph: (contextGraphId: string) => Promise<void>;
   readonly setCheckpoint: (key: string, offset: number) => void;
   readonly deleteCheckpoint: (key: string) => void;
@@ -440,7 +441,7 @@ async function recoverContextGraphSwmUnlocked(
   let snapshotProgress: Pick<RecoverContextGraphSwmResult, 'readySnapshots' | 'totalSnapshots' | 'cumulativeResolvedSnapshots'> = {
     readySnapshots: 0, totalSnapshots: 0,
   };
-  let snapshotWalkCoordinator: PrivateSwmSnapshotWalkCoordinator | undefined;
+  let snapshotWalkProgress: ManifestBoundSnapshotProgress | undefined;
   const incrementallyReadyGraphs = new Set<string>();
   /** Graph keys whose ASSERTION GRAPH was actually (re)written this run. */
   const rewrittenGraphKeys = new Set<string>();
@@ -527,9 +528,9 @@ async function recoverContextGraphSwmUnlocked(
       ...descriptor.metadataQuads,
     ]);
     const orderedManifest = collectPublicSnapshotMetadata(activeGraphMeta);
-    snapshotWalkCoordinator = deps.snapshotWalkCoordinator?.(orderedManifest);
-    const privatePreparation = snapshotWalkCoordinator
-      ? await snapshotWalkCoordinator.prepare({
+    snapshotWalkProgress = deps.snapshotWalkProgress?.(orderedManifest);
+    const privatePreparation = snapshotWalkProgress
+      ? await preparePrivateSwmSnapshotWalk(snapshotWalkProgress, {
         workAdmission: deps.workAdmission,
         validateRef: async (resolvedRef) => {
           const descriptors = snapshotDescriptorsByRef.get(resolvedRef) ?? [];
@@ -558,7 +559,7 @@ async function recoverContextGraphSwmUnlocked(
         insertedMetaQuads: 0,
         droppedDataTriples: 0,
         readySnapshots: privatePreparation.validatedRefs,
-        cumulativeResolvedSnapshots: snapshotWalkCoordinator?.resolvedCount(),
+        cumulativeResolvedSnapshots: snapshotWalkProgress?.resolvedCount(),
         totalSnapshots: orderedManifest.length,
         completed: false,
       };
@@ -582,13 +583,13 @@ async function recoverContextGraphSwmUnlocked(
       executionBoundary: boundary,
       onSnapshotReady: async (snapshot) => {
         await materializeReadySnapshot(snapshot.ref);
-        snapshotWalkCoordinator?.markResolved(snapshot.ref);
+        snapshotWalkProgress?.markResolved(snapshot.ref);
       },
     });
     snapshotProgress = {
       readySnapshots: snapshotSync.readySnapshots,
-      ...(snapshotWalkCoordinator
-        ? { cumulativeResolvedSnapshots: snapshotWalkCoordinator.resolvedCount() }
+      ...(snapshotWalkProgress
+        ? { cumulativeResolvedSnapshots: snapshotWalkProgress.resolvedCount() }
         : {}),
       totalSnapshots: snapshotSync.totalSnapshots,
     };
@@ -671,7 +672,7 @@ async function recoverContextGraphSwmUnlocked(
   for (const descriptor of graphScopedDescriptors) {
     const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
     const retainedReady = descriptor.publicSnapshotRef !== undefined
-      && snapshotWalkCoordinator?.isResolved(descriptor.publicSnapshotRef) === true;
+      && snapshotWalkProgress?.isResolved(descriptor.publicSnapshotRef) === true;
     if (incrementallyReadyGraphs.has(graphKey) || retainedReady) {
       graphAssets.push(Object.freeze({
         descriptor,

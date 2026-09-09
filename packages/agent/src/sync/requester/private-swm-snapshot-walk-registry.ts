@@ -27,67 +27,42 @@ export type PrivateSwmSnapshotWalkPreparation =
     readonly validatedRefs: number;
   };
 
-/** Private retained-walk policy composed over the narrow manifest progress core. */
-export class PrivateSwmSnapshotWalkCoordinator {
-  constructor(readonly progress: ManifestBoundSnapshotProgress) {}
-
-  matches(manifest: readonly PublicSnapshotMetadata[]): boolean {
-    return this.progress.matches(manifest);
-  }
-
-  get expiresAtMs(): number {
-    return this.progress.expiresAtMs;
-  }
-
-  isResolved(ref: string): boolean {
-    return this.progress.isResolved(ref);
-  }
-
-  resolvedCount(): number {
-    return this.progress.resolvedCount();
-  }
-
-  markResolved(ref: string): void {
-    this.progress.markResolved(ref);
-  }
-
-  /**
-   * Own private-only retained validation and unresolved-first preparation.
-   * A caller receives either one usable plan or a fail-closed local yield.
-   */
-  async prepare(options: {
+/** Prepare private retained progress without introducing a forwarding owner. */
+export async function preparePrivateSwmSnapshotWalk(
+  progress: ManifestBoundSnapshotProgress,
+  options: {
     readonly workAdmission: SyncWorkAdmission;
     readonly validateRef: (ref: string) => Promise<boolean>;
-  }): Promise<PrivateSwmSnapshotWalkPreparation> {
-    const manifest = this.progress.orderedManifestSnapshot();
-    const hasUnresolved = manifest.some(({ ref }) => !this.progress.isResolved(ref));
-    const validatedRefs = new Set<string>();
-    if (!hasUnresolved) {
-      const retainedRefs = this.progress.resolvedRefsSnapshot();
-      for (const [index, ref] of retainedRefs.entries()) {
-        if (!options.workAdmission.canAdmitWork()) {
-          for (const unvalidatedRef of retainedRefs.slice(index)) {
-            this.progress.invalidateResolved(unvalidatedRef);
-          }
-          return { kind: 'local-budget-yield', validatedRefs: validatedRefs.size };
+  },
+): Promise<PrivateSwmSnapshotWalkPreparation> {
+  const manifest = progress.orderedManifestSnapshot();
+  const hasUnresolved = manifest.some(({ ref }) => !progress.isResolved(ref));
+  const validatedRefs = new Set<string>();
+  if (!hasUnresolved) {
+    const retainedRefs = progress.resolvedRefsSnapshot();
+    for (const [index, ref] of retainedRefs.entries()) {
+      if (!options.workAdmission.canAdmitWork()) {
+        for (const unvalidatedRef of retainedRefs.slice(index)) {
+          progress.invalidateResolved(unvalidatedRef);
         }
-        if (await options.validateRef(ref)) validatedRefs.add(ref);
-        else this.progress.invalidateResolved(ref);
+        return { kind: 'local-budget-yield', validatedRefs: validatedRefs.size };
       }
+      if (await options.validateRef(ref)) validatedRefs.add(ref);
+      else progress.invalidateResolved(ref);
     }
-    return {
-      kind: 'prepared',
-      validatedRefs: validatedRefs.size,
-      plan: prepareManifestBoundSnapshotWalk(this.progress, {
-        order: 'unresolved-first',
-        canReuseResolved: ref => validatedRefs.has(ref),
-      }),
-    };
   }
+  return {
+    kind: 'prepared',
+    validatedRefs: validatedRefs.size,
+    plan: prepareManifestBoundSnapshotWalk(progress, {
+      order: 'unresolved-first',
+      canReuseResolved: ref => validatedRefs.has(ref),
+    }),
+  };
 }
 
 interface RetainedPrivateSnapshotWalk {
-  readonly coordinator: PrivateSwmSnapshotWalkCoordinator;
+  readonly progress: ManifestBoundSnapshotProgress;
 }
 
 const DEFAULT_MAX_RETAINED_PRIVATE_SNAPSHOT_WALKS = 256;
@@ -121,24 +96,22 @@ export class PrivateSwmSnapshotWalkRegistry {
   open(
     owner: PrivateSwmSnapshotWalkOwner,
     orderedManifest: readonly PublicSnapshotMetadata[],
-  ): PrivateSwmSnapshotWalkCoordinator {
+  ): ManifestBoundSnapshotProgress {
     this.#pruneExpired();
     const ownerKey = privateSnapshotWalkOwnerKey(owner);
     const retained = this.#walks.get(ownerKey);
-    if (retained?.coordinator.matches(orderedManifest)) return retained.coordinator;
+    if (retained?.progress.matches(orderedManifest)) return retained.progress;
     if (retained) this.#walks.delete(ownerKey);
 
-    const coordinator = new PrivateSwmSnapshotWalkCoordinator(
-      new ManifestBoundSnapshotProgress(orderedManifest, {
-        now: this.#now,
-        retentionTtlMs: this.#retentionTtlMs,
-      }),
-    );
+    const progress = new ManifestBoundSnapshotProgress(orderedManifest, {
+      now: this.#now,
+      retentionTtlMs: this.#retentionTtlMs,
+    });
     if (orderedManifest.length === 0 || this.#walks.size >= this.#maxTargets) {
-      return coordinator;
+      return progress;
     }
-    this.#walks.set(ownerKey, { coordinator });
-    return coordinator;
+    this.#walks.set(ownerKey, { progress });
+    return progress;
   }
 
   release(owner: PrivateSwmSnapshotWalkOwner): void {
@@ -153,7 +126,7 @@ export class PrivateSwmSnapshotWalkRegistry {
   #pruneExpired(): void {
     const now = this.#now();
     for (const [ownerKey, retained] of this.#walks) {
-      if (retained.coordinator.expiresAtMs <= now) this.#walks.delete(ownerKey);
+      if (retained.progress.expiresAtMs <= now) this.#walks.delete(ownerKey);
     }
   }
 }

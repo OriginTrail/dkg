@@ -6,7 +6,6 @@ import type { DKGAgent } from '../src/index.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import type { SwmTargetExecutorPortsV1 } from '../src/sync/requester/swm-target-executor.js';
 import {
-  PrivateSwmSnapshotWalkCoordinator,
   PrivateSwmSnapshotWalkRegistry,
 } from
   '../src/sync/requester/private-swm-snapshot-walk-registry.js';
@@ -195,12 +194,10 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     const meta = fixtures.flatMap(({ metadata }) => metadata);
     const manifest = collectPublicSnapshotMetadata(meta);
     const owner = { contextGraphId: CG, remotePeerId: 'peer-source' };
-    const retained = new PrivateSwmSnapshotWalkCoordinator(
-      new ManifestBoundSnapshotProgress(manifest, {
-        now: Date.now,
-        retentionTtlMs: 60_000,
-      }),
-    );
+    const retained = new ManifestBoundSnapshotProgress(manifest, {
+      now: Date.now,
+      retentionTtlMs: 60_000,
+    });
     for (const { ref } of manifest) retained.markResolved(ref);
 
     let canAdmit = true;
@@ -235,7 +232,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
       snapshotMaterializer: {
         isGraphAssetMaterialized,
       } as unknown as SharedMemorySnapshotMaterializer,
-      snapshotWalkCoordinator: () => retained,
+      snapshotWalkProgress: () => retained,
       store,
       replaceMetaForRoots: async () => undefined,
       replaceMetaForGraphAssets: async () => undefined,

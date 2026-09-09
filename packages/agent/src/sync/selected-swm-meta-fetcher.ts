@@ -16,6 +16,7 @@ import type {
   SharedMemoryMetadataFetcher,
 } from './requester/shared-memory-sync.js';
 import type { SelectedSwmMetaRetentionLease } from './selected-swm-meta-budget.js';
+import type { SyncWorkAdmission } from './work-admission.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from './durable-session.js';
 import {
   SelectedManifestBoundSnapshotWalk,
@@ -224,6 +225,7 @@ interface SelectedMetaPageFetchRequest {
   readonly contextGraphId: string;
   readonly graphUri: string;
   readonly deadline: number;
+  readonly workAdmission: SyncWorkAdmission;
   readonly returnAcceptedPrefixOnRetryableTransportFailure: true;
   readonly requesterScope: SelectedSwmMetaRetentionScope;
   readonly maxAcceptedQuads: number;

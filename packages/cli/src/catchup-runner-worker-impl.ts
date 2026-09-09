@@ -8,12 +8,12 @@ import {
   classifyDurableProgress,
   classifySharedMemoryFreshness,
   createFailedPeerDurableSyncResult,
+  emptySharedMemorySyncResult,
   mapWithConcurrency,
-  mergeSharedMemoryLocalYield,
+  mergeSharedMemorySyncDiagnostics,
   resolveSwmCatchupPassConfig,
   runCatchupPlaneWithPolicy,
   runCatchupPlanesWithPolicy,
-  selectSwmSnapshotCoverage,
   type CatchupPlaneContext,
   type DurableProgressClassification,
   type DurableSyncResult,
@@ -206,32 +206,8 @@ function describeCoverage(coverage: SwmSnapshotCoverage | undefined): string {
 }
 
 function emptyShared(): SharedMemorySyncResult {
-  return {
-    snapshotPlaneIncomplete: 0,
-    insertedTriples: 0,
-    fetchedMetaTriples: 0,
-    fetchedDataTriples: 0,
-    insertedMetaTriples: 0,
-    insertedDataTriples: 0,
-    bytesReceived: 0,
-    resumedPhases: 0,
-    timedOutPhases: 0,
-    completedPhases: 0,
-    checkpointAdvances: 0,
-    emptyResponses: 0,
-    droppedDataTriples: 0,
-    failedPeers: 1,
-    failedPhases: 0,
-    deniedPhases: 0,
-    deferredBackpressure: 0,
-    replayPhaseBytesReceived: 0,
-    snapshotPhaseBytesReceived: 0,
-    // `swmCoverage` stays ABSENT here on purpose. This is the fallback for a
-    // peer whose round threw, so it has no manifest to report; a fabricated
-    // `0/0` would be a record the reduction could select and Chunk 5 could
-    // print. Absent and `0/0` both read as "not capable", but only absent is
-    // honest.
-  };
+  // Coverage stays absent: a peer whose round threw reported no manifest.
+  return emptySharedMemorySyncResult(1);
 }
 
 async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult> {
@@ -629,29 +605,29 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
 
     if (shared) {
       sharedMemorySynced += shared.insertedDataTriples ?? 0;
-      diagnostics.sharedMemory.fetchedMetaTriples += shared.fetchedMetaTriples;
-      diagnostics.sharedMemory.fetchedDataTriples += shared.fetchedDataTriples;
-      diagnostics.sharedMemory.insertedMetaTriples += shared.insertedMetaTriples;
-      diagnostics.sharedMemory.insertedDataTriples += shared.insertedDataTriples;
-      diagnostics.sharedMemory.bytesReceived += shared.bytesReceived;
-      diagnostics.sharedMemory.resumedPhases += shared.resumedPhases;
-      diagnostics.sharedMemory.timedOutPhases += shared.timedOutPhases ?? 0;
-      diagnostics.sharedMemory.completedPhases += shared.completedPhases ?? 0;
-      diagnostics.sharedMemory.checkpointAdvances += shared.checkpointAdvances ?? 0;
-      diagnostics.sharedMemory.emptyResponses += shared.emptyResponses;
-      diagnostics.sharedMemory.droppedDataTriples += shared.droppedDataTriples;
-      diagnostics.sharedMemory.failedPeers += shared.failedPeers;
-      diagnostics.sharedMemory.failedPhases += shared.failedPhases ?? 0;
-      diagnostics.sharedMemory.deferredBackpressure += shared.deferredBackpressure ?? 0;
-      diagnostics.sharedMemory.localYield = mergeSharedMemoryLocalYield(
-        diagnostics.sharedMemory.localYield,
-        shared.localYield,
+      const sharedForDiagnostics = shared.swmCoverage
+        ? {
+          ...shared,
+          swmCoverage: {
+            ...shared.swmCoverage,
+            fromAuthority: fromSharedMemoryAuthority,
+          },
+        }
+        : shared;
+      const mergedSharedMemoryDiagnostics = mergeSharedMemorySyncDiagnostics(
+        diagnostics.sharedMemory,
+        sharedForDiagnostics,
+        { failedPeers: 'sum' },
       );
-      diagnostics.sharedMemory.snapshotPlaneIncomplete =
-        (diagnostics.sharedMemory.snapshotPlaneIncomplete ?? 0)
-        + (shared.snapshotPlaneIncomplete ?? 0);
-      diagnostics.sharedMemory.replayPhaseBytesReceived += shared.replayPhaseBytesReceived ?? 0;
-      diagnostics.sharedMemory.snapshotPhaseBytesReceived += shared.snapshotPhaseBytesReceived ?? 0;
+      diagnostics.sharedMemory = {
+        ...mergedSharedMemoryDiagnostics,
+        deferredBackpressure: mergedSharedMemoryDiagnostics.deferredBackpressure ?? 0,
+        continuationPasses: mergedSharedMemoryDiagnostics.continuationPasses ?? 0,
+        replayPhaseBytesReceived:
+          mergedSharedMemoryDiagnostics.replayPhaseBytesReceived ?? 0,
+        snapshotPhaseBytesReceived:
+          mergedSharedMemoryDiagnostics.snapshotPhaseBytesReceived ?? 0,
+      };
       // The DIAGNOSTIC above counts every deferral, including continuation
       // ones — that is the honest observability number. The JOB-LEVEL scalar
       // below must not, and the reason is a behaviour change rather than a
@@ -675,18 +651,6 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       // edge case.
       if (!isContinuationRound) {
         deferredBackpressure += shared.deferredBackpressure ?? 0;
-      }
-      // Coverage is the one field here that is SELECTED, not summed. Summing —
-      // or taking independent maxima over resolved and total — would let a peer
-      // reporting 178/250 and a peer reporting 200/200 combine into 200/250: a
-      // graph state no peer described, carrying a missing sample from neither.
-      // `fromAuthority` is attached here because peer roles are the walk's
-      // knowledge, not the agent-side sync's.
-      if (shared.swmCoverage) {
-        diagnostics.sharedMemory.swmCoverage = selectSwmSnapshotCoverage(
-          diagnostics.sharedMemory.swmCoverage,
-          { ...shared.swmCoverage, fromAuthority: fromSharedMemoryAuthority },
-        );
       }
       diagnostics.sharedMemory.deniedPhases =
         (diagnostics.sharedMemory.deniedPhases ?? 0) + (shared.deniedPhases ?? 0);
