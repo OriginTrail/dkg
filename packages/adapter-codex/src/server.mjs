@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { readFileSync, createReadStream, statSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, createReadStream, statSync, existsSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
 import { resolve, join, extname, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -40,7 +40,13 @@ export function readJson(req, limit = 1_000_000) {
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2', '.json': 'application/json' };
 
-export function createServer({ bridge, uiDir, port = 9210, dkgPort = 9200, dkgHome, sessionToken = randomBytes(32).toString('hex'), nativeMemory, hookToken }) {
+function bootstrapPage() {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DKG Codex</title></head><body><p id="status">Authorizing DKG Codex...</p><script>
+(async()=>{const status=document.getElementById('status');let token='';try{token=decodeURIComponent(location.hash.slice(1))}catch{}history.replaceState(null,'','/ui/codex');if(!token){status.textContent='Owner authorization is required. Reopen this page using the startup instructions from the DKG Codex service.';return}try{const response=await fetch('/api/codex/session',{method:'POST',credentials:'same-origin',headers:{'X-DKG-Codex':'1','X-DKG-Codex-Bootstrap':token}});if(!response.ok)throw new Error();location.reload()}catch{status.textContent='Authorization failed. Reopen this page using the startup instructions from the DKG Codex service.'}})();
+</script></body></html>`;
+}
+
+export function createServer({ bridge, uiDir, port = 9210, dkgPort = 9200, dkgHome, sessionToken = randomBytes(32).toString('hex'), bootstrapToken, nativeMemory, hookToken }) {
   const json = (res, status, value) => {
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify(value));
@@ -52,8 +58,16 @@ export function createServer({ bridge, uiDir, port = 9210, dkgPort = 9200, dkgHo
     if (!validOrigin(req, port)) return json(res, 403, { error: 'Only the local DKG UI may access this bridge.' });
     const url = new URL(req.url, `http://${req.headers.host}`);
     const path = url.pathname;
+    const cookie = (req.headers.cookie || '').split(';').map((s) => s.trim()).find((s) => s.startsWith('dkg_codex='))?.slice(10);
     try {
       if (req.method === 'GET' && path === '/') { res.writeHead(302, { Location: '/ui/codex' }); return res.end(); }
+      if (path === '/api/codex/session' && req.method === 'POST') {
+        if (req.headers['x-dkg-codex'] !== '1' || !bootstrapToken || !equal(req.headers['x-dkg-codex-bootstrap'], bootstrapToken)) {
+          throw HTTP_ERROR(401, 'Owner authorization is required.');
+        }
+        res.setHeader('Set-Cookie', `dkg_codex=${sessionToken}; HttpOnly; SameSite=Strict; Path=/`);
+        return json(res, 200, { ok: true });
+      }
       if (path === '/ui' || path.startsWith('/ui/')) {
         if (req.method !== 'GET' && req.method !== 'HEAD') throw HTTP_ERROR(405, 'Method not allowed.');
         const suffix = decodeURIComponent(path.slice('/ui/'.length));
@@ -67,7 +81,10 @@ export function createServer({ bridge, uiDir, port = 9210, dkgPort = 9200, dkgHo
         res.setHeader('Content-Type', MIME[extname(file)] || 'application/octet-stream');
         if (extname(file) === '.html') {
           res.setHeader('Cache-Control', 'no-store');
-          res.setHeader('Set-Cookie', `dkg_codex=${sessionToken}; HttpOnly; SameSite=Strict; Path=/`);
+          if (!equal(cookie, sessionToken)) {
+            res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'unsafe-inline'; connect-src 'self'; style-src 'unsafe-inline'");
+            return res.end(req.method === 'HEAD' ? undefined : bootstrapPage());
+          }
           const html = readFileSync(file, 'utf8').replace('</head>', '<script>window.__DKG_CODEX__=true;</script></head>');
           return res.end(req.method === 'HEAD' ? undefined : html);
         }
@@ -79,7 +96,6 @@ export function createServer({ bridge, uiDir, port = 9210, dkgPort = 9200, dkgHo
         if (!nativeMemory || !hookToken || !equal(req.headers.authorization, `Bearer ${hookToken}`)) throw HTTP_ERROR(401, 'Local memory hook authentication required.');
         return json(res, 200, await nativeMemory.handle(await readJson(req, 3000000)));
       }
-      const cookie = (req.headers.cookie || '').split(';').map((s) => s.trim()).find((s) => s.startsWith('dkg_codex='))?.slice(10);
       if (!equal(cookie, sessionToken)) throw HTTP_ERROR(401, 'Open the DKG UI to connect.');
       if (path.startsWith('/api/codex/')) {
         if (req.method === 'POST' && req.headers['x-dkg-codex'] !== '1') throw HTTP_ERROR(403, 'Missing UI request header.');
@@ -147,7 +163,8 @@ export function createServer({ bridge, uiDir, port = 9210, dkgPort = 9200, dkgHo
         const upstream = http.request({ hostname: '127.0.0.1', port: dkgPort, path: req.url,
           method: req.method, headers }, (response) => {
           const out = { ...response.headers };
-          delete out['access-control-allow-origin']; delete out['set-cookie'];
+          for (const header of Object.keys(out)) if (header.startsWith('access-control-')) delete out[header];
+          delete out['set-cookie'];
           res.writeHead(response.statusCode, out); response.pipe(res);
         });
         upstream.on('error', () => { if (!res.headersSent) json(res, 502, { error: 'The DKG node is unavailable.' }); else res.destroy(); });
@@ -171,9 +188,15 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const dkgHome = config.dkgHome || join(homedir(), '.dkg');
   const stateDir = config.stateDir || join(dkgHome, 'codex');
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  chmodSync(stateDir, 0o700);
   const tokenPath = join(stateDir, 'memory-hook.token');
   if (!existsSync(tokenPath)) writeFileSync(tokenPath, randomBytes(32).toString('hex'), { mode: 0o600 });
+  chmodSync(tokenPath, 0o600);
   const hookToken = readFileSync(tokenPath, 'utf8').trim();
+  const bootstrapTokenPath = join(stateDir, 'ui-bootstrap.token');
+  if (!existsSync(bootstrapTokenPath)) writeFileSync(bootstrapTokenPath, randomBytes(32).toString('hex'), { mode: 0o600 });
+  chmodSync(bootstrapTokenPath, 0o600);
+  const bootstrapToken = readFileSync(bootstrapTokenPath, 'utf8').trim();
   const memory = new DkgMemory({ stateDir, dkgHome, dkgPort: config.dkgPort || 9200, defaults: config.memory || {} });
   const nativeMemory = new NativeMemory(memory);
   const rpc = new CodexRpc({ binary: config.codexBinary || 'codex', args: config.codexArgs || ['-c', 'experimental_thread_store={type="local"}', 'app-server'], cwd: config.defaultCwd || homedir(),
@@ -185,11 +208,14 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       startup_timeout_sec: 30, tool_timeout_sec: 300 },
   };
   const server = createServer({ bridge, dkgHome, port: config.port || 9210,
-    dkgPort: config.dkgPort || 9200, uiDir: config.uiDir || resolve(packageDir, '../node-ui/dist-ui'), nativeMemory, hookToken });
+    dkgPort: config.dkgPort || 9200, uiDir: config.uiDir || resolve(packageDir, '../node-ui/dist-ui'), nativeMemory, hookToken, bootstrapToken });
   let retrying = false;
   const retry = async () => { if (retrying) return; retrying = true; try { await nativeMemory.retry(); await memory.retry(); } finally { retrying = false; } };
   const retryTimer = setInterval(() => void retry().catch(() => {}), 20000);
-  server.listen(config.port || 9210, '127.0.0.1', () => console.log(`DKG Codex UI: http://127.0.0.1:${config.port || 9210}/ui/codex`));
+  server.listen(config.port || 9210, '127.0.0.1', () => {
+    console.log(`DKG Codex UI: http://127.0.0.1:${config.port || 9210}/ui/codex`);
+    console.log(`Owner bootstrap token: ${bootstrapTokenPath}`);
+  });
   const close = () => { clearInterval(retryTimer); rpc.close(); server.closeAllConnections(); server.close(() => process.exit(0)); };
   process.on('SIGTERM', close); process.on('SIGINT', close);
 }

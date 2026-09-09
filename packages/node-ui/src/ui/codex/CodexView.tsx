@@ -50,29 +50,44 @@ function RequestCard({ request, reply }: { request: any; reply: (id: string | nu
   const complexForm = fields.some(([, schema]) => !['string', 'boolean', 'integer', 'number'].includes(schema.type));
   const permissions = request.method === 'item/permissions/requestApproval';
   const legacy = ['execCommandApproval', 'applyPatchApproval'].includes(request.method);
+  const modernApproval = ['item/commandExecution/requestApproval', 'item/fileChange/requestApproval'].includes(request.method);
+  const decisions = permissions ? ['accept', 'decline'] : legacy ? ['approved', 'denied', 'abort']
+    : modernApproval ? (Array.isArray(p.availableDecisions) ? p.availableDecisions.filter((decision: unknown) => typeof decision === 'string')
+      : ['accept', 'acceptForSession', 'decline', 'cancel']) : [];
+  const decisionLabel: Record<string, string> = {
+    accept: 'Allow once', acceptForSession: 'Allow for session', decline: 'Decline', cancel: 'Cancel',
+    approved: 'Allow once', denied: 'Decline', abort: 'Cancel',
+  };
   return <section className="codex-request" aria-label={questions ? 'Codex question' : 'Approval required'}>
-    <strong>{questions ? 'Codex needs your input' : elicitation ? 'Additional information requested' : 'Approval required'}</strong>
+    <strong>{questions ? 'Codex needs your input' : elicitation ? 'Additional information requested' : p.networkApprovalContext ? 'Network access approval required' : 'Approval required'}</strong>
     {p.reason && <p>{p.reason}</p>}
     {p.command && <pre>{Array.isArray(p.command) ? p.command.join(' ') : p.command}</pre>}
     {p.cwd && <div className="codex-muted">{p.cwd}</div>}
-    {permissions && <pre>{JSON.stringify(p.permissions, null, 2)}</pre>}
+    {p.networkApprovalContext && <><p>Network destination</p><pre>{[
+      `Host: ${p.networkApprovalContext.host ?? p.networkApprovalContext.targetHost ?? 'unknown'}`,
+      `Protocol: ${p.networkApprovalContext.protocol ?? 'unknown'}`,
+      p.networkApprovalContext.port === undefined ? null : `Port: ${p.networkApprovalContext.port}`,
+    ].filter(Boolean).join('\n')}</pre></>}
+    {permissions && <><p>Requested permissions (this turn only)</p><pre>{JSON.stringify(p.permissions, null, 2)}</pre></>}
+    {p.additionalPermissions && <><p>Additional permissions requested</p><pre>{JSON.stringify(p.additionalPermissions, null, 2)}</pre></>}
     {p.grantRoot && <pre>{p.grantRoot}</pre>}
     {questions?.map((q: any) => <fieldset key={q.id}><legend>{q.question}</legend>
       {q.options?.map((o: any) => <label className="codex-option" key={o.label}><input type="radio" name={q.id} checked={answers[q.id] === o.label} onChange={() => setAnswers({ ...answers, [q.id]: o.label })} /><span>{o.label}<small>{o.description}</small></span></label>)}
       <input aria-label={q.question} type={q.isSecret ? 'password' : 'text'} placeholder="Your answer" value={answers[q.id] ?? ''} onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })} />
     </fieldset>)}
-    {elicitation && <><p>{p.message}</p>{p.url && /^https?:\/\//i.test(p.url) && <a href={p.url} target="_blank" rel="noreferrer">Open requested page</a>}{complexForm ? <details><summary>Requested fields</summary><pre>{JSON.stringify(p.requestedSchema, null, 2)}</pre><textarea aria-label="Requested information as JSON" value={content} onChange={(e) => setContent(e.target.value)} /></details> : fields.map(([key, schema]) => <label key={key} className="codex-form-field">{schema.title || key}{schema.description && <small>{schema.description}</small>}{schema.enum ? <select value={formValues[key] ?? ''} onChange={(e) => setFormValues({ ...formValues, [key]: e.target.value })}><option value="">Choose…</option>{schema.enum.map((value: string) => <option key={value}>{value}</option>)}</select> : <input aria-label={schema.title || key} type={schema.type === 'boolean' ? 'checkbox' : ['integer', 'number'].includes(schema.type) ? 'number' : 'text'} value={schema.type === 'boolean' ? undefined : formValues[key] ?? ''} checked={schema.type === 'boolean' ? formValues[key] === true : undefined} onChange={(e) => setFormValues({ ...formValues, [key]: schema.type === 'boolean' ? e.target.checked : ['integer', 'number'].includes(schema.type) ? Number(e.target.value) : e.target.value })} />}</label>)}</>}
+    {elicitation && <><p>{p.message}</p>{p.url && /^https?:\/\//i.test(p.url) && <a href={p.url} target="_blank" rel="noreferrer">Open requested page</a>}{complexForm ? <details><summary>Requested fields</summary><pre>{JSON.stringify(p.requestedSchema, null, 2)}</pre><textarea aria-label="Requested information as JSON" value={content} onChange={(e) => setContent(e.target.value)} /></details> : fields.map(([key, schema]) => <label key={key} className="codex-form-field">{schema.title || key}{schema.description && <small>{schema.description}</small>}{schema.enum ? <select aria-label={schema.title || key} value={formValues[key] ?? ''} onChange={(e) => setFormValues({ ...formValues, [key]: e.target.value })}><option value="">Choose…</option>{schema.enum.map((value: string) => <option key={value}>{value}</option>)}</select> : <input aria-label={schema.title || key} type={schema.type === 'boolean' ? 'checkbox' : ['integer', 'number'].includes(schema.type) ? 'number' : 'text'} value={schema.type === 'boolean' ? undefined : formValues[key] ?? ''} checked={schema.type === 'boolean' ? formValues[key] === true : undefined} onChange={(e) => setFormValues({ ...formValues, [key]: schema.type === 'boolean' ? e.target.checked : ['integer', 'number'].includes(schema.type) ? Number(e.target.value) : e.target.value })} />}</label>)}</>}
     {error && <p role="alert" className="codex-error">{error}</p>}
     <div className="codex-actions">
       {questions ? <button disabled={busy || questions.some((q: any) => !answers[q.id]?.trim())} onClick={() => submit({ answers: Object.fromEntries(questions.map((q: any) => [q.id, { answers: [answers[q.id]] }])) })}>Continue</button>
-        : <><button disabled={busy} onClick={() => {
+        : elicitation ? <><button disabled={busy} onClick={() => {
           if (elicitation) { try {
             const values = complexForm ? JSON.parse(content) : formValues;
             if ((p.requestedSchema?.required ?? []).some((key: string) => values[key] === undefined || values[key] === '')) { setError('Complete the required fields.'); return; }
             void submit({ action: 'accept', content: p.requestedSchema ? values : null });
           } catch { setError('Enter valid JSON.'); } }
-          else void submit({ decision: legacy ? 'approved' : 'accept' });
-        }}>{elicitation && fields.length ? 'Submit' : 'Allow once'}</button><button disabled={busy} onClick={() => submit(elicitation ? { action: 'decline' } : { decision: legacy ? 'denied' : 'decline' })}>Decline</button></>}
+        }}>{fields.length ? 'Submit' : 'Allow once'}</button><button disabled={busy} onClick={() => submit({ action: 'decline' })}>Decline</button><button disabled={busy} onClick={() => submit({ action: 'cancel' })}>Cancel</button></>
+          : decisions.length ? decisions.map((decision: string) => <button key={decision} disabled={busy} onClick={() => submit({ decision })}>{decisionLabel[decision] ?? decision}</button>)
+            : <span className="codex-muted">No decisions are available for this request.</span>}
     </div>
   </section>;
 }
@@ -103,6 +118,7 @@ export function CodexView() {
   const scroll = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const drafts = useRef<Record<string, string>>({});
+  const completedTurns = useRef(new Set<string>());
 
   const loadList = useCallback(async (query = '', next?: string) => {
     const version = ++listVersion.current;
@@ -128,20 +144,23 @@ export function CodexView() {
     source.onerror = () => {
       if (selected.current !== id) return;
       setStreamConnected(false);
-      // Renew the HttpOnly session after a local service restart. EventSource
-      // retries automatically; the next open rehydrates canonical history.
-      void fetch('/ui/codex', { cache: 'no-store' }).catch(() => {});
+      // EventSource retries automatically. A restarted service requires the
+      // owner-only launch URL to establish a new HttpOnly session.
     };
     source.onmessage = (message) => {
       if (selected.current !== id) return;
       const event: BridgeEvent = JSON.parse(message.data);
       if (event.method === 'memory/updated') setMemory((old) => ({ ...old, records: [...old.records.filter((r) => r.id !== event.params.record.id), event.params.record] }));
       setThread((old) => old ? applyEvent(old, event) : old);
-      if (event.method === 'turn/started') setActiveTurn(event.params.turn.id);
-      if (event.method === 'turn/completed') { setActiveTurn(null); void loadList().catch(() => {}); }
+      if (event.method === 'turn/started' && !completedTurns.current.has(event.params.turn.id)) setActiveTurn(event.params.turn.id);
+      if (event.method === 'turn/completed') {
+        completedTurns.current.add(event.params.turn.id);
+        if (completedTurns.current.size > 1000) completedTurns.current.delete(completedTurns.current.values().next().value!);
+        setActiveTurn(null); void loadList().catch(() => {});
+      }
       if (event.method === 'bridge/request') setPending((old) => [...old.filter((r) => r.id !== event.params.id), event.params]);
       if (['bridge/requestResolved', 'serverRequest/resolved'].includes(event.method)) setPending((old) => old.filter((r) => String(r.id) !== String(event.params.requestId)));
-      if (event.method === 'bridge/disconnected') { setActiveTurn(null); setPending([]); setError('Codex disconnected. Reload to reconnect. Your conversation is saved.'); }
+      if (event.method === 'bridge/disconnected') { completedTurns.current.clear(); setActiveTurn(null); setPending([]); setError('Codex disconnected. Reopen the owner launch URL to reconnect. Your conversation is saved.'); }
       if (event.method === 'error' && event.params.error) setError(event.params.error.message);
     };
   }, [loadList]);
@@ -198,7 +217,7 @@ export function CodexView() {
     messageId.current ||= crypto.randomUUID();
     try {
       const result = await call('send', { threadId: id, text, attachments, requestId: messageId.current });
-      if (selected.current === id) { setActiveTurn(result.turn.id); setDraft(''); setAttachments([]); drafts.current[id] = ''; messageId.current = null; follow.current = true; }
+      if (selected.current === id) { if (!completedTurns.current.has(result.turn.id)) setActiveTurn(result.turn.id); setDraft(''); setAttachments([]); drafts.current[id] = ''; messageId.current = null; follow.current = true; }
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
   }

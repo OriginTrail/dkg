@@ -56,13 +56,42 @@ test('concurrent start is rejected and stop uses the correct turn', async (t) =>
 
 test('approval is never automatic; response is scoped and consumed once', (t) => {
   const { bridge, rpc } = setup(t);
-  rpc.emit('request', { id: 7, method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-a', command: 'example' } });
+  rpc.emit('request', { id: 7, method: 'item/commandExecution/requestApproval', params: {
+    threadId: 'thread-a', command: 'example', availableDecisions: ['decline'],
+  } });
   assert.equal(rpc.replies.length, 0);
   assert.throws(() => bridge.reply({ id: 7, threadId: 'other', response: { decision: 'accept' } }), { status: 403 });
   assert.throws(() => bridge.reply({ id: 7, threadId: 'thread-a', response: { decision: 'acceptForSession' } }), { status: 400 });
   bridge.reply({ id: 7, threadId: 'thread-a', response: { decision: 'decline' } });
   assert.deepEqual(rpc.replies, [{ id: 7, result: { decision: 'decline' } }]);
   assert.throws(() => bridge.reply({ id: 7, threadId: 'thread-a', response: { decision: 'accept' } }), { status: 409 });
+});
+
+test('modern approvals honor the advertised choices and default to the complete protocol decision set', () => {
+  const request = { method: 'item/fileChange/requestApproval', params: { availableDecisions: ['acceptForSession', 'cancel'] } };
+  assert.deepEqual(approvalResult(request, { decision: 'acceptForSession' }), { decision: 'acceptForSession' });
+  assert.throws(() => approvalResult(request, { decision: 'accept' }), { status: 400 });
+  assert.deepEqual(approvalResult({ method: request.method, params: {} }, { decision: 'acceptForSession' }), { decision: 'acceptForSession' });
+});
+
+test('a completion notification received before turn/start returns cannot resurrect the turn', async (t) => {
+  const { bridge, rpc } = setup(t);
+  let turn = 0;
+  rpc.request = async (method, params) => {
+    rpc.calls.push({ method, params });
+    if (method === 'thread/read') return { thread: { id: 'thread-a', turns: [{ id: 'old', status: 'completed', items: [] }] } };
+    if (method === 'turn/start') {
+      const id = `fast-${++turn}`;
+      rpc.emit('notification', { method: 'turn/completed', params: { threadId: 'thread-a', turn: { id, status: 'completed' } } });
+      return { turn: { id, status: 'inProgress' } };
+    }
+    return {};
+  };
+  await bridge.send({ threadId: 'thread-a', text: 'First', requestId: 'fast-a' });
+  assert.equal(bridge.active.has('thread-a'), false);
+  await bridge.send({ threadId: 'thread-a', text: 'Second', requestId: 'fast-b' });
+  assert.equal(rpc.calls.filter((call) => call.method === 'turn/start').length, 2);
+  assert.equal(bridge.active.has('thread-a'), false);
 });
 
 test('questions require answers; requested permissions cannot be expanded by client', () => {

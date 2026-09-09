@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTabsStore } from '../stores/tabs.js';
+import { codexEnabled } from '../codex/enabled.js';
 
 // Map between deep-link URL paths and centre-tab IDs. Keeping this here
 // (rather than inside `useTabsStore`) lets the route layer stay a thin
@@ -8,13 +9,13 @@ import { useTabsStore } from '../stores/tabs.js';
 // open, but a fresh navigation to e.g. `/observability` opens that tab on
 // mount and clicking the tab pushes the corresponding URL.
 export const URL_PATH_TO_TAB: Record<string, { id: string; label: string }> = {
-  '/codex': { id: 'codex', label: 'Codex' },
+  '/ui/codex': { id: 'codex', label: 'Codex' },
   '/observability': { id: 'operations', label: 'Observability' },
   '/operations': { id: 'operations', label: 'Observability' },
   '/settings': { id: 'settings', label: 'Settings' },
 };
 export const TAB_TO_URL_PATH: Record<string, string> = {
-  codex: '/codex',
+  codex: '/ui/codex',
   operations: '/observability',
   settings: '/settings',
   dashboard: '/',
@@ -50,13 +51,13 @@ export function useShellRouting(): void {
 
   useEffect(() => {
     const match = URL_PATH_TO_TAB[pathname];
-    if (match) {
+    if (match && (match.id !== 'codex' || codexEnabled)) {
       openTab({ id: match.id, label: match.label, closable: true });
     }
   }, [pathname, openTab]);
 
   useEffect(() => {
-    const target = TAB_TO_URL_PATH[activeTabId];
+    const target = activeTabId === 'codex' && !codexEnabled ? undefined : TAB_TO_URL_PATH[activeTabId];
     if (target) {
       if (target !== pathname) navigate(target, { replace: true });
       return;

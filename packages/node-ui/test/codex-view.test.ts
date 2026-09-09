@@ -168,7 +168,12 @@ describe('Codex workspace view', () => {
     const currentSource = FakeEventSource.instances.at(-1)!;
     await act(async () => currentSource.onmessage?.({ data: JSON.stringify({ sequence: 7, method: 'turn/started', params: { threadId: 'thread-1', turn: { id: 'active', status: 'inProgress' } } }) }));
     const stop = [...container.querySelectorAll('button')].find((button) => button.textContent === 'Stop');
-    if (stop) await act(async () => stop.click());
+    expect(stop).toBeDefined();
+    await act(async () => stop!.click());
+    const stopCall = fetchMock.mock.calls.find(([url]) => String(url).includes('/stop'))!;
+    expect(stopCall).toBeDefined();
+    expect(stopCall[1]).toMatchObject({ method: 'POST' });
+    expect(JSON.parse(String(stopCall[1]?.body))).toEqual({ threadId: 'thread-1' });
 
     await act(async () => currentSource.onmessage?.({ data: JSON.stringify({ sequence: 8, method: 'bridge/request', params: { id: 12, method: 'mcpServer/elicitation/request', params: { message: 'Provide value', requestedSchema: { required: ['name'], properties: { name: { type: 'string', title: 'Name' }, count: { type: 'integer' }, enabled: { type: 'boolean' }, mode: { type: 'string', enum: ['safe'] } } } } } }) }));
     expect(container.textContent).toContain('Additional information requested');
@@ -177,7 +182,61 @@ describe('Codex workspace view', () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(name, 'DKG');
       name.dispatchEvent(new Event('input', { bubbles: true }));
     });
+    const count = container.querySelector<HTMLInputElement>('input[aria-label="count"]')!;
+    const enabled = container.querySelector<HTMLInputElement>('input[aria-label="enabled"]')!;
+    const mode = container.querySelector<HTMLSelectElement>('select[aria-label="mode"]')!;
+    expect(count).toBeDefined(); expect(enabled).toBeDefined(); expect(mode).toBeDefined();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(count, '3');
+      count.dispatchEvent(new Event('input', { bubbles: true }));
+      enabled.click();
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set?.call(mode, 'safe');
+      mode.dispatchEvent(new Event('change', { bubbles: true }));
+    });
     const submit = [...container.querySelectorAll('button')].find((button) => button.textContent === 'Submit');
-    if (submit) await act(async () => submit.click());
+    expect(submit).toBeDefined();
+    await act(async () => submit!.click());
+    const replyCall = fetchMock.mock.calls.find(([url]) => String(url).includes('/reply'))!;
+    expect(replyCall).toBeDefined();
+    expect(replyCall[1]).toMatchObject({ method: 'POST' });
+    expect(JSON.parse(String(replyCall[1]?.body))).toEqual({
+      id: 12,
+      threadId: 'thread-1',
+      response: { action: 'accept', content: { name: 'DKG', count: 3, enabled: true, mode: 'safe' } },
+    });
+  });
+
+  it('shows the complete network and permission context and only advertises server-supported decisions', async () => {
+    await act(async () => root.render(React.createElement(CodexView)));
+    await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    const source = FakeEventSource.instances[0];
+    await act(async () => source.onmessage?.({ data: JSON.stringify({ sequence: 9, method: 'bridge/request', params: {
+      id: 14,
+      method: 'item/commandExecution/requestApproval',
+      params: {
+        threadId: 'thread-1',
+        command: ['curl', 'https://attacker.example'],
+        cwd: '/workspace/project',
+        reason: 'Contact the requested service',
+        networkApprovalContext: { host: 'attacker.example', protocol: 'https', port: 443 },
+        additionalPermissions: { fileSystem: { read: ['/workspace/project'], write: ['/tmp/result'] } },
+        availableDecisions: ['decline', 'cancel'],
+      },
+    } }) }));
+    expect(container.textContent).toContain('Network access approval required');
+    expect(container.textContent).toContain('Host: attacker.example');
+    expect(container.textContent).toContain('Protocol: https');
+    expect(container.textContent).toContain('Port: 443');
+    expect(container.textContent).toContain('Additional permissions requested');
+    expect(container.textContent).toContain('/workspace/project');
+    expect(container.textContent).toContain('/tmp/result');
+    expect([...container.querySelectorAll('button')].some((button) => button.textContent === 'Allow once')).toBe(false);
+    expect([...container.querySelectorAll('button')].some((button) => button.textContent === 'Allow for session')).toBe(false);
+    const decline = [...container.querySelectorAll('button')].find((button) => button.textContent === 'Decline');
+    const cancel = [...container.querySelectorAll('button')].find((button) => button.textContent === 'Cancel');
+    expect(decline).toBeDefined(); expect(cancel).toBeDefined();
+    await act(async () => decline!.click());
+    const replyCall = fetchMock.mock.calls.find(([url]) => String(url).includes('/reply'))!;
+    expect(JSON.parse(String(replyCall[1]?.body))).toEqual({ id: 14, threadId: 'thread-1', response: { decision: 'decline' } });
   });
 });

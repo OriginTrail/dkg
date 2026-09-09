@@ -61,7 +61,10 @@ export function approvalResult(request, input) {
     return { action: input.action, content: input.content ?? null };
   }
   const legacy = method === 'applyPatchApproval' || method === 'execCommandApproval';
-  const allowed = legacy ? ['approved', 'denied', 'abort'] : ['accept', 'decline', 'cancel'];
+  const advertised = request.params.availableDecisions;
+  const allowed = legacy ? ['approved', 'denied', 'abort']
+    : Array.isArray(advertised) ? advertised.filter((decision) => typeof decision === 'string')
+      : ['accept', 'acceptForSession', 'decline', 'cancel'];
   if (!allowed.includes(input.decision)) throw HTTP_ERROR(400, 'Invalid approval decision.');
   return { decision: input.decision };
 }
@@ -88,6 +91,7 @@ export class CodexBridge extends EventEmitter {
     this.requests = new Map();
     this.loaded = new Set();
     this.active = new Map();
+    this.completedTurns = new Set();
     this.events = [];
     this.sequence = 0;
     this.eventBytes = 0;
@@ -100,7 +104,7 @@ export class CodexBridge extends EventEmitter {
     rpc.on('notification', (message) => this.onNotification(message));
     rpc.on('request', (message) => this.onRequest(message));
     rpc.on('disconnect', () => {
-      this.loaded.clear(); this.active.clear(); this.requests.clear();
+      this.loaded.clear(); this.active.clear(); this.completedTurns.clear(); this.requests.clear();
       this.publish('bridge/disconnected', {});
     });
   }
@@ -140,8 +144,15 @@ export class CodexBridge extends EventEmitter {
           status: item.status || 'completed', itemId: item.id });
       }
     }
-    if (method === 'turn/started') this.active.set(params.threadId, params.turn.id);
-    if (method === 'turn/completed') { this.active.delete(params.threadId); this.memoryTurns.delete(params.threadId); }
+    const turnId = params.turn?.id ?? params.turnId;
+    if (method === 'turn/started' && !this.completedTurns.has(turnId)) this.active.set(params.threadId, turnId);
+    if (method === 'turn/completed') {
+      if (turnId) {
+        this.completedTurns.add(turnId);
+        if (this.completedTurns.size > 1000) this.completedTurns.delete(this.completedTurns.values().next().value);
+      }
+      this.active.delete(params.threadId); this.memoryTurns.delete(params.threadId);
+    }
     if (method === 'serverRequest/resolved') this.requests.delete(String(params.requestId));
     this.publish(method, params);
   }
@@ -290,7 +301,9 @@ export class CodexBridge extends EventEmitter {
       const result = await this.rpc.request('turn/start', { threadId,
         clientUserMessageId: requestId, input });
       this.memory?.bindTurn(threadId, `user:${requestId}`, result.turn.id);
-      this.active.set(threadId, result.turn.id);
+      // Notifications can arrive while the turn/start response is still in flight.
+      // Never resurrect a turn after its authoritative completion event.
+      if (!this.completedTurns.has(result.turn.id)) this.active.set(threadId, result.turn.id);
       this.receipts.set(key, result);
       if (this.receipts.size > 1000) this.receipts.delete(this.receipts.keys().next().value);
       return result;
