@@ -69,6 +69,10 @@ import {
   type Rfc64CatalogReplayPeerDemandV1,
   type Rfc64CatalogReplayPeerFenceLeaseV1,
 } from './rfc64/catalog-replay-recovery-runtime-v1.js';
+export { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from
+  './rfc64/catalog-limits-v1.js';
+import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from
+  './rfc64/catalog-limits-v1.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
 import {
@@ -479,7 +483,6 @@ const rfc64SystemContextGraphIdsV1 = new Set<string>(Object.values(SYSTEM_CONTEX
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_V1 = 64;
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_PER_PEER_V1 = 4;
 export const RFC64_CATALOG_TARGET_MAX_ENTRIES_V1 = 1_024;
-export const RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 = 64;
 export const RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1 = 64;
 
 interface Rfc64CatalogReplayRuntimeV1 {

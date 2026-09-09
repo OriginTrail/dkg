@@ -32,6 +32,8 @@ import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
+import type { ContextGraphSubscriptionAuthorityRecoveryRuntime } from
+  './context-graph-subscription-authority-recovery.js';
 import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
 import { SyncOnConnectPeerScheduler } from './sync/on-connect/peer-scheduler.js';
 import {
@@ -1237,16 +1239,9 @@ export class DKGAgentBase {
   /** Canonical dormant classification; public status arrays are projections. */
   protected readonly contextGraphSubscriptionDormancyById =
     new Map<string, ContextGraphDormancyReason>();
-  /**
-   * Startup authority reads stay short and fail closed. This detached owner
-   * retries only the persisted rows that were consequently left dormant,
-   * allowing one bounded cold registration-index build after startup without
-   * extending the daemon readiness path.
-   */
-  protected contextGraphSubscriptionAuthorityRetryTimer: ReturnType<typeof setTimeout> | null = null;
-  protected contextGraphSubscriptionAuthorityRetryAbortController: AbortController | null = null;
-  protected contextGraphSubscriptionAuthorityRetryInFlight = false;
-  protected contextGraphSubscriptionAuthorityRetryCompletion: Promise<void> | null = null;
+  /** Detached owner for post-readiness persisted-subscription authority recovery. */
+  protected contextGraphSubscriptionAuthorityRecoveryRuntime?:
+    ContextGraphSubscriptionAuthorityRecoveryRuntime;
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();

@@ -859,7 +859,14 @@ describe('RFC-64 rollout authority integration', () => {
     expect(markPending).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, peerId);
     expect(replay).toHaveBeenCalledWith(
       CONTEXT_GRAPH_ID,
-      { seedConnectedPeers: false },
+      expect.objectContaining({
+        seedConnectedPeers: false,
+        replayDemand: expect.objectContaining({
+          peerId,
+          generation: expect.any(Number),
+          release: expect.any(Function),
+        }),
+      }),
     );
     expect(reannounce).toHaveBeenCalledTimes(1);
   }, 15_000);

@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { snapshotRfc64PublicCatalogAnnouncementPeersV1 } from './catalog-peers-v1.js';
+import {
+  RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1,
+  snapshotRfc64PublicCatalogAnnouncementPeersV1,
+} from './catalog-peers-v1.js';
+import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from './catalog-limits-v1.js';
 
-const MAX_REPLAY_PEERS_V1 = 64;
 const MAX_UNRESOLVED_PEERS_V1 = 64;
-const MAX_PROMISED_TARGETS_V1 = 64;
 
 export interface Rfc64CatalogReplayPeerDemandV1 {
   readonly peerId: string;
@@ -63,15 +65,18 @@ export interface Rfc64CatalogReplayRecoveryStatusV1 {
 class Rfc64CatalogReplayPeerWorklistV1 {
   readonly #pending = new Map<string, number>();
   #nextGeneration = 0;
-  #remaining = MAX_REPLAY_PEERS_V1;
+  #remaining = RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1;
   #overflowed = false;
 
   beginRun(): void {
-    this.#remaining = MAX_REPLAY_PEERS_V1;
+    this.#remaining = RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1;
   }
 
   acquire(peerId: string): Rfc64CatalogReplayPeerFenceLeaseV1 | null {
-    if (!this.#pending.has(peerId) && this.#pending.size >= MAX_REPLAY_PEERS_V1) {
+    if (
+      !this.#pending.has(peerId)
+      && this.#pending.size >= RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1
+    ) {
       this.#overflowed = true;
       return null;
     }
@@ -91,7 +96,7 @@ class Rfc64CatalogReplayPeerWorklistV1 {
 
   seed(peerId: string): void {
     if (this.#pending.has(peerId)) return;
-    if (this.#pending.size >= MAX_REPLAY_PEERS_V1) {
+    if (this.#pending.size >= RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1) {
       this.#overflowed = true;
       return;
     }
@@ -221,7 +226,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   ): Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> {
     const progress = this.#progressFor(input.contextGraphId, input.policyDigest);
     const seedPeers = snapshotRfc64PublicCatalogAnnouncementPeersV1(
-      input.seedPeers.slice(0, MAX_REPLAY_PEERS_V1),
+      input.seedPeers.slice(0, RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1),
     );
     for (const peer of seedPeers) progress.peerWorklist.seed(peer);
     for (const demand of input.replayDemands ?? []) progress.peerWorklist.seedDemand(demand);
@@ -288,7 +293,8 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
           promisedByIdentity.set(this.#ports.targetIdentity(target), target);
         }
         const promised = [...promisedByIdentity.values()];
-        const parityFailed = promised.length > MAX_PROMISED_TARGETS_V1
+        const parityFailed = promised.length
+          > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1
           || await this.#ports.parityFailed(input.contextGraphId, promised);
         // A reconnect generation arriving during the durable parity read owns
         // another pass. The worklist budget keeps that fence finite.
