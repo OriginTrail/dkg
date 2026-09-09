@@ -70,6 +70,7 @@ export default defineConfig({
           // paying the 2-minute hardhat-boot tax of the default config.
           'test/resolve-standalone-install.test.ts',
           'test/auto-update.test.ts',
+          'test/auto-update-workspace-clean.test.ts',
           'test/maintenance-update-gate.test.ts',
           'test/dkg-doctor.test.ts',
           'test/metrics-collector-config.test.ts',
@@ -175,6 +176,7 @@ export default defineConfig({
           'test/oxigraph-binary.test.ts',
           'test/oxigraph-listen-port.test.ts',
           'test/oxigraph-server.test.ts',
+          'test/oxigraph-parent-watchdog.test.ts',
           'test/oxigraph-managed.test.ts',
           // Opt-in via BLAZEGRAPH_INTEGRATION_TEST=1. Skips silently
           // (no fetch / no docker spawn) when the env-var is unset, so

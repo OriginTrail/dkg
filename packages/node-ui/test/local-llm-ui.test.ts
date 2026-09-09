@@ -40,6 +40,7 @@ describe('DKG Local LLM Node UI surface', () => {
       if (url.endsWith('/api/local-llm/health')) {
         return json({
           ok: false,
+          configured: true,
           ready: false,
           reachable: false,
           offline: true,
@@ -66,6 +67,57 @@ describe('DKG Local LLM Node UI surface', () => {
     await expect(connectLocalAgentIntegration('local-llm')).rejects.toThrow(
       'local connect is not available',
     );
+  });
+
+  it('hides the daemon-owned chat when no local LLM is configured or reachable', async () => {
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/api/local-agent-integrations')) {
+        return json({ integrations: [localLlmRecord()] });
+      }
+      if (url.endsWith('/api/local-llm/health')) {
+        return json({
+          ok: false,
+          configured: false,
+          ready: false,
+          reachable: false,
+          offline: true,
+          readOnly: true,
+          error: 'Local LLM server is offline: fetch failed',
+        });
+      }
+      return json({ error: `Unexpected request: ${url}` }, 500);
+    }) as typeof globalThis.fetch;
+
+    await expect(fetchLocalAgentIntegrations()).resolves.toEqual({ integrations: [] });
+  });
+
+  it('shows an auto-detected default local LLM without environment overrides', async () => {
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/api/local-agent-integrations')) {
+        return json({ integrations: [localLlmRecord()] });
+      }
+      if (url.endsWith('/api/local-llm/health')) {
+        return json({
+          ok: true,
+          configured: false,
+          ready: true,
+          reachable: true,
+          offline: false,
+          readOnly: true,
+        });
+      }
+      return json({ error: `Unexpected request: ${url}` }, 500);
+    }) as typeof globalThis.fetch;
+
+    const { integrations } = await fetchLocalAgentIntegrations();
+    expect(integrations).toHaveLength(1);
+    expect(integrations[0]).toMatchObject({
+      id: 'local-llm',
+      chatReady: true,
+      status: 'chat_ready',
+    });
   });
 
   it('posts the fixed session and active graph, then emits one final event with DKG metadata', async () => {
