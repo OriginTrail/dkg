@@ -1528,7 +1528,14 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   async resolveRandomSamplingAvailability(identityId: bigint): Promise<RandomSamplingAvailability> {
-    return { kind: 'available', member: await this.isShardingTableMember(identityId) };
+    try {
+      if (!this.isRandomSamplingReady()) {
+        return { kind: 'unavailable', reason: 'contracts_not_deployed' };
+      }
+      return { kind: 'available', member: await this.isShardingTableMember(identityId) };
+    } catch (error) {
+      return { kind: 'indeterminate', error };
+    }
   }
 
   async verify(params: VerifyParams): Promise<TxResult> {

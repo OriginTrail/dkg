@@ -6,6 +6,7 @@ import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import {
   bindRandomSampling,
+  resolveRandomSamplingBinding,
   type RandomSamplingBindingResult,
   type RandomSamplingDisabledReason,
   type RandomSamplingHandle,
@@ -131,6 +132,27 @@ describe('Random Sampling membership reconciliation', () => {
       expect(stop).toHaveBeenCalledTimes(stopped);
       expect(runtime.getStatus().enabled).toBe(active && !missing);
     } finally { await runtime.stop(); }
+  });
+
+  it('maps typed indeterminate availability without an exception round-trip', async () => {
+    const error = new Error('temporary RPC outage');
+    const warn = vi.fn();
+    const resolveEligibility = createRandomSamplingEligibilityResolver({
+      role: 'core',
+      chain: {
+        chainId: 'mock:0',
+        getIdentityId: async () => 52n,
+        resolveRandomSamplingAvailability: async () => ({ kind: 'indeterminate', error }),
+      },
+      log: { warn },
+    });
+
+    await expect(resolveEligibility()).resolves.toEqual({
+      kind: 'indeterminate', reason: 'eligibility_lookup_failed', identityId: 52n,
+    });
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      `V10 Random Sampling eligibility lookup failed; will retry: ${String(error)}`,
+    );
   });
 
   it.each(['shutdown', 'membership'] as const)('waits for a failing close to settle during %s, then permits a fresh lifecycle', async (stage) => {
@@ -306,29 +328,39 @@ describe('Random Sampling membership reconciliation', () => {
   });
 
   it('retries contract invalidation between eligibility and binding', async () => {
-    const disabled: RandomSamplingHandle = {
-      enabled: false, start: vi.fn(), stop: vi.fn(async () => {}),
-      getStatus: () => ({ enabled: false, role: 'core', identityId: '52', disabledReason: 'contracts_not_deployed', loop: null }),
+    let ready = false;
+    const chain = {
+      chainId: 'mock:0',
+      getIdentityId: async () => 52n,
+      resolveRandomSamplingAvailability: async (): Promise<RandomSamplingAvailability> => (
+        { kind: 'available', member: true }
+      ),
+      isRandomSamplingReady: () => ready,
+      getActiveProofPeriodStatus: async () => { throw new Error('test tick ends after binding'); },
+      createChallenge: vi.fn(), submitProof: vi.fn(),
+      getNodeChallenge: async () => null, getKAContextGraphId: vi.fn(),
     };
-    const enabled: RandomSamplingHandle = {
-      enabled: true, start: vi.fn(), stop: vi.fn(async () => {}),
-      getStatus: () => ({ enabled: true, role: 'core', identityId: '52', disabledReason: null, loop: null }),
-    };
-    const createHandle = vi.fn(async (): Promise<RandomSamplingBindingResult> => readyBinding(enabled))
-      .mockResolvedValueOnce({
-        kind: 'unavailable', reason: 'contracts_not_deployed', handleToClose: disabled,
-      });
+    const createHandle = vi.fn((identityId: bigint) => resolveRandomSamplingBinding({
+      role: 'core', identityId,
+      chain: chain as never, store: {} as never,
+      useWorkerThread: false, tickIntervalMs: 60_000,
+      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    }));
     const runtime = createRuntime({
-      role: 'core', chain: { chainId: 'mock:0', getIdentityId: async () => 52n, isShardingTableMember: async () => true },
+      role: 'core', chain,
       createHandle, log: { info: vi.fn(), warn: vi.fn() }, shutdownTimeoutMs: () => 100,
     });
     try {
       await runtime.start();
-      expect(disabled.start).not.toHaveBeenCalled();
-      expect(disabled.stop).toHaveBeenCalledOnce();
+      expect(createHandle).toHaveBeenCalledOnce();
+      expect(runtime.getStatus()).toMatchObject({
+        enabled: false, disabledReason: 'contracts_not_deployed',
+      });
       expect(runtime.getDiagnostics()).toMatchObject({ phase: 'waiting', reconciliationScheduled: true });
+
+      ready = true;
       await runtime.reconcile();
-      expect(enabled.start).toHaveBeenCalledOnce();
+      expect(createHandle).toHaveBeenCalledTimes(2);
       expect(runtime.getStatus().enabled).toBe(true);
     } finally { await runtime.stop(); }
   });

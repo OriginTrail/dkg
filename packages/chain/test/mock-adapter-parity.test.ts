@@ -41,7 +41,7 @@
  * offline-mode users will hit surprises on chain switch. The test stays
  * red until parity is restored or a documented exemption is added.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 import { NoChainAdapter } from '../src/no-chain-adapter.js';
@@ -440,6 +440,20 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     const mock = new MockChainAdapter();
     expect(await mock.resolveRandomSamplingAvailability(0n)).toEqual({ kind: 'available', member: false });
     expect(await mock.resolveRandomSamplingAvailability(42n)).toEqual({ kind: 'available', member: true });
+  });
+
+  it('preserves mock Random Sampling readiness and readiness failures in the typed capability', async () => {
+    const mock = new MockChainAdapter();
+    vi.spyOn(mock, 'isRandomSamplingReady').mockReturnValueOnce(false);
+    await expect(mock.resolveRandomSamplingAvailability(42n)).resolves.toEqual({
+      kind: 'unavailable', reason: 'contracts_not_deployed',
+    });
+
+    const error = new Error('readiness unavailable');
+    vi.spyOn(mock, 'isRandomSamplingReady').mockImplementationOnce(() => { throw error; });
+    await expect(mock.resolveRandomSamplingAvailability(42n)).resolves.toEqual({
+      kind: 'indeterminate', error,
+    });
   });
 
   // Codex PR #595 round-5: EVMChainAdapter.getMinimumRequiredSignatures

@@ -31,16 +31,14 @@ export function createRandomSamplingEligibilityResolver(options: {
       return { kind: 'indeterminate', reason: 'identity_lookup_failed' };
     }
     if (identityId === 0n) return { kind: 'unavailable', identityId, reason: 'no_identity' };
-    try {
-      const availability = await readRandomSamplingAvailability(chain, identityId);
-      if (availability.kind === 'indeterminate') throw availability.error;
-      if (availability.kind === 'unavailable') return { kind: 'unavailable', identityId, reason: availability.reason };
-      return availability.member
-        ? { kind: 'eligible', identityId }
-        : { kind: 'unavailable', identityId, reason: 'awaiting_sharding_table' };
-    } catch (error) {
-      log.warn(`V10 Random Sampling eligibility lookup failed; will retry: ${String(error)}`);
+    const availability = await readRandomSamplingAvailability(chain, identityId);
+    if (availability.kind === 'indeterminate') {
+      log.warn(`V10 Random Sampling eligibility lookup failed; will retry: ${String(availability.error)}`);
       return { kind: 'indeterminate', reason: 'eligibility_lookup_failed', identityId };
     }
+    if (availability.kind === 'unavailable') return { kind: 'unavailable', identityId, reason: availability.reason };
+    return availability.member
+      ? { kind: 'eligible', identityId }
+      : { kind: 'unavailable', identityId, reason: 'awaiting_sharding_table' };
   };
 }
