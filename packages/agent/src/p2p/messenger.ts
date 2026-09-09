@@ -9,16 +9,20 @@ import {
   type CompatibleProtocolOutboxStore,
   type MessageIdempotencyStore,
   type ProtocolOutboxEntry,
+  type ProtocolOutboxMetadata,
+  type ProtocolOutboxQueueStats,
   type ProtocolRouter,
   type SendOptions,
 } from '@origintrail-official/dkg-core';
 import {
   OutboxDrainer,
   type OutboxDrainerOptions,
+  type OutboxDrainStats,
 } from './outbox-drainer.js';
 export {
   DEFAULT_OUTBOX_DRAIN_BATCH_SIZE,
   DEFAULT_OUTBOX_DRAIN_CONCURRENCY,
+  DEFAULT_OUTBOX_DRAIN_MAX_PAYLOAD_BYTES,
   type OutboxDrainerOptions,
 } from './outbox-drainer.js';
 
@@ -383,7 +387,7 @@ export class Messenger {
   private readonly outbox?: ProtocolOutbox;
   private readonly clock: () => number;
   private readonly resolvePeer?: (peerId: string, opts: { signal: AbortSignal }) => Promise<void>;
-  private readonly outboxDrainer?: OutboxDrainer<ProtocolOutboxEntry>;
+  private readonly outboxDrainer?: OutboxDrainer;
 
   /**
    * Application handlers registered via `register`. Stored separately
@@ -494,8 +498,9 @@ export class Messenger {
     this.sloWindowSamples = deps.sloWindowSamples ?? DEFAULT_SLO_WINDOW_SAMPLES;
     this.resolvePeer = deps.resolvePeer;
     if (this.outbox) {
+      this.outbox.requireBoundedStore();
       this.outboxDrainer = new OutboxDrainer(
-        (now, limit) => this.outbox!.duePage(now, limit),
+        (now, budget) => this.outbox!.readDuePage(now, budget),
         (entry) => this.retryOutboxEntry(entry),
         deps.outboxDrain,
       );
@@ -1016,15 +1021,14 @@ export class Messenger {
       this.clearDhtWalkRateLimitIfDrained(entry.peer);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      const updated = outbox.enqueueFailure(
+      const updated = outbox.recordRetryFailure(
         entry.peer,
         entry.protocol,
         entry.messageId,
-        entry.payload,
         errMsg,
         this.clock(),
       );
-      if (isRecoverableMessengerSendError(err, errMsg)) {
+      if (updated && isRecoverableMessengerSendError(err, errMsg)) {
         this.scheduleOutboxPeerRecovery(entry.peer, updated.attempts, errMsg);
       }
       // A non-recoverable retry remains visible for operator intervention, but
@@ -1150,7 +1154,7 @@ export class Messenger {
     lastError: string;
   }> {
     if (!this.outbox) return [];
-    const dropped = this.outbox.dropExpired(now);
+    const dropped = this.outbox.dropExpiredMetadata(now);
     // rc.9 PR-12: clean firstAttemptAt for expired entries so the
     // SLO bookkeeping map doesn't grow unbounded on permanently
     // unreachable peers.
@@ -1175,14 +1179,19 @@ export class Messenger {
     return this.outbox?.size() ?? 0;
   }
 
-  /**
-   * Snapshot of every entry currently in the outbox. Used by the
-   * `/api/chat/outbox` route + the MCP `dkg_outbox_status` tool so
-   * operators can see what's pending after a long recipient outage.
-   * Empty array when no outbox is wired.
-   */
-  listOutbox(): ProtocolOutboxEntry[] {
-    return this.outbox?.list() ?? [];
+  /** Diagnostics are metadata-only. Payload snapshots require explicit opt-in. */
+  listOutbox(options?: { includePayload?: false }): ProtocolOutboxMetadata[];
+  listOutbox(options: { includePayload: true }): ProtocolOutboxEntry[];
+  listOutbox(options?: { includePayload?: boolean }): ProtocolOutboxMetadata[] | ProtocolOutboxEntry[] {
+    if (!this.outbox) return [];
+    return options?.includePayload ? this.outbox.list() : this.outbox.listMetadata();
+  }
+
+  /** Fixed-cardinality queue/admission gauges and skip counters for /api/slo. */
+  getOutboxStats(): (OutboxDrainStats & ProtocolOutboxQueueStats) | undefined {
+    const stats = this.outboxDrainer?.getStats();
+    if (!stats || !this.outbox) return undefined;
+    return { ...stats, ...this.outbox.queueStats(this.clock(), stats.maxPayloadBytes) };
   }
 
   /**

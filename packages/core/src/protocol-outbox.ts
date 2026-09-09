@@ -29,11 +29,16 @@
 
 import type {
   CompatibleProtocolOutboxStore,
+  BoundedProtocolOutboxStore,
   IdempotencyCheckResult,
   MessageDirection,
   MessageIdempotencyStore,
   LegacyProtocolOutboxStore,
   ProtocolOutboxEntry,
+  ProtocolOutboxMetadata,
+  ProtocolOutboxPage,
+  ProtocolOutboxPageBudget,
+  ProtocolOutboxQueueStats,
   ProtocolOutboxStore,
 } from './messenger-types.js';
 import { RESPONSE_CACHE_BYTES } from './messenger-types.js';
@@ -94,9 +99,22 @@ function cloneOutboxEntry(entry: ProtocolOutboxEntry): ProtocolOutboxEntry {
 function compareDueEntries(a: ProtocolOutboxEntry, b: ProtocolOutboxEntry): number {
   return a.nextAttemptAt - b.nextAttemptAt
     || a.firstFailureAt - b.firstFailureAt
-    || a.peer.localeCompare(b.peer)
-    || a.protocol.localeCompare(b.protocol)
-    || a.messageId.localeCompare(b.messageId);
+    || Buffer.compare(Buffer.from(a.peer), Buffer.from(b.peer))
+    || Buffer.compare(Buffer.from(a.protocol), Buffer.from(b.protocol))
+    || Buffer.compare(Buffer.from(a.messageId), Buffer.from(b.messageId));
+}
+
+function entryMetadata(entry: ProtocolOutboxEntry): ProtocolOutboxMetadata {
+  const { payload, ...metadata } = entry;
+  return { ...metadata, payloadBytes: payload.byteLength };
+}
+
+export function validateProtocolOutboxPageBudget(budget: ProtocolOutboxPageBudget): void {
+  for (const name of ['maxEntries', 'maxPayloadBytes'] as const) {
+    if (!Number.isSafeInteger(budget[name]) || budget[name] <= 0) {
+      throw new RangeError(`Outbox ${name} must be a positive safe integer`);
+    }
+  }
 }
 
 function comparePendingEntries(a: ProtocolOutboxEntry, b: ProtocolOutboxEntry): number {
@@ -105,9 +123,11 @@ function comparePendingEntries(a: ProtocolOutboxEntry, b: ProtocolOutboxEntry): 
     || a.messageId.localeCompare(b.messageId);
 }
 
-function normalizeDuePageLimit(limit: number | undefined): number | undefined {
-  if (limit === undefined || !Number.isFinite(limit)) return undefined;
-  return Math.max(0, Math.floor(limit));
+function normalizeDuePageLimit(limit: number): number {
+  if (!Number.isFinite(limit) || limit < 0 || limit > Number.MAX_SAFE_INTEGER) {
+    throw new RangeError('Outbox duePage limit must be finite and non-negative');
+  }
+  return Math.floor(limit);
 }
 
 interface ProtocolOutboxStorePolicy extends ProtocolOutboxOptions {
@@ -140,6 +160,14 @@ function normalizeOutboxStore(store: CompatibleProtocolOutboxStore): ProtocolOut
     pendingFor: legacy.pendingFor.bind(legacy),
   };
   if (legacy.duePage) normalized.duePage = legacy.duePage.bind(legacy);
+  if (legacy.readDuePage) normalized.readDuePage = legacy.readDuePage.bind(legacy);
+  if (legacy.listMetadata) {
+    normalized.listMetadata = legacy.listMetadata.bind(legacy);
+    normalized.hasPendingFor = (peer) => legacy.listMetadata!(peer).length > 0;
+  }
+  if (legacy.dropExpiredMetadata) normalized.dropExpiredMetadata = legacy.dropExpiredMetadata.bind(legacy);
+  if (legacy.recordRetryFailure) normalized.recordRetryFailure = legacy.recordRetryFailure.bind(legacy);
+  if (legacy.queueStats) normalized.queueStats = legacy.queueStats.bind(legacy);
   return normalized;
 }
 
@@ -241,23 +269,58 @@ export class ProtocolOutbox {
 
   /** All due entries in deterministic retry order. */
   due(now: number): ProtocolOutboxEntry[] {
-    return this.duePage(now);
+    return [...this.store.due(now)].sort(compareDueEntries);
   }
 
   /**
-   * Return a canonical retry page while preserving legacy `due(now)` stores.
-   * Stores may opt into the bounded fast path; the fallback sorts before it
-   * caps so an older store cannot bypass either the order or the batch bound.
+   * Explicit count-limited payload snapshot. Automatic drains use readDuePage
+   * instead. A count request never falls back to loading an unlimited backlog.
    */
-  duePage(now: number, limit?: number): ProtocolOutboxEntry[] {
+  duePage(now: number, limit: number): ProtocolOutboxEntry[] {
     const normalizedLimit = normalizeDuePageLimit(limit);
     if (normalizedLimit === 0) return [];
 
-    const snapshot = normalizedLimit !== undefined && this.store.duePage
-      ? this.store.duePage(now, normalizedLimit)
-      : this.store.due(now);
+    if (!this.store.duePage) {
+      throw new Error('Custom outbox store must implement duePage for count-limited payload reads');
+    }
+    const snapshot = this.store.duePage(now, normalizedLimit);
     const ordered = [...snapshot].sort(compareDueEntries);
-    return normalizedLimit === undefined ? ordered : ordered.slice(0, normalizedLimit);
+    return ordered.slice(0, normalizedLimit);
+  }
+
+  /** Fail at Messenger construction, before accepting durable sends with an unsafe store. */
+  requireBoundedStore(): void {
+    this.getBoundedStore();
+  }
+
+  private getBoundedStore(): ProtocolOutboxStore & BoundedProtocolOutboxStore {
+    for (const method of ['readDuePage', 'listMetadata', 'dropExpiredMetadata', 'recordRetryFailure', 'queueStats'] as const) {
+      if (typeof this.store[method] !== 'function') {
+        throw new Error(`Custom outbox store must implement ${method} for byte-bounded Messenger retries; payload-snapshot fallback is disabled`);
+      }
+    }
+    return this.store as ProtocolOutboxStore & BoundedProtocolOutboxStore;
+  }
+
+  readDuePage(now: number, budget: ProtocolOutboxPageBudget): ProtocolOutboxPage {
+    validateProtocolOutboxPageBudget(budget);
+    return this.getBoundedStore().readDuePage(now, budget);
+  }
+
+  listMetadata(peer?: string): ProtocolOutboxMetadata[] {
+    return this.getBoundedStore().listMetadata(peer);
+  }
+
+  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
+    return this.getBoundedStore().dropExpiredMetadata(now);
+  }
+
+  recordRetryFailure(peer: string, protocol: string, messageId: string, error: string, now: number): ProtocolOutboxMetadata | undefined {
+    return this.getBoundedStore().recordRetryFailure(peer, protocol, messageId, error, now);
+  }
+
+  queueStats(now: number, maxPayloadBytes: number): ProtocolOutboxQueueStats {
+    return this.getBoundedStore().queueStats(now, maxPayloadBytes);
   }
 
   hasPendingFor(peer: string): boolean {
@@ -266,7 +329,7 @@ export class ProtocolOutbox {
 
   /**
    * Compatibility/diagnostic snapshot for a peer. This does not participate in
-   * retry selection; scheduled drains remain exclusively `duePage`-driven.
+   * retry selection; scheduled drains remain exclusively `readDuePage`-driven.
    */
   pendingFor(peer: string): ProtocolOutboxEntry[] {
     const pendingFor = this.store.pendingFor;
@@ -288,7 +351,7 @@ export class ProtocolOutbox {
 
   /**
    * Snapshot of every entry currently in the underlying store. Used
-   * by `Messenger.listOutbox` for the diagnostics surface. Returns
+   * only for explicit payload inspection. Returns
    * entries in store order — callers that need per-peer FIFO should
    * sort by `firstFailureAt`.
    */
@@ -407,7 +470,77 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
   }
 
   duePage(now: number, limit: number): ProtocolOutboxEntry[] {
-    return this.due(now).slice(0, limit);
+    limit = normalizeDuePageLimit(limit);
+    return Array.from(this.entries.values())
+      .filter(entry => entry.nextAttemptAt <= now)
+      .sort(compareDueEntries).slice(0, limit).map(cloneOutboxEntry);
+  }
+
+  readDuePage(now: number, budget: ProtocolOutboxPageBudget): ProtocolOutboxPage {
+    validateProtocolOutboxPageBudget(budget);
+    let skippedOversizedEntries = 0;
+    const candidates = Array.from(this.entries.values())
+      .filter(entry => {
+        if (entry.nextAttemptAt > now) return false;
+        if (entry.payload.byteLength <= budget.maxPayloadBytes) return true;
+        skippedOversizedEntries++;
+        return false;
+      })
+      .sort(compareDueEntries);
+    const entries: ProtocolOutboxEntry[] = [];
+    let payloadBytes = 0;
+    let byteBudgetExhausted = false;
+    for (const entry of candidates) {
+      if (entries.length === budget.maxEntries) break;
+      if (payloadBytes + entry.payload.byteLength > budget.maxPayloadBytes) {
+        byteBudgetExhausted = true;
+        break;
+      }
+      payloadBytes += entry.payload.byteLength;
+      entries.push(cloneOutboxEntry(entry));
+    }
+    return { entries, payloadBytes, skippedOversizedEntries, byteBudgetExhausted };
+  }
+
+  listMetadata(peer?: string): ProtocolOutboxMetadata[] {
+    return Array.from(this.entries.values())
+      .filter(entry => peer === undefined || entry.peer === peer)
+      .map(entryMetadata);
+  }
+
+  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
+    const dropped: ProtocolOutboxMetadata[] = [];
+    for (const [key, entry] of this.entries) {
+      if (now - entry.firstFailureAt > this.maxAgeMs) {
+        dropped.push(entryMetadata(entry));
+        this.entries.delete(key);
+      }
+    }
+    return dropped;
+  }
+
+  recordRetryFailure(peer: string, protocol: string, messageId: string, error: string, now: number): ProtocolOutboxMetadata | undefined {
+    const entry = this.entries.get(InMemoryProtocolOutboxStore.key(peer, protocol, messageId));
+    if (!entry) return undefined;
+    entry.attempts += 1;
+    entry.lastAttemptAt = now;
+    entry.nextAttemptAt = now + this.backoffFor(entry.attempts);
+    entry.lastError = error;
+    return entryMetadata(entry);
+  }
+
+  queueStats(now: number, maxPayloadBytes: number): ProtocolOutboxQueueStats {
+    let queuedBytes = 0;
+    let oldestDueAgeMs = 0;
+    let oversizedDueEntries = 0;
+    for (const entry of this.entries.values()) {
+      queuedBytes += entry.payload.byteLength;
+      if (entry.nextAttemptAt <= now) {
+        oldestDueAgeMs = Math.max(oldestDueAgeMs, now - entry.nextAttemptAt);
+        if (entry.payload.byteLength > maxPayloadBytes) oversizedDueEntries++;
+      }
+    }
+    return { queuedEntries: this.entries.size, queuedBytes, oldestDueAgeMs, oversizedDueEntries };
   }
 
   dropExpired(now: number): ProtocolOutboxEntry[] {

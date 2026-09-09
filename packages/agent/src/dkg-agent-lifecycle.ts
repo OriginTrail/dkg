@@ -2249,6 +2249,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       router: this.router,
       idempotencyStore,
       outboxStore,
+      outboxDrain: this.config.messengerOutboxDrain,
       // PR feat/chain-agents-cg-phonebook: stall-recovery now routes
       // through the full PeerResolver instead of raw DHT findPeer.
       // The dial fast-path (ProtocolRouter) already uses the canonical

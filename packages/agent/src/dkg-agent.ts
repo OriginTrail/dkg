@@ -1702,6 +1702,10 @@ export class DKGAgent extends DKGAgentBase {
     return this.messenger.getSloStats();
   }
 
+  getMessengerOutboxStats() {
+    return this.messenger.getOutboxStats();
+  }
+
   /**
    * Snapshot of SWM gossip publish health (rc.9 PR-A).
    *

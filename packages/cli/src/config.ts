@@ -831,6 +831,8 @@ export interface DkgConfig {
       collectionEnabled?: boolean;
     };
   };
+  /** Automatic outbox retry admission: positive integers, default 100 entries / 4 MiB / 4 workers. */
+  messengerOutboxDrain?: DKGAgentConfig['messengerOutboxDrain'];
   /** Shared memory (workspace) data TTL in milliseconds. Default: 30 days (2592000000). Set to 0 to disable cleanup. */
   sharedMemoryTtlMs?: number;
   /** @deprecated Legacy alias for sharedMemoryTtlMs */

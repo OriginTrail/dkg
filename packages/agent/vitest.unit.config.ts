@@ -189,6 +189,7 @@ export default defineConfig({
       "test/explicit-connect-admission.test.ts",
       "test/sync-responder-agents-meta-serve-skip.test.ts",
       "test/messenger-substrate.test.ts",
+      "test/messenger-outbox-budget.test.ts",
       "test/context-graph-join-policy.test.ts",
       "test/bounded-operation.test.ts",
       "test/private-read-chain-authority.test.ts",

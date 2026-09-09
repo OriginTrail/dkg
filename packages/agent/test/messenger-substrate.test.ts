@@ -123,6 +123,11 @@ describe('Messenger.sendReliable (happy path semantics)', () => {
       size: backing.size.bind(backing),
       list: backing.list.bind(backing),
       getEntry: backing.getEntry.bind(backing),
+      readDuePage: backing.readDuePage.bind(backing),
+      listMetadata: backing.listMetadata.bind(backing),
+      dropExpiredMetadata: backing.dropExpiredMetadata.bind(backing),
+      recordRetryFailure: backing.recordRetryFailure.bind(backing),
+      queueStats: backing.queueStats.bind(backing),
     };
     const router = makeRouter(async () => new Uint8Array([0x42]));
     const messenger = new Messenger({

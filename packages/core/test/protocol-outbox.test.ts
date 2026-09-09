@@ -158,10 +158,10 @@ describe('ProtocolOutbox.due / peer presence', () => {
     const now = 1000 + DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS[0];
 
     expect(outbox.duePage(now, 1.9).map((entry) => entry.messageId)).toEqual(['a-first']);
-    expect(outbox.duePage(now, Number.NaN).map((entry) => entry.messageId)).toEqual(['a-first', 'z-last']);
+    expect(() => outbox.duePage(now, Number.NaN)).toThrow('limit must be finite');
   });
 
-  it('keeps legacy due/pendingFor stores compatible and sorts before applying the cap', () => {
+  it('retains explicit legacy snapshots but refuses an unbounded fallback for a capped read', () => {
     const backing = new InMemoryProtocolOutboxStore();
     const entry = (
       messageId: string,
@@ -192,8 +192,8 @@ describe('ProtocolOutbox.due / peer presence', () => {
     };
     const outbox = new ProtocolOutbox(legacyStore);
 
-    expect(outbox.duePage(100, 1).map((candidate) => candidate.messageId))
-      .toEqual(['z-older-failure']);
+    expect(() => outbox.duePage(100, 1)).toThrow('must implement duePage');
+    expect(() => outbox.requireBoundedStore()).toThrow('must implement readDuePage');
     expect(outbox.due(100).map((candidate) => candidate.messageId))
       .toEqual(['z-older-failure', 'a-newer-failure']);
     expect(outbox.hasPendingFor(PEER_A)).toBe(true);

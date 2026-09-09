@@ -7,6 +7,11 @@ import {
   type MessageDirection,
   type MessageIdempotencyStore,
   type ProtocolOutboxEntry,
+  type ProtocolOutboxMetadata,
+  type ProtocolOutboxPage,
+  type ProtocolOutboxPageBudget,
+  type ProtocolOutboxQueueStats,
+  validateProtocolOutboxPageBudget,
   type ProtocolOutboxStore,
   type ContextGraphJoinPolicyRecord,
   parseContextGraphJoinPolicyRecord,
@@ -3770,6 +3775,11 @@ export interface SqliteProtocolOutboxStoreOptions {
   backoffFor?: (attempts: number) => number;
 }
 
+const OUTBOX_METADATA_COLUMNS = `peer_id AS peer, protocol, message_id AS messageId,
+  length(payload) AS payloadBytes, attempts, first_failure_at AS firstFailureAt,
+  last_attempt_at AS lastAttemptAt, next_attempt_at AS nextAttemptAt,
+  coalesce(last_error, '') AS lastError`;
+
 export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
   private readonly db: Database.Database;
   private maxAgeMs = 24 * 60 * 60 * 1000;
@@ -3927,6 +3937,7 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
   }
 
   duePage(now: number, limit: number): ProtocolOutboxEntry[] {
+    if (!Number.isSafeInteger(limit) || limit < 0) throw new RangeError('Outbox duePage limit must be a non-negative safe integer');
     const rows = this.db
       .prepare(
         `SELECT * FROM protocol_outbox
@@ -3947,6 +3958,78 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
       last_error: string | null;
     }>;
     return rows.map(SqliteProtocolOutboxStore.rowToEntry);
+  }
+
+  readDuePage(now: number, budget: ProtocolOutboxPageBudget): ProtocolOutboxPage {
+    validateProtocolOutboxPageBudget(budget);
+    // SQLite length(BLOB) reads its size without returning the BLOB to JS.
+    // Select metadata first, then load only the admitted prefix. The read
+    // transaction keeps both queries on one snapshot without a durable lease:
+    // the daemon has one Messenger owner and never deletes rows on selection.
+    return this.db.transaction(() => {
+      const candidates = this.db.prepare(
+        `SELECT ${OUTBOX_METADATA_COLUMNS} FROM protocol_outbox
+         WHERE next_attempt_at <= ? AND length(payload) <= ?
+         ORDER BY next_attempt_at, first_failure_at, peer_id, protocol, message_id
+         LIMIT ?`,
+      ).all(now, budget.maxPayloadBytes, budget.maxEntries) as ProtocolOutboxMetadata[];
+      const entries: ProtocolOutboxEntry[] = [];
+      let payloadBytes = 0;
+      let byteBudgetExhausted = false;
+      for (const candidate of candidates) {
+        if (payloadBytes + candidate.payloadBytes > budget.maxPayloadBytes) {
+          byteBudgetExhausted = true;
+          break;
+        }
+        const entry = this.getEntry(candidate.peer, candidate.protocol, candidate.messageId);
+        if (entry) {
+          entries.push(entry);
+          payloadBytes += entry.payload.byteLength;
+        }
+      }
+      const { skippedOversizedEntries } = this.db.prepare(
+        'SELECT count(*) AS skippedOversizedEntries FROM protocol_outbox WHERE next_attempt_at <= ? AND length(payload) > ?',
+      ).get(now, budget.maxPayloadBytes) as { skippedOversizedEntries: number };
+      return { entries, payloadBytes, skippedOversizedEntries, byteBudgetExhausted };
+    })();
+  }
+
+  listMetadata(peer?: string): ProtocolOutboxMetadata[] {
+    const statement = this.db.prepare(
+      `SELECT ${OUTBOX_METADATA_COLUMNS} FROM protocol_outbox
+       ${peer === undefined ? '' : 'WHERE peer_id = ?'}
+       ORDER BY first_failure_at, peer_id, protocol, message_id`,
+    );
+    return (peer === undefined ? statement.all() : statement.all(peer)) as ProtocolOutboxMetadata[];
+  }
+
+  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
+    return this.db.prepare(
+      `DELETE FROM protocol_outbox WHERE first_failure_at < ? RETURNING ${OUTBOX_METADATA_COLUMNS}`,
+    ).all(now - this.maxAgeMs) as ProtocolOutboxMetadata[];
+  }
+
+  recordRetryFailure(peer: string, protocol: string, messageId: string, error: string, now: number): ProtocolOutboxMetadata | undefined {
+    return this.db.transaction(() => {
+      const current = this.db.prepare(
+        'SELECT attempts FROM protocol_outbox WHERE peer_id = ? AND protocol = ? AND message_id = ?',
+      ).get(peer, protocol, messageId) as { attempts: number } | undefined;
+      if (!current) return undefined;
+      const attempts = current.attempts + 1;
+      return this.db.prepare(
+        `UPDATE protocol_outbox SET attempts = ?, last_attempt_at = ?, next_attempt_at = ?, last_error = ?
+         WHERE peer_id = ? AND protocol = ? AND message_id = ? RETURNING ${OUTBOX_METADATA_COLUMNS}`,
+      ).get(attempts, now, now + this.backoffFor(attempts), error, peer, protocol, messageId) as ProtocolOutboxMetadata;
+    }).immediate();
+  }
+
+  queueStats(now: number, maxPayloadBytes: number): ProtocolOutboxQueueStats {
+    return this.db.prepare(
+      `SELECT count(*) AS queuedEntries, coalesce(sum(length(payload)), 0) AS queuedBytes,
+       coalesce(max(CASE WHEN next_attempt_at <= ? THEN ? - next_attempt_at END), 0) AS oldestDueAgeMs,
+       count(CASE WHEN next_attempt_at <= ? AND length(payload) > ? THEN 1 END) AS oversizedDueEntries
+       FROM protocol_outbox`,
+    ).get(now, now, now, maxPayloadBytes) as ProtocolOutboxQueueStats;
   }
 
   dropExpired(now: number): ProtocolOutboxEntry[] {
@@ -4029,7 +4112,9 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
       peer: row.peer_id,
       protocol: row.protocol,
       messageId: row.message_id,
-      payload: new Uint8Array(row.payload),
+      // better-sqlite3 already owns a fresh Buffer. A view retains that backing
+      // allocation without a second full-payload copy; writes cannot affect SQL.
+      payload: new Uint8Array(row.payload.buffer, row.payload.byteOffset, row.payload.byteLength),
       attempts: row.attempts,
       firstFailureAt: row.first_failure_at,
       lastAttemptAt: row.last_attempt_at,
