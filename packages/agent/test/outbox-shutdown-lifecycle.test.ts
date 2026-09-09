@@ -23,7 +23,7 @@ import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstra
 
 function syntheticShutdownAgent(): any {
   const agent = Object.create(DKGAgent.prototype) as any;
-  agent.peerSyncSession = new PeerSyncSession();
+  agent.peerSyncSession = PeerSyncSession.stopped();
   agent.lastSyncDisconnectedAt = new Map();
   agent.selectedSwmBootstrapAdmission = new SelectedSwmBootstrapAdmission();
   return agent;

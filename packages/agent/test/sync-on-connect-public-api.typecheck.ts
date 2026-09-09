@@ -1,4 +1,9 @@
 import type { DKGAgent } from '../src/index.js';
+import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
+
+// An active session must always be able to construct its scheduler.
+// @ts-expect-error scheduler callbacks are mandatory for active construction
+new PeerSyncSession();
 
 type AssertFalse<Value extends false> = Value;
 

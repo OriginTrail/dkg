@@ -50,7 +50,7 @@ function temporaryDataDirectory(): string {
 
 function syntheticAgent(dataDirectory?: string): any {
   const agent = Object.create(DKGAgent.prototype) as any;
-  agent.peerSyncSession = new PeerSyncSession();
+  agent.peerSyncSession = PeerSyncSession.stopped();
   agent.lastSyncDisconnectedAt = new Map();
   Object.assign(agent, {
     config: dataDirectory === undefined ? {} : { dataDir: dataDirectory },

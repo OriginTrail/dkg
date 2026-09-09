@@ -15,6 +15,13 @@ import { createPeerEventFixture, deferred, flushMicrotasks } from './_helpers/pe
 
 const PROBE = { protocolsKey: null, connectionKey: null } satisfies Awaited<ReturnType<DKGAgent['getSyncReconcilerProbe']>>;
 
+function activeSessionWithoutJobs(): PeerSyncSession {
+  return new PeerSyncSession({
+    createJob: () => { throw new Error('scheduler is outside this fixture'); },
+    onInternalError: () => undefined,
+  });
+}
+
 describe('peer-event lifecycle', () => {
   it('supplies the fully constructed session when a lazy peer job is created', async () => {
     let observedSession: PeerSyncSession | undefined;
@@ -61,7 +68,7 @@ describe('peer-event lifecycle', () => {
 
   it.each([new Error('queued sync failure'), 'queued sync failure'])('uses active configured replay authority and fences queued errors: %s', async (failure) => {
     const f = await createPeerEventFixture();
-    const session = new PeerSyncSession();
+    const session = activeSessionWithoutJobs();
     try {
       vi.spyOn(f.agent, 'readRfc64CatalogResponsibilitiesV1').mockReturnValue([]);
       vi.spyOn(f.agent, 'resolveRfc64CatalogReceiverAuthorityV1').mockImplementation((contextGraphId) => {

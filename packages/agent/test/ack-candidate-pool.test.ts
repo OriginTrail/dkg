@@ -69,7 +69,10 @@ async function buildAgent(opts: {
   });
   const internals = agent as unknown as AgentInternals;
   // The fixture represents a running node whose identify events may update ACK capabilities.
-  internals.peerSyncSession = new PeerSyncSession();
+  internals.peerSyncSession = new PeerSyncSession({
+    createJob: () => { throw new Error('scheduler is outside this fixture'); },
+    onInternalError: () => undefined,
+  });
   internals.node = {
     libp2p: {
       peerId: { toString: () => internals.peerId },

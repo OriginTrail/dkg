@@ -36,24 +36,24 @@ export class PeerSyncSession extends PeerEventLifetime {
   private scheduler: SyncOnConnectPeerScheduler<RecoveryPlan> | null = null;
 
   constructor(
-    private readonly schedulerCallbacks?: PeerSyncSessionCallbacks,
+    private readonly schedulerCallbacks: PeerSyncSessionCallbacks,
   ) { super(); }
 
   static stopped(): PeerSyncSession {
-    const session = new PeerSyncSession();
+    const session = new PeerSyncSession({
+      createJob: () => { throw new Error('Stopped PeerSyncSession cannot create jobs'); },
+      onInternalError: () => undefined,
+    });
     session.close();
     return session;
   }
 
   getScheduler(): SyncOnConnectPeerScheduler<RecoveryPlan> {
     if (this.scheduler === null) {
-      if (!this.schedulerCallbacks) {
-        throw new Error('PeerSyncSession scheduler callbacks must be supplied at construction');
-      }
       this.scheduler = new SyncOnConnectPeerScheduler({
-        createJob: (remotePeer) => this.schedulerCallbacks!.createJob(remotePeer, this),
+        createJob: (remotePeer) => this.schedulerCallbacks.createJob(remotePeer, this),
         onInternalError: (remotePeer, error, stage) => (
-          this.schedulerCallbacks!.onInternalError(remotePeer, error, stage, this)
+          this.schedulerCallbacks.onInternalError(remotePeer, error, stage, this)
         ),
       });
       if (!this.checkpoint()) this.scheduler.close();

@@ -27,6 +27,13 @@ import {
   type SelectedSwmLifecycleAgentFixture,
 } from './selected-swm-test-helpers.js';
 
+function activeSessionWithoutJobs(): PeerSyncSession {
+  return new PeerSyncSession({
+    createJob: () => { throw new Error('scheduler is outside this fixture'); },
+    onInternalError: () => undefined,
+  });
+}
+
 describe('selected RFC-64 SWM lifecycle wiring', () => {
   it('accounts a real complete private-only no-op without reconciler backoff', async () => {
     const publicCg = 'unselected-public-control';
@@ -65,7 +72,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         ordinaryPrivate: { completed: 1, total: 1 },
       });
 
-      const session = new PeerSyncSession();
+      const session = activeSessionWithoutJobs();
       const backoff = session.syncReconcilerBackoff;
       const accountingAgent = {
         peerSyncSession: session,
@@ -362,7 +369,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         },
       },
       networkAdmissionCoordinator: { isAcceptedPeer: () => true },
-      peerSyncSession: new PeerSyncSession(),
+      peerSyncSession: activeSessionWithoutJobs(),
       knownCorePeerIds: new Set<string>(),
       knownCorePeerIdsV2: new Set<string>(),
       applySyncOnConnectAccounting:
@@ -467,7 +474,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         },
       },
       networkAdmissionCoordinator: { isAcceptedPeer: () => true },
-      peerSyncSession: new PeerSyncSession(),
+      peerSyncSession: activeSessionWithoutJobs(),
       knownCorePeerIds: new Set<string>(),
       knownCorePeerIdsV2: new Set<string>(),
       applySyncOnConnectAccounting:
