@@ -124,6 +124,7 @@ export default defineConfig({
       "test/peer-selection.test.ts",
       "test/sync-requester-priority.test.ts",
       "test/sync-requester-progress.test.ts",
+      "test/public-snapshot-fetch-concurrency.test.ts",
       "test/rootless-durable-bounded-progress.test.ts",
       "test/rootless-durable-skips-legacy-partition.test.ts",
       "test/rootless-lifecycle-graph.test.ts",

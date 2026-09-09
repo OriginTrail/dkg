@@ -1,3 +1,4 @@
+import { mapWithConcurrency } from '../../map-with-concurrency.js';
 import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -38,6 +39,9 @@ const DKG = 'http://dkg.io/ontology/';
  * structure on this node; the exact figure travels as `missingCount`.
  */
 const PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT = 10;
+
+/** Bound each requester round; the shared responder admission policy still applies. */
+export const PUBLIC_SNAPSHOT_FETCH_CONCURRENCY = 4;
 /**
  * Stored length of ONE sampled ref.
  *
@@ -1592,6 +1596,8 @@ export async function syncPublicSnapshotsForMeta(params: {
   remotePeerId: string;
   contextGraphId: string;
   deadline: number;
+  /** Callers may lower the bounded pool for a constrained responder or paired measurements. */
+  fetchConcurrency?: number;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   deleteCheckpoint: (key: string) => void;
@@ -1636,6 +1642,10 @@ export async function syncPublicSnapshotsForMeta(params: {
   const executionBoundary = params.executionBoundary
     ?? createRecoveryExecutionAdmission();
   executionBoundary.assertCurrent();
+  const concurrency = params.fetchConcurrency ?? PUBLIC_SNAPSHOT_FETCH_CONCURRENCY;
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > PUBLIC_SNAPSHOT_FETCH_CONCURRENCY) {
+    throw new RangeError(`Public snapshot fetch concurrency must be between 1 and ${PUBLIC_SNAPSHOT_FETCH_CONCURRENCY}`);
+  }
   const manifestSnapshots = params.snapshotWalk
     ? []
     : collectPublicSnapshotMetadata(params.metaQuads);
@@ -1669,73 +1679,22 @@ export async function syncPublicSnapshotsForMeta(params: {
   let resumedPhases = 0;
   let timedOutPhases = 0;
   let completedPhases = 0;
-  let checkpointAdvances = 0;
-  let readySnapshots = 0;
-  let missingCount = 0;
   let yieldedAtDeadline = false;
-  const missingSample: string[] = [];
-  const noteMissing = (ref: string): void => {
-    missingCount += 1;
-    if (missingSample.length < PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT) {
-      missingSample.push(boundSampledRef(ref));
-    }
-  };
-  /** Every ref from `index` onward is unresolved; record them and stop. */
-  const abandonFrom = (index: number): void => {
-    for (let i = index; i < snapshots.length; i += 1) noteMissing(snapshots[i]!.ref);
-  };
+  let stopDispatch = false;
+  type SnapshotOutcome = { ready: boolean; error?: unknown };
 
-  /**
-   * Carry what the walk achieved out through a throw.
-   *
-   * Everything from `index` on is unresolved — the ref that threw included —
-   * so the counts obey the same `resolved + missing === total` invariant the
-   * returned value does. Without this the caller's `catch` sees only an error,
-   * builds no coverage record, and the continuation loop reads a pass that
-   * materialized real Knowledge Assets as non-advancing.
-   */
-  const rethrowWithProgress = (err: unknown, index: number): never => {
-    abandonFrom(index);
-    attachPublicSnapshotWalkProgress(err, {
-      readySnapshots,
-      totalSnapshots: snapshots.length,
-      missingCount,
-      missingSample,
-    });
-    throw err;
-  };
-
-  for (const [index, snapshot] of snapshots.entries()) {
-    executionBoundary.assertCurrent();
-    // A selected transfer owner may carry exact, manifest-bound evidence from
-    // an earlier bounded slice. Skipping these refs is intentionally cheaper
-    // than re-reading and re-hashing every snapshot blob and assertion graph:
-    // that O(prefix) replay eventually consumed the whole slice and fixed the
-    // continuation at N/N+K forever. The owner is in-memory and resets on any
-    // manifest change, expiry, release or process restart.
-    if (params.snapshotWalk?.isResolved(snapshot.ref)) {
-      readySnapshots += 1;
-      continue;
-    }
-    // Yield BETWEEN Knowledge Assets, and check the clock BEFORE doing any work
-    // for this one. Both halves matter:
-    //
-    // - Before, not after: a cache "hit" is O(KA size) — a full `.nq` read plus
-    //   a SHA-256 — and a miss is a network round trip. Checking afterwards
-    //   would let one KA overrun the budget it was supposed to respect.
-    // - Before the fetch specifically: no `SyncPageResult` exists yet, so
-    //   `timedOutPhases` structurally CANNOT move on this path. That is what
-    //   keeps a local budget decision from being reported as a peer timeout and
-    //   putting a healthy responder into backoff.
-    //
-    // Never mid-KA: a snapshot is applied whole or not at all, so stopping here
-    // can never leave a partially materialized asset.
-    if (Date.now() >= params.deadline) {
-      yieldedAtDeadline = true;
-      abandonFrom(index);
-      break;
-    }
+  // Every callback catches its failure so the ordered pool joins all admitted
+  // reads and mutations. A hard failure or incomplete stream stops new refs;
+  // short prefixes remain eligible for skip-and-continue recovery.
+  const outcomes = await mapWithConcurrency(snapshots, concurrency, async (snapshot): Promise<SnapshotOutcome> => {
+    if (stopDispatch) return { ready: false };
     try {
+      executionBoundary.assertCurrent();
+      if (params.snapshotWalk?.isResolved(snapshot.ref)) return { ready: true };
+      if (Date.now() >= params.deadline) {
+        yieldedAtDeadline = true;
+        return { ready: false };
+      }
       if (await executionBoundary.read(
         () => hasValidSnapshot(params.publicSnapshotStore!, snapshot),
       )) {
@@ -1744,10 +1703,15 @@ export async function syncPublicSnapshotsForMeta(params: {
           await params.onSnapshotReady(snapshot, 'cache');
           executionBoundary.assertCurrent();
         }
-        readySnapshots += 1;
-        continue;
+        return { ready: true };
       }
 
+      // A slow cache miss can consume the remaining round budget. Recheck
+      // at the actual network-dispatch boundary, without blaming the peer.
+      if (Date.now() >= params.deadline) {
+        yieldedAtDeadline = true;
+        return { ready: false };
+      }
       const snapshotOptions: SyncPageFetchOptions = executionBoundary.signal === undefined
         ? { snapshotRef: snapshot.ref }
         : { snapshotRef: snapshot.ref, signal: executionBoundary.signal };
@@ -1776,8 +1740,8 @@ export async function syncPublicSnapshotsForMeta(params: {
         // monotonic recovery progress across the CG without accepting a partial
         // asset.
         executionBoundary.admitSyncMutation(() => params.deleteCheckpoint(result.checkpointKey));
-        abandonFrom(index);
-        break;
+        stopDispatch = true;
+        return { ready: false };
       }
 
       const snapshotQuads = result.quads.map((quad) => ({ ...quad, graph: '' }));
@@ -1798,8 +1762,7 @@ export async function syncPublicSnapshotsForMeta(params: {
         // this KA and nothing else — it stays uncached and unapplied, and is
         // retried from offset zero next pass.
         executionBoundary.admitSyncMutation(() => params.deleteCheckpoint(result.checkpointKey));
-        noteMissing(snapshot.ref);
-        continue;
+        return { ready: false };
       }
       const actualDigest = workspacePublicQuadsDigest(snapshotQuads);
       if (actualDigest !== snapshot.digest || snapshotQuads.length !== snapshot.count) {
@@ -1818,34 +1781,40 @@ export async function syncPublicSnapshotsForMeta(params: {
         executionBoundary.assertCurrent();
       }
       completedPhases += 1;
-      readySnapshots += 1;
-    } catch (err) {
-      executionBoundary.assertCurrent();
-      // Any failure in this KA's work — the blob read, the fetch, the
-      // digest check, the store write, or materialization — leaves the walk
-      // here. Carry what earlier iterations achieved out with it.
-      rethrowWithProgress(err, index);
+      return { ready: true };
+    } catch (error) {
+      stopDispatch = true;
+      return { ready: false, error };
+    }
+  });
+  executionBoundary.assertCurrent();
+
+  // Fold in manifest order, independent of completion order. Include admitted
+  // siblings that completed after an earlier ref failed, and never report a
+  // missing suffix when parallel work has already resolved holes inside it.
+  let readySnapshots = 0;
+  let missingCount = 0;
+  const missingSample: string[] = [];
+  for (const [index, outcome] of outcomes.entries()) {
+    if (outcome.ready) readySnapshots++;
+    else {
+      missingCount++;
+      if (missingSample.length < PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT) {
+        missingSample.push(boundSampledRef(snapshots[index]!.ref));
+      }
     }
   }
-
+  const failure = outcomes.find(outcome => 'error' in outcome);
+  if (failure) {
+    attachPublicSnapshotWalkProgress(failure.error, {
+      readySnapshots, totalSnapshots: snapshots.length, missingCount, missingSample,
+    });
+    throw failure.error;
+  }
   return {
-    bytesReceived,
-    resumedPhases,
-    timedOutPhases,
-    completedPhases,
-    checkpointAdvances,
-    readySnapshots,
-    totalSnapshots: snapshots.length,
-    // The ONLY completion expression, and it is derived rather than asserted.
-    // Every path that gives up on a ref — the deadline yield, a fetch that did
-    // not complete, and the skipped short prefix — routes through
-    // `noteMissing`, so a round can no longer fall out of the loop claiming
-    // success while having abandoned work. A hardcoded `true` here is exactly
-    // how skip-and-continue would have silently reported a complete manifest.
-    completed: missingCount === 0,
-    missingCount,
-    missingSample,
-    yieldedAtDeadline,
+    bytesReceived, resumedPhases, timedOutPhases, completedPhases, checkpointAdvances: 0,
+    readySnapshots, totalSnapshots: snapshots.length, completed: missingCount === 0,
+    missingCount, missingSample, yieldedAtDeadline,
   };
 }
 
