@@ -1572,7 +1572,7 @@ async function runDaemonInnerWithStartupOwnership(
     storeConfig: runtimeStore,
     log,
   });
-  if (wipeResult.wiped) {
+  if (wipeResult.status === 'wiped') {
     log(
       `Chain-state auto-wipe complete: ${wipeResult.removedFiles.length} file(s) removed, ` +
       `${wipeResult.backedUpFiles.length} backed up ` +

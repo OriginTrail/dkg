@@ -132,6 +132,7 @@ export default defineConfig({
           // fast unit lane.
           'test/chain-reset-wipe.test.ts',
           'test/chain-reset-wipe-backup.test.ts',
+          'test/daemon-chain-reset-wipe.test.ts',
           'test/store-health-check.test.ts',
           'test/validate-store-config.test.ts',
           'test/store-wizard.test.ts',

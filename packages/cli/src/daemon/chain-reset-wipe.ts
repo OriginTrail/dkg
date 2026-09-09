@@ -73,7 +73,7 @@ import {
   statSync,
   utimesSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { isExternalBackend, getSparqlEndpoint, CHANGELOG_GRAPH } from '@origintrail-official/dkg-storage';
 
 const STATE_FILE = '.network-state.json';
@@ -150,19 +150,8 @@ const SPARQL_SCOPED_DELETE =
   'WHERE { GRAPH ?g { ?s ?p ?o } ' +
   `FILTER(strstarts(str(?g), "${V10_GRAPH_PREFIX}") || strstarts(str(?g), "${PUBLISHER_GRAPH_PREFIX}") || str(?g) = "${CHANGELOG_GRAPH}") }`;
 
-export interface ChainResetWipeResult {
-  /** True when a wipe was performed. */
-  wiped: boolean;
-  /**
-   * True when a wipe WOULD have run (marker mismatch) but was bypassed
-   * because `skip` was set (`DKG_SKIP_CHAIN_RESET_WIPE=1`). Mutually
-   * exclusive with `wiped`. The marker is deliberately NOT persisted on a
-   * skip, so the wipe re-triggers once the env var is unset.
-   */
-  skipped: boolean;
-  /** The marker we had persisted before this boot, or null on first boot / no persisted state. */
-  prevMarker: string | null;
-  /** Files removed during the wipe (relative to dataDir). Empty when `wiped=false`. */
+interface ChainResetWipeEffects {
+  /** Files removed during the wipe (relative to dataDir). Empty when no wipe ran. */
   removedFiles: string[];
   /**
    * `store.nq` backup filenames created by renaming it instead of deleting it
@@ -177,6 +166,24 @@ export interface ChainResetWipeResult {
    */
   failedFiles: Array<{ file: string; error: string }>;
 }
+
+interface NoChainResetWipeEffects {
+  removedFiles: [];
+  backedUpFiles: [];
+  failedFiles: [];
+}
+
+/**
+ * Inactive means no reset marker is configured; steady means it already matches.
+ * A skipped mismatch preserves the old marker so unsetting the opt-out retries.
+ * A wiped result records an attempt, which may be partial; failedFiles identifies
+ * effects that still need retry.
+ */
+export type ChainResetWipeResult =
+  | ({ status: 'inactive'; prevMarker: null } & NoChainResetWipeEffects)
+  | ({ status: 'steady'; prevMarker: string } & NoChainResetWipeEffects)
+  | ({ status: 'skipped'; prevMarker: string | null } & NoChainResetWipeEffects)
+  | ({ status: 'wiped'; prevMarker: string | null } & ChainResetWipeEffects);
 
 export interface ChainResetWipeOptions {
   /** Node data directory (e.g. `~/.dkg`). */
@@ -547,8 +554,9 @@ function performWipe(
   const walAbs = walPath && walPath.length > 0
     ? walPath
     : join(dataDir, 'random-sampling.wal');
-  const walLabel = walAbs.startsWith(dataDir)
-    ? walAbs.slice(dataDir.length).replace(/^[/\\]+/, '')
+  const dataPrefix = dataDir.endsWith(sep) ? dataDir : dataDir + sep;
+  const walLabel = walAbs.startsWith(dataPrefix)
+    ? walAbs.slice(dataPrefix.length)
     : walAbs;
   wipeAbs(walAbs, walLabel || 'random-sampling.wal');
   for (const suffix of ['', '-journal', '-wal', '-shm']) {
@@ -589,14 +597,14 @@ export async function chainResetWipe(
   // touched so we don't accidentally turn on the protocol later just
   // because some leftover state file made the comparison non-trivial.
   if (opts.currentMarker === undefined) {
-    return { wiped: false, skipped: false, prevMarker: null, removedFiles: [], backedUpFiles: [], failedFiles: [] };
+    return { status: 'inactive', prevMarker: null, removedFiles: [], backedUpFiles: [], failedFiles: [] };
   }
 
   const prev = loadState(opts.dataDir);
   const prevMarker = prev?.chainResetMarker ?? null;
 
   if (prevMarker === opts.currentMarker) {
-    return { wiped: false, skipped: false, prevMarker, removedFiles: [], backedUpFiles: [], failedFiles: [] };
+    return { status: 'steady', prevMarker, removedFiles: [], backedUpFiles: [], failedFiles: [] };
   }
 
   // Dev-loop opt-out. A wipe WOULD run here (marker mismatch, including
@@ -611,7 +619,7 @@ export async function chainResetWipe(
       `Chain reset wipe skipped (DKG_SKIP_CHAIN_RESET_WIPE=1): marker ${prevMarker ?? '<none>'} → ${opts.currentMarker}. ` +
       `Local chain-state preserved; unset the env var to wipe.`,
     );
-    return { wiped: false, skipped: true, prevMarker, removedFiles: [], backedUpFiles: [], failedFiles: [] };
+    return { status: 'skipped', prevMarker, removedFiles: [], backedUpFiles: [], failedFiles: [] };
   }
 
   // Mismatch (including "first boot with marker present"): wipe.
@@ -695,7 +703,7 @@ export async function chainResetWipe(
     log('Chain-state wipe incomplete. Continuing boot so operator can repair filesystem state.');
   }
 
-  return { wiped: true, skipped: false, prevMarker, removedFiles, backedUpFiles, failedFiles };
+  return { status: 'wiped', prevMarker, removedFiles, backedUpFiles, failedFiles };
 }
 
 // =====================================================================
