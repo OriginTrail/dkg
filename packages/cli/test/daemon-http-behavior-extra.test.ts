@@ -1070,7 +1070,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
-          resolveContextGraphReadAuthority: async () => ({
+          resolveContextGraphSubscriptionBootstrapAuthority: async () => ({
             outcome: 'allowed' as const,
             source: 'legacy-local' as const,
             reason: 'test-public',
@@ -1196,7 +1196,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
-          resolveContextGraphReadAuthority: async () => ({
+          resolveContextGraphSubscriptionBootstrapAuthority: async () => ({
             outcome: 'allowed' as const,
             source: 'legacy-local' as const,
             reason: 'test-public',
@@ -1314,7 +1314,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
-          resolveContextGraphReadAuthority: async () => ({
+          resolveContextGraphSubscriptionBootstrapAuthority: async () => ({
             outcome: 'allowed' as const,
             source: 'legacy-local' as const,
             reason: 'test-public',
@@ -2472,19 +2472,17 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
     let observedReadOpts: {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
-      registrationResolution?: 'policy-read' | 'bootstrap-scan';
     } | undefined;
     let routeServer: Server | null = null;
     try {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
-          resolveContextGraphReadAuthority: async (
+          resolveContextGraphSubscriptionBootstrapAuthority: async (
             _id: string,
             readOpts: {
               callerAgentAddress?: string;
               allowSubscriptionFallback?: boolean;
-              registrationResolution?: 'policy-read' | 'bootstrap-scan';
             },
           ) => {
             observedReadOpts = readOpts;
@@ -2569,7 +2567,6 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
       expect(observedReadOpts).toEqual({
         callerAgentAddress: CALLER,
         allowSubscriptionFallback: false,
-        registrationResolution: 'bootstrap-scan',
       });
       return {
         status: response.status,

@@ -24,7 +24,7 @@ describe('Context Graph registration resolution deadlines', () => {
   
       const binding = fixture.agent.resolveContextGraphRegistrationBinding(
         'cold-cleartext',
-        { registrationResolution: 'bootstrap-scan' },
+        { registrationTimeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS },
       );
       await vi.advanceTimersByTimeAsync(2_501);
   
@@ -54,7 +54,7 @@ describe('Context Graph registration resolution deadlines', () => {
   
       const binding = fixture.agent.resolveContextGraphRegistrationBinding(
         'cold-cleartext',
-        { registrationResolution: 'bootstrap-scan' },
+        { registrationTimeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS },
       );
       await vi.advanceTimersByTimeAsync(CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS - 1);
       const operationSignal = fixture.resolveContextGraphIdByNameHash.mock.calls[0]?.[1]?.signal;
@@ -75,7 +75,7 @@ describe('Context Graph registration resolution deadlines', () => {
     ['policy-read', CHAIN_POLICY_READ_TIMEOUT_MS],
     ['bootstrap-scan', CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS],
   ] as const)('applies the %s deadline to a direct local binding read', async (
-    registrationResolution,
+    _registrationResolution,
     timeoutMs,
   ) => {
     vi.useFakeTimers();
@@ -92,7 +92,7 @@ describe('Context Graph registration resolution deadlines', () => {
   
       const binding = fixture.agent.resolveContextGraphRegistrationBinding(
         LOCAL_ID,
-        { registrationResolution },
+        { registrationTimeoutMs: timeoutMs },
       );
       await vi.advanceTimersByTimeAsync(timeoutMs - 1);
       const operationSignal = resolveDirect.mock.calls[0]?.[1]?.signal;
@@ -109,4 +109,3 @@ describe('Context Graph registration resolution deadlines', () => {
     }
   });
 });
-

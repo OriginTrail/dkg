@@ -300,6 +300,7 @@ import {
   TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
   CHAIN_POLICY_READ_TIMEOUT_MS,
+  CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
@@ -334,7 +335,6 @@ import {
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
   type ContextGraphMembershipStore,
-  type ContextGraphRegistrationResolution,
   type DurableSyncDiagnostics,
   type SharedMemorySyncDiagnostics,
   type CatchupSyncDiagnostics,
@@ -696,7 +696,6 @@ export class QueryMethods extends DKGAgentBase {
     opts: {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
-      registrationResolution?: ContextGraphRegistrationResolution;
       signal?: AbortSignal;
     } = {},
   ): Promise<boolean> {
@@ -708,13 +707,40 @@ export class QueryMethods extends DKGAgentBase {
     opts: {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
-      /**
-       * Opt in only at an explicit subscription/bootstrap boundary. Security-
-       * sensitive ordinary reads keep the short fail-closed chain deadline.
-       */
-      registrationResolution?: ContextGraphRegistrationResolution;
       signal?: AbortSignal;
     } = {},
+  ): Promise<ContextGraphReadAuthorityDecision> {
+    return this.resolveContextGraphReadAuthorityWithRegistrationTimeout(
+      contextGraphId,
+      opts,
+      CHAIN_POLICY_READ_TIMEOUT_MS,
+    );
+  }
+
+  /** Subscription admission may populate a cold chain name-hash index. */
+  public async resolveContextGraphSubscriptionBootstrapAuthority(this: DKGAgent,
+    contextGraphId: string,
+    opts: {
+      callerAgentAddress?: string;
+      allowSubscriptionFallback?: boolean;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<ContextGraphReadAuthorityDecision> {
+    return this.resolveContextGraphReadAuthorityWithRegistrationTimeout(
+      contextGraphId,
+      opts,
+      CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
+    );
+  }
+
+  private async resolveContextGraphReadAuthorityWithRegistrationTimeout(this: DKGAgent,
+    contextGraphId: string,
+    opts: {
+      callerAgentAddress?: string;
+      allowSubscriptionFallback?: boolean;
+      signal?: AbortSignal;
+    },
+    registrationTimeoutMs: number,
   ): Promise<ContextGraphReadAuthorityDecision> {
     const acceptedPublicPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
@@ -729,7 +755,7 @@ export class QueryMethods extends DKGAgentBase {
       getRegisteredAuthority: () => this.resolveRegisteredContextGraphAuthority(
         contextGraphId,
         {
-          registrationResolution: opts.registrationResolution,
+          registrationTimeoutMs,
           signal: opts.signal,
         },
       ),

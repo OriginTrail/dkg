@@ -657,14 +657,6 @@ export interface ChatSendResult {
  */
 export type ContextGraphSyncMode = 'on-demand' | 'always-on';
 
-/** Tracks the subscription and sync state of a context graph. */
-/**
- * Registration-binding latency policy selected at the read/bootstrap boundary.
- * Ordinary authorization reads fail closed quickly; explicit bootstrap scans
- * may spend the longer bounded window needed to populate a cold reverse index.
- */
-export type ContextGraphRegistrationResolution = 'policy-read' | 'bootstrap-scan';
-
 export interface ContextGraphSub {
   name?: string;
   /** Requested synchronization lifetime, normalized before entering live state. */

@@ -35,18 +35,18 @@ describe('Context Graph subscription authority retry', () => {
     let completeColdRetry!: (value: bigint | null) => void;
     const resolveByNameHash = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
       .mockImplementation((_nameHash, options) => {
+        // Other startup policy probes may use the same adapter method without
+        // the bounded registration resolver's signal. They are not the cold
+        // binding attempts this fixture controls.
+        if (!options?.signal) return Promise.resolve(null);
         attempt += 1;
         if (attempt > 1) {
           return new Promise<bigint | null>((resolve) => { completeColdRetry = resolve; });
         }
-        return new Promise<bigint | null>((resolve) => {
-          const signal = options?.signal;
-          if (signal?.aborted) {
-            resolve(null);
-            return;
-          }
-          signal?.addEventListener('abort', () => resolve(null), { once: true });
-        });
+        // Keep startup deterministic: the first lookup is unavailable without
+        // spending the full bootstrap scan deadline. The second lookup remains
+        // open long enough to prove the background retry owns that deadline.
+        return Promise.reject(new Error('temporary name-hash lookup outage'));
       });
     agent = await DKGAgent.create({
       name: 'PrivateReadColdBindingBackgroundRetry',
@@ -63,8 +63,10 @@ describe('Context Graph subscription authority retry', () => {
     const retry = vi.spyOn(agent, 'retryUnavailableContextGraphSubscriptionAuthorities');
 
     await agent.start();
-    await vi.waitFor(() => expect(resolveByNameHash).toHaveBeenCalledTimes(2));
-    const retrySignal = resolveByNameHash.mock.calls[1]?.[1]?.signal;
+    await vi.waitFor(() => expect(attempt).toBe(2));
+    const retrySignal = [...resolveByNameHash.mock.calls]
+      .reverse()
+      .find(([, options]) => options?.signal)?.[1]?.signal;
     expect(retrySignal?.aborted).toBe(false);
     await new Promise<void>((resolve) => {
       setTimeout(resolve, CHAIN_POLICY_READ_TIMEOUT_MS + 1);
@@ -85,7 +87,8 @@ describe('Context Graph subscription authority retry', () => {
     expect(load).toHaveBeenCalledTimes(2);
     expect(load).toHaveBeenNthCalledWith(1, contextGraphId);
     expect(load).toHaveBeenNthCalledWith(2, contextGraphId);
-    expect(resolveByNameHash.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+    expect(resolveByNameHash.mock.calls.find(([, options]) => options?.signal)?.[1]?.signal?.aborted)
+      .toBe(false);
     expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
       subscribed: true,
       onChainId: '7',
@@ -131,7 +134,7 @@ describe('Context Graph subscription authority retry', () => {
       contextGraphSubscriptionRehydrationEnabled: true,
     });
     let authorityAvailable = false;
-    const resolveAuthority = vi.spyOn(agent, 'resolveContextGraphReadAuthority')
+    const resolveAuthority = vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
       .mockImplementation(async (candidateId) => {
       if (candidateId === contextGraphId && !authorityAvailable) {
         return {
@@ -218,7 +221,7 @@ describe('Context Graph subscription authority retry', () => {
     let enteredRetry!: () => void;
     const retryGate = new Promise<void>((resolve) => { releaseRetry = resolve; });
     const retryStarted = new Promise<void>((resolve) => { enteredRetry = resolve; });
-    vi.spyOn(agent, 'resolveContextGraphReadAuthority')
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
       .mockImplementation(async (contextGraphId) => {
         if (contextGraphId === liveContextGraphId) {
           return {
@@ -283,7 +286,7 @@ describe('Context Graph subscription authority retry', () => {
       contextGraphSubscriptionRehydrationEnabled: true,
     });
     let attempts = 0;
-    vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockImplementation(async () => {
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority').mockImplementation(async () => {
       attempts += 1;
       return attempts === 1
         ? {
@@ -352,7 +355,7 @@ describe('Context Graph subscription authority retry', () => {
     });
     let attempts = 0;
     let retrySignal: AbortSignal | undefined;
-    vi.spyOn(agent, 'resolveContextGraphReadAuthority')
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
       .mockImplementation(async (_candidateId, options) => {
         attempts += 1;
         if (attempts === 1) {
@@ -416,7 +419,7 @@ describe('Context Graph subscription authority retry', () => {
     let enteredRetry!: () => void;
     const retryGate = new Promise<void>((resolve) => { releaseRetry = resolve; });
     const retryStarted = new Promise<void>((resolve) => { enteredRetry = resolve; });
-    vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockImplementation(async () => {
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority').mockImplementation(async () => {
       attempts += 1;
       if (attempts === 1) {
         return {
@@ -479,7 +482,7 @@ describe('Context Graph subscription authority retry', () => {
     let enteredRetry!: () => void;
     const retryGate = new Promise<void>((resolve) => { releaseRetry = resolve; });
     const retryStarted = new Promise<void>((resolve) => { enteredRetry = resolve; });
-    vi.spyOn(agent, 'resolveContextGraphReadAuthority')
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
       .mockImplementation(async (contextGraphId) => {
         if (contextGraphId === liveContextGraphId) {
           return {

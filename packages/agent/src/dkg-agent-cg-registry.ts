@@ -300,7 +300,6 @@ import {
   TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
   CHAIN_POLICY_READ_TIMEOUT_MS,
-  CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { runBoundedOperation } from './bounded-operation.js';
@@ -336,7 +335,6 @@ import {
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
   type ContextGraphMembershipStore,
-  type ContextGraphRegistrationResolution,
   type DurableSyncDiagnostics,
   type SharedMemorySyncDiagnostics,
   type CatchupSyncDiagnostics,
@@ -626,13 +624,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     contextGraphId: string,
     options: {
       signal?: AbortSignal;
-      registrationResolution?: ContextGraphRegistrationResolution;
+      registrationTimeoutMs?: number;
     } = {},
   ): Promise<ContextGraphRegistrationBinding> {
-    const registrationResolution = options.registrationResolution ?? 'policy-read';
-    const registrationResolutionTimeoutMs = registrationResolution === 'bootstrap-scan'
-      ? CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS
-      : CHAIN_POLICY_READ_TIMEOUT_MS;
+    const registrationResolutionTimeoutMs = options.registrationTimeoutMs
+      ?? CHAIN_POLICY_READ_TIMEOUT_MS;
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return { kind: 'unregistered' };
     }

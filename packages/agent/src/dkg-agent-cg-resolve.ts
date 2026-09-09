@@ -380,7 +380,6 @@ import {
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
   type ContextGraphMembershipStore,
-  type ContextGraphRegistrationResolution,
   type DurableSyncDiagnostics,
   type SharedMemorySyncDiagnostics,
   type CatchupSyncDiagnostics,
@@ -1527,14 +1526,14 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     options: {
       allowCachedRoster?: boolean;
       signal?: AbortSignal;
-      registrationResolution?: ContextGraphRegistrationResolution;
+      registrationTimeoutMs?: number;
     } = {},
   ): Promise<RegisteredContextGraphAuthority> {
     const registration = await this.resolveContextGraphRegistrationBinding(
       contextGraphId,
       {
         signal: options.signal,
-        registrationResolution: options.registrationResolution,
+        registrationTimeoutMs: options.registrationTimeoutMs,
       },
     );
     if (registration.kind !== 'registered') return registration;
