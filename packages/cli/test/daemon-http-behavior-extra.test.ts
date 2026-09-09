@@ -2469,6 +2469,11 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
     } as any;
 
     let subscribeCalled = false;
+    let observedReadOpts: {
+      callerAgentAddress?: string;
+      allowSubscriptionFallback?: boolean;
+      registrationResolution?: 'policy-read' | 'bootstrap-scan';
+    } | undefined;
     let routeServer: Server | null = null;
     try {
       routeServer = createServer(async (req, res) => {
@@ -2479,14 +2484,10 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
             readOpts: {
               callerAgentAddress?: string;
               allowSubscriptionFallback?: boolean;
-              allowColdRegistrationBinding?: boolean;
+              registrationResolution?: 'policy-read' | 'bootstrap-scan';
             },
           ) => {
-            expect(readOpts).toEqual({
-              callerAgentAddress: CALLER,
-              allowSubscriptionFallback: false,
-              allowColdRegistrationBinding: true,
-            });
+            observedReadOpts = readOpts;
             if (opts.authority === 'throw') throw new Error('authority read failed');
             return {
               outcome: opts.authority,
@@ -2565,6 +2566,11 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
           body: JSON.stringify({ contextGraphId, includeSharedMemory: false }),
         },
       );
+      expect(observedReadOpts).toEqual({
+        callerAgentAddress: CALLER,
+        allowSubscriptionFallback: false,
+        registrationResolution: 'bootstrap-scan',
+      });
       return {
         status: response.status,
         body: await response.json() as Record<string, unknown>,

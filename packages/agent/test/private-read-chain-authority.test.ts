@@ -887,6 +887,74 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
   }, 15_000);
 
+  it('drains a cancelled authority retry without activating after its save settles', async () => {
+    const contextGraphId = 'persisted-cold-binding-stop-during-save';
+    const rows = new Map<string, any>([[contextGraphId, {
+      id: contextGraphId,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+    }]]);
+    let releaseSave!: () => void;
+    let enteredSave!: () => void;
+    const saveGate = new Promise<void>((resolve) => { releaseSave = resolve; });
+    const saveStarted = new Promise<void>((resolve) => { enteredSave = resolve; });
+    agent = await DKGAgent.create({
+      name: 'PrivateReadAuthorityRetryShutdownFence',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...rows.values()],
+        load: async (id) => rows.get(id) ?? null,
+        save: async (row) => {
+          if (row.id === contextGraphId && row.onChainId === '7') {
+            enteredSave();
+            await saveGate;
+          }
+          rows.set(row.id, row);
+        },
+        delete: async (id) => { rows.delete(id); },
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+    });
+    let attempts = 0;
+    let retrySignal: AbortSignal | undefined;
+    vi.spyOn(agent, 'resolveContextGraphReadAuthority')
+      .mockImplementation(async (_candidateId, options) => {
+        attempts += 1;
+        if (attempts === 1) {
+          return {
+            outcome: 'unavailable',
+            source: 'registered-chain',
+            reason: 'temporary-authority-outage',
+            metadataBootstrap: 'eligible',
+          } as const;
+        }
+        retrySignal = options?.signal;
+        return {
+          outcome: 'allowed',
+          source: 'registered-chain',
+          reason: 'open-context-graph',
+          metadataBootstrap: 'eligible',
+          onChainId: 7n,
+        } as const;
+      });
+    const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
+    const persistMembership = vi.spyOn(agent, 'persistLocalNodeMembership');
+
+    await agent.start();
+    await saveStarted;
+    const stopping = agent.stop();
+    await vi.waitFor(() => expect(retrySignal?.aborted).toBe(true));
+    releaseSave();
+    await stopping;
+
+    expect(agent.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);
+    expect(subscribe.mock.calls.some(([id]) => id === contextGraphId)).toBe(false);
+    expect(persistMembership.mock.calls.some(([id]) => id === contextGraphId)).toBe(false);
+  }, 15_000);
+
   it('does not activate the authority-retry target after it is deleted', async () => {
     const contextGraphId = 'persisted-cold-deleted-during-retry';
     const rows = new Map<string, any>([[contextGraphId, {

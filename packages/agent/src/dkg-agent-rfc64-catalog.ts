@@ -472,6 +472,7 @@ const rfc64SystemContextGraphIdsV1 = new Set<string>(Object.values(SYSTEM_CONTEX
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_V1 = 64;
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_PER_PEER_V1 = 4;
 const RFC64_CATALOG_REPLAY_MAX_CONNECTED_PEERS_V1 = 64;
+const RFC64_CATALOG_REPLAY_UNRESOLVED_PEER_CAPACITY_V1 = 64;
 export const RFC64_CATALOG_TARGET_MAX_ENTRIES_V1 = 1_024;
 export const RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 = 64;
 export const RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1 = 64;
@@ -519,6 +520,22 @@ interface Rfc64CatalogReplayProgressV1 {
   active: boolean;
   failed: boolean;
   completion: Promise<Readonly<{ requested: number; failed: number }>> | null;
+}
+
+/** Retain bounded attribution; overflow survives as a full-replay witness. */
+function retainRfc64CatalogReplayPeerFailureV1(
+  progress: Rfc64CatalogReplayProgressV1,
+  peerId: string,
+): boolean {
+  if (
+    progress.unresolvedPeers.has(peerId)
+    || progress.unresolvedPeers.size < RFC64_CATALOG_REPLAY_UNRESOLVED_PEER_CAPACITY_V1
+  ) {
+    progress.unresolvedPeers.add(peerId);
+    return true;
+  }
+  progress.requiresFullReplay = true;
+  return false;
 }
 
 interface Rfc64CatalogReplayPeerDemandV1 {
@@ -1311,6 +1328,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       rfc64CatalogReplayConnectionRuntimesV1.set(this, runtime);
     }
     return runtime.prepare(peerId);
+  }
+
+  /** Release live-session replay debounce after the peer is fully disconnected. */
+  closeRfc64CatalogConnectionReplaySessionV1(
+    this: DKGAgent,
+    peerId: string,
+  ): void {
+    rfc64CatalogReplayConnectionRuntimesV1.get(this)?.peerDisconnected(peerId);
   }
 
   /** Forget process-local operational targets when receiver ownership ends. */
@@ -2939,7 +2964,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
                   return;
                 }
                 if (attempt === 1) {
-                  replayProgress.unresolvedPeers.add(remotePeerId);
+                  if (!retainRfc64CatalogReplayPeerFailureV1(
+                    replayProgress,
+                    remotePeerId,
+                  )) {
+                    requiresFullReplay = true;
+                  }
                   failed += 1;
                 }
               }

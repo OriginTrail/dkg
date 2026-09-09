@@ -1246,6 +1246,7 @@ export class DKGAgentBase {
   protected contextGraphSubscriptionAuthorityRetryTimer: ReturnType<typeof setTimeout> | null = null;
   protected contextGraphSubscriptionAuthorityRetryAbortController: AbortController | null = null;
   protected contextGraphSubscriptionAuthorityRetryInFlight = false;
+  protected contextGraphSubscriptionAuthorityRetryCompletion: Promise<void> | null = null;
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();

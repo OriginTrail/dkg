@@ -2001,7 +2001,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     if (this.started) return;
-    this.clearContextGraphSubscriptionAuthorityRetry();
+    void this.clearContextGraphSubscriptionAuthorityRetry();
     this.contextGraphSubscriptionAuthorityRetryAbortController = new AbortController();
     this.contextGraphMembershipPersistence.reopen();
     this.vmReconcileRuntimeReady = false;
@@ -3944,6 +3944,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         .getPeers()
         .some((p) => p.toString() === remotePeer);
       if (stillConnected) return;
+      this.closeRfc64CatalogConnectionReplaySessionV1(remotePeer);
       this.skippedNoSyncPeers.delete(remotePeer);
       this.lastSyncDisconnectedAt.set(remotePeer, Date.now());
     });
@@ -4190,7 +4191,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.contextGraphSubscriptionAuthorityRetryTimer = null;
       if (!this.started || controller.signal.aborted) return;
       this.contextGraphSubscriptionAuthorityRetryInFlight = true;
-      this.retryUnavailableContextGraphSubscriptionAuthorities(controller.signal)
+      const completion = this.retryUnavailableContextGraphSubscriptionAuthorities(controller.signal)
         .catch((error: unknown) => {
           if (controller.signal.aborted) return;
           this.log.warn(
@@ -4201,6 +4202,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           );
         })
         .finally(() => {
+          if (this.contextGraphSubscriptionAuthorityRetryCompletion === completion) {
+            this.contextGraphSubscriptionAuthorityRetryCompletion = null;
+          }
           if (this.contextGraphSubscriptionAuthorityRetryAbortController !== controller) return;
           this.contextGraphSubscriptionAuthorityRetryInFlight = false;
           if (!this.started || controller.signal.aborted) return;
@@ -4211,11 +4215,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             this.scheduleContextGraphSubscriptionAuthorityRetry(ctx, 30_000);
           }
         });
+      this.contextGraphSubscriptionAuthorityRetryCompletion = completion;
     }, Math.max(0, delayMs));
     this.contextGraphSubscriptionAuthorityRetryTimer.unref?.();
   }
 
-  clearContextGraphSubscriptionAuthorityRetry(this: DKGAgent): void {
+  clearContextGraphSubscriptionAuthorityRetry(this: DKGAgent): Promise<void> | null {
     if (this.contextGraphSubscriptionAuthorityRetryTimer !== null) {
       clearTimeout(this.contextGraphSubscriptionAuthorityRetryTimer);
       this.contextGraphSubscriptionAuthorityRetryTimer = null;
@@ -4223,6 +4228,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.contextGraphSubscriptionAuthorityRetryAbortController?.abort();
     this.contextGraphSubscriptionAuthorityRetryAbortController = null;
     this.contextGraphSubscriptionAuthorityRetryInFlight = false;
+    const completion = this.contextGraphSubscriptionAuthorityRetryCompletion;
+    this.contextGraphSubscriptionAuthorityRetryCompletion = null;
+    return completion;
   }
 
   /**
@@ -10100,7 +10108,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
     const status = this.contextGraphSubscriptionRehydrationStatus;
-    if (!store || !status?.rehydrationEnabled || signal.aborted) return;
+    const owner = this.contextGraphSubscriptionAuthorityRetryAbortController;
+    const isCurrentRetry = (): boolean => (
+      owner !== null
+      && owner.signal === signal
+      && this.contextGraphSubscriptionAuthorityRetryAbortController === owner
+      && !signal.aborted
+    );
+    if (!store || !status?.rehydrationEnabled || !isCurrentRetry()) return;
     const ctx = createOperationContext('init');
     const candidates = [...this.contextGraphSubscriptionDormancyById]
       .filter(([, reason]) => reason === 'authorityUnavailable')
@@ -10124,13 +10139,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
 
     for (const contextGraphId of candidates) {
-      if (signal.aborted) return;
+      if (!isCurrentRetry()) return;
       if (
         this.contextGraphSubscriptionDormancyById.get(contextGraphId)
           !== 'authorityUnavailable'
       ) continue;
       const revision = this.contextGraphSubscriptionPersistRevisions.get(contextGraphId) ?? 0;
       const candidate = await loadRow(contextGraphId);
+      if (!isCurrentRetry()) return;
       if (candidate === null) {
         this.updateContextGraphSubscriptionRehydrationStatusAfterClear([contextGraphId]);
         continue;
@@ -10146,7 +10162,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         reason: 'unexpected-authority-error',
         metadataBootstrap: 'eligible' as const,
       }));
-      if (signal.aborted) return;
+      if (!isCurrentRetry()) return;
       if (
         this.contextGraphSubscriptionDormancyById.get(contextGraphId)
           !== 'authorityUnavailable'
@@ -10162,7 +10178,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
 
       const currentRow = await loadRow(contextGraphId);
-      if (signal.aborted) return;
+      if (!isCurrentRetry()) return;
       if (
         currentRow === null
         || this.contextGraphSubscriptionDormancyById.get(contextGraphId)
@@ -10206,6 +10222,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         lastReconciledOrdinal: currentRow.lastReconciledOrdinal,
         coreHosted: currentRow.coreHosted,
       }, { persist: false, updateRehydrationStatus: false });
+      const rollbackRecoveredSubscription = (): void => {
+        if (this.subscribedContextGraphs.get(contextGraphId) === recoveredSubscription) {
+          this.deleteContextGraphSubscription(contextGraphId);
+        }
+      };
       try {
         // Cold registration discovery is itself the authoritative binding
         // proof. Carry that proof into the canonical subscription before
@@ -10214,12 +10235,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // default RFC-64 selection registry. Await the responsibility boundary
         // and durably self-heal the binding before reporting recovery complete.
         await this.reconcileRfc64CatalogResponsibilityV1(contextGraphId);
+        if (!isCurrentRetry()) {
+          rollbackRecoveredSubscription();
+          return;
+        }
         await this.persistContextGraphSubscriptionStrict(
           contextGraphId,
           recoveredSubscription,
           currentRow.syncScoped,
           () => (
-            !signal.aborted
+            isCurrentRetry()
             && this.subscribedContextGraphs.get(contextGraphId) === recoveredSubscription
             && this.contextGraphSubscriptionDormancyById.get(contextGraphId)
               === 'authorityUnavailable'
@@ -10227,11 +10252,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               === revision
           ),
         );
-      } catch (error) {
-        if (this.subscribedContextGraphs.get(contextGraphId) === recoveredSubscription) {
-          this.deleteContextGraphSubscription(contextGraphId);
+        if (!isCurrentRetry()) {
+          rollbackRecoveredSubscription();
+          return;
         }
-        if (!signal.aborted) {
+      } catch (error) {
+        rollbackRecoveredSubscription();
+        if (isCurrentRetry()) {
           this.log.warn(
             ctx,
             `Deferred persisted context-graph subscription "${contextGraphId}" after authority recovery: ${error instanceof Error ? error.message : String(error)}`,

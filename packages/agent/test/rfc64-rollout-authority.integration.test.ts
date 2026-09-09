@@ -1000,6 +1000,61 @@ describe('RFC-64 rollout authority integration', () => {
     expect(recoveredStatus?.stableReason).not.toBe('catalog-replay-incomplete');
   });
 
+  it('bounds unresolved provider attribution and retains an aggregate churn witness', async () => {
+    const edge = await startAgent({
+      name: 'replay-bounded-unresolved-provider-churn',
+      activation: activation('catalog'),
+    });
+    vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([] as never);
+    const service = (edge as any).rfc64PublicCatalogServiceV1;
+    const requestReplay = vi.spyOn(service, 'requestCatalogHeadReplay')
+      .mockRejectedValue(new Rfc64PublicCatalogTransportErrorV1(
+        'catalog-transport-wire',
+        'provider unreachable during churn',
+      ));
+    const queueGeneration = (generation: number): void => {
+      for (let index = 0; index < 64; index += 1) {
+        expect(edge.markRfc64CatalogReplayPeerPendingV1(
+          CONTEXT_GRAPH_ID,
+          `12D3KooWReplayFailedGeneration${generation}Peer${index}`,
+        )).not.toBeNull();
+      }
+    };
+
+    queueGeneration(0);
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+      CONTEXT_GRAPH_ID,
+      { seedConnectedPeers: false },
+    )).resolves.toEqual({ requested: 0, failed: 64 });
+    queueGeneration(1);
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+      CONTEXT_GRAPH_ID,
+      { seedConnectedPeers: false },
+    )).resolves.toEqual({ requested: 0, failed: 65 });
+
+    requestReplay.mockClear();
+    requestReplay.mockResolvedValue(Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+      heads: Object.freeze([]),
+    }));
+    expect(edge.markRfc64CatalogReplayPeerPendingV1(
+      CONTEXT_GRAPH_ID,
+      '12D3KooWReplayFailedGenerationRecoveryPeer',
+    )).not.toBeNull();
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+      CONTEXT_GRAPH_ID,
+      { seedConnectedPeers: false },
+    )).resolves.toEqual({ requested: 64, failed: 1 });
+    expect(requestReplay).toHaveBeenCalledTimes(64);
+    await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        phase: 'blocked',
+        stableReason: 'catalog-replay-incomplete',
+      }),
+    );
+  });
+
   it('marks then clears the synchronous connection replay fence when admission denies the peer', async () => {
     const peer = await startAgent({ name: 'replay-denied-connection-peer' });
     const edge = await startAgent({
@@ -1145,7 +1200,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(reannounce).toHaveBeenCalledTimes(1);
   }, 15_000);
 
-  it('debounces reconnect replay before expiry and admits it at the exact boundary', async () => {
+  it('debounces one live session but replays a genuine reconnect before time expiry', async () => {
     const edge = await startAgent({
       name: 'replay-connection-debounce-expiry',
       activation: activation('catalog'),
@@ -1161,8 +1216,13 @@ describe('RFC-64 rollout authority integration', () => {
     vi.spyOn(edge as any, 'drainPendingSenderKeyForPeer')
       .mockResolvedValue(0);
     const markPending = vi.spyOn(edge, 'markRfc64CatalogReplayPeerPendingV1');
+    let providerHead = 'head-v1';
+    const replayedHeads: string[] = [];
     const replay = vi.spyOn(edge, 'requestRfc64CatalogHeadReplaysFromConnectedPeersV1')
-      .mockResolvedValue(Object.freeze({ requested: 1, failed: 0 }));
+      .mockImplementation(async () => {
+        replayedHeads.push(providerHead);
+        return Object.freeze({ requested: 1, failed: 0 });
+      });
     vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1')
       .mockResolvedValue(Object.freeze({ announced: 0, failed: 0, manifest: Object.freeze([]) }));
     const now = vi.spyOn(Date, 'now').mockReturnValue(100_000);
@@ -1178,15 +1238,26 @@ describe('RFC-64 rollout authority integration', () => {
     edge.node.libp2p.dispatchEvent(event());
     await vi.waitFor(() => expect(replay).toHaveBeenCalledTimes(1));
 
-    now.mockReturnValue(159_999);
+    now.mockReturnValue(109_999);
     edge.node.libp2p.dispatchEvent(event());
     await vi.waitFor(() => expect(admission).toHaveBeenCalledTimes(2));
     expect(replay).toHaveBeenCalledTimes(1);
 
-    now.mockReturnValue(160_000);
+    vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([] as never);
+    now.mockReturnValue(110_000);
+    edge.node.libp2p.dispatchEvent(new CustomEvent('connection:close', {
+      detail: {
+        remotePeer,
+        remoteAddr: { toString: () => '/ip4/127.0.0.1/tcp/1' },
+        timeline: { open: 100_000, close: 110_000 },
+      },
+    } as any));
+    providerHead = 'head-v2';
+    now.mockReturnValue(110_001);
     edge.node.libp2p.dispatchEvent(event());
     await vi.waitFor(() => expect(replay).toHaveBeenCalledTimes(2));
     expect(markPending).toHaveBeenCalledTimes(2);
+    expect(replayedHeads).toEqual(['head-v1', 'head-v2']);
   }, 15_000);
 
   it('connection replay sends public and authorized private heads without disclosing private metadata to a nonmember', async () => {

@@ -51,6 +51,11 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     this.#maxPeers = maxPeers;
   }
 
+  /** End debounce ownership only after the peer's final live connection closes. */
+  peerDisconnected(peerId: string): void {
+    this.#byPeer.delete(peerId);
+  }
+
   prepare(
     peerId: string,
     nowMs = Date.now(),
