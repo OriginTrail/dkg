@@ -4,7 +4,22 @@ import { chmodSync, mkdirSync, existsSync, statSync, copyFileSync, mkdtempSync, 
 import { tmpdir } from 'node:os';
 import { join, win32 } from 'node:path';
 import { snapshotMcpConfigSource, writeMcpConfigAtomic } from '../src/mcp-config-file.js';
+import { detectClients } from '../src/mcp-client-registry.js';
+import { detectMcpRuntime } from '../src/mcp-runtime.js';
 import { copyWindowsMcpConfigMetadata, linuxMetadataCopyCommand, mcpConfigPersistenceStrategy } from '../src/mcp-config-metadata.js';
+
+const runtimeFixture = vi.hoisted(() => ({ release: undefined as string | undefined, proc: undefined as string | undefined }));
+vi.mock('node:os', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return { ...actual, platform: () => process.platform, release: () => runtimeFixture.release ?? actual.release() };
+});
+vi.mock('node:fs', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual, readFileSync: ((...args: Parameters<typeof actual.readFileSync>) => {
+    if (args[0] === '/proc/version' && runtimeFixture.proc !== undefined) return runtimeFixture.proc;
+    return actual.readFileSync(...args);
+  }) as typeof actual.readFileSync };
+});
 
 vi.mock('node:child_process', async importOriginal => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -19,21 +34,50 @@ beforeEach(() => {
   path = join(directory, "config 'quoted'.json");
   writeFileSync(path, '{"original":true}\n');
 });
-afterEach(() => { vi.unstubAllEnvs(); vi.mocked(execFileSync).mockReset(); rmSync(directory, { recursive: true, force: true }); });
+afterEach(() => { runtimeFixture.release = undefined; runtimeFixture.proc = undefined; vi.unstubAllEnvs(); vi.mocked(execFileSync).mockReset(); rmSync(directory, { recursive: true, force: true }); });
 
-it.each([
-  ['drive', 'C:\\fixture\\config.json', 'windows-wsl'],
-  ['network share', '\\\\server\\share\\config.json', 'windows-wsl'],
-  ['Linux distro', '\\\\wsl.localhost\\Ubuntu\\home\\user\\config.json', 'linux'],
-  ['legacy Linux distro', '\\\\wsl$\\Ubuntu\\home\\user\\config.json', 'linux'],
-] as const)('selects native WSL persistence from the destination on a %s', (_label, translated, kind) => {
+const signals = [
+  { name: 'distro environment', env: 'WSL_DISTRO_NAME', release: 'generic', proc: 'generic' },
+  { name: 'interop environment', env: 'WSL_INTEROP', release: 'generic', proc: 'generic' },
+  { name: 'Microsoft release', release: '5.15.0-microsoft-standard', proc: 'generic' },
+  { name: 'WSL-only release', release: '5.15.0-wsl2', proc: 'generic' },
+  { name: 'Microsoft procfs', release: 'generic', proc: 'Linux Microsoft kernel' },
+  { name: 'WSL-only procfs', release: 'generic', proc: 'Linux WSL2 kernel' },
+];
+const destinations = [
+  { name: 'drive', translated: 'C:\\fixture\\config.json', kind: 'windows-wsl' },
+  { name: 'network share', translated: '\\\\server\\share\\config.json', kind: 'windows-wsl' },
+  { name: 'Linux distro', translated: '\\\\wsl.localhost\\Ubuntu\\home\\user\\config.json', kind: 'linux' },
+  { name: 'legacy Linux distro', translated: '\\\\wsl$\\Ubuntu\\home\\user\\config.json', kind: 'linux' },
+];
+it.each(signals.flatMap(signal => destinations.map(destination => ({ signal, destination,
+  name: signal.name + ': ' + destination.name }))))('routes a shared runtime signal: $name', ({ signal, destination }) => {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
-  vi.stubEnv('WSL_DISTRO_NAME', 'Ubuntu');
-  vi.mocked(execFileSync).mockReturnValue(translated);
+  vi.stubEnv('WSL_DISTRO_NAME', undefined);
+  vi.stubEnv('WSL_INTEROP', undefined);
+  if (signal.env) vi.stubEnv(signal.env, 'fixture');
+  runtimeFixture.release = signal.release;
+  runtimeFixture.proc = signal.proc;
+  vi.mocked(execFileSync).mockReturnValue(destination.translated);
   try {
     Object.defineProperty(process, 'platform', { value: 'linux' });
-    expect(mcpConfigPersistenceStrategy('native', path).kind).toBe(kind);
+    expect(detectMcpRuntime()).toBe('wsl');
+    const discoverWindowsPath = vi.fn(() => null);
+    detectClients(discoverWindowsPath);
+    expect(discoverWindowsPath).toHaveBeenCalledWith('USERPROFILE');
+    expect(mcpConfigPersistenceStrategy(path).kind).toBe(destination.kind);
     expect(execFileSync).toHaveBeenCalledWith('/usr/bin/wslpath', ['-w', path], expect.any(Object));
+  } finally { Object.defineProperty(process, 'platform', platform); }
+});
+
+it.each([['darwin', 'posix'], ['win32', 'windows-native']] as const)('ignores WSL markers outside Linux on %s', (operatingSystem, kind) => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  vi.stubEnv('WSL_DISTRO_NAME', 'fixture');
+  runtimeFixture.release = 'microsoft-wsl';
+  try {
+    Object.defineProperty(process, 'platform', { value: operatingSystem });
+    expect(mcpConfigPersistenceStrategy(path).kind).toBe(kind);
+    expect(execFileSync).not.toHaveBeenCalled();
   } finally { Object.defineProperty(process, 'platform', platform); }
 });
 
@@ -50,7 +94,7 @@ it('rejects a missing metadata capability before creating files or changing cont
   vi.mocked(execFileSync).mockImplementationOnce(() => { throw new Error('gcp not installed'); });
   try {
     Object.defineProperty(process, 'platform', { value: 'linux' });
-    expect(() => writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native', path), snapshotMcpConfigSource(path))).toThrow('apk add coreutils');
+    expect(() => writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy(path), snapshotMcpConfigSource(path))).toThrow('apk add coreutils');
     expect(readFileSync(path, 'utf8')).toBe('{"original":true}\n');
     expect(readdirSync(directory)).toEqual(before);
   } finally { Object.defineProperty(process, 'platform', platform); }
@@ -72,7 +116,7 @@ it.each(['acl', 'replace', 'restore-backup', 'retain-backup'] as const)('preserv
   });
   try {
     Object.defineProperty(process, 'platform', { value: 'win32' });
-    expect(() => writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native', path), snapshotMcpConfigSource(path))).toThrow(stage === 'retain-backup' ? 'backup is retained' : 'failed');
+    expect(() => writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy(path), snapshotMcpConfigSource(path))).toThrow(stage === 'retain-backup' ? 'backup is retained' : 'failed');
     expect(readFileSync(path, 'utf8')).toBe('{"original":true}\n');
     const backups = readdirSync(directory).filter(name => name.endsWith('.backup'));
     expect(backups).toHaveLength(stage === 'retain-backup' ? 1 : 0);
@@ -109,7 +153,7 @@ it('rejects first-time creation if a symlinked parent changes after inspection',
   expect(source.content).toBeUndefined();
   unlinkSync(alias);
   symlinkSync(second, alias, 'junction');
-  expect(() => writeMcpConfigAtomic(configPath, '{}\n', mcpConfigPersistenceStrategy('native', source.destination), source))
+  expect(() => writeMcpConfigAtomic(configPath, '{}\n', mcpConfigPersistenceStrategy(source.destination), source))
     .toThrow('changed while it was being edited');
   expect(readdirSync(first)).toEqual([]);
   expect(readdirSync(second)).toEqual([]);
@@ -125,7 +169,7 @@ it.runIf(nativeMetadata && process.platform === 'darwin')('preserves macOS permi
   const { mode, uid, gid } = statSync(path);
   expect(mode & 0o777).toBe(0o640);
   expect(before).toContain('everyone allow read');
-  writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native', path), snapshotMcpConfigSource(path));
+  writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy(path), snapshotMcpConfigSource(path));
   expect(acl()).toBe(before);
   expect(statSync(path)).toMatchObject({ mode, uid, gid });
   expect(execFileSync('/usr/bin/xattr', ['-p', 'org.origintrail.fixture', path], { encoding: 'utf8' }).trim()).toBe('retained');
@@ -139,7 +183,7 @@ it.runIf(nativeMetadata && process.platform === 'linux')('preserves Linux ACLs a
   const acl = () => execFileSync('getfacl', ['-cn', path], { encoding: 'utf8' });
   const before = acl();
   expect(before).toContain('user:65534:r--');
-  writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native', path), snapshotMcpConfigSource(path));
+  writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy(path), snapshotMcpConfigSource(path));
   expect(acl()).toBe(before);
   expect(execFileSync('getfattr', ['--only-values', '-n', 'user.dkg_fixture', path], { encoding: 'utf8' }).trim()).toBe('retained');
   expect(readdirSync(directory)).toEqual(["config 'quoted'.json"]);
@@ -169,7 +213,7 @@ it.runIf(nativeMetadata && process.platform === 'win32')('preserves a protected 
     expect(readFileSync(marker, 'utf8')).toBe('executed');
     rmSync(marker);
     process.chdir(untrusted);
-    writeMcpConfigAtomic(path, '{"replacement":true}\n', mcpConfigPersistenceStrategy('native', path), snapshotMcpConfigSource(path));
+    writeMcpConfigAtomic(path, '{"replacement":true}\n', mcpConfigPersistenceStrategy(path), snapshotMcpConfigSource(path));
     expect(existsSync(marker)).toBe(false);
   } finally {
     process.chdir(priorCwd);
@@ -181,13 +225,14 @@ it.runIf(nativeMetadata && process.platform === 'win32')('preserves a protected 
   const source = snapshotMcpConfigSource(firstPath);
   expect(source.content).toBeUndefined();
   writeMcpConfigAtomic(firstPath, '{"mcpServers":{"dkg":{"command":"node"}}}\n',
-    mcpConfigPersistenceStrategy('native', source.destination), source);
+    mcpConfigPersistenceStrategy(source.destination), source);
   expect(JSON.parse(readFileSync(firstPath, 'utf8'))).toEqual({ mcpServers: { dkg: { command: 'node' } } });
   expect(readdirSync(directory).sort()).toEqual(["config 'quoted'.json", 'first-time.json', 'untrusted']);
 });
 
 
 it('routes Windows-side WSL replacements through converted paths and Windows security APIs', () => {
+  vi.stubEnv('WSL_DISTRO_NAME', 'Ubuntu');
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
   const converted = new Map<string, string>();
   const systemPowerShell = '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe';
@@ -215,7 +260,7 @@ it('routes Windows-side WSL replacements through converted paths and Windows sec
   });
   try {
     Object.defineProperty(process, 'platform', { value: 'linux' });
-    writeMcpConfigAtomic(path, '{"wsl":true}\n', mcpConfigPersistenceStrategy('windows-wsl', path), snapshotMcpConfigSource(path));
+    writeMcpConfigAtomic(path, '{"wsl":true}\n', mcpConfigPersistenceStrategy(path), snapshotMcpConfigSource(path));
     expect(scripts).toHaveLength(2);
     expect(scripts[0]).toContain('Get-Acl');
     expect(scripts[1]).toContain('::Replace');

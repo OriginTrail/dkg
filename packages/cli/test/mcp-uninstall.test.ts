@@ -8,7 +8,7 @@ import TOML from '@iarna/toml';
 import { inspectRegistration, removeRegistration, readRegistration, classifyRegistration, writeRegistration } from '../src/mcp-client-config.js';
 import { snapshotMcpConfigSource, writeMcpConfigAtomic, type McpConfigSourceSnapshot } from '../src/mcp-config-file.js';
 import { mcpConfigPersistenceStrategy, type McpConfigPersistenceStrategy } from '../src/mcp-config-metadata.js';
-import { type ClientTarget } from '../src/mcp-client-registry.js';
+import { selectMcpClientTargets, type ClientTarget } from '../src/mcp-client-registry.js';
 import { dkgDir, configPath } from '../src/config.js';
 import { dkgAuthTokenPath } from '@origintrail-official/dkg-core';
 import { mcpUninstallAction } from '../src/mcp-uninstall.js';
@@ -31,7 +31,8 @@ vi.mock('../src/mcp-config-file.js', async importOriginal => {
       content: string,
       _persistence: McpConfigPersistenceStrategy,
       expectedSource: McpConfigSourceSnapshot,
-    ) => actual.writeMcpConfigAtomic(path, content, mcpConfigPersistenceStrategy('native', path), expectedSource)),
+      validateDestination?: () => void,
+    ) => actual.writeMcpConfigAtomic(path, content, mcpConfigPersistenceStrategy(path, process.platform === 'win32' ? 'windows' : process.platform === 'linux' ? 'linux' : 'posix'), expectedSource, validateDestination)),
   };
 });
 
@@ -49,6 +50,7 @@ function target(name: string, container: 'mcpServers' | 'servers' | 'mcp_servers
   const id = ({ 'Claude Code': 'claude-code', 'Claude Desktop': 'claude-desktop', Windsurf: 'windsurf', Cline: 'cline' } as const)[name as 'Claude Code' | 'Claude Desktop' | 'Windsurf' | 'Cline'] ?? 'cursor';
   return { ...paths, id, format: 'json', serverContainer: 'mcpServers' };
 }
+const physical = (client: ClientTarget) => selectMcpClientTargets([client])[0]!.file;
 function seed(client: ClientTarget, onlyDkg = false): void {
   const container = client.serverContainer;
   const body = { setting: 'keep', [container]: {
@@ -74,7 +76,7 @@ describe('MCP registration removal', () => {
       const original = JSON.stringify({ [client.serverContainer]: value, setting: 'keep' }) + '\n';
       writeFileSync(client.configPath, original);
       const writesBefore = vi.mocked(writeMcpConfigAtomic).mock.calls.length;
-      expect(() => writeRegistration(client, { command: 'node', args: ['dkg.js'], env: { DKG_HOME: '/fixture' } }))
+      expect(() => writeRegistration(physical(client), { command: 'node', args: ['dkg.js'], env: { DKG_HOME: '/fixture' } }))
         .toThrow('Malformed MCP server container');
       expect(readFileSync(client.configPath, 'utf8')).toBe(original);
       expect(vi.mocked(writeMcpConfigAtomic).mock.calls).toHaveLength(writesBefore);
@@ -85,7 +87,7 @@ describe('MCP registration removal', () => {
     const client = target('Codex', 'mcp_servers', 'toml');
     writeFileSync(client.configPath, original);
     const writesBefore = vi.mocked(writeMcpConfigAtomic).mock.calls.length;
-    expect(() => writeRegistration(client, { command: 'node', args: ['dkg.js'], env: { DKG_HOME: '/fixture' } }))
+    expect(() => writeRegistration(physical(client), { command: 'node', args: ['dkg.js'], env: { DKG_HOME: '/fixture' } }))
       .toThrow('Malformed MCP server container');
     expect(readFileSync(client.configPath, 'utf8')).toBe(original);
     expect(vi.mocked(writeMcpConfigAtomic).mock.calls).toHaveLength(writesBefore);
@@ -95,7 +97,7 @@ describe('MCP registration removal', () => {
     const client = target('dangling');
     fs.symlinkSync('missing-target.json', client.configPath);
     const entries = fs.readdirSync(root);
-    expect(() => writeMcpConfigAtomic(client.configPath, '{}\n', mcpConfigPersistenceStrategy('native', client.configPath), snapshotMcpConfigSource(client.configPath))).toThrow();
+    expect(() => writeMcpConfigAtomic(client.configPath, '{}\n', mcpConfigPersistenceStrategy(client.configPath), snapshotMcpConfigSource(client.configPath))).toThrow();
     expect(fs.lstatSync(client.configPath).isSymbolicLink()).toBe(true);
     expect(fs.readlinkSync(client.configPath)).toBe('missing-target.json');
     expect(fs.readdirSync(root)).toEqual(entries);
@@ -107,7 +109,7 @@ describe('MCP registration removal', () => {
     seed(real);
     fs.symlinkSync(real.configPath, client.configPath);
     const entries = fs.readdirSync(root);
-    expect(removeRegistration(client)).toBe(true);
+    expect(removeRegistration(physical(client))).toBe(true);
     expect(fs.lstatSync(client.configPath).isSymbolicLink()).toBe(true);
     expect(fs.readlinkSync(client.configPath)).toBe(real.configPath);
     expect(read(real).mcpServers).toEqual({ other: { command: 'other-server', custom: 'keep' } });
@@ -126,7 +128,7 @@ describe('MCP registration removal', () => {
     const path = symlink ? join(root, 'owner-link.json') : real.configPath;
     if (symlink) fs.symlinkSync(real.configPath, path);
     const entries = fs.readdirSync(root);
-    writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native', path), snapshotMcpConfigSource(path));
+    writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy(path), snapshotMcpConfigSource(path));
     const after = fs.statSync(real.configPath);
     expect({ uid: after.uid, gid: after.gid, mode: after.mode }).toEqual({ uid: before.uid, gid: before.gid, mode: before.mode });
     expect(readFileSync(real.configPath, 'utf8')).toBe('{}\n');
@@ -149,7 +151,7 @@ describe('MCP registration removal', () => {
       return copied;
     });
     vi.spyOn(fs, 'fchownSync').mockImplementationOnce(() => { throw new Error('ownership preservation denied'); });
-    expect(() => writeMcpConfigAtomic(link, '{}\n', mcpConfigPersistenceStrategy('native', link), snapshotMcpConfigSource(link))).toThrow('ownership preservation denied');
+    expect(() => writeMcpConfigAtomic(link, '{}\n', mcpConfigPersistenceStrategy(link), snapshotMcpConfigSource(link))).toThrow('ownership preservation denied');
     expect(fs.renameSync).not.toHaveBeenCalled();
     expect(readFileSync(client.configPath, 'utf8')).toBe(raw);
     expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
@@ -165,7 +167,7 @@ describe('MCP registration removal', () => {
     const client = target('lossless');
     const raw = `{\n "clientId":9007199254740993, "ratio":1.2300e+06, "mcpServers":{${servers}}\n}\n`;
     writeFileSync(client.configPath, raw);
-    expect(removeRegistration(client)).toBe(true);
+    expect(removeRegistration(physical(client))).toBe(true);
     const result = readFileSync(client.configPath, 'utf8');
     expect(result).toContain('"clientId":9007199254740993');
     expect(result).toContain('"ratio":1.2300e+06');
@@ -193,7 +195,7 @@ describe('MCP registration removal', () => {
     writeFileSync(client.configPath, raw);
     const expected = parseJsonc(raw);
     delete expected.servers.dkg;
-    expect(removeRegistration(client)).toBe(true);
+    expect(removeRegistration(physical(client))).toBe(true);
     expect(read(client)).toEqual(expected);
     expect(readFileSync(client.configPath, 'utf8')).toContain('/* keep */');
   });
@@ -204,7 +206,7 @@ describe('MCP registration removal', () => {
     const original = readFileSync(client.configPath, 'utf8');
     const files = fs.readdirSync(root);
     const rename = vi.mocked(fs.renameSync).mockImplementationOnce(() => { throw new Error('replacement failed'); });
-    expect(() => removeRegistration(client)).toThrow('replacement failed');
+    expect(() => removeRegistration(physical(client))).toThrow('replacement failed');
     expect(rename).toHaveBeenCalledOnce();
     expect(readFileSync(client.configPath, 'utf8')).toBe(original);
     expect(fs.readdirSync(root)).toEqual(files);
@@ -214,7 +216,7 @@ describe('MCP registration removal', () => {
     const client = target('permissions');
     seed(client);
     fs.chmodSync(client.configPath, 0o640);
-    expect(removeRegistration(client)).toBe(true);
+    expect(removeRegistration(physical(client))).toBe(true);
     if (process.platform !== 'win32') expect(fs.statSync(client.configPath).mode & 0o777).toBe(0o640);
   });
 
@@ -226,10 +228,10 @@ describe('MCP registration removal', () => {
   ] as const)('removes only DKG from %s', (name, container, format) => {
     const client = target(name, container, format);
     seed(client);
-    expect(removeRegistration(client)).toBe(true);
+    expect(removeRegistration(physical(client))).toBe(true);
     expect(read(client)).toEqual({ setting: 'keep', [container]: { other: { command: 'other-server', custom: 'keep' } } });
     const bytes = readFileSync(client.configPath, 'utf8');
-    expect(removeRegistration(client)).toBe(false);
+    expect(removeRegistration(physical(client))).toBe(false);
     expect(readFileSync(client.configPath, 'utf8')).toBe(bytes);
   });
 
@@ -237,7 +239,7 @@ describe('MCP registration removal', () => {
     'preserves the empty %s container', (container, format) => {
       const client = target('only', container, format);
       seed(client, true);
-      expect(removeRegistration(client)).toBe(true);
+      expect(removeRegistration(physical(client))).toBe(true);
       expect(read(client)).toEqual({ setting: 'keep', [container]: {} });
     },
   );
@@ -245,7 +247,7 @@ describe('MCP registration removal', () => {
   it('preserves TOML comments and sibling tables while removing DKG subtables', () => {
     const client = target('Codex CLI', 'mcp_servers', 'toml');
     writeFileSync(client.configPath, '# preferences\nmodel = "example"\n\n[mcp_servers.dkg]\ncommand = "dkg"\n[mcp_servers.dkg.env]\nDKG_HOME = "/fixture"\n\n# unrelated server\n[mcp_servers.other]\ncommand = "other"\n');
-    expect(removeRegistration(client)).toBe(true);
+    expect(removeRegistration(physical(client))).toBe(true);
     const output = readFileSync(client.configPath, 'utf8');
     expect(output).toContain('# preferences\nmodel = "example"');
     expect(output).toContain('# unrelated server\n[mcp_servers.other]\ncommand = "other"');
@@ -255,7 +257,7 @@ describe('MCP registration removal', () => {
   it('handles inline TOML without deleting sibling settings', () => {
     const client = target('Codex CLI', 'mcp_servers', 'toml');
     writeFileSync(client.configPath, 'setting = "keep"\nmcp_servers = { dkg = { command = "dkg" }, other = { command = "other" } }\n');
-    expect(removeRegistration(client)).toBe(true);
+    expect(removeRegistration(physical(client))).toBe(true);
     expect(read(client)).toEqual({ setting: 'keep', mcp_servers: { other: { command: 'other' } } });
   });
 
@@ -274,18 +276,18 @@ this_is_string_content = true
     const expected = TOML.parse(raw);
     delete (expected.mcp_servers as TOML.JsonMap).dkg;
     writeFileSync(client.configPath, raw);
-    expect(removeRegistration(client)).toBe(true);
+    expect(removeRegistration(physical(client))).toBe(true);
     const output = readFileSync(client.configPath, 'utf8');
     expect(TOML.parse(output)).toEqual(expected);
     expect(output.startsWith(prefix)).toBe(true);
     expect(output.endsWith(sibling)).toBe(true);
-    expect(removeRegistration(client)).toBe(false);
+    expect(removeRegistration(physical(client))).toBe(false);
     expect(readFileSync(client.configPath, 'utf8')).toBe(output);
   });
 
   it('does not create a missing config', () => {
     const client = target('absent');
-    expect(removeRegistration(client)).toBe(false);
+    expect(removeRegistration(physical(client))).toBe(false);
     expect(existsSync(client.configPath)).toBe(false);
   });
 
@@ -293,7 +295,7 @@ this_is_string_content = true
     'leaves malformed configuration untouched: %s', (raw) => {
       const client = target('malformed');
       writeFileSync(client.configPath, raw);
-      expect(() => removeRegistration(client)).toThrow();
+      expect(() => removeRegistration(physical(client))).toThrow();
       expect(readFileSync(client.configPath, 'utf8')).toBe(raw);
     },
   );
@@ -301,7 +303,7 @@ this_is_string_content = true
   it('removes a stale DKG entry even when it cannot launch', () => {
     const client = target('stale');
     writeFileSync(client.configPath, '{"mcpServers":{"dkg":null,"other":{"url":"https://example.org/mcp"}}}');
-    expect(removeRegistration(client)).toBe(true);
+    expect(removeRegistration(physical(client))).toBe(true);
     expect(read(client).mcpServers).toEqual({ other: { url: 'https://example.org/mcp' } });
   });
 });
@@ -317,7 +319,7 @@ describe('mcpUninstallAction', () => {
   it('--yes removes every registration without prompting, then reruns as a no-op', async () => {
     const { clients, messages, deps } = fixture();
     await mcpUninstallAction({ yes: true }, deps);
-    expect(clients.every((client) => !inspectRegistration(client))).toBe(true);
+    expect(clients.every((client) => !inspectRegistration(physical(client)))).toBe(true);
     await mcpUninstallAction({ yes: true }, deps);
     expect(messages.at(-1)).toBe('No DKG MCP registrations found.');
   });
@@ -326,16 +328,16 @@ describe('mcpUninstallAction', () => {
     const { clients, deps } = fixture();
     expect(process.stdin.isTTY).toBeFalsy();
     await expect(mcpUninstallAction({}, deps)).rejects.toThrow('requires --yes');
-    expect(clients.every((client) => inspectRegistration(client))).toBe(true);
+    expect(clients.every((client) => inspectRegistration(physical(client)))).toBe(true);
   });
 
   it('--client selects one canonical client name', async () => {
     const { clients, deps } = fixture();
     const untouched = readFileSync(clients[0].configPath, 'utf8');
     await mcpUninstallAction({ yes: true, client: 'claude-code' }, deps);
-    expect(inspectRegistration(clients[1])).toBe(false);
+    expect(inspectRegistration(physical(clients[1]))).toBe(false);
     expect(readFileSync(clients[0].configPath, 'utf8')).toBe(untouched);
-    expect(inspectRegistration(clients[2])).toBe(true);
+    expect(inspectRegistration(physical(clients[2]))).toBe(true);
   });
 
   it('--dry-run reports without prompting, changing bytes, or touching node files', async () => {
@@ -368,7 +370,7 @@ describe('mcpUninstallAction', () => {
       await mcpUninstallAction({}, deps);
       expect(question).toHaveBeenCalledTimes(3);
       expect(close).toHaveBeenCalledTimes(1);
-      expect(clients.map((client) => inspectRegistration(client))).toEqual([true, true, false]);
+      expect(clients.map((client) => inspectRegistration(physical(client)))).toEqual([true, true, false]);
       expect(clients.slice(0, 2).map((client) => readFileSync(client.configPath, 'utf8'))).toEqual(originals.slice(0, 2));
     } finally {
       streams.forEach((stream, index) => {
@@ -389,7 +391,7 @@ describe('mcpUninstallAction', () => {
   it('rejects an unknown client without modifying any registration', async () => {
     const { clients, deps } = fixture();
     await expect(mcpUninstallAction({ yes: true, client: 'typo' }, deps)).rejects.toThrow('Unsupported MCP client selector');
-    expect(clients.every((client) => inspectRegistration(client))).toBe(true);
+    expect(clients.every((client) => inspectRegistration(physical(client)))).toBe(true);
   });
 
   it('continues processing confirmed clients after a config fails during removal', async () => {
@@ -404,7 +406,7 @@ describe('mcpUninstallAction', () => {
       },
     })).rejects.toThrow('Could not remove 1');
     expect(readFileSync(clients[0].configPath, 'utf8')).toBe(original);
-    expect(clients.slice(1).every((client) => !inspectRegistration(client))).toBe(true);
+    expect(clients.slice(1).every((client) => !inspectRegistration(physical(client)))).toBe(true);
   });
 
   it('reports unreadable configuration and still processes other confirmed clients', async () => {
@@ -412,7 +414,7 @@ describe('mcpUninstallAction', () => {
     writeFileSync(clients[0].configPath, '{bad');
     await expect(mcpUninstallAction({ yes: true }, deps)).rejects.toThrow('Could not remove 1');
     expect(readFileSync(clients[0].configPath, 'utf8')).toBe('{bad');
-    expect(clients.slice(1).every((client) => !inspectRegistration(client))).toBe(true);
+    expect(clients.slice(1).every((client) => !inspectRegistration(physical(client)))).toBe(true);
   });
 });
 
@@ -471,11 +473,11 @@ describe('stable client selectors', () => {
     expect(messages.join('\n')).toContain('Claude Desktop');
     expect(messages).toContain('Removed DKG MCP from Claude Desktop');
     expect(messages.some(message => /^Found DKG MCP: Cursor|^Removed DKG MCP from Cursor/.test(message))).toBe(false);
-    expect(inspectRegistration(cursor)).toBe(false);
+    expect(inspectRegistration(physical(cursor))).toBe(false);
     expect(fs.lstatSync(aliasPath).isSymbolicLink()).toBe(true);
   });
 
-  it.each([false, true])('setup writes an aliased WSL leaf once using Windows persistence (symlink: %s)', async (symlink) => {
+  it.each([false, true])('setup writes each aliased physical leaf once (symlink: %s)', async (symlink) => {
     vi.stubEnv('HOME', root);
     vi.stubEnv('USERPROFILE', root);
     const nodeHome = join(root, 'node');
@@ -505,8 +507,8 @@ describe('stable client selectors', () => {
     const writes = vi.mocked(writeMcpConfigAtomic).mock.calls.slice(writesBefore);
     expect(writes).toHaveLength(1);
     expect(writes[0]).toEqual([
-      native.configPath, expect.any(String),
-      expect.objectContaining({ kind: 'windows-wsl' }), expect.any(Object),
+      fs.realpathSync(native.configPath), expect.any(String),
+      expect.objectContaining({ kind: mcpConfigPersistenceStrategy(fs.realpathSync(native.configPath)).kind }), expect.any(Object), expect.any(Function),
     ]);
     expect(read(windows).mcpServers.dkg.command).toBe(process.execPath);
     expect(read(windows).mcpServers.other).toEqual({ command: 'other-server', custom: 'keep' });
@@ -527,12 +529,12 @@ describe('stable client selectors', () => {
     const client = { ...template, name: 'Cursor (Windows-side via WSL)', location: 'windows-wsl' as const };
     seed(client);
     await mcpUninstallAction({ yes: true, client: 'cursor' }, { detectClients: () => [client], log: () => {} });
-    expect(inspectRegistration(client)).toBe(false);
+    expect(inspectRegistration(physical(client))).toBe(false);
     expect(writeMcpConfigAtomic).toHaveBeenCalledWith(
-      client.configPath,
+      fs.realpathSync(client.configPath),
       expect.any(String),
-      expect.objectContaining({ kind: 'windows-wsl' }),
-      expect.any(Object),
+      expect.objectContaining({ kind: mcpConfigPersistenceStrategy(client.configPath).kind }),
+      expect.any(Object), expect.any(Function),
     );
   });
 
@@ -543,11 +545,11 @@ describe('stable client selectors', () => {
     const windows = { ...template, name: 'A renamed Windows display label', location: 'windows-wsl' as const };
     seed(native); seed(windows);
     await mcpUninstallAction({ yes: true, client: selector }, { detectClients: () => [native, windows], log: () => {} });
-    expect(inspectRegistration(native)).toBe(selector === 'cursor:windows-wsl');
-    expect(inspectRegistration(windows)).toBe(selector === 'cursor:native');
+    expect(inspectRegistration(physical(native))).toBe(selector === 'cursor:windows-wsl');
+    expect(inspectRegistration(physical(windows))).toBe(selector === 'cursor:native');
   });
 
-  it('retains Windows persistence metadata when a native selector aliases the same WSL file', async () => {
+  it('uses physical storage when a native selector aliases another logical client', async () => {
     const native = target('Cursor');
     if (native.id !== 'cursor') throw new Error('Expected a Cursor fixture');
     const windows = { ...native, name: 'Cursor (Windows-side via WSL)', location: 'windows-wsl' as const };
@@ -556,13 +558,13 @@ describe('stable client selectors', () => {
     await mcpUninstallAction({ yes: true, client: 'cursor:native' }, {
       detectClients: () => [native, windows], log: () => {},
     });
-    expect(inspectRegistration(native)).toBe(false);
+    expect(inspectRegistration(physical(native))).toBe(false);
     expect(vi.mocked(writeMcpConfigAtomic).mock.calls).toHaveLength(callsBefore + 1);
     expect(writeMcpConfigAtomic).toHaveBeenCalledWith(
-      native.configPath,
+      fs.realpathSync(native.configPath),
       expect.any(String),
-      expect.objectContaining({ kind: 'windows-wsl' }),
-      expect.any(Object),
+      expect.objectContaining({ kind: mcpConfigPersistenceStrategy(native.configPath).kind }),
+      expect.any(Object), expect.any(Function),
     );
   });
 
@@ -591,7 +593,7 @@ describe('typed owned-registration boundary', () => {
   ])('classifies $kind/$state without exposing raw owned fields', ({ value, kind, state }) => {
     const client = target('Cursor');
     writeFileSync(client.configPath, JSON.stringify({ mcpServers: { dkg: value } }));
-    const read = readRegistration(client);
+    const read = readRegistration(physical(client));
     expect(read.kind).toBe(kind);
     expect(classifyRegistration(read, expected)).toBe(state);
   });
@@ -599,11 +601,11 @@ describe('typed owned-registration boundary', () => {
   it.each([{ value: ['array-entry'] }, { value: { command: 'old', env: ['array-env'], cwd: '/keep' } }])('does not merge array indices into owned registration records', ({ value }) => {
     const client = target('Cursor');
     writeFileSync(client.configPath, JSON.stringify({ mcpServers: { dkg: value } }));
-    writeRegistration(client, expected);
+    writeRegistration(physical(client), expected);
     const entry = JSON.parse(readFileSync(client.configPath, 'utf8')).mcpServers.dkg;
     expect(entry).not.toHaveProperty('0');
     expect(entry.env).toEqual(expected.env);
     if (!Array.isArray(value)) expect(entry.cwd).toBe('/keep');
-    expect(classifyRegistration(readRegistration(client), expected)).toBe('registered');
+    expect(classifyRegistration(readRegistration(physical(client)), expected)).toBe('registered');
   });
 });

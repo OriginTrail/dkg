@@ -40,7 +40,9 @@ export function writeMcpConfigAtomic(
   content: string,
   persistence: McpConfigPersistenceStrategy,
   expectedSource: McpConfigSourceSnapshot,
+  validateDestination: () => void = () => {},
 ): void {
+  validateDestination();
   assertSourceUnchanged(configPath, expectedSource);
   const destination = expectedSource.destination;
   const original = existsSync(destination) ? statSync(destination) : undefined;
@@ -65,6 +67,7 @@ export function writeMcpConfigAtomic(
     }
     // A client may rewrite its config while this replacement is being
     // prepared. Never publish an edit derived from stale bytes over that work.
+    validateDestination();
     assertSourceUnchanged(configPath, expectedSource);
     persistence.publish(replacement);
   } finally {

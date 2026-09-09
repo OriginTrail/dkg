@@ -13,6 +13,7 @@ export default defineConfig({
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
           'test/mcp-config-document.test.ts',
+          'test/mcp-physical-config.test.ts',
           'test/mcp-config-metadata.test.ts',
           'test/api-client.test.ts',
           'test/live-daemon-isolation.test.ts',
