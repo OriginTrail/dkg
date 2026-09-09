@@ -2,14 +2,6 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { SwmExpiryCleanupWorker } from '../src/swm-expiry-cleanup-worker.js';
 import type { SwmExpiryCleanupContinuation, SwmExpiryCleanupResult } from '../src/swm-expiry-cleanup.js';
 
-function runtimeSettings(initialTtlMs: number) {
-  let ttlMs = initialTtlMs;
-  return {
-    getSharedMemoryTtlMs: () => ttlMs,
-    setSharedMemoryTtlMs: (nextTtlMs: number) => { ttlMs = nextTtlMs; },
-  };
-}
-
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: Error) => void;
@@ -28,14 +20,15 @@ const continuation: SwmExpiryCleanupContinuation = { remainingTargets: [{
 it('automatically schedules cleanup when TTL is enabled and cancels it when disabled', async () => {
   vi.useFakeTimers();
   const pass = vi.fn().mockResolvedValue({ triplesDeleted: 0 });
-  const worker = new SwmExpiryCleanupWorker(pass, runtimeSettings(0), 10);
+  let ttlMs = 0;
+  const worker = new SwmExpiryCleanupWorker(pass, () => ttlMs, 10);
   worker.start();
   await vi.advanceTimersByTimeAsync(20);
   expect(pass).not.toHaveBeenCalled();
-  worker.setTtl(100);
+  ttlMs = 100; worker.onTtlChanged();
   await vi.advanceTimersByTimeAsync(0);
   expect(pass).toHaveBeenCalledOnce();
-  worker.setTtl(0);
+  ttlMs = 0; worker.onTtlChanged();
   await vi.advanceTimersByTimeAsync(100);
   expect(pass).toHaveBeenCalledOnce();
   await worker.stop();
@@ -47,29 +40,30 @@ it('joins manual and timer calls, then resumes periodic maintenance with the lat
   const pass = vi.fn<ConstructorParameters<typeof SwmExpiryCleanupWorker>[0]>()
     .mockReturnValueOnce(blocked.promise)
     .mockResolvedValue({ triplesDeleted: 7 });
-  const worker = new SwmExpiryCleanupWorker(pass, runtimeSettings(100), 10);
+  let ttlMs = 100;
+  const worker = new SwmExpiryCleanupWorker(pass, () => ttlMs, 10);
   worker.start();
   worker.start();
   const first = worker.runNow();
   expect(worker.runNow()).toBe(first);
   await vi.advanceTimersByTimeAsync(30);
   expect(pass).toHaveBeenCalledTimes(1);
-  worker.setTtl(200);
+  ttlMs = 200; worker.onTtlChanged();
   blocked.resolve({ triplesDeleted: 5 });
   expect(await first).toBe(5);
   await vi.advanceTimersByTimeAsync(10);
   expect(pass).toHaveBeenLastCalledWith(200, expect.any(Function), undefined, undefined);
   expect(pass).toHaveBeenCalledTimes(2);
-  worker.setTtl(0);
+  ttlMs = 0; worker.onTtlChanged();
   expect(worker.running).toBe(false);
   expect(await worker.runNow()).toBe(0);
   await vi.advanceTimersByTimeAsync(50);
   expect(pass).toHaveBeenCalledTimes(2);
-  worker.setTtl(300);
+  ttlMs = 300; worker.onTtlChanged();
   await worker.runNow();
   expect(pass).toHaveBeenLastCalledWith(300, expect.any(Function), undefined, expect.any(Number));
   await worker.stop();
-  worker.setTtl(400);
+  ttlMs = 400; worker.onTtlChanged();
   await vi.advanceTimersByTimeAsync(100);
   expect(pass).toHaveBeenCalledTimes(3);
 });
@@ -80,7 +74,8 @@ it('fences stop immediately but joins physical work before allowing a restart', 
   const pass = vi.fn<ConstructorParameters<typeof SwmExpiryCleanupWorker>[0]>()
     .mockImplementationOnce(async (_ttl, closed) => { isClosed = closed; return blocked.promise; })
     .mockResolvedValue({ triplesDeleted: 0 });
-  const worker = new SwmExpiryCleanupWorker(pass, runtimeSettings(100));
+  const ttlMs = 100;
+  const worker = new SwmExpiryCleanupWorker(pass, () => ttlMs);
   worker.start();
   const running = worker.runNow();
   await Promise.resolve();
@@ -104,7 +99,8 @@ it('fences stop immediately but joins physical work before allowing a restart', 
 
 it('does not start queued storage work after stop', async () => {
   const pass = vi.fn().mockResolvedValue({ triplesDeleted: 0 });
-  const worker = new SwmExpiryCleanupWorker(pass, runtimeSettings(100));
+  const ttlMs = 100;
+  const worker = new SwmExpiryCleanupWorker(pass, () => ttlMs);
   const queued = worker.runNow();
   await worker.stop();
   expect(await queued).toBe(0);
@@ -114,7 +110,8 @@ it('does not start queued storage work after stop', async () => {
 it('retires a rejected shared call and permits the next invocation to recover', async () => {
   const blocked = deferred<SwmExpiryCleanupResult>();
   const pass = vi.fn().mockReturnValueOnce(blocked.promise).mockResolvedValue({ triplesDeleted: 2 });
-  const worker = new SwmExpiryCleanupWorker(pass, runtimeSettings(100));
+  const ttlMs = 100;
+  const worker = new SwmExpiryCleanupWorker(pass, () => ttlMs);
   const first = worker.runNow();
   expect(worker.runNow()).toBe(first);
   const rejected = expect(first).rejects.toThrow('unavailable');
@@ -129,12 +126,13 @@ it('starts disabled and safely retires failures from scheduled and stopping work
   const blocked = deferred<SwmExpiryCleanupResult>();
   const pass = vi.fn().mockRejectedValueOnce(new Error('startup failure'))
     .mockRejectedValueOnce(new Error('periodic failure')).mockReturnValueOnce(blocked.promise);
-  const worker = new SwmExpiryCleanupWorker(pass, runtimeSettings(0), 10);
+  let ttlMs = 0;
+  const worker = new SwmExpiryCleanupWorker(pass, () => ttlMs, 10);
   worker.start();
   expect(worker.running).toBe(false);
   await vi.advanceTimersByTimeAsync(20);
   expect(pass).not.toHaveBeenCalled();
-  worker.setTtl(100);
+  ttlMs = 100; worker.onTtlChanged();
   await expect(worker.runNow()).rejects.toThrow('startup failure');
   await vi.advanceTimersByTimeAsync(10);
   expect(pass).toHaveBeenCalledTimes(2);
@@ -156,7 +154,8 @@ it('automatically drains a backlog in yielding bounded passes before the mainten
     remaining -= deleted;
     return { triplesDeleted: deleted, continuation: remaining > 0 ? continuation : undefined };
   });
-  const worker = new SwmExpiryCleanupWorker(pass, runtimeSettings(100), 900_000);
+  const ttlMs = 100;
+  const worker = new SwmExpiryCleanupWorker(pass, () => ttlMs, 900_000);
   worker.start();
   try {
     await vi.advanceTimersByTimeAsync(0);
@@ -171,10 +170,11 @@ it('automatically drains a backlog in yielding bounded passes before the mainten
 it.each(['disable', 'stop'])('cancels a pending backlog continuation on %s', async action => {
   vi.useFakeTimers();
   const pass = vi.fn().mockResolvedValue({ triplesDeleted: 1000, continuation });
-  const worker = new SwmExpiryCleanupWorker(pass, runtimeSettings(100), 900_000);
+  let ttlMs = 100;
+  const worker = new SwmExpiryCleanupWorker(pass, () => ttlMs, 900_000);
   worker.start();
   await vi.advanceTimersByTimeAsync(0);
-  if (action === 'disable') worker.setTtl(0);
+  if (action === 'disable') { ttlMs = 0; worker.onTtlChanged(); }
   else await worker.stop();
   await vi.advanceTimersByTimeAsync(100);
   expect(pass).toHaveBeenCalledOnce();
@@ -185,10 +185,11 @@ it('does not rearm a continuation when TTL is disabled during physical work', as
   vi.useFakeTimers();
   const blocked = deferred<SwmExpiryCleanupResult>();
   const pass = vi.fn().mockReturnValueOnce(blocked.promise);
-  const worker = new SwmExpiryCleanupWorker(pass, runtimeSettings(100), 900_000);
+  let ttlMs = 100;
+  const worker = new SwmExpiryCleanupWorker(pass, () => ttlMs, 900_000);
   const running = worker.runNow();
   await Promise.resolve();
-  worker.setTtl(0);
+  ttlMs = 0; worker.onTtlChanged();
   blocked.resolve({ triplesDeleted: 1000, continuation });
   await running;
   await vi.advanceTimersByTimeAsync(100);
@@ -203,7 +204,8 @@ it('joins a periodic pass then completes the manual cutoff without detached work
   const pass = vi.fn<ConstructorParameters<typeof SwmExpiryCleanupWorker>[0]>()
     .mockReturnValueOnce(blocked.promise)
     .mockResolvedValue({ triplesDeleted: 2 });
-  const worker = new SwmExpiryCleanupWorker(pass, runtimeSettings(100), 900_000);
+  const ttlMs = 100;
+  const worker = new SwmExpiryCleanupWorker(pass, () => ttlMs, 900_000);
   worker.start();
   await vi.advanceTimersByTimeAsync(0);
   vi.setSystemTime(Date.now() + 1000);
@@ -222,7 +224,8 @@ it('does not duplicate an identical manual request after promoting a queued peri
   const blocked = deferred<SwmExpiryCleanupResult>();
   const pass = vi.fn<ConstructorParameters<typeof SwmExpiryCleanupWorker>[0]>()
     .mockReturnValueOnce(blocked.promise);
-  const worker = new SwmExpiryCleanupWorker(pass, runtimeSettings(100), 900_000);
+  const ttlMs = 100;
+  const worker = new SwmExpiryCleanupWorker(pass, () => ttlMs, 900_000);
   worker.start();
   vi.advanceTimersByTime(0);
   const first = worker.runNow();
@@ -244,10 +247,11 @@ it('runs a fresh manual sweep when TTL shortens during an active manual drain', 
   const pass = vi.fn<ConstructorParameters<typeof SwmExpiryCleanupWorker>[0]>()
     .mockReturnValueOnce(blocked.promise)
     .mockResolvedValue({ triplesDeleted: 7 });
-  const worker = new SwmExpiryCleanupWorker(pass, runtimeSettings(48 * 60 * 60 * 1000));
+  let ttlMs = 48 * 60 * 60 * 1000;
+  const worker = new SwmExpiryCleanupWorker(pass, () => ttlMs);
   const first = worker.runNow();
   await Promise.resolve();
-  worker.setTtl(60 * 60 * 1000);
+  ttlMs = 60 * 60 * 1000; worker.onTtlChanged();
   const newerCutoff = Date.now() - 60 * 60 * 1000;
   const second = worker.runNow();
   expect(second).toBe(first);
@@ -265,7 +269,8 @@ it('starts a fresh sweep when a manual request upgrades a queued periodic contin
   const pass = vi.fn<ConstructorParameters<typeof SwmExpiryCleanupWorker>[0]>()
     .mockResolvedValueOnce({ triplesDeleted: 1, continuation })
     .mockResolvedValue({ triplesDeleted: 2 });
-  const worker = new SwmExpiryCleanupWorker(pass, runtimeSettings(100), 900_000);
+  const ttlMs = 100;
+  const worker = new SwmExpiryCleanupWorker(pass, () => ttlMs, 900_000);
   worker.start();
   try {
     await vi.advanceTimersByTimeAsync(0);
@@ -281,18 +286,12 @@ it('pins the public cutoff across yielding passes and does not schedule before s
   const pass = vi.fn<ConstructorParameters<typeof SwmExpiryCleanupWorker>[0]>()
     .mockResolvedValueOnce({ triplesDeleted: 5, continuation })
     .mockResolvedValue({ triplesDeleted: 2 });
-  const worker = new SwmExpiryCleanupWorker(pass, runtimeSettings(100));
+  const ttlMs = 100;
+  const worker = new SwmExpiryCleanupWorker(pass, () => ttlMs);
   expect(await worker.runNow()).toBe(7);
   expect(pass.mock.calls[0]![3]).toBe(pass.mock.calls[1]![3]);
   expect(worker.running).toBe(false);
   await new Promise(resolve => setTimeout(resolve, 20));
   expect(pass).toHaveBeenCalledTimes(2);
   await worker.stop();
-});
-
-it.each([-1, NaN, Infinity, 1e20])('rejects invalid TTL %s without changing worker state', ttl => {
-  const pass = vi.fn().mockResolvedValue({ triplesDeleted: 0 });
-  expect(() => new SwmExpiryCleanupWorker(pass, runtimeSettings(ttl))).toThrow('sharedMemoryTtlMs');
-  const worker = new SwmExpiryCleanupWorker(pass, runtimeSettings(100));
-  expect(() => worker.setTtl(ttl)).toThrow('sharedMemoryTtlMs');
 });

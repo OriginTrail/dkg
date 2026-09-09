@@ -598,12 +598,12 @@ it('awaits all 1001 initially expired operations and includes every deletion in 
   expect(f.stats.largestBatch).toBe(250);
 });
 
-it('rejects Date-out-of-range TTL at creation and before mutating a running configuration', async () => {
-  const creation = DKGAgent.create({ name: 'invalid-expiry', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 1e20 })
+it.each([-1, NaN, Infinity, 1e20])('rejects invalid TTL %s at creation and before mutating a running configuration', async ttlMs => {
+  const creation = DKGAgent.create({ name: 'invalid-expiry', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: ttlMs })
     .then(agent => { agents.push(agent); return agent; });
   await expect(creation).rejects.toThrow('sharedMemoryTtlMs');
   const f = await fixture(1);
-  expect(() => f.agent.setSharedMemoryTtlMs(1e20)).toThrow('sharedMemoryTtlMs');
+  expect(() => f.agent.setSharedMemoryTtlMs(ttlMs)).toThrow('sharedMemoryTtlMs');
   expect(await f.agent.cleanupExpiredSharedMemory()).toBe(3);
 });
 

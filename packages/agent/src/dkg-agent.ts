@@ -1,4 +1,4 @@
-import { validateSharedMemoryTtlMs } from './swm-expiry-cleanup.js';
+import { validateSharedMemoryTtlMs } from './dkg-agent-config-validation.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,

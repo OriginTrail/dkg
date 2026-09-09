@@ -4,7 +4,6 @@ import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-pub
 import { registerSyncHandler } from '../../src/sync/responder/sync-handler.js';
 import type { SyncResponderSnapshotBudgetOptions } from '../../src/sync/responder/snapshot-budget.js';
 import type { SyncRequestEnvelope } from '../../src/sync/auth/request-build.js';
-import type { SwmExpiryRuntimeSettings } from '../../src/swm-expiry-runtime-settings.js';
 
 export const TEST_SYNC_PROTOCOL = '/origintrail/dkg/sync/1.0.0';
 export const TEST_SYNC_DENIED = 'sync-denied';
@@ -14,16 +13,6 @@ export const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 export const SCHEMA_NAME = 'http://schema.org/name';
 
 export const noopLog = (_ctx: OperationContext, _msg: string) => {};
-
-export function mutableSwmExpiryRuntimeSettings(
-  initialTtlMs: number,
-): SwmExpiryRuntimeSettings {
-  let ttlMs = initialTtlMs;
-  return {
-    getSharedMemoryTtlMs: () => ttlMs,
-    setSharedMemoryTtlMs: (nextTtlMs) => { ttlMs = nextTtlMs; },
-  };
-}
 
 export interface CapturedSyncHandler {
   register: (
@@ -72,7 +61,7 @@ export function registerTestSyncHandler(
     protocolSync: TEST_SYNC_PROTOCOL,
     syncDeniedResponse: TEST_SYNC_DENIED,
     syncPageSize: options.syncPageSize ?? 5000,
-    swmExpiryRuntimeSettings: mutableSwmExpiryRuntimeSettings(options.sharedMemoryTtlMs ?? 0),
+    getSharedMemoryTtlMs: () => options.sharedMemoryTtlMs ?? 0,
     store,
     publicSnapshotStore: options.publicSnapshotStore,
     peerId: 'self-peer',

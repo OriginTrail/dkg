@@ -1,7 +1,6 @@
 import { setImmediate } from 'node:timers/promises';
 import { SWM_CLEANUP_INTERVAL_MS } from './dkg-agent-constants.js';
-import { validateSharedMemoryTtlMs, type SwmExpiryCleanupContinuation, type SwmExpiryCleanupResult } from './swm-expiry-cleanup.js';
-import type { SwmExpiryRuntimeSettings } from './swm-expiry-runtime-settings.js';
+import type { SwmExpiryCleanupContinuation, SwmExpiryCleanupResult } from './swm-expiry-cleanup.js';
 
 type MaintenanceMode = 'manual' | 'periodic';
 type CleanupRequest = { readonly kind: 'periodic' } | { readonly kind: 'manual'; readonly cutoffMs: number };
@@ -17,26 +16,18 @@ type WorkerState =
   | { readonly kind: 'stopping'; readonly completion: Promise<void> }
   | { readonly kind: 'stopped' };
 
-/** Each lifecycle state owns its timer or physical flight. Settings are shared with the agent. */
+/** Each lifecycle state owns its timer or physical flight. The agent owns configuration. */
 export class SwmExpiryCleanupWorker {
   private state: WorkerState = { kind: 'idle', mode: 'manual' };
 
   constructor(
     private readonly processPass: (ttlMs: number, isClosed: () => boolean, continuation?: SwmExpiryCleanupContinuation, cutoffMs?: number) => Promise<SwmExpiryCleanupResult>,
-    private readonly settings: SwmExpiryRuntimeSettings,
+    private readonly getSharedMemoryTtlMs: () => number,
     private readonly intervalMs = SWM_CLEANUP_INTERVAL_MS,
-  ) { validateSharedMemoryTtlMs(this.ttlMs()); }
-
-  private ttlMs(): number {
-    return this.settings.getSharedMemoryTtlMs();
-  }
-
-  private updateTtlMs(ttlMs: number): void {
-    this.settings.setSharedMemoryTtlMs(ttlMs);
-  }
+  ) {}
 
   get running(): boolean {
-    return this.ttlMs() > 0 && (this.state.kind === 'scheduled'
+    return this.getSharedMemoryTtlMs() > 0 && (this.state.kind === 'scheduled'
       || ((this.state.kind === 'idle' || this.state.kind === 'running') && this.state.mode === 'periodic'));
   }
 
@@ -49,16 +40,14 @@ export class SwmExpiryCleanupWorker {
     this.schedule(0);
   }
 
-  setTtl(ttlMs: number): void {
-    validateSharedMemoryTtlMs(ttlMs);
-    this.updateTtlMs(ttlMs);
-    if (ttlMs === 0) this.cancelScheduled();
+  onTtlChanged(): void {
+    if (this.getSharedMemoryTtlMs() === 0) this.cancelScheduled();
     else this.schedule(0);
   }
 
   /** Join one owned flight; newer manual cutoffs are drained before it resolves. */
   runNow(): Promise<number> {
-    const ttlMs = this.ttlMs();
+    const ttlMs = this.getSharedMemoryTtlMs();
     if (this.state.kind === 'stopping' || this.state.kind === 'stopped' || ttlMs === 0) return Promise.resolve(0);
     const cutoffMs = Date.now() - ttlMs;
     if (this.state.kind === 'running') {
@@ -109,17 +98,17 @@ export class SwmExpiryCleanupWorker {
   private async execute(flight: CleanupFlight): Promise<number> {
     let deleted = 0;
     try {
-      while (this.owns(flight) && this.ttlMs() > 0) {
+      while (this.owns(flight) && this.getSharedMemoryTtlMs() > 0) {
         const request = flight.request;
         const continuation = flight.continuation;
         flight.continuation = undefined;
         const result = await this.processPass(
-          this.ttlMs(),
-          () => !this.owns(flight) || this.ttlMs() === 0,
+          this.getSharedMemoryTtlMs(),
+          () => !this.owns(flight) || this.getSharedMemoryTtlMs() === 0,
           continuation,
           request.kind === 'manual' ? request.cutoffMs : undefined);
         deleted += result.triplesDeleted;
-        if (!this.owns(flight) || this.ttlMs() === 0) break;
+        if (!this.owns(flight) || this.getSharedMemoryTtlMs() === 0) break;
         if (flight.request !== request) {
           await setImmediate();
           continue;
@@ -143,7 +132,7 @@ export class SwmExpiryCleanupWorker {
   }
 
   private schedule(delayMs: number, continuation?: SwmExpiryCleanupContinuation): void {
-    if (this.state.kind !== 'idle' || this.state.mode !== 'periodic' || this.ttlMs() === 0) return;
+    if (this.state.kind !== 'idle' || this.state.mode !== 'periodic' || this.getSharedMemoryTtlMs() === 0) return;
     const scheduled: Extract<WorkerState, { kind: 'scheduled' }> = {
       kind: 'scheduled', continuation,
       timer: setTimeout(() => {

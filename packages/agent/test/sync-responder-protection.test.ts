@@ -7,7 +7,6 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { QueryOptions, QueryResult, Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
-import { mutableSwmExpiryRuntimeSettings } from './_helpers/sync-responder.js';
 
 const REMOTE_A = '12D3KooWResponderCapPeerA';
 const REMOTE_B = '12D3KooWResponderCapPeerB';
@@ -123,7 +122,7 @@ function captureHandler(
     protocolSync: '/origintrail/dkg/sync/1.0.0',
     syncDeniedResponse: 'sync-denied',
     syncPageSize: 500,
-    swmExpiryRuntimeSettings: mutableSwmExpiryRuntimeSettings(0),
+    getSharedMemoryTtlMs: () => 0,
     store,
     publicSnapshotStore: options.publicSnapshotStore,
     peerId: 'self-peer',

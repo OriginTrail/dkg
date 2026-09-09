@@ -9,6 +9,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { validateSharedMemoryTtlMs } from './dkg-agent-config-validation.js';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -3330,7 +3331,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       protocolSync: PROTOCOL_SYNC,
       syncDeniedResponse: SYNC_DENIED_RESPONSE,
       syncPageSize: SYNC_PAGE_SIZE,
-      swmExpiryRuntimeSettings: this.swmExpiryRuntimeSettings,
+      getSharedMemoryTtlMs: () => this.config.sharedMemoryTtlMs,
       store: this.store,
       publicSnapshotStore: this.publicSnapshotStore,
       peerId: this.peerId,
@@ -10645,7 +10646,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * and the next cleanup cycle without requiring a restart.
    */
   setSharedMemoryTtlMs(this: DKGAgent, ttlMs: number): void {
-    this.swmExpiryCleanupWorker.setTtl(ttlMs);
+    validateSharedMemoryTtlMs(ttlMs);
+    this.config.sharedMemoryTtlMs = ttlMs;
+    this.swmExpiryCleanupWorker.onTtlChanged();
   }
 
   /**

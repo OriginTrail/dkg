@@ -11,7 +11,6 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { SwmExpiryCleanupWorker } from './swm-expiry-cleanup-worker.js';
-import type { SwmExpiryRuntimeSettings } from './swm-expiry-runtime-settings.js';
 import { runSwmExpiryCleanup } from './swm-expiry-cleanup.js';
 import { performance } from 'node:perf_hooks';
 import {
@@ -1077,8 +1076,6 @@ export class DKGAgentBase {
   protected messageHandler: MessageHandler | null = null;
   protected chainPoller: ChainEventPoller | null = null;
   protected readonly swmExpiryCleanupWorker: SwmExpiryCleanupWorker;
-  /** The single live TTL setting consumed by cleanup and sync serving. */
-  protected readonly swmExpiryRuntimeSettings: SwmExpiryRuntimeSettings;
   /** Phase B — periodic chain-driven VM reconciliation sweep timer. */
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;
   /** Phase B — unified per-CG coalescing and node-wide admission policy. */
@@ -1830,16 +1827,12 @@ export class DKGAgentBase {
     this.publisher = publisher;
     this.queryEngine = queryEngine;
     this.workspaceOwnedEntities = workspaceOwnedEntities;
-    this.swmExpiryRuntimeSettings = {
-      getSharedMemoryTtlMs: () => this.config.sharedMemoryTtlMs,
-      setSharedMemoryTtlMs: (ttlMs) => { this.config.sharedMemoryTtlMs = ttlMs; },
-    };
     this.swmExpiryCleanupWorker = new SwmExpiryCleanupWorker(
       (ttlMs, isClosed, continuation, cutoffMs) => runSwmExpiryCleanup({
         store: this.store, workspaceOwnedEntities: this.workspaceOwnedEntities,
         writeLocks, log: this.log, isClosed,
       }, ttlMs, continuation, cutoffMs),
-      this.swmExpiryRuntimeSettings,
+      () => this.config.sharedMemoryTtlMs,
       SWM_CLEANUP_INTERVAL_MS,
     );
     this.writeLocks = writeLocks;
