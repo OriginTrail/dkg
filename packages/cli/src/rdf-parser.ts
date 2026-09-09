@@ -87,9 +87,17 @@ export async function parseRdfInput(
       throw error;
     }
     if (typeof nquads !== 'string') throw new Error('JSON-LD conversion did not return N-Quads');
-    return { sourceKind: 'jsonld', quads: await parseRdf(nquads, 'nquads', defaultGraph) };
+    return { sourceKind: 'jsonld', quads: await parseN3Quads(nquads, 'nquads', defaultGraph) };
   }
 
+  return { sourceKind: 'rdf', quads: await parseN3Quads(content, format, defaultGraph) };
+}
+
+function parseN3Quads(
+  content: string,
+  format: Exclude<RdfFormat, 'json' | 'jsonld'>,
+  defaultGraph: string,
+): Promise<SimpleQuad[]> {
   // N3 parser handles N-Triples, N-Quads, Turtle, TriG
   const n3Format = N3_FORMAT_MAP[format];
   if (!n3Format) throw new Error(`Unsupported format: ${format}`);
@@ -100,7 +108,7 @@ export async function parseRdfInput(
 
     parser.parse(content, (error: Error | null, quad: N3Quad | null) => {
       if (error) { reject(error); return; }
-      if (!quad) { resolve({ sourceKind: 'rdf', quads }); return; }
+      if (!quad) { resolve(quads); return; }
 
       quads.push({
         subject: termToString(quad.subject),
