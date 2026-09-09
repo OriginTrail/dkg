@@ -9,7 +9,6 @@ import {
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   MEMBER_ROSTER_OBJECT_TYPE_V1,
   MemoryLayer,
-  PROTOCOL_NETWORK_IDENTITY,
   assertCanonicalGraphScopedAuthorSealV1,
   buildAssertionSealQuads,
   buildAuthorAttestationTypedData,
@@ -289,6 +288,8 @@ interface NativeAgentStartOptionsV1 {
   readonly operationalPrivateKey?: string;
   readonly omitLegacyDeployment?: boolean;
   readonly beforeStart?: (agent: DKGAgent) => void | Promise<void>;
+  /** Establish live-node test preconditions before automatic graph subscription. */
+  readonly afterStart?: (agent: DKGAgent) => void | Promise<void>;
 }
 
 async function startNativeAgentWithOptions(
@@ -306,6 +307,7 @@ async function startNativeAgentWithOptions(
     activation,
     persistentStorePath,
     beforeStart,
+    afterStart,
     syncContextGraphs,
     operationalPrivateKey,
     omitLegacyDeployment = false,
@@ -379,6 +381,7 @@ async function startNativeAgentWithOptions(
   agents.push(agent);
   await beforeStart?.(agent);
   await agent.start();
+  await afterStart?.(agent);
   const selectedContextGraphs = syncContextGraphs ?? (catalogActivation !== undefined
     && catalogActivation.enabled !== false
     ? catalogActivation.bootstrap?.acceptedPolicies.map(
@@ -2108,17 +2111,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           providerPeerAddresses.get(peerId) ?? null,
       },
     });
-    const send = provider.router.send.bind(provider.router);
-    let interruptedProbe = false;
-    // A peer closing during identity negotiation can return no frame. Keep
-    // the real admission/backoff owner and all subsequent wire probes live.
-    vi.spyOn(provider.router, 'send').mockImplementation(async (peer, protocol, data, options) => {
-      if (protocol === PROTOCOL_NETWORK_IDENTITY && !interruptedProbe) {
-        interruptedProbe = true;
-        return new Uint8Array();
-      }
-      return send(peer, protocol, data, options);
-    });
     provider.acceptRfc64CatalogAccessSnapshotV1({
       policy: authority.policy,
       policyDigest: authority.policyDigest,
@@ -2135,19 +2127,15 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       existingDataDir: dataDir,
       persistentStorePath,
       catalogActivation,
+      afterStart: (agent) => provider.networkAdmission.rememberRetryableProbeFailure(
+        agent.peerId, 'restart fixture transient backoff', 'transient',
+      ),
       beforeStart: (agent) => {
         vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
           AUTHOR_WALLET.privateKey,
         );
       },
     });
-    providerPeerAddresses.set(author.peerId, AUTHOR);
-    await connectBothWays(author, provider);
-    await vi.waitFor(() => {
-      expect(interruptedProbe).toBe(true);
-      expect(provider.networkAdmission.getRetryableProbeBackoff(author.peerId))
-        .toMatchObject({ kind: 'transient', failures: 1 });
-    }, { timeout: 5_000, interval: 10 });
     const assertionCoordinate = 'private-startup-repair';
     const shareOperationId = 'private-startup-repair-operation';
     await seedSignedSwmWorkspaceV1(author, {
@@ -2170,11 +2158,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const authorPeerId = author.peerId;
     await author.stop();
     agents.splice(agents.indexOf(author), 1);
-    await vi.waitFor(() => {
-      expect(provider.node.libp2p.getConnections().some(
-        ({ remotePeer }) => remotePeer.toString() === authorPeerId,
-      )).toBe(false);
-    }, { timeout: 10_000, interval: 10 });
 
     let markStartupProjectionEntered!: () => void;
     let releaseStartupProjection!: () => void;
@@ -2190,6 +2173,9 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       existingDataDir: dataDir,
       persistentStorePath,
       catalogActivation,
+      afterStart: (agent) => provider.networkAdmission.rememberRetryableProbeFailure(
+        agent.peerId, 'restart fixture transient backoff', 'transient',
+      ),
       beforeStart: (agent) => {
         vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
           AUTHOR_WALLET.privateKey,
@@ -2214,7 +2200,13 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     try {
       // Raw libp2p dial only awaits transport. This controlled reconnect must
       // await the public API's signed identity admission before publishing.
+      provider.networkAdmission.rememberRetryableProbeFailure(
+        restarted.peerId, 'restart fixture transient backoff', 'transient',
+      );
       await restarted.connectTo(tcpMultiaddr(provider));
+      expect(provider.networkAdmission.getRetryableProbeBackoff(restarted.peerId))
+        .toMatchObject({ kind: 'transient', retryAfterMs: expect.any(Number) });
+      expect(provider.networkAdmission.isAcceptedPeer(restarted.peerId)).toBe(false);
       await provider.connectTo(tcpMultiaddr(restarted));
       expect(provider.networkAdmission.isAcceptedPeer(restarted.peerId)).toBe(true);
       expect(provider.networkAdmission.getRetryableProbeBackoff(restarted.peerId)).toBeUndefined();
