@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { SYSTEM_CONTEXT_GRAPHS, contextGraphWorkspaceGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   createSharedMemorySnapshotMaterializer,
   type SharedMemorySnapshotMaterializer,
@@ -14,13 +14,15 @@ import {
   type DurableSyncStoreInsertRequest,
 } from '../src/sync/requester/durable-sync.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
-import { generateShareMetadata, workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
+import { workspaceOperationPublicSliceSubject, workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
+import { storeWorkspaceOperationPublicQuads } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import {
   collectPublicSnapshotMetadata,
   runSharedMemorySync,
   selectSwmSnapshotCoverage,
   syncPublicSnapshotsForMeta,
+  type SharedMemorySyncMode,
 } from '../src/sync/requester/shared-memory-sync.js';
 import type { SwmSnapshotCoverage } from '../src/dkg-agent-types.js';
 import {
@@ -1975,240 +1977,273 @@ describe('public SWM snapshot coverage (#2050)', () => {
     }
   });
 
-  it.each(['clean', 'duplicate-version', 'future-version', 'shared-ref', 'shared-ref-first', 'truncated-entity', 'truncated-ka', 'head-alias', 'truncated-sibling'] as const)('preserves entity-share coverage and metadata beside %s graph-scoped heads', async (headState) => {
-    // Entity-level shares advertise digest-bound slices without per-KA heads.
-    // Malformed KA metadata must not suppress unrelated, ready entity slices.
-    // Shared refs still require KA authority, and a partially fetched multi-root
-    // operation cannot publish membership rows for the missing root.
+  async function entityShareFixture() {
     const { metaGraph } = swmFixtures(COVERAGE_CG);
-    const SHARE_OP = 'op-entity-share-1';
-    const ROOT = 'https://example.org/thing/1';
-    // One root's public slice, as `filterQuadsForRoot` hands it to
-    // `putSnapshot`. Digest and count are taken FROM this payload because
-    // `hasValidSnapshot` re-checks both against the cached blob: a hand-written
-    // count would turn a cache hit into a network fetch and quietly move the
-    // row onto a different branch of the walk.
+    const shareOperationId = 'op-entity-share-1';
+    const root = 'https://example.org/thing/1';
+    const siblingRoot = 'https://example.org/thing/2';
     const payload: Quad[] = [
-      { subject: ROOT, predicate: 'https://schema.org/name', object: '"Thing One"', graph: '' } as Quad,
-      { subject: ROOT, predicate: 'https://schema.org/color', object: '"blue"', graph: '' } as Quad,
+      { subject: root, predicate: 'https://schema.org/name', object: '"Thing One"', graph: '' },
+      { subject: root, predicate: 'https://schema.org/color', object: '"blue"', graph: '' },
     ];
-    const digest = workspacePublicQuadsDigest(payload);
-    const sliceSubject = `urn:dkg:public-stage:${[COVERAGE_CG, '_', SHARE_OP, ROOT].map(encodeURIComponent).join(':')}`;
-    const meta: Quad[] = [
-      // Production-generated, not invented: these are the share-operation rows
-      // an entity share writes alongside the slice. They contribute neither a
-      // manifest ref (no digest/count) nor a descriptor (no head names this
-      // operation), which is what leaves the slice row as the only thing under
-      // test while keeping the fixture the shape a real peer would serve.
-      ...generateShareMetadata({
-        shareOperationId: SHARE_OP,
-        contextGraphId: COVERAGE_CG,
-        rootEntities: [ROOT],
-        publisherPeerId: 'peer-source',
-        timestamp: new Date(0),
-      }, metaGraph),
-      // The slice rows themselves, in `storeWorkspaceOperationPublicQuads`
-      // order. Deliberately NO `dkg:publicSnapshotGraph` row: with a snapshot
-      // store configured the blob is keyed by its digest and `ref === digest`,
-      // and that absence is precisely what makes this row a snapshot-FETCH
-      // target instead of a graph-sync one. `publicQuadsCount` keeps its
-      // `xsd:integer` type because that is how production writes it.
-      { subject: sliceSubject, predicate: 'http://dkg.io/ontology/contextGraphId', object: `"${COVERAGE_CG}"`, graph: metaGraph } as Quad,
-      { subject: sliceSubject, predicate: 'http://dkg.io/ontology/shareOperationId', object: `"${SHARE_OP}"`, graph: metaGraph } as Quad,
-      { subject: sliceSubject, predicate: 'http://dkg.io/ontology/publicSliceRootEntity', object: ROOT, graph: metaGraph } as Quad,
-      { subject: sliceSubject, predicate: 'http://dkg.io/ontology/publicQuadsDigest', object: `"${digest}"`, graph: metaGraph } as Quad,
-      {
-        subject: sliceSubject,
-        predicate: 'http://dkg.io/ontology/publicQuadsCount',
-        object: `"${payload.length}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
-        graph: metaGraph,
-      } as Quad,
-      { subject: sliceSubject, predicate: 'http://dkg.io/ontology/publisherPeerId', object: '"peer-source"', graph: metaGraph } as Quad,
-      { subject: sliceSubject, predicate: 'http://dkg.io/ontology/publishedAt', object: `"${new Date(0).toISOString()}"`, graph: metaGraph } as Quad,
-    ];
-
-    const siblingRoot = `${ROOT}/sibling`;
     const siblingPayload: Quad[] = [{ subject: siblingRoot, predicate: 'https://schema.org/name', object: '"Sibling"', graph: '' }];
+    const digest = workspacePublicQuadsDigest(payload);
     const siblingDigest = workspacePublicQuadsDigest(siblingPayload);
-    if (headState === 'truncated-sibling') {
-      const siblingSubject = sliceSubject.replace(encodeURIComponent(ROOT), encodeURIComponent(siblingRoot));
-      meta.push(...meta.filter((quad) => quad.subject === sliceSubject).map((quad) => ({
-        ...quad,
-        subject: siblingSubject,
-        object: quad.predicate.endsWith('/publicSliceRootEntity') ? siblingRoot
-          : quad.predicate.endsWith('/publicQuadsDigest') ? `"${siblingDigest}"`
-          : quad.predicate.endsWith('/publicQuadsCount') ? '"1"^^<http://www.w3.org/2001/XMLSchema#integer>'
-          : quad.object,
-      })), {
-        subject: `urn:dkg:share:${COVERAGE_CG}:${SHARE_OP}`,
-        predicate: 'http://dkg.io/ontology/rootEntity', object: siblingRoot, graph: metaGraph,
+    const cached = new Map<string, Quad[]>();
+    const source = new OxigraphStore();
+    const graphManager = new GraphManager(source);
+    const createMetadata = async (roots: string[], data: Quad[]) => {
+      // The real publisher owns both subject identity and the complete metadata model.
+      await storeWorkspaceOperationPublicQuads({
+        store: source, graphManager, contextGraphId: COVERAGE_CG,
+        shareOperationId, rootEntities: roots, quads: data,
+        publisherPeerId: 'peer-source', timestamp: new Date(0),
+        publicSnapshotStore: {
+          getSnapshot: async ref => cached.get(ref) ?? null,
+          putSnapshot: async ({ digest: ref, quads }) => {
+            cached.set(ref, quads.map(quad => ({ ...quad, graph: '' })));
+            return { ref, byteLength: 0 };
+          },
+        },
       });
+      const result = await source.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } }`);
+      if (result.type !== 'quads') throw new Error('Fixture metadata query did not return quads');
+      // The manifest visits refs in transport order. Keep the ready root before
+      // the missing sibling, independently of the store's CONSTRUCT ordering.
+      const slices = roots.map(root => workspaceOperationPublicSliceSubject(COVERAGE_CG, shareOperationId, root));
+      return result.quads.map(quad => ({ ...quad, graph: metaGraph }))
+        .sort((a, b) => slices.indexOf(a.subject) - slices.indexOf(b.subject));
+    };
+    let entityMeta: Quad[];
+    let twoRootMeta: Quad[];
+    try {
+      entityMeta = await createMetadata([root], payload);
+      twoRootMeta = await createMetadata([root, siblingRoot], [...payload, ...siblingPayload]);
+    } finally {
+      await source.close();
     }
-    const entityMeta = [...meta];
-    const sharedRef = headState.startsWith('shared-ref');
-    const entityIncomplete = headState === 'truncated-entity';
-    const poisoned = headState === 'clean' ? undefined : swmFixtures(COVERAGE_CG).manifest(1)[0]!;
-    if (poisoned) {
-      const poisonedRows = poisoned.meta.map((quad) => {
-        if (headState === 'head-alias' && quad.subject === poisoned.headSubject
-          && quad.predicate.endsWith('/shareOperationId')) return { ...quad, object: `"${SHARE_OP}"` };
-        if (headState === 'future-version' && quad.subject === poisoned.headSubject
-          && quad.predicate === 'http://dkg.io/ontology/contentScopeVersion') {
-          return { ...quad, object: '"999"^^<http://www.w3.org/2001/XMLSchema#integer>' };
-        }
-        if (sharedRef && (quad.predicate.endsWith('/publicSnapshotRef')
-          || quad.predicate.endsWith('/publicQuadsDigest'))) return { ...quad, object: `"${digest}"` };
-        if (sharedRef && quad.predicate.endsWith('/publicQuadsCount')) {
-          return { ...quad, object: `"${payload.length}"^^<http://www.w3.org/2001/XMLSchema#integer>` };
-        }
-        return quad;
-      });
-      if (headState === 'shared-ref-first') meta.unshift(...poisonedRows);
-      else meta.push(...poisonedRows);
-      if (headState !== 'future-version') meta.push({
-        subject: poisoned.headSubject,
-        predicate: 'http://dkg.io/ontology/assertionVersion',
-        object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
-        graph: metaGraph,
-      });
-    }
-
-    // Fixture integrity across BOTH readers, asserted before the sync so a
-    // fixture that drifted names itself instead of surfacing as an unexplained
-    // count. The manifest must really carry this one ref (or `snapshotsTotal:
-    // 1` below would be measuring something else), and NOTHING may be
-    // described (or this row would silently become a second copy of the mixed
-    // row above, travelling the described path it is meant to avoid).
-    expect(collectPublicSnapshotMetadata(entityMeta)).toEqual([{
-      ref: digest,
-      digest,
-      count: payload.length,
-      publishedAtMs: 0,
-    }, ...(headState === 'truncated-sibling' ? [{
-      ref: siblingDigest, digest: siblingDigest, count: siblingPayload.length, publishedAtMs: 0,
-    }] : [])]);
-    if (poisoned) {
-      expect(() => parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: COVERAGE_CG, metaQuads: meta }))
-        .toThrow(headState === 'future-version' ? /unsupported contentScopeVersion/ : /ambiguous assertionVersion/);
-    } else {
-      expect(parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: COVERAGE_CG, metaQuads: meta })).toEqual([]);
-    }
-
-    // The blob is already cached: the state of a node whose earlier pass
-    // fetched it. Nothing here is missing — the peer owes this node nothing.
-    const cached = new Map<string, Quad[]>([[digest, payload]]);
-    if (poisoned) cached.set(poisoned.digest, poisoned.payload);
-    const missingRef = entityIncomplete ? digest : headState === 'truncated-ka' ? poisoned!.digest
-      : headState === 'truncated-sibling' ? siblingDigest : undefined;
-    const expectedMeta = sharedRef || entityIncomplete ? []
-      : headState === 'head-alias' || headState === 'truncated-sibling'
-        ? entityMeta.filter((quad) => quad.subject === sliceSubject) : entityMeta;
-    if (missingRef) cached.delete(missingRef);
-    const snapshotFetches: string[] = [];
-
-    // A real store and the real materializer, as the rows above use them: with
-    // a hand-rolled stub, "nothing was written" would be unfalsifiable, and the
-    // `insertedDataTriples` witness below could not distinguish a vacuous
-    // resolution from a materializer that silently does nothing.
-    const store = new OxigraphStore();
-    const materializer = createSharedMemorySnapshotMaterializer({
-      store,
-      writeLocks: new Map<string, Promise<void>>(),
-      invalidateListContextGraphsCache: () => {},
+    const sliceSubject = workspaceOperationPublicSliceSubject(COVERAGE_CG, shareOperationId, root);
+    const siblingSubject = workspaceOperationPublicSliceSubject(COVERAGE_CG, shareOperationId, siblingRoot);
+    const ka = swmFixtures(COVERAGE_CG).manifest(1)[0]!;
+    cached.set(ka.digest, ka.payload);
+    const duplicateHead: Quad[] = [...ka.meta, {
+      subject: ka.headSubject, predicate: 'http://dkg.io/ontology/assertionVersion',
+      object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: metaGraph,
+    }];
+    const futureHead = ka.meta.map(quad => quad.subject === ka.headSubject && quad.predicate.endsWith('/contentScopeVersion')
+      ? { ...quad, object: '"999"^^<http://www.w3.org/2001/XMLSchema#integer>' } : quad);
+    const sharedHead = duplicateHead.map(quad => {
+      if (quad.predicate.endsWith('/publicSnapshotRef') || quad.predicate.endsWith('/publicQuadsDigest')) return { ...quad, object: `"${digest}"` };
+      if (quad.predicate.endsWith('/publicQuadsCount')) return { ...quad, object: `"${payload.length}"^^<http://www.w3.org/2001/XMLSchema#integer>` };
+      return quad;
     });
+    const aliasHead = duplicateHead.map(quad => quad.subject === ka.headSubject && quad.predicate.endsWith('/shareOperationId')
+      ? { ...quad, object: `"${shareOperationId}"` } : quad);
+    return {
+      metaGraph, payload, digest, siblingDigest, cached, ka, entityMeta, twoRootMeta, sliceSubject, siblingSubject,
+      duplicateHead, futureHead, sharedHead, aliasHead,
+      sliceMeta: entityMeta.filter(quad => quad.subject === sliceSubject),
+      siblingMeta: twoRootMeta.filter(quad => quad.subject === siblingSubject),
+      data: payload.map(quad => ({ ...quad, graph: contextGraphWorkspaceGraphUri(COVERAGE_CG) })),
+    };
+  }
 
+  type EntityFixture = Awaited<ReturnType<typeof entityShareFixture>>;
+  interface EntityRecoveryScenario {
+    name: string;
+    arrange(f: EntityFixture): {
+      meta: Quad[];
+      data: Quad[];
+      missingRef?: string;
+      mode?: SharedMemorySyncMode;
+      rejectMetadataInsert?: boolean;
+    };
+    expected(f: EntityFixture): {
+      metadata: Quad[];
+      data: Quad[];
+      failedPhases: number;
+      attemptedRows: Quad[];
+      coverage: Pick<SwmSnapshotCoverage, 'snapshotsResolved' | 'snapshotsTotal' | 'missingCount' | 'missingSample'>;
+    };
+    parseError?: RegExp;
+  }
+  const coverage = (resolved: number, total: number, missing: number, sample: string[] = []) => ({
+    snapshotsResolved: resolved, snapshotsTotal: total, missingCount: missing, missingSample: sample,
+  });
+  const recovered = (metadata: Quad[], data: Quad[], expectedCoverage: ReturnType<typeof coverage>, failedPhases = 1) => ({
+    metadata, data, failedPhases, coverage: expectedCoverage, attemptedRows: [...data, ...metadata],
+  });
+  const selectedMode = (accepts: boolean): SharedMemorySyncMode => ({
+    kind: 'selected-recovery',
+    recoveryGuard: { signal: new AbortController().signal, assertCurrent: noop },
+    snapshotEvidencePolicy: { accepts: () => accepts },
+  });
+  const ambiguousVersion = /ambiguous assertionVersion/;
+  const entityScenarios: EntityRecoveryScenario[] = [
+    {
+      name: 'clean entity share',
+      arrange: f => ({ meta: f.entityMeta, data: [] }),
+      expected: f => recovered(f.entityMeta, [], coverage(1, 1, 0), 0),
+    },
+    {
+      name: 'duplicate KA version', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.entityMeta, ...f.duplicateHead], data: f.data }),
+      expected: f => recovered(f.entityMeta, f.data, coverage(1, 2, 1)),
+    },
+    {
+      name: 'future KA content-scope version', parseError: /unsupported contentScopeVersion/,
+      arrange: f => ({ meta: [...f.entityMeta, ...f.futureHead], data: f.data }),
+      expected: f => recovered(f.entityMeta, f.data, coverage(1, 2, 1)),
+    },
+    {
+      name: 'shared ref with entity source first', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.entityMeta, ...f.sharedHead], data: f.data }),
+      expected: f => recovered([], f.data, coverage(0, 1, 1)),
+    },
+    {
+      name: 'shared ref with KA source first', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.sharedHead, ...f.entityMeta], data: f.data }),
+      expected: f => recovered([], f.data, coverage(0, 1, 1)),
+    },
+    {
+      name: 'missing entity snapshot', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.entityMeta, ...f.duplicateHead], data: f.data, missingRef: f.digest }),
+      expected: f => recovered([], f.data, coverage(0, 2, 2, [f.digest, f.ka.digest])),
+    },
+    {
+      name: 'missing unrelated KA snapshot', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.entityMeta, ...f.duplicateHead], data: f.data, missingRef: f.ka.digest }),
+      expected: f => recovered(f.entityMeta, f.data, coverage(1, 2, 1, [f.ka.digest])),
+    },
+    {
+      name: 'KA head aliases the entity operation', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.entityMeta, ...f.aliasHead], data: f.data }),
+      expected: f => recovered(f.sliceMeta, f.data, coverage(1, 2, 1)),
+    },
+    {
+      name: 'missing sibling snapshot in a multi-root operation', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.twoRootMeta, ...f.duplicateHead], data: f.data, missingRef: f.siblingDigest }),
+      expected: f => recovered(f.sliceMeta, f.data, coverage(1, 3, 2, [f.siblingDigest, f.ka.digest])),
+    },
+    {
+      name: 'ready sibling cannot authorize a mixed-source root', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.twoRootMeta, ...f.sharedHead], data: f.data }),
+      expected: f => recovered(f.siblingMeta, f.data, coverage(1, 2, 1)),
+    },
+    {
+      name: 'all independently ready roots publish the multi-root operation', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.twoRootMeta, ...f.duplicateHead], data: f.data }),
+      expected: f => recovered(f.twoRootMeta, f.data, coverage(2, 3, 1)),
+    },
+    {
+      name: 'metadata-only recovery after a malformed head', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.entityMeta, ...f.duplicateHead], data: [] }),
+      expected: f => recovered(f.entityMeta, [], coverage(1, 2, 1)),
+    },
+    {
+      name: 'a missing operation does not suppress its ready slice', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.sliceMeta, ...f.duplicateHead], data: [] }),
+      expected: f => recovered(f.sliceMeta, [], coverage(1, 2, 1)),
+    },
+    {
+      name: 'a declared root without slice metadata blocks the operation', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.twoRootMeta.filter(quad => quad.subject !== f.siblingSubject), ...f.duplicateHead], data: [] }),
+      expected: f => recovered(f.sliceMeta, [], coverage(1, 2, 1)),
+    },
+    {
+      name: 'operation and slice subgraphs must agree', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.entityMeta, ...f.duplicateHead, {
+        subject: f.entityMeta.find(quad => quad.subject !== f.sliceSubject)!.subject,
+        predicate: 'http://dkg.io/ontology/subGraphName', object: '"other"', graph: f.metaGraph,
+      }], data: [] }),
+      expected: f => recovered(f.sliceMeta, [], coverage(1, 2, 1)),
+    },
+    {
+      name: 'an invalid root cannot authorize a slice', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.entityMeta.map(quad => quad.predicate.endsWith('/publicSliceRootEntity')
+        ? { ...quad, object: '"not an IRI"' } : quad), ...f.duplicateHead], data: [] }),
+      expected: () => recovered([], [], coverage(0, 2, 2)),
+    },
+    {
+      name: 'selected recovery accepts entity evidence', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.entityMeta, ...f.duplicateHead], data: [], mode: selectedMode(true) }),
+      expected: f => recovered(f.entityMeta, [], coverage(1, 2, 1)),
+    },
+    {
+      name: 'selected recovery rejects entity evidence', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.entityMeta, ...f.duplicateHead], data: [], mode: selectedMode(false) }),
+      expected: () => recovered([], [], coverage(1, 2, 1)),
+    },
+    {
+      name: 'a rejected combined write exposes neither data nor metadata', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.entityMeta, ...f.duplicateHead], data: f.data, rejectMetadataInsert: true }),
+      expected: f => ({ ...recovered([], [], coverage(1, 2, 1), 2), attemptedRows: [...f.data, ...f.entityMeta] }),
+    },
+  ];
+
+  it.each(entityScenarios)('preserves entity-share recovery: $name', async scenario => {
+    const fixture = await entityShareFixture();
+    const input = scenario.arrange(fixture);
+    const expected = scenario.expected(fixture);
+    if (scenario.parseError) {
+      expect(() => parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: COVERAGE_CG, metaQuads: input.meta })).toThrow(scenario.parseError);
+    } else {
+      expect(parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: COVERAGE_CG, metaQuads: input.meta })).toEqual([]);
+    }
+    if (input.missingRef) fixture.cached.delete(input.missingRef);
+    const snapshotFetches: string[] = [];
+    const batches: Quad[][] = [];
+    const store = new OxigraphStore();
+    const materializer = createSharedMemorySnapshotMaterializer({ store, writeLocks: new Map<string, Promise<void>>(), invalidateListContextGraphsCache: noop });
     try {
       const summary = await runSharedMemorySync({
-        mode: { kind: 'ordinary' },
-        ctx,
-        remotePeerId: 'peer-entity-share-1a2b3c4d',
-        contextGraphIds: [COVERAGE_CG],
-        createContextGraphSyncDeadline: () => Date.now() + 60_000,
-        fetchSyncPages: async (
-          _ctx: OperationContext,
-          _peer: string,
-          contextGraphId: string,
-          _includeSharedMemory: boolean,
-          phase: string,
-          _graph: string,
-          _deadline: number,
-          fetchOptions?: { snapshotRef?: string },
-        ) => {
-          const snapshotRef = fetchOptions?.snapshotRef;
+        mode: input.mode ?? { kind: 'ordinary' }, ctx, remotePeerId: 'peer-entity-share-1a2b3c4d',
+        contextGraphIds: [COVERAGE_CG], createContextGraphSyncDeadline: () => Date.now() + 60_000,
+        fetchSyncPages: async (_ctx, _peer, contextGraphId, _shared, phase, _graph, _deadline, options) => {
           if (phase === 'snapshot') {
-            snapshotFetches.push(String(snapshotRef));
-            if (snapshotRef === missingRef) return { ...pageResult(contextGraphId, phase), completed: false, timedOut: true };
+            snapshotFetches.push(String(options?.snapshotRef));
+            if (options?.snapshotRef === input.missingRef) return { ...pageResult(contextGraphId, phase), completed: false, timedOut: true };
           }
-          // Every phase completes cleanly, so `manifestComplete` is true — the
-          // other half of the vacuity gate. A truncated meta phase parses no
-          // descriptors either, and there "no descriptor" means "not known
-          // yet"; that boundary is a separate row and is not smuggled in here.
           return pageResult(contextGraphId, phase);
         },
         processSharedMemoryBatch: async () => ({
-          ...sharedMemoryProcessResult(),
-          emptyResponses: 0,
-          verifiedMeta: meta,
-          verifiedData: poisoned ? payload.map((quad) => ({ ...quad, graph: contextGraphWorkspaceGraphUri(COVERAGE_CG) })) : [],
-          totalFetchedDataQuads: poisoned ? payload.length : 0,
-          totalFetchedMetaQuads: meta.length,
+          ...sharedMemoryProcessResult(), emptyResponses: 0, verifiedMeta: input.meta, verifiedData: input.data,
+          totalFetchedDataQuads: input.data.length, totalFetchedMetaQuads: input.meta.length,
         }),
         ensureContextGraph: async () => {},
-        storeInsert: async (quads: Quad[]) => { await store.insert(quads); },
-        snapshotMaterializer: materializer,
-        publicSnapshotStore: {
-          getSnapshot: async (ref: string) => cached.get(ref) ?? null,
-          putSnapshot: async () => ({ ref: 'unused', byteLength: 0 }),
+        storeInsert: async quads => {
+          batches.push([...quads]);
+          if (input.rejectMetadataInsert && quads.some(quad => quad.graph === fixture.metaGraph)) throw new Error('metadata batch rejected');
+          await store.insert(quads);
         },
-        deleteCheckpoint: () => {},
-        setCheckpoint: () => {},
-        ensureOwnedMap: () => new Map(),
-        logInfo: noop,
-        logWarn: noop,
-        logDebug: noop,
+        snapshotMaterializer: materializer,
+        publicSnapshotStore: { getSnapshot: async ref => fixture.cached.get(ref) ?? null, putSnapshot: async () => ({ ref: 'unused', byteLength: 0 }) },
+        deleteCheckpoint: noop, setCheckpoint: noop, ensureOwnedMap: () => new Map(),
+        logInfo: noop, logWarn: noop, logDebug: noop,
       });
-
-      // Pre-cached, so the ref must not touch the transport; a digest that
-      // stopped matching the payload would turn this into a fetch.
-      expect(snapshotFetches).toEqual(missingRef ? [missingRef] : []);
-      expect(summary.failedPhases).toBe(poisoned ? 1 : 0);
-      // Entity DATA still lands even while malformed KA heads stay withheld.
-      expect(summary.insertedDataTriples).toBe(poisoned ? payload.length : 0);
-      // Pre-fix: `0/1`, `missingCount: 1`, permanently — for a peer this node
-      // was fully synced with, and for EVERY Context Graph written by entity
-      // shares. `snapshotsResolved === snapshotsTotal` is what makes
-      // `capablePeersForNextPass`'s `resolved < total` false and finally stops
-      // the nomination.
+      expect(snapshotFetches).toEqual(input.missingRef ? [input.missingRef] : []);
+      expect(summary.failedPhases).toBe(expected.failedPhases);
+      expect(summary.insertedDataTriples).toBe(expected.data.length);
+      expect(summary.insertedMetaTriples).toBe(expected.metadata.length);
       expect(summary.swmCoverage).toEqual({
-        contextGraphId: COVERAGE_CG,
-        peerIdSuffix: '1a2b3c4d',
-        snapshotsResolved: sharedRef || entityIncomplete ? 0 : 1,
-        snapshotsTotal: headState === 'truncated-sibling' ? 3 : poisoned && !sharedRef ? 2 : 1,
-        manifestComplete: true,
-        descriptorsAuthoritative: !poisoned,
-        missingCount: entityIncomplete || headState === 'truncated-sibling' ? 2 : poisoned ? 1 : 0,
-        missingSample: entityIncomplete || headState === 'truncated-sibling' ? [missingRef!, poisoned!.digest]
-          : missingRef ? [missingRef] : [],
-        materializationFailures: 0,
+        contextGraphId: COVERAGE_CG, peerIdSuffix: '1a2b3c4d',
+        ...expected.coverage, manifestComplete: true, descriptorsAuthoritative: !scenario.parseError, materializationFailures: 0,
       });
-      expect(summary.insertedMetaTriples).toBe(expectedMeta.length);
-      const storedMeta = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } }`);
-      expect(storedMeta.type).toBe('quads');
-      if (storedMeta.type === 'quads') {
-        expect(storedMeta.quads).toHaveLength(expectedMeta.length);
-        expect(storedMeta.quads).toEqual(expect.arrayContaining(expectedMeta.map((quad) => ({
-          ...quad,
-          graph: '',
-          // Oxigraph canonicalizes xsd:dateTime lexical representations.
-          object: quad.predicate.endsWith('/publishedAt') ? expect.any(String) : quad.object,
-        }))));
-        if (poisoned) {
-          expect(storedMeta.quads.some((quad) => quad.subject === poisoned.headSubject)).toBe(false);
-          expect(storedMeta.quads.some((quad) => poisoned.meta.some((row) => row.subject === quad.subject))).toBe(false);
+      for (const [graph, rows] of [[fixture.metaGraph, expected.metadata], [contextGraphWorkspaceGraphUri(COVERAGE_CG), expected.data]] as const) {
+        const stored = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
+        expect(stored.type).toBe('quads');
+        if (stored.type === 'quads') {
+          expect(stored.quads).toHaveLength(rows.length);
+          expect(stored.quads).toEqual(expect.arrayContaining(rows.map(quad => ({ ...quad, graph: '' }))));
         }
       }
+      expect(batches).toHaveLength(expected.attemptedRows.length > 0 ? 1 : 0);
+      if (expected.attemptedRows.length > 0) {
+        expect(batches[0]).toHaveLength(expected.attemptedRows.length);
+        expect(batches[0]).toEqual(expect.arrayContaining(expected.attemptedRows));
+      }
     } finally {
-      await store.close().catch(() => {});
+      await store.close();
     }
   });
 

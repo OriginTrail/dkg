@@ -1,3 +1,4 @@
+import { workspaceOperationSubject } from './workspace-metadata-subjects.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from '@origintrail-official/dkg-storage';
 import {
@@ -1082,7 +1083,7 @@ export function generateShareMetadata(
   swmMetaGraph: string,
 ): Quad[] {
   const quads: Quad[] = [];
-  const subject = `urn:dkg:share:${meta.contextGraphId}:${meta.shareOperationId}`;
+  const subject = workspaceOperationSubject(meta.contextGraphId, meta.shareOperationId);
 
   quads.push(
     mq(subject, `${RDF}type`, `${DKG}WorkspaceOperation`, swmMetaGraph),
@@ -1174,7 +1175,7 @@ export function generateKnowledgeAssetShareMetadata(
   ) {
     throw new Error('Graph-scoped KA share has an invalid access-policy peer envelope');
   }
-  const subject = `urn:dkg:share:${meta.contextGraphId}:${meta.shareOperationId}`;
+  const subject = workspaceOperationSubject(meta.contextGraphId, meta.shareOperationId);
   const quads = [
     mq(subject, `${RDF}type`, `${DKG}WorkspaceOperation`, swmMetaGraph),
     mq(subject, `${DKG}contextGraphId`, lit(meta.contextGraphId), swmMetaGraph),

@@ -1,3 +1,4 @@
+import { workspaceOperationSubject as buildWorkspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
@@ -1427,27 +1428,7 @@ function normalizeOptionalSubGraphName(subGraphName: string | undefined): string
 function workspaceOperationSubject(contextGraphId: string, shareOperationId: string): string {
   const normalizedContextGraphId = safeWorkspaceIdPart(contextGraphId, 'contextGraphId');
   const normalizedShareOperationId = safeWorkspaceIdPart(shareOperationId, 'shareOperationId');
-  const subject = `urn:dkg:share:${normalizedContextGraphId}:${normalizedShareOperationId}`;
-  assertSafeIri(subject);
-  return subject;
-}
-
-function workspaceKnowledgeAssetHeadSubject(kaUal: string): string {
-  const scope = createGraphKnowledgeAssetScope(kaUal, 1);
-  const subject = `${scope.ual}#dkg-swm-head`;
-  assertSafeIri(subject);
-  return subject;
-}
-
-function workspaceOperationPublicSliceSubject(
-  contextGraphId: string,
-  shareOperationId: string,
-  rootEntity: string,
-  subGraphName?: string,
-): string {
-  const parts = [contextGraphId, subGraphName ?? '_', shareOperationId, rootEntity]
-    .map((part) => encodeURIComponent(part));
-  const subject = `urn:dkg:public-stage:${parts.join(':')}`;
+  const subject = buildWorkspaceOperationSubject(normalizedContextGraphId, normalizedShareOperationId);
   assertSafeIri(subject);
   return subject;
 }

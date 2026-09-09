@@ -1,3 +1,4 @@
+export { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject, isWorkspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 export * from './publisher.js';
 export * from './publication-pricing.js';
 export * from './publication-payload-measurement.js';

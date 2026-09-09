@@ -1,3 +1,5 @@
+import { createEntitySliceRecoveryPlan } from './entity-slice-recovery.js';
+import { stripMetadataLiteral as stripLiteral } from './metadata-literal.js';
 import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -899,7 +901,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       let materializedQuads = 0;
       const manifest = collectPublicSnapshotManifest(processed.verifiedMeta, !descriptorsAuthoritativeForCg);
       const manifestSnapshots = manifest.snapshots;
-      const entitySnapshotAuthority = readEntitySnapshotAuthority(
+      const entitySnapshotAuthority = createEntitySliceRecoveryPlan(
         pid, processed.verifiedMeta, manifest.sourceSubjectsByRef,
       );
       const orderedManifestSnapshots = snapshotRecoveryOrder === 'recent-balanced'
@@ -1430,11 +1432,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         const entityMeta = !descriptorsAuthoritativeForCg && snapshotEvidenceAccepted
           ? entitySnapshotAuthority.metadataFor(materializedRefs)
           : [];
-        if (validWsQuads.length > 0 || entityMeta.length > 0) {
+        const recoveredRows = [...validWsQuads, ...entityMeta];
+        if (recoveredRows.length > 0) {
           await recoveryBoundary.admitAsyncMutation(async () => {
             await ensureContextGraph(pid);
-            if (validWsQuads.length > 0) await storeInsert(validWsQuads);
-            if (entityMeta.length > 0) await storeInsert(entityMeta);
+            await storeInsert(recoveredRows);
             // Ownership belongs to the same admitted logical write as the
             // verified data. Revocation may be observed after this unit, but
             // must never leave inserted entities without their arbitration
@@ -1946,63 +1948,6 @@ function collectPublicSnapshotManifest(metaQuads: readonly Quad[], captureSource
   return { snapshots: [...byRef.values()], sourceSubjectsByRef };
 }
 
-/**
- * Entity slices have no graph-scoped descriptor. A ref also advertised by any
- * other source still requires descriptor authority; digest deduplication must
- * not let an entity slice hide an unwritten Knowledge Asset with the same blob.
- */
-function readEntitySnapshotAuthority(
-  contextGraphId: string,
-  metaQuads: readonly Quad[],
-  sourcesByRef: ReadonlyMap<string, ReadonlySet<string>>,
-): { refs: ReadonlySet<string>; metadataFor(readyRefs: ReadonlySet<string>): Quad[] } {
-  const prefix = `urn:dkg:public-stage:${encodeURIComponent(contextGraphId)}:`;
-  const refs = new Set<string>();
-  const sliceSubjects = new Set<string>();
-  for (const [ref, sources] of sourcesByRef) {
-    if (sources.size === 0 || ![...sources].every((subject) => subject.startsWith(prefix))) continue;
-    refs.add(ref);
-    for (const subject of sources) sliceSubjects.add(subject);
-  }
-  return {
-    refs,
-    metadataFor: (readyRefs) => {
-      if (refs.size === 0 || readyRefs.size === 0) return [];
-      const readySlices = new Set<string>();
-      for (const ref of readyRefs) {
-        if (refs.has(ref)) for (const subject of sourcesByRef.get(ref)!) readySlices.add(subject);
-      }
-      const key = (graph: string, subject: string) => `${graph}\u0000${subject}`;
-      const allowed = new Set<string>();
-      const blocked = new Set<string>();
-      const graphScopedFields = new Set([
-        `${DKG}kaUal`, `${DKG}assertionVersion`, `${DKG}assertionGraph`, `${DKG}contentScopeVersion`,
-        `${DKG}publicSnapshotRef`, `${DKG}publicQuadsDigest`, `${DKG}publicQuadsCount`,
-      ]);
-      for (const quad of metaQuads) {
-        const subjectKey = key(quad.graph, quad.subject);
-        const isHead = quad.subject.endsWith('#dkg-swm-head');
-        const isSlice = sliceSubjects.has(quad.subject);
-        const isReadySlice = readySlices.has(quad.subject);
-        if (isReadySlice) allowed.add(subjectKey);
-        if (isHead || (!isSlice && graphScopedFields.has(quad.predicate))) blocked.add(subjectKey);
-        if (quad.predicate !== `${DKG}shareOperationId`) continue;
-        const operationId = stripLiteral(quad.object)?.trim();
-        if (!operationId) continue;
-        const operationKey = key(quad.graph, `urn:dkg:share:${contextGraphId}:${operationId}`);
-        if (isReadySlice) allowed.add(operationKey);
-        // Do not publish a multi-root operation while one of its slices is missing.
-        // An ambiguous head can name several operations; withhold every candidate.
-        if (isHead || (isSlice && !isReadySlice)) blocked.add(operationKey);
-      }
-      return metaQuads.filter((quad) => {
-        const subjectKey = key(quad.graph, quad.subject);
-        return allowed.has(subjectKey) && !blocked.has(subjectKey);
-      });
-    },
-  };
-}
-
 function newerPublicSnapshotRecency(
   left: Pick<PublicSnapshotMetadata, 'publishedAtMs' | 'ualOrdinal'>,
   right: Pick<PublicSnapshotMetadata, 'publishedAtMs' | 'ualOrdinal'>,
@@ -2090,18 +2035,6 @@ async function hasValidSnapshot(
   }
   if (!quads) return false;
   return quads.length === snapshot.count && workspacePublicQuadsDigest(quads) === snapshot.digest;
-}
-
-function stripLiteral(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  const match = value.match(/^"((?:[^"\\]|\\.)*)"(?:@[-A-Za-z0-9]+|\^\^<[^>]+>)?$/);
-  if (!match) return value;
-  return match[1]
-    .replace(/\\n/g, '\n')
-    .replace(/\\r/g, '\r')
-    .replace(/\\t/g, '\t')
-    .replace(/\\"/g, '"')
-    .replace(/\\\\/g, '\\');
 }
 
 function parseIntegerLiteral(value: string | undefined): number | undefined {
