@@ -52,11 +52,10 @@ import type {
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import {
-  createVmReconcileDispatcherPair,
+  VmReconcileSchedulingRuntime,
   type OrdinalOutcome,
   type OrdinalRecoveryTarget,
   type PendingOrdinalRecoveryResult,
-  type VmReconcileDispatcherPair,
 } from '../src/chain-reconciler.js';
 import { packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
 import type { ContextGraphReconcileResult } from '../src/vm-reconcile-service.js';
@@ -99,14 +98,7 @@ interface AgentInternals {
   scheduleVmReconcileSweep(): void;
   subscribedContextGraphs: Map<string, { subscribed: boolean; syncMode?: 'on-demand' | 'always-on'; coreHosted?: boolean; onChainId?: string; lastReconciledOrdinal?: number }>;
   gossipRegistered: Set<string>;
-  vmReconcileDispatcher: {
-    triggerLive: (cg: string) => void;
-    triggerPeriodic: (cg: string) => void;
-    tryTriggerPeriodic: (cg: string) => boolean;
-    waitForIdle(): Promise<void>;
-    dispatch?: (cg: string, source: 'live' | 'periodic' | 'manual') => Promise<unknown>;
-  } | null;
-  vmReconcileScheduling: Readonly<VmReconcileDispatcherPair<unknown>>;
+  vmReconcileScheduling: VmReconcileSchedulingRuntime<unknown>;
   store: TripleStore;
   chain: MockChainAdapter & {
     getContextGraphAccessPolicy?: (id: bigint) => Promise<number>;
@@ -2299,7 +2291,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
     const liveTriggered: string[] = [];
     const periodicTriggered: string[] = [];
-    const scheduling = createVmReconcileDispatcherPair(async (cg, source) => {
+    const scheduling = new VmReconcileSchedulingRuntime(async (cg, source) => {
       if (source === 'periodic') periodicTriggered.push(cg);
       else if (source === 'live') liveTriggered.push(cg);
       return {};
@@ -2330,12 +2322,12 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     }
 
     const swept: string[] = [];
-    const scheduling = createVmReconcileDispatcherPair(
+    const scheduling = new VmReconcileSchedulingRuntime(
       async (contextGraphId) => { swept.push(contextGraphId); },
       () => undefined,
       { concurrency: 1, maxPending: 1 },
     );
-    const dispatcher = scheduling.dispatcher;
+    const dispatcher = scheduling;
     internals.vmReconcileScheduling = scheduling;
 
     for (let sweep = 0; sweep < contextGraphIds.length; sweep += 1) {
@@ -2504,8 +2496,8 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     });
 
     const liveTriggered: string[] = [];
-    const scheduling = createVmReconcileDispatcherPair(async () => ({}), () => undefined);
-    vi.spyOn(scheduling.dispatcher, 'triggerLive').mockImplementation(
+    const scheduling = new VmReconcileSchedulingRuntime(async () => ({}), () => undefined);
+    vi.spyOn(scheduling, 'triggerLive').mockImplementation(
       (contextGraphId: string) => { liveTriggered.push(contextGraphId); },
     );
     internals.vmReconcileScheduling = scheduling;
@@ -5531,7 +5523,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     chain.getContextGraphKCCount = async () => 0n;
 
     const sources: string[] = [];
-    internals.vmReconcileScheduling = createVmReconcileDispatcherPair(
+    internals.vmReconcileScheduling = new VmReconcileSchedulingRuntime(
       async (_key: string, source: string) => {
         sources.push(source);
         return {};

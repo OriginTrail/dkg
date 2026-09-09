@@ -23,13 +23,7 @@ export class VmReconcileSchedulingMethods extends DKGAgentBase {
       if (this.contextGraphBindingState.hasBindingCandidate(localCgId, sub)) bound.add(localCgId);
       else if (sub.subscribed) unbound.push(localCgId);
     }
-    const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
-      ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
-      ?? [];
-    for (const { policyEnvelope } of acceptedPolicies) {
-      const localCgId = policyEnvelope.payload.contextGraphId;
-      if (this.isRfc64SelectedVmReconcileTargetAllowed(localCgId)) bound.add(localCgId);
-    }
+    for (const localCgId of this.rfc64SelectedVmReconcileTargetIds()) bound.add(localCgId);
     return {
       scheduling,
       isLifecycleCurrent,

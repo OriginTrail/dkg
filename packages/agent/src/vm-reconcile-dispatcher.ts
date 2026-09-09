@@ -56,26 +56,6 @@ export interface VmReconcileDispatcherOptions {
   maxForegroundBurst?: number;
 }
 
-export interface VmReconcileDispatcherPair<T> {
-  readonly dispatcher: VmReconcileDispatcher<T>;
-  readonly sweepAdmission: VmReconcileSweepAdmission<T>;
-  scheduleSweep(
-    boundKeys: readonly string[],
-    unboundKeys: readonly string[],
-    isCurrent: () => boolean,
-  ): void;
-  completeSweep(
-    boundKeys: readonly string[],
-    unboundKeys: readonly string[],
-    isCurrent: () => boolean,
-    signal?: AbortSignal,
-  ): Promise<void>;
-  resetSweep(): void;
-  close(): Promise<void>;
-}
-
-const VM_RECONCILE_SWEEP_ADMISSION = Symbol('vm-reconcile-sweep-admission');
-
 function vmReconcileSourceRank(source: VmReconcileSource): number {
   if (source === 'manual') return 2;
   if (source === 'live') return 1;
@@ -95,7 +75,7 @@ export class VmReconcileDispatcher<T> {
   private queued = 0;
   private sequence = 0;
   private foregroundBurst = 0;
-  private closed = false;
+  protected closed = false;
   private readonly states = new Map<string, VmReconcileDispatchState<T>>();
   private readonly pending: Array<VmReconcileDispatchWork<T>> = [];
   private readonly idleWaiters = new Set<() => void>();
@@ -104,8 +84,6 @@ export class VmReconcileDispatcher<T> {
   private readonly concurrency: number;
   private readonly maxPending: number;
   private readonly maxForegroundBurst: number;
-  readonly [VM_RECONCILE_SWEEP_ADMISSION]: VmReconcileSweepAdmission<T>;
-
   constructor(
     private readonly run: (key: string, source: VmReconcileSource) => Promise<T>,
     private readonly onFailure: (key: string, error: unknown) => void,
@@ -128,11 +106,6 @@ export class VmReconcileDispatcher<T> {
     this.concurrency = concurrency;
     this.maxPending = maxPending;
     this.maxForegroundBurst = maxForegroundBurst;
-    this[VM_RECONCILE_SWEEP_ADMISSION] = Object.freeze({
-      tryAdmit: (key: string) => this.tryDispatchPeriodic(key),
-      waitForChange: (signal?: AbortSignal) => this.waitForPeriodicStateChange(signal),
-      isClosed: () => this.closed,
-    });
   }
 
   /** Enqueue a low-latency chain-event nudge; suppressed until a sweep after failure. */
@@ -170,14 +143,14 @@ export class VmReconcileDispatcher<T> {
   }
 
   /** Periodic admission with its exact completion handle; undefined means no admission. */
-  private tryDispatchPeriodic(key: string): Promise<T> | undefined {
+  protected tryDispatchPeriodic(key: string): Promise<T> | undefined {
     const outcome = this.admit(key, 'periodic');
     if (!('completion' in outcome)) return undefined;
     void outcome.completion.catch(() => undefined);
     return outcome.completion;
   }
 
-  private waitForPeriodicStateChange(signal?: AbortSignal): Promise<void> {
+  protected waitForPeriodicStateChange(signal?: AbortSignal): Promise<void> {
     return new Promise<void>(resolve => {
       const finish = () => {
         this.periodicStateWaiters.delete(finish);
@@ -464,39 +437,100 @@ export class VmReconcileDispatcher<T> {
   }
 }
 
-/** Construct the host-owned dispatcher and its internal sweep port together. */
-export function createVmReconcileDispatcherPair<T>(
-  run: (key: string, source: VmReconcileSource) => Promise<T>,
-  onFailure: (key: string, error: unknown) => void,
-  options: VmReconcileDispatcherOptions = {},
-  discoveryBatchSize = 8,
-): Readonly<VmReconcileDispatcherPair<T>> {
-  const dispatcher = new VmReconcileDispatcher(run, onFailure, options);
-  const planner = new VmReconcileSweepPlanner(discoveryBatchSize);
-  const sweepAdmission = dispatcher[VM_RECONCILE_SWEEP_ADMISSION];
-  return Object.freeze({
-    dispatcher,
-    sweepAdmission,
-    scheduleSweep: (
-      boundKeys: readonly string[],
-      unboundKeys: readonly string[],
-      isCurrent: () => boolean,
-    ) => {
-      planner.admit(boundKeys, unboundKeys,
-        key => isCurrent() ? sweepAdmission.tryAdmit(key) : undefined);
-    },
-    completeSweep: (
-      boundKeys: readonly string[],
-      unboundKeys: readonly string[],
-      isCurrent: () => boolean,
-      signal?: AbortSignal,
-    ) => planner.complete(
-      boundKeys, unboundKeys, sweepAdmission, isCurrent, signal,
-    ),
-    resetSweep: () => planner.reset(),
-    close: () => {
-      planner.reset();
-      return dispatcher.close();
-    },
-  });
+/** Module-private bridge: the sweep capability never escapes the cohesive runtime. */
+class VmReconcileRuntimeDispatcher<T> extends VmReconcileDispatcher<T> {
+  constructor(
+    run: (key: string, source: VmReconcileSource) => Promise<T>,
+    onFailure: (key: string, error: unknown) => void,
+    options: VmReconcileDispatcherOptions,
+    installSweepAdmission: (admission: VmReconcileSweepAdmission<T>) => void,
+  ) {
+    super(run, onFailure, options);
+    installSweepAdmission(Object.freeze({
+      tryAdmit: (key: string) => this.tryDispatchPeriodic(key),
+      waitForChange: (signal?: AbortSignal) => this.waitForPeriodicStateChange(signal),
+      isClosed: () => this.closed,
+    }));
+  }
+}
+
+/**
+ * Cohesive host-owned runtime for foreground nudges and periodic sweep work.
+ *
+ * The dispatcher/planner relationship and exact-completion admission bridge
+ * are deliberately private, leaving one lifecycle and scheduling identity at
+ * the agent boundary.
+ */
+export class VmReconcileSchedulingRuntime<T> {
+  private readonly dispatcher: VmReconcileRuntimeDispatcher<T>;
+  private readonly planner: VmReconcileSweepPlanner;
+  private readonly sweepAdmission: VmReconcileSweepAdmission<T>;
+
+  constructor(
+    run: (key: string, source: VmReconcileSource) => Promise<T>,
+    onFailure: (key: string, error: unknown) => void,
+    options: VmReconcileDispatcherOptions = {},
+    discoveryBatchSize = 8,
+  ) {
+    let sweepAdmission!: VmReconcileSweepAdmission<T>;
+    this.dispatcher = new VmReconcileRuntimeDispatcher(
+      run,
+      onFailure,
+      options,
+      (admission) => { sweepAdmission = admission; },
+    );
+    this.planner = new VmReconcileSweepPlanner(discoveryBatchSize);
+    this.sweepAdmission = sweepAdmission;
+  }
+
+  triggerLive(key: string): void { this.dispatcher.triggerLive(key); }
+  releaseLiveHold(key: string): void { this.dispatcher.releaseLiveHold(key); }
+  triggerPeriodic(key: string): void { this.dispatcher.triggerPeriodic(key); }
+  tryTriggerPeriodic(key: string): boolean { return this.dispatcher.tryTriggerPeriodic(key); }
+  triggerManual(key: string): Promise<T> { return this.dispatcher.triggerManual(key); }
+  dispatch(key: string, source: VmReconcileSource): Promise<T> {
+    return this.dispatcher.dispatch(key, source);
+  }
+  isInFlight(key: string): boolean { return this.dispatcher.isInFlight(key); }
+  pendingSource(key: string): VmReconcileSource | undefined {
+    return this.dispatcher.pendingSource(key);
+  }
+  snapshot(): { active: number; queued: number; closed: boolean } {
+    return this.dispatcher.snapshot();
+  }
+  waitForIdle(key?: string): Promise<void> { return this.dispatcher.waitForIdle(key); }
+
+  scheduleSweep(
+    boundKeys: readonly string[],
+    unboundKeys: readonly string[],
+    isCurrent: () => boolean,
+  ): void {
+    this.planner.admit(
+      boundKeys,
+      unboundKeys,
+      key => isCurrent() ? this.sweepAdmission.tryAdmit(key) : undefined,
+    );
+  }
+
+  completeSweep(
+    boundKeys: readonly string[],
+    unboundKeys: readonly string[],
+    isCurrent: () => boolean,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    return this.planner.complete(
+      boundKeys,
+      unboundKeys,
+      this.sweepAdmission,
+      isCurrent,
+      signal,
+    );
+  }
+
+  resetSweep(): void { this.planner.reset(); }
+
+  close(): Promise<void> {
+    this.planner.reset();
+    return this.dispatcher.close();
+  }
 }

@@ -21,9 +21,7 @@ import {
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import {
-  createVmReconcileDispatcherPair,
-  VmReconcileDispatcher,
-  type VmReconcileDispatcherPair,
+  VmReconcileSchedulingRuntime,
 } from '../src/chain-reconciler.js';
 import { resolveRfc64CatalogExecutionPlanV1 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 
@@ -38,6 +36,7 @@ function deferred<T>(): {
 
 interface AgentInternals {
   runVmReconcileSweep(): Promise<void>;
+  rfc64SelectedVmReconcileTargetIds(): readonly string[];
   resolveVmReconcileTarget(localCgId: string): Promise<unknown>;
   fetchContextGraphAssets(localCgId: string, requestedUals: readonly string[]): Promise<unknown>;
   selfPrimeSubscriptionOnChainId(
@@ -61,8 +60,7 @@ interface AgentInternals {
     onChainId: string,
   ): void;
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string }>;
-  vmReconcileDispatcher: VmReconcileDispatcher<boolean> | null;
-  vmReconcileScheduling: Readonly<VmReconcileDispatcherPair<boolean>>;
+  vmReconcileScheduling: VmReconcileSchedulingRuntime<boolean>;
   store: TripleStore;
 }
 
@@ -77,16 +75,16 @@ function stubNode(agent: DKGAgent): void {
 
 function installVmReconcileScheduling(
   internals: AgentInternals,
-  scheduling: Readonly<VmReconcileDispatcherPair<boolean>>,
-): VmReconcileDispatcher<boolean> {
+  scheduling: VmReconcileSchedulingRuntime<boolean>,
+): VmReconcileSchedulingRuntime<boolean> {
   internals.vmReconcileScheduling = scheduling;
-  return scheduling.dispatcher;
+  return scheduling;
 }
 
 /** Exercise admission through the real dispatcher and canonical authorization/binding owner. */
 function targetDispatcher(internals: AgentInternals) {
   const triggered: string[] = [];
-  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async (cg, source) => {
+  const dispatcher = installVmReconcileScheduling(internals, new VmReconcileSchedulingRuntime(async (cg, source) => {
     await internals.resolveVmReconcileTarget(cg);
     triggered.push(`${source}:${cg}`);
     return true;
@@ -241,7 +239,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     internals.subscribedContextGraphs.set(selected, passiveDiscoveryRow);
 
     const triggered: string[] = [];
-    const scheduling = createVmReconcileDispatcherPair(async (cg, reason) => {
+    const scheduling = new VmReconcileSchedulingRuntime(async (cg, reason) => {
       triggered.push(`${reason}:${cg}`);
       return true;
     }, () => undefined);
@@ -252,6 +250,33 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(triggered).toEqual([`periodic:${selected}`]);
     expect(internals.subscribedContextGraphs.size).toBe(1);
     expect(internals.subscribedContextGraphs.get(selected)).toBe(passiveDiscoveryRow);
+  });
+
+  it('normalizes legacy RFC-64 selection and excludes member/core-owned targets', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'Rfc64LegacyVmSelection', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const config = (internals as any).config;
+    const selected = ['legacy-z', 'legacy-a', 'legacy-member', 'legacy-core', 'legacy-private'];
+    config.syncContextGraphs = selected;
+    config.rfc64CatalogBootstrap = undefined;
+    config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: selected.map((contextGraphId, index) => ({
+        policyEnvelope: {
+          payload: { accessPolicy: index === 4 ? 1 : 0, contextGraphId },
+        },
+        targets: [],
+      })),
+    };
+    internals.subscribedContextGraphs.clear();
+    internals.subscribedContextGraphs.set('legacy-member', { subscribed: true });
+    internals.subscribedContextGraphs.set('legacy-core', {
+      subscribed: false,
+      coreHosted: true,
+    });
+
+    expect(internals.rfc64SelectedVmReconcileTargetIds()).toEqual(['legacy-a', 'legacy-z']);
   });
 
   it.each([false, true])(
@@ -289,7 +314,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       const dispatch = vi.fn(async (_cg: string, _reason: 'live' | 'periodic' | 'manual') => true);
       installVmReconcileScheduling(
         internals,
-        createVmReconcileDispatcherPair(dispatch, () => undefined),
+        new VmReconcileSchedulingRuntime(dispatch, () => undefined),
       );
 
       await internals.runVmReconcileSweep();
@@ -835,7 +860,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     const dispatch = vi.fn(async (_cg: string, _reason: 'live' | 'periodic' | 'manual') => true);
     installVmReconcileScheduling(
       internals,
-      createVmReconcileDispatcherPair(dispatch, () => undefined),
+      new VmReconcileSchedulingRuntime(dispatch, () => undefined),
     );
     const resolveOnChainId = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
       .mockResolvedValue(298n);
@@ -1143,14 +1168,14 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     internals.subscribedContextGraphs.set(CG_BOUND, { subscribed: true, onChainId: ON_BOUND });
 
     const triggered: string[] = [];
-    const scheduling = createVmReconcileDispatcherPair(async (cg, source) => {
+    const scheduling = new VmReconcileSchedulingRuntime(async (cg, source) => {
       triggered.push(`${source}:${cg}`);
       return true;
     }, () => undefined);
     installVmReconcileScheduling(internals, scheduling);
 
     const reconciled = await internals.handleKARegisteredNudge(ON_BOUND, 1n, createOperationContext('system'));
-    await internals.vmReconcileDispatcher.waitForIdle();
+    await internals.vmReconcileScheduling.waitForIdle();
     expect(reconciled).toBe(CG_BOUND);
     expect(triggered).toEqual([`live:${CG_BOUND}`]);
   });

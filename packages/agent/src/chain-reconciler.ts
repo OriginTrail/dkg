@@ -30,10 +30,9 @@ import {
   ordinalsToReconcile,
 } from './reconcile-cursor.js';
 export {
-  createVmReconcileDispatcherPair,
   VmReconcileDispatcher,
+  VmReconcileSchedulingRuntime,
   type VmReconcileDispatcherOptions,
-  type VmReconcileDispatcherPair,
 } from './vm-reconcile-dispatcher.js';
 
 /**

@@ -4,8 +4,7 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import type {
-  VmReconcileDispatcher,
-  VmReconcileDispatcherPair,
+  VmReconcileSchedulingRuntime,
 } from '../src/chain-reconciler.js';
 import type { ContextGraphReconcileResult } from '../src/vm-reconcile-service.js';
 
@@ -13,7 +12,7 @@ interface TimerInternals {
   subscribedContextGraphs: Map<string, { subscribed: boolean; onChainId?: string }>;
   vmReconcileStartupTimer: ReturnType<typeof setTimeout> | null;
   vmReconcileTimer: ReturnType<typeof setInterval> | null;
-  vmReconcileScheduling?: Readonly<VmReconcileDispatcherPair<ContextGraphReconcileResult>>;
+  vmReconcileScheduling?: VmReconcileSchedulingRuntime<ContextGraphReconcileResult>;
   scheduleVmReconcileSweep(): void;
   log: { warn(ctx: OperationContext, message: string): void };
 }
@@ -38,10 +37,10 @@ it.each([false, true])('runs lifecycle startup and later interval admissions wit
       headOrdinal: 0, watermarkBefore: 0, watermarkAfter: 0, reconciledOrdinals: 0, unresolvedOrdinals: 0,
     };
   });
-  const originalEnsure = agent.ensureVmReconcileDispatcher.bind(agent);
-  let dispatcher: VmReconcileDispatcher<ContextGraphReconcileResult> | undefined;
+  const originalEnsure = agent.ensureVmReconcileScheduling.bind(agent);
+  let dispatcher: VmReconcileSchedulingRuntime<ContextGraphReconcileResult> | undefined;
   let fakeTimers = false;
-  vi.spyOn(agent, 'ensureVmReconcileDispatcher').mockImplementation(() => {
+  vi.spyOn(agent, 'ensureVmReconcileScheduling').mockImplementation(() => {
     dispatcher = originalEnsure();
     // Keep network startup on real timers. The final lifecycle boundary below
     // is the actual production owner that arms the startup/interval callbacks.
@@ -102,51 +101,43 @@ it('pairs a fresh dispatcher with startup admission after a same-instance restar
     headOrdinal: 0, watermarkBefore: 0, watermarkAfter: 0,
     reconciledOrdinals: 0, unresolvedOrdinals: 0,
   }));
-  const originalEnsure = agent.ensureVmReconcileDispatcher.bind(agent);
-  const dispatchers: VmReconcileDispatcher<ContextGraphReconcileResult>[] = [];
-  const runtimes: Readonly<VmReconcileDispatcherPair<ContextGraphReconcileResult>>[] = [];
+  const originalEnsure = agent.ensureVmReconcileScheduling.bind(agent);
+  const runtimes: VmReconcileSchedulingRuntime<ContextGraphReconcileResult>[] = [];
   let fakeTimers = false;
-  vi.spyOn(agent, 'ensureVmReconcileDispatcher').mockImplementation(() => {
-    const dispatcher = originalEnsure();
-    if (!dispatchers.includes(dispatcher)) dispatchers.push(dispatcher);
-    const runtime = internals.vmReconcileScheduling;
-    if (runtime && !runtimes.includes(runtime)) runtimes.push(runtime);
+  vi.spyOn(agent, 'ensureVmReconcileScheduling').mockImplementation(() => {
+    const runtime = originalEnsure();
+    if (!runtimes.includes(runtime)) runtimes.push(runtime);
     if (!fakeTimers) {
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
       fakeTimers = true;
     }
-    return dispatcher;
+    return runtime;
   });
   try {
     await agent.start();
-    expect(dispatchers).toHaveLength(1);
     expect(runtimes).toHaveLength(1);
-    expect(runtimes[0]!.dispatcher).toBe(dispatchers[0]);
     expect(Object.hasOwn(agent, 'vmReconcileDispatcher')).toBe(false);
     await agent.stop();
-    expect(dispatchers[0].snapshot().closed).toBe(true);
+    expect(runtimes[0]!.snapshot().closed).toBe(true);
     expect(internals.vmReconcileScheduling).toBeUndefined();
 
     vi.useRealTimers();
     fakeTimers = false;
     await agent.start();
-    expect(dispatchers).toHaveLength(2);
     expect(runtimes).toHaveLength(2);
     expect(runtimes[1]).not.toBe(runtimes[0]);
-    expect(runtimes[1]!.dispatcher).toBe(dispatchers[1]);
-    expect(dispatchers[1]).not.toBe(dispatchers[0]);
     internals.subscribedContextGraphs.clear();
     internals.subscribedContextGraphs.set('restart-bound', { subscribed: true, onChainId: '2' });
 
     await vi.advanceTimersByTimeAsync(1);
-    await dispatchers[1].waitForIdle('restart-bound');
+    await runtimes[1]!.waitForIdle('restart-bound');
     expect(execute).toHaveBeenCalledWith('restart-bound', 'periodic');
   } finally {
     if (internals.vmReconcileStartupTimer) clearTimeout(internals.vmReconcileStartupTimer);
     if (internals.vmReconcileTimer) clearInterval(internals.vmReconcileTimer);
     internals.vmReconcileStartupTimer = null;
     internals.vmReconcileTimer = null;
-    await dispatchers.at(-1)?.close();
+    await runtimes.at(-1)?.close();
     vi.useRealTimers();
     await agent.stop();
     Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_STARTUP_MAX_DELAY_MS', startup);

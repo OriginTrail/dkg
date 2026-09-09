@@ -5,6 +5,7 @@ import { Rfc64SwmRecoveryRuntimeV1 } from
   '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 import { projectContextGraphSubscriptionPersistence } from '../src/context-graph-subscription-policy.js';
 import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
+import { VmReconcileSchedulingRuntime } from '../src/chain-reconciler.js';
 
 const LOCAL_ID = 'selected-public-cg';
 const NAME_HASH = `0x${'ab'.repeat(32)}`;
@@ -145,10 +146,8 @@ function selectedFixture(resolved: bigint | null = 42n) {
     vmReconcilePhysicalRuns: new Set<Promise<unknown>>(),
     resolveLocalCgIdByOnChainId: (_onChainId: string) => null as string | null,
     vmReconcileScheduling: {
-      dispatcher: {
-        triggerLive: vi.fn(),
-        releaseLiveHold: vi.fn(),
-      },
+      triggerLive: vi.fn(),
+      releaseLiveHold: vi.fn(),
     },
     onChainParticipantAgentsCache: new Map(),
     contextGraphExists: vi.fn(async () => false),
@@ -605,6 +604,43 @@ describe('cold current-state Context Graph name binding', () => {
     expect(fixture.agent.forceClearVmReconcileStateForContextGraph).toHaveBeenCalledOnce();
   });
 
+  it('lets a fresh reverse binding release a failed-live hold before the periodic sweep', async () => {
+    const fixture = selectedFixture();
+    fixture.agent.vmReconcileEnabled = () => true;
+    fixture.agent.vmReconcileLifecycleGeneration = 1;
+    fixture.agent.vmReconcileRotationClosed = false;
+    fixture.agent.resolveLocalCgIdByOnChainId = () => null;
+    const sources: string[] = [];
+    const runtime = new VmReconcileSchedulingRuntime<boolean>(async (_key, source) => {
+      sources.push(source);
+      if (sources.length === 1) throw new Error('transient discovery miss');
+      return true;
+    }, () => undefined);
+    fixture.agent.vmReconcileScheduling = runtime;
+
+    try {
+      runtime.triggerLive(LOCAL_ID);
+      await runtime.waitForIdle(LOCAL_ID);
+      runtime.triggerLive(LOCAL_ID);
+      await runtime.waitForIdle(LOCAL_ID);
+      expect(sources).toEqual(['live']);
+
+      fixture.agent.bindSubscriptionReverseNameHashOnChainId(
+        LOCAL_ID,
+        fixture.subscription,
+        '42',
+        NAME_HASH,
+      );
+      await expect(fixture.agent.handleKARegisteredNudge('42', 99n, {}))
+        .resolves.toBe(LOCAL_ID);
+      await runtime.waitForIdle(LOCAL_ID);
+
+      expect(sources).toEqual(['live', 'live']);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it('invalidates the reverse candidate and cursor when the subscription commitment changes', () => {
     const fixture = selectedFixture();
     fixture.agent.bindSubscriptionReverseNameHashOnChainId(
@@ -740,10 +776,8 @@ describe('cold current-state Context Graph name binding', () => {
     fixture.agent.resolveLocalCgIdByOnChainId = () => null;
     const triggerLive = vi.fn();
     fixture.agent.vmReconcileScheduling = {
-      dispatcher: {
-        triggerLive,
-        releaseLiveHold: vi.fn(),
-      },
+      triggerLive,
+      releaseLiveHold: vi.fn(),
     };
 
     await expect(fixture.agent.handleKARegisteredNudge(

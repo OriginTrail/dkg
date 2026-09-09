@@ -6,17 +6,14 @@ import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { VmReconcileShutdownTimeoutError } from '../src/vm-reconcile-service.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import {
-  createVmReconcileDispatcherPair,
-  VmReconcileDispatcher,
-  type VmReconcileDispatcherPair,
+  VmReconcileSchedulingRuntime,
 } from '../src/chain-reconciler.js';
 
 type Subscription = { subscribed: boolean; coreHosted?: boolean; onChainId?: string };
 interface Internals {
   subscribedContextGraphs: Map<string, Subscription>;
   node: unknown;
-  vmReconcileDispatcher: VmReconcileDispatcher<boolean>;
-  vmReconcileScheduling: Readonly<VmReconcileDispatcherPair<boolean>>;
+  vmReconcileScheduling: VmReconcileSchedulingRuntime<boolean>;
   vmReconcileLifecycleController: AbortController;
   vmReconcilePhysicalRuns: Set<Promise<unknown>>;
   resolveVmReconcileTarget(cg: string, isCurrent?: () => boolean, signal?: AbortSignal): Promise<unknown>;
@@ -28,13 +25,13 @@ interface Internals {
   resolveContextGraphOnChainIdBinding(id: string): Promise<{ onChainId: string; provenance: 'ontology' } | null>;
 }
 const agents: DKGAgent[] = [];
-const dispatchers: VmReconcileDispatcher<boolean>[] = [];
+const dispatchers: VmReconcileSchedulingRuntime<boolean>[] = [];
 function installVmReconcileScheduling(
   internals: Internals,
-  scheduling: Readonly<VmReconcileDispatcherPair<boolean>>,
-): VmReconcileDispatcher<boolean> {
+  scheduling: VmReconcileSchedulingRuntime<boolean>,
+): VmReconcileSchedulingRuntime<boolean> {
   internals.vmReconcileScheduling = scheduling;
-  return scheduling.dispatcher;
+  return scheduling;
 }
 afterEach(async () => {
   for (const dispatcher of dispatchers.splice(0)) await dispatcher.close();
@@ -55,7 +52,7 @@ async function fixture(unbound: number, maxPending = 64) {
   });
   const installDispatcher = () => {
     const signal = internals.vmReconcileLifecycleController.signal;
-    const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async (cg) => {
+    const dispatcher = installVmReconcileScheduling(internals, new VmReconcileSchedulingRuntime(async (cg) => {
       order.push(`dispatch:${cg}`);
       await internals.resolveVmReconcileTarget(cg, () => !signal.aborted, signal);
       return true;
@@ -64,7 +61,7 @@ async function fixture(unbound: number, maxPending = 64) {
     return dispatcher;
   };
   installDispatcher();
-  const triggerLive = vi.spyOn(internals.vmReconcileDispatcher, 'triggerLive');
+  const triggerLive = vi.spyOn(internals.vmReconcileScheduling, 'triggerLive');
   return { internals, resolve, canRead, order, triggerLive, installDispatcher };
 }
 
@@ -88,7 +85,7 @@ it.each([3, 8, 16, 26])('covers %i stable unbound subscriptions fairly with at m
     for (let round = 0; round < rounds; round++) {
       resolve.mockClear();
       internals.scheduleVmReconcileSweep();
-      await internals.vmReconcileDispatcher.waitForIdle();
+      await internals.vmReconcileScheduling.waitForIdle();
       expect(resolve.mock.calls.length).toBeLessThanOrEqual(8);
       const ids = resolve.mock.calls.map(([id]) => id);
       expect(new Set(ids).size).toBe(ids.length);
@@ -102,7 +99,7 @@ it('admits already-bound reconciliation before unbound resolution work', async (
   const { internals, order } = await fixture(30);
   internals.subscribedContextGraphs.set('bound', { subscribed: true, onChainId: '31' });
   internals.scheduleVmReconcileSweep();
-  await internals.vmReconcileDispatcher.waitForIdle();
+  await internals.vmReconcileScheduling.waitForIdle();
   expect(order[0]).toBe('dispatch:bound');
 });
 
@@ -110,7 +107,7 @@ it('counts denied read-authority checks against the unbound attempt budget', asy
   const { internals, canRead, resolve } = await fixture(30);
   canRead.mockResolvedValue(false);
   internals.scheduleVmReconcileSweep();
-  await internals.vmReconcileDispatcher.waitForIdle();
+  await internals.vmReconcileScheduling.waitForIdle();
   expect(canRead).toHaveBeenCalledTimes(8);
   expect(resolve).not.toHaveBeenCalled();
 });
@@ -118,16 +115,16 @@ it('counts denied read-authority checks against the unbound attempt budget', asy
 it('handles deletion, binding, replacement and appended subscriptions without skipping surviving candidates', async () => {
   const { internals, resolve } = await fixture(20);
   internals.scheduleVmReconcileSweep();
-  await internals.vmReconcileDispatcher.waitForIdle();
+  await internals.vmReconcileScheduling.waitForIdle();
   internals.subscribedContextGraphs.delete('cg-8');
   internals.subscribedContextGraphs.set('cg-9', { subscribed: true });
   internals.subscribedContextGraphs.set('cg-10', { subscribed: true, onChainId: '110' });
   for (let i = 20; i < 23; i++) internals.subscribedContextGraphs.set(`cg-${i}`, { subscribed: true });
   resolve.mockClear();
   internals.scheduleVmReconcileSweep();
-  await internals.vmReconcileDispatcher.waitForIdle();
+  await internals.vmReconcileScheduling.waitForIdle();
   internals.scheduleVmReconcileSweep();
-  await internals.vmReconcileDispatcher.waitForIdle();
+  await internals.vmReconcileScheduling.waitForIdle();
   const ids = resolve.mock.calls.map(([id]) => id);
   expect(ids).not.toContain('cg-8');
   expect(ids).not.toContain('cg-10');
@@ -141,7 +138,7 @@ it('fences a subscription replaced during its read-authority lookup', async () =
     return true;
   });
   internals.scheduleVmReconcileSweep();
-  await internals.vmReconcileDispatcher.waitForIdle();
+  await internals.vmReconcileScheduling.waitForIdle();
   expect(resolve).not.toHaveBeenCalled();
 });
 
@@ -156,13 +153,13 @@ it.each(['binding', 'read-authority'])('stops during %s lookup and starts a new 
     internals.scheduleVmReconcileSweep();
     await vi.waitFor(() => expect(blocked.mock.calls.length).toBe(1));
     internals.closeVmReconcileRotationState();
-    await internals.vmReconcileDispatcher.close();
+    await internals.vmReconcileScheduling.close();
     expect(resolve.mock.calls.length).toBe(stage === 'binding' ? 1 : 0);
     internals.openVmReconcileRotationState();
     installDispatcher();
     resolve.mockClear();
     internals.scheduleVmReconcileSweep();
-    await internals.vmReconcileDispatcher.waitForIdle();
+    await internals.vmReconcileScheduling.waitForIdle();
     expect(resolve.mock.calls.map(([id]) => id)).toEqual(Array.from({ length: 8 }, (_, i) => `cg-${i}`));
   } finally { release(); }
 });
@@ -177,7 +174,7 @@ it.each(['bound', 'cg-0'])('keeps bounded discovery progressing while %s reconci
     order.push(`resolve:${id}`);
     return id === 'cg-0' ? { onChainId: '43', provenance: 'ontology' } : null;
   });
-  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async (id) => {
+  const dispatcher = installVmReconcileScheduling(internals, new VmReconcileSchedulingRuntime(async (id) => {
     await targetResolver.resolveVmReconcileTarget(id);
     if (id === blockedId) await pending;
     return true;
@@ -203,8 +200,8 @@ it('keeps discovery fair when the bound set exceeds queue capacity', async () =>
   for (let sweep = 0; sweep < 10; sweep++) {
     resolve.mockClear();
     internals.scheduleVmReconcileSweep();
-    expect(internals.vmReconcileDispatcher.snapshot().queued).toBeLessThanOrEqual(3);
-    await internals.vmReconcileDispatcher.waitForIdle();
+    expect(internals.vmReconcileScheduling.snapshot().queued).toBeLessThanOrEqual(3);
+    await internals.vmReconcileScheduling.waitForIdle();
     expect(resolve.mock.calls.length).toBeLessThanOrEqual(8);
     for (const [id] of resolve.mock.calls) seen.add(id);
   }
@@ -218,7 +215,7 @@ it('advances discovery under a sustained bound backlog without waiting for idle'
   const releases: Array<() => void> = [];
   const started: string[] = [];
   let paused = true;
-  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async (id) => {
+  const dispatcher = installVmReconcileScheduling(internals, new VmReconcileSchedulingRuntime(async (id) => {
     started.push(id);
     try { await internals.resolveVmReconcileTarget(id); }
     finally { if (paused) await new Promise<void>(done => releases.push(done)); }
@@ -247,7 +244,7 @@ it.each([1, 3])('reserves foreground admission with maxPending=%i while the swee
   const releases: Array<() => void> = [];
   const started: string[] = [];
   let paused = true;
-  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async (id) => {
+  const dispatcher = installVmReconcileScheduling(internals, new VmReconcileSchedulingRuntime(async (id) => {
     started.push(id);
     if (paused) await new Promise<void>(done => releases.push(done));
     return true;
@@ -287,7 +284,7 @@ it('keeps the public sweep completion pending until its admitted work finishes',
     release();
     await sweep;
     expect(resolve).toHaveBeenCalledOnce();
-    expect(internals.vmReconcileDispatcher.snapshot()).toMatchObject({ active: 0, queued: 0 });
+    expect(internals.vmReconcileScheduling.snapshot()).toMatchObject({ active: 0, queued: 0 });
   } finally { release(); await sweep; }
 });
 
@@ -336,7 +333,7 @@ it('completes an empty sweep without waiting for unrelated manual work', async (
   const { internals } = await fixture(0);
   let release!: () => void;
   const blocked = new Promise<void>(done => { release = done; });
-  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(
+  const dispatcher = installVmReconcileScheduling(internals, new VmReconcileSchedulingRuntime(
     async () => { await blocked; return true; },
     () => undefined,
   ));
@@ -381,7 +378,7 @@ it('finishes its admitted targets while an unrelated concurrent manual task rema
   let release!: () => void;
   const blocked = new Promise<void>(done => { release = done; });
   const ran: string[] = [];
-  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async key => {
+  const dispatcher = installVmReconcileScheduling(internals, new VmReconcileSchedulingRuntime(async key => {
     ran.push(key);
     if (key === 'unrelated') await blocked;
     return true;
@@ -414,7 +411,7 @@ it('releases a capacity-waiting sweep on lifecycle closure without admitting its
   try {
     await vi.waitFor(() => expect(canRead).toHaveBeenCalledOnce());
     internals.closeVmReconcileRotationState();
-    await internals.vmReconcileDispatcher.close();
+    await internals.vmReconcileScheduling.close();
     await sweep;
     expect(order.filter(key => key.startsWith('dispatch:'))).toEqual(['dispatch:bound-0']);
   } finally { release(); await sweep; }
@@ -425,7 +422,7 @@ it('waits for relevant trailing capacity without spinning when another worker is
   internals.subscribedContextGraphs.set('B', { subscribed: true, onChainId: '2' });
   const gates = new Map<string, () => void>();
   const runs = new Map<string, number>();
-  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async key => {
+  const dispatcher = installVmReconcileScheduling(internals, new VmReconcileSchedulingRuntime(async key => {
     const count = (runs.get(key) ?? 0) + 1; runs.set(key, count);
     if (count === 1) await new Promise<void>(resolve => { gates.set(key, resolve); });
     return true;
@@ -436,19 +433,15 @@ it('waits for relevant trailing capacity without spinning when another worker is
   dispatcher.triggerLive('A');
   gates.get('C')!(); await dispatcher.waitForIdle('C');
   expect(dispatcher.snapshot()).toMatchObject({ active: 2, queued: 1 });
-  // Cap attempts so a regression reports a failure instead of hanging Vitest's event loop.
-  const admission = dispatcher as unknown as { admit(key: string, source: string): unknown };
-  const original = admission.admit.bind(dispatcher);
-  const attempts = vi.spyOn(admission, 'admit').mockImplementation((key, source) => {
-    if (attempts.mock.calls.length > 10) throw new Error('periodic admission busy-spin');
-    return original(key, source);
-  });
   let failure: unknown;
   const sweep = internals.runVmReconcileSweep().catch(error => { failure = error; });
   try {
-    await new Promise(resolve => setTimeout(resolve, 5)); // event-loop heartbeat must run
+    // The event-loop heartbeat proves rejected admission sleeps on the private
+    // runtime capacity signal instead of retrying synchronously.
+    await new Promise(resolve => setTimeout(resolve, 5));
     expect(failure).toBeUndefined();
-    expect(attempts).toHaveBeenCalledTimes(1);
+    expect(runs.get('B')).toBe(1);
+    expect(dispatcher.snapshot()).toMatchObject({ active: 2, queued: 1 });
   } finally {
     gates.get('A')!(); gates.get('B')!();
     await sweep;
@@ -462,7 +455,7 @@ it.each(['pending', 'active'] as const)('awaits the exact %s coalesced or traili
   internals.subscribedContextGraphs.set('selected', { subscribed: true, onChainId: '2' });
   const releases: Array<() => void> = [];
   const sources: string[] = [];
-  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async (key, source) => {
+  const dispatcher = installVmReconcileScheduling(internals, new VmReconcileSchedulingRuntime(async (key, source) => {
     sources.push(`${key}:${source}`);
     await new Promise<void>(resolve => { releases.push(resolve); });
     return true;
@@ -496,7 +489,7 @@ it('joins the leading admission of a timer turn resumed by a public sweep', asyn
   const x = new Promise<void>(resolve => { releaseX = resolve; });
   const a = new Promise<void>(resolve => { releaseA = resolve; });
   const ran: string[] = [];
-  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async key => {
+  const dispatcher = installVmReconcileScheduling(internals, new VmReconcileSchedulingRuntime(async key => {
     ran.push(key);
     if (key === 'X') await x;
     if (key === 'A') await a;
@@ -527,7 +520,7 @@ it('gives overlapping public sweeps their own admitted completion boundaries', a
   const release: Array<() => void> = [];
   const ran: string[] = [];
   let draining = false;
-  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async key => {
+  const dispatcher = installVmReconcileScheduling(internals, new VmReconcileSchedulingRuntime(async key => {
     ran.push(key);
     if (key === 'A' && !draining) await new Promise<void>(resolve => { release.push(resolve); });
     return true;
@@ -559,7 +552,7 @@ it('joins overlapping public calls and timer ticks on one retained one-slot admi
   const a = new Promise<void>(resolve => { releaseA = resolve; });
   const u = new Promise<void>(resolve => { releaseU = resolve; });
   const ran: string[] = [];
-  const dispatcher = installVmReconcileScheduling(internals, createVmReconcileDispatcherPair(async key => {
+  const dispatcher = installVmReconcileScheduling(internals, new VmReconcileSchedulingRuntime(async key => {
     ran.push(key); await (key === 'A' ? a : u); return true;
   }, () => {}, { concurrency: 1, maxPending: 1 }));
   dispatchers.push(dispatcher);

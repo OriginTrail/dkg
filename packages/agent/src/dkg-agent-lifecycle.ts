@@ -4183,7 +4183,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // jitter instead of launching an eager sweep against the old runtime.
     this.vmReconcileRuntimeReady = true;
     if (this.vmReconcileEnabled()) {
-      this.ensureVmReconcileDispatcher();
+      this.ensureVmReconcileScheduling();
       const runSweep = (): void => {
         try { this.scheduleVmReconcileSweep(); }
         catch (err) {

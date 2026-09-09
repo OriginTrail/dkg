@@ -1,8 +1,7 @@
-import { VmReconcileSweepPlanner } from '../src/internal/vm-reconcile-sweep.js';
 import { describe, it, expect, vi } from 'vitest';
 import {
   reconcileContextGraph,
-  createVmReconcileDispatcherPair,
+  VmReconcileSchedulingRuntime,
   VmReconcileDispatcher,
   RecentUalSet,
   type ChainReconcilerDeps,
@@ -1315,37 +1314,34 @@ describe('capacity-aware periodic admission', () => {
   it.each(['abort', 'close'] as const)('releases a one-slot wait on %s while active work stays owned', async action => {
     let release!: () => void;
     const blocked = new Promise<void>(resolve => { release = resolve; });
-    const { dispatcher, sweepAdmission: port } = createVmReconcileDispatcherPair(
+    const runtime = new VmReconcileSchedulingRuntime(
       async () => blocked,
       () => undefined,
       { maxPending: 1 },
     );
     const controller = new AbortController();
-    const active = dispatcher.triggerManual('active');
-    expect(port.tryAdmit('waiting')).toBeUndefined();
-    const admission = port.waitForChange(controller.signal);
-    const closing = action === 'close' ? dispatcher.close() : undefined;
+    const active = runtime.triggerManual('active');
+    const sweep = runtime.completeSweep(['waiting'], [], () => true, controller.signal);
+    const closing = action === 'close' ? runtime.close() : undefined;
     if (action === 'abort') controller.abort();
     try {
-      await expect(admission).resolves.toBeUndefined();
-      expect(dispatcher.isInFlight('waiting')).toBe(false);
-      expect(dispatcher.isInFlight('active')).toBe(true);
-    } finally { release(); await active; await closing; await dispatcher.close(); }
-    expect(port.tryAdmit('closed')).toBeUndefined();
+      await expect(sweep).resolves.toBeUndefined();
+      expect(runtime.isInFlight('waiting')).toBe(false);
+      expect(runtime.isInFlight('active')).toBe(true);
+    } finally { release(); await active; await closing; await runtime.close(); }
+    expect(runtime.tryTriggerPeriodic('closed')).toBe(false);
   });
 
   it('admits no work for an already-aborted caller', async () => {
     const run = vi.fn(async () => undefined);
-    const { dispatcher, sweepAdmission } = createVmReconcileDispatcherPair(
+    const runtime = new VmReconcileSchedulingRuntime(
       run,
       () => undefined,
     );
     const controller = new AbortController(); controller.abort();
-    await new VmReconcileSweepPlanner(0).complete(
-      ['cancelled'], [], sweepAdmission, () => true, controller.signal,
-    );
+    await runtime.completeSweep(['cancelled'], [], () => true, controller.signal);
     expect(run).not.toHaveBeenCalled();
-    await dispatcher.close();
+    await runtime.close();
   });
 });
 
@@ -1353,25 +1349,23 @@ describe('capacity-aware periodic admission', () => {
 it('coalesces a waiting periodic request when a foreground trailing pass becomes available', async () => {
   const gates = new Map<string, () => void>();
   const counts = new Map<string, number>();
-  const { dispatcher, sweepAdmission: port } = createVmReconcileDispatcherPair(async key => {
+  const runtime = new VmReconcileSchedulingRuntime(async key => {
     const count = (counts.get(key) ?? 0) + 1; counts.set(key, count);
     if (count === 1) await new Promise<void>(resolve => { gates.set(key, resolve); });
     return key;
   }, () => undefined, { concurrency: 3, maxPending: 2 });
-  for (const key of ['A', 'B', 'C']) dispatcher.triggerLive(key);
+  for (const key of ['A', 'B', 'C']) runtime.triggerLive(key);
   await new Promise(resolve => setTimeout(resolve, 0));
-  dispatcher.triggerLive('A');
-  gates.get('C')!(); await dispatcher.waitForIdle('C');
-  expect(port.tryAdmit('B')).toBeUndefined();
-  let completion: Promise<string> | undefined;
-  const waiting = port.waitForChange().then(() => { completion = port.tryAdmit('B'); });
-  const manual = dispatcher.triggerManual('B');
+  runtime.triggerLive('A');
+  gates.get('C')!(); await runtime.waitForIdle('C');
+  const sweep = runtime.completeSweep(['B'], [], () => true);
+  const manual = runtime.triggerManual('B');
   try {
     await new Promise(resolve => setTimeout(resolve, 5));
-    expect(completion).toBe(manual);
+    expect(counts.get('B')).toBe(1);
   } finally {
     gates.get('A')!(); gates.get('B')!();
-    await waiting; await manual; await dispatcher.close();
+    await manual; await sweep; await runtime.close();
   }
   expect(counts.get('B')).toBe(2);
 });

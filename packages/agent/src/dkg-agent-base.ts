@@ -278,7 +278,7 @@ import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-ha
 import {
   reconcileContextGraph,
   RecentUalSet,
-  type VmReconcileDispatcherPair,
+  type VmReconcileSchedulingRuntime,
   type ChainReconcilerDeps,
   type OrdinalOutcome,
 } from './chain-reconciler.js';
@@ -1080,12 +1080,7 @@ export class DKGAgentBase {
   /** Phase B — periodic chain-driven VM reconciliation sweep timer. */
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;
   /** One host-owned runtime for foreground dispatch and retained sweep admission. */
-  protected vmReconcileScheduling?: Readonly<
-    VmReconcileDispatcherPair<ContextGraphReconcileResult>
-  >;
-  protected get vmReconcileDispatcher() {
-    return this.vmReconcileScheduling?.dispatcher;
-  }
+  protected vmReconcileScheduling?: VmReconcileSchedulingRuntime<ContextGraphReconcileResult>;
   /** Closed dispatcher retained until every physically active worker settles. */
   protected vmReconcileRetirement: Promise<void> | null = null;
   /** Reconcile engines may outlive a caller's abort race; stop drains these before store teardown. */
