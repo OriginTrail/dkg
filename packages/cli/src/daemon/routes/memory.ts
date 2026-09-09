@@ -61,6 +61,7 @@ import {
   classifySwmCatchupPeerOutcome,
   createSwmCatchupPeerSelector,
   loadOpWallets,
+  type SharedMemoryIncompleteReason,
 } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
@@ -442,6 +443,7 @@ function decodeReservedKaId(val: unknown): bigint | undefined {
 const swmCatchupPeerSelector = createSwmCatchupPeerSelector();
 
 type SwmCatchupDetailedResult = {
+  incompleteReason?: SharedMemoryIncompleteReason;
   insertedTriples: number;
   fetchedDataTriples?: number;
   fetchedMetaTriples?: number;
@@ -459,6 +461,7 @@ function swmCatchupResultFromInserted(insertedTriples: number): SwmCatchupDetail
 
 function swmCatchupOutcomeInput(result: SwmCatchupDetailedResult, errorMessage?: string) {
   return {
+    incompleteReason: result.incompleteReason,
     insertedTriples: result.insertedTriples,
     fetchedDataTriples: result.fetchedDataTriples,
     fetchedMetaTriples: result.fetchedMetaTriples,

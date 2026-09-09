@@ -1186,4 +1186,41 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       },
     ]);
   });
+
+  it('keeps a peer eligible after the detailed route reports a local budget yield', async () => {
+    const cgId = 'typed-local-yield-route-cg';
+    const peerId = 'peer-local-yield';
+    const syncSharedMemoryFromPeerDetailed = vi.fn()
+      .mockResolvedValueOnce({
+        insertedTriples: 0,
+        incompleteReason: 'local-budget-yield',
+        failedPhases: 1,
+        snapshotPlaneIncomplete: 1,
+        backoffWorthyFailures: 0,
+      })
+      .mockResolvedValueOnce({ insertedTriples: 0 });
+    const agent = {
+      peerId: 'self-peer',
+      node: {
+        libp2p: {
+          getConnections: () => [{ remotePeer: { toString: () => peerId } }],
+        },
+      },
+      canUseSharedMemoryForContextGraph: vi.fn(async () => true),
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      isPrivateContextGraph: vi.fn(async () => false),
+      syncSharedMemoryFromPeerDetailed,
+      syncFromPeer: vi.fn(),
+    };
+
+    const first = buildCatchupCtx({ contextGraphId: cgId, hostCatchupFallback: false }, agent);
+    await handleMemoryRoutes(first.ctx);
+    expect(first.res.statusCode).toBe(200);
+
+    const second = buildCatchupCtx({ contextGraphId: cgId, hostCatchupFallback: false }, agent);
+    await handleMemoryRoutes(second.ctx);
+    expect(second.res.statusCode).toBe(200);
+    expect(syncSharedMemoryFromPeerDetailed).toHaveBeenCalledTimes(2);
+    expect(syncSharedMemoryFromPeerDetailed).toHaveBeenNthCalledWith(2, peerId, [cgId]);
+  });
 });

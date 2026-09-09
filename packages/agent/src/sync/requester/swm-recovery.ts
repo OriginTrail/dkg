@@ -18,7 +18,10 @@ import {
   type VerifiedSwmRecoveryGraphApply,
 } from './swm-recovery-apply.js';
 import {
+  collectPublicSnapshotMetadata,
   syncPublicSnapshotsForMeta,
+  type PublicSnapshotMetadata,
+  type SharedMemorySnapshotWalkContinuation,
 } from './shared-memory-sync.js';
 import { appendInPlace } from '../append-in-place.js';
 import {
@@ -40,6 +43,7 @@ import {
   isNamedSubgraphSharedMemoryDataGraph,
   isNamedSubgraphSharedMemoryMetaGraph,
 } from '../shared-memory-graphs.js';
+import type { SharedMemoryIncompleteReason } from '../shared-memory-completion.js';
 
 /**
  * recovery entry point. Recovers a CG's
@@ -142,6 +146,10 @@ export interface RecoverContextGraphSwmDeps {
    * one store with a materializer over another, is unrepresentable.
    */
   readonly snapshotMaterializer: SharedMemorySnapshotMaterializer;
+  /** Manifest-bound progress retained by the owning private recovery executor. */
+  readonly snapshotWalk?: (
+    orderedManifest: readonly PublicSnapshotMetadata[],
+  ) => SharedMemorySnapshotWalkContinuation;
   readonly ensureContextGraph: (contextGraphId: string) => Promise<void>;
   readonly setCheckpoint: (key: string, offset: number) => void;
   readonly deleteCheckpoint: (key: string) => void;
@@ -166,7 +174,7 @@ export interface RecoverContextGraphSwmDeps {
 
 export interface RecoverContextGraphSwmResult {
   /** Explicit local yield, independent of any peer response or transport failure. */
-  readonly incompleteReason?: 'local-budget-yield';
+  readonly incompleteReason?: SharedMemoryIncompleteReason;
   readonly replacedRoots: number;
   readonly replacedGraphs: number;
   readonly insertedDataQuads: number;
@@ -261,15 +269,19 @@ async function fetchPhaseFully(
   boundary: RecoveryExecutionAdmission,
   phase: RecoverableSyncPhase,
   graphUri: string,
-): Promise<{ quads: Quad[]; completed: boolean; localBudgetYielded?: boolean }> {
+): Promise<{
+  quads: Quad[];
+  completed: boolean;
+  incompleteReason?: SharedMemoryIncompleteReason;
+}> {
   const workAdmission = deps.workAdmission ?? UNRESTRICTED_SYNC_WORK;
-  let localBudgetYielded = false;
+  let incompleteReason: SharedMemoryIncompleteReason | undefined;
   const maxPages = deps.maxPagesPerPhase ?? DEFAULT_MAX_PAGES_PER_PHASE;
   const all: Quad[] = [];
   let lastCheckpointKey: string | undefined;
   for (let i = 0; i < maxPages; i++) {
     if (Date.now() >= deps.deadline || !workAdmission.canAdmitWork()) {
-      localBudgetYielded = true;
+      incompleteReason = 'local-budget-yield';
       break;
     }
     const page = await boundary.read(() => deps.fetchSyncPages(
@@ -282,7 +294,7 @@ async function fetchPhaseFully(
       workAdmission.capDeadline(deps.deadline),
       { signal: boundary.signal, workAdmission },
     ));
-    localBudgetYielded ||= page.localBudgetYielded === true;
+    incompleteReason ??= page.incompleteReason;
     appendInPlace(all, page.quads);
     lastCheckpointKey = page.checkpointKey;
     if (page.completed) {
@@ -290,7 +302,7 @@ async function fetchPhaseFully(
       return { quads: all, completed: true };
     }
     // Not completed (deadline or partial). Stop if no forward progress.
-    if (page.localBudgetYielded || page.timedOut || page.nextOffset <= page.resumedFromOffset) break;
+    if (page.incompleteReason || page.timedOut || page.nextOffset <= page.resumedFromOffset) break;
     boundary.admitSyncMutation(() => deps.setCheckpoint(page.checkpointKey, page.nextOffset));
   }
   // Incomplete: the accumulated `all` is a prefix that the caller MUST NOT
@@ -302,7 +314,11 @@ async function fetchPhaseFully(
   if (lastCheckpointKey !== undefined) {
     boundary.admitSyncMutation(() => deps.deleteCheckpoint(lastCheckpointKey!));
   }
-  return { quads: all, completed: false, localBudgetYielded };
+  return {
+    quads: all,
+    completed: false,
+    ...(incompleteReason ? { incompleteReason } : {}),
+  };
 }
 
 export async function recoverContextGraphSwm(
@@ -352,7 +368,7 @@ async function recoverContextGraphSwmUnlocked(
       droppedDataTriples: 0,
       readySnapshots: 0,
       totalSnapshots: 0,
-      ...(meta.localBudgetYielded ? { incompleteReason: 'local-budget-yield' as const } : {}),
+      ...(meta.incompleteReason ? { incompleteReason: meta.incompleteReason } : {}),
       completed: false,
     };
   }
@@ -399,6 +415,7 @@ async function recoverContextGraphSwmUnlocked(
     (descriptor) => descriptor.publicSnapshotGraph !== undefined,
   );
   let snapshotProgress = { readySnapshots: 0, totalSnapshots: 0 };
+  let snapshotWalk: SharedMemorySnapshotWalkContinuation | undefined;
   const incrementallyReadyGraphs = new Set<string>();
   /** Graph keys whose ASSERTION GRAPH was actually (re)written this run. */
   const rewrittenGraphKeys = new Set<string>();
@@ -484,6 +501,8 @@ async function recoverContextGraphSwmUnlocked(
     const activeGraphMeta = graphScopedDescriptors.flatMap((descriptor) => [
       ...descriptor.metadataQuads,
     ]);
+    const orderedManifest = collectPublicSnapshotMetadata(activeGraphMeta);
+    snapshotWalk = deps.snapshotWalk?.(orderedManifest);
     boundary.assertCurrent();
     const snapshotSync = await syncPublicSnapshotsForMeta({
       ctx: deps.ctx,
@@ -491,7 +510,9 @@ async function recoverContextGraphSwmUnlocked(
       contextGraphId: deps.contextGraphId,
       deadline: deps.deadline,
       workAdmission: deps.workAdmission,
-      metaQuads: activeGraphMeta,
+      ...(snapshotWalk
+        ? { snapshotWalk }
+        : { metaQuads: activeGraphMeta }),
       publicSnapshotStore: deps.publicSnapshotStore,
       // Raw ports: syncPublicSnapshotsForMeta is the sole owner of admission,
       // post-read checks, signal attachment, and checkpoint commits.
@@ -499,7 +520,10 @@ async function recoverContextGraphSwmUnlocked(
       deleteCheckpoint: deps.deleteCheckpoint,
       setCheckpoint: deps.setCheckpoint,
       executionBoundary: boundary,
-      onSnapshotReady: (snapshot) => materializeReadySnapshot(snapshot.ref),
+      onSnapshotReady: async (snapshot) => {
+        await materializeReadySnapshot(snapshot.ref);
+        snapshotWalk?.markResolved(snapshot.ref);
+      },
     });
     snapshotProgress = {
       readySnapshots: snapshotSync.readySnapshots,
@@ -518,7 +542,9 @@ async function recoverContextGraphSwmUnlocked(
         insertedMetaQuads: incrementallyInsertedMetaQuads,
         droppedDataTriples: 0,
         ...snapshotProgress,
-        ...(snapshotSync.yieldedAtDeadline ? { incompleteReason: 'local-budget-yield' as const } : {}),
+        ...(snapshotSync.incompleteReason
+          ? { incompleteReason: snapshotSync.incompleteReason }
+          : {}),
         completed: false,
       };
     }
@@ -530,7 +556,7 @@ async function recoverContextGraphSwmUnlocked(
   const needsAggregateData = hasLegacyRoots || hasGraphBackedSnapshots;
   const data = needsAggregateData
     ? await fetchPhaseFully(deps, boundary, 'data', wsGraph)
-    : { quads: [] as Quad[], completed: true, localBudgetYielded: false };
+    : { quads: [] as Quad[], completed: true };
 
   // Legacy row pagination can cut a root (or a graph-backed snapshot) in the
   // middle. Preserve the existing all-or-nothing gate for that compatibility
@@ -548,7 +574,7 @@ async function recoverContextGraphSwmUnlocked(
       insertedMetaQuads: incrementallyInsertedMetaQuads,
       droppedDataTriples: 0,
       ...snapshotProgress,
-      ...(data.localBudgetYielded ? { incompleteReason: 'local-budget-yield' as const } : {}),
+      ...(data.incompleteReason ? { incompleteReason: data.incompleteReason } : {}),
       completed: false,
     };
   }
@@ -581,7 +607,9 @@ async function recoverContextGraphSwmUnlocked(
   const graphAssets: VerifiedSwmRecoveryGraphApply[] = [];
   for (const descriptor of graphScopedDescriptors) {
     const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
-    if (incrementallyReadyGraphs.has(graphKey)) {
+    const retainedReady = descriptor.publicSnapshotRef !== undefined
+      && snapshotWalk?.isResolved(descriptor.publicSnapshotRef) === true;
+    if (incrementallyReadyGraphs.has(graphKey) || retainedReady) {
       graphAssets.push(Object.freeze({
         descriptor,
         kind: rewrittenGraphKeys.has(graphKey)

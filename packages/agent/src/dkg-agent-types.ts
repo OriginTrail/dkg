@@ -16,6 +16,7 @@
 
 import type { ethers } from 'ethers';
 import type { CatchupPassDecisionReason } from './sync/catchup-pass-policy.js';
+import type { SharedMemoryIncompleteReason } from './sync/shared-memory-completion.js';
 import type {
   Quad,
   TripleStore,
@@ -1236,6 +1237,8 @@ export interface SwmSnapshotCoverage {
 }
 
 export interface SharedMemorySyncDiagnostics {
+  /** Semantic incomplete outcome preserved end-to-end for peer policy. */
+  incompleteReason?: SharedMemoryIncompleteReason;
   fetchedMetaTriples: number;
   fetchedDataTriples: number;
   insertedMetaTriples: number;

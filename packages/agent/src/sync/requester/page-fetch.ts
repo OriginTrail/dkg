@@ -43,6 +43,7 @@ import {
   SYNC_REQUEST_INITIAL_PAGE_SIZE,
   SYNC_REQUEST_SAFE_PAGE_SIZE,
 } from '../../dkg-agent-constants.js';
+import type { SharedMemoryIncompleteReason } from '../shared-memory-completion.js';
 
 const MAX_UNFINISHED_SYNC_RESPONDER_SESSIONS = 4096;
 type UnfinishedSyncResponderSession = {
@@ -168,8 +169,8 @@ function createResponderSessionId(includeSharedMemory: boolean, phase: SyncPhase
 }
 
 export interface SyncPageResult {
-  /** Incomplete because the enclosing operation admitted no further work. */
-  localBudgetYielded?: boolean;
+  /** Semantic reason this page ended before completing its requested scope. */
+  incompleteReason?: SharedMemoryIncompleteReason;
   quads: Quad[];
   /** Absolute raw responder row coordinate for every retained quad. */
   quadRawOffsets?: number[];
@@ -1051,7 +1052,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
         bytesReceived, resumedFromOffset, rawResumedFromOffset, responderSessionStartedFresh,
         ...(manifestDigest ? { manifestDigest } : {}),
         nextOffset: offset, rawNextOffset: offset, checkpointKey,
-        completed: false, timedOut: false, localBudgetYielded: true,
+        completed: false, timedOut: false, incompleteReason: 'local-budget-yield',
       };
     }
     // The transport retry helper has no onRetry callback after its terminal

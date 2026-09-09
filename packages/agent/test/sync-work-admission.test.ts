@@ -42,7 +42,7 @@ describe('page and transport admission within one operation', () => {
       },
     });
     expect(timeouts).toEqual([100, 50]);
-    expect(result).toMatchObject({ completed: false, timedOut: false, localBudgetYielded: true });
+    expect(result).toMatchObject({ completed: false, timedOut: false, incompleteReason: 'local-budget-yield' });
     expect(result.quads).toHaveLength(2);
   });
 
@@ -56,7 +56,7 @@ describe('page and transport admission within one operation', () => {
       buildSyncRequest: async () => { elapsed = 100; return new Uint8Array([1]); },
     });
     expect(send).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ completed: false, timedOut: false, localBudgetYielded: true });
+    expect(result).toMatchObject({ completed: false, timedOut: false, incompleteReason: 'local-budget-yield' });
   });
 
   it('recomputes the timeout for each retry after the wall clock rolls back', async () => {
@@ -119,6 +119,6 @@ describe('page and transport admission within one operation', () => {
     const result = await request({ workAdmission, send });
 
     expect(send).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ completed: false, localBudgetYielded: true });
+    expect(result).toMatchObject({ completed: false, incompleteReason: 'local-budget-yield' });
   });
 });

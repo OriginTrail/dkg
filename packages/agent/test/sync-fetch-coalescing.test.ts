@@ -1637,6 +1637,7 @@ describe('DKGAgent sync fetch coalescing', () => {
     // aggregate preserves the documented identity
     // `replayPhaseBytesReceived + snapshotPhaseBytesReceived === bytesReceived`.
     const peerARound = {
+      incompleteReason: 'local-budget-yield' as const,
       swmCoverage: peerACoverage(),
       snapshotPlaneIncomplete: 1,
       replayPhaseBytesReceived: 4_096,
@@ -1717,6 +1718,7 @@ describe('DKGAgent sync fetch coalescing', () => {
       // SUMMATION across both peers. Each expected value differs from both
       // operands, so neither `=` (last write) nor a dropped forward can produce it.
       expect(swm.snapshotPlaneIncomplete).toBe(3); // 1 + 2
+      expect(swm.incompleteReason).toBe('local-budget-yield');
       expect(swm.replayPhaseBytesReceived).toBe(5_120); // 4_096 + 1_024
       expect(swm.snapshotPhaseBytesReceived).toBe(81_920); // 65_536 + 16_384
       // The documented split identity has to survive aggregation, not just hold

@@ -3,6 +3,7 @@ import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SwmSnapshotCoverage } from '../../dkg-agent-types.js';
+import type { SharedMemoryIncompleteReason } from '../shared-memory-completion.js';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import type { SyncPhase } from '../auth/request-build.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
@@ -228,6 +229,8 @@ export function readPublicSnapshotWalkProgress(err: unknown): PublicSnapshotWalk
 }
 
 export interface SharedMemorySyncSummary {
+  /** Semantic incomplete outcome preserved separately from numeric telemetry. */
+  incompleteReason?: SharedMemoryIncompleteReason;
   insertedTriples: number;
   fetchedMetaTriples: number;
   fetchedDataTriples: number;
@@ -1382,7 +1385,8 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // NOT kept out of `failedPhases` below: the round really did not complete
       // the plane, and without that the round classifies as clean and reports
       // the graph `done` while Knowledge Assets are still missing.
-      if (snapshotSync.yieldedAtDeadline) {
+      if (snapshotSync.incompleteReason === 'local-budget-yield') {
+        summary.incompleteReason = snapshotSync.incompleteReason;
         summary.snapshotPlaneIncomplete += 1;
         logInfo(ctx, `SWM sync for "${pid}": yielded at the round deadline with `
           + `${snapshotSync.missingCount} of ${snapshotSync.totalSnapshots} snapshot(s) unresolved`);
@@ -1634,7 +1638,7 @@ export async function syncPublicSnapshotsForMeta(params: {
    * `snapshotPlaneIncomplete` and must NOT fold it into `timedOutPhases`, which
    * marks the peer backoff-worthy (`durable-progress.ts` `backoffWorthyFailure`).
    */
-  yieldedAtDeadline: boolean;
+  incompleteReason?: SharedMemoryIncompleteReason;
 }> {
   const workAdmission = params.workAdmission ?? UNRESTRICTED_SYNC_WORK;
   const executionBoundary = params.executionBoundary
@@ -1660,7 +1664,6 @@ export async function syncPublicSnapshotsForMeta(params: {
       completed: true,
       missingCount: 0,
       missingSample: [],
-      yieldedAtDeadline: false,
     };
   }
   if (!params.publicSnapshotStore) {
@@ -1676,7 +1679,7 @@ export async function syncPublicSnapshotsForMeta(params: {
   let checkpointAdvances = 0;
   let readySnapshots = 0;
   let missingCount = 0;
-  let yieldedAtDeadline = false;
+  let incompleteReason: SharedMemoryIncompleteReason | undefined;
   const missingSample: string[] = [];
   const noteMissing = (ref: string): void => {
     missingCount += 1;
@@ -1735,7 +1738,7 @@ export async function syncPublicSnapshotsForMeta(params: {
     // Never mid-KA: a snapshot is applied whole or not at all, so stopping here
     // can never leave a partially materialized asset.
     if (Date.now() >= params.deadline || !workAdmission.canAdmitWork()) {
-      yieldedAtDeadline = true;
+      incompleteReason = 'local-budget-yield';
       abandonFrom(index);
       break;
     }
@@ -1755,7 +1758,7 @@ export async function syncPublicSnapshotsForMeta(params: {
       // Cache validation can consume the allowance without producing a hit.
       // Admit no new transport after that local work exhausts the budget.
       if (Date.now() >= params.deadline || !workAdmission.canAdmitWork()) {
-        yieldedAtDeadline = true;
+        incompleteReason = 'local-budget-yield';
         abandonFrom(index);
         break;
       }
@@ -1778,7 +1781,7 @@ export async function syncPublicSnapshotsForMeta(params: {
       bytesReceived += result.bytesReceived;
       resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
       timedOutPhases += result.timedOut ? 1 : 0;
-      yieldedAtDeadline ||= result.localBudgetYielded === true;
+      incompleteReason ??= result.incompleteReason;
       if (result.completed) {
         executionBoundary.admitSyncMutation(() => params.deleteCheckpoint(result.checkpointKey));
       }
@@ -1860,7 +1863,7 @@ export async function syncPublicSnapshotsForMeta(params: {
     completed: missingCount === 0,
     missingCount,
     missingSample,
-    yieldedAtDeadline,
+    ...(incompleteReason ? { incompleteReason } : {}),
   };
 }
 

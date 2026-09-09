@@ -97,6 +97,7 @@ describe('SWM catchup peer selection', () => {
     expect(classifySwmCatchupPeerOutcome({ deniedPhases: 1 })).toBe('denied');
     expect(classifySwmCatchupPeerOutcome({ failedPeers: 1 })).toBe('transportFailed');
     const localYield = classifySwmCatchupPeerOutcome({
+      incompleteReason: 'local-budget-yield',
       failedPhases: 1,
       snapshotPlaneIncomplete: 1,
       backoffWorthyFailures: 0,
@@ -106,9 +107,14 @@ describe('SWM catchup peer selection', () => {
     selector.record('cg', 'healthy-peer', localYield, 100);
     expect(selector.get('cg', 'healthy-peer', 101)).toBeUndefined();
     expect(classifySwmCatchupPeerOutcome({
+      incompleteReason: 'local-budget-yield',
       failedPhases: 1,
       snapshotPlaneIncomplete: 1,
       backoffWorthyFailures: 1,
+    })).toBe('transportFailed');
+    expect(classifySwmCatchupPeerOutcome({
+      failedPhases: 1,
+      snapshotPlaneIncomplete: 1,
     })).toBe('transportFailed');
     expect(classifySwmCatchupPeerOutcome({})).toBe('empty');
   });

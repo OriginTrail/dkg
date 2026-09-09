@@ -162,10 +162,15 @@ describe('withRetry', () => {
     expect(errors[0]).toBe(specificError);
   });
 
-  it('preserves the admitted failure when post-backoff continuation stops', async () => {
+  it('re-evaluates retry policy after backoff and preserves the admitted failure', async () => {
     const admittedFailure = new Error('first attempt failed');
     let calls = 0;
-    const shouldContinueAfterBackoff = () => false;
+    let retryAllowed = true;
+    let policyCalls = 0;
+    const isRetryable = () => {
+      policyCalls += 1;
+      return retryAllowed;
+    };
 
     const outcome = await withRetry(async () => {
       calls += 1;
@@ -174,11 +179,13 @@ describe('withRetry', () => {
       maxAttempts: 3,
       baseDelayMs: 0,
       jitter: 0,
-      shouldContinueAfterBackoff,
+      isRetryable,
+      onRetry: () => { retryAllowed = false; },
     }).then(() => null, error => error);
 
     expect(outcome).toBe(admittedFailure);
     expect(calls).toBe(1);
+    expect(policyCalls).toBe(2);
   });
 
   it('does not mutate default AbortController reasons while aborting backoff', async () => {

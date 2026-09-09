@@ -22,6 +22,8 @@ import type { RecoveryExecutionGuard } from './recovery-execution-guard.js';
 import {
   runSharedMemorySync,
   type SharedMemoryMetadataFetcher,
+  type PublicSnapshotMetadata,
+  type SharedMemorySnapshotWalkContinuation,
   type SharedMemorySyncContext,
   type SharedMemorySyncSummary,
 } from './shared-memory-sync.js';
@@ -101,6 +103,42 @@ export interface PrivateSwmRecoveryTargetV1 {
   readonly includeRootScope?: boolean;
 }
 
+/** Factory-owned, manifest-bound progress shared by consecutive recovery jobs. */
+export class PrivateSwmSnapshotWalkRegistry {
+  readonly #walks = new Map<
+    string,
+    { manifestKey: string; walk: SharedMemorySnapshotWalkContinuation }
+  >();
+
+  open(
+    target: PrivateSwmRecoveryTargetV1,
+    orderedManifest: readonly PublicSnapshotMetadata[],
+  ): SharedMemorySnapshotWalkContinuation {
+    const ownerKey = `${target.contextGraphId}\u0000${target.remotePeerId}`;
+    const manifest = Object.freeze(orderedManifest.map((snapshot) => Object.freeze({ ...snapshot })));
+    const manifestKey = manifest.map(({ ref, digest, count }) => `${ref}\u0000${digest}\u0000${count}`).join('\u0001');
+    const retained = this.#walks.get(ownerKey);
+    if (retained?.manifestKey === manifestKey) return retained.walk;
+
+    const allowedRefs = new Set(manifest.map(({ ref }) => ref));
+    const resolvedRefs = new Set<string>();
+    const walk: SharedMemorySnapshotWalkContinuation = {
+      orderedManifestSnapshot: () => manifest,
+      isResolved: (ref) => resolvedRefs.has(ref),
+      resolvedCount: () => resolvedRefs.size,
+      resolvedRefsSnapshot: () => Object.freeze([...resolvedRefs]),
+      suppressedMetadataRows: () => [],
+      markResolved: (ref) => {
+        if (this.#walks.get(ownerKey)?.walk === walk && allowedRefs.has(ref)) {
+          resolvedRefs.add(ref);
+        }
+      },
+    };
+    this.#walks.set(ownerKey, { manifestKey, walk });
+    return walk;
+  }
+}
+
 /**
  * Owns the stable adapters and write policies for ordinary public sync and
  * public/private recovery. Callers supply only per-target state; requester
@@ -116,7 +154,10 @@ export class SwmTargetExecutorV1 {
     Promise<{ registered: string[]; excluded: string[] }>
   >();
 
-  constructor(ports: SwmTargetExecutorPortsV1) {
+  constructor(
+    ports: SwmTargetExecutorPortsV1,
+    private readonly privateSnapshotWalks = new PrivateSwmSnapshotWalkRegistry(),
+  ) {
     this.#ports = ports;
     this.#snapshotMaterializer = createSharedMemorySnapshotMaterializer({
       store: ports.store,
@@ -124,6 +165,13 @@ export class SwmTargetExecutorV1 {
       invalidateListContextGraphsCache: ports.invalidateListContextGraphsCache,
     });
     this.#recoveryMutation = ports.recoveryMutation;
+  }
+
+  #privateSnapshotWalk(
+    target: PrivateSwmRecoveryTargetV1,
+    orderedManifest: readonly PublicSnapshotMetadata[],
+  ): SharedMemorySnapshotWalkContinuation {
+    return this.privateSnapshotWalks.open(target, orderedManifest);
   }
 
   async recoverPrivateTarget(
@@ -176,6 +224,7 @@ export class SwmTargetExecutorV1 {
       getExcludedSubGraphNames: async () => (await admission()).excluded,
       includeRootScope: target.includeRootScope,
       ensureOwnedMap: this.#ports.ensureOwnedMap,
+      snapshotWalk: (orderedManifest) => this.#privateSnapshotWalk(target, orderedManifest),
       logInfo: this.#ports.logInfo,
       logWarn: this.#ports.logWarn,
       recoveryGuard: target.recoveryGuard,
@@ -296,16 +345,17 @@ export class SwmTargetExecutorV1 {
   }
 }
 
-/** Stable typed composition; each call creates isolated session state. */
+/** Stable typed composition with isolated session caches and shared manifest progress. */
 export class SwmTargetExecutorSessionFactoryV1 {
   readonly #ports: SwmTargetExecutorPortsV1;
+  readonly #privateSnapshotWalks = new PrivateSwmSnapshotWalkRegistry();
 
   constructor(ports: SwmTargetExecutorPortsV1) {
     this.#ports = ports;
   }
 
   createSession(): SwmTargetExecutorV1 {
-    return new SwmTargetExecutorV1(this.#ports);
+    return new SwmTargetExecutorV1(this.#ports, this.#privateSnapshotWalks);
   }
 }
 

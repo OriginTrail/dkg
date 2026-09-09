@@ -1759,6 +1759,7 @@ function mergeSharedMemorySyncResults(
 ): SharedMemorySyncResult {
   const swmCoverage = selectSwmSnapshotCoverage(a.swmCoverage, b.swmCoverage);
   return {
+    incompleteReason: a.incompleteReason ?? b.incompleteReason,
     insertedTriples: a.insertedTriples + b.insertedTriples,
     fetchedMetaTriples: a.fetchedMetaTriples + b.fetchedMetaTriples,
     fetchedDataTriples: a.fetchedDataTriples + b.fetchedDataTriples,
@@ -7703,6 +7704,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               } else {
                 result.failedPhases = 1;
                 if (recovered.incompleteReason === 'local-budget-yield') {
+                  result.incompleteReason = recovered.incompleteReason;
                   result.snapshotPlaneIncomplete = 1;
                 } else {
                   result.backoffWorthyFailures = 1;
@@ -8559,6 +8561,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         diagnostics.sharedMemory.snapshotPlaneIncomplete =
           (diagnostics.sharedMemory.snapshotPlaneIncomplete ?? 0)
           + (r.shared.snapshotPlaneIncomplete ?? 0);
+        diagnostics.sharedMemory.incompleteReason ??= r.shared.incompleteReason;
         diagnostics.sharedMemory.replayPhaseBytesReceived =
           (diagnostics.sharedMemory.replayPhaseBytesReceived ?? 0)
           + (r.shared.replayPhaseBytesReceived ?? 0);
@@ -8610,6 +8613,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       diagnostics.sharedMemory.snapshotPlaneIncomplete =
         (diagnostics.sharedMemory.snapshotPlaneIncomplete ?? 0)
         + (shared.snapshotPlaneIncomplete ?? 0);
+      diagnostics.sharedMemory.incompleteReason ??= shared.incompleteReason;
       diagnostics.sharedMemory.replayPhaseBytesReceived =
         (diagnostics.sharedMemory.replayPhaseBytesReceived ?? 0)
         + (shared.replayPhaseBytesReceived ?? 0);

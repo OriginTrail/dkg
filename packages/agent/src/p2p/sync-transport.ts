@@ -240,9 +240,6 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
       isRetryable: (error) => params.signal?.aborted !== true
         && !(error instanceof SyncWorkAdmissionExhaustedError)
         && workAdmission.canAdmitWork(),
-      // Expiry while sleeping is a local scheduling decision, but the
-      // already-admitted transport failure remains the terminal outcome.
-      shouldContinueAfterBackoff: () => workAdmission.canAdmitWork(),
       onRetry: params.onRetry,
     },
         );

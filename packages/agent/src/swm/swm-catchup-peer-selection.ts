@@ -1,3 +1,5 @@
+import type { SharedMemoryIncompleteReason } from '../sync/shared-memory-completion.js';
+
 export type SwmCatchupPeerOutcome = 'good' | 'empty' | 'denied' | 'unsupported' | 'transportFailed' | 'localYield';
 
 export const SWM_CATCHUP_PEER_GOOD_TTL_MS = 10 * 60_000;
@@ -145,6 +147,7 @@ export function createSwmCatchupPeerSelector(options?: SwmCatchupPeerSelectorOpt
 }
 
 export function classifySwmCatchupPeerOutcome(input: {
+  incompleteReason?: SharedMemoryIncompleteReason;
   insertedTriples?: number;
   fetchedDataTriples?: number;
   fetchedMetaTriples?: number;
@@ -163,12 +166,9 @@ export function classifySwmCatchupPeerOutcome(input: {
     return 'denied';
   }
   const failedPhases = input.failedPhases ?? 0;
-  const locallyIncomplete = input.snapshotPlaneIncomplete ?? 0;
   if (
     !input.errorMessage
-    && locallyIncomplete > 0
-    && failedPhases > 0
-    && failedPhases <= locallyIncomplete
+    && input.incompleteReason === 'local-budget-yield'
     && (input.failedPeers ?? 0) === 0
     && (input.timedOutPhases ?? 0) === 0
     && (input.backoffWorthyFailures ?? 0) === 0

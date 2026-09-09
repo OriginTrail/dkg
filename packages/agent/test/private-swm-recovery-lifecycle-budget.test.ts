@@ -9,26 +9,33 @@ import type { SyncWorkAdmission } from '../src/sync/work-admission.js';
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
 import { createSwmTargetExecutorSessionFactoryForTest } from './_helpers/swm-target-executor-session-fixture.js';
-import { CG, WS, WS_META, UAL, DKG, XSD_INTEGER, recoveryPage as page } from './_helpers/swm-recovery-fixture.js';
+import { CG, WS, WS_META, DKG, XSD_INTEGER, recoveryPage as page } from './_helpers/swm-recovery-fixture.js';
 
-function snapshotMetadata(): Quad[] {
-  const payload = [{ subject: 'urn:s', predicate: 'urn:p', object: '"new"', graph: '' }];
-  const operationId = 'budget-recovery';
+function snapshotFixture(kaNumber = 7, value = 'new') {
+  const ual = `did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/${kaNumber}`;
+  const payload = [{ subject: `urn:s:${kaNumber}`, predicate: 'urn:p', object: `"${value}"`, graph: '' }];
+  const digest = workspacePublicQuadsDigest(payload);
+  const operationId = `budget-recovery-${kaNumber}`;
   const operation = `urn:dkg:share:${CG}:${operationId}`;
-  const head = `${UAL}#dkg-swm-head`;
-  const assertionGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, createGraphKnowledgeAssetScope(UAL, 1));
-  return [
+  const head = `${ual}#dkg-swm-head`;
+  const assertionGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, createGraphKnowledgeAssetScope(ual, 1));
+  const metadata = [
     ...generateKnowledgeAssetShareMetadata({
-      shareOperationId: operationId, contextGraphId: CG, kaUal: UAL, assertionVersion: 1,
+      shareOperationId: operationId, contextGraphId: CG, kaUal: ual, assertionVersion: 1,
       publicTripleCount: 1, privateTripleCount: 0, publisherPeerId: 'peer-source', timestamp: new Date(0),
     }, WS_META),
-    { subject: operation, predicate: `${DKG}publicQuadsDigest`, object: `"${workspacePublicQuadsDigest(payload)}"`, graph: WS_META },
+    { subject: operation, predicate: `${DKG}publicQuadsDigest`, object: `"${digest}"`, graph: WS_META },
     { subject: head, predicate: `${DKG}contentScopeVersion`, object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD_INTEGER}>`, graph: WS_META },
-    { subject: head, predicate: `${DKG}kaUal`, object: UAL, graph: WS_META },
+    { subject: head, predicate: `${DKG}kaUal`, object: ual, graph: WS_META },
     { subject: head, predicate: `${DKG}assertionVersion`, object: `"1"^^<${XSD_INTEGER}>`, graph: WS_META },
     { subject: head, predicate: `${DKG}assertionGraph`, object: assertionGraph, graph: WS_META },
     { subject: head, predicate: `${DKG}shareOperationId`, object: `"${operationId}"`, graph: WS_META },
   ];
+  return { digest, metadata, payload };
+}
+
+function snapshotMetadata(): Quad[] {
+  return snapshotFixture().metadata;
 }
 
 function legacyMetadata(): Quad[] {
@@ -122,9 +129,70 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     expect(getSnapshot).toHaveBeenCalledTimes(1);
     expect(fetchSyncPages).toHaveBeenCalledTimes(1); // Metadata only; zero snapshot requests.
     expect(result).toMatchObject({
+      incompleteReason: 'local-budget-yield',
       completedPhases: 0, failedPhases: 1, snapshotPlaneIncomplete: 1,
       failedPeers: 0, backoffWorthyFailures: 0, insertedTriples: 0,
     });
+  });
+
+  it('skips a verified cached prefix across jobs and eventually fetches the manifest tail', async () => {
+    vi.stubEnv('DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS', '100');
+    let elapsed = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+    const fixtures = [snapshotFixture(9, 'cached-a'), snapshotFixture(8, 'cached-b'), snapshotFixture(7, 'tail')];
+    const snapshots = new Map<string, Quad[]>([
+      [fixtures[0].digest, fixtures[0].payload],
+      [fixtures[1].digest, fixtures[1].payload],
+    ]);
+    const getSnapshot = vi.fn(async (ref: string) => {
+      const value = snapshots.get(ref);
+      if (value) elapsed += 60;
+      return value?.map((quad) => ({ ...quad })) ?? null;
+    });
+    const putSnapshot = vi.fn(async ({ digest, quads }: { digest: string; quads: readonly Quad[] }) => {
+      snapshots.set(digest, quads.map((quad) => ({ ...quad })));
+      return { ref: digest, byteLength: 0 };
+    });
+    const { run, fetchSyncPages } = harness({ getSnapshot, putSnapshot });
+    fetchSyncPages.mockImplementation(async (_ctx, _peer, _cg, _swm, phase, _graph, _deadline, options) => {
+      if (phase === 'meta') return page(fixtures.flatMap(({ metadata }) => metadata));
+      expect(phase).toBe('snapshot');
+      expect(options?.snapshotRef).toBe(fixtures[2].digest);
+      return page(fixtures[2].payload);
+    });
+
+    const first = await run();
+    expect(first).toMatchObject({
+      incompleteReason: 'local-budget-yield',
+      failedPhases: 1,
+      snapshotPlaneIncomplete: 1,
+    });
+    expect(getSnapshot).toHaveBeenCalledTimes(2);
+
+    const second = await run();
+    expect(second).toMatchObject({
+      incompleteReason: 'local-budget-yield',
+      failedPhases: 1,
+      snapshotPlaneIncomplete: 1,
+    });
+    expect(getSnapshot).toHaveBeenCalledTimes(4);
+
+    const third = await run();
+    expect(third.failedPhases).toBe(0);
+    expect(putSnapshot).toHaveBeenCalledExactlyOnceWith({
+      digest: fixtures[2].digest,
+      quads: fixtures[2].payload,
+    });
+    expect(getSnapshot.mock.calls.map(([ref]) => ref)).toEqual([
+      fixtures[0].digest,
+      fixtures[0].digest,
+      fixtures[1].digest,
+      fixtures[1].digest,
+      fixtures[2].digest,
+      fixtures[2].digest,
+    ]);
+    expect(fetchSyncPages.mock.calls.map((call) => call[4]))
+      .toEqual(['meta', 'meta', 'meta', 'snapshot']);
   });
 
   it.each(['meta', 'data'] as const)(
@@ -138,7 +206,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
         if (phase === 'meta' && yieldedPhase === 'data') return page(legacyMetadata());
         expect(phase).toBe(yieldedPhase);
         elapsed = 100;
-        return { ...page([], false), localBudgetYielded: true };
+        return { ...page([], false), incompleteReason: 'local-budget-yield' };
       });
 
       const result = await run();
@@ -146,6 +214,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
       expect(fetchSyncPages.mock.calls.map(call => call[4]))
         .toEqual(yieldedPhase === 'meta' ? ['meta'] : ['meta', 'data']);
       expect(result).toMatchObject({
+        incompleteReason: 'local-budget-yield',
         completedPhases: 0,
         failedPhases: 1,
         snapshotPlaneIncomplete: 1,

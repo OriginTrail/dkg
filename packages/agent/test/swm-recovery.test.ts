@@ -78,7 +78,7 @@ describe('syncPublicSnapshotsForMeta', () => {
       fetchSyncPages, deleteCheckpoint: () => {}, setCheckpoint: () => {},
     });
     expect(fetchSyncPages).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ completed: false, readySnapshots: 0, timedOutPhases: 0, yieldedAtDeadline: true });
+    expect(result).toMatchObject({ completed: false, readySnapshots: 0, timedOutPhases: 0, incompleteReason: 'local-budget-yield' });
   });
 
   it('prioritizes three recent snapshots for every historical snapshot', () => {
@@ -243,7 +243,6 @@ describe('syncPublicSnapshotsForMeta', () => {
       completedPhases: 1,
       // A skip is OUR classification of the peer's response, not a local budget
       // decision, so the voluntary-yield flag must stay down.
-      yieldedAtDeadline: false,
     });
     // The shortfall names the ref that was skipped, not the one that succeeded.
     expect(result.missingSample).toEqual([shortDigest]);
@@ -266,7 +265,7 @@ describe('syncPublicSnapshotsForMeta', () => {
     //
     // The contract being pinned is an ATTRIBUTION rule, not a counting rule:
     // stopping on OUR OWN round budget is a local scheduling decision, so it
-    // must surface as an incomplete snapshot plane (`yieldedAtDeadline`, which
+    // must surface as an incomplete snapshot plane (`incompleteReason`, which
     // the caller in `runSharedMemorySync` turns into `snapshotPlaneIncomplete`
     // + `failedPhases`) and must NEVER touch `timedOutPhases` — that field
     // feeds `backoffWorthyFailure` in `durable-progress.ts`, so folding a
@@ -332,7 +331,7 @@ describe('syncPublicSnapshotsForMeta', () => {
 
       expect(result).toMatchObject({
         // The local yield signal the caller maps to `snapshotPlaneIncomplete`.
-        yieldedAtDeadline: true,
+        incompleteReason: 'local-budget-yield',
         // A yield is not a clean round: `completed` is derived from
         // `missingCount === 0`, so the abandoned tail keeps the graph from
         // being stamped caught-up while Knowledge Assets are still missing.
