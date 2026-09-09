@@ -4,7 +4,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter, type RandomSamplingAvailability } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
-import type { RandomSamplingBindingResult, RandomSamplingHandle } from '../src/random-sampling-bind.js';
+import {
+  bindRandomSampling,
+  type RandomSamplingBindingResult,
+  type RandomSamplingDisabledReason,
+  type RandomSamplingHandle,
+} from '../src/random-sampling-bind.js';
 
 function readyBinding(handle: RandomSamplingHandle): RandomSamplingBindingResult {
   return { kind: 'ready', handle };
@@ -46,7 +51,7 @@ async function startCore(initialMembership = true) {
   };
   let pending: Promise<void> | undefined;
   const beginTick = () => {
-    expect(runtime().getLifecycleSnapshot().reconciliationScheduled).toBe(true);
+    expect(runtime().getDiagnostics().reconciliationScheduled).toBe(true);
     pending = runtime().reconcile();
     return pending;
   };
@@ -58,6 +63,42 @@ async function startCore(initialMembership = true) {
 }
 
 describe('Random Sampling membership reconciliation', () => {
+  it.each([
+    {
+      name: 'edge role', role: 'edge' as const, identityId: 52n,
+      chain: {}, reason: 'edge_node' as RandomSamplingDisabledReason,
+    },
+    {
+      name: 'zero identity', role: 'core' as const, identityId: 0n,
+      chain: {}, reason: 'no_identity' as RandomSamplingDisabledReason,
+    },
+    {
+      name: 'missing chain methods', role: 'core' as const, identityId: 52n,
+      chain: {}, reason: 'unsupported_chain' as RandomSamplingDisabledReason,
+    },
+    {
+      name: 'contracts not ready', role: 'core' as const, identityId: 52n,
+      chain: {
+        getActiveProofPeriodStatus() {}, createChallenge() {}, submitProof() {},
+        getNodeChallenge() {}, getKAContextGraphId() {}, isRandomSamplingReady: () => false,
+      },
+      reason: 'contracts_not_deployed' as RandomSamplingDisabledReason,
+    },
+  ])('preserves the public no-op handle contract for $name', async ({ role, identityId, chain, reason }) => {
+    const handle = await bindRandomSampling({
+      role, identityId, chain: chain as never, store: {} as never,
+      // If an early-unavailable path attempted to acquire a WAL, this invalid
+      // parent would make the compatibility test fail instead of leaking it.
+      walPath: '/path-that-must-not-exist/random-sampling/wal.json',
+    });
+    expect(handle.enabled).toBe(false);
+    expect(() => handle.start()).not.toThrow();
+    await expect(handle.stop()).resolves.toBeUndefined();
+    expect(handle.getStatus()).toMatchObject({
+      enabled: false, role, identityId: identityId.toString(), disabledReason: reason, loop: null,
+    });
+  });
+
   it.each([
     { active: false, missing: false, phase: 'waiting', stopped: 0, scheduled: true, observed: false },
     { active: true, missing: false, phase: 'running', stopped: 0, scheduled: true, observed: true },
@@ -82,7 +123,7 @@ describe('Random Sampling membership reconciliation', () => {
         ? { kind: 'unavailable', reason: 'contracts_not_deployed' }
         : { kind: 'indeterminate', error: failure });
       await runtime.reconcile();
-      expect(runtime.getLifecycleSnapshot()).toMatchObject({
+      expect(runtime.getDiagnostics()).toMatchObject({
         phase,
         reconciliationScheduled: scheduled,
         deploymentObserved: observed,
@@ -149,10 +190,10 @@ describe('Random Sampling membership reconciliation', () => {
       await entered.promise;
       await expect(runtime.stop()).rejects.toMatchObject({ name: 'RandomSamplingShutdownTimeoutError' });
       await reconciling;
-      expect(runtime.getLifecycleSnapshot().phase).toBe('retiring');
+      expect(runtime.getDiagnostics().phase).toBe('retiring');
       gate.resolve();
       await expect(runtime.stop()).resolves.toBeUndefined();
-      expect(runtime.getLifecycleSnapshot().phase).toBe('stopped');
+      expect(runtime.getDiagnostics().phase).toBe('stopped');
     } finally { gate.resolve(); await runtime.stop(); }
   });
 
@@ -188,7 +229,7 @@ describe('Random Sampling membership reconciliation', () => {
       deployed = false;
       await vi.advanceTimersByTimeAsync(30_000);
       expect(handles[0].stop).toHaveBeenCalledOnce();
-      expect(runtime.getLifecycleSnapshot().reconciliationScheduled).toBe(true);
+      expect(runtime.getDiagnostics().reconciliationScheduled).toBe(true);
       deployed = true;
       await vi.advanceTimersByTimeAsync(30_000);
       expect(refresh).toHaveBeenCalledTimes(3);
@@ -213,7 +254,7 @@ describe('Random Sampling membership reconciliation', () => {
       await expect(runtime.stop()).resolves.toBeUndefined();
       expect(stop).toHaveBeenCalledOnce();
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('WAL close failed'));
-      expect(runtime.getLifecycleSnapshot().phase).toBe('stopped');
+      expect(runtime.getDiagnostics().phase).toBe('stopped');
       expect(runtime.getStatus().enabled).toBe(false);
     } finally { await runtime.stop().catch(() => {}); }
   });
@@ -251,7 +292,7 @@ describe('Random Sampling membership reconciliation', () => {
     const runtime = createRuntime({
       role: 'core', chain: { chainId: 'mock:0', getIdentityId: async () => 52n, isShardingTableMember: async () => true },
       createHandle: async () => ({
-        kind: 'unavailable', retry: 'never', reason: 'unsupported_chain', handleToClose: handle,
+        kind: 'unavailable', reason: 'unsupported_chain', handleToClose: handle,
       }),
       log: { info: vi.fn(), warn: vi.fn() }, shutdownTimeoutMs: () => 100,
     });
@@ -260,7 +301,7 @@ describe('Random Sampling membership reconciliation', () => {
       expect(handle.start).not.toHaveBeenCalled();
       expect(handle.stop).toHaveBeenCalledOnce();
       expect(runtime.getStatus()).toMatchObject({ enabled: false, disabledReason: 'unsupported_chain' });
-      expect(runtime.getLifecycleSnapshot().reconciliationScheduled).toBe(false);
+      expect(runtime.getDiagnostics().reconciliationScheduled).toBe(false);
     } finally { await runtime.stop(); }
   });
 
@@ -275,7 +316,7 @@ describe('Random Sampling membership reconciliation', () => {
     };
     const createHandle = vi.fn(async (): Promise<RandomSamplingBindingResult> => readyBinding(enabled))
       .mockResolvedValueOnce({
-        kind: 'unavailable', retry: 'poll', reason: 'contracts_not_deployed', handleToClose: disabled,
+        kind: 'unavailable', reason: 'contracts_not_deployed', handleToClose: disabled,
       });
     const runtime = createRuntime({
       role: 'core', chain: { chainId: 'mock:0', getIdentityId: async () => 52n, isShardingTableMember: async () => true },
@@ -285,7 +326,7 @@ describe('Random Sampling membership reconciliation', () => {
       await runtime.start();
       expect(disabled.start).not.toHaveBeenCalled();
       expect(disabled.stop).toHaveBeenCalledOnce();
-      expect(runtime.getLifecycleSnapshot()).toMatchObject({ phase: 'waiting', reconciliationScheduled: true });
+      expect(runtime.getDiagnostics()).toMatchObject({ phase: 'waiting', reconciliationScheduled: true });
       await runtime.reconcile();
       expect(enabled.start).toHaveBeenCalledOnce();
       expect(runtime.getStatus().enabled).toBe(true);
@@ -319,7 +360,7 @@ describe('Random Sampling membership reconciliation', () => {
       await runtime.stop();
       await vi.advanceTimersByTimeAsync(60_000);
       expect(membership).toHaveBeenCalledTimes(3);
-      expect(runtime.getLifecycleSnapshot().reconciliationScheduled).toBe(false);
+      expect(runtime.getDiagnostics().reconciliationScheduled).toBe(false);
     } finally { await runtime.stop(); vi.useRealTimers(); }
   });
 
@@ -331,7 +372,7 @@ describe('Random Sampling membership reconciliation', () => {
       await f.agent.start();
       expect(f.create).toHaveBeenCalledTimes(2);
       expect(f.handles.at(-1)).not.toBe(original);
-      expect(f.runtime().getLifecycleSnapshot().reconciliationScheduled).toBe(true);
+      expect(f.runtime().getDiagnostics().reconciliationScheduled).toBe(true);
       await vi.waitFor(() => expect(f.agent.getRandomSamplingStatus().loop?.totalTicks).toBeGreaterThan(0));
     } finally { await f.agent.stop(); }
   });
@@ -346,7 +387,7 @@ describe('Random Sampling membership reconciliation', () => {
       await f.tick();
       expect(stop).toHaveBeenCalledOnce();
       expect(f.agent.getRandomSamplingStatus()).toMatchObject({ enabled: false, disabledReason: 'awaiting_sharding_table', identityId: '52' });
-      expect(f.runtime().getLifecycleSnapshot().phase).not.toBe('running');
+      expect(f.runtime().getDiagnostics().phase).not.toBe('running');
       f.setMember(true);
       await f.tick();
       expect(f.create).toHaveBeenCalledTimes(2);
@@ -422,8 +463,8 @@ describe('Random Sampling membership reconciliation', () => {
       await stopping;
       await f.settleTick();
       expect(f.create).not.toHaveBeenCalled();
-      expect(f.runtime().getLifecycleSnapshot().phase).not.toBe('running');
-      expect(f.runtime().getLifecycleSnapshot().reconciliationScheduled).toBe(false);
+      expect(f.runtime().getDiagnostics().phase).not.toBe('running');
+      expect(f.runtime().getDiagnostics().reconciliationScheduled).toBe(false);
       expect(f.agent.getRandomSamplingStatus().enabled).toBe(false);
     } finally { gate.resolve(false); await f.agent.stop(); }
   });
@@ -462,8 +503,8 @@ describe('Random Sampling membership reconciliation', () => {
       await f.settleTick();
       expect(start).not.toHaveBeenCalled();
       expect(stop).toHaveBeenCalledOnce();
-      expect(f.runtime().getLifecycleSnapshot().phase).not.toBe('running');
-      expect(f.runtime().getLifecycleSnapshot().reconciliationScheduled).toBe(false);
+      expect(f.runtime().getDiagnostics().phase).not.toBe('running');
+      expect(f.runtime().getDiagnostics().reconciliationScheduled).toBe(false);
     } finally { gate.resolve(); closeGate.resolve(); await f.agent.stop(); }
   });
 

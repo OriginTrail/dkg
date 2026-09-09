@@ -6,14 +6,17 @@ declare const handle: RandomSamplingHandle;
 const ready = { kind: 'ready', handle } satisfies RandomSamplingBindingResult;
 const unavailable = {
   kind: 'unavailable',
-  retry: 'poll',
   reason: 'contracts_not_deployed',
   handleToClose: handle,
 } satisfies RandomSamplingBindingResult;
 
 // Disabled binding outcomes are control-flow inputs and must state their reason.
 // @ts-expect-error unavailable bindings without a reason are invalid
-const missingReason: RandomSamplingBindingResult = { kind: 'unavailable', retry: 'poll' };
+const missingReason: RandomSamplingBindingResult = { kind: 'unavailable' };
+
+// Retry policy is runtime-owned; binding facts cannot encode contradictory policy.
+// @ts-expect-error unsupported-chain bindings cannot carry an ad-hoc retry policy
+const pollingUnsupported: RandomSamplingBindingResult = { kind: 'unavailable', reason: 'unsupported_chain', retry: 'poll' };
 
 // Availability mocks share the canonical chain fact shape.
 const availability = { kind: 'available', member: true } satisfies RandomSamplingAvailability;
@@ -21,4 +24,5 @@ const availability = { kind: 'available', member: true } satisfies RandomSamplin
 void ready;
 void unavailable;
 void missingReason;
+void pollingUnsupported;
 void availability;

@@ -24,6 +24,13 @@ export interface RandomSamplingRuntimeOptions {
   shutdownTimeoutMs(): number;
 }
 
+export interface RandomSamplingRuntimeDiagnostics {
+  phase: State['kind'];
+  reconciliationScheduled: boolean;
+  reconciliationInFlight: boolean;
+  deploymentObserved: boolean;
+}
+
 /** One node lifetime owns eligibility, reconciliation, binding and physical retirement. */
 export class RandomSamplingRuntime {
   private state: State = { kind: 'waiting', identityId: 0n, reason: 'not_started' };
@@ -86,7 +93,8 @@ export class RandomSamplingRuntime {
     };
   }
 
-  getLifecycleSnapshot() {
+  /** Operational diagnostics used by health checks and deterministic tests. */
+  getDiagnostics(): RandomSamplingRuntimeDiagnostics {
     return {
       phase: this.state.kind,
       reconciliationScheduled: this.timer !== null,
@@ -171,7 +179,9 @@ export class RandomSamplingRuntime {
           await this.finishRetirement(false);
         }
         if (!signal.aborted) this.state = {
-          kind: binding.retry === 'poll' ? 'waiting' : 'disabled',
+          kind: binding.reason === 'edge_node' || binding.reason === 'unsupported_chain'
+            ? 'disabled'
+            : 'waiting',
           identityId,
           reason: binding.reason,
         };

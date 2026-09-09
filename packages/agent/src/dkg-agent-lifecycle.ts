@@ -198,7 +198,7 @@ import {
 } from './sync-verify-worker.js';
 import { classifyDurableMetaGraph } from './sync/durable-integrity.js';
 import {
-  bindRandomSampling,
+  resolveRandomSamplingBinding,
 } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
@@ -4277,9 +4277,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   /** Bind fresh resources before the lifecycle takes replacement ownership. */
   createRandomSamplingHandle(
     this: DKGAgent,
-    options: Parameters<typeof bindRandomSampling>[0],
-  ): ReturnType<typeof bindRandomSampling> {
-    return bindRandomSampling(options);
+    options: Parameters<typeof resolveRandomSamplingBinding>[0],
+  ): ReturnType<typeof resolveRandomSamplingBinding> {
+    return resolveRandomSamplingBinding(options);
   }
 
   /** Thin lifecycle adapter for the bounded proof-time exact-repair runner. */

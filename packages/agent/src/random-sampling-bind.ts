@@ -118,7 +118,6 @@ export type RandomSamplingBindingResult =
   | { kind: 'ready'; handle: RandomSamplingHandle }
   | {
     kind: 'unavailable';
-    retry: 'never' | 'poll';
     reason: 'edge_node' | 'no_identity' | 'unsupported_chain' | 'contracts_not_deployed';
     /** Retained only when construction acquired a resource before declining admission. */
     handleToClose?: RandomSamplingHandle;
@@ -177,13 +176,12 @@ const DEFAULT_TICK_INTERVAL_MS = 30_000;
  * their retry policy explicitly; callers never infer lifecycle policy from
  * the compatibility-oriented status snapshot.
  */
-export async function bindRandomSampling(
+export async function resolveRandomSamplingBinding(
   opts: RandomSamplingBindOptions,
 ): Promise<RandomSamplingBindingResult> {
   if (opts.role !== 'core' || opts.identityId === 0n) {
     return {
       kind: 'unavailable',
-      retry: opts.role !== 'core' ? 'never' : 'poll',
       reason: opts.role !== 'core' ? 'edge_node' : 'no_identity',
     };
   }
@@ -204,14 +202,14 @@ export async function bindRandomSampling(
   );
   if (missing.length > 0) {
     opts.log?.warn('rs.bind.missing-methods', { missing });
-    return { kind: 'unavailable', retry: 'never', reason: 'unsupported_chain' };
+    return { kind: 'unavailable', reason: 'unsupported_chain' };
   }
   const readiness = (opts.chain as { isRandomSamplingReady?: () => boolean }).isRandomSamplingReady;
   if (typeof readiness === 'function' && !readiness.call(opts.chain)) {
     opts.log?.warn('rs.bind.not-deployed', {
       reason: 'RandomSampling/RandomSamplingStorage not resolved on chain adapter',
     });
-    return { kind: 'unavailable', retry: 'poll', reason: 'contracts_not_deployed' };
+    return { kind: 'unavailable', reason: 'contracts_not_deployed' };
   }
 
   const wal: ProverWal = opts.walPath
@@ -251,4 +249,37 @@ export async function bindRandomSampling(
       loop: loop.getStatus(),
     }),
   } };
+}
+
+/**
+ * Public compatibility facade. Since its introduction this function has
+ * returned a directly usable handle, including a disabled no-op handle when
+ * Random Sampling cannot run. Lifecycle policy belongs to the agent-owned
+ * runtime and is intentionally kept behind {@link resolveRandomSamplingBinding}.
+ */
+export async function bindRandomSampling(
+  opts: RandomSamplingBindOptions,
+): Promise<RandomSamplingHandle> {
+  const binding = await resolveRandomSamplingBinding(opts);
+  if (binding.kind === 'ready') return binding.handle;
+  return binding.handleToClose ?? makeNoopHandle(opts.role, opts.identityId, binding.reason);
+}
+
+function makeNoopHandle(
+  role: AgentRole,
+  identityId: bigint,
+  disabledReason: RandomSamplingDisabledReason,
+): RandomSamplingHandle {
+  return {
+    enabled: false,
+    start: () => undefined,
+    stop: async () => undefined,
+    getStatus: (): RandomSamplingStatus => ({
+      enabled: false,
+      role,
+      identityId: identityId.toString(),
+      disabledReason,
+      loop: null,
+    }),
+  };
 }

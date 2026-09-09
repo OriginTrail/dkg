@@ -89,7 +89,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
         name: 'RandomSamplingShutdownTimeoutError',
         timeoutMs: 20,
       });
-      expect(agent.randomSamplingRuntime.getLifecycleSnapshot().phase).toBe('retiring');
+      expect(agent.randomSamplingRuntime.getDiagnostics().phase).toBe('retiring');
       expect(closeProver).not.toHaveBeenCalled();
       expect(stopNode).not.toHaveBeenCalled();
       expect(closeStore).not.toHaveBeenCalled();
@@ -98,7 +98,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       await expect(agent.stop()).resolves.toBeUndefined();
       expect(stopProver).toHaveBeenCalledOnce();
       expect(closeProver).toHaveBeenCalledOnce();
-      expect(agent.randomSamplingRuntime.getLifecycleSnapshot().phase).toBe('stopped');
+      expect(agent.randomSamplingRuntime.getDiagnostics().phase).toBe('stopped');
       expect(stopNode).toHaveBeenCalledOnce();
       expect(closeStore).toHaveBeenCalledOnce();
     } finally {

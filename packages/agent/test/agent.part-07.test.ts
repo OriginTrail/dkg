@@ -55,7 +55,7 @@ describe('Random Sampling lifecycle gating', () => {
         loop: null,
       });
 
-      expect(runtimeState().getLifecycleSnapshot().reconciliationScheduled).toBe(true);
+      expect(runtimeState().getDiagnostics().reconciliationScheduled).toBe(true);
 
       sharded = true;
       await runtimeState().reconcile();
@@ -68,7 +68,7 @@ describe('Random Sampling lifecycle gating', () => {
         identityId: '52',
         disabledReason: null,
       });
-      expect(runtimeState().getLifecycleSnapshot().reconciliationScheduled).toBe(true);
+      expect(runtimeState().getDiagnostics().reconciliationScheduled).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -97,7 +97,7 @@ describe('Random Sampling lifecycle gating', () => {
         identityId: '53',
         disabledReason: 'contracts_not_deployed',
       });
-      expect(runtimeState().getLifecycleSnapshot().reconciliationScheduled).toBe(false);
+      expect(runtimeState().getDiagnostics().reconciliationScheduled).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -133,7 +133,7 @@ describe('Random Sampling lifecycle gating', () => {
         disabledReason: 'eligibility_lookup_failed',
       });
 
-      expect(runtimeState().getLifecycleSnapshot().reconciliationScheduled).toBe(true);
+      expect(runtimeState().getDiagnostics().reconciliationScheduled).toBe(true);
 
       await runtimeState().reconcile();
       await vi.waitFor(
@@ -146,7 +146,7 @@ describe('Random Sampling lifecycle gating', () => {
         identityId: '56',
         disabledReason: null,
       });
-      expect(runtimeState().getLifecycleSnapshot().reconciliationScheduled).toBe(true);
+      expect(runtimeState().getDiagnostics().reconciliationScheduled).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -179,7 +179,7 @@ describe('Random Sampling lifecycle gating', () => {
         identityId: '54',
         disabledReason: 'contracts_not_deployed',
       });
-      expect(runtimeState().getLifecycleSnapshot().reconciliationScheduled).toBe(false);
+      expect(runtimeState().getDiagnostics().reconciliationScheduled).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -212,7 +212,7 @@ describe('Random Sampling lifecycle gating', () => {
         identityId: '55',
         disabledReason: 'eligibility_lookup_failed',
       });
-      expect(runtimeState().getLifecycleSnapshot().reconciliationScheduled).toBe(true);
+      expect(runtimeState().getDiagnostics().reconciliationScheduled).toBe(true);
       readiness.mockReturnValue(true);
       await runtimeState().reconcile();
       expect(membership).toHaveBeenCalledWith(55n);

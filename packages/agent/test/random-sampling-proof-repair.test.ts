@@ -1,5 +1,5 @@
 import { RandomSamplingRuntime } from '../src/random-sampling-runtime.js';
-import { bindRandomSampling, type RandomSamplingHandle } from '../src/random-sampling-bind.js';
+import { resolveRandomSamplingBinding, type RandomSamplingHandle } from '../src/random-sampling-bind.js';
 import { createRandomSamplingEligibilityResolver } from '../src/random-sampling-eligibility.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -748,7 +748,7 @@ describe('Random Sampling proof-time exact repair', () => {
       resolveEligibility: createRandomSamplingEligibilityResolver({ role: 'core', chain: bindingFixture.chain, log: bindingFixture.log }),
       shutdownTimeoutMs: () => 5_000,
       log: bindingFixture.log,
-      createHandle: (identityId) => bindRandomSampling({
+      createHandle: (identityId) => resolveRandomSamplingBinding({
         role: 'core', chain: bindingFixture.chain as never, store: bindingFixture.store, identityId,
         useWorkerThread: false, tickIntervalMs: 60_000,
         repairMissingKnowledgeAsset: repairRandomSamplingKnowledgeAsset,
