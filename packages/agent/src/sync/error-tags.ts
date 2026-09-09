@@ -4,6 +4,30 @@ import {
 } from '@origintrail-official/dkg-core';
 import { isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 
+/** Concurrent failures retain their triggering cause and every admitted classification. */
+export class SyncFailureGroup extends AggregateError {
+  readonly syncDenied: boolean;
+
+  constructor(primary: unknown, additional: readonly unknown[]) {
+    super([primary, ...additional], primary instanceof Error
+      ? `Concurrent sync failures: ${primary.message}`
+      : 'Concurrent sync operations failed', { cause: primary });
+    Object.freeze(this.errors);
+    this.syncDenied = this.errors.some(isSyncDeniedError);
+  }
+}
+
+/** Preserve single-error identity, including frozen errors tagged through side channels. */
+export function combineSyncFailures(primary: unknown, additional: readonly unknown[]): unknown {
+  const unique = [...new Set([primary, ...additional])];
+  return unique.length === 1 ? primary : new SyncFailureGroup(primary, unique.slice(1));
+}
+
+function isSyncDeniedError(error: unknown): boolean {
+  try { return Boolean(isTaggableThrowable(error) && (error as { syncDenied?: boolean }).syncDenied); }
+  catch { return false; }
+}
+
 type SyncErrorTag =
   | 'syncPeerResponded'
   | 'syncTransportFailure'
@@ -51,10 +75,11 @@ function hasSyncErrorTag(error: unknown, tag: SyncErrorTag): boolean {
   if (!isTaggableThrowable(error)) return false;
   if (syncErrorTagSideChannels[tag].has(error)) return true;
   try {
-    return Boolean((error as Record<string, unknown>)[tag]);
+    if ((error as Record<string, unknown>)[tag]) return true;
   } catch {
-    return false;
+    // An unreadable own property must not hide classified concurrent causes.
   }
+  return error instanceof SyncFailureGroup && error.errors.some(cause => hasSyncErrorTag(cause, tag));
 }
 
 export function toSyncPeerRespondedError<T extends object>(error: T): T;
@@ -102,11 +127,7 @@ export function isSyncValidationRejection(error: unknown): boolean {
 
 export function didSyncPeerRespond(error: unknown): boolean {
   if (hasSyncErrorTag(error, 'syncPeerResponded')) return true;
-  try {
-    return Boolean(isTaggableThrowable(error) && (error as { syncDenied?: boolean }).syncDenied);
-  } catch {
-    return false;
-  }
+  return isSyncDeniedError(error);
 }
 
 export function isSyncTransportFailure(error: unknown): boolean {
@@ -139,6 +160,7 @@ export function isKnownRetryableSyncTransportInterruption(error: unknown): boole
     || isChainRpcTransportError(error)
     || isSyncLocalRequestFailure(error)
   ) return false;
+  if (error instanceof SyncFailureGroup) return error.errors.every(isKnownRetryableSyncTransportInterruption);
 
   // The transport boundary is authoritative even when its deadline surfaces
   // as AbortError. Caller/node cancellation is rejected separately by the
@@ -163,6 +185,7 @@ export function isKnownRetryableSyncTransportInterruption(error: unknown): boole
  * fixed.
  */
 export function isSyncPermanentRejection(error: unknown): boolean {
+  if (error instanceof SyncFailureGroup) return error.errors.some(isSyncPermanentRejection);
   return isOversizedRdfLiteralError(error);
 }
 
@@ -172,6 +195,7 @@ export function isSyncBackoffWorthyError(error: unknown): boolean {
     || isChainRpcTransportError(error)
     || isRecoverableSendError(error)
   ) return true;
+  if (error instanceof SyncFailureGroup) return error.errors.some(isSyncBackoffWorthyError);
 
   const message = syncErrorMessage(error);
 

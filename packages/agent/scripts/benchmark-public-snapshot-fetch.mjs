@@ -26,8 +26,10 @@ const refs = payloads.map(workspacePublicQuadsDigest);
 const byRef = new Map(refs.map((ref, i) => [ref, payloads[i]]));
 const metaQuads = refs.flatMap((ref, i) => [['publicSnapshotRef', ref], ['publicQuadsDigest', ref], ['publicQuadsCount', '1']]
   .map(([name, value]) => ({ subject: `urn:op:${i}`, predicate: `http://dkg.io/ontology/${name}`, object: `"${value}"`, graph: '' })));
-const moduleHash = createHash('sha256').update(readFileSync(new URL('../dist/sync/requester/shared-memory-sync.js', import.meta.url))).digest('hex');
-console.log(JSON.stringify({ experiment: 'controlled-requester-rtt', rows, rttMs, roundMs, limits, moduleHash }));
+const moduleHashes = Object.fromEntries(['shared-memory-sync', 'public-snapshot-recovery'].map(name => [
+  name, createHash('sha256').update(readFileSync(new URL(`../dist/sync/requester/${name}.js`, import.meta.url))).digest('hex'),
+]));
+console.log(JSON.stringify({ experiment: 'controlled-requester-rtt', rows, rttMs, roundMs, limits, moduleHashes }));
 for (const fetchConcurrency of limits) {
   const snapshots = new Map();
   let active = 0; let peak = 0; let requests = 0;

@@ -173,6 +173,7 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     string,
     Promise<{ readonly ref: string; readonly byteLength: number }>
   >();
+  private writeTail: Promise<void> = Promise.resolve();
   private readonly activeSnapshots = new Map<string, number>();
   private readonly gcConfig: ResolvedSnapshotGarbageCollectionConfig;
   private readonly log?: (message: string) => void;
@@ -228,7 +229,12 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     const pending = this.pendingWrites.get(hash);
     if (pending) return pending;
 
-    const operation = this.withActiveSnapshot(hash, () => this.putSnapshotOnce(input, hash));
+    // Capacity admission and the complete file write share one lane across
+    // distinct digests. A later writer observes the prior write's disk usage.
+    // Reads/downloads remain independent, and failures release the lane.
+    const operation = this.writeTail.then(() =>
+      this.withActiveSnapshot(hash, () => this.putSnapshotOnce(input, hash)));
+    this.writeTail = operation.then(() => {}, () => {});
     this.pendingWrites.set(hash, operation);
     try {
       return await operation;

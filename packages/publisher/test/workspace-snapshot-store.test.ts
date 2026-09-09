@@ -21,6 +21,7 @@ import {
   type SnapshotPageIndexRecord,
   type SnapshotPageIndexStore,
   workspacePublicQuadsDigest,
+  serializeWorkspacePublicSnapshotQuads,
 } from '../src/workspace-snapshot-store.js';
 
 const DIGEST = `sha256:${'b'.repeat(64)}`;
@@ -784,6 +785,36 @@ describe('FileWorkspacePublicSnapshotStore GC v1', () => {
       store?.stopGarbageCollection();
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it('keeps concurrent distinct writes above the aggregate hard reserve and recovers after rejection', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-concurrent-capacity-'));
+    const inputs = Array.from({ length: 4 }, (_, i) => ({ digest: digestFor(800 + i), quads: makeQuads(3, `concurrent-${i}`) }));
+    const writeBytes = Buffer.byteLength(serializeWorkspacePublicSnapshotQuads(inputs[0]!.quads), 'utf8');
+    const hardReserveBytes = 1000;
+    let capacity = hardReserveBytes + Math.floor(writeBytes * 2.5);
+    const committedBytes = async () => (await Promise.all(inputs.map(async ({ digest }) => {
+      try { return (await stat(snapshotPath(directory, digest))).size; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0; throw error; }
+    }))).reduce((sum, bytes) => sum + bytes, 0);
+    const store = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+      gc: { enabled: true, intervalMs: 60_000, triggerFreeBytes: hardReserveBytes + 1,
+        targetFreeBytes: hardReserveBytes + 1, hardReserveBytes, minAgeMs: Number.MAX_SAFE_INTEGER },
+      getAvailableBytes: async () => capacity - await committedBytes(),
+    });
+    try {
+      const outcomes = await Promise.allSettled(inputs.map(input => store.putSnapshot(input)));
+      expect(outcomes.filter(result => result.status === 'fulfilled')).toHaveLength(2);
+      const rejected = outcomes.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
+      expect(rejected).toHaveLength(2);
+      expect(rejected.every(error => error instanceof SnapshotStorageCapacityError)).toBe(true);
+      expect(capacity - await committedBytes()).toBeGreaterThanOrEqual(hardReserveBytes);
+      // A failed admission must release the write queue for later recovery.
+      capacity += writeBytes;
+      const retry = inputs[outcomes.findIndex(result => result.status === 'rejected')]!;
+      await expect(store.putSnapshot(retry)).resolves.toMatchObject({ ref: retry.digest });
+      expect(capacity - await committedBytes()).toBeGreaterThanOrEqual(hardReserveBytes);
+    } finally { store.stopGarbageCollection(); await rm(directory, { recursive: true, force: true }); }
   });
 
   it('rejects a new snapshot before violating the hard reserve', async () => {
