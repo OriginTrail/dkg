@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readFileSync
 import { tmpdir, homedir, platform } from 'node:os';
 import { join } from 'node:path';
 import TOML from '@iarna/toml';
+import { parse as parseJsonc } from 'jsonc-parser';
 import { SELECTABLE_SETUP_NETWORKS } from '@origintrail-official/dkg-core';
 import { mcpSetupAction, type McpSetupActionDeps } from '../src/mcp-setup.js';
 import { listBundledNetworkConfigNames, resolveKnownNetworkConfigName } from '../src/config.js';
@@ -923,6 +924,52 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const written = JSON.parse(readFileSync(vscodePath, 'utf-8'));
     expect(written.servers['other-mcp']).toEqual({ command: 'baz' });
     expect(written.servers.dkg).toEqual(EXPECTED_INSTALLED_ENTRY());
+  });
+
+  it('phase-4: adds VSCode servers.dkg without normalizing JSONC trivia or numeric lexemes', async () => {
+    const vscodePath = vscodeMcpPathUnder(tmpHome);
+    mkdirSync(join(vscodePath, '..'), { recursive: true });
+    const raw = '{\r\n  // keep operator settings\r\n  "clientId": 9007199254740993,\r\n  "servers": {\r\n    "other": { "command": "other" },\r\n  },\r\n}\r\n';
+    writeFileSync(vscodePath, raw);
+
+    await mcpSetupAction({ start: false, fund: false, verify: false }, makeDeps());
+
+    const output = readFileSync(vscodePath, 'utf8');
+    const closingContainer = raw.indexOf('  },\r\n}\r\n');
+    expect(output.startsWith(raw.slice(0, closingContainer))).toBe(true);
+    expect(output.endsWith(raw.slice(closingContainer))).toBe(true);
+    expect(output).toContain('// keep operator settings');
+    expect(output).toContain('9007199254740993');
+    expect(output).toContain('"other": {');
+    expect(output.replace(/\r\n/g, '')).not.toContain('\n');
+    const parsed = parseJsonc(output);
+    expect(parsed.servers.other).toEqual({ command: 'other' });
+    expect(parsed.servers.dkg).toEqual(EXPECTED_INSTALLED_ENTRY());
+  });
+
+  it('phase-4: refreshes VSCode servers.dkg while preserving JSONC extensions and siblings', async () => {
+    const vscodePath = vscodeMcpPathUnder(tmpHome);
+    mkdirSync(join(vscodePath, '..'), { recursive: true });
+    const raw = '{\r\n  // keep root comment\r\n  "ratio": 1.2300e+06,\r\n  "servers": {\r\n    "dkg": { "command": "old", "args": [], "env": { "DKG_HOME": "/old", "EXTRA": "keep" }, "cwd": "/keep" },\r\n    // keep sibling comment\r\n    "other": { "command": "other" },\r\n  },\r\n}\r\n';
+    writeFileSync(vscodePath, raw);
+
+    await mcpSetupAction({ start: false, fund: false, verify: false }, makeDeps());
+
+    const output = readFileSync(vscodePath, 'utf8');
+    expect(output.startsWith(raw.slice(0, raw.indexOf('    "dkg"')))).toBe(true);
+    expect(output.endsWith(raw.slice(raw.indexOf('    // keep sibling comment')))).toBe(true);
+    expect(output).toContain('// keep root comment');
+    expect(output).toContain('// keep sibling comment');
+    expect(output).toContain('1.2300e+06');
+    expect(output).toContain('"other": { "command": "other" },');
+    expect(output.replace(/\r\n/g, '')).not.toContain('\n');
+    const parsed = parseJsonc(output);
+    expect(parsed.servers.dkg).toMatchObject({
+      ...EXPECTED_INSTALLED_ENTRY(),
+      cwd: '/keep',
+      env: { ...EXPECTED_INSTALLED_ENTRY().env, EXTRA: 'keep' },
+    });
+    expect(parsed.servers.other).toEqual({ command: 'other' });
   });
 
   // ── Phase-5: Cline (deep-nested VSCode globalStorage path) ────────

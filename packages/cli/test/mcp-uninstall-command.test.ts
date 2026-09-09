@@ -19,7 +19,8 @@ vi.mock('../src/mcp-config-file.js', async importOriginal => {
       path: string,
       content: string,
       _persistence: Parameters<typeof actual.writeMcpConfigAtomic>[2],
-    ) => actual.writeMcpConfigAtomic(path, content, mcpConfigPersistenceStrategy('native'))),
+      expectedSource: Parameters<typeof actual.writeMcpConfigAtomic>[3],
+    ) => actual.writeMcpConfigAtomic(path, content, mcpConfigPersistenceStrategy('native'), expectedSource)),
   };
 });
 

@@ -13,7 +13,7 @@ import {
   type ValCstNode,
 } from '@toml-tools/parser';
 import { DKG_SERVER_KEY, tildify, type ClientTarget } from './mcp-client-registry.js';
-import { writeMcpConfigAtomic } from './mcp-config-file.js';
+import { writeMcpConfigAtomic, type McpConfigSourceSnapshot } from './mcp-config-file.js';
 import { mcpConfigPersistenceStrategy } from './mcp-config-metadata.js';
 import type { PersistedRegistration, RegistrationEdit } from './mcp-client-config.js';
 
@@ -252,10 +252,9 @@ export function writeTomlConfigEdit(
   target: ClientTarget,
   body: Record<string, unknown>,
   edit: RegistrationEdit,
+  source: McpConfigSourceSnapshot,
 ): void {
-  const raw = existsSync(target.configPath)
-    ? readFileSync(target.configPath, 'utf8')
-    : '';
+  const raw = source.content ?? '';
   const ownedPath = `${target.serverContainer}.${DKG_SERVER_KEY}`;
   const tableEdit = edit.kind === 'remove' ? edit
     : { kind: 'upsert' as const, block: serialiseTomlEntryOnly(target, edit.registration) };
@@ -295,5 +294,6 @@ export function writeTomlConfigEdit(
     target.configPath,
     patched ?? TOML.stringify(body as TOML.JsonMap),
     mcpConfigPersistenceStrategy(target.location),
+    source,
   );
 }

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import TOML from '@iarna/toml';
 import { inspectRegistration, removeRegistration, readRegistration, classifyRegistration, writeRegistration } from '../src/mcp-client-config.js';
-import { writeMcpConfigAtomic } from '../src/mcp-config-file.js';
+import { snapshotMcpConfigSource, writeMcpConfigAtomic, type McpConfigSourceSnapshot } from '../src/mcp-config-file.js';
 import { mcpConfigPersistenceStrategy, type McpConfigPersistenceStrategy } from '../src/mcp-config-metadata.js';
 import { type ClientTarget } from '../src/mcp-client-registry.js';
 import { dkgDir, configPath } from '../src/config.js';
@@ -29,7 +29,8 @@ vi.mock('../src/mcp-config-file.js', async importOriginal => {
       path: string,
       content: string,
       _persistence: McpConfigPersistenceStrategy,
-    ) => actual.writeMcpConfigAtomic(path, content, mcpConfigPersistenceStrategy('native'))),
+      expectedSource: McpConfigSourceSnapshot,
+    ) => actual.writeMcpConfigAtomic(path, content, mcpConfigPersistenceStrategy('native'), expectedSource)),
   };
 });
 
@@ -65,7 +66,7 @@ describe('MCP registration removal', () => {
     const client = target('dangling');
     fs.symlinkSync('missing-target.json', client.configPath);
     const entries = fs.readdirSync(root);
-    expect(() => writeMcpConfigAtomic(client.configPath, '{}\n', mcpConfigPersistenceStrategy('native'))).toThrow();
+    expect(() => writeMcpConfigAtomic(client.configPath, '{}\n', mcpConfigPersistenceStrategy('native'), snapshotMcpConfigSource(client.configPath))).toThrow();
     expect(fs.lstatSync(client.configPath).isSymbolicLink()).toBe(true);
     expect(fs.readlinkSync(client.configPath)).toBe('missing-target.json');
     expect(fs.readdirSync(root)).toEqual(entries);
@@ -96,7 +97,7 @@ describe('MCP registration removal', () => {
     const path = symlink ? join(root, 'owner-link.json') : real.configPath;
     if (symlink) fs.symlinkSync(real.configPath, path);
     const entries = fs.readdirSync(root);
-    writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native'));
+    writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native'), snapshotMcpConfigSource(path));
     const after = fs.statSync(real.configPath);
     expect({ uid: after.uid, gid: after.gid, mode: after.mode }).toEqual({ uid: before.uid, gid: before.gid, mode: before.mode });
     expect(readFileSync(real.configPath, 'utf8')).toBe('{}\n');
@@ -119,7 +120,7 @@ describe('MCP registration removal', () => {
       return copied;
     });
     vi.spyOn(fs, 'fchownSync').mockImplementationOnce(() => { throw new Error('ownership preservation denied'); });
-    expect(() => writeMcpConfigAtomic(link, '{}\n', mcpConfigPersistenceStrategy('native'))).toThrow('ownership preservation denied');
+    expect(() => writeMcpConfigAtomic(link, '{}\n', mcpConfigPersistenceStrategy('native'), snapshotMcpConfigSource(link))).toThrow('ownership preservation denied');
     expect(fs.renameSync).not.toHaveBeenCalled();
     expect(readFileSync(client.configPath, 'utf8')).toBe(raw);
     expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
@@ -399,6 +400,7 @@ describe('stable client selectors', () => {
       client.configPath,
       expect.any(String),
       expect.objectContaining({ kind: 'windows-wsl' }),
+      expect.any(Object),
     );
   });
 
@@ -411,6 +413,24 @@ describe('stable client selectors', () => {
     await mcpUninstallAction({ yes: true, client: selector }, { detectClients: () => [native, windows], log: () => {} });
     expect(inspectRegistration(native)).toBe(selector === 'cursor:windows-wsl');
     expect(inspectRegistration(windows)).toBe(selector === 'cursor:native');
+  });
+
+  it('retains Windows persistence metadata when a native selector aliases the same WSL file', async () => {
+    const native = target('Cursor');
+    const windows = { ...native, name: 'Cursor (Windows-side via WSL)', location: 'windows-wsl' as const };
+    seed(native);
+    const callsBefore = vi.mocked(writeMcpConfigAtomic).mock.calls.length;
+    await mcpUninstallAction({ yes: true, client: 'cursor:native' }, {
+      detectClients: () => [native, windows], log: () => {},
+    });
+    expect(inspectRegistration(native)).toBe(false);
+    expect(vi.mocked(writeMcpConfigAtomic).mock.calls).toHaveLength(callsBefore + 1);
+    expect(writeMcpConfigAtomic).toHaveBeenCalledWith(
+      windows.configPath,
+      expect.any(String),
+      expect.objectContaining({ kind: 'windows-wsl' }),
+      expect.any(Object),
+    );
   });
 
   it.each(['typo', 'codex-cli:windows-wsl', 'claude-code:windows-wsl'])('rejects unsupported selector %s before detection', async selector => {

@@ -2,7 +2,7 @@ import { existsSync, readFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { applyEdits, createScanner, findNodeAtLocation, modify, parse as parseJsonc, parseTree, type Edit, type ParseError } from 'jsonc-parser';
-import { writeMcpConfigAtomic } from './mcp-config-file.js';
+import { snapshotMcpConfigSource, writeMcpConfigAtomic, type McpConfigSourceSnapshot } from './mcp-config-file.js';
 import { mcpConfigPersistenceStrategy } from './mcp-config-metadata.js';
 import { readToml, writeTomlConfigEdit } from './mcp-toml-document.js';
 import { DKG_SERVER_KEY, tildify, type ClientTarget } from './mcp-client-registry.js';
@@ -233,24 +233,81 @@ function removeJsonEntry(raw: string, path: string[], allowTrailingComma: boolea
   return applyEdits(raw, edits);
 }
 
+/** Add one property without asking jsonc-parser to reformat sibling values. */
+function addJsoncObjectProperty(
+  raw: string,
+  containerPath: string[],
+  name: string,
+  value: unknown,
+): string | null {
+  const tree = parseTree(raw, [], { allowTrailingComma: true });
+  const container = tree && findNodeAtLocation(tree, containerPath);
+  if (container?.type !== 'object') return null;
+  const closingOffset = container.offset + container.length - 1;
+  if (raw[closingOffset] !== '}') return null;
+  const closingLineStart = raw.lastIndexOf('\n', closingOffset - 1) + 1;
+  const closingIndent = raw.slice(closingLineStart, closingOffset);
+  if (!/^[\t ]*$/.test(closingIndent)) return null;
+
+  const properties = container.children ?? [];
+  const first = properties[0];
+  let propertyIndent = `${closingIndent}  `;
+  if (first) {
+    const firstLineStart = raw.lastIndexOf('\n', first.offset - 1) + 1;
+    const candidate = raw.slice(firstLineStart, first.offset);
+    if (!/^[\t ]*$/.test(candidate)) return null;
+    propertyIndent = candidate;
+  }
+
+  const newline = raw.includes('\r\n') ? '\r\n' : '\n';
+  const encodedLines = JSON.stringify(value, null, 2).split('\n');
+  const encoded = encodedLines.join(`${newline}${propertyIndent}`);
+  const edits: Edit[] = [];
+  let retainTrailingComma = false;
+  const last = properties.at(-1);
+  if (last) {
+    const scanner = createScanner(raw, true);
+    scanner.setPosition(last.offset + last.length);
+    scanner.scan();
+    retainTrailingComma = raw.slice(scanner.getTokenOffset(), scanner.getTokenOffset() + scanner.getTokenLength()) === ',';
+    if (!retainTrailingComma) edits.push({ offset: last.offset + last.length, length: 0, content: ',' });
+  }
+  edits.push({
+    offset: closingLineStart,
+    length: 0,
+    content: `${propertyIndent}${JSON.stringify(name)}: ${encoded}${retainTrailingComma ? ',' : ''}${newline}`,
+  });
+  return applyEdits(raw, edits);
+}
+
 /** Edit only the owned source range, preserving numeric lexemes and JSONC trivia. */
 function writeJsonDocumentEdit(
   target: ClientTarget,
   body: Record<string, unknown>,
   edit: RegistrationEdit,
+  source: McpConfigSourceSnapshot,
 ): void {
-  const raw = existsSync(target.configPath) ? readFileSync(target.configPath, 'utf8') : '{}';
+  const raw = source.content ?? '{}';
   const allowTrailingComma = target.format === 'jsonc';
-  const patched = edit.kind === 'remove' ? removeJsonEntry(raw, [target.serverContainer, DKG_SERVER_KEY], allowTrailingComma)
-    : applyEdits(raw, modify(raw, [target.serverContainer, DKG_SERVER_KEY], edit.registration, {
-    formattingOptions: { insertSpaces: true, tabSize: 2, eol: raw.includes('\r\n') ? '\r\n' : '\n' },
-  }));
+  let patched: string;
+  if (edit.kind === 'remove') {
+    patched = removeJsonEntry(raw, [target.serverContainer, DKG_SERVER_KEY], allowTrailingComma);
+  } else {
+    const tree = parseTree(raw, [], { allowTrailingComma: true });
+    const existing = tree ? findNodeAtLocation(tree, [target.serverContainer, DKG_SERVER_KEY]) : undefined;
+    const losslessAddition = allowTrailingComma && existing === undefined
+      ? addJsoncObjectProperty(raw, [target.serverContainer], DKG_SERVER_KEY, edit.registration)
+      : null;
+    patched = losslessAddition ?? applyEdits(raw, modify(raw, [target.serverContainer, DKG_SERVER_KEY], edit.registration, {
+      formattingOptions: { insertSpaces: true, tabSize: 2, eol: raw.includes('\r\n') ? '\r\n' : '\n' },
+    }));
+  }
   const errors: ParseError[] = [];
   const parsed = parseJsonc(patched, errors, { allowTrailingComma, disallowComments: !allowTrailingComma });
   if (errors.length > 0 || !isDeepStrictEqual(parsed, body)) {
     throw new Error(`Cannot safely edit ${target.format.toUpperCase()} registration in ${target.displayPath}`);
   }
-  writeMcpConfigAtomic(target.configPath, patched, mcpConfigPersistenceStrategy(target.location));
+  writeMcpConfigAtomic(target.configPath, patched, mcpConfigPersistenceStrategy(target.location), source);
 }
 
 /**
@@ -268,20 +325,21 @@ function applyRegistrationEdit(
   target: ClientTarget,
   body: Record<string, unknown>,
   edit: RegistrationEdit,
+  source: McpConfigSourceSnapshot,
 ): void {
   const format = target.format;
   const dir = dirname(target.configPath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   switch (format) {
     case 'json':
-      if (edit.kind === 'remove') writeJsonDocumentEdit(target, body, edit);
-      else writeMcpConfigAtomic(target.configPath, JSON.stringify(body, null, 2) + '\n', mcpConfigPersistenceStrategy(target.location));
+      if (edit.kind === 'remove') writeJsonDocumentEdit(target, body, edit, source);
+      else writeMcpConfigAtomic(target.configPath, JSON.stringify(body, null, 2) + '\n', mcpConfigPersistenceStrategy(target.location), source);
       return;
     case 'jsonc':
-      writeJsonDocumentEdit(target, body, edit);
+      writeJsonDocumentEdit(target, body, edit, source);
       return;
     case 'toml':
-      writeTomlConfigEdit(target, body, edit);
+      writeTomlConfigEdit(target, body, edit, source);
       return;
     default:
       throw new Error(`Unknown client config format: ${String(format)}`);
@@ -309,10 +367,11 @@ export function inspectRegistration(target: ClientTarget): boolean {
 
 /** Re-read, then remove only the owned leaf; retain unrelated config and empty parent containers. */
 export function removeRegistration(target: ClientTarget): boolean {
+  const source = snapshotMcpConfigSource(target.configPath);
   const location = registrationLocation(target);
   if (!location) return false;
   delete location.container[DKG_SERVER_KEY];
-  applyRegistrationEdit(target, location.body, { kind: 'remove' });
+  applyRegistrationEdit(target, location.body, { kind: 'remove' }, source);
   return true;
 }
 
@@ -320,6 +379,7 @@ export function writeRegistration(
   target: ClientTarget,
   entry: DesiredRegistration,
 ): void {
+  const source = snapshotMcpConfigSource(target.configPath);
   const body = readConfigBody(target);
 
   // Codex Round-15 Fix 22 + Round-19 Fix 26: when refreshing an
@@ -349,7 +409,7 @@ export function writeRegistration(
     env: { ...currentEnv, ...entry.env, DKG_HOME: entry.env.DKG_HOME },
   };
   container[DKG_SERVER_KEY] = mergedEntry;
-  applyRegistrationEdit(target, body, { kind: 'upsert', registration: mergedEntry });
+  applyRegistrationEdit(target, body, { kind: 'upsert', registration: mergedEntry }, source);
 }
 
 /** Read the owned entry for setup classification; no mutation. */

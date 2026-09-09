@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, statSync, copyFileSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { writeMcpConfigAtomic } from '../src/mcp-config-file.js';
+import { snapshotMcpConfigSource, writeMcpConfigAtomic } from '../src/mcp-config-file.js';
 import { linuxMetadataCopyCommand, mcpConfigPersistenceStrategy } from '../src/mcp-config-metadata.js';
 
 vi.mock('node:child_process', async importOriginal => {
@@ -34,7 +34,7 @@ it('rejects a missing metadata capability before creating files or changing cont
   vi.mocked(execFileSync).mockImplementationOnce(() => { throw new Error('gcp not installed'); });
   try {
     Object.defineProperty(process, 'platform', { value: 'linux' });
-    expect(() => writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native'))).toThrow('apk add coreutils');
+    expect(() => writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native'), snapshotMcpConfigSource(path))).toThrow('apk add coreutils');
     expect(readFileSync(path, 'utf8')).toBe('{"original":true}\n');
     expect(readdirSync(directory)).toEqual(before);
   } finally { Object.defineProperty(process, 'platform', platform); }
@@ -56,13 +56,30 @@ it.each(['acl', 'replace', 'restore-backup', 'retain-backup'] as const)('preserv
   });
   try {
     Object.defineProperty(process, 'platform', { value: 'win32' });
-    expect(() => writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native'))).toThrow(stage === 'retain-backup' ? 'backup is retained' : 'failed');
+    expect(() => writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native'), snapshotMcpConfigSource(path))).toThrow(stage === 'retain-backup' ? 'backup is retained' : 'failed');
     expect(readFileSync(path, 'utf8')).toBe('{"original":true}\n');
     const backups = readdirSync(directory).filter(name => name.endsWith('.backup'));
     expect(backups).toHaveLength(stage === 'retain-backup' ? 1 : 0);
     if (backups[0]) expect(readFileSync(join(directory, backups[0]), 'utf8')).toBe('{"original":true}\n');
     expect(readdirSync(directory).filter(name => name.endsWith('.tmp'))).toEqual([]);
   } finally { Object.defineProperty(process, 'platform', platform); }
+});
+
+it('aborts publication when the client changes the destination after the edit snapshot', () => {
+  const source = snapshotMcpConfigSource(path);
+  const publish = vi.fn();
+  const persistence = {
+    kind: 'posix' as const,
+    preflight() {},
+    prepare() {},
+    secure() { writeFileSync(path, '{"clientChange":true}\n'); },
+    publish,
+  };
+  expect(() => writeMcpConfigAtomic(path, '{"dkgChange":true}\n', persistence, source))
+    .toThrow('changed while it was being edited');
+  expect(publish).not.toHaveBeenCalled();
+  expect(readFileSync(path, 'utf8')).toBe('{"clientChange":true}\n');
+  expect(readdirSync(directory)).toEqual(["config 'quoted'.json"]);
 });
 
 // test-disable-allow: D1 #425 -- owner=branarakic lane=mcp-config-native-macos expires=2026-10-08 Native ACL/xattr case runs on macos-latest in mcp-config-native.yml.
@@ -75,7 +92,7 @@ it.runIf(nativeMetadata && process.platform === 'darwin')('preserves macOS permi
   const { mode, uid, gid } = statSync(path);
   expect(mode & 0o777).toBe(0o640);
   expect(before).toContain('everyone allow read');
-  writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native'));
+  writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native'), snapshotMcpConfigSource(path));
   expect(acl()).toBe(before);
   expect(statSync(path)).toMatchObject({ mode, uid, gid });
   expect(execFileSync('/usr/bin/xattr', ['-p', 'org.origintrail.fixture', path], { encoding: 'utf8' }).trim()).toBe('retained');
@@ -89,7 +106,7 @@ it.runIf(nativeMetadata && process.platform === 'linux')('preserves Linux ACLs a
   const acl = () => execFileSync('getfacl', ['-cn', path], { encoding: 'utf8' });
   const before = acl();
   expect(before).toContain('user:65534:r--');
-  writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native'));
+  writeMcpConfigAtomic(path, '{}\n', mcpConfigPersistenceStrategy('native'), snapshotMcpConfigSource(path));
   expect(acl()).toBe(before);
   expect(execFileSync('getfattr', ['--only-values', '-n', 'user.dkg_fixture', path], { encoding: 'utf8' }).trim()).toBe('retained');
   expect(readdirSync(directory)).toEqual(["config 'quoted'.json"]);
@@ -104,7 +121,7 @@ it.runIf(nativeMetadata && process.platform === 'win32')('preserves a protected 
   const descriptor = () => powershell('(Get-Acl -LiteralPath $env:DKG_MCP_NATIVE_PATH).Sddl');
   const before = descriptor();
   expect(powershell('(Get-Acl -LiteralPath $env:DKG_MCP_NATIVE_PATH).AreAccessRulesProtected')).toBe('True');
-  writeMcpConfigAtomic(path, '{"replacement":true}\n', mcpConfigPersistenceStrategy('native'));
+  writeMcpConfigAtomic(path, '{"replacement":true}\n', mcpConfigPersistenceStrategy('native'), snapshotMcpConfigSource(path));
   expect(descriptor()).toBe(before);
   expect(readFileSync(path, 'utf8')).toBe('{"replacement":true}\n');
   expect(readdirSync(directory)).toEqual(["config 'quoted'.json"]);
@@ -137,7 +154,7 @@ it('routes Windows-side WSL replacements through converted paths and Windows sec
   });
   try {
     Object.defineProperty(process, 'platform', { value: 'linux' });
-    writeMcpConfigAtomic(path, '{"wsl":true}\n', mcpConfigPersistenceStrategy('windows-wsl'));
+    writeMcpConfigAtomic(path, '{"wsl":true}\n', mcpConfigPersistenceStrategy('windows-wsl'), snapshotMcpConfigSource(path));
     expect(scripts).toHaveLength(2);
     expect(scripts[0]).toContain('Get-Acl');
     expect(scripts[1]).toContain('::Replace');
