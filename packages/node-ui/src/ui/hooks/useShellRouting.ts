@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTabsStore } from '../stores/tabs.js';
-import { codexEnabled } from '../codex/enabled.js';
+import { SHELL_TAB_FEATURES, shellTabFeatureById, shellTabFeatureByPath } from '../codex/tabFeature.js';
 
 // Map between deep-link URL paths and centre-tab IDs. Keeping this here
 // (rather than inside `useTabsStore`) lets the route layer stay a thin
@@ -9,13 +9,13 @@ import { codexEnabled } from '../codex/enabled.js';
 // open, but a fresh navigation to e.g. `/observability` opens that tab on
 // mount and clicking the tab pushes the corresponding URL.
 export const URL_PATH_TO_TAB: Record<string, { id: string; label: string }> = {
-  '/ui/codex': { id: 'codex', label: 'Codex' },
+  ...Object.fromEntries(SHELL_TAB_FEATURES.map(({ path, id, label }) => [path, { id, label }])),
   '/observability': { id: 'operations', label: 'Observability' },
   '/operations': { id: 'operations', label: 'Observability' },
   '/settings': { id: 'settings', label: 'Settings' },
 };
 export const TAB_TO_URL_PATH: Record<string, string> = {
-  codex: '/ui/codex',
+  ...Object.fromEntries(SHELL_TAB_FEATURES.map(({ id, path }) => [id, path])),
   operations: '/observability',
   settings: '/settings',
   dashboard: '/',
@@ -51,13 +51,15 @@ export function useShellRouting(): void {
 
   useEffect(() => {
     const match = URL_PATH_TO_TAB[pathname];
-    if (match && (match.id !== 'codex' || codexEnabled)) {
+    const feature = shellTabFeatureByPath(pathname);
+    if (match && (!feature || feature.enabled)) {
       openTab({ id: match.id, label: match.label, closable: true });
     }
   }, [pathname, openTab]);
 
   useEffect(() => {
-    const target = activeTabId === 'codex' && !codexEnabled ? undefined : TAB_TO_URL_PATH[activeTabId];
+    const activeFeature = shellTabFeatureById(activeTabId);
+    const target = activeFeature && !activeFeature.enabled ? undefined : TAB_TO_URL_PATH[activeTabId];
     if (target) {
       if (target !== pathname) navigate(target, { replace: true });
       return;

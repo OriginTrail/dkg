@@ -7,9 +7,7 @@ import { authHeaders, fileUrl } from '../../api.js';
 import { DOC_TAB_PREFIX, decodeDocTabId } from '../../lib/doc-tab-id.js';
 import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../../lib/contextGraphPrimer.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
-const CodexView = createRecoverableLazyView(() =>
-  import('../../codex/CodexView.js').then((m) => m.CodexView)
-, 'Codex');
+import { shellTabFeatureById } from '../../codex/tabFeature.js';
 
 const CLOSE_ICON = (
   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -290,9 +288,10 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
 
 function ViewContainer() {
   const activeTabId = useTabsStore((s) => s.activeTabId);
+  const feature = shellTabFeatureById(activeTabId);
 
   if (activeTabId === 'dashboard') return <DashboardView />;
-  if (activeTabId === 'codex') return <CodexView />;
+  if (feature?.enabled) return feature.render();
 
   if (activeTabId === 'operations') {
     return <OperationsView />;

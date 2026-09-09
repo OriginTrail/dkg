@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { loadAuthTokenSync } from '@origintrail-official/dkg-core';
 
 const S = 'http://schema.org/';
 const D = 'http://dkg.io/ontology/';
@@ -87,6 +88,11 @@ export class DkgMemory extends EventEmitter {
     return record;
   }
   publicRecord(r) { const { quads: _quads, text: _text, ...rest } = r; return rest; }
+  receiptCandidates(threadId, turnId) {
+    return [...this.records.values()].filter((record) => (
+      record.threadId === threadId && record.turnId === turnId
+    )).map((record) => ({ ...this.publicRecord(record), text: record.text }));
+  }
   snapshot(threadId) {
     return { settings: this.settings, records: [...this.records.values()].filter((r) => r.threadId === threadId)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt)).map((r) => this.publicRecord(r)),
@@ -94,7 +100,7 @@ export class DkgMemory extends EventEmitter {
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 20).map((r) => this.publicRecord(r)) };
   }
   async api(path, body, timeout = 5000) {
-    const token = readFileSync(join(this.dkgHome, 'auth.token'), 'utf8').split(/\r?\n/).map((s) => s.trim()).find((s) => s && !s.startsWith('#'));
+    const token = loadAuthTokenSync(this.dkgHome);
     if (!token) throw new Error('DKG authentication is unavailable.');
     const options = {
       method: body === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
@@ -121,13 +127,13 @@ export class DkgMemory extends EventEmitter {
     if (this.privateReady) return;
     const id = this.settings.contextGraphId;
     let graphs = (await this.api('/api/context-graph/list')).contextGraphs;
-    let graph = graphs.find((g) => g.id === id || g.id.endsWith('/' + id));
+    let graph = graphs.find((g) => g.id === id);
     if (!graph) {
       await this.api('/api/context-graph/create', { id, name: 'Codex · Private Conversations',
         description: 'Private local conversation memory, retrieval evidence, and action traces for Codex.',
         private: true, accessPolicy: 1, publishPolicy: 0, register: false });
       graphs = (await this.api('/api/context-graph/list')).contextGraphs;
-      graph = graphs.find((g) => g.id === id || g.id.endsWith('/' + id));
+      graph = graphs.find((g) => g.id === id);
     }
     if (!graph || graph.accessPolicy !== 'private' || graph.onChainId) throw new Error('Conversation memory requires a private, unregistered context graph.');
     this.settings.contextGraphId = graph.id; this.writeSettings();
@@ -192,14 +198,28 @@ export class DkgMemory extends EventEmitter {
     result.durationMs = Date.now() - start;
     return result;
   }
-  capture({ threadId, turnId, messageId, itemId, role, phase = 'final', text, surface = 'dkg', recall, trace = [], createdAt = new Date().toISOString() }) {
-    if (!this.enabled(surface, 'Capture') || !text) return Promise.resolve(null);
+  stageCapture({ threadId, turnId, messageId, itemId, role, phase = 'final', text, surface = 'dkg', recall, trace = [], createdAt = new Date().toISOString(), awaitingTurn = false }) {
+    if (!this.enabled(surface, 'Capture') || !text) return null;
     const id = this.recordId(threadId, messageId);
     const existing = this.records.get(id);
-    if (existing) return existing.status === 'stored' ? Promise.resolve(this.publicRecord(existing)) : this.schedule(existing);
+    if (existing) return this.publicRecord(existing);
     const record = { id, threadId, turnId, messageId, itemId, role, phase, text, surface, createdAt, order: ++this.order,
-      status: 'pending', recall, trace, contextGraphId: this.settings.contextGraphId, stats: null };
-    this.put(record); return this.schedule(record);
+      status: 'pending', recall, trace, contextGraphId: this.settings.contextGraphId, stats: null, awaitingTurn };
+    this.put(record); return this.publicRecord(record);
+  }
+  capture(input) {
+    const staged = this.stageCapture(input);
+    if (!staged) return Promise.resolve(null);
+    const record = this.records.get(staged.id);
+    return record.status === 'stored' ? Promise.resolve(staged) : this.schedule(record);
+  }
+  commitCapture(threadId, messageId) {
+    const record = this.records.get(this.recordId(threadId, messageId));
+    if (!record) return Promise.resolve(null);
+    if (record.awaitingTurn) return Promise.resolve(this.publicRecord(record));
+    return record.status === 'stored'
+      ? Promise.resolve(this.publicRecord(record))
+      : this.schedule(record);
   }
   schedule(record) {
     const work = this.queue.then(() => this.persist(record));
@@ -207,6 +227,7 @@ export class DkgMemory extends EventEmitter {
   }
   async persist(r) {
     if (r.status === 'stored') return this.publicRecord(r);
+    if (r.awaitingTurn) return this.publicRecord(r);
     const earlier = [...this.records.values()].find((other) => other.id !== r.id && other.threadId === r.threadId
       && (other.order && r.order ? other.order < r.order : other.createdAt < r.createdAt) && other.status !== 'stored' && this.enabled(other.surface, 'Capture'));
     if (earlier) { r.error = 'Waiting for an earlier message in this conversation to be stored'; this.put(r); return this.publicRecord(r); }
@@ -266,10 +287,19 @@ export class DkgMemory extends EventEmitter {
   }
   bindTurn(threadId, messageId, turnId) {
     const r = this.records.get(hash(`${threadId}:${messageId}`));
-    if (r) { r.turnId = turnId; this.put(r); }
+    if (!r) return;
+    if (r.status === 'stored' && r.turnId !== turnId) {
+      throw new Error('A stored memory record cannot be rebound to another turn.');
+    }
+    if (r.turnId !== turnId) {
+      r.turnId = turnId;
+      if (r.status !== 'stored') { delete r.quads; r.stats = null; }
+    }
+    r.awaitingTurn = false;
+    this.put(r);
   }
   async retry() {
     const records = [...this.records.values()].sort((a, b) => a.order && b.order ? a.order - b.order : a.createdAt.localeCompare(b.createdAt));
-    for (const r of records) if (r.status !== 'stored' && this.enabled(r.surface, 'Capture')) await this.schedule(r);
+    for (const r of records) if (r.status !== 'stored' && !r.awaitingTurn && this.enabled(r.surface, 'Capture')) await this.schedule(r);
   }
 }

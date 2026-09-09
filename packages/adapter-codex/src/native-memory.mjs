@@ -57,6 +57,7 @@ export class NativeMemory {
     return {};
   }
   async retry() {
+    if (!this.memory.enabled('native', 'Capture')) return;
     for (const file of readdirSync(this.outbox).filter((f) => f.endsWith('.json')).sort()) {
       try {
         await this.handle(JSON.parse(readFileSync(join(this.outbox, file), 'utf8')), true);

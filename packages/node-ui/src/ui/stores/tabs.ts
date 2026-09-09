@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { codexEnabled } from '../codex/enabled.js';
+import { enabledShellTabFeatures } from '../codex/tabFeature.js';
 
 export interface CenterTab {
   id: string;
@@ -19,12 +19,13 @@ interface TabsState {
 
 const INITIAL_TABS: CenterTab[] = [
   { id: 'dashboard', label: 'Dashboard', closable: false },
-  ...(codexEnabled ? [{ id: 'codex', label: 'Codex', closable: false }] : []),
+  ...enabledShellTabFeatures().map(({ id, label, closable }) => ({ id, label, closable })),
 ];
+const defaultFeature = enabledShellTabFeatures().find((feature) => feature.defaultSelection);
 
 export const useTabsStore = create<TabsState>((set, get) => ({
   tabs: INITIAL_TABS,
-  activeTabId: codexEnabled ? 'codex' : 'dashboard',
+  activeTabId: defaultFeature?.id ?? 'dashboard',
 
   openTab: (tab) => {
     const { tabs } = get();

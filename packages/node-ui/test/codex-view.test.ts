@@ -122,10 +122,10 @@ describe('Codex workspace view', () => {
     await emit('turn/started', { threadId: 'thread-1', turn: { id: 'turn-live', status: 'inProgress', items: [] } });
     expect(container.textContent).toContain('Codex is working');
     await emit('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-live', status: 'completed' } });
-    await emit('bridge/request', { id: 9, method: 'execCommandApproval', params: { reason: 'Run checks', command: ['pnpm', 'test'], cwd: '/workspace' } });
+    await emit('bridge/request', { id: 9, threadId: 'thread-1', kind: 'approval', title: 'Approval required', details: { reason: 'Run checks', command: ['pnpm', 'test'], cwd: '/workspace' }, actions: [{ id: 'decline', label: 'Decline' }] });
     expect(container.textContent).toContain('Approval required');
     await emit('bridge/requestResolved', { requestId: 9 });
-    await emit('bridge/request', { id: 10, method: 'item/tool/requestUserInput', params: { questions: [{ id: 'choice', question: 'Continue?', options: [{ label: 'Yes', description: 'Proceed' }] }] } });
+    await emit('bridge/request', { id: 10, threadId: 'thread-1', kind: 'questions', title: 'Codex needs your input', details: { questions: [{ id: 'choice', question: 'Continue?', options: [{ label: 'Yes', description: 'Proceed' }] }] } });
     expect(container.textContent).toContain('Codex needs your input');
     await emit('serverRequest/resolved', { requestId: 10 });
     await emit('error', { error: { message: 'event failed' } });
@@ -156,6 +156,8 @@ describe('Codex workspace view', () => {
       cwd.dispatchEvent(new Event('input', { bubbles: true }));
     });
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Create conversation')!.click());
+    const currentSource = FakeEventSource.instances.at(-1)!;
+    await act(async () => currentSource.onopen?.());
 
     const textarea = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message Codex"]')!;
     await act(async () => {
@@ -165,7 +167,6 @@ describe('Codex workspace view', () => {
     await act(async () => container.querySelector<HTMLButtonElement>('button.codex-send')!.click());
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/send'))).toBe(true);
 
-    const currentSource = FakeEventSource.instances.at(-1)!;
     await act(async () => currentSource.onmessage?.({ data: JSON.stringify({ sequence: 7, method: 'turn/started', params: { threadId: 'thread-1', turn: { id: 'active', status: 'inProgress' } } }) }));
     const stop = [...container.querySelectorAll('button')].find((button) => button.textContent === 'Stop');
     expect(stop).toBeDefined();
@@ -175,7 +176,7 @@ describe('Codex workspace view', () => {
     expect(stopCall[1]).toMatchObject({ method: 'POST' });
     expect(JSON.parse(String(stopCall[1]?.body))).toEqual({ threadId: 'thread-1' });
 
-    await act(async () => currentSource.onmessage?.({ data: JSON.stringify({ sequence: 8, method: 'bridge/request', params: { id: 12, method: 'mcpServer/elicitation/request', params: { message: 'Provide value', requestedSchema: { required: ['name'], properties: { name: { type: 'string', title: 'Name' }, count: { type: 'integer' }, enabled: { type: 'boolean' }, mode: { type: 'string', enum: ['safe'] } } } } } }) }));
+    await act(async () => currentSource.onmessage?.({ data: JSON.stringify({ sequence: 8, method: 'bridge/request', params: { id: 12, threadId: 'thread-1', kind: 'elicitation', title: 'Additional information requested', details: { message: 'Provide value', schema: { required: ['name'], properties: { name: { type: 'string', title: 'Name' }, count: { type: 'integer' }, enabled: { type: 'boolean' }, mode: { type: 'string', enum: ['safe'] } } } }, actions: [{ id: 'accept', label: 'Allow once' }, { id: 'decline', label: 'Decline' }, { id: 'cancel', label: 'Cancel' }] } }) }));
     expect(container.textContent).toContain('Additional information requested');
     const name = container.querySelector<HTMLInputElement>('input[aria-label="Name"]')!;
     await act(async () => {
@@ -212,16 +213,17 @@ describe('Codex workspace view', () => {
     const source = FakeEventSource.instances[0];
     await act(async () => source.onmessage?.({ data: JSON.stringify({ sequence: 9, method: 'bridge/request', params: {
       id: 14,
-      method: 'item/commandExecution/requestApproval',
-      params: {
-        threadId: 'thread-1',
+      threadId: 'thread-1',
+      kind: 'approval',
+      title: 'Network access approval required',
+      details: {
         command: ['curl', 'https://attacker.example'],
         cwd: '/workspace/project',
         reason: 'Contact the requested service',
-        networkApprovalContext: { host: 'attacker.example', protocol: 'https', port: 443 },
+        network: { host: 'attacker.example', protocol: 'https', port: 443 },
         additionalPermissions: { fileSystem: { read: ['/workspace/project'], write: ['/tmp/result'] } },
-        availableDecisions: ['decline', 'cancel'],
       },
+      actions: [{ id: 'decline', label: 'Decline' }, { id: 'cancel', label: 'Cancel' }],
     } }) }));
     expect(container.textContent).toContain('Network access approval required');
     expect(container.textContent).toContain('Host: attacker.example');

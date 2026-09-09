@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DkgMemory, keywords, memoryContext, rdfText } from '../src/memory.mjs';
@@ -67,6 +67,46 @@ test('refuses an existing public or registered conversation graph', async t => {
   assert.ok(!s.calls.some(c => c.path === '/api/knowledge-assets'));
 });
 
+test('does not mistake a suffix-colliding graph for the private conversation graph', async t => {
+  const s = setup(t);
+  s.setGraph({ id: 'urn:example/codex-private-conversations', accessPolicy: 'public', onChainId: '1' });
+  const stored = await s.memory.capture(message);
+  assert.equal(stored.status, 'stored');
+  assert.equal(s.calls.filter(c => c.path === '/api/context-graph/create').length, 1);
+  assert.equal(s.calls.find(c => c.path === '/api/context-graph/create').body.id, 'codex-private-conversations');
+});
+
+test('stages the user record locally, then stores the real turn id across retry', async t => {
+  const s = setup(t);
+  const messageId = 'user:request-a';
+  const staged = s.memory.stageCapture({
+    threadId: 'thread-a', messageId, role: 'user', text: 'Waiting for a real turn.',
+    awaitingTurn: true,
+  });
+  assert.equal(staged.status, 'pending');
+  assert.equal(s.calls.length, 0);
+  await s.memory.commitCapture('thread-a', messageId);
+  assert.equal(s.calls.length, 0);
+
+  s.setFail(true);
+  s.memory.bindTurn('thread-a', messageId, 'turn-from-codex');
+  assert.equal((await s.memory.commitCapture('thread-a', messageId)).status, 'pending');
+  s.setFail(false);
+  await s.memory.retry();
+  await s.memory.capture({
+    threadId: 'thread-a', turnId: 'turn-from-codex', messageId: 'assistant:turn-from-codex:final',
+    role: 'assistant', text: 'The reply.',
+  });
+  const records = [...s.memory.records.values()];
+  assert.deepEqual(records.map(record => record.status), ['stored', 'stored']);
+  for (const record of records) {
+    assert.ok(record.quads.some(q => q.predicate === 'http://dkg.io/ontology/turnId'
+      && q.object === '"turn-from-codex"'));
+  }
+  assert.ok(!records[0].quads.some(q => q.predicate === 'http://dkg.io/ontology/turnId'
+    && q.object === `"${messageId}"`));
+});
+
 test('a delayed first message preserves conversation order and does not double-count its entity', async t => {
   const s=setup(t); s.setFail(true);
   await s.memory.capture({...message,createdAt:'2026-09-08T00:00:00.000Z'});
@@ -120,6 +160,31 @@ test('native hooks save both speakers, skip DKG bridge, keep tool payloads out o
   s.memory.configure({ nativeCapture: false });
   await native.handle({ ...input, turn_id: 'turn-b', hook_event_name: 'UserPromptSubmit', prompt: 'not recorded' });
   assert.equal(s.memory.records.size, count);
+});
+
+test('disabled native capture preserves queued hook events for a later retry', async t => {
+  const s = setup(t);
+  const native = new NativeMemory(s.memory);
+  const queued = join(native.outbox, '0001.json');
+  const queuedReply = join(native.outbox, '0002.json');
+  writeFileSync(queued, JSON.stringify({
+    session_id: 'native-a', turn_id: 'turn-a', hook_event_name: 'UserPromptSubmit', prompt: 'Remember later',
+  }));
+  writeFileSync(queuedReply, JSON.stringify({
+    session_id: 'native-a', turn_id: 'turn-a', hook_event_name: 'Stop', last_assistant_message: 'Remembered.',
+  }));
+  s.memory.configure({ nativeCapture: false });
+  await native.retry();
+  assert.equal(existsSync(queued), true);
+  assert.equal(existsSync(queuedReply), true);
+  assert.equal(s.memory.records.size, 0);
+
+  s.memory.configure({ nativeCapture: true });
+  await native.retry();
+  assert.equal(existsSync(queued), false);
+  assert.equal(existsSync(queuedReply), false);
+  assert.deepEqual([...s.memory.records.values()].map(record => record.role), ['user', 'assistant']);
+  assert.deepEqual([...s.memory.records.values()].map(record => record.status), ['stored', 'stored']);
 });
 
 test('paused interface does not block another interface and resumed delta is remeasured', async t => {

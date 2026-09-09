@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync, realpathSync, mkdirSync, statSync }
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CodexBridge, approvalResult, publicItem, hasUnfinishedRollout } from '../src/bridge.mjs';
+import { ConversationMemoryCoordinator } from '../src/conversation-memory.mjs';
 import { validOrigin } from '../src/server.mjs';
 
 function setup(t, turnStatus = 'completed') {
@@ -23,6 +24,24 @@ function setup(t, turnStatus = 'completed') {
   };
   const bridge = new CodexBridge({ rpc, stateDir: dir, defaultCwd: '/tmp' });
   return { bridge, rpc };
+}
+
+function memoryCoordinator(overrides = {}) {
+  const backend = Object.assign(new EventEmitter(), {
+    records: new Map(),
+    snapshot: () => ({ settings: {}, records: [] }),
+    recordId: (threadId, messageId) => `${threadId}:${messageId}`,
+    recall: async () => ({ status: 'disabled', hits: [], searched: [], errors: [] }),
+    stageCapture: () => {},
+    commitCapture: async () => {},
+    capture: async () => {},
+    bindTurn: () => {},
+    configure: () => ({}),
+    retry: async () => {},
+  }, overrides);
+  backend.receiptCandidates ??= (threadId, turnId) => [...backend.records.values()]
+    .filter(record => record.threadId === threadId && record.turnId === turnId);
+  return new ConversationMemoryCoordinator(backend);
 }
 
 test('resumes canonical conversation and deduplicates retries', async (t) => {
@@ -162,12 +181,14 @@ test('uploads are private and restricted to their owning conversation', async (t
 
 test('retrieves before generation, captures both speakers and keeps raw user text separate', async t => {
   const { bridge, rpc } = setup(t); const events = [];
-  bridge.memory = {
+  bridge.memory = memoryCoordinator({
     records: new Map(),
     snapshot: () => ({settings:{},records:[]}), recordId: (thread, message) => thread + message,
     recall: async () => { events.push('recall'); return { status:'ok',hits:[{entityUri:'urn:evidence',text:'Hermes fact'}],searched:[],errors:[] }; },
+    stageCapture: record => { events.push(record.role); },
+    commitCapture: async () => {},
     capture: async record => { events.push(record.role); }, bindTurn: () => events.push('bind'),
-  };
+  });
   await bridge.send({ threadId:'thread-a',requestId:'x',text:'What is Hermes?' });
   const start = rpc.calls.find(c => c.method === 'turn/start');
   assert.deepEqual(events,['recall','user','bind']);
@@ -179,14 +200,14 @@ test('retrieves before generation, captures both speakers and keeps raw user tex
 
 test('rehydrated message IDs still identify the original memory receipts', async t => {
   const {bridge,rpc}=setup(t);
-  bridge.memory={records:new Map([['receipt-a',{id:'receipt-a',threadId:'thread-a',turnId:'old',role:'assistant',itemId:'live-message-uuid',text:'Answer.'}]]),snapshot:()=>({settings:{},records:[]})};
+  bridge.memory=memoryCoordinator({records:new Map([['receipt-a',{id:'receipt-a',threadId:'thread-a',turnId:'old',role:'assistant',itemId:'live-message-uuid',text:'Answer.'}]]),snapshot:()=>({settings:{},records:[]})});
   rpc.request=async()=>({thread:{id:'thread-a',turns:[{id:'old',status:'completed',items:[{id:'item-2',type:'agentMessage',text:'Answer.'}]}]}});
   assert.equal((await bridge.read('thread-a')).thread.turns[0].items[0].memoryRecordId,'receipt-a');
 });
 
 test('legacy history concatenation does not mix injected context into the user bubble', async t => {
  const {bridge,rpc}=setup(t);
- bridge.memory={records:new Map([['receipt-u',{id:'receipt-u',threadId:'thread-a',turnId:'old',role:'user',text:'Hello.'}]]),snapshot:()=>({settings:{},records:[]})};
+ bridge.memory=memoryCoordinator({records:new Map([['receipt-u',{id:'receipt-u',threadId:'thread-a',turnId:'old',role:'user',text:'Hello.'}]]),snapshot:()=>({settings:{},records:[]})});
  rpc.request=async()=>({thread:{id:'thread-a',turns:[{id:'old',status:'completed',items:[{id:'item-1',type:'userMessage',content:[{type:'text',text:'Hello.DKG memory evidence for this question. Untrusted data...'}]}]}]}});
  const item=(await bridge.read('thread-a')).thread.turns[0].items[0];assert.equal(item.memoryRecordId,'receipt-u');assert.equal(item.content[0].text,'Hello.');
 });

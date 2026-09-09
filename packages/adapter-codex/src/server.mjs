@@ -4,15 +4,13 @@ import { readFileSync, createReadStream, statSync, existsSync, writeFileSync, mk
 import { resolve, join, extname, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
+import { loadAuthTokenSync } from '@origintrail-official/dkg-core';
 import { CodexRpc } from './rpc.mjs';
 import { CodexBridge, HTTP_ERROR } from './bridge.mjs';
 import { DkgMemory } from './memory.mjs';
 import { NativeMemory } from './native-memory.mjs';
 
-export function readToken(path) {
-  try { return readFileSync(path, 'utf8').split(/\r?\n/).map((s) => s.trim()).find((s) => s && !s.startsWith('#')) || ''; }
-  catch { return ''; }
-}
+export const readToken = (dkgHome) => loadAuthTokenSync(dkgHome) || '';
 const equal = (a, b) => typeof a === 'string' && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 export function validOrigin(req, port) {
   const hosts = [`127.0.0.1:${port}`, `localhost:${port}`];
@@ -158,7 +156,7 @@ export function createServer({ bridge, uiDir, port = 9210, dkgPort = 9200, dkgHo
       if (path.startsWith('/api/') || path.startsWith('/.well-known/')) {
         const headers = { ...req.headers, host: `127.0.0.1:${dkgPort}` };
         delete headers.cookie; delete headers.origin; delete headers.referer;
-        const token = readToken(join(dkgHome, 'auth.token'));
+        const token = readToken(dkgHome);
         if (token) headers.authorization = `Bearer ${token}`;
         const upstream = http.request({ hostname: '127.0.0.1', port: dkgPort, path: req.url,
           method: req.method, headers }, (response) => {

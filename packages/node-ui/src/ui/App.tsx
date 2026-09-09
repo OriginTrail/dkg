@@ -15,6 +15,7 @@ import { useVisibilityPolling } from './hooks/useVisibilityPolling.js';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.js';
 import { useShellRouting } from './hooks/useShellRouting.js';
 import { MockModeBanner } from './components/MockModeBanner.js';
+import { shellTabFeatureById } from './codex/tabFeature.js';
 
 function useLiveStatus() {
   const setNodeStatus = useAgentsStore((s) => s.setNodeStatus);
@@ -130,7 +131,11 @@ function useDragResizeV(onDrag: (delta: number) => void) {
 }
 
 function AppShell() {
-  const isCodex = useTabsStore((s) => s.activeTabId === 'codex');
+  const activeTabId = useTabsStore((s) => s.activeTabId);
+  const activeFeature = shellTabFeatureById(activeTabId);
+  const hideRightPanel = activeFeature?.enabled
+    ? activeFeature.layout.hideRightPanel
+    : false;
   useLiveStatus();
   useKeyboardShortcuts();
   useShellRouting();
@@ -216,7 +221,7 @@ function AppShell() {
           <PanelBottom />
         </div>
 
-        {!rightCollapsed && !isCodex && (
+        {!rightCollapsed && !hideRightPanel && (
           <>
             <div className="v10-resize-handle-h" ref={rightHandle} />
             <div className="v10-panel-right" style={{ width: rightWidth }}>

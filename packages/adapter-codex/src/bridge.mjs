@@ -3,13 +3,11 @@ import { mkdirSync, readFileSync, writeFileSync, renameSync, openSync, fstatSync
 import { join, isAbsolute, basename, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { memoryContext } from './memory.mjs';
+import { ConversationMemoryCoordinator } from './conversation-memory.mjs';
+import { approvalResult, normalizeInteractiveRequest } from './interactive-request.mjs';
+import { HTTP_ERROR } from './http-error.mjs';
 
-export const HTTP_ERROR = (status, message) => Object.assign(new Error(message), { status });
-const INTERACTIVE = new Set([
-  'item/commandExecution/requestApproval', 'item/fileChange/requestApproval',
-  'item/tool/requestUserInput', 'item/permissions/requestApproval',
-  'mcpServer/elicitation/request', 'applyPatchApproval', 'execCommandApproval',
-]);
+export { approvalResult, HTTP_ERROR };
 
 // A second app-server labels unfinished disk turns "interrupted", even while
 // the desktop still owns them. Check the actual turn boundary before resuming.
@@ -38,37 +36,6 @@ export function hasUnfinishedRollout(path) {
   return false;
 }
 
-export function approvalResult(request, input) {
-  const method = request.method;
-  if (method === 'item/tool/requestUserInput') {
-    const answers = {};
-    for (const question of request.params.questions ?? []) {
-      const answer = input.answers?.[question.id];
-      if (!Array.isArray(answer?.answers) || !answer.answers.length ||
-          answer.answers.some((a) => typeof a !== 'string' || !a.trim() || a.length > 20_000)) {
-        throw HTTP_ERROR(400, 'Answer each question before continuing.');
-      }
-      answers[question.id] = { answers: answer.answers };
-    }
-    return { answers };
-  }
-  if (method === 'item/permissions/requestApproval') {
-    if (!['accept', 'decline'].includes(input.decision)) throw HTTP_ERROR(400, 'Choose Allow or Decline.');
-    return { permissions: input.decision === 'accept' ? request.params.permissions : {}, scope: 'turn' };
-  }
-  if (method === 'mcpServer/elicitation/request') {
-    if (!['accept', 'decline', 'cancel'].includes(input.action)) throw HTTP_ERROR(400, 'Invalid response.');
-    return { action: input.action, content: input.content ?? null };
-  }
-  const legacy = method === 'applyPatchApproval' || method === 'execCommandApproval';
-  const advertised = request.params.availableDecisions;
-  const allowed = legacy ? ['approved', 'denied', 'abort']
-    : Array.isArray(advertised) ? advertised.filter((decision) => typeof decision === 'string')
-      : ['accept', 'acceptForSession', 'decline', 'cancel'];
-  if (!allowed.includes(input.decision)) throw HTTP_ERROR(400, 'Invalid approval decision.');
-  return { decision: input.decision };
-}
-
 // Only readable summaries are exposed for reasoning items; never raw reasoning.
 export function publicItem(item) {
   if (item?.type !== 'reasoning') return item;
@@ -76,18 +43,16 @@ export function publicItem(item) {
 }
 function publicThread(thread) {
   return { ...thread, turns: (thread.turns ?? []).map((turn) => ({
-    ...turn, items: (turn.items ?? []).map((item) => item.type === 'userMessage'
-      ? { ...item, content: (item.content || []).filter((part, index) => index === 0 || !part.text?.startsWith('DKG memory evidence for this question.')) }
-      : publicItem(item)),
+    ...turn, items: (turn.items ?? []).map(publicItem),
   })) };
 }
 
 export class CodexBridge extends EventEmitter {
   constructor({ rpc, stateDir, defaultCwd, initialThreadId, memory }) {
     super();
-    Object.assign(this, { rpc, stateDir, defaultCwd, initialThreadId, memory });
-    this.memoryTurns = new Map();
-    memory?.on('update', (p) => this.publish('memory/updated', p));
+    Object.assign(this, { rpc, stateDir, defaultCwd, initialThreadId });
+    this.memory = memory ? new ConversationMemoryCoordinator(memory) : null;
+    this.memory?.on('update', (p) => this.publish('memory/updated', p));
     this.requests = new Map();
     this.loaded = new Set();
     this.active = new Map();
@@ -128,22 +93,7 @@ export class CodexBridge extends EventEmitter {
     const params = { ...message.params };
     if (method === 'item/reasoning/textDelta') return;
     if (params.item) params.item = publicItem(params.item);
-    const memoryTurn = this.memoryTurns.get(params.threadId);
-    if (memoryTurn && params.item?.type === 'userMessage') params.item = { ...params.item,
-      memoryRecordId: this.memory.recordId(params.threadId, memoryTurn.userMessageId), content: [{ type: 'text', text: memoryTurn.text }] };
-    if (memoryTurn && method === 'item/completed') {
-      const item = params.item;
-      if (item.type === 'agentMessage' && item.text) {
-        item.memoryRecordId = this.memory.recordId(params.threadId, `assistant:${params.turnId}:${item.id}`);
-        void this.memory.capture({ threadId: params.threadId, turnId: params.turnId,
-          messageId: `assistant:${params.turnId}:${item.id}`, itemId: item.id,
-          role: 'assistant', phase: item.phase || 'final', text: item.text, surface: 'dkg',
-          recall: memoryTurn.recall, trace: item.phase === 'commentary' ? [] : [...memoryTurn.trace] }).catch(() => {});
-      } else if (['commandExecution', 'mcpToolCall', 'fileChange', 'webSearch', 'dynamicToolCall'].includes(item.type)) {
-        memoryTurn.trace.push({ label: item.type === 'mcpToolCall' ? `${item.server} · ${item.tool}` : item.tool || item.type,
-          status: item.status || 'completed', itemId: item.id });
-      }
-    }
+    if (params.item && this.memory) params.item = this.memory.observeItem(method, params);
     const turnId = params.turn?.id ?? params.turnId;
     if (method === 'turn/started' && !this.completedTurns.has(turnId)) this.active.set(params.threadId, turnId);
     if (method === 'turn/completed') {
@@ -151,21 +101,22 @@ export class CodexBridge extends EventEmitter {
         this.completedTurns.add(turnId);
         if (this.completedTurns.size > 1000) this.completedTurns.delete(this.completedTurns.values().next().value);
       }
-      this.active.delete(params.threadId); this.memoryTurns.delete(params.threadId);
+      this.active.delete(params.threadId); this.memory?.finishTurn(params.threadId, turnId);
     }
     if (method === 'serverRequest/resolved') this.requests.delete(String(params.requestId));
     this.publish(method, params);
   }
   onRequest(message) {
-    if (!INTERACTIVE.has(message.method)) {
+    const normalized = normalizeInteractiveRequest(message);
+    if (!normalized) {
       if (message.method === 'item/tool/call') {
         this.rpc.reply(message.id, { success: false, contentItems: [{ type: 'inputText',
           text: 'This desktop-only dynamic tool is unavailable in the DKG UI. Use the available Codex tools instead.' }] });
       } else this.rpc.reject(message.id, 'This request requires the Codex desktop application.');
       return;
     }
-    this.requests.set(String(message.id), message);
-    this.publish('bridge/request', message);
+    this.requests.set(String(message.id), { raw: message, public: normalized });
+    this.publish('bridge/request', normalized);
   }
   async ready() { await this.rpc.start(); }
   async status() {
@@ -193,27 +144,16 @@ export class CodexBridge extends EventEmitter {
     const { thread } = result;
     const externalActive = !this.loaded.has(threadId) && hasUnfinishedRollout(thread.path);
     if (externalActive && thread.turns?.length) thread.turns.at(-1).status = 'inProgress';
-    const visible = publicThread(thread);
     // Recall remains visible in its evidence inspector, not mixed into the
     // user's own message bubble. Codex still retains the exact submitted input.
-    if (this.memory) for (const turn of visible.turns) {
-      const records = [...this.memory.records.values()].filter((r) => r.threadId === threadId && r.turnId === turn.id);
-      const used = new Set();
-      turn.items = turn.items.map((item) => {
-        const role = item.type === 'userMessage' ? 'user' : item.type === 'agentMessage' ? 'assistant' : null;
-        if (!role) return item;
-        const text = role === 'user' ? (item.content || []).map((part) => part.text || '').join('\n') : item.text;
-        const record = records.find((r) => !used.has(r.id) && r.role === role && (r.itemId === item.id || r.text === text || (role === 'user' &&
-          (text.startsWith(r.text + '\n\nAttached local files:\n') || text.startsWith(r.text + 'DKG memory evidence for this question.')))));
-        if (!record) return item;
-        used.add(record.id);
-        return { ...item, memoryRecordId: record.id, ...(role === 'user' ? { content: [{ type: 'text', text: record.text }] } : {}) };
-      });
-    }
+    const visible = this.memory
+      ? this.memory.decorateThread(publicThread(thread))
+      : publicThread(thread);
     return { thread: visible, sequence: this.sequence, memory: this.memory?.snapshot(threadId),
       externalActive,
       activeTurnId: this.active.get(threadId) ?? null,
-      pendingRequests: [...this.requests.values()].filter((r) => r.params.threadId === threadId || r.params.conversationId === threadId) };
+      pendingRequests: [...this.requests.values()].map((entry) => entry.public)
+        .filter((request) => request.threadId === threadId) };
   }
   async select(threadId) {
     const data = await this.read(threadId);
@@ -291,16 +231,15 @@ export class CodexBridge extends EventEmitter {
         paths.push(actual);
       }
       if (paths.reduce((sum, path) => sum + statSync(path).size, 0) > 8_000_000) throw HTTP_ERROR(413, 'Attachments are limited to 8 MB total per message.');
-      const recall = await this.memory?.recall(text, 'dkg');
-      await this.memory?.capture({ threadId, messageId: `user:${requestId}`, role: 'user', text, surface: 'dkg', recall });
+      const preparedMemory = await this.memory?.prepareTurn({ threadId, requestId, text });
+      const recall = preparedMemory?.recall;
       const input = [{ type: 'text', text: text + (paths.length ? '\n\nAttached local files:\n' + paths.join('\n') : ''), text_elements: [] }];
       const context = memoryContext(recall);
       if (context) input.push({ type: 'text', text: context, text_elements: [] });
       for (const path of paths) if (/\.(png|jpe?g|webp|gif)$/i.test(path)) input.push({ type: 'localImage', path });
-      if (this.memory) this.memoryTurns.set(threadId, { recall, trace: [], text, userMessageId: `user:${requestId}` });
       const result = await this.rpc.request('turn/start', { threadId,
         clientUserMessageId: requestId, input });
-      this.memory?.bindTurn(threadId, `user:${requestId}`, result.turn.id);
+      await this.memory?.startTurn(threadId, requestId, result.turn.id);
       // Notifications can arrive while the turn/start response is still in flight.
       // Never resurrect a turn after its authoritative completion event.
       if (!this.completedTurns.has(result.turn.id)) this.active.set(threadId, result.turn.id);
@@ -317,10 +256,10 @@ export class CodexBridge extends EventEmitter {
   reply({ id, threadId, response }) {
     const request = this.requests.get(String(id));
     if (!request) throw HTTP_ERROR(409, 'This request has already been resolved.');
-    if ((request.params.threadId ?? request.params.conversationId) !== threadId) throw HTTP_ERROR(403, 'Request belongs to another conversation.');
-    this.rpc.reply(request.id, approvalResult(request, response ?? {}));
+    if (request.public.threadId !== threadId) throw HTTP_ERROR(403, 'Request belongs to another conversation.');
+    this.rpc.reply(request.raw.id, approvalResult(request.raw, response ?? {}));
     this.requests.delete(String(id));
-    this.publish('bridge/requestResolved', { requestId: request.id, threadId });
+    this.publish('bridge/requestResolved', { requestId: request.raw.id, threadId });
     return { ok: true };
   }
 }
