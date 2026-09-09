@@ -52,7 +52,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          pnpm --dir packages/cli run build
+          node scripts/build-runtime-packages.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm --dir packages/cli exec esbuild test/fixtures/mcp-config-wsl.fixture.ts --platform=node --format=esm --target=node22 --outfile=dist/fixtures/mcp-config-wsl.fixture.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
