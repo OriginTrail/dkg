@@ -16,18 +16,14 @@
  * shape: anything that leaves the HTTP listener dead while the process
  * remains alive. Defense-in-depth.
  *
- * # Why TCP-connect rather than HTTP
+ * # HTTP response liveness
  *
- * The cheapest possible "is the server alive" check is a plain TCP connect.
- *   - No HTTP request body to parse.
- *   - No auth token to load (saves us from threading config / loadTokens
- *     into the supervisor).
- *   - No 404/405/etc to special-case (any response = alive).
- *   - Cancellable cleanly via socket.destroy().
- *
- * If the TCP connection refuses or times out, the worker either died
- * silently (listener gone) or is in the wedged-event-loop state we're
- * trying to detect. Either way, SIGKILL + respawn is the right response.
+ * The kernel can complete a TCP handshake while the worker's JavaScript
+ * event loop is stuck. Require an HTTP response to a cheap, unknown API
+ * HEAD route. Any status (including 401/404/503) proves request handling
+ * progressed, without credentials or a database/chain health dependency.
+ * A single absolute deadline bounds connecting and receiving the status
+ * line, and the socket is destroyed on every outcome.
  *
  * # Env gate
  *
@@ -41,10 +37,10 @@
  * probe. Defaults to on so production benefits; tests opt out.
  */
 
-import { connect, type Socket } from 'node:net';
+import { request, type ClientRequest } from 'node:http';
 import { SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS } from './shutdown.js';
 
-/** Default per-probe TCP-connect timeout. */
+/** Default total HTTP liveness deadline — 5s. */
 export const LIVENESS_PROBE_TIMEOUT_MS = 5_000;
 export const DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS = 30_000;
 
@@ -63,8 +59,10 @@ export function resolveLivenessShutdownGraceMs(hardTimeoutMs: number): number {
 }
 
 /**
- * One-shot probe: connect to `host:port`, return `true` on success, `false`
- * on refusal / timeout / any error. Never throws.
+ * One-shot probe: require an HTTP status line from `host:port`; a TCP
+ * connection alone is insufficient. Node owns HTTP framing and status
+ * parsing; this policy accepts any parsed response. Returns false on any
+ * error or timeout.
  *
  * The socket is force-destroyed on every outcome (success or failure) to
  * avoid leaking file descriptors when the supervisor probes the worker
@@ -77,30 +75,39 @@ export async function probeWorkerAlive(
 ): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     let settled = false;
-    const settle = (alive: boolean, socket: Socket | null) => {
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    let probe: ClientRequest | null = null;
+    const settle = (alive: boolean) => {
       if (settled) return;
       settled = true;
+      clearTimeout(deadline);
       try {
-        socket?.destroy();
+        probe?.destroy();
       } catch {
-        /* socket may already be destroyed; ignore */
+        /* request may already be destroyed; ignore */
       }
       resolve(alive);
     };
-    let socket: Socket;
     try {
-      socket = connect({ port, host });
-    } catch (err) {
-      // Synchronous throw from `connect` is unusual (it's normally async)
-      // but possible on invalid port. Treat as not-alive.
-      void err;
-      resolve(false);
+      probe = request({
+        host,
+        port,
+        method: 'HEAD',
+        path: '/api/__dkg_liveness_probe__',
+        agent: false,
+      }, (response) => {
+        response.resume();
+        settle(response.statusCode !== undefined);
+      });
+    } catch {
+      settle(false);
       return;
     }
-    socket.setTimeout(timeoutMs);
-    socket.once('connect', () => settle(true, socket));
-    socket.once('timeout', () => settle(false, socket));
-    socket.once('error', () => settle(false, socket));
+    deadline = setTimeout(() => settle(false), timeoutMs);
+    deadline.unref?.();
+    probe.once('error', () => settle(false));
+    probe.once('close', () => settle(false));
+    probe.end();
   });
 }
 
