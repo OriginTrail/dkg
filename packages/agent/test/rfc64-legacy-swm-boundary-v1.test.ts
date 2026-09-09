@@ -282,6 +282,28 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     );
   });
 
+  it('binds the selective workspace operation before joining legacy heads', async () => {
+    const root = await secureTempRoot(roots);
+    const store = fakeStore(new Map([[META_GRAPH, [UAL_ONE]]]));
+
+    await initializeRfc64LegacySwmBoundaryV1({}, root, store);
+
+    const captureQueryCall = vi.mocked(store.query).mock.calls.find(([, options]) => (
+      options?.source === 'agent.rfc64.legacySwmBoundary.readHeads'
+    ));
+    expect(captureQueryCall).toBeDefined();
+    const captureQuery = captureQueryCall![0];
+    const operationPattern = captureQuery.indexOf(
+      '?operation <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>',
+    );
+    const headPattern = captureQuery.indexOf(
+      '?head <http://dkg.io/ontology/kaUal>',
+    );
+    expect(operationPattern).toBeGreaterThanOrEqual(0);
+    expect(headPattern).toBeGreaterThan(operationPattern);
+    expect(captureQuery).not.toContain('queryHints#');
+  });
+
   it('does not query a named metadata graph that could exhaust the root head cap', async () => {
     const root = await secureTempRoot(roots);
     const rootBinding = {

@@ -405,16 +405,21 @@ async function captureRfc64LegacySwmBoundaryV1(
   // is ambiguous because a valid Context Graph ID may itself contain slashes;
   // enumerating every `.../_shared_memory_meta` graph would also let unrelated
   // named history consume the bounded root-capture budget before classification.
+  // Keep the selective WorkspaceOperation pattern before the SWM head join.
+  // Blazegraph otherwise chooses a plan that scans and joins every candidate
+  // head first, which can exceed the store deadline on an existing node during
+  // the one-time upgrade capture. Source order is therefore an operational part
+  // of this query, even though the two forms are semantically equivalent.
   const result = await store.query(
     `SELECT DISTINCT ?metaGraph ?head ?ual ?contextGraphId WHERE { ` +
     `GRAPH ?metaGraph { ` +
-    `?head <${KA_UAL}> ?ual ; <${SHARE_OPERATION_ID}> ?shareId . ` +
     `?operation <${RDF_TYPE}> <${WORKSPACE_OPERATION}> ; ` +
     `<${KA_UAL}> ?ual ; <${SHARE_OPERATION_ID}> ?shareId ; ` +
     `<${CONTEXT_GRAPH_ID}> ?contextGraphId . ` +
     `FILTER(STR(?metaGraph) = CONCAT(` +
     `${JSON.stringify(CONTEXT_GRAPH_PREFIX)}, STR(?contextGraphId), ` +
     `${JSON.stringify(SWM_META_SUFFIX)})) ` +
+    `?head <${KA_UAL}> ?ual ; <${SHARE_OPERATION_ID}> ?shareId . ` +
     `FILTER(STRENDS(STR(?head), ${JSON.stringify(SWM_HEAD_SUFFIX)})) ` +
     `} } LIMIT ${RFC64_LEGACY_SWM_HEAD_LIMIT_V1 + 1}`,
     {

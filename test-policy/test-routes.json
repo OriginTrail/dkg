@@ -82,6 +82,13 @@
     "command": "DKG_REQUIRE_BLAZEGRAPH=1 pnpm test:conformance"
   },
   {
+    "pattern": "packages/agent/test-live/*.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Live Blazegraph regressions required in the existing Tornado Blazegraph CI lane",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-agent exec vitest run --config vitest.blazegraph.config.ts"
+  },
+  {
     "pattern": "tools/observability/w1/*.test.yaml",
     "lane": "prometheus-rules",
     "reason": "Promtool rule regression fixtures; requires Prometheus tools",
