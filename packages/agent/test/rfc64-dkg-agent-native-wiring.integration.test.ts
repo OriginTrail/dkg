@@ -10,7 +10,6 @@ import {
   MEMBER_ROSTER_OBJECT_TYPE_V1,
   MemoryLayer,
   PROTOCOL_NETWORK_IDENTITY,
-  type ProtocolRouter,
   assertCanonicalGraphScopedAuthorSealV1,
   buildAssertionSealQuads,
   buildAuthorAttestationTypedData,
@@ -68,7 +67,6 @@ import {
   DKGAgent,
   Rfc64CatalogReconciliationTerminalErrorV1,
 } from '../src/index.js';
-import type { NetworkAdmissionService } from '../src/p2p/network-admission.js';
 import { Rfc64SwmRecoveryRuntimeV1 } from
   '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 import {
@@ -2110,15 +2108,11 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           providerPeerAddresses.get(peerId) ?? null,
       },
     });
-    const providerRuntime = provider as unknown as {
-      router: ProtocolRouter;
-      networkAdmission: NetworkAdmissionService;
-    };
-    const send = providerRuntime.router.send.bind(providerRuntime.router);
+    const send = provider.router.send.bind(provider.router);
     let interruptedProbe = false;
     // A peer closing during identity negotiation can return no frame. Keep
     // the real admission/backoff owner and all subsequent wire probes live.
-    vi.spyOn(providerRuntime.router, 'send').mockImplementation(async (peer, protocol, data, options) => {
+    vi.spyOn(provider.router, 'send').mockImplementation(async (peer, protocol, data, options) => {
       if (protocol === PROTOCOL_NETWORK_IDENTITY && !interruptedProbe) {
         interruptedProbe = true;
         return new Uint8Array();
@@ -2151,7 +2145,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await connectBothWays(author, provider);
     await vi.waitFor(() => {
       expect(interruptedProbe).toBe(true);
-      expect(providerRuntime.networkAdmission.getRetryableProbeBackoff(author.peerId))
+      expect(provider.networkAdmission.getRetryableProbeBackoff(author.peerId))
         .toMatchObject({ kind: 'transient', failures: 1 });
     }, { timeout: 5_000, interval: 10 });
     const assertionCoordinate = 'private-startup-repair';
@@ -2222,8 +2216,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       // await the public API's signed identity admission before publishing.
       await restarted.connectTo(tcpMultiaddr(provider));
       await provider.connectTo(tcpMultiaddr(restarted));
-      expect(providerRuntime.networkAdmission.isAcceptedPeer(restarted.peerId)).toBe(true);
-      expect(providerRuntime.networkAdmission.getRetryableProbeBackoff(restarted.peerId)).toBeUndefined();
+      expect(provider.networkAdmission.isAcceptedPeer(restarted.peerId)).toBe(true);
+      expect(provider.networkAdmission.getRetryableProbeBackoff(restarted.peerId)).toBeUndefined();
     } finally {
       releaseStartupProjection();
     }
