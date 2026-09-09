@@ -251,7 +251,6 @@ async function startNativeAgent(
   existingDataDir?: string,
   accessPolicyAuthority?: Rfc64CatalogAccessPolicyAuthorityConfigV1,
   finalizedRuntime?: Readonly<{
-    rpcUrl: string;
     chainAdapter: FinalizedVmLoopbackMockChainAdapterV1;
     initialSubscription?: ContextGraphIdV1;
   }>,
@@ -273,7 +272,6 @@ interface NativeAgentStartOptionsV1 {
   readonly existingDataDir?: string;
   readonly accessPolicyAuthority?: Rfc64CatalogAccessPolicyAuthorityConfigV1;
   readonly finalizedRuntime?: Readonly<{
-    rpcUrl: string;
     chainAdapter: FinalizedVmLoopbackMockChainAdapterV1;
     initialSubscription?: ContextGraphIdV1;
   }>;
@@ -364,7 +362,8 @@ async function startNativeAgentWithOptions(
     ...(finalizedRuntime === undefined ? {} : {
       chainAdapter: finalizedRuntime.chainAdapter,
       chainConfig: {
-        rpcUrl: finalizedRuntime.rpcUrl,
+        // The chain config supplies fixture operational keys; the adapter owns RPC.
+        rpcUrl: finalizedRuntime.chainAdapter.getRpcUrls()[0]!,
         hubAddress: CONTEXT_GRAPH_STORAGE,
         operationalKeys: [`0x${'12'.repeat(32)}`],
       },
@@ -7253,7 +7252,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         );
       }
     });
-    const adapter = new FinalizedVmLoopbackMockChainAdapterV1(fixture);
+    const adapter = new FinalizedVmLoopbackMockChainAdapterV1(fixture, rpcServer.url);
     await adapter.createOnChainContextGraph({ accessPolicy: 1, publishPolicy: 0, nameHash });
 
     const policy: ContextGraphPolicyV1 = {
@@ -7285,7 +7284,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         localAgentAddress: AUTHOR,
         resolveRemoteAgentAddress: async (peerId) => peerAddresses.get(peerId) ?? null,
       },
-      finalizedRuntime: { rpcUrl: rpcServer.url, chainAdapter: adapter },
+      finalizedRuntime: { chainAdapter: adapter },
     });
     allowAllNetworkAdmissionForTest(provider);
     provider.acceptRfc64CatalogAccessSnapshotV1({ policy, policyDigest, roster });
@@ -8011,7 +8010,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         resolveRemoteAgentAddress: async (peerId) => authorPeerAddresses.get(peerId) ?? null,
       },
     });
-    const providerAdapter = new FinalizedVmLoopbackMockChainAdapterV1(emptyFixture);
+    const providerAdapter = new FinalizedVmLoopbackMockChainAdapterV1(emptyFixture, providerRpcServer.url);
     await providerAdapter.createOnChainContextGraph({
       accessPolicy: 1,
       publishPolicy: 0,
@@ -8032,7 +8031,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         ),
       },
       finalizedRuntime: {
-        rpcUrl: providerRpcServer.url,
         chainAdapter: providerAdapter,
       },
     });
@@ -8103,7 +8101,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         );
       }
     });
-    const authorizedAdapter = new FinalizedVmLoopbackMockChainAdapterV1(providerFixture);
+    const authorizedAdapter = new FinalizedVmLoopbackMockChainAdapterV1(providerFixture, authorizedRpcServer.url);
     await authorizedAdapter.createOnChainContextGraph({
       accessPolicy: 1,
       publishPolicy: 0,
@@ -8123,7 +8121,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const authorizedCold = await startNativeAgentWithOptions({
       name: 'private-authorized-cold',
       finalizedRuntime: {
-        rpcUrl: authorizedRpcServer.url,
         chainAdapter: authorizedAdapter,
         initialSubscription: CONTEXT_GRAPH_ID,
       },
@@ -8286,7 +8283,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(deniedUnscopedResult.bindings).toEqual([]);
 
     unboundColdAgentAddress = coldAgentAddress;
-    const coldAdapter = new FinalizedVmLoopbackMockChainAdapterV1(coldFixture);
+    const coldAdapter = new FinalizedVmLoopbackMockChainAdapterV1(coldFixture, coldRpcServer.url);
     await coldAdapter.createOnChainContextGraph({
       accessPolicy: 1,
       publishPolicy: 0,
@@ -8296,7 +8293,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const cold = await startNativeAgentWithOptions({
       name: 'private-incomplete-cold',
       finalizedRuntime: {
-        rpcUrl: coldRpcServer.url,
         chainAdapter: coldAdapter,
         initialSubscription: CONTEXT_GRAPH_ID,
       },
@@ -8424,7 +8420,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         );
       }
     });
-    const receiverChain = new FinalizedVmLoopbackMockChainAdapterV1(fixture);
+    const receiverChain = new FinalizedVmLoopbackMockChainAdapterV1(fixture, rpc.url);
     const privateVmDependencyLookup = vi.spyOn(
       receiverChain,
       'getDKGKnowledgeAssetsAddress',
@@ -8440,7 +8436,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       undefined,
       undefined,
       {
-        rpcUrl: rpc.url,
         chainAdapter: receiverChain,
         initialSubscription: CONTEXT_GRAPH_ID,
       },
@@ -8451,8 +8446,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       undefined,
       undefined,
       {
-        rpcUrl: rpc.url,
-        chainAdapter: new FinalizedVmLoopbackMockChainAdapterV1(fixture),
+        chainAdapter: new FinalizedVmLoopbackMockChainAdapterV1(fixture, rpc.url),
       },
       {
         peers: [receiver.peerId],
@@ -8595,7 +8589,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       storePath: string,
       bootstrapConfig?: Rfc64PublicCatalogBootstrapConfigV1,
     ): Promise<DKGAgent> => {
-      const chainAdapter = new FinalizedVmLoopbackMockChainAdapterV1(fixture);
+      const chainAdapter = new FinalizedVmLoopbackMockChainAdapterV1(fixture, rpc.url);
       await chainAdapter.createOnChainContextGraph({
         accessPolicy: 0,
         publishPolicy: 0,
@@ -8605,7 +8599,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         name,
         existingDataDir: dataDir,
         finalizedRuntime: {
-          rpcUrl: rpc.url,
           chainAdapter,
           initialSubscription: CONTEXT_GRAPH_ID,
         },
@@ -8635,8 +8628,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       undefined,
       undefined,
       {
-        rpcUrl: rpc.url,
-        chainAdapter: new FinalizedVmLoopbackMockChainAdapterV1(fixture),
+        chainAdapter: new FinalizedVmLoopbackMockChainAdapterV1(fixture, rpc.url),
       },
       {
         peers: [warm.peerId],

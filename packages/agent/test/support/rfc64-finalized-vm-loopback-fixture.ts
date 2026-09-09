@@ -62,12 +62,18 @@ const KNOWLEDGE_ASSET_INTERFACE = new ethers.Interface([
 /** Mock adapter whose chain identity matches the loopback finalized-RPC lane. */
 export class FinalizedVmLoopbackMockChainAdapterV1 extends MockChainAdapter {
   readonly #fixture: FinalizedVmLoopbackFixtureConfigV1;
+  readonly #rpcUrl: string;
 
-  constructor(fixture: FinalizedVmLoopbackFixtureConfigV1) {
+  constructor(fixture: FinalizedVmLoopbackFixtureConfigV1, rpcUrl: string) {
     super(fixture.networkId, MOCK_DEFAULT_SIGNER, {
       initialContextGraphId: BigInt(fixture.onChainContextGraphId),
     });
     this.#fixture = fixture;
+    this.#rpcUrl = rpcUrl;
+  }
+
+  getRpcUrls(): string[] {
+    return [this.#rpcUrl];
   }
 
   override async getEvmChainId(): Promise<bigint> {
