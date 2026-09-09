@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, existsSync, statSync, copyFileSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, win32 } from 'node:path';
-import { snapshotMcpConfigSource, writeMcpConfigAtomic } from '../src/mcp-config-file.js';
+import { snapshotMcpConfigSource as snapshotSourceTransaction, writeMcpConfigAtomic } from '../src/mcp-config-file.js';
 import { detectClients } from '../src/mcp-client-registry.js';
 import { detectMcpRuntime } from '../src/mcp-runtime.js';
 import { copyWindowsMcpConfigMetadata, linuxMetadataCopyCommand, mcpConfigPersistenceStrategy } from '../src/mcp-config-metadata.js';
@@ -27,6 +27,10 @@ vi.mock('node:child_process', async importOriginal => {
 });
 
 const nativeMetadata = process.env.DKG_REQUIRE_NATIVE_MCP_METADATA === '1';
+const snapshotMcpConfigSource = (configPath: string) => snapshotSourceTransaction(
+  configPath,
+  [{ configPath, displayPath: configPath }],
+);
 let directory: string;
 let path: string;
 beforeEach(() => {
@@ -154,7 +158,7 @@ it('rejects first-time creation if a symlinked parent changes after inspection',
   unlinkSync(alias);
   symlinkSync(second, alias, 'junction');
   expect(() => writeMcpConfigAtomic(configPath, '{}\n', mcpConfigPersistenceStrategy(source.destination), source))
-    .toThrow('changed while it was being edited');
+    .toThrow('path changed since inspection');
   expect(readdirSync(first)).toEqual([]);
   expect(readdirSync(second)).toEqual([]);
 });

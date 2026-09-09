@@ -21,6 +21,7 @@ void [standard, vscode, codex, wrongCodex, wrongCursor, unsupportedCodexLocation
 // Mutation requires a selected physical config; a logical target cannot bypass it.
 import { readRegisteredServerKeys, writeRegistration, removeRegistration } from '../src/mcp-client-config.js';
 import type { McpPhysicalConfig } from '../src/mcp-physical-config.js';
+import type { McpConfigSourceSnapshot } from '../src/mcp-config-file.js';
 declare const selection: McpConfigSelection;
 declare const registration: Parameters<typeof writeRegistration>[1];
 const file: McpPhysicalConfig = selection.file;
@@ -39,3 +40,11 @@ const location = selection.file.location;
 // @ts-expect-error A physical config is not a logical client.
 const identity: ClientTarget = selection.file;
 void [file, selectedClient, location, identity];
+
+// @ts-expect-error Transaction snapshots cannot be forged without the factory's path validation.
+const unboundSource: McpConfigSourceSnapshot = {
+  destination: '/tmp/config.json',
+  content: undefined,
+  assertCurrent() {},
+};
+void unboundSource;

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { McpClientConfigShape } from './mcp-config-document.js';
 import { mcpConfigPersistenceStrategy } from './mcp-config-metadata.js';
-import { resolveMcpConfigDestination, snapshotMcpConfigSource, writeMcpConfigAtomic, type McpConfigSourceSnapshot } from './mcp-config-file.js';
+import { snapshotMcpConfigSource, writeMcpConfigAtomic, type McpConfigSourceSnapshot } from './mcp-config-file.js';
 
 type ConfigPath = Readonly<{ configPath: string; displayPath: string }>;
 
@@ -20,27 +20,15 @@ export class McpPhysicalConfig {
 
   get displayPath(): string { return this.paths[0]!.displayPath; }
 
-  private assertCurrent(): void {
-    for (const path of this.paths) {
-      if (resolveMcpConfigDestination(path.configPath) !== this.destination) {
-        throw new Error(`MCP config path changed since inspection: ${path.displayPath}. Re-run the command to confirm the current destination.`);
-      }
-    }
-  }
-
   readSource(): McpConfigSourceSnapshot {
-    this.assertCurrent();
-    const source = snapshotMcpConfigSource(this.destination);
-    this.assertCurrent();
-    return source;
+    return snapshotMcpConfigSource(this.destination, this.paths);
   }
 
   write(content: string, source: McpConfigSourceSnapshot): void {
-    this.assertCurrent();
     if (source.destination !== this.destination) throw new Error('MCP config source belongs to a different destination');
     const persistence = mcpConfigPersistenceStrategy(this.destination);
     const directory = dirname(this.destination);
     if (!existsSync(directory)) mkdirSync(directory, { recursive: true });
-    writeMcpConfigAtomic(this.destination, content, persistence, source, () => this.assertCurrent());
+    writeMcpConfigAtomic(this.destination, content, persistence, source);
   }
 }
