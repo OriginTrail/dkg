@@ -91,8 +91,8 @@ export class SqliteProtocolOutboxStore implements BoundedProtocolOutboxStore, Pr
       'SELECT attempts FROM protocol_outbox WHERE peer_id = ? AND protocol = ? AND message_id = ?',
     ).get(peer, protocol, messageId) as { attempts: number } | undefined;
     if (existing) {
-      return SqliteProtocolOutboxStore.rowToEntry(this.advanceRetry<SqliteOutboxRow>(
-        peer, protocol, messageId, existing.attempts + 1, error, now, '*',
+      return SqliteProtocolOutboxStore.rowToEntry(this.advanceRetryEntry(
+        peer, protocol, messageId, existing.attempts + 1, error, now,
       )!);
     }
 
@@ -237,14 +237,10 @@ export class SqliteProtocolOutboxStore implements BoundedProtocolOutboxStore, Pr
     return (peer === undefined ? statement.all() : statement.all(peer)) as ProtocolOutboxMetadata[];
   }
 
-  private removeExpired<Row>(now: number, columns: string): Row[] {
-    return this.db.prepare(
-      `DELETE FROM protocol_outbox WHERE first_failure_at < ? RETURNING ${columns}`,
-    ).all(now - this.maxAgeMs) as Row[];
-  }
-
   dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
-    return this.removeExpired<ProtocolOutboxMetadata>(now, OUTBOX_METADATA_COLUMNS);
+    return this.db.prepare(
+      `DELETE FROM protocol_outbox WHERE first_failure_at < ? RETURNING ${OUTBOX_METADATA_COLUMNS}`,
+    ).all(now - this.maxAgeMs) as ProtocolOutboxMetadata[];
   }
 
   recordRetryFailure(peer: string, protocol: string, messageId: string, error: string, now: number): ProtocolOutboxMetadata | undefined {
@@ -253,20 +249,30 @@ export class SqliteProtocolOutboxStore implements BoundedProtocolOutboxStore, Pr
         'SELECT attempts FROM protocol_outbox WHERE peer_id = ? AND protocol = ? AND message_id = ?',
       ).get(peer, protocol, messageId) as { attempts: number } | undefined;
       if (!current) return undefined;
-      return this.advanceRetry<ProtocolOutboxMetadata>(
-        peer, protocol, messageId, current.attempts + 1, error, now, OUTBOX_METADATA_COLUMNS,
+      return this.advanceRetryMetadata(
+        peer, protocol, messageId, current.attempts + 1, error, now,
       );
     }).immediate();
   }
 
-  private advanceRetry<Row>(
+  private advanceRetryMetadata(
     peer: string, protocol: string, messageId: string, attempts: number,
-    error: string, now: number, columns: string,
-  ): Row | undefined {
+    error: string, now: number,
+  ): ProtocolOutboxMetadata | undefined {
     return this.db.prepare(
       `UPDATE protocol_outbox SET attempts = ?, last_attempt_at = ?, next_attempt_at = ?, last_error = ?
-       WHERE peer_id = ? AND protocol = ? AND message_id = ? RETURNING ${columns}`,
-    ).get(attempts, now, now + this.backoffFor(attempts), error, peer, protocol, messageId) as Row | undefined;
+       WHERE peer_id = ? AND protocol = ? AND message_id = ? RETURNING ${OUTBOX_METADATA_COLUMNS}`,
+    ).get(attempts, now, now + this.backoffFor(attempts), error, peer, protocol, messageId) as ProtocolOutboxMetadata | undefined;
+  }
+
+  private advanceRetryEntry(
+    peer: string, protocol: string, messageId: string, attempts: number,
+    error: string, now: number,
+  ): SqliteOutboxRow | undefined {
+    return this.db.prepare(
+      `UPDATE protocol_outbox SET attempts = ?, last_attempt_at = ?, next_attempt_at = ?, last_error = ?
+       WHERE peer_id = ? AND protocol = ? AND message_id = ? RETURNING *`,
+    ).get(attempts, now, now + this.backoffFor(attempts), error, peer, protocol, messageId) as SqliteOutboxRow | undefined;
   }
 
   queueStats(now: number, maxPayloadBytes: number): ProtocolOutboxQueueStats {
@@ -279,7 +285,10 @@ export class SqliteProtocolOutboxStore implements BoundedProtocolOutboxStore, Pr
   }
 
   dropExpired(now: number): ProtocolOutboxEntry[] {
-    return this.removeExpired<SqliteOutboxRow>(now, '*').map(SqliteProtocolOutboxStore.rowToEntry);
+    return (this.db.prepare(
+      'DELETE FROM protocol_outbox WHERE first_failure_at < ? RETURNING *',
+    ).all(now - this.maxAgeMs) as SqliteOutboxRow[])
+      .map(SqliteProtocolOutboxStore.rowToEntry);
   }
 
   size(): number {

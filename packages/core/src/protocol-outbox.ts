@@ -41,7 +41,7 @@ import type {
   ProtocolOutboxQueueStats,
   ProtocolOutboxStore,
   ProtocolOutboxPersistence,
-  ProtocolOutboxInspection,
+  ProtocolOutboxPayloadInspection,
 } from './messenger-types.js';
 import { RESPONSE_CACHE_BYTES } from './messenger-types.js';
 
@@ -359,23 +359,23 @@ export function assertBoundedProtocolOutboxStore(store: unknown): asserts store 
   }
 }
 
-type PayloadInspection = Pick<ProtocolOutboxInspection, 'list' | 'getEntry'>;
-
-function optionalPayloadInspection(store: BoundedProtocolOutboxStore): PayloadInspection | undefined {
-  const candidate = store as BoundedProtocolOutboxStore & Partial<PayloadInspection>;
+export function protocolOutboxPayloadInspection(
+  store: BoundedProtocolOutboxStore,
+): ProtocolOutboxPayloadInspection | undefined {
+  const candidate = store as BoundedProtocolOutboxStore & Partial<ProtocolOutboxPayloadInspection>;
   return typeof candidate.list === 'function' && typeof candidate.getEntry === 'function'
-    ? candidate as BoundedProtocolOutboxStore & PayloadInspection
+    ? candidate as BoundedProtocolOutboxStore & ProtocolOutboxPayloadInspection
     : undefined;
 }
 
 /** Automatic retries depend only on bounded access and common persistence. */
 export class BoundedProtocolOutbox extends ProtocolOutboxAttempts<BoundedProtocolOutboxStore> {
-  private readonly payloadInspection?: PayloadInspection;
+  private readonly inspection?: ProtocolOutboxPayloadInspection;
 
   constructor(store: BoundedProtocolOutboxStore, options: ProtocolOutboxOptions = {}) {
     assertBoundedProtocolOutboxStore(store);
     super(store, options);
-    this.payloadInspection = optionalPayloadInspection(store);
+    this.inspection = protocolOutboxPayloadInspection(store);
   }
 
   readDuePage(now: number, budget: ProtocolOutboxPageBudget): ProtocolOutboxPage {
@@ -403,18 +403,9 @@ export class BoundedProtocolOutbox extends ProtocolOutboxAttempts<BoundedProtoco
     return this.store.hasPendingFor(peer);
   }
 
-  /** Explicit compatibility access; optional on new automatic-retry stores. */
-  list(): ProtocolOutboxEntry[] {
-    return this.requirePayloadInspection().list();
-  }
-
-  getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined {
-    return this.requirePayloadInspection().getEntry(peer, protocol, messageId);
-  }
-
-  private requirePayloadInspection(): PayloadInspection {
-    if (!this.payloadInspection) throw new Error('Outbox store does not support legacy payload inspection');
-    return this.payloadInspection;
+  /** Explicitly expose whether this store supplied payload inspection. */
+  payloadInspection(): ProtocolOutboxPayloadInspection | undefined {
+    return this.inspection;
   }
 }
 

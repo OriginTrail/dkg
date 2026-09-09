@@ -258,8 +258,17 @@ export interface ProtocolOutboxPersistence {
   size(): number;
 }
 
-/** Explicit legacy payload snapshots; automatic retries do not require them. */
-export interface ProtocolOutboxInspection {
+/** Payload-bearing inspection is an optional capability of bounded stores. */
+export interface ProtocolOutboxPayloadInspection {
+  /** Snapshot of every queued payload-bearing entry. */
+  list(): ProtocolOutboxEntry[];
+
+  /** Look up one payload-bearing entry by its durable identity. */
+  getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined;
+}
+
+/** Explicit legacy retry and payload snapshots; automatic retries do not require them. */
+export interface ProtocolOutboxInspection extends ProtocolOutboxPayloadInspection {
   /**
    * All entries whose `nextAttemptAt <= now`.
    *
@@ -288,23 +297,6 @@ export interface ProtocolOutboxInspection {
    */
   dropExpired(now: number): ProtocolOutboxEntry[];
 
-  /**
-   * Snapshot of every entry in the store. Used by the diagnostics
-   * surface (`/api/chat/outbox`, `dkg_outbox_status` MCP tool) so
-   * operators can see what's pending after a long recipient outage.
-   * Order is implementation-defined; callers that need per-peer
-   * FIFO should sort by `firstFailureAt`.
-   */
-  list(): ProtocolOutboxEntry[];
-
-  /**
-   * Look up a specific entry by `(peer, protocol, messageId)`.
-   * Returns `undefined` when no such entry exists. Used by
-   * diagnostics + by callers that need full retry metadata (e.g.
-   * surfacing `nextAttemptAt` in an HTTP response after a queued
-   * send).
-   */
-  getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined;
 }
 
 /**

@@ -10,6 +10,7 @@ import {
   type MessageIdempotencyStore,
   type ProtocolOutboxEntry,
   type ProtocolOutboxMetadata,
+  type ProtocolOutboxPayloadInspection,
   type ProtocolOutboxQueueStats,
   type ProtocolRouter,
   type SendOptions,
@@ -385,6 +386,7 @@ export class Messenger {
   private readonly router: ProtocolRouter;
   private readonly idempotencyStore?: MessageIdempotencyStore;
   private readonly outbox?: BoundedProtocolOutbox;
+  private readonly outboxPayloadInspection?: ProtocolOutboxPayloadInspection;
   private readonly clock: () => number;
   private readonly resolvePeer?: (peerId: string, opts: { signal: AbortSignal }) => Promise<void>;
   private readonly outboxDrainer?: OutboxDrainer;
@@ -493,6 +495,7 @@ export class Messenger {
         backoffs: deps.backoffs,
         maxAgeMs: deps.maxAgeMs,
       });
+      this.outboxPayloadInspection = this.outbox.payloadInspection();
     }
     this.clock = deps.clock ?? (() => Date.now());
     this.sloWindowSamples = deps.sloWindowSamples ?? DEFAULT_SLO_WINDOW_SAMPLES;
@@ -1179,13 +1182,13 @@ export class Messenger {
   }
 
   /** Explicit legacy payload inspection; operational diagnostics use listOutboxMetadata. */
-  listOutbox(): ProtocolOutboxEntry[] {
-    return this.outbox?.list() ?? [];
+  listOutbox(): ProtocolOutboxEntry[] | undefined {
+    return this.outboxPayloadInspection?.list();
   }
 
   /** Metadata-only diagnostics never load queued envelopes. */
-  listOutboxMetadata(): ProtocolOutboxMetadata[] {
-    return this.outbox?.listMetadata() ?? [];
+  listOutboxMetadata(peerId?: string): ProtocolOutboxMetadata[] {
+    return this.outbox?.listMetadata(peerId) ?? [];
   }
 
   /** Fixed-cardinality queue/admission gauges and skip counters for /api/slo. */
@@ -1202,7 +1205,7 @@ export class Messenger {
    * when no outbox is wired or no such entry exists.
    */
   getOutboxEntry(peerId: string, protocolId: string, messageId: string): ProtocolOutboxEntry | undefined {
-    return this.outbox?.getEntry(peerId, protocolId, messageId);
+    return this.outboxPayloadInspection?.getEntry(peerId, protocolId, messageId);
   }
 
   private requireSubstrate(method: string): void {

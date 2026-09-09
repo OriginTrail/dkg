@@ -1,6 +1,6 @@
 import { DKGAgent, type DKGAgentConfig } from '@origintrail-official/dkg-agent';
 import { Messenger } from '@origintrail-official/dkg-agent/dist/p2p/messenger.js';
-import { ProtocolOutbox, type ProtocolOutboxStore, type BoundedProtocolOutboxStore,
+import { BoundedProtocolOutbox, ProtocolOutbox, type ProtocolOutboxStore, type BoundedProtocolOutboxStore,
   type ProtocolRouter, type ProtocolOutboxEntry, type ProtocolOutboxMetadata } from '@origintrail-official/dkg-core';
 
 declare const unboundedStore: ProtocolOutboxStore;
@@ -19,7 +19,7 @@ declare const agent: DKGAgent;
 declare const messenger: Messenger;
 const legacyChat: ProtocolOutboxEntry[] = agent.listMessageOutbox();
 const chatMetadata: ProtocolOutboxMetadata[] = agent.listMessageOutboxMetadata();
-const legacyMessenger: ProtocolOutboxEntry[] = messenger.listOutbox();
+const legacyMessenger: ProtocolOutboxEntry[] | undefined = messenger.listOutbox();
 const messengerMetadata: ProtocolOutboxMetadata[] = messenger.listOutboxMetadata();
 const legacyDue: ProtocolOutboxEntry[] = new ProtocolOutbox(unboundedStore).duePage(Date.now());
 void legacyChat; void chatMetadata; void legacyMessenger; void messengerMetadata; void legacyDue;
@@ -30,5 +30,7 @@ type AutomaticStore = Pick<BoundedProtocolOutboxStore,
   | 'readDuePage' | 'listMetadata' | 'dropExpiredMetadata' | 'recordRetryFailure' | 'queueStats'>;
 declare const automaticOnly: AutomaticStore;
 new Messenger({ router, outboxStore: automaticOnly });
+const automaticOutbox = new BoundedProtocolOutbox(automaticOnly);
+const unavailableInspection: undefined | { list(): ProtocolOutboxEntry[] } = automaticOutbox.payloadInspection();
 const automaticConfig: AgentOutboxStore = automaticOnly;
-void automaticConfig;
+void automaticConfig; void unavailableInspection;

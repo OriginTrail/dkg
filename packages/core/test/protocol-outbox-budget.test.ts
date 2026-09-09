@@ -19,8 +19,7 @@ it('uses a bounded-only store without any legacy payload inspection methods', ()
   outbox.enqueueFailure('peer', '/test', 'id', new Uint8Array([7]), 'offline', 0);
   expect(outbox.readDuePage(10, { maxEntries: 1, maxPayloadBytes: 1 }).entries[0].messageId).toBe('id');
   expect(outbox.hasPendingFor('peer')).toBe(true);
-  expect(() => outbox.list()).toThrow('does not support legacy payload inspection');
-  expect(() => outbox.getEntry('peer', '/test', 'id')).toThrow('does not support legacy payload inspection');
+  expect(outbox.payloadInspection()).toBeUndefined();
   outbox.markDelivered('peer', '/test', 'id');
   expect(outbox.size()).toBe(0);
 });
@@ -68,7 +67,8 @@ describe('byte-bounded outbox access', () => {
     const { outbox, add } = fixture(); add('a', 3);
     const page = outbox.readDuePage(10, { maxEntries: 1, maxPayloadBytes: 3 });
     page.entries[0].payload[0] = 99;
-    expect(outbox.getEntry('peer', '/test', 'a')?.payload).toEqual(new Uint8Array([7, 7, 7]));
+    expect(outbox.payloadInspection()!.getEntry('peer', '/test', 'a')?.payload)
+      .toEqual(new Uint8Array([7, 7, 7]));
     outbox.markDelivered('peer', '/test', 'a');
     expect(outbox.recordRetryFailure('peer', '/test', 'a', 'late failure', 20)).toBeUndefined();
     expect(outbox.size()).toBe(0);

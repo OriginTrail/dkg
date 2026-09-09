@@ -61,12 +61,12 @@ it('keeps retry updates, summary diagnostics and expiry on metadata-only store m
 
 it('preserves legacy payload inspection and offers metadata-only diagnostics', () => {
   const { messenger, add } = fixture(); const entry = add('entry');
-  expect(messenger.listOutbox()[0].payload).toEqual(entry.payload);
+  expect(messenger.listOutbox()![0].payload).toEqual(entry.payload);
   expect(messenger.listOutboxMetadata()[0]).not.toHaveProperty('payload');
-  const payload = messenger.listOutbox()[0]!.payload;
+  const payload = messenger.listOutbox()![0]!.payload;
   expect(payload).toEqual(entry.payload);
   payload.fill(0);
-  expect(messenger.listOutbox()[0]!.payload).toEqual(entry.payload);
+  expect(messenger.listOutbox()![0]!.payload).toEqual(entry.payload);
 });
 
 it('does not resurrect a retry removed while its wire attempt was in flight', async () => {
@@ -166,7 +166,7 @@ it('holds only one transport-sized default page when queued payloads exceed that
 
 it('returns empty diagnostics when Messenger has no durable substrate', () => {
   const messenger = new Messenger({ router: {} as ProtocolRouter });
-  expect(messenger.listOutbox()).toEqual([]);
+  expect(messenger.listOutbox()).toBeUndefined();
   expect(messenger.listOutboxMetadata()).toEqual([]);
   expect(messenger.getOutboxStats()).toBeUndefined();
 });
@@ -188,4 +188,5 @@ it('drains a custom store that implements only automatic retry capabilities', as
   expect(send).toHaveBeenCalledTimes(1);
   expect(messenger.outboxSize()).toBe(0);
   expect(messenger.listOutboxMetadata()).toEqual([]);
+  expect(messenger.listOutbox()).toBeUndefined();
 });

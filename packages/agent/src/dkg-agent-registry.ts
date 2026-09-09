@@ -1836,7 +1836,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
   listMessageOutbox(this: DKGAgent): ProtocolOutboxEntry[] {
     return this.messenger
       .listOutbox()
-      .filter((entry) => entry.protocol === PROTOCOL_MESSAGE);
+      ?.filter((entry) => entry.protocol === PROTOCOL_MESSAGE) ?? [];
   }
 
   /** Chat retry diagnostics without loading queued envelope payloads. */
