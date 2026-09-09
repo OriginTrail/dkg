@@ -1264,7 +1264,7 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
         },
       } as any));
 
-      for (let i = 0; i < 50 && !syncState(agent).snapshot(remotePeer).backoff !== undefined; i++) {
+      for (let i = 0; i < 50 && syncState(agent).snapshot(remotePeer).backoff === undefined; i++) {
         await new Promise(r => setTimeout(r, 10));
       }
 
