@@ -139,10 +139,10 @@ export function buildGate1RolloutActivation(
 }
 
 export function isGate1VmChainInventorySelected(
-  agent: DKGAgent,
+  agent: { getVmReconcileTargetIds(): readonly string[] },
   contextGraphId: string,
 ): boolean {
-  return agent.rfc64SelectedVmReconcileTargetIds().includes(contextGraphId);
+  return agent.getVmReconcileTargetIds().includes(contextGraphId);
 }
 
 /**

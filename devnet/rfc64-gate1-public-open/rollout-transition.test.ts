@@ -5,7 +5,6 @@ import { join, resolve } from 'node:path';
 import process from 'node:process';
 import { after, test } from 'node:test';
 
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   MemoryLayer,
   computeAuthorCatalogScopeDigestV1,
@@ -103,17 +102,17 @@ test('routes every registered rollout command through its own output decoder', (
 
 test('rollout VM evidence reflects the running agent selection', () => {
   const selected = {
-    rfc64SelectedVmReconcileTargetIds: () => [CONTEXT_GRAPH_ID],
+    getVmReconcileTargetIds: () => [CONTEXT_GRAPH_ID],
   };
   const unselected = {
-    rfc64SelectedVmReconcileTargetIds: () => [],
+    getVmReconcileTargetIds: () => [],
   };
   assert.equal(
-    isGate1VmChainInventorySelected(selected as unknown as DKGAgent, CONTEXT_GRAPH_ID),
+    isGate1VmChainInventorySelected(selected, CONTEXT_GRAPH_ID),
     true,
   );
   assert.equal(
-    isGate1VmChainInventorySelected(unselected as unknown as DKGAgent, CONTEXT_GRAPH_ID),
+    isGate1VmChainInventorySelected(unselected, CONTEXT_GRAPH_ID),
     false,
   );
 });

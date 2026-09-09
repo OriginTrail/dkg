@@ -9,9 +9,13 @@ const targeted: Promise<string | null> = agent.selfPrimeSubscriptionOnChainId(
   'cg', { subscribed: true, synced: false, syncMode: 'always-on' }, 500n,
 );
 const completed: Promise<void> = agent.runVmReconcileSweep();
+const targets: readonly string[] = agent.getVmReconcileTargetIds();
+// @ts-expect-error Candidate bucketing stays internal; diagnostics expose only IDs.
+agent.selectVmReconcileTargets();
 void admitted;
 void targeted;
 void completed;
+void targets;
 
 // @ts-expect-error Sweep capacity waiting is internal, not a supported dispatcher operation.
 dispatcher.schedulePeriodicWhenAvailable('cg');

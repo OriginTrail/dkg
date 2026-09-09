@@ -6,16 +6,7 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 export class VmReconcileSchedulingMethods extends DKGAgentBase {
-  protected prepareVmReconcileSweep(this: DKGAgent) {
-    if (this.started && !this.vmReconcileRuntimeReady) return;
-    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
-    const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
-    const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
-      && !lifecycleSignal?.aborted
-      && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
-    const scheduling = this.vmReconcileScheduling;
-    if (!isLifecycleCurrent() || !this.vmReconcileEnabled() || !scheduling) return;
-
+  protected selectVmReconcileTargets(this: DKGAgent) {
     const bound = new Set<string>();
     const unbound: string[] = [];
     for (const [localCgId, sub] of this.subscribedContextGraphs) {
@@ -25,12 +16,29 @@ export class VmReconcileSchedulingMethods extends DKGAgentBase {
     }
     for (const localCgId of this.rfc64SelectedVmReconcileTargetIds()) bound.add(localCgId);
     return {
-      scheduling,
-      isLifecycleCurrent,
-      lifecycleSignal,
       bound: [...bound],
       unbound: unbound.filter(key => !bound.has(key)),
     };
+  }
+
+  /** Current VM target intent, including subscriptions that still need binding.
+   * This snapshot performs no admission, chain reads, or lifecycle transition.
+   */
+  getVmReconcileTargetIds(this: DKGAgent): readonly string[] {
+    const { bound, unbound } = this.selectVmReconcileTargets();
+    return [...bound, ...unbound];
+  }
+
+  protected prepareVmReconcileSweep(this: DKGAgent) {
+    if (this.started && !this.vmReconcileRuntimeReady) return;
+    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
+    const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
+    const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
+      && !lifecycleSignal?.aborted
+      && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
+    const scheduling = this.vmReconcileScheduling;
+    if (!isLifecycleCurrent() || !this.vmReconcileEnabled() || !scheduling) return;
+    return { scheduling, isLifecycleCurrent, lifecycleSignal, ...this.selectVmReconcileTargets() };
   }
 
   /** Timer-only admission turn; physical workers never serialize later ticks. */
