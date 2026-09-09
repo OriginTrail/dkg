@@ -418,6 +418,24 @@ describe('mcpUninstallAction', () => {
 
 
 describe('stable client selectors', () => {
+  it('retains the selected logical client when different IDs share a symlinked config leaf', async () => {
+    const cursor = target('Cursor');
+    seed(cursor);
+    if (cursor.id !== 'cursor') throw new Error('Expected Cursor fixture');
+    const aliasPath = join(root, 'claude-alias.json');
+    fs.symlinkSync(cursor.configPath, aliasPath);
+    const claude: ClientTarget = { ...cursor, id: 'claude-desktop', name: 'Claude Desktop', configPath: aliasPath, displayPath: aliasPath };
+    const messages: string[] = [];
+    await mcpUninstallAction({ yes: true, client: 'claude-desktop' }, {
+      detectClients: () => [cursor, claude], log: message => { messages.push(message); },
+    });
+    expect(messages.join('\n')).toContain('Claude Desktop');
+    expect(messages).toContain('Removed DKG MCP from Claude Desktop');
+    expect(messages.some(message => /^Found DKG MCP: Cursor|^Removed DKG MCP from Cursor/.test(message))).toBe(false);
+    expect(inspectRegistration(cursor)).toBe(false);
+    expect(fs.lstatSync(aliasPath).isSymbolicLink()).toBe(true);
+  });
+
   it.each([false, true])('setup writes an aliased WSL leaf once using Windows persistence (symlink: %s)', async (symlink) => {
     vi.stubEnv('HOME', root);
     vi.stubEnv('USERPROFILE', root);
@@ -448,7 +466,7 @@ describe('stable client selectors', () => {
     const writes = vi.mocked(writeMcpConfigAtomic).mock.calls.slice(writesBefore);
     expect(writes).toHaveLength(1);
     expect(writes[0]).toEqual([
-      windows.configPath, expect.any(String),
+      fs.realpathSync(windows.configPath), expect.any(String),
       expect.objectContaining({ kind: 'windows-wsl' }), expect.any(Object),
     ]);
     expect(read(windows).mcpServers.dkg.command).toBe(process.execPath);
@@ -472,7 +490,7 @@ describe('stable client selectors', () => {
     await mcpUninstallAction({ yes: true, client: 'cursor' }, { detectClients: () => [client], log: () => {} });
     expect(inspectRegistration(client)).toBe(false);
     expect(writeMcpConfigAtomic).toHaveBeenCalledWith(
-      client.configPath,
+      fs.realpathSync(client.configPath),
       expect.any(String),
       expect.objectContaining({ kind: 'windows-wsl' }),
       expect.any(Object),
@@ -502,7 +520,7 @@ describe('stable client selectors', () => {
     expect(inspectRegistration(native)).toBe(false);
     expect(vi.mocked(writeMcpConfigAtomic).mock.calls).toHaveLength(callsBefore + 1);
     expect(writeMcpConfigAtomic).toHaveBeenCalledWith(
-      windows.configPath,
+      fs.realpathSync(windows.configPath),
       expect.any(String),
       expect.objectContaining({ kind: 'windows-wsl' }),
       expect.any(Object),

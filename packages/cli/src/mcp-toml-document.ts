@@ -12,7 +12,7 @@ import {
   type TomlCstNode,
   type ValCstNode,
 } from '@toml-tools/parser';
-import { DKG_SERVER_KEY, tildify, type ClientTarget } from './mcp-client-registry.js';
+import { DKG_SERVER_KEY, tildify, type McpConfigEndpoint } from './mcp-client-registry.js';
 import { writeMcpConfigAtomic, type McpConfigSourceSnapshot } from './mcp-config-file.js';
 import { mcpConfigPersistenceStrategy } from './mcp-config-metadata.js';
 import type { PersistedRegistration, RegistrationEdit } from './mcp-client-config.js';
@@ -46,7 +46,7 @@ export function readToml(path: string): Record<string, unknown> {
 }
 
 function serialiseTomlEntryOnly(
-  target: ClientTarget,
+  target: McpConfigEndpoint,
   registration: PersistedRegistration,
 ): string {
   const nested: Record<string, unknown> = {
@@ -174,7 +174,7 @@ function appendTomlTable(raw: string, replacement: string, newline: string): str
 
 function replaceTomlTable(
   raw: string,
-  serverContainer: ClientTarget['serverContainer'],
+  serverContainer: McpConfigEndpoint['serverContainer'],
   edit: { kind: 'upsert'; block: string } | { kind: 'remove' },
   parsedRawHasOwnedEntry: boolean,
   parsedRawHasOwnedParent: boolean,
@@ -243,13 +243,13 @@ function replaceTomlTable(
   return out + raw.slice(cursor);
 }
 
-function tomlRawHasContainer(raw: string, container: ClientTarget['serverContainer']): boolean {
+function tomlRawHasContainer(raw: string, container: McpConfigEndpoint['serverContainer']): boolean {
   try { return raw.trim() !== '' && TOML.parse(raw)[container] !== undefined; }
   catch { return false; }
 }
 
 export function writeTomlConfigEdit(
-  target: ClientTarget,
+  target: McpConfigEndpoint,
   body: Record<string, unknown>,
   edit: RegistrationEdit,
   source: McpConfigSourceSnapshot,
@@ -284,7 +284,7 @@ export function writeTomlConfigEdit(
   }
   if (patched === null) {
     process.stderr.write(
-      `[mcp-config] WARNING: ${target.name} config at ${tildify(target.configPath)} ` +
+      `[mcp-config] WARNING: TOML config at ${tildify(target.configPath)} ` +
         `uses a TOML shape that cannot be patched safely for ${ownedPath}; ` +
         'rewriting the TOML file to avoid invalid or duplicate definitions. ' +
         'Comments/formatting outside this entry may not be preserved.\n',

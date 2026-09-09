@@ -1,4 +1,4 @@
-import { detectClients, selectMcpClientTargets, tildify, clientSkillPath, type ClientTarget } from './mcp-client-registry.js';
+import { detectClients, selectMcpClientTargets, mcpConfigClientNames, tildify, clientSkillPath, type ClientTarget, type McpConfigSelection } from './mcp-client-registry.js';
 import { readRegistration, classifyRegistration, writeRegistration, type DesiredRegistration } from './mcp-client-config.js';
 /**
  * `dkg mcp setup` — bundled init + daemon-start + MCP-client registration.
@@ -389,14 +389,14 @@ export async function confirmPlan(
       const verb = { register: 'Register', refresh: 'Refresh' }[p.action];
       const ans = (
         await rl.question(
-          `${verb} DKG MCP with ${p.s.target.name} (${p.s.target.displayPath})? [Y/n] `,
+          `${verb} DKG MCP with ${mcpConfigClientNames(p.s.target)} (${p.s.target.endpoint.displayPath})? [Y/n] `,
         )
       )
         .trim()
         .toLowerCase();
       const declined = ans === 'n' || ans === 'no';
       if (declined) {
-        console.log(`  → declined; will skip ${p.s.target.name}`);
+        console.log(`  → declined; will skip ${mcpConfigClientNames(p.s.target)}`);
         result.push({ ...p, action: 'skip' });
       } else {
         result.push(p);
@@ -497,15 +497,15 @@ function detectContext(
 type RegistrationState = 'registered' | 'stale' | 'not-registered';
 
 interface ClientState {
-  target: ClientTarget;
+  target: McpConfigSelection;
   state: RegistrationState;
 }
 
 function classify(
-  target: ClientTarget,
+  target: McpConfigSelection,
   expected: DesiredRegistration,
 ): ClientState {
-  const current = readRegistration(target);
+  const current = readRegistration(target.endpoint);
   return { target, state: classifyRegistration(current, expected) };
 }
 
@@ -999,20 +999,20 @@ export async function mcpSetupAction(
   // emit a stderr warning, mark the target as failed, and force
   // the planner below to `skip` it so no write is attempted on a
   // client we couldn't read. Other clients continue unaffected.
-  const classifyFailed = new Set<string>();
+  const classifyFailed = new Set<McpConfigSelection>();
   const states: ClientState[] = clients.map((c) => {
     try {
       return classify(c, expectedEntry);
     } catch (err: any) {
       process.stderr.write(
-        `[setup] WARNING: ${c.name} classify failed (${err?.message ?? err}); skipping this client.\n`,
+        `[setup] WARNING: ${mcpConfigClientNames(c)} classify failed (${err?.message ?? err}); skipping this client.\n`,
       );
-      classifyFailed.add(c.name);
+      classifyFailed.add(c);
       return { target: c, state: 'not-registered' };
     }
   });
   const planned: PlannedItem[] = states.map((s) => {
-    if (classifyFailed.has(s.target.name)) return { s, action: 'skip' };
+    if (classifyFailed.has(s.target)) return { s, action: 'skip' };
     if (force) return { s, action: 'refresh' };
     if (s.state === 'not-registered') return { s, action: 'register' };
     if (s.state === 'stale') return { s, action: 'refresh' };
@@ -1032,7 +1032,7 @@ export async function mcpSetupAction(
         : action === 'refresh'
           ? 'will refresh'
           : 'leaving alone';
-    console.log(`  ${s.target.name.padEnd(13)} (${s.target.displayPath}) — ${stateLabel}; ${actionLabel}`);
+    console.log(`  ${mcpConfigClientNames(s.target).padEnd(13)} (${s.target.endpoint.displayPath}) — ${stateLabel}; ${actionLabel}`);
   }
 
   // F31: per-client interactive confirm. Skipped on `--yes`, in
@@ -1079,15 +1079,18 @@ export async function mcpSetupAction(
     console.log('');
     for (const { s, action } of writes) {
       try {
-        writeRegistration(s.target, expectedEntry);
-        console.log(`  ${action === 'register' ? 'Registered' : 'Refreshed'} ${s.target.name} → ${s.target.displayPath}`);
+        writeRegistration(s.target.endpoint, expectedEntry);
+        console.log(`  ${action === 'register' ? 'Registered' : 'Refreshed'} ${mcpConfigClientNames(s.target)} → ${s.target.endpoint.displayPath}`);
         // RFC-41 §4.5: explicit SKILL.md delivery for Cursor + Claude Code,
         // which don't walk node_modules for skill discovery. Returns null
         // for clients that don't support skill delivery; logs a warning
         // on failure but doesn't fail the MCP registration that just succeeded.
-        const skillPath = deliverSkillToClient(s.target);
-        if (skillPath) {
-          console.log(`    └─ SKILL.md copied to ${tildify(skillPath)}`);
+        const delivered = new Set<string>();
+        for (const alias of s.target.aliases) {
+          if (delivered.has(alias.id)) continue;
+          delivered.add(alias.id);
+          const skillPath = deliverSkillToClient(alias);
+          if (skillPath) console.log(`    └─ SKILL.md copied to ${tildify(skillPath)}`);
         }
       } catch (err: any) {
         // Codex Round-8 Fix 15: per-client write error isolation.
@@ -1103,9 +1106,9 @@ export async function mcpSetupAction(
         // for the post-loop aggregate throw.
         const msg = err?.message ?? String(err);
         process.stderr.write(
-          `[setup] WARNING: ${s.target.name} write failed (${msg}); other clients still attempted.\n`,
+          `[setup] WARNING: ${mcpConfigClientNames(s.target)} write failed (${msg}); other clients still attempted.\n`,
         );
-        writeFailures.push({ name: s.target.name, error: msg });
+        writeFailures.push({ name: mcpConfigClientNames(s.target), error: msg });
       }
     }
   }
@@ -1128,7 +1131,7 @@ export async function mcpSetupAction(
   // failure).
   if (!dryRun) {
     const allFailures: { name: string; error: string }[] = [
-      ...Array.from(classifyFailed).map((name) => ({ name, error: 'classify failed' })),
+      ...Array.from(classifyFailed).map((target) => ({ name: mcpConfigClientNames(target), error: 'classify failed' })),
       ...writeFailures,
     ];
     if (allFailures.length > 0) {

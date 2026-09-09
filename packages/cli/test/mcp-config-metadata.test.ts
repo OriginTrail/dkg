@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, statSync, copyFileSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, existsSync, statSync, copyFileSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import { snapshotMcpConfigSource, writeMcpConfigAtomic } from '../src/mcp-config-file.js';
-import { linuxMetadataCopyCommand, mcpConfigPersistenceStrategy } from '../src/mcp-config-metadata.js';
+import { copyWindowsMcpConfigMetadata, linuxMetadataCopyCommand, mcpConfigPersistenceStrategy } from '../src/mcp-config-metadata.js';
 
 vi.mock('node:child_process', async importOriginal => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -114,33 +114,55 @@ it.runIf(nativeMetadata && process.platform === 'linux')('preserves Linux ACLs a
 
 // test-disable-allow: D1 #425 -- owner=branarakic lane=mcp-config-native-windows expires=2026-10-08 Native security-descriptor case runs on windows-latest in mcp-config-native.yml.
 it.runIf(nativeMetadata && process.platform === 'win32')('preserves a protected Windows DACL and owner through replacement', () => {
-  const powershell = (script: string) => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference='Stop'; $env:PSModulePath = $PSHOME + '\\Modules'; ${script}`], {
+  const systemPowerShell = win32.join(process.env.SystemRoot!, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const powershell = (script: string) => execFileSync(systemPowerShell, ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference='Stop'; $env:PSModulePath = $PSHOME + '\\Modules'; ${script}`], {
     encoding: 'utf8', env: { ...process.env, DKG_MCP_NATIVE_PATH: path }, windowsHide: true,
   }).trim();
   powershell("$acl=Get-Acl -LiteralPath $env:DKG_MCP_NATIVE_PATH; $acl.SetAccessRuleProtection($true,$false); $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; $rule=[System.Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','Allow'); $acl.SetAccessRule($rule); Set-Acl -LiteralPath $env:DKG_MCP_NATIVE_PATH -AclObject $acl");
   const descriptor = () => powershell('(Get-Acl -LiteralPath $env:DKG_MCP_NATIVE_PATH).Sddl');
   const before = descriptor();
   expect(powershell('(Get-Acl -LiteralPath $env:DKG_MCP_NATIVE_PATH).AreAccessRulesProtected')).toBe('True');
-  writeMcpConfigAtomic(path, '{"replacement":true}\n', mcpConfigPersistenceStrategy('native'), snapshotMcpConfigSource(path));
+  const untrusted = join(directory, 'untrusted');
+  mkdirSync(untrusted);
+  const shadowExecutable = join(untrusted, 'powershell.exe');
+  const marker = join(untrusted, 'shadow-executed');
+  vi.stubEnv('DKG_MCP_SHADOW_EXE', shadowExecutable);
+  vi.stubEnv('DKG_MCP_SHADOW_MARKER', marker);
+  const priorCwd = process.cwd();
+  try {
+    powershell(`Add-Type -TypeDefinition 'using System; using System.IO; public class ShadowPowerShell { public static int Main() { File.WriteAllText(Environment.GetEnvironmentVariable("DKG_MCP_SHADOW_MARKER"), "executed"); return 99; } }' -OutputAssembly $env:DKG_MCP_SHADOW_EXE -OutputType ConsoleApplication`);
+    // Prove the sentinel is executable before using it to detect unsafe lookup.
+    expect(() => execFileSync(shadowExecutable, [], { stdio: 'pipe' })).toThrow();
+    expect(readFileSync(marker, 'utf8')).toBe('executed');
+    rmSync(marker);
+    process.chdir(untrusted);
+    writeMcpConfigAtomic(path, '{"replacement":true}\n', mcpConfigPersistenceStrategy('native'), snapshotMcpConfigSource(path));
+    expect(existsSync(marker)).toBe(false);
+  } finally {
+    process.chdir(priorCwd);
+    vi.unstubAllEnvs();
+  }
   expect(descriptor()).toBe(before);
   expect(readFileSync(path, 'utf8')).toBe('{"replacement":true}\n');
-  expect(readdirSync(directory)).toEqual(["config 'quoted'.json"]);
+  expect(readdirSync(directory).sort()).toEqual(["config 'quoted'.json", "untrusted"]);
 });
 
 
 it('routes Windows-side WSL replacements through converted paths and Windows security APIs', () => {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
   const converted = new Map<string, string>();
+  const systemPowerShell = '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe';
   const scripts: string[] = [];
   vi.mocked(execFileSync).mockImplementation((command, args, options) => {
-    if (command === 'wslpath') {
+    if (command === '/usr/bin/wslpath') {
+      if (args?.[0] === '-u') return systemPowerShell;
       expect(args?.[0]).toBe('-w');
       const native = String(args?.[1]);
       const windows = `C:\\fixture\\${converted.size}`;
       converted.set(windows, native);
       return windows;
     }
-    expect(command).toBe('powershell.exe');
+    expect(command).toBe(systemPowerShell);
     const environment = (options as { env: NodeJS.ProcessEnv }).env;
     for (const name of ['DKG_MCP_FILE_SOURCE', 'DKG_MCP_FILE_DESTINATION', 'DKG_MCP_FILE_BACKUP']) {
       expect(environment.WSLENV?.split(':')).toContain(name);
@@ -160,4 +182,31 @@ it('routes Windows-side WSL replacements through converted paths and Windows sec
     expect(scripts[1]).toContain('::Replace');
     expect(readFileSync(path, 'utf8')).toBe('{"wsl":true}\n');
   } finally { Object.defineProperty(process, 'platform', platform); }
+});
+
+
+it('uses an absolute system PowerShell executable regardless of working-directory candidates', () => {
+  vi.stubEnv('SystemRoot', 'D:\\Windows');
+  try {
+    vi.mocked(execFileSync).mockReturnValue(Buffer.from(''));
+    copyWindowsMcpConfigMetadata('D:\\config.json', 'D:\\replacement.json', 'native');
+    expect(vi.mocked(execFileSync).mock.calls[0]?.[0]).toBe('D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+  } finally { vi.unstubAllEnvs(); }
+});
+
+it.each(['.', 'Windows', 'C:Windows', '\\Windows', 'C:\\Windows\\..\\untrusted'])('rejects ambiguous system root %s without executing a binary', root => {
+  vi.stubEnv('SystemRoot', root);
+  try {
+    expect(() => copyWindowsMcpConfigMetadata('source', 'destination', 'native')).toThrow('absolute Windows SystemRoot');
+    expect(execFileSync).not.toHaveBeenCalled();
+  } finally { vi.unstubAllEnvs(); }
+});
+
+it('rejects a relative WSL system-executable conversion before running PowerShell', () => {
+  vi.mocked(execFileSync).mockReturnValue('powershell.exe');
+  expect(() => copyWindowsMcpConfigMetadata(path, path, 'windows-wsl'))
+    .toThrow('absolute WSL path');
+  expect(execFileSync).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(execFileSync).mock.calls[0]?.[0]).toBe('/usr/bin/wslpath');
+  expect(readFileSync(path, 'utf8')).toBe('{"original":true}\n');
 });

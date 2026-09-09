@@ -1,3 +1,4 @@
+import { win32, posix } from 'node:path';
 import type { McpClientLocation } from './mcp-client-registry.js';
 import { execFileSync } from 'node:child_process';
 import { existsSync, fchmodSync, fchownSync, fstatSync, renameSync, rmSync, type Stats } from 'node:fs';
@@ -45,13 +46,29 @@ const WINDOWS_MCP_CONFIG_SCRIPTS: Record<WindowsMcpConfigOperation, string> = {
   'replace-file': '[System.IO.File]::Replace($env:DKG_MCP_FILE_SOURCE, $env:DKG_MCP_FILE_DESTINATION, $env:DKG_MCP_FILE_BACKUP, $false)',
 };
 
+/** Resolve the OS runtime without searching the working directory or PATH. */
+export function windowsPowerShellExecutable(location: McpClientLocation): string {
+  // WSL does not forward SystemRoot by default. Non-default Windows installs
+  // can supply the inherited Windows SystemRoot explicitly to the Linux process.
+  const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT ?? 'C:\\Windows';
+  if (!/^[A-Za-z]:[\\/]/.test(systemRoot) || /[\\/]\.\.?([\\/]|$)/.test(systemRoot)) {
+    throw new Error('MCP config persistence requires an absolute Windows SystemRoot (for example C:\\Windows).');
+  }
+  const executable = win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  if (location === 'native') return executable;
+  const mounted = execFileSync('/usr/bin/wslpath', ['-u', executable], { encoding: 'utf8', stdio: 'pipe' }).trim();
+  if (!posix.isAbsolute(mounted)) throw new Error('Could not resolve an absolute WSL path for system PowerShell.');
+  return mounted;
+}
+
 function runMcpConfigPowerShell(
   operation: WindowsMcpConfigOperation,
   paths: { source: string; destination: string; backup?: string },
   location: Extract<McpClientLocation, 'native' | 'windows-wsl'>,
 ): void {
+  const executable = windowsPowerShellExecutable(location);
   const windowsPath = (path: string) => location === 'windows-wsl'
-    ? execFileSync('wslpath', ['-w', path], { encoding: 'utf8', stdio: 'pipe' }).trim()
+    ? execFileSync('/usr/bin/wslpath', ['-w', path], { encoding: 'utf8', stdio: 'pipe' }).trim()
     : path;
   const pathEnvironment = {
     DKG_MCP_FILE_SOURCE: windowsPath(paths.source),
@@ -63,7 +80,7 @@ function runMcpConfigPowerShell(
   const forwardedNames = Object.keys(pathEnvironment);
   const wslEnvironment = [...(process.env.WSLENV ?? '').split(':')
     .filter(name => name && !forwardedNames.includes(name.split('/')[0]!)), ...forwardedNames].join(':');
-  execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference = 'Stop'; $env:PSModulePath = $PSHOME + '\\Modules'; ${WINDOWS_MCP_CONFIG_SCRIPTS[operation]}`], {
+  execFileSync(executable, ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference = 'Stop'; $env:PSModulePath = $PSHOME + '\\Modules'; ${WINDOWS_MCP_CONFIG_SCRIPTS[operation]}`], {
     stdio: 'pipe',
     windowsHide: true,
     env: {

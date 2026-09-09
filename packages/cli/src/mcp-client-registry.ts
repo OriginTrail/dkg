@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { homedir, platform, release as osRelease } from 'node:os';
 import { execSync } from 'node:child_process';
 
@@ -34,7 +34,7 @@ const MCP_CLIENT_REGISTRY = [
     skillPath: ['.claude', 'skills', 'dkg-node', 'SKILL.md'],
   },
   { target: { id: 'claude-desktop', name: 'Claude Desktop', ...JSON_MCP },
-    nativePaths: claudeDesktopPaths,
+    nativePaths: (_home: string, root: string) => appConfigPaths(root, 'Claude', 'claude_desktop_config.json'),
     windowsPath: (env: WindowsPaths) => env.APPDATA && join(env.APPDATA, 'Claude', 'claude_desktop_config.json'),
   },
   { target: { id: 'windsurf', name: 'Windsurf', ...JSON_MCP },
@@ -42,11 +42,11 @@ const MCP_CLIENT_REGISTRY = [
     windowsPath: (env: WindowsPaths) => env.USERPROFILE && join(env.USERPROFILE, '.codeium', 'windsurf', 'mcp_config.json'),
   },
   { target: { id: 'vscode', name: 'VSCode', ...JSONC_SERVERS },
-    nativePaths: vscodeMcpPaths,
+    nativePaths: (_home: string, root: string) => appConfigPaths(root, 'Code', 'User', 'mcp.json'),
     windowsPath: (env: WindowsPaths) => env.APPDATA && join(env.APPDATA, 'Code', 'User', 'mcp.json'),
   },
   { target: { id: 'cline', name: 'Cline', ...JSON_MCP },
-    nativePaths: clineMcpPaths,
+    nativePaths: (_home: string, root: string) => appConfigPaths(root, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json'),
     windowsPath: (env: WindowsPaths) => env.APPDATA && join(env.APPDATA, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json'),
   },
   { target: { id: 'codex-cli', name: 'Codex CLI', ...TOML_SERVERS },
@@ -80,28 +80,57 @@ export function parseMcpClientSelector(value: string): { id: McpClientId; locati
   return { id: client.target.id, location };
 }
 
-/** Select each physical owned leaf once, retaining its authoritative persistence location. */
+/** Physical storage owns format and persistence, independently of client identity. */
+export type McpConfigEndpoint = McpClientConfigShape & {
+  readonly configPath: string;
+  readonly displayPath: string;
+  readonly location: McpClientLocation;
+};
+
+export interface McpConfigSelection {
+  readonly endpoint: McpConfigEndpoint;
+  /** Logical clients selected by the caller; never replaced by a storage alias. */
+  readonly aliases: readonly ClientTarget[];
+}
+
+export function mcpConfigClientNames(selection: McpConfigSelection): string {
+  return [...new Set(selection.aliases.map(alias => alias.name))].join(', ');
+}
+
+/** Select each physical owned leaf once while retaining the selected logical aliases. */
 export function selectMcpClientTargets(
   clients: readonly ClientTarget[],
   selector?: ReturnType<typeof parseMcpClientSelector>,
-): ClientTarget[] {
-  const groups = new Map<string, ClientTarget[]>();
+): McpConfigSelection[] {
+  const groups = new Map<string, { path: string; aliases: ClientTarget[] }>();
   for (const target of clients) {
     let physicalPath: string;
     try { physicalPath = realpathSync(target.configPath); }
-    catch { physicalPath = resolve(target.configPath); }
+    catch {
+      // First registration can also arrive through an existing symlinked parent.
+      try { physicalPath = join(realpathSync(dirname(target.configPath)), basename(target.configPath)); }
+      catch { physicalPath = resolve(target.configPath); }
+    }
     const leaf = JSON.stringify([physicalPath, target.serverContainer, DKG_SERVER_KEY]);
-    const group = groups.get(leaf) ?? [];
-    group.push(target);
+    const group = groups.get(leaf) ?? { path: physicalPath, aliases: [] };
+    group.aliases.push(target);
     groups.set(leaf, group);
   }
-  // Match logical aliases before selecting the persistence strategy. A native
-  // WSL HOME can point at the same NTFS file as a Windows-side client target;
-  // even an explicit :native selector must preserve that file's Windows DACL.
-  return [...groups.values()]
-    .filter(group => !selector || group.some(target => target.id === selector.id
-      && (!selector.location || target.location === selector.location)))
-    .map(group => group.find(target => target.location === 'windows-wsl') ?? group[0]!);
+  const selected: McpConfigSelection[] = [];
+  for (const group of groups.values()) {
+    const aliases = group.aliases.filter(target => !selector || (target.id === selector.id
+      && (!selector.location || target.location === selector.location)));
+    if (aliases.length === 0) continue;
+    // A selected native alias can still refer to a Windows-backed file. Only
+    // storage fields come from the persistence owner; identity stays in aliases.
+    const storage = group.aliases.find(target => target.location === 'windows-wsl') ?? group.aliases[0]!;
+    const { id: _id, name: _name, ...endpoint } = storage;
+    selected.push({
+      endpoint: { ...endpoint, configPath: group.path },
+      aliases,
+    });
+  }
+  return selected;
 }
 
 export function clientSkillPath(id: McpClientId, home: string): string | null {
@@ -119,105 +148,17 @@ export function tildify(p: string): string {
   return p.startsWith(home) ? '~' + p.slice(home.length) : p;
 }
 
-/**
- * Codex Round-6 Fix 9: resolve the Linux config base directory,
- * honouring `XDG_CONFIG_HOME` when set. Per the XDG Base Directory
- * spec, applications that store config under `~/.config` should
- * defer to `$XDG_CONFIG_HOME` first — users who relocate app
- * configs (common on multi-user systems and dotfile-managed
- * setups) were previously invisible to `dkg mcp setup`'s detection
- * sweep. Used by the Claude Desktop / VSCode + Copilot Chat /
- * Cline Linux path resolvers below.
- */
-function linuxConfigDir(home: string): string {
-  return process.env.XDG_CONFIG_HOME ?? join(home, '.config');
+/** Resolve the native application-config root once for the detection sweep. */
+function nativeApplicationConfigRoot(home: string): string {
+  switch (platform()) {
+    case 'darwin': return join(home, 'Library', 'Application Support');
+    case 'win32': return process.env.APPDATA ?? join(home, 'AppData', 'Roaming');
+    default: return process.env.XDG_CONFIG_HOME ?? join(home, '.config');
+  }
 }
 
-/**
- * Resolve Claude Desktop's per-platform config path. The macOS path
- * uses `~/Library/Application Support/Claude/`; Windows uses
- * `%APPDATA%\Claude\`; Linux follows XDG-ish convention at
- * `~/.config/Claude/`. The display path tildifies the home prefix
- * so the operator-facing log reads consistently across platforms.
- */
-function claudeDesktopPaths(home: string): { configPath: string; displayPath: string } {
-  const p = platform();
-  if (p === 'darwin') {
-    const configPath = join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json');
-    return { configPath, displayPath: '~/Library/Application Support/Claude/claude_desktop_config.json' };
-  }
-  if (p === 'win32') {
-    const appData = process.env.APPDATA ?? join(home, 'AppData', 'Roaming');
-    const configPath = join(appData, 'Claude', 'claude_desktop_config.json');
-    return { configPath, displayPath: configPath.replace(home, '~') };
-  }
-  // Linux + everything else: XDG-style. Per Claude's docs the active
-  // config under Linux is `<XDG_CONFIG_HOME>/Claude/claude_desktop_config.json`,
-  // falling back to `~/.config/Claude/...` when XDG_CONFIG_HOME is unset.
-  const configPath = join(linuxConfigDir(home), 'Claude', 'claude_desktop_config.json');
-  return { configPath, displayPath: tildify(configPath) };
-}
-
-/**
- * Resolve VSCode + Copilot Chat's per-platform user-settings MCP
- * config path. VSCode keeps user-scoped settings under
- * `<userDataDir>/User/`; on Mac this is
- * `~/Library/Application Support/Code/User/mcp.json`; on Windows
- * it's `%APPDATA%\Code\User\mcp.json`; on Linux it's
- * `~/.config/Code/User/mcp.json`. Note this is the user-scoped
- * (cross-workspace) config, not the per-workspace `.vscode/mcp.json`.
- *
- * Diverges from the canonical `mcpServers.dkg` shape: Copilot Chat's
- * MCP wiring uses `servers.dkg` instead. The phase-1 serverContainer
- * dispatch handles that without per-client write logic.
- */
-function vscodeMcpPaths(home: string): { configPath: string; displayPath: string } {
-  const p = platform();
-  if (p === 'darwin') {
-    const configPath = join(home, 'Library', 'Application Support', 'Code', 'User', 'mcp.json');
-    return { configPath, displayPath: '~/Library/Application Support/Code/User/mcp.json' };
-  }
-  if (p === 'win32') {
-    const appData = process.env.APPDATA ?? join(home, 'AppData', 'Roaming');
-    const configPath = join(appData, 'Code', 'User', 'mcp.json');
-    return { configPath, displayPath: configPath.replace(home, '~') };
-  }
-  const configPath = join(linuxConfigDir(home), 'Code', 'User', 'mcp.json');
-  return { configPath, displayPath: tildify(configPath) };
-}
-
-/**
- * Resolve Cline (VSCode extension) per-platform config path. Cline
- * stores its MCP wiring inside VSCode's per-extension globalStorage
- * directory under the extension publisher.id namespace
- * (`saoudrizwan.claude-dev`). Same `mcpServers.dkg` JSON shape as
- * Cursor / Claude Code; what's hard is just the deeply-nested path.
- *
- * macOS: `~/Library/Application Support/Code/User/globalStorage/...`
- * Windows: `%APPDATA%\Code\User\globalStorage\...`
- * Linux:  `~/.config/Code/User/globalStorage/...`
- *
- * Mirrors `vscodeMcpPaths` for the per-platform Code-user-data root,
- * with the per-extension globalStorage suffix appended.
- */
-function clineMcpPaths(home: string): { configPath: string; displayPath: string } {
-  const suffix = join(
-    'globalStorage',
-    'saoudrizwan.claude-dev',
-    'settings',
-    'cline_mcp_settings.json',
-  );
-  const p = platform();
-  if (p === 'darwin') {
-    const configPath = join(home, 'Library', 'Application Support', 'Code', 'User', suffix);
-    return { configPath, displayPath: `~/Library/Application Support/Code/User/${suffix.replace(/\\/g, '/')}` };
-  }
-  if (p === 'win32') {
-    const appData = process.env.APPDATA ?? join(home, 'AppData', 'Roaming');
-    const configPath = join(appData, 'Code', 'User', suffix);
-    return { configPath, displayPath: configPath.replace(home, '~') };
-  }
-  const configPath = join(linuxConfigDir(home), 'Code', 'User', suffix);
+function appConfigPaths(root: string, ...suffix: string[]) {
+  const configPath = join(root, ...suffix);
   return { configPath, displayPath: tildify(configPath) };
 }
 
@@ -232,7 +173,7 @@ function clineMcpPaths(home: string): { configPath: string; displayPath: string 
  *   - Cursor:        `~/.cursor/mcp.json` — global per-user MCP config
  *   - Claude Code:   `~/.claude.json` — user-scoped path the MCP-server
  *     wiring already uses across the rest of the codebase
- *   - Claude Desktop: per-platform (see `claudeDesktopPaths`)
+ *   - Claude Desktop: per-platform (native application-config root)
  *   - Windsurf (Codeium): `~/.codeium/windsurf/mcp_config.json`
  *
  * Detection is deliberately permissive: any client whose config file is
@@ -314,10 +255,11 @@ export function detectClients(
     wslWindowsEnvPath,
 ): ClientTarget[] {
   const home = homedir();
+  const appConfigRoot = nativeApplicationConfigRoot(home);
   const candidates: ClientTarget[] = MCP_CLIENT_REGISTRY.map((client) => ({
     ...client.target,
     location: 'native',
-    ...client.nativePaths(home),
+    ...client.nativePaths(home, appConfigRoot),
   }));
   if (isWSL()) {
     const windows = {

@@ -5,7 +5,7 @@ import { applyEdits, createScanner, findNodeAtLocation, modify, parse as parseJs
 import { snapshotMcpConfigSource, writeMcpConfigAtomic, type McpConfigSourceSnapshot } from './mcp-config-file.js';
 import { mcpConfigPersistenceStrategy } from './mcp-config-metadata.js';
 import { readToml, writeTomlConfigEdit } from './mcp-toml-document.js';
-import { DKG_SERVER_KEY, tildify, type ClientTarget } from './mcp-client-registry.js';
+import { DKG_SERVER_KEY, tildify, type McpConfigEndpoint } from './mcp-client-registry.js';
 
 /** Parsed config objects have named fields; arrays/scalars are never mergeable records. */
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -93,7 +93,7 @@ function readJson(path: string, format: 'json' | 'jsonc' = 'json'): Record<strin
  * first-write callers don't have to special-case
  * detection-via-parent-dir candidates.
  */
-function readConfigBody(target: ClientTarget): Record<string, unknown> {
+function readConfigBody(target: McpConfigEndpoint): Record<string, unknown> {
   const format = target.format;
   switch (format) {
     case 'json':
@@ -152,7 +152,7 @@ export type ServerKeyProbe =
  * that as "not installed": it would tell a user an integration is missing when
  * the truth is that their config could not be read.
  */
-export function readRegisteredServerKeys(target: ClientTarget): ServerKeyProbe {
+export function readRegisteredServerKeys(target: McpConfigEndpoint): ServerKeyProbe {
   let body: Record<string, unknown>;
   try {
     body = readConfigBody(target);
@@ -282,7 +282,7 @@ function addJsoncObjectProperty(
 
 /** Edit only the owned source range, preserving numeric lexemes and JSONC trivia. */
 function writeJsonDocumentEdit(
-  target: ClientTarget,
+  target: McpConfigEndpoint,
   body: Record<string, unknown>,
   edit: RegistrationEdit,
   source: McpConfigSourceSnapshot,
@@ -322,7 +322,7 @@ function writeJsonDocumentEdit(
  * logic.
  */
 function applyRegistrationEdit(
-  target: ClientTarget,
+  target: McpConfigEndpoint,
   body: Record<string, unknown>,
   edit: RegistrationEdit,
   source: McpConfigSourceSnapshot,
@@ -347,7 +347,7 @@ function applyRegistrationEdit(
 }
 
 /** Resolve the owned leaf and its mutable container from a fresh config read. */
-function registrationLocation(target: ClientTarget): {
+function registrationLocation(target: McpConfigEndpoint): {
   body: Record<string, unknown>; container: Record<string, unknown>;
 } | undefined {
   const body = readConfigBody(target);
@@ -358,12 +358,12 @@ function registrationLocation(target: ClientTarget): {
 }
 
 /** Inspect only: stale/null entries still count as an owned registration. */
-export function inspectRegistration(target: ClientTarget): boolean {
+export function inspectRegistration(target: McpConfigEndpoint): boolean {
   return registrationLocation(target) !== undefined;
 }
 
 /** Re-read, then remove only the owned leaf; retain unrelated config and empty parent containers. */
-export function removeRegistration(target: ClientTarget): boolean {
+export function removeRegistration(target: McpConfigEndpoint): boolean {
   const source = snapshotMcpConfigSource(target.configPath);
   const location = registrationLocation(target);
   if (!location) return false;
@@ -373,7 +373,7 @@ export function removeRegistration(target: ClientTarget): boolean {
 }
 
 export function writeRegistration(
-  target: ClientTarget,
+  target: McpConfigEndpoint,
   entry: DesiredRegistration,
 ): void {
   const source = snapshotMcpConfigSource(target.configPath);
@@ -409,17 +409,17 @@ export function writeRegistration(
 }
 
 /** Read the owned entry for setup classification; no mutation. */
-export function readRegistration(target: ClientTarget): RegistrationRead {
+export function readRegistration(target: McpConfigEndpoint): RegistrationRead {
   return normalizeRegistration(readOwnedRegistration(readConfigBody(target), target));
 }
 
-function readOwnedRegistration(body: Record<string, unknown>, target: ClientTarget): unknown {
+function readOwnedRegistration(body: Record<string, unknown>, target: McpConfigEndpoint): unknown {
   return readServerContainer(body, target)?.[DKG_SERVER_KEY];
 }
 
 function readServerContainer(
   body: Record<string, unknown>,
-  target: ClientTarget,
+  target: McpConfigEndpoint,
 ): Record<string, unknown> | undefined {
   if (!Object.hasOwn(body, target.serverContainer)) return undefined;
   const container = body[target.serverContainer];

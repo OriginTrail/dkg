@@ -8,7 +8,7 @@ import { SELECTABLE_SETUP_NETWORKS } from '@origintrail-official/dkg-core';
 import { mcpSetupAction, type McpSetupActionDeps, type PlannedItem } from '../src/mcp-setup.js';
 import { listBundledNetworkConfigNames, resolveKnownNetworkConfigName } from '../src/config.js';
 import { REQUIRED_SKILL_TOKENS } from '../src/skill-template.js';
-import type { ClientTarget } from '../src/mcp-client-registry.js';
+import type { ClientTarget, McpConfigSelection } from '../src/mcp-client-registry.js';
 
 /**
  * NO MOCKS. `dkg mcp setup` is a pure CLI ORCHESTRATOR over (a) a real
@@ -1195,7 +1195,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
 
     const confirmPlan = recorder(async (planned: any) =>
       planned.map((p: any) =>
-        p.s.target.name === 'Cursor' ? { ...p, action: 'skip' } : p,
+        p.s.target.aliases.some((alias: ClientTarget) => alias.id === 'cursor') ? { ...p, action: 'skip' } : p,
       ),
     );
     const deps = makeDeps({ confirmPlan });
@@ -2395,7 +2395,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       format: 'json', serverContainer: 'mcpServers', location: 'native',
     };
     const windows: ClientTarget = { ...native, name: 'Cursor via WSL', location: 'windows-wsl' };
-    const plans: ClientTarget[][] = [];
+    const plans: McpConfigSelection[][] = [];
     await mcpSetupAction({ start: false, fund: false, verify: false, force: true }, makeDeps({
       detectClients: () => windowsFirst ? [windows, native] : [native, windows],
       confirmPlan: async (planned) => {
@@ -2403,8 +2403,25 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
         return planned.map(item => ({ ...item, action: 'skip' }));
       },
     }));
-    expect(plans).toEqual([[windows]]);
+    expect(plans).toHaveLength(1);
+    expect(plans[0]).toHaveLength(1);
+    expect(plans[0][0].endpoint).toMatchObject({ configPath: realpathSync(configPath), location: 'windows-wsl' });
+    expect(plans[0][0].aliases).toEqual(windowsFirst ? [windows, native] : [native, windows]);
     expect(JSON.parse(readFileSync(configPath, 'utf8')).mcpServers.dkg.command).toBe('old');
+  });
+
+  it.each([false, true])('delivers skills to both logical clients sharing one physical config (Claude first: %s)', async (claudeFirst) => {
+    const configPath = join(tmpHome, 'shared-config.json');
+    writeFileSync(configPath, '{"mcpServers":{}}');
+    const cursor: ClientTarget = { id: 'cursor', name: 'Cursor', configPath, displayPath: configPath,
+      location: 'native', format: 'json', serverContainer: 'mcpServers' };
+    const claude: ClientTarget = { ...cursor, id: 'claude-code', name: 'Claude Code' };
+    await mcpSetupAction({ start: false, fund: false, verify: false }, makeDeps({
+      detectClients: () => claudeFirst ? [claude, cursor] : [cursor, claude],
+      confirmPlan: async (planned) => { expect(planned).toHaveLength(1); return [...planned]; },
+    }));
+    expect(existsSync(join(tmpHome, '.cursor', 'skills', 'dkg-node', 'SKILL.md'))).toBe(true);
+    expect(existsSync(join(tmpHome, '.claude', 'skills', 'dkg-node', 'SKILL.md'))).toBe(true);
   });
 
   it('rejects a malformed server container during setup while registering a healthy client', async () => {
@@ -3564,7 +3581,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const stderrText = (stderrSilencer.calls as any[])
       .map((c) => String(c[0]))
       .join('');
-    expect(stderrText).toMatch(/WARNING: Codex CLI config/);
+    expect(stderrText).toMatch(/WARNING: TOML config/);
     expect(stderrText).toMatch(/cannot be patched safely for mcp_servers\.dkg/);
     expect(stderrText).toMatch(/invalid or duplicate definitions/);
     expect(stderrText).toMatch(/Comments\/formatting outside this entry may not be preserved/);
@@ -3604,7 +3621,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const stderrText = (stderrSilencer.calls as any[])
       .map((c) => String(c[0]))
       .join('');
-    expect(stderrText).toMatch(/WARNING: Codex CLI config/);
+    expect(stderrText).toMatch(/WARNING: TOML config/);
     expect(stderrText).toMatch(/cannot be patched safely for mcp_servers\.dkg/);
     expect(after.model).toBe('gpt-5');
     expect(after.mcp_servers['github-mcp']).toEqual({
