@@ -1,3 +1,4 @@
+import { SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE, SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE } from '@origintrail-official/dkg-publisher';
 import {
   decodeFinalizationMessage,
   contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
@@ -155,8 +156,8 @@ export const KEEP_ROOT_COPY_PREDICATE = `${DKG_NS}keepRootCopyOnLabel`;
  * graph), so stamping these predicates into the meta graph does not perturb the
  * generation signal the negative cache keys on — the two mechanisms don't fight.
  */
-export const SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE = `${DKG_NS}snapshotMerkleRoot`;
-export const SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE = `${DKG_NS}snapshotContentDigest`;
+export { SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE, SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE } from '@origintrail-official/dkg-publisher';
+
 
 /**
  * Resolves a local context-graph id (the topic/CG name used in gossip) to

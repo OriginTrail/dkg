@@ -4,6 +4,8 @@ export default defineConfig({
   test: {
     include: [
       'test/graph-publish-envelope.test.ts',
+      'test/workspace-metadata-subjects.test.ts',
+      'test/entity-share-metadata.test.ts',
       'test/ka-update-submit-failure.test.ts',
       'test/ack-peer-selection.test.ts',
       'test/trust-metadata.test.ts',

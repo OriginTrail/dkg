@@ -1,4 +1,4 @@
-import { workspaceOperationSubject as buildWorkspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
+import { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
@@ -1425,13 +1425,7 @@ function normalizeOptionalSubGraphName(subGraphName: string | undefined): string
   return normalized;
 }
 
-function workspaceOperationSubject(contextGraphId: string, shareOperationId: string): string {
-  const normalizedContextGraphId = safeWorkspaceIdPart(contextGraphId, 'contextGraphId');
-  const normalizedShareOperationId = safeWorkspaceIdPart(shareOperationId, 'shareOperationId');
-  const subject = buildWorkspaceOperationSubject(normalizedContextGraphId, normalizedShareOperationId);
-  assertSafeIri(subject);
-  return subject;
-}
+
 
 function workspaceOperationPublicSnapshotGraph(
   contextGraphId: string,
@@ -1544,17 +1538,4 @@ function parsePositiveBigIntLiteral(value: string | undefined): bigint {
 
 function isPresent<T>(value: T | undefined): value is T {
   return value !== undefined;
-}
-
-function safeWorkspaceIdPart(value: string, fieldName: 'contextGraphId' | 'shareOperationId'): string {
-  const normalized = value.trim();
-  if (normalized.length === 0) {
-    throw new Error(`Shared-memory resolution requires a non-empty ${fieldName}`);
-  }
-
-  if (/[\s<>"{}|^`\\]/.test(normalized)) {
-    throw new Error(`Shared-memory resolution rejected unsafe ${fieldName}: ${value}`);
-  }
-
-  return normalized;
 }

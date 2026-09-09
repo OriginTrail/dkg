@@ -1,3 +1,4 @@
+export { decodeEntityShareMetadata, SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE, SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE, type EntityShareSliceDescriptor, type EntityShareOperationDescriptor, type EntityShareMetadataRecord } from './entity-share-metadata.js';
 export { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject, isWorkspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 export * from './publisher.js';
 export * from './publication-pricing.js';

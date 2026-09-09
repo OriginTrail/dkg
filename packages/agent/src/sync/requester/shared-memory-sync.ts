@@ -1,5 +1,5 @@
 import { createEntitySliceRecoveryPlan } from './entity-slice-recovery.js';
-import { stripMetadataLiteral as stripLiteral } from './metadata-literal.js';
+import { stripMetadataLiteral as stripLiteral } from '../metadata-literal.js';
 import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -899,9 +899,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       let materializedGraphs = 0;
       let materializationFailures = 0;
       let materializedQuads = 0;
-      const manifest = collectPublicSnapshotManifest(processed.verifiedMeta, !descriptorsAuthoritativeForCg);
+      const manifest = collectPublicSnapshotManifest(processed.verifiedMeta);
       const manifestSnapshots = manifest.snapshots;
-      const entitySnapshotAuthority = createEntitySliceRecoveryPlan(
+      const entitySnapshotAuthority = descriptorsAuthoritativeForCg ? undefined : createEntitySliceRecoveryPlan(
         pid, processed.verifiedMeta, manifest.sourceSubjectsByRef,
       );
       const orderedManifestSnapshots = snapshotRecoveryOrder === 'recent-balanced'
@@ -1049,7 +1049,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // Other sources (including a KA sharing the same digest) stay unresolved.
         if (!descriptors?.length) {
           if (manifestComplete && (
-            descriptorsAuthoritativeForCg || entitySnapshotAuthority.refs.has(snapshotRef)
+            descriptorsAuthoritativeForCg || entitySnapshotAuthority?.refs.has(snapshotRef)
           )) {
             materializedRefs.add(snapshotRef);
             materializedRefsForCg = materializedRefs.size;
@@ -1430,7 +1430,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // otherwise certify. Only independently ready entity refs may publish
         // their metadata; an unrelated snapshot timeout cannot suppress them.
         const entityMeta = !descriptorsAuthoritativeForCg && snapshotEvidenceAccepted
-          ? entitySnapshotAuthority.metadataFor(materializedRefs)
+          ? entitySnapshotAuthority?.metadataFor(materializedRefs) ?? []
           : [];
         const recoveredRows = [...validWsQuads, ...entityMeta];
         if (recoveredRows.length > 0) {
@@ -1854,7 +1854,7 @@ export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): Publi
 }
 
 /** Keep source provenance internal without changing the exported metadata shape. */
-function collectPublicSnapshotManifest(metaQuads: readonly Quad[], captureSources = false): {
+function collectPublicSnapshotManifest(metaQuads: readonly Quad[]): {
   snapshots: PublicSnapshotMetadata[];
   sourceSubjectsByRef: Map<string, Set<string>>;
 } {
@@ -1918,11 +1918,9 @@ function collectPublicSnapshotManifest(metaQuads: readonly Quad[], captureSource
     if (!entry.digest || !Number.isInteger(entry.count)) {
       throw new Error(`Shared-memory public snapshot metadata for ${subject} is missing digest/count`);
     }
-    if (captureSources) {
-      const sources = sourceSubjectsByRef.get(ref) ?? new Set<string>();
-      sources.add(subject);
-      sourceSubjectsByRef.set(ref, sources);
-    }
+    const sources = sourceSubjectsByRef.get(ref) ?? new Set<string>();
+    sources.add(subject);
+    sourceSubjectsByRef.set(ref, sources);
     const existing = byRef.get(ref);
     const metadata: PublicSnapshotMetadata = {
       ref,

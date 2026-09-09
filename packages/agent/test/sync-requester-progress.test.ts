@@ -15,7 +15,7 @@ import {
 } from '../src/sync/requester/durable-sync.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import { workspaceOperationPublicSliceSubject, workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
-import { storeWorkspaceOperationPublicQuads } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
+import { resolveWorkspaceOperation, storeWorkspaceOperationPublicQuads } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import {
   collectPublicSnapshotMetadata,
@@ -1992,12 +1992,13 @@ describe('public SWM snapshot coverage (#2050)', () => {
     const cached = new Map<string, Quad[]>();
     const source = new OxigraphStore();
     const graphManager = new GraphManager(source);
-    const createMetadata = async (roots: string[], data: Quad[]) => {
+    const createMetadata = async (roots: string[], data: Quad[], subGraphName?: string) => {
+      const targetMetaGraph = graphManager.sharedMemoryMetaUri(COVERAGE_CG, subGraphName);
       // The real publisher owns both subject identity and the complete metadata model.
       await storeWorkspaceOperationPublicQuads({
         store: source, graphManager, contextGraphId: COVERAGE_CG,
         shareOperationId, rootEntities: roots, quads: data,
-        publisherPeerId: 'peer-source', timestamp: new Date(0),
+        publisherPeerId: 'peer-source', timestamp: new Date(0), subGraphName,
         publicSnapshotStore: {
           getSnapshot: async ref => cached.get(ref) ?? null,
           putSnapshot: async ({ digest: ref, quads }) => {
@@ -2006,19 +2007,22 @@ describe('public SWM snapshot coverage (#2050)', () => {
           },
         },
       });
-      const result = await source.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } }`);
+      const result = await source.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${targetMetaGraph}> { ?s ?p ?o } }`);
       if (result.type !== 'quads') throw new Error('Fixture metadata query did not return quads');
       // The manifest visits refs in transport order. Keep the ready root before
       // the missing sibling, independently of the store's CONSTRUCT ordering.
-      const slices = roots.map(root => workspaceOperationPublicSliceSubject(COVERAGE_CG, shareOperationId, root));
-      return result.quads.map(quad => ({ ...quad, graph: metaGraph }))
+      const slices = roots.map(root => workspaceOperationPublicSliceSubject(COVERAGE_CG, shareOperationId, root, subGraphName));
+      return result.quads.map(quad => ({ ...quad, graph: targetMetaGraph }))
         .sort((a, b) => slices.indexOf(a.subject) - slices.indexOf(b.subject));
     };
     let entityMeta: Quad[];
     let twoRootMeta: Quad[];
+    let namedMeta: Quad[];
+    const namedMetaGraph = graphManager.sharedMemoryMetaUri(COVERAGE_CG, 'research');
     try {
       entityMeta = await createMetadata([root], payload);
       twoRootMeta = await createMetadata([root, siblingRoot], [...payload, ...siblingPayload]);
+      namedMeta = await createMetadata([root], payload, 'research');
     } finally {
       await source.close();
     }
@@ -2040,7 +2044,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
     const aliasHead = duplicateHead.map(quad => quad.subject === ka.headSubject && quad.predicate.endsWith('/shareOperationId')
       ? { ...quad, object: `"${shareOperationId}"` } : quad);
     return {
-      metaGraph, payload, digest, siblingDigest, cached, ka, entityMeta, twoRootMeta, sliceSubject, siblingSubject,
+      metaGraph, namedMetaGraph, namedMeta, shareOperationId, root, payload, digest, siblingDigest, cached, ka, entityMeta, twoRootMeta, sliceSubject, siblingSubject,
       duplicateHead, futureHead, sharedHead, aliasHead,
       sliceMeta: entityMeta.filter(quad => quad.subject === sliceSubject),
       siblingMeta: twoRootMeta.filter(quad => quad.subject === siblingSubject),
@@ -2066,6 +2070,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
       coverage: Pick<SwmSnapshotCoverage, 'snapshotsResolved' | 'snapshotsTotal' | 'missingCount' | 'missingSample'>;
     };
     parseError?: RegExp;
+    resolvedOperation?: { subGraphName?: string };
   }
   const coverage = (resolved: number, total: number, missing: number, sample: string[] = []) => ({
     snapshotsResolved: resolved, snapshotsTotal: total, missingCount: missing, missingSample: sample,
@@ -2140,6 +2145,43 @@ describe('public SWM snapshot coverage (#2050)', () => {
       arrange: f => ({ meta: [...f.entityMeta, ...f.duplicateHead], data: [] }),
       expected: f => recovered(f.entityMeta, [], coverage(1, 2, 1)),
     },
+    {
+      name: 'finalization memo stamps preserve canonical operation recovery', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.entityMeta, ...f.duplicateHead,
+        ...['snapshotMerkleRoot', 'snapshotContentDigest'].map(field => ({
+          subject: f.entityMeta.find(quad => quad.subject !== f.sliceSubject)!.subject,
+          predicate: `http://dkg.io/ontology/${field}`, object: '"peer-local memo"', graph: f.metaGraph,
+        })),
+      ], data: [] }),
+      expected: f => recovered(f.entityMeta, [], coverage(1, 2, 1)),
+      resolvedOperation: {},
+    },
+    {
+      name: 'memo sidecars cannot hide a KA commitment on an entity operation', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.entityMeta, ...f.duplicateHead,
+        ...['snapshotMerkleRoot', 'kaUal'].map(field => ({
+          subject: f.entityMeta.find(quad => quad.subject !== f.sliceSubject)!.subject,
+          predicate: `http://dkg.io/ontology/${field}`, object: '"unexpected commitment"', graph: f.metaGraph,
+        })),
+      ], data: [] }),
+      expected: f => recovered(f.sliceMeta, [], coverage(1, 2, 1)),
+    },
+    {
+      name: 'a named subgraph recovers matching slice and operation rows', parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...f.namedMeta, ...f.duplicateHead], data: [] }),
+      expected: f => recovered(f.namedMeta, [], coverage(1, 2, 1)),
+      resolvedOperation: { subGraphName: 'research' },
+    },
+    ...[true, false].map((entityClaimFirst): EntityRecoveryScenario => ({
+      name: 'ambiguous head reserves every operation: entity claim ' + (entityClaimFirst ? 'first' : 'last'),
+      parseError: ambiguousVersion,
+      arrange: f => {
+        const claim = { subject: f.ka.headSubject, predicate: 'http://dkg.io/ontology/shareOperationId',
+          object: JSON.stringify(f.shareOperationId), graph: f.metaGraph };
+        return { meta: [...f.entityMeta, ...(entityClaimFirst ? [claim, ...f.duplicateHead] : [...f.duplicateHead, claim])], data: [] };
+      },
+      expected: f => recovered(f.sliceMeta, [], coverage(1, 2, 1)),
+    })),
     {
       name: 'a missing operation does not suppress its ready slice', parseError: ambiguousVersion,
       arrange: f => ({ meta: [...f.sliceMeta, ...f.duplicateHead], data: [] }),
@@ -2229,13 +2271,20 @@ describe('public SWM snapshot coverage (#2050)', () => {
         contextGraphId: COVERAGE_CG, peerIdSuffix: '1a2b3c4d',
         ...expected.coverage, manifestComplete: true, descriptorsAuthoritative: !scenario.parseError, materializationFailures: 0,
       });
-      for (const [graph, rows] of [[fixture.metaGraph, expected.metadata], [contextGraphWorkspaceGraphUri(COVERAGE_CG), expected.data]] as const) {
+      const expectedRows = [...expected.metadata, ...expected.data];
+      for (const graph of new Set([fixture.metaGraph, fixture.namedMetaGraph, contextGraphWorkspaceGraphUri(COVERAGE_CG)])) {
+        const rows = expectedRows.filter(quad => quad.graph === graph);
         const stored = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
         expect(stored.type).toBe('quads');
         if (stored.type === 'quads') {
           expect(stored.quads).toHaveLength(rows.length);
           expect(stored.quads).toEqual(expect.arrayContaining(rows.map(quad => ({ ...quad, graph: '' }))));
         }
+      }
+      if (scenario.resolvedOperation) {
+        const operation = await resolveWorkspaceOperation({ store, graphManager: new GraphManager(store),
+          contextGraphId: COVERAGE_CG, shareOperationId: fixture.shareOperationId, ...scenario.resolvedOperation });
+        expect(operation.rootEntities).toEqual([fixture.root]);
       }
       expect(batches).toHaveLength(expected.attemptedRows.length > 0 ? 1 : 0);
       if (expected.attemptedRows.length > 0) {
