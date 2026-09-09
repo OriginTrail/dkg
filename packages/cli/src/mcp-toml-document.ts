@@ -4,7 +4,7 @@ import TOML from '@iarna/toml';
 import { parse as parseTomlCst, type ExpressionCstNode, type KeyCstNode, type TomlCstNode } from '@toml-tools/parser';
 import { DKG_SERVER_KEY, tildify, type ClientTarget } from './mcp-client-registry.js';
 import { writeMcpConfigAtomic } from './mcp-config-file.js';
-import type { DesiredRegistration, RegistrationEdit } from './mcp-client-config.js';
+import type { PersistedRegistration, RegistrationEdit } from './mcp-client-config.js';
 
 /**
  * PR #443 round-5 Codex Review: mirror `readJson`'s friendly-recovery
@@ -36,7 +36,7 @@ export function readToml(path: string): Record<string, unknown> {
 
 function serialiseTomlEntryOnly(
   target: ClientTarget,
-  registration: DesiredRegistration,
+  registration: PersistedRegistration,
 ): string {
   const nested: Record<string, unknown> = {
     [target.serverContainer]: { [DKG_SERVER_KEY]: registration },

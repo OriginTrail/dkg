@@ -18,8 +18,14 @@ export interface McpRegistration {
   args?: string[];
   dkgHome?: string;
 }
-/** Canonical DKG-owned fields; additional client-specific fields are retained. */
+/** Canonical fields owned by `dkg mcp setup`. */
 export interface DesiredRegistration {
+  command: string;
+  args: string[];
+  env: { DKG_HOME: string };
+}
+/** Persisted client shape at the single extension-preserving merge boundary. */
+export interface PersistedRegistration {
   command: string;
   args: string[];
   env: { DKG_HOME: string; [name: string]: unknown };
@@ -31,7 +37,7 @@ export type RegistrationRead =
   | { kind: 'entry'; registration: McpRegistration };
 export type RegistrationEdit =
   | { kind: 'remove' }
-  | { kind: 'upsert'; registration: DesiredRegistration };
+  | { kind: 'upsert'; registration: PersistedRegistration };
 
 function normalizeRegistration(value: unknown): RegistrationRead {
   if (value === undefined || value === null) return { kind: 'absent' };
@@ -336,7 +342,7 @@ export function writeRegistration(
   const currentEntry = container[DKG_SERVER_KEY];
   const currentEntryObj = isPlainRecord(currentEntry) ? currentEntry : {};
   const currentEnv = isPlainRecord(currentEntryObj.env) ? currentEntryObj.env : {};
-  const mergedEntry: DesiredRegistration = {
+  const mergedEntry: PersistedRegistration = {
     ...currentEntryObj,
     ...entry,
     env: { ...currentEnv, ...entry.env, DKG_HOME: entry.env.DKG_HOME },
