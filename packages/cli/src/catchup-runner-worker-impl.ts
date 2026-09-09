@@ -207,6 +207,7 @@ function describeCoverage(coverage: SwmSnapshotCoverage | undefined): string {
 
 function emptyShared(): SharedMemorySyncResult {
   return {
+    snapshotPlaneIncomplete: 0,
     insertedTriples: 0,
     fetchedMetaTriples: 0,
     fetchedDataTriples: 0,
@@ -305,6 +306,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       deniedPhases: 0,
     },
     sharedMemory: {
+      snapshotPlaneIncomplete: 0,
       fetchedMetaTriples: 0,
       fetchedDataTriples: 0,
       insertedMetaTriples: 0,

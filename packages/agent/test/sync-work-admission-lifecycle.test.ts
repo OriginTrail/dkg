@@ -44,3 +44,25 @@ it('keeps independently budgeted lifecycle fetches separate and forwards their a
     await agent.stop();
   }
 });
+
+it('keeps numeric snapshot counters on clean public detailed-sync and no-peer catchup results', async () => {
+  vi.stubEnv('DKG_DURABLE_SYNC_ENABLED', '0');
+  const agent = await DKGAgent.create({
+    name: 'CleanSnapshotCounterContract', listenHost: '127.0.0.1',
+    chainAdapter: new MockChainAdapter(), rfc64CatalogActivation: { enabled: false },
+  });
+  try {
+    await agent.start();
+    const detailed = await agent.syncSharedMemoryFromPeerDetailed('unused-peer', ['empty-cg']);
+    const catchup = await agent.syncContextGraphFromConnectedPeers('empty-cg', { includeSharedMemory: true });
+    expect({
+      detailed: detailed.snapshotPlaneIncomplete,
+      catchup: catchup.diagnostics?.sharedMemory.snapshotPlaneIncomplete,
+    }).toEqual({ detailed: 0, catchup: 0 });
+    expect(detailed.localYield).toBeUndefined();
+    expect(catchup.diagnostics?.sharedMemory.localYield).toBeUndefined();
+  } finally {
+    await agent.stop();
+    vi.unstubAllEnvs();
+  }
+});

@@ -235,8 +235,8 @@ export function readPublicSnapshotWalkProgress(err: unknown): PublicSnapshotWalk
 export interface SharedMemorySyncSummary {
   /** Plane-neutral reason that this requester voluntarily stopped local work. */
   localYield?: SharedMemoryLocalYield;
-  /** Snapshot phases left incomplete specifically by a local yield. */
-  snapshotPlaneIncomplete?: number;
+  /** Snapshot phases left incomplete specifically by a local yield; zero on clean results. */
+  snapshotPlaneIncomplete: number;
   insertedTriples: number;
   fetchedMetaTriples: number;
   fetchedDataTriples: number;
@@ -565,6 +565,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
   };
 
   const summary: SharedMemorySyncSummary = {
+    snapshotPlaneIncomplete: 0,
     insertedTriples: 0,
     fetchedMetaTriples: 0,
     fetchedDataTriples: 0,

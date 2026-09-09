@@ -121,8 +121,8 @@ export interface CatchupJobResult {
       swmCoverage?: SwmSnapshotCoverage;
       /** Plane-neutral local-yield completion reason. */
       localYield?: SharedMemoryLocalYield;
-      /** Snapshot phases left incomplete specifically by a local yield. */
-      snapshotPlaneIncomplete?: number;
+      /** Snapshot phases left incomplete specifically by a local yield; zero on clean results. */
+      snapshotPlaneIncomplete: number;
       /** Extra passes over the peer set beyond the first. */
       continuationPasses: number;
       /**

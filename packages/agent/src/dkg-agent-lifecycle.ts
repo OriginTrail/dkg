@@ -1730,6 +1730,7 @@ const CHANGELOG_MAX_SCAN_LIMIT = 2000;
 
 function emptySharedMemorySyncResult(): SharedMemorySyncResult {
   return {
+    snapshotPlaneIncomplete: 0,
     insertedTriples: 0,
     fetchedMetaTriples: 0,
     fetchedDataTriples: 0,
@@ -8271,6 +8272,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         deferredBackpressure: 0,
       },
       sharedMemory: {
+        snapshotPlaneIncomplete: 0,
         fetchedMetaTriples: 0,
         fetchedDataTriples: 0,
         insertedMetaTriples: 0,
@@ -8333,6 +8335,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // catchup-status endpoint and UI keep working — see
     // `cli/src/daemon.ts` subscribe job and `catchup-runner.ts`.
     const emptyShared = (): SharedMemorySyncResult => ({
+      snapshotPlaneIncomplete: 0,
       insertedTriples: 0,
       fetchedMetaTriples: 0,
       fetchedDataTriples: 0,

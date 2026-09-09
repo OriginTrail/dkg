@@ -146,6 +146,10 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
       }
     });
 
+    const snapshotCounter: number = result.diagnostics!.sharedMemory.snapshotPlaneIncomplete;
+    expect(snapshotCounter).toBe(0);
+    expect(snapshotCounter + 1).toBe(1);
+    expect(result.diagnostics?.sharedMemory.localYield).toBeUndefined();
     expect(result.cleanPlaneCompletions?.durable.authorityEmptyPeers).toBe(0);
     expect(result.cleanPlaneCompletions?.durable.emptyPeers).toBe(1);
   });

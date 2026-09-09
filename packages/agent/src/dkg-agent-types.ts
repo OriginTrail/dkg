@@ -1239,8 +1239,8 @@ export interface SwmSnapshotCoverage {
 export interface SharedMemorySyncDiagnostics {
   /** Plane-neutral reason that shared-memory work voluntarily stopped. */
   localYield?: SharedMemoryLocalYield;
-  /** Snapshot phases left incomplete specifically by a local yield. */
-  snapshotPlaneIncomplete?: number;
+  /** Snapshot phases left incomplete specifically by a local yield; zero on clean results. */
+  snapshotPlaneIncomplete: number;
   fetchedMetaTriples: number;
   fetchedDataTriples: number;
   insertedMetaTriples: number;

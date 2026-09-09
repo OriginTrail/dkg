@@ -1199,6 +1199,8 @@ describe('sync requester progress accounting', () => {
       logDebug: noop,
     });
 
+    expect(summary.snapshotPlaneIncomplete).toBe(0);
+    expect(summary.localYield).toBeUndefined();
     expect(summary.completedPhases).toBe(2);
     expect(summary.checkpointAdvances).toBe(0);
   });

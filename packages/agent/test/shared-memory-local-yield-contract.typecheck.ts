@@ -1,6 +1,6 @@
 import type { SharedMemoryLocalYield } from '../src/sync/shared-memory-completion.js';
 import { sharedMemoryLocalYield } from '../src/sync/shared-memory-completion.js';
-import { classifySwmCatchupPeerOutcome, createSwmCatchupPeerSelector, type SwmCatchupPeerOutcome } from '@origintrail-official/dkg-agent';
+import { classifySwmCatchupPeerOutcome, createSwmCatchupPeerSelector, type DKGAgent, type SharedMemorySyncResult, type SwmCatchupPeerOutcome } from '@origintrail-official/dkg-agent';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 
 const localYield = sharedMemoryLocalYield();
@@ -46,3 +46,11 @@ void emptyOutcome;
 
 // New local-yield inputs also compose safely; the selector treats no evidence as a no-op.
 selector.record('cg', 'peer', classifySwmCatchupPeerOutcome({ localYield }));
+
+// Existing callers can use the exported result counters directly in arithmetic.
+declare const detailed: SharedMemorySyncResult;
+declare const catchup: NonNullable<Awaited<ReturnType<DKGAgent['syncContextGraphFromConnectedPeers']>>['diagnostics']>;
+const detailedCounter: number = detailed.snapshotPlaneIncomplete;
+const catchupCounter: number = catchup.sharedMemory.snapshotPlaneIncomplete;
+void detailedCounter;
+void catchupCounter;
