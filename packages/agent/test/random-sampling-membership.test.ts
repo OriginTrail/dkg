@@ -1,7 +1,7 @@
 import { createRandomSamplingEligibilityResolver, type RandomSamplingEligibilityChain } from '../src/random-sampling-eligibility.js';
 import { RandomSamplingRuntime, type RandomSamplingRuntimeOptions } from '../src/random-sampling-runtime.js';
 import { describe, expect, it, vi } from 'vitest';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { MockChainAdapter, type RandomSamplingAvailability } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import type { RandomSamplingHandle } from '../src/random-sampling-bind.js';
@@ -61,7 +61,7 @@ describe('Random Sampling membership reconciliation', () => {
     { active: true, missing: true, phase: 'waiting', stopped: 1, scheduled: true },
   ])('applies typed chain outcomes: active=$active missing=$missing', async ({ active, missing, phase, stopped, scheduled }) => {
     const failure = new Error('temporary RPC outage');
-    const availability = vi.fn(async () => ({ kind: 'available' as const, member: true }));
+    const availability = vi.fn(async (): Promise<RandomSamplingAvailability> => ({ kind: 'available', member: true }));
     const stop = vi.fn(async () => {});
     const runtime = createRuntime({
       role: 'core', chain: {
