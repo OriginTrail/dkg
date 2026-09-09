@@ -287,11 +287,10 @@ export interface SharedMemoryMetadataFetchOutcome {
   readonly continuationYielded: boolean;
 }
 
-/** A manifest owner prepares the order and evidence policy for one pass. */
+/** Immutable manifest order and validated reuse decisions for one pass. */
 export interface PublicSnapshotWalkPlan {
   readonly snapshots: readonly PublicSnapshotMetadata[];
-  /** The owner decides which earlier results may be reused in this pass. */
-  canReuse(ref: string): boolean;
+  readonly reusableRefs: readonly string[];
 }
 
 export interface SnapshotWalkPreparation {
@@ -1734,12 +1733,13 @@ export async function syncPublicSnapshotsForMeta(params: {
     throw err;
   };
 
+  const reusableRefs = new Set(params.snapshotWalk?.reusableRefs);
   for (const [index, snapshot] of snapshots.entries()) {
     executionBoundary.assertCurrent();
     // The owner decides which manifest-bound evidence this pass can reuse.
     // Avoid repeating blob and assertion validation when that owner has
     // already established it, leaving time for unresolved refs to advance.
-    if (params.snapshotWalk?.canReuse(snapshot.ref)) {
+    if (reusableRefs.has(snapshot.ref)) {
       readySnapshots += 1;
       continue;
     }

@@ -100,15 +100,18 @@ export function prepareManifestBoundSnapshotWalk(
   { order, canReuseResolved }: SnapshotWalkPreparation,
 ): PublicSnapshotWalkPlan {
   const manifest = progress.orderedManifestSnapshot();
+  const resolvedRefs = new Set(progress.resolvedRefsSnapshot());
   const snapshots = order === 'manifest'
     ? manifest
     : Object.freeze([
-      ...manifest.filter(({ ref }) => !progress.isResolved(ref)),
-      ...manifest.filter(({ ref }) => progress.isResolved(ref)),
+      ...manifest.filter(({ ref }) => !resolvedRefs.has(ref)),
+      ...manifest.filter(({ ref }) => resolvedRefs.has(ref)),
     ]);
   return Object.freeze({
     snapshots,
-    canReuse: (ref: string) => progress.isResolved(ref) && canReuseResolved(ref),
+    reusableRefs: Object.freeze(manifest
+      .filter(({ ref }) => resolvedRefs.has(ref) && canReuseResolved(ref))
+      .map(({ ref }) => ref)),
   });
 }
 

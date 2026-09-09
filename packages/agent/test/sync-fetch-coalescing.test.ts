@@ -380,6 +380,36 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
+  it.each([
+    { name: 'different custom keys', secondKey: 'lane-b', expectedSends: 2 },
+    { name: 'separate policies with the same custom key', secondKey: 'lane-a', expectedSends: 1 },
+  ])('preserves request ownership for $name', async ({ secondKey, expectedSends }) => {
+    const responses = [deferred<Uint8Array>(), deferred<Uint8Array>()];
+    let sends = 0;
+    const agent = await createAgentWithSend(async () => responses[sends++]!.promise);
+    try {
+      const first = fetchPages(agent, { workAdmission: createSyncWorkAdmission(() => 1_000, { sharing: 'coalescible', key: 'lane-a' }) });
+      await flushMicrotasks();
+      const second = fetchPages(agent, { workAdmission: createSyncWorkAdmission(() => 1_000, { sharing: 'coalescible', key: secondKey }) });
+      let secondSettled = false;
+      void second.then(() => { secondSettled = true; });
+      await flushMicrotasks();
+      expect(sends).toBe(expectedSends);
+      responses[0]!.resolve(new Uint8Array());
+      const firstResult = await first;
+      await flushMicrotasks();
+      expect(secondSettled).toBe(expectedSends === 1);
+      responses[1]!.resolve(new Uint8Array());
+      const secondResult = await second;
+      expect(firstResult === secondResult).toBe(expectedSends === 1);
+      expect(firstResult.quads).toEqual([]);
+      expect(secondResult.quads).toEqual([]);
+    } finally {
+      for (const response of responses) response.resolve(new Uint8Array());
+      await agent.stop();
+    }
+  });
+
   it('does not coalesce different sync identity keys', async () => {
     const cases: Array<{ name: string; base: FetchArgs; variant: FetchArgs }> = [
       { name: 'remotePeerId', base: {}, variant: { remotePeerId: PEER_B } },

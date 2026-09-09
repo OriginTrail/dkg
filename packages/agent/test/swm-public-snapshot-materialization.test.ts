@@ -350,7 +350,7 @@ describe('public SWM snapshot materialization', () => {
     const resolved = new Set<string>();
     const suppressedByRef = new Map<string, readonly Quad[]>();
     const walk: SharedMemorySnapshotWalkContinuation = {
-      prepare: () => ({ snapshots: manifest, canReuse: (ref) => resolved.has(ref) }),
+      prepare: () => ({ snapshots: manifest, reusableRefs: Object.freeze([...resolved]) }),
       orderedManifestSnapshot: () => manifest.map((snapshot) => ({ ...snapshot })),
       isResolved: (ref) => resolved.has(ref),
       resolvedCount: () => resolved.size,

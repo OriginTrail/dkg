@@ -138,7 +138,7 @@ describe('selected snapshot walk continuation', () => {
       deadline: Date.now() + 60_000,
       snapshotWalk: {
         snapshots,
-        canReuse: (ref) => ref === firstDigest,
+        reusableRefs: [firstDigest],
       },
       publicSnapshotStore: {
         getSnapshot: async (ref) => {
@@ -195,7 +195,7 @@ describe('selected snapshot walk continuation', () => {
       deadline: Date.now() + 60_000,
       snapshotWalk: {
         snapshots,
-        canReuse: () => false,
+        reusableRefs: [],
       },
       publicSnapshotStore: {
         getSnapshot: async () => null,

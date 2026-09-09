@@ -72,7 +72,7 @@ describe('selected snapshot-walk adapter', () => {
     rows[0]!.object = '"changed"';
     const plan = walk.prepare({ order: 'manifest', canReuseResolved: () => true });
     expect(plan.snapshots.map(({ ref }) => ref)).toEqual(['a', 'b']);
-    expect(plan.canReuse('a')).toBe(true);
+    expect(plan.reusableRefs.includes('a')).toBe(true);
     expect(walk.suppressedMetadataRows('a')[0]!.object).toBe('"original"');
     walk.invalidateResolved('a');
     expect(walk.suppressedMetadataRows('a')).toEqual([]);
@@ -113,7 +113,7 @@ describe('private snapshot-walk coordinator', () => {
     expect(unresolved.kind).toBe('prepared');
     if (unresolved.kind !== 'prepared') throw new Error('Expected prepared walk');
     expect(unresolved.plan.snapshots.map(({ ref }) => ref)).toEqual(['b', 'a']);
-    expect(unresolved.plan.canReuse('a')).toBe(false);
+    expect(unresolved.plan.reusableRefs.includes('a')).toBe(false);
 
     coordinator.markResolved('b');
     const revalidated = await coordinator.prepare({
@@ -122,7 +122,7 @@ describe('private snapshot-walk coordinator', () => {
     });
     expect(revalidated.kind).toBe('prepared');
     if (revalidated.kind !== 'prepared') throw new Error('Expected prepared walk');
-    expect(revalidated.plan.canReuse('a')).toBe(true);
+    expect(revalidated.plan.reusableRefs.includes('a')).toBe(true);
     expect(coordinator.isResolved('b')).toBe(false);
   });
 
@@ -155,5 +155,22 @@ it('prepares plans without adding owner policy to the progress core', () => {
     canReuseResolved: () => false,
   });
   expect(plan.snapshots.map(({ ref }) => ref)).toEqual(['b', 'a']);
-  expect(plan.canReuse('a')).toBe(false);
+  expect(plan.reusableRefs.includes('a')).toBe(false);
+});
+
+it.each(['progress', 'evidence'])('captures reusable decisions before later %s changes', change => {
+  const state = progress();
+  state.markResolved('a');
+  let verified = true;
+  const canReuseResolved = vi.fn(() => verified);
+  const plan = prepareManifestBoundSnapshotWalk(state, { order: 'unresolved-first', canReuseResolved });
+  if (change === 'progress') { state.invalidateResolved('a'); state.markResolved('b'); }
+  else verified = false;
+  expect(plan.snapshots.map(({ ref }) => ref)).toEqual(['b', 'a']);
+  expect(plan.reusableRefs.includes('a')).toBe(true);
+  expect(plan.reusableRefs.includes('b')).toBe(false);
+  expect(canReuseResolved).toHaveBeenCalledOnce();
+  expect(Object.isFrozen(plan.reusableRefs)).toBe(true);
+  expect(() => Reflect.set(plan.reusableRefs, 0, "mutated")).not.toThrow();
+  expect(plan.reusableRefs).toEqual(["a"]);
 });
