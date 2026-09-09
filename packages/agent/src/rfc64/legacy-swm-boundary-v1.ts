@@ -8,8 +8,6 @@ import {
   assertContextGraphIdV1,
   assertSwmAuthorInventoryShareOperationIdV1,
   contextGraphWorkspaceMetaGraphUri,
-  sparqlIri,
-  sparqlString,
   type CanonicalDeterministicUalV1,
   type ContextGraphIdV1,
   type PositiveDecimalU64V1,
@@ -17,7 +15,6 @@ import {
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 
-import { mapWithConcurrency } from '../map-with-concurrency.js';
 import { createRfc64DurableFileStoreV1 } from './durable-file-store-v1.js';
 
 const RFC64_LEGACY_SWM_CAPTURE_PATH_V1 = 'legacy-swm-boundary-v1/capture.json';
@@ -33,8 +30,6 @@ const RFC64_LEGACY_SWM_CAPTURE_MAX_BYTES_V1 = 64 * 1024 * 1024;
 const RFC64_LEGACY_SWM_REPUBLISHED_MAX_BYTES_V1 = 2 * 1024;
 const RFC64_LEGACY_SWM_META_GRAPH_LIMIT_V1 = 16_384;
 const RFC64_LEGACY_SWM_HEAD_LIMIT_V1 = 100_000;
-const RFC64_LEGACY_SWM_HEAD_READ_BATCH_SIZE_V1 = 500;
-const RFC64_LEGACY_SWM_HEAD_READ_CONCURRENCY_V1 = 4;
 const CONTEXT_GRAPH_PREFIX = 'did:dkg:context-graph:';
 const SWM_META_SUFFIX = '/_shared_memory_meta';
 const SWM_HEAD_SUFFIX = '#dkg-swm-head';
@@ -54,18 +49,6 @@ interface Rfc64LegacySwmBoundaryEntryV1 {
 interface Rfc64LegacySwmBoundaryCaptureV1 {
   readonly version: 1;
   readonly entries: readonly Rfc64LegacySwmBoundaryEntryV1[];
-}
-
-interface Rfc64LegacySwmGraphCapturePlanV1 {
-  readonly contextGraphId: ContextGraphIdV1;
-  readonly metaGraph: string;
-  readonly headsByUal: Map<CanonicalDeterministicUalV1, string>;
-}
-
-interface Rfc64LegacySwmHeadBatchV1 {
-  readonly contextGraphId: ContextGraphIdV1;
-  readonly metaGraph: string;
-  readonly heads: readonly (readonly [CanonicalDeterministicUalV1, string])[];
 }
 
 interface Rfc64LegacySwmRepublishedMarkerV1
@@ -418,17 +401,15 @@ async function readRfc64LateLegacySwmBoundaryEntriesV1(
 async function captureRfc64LegacySwmBoundaryV1(
   store: TripleStore,
 ): Promise<Readonly<Rfc64LegacySwmBoundaryCaptureV1>> {
-  // This first read derives each canonical head IRI from a selective operation
-  // binding and uses only that exact IRI in the correlated existence check.
-  // DISTINCT collapses repeated historical operations only after the exact
-  // current head and operation share ID have been correlated, so the existing
-  // limits count fully qualified legacy heads rather than preliminary rows. A
-  // separate exact-binding read below preserves the physical capture boundary.
-  // No optimizer can turn either phase into the broad legacy-head scan that
-  // blocked startup because the head subject is derived before it is read.
+  // Derive each canonical head IRI from the selective operation binding before
+  // reading that exact subject. BIND is an explicit SPARQL algebra boundary,
+  // unlike textual ordering inside one basic graph pattern, so the store never
+  // needs to begin with the broad legacy-head scan that blocked startup.
+  // DISTINCT runs after the exact head/operation share-ID correlation: repeated
+  // history collapses and the limits count only fully qualified legacy heads.
   // Reject named-subgraph metadata inside the store: URI-only parsing is
   // ambiguous because a valid Context Graph ID may itself contain slashes.
-  const operationResult = await store.query(
+  const result = await store.query(
     `SELECT DISTINCT ?metaGraph ?head ?ual ?contextGraphId WHERE { ` +
     `GRAPH ?metaGraph { ` +
     `?operation <${RDF_TYPE}> <${WORKSPACE_OPERATION}> ; ` +
@@ -443,27 +424,23 @@ async function captureRfc64LegacySwmBoundaryV1(
     `} ` +
     `} LIMIT ${RFC64_LEGACY_SWM_HEAD_LIMIT_V1 + 1}`,
     {
-      source: 'agent.rfc64.legacySwmBoundary.readOperations',
+      source: 'agent.rfc64.legacySwmBoundary.readHeads',
       priority: 'background',
     },
   );
-  if (operationResult.type !== 'bindings') {
-    throw new Error(
-      'RFC-64 legacy SWM boundary operation query did not return bindings',
-    );
+  if (result.type !== 'bindings') {
+    throw new Error('RFC-64 legacy SWM boundary query did not return bindings');
   }
-  if (
-    operationResult.bindings.length
-    > RFC64_LEGACY_SWM_HEAD_LIMIT_V1
-  ) {
+  if (result.bindings.length > RFC64_LEGACY_SWM_HEAD_LIMIT_V1) {
     throw new Error(
       `RFC-64 legacy SWM boundary exceeds head limit ` +
       `${RFC64_LEGACY_SWM_HEAD_LIMIT_V1}`,
     );
   }
 
-  const graphPlans = new Map<string, Rfc64LegacySwmGraphCapturePlanV1>();
-  for (const row of operationResult.bindings) {
+  const rootMetaGraphs = new Set<string>();
+  const entries = new Map<string, Rfc64LegacySwmBoundaryEntryV1>();
+  for (const row of result.bindings) {
     const metaGraph = row['metaGraph'];
     const head = row['head'];
     const rawUal = row['ual'];
@@ -475,7 +452,7 @@ async function captureRfc64LegacySwmBoundaryV1(
       || rawContextGraphId === undefined
     ) {
       throw new Error(
-        'RFC-64 legacy SWM boundary returned an incomplete operation',
+        'RFC-64 legacy SWM boundary returned an incomplete head',
       );
     }
     const contextGraphId = decodeRfc64BindingValueV1(rawContextGraphId);
@@ -486,110 +463,26 @@ async function captureRfc64LegacySwmBoundaryV1(
     if (metaGraph !== contextGraphWorkspaceMetaGraphUri(contextGraphId)) {
       continue;
     }
+    rootMetaGraphs.add(metaGraph);
+    if (rootMetaGraphs.size > RFC64_LEGACY_SWM_META_GRAPH_LIMIT_V1) {
+      throw new Error(
+        `RFC-64 legacy SWM boundary exceeds metadata graph limit ` +
+        `${RFC64_LEGACY_SWM_META_GRAPH_LIMIT_V1}`,
+      );
+    }
     const kaUal = assertCanonicalDeterministicUalV1(rawUal).ual;
     if (head !== `${kaUal}${SWM_HEAD_SUFFIX}`) {
       throw new Error(`RFC-64 legacy SWM head identity differs for ${kaUal}`);
     }
-    let plan = graphPlans.get(metaGraph);
-    if (plan === undefined) {
-      if (graphPlans.size >= RFC64_LEGACY_SWM_META_GRAPH_LIMIT_V1) {
-        throw new Error(
-          `RFC-64 legacy SWM boundary exceeds metadata graph limit ` +
-          `${RFC64_LEGACY_SWM_META_GRAPH_LIMIT_V1}`,
-        );
-      }
-      plan = {
-        metaGraph,
-        contextGraphId,
-        headsByUal: new Map(),
-      };
-      graphPlans.set(metaGraph, plan);
-    }
-    plan.headsByUal.set(kaUal, head);
-  }
-
-  const batches: Rfc64LegacySwmHeadBatchV1[] = [];
-  for (const plan of graphPlans.values()) {
-    const graphHeads = [...plan.headsByUal.entries()];
-    for (
-      let offset = 0;
-      offset < graphHeads.length;
-      offset += RFC64_LEGACY_SWM_HEAD_READ_BATCH_SIZE_V1
-    ) {
-      batches.push(Object.freeze({
-        contextGraphId: plan.contextGraphId,
-        metaGraph: plan.metaGraph,
-        heads: Object.freeze(graphHeads.slice(
-          offset,
-          offset + RFC64_LEGACY_SWM_HEAD_READ_BATCH_SIZE_V1,
-        )),
-      }));
-    }
-  }
-  const verifiedBatches = await mapWithConcurrency(
-    batches,
-    RFC64_LEGACY_SWM_HEAD_READ_CONCURRENCY_V1,
-    async (batch) => readRfc64LegacySwmHeadBatchV1(store, batch),
-  );
-  const entries = new Map<string, Rfc64LegacySwmBoundaryEntryV1>();
-  for (const verified of verifiedBatches) {
-    for (const entry of verified) {
-      entries.set(`${entry.contextGraphId}\u0000${entry.kaUal}`, entry);
-    }
+    entries.set(`${contextGraphId}\u0000${kaUal}`, Object.freeze({
+      contextGraphId,
+      kaUal,
+    }));
   }
   return Object.freeze({
     version: 1,
     entries: Object.freeze([...entries.values()].sort(compareEntries)),
   });
-}
-
-async function readRfc64LegacySwmHeadBatchV1(
-  store: TripleStore,
-  batch: Rfc64LegacySwmHeadBatchV1,
-): Promise<readonly Rfc64LegacySwmBoundaryEntryV1[]> {
-  const values = batch.heads.map(([kaUal, head]) => (
-    `(${sparqlIri(head)} ${sparqlIri(kaUal)} ` +
-    `${sparqlString(batch.contextGraphId)})`
-  )).join(' ');
-  // sparql-scan-allow: R2 -- the graph, head, UAL, and context ID are exact values from the bounded candidate read above
-  const headResult = await store.query(
-    `SELECT DISTINCT ?head ?ual WHERE { ` +
-    `VALUES (?head ?ual ?contextGraphId) { ${values} } ` +
-    `GRAPH ${sparqlIri(batch.metaGraph)} { ` +
-    `?head <${KA_UAL}> ?ual ; <${SHARE_OPERATION_ID}> ?shareId . ` +
-    `?operation <${RDF_TYPE}> <${WORKSPACE_OPERATION}> ; ` +
-    `<${KA_UAL}> ?ual ; <${SHARE_OPERATION_ID}> ?shareId ; ` +
-    `<${CONTEXT_GRAPH_ID}> ?contextGraphId . ` +
-    `} } LIMIT ${batch.heads.length + 1}`,
-    {
-      source: 'agent.rfc64.legacySwmBoundary.readHeads',
-      priority: 'background',
-    },
-  );
-  if (headResult.type !== 'bindings') {
-    throw new Error(
-      'RFC-64 legacy SWM boundary head query did not return bindings',
-    );
-  }
-  if (headResult.bindings.length > batch.heads.length) {
-    throw new Error('RFC-64 legacy SWM boundary head query exceeded its batch');
-  }
-  const requestedUals = new Set(batch.heads.map(([kaUal]) => kaUal));
-  return Object.freeze(headResult.bindings.map((row) => {
-    const head = row['head'];
-    const rawUal = row['ual'];
-    if (head === undefined || rawUal === undefined) {
-      throw new Error('RFC-64 legacy SWM boundary returned an incomplete head');
-    }
-    const kaUal = assertCanonicalDeterministicUalV1(rawUal).ual;
-    if (!requestedUals.has(kaUal)) {
-      throw new Error('RFC-64 legacy SWM boundary returned an unrequested head');
-    }
-    if (head !== `${kaUal}${SWM_HEAD_SUFFIX}`) {
-      throw new Error(`RFC-64 legacy SWM head identity differs for ${kaUal}`);
-    }
-    return Object.freeze({ contextGraphId: batch.contextGraphId, kaUal });
-  }));
 }
 
 function decodeRfc64BindingValueV1(raw: string): string {
