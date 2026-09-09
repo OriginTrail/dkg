@@ -16,7 +16,6 @@ interface Internals {
   vmReconcileScheduling: VmReconcileSchedulingRuntime<boolean>;
   vmReconcileLifecycleController: AbortController;
   vmReconcilePhysicalRuns: Set<Promise<unknown>>;
-  ensureVmReconcileScheduling(): VmReconcileSchedulingRuntime<boolean>;
   resolveVmReconcileTarget(cg: string, isCurrent?: () => boolean, signal?: AbortSignal): Promise<unknown>;
   runVmReconcileSweep(): Promise<void>;
   scheduleVmReconcileSweep(): void;
@@ -114,13 +113,35 @@ it('enforces the production unbound batch size through the agent-owned runtime',
     internals.subscribedContextGraphs.set(`production-cg-${i}`, { subscribed: true });
   }
   const canRead = vi.spyOn(agent, 'canReadContextGraph').mockResolvedValue(false);
-  const scheduling = internals.ensureVmReconcileScheduling();
-  dispatchers.push(scheduling);
+  const scheduling = agent.ensureVmReconcileScheduling();
 
   internals.scheduleVmReconcileSweep();
   await scheduling.waitForIdle();
 
   expect(canRead).toHaveBeenCalledTimes(DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE);
+});
+
+it('caps discovery attempts through the production runtime factory', async () => {
+  const agent = await DKGAgent.create({ name: 'ProductionSelfPrimeBudget', chainAdapter: new MockChainAdapter() });
+  agents.push(agent);
+  const internals = agent as unknown as Internals;
+  internals.node = { peerId: '12D3KooWSelfPrimeBudget', libp2p: { getPeers: () => [] } };
+  internals.openVmReconcileRotationState();
+  const budget = DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE;
+  expect(budget).toBe(8);
+  for (let i = 0; i < budget * 3 + 3; i++) {
+    internals.subscribedContextGraphs.set(`production-cg-${i}`, { subscribed: true });
+  }
+  const canRead = vi.spyOn(agent, 'canReadContextGraph').mockResolvedValue(true);
+  const resolve = vi.spyOn(internals, 'resolveContextGraphOnChainIdBinding').mockResolvedValue(null);
+  // Keep the runtime created by the production factory, including its budget
+  // argument and real executeVmReconcileForCg callback.
+  const runtime = agent.ensureVmReconcileScheduling();
+  await agent.runVmReconcileSweep();
+  expect(agent.ensureVmReconcileScheduling()).toBe(runtime);
+  expect(resolve).toHaveBeenCalledTimes(budget);
+  expect(canRead).toHaveBeenCalledTimes(budget);
+  expect(new Set(resolve.mock.calls.map(([id]) => id)).size).toBe(budget);
 });
 
 it.each([3, 8, 16, 26])('covers %i stable unbound subscriptions fairly with at most eight lookups per sweep', async (count) => {
