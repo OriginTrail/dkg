@@ -38,6 +38,8 @@ import type {
   ContextGraphAuthoritySnapshot,
 } from './chain-adapter.js';
 import type { RpcUsageWindow } from './rpc-usage.js';
+import type { FinalizedChainReadOwnerV1 } from './finalized-chain-read-admission.js';
+import type { StrictCurrentFinalizedEvmSnapshotScopeV1 } from './current-finalized-evm-snapshot.js';
 import {
   NoEligibleContextGraphError,
   NoEligibleKnowledgeCollectionError,
@@ -265,7 +267,9 @@ export class MockChainAdapter implements ChainAdapter {
     return [];
   }
 
-  async createFinalizedEvmSnapshotScope(): Promise<null> {
+  async createFinalizedEvmSnapshotScope(
+    _owner: FinalizedChainReadOwnerV1,
+  ): Promise<StrictCurrentFinalizedEvmSnapshotScopeV1 | null> {
     return null;
   }
 

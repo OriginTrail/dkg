@@ -18,17 +18,17 @@
  * dialled nothing. Both assertions below therefore fail on the unfixed code: the
  * first on the message, the second on an empty dial log.
  */
-import { resolveRpcUrls } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, resolveRpcUrls } from '@origintrail-official/dkg-chain';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createRfc64FinalizedVmAgentPrecommitV1 } from '../src/rfc64/finalized-vm-agent-precommit-v1.js';
 import {
-  finalizedSnapshotScopeFactory,
   rfc64FinalizedVmPrecommitOptions,
   rfc64FinalizedVmPrecommitPlan,
 } from './support/rfc64-finalized-vm-precommit-fixture.js';
+import { RFC64_VM_CHAIN_ID } from './support/rfc64-finalized-vm-placement-fixture.js';
 
 const REPO_ROOT = join(import.meta.dirname, '..', '..', '..');
 
@@ -61,10 +61,24 @@ describe('RFC-64 finalized VM precommit on a shipped RPC pool', () => {
       throw new Error('stubbed transport failure');
     });
 
-    // Only the adapter-owned snapshot factory varies — that is the seam under test.
+    const adapter = new EVMChainAdapter({
+      rpcUrl: pool[0]!,
+      rpcUrls: pool.slice(1),
+      privateKey: `0x${'11'.repeat(32)}`,
+      hubAddress: `0x${'22'.repeat(20)}`,
+      chainId: 'evm:31337',
+      staticNetwork: false,
+      allowNoAdminSigner: true,
+    });
+    const getEvmChainId = vi.spyOn(adapter, 'getEvmChainId')
+      .mockResolvedValue(BigInt(RFC64_VM_CHAIN_ID));
+
+    // Only chain-ID resolution and transport are mocked; scope construction is
+    // exercised through the production adapter boundary.
     const precommit = createRfc64FinalizedVmAgentPrecommitV1(
       rfc64FinalizedVmPrecommitOptions({
-        createFinalizedSnapshotScope: finalizedSnapshotScopeFactory(pool),
+        createFinalizedSnapshotScope: () =>
+          adapter.createFinalizedEvmSnapshotScope('rfc64'),
       }),
     );
 
@@ -87,6 +101,7 @@ describe('RFC-64 finalized VM precommit on a shipped RPC pool', () => {
     // the normalizer's spelling rules.
     const href = (url: string) => new URL(url).href;
     expect([...new Set(dialled)]).toEqual([href(pool[0]!), href(pool[1]!)]);
+    expect(getEvmChainId).toHaveBeenCalledOnce();
     // And the third is stranded — stated as a tested fact rather than left as a
     // silent consequence. Selection is health-blind and configuration-ordered,
     // so `base-sepolia.drpc.org` is never reached by a strict finalized read even
@@ -94,4 +109,3 @@ describe('RFC-64 finalized VM precommit on a shipped RPC pool', () => {
     expect(dialled).not.toContain(href(pool[2]!));
   });
 });
-
