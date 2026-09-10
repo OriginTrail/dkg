@@ -25,7 +25,11 @@ import {
   reverseHermesSetupForUi,
 } from '../src/daemon/local-agents.js';
 import { handleHermesRoutes } from '../src/daemon/routes/hermes.js';
-import { handleLocalAgentsRoutes } from '../src/daemon/routes/local-agents.js';
+import {
+  handleLocalAgentsRoutes,
+  persistLocalAgentCandidate,
+} from '../src/daemon/routes/local-agents.js';
+import { updateDaemonConfig } from '../src/daemon/routes/context.js';
 
 const disconnectHermesProfileMock = vi.hoisted(() => vi.fn());
 const resolveHermesProfileMock = vi.hoisted(() => vi.fn(() => ({
@@ -879,6 +883,70 @@ describe('Hermes channel helpers', () => {
 });
 
 describe('Hermes local-agent registry lifecycle', () => {
+  it('rebases deferred integration state through the canonical config store', async () => {
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
+    const initial = makeConfig();
+    const configStore = new DkgConfigStore(new DkgHomeFiles(dkgHome), initial);
+    const candidate = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          capabilities: { localChat: true },
+          runtime: { status: 'ready', ready: true, lastError: null },
+        },
+      },
+    });
+    const context = { configStore };
+
+    try {
+      await persistLocalAgentCandidate(context, '', candidate);
+      await persistLocalAgentCandidate(context, 'hermes', candidate);
+      expect(configStore.current.localAgentIntegrations).toBeUndefined();
+
+      await persistLocalAgentCandidate(context, ' OpenClaw ', candidate);
+      expect(configStore.current.localAgentIntegrations?.openclaw?.runtime)
+        .toMatchObject({ status: 'ready', ready: true });
+
+      await configStore.update(current => ({
+        ...current,
+        localAgentIntegrations: {
+          ...current.localAgentIntegrations,
+          openclaw: {
+            ...current.localAgentIntegrations?.openclaw,
+            enabled: false,
+            runtime: { status: 'disconnected', ready: false, lastError: null },
+          },
+        },
+      }));
+      await persistLocalAgentCandidate(context, 'openclaw', candidate);
+      expect(configStore.current.localAgentIntegrations?.openclaw)
+        .toMatchObject({ enabled: false, runtime: { status: 'disconnected' } });
+      expect(initial.localAgentIntegrations).toBeUndefined();
+    } finally {
+      rmSync(dkgHome, { recursive: true, force: true });
+    }
+  });
+
+  it('publishes a requested draft before rethrowing a deferred mutation error', async () => {
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
+    const initial = makeConfig();
+    const configStore = new DkgConfigStore(new DkgHomeFiles(dkgHome), initial);
+    try {
+      await expect(updateDaemonConfig(
+        { config: initial, configStore },
+        draft => {
+          draft.name = 'published-before-error';
+          throw new Error('attach failed after recording state');
+        },
+        { commitOnError: true },
+      )).rejects.toThrow('attach failed after recording state');
+      expect(configStore.current.name).toBe('published-before-error');
+      expect(initial.name).toBe('test-node');
+    } finally {
+      rmSync(dkgHome, { recursive: true, force: true });
+    }
+  });
+
   it('short-circuits to ready when UI connect reaches bridge health and transport is already stored', async () => {
     // Re-running Connect on an already-attached Hermes integration: the stored
     // transport from the prior install lets us trust the bridge probe directly

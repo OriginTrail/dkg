@@ -315,6 +315,7 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
+import { mutableConfigSnapshot } from '../../daemon-config-store.js';
 import {
   primeAgentDkgSessionId,
   readPrimeAgentSessions,
@@ -377,6 +378,32 @@ function withPrimeAgentSessionCount<T extends { id: string; metadata?: Record<st
   return withPrimeAgentSessionCounts([integration])[0];
 }
 
+/** Rebase deferred attach state through the daemon's canonical config owner. */
+export async function persistLocalAgentCandidate(
+  ctx: Pick<RequestContext, 'configStore'>,
+  id: string,
+  candidate: DkgConfig,
+): Promise<void> {
+  const normalizedId = normalizeIntegrationId(id);
+  if (!normalizedId) return;
+  const candidateEntry = getStoredLocalAgentIntegrations(candidate)[normalizedId];
+  if (!candidateEntry) return;
+  await ctx.configStore.update(current => {
+    const stored = getStoredLocalAgentIntegrations(current);
+    const currentEntry = stored[normalizedId];
+    // A deferred attach result must not re-enable an integration that was
+    // explicitly disconnected after the job started.
+    if (currentEntry?.enabled === false && candidateEntry.enabled !== false) return current;
+    const next = mutableConfigSnapshot(current);
+    next.localAgentIntegrations = {
+      ...stored,
+      [normalizedId]: structuredClone(candidateEntry),
+    };
+    if (normalizedId === 'openclaw') pruneLegacyOpenClawConfig(next);
+    return next;
+  });
+}
+
 export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -407,24 +434,9 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
     requestAgentAddress,
   } = ctx;
   const config = currentDaemonConfig(ctx);
-  const persistLocalAgentCandidate = (id: string) => async (candidate: DkgConfig): Promise<void> => {
-    const normalizedId = normalizeIntegrationId(id);
-    if (!normalizedId) return;
-    const candidateEntry = getStoredLocalAgentIntegrations(candidate)[normalizedId];
-    if (!candidateEntry) return;
-    await updateDaemonConfig(ctx, draft => {
-      const stored = getStoredLocalAgentIntegrations(draft);
-      const currentEntry = stored[normalizedId];
-      // A deferred attach result must not re-enable an integration that was
-      // explicitly disconnected after the job started.
-      if (currentEntry?.enabled === false && candidateEntry.enabled !== false) return;
-      draft.localAgentIntegrations = {
-        ...stored,
-        [normalizedId]: structuredClone(candidateEntry),
-      };
-      if (normalizedId === 'openclaw') pruneLegacyOpenClawConfig(draft);
-    });
-  };
+  const persistLocalAgentCandidateFor = (id: string) => (
+    (candidate: DkgConfig) => persistLocalAgentCandidate(ctx, id, candidate)
+  );
 
 
   // GET /api/local-agent-integrations — generic local agent registry/status surface
@@ -462,7 +474,7 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
         ctx,
         draft => source === 'node-ui'
           ? connectLocalAgentIntegrationFromUi(draft, parsed, bridgeAuthToken, {
-            saveConfig: persistLocalAgentCandidate(String(parsed.id ?? '')),
+            saveConfig: persistLocalAgentCandidateFor(String(parsed.id ?? '')),
           })
           : { integration: connectLocalAgentIntegration(draft, parsed) },
         { commitOnError: true },
