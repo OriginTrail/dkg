@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { ethers } from 'ethers';
+import type { ContextGraphAuthorityGenerationState } from './context-graph-authority-generation.js';
 import type { ContextGraphAuthorityHistoryResolution } from './context-graph-authority-history.js';
 import type {
-  ContextGraphAuthorityIndexEvent,
   ContextGraphAuthorityIndexState,
-} from './context-graph-authority-index.js';
+} from './context-graph-authority-index-checkpoint.js';
+import type { ContextGraphAuthorityIndexEvent } from './context-graph-authority-index-reducer.js';
 
 export const CONTEXT_GRAPH_AUTHORITY_EVENT_NAMES = Object.freeze([
   'ContextGraphCreated',
@@ -26,14 +27,7 @@ export interface EvmContextGraphCurrentAuthorityState {
   readonly participantAgents: readonly string[];
 }
 
-export interface EvmContextGraphAuthorityGeneration {
-  readonly nameHash: string;
-  readonly ownershipEra: number;
-  readonly policyVersion: number;
-  readonly rosterVersion: number;
-  readonly sourceBlockNumber: number;
-  readonly sourceBlockHash: string;
-}
+export type EvmContextGraphAuthorityGeneration = ContextGraphAuthorityGenerationState;
 
 export interface EvmContextGraphAuthoritySourceResult {
   readonly current: EvmContextGraphCurrentAuthorityState;

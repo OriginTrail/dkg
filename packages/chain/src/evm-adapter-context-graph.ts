@@ -1117,16 +1117,16 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         return snapshot;
       },
       {
-        ...(this.contextGraphAuthorityIndex === undefined
-          ? { signal: options.signal }
-          : {
-              // A cancelled waiter leaves the shared index walk running for
-              // its surviving callers, but must not start a fresh provider
-              // attempt after its own detached wait returns.
-              isRetryable: (error: unknown) => (
-                !options.signal?.aborted && isRetryableRpcError(error)
-              ),
-            }),
+        // The caller signal remains bound to finalized/current/stabilization
+        // point reads. Shared index page reads explicitly rebind the narrower
+        // index lifecycle signal above, so one cancelled waiter does not abort
+        // transport work still serving another waiter.
+        signal: options.signal,
+        ...(this.contextGraphAuthorityIndex === undefined ? {} : {
+          isRetryable: (error: unknown) => (
+            !options.signal?.aborted && isRetryableRpcError(error)
+          ),
+        }),
         // A cold authority resolution performs a bounded historical log scan;
         // the default 4s point-read cap aborts healthy fallback providers before
         // they can finish. Warm checkpoint suffixes remain fast under this cap.

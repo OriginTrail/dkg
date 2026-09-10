@@ -2,20 +2,13 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { ContextGraphAuthorityIndex } from '../src/context-graph-authority-index.js';
+import type { ContextGraphAuthorityIndexStore } from '../src/context-graph-authority-index-checkpoint.js';
 import {
-  ContextGraphAuthorityHistoryCache,
-  resolveContextGraphAuthorityHistory,
-} from '../src/context-graph-authority-history.js';
-import {
-  ContextGraphAuthorityIndex,
-  normalizeContextGraphAuthorityIndexCheckpoint,
   reduceContextGraphAuthorityIndexPage,
   type ContextGraphAuthorityIndexEvent,
-  type ContextGraphAuthorityIndexStore,
-} from '../src/context-graph-authority-index.js';
-import { applyContextGraphAuthorityGenerationEvent } from '../src/context-graph-authority-generation.js';
+} from '../src/context-graph-authority-index-reducer.js';
 
-const ZERO = `0x${'0'.repeat(40)}`;
 const OWNER = `0x${'11'.repeat(20)}`;
 const NEXT_OWNER = `0x${'22'.repeat(20)}`;
 const NAME_9 = `0x${'99'.repeat(32)}`;
@@ -48,309 +41,6 @@ function creation(
 ): ContextGraphAuthorityIndexEvent {
   return event('ContextGraphCreated', contextGraphId, blockNumber, index, { nameHash });
 }
-
-describe('contract-wide Context Graph authority index reducer', () => {
-  it('groups unsorted logs by graph and preserves the authority generation semantics', () => {
-    const result = reduceContextGraphAuthorityIndexPage({
-      deploymentBlockNumber: 10,
-      throughBlockNumber: 20,
-      throughBlockHash: blockHash(20),
-      events: [
-        event('AgentParticipantRemoved', 9n, 13, 0),
-        creation(10n, 11, 1, NAME_10),
-        event('PublishAuthorityUpdated', 9n, 12, 2),
-        event('Transfer', 9n, 10, 0, { from: ZERO, to: OWNER }),
-        event('AgentParticipantAdded', 9n, 11, 2),
-        creation(9n, 10, 1, NAME_9),
-        event('Transfer', 9n, 12, 1, { from: OWNER, to: NEXT_OWNER }),
-      ],
-    });
-
-    expect(result.checkpoint.cursor).toEqual({
-      deploymentBlockNumber: 10,
-      throughBlockNumber: 20,
-      throughBlockHash: blockHash(20),
-      stateCount: 2,
-    });
-    expect(result.checkpoint.states).toEqual([
-      {
-        contextGraphId: '9',
-        nameHash: NAME_9,
-        ownershipEra: 1,
-        policyVersion: 2,
-        rosterVersion: 3,
-        sourceBlockNumber: 12,
-        sourceBlockHash: blockHash(12),
-      },
-      {
-        contextGraphId: '10',
-        nameHash: NAME_10,
-        ownershipEra: 0,
-        policyVersion: 0,
-        rosterVersion: 0,
-        sourceBlockNumber: 11,
-        sourceBlockHash: blockHash(11),
-      },
-    ]);
-    expect(Object.isFrozen(result.checkpoint)).toBe(true);
-    expect(Object.isFrozen(result.checkpoint.states)).toBe(true);
-    expect(result.checkpoint.states.every(Object.isFrozen)).toBe(true);
-  });
-
-  it('matches the legacy per-graph reducer for the same event history', async () => {
-    const index = reduceContextGraphAuthorityIndexPage({
-      deploymentBlockNumber: 10,
-      throughBlockNumber: 20,
-      throughBlockHash: blockHash(20),
-      events: [
-        event('AgentParticipantRemoved', 9n, 13, 0),
-        event('PublishAuthorityUpdated', 9n, 12, 2),
-        event('AgentParticipantAdded', 9n, 11, 2),
-        creation(9n, 10, 1, NAME_9),
-        event('Transfer', 9n, 12, 1, { from: OWNER, to: NEXT_OWNER }),
-      ],
-    }).checkpoint.states[0]!;
-    const history = await resolveContextGraphAuthorityHistory({
-      cache: new ContextGraphAuthorityHistoryCache(),
-      cacheKey: 'parity:9',
-      readScope: {},
-      contextGraphId: 9n,
-      finalized: { number: 20, hash: blockHash(20) },
-      pageSize: 100,
-      loadColdFromBlock: async () => 10,
-      readBlockHash: async (blockNumber) => blockHash(blockNumber),
-      readCreationEvents: async () => [{
-        blockNumber: 10,
-        blockHash: blockHash(10),
-        index: 1,
-        nameHash: NAME_9,
-      }],
-      readEvents: async ({ name }) => ({
-        Transfer: [{ blockNumber: 12, blockHash: blockHash(12), index: 1 }],
-        PublishAuthorityUpdated: [{
-          blockNumber: 12, blockHash: blockHash(12), index: 2,
-        }],
-        AgentParticipantAdded: [{ blockNumber: 11, blockHash: blockHash(11), index: 2 }],
-        AgentParticipantRemoved: [{ blockNumber: 13, blockHash: blockHash(13), index: 0 }],
-        PublishPolicyUpdated: [],
-      })[name],
-    });
-    const { contextGraphId: _, ...indexGeneration } = index;
-    const { throughBlockNumber: _number, throughBlockHash: _hash, ...legacyGeneration } =
-      history.state;
-    expect(indexGeneration).toEqual(legacyGeneration);
-  });
-
-  it('reduces an exactly contiguous suffix without mutating the prior checkpoint', () => {
-    const first = reduceContextGraphAuthorityIndexPage({
-      deploymentBlockNumber: 10,
-      throughBlockNumber: 20,
-      throughBlockHash: blockHash(20),
-      events: [creation(9n, 10, 1, NAME_9), creation(10n, 11, 1, NAME_10)],
-    });
-    const suffix = reduceContextGraphAuthorityIndexPage({
-      deploymentBlockNumber: 10,
-      throughBlockNumber: 25,
-      throughBlockHash: blockHash(25),
-      previous: first.checkpoint,
-      events: [event('PublishPolicyUpdated', 10n, 22, 4)],
-    });
-
-    expect(suffix.checkpoint.states).toHaveLength(2);
-    expect(suffix.checkpoint.states[1]).toMatchObject({
-      contextGraphId: '10',
-      policyVersion: 1,
-      sourceBlockNumber: 22,
-    });
-    expect(first.checkpoint.states[1]).toMatchObject({
-      contextGraphId: '10',
-      policyVersion: 0,
-    });
-
-    const emptySuffix = reduceContextGraphAuthorityIndexPage({
-      deploymentBlockNumber: 10,
-      throughBlockNumber: 30,
-      throughBlockHash: blockHash(30),
-      previous: suffix.checkpoint,
-      events: [],
-    });
-    expect(emptySuffix.checkpoint.cursor.stateCount).toBe(2);
-  });
-
-  it('ignores mint, burn, and self-transfer logs', () => {
-    const result = reduceContextGraphAuthorityIndexPage({
-      deploymentBlockNumber: 10,
-      throughBlockNumber: 15,
-      throughBlockHash: blockHash(15),
-      events: [
-        event('Transfer', 9n, 10, 0, { from: ZERO, to: OWNER }),
-        creation(9n, 10, 1, NAME_9),
-        event('Transfer', 9n, 11, 0, { from: OWNER, to: OWNER }),
-        event('Transfer', 9n, 12, 0, { from: OWNER, to: ZERO }),
-      ],
-    });
-    expect(result.checkpoint.states[0]).toMatchObject({
-      ownershipEra: 0,
-      policyVersion: 0,
-      rosterVersion: 0,
-      sourceBlockNumber: 10,
-    });
-  });
-
-  it('fails closed on gaps, overlaps, deployment changes, and malformed prior state', () => {
-    const first = reduceContextGraphAuthorityIndexPage({
-      deploymentBlockNumber: 10,
-      throughBlockNumber: 20,
-      throughBlockHash: blockHash(20),
-      events: [creation(9n, 10, 1, NAME_9)],
-    });
-    expect(() => reduceContextGraphAuthorityIndexPage({
-      deploymentBlockNumber: 10,
-      throughBlockNumber: 20,
-      throughBlockHash: blockHash(20),
-      previous: first.checkpoint,
-      events: [],
-    })).toThrow('empty, overlapping, or non-contiguous');
-    expect(() => reduceContextGraphAuthorityIndexPage({
-      deploymentBlockNumber: 11,
-      throughBlockNumber: 25,
-      throughBlockHash: blockHash(25),
-      previous: first.checkpoint,
-      events: [],
-    })).toThrow('deployment block changed');
-    expect(() => reduceContextGraphAuthorityIndexPage({
-      deploymentBlockNumber: 10,
-      throughBlockNumber: 25,
-      throughBlockHash: blockHash(25),
-      previous: {
-        ...first.checkpoint,
-        cursor: { ...first.checkpoint.cursor, stateCount: 2 },
-      },
-      events: [],
-    })).toThrow('previous checkpoint is malformed');
-  });
-
-  it('fails closed on duplicate positions, duplicate creation, and pre-creation changes', () => {
-    expect(() => reduceContextGraphAuthorityIndexPage({
-      deploymentBlockNumber: 10,
-      throughBlockNumber: 20,
-      throughBlockHash: blockHash(20),
-      events: [
-        creation(9n, 10, 1, NAME_9),
-        event('AgentParticipantAdded', 9n, 10, 1),
-      ],
-    })).toThrow('duplicate log position');
-
-    const first = reduceContextGraphAuthorityIndexPage({
-      deploymentBlockNumber: 10,
-      throughBlockNumber: 20,
-      throughBlockHash: blockHash(20),
-      events: [creation(9n, 10, 1, NAME_9)],
-    });
-    expect(() => reduceContextGraphAuthorityIndexPage({
-      deploymentBlockNumber: 10,
-      throughBlockNumber: 25,
-      throughBlockHash: blockHash(25),
-      previous: first.checkpoint,
-      events: [creation(9n, 22, 1, NAME_9)],
-    })).toThrow('more than one creation event');
-
-    expect(() => reduceContextGraphAuthorityIndexPage({
-      deploymentBlockNumber: 10,
-      throughBlockNumber: 20,
-      throughBlockHash: blockHash(20),
-      events: [event('PublishPolicyUpdated', 9n, 12, 0)],
-    })).toThrow('precedes creation');
-  });
-
-  it('validates page events and the terminal page anchor', () => {
-    expect(() => reduceContextGraphAuthorityIndexPage({
-      deploymentBlockNumber: 10,
-      throughBlockNumber: 20,
-      throughBlockHash: blockHash(20),
-      events: [creation(9n, 21, 0, NAME_9)],
-    })).toThrow('outside its page or is malformed');
-    expect(() => reduceContextGraphAuthorityIndexPage({
-      deploymentBlockNumber: 10,
-      throughBlockNumber: 20,
-      throughBlockHash: blockHash(20),
-      events: [{
-        ...creation(9n, 20, 0, NAME_9),
-        blockHash: blockHash(19),
-      }],
-    })).toThrow('disagrees with the page anchor');
-    expect(() => reduceContextGraphAuthorityIndexPage({
-      deploymentBlockNumber: 10,
-      throughBlockNumber: 20,
-      throughBlockHash: blockHash(20),
-      events: [event('Transfer', 9n, 12, 0, { from: 'bad', to: OWNER })],
-    })).toThrow('invalid address');
-  });
-
-  it('normalizes durable checkpoints and rejects count, id, hash, and source corruption', () => {
-    const valid = reduceContextGraphAuthorityIndexPage({
-      deploymentBlockNumber: 10,
-      throughBlockNumber: 20,
-      throughBlockHash: blockHash(20).toUpperCase().replace('0X', '0x'),
-      events: [creation(9n, 10, 1, NAME_9.toUpperCase().replace('0X', '0x'))],
-    }).checkpoint;
-    expect(normalizeContextGraphAuthorityIndexCheckpoint(valid)).toEqual(valid);
-    expect(normalizeContextGraphAuthorityIndexCheckpoint({
-      ...valid,
-      cursor: { ...valid.cursor, stateCount: 2 },
-    })).toBeUndefined();
-    expect(normalizeContextGraphAuthorityIndexCheckpoint({
-      ...valid,
-      states: [{ ...valid.states[0], contextGraphId: '09' }],
-    })).toBeUndefined();
-    expect(normalizeContextGraphAuthorityIndexCheckpoint({
-      ...valid,
-      states: [{ ...valid.states[0], sourceBlockNumber: 21 }],
-    })).toBeUndefined();
-    expect(normalizeContextGraphAuthorityIndexCheckpoint({
-      ...valid,
-      cursor: { ...valid.cursor, throughBlockHash: 'bad' },
-    })).toBeUndefined();
-    expect(normalizeContextGraphAuthorityIndexCheckpoint({
-      ...valid,
-      states: [{
-        ...valid.states[0],
-        ownershipEra: 1,
-        policyVersion: 0,
-        rosterVersion: 0,
-      }],
-    })).toBeUndefined();
-    expect(normalizeContextGraphAuthorityIndexCheckpoint({
-      ...valid,
-      states: [{ ...valid.states[0], contextGraphId: (1n << 256n).toString(10) }],
-    })).toBeUndefined();
-  });
-
-  it('decodes opaque durable reads only at the chain-owned boundary', async () => {
-    const store: ContextGraphAuthorityIndexStore = {
-      load: async () => ({ token: 1, value: { cursor: 'not-a-cursor', states: [] } }),
-      compareAndSwap: async () => 2,
-      invalidate: async () => 2,
-    };
-    expect(normalizeContextGraphAuthorityIndexCheckpoint((await store.load('scope'))?.value))
-      .toBeUndefined();
-  });
-
-  it('rejects counter overflow before a checkpoint can be emitted', () => {
-    expect(() => applyContextGraphAuthorityGenerationEvent({
-      nameHash: NAME_9,
-      ownershipEra: 0,
-      policyVersion: Number.MAX_SAFE_INTEGER,
-      rosterVersion: 0,
-      sourceBlockNumber: 10,
-      sourceBlockHash: blockHash(10),
-    }, {
-      name: 'PublishPolicyUpdated',
-      blockNumber: 22,
-      blockHash: blockHash(22),
-    }, 'Context Graph 9')).toThrow('safe integer range');
-  });
-});
 
 class MemoryAuthorityIndexStore implements ContextGraphAuthorityIndexStore {
   record: Readonly<{ token: number; value: unknown | null }> | undefined;
@@ -551,6 +241,7 @@ describe('durable contract-wide Context Graph authority scanner', () => {
 
   it('reloads the CAS winner and resumes from its suffix with concurrent providers', async () => {
     const store = new MemoryAuthorityIndexStore();
+    const index = new ContextGraphAuthorityIndex(store);
     const firstPageEntered = Promise.withResolvers<void>();
     const releaseFirstPage = Promise.withResolvers<void>();
     let gatedReads = 0;
@@ -566,10 +257,10 @@ describe('durable contract-wide Context Graph authority scanner', () => {
       return allEvents.filter((entry) => entry.blockNumber >= from && entry.blockNumber <= to);
     };
 
-    const first = new ContextGraphAuthorityIndex(store).resolve(
+    const first = index.resolve(
       makeInput(9n, {}, reader(rangesA)),
     );
-    const second = new ContextGraphAuthorityIndex(store).resolve(
+    const second = index.resolve(
       makeInput(10n, {}, reader(rangesB)),
     );
     await firstPageEntered.promise;
@@ -581,6 +272,11 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     ]);
     expect(rangesA[0]).toEqual([10, 14]);
     expect(rangesB[0]).toEqual([10, 14]);
+    for (const ranges of [rangesA, rangesB]) {
+      const starts = ranges.map(([from]) => from);
+      expect(starts.slice(1).every((from, offset) => from > starts[offset]!)).toBe(true);
+      expect(starts.filter((from) => from === 10)).toHaveLength(1);
+    }
     expect(store.record?.token).toBeGreaterThanOrEqual(4);
     expect((store.record!.value as { cursor: { throughBlockNumber: number } }).cursor)
       .toMatchObject({ throughBlockNumber: 25 });
@@ -654,6 +350,27 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     release.resolve();
     await expect(survivor).resolves.toMatchObject({ contextGraphId: '10' });
     expect(reads).toBe(4);
+  });
+
+  it('does not start durable or RPC work for an already-aborted caller', async () => {
+    const calls = { loads: 0, commits: 0, invalidations: 0, blockHashes: 0, pages: 0 };
+    const store: ContextGraphAuthorityIndexStore = {
+      load: async () => { calls.loads += 1; return undefined; },
+      compareAndSwap: async () => { calls.commits += 1; return 1; },
+      invalidate: async () => { calls.invalidations += 1; return 1; },
+    };
+    const abort = new AbortController();
+    abort.abort(new Error('caller already left'));
+    const input = makeInput(9n, {}, async () => { calls.pages += 1; return []; });
+
+    await expect(new ContextGraphAuthorityIndex(store).resolve({
+      ...input,
+      signal: abort.signal,
+      readBlockHash: async () => { calls.blockHashes += 1; return blockHash(10); },
+    })).rejects.toThrow('caller already left');
+    expect(calls).toEqual({
+      loads: 0, commits: 0, invalidations: 0, blockHashes: 0, pages: 0,
+    });
   });
 
   it('aborts the shared transport when its owning lifecycle is cleared', async () => {

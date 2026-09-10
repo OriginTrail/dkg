@@ -8,7 +8,7 @@
 import { Contract } from 'ethers';
 import type { ApprovalPolicy, ContextGraphRegistryScanCursorStore } from './chain-adapter.js';
 import type { ContextGraphAuthorityHistoryStore } from './context-graph-authority-history.js';
-import type { ContextGraphAuthorityIndexStore } from './context-graph-authority-index.js';
+import type { ContextGraphAuthorityIndexStore } from './context-graph-authority-index-checkpoint.js';
 
 export interface EVMAdapterBaseConfig {
   rpcUrl: string;

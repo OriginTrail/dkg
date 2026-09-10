@@ -34,9 +34,10 @@ interface AuthorityEvidence {
   readonly ranges: Array<readonly [number, number]>;
   readonly staticCalls: Array<readonly [bigint, { blockTag: number }]>;
   readonly deploymentReads: Array<readonly [string, string, string]>;
-  readonly readOptions: Array<Readonly<{ policy?: string }>>;
+  readonly readOptions: Array<Readonly<{ policy?: string; signal?: AbortSignal }>>;
   readonly indexRanges: Array<readonly [number, number]>;
   readonly indexTopicSets: string[][];
+  readonly indexAddresses: string[];
 }
 
 interface EvmAuthorityHarness {
@@ -47,6 +48,8 @@ interface EvmAuthorityHarness {
   replaceCachedAnchor(): void;
   replaceFinalizedHead(): void;
   holdCurrentStateRead(): Readonly<{ entered: Promise<void>; release(): void }>;
+  holdBlockRead(tag: string | number): Readonly<{ entered: Promise<void>; release(): void }>;
+  holdIndexPageRead(): Readonly<{ entered: Promise<void>; release(): void }>;
   setPublishAuthorityAccountId(value: unknown): void;
   rotateContextGraphStorage(): void;
 }
@@ -93,12 +96,22 @@ function makeEvmAuthorityAdapter(
     readOptions: [],
     indexRanges: [],
     indexTopicSets: [],
+    indexAddresses: [],
   };
 
   let finalizedNumber = 30;
   let finalizedHash = FINALIZED_HASH;
   let cachedAnchorReplaced = false;
   let currentReadGate: PromiseWithResolvers<void> | undefined;
+  let blockReadGate: Readonly<{
+    tag: string | number;
+    entered: PromiseWithResolvers<void>;
+    release: PromiseWithResolvers<void>;
+  }> | undefined;
+  let indexPageReadGate: Readonly<{
+    entered: PromiseWithResolvers<void>;
+    release: PromiseWithResolvers<void>;
+  }> | undefined;
   const logs: Record<string, ReturnType<typeof event>[]> = {
     ContextGraphCreated: [event(10, 1, CREATION_HASH, [9n, OWNER, NAME_HASH])],
     Transfer: [
@@ -176,6 +189,12 @@ function makeEvmAuthorityAdapter(
   };
   const provider = {
     getBlock: async (tag: string | number) => {
+      const gate = blockReadGate;
+      if (gate?.tag === tag) {
+        blockReadGate = undefined;
+        gate.entered.resolve();
+        await gate.release.promise;
+      }
       if (tag === 'finalized') return { number: finalizedNumber, hash: finalizedHash };
       const historicalHash = tag === 30 && cachedAnchorReplaced
         ? `0x${'cc'.repeat(32)}`
@@ -191,12 +210,21 @@ function makeEvmAuthorityAdapter(
     },
     getNetwork: async () => ({ chainId: 31337n }),
     getLogs: async (filter: {
+      address: string;
       fromBlock: number;
       toBlock: number;
       topics: string[][];
     }) => {
+      expect(filter.address).toBe(GOVERNANCE);
+      evidence.indexAddresses.push(filter.address);
       evidence.indexRanges.push([filter.fromBlock, filter.toBlock]);
       evidence.indexTopicSets.push(filter.topics[0] ?? []);
+      const gate = indexPageReadGate;
+      if (gate !== undefined) {
+        indexPageReadGate = undefined;
+        gate.entered.resolve();
+        await gate.release.promise;
+      }
       const namedArgs = (values: readonly unknown[], names: Record<string, unknown>) => (
         Object.assign([...values], names)
       );
@@ -304,6 +332,18 @@ function makeEvmAuthorityAdapter(
       };
       return { entered: entered.promise, release: release.resolve };
     },
+    holdBlockRead: (tag) => {
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      blockReadGate = { tag, entered, release };
+      return { entered: entered.promise, release: release.resolve };
+    },
+    holdIndexPageRead: () => {
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      indexPageReadGate = { entered, release };
+      return { entered: entered.promise, release: release.resolve };
+    },
     setPublishAuthorityAccountId: (value) => {
       current.publishAuthorityAccountId = value;
       current[8] = value;
@@ -325,6 +365,7 @@ describe('RFC-64 Context Graph authority snapshots', () => {
       sourceBlockNumber: '21',
     });
     expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
+    expect(evidence.indexAddresses).toEqual(Array(3).fill(GOVERNANCE));
     expect(evidence.filters).toEqual([]);
     expect(evidence.indexTopicSets).toEqual(Array(3).fill([
       'topic:ContextGraphCreated',
@@ -337,6 +378,75 @@ describe('RFC-64 Context Graph authority snapshots', () => {
 
     await adapter.getContextGraphAuthoritySnapshot(9n);
     expect(evidence.indexRanges).toHaveLength(3);
+  });
+
+  it.each([
+    ['finalized head', (harness: EvmAuthorityHarness) => harness.holdBlockRead('finalized')],
+    ['current state', (harness: EvmAuthorityHarness) => harness.holdCurrentStateRead()],
+    ['stabilization fence', (harness: EvmAuthorityHarness) => harness.holdBlockRead(30)],
+  ] as const)('keeps caller cancellation bound during the indexed %s read', async (
+    _stage,
+    hold,
+  ) => {
+    const harness = makeEvmAuthorityAdapter({ sharedIndex: true });
+    const adapter = harness.adapter as any;
+    adapter.readTipProvider = async (
+      _label: string,
+      read: (provider: EvmAuthorityHarness['provider']) => Promise<unknown>,
+      options: Readonly<{ signal?: AbortSignal }>,
+    ) => {
+      harness.evidence.readOptions.push(options);
+      const pending = read(harness.provider);
+      if (options.signal === undefined) return pending;
+      return new Promise((resolve, reject) => {
+        const onAbort = () => reject(options.signal!.reason);
+        options.signal!.addEventListener('abort', onAbort, { once: true });
+        void pending.then(resolve, reject).finally(() => {
+          options.signal!.removeEventListener('abort', onAbort);
+        });
+      });
+    };
+    const gate = hold(harness);
+    const abort = new AbortController();
+    const pending = harness.adapter.getContextGraphAuthoritySnapshot(9n, {
+      signal: abort.signal,
+    });
+    await gate.entered;
+    abort.abort(new Error('snapshot caller left'));
+    await expect(pending).rejects.toThrow('snapshot caller left');
+    expect(harness.evidence.readOptions[0]?.signal).toBe(abort.signal);
+    gate.release();
+  });
+
+  it('detaches one cancelled waiter without aborting its shared indexed page read', async () => {
+    const harness = makeEvmAuthorityAdapter({ sharedIndex: true });
+    const adapter = harness.adapter as any;
+    adapter.readTipProvider = async (
+      _label: string,
+      read: (provider: EvmAuthorityHarness['provider']) => Promise<unknown>,
+      options: Readonly<{ signal?: AbortSignal }>,
+    ) => {
+      const pending = read(harness.provider);
+      if (options.signal === undefined) return pending;
+      return new Promise((resolve, reject) => {
+        const onAbort = () => reject(options.signal!.reason);
+        options.signal!.addEventListener('abort', onAbort, { once: true });
+        void pending.then(resolve, reject).finally(() => {
+          options.signal!.removeEventListener('abort', onAbort);
+        });
+      });
+    };
+    const gate = harness.holdIndexPageRead();
+    const abort = new AbortController();
+    const cancelled = harness.adapter.getContextGraphAuthoritySnapshot(9n, {
+      signal: abort.signal,
+    });
+    await gate.entered;
+    const survivor = harness.adapter.getContextGraphAuthoritySnapshot(9n);
+    abort.abort(new Error('one waiter left'));
+    await expect(cancelled).rejects.toThrow('one waiter left');
+    gate.release();
+    await expect(survivor).resolves.toMatchObject({ contextGraphId: '9' });
   });
 
   it('fails over when a provider cannot revalidate the durable authority anchor', async () => {

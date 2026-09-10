@@ -23,15 +23,10 @@ export interface ContextGraphAuthorityHistoryCreationEvent
   readonly nameHash: string;
 }
 
-export interface ContextGraphAuthorityHistoryState {
+export interface ContextGraphAuthorityHistoryState
+  extends ContextGraphAuthorityGenerationState {
   readonly throughBlockNumber: number;
   readonly throughBlockHash: string;
-  readonly nameHash: string;
-  readonly ownershipEra: number;
-  readonly policyVersion: number;
-  readonly rosterVersion: number;
-  readonly sourceBlockNumber: number;
-  readonly sourceBlockHash: string;
 }
 
 export const CONTEXT_GRAPH_AUTHORITY_HISTORY_CHECKPOINT_VERSION = 1 as const;
