@@ -1909,23 +1909,29 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       if (networkId === undefined || networkId === 'none') {
         throw new Error('RFC-64 release-native authority requires a trusted chain network');
       }
-      const onChainId = await this.getContextGraphOnChainId(contextGraphId);
-      let authority: Rfc64ReleaseNativeAuthoritySnapshotV1;
-      if (onChainId !== null) {
-        const reader = requireRfc64ContextGraphAuthorityReaderV1(
-          this.contextGraphAuthorityReaderCapability,
-        );
-        const expectedOnChainId = BigInt(onChainId);
-        const snapshot = parseRfc64AuthoritySnapshotV1(
-          await this.rfc64AuthorityRpcCircuitBreakerV1.run(
-            signal,
-            () => reader.getContextGraphAuthoritySnapshot(
+      const registeredAuthorityRead = await this.rfc64AuthorityReadCoordinatorV1.run(
+        signal,
+        async (readSignal) => {
+          const onChainId = await this.getContextGraphOnChainId(contextGraphId);
+          if (readSignal?.aborted) throw readSignal.reason;
+          if (onChainId === null) return null;
+          const reader = requireRfc64ContextGraphAuthorityReaderV1(
+            this.contextGraphAuthorityReaderCapability,
+          );
+          const expectedOnChainId = BigInt(onChainId);
+          const snapshot = parseRfc64AuthoritySnapshotV1(
+            await reader.getContextGraphAuthoritySnapshot(
               expectedOnChainId,
-              { signal },
+              { signal: readSignal },
             ),
-          ),
-          expectedOnChainId,
-        );
+            expectedOnChainId,
+          );
+          return { expectedOnChainId, snapshot } as const;
+        },
+      );
+      let authority: Rfc64ReleaseNativeAuthoritySnapshotV1;
+      if (registeredAuthorityRead !== null) {
+        const { snapshot } = registeredAuthorityRead;
         if (signal?.aborted) throw signal.reason;
         const explicitNameHash = this.subscribedContextGraphs.get(contextGraphId)?.onChainHash;
         const expectedNameHash = explicitNameHash === undefined

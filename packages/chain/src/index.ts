@@ -162,10 +162,14 @@ export {
 export { NoChainAdapter } from './no-chain-adapter.js';
 export {
   ChainRpcTransportError,
+  RpcEndpointsExhaustedError,
   isChainRpcTransportError,
+  isRpcEndpointsExhaustedError,
   createRpcTimeoutError,
   type ChainRpcTransportCode,
   type ChainRpcTransportErrorLike,
+  type RpcEndpointExhaustionKind,
+  type RpcEndpointsExhaustedErrorLike,
 } from './chain-rpc-transport-error.js';
 export {
   // Surfaced for the daemon /api/status counter + the CLI failover loop.

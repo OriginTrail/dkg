@@ -46,7 +46,12 @@ import { withTimeout, isRetryableRpcError, isThrottleRpcError, isKnownTransactio
 import { errorCode, errorMessage, errorRetryAfterMs } from './evm-adapter-errors.js';
 import { noteRpcFailover, noteRpcExhaustion, notePreferredEndpoint, noteRpcServed, rpcHost } from './rpc-failover-log.js';
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
-import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
+import {
+  ChainRpcTransportError,
+  RpcEndpointsExhaustedError,
+  createRpcTimeoutError,
+  type RpcEndpointExhaustionKind,
+} from './chain-rpc-transport-error.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
 import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
 import {
@@ -156,16 +161,14 @@ interface ProviderPassOptions<T> {
   onServed: (endpoint: RpcEndpoint, value: T) => void;
 }
 
-type ProviderSetExhaustionKind = 'all-throttled' | 'mixed';
-
 /** Internal exhaustion detail used only while deciding whether to retry a pass. */
-class ProviderSetExhaustedError extends ChainRpcTransportError {
+class ProviderSetExhaustedError extends RpcEndpointsExhaustedError {
   constructor(
     message: string,
-    exhaustionKind: ProviderSetExhaustionKind,
+    exhaustionKind: RpcEndpointExhaustionKind,
     opts: { cause: unknown; rpcUrls: readonly string[]; retryAfterMs?: number },
   ) {
-    super('RPC_ENDPOINTS_EXHAUSTED', message, { ...opts, exhaustionKind });
+    super(message, { ...opts, exhaustionKind });
   }
 }
 
@@ -554,7 +557,7 @@ export class RpcFailoverClient {
     getMetrics().chainRpcFailoverTotal.add(1, {
       rpc_method: 'eth_estimateGas', chain_id: this.chainId(), reason: 'exhausted',
     });
-    throw new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', message, {
+    throw new RpcEndpointsExhaustedError(message, {
       cause: lastRetryable,
       rpcUrls: canonical.map((e) => e.rpcUrl),
     });
@@ -628,8 +631,7 @@ export class RpcFailoverClient {
           // broadcast-time all-endpoints-exhausted failure maps to a retryable 503 at
           // the HTTP boundary, not a generic 500 — an exhaustion after a provider
           // populated/signed would otherwise surface code-less.
-          throw new ChainRpcTransportError(
-            'RPC_ENDPOINTS_EXHAUSTED',
+          throw new RpcEndpointsExhaustedError(
             `${label} broadcast failed on all configured RPC endpoints for tx ${txHash}: ${errorMessage(lastRetryable)}`,
             { cause: lastRetryable, rpcUrls: canonical.map((e) => e.rpcUrl), txHash },
           );
@@ -850,8 +852,7 @@ export class RpcFailoverClient {
     }
     // Unreachable when >=1 endpoint is configured (each iteration returns,
     // continues on empty, or throws / sets lastRetryable). Guard the 0-endpoint case.
-    throw new ChainRpcTransportError(
-      'RPC_ENDPOINTS_EXHAUSTED',
+    throw new RpcEndpointsExhaustedError(
       `${label} read failed: no configured RPC endpoints`,
       { rpcUrls: [] },
     );

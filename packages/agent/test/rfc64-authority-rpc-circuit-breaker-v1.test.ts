@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
+import {
+  ChainRpcTransportError,
+  RpcEndpointsExhaustedError,
+} from '@origintrail-official/dkg-chain';
 import { describe, expect, it } from 'vitest';
 
 import {
-  Rfc64AuthorityRpcCircuitBreakerV1,
+  Rfc64AuthorityReadCoordinatorV1,
   isRfc64AuthorityRpcCircuitOpenErrorV1,
 } from '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
 
 function exhausted(retryAfterMs?: number): ChainRpcTransportError {
-  return new ChainRpcTransportError(
-    'RPC_ENDPOINTS_EXHAUSTED',
+  return new RpcEndpointsExhaustedError(
     'authority read failed on every provider',
     {
       exhaustionKind: 'all-throttled',
@@ -27,7 +29,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
   it('shares one open circuit across queued graph refreshes', async () => {
     let now = 1_000;
     let calls = 0;
-    const breaker = new Rfc64AuthorityRpcCircuitBreakerV1({
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
       baseBackoffMs: 100,
       maxBackoffMs: 800,
       jitterRatio: 0,
@@ -60,7 +62,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
   it('admits exactly one half-open probe and reopens when it exhausts', async () => {
     let now = 0;
     let calls = 0;
-    const breaker = new Rfc64AuthorityRpcCircuitBreakerV1({
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
       baseBackoffMs: 100,
       maxBackoffMs: 800,
       jitterRatio: 0,
@@ -104,7 +106,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
   it('closes after a successful half-open probe and releases queued work', async () => {
     let now = 0;
     let calls = 0;
-    const breaker = new Rfc64AuthorityRpcCircuitBreakerV1({
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
       baseBackoffMs: 100,
       maxBackoffMs: 800,
       jitterRatio: 0,
@@ -135,9 +137,24 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     });
   });
 
-  it('honors Retry-After, exponential backoff, jitter, and the absolute cap', async () => {
+  it('applies deterministic fleet jitter when no provider hint overrides it', async () => {
     let now = 0;
-    const breaker = new Rfc64AuthorityRpcCircuitBreakerV1({
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
+      baseBackoffMs: 100,
+      maxBackoffMs: 800,
+      jitterRatio: 0.2,
+      now: () => now,
+      random: () => 1,
+    });
+
+    await expect(breaker.run(undefined, async () => { throw exhausted(); }))
+      .rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot().retryAtMs).toBe(120);
+  });
+
+  it('honors Retry-After, exponential backoff, and the absolute cap', async () => {
+    let now = 0;
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
       baseBackoffMs: 100,
       maxBackoffMs: 800,
       jitterRatio: 0.2,
@@ -161,7 +178,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
 
   it('does not trip for deterministic failures and respects an aborted waiter', async () => {
     let calls = 0;
-    const breaker = new Rfc64AuthorityRpcCircuitBreakerV1({
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
       baseBackoffMs: 100,
       maxBackoffMs: 800,
       jitterRatio: 0,
@@ -182,12 +199,44 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     expect(calls).toBe(1);
   });
 
+  it('settles a queued abort promptly without allowing later work to overtake', async () => {
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
+      baseBackoffMs: 100,
+      maxBackoffMs: 800,
+      jitterRatio: 0,
+    });
+    let releaseFirst!: () => void;
+    let markStarted!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const first = breaker.run(undefined, async () => {
+      markStarted();
+      await gate;
+      return 'first';
+    });
+    await started;
+
+    const controller = new AbortController();
+    const second = breaker.run(controller.signal, async () => 'must-not-run');
+    const third = breaker.run(undefined, async () => 'third');
+    controller.abort(new Error('queued read cancelled'));
+
+    await expect(second).rejects.toThrow('queued read cancelled');
+    await expect(Promise.race([
+      third.then(() => 'overtook'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('still-queued'), 10)),
+    ])).resolves.toBe('still-queued');
+    releaseFirst();
+    await expect(first).resolves.toBe('first');
+    await expect(third).resolves.toBe('third');
+  });
+
   it('rejects unsafe timing configuration', () => {
-    expect(() => new Rfc64AuthorityRpcCircuitBreakerV1({
+    expect(() => new Rfc64AuthorityReadCoordinatorV1({
       baseBackoffMs: 1_000,
       maxBackoffMs: 999,
     })).toThrow(/at least baseBackoffMs/u);
-    expect(() => new Rfc64AuthorityRpcCircuitBreakerV1({
+    expect(() => new Rfc64AuthorityReadCoordinatorV1({
       jitterRatio: 1.1,
     })).toThrow(/between 0 and 1/u);
   });

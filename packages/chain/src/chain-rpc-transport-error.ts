@@ -50,9 +50,14 @@ export interface ChainRpcTransportErrorLike {
   message?: string;
   rpcUrls?: readonly string[];
   txHash?: string;
-  /** Shape of the final provider pass when every endpoint was exhausted. */
-  exhaustionKind?: 'all-throttled' | 'mixed';
-  /** Largest valid HTTP Retry-After hint observed during the provider pass. */
+}
+
+export type RpcEndpointExhaustionKind = 'all-throttled' | 'mixed';
+
+/** Narrow transport variant whose metadata is meaningful only for pool exhaustion. */
+export interface RpcEndpointsExhaustedErrorLike extends ChainRpcTransportErrorLike {
+  code: 'RPC_ENDPOINTS_EXHAUSTED';
+  exhaustionKind?: RpcEndpointExhaustionKind;
   retryAfterMs?: number;
 }
 
@@ -66,9 +71,6 @@ export class ChainRpcTransportError extends Error {
 
   readonly txHash?: string;
 
-  readonly exhaustionKind?: 'all-throttled' | 'mixed';
-
-  readonly retryAfterMs?: number;
   constructor(
     code: ChainRpcTransportCode,
     message: string,
@@ -76,8 +78,6 @@ export class ChainRpcTransportError extends Error {
       cause?: unknown;
       rpcUrls?: readonly string[];
       txHash?: string;
-      exhaustionKind?: 'all-throttled' | 'mixed';
-      retryAfterMs?: number;
     },
   ) {
     super(message, opts?.cause !== undefined ? { cause: opts.cause } : undefined);
@@ -85,9 +85,36 @@ export class ChainRpcTransportError extends Error {
     this.code = code;
     if (opts?.rpcUrls) this.rpcUrls = Object.freeze([...opts.rpcUrls]);
     if (opts?.txHash) this.txHash = opts.txHash;
+  }
+}
+
+export class RpcEndpointsExhaustedError
+  extends ChainRpcTransportError
+  implements RpcEndpointsExhaustedErrorLike {
+  declare readonly code: 'RPC_ENDPOINTS_EXHAUSTED';
+  readonly exhaustionKind?: RpcEndpointExhaustionKind;
+  readonly retryAfterMs?: number;
+
+  constructor(
+    message: string,
+    opts?: {
+      cause?: unknown;
+      rpcUrls?: readonly string[];
+      txHash?: string;
+      exhaustionKind?: RpcEndpointExhaustionKind;
+      retryAfterMs?: number;
+    },
+  ) {
+    super('RPC_ENDPOINTS_EXHAUSTED', message, opts);
     if (opts?.exhaustionKind) this.exhaustionKind = opts.exhaustionKind;
     if (opts?.retryAfterMs !== undefined) this.retryAfterMs = opts.retryAfterMs;
   }
+}
+
+export function isRpcEndpointsExhaustedError(
+  err: unknown,
+): err is RpcEndpointsExhaustedErrorLike {
+  return isChainRpcTransportError(err) && err.code === 'RPC_ENDPOINTS_EXHAUSTED';
 }
 
 /**

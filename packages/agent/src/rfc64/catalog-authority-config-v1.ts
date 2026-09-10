@@ -37,7 +37,6 @@ const RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1 = 5 * 60_000;
 export const RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 = Object.freeze({
   intervalMs: RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1,
   freshnessIntervalCount: 4,
-  maxConcurrentReads: 4,
   // A provider-pool exhaustion is shared infrastructure state, not a reason
   // for every registered graph to immediately repeat the same cold scan.
   rpcCircuitBaseBackoffMs: 60_000,

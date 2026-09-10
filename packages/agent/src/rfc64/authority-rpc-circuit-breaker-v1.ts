@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  isChainRpcTransportError,
-  type ChainRpcTransportErrorLike,
+  isRpcEndpointsExhaustedError,
+  type RpcEndpointsExhaustedErrorLike,
 } from '@origintrail-official/dkg-chain';
 
 import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
@@ -11,7 +11,7 @@ import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
 export const RFC64_AUTHORITY_RPC_CIRCUIT_OPEN_CODE_V1 =
   'RFC64_AUTHORITY_RPC_CIRCUIT_OPEN' as const;
 
-export interface Rfc64AuthorityRpcCircuitBreakerOptionsV1 {
+export interface Rfc64AuthorityReadCoordinatorOptionsV1 {
   readonly baseBackoffMs?: number;
   readonly maxBackoffMs?: number;
   readonly jitterRatio?: number;
@@ -19,7 +19,7 @@ export interface Rfc64AuthorityRpcCircuitBreakerOptionsV1 {
   readonly random?: () => number;
 }
 
-export interface Rfc64AuthorityRpcCircuitSnapshotV1 {
+export interface Rfc64AuthorityReadCoordinatorSnapshotV1 {
   readonly state: 'closed' | 'open' | 'half-open';
   readonly consecutiveExhaustions: number;
   readonly retryAtMs: number | null;
@@ -84,7 +84,7 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
  * Only a typed `RPC_ENDPOINTS_EXHAUSTED` result trips the circuit. Contract
  * reverts and graph-specific validation failures retain their normal behavior.
  */
-export class Rfc64AuthorityRpcCircuitBreakerV1 {
+export class Rfc64AuthorityReadCoordinatorV1 {
   readonly #baseBackoffMs: number;
   readonly #maxBackoffMs: number;
   readonly #jitterRatio: number;
@@ -94,8 +94,9 @@ export class Rfc64AuthorityRpcCircuitBreakerV1 {
   #retryAtMs = 0;
   #running = false;
   #tail: Promise<void> = Promise.resolve();
+  #lifecycleAbort = new AbortController();
 
-  constructor(options: Rfc64AuthorityRpcCircuitBreakerOptionsV1 = {}) {
+  constructor(options: Rfc64AuthorityReadCoordinatorOptionsV1 = {}) {
     this.#baseBackoffMs = positiveSafeInteger(
       options.baseBackoffMs
         ?? RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.rpcCircuitBaseBackoffMs,
@@ -122,41 +123,79 @@ export class Rfc64AuthorityRpcCircuitBreakerV1 {
 
   async run<T>(
     signal: AbortSignal | undefined,
-    operation: () => Promise<T>,
+    operation: (signal: AbortSignal | undefined) => Promise<T>,
   ): Promise<T> {
+    const runSignal = signal === undefined
+      ? this.#lifecycleAbort.signal
+      : AbortSignal.any([signal, this.#lifecycleAbort.signal]);
     const previous = this.#tail;
     let release!: () => void;
     this.#tail = new Promise<void>((resolve) => { release = resolve; });
-    await previous;
-
-    try {
-      throwIfAborted(signal);
-      const now = this.#now();
-      if (now < this.#retryAtMs) {
-        throw new Rfc64AuthorityRpcCircuitOpenErrorV1(
-          this.#retryAtMs,
-          this.#retryAtMs - now,
-        );
-      }
-
-      this.#running = true;
+    const queued = previous.then(async () => {
       try {
-        const result = await operation();
-        this.#consecutiveExhaustions = 0;
-        this.#retryAtMs = 0;
-        return result;
-      } catch (error) {
-        if (this.#isProviderPoolExhaustion(error)) this.#open(error);
-        throw error;
+        throwIfAborted(runSignal);
+        const now = this.#now();
+        if (now < this.#retryAtMs) {
+          throw new Rfc64AuthorityRpcCircuitOpenErrorV1(
+            this.#retryAtMs,
+            this.#retryAtMs - now,
+          );
+        }
+
+        this.#running = true;
+        try {
+          const result = await operation(runSignal);
+          this.#consecutiveExhaustions = 0;
+          this.#retryAtMs = 0;
+          return result;
+        } catch (error) {
+          if (isRpcEndpointsExhaustedError(error)) this.#open(error);
+          throw error;
+        } finally {
+          this.#running = false;
+        }
       } finally {
-        this.#running = false;
+        release();
       }
+    });
+
+    let removeAbortListener: () => void = () => undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      const onAbort = () => reject(
+        runSignal.reason ?? new DOMException('The operation was aborted', 'AbortError'),
+      );
+      runSignal.addEventListener('abort', onAbort, { once: true });
+      removeAbortListener = () => runSignal.removeEventListener('abort', onAbort);
+      if (runSignal.aborted) onAbort();
+    });
+    try {
+      return await Promise.race([queued, aborted]);
     } finally {
-      release();
+      removeAbortListener();
+      // An aborted waiter settles for its caller immediately, but its queue
+      // token stays in FIFO order until the predecessor retires. Consume that
+      // later cancellation so it cannot become an unhandled rejection.
+      void queued.catch(() => undefined);
     }
   }
 
-  snapshot(): Rfc64AuthorityRpcCircuitSnapshotV1 {
+  whenIdle(): Promise<void> {
+    return this.#tail;
+  }
+
+  close(): Promise<void> {
+    if (!this.#lifecycleAbort.signal.aborted) {
+      this.#lifecycleAbort.abort(new Error('RFC-64 authority read coordinator is closing'));
+    }
+    return this.#tail;
+  }
+
+  reopen(): void {
+    if (!this.#lifecycleAbort.signal.aborted) return;
+    this.#lifecycleAbort = new AbortController();
+  }
+
+  snapshot(): Rfc64AuthorityReadCoordinatorSnapshotV1 {
     const now = this.#now();
     return Object.freeze({
       state: this.#running && this.#consecutiveExhaustions > 0
@@ -169,13 +208,7 @@ export class Rfc64AuthorityRpcCircuitBreakerV1 {
     });
   }
 
-  #isProviderPoolExhaustion(
-    error: unknown,
-  ): error is ChainRpcTransportErrorLike & { code: 'RPC_ENDPOINTS_EXHAUSTED' } {
-    return isChainRpcTransportError(error) && error.code === 'RPC_ENDPOINTS_EXHAUSTED';
-  }
-
-  #open(error: ChainRpcTransportErrorLike): void {
+  #open(error: RpcEndpointsExhaustedErrorLike): void {
     this.#consecutiveExhaustions += 1;
     const exponent = Math.min(this.#consecutiveExhaustions - 1, 30);
     const exponential = Math.min(

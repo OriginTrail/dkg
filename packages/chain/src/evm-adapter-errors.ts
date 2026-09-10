@@ -66,22 +66,32 @@ export function errorCode(err: unknown): string {
   return String((err as any)?.code ?? (err as any)?.error?.code ?? '').toUpperCase();
 }
 
+/** One cycle/depth-bounded traversal for the wrapper graph shared by selectors. */
+function* wrappedRpcErrorRecords(err: unknown): Generator<Record<string, unknown>> {
+  const seen = new Set<unknown>();
+  const pending: Array<{ value: unknown; depth: number }> = [{ value: err, depth: 0 }];
+  while (pending.length > 0) {
+    const { value, depth } = pending.pop()!;
+    if (value == null || typeof value !== 'object' || depth > 6 || seen.has(value)) continue;
+    seen.add(value);
+    const record = value as Record<string, unknown>;
+    yield record;
+    // Reverse push preserves the established cause → info → error → response walk.
+    for (const key of ['response', 'error', 'info', 'cause']) {
+      pending.push({ value: record[key], depth: depth + 1 });
+    }
+  }
+}
+
 export function errorStatus(err: unknown): number | undefined {
   // Walk the nested wrapper chains ethers v6 / managed RPCs actually populate, so
   // a provider HTTP status buried at e.g. `err.cause.info.error.status` is still
   // found (a shallow one-level read misses it and the caller would misclassify a
   // 401/403/429 as a non-status error). Depth- and cycle-bounded.
-  const seen = new Set<unknown>();
-  const visit = (e: any, depth: number): number | undefined => {
-    if (e == null || typeof e !== 'object' || depth > 5 || seen.has(e)) return undefined;
-    seen.add(e);
+  for (const record of wrappedRpcErrorRecords(err)) {
     for (const raw of [
-      e.status,
-      e.statusCode,
-      e.response?.status,
-      e.response?.statusCode,
-      e.error?.status,
-      e.error?.statusCode,
+      record.status,
+      record.statusCode,
     ]) {
       // Numeric, OR a digit-only string ("429"/"401") — several wrapped RPC/fetch
       // errors serialize the HTTP status as a string, so coerce those too rather
@@ -89,13 +99,8 @@ export function errorStatus(err: unknown): number | undefined {
       if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
       if (typeof raw === 'string' && /^\d{3}$/.test(raw.trim())) return Number(raw);
     }
-    for (const k of ['cause', 'info', 'error', 'response']) {
-      const found = visit(e[k], depth + 1);
-      if (found !== undefined) return found;
-    }
-    return undefined;
-  };
-  return visit(err, 0);
+  }
+  return undefined;
 }
 
 /**
@@ -109,7 +114,6 @@ export function errorRetryAfterMs(
   nowMs: number = Date.now(),
 ): number | undefined {
   const delays: number[] = [];
-  const seen = new Set<unknown>();
 
   const record = (raw: unknown): void => {
     if (typeof raw !== 'string' && typeof raw !== 'number') return;
@@ -142,16 +146,9 @@ export function errorRetryAfterMs(
     }
   };
 
-  const visit = (value: unknown, depth: number): void => {
-    if (value == null || typeof value !== 'object' || depth > 6 || seen.has(value)) return;
-    seen.add(value);
-    const candidate = value as Record<string, unknown>;
+  for (const candidate of wrappedRpcErrorRecords(err)) {
     readHeaders(candidate.headers);
-    for (const key of ['cause', 'info', 'error', 'response']) {
-      visit(candidate[key], depth + 1);
-    }
-  };
-  visit(err, 0);
+  }
   return delays.length === 0 ? undefined : Math.max(...delays);
 }
 
