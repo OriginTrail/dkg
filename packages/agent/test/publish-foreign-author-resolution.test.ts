@@ -49,13 +49,16 @@ describe.each([
     })).toBe(CURATOR);
   });
 
-  it.each([MEMBER, OTHER])('rejects both selector forms before querying, including matching addresses (%s)', async (legacyAddress) => {
-    const store = { query: vi.fn().mockRejectedValue(new Error('conflicting selectors must not query')) };
+  it.each([
+    { selectedAuthor: { kind: 'address', agentAddress: MEMBER } },
+    { selectedAuthor: { kind: 'malformed', displayValue: '[object Object]' } },
+    { selectedAuthor: { kind: 'address', agentAddress: MEMBER }, selectedAuthorAgentAddress: MEMBER },
+    { selectedAuthor: { kind: 'address', agentAddress: MEMBER }, selectedAuthorAgentAddress: OTHER },
+  ])('rejects internal normalized selectors before querying: %j', async (options) => {
+    const store = { query: vi.fn().mockRejectedValue(new Error('unsupported selectors must not query')) };
     await expect(resolveAuthor(store, {
-      contextGraphId: CG, name: NAME,
-      selectedAuthor: { kind: 'address', agentAddress: MEMBER },
-      selectedAuthorAgentAddress: legacyAddress,
-    })).rejects.toMatchObject({ code: 'PUBLISH_AUTHOR_SELECTION_CONFLICT' });
+      contextGraphId: CG, name: NAME, ...options,
+    } as never)).rejects.toMatchObject({ code: 'PUBLISH_AUTHOR_SELECTION_CONFLICT' });
     expect(store.query).not.toHaveBeenCalled();
   });
 });

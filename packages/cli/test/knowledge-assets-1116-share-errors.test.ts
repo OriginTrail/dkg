@@ -22,7 +22,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { DKGAgent, type PublishAuthorSelection } from '@origintrail-official/dkg-agent';
 import {
   generateEd25519Keypair,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -52,6 +52,14 @@ const CG_ID = 'issue-1116-cg';
 const ASSERTION_NAME = 'seal-asset';
 const UINT72_OVERFLOW_DECIMAL = '4722366482869645213696';
 const ROOTLESS_AUTHOR = '0x1111111111111111111111111111111111111111';
+
+function expectNestedPublishIdentityOptions(options: unknown, selection: PublishAuthorSelection): void {
+  expect(options).toHaveProperty('authorSelection');
+  expect((options as Record<string, unknown>).authorSelection).toStrictEqual(selection);
+  for (const field of ['agentAddress', 'callerAgentAddress', 'selectedAuthorAgentAddress']) {
+    expect(options).not.toHaveProperty(field);
+  }
+}
 
 async function seedRootlessPublicSnapshot(
   store: TripleStore,
@@ -1025,7 +1033,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.status).toBe(202);
     expect(res.body.jobId).toBe('job-token-agent');
     expect(seenResolveOptions).toHaveLength(1);
-    expect(seenResolveOptions[0]).toMatchObject({ authorSelection: { mode: 'callerHint', callerAgentAddress: tokenAgentAddress } });
+    expectNestedPublishIdentityOptions(seenResolveOptions[0], { mode: 'callerHint', callerAgentAddress: tokenAgentAddress });
     expect(enqueuedIntents[0]).toMatchObject({ agentAddress: tokenAgentAddress });
   });
 
@@ -1134,9 +1142,9 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(res.status).toBe(200);
       // Both identities present: the selector picks the AUTHOR while the token stays
       // the CALLER, so CG registration / curator stamping is unchanged (GH#1778).
-      expect(seen[0]).toMatchObject({
-        authorSelection: { mode: 'residentAuthor', selectedAuthorAgentAddress: SELECTED,
-        callerAgentAddress: curatorAddress },
+      expect(seen).toHaveLength(1);
+      expectNestedPublishIdentityOptions(seen[0], {
+        mode: 'residentAuthor', selectedAuthorAgentAddress: SELECTED, callerAgentAddress: curatorAddress,
       });
     });
 
@@ -1166,10 +1174,11 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
 
       expect(res.status).toBe(200);
       expect(seen).toHaveLength(2);
-      expect(seen[1]).toMatchObject({
-        authorSelection: { mode: 'residentAuthor', selectedAuthorAgentAddress: SELECTED,
-        callerAgentAddress: curatorAddress },
-      });
+      for (const options of seen) {
+        expectNestedPublishIdentityOptions(options, {
+          mode: 'residentAuthor', selectedAuthorAgentAddress: SELECTED, callerAgentAddress: curatorAddress,
+        });
+      }
     });
 
     it('vm/publish-async forwards the selector and echoes the resolved author', async () => {
@@ -1207,7 +1216,8 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       });
 
       expect(res.status).toBe(202);
-      expect(seen[0]).toMatchObject({ authorSelection: { mode: 'residentAuthor', selectedAuthorAgentAddress: SELECTED } });
+      expect(seen).toHaveLength(1);
+      expectNestedPublishIdentityOptions(seen[0], { mode: 'residentAuthor', selectedAuthorAgentAddress: SELECTED });
       // Echoed so a client can verify who will be published, and can detect a daemon
       // that ignored the selector entirely.
       expect(res.body.agentAddress).toBe(SELECTED);
@@ -1954,8 +1964,16 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         '12D3KooWStorageCore2',
       ]);
       expect(seenOpts).toHaveLength(1);
+      expectNestedPublishIdentityOptions(seenOpts[0], { mode: 'author', agentAddress: tokenAgentAddress });
+      // Run the captured route options through the real SDK identity boundary.
+      // A mixed legacy/nested bag must fail here even if the route stub accepts it.
+      const identityBoundary = Object.create(DKGAgent.prototype, {
+        defaultAgentAddress: { value: tokenAgentAddress },
+      }) as DKGAgent;
+      expect(await identityBoundary.resolveFinalizedAssertionPublishAuthor(
+        CG_ID, 'atomic-agent-publish', seenOpts[0] as Parameters<DKGAgent['resolveFinalizedAssertionPublishAuthor']>[2],
+      )).toBe(tokenAgentAddress);
       expect(seenOpts[0]).toMatchObject({
-        authorSelection: { mode: 'author', agentAddress: tokenAgentAddress },
         clearSharedMemoryAfter: false,
         pricingPolicy: 'full-content',
       });
@@ -2266,7 +2284,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(res.status).toBe(200);
       expect(res.body.storageAckPeerIds).toEqual(['12D3KooWStorageCore3']);
       expect(seenOpts).toHaveLength(1);
-      expect(seenOpts[0]).toMatchObject({ authorSelection: { mode: 'callerHint', callerAgentAddress: tokenAgentAddress } });
+      expectNestedPublishIdentityOptions(seenOpts[0], { mode: 'callerHint', callerAgentAddress: tokenAgentAddress });
     });
 
     it('standalone vm/publish accepts uint72 publisher identity overrides into publish options', async () => {

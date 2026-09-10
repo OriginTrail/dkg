@@ -2,7 +2,8 @@ import { it, expect, expectTypeOf, vi } from 'vitest';
 import { contextGraphSharedMemoryUri } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { storeKnowledgeAssetOperationPublicQuads, storeKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-publisher';
-import { readPublishIdentityPlan, type PublishAuthorSelectionOptions } from '../src/publish-author-selection.js';
+import type { PublishAuthorSelectionOptions } from '../src/publish-author-selection.js';
+import { readPublishIdentityPlan } from '../src/internal/publish-identity-plan.js';
 import { CG, MEMBER, CURATOR, OTHER, NAME, KA_UAL, RESERVED_KA_ID, PUBLIC_QUAD, MERKLE, sealFor, stubAgent } from './_helpers/finalized-author.js';
 
 it.each([

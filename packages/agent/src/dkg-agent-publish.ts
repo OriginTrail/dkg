@@ -107,7 +107,9 @@ import {
   formatPublishAuthorNotCustodialMessage,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { readPublishIdentityPlan, readResidentAuthorSelection, type PublishIdentityPlan, type PublishAuthorSelectionOptions } from './publish-author-selection.js';
+import type { PublishAuthorSelectionOptions } from './publish-author-selection.js';
+import { readPublishIdentityPlan, type PublishIdentityPlan } from './internal/publish-identity-plan.js';
+import { readResidentAuthorSelection } from './internal/resident-assertion-author-selection.js';
 import {
   deleteByPatternWithoutCount,
   GraphManager,
@@ -185,7 +187,7 @@ import {
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
 import { sharedMemoryScopeForFinalizedLifecycle } from './finalized-lifecycle-scope.js';
-import { resolveFinalizedAssertionAuthor } from './finalized-assertion-author.js';
+import { resolveResidentFinalizedAssertionAuthor } from './internal/finalized-assertion-author.js';
 
 /**
  * Public options for {@link DKGAgentPublishMixin.resolveAssertionAuthor}. Declared
@@ -869,7 +871,7 @@ async function resolvePublishAuthorSelection(
 ): Promise<string> {
   if (selection.mode === 'author') return selection.agentAddress;
   const { callerHint } = selection;
-  return (await resolveFinalizedAssertionAuthor(agent.store, {
+  return (await resolveResidentFinalizedAssertionAuthor(agent.store, {
     contextGraphId, name, subGraphName,
     callerAgentAddress: callerHint,
     selectedAuthor: selection.residentSelection,
@@ -4345,7 +4347,7 @@ export class PublishMethods extends DKGAgentBase {
    * GH#1778 — resolve the AUTHOR of a named assertion for VM publish, when the
    * caller may not be the author (a curator publishing a member-shared rootless
    * KA whose seal was delivered under the member's coordinate by durable sync).
-   * Thin delegate to {@link resolveFinalizedAssertionAuthor}, which owns the
+   * Thin delegate to {@link resolveResidentFinalizedAssertionAuthor}, which owns the
    * store/URI/EVM lookup so it lives beside the coordinate helpers rather than
    * in this publish mixin. See that function for the full resolution rule.
    */
@@ -4376,7 +4378,7 @@ export class PublishMethods extends DKGAgentBase {
     // than the one the caller named, on the exported DKGAgent surface. The required
     // coordinate must always win, and a future option added to the params type must be
     // forwarded deliberately rather than by accident.
-    return resolveFinalizedAssertionAuthor(this.store, {
+    return resolveResidentFinalizedAssertionAuthor(this.store, {
       contextGraphId,
       name,
       subGraphName: opts.subGraphName,
