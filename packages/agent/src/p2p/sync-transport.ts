@@ -1,4 +1,4 @@
-import { assertSyncWorkAdmission, SyncWorkAdmissionExhaustedError, type SyncWorkAdmission } from '../sync/work-admission.js';
+import { assertSyncWorkAdmission, SyncWorkAdmissionExhaustedError, UNRESTRICTED_SYNC_WORK, type SyncWorkAdmission } from '../sync/work-admission.js';
 import { randomUUID } from 'node:crypto';
 import { withRetry, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import {
@@ -91,7 +91,8 @@ export function createSingleUseSyncSender(
  * cached stale denial from replaying onto a later attempt.
  */
 interface SyncSendParams {
-  readonly workAdmission: SyncWorkAdmission;
+  /** Legacy callers of this published helper may omit scoped work admission. */
+  readonly workAdmission?: SyncWorkAdmission;
   remotePeerId: string;
   timeoutMs: number | ((remainingAttempts: number) => number);
   retryAttempts: number;
@@ -132,7 +133,7 @@ interface SyncSendParams {
 }
 
 export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Array> {
-  const workAdmission = params.workAdmission;
+  const workAdmission = params.workAdmission ?? UNRESTRICTED_SYNC_WORK;
   return withSpan(
     'sync.request',
     async () => {
