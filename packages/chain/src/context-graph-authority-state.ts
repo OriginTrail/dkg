@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  assertCanonicalDecimalU256,
+  assertCanonicalEvmAddress,
   assertContextGraphAccessPolicyV1,
   assertContextGraphPublishPolicyV1,
   snapshotContextGraphPublishDomainV1,
@@ -130,34 +132,16 @@ export function normalizeContextGraphAuthorityPublishReference(
     ? publishAuthorityAccountId.toString(10)
     : publishAuthorityAccountId;
   try {
-    // Policy 0 admits every non-null canonical authority/account pair, so it
-    // provides the canonical scalar validation without inventing another codec.
-    const domain = snapshotContextGraphPublishDomainV1(
-      0,
-      normalizedAuthority,
-      normalizedAccountId,
-    );
+    if (normalizedAuthority !== null) {
+      assertCanonicalEvmAddress(normalizedAuthority, 'publishAuthority');
+    }
+    assertCanonicalDecimalU256(normalizedAccountId, 'publishAuthorityAccountId');
     return Object.freeze({
-      publishAuthority: domain.publishAuthority,
-      publishAuthorityAccountId: domain.publishAuthorityAccountId,
+      publishAuthority: normalizedAuthority,
+      publishAuthorityAccountId: normalizedAccountId,
     });
   } catch {
-    if (normalizedAuthority !== null) return undefined;
-    // Null is a valid normalized reference only for the open domain. Validate
-    // its account scalar there; the caller supplies the actual policy later.
-    try {
-      const domain = snapshotContextGraphPublishDomainV1(
-        1,
-        normalizedAuthority,
-        normalizedAccountId,
-      );
-      return Object.freeze({
-        publishAuthority: domain.publishAuthority,
-        publishAuthorityAccountId: domain.publishAuthorityAccountId,
-      });
-    } catch {
-      return undefined;
-    }
+    return undefined;
   }
 }
 

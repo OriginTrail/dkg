@@ -17,6 +17,7 @@ import {
 } from '../src/context-graph-authority-index-reducer.js';
 import {
   applyContextGraphAuthorityStateEvent,
+  normalizeContextGraphAuthorityPublishReference,
   type ContextGraphAuthorityIndexState,
 } from '../src/context-graph-authority-state.js';
 
@@ -501,6 +502,56 @@ describe('contract-wide Context Graph authority index reducer', () => {
       mutate(validState),
     );
     expect(normalizeContextGraphAuthorityIndexCheckpoint(malformed)).toBeUndefined();
+  });
+
+  it.each([
+    ['zero owner', { owner: ZERO }],
+    ['malformed owner', { owner: 'bad' }],
+    ['unsupported access policy', { accessPolicy: 2 }],
+    ['unsupported publish policy', { publishPolicy: 2 }],
+    ['curated domain without authority', {
+      publishPolicy: 0, publishAuthority: null, publishAuthorityAccountId: '0',
+    }],
+    ['open domain with authority', {
+      publishPolicy: 1, publishAuthority: AUTHORITY, publishAuthorityAccountId: '0',
+    }],
+    ['duplicate participants', { participantAgents: [OWNER, OWNER] }],
+    ['zero participant', { participantAgents: [ZERO] }],
+    ['malformed participant', { participantAgents: ['bad'] }],
+    ['over-limit participants', {
+      participantAgents: Array.from(
+        { length: 257 },
+        (_entry, index) => `0x${(index + 1).toString(16).padStart(40, '0')}`,
+      ),
+    }],
+  ] as const)('rejects sealed malformed materialized state: %s', (_label, mutation) => {
+    const malformed = createContextGraphAuthorityIndexCheckpoint(validCursor, [{
+      ...validState,
+      ...mutation,
+    } as ContextGraphAuthorityIndexState]);
+    expect(normalizeContextGraphAuthorityIndexCheckpoint(malformed)).toBeUndefined();
+  });
+
+  it.each([
+    ['canonical authority', AUTHORITY, 7n, {
+      publishAuthority: AUTHORITY, publishAuthorityAccountId: '7',
+    }],
+    ['null sentinel', null, '7', {
+      publishAuthority: null, publishAuthorityAccountId: '7',
+    }],
+    ['zero-address sentinel', ZERO, 7n, {
+      publishAuthority: null, publishAuthorityAccountId: '7',
+    }],
+    ['malformed authority', 'bad', 7n, undefined],
+    ['u256 overflow', AUTHORITY, 1n << 256n, undefined],
+  ] as const)('normalizes publish reference scalars: %s', (
+    _label,
+    authority,
+    accountId,
+    expected,
+  ) => {
+    expect(normalizeContextGraphAuthorityPublishReference(authority, accountId))
+      .toEqual(expected);
   });
 
   it('decodes opaque durable reads only at the chain-owned boundary', async () => {
