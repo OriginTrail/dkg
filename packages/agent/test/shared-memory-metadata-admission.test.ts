@@ -8,8 +8,12 @@ import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped
 import { SyncVerifyWorker } from '../src/sync-verify-worker.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
+import { legacySwm20260507 } from './fixtures/legacy-swm-20260507.js';
 
 const CG = 'admission-cg';
+const contextScope = (contextGraphId: string, names: readonly string[] = []) => ({
+  kind: 'context' as const, contextGraphId, registeredSubGraphNames: new Set(names),
+});
 const DKG = 'http://dkg.io/ontology/';
 const META = contextGraphSharedMemoryMetaUri(CG);
 const ROOT = 'urn:data:allowed';
@@ -37,6 +41,41 @@ describe('shared-memory metadata protocol admission', () => {
     return result.bindings.map((row) => q(row.s, row.p, row.o, graph));
   }
 
+  it.each([undefined, 'code'])('retains historical identity-free producer records in the real worker for subgraph %s', async subGraphName => {
+    const worker = new SyncVerifyWorker(); workers.push(worker);
+    const fixture = legacySwm20260507(CG, subGraphName);
+    const result = await worker.processSharedMemoryBatch(fixture.data, fixture.metadata, CG, subGraphName ? [subGraphName] : []);
+    expect(result.verifiedMeta).toEqual(fixture.metadata);
+    expect(result.verifiedData).toEqual(fixture.data);
+    expect(result.entityCreators).toEqual([{ dataGraph: fixture.data[0].graph, entity: fixture.root, creator: 'historical-peer' }]);
+  });
+
+  it('removes unknown predicates before comparing graph-scoped operation candidates', () => {
+    const share = swmFixtures(CG).share({ ual: UAL, version: 1, operationId: 'first', marker: 'same' });
+    const secondSubject = `urn:dkg:share:${CG}:second`;
+    const second = share.meta.filter(row => row.subject === share.operationSubject).map(row => ({
+      ...row, subject: secondSubject,
+      ...(row.predicate === `${DKG}shareOperationId` ? { object: '"second"' } : {}),
+    }));
+    const extra = q(secondSubject, 'urn:extension:unrecognized', '"must not affect candidates"');
+    const descriptors = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: [
+      ...share.meta, ...second, extra, q(share.headSubject, `${DKG}shareOperationId`, '"second"'),
+    ] });
+    expect(descriptors).toHaveLength(1);
+    expect(descriptors[0].metadataQuads).not.toContainEqual(extra);
+  });
+
+  it('applies admission through the standalone worker endpoint', async () => {
+    const worker = new SyncVerifyWorker(); workers.push(worker);
+    const share = swmFixtures(CG).share({ ual: UAL, version: 1, operationId: 'standalone', marker: 'modern' });
+    const data = [q(ROOT, 'urn:data:name', '"must not hydrate"', contextGraphSharedMemoryUri(CG))];
+    const result = await worker.processSharedMemory(data, [
+      ...share.meta, q(share.operationSubject, `${DKG}rootEntity`, ROOT),
+      q(ROOT, `${DKG}workspaceOwner`, '"attacker"'),
+    ]);
+    expect(result).toEqual({ validQuads: [], dropped: 1, entityCreators: [] });
+  });
+
   it.each([undefined, 'code'])('retains real legacy and graph-scoped producer output for subgraph %s after a store round trip', async (subGraphName) => {
     const store = new OxigraphStore(); stores.push(store);
     const graphManager = new GraphManager(store);
@@ -50,7 +89,7 @@ describe('shared-memory metadata protocol admission', () => {
     await storeKnowledgeAssetWorkspaceHead({ ...common, shareOperationId: 'modern-op', kaUal: UAL, assertionVersion: 1 });
     const rows = await readGraph(store, contextGraphSharedMemoryMetaUri(CG, subGraphName));
     expect(rows.length).toBeGreaterThan(20);
-    expect(admitSharedMemoryMetadata(rows, CG, subGraphName ? [subGraphName] : [])).toEqual(rows);
+    expect(admitSharedMemoryMetadata(rows, contextScope(CG, subGraphName ? [subGraphName] : [])).metadata).toEqual(rows);
   });
 
   it('preserves producer metadata and drops unknown predicates, subjects, and misplaced protocol fields', () => {
@@ -62,18 +101,18 @@ describe('shared-memory metadata protocol admission', () => {
       q('urn:data:unrelated', `${DKG}workspaceOwner`, '"attacker"'),
       q(OP, 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'urn:extension:ControlRecord'),
     ];
-    expect(admitSharedMemoryMetadata([...valid, ...extra], CG)).toEqual(valid);
+    expect(admitSharedMemoryMetadata([...valid, ...extra], contextScope(CG)).metadata).toEqual(valid);
   });
 
   it('binds operation subjects and identity fields to the same context graph and subgraph', () => {
     const valid = legacy('code');
-    expect(admitSharedMemoryMetadata(valid, CG, ['code'])).toEqual(valid);
-    expect(admitSharedMemoryMetadata(valid, CG, [])).toEqual([]);
-    expect(admitSharedMemoryMetadata(valid.map((row) => ({ ...row, subject: 'urn:arbitrary:operation' })), CG, ['code'])).toEqual([]);
+    expect(admitSharedMemoryMetadata(valid, contextScope(CG, ['code'])).metadata).toEqual(valid);
+    expect(admitSharedMemoryMetadata(valid, contextScope(CG, [])).metadata).toEqual([]);
+    expect(admitSharedMemoryMetadata(valid.map((row) => ({ ...row, subject: 'urn:arbitrary:operation' })), contextScope(CG, ['code'])).metadata).toEqual([]);
     expect(admitSharedMemoryMetadata(valid.map((row) => row.predicate === `${DKG}contextGraphId`
-      ? { ...row, object: '"another-cg"' } : row), CG, ['code'])).toEqual([]);
-    expect(admitSharedMemoryMetadata(valid.map((row) => ({ ...row, graph: META })), CG, ['code'])).toEqual([]);
-    expect(admitSharedMemoryMetadata(valid)).toEqual(valid);
+      ? { ...row, object: '"another-cg"' } : row), contextScope(CG, ['code'])).metadata).toEqual([]);
+    expect(admitSharedMemoryMetadata(valid.map((row) => ({ ...row, graph: META })), contextScope(CG, ['code'])).metadata).toEqual([]);
+    expect(admitSharedMemoryMetadata(valid, { kind: 'allGraphs' }).metadata).toEqual(valid);
   });
 
   it('retains defined legacy snapshot-reference and member aliases on canonical subjects', () => {
@@ -88,10 +127,10 @@ describe('shared-memory metadata protocol admission', () => {
       q(subject, `${DKG}publicSnapshotRef`, '"old-store-ref"'),
       q(ROOT, 'http://www.w3.org/ns/prov#wasAttributedTo', 'did:dkg:agent:0x1234'),
     ];
-    expect(admitSharedMemoryMetadata(valid, CG)).toEqual(valid);
+    expect(admitSharedMemoryMetadata(valid, contextScope(CG)).metadata).toEqual(valid);
     const extras = [q(subject, `${DKG}workspaceOwner`, '"attacker"'), ...valid.filter((row) => row.subject === subject)
       .map((row) => ({ ...row, subject: 'urn:dkg:public-stage:arbitrary' }))];
-    expect(admitSharedMemoryMetadata([...valid, ...extras], CG)).toEqual(valid);
+    expect(admitSharedMemoryMetadata([...valid, ...extras], contextScope(CG)).metadata).toEqual(valid);
   });
 
   it('keeps graph-scoped operations rootless and filters direct descriptor metadata too', () => {
@@ -104,7 +143,7 @@ describe('shared-memory metadata protocol admission', () => {
       q(ROOT, `${DKG}workspaceOwner`, '"attacker"'),
     ];
     const input = [...share.meta, ...extra];
-    expect(admitSharedMemoryMetadata(input, CG)).toEqual(share.meta);
+    expect(admitSharedMemoryMetadata(input, contextScope(CG)).metadata).toEqual(share.meta);
     const [descriptor] = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: input });
     expect(descriptor.metadataQuads).toHaveLength(share.meta.length);
     expect(descriptor.metadataQuads).not.toEqual(expect.arrayContaining([extra[0]]));
@@ -118,15 +157,64 @@ describe('shared-memory metadata protocol admission', () => {
       q(share.headSubject, `${DKG}workspaceOwner`, '"attacker"'),
     ];
     const valid = [...legacy(), ...share.meta];
-    expect(admitSharedMemoryMetadata([...valid, ...extra], CG)).toEqual(valid);
+    expect(admitSharedMemoryMetadata([...valid, ...extra], contextScope(CG)).metadata).toEqual(valid);
   });
 
-  it('rejects unknown scope versions and incomplete operation identity rather than treating them as legacy', () => {
+  it('retains a rejected-head diagnostic so descriptor parsing fails closed', () => {
+    const share = swmFixtures(CG).share({ ual: UAL, version: 1, operationId: 'head', marker: 'head' });
+    const invalidHead = 'urn:not-a-ka#dkg-swm-head';
+    const rows = share.meta.map(row => row.subject === share.headSubject ? { ...row, subject: invalidHead } : row);
+    const model = admitSharedMemoryMetadata(rows, contextScope(CG));
+    expect(model.heads).toEqual([]);
+    expect(model.rejectedHeads).toEqual([{ subject: invalidHead, metaGraph: META }]);
+    expect(model.metadata.every(row => row.subject !== invalidHead)).toBe(true);
+    expect(() => parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: rows }))
+      .toThrow('non-canonical or mismatched kaUal');
+  });
+
+  it('rejects modern downgrade envelopes and mismatched explicit identity', () => {
     const original = legacy();
-    expect(admitSharedMemoryMetadata([...original, q(OP, `${DKG}contentScopeVersion`, '"3"')], CG)).toEqual([]);
-    expect(admitSharedMemoryMetadata([...original, q(OP, `${DKG}kaUal`, UAL)], CG)).toEqual([]);
-    expect(admitSharedMemoryMetadata(original.filter((row) => row.predicate !== `${DKG}shareOperationId`), CG)).toEqual([]);
-    expect(admitSharedMemoryMetadata([...original, q(OP, `${DKG}shareOperationId`, '"conflicting"')], CG)).toEqual([]);
+    expect(admitSharedMemoryMetadata([...original, q(OP, `${DKG}contentScopeVersion`, '"3"')], contextScope(CG)).metadata).toEqual([]);
+    expect(admitSharedMemoryMetadata([...original, q(OP, `${DKG}kaUal`, UAL)], contextScope(CG)).metadata).toEqual([]);
+    const withoutId = original.filter((row) => row.predicate !== `${DKG}shareOperationId`);
+    expect(admitSharedMemoryMetadata(withoutId, contextScope(CG)).metadata).toEqual(withoutId);
+    expect(admitSharedMemoryMetadata([...original, q(OP, `${DKG}shareOperationId`, '"conflicting"')], contextScope(CG)).metadata).toEqual([]);
+    const modern = swmFixtures(CG).share({ ual: UAL, version: 1, operationId: 'modern', marker: 'modern' });
+    const missingIdentity = modern.meta.filter(row => row.predicate !== `${DKG}contextGraphId` && row.predicate !== `${DKG}shareOperationId`);
+    expect(admitSharedMemoryMetadata(missingIdentity, contextScope(CG)).graphOperations.size).toBe(0);
+  });
+
+  it('preserves metadata order and duplicates while deriving graph-local roots and ownership once', () => {
+    const root = legacySwm20260507(CG);
+    const child = legacySwm20260507(CG, 'code');
+    const childRows = child.metadata.map(row => row.predicate === 'http://www.w3.org/ns/prov#wasAttributedTo'
+      ? { ...row, object: '"child-peer"' } : row);
+    const alias = { ...root.metadata[3], predicate: `${DKG}entity` };
+    const rows = [...root.metadata, childRows[0], alias, ...childRows.slice(1), root.metadata[3], { ...root.metadata[3] }];
+    const model = admitSharedMemoryMetadata(rows, contextScope(CG, ['code']));
+    expect(model.metadata).toEqual(rows);
+    expect(model.legacyOperations.size).toBe(2);
+    expect([...model.legacyRoots.keys()]).toEqual([root.data[0].graph, child.data[0].graph]);
+    expect(model.ownership).toEqual([
+      { dataGraph: root.data[0].graph, entity: root.root, creator: 'historical-peer' },
+      { dataGraph: child.data[0].graph, entity: child.root, creator: 'child-peer' },
+    ]);
+  });
+
+  it('admits historical slices only when their encoded identity names a same-lane legacy root', () => {
+    const fixture = legacySwm20260507(CG, 'code');
+    const mutations = [
+      (row: Quad) => ({ ...row, subject: row.subject.replace('historical-operation', 'other-operation') }),
+      (row: Quad) => ({ ...row, subject: row.subject.replace(':code:', ':unknown:') }),
+      (row: Quad) => ({ ...row, subject: row.subject.replace('urn%3Ahistorical%3Aroot', 'urn%3Aunrelated%3Aroot') }),
+      (row: Quad) => ({ ...row, subject: row.subject.replace('urn%3Ahistorical%3Aroot', '%ZZ') }),
+    ];
+    const operationRows = fixture.metadata.filter(row => row.subject === fixture.operation);
+    const slices = fixture.metadata.filter(row => row.subject === fixture.slice);
+    for (const mutate of mutations) {
+      expect(admitSharedMemoryMetadata([...operationRows, ...slices.map(mutate)], contextScope(CG, ['code'])).metadata)
+        .toEqual(operationRows);
+    }
   });
 
   it('applies admission before the real worker derives data selection and ownership', async () => {

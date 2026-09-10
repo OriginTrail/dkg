@@ -11,40 +11,40 @@ import {
   canonicalPublisherWorkspaceOperationSemantics,
   selectEquivalentWorkspaceOperation,
   workspacePublicQuadsDigest,
+  SWM_PREDICATES as P, SWM_WORKSPACE_OPERATION, SWM_HEAD_SUFFIX, swmOperationSubject,
   type WorkspaceOperationModel,
   type PublisherWorkspaceOperationSemantics,
   type WorkspaceOperationAccessEnvelope,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { selectGraphScopedSwmDescriptorMetadata } from './shared-memory-metadata-admission.js';
+import { admitSharedMemoryMetadata, type AdmittedSwmRecord } from './shared-memory-metadata-admission.js';
 import {
   formatCanonicalRdfLiteralTerm,
   parseRdfLiteralTerm,
 } from '@origintrail-official/dkg-rdf-utils';
 
-const DKG = 'http://dkg.io/ontology/';
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const WORKSPACE_OPERATION = `${DKG}WorkspaceOperation`;
+const RDF_TYPE = P.type;
+const WORKSPACE_OPERATION = SWM_WORKSPACE_OPERATION;
 
-const CONTENT_SCOPE_VERSION = `${DKG}contentScopeVersion`;
-const KA_UAL = `${DKG}kaUal`;
-const ASSERTION_VERSION = `${DKG}assertionVersion`;
-const ASSERTION_GRAPH = `${DKG}assertionGraph`;
-const SHARE_OPERATION_ID = `${DKG}shareOperationId`;
-const CONTEXT_GRAPH_ID = `${DKG}contextGraphId`;
-const PUBLIC_QUADS_DIGEST = `${DKG}publicQuadsDigest`;
-const PUBLIC_QUADS_COUNT = `${DKG}publicQuadsCount`;
-const PUBLIC_SNAPSHOT_REF = `${DKG}publicSnapshotRef`;
-const PUBLIC_SNAPSHOT_GRAPH = `${DKG}publicSnapshotGraph`;
-const PRIVATE_TRIPLE_COUNT = `${DKG}privateTripleCount`;
-const PRIVATE_MERKLE_ROOT = `${DKG}privateMerkleRoot`;
-const PUBLISHER_PEER_ID = `${DKG}publisherPeerId`;
-const PUBLISHED_AT = `${DKG}publishedAt`;
-const ACCESS_POLICY = `${DKG}accessPolicy`;
-const ALLOWED_PEER = `${DKG}allowedPeer`;
-const SUB_GRAPH_NAME = `${DKG}subGraphName`;
-const HEAD_SUFFIX = '#dkg-swm-head';
+const CONTENT_SCOPE_VERSION = P.contentScopeVersion;
+const KA_UAL = P.kaUal;
+const ASSERTION_VERSION = P.assertionVersion;
+const ASSERTION_GRAPH = P.assertionGraph;
+const SHARE_OPERATION_ID = P.shareOperationId;
+const CONTEXT_GRAPH_ID = P.contextGraphId;
+const PUBLIC_QUADS_DIGEST = P.publicQuadsDigest;
+const PUBLIC_QUADS_COUNT = P.publicQuadsCount;
+const PUBLIC_SNAPSHOT_REF = P.publicSnapshotRef;
+const PUBLIC_SNAPSHOT_GRAPH = P.publicSnapshotGraph;
+const PRIVATE_TRIPLE_COUNT = P.privateTripleCount;
+const PRIVATE_MERKLE_ROOT = P.privateMerkleRoot;
+const PUBLISHER_PEER_ID = P.publisherPeerId;
+const PUBLISHED_AT = P.publishedAt;
+const ACCESS_POLICY = P.accessPolicy;
+const ALLOWED_PEER = P.allowedPeer;
+const SUB_GRAPH_NAME = P.subGraphName;
+const HEAD_SUFFIX = SWM_HEAD_SUFFIX;
 
 interface RecoveryWorkspaceOperationIdentity {
   readonly contextGraphId: string;
@@ -178,14 +178,18 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
     params.registeredSubGraphNames,
     params.excludedSubGraphNames,
   );
-  const byGraphAndSubject = groupByGraphAndSubject(params.metaQuads);
+  // Broad shape admission is explicit here; descriptor scope validation below
+  // retains the existing failure for a head outside the caller's allowed lanes.
+  const admitted = admitSharedMemoryMetadata(params.metaQuads, { kind: 'allGraphs' });
+  for (const head of admitted.rejectedHeads) {
+    if (!allowedMetaGraphs.has(head.metaGraph)) {
+      throw new Error(`Graph-scoped SWM head ${head.subject} is in an unregistered metadata graph ${head.metaGraph}`);
+    }
+    throw new Error(`Graph-scoped SWM head ${head.subject} has a non-canonical or mismatched kaUal`);
+  }
   const descriptors: GraphScopedSwmRecoveryDescriptor[] = [];
 
-  for (const [key, headRows] of byGraphAndSubject) {
-    const separator = key.indexOf('\u0000');
-    const metaGraph = key.slice(0, separator);
-    const headSubject = key.slice(separator + 1);
-    if (!headSubject.endsWith(HEAD_SUFFIX)) continue;
+  for (const { rows: headRows, metaGraph, subject: headSubject } of admitted.heads) {
     if (!allowedMetaGraphs.has(metaGraph)) {
       throw new Error(`Graph-scoped SWM head ${headSubject} is in an unregistered metadata graph ${metaGraph}`);
     }
@@ -219,7 +223,7 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
 
     const operation = resolveEquivalentHeadOperation({
       headRows,
-      byGraphAndSubject,
+      graphOperations: admitted.graphOperations,
       contextGraphId: params.contextGraphId,
       metaGraph,
       headSubject,
@@ -260,20 +264,19 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       publisherPeerId: semantics.publisherIdentity,
       ...(subGraphName ? { subGraphName } : {}),
       metadataQuads: [
-        ...selectGraphScopedSwmDescriptorMetadata([
-          ...headRows.filter((row) => row.predicate !== SHARE_OPERATION_ID),
-          // EVERY lexical form of the selected id, not just the one selected
-          // row: RDF 1.1 admits the same value as a plain and an
-          // xsd:string-typed literal, and downstream withhold plans are built
-          // from these rows BYTE-keyed — a variant left out here passes the
-          // value-based insert canonicalization and re-stacks the losing id
-          // beside a just-preserved head.
-          ...headRows.filter((row) => row.predicate === SHARE_OPERATION_ID
-            && stripLiteral(row.object).trim() === shareOperationId),
-        ], operationRows),
+        ...headRows.filter((row) => row.predicate !== SHARE_OPERATION_ID),
+        // EVERY lexical form of the selected id, not just the one selected
+        // row: RDF 1.1 admits the same value as a plain and an
+        // xsd:string-typed literal, and downstream withhold plans are built
+        // from these rows BYTE-keyed — a variant left out here passes the
+        // value-based insert canonicalization and re-stacks the losing id
+        // beside a just-preserved head.
+        ...headRows.filter((row) => row.predicate === SHARE_OPERATION_ID
+          && stripLiteral(row.object).trim() === shareOperationId),
+        ...operationRows,
         ...(snapshotSource.operationSubject === operationSubject
           ? []
-          : selectGraphScopedSwmDescriptorMetadata([], snapshotSource.operationRows)),
+          : snapshotSource.operationRows),
       ],
     });
   }
@@ -334,7 +337,7 @@ export function canonicalizeGraphScopedSwmHeadRows(params: {
   });
 }
 
-const PROV_WAS_ATTRIBUTED_TO = 'http://www.w3.org/ns/prov#wasAttributedTo';
+const PROV_WAS_ATTRIBUTED_TO = P.wasAttributedTo;
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 
 /**
@@ -582,7 +585,7 @@ function recoverySnapshotLocator(params: {
  */
 function resolveEquivalentHeadOperation(params: {
   readonly headRows: readonly Quad[];
-  readonly byGraphAndSubject: ReadonlyMap<string, readonly Quad[]>;
+  readonly graphOperations: ReadonlyMap<string, AdmittedSwmRecord>;
   readonly contextGraphId: string;
   readonly metaGraph: string;
   readonly headSubject: string;
@@ -603,10 +606,10 @@ function resolveEquivalentHeadOperation(params: {
   }
 
   const candidates: RecoveryOperationCandidate[] = shareOperationIds.map((shareOperationId) => {
-    const operationSubject = `urn:dkg:share:${params.contextGraphId}:${shareOperationId}`;
-    const operationRows = params.byGraphAndSubject.get(
+    const operationSubject = swmOperationSubject(params.contextGraphId, shareOperationId);
+    const operationRows = params.graphOperations.get(
       `${params.metaGraph}\u0000${operationSubject}`,
-    ) ?? [];
+    )?.rows ?? [];
     const semantics = validateOperationRows({
       rows: operationRows,
       contextGraphId: params.contextGraphId,
@@ -869,17 +872,6 @@ function subGraphForMetaGraph(contextGraphId: string, metaGraph: string): string
     throw new Error(`Invalid graph-scoped SWM subgraph metadata graph ${metaGraph}`);
   }
   return name;
-}
-
-function groupByGraphAndSubject(quads: readonly Quad[]): Map<string, Quad[]> {
-  const grouped = new Map<string, Quad[]>();
-  for (const quad of quads) {
-    const key = `${quad.graph}\u0000${quad.subject}`;
-    const rows = grouped.get(key);
-    if (rows) rows.push(quad);
-    else grouped.set(key, [quad]);
-  }
-  return grouped;
 }
 
 function distinctObjects(rows: readonly Quad[], predicate: string): string[] {
