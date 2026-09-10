@@ -142,6 +142,7 @@ function selectedFixture(resolved: bigint | null = 42n) {
     vmReconcileEnabled: () => false,
     vmReconcileLifecycleGeneration: 0,
     vmReconcileRotationClosed: false,
+    vmReconcilePhysicalRuns: new Set<Promise<unknown>>(),
     resolveLocalCgIdByOnChainId: (_onChainId: string) => null as string | null,
     vmReconcileDispatcher: { triggerLive: vi.fn() },
     onChainParticipantAgentsCache: new Map(),
@@ -532,6 +533,7 @@ describe('cold current-state Context Graph name binding', () => {
       fixture.subscription,
     )).resolves.toBe('42');
 
+    expect(fixture.agent.vmReconcilePhysicalRuns.size).toBe(0);
     expect(fixture.agent.persistContextGraphSubscriptionStrict).not.toHaveBeenCalled();
     expect(fixture.subscription.onChainId).toBeUndefined();
     expect(fixture.agent.contextGraphBindingState.currentBindingFor(
