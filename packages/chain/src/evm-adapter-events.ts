@@ -12,6 +12,7 @@
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers } from 'ethers';
 import type { EventFilter, ChainEvent } from './chain-adapter.js';
+import { eventContractKeysFor } from './evm-event-contracts.js';
 
 export class EventsMethods extends EVMChainAdapterBase {
   // =====================================================================
@@ -65,8 +66,10 @@ export class EventsMethods extends EVMChainAdapterBase {
   async *listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent> {
     const { signal } = filter;
     signal?.throwIfAborted();
-    await this.init({ signal });
+    const keys = eventContractKeysFor(filter.eventTypes);
+    const contracts = await this.resolveEventContracts(keys, { signal });
     signal?.throwIfAborted();
+    if (keys.length > 0 && !this.initialized) void this.startHubRotationListener();
 
     for (const eventType of filter.eventTypes) {
       signal?.throwIfAborted();
@@ -74,7 +77,7 @@ export class EventsMethods extends EVMChainAdapterBase {
         // V8-only event — emitted by archived KnowledgeAssetsStorage. When the
         // V8 contract is absent (the V10-only deploy path after this PR), this
         // branch yields nothing and consumers must rely on V10 `KCCreated`.
-        const storage = this.contracts.knowledgeAssetsStorage;
+        const storage = contracts.knowledgeAssetsStorage;
         if (!storage) {
           continue;
         }
@@ -105,7 +108,7 @@ export class EventsMethods extends EVMChainAdapterBase {
       }
 
       if (eventType === 'ContextGraphExpanded') {
-        const cgStorage = this.contracts.contextGraphStorage;
+        const cgStorage = contracts.contextGraphStorage;
         if (cgStorage) {
           const eventFilter = cgStorage.filters.ContextGraphExpanded();
           const logs = await this.queryFilterWithFailover(
@@ -135,7 +138,7 @@ export class EventsMethods extends EVMChainAdapterBase {
       // subscribed CG ids (no global firehose). Emitted by
       // `registerKnowledgeAssetToContextGraph` in the V10 publish flow.
       if (eventType === 'KnowledgeAssetRegisteredToContextGraph') {
-        const cgStorage = this.contracts.contextGraphStorage;
+        const cgStorage = contracts.contextGraphStorage;
         if (cgStorage) {
           const eventFilter = cgStorage.filters.KnowledgeAssetRegisteredToContextGraph();
           const logs = await this.queryFilterWithFailover(
@@ -171,7 +174,7 @@ export class EventsMethods extends EVMChainAdapterBase {
       // present — otherwise a greenfield node would crash here calling a
       // non-existent `filters.KnowledgeAssetCreated()`.
       if (eventType === 'KCCreated' || eventType === 'KnowledgeAssetCreated') {
-        const kaStorage = this.contracts.knowledgeAssetStorage;
+        const kaStorage = contracts.knowledgeAssetStorage;
         if (kaStorage) {
           const fromB = filter.fromBlock ?? 0;
           const toB = filter.toBlock ?? 'latest';
@@ -281,7 +284,7 @@ export class EventsMethods extends EVMChainAdapterBase {
       }
 
       if (eventType === 'NameClaimed' || eventType === 'ContextGraphNameClaimed') {
-        const registry = this.contracts.contextGraphNameRegistry;
+        const registry = contracts.contextGraphNameRegistry;
         if (registry) {
           const eventFilter = registry.filters.NameClaimed();
           const logs = await this.queryFilterWithFailover(
@@ -306,7 +309,7 @@ export class EventsMethods extends EVMChainAdapterBase {
       }
 
       if (eventType === 'ContextGraphCreated') {
-        const cgStorage = this.contracts.contextGraphStorage;
+        const cgStorage = contracts.contextGraphStorage;
         if (cgStorage) {
           const eventFilter = cgStorage.filters.ContextGraphCreated();
           const logs = await this.queryFilterWithFailover(
@@ -341,7 +344,7 @@ export class EventsMethods extends EVMChainAdapterBase {
 
       // RFC 04 v0.3 / Issue #461 — Network State Registry events.
       if (eventType === 'RelayCapabilityUpdated') {
-        const profileStorage = this.contracts.profileStorage;
+        const profileStorage = contracts.profileStorage;
         if (profileStorage) {
           const eventFilter = profileStorage.filters.RelayCapabilityUpdated();
           const logs = await this.queryFilterWithFailover(

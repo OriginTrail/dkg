@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'test/chain-event-dispatch-context.unit.test.ts',
       'test/chain-event-poller-cancellation.unit.test.ts',
       'test/chain-event-lane-runner.unit.test.ts',
       'test/chain-event-poller-ka-registered.test.ts',

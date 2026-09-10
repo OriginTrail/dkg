@@ -76,12 +76,13 @@ describe('event scan RPC cancellation', () => {
   });
 
   it.each([
-    'Identity', 'Staking', 'ProfileStorage', 'DKGKnowledgeAssets',
-    'KnowledgeAssets', 'AskStorage', 'ContextGraphNameRegistry',
-    'ContextGraphs', 'ContextGraphStorage', 'KnowledgeAssetsLifecycle',
-    'DKGPublishingConvictionNFT', 'Chronos', 'RandomSampling',
-    'RandomSamplingStorage', 'Token',
-  ])('physically cancels event-scan initialization at %s without fallback', async stalledName => {
+    ['ProfileStorage', ['RelayCapabilityUpdated'], ['ProfileStorage']],
+    ['DKGKnowledgeAssets', ['KCCreated'], ['DKGKnowledgeAssets']],
+    ['KnowledgeAssetsStorage', ['KnowledgeBatchCreated'], ['KnowledgeAssetsStorage']],
+    ['ContextGraphNameRegistry', ['NameClaimed'], ['ContextGraphNameRegistry']],
+    ['ContextGraphStorage', ['ContextGraphCreated'], ['ContextGraphStorage']],
+    ['ContextGraphStorage', ['KCCreated', 'ContextGraphCreated'], ['DKGKnowledgeAssets', 'ContextGraphStorage']],
+  ] as const)('physically cancels only the requested event group at %s without fallback', async (stalledName, eventTypes, expectedNames) => {
     const hub = new Interface([
       'function getContractAddress(string name) view returns (address)',
       'function getAssetStorageAddress(string name) view returns (address)',
@@ -120,9 +121,14 @@ describe('event scan RPC cancellation', () => {
     const rpcUrl = `http://127.0.0.1:${bound.port}`;
     const adapter = new EVMChainAdapter({ rpcUrl, rpcUrls: [`${rpcUrl}/backup`],
       privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
+    const internal = adapter as unknown as {
+      initialized: boolean; contracts: Record<string, unknown>; init(): Promise<void>;
+      applyHubRotationEventName(name: string): void;
+    };
+    const beforeBindings = { ...internal.contracts };
     const controller = new AbortController();
     const reason = new Error('initializing poll stopped');
-    const pending = collect(adapter, { eventTypes: [], signal: controller.signal })
+    const pending = collect(adapter, { eventTypes: [...eventTypes], signal: controller.signal })
       .then(() => ({ failed: false }), error => ({ failed: true, error }));
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -137,12 +143,29 @@ describe('event scan RPC cancellation', () => {
       expect(outcome[0]).toEqual({ failed: true, error: reason });
       expect(requests.every(request => request.path === '/')).toBe(true);
       expect(requests.filter(request => request.name === stalledName)).toHaveLength(1);
-      expect((adapter as unknown as { initialized: boolean }).initialized).toBe(false);
-      // A retired initialization must leave lazy initialization usable. The
-      // resumed ordinary caller keeps the existing shared-cache/failover path.
+      expect(internal.initialized).toBe(false);
+      expect(internal.contracts).toEqual(beforeBindings);
+      expect(requests.map(request => request.name)).toEqual(expectedNames);
+      // Even bindings resolved before the stalled lookup must be retried:
+      // cancellation discards the entire staged capability group.
       stall = false;
-      expect(await collect(adapter, { eventTypes: [] })).toEqual([]);
-      expect((adapter as unknown as { initialized: boolean }).initialized).toBe(true);
+      expect(await collect(adapter, { eventTypes: [...eventTypes] })).toEqual([]);
+      expect(requests.map(request => request.name)).toEqual([...expectedNames, ...expectedNames]);
+      expect(internal.initialized).toBe(false);
+      expect(internal.contracts).toEqual(beforeBindings);
+      await collect(adapter, { eventTypes: [...eventTypes] });
+      expect(requests.map(request => request.name)).toEqual([...expectedNames, ...expectedNames]);
+      internal.applyHubRotationEventName(stalledName);
+      await collect(adapter, { eventTypes: [...eventTypes] });
+      expect(requests.map(request => request.name)).toEqual([...expectedNames, ...expectedNames, ...expectedNames]);
+      // Global initialization composes completed event bindings rather than
+      // loading them again, and still initializes its non-event capabilities.
+      const beforeFullInit = requests.filter(request => request.name === stalledName).length;
+      await internal.init();
+      expect(internal.initialized).toBe(true);
+      expect(requests.filter(request => request.name === stalledName)).toHaveLength(beforeFullInit);
+      expect(internal.contracts.identity).toBeDefined();
+
     } finally {
       clearTimeout(timeout);
       controller.abort();
@@ -151,6 +174,17 @@ describe('event scan RPC cancellation', () => {
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
       await pending;
     }
+  });
+
+  it.each([{ eventTypes: [] }, { eventTypes: ['unsupported-event'] }])('does not initialize contracts for an empty event capability set $eventTypes', async ({ eventTypes }) => {
+    const adapter = new EVMChainAdapter({ rpcUrl: 'http://127.0.0.1:59998',
+      privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
+    const init = vi.fn(async () => { throw new Error('global initializer entered'); });
+    Object.assign(adapter, { init });
+    try {
+      expect(await collect(adapter, { eventTypes })).toEqual([]);
+      expect(init).not.toHaveBeenCalled();
+    } finally { adapter.destroy(); }
   });
 
   it.each([

@@ -25,6 +25,7 @@ import type {
   SignedTransactionEnvelope,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
+import { ALL_EVM_EVENT_CONTRACT_KEYS, EvmEventContractGroup, optionalEvmContract, selectEventContracts, type EvmEventContractKey, type EvmEventContracts } from './evm-event-contracts.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
@@ -762,6 +763,7 @@ export class EVMChainAdapterBase {
   protected contracts: ContractCache;
 
   protected initialized = false;
+  private readonly eventContractGroup = new EvmEventContractGroup();
 
   /**
    * Single self-refreshing cache for the `RandomSampling` /
@@ -2848,13 +2850,11 @@ export class EVMChainAdapterBase {
       || err.message.includes('AddressDoesNotExist');
   }
 
-  protected async init(options: ChainReadOptions = {}): Promise<void> {
-    options.signal?.throwIfAborted();
+  protected async init(): Promise<void> {
     if (this.initialized) return;
     try {
-      await this.initContracts(options);
+      await this.initContracts();
     } catch (err) {
-      options.signal?.throwIfAborted();
       // `init()` sits on the critical path of every chain write
       // (`createOnChainContextGraph`, publish, verify, …). If the Hub lookups
       // fail because the configured RPC endpoint(s) are exhausted (perpetual
@@ -2875,105 +2875,40 @@ export class EVMChainAdapterBase {
     }
   }
 
-  protected async initContracts(options: ChainReadOptions = {}): Promise<void> {
-    this.contracts.identity = await this.resolveContract('Identity', undefined, options);
-    this.contracts.profile = await this.resolveContract('Profile', undefined, options);
-    this.contracts.parametersStorage = await this.resolveContract('ParametersStorage', undefined, options);
+  /** Event scans request only their own bindings; full init composes the same group. */
+  protected async resolveEventContracts(
+    keys: readonly EvmEventContractKey[],
+    options: ChainReadOptions = {},
+  ): Promise<EvmEventContracts> {
+    options.signal?.throwIfAborted();
+    if (this.initialized) return selectEventContracts(this.contracts, keys);
+    return this.eventContractGroup.resolve(keys, spec => spec.registry === 'assetStorage'
+      ? this.resolveAssetStorage(spec.name, undefined, options)
+      : this.resolveContract(spec.name, undefined, options), options.signal);
+  }
 
-    // V8 `Staking` is archived (PRD §4.1 — `Staking.sol` moved under
-    // contracts/archive/, deploy script 023 archived). Tolerate its absence
-    // so the V10 surface still initialises; the contract slot is retained
-    // only to keep stale Hub bindings on older deploys resolving cleanly.
-    try {
-      this.contracts.staking = await this.resolveContract('Staking', undefined, options);
-    } catch {
-      options.signal?.throwIfAborted();
-      // V8 Staking not deployed on this Hub — V10 surface continues.
-    }
+  protected async initContracts(): Promise<void> {
+    this.contracts.identity = await this.resolveContract('Identity');
+    this.contracts.profile = await this.resolveContract('Profile');
+    this.contracts.parametersStorage = await this.resolveContract('ParametersStorage');
 
-    // RFC 04 — ProfileStorage holds the relay registry views + events.
-    // Tolerated as optional so adapters bound to a Hub that pre-dates the
-    // Profile 1.2.0 / ProfileStorage 1.1.0 deploy still init cleanly; the
-    // relay-registry methods will throw with a clear message at call time.
-    try {
-      this.contracts.profileStorage = await this.resolveContract('ProfileStorage', undefined, options);
-    } catch {
-      options.signal?.throwIfAborted();
-      // Older deployments without the relay registry surface.
-    }
+    // The event group is staged independently and installed in one synchronous
+    // commit. Optional legacy/RFC-04 bindings may be absent; V10 KA storage is required.
+    const events = await this.resolveEventContracts(ALL_EVM_EVENT_CONTRACT_KEYS);
+    this.contracts = { ...this.contracts, ...events };
 
-    // V10.1 KA storage. Legacy V8 KnowledgeCollection + V10.0 DKGKnowledgeAssets
-    // are deleted in the rc.12 KC->KA rename — no fallback resolution.
-    this.contracts.knowledgeAssetStorage = await this.resolveAssetStorage('DKGKnowledgeAssets', undefined, options);
+    // Older deployments may omit archived V8/V9 or newer feature contracts.
+    // Their public methods retain their existing capability checks/fallbacks.
+    this.contracts.staking = await optionalEvmContract(() => this.resolveContract('Staking'));
+    this.contracts.knowledgeAssets = await optionalEvmContract(() => this.resolveContract('KnowledgeAssets'));
+    this.contracts.askStorage = await optionalEvmContract(() => this.resolveContract('AskStorage'));
+    this.contracts.contextGraphs = await optionalEvmContract(() => this.resolveContract('ContextGraphs'));
+    this.contracts.knowledgeAssetsLifecycle = await optionalEvmContract(() => this.resolveContract('KnowledgeAssetsLifecycle'));
+    this.contracts.dkgPublishingConvictionNFT = await optionalEvmContract(() => this.resolveContract('DKGPublishingConvictionNFT'));
+    this.contracts.chronos = await optionalEvmContract(() => this.resolveContract('Chronos'));
+    await optionalEvmContract(() => this.resolveAndAssignRandomSamplingPair());
 
-    // V9 contracts (KnowledgeAssets + KnowledgeAssetsStorage) are archived
-    // (PRD §4.1, deploy scripts 040+041 moved under deploy/archive). Keep
-    // the try/catch so adapters bound to legacy deploys still resolve them.
-    // AskStorage is V10-active (deploy script 017 still in the active set);
-    // split it out so a missing V9 binding doesn't strand AskStorage. The
-    // V10 publish-token-amount path depends on AskStorage being resolved.
-    try {
-      this.contracts.knowledgeAssets = await this.resolveContract('KnowledgeAssets', undefined, options);
-      this.contracts.knowledgeAssetsStorage = await this.resolveAssetStorage('KnowledgeAssetsStorage', undefined, options);
-    } catch {
-      options.signal?.throwIfAborted();
-      // V9 contracts not deployed — V9 publish/update surface unavailable.
-    }
-    try {
-      this.contracts.askStorage = await this.resolveContract('AskStorage', undefined, options);
-    } catch {
-      options.signal?.throwIfAborted();
-      // Older deployments that pre-date AskStorage — token-amount derivation unavailable.
-    }
-
-    try {
-      this.contracts.contextGraphNameRegistry = await this.resolveContract('ContextGraphNameRegistry', undefined, options);
-    } catch {
-      options.signal?.throwIfAborted();
-      // ContextGraphNameRegistry not registered in Hub — createContextGraph/listContextGraphsFromChain unavailable
-    }
-
-    try {
-      this.contracts.contextGraphs = await this.resolveContract('ContextGraphs', undefined, options);
-      this.contracts.contextGraphStorage = await this.resolveAssetStorage('ContextGraphStorage', undefined, options);
-    } catch {
-      options.signal?.throwIfAborted();
-      // ContextGraphs not deployed — context graph operations unavailable
-    }
-
-    try {
-      this.contracts.knowledgeAssetsLifecycle = await this.resolveContract('KnowledgeAssetsLifecycle', undefined, options);
-    } catch {
-      options.signal?.throwIfAborted();
-      // Lifecycle not deployed — createKnowledgeAssets unavailable.
-      // V10.0 KnowledgeAssetsLifecycle fallback was removed in the rc.12 rename.
-    }
-
-    try {
-      this.contracts.dkgPublishingConvictionNFT = await this.resolveContract('DKGPublishingConvictionNFT', undefined, options);
-    } catch {
-      options.signal?.throwIfAborted();
-      // DKGPublishingConvictionNFT not deployed — V10 PCA agent-resolution unavailable
-    }
-
-    try {
-      this.contracts.chronos = await this.resolveContract('Chronos', undefined, options);
-    } catch {
-      options.signal?.throwIfAborted();
-      // Chronos not deployed — update-path growth-cost sizing falls back to
-      // currentEpoch=0 (treats KC as having full `endEpoch` remaining lifetime).
-      // Greenfield V10 deployments always have Chronos; this catch is for older
-      // adapters bound to deploys that pre-date the Chronos registration.
-    }
-
-    try {
-      await this.resolveAndAssignRandomSamplingPair(options);
-    } catch {
-      options.signal?.throwIfAborted();
-      // RandomSampling not deployed — proof submission unavailable
-    }
-
-    const tokenAddress = this.tokenAddress ?? await this.readHubAddress('getContractAddress', 'Token', options);
+    const tokenAddress = this.tokenAddress ?? await this.readHubAddress('getContractAddress', 'Token', {});
     if (tokenAddress !== ethers.ZeroAddress) {
       this.contracts.token = new Contract(
         tokenAddress,
@@ -2985,10 +2920,7 @@ export class EVMChainAdapterBase {
         this.signer,
       );
     }
-
-    options.signal?.throwIfAborted();
     await this.startHubRotationListener();
-    options.signal?.throwIfAborted();
     this.initialized = true;
   }
 
@@ -4091,18 +4023,9 @@ export class EVMChainAdapterBase {
    * `UnauthorizedAccess` and re-tries against the freshly resolved
    * pair.
    */
-  protected async resolveAndAssignRandomSamplingPair(options: ChainReadOptions = {}): Promise<{ rs: Contract; rss: Contract }> {
+  protected async resolveAndAssignRandomSamplingPair(): Promise<{ rs: Contract; rss: Contract }> {
     const generationBefore = this.randomSamplingPairCache.currentGeneration();
-    // Shared TTL/single-flight loads remain adapter-owned. A cancellable init
-    // owns a separate pair and reads sequentially so even a failed first lookup
-    // cannot leave a sibling physical request running after init has retired.
-    const pair = options.signal
-      ? {
-          rs: await this.resolveContract('RandomSampling', undefined, options),
-          rss: await this.resolveContract('RandomSamplingStorage', undefined, options),
-        }
-      : await this.randomSamplingPairCache.get();
-    options.signal?.throwIfAborted();
+    const pair = await this.randomSamplingPairCache.get();
     if (this.randomSamplingPairCache.currentGeneration() === generationBefore) {
       this.contracts.randomSampling = pair.rs;
       this.contracts.randomSamplingStorage = pair.rss;
@@ -4299,6 +4222,7 @@ export class EVMChainAdapterBase {
   }
 
   protected finalizeKnownHubRotation(): void {
+    this.eventContractGroup.invalidate();
     this.invalidatePublishPreflightCache();
     // #1583 — redundant-but-harmless second flush (the unconditional flush at the
     // top of `applyHubRotationEventName` already cleared the memo for this event).
@@ -4329,6 +4253,7 @@ export class EVMChainAdapterBase {
    * (in-flight probe, ready flag) that `init()` alone won't reset.
    */
   protected invalidateAllBoundContracts(): void {
+    this.eventContractGroup.invalidate();
     for (const policy of HUB_BINDING_INVALIDATORS.values()) {
       this.invalidateHubBinding(policy);
     }
