@@ -36,8 +36,8 @@ describe('completed exact-VM physical attempt accounting', () => {
         expect(harness.fetched.map(fetch => fetch.peerId)).toEqual(peers);
         const record = host.vmRecoverySlots.snapshot().get(vmRecoverySlotKey(target));
         expect(record?.lastAttemptedPeerId).toBe(peers[1]);
-        expect(record?.attemptedPeerIds).toEqual(new Set(peers));
-        expect(record?.cleanAbsentPeerIds.size).toBe(0);
+        expect(record?.attemptedPeerIds).toEqual(peers);
+        expect(record?.cleanAbsentPeerIds.length).toBe(0);
         expect(record?.backoffKind).toBe('incomplete-cycle');
         expect(record?.failures).toBe(1);
         host.clearVmReconcileActiveFetchCooldown(target.localCgId);
@@ -65,8 +65,8 @@ describe('completed exact-VM physical attempt accounting', () => {
       await reading;
       const record = host.vmRecoverySlots.snapshot().get(vmRecoverySlotKey(target));
       expect(record?.lastAttemptedPeerId).toBe(peers[0]);
-      expect(record?.attemptedPeerIds).toEqual(new Set([peers[0]]));
-      expect(record?.cleanAbsentPeerIds.size).toBe(0);
+      expect(record?.attemptedPeerIds).toEqual([peers[0]]);
+      expect(record?.cleanAbsentPeerIds.length).toBe(0);
       expect(record?.phase).toBe('collecting');
     } finally {
       release();
@@ -101,7 +101,7 @@ describe('completed exact-VM physical attempt accounting', () => {
       await harness.run();
       expect(harness.fetched.map(fetch => fetch.peerId)).toEqual(peers);
       const record = host.vmRecoverySlots.snapshot().get(vmRecoverySlotKey(target));
-      expect(record?.cleanAbsentPeerIds).toEqual(new Set([peers[1]]));
+      expect(record?.cleanAbsentPeerIds).toEqual([peers[1]]);
       expect(record?.backoffKind).toBe('incomplete-cycle');
       expect(record?.failures).toBe(1);
     } finally { await harness.agent.stop().catch(() => undefined); }

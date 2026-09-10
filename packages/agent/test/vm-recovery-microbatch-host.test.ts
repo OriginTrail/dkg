@@ -289,7 +289,7 @@ describe('VM recovery microbatch host — adversarial integration', () => {
         phase: 'backoff',
         backoffKind: 'clean-absence',
       });
-      expect(record?.cleanAbsentPeerIds).toEqual(new Set([holder]));
+      expect(record?.cleanAbsentPeerIds).toEqual([holder]);
       expect(record?.nextRetryAt).toBeGreaterThan(before);
     }
   });
@@ -683,7 +683,7 @@ describe('VM recovery microbatch host — adversarial integration', () => {
           target,
           prepared: { suppressed: false },
         },
-        installedRecord: undefined,
+        slotHandle: undefined,
         candidatePeerIds: [peerId],
       }],
       unavailablePeerIds: [],

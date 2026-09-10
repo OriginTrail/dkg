@@ -465,7 +465,9 @@ import {
   type ContextGraphSubscriptionStore,
   type VmReconcilePeerTopology,
   type SelectedVmReconcileCursorRecord,
-  type VmReconcileRotationRecord,
+  type VmRecoveryRotationSnapshot,
+  type VmRecoverySlotHandle,
+  type VmRecoveryPreparation,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
@@ -615,7 +617,7 @@ const VM_EXACT_MICROBATCH_LIMITS = Object.freeze({
 
 interface VmRecoveryBatchAttempt {
   readonly entry: VmRecoveryPreparedEntry;
-  readonly installedRecord: VmReconcileRotationRecord | undefined;
+  readonly slotHandle: VmRecoverySlotHandle | undefined;
   readonly candidatePeerIds: readonly string[];
 }
 
@@ -4745,7 +4747,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     candidatePeerIds: readonly string[],
     now: number,
     curatorRosterConfirmed = true,
-  ): { record?: VmReconcileRotationRecord; suppressed: boolean } {
+  ): VmRecoveryPreparation {
     if (this.vmReconcileRotationClosed) return { suppressed: true };
     return this.vmRecoverySlots.prepare(target, {
       candidatePeerIds, curatorRosterConfirmed,
@@ -4755,7 +4757,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   vmReconcileUncreditedCandidateOrder(
     this: DKGAgent,
-    record: VmReconcileRotationRecord,
+    record: VmRecoveryRotationSnapshot,
   ): string[] {
     const candidates = [...record.candidatePeerIds];
     if (candidates.length === 0) return candidates;
@@ -4766,7 +4768,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return [
       ...candidates.slice(start),
       ...candidates.slice(0, start),
-    ].filter((peerId) => !record.attemptedPeerIds.has(peerId));
+    ].filter((peerId) => !record.attemptedPeerIds.includes(peerId));
   }
 
   /**
@@ -4778,7 +4780,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
    */
   selectVmReconcileExactCandidate(
     this: DKGAgent,
-    record: VmReconcileRotationRecord | undefined,
+    record: VmRecoveryRotationSnapshot | undefined,
     fallbackCandidatePeerIds: readonly string[],
     policy: VmRecoveryProviderPolicy,
   ): string | undefined {
@@ -4838,11 +4840,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     peerId: string | undefined,
     disposition: 'found' | 'clean-absent' | 'incomplete',
     expectedCandidatePeerIds: readonly string[],
-    capturedRecord: VmReconcileRotationRecord,
+    slotHandle: VmRecoverySlotHandle,
     unavailablePeerIds: ReadonlySet<string> = new Set(),
   ): void {
     if (this.vmReconcileRotationClosed) return;
-    this.vmRecoverySlots.settleAttempt(target, peerId, disposition, expectedCandidatePeerIds, capturedRecord, {
+    this.vmRecoverySlots.settleAttempt(target, peerId, disposition, expectedCandidatePeerIds, slotHandle, {
       now: this.vmReconcileRotationNow(), getLocalPeerId: () => this.peerId,
       baseBackoffMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS,
       maxBackoffMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
@@ -4854,14 +4856,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
     target: OrdinalRecoveryTarget,
     peerId: string,
     expectedCandidatePeerIds: readonly string[],
-    capturedRecord: VmReconcileRotationRecord,
+    slotHandle: VmRecoverySlotHandle,
   ): void {
     this.settleVmReconcileRotationAttempt(
       target,
       peerId,
       'clean-absent',
       expectedCandidatePeerIds,
-      capturedRecord,
+      slotHandle,
     );
   }
 
@@ -5143,13 +5145,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // may upgrade this credit to clean absence, but cannot erase the attempt.
     if (transferCompleted) {
       for (const attempt of attempts) {
-        if (!attempt.installedRecord) continue;
+        if (!attempt.slotHandle) continue;
         this.settleVmReconcileRotationAttempt(
           attempt.entry.target,
           peerId,
           'incomplete',
           attempt.candidatePeerIds,
-          attempt.installedRecord,
+          attempt.slotHandle,
           unavailablePeerIdSet,
         );
       }
@@ -5181,12 +5183,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
       perUalDispositions.set(batchTarget.ual, perTargetDisposition);
       if (outcome.status === 'pending') {
         if (outcome.recovery) {
-          const batchRecord = attempt.installedRecord;
-          if (!batchRecord || this.vmReconcileRotationClosed) continue;
-          if (!this.vmRecoverySlots.isCurrent(batchTarget, batchRecord)) continue;
+          const slotHandle = attempt.slotHandle;
+          if (!slotHandle || this.vmReconcileRotationClosed) continue;
+          const snapshot = this.vmRecoverySlots.read(batchTarget, slotHandle);
+          if (!snapshot) continue;
           const candidateMembershipAfter = this.vmReconcileObservedCandidatePeerIds(localCgId);
           if (!this.vmReconcilePeerMembershipMatches(
-            batchRecord.candidatePeerIds,
+            new Set(snapshot.candidatePeerIds),
             candidateMembershipAfter,
           )) {
             this.prepareVmReconcileRotationTarget(
@@ -5200,7 +5203,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
               peerId,
               perTargetDisposition,
               attempt.candidatePeerIds,
-              batchRecord,
+              slotHandle,
               unavailablePeerIdSet,
             );
           }
@@ -5516,14 +5519,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const entry = eligible[eligibleIndex]!;
       const { target } = entry;
       if (handledBatchOrdinals.has(target.ordinal)) continue;
-      const record = entry.prepared.record;
-      const installedRecord = record
-        && this.vmRecoverySlots.isCurrent(target, record)
-        ? record
-        : undefined;
-      const candidatePeerIds = installedRecord
-        ? [...installedRecord.candidatePeerIds]
-        : orderedPeerIds;
+      const slot = entry.prepared.slot;
+      const snapshot = slot ? this.vmRecoverySlots.read(target, slot.handle) : undefined;
+      const slotHandle = snapshot ? slot?.handle : undefined;
+      const candidatePeerIds = snapshot ? snapshot.candidatePeerIds : orderedPeerIds;
 
       // Rotate every physical outcome, including incomplete responses, without
       // conflating the attempt cursor with clean-absence evidence. Try the
@@ -5532,7 +5531,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // the next physical peer slot in the same bounded pass.
       let peerId: string | undefined;
       const candidatePeerId = this.selectVmReconcileExactCandidate(
-        installedRecord,
+        snapshot,
         orderedPeerIds,
         providerPolicy,
       );
@@ -5582,13 +5581,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
         }
       }
       if (!peerId) {
-        if (installedRecord) {
+        if (slotHandle) {
           this.settleVmReconcileRotationAttempt(
             target,
             candidatePeerId,
             'incomplete',
             candidatePeerIds,
-            installedRecord,
+            slotHandle,
             providerPolicy.unavailablePeerIds(),
           );
         }
@@ -5599,7 +5598,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
       let batchAttempts: VmRecoveryBatchAttempt[] = [{
         entry,
-        installedRecord,
+        slotHandle,
         candidatePeerIds,
       }];
 
@@ -5613,24 +5612,23 @@ export class SwmHostModeMethods extends DKGAgentBase {
           const candidateEntry = eligible[candidateIndex]!;
           const candidateTarget = candidateEntry.target;
           if (handledBatchOrdinals.has(candidateTarget.ordinal)) continue;
-          const candidateRecord = candidateEntry.prepared.record;
-          const candidateInstalledRecord = candidateRecord
-            && this.vmRecoverySlots.isCurrent(candidateTarget, candidateRecord)
-            ? candidateRecord
-            : undefined;
+          const candidateSlot = candidateEntry.prepared.slot;
+          const candidateSnapshot = candidateSlot
+            ? this.vmRecoverySlots.read(candidateTarget, candidateSlot.handle) : undefined;
+          const candidateHandle = candidateSnapshot ? candidateSlot?.handle : undefined;
           // The current target owns the admitted provider attempt. Later
           // candidates must still prove this peer remains uncredited in their
           // independent rotation record.
           const peerEligible = candidateIndex === eligibleIndex
-            || (candidateInstalledRecord
-              ? this.vmReconcileUncreditedCandidateOrder(candidateInstalledRecord).includes(peerId)
+            || (candidateSnapshot
+              ? this.vmReconcileUncreditedCandidateOrder(candidateSnapshot).includes(peerId)
               : orderedPeerIds.includes(peerId));
           if (!peerEligible) break;
           compatible.push({
             entry: candidateEntry,
-            installedRecord: candidateInstalledRecord,
-            candidatePeerIds: candidateInstalledRecord
-              ? [...candidateInstalledRecord.candidatePeerIds]
+            slotHandle: candidateHandle,
+            candidatePeerIds: candidateSnapshot
+              ? [...candidateSnapshot.candidatePeerIds]
               : orderedPeerIds,
           });
         }
@@ -5683,13 +5681,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
             `VM exact recovery selector for "${localCgId}" exceeds the executor cap; `
               + `ordinal=${target.ordinal} selectorCap=${VM_EXACT_MICROBATCH_LIMITS.maxSelectorBytes}`,
           );
-          if (installedRecord) {
+          if (slotHandle) {
             this.settleVmReconcileRotationAttempt(
               target,
               undefined,
               'incomplete',
               candidatePeerIds,
-              installedRecord,
+              slotHandle,
               providerPolicy.unavailablePeerIds(),
             );
           }
@@ -5738,7 +5736,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       eligibleOrdinals.has(target.ordinal) && !attemptedOrdinals.has(target.ordinal))?.ordinal;
     const hasImmediateRecoveryWork = eligible.some(({ target }) => {
       const outcome = outcomes.get(target.ordinal);
-      const record = this.vmRecoverySlots.peekRecord(target);
+      const record = this.vmRecoverySlots.peekSnapshot(target);
       if (
         record?.phase !== 'collecting'
         || this.vmReconcileUncreditedCandidateOrder(record).length === 0

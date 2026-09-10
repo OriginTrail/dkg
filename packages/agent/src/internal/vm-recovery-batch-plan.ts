@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { OrdinalRecoveryTarget } from '../chain-reconciler.js';
-import type { VmReconcileRotationRecord } from './vm-recovery-slot-registry.js';
+import type { VmRecoveryRotationSnapshot, VmRecoveryPreparation } from './vm-recovery-slot-registry.js';
 
 export interface VmRecoveryPreparedEntry {
   readonly index: number;
   readonly target: OrdinalRecoveryTarget;
-  readonly prepared: { readonly record?: VmReconcileRotationRecord; readonly suppressed: boolean };
+  readonly prepared: VmRecoveryPreparation;
 }
 
 export interface VmRecoveryBatchPlanCommitOptions {
@@ -19,7 +19,7 @@ export interface VmRecoveryBatchPlanCommitOptions {
 
 export interface VmRecoveryBatchPlan {
   readonly initiallyEligibleTargets: readonly OrdinalRecoveryTarget[];
-  readonly suppressedRecords: readonly VmReconcileRotationRecord[];
+  readonly suppressedRecords: readonly VmRecoveryRotationSnapshot[];
   commit(options: VmRecoveryBatchPlanCommitOptions): {
     readonly eligible: readonly VmRecoveryPreparedEntry[];
     readonly nextAdmissionCursor?: number;

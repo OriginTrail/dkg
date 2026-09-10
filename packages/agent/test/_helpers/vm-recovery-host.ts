@@ -7,7 +7,7 @@ import type {
   PendingOrdinalRecoveryResult,
 } from '../../src/chain-reconciler.js';
 import type { CuratorPeerIdsResolution } from '../../src/dkg-agent-lifecycle.js';
-import type { VmReconcileRotationRecord } from '../../src/dkg-agent-types.js';
+import type { VmRecoverySlotCapture, VmRecoverySlotHandle } from '../../src/dkg-agent-types.js';
 import { VmRecoverySlotRegistry } from '../../src/internal/vm-recovery-slot-registry.js';
 import { DKGAgent } from '../../src/index.js';
 import {
@@ -101,9 +101,9 @@ export interface VmRecoveryHostInternals {
       entry: {
         index: number;
         target: OrdinalRecoveryTarget;
-        prepared: { record?: VmReconcileRotationRecord; suppressed: boolean };
+        prepared: { slot?: VmRecoverySlotCapture; suppressed: boolean };
       };
-      installedRecord: VmReconcileRotationRecord | undefined;
+      slotHandle: VmRecoverySlotHandle | undefined;
       candidatePeerIds: readonly string[];
     }[];
     unavailablePeerIds: readonly string[];

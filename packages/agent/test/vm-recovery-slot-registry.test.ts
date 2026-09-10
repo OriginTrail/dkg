@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { VmRecoverySlotRegistry, type VmRecoverySlotScope } from '../src/internal/vm-recovery-slot-registry.js';
-import type { VmReconcileRotationRecord } from '../src/dkg-agent-types.js';
+import type { VmRecoverySlotCapture, VmRecoveryRotationSnapshot } from '../src/dkg-agent-types.js';
 
 const target = { localCgId: 'cg-a', onChainCgId: '1', ordinal: 0, ual: 'ka-0', merkleRoot: '0xABC' };
 
@@ -8,12 +8,12 @@ function admitFor(
   registry: VmRecoverySlotRegistry,
   value = target,
   now = 0,
-): VmReconcileRotationRecord {
+): VmRecoverySlotCapture {
   const admission = registry.admit(value, {
     candidatePeerIds: ['peer-a'], curatorRosterConfirmed: true, collectionDeadlineAt: 100,
   }, now);
   if (admission.kind === 'deferred') throw new Error('expected slot admission');
-  return admission.record;
+  return admission.slot;
 }
 
 describe('active VM recovery slot ownership', () => {
@@ -30,32 +30,54 @@ describe('active VM recovery slot ownership', () => {
       candidatePeerIds: [], curatorRosterConfirmed: true, collectionDeadlineAt: 201,
     }, 101, reservation?.kind === 'reserved' ? reservation.reservation : undefined)).toEqual({ suppressed: false });
     expect(registry.recordCount).toBe(1);
-    expect(registry.peekRecord(waiting)).toBeUndefined();
-    expect(registry.peekRecord(target)).toBe(original);
+    expect(registry.capture(waiting)).toBeUndefined();
+    expect(registry.capture(target)?.handle).toBe(original?.handle);
     expect(donorScope.signal.aborted).toBe(false);
     expect(registry.prepare(waiting, {
       candidatePeerIds: ['new-peer'], curatorRosterConfirmed: true, collectionDeadlineAt: 201,
-    }, 101).record).toBeDefined();
+    }, 101).slot).toBeDefined();
     scope.release();
     donorScope.release();
   });
 
-  it('does not expose mutable rotation state through captured records or diagnostics', () => {
+  it('keeps captured snapshots stable while an explicit handle authorizes transitions', () => {
     const registry = new VmRecoverySlotRegistry(1);
-    const record = admitFor(registry);
-    expect(() => Object.assign(record, { phase: 'backoff', nextRetryAt: Infinity })).toThrow(TypeError);
-    // JavaScript consumers may mutate their detached sets; the owner is unaffected.
-    (record.candidatePeerIds as Set<string>).clear();
-    (registry.snapshot().values().next().value!.attemptedPeerIds as Set<string>).add('peer-a');
-    expect(record.candidatePeerIds).toEqual(new Set(['peer-a']));
-    expect(record.attemptedPeerIds.size).toBe(0);
-    registry.settleAttempt(target, 'peer-a', 'clean-absent', ['peer-a'], record, {
+    const { handle, snapshot } = admitFor(registry);
+    const diagnostic = registry.snapshot().values().next().value!;
+    expect(() => Object.assign(snapshot, { phase: 'backoff' })).toThrow(TypeError);
+    expect(() => (snapshot.candidatePeerIds as string[]).push('forged-peer')).toThrow(TypeError);
+    expect(snapshot.candidatePeerIds).toBe(snapshot.candidatePeerIds);
+    registry.settleAttempt(target, 'peer-a', 'clean-absent', ['peer-a'], handle, {
       now: 10, getLocalPeerId: () => 'local', baseBackoffMs: 10, maxBackoffMs: 100,
     });
-    expect(record.phase).toBe('backoff');
-    expect(record.failures).toBe(1);
-    expect(record.cleanAbsentPeerIds).toEqual(new Set(['peer-a']));
+    expect(snapshot).toEqual(diagnostic);
+    expect(snapshot).toMatchObject({ phase: 'collecting', failures: 0, attemptedPeerIds: [] });
+    expect(registry.read(target, handle)).toMatchObject({
+      phase: 'backoff', failures: 1, cleanAbsentPeerIds: ['peer-a'],
+    });
+    expect(registry.isCurrent(target, handle)).toBe(true);
   });
+
+  it.each(['invalidation', 'same-fingerprint', 'different-fingerprint'] as const)(
+    'rejects a stale handle after %s without changing captured snapshots', replacementKind => {
+      const registry = new VmRecoverySlotRegistry(1);
+      const captured = admitFor(registry);
+      const diagnostic = registry.snapshot().values().next().value!;
+      registry.invalidate(target);
+      const replacementTarget = replacementKind === 'different-fingerprint'
+        ? { ...target, merkleRoot: 'new-root' } : target;
+      const replacement = replacementKind === 'invalidation' ? undefined : admitFor(registry, replacementTarget);
+      expect(registry.isCurrent(target, captured.handle)).toBe(false);
+      expect(registry.read(target, captured.handle)).toBeUndefined();
+      registry.settleAttempt(target, 'peer-a', 'clean-absent', ['peer-a'], captured.handle, {
+        now: 10, getLocalPeerId: () => 'local', baseBackoffMs: 10, maxBackoffMs: 100,
+      });
+      registry.touch(target, captured.handle);
+      expect(captured.snapshot).toEqual(diagnostic);
+      expect(captured.snapshot).toMatchObject({ phase: 'collecting', attemptedPeerIds: [] });
+      expect(registry.capture(replacementTarget)).toEqual(replacement);
+    },
+  );
 
   it('does not retire a replacement installed by an invalidation listener during preparation', () => {
     const registry = new VmRecoverySlotRegistry(1);
@@ -64,7 +86,7 @@ describe('active VM recovery slot ownership', () => {
     originalScope.track([target]);
     const replacement = { ...target, merkleRoot: 'listener-replacement' };
     let replacementScope: VmRecoverySlotScope | undefined;
-    let replacementRecord: VmReconcileRotationRecord | undefined;
+    let replacementRecord: VmRecoverySlotCapture | undefined;
     originalScope.signal.addEventListener('abort', () => {
       replacementRecord = admitFor(registry, replacement);
       replacementScope = registry.begin();
@@ -73,7 +95,7 @@ describe('active VM recovery slot ownership', () => {
     expect(registry.prepare({ ...target, merkleRoot: 'requested-replacement' }, {
       candidatePeerIds: ['peer-a'], curatorRosterConfirmed: true, collectionDeadlineAt: 100,
     }, 0)).toEqual({ suppressed: true });
-    expect(registry.peekRecord(replacement)).toBe(replacementRecord);
+    expect(registry.capture(replacement)?.handle).toBe(replacementRecord?.handle);
     expect(replacementScope?.signal.aborted).toBe(false);
     originalScope.release();
     replacementScope?.release();
@@ -82,13 +104,13 @@ describe('active VM recovery slot ownership', () => {
   it.each(['same', 'different'] as const)('preserves a %s-fingerprint replacement when unconfirmed proof is discarded', fingerprint => {
     const registry = new VmRecoverySlotRegistry(1);
     const original = admitFor(registry);
-    registry.settleAttempt(target, 'peer-a', 'clean-absent', ['peer-a'], original, {
+    registry.settleAttempt(target, 'peer-a', 'clean-absent', ['peer-a'], original.handle, {
       now: 0, getLocalPeerId: () => 'local', baseBackoffMs: 100, maxBackoffMs: 100,
     });
     const originalScope = registry.begin();
     originalScope.track([target]);
     const replacement = fingerprint === 'same' ? target : { ...target, merkleRoot: 'new-owner' };
-    let replacementRecord: VmReconcileRotationRecord | undefined;
+    let replacementRecord: VmRecoverySlotCapture | undefined;
     let replacementScope: VmRecoverySlotScope | undefined;
     originalScope.signal.addEventListener('abort', () => {
       replacementRecord = admitFor(registry, replacement);
@@ -98,8 +120,8 @@ describe('active VM recovery slot ownership', () => {
     expect.soft(registry.prepare(target, {
       candidatePeerIds: ['peer-b'], curatorRosterConfirmed: false, collectionDeadlineAt: 101,
     }, 1)).toEqual({ suppressed: true });
-    expect(registry.peekRecord(replacement)).toBe(replacementRecord);
-    expect(replacementRecord?.candidatePeerIds).toEqual(new Set(['peer-a']));
+    expect(registry.capture(replacement)?.handle).toBe(replacementRecord?.handle);
+    expect(replacementRecord?.snapshot.candidatePeerIds).toEqual(['peer-a']);
     expect(replacementScope?.signal.aborted).toBe(false);
     originalScope.release();
     replacementScope?.release();
@@ -141,10 +163,10 @@ describe('active VM recovery slot ownership', () => {
   ))('rolls back $mode donation after $failure failure without aborting its donor', ({ mode, failure }) => {
     class FailingRegistry extends VmRecoverySlotRegistry {
       failing = true;
-      protected override retainRecord(key: string, record: VmReconcileRotationRecord): void {
-        if (this.failing && record.ordinal === 1 && failure === 'before-write') throw new Error('install failed');
-        super.retainRecord(key, record);
-        if (this.failing && record.ordinal === 1 && failure === 'after-write') throw new Error('install failed');
+      protected override onRetention(stage: 'before' | 'after', key: string): void {
+        if (this.failing && key.endsWith('\0' + 1) && failure === `${stage}-write`) {
+          throw new Error('install failed');
+        }
       }
     }
     const registry = new FailingRegistry(1);
@@ -161,7 +183,7 @@ describe('active VM recovery slot ownership', () => {
       expect(admission.kind).toBe('reserved');
       if (admission.kind === 'reserved') expect(() => admission.reservation.commit(params)).toThrow('install failed');
     }
-    expect([...registry.snapshot().values()]).toEqual([donorRecord]);
+    expect([...registry.snapshot().values()]).toEqual([donorRecord.snapshot]);
     expect(donorScope.signal.aborted).toBe(false);
     registry.failing = false;
     expect(registry.admit(waiting, params, 100).kind).toBe('admitted');
@@ -189,7 +211,7 @@ describe('active VM recovery slot ownership', () => {
     else registry.close();
     expect(oldOtherScope.signal.aborted).toBe(true);
     expect(replacementScope?.signal.aborted).toBe(false);
-    expect(registry.peekRecord(replacement)).toBeDefined();
+    expect(registry.capture(replacement)).toBeDefined();
     firstScope.release();
     oldOtherScope.release();
     replacementScope?.release();
@@ -206,7 +228,7 @@ describe('active VM recovery slot ownership', () => {
     expect(first.kind).toBe('reserved');
     expect(second.kind).toBe('reserved');
     expect(scope.reserveAdmission({ ...target, ordinal: 4 }, 100).kind).toBe('deferred');
-    expect([...registry.snapshot().values()]).toEqual([donorA, donorB]);
+    expect([...registry.snapshot().values()]).toEqual([donorA.snapshot, donorB.snapshot]);
     if (first.kind === 'reserved') first.reservation.release();
     const next = scope.reserveAdmission({ ...target, ordinal: 4 }, 100);
     expect(next.kind).toBe('reserved');
@@ -233,7 +255,7 @@ describe('active VM recovery slot ownership', () => {
     if (admission.kind === 'reserved') expect(admission.reservation.commit({
       candidatePeerIds: ['peer-a'], curatorRosterConfirmed: false, collectionDeadlineAt: 200,
     }).kind).toBe('deferred');
-    expect(registry.peekRecord(replacement)).toBe(record);
+    expect(registry.capture(replacement)?.handle).toBe(record?.handle);
     scope.release();
   });
 
@@ -253,8 +275,8 @@ describe('active VM recovery slot ownership', () => {
     }).kind).toBe('admitted');
     expect(otherScope.signal.aborted).toBe(true);
     expect(scope.signal.aborted).toBe(false);
-    expect(registry.peekRecord(target)).toBeUndefined();
-    expect(registry.peekRecord(waiting)).toBeDefined();
+    expect(registry.capture(target)).toBeUndefined();
+    expect(registry.capture(waiting)).toBeDefined();
     registry.invalidate(waiting);
     expect(scope.signal.aborted).toBe(true);
     scope.release();
@@ -298,9 +320,9 @@ describe('active VM recovery slot ownership', () => {
     const record = admitFor(registry, target, 0);
     const installed = registry.snapshot();
     expect(empty.size).toBe(0);
-    expect([...installed.values()]).toEqual([record]);
+    expect([...installed.values()]).toEqual([record.snapshot]);
     registry.complete(target);
-    expect([...installed.values()]).toEqual([record]);
+    expect([...installed.values()]).toEqual([record.snapshot]);
     expect(registry.snapshot().size).toBe(0);
   });
 
@@ -309,7 +331,7 @@ describe('active VM recovery slot ownership', () => {
     const record = admitFor(registry);
     const scope = registry.begin();
     scope.track([target]);
-    registry.touch(target, record);
+    registry.touch(target, record.handle);
     registry.complete(target);
     expect(registry.recordCount).toBe(0);
     expect(scope.signal.aborted).toBe(false);
@@ -331,7 +353,7 @@ describe('active VM recovery slot ownership', () => {
     registry.invalidateContextGraph(target.localCgId);
     expect(local.signal.aborted).toBe(true);
     expect(remote.signal.aborted).toBe(false);
-    expect([...registry.snapshot().values()]).toEqual([otherRecord]);
+    expect([...registry.snapshot().values()]).toEqual([otherRecord.snapshot]);
     registry.close();
     expect(remote.signal.aborted).toBe(true);
     expect(registry.recordCount).toBe(0);
@@ -345,15 +367,15 @@ describe('active VM recovery slot ownership', () => {
     const active = registry.begin();
     active.track([target]);
     const replacement = { ...target, merkleRoot: '0xdef' };
-    expect(registry.peekRecord(replacement)).toBeUndefined();
-    expect(registry.isCurrent(replacement, oldRecord)).toBe(false);
+    expect(registry.capture(replacement)).toBeUndefined();
+    expect(registry.isCurrent(replacement, oldRecord.handle)).toBe(false);
     expect(registry.recordCount).toBe(1);
     expect(active.signal.aborted).toBe(false);
     registry.observeTarget(replacement);
     expect(registry.recordCount).toBe(0);
     expect(active.signal.aborted).toBe(true);
     const record = admitFor(registry, replacement, 0);
-    expect(registry.peekRecord(replacement)).toBe(record);
+    expect(registry.capture(replacement)?.handle).toBe(record?.handle);
     active.release();
   });
 
@@ -363,11 +385,11 @@ describe('active VM recovery slot ownership', () => {
     const donor = registry.begin();
     donor.track([target]);
     const waitingTarget = { ...target, localCgId: 'cg-b' };
-    let recordsAtAbort: VmReconcileRotationRecord[] | undefined;
+    let recordsAtAbort: VmRecoveryRotationSnapshot[] | undefined;
     donor.signal.addEventListener('abort', () => { recordsAtAbort = [...registry.snapshot().values()]; });
     const waiting = admitFor(registry, waitingTarget, 100);
     expect(donor.signal.aborted).toBe(true);
-    expect(recordsAtAbort).toEqual([waiting]);
+    expect(recordsAtAbort).toEqual([waiting.snapshot]);
     donor.release();
   });
 

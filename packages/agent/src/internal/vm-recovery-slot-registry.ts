@@ -5,14 +5,14 @@ import type { OrdinalRecoveryTarget } from '../chain-reconciler.js';
 type Target = Pick<OrdinalRecoveryTarget, 'localCgId' | 'onChainCgId' | 'ordinal' | 'ual' | 'merkleRoot'>;
 type SlotLocator = Pick<Target, 'localCgId' | 'onChainCgId' | 'ordinal'>;
 
-/** Process-local evidence owned by one chain-ordinal exact-recovery slot. */
-export interface VmReconcileRotationRecord extends Readonly<SlotLocator> {
+/** Point-in-time evidence, independent of the token authorizing slot commands. */
+export interface VmRecoveryRotationSnapshot extends Readonly<SlotLocator> {
   readonly fingerprint: string;
   readonly phase: 'collecting' | 'backoff';
   readonly backoffKind?: 'clean-absence' | 'incomplete-cycle';
-  readonly candidatePeerIds: ReadonlySet<string>;
-  readonly attemptedPeerIds: ReadonlySet<string>;
-  readonly cleanAbsentPeerIds: ReadonlySet<string>;
+  readonly candidatePeerIds: readonly string[];
+  readonly attemptedPeerIds: readonly string[];
+  readonly cleanAbsentPeerIds: readonly string[];
   readonly curatorRosterConfirmed: boolean;
   readonly collectionDeadlineAt: number;
   readonly lastAttemptedPeerId?: string;
@@ -21,9 +21,23 @@ export interface VmReconcileRotationRecord extends Readonly<SlotLocator> {
 }
 
 
-type MutableRotationRecord = {
-  -readonly [K in keyof VmReconcileRotationRecord]: VmReconcileRotationRecord[K] extends ReadonlySet<infer V>
-    ? Set<V> : VmReconcileRotationRecord[K];
+declare const slotHandleBrand: unique symbol;
+/** Opaque authority for exactly one retained slot generation. */
+export type VmRecoverySlotHandle = symbol & { readonly [slotHandleBrand]: true };
+
+export interface VmRecoverySlotCapture {
+  readonly handle: VmRecoverySlotHandle;
+  readonly snapshot: VmRecoveryRotationSnapshot;
+}
+
+export interface VmRecoveryPreparation {
+  readonly slot?: VmRecoverySlotCapture;
+  readonly suppressed: boolean;
+}
+
+type MutableRotationRecord = { readonly handle: VmRecoverySlotHandle } & {
+  -readonly [K in keyof VmRecoveryRotationSnapshot]: VmRecoveryRotationSnapshot[K] extends readonly (infer V)[]
+    ? Set<V> : VmRecoveryRotationSnapshot[K];
 };
 
 export interface VmRecoveryRotationPolicy {
@@ -91,8 +105,8 @@ export interface VmRecoverySlotScope {
 }
 
 export type VmRecoverySlotAdmission =
-  | { readonly kind: 'existing'; readonly record: VmReconcileRotationRecord }
-  | { readonly kind: 'admitted'; readonly record: VmReconcileRotationRecord }
+  | { readonly kind: 'existing'; readonly slot: VmRecoverySlotCapture }
+  | { readonly kind: 'admitted'; readonly slot: VmRecoverySlotCapture }
   | { readonly kind: 'deferred' };
 
 export interface VmRecoverySlotAdmissionReservation {
@@ -101,38 +115,25 @@ export interface VmRecoverySlotAdmissionReservation {
 }
 
 export type VmRecoverySlotReservation =
-  | { readonly kind: 'existing'; readonly record: VmReconcileRotationRecord }
+  | { readonly kind: 'existing'; readonly slot: VmRecoverySlotCapture }
   | { readonly kind: 'reserved'; readonly reservation: VmRecoverySlotAdmissionReservation }
   | { readonly kind: 'deferred' };
 
 /** One aggregate owns each slot's retained proof, active generation, and reservation. */
 export class VmRecoverySlotRegistry {
   private readonly slots = new Map<string, SlotState>();
-  private readonly views = new WeakMap<MutableRotationRecord, VmReconcileRotationRecord>();
-  private readonly stateByView = new WeakMap<VmReconcileRotationRecord, MutableRotationRecord>();
-
-  private view(state: MutableRotationRecord): VmReconcileRotationRecord {
-    const existing = this.views.get(state);
-    if (existing) return existing;
-    const view: VmReconcileRotationRecord = Object.freeze({
-      get localCgId() { return state.localCgId; },
-      get onChainCgId() { return state.onChainCgId; },
-      get ordinal() { return state.ordinal; },
-      get fingerprint() { return state.fingerprint; },
-      get phase() { return state.phase; },
-      get backoffKind() { return state.backoffKind; },
-      get candidatePeerIds() { return new Set(state.candidatePeerIds); },
-      get attemptedPeerIds() { return new Set(state.attemptedPeerIds); },
-      get cleanAbsentPeerIds() { return new Set(state.cleanAbsentPeerIds); },
-      get curatorRosterConfirmed() { return state.curatorRosterConfirmed; },
-      get collectionDeadlineAt() { return state.collectionDeadlineAt; },
-      get lastAttemptedPeerId() { return state.lastAttemptedPeerId; },
-      get failures() { return state.failures; },
-      get nextRetryAt() { return state.nextRetryAt; },
+  private rotationSnapshot(state: MutableRotationRecord): VmRecoveryRotationSnapshot {
+    const { handle: _handle, candidatePeerIds, attemptedPeerIds, cleanAbsentPeerIds, ...fields } = state;
+    return Object.freeze({
+      ...fields,
+      candidatePeerIds: Object.freeze([...candidatePeerIds]),
+      attemptedPeerIds: Object.freeze([...attemptedPeerIds]),
+      cleanAbsentPeerIds: Object.freeze([...cleanAbsentPeerIds]),
     });
-    this.views.set(state, view);
-    this.stateByView.set(view, state);
-    return view;
+  }
+
+  private captureState(state: MutableRotationRecord): VmRecoverySlotCapture {
+    return Object.freeze({ handle: state.handle, snapshot: this.rotationSnapshot(state) });
   }
 
   private peekState(target: Target): MutableRotationRecord | undefined {
@@ -153,21 +154,32 @@ export class VmRecoverySlotRegistry {
     return count;
   }
 
-  /** Detached membership for diagnostics and tests; callers cannot mutate ownership. */
-  snapshot(): ReadonlyMap<string, VmReconcileRotationRecord> {
-    const records = new Map<string, VmReconcileRotationRecord>();
-    for (const [key, slot] of this.slots) if (slot.record) records.set(key, this.view(slot.record));
+  /** Detached point-in-time values for diagnostics; snapshots carry no command authority. */
+  snapshot(): ReadonlyMap<string, VmRecoveryRotationSnapshot> {
+    const records = new Map<string, VmRecoveryRotationSnapshot>();
+    for (const [key, slot] of this.slots) if (slot.record) records.set(key, this.rotationSnapshot(slot.record));
     return records;
   }
 
-  /** Pure lookup: target observation/invalidation is an explicit command. */
-  peekRecord(target: Target): VmReconcileRotationRecord | undefined {
+  /** Capture a stable read model and the current generation's command token. */
+  capture(target: Target): VmRecoverySlotCapture | undefined {
     const state = this.peekState(target);
-    return state ? this.view(state) : undefined;
+    return state ? this.captureState(state) : undefined;
   }
 
-  isCurrent(target: Target, record: VmReconcileRotationRecord): boolean {
-    return this.peekRecord(target) === record;
+  peekSnapshot(target: Target): VmRecoveryRotationSnapshot | undefined {
+    const state = this.peekState(target);
+    return state ? this.rotationSnapshot(state) : undefined;
+  }
+
+  read(target: Target, handle: VmRecoverySlotHandle): VmRecoveryRotationSnapshot | undefined {
+    const state = this.peekState(target);
+    return state && state.handle === handle ? this.rotationSnapshot(state) : undefined;
+  }
+
+  isCurrent(target: Target, handle: VmRecoverySlotHandle): boolean {
+    const state = this.peekState(target);
+    return state !== undefined && state.handle === handle;
   }
 
   private prune(key: string, slot: SlotState): void {
@@ -186,8 +198,8 @@ export class VmRecoverySlotRegistry {
     this.prune(key, slot);
   }
 
-  touch(target: Target, record: VmReconcileRotationRecord): void {
-    if (!this.isCurrent(target, record)) return;
+  touch(target: Target, handle: VmRecoverySlotHandle): void {
+    if (!this.isCurrent(target, handle)) return;
     const key = vmRecoverySlotKey(target);
     const slot = this.slots.get(key)!;
     this.slots.delete(key);
@@ -254,7 +266,7 @@ export class VmRecoverySlotRegistry {
     const key = vmRecoverySlotKey(target);
     const slot = this.observedSlot(target);
     if (!slot) return { kind: 'deferred' };
-    if (slot.record) return { kind: 'existing', record: this.view(slot.record) };
+    if (slot.record) return { kind: 'existing', slot: this.captureState(slot.record) };
     if (slot.reservation) return { kind: 'deferred' };
     const hasOpenCapacity = this.occupiedCapacity() < this.maxEntries;
     const donor = hasOpenCapacity ? undefined : this.findDonor(target.localCgId, now);
@@ -294,6 +306,7 @@ export class VmRecoverySlotRegistry {
       if (!admission.active || this.slots.get(key) !== slot
         || slot.reservation?.admission !== admission) return { kind: 'deferred' };
       record = {
+        handle: Symbol('vm-recovery-slot') as VmRecoverySlotHandle,
         localCgId: target.localCgId, onChainCgId: target.onChainCgId, ordinal: target.ordinal,
         fingerprint: slot.fingerprint, phase: 'collecting',
         candidatePeerIds: new Set(params.candidatePeerIds), attemptedPeerIds: new Set(),
@@ -308,9 +321,13 @@ export class VmRecoverySlotRegistry {
         donor.slot.record = undefined;
         donorDetached = true;
       }
-      this.retainRecord(key, this.view(record));
+      this.onRetention('before', key);
+      slot.record = record;
+      this.slots.delete(key);
+      this.slots.set(key, slot);
+      this.onRetention('after', key);
       installed = this.slots.get(key) === slot && slot.record === record;
-      return installed ? { kind: 'admitted', record: this.view(record) } : { kind: 'deferred' };
+      return installed ? { kind: 'admitted', slot: this.captureState(record) } : { kind: 'deferred' };
     } finally {
       if (!installed) {
         if (record && slot.record === record) slot.record = undefined;
@@ -326,16 +343,8 @@ export class VmRecoverySlotRegistry {
     }
   }
 
-  protected retainRecord(key: string, record: VmReconcileRotationRecord): void {
-    const slot = this.slots.get(key);
-    const state = this.stateByView.get(record);
-    if (!state || !slot || slot.record || slot.fingerprint !== record.fingerprint) {
-      throw new Error('VM recovery slot changed before retention');
-    }
-    slot.record = state;
-    this.slots.delete(key);
-    this.slots.set(key, slot);
-  }
+  /** Fault-injection seam around the atomic retention write; state stays private. */
+  protected onRetention(_stage: 'before' | 'after', _key: string): void {}
 
   /** One roster transition for immediate callers, existing owners and delayed reservations. */
   prepare(
@@ -343,7 +352,7 @@ export class VmRecoverySlotRegistry {
     params: AdmissionParams,
     now: number,
     reservation?: VmRecoverySlotAdmissionReservation,
-  ): { readonly record?: VmReconcileRotationRecord; readonly suppressed: boolean } {
+  ): VmRecoveryPreparation {
     const { candidatePeerIds, curatorRosterConfirmed } = params;
     this.observeTarget(target);
     const observed = this.slots.get(vmRecoverySlotKey(target));
@@ -380,8 +389,8 @@ export class VmRecoverySlotRegistry {
       // Partial evidence is different and remains fail-open; drop it so the next
       // non-empty roster starts a genuinely fresh cycle.
       if (record?.phase === 'backoff' && now < record.nextRetryAt) {
-        this.touch(target, this.view(record));
-        return { record: this.view(record), suppressed: true };
+        this.touch(target, record.handle);
+        return { slot: this.captureState(record), suppressed: true };
       }
       this.invalidate(target);
       return { suppressed: false };
@@ -399,7 +408,7 @@ export class VmRecoverySlotRegistry {
         return { suppressed: true };
       }
       return {
-        record: admission.record,
+        slot: admission.slot,
         suppressed: false,
       };
     }
@@ -461,8 +470,8 @@ export class VmRecoverySlotRegistry {
     }
     if (record.phase === 'backoff') {
       if (now < record.nextRetryAt) {
-        this.touch(target, this.view(record));
-        return { record: this.view(record), suppressed: true };
+        this.touch(target, record.handle);
+        return { slot: this.captureState(record), suppressed: true };
       }
       // A deadline only opens a new collection cycle. It never earns another
       // failure/backoff without fresh clean-absence evidence from every peer.
@@ -480,12 +489,12 @@ export class VmRecoverySlotRegistry {
       return { suppressed: false };
     }
 
-    this.touch(target, this.view(record));
-    return { record: this.view(record), suppressed: false };
+    this.touch(target, record.handle);
+    return { slot: this.captureState(record), suppressed: false };
   }
 
   private enterBackoff(target: Target, record: MutableRotationRecord,
-    kind: NonNullable<VmReconcileRotationRecord['backoffKind']>, policy: VmRecoveryRotationPolicy): void {
+    kind: NonNullable<VmRecoveryRotationSnapshot['backoffKind']>, policy: VmRecoveryRotationPolicy): void {
     record.failures += 1;
     const exponentialBackoff = Math.min(
       policy.maxBackoffMs,
@@ -511,12 +520,12 @@ export class VmRecoverySlotRegistry {
     peerId: string | undefined,
     disposition: 'found' | 'clean-absent' | 'incomplete',
     expectedCandidatePeerIds: readonly string[],
-    capturedRecord: VmReconcileRotationRecord,
+    handle: VmRecoverySlotHandle,
     policy: VmRecoveryRotationPolicy,
     unavailablePeerIds: ReadonlySet<string> = new Set(),
   ): void {
-    if (!this.isCurrent(target, capturedRecord)) return;
-    const record = this.stateByView.get(capturedRecord)!;
+    if (!this.isCurrent(target, handle)) return;
+    const record = this.peekState(target)!;
     if (!membershipMatches(
       record.candidatePeerIds,
       expectedCandidatePeerIds,
@@ -554,16 +563,16 @@ export class VmRecoverySlotRegistry {
         this.enterBackoff(target, record, completedBackoffKind, policy);
       }
     }
-    this.touch(target, this.view(record));
+    this.touch(target, record.handle);
   }
 
   prepareBatch(options: VmRecoveryBatchOptions): VmRecoveryBatchPlan {
-    const originals = new Map<OrdinalRecoveryTarget, VmReconcileRotationRecord>();
+    const originals = new Map<OrdinalRecoveryTarget, VmRecoverySlotCapture>();
     const reservations = new Map<OrdinalRecoveryTarget, VmRecoverySlotAdmissionReservation>();
     for (const target of options.targets) {
       this.observeTarget(target);
-      const record = this.peekRecord(target);
-      if (record) originals.set(target, record);
+      const slot = this.capture(target);
+      if (slot) originals.set(target, slot);
     }
     const order = planVmRecoveryAdmission(options.targets, options.admissionCursor, new Set(originals.keys()));
     const initial = order.map(({ target, index }): VmRecoveryPreparedEntry => {
@@ -572,11 +581,11 @@ export class VmRecoverySlotRegistry {
         // Reserving a donor cannot refresh or discard its evidence before the
         // requester's roster commits. Rollback must retain the exact old owner.
         if (this.slots.get(vmRecoverySlotKey(target))?.reservation?.kind === 'donor') {
-          return { index, target, prepared: { record: original, suppressed: false } };
+          return { index, target, prepared: { slot: original, suppressed: false } };
         }
         return { index, target, prepared: this.prepare(target, {
           candidatePeerIds: options.observedCandidatePeerIds,
-          curatorRosterConfirmed: original.curatorRosterConfirmed,
+          curatorRosterConfirmed: original.snapshot.curatorRosterConfirmed,
           collectionDeadlineAt: options.collectionDeadlineAt,
         }, options.now) };
       }
@@ -586,10 +595,10 @@ export class VmRecoverySlotRegistry {
         return { index, target, prepared: { suppressed: false } };
       }
       if (admission.kind === 'existing') {
-        originals.set(target, admission.record);
+        originals.set(target, admission.slot);
         return { index, target, prepared: this.prepare(target, {
           candidatePeerIds: options.observedCandidatePeerIds,
-          curatorRosterConfirmed: admission.record.curatorRosterConfirmed,
+          curatorRosterConfirmed: admission.slot.snapshot.curatorRosterConfirmed,
           collectionDeadlineAt: options.collectionDeadlineAt,
         }, options.now) };
       }
@@ -597,11 +606,11 @@ export class VmRecoverySlotRegistry {
     }).sort((left, right) => left.index - right.index);
     return Object.freeze({
       initiallyEligibleTargets: initial.filter(entry => !entry.prepared.suppressed).map(entry => entry.target),
-      suppressedRecords: initial.flatMap(entry => entry.prepared.record ? [entry.prepared.record] : []),
+      suppressedRecords: initial.flatMap(entry => entry.prepared.slot ? [entry.prepared.slot.snapshot] : []),
       commit: (commitOptions: Parameters<VmRecoveryBatchPlan['commit']>[0]) => {
         const prepared = order.map(({ target, index }): VmRecoveryPreparedEntry => {
           const original = originals.get(target);
-          if (!commitOptions.isCurrent() || (original && !this.isCurrent(target, original))) {
+          if (!commitOptions.isCurrent() || (original && !this.isCurrent(target, original.handle))) {
             reservations.get(target)?.release();
             return { index, target, prepared: { suppressed: true } };
           }
@@ -611,11 +620,11 @@ export class VmRecoverySlotRegistry {
             collectionDeadlineAt: commitOptions.collectionDeadlineAt,
           }, commitOptions.now, reservations.get(target)) };
         });
-        const newlyAdmitted = prepared.filter(entry => entry.prepared.record && !originals.has(entry.target));
+        const newlyAdmitted = prepared.filter(entry => entry.prepared.slot && !originals.has(entry.target));
         const lastAdmitted = [...order].reverse().find(entry => newlyAdmitted.some(candidate => candidate.index === entry.index));
         const eligible = prepared.filter(entry => !entry.prepared.suppressed
-          && (!entry.prepared.record || this.isCurrent(entry.target, entry.prepared.record)))
-          .sort((left, right) => Number(Boolean(right.prepared.record)) - Number(Boolean(left.prepared.record))
+          && (!entry.prepared.slot || this.isCurrent(entry.target, entry.prepared.slot.handle)))
+          .sort((left, right) => Number(Boolean(right.prepared.slot)) - Number(Boolean(left.prepared.slot))
             || left.index - right.index);
         return {
           eligible,

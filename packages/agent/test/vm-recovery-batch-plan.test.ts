@@ -20,8 +20,8 @@ describe('VM recovery batch plan', () => {
       const prepared = registry.prepare(selected, {
         candidatePeerIds: ['old-peer'], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
       }, 0);
-      expect(prepared.record).toBeDefined();
-      registry.settleAttempt(selected, 'old-peer', 'incomplete', ['old-peer'], prepared.record!, {
+      expect(prepared.slot).toBeDefined();
+      registry.settleAttempt(selected, 'old-peer', 'incomplete', ['old-peer'], prepared.slot!.handle, {
         now: 1, getLocalPeerId: () => 'local', baseBackoffMs: 10, maxBackoffMs: 100,
       });
     }
@@ -35,8 +35,8 @@ describe('VM recovery batch plan', () => {
       now: 3, collectionDeadlineAt: 103, isCurrent: () => !scope.signal.aborted,
     });
     expect(committed.eligible).toHaveLength(1);
-    expect(committed.eligible[0]!.prepared.record).toMatchObject({
-      phase: 'collecting', candidatePeerIds: new Set(['new-peer']),
+    expect(committed.eligible[0]!.prepared.slot?.snapshot).toMatchObject({
+      phase: 'collecting', candidatePeerIds: ['new-peer'],
       attemptedPeerIds: new Set(), cleanAbsentPeerIds: new Set(),
       curatorRosterConfirmed: true, collectionDeadlineAt: 103, failures: 0, nextRetryAt: 0,
     });
@@ -60,7 +60,7 @@ describe('VM recovery batch plan', () => {
     });
     expect(committed.eligible).toEqual([{ index: 0, target: selected, prepared: { suppressed: false } }]);
     expect(registry.recordCount).toBe(0);
-    expect(registry.peekRecord(selected)).toBeUndefined();
+    expect(registry.peekSnapshot(selected)).toBeUndefined();
     scope.release();
   });
 
@@ -94,8 +94,8 @@ describe('VM recovery batch plan', () => {
 
     expect(committed.eligible.map(({ target: entry }) => entry.ordinal)).toEqual([1]);
     expect(committed.nextAdmissionCursor).toBe(0);
-    expect(registry.peekRecord(donor)).toBeUndefined();
-    expect(registry.peekRecord(waiting)?.candidatePeerIds).toEqual(new Set(['new-peer']));
+    expect(registry.peekSnapshot(donor)).toBeUndefined();
+    expect(registry.peekSnapshot(waiting)?.candidatePeerIds).toEqual(['new-peer']);
     expect(registry.recordCount).toBe(1);
     scope.release();
   });

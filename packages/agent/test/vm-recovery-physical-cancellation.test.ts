@@ -3,7 +3,7 @@ import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@orig
 import { OxigraphStore, quadsToNQuads, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import type { DKGAgent } from '../src/index.js';
-import type { ContextGraphSub, DKGAgentConfig, VmReconcileRotationRecord } from '../src/dkg-agent-types.js';
+import type { ContextGraphSub, DKGAgentConfig, VmRecoverySlotCapture } from '../src/dkg-agent-types.js';
 import type { OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
 import type { Messenger } from '../src/p2p/messenger.js';
 import type { SyncVerifyWorker } from '../src/sync-verify-worker.js';
@@ -24,7 +24,7 @@ interface PhysicalHost extends VmRecoveryHostInternals {
   subscribedContextGraphs: Map<string, ContextGraphSub>;
   bindSubscriptionOnChainId(localCgId: string, subscription: ContextGraphSub, onChainId: string): void;
   prepareVmReconcileRotationTarget(target: OrdinalRecoveryTarget, peers: readonly string[], now: number): {
-    record?: VmReconcileRotationRecord; suppressed: boolean;
+    slot?: VmRecoverySlotCapture; suppressed: boolean;
   };
   closeVmReconcileRotationState(): void;
 }

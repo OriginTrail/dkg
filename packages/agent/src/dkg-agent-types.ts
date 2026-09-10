@@ -887,7 +887,7 @@ export interface VmReconcileNegativeRecord {
   cleanMissPeerIds?: string[];
 }
 
-export type { VmReconcileRotationRecord } from './internal/vm-recovery-slot-registry.js';
+export type { VmRecoveryRotationSnapshot, VmRecoverySlotHandle, VmRecoverySlotCapture, VmRecoveryPreparation } from './internal/vm-recovery-slot-registry.js';
 
 export interface ContextGraphSubscriptionRehydrationStatus extends ContextGraphDormancyProjection {
   /** Whether persisted subscription activation was enabled for this boot. */
