@@ -39,6 +39,10 @@ interface ExpiredOperation {
   roots: string[];
   scope: { kind: 'legacy' } | { kind: 'graph-v2'; kaUal?: string; snapshotGraph?: string };
 }
+type ExpiredOperationSelector =
+  | { readonly kind: 'batch'; readonly limit: number }
+  | { readonly kind: 'uris'; readonly uris: readonly string[] };
+
 interface CleanupOutcome { triplesDeleted: number; metadataDeleted: number }
 interface CleanupBatchResult { outcomes: CleanupOutcome[]; errors: unknown[] }
 
@@ -74,7 +78,7 @@ export async function runSwmExpiryCleanup(
       const target = targets[visited]!;
       let madeProgress = false;
       while (!isClosed() && batches < SWM_CLEANUP_MAX_BATCHES) {
-        const operations = await loadExpiredBatch(store, target.metaGraph, cutoff);
+        const operations = await loadExpiredOperations(store, target.metaGraph, cutoff, { kind: 'batch', limit: SWM_CLEANUP_BATCH_SIZE });
         if (isClosed() || operations.length === 0) { madeProgress = false; break; }
         batches++;
         // Each operation rediscovers its graph family after acquiring its own
@@ -118,43 +122,43 @@ export async function runSwmExpiryCleanup(
   return result;
 }
 
-/** Limit distinct operations before expanding their roots and scope metadata. */
-async function loadExpiredBatch(store: TripleStore, metaGraph: string, cutoff: string): Promise<ExpiredOperation[]> {
-  const result = await store.query(`SELECT ?op ?re ?scopeVersion ?kaUal ?snapshotGraph WHERE {
-    { SELECT DISTINCT ?op WHERE {
-      GRAPH <${metaGraph}> {
-        ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
-        ?op <http://dkg.io/ontology/publishedAt> ?ts .
-        FILTER(?ts < "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
-      }
-    } LIMIT ${SWM_CLEANUP_BATCH_SIZE} }
-    GRAPH <${metaGraph}> {
-      OPTIONAL { ?op <http://dkg.io/ontology/rootEntity> ?re }
-      OPTIONAL {
-        ?op <http://dkg.io/ontology/contentScopeVersion> ?scopeVersion .
-        OPTIONAL { ?op <http://dkg.io/ontology/kaUal> ?kaUal }
-        OPTIONAL { ?op <http://dkg.io/ontology/publicSnapshotGraph> ?snapshotGraph }
-      }
-    }
-  }`, { source: 'agent.swmCleanup.expiredOperations' });
-  return decodeExpiredOperations(result);
-}
-
-/** Revalidate one lock-protected hydrated page immediately before deletion. */
+/** Discover or revalidate distinct expired identities, then hydrate the same operation model. */
 async function loadExpiredOperations(
   store: TripleStore,
   metaGraph: string,
   cutoff: string,
-  operationUris: readonly string[],
+  selector: ExpiredOperationSelector,
 ): Promise<ExpiredOperation[]> {
-  const safeUris = operationUris.filter(isSafeIri);
-  if (safeUris.length === 0) return [];
+  let identityFilter: string;
+  let limit: string;
+  let source: string;
+  switch (selector.kind) {
+    case 'batch':
+      identityFilter = '';
+      limit = `LIMIT ${selector.limit}`;
+      source = 'agent.swmCleanup.expiredOperations';
+      break;
+    case 'uris': {
+      const safeUris = [...new Set(selector.uris.filter(isSafeIri))];
+      if (safeUris.length === 0) return [];
+      identityFilter = `VALUES ?op { ${safeUris.map(uri => `<${uri}>`).join(' ')} }`;
+      limit = '';
+      source = 'agent.swmCleanup.revalidateOperation';
+      break;
+    }
+  }
+  // Bound the identity set before expanding roots or optional V2 fields.
+  // Revalidation uses this exact projection while holding each operation's locks.
   const result = await store.query(`SELECT ?op ?re ?scopeVersion ?kaUal ?snapshotGraph WHERE {
+    { SELECT DISTINCT ?op WHERE {
+      GRAPH <${metaGraph}> {
+        ${identityFilter}
+        ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
+        ?op <http://dkg.io/ontology/publishedAt> ?ts .
+        FILTER(?ts < "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+      }
+    } ${limit} }
     GRAPH <${metaGraph}> {
-      VALUES ?op { ${safeUris.map(uri => `<${uri}>`).join(' ')} }
-      ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
-      ?op <http://dkg.io/ontology/publishedAt> ?ts .
-      FILTER(?ts < "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
       OPTIONAL { ?op <http://dkg.io/ontology/rootEntity> ?re }
       OPTIONAL {
         ?op <http://dkg.io/ontology/contentScopeVersion> ?scopeVersion .
@@ -162,7 +166,7 @@ async function loadExpiredOperations(
         OPTIONAL { ?op <http://dkg.io/ontology/publicSnapshotGraph> ?snapshotGraph }
       }
     }
-  }`, { source: 'agent.swmCleanup.revalidateOperation' });
+  }`, { source });
   return decodeExpiredOperations(result);
 }
 
@@ -217,7 +221,7 @@ async function cleanupExpiredBatch(
       // an older TTL must not mutate rows after that boundary is invalidated.
       if (context.isClosed()) return undefined;
       const [current] = await loadExpiredOperations(
-        context.store, target.metaGraph, cutoff, [candidate.uri],
+        context.store, target.metaGraph, cutoff, { kind: 'uris', uris: [candidate.uri] },
       );
       if (context.isClosed() || !current || !sameExpiredOperation(current, candidate)) {
         return undefined;

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
 import { DEFAULT_SWM_TTL_MS } from '../src/dkg-agent-constants.js';
 import { runSwmExpiryCleanup } from '../src/swm-expiry-cleanup.js';
@@ -169,24 +170,61 @@ it('revalidates each operation independently after bounded page discovery', asyn
     options?.source === 'agent.swmCleanup.revalidateOperation')).toHaveLength(501);
 });
 
-it('hydrates every root in a real-store batch without duplicating operation deletion', async () => {
+it.each([false, true])('hydrates the same complete operation during discovery and revalidation (V2=%s)', async graphV2 => {
   const agent = await DKGAgent.create({ name: 'expiry-multi-root', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 60_000 });
   trackSwmExpiryAgent(agent);
   const { store } = agent as unknown as SwmExpiryTestInternals;
   const dkg = 'http://dkg.io/ontology/';
   const op = 'urn:expiry:multi-root';
+  const kaUal = 'did:dkg:hardhat1:31337/0x1111111111111111111111111111111111111111/1';
+  const snapshotGraph = 'urn:expiry:multi-root:snapshot';
   await store.insert([
     { subject: op, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: `${dkg}WorkspaceOperation`, graph: META },
     { subject: op, predicate: `${dkg}publishedAt`, object: '"2020-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>', graph: META },
+    { subject: op, predicate: `${dkg}publishedAt`, object: '"2020-01-02T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>', graph: META },
+    ...(graphV2 ? [
+      { subject: op, predicate: `${dkg}contentScopeVersion`, object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: META },
+      { subject: op, predicate: `${dkg}kaUal`, object: kaUal, graph: META },
+      { subject: op, predicate: `${dkg}publicSnapshotGraph`, object: snapshotGraph, graph: META },
+      { subject: 'urn:root:a', predicate: 'urn:value', object: '"snapshot"', graph: snapshotGraph },
+    ] : []),
     ...['urn:root:a', 'urn:root:b'].flatMap(root => [
       { subject: op, predicate: `${dkg}rootEntity`, object: root, graph: META },
       { subject: root, predicate: 'urn:value', object: '"expired"', graph: WS },
     ]),
   ]);
+  const query = store.query.bind(store);
+  const hydrated = new Map<string, Record<string, string>[]>();
+  vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+    const result = await query(sparql, options);
+    if ((options?.source === 'agent.swmCleanup.expiredOperations' || options?.source === 'agent.swmCleanup.revalidateOperation')
+      && result.type === 'bindings' && result.bindings.length > 0) {
+      hydrated.set(options.source, [...result.bindings].sort((a, b) => a.re.localeCompare(b.re)));
+    }
+    return result;
+  });
   const remove = vi.spyOn(store, 'deleteByPattern');
-  expect(await agent.cleanupExpiredSharedMemory()).toBe(6);
+  expect(await agent.cleanupExpiredSharedMemory()).toBe(graphV2 ? 11 : 7);
+  const discovered = hydrated.get('agent.swmCleanup.expiredOperations');
+  expect(discovered).toHaveLength(2);
+  expect(hydrated.get('agent.swmCleanup.revalidateOperation')).toEqual(discovered);
+  expect(discovered?.map(row => row.re)).toEqual(['urn:root:a', 'urn:root:b']);
+  if (graphV2) {
+    expect(discovered).toEqual(expect.arrayContaining([expect.objectContaining({ scopeVersion: expect.any(String), kaUal, snapshotGraph })]));
+    expect(await query(`SELECT ?s WHERE { GRAPH <${snapshotGraph}> { ?s ?p ?o } }`)).toMatchObject({ bindings: [] });
+  }
   expect(remove.mock.calls.filter(([pattern]) => pattern.subject === op)).toHaveLength(1);
   expect(await store.query(`SELECT ?s WHERE { GRAPH <${WS}> { ?s ?p ?o } }`)).toMatchObject({ bindings: [] });
+});
+
+it('does not interpolate an unsafe discovered operation URI into revalidation', async () => {
+  const f = await createSwmExpiryFixture(1);
+  vi.mocked(f.store.query).mockResolvedValue({ type: 'bindings', bindings: [{ op: 'urn:unsafe> } UNION { ?s ?p ?o', re: 'urn:expiry:root' }] });
+  expect(await f.agent.cleanupExpiredSharedMemory()).toBe(0);
+  expect(f.operations.size).toBe(1);
+  expect(vi.mocked(f.store.query).mock.calls.some(([, options]) => options?.source === 'agent.swmCleanup.expiredOperations')).toBe(true);
+  expect(vi.mocked(f.store.query).mock.calls.some(([, options]) => options?.source === 'agent.swmCleanup.revalidateOperation')).toBe(false);
+  expect(f.store.deleteByPattern).not.toHaveBeenCalled();
 });
 
 
