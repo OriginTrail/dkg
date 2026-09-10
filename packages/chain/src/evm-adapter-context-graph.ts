@@ -21,9 +21,9 @@ import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import {
-  contextGraphAuthorityHistoryCacheFor,
   resolveContextGraphAuthorityHistory,
   type ContextGraphAuthorityHistoryEvent,
+  type ContextGraphAuthorityHistoryEventQuery,
 } from './context-graph-authority-history.js';
 
 type ContextGraphRegistryScanPlan =
@@ -929,7 +929,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           (...args: unknown[]) => ethers.DeferredTopicFilter
         >;
         const contractAddress = (await contract.getAddress()).toLowerCase();
-        const cache = contextGraphAuthorityHistoryCacheFor(this);
+        const cache = this.contextGraphAuthorityHistory;
         const cacheKey = `${contractAddress}:${contextGraphId.toString(10)}`;
         const authorityFilters = new Map<string, ethers.DeferredTopicFilter>();
         const [current, historyResolution] = await Promise.all([
@@ -952,29 +952,39 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             readBlockHash: async (blockNumber) => (
               (await provider.getBlock(blockNumber))?.hash ?? null
             ),
-            readEvents: async (name, args, fromBlock, toBlock) => {
+            readEvents: async (query: ContextGraphAuthorityHistoryEventQuery, fromBlock, toBlock) => {
+              const { name } = query;
               let filter = authorityFilters.get(name);
               if (filter === undefined) {
-                filter = filters[name]!(...args);
+                filter = name === 'Transfer'
+                  ? filters[name]!(null, null, query.contextGraphId)
+                  : filters[name]!(query.contextGraphId);
                 authorityFilters.set(name, filter);
               }
-              return contract.queryFilter(filter, fromBlock, toBlock) as Promise<
-                readonly ContextGraphAuthorityHistoryEvent[]
-              >;
-            },
-            isOwnershipTransfer: (event) => {
-              const transfer = event as ethers.EventLog;
-              const from = String(transfer.args.from ?? transfer.args[0]).toLowerCase();
-              const to = String(transfer.args.to ?? transfer.args[1]).toLowerCase();
-              return ethers.isAddress(from)
-                && ethers.isAddress(to)
-                && from !== ethers.ZeroAddress
-                && to !== ethers.ZeroAddress
-                && from !== to;
-            },
-            creationNameHash: (event) => {
-              const created = event as ethers.EventLog;
-              return String(created.args[2]).toLowerCase();
+              const rawEvents = await contract.queryFilter(filter, fromBlock, toBlock);
+              const normalized: ContextGraphAuthorityHistoryEvent[] = [];
+              for (const rawEvent of rawEvents) {
+                const event = rawEvent as ethers.EventLog;
+                if (name === 'Transfer') {
+                  const from = String(event.args.from ?? event.args[0]).toLowerCase();
+                  const to = String(event.args.to ?? event.args[1]).toLowerCase();
+                  if (!ethers.isAddress(from)
+                    || !ethers.isAddress(to)
+                    || from === ethers.ZeroAddress
+                    || to === ethers.ZeroAddress
+                    || from === to) continue;
+                }
+                normalized.push({
+                  name,
+                  blockNumber: event.blockNumber,
+                  blockHash: event.blockHash,
+                  index: event.index,
+                  ...(name === 'ContextGraphCreated'
+                    ? { nameHash: String(event.args.nameHash ?? event.args[2]).toLowerCase() }
+                    : {}),
+                });
+              }
+              return normalized;
             },
           }),
         ]);

@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { BoundedLruCache } from '@origintrail-official/dkg-core';
+
 export const CONTEXT_GRAPH_AUTHORITY_HISTORY_MAX_ENTRIES = 1_024;
 
 export interface ContextGraphAuthorityHistoryEvent {
+  readonly name: ContextGraphAuthorityHistoryEventName;
   readonly blockNumber: number;
   readonly blockHash: string;
   readonly index: number;
-  readonly args?: readonly unknown[] | Record<string, unknown>;
+  /** Present only on the normalized creation event. */
+  readonly nameHash?: string;
 }
 
 export interface ContextGraphAuthorityHistoryState {
@@ -29,9 +33,14 @@ export type ContextGraphAuthorityHistoryEventName =
   | 'AgentParticipantAdded'
   | 'AgentParticipantRemoved';
 
+export interface ContextGraphAuthorityHistoryEventQuery {
+  readonly name: ContextGraphAuthorityHistoryEventName;
+  readonly contextGraphId: bigint;
+}
+
 /** Bounded LRU storage for finalized per-contract, per-graph history states. */
 export class ContextGraphAuthorityHistoryCache {
-  readonly #entries = new Map<string, ContextGraphAuthorityHistoryState>();
+  readonly #entries: BoundedLruCache<string, ContextGraphAuthorityHistoryState>;
 
   constructor(
     readonly maxEntries: number = CONTEXT_GRAPH_AUTHORITY_HISTORY_MAX_ENTRIES,
@@ -39,14 +48,11 @@ export class ContextGraphAuthorityHistoryCache {
     if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) {
       throw new Error('Context Graph authority history cache must retain at least one entry');
     }
+    this.#entries = new BoundedLruCache(maxEntries);
   }
 
   get(key: string): ContextGraphAuthorityHistoryState | undefined {
-    const value = this.#entries.get(key);
-    if (value === undefined) return undefined;
-    this.#entries.delete(key);
-    this.#entries.set(key, value);
-    return value;
+    return this.#entries.get(key);
   }
 
   delete(key: string): void {
@@ -54,13 +60,7 @@ export class ContextGraphAuthorityHistoryCache {
   }
 
   set(key: string, value: ContextGraphAuthorityHistoryState): void {
-    this.#entries.delete(key);
     this.#entries.set(key, value);
-    while (this.#entries.size > this.maxEntries) {
-      const oldest = this.#entries.keys().next().value as string | undefined;
-      if (oldest === undefined) break;
-      this.#entries.delete(oldest);
-    }
   }
 
   clear(): void {
@@ -70,24 +70,6 @@ export class ContextGraphAuthorityHistoryCache {
   get size(): number {
     return this.#entries.size;
   }
-}
-
-const adapterAuthorityHistoryCaches = new WeakMap<object, ContextGraphAuthorityHistoryCache>();
-
-export function contextGraphAuthorityHistoryCacheFor(
-  owner: object,
-): ContextGraphAuthorityHistoryCache {
-  let cache = adapterAuthorityHistoryCaches.get(owner);
-  if (cache === undefined) {
-    cache = new ContextGraphAuthorityHistoryCache();
-    adapterAuthorityHistoryCaches.set(owner, cache);
-  }
-  return cache;
-}
-
-export function invalidateContextGraphAuthorityHistory(owner: object): void {
-  adapterAuthorityHistoryCaches.get(owner)?.clear();
-  adapterAuthorityHistoryCaches.delete(owner);
 }
 
 export interface ResolveContextGraphAuthorityHistoryInput {
@@ -100,13 +82,10 @@ export interface ResolveContextGraphAuthorityHistoryInput {
   readonly loadColdFromBlock: () => Promise<number>;
   readonly readBlockHash: (blockNumber: number) => Promise<string | null>;
   readonly readEvents: (
-    name: ContextGraphAuthorityHistoryEventName,
-    args: readonly unknown[],
+    query: ContextGraphAuthorityHistoryEventQuery,
     fromBlock: number,
     toBlock: number,
   ) => Promise<readonly ContextGraphAuthorityHistoryEvent[]>;
-  readonly isOwnershipTransfer: (event: ContextGraphAuthorityHistoryEvent) => boolean;
-  readonly creationNameHash: (event: ContextGraphAuthorityHistoryEvent) => string;
 }
 
 export interface ContextGraphAuthorityHistoryResolution {
@@ -146,24 +125,23 @@ export async function resolveContextGraphAuthorityHistory(
     : previous.throughBlockNumber + 1;
   const read = async (
     name: ContextGraphAuthorityHistoryEventName,
-    args: readonly unknown[],
   ): Promise<ContextGraphAuthorityHistoryEvent[]> => {
     const events: ContextGraphAuthorityHistoryEvent[] = [];
     for (let lo = fromBlock; lo <= input.finalized.number; lo += input.pageSize) {
       input.signal?.throwIfAborted();
       const hi = Math.min(lo + input.pageSize - 1, input.finalized.number);
-      events.push(...await input.readEvents(name, args, lo, hi));
+      events.push(...await input.readEvents({ name, contextGraphId: input.contextGraphId }, lo, hi));
     }
     return events;
   };
   const [created, transfers, publishPolicy, publishAuthority, participantAdds,
     participantRemoves] = await Promise.all([
-    cold ? read('ContextGraphCreated', [input.contextGraphId]) : Promise.resolve([]),
-    read('Transfer', [null, null, input.contextGraphId]),
-    read('PublishPolicyUpdated', [input.contextGraphId]),
-    read('PublishAuthorityUpdated', [input.contextGraphId]),
-    read('AgentParticipantAdded', [input.contextGraphId]),
-    read('AgentParticipantRemoved', [input.contextGraphId]),
+    cold ? read('ContextGraphCreated') : Promise.resolve([]),
+    read('Transfer'),
+    read('PublishPolicyUpdated'),
+    read('PublishAuthorityUpdated'),
+    read('AgentParticipantAdded'),
+    read('AgentParticipantRemoved'),
   ]);
   if (cold && created.length !== 1) {
     throw new Error(
@@ -174,10 +152,9 @@ export async function resolveContextGraphAuthorityHistory(
   if (stableHash?.toLowerCase() !== finalizedHash) {
     throw new Error('finalized Context Graph authority anchor changed during resolution');
   }
-  const ownershipTransfers = transfers.filter(input.isOwnershipTransfer);
   const policySource = latestEvent([
     ...created,
-    ...ownershipTransfers,
+    ...transfers,
     ...publishPolicy,
     ...publishAuthority,
   ]);
@@ -188,11 +165,15 @@ export async function resolveContextGraphAuthorityHistory(
   const sourceBlockNumber = policySource?.blockNumber ?? previous!.sourceBlockNumber;
   const sourceBlockHash = policySource?.blockHash ?? previous!.sourceBlockHash;
   const sourceLogIndex = policySource?.index ?? previous!.sourceLogIndex;
-  const ownershipDelta = ownershipTransfers.length;
+  const creationNameHash = creation?.nameHash;
+  if (previous === undefined && !creationNameHash) {
+    throw new Error(`Context Graph ${input.contextGraphId.toString()} creation event has no name hash`);
+  }
+  const ownershipDelta = transfers.length;
   const state: ContextGraphAuthorityHistoryState = Object.freeze({
     throughBlockNumber: input.finalized.number,
     throughBlockHash: finalizedHash,
-    nameHash: previous?.nameHash ?? input.creationNameHash(creation!),
+    nameHash: previous?.nameHash ?? creationNameHash!,
     ownershipEra: (previous?.ownershipEra ?? 0) + ownershipDelta,
     policyVersion: (previous?.policyVersion ?? 0)
       + ownershipDelta + publishPolicy.length + publishAuthority.length,
