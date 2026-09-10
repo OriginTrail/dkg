@@ -46,6 +46,10 @@ const PCA_RPC_TOKEN_CALL_SELECTORS = new Set([
   '0x70a08231', // balanceOf(address)
   '0xdd62ed3e', // allowance(address,address)
 ]);
+const PCA_RPC_IDENTITY_STORAGE_CALL_SELECTORS = new Set([
+  ethers.id('keyHasPurpose(uint72,bytes32,uint256)').slice(0, 10),
+  ethers.id('getKeysByPurpose(uint72,uint256)').slice(0, 10),
+]);
 const PCA_RPC_MAX_BATCH = 20;
 const FEATURE_UNAVAILABLE_503 = {
   error:
@@ -104,7 +108,10 @@ function supportsPcaRpcBridge(agent: RequestContext['agent']): boolean {
   return typeof candidate.requestPublishingConvictionRpc === 'function';
 }
 
-function pcaRpcEthCallError(params: unknown[] | undefined, contracts: Pick<PcaContracts, 'nft' | 'token'>): string | null {
+function pcaRpcEthCallError(
+  params: unknown[] | undefined,
+  contracts: Pick<PcaContracts, 'nft' | 'token' | 'identityStorage'>,
+): string | null {
   if (!Array.isArray(params) || params.length === 0) return 'PCA RPC eth_call params must include a transaction object';
   const tx = params[0];
   if (!tx || typeof tx !== 'object' || Array.isArray(tx)) return 'PCA RPC eth_call params must include a transaction object';
@@ -115,16 +122,25 @@ function pcaRpcEthCallError(params: unknown[] | undefined, contracts: Pick<PcaCo
   let target: string;
   let nft: string;
   let token: string;
+  let identityStorage: string | null = null;
   try {
     target = ethers.getAddress(to).toLowerCase();
     nft = ethers.getAddress(contracts.nft).toLowerCase();
     token = ethers.getAddress(contracts.token).toLowerCase();
+    identityStorage = contracts.identityStorage
+      ? ethers.getAddress(contracts.identityStorage).toLowerCase()
+      : null;
   } catch {
     return 'PCA RPC eth_call target address is invalid';
   }
   const selector = data.slice(0, 10).toLowerCase();
   if (target === nft && PCA_RPC_NFT_CALL_SELECTORS.has(selector)) return null;
   if (target === token && PCA_RPC_TOKEN_CALL_SELECTORS.has(selector)) return null;
+  if (
+    identityStorage != null &&
+    target === identityStorage &&
+    PCA_RPC_IDENTITY_STORAGE_CALL_SELECTORS.has(selector)
+  ) return null;
   return 'PCA RPC eth_call target or selector is not allowed';
 }
 

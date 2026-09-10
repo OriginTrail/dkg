@@ -3192,6 +3192,28 @@ export const fetchWalletsBalances = () =>
     symbol?: string;
     error?: string;
   }>('/api/wallets/balances');
+
+export interface OperationalWalletSnapshot {
+  identityId: string;
+  hasProfile: boolean;
+  adminKeyConfigured: boolean;
+  canManage: boolean;
+  wallets: Array<{
+    address: string;
+    isAdmin: boolean;
+    isPrimary: boolean;
+    registered: boolean | null;
+  }>;
+}
+
+/**
+ * Local wallet addresses annotated with their on-chain operational-key state.
+ * This endpoint never returns private keys. Browser-signed identity management
+ * deliberately uses only this read endpoint; writes go straight through the
+ * connected hardware/browser wallet.
+ */
+export const fetchOperationalWallets = () =>
+  get<OperationalWalletSnapshot>('/api/operational-wallets');
 export const fetchRpcHealth = () =>
   get<{
     ok: boolean;

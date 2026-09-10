@@ -1,0 +1,122 @@
+/* Hardware-wallet management for the node's on-chain identity keys. */
+
+.v10-identity-wallets {
+  padding: 18px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+}
+
+.v10-identity-wallet-counts,
+.v10-identity-wallet-signer,
+.v10-identity-wallet-actions,
+.v10-identity-wallet-row-actions,
+.v10-identity-wallet-confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.v10-identity-wallet-signer {
+  justify-content: space-between;
+  padding: 10px;
+  margin-bottom: 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-surface);
+}
+
+.v10-identity-wallet-signer .v10-pca-wallet-connect,
+.v10-identity-wallet-signer .v10-pca-wallet-pill-wrap {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.v10-identity-wallet-known {
+  margin: 14px 0;
+}
+
+.v10-identity-wallet-subtitle {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.v10-identity-wallet-known .v10-pca-wallet-list {
+  max-width: none;
+}
+
+.v10-identity-wallet-row-actions {
+  justify-content: flex-end;
+}
+
+.v10-identity-wallet-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.v10-identity-wallet-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-surface);
+}
+
+.v10-identity-wallet-card h4 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.v10-identity-wallet-card p,
+.v10-identity-wallet-card label {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-tertiary);
+}
+
+.v10-identity-wallet-card label {
+  margin-top: auto;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.v10-identity-wallet-card .v10-form-input {
+  width: 100%;
+}
+
+.v10-identity-wallet-confirm {
+  margin-top: 12px;
+}
+
+.v10-identity-wallet-confirm > span:first-child {
+  flex: 1 1 360px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .v10-identity-wallet-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .v10-identity-wallet-signer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .v10-identity-wallet-known .v10-pca-wallet-trailing {
+    width: 100%;
+    margin-left: 0;
+  }
+}
