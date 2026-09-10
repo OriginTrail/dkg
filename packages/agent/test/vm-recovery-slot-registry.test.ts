@@ -11,6 +11,19 @@ function recordFor(registry: VmRecoverySlotRegistry, value = target): VmReconcil
 }
 
 describe('active VM recovery slot ownership', () => {
+  it('keeps snapshot membership fixed while later reads reflect slot transitions', () => {
+    const registry = new VmRecoverySlotRegistry();
+    const empty = registry.snapshot();
+    const record = recordFor(registry);
+    expect(registry.install(record, 0, 1)).toBe(true);
+    const installed = registry.snapshot();
+    expect(empty.size).toBe(0);
+    expect([...installed.values()]).toEqual([record]);
+    registry.complete(target);
+    expect([...installed.values()]).toEqual([record]);
+    expect(registry.snapshot().size).toBe(0);
+  });
+
   it('retires evidence on completion while preserving cancellation ownership until physical release', () => {
     const registry = new VmRecoverySlotRegistry();
     const record = recordFor(registry);
