@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  contextGraphAppTopic,
+  contextGraphFinalizationTopic,
+  contextGraphPublishTopic,
+  contextGraphUpdateTopic,
+} from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
 import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
 import { activatePersistedContextGraphSubscription } from
@@ -10,6 +16,26 @@ const mockLivePolicy = (agent: DKGAgent, accessPolicy: 0 | 1) =>
     kind: 'available',
     accessPolicy,
   });
+
+class ActivationTestGossip {
+  readonly subscribed = new Set<string>();
+
+  subscribe(topic: string): void {
+    this.subscribed.add(topic);
+  }
+
+  unsubscribe(topic: string): void {
+    this.subscribed.delete(topic);
+  }
+
+  onMessage(): void {}
+
+  async publish(): Promise<void> {}
+
+  getSubscribers(): string[] {
+    return [];
+  }
+}
 
 describe('Context Graph subscription authority retry', () => {
   let agent: DKGAgent | null = null;
@@ -69,6 +95,57 @@ describe('Context Graph subscription authority retry', () => {
     expect(subscriptions.get(contextGraphId)).toMatchObject({ subscribed: true });
     expect([...syncScope]).toEqual([contextGraphId]);
     expect([...gossipHandlers]).toEqual([contextGraphId]);
+  });
+
+  it('rolls back real agent sync and gossip effects after post-subscribe failure', async () => {
+    const contextGraphId = 'persisted-agent-network-rollback';
+    const row = {
+      id: contextGraphId,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+    };
+    agent = await DKGAgent.create({
+      name: 'PrivateReadPersistedAgentNetworkRollback',
+      chainAdapter: new MockChainAdapter(),
+      rfc64CatalogActivation: { enabled: false },
+    });
+    const gossip = new ActivationTestGossip();
+    (agent as unknown as { gossip: ActivationTestGossip }).gossip = gossip;
+    const topics = [
+      contextGraphPublishTopic(contextGraphId),
+      contextGraphAppTopic(contextGraphId),
+      contextGraphUpdateTopic(contextGraphId),
+      contextGraphFinalizationTopic(contextGraphId),
+    ];
+    let failAfterSubscribe = true;
+    vi.spyOn(agent, 'persistLocalNodeMembership').mockImplementation(() => {
+      if (failAfterSubscribe) {
+        failAfterSubscribe = false;
+        throw new Error('membership projection failed after gossip installation');
+      }
+    });
+
+    await expect(agent.activatePersistedContextGraphSubscriptionRecord(row))
+      .rejects.toThrow('membership projection failed after gossip installation');
+    expect(agent.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);
+    expect(agent.getSyncContextGraphIds()).not.toContain(contextGraphId);
+    expect(topics.every((topic) => !gossip.subscribed.has(topic))).toBe(true);
+    expect((agent as unknown as { gossipRegistered: Set<string> })
+      .gossipRegistered.has(contextGraphId)).toBe(false);
+
+    await expect(agent.activatePersistedContextGraphSubscriptionRecord(row))
+      .resolves.toMatchObject({ subscribed: true });
+    expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+      subscribed: true,
+      syncMode: 'always-on',
+    });
+    expect(agent.getSyncContextGraphIds()).toContain(contextGraphId);
+    expect(topics.every((topic) => gossip.subscribed.has(topic))).toBe(true);
+    expect((agent as unknown as { gossipRegistered: Set<string> })
+      .gossipRegistered.has(contextGraphId)).toBe(true);
   });
 
   it('retries a cold persisted binding after startup and restores the subscription', async () => {

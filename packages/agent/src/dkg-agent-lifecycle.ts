@@ -4250,10 +4250,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         requestWhileRunning: 'drop',
         runPass: async (signal) => {
           await this.retryUnavailableContextGraphSubscriptionAuthorities(signal);
-          if (!this.getContextGraphSubscriptionRehydrationStatus()
-            ?.dormantReasons.authorityUnavailable.length) {
-            authorityRecovery.pause();
-          }
+          return this.getContextGraphSubscriptionRehydrationStatus()
+            ?.dormantReasons.authorityUnavailable.length
+            ? 'rearm'
+            : 'idle';
         },
         onError: (error) => {
           this.log.warn(

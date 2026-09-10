@@ -76,15 +76,14 @@ describe('coalescing recurring task', () => {
     await runner.close();
   });
 
-  it('lets the workload owner explicitly pause periodic rearming', async () => {
+  it('lets a pass retire periodic rearming until a new explicit request', async () => {
     vi.useFakeTimers();
     let passes = 0;
-    let runner: CoalescingRecurringTask;
-    runner = new CoalescingRecurringTask({
+    const runner = new CoalescingRecurringTask({
       retryIntervalMs: 1_000,
       runPass: async () => {
         passes += 1;
-        runner.pause();
+        return 'idle';
       },
       onError: () => undefined,
       closingMessage: 'test closing',
@@ -100,6 +99,8 @@ describe('coalescing recurring task', () => {
 
     expect(runner.request()).toBe(true);
     await runner.whenIdle();
+    expect(passes).toBe(2);
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(passes).toBe(2);
     await runner.close();
   });
