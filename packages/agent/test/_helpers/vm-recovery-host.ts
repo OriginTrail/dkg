@@ -8,7 +8,7 @@ import type {
 } from '../../src/chain-reconciler.js';
 import type { CuratorPeerIdsResolution } from '../../src/dkg-agent-lifecycle.js';
 import type { VmReconcileRotationRecord } from '../../src/dkg-agent-types.js';
-import type { VmRecoverySlotRegistry } from '../../src/internal/vm-recovery-slot-registry.js';
+import { VmRecoverySlotRegistry } from '../../src/internal/vm-recovery-slot-registry.js';
 import { DKGAgent } from '../../src/index.js';
 import {
   exactAssetUalsForSelection,
@@ -146,6 +146,8 @@ export interface VmRecoveryHostHarnessOptions<TTarget extends OrdinalRecoveryTar
   readonly peers: readonly string[];
   readonly targetCount: number;
   readonly targetForOrdinal: (ordinal: number) => TTarget;
+  /** Override the production registry capacity for focused admission tests. */
+  readonly recoverySlotCapacity?: number;
   readonly sizingUnavailable?: boolean;
   /**
    * Keep MockChainAdapter's prototype implementation so integration tests can
@@ -181,6 +183,9 @@ export async function createVmRecoveryHostHarness<
 
   const agent = await DKGAgent.create({ name: options.name, chainAdapter });
   const internals = agent as unknown as VmRecoveryHostInternals;
+  if (options.recoverySlotCapacity !== undefined) {
+    internals.vmRecoverySlots = new VmRecoverySlotRegistry(options.recoverySlotCapacity);
+  }
   const connected = options.peers.map((peerId): TestPeerId => ({
     toString: () => peerId,
   }));

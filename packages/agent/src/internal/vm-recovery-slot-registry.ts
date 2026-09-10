@@ -58,7 +58,7 @@ export interface VmRecoverySlotScope {
   readonly signal: AbortSignal;
   /** Attach selected targets before discovery and after preparation, including unowned fallback targets. */
   track(targets: readonly Target[]): void;
-  reserveAdmission(target: Target, now: number, maxEntries: number): VmRecoverySlotReservation;
+  reserveAdmission(target: Target, now: number): VmRecoverySlotReservation;
   release(): void;
 }
 
@@ -80,6 +80,12 @@ export type VmRecoverySlotReservation =
 /** One aggregate owns each slot's retained proof, active generation, and reservation. */
 export class VmRecoverySlotRegistry {
   private readonly slots = new Map<string, SlotState>();
+
+  constructor(private readonly maxEntries: number) {
+    if (!Number.isSafeInteger(maxEntries) || maxEntries <= 0) {
+      throw new RangeError('VM recovery slot capacity must be a positive safe integer');
+    }
+  }
 
   get recordCount(): number {
     let count = 0;
@@ -174,15 +180,14 @@ export class VmRecoverySlotRegistry {
   }
 
   /** Immediate and delayed admission use the same reserved-capacity transition. */
-  admit(target: Target, params: AdmissionParams, now: number, maxEntries: number): VmRecoverySlotAdmission {
-    const admission = this.reserveAdmission(target, now, maxEntries);
+  admit(target: Target, params: AdmissionParams, now: number): VmRecoverySlotAdmission {
+    const admission = this.reserveAdmission(target, now);
     return admission.kind === 'reserved' ? admission.reservation.commit(params) : admission;
   }
 
   private reserveAdmission(
     target: Target,
     now: number,
-    maxEntries: number,
     donationReason?: symbol,
   ): VmRecoverySlotReservation {
     const key = vmRecoverySlotKey(target);
@@ -190,7 +195,7 @@ export class VmRecoverySlotRegistry {
     if (!slot) return { kind: 'deferred' };
     if (slot.record) return { kind: 'existing', record: slot.record };
     if (slot.reservation) return { kind: 'deferred' };
-    const hasOpenCapacity = this.occupiedCapacity() < maxEntries;
+    const hasOpenCapacity = this.occupiedCapacity() < this.maxEntries;
     const donor = hasOpenCapacity ? undefined : this.findDonor(target.localCgId, now);
     if (!hasOpenCapacity && !donor) {
       this.prune(key, slot);
@@ -309,9 +314,9 @@ export class VmRecoverySlotRegistry {
           generation.controller.signal.addEventListener('abort', onAbort, { once: true });
         }
       },
-      reserveAdmission: (target, now, maxEntries) => {
+      reserveAdmission: (target, now) => {
         if (released || controller.signal.aborted) return { kind: 'deferred' };
-        const result = this.reserveAdmission(target, now, maxEntries, donationReason);
+        const result = this.reserveAdmission(target, now, donationReason);
         if (controller.signal.aborted) {
           if (result.kind === 'reserved') result.reservation.release();
           return { kind: 'deferred' };

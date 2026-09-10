@@ -3,7 +3,7 @@ import { VmRecoverySlotRegistry } from '../../src/internal/vm-recovery-slot-regi
 /** Required VM retirement dependencies for tests that bypass the agent constructor. */
 export function createVmReconcileLifecycleFixture() {
   return {
-    vmRecoverySlots: new VmRecoverySlotRegistry(),
+    vmRecoverySlots: new VmRecoverySlotRegistry(2),
     vmReconcileLifecycleController: new AbortController(),
     vmReconcileLifecycleGeneration: 0,
     vmReconcileRotationClosed: false,

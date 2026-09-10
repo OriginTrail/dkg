@@ -258,10 +258,11 @@ import {
   type VmRecoveryTargetFootprint,
 } from './vm-recovery-microbatch.js';
 import { enrichVmRecoveryFootprints } from './vm-recovery-footprint.js';
-import type {
-  VmRecoverySlotAdmissionReservation,
-  VmRecoverySlotScope,
-} from './internal/vm-recovery-slot-registry.js';
+import type { VmRecoverySlotScope } from './internal/vm-recovery-slot-registry.js';
+import {
+  VmRecoveryBatchPlan,
+  type VmRecoveryPreparedEntry,
+} from './internal/vm-recovery-batch-plan.js';
 import {
   VmRecoveryProviderPolicy,
   type VmRecoveryProviderAttempt,
@@ -612,15 +613,6 @@ const VM_EXACT_MICROBATCH_LIMITS = Object.freeze({
   // Hard exact-selector cap, evaluated with the executor's real encoder.
   maxSelectorBytes: 16 * 1024,
 });
-
-interface VmRecoveryPreparedEntry {
-  readonly index: number;
-  readonly target: OrdinalRecoveryTarget;
-  readonly prepared: {
-    readonly record?: VmReconcileRotationRecord;
-    readonly suppressed: boolean;
-  };
-}
 
 interface VmRecoveryBatchAttempt {
   readonly entry: VmRecoveryPreparedEntry;
@@ -4791,7 +4783,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
           collectionDeadlineAt: now + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
         },
         now,
-        DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES,
       );
       if (admission.kind === 'deferred') {
         // Preserve the pressure bound at cap: an unowned target cannot retain
@@ -5489,86 +5480,30 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const currentTargets = targets.filter((target) =>
       target.localCgId === localCgId && target.onChainCgId === expectedOnChainCgId);
     if (currentTargets.length === 0) return noRecovery();
-    const admissionCursor = (
-      this.vmReconcileRotationAdmissionCursorByCg.get(localCgId) ?? 0
-    ) % currentTargets.length;
-    const admissionDistance = (index: number) => (
-      index - admissionCursor + currentTargets.length
-    ) % currentTargets.length;
-
     // Suppression consults only the already-observed, capped connection view.
     // This is intentionally before curator resolution, dialing, protocol waits,
     // and admission probes. Every target reached this method only after the
     // production ordinal/finalization check proved it still pending locally.
     const observedCandidatePeerIds = this.vmReconcileObservedCandidatePeerIds(localCgId);
     const now = this.vmReconcileRotationNow();
-    const initiallyOwnedRecords = new Map<OrdinalRecoveryTarget, VmReconcileRotationRecord>();
-    const admissionReservations = new Map<
-      OrdinalRecoveryTarget,
-      VmRecoverySlotAdmissionReservation
-    >();
-    for (const target of currentTargets) {
-      this.vmRecoverySlots.observeTarget(target);
-      const record = this.vmRecoverySlots.peekRecord(target);
-      if (record) initiallyOwnedRecords.set(target, record);
-    }
-    const initialPreparations = currentTargets
-      .map((target, index) => ({
-        index,
-        target,
-        hasOwnedRecord: initiallyOwnedRecords.has(target),
-      }))
-      // Use the same fair admission order before network work. Besides handing
-      // expired capacity to a waiter, this makes an all-live saturated cache
-      // return below without paying curator-resolution cost for work that
-      // cannot retain its retry state.
-      .sort((left, right) => Number(left.hasOwnedRecord) - Number(right.hasOwnedRecord)
-        || admissionDistance(left.index) - admissionDistance(right.index))
-      .map(({ index, target }) => {
-        const existing = initiallyOwnedRecords.get(target);
-        if (existing) {
-          return {
-            index,
-            target,
-            prepared: this.prepareVmReconcileRotationTarget(
-              target,
-              observedCandidatePeerIds,
-              now,
-              existing.curatorRosterConfirmed,
-            ),
-          };
-        }
-        const admission = scope.reserveAdmission(
+    const batchPlan = new VmRecoveryBatchPlan({
+      targets: currentTargets,
+      admissionCursor: this.vmReconcileRotationAdmissionCursorByCg.get(localCgId) ?? 0,
+      observedCandidatePeerIds,
+      now,
+      registry: this.vmRecoverySlots,
+      scope,
+      prepare: (target, candidatePeerIds, preparedAt, curatorRosterConfirmed) =>
+        this.prepareVmReconcileRotationTarget(
           target,
-          now,
-          DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES,
-        );
-        if (admission.kind === 'existing') {
-          return {
-            index,
-            target,
-            prepared: this.prepareVmReconcileRotationTarget(
-              target,
-              observedCandidatePeerIds,
-              now,
-              admission.record.curatorRosterConfirmed,
-            ),
-          };
-        }
-        if (admission.kind === 'reserved') {
-          admissionReservations.set(target, admission.reservation);
-          return { index, target, prepared: { suppressed: false } };
-        }
-        return { index, target, prepared: { suppressed: true } };
-      })
-      .sort((left, right) => left.index - right.index);
-    const initiallyEligible = initialPreparations
-      .filter(({ prepared }) => !prepared.suppressed)
-      .map(({ target }) => target);
+          candidatePeerIds,
+          preparedAt,
+          curatorRosterConfirmed,
+        ),
+    });
+    const initiallyEligible = batchPlan.initiallyEligibleTargets;
     if (initiallyEligible.length === 0) {
-      const suppressedRecords = initialPreparations
-        .map(({ prepared }) => prepared.record)
-        .filter((record): record is VmReconcileRotationRecord => record !== undefined);
+      const suppressedRecords = batchPlan.suppressedRecords;
       const nextRetryInMs = suppressedRecords.length === 0
         ? 0
         : Math.max(0, Math.min(...suppressedRecords.map((record) => record.nextRetryAt)) - now);
@@ -5741,92 +5676,22 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Curator preparation may have grown or shrunk the connected candidate
     // set. Re-evaluate every target against that observed change. Any roster
     // change breaks backoff and starts a fresh proof cycle.
-    const preparedEntries = currentTargets
-      .map((target, index) => ({
-        index,
-        target,
-        hasOwnedRecord: initiallyOwnedRecords.has(target),
-      }))
-      // At a full cap, give deferred targets first claim on an expired slot.
-      // Otherwise an expired owner encountered first would renew itself before
-      // any waiter could enter, starving stable-order overflow indefinitely.
-      .sort((left, right) => Number(left.hasOwnedRecord) - Number(right.hasOwnedRecord)
-        || admissionDistance(left.index) - admissionDistance(right.index))
-      .map(({ index, target }) => {
-        const original = initiallyOwnedRecords.get(target);
-        if (!isRecoveryCurrent() || (original && !this.vmRecoverySlots.isCurrent(target, original))) {
-          // A committed donation or external invalidation retired this exact
-          // record. Do not observe/prepare its old fingerprint again.
-          return { index, target, prepared: { suppressed: true } };
-        }
-        const reservation = admissionReservations.get(target);
-        if (reservation) {
-          const admission = reservation.commit({
-            candidatePeerIds: orderedPeerIds,
-            curatorRosterConfirmed: resolutionSucceeded,
-            collectionDeadlineAt: this.vmReconcileRotationNow()
-              + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
-          });
-          return {
-            index,
-            target,
-            prepared: admission.kind === 'deferred'
-              ? { suppressed: true }
-              : { record: admission.record, suppressed: false },
-          };
-        }
-        return {
-          index,
-          target,
-          prepared: this.prepareVmReconcileRotationTarget(
-            target,
-            orderedPeerIds,
-            this.vmReconcileRotationNow(),
-            resolutionSucceeded,
-          ),
-        };
-      })
-      .sort((left, right) => left.index - right.index);
-    const newlyAdmitted = preparedEntries
-      .filter(({ target, prepared }) => prepared.record
-        && !initiallyOwnedRecords.has(target));
-    if (newlyAdmitted.length > 0) {
-      const lastAdmitted = newlyAdmitted.reduce((latest, entry) => (
-        admissionDistance(entry.index) > admissionDistance(latest.index) ? entry : latest
-      ));
+    const preparedAt = this.vmReconcileRotationNow();
+    const committedPlan = batchPlan.commit({
+      candidatePeerIds: orderedPeerIds,
+      curatorRosterConfirmed: resolutionSucceeded,
+      now: preparedAt,
+      collectionDeadlineAt: preparedAt + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
+      isCurrent: isRecoveryCurrent,
+    });
+    if (committedPlan.nextAdmissionCursor !== undefined) {
       this.vmReconcileRotationAdmissionCursorByCg.delete(localCgId);
       this.vmReconcileRotationAdmissionCursorByCg.set(
         localCgId,
-        (lastAdmitted.index + 1) % currentTargets.length,
+        committedPlan.nextAdmissionCursor,
       );
     }
-    const eligible = preparedEntries
-      .map((entry) => {
-        const { record } = entry.prepared;
-        if (record && !this.vmRecoverySlots.isCurrent(entry.target, record)) {
-          // A later slot may have replaced an expired record while the batch
-          // was prepared. Defer the now-unowned target: elevated transport
-          // without retained retry state would violate the pressure bound.
-          return {
-            ...entry,
-            prepared: { suppressed: true },
-          };
-        }
-        return entry;
-      })
-      .filter((entry) => !entry.prepared.suppressed)
-      // Installed collecting records get first use of the bounded peer set so
-      // overflow cannot consume the one peer they still need to complete. The
-      // original target order remains stable within each class.
-      .sort((left, right) => {
-        const leftInstalled = left.prepared.record
-          && this.vmRecoverySlots.isCurrent(left.target, left.prepared.record)
-          ? 1 : 0;
-        const rightInstalled = right.prepared.record
-          && this.vmRecoverySlots.isCurrent(right.target, right.prepared.record)
-          ? 1 : 0;
-        return rightInstalled - leftInstalled || left.index - right.index;
-      });
+    const eligible = committedPlan.eligible;
 
     scope.track(eligible.map(({ target }) => target));
     if (!isRecoveryCurrent()) return staleRecovery();

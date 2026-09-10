@@ -8,27 +8,38 @@ function admitFor(
   registry: VmRecoverySlotRegistry,
   value = target,
   now = 0,
-  maxEntries = 2,
 ): VmReconcileRotationRecord {
   const admission = registry.admit(value, {
     candidatePeerIds: ['peer-a'], curatorRosterConfirmed: true, collectionDeadlineAt: 100,
-  }, now, maxEntries);
+  }, now);
   if (admission.kind === 'deferred') throw new Error('expected slot admission');
   return admission.record;
 }
 
 describe('active VM recovery slot ownership', () => {
+  it('binds one validated capacity to every admission path', () => {
+    expect(() => new VmRecoverySlotRegistry(0)).toThrow(/positive safe integer/);
+    const registry = new VmRecoverySlotRegistry(1);
+    admitFor(registry);
+    expect(registry.admit({ ...target, ordinal: 1 }, {
+      candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
+    }, 0).kind).toBe('deferred');
+    const scope = registry.begin();
+    expect(scope.reserveAdmission({ ...target, ordinal: 2 }, 0).kind).toBe('deferred');
+    scope.release();
+  });
+
   it('preserves one live slot per graph across overlapping fair donations', () => {
-    const registry = new VmRecoverySlotRegistry();
+    const registry = new VmRecoverySlotRegistry(2);
     admitFor(registry, target, 0, 2);
     admitFor(registry, { ...target, ordinal: 1 }, 0, 2);
     const scope = registry.begin();
-    const first = scope.reserveAdmission({ ...target, localCgId: 'cg-b' }, 0, 2);
+    const first = scope.reserveAdmission({ ...target, localCgId: 'cg-b' }, 0);
     expect(first.kind).toBe('reserved');
-    expect(scope.reserveAdmission({ ...target, localCgId: 'cg-c' }, 0, 2).kind).toBe('deferred');
-    expect(scope.reserveAdmission({ ...target, localCgId: 'cg-b', ordinal: 2 }, 0, 2).kind).toBe('deferred');
+    expect(scope.reserveAdmission({ ...target, localCgId: 'cg-c' }, 0).kind).toBe('deferred');
+    expect(scope.reserveAdmission({ ...target, localCgId: 'cg-b', ordinal: 2 }, 0).kind).toBe('deferred');
     if (first.kind === 'reserved') first.reservation.release();
-    const next = scope.reserveAdmission({ ...target, localCgId: 'cg-c' }, 0, 2);
+    const next = scope.reserveAdmission({ ...target, localCgId: 'cg-c' }, 0);
     expect(next.kind).toBe('reserved');
     if (next.kind === 'reserved') expect(next.reservation.commit({
       candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
@@ -48,24 +59,24 @@ describe('active VM recovery slot ownership', () => {
         if (this.failing && record.ordinal === 1 && failure === 'after-write') throw new Error('install failed');
       }
     }
-    const registry = new FailingRegistry();
-    const donorRecord = admitFor(registry, target, 0, 1);
+    const registry = new FailingRegistry(1);
+    const donorRecord = admitFor(registry, target, 0);
     const donorScope = registry.begin();
     donorScope.track([target]);
     const requesterScope = registry.begin();
     const waiting = { ...target, ordinal: 1 };
     const params = { candidatePeerIds: ['peer-a'], curatorRosterConfirmed: true, collectionDeadlineAt: 200 };
     if (mode === 'immediate') {
-      expect(() => registry.admit(waiting, params, 100, 1)).toThrow('install failed');
+      expect(() => registry.admit(waiting, params, 100)).toThrow('install failed');
     } else {
-      const admission = requesterScope.reserveAdmission(waiting, 100, 1);
+      const admission = requesterScope.reserveAdmission(waiting, 100);
       expect(admission.kind).toBe('reserved');
       if (admission.kind === 'reserved') expect(() => admission.reservation.commit(params)).toThrow('install failed');
     }
     expect([...registry.snapshot().values()]).toEqual([donorRecord]);
     expect(donorScope.signal.aborted).toBe(false);
     registry.failing = false;
-    expect(registry.admit(waiting, params, 100, 1).kind).toBe('admitted');
+    expect(registry.admit(waiting, params, 100).kind).toBe('admitted');
     expect(donorScope.signal.aborted).toBe(true);
     expect(registry.recordCount).toBe(1);
     donorScope.release();
@@ -73,7 +84,7 @@ describe('active VM recovery slot ownership', () => {
   });
 
   it.each(['context', 'close'] as const)('preserves a replacement acquired by an abort listener during %s invalidation', kind => {
-    const registry = new VmRecoverySlotRegistry();
+    const registry = new VmRecoverySlotRegistry(2);
     const other = { ...target, ordinal: 1 };
     const firstScope = registry.begin();
     const oldOtherScope = registry.begin();
@@ -98,18 +109,18 @@ describe('active VM recovery slot ownership', () => {
   });
 
   it('reserves distinct donors and makes released capacity available to the next waiter', () => {
-    const registry = new VmRecoverySlotRegistry();
+    const registry = new VmRecoverySlotRegistry(2);
     const donorA = admitFor(registry, target, 0, 2);
     const donorB = admitFor(registry, { ...target, ordinal: 1 }, 0, 2);
     const scope = registry.begin();
-    const first = scope.reserveAdmission({ ...target, ordinal: 2 }, 100, 2);
-    const second = scope.reserveAdmission({ ...target, ordinal: 3 }, 100, 2);
+    const first = scope.reserveAdmission({ ...target, ordinal: 2 }, 100);
+    const second = scope.reserveAdmission({ ...target, ordinal: 3 }, 100);
     expect(first.kind).toBe('reserved');
     expect(second.kind).toBe('reserved');
-    expect(scope.reserveAdmission({ ...target, ordinal: 4 }, 100, 2).kind).toBe('deferred');
+    expect(scope.reserveAdmission({ ...target, ordinal: 4 }, 100).kind).toBe('deferred');
     expect([...registry.snapshot().values()]).toEqual([donorA, donorB]);
     if (first.kind === 'reserved') first.reservation.release();
-    const next = scope.reserveAdmission({ ...target, ordinal: 4 }, 100, 2);
+    const next = scope.reserveAdmission({ ...target, ordinal: 4 }, 100);
     expect(next.kind).toBe('reserved');
     const params = { candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 200 };
     if (second.kind === 'reserved') expect(second.reservation.commit(params).kind).toBe('admitted');
@@ -120,16 +131,16 @@ describe('active VM recovery slot ownership', () => {
   });
 
   it.each(['before', 'after'] as const)('observes external donor replacement when tracked %s reservation', order => {
-    const registry = new VmRecoverySlotRegistry();
-    admitFor(registry, target, 0, 1);
+    const registry = new VmRecoverySlotRegistry(1);
+    admitFor(registry, target, 0);
     const waiting = { ...target, ordinal: 1 };
     const scope = registry.begin();
     if (order === 'before') scope.track([target, waiting]);
-    const admission = scope.reserveAdmission(waiting, 100, 1);
+    const admission = scope.reserveAdmission(waiting, 100);
     expect(admission.kind).toBe('reserved');
     if (order === 'after') scope.track([target, waiting]);
     const replacement = { ...target, merkleRoot: 'new-root' };
-    const record = admitFor(registry, replacement, 100, 1);
+    const record = admitFor(registry, replacement, 100);
     expect(scope.signal.aborted).toBe(true);
     if (admission.kind === 'reserved') expect(admission.reservation.commit({
       candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 200,
@@ -139,14 +150,14 @@ describe('active VM recovery slot ownership', () => {
   });
 
   it.each(['before', 'after'] as const)('suppresses only its own donation when tracked %s reservation', order => {
-    const registry = new VmRecoverySlotRegistry();
-    admitFor(registry, target, 0, 1);
+    const registry = new VmRecoverySlotRegistry(1);
+    admitFor(registry, target, 0);
     const otherScope = registry.begin();
     otherScope.track([target]);
     const waiting = { ...target, ordinal: 1 };
     const scope = registry.begin();
     if (order === 'before') scope.track([target, waiting]);
-    const admission = scope.reserveAdmission(waiting, 100, 1);
+    const admission = scope.reserveAdmission(waiting, 100);
     expect(admission.kind).toBe('reserved');
     if (order === 'after') scope.track([target, waiting]);
     if (admission.kind === 'reserved') expect(admission.reservation.commit({
@@ -163,13 +174,13 @@ describe('active VM recovery slot ownership', () => {
   });
 
   it('counts delayed open-capacity reservations during immediate admission', () => {
-    const registry = new VmRecoverySlotRegistry();
+    const registry = new VmRecoverySlotRegistry(1);
     const scope = registry.begin();
-    const admission = scope.reserveAdmission(target, 0, 1);
+    const admission = scope.reserveAdmission(target, 0);
     expect(admission.kind).toBe('reserved');
     expect(registry.admit({ ...target, ordinal: 1 }, {
       candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
-    }, 0, 1).kind).toBe('deferred');
+    }, 0).kind).toBe('deferred');
     if (admission.kind === 'reserved') expect(admission.reservation.commit({
       candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
     }).kind).toBe('admitted');
@@ -178,9 +189,9 @@ describe('active VM recovery slot ownership', () => {
   });
 
   it.each(['target', 'context', 'close'] as const)('retires an untracked pending admission on %s invalidation', kind => {
-    const registry = new VmRecoverySlotRegistry();
+    const registry = new VmRecoverySlotRegistry(1);
     const scope = registry.begin();
-    const admission = scope.reserveAdmission(target, 0, 1);
+    const admission = scope.reserveAdmission(target, 0);
     expect(admission.kind).toBe('reserved');
     if (kind === 'target') registry.observeTarget({ ...target, merkleRoot: 'new-root' });
     else if (kind === 'context') registry.invalidateContextGraph(target.localCgId);
@@ -189,14 +200,14 @@ describe('active VM recovery slot ownership', () => {
       candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
     }).kind).toBe('deferred');
     expect(registry.recordCount).toBe(0);
-    expect(admitFor(registry, target, 0, 1)).toBeDefined();
+    expect(admitFor(registry, target, 0)).toBeDefined();
     scope.release();
   });
 
   it('keeps snapshot membership fixed while later reads reflect slot transitions', () => {
-    const registry = new VmRecoverySlotRegistry();
+    const registry = new VmRecoverySlotRegistry(2);
     const empty = registry.snapshot();
-    const record = admitFor(registry, target, 0, 1);
+    const record = admitFor(registry, target, 0);
     const installed = registry.snapshot();
     expect(empty.size).toBe(0);
     expect([...installed.values()]).toEqual([record]);
@@ -206,7 +217,7 @@ describe('active VM recovery slot ownership', () => {
   });
 
   it('retires evidence on completion while preserving cancellation ownership until physical release', () => {
-    const registry = new VmRecoverySlotRegistry();
+    const registry = new VmRecoverySlotRegistry(2);
     const record = admitFor(registry);
     const scope = registry.begin();
     scope.track([target]);
@@ -220,7 +231,7 @@ describe('active VM recovery slot ownership', () => {
   });
 
   it('invalidates retained and record-less slots together while isolating other graphs', () => {
-    const registry = new VmRecoverySlotRegistry();
+    const registry = new VmRecoverySlotRegistry(2);
     const unowned = { ...target, ordinal: 1 };
     const other = { ...target, localCgId: 'cg-b' };
     admitFor(registry);
@@ -241,8 +252,8 @@ describe('active VM recovery slot ownership', () => {
   });
 
   it('keeps reads pure and replaces a fingerprint only at explicit observation', () => {
-    const registry = new VmRecoverySlotRegistry();
-    const oldRecord = admitFor(registry, target, 0, 1);
+    const registry = new VmRecoverySlotRegistry(2);
+    const oldRecord = admitFor(registry, target, 0);
     const active = registry.begin();
     active.track([target]);
     const replacement = { ...target, merkleRoot: '0xdef' };
@@ -253,27 +264,27 @@ describe('active VM recovery slot ownership', () => {
     registry.observeTarget(replacement);
     expect(registry.recordCount).toBe(0);
     expect(active.signal.aborted).toBe(true);
-    const record = admitFor(registry, replacement, 0, 1);
+    const record = admitFor(registry, replacement, 0);
     expect(registry.peekRecord(replacement)).toBe(record);
     active.release();
   });
 
   it('aborts an expired donor only after installing the waiting record within capacity', () => {
-    const registry = new VmRecoverySlotRegistry();
-    admitFor(registry, target, 0, 1);
+    const registry = new VmRecoverySlotRegistry(1);
+    admitFor(registry, target, 0);
     const donor = registry.begin();
     donor.track([target]);
     const waitingTarget = { ...target, localCgId: 'cg-b' };
     let recordsAtAbort: VmReconcileRotationRecord[] | undefined;
     donor.signal.addEventListener('abort', () => { recordsAtAbort = [...registry.snapshot().values()]; });
-    const waiting = admitFor(registry, waitingTarget, 100, 1);
+    const waiting = admitFor(registry, waitingTarget, 100);
     expect(donor.signal.aborted).toBe(true);
     expect(recordsAtAbort).toEqual([waiting]);
     donor.release();
   });
 
   it('keeps a shared generation alive when one caller releases it', () => {
-    const lifetimes = new VmRecoverySlotRegistry();
+    const lifetimes = new VmRecoverySlotRegistry(2);
     const first = lifetimes.begin();
     const second = lifetimes.begin();
     first.track([target, target]);
@@ -289,7 +300,7 @@ describe('active VM recovery slot ownership', () => {
   });
 
   it('does not let an old completion retire its replacement generation', () => {
-    const lifetimes = new VmRecoverySlotRegistry();
+    const lifetimes = new VmRecoverySlotRegistry(2);
     const old = lifetimes.begin();
     old.track([target]);
     const replacement = lifetimes.begin();
@@ -303,7 +314,7 @@ describe('active VM recovery slot ownership', () => {
   });
 
   it('isolates context graphs and permits new work after a drained close', () => {
-    const lifetimes = new VmRecoverySlotRegistry();
+    const lifetimes = new VmRecoverySlotRegistry(2);
     const first = lifetimes.begin();
     const other = lifetimes.begin();
     first.track([target]);
@@ -324,7 +335,7 @@ describe('active VM recovery slot ownership', () => {
   });
 
   it('cannot reacquire cancellation ownership through a released scope', () => {
-    const lifetimes = new VmRecoverySlotRegistry();
+    const lifetimes = new VmRecoverySlotRegistry(2);
     const finished = lifetimes.begin();
     finished.track([target]);
     finished.release();

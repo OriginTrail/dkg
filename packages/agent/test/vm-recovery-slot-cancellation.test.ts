@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import type { OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
-import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { waitForPeerProtocol } from '../src/p2p/protocol-readiness.js';
 import type { ContextGraphSub, VmReconcileRotationRecord } from '../src/dkg-agent-types.js';
 import {
@@ -62,11 +61,10 @@ describe('exact VM recovery slot cancellation', () => {
       const release = barrier();
       const harness = await createVmRecoveryHostHarness({
         name: `ReservedDonor-${invalidation}`, localCgId, peers: [peer], targetCount: 2,
+        recoverySlotCapacity: 1,
         targetForOrdinal: ordinal => targetFor(localCgId, ordinal), onFetch: () => 'clean-absent',
       });
       const host = harness.internals as CancellationHost;
-      const descriptor = Object.getOwnPropertyDescriptor(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES')!;
-      Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', { ...descriptor, value: 1 });
       const donor = harness.targets[0]!;
       const waiting = harness.targets[1]!;
       const original = host.prepareVmReconcileRotationTarget(donor, [peer], host.vmReconcileRotationNow()).record!;
@@ -123,7 +121,6 @@ describe('exact VM recovery slot cancellation', () => {
         await recovery;
         replacementScope.release();
         donorObserver.release();
-        Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', descriptor);
         await harness.agent.stop().catch(() => undefined);
       }
     },
@@ -137,6 +134,7 @@ describe('exact VM recovery slot cancellation', () => {
     let signal: AbortSignal | undefined;
     const harness = await createVmRecoveryHostHarness({
       name: 'FailedDonation', localCgId, peers: [peer], targetCount: 1,
+      recoverySlotCapacity: 2,
       targetForOrdinal: ordinal => targetFor(localCgId, ordinal), onFetch: () => 'clean-absent',
     });
     const host = harness.internals as CancellationHost;
@@ -146,11 +144,9 @@ describe('exact VM recovery slot cancellation', () => {
       await release.promise;
       return true;
     };
-    const descriptor = Object.getOwnPropertyDescriptor(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES')!;
     const recovery = harness.run();
     try {
       await entered.promise;
-      Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', { ...descriptor, value: 2 });
       host.prepareVmReconcileRotationTarget(targetFor(localCgId, 1), [peer], host.vmReconcileRotationNow());
       const original = [...host.vmRecoverySlots.snapshot().entries()];
       const waitingTarget = targetFor('waiting-cg');
@@ -176,7 +172,6 @@ describe('exact VM recovery slot cancellation', () => {
     } finally {
       release.release();
       await recovery;
-      Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', descriptor);
       await harness.agent.stop().catch(() => undefined);
     }
   });
@@ -414,6 +409,7 @@ describe('exact VM recovery slot cancellation', () => {
     const harness = await createVmRecoveryHostHarness({
       name: `SlotCancellation-${stage}-${invalidation}`,
       localCgId, peers: [peer], targetCount: 1,
+      recoverySlotCapacity: 2,
       targetForOrdinal: ordinal => targetFor(localCgId, ordinal),
       onFetch: async (_peer, _targets, _recovered, signal) => {
         if (stage === 'transport') {
@@ -491,7 +487,6 @@ describe('exact VM recovery slot cancellation', () => {
       localCgId, 1n, harness.targets, 100, () => true,
       host.vmReconcileLifecycleController.signal,
     );
-    let restoreCapacity = () => {};
     try {
       await entered;
       const target = harness.targets[0]!;
@@ -500,7 +495,7 @@ describe('exact VM recovery slot cancellation', () => {
       expect(originalRecord).toBeDefined();
       if (stage === 'transport') expect(getSyncBackpressureSnapshot(policy).inflight).toBe(1);
       else expect(harness.fetched).toHaveLength(0);
-      restoreCapacity = applyVmRecoveryInvalidation({
+      applyVmRecoveryInvalidation({
         invalidation, agent: harness.agent, host, localCgId, target, peerId: peer,
       });
       expect(host.vmRecoverySlots.snapshot().get(slotKey)).not.toBe(originalRecord);
@@ -515,7 +510,6 @@ describe('exact VM recovery slot cancellation', () => {
       releaseWait();
       host.vmReconcileLifecycleController.abort();
       await recovery.catch(() => undefined);
-      restoreCapacity();
       await harness.agent.stop().catch(() => undefined);
     }
   });

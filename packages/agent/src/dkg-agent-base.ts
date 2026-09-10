@@ -1136,7 +1136,9 @@ export class DKGAgentBase {
   protected readonly vmReconcileNegativeCacheHydrated = new Map<string, string>();
   protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
   /** Owns retained absence evidence and active recovery slot generations together. */
-  protected readonly vmRecoverySlots = new VmRecoverySlotRegistry();
+  protected readonly vmRecoverySlots = new VmRecoverySlotRegistry(
+    DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES,
+  );
   /** Next stable batch index to consider when the bounded rotation cache has waiters. */
   protected readonly vmReconcileRotationAdmissionCursorByCg = new Map<string, number>();
   /** Last resolved curator peers, used to keep the capped exact-recovery roster authoritative. */

@@ -42,6 +42,7 @@ const policyConfig = { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 1 };
 async function physicalHarness(localCgId: string, targetCount = 1, peerIds = [peer]) {
   const harness = await createVmRecoveryHostHarness({
     name: 'PhysicalSlotCancellation', localCgId, peers: peerIds, targetCount,
+    recoverySlotCapacity: 2,
     useRegisteredChainFootprints: true,
     targetForOrdinal: ordinal => ({
       localCgId, onChainCgId: '1', ordinal,
@@ -123,13 +124,12 @@ describe('VM slot cancellation through the physical exact requester', () => {
       host.messenger = { sendToPeer: send };
       const reconcile = vi.spyOn(host, 'reconcileChainOrdinal');
       const recovery = harness.run();
-      let restoreCapacity = () => {};
       try {
         await entered.promise;
         expect(harness.pressure()).toMatchObject({ inflight: 1, queued: 0 });
         expect(transportSignal?.aborted).toBe(false);
         const target = harness.targets[0]!;
-        restoreCapacity = applyVmRecoveryInvalidation({
+        applyVmRecoveryInvalidation({
           invalidation, agent: harness.agent, host, localCgId, target, peerId: peer,
           replacementMerkleRoot: 'replacement', waitingLocalCgId: 'waiting-cg',
         });
@@ -142,7 +142,6 @@ describe('VM slot cancellation through the physical exact requester', () => {
       } finally {
         release.release();
         await recovery;
-        restoreCapacity();
         await harness.dispose();
       }
     },
@@ -204,12 +203,11 @@ describe('VM slot cancellation through the physical exact requester', () => {
       });
       let settled = false;
       const recovery = harness.run().finally(() => { settled = true; });
-      let restoreCapacity = () => {};
       try {
         await entered.promise;
         expect(host.graphScopedStorePhysicalRuns.size).toBe(1);
         expect(harness.pressure().inflight).toBe(1);
-        restoreCapacity = applyVmRecoveryInvalidation({
+        applyVmRecoveryInvalidation({
           invalidation, agent: harness.agent, host, localCgId, target, peerId: peer,
           replacementMerkleRoot: 'replacement', waitingLocalCgId: 'waiting-cg',
         });
@@ -239,7 +237,6 @@ describe('VM slot cancellation through the physical exact requester', () => {
       } finally {
         release.release();
         await recovery;
-        restoreCapacity();
         await harness.dispose();
         await store.close();
       }

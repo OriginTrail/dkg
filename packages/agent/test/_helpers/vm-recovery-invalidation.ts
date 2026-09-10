@@ -1,5 +1,4 @@
 import type { OrdinalRecoveryTarget } from '../../src/chain-reconciler.js';
-import { DKGAgentBase } from '../../src/dkg-agent-base.js';
 import type { ContextGraphSub } from '../../src/dkg-agent-types.js';
 
 export const VM_RECOVERY_INVALIDATIONS = [
@@ -28,11 +27,7 @@ export function applyVmRecoveryInvalidation(params: {
   readonly peerId: string;
   readonly replacementMerkleRoot?: string;
   readonly waitingLocalCgId?: string;
-}): () => void {
-  const capacity = Object.getOwnPropertyDescriptor(
-    DKGAgentBase,
-    'VM_RECONCILE_CACHE_MAX_ENTRIES',
-  )!;
+}): void {
   switch (params.invalidation) {
     case 'unsubscribe':
       params.agent.unsubscribeFromContextGraph(params.localCgId, { persist: false });
@@ -52,10 +47,6 @@ export function applyVmRecoveryInvalidation(params: {
       );
       break;
     case 'eviction':
-      Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', {
-        ...capacity,
-        value: 2,
-      });
       params.host.prepareVmReconcileRotationTarget(
         { ...params.target, ordinal: params.target.ordinal + 1 },
         [params.peerId],
@@ -71,9 +62,4 @@ export function applyVmRecoveryInvalidation(params: {
       params.host.closeVmReconcileRotationState();
       break;
   }
-  return () => Object.defineProperty(
-    DKGAgentBase,
-    'VM_RECONCILE_CACHE_MAX_ENTRIES',
-    capacity,
-  );
 }
