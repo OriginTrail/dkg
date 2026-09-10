@@ -132,6 +132,7 @@ export {
 export {
   emptyRpcUsageWindow,
   mergeRpcUsageWindows,
+  RPC_ENDPOINT_SLOT_LABELS,
   normalizeRpcUsageWindow,
   normalizeRpcEndpointSlotLabel,
   rpcUsageWindowTotal,

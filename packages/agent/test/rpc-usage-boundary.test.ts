@@ -32,7 +32,7 @@ describe('DKGAgent.drainRpcUsage — the adapter→agent telemetry boundary', ()
     expect(out).toEqual({
       byMethod: {},
       ethCallByConsumer: {},
-      ethGetLogsByConsumerAndEndpointSlot: {},
+      attributions: [],
       lifetimeTotal: 0,
     });
   });
@@ -42,7 +42,7 @@ describe('DKGAgent.drainRpcUsage — the adapter→agent telemetry boundary', ()
     expect(out).toEqual({
       byMethod: {},
       ethCallByConsumer: {},
-      ethGetLogsByConsumerAndEndpointSlot: {},
+      attributions: [],
       lifetimeTotal: 0,
     });
   });

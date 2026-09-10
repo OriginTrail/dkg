@@ -381,6 +381,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           connected,
           'listContextGraphsFromChain NameClaimed',
           preferred,
+          'listContextGraphsFromChain',
         );
         preferred = page.provider;
         pageResults = [];

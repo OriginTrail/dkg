@@ -946,6 +946,7 @@ export class EVMChainAdapterBase {
           connected,
           label,
           preferred,
+          rpcUsageConsumer,
         ) => this.queryEventLogsPage(
           baseContract,
           filter,
@@ -955,6 +956,7 @@ export class EVMChainAdapterBase {
           connected,
           label,
           preferred,
+          rpcUsageConsumer,
         ),
       }),
     });
@@ -3222,6 +3224,7 @@ export class EVMChainAdapterBase {
       connected,
       'getMaxKaNumberForAuthor KnowledgeAssetCreated',
       preferred,
+      'getMaxKaNumberForAuthor',
     );
   }
 
@@ -3234,6 +3237,7 @@ export class EVMChainAdapterBase {
     connected: Map<JsonRpcProvider, Contract>,
     label: string,
     preferred?: JsonRpcProvider,
+    rpcUsageConsumer = 'eventLogPageScan',
   ): Promise<{ logs: ReadonlyArray<ethers.EventLog | ethers.Log>; provider: JsonRpcProvider }> {
     return withSpan(
       'chain.eth_getLogs',
@@ -3269,7 +3273,7 @@ export class EVMChainAdapterBase {
             // bounded consumer scope explicitly so a large historical crawl
             // (notably the pre-10.0.4 KA high-water fallback) cannot collapse
             // into `consumer=unattributed` in raw eth_getLogs telemetry.
-            const logs = await withRpcUsageConsumer(label, () => withTimeout(
+            const logs = await withRpcUsageConsumer(rpcUsageConsumer, () => withTimeout(
               contract.queryFilter(filter as any, lo, hi),
               KA_HIGH_WATER_PAGE_TIMEOUT_MS,
               `${label} getLogs [${lo}, ${hi}]`,

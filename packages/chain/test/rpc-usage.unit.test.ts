@@ -26,6 +26,7 @@ import {
   normalizeRpcEndpointSlotLabel,
   normalizeRpcUsageWindow,
   normalizeRpcUsageConsumer,
+  RPC_ENDPOINT_SLOT_LABELS,
   rpcUsageWindowTotal,
   RpcUsageTracker,
   createCountingJsonRpcProvider,
@@ -557,15 +558,14 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
   });
 
   it('bounds configured endpoint slots without exposing endpoint identity', () => {
-    expect(boundedRpcEndpointSlotLabel(0)).toBe('primary');
-    expect(boundedRpcEndpointSlotLabel(1)).toBe('fallback_1');
-    expect(boundedRpcEndpointSlotLabel(15)).toBe('fallback_15');
-    expect(boundedRpcEndpointSlotLabel(16)).toBe('other');
+    for (const [slot, label] of RPC_ENDPOINT_SLOT_LABELS.entries()) {
+      expect(boundedRpcEndpointSlotLabel(slot)).toBe(label);
+      expect(normalizeRpcEndpointSlotLabel(label)).toBe(label);
+    }
+    expect(boundedRpcEndpointSlotLabel(RPC_ENDPOINT_SLOT_LABELS.length)).toBe('other');
     expect(boundedRpcEndpointSlotLabel(-1)).toBe('other');
     expect(boundedRpcEndpointSlotLabel(undefined)).toBe('other');
     expect(boundedRpcEndpointSlotLabel(Number.NaN)).toBe('other');
-    expect(normalizeRpcEndpointSlotLabel('primary')).toBe('primary');
-    expect(normalizeRpcEndpointSlotLabel('fallback_15')).toBe('fallback_15');
     expect(normalizeRpcEndpointSlotLabel('fallback_16')).toBe('other');
     expect(normalizeRpcEndpointSlotLabel('https://secret.example/rpc')).toBe('other');
   });

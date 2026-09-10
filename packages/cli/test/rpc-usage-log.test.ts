@@ -91,6 +91,24 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
     ]);
   });
 
+  it('drops unsupported attribution methods before log formatting', () => {
+    const lines = formatRpcUsageLines(
+      {
+        byMethod: { eth_call: 1 },
+        attributions: [{
+          method: 'eth_call\nlevel=error',
+          consumer: 'malicious',
+          count: 1,
+        } as never],
+        lifetimeTotal: 1,
+      },
+      60,
+    );
+
+    expect(lines).toEqual(['rpc_usage method=eth_call count=1 window_s=60']);
+    expect(lines.join('\n')).not.toContain('level=error');
+  });
+
   it('emits bounded eth_getLogs consumer and endpoint-slot attribution', () => {
     const lines = formatRpcUsageLines(
       {

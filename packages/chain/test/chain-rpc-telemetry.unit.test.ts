@@ -152,7 +152,7 @@ describe('chain RPC telemetry — real readContractWith emits bounded labels', (
     a.destroy?.();
   });
 
-  it('attributes direct page-scan eth_getLogs requests to the bounded scan label', async () => {
+  it('attributes direct page-scan eth_getLogs requests to a stable operation key', async () => {
     const a: any = new EVMChainAdapter(minimalConfig());
     const contract = logScanContract(async () => {
       // Emulate CountingJsonRpcProvider's raw transport hook at the direct
@@ -170,15 +170,28 @@ describe('chain RPC telemetry — real readContractWith emits bounded labels', (
       scanProviders,
       new Map(),
       'getMaxKaNumberForAuthor KnowledgeAssetCreated',
+      undefined,
+      'getMaxKaNumberForAuthor',
+    );
+    await a.queryEventLogsPage(
+      contract,
+      {},
+      101,
+      200,
+      scanProviders,
+      new Map(),
+      'wording can change without changing telemetry identity',
+      undefined,
+      'getMaxKaNumberForAuthor',
     );
 
     const usage = a.drainRpcUsage();
-    expect(usage.byMethod.eth_getLogs).toBe(1);
+    expect(usage.byMethod.eth_getLogs).toBe(2);
     expect(usage.attributions).toEqual([{
       method: 'eth_getLogs',
-      consumer: 'getMaxKaNumberForAuthor_KnowledgeAssetCreated',
+      consumer: 'getMaxKaNumberForAuthor',
       endpointSlot: 'primary',
-      count: 1,
+      count: 2,
     }]);
     a.destroy?.();
   });

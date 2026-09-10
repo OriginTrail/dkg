@@ -88,13 +88,29 @@ export function jsonRpcMethodsFromBody(body: Uint8Array | null | undefined): str
   }
 }
 
-/** A fresh all-zero window — the identity element for merging and the value of "nothing to report". */
-export type RpcEndpointSlotLabel =
-  | 'primary'
-  | 'fallback_1' | 'fallback_2' | 'fallback_3' | 'fallback_4' | 'fallback_5'
-  | 'fallback_6' | 'fallback_7' | 'fallback_8' | 'fallback_9' | 'fallback_10'
-  | 'fallback_11' | 'fallback_12' | 'fallback_13' | 'fallback_14' | 'fallback_15'
-  | 'other';
+/** The complete bounded vocabulary for individually attributed endpoint slots. */
+export const RPC_ENDPOINT_SLOT_LABELS = Object.freeze([
+  'primary',
+  'fallback_1',
+  'fallback_2',
+  'fallback_3',
+  'fallback_4',
+  'fallback_5',
+  'fallback_6',
+  'fallback_7',
+  'fallback_8',
+  'fallback_9',
+  'fallback_10',
+  'fallback_11',
+  'fallback_12',
+  'fallback_13',
+  'fallback_14',
+  'fallback_15',
+] as const);
+
+type TrackedRpcEndpointSlotLabel = typeof RPC_ENDPOINT_SLOT_LABELS[number];
+export type RpcEndpointSlotLabel = TrackedRpcEndpointSlotLabel | 'other';
+const RPC_ENDPOINT_SLOT_LABEL_SET: ReadonlySet<string> = new Set(RPC_ENDPOINT_SLOT_LABELS);
 
 /** Canonical method-aware diagnostic attribution carried by a usage window. */
 export type RpcUsageAttribution =
@@ -110,6 +126,35 @@ type ConcreteRpcUsageWindow = NormalizedRpcUsageWindow & {
   readonly attributions: readonly RpcUsageAttribution[];
 };
 
+function normalizeRpcUsageAttribution(value: unknown): RpcUsageAttribution | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const candidate = value as {
+    method?: unknown;
+    consumer?: unknown;
+    endpointSlot?: unknown;
+    count?: unknown;
+  };
+  if (typeof candidate.consumer !== 'string' || typeof candidate.count !== 'number') {
+    return undefined;
+  }
+  if (candidate.method === 'eth_call') {
+    return {
+      method: 'eth_call',
+      consumer: candidate.consumer,
+      count: candidate.count,
+    };
+  }
+  if (candidate.method === 'eth_getLogs') {
+    return {
+      method: 'eth_getLogs',
+      consumer: candidate.consumer,
+      endpointSlot: normalizeRpcEndpointSlotLabel(candidate.endpointSlot),
+      count: candidate.count,
+    };
+  }
+  return undefined;
+}
+
 export function emptyRpcUsageWindow(): ConcreteRpcUsageWindow {
   return {
     byMethod: {},
@@ -122,7 +167,10 @@ export function emptyRpcUsageWindow(): ConcreteRpcUsageWindow {
 /** Normalize a public drain-window input into the concrete telemetry model. */
 export function normalizeRpcUsageWindow(window: RpcUsageWindow): ConcreteRpcUsageWindow {
   const attributions = window.attributions
-    ? [...window.attributions]
+    ? window.attributions.flatMap((value) => {
+        const normalized = normalizeRpcUsageAttribution(value);
+        return normalized === undefined ? [] : [normalized];
+      })
     : [
         ...Object.entries(window.ethCallByConsumer ?? {}).map(
           ([consumer, count]): RpcUsageAttribution => ({ method: 'eth_call', consumer, count }),
@@ -304,9 +352,9 @@ function activeRpcUsageConsumer(): string | undefined {
  * collapse to `other` rather than expanding telemetry cardinality.
  */
 export function normalizeRpcEndpointSlotLabel(value: unknown): RpcEndpointSlotLabel {
-  if (value === 'primary' || value === 'other') return value;
-  if (typeof value === 'string' && /^fallback_(?:[1-9]|1[0-5])$/.test(value)) {
-    return value as RpcEndpointSlotLabel;
+  if (value === 'other') return value;
+  if (typeof value === 'string' && RPC_ENDPOINT_SLOT_LABEL_SET.has(value)) {
+    return value as TrackedRpcEndpointSlotLabel;
   }
   return 'other';
 }
@@ -319,11 +367,7 @@ export function boundedRpcEndpointSlotLabel(
     || !Number.isSafeInteger(endpointSlot)
     || endpointSlot < 0
   ) return 'other';
-  if (endpointSlot === 0) return 'primary';
-  if (endpointSlot < RpcUsageTracker.MAX_TRACKED_ENDPOINT_SLOTS) {
-    return normalizeRpcEndpointSlotLabel(`fallback_${endpointSlot}`);
-  }
-  return 'other';
+  return RPC_ENDPOINT_SLOT_LABELS[endpointSlot] ?? 'other';
 }
 
 /**
@@ -360,7 +404,7 @@ export class RpcUsageTracker {
    */
   static readonly MAX_WINDOW_METHODS = 64;
   static readonly MAX_WINDOW_CONSUMERS = 128;
-  static readonly MAX_TRACKED_ENDPOINT_SLOTS = 16;
+  static readonly MAX_TRACKED_ENDPOINT_SLOTS = RPC_ENDPOINT_SLOT_LABELS.length;
   static readonly MAX_WINDOW_GET_LOGS_ATTRIBUTIONS = 256;
 
   record(method: string, endpointSlot?: number): void {
