@@ -331,11 +331,10 @@ export interface SharedMemorySyncSnapshotEvidencePolicy {
 
 /** The only two valid requester algorithm modes. */
 export type SharedMemorySyncMode = Readonly<
-  | { kind: 'ordinary'; metadataFetcher?: SharedMemoryMetadataFetcher }
+  | { kind: 'ordinary' }
   | {
     kind: 'selected-recovery';
     recoveryGuard: RecoveryExecutionGuard;
-    metadataFetcher?: SharedMemoryMetadataFetcher;
     snapshotEvidencePolicy?: SharedMemorySyncSnapshotEvidencePolicy;
     snapshotRecoveryOrder?: 'manifest' | 'recent-balanced';
   }
@@ -344,6 +343,8 @@ export type SharedMemorySyncMode = Readonly<
 export interface SharedMemorySyncContext {
   /** One discriminant owns every selected-recovery-only capability. */
   mode: SharedMemorySyncMode;
+  /** Lifecycle callers supply a retained session; low-level callers may use the default page fetch. */
+  metadataFetcher?: SharedMemoryMetadataFetcher;
   ctx: OperationContext;
   remotePeerId: string;
   contextGraphIds: string[];
@@ -434,6 +435,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     contextGraphIds,
     createContextGraphSyncDeadline,
     fetchSyncPages,
+    metadataFetcher,
     processSharedMemoryBatch,
     ensureContextGraph,
     storeInsert,
@@ -454,7 +456,6 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
   const snapshotEvidencePolicy = context.mode.kind === 'selected-recovery'
     ? context.mode.snapshotEvidencePolicy
     : undefined;
-  const metadataFetcher = context.mode.metadataFetcher;
   const snapshotRecoveryOrder = context.mode.kind === 'selected-recovery'
     ? context.mode.snapshotRecoveryOrder ?? 'manifest'
     : 'manifest';

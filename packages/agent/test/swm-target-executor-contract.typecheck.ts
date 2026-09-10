@@ -51,40 +51,68 @@ const selectedWithoutMetadata: PublicSwmTargetV1 = { ...base, mode: { kind: 'sel
 void ordinaryWithoutMetadata;
 void selectedWithoutMetadata;
 
-declare const requesterBase: Omit<SharedMemorySyncContext, 'mode'>;
+declare const requesterBase: Omit<SharedMemorySyncContext, 'mode' | 'metadataFetcher'>;
 
 const ordinaryRequester: SharedMemorySyncContext = {
   ...requesterBase,
+  metadataFetcher,
   mode: { kind: 'ordinary' },
 };
 
 const selectedRequester: SharedMemorySyncContext = {
   ...requesterBase,
+  metadataFetcher,
   mode: {
     kind: 'selected-recovery',
     recoveryGuard,
-    metadataFetcher,
     snapshotRecoveryOrder: 'recent-balanced',
   },
 };
 
 const requesterWithoutGuard: SharedMemorySyncContext = {
   ...requesterBase,
+  metadataFetcher,
   // @ts-expect-error The requester boundary also requires a selected-recovery lease.
   mode: {
     kind: 'selected-recovery',
-    metadataFetcher,
     snapshotRecoveryOrder: 'recent-balanced',
   },
 };
 
 const ordinaryRequesterWithRecoveryState: SharedMemorySyncContext = {
   ...requesterBase,
+  metadataFetcher,
   // @ts-expect-error Ordinary requester mode cannot carry selected-recovery capabilities.
-  mode: { kind: 'ordinary', recoveryGuard, metadataFetcher },
+  mode: { kind: 'ordinary', recoveryGuard },
+};
+
+// Low-level callers retain their default fetch path in either algorithm mode.
+const ordinaryRequesterDefault: SharedMemorySyncContext = {
+  ...requesterBase,
+  mode: { kind: 'ordinary' },
+};
+const selectedRequesterDefault: SharedMemorySyncContext = {
+  ...requesterBase,
+  mode: { kind: 'selected-recovery', recoveryGuard },
+};
+
+const ordinaryModeWithMetadata: SharedMemorySyncContext['mode'] = {
+  kind: 'ordinary',
+  // @ts-expect-error Retrieval belongs to the context, independently of the mode.
+  metadataFetcher,
+};
+const selectedModeWithMetadata: SharedMemorySyncContext['mode'] = {
+  kind: 'selected-recovery',
+  recoveryGuard,
+  // @ts-expect-error Selected recovery does not change the retrieval dependency boundary.
+  metadataFetcher,
 };
 
 void ordinaryRequester;
 void selectedRequester;
 void requesterWithoutGuard;
 void ordinaryRequesterWithRecoveryState;
+void ordinaryRequesterDefault;
+void selectedRequesterDefault;
+void ordinaryModeWithMetadata;
+void selectedModeWithMetadata;
