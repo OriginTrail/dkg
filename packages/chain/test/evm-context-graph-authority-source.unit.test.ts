@@ -46,22 +46,40 @@ describe('ContextGraphStorage authority ABI source', () => {
     ['ContextGraphCreated', [
       9n, OWNER, NAME_HASH, [AGENT], 0n, 1, 0, AUTHORITY, 7n,
     ], {
-      name: 'ContextGraphCreated', contextGraphId: 9n, nameHash: NAME_HASH,
+      name: 'ContextGraphCreated',
+      contextGraphId: 9n,
+      owner: OWNER,
+      nameHash: NAME_HASH,
+      participantAgents: [AGENT],
+      accessPolicy: 1,
+      publishPolicy: 0,
+      publishAuthority: AUTHORITY,
+      publishAuthorityAccountId: '7',
     }],
     ['Transfer', [OWNER, NEXT_OWNER, 9n], {
       name: 'Transfer', contextGraphId: 9n, from: OWNER, to: NEXT_OWNER,
     }],
     ['PublishPolicyUpdated', [9n, 1, ethers.ZeroAddress, 0n], {
-      name: 'PublishPolicyUpdated', contextGraphId: 9n,
+      name: 'PublishPolicyUpdated',
+      contextGraphId: 9n,
+      publishPolicy: 1,
+      publishAuthority: null,
+      publishAuthorityAccountId: '0',
     }],
     ['PublishAuthorityUpdated', [9n, AUTHORITY, 7n], {
-      name: 'PublishAuthorityUpdated', contextGraphId: 9n,
+      name: 'PublishAuthorityUpdated',
+      contextGraphId: 9n,
+      publishAuthority: AUTHORITY,
+      publishAuthorityAccountId: '7',
     }],
     ['AgentParticipantAdded', [9n, AGENT], {
-      name: 'AgentParticipantAdded', contextGraphId: 9n,
+      name: 'AgentParticipantAdded', contextGraphId: 9n, agent: AGENT,
     }],
     ['AgentParticipantRemoved', [9n, AGENT], {
-      name: 'AgentParticipantRemoved', contextGraphId: 9n,
+      name: 'AgentParticipantRemoved', contextGraphId: 9n, agent: AGENT,
+    }],
+    ['ContextGraphDeactivated', [9n], {
+      name: 'ContextGraphDeactivated', contextGraphId: 9n,
     }],
   ] as const)('decodes a real %s log into the closed index event', (
     name,

@@ -91,6 +91,13 @@ const validCursor = Object.freeze({
 
 const validState = Object.freeze({
   contextGraphId: '9',
+  owner: OWNER,
+  active: true,
+  accessPolicy: 1 as const,
+  publishPolicy: 0 as const,
+  publishAuthority: AUTHORITY,
+  publishAuthorityAccountId: '7',
+  participantAgents: Object.freeze([OWNER]),
   nameHash: NAME_9,
   ownershipEra: 0,
   policyVersion: 0,
