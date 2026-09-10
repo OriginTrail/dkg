@@ -3,7 +3,7 @@ import type { DkgConfig, DkgHomeFiles } from './config.js';
 
 export type DkgConfigUpdate = (
   current: Readonly<DkgConfig>,
-) => DkgConfig | Promise<DkgConfig>;
+) => DkgConfig;
 
 export type DkgConfigActivation = (
   next: Readonly<DkgConfig>,
@@ -12,7 +12,9 @@ export type DkgConfigActivation = (
 
 /**
  * The explicit owner of one daemon's durable and in-memory configuration.
- * Every mutation is serialized and derived from the latest immutable commit.
+ * Every commit is serialized and derived from the latest immutable snapshot.
+ * Updaters are deliberately synchronous: discovery, probes, and other workflow
+ * work must finish before entering this short rebase/publish/activate section.
  */
 export class DkgConfigStore {
   readonly files: DkgHomeFiles;
@@ -31,9 +33,9 @@ export class DkgConfigStore {
     update: DkgConfigUpdate,
     activate: DkgConfigActivation = () => undefined,
   ): Promise<Readonly<DkgConfig>> {
-    return configFileStore(this.files.configPath).transition(async () => {
+    return configFileStore(this.files.configPath).transition(() => {
       const previous = this.#current;
-      const next = immutableConfig(await update(previous));
+      const next = immutableConfig(update(previous));
       return {
         contents: JSON.stringify(next, null, 2) + '\n',
         activate: () => {

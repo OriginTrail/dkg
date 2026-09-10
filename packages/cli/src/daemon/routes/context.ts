@@ -120,7 +120,8 @@ export interface RequestContext {
   publisherControl: VmPublisherControl;
   /** Lifecycle-owned runtime and readiness as one correlated state. */
   publisherState: PublisherState;
-  config: Readonly<DkgConfig>;
+  /** Live read-only projection of `configStore.current`; never an independent snapshot. */
+  readonly config: Readonly<DkgConfig>;
   /** Canonical owner of the daemon's immutable committed configuration. */
   configStore: DkgConfigStore;
   /** Immutable RFC-64 activation resolved once during daemon startup. */
@@ -175,9 +176,9 @@ export interface RequestContext {
 export type RequestContextInputFields = Omit<RequestContext, typeof REQUEST_CONTEXT_BRAND>;
 
 export function currentDaemonConfig(
-  ctx: Pick<RequestContext, 'config' | 'configStore'>,
+  ctx: Pick<RequestContext, 'configStore'>,
 ): Readonly<DkgConfig> {
-  return ctx.configStore?.current ?? ctx.config;
+  return ctx.configStore.current;
 }
 
 /**
@@ -185,28 +186,14 @@ export function currentDaemonConfig(
  * canonical configuration owner.
  */
 export async function updateDaemonConfig<T>(
-  ctx: Pick<RequestContext, 'config' | 'configStore'>,
-  mutate: (draft: DkgConfig) => T | Promise<T>,
-  options: { commitOnError?: boolean } = {},
+  ctx: Pick<RequestContext, 'configStore'>,
+  mutate: (draft: DkgConfig) => T,
 ): Promise<T> {
-  const store = ctx.configStore;
-  if (!store) throw new Error('Canonical daemon configuration store is required');
-
   let result!: T;
-  let completed = false;
-  let deferredError: unknown;
-  await store.update(async current => {
+  await ctx.configStore.update(current => {
     const draft = mutableConfigSnapshot(current);
-    try {
-      result = await mutate(draft);
-      completed = true;
-    } catch (error) {
-      if (!options.commitOnError) throw error;
-      deferredError = error;
-    }
+    result = mutate(draft);
     return draft;
   });
-  if (deferredError !== undefined) throw deferredError;
-  if (!completed) throw new Error('Configuration update did not complete');
   return result;
 }

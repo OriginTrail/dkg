@@ -67,6 +67,7 @@ describe('canonical request actor route identity', () => {
       res,
       agent,
       authentication: authentication(),
+      configStore: { current: {} },
     } as unknown as HandleRequestInput);
 
     expect(resolveAgentAddress).toHaveBeenCalledTimes(1);
@@ -97,6 +98,7 @@ describe('canonical request actor route identity', () => {
       res,
       agent,
       authentication: authentication(),
+      configStore: { current: {} },
     } as unknown as HandleRequestInput);
 
     expect(resolveAgentAddress).toHaveBeenCalledTimes(1);

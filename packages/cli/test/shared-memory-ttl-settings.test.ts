@@ -84,18 +84,8 @@ describe('shared-memory TTL settings HTTP boundary', () => {
       .every(value => Object.isFrozen(value))).toBe(true);
     expect(() => { (initial as DkgConfig).name = 'illegal external mutation'; }).toThrow(TypeError);
 
-    let releaseFirst!: () => void;
-    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
-    let firstEntered!: () => void;
-    const entered = new Promise<void>(resolve => { firstEntered = resolve; });
-    const first = configStore.update(async current => {
-      firstEntered();
-      await firstGate;
-      return { ...current, name: 'first ordered update' };
-    });
-    await entered;
+    const first = configStore.update(current => ({ ...current, name: 'first ordered update' }));
     const second = configStore.update(current => ({ ...current, workspaceTtlMs: 2 * DAY }));
-    releaseFirst();
     await Promise.all([first, second]);
 
     expect(configStore.current).toMatchObject({

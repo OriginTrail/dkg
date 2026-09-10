@@ -175,4 +175,42 @@ describe('configuration file publication', () => {
     expect(JSON.parse(await fs.readFile(path, 'utf8'))).toMatchObject({ name: 'captured at call time' });
   });
 
+  it(
+    'saveConfig updates a relative symlink target without replacing config.json', async () => {
+      await fs.unlink(path);
+      const targetDirectory = join(directory, 'state');
+      const target = join(targetDirectory, 'active-config.json');
+      await fs.mkdir(targetDirectory);
+      await fs.writeFile(target, JSON.stringify({ name: 'old' }));
+      await fs.symlink(join('state', 'active-config.json'), path);
+
+      await new DkgHomeFiles(directory).saveConfig({ name: 'symlinked-save' } as DkgConfig);
+
+      expect((await fs.lstat(path)).isSymbolicLink()).toBe(true);
+      expect(await fs.readlink(path)).toBe(join('state', 'active-config.json'));
+      expect(JSON.parse(await fs.readFile(target, 'utf8'))).toMatchObject({ name: 'symlinked-save' });
+    },
+  );
+
+  it(
+    'transactional updates and rollback preserve a symlinked config.json', async () => {
+      await fs.unlink(path);
+      const targetDirectory = join(directory, 'state');
+      const target = join(targetDirectory, 'active-config.json');
+      await fs.mkdir(targetDirectory);
+      await fs.writeFile(target, 'old through symlink\n');
+      await fs.symlink(join('state', 'active-config.json'), path);
+
+      await expect(writeConfigSettingsTransaction(path, 'candidate\n', () => {
+        expect(readFileSync(path, 'utf8')).toBe('candidate\n');
+        throw new Error('activation failed');
+      })).rejects.toThrow('activation failed');
+
+      expect((await fs.lstat(path)).isSymbolicLink()).toBe(true);
+      expect(await fs.readlink(path)).toBe(join('state', 'active-config.json'));
+      expect(await fs.readFile(target, 'utf8')).toBe('old through symlink\n');
+      expect(await fs.readdir(targetDirectory)).toEqual(['active-config.json']);
+    },
+  );
+
 });

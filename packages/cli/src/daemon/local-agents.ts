@@ -35,6 +35,7 @@ import {
   OpenClawChannelTarget,
   OpenClawChannelHealthReport,
   OpenClawUiAttachDeps,
+  type LocalAgentAttachStatePatch,
   cancelPendingLocalAgentAttachJob,
   scheduleOpenClawUiAttachJob,
   isOpenClawUiAttachCancelled,
@@ -675,14 +676,14 @@ export async function connectLocalAgentIntegrationFromUi(
       };
     }
 
-    const persistHermesIntegrationState = async (patch: Record<string, unknown>): Promise<LocalAgentIntegrationRecord | null> => {
+    const persistHermesIntegrationState = async (patch: LocalAgentAttachStatePatch): Promise<LocalAgentIntegrationRecord | null> => {
       const current = getLocalAgentIntegration(config, requested.id);
       if (current?.enabled === false && patch.enabled !== false) {
         return null;
       }
       const integration = updateLocalAgentIntegration(config, requested.id, patch);
       if (saveConfigState) {
-        await saveConfigState(config);
+        await saveConfigState(config, patch);
       }
       return integration;
     };
@@ -799,14 +800,14 @@ export async function connectLocalAgentIntegrationFromUi(
     };
   }
 
-  const persistIntegrationState = async (patch: Record<string, unknown>): Promise<LocalAgentIntegrationRecord | null> => {
+  const persistIntegrationState = async (patch: LocalAgentAttachStatePatch): Promise<LocalAgentIntegrationRecord | null> => {
     const current = getLocalAgentIntegration(config, requested.id);
     if (current?.enabled === false && patch.enabled !== false) {
       return null;
     }
     const integration = updateLocalAgentIntegration(config, requested.id, patch);
     if (saveConfigState) {
-      await saveConfigState(config);
+      await saveConfigState(config, patch);
     }
     return integration;
   };

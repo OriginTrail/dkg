@@ -123,15 +123,16 @@ function makeAgentMock(opts: { store: OxigraphStore; cgs: Array<{ name: string; 
 
 function makeCtx(path: string, agent: ReturnType<typeof makeAgentMock>) {
   const url = new URL(path, 'http://127.0.0.1');
+  const config = {
+    name: 'backfill-test',
+    nodeRole: 'core',
+    chain: { type: 'evm', rpcUrl: 'https://test.example/rpc', hubAddress: '0x0000000000000000000000000000000000000001', chainId: 'hardhat:31337' },
+  };
   return {
     agent,
     publisherControl: {},
     publisherRuntime: null,
-    config: {
-      name: 'backfill-test',
-      nodeRole: 'core',
-      chain: { type: 'evm', rpcUrl: 'https://test.example/rpc', hubAddress: '0x0000000000000000000000000000000000000001', chainId: 'hardhat:31337' },
-    },
+    configStore: { current: config },
     startedAt: Date.now() - 1000,
     dashDb: {},
     opWallets: { wallets: [] },

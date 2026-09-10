@@ -2,7 +2,7 @@ import { constants } from 'node:fs';
 import { copyFile, mkdir, rename, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { writeFileAtomic } from './fs-utils.js';
+import { resolveAtomicWriteDestination, writeFileAtomic } from './fs-utils.js';
 
 export interface ConfigFileTransition<T> {
   readonly contents: string;
@@ -44,25 +44,26 @@ export class ConfigFileStore {
   }
 
   async #publishTransaction<T>(contents: string, activate: () => T): Promise<T> {
+    const destination = await resolveAtomicWriteDestination(this.path);
     let backup: string | undefined;
     let preserveBackup = false;
     try {
-      await mkdir(dirname(this.path), { recursive: true });
-      const candidate = `${this.path}.${randomUUID()}.rollback`;
+      await mkdir(dirname(destination), { recursive: true });
+      const candidate = `${destination}.${randomUUID()}.rollback`;
       try {
-        await copyFile(this.path, candidate, constants.COPYFILE_EXCL);
+        await copyFile(destination, candidate, constants.COPYFILE_EXCL);
         backup = candidate;
       } catch (error) {
         await unlink(candidate).catch(() => undefined);
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       }
-      await writeFileAtomic(this.path, contents, { writeOptions: { flag: 'wx', mode: 0o600 } });
+      await writeFileAtomic(destination, contents, { writeOptions: { flag: 'wx', mode: 0o600 } });
       try {
         return activate();
       } catch (error) {
         try {
-          if (backup) await rename(backup, this.path);
-          else await unlink(this.path);
+          if (backup) await rename(backup, destination);
+          else await unlink(destination);
         } catch (rollbackError) {
           preserveBackup = true;
           throw new AggregateError([error, rollbackError],

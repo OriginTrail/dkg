@@ -3603,7 +3603,6 @@ async function runDaemonInnerWithStartupOwnership(
         agent,
         publisherControl,
         publisherState,
-        config,
         configStore,
         rfc64Catalog,
         rfc64PublicCatalog,
