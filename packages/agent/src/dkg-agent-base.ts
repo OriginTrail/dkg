@@ -33,6 +33,7 @@ import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
+import type { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
 import {
   SwmTargetExecutorSessionFactoryV1,
@@ -276,8 +277,8 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
 import {
   reconcileContextGraph,
-  VmReconcileDispatcher,
   RecentUalSet,
+  type VmReconcileSchedulingRuntime,
   type ChainReconcilerDeps,
   type OrdinalOutcome,
 } from './chain-reconciler.js';
@@ -979,6 +980,8 @@ export class DKGAgentBase {
       ? configured
       : 10 * 60_000;
   })();
+  /** Maximum unbound subscription read-authority/binding attempts per periodic sweep. */
+  static readonly VM_RECONCILE_UNBOUND_BATCH_SIZE = 8;
   static readonly VM_RECONCILE_CACHE_MAX_ENTRIES = readPositiveSafeIntegerEnv(
     'DKG_VM_RECONCILE_CACHE_MAX_ENTRIES',
     1_000,
@@ -1077,8 +1080,8 @@ export class DKGAgentBase {
   protected swmCleanupTimer: ReturnType<typeof setInterval> | null = null;
   /** Phase B — periodic chain-driven VM reconciliation sweep timer. */
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;
-  /** Phase B — unified per-CG coalescing and node-wide admission policy. */
-  protected vmReconcileDispatcher?: VmReconcileDispatcher<ContextGraphReconcileResult>;
+  /** One host-owned runtime for foreground dispatch and retained sweep admission. */
+  protected vmReconcileScheduling?: VmReconcileSchedulingRuntime<ContextGraphReconcileResult>;
   /** Closed dispatcher retained until every physically active worker settles. */
   protected vmReconcileRetirement: Promise<void> | null = null;
   /** Reconcile engines may outlive a caller's abort race; stop drains these before store teardown. */
@@ -1090,12 +1093,8 @@ export class DKGAgentBase {
   protected vmReconcileRuntimeReady = false;
   /** A timed-out physical retirement quarantines this instance until stop is retried. */
   protected vmReconcileShutdownBlocked = false;
-  /** Next eligible CG index for bounded periodic-sweep admission. */
-  protected vmReconcileSweepCursor = 0;
   /** Deterministically staggered cold-start prime, separate from the interval. */
   protected vmReconcileStartupTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Process-wide sweep single-flight; interval/startup callers join this promise. */
-  protected vmReconcileSweepInFlight: Promise<void> | null = null;
   /** Phase B — in-memory reconcile cursor per local CG id (watermark + `ahead`). */
   protected readonly reconcileCursors = new Map<string, CursorState>();
   /**
@@ -1215,6 +1214,10 @@ export class DKGAgentBase {
   protected readonly finalizationRuntime = new FinalizationRuntime();
   /** Single owner for RFC-64 public transport, authority refresh, and persistence. */
   protected rfc64PublicCatalogOwnerV1!: Rfc64PublicCatalogWorkloadOwnerV1;
+  /** Authority-read scheduling is owned by the public-catalog workload owner. */
+  protected get rfc64AuthorityReadCoordinatorV1() {
+    return this.rfc64PublicCatalogOwnerV1.authorityReads;
+  }
   /** Compatibility view for catalog methods that operate on the active service. */
   protected get rfc64PublicCatalogServiceV1(): Rfc64PublicCatalogServiceV1 | undefined {
     return this.rfc64PublicCatalogOwnerV1?.service;
@@ -1237,6 +1240,9 @@ export class DKGAgentBase {
   /** Canonical dormant classification; public status arrays are projections. */
   protected readonly contextGraphSubscriptionDormancyById =
     new Map<string, ContextGraphDormancyReason>();
+  /** Detached owner for post-readiness persisted-subscription authority recovery. */
+  protected contextGraphSubscriptionAuthorityRecoveryRuntime?:
+    CoalescingRecurringTask;
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();

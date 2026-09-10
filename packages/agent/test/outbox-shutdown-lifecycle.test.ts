@@ -4,7 +4,7 @@ import { startProverLoop, type TickOutcome } from '@origintrail-official/dkg-ran
 import { DKGAgent } from '../src/dkg-agent.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { RandomSamplingShutdownTimeoutError } from '../src/random-sampling-bind.js';
-import { VmReconcileDispatcher } from '../src/chain-reconciler.js';
+import { VmReconcileSchedulingRuntime } from '../src/chain-reconciler.js';
 import { FinalizationRuntime } from '../src/finalization-runtime.js';
 import {
   ContextGraphMembershipPersistScheduler,
@@ -242,13 +242,14 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
   it('closes reconcile admission and cancels queued jobs before store teardown', async () => {
     let releaseActive!: () => void;
     let queuedStarted = false;
-    const dispatcher = new VmReconcileDispatcher(async (key) => {
+    const scheduling = new VmReconcileSchedulingRuntime(async (key) => {
       if (key === 'active') {
         await new Promise<void>((resolve) => { releaseActive = resolve; });
       } else if (key === 'queued') {
         queuedStarted = true;
       }
     }, () => undefined);
+    const { dispatcher } = scheduling;
     const active = dispatcher.triggerManual('active');
     const queuedOutcome = dispatcher.triggerManual('queued').catch((error) => error);
     const closeStore = vi.fn(async () => {});
@@ -261,7 +262,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
           expect(agent.vmReconcileRotationClosed).toBe(true);
         }),
       },
-      vmReconcileDispatcher: dispatcher,
+      vmReconcileScheduling: scheduling,
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
       messenger: { stopOutboxDrain: vi.fn(async () => {}) },
@@ -301,10 +302,11 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     try {
       let release!: () => void;
       const activeGate = new Promise<void>((resolve) => { release = resolve; });
-      const dispatcher = new VmReconcileDispatcher(
+      const scheduling = new VmReconcileSchedulingRuntime(
         async () => activeGate,
         () => undefined,
       );
+      const { dispatcher } = scheduling;
       void dispatcher.triggerManual('stuck');
       await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -315,7 +317,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       Object.assign(agent, {
         started: true,
         chainPoller: null,
-        vmReconcileDispatcher: dispatcher,
+        vmReconcileScheduling: scheduling,
         coreHostRecordingsClosed: false,
         drainCoreHostRecordings: vi.fn(async () => {}),
         messenger: { stopOutboxDrain: vi.fn(async () => {}) },

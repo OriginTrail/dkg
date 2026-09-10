@@ -60,6 +60,19 @@ import {
 import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import {
+  Rfc64CatalogReplayConnectionRuntimeV1,
+  type Rfc64CatalogReplayConnectionReservationV1,
+} from './rfc64/catalog-replay-connection-runtime-v1.js';
+import {
+  Rfc64CatalogReplayRecoveryRuntimeV1,
+  type Rfc64CatalogReplayPeerDemandV1,
+  type Rfc64CatalogReplayPeerFenceLeaseV1,
+} from './rfc64/catalog-replay-recovery-runtime-v1.js';
+export { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from
+  './rfc64/catalog-limits-v1.js';
+import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from
+  './rfc64/catalog-limits-v1.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
 import {
@@ -71,7 +84,9 @@ import type {
   AcceptRfc64CatalogAccessSnapshotInputV1,
   AcceptedRfc64CatalogAccessSnapshotV1,
 } from './rfc64/catalog-access-policy-v1.js';
-import type { Rfc64PublicCatalogReceiverReconcilerV1 } from './rfc64/public-catalog-receiver-v1.js';
+import type {
+  Rfc64PublicCatalogCurrentReceiverReconcilerV1,
+} from './rfc64/public-catalog-receiver-v1.js';
 import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
 import {
   Rfc64PublicCatalogServiceV1,
@@ -468,7 +483,6 @@ const rfc64SystemContextGraphIdsV1 = new Set<string>(Object.values(SYSTEM_CONTEX
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_V1 = 64;
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_PER_PEER_V1 = 4;
 export const RFC64_CATALOG_TARGET_MAX_ENTRIES_V1 = 1_024;
-export const RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 = 64;
 export const RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1 = 64;
 
 interface Rfc64CatalogReplayRuntimeV1 {
@@ -500,60 +514,12 @@ type Rfc64CatalogReplayAdmissionV1 = Readonly<{
 const rfc64CatalogReplayRuntimesV1 = new WeakMap<DKGAgent, Rfc64CatalogReplayRuntimeV1>();
 const rfc64CatalogReplaySnapshotRuntimesV1 =
   new WeakMap<DKGAgent, Rfc64CatalogReplaySnapshotRuntimeOwnerV1>();
-
-interface Rfc64CatalogReplayProgressV1 {
-  readonly policyDigest: Digest32V1;
-  readonly pendingPeers: Set<string>;
-  token: number;
-  active: boolean;
-  failed: boolean;
-  completion: Promise<Readonly<{ requested: number; failed: number }>> | null;
-}
-
-const rfc64CatalogReplayProgressV1 =
-  new WeakMap<DKGAgent, Map<string, Rfc64CatalogReplayProgressV1>>();
-const rfc64CatalogReplayStatusRevisionV1 = new WeakMap<DKGAgent, number>();
-
-function bumpRfc64CatalogReplayStatusRevisionV1(agent: DKGAgent): void {
-  rfc64CatalogReplayStatusRevisionV1.set(
-    agent,
-    (rfc64CatalogReplayStatusRevisionV1.get(agent) ?? 0) + 1,
-  );
-}
-
-function rfc64CatalogReplayProgressForV1(
-  agent: DKGAgent,
-  contextGraphId: string,
-  policyDigest: Digest32V1,
-): Rfc64CatalogReplayProgressV1 {
-  let byContextGraph = rfc64CatalogReplayProgressV1.get(agent);
-  if (byContextGraph === undefined) {
-    byContextGraph = new Map();
-    rfc64CatalogReplayProgressV1.set(agent, byContextGraph);
-  }
-  let progress = byContextGraph.get(contextGraphId);
-  if (progress === undefined || progress.policyDigest !== policyDigest) {
-    progress = {
-      policyDigest,
-      pendingPeers: new Set(),
-      token: 0,
-      active: false,
-      failed: false,
-      completion: null,
-    };
-    byContextGraph.set(contextGraphId, progress);
-  }
-  return progress;
-}
-
-function clearRfc64CatalogReplayProgressV1(
-  agent: DKGAgent,
-  contextGraphId: string,
-): void {
-  if (rfc64CatalogReplayProgressV1.get(agent)?.delete(contextGraphId) === true) {
-    bumpRfc64CatalogReplayStatusRevisionV1(agent);
-  }
-}
+const rfc64CatalogReplayConnectionRuntimesV1 =
+  new WeakMap<DKGAgent, Rfc64CatalogReplayConnectionRuntimeV1>();
+const rfc64CatalogReplayRecoveryRuntimesV1 = new WeakMap<
+  DKGAgent,
+  Rfc64CatalogReplayRecoveryRuntimeV1<Rfc64PublicCatalogHeadAnnouncementV1>
+>();
 
 interface Rfc64CatalogTrackedTargetV1 {
   announcement: Rfc64PublicCatalogHeadAnnouncementV1;
@@ -1181,13 +1147,121 @@ function sumDecimalCountsV1(values: readonly string[]): string {
 }
 
 export class Rfc64CatalogMethods extends DKGAgentBase {
+  /** Stable recovery capabilities are captured once per agent-owned runtime. */
+  private rfc64CatalogReplayRecoveryRuntimeV1(
+    this: DKGAgent,
+  ): Rfc64CatalogReplayRecoveryRuntimeV1<Rfc64PublicCatalogHeadAnnouncementV1> {
+    let runtime = rfc64CatalogReplayRecoveryRuntimesV1.get(this);
+    if (runtime !== undefined) return runtime;
+    runtime = new Rfc64CatalogReplayRecoveryRuntimeV1({
+      requestPeer: async (contextGraphId, remotePeerId) => {
+        const service = this.rfc64PublicCatalogServiceV1;
+        const networkId = (
+          this.config.rfc64CatalogDeploymentProfile?.networkId
+          ?? this.config.networkIdentity?.chainId
+        ) as NetworkIdV1 | undefined;
+        if (service === undefined || networkId === undefined || networkId === 'none') {
+          throw new Error('RFC-64 catalog replay recovery is not active');
+        }
+        try {
+          const completion = await service.requestCatalogHeadReplay({
+            remotePeerId,
+            networkId,
+            contextGraphId: contextGraphId as ContextGraphIdV1,
+          });
+          return Object.freeze({
+            status: 'completed' as const,
+            targets: completion.heads,
+          });
+        } catch (error) {
+          if (
+            error instanceof Rfc64PublicCatalogTransportErrorV1
+            && error.code === 'catalog-transport-policy-denied'
+          ) return Object.freeze({ status: 'not-provider' as const });
+          throw error;
+        }
+      },
+      whenReceiverIdle: async () => {
+        await this.rfc64PublicCatalogServiceV1?.whenReceiverIdle();
+      },
+      targetIdentity: rfc64CatalogTargetExactIdentityKeyV1,
+      parityFailed: async (contextGraphId, promised) => {
+        const persistence = this.rfc64PersistenceV1;
+        if (persistence === undefined) return true;
+        const applied = new Map(
+          (await loadRfc64OperationalAppliedHeadsV1(persistence))
+            .filter((head) => head.contextGraphId === contextGraphId)
+            .map((head) => [head.scopeKey, head]),
+        );
+        return promised.some((target) => {
+          const current = applied.get(rfc64CatalogTargetScopeKeyV1(target));
+          if (current === undefined) return true;
+          const currentVersion = BigInt(current.snapshot.catalogVersion);
+          const promisedVersion = BigInt(target.catalogVersion);
+          return currentVersion < promisedVersion || (
+            currentVersion === promisedVersion
+            && current.snapshot.currentCatalogHeadDigest !== target.catalogHeadObjectDigest
+          );
+        });
+      },
+    });
+    rfc64CatalogReplayRecoveryRuntimesV1.set(this, runtime);
+    return runtime;
+  }
+
+  /**
+   * Prepare one catalog-owned replay transition before asynchronous network
+   * admission. The returned composite is the lifecycle listener's only RFC-64
+   * responsibility: admit it or reject it.
+   */
+  prepareRfc64CatalogConnectionReplayV1(
+    this: DKGAgent,
+    peerId: string,
+  ): Rfc64CatalogReplayConnectionReservationV1 | null {
+    let runtime = rfc64CatalogReplayConnectionRuntimesV1.get(this);
+    if (runtime === undefined) {
+      runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
+        selectContextGraphIds: () => [
+          ...this.readRfc64CatalogResponsibilitiesV1()
+            .filter((responsibility) => responsibility.active && responsibility.mode !== 'legacy')
+            .map((responsibility) => responsibility.contextGraphId),
+          ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority)
+            .filter((contextGraphId) => {
+              const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
+              return authority.active && authority.mode !== 'legacy';
+            }),
+        ],
+        acquireFence: (contextGraphId, replayPeerId) =>
+          this.markRfc64CatalogReplayPeerPendingV1(contextGraphId, replayPeerId),
+        reannounce: (replayPeerId) =>
+          this.reannounceRfc64CatalogHeadsToPeerV1(replayPeerId),
+        replay: (contextGraphId, replayDemand) =>
+          this.requestRfc64CatalogHeadReplayForConnectionDemandV1(
+            contextGraphId,
+            replayDemand,
+          ),
+        warn: (message) => this.log.warn(createOperationContext('system'), message),
+      });
+      rfc64CatalogReplayConnectionRuntimesV1.set(this, runtime);
+    }
+    return runtime.prepare(peerId);
+  }
+
+  /** Release live-session replay debounce after the peer is fully disconnected. */
+  closeRfc64CatalogConnectionReplaySessionV1(
+    this: DKGAgent,
+    peerId: string,
+  ): void {
+    rfc64CatalogReplayConnectionRuntimesV1.get(this)?.peerDisconnected(peerId);
+  }
+
   /** Forget process-local operational targets when receiver ownership ends. */
   clearRfc64CatalogOperationalTargetsV1(
     this: DKGAgent,
     contextGraphId: string,
   ): void {
     rfc64CatalogTargetAnnouncementsV1.get(this)?.clearContextGraph(contextGraphId);
-    clearRfc64CatalogReplayProgressV1(this, contextGraphId);
+    this.rfc64CatalogReplayRecoveryRuntimeV1().clear(contextGraphId);
   }
 
   /** Fence operational completeness synchronously when a replay-capable peer connects. */
@@ -1195,44 +1269,23 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
     peerId: string,
-  ): void {
+  ): Rfc64CatalogReplayPeerFenceLeaseV1 | null {
     const service = this.rfc64PublicCatalogServiceV1;
     const networkId = (
       this.config.rfc64CatalogDeploymentProfile?.networkId
       ?? this.config.networkIdentity?.chainId
     ) as NetworkIdV1 | undefined;
-    if (service === undefined || networkId === undefined || networkId === 'none') return;
+    if (service === undefined || networkId === undefined || networkId === 'none') return null;
     const accepted = service.acceptedPolicySnapshot(
       networkId,
       contextGraphId as ContextGraphIdV1,
     );
-    if (accepted === null) return;
-    const progress = rfc64CatalogReplayProgressForV1(
-      this,
+    if (accepted === null) return null;
+    return this.rfc64CatalogReplayRecoveryRuntimeV1().markPeerPending(
       contextGraphId,
       accepted.policyDigest,
+      peerId,
     );
-    progress.pendingPeers.add(peerId);
-    if (!progress.active) {
-      progress.active = true;
-      progress.failed = false;
-      bumpRfc64CatalogReplayStatusRevisionV1(this);
-    }
-  }
-
-  /** Release a synchronous connection fence when admission rejects that peer. */
-  clearRfc64CatalogReplayPeerPendingV1(
-    this: DKGAgent,
-    contextGraphId: string,
-    peerId: string,
-  ): void {
-    const progress = rfc64CatalogReplayProgressV1.get(this)?.get(contextGraphId);
-    if (progress === undefined) return;
-    progress.pendingPeers.delete(peerId);
-    if (progress.pendingPeers.size === 0 && progress.completion === null && progress.active) {
-      progress.active = false;
-      bumpRfc64CatalogReplayStatusRevisionV1(this);
-    }
   }
 
   /** Desired RFC-64 selection derived from the normal live CG lifecycle. */
@@ -1293,7 +1346,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           : 'operator-override',
       });
     }));
-    let replaySnapshotRevision = rfc64CatalogReplayStatusRevisionV1.get(this) ?? 0;
+    const replayRecovery = this.rfc64CatalogReplayRecoveryRuntimeV1();
+    let replaySnapshotRevision = replayRecovery.revision;
     let appliedByContextGraph = persistence === undefined
       ? new Map<string, readonly Readonly<Rfc64OperationalAppliedHeadV1>[]>()
       : groupRfc64OperationalAppliedHeadsV1(
@@ -1301,15 +1355,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         );
     if (
       persistence !== undefined
-      && replaySnapshotRevision !== (rfc64CatalogReplayStatusRevisionV1.get(this) ?? 0)
+      && replaySnapshotRevision !== replayRecovery.revision
     ) {
-      replaySnapshotRevision = rfc64CatalogReplayStatusRevisionV1.get(this) ?? 0;
+      replaySnapshotRevision = replayRecovery.revision;
       appliedByContextGraph = groupRfc64OperationalAppliedHeadsV1(
         await loadRfc64OperationalAppliedHeadsV1(persistence),
       );
     }
-    const replaySnapshotUnstable = replaySnapshotRevision
-      !== (rfc64CatalogReplayStatusRevisionV1.get(this) ?? 0);
+    const replaySnapshotUnstable = replaySnapshotRevision !== replayRecovery.revision;
     const progressByContextGraph = rfc64CatalogAuthorityProgressV1.get(this);
     const receiverStats = service?.stats().receiver;
     return Object.freeze(selections.map((selection) => {
@@ -1320,12 +1373,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         )
         : null;
       const progress = progressByContextGraph?.get(selection.contextGraphId);
-      const replayProgress = rfc64CatalogReplayProgressV1
-        .get(this)?.get(selection.contextGraphId);
-      const currentReplayProgress = accepted !== null
-        && replayProgress?.policyDigest === accepted.policyDigest
-        ? replayProgress
-        : undefined;
+      const currentReplayProgress = accepted === null
+        ? null
+        : replayRecovery.status(selection.contextGraphId, accepted.policyDigest);
       const replayActive = replaySnapshotUnstable || currentReplayProgress?.active === true;
       const replayFailed = currentReplayProgress?.failed === true;
       const replayUnsettled = replayActive || replayFailed;
@@ -1923,17 +1973,29 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       if (networkId === undefined || networkId === 'none') {
         throw new Error('RFC-64 release-native authority requires a trusted chain network');
       }
-      const onChainId = await this.getContextGraphOnChainId(contextGraphId);
+      const registeredAuthorityRead = await this.rfc64AuthorityReadCoordinatorV1.run(
+        signal,
+        async (readSignal) => {
+          const onChainId = await this.getContextGraphOnChainId(contextGraphId);
+          if (readSignal?.aborted) throw readSignal.reason;
+          if (onChainId === null) return null;
+          const reader = requireRfc64ContextGraphAuthorityReaderV1(
+            this.contextGraphAuthorityReaderCapability,
+          );
+          const expectedOnChainId = BigInt(onChainId);
+          const snapshot = parseRfc64AuthoritySnapshotV1(
+            await reader.getContextGraphAuthoritySnapshot(
+              expectedOnChainId,
+              { signal: readSignal },
+            ),
+            expectedOnChainId,
+          );
+          return { expectedOnChainId, snapshot } as const;
+        },
+      );
       let authority: Rfc64ReleaseNativeAuthoritySnapshotV1;
-      if (onChainId !== null) {
-        const reader = requireRfc64ContextGraphAuthorityReaderV1(
-          this.contextGraphAuthorityReaderCapability,
-        );
-        const expectedOnChainId = BigInt(onChainId);
-        const snapshot = parseRfc64AuthoritySnapshotV1(
-          await reader.getContextGraphAuthoritySnapshot(expectedOnChainId),
-          expectedOnChainId,
-        );
+      if (registeredAuthorityRead !== null) {
+        const { snapshot } = registeredAuthorityRead;
         if (signal?.aborted) throw signal.reason;
         const explicitNameHash = this.subscribedContextGraphs.get(contextGraphId)?.onChainHash;
         const expectedNameHash = explicitNameHash === undefined
@@ -2450,8 +2512,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       this.rfc64PublicCatalogReconciliationFailuresV1.clear();
       rfc64DirectAcceptedCompatibilityV1.delete(this);
       rfc64CatalogReplayRuntimesV1.delete(this);
-      rfc64CatalogReplayProgressV1.delete(this);
-      rfc64CatalogReplayStatusRevisionV1.delete(this);
+      rfc64CatalogReplayRecoveryRuntimesV1.get(this)?.reset();
+      rfc64CatalogReplayRecoveryRuntimesV1.delete(this);
+      rfc64CatalogReplayConnectionRuntimesV1.get(this)?.reset();
+      rfc64CatalogReplayConnectionRuntimesV1.delete(this);
       rfc64CatalogTargetAnnouncementsV1.get(this)?.resetAll();
       rfc64CatalogTargetAnnouncementsV1.delete(this);
     }
@@ -2740,6 +2804,45 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<Readonly<{ requested: number; failed: number }>> {
+    return this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
+      kind: 'connected-peers',
+    });
+  }
+
+  /** Continue only already-owned recovery demand without reseeding peers. */
+  async continueRfc64CatalogHeadReplayRecoveryV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<Readonly<{ requested: number; failed: number }>> {
+    return this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
+      kind: 'pending-recovery',
+    });
+  }
+
+  /** Consume one admission-owned connection demand without a full peer scan. */
+  async requestRfc64CatalogHeadReplayForConnectionDemandV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    replayDemand: Rfc64CatalogReplayPeerDemandV1,
+  ): Promise<Readonly<{ requested: number; failed: number }>> {
+    return this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
+      kind: 'connection-demand',
+      replayDemand,
+    });
+  }
+
+  private async requestRfc64CatalogHeadReplayV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    request: Readonly<
+      | { kind: 'connected-peers' }
+      | { kind: 'pending-recovery' }
+      | {
+          kind: 'connection-demand';
+          replayDemand: Rfc64CatalogReplayPeerDemandV1;
+        }
+    >,
+  ): Promise<Readonly<{ requested: number; failed: number }>> {
     const service = this.rfc64PublicCatalogServiceV1;
     const networkId = (
       this.config.rfc64CatalogDeploymentProfile?.networkId
@@ -2759,115 +2862,29 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     ) {
       return Object.freeze({ requested: 0, failed: 0 });
     }
-    const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(
-      this.node.libp2p.getPeers().map((peer) => peer.toString()).slice(0, 64),
-    );
-    const replayProgress = rfc64CatalogReplayProgressForV1(
-      this,
+    const scope = {
       contextGraphId,
-      accepted.policyDigest,
-    );
-    for (const peer of peers) replayProgress.pendingPeers.add(peer);
-    if (replayProgress.pendingPeers.size === 0) {
-      return Object.freeze({ requested: 0, failed: 0 });
+      policyDigest: accepted.policyDigest,
+    } as const;
+    switch (request.kind) {
+      case 'connected-peers':
+        return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
+          ...scope,
+          kind: 'full-connected-peers',
+          connectedPeerIds: this.node.libp2p.getPeers().map((peer) => peer.toString()),
+        });
+      case 'pending-recovery':
+        return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
+          ...scope,
+          kind: 'pending-recovery',
+        });
+      case 'connection-demand':
+        return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
+          ...scope,
+          kind: 'connection-demand',
+          demand: request.replayDemand,
+        });
     }
-    if (replayProgress.completion !== null) return replayProgress.completion;
-    replayProgress.token += 1;
-    const token = replayProgress.token;
-    replayProgress.active = true;
-    replayProgress.failed = false;
-    bumpRfc64CatalogReplayStatusRevisionV1(this);
-    const run = (async (): Promise<Readonly<{ requested: number; failed: number }>> => {
-      let requested = 0;
-      let failed = 0;
-      let replayFailed = true;
-      try {
-        const manifests: Rfc64PublicCatalogHeadAnnouncementV1[][] = [];
-        for (;;) {
-          const replayPeers = [...replayProgress.pendingPeers];
-          replayProgress.pendingPeers.clear();
-          await Promise.all(replayPeers.map(async (remotePeerId) => {
-            for (let attempt = 0; attempt < 2; attempt += 1) {
-              try {
-                const completion = await service.requestCatalogHeadReplay({
-                  remotePeerId,
-                  networkId,
-                  contextGraphId: contextGraphId as ContextGraphIdV1,
-                });
-                manifests.push([...completion.heads]);
-                requested += 1;
-                return;
-              } catch (error) {
-                // A connected peer that does not hold the current CG is not a
-                // promised provider. Policy denial is therefore a bounded
-                // negative discovery result, while unsupported V2, malformed
-                // completion, transport failure, and provider incompleteness
-                // remain fail-closed.
-                if (
-                  error instanceof Rfc64PublicCatalogTransportErrorV1
-                  && error.code === 'catalog-transport-policy-denied'
-                ) return;
-                if (attempt === 1) failed += 1;
-              }
-            }
-          }));
-          // Completion-capable provider responses are returned only after every
-          // promised announcement is synchronously admitted at this receiver.
-          await service.whenReceiverIdle();
-          if (replayProgress.pendingPeers.size > 0) continue;
-
-          const promisedByIdentity = new Map<string, Rfc64PublicCatalogHeadAnnouncementV1>();
-          for (const target of manifests.flat()) {
-            promisedByIdentity.set(rfc64CatalogTargetExactIdentityKeyV1(target), target);
-          }
-          const promised = [...promisedByIdentity.values()];
-          let parityFailures = 0;
-          if (promised.length > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1) {
-            parityFailures = 1;
-          } else if (this.rfc64PersistenceV1 === undefined) {
-            parityFailures = 1;
-          } else {
-            const applied = new Map(
-              (await loadRfc64OperationalAppliedHeadsV1(this.rfc64PersistenceV1))
-                .filter((head) => head.contextGraphId === contextGraphId)
-                .map((head) => [head.scopeKey, head]),
-            );
-            const unsatisfied = promised.some((target) => {
-              const current = applied.get(rfc64CatalogTargetScopeKeyV1(target));
-              if (current === undefined) return true;
-              const currentVersion = BigInt(current.snapshot.catalogVersion);
-              const promisedVersion = BigInt(target.catalogVersion);
-              return currentVersion < promisedVersion || (
-                currentVersion === promisedVersion
-                && current.snapshot.currentCatalogHeadDigest
-                  !== target.catalogHeadObjectDigest
-              );
-            });
-            if (unsatisfied) parityFailures = 1;
-          }
-          // A connection arriving during the asynchronous durable parity read
-          // owns another replay pass; never settle the coalesced run around it.
-          if (replayProgress.pendingPeers.size > 0) continue;
-          failed += parityFailures;
-          break;
-        }
-        replayFailed = failed > 0;
-        return Object.freeze({ requested, failed });
-      } catch {
-        failed += 1;
-        return Object.freeze({ requested, failed });
-      } finally {
-        const current = rfc64CatalogReplayProgressV1.get(this)?.get(contextGraphId);
-        if (current === replayProgress && current.token === token) {
-          current.active = false;
-          current.failed = replayFailed;
-          current.completion = null;
-          bumpRfc64CatalogReplayStatusRevisionV1(this);
-        }
-      }
-    })();
-    replayProgress.completion = run;
-    return run;
   }
 
   /**
@@ -3396,10 +3413,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             });
           },
         });
-        const deploymentAwareReconciler: Rfc64PublicCatalogReceiverReconcilerV1 = {
-          isHeadApplied: (announcement) => {
+        const deploymentAwareReconciler: Rfc64PublicCatalogCurrentReceiverReconcilerV1 = {
+          isHeadSatisfied: (announcement) => {
             this.assertRfc64CatalogNetworkMatchesTrustedSourceV1(announcement.networkId);
-            return reconciler.isHeadApplied(announcement);
+            return reconciler.isHeadSatisfied(announcement);
           },
           reconcileHead: (remotePeerId, announcement, signal) =>
             reconciler.reconcileHead(remotePeerId, announcement, signal),

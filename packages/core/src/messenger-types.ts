@@ -169,7 +169,68 @@ export interface ProtocolOutboxEntry {
   lastError: string;
 }
 
-interface ProtocolOutboxStoreBase {
+/** Retry/diagnostic fields without materializing the envelope. */
+export interface ProtocolOutboxMetadata extends Omit<ProtocolOutboxEntry, 'payload'> {
+  payloadBytes: number;
+}
+
+export interface ProtocolOutboxPageBudget {
+  maxEntries: number;
+  maxPayloadBytes: number;
+}
+
+export interface ProtocolOutboxPage {
+  entries: ProtocolOutboxEntry[];
+  skippedOversizedEntries: number;
+  byteBudgetExhausted: boolean;
+}
+
+/** Fixed-cardinality queue gauges; no payloads or peer/protocol labels. */
+export interface ProtocolOutboxQueueStats {
+  queuedEntries: number;
+  queuedBytes: number;
+  oldestDueAgeMs: number;
+  oversizedDueEntries: number;
+}
+
+/** Retry/retention policy the outbox wrapper installs on its persistence owner. */
+export interface ProtocolOutboxStorePolicy {
+  readonly backoffs: readonly number[];
+  readonly maxAgeMs: number;
+  readonly backoffFor: (attempts: number) => number;
+}
+
+export interface ProtocolOutboxPolicyConfiguration {
+  configurePolicy(policy: ProtocolOutboxStorePolicy): void;
+}
+
+/**
+ * Required by automatic Messenger retries. Legacy payload snapshots remain
+ * available explicitly, but are never a fallback for these bounded reads.
+ * One Messenger owns a store: pages are snapshots, not multi-consumer leases.
+ * Rows survive crashes and are removed only after successful delivery or expiry.
+ */
+export interface BoundedProtocolOutboxStore
+  extends ProtocolOutboxPersistence, ProtocolOutboxPolicyConfiguration {
+  /** Boolean peer-presence lookup for recovery bookkeeping. */
+  hasPendingFor(peer: string): boolean;
+  /**
+   * Skip rows larger than maxPayloadBytes without loading their payloads;
+   * return the longest due prefix that fits both budgets after that filter.
+   * Order: nextAttemptAt, firstFailureAt, then UTF-8 binary peer/protocol/id.
+   * Oversized rows remain queued, visible in queueStats, until expiry or a
+   * larger configured budget. They cannot block smaller due entries.
+   */
+  readDuePage(now: number, budget: ProtocolOutboxPageBudget): ProtocolOutboxPage;
+  listMetadata(peer?: string): ProtocolOutboxMetadata[];
+  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[];
+  /** Update an existing retry without reading/copying its payload or resurrecting a removed row. */
+  recordRetryFailure(peer: string, protocol: string, messageId: string, error: string, now: number): ProtocolOutboxMetadata | undefined;
+  queueStats(now: number, maxPayloadBytes: number): ProtocolOutboxQueueStats;
+}
+
+/** Shared enqueue, delivery and row-presence operations. */
+export interface ProtocolOutboxPersistence {
   /**
    * Insert or update an outbox entry for `(peer, protocol, messageId)`.
    * First failure creates the entry with `attempts = 1`. Subsequent
@@ -205,12 +266,27 @@ interface ProtocolOutboxStoreBase {
    */
   hasEntry(peer: string, protocol: string, messageId: string): boolean;
 
+  /** Total entries currently queued. */
+  size(): number;
+}
+
+/** Payload-bearing inspection is an optional capability of bounded stores. */
+export interface ProtocolOutboxPayloadInspection {
+  /** Snapshot of every queued payload-bearing entry. */
+  list(): ProtocolOutboxEntry[];
+
+  /** Look up one payload-bearing entry by its durable identity. */
+  getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined;
+}
+
+/** Explicit legacy retry and payload snapshots; automatic retries do not require them. */
+export interface ProtocolOutboxInspection extends ProtocolOutboxPayloadInspection {
   /**
    * All entries whose `nextAttemptAt <= now`.
    *
    * This remains the required public store contract for compatibility with
-   * existing/custom stores. `ProtocolOutbox` applies canonical ordering when
-   * it turns this snapshot into a bounded retry page.
+   * existing/custom stores that explicitly request payload snapshots. Automatic
+   * retries require the bounded readDuePage capability and never call due().
    */
   due(now: number): ProtocolOutboxEntry[];
 
@@ -221,7 +297,8 @@ interface ProtocolOutboxStoreBase {
    * limit. Implementations that opt in MUST select the first `limit` rows in
    * ascending `nextAttemptAt`, `firstFailureAt`, then
    * `(peer, protocol, messageId)` order. Stores that only implement the legacy
-   * `due(now)` API remain fully supported through the wrapper fallback.
+   * `due(now)` API must implement this method to support count-limited reads;
+   * the wrapper never materializes an unbounded fallback to satisfy a limit.
    */
   duePage?(now: number, limit: number): ProtocolOutboxEntry[];
 
@@ -232,36 +309,18 @@ interface ProtocolOutboxStoreBase {
    */
   dropExpired(now: number): ProtocolOutboxEntry[];
 
-  /** Total entries currently queued. For diagnostics + tests. */
-  size(): number;
-
-  /**
-   * Snapshot of every entry in the store. Used by the diagnostics
-   * surface (`/api/chat/outbox`, `dkg_outbox_status` MCP tool) so
-   * operators can see what's pending after a long recipient outage.
-   * Order is implementation-defined; callers that need per-peer
-   * FIFO should sort by `firstFailureAt`.
-   */
-  list(): ProtocolOutboxEntry[];
-
-  /**
-   * Look up a specific entry by `(peer, protocol, messageId)`.
-   * Returns `undefined` when no such entry exists. Used by
-   * diagnostics + by callers that need full retry metadata (e.g.
-   * surfacing `nextAttemptAt` in an HTTP response after a queued
-   * send).
-   */
-  getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined;
 }
 
 /**
- * Current sender-side outbox store contract. Peer bookkeeping uses a boolean
- * fast path; retry selection remains exclusively `due`/`duePage`-driven.
+ * Payload-inspection store contract with a boolean peer-presence fast path.
+ * Automatic-only stores implement BoundedProtocolOutboxStore independently.
  *
  * `pendingFor` is an optional compatibility/diagnostic capability. New stores
  * do not need to materialize full payload-bearing peer snapshots.
  */
-export interface ProtocolOutboxStore extends ProtocolOutboxStoreBase {
+export interface ProtocolOutboxStore extends ProtocolOutboxPersistence, ProtocolOutboxInspection {
+  /** Optional only on the legacy payload-inspection facade. */
+  configurePolicy?(policy: ProtocolOutboxStorePolicy): void;
   /** Whether this peer still has any durable row (DHT recovery bookkeeping). */
   hasPendingFor(peer: string): boolean;
 
@@ -276,7 +335,9 @@ export interface ProtocolOutboxStore extends ProtocolOutboxStoreBase {
  * Pre-#1579 custom-store shape retained at the `ProtocolOutbox` boundary.
  * Legacy stores exposed the full peer snapshot instead of a boolean fast path.
  */
-export interface LegacyProtocolOutboxStore extends ProtocolOutboxStoreBase {
+export interface LegacyProtocolOutboxStore extends ProtocolOutboxPersistence, ProtocolOutboxInspection {
+  /** Optional only on the pre-bounded compatibility facade. */
+  configurePolicy?(policy: ProtocolOutboxStorePolicy): void;
   /** Snapshot of one peer's rows, ordered by `firstFailureAt`. */
   pendingFor(peer: string): ProtocolOutboxEntry[];
 
