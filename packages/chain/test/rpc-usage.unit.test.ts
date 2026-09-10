@@ -19,6 +19,7 @@ import {
 } from '@opentelemetry/sdk-metrics';
 import { rebuildMetrics } from '@origintrail-official/dkg-core';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { MockChainAdapter } from '../src/mock-adapter.js';
 import {
   boundedRpcEndpointSlotLabel,
   boundedRpcMethodLabel,
@@ -461,6 +462,63 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       ethCallByConsumer: {},
       attributions: [],
       lifetimeTotal: 3,
+    });
+  });
+
+  it('normalizes canonical attribution arrays and drops malformed external entries', () => {
+    const normalized = normalizeRpcUsageWindow({
+      byMethod: { eth_call: 2, eth_getLogs: 2 },
+      attributions: [
+        { method: 'eth_call', consumer: 'token.balanceOf', count: 2 },
+        {
+          method: 'eth_getLogs',
+          consumer: 'cg.authority.history',
+          endpointSlot: 'fallback_1',
+          count: 1,
+        },
+        {
+          method: 'eth_getLogs',
+          consumer: 'cg.authority.history',
+          endpointSlot: 'https://secret.example/rpc',
+          count: 1,
+        },
+        null,
+        [],
+        { method: 'eth_call', consumer: 7, count: 1 },
+        { method: 'eth_call', consumer: 'invalid-count', count: '1' },
+        { method: 'net_version', consumer: 'unsupported', count: 1 },
+      ],
+      lifetimeTotal: 4,
+    } as unknown as Parameters<typeof normalizeRpcUsageWindow>[0]);
+
+    expect(normalized).toEqual({
+      byMethod: { eth_call: 2, eth_getLogs: 2 },
+      ethCallByConsumer: { 'token.balanceOf': 2 },
+      attributions: [
+        { method: 'eth_call', consumer: 'token.balanceOf', count: 2 },
+        {
+          method: 'eth_getLogs',
+          consumer: 'cg.authority.history',
+          endpointSlot: 'fallback_1',
+          count: 1,
+        },
+        {
+          method: 'eth_getLogs',
+          consumer: 'cg.authority.history',
+          endpointSlot: 'other',
+          count: 1,
+        },
+      ],
+      lifetimeTotal: 4,
+    });
+  });
+
+  it('returns a concrete empty RPC usage window from the mock adapter', () => {
+    expect(new MockChainAdapter().drainRpcUsage()).toEqual({
+      byMethod: {},
+      ethCallByConsumer: {},
+      attributions: [],
+      lifetimeTotal: 0,
     });
   });
 
