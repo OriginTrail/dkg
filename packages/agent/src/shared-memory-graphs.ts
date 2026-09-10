@@ -1,6 +1,7 @@
 import {
   contextGraphSharedMemoryMetaUri,
   contextGraphSharedMemoryUri,
+  sharedMemoryScopeKey,
   validateSubGraphName,
 } from '@origintrail-official/dkg-core';
 
@@ -30,7 +31,7 @@ export function describeSharedMemoryGraphs(
     ...(subGraphName === undefined ? {} : { subGraphName }),
     dataGraph: contextGraphSharedMemoryUri(contextGraphId, subGraphName),
     metaGraph: contextGraphSharedMemoryMetaUri(contextGraphId, subGraphName),
-    ownershipKey: subGraphName === undefined ? contextGraphId : `${contextGraphId}\0${subGraphName}`,
+    ownershipKey: sharedMemoryScopeKey(contextGraphId, subGraphName),
   };
 }
 

@@ -1,3 +1,5 @@
+import { sharedMemoryScopeKey } from '@origintrail-official/dkg-core';
+
 /**
  * Gate-based multi-key lock — the single canonical implementation of this concurrency
  * idiom in the publisher package. The `withWriteLocks` methods in `dkg-publisher.ts`
@@ -65,7 +67,7 @@ export function swmKaWriteLockKey(
   subGraphName: string | undefined,
   kaUal: string,
 ): string {
-  return `${swmWriteLockNamespace(contextGraphId, subGraphName)}\0ka\0${kaUal.toLowerCase()}`;
+  return `${sharedMemoryScopeKey(contextGraphId, subGraphName)}\0ka\0${kaUal.toLowerCase()}`;
 }
 
 /**
@@ -77,9 +79,5 @@ export function swmEntityWriteLockKey(
   subGraphName: string | undefined,
   subject: string,
 ): string {
-  return `${swmWriteLockNamespace(contextGraphId, subGraphName)}\0${subject}`;
-}
-
-function swmWriteLockNamespace(contextGraphId: string, subGraphName: string | undefined): string {
-  return subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
+  return `${sharedMemoryScopeKey(contextGraphId, subGraphName)}\0${subject}`;
 }

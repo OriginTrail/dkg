@@ -17,7 +17,7 @@ import {
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
-  contextGraphSharedMemoryUri,
+  contextGraphSharedMemoryUri, sharedMemoryScopeKey,
   contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
   deriveCuratorDidFromCgId,
@@ -1302,7 +1302,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     }
 
     // Clear SWM ownership cache for this sub-graph
-    const ownershipKey = `${contextGraphId}\0${subGraphName}`;
+    const ownershipKey = sharedMemoryScopeKey(contextGraphId, subGraphName);
     this.publisher.clearSubGraphOwnership(ownershipKey);
     this.contextGraphMetaProjection.markDirty(contextGraphId);
 

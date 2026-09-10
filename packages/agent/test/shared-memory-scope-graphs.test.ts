@@ -19,6 +19,7 @@ describe('named-subgraph Shared Memory graph classification', () => {
     const root = describeSharedMemoryGraphs(CG);
     const named = describeSharedMemoryGraphs(CG, SUBGRAPH)!;
 
+    expect(root.ownershipKey).toBe(CG);
     expect(parseSharedMemoryMetaGraph(CG, root.metaGraph)).toEqual(root);
     expect(parseSharedMemoryDataGraph(CG, `${root.dataGraph}/0xabc/7`)).toEqual(root);
     expect(parseSharedMemoryMetaGraph(CG, named.metaGraph)).toEqual(named);
@@ -32,6 +33,7 @@ describe('named-subgraph Shared Memory graph classification', () => {
   });
 
   it('rejects invalid or near-miss graph addresses', () => {
+    expect(describeSharedMemoryGraphs(CG, '')).toBeUndefined();
     expect(describeSharedMemoryGraphs(CG, '_reserved')).toBeUndefined();
     expect(parseSharedMemoryMetaGraph(CG, `${contextGraphSharedMemoryMetaUri(CG, SUBGRAPH)}/child`)).toBeUndefined();
     expect(parseSharedMemoryDataGraph(CG, `${contextGraphSharedMemoryUri(CG, SUBGRAPH)}/staging/op`)).toBeUndefined();
