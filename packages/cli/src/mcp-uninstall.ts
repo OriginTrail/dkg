@@ -1,4 +1,4 @@
-import { detectClients, parseMcpClientSelector, selectMcpClientTargets, assertMcpConfigSelectionCurrent, mcpConfigClientNames, type McpConfigSelection } from './mcp-client-registry.js';
+import { detectClients, parseMcpClientSelector, selectMcpClientTargets, mcpConfigClientNames, type McpConfigSelection } from './mcp-client-registry.js';
 import { inspectRegistration, removeRegistration } from './mcp-client-config.js';
 
 export interface McpUninstallCliOptions {
@@ -27,7 +27,7 @@ export async function confirmUninstallTargets(
   const confirmed: McpConfigSelection[] = [];
   try {
     for (const target of targets) {
-      const answer = (await rl.question(`Remove DKG MCP from ${mcpConfigClientNames(target)} (${target.endpoint.displayPath})? [Y/n] `)).trim().toLowerCase();
+      const answer = (await rl.question(`Remove DKG MCP from ${mcpConfigClientNames(target)} (${target.file.displayPath})? [Y/n] `)).trim().toLowerCase();
       if (answer !== 'n' && answer !== 'no') confirmed.push(target);
     }
     return confirmed;
@@ -51,9 +51,9 @@ export async function mcpUninstallAction(
   const failures: string[] = [];
   for (const target of selected) {
     try {
-      if (inspectRegistration(target.endpoint)) {
+      if (inspectRegistration(target.file)) {
         planned.push(target);
-        log(`${opts.dryRun ? 'Would remove' : 'Found'} DKG MCP: ${mcpConfigClientNames(target)} (${target.endpoint.displayPath})`);
+        log(`${opts.dryRun ? 'Would remove' : 'Found'} DKG MCP: ${mcpConfigClientNames(target)} (${target.file.displayPath})`);
       }
     } catch (error) {
       failures.push(`${mcpConfigClientNames(target)}: ${error instanceof Error ? error.message : 'Unable to read config'}`);
@@ -67,8 +67,7 @@ export async function mcpUninstallAction(
     const confirmed = await (deps.confirmTargets ?? confirmUninstallTargets)(planned, { yes: opts.yes === true });
     for (const target of confirmed) {
       try {
-        assertMcpConfigSelectionCurrent(target);
-        const removed = removeRegistration(target.endpoint);
+        const removed = removeRegistration(target.file);
         log(`${removed ? 'Removed DKG MCP from' : 'Already unregistered:'} ${mcpConfigClientNames(target)}`);
       } catch (error) {
         failures.push(`${mcpConfigClientNames(target)}: ${error instanceof Error ? error.message : 'Unable to write config'}`);
