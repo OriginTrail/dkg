@@ -26,7 +26,12 @@ import {
   type ContextGraphAuthorityHistoryEvent,
   type ContextGraphAuthorityHistoryEventQuery,
 } from './context-graph-authority-history.js';
-import type { ContextGraphAuthorityIndexEvent } from './context-graph-authority-index.js';
+import {
+  contextGraphAuthorityEventTopics,
+  normalizeContextGraphAuthorityIndexLog,
+  resolveEvmContextGraphAuthoritySource,
+  type EvmContextGraphAuthoritySource,
+} from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
@@ -929,93 +934,34 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         if (finalized === null || finalized.hash === null) {
           throw new Error('finalized Context Graph authority block is unavailable');
         }
+        const finalizedHash = finalized.hash;
         const contract = base.connect(provider) as Contract;
         const filters = contract.filters as unknown as Record<
           string,
           (...args: unknown[]) => ethers.DeferredTopicFilter
         >;
         const contractAddress = (await contract.getAddress()).toLowerCase();
-        const readCurrentState = () => (contract as any).getContextGraph.staticCall(
+        const readCurrentState = () => (contract.getContextGraph as ethers.ContractMethod).staticCall(
           contextGraphId,
           { blockTag: finalized.number },
         );
-        let current: any;
-        let nextHistory: Readonly<{
-          nameHash: string;
-          ownershipEra: number;
-          policyVersion: number;
-          rosterVersion: number;
-          sourceBlockNumber: number;
-          sourceBlockHash: string;
-        }>;
-        let publishHistory: (() => Promise<void>) | undefined;
-
-        if (this.contextGraphAuthorityIndex !== undefined) {
+        const authoritySource: EvmContextGraphAuthoritySource =
+          this.contextGraphAuthorityIndex !== undefined ? await (async () => {
           const deploymentBlockNumber = (await this.resolveContractDeployBlock(
             contractAddress,
             'getContextGraphAuthoritySnapshot',
             'ContextGraphStorage',
           )).fromBlock;
-          const authorityEventNames = [
-            'ContextGraphCreated',
-            'Transfer',
-            'PublishPolicyUpdated',
-            'PublishAuthorityUpdated',
-            'AgentParticipantAdded',
-            'AgentParticipantRemoved',
-          ] as const;
-          const authorityTopics = authorityEventNames.map((name) => {
-            const fragment = contract.interface.getEvent(name);
-            if (fragment === null) throw new Error(`ContextGraphStorage has no ${name} event`);
-            return fragment.topicHash;
-          });
-          const normalizeIndexLog = (log: ethers.Log): ContextGraphAuthorityIndexEvent => {
-            const parsed = contract.interface.parseLog(log);
-            if (parsed === null) {
-              throw new Error('ContextGraphStorage returned an unknown authority event');
-            }
-            const baseEvent = {
-              blockNumber: log.blockNumber,
-              blockHash: log.blockHash,
-              index: log.index,
-            };
-            switch (parsed.name) {
-              case 'ContextGraphCreated':
-                return {
-                  ...baseEvent,
-                  name: parsed.name,
-                  contextGraphId: BigInt(parsed.args.contextGraphId ?? parsed.args[0]),
-                  nameHash: String(parsed.args.nameHash ?? parsed.args[2]),
-                };
-              case 'Transfer':
-                return {
-                  ...baseEvent,
-                  name: parsed.name,
-                  contextGraphId: BigInt(parsed.args.tokenId ?? parsed.args[2]),
-                  from: String(parsed.args.from ?? parsed.args[0]),
-                  to: String(parsed.args.to ?? parsed.args[1]),
-                };
-              case 'PublishPolicyUpdated':
-              case 'PublishAuthorityUpdated':
-              case 'AgentParticipantAdded':
-              case 'AgentParticipantRemoved':
-                return {
-                  ...baseEvent,
-                  name: parsed.name,
-                  contextGraphId: BigInt(parsed.args.contextGraphId ?? parsed.args[0]),
-                };
-              default:
-                throw new Error(`Unsupported ContextGraphStorage authority event ${parsed.name}`);
-            }
-          };
-          [current, nextHistory] = await Promise.all([
-            readCurrentState(),
-            this.contextGraphAuthorityIndex.resolve({
+          const authorityTopics = contextGraphAuthorityEventTopics(contract.interface);
+          return Object.freeze({
+            kind: 'indexed' as const,
+            readCurrent: readCurrentState,
+            readGeneration: () => this.contextGraphAuthorityIndex!.resolve({
               scope: [this.deploymentId, contractAddress].join(':'),
               contextGraphId,
               readScope: provider,
               deploymentBlockNumber,
-              finalized: { number: finalized.number, hash: finalized.hash },
+              finalized: { number: finalized.number, hash: finalizedHash },
               pageSize: this.cgRegistryScanPageSize,
               signal: options.signal,
               readBlockHash: async (blockNumber, lifecycleSignal) => (
@@ -1030,7 +976,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
                     lifecycleSignal,
                     () => provider.getLogs({
                       address: contractAddress,
-                      topics: [authorityTopics],
+                      topics: [[...authorityTopics]],
                       fromBlock: rangeFrom,
                       toBlock: rangeTo,
                     }),
@@ -1039,11 +985,22 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
                   toBlock,
                   signal: lifecycleSignal,
                 });
-                return logs.map(normalizeIndexLog);
+                return logs.map((log) => normalizeContextGraphAuthorityIndexLog(
+                  contract.interface,
+                  log,
+                ));
               },
             }),
-          ]);
-        } else {
+            stabilize: async () => {
+              const stable = await provider.getBlock(finalized.number);
+              if (stable?.hash?.toLowerCase() !== finalizedHash.toLowerCase()) {
+                throw new Error(
+                  'finalized Context Graph authority anchor changed during resolution',
+                );
+              }
+            },
+          });
+        })() : (() => {
           const cache = this.contextGraphAuthorityHistory;
           const cacheKey = [
             this.deploymentId,
@@ -1074,14 +1031,15 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
               signal: options.signal,
             });
           };
-          const [resolvedCurrent, historyResolution] = await Promise.all([
-            readCurrentState(),
-            resolveContextGraphAuthorityHistory({
+          return Object.freeze({
+            kind: 'legacy' as const,
+            readCurrent: readCurrentState,
+            readHistory: () => resolveContextGraphAuthorityHistory({
               cache,
               cacheKey,
               readScope: provider,
               contextGraphId,
-              finalized: { number: finalized.number, hash: finalized.hash },
+              finalized: { number: finalized.number, hash: finalizedHash },
               pageSize: this.cgRegistryScanPageSize,
               signal: options.signal,
               loadColdFromBlock: async () => (await this.resolveContractDeployBlock(
@@ -1134,51 +1092,28 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
                 return normalized;
               },
             }),
-          ]);
-          current = resolvedCurrent;
-          nextHistory = historyResolution.state;
-          publishHistory = historyResolution.publish;
-        }
+          });
+        })();
+        const authority = await resolveEvmContextGraphAuthoritySource(authoritySource);
         options.signal?.throwIfAborted();
-        const participantAgents = [...(current.participantAgents ?? current[1] ?? [])]
-          .map((address) => String(address).toLowerCase())
-          .sort();
-        const owner = String(current.owner ?? current[0]).toLowerCase();
-        const accessPolicy = Number(BigInt(current.accessPolicy ?? current[5]));
-        const publishPolicy = Number(BigInt(current.publishPolicy ?? current[6]));
-        const authorityRaw = String(current.publishAuthority ?? current[7]).toLowerCase();
         const chainId = (await provider.getNetwork()).chainId.toString(10);
         const snapshot: ContextGraphAuthoritySnapshot = Object.freeze({
           chainId,
           governanceContract: contractAddress,
           contextGraphId: contextGraphId.toString(10),
-          owner,
-          active: Boolean(current.active ?? current[3]),
-          accessPolicy,
-          publishPolicy,
-          publishAuthority: authorityRaw === ethers.ZeroAddress ? null : authorityRaw,
-          publishAuthorityAccountId:
-            BigInt(current.publishAuthorityAccountId ?? current[8]).toString(10),
-          participantAgents: Object.freeze(participantAgents),
-          nameHash: nextHistory.nameHash,
-          ownershipEra: nextHistory.ownershipEra.toString(10),
-          policyVersion: nextHistory.policyVersion.toString(10),
-          rosterVersion: nextHistory.rosterVersion.toString(10),
-          sourceBlockNumber: nextHistory.sourceBlockNumber.toString(10),
-          sourceBlockHash: nextHistory.sourceBlockHash,
+          ...authority.current,
+          nameHash: authority.generation.nameHash,
+          ownershipEra: authority.generation.ownershipEra.toString(10),
+          policyVersion: authority.generation.policyVersion.toString(10),
+          rosterVersion: authority.generation.rosterVersion.toString(10),
+          sourceBlockNumber: authority.generation.sourceBlockNumber.toString(10),
+          sourceBlockHash: authority.generation.sourceBlockHash,
         });
         // Verify the combined current-state + generation view only after both
         // reads settle. The legacy reader publishes its checkpoint here; the
         // shared index has already committed complete pages and this final
         // check prevents a changed head from escaping as one mixed snapshot.
-        if (publishHistory !== undefined) {
-          await publishHistory();
-        } else {
-          const stable = await provider.getBlock(finalized.number);
-          if (stable?.hash?.toLowerCase() !== finalized.hash.toLowerCase()) {
-            throw new Error('finalized Context Graph authority anchor changed during resolution');
-          }
-        }
+        await authority.stabilize();
         return snapshot;
       },
       {

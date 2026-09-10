@@ -54,23 +54,24 @@ interface EvmAuthorityHarness {
 function makeEvmAuthorityAdapter(
   options: { reorg?: boolean; providerRangeLimit?: number; sharedIndex?: boolean } = {},
 ): EvmAuthorityHarness {
-  let authorityIndexRecord: Readonly<{ revision: number; value: unknown }> | undefined;
+  let authorityIndexRecord: Readonly<{ token: number; value: unknown | null }> | undefined;
   const authorityIndexStore = {
     load: async () => authorityIndexRecord,
     compareAndSwap: async (
       _scope: string,
-      expectedRevision: number | undefined,
-      nextRevision: number,
+      expectedToken: number | undefined,
       value: unknown,
     ) => {
-      if (authorityIndexRecord?.revision !== expectedRevision) return false;
-      authorityIndexRecord = { revision: nextRevision, value };
-      return true;
+      if (authorityIndexRecord?.token !== expectedToken) return undefined;
+      const nextToken = expectedToken === undefined ? 1 : expectedToken + 1;
+      authorityIndexRecord = { token: nextToken, value };
+      return nextToken;
     },
-    delete: async (_scope: string, expectedRevision: number) => {
-      if (authorityIndexRecord?.revision !== expectedRevision) return false;
-      authorityIndexRecord = undefined;
-      return true;
+    invalidate: async (_scope: string, expectedToken: number) => {
+      if (authorityIndexRecord?.token !== expectedToken) return undefined;
+      const nextToken = expectedToken + 1;
+      authorityIndexRecord = { token: nextToken, value: null };
+      return nextToken;
     },
   };
   const adapter: any = new EVMChainAdapter({

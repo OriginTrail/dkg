@@ -171,9 +171,9 @@ export class SqliteContextGraphAuthorityHistoryStore {
 /**
  * Opaque SQLite persistence for the chain-owned contract-wide authority index.
  *
- * The JSON payload is never interpreted here. Only the monotonic revision is
- * stored separately so SQLite can provide one atomic compare-and-swap boundary
- * for complete page checkpoints.
+ * Authority-bearing JSON is never interpreted here. The store owns the
+ * monotonic CAS token, and JSON `null` is its durable invalidation tombstone.
+ * Tokens therefore never repeat, including across corruption/reorg recovery.
  */
 export class SqliteContextGraphAuthorityIndexStore {
   private readonly db: Database.Database;
@@ -182,7 +182,7 @@ export class SqliteContextGraphAuthorityIndexStore {
     this.db = dashboard.db;
   }
 
-  async load(scope: string): Promise<Readonly<{ revision: number; value: unknown }> | undefined> {
+  async load(scope: string): Promise<Readonly<{ token: number; value: unknown | null }> | undefined> {
     const row = this.db.prepare(`
       SELECT revision, checkpoint_json
         FROM context_graph_authority_indexes
@@ -191,15 +191,15 @@ export class SqliteContextGraphAuthorityIndexStore {
     if (row === undefined) return undefined;
     try {
       return Object.freeze({
-        revision: row.revision,
+        token: row.revision,
         value: JSON.parse(row.checkpoint_json) as unknown,
       });
     } catch {
-      // Preserve the durable revision even when the opaque payload is corrupt,
-      // so chain can conditionally delete this exact row without racing a
+      // Preserve the durable token even when the opaque payload is corrupt, so
+      // chain can conditionally invalidate this exact row without racing a
       // newer compare-and-swap winner.
       return Object.freeze({
-        revision: row.revision,
+        token: row.revision,
         value: Object.freeze({ invalidCheckpointJson: row.checkpoint_json }),
       });
     }
@@ -207,41 +207,48 @@ export class SqliteContextGraphAuthorityIndexStore {
 
   async compareAndSwap(
     scope: string,
-    expectedRevision: number | undefined,
-    nextRevision: number,
+    expectedToken: number | undefined,
     checkpoint: unknown,
-  ): Promise<boolean> {
+  ): Promise<number | undefined> {
     if (scope.trim().length === 0) throw new Error('Authority index scope is empty');
-    if (!Number.isSafeInteger(nextRevision) || nextRevision < 1) {
-      throw new Error('Authority index revision is invalid');
-    }
     const value = JSON.stringify(checkpoint);
-    if (expectedRevision === undefined) {
-      if (nextRevision !== 1) throw new Error('Initial authority index revision must be 1');
-      return this.db.prepare(`
+    if (value === undefined) throw new Error('Authority index checkpoint is not serializable');
+    if (expectedToken === undefined) {
+      const inserted = this.db.prepare(`
         INSERT OR IGNORE INTO context_graph_authority_indexes (
           scope, revision, checkpoint_json, updated_at
         ) VALUES (?, ?, ?, ?)
-      `).run(scope, nextRevision, value, Date.now()).changes === 1;
+      `).run(scope, 1, value, Date.now()).changes === 1;
+      return inserted ? 1 : undefined;
     }
-    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
-      throw new Error('Authority index expected revision is invalid');
+    if (!Number.isSafeInteger(expectedToken) || expectedToken < 1) {
+      throw new Error('Authority index expected token is invalid');
     }
-    if (nextRevision !== expectedRevision + 1) {
-      throw new Error('Authority index revision must advance exactly once');
+    const nextToken = expectedToken + 1;
+    if (!Number.isSafeInteger(nextToken)) {
+      throw new Error('Authority index token exceeds the safe integer range');
     }
-    return this.db.prepare(`
+    const updated = this.db.prepare(`
       UPDATE context_graph_authority_indexes
          SET revision = ?, checkpoint_json = ?, updated_at = ?
        WHERE scope = ? AND revision = ?
-    `).run(nextRevision, value, Date.now(), scope, expectedRevision).changes === 1;
+    `).run(nextToken, value, Date.now(), scope, expectedToken).changes === 1;
+    return updated ? nextToken : undefined;
   }
 
-  async delete(scope: string, expectedRevision: number): Promise<boolean> {
-    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) return false;
-    return this.db.prepare(`
-      DELETE FROM context_graph_authority_indexes
+  async invalidate(scope: string, expectedToken: number): Promise<number | undefined> {
+    if (!Number.isSafeInteger(expectedToken) || expectedToken < 1) {
+      throw new Error('Authority index expected token is invalid');
+    }
+    const nextToken = expectedToken + 1;
+    if (!Number.isSafeInteger(nextToken)) {
+      throw new Error('Authority index token exceeds the safe integer range');
+    }
+    const invalidated = this.db.prepare(`
+      UPDATE context_graph_authority_indexes
+         SET revision = ?, checkpoint_json = 'null', updated_at = ?
        WHERE scope = ? AND revision = ?
-    `).run(scope, expectedRevision).changes === 1;
+    `).run(nextToken, Date.now(), scope, expectedToken).changes === 1;
+    return invalidated ? nextToken : undefined;
   }
 }

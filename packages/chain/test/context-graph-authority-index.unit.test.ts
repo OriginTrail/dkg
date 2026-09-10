@@ -328,9 +328,9 @@ describe('contract-wide Context Graph authority index reducer', () => {
 
   it('decodes opaque durable reads only at the chain-owned boundary', async () => {
     const store: ContextGraphAuthorityIndexStore = {
-      load: async () => ({ revision: 1, value: { cursor: 'not-a-cursor', states: [] } }),
-      compareAndSwap: async () => true,
-      delete: async () => true,
+      load: async () => ({ token: 1, value: { cursor: 'not-a-cursor', states: [] } }),
+      compareAndSwap: async () => 2,
+      invalidate: async () => 2,
     };
     expect(normalizeContextGraphAuthorityIndexCheckpoint((await store.load('scope'))?.value))
       .toBeUndefined();
@@ -353,31 +353,32 @@ describe('contract-wide Context Graph authority index reducer', () => {
 });
 
 class MemoryAuthorityIndexStore implements ContextGraphAuthorityIndexStore {
-  record: Readonly<{ revision: number; value: unknown }> | undefined;
+  record: Readonly<{ token: number; value: unknown | null }> | undefined;
   readonly commits: number[] = [];
-  readonly deletes: number[] = [];
+  readonly invalidations: number[] = [];
 
-  async load(): Promise<Readonly<{ revision: number; value: unknown }> | undefined> {
+  async load(): Promise<Readonly<{ token: number; value: unknown | null }> | undefined> {
     return this.record;
   }
 
   async compareAndSwap(
     _scope: string,
-    expectedRevision: number | undefined,
-    nextRevision: number,
+    expectedToken: number | undefined,
     value: unknown,
-  ): Promise<boolean> {
-    if (this.record?.revision !== expectedRevision) return false;
-    this.record = Object.freeze({ revision: nextRevision, value });
-    this.commits.push(nextRevision);
-    return true;
+  ): Promise<number | undefined> {
+    if (this.record?.token !== expectedToken) return undefined;
+    const nextToken = expectedToken === undefined ? 1 : expectedToken + 1;
+    this.record = Object.freeze({ token: nextToken, value });
+    this.commits.push(nextToken);
+    return nextToken;
   }
 
-  async delete(_scope: string, expectedRevision: number): Promise<boolean> {
-    if (this.record?.revision !== expectedRevision) return false;
-    this.record = undefined;
-    this.deletes.push(expectedRevision);
-    return true;
+  async invalidate(_scope: string, expectedToken: number): Promise<number | undefined> {
+    if (this.record?.token !== expectedToken) return undefined;
+    const nextToken = expectedToken + 1;
+    this.record = Object.freeze({ token: nextToken, value: null });
+    this.invalidations.push(nextToken);
+    return nextToken;
   }
 }
 
@@ -473,9 +474,9 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     expect(resumedRanges[0]).toEqual([15, 19]);
   });
 
-  it('recovers corrupt payloads and never conditionally deletes a newer winner', async () => {
+  it('tombstones corrupt payloads before rebuilding with a non-repeating token', async () => {
     const store = new MemoryAuthorityIndexStore();
-    store.record = { revision: 7, value: { corrupt: true } };
+    store.record = { token: 7, value: { corrupt: true } };
     const index = new ContextGraphAuthorityIndex(store);
     await index.resolve(makeInput(
       9n,
@@ -484,33 +485,20 @@ describe('durable contract-wide Context Graph authority scanner', () => {
         entry.blockNumber >= from && entry.blockNumber <= to
       )),
     ));
-    expect(store.deletes).toEqual([7]);
-    expect(store.record?.revision).toBe(4);
+    expect(store.invalidations).toEqual([8]);
+    expect(store.record?.token).toBe(12);
+  });
 
-    const originalDelete = store.delete.bind(store);
-    store.delete = async (_scope: string, expectedRevision: number) => {
-      if (expectedRevision === store.record?.revision) {
-        const winner = reduceContextGraphAuthorityIndexPage({
-          deploymentBlockNumber: 11,
-          throughBlockNumber: 30,
-          throughBlockHash: blockHash(30),
-          events: [
-            creation(9n, 11, 0, NAME_9),
-            creation(10n, 12, 0, NAME_10),
-            event('PublishPolicyUpdated', 10n, 28, 0),
-          ],
-        }).checkpoint;
-        store.record = { revision: winner.revision, value: winner };
-        return false;
-      }
-      return originalDelete(_scope, expectedRevision);
-    };
-    const admitted = await new ContextGraphAuthorityIndex(store).resolve({
-      ...makeInput(10n, {}, async () => [], 30),
-      deploymentBlockNumber: 11,
-    });
-    expect(admitted.policyVersion).toBe(1);
-    expect(store.record?.revision).toBe(1);
+  it('rejects a malformed durable token promptly without recursive recovery', async () => {
+    const store = new MemoryAuthorityIndexStore();
+    store.record = { token: 1.5, value: { corrupt: true } };
+
+    await expect(new ContextGraphAuthorityIndex(store).resolve(makeInput(
+      9n,
+      {},
+      async () => [],
+    ))).rejects.toThrow('durable token is invalid');
+    expect(store.invalidations).toEqual([]);
   });
 
   it('preserves a newer durable cursor when a lagging caller observes an older head', async () => {
@@ -525,7 +513,7 @@ describe('durable contract-wide Context Graph authority scanner', () => {
       makeInput(9n, {}, readPage, 25),
     )).rejects.toThrow('behind durable cursor 30');
     expect(store.record).toBe(winner);
-    expect(store.deletes).toEqual([]);
+    expect(store.invalidations).toEqual([]);
   });
 
   it('reloads a newer winner when conditional reorg invalidation loses its race', async () => {
@@ -534,20 +522,20 @@ describe('durable contract-wide Context Graph authority scanner', () => {
       entry.blockNumber >= from && entry.blockNumber <= to
     ));
     await new ContextGraphAuthorityIndex(store).resolve(makeInput(9n, {}, readPage, 25));
-    const rejectedRevision = store.record!.revision;
-    const originalDelete = store.delete.bind(store);
-    store.delete = async (scope: string, expectedRevision: number) => {
-      if (expectedRevision === rejectedRevision) {
+    const rejectedToken = store.record!.token;
+    const originalInvalidate = store.invalidate.bind(store);
+    store.invalidate = async (scope: string, expectedToken: number) => {
+      if (expectedToken === rejectedToken) {
         const winner = reduceContextGraphAuthorityIndexPage({
           deploymentBlockNumber: 10,
           throughBlockNumber: 30,
           throughBlockHash: blockHash(30),
           events: allEvents,
         }).checkpoint;
-        store.record = { revision: winner.revision, value: winner };
-        return false;
+        store.record = { token: rejectedToken + 1, value: winner };
+        return undefined;
       }
-      return originalDelete(scope, expectedRevision);
+      return originalInvalidate(scope, expectedToken);
     };
 
     const state = await new ContextGraphAuthorityIndex(store).resolve({
@@ -557,8 +545,89 @@ describe('durable contract-wide Context Graph authority scanner', () => {
       ),
     });
     expect(state).toMatchObject({ contextGraphId: '10', policyVersion: 1 });
-    expect(store.record?.revision).toBe(1);
-    expect(store.deletes).toEqual([]);
+    expect(store.record?.token).toBe(rejectedToken + 1);
+    expect(store.invalidations).toEqual([]);
+  });
+
+  it('reloads the CAS winner and resumes from its suffix with concurrent providers', async () => {
+    const store = new MemoryAuthorityIndexStore();
+    const firstPageEntered = Promise.withResolvers<void>();
+    const releaseFirstPage = Promise.withResolvers<void>();
+    let gatedReads = 0;
+    const rangesA: Array<readonly [number, number]> = [];
+    const rangesB: Array<readonly [number, number]> = [];
+    const reader = (ranges: Array<readonly [number, number]>) => async (from: number, to: number) => {
+      ranges.push([from, to]);
+      if (from === 10) {
+        gatedReads += 1;
+        if (gatedReads === 2) firstPageEntered.resolve();
+        await releaseFirstPage.promise;
+      }
+      return allEvents.filter((entry) => entry.blockNumber >= from && entry.blockNumber <= to);
+    };
+
+    const first = new ContextGraphAuthorityIndex(store).resolve(
+      makeInput(9n, {}, reader(rangesA)),
+    );
+    const second = new ContextGraphAuthorityIndex(store).resolve(
+      makeInput(10n, {}, reader(rangesB)),
+    );
+    await firstPageEntered.promise;
+    releaseFirstPage.resolve();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      expect.objectContaining({ contextGraphId: '9' }),
+      expect.objectContaining({ contextGraphId: '10' }),
+    ]);
+    expect(rangesA[0]).toEqual([10, 14]);
+    expect(rangesB[0]).toEqual([10, 14]);
+    expect(store.record?.token).toBeGreaterThanOrEqual(4);
+    expect((store.record!.value as { cursor: { throughBlockNumber: number } }).cursor)
+      .toMatchObject({ throughBlockNumber: 25 });
+  });
+
+  it('prevents an ABA stale writer after invalidation and checkpoint recreation', async () => {
+    const store = new MemoryAuthorityIndexStore();
+    const scope = makeInput(9n, {}, async () => []).scope;
+    const initial = reduceContextGraphAuthorityIndexPage({
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 14,
+      throughBlockHash: blockHash(14),
+      events: allEvents.filter((entry) => entry.blockNumber <= 14),
+    }).checkpoint;
+    expect(await store.compareAndSwap(scope, undefined, initial)).toBe(1);
+
+    const stalePageEntered = Promise.withResolvers<void>();
+    const releaseStalePage = Promise.withResolvers<void>();
+    const stale = new ContextGraphAuthorityIndex(store).resolve(makeInput(
+      9n,
+      {},
+      async (from, to) => {
+        if (from === 15) {
+          stalePageEntered.resolve();
+          await releaseStalePage.promise;
+        }
+        return allEvents.filter((entry) => entry.blockNumber >= from && entry.blockNumber <= to);
+      },
+      25,
+    ));
+    await stalePageEntered.promise;
+
+    expect(await store.invalidate(scope, 1)).toBe(2);
+    const recreated = reduceContextGraphAuthorityIndexPage({
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 20,
+      throughBlockHash: blockHash(20),
+      events: allEvents.filter((entry) => entry.blockNumber <= 20),
+    }).checkpoint;
+    expect(await store.compareAndSwap(scope, 2, recreated)).toBe(3);
+    releaseStalePage.resolve();
+
+    await expect(stale).resolves.toMatchObject({ contextGraphId: '9' });
+    expect(store.commits).not.toContain(2);
+    expect(store.record?.token).toBeGreaterThan(3);
+    expect((store.record!.value as { cursor: { throughBlockNumber: number } }).cursor)
+      .toMatchObject({ throughBlockNumber: 25 });
   });
 
   it('detaches caller cancellation from a shared scan', async () => {

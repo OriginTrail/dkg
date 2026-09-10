@@ -27,8 +27,8 @@ describe('DKGAgent chain cursor wiring', () => {
     };
     const authorityIndexStore = {
       load: vi.fn(async () => undefined),
-      compareAndSwap: vi.fn(async () => true),
-      delete: vi.fn(async () => true),
+      compareAndSwap: vi.fn(async () => 1),
+      invalidate: vi.fn(async () => 2),
     };
 
     agent = await DKGAgent.create({
