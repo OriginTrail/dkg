@@ -17071,12 +17071,17 @@
         "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"() {\\n          await new Promise(() => undefined);\\n        }\"}]}": 1,
         "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"() {\\n          throw new Error('stream returned in closed state');\\n        }\"}]}": 1
       },
-      "packages/publisher/test/chain-event-lane-runner.unit.test.ts": {
+      "packages/publisher/test/chain-event-lane-cursor-persistence.test.ts": {
+        "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"async function* (f: EventFilter): AsyncIterable<ChainEvent> {\\n        filters.push(f);\\n        if (f.eventTypes.includes('ContextGraphCreated') && failContextLane) {\\n          throw new Error('context lane unavailable');\\n        }\\n      }\"}]}": 1
+      },
+      "packages/publisher/test/chain-event-lane-publish.test.ts": {
+        "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"async function* (f: EventFilter): AsyncIterable<ChainEvent> {\\n        filters.push(f);\\n      }\"}]}": 1
+      },
+      "packages/publisher/test/chain-event-lane-scheduler.test.ts": {
         "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"async function* (f: EventFilter): AsyncIterable<ChainEvent> {\\n        filters.push(f);\\n        calls++;\\n        if (calls <= 5) throw new Error('rpc down');\\n      }\"}]}": 1,
         "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"async function* (f: EventFilter): AsyncIterable<ChainEvent> {\\n        filters.push(f);\\n        calls++;\\n        if (calls === 1 || calls === 2 || calls === 4) throw new Error('rpc down');\\n      }\"}]}": 1,
         "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"async function* (f: EventFilter): AsyncIterable<ChainEvent> {\\n        filters.push(f);\\n        calls++;\\n        if (calls === 1) throw new Error('rpc down');\\n      }\"}]}": 1,
-        "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"async function* (f: EventFilter): AsyncIterable<ChainEvent> {\\n        filters.push(f);\\n        if (f.eventTypes.includes('ContextGraphCreated') && failContextLane) {\\n          throw new Error('context lane unavailable');\\n        }\\n      }\"}]}": 1,
-        "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"async function* (f: EventFilter): AsyncIterable<ChainEvent> {\\n        filters.push(f);\\n      }\"}]}": 3
+        "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"async function* (f: EventFilter): AsyncIterable<ChainEvent> {\\n        filters.push(f);\\n      }\"}]}": 2
       },
       "packages/publisher/test/chain-event-poller-v10-only.test.ts": {
         "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"async function* (f: EventFilter): AsyncIterable<ChainEvent> {\\n      filters.push(f);\\n      // yield nothing\\n    }\"}]}": 1

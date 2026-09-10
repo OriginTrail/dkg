@@ -300,6 +300,7 @@ import {
   TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
   CHAIN_POLICY_READ_TIMEOUT_MS,
+  CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
@@ -695,6 +696,7 @@ export class QueryMethods extends DKGAgentBase {
     opts: {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
+      signal?: AbortSignal;
     } = {},
   ): Promise<boolean> {
     return (await this.resolveContextGraphReadAuthority(contextGraphId, opts)).outcome === 'allowed';
@@ -705,7 +707,42 @@ export class QueryMethods extends DKGAgentBase {
     opts: {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
+      signal?: AbortSignal;
     } = {},
+  ): Promise<ContextGraphReadAuthorityDecision> {
+    return QueryMethods.prototype.resolveContextGraphReadAuthorityWithRegistrationTimeout.call(
+      this,
+      contextGraphId,
+      opts,
+      CHAIN_POLICY_READ_TIMEOUT_MS,
+    );
+  }
+
+  /** Subscription admission may populate a cold chain name-hash index. */
+  public async resolveContextGraphSubscriptionBootstrapAuthority(this: DKGAgent,
+    contextGraphId: string,
+    opts: {
+      callerAgentAddress?: string;
+      allowSubscriptionFallback?: boolean;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<ContextGraphReadAuthorityDecision> {
+    return QueryMethods.prototype.resolveContextGraphReadAuthorityWithRegistrationTimeout.call(
+      this,
+      contextGraphId,
+      opts,
+      CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
+    );
+  }
+
+  private async resolveContextGraphReadAuthorityWithRegistrationTimeout(this: DKGAgent,
+    contextGraphId: string,
+    opts: {
+      callerAgentAddress?: string;
+      allowSubscriptionFallback?: boolean;
+      signal?: AbortSignal;
+    },
+    registrationTimeoutMs: number,
   ): Promise<ContextGraphReadAuthorityDecision> {
     const acceptedPublicPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
@@ -717,7 +754,13 @@ export class QueryMethods extends DKGAgentBase {
       isSystemContextGraph: (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId),
       getPeerId: () => this.peerId,
       getAllowedPeers: () => this.getContextGraphAllowedPeers(contextGraphId),
-      getRegisteredAuthority: () => this.resolveRegisteredContextGraphAuthority(contextGraphId),
+      getRegisteredAuthority: () => this.resolveRegisteredContextGraphAuthority(
+        contextGraphId,
+        {
+          registrationTimeoutMs,
+          signal: opts.signal,
+        },
+      ),
       isAgentAllowed: (agentAddress, roster) => this.isAgentAddressAllowed(agentAddress, roster),
       hasLocalAgentInRoster: (roster) => this.hasLocalAgentInGate(roster),
       resolveRfc64PrivateRoster: () => this.resolveRfc64PrivateReadRosterV1(contextGraphId),

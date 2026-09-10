@@ -21,13 +21,9 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import {
-  detectClients,
-  readRegisteredServerKeys,
-  type ClientTarget,
-  type RegisteredMcpServer,
-  type ServerKeyProbe,
-} from '../mcp-setup.js';
+import { detectClients, selectMcpClientTargets, type ClientTarget } from '../mcp-client-registry.js';
+import type { McpPhysicalConfig } from '../mcp-physical-config.js';
+import { readRegisteredServerKeys, type RegisteredMcpServer, type ServerKeyProbe } from '../mcp-client-config.js';
 import {
   resolveNpmGlobalService,
   type InstallMcp,
@@ -81,11 +77,11 @@ export interface DetectDeps {
   /** Defaults to the same client targets `dkg mcp setup` registers into. */
   clients?: ClientTarget[];
   /**
-   * Defaults to probing each client's registered server keys. Returns a
+   * Defaults to probing each selected physical config's registered server keys. Returns a
    * probe result, not a bare list, so "could not read this config" stays
    * distinguishable from "read it, nothing registered".
    */
-  readServerKeys?: (target: ClientTarget) => ServerKeyProbe;
+  readServerKeys?: (target: McpPhysicalConfig) => ServerKeyProbe;
 }
 
 /**
@@ -186,15 +182,16 @@ export async function detectInstalled(
   if (needsMcp) {
     const clients = deps.clients ?? detectClients();
     const readKeys = deps.readServerKeys ?? readRegisteredServerKeys;
-    for (const target of clients) {
-      const probe = readKeys(target);
+    for (const { file, aliases } of selectMcpClientTargets(clients)) {
+      const names = aliases.map(alias => alias.name);
+      const probe = readKeys(file);
       if (!probe.ok) {
-        unreadableClients.push(target.name);
+        unreadableClients.push(...names);
         continue;
       }
       for (const [name, server] of Object.entries(probe.servers)) {
         const list = mcpBlocks.get(name) ?? [];
-        list.push({ client: target.name, server });
+        list.push(...names.map(client => ({ client, server })));
         mcpBlocks.set(name, list);
       }
     }

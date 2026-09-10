@@ -1,5 +1,6 @@
 export const RFC64_UNIT_TESTS = [
   "test/rfc64-inventory-v1-scalars.test.ts",
+  "test/rfc64-legacy-swm-boundary-v1.test.ts",
   "test/rfc64-inventory-v1-lifecycle.test.ts",
   "test/rfc64-inventory-v1-candidates.test.ts",
   "test/rfc64-inventory-v1-applied-head.test.ts",
@@ -56,9 +57,13 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-catalog-responsibility-registry-v1.test.ts",
   "test/rfc64-catalog-bootstrap-outcome-v1.test.ts",
   "test/rfc64-coalescing-supervisor-v1.test.ts",
+  "test/rfc64-authority-rpc-circuit-breaker-v1.test.ts",
   "test/rfc64-private-catalog-activation-config-v1.test.ts",
   "test/rfc64-private-sender-key-roster.test.ts",
   "test/rfc64-rollout-authority.integration.test.ts",
+  "test/rfc64-replay-worklist.integration.test.ts",
+  "test/rfc64-catalog-replay-connection-runtime-v1.test.ts",
+  "test/rfc64-catalog-replay-recovery-runtime-v1.test.ts",
   "test/rfc64-private-catalog-gate-artifact.test.ts",
   "test/rfc64-policy-cell-v1.test.ts",
 ] as const;

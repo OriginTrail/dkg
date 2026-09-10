@@ -1,3 +1,4 @@
+import { MCP_CLIENT_IDS } from '../mcp-client-registry.js';
 import { Command } from 'commander';
 import { readFileSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -132,6 +133,22 @@ mcpCmd
     } catch (err: any) {
       console.error(`\n[dkg mcp serve] ERROR: ${err?.message ?? err}\n`);
       process.exit(1);
+    }
+  });
+
+mcpCmd
+  .command('uninstall')
+  .description('Remove the DKG MCP registration from selected clients')
+  .option('--yes', 'Confirm removal without interactive prompts')
+  .option('--client <id>', `Client ID (${MCP_CLIENT_IDS.join(', ')}); optionally append :native or :windows-wsl`)
+  .option('--dry-run', 'Preview registrations to remove without writing files')
+  .action(async (opts) => {
+    const { mcpUninstallAction } = await import('../mcp-uninstall.js');
+    try {
+      await mcpUninstallAction(opts);
+    } catch (err: unknown) {
+      console.error(`\n[dkg mcp uninstall] ERROR: ${toErrorMessage(err)}\n`);
+      process.exitCode = 1;
     }
   });
 
