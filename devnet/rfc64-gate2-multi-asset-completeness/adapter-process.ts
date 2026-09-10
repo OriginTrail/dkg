@@ -50,7 +50,7 @@ import {
   parseFinalizedChainHarnessConfigV1,
   startFinalizedChainHarnessRuntimeV1,
   type FinalizedChainHarnessRuntimeV1,
-} from './finalized-vm-harness-runtime.ts';
+} from './finalized-chain-harness-runtime.ts';
 import { sealGate2ExecutedRuntimeManifestV1 } from './runtime-load-hook.ts';
 import { stagePrivateCatalogBulkPredecessorV1 } from
   '../rfc64-cp2-private-swm-vm-recovery/bulk-predecessor.ts';
@@ -222,7 +222,7 @@ async function boot(): Promise<void> {
     processId: process.pid,
     runtimeBuildManifestDigest,
     finalizedChainRuntime: finalizedChainConfig !== null,
-    finalizedVmRuntime: finalizedChainRuntime?.hasVmInventory === true,
+    finalizedVmRuntime: finalizedChainRuntime?.kind === 'vm',
     startupRepair: null,
   });
 }

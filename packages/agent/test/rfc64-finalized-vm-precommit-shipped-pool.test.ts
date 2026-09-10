@@ -1,3 +1,4 @@
+import { supportedFinalizedReads } from './support/rfc64-finalized-vm-precommit-fixture.js';
 /**
  * The integration seam this change exists to fix.
  *
@@ -77,8 +78,8 @@ describe('RFC-64 finalized VM precommit on a shipped RPC pool', () => {
     // exercised through the production adapter boundary.
     const precommit = createRfc64FinalizedVmAgentPrecommitV1(
       rfc64FinalizedVmPrecommitOptions({
-        createFinalizedReadBinding: () =>
-          adapter.createFinalizedEvmReadBinding('rfc64'),
+        finalizedReads: supportedFinalizedReads(() =>
+          adapter.createFinalizedEvmReadBinding('rfc64')),
       }),
     );
 

@@ -15,10 +15,15 @@ function legacyAdapter(): ChainAdapter {
 }
 
 describe('legacy adapters at the finalized catalog composition boundary', () => {
-  it.each(['finalizedPolicyPrecommit', 'finalizedVmPrecommit'] as const)(
-    '%s rejects a missing capability with the controlled configuration error', async kind => {
+  it.each([
+    ['finalizedPolicyPrecommit', 'legacy', legacyAdapter],
+    ['finalizedVmPrecommit', 'legacy', legacyAdapter],
+    ['finalizedPolicyPrecommit', 'no-chain', () => new NoChainAdapter()],
+    ['finalizedVmPrecommit', 'no-chain', () => new NoChainAdapter()],
+  ] as const)(
+    '%s rejects a missing capability on %s with the controlled configuration error', async (kind, _label, makeChain) => {
       const store = new OxigraphStore();
-      const chain = legacyAdapter();
+      const chain = makeChain();
       const handlers = createRfc64FinalizedAgentPrecommitsV1({
         chain, store,
         acceptedPolicySnapshotForCatalogScope: acceptedRfc64VmPolicySnapshot,
@@ -27,10 +32,28 @@ describe('legacy adapters at the finalized catalog composition boundary', () => 
       try {
         await expect(handlers[kind](rfc64FinalizedVmPrecommitPlan(), new AbortController().signal))
           .rejects.toThrow('RFC-64 finalized precommit requires trusted RPC configuration');
-        await expect(chain.getIdentityId()).resolves.toBe(0n);
       } finally {
         await store.close();
       }
+    },
+  );
+
+  it.each(['finalizedPolicyPrecommit', 'finalizedVmPrecommit'] as const)(
+    '%s preserves a supported provider failure', async kind => {
+      const store = new OxigraphStore();
+      const failure = new Error('adapter-owned endpoint failed');
+      const create = vi.fn(async () => { throw failure; });
+      const chain = Object.assign(new MockChainAdapter(), { createFinalizedEvmReadBinding: create });
+      const handlers = createRfc64FinalizedAgentPrecommitsV1({
+        chain, store,
+        acceptedPolicySnapshotForCatalogScope: acceptedRfc64VmPolicySnapshot,
+        getOnChainContextGraphId: async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID,
+      });
+      try {
+        await expect(handlers[kind](rfc64FinalizedVmPrecommitPlan(), new AbortController().signal))
+          .rejects.toBe(failure);
+        expect(create).toHaveBeenCalledExactlyOnceWith('rfc64');
+      } finally { await store.close(); }
     },
   );
 

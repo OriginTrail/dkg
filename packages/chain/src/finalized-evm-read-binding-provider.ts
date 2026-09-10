@@ -7,7 +7,7 @@ import type { FinalizedChainReadOwnerV1 } from './finalized-chain-read-admission
 export interface FinalizedEvmReadBindingProvider {
   createFinalizedEvmReadBinding(
     owner: FinalizedChainReadOwnerV1,
-  ): Promise<Readonly<FinalizedEvmReadBindingV1> | null>;
+  ): Promise<Readonly<FinalizedEvmReadBindingV1>>;
 }
 
 export type FinalizedEvmReadBindingCapability =

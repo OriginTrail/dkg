@@ -1,3 +1,4 @@
+import { supportedFinalizedReads, unavailableFinalizedReads } from './support/rfc64-finalized-vm-precommit-fixture.js';
 import {
   MemoryLayer,
   contextGraphLayerUri,
@@ -152,7 +153,7 @@ describe('RFC-64 finalized VM agent precommit', () => {
     const coldHandler = createRfc64FinalizedVmAgentPrecommitV1({
       ...options,
       acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
-      createFinalizedReadBinding: finalizedReadBindingFactory([endpoint]),
+      finalizedReads: supportedFinalizedReads(finalizedReadBindingFactory([endpoint])),
     });
     const newerPlan = Object.freeze({
       ...plan(),
@@ -182,7 +183,7 @@ describe('RFC-64 finalized VM agent precommit', () => {
     const exactHandler = createRfc64FinalizedVmAgentPrecommitV1({
       ...options,
       acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
-      createFinalizedReadBinding: finalizedReadBindingFactory([endpoint]),
+      finalizedReads: supportedFinalizedReads(finalizedReadBindingFactory([endpoint])),
     });
     const exactTransaction = await exactHandler(Object.freeze({
       ...plan(),
@@ -194,7 +195,7 @@ describe('RFC-64 finalized VM agent precommit', () => {
     const warmHandler = createRfc64FinalizedVmAgentPrecommitV1({
       ...options,
       acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
-      createFinalizedReadBinding: finalizedReadBindingFactory([endpoint]),
+      finalizedReads: supportedFinalizedReads(finalizedReadBindingFactory([endpoint])),
     });
     const warmTransaction = await warmHandler(newerPlan, new AbortController().signal);
     expect(warmTransaction.materializationReceipts).toEqual([]);
@@ -235,8 +236,7 @@ describe('RFC-64 finalized VM agent precommit', () => {
     const handler = createRfc64FinalizedVmAgentPrecommitV1({
       ...options,
       acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
-      createFinalizedReadBinding:
-        finalizedReadBindingFactory([await liveRpcEndpoint(assertionRoot)]),
+      finalizedReads: supportedFinalizedReads(finalizedReadBindingFactory([await liveRpcEndpoint(assertionRoot)])),
     });
 
     const transaction = await handler(Object.freeze({
@@ -279,7 +279,7 @@ describe('RFC-64 finalized VM agent precommit', () => {
       ...baseOptions(),
       acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
       getOnChainContextGraphId,
-      createFinalizedReadBinding,
+      finalizedReads: supportedFinalizedReads(createFinalizedReadBinding),
       getKnowledgeAssetStorageAddress,
       getKnowledgeAssetsLifecycleAddress,
       materialize,
@@ -303,7 +303,7 @@ describe('RFC-64 finalized VM agent precommit', () => {
   it('does not apply the private root-only restriction to a public finalized lane', async () => {
     const handler = createRfc64FinalizedVmAgentPrecommitV1({
       ...baseOptions(),
-      createFinalizedReadBinding: async () => null,
+      finalizedReads: unavailableFinalizedReads,
     });
     const namedPlan = {
       ...plan(),
@@ -333,27 +333,26 @@ describe('RFC-64 finalized VM agent precommit', () => {
 
   it('rejects unavailable finalized reads before resolving VM storage', async () => {
     const getOnChainContextGraphId = vi.fn(async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID);
-    const createFinalizedReadBinding = vi.fn(async () => null);
+    const finalizedReads = unavailableFinalizedReads;
     const getKnowledgeAssetStorageAddress = vi.fn(async () => RFC64_VM_KA_STORAGE);
     const handler = createRfc64FinalizedVmAgentPrecommitV1({
       ...baseOptions(),
       getOnChainContextGraphId,
-      createFinalizedReadBinding,
+      finalizedReads,
       getKnowledgeAssetStorageAddress,
     });
 
     await expect(handler(plan(), new AbortController().signal)).rejects.toThrow(
       'requires trusted RPC configuration',
     );
-    expect(getOnChainContextGraphId).toHaveBeenCalledOnce();
-    expect(createFinalizedReadBinding).toHaveBeenCalledOnce();
+    expect(getOnChainContextGraphId).not.toHaveBeenCalled();
     expect(getKnowledgeAssetStorageAddress).not.toHaveBeenCalled();
   });
 
   it('rejects when the live adapter chain differs from the accepted finalized policy', async () => {
     const handler = createRfc64FinalizedVmAgentPrecommitV1({
       ...baseOptions(),
-      createFinalizedReadBinding: finalizedReadBindingFactory(['http://127.0.0.1:8545'], '1'),
+      finalizedReads: supportedFinalizedReads(finalizedReadBindingFactory(['http://127.0.0.1:8545'], '1')),
     });
 
     await expect(handler(plan(), new AbortController().signal)).rejects.toThrow(
@@ -427,8 +426,7 @@ describe('RFC-64 finalized VM agent precommit', () => {
     const handler = createRfc64FinalizedVmAgentPrecommitV1({
       ...options,
       acceptedPolicySnapshotForCatalogScope,
-      createFinalizedReadBinding:
-        finalizedReadBindingFactory([await liveRpcEndpoint(assertionRoot)]),
+      finalizedReads: supportedFinalizedReads(finalizedReadBindingFactory([await liveRpcEndpoint(assertionRoot)])),
       materialize,
     });
 
@@ -478,8 +476,7 @@ describe('RFC-64 finalized VM agent precommit', () => {
     const handler = createRfc64FinalizedVmAgentPrecommitV1({
       ...baseOptions(),
       acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
-      createFinalizedReadBinding:
-        finalizedReadBindingFactory([await liveRpcEndpoint(assertionRoot)]),
+      finalizedReads: supportedFinalizedReads(finalizedReadBindingFactory([await liveRpcEndpoint(assertionRoot)])),
       materialize,
     });
 

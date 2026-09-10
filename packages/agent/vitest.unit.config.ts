@@ -44,6 +44,7 @@ export default defineConfig({
       "test/rfc64-receiver-admission-deferral.test.ts",
       "test/rfc64-precommit-owner-attribution.test.ts",
       "test/rfc64-finalized-adapter-compatibility.test.ts",
+      "test/rfc64-finalized-chain-harness.test.ts",
       "test/exact-assets.test.ts",
       "test/exact-asset-responder.test.ts",
       "test/exact-asset-wire-parse.test.ts",

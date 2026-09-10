@@ -43,12 +43,7 @@ describe('optional finalized EVM binding provider', () => {
     });
   });
 
-  it('preserves a provider refusal and error without substituting another RPC source', async () => {
-    const refused = bindFinalizedEvmReadBindingProvider(Object.assign(new NoChainAdapter(), {
-      createFinalizedEvmReadBinding: async () => null,
-    }));
-    if (refused.status !== 'supported') throw new Error('Expected provider');
-    await expect(refused.provider.createFinalizedEvmReadBinding('rfc64')).resolves.toBeNull();
+  it('preserves a provider error without substituting another RPC source', async () => {
     const failure = new Error('adapter configuration failed');
     const failed = bindFinalizedEvmReadBindingProvider(Object.assign(new NoChainAdapter(), {
       createFinalizedEvmReadBinding: async () => { throw failure; },

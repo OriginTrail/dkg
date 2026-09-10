@@ -10,10 +10,13 @@ import {
 
 import {
   FinalizedChainLoopbackMockChainAdapterV1,
-  FinalizedVmLoopbackMockChainAdapterV1,
   createFinalizedChainLoopbackRpcV1,
-  createFinalizedVmLoopbackRpcV1,
   type FinalizedChainLoopbackFixtureConfigV1,
+  type FinalizedChainLoopbackRpcV1,
+} from '../../packages/agent/test/support/rfc64-finalized-chain-loopback-fixture.js';
+import {
+  FinalizedVmLoopbackMockChainAdapterV1,
+  createFinalizedVmLoopbackRpcV1,
   type FinalizedVmLoopbackFixtureConfigV1,
 } from '../../packages/agent/test/support/rfc64-finalized-vm-loopback-fixture.js';
 
@@ -40,21 +43,29 @@ export interface FinalizedChainHarnessVmInventoryConfigV1 {
 }
 
 /** Finalized chain/CG policy baseline; VM inventory is an explicit extension. */
-export interface FinalizedChainHarnessConfigV1 {
+interface FinalizedChainAuthorityHarnessConfigV1 {
   readonly accessPolicy: 0 | 1;
   readonly contextGraphId: string;
   readonly nameHash: Digest32V1;
   readonly onChainContextGraphId: string;
   readonly ownerAddress: EvmAddressV1;
-  readonly vmInventory?: Readonly<FinalizedChainHarnessVmInventoryConfigV1>;
 }
 
-export interface FinalizedChainHarnessRuntimeV1 {
-  readonly chainAdapter: FinalizedChainLoopbackMockChainAdapterV1;
-  readonly hasVmInventory: boolean;
+export type FinalizedChainHarnessConfigV1 =
+  | Readonly<FinalizedChainAuthorityHarnessConfigV1 & { kind: 'policy' }>
+  | Readonly<FinalizedChainAuthorityHarnessConfigV1 & {
+      kind: 'vm'; vmInventory: Readonly<FinalizedChainHarnessVmInventoryConfigV1>;
+    }>;
+
+interface FinalizedChainHarnessServerV1<T extends FinalizedChainLoopbackMockChainAdapterV1> {
+  readonly chainAdapter: T;
   readonly rpcUrl: string;
   close(): Promise<void>;
 }
+
+export type FinalizedChainHarnessRuntimeV1 =
+  | Readonly<FinalizedChainHarnessServerV1<FinalizedChainLoopbackMockChainAdapterV1> & { kind: 'policy' }>
+  | Readonly<FinalizedChainHarnessServerV1<FinalizedVmLoopbackMockChainAdapterV1> & { kind: 'vm' }>;
 
 const FINALIZED_BLOCK_HASH = `0x${'77'.repeat(32)}`;
 
@@ -72,9 +83,6 @@ export function parseFinalizedChainHarnessConfigV1(
     : canonicalAccessPolicy(parsed.accessPolicy, 'finalizedChain.accessPolicy');
   const nameHash = requiredDigest(parsed.nameHash, 'finalizedChain.nameHash');
   const ownerAddress = canonicalEvmAddress(parsed.ownerAddress, 'finalizedChain.ownerAddress');
-  const vmInventory = parsed.vmInventory === undefined
-    ? undefined
-    : parseVmInventory(parsed.vmInventory);
   const onChainContextGraphId = canonicalDecimalWire(
     parsed.onChainContextGraphId,
     'finalizedChain.onChainContextGraphId',
@@ -82,14 +90,11 @@ export function parseFinalizedChainHarnessConfigV1(
   if (BigInt(onChainContextGraphId) === 0n) {
     throw new TypeError('finalized chain on-chain context graph id must be non-zero');
   }
-  return Object.freeze({
-    accessPolicy,
-    contextGraphId,
-    nameHash,
-    onChainContextGraphId,
-    ownerAddress,
-    ...(vmInventory === undefined ? {} : { vmInventory }),
-  });
+  const authority = { accessPolicy, contextGraphId, nameHash, onChainContextGraphId, ownerAddress };
+  // Normalize the legacy wire shape once; all runtime consumers use the mode.
+  return parsed.vmInventory === undefined
+    ? Object.freeze({ ...authority, kind: 'policy' })
+    : Object.freeze({ ...authority, kind: 'vm', vmInventory: parseVmInventory(parsed.vmInventory) });
 }
 
 function parseVmInventory(value: unknown): Readonly<FinalizedChainHarnessVmInventoryConfigV1> {
@@ -124,7 +129,28 @@ function parseVmInventory(value: unknown): Readonly<FinalizedChainHarnessVmInven
 export async function startFinalizedChainHarnessRuntimeV1(
   config: Readonly<FinalizedChainHarnessConfigV1>,
 ): Promise<Readonly<FinalizedChainHarnessRuntimeV1>> {
-  const baseline = Object.freeze({
+  switch (config.kind) {
+    case 'policy': {
+      const fixture = authorityLoopbackFixture(config);
+      const runtime = await startFinalizedChainHarnessServerV1(config,
+        createFinalizedChainLoopbackRpcV1(fixture),
+        rpcUrl => new FinalizedChainLoopbackMockChainAdapterV1(fixture, rpcUrl));
+      return Object.freeze({ ...runtime, kind: 'policy' });
+    }
+    case 'vm': {
+      const fixture = vmLoopbackFixture(config);
+      const runtime = await startFinalizedChainHarnessServerV1(config,
+        createFinalizedVmLoopbackRpcV1(fixture),
+        rpcUrl => new FinalizedVmLoopbackMockChainAdapterV1(fixture, rpcUrl));
+      return Object.freeze({ ...runtime, kind: 'vm' });
+    }
+  }
+}
+
+function authorityLoopbackFixture(
+  config: FinalizedChainAuthorityHarnessConfigV1,
+): FinalizedChainLoopbackFixtureConfigV1 {
+  return Object.freeze({
     accessPolicy: config.accessPolicy,
     active: true,
     assertedAtChainId: RFC64_GATE2_DEPLOYMENT.assertedAtChainId,
@@ -139,22 +165,26 @@ export async function startFinalizedChainHarnessRuntimeV1(
     ownerAddress: config.ownerAddress,
     publishPolicy: 1,
   } satisfies FinalizedChainLoopbackFixtureConfigV1);
-  const vmFixture = config.vmInventory === undefined
-    ? undefined
-    : Object.freeze({
-        ...baseline,
-        knowledgeAssetStorageAddress: RFC64_GATE2_KNOWLEDGE_ASSET_STORAGE_ADDRESS,
-        assets: Object.freeze(config.vmInventory.assets.map((asset) => Object.freeze({
-          assertionRoot: asset.assertionRoot,
-          assertionVersion: asset.assertionVersion,
-          authorAddress: asset.authorAddress,
-          kaId: asset.kaId,
-          publisherAddress: '0x6666666666666666666666666666666666666666' as EvmAddressV1,
-        }))),
-      } satisfies FinalizedVmLoopbackFixtureConfigV1);
-  const rpcFixture = vmFixture === undefined
-    ? createFinalizedChainLoopbackRpcV1(baseline)
-    : createFinalizedVmLoopbackRpcV1(vmFixture);
+}
+
+function vmLoopbackFixture(
+  config: Extract<FinalizedChainHarnessConfigV1, { kind: 'vm' }>,
+): FinalizedVmLoopbackFixtureConfigV1 {
+  return Object.freeze({
+    ...authorityLoopbackFixture(config),
+    knowledgeAssetStorageAddress: RFC64_GATE2_KNOWLEDGE_ASSET_STORAGE_ADDRESS,
+    assets: Object.freeze(config.vmInventory.assets.map(asset => Object.freeze({
+      ...asset, publisherAddress: '0x6666666666666666666666666666666666666666' as EvmAddressV1,
+    }))),
+  });
+}
+
+/** Shared HTTP ownership and adapter initialization for either explicit composition. */
+async function startFinalizedChainHarnessServerV1<T extends FinalizedChainLoopbackMockChainAdapterV1>(
+  config: FinalizedChainAuthorityHarnessConfigV1,
+  rpcFixture: FinalizedChainLoopbackRpcV1,
+  createAdapter: (rpcUrl: string) => T,
+): Promise<Readonly<FinalizedChainHarnessServerV1<T>>> {
   let activeServer: Server | undefined;
   const server = createServer(async (request, response) => {
     try {
@@ -173,10 +203,10 @@ export async function startFinalizedChainHarnessRuntimeV1(
       }
       const call = plainRecord(
         JSON.parse(Buffer.concat(chunks).toString('utf8')),
-        'finalized VM JSON-RPC call',
+        'finalized chain JSON-RPC call',
       );
-      const method = requiredString(call.method, 'finalized VM JSON-RPC method');
-      const params = plainArray(call.params, 'finalized VM JSON-RPC params');
+      const method = requiredString(call.method, 'finalized chain JSON-RPC method');
+      const params = plainArray(call.params, 'finalized chain JSON-RPC params');
       const result = rpcFixture.respond(method, params);
       sendRpcResponse(response, call.id, { result });
     } catch (error) {
@@ -196,14 +226,12 @@ export async function startFinalizedChainHarnessRuntimeV1(
   const address = server.address() as AddressInfo | null;
   if (address === null) {
     await closeServer(server);
-    throw new Error('finalized VM JSON-RPC server has no address');
+    throw new Error('finalized chain JSON-RPC server has no address');
   }
   const rpcUrl = `http://127.0.0.1:${address.port}`;
-  let chainAdapter: FinalizedChainLoopbackMockChainAdapterV1;
+  let chainAdapter: T;
   try {
-    chainAdapter = vmFixture === undefined
-      ? new FinalizedChainLoopbackMockChainAdapterV1(baseline, rpcUrl)
-      : new FinalizedVmLoopbackMockChainAdapterV1(vmFixture, rpcUrl);
+    chainAdapter = createAdapter(rpcUrl);
     const created = await chainAdapter.createOnChainContextGraph({
       accessPolicy: config.accessPolicy,
       publishPolicy: 1,
@@ -218,7 +246,6 @@ export async function startFinalizedChainHarnessRuntimeV1(
   }
   return Object.freeze({
     chainAdapter,
-    hasVmInventory: vmFixture !== undefined,
     rpcUrl,
     close: async () => {
       const current = activeServer;

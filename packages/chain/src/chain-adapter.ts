@@ -1216,7 +1216,7 @@ export interface ChainAdapter {
   /** Optional adapter-owned EVM reads; bind with bindFinalizedEvmReadBindingProvider. */
   createFinalizedEvmReadBinding?(
     owner: FinalizedChainReadOwnerV1,
-  ): Promise<Readonly<FinalizedEvmReadBindingV1> | null>;
+  ): Promise<Readonly<FinalizedEvmReadBindingV1>>;
 
   // Identity
   registerIdentity(proof: IdentityProof): Promise<bigint>;

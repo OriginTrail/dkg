@@ -20,6 +20,8 @@ import {
 import {
   createStrictCurrentFinalizedEvmSnapshotScopeV1,
   type FinalizedEvmReadBindingV1,
+  type FinalizedEvmReadBindingCapability,
+  type FinalizedEvmReadBindingProvider,
 } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 
@@ -41,6 +43,16 @@ import {
 
 export const RFC64_VM_CATALOG_HEAD_DIGEST = `0x${'91'.repeat(32)}` as Digest32V1;
 export const RFC64_VM_INVENTORY_DIGEST = `0x${'92'.repeat(32)}` as Digest32V1;
+
+export const unavailableFinalizedReads = Object.freeze({
+  status: 'unsupported' as const, reason: 'finalized-evm-read-binding-unavailable' as const,
+});
+
+export function supportedFinalizedReads(
+  createFinalizedEvmReadBinding: FinalizedEvmReadBindingProvider['createFinalizedEvmReadBinding'],
+): Extract<FinalizedEvmReadBindingCapability, { status: 'supported' }> {
+  return Object.freeze({ status: 'supported', provider: { createFinalizedEvmReadBinding } });
+}
 
 export function finalizedReadBindingFactory(
   endpoints: readonly string[],
@@ -131,8 +143,7 @@ export function rfc64FinalizedVmPrecommitOptions(
 ): Rfc64FinalizedVmAgentPrecommitOptionsV1 {
   return {
     acceptedPolicySnapshotForCatalogScope: () => acceptedRfc64VmPolicySnapshot(),
-    createFinalizedReadBinding:
-      finalizedReadBindingFactory(['http://127.0.0.1:8545']),
+    finalizedReads: supportedFinalizedReads(finalizedReadBindingFactory(['http://127.0.0.1:8545'])),
     getOnChainContextGraphId: async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID,
     getKnowledgeAssetStorageAddress: async () => RFC64_VM_KA_STORAGE,
     getKnowledgeAssetsLifecycleAddress: async () => RFC64_VM_KAV10,

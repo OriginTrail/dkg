@@ -20,9 +20,7 @@ export function createRfc64FinalizedAgentPrecommitsV1(options: Rfc64FinalizedAge
   const shared: Rfc64FinalizedPolicyAgentPrecommitResolutionOptionsV1 = {
     acceptedPolicySnapshotForCatalogScope: options.acceptedPolicySnapshotForCatalogScope,
     getOnChainContextGraphId: options.getOnChainContextGraphId,
-    createFinalizedReadBinding: () => finalizedReads.status === 'supported'
-      ? finalizedReads.provider.createFinalizedEvmReadBinding('rfc64')
-      : Promise.resolve(null),
+    finalizedReads,
   };
   return Object.freeze({
     finalizedPolicyPrecommit: createRfc64FinalizedPolicyAgentPrecommitV1(shared),

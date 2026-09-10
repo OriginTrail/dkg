@@ -12,7 +12,7 @@ import {
   type EvmAddressV1,
   type MemberRosterV1,
 } from '@origintrail-official/dkg-core';
-import type { FinalizedEvmReadBindingV1, StrictCurrentFinalizedEvmSnapshotScopeV1 } from '@origintrail-official/dkg-chain';
+import type { FinalizedEvmReadBindingCapability, StrictCurrentFinalizedEvmSnapshotScopeV1 } from '@origintrail-official/dkg-chain';
 
 import {
   assertAcceptedRfc64CatalogAuthorMembershipV1,
@@ -30,8 +30,7 @@ import type {
 export interface Rfc64FinalizedPolicyAgentPrecommitResolutionOptionsV1 {
   readonly acceptedPolicySnapshotForCatalogScope:
     (scope: Readonly<AuthorCatalogScopeV1>) => AcceptedRfc64CatalogAccessSnapshotV1;
-  readonly createFinalizedReadBinding:
-    () => Promise<Readonly<FinalizedEvmReadBindingV1> | null>;
+  readonly finalizedReads: FinalizedEvmReadBindingCapability;
   readonly getOnChainContextGraphId:
     (contextGraphId: ContextGraphIdV1, signal: AbortSignal) => Promise<string | null>;
 }
@@ -122,14 +121,15 @@ export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
   ) {
     throw new Error('RFC-64 finalized precommit source differs from its governance binding');
   }
+  const { finalizedReads } = options;
+  if (finalizedReads.status === 'unsupported') {
+    throw new Error('RFC-64 finalized precommit requires trusted RPC configuration');
+  }
   const [binding, untrustedContextGraphId] = await Promise.all([
-    options.createFinalizedReadBinding(),
+    finalizedReads.provider.createFinalizedEvmReadBinding('rfc64'),
     options.getOnChainContextGraphId(plan.catalogScope.contextGraphId, signal),
   ]);
   signal.throwIfAborted();
-  if (binding === null) {
-    throw new Error('RFC-64 finalized precommit requires trusted RPC configuration');
-  }
   if (untrustedContextGraphId === null) {
     throw new Error('RFC-64 finalized precommit could not resolve the numeric context graph id');
   }

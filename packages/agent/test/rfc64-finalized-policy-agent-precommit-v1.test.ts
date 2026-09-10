@@ -1,3 +1,4 @@
+import { supportedFinalizedReads, unavailableFinalizedReads } from './support/rfc64-finalized-vm-precommit-fixture.js';
 import type {
   ContextGraphPolicyV1,
   Digest32V1,
@@ -19,7 +20,6 @@ import {
   RFC64_VM_CHAIN_ID,
   RFC64_VM_CONTEXT_GRAPH_NAME,
   RFC64_VM_KAV10,
-  RFC64_VM_KA_STORAGE,
   RFC64_VM_NETWORK_ID,
   RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID,
   RFC64_VM_POLICY_DIGEST,
@@ -31,9 +31,9 @@ import {
   rfc64FinalizedVmPrecommitPlan,
 } from './support/rfc64-finalized-vm-precommit-fixture.js';
 import {
-  createFinalizedVmLoopbackRpcV1,
-  type FinalizedVmLoopbackFixtureConfigV1,
-} from './support/rfc64-finalized-vm-loopback-fixture.js';
+  createFinalizedChainLoopbackRpcV1,
+  type FinalizedChainLoopbackFixtureConfigV1,
+} from './support/rfc64-finalized-chain-loopback-fixture.js';
 
 const rpcHarness = createLoopbackJsonRpcTestHarness();
 
@@ -45,21 +45,19 @@ function options() {
   const fixture = rfc64FinalizedVmPrecommitOptions();
   return {
     acceptedPolicySnapshotForCatalogScope: fixture.acceptedPolicySnapshotForCatalogScope,
-    createFinalizedReadBinding: fixture.createFinalizedReadBinding,
+    finalizedReads: fixture.finalizedReads,
     getOnChainContextGraphId: fixture.getOnChainContextGraphId,
   };
 }
 
 function finalizedChainFixture(
-  overrides: Partial<FinalizedVmLoopbackFixtureConfigV1> = {},
-): FinalizedVmLoopbackFixtureConfigV1 {
+  overrides: Partial<FinalizedChainLoopbackFixtureConfigV1> = {},
+): FinalizedChainLoopbackFixtureConfigV1 {
   return {
     accessPolicy: 0,
     active: true,
     assertedAtChainId: RFC64_VM_CHAIN_ID,
     assertedAtKav10Address: RFC64_VM_KAV10,
-    knowledgeAssetStorageAddress: RFC64_VM_KA_STORAGE,
-    assets: [],
     blockHash: RFC64_VM_BLOCK_HASH,
     blockNumberQuantity: '0x7c',
     contextGraphStorageAddress: RFC64_VM_CG_STORAGE,
@@ -73,9 +71,9 @@ function finalizedChainFixture(
 }
 
 async function liveOptions(
-  overrides: Partial<FinalizedVmLoopbackFixtureConfigV1> = {},
+  overrides: Partial<FinalizedChainLoopbackFixtureConfigV1> = {},
 ) {
-  const rpc = createFinalizedVmLoopbackRpcV1(finalizedChainFixture(overrides));
+  const rpc = createFinalizedChainLoopbackRpcV1(finalizedChainFixture(overrides));
   const server = await rpcHarness.start((call, response) => {
     try {
       sendJsonRpcResult(response, call, rpc.respond(call.method, call.params));
@@ -91,7 +89,7 @@ async function liveOptions(
   return {
     options: {
       ...options(),
-      createFinalizedReadBinding: finalizedReadBindingFactory([server.url]),
+      finalizedReads: supportedFinalizedReads(finalizedReadBindingFactory([server.url])),
     },
     rpc,
   };
@@ -161,11 +159,11 @@ describe('RFC-64 finalized policy agent precommit', () => {
     const pending = new Promise<void>((resolve) => { releaseBinding = resolve; });
     const createFinalizedReadBinding = vi.fn(async () => {
       await pending;
-      return live.options.createFinalizedReadBinding();
+      return live.options.finalizedReads.provider.createFinalizedEvmReadBinding('rfc64');
     });
     const getOnChainContextGraphId = vi.fn(async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID);
     const handler = createRfc64FinalizedPolicyAgentPrecommitV1({
-      ...live.options, createFinalizedReadBinding, getOnChainContextGraphId,
+      ...live.options, finalizedReads: supportedFinalizedReads(createFinalizedReadBinding), getOnChainContextGraphId,
     });
     const running = handler(rfc64FinalizedVmPrecommitPlan(), new AbortController().signal);
     try {
@@ -181,11 +179,11 @@ describe('RFC-64 finalized policy agent precommit', () => {
   it('accepts a chain-bound SWM catalog without invoking VM materialization', async () => {
     const getOnChainContextGraphId = vi.fn(async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID);
     const live = await liveOptions();
-    const createFinalizedReadBinding = vi.fn(live.options.createFinalizedReadBinding);
+    const createFinalizedReadBinding = vi.fn(() => live.options.finalizedReads.provider.createFinalizedEvmReadBinding('rfc64'));
     const handler = createRfc64FinalizedPolicyAgentPrecommitV1({
       ...live.options,
       getOnChainContextGraphId,
-      createFinalizedReadBinding,
+      finalizedReads: supportedFinalizedReads(createFinalizedReadBinding),
     });
 
     await expect(handler(
@@ -203,21 +201,20 @@ describe('RFC-64 finalized policy agent precommit', () => {
     ))).toHaveLength(2);
   });
 
-  it('rejects unavailable finalized reads after resolving the shared binding', async () => {
+  it('rejects an unsupported finalized-read capability before resolving the numeric CG', async () => {
     const getOnChainContextGraphId = vi.fn(async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID);
-    const createFinalizedReadBinding = vi.fn(async () => null);
+    const finalizedReads = unavailableFinalizedReads;
     const handler = createRfc64FinalizedPolicyAgentPrecommitV1({
       ...options(),
       getOnChainContextGraphId,
-      createFinalizedReadBinding,
+      finalizedReads,
     });
 
     await expect(handler(
       rfc64FinalizedVmPrecommitPlan(),
       new AbortController().signal,
     )).rejects.toThrow('requires trusted RPC configuration');
-    expect(getOnChainContextGraphId).toHaveBeenCalledOnce();
-    expect(createFinalizedReadBinding).toHaveBeenCalledOnce();
+    expect(getOnChainContextGraphId).not.toHaveBeenCalled();
   });
 
   it('leaves non-finalized owner policy outside the EVM precommit lane', async () => {
@@ -235,7 +232,7 @@ describe('RFC-64 finalized policy agent precommit', () => {
         },
       }),
       getOnChainContextGraphId,
-      createFinalizedReadBinding,
+      finalizedReads: supportedFinalizedReads(createFinalizedReadBinding),
     });
 
     const finalizedPlan = rfc64FinalizedVmPrecommitPlan();
@@ -263,7 +260,7 @@ describe('RFC-64 finalized policy agent precommit', () => {
       ...options(),
       acceptedPolicySnapshotForCatalogScope,
       getOnChainContextGraphId,
-      createFinalizedReadBinding,
+      finalizedReads: supportedFinalizedReads(createFinalizedReadBinding),
     });
 
     await expect(handler(
@@ -314,7 +311,7 @@ describe('RFC-64 finalized policy agent precommit', () => {
       ...options(),
       acceptedPolicySnapshotForCatalogScope,
       getOnChainContextGraphId,
-      createFinalizedReadBinding,
+      finalizedReads: supportedFinalizedReads(createFinalizedReadBinding),
     });
 
     await expect(handler(
@@ -377,7 +374,7 @@ describe('RFC-64 finalized policy agent precommit', () => {
 
     const differentChain = createRfc64FinalizedPolicyAgentPrecommitV1({
       ...options(),
-      createFinalizedReadBinding: finalizedReadBindingFactory(['http://127.0.0.1:8545'], '1'),
+      finalizedReads: supportedFinalizedReads(finalizedReadBindingFactory(['http://127.0.0.1:8545'], '1')),
     });
     await expect(differentChain(
       rfc64FinalizedVmPrecommitPlan(),
@@ -405,7 +402,7 @@ describe('RFC-64 finalized policy agent precommit', () => {
         policyOverrides as Partial<ContextGraphPolicyV1>,
       ),
       getOnChainContextGraphId,
-      createFinalizedReadBinding,
+      finalizedReads: supportedFinalizedReads(createFinalizedReadBinding),
     });
 
     await expect(handler(
