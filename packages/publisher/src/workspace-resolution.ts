@@ -1402,8 +1402,13 @@ function normalizeOptionalSubGraphName(subGraphName: string | undefined): string
   return normalized;
 }
 
-
-
+/** Canonical durable SWM head locator shared by writers and recovery admission. */
+export function workspaceKnowledgeAssetHeadSubject(kaUal: string): string {
+  const scope = createGraphKnowledgeAssetScope(kaUal, 1);
+  const subject = `${scope.ual}#dkg-swm-head`;
+  assertSafeIri(subject);
+  return subject;
+}
 
 function workspaceOperationPublicSnapshotGraph(
   contextGraphId: string,
