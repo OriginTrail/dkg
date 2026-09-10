@@ -88,6 +88,24 @@ describe('/api/slo wire format (rc.9 PR-A / Codex PR #570 R10)', () => {
     });
   });
 
+  it('publishes fixed-cardinality outbox queue and active-drain metrics over HTTP', async () => {
+    const outbox = { batchSize: 100, maxPayloadBytes: 4 * 1024 * 1024,
+      claimedEntries: 1, claimedBytes: 1024, lastBatchEntries: 1, lastBatchPayloadBytes: 1024,
+      skippedOversizedEntriesTotal: 20, byteBudgetDeferralsTotal: 3,
+      queuedEntries: 4, queuedBytes: 12345, oldestDueAgeMs: 900, oversizedDueEntries: 2 };
+    const agent: FakeAgent = {
+      getMessengerSloStats: () => ({}), getMessengerOutboxStats: () => outbox,
+      getSwmGossipStats: () => ({ publishFailures: {}, publishFailuresOverflow: 0, publishFailuresTruncated: false }),
+      getSwmHandlerStats: () => ({ redundantApplies: {}, redundantAppliesLowerBound: false,
+        redundantAppliesOverflow: 0, redundantAppliesTruncated: false }),
+    };
+    ({ server, port } = await startSloServer(agent));
+    const { status, body } = await get(port, '/api/slo');
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ outbox });
+    expect((body as { outbox: unknown }).outbox).toEqual(outbox);
+  });
+
   it('populated payload — every field flows through end-to-end', async () => {
     const agent: FakeAgent = {
       getMessengerSloStats: () => ({

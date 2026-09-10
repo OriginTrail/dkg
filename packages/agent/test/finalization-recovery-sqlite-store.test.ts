@@ -40,7 +40,7 @@ describe('SQLite finalization recovery store', () => {
       await store.receive(received({ key: 'entry-1' }));
       await store.receive(received({ key: 'entry-2' }));
       await store.receive(received({ key: 'entry-3' }));
-      await store.recordAttempt('entry-1', 0, 'busy', 1_000);
+      await store.recordAttempt('entry-1', 0, 'busy', { mode: 'ordinary', retryDelayMs: 1_000 });
       await commitOriginalEvidence(store, 'entry-3', 0, evidence());
       await store.transition('entry-3', 0, 'SETTLED');
 
@@ -60,6 +60,39 @@ describe('SQLite finalization recovery store', () => {
     }
   });
 
+  it('reports a lost attempt CAS after a terminal transition', async () => {
+    const directory = await temporaryDirectory();
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      await store.receive(received());
+      await expect(store.transition('entry-1', 0, 'REJECTED', 'terminal'))
+        .resolves.toBe(true);
+
+      await expect(store.recordAttempt(
+        'entry-1',
+        0,
+        'late failure',
+        {
+          mode: 'stable-failure',
+          retryDelayMs: 1_000,
+          failureCode: 'store-scheduler-busy',
+          stableFailureThreshold: 3,
+          stableFailureRetryMs: 10_000,
+          retryDeadlineAt: 60_000,
+        },
+      )).resolves.toEqual({ status: 'stale' });
+      await expect(store.get('entry-1')).resolves.toMatchObject({
+        state: 'REJECTED',
+        attemptCount: 0,
+        failureStreak: 0,
+        lastError: 'terminal',
+      });
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('lists a SETTLED receipt retry only after its persisted deadline', async () => {
     const directory = await temporaryDirectory();
     try {
@@ -70,7 +103,9 @@ describe('SQLite finalization recovery store', () => {
       await store.receive(received());
       await commitOriginalEvidence(store, 'entry-1', 0, evidence());
       await store.transition('entry-1', 0, 'SETTLED');
-      await store.recordAttempt('entry-1', 0, 'receipt pending', 1_000);
+      await store.recordAttempt('entry-1', 0, 'receipt pending', {
+        mode: 'ordinary', retryDelayMs: 1_000,
+      });
 
       await expect(store.listDue(16)).resolves.toEqual([]);
       now = 2_000;
@@ -96,7 +131,9 @@ describe('SQLite finalization recovery store', () => {
         oldestDueAgeMs: 0,
       });
 
-      await store.recordAttempt('entry-1', 0, 'long backoff', 10_000);
+      await store.recordAttempt('entry-1', 0, 'long backoff', {
+        mode: 'ordinary', retryDelayMs: 10_000,
+      });
       expect(await store.get('entry-1')).toMatchObject({
         nextAttemptAt: 11_000,
       });
@@ -104,12 +141,16 @@ describe('SQLite finalization recovery store', () => {
 
       now = 1_500;
       await store.recordAttempt('entry-1', 0, 'duplicate without delay');
-      await store.recordAttempt('entry-1', 0, 'shorter backoff', 100);
+      await store.recordAttempt('entry-1', 0, 'shorter backoff', {
+        mode: 'ordinary', retryDelayMs: 100,
+      });
       expect(await store.get('entry-1')).toMatchObject({
         nextAttemptAt: 11_000,
       });
 
-      await store.recordAttempt('entry-1', 0, 'longer backoff', 20_000);
+      await store.recordAttempt('entry-1', 0, 'longer backoff', {
+        mode: 'ordinary', retryDelayMs: 20_000,
+      });
       expect(await store.get('entry-1')).toMatchObject({
         nextAttemptAt: 21_500,
       });
@@ -267,7 +308,9 @@ describe('SQLite finalization recovery store', () => {
       expect((await store.receive(received())).status).toBe('inserted');
       expect((await commitOriginalEvidence(store, 'entry-1', 0, evidence())).status).toBe('verified');
       for (let attempt = 0; attempt < 4; attempt += 1) {
-        await store.recordAttempt('entry-1', 0, 'store scheduler remained busy', 1_000);
+        await store.recordAttempt('entry-1', 0, 'store scheduler remained busy', {
+          mode: 'ordinary', retryDelayMs: 1_000,
+        });
       }
       expect(await store.list()).toMatchObject([{
         state: 'VERIFIED',
@@ -390,7 +433,9 @@ describe('SQLite finalization recovery store', () => {
       }))).status).toBe('inserted');
       expect((await commitOriginalEvidence(store, 'entry-1', 0, evidence())).status).toBe('verified');
       expect(await store.transition('entry-1', 0, 'SETTLED')).toBe(true);
-      await store.recordAttempt('entry-1', 0, 'old settled retry', 1_000);
+      await store.recordAttempt('entry-1', 0, 'old settled retry', {
+        mode: 'ordinary', retryDelayMs: 1_000,
+      });
 
       await expect(store.recordSettledPublisherUpgrade(
         'entry-1',

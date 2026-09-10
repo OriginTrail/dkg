@@ -31,7 +31,7 @@
  * count/digest guard, MAX head read, head-metadata swap) is covered against a
  * real OxigraphStore in `swm-snapshot-materializer.test.ts`.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -121,6 +121,7 @@ function fixture(subGraphName?: string, publisherPeerId = 'peer-source') {
 }
 
 interface HarnessOverrides {
+  snapshotStore?: WorkspacePublicSnapshotStore;
   storedHead?: () => StoredWorkspaceHeadState;
   contentPresent?: () => boolean;
   replaceImpl?: (graphUri: string, quads: Quad[]) => Promise<void>;
@@ -141,7 +142,7 @@ interface HarnessOverrides {
 
 function harness(overrides: HarnessOverrides = {}) {
   const fx = fixture(overrides.subGraphName, overrides.publisherPeerId);
-  const snapshotStore = new MemorySnapshotStore();
+  const snapshotStore = overrides.snapshotStore ?? new MemorySnapshotStore();
   const events: string[] = [];
   const replaced: Array<{ graphUri: string; quads: Quad[] }> = [];
   const headSwaps: Array<{ contextGraphId: string; headSubject: string }> = [];
@@ -207,8 +208,9 @@ function harness(overrides: HarnessOverrides = {}) {
         inserted.push(quads);
       },
       snapshotMaterializer: {
-        preserveStoredIdentityForSkippedAsset: async () => { throw new Error('Private identity preservation is outside this selected-sync fixture'); },
-        replaceMetaForGraphAssets: async () => { throw new Error('Private bulk recovery is outside this selected-sync fixture'); },
+        // Private-lane mutations are outside this public orchestration fixture.
+        preserveStoredIdentityForSkippedAsset: async () => { throw new Error('unexpected private recovery'); },
+        replaceMetaForGraphAssets: async () => { throw new Error('unexpected private recovery'); },
         withKaWriteLock: async (contextGraphId, subGraphName, kaUal, fn) => {
           events.push('lock-requested');
           overrides.onLockRequested?.();
@@ -271,6 +273,44 @@ function harness(overrides: HarnessOverrides = {}) {
 }
 
 describe('public SWM snapshot materialization', () => {
+  it.each(['valid', 'invalid', 'throws'] as const)('uses optional validation capability (%s) with the store receiver', async (outcome) => {
+    const store: WorkspacePublicSnapshotStore = new MemorySnapshotStore();
+    const load = vi.spyOn(store, 'getSnapshot');
+    const validate = vi.fn(async function (this: WorkspacePublicSnapshotStore) {
+      expect(this).toBe(store);
+      if (outcome === 'throws') throw new Error('snapshot unreadable');
+      return outcome === 'valid';
+    });
+    store.validateSnapshot = validate;
+    const h = harness({
+      snapshotStore: store,
+      storedHead: () => ({ version: '1', needsRepair: false, shareOperationId: null }),
+      contentPresent: () => true,
+    });
+    const summary = await h.run();
+    expect(validate).toHaveBeenCalledExactlyOnceWith(h.fx.digest, h.fx.digest, h.fx.payload.length);
+    expect(load).not.toHaveBeenCalled();
+    expect(h.snapshotFetches).toEqual(outcome === 'valid' ? [] : [h.fx.digest]);
+    expect(summary.failedPhases).toBe(0);
+  });
+
+  it.each(['valid', 'wrong-count', 'wrong-digest', 'throws'] as const)('fully validates legacy stores without the capability (%s)', async (outcome) => {
+    const store = new MemorySnapshotStore();
+    const load = vi.spyOn(store, 'getSnapshot');
+    if (outcome === 'wrong-count') load.mockResolvedValue([]);
+    if (outcome === 'wrong-digest') load.mockResolvedValue(fixture().payload.map(q => ({ ...q, object: '"changed"' })));
+    if (outcome === 'throws') load.mockRejectedValue(new Error('snapshot unreadable'));
+    const h = harness({
+      snapshotStore: store,
+      storedHead: () => ({ version: '1', needsRepair: false, shareOperationId: null }),
+      contentPresent: () => true,
+    });
+    await h.run();
+    await h.run();
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(h.snapshotFetches).toEqual(outcome === 'valid' ? [] : [h.fx.digest, h.fx.digest]);
+  });
+
   it('materializes a cached snapshot into the assertion graph for a held-out node', async () => {
     const h = harness();
     const summary = await h.run();
