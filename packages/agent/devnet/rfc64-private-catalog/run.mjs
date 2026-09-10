@@ -11,11 +11,18 @@ import { fileURLToPath } from 'node:url';
 import {
   ASSET_NUMBERS,
   PROJECTION_EVIDENCE,
+  UPDATED_PROJECTION_EVIDENCE,
   roleAgentAddress,
 } from './fixture.mjs';
-import { sanitizeGateFailureV1 } from './gate-artifact.mjs';
+import {
+  createGateCommandFailureV1,
+  sanitizeGateFailureV1,
+} from './gate-artifact.mjs';
 import { isExpectedPrivateCatalogDenialResultV1 } from './denial-evidence.mjs';
-import { hasExactPrivateCatalogMemoryContents } from './memory-evidence.mjs';
+import {
+  hasExactPrivateCatalogMemoryContents,
+  hasExactPrivateCatalogSwmContents,
+} from './memory-evidence.mjs';
 import {
   createRfc64PrivateRuntimeEvidenceCollectorV1,
 } from './runtime-provenance.mjs';
@@ -42,7 +49,15 @@ export const RFC64_PRIVATE_GATE_RPC_BUDGET_V1 = Object.freeze({
 });
 export const EXPECTED_MEMORY_CONTENTS = Object.freeze({
   assetNumbers: ASSET_NUMBERS,
-  projection: PROJECTION_EVIDENCE,
+  swm: Object.freeze({
+    projection: UPDATED_PROJECTION_EVIDENCE,
+    assertionVersion: '2',
+    shareOperationIdPrefix: 'rfc64-private-release-gate-v2-',
+  }),
+  vm: Object.freeze({
+    projection: PROJECTION_EVIDENCE,
+    assertionVersion: '1',
+  }),
 });
 
 let requestSequence = 0;
@@ -112,7 +127,10 @@ export class AgentChild {
           && waiter.requestId !== undefined
           && waiter.requestId === event.requestId
         ) {
-          waiter.reject(new Error(`${role}: ${event.message}`));
+          waiter.reject(createGateCommandFailureV1(
+            waiter.event,
+            new Error(`${role}: ${event.message}`),
+          ));
           this.waiters.splice(this.waiters.indexOf(waiter), 1);
         } else if (event.event === 'boot-failed') {
           waiter.reject(new Error(`${role}: ${event.message}`));
@@ -288,6 +306,16 @@ export async function executeRfc64PrivateReleaseGateV1({
       'owner', dataDirs, manifestPath, peerIds, active, runtimeProvenance,
     );
     const published = await owner.request({ cmd: 'publish' }, 'published');
+    const ownerSourceState = await owner.request({
+      cmd: 'inspect',
+      expectedHeadDigest: published.headObjectDigest,
+    }, 'inspection');
+    if (!hasExactSourceSwmContents(ownerSourceState)) {
+      throw new Error(
+        `owner: fixture source is missing the exact version-2 SWM head; `
+        + `state=${JSON.stringify(safeMemorySummary(ownerSourceState))}`,
+      );
+    }
 
     const provider2 = await startRole(
       'provider2', dataDirs, manifestPath, peerIds, active, runtimeProvenance,
@@ -297,7 +325,7 @@ export async function executeRfc64PrivateReleaseGateV1({
       cmd: 'wait-bootstrap',
       expectedHeadDigest: published.headObjectDigest,
       timeoutMs: RUN_TIMEOUT_MS,
-    }, 'bootstrap-applied');
+    }, 'bootstrap-applied', RUN_TIMEOUT_MS + 10_000);
     const provider2State = await provider2.request({
       cmd: 'inspect',
       expectedHeadDigest: published.headObjectDigest,
@@ -323,7 +351,11 @@ export async function executeRfc64PrivateReleaseGateV1({
       provider2StateAfterOwnerExit.exactExpectedHead !== true
       || !hasExactMemoryContents(provider2StateAfterOwnerExit)
     ) {
-      throw new Error('provider2: exact head, SWM, or VM changed after owner exit');
+      throw new Error(
+        'provider2: exact head, SWM, or VM changed after owner exit; '
+        + `before=${JSON.stringify(safeMemorySummary(provider2State))}; `
+        + `after=${JSON.stringify(safeMemorySummary(provider2StateAfterOwnerExit))}`,
+      );
     }
 
     const receiver = await startRole(
@@ -334,7 +366,7 @@ export async function executeRfc64PrivateReleaseGateV1({
       cmd: 'wait-bootstrap',
       expectedHeadDigest: published.headObjectDigest,
       timeoutMs: RUN_TIMEOUT_MS,
-    }, 'bootstrap-applied');
+    }, 'bootstrap-applied', RUN_TIMEOUT_MS + 10_000);
     const receiverState = await receiver.request({
       cmd: 'inspect',
       expectedHeadDigest: published.headObjectDigest,
@@ -389,9 +421,9 @@ export async function executeRfc64PrivateReleaseGateV1({
       runtimeProvenance,
     );
     const restartState = await restartedReceiver.request({
-      cmd: 'inspect',
+      cmd: 'inspect-persisted',
       expectedHeadDigest: published.headObjectDigest,
-    }, 'inspection');
+    }, 'persisted-inspection');
 
     runtimeEvidence.record('outsider', await outsider.stop());
     active.delete(outsider);
@@ -414,7 +446,7 @@ export async function executeRfc64PrivateReleaseGateV1({
         provider2Bootstrap.appliedHeadDigest === published.headObjectDigest
         && provider2State.exactExpectedHead === true
         && provider2State.inventoryRowCount === '2',
-      provider2HasExactSwmAndVm: hasExactMemoryContents(provider2State),
+      provider2HasSwmV2AndVmV1: hasExactMemoryContents(provider2State),
       receiverUsedProvider2AfterOwnerStopped:
         receiverBootstrap.appliedHeadDigest === published.headObjectDigest
         && receiverBootstrap.providerPeerId === peerIds.provider2,
@@ -423,13 +455,13 @@ export async function executeRfc64PrivateReleaseGateV1({
         && ownerListenerClosed
         && provider2ListenerDialable
         && owner.exitSequence < receiver.spawnSequence,
-      receiverHasExactSwmAndVm: hasExactMemoryContents(receiverState),
+      receiverCaughtUpSwmV2AndVmV1: hasExactMemoryContents(receiverState),
       finalizedChainPathExecuted:
         provider2State.rpcCalls > 0 && receiverState.rpcCalls > 0,
       finalizedChainRpcWithinBudget:
         isWithinRpcBudgetV1(provider2StateAfterRevocation)
         && isWithinRpcBudgetV1(receiverStateAfterRevocation)
-        && isWithinRpcBudgetV1(restartState),
+        && isWithinRpcCeilingV1(restartState),
       outsiderDeniedBeforeApplication:
         isExpectedPrivateCatalogDenialResultV1(outsiderDenial)
         && outsiderState.appliedHeadDigest === null,
@@ -447,7 +479,7 @@ export async function executeRfc64PrivateReleaseGateV1({
         restartedReceiver.ready.peerId === peerIds.receiver
         && restartState.exactExpectedHead === true
         && restartState.inventoryRowCount === '2',
-      restartPreservedExactSwmAndVm: hasExactMemoryContents(restartState),
+      restartPreservedSwmV2AndVmV1: hasExactMemoryContents(restartState),
     });
     const status = Object.values(checks).every(Boolean) ? 'PASS' : 'FAIL';
     artifact = {
@@ -570,6 +602,22 @@ async function dial(from, to) {
 export const hasExactMemoryContents = (state) =>
   hasExactPrivateCatalogMemoryContents(state, EXPECTED_MEMORY_CONTENTS);
 
+export const hasExactSourceSwmContents = (state) =>
+  hasExactPrivateCatalogSwmContents(state, {
+    assetNumbers: EXPECTED_MEMORY_CONTENTS.assetNumbers,
+    ...EXPECTED_MEMORY_CONTENTS.swm,
+  });
+
+function safeMemorySummary(state) {
+  return Object.freeze({
+    appliedHeadDigest: state.appliedHeadDigest,
+    catalogVersion: state.catalogVersion,
+    exactExpectedHead: state.exactExpectedHead,
+    graphCounts: state.graphCounts,
+    inventoryRowCount: state.inventoryRowCount,
+  });
+}
+
 function safeRole(ready) {
   return {
     agentClass: ready.agentClass,
@@ -614,9 +662,13 @@ export function rpcEvidenceV1(state) {
 
 export function isWithinRpcBudgetV1(state) {
   const evidence = rpcEvidenceV1(state);
-  if (evidence.total < 1 || evidence.total > RFC64_PRIVATE_GATE_RPC_BUDGET_V1.total) {
-    return false;
-  }
+  return evidence.total >= 1 && isWithinRpcCeilingV1(state);
+}
+
+/** Persisted-state inspection may be RPC-free but must never exceed known ceilings. */
+export function isWithinRpcCeilingV1(state) {
+  const evidence = rpcEvidenceV1(state);
+  if (evidence.total > RFC64_PRIVATE_GATE_RPC_BUDGET_V1.total) return false;
   return Object.entries(evidence.byMethod).every(([method, count]) => (
     Number.isSafeInteger(count)
     && count >= 0

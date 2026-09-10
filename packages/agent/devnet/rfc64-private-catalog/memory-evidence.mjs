@@ -5,6 +5,8 @@ import { createHash } from 'node:crypto';
 import {
   MemoryLayer,
   contextGraphLayerUri,
+  contextGraphMetaUri,
+  contextGraphWorkspaceMetaGraphUri,
 } from '@origintrail-official/dkg-core';
 import {
   quadsToNQuads,
@@ -63,6 +65,7 @@ export async function readExactGraphMemoryEvidence(store, graph, options = {}) {
  */
 export async function readPrivateCatalogGraphCountEvidence(store, input) {
   return Promise.all(input.assetNumbers.map(async (kaNumber) => {
+    const kaUal = `did:dkg:${input.networkId}/${input.authorAddress}/${kaNumber}`;
     const swmGraph = contextGraphLayerUri(
       input.contextGraphId,
       MemoryLayer.SharedWorkingMemory,
@@ -75,18 +78,78 @@ export async function readPrivateCatalogGraphCountEvidence(store, input) {
       input.authorAddress,
       kaNumber,
     );
-    const [swm, vm] = await Promise.all([
+    const [swm, vm, swmHead, vmHead] = await Promise.all([
       readExactGraphMemoryEvidence(store, swmGraph),
       readExactGraphMemoryEvidence(store, vmGraph),
+      readLayerHeadEvidence(store, {
+        graph: contextGraphWorkspaceMetaGraphUri(input.contextGraphId),
+        subject: `${kaUal}#dkg-swm-head`,
+        includeShareOperationId: true,
+      }),
+      readLayerHeadEvidence(store, {
+        graph: contextGraphMetaUri(input.contextGraphId),
+        subject: kaUal,
+        includeShareOperationId: false,
+      }),
     ]);
     return Object.freeze({
       kaNumber,
+      kaUal,
+      swmGraph,
       swm: swm.count,
       swmDigest: swm.digest,
+      swmHead,
+      vmGraph,
       vm: vm.count,
       vmDigest: vm.digest,
+      vmHead,
     });
   }));
+}
+
+async function readLayerHeadEvidence(store, input) {
+  const shareOperationSelection = input.includeShareOperationId
+    ? '?shareOperationId'
+    : '';
+  const shareOperationPattern = input.includeShareOperationId
+    ? `<${input.subject}> <http://dkg.io/ontology/shareOperationId> ?shareOperationId .`
+    : '';
+  const result = await store.query(`
+    SELECT ?assertionVersion ?assertionGraph ${shareOperationSelection} WHERE {
+      GRAPH <${input.graph}> {
+        <${input.subject}> <http://dkg.io/ontology/assertionVersion> ?assertionVersion ;
+          <http://dkg.io/ontology/assertionGraph> ?assertionGraph .
+        ${shareOperationPattern}
+      }
+    }
+    LIMIT 2
+  `, { source: 'rfc64-private-release-gate.memoryHeadEvidence' });
+  if (result.type !== 'bindings' || result.bindings.length !== 1) return null;
+  const row = result.bindings[0];
+  const assertionVersion = literalValue(row?.['assertionVersion']);
+  const assertionGraph = row?.['assertionGraph'];
+  const shareOperationId = input.includeShareOperationId
+    ? literalValue(row?.['shareOperationId'])
+    : undefined;
+  if (
+    assertionVersion === null
+    || typeof assertionGraph !== 'string'
+    || (input.includeShareOperationId && shareOperationId === null)
+  ) return null;
+  return Object.freeze({
+    assertionVersion,
+    assertionGraph,
+    ...(shareOperationId === undefined || shareOperationId === null
+      ? {}
+      : { shareOperationId }),
+  });
+}
+
+function literalValue(term) {
+  if (typeof term !== 'string') return null;
+  if (!term.startsWith('"')) return term;
+  const match = /^"((?:[^"\\]|\\.)*)"/.exec(term);
+  return match?.[1] ?? null;
 }
 
 /**
@@ -95,9 +158,25 @@ export async function readPrivateCatalogGraphCountEvidence(store, input) {
  * duplicated as magic numbers in the executable runner.
  */
 export function hasExactPrivateCatalogMemoryContents(state, expected) {
-  if (!Array.isArray(state?.graphCounts) || !Array.isArray(expected?.assetNumbers)) {
-    return false;
-  }
+  return hasExactPrivateCatalogSwmContents(state, {
+    assetNumbers: expected?.assetNumbers,
+    ...expected?.swm,
+  }) && hasExactPrivateCatalogVmContents(state, {
+    assetNumbers: expected?.assetNumbers,
+    ...expected?.vm,
+  });
+}
+
+export function hasExactPrivateCatalogSwmContents(state, expected) {
+  return hasExactPrivateCatalogLayerContents(state, expected, 'swm');
+}
+
+export function hasExactPrivateCatalogVmContents(state, expected) {
+  return hasExactPrivateCatalogLayerContents(state, expected, 'vm');
+}
+
+function hasExactPrivateCatalogLayerContents(state, expected, layer) {
+  if (!Array.isArray(state?.graphCounts) || !Array.isArray(expected?.assetNumbers)) return false;
   const expectedAssets = new Set(expected.assetNumbers);
   const actualAssets = new Set(state.graphCounts.map(({ kaNumber }) => kaNumber));
   if (
@@ -108,10 +187,19 @@ export function hasExactPrivateCatalogMemoryContents(state, expected) {
     return false;
   }
   const projection = expected.projection;
-  return state.graphCounts.every(({ swm, swmDigest, vm, vmDigest }) => (
-    swm === projection?.count
-    && vm === projection?.count
-    && swmDigest === projection?.digest
-    && vmDigest === projection?.digest
-  ));
+  return state.graphCounts.every((evidence) => {
+    const count = evidence[layer];
+    const digest = evidence[`${layer}Digest`];
+    const graph = evidence[`${layer}Graph`];
+    const head = evidence[`${layer}Head`];
+    return count === projection?.count
+      && digest === projection?.digest
+      && head?.assertionVersion === expected.assertionVersion
+      && head?.assertionGraph === graph
+      && (
+        layer !== 'swm'
+        || head.shareOperationId
+          === `${expected.shareOperationIdPrefix ?? ''}${evidence.kaNumber}`
+      );
+  });
 }
