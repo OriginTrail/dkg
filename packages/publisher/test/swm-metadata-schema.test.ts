@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { storeWorkspaceOperationPublicQuads } from '../src/workspace-resolution.js';
-import { decodeSwmPublicSliceSubject, selectSwmRecordRows, emitSwmOwnership } from '../src/swm-metadata-schema.js';
+import {
+  SWM_PREDICATES, decodeSwmPublicSliceSubject, selectSwmRecordRows, emitSwmHead, emitSwmOwnership,
+} from '../src/swm-metadata-schema.js';
 
 describe('public slice identity admission', () => {
   it.each([undefined, 'public-data'])('decodes persisted producer identities in scope %s', async (subGraphName) => {
@@ -79,6 +81,26 @@ describe('SWM role projection', () => {
 });
 
 describe('current SWM writer boundary', () => {
+  it('derives deterministic wire order and runtime cardinality from the role schema', () => {
+    const rows = emitSwmHead('urn:head', 'urn:meta', {
+      shareOperationId: '"op"', assertionGraph: 'urn:assertion', assertionVersion: '"1"',
+      kaUal: 'urn:ual', contentScopeVersion: '"2"',
+    });
+    expect(rows.map(row => row.predicate)).toEqual([
+      SWM_PREDICATES.contentScopeVersion, SWM_PREDICATES.kaUal, SWM_PREDICATES.assertionVersion,
+      SWM_PREDICATES.assertionGraph, SWM_PREDICATES.shareOperationId,
+    ]);
+    expect(() => Reflect.apply(emitSwmHead, undefined, [
+      'urn:head', 'urn:meta', { contentScopeVersion: '"2"' },
+    ])).toThrow('Missing headV2 field: kaUal');
+    expect(() => Reflect.apply(emitSwmHead, undefined, [
+      'urn:head', 'urn:meta', {
+        contentScopeVersion: '"2"', kaUal: ['urn:ual'], assertionVersion: '"1"',
+        assertionGraph: 'urn:assertion', shareOperationId: '"op"',
+      },
+    ])).toThrow('Invalid headV2 cardinality for field: kaUal');
+  });
+
   it('rejects historical-only fields from untyped callers', () => {
     expect(() => Reflect.apply(emitSwmOwnership, undefined, [
       'urn:root', 'urn:meta', { workspaceOwner: '"peer"', wasAttributedTo: '"legacy"' },

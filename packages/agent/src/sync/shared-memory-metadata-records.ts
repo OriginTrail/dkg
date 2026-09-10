@@ -30,8 +30,7 @@ export interface AdmittedSwmRecord {
   readonly subject: string;
   readonly metaGraph: string;
   readonly dataGraph: string;
-  readonly rows: readonly Quad[];
-  readonly sourceIndices: readonly number[];
+  readonly rows: readonly IndexedSwmRow[];
 }
 interface OperationIdentity {
   readonly contextGraphId: string;
@@ -46,7 +45,17 @@ export interface AdmittedLegacySwmOperation extends AdmittedSwmRecord, Operation
   readonly creator?: string;
 }
 export type AdmittedSwmHead = AdmittedSwmRecord & { readonly role: 'head' };
-export type AdmittedGraphSwmOperation = AdmittedSwmRecord & { readonly role: 'graphOperation' };
+export interface GraphSwmOperationEnvelope extends OperationIdentity {
+  readonly contentScopeVersion: typeof GRAPH_KA_CONTENT_SCOPE_VERSION;
+  readonly kaUal: string;
+  readonly assertionVersion: string;
+  readonly publishedAt: string;
+  readonly publisherPeerId: string;
+}
+export type AdmittedGraphSwmOperation = AdmittedSwmRecord & {
+  readonly role: 'graphOperation';
+  readonly envelope: GraphSwmOperationEnvelope;
+};
 export type DecodedSwmRecord = AdmittedLegacySwmOperation | AdmittedSwmHead | AdmittedGraphSwmOperation
   | (AdmittedSwmRecord & { readonly role: 'publicSlice' | 'ownership' });
 export interface SwmRecordRejection {
@@ -107,8 +116,13 @@ export function indexSwmMetadata(quads: readonly Quad[], scope: SharedMemoryAdmi
 }
 
 function recordRows(source: SwmRecordSource, rows: readonly IndexedSwmRow[]): AdmittedSwmRecord {
-  return { subject: source.subject, metaGraph: source.metaGraph, dataGraph: source.dataGraph,
-    rows: rows.map(row => row.quad), sourceIndices: rows.map(row => row.sourceIndex) };
+  return { subject: source.subject, metaGraph: source.metaGraph, dataGraph: source.dataGraph, rows };
+}
+export function swmRecordQuads(record: Pick<AdmittedSwmRecord, 'rows'>): readonly Quad[] {
+  return record.rows.map(row => row.quad);
+}
+export function swmRecordSourceIndices(record: Pick<AdmittedSwmRecord, 'rows'>): readonly number[] {
+  return record.rows.map(row => row.sourceIndex);
 }
 function selectRows(source: SwmRecordSource, role: SwmRecordRole): IndexedSwmRow[] {
   return source.rows.filter(({ quad }) => isSwmRecordRowAllowed(role, quad));
@@ -125,6 +139,14 @@ function literalValue(rows: readonly Quad[], predicate: string): string | undefi
     values.add(literal.value);
   }
   return values.size === 1 ? [...values][0] : undefined;
+}
+function singleObject(rows: readonly Quad[], predicate: string): string | undefined {
+  const values = new Set(rows.filter(row => row.predicate === predicate).map(row => row.object));
+  return values.size === 1 ? [...values][0] : undefined;
+}
+function singleLiteralValue(rows: readonly Quad[], predicate: string): string | undefined {
+  const object = singleObject(rows, predicate);
+  return object === undefined ? undefined : parseRdfLiteralTerm(object)?.value;
 }
 function matchesLiteral(rows: readonly Quad[], predicate: string, expected: string | undefined, required = false): boolean {
   if (!rows.some(row => row.predicate === predicate)) return !required;
@@ -176,8 +198,23 @@ export function decodeSwmOperation(source: SwmRecordSource, scope: SharedMemoryA
   const modern = rows.some(row => row.predicate === P.contentScopeVersion);
   if (!matchesIdentity(rows, identity, modern)) return rejection(source, 'operation', 'identityMismatch');
   if (modern) {
-    if (Number(literalValue(rows, P.contentScopeVersion)) !== GRAPH_KA_CONTENT_SCOPE_VERSION) return rejection(source, 'operation', 'unsupportedVersion');
-    return { ...recordRows(source, selectRows(source, 'graphOperationV2')), role: 'graphOperation' };
+    const contentScopeVersion = Number(singleLiteralValue(rows, P.contentScopeVersion));
+    if (contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) return rejection(source, 'operation', 'unsupportedVersion');
+    const kaUal = singleObject(rows, P.kaUal);
+    const assertionVersion = singleLiteralValue(rows, P.assertionVersion);
+    const publishedAt = singleLiteralValue(rows, P.publishedAt);
+    const publisherPeerId = singleLiteralValue(rows, P.publisherPeerId)?.trim();
+    if (!kaUal || !assertionVersion || !publishedAt || !publisherPeerId) {
+      return rejection(source, 'operation', 'identityMismatch');
+    }
+    return {
+      ...recordRows(source, selectRows(source, 'graphOperationV2')),
+      role: 'graphOperation',
+      envelope: {
+        ...identity, contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal, assertionVersion, publishedAt, publisherPeerId,
+      },
+    };
   }
   if (rows.some(row => row.predicate === P.kaUal || row.predicate === P.assertionVersion)) return rejection(source, 'operation', 'modernFieldsWithoutVersion');
   const members: Array<{ sourceIndex: number; root: string }> = [];
@@ -188,8 +225,9 @@ export function decodeSwmOperation(source: SwmRecordSource, scope: SharedMemoryA
     members.push({ sourceIndex, root }); return true;
   });
   const record = recordRows(source, selected);
+  const admittedRows = swmRecordQuads(record);
   return { ...record, ...identity, role: 'legacyOperation', members, roots: new Set(members.map(member => member.root)),
-    published: record.rows.some(row => row.predicate === P.publishedAt), creator: operationCreator(record.rows) };
+    published: admittedRows.some(row => row.predicate === P.publishedAt), creator: operationCreator(admittedRows) };
 }
 
 export function decodeSwmHead(source: SwmRecordSource): AdmittedSwmHead | SwmRecordRejection | undefined {

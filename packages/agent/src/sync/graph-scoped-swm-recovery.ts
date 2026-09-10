@@ -7,21 +7,21 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   workspacePublicQuadsDigest,
-  SWM_PREDICATES as P, SWM_WORKSPACE_OPERATION, SWM_HEAD_SUFFIX, swmOperationSubject,
+  SWM_PREDICATES as P, SWM_HEAD_SUFFIX, swmOperationSubject,
   swmKnowledgeAssetOperationSnapshotGraph as knowledgeAssetSnapshotGraph,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { admitSharedMemoryMetadata } from './shared-memory-metadata-admission.js';
 import { projectStrictSwmRecovery } from './shared-memory-metadata-projections.js';
-import type { AdmittedSwmRecord } from './shared-memory-metadata-records.js';
+import {
+  swmRecordQuads,
+  type AdmittedGraphSwmOperation,
+} from './shared-memory-metadata-records.js';
 import {
   formatCanonicalRdfLiteralTerm,
   parseRdfLiteralTerm,
 } from '@origintrail-official/dkg-rdf-utils';
-
-const RDF_TYPE = P.type;
-const WORKSPACE_OPERATION = SWM_WORKSPACE_OPERATION;
 
 const CONTENT_SCOPE_VERSION = P.contentScopeVersion;
 const KA_UAL = P.kaUal;
@@ -35,7 +35,6 @@ const PUBLIC_SNAPSHOT_REF = P.publicSnapshotRef;
 const PUBLIC_SNAPSHOT_GRAPH = P.publicSnapshotGraph;
 const PRIVATE_TRIPLE_COUNT = P.privateTripleCount;
 const PRIVATE_MERKLE_ROOT = P.privateMerkleRoot;
-const PUBLISHER_PEER_ID = P.publisherPeerId;
 const PUBLISHED_AT = P.publishedAt;
 const ACCESS_POLICY = P.accessPolicy;
 const ALLOWED_PEER = P.allowedPeer;
@@ -112,7 +111,9 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
   }));
   const descriptors: GraphScopedSwmRecoveryDescriptor[] = [];
 
-  for (const { rows: headRows, metaGraph, subject: headSubject } of admitted.heads) {
+  for (const head of admitted.heads) {
+    const { metaGraph, subject: headSubject } = head;
+    const headRows = swmRecordQuads(head);
     const kaUalFromHead = headSubject.slice(0, -HEAD_SUFFIX.length);
     const scopeVersion = requireSafeInteger(headRows, CONTENT_SCOPE_VERSION, 'contentScopeVersion');
     if (scopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
@@ -150,7 +151,7 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       assertionVersion: scope.assertionVersion,
       subGraphName,
     });
-    const { shareOperationId, operationSubject, operationRows } = operation;
+    const { shareOperationId, operationSubject, operationRows, publisherPeerId } = operation;
 
     const publicQuadsDigest = requireLiteral(
       operationRows,
@@ -217,7 +218,6 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       throw new Error(`Graph-scoped SWM operation ${operationSubject} has an invalid publicSnapshotRef`);
     }
 
-    const publisherPeerId = requireLiteral(operationRows, PUBLISHER_PEER_ID, 'publisherPeerId').trim();
     if (!publisherPeerId) {
       throw new Error(`Graph-scoped SWM operation ${operationSubject} has an empty publisherPeerId`);
     }
@@ -433,6 +433,7 @@ interface ResolvedHeadOperation {
   readonly shareOperationId: string;
   readonly operationSubject: string;
   readonly operationRows: readonly Quad[];
+  readonly publisherPeerId: string;
 }
 
 /**
@@ -444,7 +445,7 @@ interface ResolvedHeadOperation {
  */
 function resolveEquivalentHeadOperation(params: {
   readonly headRows: readonly Quad[];
-  readonly graphOperations: ReadonlyMap<string, AdmittedSwmRecord>;
+  readonly graphOperations: ReadonlyMap<string, AdmittedGraphSwmOperation>;
   readonly contextGraphId: string;
   readonly metaGraph: string;
   readonly headSubject: string;
@@ -466,12 +467,15 @@ function resolveEquivalentHeadOperation(params: {
 
   const candidates = shareOperationIds.map((shareOperationId) => {
     const operationSubject = swmOperationSubject(params.contextGraphId, shareOperationId);
-    const operationRows = params.graphOperations.get(
+    const operation = params.graphOperations.get(
       `${params.metaGraph}\u0000${operationSubject}`,
-    )?.rows ?? [];
-    validateOperationRows({
-      rows: operationRows,
-      contextGraphId: params.contextGraphId,
+    );
+    if (!operation) {
+      throw new Error(`Graph-scoped SWM head references missing operation ${operationSubject}`);
+    }
+    const operationRows = swmRecordQuads(operation);
+    validateOperationForHead({
+      operation,
       metaGraph: params.metaGraph,
       operationSubject,
       shareOperationId,
@@ -479,7 +483,7 @@ function resolveEquivalentHeadOperation(params: {
       assertionVersion: params.assertionVersion,
       subGraphName: params.subGraphName,
     });
-    const publishedAt = stripLiteral(requireSingle(operationRows, PUBLISHED_AT, 'publishedAt'));
+    const publishedAt = operation.envelope.publishedAt;
     const publishedAtMs = Date.parse(publishedAt);
     if (!Number.isFinite(publishedAtMs)) {
       throw new Error(`Graph-scoped SWM operation ${operationSubject} has an invalid publishedAt`);
@@ -510,6 +514,7 @@ function resolveEquivalentHeadOperation(params: {
       shareOperationId,
       operationSubject,
       operationRows,
+      publisherPeerId: operation.envelope.publisherPeerId,
       publishedAtMs,
       samePayloadByteEquivalenceKey,
     };
@@ -563,9 +568,8 @@ export async function materializeGraphScopedSwmRecoveryAsset(params: {
   };
 }
 
-function validateOperationRows(params: {
-  rows: readonly Quad[];
-  contextGraphId: string;
+function validateOperationForHead(params: {
+  operation: AdmittedGraphSwmOperation;
   metaGraph: string;
   operationSubject: string;
   shareOperationId: string;
@@ -573,31 +577,20 @@ function validateOperationRows(params: {
   assertionVersion: string;
   subGraphName?: string;
 }): void {
-  const rows = params.rows;
-  if (rows.length === 0) {
-    throw new Error(`Graph-scoped SWM head references missing operation ${params.operationSubject}`);
-  }
-  if (!rows.some((row) => row.predicate === RDF_TYPE && row.object === WORKSPACE_OPERATION)) {
-    throw new Error(`Graph-scoped SWM operation ${params.operationSubject} is missing its type`);
-  }
-  requireSingle(rows, PUBLISHED_AT, 'publishedAt');
-  if (requireSafeInteger(rows, CONTENT_SCOPE_VERSION, 'contentScopeVersion') !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
-    throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has an invalid scope version`);
-  }
-  if (requireLiteral(rows, CONTEXT_GRAPH_ID, 'contextGraphId') !== params.contextGraphId) {
-    throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has a contextGraphId mismatch`);
-  }
-  if (requireLiteral(rows, SHARE_OPERATION_ID, 'shareOperationId') !== params.shareOperationId) {
+  const rows = swmRecordQuads(params.operation);
+  const envelope = params.operation.envelope;
+  if (envelope.shareOperationId !== params.shareOperationId) {
     throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has a shareOperationId mismatch`);
   }
-  if (requireSingle(rows, KA_UAL, 'kaUal') !== params.kaUal) {
+  if (envelope.kaUal !== params.kaUal) {
     throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has a kaUal mismatch`);
   }
-  if (requirePositiveInteger(rows, ASSERTION_VERSION, 'assertionVersion') !== params.assertionVersion) {
+  if (!/^[0-9]+$/.test(envelope.assertionVersion)
+    || BigInt(envelope.assertionVersion) < 1n
+    || BigInt(envelope.assertionVersion).toString() !== params.assertionVersion) {
     throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has an assertionVersion mismatch`);
   }
-  const operationSubGraph = optionalLiteral(rows, SUB_GRAPH_NAME, 'subGraphName')?.trim();
-  if (operationSubGraph !== params.subGraphName) {
+  if (envelope.subGraphName !== params.subGraphName) {
     throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has a subGraphName mismatch`);
   }
   const accessPolicy = optionalLiteral(rows, ACCESS_POLICY, 'accessPolicy')?.trim();
@@ -611,10 +604,8 @@ function validateOperationRows(params: {
   ) {
     throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has an invalid access envelope`);
   }
-  for (const row of rows) {
-    if (row.graph !== params.metaGraph || row.subject !== params.operationSubject) {
-      throw new Error(`Graph-scoped SWM operation ${params.operationSubject} is not graph-local`);
-    }
+  if (params.operation.metaGraph !== params.metaGraph || params.operation.subject !== params.operationSubject) {
+    throw new Error(`Graph-scoped SWM operation ${params.operationSubject} is not graph-local`);
   }
 }
 

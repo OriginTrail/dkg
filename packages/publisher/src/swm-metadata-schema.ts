@@ -60,76 +60,81 @@ export const SWM_READ_FIELDS = {
 } as const;
 
 export type SwmRecordRole = keyof typeof SWM_READ_FIELDS;
-/** Current producers cannot emit historical member/payload/reference aliases. */
-interface CurrentWriteTerms {
-  readonly entity?: never;
-  readonly publicSnapshotRef?: never;
-  readonly publicStagedQuads?: never;
-}
-interface OperationTerms extends CurrentWriteTerms {
-  readonly contextGraphId: string;
-  readonly shareOperationId: string;
-  readonly publisherPeerId: string;
-  readonly wasAttributedTo: string;
-  readonly publishedAt: string;
-  readonly subGraphName?: string;
-}
-export interface LegacySwmOperationTerms extends OperationTerms {
-  readonly type: typeof SWM_WORKSPACE_OPERATION;
-  readonly rootEntity: readonly string[];
-}
-export interface SwmHeadTerms extends CurrentWriteTerms {
-  readonly contentScopeVersion: string;
-  readonly kaUal: string;
-  readonly assertionVersion: string;
-  readonly assertionGraph: string;
-  readonly shareOperationId: string;
-}
-export interface SwmPublicSliceTerms extends OperationTerms {
-  readonly publicSliceRootEntity: string;
-  readonly publicQuadsDigest: string;
-  readonly publicQuadsCount: string;
-  readonly publicSnapshotGraph?: string;
-}
-export interface SwmOwnershipTerms extends CurrentWriteTerms {
-  readonly workspaceOwner: string;
-  readonly wasAttributedTo?: never;
-}
-interface GraphSwmOperationHeaderTerms extends OperationTerms {
-  readonly type: typeof SWM_WORKSPACE_OPERATION;
-  readonly contentScopeVersion: string;
-  readonly kaUal: string;
-  readonly assertionVersion: string;
-  readonly publicQuadsCount: string;
-  readonly privateTripleCount: string;
-  readonly privateMerkleRoot?: string;
-  readonly accessPolicy?: string;
-  readonly allowedPeer?: readonly string[];
-}
-interface GraphSwmSnapshotFragmentTerms extends CurrentWriteTerms {
-  readonly publicQuadsDigest: string;
-  readonly publicSnapshotGraph?: string;
-}
 
-const CURRENT_OPERATION_FIELDS = ['contextGraphId', 'shareOperationId', 'publisherPeerId', 'wasAttributedTo', 'publishedAt', 'subGraphName'] as const;
-// Write fields are deliberately independent of historical read allowlists.
-const WRITE_FIELDS = {
-  legacyOperationV1: [...CURRENT_OPERATION_FIELDS, 'type', 'rootEntity'],
-  headV2: ['contentScopeVersion', 'kaUal', 'assertionVersion', 'assertionGraph', 'shareOperationId'],
-  publicSliceV1: [...CURRENT_OPERATION_FIELDS, 'publicSliceRootEntity', 'publicQuadsDigest', 'publicQuadsCount', 'publicSnapshotGraph'],
-  ownershipV1: ['workspaceOwner'],
-  graphOperationHeader: [...CURRENT_OPERATION_FIELDS, 'type', 'contentScopeVersion', 'kaUal', 'assertionVersion',
-    'publicQuadsCount', 'privateTripleCount', 'privateMerkleRoot', 'accessPolicy', 'allowedPeer'],
-  graphSnapshotFragment: ['publicQuadsDigest', 'publicSnapshotGraph'],
-} as const satisfies Record<string, readonly (keyof typeof P)[]>;
+type WriteCardinality = 'one' | 'optional' | 'many' | 'optionalMany';
+type WriteFieldDescriptor = readonly [keyof typeof P, WriteCardinality];
+const CURRENT_OPERATION_FIELDS = [
+  ['contextGraphId', 'one'], ['shareOperationId', 'one'], ['publisherPeerId', 'one'],
+  ['wasAttributedTo', 'one'], ['publishedAt', 'one'], ['subGraphName', 'optional'],
+] as const satisfies readonly WriteFieldDescriptor[];
 
-/** Private serializer: preserve caller order and reject fields outside the writer contract. */
-function emitTerms(role: keyof typeof WRITE_FIELDS, subject: string, graph: string, terms: object): Quad[] {
+/**
+ * The one source of truth for each current writer contract. Field order is
+ * wire order; cardinality drives both the public input type and runtime
+ * validation. Historical read-only fields intentionally appear only above.
+ */
+const SWM_WRITE_SCHEMAS = {
+  legacyOperationV1: [...CURRENT_OPERATION_FIELDS, ['type', 'one'], ['rootEntity', 'many']],
+  headV2: [
+    ['contentScopeVersion', 'one'], ['kaUal', 'one'], ['assertionVersion', 'one'],
+    ['assertionGraph', 'one'], ['shareOperationId', 'one'],
+  ],
+  publicSliceV1: [
+    ...CURRENT_OPERATION_FIELDS, ['publicSliceRootEntity', 'one'], ['publicQuadsDigest', 'one'],
+    ['publicQuadsCount', 'one'], ['publicSnapshotGraph', 'optional'],
+  ],
+  ownershipV1: [['workspaceOwner', 'one']],
+  graphOperationHeader: [
+    ...CURRENT_OPERATION_FIELDS, ['type', 'one'], ['contentScopeVersion', 'one'], ['kaUal', 'one'],
+    ['assertionVersion', 'one'], ['publicQuadsCount', 'one'], ['privateTripleCount', 'one'],
+    ['privateMerkleRoot', 'optional'], ['accessPolicy', 'optional'], ['allowedPeer', 'optionalMany'],
+  ],
+  graphSnapshotFragment: [['publicQuadsDigest', 'one'], ['publicSnapshotGraph', 'optional']],
+} as const satisfies Record<string, readonly WriteFieldDescriptor[]>;
+
+type WriterRole = keyof typeof SWM_WRITE_SCHEMAS;
+type DescriptorFor<R extends WriterRole> = (typeof SWM_WRITE_SCHEMAS)[R][number];
+type FieldsWithCardinality<R extends WriterRole, C extends WriteCardinality> =
+  DescriptorFor<R> extends infer D
+    ? D extends readonly [infer F extends keyof typeof P, C] ? F : never
+    : never;
+type WriterField<R extends WriterRole> = DescriptorFor<R>[0];
+type WriterTerms<R extends WriterRole> =
+  { readonly [F in FieldsWithCardinality<R, 'one'>]: string }
+  & { readonly [F in FieldsWithCardinality<R, 'optional'>]?: string }
+  & { readonly [F in FieldsWithCardinality<R, 'many'>]: readonly string[] }
+  & { readonly [F in FieldsWithCardinality<R, 'optionalMany'>]?: readonly string[] }
+  & { readonly [F in Exclude<keyof typeof P, WriterField<R>>]?: never };
+
+export type LegacySwmOperationTerms = WriterTerms<'legacyOperationV1'>;
+export type SwmHeadTerms = WriterTerms<'headV2'>;
+export type SwmPublicSliceTerms = WriterTerms<'publicSliceV1'>;
+export type SwmOwnershipTerms = WriterTerms<'ownershipV1'>;
+type GraphSwmOperationHeaderTerms = WriterTerms<'graphOperationHeader'>;
+type GraphSwmSnapshotFragmentTerms = WriterTerms<'graphSnapshotFragment'>;
+
+/** Validate and emit in descriptor order, independent of caller object order. */
+function emitTerms<R extends WriterRole>(role: R, subject: string, graph: string, terms: WriterTerms<R>): Quad[] {
+  const schema: readonly WriteFieldDescriptor[] = SWM_WRITE_SCHEMAS[role];
+  const allowed = new Set(schema.map(([field]) => field));
+  for (const field of Object.keys(terms)) {
+    if (!allowed.has(field as keyof typeof P)) throw new Error(`Unknown ${role} field: ${field}`);
+  }
+  const values = terms as Record<WriterField<R>, string | readonly string[] | undefined>;
   const rows: Quad[] = [];
-  const fields: readonly string[] = WRITE_FIELDS[role];
-  for (const [field, value] of Object.entries(terms) as Array<[keyof typeof P, string | readonly string[] | undefined]>) {
-    if (!fields.includes(field)) throw new Error(`Unknown ${role} field: ${field}`);
-    for (const object of typeof value === 'string' ? [value] : value ?? []) {
+  for (const [field, cardinality] of schema) {
+    const value = values[field as WriterField<R>];
+    const repeated = cardinality === 'many' || cardinality === 'optionalMany';
+    const required = cardinality === 'one' || cardinality === 'many';
+    if (value === undefined) {
+      if (required) throw new Error(`Missing ${role} field: ${field}`);
+      continue;
+    }
+    if (repeated ? !Array.isArray(value) : typeof value !== 'string') {
+      throw new Error(`Invalid ${role} cardinality for field: ${field}`);
+    }
+    for (const object of repeated ? value as readonly string[] : [value as string]) {
+      if (typeof object !== 'string') throw new Error(`Invalid ${role} value for field: ${field}`);
       rows.push({ subject, predicate: P[field], object, graph });
     }
   }

@@ -5,6 +5,7 @@ import {
   swmPublicSliceSubject as workspaceOperationPublicSliceSubject,
   swmKnowledgeAssetOperationSnapshotGraph as workspaceKnowledgeAssetOperationSnapshotGraph,
 } from './swm-metadata-schema.js';
+export { workspaceKnowledgeAssetHeadSubject };
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
@@ -1400,14 +1401,6 @@ function normalizeOptionalSubGraphName(subGraphName: string | undefined): string
     throw new Error(`Lift shared-memory resolution rejected invalid subGraphName "${subGraphName}": ${validation.reason}`);
   }
   return normalized;
-}
-
-/** Canonical durable SWM head locator shared by writers and recovery admission. */
-export function workspaceKnowledgeAssetHeadSubject(kaUal: string): string {
-  const scope = createGraphKnowledgeAssetScope(kaUal, 1);
-  const subject = `${scope.ual}#dkg-swm-head`;
-  assertSafeIri(subject);
-  return subject;
 }
 
 function workspaceOperationPublicSnapshotGraph(

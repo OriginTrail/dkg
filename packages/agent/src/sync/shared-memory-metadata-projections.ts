@@ -2,11 +2,14 @@
 
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { AdmittedSharedMemoryMetadata } from './shared-memory-metadata-admission.js';
-import { swmRecordKey, type AdmittedGraphSwmOperation, type AdmittedSwmHead, type SharedMemoryContextScope } from './shared-memory-metadata-records.js';
+import {
+  swmRecordKey, swmRecordSourceIndices,
+  type AdmittedGraphSwmOperation, type AdmittedSwmHead, type SharedMemoryContextScope,
+} from './shared-memory-metadata-records.js';
 
 /** Replay source positions, preserving duplicates and order without quad identity. */
 export function projectSwmPersistence(model: AdmittedSharedMemoryMetadata): Quad[] {
-  const selected = new Set(model.records.flatMap(record => [...record.sourceIndices]));
+  const selected = new Set(model.records.flatMap(record => [...swmRecordSourceIndices(record)]));
   return model.sourceQuads.filter((_row, index) => selected.has(index));
 }
 

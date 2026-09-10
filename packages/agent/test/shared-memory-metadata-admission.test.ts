@@ -283,7 +283,7 @@ describe('shared-memory metadata protocol admission', () => {
     const rows = [...first.filter(row => row !== member), ...second, member, member, { ...member }];
     const model = admitSharedMemoryMetadata(rows, contextScope(CG));
     const cloned = { ...model, records: model.records.map(record => ({
-      ...record, rows: record.rows.map(row => ({ ...row })),
+      ...record, rows: record.rows.map(row => ({ ...row, quad: { ...row.quad } })),
     })) };
     expect(projectSwmPersistence(cloned)).toEqual(rows);
     expect(projectSwmPersistence(cloned).filter(row => row === member)).toHaveLength(2);
@@ -348,6 +348,21 @@ describe('shared-memory metadata protocol admission', () => {
     const accepted = await worker.processSharedMemoryBatch(data, legacy(), CG);
     expect(accepted.verifiedData).toEqual(data);
     expect(accepted.entityCreators).toEqual([{ dataGraph: contextGraphSharedMemoryUri(CG), entity: ROOT, creator: 'peer-source' }]);
+  });
+
+  it.each([
+    ['publishedAt', `${DKG}publishedAt`],
+    ['WorkspaceOperation type', 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'],
+  ])('does not authorize a legacy root without its mandatory %s row', async (_name, predicate) => {
+    const worker = new SyncVerifyWorker(); workers.push(worker);
+    const metadata = legacy().filter(row => row.predicate !== predicate);
+    const data = [q(ROOT, 'urn:data:name', '"must remain unauthorized"', contextGraphSharedMemoryUri(CG))];
+    const result = await worker.processSharedMemoryBatch(data, metadata, CG);
+    expect(result.verifiedData).toEqual([]);
+    expect(result.entityCreators).toEqual([]);
+    const hydration = projectLegacySwmHydration(admitSharedMemoryMetadata(metadata, contextScope(CG)));
+    expect([...hydration.legacyRoots]).toEqual([]);
+    expect(hydration.ownership).toEqual([]);
   });
 
   it('persists only admitted metadata through real worker, requester, and Oxigraph storage', async () => {
