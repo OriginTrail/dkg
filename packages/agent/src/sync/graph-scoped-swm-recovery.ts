@@ -10,6 +10,7 @@ import {
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { selectGraphScopedSwmDescriptorMetadata } from './shared-memory-metadata-admission.js';
 import {
   formatCanonicalRdfLiteralTerm,
   parseRdfLiteralTerm,
@@ -244,7 +245,7 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       ...(publicSnapshotGraph ? { publicSnapshotGraph } : {}),
       publisherPeerId,
       ...(subGraphName ? { subGraphName } : {}),
-      metadataQuads: [
+      metadataQuads: selectGraphScopedSwmDescriptorMetadata([
         ...headRows.filter((row) => row.predicate !== SHARE_OPERATION_ID),
         // EVERY lexical form of the selected id, not just the one selected
         // row: RDF 1.1 admits the same value as a plain and an
@@ -254,8 +255,7 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
         // beside a just-preserved head.
         ...headRows.filter((row) => row.predicate === SHARE_OPERATION_ID
           && stripLiteral(row.object).trim() === shareOperationId),
-        ...operationRows,
-      ],
+      ], operationRows),
     });
   }
 
