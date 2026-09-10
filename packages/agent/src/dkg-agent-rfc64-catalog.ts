@@ -149,6 +149,8 @@ import {
   resolveRfc64CatalogResponsibilityReasonV1,
   type Rfc64CatalogResponsibilitySelectionV1,
 } from './rfc64/catalog-responsibility-registry-v1.js';
+import type { Rfc64AuthorityReadCoordinatorSnapshotV1 } from
+  './rfc64/authority-rpc-circuit-breaker-v1.js';
 import {
   composeRfc64FinalizedCatalogAuthorityV1,
   composeRfc64RegisteredRosterVersionV1,
@@ -1298,6 +1300,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     ).snapshot();
   }
 
+  /**
+   * Privacy-safe operator view of the node-wide RFC-64 authority-read circuit.
+   * The snapshot contains no provider URLs, graph identifiers, or RPC payloads.
+   */
+  readRfc64AuthorityRpcCircuitSnapshotV1(
+    this: DKGAgent,
+  ): Rfc64AuthorityReadCoordinatorSnapshotV1 {
+    return this.rfc64AuthorityReadCoordinatorV1.snapshot();
+  }
   /** Local, privacy-safe per-CG release evidence used by status and harnesses. */
   async readRfc64CatalogOperationalStatusV1(
     this: DKGAgent,

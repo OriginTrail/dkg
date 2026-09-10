@@ -124,6 +124,30 @@ async function requestStatusWithAgent(
 }
 
 describe('/api/status RFC-64 private recovery privacy', () => {
+  it('surfaces only the privacy-safe RFC-64 authority RPC circuit snapshot', async () => {
+    const readCircuit = vi.fn(() => ({
+      state: 'open' as const,
+      consecutiveExhaustions: 3,
+      retryAtMs: 1_893_456_000_000,
+    }));
+    const response = await requestStatusWithAgent({
+      readRfc64AuthorityRpcCircuitSnapshotV1: readCircuit,
+    });
+
+    expect(response.status).toBe(200);
+    expect(readCircuit).toHaveBeenCalledOnce();
+    expect(response.body.rfc64Catalog.authorityRpcCircuit).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 3,
+      retryAtMs: 1_893_456_000_000,
+    });
+    expect(Object.keys(response.body.rfc64Catalog.authorityRpcCircuit).sort()).toEqual([
+      'consecutiveExhaustions',
+      'retryAtMs',
+      'state',
+    ]);
+  });
+
   it('projects live mixed edge selection without leaking private ids into public status', async () => {
     const publicContextGraph = 'runtime-selected-public';
     const privateContextGraph =
