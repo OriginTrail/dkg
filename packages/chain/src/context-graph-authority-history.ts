@@ -353,7 +353,16 @@ async function loadContextGraphAuthorityHistory(
     for (let lo = fromBlock; lo <= input.finalized.number; lo += input.pageSize) {
       input.signal?.throwIfAborted();
       const hi = Math.min(lo + input.pageSize - 1, input.finalized.number);
-      events.push(...await input.readEvents({ name, contextGraphId: input.contextGraphId }, lo, hi));
+      events.push(...await readAuthorityHistoryRange(
+        (rangeFrom, rangeTo) => input.readEvents(
+          { name, contextGraphId: input.contextGraphId },
+          rangeFrom,
+          rangeTo,
+        ),
+        lo,
+        hi,
+        input.signal,
+      ));
     }
     return events;
   };
@@ -362,7 +371,16 @@ async function loadContextGraphAuthorityHistory(
     for (let lo = fromBlock; lo <= input.finalized.number; lo += input.pageSize) {
       input.signal?.throwIfAborted();
       const hi = Math.min(lo + input.pageSize - 1, input.finalized.number);
-      events.push(...await input.readCreationEvents(input.contextGraphId, lo, hi));
+      events.push(...await readAuthorityHistoryRange(
+        (rangeFrom, rangeTo) => input.readCreationEvents(
+          input.contextGraphId,
+          rangeFrom,
+          rangeTo,
+        ),
+        lo,
+        hi,
+        input.signal,
+      ));
     }
     return events;
   };
@@ -433,4 +451,42 @@ async function loadContextGraphAuthorityHistory(
     sourceBlockNumber,
     sourceBlockHash: sourceBlockHash.toLowerCase(),
   });
+}
+
+/**
+ * Retry only provider-declared block-range limits, splitting sequentially so a
+ * 50-block fallback RPC can finish a scan configured for 200/2,000-block
+ * providers without multiplying the cold-start request burst.
+ */
+async function readAuthorityHistoryRange<T>(
+  read: (fromBlock: number, toBlock: number) => Promise<readonly T[]>,
+  fromBlock: number,
+  toBlock: number,
+  signal?: AbortSignal,
+): Promise<T[]> {
+  signal?.throwIfAborted();
+  try {
+    return [...await read(fromBlock, toBlock)];
+  } catch (err) {
+    if (fromBlock >= toBlock || !isRpcBlockRangeLimitError(err)) throw err;
+    const midpoint = fromBlock + Math.floor((toBlock - fromBlock) / 2);
+    const left = await readAuthorityHistoryRange(read, fromBlock, midpoint, signal);
+    const right = await readAuthorityHistoryRange(read, midpoint + 1, toBlock, signal);
+    return [...left, ...right];
+  }
+}
+
+function isRpcBlockRangeLimitError(err: unknown): boolean {
+  const candidate = err as {
+    message?: unknown;
+    error?: { message?: unknown };
+    info?: { error?: { message?: unknown } };
+  };
+  const message = [
+    candidate?.message,
+    candidate?.error?.message,
+    candidate?.info?.error?.message,
+  ].filter((value): value is string => typeof value === 'string').join(' ');
+  return /(?:block range too large|exceeds? (?:the )?(?:max(?:imum)? )?block range|maximum allowed is \d+ blocks|limited to (?:a )?\d+ blocks?)/i
+    .test(message);
 }

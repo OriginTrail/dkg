@@ -46,7 +46,17 @@ function directHistoryInput(params: Readonly<{
   readScope?: object;
   signal?: AbortSignal;
   omitCreationNameHash?: boolean;
+  rangeLimit?: number;
+  rangeAttempts?: { count: number };
 }>): ResolveContextGraphAuthorityHistoryInput {
+  const enforceRangeLimit = (fromBlock: number, toBlock: number) => {
+    if (params.rangeAttempts) params.rangeAttempts.count += 1;
+    if (params.rangeLimit !== undefined && toBlock - fromBlock + 1 > params.rangeLimit) {
+      throw new Error(
+        `Block range too large: maximum allowed is ${params.rangeLimit} blocks`,
+      );
+    }
+  };
   return {
     cache: params.cache,
     cacheKey: params.cacheKey,
@@ -61,9 +71,11 @@ function directHistoryInput(params: Readonly<{
     },
     readBlockHash: async (blockNumber) => params.blockHashes?.[blockNumber]
       ?? (blockNumber === params.blockNumber ? params.blockHash : null),
-    readCreationEvents: async () => {
+    readCreationEvents: async (_contextGraphId, fromBlock, toBlock) => {
+      enforceRangeLimit(fromBlock, toBlock);
       params.creationGate?.entered();
       if (params.creationGate) await params.creationGate.wait;
+      if (fromBlock > 1 || toBlock < 1) return [];
       return [{
         blockNumber: 1,
         blockHash: `0x${'01'.repeat(32)}`,
@@ -72,6 +84,7 @@ function directHistoryInput(params: Readonly<{
       }] as unknown as readonly ContextGraphAuthorityHistoryCreationEvent[];
     },
     readEvents: async (_query, fromBlock, toBlock) => {
+      enforceRangeLimit(fromBlock, toBlock);
       params.ordinaryRanges?.push([fromBlock, toBlock]);
       return [];
     },
@@ -349,6 +362,23 @@ describe('ContextGraphAuthorityHistoryCache', () => {
     expect(coldReads.count).toBe(1);
     await resolution.publish();
     expect(store.states.get('malformed')?.throughBlockHash).toBe(NEXT_FINALIZED_HASH);
+  });
+
+  it('sequentially splits pages rejected by a fallback RPC range cap', async () => {
+    const rangeAttempts = { count: 0 };
+    const resolution = await resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache: new ContextGraphAuthorityHistoryCache(),
+      cacheKey: 'adaptive-range',
+      blockNumber: 200,
+      blockHash: FINALIZED_HASH,
+      rangeLimit: 50,
+      rangeAttempts,
+    }));
+    expect(resolution.state.throughBlockNumber).toBe(200);
+    // Two configured 100-block pages × six event streams: each rejected page
+    // is retried as two accepted 50-block reads.
+    expect(rangeAttempts.count).toBe(36);
+    await resolution.publish();
   });
 
   it('rejects a malformed creation event without a name hash at runtime', async () => {
