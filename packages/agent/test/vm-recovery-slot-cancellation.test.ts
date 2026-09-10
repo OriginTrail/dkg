@@ -68,9 +68,9 @@ describe('exact VM recovery slot cancellation', () => {
       const donor = harness.targets[0]!;
       const waiting = harness.targets[1]!;
       const original = host.prepareVmReconcileRotationTarget(donor, [peer], host.vmReconcileRotationNow()).record!;
-      original.phase = 'backoff';
-      original.backoffKind = 'incomplete-cycle';
-      original.nextRetryAt = 0;
+      host.vmRecoverySlots.settleAttempt(donor, peer, 'incomplete', [peer], original, {
+        now: 0, getLocalPeerId: () => 'test-host', baseBackoffMs: 1, maxBackoffMs: 1,
+      });
       let discoverySignal: AbortSignal | undefined;
       host.resolveCuratorPeerIdsForCg = async (_cg, options) => {
         discoverySignal = options?.signal;

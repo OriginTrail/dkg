@@ -66,6 +66,31 @@ describe('VM recovery microbatch host — adversarial integration', () => {
       agent.stop().catch(() => undefined)));
   });
 
+  it('leaves zero-peer targets without absence evidence and retries immediately when a peer appears', async () => {
+    const localCgId = '0x0000000000000000000000000000000000000001/empty-roster';
+    const peers: string[] = [];
+    const harness = await createRecoveryHarness({
+      name: 'ExactVmEmptyRoster', localCgId, peers, targetCount: 1,
+      onFetch: (_peer, requested, recovered) => {
+        for (const target of requested) recovered.add(target.ordinal);
+        return 'found';
+      },
+    });
+    agents.push(harness.agent);
+    const empty = await harness.run();
+    expect.soft(empty.attemptedOrdinals).toEqual([]);
+    expect.soft(harness.fetched).toEqual([]);
+    expect.soft(harness.internals.vmRecoverySlots.recordCount).toBe(0);
+    expect.soft(harness.internals.readVmReconcileActiveFetchCooldown(localCgId)).toBeUndefined();
+
+    peers.push('12D3KooWNewlyAvailableHolder');
+    harness.internals.node.libp2p.getConnections = () => peers.map(peer => ({ remotePeer: { toString: () => peer } }));
+    const recovered = await harness.run();
+    expect(recovered.outcomes.get(0)?.status).toBe('reconciled');
+    expect(harness.fetched).toEqual([{ peerId: peers[0], uals: [harness.targets[0]!.ual] }]);
+    expect(harness.internals.vmRecoverySlots.recordCount).toBe(0);
+  });
+
   it('rotates after spending one proven-holder reuse in the recovery slice', async () => {
     const holder = '12D3KooWExactProvenAHolder';
     const fallback = '12D3KooWExactProvenZFallback';
@@ -643,7 +668,6 @@ describe('VM recovery microbatch host — adversarial integration', () => {
     });
     agents.push(harness.agent);
     const target = harness.targets[0]!;
-    const slotKey = vmRecoverySlotKey(target);
     const replication = vi.spyOn(
       harness.agent as unknown as { emitReplication(event: unknown): void },
       'emitReplication',
@@ -657,7 +681,7 @@ describe('VM recovery microbatch host — adversarial integration', () => {
         entry: {
           index: 0,
           target,
-          prepared: { slotKey, suppressed: false },
+          prepared: { suppressed: false },
         },
         installedRecord: undefined,
         candidatePeerIds: [peerId],

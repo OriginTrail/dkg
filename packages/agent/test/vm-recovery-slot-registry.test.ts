@@ -17,12 +17,74 @@ function admitFor(
 }
 
 describe('active VM recovery slot ownership', () => {
+  it.each(['immediate', 'reserved'] as const)('releases an empty %s roster without retiring a donor', kind => {
+    const registry = new VmRecoverySlotRegistry(1);
+    const original = admitFor(registry);
+    const donorScope = registry.begin();
+    donorScope.track([target]);
+    const waiting = { ...target, ordinal: 1 };
+    const scope = registry.begin();
+    const reservation = kind === 'reserved' ? scope.reserveAdmission(waiting, 101) : undefined;
+    if (kind === 'reserved') expect(reservation?.kind).toBe('reserved');
+    expect(registry.prepare(waiting, {
+      candidatePeerIds: [], curatorRosterConfirmed: true, collectionDeadlineAt: 201,
+    }, 101, reservation?.kind === 'reserved' ? reservation.reservation : undefined)).toEqual({ suppressed: false });
+    expect(registry.recordCount).toBe(1);
+    expect(registry.peekRecord(waiting)).toBeUndefined();
+    expect(registry.peekRecord(target)).toBe(original);
+    expect(donorScope.signal.aborted).toBe(false);
+    expect(registry.prepare(waiting, {
+      candidatePeerIds: ['new-peer'], curatorRosterConfirmed: true, collectionDeadlineAt: 201,
+    }, 101).record).toBeDefined();
+    scope.release();
+    donorScope.release();
+  });
+
+  it('does not expose mutable rotation state through captured records or diagnostics', () => {
+    const registry = new VmRecoverySlotRegistry(1);
+    const record = admitFor(registry);
+    expect(() => Object.assign(record, { phase: 'backoff', nextRetryAt: Infinity })).toThrow(TypeError);
+    // JavaScript consumers may mutate their detached sets; the owner is unaffected.
+    (record.candidatePeerIds as Set<string>).clear();
+    (registry.snapshot().values().next().value!.attemptedPeerIds as Set<string>).add('peer-a');
+    expect(record.candidatePeerIds).toEqual(new Set(['peer-a']));
+    expect(record.attemptedPeerIds.size).toBe(0);
+    registry.settleAttempt(target, 'peer-a', 'clean-absent', ['peer-a'], record, {
+      now: 10, getLocalPeerId: () => 'local', baseBackoffMs: 10, maxBackoffMs: 100,
+    });
+    expect(record.phase).toBe('backoff');
+    expect(record.failures).toBe(1);
+    expect(record.cleanAbsentPeerIds).toEqual(new Set(['peer-a']));
+  });
+
+  it('does not retire a replacement installed by an invalidation listener during preparation', () => {
+    const registry = new VmRecoverySlotRegistry(1);
+    admitFor(registry);
+    const originalScope = registry.begin();
+    originalScope.track([target]);
+    const replacement = { ...target, merkleRoot: 'listener-replacement' };
+    let replacementScope: VmRecoverySlotScope | undefined;
+    let replacementRecord: VmReconcileRotationRecord | undefined;
+    originalScope.signal.addEventListener('abort', () => {
+      replacementRecord = admitFor(registry, replacement);
+      replacementScope = registry.begin();
+      replacementScope.track([replacement]);
+    }, { once: true });
+    expect(registry.prepare({ ...target, merkleRoot: 'requested-replacement' }, {
+      candidatePeerIds: ['peer-a'], curatorRosterConfirmed: true, collectionDeadlineAt: 100,
+    }, 0)).toEqual({ suppressed: true });
+    expect(registry.peekRecord(replacement)).toBe(replacementRecord);
+    expect(replacementScope?.signal.aborted).toBe(false);
+    originalScope.release();
+    replacementScope?.release();
+  });
+
   it('binds one validated capacity to every admission path', () => {
     expect(() => new VmRecoverySlotRegistry(0)).toThrow(/positive safe integer/);
     const registry = new VmRecoverySlotRegistry(1);
     admitFor(registry);
     expect(registry.admit({ ...target, ordinal: 1 }, {
-      candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
+      candidatePeerIds: ['peer-a'], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
     }, 0).kind).toBe('deferred');
     const scope = registry.begin();
     expect(scope.reserveAdmission({ ...target, ordinal: 2 }, 0).kind).toBe('deferred');
@@ -31,8 +93,8 @@ describe('active VM recovery slot ownership', () => {
 
   it('preserves one live slot per graph across overlapping fair donations', () => {
     const registry = new VmRecoverySlotRegistry(2);
-    admitFor(registry, target, 0, 2);
-    admitFor(registry, { ...target, ordinal: 1 }, 0, 2);
+    admitFor(registry, target, 0);
+    admitFor(registry, { ...target, ordinal: 1 }, 0);
     const scope = registry.begin();
     const first = scope.reserveAdmission({ ...target, localCgId: 'cg-b' }, 0);
     expect(first.kind).toBe('reserved');
@@ -42,7 +104,7 @@ describe('active VM recovery slot ownership', () => {
     const next = scope.reserveAdmission({ ...target, localCgId: 'cg-c' }, 0);
     expect(next.kind).toBe('reserved');
     if (next.kind === 'reserved') expect(next.reservation.commit({
-      candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
+      candidatePeerIds: ['peer-a'], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
     }).kind).toBe('admitted');
     expect([...registry.snapshot().values()].map(record => record.localCgId)).toEqual(['cg-a', 'cg-c']);
     scope.release();
@@ -110,8 +172,8 @@ describe('active VM recovery slot ownership', () => {
 
   it('reserves distinct donors and makes released capacity available to the next waiter', () => {
     const registry = new VmRecoverySlotRegistry(2);
-    const donorA = admitFor(registry, target, 0, 2);
-    const donorB = admitFor(registry, { ...target, ordinal: 1 }, 0, 2);
+    const donorA = admitFor(registry, target, 0);
+    const donorB = admitFor(registry, { ...target, ordinal: 1 }, 0);
     const scope = registry.begin();
     const first = scope.reserveAdmission({ ...target, ordinal: 2 }, 100);
     const second = scope.reserveAdmission({ ...target, ordinal: 3 }, 100);
@@ -122,7 +184,7 @@ describe('active VM recovery slot ownership', () => {
     if (first.kind === 'reserved') first.reservation.release();
     const next = scope.reserveAdmission({ ...target, ordinal: 4 }, 100);
     expect(next.kind).toBe('reserved');
-    const params = { candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 200 };
+    const params = { candidatePeerIds: ['peer-a'], curatorRosterConfirmed: false, collectionDeadlineAt: 200 };
     if (second.kind === 'reserved') expect(second.reservation.commit(params).kind).toBe('admitted');
     if (next.kind === 'reserved') expect(next.reservation.commit(params).kind).toBe('admitted');
     expect([...registry.snapshot().values()].map(record => record.ordinal)).toEqual([3, 4]);
@@ -143,7 +205,7 @@ describe('active VM recovery slot ownership', () => {
     const record = admitFor(registry, replacement, 100);
     expect(scope.signal.aborted).toBe(true);
     if (admission.kind === 'reserved') expect(admission.reservation.commit({
-      candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 200,
+      candidatePeerIds: ['peer-a'], curatorRosterConfirmed: false, collectionDeadlineAt: 200,
     }).kind).toBe('deferred');
     expect(registry.peekRecord(replacement)).toBe(record);
     scope.release();
@@ -161,7 +223,7 @@ describe('active VM recovery slot ownership', () => {
     expect(admission.kind).toBe('reserved');
     if (order === 'after') scope.track([target, waiting]);
     if (admission.kind === 'reserved') expect(admission.reservation.commit({
-      candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 200,
+      candidatePeerIds: ['peer-a'], curatorRosterConfirmed: false, collectionDeadlineAt: 200,
     }).kind).toBe('admitted');
     expect(otherScope.signal.aborted).toBe(true);
     expect(scope.signal.aborted).toBe(false);
@@ -179,10 +241,10 @@ describe('active VM recovery slot ownership', () => {
     const admission = scope.reserveAdmission(target, 0);
     expect(admission.kind).toBe('reserved');
     expect(registry.admit({ ...target, ordinal: 1 }, {
-      candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
+      candidatePeerIds: ['peer-a'], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
     }, 0).kind).toBe('deferred');
     if (admission.kind === 'reserved') expect(admission.reservation.commit({
-      candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
+      candidatePeerIds: ['peer-a'], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
     }).kind).toBe('admitted');
     expect(registry.recordCount).toBe(1);
     scope.release();
@@ -197,7 +259,7 @@ describe('active VM recovery slot ownership', () => {
     else if (kind === 'context') registry.invalidateContextGraph(target.localCgId);
     else registry.close();
     if (admission.kind === 'reserved') expect(admission.reservation.commit({
-      candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
+      candidatePeerIds: ['peer-a'], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
     }).kind).toBe('deferred');
     expect(registry.recordCount).toBe(0);
     expect(admitFor(registry, target, 0)).toBeDefined();
