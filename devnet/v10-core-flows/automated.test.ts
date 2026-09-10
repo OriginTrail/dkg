@@ -622,18 +622,37 @@ describe('3. NFT staking withdraw', () => {
     const receipt = await tx.wait();
     expect(receipt.status, `withdraw tx reverted`).toBe(1);
 
+    // `StakingV10.withdraw` AUTO-CLAIMS outstanding rewards and compounds them
+    // into `raw` before the payout (Q3/D19 in StakingV10.sol), emitting
+    // `RewardsClaimed(tokenId, amount)` from the same tx. So when earlier
+    // suites (or test 4 on a re-run) left this position with unclaimed
+    // RS-scored epochs, the payout is EXACTLY `pre-withdraw raw + auto-claimed
+    // reward` — comparing against `raw` alone trips on that reward dust.
+    // Derive the expected payout from the on-chain events instead of assuming
+    // zero pending rewards; every equality below stays exact (no tolerance).
     const iface = new ethers.Interface(NFT_ABI);
     let eventAmount = 0n;
+    let autoClaimed = 0n;
     for (const log of receipt.logs) {
       try {
         const parsed = iface.parseLog(log);
         if (parsed?.name === 'PositionWithdrawn') eventAmount = parsed.args.amount;
+        // Emitted by StakingV10 (parseLog matches on the event signature, not
+        // the emitting address); tokenId-guarded for safety.
+        if (parsed?.name === 'RewardsClaimed' && parsed.args.tokenId === tokenIdRaw) {
+          autoClaimed += parsed.args.amount as bigint;
+        }
       } catch { /* not our event */ }
     }
-    expect(eventAmount).toBe(expectedAmount);
+    expect(
+      eventAmount,
+      `PositionWithdrawn amount must equal pre-withdraw raw (${expectedAmount}) + ` +
+        `auto-claimed reward (${autoClaimed})`,
+    ).toBe(expectedAmount + autoClaimed);
 
     const tracAfter = await state.token.balanceOf(target!.address);
-    expect(tracAfter - tracBefore, 'TRAC delta must match raw stake').toBe(expectedAmount);
+    expect(tracAfter - tracBefore, 'TRAC delta must match the withdraw payout (raw + auto-claimed reward)')
+      .toBe(eventAmount);
 
     // NFT burned
     await expect(nft.ownerOf(tokenIdRaw)).rejects.toThrow();
@@ -714,12 +733,34 @@ describe('4. operator-fee accrual + withdrawal', () => {
       await sleep(1500);
     }
 
+    // The RS prover runs a full pipeline before the epoch score turns
+    // non-zero: an open proof period (100 blocks on the devnet — ~100s at the
+    // default 1s block interval), a prover-loop tick that draws the challenge,
+    // KC extraction, and a mined proof tx. The previous fixed 80s window
+    // covered less than ONE proof period, so the assertion was timing-lucky:
+    // fast hosts landed a proof inside the window, loaded CI hosts missed it.
+    // Poll against a generous wall-clock deadline instead, and tick the chain
+    // a couple of blocks each attempt so proof periods keep rolling even when
+    // interval mining is off (HARDHAT_BLOCK_INTERVAL_MS=0) or the interval
+    // miner lags under load — same rationale as the no-stall liveness poll in
+    // devnet/pr1385-subgraph-rs. hardhat_mine's zero per-block timestamp
+    // interval leaves wall-clock time (and therefore the current epoch)
+    // unwarped: scoreEpoch must remain the LIVE epoch for the prover to score
+    // it. The assertion itself is unchanged — the score MUST become > 0.
+    const RS_SCORE_DEADLINE_MS = 120_000;
+    const RS_SCORE_POLL_MS = 5_000;
+    const rsScoreDeadline = Date.now() + RS_SCORE_DEADLINE_MS;
     let scoreNow = await state.rs.getNodeEpochScore(scoreEpoch, identityId);
-    for (let waited = 0; waited < 80 && scoreNow === 0n; waited += 5) {
-      await sleep(5_000);
+    while (scoreNow === 0n && Date.now() < rsScoreDeadline) {
+      await state.provider.send('hardhat_mine', ['0x2', '0x0']);
+      await sleep(RS_SCORE_POLL_MS);
       scoreNow = await state.rs.getNodeEpochScore(scoreEpoch, identityId);
     }
-    expect(scoreNow, `node1 must have non-zero RS score in epoch ${scoreEpoch}`).toBeGreaterThan(0n);
+    expect(
+      scoreNow,
+      `node1 must have non-zero RS score in epoch ${scoreEpoch} ` +
+        `(no proof landed within ${RS_SCORE_DEADLINE_MS / 1000}s of polling)`,
+    ).toBeGreaterThan(0n);
 
     const allScore = await state.rs.getAllNodesEpochScore(scoreEpoch);
     const epochPool = await state.es.getEpochPool(1n, scoreEpoch);
