@@ -18,12 +18,12 @@ import {
   isSafeJobId,
   SAFE_JOB_ID_ERROR,
 } from '@origintrail-official/dkg-publisher';
-import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
+import { DkgHomeFiles, isProcessRunning } from './config.js';
 import {
   serializeAgentListOptions,
   type AgentListPageOptions,
 } from '@origintrail-official/dkg-core';
-import { loadTokens } from './auth.js';
+import { loadApiClientToken } from './auth.js';
 import {
   finalizedPublishOptionsPayload,
   type KnowledgeAssetFinalizedPublishOptions,
@@ -424,7 +424,12 @@ export interface ApiClientConnectOptions {
   allowConfigFallback?: boolean;
 }
 
-const DAEMON_NOT_RUNNING_MESSAGE = 'Daemon is not running. Start it with: dkg start';
+function daemonNotRunningMessage(selectedHome: string): string {
+  return `Daemon is not running at ${selectedHome}.\n`
+    + 'DKG_HOME selects the node directory checked by this command.\n'
+    + 'Start a daemon in that directory with: dkg start\n'
+    + 'For an existing devnet, set DKG_HOME to its node directory (for example .devnet/node1), then rerun this command.';
+}
 const DEFAULT_NODE_NAME = 'dkg-node';
 
 function controlPlaneWarning(missingFiles: string[]): string | undefined {
@@ -558,72 +563,78 @@ export interface KnowledgeAssetPublishAuthorSelection {
   selectedAuthorAgentAddress?: string;
 }
 
+interface ConfigFallbackContext {
+  readonly expectedStatusName: string;
+  readonly selectedHome: string;
+  readonly controlPlaneWarning: string | undefined;
+}
+
 export class ApiClient {
   private baseUrl: string;
   private token?: string;
-  private expectedStatusName?: string;
+  private readonly configFallback?: Readonly<ConfigFallbackContext>;
   readonly controlPlaneWarning?: string;
 
   constructor(portOrBaseUrl: number | string, token?: string, opts?: {
-    controlPlaneWarning?: string;
-    expectedStatusName?: string;
+    configFallback?: ConfigFallbackContext;
   }) {
     this.baseUrl = typeof portOrBaseUrl === 'number'
       ? `http://127.0.0.1:${portOrBaseUrl}`
       : portOrBaseUrl.replace(/\/+$/, '');
     this.token = token;
-    this.expectedStatusName = opts?.expectedStatusName;
-    this.controlPlaneWarning = opts?.controlPlaneWarning;
+    this.configFallback = opts?.configFallback && Object.freeze({ ...opts.configFallback });
+    this.controlPlaneWarning = this.configFallback?.controlPlaneWarning;
   }
 
   static async connect(opts: ApiClientConnectOptions = {}): Promise<ApiClient> {
+    const homeFiles = new DkgHomeFiles();
+    const selectedHome = homeFiles.home;
+    const environmentToken = process.env.DKG_AUTH_TOKEN?.trim();
     const hasEnvPort = process.env.DKG_API_PORT !== undefined && process.env.DKG_API_PORT !== '';
     const envPort = hasEnvPort
       ? parseInt(process.env.DKG_API_PORT as string, 10)
       : null;
 
-    const filePort = hasEnvPort ? null : await readApiPort();
+    const filePort = hasEnvPort ? null : await homeFiles.readApiPort();
     let port = envPort ?? filePort;
-    let warning: string | undefined;
-    let expectedStatusName: string | undefined;
-    let config: Awaited<ReturnType<typeof loadConfig>> | null = null;
+    let configFallback: ConfigFallbackContext | undefined;
+    let config: Awaited<ReturnType<DkgHomeFiles['loadConfig']>> | null = null;
 
     // A persisted api.port contains only the bound port. Pair it with the
     // configured bind host so CLI commands reach daemons bound to a specific
     // non-loopback address. Keep the port usable if config parsing fails.
-    if (!hasEnvPort && filePort && configExists()) {
-      config = await loadConfig().catch(() => null);
+    if (!hasEnvPort && filePort && homeFiles.configExists()) {
+      config = await homeFiles.loadConfig().catch(() => null);
     }
 
     if (!port) {
-      const pid = await readPid();
-      if (opts.allowConfigFallback && !hasEnvPort && configExists()) {
-        config = config ?? await loadConfig();
+      const pid = await homeFiles.readPid();
+      if (opts.allowConfigFallback && !hasEnvPort && homeFiles.configExists()) {
+        config = config ?? await homeFiles.loadConfig();
         const configuredPort = Number.isFinite(config.apiPort) && config.apiPort > 0 ? config.apiPort : null;
         if (configuredPort && !isAmbiguousFallbackName(config.name)) {
           const missingFiles = ['api.port', ...(pid ? [] : ['daemon.pid'])];
           port = configuredPort;
-          expectedStatusName = config.name;
-          warning = controlPlaneWarning(missingFiles);
+          configFallback = { expectedStatusName: config.name, selectedHome,
+            controlPlaneWarning: controlPlaneWarning(missingFiles) };
         }
       }
     }
 
     if (!port) {
-      const pid = await readPid();
+      const pid = await homeFiles.readPid();
       if (!pid || !isProcessRunning(pid)) {
-        throw new Error(DAEMON_NOT_RUNNING_MESSAGE);
+        throw new Error(daemonNotRunningMessage(selectedHome));
       }
       throw new Error('Cannot read API port. Set DKG_API_PORT or restart: dkg stop && dkg start');
     }
 
-    const tokens = await loadTokens();
-    const environmentToken = process.env.DKG_AUTH_TOKEN?.trim();
-    const token = environmentToken || (tokens.size > 0 ? tokens.values().next().value : undefined);
+    const homeToken = await loadApiClientToken(homeFiles);
+    const token = environmentToken || homeToken;
     const portOrBaseUrl = !hasEnvPort && config
       ? configuredApiBaseUrl(config.apiHost, port)
       : port;
-    return new ApiClient(portOrBaseUrl, token, { controlPlaneWarning: warning, expectedStatusName });
+    return new ApiClient(portOrBaseUrl, token, { configFallback });
   }
 
   async status(): Promise<DaemonStatusResponse> {
@@ -631,12 +642,12 @@ export class ApiClient {
     try {
       status = await this.get<unknown>('/api/status', { auth: false });
     } catch (err) {
-      if (this.expectedStatusName && isConnectionFailure(err)) {
-        throw new Error(DAEMON_NOT_RUNNING_MESSAGE);
+      if (this.configFallback && isConnectionFailure(err)) {
+        throw new Error(daemonNotRunningMessage(this.configFallback.selectedHome));
       }
       throw err;
     }
-    return requireDaemonStatusResponse(status, this.expectedStatusName);
+    return requireDaemonStatusResponse(status, this.configFallback?.expectedStatusName);
   }
 
   /**

@@ -19,6 +19,9 @@ import type { AgentConfigResolutionInputKey } from './resolved-agent-config.js';
 import type { StartupResourcePolicy } from './resource-policy.js';
 import type { CatchupPassDecisionReason } from './sync/catchup-pass-policy.js';
 import type {
+  MessengerOutboxDrainOptions,
+} from './p2p/outbox-drain-types.js';
+import type {
   Quad,
   TripleStore,
   TripleStoreConfig,
@@ -28,7 +31,7 @@ import type {
   OperationContext,
   AuthorAttestationTypedData,
   DkgNetworkIdentity,
-  CompatibleProtocolOutboxStore,
+  BoundedProtocolOutboxStore,
   MessageIdempotencyStore,
   SwmSenderKeyPackageAckReasonCode,
   ContextGraphJoinPolicyMode as CoreContextGraphJoinPolicyMode,
@@ -55,7 +58,12 @@ import type {
   WorkspacePublicSnapshotStore,
   CursorPersistence as ChainEventCursorPersistence,
 } from '@origintrail-official/dkg-publisher';
-import type { ApprovalPolicy, ChainAdapter, ContextGraphRegistryScanCursorStore } from '@origintrail-official/dkg-chain';
+import type {
+  ApprovalPolicy,
+  ChainAdapter,
+  ContextGraphAuthorityHistoryStore,
+  ContextGraphRegistryScanCursorStore,
+} from '@origintrail-official/dkg-chain';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
 import type { CclFactResolutionMode } from './ccl-fact-resolution.js';
@@ -659,7 +667,6 @@ export interface ChatSendResult {
  */
 export type ContextGraphSyncMode = 'on-demand' | 'always-on';
 
-/** Tracks the subscription and sync state of a context graph. */
 export interface ContextGraphSub {
   name?: string;
   /** Requested synchronization lifetime, normalized before entering live state. */
@@ -1891,6 +1898,8 @@ export interface DKGAgentConfig {
   chainEventCursorStore?: ChainEventCursorPersistence;
   /** Durable ContextGraphNameRegistry discovery cursor store. Defaults to in-memory adapter state. */
   contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
+  /** Process-owned local durable finalized Context Graph authority-history checkpoints. */
+  localContextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
   /**
    * Intentional cap on how many persisted context-graph subscriptions are
    * *activated* (gossip-subscribed + sync-tracked) when rehydrating at startup.
@@ -1932,11 +1941,18 @@ export interface DKGAgentConfig {
    * Best-effort: the agent never awaits or throws on the sink.
    */
   onReplicationEvent?: ReplicationEventSink;
+  /** In-process outbox admission bounds; default 100 entries / 10 MiB / 4 workers (DEFAULT_OUTBOX_DRAIN_MAX_PAYLOAD_BYTES). */
+  messengerOutboxDrain?: MessengerOutboxDrainOptions;
   messengerStores?: {
     idempotencyStore: MessageIdempotencyStore;
-    outboxStore: CompatibleProtocolOutboxStore;
+    outboxStore: BoundedProtocolOutboxStore;
   };
 }
+
+export type {
+  MessengerOutboxDrainOptions,
+  MessengerOutboxStats,
+} from './p2p/outbox-drain-types.js';
 
 export interface DKGAgentACKTransportOptions {
   sendTimeoutMs?: number;

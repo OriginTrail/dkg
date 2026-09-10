@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as configModule from '../src/config.js';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ApiClient } from '../src/api-client.js';
@@ -103,6 +104,28 @@ describe('ApiClient', () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
+  it('constructs direct remote clients without reading the local DKG home', async () => {
+    const home = vi.fn(() => { throw new Error('unexpected local-home context'); });
+    vi.resetModules();
+    vi.doMock('../src/config.js', () => ({
+      ...configModule,
+      DkgHomeFiles: class {
+        constructor() { home(); }
+      },
+    }));
+    try {
+      const { ApiClient: RemoteApiClient } = await import('../src/api-client.js');
+      const mockedConfig = await import('../src/config.js');
+      expect(() => new mockedConfig.DkgHomeFiles()).toThrow('unexpected local-home context');
+      home.mockClear();
+      expect(() => new RemoteApiClient('https://remote.example')).not.toThrow();
+      expect(home).not.toHaveBeenCalled();
+    } finally {
+      vi.doUnmock('../src/config.js');
+      vi.resetModules();
+    }
+  });
+
   describe('GET endpoints', () => {
     it('status() calls public /api/status without auth header', async () => {
       const body = { name: 'test', peerId: 'peer1', uptimeMs: 1000, connectedPeers: 2, relayConnected: true, multiaddrs: [] };
@@ -147,6 +170,57 @@ describe('ApiClient', () => {
       expect(result.status).toBe('unreachable');
       expect(result.jobStatus).toBe('partial');
     });
+
+    it.each(['persisted', 'persisted-env-token', 'fallback-json', 'fallback-yaml'] as const)(
+      'connect() keeps every local read in one home across a delayed read (%s)', async (mode) => {
+        const otherHome = join(tempDir, 'other-home');
+        await mkdir(otherHome);
+        process.env.DKG_HOME = tempDir;
+        delete process.env.DKG_API_PORT;
+        await writeFile(join(tempDir, 'daemon.pid'), '12345');
+        await writeFile(join(tempDir, 'auth.token'), 'home-a-token\n');
+        await writeFile(join(otherHome, 'auth.token'), 'home-b-token\n');
+        await writeFile(join(otherHome, 'config.json'), JSON.stringify({ name: 'node-b', apiPort: 9444, apiHost: '192.0.2.20' }));
+        if (mode === 'fallback-yaml') {
+          await writeFile(join(tempDir, 'config.yaml'), 'name: node-a\napiPort: 9317\napiHost: 192.0.2.10\n');
+        } else {
+          await writeFile(join(tempDir, 'config.json'), JSON.stringify({ name: 'node-a', apiPort: 9317, apiHost: '192.0.2.10' }));
+        }
+        if (mode === 'persisted-env-token') process.env.DKG_AUTH_TOKEN = 'token-a';
+        if (mode.startsWith('persisted')) await writeFile(join(tempDir, 'api.port'), '9317');
+        let release!: () => void;
+        let markEntered!: () => void;
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+        const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+        const readPort = configModule.DkgHomeFiles.prototype.readApiPort;
+        const read = vi.spyOn(configModule.DkgHomeFiles.prototype, 'readApiPort').mockImplementation(async function () {
+          const value = await readPort.call(this);
+          markEntered();
+          await gate;
+          return value;
+        });
+        const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { agents: [] } });
+        globalThis.fetch = fetch;
+        try {
+          const connecting = ApiClient.connect({ allowConfigFallback: true });
+          await entered;
+          process.env.DKG_HOME = otherHome;
+          if (mode === 'persisted-env-token') process.env.DKG_AUTH_TOKEN = 'token-b';
+          release();
+          const connected = await connecting;
+          await connected.agents();
+          expect(calls[0].url).toBe('http://192.0.2.10:9317/api/agents');
+          expect(new Headers(calls[0].opts.headers).get('Authorization')).toBe(mode === 'persisted-env-token' ? 'Bearer token-a' : 'Bearer home-a-token');
+          if (!mode.startsWith('persisted')) {
+            expect(connected.controlPlaneWarning).toContain('api.port');
+            expect(connected.controlPlaneWarning).not.toContain('daemon.pid');
+          }
+        } finally {
+          release();
+          read.mockRestore();
+        }
+      },
+    );
 
     it('connect() gives DKG_AUTH_TOKEN precedence over the selected home token file', async () => {
       process.env.DKG_HOME = tempDir;
@@ -300,7 +374,10 @@ describe('ApiClient', () => {
       globalThis.fetch = fetch;
 
       await expect(ApiClient.connect({ allowConfigFallback: true }))
-        .rejects.toThrow('Daemon is not running. Start it with: dkg start');
+        .rejects.toThrow(`Daemon is not running at ${tempDir}.\n`
+          + 'DKG_HOME selects the node directory checked by this command.\n'
+          + 'Start a daemon in that directory with: dkg start\n'
+          + 'For an existing devnet, set DKG_HOME to its node directory (for example .devnet/node1), then rerun this command.');
       expect(calls).toHaveLength(0);
       expect(existsSync(join(tempDir, 'api.port'))).toBe(false);
       expect(existsSync(join(tempDir, 'daemon.pid'))).toBe(false);
@@ -335,7 +412,10 @@ describe('ApiClient', () => {
 
       const connected = await ApiClient.connect({ allowConfigFallback: true });
 
-      await expect(connected.status()).rejects.toThrow('Daemon is not running. Start it with: dkg start');
+      // A client reports the home it connected through, even if a later command
+      // changes the process-wide selection before this request fails.
+      process.env.DKG_HOME = join(tempDir, 'another-node');
+      await expect(connected.status()).rejects.toThrow(`Daemon is not running at ${tempDir}.`);
       expect(calls).toHaveLength(1);
       expect(calls[0].url).toBe('http://127.0.0.1:9317/api/status');
       expect((calls[0].opts.headers as any).Authorization).toBeUndefined();
@@ -349,7 +429,7 @@ describe('ApiClient', () => {
       globalThis.fetch = fetch;
 
       const connected = await ApiClient.connect({ allowConfigFallback: true });
-      await expect(connected.status()).rejects.toThrow('Daemon is not running. Start it with: dkg start');
+      await expect(connected.status()).rejects.toThrow(`Daemon is not running at ${tempDir}.`);
     });
 
     it('does not let a hostile nested error getter escape transport classification', async () => {

@@ -6,9 +6,12 @@ import {
   contextGraphMetaUri,
   ASSERTION_SEAL_PREDICATES,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
+  TypedEventBus,
+  generateEd25519Keypair,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
+import { computeFlatKCRootV10, DKGPublisher, generateAssertionPromotedMetadata } from '@origintrail-official/dkg-publisher';
+import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/dkg-agent.js';
 
 /**
@@ -697,6 +700,58 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
 });
 
 describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves the member author', () => {
+  it.each([undefined, CURATOR])('returns a successful intent bound to the member seal (caller hint: %s)', async (callerAgentAddress) => {
+    const store = new OxigraphStore();
+    try {
+      const publisher = new DKGPublisher({
+        store, chain: new NoChainAdapter(), eventBus: new TypedEventBus(),
+        keypair: await generateEd25519Keypair(),
+      });
+      const shareOperationId = 'member-authored-share';
+      const merkleHex = Buffer.from(MERKLE).toString('hex');
+      const promoted = generateAssertionPromotedMetadata({
+        contextGraphId: CG, agentAddress: MEMBER, assertionName: NAME,
+        kaNumber: 7, shareOperationId, rootEntities: [], merkleHex,
+        timestamp: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      await store.insert([
+        ...sealFor(MEMBER),
+        ...sealFor(CURATOR, 'unrelated-caller-asset'),
+        ...promoted.insert,
+      ]);
+      await publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+        contextGraphId: CG, kaUal: KA_UAL, assertionVersion: 1,
+        shareOperationId, quads: [PUBLIC_QUAD], privateTripleCount: 0,
+        accessPolicy: 'allowList', allowedPeers: ['peer-z', 'peer-a'],
+      });
+      await publisher.markSwmShareComplete(CG, NAME, MEMBER);
+      const agent = stubAgent(store, CURATOR);
+      agent.publisher = publisher;
+
+      // Author resolution, history, seal parsing and SWM-head resolution all
+      // read the real store; the intent builder and its readers are not mocked.
+      const intent: Awaited<ReturnType<DKGAgent['resolveFinalizedAssertionVmPublishIntent']>> =
+        await agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME,
+          callerAgentAddress === undefined ? undefined : { callerAgentAddress });
+      expect(intent.agentAddress).toBe(MEMBER);
+      expect(intent.agentAddress).not.toBe(CURATOR);
+      expect(intent.callerAgentAddress).toBe(callerAgentAddress);
+      expect(intent).toMatchObject({
+        contextGraphId: CG, name: NAME, kaUal: KA_UAL.toLowerCase(),
+        assertionVersion: '1', shareOperationId,
+        accessPolicy: 'allowList', allowedPeers: ['peer-a', 'peer-z'],
+        sealMerkleRoot: `0x${merkleHex}`,
+        seal: {
+          merkleRoot: `0x${merkleHex}`, authorAddress: MEMBER,
+          reservedKaId: RESERVED_KA_ID.toString(), schemeVersion: 1,
+          signature: { r: `0x${'01'.repeat(32)}`, vs: `0x${'02'.repeat(32)}` },
+        },
+      });
+    } finally {
+      await store.close();
+    }
+  });
+
   it('resolves the member author from _meta when the caller (curator) is not the author', async () => {
     const store = new OxigraphStore();
     await store.insert(sealFor(MEMBER));

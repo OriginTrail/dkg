@@ -12,7 +12,11 @@ export default defineConfig({
     include: runsDaemonHttpBehavior
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
+          'test/mcp-config-document.test.ts',
+          'test/mcp-physical-config.test.ts',
+          'test/mcp-config-metadata.test.ts',
           'test/api-client.test.ts',
+          'test/messenger-outbox-memory.test.ts',
           'test/live-daemon-isolation.test.ts',
           'test/async-vm-publish-registration.test.ts',
           // #1828 — durable-admission recovery lookup route (pure handler, no hardhat).
@@ -70,6 +74,7 @@ export default defineConfig({
           // paying the 2-minute hardhat-boot tax of the default config.
           'test/resolve-standalone-install.test.ts',
           'test/auto-update.test.ts',
+          'test/auto-update-workspace-clean.test.ts',
           'test/maintenance-update-gate.test.ts',
           'test/dkg-doctor.test.ts',
           'test/metrics-collector-config.test.ts',
@@ -128,7 +133,9 @@ export default defineConfig({
           // (mocked fetch + in-memory config); cheap to keep in the
           // fast unit lane.
           'test/chain-reset-wipe.test.ts',
+          'test/chain-reset-wipe-outcome.test.ts',
           'test/chain-reset-wipe-backup.test.ts',
+          'test/daemon-chain-reset-wipe.test.ts',
           'test/store-health-check.test.ts',
           'test/validate-store-config.test.ts',
           'test/store-wizard.test.ts',
@@ -175,6 +182,7 @@ export default defineConfig({
           'test/oxigraph-binary.test.ts',
           'test/oxigraph-listen-port.test.ts',
           'test/oxigraph-server.test.ts',
+          'test/oxigraph-parent-watchdog.test.ts',
           'test/oxigraph-managed.test.ts',
           // Opt-in via BLAZEGRAPH_INTEGRATION_TEST=1. Skips silently
           // (no fetch / no docker spawn) when the env-var is unset, so

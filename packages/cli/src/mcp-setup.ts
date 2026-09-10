@@ -1,3 +1,5 @@
+import { detectClients, selectMcpClientTargets, mcpConfigClientNames, tildify, clientSkillPath, type ClientTarget, type McpConfigSelection } from './mcp-client-registry.js';
+import { readRegistration, classifyRegistration, writeRegistration, type DesiredRegistration } from './mcp-client-config.js';
 /**
  * `dkg mcp setup` — bundled init + daemon-start + MCP-client registration.
  *
@@ -38,7 +40,7 @@
  * Per-client format / entry-shape dispatch (phase 1): Cursor, Claude
  * Code, Claude Desktop, Windsurf, and Cline all use canonical
  * `mcpServers.dkg` JSON. VSCode + Copilot Chat keys under
- * `servers.dkg` instead. The `format` + `entryPath` fields on
+ * `servers.dkg` instead. The `format` + `serverContainer` fields on
  * `ClientTarget` describe each client's contract; `writeRegistration`
  * and `classify` dispatch on those without per-client write logic.
  *
@@ -69,10 +71,8 @@
 import { renderStandaloneDkgNodeSkill } from './skill-template.js';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { homedir, platform, release as osRelease } from 'node:os';
-import { execSync } from 'node:child_process';
+import { homedir } from 'node:os';
 import yaml from 'js-yaml';
-import TOML from '@iarna/toml';
 import { resolveSetupNetworkName } from '@origintrail-official/dkg-core';
 import {
   assertSelectableNetwork,
@@ -158,6 +158,8 @@ export interface PlannedItem {
  * passes its real implementations.
  */
 export interface McpSetupActionDeps {
+  /** Client discovery can be supplied by an isolated setup environment. */
+  detectClients?: typeof detectClients;
   loadNetworkConfig: typeof import('@origintrail-official/dkg-adapter-openclaw').loadNetworkConfig;
   /** Canonical persisted-config network resolver, injectable for tests. */
   resolveKnownNetworkConfigName: typeof resolveKnownNetworkConfigName;
@@ -259,7 +261,7 @@ function canonicalEntry(
   context: SetupContext,
   monorepoRoot: string | null,
   dkgHome: string,
-): Record<string, unknown> {
+): DesiredRegistration {
   let cliJsPath: string;
   if (context === 'monorepo' && monorepoRoot) {
     cliJsPath = join(monorepoRoot, 'packages', 'cli', 'dist', 'cli.js');
@@ -384,17 +386,17 @@ export async function confirmPlan(
         result.push(p);
         continue;
       }
-      const verb = p.action === 'register' ? 'Register' : 'Refresh';
+      const verb = { register: 'Register', refresh: 'Refresh' }[p.action];
       const ans = (
         await rl.question(
-          `${verb} DKG MCP with ${p.s.target.name} (${p.s.target.displayPath})? [Y/n] `,
+          `${verb} DKG MCP with ${mcpConfigClientNames(p.s.target)} (${p.s.target.file.displayPath})? [Y/n] `,
         )
       )
         .trim()
         .toLowerCase();
       const declined = ans === 'n' || ans === 'no';
       if (declined) {
-        console.log(`  → declined; will skip ${p.s.target.name}`);
+        console.log(`  → declined; will skip ${mcpConfigClientNames(p.s.target)}`);
         result.push({ ...p, action: 'skip' });
       } else {
         result.push(p);
@@ -492,1103 +494,19 @@ function detectContext(
     : { context: 'installed', monorepoRoot: null };
 }
 
-export interface ClientTarget {
-  name: string;
-  configPath: string;
-  /** Pretty path for display, with `~` substituted back in. */
-  displayPath: string;
-  /**
-   * Per-client config-file format. Defaults to `'json'` so the existing
-   * Cursor + Claude Code targets stay byte-identical post-refactor.
-   * Codex CLI uses `'toml'`. The `'yaml'` variant is reserved for
-   * future clients (Continue was attempted in PR #443 then reverted
-   * because its MCP config is workspace-local, not user-global —
-   * structural mismatch with `dkg mcp setup`'s machine-wide UX);
-   * `readConfigBody` / `writeConfigBody` keep `NotImplementedError`
-   * stubs for the YAML branch so re-adding a YAML client is purely
-   * additive when the time comes.
-   */
-  format?: 'json' | 'toml' | 'yaml';
-  /**
-   * Dotted path to the per-server entry inside the parsed config.
-   * Defaults to `'mcpServers.dkg'` — the shape Cursor / Claude Code /
-   * Claude Desktop / Windsurf / Cline all use. Clients diverging from
-   * that shape (VSCode + Copilot Chat uses `servers.dkg`; Codex CLI
-   * uses `mcp_servers.dkg` under TOML) declare the alternate path
-   * here so a single registration helper covers all surfaces without
-   * per-client write logic.
-   */
-  entryPath?: string;
-}
-
-const DEFAULT_FORMAT: NonNullable<ClientTarget['format']> = 'json';
-const DEFAULT_ENTRY_PATH = 'mcpServers.dkg';
-
-/**
- * Resolve a dotted entry-path (`'mcpServers.dkg'`, `'servers.dkg'`,
- * `'mcp_servers.dkg'`) into its head segments + final key. Used by
- * both classify (read) and writeRegistration (write) to navigate the
- * parsed config object identically.
- */
-function splitEntryPath(entryPath: string | undefined): { head: string[]; leaf: string } {
-  const path = entryPath ?? DEFAULT_ENTRY_PATH;
-  const parts = path.split('.').filter(Boolean);
-  if (parts.length === 0) {
-    throw new Error(`Invalid entryPath "${entryPath}": must be a non-empty dotted path`);
-  }
-  return { head: parts.slice(0, -1), leaf: parts[parts.length - 1] };
-}
-
-/**
- * Walk a parsed config object down a list of head segments, lazily
- * creating intermediate `Record<string, unknown>` containers for any
- * missing levels. Returns the parent container of the leaf key.
- *
- * Used at write time only. At read time we tolerate missing
- * intermediates (the entry just classifies as `not-registered`).
- */
-function ensurePathContainer(
-  body: Record<string, unknown>,
-  head: string[],
-): Record<string, unknown> {
-  let cursor: Record<string, unknown> = body;
-  for (const segment of head) {
-    const next = cursor[segment];
-    if (next === undefined || next === null || typeof next !== 'object') {
-      const fresh: Record<string, unknown> = {};
-      cursor[segment] = fresh;
-      cursor = fresh;
-    } else {
-      cursor = next as Record<string, unknown>;
-    }
-  }
-  return cursor;
-}
-
-/**
- * Read the leaf value at a dotted entry-path; returns `undefined` if
- * any intermediate is missing or non-object. Used by `classify` so
- * staleness detection works regardless of how deep the entry is
- * nested.
- */
-function readEntryAt(
-  body: Record<string, unknown>,
-  entryPath: string | undefined,
-): unknown {
-  const { head, leaf } = splitEntryPath(entryPath);
-  let cursor: unknown = body;
-  for (const segment of head) {
-    if (cursor === undefined || cursor === null || typeof cursor !== 'object') {
-      return undefined;
-    }
-    cursor = (cursor as Record<string, unknown>)[segment];
-  }
-  if (cursor === undefined || cursor === null || typeof cursor !== 'object') {
-    return undefined;
-  }
-  return (cursor as Record<string, unknown>)[leaf];
-}
-
-function expandHome(p: string): string {
-  if (p.startsWith('~/')) return join(homedir(), p.slice(2));
-  return p;
-}
-
-function tildify(p: string): string {
-  const home = homedir();
-  return p.startsWith(home) ? '~' + p.slice(home.length) : p;
-}
-
-/**
- * Codex Round-6 Fix 9: resolve the Linux config base directory,
- * honouring `XDG_CONFIG_HOME` when set. Per the XDG Base Directory
- * spec, applications that store config under `~/.config` should
- * defer to `$XDG_CONFIG_HOME` first — users who relocate app
- * configs (common on multi-user systems and dotfile-managed
- * setups) were previously invisible to `dkg mcp setup`'s detection
- * sweep. Used by the Claude Desktop / VSCode + Copilot Chat /
- * Cline Linux path resolvers below.
- */
-function linuxConfigDir(home: string): string {
-  return process.env.XDG_CONFIG_HOME ?? join(home, '.config');
-}
-
-/**
- * Resolve Claude Desktop's per-platform config path. The macOS path
- * uses `~/Library/Application Support/Claude/`; Windows uses
- * `%APPDATA%\Claude\`; Linux follows XDG-ish convention at
- * `~/.config/Claude/`. The display path tildifies the home prefix
- * so the operator-facing log reads consistently across platforms.
- */
-function claudeDesktopPaths(home: string): { configPath: string; displayPath: string } {
-  const p = platform();
-  if (p === 'darwin') {
-    const configPath = join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json');
-    return { configPath, displayPath: '~/Library/Application Support/Claude/claude_desktop_config.json' };
-  }
-  if (p === 'win32') {
-    const appData = process.env.APPDATA ?? join(home, 'AppData', 'Roaming');
-    const configPath = join(appData, 'Claude', 'claude_desktop_config.json');
-    return { configPath, displayPath: configPath.replace(home, '~') };
-  }
-  // Linux + everything else: XDG-style. Per Claude's docs the active
-  // config under Linux is `<XDG_CONFIG_HOME>/Claude/claude_desktop_config.json`,
-  // falling back to `~/.config/Claude/...` when XDG_CONFIG_HOME is unset.
-  const configPath = join(linuxConfigDir(home), 'Claude', 'claude_desktop_config.json');
-  return { configPath, displayPath: tildify(configPath) };
-}
-
-/**
- * Resolve VSCode + Copilot Chat's per-platform user-settings MCP
- * config path. VSCode keeps user-scoped settings under
- * `<userDataDir>/User/`; on Mac this is
- * `~/Library/Application Support/Code/User/mcp.json`; on Windows
- * it's `%APPDATA%\Code\User\mcp.json`; on Linux it's
- * `~/.config/Code/User/mcp.json`. Note this is the user-scoped
- * (cross-workspace) config, not the per-workspace `.vscode/mcp.json`.
- *
- * Diverges from the canonical `mcpServers.dkg` shape: Copilot Chat's
- * MCP wiring uses `servers.dkg` instead. The phase-1 entryPath
- * dispatch handles that without per-client write logic.
- */
-function vscodeMcpPaths(home: string): { configPath: string; displayPath: string } {
-  const p = platform();
-  if (p === 'darwin') {
-    const configPath = join(home, 'Library', 'Application Support', 'Code', 'User', 'mcp.json');
-    return { configPath, displayPath: '~/Library/Application Support/Code/User/mcp.json' };
-  }
-  if (p === 'win32') {
-    const appData = process.env.APPDATA ?? join(home, 'AppData', 'Roaming');
-    const configPath = join(appData, 'Code', 'User', 'mcp.json');
-    return { configPath, displayPath: configPath.replace(home, '~') };
-  }
-  const configPath = join(linuxConfigDir(home), 'Code', 'User', 'mcp.json');
-  return { configPath, displayPath: tildify(configPath) };
-}
-
-/**
- * Resolve Cline (VSCode extension) per-platform config path. Cline
- * stores its MCP wiring inside VSCode's per-extension globalStorage
- * directory under the extension publisher.id namespace
- * (`saoudrizwan.claude-dev`). Same `mcpServers.dkg` JSON shape as
- * Cursor / Claude Code; what's hard is just the deeply-nested path.
- *
- * macOS: `~/Library/Application Support/Code/User/globalStorage/...`
- * Windows: `%APPDATA%\Code\User\globalStorage\...`
- * Linux:  `~/.config/Code/User/globalStorage/...`
- *
- * Mirrors `vscodeMcpPaths` for the per-platform Code-user-data root,
- * with the per-extension globalStorage suffix appended.
- */
-function clineMcpPaths(home: string): { configPath: string; displayPath: string } {
-  const suffix = join(
-    'globalStorage',
-    'saoudrizwan.claude-dev',
-    'settings',
-    'cline_mcp_settings.json',
-  );
-  const p = platform();
-  if (p === 'darwin') {
-    const configPath = join(home, 'Library', 'Application Support', 'Code', 'User', suffix);
-    return { configPath, displayPath: `~/Library/Application Support/Code/User/${suffix.replace(/\\/g, '/')}` };
-  }
-  if (p === 'win32') {
-    const appData = process.env.APPDATA ?? join(home, 'AppData', 'Roaming');
-    const configPath = join(appData, 'Code', 'User', suffix);
-    return { configPath, displayPath: configPath.replace(home, '~') };
-  }
-  const configPath = join(linuxConfigDir(home), 'Code', 'User', suffix);
-  return { configPath, displayPath: tildify(configPath) };
-}
-
-/**
- * Discover MCP-aware clients on the machine. We look at the standard
- * config-file locations rather than probing for installed binaries — a
- * config file is the artifact `dkg mcp setup` actually writes into, and
- * its existence (or non-existence) is the signal that matters.
- *
- * Per-client docs source-of-truth (verify on next-cycle if anything
- * drifts):
- *   - Cursor:        `~/.cursor/mcp.json` — global per-user MCP config
- *   - Claude Code:   `~/.claude.json` — user-scoped path the MCP-server
- *     wiring already uses across the rest of the codebase
- *   - Claude Desktop: per-platform (see `claudeDesktopPaths`)
- *   - Windsurf (Codeium): `~/.codeium/windsurf/mcp_config.json`
- *
- * Detection is deliberately permissive: any client whose config file is
- * already present OR whose config directory is already present counts as
- * "detected" for write purposes. Operators with a fresh machine and no
- * client installed still see the fallback "no clients detected; run
- * `dkg mcp setup --print-only`" message.
- */
-/**
- * Codex Round-13 Fix 20: detect WSL2. Linux platform with `microsoft`
- * / `WSL` markers in env, kernel release, or `/proc/version`. WSL
- * users running `dkg mcp setup` from inside their WSL distro need
- * to register Windows-side GUI clients (Claude Desktop, Windsurf,
- * VSCode + Copilot, Cline) AS WELL AS any Linux-native clients —
- * pre-fix they got the Linux-only set and the README's WSL2
- * promise silently failed for the apps users actually run.
- *
- * Multi-signal detection (env first; cheaper than fs reads):
- *   - `WSL_DISTRO_NAME` / `WSL_INTEROP` set by the WSL launcher.
- *   - `os.release()` contains `microsoft` or `wsl` (WSL kernels
- *     identify themselves there).
- *   - `/proc/version` contains the same markers (slower fallback).
- */
-function isWSL(): boolean {
-  if (platform() !== 'linux') return false;
-  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) return true;
-  try {
-    const release = osRelease().toLowerCase();
-    if (release.includes('microsoft') || release.includes('wsl')) return true;
-  } catch { /* fall through */ }
-  try {
-    const procVersion = readFileSync('/proc/version', 'utf-8').toLowerCase();
-    if (procVersion.includes('microsoft') || procVersion.includes('wsl')) return true;
-  } catch { /* /proc/version not readable; not WSL */ }
-  return false;
-}
-
-/**
- * Resolve a Windows-side env var (e.g. `%USERPROFILE%`,
- * `%APPDATA%`) into a WSL-mounted Linux path (`/mnt/c/...`). Uses
- * `cmd.exe` to read the env var, then `wslpath` to convert. Returns
- * `null` on any failure (cmd.exe / wslpath missing, env var
- * unset, conversion error) so callers fall back to Linux-only
- * detection.
- *
- * Codex Round-13 Fix 20 helper.
- */
-function wslWindowsEnvPath(envVarName: string): string | null {
-  try {
-    const winPath = execSync(`cmd.exe /c "echo %${envVarName}%"`, {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    // `cmd.exe` echoes `%FOO%` literally when the var is unset.
-    if (!winPath || winPath.startsWith('%')) return null;
-    // Strip Windows CR if present.
-    const cleaned = winPath.replace(/\r/g, '');
-    // wslpath -u takes the Windows path and emits the /mnt/c/...
-    // form. Quote the input to handle spaces in usernames.
-    const linuxPath = execSync(`wslpath -u '${cleaned.replace(/'/g, "'\\''")}'`, {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    return linuxPath || null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Exported for Codex Round-13 Fix 20 tests — direct unit testing
- * of WSL2 client-detection branch without going through the full
- * `mcpSetupAction` body. Production callers go via the action.
- * The resolver arg is test-only so WSL Windows path discovery can
- * be exercised without real cmd.exe / wslpath binaries.
- */
-export function detectClients(
-  resolveWslWindowsEnvPath: (envVarName: string) => string | null =
-    wslWindowsEnvPath,
-): ClientTarget[] {
-  const home = homedir();
-  const claudeDesktop = claudeDesktopPaths(home);
-  const vscodeMcp = vscodeMcpPaths(home);
-  const candidates: ClientTarget[] = [
-    {
-      name: 'Cursor',
-      configPath: join(home, '.cursor', 'mcp.json'),
-      displayPath: '~/.cursor/mcp.json',
-    },
-    {
-      name: 'Claude Code',
-      configPath: join(home, '.claude.json'),
-      displayPath: '~/.claude.json',
-    },
-    {
-      name: 'Claude Desktop',
-      configPath: claudeDesktop.configPath,
-      displayPath: claudeDesktop.displayPath,
-    },
-    {
-      name: 'Windsurf',
-      configPath: join(home, '.codeium', 'windsurf', 'mcp_config.json'),
-      displayPath: '~/.codeium/windsurf/mcp_config.json',
-    },
-    {
-      name: 'VSCode',
-      configPath: vscodeMcp.configPath,
-      displayPath: vscodeMcp.displayPath,
-      // Copilot Chat's MCP wiring keys under `servers`, not the
-      // canonical `mcpServers`. Phase-1 entryPath dispatch handles
-      // it without per-client write logic.
-      entryPath: 'servers.dkg',
-    },
-    (() => {
-      const cline = clineMcpPaths(home);
-      return {
-        name: 'Cline',
-        configPath: cline.configPath,
-        displayPath: cline.displayPath,
-        // Cline uses the canonical `mcpServers.dkg` shape; only the
-        // path is unusual (deep-nested under VSCode's per-extension
-        // globalStorage). entryPath defaults to `mcpServers.dkg`
-        // so no override needed.
-      };
-    })(),
-    {
-      // Codex CLI (OpenAI). Config: `~/.codex/config.toml`. Entry path:
-      // `[mcp_servers.<name>]` table — Codex CLI's canonical naming
-      // (note `mcp_servers`, snake-cased, distinct from the
-      // `mcpServers` JSON convention used by every other client).
-      // Verified against Codex CLI docs at
-      // https://github.com/openai/codex (issue #437, 2026-05-08).
-      name: 'Codex CLI',
-      configPath: join(home, '.codex', 'config.toml'),
-      displayPath: '~/.codex/config.toml',
-      format: 'toml',
-      entryPath: 'mcp_servers.dkg',
-    },
-  ];
-
-  // Codex Round-13 Fix 20: when running inside WSL2, ALSO probe the
-  // Windows-side config locations for the four GUI clients users
-  // typically run on Windows even when their dev shell is in WSL.
-  // Linux-side entries above are preserved (some WSL users run
-  // native Linux GUI clients too); the new entries are additive
-  // with disambiguated names so the operator-facing log is clear.
-  if (isWSL()) {
-    const winUserProfile = resolveWslWindowsEnvPath('USERPROFILE');
-    const winAppData = resolveWslWindowsEnvPath('APPDATA');
-    if (winAppData) {
-      // Claude Desktop on Windows: %APPDATA%\Claude\claude_desktop_config.json.
-      const claudeWinPath = join(winAppData, 'Claude', 'claude_desktop_config.json');
-      candidates.push({
-        name: 'Claude Desktop (Windows-side via WSL)',
-        configPath: claudeWinPath,
-        displayPath: claudeWinPath,
-      });
-      // VSCode + Copilot Chat on Windows: %APPDATA%\Code\User\mcp.json.
-      const vscodeWinPath = join(winAppData, 'Code', 'User', 'mcp.json');
-      candidates.push({
-        name: 'VSCode (Windows-side via WSL)',
-        configPath: vscodeWinPath,
-        displayPath: vscodeWinPath,
-        entryPath: 'servers.dkg',
-      });
-      // Cline on Windows: %APPDATA%\Code\User\globalStorage\
-      // saoudrizwan.claude-dev\settings\cline_mcp_settings.json.
-      const clineWinPath = join(
-        winAppData, 'Code', 'User',
-        'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json',
-      );
-      candidates.push({
-        name: 'Cline (Windows-side via WSL)',
-        configPath: clineWinPath,
-        displayPath: clineWinPath,
-      });
-    }
-    if (winUserProfile) {
-      // Windsurf on Windows: %USERPROFILE%\.codeium\windsurf\mcp_config.json
-      // (the `~/.codeium/...` path resolves under USERPROFILE on Windows,
-      // not APPDATA).
-      const windsurfWinPath = join(winUserProfile, '.codeium', 'windsurf', 'mcp_config.json');
-      candidates.push({
-        name: 'Windsurf (Windows-side via WSL)',
-        configPath: windsurfWinPath,
-        displayPath: windsurfWinPath,
-      });
-      // Codex Round-17 Fix 23: Cursor on Windows — same shape as
-      // Linux Cursor (~/.cursor/mcp.json + canonical mcpServers.dkg
-      // entry), just resolved through %USERPROFILE%. Round-13 FIX 20
-      // skipped this; "Windows Cursor + WSL shell" is a common dev
-      // setup that was silently unregistered until now even though
-      // Cursor's been in the detection set since round 1.
-      const cursorWinPath = join(winUserProfile, '.cursor', 'mcp.json');
-      candidates.push({
-        name: 'Cursor (Windows-side via WSL)',
-        configPath: cursorWinPath,
-        displayPath: cursorWinPath,
-      });
-      // PR #443 local review: do not register Windows-side Codex
-      // from a WSL process yet. The canonical entry is computed from
-      // the current Linux/WSL Node + CLI paths; writing that into
-      // %USERPROFILE%\.codex\config.toml would leave Windows Codex
-      // unable to spawn the MCP server. Add this only once we emit a
-      // Windows-compatible wrapper command, e.g. via wsl.exe.
-    }
-  }
-
-  return candidates.filter((c) => {
-    if (existsSync(c.configPath)) return true;
-    if (existsSync(dirname(c.configPath))) return true;
-    return false;
-  });
-}
-
 type RegistrationState = 'registered' | 'stale' | 'not-registered';
 
 interface ClientState {
-  target: ClientTarget;
+  target: McpConfigSelection;
   state: RegistrationState;
-  current: unknown;
-}
-
-function readJson(path: string): Record<string, unknown> {
-  if (!existsSync(path)) return {};
-  const raw = readFileSync(path, 'utf8').trim();
-  if (!raw) return {};
-  try {
-    const parsed = JSON.parse(raw);
-    return typeof parsed === 'object' && parsed !== null
-      ? (parsed as Record<string, unknown>)
-      : {};
-  } catch {
-    throw new Error(
-      `Existing file is not valid JSON: ${tildify(path)}. Move it aside and re-run.`,
-    );
-  }
-}
-
-/**
- * PR #443 round-5 Codex Review: mirror `readJson`'s friendly-recovery
- * wrapping for the TOML branch. `@iarna/toml`'s parse error includes
- * line/column info but no path and no suggested next-step; an
- * operator hitting a malformed `~/.codex/config.toml` would see the
- * raw library message and abort the entire `dkg mcp setup` flow with
- * no clear recovery path. Wrap with the same shape JSON uses so the
- * operator-facing error names the file and the move-it-aside
- * recovery procedure.
- */
-function readToml(path: string): Record<string, unknown> {
-  if (!existsSync(path)) return {};
-  const raw = readFileSync(path, 'utf8');
-  // `@iarna/toml`'s parser returns `{}` for an all-whitespace file
-  // already, but normalising empty-string up front mirrors readJson
-  // and skips the parse call for the common parent-dir-only-detected
-  // first-write case.
-  if (!raw.trim()) return {};
-  try {
-    const parsed = TOML.parse(raw);
-    return parsed as Record<string, unknown>;
-  } catch {
-    throw new Error(
-      `Existing file is not valid TOML: ${tildify(path)}. Move it aside and re-run.`,
-    );
-  }
-}
-
-/**
- * Read the parsed body of a per-client config, dispatching on
- * `target.format`. JSON is the default + most-common format. TOML
- * (Codex CLI) uses `@iarna/toml`. The YAML branch is a reserved
- * stub today — see `ClientTarget.format` for the PR #443 history.
- * Missing-file is normalised to `{}` for the live formats so
- * first-write callers don't have to special-case
- * detection-via-parent-dir candidates.
- */
-function readConfigBody(target: ClientTarget): Record<string, unknown> {
-  const format = target.format ?? DEFAULT_FORMAT;
-  switch (format) {
-    case 'json':
-      return readJson(target.configPath);
-    case 'toml':
-      return readToml(target.configPath);
-    case 'yaml':
-      // YAML branch is reserved for a future client (PR #443
-      // attempted Continue here, then reverted because Continue's
-      // MCP config is workspace-local, not user-global). Re-adding
-      // a YAML client is purely additive: declare the candidate
-      // with `format: 'yaml'` and replace this stub with the
-      // `js-yaml.load` call. Throwing eagerly here means a future
-      // candidate that ships pre-stub-replacement trips cleanly at
-      // registration time rather than silently writing garbage.
-      throw new Error(
-        `YAML config format not yet implemented (target: ${target.name}).`,
-      );
-    default:
-      throw new Error(`Unknown client config format: ${String(format)}`);
-  }
-}
-
-/** The launch shape of one registered MCP server, as the client stores it. */
-export interface RegisteredMcpServer {
-  command: string;
-  /**
-   * The declared launch arguments. `[]` means the key was absent — a legitimate
-   * args-less server. `null` means the key was PRESENT but is not a string
-   * array, which is not a launch block we can compare. The distinction matters:
-   * quietly dropping a non-string element would rewrite `args: [123]` into `[]`
-   * and let it match an args-less registry entry, manufacturing an install.
-   */
-  args: string[] | null;
-  /** String-valued env entries only; non-string values are not represented. */
-  env?: Record<string, string>;
-}
-
-/**
- * Outcome of inspecting one client config for registered MCP servers.
- * `ok: false` is "we could not look", never "we looked and found nothing".
- *
- * Carries the blocks rather than only their names. A server registered under a
- * slug is evidence that THAT integration is installed only if it also launches
- * what the registry entry says it should — the name alone cannot tell a real
- * installation apart from an unrelated server that happens to share it.
- */
-export type ServerKeyProbe =
-  | { ok: true; servers: Record<string, RegisteredMcpServer> }
-  | { ok: false; reason: string };
-
-/**
- * Names of every MCP server registered in a client's config, whatever container
- * that client uses (`mcpServers`, `servers`, `mcp_servers`) and whatever format
- * it is written in (JSON, TOML).
- *
- * `dkg mcp setup` cares about one fixed leaf (`…dkg`); integration detection
- * needs the sibling keys instead, because an installed integration registers
- * itself under its own slug. Exposed here so `dkg integration list` reads the
- * same client targets and container paths that `dkg mcp setup` writes, rather
- * than maintaining a second, narrower list that silently misses clients.
- *
- * Absence of evidence is not evidence of absence, so the two are returned as
- * different values rather than both as []. `ok: false` means we could not look
- * — the file is present but unreadable, unparseable, or malformed at the
- * container we needed. A caller that reports install state must not render
- * that as "not installed": it would tell a user an integration is missing when
- * the truth is that their config could not be read.
- */
-export function readRegisteredServerKeys(target: ClientTarget): ServerKeyProbe {
-  let body: Record<string, unknown>;
-  try {
-    body = readConfigBody(target);
-  } catch (err) {
-    // A config that does not exist IS a real answer: this client has
-    // registered nothing. Anything else means the file is there and we failed.
-    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return { ok: true, servers: {} };
-    return { ok: false, reason: `could not read ${target.displayPath}` };
-  }
-  const { head } = splitEntryPath(target.entryPath);
-  let cursor: unknown = body;
-  for (const segment of head) {
-    if (cursor === null || typeof cursor !== 'object') return { ok: true, servers: {} };
-    cursor = (cursor as Record<string, unknown>)[segment];
-  }
-  // Missing container: readable config, nothing registered.
-  if (cursor === undefined) return { ok: true, servers: {} };
-  // Present but not a KEYED object: malformed exactly where we needed to read.
-  // An array counts — `typeof [] === 'object'`, so without the explicit check it
-  // fell through to Object.entries([]) and reported "readable, nothing
-  // registered": a confident claim about a container we cannot interpret. The
-  // entry-level filter below already rejected arrays; the container needed the
-  // same treatment.
-  if (cursor === null || typeof cursor !== 'object' || Array.isArray(cursor)) {
-    return { ok: false, reason: `malformed server container in ${target.displayPath}` };
-  }
-  // Only entries that could actually launch count as registrations. `classify`
-  // above already treats `{ dkg: null }` as not-registered (deliberately —
-  // pre-F7 it read as `stale` and claimed there was a value to refresh). A
-  // value that is null, scalar, an array, or an object carrying no `command`
-  // is the same non-registration: nothing there can start. Counting one would
-  // be a false positive, the opposite failure from the unreadable-config case.
-  const servers: Record<string, RegisteredMcpServer> = {};
-  for (const [name, value] of Object.entries(cursor as Record<string, unknown>)) {
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) continue;
-    const block = value as Record<string, unknown>;
-    if (typeof block.command !== 'string') continue;
-    const env: Record<string, string> = {};
-    if (block.env !== null && typeof block.env === 'object' && !Array.isArray(block.env)) {
-      for (const [k, val] of Object.entries(block.env as Record<string, unknown>)) {
-        if (typeof val === 'string') env[k] = val;
-      }
-    }
-    let args: string[] | null;
-    if (block.args === undefined) {
-      args = []; // absent: a legitimate args-less server
-    } else if (Array.isArray(block.args) && block.args.every((a) => typeof a === 'string')) {
-      args = block.args as string[];
-    } else {
-      args = null; // present but not a string array — not comparable
-    }
-    servers[name] = { command: block.command, args, env };
-  }
-  return { ok: true, servers };
-}
-
-function serialiseTomlEntryOnly(
-  target: ClientTarget,
-  body: Record<string, unknown>,
-): string {
-  const nested: Record<string, unknown> = {};
-  const { head, leaf } = splitEntryPath(target.entryPath);
-  const container = ensurePathContainer(nested, head);
-  container[leaf] = readEntryAt(body, target.entryPath) ?? {};
-  return TOML.stringify(nested as TOML.JsonMap);
-}
-
-interface TomlLine {
-  text: string;
-  eol: string;
-}
-
-function splitTomlLines(raw: string): TomlLine[] {
-  const lines: TomlLine[] = [];
-  const re = /(.*?)(\r\n|\n|\r|$)/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(raw)) !== null) {
-    if (match[0] === '') break;
-    lines.push({ text: match[1], eol: match[2] });
-  }
-  return lines;
-}
-
-function splitTomlKeyPath(path: string): string[] {
-  const parts: string[] = [];
-  let current = '';
-  let quote: '"' | "'" | null = null;
-  let escaped = false;
-  for (const ch of path) {
-    if (escaped) {
-      current += ch;
-      escaped = false;
-      continue;
-    }
-    if (quote === '"' && ch === '\\') {
-      current += ch;
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      current += ch;
-      if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      current += ch;
-      quote = ch;
-      continue;
-    }
-    if (ch === '.') {
-      parts.push(current.trim());
-      current = '';
-      continue;
-    }
-    current += ch;
-  }
-  parts.push(current.trim());
-  return parts.map((part) => {
-    if (
-      part.length >= 2 &&
-      ((part.startsWith('"') && part.endsWith('"')) ||
-        (part.startsWith("'") && part.endsWith("'")))
-    ) {
-      return part.slice(1, -1);
-    }
-    return part;
-  });
-}
-
-const TOML_PATH_SEPARATOR = '\0';
-
-function normaliseTomlHeaderPath(path: string): string {
-  return splitTomlKeyPath(path).join(TOML_PATH_SEPARATOR);
-}
-
-function normaliseTomlOwnedPath(path: string): string {
-  return path.split('.').filter(Boolean).join(TOML_PATH_SEPARATOR);
-}
-
-function tomlParentPath(path: string): string | null {
-  const parts = path.split('.').filter(Boolean);
-  if (parts.length <= 1) return null;
-  return parts.slice(0, -1).join('.');
-}
-
-function tomlTableHeaderPath(line: string): string | null {
-  const arrayMatch = line.match(/^\s*\[\[\s*(.+?)\s*\]\]\s*(?:#.*)?$/);
-  if (arrayMatch) return normaliseTomlHeaderPath(arrayMatch[1]);
-  const tableMatch = line.match(/^\s*\[\s*(.+?)\s*\]\s*(?:#.*)?$/);
-  if (tableMatch) return normaliseTomlHeaderPath(tableMatch[1]);
-  return null;
-}
-
-function ownsTomlTablePath(path: string, ownedPath: string): boolean {
-  return path === ownedPath || path.startsWith(`${ownedPath}${TOML_PATH_SEPARATOR}`);
-}
-
-type TomlMultilineDelimiter = '"""' | "'''";
-
-function advanceTomlMultilineDelimiter(
-  line: string,
-  state: TomlMultilineDelimiter | null,
-): TomlMultilineDelimiter | null {
-  let i = 0;
-  let quote: '"' | "'" | null = null;
-  let escaped = false;
-
-  while (i < line.length) {
-    if (state) {
-      const end = line.indexOf(state, i);
-      if (end === -1) return state;
-      i = end + state.length;
-      state = null;
-      continue;
-    }
-
-    const ch = line[i];
-    if (quote === '"') {
-      if (escaped) {
-        escaped = false;
-      } else if (ch === '\\') {
-        escaped = true;
-      } else if (ch === '"') {
-        quote = null;
-      }
-      i++;
-      continue;
-    }
-    if (quote === "'") {
-      if (ch === "'") quote = null;
-      i++;
-      continue;
-    }
-    if (ch === '#') break;
-    if (line.startsWith('"""', i)) {
-      state = '"""';
-      i += 3;
-      continue;
-    }
-    if (line.startsWith("'''", i)) {
-      state = "'''";
-      i += 3;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      i++;
-      continue;
-    }
-    i++;
-  }
-
-  return state;
-}
-
-function tomlTableHeaderPaths(lines: TomlLine[]): Array<string | null> {
-  let multilineDelimiter: TomlMultilineDelimiter | null = null;
-  return lines.map((line) => {
-    const headerPath = multilineDelimiter ? null : tomlTableHeaderPath(line.text);
-    multilineDelimiter = advanceTomlMultilineDelimiter(line.text, multilineDelimiter);
-    return headerPath;
-  });
-}
-
-function isTomlCommentOrBlank(line: TomlLine): boolean {
-  const trimmed = line.text.trim();
-  return trimmed === '' || trimmed.startsWith('#');
-}
-
-function normaliseNewlines(text: string, newline: string): string {
-  return text.replace(/\r\n|\n|\r/g, newline);
-}
-
-function appendTomlTable(raw: string, replacement: string, newline: string): string {
-  if (!raw.trim()) return replacement;
-  let out = raw;
-  if (!out.endsWith('\n') && !out.endsWith('\r')) out += newline;
-  if (!out.endsWith(`${newline}${newline}`)) out += newline;
-  return out + replacement;
-}
-
-function replaceTomlTable(
-  raw: string,
-  ownedPath: string,
-  replacement: string,
-  parsedRawHasOwnedEntry: boolean,
-  parsedRawHasOwnedParent: boolean,
-): string | null {
-  const newline = raw.includes('\r\n') ? '\r\n' : '\n';
-  const ownedPathKey = normaliseTomlOwnedPath(ownedPath);
-  const parentPathKey = tomlParentPath(ownedPath);
-  const normalisedParentPathKey = parentPathKey
-    ? normaliseTomlOwnedPath(parentPathKey)
-    : null;
-  const replacementBlock = normaliseNewlines(
-    replacement.endsWith('\n') || replacement.endsWith('\r')
-      ? replacement
-      : replacement + newline,
-    newline,
-  );
-  const lines = splitTomlLines(raw);
-  const headerPaths = tomlTableHeaderPaths(lines);
-  const ranges: { start: number; end: number }[] = [];
-  let hasRootTable = false;
-  let hasParentTableFamily = normalisedParentPathKey === null;
-
-  for (let i = 0; i < lines.length; i++) {
-    const headerPath = headerPaths[i];
-    if (!headerPath) continue;
-    if (
-      normalisedParentPathKey &&
-      ownsTomlTablePath(headerPath, normalisedParentPathKey)
-    ) {
-      hasParentTableFamily = true;
-    }
-    if (!ownsTomlTablePath(headerPath, ownedPathKey)) continue;
-    if (headerPath === ownedPathKey) hasRootTable = true;
-    let end = i + 1;
-    while (end < lines.length && headerPaths[end] === null) {
-      end++;
-    }
-    let replaceEnd = end;
-    while (replaceEnd > i + 1 && isTomlCommentOrBlank(lines[replaceEnd - 1])) {
-      replaceEnd--;
-    }
-    ranges.push({ start: i, end: replaceEnd });
-    i = end - 1;
-  }
-
-  if (parsedRawHasOwnedEntry && !hasRootTable) {
-    return null;
-  }
-
-  if (parsedRawHasOwnedParent && !hasParentTableFamily && ranges.length === 0) {
-    return null;
-  }
-
-  if (ranges.length === 0) {
-    return appendTomlTable(raw, replacementBlock, newline);
-  }
-
-  let inserted = false;
-  let rangeIndex = 0;
-  let out = '';
-  for (let i = 0; i < lines.length;) {
-    const range = ranges[rangeIndex];
-    if (range && i === range.start) {
-      if (!inserted) {
-        out += replacementBlock;
-        inserted = true;
-      }
-      i = range.end;
-      rangeIndex++;
-      continue;
-    }
-    out += lines[i].text + lines[i].eol;
-    i++;
-  }
-  return out;
-}
-
-function readPathAt(body: Record<string, unknown>, path: string | undefined): unknown {
-  if (!path) return undefined;
-  let cursor: unknown = body;
-  for (const segment of path.split('.').filter(Boolean)) {
-    if (cursor === undefined || cursor === null || typeof cursor !== 'object') {
-      return undefined;
-    }
-    cursor = (cursor as Record<string, unknown>)[segment];
-  }
-  return cursor;
-}
-
-function tomlRawHasEntry(raw: string, entryPath: string | undefined): boolean {
-  if (!raw.trim()) return false;
-  try {
-    const parsed = TOML.parse(raw) as Record<string, unknown>;
-    return readEntryAt(parsed, entryPath) !== undefined;
-  } catch {
-    return false;
-  }
-}
-
-function tomlRawHasPath(raw: string, path: string | undefined): boolean {
-  if (!raw.trim()) return false;
-  try {
-    const parsed = TOML.parse(raw) as Record<string, unknown>;
-    return readPathAt(parsed, path) !== undefined;
-  } catch {
-    return false;
-  }
-}
-
-function writeTomlConfigBody(
-  target: ClientTarget,
-  body: Record<string, unknown>,
-): void {
-  const raw = existsSync(target.configPath)
-    ? readFileSync(target.configPath, 'utf8')
-    : '';
-  const ownedPath = target.entryPath ?? DEFAULT_ENTRY_PATH;
-  const ownedParentPath = tomlParentPath(ownedPath) ?? undefined;
-  const serialisedEntry = serialiseTomlEntryOnly(target, body);
-  const patched = replaceTomlTable(
-    raw,
-    ownedPath,
-    serialisedEntry,
-    tomlRawHasEntry(raw, target.entryPath),
-    tomlRawHasPath(raw, ownedParentPath),
-  );
-  if (patched === null) {
-    process.stderr.write(
-      `[setup] WARNING: ${target.name} config at ${tildify(target.configPath)} ` +
-        `uses a TOML shape that cannot be patched safely for ${ownedPath}; ` +
-        'rewriting the TOML file to avoid invalid or duplicate definitions. ' +
-        'Comments/formatting outside this entry may not be preserved.\n',
-    );
-  }
-  writeFileSync(
-    target.configPath,
-    patched ?? TOML.stringify(body as TOML.JsonMap),
-  );
-}
-
-/**
- * Serialize a parsed body to disk, dispatching on `target.format`.
- * Mirrors `readConfigBody`'s dispatch shape. JSON output keeps the
- * pre-refactor formatting (2-space indent, trailing newline)
- * byte-for-byte. TOML patches only the owned MCP table. YAML is a
- * reserved-stub branch today.
- *
- * FIX 26 merge: format-agnostic. The merge in `writeRegistration`
- * operates on the parsed body object before it reaches this writer,
- * so the per-format spread/stringify path here never sees the merge
- * logic.
- */
-function writeConfigBody(target: ClientTarget, body: Record<string, unknown>): void {
-  const format = target.format ?? DEFAULT_FORMAT;
-  const dir = dirname(target.configPath);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  switch (format) {
-    case 'json':
-      writeFileSync(target.configPath, JSON.stringify(body, null, 2) + '\n');
-      return;
-    case 'toml':
-      writeTomlConfigBody(target, body);
-      return;
-    case 'yaml':
-      // Mirror `readConfigBody`'s YAML stub. See the comment there
-      // for the rationale (PR #443 Continue revert; YAML branch
-      // reserved for a future client).
-      throw new Error(
-        `YAML config format not yet implemented (target: ${target.name}).`,
-      );
-    default:
-      throw new Error(`Unknown client config format: ${String(format)}`);
-  }
 }
 
 function classify(
-  target: ClientTarget,
-  expected: Record<string, unknown>,
+  target: McpConfigSelection,
+  expected: DesiredRegistration,
 ): ClientState {
-  const body = readConfigBody(target);
-  const current = readEntryAt(body, target.entryPath) as
-    | Record<string, unknown>
-    | null
-    | undefined;
-  // Treat both `undefined` (key absent) and `null` (key present but
-  // explicitly nulled) as "not-registered". Pre-F7 a `{ dkg: null }`
-  // entry classified as `stale`, which made the operator-facing
-  // log line claim there was a current value to refresh — there
-  // wasn't. Same registration outcome under `--force`; clearer log.
-  if (current === undefined || current === null) {
-    return { target, state: 'not-registered', current: null };
-  }
-  // Codex Round-4 staleness contract: pure string equality. The
-  // canonical entry is now uniform `process.execPath + cli.js path`
-  // for both installed and monorepo modes (round-4 unified the
-  // shape), so all earlier asymmetric equivalence rules collapse
-  // to a single check. Any divergence — legacy bare-`"dkg"`,
-  // resolved-`/usr/local/bin/dkg`, a stale repo-root path from a
-  // moved checkout, etc. — classifies as `stale` and refreshes to
-  // the new shape on stock re-run. Auto-migration fires for free.
-  const expectedCommand = expected.command;
-  const currentCommand = (current as Record<string, unknown>).command;
-  const commandMatches = currentCommand === expectedCommand;
-  const argsMatch =
-    Array.isArray((current as Record<string, unknown>).args) &&
-    JSON.stringify((current as Record<string, unknown>).args) ===
-      JSON.stringify(expected.args);
-  // Codex Round-9 Fix 16 + Round-15 Fix 22: compare ONLY the
-  // `env.DKG_HOME` field, not the whole env object. Round-9 used
-  // strict JSON.stringify equality on env, but that turned any
-  // user-added MCP env var (NODE_OPTIONS, HTTPS_PROXY, custom
-  // debug flags) into spurious "stale drift" — and combined with
-  // writeRegistration's full-entry replace, those user vars got
-  // silently wiped on every re-run. Post-fix: only DKG_HOME
-  // matters for staleness; user-added keys are preserved by the
-  // write-time merge in writeRegistration. A pre-Fix-16 entry
-  // lacking `env` entirely classifies as `stale` (currentDkgHome
-  // === undefined !== expectedDkgHome) and migrates forward.
-  const currentEnvObj =
-    (current as Record<string, unknown>).env &&
-    typeof (current as Record<string, unknown>).env === 'object'
-      ? ((current as Record<string, unknown>).env as Record<string, unknown>)
-      : undefined;
-  const currentDkgHome = currentEnvObj?.DKG_HOME;
-  const expectedDkgHome =
-    expected.env && typeof expected.env === 'object'
-      ? (expected.env as Record<string, unknown>).DKG_HOME
-      : undefined;
-  const envMatch = currentDkgHome === expectedDkgHome;
-  const matches =
-    typeof current === 'object' &&
-    current !== null &&
-    commandMatches &&
-    argsMatch &&
-    envMatch;
-  return {
-    target,
-    state: matches ? 'registered' : 'stale',
-    current: current ?? null,
-  };
-}
-
-function writeRegistration(
-  target: ClientTarget,
-  entry: Record<string, unknown>,
-): void {
-  const body = readConfigBody(target);
-
-  // Codex Round-15 Fix 22 + Round-19 Fix 26: when refreshing an
-  // existing entry, MERGE the entire existing entry — not just
-  // env — with the expected entry. Round-15 Fix 22 added env-merge
-  // (NODE_OPTIONS, HTTPS_PROXY, etc. preserved) but the rest of
-  // the entry was still being replaced wholesale, which clobbered
-  // top-level keys clients use to anchor MCP servers (e.g. `cwd`
-  // for workspace-scoped servers, custom keys like `restartPolicy`).
-  //
-  // Spread order: existing entry first, then expected entry, then
-  // explicit env merge. The fields THIS COMMAND owns are
-  // `command`, `args`, and `env.DKG_HOME` — those override
-  // existing values via the second spread + explicit env override.
-  // Everything else passes through from the existing entry
-  // unchanged: arbitrary top-level keys (cwd, restartPolicy, …)
-  // and arbitrary env keys (NODE_OPTIONS, HTTPS_PROXY, …).
-  const { head, leaf } = splitEntryPath(target.entryPath);
-  const container = ensurePathContainer(body, head);
-  const currentEntry = container[leaf];
-  const currentEntryObj =
-    currentEntry && typeof currentEntry === 'object'
-      ? (currentEntry as Record<string, unknown>)
-      : {};
-  const currentEnv =
-    currentEntryObj.env && typeof currentEntryObj.env === 'object'
-      ? (currentEntryObj.env as Record<string, unknown>)
-      : {};
-  const expectedEnv =
-    entry.env && typeof entry.env === 'object'
-      ? (entry.env as Record<string, unknown>)
-      : {};
-  const mergedEntry: Record<string, unknown> = {
-    ...currentEntryObj,
-    ...entry,
-    env: { ...currentEnv, ...expectedEnv },
-  };
-  container[leaf] = mergedEntry;
-  writeConfigBody(target, body);
+  const current = readRegistration(target.file);
+  return { target, state: classifyRegistration(current, expected) };
 }
 
 /**
@@ -1607,26 +525,6 @@ function writeRegistration(
  * Code to fixed destinations; other client targets get `null`
  * and the caller skips the copy step).
  */
-function skillTargetForClient(target: ClientTarget, home: string): string | null {
-  // Match by name prefix so the WSL2-side variants ("Cursor (Windows-side via WSL)")
-  // also get skill delivery if the operator-facing client config lives Windows-side.
-  // Both Cursor and Claude Code keep skills under `~/.cursor/skills/` and
-  // `~/.claude/skills/` respectively on the operator's primary OS — for the
-  // WSL2 case the operator runs the GUI client on Windows so the Linux-side
-  // ~/.cursor/skills/ they have inside WSL is the right destination iff
-  // they ALSO run a Cursor instance against WSL. Erring on the side of "deliver
-  // to the Linux-side too" is safe — extra files in skill dirs are inert,
-  // and a corresponding miss is what RFC-41 specifies the operator should
-  // notice via SKILL.md being absent.
-  if (target.name === 'Cursor' || target.name.startsWith('Cursor ')) {
-    return join(home, '.cursor', 'skills', 'dkg-node', 'SKILL.md');
-  }
-  if (target.name === 'Claude Code' || target.name.startsWith('Claude Code ')) {
-    return join(home, '.claude', 'skills', 'dkg-node', 'SKILL.md');
-  }
-  return null;
-}
-
 
 /**
  * Copy the bundled SKILL.md into the per-client skills directory if
@@ -1645,7 +543,7 @@ function skillTargetForClient(target: ClientTarget, home: string): string | null
  */
 function deliverSkillToClient(target: ClientTarget): string | null {
   const home = homedir();
-  const skillPath = skillTargetForClient(target, home);
+  const skillPath = clientSkillPath(target.id, home);
   if (!skillPath) return null;
   try {
     const skillContent = renderStandaloneDkgNodeSkill();
@@ -1834,7 +732,7 @@ export async function mcpSetupAction(
   // disambiguation note (Round-2 Bug B): operator advisories on
   // stderr; data on stdout. Round-7 originally used console.log
   // and broke --print-only stdout purity for the second time.
-  const entryArgs = (expectedEntry.args as string[]).join(' ');
+  const entryArgs = expectedEntry.args.join(' ');
   process.stderr.write(`[setup] Registering CLI: ${expectedEntry.command} ${entryArgs}\n`);
 
   if (printOnly) {
@@ -2079,7 +977,7 @@ export async function mcpSetupAction(
 
   // ── Step 4: client detection + classification ─────────────────────
   console.log('');
-  const clients = detectClients();
+  const clients = selectMcpClientTargets((deps.detectClients ?? detectClients)());
   if (clients.length === 0) {
     console.log('No MCP-aware clients detected.');
     console.log('  Print the canonical JSON for manual paste:');
@@ -2101,20 +999,20 @@ export async function mcpSetupAction(
   // emit a stderr warning, mark the target as failed, and force
   // the planner below to `skip` it so no write is attempted on a
   // client we couldn't read. Other clients continue unaffected.
-  const classifyFailed = new Set<string>();
+  const classifyFailed = new Set<McpConfigSelection>();
   const states: ClientState[] = clients.map((c) => {
     try {
       return classify(c, expectedEntry);
     } catch (err: any) {
       process.stderr.write(
-        `[setup] WARNING: ${c.name} classify failed (${err?.message ?? err}); skipping this client.\n`,
+        `[setup] WARNING: ${mcpConfigClientNames(c)} classify failed (${err?.message ?? err}); skipping this client.\n`,
       );
-      classifyFailed.add(c.name);
-      return { target: c, state: 'not-registered', current: null };
+      classifyFailed.add(c);
+      return { target: c, state: 'not-registered' };
     }
   });
   const planned: PlannedItem[] = states.map((s) => {
-    if (classifyFailed.has(s.target.name)) return { s, action: 'skip' };
+    if (classifyFailed.has(s.target)) return { s, action: 'skip' };
     if (force) return { s, action: 'refresh' };
     if (s.state === 'not-registered') return { s, action: 'register' };
     if (s.state === 'stale') return { s, action: 'refresh' };
@@ -2134,7 +1032,7 @@ export async function mcpSetupAction(
         : action === 'refresh'
           ? 'will refresh'
           : 'leaving alone';
-    console.log(`  ${s.target.name.padEnd(13)} (${s.target.displayPath}) — ${stateLabel}; ${actionLabel}`);
+    console.log(`  ${mcpConfigClientNames(s.target).padEnd(13)} (${s.target.file.displayPath}) — ${stateLabel}; ${actionLabel}`);
   }
 
   // F31: per-client interactive confirm. Skipped on `--yes`, in
@@ -2181,15 +1079,18 @@ export async function mcpSetupAction(
     console.log('');
     for (const { s, action } of writes) {
       try {
-        writeRegistration(s.target, expectedEntry);
-        console.log(`  ${action === 'register' ? 'Registered' : 'Refreshed'} ${s.target.name} → ${s.target.displayPath}`);
+        writeRegistration(s.target.file, expectedEntry);
+        console.log(`  ${action === 'register' ? 'Registered' : 'Refreshed'} ${mcpConfigClientNames(s.target)} → ${s.target.file.displayPath}`);
         // RFC-41 §4.5: explicit SKILL.md delivery for Cursor + Claude Code,
         // which don't walk node_modules for skill discovery. Returns null
         // for clients that don't support skill delivery; logs a warning
         // on failure but doesn't fail the MCP registration that just succeeded.
-        const skillPath = deliverSkillToClient(s.target);
-        if (skillPath) {
-          console.log(`    └─ SKILL.md copied to ${tildify(skillPath)}`);
+        const delivered = new Set<string>();
+        for (const alias of s.target.aliases) {
+          if (delivered.has(alias.id)) continue;
+          delivered.add(alias.id);
+          const skillPath = deliverSkillToClient(alias);
+          if (skillPath) console.log(`    └─ SKILL.md copied to ${tildify(skillPath)}`);
         }
       } catch (err: any) {
         // Codex Round-8 Fix 15: per-client write error isolation.
@@ -2205,9 +1106,9 @@ export async function mcpSetupAction(
         // for the post-loop aggregate throw.
         const msg = err?.message ?? String(err);
         process.stderr.write(
-          `[setup] WARNING: ${s.target.name} write failed (${msg}); other clients still attempted.\n`,
+          `[setup] WARNING: ${mcpConfigClientNames(s.target)} write failed (${msg}); other clients still attempted.\n`,
         );
-        writeFailures.push({ name: s.target.name, error: msg });
+        writeFailures.push({ name: mcpConfigClientNames(s.target), error: msg });
       }
     }
   }
@@ -2230,7 +1131,7 @@ export async function mcpSetupAction(
   // failure).
   if (!dryRun) {
     const allFailures: { name: string; error: string }[] = [
-      ...Array.from(classifyFailed).map((name) => ({ name, error: 'classify failed' })),
+      ...Array.from(classifyFailed).map((target) => ({ name: mcpConfigClientNames(target), error: 'classify failed' })),
       ...writeFailures,
     ];
     if (allFailures.length > 0) {
@@ -2284,5 +1185,3 @@ export async function mcpSetupAction(
     else delete process.env.DKG_HOME;
   }
 }
-
-export { expandHome };

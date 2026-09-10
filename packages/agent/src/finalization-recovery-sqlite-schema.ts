@@ -28,7 +28,8 @@ import {
 
 const APPLICATION_ID = 0x444b4649; // DKFI
 const LEGACY_USER_VERSION = 1;
-const USER_VERSION = 2;
+const DEFERRED_SPOOL_USER_VERSION = 2;
+const USER_VERSION = 3;
 
 const DDL_V1 = `
 CREATE TABLE finalization_inbox_v1 (
@@ -133,6 +134,13 @@ CREATE INDEX finalization_pending_peer_v2
 `;
 
 const DDL_V2 = `${DDL_V1}\n${PENDING_DDL_V2}`;
+const FAILURE_STREAK_MIGRATION_V3 = `
+ALTER TABLE finalization_inbox_v1
+  ADD COLUMN failure_signature TEXT;
+ALTER TABLE finalization_inbox_v1
+  ADD COLUMN failure_streak INTEGER NOT NULL DEFAULT 0 CHECK (failure_streak >= 0);
+`;
+const DDL_V3 = `${DDL_V2}\n${FAILURE_STREAK_MIGRATION_V3}`;
 
 export interface OpenedFinalizationRecoveryDatabase {
   databasePath: string;
@@ -229,7 +237,11 @@ function verifySchema(
   }
   database.prepare('SELECT * FROM finalization_inbox_v1')
     .all()
-    .forEach(finalizationRecoveryRowToEntry);
+    .forEach((row) => finalizationRecoveryRowToEntry(
+      userVersion < USER_VERSION
+        ? { ...row, failure_signature: null, failure_streak: 0 }
+        : row,
+    ));
 }
 
 function applyRuntimePragmas(database: DatabaseSync): void {
@@ -274,7 +286,7 @@ function initializeFresh(database: DatabaseSync, path: string): void {
     ) {
       throw new Error('Finalization inbox lost its pristine identity before initialization');
     }
-    database.exec(DDL_V2);
+    database.exec(DDL_V3);
     database.exec(`PRAGMA application_id = ${APPLICATION_ID}`);
     database.exec(`PRAGMA user_version = ${USER_VERSION}`);
     database.exec('COMMIT');
@@ -293,13 +305,36 @@ function initializeFresh(database: DatabaseSync, path: string): void {
   fsyncOwnedSqliteFileAndDirectoryV1(path);
 }
 
-function migrateLegacyV1(database: DatabaseSync, databasePath: string): void {
+interface FinalizationSchemaMigration {
+  readonly sourceVersion: number;
+  readonly targetVersion: number;
+  readonly ddl: string;
+}
+
+const SCHEMA_MIGRATIONS: ReadonlyMap<number, FinalizationSchemaMigration> = new Map([
+  [LEGACY_USER_VERSION, {
+    sourceVersion: LEGACY_USER_VERSION,
+    targetVersion: DEFERRED_SPOOL_USER_VERSION,
+    ddl: PENDING_DDL_V2,
+  }],
+  [DEFERRED_SPOOL_USER_VERSION, {
+    sourceVersion: DEFERRED_SPOOL_USER_VERSION,
+    targetVersion: USER_VERSION,
+    ddl: FAILURE_STREAK_MIGRATION_V3,
+  }],
+]);
+
+function runDurableMigration(
+  database: DatabaseSync,
+  databasePath: string,
+  migration: FinalizationSchemaMigration,
+): void {
   let transactionOpen = false;
   try {
     database.exec('BEGIN IMMEDIATE');
     transactionOpen = true;
-    database.exec(PENDING_DDL_V2);
-    database.exec(`PRAGMA user_version = ${USER_VERSION}`);
+    database.exec(migration.ddl);
+    database.exec(`PRAGMA user_version = ${migration.targetVersion}`);
     database.exec('COMMIT');
     transactionOpen = false;
   } catch (error) {
@@ -312,10 +347,24 @@ function migrateLegacyV1(database: DatabaseSync, databasePath: string): void {
   if (String(journalMode?.journal_mode).toLowerCase() === 'wal') {
     const checkpoint = database.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
     if (Number(checkpoint?.busy ?? 1) !== 0) {
-      throw new Error('Finalization inbox v1 migration WAL checkpoint remained busy');
+      throw new Error(
+        `Finalization inbox v${migration.sourceVersion} migration WAL checkpoint remained busy`,
+      );
     }
   }
   fsyncOwnedSqliteFileAndDirectoryV1(databasePath);
+}
+
+function migrateFromVersion(
+  database: DatabaseSync,
+  databasePath: string,
+  sourceVersion: number,
+): void {
+  const migration = SCHEMA_MIGRATIONS.get(sourceVersion);
+  if (!migration) {
+    throw new Error(`Finalization inbox has no migration from version ${sourceVersion}`);
+  }
+  runDurableMigration(database, databasePath, migration);
 }
 
 export async function openFinalizationRecoveryDatabase(
@@ -333,15 +382,24 @@ export async function openFinalizationRecoveryDatabase(
         'Finalization inbox',
       );
     } catch {
-      // The main-file header can legitimately lag a committed WAL. Accept
-      // exactly the owned v1 header here, then classify from SQLite's recovered
-      // PRAGMA below after the WAL has been replayed.
-      assertOwnedSqliteHeaderIdentityV1(
-        databasePath,
-        APPLICATION_ID,
-        LEGACY_USER_VERSION,
-        'Finalization inbox',
-      );
+      // The main-file header can legitimately lag a committed WAL. Accept an
+      // owned historical header here, then classify from SQLite's recovered
+      // PRAGMA after the WAL has been replayed.
+      try {
+        assertOwnedSqliteHeaderIdentityV1(
+          databasePath,
+          APPLICATION_ID,
+          DEFERRED_SPOOL_USER_VERSION,
+          'Finalization inbox',
+        );
+      } catch {
+        assertOwnedSqliteHeaderIdentityV1(
+          databasePath,
+          APPLICATION_ID,
+          LEGACY_USER_VERSION,
+          'Finalization inbox',
+        );
+      }
     }
   }
   const database = new sqlite.DatabaseSync(databasePath);
@@ -354,11 +412,19 @@ export async function openFinalizationRecoveryDatabase(
         expectedSchema(sqlite.DatabaseSync, DDL_V1),
         LEGACY_USER_VERSION,
       );
-      migrateLegacyV1(database, databasePath);
+      migrateFromVersion(database, databasePath, LEGACY_USER_VERSION);
+      migrateFromVersion(database, databasePath, DEFERRED_SPOOL_USER_VERSION);
+    } else if (recoveredVersion === DEFERRED_SPOOL_USER_VERSION) {
+      verifySchema(
+        database,
+        expectedSchema(sqlite.DatabaseSync, DDL_V2),
+        DEFERRED_SPOOL_USER_VERSION,
+      );
+      migrateFromVersion(database, databasePath, DEFERRED_SPOOL_USER_VERSION);
     } else if (recoveredVersion !== USER_VERSION) {
       throw new Error('Finalization inbox has a foreign or unsupported recovered version');
     }
-    verifySchema(database, expectedSchema(sqlite.DatabaseSync, DDL_V2));
+    verifySchema(database, expectedSchema(sqlite.DatabaseSync, DDL_V3));
     applyRuntimePragmas(database);
     secureOwnedSqliteFileSetV1(databasePath, 'Finalization inbox');
     return { databasePath, database };

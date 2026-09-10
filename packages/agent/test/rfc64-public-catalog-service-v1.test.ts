@@ -173,7 +173,7 @@ function exactStageReceipt(
 
 function inertReconciler(): Rfc64PublicCatalogReceiverReconcilerV1 {
   return {
-    isHeadApplied: async () => false,
+    isHeadSatisfied: async () => false,
     reconcileHead: async () => 'not-found',
   };
 }
@@ -1376,7 +1376,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       native: nativeOptions((input) => {
         clients = input;
         return {
-          isHeadApplied: async () => false,
+          isHeadSatisfied: async () => false,
           reconcileHead: async () => {
             reconcileStarted.resolve();
             return reconcileResult.promise;
@@ -1460,7 +1460,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest: async () => null },
       receiver: { maxConcurrent: 1, maxAttempts: 1, retryBackoffMs: 0 },
       native: nativeOptions(() => ({
-        isHeadApplied: async (head) => applied.has(head.catalogHeadObjectDigest),
+        isHeadSatisfied: async (head) => applied.has(head.catalogHeadObjectDigest),
         reconcileHead: async (_peerId, head) => {
           reconciledVersions.push(head.catalogVersion);
           if (head.catalogVersion === '1') {
@@ -1530,7 +1530,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest: async () => null },
       receiver: { maxConcurrent: 1, maxAttempts: 1, retryBackoffMs: 0 },
       native: nativeOptions(() => ({
-        isHeadApplied: async (head) => currentApplied && head.catalogVersion === '40',
+        isHeadSatisfied: async (head) => currentApplied && head.catalogVersion === '40',
         reconcileHead: async (peerId, head) => {
           reconciled.push({ peerId, version: head.catalogVersion });
           if (head.catalogVersion !== '40') {
@@ -1609,7 +1609,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       accessPolicyAuthority: accessPolicyAuthority(),
       receiver: { retryBackoffMs: 0 },
       native: nativeOptions(() => ({
-        isHeadApplied: async () => false,
+        isHeadSatisfied: async () => false,
         reconcileHead,
       })),
     });
@@ -1647,7 +1647,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       router: new RecordingRouter().asProtocolRouter(),
       controlObjects: controlObjects(),
       accessPolicyAuthority: accessPolicyAuthority(),
-      native: nativeOptions(() => ({ isHeadApplied: async () => false, reconcileHead })),
+      native: nativeOptions(() => ({ isHeadSatisfied: async () => false, reconcileHead })),
     });
     const policy = catalogPolicy(CONTEXT_GRAPH_ID, 1, 1);
     const policyDigest = `0x${'91'.repeat(32)}` as Digest32V1;
@@ -1714,7 +1714,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
         authoringAllowed: active,
         reconciliationLane: active ? 'catalog-apply' : 'disabled',
       }),
-      native: nativeOptions(() => ({ isHeadApplied: async () => false, reconcileHead })),
+      native: nativeOptions(() => ({ isHeadSatisfied: async () => false, reconcileHead })),
     });
     const policy = acceptPolicy(service);
     service.start();
@@ -1781,7 +1781,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
         },
       },
       native: nativeOptions(() => ({
-        isHeadApplied: async () => false,
+        isHeadSatisfied: async () => false,
         reconcileHead: async () => {
           events.push('remote-enter');
           remoteEntered.resolve(undefined);
@@ -1827,7 +1827,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       accessPolicyAuthority: accessPolicyAuthority(),
       receiver: { maxAttempts: 2, retryBackoffMs: 0 },
       native: nativeOptions(() => ({
-        isHeadApplied: async () => false,
+        isHeadSatisfied: async () => false,
         reconcileHead: async (peerId) => {
           reconciledPeers.push(peerId);
           if (peerId === 'peer-a') throw new Error('provider lost');
@@ -1900,7 +1900,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       accessPolicyAuthority: accessPolicyAuthority(),
       receiver: { retryBackoffMs: 0 },
       native: nativeOptions(() => ({
-        isHeadApplied: async () => false,
+        isHeadSatisfied: async () => false,
         reconcileHead: async () => 'applied',
       })),
     });
@@ -1970,7 +1970,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       accessPolicyAuthority: accessPolicyAuthority(),
       receiver: { retryBackoffMs: 0 },
       native: nativeOptions(() => ({
-        isHeadApplied: async () => false,
+        isHeadSatisfied: async () => false,
         reconcileHead: async (peerId) => {
           reconciledPeers.push(peerId);
           return 'applied';
@@ -2047,7 +2047,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
         accessPolicyAuthority: accessPolicyAuthority(),
         receiver: { maxAttempts: 1, retryBackoffMs: 0 },
         native: nativeOptions(() => ({
-          isHeadApplied: async () => false,
+          isHeadSatisfied: async () => false,
           reconcileHead: async (peerId) => {
             throw scenario.errors.get(peerId)!;
           },
@@ -2102,7 +2102,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       accessPolicyAuthority: accessPolicyAuthority(),
       receiver: { retryBackoffMs: 0 },
       native: nativeOptions(() => ({
-        isHeadApplied: async () => applied,
+        isHeadSatisfied: async () => applied,
         reconcileHead: async (peerId) => {
           reconciledPeers.push(peerId);
           if (peerId !== 'peer-c') throw new Error('explicit provider must not be needed');
@@ -2167,7 +2167,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       accessPolicyAuthority: accessPolicyAuthority(),
       receiver: { maxAttempts: 1, retryBackoffMs: 0 },
       native: nativeOptions(() => ({
-        isHeadApplied: async () => false,
+        isHeadSatisfied: async () => false,
         reconcileHead: async (_peerId, head) => {
           if (head.policyDigest === rotatedDigest) throw rejectedPrecommit;
           return 'applied';
@@ -2248,7 +2248,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
         reconciliationLane: 'shadow-stage',
       }),
       native: nativeOptions(() => ({
-        isHeadApplied: async () => false,
+        isHeadSatisfied: async () => false,
         reconcileHead,
       })),
     });

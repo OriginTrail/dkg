@@ -473,15 +473,52 @@ describe('startLivenessWatcher', () => {
   });
 });
 
-describe('probeWorkerAlive (real TCP socket round-trip)', () => {
-  it('returns true when a TCP listener accepts the connection', async () => {
-    const server = createServer((socket) => socket.end());
+describe('probeWorkerAlive (real HTTP socket round-trip)', () => {
+  it.each([200, 401, 404, 503])('accepts HTTP %i as proof of event-loop progress', async (status) => {
+    let request = '';
+    const server = createServer((socket) => socket.once('data', (data) => {
+      request = data.toString();
+      socket.end(`HTTP/1.1 ${status} Response\r\nContent-Length: 0\r\n\r\n`);
+    }));
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as { port: number }).port;
     try {
       const alive = await probeWorkerAlive(port, '127.0.0.1', 2_000);
       expect(alive).toBe(true);
+      expect(request).toContain('HEAD /api/__dkg_liveness_probe__ HTTP/1.1');
+      expect(request).not.toContain('Authorization');
     } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('rejects a listener that accepts TCP but never responds', async () => {
+    const sockets = new Set<import('node:net').Socket>();
+    const server = createServer((socket) => { sockets.add(socket); socket.on('data', () => {}); });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      expect(await probeWorkerAlive((server.address() as { port: number }).port, '127.0.0.1', 50)).toBe(false);
+      expect(sockets.size).toBe(1); // TCP connection really succeeded.
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('bounds a trickling incomplete status line by the total deadline', async () => {
+    const sockets = new Set<import('node:net').Socket>();
+    const server = createServer((socket) => {
+      sockets.add(socket);
+      socket.on('data', () => {});
+      const timer = setInterval(() => socket.write('H'), 5);
+      socket.on('close', () => clearInterval(timer));
+      socket.on('error', () => {});
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      expect(await probeWorkerAlive((server.address() as { port: number }).port, '127.0.0.1', 50)).toBe(false);
+    } finally {
+      for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });

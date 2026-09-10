@@ -1070,7 +1070,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
-          resolveContextGraphReadAuthority: async () => ({
+          resolveContextGraphSubscriptionBootstrapAuthority: async () => ({
             outcome: 'allowed' as const,
             source: 'legacy-local' as const,
             reason: 'test-public',
@@ -1196,7 +1196,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
-          resolveContextGraphReadAuthority: async () => ({
+          resolveContextGraphSubscriptionBootstrapAuthority: async () => ({
             outcome: 'allowed' as const,
             source: 'legacy-local' as const,
             reason: 'test-public',
@@ -1314,7 +1314,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
-          resolveContextGraphReadAuthority: async () => ({
+          resolveContextGraphSubscriptionBootstrapAuthority: async () => ({
             outcome: 'allowed' as const,
             source: 'legacy-local' as const,
             reason: 'test-public',
@@ -2469,19 +2469,23 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
     } as any;
 
     let subscribeCalled = false;
+    let observedReadOpts: {
+      callerAgentAddress?: string;
+      allowSubscriptionFallback?: boolean;
+    } | undefined;
     let routeServer: Server | null = null;
     try {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
-          resolveContextGraphReadAuthority: async (
+          resolveContextGraphSubscriptionBootstrapAuthority: async (
             _id: string,
-            readOpts: { callerAgentAddress?: string; allowSubscriptionFallback?: boolean },
+            readOpts: {
+              callerAgentAddress?: string;
+              allowSubscriptionFallback?: boolean;
+            },
           ) => {
-            expect(readOpts).toEqual({
-              callerAgentAddress: CALLER,
-              allowSubscriptionFallback: false,
-            });
+            observedReadOpts = readOpts;
             if (opts.authority === 'throw') throw new Error('authority read failed');
             return {
               outcome: opts.authority,
@@ -2560,6 +2564,10 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
           body: JSON.stringify({ contextGraphId, includeSharedMemory: false }),
         },
       );
+      expect(observedReadOpts).toEqual({
+        callerAgentAddress: CALLER,
+        allowSubscriptionFallback: false,
+      });
       return {
         status: response.status,
         body: await response.json() as Record<string, unknown>,
