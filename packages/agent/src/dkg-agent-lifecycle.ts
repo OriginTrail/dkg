@@ -292,7 +292,6 @@ import {
   getSyncCheckpointKey,
   MemorySyncCheckpointStore,
   type DurableManifestDigest,
-  type SwmMetaRetentionScope,
   type SyncCheckpointScope,
 } from './sync/checkpoint/state.js';
 import {
@@ -333,7 +332,7 @@ import {
   selectSwmSnapshotCoverage,
   sharedMemoryOwnershipKeyFromGraph,
 } from './sync/requester/shared-memory-sync.js';
-import type { SwmMetaTransferMode } from './sync/swm-meta-transfer-coordinator.js';
+import type { SwmMetaTransferSession } from './sync/swm-meta-transfer-coordinator.js';
 import {
   createSwmMetaFetcher,
   type SwmMetaFetcher,
@@ -1198,8 +1197,6 @@ function normalizeSyncPageFetchOptions(
   };
 }
 
-let swmMetaInvocationSequence = 0;
-
 type SwmMetaRetentionBudget = ReturnType<
   typeof createSwmMetaRetentionBudget
 >;
@@ -1219,11 +1216,6 @@ function swmMetaRetentionBudgetFor(
   const budget = createSwmMetaRetentionBudget(limits);
   swmMetaRetentionBudgets.set(owner, { signature, budget });
   return budget;
-}
-
-function nextSwmMetaRequesterScope(mode: SwmMetaTransferMode): SwmMetaRetentionScope {
-  swmMetaInvocationSequence += 1;
-  return `${mode}-swm-meta:retained:${swmMetaInvocationSequence}`;
 }
 
 function asSyncFetchAbortError(reason: unknown): Error {
@@ -7685,8 +7677,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       maxPrefixRows: budget.maxSnapshotRows,
       maxPrefixBytesEstimate: budget.maxSnapshotBytesEstimate,
     });
-    const createMetaFetcher = (): SwmMetaFetcher => {
-      const requesterScope = nextSwmMetaRequesterScope(transferMode);
+    const createMetaFetcher = ({ requesterScope }: SwmMetaTransferSession): SwmMetaFetcher => {
       return createSwmMetaFetcher({
         remotePeerId,
         requesterScope,

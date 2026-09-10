@@ -37,7 +37,6 @@ for (const [legacy, current] of [
   [legacyMetaBudget.SelectedSwmMetaRetentionBudgetError, metaBudget.SwmMetaRetentionBudgetError],
   [legacyMetaFetcher.createSelectedSwmMetaFetcher, metaFetcher.createSwmMetaFetcher],
   [legacyMetaFetcher.SelectedSwmMetaTransferOwner, metaFetcher.SwmMetaTransferOwner],
-  [legacyMetaCoordinator.SelectedSwmMetaTransferCoordinator, metaCoordinator.SwmMetaTransferCoordinator],
 ]) {
   assert.equal(typeof legacy, 'function');
   assert.equal(legacy, current);
@@ -53,6 +52,7 @@ assert.equal(blocked.maxRows, 0);
 assert.throws(() => blocked.commitReplace(1, 64), error => (
   error instanceof legacyMetaBudget.SelectedSwmMetaRetentionBudgetError
   && error instanceof metaBudget.SwmMetaRetentionBudgetError
+  && error.name === 'SelectedSwmMetaRetentionBudgetError'
   && error.code === 'SELECTED_SWM_META_RETENTION_LIMIT'
 ));
 retained.release();
@@ -61,6 +61,7 @@ assert.equal(available.maxRows, 1);
 available.release();
 waiting.release();
 const compatibilityCoordinator = new legacyMetaCoordinator.SelectedSwmMetaTransferCoordinator();
+assert.ok(compatibilityCoordinator instanceof metaCoordinator.SwmMetaTransferCoordinator);
 const compatibilityFetcher = metaFetcher.createSwmMetaFetcher({
   remotePeerId: 'compatibility-peer', requesterScope: 'selected-swm-meta:retained:compatibility',
   retentionBudget: compatibilityBudget, deleteCheckpoint: () => {},

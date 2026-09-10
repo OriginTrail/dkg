@@ -30,7 +30,8 @@ export class SwmMetaRetentionBudgetError extends Error {
     readonly limit: number,
   ) {
     super(`SWM metadata retention ${dimension} ${actual} exceeds limit ${limit}`);
-    this.name = 'SwmMetaRetentionBudgetError';
+    // Keep the released selected API's observable error identity.
+    this.name = 'SelectedSwmMetaRetentionBudgetError';
   }
 }
 

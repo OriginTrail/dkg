@@ -4,6 +4,7 @@ import {
   SwmMetaTransferOwner,
   type SwmMetaFetcher,
 } from './swm-meta-fetcher.js';
+import type { SwmMetaRetentionScope } from './checkpoint/state.js';
 
 export type SwmMetaTransferMode = 'ordinary' | 'selected';
 
@@ -11,6 +12,13 @@ export interface SwmMetaTransferScope {
   readonly mode: SwmMetaTransferMode;
   readonly remotePeerId: string;
 }
+
+/** Allocated once for a retained owner; all identity fields share one mode. */
+export interface SwmMetaTransferSession extends SwmMetaTransferScope {
+  readonly requesterScope: SwmMetaRetentionScope;
+}
+
+let transferSequence = 0;
 
 /** Agent-owned registry and shutdown boundary for isolated metadata transfer owners. */
 export class SwmMetaTransferCoordinator {
@@ -25,12 +33,13 @@ export class SwmMetaTransferCoordinator {
   }
 
   run<T>(
-    scope: string | SwmMetaTransferScope,
-    createFetcher: () => SwmMetaFetcher,
+    scope: SwmMetaTransferScope,
+    createFetcher: (session: SwmMetaTransferSession) => SwmMetaFetcher,
     operation: (fetcher: SwmMetaFetcher) => Promise<T>,
   ): Promise<T> {
     if (this.#closed) return Promise.reject(this.#closedError());
-    const transferKey = typeof scope === 'string' ? scope : `${scope.mode}\0${scope.remotePeerId}`;
+    const { mode, remotePeerId } = scope;
+    const transferKey = `${mode}\0${remotePeerId}`;
     let owner = this.#owners.get(transferKey);
     if (!owner) {
       let registeredOwner: SwmMetaTransferOwner;
@@ -48,8 +57,11 @@ export class SwmMetaTransferCoordinator {
       owner = registeredOwner;
       this.#owners.set(transferKey, owner);
     }
-    const execute = owner.run(createFetcher, operation);
-    return execute;
+    return owner.run(() => createFetcher({
+      mode,
+      remotePeerId,
+      requesterScope: `${mode}-swm-meta:retained:${++transferSequence}`,
+    }), operation);
   }
 
   async close(): Promise<void> {
