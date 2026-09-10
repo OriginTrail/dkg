@@ -82,16 +82,22 @@ describe('formatChainResetWipeOutcome', () => {
   it.each([
     {
       status: 'completed',
+      attempted: true,
+      requiresStoreRetag: false,
       ...effects,
       failedFiles: [],
     },
     {
       status: 'incomplete',
+      attempted: true,
+      requiresStoreRetag: true,
       ...effects,
       failedFiles: [{ file: 'publish-journal.blocked', error: 'is a directory' }],
     },
     {
       status: 'marker-write-failed',
+      attempted: true,
+      requiresStoreRetag: true,
       ...effects,
       failedFiles: [],
       markerError: 'state path is a directory',
@@ -113,6 +119,8 @@ describe('formatChainResetWipeOutcome', () => {
   it('stays silent when no wipe was attempted', () => {
     expect(formatChainResetWipeOutcome({
       status: 'steady',
+      attempted: false,
+      requiresStoreRetag: false,
       prevMarker: NEW_MARKER,
       removedFiles: [],
       backedUpFiles: [],

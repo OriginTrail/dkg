@@ -1576,12 +1576,10 @@ async function runDaemonInnerWithStartupOwnership(
   for (const message of formatChainResetWipeOutcome(wipeResult, network?.chainResetMarker)) {
     log(message);
   }
-  if (wipeResult.status === 'completed' || wipeResult.status === 'incomplete' || wipeResult.status === 'marker-write-failed') {
-    // A DKG-managed external wipe uses DROP ALL, which also removes the
-    // namespace ownership tag verified above. Re-tag before continuing so
-    // this daemon never runs against an unclaimed namespace. This is required
-    // even when a local deletion or marker write failed: DROP ALL can succeed
-    // independently of those steps.
+  if (wipeResult.requiresStoreRetag) {
+    // A DKG-managed DROP ALL may have removed the namespace ownership tag.
+    // Re-tag even when cleanup or marker persistence failed: the remote
+    // request can take effect independently of those local outcomes.
     if (isExternalBackend(runtimeStore?.backend)) {
       const identity = await checkOrSetStoreIdentity({
         storeConfig: runtimeStore,

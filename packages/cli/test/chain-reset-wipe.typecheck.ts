@@ -2,12 +2,12 @@ import type { ChainResetWipeResult } from '../src/daemon/chain-reset-wipe.js';
 
 // Explicit constructions exercise every supported status and its effect data.
 const statuses: ChainResetWipeResult[] = [
-  { status: 'inactive', prevMarker: null, removedFiles: [], backedUpFiles: [], failedFiles: [] },
-  { status: 'steady', prevMarker: 'same', removedFiles: [], backedUpFiles: [], failedFiles: [] },
-  { status: 'skipped', prevMarker: 'old', removedFiles: [], backedUpFiles: [], failedFiles: [] },
-  { status: 'completed', prevMarker: 'old', removedFiles: ['sampling.wal'], backedUpFiles: [], failedFiles: [] },
-  { status: 'incomplete', prevMarker: 'old', removedFiles: [], backedUpFiles: [], failedFiles: [{ file: 'store.nq', error: 'denied' }] },
-  { status: 'marker-write-failed', prevMarker: 'old', removedFiles: ['sampling.wal'], backedUpFiles: [], failedFiles: [], markerError: 'denied' },
+  { status: 'inactive', attempted: false, requiresStoreRetag: false, prevMarker: null, removedFiles: [], backedUpFiles: [], failedFiles: [] },
+  { status: 'steady', attempted: false, requiresStoreRetag: false, prevMarker: 'same', removedFiles: [], backedUpFiles: [], failedFiles: [] },
+  { status: 'skipped', attempted: false, requiresStoreRetag: false, prevMarker: 'old', removedFiles: [], backedUpFiles: [], failedFiles: [] },
+  { status: 'completed', attempted: true, requiresStoreRetag: false, prevMarker: 'old', removedFiles: ['sampling.wal'], backedUpFiles: [], failedFiles: [] },
+  { status: 'incomplete', attempted: true, requiresStoreRetag: true, prevMarker: 'old', removedFiles: [], backedUpFiles: [], failedFiles: [{ file: 'store.nq', error: 'denied' }] },
+  { status: 'marker-write-failed', attempted: true, requiresStoreRetag: true, prevMarker: 'old', removedFiles: ['sampling.wal'], backedUpFiles: [], failedFiles: [], markerError: 'denied' },
 ];
 void statuses;
 // @ts-expect-error Conflicting boolean states are no longer representable.
