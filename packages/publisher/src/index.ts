@@ -447,3 +447,5 @@ export { AccessHandler, type AccessPolicy } from './access-handler.js';
 export { AccessClient, type AccessResult } from './access-client.js';
 export * from './share-batching.js';
 export { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
+
+export { SWM_RECORD_SCHEMAS, SWM_PREDICATES, SWM_WORKSPACE_OPERATION, SWM_HEAD_SUFFIX, emitSwmRecord, selectSwmRecordRows, swmOperationSubject, swmKnowledgeAssetHeadSubject, swmPublicSliceSubject, decodeSwmPublicSliceSubject, swmKnowledgeAssetOperationSnapshotGraph, type SwmRecordRole, type SwmRecordTerms } from './swm-metadata-schema.js';
