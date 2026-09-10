@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -16,6 +16,8 @@ import {
   createManagedOxigraphRuntimeStoreConfigV1,
 } from '@origintrail-official/dkg-storage';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
+import type { ChainResetWipeResult } from '../src/daemon/chain-reset-wipe.js';
+import type { StoreIdentityTagResult } from '../src/daemon/store-health-check.js';
 
 const PRIVATE_RFC64_CONTEXT_GRAPH =
   '0x1111111111111111111111111111111111111111/private-daemon-wiring';
@@ -355,56 +357,81 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     });
   });
 
-  it('fails closed when managed store ownership cannot be re-tagged after a wipe', async () => {
-    mocks.chainResetWipe.mockResolvedValueOnce({
-      status: 'incomplete',
-      attempted: true,
-      requiresStoreRetag: true,
-      prevMarker: 'old-chain',
-      removedFiles: ['<sparql:drop-all http://127.0.0.1:7878/update>'],
-      backedUpFiles: [],
-      failedFiles: [{ file: '<external-wipe>', error: 'response lost after DROP' }],
-    });
-    mocks.checkOrSetStoreIdentity
-      .mockResolvedValueOnce({
-        ok: true,
-        action: 'matched',
-        nodeName: 'storage-ack-timing-core-test',
-      })
-      .mockResolvedValueOnce({
-        ok: false,
-        action: 'transport-error',
-        error: 'endpoint unavailable',
-      });
-
-    await expect(runDaemonInner(true, {
-      name: 'storage-ack-timing-core-test',
-      networkConfig: 'mainnet-gnosis',
-      listenPort: 0,
-      nodeRole: 'core',
-      chain: {
-        type: 'evm',
-        rpcUrl: 'https://private-rpc.example',
-        hubAddress: '0x1234567890123456789012345678901234567890',
-        chainId: 'evm:100',
+  it.each([
+    {
+      failure: { ok: false, action: 'transport-error', error: 'endpoint unavailable after DROP' },
+      diagnostic: '[STORE-IDENTITY] failed to re-tag: endpoint unavailable after DROP',
+    },
+    {
+      failure: {
+        ok: false, action: 'mismatch', existingNodeName: 'another-node',
+        expectedNodeName: 'storage-ack-timing-core-test', error: 'ownership changed after DROP',
       },
-      store: {
-        backend: 'sparql-http',
-        options: {
-          queryEndpoint: 'http://127.0.0.1:7878/query',
-          updateEndpoint: 'http://127.0.0.1:7878/update',
-          managedByDkg: true,
-        },
-      },
-    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('process.exit:1');
+      diagnostic: '[STORE-IDENTITY] external triple-store is owned by a different node.',
+    },
+  ] satisfies Array<{ failure: StoreIdentityTagResult; diagnostic: string }>)(
+    'refuses startup after post-wipe ownership $failure.action',
+    async ({ failure, diagnostic }) => {
+      mocks.chainResetWipe.mockResolvedValueOnce({
+        status: 'incomplete',
+        attempted: true,
+        requiresStoreRetag: true,
+        prevMarker: 'old-chain',
+        removedFiles: [],
+        backedUpFiles: [],
+        failedFiles: [{ file: '<external-wipe>', error: 'response lost after DROP' }],
+      } satisfies ChainResetWipeResult);
+      mocks.checkOrSetStoreIdentity
+        .mockResolvedValueOnce({ ok: true, action: 'matched', nodeName: 'storage-ack-timing-core-test' })
+        .mockResolvedValueOnce(failure);
 
-    expect(mocks.checkOrSetStoreIdentity).toHaveBeenCalledTimes(2);
-    expect(process.exit).toHaveBeenCalledWith(1);
-    expect(mocks.agentCreate).not.toHaveBeenCalled();
-    expect(stdoutLines.join('')).toContain(
-      '[STORE-IDENTITY] failed to re-tag: endpoint unavailable',
-    );
-  });
+      try {
+        await expect(runDaemonInner(true, {
+          name: 'storage-ack-timing-core-test',
+          networkConfig: 'mainnet-gnosis',
+          listenPort: 0,
+          apiPort: 0,
+          nodeRole: 'core',
+          chain: {
+            type: 'evm', rpcUrl: 'https://private-rpc.example',
+            hubAddress: '0x1234567890123456789012345678901234567890',
+            chainId: 'evm:100',
+          },
+          store: {
+            backend: 'sparql-http',
+            options: {
+              queryEndpoint: 'http://127.0.0.1:7878/query',
+              updateEndpoint: 'http://127.0.0.1:7878/update',
+              managedByDkg: true,
+            },
+          },
+        }, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('process.exit:1');
+
+        expect(process.exit).toHaveBeenCalledExactlyOnceWith(1);
+        expect(mocks.chainResetWipe).toHaveBeenCalledTimes(1);
+        expect(mocks.checkOrSetStoreIdentity).toHaveBeenCalledTimes(2);
+        const identityOrder = mocks.checkOrSetStoreIdentity.mock.invocationCallOrder;
+        const wipeOrder = mocks.chainResetWipe.mock.invocationCallOrder[0]!;
+        expect(identityOrder[0]).toBeLessThan(wipeOrder);
+        expect(identityOrder[1]).toBeGreaterThan(wipeOrder);
+        expect(mocks.agentCreate).not.toHaveBeenCalled();
+        expect(mocks.loadOpWallets).not.toHaveBeenCalled();
+        expect(mocks.startPublisherRuntimeWithOutcome).not.toHaveBeenCalled();
+        const log = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
+        expect(log).toContain(diagnostic);
+        expect(stdoutLines.join('')).toContain(diagnostic);
+        expect(log).not.toContain('Re-tagged triple-store namespace');
+        if (failure.action === 'mismatch') {
+          expect(log).toContain(failure.existingNodeName);
+          expect(log).toContain(failure.expectedNodeName);
+        }
+        expect(process.listeners('uncaughtException')).toEqual(uncaughtExceptionListeners);
+        expect(process.listeners('unhandledRejection')).toEqual(unhandledRejectionListeners);
+      } finally {
+        closeDashboardDbFromAgentCreateArg(mocks.agentCreate.mock.calls[0]?.[0]);
+      }
+    },
+  );
 
   it('round-trips deployment-scoped selected VM cursors through the daemon DashboardDB wiring', async () => {
     const record = {
@@ -497,8 +524,9 @@ describe('runDaemonInner StorageACK timing wiring', () => {
         let agent: Awaited<ReturnType<typeof RealDKGAgent.create>> | undefined;
         try {
           agent = await RealDKGAgent.create(createArg);
-          expect(() => new SyncSharedProjectionStoreV1(agent.store)).not.toThrow();
-          expect(() => new SyncSemanticStoreV1(agent.store)).not.toThrow();
+          const store = agent.store;
+          expect(() => new SyncSharedProjectionStoreV1(store)).not.toThrow();
+          expect(() => new SyncSemanticStoreV1(store)).not.toThrow();
           expect(asChangelogReader(agent.store) !== null).toBe(changelog);
         } finally {
           await agent?.stop().catch(() => {});
@@ -757,11 +785,15 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     const realSetTimeout = globalThis.setTimeout;
     vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: Parameters<typeof setTimeout>[0], timeout?: number, ...args: any[]) => {
       const handle = realSetTimeout(handler, timeout, ...args);
-      if ((timeout ?? 0) > 0) handle.unref?.();
+      const timer: unknown = handle;
+      if ((timeout ?? 0) > 0 && typeof timer === 'object' && timer !== null
+        && 'unref' in timer && typeof timer.unref === 'function') timer.unref();
       return handle;
     }) as typeof setTimeout);
     const response = new Uint8Array([7]);
-    const sendReliable = vi.fn(async () => ({
+    const sendReliable = vi.fn<(
+      peerId: string, protocol: string, data: Uint8Array, options: { timeoutMs?: number },
+    ) => Promise<{ delivered: boolean; response?: Uint8Array; error?: unknown }>>(async () => ({
       delivered: true,
       response,
     }));
