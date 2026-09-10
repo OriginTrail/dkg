@@ -24,6 +24,7 @@ export default defineConfig({
       "test/swm-expiry-lifecycle.test.ts",
       "test/swm-expiry-fairness.test.ts",
       "test/swm-expiry-publisher-lock.test.ts",
+      "test/swm-expiry-external-store.test.ts",
       "test/swm-expiry-cleanup-worker.test.ts",
       "test/ack-candidate-pool.test.ts",
       "test/e2e-dht-dial.test.ts",

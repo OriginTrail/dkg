@@ -13,6 +13,7 @@ import {
 
 export const SWM_CLEANUP_BATCH_SIZE = 250;
 export const SWM_CLEANUP_MAX_BATCHES = 4;
+const SWM_CLEANUP_MAX_CONCURRENT_OPERATIONS = 4;
 
 export interface SwmExpiryCleanupContext {
   store: TripleStore;
@@ -213,29 +214,45 @@ async function cleanupExpiredBatch(
   cutoff: string,
   candidates: readonly ExpiredOperation[],
 ): Promise<CleanupBatchResult> {
-  const settled = await Promise.allSettled(candidates.map(candidate => withKeyedLocks(
-    context.writeLocks,
-    cleanupWriteLockKeys(target, candidate),
-    async () => {
-      // The worker also fences retention changes here: a pass selected under
-      // an older TTL must not mutate rows after that boundary is invalidated.
-      if (context.isClosed()) return undefined;
-      const [current] = await loadExpiredOperations(
-        context.store, target.metaGraph, cutoff, { kind: 'uris', uris: [candidate.uri] },
-      );
-      if (context.isClosed() || !current || !sameExpiredOperation(current, candidate)) {
-        return undefined;
-      }
-      const family = await resolveGraphFamily(context.store, target);
-      if (context.isClosed()) return undefined;
-      return cleanupExpiredOperation(context, target, family, current);
-    },
-  )));
+  // HTTP stores reserve ACK/health capacity and have bounded ordinary queues.
+  // A page is a selection bound, not permission to enqueue 250 RPC pipelines.
+  const pressure = context.store.getPressureSnapshot?.();
+  const ordinarySlots = pressure
+    ? pressure.maxConcurrent - pressure.ackReservedSlots - (pressure.healthReservedSlots ?? 0)
+    : SWM_CLEANUP_MAX_CONCURRENT_OPERATIONS;
+  const concurrency = Math.min(candidates.length, SWM_CLEANUP_MAX_CONCURRENT_OPERATIONS,
+    Math.max(1, Math.floor(ordinarySlots)));
   const batch: CleanupBatchResult = { outcomes: [], errors: [] };
-  for (const result of settled) {
-    if (result.status === 'rejected') batch.errors.push(result.reason);
-    else if (result.value) batch.outcomes.push(result.value);
-  }
+  let nextCandidate = 0;
+  // Remote counted-delete APIs measure graph-wide before/after counts. Keep
+  // those mutation sequences disjoint within the target, even for distinct
+  // entity keys. Take this gate AFTER entity/KA locks, so a blocked writer
+  // cannot monopolize the graph's cleanup mutation gate.
+  const countedMutations = new Map<string, Promise<void>>();
+  await Promise.all(Array.from({ length: concurrency }, async () => {
+    while (nextCandidate < candidates.length && !context.isClosed()) {
+      const candidate = candidates[nextCandidate++]!;
+      try {
+        const outcome = await withKeyedLocks(context.writeLocks, cleanupWriteLockKeys(target, candidate), async () => {
+          if (context.isClosed()) return undefined;
+          const [current] = await loadExpiredOperations(
+            context.store, target.metaGraph, cutoff, { kind: 'uris', uris: [candidate.uri] },
+          );
+          if (context.isClosed() || !current || !sameExpiredOperation(current, candidate)) return undefined;
+          const family = await resolveGraphFamily(context.store, target);
+          return withKeyedLocks(countedMutations, [target.metaGraph], async () => {
+            // Retention or shutdown can invalidate the pass while this worker
+            // waits for the preceding counted mutation to drain.
+            if (context.isClosed()) return undefined;
+            return cleanupExpiredOperation(context, target, family, current);
+          });
+        });
+        if (outcome) batch.outcomes.push(outcome);
+      } catch (error) {
+        batch.errors.push(error);
+      }
+    }
+  }));
   return batch;
 }
 

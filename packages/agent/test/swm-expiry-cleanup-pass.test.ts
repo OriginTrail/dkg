@@ -270,7 +270,7 @@ it.each([undefined, 'research'])('evicts only expired ownership in graph family 
 });
 
 
-it.each([false, true])('waits for successful parallel deletions after a sibling fails (shutdown=%s)', async shutdown => {
+it.each([false, true])('waits for an admitted deletion after a sibling revalidation fails (shutdown=%s)', async shutdown => {
   const agent = await DKGAgent.create({ name: 'expiry-parallel-failure', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 60_000 });
   trackSwmExpiryAgent(agent);
   await agent.start();
@@ -282,23 +282,26 @@ it.each([false, true])('waits for successful parallel deletions after a sibling 
     { subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation', graph: META },
     { subject, predicate: 'http://dkg.io/ontology/publishedAt', object: '"2020-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>', graph: META },
   ]));
-  let entered!: () => void, failed!: () => void, release!: () => void;
-  const slowEntered = new Promise<void>(resolve => { entered = resolve; });
-  const failureObserved = new Promise<void>(resolve => { failed = resolve; });
+  let release!: () => void;
+  let slowEntered = false;
+  let failureObserved = false;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const remove = store.deleteByPattern.bind(store);
   let failOnce = true;
   let siblingFinished = false;
   vi.spyOn(store, 'deleteByPattern').mockImplementation(async pattern => {
-    if (pattern.subject === failedOp && failOnce) {
-      failOnce = false; failed(); throw new Error('injected parallel deletion failure');
-    }
-    if (pattern.subject === slowOp) { entered(); await gate; }
+    if (pattern.subject === slowOp) { slowEntered = true; await gate; }
     const deleted = await remove(pattern);
     if (pattern.subject === slowOp) siblingFinished = true;
     return deleted;
   });
-  const query = vi.spyOn(store, 'query');
+  const read = store.query.bind(store);
+  const query = vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+    if (failOnce && options?.source === 'agent.swmCleanup.revalidateOperation' && sparql.includes(`<${failedOp}>`)) {
+      failOnce = false; failureObserved = true; throw new Error('injected sibling revalidation failure');
+    }
+    return read(sparql, options);
+  });
   const warning = vi.spyOn(log, 'warn').mockImplementation(() => undefined);
   const close = store.close.bind(store);
   let closedBeforeSibling = false;
@@ -308,14 +311,18 @@ it.each([false, true])('waits for successful parallel deletions after a sibling 
   });
   // Keep the same cutoff for the joining call: it must join this physical pass.
   vi.useFakeTimers({ toFake: ['Date'] });
+  const cutoffNow = Date.now();
   let completed = false;
   const cleanup = agent.cleanupExpiredSharedMemory().then(value => { completed = true; return value; });
-  await Promise.all([slowEntered, failureObserved]);
-  await new Promise(resolve => setImmediate(resolve));
-  const joined = agent.cleanupExpiredSharedMemory();
+  let joined: Promise<number> | undefined;
+  let stop: Promise<void> | undefined;
   let stopped = false;
-  const stop = shutdown ? agent.stop().then(() => { stopped = true; }) : undefined;
   try {
+    await vi.waitFor(() => { expect(slowEntered).toBe(true); expect(failureObserved).toBe(true); });
+    // waitFor advances Vitest's fake clock; this call is joining the original cutoff.
+    vi.setSystemTime(cutoffNow);
+    joined = agent.cleanupExpiredSharedMemory();
+    stop = shutdown ? agent.stop().then(() => { stopped = true; }) : undefined;
     await new Promise(resolve => setTimeout(resolve, 50));
     expect(completed).toBe(false);
     expect(stopped).toBe(false);
@@ -327,7 +334,7 @@ it.each([false, true])('waits for successful parallel deletions after a sibling 
   }
   expect(await cleanup).toBe(2);
   expect(await joined).toBe(2);
-  expect(warning).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('injected parallel deletion failure'));
+  expect(warning).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('injected sibling revalidation failure'));
   if (shutdown) {
     expect(closed).toHaveBeenCalledOnce();
     expect(closedBeforeSibling).toBe(false);
