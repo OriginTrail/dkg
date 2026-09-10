@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { storeWorkspaceOperationPublicQuads } from '../src/workspace-resolution.js';
-import { decodeSwmPublicSliceSubject, selectSwmRecordRows } from '../src/swm-metadata-schema.js';
+import { decodeSwmPublicSliceSubject, selectSwmRecordRows, emitSwmOwnership } from '../src/swm-metadata-schema.js';
 
 describe('public slice identity admission', () => {
   it.each([undefined, 'public-data'])('decodes persisted producer identities in scope %s', async (subGraphName) => {
@@ -75,5 +75,13 @@ describe('SWM role projection', () => {
     ];
     expect(selectSwmRecordRows('legacyOperationV1', rows)).toEqual([root, operationType, legacyMember, root]);
     expect(rows).toHaveLength(7);
+  });
+});
+
+describe('current SWM writer boundary', () => {
+  it('rejects historical-only fields from untyped callers', () => {
+    expect(() => Reflect.apply(emitSwmOwnership, undefined, [
+      'urn:root', 'urn:meta', { workspaceOwner: '"peer"', wasAttributedTo: '"legacy"' },
+    ])).toThrow('Unknown ownershipV1 field: wasAttributedTo');
   });
 });
