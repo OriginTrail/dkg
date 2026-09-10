@@ -51,6 +51,7 @@ import {
 import {
   sharedMemoryCompletionFields,
   type SharedMemoryCompletionFields,
+  type SharedMemoryWorkOutcome,
 } from '../shared-memory-completion.js';
 
 const MAX_UNFINISHED_SYNC_RESPONDER_SESSIONS = 4096;
@@ -217,6 +218,18 @@ function acceptedIncompletePrefixResult(
     ...result,
     ...sharedMemoryCompletionFields('timed-out'),
   };
+}
+
+type SyncAdmissionTerminalOutcome = Extract<
+  SharedMemoryWorkOutcome,
+  'timed-out' | 'local-budget-yield'
+>;
+
+function syncAdmissionTerminalOutcome(
+  error: unknown,
+): SyncAdmissionTerminalOutcome | undefined {
+  if (!(error instanceof SyncWorkAdmissionExhaustedError)) return undefined;
+  return error.outcome === 'timed_out' ? 'timed-out' : 'local-budget-yield';
 }
 
 /** Canonical transport path identity for learned requester page sizing. */
@@ -766,7 +779,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
   let bytesReceived = 0;
   let acceptedHeapBytesEstimate = 0;
   let responsePages = 0;
-  let timedOut = false;
+  let admissionOutcome: SyncAdmissionTerminalOutcome | undefined;
   let yielded = false;
   // Start an unknown peer/path at the conservative initial page size, then
   // grow toward the throughput ceiling only after sustained success. Reduce
@@ -823,7 +836,8 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     // Leave part of this round for a fresh request after a stalled attempt.
     // Recompute after authentication on every retry; transport admission then
     // applies the remaining monotonic private-job allowance.
-    timeoutMs: (remainingAttempts) => Math.min(
+    timeoutMs: syncPageTimeoutMs,
+    attemptTimeoutMs: ({ remainingAttempts }) => Math.min(
       syncPageTimeoutMs,
       Math.max(1, Math.floor(Math.max(0, params.deadline - Date.now()) / remainingAttempts)),
     ),
@@ -863,7 +877,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     onRetry,
   });
 
-  fetchPages: try {
+  try {
     if (
       responderSessionNeedsPriming
       && responderSession
@@ -1065,27 +1079,14 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
       if (!usesByteBudgetPagination && parsed.totalQuads < successfulPageSize) break;
     }
   } catch (err) {
-    if (err instanceof SyncWorkAdmissionExhaustedError) {
+    const terminalOutcome = syncAdmissionTerminalOutcome(err);
+    if (terminalOutcome !== undefined) {
       if (signal?.aborted) {
         phaseTelemetry.finish('error', allQuads.length);
         throw asAbortError(signal.reason);
       }
-      if (err.outcome === 'timed_out') {
-        timedOut = true;
-        break fetchPages;
-      } else {
-        deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
-        phaseTelemetry.finish('local_yield', allQuads.length);
-        return {
-          quads: allQuads,
-          ...(hasCompleteQuadRawOffsetMapping ? { quadRawOffsets: allQuadRawOffsets } : {}),
-          bytesReceived, resumedFromOffset, rawResumedFromOffset, responderSessionStartedFresh,
-          ...(manifestDigest ? { manifestDigest } : {}),
-          nextOffset: offset, rawNextOffset: offset, checkpointKey,
-          ...sharedMemoryCompletionFields('local-budget-yield'),
-        };
-      }
-    }
+      admissionOutcome = terminalOutcome;
+    } else {
     // The transport retry helper has no onRetry callback after its terminal
     // attempt. Persist one final backoff step so the next bounded continuation
     // does not repeat the same known-failing page size from scratch.
@@ -1277,9 +1278,12 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
 
     phaseTelemetry.finish('error', allQuads.length);
     throw err;
+    }
   }
 
-  if (usesPageSession && responderSession) {
+  if (admissionOutcome === 'local-budget-yield') {
+    deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
+  } else if (usesPageSession && responderSession) {
     // R10 recovery has its own responder-session scope and MUST rebuild the
     // COMPLETE state from offset 0 on every (re)try (see swm-recovery
     // `fetchPhaseFully`, which deletes the checkpoint on a partial abandon). It
@@ -1315,7 +1319,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     }
   }
 
-  if (timedOut) {
+  if (admissionOutcome === 'timed-out') {
     const scope = includeSharedMemory ? 'shared-memory' : 'durable';
     logWarn(
       ctx,
@@ -1323,7 +1327,14 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     );
   }
 
-  phaseTelemetry.finish(timedOut ? 'timed_out' : 'completed', allQuads.length);
+  phaseTelemetry.finish(
+    admissionOutcome === 'timed-out'
+      ? 'timed_out'
+      : admissionOutcome === 'local-budget-yield'
+        ? 'local_yield'
+        : 'completed',
+    allQuads.length,
+  );
 
   return {
     quads: allQuads,
@@ -1339,7 +1350,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     rawNextOffset: offset,
     checkpointKey,
     ...sharedMemoryCompletionFields(
-      timedOut ? 'timed-out' : yielded ? 'incomplete' : 'completed',
+      admissionOutcome ?? (yielded ? 'incomplete' : 'completed'),
     ),
   };
 }

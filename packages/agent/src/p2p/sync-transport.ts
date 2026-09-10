@@ -1,6 +1,11 @@
 import { assertSyncWorkAdmission, SyncWorkAdmissionExhaustedError, UNRESTRICTED_SYNC_WORK, type SyncWorkAdmission } from '../sync/work-admission.js';
 import { randomUUID } from 'node:crypto';
-import { withRetry, withSpan, getMetrics } from '@origintrail-official/dkg-core';
+import {
+  withRetry,
+  withSpan,
+  getMetrics,
+  type RetryAttemptContext,
+} from '@origintrail-official/dkg-core';
 import {
   toSyncLocalRequestFailureError,
   toSyncTransportFailureError,
@@ -94,7 +99,13 @@ interface SyncSendParams {
   /** Legacy callers of this published helper may omit scoped work admission. */
   readonly workAdmission?: SyncWorkAdmission;
   remotePeerId: string;
+  /**
+   * Legacy fixed/resolver timeout. New retry-aware callers should use
+   * `attemptTimeoutMs`, whose input comes directly from the retry engine.
+   */
   timeoutMs: number | ((remainingAttempts: number) => number);
+  /** Explicit per-attempt timeout policy driven by canonical retry state. */
+  attemptTimeoutMs?: (attempt: RetryAttemptContext) => number;
   retryAttempts: number;
   signal?: AbortSignal;
   contextGraphId: string;
@@ -138,9 +149,8 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
     'sync.request',
     async () => {
       try {
-        let remainingAttempts = params.retryAttempts;
         const out = await withRetry(
-    async () => {
+    async (attempt) => {
       // Resolved once per attempt so all three W1 points describe the same
       // send, and so the ambient source is read once rather than three times.
       const attributes = syncAttemptAttributes({
@@ -170,9 +180,10 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
           throw toSyncLocalRequestFailureError(error);
         }
         throwIfAborted(params.signal);
-        const requestedTimeoutMs = typeof params.timeoutMs === 'function'
-          ? params.timeoutMs(remainingAttempts)
-          : params.timeoutMs;
+        const requestedTimeoutMs = params.attemptTimeoutMs?.(attempt)
+          ?? (typeof params.timeoutMs === 'function'
+            ? params.timeoutMs(attempt.remainingAttempts)
+            : params.timeoutMs);
         const timeoutMs = workAdmission.admitTimeout(requestedTimeoutMs);
         const messageId = randomUUID();
         let responseBytes: Uint8Array;
@@ -222,7 +233,6 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
         }
         throw error;
       } finally {
-        remainingAttempts -= 1;
         // I1 is finalized HERE, in the surrounding per-attempt `finally`, after
         // validation and cancellation classification. An outcome fixed at send
         // resolution could never later become `validation_rejected`.

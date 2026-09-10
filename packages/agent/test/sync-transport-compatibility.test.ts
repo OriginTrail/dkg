@@ -15,6 +15,27 @@ function legacyParams(send: SingleUseSyncSender): Omit<Parameters<typeof sendSyn
 }
 
 describe('published sync transport compatibility', () => {
+  it('drives the explicit timeout policy from retry-engine attempt state', async () => {
+    const send = vi.fn<SingleUseSyncSender>(async () => response);
+    const legacyTimeout = vi.fn(() => 9_999);
+    const attemptTimeoutMs = vi.fn(() => 321);
+    await expect(sendSyncRequest({
+      ...legacyParams(send),
+      timeoutMs: legacyTimeout,
+      attemptTimeoutMs,
+    })).resolves.toEqual(response);
+
+    expect(attemptTimeoutMs).toHaveBeenCalledExactlyOnceWith({
+      attempt: 1,
+      maxAttempts: 1,
+      remainingAttempts: 1,
+    });
+    expect(legacyTimeout).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledExactlyOnceWith(
+      'legacy-peer', '/dkg/test/sync', request, 321, expect.any(String), undefined,
+    );
+  });
+
   it.each(['number', 'resolver'] as const)('accepts the pre-admission parameter shape with a %s timeout', kind => {
     const send = vi.fn<SingleUseSyncSender>(async () => response);
     const timeoutResolver = vi.fn((remainingAttempts: number) => 1500 + remainingAttempts);

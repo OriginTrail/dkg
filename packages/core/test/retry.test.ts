@@ -2,6 +2,26 @@ import { describe, it, expect, vi } from 'vitest';
 import { withRetry } from '../src/retry.js';
 
 describe('withRetry', () => {
+  it('supplies one canonical attempt context to every invocation', async () => {
+    const attempts: unknown[] = [];
+    await withRetry(async (attempt) => {
+      attempts.push(attempt);
+      if (attempt.attempt < attempt.maxAttempts) throw new Error('retry');
+      return 'ok';
+    }, {
+      maxAttempts: 3,
+      baseDelayMs: 0,
+      jitter: 0,
+    });
+
+    expect(attempts).toEqual([
+      { attempt: 1, maxAttempts: 3, remainingAttempts: 3 },
+      { attempt: 2, maxAttempts: 3, remainingAttempts: 2 },
+      { attempt: 3, maxAttempts: 3, remainingAttempts: 1 },
+    ]);
+    expect(attempts.every(Object.isFrozen)).toBe(true);
+  });
+
   it('returns on first success', async () => {
     let calls = 0;
     const fn = async () => { calls++; return 'ok'; };

@@ -15,6 +15,15 @@ export interface RetryOptions {
   signal?: AbortSignal;
 }
 
+/** Canonical attempt state supplied by the retry engine to each invocation. */
+export interface RetryAttemptContext {
+  /** One-based attempt number. */
+  readonly attempt: number;
+  readonly maxAttempts: number;
+  /** Attempts available including the current invocation. */
+  readonly remainingAttempts: number;
+}
+
 const DEFAULTS: Required<Omit<
   RetryOptions,
   'isRetryable' | 'onRetry' | 'signal'
@@ -31,7 +40,7 @@ const DEFAULTS: Required<Omit<
  * delay = min(baseDelay * 2^attempt + jitter, maxDelay)
  */
 export async function withRetry<T>(
-  fn: () => Promise<T>,
+  fn: (attempt: RetryAttemptContext) => Promise<T>,
   opts: RetryOptions = {},
 ): Promise<T> {
   const maxAttempts = opts.maxAttempts ?? DEFAULTS.maxAttempts;
@@ -47,7 +56,11 @@ export async function withRetry<T>(
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     throwIfAborted(signal);
     try {
-      return await fn();
+      return await fn(Object.freeze({
+        attempt: attempt + 1,
+        maxAttempts,
+        remainingAttempts: maxAttempts - attempt,
+      }));
     } catch (err) {
       lastErr = err;
 
