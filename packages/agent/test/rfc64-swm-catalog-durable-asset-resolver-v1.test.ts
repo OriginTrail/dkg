@@ -18,8 +18,10 @@ import {
 import {
   computeFlatKCRootV10,
   generateGraphKnowledgeAssetMetadata,
+  storeKnowledgeAssetOperationPublicQuads,
+  storeKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -55,6 +57,50 @@ beforeEach(async () => {
 });
 
 describe('RFC-64 durable SWM inventory catalog asset resolver', () => {
+  it('accepts an inventory operation id retained as an equivalent head alias', async () => {
+    const graphManager = new GraphManager(store);
+    const selectedAlias = 'newer-storage-ack-alias';
+    for (const [shareOperationId, timestamp] of [
+      [row.shareOperationId, new Date('2026-09-01T00:00:00.000Z')],
+      [selectedAlias, new Date('2026-09-01T00:00:01.000Z')],
+    ] as const) {
+      await storeKnowledgeAssetOperationPublicQuads({
+        store,
+        graphManager,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        shareOperationId,
+        kaUal: seal.kaUal,
+        assertionVersion: seal.assertionVersion,
+        quads: PROJECTION_QUADS,
+        privateTripleCount: 0,
+        publisherPeerId: 'rfc64-finalized-catalog-test',
+        accessPolicy: 'public',
+        agentAddress: AUTHOR,
+        timestamp,
+      });
+    }
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId: row.shareOperationId,
+      kaUal: seal.kaUal,
+      assertionVersion: seal.assertionVersion,
+    });
+    await store.insert([{
+      subject: `${seal.kaUal}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: JSON.stringify(selectedAlias),
+      graph: graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH_ID),
+    }]);
+
+    await expect(resolve('public')).resolves.toMatchObject({
+      assertionCoordinate: ASSERTION_COORDINATE,
+      projectionBytes: PROJECTION_BYTES,
+      seal,
+    });
+  });
+
   it('uses an exact finalized VM projection for a retained private row without an SWM head', async () => {
     await seedVmProjection(store, seal, PROJECTION_QUADS);
 

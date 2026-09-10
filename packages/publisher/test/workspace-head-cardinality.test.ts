@@ -176,6 +176,29 @@ describe('workspace operation semantic model', () => {
       shareOperationIds: ['originator', 'storage-ack'],
     });
   });
+
+  it('uses the finite recovery identity profile without open-ended extensions', () => {
+    const recoveryIdentity = {
+      contextGraphId: 'cg',
+      contentScopeVersion: '2',
+      kaUal: UAL,
+      assertionVersion: '1',
+      subGraphName: 'wing-a',
+      authorIdentities: ['did:example:author'],
+    } as const;
+    const key = workspaceOperationSemanticsKey({ ...semantics, recoveryIdentity });
+    for (const field of ['contextGraphId', 'contentScopeVersion', 'kaUal',
+      'assertionVersion', 'subGraphName'] as const) {
+      expect(workspaceOperationSemanticsKey({
+        ...semantics,
+        recoveryIdentity: { ...recoveryIdentity, [field]: `${recoveryIdentity[field]}-other` },
+      })).not.toBe(key);
+    }
+    expect(workspaceOperationSemanticsKey({
+      ...semantics,
+      recoveryIdentity: { ...recoveryIdentity, authorIdentities: ['did:example:other'] },
+    })).not.toBe(key);
+  });
 });
 
 describe('isKnowledgeAssetWorkspaceHeadCorruptError boundary predicate', () => {
@@ -295,6 +318,32 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
 
   it.each([
     {
+      label: 'public for a public-only assertion',
+      local: {},
+      remote: { accessPolicy: 'public' as const },
+    },
+    {
+      label: 'ownerOnly for a private assertion',
+      local: { privateTripleCount: 1, privateMerkleRoot: new Uint8Array(32).fill(1) },
+      remote: {
+        privateTripleCount: 1,
+        privateMerkleRoot: new Uint8Array(32).fill(1),
+        accessPolicy: 'ownerOnly' as const,
+      },
+    },
+  ])('treats an omitted policy as effective $label', async ({ local, remote }) => {
+    const h = makeHarness();
+    await seedHealthyHead(h, local);
+    await seedOperation(h, REMOTE_OP, remote);
+    await unionInsertSecondHeadId(h);
+    await expect(resolveHead(h)).resolves.toMatchObject({
+      shareOperationId: REMOTE_OP,
+      shareOperationIds: [LOCAL_OP, REMOTE_OP],
+    });
+  });
+
+  it.each([
+    {
       field: 'public content digest',
       local: {},
       remote: { quads: CONTENT.map((quad, index) => index === 0 ? { ...quad, object: '"changed"' } : quad) },
@@ -310,6 +359,7 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
       local: { accessPolicy: 'allowList', allowedPeers: ['peer-a'] },
       remote: { accessPolicy: 'allowList', allowedPeers: ['peer-b'] },
     },
+    { field: 'effective access policy', local: {}, remote: { accessPolicy: 'ownerOnly' } },
   ] satisfies ReadonlyArray<{
     field: string;
     local: SeedOperationOverrides;

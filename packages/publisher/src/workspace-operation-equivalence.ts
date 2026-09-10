@@ -9,8 +9,18 @@ export interface WorkspaceOperationSemantics {
   readonly publisherIdentity?: string;
   readonly accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
   readonly allowedPeers: readonly string[];
-  /** Feature-owned semantic fields that are not part of the base publisher shape. */
-  readonly extensions?: Readonly<Record<string, string | readonly string[] | undefined>>;
+  /** Recovery-only identity facts, absent from publisher-local head selection. */
+  readonly recoveryIdentity?: WorkspaceOperationRecoveryIdentity;
+}
+
+/** Finite recovery profile shared by decoded and cross-store comparisons. */
+export interface WorkspaceOperationRecoveryIdentity {
+  readonly contextGraphId: string;
+  readonly contentScopeVersion: string;
+  readonly kaUal: string;
+  readonly assertionVersion: string;
+  readonly subGraphName?: string;
+  readonly authorIdentities: readonly string[];
 }
 
 /** Persistence facts that may legitimately differ between equivalent aliases. */
@@ -26,21 +36,6 @@ export interface WorkspaceOperationModel {
 
 export type WorkspaceOperationEquivalenceMode = 'decoded' | 'cross-store';
 
-function canonicalRecord(
-  input: Readonly<Record<string, unknown>>,
-): Readonly<Record<string, unknown>> {
-  return Object.fromEntries(Object.entries(input)
-    .filter(([, value]) => value !== undefined)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, value]) => {
-      if (Array.isArray(value)) return [key, [...new Set(value)].sort()];
-      if (value !== null && typeof value === 'object') {
-        return [key, canonicalRecord(value as Readonly<Record<string, unknown>>)]
-      }
-      return [key, value];
-    }));
-}
-
 /**
  * The canonical equality boundary for workspace-operation aliases. Provenance
  * is deliberately absent. Both modes share the same semantic field list;
@@ -51,20 +46,36 @@ export function workspaceOperationSemanticsKey(
   semantics: WorkspaceOperationSemantics,
   mode: WorkspaceOperationEquivalenceMode = 'decoded',
 ): string {
-  const normalized: WorkspaceOperationSemantics = {
-    ...semantics,
+  const normalizeSet = (values: readonly string[]) => [...new Set(values)].sort();
+  const normalized = {
     publicQuadsDigest: mode === 'cross-store'
       ? semantics.publicQuadsDigest.trim().toLowerCase()
       : semantics.publicQuadsDigest,
+    publicTripleCount: semantics.publicTripleCount,
     ...(semantics.privateMerkleRoot === undefined
       ? {}
       : { privateMerkleRoot: semantics.privateMerkleRoot.toLowerCase() }),
+    privateTripleCount: semantics.privateTripleCount,
     ...(semantics.publisherIdentity === undefined
       ? {}
       : { publisherIdentity: semantics.publisherIdentity.trim() }),
-    allowedPeers: [...new Set(semantics.allowedPeers.map((peer) => peer.trim()))].sort(),
+    accessPolicy: semantics.accessPolicy
+      ?? (semantics.privateTripleCount > 0 ? 'ownerOnly' : 'public'),
+    allowedPeers: normalizeSet(semantics.allowedPeers.map((peer) => peer.trim())),
+    ...(semantics.recoveryIdentity === undefined ? {} : {
+      recoveryIdentity: {
+        contextGraphId: semantics.recoveryIdentity.contextGraphId,
+        contentScopeVersion: semantics.recoveryIdentity.contentScopeVersion,
+        kaUal: semantics.recoveryIdentity.kaUal,
+        assertionVersion: semantics.recoveryIdentity.assertionVersion,
+        ...(semantics.recoveryIdentity.subGraphName === undefined
+          ? {}
+          : { subGraphName: semantics.recoveryIdentity.subGraphName }),
+        authorIdentities: normalizeSet(semantics.recoveryIdentity.authorIdentities),
+      },
+    }),
   };
-  return JSON.stringify(canonicalRecord(normalized as unknown as Readonly<Record<string, unknown>>));
+  return JSON.stringify(normalized);
 }
 
 /** Validate one equivalence class and select its deterministic display alias. */

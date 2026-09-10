@@ -6,8 +6,10 @@ import {
   validateSubGraphName,
 } from '@origintrail-official/dkg-core';
 import {
+  selectEquivalentWorkspaceOperation,
   workspaceOperationSemanticsKey,
   workspacePublicQuadsDigest,
+  type WorkspaceOperationModel,
   type WorkspaceOperationSemantics,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
@@ -449,7 +451,7 @@ export function operationIdentityKey(rows: readonly Quad[]): string | null {
     privateTripleCount,
     accessPolicy: effectivePolicy as 'public' | 'ownerOnly' | 'allowList',
     allowedPeers: values(ALLOWED_PEER).map((value) => stripLiteral(value).trim()),
-    extensions: {
+    recoveryIdentity: {
       contextGraphId: normalizeIdentityObject(required[CONTEXT_GRAPH_ID]!),
       contentScopeVersion: normalizeIdentityObject(required[CONTENT_SCOPE_VERSION]!),
       kaUal: normalizeIdentityObject(required[KA_UAL]!),
@@ -457,7 +459,7 @@ export function operationIdentityKey(rows: readonly Quad[]): string | null {
       ...(subGraphName === undefined
         ? {}
         : { subGraphName: normalizeIdentityObject(subGraphName) }),
-      ...(attributedTo.length === 0 ? {} : { attributedTo }),
+      authorIdentities: attributedTo,
     },
   }, 'cross-store');
 }
@@ -466,40 +468,6 @@ interface ResolvedHeadOperation {
   readonly shareOperationId: string;
   readonly operationSubject: string;
   readonly operationRows: readonly Quad[];
-}
-
-function decodedOperationSemantics(
-  rows: readonly Quad[],
-): WorkspaceOperationSemantics {
-  const publicTripleCount = requireSafeInteger(rows, PUBLIC_QUADS_COUNT, 'publicQuadsCount');
-  const privateTripleCount = requireSafeInteger(rows, PRIVATE_TRIPLE_COUNT, 'privateTripleCount');
-  const privateMerkleRoot = optionalLiteral(rows, PRIVATE_MERKLE_ROOT, 'privateMerkleRoot');
-  const accessPolicy = optionalLiteral(rows, ACCESS_POLICY, 'accessPolicy') as
-    | 'public' | 'ownerOnly' | 'allowList' | undefined;
-  return {
-    publicQuadsDigest: requireLiteral(rows, PUBLIC_QUADS_DIGEST, 'publicQuadsDigest'),
-    publicTripleCount,
-    ...(privateMerkleRoot === undefined ? {} : { privateMerkleRoot }),
-    privateTripleCount,
-    publisherIdentity: requireLiteral(rows, PUBLISHER_PEER_ID, 'publisherPeerId'),
-    ...(accessPolicy === undefined ? {} : { accessPolicy }),
-    allowedPeers: distinctObjects(rows, ALLOWED_PEER).map(stripLiteral),
-    extensions: {
-      contextGraphId: requireLiteral(rows, CONTEXT_GRAPH_ID, 'contextGraphId'),
-      contentScopeVersion: requireLiteral(rows, CONTENT_SCOPE_VERSION, 'contentScopeVersion'),
-      kaUal: requireSingle(rows, KA_UAL, 'kaUal'),
-      assertionVersion: requireLiteral(rows, ASSERTION_VERSION, 'assertionVersion'),
-      ...(() => {
-        const subGraphName = optionalLiteral(rows, SUB_GRAPH_NAME, 'subGraphName');
-        return subGraphName === undefined ? {} : { subGraphName };
-      })(),
-      ...(() => {
-        const authorIdentities = distinctObjects(rows, PROV_WAS_ATTRIBUTED_TO)
-          .map(normalizeIdentityObject);
-        return authorIdentities.length === 0 ? {} : { authorIdentities };
-      })(),
-    },
-  };
 }
 
 /**
@@ -536,7 +504,7 @@ function resolveEquivalentHeadOperation(params: {
     const operationRows = params.byGraphAndSubject.get(
       `${params.metaGraph}\u0000${operationSubject}`,
     ) ?? [];
-    validateOperationRows({
+    const semantics = validateOperationRows({
       rows: operationRows,
       contextGraphId: params.contextGraphId,
       metaGraph: params.metaGraph,
@@ -551,10 +519,6 @@ function resolveEquivalentHeadOperation(params: {
     if (!Number.isFinite(publishedAtMs)) {
       throw new Error(`Graph-scoped SWM operation ${operationSubject} has an invalid publishedAt`);
     }
-    const semanticKey = workspaceOperationSemanticsKey(
-      decodedOperationSemantics(operationRows),
-      'decoded',
-    );
     const headShareOperationRow = params.headRows
       .filter((row) => row.predicate === SHARE_OPERATION_ID)
       .find((row) => stripLiteral(row.object).trim() === shareOperationId);
@@ -562,21 +526,24 @@ function resolveEquivalentHeadOperation(params: {
       throw new Error(`Graph-scoped SWM head ${params.headSubject} is missing shareOperationId`);
     }
     return {
-      shareOperationId,
+      semantics,
+      provenance: { shareOperationId, publishedAtMs },
       operationSubject,
       operationRows,
-      publishedAtMs,
-      semanticKey,
+    } satisfies WorkspaceOperationModel & {
+      readonly operationSubject: string;
+      readonly operationRows: readonly Quad[];
     };
   });
 
-  if (new Set(candidates.map((candidate) => candidate.semanticKey)).size > 1) {
-    throw new Error(`ambiguous shareOperationId`);
-  }
-  candidates.sort((left, right) =>
-    right.publishedAtMs - left.publishedAtMs
-    || right.shareOperationId.localeCompare(left.shareOperationId));
-  return candidates[0]!;
+  const { selected } = selectEquivalentWorkspaceOperation(candidates, {
+    ambiguityError: () => new Error('ambiguous shareOperationId'),
+  });
+  return {
+    shareOperationId: selected.provenance.shareOperationId,
+    operationSubject: selected.operationSubject,
+    operationRows: selected.operationRows,
+  };
 }
 
 /** Load and re-verify one immutable snapshot, then stamp its exact SWM graph. */
@@ -627,7 +594,7 @@ function validateOperationRows(params: {
   kaUal: string;
   assertionVersion: string;
   subGraphName?: string;
-}): void {
+}): WorkspaceOperationSemantics {
   const rows = params.rows;
   if (rows.length === 0) {
     throw new Error(`Graph-scoped SWM head references missing operation ${params.operationSubject}`);
@@ -671,6 +638,39 @@ function validateOperationRows(params: {
       throw new Error(`Graph-scoped SWM operation ${params.operationSubject} is not graph-local`);
     }
   }
+  const publicTripleCount = requireSafeInteger(rows, PUBLIC_QUADS_COUNT, 'publicQuadsCount');
+  const privateTripleCount = requireSafeInteger(rows, PRIVATE_TRIPLE_COUNT, 'privateTripleCount');
+  const privateMerkleRoot = optionalLiteral(rows, PRIVATE_MERKLE_ROOT, 'privateMerkleRoot');
+  const publisherIdentity = requireLiteral(rows, PUBLISHER_PEER_ID, 'publisherPeerId');
+  if (publicTripleCount < 0 || privateTripleCount < 0 || !publisherIdentity) {
+    throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has invalid commitment metadata`);
+  }
+  if (
+    (privateTripleCount > 0 && !/^0x[0-9a-f]{64}$/i.test(privateMerkleRoot ?? ''))
+    || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
+  ) {
+    throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has an invalid private commitment`);
+  }
+  return {
+    publicQuadsDigest: requireLiteral(rows, PUBLIC_QUADS_DIGEST, 'publicQuadsDigest'),
+    publicTripleCount,
+    ...(privateMerkleRoot === undefined ? {} : { privateMerkleRoot }),
+    privateTripleCount,
+    publisherIdentity,
+    ...(accessPolicy === undefined
+      ? {}
+      : { accessPolicy: accessPolicy as 'public' | 'ownerOnly' | 'allowList' }),
+    allowedPeers,
+    recoveryIdentity: {
+      contextGraphId: params.contextGraphId,
+      contentScopeVersion: requireLiteral(rows, CONTENT_SCOPE_VERSION, 'contentScopeVersion'),
+      kaUal: params.kaUal,
+      assertionVersion: params.assertionVersion,
+      ...(operationSubGraph === undefined ? {} : { subGraphName: operationSubGraph }),
+      authorIdentities: distinctObjects(rows, PROV_WAS_ATTRIBUTED_TO)
+        .map(normalizeIdentityObject),
+    },
+  };
 }
 
 function allowedWorkspaceMetaGraphs(
