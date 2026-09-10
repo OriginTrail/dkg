@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore, quadsToNQuads, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
-import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import type { DKGAgent } from '../src/index.js';
 import type { ContextGraphSub, DKGAgentConfig, VmReconcileRotationRecord } from '../src/dkg-agent-types.js';
@@ -11,6 +10,9 @@ import type { SyncVerifyWorker } from '../src/sync-verify-worker.js';
 import { getSyncBackpressureSnapshot, resolveSyncGlobalBackpressure } from '../src/sync/backpressure.js';
 import { createUalOnlyExactAssetSelection, requireExactAssetSelection } from '../src/sync/exact-assets.js';
 import { createVmRecoveryHostHarness, type VmRecoveryHostInternals } from './_helpers/vm-recovery-host.js';
+import {
+  applyVmRecoveryInvalidation, VM_RECOVERY_INVALIDATIONS,
+} from './_helpers/vm-recovery-invalidation.js';
 
 interface PhysicalHost extends VmRecoveryHostInternals {
   config: DKGAgentConfig;
@@ -76,7 +78,7 @@ async function physicalHarness(localCgId: string, targetCount = 1) {
 }
 
 describe('VM slot cancellation through the physical exact requester', () => {
-  it.each(['unsubscribe', 'rebind', 'fingerprint', 'eviction', 'shutdown'] as const)(
+  it.each(VM_RECOVERY_INVALIDATIONS)(
     '%s aborts a real page request and returns global capacity without another send',
     async invalidation => {
       const localCgId = `physical-${invalidation}`;
@@ -100,23 +102,16 @@ describe('VM slot cancellation through the physical exact requester', () => {
       host.messenger = { sendToPeer: send };
       const reconcile = vi.spyOn(host, 'reconcileChainOrdinal');
       const recovery = harness.run();
-      const descriptor = Object.getOwnPropertyDescriptor(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES')!;
+      let restoreCapacity = () => {};
       try {
         await entered.promise;
         expect(harness.pressure()).toMatchObject({ inflight: 1, queued: 0 });
         expect(transportSignal?.aborted).toBe(false);
         const target = harness.targets[0]!;
-        if (invalidation === 'unsubscribe') harness.agent.unsubscribeFromContextGraph(localCgId, { persist: false });
-        if (invalidation === 'rebind') host.bindSubscriptionOnChainId(localCgId, host.subscribedContextGraphs.get(localCgId)!, '2');
-        if (invalidation === 'fingerprint') host.prepareVmReconcileRotationTarget(
-          { ...target, merkleRoot: 'replacement' }, [peer], host.vmReconcileRotationNow(),
-        );
-        if (invalidation === 'shutdown') host.closeVmReconcileRotationState();
-        if (invalidation === 'eviction') {
-          Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', { ...descriptor, value: 2 });
-          host.prepareVmReconcileRotationTarget({ ...target, ordinal: 1 }, [peer], host.vmReconcileRotationNow());
-          host.prepareVmReconcileRotationTarget({ ...target, localCgId: 'waiting-cg' }, [peer], host.vmReconcileRotationNow());
-        }
+        restoreCapacity = applyVmRecoveryInvalidation({
+          invalidation, agent: harness.agent, host, localCgId, target, peerId: peer,
+          replacementMerkleRoot: 'replacement', waitingLocalCgId: 'waiting-cg',
+        });
         await abortObserved.promise;
         await expect(recovery).resolves.toMatchObject({ outcomes: new Map(), attemptedOrdinals: [] });
         expect(send).toHaveBeenCalledTimes(1);
@@ -126,13 +121,13 @@ describe('VM slot cancellation through the physical exact requester', () => {
       } finally {
         release.release();
         await recovery;
-        Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', descriptor);
+        restoreCapacity();
         await harness.dispose();
       }
     },
   );
 
-  it.each(['unsubscribe', 'rebind', 'fingerprint', 'eviction', 'shutdown'] as const)(
+  it.each(VM_RECOVERY_INVALIDATIONS)(
     '%s drains an entered Oxigraph atomic replacement before releasing global capacity',
     async invalidation => {
       const localCgId = '1';
@@ -188,22 +183,15 @@ describe('VM slot cancellation through the physical exact requester', () => {
       });
       let settled = false;
       const recovery = harness.run().finally(() => { settled = true; });
-      const descriptor = Object.getOwnPropertyDescriptor(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES')!;
+      let restoreCapacity = () => {};
       try {
         await entered.promise;
         expect(host.graphScopedStorePhysicalRuns.size).toBe(1);
         expect(harness.pressure().inflight).toBe(1);
-        if (invalidation === 'unsubscribe') harness.agent.unsubscribeFromContextGraph(localCgId, { persist: false });
-        if (invalidation === 'rebind') host.bindSubscriptionOnChainId(localCgId, host.subscribedContextGraphs.get(localCgId)!, '2');
-        if (invalidation === 'fingerprint') host.prepareVmReconcileRotationTarget(
-          { ...target, merkleRoot: 'replacement' }, [peer], host.vmReconcileRotationNow(),
-        );
-        if (invalidation === 'shutdown') host.closeVmReconcileRotationState();
-        if (invalidation === 'eviction') {
-          Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', { ...descriptor, value: 2 });
-          host.prepareVmReconcileRotationTarget({ ...target, ordinal: 1 }, [peer], host.vmReconcileRotationNow());
-          host.prepareVmReconcileRotationTarget({ ...target, localCgId: 'waiting-cg' }, [peer], host.vmReconcileRotationNow());
-        }
+        restoreCapacity = applyVmRecoveryInvalidation({
+          invalidation, agent: harness.agent, host, localCgId, target, peerId: peer,
+          replacementMerkleRoot: 'replacement', waitingLocalCgId: 'waiting-cg',
+        });
         await Promise.resolve();
         expect(settled).toBe(false);
         expect(harness.pressure().inflight).toBe(1);
@@ -230,7 +218,7 @@ describe('VM slot cancellation through the physical exact requester', () => {
       } finally {
         release.release();
         await recovery;
-        Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', descriptor);
+        restoreCapacity();
         await harness.dispose();
         await store.close();
       }

@@ -3,6 +3,7 @@ import { createOperationContext } from '@origintrail-official/dkg-core';
 import type { OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import type { ContextGraphSub, VmReconcileRotationRecord } from '../src/dkg-agent-types.js';
+import type { VmRecoverySlotRegistry } from '../src/internal/vm-recovery-slot-registry.js';
 import {
   getSyncBackpressureSnapshot,
   resolveSyncGlobalBackpressure,
@@ -12,6 +13,9 @@ import {
   createVmRecoveryHostHarness,
   type VmRecoveryHostInternals,
 } from './_helpers/vm-recovery-host.js';
+import {
+  applyVmRecoveryInvalidation, VM_RECOVERY_INVALIDATIONS,
+} from './_helpers/vm-recovery-invalidation.js';
 
 interface CancellationHost extends VmRecoveryHostInternals {
   subscribedContextGraphs: Map<string, ContextGraphSub>;
@@ -41,7 +45,7 @@ function barrier() {
 }
 
 const cases = (['discovery', 'legacy-meta', 'legacy-registry', 'dial', 'protocol', 'admission', 'transport'] as const).flatMap(stage =>
-  (['unsubscribe', 'rebind', 'fingerprint', 'eviction', 'shutdown'] as const)
+  VM_RECOVERY_INVALIDATIONS
     .map(invalidation => ({ stage, invalidation })),
 );
 
@@ -72,12 +76,14 @@ describe('exact VM recovery slot cancellation', () => {
       const original = [...host.vmRecoverySlots.records.entries()];
       const waitingTarget = targetFor('waiting-cg');
       const waitingKey = host.vmReconcileRotationSlotKey(waitingTarget);
-      // Fault injection below the registry's public readonly inspection boundary.
-      const retained = host.vmRecoverySlots.records as Map<string, VmReconcileRotationRecord>;
-      const set = retained.set.bind(retained);
-      const failInstall = vi.spyOn(retained, 'set').mockImplementation((key, record) => {
+      // Fault injection targets the registry's retention seam; its maps stay private.
+      const registry = host.vmRecoverySlots as VmRecoverySlotRegistry & {
+        retainRecord(key: string, record: VmReconcileRotationRecord): void;
+      };
+      const retain = registry.retainRecord.bind(registry);
+      const failInstall = vi.spyOn(registry, 'retainRecord').mockImplementation((key, record) => {
         if (key === waitingKey) throw new Error('injected install failure');
-        return set(key, record);
+        return retain(key, record);
       });
       try {
         expect(() => host.prepareVmReconcileRotationTarget(waitingTarget, [peer], host.vmReconcileRotationNow()))
@@ -185,8 +191,8 @@ describe('exact VM recovery slot cancellation', () => {
     const host = harness.internals as CancellationHost;
     host.subscribedContextGraphs.set(localCgId, { subscribed: true, synced: false, syncMode: 'always-on', onChainId: '1' });
     // Expired collection/cache pressure can intentionally produce this supported preparation result.
-    vi.spyOn(host, 'prepareVmReconcileRotationTarget').mockImplementation(target => ({
-      slotKey: host.vmReconcileRotationSlotKey(target), suppressed: false,
+    vi.spyOn(host, 'prepareVmReconcileRotationTarget').mockImplementation(() => ({
+      suppressed: false,
     }));
     const recovery = harness.run();
     try {
@@ -382,7 +388,7 @@ describe('exact VM recovery slot cancellation', () => {
       localCgId, 1n, harness.targets, 100, () => true,
       host.vmReconcileLifecycleController.signal,
     );
-    const capDescriptor = Object.getOwnPropertyDescriptor(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES')!;
+    let restoreCapacity = () => {};
     try {
       await entered;
       const target = harness.targets[0]!;
@@ -391,28 +397,9 @@ describe('exact VM recovery slot cancellation', () => {
       expect(originalRecord).toBeDefined();
       if (stage === 'transport') expect(getSyncBackpressureSnapshot(policy).inflight).toBe(1);
       else expect(harness.fetched).toHaveLength(0);
-      switch (invalidation) {
-        case 'unsubscribe':
-          harness.agent.unsubscribeFromContextGraph(localCgId, { persist: false });
-          break;
-        case 'rebind':
-          host.bindSubscriptionOnChainId(localCgId, subscription, '2');
-          break;
-        case 'fingerprint':
-          host.prepareVmReconcileRotationTarget({ ...target, merkleRoot: 'replacement-root' }, [peer], host.vmReconcileRotationNow());
-          break;
-        case 'eviction': {
-          // Exercise the real cross-CG donation path with a two-record cap.
-          Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', { ...capDescriptor, value: 2 });
-          host.prepareVmReconcileRotationTarget(targetFor(localCgId, 1), [peer], host.vmReconcileRotationNow());
-          const replacement = host.prepareVmReconcileRotationTarget(targetFor(`${localCgId}-waiting`), [peer], host.vmReconcileRotationNow());
-          expect(replacement.suppressed).toBe(false);
-          break;
-        }
-        case 'shutdown':
-          host.closeVmReconcileRotationState();
-          break;
-      }
+      restoreCapacity = applyVmRecoveryInvalidation({
+        invalidation, agent: harness.agent, host, localCgId, target, peerId: peer,
+      });
       expect(host.vmRecoverySlots.records.get(slotKey)).not.toBe(originalRecord);
       expect(boundarySignal?.aborted).toBe(true);
       await expect(recovery).resolves.toMatchObject({ outcomes: new Map(), attemptedOrdinals: [] });
@@ -424,7 +411,7 @@ describe('exact VM recovery slot cancellation', () => {
     } finally {
       releaseWait();
       await recovery;
-      Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', capDescriptor);
+      restoreCapacity();
       await harness.agent.stop().catch(() => undefined);
     }
   });

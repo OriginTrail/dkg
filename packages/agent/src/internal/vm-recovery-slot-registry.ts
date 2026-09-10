@@ -1,7 +1,22 @@
 import type { OrdinalRecoveryTarget } from '../chain-reconciler.js';
-import type { VmReconcileRotationRecord } from '../dkg-agent-types.js';
 
 type Target = Pick<OrdinalRecoveryTarget, 'localCgId' | 'onChainCgId' | 'ordinal' | 'ual' | 'merkleRoot'>;
+type SlotLocator = Pick<Target, 'localCgId' | 'onChainCgId' | 'ordinal'>;
+
+/** Process-local evidence owned by one chain-ordinal exact-recovery slot. */
+export interface VmReconcileRotationRecord extends SlotLocator {
+  fingerprint: string;
+  phase: 'collecting' | 'backoff';
+  backoffKind?: 'clean-absence' | 'incomplete-cycle';
+  candidatePeerIds: Set<string>;
+  attemptedPeerIds: Set<string>;
+  cleanAbsentPeerIds: Set<string>;
+  curatorRosterConfirmed: boolean;
+  collectionDeadlineAt: number;
+  lastAttemptedPeerId?: string;
+  failures: number;
+  nextRetryAt: number;
+}
 
 export function vmRecoverySlotKey(target: Pick<Target, 'localCgId' | 'onChainCgId' | 'ordinal'>): string {
   return `${target.localCgId}\0${target.onChainCgId}\0${target.ordinal}`;
@@ -25,23 +40,48 @@ export interface VmRecoverySlotScope {
   release(): void;
 }
 
+export interface VmRecoverySlotPreparation {
+  readonly record?: VmReconcileRotationRecord;
+  readonly suppressed: boolean;
+}
+
 /** Owns retained proof records and active generations, including record-less recovery. */
 export class VmRecoverySlotRegistry {
   private readonly slots = new Map<string, SlotGeneration>();
   private readonly retained = new Map<string, VmReconcileRotationRecord>();
 
-  get records(): ReadonlyMap<string, VmReconcileRotationRecord> { return this.retained; }
+  get recordCount(): number { return this.retained.size; }
+
+  /** Detached state for diagnostics and tests; callers cannot mutate ownership. */
+  snapshot(): ReadonlyMap<string, VmReconcileRotationRecord> {
+    return new Map(this.retained);
+  }
+
+  /** @deprecated Use target-based APIs; this is a detached diagnostic snapshot. */
+  get records(): ReadonlyMap<string, VmReconcileRotationRecord> { return this.snapshot(); }
+
+  currentRecord(target: Target): VmReconcileRotationRecord | undefined {
+    this.observe(target);
+    const record = this.retained.get(vmRecoverySlotKey(target));
+    return record?.fingerprint === vmRecoveryTargetFingerprint(target) ? record : undefined;
+  }
+
+  isCurrent(target: Target, record: VmReconcileRotationRecord): boolean {
+    return this.currentRecord(target) === record;
+  }
 
   /** Successful ordinal completion retires evidence without aborting its shared batch. */
-  complete(key: string): void { this.retained.delete(key); }
+  complete(target: SlotLocator): void { this.retained.delete(vmRecoverySlotKey(target)); }
 
-  touch(key: string, record: VmReconcileRotationRecord): void {
+  touch(target: Target, record: VmReconcileRotationRecord): void {
+    const key = vmRecoverySlotKey(target);
+    if (record.fingerprint !== vmRecoveryTargetFingerprint(target)) return;
     if (this.retained.get(key) !== record) return;
     this.retained.delete(key);
     this.retained.set(key, record);
   }
 
-  findReplacement(
+  private findReplacementEntry(
     requestingCgId: string | undefined,
     now: number,
     maxEntries: number,
@@ -65,27 +105,60 @@ export class VmRecoverySlotRegistry {
     return undefined;
   }
 
+  findReplacement(
+    requestingCgId: string | undefined,
+    now: number,
+    maxEntries: number,
+  ): VmReconcileRotationRecord | undefined {
+    return this.findReplacementEntry(requestingCgId, now, maxEntries)?.[1];
+  }
+
   /** Donation cancels the donor only after the requester owns its retained slot. */
   install(record: VmReconcileRotationRecord, now: number, maxEntries: number): boolean {
     const key = vmRecoverySlotKey(record);
     if (this.retained.has(key)) return false;
-    const replacement = this.findReplacement(record.localCgId, now, maxEntries);
+    const replacement = this.findReplacementEntry(record.localCgId, now, maxEntries);
     if (!replacement) {
       if (this.retained.size >= maxEntries) return false;
-      this.retained.set(key, record);
+      this.retainRecord(key, record);
       return this.retained.get(key) === record;
     }
     const [donorKey, donor] = replacement;
     let installed = false;
     this.retained.delete(donorKey);
     try {
-      this.retained.set(key, record);
+      this.retainRecord(key, record);
       installed = this.retained.get(key) === record;
       return installed;
     } finally {
-      if (installed) this.invalidateSlot(donorKey);
-      else if (!this.retained.has(donorKey)) this.retained.set(donorKey, donor);
+      if (installed) this.invalidateKey(donorKey);
+      else if (!this.retained.has(donorKey)) this.retainRecord(donorKey, donor);
     }
+  }
+
+  createRecord(target: Target, params: {
+    readonly candidatePeerIds: readonly string[];
+    readonly curatorRosterConfirmed: boolean;
+    readonly collectionDeadlineAt: number;
+  }): VmReconcileRotationRecord {
+    return {
+      localCgId: target.localCgId,
+      onChainCgId: target.onChainCgId,
+      ordinal: target.ordinal,
+      fingerprint: vmRecoveryTargetFingerprint(target),
+      phase: 'collecting',
+      candidatePeerIds: new Set(params.candidatePeerIds),
+      attemptedPeerIds: new Set(),
+      cleanAbsentPeerIds: new Set(),
+      curatorRosterConfirmed: params.curatorRosterConfirmed,
+      collectionDeadlineAt: params.collectionDeadlineAt,
+      failures: 0,
+      nextRetryAt: 0,
+    };
+  }
+
+  protected retainRecord(key: string, record: VmReconcileRotationRecord): void {
+    this.retained.set(key, record);
   }
 
   begin(): VmRecoverySlotScope {
@@ -131,16 +204,20 @@ export class VmRecoverySlotRegistry {
   }
 
   /** Observing a replacement fingerprint invalidates only the superseded generation. */
-  observe(target: Target): void {
+  private observe(target: Target): void {
     const key = vmRecoverySlotKey(target);
     const generation = this.slots.get(key);
     const record = this.retained.get(key);
     const fingerprint = vmRecoveryTargetFingerprint(target);
     if ((generation && generation.fingerprint !== fingerprint)
-      || (record && record.fingerprint !== fingerprint)) this.invalidateSlot(key);
+      || (record && record.fingerprint !== fingerprint)) this.invalidateKey(key);
   }
 
-  invalidateSlot(key: string): void {
+  invalidate(target: SlotLocator): void {
+    this.invalidateKey(vmRecoverySlotKey(target));
+  }
+
+  private invalidateKey(key: string): void {
     this.retained.delete(key);
     const generation = this.slots.get(key);
     if (!generation) return;
@@ -155,13 +232,13 @@ export class VmRecoverySlotRegistry {
     // Abort listeners run synchronously and can acquire a new generation.
     const generations = [...this.slots];
     for (const [key, generation] of generations) {
-      if (generation.localCgId === localCgId) this.invalidateSlot(key);
+      if (generation.localCgId === localCgId) this.invalidateKey(key);
     }
   }
 
   close(): void {
     this.retained.clear();
     const keys = [...this.slots.keys()];
-    for (const key of keys) this.invalidateSlot(key);
+    for (const key of keys) this.invalidateKey(key);
   }
 }

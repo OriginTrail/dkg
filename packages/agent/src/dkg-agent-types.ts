@@ -880,32 +880,7 @@ export interface VmReconcileNegativeRecord {
   cleanMissPeerIds?: string[];
 }
 
-/** Process-local evidence for one chain-ordinal exact-recovery rotation. */
-export interface VmReconcileRotationRecord {
-  localCgId: string;
-  onChainCgId: string;
-  ordinal: number;
-  fingerprint: string;
-  phase: 'collecting' | 'backoff';
-  /** Retry suppression is distinct from authenticated clean-absence proof. */
-  backoffKind?: 'clean-absence' | 'incomplete-cycle';
-  candidatePeerIds: Set<string>;
-  /** Peers physically attempted during the current proof cycle. */
-  attemptedPeerIds: Set<string>;
-  cleanAbsentPeerIds: Set<string>;
-  /**
-   * A process-local curator lookup completed (or its bounded cached roster was
-   * reused). This is not cryptographic or network-wide completeness evidence;
-   * observed roster changes invalidate the cycle and backoff is time-bounded.
-   */
-  curatorRosterConfirmed: boolean;
-  /** Monotonic bound after which a partial clean-absence proof restarts. */
-  collectionDeadlineAt: number;
-  /** Cursor only; every physical attempt advances it, regardless of outcome. */
-  lastAttemptedPeerId?: string;
-  failures: number;
-  nextRetryAt: number;
-}
+export type { VmReconcileRotationRecord } from './internal/vm-recovery-slot-registry.js';
 
 export interface ContextGraphSubscriptionRehydrationStatus extends ContextGraphDormancyProjection {
   /** Whether persisted subscription activation was enabled for this boot. */

@@ -615,7 +615,6 @@ interface VmRecoveryPreparedEntry {
   readonly index: number;
   readonly target: OrdinalRecoveryTarget;
   readonly prepared: {
-    readonly slotKey: string;
     readonly record?: VmReconcileRotationRecord;
     readonly suppressed: boolean;
   };
@@ -4796,11 +4795,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return performance.now();
   }
 
-  vmReconcileRotationSlotKey(
-    this: DKGAgent,
-    target: OrdinalRecoveryTarget,
-  ): string {
+  /** @deprecated Test diagnostic; recovery code uses target-based registry APIs. */
+  vmReconcileRotationSlotKey(this: DKGAgent, target: OrdinalRecoveryTarget): string {
     return vmRecoverySlotKey(target);
+  }
+
+  /** @deprecated Test diagnostic; recovery code uses target-based registry APIs. */
+  vmReconcileRotationFingerprint(this: DKGAgent, target: OrdinalRecoveryTarget): string {
+    return vmRecoveryTargetFingerprint(target);
   }
 
   clearVmReconcileRotationStateForSlot(
@@ -4809,16 +4811,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     onChainCgId: bigint,
     ordinal: number,
   ): void {
-    this.vmRecoverySlots.complete(vmRecoverySlotKey({
+    this.vmRecoverySlots.complete({
       localCgId, onChainCgId: onChainCgId.toString(), ordinal,
-    }));
-  }
-
-  vmReconcileRotationFingerprint(
-    this: DKGAgent,
-    target: OrdinalRecoveryTarget,
-  ): string {
-    return vmRecoveryTargetFingerprint(target);
+    });
   }
 
   vmReconcileObservedCandidatePeerIds(
@@ -4879,31 +4874,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return left.size === right.length && right.every((peerId) => left.has(peerId));
   }
 
-  touchVmReconcileRotationRecord(
-    this: DKGAgent,
-    slotKey: string,
-    record: VmReconcileRotationRecord,
-  ): void {
-    this.vmRecoverySlots.touch(slotKey, record);
-  }
-
   prepareVmReconcileRotationTarget(
     this: DKGAgent,
     target: OrdinalRecoveryTarget,
     candidatePeerIds: readonly string[],
     now: number,
     curatorRosterConfirmed = true,
-  ): {
-    slotKey: string;
-    record?: VmReconcileRotationRecord;
-    suppressed: boolean;
-  } {
-    const slotKey = this.vmReconcileRotationSlotKey(target);
-    if (this.vmReconcileRotationClosed) return { slotKey, suppressed: true };
+  ): { record?: VmReconcileRotationRecord; suppressed: boolean } {
+    if (this.vmReconcileRotationClosed) return { suppressed: true };
 
-    this.vmRecoverySlots.observe(target);
-    const fingerprint = this.vmReconcileRotationFingerprint(target);
-    let record = this.vmRecoverySlots.records.get(slotKey);
+    let record = this.vmRecoverySlots.currentRecord(target);
     if (
       record?.phase === 'backoff'
       && record.backoffKind === 'clean-absence'
@@ -4911,7 +4891,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     ) {
       // Absence gathered while curator discovery was unavailable must not
       // suppress the next lookup: that lookup may reveal the only holder.
-      this.vmRecoverySlots.invalidateSlot(slotKey);
+      this.vmRecoverySlots.invalidate(target);
       record = undefined;
     }
     if (candidatePeerIds.length === 0) {
@@ -4920,37 +4900,27 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // Partial evidence is different and remains fail-open; drop it so the next
       // non-empty roster starts a genuinely fresh cycle.
       if (record?.phase === 'backoff' && now < record.nextRetryAt) {
-        this.touchVmReconcileRotationRecord(slotKey, record);
-        return { slotKey, record, suppressed: true };
+        this.vmRecoverySlots.touch(target, record);
+        return { record, suppressed: true };
       }
-      this.vmRecoverySlots.invalidateSlot(slotKey);
-      return { slotKey, suppressed: false };
+      this.vmRecoverySlots.invalidate(target);
+      return { suppressed: false };
     }
 
     if (!record) {
-      const nextRecord: VmReconcileRotationRecord = {
-        localCgId: target.localCgId,
-        onChainCgId: target.onChainCgId,
-        ordinal: target.ordinal,
-        fingerprint,
-        phase: 'collecting',
-        candidatePeerIds: new Set(candidatePeerIds),
-        attemptedPeerIds: new Set(),
-        cleanAbsentPeerIds: new Set(),
+      const nextRecord = this.vmRecoverySlots.createRecord(target, {
+        candidatePeerIds,
         curatorRosterConfirmed,
         collectionDeadlineAt: now + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
-        failures: 0,
-        nextRetryAt: 0,
-      };
+      });
       if (!this.installVmReconcileRotationRecord(nextRecord)) {
         // Preserve the pressure bound at cap: an unowned target cannot retain
         // exponential retry state, so running elevated exact transport here
         // would replay it every sweep. Defer until an expired/resolved slot is
         // available; this is process-local scheduling, never absence evidence.
-        return { slotKey, suppressed: true };
+        return { suppressed: true };
       }
       return {
-        slotKey,
         record: nextRecord,
         suppressed: false,
       };
@@ -5016,8 +4986,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     if (record.phase === 'backoff') {
       if (now < record.nextRetryAt) {
-        this.touchVmReconcileRotationRecord(slotKey, record);
-        return { slotKey, record, suppressed: true };
+        this.vmRecoverySlots.touch(target, record);
+        return { record, suppressed: true };
       }
       // A deadline only opens a new collection cycle. It never earns another
       // failure/backoff without fresh clean-absence evidence from every peer.
@@ -5032,17 +5002,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // Expired partial evidence fails open and releases its cache slot. Return
       // evidence-free for this pass so a repeatedly ineligible roster cannot
       // refresh all collecting entries just before capacity admission runs.
-      this.vmRecoverySlots.invalidateSlot(slotKey);
-      return { slotKey, suppressed: false };
+      this.vmRecoverySlots.invalidate(target);
+      return { suppressed: false };
     }
 
-    this.touchVmReconcileRotationRecord(slotKey, record);
-    return { slotKey, record, suppressed: false };
+    this.vmRecoverySlots.touch(target, record);
+    return { record, suppressed: false };
   }
 
   enterVmReconcileRotationBackoff(
     this: DKGAgent,
-    slotKey: string,
+    target: OrdinalRecoveryTarget,
     record: VmReconcileRotationRecord,
     kind: NonNullable<VmReconcileRotationRecord['backoffKind']> = 'clean-absence',
   ): void {
@@ -5053,7 +5023,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         * 2 ** Math.max(0, record.failures - 1),
     );
     const jitterSample = createHash('sha256')
-      .update(`${this.peerId}\0${slotKey}\0${record.fingerprint}\0${record.failures}`)
+      .update(`${this.peerId}\0${target.localCgId}\0${target.onChainCgId}\0${target.ordinal}\0${record.fingerprint}\0${record.failures}`)
       .digest()
       .readUInt32BE(0) / 0x1_0000_0000;
     const backoff = Math.min(
@@ -5107,14 +5077,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
   findVmReconcileRotationReplacement(
     this: DKGAgent,
     requestingCgId?: string,
-  ): [string, VmReconcileRotationRecord] | undefined {
+  ): VmReconcileRotationRecord | undefined {
     return this.vmRecoverySlots.findReplacement(
       requestingCgId, this.vmReconcileRotationNow(), DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES,
     );
   }
 
   canInstallVmReconcileRotationRecord(this: DKGAgent, requestingCgId?: string): boolean {
-    if (this.vmRecoverySlots.records.size < DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES) {
+    if (this.vmRecoverySlots.recordCount < DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES) {
       return true;
     }
     return this.findVmReconcileRotationReplacement(requestingCgId) !== undefined;
@@ -5177,8 +5147,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     unavailablePeerIds: ReadonlySet<string> = new Set(),
   ): void {
     if (this.vmReconcileRotationClosed) return;
-    const slotKey = this.vmReconcileRotationSlotKey(target);
-    if (this.vmRecoverySlots.records.get(slotKey) !== capturedRecord) return;
+    if (!this.vmRecoverySlots.isCurrent(target, capturedRecord)) return;
     if (!this.vmReconcilePeerMembershipMatches(
       capturedRecord.candidatePeerIds,
       expectedCandidatePeerIds,
@@ -5201,14 +5170,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const cleanAbsentFromEveryPeer = [...capturedRecord.candidatePeerIds]
       .every((candidatePeerId) => capturedRecord.cleanAbsentPeerIds.has(candidatePeerId));
     if (cleanAbsentFromEveryPeer && capturedRecord.curatorRosterConfirmed) {
-      this.enterVmReconcileRotationBackoff(slotKey, capturedRecord, 'clean-absence');
+      this.enterVmReconcileRotationBackoff(target, capturedRecord, 'clean-absence');
     } else if (scheduledEveryPeer && capturedRecord.curatorRosterConfirmed) {
       // This is retry suppression only, never absence proof. It prevents a
       // legacy peer that ignores the exact filter from replaying the same
       // bounded prefix at elevated priority every sweep.
-      this.enterVmReconcileRotationBackoff(slotKey, capturedRecord, 'incomplete-cycle');
+      this.enterVmReconcileRotationBackoff(target, capturedRecord, 'incomplete-cycle');
     }
-    this.touchVmReconcileRotationRecord(slotKey, capturedRecord);
+    this.vmRecoverySlots.touch(target, capturedRecord);
   }
 
   creditVmReconcileCleanAbsence(
@@ -5525,10 +5494,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (outcome.status === 'pending' && outcome.recovery) {
         const batchRecord = attempt.installedRecord;
         if (!batchRecord || this.vmReconcileRotationClosed) continue;
-        if (
-          this.vmRecoverySlots.records.get(this.vmReconcileRotationSlotKey(batchTarget))
-          !== batchRecord
-        ) continue;
+        if (!this.vmRecoverySlots.isCurrent(batchTarget, batchRecord)) continue;
         const candidateMembershipAfter = this.vmReconcileObservedCandidatePeerIds(localCgId);
         if (!this.vmReconcilePeerMembershipMatches(
           batchRecord.candidatePeerIds,
@@ -5550,7 +5516,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           );
         }
       } else {
-        this.vmRecoverySlots.complete(this.vmReconcileRotationSlotKey(batchTarget));
+        this.vmRecoverySlots.complete(batchTarget);
       }
     }
     return {
@@ -5649,23 +5615,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // production ordinal/finalization check proved it still pending locally.
     const observedCandidatePeerIds = this.vmReconcileObservedCandidatePeerIds(localCgId);
     const now = this.vmReconcileRotationNow();
-    const initiallyOwnedSlotKeys = new Set(currentTargets.flatMap((target) => {
-      const slotKey = this.vmReconcileRotationSlotKey(target);
-      const record = this.vmRecoverySlots.records.get(slotKey);
-      return record?.fingerprint === this.vmReconcileRotationFingerprint(target)
-        ? [slotKey]
-        : [];
-    }));
+    const initiallyOwnedRecords = new Map<OrdinalRecoveryTarget, VmReconcileRotationRecord>();
+    for (const target of currentTargets) {
+      const record = this.vmRecoverySlots.currentRecord(target);
+      if (record) initiallyOwnedRecords.set(target, record);
+    }
     const hasUnownedTarget = currentTargets.some((target) =>
-      !initiallyOwnedSlotKeys.has(this.vmReconcileRotationSlotKey(target)));
-    const reservedReplacementSlotKey = hasUnownedTarget
-      ? this.findVmReconcileRotationReplacement(localCgId)?.[0]
+      !initiallyOwnedRecords.has(target));
+    const reservedReplacementRecord = hasUnownedTarget
+      ? this.findVmReconcileRotationReplacement(localCgId)
       : undefined;
     const initialPreparations = currentTargets
       .map((target, index) => ({
         index,
         target,
-        hasOwnedRecord: initiallyOwnedSlotKeys.has(this.vmReconcileRotationSlotKey(target)),
+        hasOwnedRecord: initiallyOwnedRecords.has(target),
       }))
       // Use the same fair admission order before network work. Besides handing
       // expired capacity to a waiter, this makes an all-live saturated cache
@@ -5674,10 +5638,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       .sort((left, right) => Number(left.hasOwnedRecord) - Number(right.hasOwnedRecord)
         || admissionDistance(left.index) - admissionDistance(right.index))
       .map(({ index, target }) => {
-        const slotKey = this.vmReconcileRotationSlotKey(target);
-        this.vmRecoverySlots.observe(target);
-        const existing = this.vmRecoverySlots.records.get(slotKey);
-        if (!existing || existing.fingerprint !== this.vmReconcileRotationFingerprint(target)) {
+        const existing = this.vmRecoverySlots.currentRecord(target);
+        if (!existing) {
           // The pre-network pass only consults already-earned suppression. A new
           // cycle is installed after curator resolution so its first roster is
           // authoritative-first; a stale fingerprint is invalidated immediately.
@@ -5686,20 +5648,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
             index,
             target,
             prepared: {
-              slotKey,
               record: undefined,
               suppressed: this.vmReconcileRotationClosed || !capacityAvailable,
             },
           };
         }
-        if (slotKey === reservedReplacementSlotKey) {
+        if (existing === reservedReplacementRecord) {
           // Keep the donor intact, but do not renew it before the waiter reaches
           // post-resolution installation. An earlier lifecycle exit leaves the
           // original record untouched; a successful install replaces it atomically.
           return {
             index,
             target,
-            prepared: { slotKey, record: existing, suppressed: true },
+            prepared: { record: existing, suppressed: true },
           };
         }
         return {
@@ -5882,7 +5843,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       .map((target, index) => ({
         index,
         target,
-        hasOwnedRecord: initiallyOwnedSlotKeys.has(this.vmReconcileRotationSlotKey(target)),
+        hasOwnedRecord: initiallyOwnedRecords.has(target),
       }))
       // At a full cap, give deferred targets first claim on an expired slot.
       // Otherwise an expired owner encountered first would renew itself before
@@ -5902,7 +5863,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       .sort((left, right) => left.index - right.index);
     const newlyAdmitted = preparedEntries
       .filter(({ target, prepared }) => prepared.record
-        && !initiallyOwnedSlotKeys.has(this.vmReconcileRotationSlotKey(target)));
+        && !initiallyOwnedRecords.has(target));
     if (newlyAdmitted.length > 0) {
       const lastAdmitted = newlyAdmitted.reduce((latest, entry) => (
         admissionDistance(entry.index) > admissionDistance(latest.index) ? entry : latest
@@ -5916,16 +5877,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const eligible = preparedEntries
       .map((entry) => {
         const { record } = entry.prepared;
-        if (
-          record
-          && this.vmRecoverySlots.records.get(entry.prepared.slotKey) !== record
-        ) {
+        if (record && !this.vmRecoverySlots.isCurrent(entry.target, record)) {
           // A later slot may have replaced an expired record while the batch
           // was prepared. Defer the now-unowned target: elevated transport
           // without retained retry state would violate the pressure bound.
           return {
             ...entry,
-            prepared: { slotKey: entry.prepared.slotKey, suppressed: true },
+            prepared: { suppressed: true },
           };
         }
         return entry;
@@ -5936,10 +5894,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // original target order remains stable within each class.
       .sort((left, right) => {
         const leftInstalled = left.prepared.record
-          && this.vmRecoverySlots.records.get(left.prepared.slotKey) === left.prepared.record
+          && this.vmRecoverySlots.isCurrent(left.target, left.prepared.record)
           ? 1 : 0;
         const rightInstalled = right.prepared.record
-          && this.vmRecoverySlots.records.get(right.prepared.slotKey) === right.prepared.record
+          && this.vmRecoverySlots.isCurrent(right.target, right.prepared.record)
           ? 1 : 0;
         return rightInstalled - leftInstalled || left.index - right.index;
       });
@@ -5964,7 +5922,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (handledBatchOrdinals.has(target.ordinal)) continue;
       const record = entry.prepared.record;
       const installedRecord = record
-        && this.vmRecoverySlots.records.get(this.vmReconcileRotationSlotKey(target)) === record
+        && this.vmRecoverySlots.isCurrent(target, record)
         ? record
         : undefined;
       const candidatePeerIds = installedRecord
@@ -6054,9 +6012,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           if (handledBatchOrdinals.has(candidateTarget.ordinal)) continue;
           const candidateRecord = candidateEntry.prepared.record;
           const candidateInstalledRecord = candidateRecord
-            && this.vmRecoverySlots.records.get(
-              this.vmReconcileRotationSlotKey(candidateTarget),
-            ) === candidateRecord
+            && this.vmRecoverySlots.isCurrent(candidateTarget, candidateRecord)
             ? candidateRecord
             : undefined;
           // The current target owns the admitted provider attempt. Later
@@ -6179,12 +6135,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
       eligibleOrdinals.has(target.ordinal) && !attemptedOrdinals.has(target.ordinal))?.ordinal;
     const hasImmediateRecoveryWork = eligible.some(({ target }) => {
       const outcome = outcomes.get(target.ordinal);
-      const record = this.vmRecoverySlots.records.get(
-        this.vmReconcileRotationSlotKey(target),
-      );
+      const record = this.vmRecoverySlots.currentRecord(target);
       if (
         record?.phase !== 'collecting'
-        || record.fingerprint !== this.vmReconcileRotationFingerprint(target)
         || this.vmReconcileUncreditedCandidateOrder(record).length === 0
       ) return false;
       // When revalidation ran, it must still describe the same pending target.

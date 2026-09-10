@@ -108,7 +108,7 @@ export interface VmRecoveryHostInternals {
       entry: {
         index: number;
         target: OrdinalRecoveryTarget;
-        prepared: { slotKey: string; suppressed: boolean };
+        prepared: { record?: VmReconcileRotationRecord; suppressed: boolean };
       };
       installedRecord: VmReconcileRotationRecord | undefined;
       candidatePeerIds: readonly string[];

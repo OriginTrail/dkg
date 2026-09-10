@@ -4279,7 +4279,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect([...grown.record.attemptedPeerIds]).toEqual([peerA]);
 
     const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
-    (internals as any).vmRecoverySlots.invalidateSlot(slotKey);
+    (internals as any).vmRecoverySlots.invalidate(target);
     (internals as any).creditVmReconcileCleanAbsence(
       target, peerA, [peerA, peerB, peerC], grown.record,
     );
@@ -5070,7 +5070,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     await fetchStarted;
     const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
     expect((internals as any).vmRecoverySlots.records.has(slotKey)).toBe(true);
-    (internals as any).vmRecoverySlots.invalidateSlot(slotKey);
+    (internals as any).vmRecoverySlots.invalidate(target);
     releaseFetch();
     await recovery;
 
