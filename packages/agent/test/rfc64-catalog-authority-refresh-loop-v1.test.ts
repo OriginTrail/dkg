@@ -265,10 +265,10 @@ describe('RFC-64 catalog authority refresh loop', () => {
     await Promise.all(started.slice(0, limit));
     expect(attempts).toEqual(contextGraphIds.slice(0, limit));
 
-    let fifthStarted = false;
-    void started[limit]!.then(() => { fifthStarted = true; });
+    let nextStarted = false;
+    void started[limit]!.then(() => { nextStarted = true; });
     await Promise.resolve();
-    expect(fifthStarted).toBe(false);
+    expect(nextStarted).toBe(false);
 
     releases[0]!();
     await started[limit];

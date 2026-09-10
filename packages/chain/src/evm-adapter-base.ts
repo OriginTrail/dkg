@@ -33,7 +33,7 @@ import {
   getMetrics,
 } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
@@ -59,6 +59,7 @@ import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, reso
 } from './evm-adapter-constants.js';
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
 import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
+import { ContextGraphAuthorityHistoryCache } from './context-graph-authority-history.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
 
@@ -461,30 +462,6 @@ function kaHighWaterViewSelectorInCode(storage: Contract, code: string): boolean
  * the common provider phrasings (geth/erigon/nethermind/managed endpoints).
  */
 /**
- * Flatten an error into a single lowercased string across the nested fields
- * ethers v6 / managed RPCs actually populate — `message`, `shortMessage`,
- * `reason`, `body`, and recursively `error` / `info` / `cause` / `data`. The
- * plain `errorMessage` reads only `.message`, so a managed-RPC denial whose text
- * lives in `err.info.error.message` / `err.body` would otherwise be invisible.
- */
-function allErrorText(err: unknown): string {
-  const parts: string[] = [];
-  const seen = new Set<unknown>();
-  const visit = (e: any, depth: number): void => {
-    if (e == null || depth > 5 || seen.has(e)) return;
-    if (typeof e === 'string') { parts.push(e); return; }
-    if (typeof e !== 'object') return;
-    seen.add(e);
-    for (const k of ['message', 'shortMessage', 'reason', 'body']) {
-      if (typeof e[k] === 'string') parts.push(e[k]);
-    }
-    for (const k of ['error', 'info', 'cause', 'data']) visit(e[k], depth + 1);
-  };
-  visit(err, 0);
-  return parts.join(' ').toLowerCase();
-}
-
-/**
  * True when `err` is a TRANSIENT rate-limit / throttle from the RPC provider —
  * keyed on the provider HTTP status (`429`; `errorStatus` recurses nested
  * `cause`/`info`/`error` fields) plus a rate-limit / quota / compute-unit
@@ -503,7 +480,7 @@ function allErrorText(err: unknown): string {
  */
 function isTransientThrottle(err: unknown): boolean {
   if (errorStatus(err) === 429) return true;
-  const msg = allErrorText(err);
+  const msg = collectEvmErrorText(err);
   return /\b(too many requests|rate[ -]?limit|throttl|compute units?|capacity|quota|credits?|(daily|monthly|request|compute)[^.]{0,12}\blimit|limit reached|over (the )?limit)\b/.test(msg);
 }
 
@@ -517,7 +494,7 @@ function isTransientThrottle(err: unknown): boolean {
 function isHistoricalStateUnavailable(err: unknown): boolean {
   if (isTransientThrottle(err)) return false;
 
-  const msg = allErrorText(err);
+  const msg = collectEvmErrorText(err);
 
   // Genuine "node lacks historical state" shapes → degrade to the genesis log scan.
   // NOTE: a bare `header not found` is intentionally NOT here — nodes also return
@@ -989,6 +966,9 @@ export class EVMChainAdapterBase {
 
   protected readonly contextGraphRegistryScanCursor: ContextGraphRegistryScanCursor;
 
+  /** Finalized authority scan watermarks owned by this adapter lifecycle. */
+  protected readonly contextGraphAuthorityHistory: ContextGraphAuthorityHistoryCache;
+
   /**
    * eth_getLogs block-window for the pre-10.0.4 getMaxKaNumberForAuthor fallback
    * scan (adapter-level config `kaHighWaterScanPageSize`; non-integer / `< 1`
@@ -1014,6 +994,7 @@ export class EVMChainAdapterBase {
     this.cachedContractDeployBlocks.clear();
     this.contextGraphNameHashResolver?.invalidateAll();
     this.contextGraphRegistryScanCursor.clearMemoryCache();
+    this.contextGraphAuthorityHistory.clear();
   }
 
   protected clearIdentityIdForAddress(address: string): void {
@@ -1324,6 +1305,10 @@ export class EVMChainAdapterBase {
       deploymentId: this.deploymentId,
       store: config.contextGraphRegistryScanCursorStore,
     });
+    this.contextGraphAuthorityHistory = new ContextGraphAuthorityHistoryCache(
+      undefined,
+      config.localContextGraphAuthorityHistoryStore,
+    );
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;
     this.minPublisherTracWei = config.minPublisherTracWei ?? 0n;
@@ -4366,6 +4351,7 @@ export class EVMChainAdapterBase {
    */
   destroy(): void {
     this.hubRotationPoller.stop();
+    this.contextGraphAuthorityHistory.clear();
     for (const provider of this.providers) {
       try { provider.destroy(); } catch { /* already destroyed / not destroyable */ }
     }

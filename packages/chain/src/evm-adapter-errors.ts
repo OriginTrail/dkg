@@ -23,6 +23,34 @@ export function errorMessage(err: unknown): string {
 }
 
 /**
+ * Flatten the nested text fields used by ethers and managed JSON-RPC
+ * providers. Transport classifiers share this boundary so domain reducers do
+ * not grow their own incomplete error-envelope parsers.
+ */
+export function collectEvmErrorText(err: unknown): string {
+  const parts: string[] = [];
+  const seen = new Set<unknown>();
+  const visit = (value: unknown, depth: number): void => {
+    if (value == null || depth > 5 || seen.has(value)) return;
+    if (typeof value === 'string') {
+      parts.push(value);
+      return;
+    }
+    if (typeof value !== 'object') return;
+    seen.add(value);
+    const record = value as Record<string, unknown>;
+    for (const key of ['message', 'shortMessage', 'reason', 'body']) {
+      if (typeof record[key] === 'string') parts.push(record[key]);
+    }
+    for (const key of ['error', 'info', 'cause', 'data']) {
+      visit(record[key], depth + 1);
+    }
+  };
+  visit(err, 0);
+  return parts.join(' ').toLowerCase();
+}
+
+/**
  * Read the top-level error class name exposed by Error / DOMException shapes.
  * Unlike status and code extraction, this deliberately does not traverse
  * wrappers: a name describes the caught surface error, while nested transport
