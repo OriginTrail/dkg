@@ -34,7 +34,12 @@ import { rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './rpc-failover-client.js';
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
-import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
+import {
+  RpcUsageTracker,
+  createCountingJsonRpcProvider,
+  withRpcUsageConsumer,
+  type RpcUsageWindow,
+} from './rpc-usage.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
@@ -3278,11 +3283,16 @@ export class EVMChainAdapterBase {
               contract = baseContract.connect(provider) as Contract;
               connected.set(provider, contract);
             }
-            const logs = await withTimeout(
+            // This scan bypasses RpcFailoverClient intentionally because it
+            // owns a page-aware provider order and timeout. Establish the same
+            // bounded consumer scope explicitly so a large historical crawl
+            // (notably the pre-10.0.4 KA high-water fallback) cannot collapse
+            // into `consumer=unattributed` in raw eth_getLogs telemetry.
+            const logs = await withRpcUsageConsumer(label, () => withTimeout(
               contract.queryFilter(filter as any, lo, hi),
               KA_HIGH_WATER_PAGE_TIMEOUT_MS,
               `${label} getLogs [${lo}, ${hi}]`,
-            );
+            ));
             metrics.chainRpcTotal.add(1, {
               rpc_method: 'eth_getLogs', outcome: 'ok', retryable: false, chain_id: this.chainId,
             });
