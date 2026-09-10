@@ -48,7 +48,9 @@ describe('daemon chain event shutdown', () => {
       expect(rows.filter(row => row.event === 'entered')).toHaveLength(1);
       expect(rows.find(row => row.event === 'store-close')).toMatchObject({ bound: null, candidate: false, physicalRuns: 0 });
       expect(rows.find(row => row.event === 'dashboard-close')).toMatchObject({ cursor: 10 });
-      expect(events.indexOf('physical-read-settled')).toBeLessThan(events.indexOf('store-close'));
+      const physicalReadSettled = events.indexOf('physical-read-settled');
+      expect(physicalReadSettled).toBeGreaterThanOrEqual(0);
+      expect(physicalReadSettled).toBeLessThan(events.indexOf('store-close'));
       expect(events.indexOf('store-close')).toBeLessThan(events.indexOf('dashboard-close'));
       if (scenario !== 'noncooperative') expect(events).not.toContain('agent-stop-error');
     } finally { await stopLiveDaemon(daemon); }
