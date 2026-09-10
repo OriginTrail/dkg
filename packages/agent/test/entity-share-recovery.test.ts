@@ -450,11 +450,16 @@ describe('entity-share recovery beside malformed KA heads', () => {
         metadataFetcher: { ...fetcher.strategy, snapshotWalk(contextGraphId, manifest) {
           walk = fetcher.strategy.snapshotWalk!(contextGraphId, manifest);
           const current = walk;
-          return { ...current, markResolved(ref, suppressedRows) {
-            expect(durable).toBe(true);
-            expect(owned.get(f.root)).toBe('peer-source');
-            current.markResolved(ref, suppressedRows);
-          } };
+          return {
+            prepare: options => current.prepare(options),
+            resolvedRefsSnapshot: () => current.resolvedRefsSnapshot(),
+            suppressedMetadataRows: ref => current.suppressedMetadataRows(ref),
+            markResolved(ref, suppressedRows) {
+              expect(durable).toBe(true);
+              expect(owned.get(f.root)).toBe('peer-source');
+              current.markResolved(ref, suppressedRows);
+            },
+          };
         } },
       },
       ctx, remotePeerId: 'peer-entity-retry', contextGraphIds: [COVERAGE_CG],
