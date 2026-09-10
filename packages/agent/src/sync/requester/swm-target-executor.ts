@@ -185,7 +185,6 @@ export class SwmTargetExecutorV1 {
       ? {
         kind: 'selected-recovery' as const,
         recoveryGuard: target.mode.recoveryGuard,
-        metadataFetcher: target.metadataFetcher,
         snapshotEvidencePolicy: {
           accepts: ({
             verifiedMetadataTriples,
@@ -202,7 +201,7 @@ export class SwmTargetExecutorV1 {
         },
         snapshotRecoveryOrder: 'recent-balanced' as const,
       }
-      : { kind: 'ordinary' as const, metadataFetcher: target.metadataFetcher };
+      : { kind: 'ordinary' as const };
     const storeInsert = async (quads: Quad[]) => {
       const inserted = await insertWithOversizeGuard(
         (kept) => this.#ports.store.insert(kept, {
@@ -217,6 +216,7 @@ export class SwmTargetExecutorV1 {
     };
     return runSharedMemorySync({
       mode,
+      metadataFetcher: target.metadataFetcher,
       ctx: target.ctx,
       remotePeerId: target.remotePeerId,
       contextGraphIds: [target.contextGraphId],
