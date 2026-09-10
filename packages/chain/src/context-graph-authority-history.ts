@@ -25,7 +25,6 @@ export interface ContextGraphAuthorityHistoryState {
   readonly rosterVersion: number;
   readonly sourceBlockNumber: number;
   readonly sourceBlockHash: string;
-  readonly sourceLogIndex: number;
 }
 
 export type ContextGraphAuthorityHistoryEventName =
@@ -212,7 +211,6 @@ async function loadContextGraphAuthorityHistory(
   },
 ): Promise<ContextGraphAuthorityHistoryState> {
   const previous = input.previous;
-  const cold = previous === undefined;
   const fromBlock = previous === undefined
     ? await input.loadColdFromBlock()
     : previous.throughBlockNumber + 1;
@@ -238,47 +236,69 @@ async function loadContextGraphAuthorityHistory(
   };
   const [created, transfers, publishPolicy, publishAuthority, participantAdds,
     participantRemoves] = await Promise.all([
-    cold ? readCreation() : Promise.resolve([]),
+    previous === undefined ? readCreation() : Promise.resolve([]),
     read('Transfer'),
     read('PublishPolicyUpdated'),
     read('PublishAuthorityUpdated'),
     read('AgentParticipantAdded'),
     read('AgentParticipantRemoved'),
   ]);
-  if (cold && created.length !== 1) {
-    throw new Error(
-      `Context Graph ${input.contextGraphId.toString()} has ${created.length} finalized creation events`,
-    );
-  }
+  const baseline: Readonly<{
+    nameHash: string;
+    ownershipEra: number;
+    policyVersion: number;
+    rosterVersion: number;
+    sourceBlockNumber: number;
+    sourceBlockHash: string;
+  }> = previous === undefined
+    ? (() => {
+        const creation = created[0];
+        if (created.length !== 1 || creation === undefined) {
+          throw new Error(
+            `Context Graph ${input.contextGraphId.toString()} has ${created.length} finalized creation events`,
+          );
+        }
+        if (!creation.nameHash) {
+          throw new Error(
+            `Context Graph ${input.contextGraphId.toString()} creation event has no name hash`,
+          );
+        }
+        return {
+          nameHash: creation.nameHash,
+          ownershipEra: 0,
+          policyVersion: 0,
+          rosterVersion: 0,
+          sourceBlockNumber: creation.blockNumber,
+          sourceBlockHash: creation.blockHash,
+        };
+      })()
+    : {
+        nameHash: previous.nameHash,
+        ownershipEra: previous.ownershipEra,
+        policyVersion: previous.policyVersion,
+        rosterVersion: previous.rosterVersion,
+        sourceBlockNumber: previous.sourceBlockNumber,
+        sourceBlockHash: previous.sourceBlockHash,
+      };
   const policySource = latestEvent([
     ...created,
     ...transfers,
     ...publishPolicy,
     ...publishAuthority,
   ]);
-  const creation = created[0];
-  if (policySource === undefined && previous === undefined) {
-    throw new Error(`Context Graph ${input.contextGraphId.toString()} has no authority history source`);
-  }
-  const sourceBlockNumber = policySource?.blockNumber ?? previous!.sourceBlockNumber;
-  const sourceBlockHash = policySource?.blockHash ?? previous!.sourceBlockHash;
-  const sourceLogIndex = policySource?.index ?? previous!.sourceLogIndex;
-  const creationNameHash = creation?.nameHash;
-  if (previous === undefined && !creationNameHash) {
-    throw new Error(`Context Graph ${input.contextGraphId.toString()} creation event has no name hash`);
-  }
+  const sourceBlockNumber = policySource?.blockNumber ?? baseline.sourceBlockNumber;
+  const sourceBlockHash = policySource?.blockHash ?? baseline.sourceBlockHash;
   const ownershipDelta = transfers.length;
   return Object.freeze({
     throughBlockNumber: input.finalized.number,
     throughBlockHash: input.finalized.hash,
-    nameHash: previous?.nameHash ?? creationNameHash!,
-    ownershipEra: (previous?.ownershipEra ?? 0) + ownershipDelta,
-    policyVersion: (previous?.policyVersion ?? 0)
+    nameHash: baseline.nameHash,
+    ownershipEra: baseline.ownershipEra + ownershipDelta,
+    policyVersion: baseline.policyVersion
       + ownershipDelta + publishPolicy.length + publishAuthority.length,
-    rosterVersion: (previous?.rosterVersion ?? 0)
+    rosterVersion: baseline.rosterVersion
       + ownershipDelta + participantAdds.length + participantRemoves.length,
     sourceBlockNumber,
     sourceBlockHash: sourceBlockHash.toLowerCase(),
-    sourceLogIndex,
   });
 }
