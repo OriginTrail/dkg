@@ -4254,11 +4254,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // jitter instead of launching an eager sweep against the old runtime.
     this.vmReconcileRuntimeReady = true;
     if (this.vmReconcileEnabled()) {
-      this.ensureVmReconcileDispatcher();
+      this.ensureVmReconcileScheduling();
       const runSweep = (): void => {
-        this.runVmReconcileSweep().catch((err: unknown) => {
+        try { this.scheduleVmReconcileSweep(); }
+        catch (err) {
           this.log.warn(ctx, `VM reconcile sweep failed: ${err instanceof Error ? err.message : String(err)}`);
-        });
+        }
       };
       const startupDelayMs = deterministicStartupJitterMs(
         `${this.node.peerId.toString()}\0${this.chain.chainId}`,

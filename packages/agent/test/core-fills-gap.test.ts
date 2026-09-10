@@ -52,7 +52,7 @@ import type {
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import {
-  VmReconcileDispatcher,
+  VmReconcileSchedulingRuntime,
   type OrdinalOutcome,
   type OrdinalRecoveryTarget,
   type PendingOrdinalRecoveryResult,
@@ -95,14 +95,10 @@ interface AgentInternals {
     source: 'live' | 'periodic' | 'manual',
   ): Promise<ContextGraphReconcileResult>;
   runVmReconcileSweep(): Promise<void>;
+  scheduleVmReconcileSweep(): void;
   subscribedContextGraphs: Map<string, { subscribed: boolean; syncMode?: 'on-demand' | 'always-on'; coreHosted?: boolean; onChainId?: string; lastReconciledOrdinal?: number }>;
   gossipRegistered: Set<string>;
-  vmReconcileDispatcher: {
-    triggerLive: (cg: string) => void;
-    triggerPeriodic: (cg: string) => void;
-    tryTriggerPeriodic: (cg: string) => boolean;
-    dispatch?: (cg: string, source: 'live' | 'periodic' | 'manual') => Promise<unknown>;
-  } | null;
+  vmReconcileScheduling: VmReconcileSchedulingRuntime<unknown>;
   store: TripleStore;
   chain: MockChainAdapter & {
     getContextGraphAccessPolicy?: (id: bigint) => Promise<number>;
@@ -2295,19 +2291,12 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
     const liveTriggered: string[] = [];
     const periodicTriggered: string[] = [];
-    internals.vmReconcileDispatcher = {
-      triggerLive: (cg: string) => { liveTriggered.push(cg); },
-      triggerPeriodic: (cg: string) => { periodicTriggered.push(cg); },
-      tryTriggerPeriodic: (cg: string) => {
-        periodicTriggered.push(cg);
-        return true;
-      },
-      dispatch: async (cg: string, source: 'live' | 'periodic' | 'manual') => {
-        if (source === 'periodic') periodicTriggered.push(cg);
-        else if (source === 'live') liveTriggered.push(cg);
-        return {};
-      },
-    };
+    const scheduling = new VmReconcileSchedulingRuntime(async (cg, source) => {
+      if (source === 'periodic') periodicTriggered.push(cg);
+      else if (source === 'live') liveTriggered.push(cg);
+      return {};
+    }, () => undefined);
+    internals.vmReconcileScheduling = scheduling;
 
     await internals.runVmReconcileSweep();
 
@@ -2333,16 +2322,21 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     }
 
     const swept: string[] = [];
-    const dispatcher = new VmReconcileDispatcher(
+    const scheduling = new VmReconcileSchedulingRuntime(
       async (contextGraphId) => { swept.push(contextGraphId); },
       () => undefined,
       { concurrency: 1, maxPending: 1 },
     );
-    internals.vmReconcileDispatcher = dispatcher;
+    const dispatcher = scheduling;
+    internals.vmReconcileScheduling = scheduling;
 
-    for (let sweep = 0; sweep < 4; sweep += 1) {
-      await internals.runVmReconcileSweep();
+    for (let sweep = 0; sweep < contextGraphIds.length; sweep += 1) {
+      internals.scheduleVmReconcileSweep();
+      // maxPending=1 is reserved for foreground work: only the active slot is
+      // available to this background-only sweep, so one CG advances per tick.
+      expect(dispatcher.snapshot().queued).toBe(0);
       await dispatcher.waitForIdle();
+      expect(swept).toHaveLength(sweep + 1);
     }
 
     expect(new Set(swept)).toEqual(new Set(contextGraphIds));
@@ -2502,12 +2496,11 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     });
 
     const liveTriggered: string[] = [];
-    internals.vmReconcileDispatcher = {
-      triggerLive: (contextGraphId: string) => { liveTriggered.push(contextGraphId); },
-      triggerPeriodic: () => undefined,
-      tryTriggerPeriodic: () => true,
-      dispatch: async () => ({}),
-    };
+    const scheduling = new VmReconcileSchedulingRuntime(async () => ({}), () => undefined);
+    vi.spyOn(scheduling, 'triggerLive').mockImplementation(
+      (contextGraphId: string) => { liveTriggered.push(contextGraphId); },
+    );
+    internals.vmReconcileScheduling = scheduling;
 
     const pendingResult = await internals.executeVmReconcileForCg(pendingCg, 'periodic');
     expect(pendingResult).toMatchObject({
@@ -5631,12 +5624,13 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     chain.getContextGraphKCCount = async () => 0n;
 
     const sources: string[] = [];
-    (internals as any).vmReconcileDispatcher = {
-      dispatch: async (_key: string, source: string) => {
+    internals.vmReconcileScheduling = new VmReconcileSchedulingRuntime(
+      async (_key: string, source: string) => {
         sources.push(source);
         return {};
       },
-    };
+      () => undefined,
+    );
 
     await internals.runVmReconcileForCg('priority-current', 'periodic');
     await internals.runVmReconcileForCg('priority-current', 'live');
