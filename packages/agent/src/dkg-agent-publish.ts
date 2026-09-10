@@ -107,7 +107,7 @@ import {
   formatPublishAuthorNotCustodialMessage,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { readPublishAuthorSelection, publishAuthorCallerIdentity, type PublishAuthorSelectionOptions } from './publish-author-selection.js';
+import { readPublishIdentityPlan, readResidentAuthorSelection, type PublishIdentityPlan, type PublishAuthorSelectionOptions } from './publish-author-selection.js';
 import {
   deleteByPatternWithoutCount,
   GraphManager,
@@ -859,21 +859,20 @@ function recordPublishOutcome(
   getMetrics().publishDuration.record(Date.now() - startedAt, attrs);
 }
 
-/** Resolve one immutable selection without presenting an unvalidated resident selector as a string. */
+/** Resolve the snapshotted plan without revisiting public option syntax. */
 async function resolvePublishAuthorSelection(
   agent: DKGAgent,
   contextGraphId: string,
   name: string,
-  selection: ReturnType<typeof readPublishAuthorSelection>,
-  defaultCallerHint: string,
+  selection: PublishIdentityPlan['author'],
   subGraphName?: string,
 ): Promise<string> {
   if (selection.mode === 'author') return selection.agentAddress;
-  const callerHint = publishAuthorCallerIdentity(selection) ?? defaultCallerHint;
+  const { callerHint } = selection;
   return (await resolveFinalizedAssertionAuthor(agent.store, {
     contextGraphId, name, subGraphName,
     callerAgentAddress: callerHint,
-    selectedAuthorAgentAddress: selection.mode === 'residentAuthor' ? selection.selectedAuthorAgentAddress : undefined,
+    selectedAuthor: selection.residentSelection,
   })) ?? callerHint;
 }
 
@@ -4384,9 +4383,7 @@ export class PublishMethods extends DKGAgentBase {
       callerAgentAddress: opts.callerAgentAddress,
       // Presence, not truthiness: '' / null are SUPPLIED selectors and must fail closed
       // downstream, not silently fall back to normal resolution.
-      ...(opts.selectedAuthorAgentAddress !== undefined
-        ? { selectedAuthorAgentAddress: opts.selectedAuthorAgentAddress }
-        : {}),
+      selectedAuthor: readResidentAuthorSelection(opts.selectedAuthorAgentAddress),
     });
   }
 
@@ -4399,9 +4396,9 @@ export class PublishMethods extends DKGAgentBase {
     name: string,
     opts?: PublishAuthorSelectionOptions & { subGraphName?: string },
   ): Promise<string> {
+    const identity = readPublishIdentityPlan(opts, this.defaultAgentAddress ?? this.peerId);
     return resolvePublishAuthorSelection(
-      this, contextGraphId, name, readPublishAuthorSelection(opts),
-      this.defaultAgentAddress ?? this.peerId, opts?.subGraphName,
+      this, contextGraphId, name, identity.author, opts?.subGraphName,
     );
   }
 
@@ -4437,22 +4434,12 @@ export class PublishMethods extends DKGAgentBase {
       publisherOverride?: DKGPublisher;
     },
   ): Promise<KnowledgeAssetVmPublishRequest> {
-    const identityOptions = opts && { ...opts };
-    const authorSelection = readPublishAuthorSelection(identityOptions);
-    // GH#1778 — the ENQUEUING caller (token holder for the route path, or an
-    // explicit author selector for a direct caller), persisted alongside the
-    // resolved author so the async worker stamps the CG curator with the caller
-    // (matching the sync lane), NOT the resolved member author. Left undefined
-    // for a tokenless enqueue so `stampAddressCurator` falls back to the node
-    // default — again exactly as the sync lane does.
-    // Preserve the flat contract's explicit empty caller precedence over an
-    // author override, and snapshot it before asynchronous author resolution.
-    const callerAgentAddress = identityOptions?.authorSelection === undefined
-      ? identityOptions?.callerAgentAddress ?? identityOptions?.agentAddress
-      : publishAuthorCallerIdentity(authorSelection);
+    const identity = readPublishIdentityPlan(opts, this.defaultAgentAddress ?? this.peerId);
+    // Persist the enqueuing caller independently from the resolved member author.
+    // The normalization boundary owns legacy empty-caller and tokenless behavior.
+    const callerAgentAddress = identity.enqueueCaller;
     const agentAddress = await resolvePublishAuthorSelection(
-      this, contextGraphId, name, authorSelection,
-      this.defaultAgentAddress ?? this.peerId, opts?.subGraphName,
+      this, contextGraphId, name, identity.author, opts?.subGraphName,
     );
     const publisher = opts?.publisherOverride ?? this.publisher;
     const history = await this.assertion.history(contextGraphId, name, {

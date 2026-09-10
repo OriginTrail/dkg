@@ -35,6 +35,11 @@ export interface AssertionAuthorQueryStore {
   }>;
 }
 
+/** A snapshotted selector; malformed public input still reports resident candidates. */
+export type ResidentAssertionAuthorSelection =
+  | { readonly kind: 'address'; readonly agentAddress: string }
+  | { readonly kind: 'malformed'; readonly displayValue: string };
+
 export interface ResolveFinalizedAssertionAuthorParams {
   contextGraphId: string;
   name: string;
@@ -52,7 +57,7 @@ export interface ResolveFinalizedAssertionAuthorParams {
    * authorship (an address that is not resident fails closed) and it never
    * changes the caller identity used for CG registration / curator stamping.
    */
-  selectedAuthorAgentAddress?: unknown;
+  selectedAuthor?: ResidentAssertionAuthorSelection;
 }
 
 /**
@@ -85,7 +90,7 @@ export async function resolveFinalizedAssertionAuthor(
     name,
     subGraphName,
     callerAgentAddress,
-    selectedAuthorAgentAddress,
+    selectedAuthor,
   }: ResolveFinalizedAssertionAuthorParams,
 ): Promise<string | undefined> {
   if (!validateAssertionName(name).valid) return undefined;
@@ -150,15 +155,17 @@ export async function resolveFinalizedAssertionAuthor(
   // silent-drop this option exists to prevent. Only `undefined` is absent, matching the
   // HTTP boundary, which 400s every other malformed value. Anything present that names no
   // resident candidate fails closed below.
-  if (selectedAuthorAgentAddress !== undefined) {
-    const selected = typeof selectedAuthorAgentAddress === 'string'
-      ? candidates.find((a) => knowledgeAssetAgentAddressesEqual(a, selectedAuthorAgentAddress))
+  if (selectedAuthor !== undefined) {
+    const selected = selectedAuthor.kind === 'address'
+      ? candidates.find((a) => knowledgeAssetAgentAddressesEqual(a, selectedAuthor.agentAddress))
       : undefined;
+    const displayValue = selectedAuthor.kind === 'address'
+      ? selectedAuthor.agentAddress : selectedAuthor.displayValue;
     if (selected) return selected;
     throw Object.assign(
       new Error(
         `Cannot publish "${name}" in context graph "${contextGraphId}": selected author ` +
-          `${selectedAuthorAgentAddress} has no finalized knowledge asset with this name.`,
+          `${displayValue} has no finalized knowledge asset with this name.`,
       ),
       {
         code: ASSERTION_AUTHOR_NOT_RESIDENT_CODE,

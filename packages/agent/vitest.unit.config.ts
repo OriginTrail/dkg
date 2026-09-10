@@ -26,6 +26,7 @@ export default defineConfig({
       "test/imported-artifact.test.ts",
       "test/publish-finalized-agent-lane.test.ts",
       "test/publish-foreign-author-resolution.test.ts",
+      "test/publish-author-selection.test.ts",
       "test/durable-integrity-seal-assertion-version.test.ts",
       "test/iri-term.test.ts",
       "test/promote-async-default-agent.test.ts",
