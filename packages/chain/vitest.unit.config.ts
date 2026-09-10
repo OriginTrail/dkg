@@ -26,6 +26,7 @@ export default defineConfig({
       'test/filter-error-silencer.test.ts',
       'test/keyed-mutex-observability.test.ts',
       'test/mock-adapter-publishing-conviction-v10.test.ts',
+      'test/mock-adapter-parity.test.ts',
     ],
     exclude: ['**/node_modules/**', '**/dist/**'],
     testTimeout: 30_000,
