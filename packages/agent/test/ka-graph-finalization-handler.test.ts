@@ -41,6 +41,8 @@ import {
   openSqliteFinalizationRecoveryStore,
   type SqliteFinalizationRecoveryStore,
 } from '../src/finalization-recovery-sqlite-store.js';
+import type { FinalizationRecoveryEligibility } from
+  '../src/finalization-recovery-eligibility.js';
 import type { FinalizationRecoveryStore } from '../src/finalization-recovery-store.js';
 import { protobufScalarToBigInt } from '../src/protobuf-scalars.js';
 import {
@@ -147,10 +149,12 @@ async function closeInbox(inbox: SqliteFinalizationRecoveryStore | undefined): P
 function recoveryOptions(
   recoveryStore: FinalizationRecoveryStore,
   localTopicOnChainContextGraphId = '42',
+  finalizationRecoveryEligibility: FinalizationRecoveryEligibility = async () => true,
 ) {
   return {
     recoveryStore,
     resolveContextGraphOnChainId: async () => localTopicOnChainContextGraphId,
+    finalizationRecoveryEligibility,
   };
 }
 
