@@ -28,6 +28,9 @@ import {
   NETWORK_ID,
   ON_CHAIN_CONTEXT_GRAPH_ID,
   PRIVATE_MEMBER_ROLES,
+  PROJECTION_EVIDENCE,
+  UPDATED_PROJECTION_EVIDENCE,
+  UPDATED_PROJECTION_QUADS,
   createCatalogAssets,
   createFinalizedChainFixture,
   createPrivatePolicyAndRoster,
@@ -38,7 +41,10 @@ import {
 } from './fixture.mjs';
 import { classifyExpectedPrivateCatalogDenialV1 } from './denial-evidence.mjs';
 import { sealExecutedRuntimeManifestV1 } from '../../../../devnet/rfc64-runtime-load-hook.mts';
-import { readPrivateCatalogGraphCountEvidence } from './memory-evidence.mjs';
+import {
+  hasExactPrivateCatalogMemoryContents,
+  readPrivateCatalogGraphCountEvidence,
+} from './memory-evidence.mjs';
 
 const ROLE = requiredEnv('DKG_RFC64_PRIVATE_ROLE');
 const MODE = requiredEnv('DKG_RFC64_PRIVATE_MODE');
@@ -105,7 +111,10 @@ async function createAgent(manifest, finalizedRuntime) {
         hubAddress: CONTEXT_GRAPH_STORAGE,
         operationalKeys: [rolePrivateKey(ROLE)],
       },
-      contextGraphSubscriptionStore: seededSubscriptionStore(CONTEXT_GRAPH_ID),
+      contextGraphSubscriptionStore: seededSubscriptionStore(
+        CONTEXT_GRAPH_ID,
+        ON_CHAIN_CONTEXT_GRAPH_ID,
+      ),
     };
   }
   const base = {
@@ -119,7 +128,7 @@ async function createAgent(manifest, finalizedRuntime) {
     syncSharedMemoryOnConnect: false,
     syncReconcilerEnabled: false,
     syncOnConnectEnabled: false,
-    durableSyncEnabled: false,
+    durableSyncEnabled: true,
     agentProfileHeartbeatMs: 0,
     ...chainRuntime,
   };
@@ -147,7 +156,9 @@ async function createAgent(manifest, finalizedRuntime) {
     });
   }
 
-  const providerPeerIds = [peerIds.owner, peerIds.provider2];
+  const completeSwmProviders = ROLE === 'provider2'
+    ? [peerIds.owner]
+    : [peerIds.provider2];
   return DKGAgent.create({
     ...base,
     networkIdentity: {
@@ -170,9 +181,9 @@ async function createAgent(manifest, finalizedRuntime) {
           rosterEnvelope,
           targets: [{
             authorAddress: roleAgentAddress('owner'),
-            providers: providerPeerIds,
+            providers: completeSwmProviders,
           }],
-          completeSwmProviders: providerPeerIds,
+          completeSwmProviders,
         }],
         retryIntervalMs: 1_000,
       },
@@ -207,6 +218,13 @@ async function handle(command) {
       return;
     case 'inspect':
       emit('inspection', requestId, await inspect(command.expectedHeadDigest));
+      return;
+    case 'inspect-persisted':
+      emit(
+        'persisted-inspection',
+        requestId,
+        await inspect(command.expectedHeadDigest, { includeNonmemberQuery: false }),
+      );
       return;
     case 'sync-denied':
       await proveDenied(command, requestId);
@@ -249,6 +267,25 @@ async function publishCatalog(requestId) {
       catalogIssuerDelegationExpiresAt: '1893456000000',
     });
   }
+  // The catalog establishes the finalized VM baseline first. These staged
+  // version-2 snapshots represent a later, not-yet-finalized SWM generation,
+  // so finalized version-1 twin retirement must preserve them.
+  for (const [index, asset] of assets.entries()) {
+    const kaNumber = ASSET_NUMBERS[index];
+    if (kaNumber === undefined) throw new Error('catalog fixture asset number is missing');
+    await agent.publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId: `rfc64-private-release-gate-v2-${kaNumber}`,
+      kaUal: asset.seal.kaUal,
+      assertionVersion: '2',
+      quads: UPDATED_PROJECTION_QUADS,
+      privateTripleCount: 0,
+      publisherPeerId: agent.peerId,
+      accessPolicy: 'ownerOnly',
+      agentAddress: roleAgentAddress('owner'),
+      timestamp: new Date(),
+    });
+  }
   if (applied === undefined) throw new Error('catalog upsert produced no applied head');
   emit('published', requestId, {
     headObjectDigest: applied.currentCatalogHeadDigest,
@@ -266,11 +303,12 @@ async function waitForBootstrap(command, requestId) {
   while (Date.now() < deadline) {
     await agent.whenRfc64PublicCatalogBootstrapIdleV1();
     last = agent.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0] ?? null;
-    if (
+    const bootstrapApplied = (
       last?.outcome === 'applied'
       && (command.expectedHeadDigest === undefined
         || last.appliedHeadDigest === command.expectedHeadDigest)
-    ) {
+    );
+    if (bootstrapApplied && await hasExactLocalMemoryContents()) {
       emit('bootstrap-applied', requestId, {
         outcome: last.outcome,
         providerPeerId: last.providerPeerId,
@@ -283,10 +321,48 @@ async function waitForBootstrap(command, requestId) {
     }
     await delay(100);
   }
-  throw new Error(`bootstrap did not apply the expected head; last outcome ${last?.outcome ?? 'none'}`);
+  const graphCounts = await readPrivateCatalogGraphCountEvidence(agent.store, {
+    assetNumbers: ASSET_NUMBERS,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    authorAddress: roleAgentAddress('owner'),
+    networkId: NETWORK_ID,
+  });
+  const registeredAuthority = await agent.resolveRegisteredContextGraphAuthority(
+    CONTEXT_GRAPH_ID,
+  ).catch((error) => ({ error: boundedErrorChain(error) }));
+  const memberRecoveryGate = await agent.getMemberRecoveryGate(
+    CONTEXT_GRAPH_ID,
+  ).catch((error) => ({ error: boundedErrorChain(error) }));
+  throw new Error(
+    `bootstrap did not converge; graphCounts=${JSON.stringify(graphCounts)}; `
+    + `memberRecoveryGate=${JSON.stringify(memberRecoveryGate)}; `
+    + `registeredAuthority=${JSON.stringify(registeredAuthority, bigintToDecimal)}; `
+    + `last=${JSON.stringify(last)}`,
+  );
 }
 
-async function inspect(expectedHeadDigest) {
+async function hasExactLocalMemoryContents() {
+  const graphCounts = await readPrivateCatalogGraphCountEvidence(agent.store, {
+    assetNumbers: ASSET_NUMBERS,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    authorAddress: roleAgentAddress('owner'),
+    networkId: NETWORK_ID,
+  });
+  return hasExactPrivateCatalogMemoryContents(
+    { graphCounts },
+    {
+      assetNumbers: ASSET_NUMBERS,
+      swm: {
+        projection: UPDATED_PROJECTION_EVIDENCE,
+        assertionVersion: '2',
+        shareOperationIdPrefix: 'rfc64-private-release-gate-v2-',
+      },
+      vm: { projection: PROJECTION_EVIDENCE, assertionVersion: '1' },
+    },
+  );
+}
+
+async function inspect(expectedHeadDigest, { includeNonmemberQuery = true } = {}) {
   const authorAddress = roleAgentAddress('owner');
   const scopeDigest = computeAuthorCatalogScopeDigestV1({
     networkId: NETWORK_ID,
@@ -307,8 +383,9 @@ async function inspect(expectedHeadDigest) {
     assetNumbers: ASSET_NUMBERS,
     contextGraphId: CONTEXT_GRAPH_ID,
     authorAddress,
+    networkId: NETWORK_ID,
   });
-  const outsiderResult = ROLE === 'outsider'
+  const outsiderResult = ROLE === 'outsider' || !includeNonmemberQuery
     ? null
     : await agent.query(
       'SELECT ?name WHERE { <https://example.org/alice> <https://schema.org/name> ?name }',
@@ -326,7 +403,9 @@ async function inspect(expectedHeadDigest) {
       ? null
       : applied?.currentCatalogHeadDigest === expectedHeadDigest,
     graphCounts,
-    outsiderVisibleVmBindings: outsiderResult?.bindings?.length ?? 0,
+    outsiderVisibleVmBindings: includeNonmemberQuery
+      ? outsiderResult?.bindings?.length ?? 0
+      : null,
     receiverStats: agent.rfc64PublicCatalogStatsV1()?.receiver ?? null,
     rpcCalls: rpc === undefined ? 0 : [
       'eth_getBlockByNumber',
@@ -362,11 +441,23 @@ async function revokeReceiver(requestId) {
   ) {
     throw new Error('provider2 did not adopt the finalized receiver revocation');
   }
-  agent.acceptRfc64CatalogAccessSnapshotV1({
+  const catalogService = agent.rfc64PublicCatalogServiceV1;
+  if (catalogService === undefined) {
+    throw new Error('provider2 has no RFC-64 catalog service');
+  }
+  const accepted = catalogService.acceptAuthoritativePolicySnapshot({
     policy: authority.policy,
     policyDigest: authority.policyDigest,
     roster: authority.roster,
   });
+  if (
+    accepted.roster?.version !== expected.roster.version
+    || accepted.roster.members.some(
+      ({ agentAddress }) => agentAddress === roleAgentAddress('receiver'),
+    )
+  ) {
+    throw new Error('provider2 did not accept the finalized receiver revocation');
+  }
   emit('receiver-revoked', requestId, {
     policyDigest: authority.policyDigest,
     rosterVersion: authority.roster.version,
@@ -402,12 +493,13 @@ async function proveDenied(command, requestId) {
   }
 }
 
-function seededSubscriptionStore(contextGraphId) {
+function seededSubscriptionStore(contextGraphId, onChainId) {
   const records = new Map([[contextGraphId, {
     id: contextGraphId,
     subscribed: true,
     synced: false,
     syncScoped: true,
+    onChainId,
   }]]);
   return {
     loadAll: async () => [...records.values()].map((record) => ({ ...record })),
@@ -456,6 +548,10 @@ function boundedTimeout(value) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function bigintToDecimal(_key, value) {
+  return typeof value === 'bigint' ? value.toString(10) : value;
 }
 
 process.on('SIGTERM', () => { void shutdown(0); });

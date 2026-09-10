@@ -50,6 +50,21 @@ export const PROJECTION_NQUADS = canonicalGraphlessProjectionNQuads(PROJECTION_Q
 export const PROJECTION = new TextEncoder().encode(`${PROJECTION_NQUADS}\n`);
 export const PROJECTION_EVIDENCE = computeGraphlessMemoryEvidence(PROJECTION_QUADS);
 export const PROJECTION_DIGEST = PROJECTION_EVIDENCE.digest;
+export const UPDATED_PROJECTION_QUADS = Object.freeze([
+  Object.freeze({
+    subject: 'https://example.org/alice',
+    predicate: 'https://schema.org/age',
+    object: '"43"^^<http://www.w3.org/2001/XMLSchema#integer>',
+  }),
+  Object.freeze({
+    subject: 'https://example.org/alice',
+    predicate: 'https://schema.org/name',
+    object: '"Alice v2"',
+  }),
+]);
+export const UPDATED_PROJECTION_EVIDENCE = computeGraphlessMemoryEvidence(
+  UPDATED_PROJECTION_QUADS,
+);
 export const PRIVATE_MEMBER_ROLES = Object.freeze(['owner', 'provider2', 'receiver']);
 export const DEPLOYMENT = Object.freeze({
   networkId: NETWORK_ID,
