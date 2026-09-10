@@ -7,23 +7,69 @@ import type {
   FetchRequest,
 } from 'ethers';
 import { errorMessage } from './evm-adapter-errors.js';
+import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
 
 const rpcRequestAbortContext = new AsyncLocalStorage<AbortSignal>();
 
 /** Bind one caller-owned cancellation signal to the raw ethers HTTP request. */
 export function withRpcRequestAbortSignal<T>(signal: AbortSignal, fn: () => T): T {
-  return rpcRequestAbortContext.run(signal, fn);
+  const parentSignal = rpcRequestAbortContext.getStore();
+  return rpcRequestAbortContext.run(
+    parentSignal === undefined ? signal : AbortSignal.any([parentSignal, signal]),
+    fn,
+  );
 }
 
 export function activeRpcRequestAbortSignal(): AbortSignal | undefined {
   return rpcRequestAbortContext.getStore();
 }
 
-function throwAbortReason(signal: AbortSignal): never {
+/** Normalize caller/deadline cancellation consistently at every transport gate. */
+export function throwRpcRequestAbortReason(signal: AbortSignal): never {
   if (signal.reason instanceof Error) throw signal.reason;
   const error = new Error(typeof signal.reason === 'string' ? signal.reason : 'RPC request aborted');
   error.name = 'AbortError';
   throw error;
+}
+
+/**
+ * Run an entire provider attempt inside a cancellable deadline. The signal is
+ * visible both to governor admission and to the concrete HTTP transport, while
+ * the explicit race keeps the caller's timeout prompt even if third-party code
+ * is temporarily between cancellable stages (for example in retry backoff).
+ */
+export async function withRpcRequestTimeout<T>(
+  timeoutMs: number,
+  label: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const timeoutController = new AbortController();
+  const parentSignal = activeRpcRequestAbortSignal();
+  const signal = parentSignal === undefined
+    ? timeoutController.signal
+    : AbortSignal.any([parentSignal, timeoutController.signal]);
+  const timeoutError = createRpcTimeoutError(`${label} timed out after ${timeoutMs}ms`);
+  const timer = setTimeout(() => timeoutController.abort(timeoutError), timeoutMs);
+  timer.unref?.();
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => {
+      try {
+        throwRpcRequestAbortReason(signal);
+      } catch (error) {
+        reject(error);
+      }
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+  try {
+    const attempt = Promise.resolve(withRpcRequestAbortSignal(signal, fn));
+    return await Promise.race([attempt, aborted]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
 }
 
 /**
@@ -38,7 +84,7 @@ export const cancellableRpcGetUrl: FetchGetUrlFunc = async (
 ) => {
   signal?.checkSignal();
   const callerSignal = activeRpcRequestAbortSignal();
-  if (callerSignal?.aborted) throwAbortReason(callerSignal);
+  if (callerSignal?.aborted) throwRpcRequestAbortReason(callerSignal);
 
   const controller = new AbortController();
   let cancelled = false;
@@ -81,7 +127,7 @@ export const cancellableRpcGetUrl: FetchGetUrlFunc = async (
       body: body.length > 0 ? body : null,
     };
   } catch (error) {
-    if (callerCancelled && callerSignal) throwAbortReason(callerSignal);
+    if (callerCancelled && callerSignal) throwRpcRequestAbortReason(callerSignal);
     if (cancelled) {
       throw Object.assign(new Error('RPC request cancelled', { cause: error }), {
         code: 'CANCELLED',

@@ -159,6 +159,9 @@ export function isRetryableRpcError(err: unknown): boolean {
     || code === 'NETWORK_ERROR' || code === 'ECONNRESET' || code === 'ECONNREFUSED'
     || code === 'ETIMEDOUT' || code === 'ENOTFOUND' || code === 'EAI_AGAIN'
     || code === 'UNKNOWN_ERROR' || code === 'BAD_DATA'
+    // Local capacity exhaustion is transient, but failover loops special-case
+    // it because every endpoint in the process shares the same governor.
+    || code === 'RPC_REQUEST_GOVERNOR_QUEUE_FULL'
     // Our own synthetic "all configured RPC endpoints exhausted" code — by
     // definition retryable, regardless of the aggregated message text.
     || code === 'RPC_ENDPOINTS_EXHAUSTED') {

@@ -42,7 +42,7 @@
 import type { SignedTransactionEnvelope } from './chain-adapter.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { withSpan, getMetrics } from '@origintrail-official/dkg-core';
-import { withTimeout, isRetryableRpcError, isThrottleRpcError, isKnownTransactionError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
+import { isRetryableRpcError, isThrottleRpcError, isKnownTransactionError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { errorCode, errorMessage, errorRetryAfterMs } from './evm-adapter-errors.js';
 import { noteRpcFailover, noteRpcExhaustion, notePreferredEndpoint, noteRpcServed, rpcHost } from './rpc-failover-log.js';
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
@@ -53,7 +53,11 @@ import {
   type RpcEndpointExhaustionKind,
 } from './chain-rpc-transport-error.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
-import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
+import {
+  withRpcRequestAbortSignal,
+  withRpcRequestTimeout,
+} from './rpc-request-transport.js';
+import { isRpcRequestGovernorQueueFullError } from './rpc-request-governor.js';
 import {
   RPC_READ_STALL_TIMEOUT_MS,
   RPC_LOG_SCAN_TIMEOUT_MS,
@@ -489,17 +493,17 @@ export class RpcFailoverClient {
         );
         const rpcSigner = this.rebindSigner(signer, endpoint.provider);
         const connected = this.rebindContract(contract, rpcSigner) as any;
-        const populated = await withTimeout<ethers.TransactionRequest>(
-          connected[method].populateTransaction(...args) as Promise<ethers.TransactionRequest>,
+        const populated = await withRpcRequestTimeout<ethers.TransactionRequest>(
           RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
           `${label} transaction population via RPC #${i + 1}`,
+          () => connected[method].populateTransaction(...args) as Promise<ethers.TransactionRequest>,
         );
         if (opts?.gasLimitBufferBps && populated.gasLimit == null) {
           try {
-            const est = (await withTimeout<bigint>(
-              connected[method].estimateGas(...args) as Promise<bigint>,
+            const est = (await withRpcRequestTimeout<bigint>(
               RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
               `${label} gas estimation via RPC #${i + 1}`,
+              () => connected[method].estimateGas(...args) as Promise<bigint>,
             ));
             populated.gasLimit = (est * BigInt(10_000 + opts.gasLimitBufferBps)) / 10_000n;
           } catch (estErr) {
@@ -520,10 +524,10 @@ export class RpcFailoverClient {
             );
           }
         }
-        const signed = await withTimeout(
-          this.signPopulated(rpcSigner, populated),
+        const signed = await withRpcRequestTimeout(
           RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
           `${label} transaction signing via RPC #${i + 1}`,
+          () => this.signPopulated(rpcSigner, populated),
         );
         // Signed on this endpoint → 'nonceWrite' marks it WRITE-proven (nonce-safe)
         // so it's preferred for the read-your-write ops that follow (the caller's
@@ -532,6 +536,7 @@ export class RpcFailoverClient {
         noteRpcServed(`${label} preparation`, endpoint.rpcUrl, { mode: 'read', key: this.servedWriteKey('tx-preparation') });
         return signed;
       } catch (err) {
+        if (isRpcRequestGovernorQueueFullError(err)) throw err;
         if (!isRetryableRpcError(err)) throw err;
         lastRetryable = err;
         attempt.recordFailure(); // de-prefer a failed backend
@@ -594,10 +599,10 @@ export class RpcFailoverClient {
                 RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
                 `${label} chainId validation via RPC #${i + 1}`,
               );
-              await withTimeout(
-                provider.broadcastTransaction(signedTx),
+              await withRpcRequestTimeout(
                 RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
                 `${label} broadcast via RPC #${i + 1}`,
+                () => provider.broadcastTransaction(signedTx),
               );
               span.setAttribute('dkg.tx_hash', txHash);
               this.recordRpcOutcome('eth_sendRawTransaction', 'ok');
@@ -605,6 +610,7 @@ export class RpcFailoverClient {
               noteRpcServed(`${label} broadcast`, endpoint.rpcUrl, { mode: 'write' });
               return;
             } catch (err) {
+              if (isRpcRequestGovernorQueueFullError(err)) throw err;
               if (isKnownTransactionError(err)) {
                 // Already-known / already-mined tx is success for our purposes.
                 span.setAttribute('dkg.tx_hash', txHash);
@@ -806,6 +812,7 @@ export class RpcFailoverClient {
         options.onServed(endpoint, out);
         return out;
       } catch (err) {
+        if (isRpcRequestGovernorQueueFullError(err)) throw err;
         if (!options.isRetryable(err)) throw err;
         lastRetryable = err;
         if (!isThrottleRpcError(err)) {
@@ -874,7 +881,7 @@ export class RpcFailoverClient {
     if (remainingMs <= 0) {
       throw createRpcTimeoutError(`${label} exceeded its endpoint-attempt deadline`);
     }
-    return withTimeout(stage(), remainingMs, label);
+    return withRpcRequestTimeout(remainingMs, label, stage);
   }
 
   /**
@@ -931,12 +938,15 @@ export class RpcFailoverClient {
     timeoutLabel: string,
   ): Promise<void> {
     if (!this.validateEndpoint) return;
-    const validation = this.validateEndpoint(endpoint);
     if (timeoutMs == null) {
-      await validation;
+      await this.validateEndpoint(endpoint);
       return;
     }
-    await withTimeout(validation, timeoutMs, timeoutLabel);
+    await withRpcRequestTimeout(
+      timeoutMs,
+      timeoutLabel,
+      () => this.validateEndpoint!(endpoint),
+    );
   }
 
   /** Rebind a SIGNER to `provider` for one per-endpoint populate+sign attempt. */

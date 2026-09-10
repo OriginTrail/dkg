@@ -24,6 +24,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import {
   ChainRpcTransportError,
+  RpcRequestGovernor,
   noteRpcFailover,
   noteRpcExhaustion,
   notePreferredEndpoint,
@@ -43,6 +44,7 @@ import {
 import {
   buildRfc64CatalogConfigurationEvidenceV1,
   handleStatusRoutes,
+  probeRpcEndpoint,
 } from '../src/daemon/routes/status.js';
 import { sanitizeRfc64CatalogShadowExecutionStatusV1 } from
   '../src/daemon/routes/rfc64-status-contract.js';
@@ -72,6 +74,41 @@ function resolveStatusActivationState(config: Record<string, unknown>) {
     resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
   ).activationState;
 }
+
+describe('daemon direct RPC probe admission', () => {
+  it('uses the shared governor and cancels before transport when capacity is unavailable', async () => {
+    let hits = 0;
+    const rpc = createServer((_req, res) => {
+      hits += 1;
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x10' }));
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 0.1,
+      foregroundReservePercent: 0,
+      burstRequests: 1,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
+    await governor.acquire('foreground');
+    try {
+      const result = await probeRpcEndpoint(
+        `http://127.0.0.1:${address.port}`,
+        0,
+        governor,
+      );
+      expect(result).toMatchObject({ ok: false, error: 'RPC health probe timed out' });
+      expect(hits).toBe(0);
+      expect(governor.snapshot().foregroundQueued).toBe(0);
+      expect(governor.snapshot().cancelled).toBeGreaterThan(0);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  }, 10_000);
+});
 
 async function requestStatusWithAgent(
   agentOverrides: Record<string, unknown>,

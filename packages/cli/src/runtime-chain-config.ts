@@ -1,6 +1,6 @@
-import {
+import type {
+  EVMAdapterConfig,
   RpcRequestGovernor,
-  type EVMAdapterConfig,
 } from '@origintrail-official/dkg-chain';
 import {
   resolveApprovalPolicy,
@@ -18,10 +18,24 @@ export type RuntimeEvmChainConfig = Pick<
   | 'rpcRequestGovernor'
 >;
 
+/** Pure resolved values before the composition root attaches process state. */
+export type RuntimeEvmChainConfigProjection = Omit<
+  RuntimeEvmChainConfig,
+  'rpcRequestGovernor'
+>;
+
+/** Bind an explicitly process-owned governor to a pure resolved projection. */
+export function bindRuntimeRpcRequestGovernor(
+  projected: RuntimeEvmChainConfigProjection,
+  rpcRequestGovernor: RpcRequestGovernor,
+): RuntimeEvmChainConfig {
+  return { ...projected, rpcRequestGovernor };
+}
+
 /** Neutral projection shared by the agent and every publisher adapter. */
 export function projectRuntimeEvmChainConfig(
   chain: ResolvedChainConfig | undefined,
-): RuntimeEvmChainConfig | undefined {
+): RuntimeEvmChainConfigProjection | undefined {
   if (!chain?.rpcUrl || !chain.hubAddress) return undefined;
   return {
     rpcUrl: chain.rpcUrl,
@@ -37,6 +51,5 @@ export function projectRuntimeEvmChainConfig(
     cgRegistryScanPageSize: chain.cgRegistryScanPageSize,
     minPublisherNativeWei: chain.minPublisherNativeWei,
     minPublisherTracWei: chain.minPublisherTracWei,
-    rpcRequestGovernor: new RpcRequestGovernor(chain.rpcRequestBudget),
   };
 }

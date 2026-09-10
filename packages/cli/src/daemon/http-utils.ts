@@ -341,6 +341,7 @@ export function sanitizeRpcMessage(msg: string): string {
  * keyed STRICTLY on `err.code` (never message text):
  *   - `RPC_ENDPOINTS_EXHAUSTED`   → 503 (all configured endpoints failed over)
  *   - `RPC_RECEIPT_LOOKUP_FAILED` → 503 (receipt lookup failed on every endpoint)
+ *   - `RPC_REQUEST_GOVERNOR_QUEUE_FULL` → 503 (local request did not start)
  *   - `TIMEOUT`                   → 504 (receipt wait / RPC request timed out)
  *
  * Returns `undefined` for anything else. On-chain reverts (`CALL_EXCEPTION`),
@@ -386,6 +387,15 @@ export function classifyChainRpcTransportStatus(
           code,
         ),
       };
+    case "RPC_REQUEST_GOVERNOR_QUEUE_FULL":
+      return {
+        status: 503,
+        body: {
+          ...transportBody(msg || "Chain RPC request capacity is temporarily full.", code),
+          retryable: true,
+          outcome: "not_started",
+        },
+      };
     case "RPC_TIMEOUT":
       // Internal, chain-namespaced timeout code. Expose the public/legacy
       // `code: "TIMEOUT"` in the 504 body (clients key on that), keeping the
@@ -420,6 +430,9 @@ export function respondIfChainRpcTransportError(
 ): boolean {
   const transport = classifyChainRpcTransportStatus(err);
   if (!transport) return false;
+  if (transport.body.code === 'RPC_REQUEST_GOVERNOR_QUEUE_FULL') {
+    res.setHeader('Retry-After', '1');
+  }
   jsonResponse(res, transport.status, extraBody ? { ...extraBody, ...transport.body } : transport.body);
   return true;
 }

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { join } from 'node:path';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 
 import { multiaddr } from '@multiformats/multiaddr';
 import {
@@ -24,6 +26,8 @@ import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-officia
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import {
   NoChainAdapter,
+  createGovernedJsonRpcProvider,
+  RpcRequestGovernor,
   RpcEndpointsExhaustedError,
   type ChainAdapter,
   type ContextGraphAuthoritySnapshot,
@@ -207,6 +211,69 @@ afterEach(async () => {
 });
 
 describe('RFC-64 rollout authority integration', () => {
+  it('keeps authority-task transport attempts and retries in the background lane', async () => {
+    let hits = 0;
+    const rpc = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        hits += 1;
+        if (hits === 1) {
+          res.writeHead(429, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            error: { code: -32005, message: 'rate limited' },
+          }));
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x10' }));
+      });
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 50,
+      burstRequests: 100,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
+    const provider = createGovernedJsonRpcProvider(
+      `http://127.0.0.1:${address.port}`,
+      {
+        maxRetries: 1,
+        providerOptions: { batchMaxCount: 1 },
+        requestGovernor: governor,
+      },
+    );
+    const edge = await startAgent({ name: 'authority-transport-background-lane' });
+    vi.spyOn(edge, 'getContextGraphOnChainId').mockImplementation(async () => {
+      await provider._send({
+        id: 1,
+        jsonrpc: '2.0',
+        method: 'eth_blockNumber',
+        params: [],
+      });
+      return null;
+    });
+    vi.spyOn(edge, 'getContextGraphOwner').mockResolvedValue(`did:dkg:agent:${AUTHOR}`);
+    try {
+      await expect(edge.readRfc64CurrentCuratorAuthorityBindingV1(CONTEXT_GRAPH_ID))
+        .resolves.toMatchObject({ agentAddress: AUTHOR });
+      expect(hits).toBe(2);
+      expect(governor.snapshot()).toMatchObject({
+        backgroundAdmitted: 2,
+        foregroundAdmitted: 0,
+      });
+    } finally {
+      provider.destroy();
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  });
+
   it('coalesces duplicate inbound catalog replay requests behind a bounded queue', async () => {
     const edge = await startAgent({ name: 'bounded-replay-queue' });
     let release!: () => void;
