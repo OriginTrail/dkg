@@ -60,6 +60,10 @@ import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, reso
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
 import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
 import { ContextGraphAuthorityHistoryCache } from './context-graph-authority-history.js';
+import {
+  isTrustedContextGraphAuthorityIndexStore,
+  type TrustedContextGraphAuthorityIndexStore,
+} from './context-graph-authority-index.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
 
@@ -920,6 +924,9 @@ export class EVMChainAdapterBase {
   /** Finalized authority scan watermarks owned by this adapter lifecycle. */
   protected readonly contextGraphAuthorityHistory: ContextGraphAuthorityHistoryCache;
 
+  /** Durable seam for the contract-wide scanner introduced in the next milestone. */
+  protected readonly contextGraphAuthorityIndexStore?: TrustedContextGraphAuthorityIndexStore;
+
   /**
    * eth_getLogs block-window for the pre-10.0.4 getMaxKaNumberForAuthor fallback
    * scan (adapter-level config `kaHighWaterScanPageSize`; non-integer / `< 1`
@@ -1261,6 +1268,15 @@ export class EVMChainAdapterBase {
       undefined,
       config.localContextGraphAuthorityHistoryStore,
     );
+    if (
+      config.contextGraphAuthorityIndexStore !== undefined
+      && !isTrustedContextGraphAuthorityIndexStore(config.contextGraphAuthorityIndexStore)
+    ) {
+      throw new Error(
+        'Context Graph authority index store must be explicitly admitted as trusted local storage',
+      );
+    }
+    this.contextGraphAuthorityIndexStore = config.contextGraphAuthorityIndexStore;
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;
     this.minPublisherTracWei = config.minPublisherTracWei ?? 0n;

@@ -24,6 +24,7 @@ import {
 } from './routine-log-retention.js';
 export {
   SqliteChainEventCursorStore,
+  SqliteContextGraphAuthorityIndexStore,
   SqliteContextGraphAuthorityHistoryStore,
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
@@ -345,6 +346,29 @@ export class DashboardDB {
         this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0 CHECK (terminal IN (0, 1));`);
       }
     };
+    const ensureContextGraphAuthorityIndexSchema = () => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS context_graph_authority_index_cursors (
+          scope TEXT PRIMARY KEY CHECK (length(trim(scope)) > 0),
+          deployment_block_number INTEGER NOT NULL CHECK (deployment_block_number >= 0),
+          through_block_number INTEGER NOT NULL CHECK (through_block_number >= deployment_block_number),
+          through_block_hash TEXT NOT NULL CHECK (length(through_block_hash) = 66),
+          state_count INTEGER NOT NULL CHECK (state_count >= 0),
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS context_graph_authority_index_states (
+          scope TEXT NOT NULL CHECK (length(trim(scope)) > 0),
+          context_graph_id TEXT NOT NULL CHECK (length(context_graph_id) > 0),
+          name_hash TEXT NOT NULL CHECK (length(name_hash) = 66),
+          ownership_era INTEGER NOT NULL CHECK (ownership_era >= 0),
+          policy_version INTEGER NOT NULL CHECK (policy_version >= 0),
+          roster_version INTEGER NOT NULL CHECK (roster_version >= 0),
+          source_block_number INTEGER NOT NULL CHECK (source_block_number >= 0),
+          source_block_hash TEXT NOT NULL CHECK (length(source_block_hash) = 66),
+          PRIMARY KEY (scope, context_graph_id)
+        );
+      `);
+    };
     if (version > SCHEMA_VERSION) return;
     if (version === SCHEMA_VERSION) {
       // Repair restored/development databases that carry the current version
@@ -352,6 +376,7 @@ export class DashboardDB {
       ensureJoinApprovalRepairMarker();
       ensureSyncCheckpointResumeColumns();
       ensureJoinPolicyAuditCapTrigger();
+      ensureContextGraphAuthorityIndexSchema();
       installRoutineLogRetentionSchema(this.db);
       return;
     }
@@ -1289,6 +1314,14 @@ export class DashboardDB {
       // row ids, so overflow checks are O(1) and each prune touches at most one
       // configured batch.
       installRoutineLogRetentionSchema(this.db);
+    }
+    if (version < 36) {
+      // Contract-wide authority history is reduced into compact per-graph rows.
+      // The cursor and changed rows advance in one transaction, so a process
+      // restart resumes at the next unscanned block without exposing a torn
+      // generation. The v1 settings-backed per-graph checkpoints remain intact
+      // for rollback while the shared scanner is introduced incrementally.
+      ensureContextGraphAuthorityIndexSchema();
     }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {

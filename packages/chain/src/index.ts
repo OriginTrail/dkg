@@ -5,6 +5,24 @@ export {
   type ContextGraphAuthorityHistoryStore,
 } from './context-graph-authority-history.js';
 export {
+  isTrustedContextGraphAuthorityIndexStore,
+  normalizeContextGraphAuthorityIndexCheckpoint,
+  reduceContextGraphAuthorityIndexPage,
+  trustContextGraphAuthorityIndexStore,
+  type ContextGraphAuthorityIndexCheckpoint,
+  type ContextGraphAuthorityIndexCreationEvent,
+  type ContextGraphAuthorityIndexCursor,
+  type ContextGraphAuthorityIndexEvent,
+  type ContextGraphAuthorityIndexPageReduction,
+  type ContextGraphAuthorityIndexPolicyEvent,
+  type ContextGraphAuthorityIndexRosterEvent,
+  type ContextGraphAuthorityIndexState,
+  type ContextGraphAuthorityIndexStore,
+  type ContextGraphAuthorityIndexTransferEvent,
+  type ReduceContextGraphAuthorityIndexPageInput,
+  type TrustedContextGraphAuthorityIndexStore,
+} from './context-graph-authority-index.js';
+export {
   bindContextGraphAuthorityReader,
   type ContextGraphAuthorityReader,
   type ContextGraphAuthorityReaderCapability,
