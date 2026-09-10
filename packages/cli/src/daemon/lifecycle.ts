@@ -66,6 +66,7 @@ import {
   buildEvmDeploymentId,
   MockChainAdapter,
   mergeRpcUsageWindows,
+  trustContextGraphAuthorityHistoryStore,
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
@@ -1791,7 +1792,13 @@ async function runDaemonInnerWithStartupOwnership(
   const changelogEraGuard = config.store?.changelog ? new SqliteChangelogEraGuard(dashDb) : undefined;
   const chainEventCursorStore = new SqliteChainEventCursorStore(dashDb, { scope: chainCursorScope });
   const contextGraphRegistryScanCursorStore = new SqliteContextGraphRegistryScanCursorStore(dashDb);
-  const contextGraphAuthorityHistoryStore = new SqliteContextGraphAuthorityHistoryStore(dashDb);
+  // DashboardDB is process-owned local state under the same integrity boundary
+  // as the node identity/configuration. Authority generations cannot be proven
+  // from a watermark hash alone, so this composition-root admission is
+  // deliberately explicit rather than inferred from a structural store type.
+  const contextGraphAuthorityHistoryStore = trustContextGraphAuthorityHistoryStore(
+    new SqliteContextGraphAuthorityHistoryStore(dashDb),
+  );
 
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
   // Durable per-author KA-number sequence backing the off-chain

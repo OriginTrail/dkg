@@ -247,7 +247,26 @@ describe('daemon startup network validation', () => {
         load: expect.any(Function),
         save: expect.any(Function),
       },
+      contextGraphAuthorityHistoryStore: {
+        load: expect.any(Function),
+        save: expect.any(Function),
+        delete: expect.any(Function),
+      },
     });
+    const authorityCheckpoint = {
+      version: 1,
+      state: { throughBlockNumber: 30 },
+      integrity: `0x${'11'.repeat(32)}`,
+    };
+    await createArg.contextGraphAuthorityHistoryStore.save(
+      'daemon-startup-wiring',
+      authorityCheckpoint,
+    );
+    await expect(createArg.contextGraphAuthorityHistoryStore.load('daemon-startup-wiring'))
+      .resolves.toEqual(authorityCheckpoint);
+    await createArg.contextGraphAuthorityHistoryStore.delete('daemon-startup-wiring');
+    await expect(createArg.contextGraphAuthorityHistoryStore.load('daemon-startup-wiring'))
+      .resolves.toBeUndefined();
     expect((createArg.chainEventCursorStore as any).scope).toBe(buildEvmDeploymentId({
       chainId: 'gnosis:100',
       hubAddress: '0x1234567890123456789012345678901234567890',

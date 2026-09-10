@@ -26,6 +26,7 @@ import {
   type ContextGraphAuthorityHistoryEvent,
   type ContextGraphAuthorityHistoryEventQuery,
 } from './context-graph-authority-history.js';
+import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 
 type ContextGraphRegistryScanPlan =
   | {
@@ -950,8 +951,15 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
               : filters[name]!(targetContextGraphId);
             authorityFilters.set(name, filter);
           }
-          return (await contract.queryFilter(filter, fromBlock, toBlock))
-            .map((rawEvent) => rawEvent as ethers.EventLog);
+          return readAdaptiveEvmLogRange({
+            read: async (rangeFrom, rangeTo) => (
+              (await contract.queryFilter(filter!, rangeFrom, rangeTo))
+                .map((rawEvent) => rawEvent as ethers.EventLog)
+            ),
+            fromBlock,
+            toBlock,
+            signal: options.signal,
+          });
         };
         const [current, historyResolution] = await Promise.all([
           (contract as any).getContextGraph.staticCall(

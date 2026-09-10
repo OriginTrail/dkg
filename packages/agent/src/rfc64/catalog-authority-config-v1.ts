@@ -37,11 +37,7 @@ const RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1 = 5 * 60_000;
 export const RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 = Object.freeze({
   intervalMs: RFC64_CATALOG_AUTHORITY_REFRESH_INTERVAL_MS_V1,
   freshnessIntervalCount: 4,
-  // A brand-new node has no durable authority checkpoints yet. Keep graph
-  // histories serial (the chain cache also serializes their cold event streams)
-  // so one restart cannot fan four graphs × six filters into the RPC. Warm
-  // suffix reads stay cheap because finalized checkpoints survive restarts.
-  maxConcurrentReads: 1,
+  maxConcurrentReads: 4,
 });
 
 /**

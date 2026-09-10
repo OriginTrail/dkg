@@ -2333,28 +2333,32 @@ describe('DashboardDB — chain RPC cursor stores', () => {
   it('atomically persists versioned Context Graph authority checkpoints', async () => {
     const store = new SqliteContextGraphAuthorityHistoryStore(db);
     const key = 'evm:84532:hub=0xabc:0x3333333333333333333333333333333333333333:9';
-    const state = {
-      throughBlockNumber: 5000,
-      throughBlockHash: `0x${'55'.repeat(32)}`,
-      nameHash: `0x${'88'.repeat(32)}`,
-      ownershipEra: 2,
-      policyVersion: 4,
-      rosterVersion: 7,
-      sourceBlockNumber: 4990,
-      sourceBlockHash: `0x${'44'.repeat(32)}`,
+    const checkpoint = {
+      version: 1,
+      state: {
+        throughBlockNumber: 5000,
+        throughBlockHash: `0x${'55'.repeat(32)}`,
+        nameHash: `0x${'88'.repeat(32)}`,
+        ownershipEra: 2,
+        policyVersion: 4,
+        rosterVersion: 7,
+        sourceBlockNumber: 4990,
+        sourceBlockHash: `0x${'44'.repeat(32)}`,
+      },
+      integrity: `0x${'99'.repeat(32)}`,
     };
 
-    await store.save(key, state);
-    expect(await store.load(key)).toEqual(state);
+    await store.save(key, checkpoint);
+    expect(await store.load(key)).toEqual(checkpoint);
     const persisted = db.db.prepare(
       `SELECT value FROM settings WHERE key = ?`,
     ).get(`${SqliteContextGraphAuthorityHistoryStore.KEY_PREFIX}${key}`) as { value: string };
-    expect(JSON.parse(persisted.value)).toEqual({ version: 1, state });
+    expect(JSON.parse(persisted.value)).toEqual(checkpoint);
 
     db.close();
     db = new DashboardDB({ dataDir: dir });
     const reopened = new SqliteContextGraphAuthorityHistoryStore(db);
-    expect(await reopened.load(key)).toEqual(state);
+    expect(await reopened.load(key)).toEqual(checkpoint);
     await reopened.delete(key);
     expect(await reopened.load(key)).toBeUndefined();
   });
