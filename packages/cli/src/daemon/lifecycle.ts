@@ -2093,6 +2093,7 @@ async function runDaemonInnerWithStartupOwnership(
       commitAutomaticApproval: async (input) =>
         dashDb.commitContextGraphAutomaticApproval(input),
     },
+    messengerOutboxDrain: config.messengerOutboxDrain,
     messengerStores: {
       idempotencyStore: messengerIdempotencyStore,
       outboxStore: messengerOutboxStore,

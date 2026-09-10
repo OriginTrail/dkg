@@ -17,6 +17,9 @@
 import type { ethers } from 'ethers';
 import type { CatchupPassDecisionReason } from './sync/catchup-pass-policy.js';
 import type {
+  MessengerOutboxDrainOptions,
+} from './p2p/outbox-drain-types.js';
+import type {
   Quad,
   TripleStore,
   TripleStoreConfig,
@@ -26,7 +29,7 @@ import type {
   OperationContext,
   AuthorAttestationTypedData,
   DkgNetworkIdentity,
-  CompatibleProtocolOutboxStore,
+  BoundedProtocolOutboxStore,
   MessageIdempotencyStore,
   SwmSenderKeyPackageAckReasonCode,
   ContextGraphJoinPolicyMode as CoreContextGraphJoinPolicyMode,
@@ -1937,11 +1940,18 @@ export interface DKGAgentConfig {
    * Best-effort: the agent never awaits or throws on the sink.
    */
   onReplicationEvent?: ReplicationEventSink;
+  /** In-process outbox admission bounds; default 100 entries / 10 MiB / 4 workers (DEFAULT_OUTBOX_DRAIN_MAX_PAYLOAD_BYTES). */
+  messengerOutboxDrain?: MessengerOutboxDrainOptions;
   messengerStores?: {
     idempotencyStore: MessageIdempotencyStore;
-    outboxStore: CompatibleProtocolOutboxStore;
+    outboxStore: BoundedProtocolOutboxStore;
   };
 }
+
+export type {
+  MessengerOutboxDrainOptions,
+  MessengerOutboxStats,
+} from './p2p/outbox-drain-types.js';
 
 export interface DKGAgentACKTransportOptions {
   sendTimeoutMs?: number;

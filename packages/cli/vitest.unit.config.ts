@@ -15,6 +15,7 @@ export default defineConfig({
           'test/mcp-config-document.test.ts',
           'test/mcp-config-metadata.test.ts',
           'test/api-client.test.ts',
+          'test/messenger-outbox-memory.test.ts',
           'test/live-daemon-isolation.test.ts',
           'test/async-vm-publish-registration.test.ts',
           // #1828 — durable-admission recovery lookup route (pure handler, no hardhat).
