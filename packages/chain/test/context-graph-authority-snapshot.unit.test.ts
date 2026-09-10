@@ -48,7 +48,9 @@ interface EvmAuthorityHarness {
   rotateContextGraphStorage(): void;
 }
 
-function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}): EvmAuthorityHarness {
+function makeEvmAuthorityAdapter(
+  options: { reorg?: boolean; providerRangeLimit?: number } = {},
+): EvmAuthorityHarness {
   const adapter: any = new EVMChainAdapter({
     rpcUrl: 'http://127.0.0.1:1',
     hubAddress: GOVERNANCE,
@@ -108,7 +110,20 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}): EvmAuthorit
     ])),
     queryFilter: async (filter: { name: string }, fromBlock: number, toBlock: number) => {
       evidence.ranges.push([fromBlock, toBlock]);
-      if (toBlock - fromBlock + 1 > 10) throw new Error('oversized log range');
+      if (
+        options.providerRangeLimit !== undefined
+        && toBlock - fromBlock + 1 > options.providerRangeLimit
+      ) {
+        throw {
+          cause: {
+            info: {
+              error: {
+                message: `eth_getLogs is limited to ${options.providerRangeLimit} blocks`,
+              },
+            },
+          },
+        };
+      }
       return (logs[filter.name] ?? []).filter(
         (entry) => entry.blockNumber >= fromBlock && entry.blockNumber <= toBlock,
       );
@@ -273,6 +288,31 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     // immutable and is never scanned again.
     expect(evidence.ranges.slice(18)).toEqual(Array(5).fill([31, 35]));
     expect(evidence.deploymentReads).toHaveLength(1);
+  });
+
+  it('splits provider-capped ranges through the real adapter queryFilter boundary', async () => {
+    const { adapter, evidence } = makeEvmAuthorityAdapter({ providerRangeLimit: 10 });
+    (adapter as any).cgRegistryScanPageSize = 30;
+
+    const snapshot = await adapter.getContextGraphAuthoritySnapshot(9n);
+
+    expect(snapshot).toMatchObject({
+      contextGraphId: '9',
+      owner: OWNER,
+      publishPolicy: 0,
+      ownershipEra: '1',
+      policyVersion: '3',
+      rosterVersion: '3',
+    });
+    expect(evidence.ranges).toEqual(expect.arrayContaining([
+      [7, 30],
+      [7, 18],
+      [7, 12],
+      [13, 18],
+      [19, 30],
+      [19, 24],
+      [25, 30],
+    ]));
   });
 
   it('rejects a finalized anchor that changes while the generation is read', async () => {

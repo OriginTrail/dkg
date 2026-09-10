@@ -1302,7 +1302,7 @@ export class EVMChainAdapterBase {
     });
     this.contextGraphAuthorityHistory = new ContextGraphAuthorityHistoryCache(
       undefined,
-      config.contextGraphAuthorityHistoryStore,
+      config.localContextGraphAuthorityHistoryStore,
     );
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;

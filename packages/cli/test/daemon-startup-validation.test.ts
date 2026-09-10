@@ -247,7 +247,7 @@ describe('daemon startup network validation', () => {
         load: expect.any(Function),
         save: expect.any(Function),
       },
-      contextGraphAuthorityHistoryStore: {
+      localContextGraphAuthorityHistoryStore: {
         load: expect.any(Function),
         save: expect.any(Function),
         delete: expect.any(Function),
@@ -258,14 +258,14 @@ describe('daemon startup network validation', () => {
       state: { throughBlockNumber: 30 },
       integrity: `0x${'11'.repeat(32)}`,
     };
-    await createArg.contextGraphAuthorityHistoryStore.save(
+    await createArg.localContextGraphAuthorityHistoryStore.save(
       'daemon-startup-wiring',
       authorityCheckpoint,
     );
-    await expect(createArg.contextGraphAuthorityHistoryStore.load('daemon-startup-wiring'))
+    await expect(createArg.localContextGraphAuthorityHistoryStore.load('daemon-startup-wiring'))
       .resolves.toEqual(authorityCheckpoint);
-    await createArg.contextGraphAuthorityHistoryStore.delete('daemon-startup-wiring');
-    await expect(createArg.contextGraphAuthorityHistoryStore.load('daemon-startup-wiring'))
+    await createArg.localContextGraphAuthorityHistoryStore.delete('daemon-startup-wiring');
+    await expect(createArg.localContextGraphAuthorityHistoryStore.load('daemon-startup-wiring'))
       .resolves.toBeUndefined();
     expect((createArg.chainEventCursorStore as any).scope).toBe(buildEvmDeploymentId({
       chainId: 'gnosis:100',
