@@ -4,7 +4,11 @@ export default defineConfig({
   test: {
     include: [
       'test/keyed-lock.test.ts',
+      'test/workspace-snapshot-source.test.ts',
+      'test/workspace-snapshot-page-index.test.ts',
       'test/graph-publish-envelope.test.ts',
+      'test/workspace-metadata-subjects.test.ts',
+      'test/entity-share-metadata.test.ts',
       'test/ka-update-submit-failure.test.ts',
       'test/ack-peer-selection.test.ts',
       'test/trust-metadata.test.ts',
@@ -74,6 +78,7 @@ export default defineConfig({
       'test/storage-ack-priority-lane.test.ts',
       'test/swm-slice-ack-unbounded.test.ts',
       'test/workspace-snapshot-store.test.ts',
+      'test/workspace-snapshot-validation.test.ts',
       'test/workspace-head-cardinality.test.ts',
       'test/knowledge-asset-swm-staging.test.ts',
     ],

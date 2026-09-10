@@ -26,9 +26,12 @@ export interface StrictCurrentFinalizedEvmRpcConfigV1 {
   readonly blockReferenceProfile?: CurrentFinalizedEvmBlockReferenceProfileV1;
 }
 
+/** Validated session: the runtime can attempt exactly one or two endpoints. */
+export type StrictFinalizedEndpointSessionV1 = readonly [string] | readonly [string, string];
+
 export interface StrictRpcConfigSnapshotV1 {
   readonly chainId: ChainIdV1;
-  readonly endpoints: readonly string[];
+  readonly endpoints: StrictFinalizedEndpointSessionV1;
   readonly blockReferenceProfile: CurrentFinalizedEvmBlockReferenceProfileV1;
 }
 
