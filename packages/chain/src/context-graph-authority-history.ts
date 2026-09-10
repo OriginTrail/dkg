@@ -2,6 +2,11 @@
 
 import { BoundedLruCache } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
+import {
+  applyContextGraphAuthorityGenerationEvent,
+  type ContextGraphAuthorityGenerationEvent,
+  type ContextGraphAuthorityGenerationState,
+} from './context-graph-authority-generation.js';
 import { KeyedSerializer } from './keyed-mutex.js';
 
 export const CONTEXT_GRAPH_AUTHORITY_HISTORY_MAX_ENTRIES = 1_024;
@@ -515,14 +520,6 @@ export interface ResolveContextGraphAuthorityHistoryInput
   readonly cache: ContextGraphAuthorityHistoryCache;
 }
 
-function latestEvent(
-  events: readonly ContextGraphAuthorityHistoryEvent[],
-): ContextGraphAuthorityHistoryEvent | undefined {
-  return [...events].sort((left, right) => (
-    left.blockNumber - right.blockNumber || left.index - right.index
-  )).at(-1);
-}
-
 /** Resolve one cold or suffix history scan into a complete generation state. */
 export async function resolveContextGraphAuthorityHistory(
   input: ResolveContextGraphAuthorityHistoryInput,
@@ -586,62 +583,49 @@ async function loadContextGraphAuthorityHistory(
         read('AgentParticipantAdded'),
         read('AgentParticipantRemoved'),
       ]);
-  const baseline: Readonly<{
-    nameHash: string;
-    ownershipEra: number;
-    policyVersion: number;
-    rosterVersion: number;
-    sourceBlockNumber: number;
-    sourceBlockHash: string;
-  }> = previous === undefined
-    ? (() => {
-        const creation = created[0];
-        if (created.length !== 1 || creation === undefined) {
-          throw new Error(
-            `Context Graph ${input.contextGraphId.toString()} has ${created.length} finalized creation events`,
-          );
-        }
-        if (!creation.nameHash) {
-          throw new Error(
-            `Context Graph ${input.contextGraphId.toString()} creation event has no name hash`,
-          );
-        }
-        return {
-          nameHash: creation.nameHash,
-          ownershipEra: 0,
-          policyVersion: 0,
-          rosterVersion: 0,
-          sourceBlockNumber: creation.blockNumber,
-          sourceBlockHash: creation.blockHash,
-        };
-      })()
-    : {
-        nameHash: previous.nameHash,
-        ownershipEra: previous.ownershipEra,
-        policyVersion: previous.policyVersion,
-        rosterVersion: previous.rosterVersion,
-        sourceBlockNumber: previous.sourceBlockNumber,
-        sourceBlockHash: previous.sourceBlockHash,
-      };
-  const policySource = latestEvent([
-    ...created,
-    ...transfers,
-    ...publishPolicy,
-    ...publishAuthority,
-  ]);
-  const sourceBlockNumber = policySource?.blockNumber ?? baseline.sourceBlockNumber;
-  const sourceBlockHash = policySource?.blockHash ?? baseline.sourceBlockHash;
-  const ownershipDelta = transfers.length;
+  if (previous === undefined) {
+    const creation = created[0];
+    if (created.length !== 1 || creation === undefined) {
+      throw new Error(
+        `Context Graph ${input.contextGraphId.toString()} has ${created.length} finalized creation events`,
+      );
+    }
+    if (!creation.nameHash) {
+      throw new Error(
+        `Context Graph ${input.contextGraphId.toString()} creation event has no name hash`,
+      );
+    }
+  }
+  const named = <T extends ContextGraphAuthorityHistoryEvent>(
+    name: ContextGraphAuthorityGenerationEvent['name'],
+    events: readonly T[],
+  ) => events.map((event) => ({ ...event, name } as ContextGraphAuthorityGenerationEvent & {
+    readonly index: number;
+  }));
+  const events = [
+    ...named('ContextGraphCreated', created),
+    ...named('Transfer', transfers),
+    ...named('PublishPolicyUpdated', publishPolicy),
+    ...named('PublishAuthorityUpdated', publishAuthority),
+    ...named('AgentParticipantAdded', participantAdds),
+    ...named('AgentParticipantRemoved', participantRemoves),
+  ].sort((left, right) => (
+    left.blockNumber - right.blockNumber || left.index - right.index
+  ));
+  let generation: ContextGraphAuthorityGenerationState | undefined = previous;
+  for (const event of events) {
+    generation = applyContextGraphAuthorityGenerationEvent(
+      generation,
+      event,
+      `Context Graph ${input.contextGraphId.toString()}`,
+    );
+  }
+  if (generation === undefined) {
+    throw new Error(`Context Graph ${input.contextGraphId.toString()} has no authority generation`);
+  }
   return Object.freeze({
+    ...generation,
     throughBlockNumber: input.finalized.number,
     throughBlockHash: input.finalized.hash,
-    nameHash: baseline.nameHash,
-    ownershipEra: baseline.ownershipEra + ownershipDelta,
-    policyVersion: baseline.policyVersion
-      + ownershipDelta + publishPolicy.length + publishAuthority.length,
-    rosterVersion: baseline.rosterVersion
-      + ownershipDelta + participantAdds.length + participantRemoves.length,
-    sourceBlockNumber,
-    sourceBlockHash: sourceBlockHash.toLowerCase(),
   });
 }
