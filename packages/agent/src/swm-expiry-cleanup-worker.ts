@@ -1,6 +1,6 @@
 import { setImmediate } from 'node:timers/promises';
 import { SWM_CLEANUP_INTERVAL_MS } from './dkg-agent-constants.js';
-import type { SwmExpiryCleanupContinuation, SwmExpiryCleanupResult } from './swm-expiry-cleanup.js';
+import type { SwmExpiryCleanupContinuation, SwmExpiryCleanupRequest, SwmExpiryCleanupResult } from './swm-expiry-cleanup.js';
 
 type MaintenanceMode = 'manual' | 'periodic';
 type CleanupRequest = { readonly kind: 'periodic' } | { readonly kind: 'manual'; readonly cutoffMs: number };
@@ -22,7 +22,7 @@ export class SwmExpiryCleanupWorker {
   private retentionGeneration = 0;
 
   constructor(
-    private readonly processPass: (ttlMs: number, isClosed: () => boolean, continuation?: SwmExpiryCleanupContinuation, cutoffMs?: number) => Promise<SwmExpiryCleanupResult>,
+    private readonly processPass: (request: SwmExpiryCleanupRequest, isClosed: () => boolean) => Promise<SwmExpiryCleanupResult>,
     private readonly getSharedMemoryTtlMs: () => number,
     private readonly intervalMs = SWM_CLEANUP_INTERVAL_MS,
   ) {}
@@ -117,10 +117,9 @@ export class SwmExpiryCleanupWorker {
         const continuation = flight.continuation;
         flight.continuation = undefined;
         const result = await this.processPass(
-          this.getSharedMemoryTtlMs(),
+          { cutoffMs: request.kind === 'manual' ? request.cutoffMs : Date.now() - this.getSharedMemoryTtlMs(), continuation },
           () => !this.owns(flight) || this.getSharedMemoryTtlMs() === 0 || generation !== this.retentionGeneration,
-          continuation,
-          request.kind === 'manual' ? request.cutoffMs : undefined);
+        );
         deleted += result.triplesDeleted;
         if (!this.owns(flight) || this.getSharedMemoryTtlMs() === 0) break;
         if (flight.request !== request || generation !== this.retentionGeneration) {

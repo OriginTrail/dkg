@@ -240,7 +240,7 @@ it('logs cutoff conversion failures and resolves through the cleanup error contr
   const f = await createSwmExpiryFixture(1);
   await expect(runSwmExpiryCleanup(
     swmExpiryCleanupContext(f.agent, { writeLocks: new Map() }),
-    1e20,
+    { cutoffMs: 1e20 },
   )).resolves.toMatchObject({ triplesDeleted: 0 });
   expect(f.warning).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('Invalid time value'));
 });
@@ -262,11 +262,14 @@ it.each([undefined, 'research'])('evicts only expired ownership in graph family 
     { subject: 'urn:op:ownership', predicate: 'http://dkg.io/ontology/rootEntity', object: 'urn:expired', graph: `${graph}_meta` },
     { subject: 'urn:expired', predicate: 'urn:p', object: '"expired"', graph },
     { subject: 'urn:retained', predicate: 'urn:p', object: '"keep"', graph },
+    { subject: 'urn:expired', predicate: 'urn:p', object: '"staged root"', graph: `${graph}/staging/new-share` },
+    { subject: 'urn:expired/.well-known/genid/child', predicate: 'urn:p', object: '"staged child"', graph: `${graph}/staging/new-share` },
   ]);
   await agent.cleanupExpiredSharedMemory();
   expect(workspaceOwnedEntities.get(key)?.has('urn:expired')).toBe(false);
   expect(workspaceOwnedEntities.get(key)?.get('urn:retained')).toBe('peer');
   expect(workspaceOwnedEntities.get(otherKey)?.get('urn:expired')).toBe('other-peer');
+  expect(await store.countQuads(`${graph}/staging/new-share`)).toBe(2);
 });
 
 

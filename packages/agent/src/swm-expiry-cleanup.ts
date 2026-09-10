@@ -1,9 +1,10 @@
-import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, resolveSharedMemoryScopeGraphs, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   createOperationContext, GRAPH_KA_CONTENT_SCOPE_VERSION, isSafeIri,
   type Logger,
 } from '@origintrail-official/dkg-core';
 import { swmEntityWriteLockKey, swmKaWriteLockKey, withKeyedLocks } from '@origintrail-official/dkg-publisher';
+import { mapWithConcurrencySettled } from './map-with-concurrency.js';
 import { stripLiteral } from './dkg-agent-utils.js';
 import {
   describeSharedMemoryGraphs,
@@ -23,6 +24,10 @@ export interface SwmExpiryCleanupContext {
   log: Pick<Logger, 'info' | 'warn'>;
   isClosed: () => boolean;
 }
+export interface SwmExpiryCleanupRequest {
+  readonly cutoffMs: number;
+  readonly continuation?: SwmExpiryCleanupContinuation;
+}
 export interface SwmExpiryCleanupResult {
   triplesDeleted: number;
   /** Unvisited or still-progressing targets from this finite sweep. */
@@ -34,7 +39,6 @@ export interface SwmExpiryCleanupContinuation {
   readonly restartAfter?: string;
 }
 type CleanupTarget = SharedMemoryGraphDescriptor;
-interface GraphFamily { graphs: string[]; ownershipKeys: Set<string> }
 interface ExpiredOperation {
   uri: string;
   roots: string[];
@@ -50,16 +54,14 @@ interface CleanupBatchResult { outcomes: CleanupOutcome[]; errors: unknown[] }
 /** At most four nonempty pages per invocation; continuation rotates graph priority. */
 export async function runSwmExpiryCleanup(
   context: SwmExpiryCleanupContext,
-  ttlMs: number,
-  continuation?: SwmExpiryCleanupContinuation,
-  cutoffMs?: number,
+  { cutoffMs, continuation }: SwmExpiryCleanupRequest,
 ): Promise<SwmExpiryCleanupResult> {
   const { store, log, isClosed } = context;
   const ctx = createOperationContext('share');
   const result: SwmExpiryCleanupResult = { triplesDeleted: 0 };
   const counts = new Map<string, { triples: number; operations: number }>();
   try {
-    const cutoff = new Date(cutoffMs ?? Date.now() - ttlMs).toISOString();
+    const cutoff = new Date(cutoffMs).toISOString();
     const continuing = continuation !== undefined && continuation.remainingTargets.length > 0;
     const targets: CleanupTarget[] = continuing ? [...continuation.remainingTargets] : [];
     let restartAfter = continuing ? continuation.restartAfter : undefined;
@@ -214,45 +216,35 @@ async function cleanupExpiredBatch(
   cutoff: string,
   candidates: readonly ExpiredOperation[],
 ): Promise<CleanupBatchResult> {
-  // HTTP stores reserve ACK/health capacity and have bounded ordinary queues.
-  // A page is a selection bound, not permission to enqueue 250 RPC pipelines.
-  const pressure = context.store.getPressureSnapshot?.();
-  const ordinarySlots = pressure
-    ? pressure.maxConcurrent - pressure.ackReservedSlots - (pressure.healthReservedSlots ?? 0)
-    : SWM_CLEANUP_MAX_CONCURRENT_OPERATIONS;
-  const concurrency = Math.min(candidates.length, SWM_CLEANUP_MAX_CONCURRENT_OPERATIONS,
-    Math.max(1, Math.floor(ordinarySlots)));
+  // Keep at most four operation pipelines in flight; the storage scheduler
+  // owns lane admission and reservations. Every admitted sibling settles.
   const batch: CleanupBatchResult = { outcomes: [], errors: [] };
-  let nextCandidate = 0;
   // Remote counted-delete APIs measure graph-wide before/after counts. Keep
   // those mutation sequences disjoint within the target, even for distinct
   // entity keys. Take this gate AFTER entity/KA locks, so a blocked writer
   // cannot monopolize the graph's cleanup mutation gate.
   const countedMutations = new Map<string, Promise<void>>();
-  await Promise.all(Array.from({ length: concurrency }, async () => {
-    while (nextCandidate < candidates.length && !context.isClosed()) {
-      const candidate = candidates[nextCandidate++]!;
-      try {
-        const outcome = await withKeyedLocks(context.writeLocks, cleanupWriteLockKeys(target, candidate), async () => {
-          if (context.isClosed()) return undefined;
-          const [current] = await loadExpiredOperations(
-            context.store, target.metaGraph, cutoff, { kind: 'uris', uris: [candidate.uri] },
-          );
-          if (context.isClosed() || !current || !sameExpiredOperation(current, candidate)) return undefined;
-          const family = await resolveGraphFamily(context.store, target);
-          return withKeyedLocks(countedMutations, [target.metaGraph], async () => {
-            // Retention or shutdown can invalidate the pass while this worker
-            // waits for the preceding counted mutation to drain.
-            if (context.isClosed()) return undefined;
-            return cleanupExpiredOperation(context, target, family, current);
-          });
-        });
-        if (outcome) batch.outcomes.push(outcome);
-      } catch (error) {
-        batch.errors.push(error);
-      }
-    }
-  }));
+  const settled = await mapWithConcurrencySettled(candidates, SWM_CLEANUP_MAX_CONCURRENT_OPERATIONS, async candidate => {
+    if (context.isClosed()) return undefined;
+    return withKeyedLocks(context.writeLocks, cleanupWriteLockKeys(target, candidate), async () => {
+      if (context.isClosed()) return undefined;
+      const [current] = await loadExpiredOperations(
+        context.store, target.metaGraph, cutoff, { kind: 'uris', uris: [candidate.uri] },
+      );
+      if (context.isClosed() || !current || !sameExpiredOperation(current, candidate)) return undefined;
+      const graphs = await resolveSharedMemoryScopeGraphs(context.store, target.dataGraph, { kind: 'complete-family' });
+      return withKeyedLocks(countedMutations, [target.metaGraph], async () => {
+        // Retention or shutdown can invalidate the pass while this worker
+        // waits for the preceding counted mutation to drain.
+        if (context.isClosed()) return undefined;
+        return cleanupExpiredOperation(context, target, graphs, current);
+      });
+    });
+  });
+  for (const outcome of settled) {
+    if (outcome.status === 'rejected') batch.errors.push(outcome.reason);
+    else if (outcome.value) batch.outcomes.push(outcome.value);
+  }
   return batch;
 }
 
@@ -265,21 +257,14 @@ function cleanupWriteLockKeys(target: CleanupTarget, operation: ExpiredOperation
   ];
 }
 
-async function resolveGraphFamily(store: TripleStore, target: CleanupTarget): Promise<GraphFamily> {
-  return {
-    graphs: await listGraphFamily(store, target.dataGraph),
-    ownershipKeys: new Set([target.ownershipKey]),
-  };
-}
-
 /** Finish one operation before yielding; stop joins this physical work before closing storage. */
 async function cleanupExpiredOperation(
   { store, workspaceOwnedEntities }: SwmExpiryCleanupContext,
   target: CleanupTarget,
-  family: GraphFamily,
+  graphs: readonly string[],
   operation: ExpiredOperation,
 ): Promise<CleanupOutcome> {
-  let triplesDeleted = await cleanupLegacyRoots(store, family.graphs, operation.roots);
+  let triplesDeleted = await cleanupLegacyRoots(store, graphs, operation.roots);
   if (operation.scope.kind === 'graph-v2') {
     triplesDeleted += await cleanupGraphScopedOperation(store, target.metaGraph, operation.uri, operation.scope);
   }
@@ -287,7 +272,7 @@ async function cleanupExpiredOperation(
   triplesDeleted += metadataDeleted;
   for (const root of operation.roots) {
     triplesDeleted += await store.deleteByPattern({ graph: target.metaGraph, subject: root, predicate: 'http://dkg.io/ontology/workspaceOwner' });
-    for (const key of family.ownershipKeys) workspaceOwnedEntities.get(key)?.delete(root);
+    workspaceOwnedEntities.get(target.ownershipKey)?.delete(root);
   }
   return { triplesDeleted, metadataDeleted };
 }
@@ -334,14 +319,6 @@ async function cleanupGraphScopedOperation(
     await store.dropGraph(scope.snapshotGraph);
   }
   return deleted;
-}
-
-async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<string[]> {
-  const graphs = await listGraphsByPrefix(store, `${rootGraph}/`);
-  if (await store.hasGraph(rootGraph)) {
-    graphs.unshift(rootGraph);
-  }
-  return graphs;
 }
 
 async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<string[]> {
