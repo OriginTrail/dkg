@@ -450,6 +450,7 @@ describe('graph-scoped assertion finalization recovery', () => {
 
     // Crash inside the post-swap tail: the memory-layer meta rewrite is the
     // first durable write after the SWM replacement.
+    const postSwapFailure = new Error('injected post-swap promote failure');
     const realInsert = agent.store.insert.bind(agent.store);
     let crashed = false;
     agent.store.insert = async (quads, options) => {
@@ -459,22 +460,23 @@ describe('graph-scoped assertion finalization recovery', () => {
           quad.predicate === 'http://dkg.io/ontology/memoryLayer' && quad.object === '"SWM"')
       ) {
         crashed = true;
-        throw new Error('injected post-swap promote failure');
+        throw postSwapFailure;
       }
       return realInsert(quads, options);
     };
     try {
-      await expect(agent.assertion.promote(contextGraphId, name)).rejects.toThrow(
-        'injected post-swap promote failure',
-      );
+      await expect(agent.assertion.promote(contextGraphId, name)).rejects.toMatchObject({
+        code: 'PROMOTE_POST_COMMIT_FAILURE',
+        cause: postSwapFailure,
+      });
     } finally {
       agent.store.insert = realInsert;
     }
 
-    // The WM source must survive the failed tail: dropping it before the
-    // durable writes strands the promotion — a retry then reads empty working
-    // memory and aborts instead of converging.
+    // Unknown-outcome failures require explicit recovery. The WM source and
+    // exact SWM graph must survive so that recovery can repair the same KA.
     expect(await agent.store.countQuads(wmGraph)).toBe(1);
+    expect(await agent.store.countQuads(swmGraph)).toBe(1);
 
     const retried = await agent.assertion.promote(contextGraphId, name);
     // The exact SWM graph committed before the injected post-swap failure.

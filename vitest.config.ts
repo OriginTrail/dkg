@@ -4,6 +4,11 @@ export default defineConfig({
   test: {
     exclude: [...configDefaults.exclude, 'bench/**', '**/*.bench.ts'],
     projects: [
+      'packages/random-sampling',
+      'packages/kafka-plugin',
+      'packages/local-llm',
+      'packages/okf',
+      'packages/rdf-utils',
       'packages/core',
       'packages/http-utils',
       'packages/storage',

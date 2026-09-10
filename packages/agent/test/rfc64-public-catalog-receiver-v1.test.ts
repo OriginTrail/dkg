@@ -899,7 +899,7 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     receiver.schedule(headWith(`0x${'a2'.repeat(32)}`), 'peer');
     receiver.schedule(headWith(`0x${'a3'.repeat(32)}`), 'peer');
     expect(receiver.stats().droppedQueueFull).toBe(1);
-    expect(onAttemptStart).toHaveBeenCalledTimes(3);
+    expect(onAttemptStart).toHaveBeenCalledTimes(2);
     gate.resolve('not-found');
     await receiver.whenIdle();
   });

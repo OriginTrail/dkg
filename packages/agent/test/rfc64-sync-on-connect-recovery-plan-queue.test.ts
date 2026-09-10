@@ -1,6 +1,17 @@
-import { describe, expect, it, vi } from 'vitest';
-import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { computeNetworkId, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS } from '../src/dkg-agent-constants.js';
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import { Rfc64SwmRecoveryRuntimeV1 } from
+  '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
+import { resolveRfc64RuntimeCatalogBootstrapConfigV1 } from
+  '../src/rfc64/public-catalog-activation-config-v1.js';
 import { SyncOnConnectPeerScheduler } from '../src/sync/on-connect/peer-scheduler.js';
 import {
   allowAllNetworkAdmission,
@@ -11,10 +22,367 @@ import {
   flushTimers,
   installSyncOnConnectPeerJobStub,
 } from './_helpers/sync-on-connect-test-fixture.js';
+import {
+  RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+  RFC64_ROLLOUT_NETWORK_ID,
+  rfc64RolloutActivation,
+  rfc64RolloutPolicyEnvelope,
+} from './_helpers/rfc64-rollout-agent-harness.js';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+const tempDirs: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map(
+    (path) => rm(path, { recursive: true, force: true }),
+  ));
+});
 
 describe('RFC-64 recovery-plan queue authorization', () => {
+  it('uses one selection projection for current, previous, and next authority', () => {
+    let selection = {
+      selectedContextGraphs: [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
+      eligibleContextGraphs: [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
+      subscriptionDriven: true,
+    };
+    const recoveryConfig = {
+      retryIntervalMs: 0,
+      acceptedPublicPolicies: [{
+        policyEnvelope: rfc64RolloutPolicyEnvelope(),
+        targets: [],
+        completeSwmProviders: [PEER_A],
+      }],
+    };
+    const normalizedRecoveryConfig = resolveRfc64RuntimeCatalogBootstrapConfigV1(
+      undefined,
+      recoveryConfig,
+    );
+    const deleteProvider = vi.fn();
+    const runtime = new Rfc64SwmRecoveryRuntimeV1({
+      authority: {
+        resolveRuntimeSelection: () => selection,
+        resolveConfigured: (contextGraphId) => ({
+          contextGraphId,
+          selected: true,
+          eligible: true,
+          active: true,
+          mode: 'catalog',
+          killSwitchActive: false,
+          legacySyncAllowed: false,
+          track2Enabled: true,
+          authoringAllowed: true,
+          reconciliationLane: 'catalog-apply',
+        }),
+        resolveRecoveryConfig: () => normalizedRecoveryConfig,
+      },
+      admission: { invalidateContextGraph: () => [] },
+      cooldown: { deleteProvider },
+    });
+
+    expect(runtime.resolveRuntimeAuthority(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
+      .toMatchObject({ active: true, lane: 'selected-public' });
+    expect(runtime.resolveConfiguredCompleteProviderPeerIds(
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+    )).toEqual([PEER_A]);
+    expect(runtime.resolveActiveCompleteProviderPeerIds(
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+    )).toEqual([PEER_A]);
+    expect(runtime.projectSubscriptionTransition(RFC64_ROLLOUT_CONTEXT_GRAPH_ID, {
+      previousSubscribed: true,
+      nextSubscribed: false,
+    })).toMatchObject({
+      receiverChanged: true,
+      recoveryChanged: true,
+      nextReceiverActive: false,
+    });
+
+    selection = { ...selection, selectedContextGraphs: [] };
+    expect(runtime.resolveRuntimeAuthority(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
+      .toMatchObject({ active: false, lane: 'selected-public' });
+    expect(runtime.resolveConfiguredCompleteProviderPeerIds(
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+    )).toEqual([PEER_A]);
+    expect(runtime.resolveActiveCompleteProviderPeerIds(
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+    )).toEqual([]);
+    expect(runtime.invalidateSelectionState(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
+      .toEqual([PEER_A]);
+    expect(deleteProvider).toHaveBeenCalledWith(PEER_A);
+    expect(runtime.projectSubscriptionTransition(RFC64_ROLLOUT_CONTEXT_GRAPH_ID, {
+      previousSubscribed: false,
+      nextSubscribed: true,
+    })).toMatchObject({
+      receiverChanged: true,
+      recoveryChanged: true,
+      nextReceiverActive: true,
+    });
+  });
+
+  it('projects every subscription lifecycle effect from one transition snapshot', () => {
+    const project = vi.fn()
+      .mockReturnValueOnce({
+        previousReceiverActive: true,
+        nextReceiverActive: false,
+        receiverChanged: true,
+        recoveryChanged: true,
+      })
+      .mockReturnValueOnce({
+        previousReceiverActive: false,
+        nextReceiverActive: true,
+        receiverChanged: true,
+        recoveryChanged: true,
+      });
+    const deactivate = vi.fn();
+    const clearTargets = vi.fn();
+    const invalidate = vi.fn();
+    const queueGossip = vi.fn();
+    const replay = vi.fn(async () => ({ requested: 0, failed: 0 }));
+    const startSupervisor = vi.fn();
+    const agent = {
+      projectRfc64CatalogSubscriptionTransitionV1: project,
+      rfc64PublicCatalogServiceV1: {
+        deactivateReceiverContextGraph: deactivate,
+      },
+      clearRfc64CatalogOperationalTargetsV1: clearTargets,
+      invalidateRfc64PublicCatalogBootstrapPassV1: invalidate,
+      queueSharedMemoryGossipSubscription: queueGossip,
+      requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+      startRfc64SwmCatalogProjectionSupervisorV1: startSupervisor,
+    };
+    const handle = LifecycleSyncMethods.prototype
+      .handleRfc64CatalogReceiverSelectionTransitionV1;
+    const unsubscribe = {
+      kind: 'subscription' as const,
+      previousSubscribed: true,
+      nextSubscribed: false,
+    };
+    const subscribe = {
+      kind: 'subscription' as const,
+      previousSubscribed: false,
+      nextSubscribed: true,
+    };
+
+    handle.call(agent as never, RFC64_ROLLOUT_CONTEXT_GRAPH_ID, unsubscribe);
+    handle.call(agent as never, RFC64_ROLLOUT_CONTEXT_GRAPH_ID, subscribe);
+
+    expect(project).toHaveBeenNthCalledWith(
+      1,
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+      unsubscribe,
+    );
+    expect(project).toHaveBeenNthCalledWith(
+      2,
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+      subscribe,
+    );
+    expect(deactivate).toHaveBeenCalledOnce();
+    expect(clearTargets).toHaveBeenCalledOnce();
+    expect(invalidate).toHaveBeenCalledTimes(2);
+    expect(queueGossip).toHaveBeenCalledTimes(2);
+    expect(replay).toHaveBeenCalledOnce();
+    expect(startSupervisor).toHaveBeenCalledOnce();
+  });
+
+  it('wires runtime authority into one-way coordinator admission and revalidation', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-owner-composition-'));
+    tempDirs.push(dataDir);
+    const agent = await createUnstartedAgent('Rfc64RecoveryOwnerComposition', {
+      dataDir,
+      rfc64PublicCatalogActivation: {
+        ...rfc64RolloutActivation('catalog'),
+        bootstrap: {
+          retryIntervalMs: 0,
+          acceptedPublicPolicies: [{
+            policyEnvelope: rfc64RolloutPolicyEnvelope(),
+            targets: [],
+            completeSwmProviders: [PEER_A],
+          }],
+        },
+      },
+      syncContextGraphs: [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
+      chainAdapter: new MockChainAdapter(RFC64_ROLLOUT_NETWORK_ID),
+      networkIdentity: {
+        networkId: await computeNetworkId(),
+        chainId: RFC64_ROLLOUT_NETWORK_ID,
+      },
+    });
+    agent.subscribedContextGraphs.set(RFC64_ROLLOUT_CONTEXT_GRAPH_ID, {
+      subscribed: true,
+    });
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.isRfc64CatalogBootstrapSwmRecoveryReadyV1 = () => true;
+
+    expect(agent.resolveRfc64SwmRecoveryRuntimeAuthorityV1(
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+    )).toMatchObject({ active: true, lane: 'selected-public' });
+
+    const coordinator = agent.rfc64SwmRecoveryCoordinatorV1;
+    expect(coordinator.admitSelectedPublic(
+      PEER_A,
+      [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
+    )).toBe(true);
+    const activePlan = agent.resolveActiveRfc64SwmRecoveryPlanV1(PEER_A);
+    const authorized = coordinator.authorizeForCatalogPass(activePlan, 0);
+    expect(authorized).not.toBeNull();
+    expect(coordinator.revalidate(authorized!)).toEqual(authorized);
+  });
+
+  it('queues a widened plan when a newly selected graph had no admission owner', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-recovery-queue-'));
+    tempDirs.push(dataDir);
+    const agent = await createUnstartedAgent('Rfc64SelectionInvalidatesExactCooldown', {
+      dataDir,
+      store: new OxigraphStore(),
+      rfc64PublicCatalogActivation: {
+        ...rfc64RolloutActivation('catalog'),
+        bootstrap: {
+          retryIntervalMs: 0,
+          acceptedPublicPolicies: [{
+            policyEnvelope: rfc64RolloutPolicyEnvelope(),
+            targets: [],
+            completeSwmProviders: [PEER_A],
+          }],
+        },
+      },
+      syncContextGraphs: [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
+      chainAdapter: new MockChainAdapter(RFC64_ROLLOUT_NETWORK_ID),
+      networkIdentity: {
+        networkId: await computeNetworkId(),
+        chainId: RFC64_ROLLOUT_NETWORK_ID,
+      },
+    });
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    const authorized = {
+      kind: 'rfc64-authorized-swm-recovery-v1' as const,
+      providerPeerId: PEER_A,
+      targets: [
+        { contextGraphId: 'existing-cg', lane: 'selected-public' as const },
+        {
+          contextGraphId: RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+          lane: 'selected-public' as const,
+        },
+      ],
+    };
+    const selectedRun = vi.fn(async () => undefined);
+    installSyncOnConnectPeerJobStub(agent, { runSelected: selectedRun });
+    agent.selectedSwmBootstrapAdmission.request(PEER_A, ['existing-cg']);
+    agent.rfc64ExactCatchupOnConnectAt.set(PEER_A, Date.now());
+
+    expect(agent.rfc64SwmRecoveryRuntimeV1.resolveConfiguredCompleteProviderPeerIds(
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+    )).toEqual([PEER_A]);
+    expect(agent.resolveRfc64CompleteSwmProviderPeerIdsV1(
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+    )).toEqual([]);
+
+    expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
+      authorized,
+      vi.fn(),
+      0,
+    )).toBe(false);
+    expect(agent.invalidateRfc64SwmRecoverySelectionStateV1(
+      RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
+    ))
+      .toEqual([PEER_A]);
+    expect(agent.rfc64ExactCatchupOnConnectAt.has(PEER_A)).toBe(false);
+    expect(agent.selectedSwmBootstrapAdmission.snapshot(PEER_A)).toEqual({
+      contextGraphIds: ['existing-cg'],
+      phase: 'retry-required',
+    });
+    agent.selectedSwmBootstrapAdmission.request(
+      PEER_A,
+      ['existing-cg', RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
+    );
+
+    expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
+      authorized,
+      vi.fn(),
+      0,
+    )).toBe(true);
+    await vi.waitFor(() => expect(selectedRun).toHaveBeenCalledWith(PEER_A, authorized));
+  });
+
+  it('revokes only the changed graph in a mixed in-flight recovery plan', async () => {
+    const agent = await createUnstartedAgent('Rfc64GraphScopedRecoveryRevocation');
+    vi.spyOn(agent.rfc64SwmRecoveryRuntimeV1, 'resolveRuntimeAuthority')
+      .mockImplementation((contextGraphId) => ({
+        kind: 'rfc64-swm-recovery-runtime-authority-v1',
+        contextGraphId,
+        lane: contextGraphId === 'private-cg' ? 'ordinary-private' : 'selected-public',
+        active: true,
+      }));
+    const publicLease = agent.acquireRfc64SwmRecoveryTargetLeaseV1({
+      contextGraphId: 'public-cg',
+      lane: 'selected-public',
+    });
+    const privateLease = agent.acquireRfc64SwmRecoveryTargetLeaseV1({
+      contextGraphId: 'private-cg',
+      lane: 'ordinary-private',
+    });
+
+    agent.invalidateRfc64SwmRecoverySelectionStateV1('public-cg');
+
+    expect(publicLease.signal.aborted).toBe(true);
+    expect(publicLease.isCurrent()).toBe(false);
+    expect(privateLease.signal.aborted).toBe(false);
+    expect(privateLease.isCurrent()).toBe(true);
+    expect(() => privateLease.assertCurrent()).not.toThrow();
+
+    const nextPublicLease = agent.acquireRfc64SwmRecoveryTargetLeaseV1({
+      contextGraphId: 'public-cg',
+      lane: 'selected-public',
+    });
+    expect(nextPublicLease.signal.aborted).toBe(false);
+    expect(nextPublicLease.isCurrent()).toBe(true);
+    expect(() => publicLease.assertCurrent()).toThrow('recovery authority was revoked');
+  });
+
+  it('reports a catalog recovery plan that is not authorized', async () => {
+    const agent = await createUnstartedAgent('Rfc64CatalogPlanNotAuthorized');
+    const activePlan = {
+      kind: 'rfc64-active-swm-recovery-plan-v1' as const,
+      providerPeerId: PEER_A,
+      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' as const }],
+    };
+    const authorizeForCatalogPass = vi.fn(() => null);
+    const queue = vi.spyOn(agent, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect');
+    agent.rfc64SwmRecoveryCoordinatorV1 = createRfc64CoordinatorStub({
+      authorizeForCatalogPass,
+    });
+
+    expect(agent.queueRfc64CatalogRecoveryPlanV1(activePlan, vi.fn(), 0))
+      .toEqual({ kind: 'not-authorized' });
+    expect(authorizeForCatalogPass).toHaveBeenCalledOnce();
+    expect(queue).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [true, 'queued'],
+    [false, 'rejected'],
+  ] as const)('reports catalog queue acceptance=%s as %s', async (accepted, kind) => {
+    const agent = await createUnstartedAgent(`Rfc64CatalogPlan-${kind}`);
+    const activePlan = {
+      kind: 'rfc64-active-swm-recovery-plan-v1' as const,
+      providerPeerId: PEER_A,
+      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' as const }],
+    };
+    const authorizedPlan = {
+      kind: 'rfc64-authorized-swm-recovery-v1' as const,
+      providerPeerId: PEER_A,
+      targets: activePlan.targets,
+    };
+    agent.rfc64SwmRecoveryCoordinatorV1 = createRfc64CoordinatorStub({
+      authorizeForCatalogPass: vi.fn(() => authorizedPlan),
+    });
+    vi.spyOn(agent, 'queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect')
+      .mockReturnValue(accepted);
+
+    expect(agent.queueRfc64CatalogRecoveryPlanV1(activePlan, vi.fn(), 0))
+      .toEqual({ kind });
+  });
+
   it('rejects a network-denied provider at the authorized queue boundary', async () => {
     const agent = await createUnstartedAgent('Rfc64AuthorizedPlanNetworkDenial');
     agent.networkAdmissionCoordinator.isAcceptedPeer = () => false;

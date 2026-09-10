@@ -20,7 +20,7 @@ import {
   type LiftJobHex,
 } from '../../src/index.js';
 import type { PersistedFailedJob } from '../../src/async-lift-publisher-utils.js';
-import { KA_VM_VALIDATION, kaVmPublishRequest } from './ka-vm-publish.js';
+import { KA_VM_VALIDATION, kaVmPublishRequest } from '../../../../scripts/testing/ka-vm-publish.js';
 
 /** The one transaction hash every evidence-bearing fixture persists. */
 export const TX_HASH = `0x${'ab'.repeat(32)}` as LiftJobHex;

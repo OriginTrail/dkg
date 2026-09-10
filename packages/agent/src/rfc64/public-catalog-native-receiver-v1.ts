@@ -732,6 +732,7 @@ export class Rfc64PublicCatalogNativeReceiverV1<
         appliedHeadStatus = 'existing';
       } else {
         try {
+          throwIfAborted(signal);
           appliedHeadStatus = this.options.inventory.compareAndSwapAppliedCatalogHeadV1({
             catalogScopeDigest,
             authorAddress: head.payload.authorAddress,
@@ -742,6 +743,7 @@ export class Rfc64PublicCatalogNativeReceiverV1<
             inventoryRowCount: '0' as never,
           }).status;
         } catch (cause) {
+          if (signal?.aborted && cause === signal.reason) throw cause;
           const reconciled = this.options.inventory.readAppliedCatalogHeadV1(
             catalogScopeDigest,
             head.payload.authorAddress,
@@ -1310,6 +1312,7 @@ export class Rfc64PublicCatalogNativeReceiverV1<
         appliedHeadStatus = 'existing';
       } else {
         try {
+          throwIfAborted(signal);
           const casResult = this.options.inventory.compareAndSwapAppliedCatalogHeadV1({
             catalogScopeDigest,
             authorAddress: head.payload.authorAddress,
@@ -1324,6 +1327,7 @@ export class Rfc64PublicCatalogNativeReceiverV1<
           headCommitDisposition = 'target';
           appliedHeadStatus = casResult.status;
         } catch (cause) {
+          if (signal?.aborted && cause === signal.reason) throw cause;
           // The CAS adapter can throw after its durable write. Until its exact
           // state is read, predecessor rollback is unsafe.
           headCommitDisposition = 'indeterminate';

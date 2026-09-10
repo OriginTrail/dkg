@@ -1,3 +1,4 @@
+import { coverageForPackage } from "../../vitest.coverage";
 import { defineConfig } from "vitest/config";
 
 import { RFC64_UNIT_TESTS } from "./vitest.rfc64-unit-tests";
@@ -14,7 +15,10 @@ const SQLITE_EXEC_ARGV = [
 
 export default defineConfig({
   test: {
+    allowOnly: false,
+    coverage: coverageForPackage("agent"),
     include: [
+      "test/stored-swm-maintenance.test.ts",
       "test/context-graph-meta-projection.test.ts",
       "test/context-graph-discovery-options.test.ts",
       ...RFC64_UNIT_TESTS,
@@ -191,6 +195,7 @@ export default defineConfig({
       "test/context-graph-join-policy.test.ts",
       "test/bounded-operation.test.ts",
       "test/private-read-chain-authority.test.ts",
+      "test/context-graph-access-policy-state.test.ts",
       "test/context-graph-historical-name-binding.test.ts",
       "test/context-graph-list-concurrency.test.ts",
       "test/cg-resolve-refresh.test.ts",

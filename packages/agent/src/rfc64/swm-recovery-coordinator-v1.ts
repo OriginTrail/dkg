@@ -4,6 +4,7 @@ import {
   canonicalizeRfc64SwmRecoveryTargetsV1,
   sameRfc64SwmRecoveryTargetsV1,
   type Rfc64AuthorizedSwmRecoveryPlanV1,
+  type Rfc64ActivePeerSwmRecoveryPlanV1,
   type Rfc64PeerSwmRecoveryPlanV1,
   type Rfc64SwmRecoveryTargetV1,
 } from './swm-recovery-plan-v1.js';
@@ -11,7 +12,6 @@ import {
 export type { Rfc64AuthorizedSwmRecoveryPlanV1 } from './swm-recovery-plan-v1.js';
 
 export interface Rfc64SwmRecoveryAdmissionPortV1 {
-  readonly selectedPublicContextGraphIds: () => readonly string[];
   readonly requestSelectedPublicAdmission:
     (providerPeerId: string, contextGraphIds: readonly string[]) => boolean;
   readonly refreshSelectedPublicAdmission: (
@@ -23,8 +23,8 @@ export interface Rfc64SwmRecoveryAdmissionPortV1 {
     contextGraphIds: readonly string[];
     phase: 'retry-required' | 'terminal';
   }> | null;
-  readonly configuredRecoveryPlan:
-    (providerPeerId: string) => Readonly<Rfc64PeerSwmRecoveryPlanV1>;
+  readonly activeRecoveryPlan:
+    (providerPeerId: string) => Readonly<Rfc64ActivePeerSwmRecoveryPlanV1>;
   readonly isCatalogReady: (providerPeerId: string) => boolean;
   readonly isPeerAccepted: (providerPeerId: string) => boolean;
   readonly isStarted: () => boolean;
@@ -107,21 +107,16 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
   private eligibleTargets(
     recoveryPlan: Readonly<Rfc64PeerSwmRecoveryPlanV1>,
   ): readonly Rfc64SwmRecoveryTargetV1[] | null {
-    const selectedPublic = new Set(this.deps.admission.selectedPublicContextGraphIds());
     const canonicalTargets = canonicalizeRfc64SwmRecoveryTargetsV1(recoveryPlan.targets);
     if (canonicalTargets === null) return null;
     const configuredTargets = canonicalizeRfc64SwmRecoveryTargetsV1(
-      this.deps.admission.configuredRecoveryPlan(recoveryPlan.providerPeerId).targets,
+      this.deps.admission.activeRecoveryPlan(recoveryPlan.providerPeerId).targets,
     );
     if (configuredTargets === null) return null;
     const configuredTargetKeys = new Set(configuredTargets.map(recoveryTargetKey));
-    const eligible = canonicalTargets.filter((target) => (
-      configuredTargetKeys.has(recoveryTargetKey(target))
-      && (
-        target.lane === 'ordinary-private'
-        || selectedPublic.has(target.contextGraphId)
-      )
-    ));
+    const eligible = canonicalTargets.filter(
+      (target) => configuredTargetKeys.has(recoveryTargetKey(target)),
+    );
     return eligible.length === 0 ? null : eligible;
   }
 
@@ -151,15 +146,11 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
     ) {
       throw new Error('RFC-64 SWM recovery provider is not admitted or catalog-ready');
     }
-    const configured = this.deps.admission.configuredRecoveryPlan(
+    const configured = this.deps.admission.activeRecoveryPlan(
       authorized.providerPeerId,
     );
-    const selectedPublic = new Set(
-      this.deps.admission.selectedPublicContextGraphIds(),
-    );
     const configuredPublicTargets = configured.targets.filter(
-      ({ contextGraphId, lane }) => lane === 'selected-public'
-        && selectedPublic.has(contextGraphId),
+      ({ lane }) => lane === 'selected-public',
     );
     const configuredPublicIds = configuredPublicTargets.map(
       ({ contextGraphId }) => contextGraphId,

@@ -41,6 +41,8 @@ import {
   openSqliteFinalizationRecoveryStore,
   type SqliteFinalizationRecoveryStore,
 } from '../src/finalization-recovery-sqlite-store.js';
+import type { FinalizationRecoveryEligibility } from
+  '../src/finalization-recovery-eligibility.js';
 import type { FinalizationRecoveryStore } from '../src/finalization-recovery-store.js';
 import { protobufScalarToBigInt } from '../src/protobuf-scalars.js';
 import {
@@ -48,7 +50,10 @@ import {
   type ChainReconcilerDeps,
 } from '../src/chain-reconciler.js';
 import { createCursorState } from '../src/reconcile-cursor.js';
-import { createRetireConfirmedGraphScopedSwmTwinIfOrphaned } from
+import {
+  createRetireConfirmedGraphScopedSwmTwinIfOrphaned,
+  reconcileFinalizedSwmTwinFromCatalogProjection,
+} from
   '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 
 const CG = 'rootless-finalization';
@@ -144,10 +149,12 @@ async function closeInbox(inbox: SqliteFinalizationRecoveryStore | undefined): P
 function recoveryOptions(
   recoveryStore: FinalizationRecoveryStore,
   localTopicOnChainContextGraphId = '42',
+  finalizationRecoveryEligibility: FinalizationRecoveryEligibility = async () => true,
 ) {
   return {
     recoveryStore,
     resolveContextGraphOnChainId: async () => localTopicOnChainContextGraphId,
+    finalizationRecoveryEligibility,
   };
 }
 
@@ -1243,7 +1250,10 @@ describe('graph-scoped finalization handler', () => {
       );
 
       const query = store.query.bind(store);
-      let busyReads = 2;
+      // Publisher-authority observation now owns the first store probe. Keep
+      // both materialization attempts busy as well so this still exercises the
+      // durable pre-verification timeout path.
+      let busyReads = 3;
       store.query = async (sparql, options) => {
         if (busyReads > 0) {
           busyReads -= 1;
@@ -1367,7 +1377,8 @@ describe('graph-scoped finalization handler', () => {
         chain,
         recoveryOptions(inbox),
       );
-      let busyReads = 2;
+      // One authority probe precedes the two bounded materialization attempts.
+      let busyReads = 3;
       store.query = async (sparql, options) => {
         if (busyReads > 0) {
           busyReads -= 1;
@@ -1409,7 +1420,7 @@ describe('graph-scoped finalization handler', () => {
 
       await vi.waitFor(async () => {
         expect(await inbox!.list()).toMatchObject([{ state: 'SETTLED' }]);
-      });
+      }, { timeout: 7_000 });
       expect(await store.countQuads(vmGraph)).toBe(2);
       const health = await inbox.health();
       expect(health.ready).toBe(true);
@@ -1608,7 +1619,7 @@ describe('graph-scoped finalization handler', () => {
         listDue: async () => [],
         listForKnowledgeAsset: async () => [],
         transition: async () => false,
-        recordAttempt: async () => {},
+        recordAttempt: async () => ({ status: 'stale' }),
         health: async () => ({
           available: true,
           closed: false,
@@ -1681,10 +1692,15 @@ describe('graph-scoped finalization handler', () => {
       expect(await inbox.list()).toMatchObject([{
         state: 'RECEIVED',
         attemptCount: 1,
-        lastError: 'finalization processing deferred',
+        lastError: 'context-graph-binding-pending',
       }]);
 
       boundContextGraphId = 42n;
+      const [deferred] = await inbox.list();
+      await new Promise((resolve) => setTimeout(
+        resolve,
+        Math.max(0, (deferred?.nextAttemptAt ?? Date.now()) - Date.now()) + 10,
+      ));
       await recoveryHandler.handleFinalizationMessage(
         encodeFinalizationMessage(message),
         CG,
@@ -1733,7 +1749,7 @@ describe('graph-scoped finalization handler', () => {
       expect(await inbox.list()).toMatchObject([{
         state: 'RECEIVED',
         attemptCount: 1,
-        lastError: 'finalization processing deferred',
+        lastError: 'context-graph-binding-pending',
       }]);
     } finally {
       await closeInbox(inbox);
@@ -2404,6 +2420,109 @@ describe('graph-scoped finalization handler', () => {
       <http://www.w3.org/ns/prov#wasAttributedTo> <did:dkg:agent:${AUTHOR}> .
       FILTER NOT EXISTS { <${UAL}> <http://dkg.io/ontology/transactionHash> ?tx }
     `);
+  });
+
+  it('retires the exact SWM twin after receiptless public chain promotion', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    const writeLocks = new Map<string, Promise<void>>();
+    const retire = vi.fn(async (candidate: { swmGraph: string }) => {
+      await store.dropGraph(candidate.swmGraph);
+    });
+    const publicHandler = new FinalizationHandler(
+      store,
+      legacyFinalizationChain(4, {
+        isContextGraphActiveOnChain: async () => true,
+        getContextGraphAccessPolicy: async () => 0,
+        getMerkleRootCount: async () => 1n,
+        getLatestMerkleRoot: async () => message.kcMerkleRoot,
+        getLatestMerkleRootAuthor: async () => AUTHOR,
+      }),
+      {
+        reconcileConfirmedGraphScopedSwmTwin: async (evidence) => {
+          const outcome = await reconcileFinalizedSwmTwinFromCatalogProjection({
+            store,
+            writeLocks,
+            evidence,
+            retire,
+          });
+          expect(outcome).toBe('retired');
+        },
+      },
+    );
+    const internals = publicHandler as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+      findSwmSnapshotForMerkleRoot?: () => Promise<never>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+    internals.findSwmSnapshotForMerkleRoot = async () => {
+      throw new Error('legacy root scan must not run for graph-scoped SWM');
+    };
+
+    await expect(reconcileGraphScoped(publicHandler, message)).resolves.toBe('promoted');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    expect(retire).toHaveBeenCalledOnce();
+  });
+
+  it('retires only the exact SWM twin when restart reconciliation finds matching VM metadata', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    await expectGraphScopedMetadata(`
+      <http://dkg.io/ontology/status> "confirmed" ;
+      <http://dkg.io/ontology/transactionHash> "${message.txHash}" ;
+      <http://dkg.io/ontology/materializedVersion> "123:4" .
+    `);
+
+    const unrelatedSwmGraph =
+      `did:dkg:context-graph:${CG}/_shared_memory/upgrade-restart-sentinel`;
+    await store.insert([{
+      subject: 'urn:asset:unrelated-upgrade-restart',
+      predicate: 'urn:predicate:value',
+      object: '"preserved"',
+      graph: unrelatedSwmGraph,
+    }]);
+
+    const writeLocks = new Map<string, Promise<void>>();
+    const retire = vi.fn(async (candidate: { swmGraph: string }) => {
+      await store.dropGraph(candidate.swmGraph);
+    });
+    const restarted = new FinalizationHandler(
+      store,
+      legacyFinalizationChain(),
+      {
+        reconcileConfirmedGraphScopedSwmTwin: async (evidence) => {
+          await expect(reconcileFinalizedSwmTwinFromCatalogProjection({
+            store,
+            writeLocks,
+            evidence,
+            retire,
+          })).resolves.toBe('retired');
+        },
+      },
+    );
+    const internals = restarted as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+      findSwmSnapshotForMerkleRoot?: () => Promise<never>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+    internals.findSwmSnapshotForMerkleRoot = async () => {
+      throw new Error('legacy root scan must not run for matching graph-scoped VM metadata');
+    };
+
+    await expect(reconcileGraphScoped(restarted, message)).resolves.toBe('already-confirmed');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    expect(await store.countQuads(unrelatedSwmGraph)).toBe(1);
+    expect(retire).toHaveBeenCalledOnce();
+    expect(retire).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId: CG,
+      kaUal: UAL,
+      swmGraph,
+    }));
   });
 
   it('promotes a later exact public SWM assertion when the chain version advances', async () => {

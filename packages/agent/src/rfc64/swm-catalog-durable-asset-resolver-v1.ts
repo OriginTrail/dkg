@@ -138,37 +138,21 @@ async function resolveDurableCatalogAssetV1(
   });
   throwIfAbortedV1(params.signal);
 
-  let projectionQuads: readonly Quad[];
-  // Finalized private placements remain in the tier-neutral author inventory
-  // after their byte-identical SWM twin is retired. Rebuild those rows from
-  // exact confirmed VM state; public lanes continue to require a workspace head.
-  if (head === undefined) {
-    if (laneKind !== 'private') {
-      throw new Error(`durable RFC-64 workspace head differs for ${identity.kaUal}`);
-    }
-    projectionQuads = await resolveFinalizedVmProjectionQuadsV1(
-      params,
-      identity,
-      seal,
-      resolution.kind === 'inventory-row'
-        ? 'agent.rfc64.swmInventory.catalogReconcile.vmProjection'
-        : 'agent.rfc64.finalizedPrivateCatalogRepair.vmProjection',
-    );
-  } else {
-    const inventoryRowDiffers = resolution.kind === 'inventory-row' && (
+  const inventoryRowDiffers = resolution.kind === 'inventory-row'
+    && head !== undefined
+    && (
       head.shareOperationId !== resolution.row.shareOperationId
       || head.publicTripleCount !== Number(resolution.row.publicTripleCount)
       || head.privateTripleCount !== Number(resolution.row.privateTripleCount)
     );
-    if (
-      head.assertionVersion !== identity.assertionVersion
-      || head.publicTripleCount !== Number(seal.publicTripleCount)
-      || head.privateTripleCount !== Number(seal.privateTripleCount)
-      || !laneAcceptsWorkspaceHeadV1(laneKind, head.accessPolicy)
-      || inventoryRowDiffers
-    ) {
-      throw new Error(`durable RFC-64 workspace head differs for ${identity.kaUal}`);
-    }
+  const workspaceHeadMatches = head !== undefined
+    && head.assertionVersion === identity.assertionVersion
+    && head.publicTripleCount === Number(seal.publicTripleCount)
+    && head.privateTripleCount === Number(seal.privateTripleCount)
+    && laneAcceptsWorkspaceHeadV1(laneKind, head.accessPolicy)
+    && !inventoryRowDiffers;
+  let projectionQuads: readonly Quad[];
+  if (workspaceHeadMatches) {
     const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
       store: params.store,
       graphManager,
@@ -180,6 +164,22 @@ async function resolveDurableCatalogAssetV1(
     });
     throwIfAbortedV1(params.signal);
     projectionQuads = snapshot.quads;
+  } else {
+    // A finalized private lift may replace or retire its SWM workspace head
+    // before the detached inventory/catalog observer runs. Only this private
+    // lane may fall back, and the confirmed metadata envelope plus the strict
+    // author seal still have to prove the exact VM projection.
+    if (laneKind !== 'private') {
+      throw new Error(`durable RFC-64 workspace head differs for ${identity.kaUal}`);
+    }
+    projectionQuads = await resolveFinalizedVmProjectionQuadsV1(
+      params,
+      identity,
+      seal,
+      resolution.kind === 'inventory-row'
+        ? 'agent.rfc64.swmInventory.catalogReconcile.vmProjection'
+        : 'agent.rfc64.finalizedPrivateCatalogRepair.vmProjection',
+    );
   }
 
   assertProjectionMatchesSealV1(projectionQuads, seal, identity.kaUal);

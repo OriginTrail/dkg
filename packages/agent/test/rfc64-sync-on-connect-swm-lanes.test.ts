@@ -185,7 +185,9 @@ describe('RFC-64 SWM lane partition and admission', () => {
     ))
       .toBe('synced');
 
-    expect(planner).toHaveBeenCalledTimes(2);
+    // Selected recovery is frozen by its dedicated authority resolver before
+    // durable sync. Only ordinary work is re-planned from the refreshed state.
+    expect(planner).toHaveBeenCalledTimes(1);
     expect(selectedSync).toHaveBeenCalledWith(
       PEER_A,
       ['selected-a'],

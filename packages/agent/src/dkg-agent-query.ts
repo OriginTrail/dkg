@@ -7,6 +7,7 @@
  * so cross-calls resolve against the composed class.
  */
 
+import { listStoredContextGraphUris, storedContextGraphPolicyCandidates } from './stored-context-graph-candidates.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -852,20 +853,11 @@ export class QueryMethods extends DKGAgentBase {
       ...this.subscribedContextGraphs.keys(),
       ...(this.config.syncContextGraphs ?? []),
     ]);
-    const graphPrefix = 'did:dkg:context-graph:';
-    const graphOptions = { source: 'agent.query.rfc64RuntimePrivateGraphs' };
-    const storedGraphs = this.store.listGraphsByPrefix
-      ? await this.store.listGraphsByPrefix(graphPrefix, graphOptions)
-      : await this.store.listGraphs(graphOptions);
-    for (const graph of storedGraphs) {
-      if (!graph.startsWith(graphPrefix)) continue;
-      let candidate = graph.slice(graphPrefix.length);
-      while (candidate) {
-        runtimeCandidates.add(candidate);
-        const slash = candidate.lastIndexOf('/');
-        if (slash < 0) break;
-        candidate = candidate.slice(0, slash);
-      }
+    const storedGraphs = await listStoredContextGraphUris(this.store, {
+      source: 'agent.query.rfc64RuntimePrivateGraphs',
+    });
+    for (const candidate of storedContextGraphPolicyCandidates(storedGraphs)) {
+      runtimeCandidates.add(candidate);
     }
     for (const contextGraphId of runtimeCandidates) {
       if (this.resolveRfc64PrivateReadRosterV1(contextGraphId) !== undefined) {

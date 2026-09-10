@@ -73,6 +73,7 @@ import {
 import {
   fetchNpmDistTags,
 } from '../update/npm-registry.js';
+import { cleanStaleWorkspacePackages } from './auto-update-workspace-clean.js';
 import {
   checkForNpmVersionUpdate as checkForNpmVersionUpdateShared,
   getCurrentCliVersion as getCurrentCliVersionShared,
@@ -87,6 +88,11 @@ export {
 } from '../update/npm-registry.js';
 export { deriveUpdateCheckState } from '../update/npm-version.js';
 export type { NpmVersionResult, NpmVersionStatus } from '../update/npm-version.js';
+
+/** Updater-owned dependency seam for inactive-slot preparation. */
+export const _autoUpdateDependencies = {
+  cleanStaleWorkspacePackages,
+};
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -1162,6 +1168,7 @@ async function _performUpdateInner(
   const timeouts = resolveBuildTimeouts(au);
 
   try {
+    await _autoUpdateDependencies.cleanStaleWorkspacePackages(targetDir, log);
     await runBuildStep(execAsync, "pnpm install --frozen-lockfile", {
       cwd: targetDir,
       timeoutMs: timeouts.install,

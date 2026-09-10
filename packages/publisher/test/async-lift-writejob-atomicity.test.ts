@@ -15,7 +15,7 @@ import {
   serializeJob,
   serializeJobRecord,
 } from '../src/async-lift-control-plane.js';
-import { KA_VM_VALIDATION, kaVmPublishRequest } from './_helpers/ka-vm-publish.js';
+import { KA_VM_VALIDATION, kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 
 // #1863 — writeJob persists a job transition via the atomic
 // tryReplaceSubjectAtomically capability so a lock-free reader racing a

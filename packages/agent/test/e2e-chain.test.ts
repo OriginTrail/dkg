@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { ethers, Wallet, Contract } from 'ethers';
 import { DKGAgent } from '../src/index.js';
@@ -10,6 +10,7 @@ import {
   MemoryLayer,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
+  contextGraphFinalizationTopic,
   type PrecomputedUpdateAttestation,
 } from '@origintrail-official/dkg-core';
 import {
@@ -94,7 +95,7 @@ let agentBIdentityId: number;
 
 describe('E2E: DKGAgent with real blockchain', () => {
   beforeAll(async () => {
-    ctx = await spawnHardhatEnv(8547);
+    ctx = await spawnHardhatEnv();
     // Create on-chain profiles for agent keys so ensureProfile finds them
     agentAIdentityId = await createNodeProfile(
       ctx.provider, ctx.hubAddress,
@@ -122,7 +123,7 @@ describe('E2E: DKGAgent with real blockchain', () => {
     for (const agent of agents) {
       try { await agent.stop(); } catch { /* teardown best-effort */ }
     }
-    killHardhat(ctx);
+    await killHardhat(ctx);
   });
 
   it('creates agents with real EVMChainAdapter (no mocks)', async () => {
@@ -132,6 +133,9 @@ describe('E2E: DKGAgent with real blockchain', () => {
       nodeRole: 'core',
       listenPort: 0,
       skills: [],
+      // This suite exercises the one-release legacy GossipSub rollback. In
+      // 10.0.16 omission selects catalog authority and suppresses that topic.
+      rfc64CatalogActivation: { enabled: false },
       chainConfig: makeChainConfig(HARDHAT_KEYS.EXTRA1, HARDHAT_KEYS.EXTRA3),
     });
     agents.push(agentA);
@@ -142,6 +146,7 @@ describe('E2E: DKGAgent with real blockchain', () => {
       nodeRole: 'core',
       listenPort: 0,
       skills: [],
+      rfc64CatalogActivation: { enabled: false },
       chainConfig: makeChainConfig(HARDHAT_KEYS.EXTRA2, HARDHAT_KEYS.PUBLISHER2),
     });
     agents.push(agentB);
@@ -425,25 +430,18 @@ describe('E2E: DKGAgent with real blockchain', () => {
 
   it('second agent sees new publish via gossipsub without manual sync', async () => {
 
-    const chainAdapter = new EVMChainAdapter(
-      makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.EXTRA1),
-    );
-    const cgResult = await chainAdapter.createOnChainContextGraph({
-      accessPolicy: 0,
-      publishPolicy: 1,
-    });
-    const gossipCG = String(cgResult.contextGraphId);
-
-    await agents[0].createContextGraph({
-      id: gossipCG,
-      name: 'Gossip Verification',
-    });
-    const sub3 = (agents[0] as any).subscribedContextGraphs.get(gossipCG);
-    if (sub3) sub3.onChainId = gossipCG;
-
+    const gossipCG = 'gossip-verification-e2e';
+    await agents[0].createContextGraph({ id: gossipCG, name: 'Gossip Verification' });
+    await agents[0].registerContextGraph(gossipCG);
+    // Subscription is authorization gated on discovered CG metadata. A fixed
+    // sleep could publish before the receiver knew the graph or its topic.
+    await expect.poll(() => agents[1].contextGraphExists(gossipCG), { timeout: 10_000 }).toBe(true);
     agents[0].subscribeToContextGraph(gossipCG);
     agents[1].subscribeToContextGraph(gossipCG);
-    await new Promise((r) => setTimeout(r, 1000));
+    await expect.poll(
+      () => agents[0].gossip.getSubscribers(contextGraphFinalizationTopic(gossipCG)),
+      { timeout: 10_000 },
+    ).toContain(agents[1].peerId);
 
     const quads = [
       {
@@ -454,20 +452,24 @@ describe('E2E: DKGAgent with real blockchain', () => {
       },
     ];
 
-    await agents[0].publish(gossipCG, quads);
-
-    // Wait for gossip propagation
-    await new Promise((r) => setTimeout(r, 3000));
-
-    const result = await agents[1].query(
-      `SELECT ?name WHERE { <did:dkg:test:GossipEntity> <http://schema.org/name> ?name }`,
-      { contextGraphId: gossipCG },
-    );
-
-    expect(result).toBeDefined();
-    expect(result.bindings).toBeDefined();
-    expect(result.bindings.length).toBeGreaterThanOrEqual(1);
-    const names = result.bindings.map((b: any) => b.name?.value ?? b.name);
-    expect(names.some((n: string) => n.includes('GossipTest'))).toBe(true);
+    const receiver = agents[1];
+    const delivered = vi.spyOn(receiver.getOrCreateFinalizationHandler(), 'handleFinalizationMessage');
+    try {
+      await agents[0].publish(gossipCG, quads);
+      await expect.poll(() => delivered.mock.calls.some(
+        ([, cg, from]) => cg === gossipCG && from === agents[0].peerId,
+      ), { timeout: 10_000 }).toBe(true);
+      const deliveryIndex = delivered.mock.calls.findIndex(([, cg]) => cg === gossipCG);
+      await delivered.mock.results[deliveryIndex].value;
+      await expect.poll(async () => {
+        const result = await receiver.query(
+          `SELECT ?name WHERE { <did:dkg:test:GossipEntity> <http://schema.org/name> ?name }`,
+          { contextGraphId: gossipCG },
+        );
+        return result.bindings.map((binding: any) => binding.name?.value ?? binding.name);
+      }, { timeout: 10_000 }).toContain('"GossipTest"');
+    } finally {
+      delivered.mockRestore();
+    }
   }, 60_000);
 });

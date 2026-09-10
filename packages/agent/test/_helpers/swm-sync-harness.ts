@@ -64,6 +64,7 @@ export function makeSwmSyncHarness(options: {
       quads: [...options.served.payload],
     });
     return runSharedMemorySync({
+      mode: { kind: 'ordinary' },
       ctx: options.ctx,
       remotePeerId: 'peer-source',
       contextGraphIds: [options.contextGraphId],

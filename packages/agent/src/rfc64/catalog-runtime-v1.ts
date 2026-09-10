@@ -9,16 +9,13 @@ export interface Rfc64CatalogRuntimeOptionsV1 {
     open: () => void;
     close: () => Promise<void>;
   }>;
-  readonly service: Readonly<{
-    start: (ctx: OperationContext) => void;
-    /** Closes transport and physically drains the shared mutation coordinator. */
+  readonly mutationPersistence: Readonly<{
+    open: () => void;
     close: () => Promise<void>;
   }>;
-  readonly receiverAdmission: Readonly<{
-    close: () => Promise<void>;
-  }>;
-  readonly bootstrap: Rfc64CatalogWorkloadOwnerV1;
-  readonly projection: Rfc64CatalogWorkloadOwnerV1;
+  readonly publicCatalog: Rfc64PublicCatalogRuntimeOwnerV1;
+  /** Ordered independent workloads started after public transport admission. */
+  readonly workloads: readonly Rfc64CatalogWorkloadOwnerV1[];
 }
 
 /** Semantic lifecycle surface implemented by each feature-local workload owner. */
@@ -28,8 +25,17 @@ export interface Rfc64CatalogWorkloadOwnerV1 {
   close(): Promise<void>;
 }
 
+/** Public transport adds an early receiver-admission fence to the owner contract. */
+export interface Rfc64PublicCatalogRuntimeOwnerV1 extends Rfc64CatalogWorkloadOwnerV1 {
+  closeReceiverAdmission(): Promise<void>;
+}
+
 export class Rfc64CatalogRuntimeV1 {
   readonly #options: Rfc64CatalogRuntimeOptionsV1;
+  #inventoryObserversStartAttempted = false;
+  #mutationPersistenceStartAttempted = false;
+  #publicCatalogStartAttempted = false;
+  readonly #workloadsStartAttempted = new Set<Rfc64CatalogWorkloadOwnerV1>();
   #started = false;
   #close: Promise<void> | null = null;
 
@@ -42,39 +48,59 @@ export class Rfc64CatalogRuntimeV1 {
       throw new Error('RFC-64 catalog runtime cannot start while close is in progress');
     }
     if (this.#started) return;
-    this.#options.inventoryObservers.open();
-    this.#options.service.start(ctx);
-    this.#options.bootstrap.start(ctx);
-    this.#options.projection.start(ctx);
-    this.#started = true;
+    try {
+      this.#inventoryObserversStartAttempted = true;
+      this.#options.inventoryObservers.open();
+      this.#mutationPersistenceStartAttempted = true;
+      this.#options.mutationPersistence.open();
+      this.#publicCatalogStartAttempted = true;
+      this.#options.publicCatalog.start(ctx);
+      for (const workload of this.#options.workloads) {
+        this.#workloadsStartAttempted.add(workload);
+        workload.start(ctx);
+      }
+      this.#started = true;
+    } catch (error) {
+      this.#armClose(this.#closeOwnedLifecycle());
+      throw error;
+    }
   }
 
   async whenIdle(): Promise<void> {
     await Promise.all([
-      this.#options.bootstrap.whenIdle(),
-      this.#options.projection.whenIdle(),
+      this.#options.publicCatalog.whenIdle(),
+      ...this.#options.workloads.map((workload) => workload.whenIdle()),
     ]);
   }
 
   close(): Promise<void> {
     if (this.#close !== null) return this.#close;
     const closing = this.#closeOwnedLifecycle();
+    this.#armClose(closing);
+    return closing;
+  }
+
+  #armClose(closing: Promise<void>): void {
     this.#close = closing;
     void closing.then(() => {
       if (this.#close === closing) this.#close = null;
       this.#started = false;
+      this.#inventoryObserversStartAttempted = false;
+      this.#mutationPersistenceStartAttempted = false;
+      this.#publicCatalogStartAttempted = false;
+      this.#workloadsStartAttempted.clear();
     }, () => {
       // A failed owner did not prove that its resource closed. Keep the
       // rejected close promise as a permanent fence: callers may observe the
       // failure again, but same-instance restart cannot reopen partial state.
     });
-    return closing;
   }
 
   async #closeOwnedLifecycle(): Promise<void> {
-    // Preserve the production dependency order: producer admission first,
-    // receiver admission second, then fence both independent workload owners
-    // concurrently before transport and mutation persistence are released.
+    // Preserve the production dependency order: producer admission first and
+    // receiver admission second. Then retire every independent workload
+    // concurrently. Shared mutation persistence remains live until every
+    // producer and consumer has physically retired.
     const failures: unknown[] = [];
     const settle = async (actions: readonly (() => Promise<void>)[]): Promise<void> => {
       const results = await Promise.allSettled(actions.map((action) => action()));
@@ -82,13 +108,21 @@ export class Rfc64CatalogRuntimeV1 {
         if (result.status === 'rejected') failures.push(result.reason);
       }
     };
-    await settle([this.#options.inventoryObservers.close]);
-    await settle([this.#options.receiverAdmission.close]);
+    await settle(this.#inventoryObserversStartAttempted
+      ? [this.#options.inventoryObservers.close]
+      : []);
+    await settle(this.#publicCatalogStartAttempted
+      ? [() => this.#options.publicCatalog.closeReceiverAdmission()]
+      : []);
     await settle([
-      () => this.#options.bootstrap.close(),
-      () => this.#options.projection.close(),
+      ...(this.#publicCatalogStartAttempted
+        ? [() => this.#options.publicCatalog.close()]
+        : []),
+      ...[...this.#workloadsStartAttempted].map((workload) => () => workload.close()),
     ]);
-    await settle([this.#options.service.close]);
+    await settle(this.#mutationPersistenceStartAttempted
+      ? [this.#options.mutationPersistence.close]
+      : []);
     if (failures.length === 1) throw failures[0];
     if (failures.length > 1) {
       throw new AggregateError(failures, 'RFC-64 catalog runtime close failed');

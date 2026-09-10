@@ -1,8 +1,8 @@
 import {
   readSparqlLogicalCodePoint,
   readSparqlVariableEnd,
+  scanSparqlIriRef,
   scanSparqlStringLiteral,
-  skipSparqlIriRef,
   sparqlAsciiDigitWidth,
   sparqlPnCharsBaseWidth,
   sparqlPnCharsUWidth,
@@ -183,23 +183,6 @@ function isWhitespace(codePoint: number): boolean {
 
 function blank(masked: string[], start: number, end: number): void {
   for (let index = start; index < end; index++) masked[index] = ' ';
-}
-
-function logicalIriValue(value: string, start: number, end: number): string | null {
-  const opening = readSparqlLogicalCodePoint(value, start);
-  if (!opening || opening.codePoint !== 0x3c) return null;
-  const decoded: string[] = [];
-  let index = start + opening.rawWidth;
-  while (index < end) {
-    const logical = readSparqlLogicalCodePoint(value, index);
-    if (!logical || index + logical.rawWidth > end) return null;
-    if (index + logical.rawWidth === end) {
-      return logical.codePoint === 0x3e ? decoded.join('') : null;
-    }
-    decoded.push(String.fromCodePoint(logical.codePoint));
-    index += logical.rawWidth;
-  }
-  return null;
 }
 
 function logicalTokenValue(value: string, start: number, end: number): string | null {
@@ -407,21 +390,16 @@ function scanSparql(value: string): ScannedSparql | null {
       logical.codePoint === 0x3c
       && lessThanStartsIriRef(tokens, openExpressionGroups)
     ) {
-      const iriEnd = skipSparqlIriRef(value, index);
-      if (iriEnd !== null) {
+      const iriScan = scanSparqlIriRef(value, index);
+      if (iriScan !== null) {
         const start = index;
-        index = iriEnd;
-        const logicalValue = logicalIriValue(value, start, index);
-        if (logicalValue === null) {
-          unterminated = true;
-          continue;
-        }
+        index = iriScan.end;
         materialized.push(value.slice(start, index));
         blank(masked, start, index);
         tokens.push({
           kind: 'iri',
           raw: value.slice(start, index),
-          logicalValue,
+          logicalValue: iriScan.logicalValue,
           start,
           end: index,
         });

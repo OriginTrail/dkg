@@ -6,6 +6,8 @@ import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpe
 import { runPromoteJob } from '../src/daemon/worker/async-promote-worker.js';
 import { createAsyncPromoteWorkerFixture, deferred, type AsyncPromoteWorkerFixture } from './_helpers/async-promote-worker-fixture.js';
 
+const PROMOTE_RETRYABLE_FAILURE_CODE = 'PROMOTE_RETRYABLE_FAILURE';
+
 const PROMOTE_FAILURE_LOG_PREFIX = '[async-promote-worker] ';
 
 function promoteFailureDiagnostics(logs: readonly string[]): Record<string, unknown>[] {
@@ -38,7 +40,7 @@ describe('promote worker diagnostics and hostile loggers', () => {
       },
       now: fixture.clock.now,
       heartbeatIntervalMs: 0,
-      log: (message) => logs.push(message),
+      log: (message) => { logs.push(message); },
     });
     expect(result.outcome).toBe('failed_retrying');
     expect(result.error?.classification).toBe('transient');
@@ -56,6 +58,36 @@ describe('promote worker diagnostics and hostile loggers', () => {
         stage: 'unknown',
         classification: 'transient',
         retryable: true,
+      }),
+    ]);
+  });
+
+  it('keeps a serialized cross-boundary generic failure queued for retry', async () => {
+    const job = await enqueueAndClaim();
+    const result = await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw { code: PROMOTE_RETRYABLE_FAILURE_CODE };
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => { logs.push(message); },
+    });
+
+    expect(result).toMatchObject({
+      outcome: 'failed_retrying',
+      error: { classification: 'transient', retryable: true },
+    });
+    expect(await queue.getStatus(job.jobId)).toMatchObject({ state: 'failed_retrying' });
+    expect(promoteFailureDiagnostics(logs)).toEqual([
+      expect.objectContaining({
+        classification: 'transient',
+        retryable: true,
+        errorName: 'PromoteRetryableFailureError',
+        errorCode: PROMOTE_RETRYABLE_FAILURE_CODE,
       }),
     ]);
   });
@@ -80,7 +112,7 @@ describe('promote worker diagnostics and hostile loggers', () => {
       },
       now: fixture.clock.now,
       heartbeatIntervalMs: 0,
-      log: (message) => logs.push(message),
+      log: (message) => { logs.push(message); },
     });
 
     expect(promoteFailureDiagnostics(logs)).toEqual([
@@ -123,7 +155,7 @@ describe('promote worker diagnostics and hostile loggers', () => {
       },
       now: fixture.clock.now,
       heartbeatIntervalMs: 0,
-      log: (message) => logs.push(message),
+      log: (message) => { logs.push(message); },
     });
     expect(result.outcome).toBe('failed_terminal');
     expect(result.error?.classification).toBe('fatal');
@@ -201,16 +233,14 @@ describe('promote worker diagnostics and hostile loggers', () => {
     expect(promoteFailureDiagnostics(logs)).toEqual(diagnostics);
   });
 
-  it('maps unowned stages and unsafe error identity to bounded unknown values', async () => {
+  it('sanitizes caller-controlled error identity at the worker logging boundary', async () => {
     const job = await enqueueAndClaim();
-    const sensitiveMessage = 'opaque secret-sentinel failure';
-    const alphanumericSecretToken = 'AKIAIOSFODNN7EXAMPLE';
-    const failure = Object.assign(new Error(`[promote:callerControlled] ${sensitiveMessage}`), {
-      name: `Error${alphanumericSecretToken}`,
-      code: alphanumericSecretToken,
+    const secretToken = 'AKIAIOSFODNN7EXAMPLE';
+    const failure = Object.assign(new Error('[promote:callerControlled] secret-sentinel failure'), {
+      name: `Error${secretToken}`,
+      code: secretToken,
     });
-
-    await runPromoteJob({
+    const result = await runPromoteJob({
       job,
       queue,
       workerId: 'worker-test',
@@ -220,19 +250,18 @@ describe('promote worker diagnostics and hostile loggers', () => {
       },
       now: fixture.clock.now,
       heartbeatIntervalMs: 0,
-      log: (message) => logs.push(message),
+      log: (message) => { logs.push(message); },
     });
 
-    expect(promoteFailureDiagnostics(logs)).toEqual([
-      expect.objectContaining({
-        stage: 'unknown',
-        errorName: 'unknown',
-        errorCode: 'unknown',
-      }),
-    ]);
+    expect(result.outcome).toBe('failed_terminal');
+    expect(promoteFailureDiagnostics(logs)).toEqual([expect.objectContaining({
+      stage: 'unknown', errorName: 'unknown', errorCode: 'unknown',
+      classification: 'fatal', retryable: false,
+    })]);
     expect(promoteFailureDiagnostics(logs)[0]).not.toHaveProperty('messageFingerprint');
+    expect(logs.join('\n')).not.toContain(secretToken);
     expect(logs.join('\n')).not.toContain('secret-sentinel');
-    expect(logs.join('\n')).not.toContain(alphanumericSecretToken);
+    expect(logs.join('\n')).not.toContain('callerControlled');
     expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
   });
 
@@ -348,6 +377,41 @@ describe('promote worker diagnostics and hostile loggers', () => {
     } finally {
       process.off('unhandledRejection', onUnhandledRejection);
     }
+  });
+
+  it('maps unowned stages and unsafe error identity to bounded unknown values', async () => {
+    const job = await enqueueAndClaim();
+    const sensitiveMessage = 'opaque secret-sentinel failure';
+    const alphanumericSecretToken = 'AKIAIOSFODNN7EXAMPLE';
+    const failure = Object.assign(new Error(`[promote:callerControlled] ${sensitiveMessage}`), {
+      name: `Error${alphanumericSecretToken}`,
+      code: alphanumericSecretToken,
+    });
+
+    await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw failure;
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => { logs.push(message); },
+    });
+
+    expect(promoteFailureDiagnostics(logs)).toEqual([
+      expect.objectContaining({
+        stage: 'unknown',
+        errorName: 'unknown',
+        errorCode: 'unknown',
+      }),
+    ]);
+    expect(promoteFailureDiagnostics(logs)[0]).not.toHaveProperty('messageFingerprint');
+    expect(logs.join('\n')).not.toContain('secret-sentinel');
+    expect(logs.join('\n')).not.toContain(alphanumericSecretToken);
+    expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
   });
 
 });

@@ -1,3 +1,4 @@
+import { hasValidGraphScopedContent, resolveGraphPublishAccess } from './graph-publish-envelope.js';
 import {
   deleteByPatternWithoutCount,
   GraphManager,
@@ -17,6 +18,7 @@ import type {
   StorageACKMsg,
   SubscriptionSource,
   UpdateIntentMsg,
+  GraphKnowledgeAssetAccessPolicy,
 } from '@origintrail-official/dkg-core';
 import {
   Logger,
@@ -56,6 +58,7 @@ import { generateKnowledgeAssetShareMetadata } from './metadata.js';
 import { storeKnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
+import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
 import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
@@ -65,7 +68,7 @@ type GraphScopedPublishIntent = {
   publicTripleCount: number;
   privateTripleCount: number;
   privateMerkleRoot?: Uint8Array;
-  accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  accessPolicy: GraphKnowledgeAssetAccessPolicy;
   allowedPeers: string[];
   subGraphName?: string;
 };
@@ -97,32 +100,18 @@ function resolveGraphScopedPublishIntent(
   }
   const publicTripleCount = intent.publicTripleCount ?? 0;
   const privateTripleCount = intent.privateTripleCount ?? 0;
-  if (
-    !Number.isSafeInteger(publicTripleCount)
-    || publicTripleCount < 0
-    || !Number.isSafeInteger(privateTripleCount)
-    || privateTripleCount < 0
-    || (publicTripleCount === 0 && privateTripleCount === 0)
-    || (privateTripleCount > 0 && privateMerkleRoot?.length !== 32)
-    || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
-  ) {
+  if (!hasValidGraphScopedContent(publicTripleCount, privateTripleCount, privateMerkleRoot)) {
     throw new Error('StorageACK: graph-scoped publish has an invalid content envelope');
   }
   const scope = createGraphKnowledgeAssetScope(intent.kaUal, intent.assertionVersion);
   if (scope.ual !== intent.kaUal || scope.assertionVersion !== '1') {
     throw new Error('StorageACK: graph-scoped publish requires a canonical version-1 UAL');
   }
-  const accessPolicy = intent.accessPolicy;
-  const rawAllowedPeers = intent.allowedPeers ?? [];
-  const allowedPeers = [...new Set(rawAllowedPeers.map((peer) => peer.trim()).filter(Boolean))];
-  if (
-    (accessPolicy !== 'public' && accessPolicy !== 'ownerOnly' && accessPolicy !== 'allowList')
-    || allowedPeers.length !== rawAllowedPeers.length
-    || (accessPolicy === 'allowList' && allowedPeers.length === 0)
-    || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
-  ) {
+  const access = resolveGraphPublishAccess(intent.accessPolicy, intent.allowedPeers ?? []);
+  if (!access) {
     throw new Error('StorageACK: graph-scoped publish has an invalid access envelope');
   }
+  const { accessPolicy, allowedPeers } = access;
   const subGraphName = intent.subGraphName || undefined;
   if (subGraphName) {
     const validation = validateSubGraphName(subGraphName);
@@ -179,15 +168,7 @@ function resolveGraphScopedUpdateIntent(
   }
   const publicTripleCount = intent.publicTripleCount ?? 0;
   const privateTripleCount = intent.privateTripleCount ?? 0;
-  if (
-    !Number.isSafeInteger(publicTripleCount)
-    || publicTripleCount < 0
-    || !Number.isSafeInteger(privateTripleCount)
-    || privateTripleCount < 0
-    || (publicTripleCount === 0 && privateTripleCount === 0)
-    || (privateTripleCount > 0 && privateMerkleRoot?.length !== 32)
-    || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
-  ) {
+  if (!hasValidGraphScopedContent(publicTripleCount, privateTripleCount, privateMerkleRoot)) {
     throw new Error('UpdateStorageACK: invalid graph-scoped content envelope');
   }
   const scope = createGraphKnowledgeAssetScope(intent.kaUal, intent.assertionVersion);
@@ -412,6 +393,8 @@ export interface StorageACKHandlerConfig {
    * of the H5 prefix on the V10 ACK digest.
    */
   kav10Address: string;
+  /** Shared publisher/agent lock domain for graph-scoped SWM KA writes. */
+  workspaceWriteLocks?: Map<string, Promise<void>>;
   /**
    * Optional live confirmation hook. When provided, the handler calls it
    * immediately before signing so removed/unregistered operational keys stop
@@ -912,7 +895,7 @@ export class StorageACKHandler {
       graph: metaGraph,
     });
 
-    const result = await this.runStoreOpOrDecline(cgId, async () => {
+    const persist = async () => this.runStoreOpOrDecline(cgId, async () => {
       if (replaceGraph) {
         const replaced = await tryReplaceGraphAtomically(
           this.store,
@@ -963,6 +946,17 @@ export class StorageACKHandler {
         ackStoreOptions('storage-ack.persistGraphScoped.flush'),
       );
     }, signal);
+    const result = this.config.workspaceWriteLocks
+      ? await withKeyedLocks(
+        this.config.workspaceWriteLocks,
+        [swmKaWriteLockKey(
+          swmGraphId,
+          graphPublish.subGraphName,
+          graphPublish.scope.ual,
+        )],
+        persist,
+      )
+      : await persist();
     return result.ok ? { ok: true } : result;
   }
 
@@ -1262,9 +1256,9 @@ export class StorageACKHandler {
       const claimedByteSize = typeof intent.publicByteSize === 'number'
         ? intent.publicByteSize
         : Number(intent.publicByteSize);
-      // byteSize parity: the curated CG prices off the catalog footprint, so
-      // the inline catalog bytes MUST equal the claimed `publicByteSize`
-      // (same honesty guard the plaintext path applies to its quads).
+      // byteSize parity: the inline catalog bytes MUST equal the claimed
+      // `publicByteSize` (the same honesty guard the plaintext path applies to
+      // its quads). A publisher may independently choose a higher tokenAmount.
       if (intent.stagingQuads.length !== claimedByteSize) {
         return this.encodeDecline(
           cgId,
@@ -1611,11 +1605,12 @@ export class StorageACKHandler {
     // by the merkle-root check above (computeFlatKCRoot over the SWM quads).
     const verifiedKACount = 1;
 
-    // byteSize pin: `publicByteSize` is signed into the ACK digest and prices the
-    // publish on-chain (`ask · byteSize · epochs`); nothing on-chain can see the
-    // content, so without this an under-claim (e.g. `byteSize = 1` for real
-    // content) drives the cost toward zero regardless of the ask. The publisher
-    // computes it as the UTF-8 byte length of the N-Quads serialization
+    // byteSize pin: `publicByteSize` is signed into the ACK digest and establishes
+    // the minimum publish price on-chain (`ask · byteSize · epochs`). Publishers
+    // may independently choose a higher tokenAmount, but nothing on-chain can see
+    // the content, so without this floor an under-claim (e.g. `byteSize = 1` for
+    // real content) drives the minimum toward zero regardless of the ask. The
+    // publisher computes it as the UTF-8 byte length of the N-Quads serialization
     // (`TextEncoder().encode(nquads).length`), so the floor is in UTF-8 bytes:
     //   - INLINE path (`stagingQuads` present): the core received the EXACT
     //     serialized payload, so require the claim to cover its full byte length

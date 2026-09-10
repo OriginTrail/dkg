@@ -152,11 +152,21 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
       writeLocks,
       invalidateListContextGraphsCache: () => {},
     });
+    const ownership = new Map<string, Map<string, string>>();
     return {
       ...makeIdentityBaseDeps(store, curatorMeta, writeLocks),
+      replaceMetaForRoots: async () => undefined,
       replaceMetaForGraphAssets: (assets: readonly GraphScopedSwmRecoveryDescriptor[]) =>
         snapshotMaterializer.replaceMetaForGraphAssets(assets),
       snapshotMaterializer,
+      ensureOwnedMap: (key: string) => {
+        let owned = ownership.get(key);
+        if (owned === undefined) {
+          owned = new Map();
+          ownership.set(key, owned);
+        }
+        return owned;
+      },
     };
   }
 

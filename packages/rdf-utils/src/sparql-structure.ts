@@ -21,6 +21,8 @@ export interface SparqlStructure {
   readonly braces: SparqlDelimiterIndex;
   readonly parentheses: SparqlDelimiterIndex;
   readonly brackets: SparqlDelimiterIndex;
+  /** True only when every supported delimiter family is balanced. */
+  readonly balanced: boolean;
 }
 
 function indexDelimiter(
@@ -74,10 +76,14 @@ function indexDelimiter(
 /** Build the one shared shallow delimiter/group index for policy consumers. */
 export function indexSparqlStructure(prepared: PreparedSparql): SparqlStructure {
   const { tokens } = prepared;
+  const braces = indexDelimiter(tokens, '{', '}');
+  const parentheses = indexDelimiter(tokens, '(', ')');
+  const brackets = indexDelimiter(tokens, '[', ']');
   return Object.freeze({
-    braces: indexDelimiter(tokens, '{', '}'),
-    parentheses: indexDelimiter(tokens, '(', ')'),
-    brackets: indexDelimiter(tokens, '[', ']'),
+    braces,
+    parentheses,
+    brackets,
+    balanced: braces.balanced && parentheses.balanced && brackets.balanced,
   });
 }
 

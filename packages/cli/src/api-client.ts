@@ -12,12 +12,17 @@ import type {
   JournalReadResult,
   LiftJobRetryProjection,
   PersistedLiftJob,
+  PublicationPricingPolicy,
 } from '@origintrail-official/dkg-publisher';
 import {
   isSafeJobId,
   SAFE_JOB_ID_ERROR,
 } from '@origintrail-official/dkg-publisher';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
+import {
+  serializeAgentListOptions,
+  type AgentListPageOptions,
+} from '@origintrail-official/dkg-core';
 import { loadTokens } from './auth.js';
 import {
   finalizedPublishOptionsPayload,
@@ -442,12 +447,71 @@ function configuredApiBaseUrl(apiHost: unknown, port: number): string {
   return `http://${authority}:${port}`;
 }
 
+interface TransportErrorFacts {
+  httpStatus?: number;
+  names: Set<string>;
+  codes: Set<string>;
+  messages: string[];
+}
+
+const CONNECTION_FAILURE_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+]);
+const SHUTDOWN_RESPONSE_DISCONNECT_CODES = new Set([
+  'ECONNRESET',
+  'EPIPE',
+  'UND_ERR_SOCKET',
+]);
+
+function errorField(error: object, key: string): unknown {
+  try {
+    return (error as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+/** Normalize the structured facts once; callers retain operation-specific policy. */
+function classifyTransportError(error: unknown): TransportErrorFacts {
+  const facts: TransportErrorFacts = {
+    names: new Set(),
+    codes: new Set(),
+    messages: [],
+  };
+  const visited = new Set<object>();
+  let candidate = error;
+  while (candidate && typeof candidate === 'object' && !visited.has(candidate)) {
+    visited.add(candidate);
+    const httpStatus = errorField(candidate, 'httpStatus');
+    const name = errorField(candidate, 'name');
+    const code = errorField(candidate, 'code');
+    const message = errorField(candidate, 'message');
+    if (facts.httpStatus === undefined && typeof httpStatus === 'number') {
+      facts.httpStatus = httpStatus;
+    }
+    if (typeof name === 'string') facts.names.add(name);
+    if (typeof code === 'string') facts.codes.add(code);
+    if (typeof message === 'string') facts.messages.push(message);
+    candidate = errorField(candidate, 'cause');
+  }
+  return facts;
+}
+
 function isConnectionFailure(err: unknown): boolean {
-  if (!err || typeof err !== 'object') return false;
-  if ('httpStatus' in err) return false;
-  const name = 'name' in err ? String((err as { name?: unknown }).name) : '';
-  const message = 'message' in err ? String((err as { message?: unknown }).message) : '';
-  return name === 'TypeError' && /fetch failed|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|terminated/i.test(message);
+  const facts = classifyTransportError(err);
+  if (facts.httpStatus !== undefined || !facts.names.has('TypeError')) return false;
+  return [...facts.codes].some(code => CONNECTION_FAILURE_CODES.has(code))
+    || facts.messages.some(message => /fetch failed|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|terminated/i.test(message));
+}
+
+function shutdownResponseMayHaveBeenInterrupted(error: unknown): boolean {
+  const facts = classifyTransportError(error);
+  if (facts.httpStatus !== undefined) return false;
+  return [...facts.codes].some(code => SHUTDOWN_RESPONSE_DISCONNECT_CODES.has(code))
+    || facts.messages.some(message => /connection reset|socket closed|socket hang up/i.test(message));
 }
 
 function isDaemonStatusResponse(value: unknown): value is DaemonStatusResponse {
@@ -575,10 +639,18 @@ export class ApiClient {
     return requireDaemonStatusResponse(status, this.expectedStatusName);
   }
 
-  async agents(): Promise<{
+  /**
+   * List agents (GH#310). Options and their wire spellings come from the
+   * shared contract in src/agents-list-wire.ts — the same module the daemon
+   * route derives its parser vocabulary from, so client and server cannot
+   * drift apart without a compile error.
+   */
+  async agents(options: AgentListPageOptions = {}): Promise<{
     agents: Array<{ agentUri: string; name: string; peerId: string; framework?: string; nodeRole?: string }>;
+    nextCursor?: string;
   }> {
-    return this.get('/api/agents');
+    const qs = serializeAgentListOptions(options);
+    return this.get(`/api/agents${qs ? `?${qs}` : ''}`);
   }
 
   /**
@@ -1027,6 +1099,7 @@ export class ApiClient {
     options?: KnowledgeAssetPublishAuthorSelection & {
       clearAfter?: boolean;
       publishEpochs?: number;
+      pricingPolicy?: PublicationPricingPolicy;
       publisherNodeIdentityIdOverride?: bigint;
     },
   ): Promise<{
@@ -1073,6 +1146,7 @@ export class ApiClient {
       schemeVersion?: number;
       clearAfter?: boolean;
       publishEpochs?: number;
+      pricingPolicy?: PublicationPricingPolicy;
       publisherNodeIdentityIdOverride?: bigint;
     },
   ): Promise<{
@@ -1110,6 +1184,9 @@ export class ApiClient {
           : {}),
         ...(options?.publishEpochs !== undefined
           ? { publishEpochs: options.publishEpochs }
+          : {}),
+        ...(options?.pricingPolicy !== undefined
+          ? { pricingPolicy: options.pricingPolicy }
           : {}),
         ...(options?.publisherNodeIdentityIdOverride !== undefined
           ? { publisherNodeIdentityIdOverride: options.publisherNodeIdentityIdOverride }
@@ -2212,8 +2289,11 @@ export class ApiClient {
   async shutdown(): Promise<void> {
     try {
       await this.post('/api/shutdown', {});
-    } catch {
-      // Connection may close before response
+    } catch (error) {
+      // The daemon may exit after accepting the request but before its response
+      // reaches this process. Definite HTTP and pre-request failures must remain
+      // visible so callers do not enter the full shutdown wait on a rejected stop.
+      if (!shutdownResponseMayHaveBeenInterrupted(error)) throw error;
     }
   }
 

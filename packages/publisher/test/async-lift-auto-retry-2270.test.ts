@@ -10,7 +10,7 @@ import {
   KA_VM_VALIDATION,
   kaVmPublishRequest,
   stageKnowledgeAssetShareSnapshot,
-} from './_helpers/ka-vm-publish.js';
+} from '../../../scripts/testing/ka-vm-publish.js';
 
 /**
  * GH#2270 — the automatic retry lane: registry allow-list (`workspace_unavailable`), jittered

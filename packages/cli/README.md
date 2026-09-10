@@ -300,6 +300,12 @@ modes auto-renewal can't recover from:
 | `dkg update` | Update the node software from npm (blue-green slots for Core nodes) |
 | `dkg rollback` | Roll back to the previous software slot |
 
+Graceful shutdown keeps a 15-second hard-stop safety budget by default. Nodes
+that must drain longer RPC callbacks may set `DKG_SHUTDOWN_HARD_TIMEOUT_MS` to
+an integer from `5000` through `300000` before `dkg start`. Invalid, blank,
+fractional, or out-of-range values fail startup; the watchdog cannot be
+disabled through this setting.
+
 Run `dkg <command> --help` for per-command options.
 
 ### Local LLM over DKG MCP
@@ -590,6 +596,19 @@ partial run and leave diagnostics enabled. The JSON report records interval
 throughput, write latency percentiles, per-node `store.nq`/snapshot/log/process
 samples, and appended daemon-log counters. A Markdown summary is written to
 `<output>.analysis.md` by default, or to `--analysis-output <path>`.
+
+## MCP client config updates
+
+`dkg mcp setup` and `dkg mcp uninstall` preserve existing config permissions,
+ACLs and extended attributes when replacing a config. On Linux, updating an
+existing file requires GNU coreutils `cp` (or `gcp`) with `--preserve` and xattr
+support. Minimal BusyBox installations must install `coreutils`, for example
+`apk add coreutils` on Alpine. The CLI checks the capability before writing and
+leaves the original file unchanged when it is unavailable. macOS uses its system
+metadata-preserving copy. Windows uses Windows PowerShell and the native file
+replacement API, preserving the existing access policy before writing contents.
+Windows-side targets selected from WSL use that same Windows mechanism through
+`wslpath` and Windows PowerShell; Linux-native targets retain Linux metadata.
 
 ## Extending the Node
 

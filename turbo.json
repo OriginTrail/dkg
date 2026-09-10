@@ -1,27 +1,57 @@
 {
   "$schema": "https://turbo.build/schema.json",
-  "globalEnv": ["DKG_SKIP_EVM_BUILD"],
+  "globalEnv": [
+    "DKG_SKIP_EVM_BUILD"
+  ],
   "tasks": {
     "build": {
-      "dependsOn": ["^build"],
-      "outputs": ["dist/**"]
+      "dependsOn": [
+        "^build"
+      ],
+      "outputs": [
+        "dist/**",
+        "extension/dist/**"
+      ]
     },
     "build:ui": {
-      "dependsOn": ["build"],
-      "outputs": ["dist-ui/**"]
+      "dependsOn": [
+        "build"
+      ],
+      "outputs": [
+        "dist-ui/**"
+      ]
     },
     "build:full": {
-      "dependsOn": ["build", "build:ui"],
-      "outputs": ["dist/**", "dist-ui/**"]
+      "dependsOn": [
+        "build",
+        "build:ui"
+      ],
+      "outputs": [
+        "dist/**",
+        "dist-ui/**"
+      ]
     },
     "test": {
-      "dependsOn": ["build"],
+      "dependsOn": [
+        "build"
+      ],
       "outputs": []
     },
     "test:coverage": {
-      "dependsOn": ["build"],
-      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/vitest.coverage.ts"],
-      "outputs": ["coverage/**"]
+      "dependsOn": [
+        "build"
+      ],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/vitest.coverage.ts",
+        "$TURBO_ROOT$/scripts/lib/coverage-scope.mjs",
+        "$TURBO_ROOT$/scripts/ci/check-coverage.mjs",
+        "$TURBO_ROOT$/test-policy/coverage-baselines.json"
+      ],
+      "outputs": [
+        "coverage/**"
+      ],
+      "cache": false
     },
     "lint": {},
     "clean": {

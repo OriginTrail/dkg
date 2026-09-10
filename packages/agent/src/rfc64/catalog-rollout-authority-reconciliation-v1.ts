@@ -23,6 +23,10 @@ export async function reconcileRfc64CatalogAuthorityPlanV1(
   store: TripleStore,
   executionPlan: Rfc64CatalogExecutionPlanV1,
 ): Promise<void> {
+  // The global kill switch is an execution fence, not a semantic-authority
+  // transition. Preserve every verified applied head so re-enabling resumes
+  // from the durable checkpoint without deleting or re-projecting content.
+  if (executionPlan.killSwitchActive) return;
   const nextCatalogSet = new Set(Object.entries(executionPlan.selectedAuthority)
     .filter(([, authority]) => authority.mode === 'catalog')
     .map(([contextGraphId]) => contextGraphId));
@@ -51,6 +55,13 @@ export async function reconcileRfc64CatalogAuthorityPlanV1(
         appliedHead.currentCatalogHeadDigest,
       )
     ) continue;
+    // Persisted runtime responsibilities are rehydrated after this pre-network
+    // sweep. For graphs not present in a compatibility manifest, apply the
+    // restart-stable default/override directly rather than interpreting the
+    // temporarily empty responsibility registry as relinquished authority.
+    const runtimeMode = executionPlan.contextGraphModes[contextGraphId]
+      ?? executionPlan.responsibilityDefaultMode;
+    if (runtimeMode === 'catalog') nextCatalogSet.add(contextGraphId);
     // Preserve the pre-activation standalone catalog API when no selected-CG
     // rollout block is enabled.
     if (executionPlan.standaloneTrack2Enabled) nextCatalogSet.add(contextGraphId);

@@ -675,6 +675,14 @@ describe('DkgDaemonClient', () => {
   // Agents & skills discovery
   // ---------------------------------------------------------------------------
 
+/**
+   * Exact query-entry map — substring assertions are spoofable (a URL holding
+   * `badconnectionStatus=connected` CONTAINS `connectionStatus=connected`),
+   * and the wire parameter NAMES are the load-bearing contract here.
+   */
+  const queryEntries = (url: string): Record<string, string> =>
+    Object.fromEntries(new URLSearchParams(url.split('?')[1] ?? ''));
+
   it('getAgents should GET /api/agents', async () => {
     fetchResponses.push(
       new Response(JSON.stringify({ agents: [{ name: 'agent-1', peerId: '12D3...' }] }), { status: 200 }),
@@ -690,11 +698,94 @@ describe('DkgDaemonClient', () => {
       new Response(JSON.stringify({ agents: [] }), { status: 200 }),
     );
 
-    await client.getAgents({ framework: 'OpenClaw', skill_type: 'ImageAnalysis' });
-    const url = fetchCalls[0][0] as string;
-    expect(url).toContain('framework=OpenClaw');
-    expect(url).toContain('skill_type=ImageAnalysis');
+    await client.getAgents({ framework: 'OpenClaw', skillType: 'ImageAnalysis' });
+    expect(queryEntries(fetchCalls[0][0] as string)).toEqual({
+      framework: 'OpenClaw',
+      skill_type: 'ImageAnalysis',
+    });
   });
+
+  it('getAgents passes the GH#310 connection/local/pagination filters', async () => {
+    fetchResponses.push(
+      new Response(JSON.stringify({ agents: [], nextCursor: 'n1' }), { status: 200 }),
+    );
+
+    const result = await client.getAgents({
+      connectionStatus: 'connected',
+      local: true,
+      limit: 10,
+      cursor: 'cur-1',
+    });
+    // Exact entries: the camelCase/snake_case parameter NAMES are the contract.
+    expect(queryEntries(fetchCalls[0][0] as string)).toEqual({
+      connectionStatus: 'connected',
+      local: 'true',
+      limit: '10',
+      cursor: 'cur-1',
+    });
+    expect(result.nextCursor).toBe('n1');
+  });
+
+  it('getAgentsUnvalidated serializes raw args verbatim AND surfaces the daemon 400', async () => {
+    fetchResponses.push(
+      new Response(JSON.stringify({ error: '"limit" must be a positive integer' }), { status: 400 }),
+    );
+    // The rejection IS the contract: if the client swallowed the 400 into
+    // {agents: []}, malformed filters would look like successful empty
+    // queries and the whole validation chain would be silent.
+    await expect(client.getAgentsUnvalidated({
+      framework: 'OpenClaw',
+      skill_type: 'ImageAnalysis',
+      connection_status: 'onnected',
+      limit: '10junk',
+      local: 'ture',
+    })).rejects.toThrow(/responded 400.*positive integer/);
+    // The pre-existing filters go through the SAME boundary as the new ones;
+    // exact entries so a prefixed or renamed key cannot sneak past.
+    expect(queryEntries(fetchCalls[0][0] as string)).toEqual({
+      framework: 'OpenClaw',
+      skill_type: 'ImageAnalysis',
+      connectionStatus: 'onnected',
+      limit: '10junk',
+      local: 'ture',
+    });
+  });
+
+  it('legacy skill_type callers keep working, and a conflicting pair is loud', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ agents: [] }), { status: 200 }));
+    // Pre-GH#310 spelling, unchanged behavior on the wire.
+    await client.getAgents({ skill_type: 'ImageAnalysis' });
+    expect(queryEntries(fetchCalls[0][0] as string)).toEqual({ skill_type: 'ImageAnalysis' });
+    // Both spellings with different values cannot silently pick one.
+    await expect(client.getAgents({ skillType: 'A', skill_type: 'B' }))
+      .rejects.toThrow(/Conflicting skill filters/);
+  });
+
+  it('a misspelled key and an empty cursor REACH the daemon instead of widening the query', async () => {
+    fetchResponses.push(
+      new Response(JSON.stringify({ error: 'Unknown query parameter "limt"' }), { status: 400 }),
+    );
+    // The whole point of the unvalidated path: nothing supplied may vanish.
+    // A dropped `limt` would silently return the full ~150 KB registry; a
+    // dropped empty cursor would silently serve page one.
+    await expect(client.getAgentsUnvalidated({ limt: 5, cursor: '' }))
+      .rejects.toThrow(/responded 400/);
+    expect(queryEntries(fetchCalls[0][0] as string)).toEqual({
+      limt: '5',
+      cursor: '',
+    });
+  });
+
+  it('typed and tool-originated requests share one wire mapping', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ agents: [] }), { status: 200 }));
+    fetchResponses.push(new Response(JSON.stringify({ agents: [] }), { status: 200 }));
+    await client.getAgents({ skillType: 'X', connectionStatus: 'connected', local: false, limit: 5 });
+    await client.getAgentsUnvalidated({ skill_type: 'X', connection_status: 'connected', local: false, limit: 5 });
+    const typedQs = (fetchCalls[0][0] as string).split('?')[1];
+    const rawQs = (fetchCalls[1][0] as string).split('?')[1];
+    expect(typedQs).toBe(rawQs);
+  });
+
 
   it('getSkills should GET /api/skills', async () => {
     fetchResponses.push(

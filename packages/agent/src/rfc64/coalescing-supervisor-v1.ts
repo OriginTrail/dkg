@@ -4,6 +4,8 @@
 
 export interface Rfc64CoalescingSupervisorOptionsV1 {
   readonly retryIntervalMs?: number;
+  /** Default queues one follow-up pass; periodic owners may instead drop overlap. */
+  readonly requestWhileRunning?: 'coalesce' | 'drop';
   readonly runPass: (signal: AbortSignal) => Promise<void>;
   readonly onError: (error: unknown) => void;
   readonly beforePeriodicPass?: () => void;
@@ -34,6 +36,7 @@ export class Rfc64CoalescingSupervisorV1 {
   /** Admit or coalesce a pass without creating concurrent workload owners. */
   request(): boolean {
     if (this.#closed) return false;
+    if (this.#run !== null && this.#options.requestWhileRunning === 'drop') return false;
     this.#requested = true;
     this.#launch();
     return true;

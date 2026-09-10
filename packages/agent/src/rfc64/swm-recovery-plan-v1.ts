@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type {
-  Rfc64CatalogBootstrapConfigV1,
-  Rfc64CatalogBootstrapPolicyV1,
-  Rfc64PublicCatalogBootstrapConfigV1,
-} from '../dkg-agent-types.js';
+import type { Rfc64RuntimeCatalogBootstrapConfigV1 } from
+  './public-catalog-activation-config-v1.js';
 
 export type Rfc64SwmRecoveryLaneV1 = 'ordinary-private' | 'selected-public';
 
@@ -18,15 +15,61 @@ export interface Rfc64PeerSwmRecoveryPlanV1 {
   readonly targets: readonly Readonly<Rfc64SwmRecoveryTargetV1>[];
 }
 
+/** A configured provider plan after canonical live recovery authority is applied. */
+export interface Rfc64ActivePeerSwmRecoveryPlanV1 extends Rfc64PeerSwmRecoveryPlanV1 {
+  readonly kind: 'rfc64-active-swm-recovery-plan-v1';
+}
+
 export interface Rfc64AuthorizedSwmRecoveryPlanV1 {
   readonly kind: 'rfc64-authorized-swm-recovery-v1';
   readonly providerPeerId: string;
   readonly targets: readonly Readonly<Rfc64SwmRecoveryTargetV1>[];
 }
 
-type Rfc64RecoveryConfigV1 = Readonly<
-  Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1
->;
+type Rfc64RecoveryConfigV1 = Readonly<Rfc64RuntimeCatalogBootstrapConfigV1>;
+
+export interface Rfc64SwmRecoveryRuntimeAuthorityV1 {
+  readonly kind: 'rfc64-swm-recovery-runtime-authority-v1';
+  readonly contextGraphId: string;
+  readonly lane: Rfc64SwmRecoveryLaneV1 | null;
+  readonly active: boolean;
+}
+
+interface Rfc64CatalogRecoveryAuthorityV1 {
+  readonly killSwitchActive: boolean;
+  readonly legacySyncAllowed: boolean;
+  readonly track2Enabled: boolean;
+}
+
+/**
+ * One graph-level answer shared by active plans, status and selection-change
+ * fencing. Public recovery is live-selection owned; private recovery follows
+ * receiver authority. Neither lane can execute through the kill switch.
+ */
+export function resolveRfc64SwmRecoveryRuntimeAuthorityV1(input: Readonly<{
+  contextGraphId: string;
+  lane: Rfc64SwmRecoveryLaneV1 | undefined;
+  configuredAuthority: Readonly<Rfc64CatalogRecoveryAuthorityV1>;
+  receiverAuthority: Readonly<Rfc64CatalogRecoveryAuthorityV1>;
+  runtimeSelected: boolean;
+}>): Readonly<Rfc64SwmRecoveryRuntimeAuthorityV1> {
+  const lane = input.lane ?? null;
+  const active = lane === 'selected-public'
+    ? !input.configuredAuthority.killSwitchActive
+      && (input.configuredAuthority.legacySyncAllowed
+        || input.configuredAuthority.track2Enabled)
+      && input.runtimeSelected
+    : lane === 'ordinary-private'
+      && !input.receiverAuthority.killSwitchActive
+      && (input.receiverAuthority.legacySyncAllowed
+        || input.receiverAuthority.track2Enabled);
+  return Object.freeze({
+    kind: 'rfc64-swm-recovery-runtime-authority-v1',
+    contextGraphId: input.contextGraphId,
+    lane,
+    active,
+  });
+}
 
 /** Locale-independent ordering shared by recovery plans and admission state. */
 export function compareRfc64ContextGraphIdsV1(left: string, right: string): number {
@@ -50,7 +93,7 @@ export function resolveRfc64SelectedRecoveryContextGraphIdsV1(
   config: Rfc64RecoveryConfigV1 | undefined,
 ): readonly string[] {
   if (config === undefined) return Object.freeze([]);
-  return Object.freeze(acceptedPoliciesV1(config)
+  return Object.freeze(config.acceptedPolicies
     .filter(({ completeSwmProviders = [] }) => completeSwmProviders.length > 0)
     .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
 }
@@ -60,7 +103,7 @@ export function resolveRfc64PrivateRecoveryContextGraphIdsV1(
   config: Rfc64RecoveryConfigV1 | undefined,
 ): readonly string[] {
   if (config === undefined) return Object.freeze([]);
-  return Object.freeze(acceptedPoliciesV1(config)
+  return Object.freeze(config.acceptedPolicies
     .filter(({ policyEnvelope, completeSwmProviders = [] }) => (
       policyEnvelope.payload.accessPolicy === 1
       && completeSwmProviders.length > 0
@@ -75,7 +118,7 @@ export function resolveRfc64PeerSwmRecoveryPlanV1(
 ): Readonly<Rfc64PeerSwmRecoveryPlanV1> {
   const byContextGraph = new Map<string, Rfc64SwmRecoveryLaneV1>();
   if (config !== undefined) {
-    for (const { policyEnvelope, completeSwmProviders = [] } of acceptedPoliciesV1(config)) {
+    for (const { policyEnvelope, completeSwmProviders = [] } of config.acceptedPolicies) {
       if (!completeSwmProviders.includes(providerPeerId)) continue;
       const lane = policyEnvelope.payload.accessPolicy === 1
         ? 'ordinary-private'
@@ -97,13 +140,39 @@ export function resolveRfc64PeerSwmRecoveryPlanV1(
   });
 }
 
+/**
+ * Canonical live recovery plan for one graph-complete provider. Configuration
+ * proves provider ownership; receiver authority and runtime selection prove
+ * whether that lane may execute now. Catalog mode never widens legacy gossip:
+ * it admits only an explicitly configured target that is selected for Track-2.
+ */
+export function resolveRfc64ActivePeerSwmRecoveryPlanV1(
+  config: Rfc64RecoveryConfigV1 | undefined,
+  providerPeerId: string,
+  resolveRuntimeAuthority: (
+    contextGraphId: string,
+  ) => Readonly<Rfc64SwmRecoveryRuntimeAuthorityV1>,
+): Readonly<Rfc64ActivePeerSwmRecoveryPlanV1> {
+  const configured = resolveRfc64PeerSwmRecoveryPlanV1(config, providerPeerId);
+  return Object.freeze({
+    kind: 'rfc64-active-swm-recovery-plan-v1',
+    ...configured,
+    targets: Object.freeze(configured.targets.filter(({ contextGraphId, lane }) => {
+      const authority = resolveRuntimeAuthority(contextGraphId);
+      return authority.contextGraphId === contextGraphId
+        && authority.lane === lane
+        && authority.active;
+    })),
+  });
+}
+
 /** Accepted recovery lane for a graph, independent of local store contents. */
 export function resolveRfc64SwmRecoveryLaneV1(
   config: Rfc64RecoveryConfigV1 | undefined,
   contextGraphId: string,
 ): Rfc64SwmRecoveryLaneV1 | undefined {
   if (config === undefined) return undefined;
-  const policy = acceptedPoliciesV1(config).find(
+  const policy = config.acceptedPolicies.find(
     ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
   );
   if (policy === undefined) return undefined;
@@ -118,7 +187,7 @@ export function resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
   providerPeerId: string,
 ): readonly string[] {
   if (config === undefined) return Object.freeze([]);
-  return Object.freeze(acceptedPoliciesV1(config)
+  return Object.freeze(config.acceptedPolicies
     .filter(({ completeSwmProviders = [] }) => completeSwmProviders.includes(providerPeerId))
     .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
 }
@@ -148,12 +217,4 @@ export function sameRfc64SwmRecoveryTargetsV1(
       && target.contextGraphId === expected.contextGraphId
       && target.lane === expected.lane;
   });
-}
-
-function acceptedPoliciesV1(
-  config: Rfc64RecoveryConfigV1,
-): readonly Rfc64CatalogBootstrapPolicyV1[] {
-  return 'acceptedPolicies' in config
-    ? config.acceptedPolicies
-    : config.acceptedPublicPolicies;
 }

@@ -1,23 +1,25 @@
-import { hasErrorCode } from '@origintrail-official/dkg-core';
+import {
+  daemonShutdownCoordinator,
+  reportDaemonShutdownResult,
+  type DaemonShutdownCoordinator,
+} from '../daemon/shutdown-wait.js';
 
-import { isProcessRunning, readPid } from '../config.js';
+interface StopDaemonDependencies {
+  coordinator: DaemonShutdownCoordinator;
+  log(message: string): void;
+  error(message: string): void;
+}
 
-const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const defaultStopDaemonDependencies: StopDaemonDependencies = {
+  coordinator: daemonShutdownCoordinator,
+  log: (message) => console.log(message),
+  error: (message) => console.error(message),
+};
 
 /** Returns true if the daemon stopped (or was not running). */
-export async function stopDaemonIfRunning(): Promise<boolean> {
-  const pid = await readPid();
-  if (!pid || !isProcessRunning(pid)) return true;
-  console.log('Stopping daemon...');
-  try {
-    process.kill(pid, 'SIGTERM');
-  } catch (err) {
-    if (!hasErrorCode(err, 'ESRCH')) throw err;
-  }
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    await wait(500);
-    if (!isProcessRunning(pid)) return true;
-  }
-  console.error('Daemon is still running after SIGTERM. Stop it manually before restarting.');
-  return false;
+export async function stopDaemonIfRunning(
+  dependencies: StopDaemonDependencies = defaultStopDaemonDependencies,
+): Promise<boolean> {
+  const result = await dependencies.coordinator.stopViaSignal();
+  return reportDaemonShutdownResult(result, dependencies);
 }

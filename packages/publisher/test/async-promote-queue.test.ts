@@ -70,6 +70,41 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     now += ms;
   }
 
+  it('claims from active rows after restart without transferring terminal history', async () => {
+    const queue = createQueue();
+    const cancelledId = await queue.enqueue(makeRequest());
+    await queue.cancel(cancelledId);
+    const terminal = (await queue.getStatus(cancelledId))!;
+    const history = Array.from({ length: 1_000 }, (_, i) => ({
+      ...terminal,
+      jobId: `history-${i}`,
+      state: i % 2 === 0 ? 'succeeded' as const : 'failed' as const,
+    }));
+    await store.insert(history.flatMap((job) => serializeJob(job, DEFAULT_PROMOTE_CONTROL_GRAPH_URI)));
+    const first = await queue.enqueue(makeRequest({ assertionName: 'active-first' }));
+    advance(1);
+    const second = await queue.enqueue(makeRequest({ assertionName: 'active-second' }));
+    const originalQuery = store.query.bind(store);
+    const candidateCounts: number[] = [];
+    store.query = async (...args) => {
+      const result = await originalQuery(...args);
+      if (args[1]?.source === 'publisher.asyncPromote.claimNext.candidates') {
+        if (result.type !== 'bindings') throw new Error('expected bindings');
+        candidateCounts.push(result.bindings.length);
+      }
+      return result;
+    };
+
+    const restarted = createQueue();
+    expect((await restarted.claimNext('worker-a'))?.jobId).toBe(first);
+    expect((await restarted.claimNext('worker-b'))?.jobId).toBe(second);
+    expect(await restarted.claimNext('worker-c')).toBeNull();
+    expect(candidateCounts).toEqual([2, 2, 2]);
+    expect(await restarted.list({ state: ['running', 'running'] })).toHaveLength(2);
+    expect(await restarted.list({ state: [] })).toHaveLength(1_003);
+    expect(await restarted.list({ state: ['failed', 'succeeded'] })).toHaveLength(1_001);
+  });
+
   /**
    * Wrap an OxigraphStore so the first `flush()` after `arm()` parks until
    * `releaseFlush()` is called. Used by the read/write race tests (5a–5c) to

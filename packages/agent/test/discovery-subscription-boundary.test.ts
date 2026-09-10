@@ -13,10 +13,20 @@ import {
 import { MockChainAdapter, type ContextGraphOnChain } from '@origintrail-official/dkg-chain';
 import {
   AGENT_REGISTRY_CONTEXT_GRAPH,
-  DKGAgent,
+  DKGAgent as RealDKGAgent,
   type ContextGraphMembershipRecord,
   type ContextGraphSubscriptionRecord,
 } from '../src/index.js';
+
+type DKGAgent = RealDKGAgent;
+const DKGAgent = {
+  create(config: Parameters<typeof RealDKGAgent.create>[0]) {
+    return RealDKGAgent.create({
+      rfc64CatalogActivation: { enabled: false },
+      ...config,
+    });
+  },
+};
 
 describe('Context Graph discovery/subscription boundary', () => {
   it('rejects null instead of silently enabling persisted subscription rehydration', async () => {

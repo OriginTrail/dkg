@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { AutoUpdateConfig } from '../src/config.js';
-import { _autoUpdateIo } from '../src/daemon.js';
+import { _autoUpdateDependencies, _autoUpdateIo } from '../src/daemon.js';
 
 const MARKITDOWN_TARGETS_JSON = JSON.stringify([
   { platform: 'linux', arch: 'x64', assetName: 'markitdown-linux-x64', runner: 'ubuntu-latest' },
@@ -52,6 +52,7 @@ function mockReadFileSyncValue(path: unknown): string {
 
 // Save original _autoUpdateIo values for restoration
 const origIo = { ..._autoUpdateIo };
+const origDependencies = { ..._autoUpdateDependencies };
 
 // Tracking arrays
 let readFileCalls: [any, ...any[]][] = [];
@@ -134,6 +135,7 @@ function resetMocks() {
 }
 
 function installMocks() {
+  _autoUpdateDependencies.cleanStaleWorkspacePackages = async () => {};
   _autoUpdateIo.readFile = (async (path: any, ...rest: any[]) => {
     readFileCalls.push([path, ...rest]);
     return readFileImpl(path, ...rest);
@@ -192,6 +194,7 @@ function installMocks() {
 
 function restoreIo() {
   Object.assign(_autoUpdateIo, origIo);
+  Object.assign(_autoUpdateDependencies, origDependencies);
 }
 
 import {
@@ -2249,6 +2252,33 @@ describe('autoupdater hardening', () => {
     const cliProjectRmCall = rmCalls.find(args => String(args[0]).endsWith('/packages/cli/project.json'));
     expect(cliProjectRmCall).toBeDefined();
     expect(cliProjectRmCall?.[1]).toMatchObject({ force: true });
+  });
+
+  it('cleans stale workspace copies before installing into the inactive slot', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    const events: string[] = [];
+    _autoUpdateDependencies.cleanStaleWorkspacePackages = async (slot) => {
+      expect(slot).toMatch(/\/releases\/b$/);
+      events.push('clean');
+    };
+    execImpl = async (cmd) => {
+      if (cmd.includes('pnpm install')) events.push('install');
+      return { stdout: '', stderr: '' };
+    };
+    await performUpdate(AU, () => {});
+    expect(events).toEqual(['clean', 'install']);
+  });
+
+  it('does not install or activate when stale workspace cleanup fails', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    _autoUpdateDependencies.cleanStaleWorkspacePackages = async () => {
+      throw new Error('quarantine failed');
+    };
+    expect(await performUpdate(AU, () => {})).toBe(false);
+    expect(execCalls.some(({ cmd }) => cmd.includes('pnpm install'))).toBe(false);
+    expect(swapSlotCalls).toEqual([]);
   });
 
   it('orphan-process sweep is scoped to the slot dir (no host-wide pkill -f)', async () => {

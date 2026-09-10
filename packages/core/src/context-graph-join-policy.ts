@@ -33,6 +33,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function isFiniteNumber(value: unknown): value is number {
+  return Number.isFinite(value as number);
+}
+
 /**
  * Parse untrusted persisted policy state into its canonical representation.
  *
@@ -50,7 +54,7 @@ export function parseContextGraphJoinPolicyRecord(
   if (expectedContextGraphId !== undefined && value.contextGraphId !== expectedContextGraphId) return null;
   if (value.mode !== 'manual' && value.mode !== 'open') return null;
   if (typeof value.ownerDid !== 'string' || value.ownerDid.length === 0) return null;
-  if (typeof value.updatedAt !== 'number' || !Number.isFinite(value.updatedAt)) return null;
+  if (!isFiniteNumber(value.updatedAt)) return null;
 
   if (value.mode === 'open') {
     if (
