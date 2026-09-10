@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
-import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
+import {
+  getSyncCheckpointKey,
+  MemorySyncCheckpointStore,
+} from '../src/sync/checkpoint/state.js';
 import { createPrivateSwmRecoveryWindow } from '../src/sync/requester/private-swm-recovery-budget.js';
 import { isSyncTransportFailure } from '../src/sync/error-tags.js';
 
@@ -96,6 +99,66 @@ describe('page and transport admission within one operation', () => {
       localYield: true as const,
     });
     expect(result.quads).toHaveLength(2);
+  });
+
+  it('restarts a locally yielded page session at offset zero with a fresh token', async () => {
+    let elapsed = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+    const checkpointStore = new MemorySyncCheckpointStore();
+    const requests: Array<{ offset: number; syncSessionId: string | undefined }> = [];
+    const buildSyncRequest: Parameters<typeof fetchSyncPages>[0]['buildSyncRequest'] = async (
+      _contextGraphId,
+      offset,
+      _limit,
+      _includeSharedMemory,
+      _remotePeerId,
+      _phase,
+      _snapshotRef,
+      _sinceBatchId,
+      syncSessionId,
+    ) => {
+      requests.push({ offset, syncSessionId });
+      return new Uint8Array([1]);
+    };
+
+    const first = await request({
+      phase: 'data',
+      checkpointStore,
+      buildSyncRequest,
+      workAdmission: roundAdmission(100),
+      send: async () => {
+        elapsed = 100;
+        return new TextEncoder().encode('page');
+      },
+    });
+
+    expect(first).toMatchObject({
+      completed: false,
+      localYield: true as const,
+      resumedFromOffset: 0,
+    });
+    expect(first.quads).toHaveLength(1);
+    const checkpointKey = getSyncCheckpointKey(
+      'budget-peer',
+      'budget-cg',
+      true,
+      'data',
+    );
+    expect(checkpointStore.get(checkpointKey)).toBeUndefined();
+
+    const second = await request({
+      phase: 'data',
+      checkpointStore,
+      buildSyncRequest,
+      workAdmission: roundAdmission(100),
+      send: async () => new Uint8Array(),
+    });
+
+    expect(second).toMatchObject({ completed: true, resumedFromOffset: 0 });
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toMatchObject({ offset: 0, syncSessionId: expect.any(String) });
+    expect(requests[1]).toMatchObject({ offset: 0, syncSessionId: expect.any(String) });
+    expect(requests[1]!.syncSessionId).not.toBe(requests[0]!.syncSessionId);
   });
 
   it('admits no send after authentication consumes the allowance', async () => {

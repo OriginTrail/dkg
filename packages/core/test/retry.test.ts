@@ -1,10 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
-import { withRetry } from '../src/retry.js';
+import { withRetry, withRetryContext } from '../src/retry.js';
 
 describe('withRetry', () => {
   it('supplies one canonical attempt context to every invocation', async () => {
     const attempts: unknown[] = [];
-    await withRetry(async (attempt) => {
+    await withRetryContext(async (attempt) => {
       attempts.push(attempt);
       if (attempt.attempt < attempt.maxAttempts) throw new Error('retry');
       return 'ok';
@@ -20,6 +20,25 @@ describe('withRetry', () => {
       { attempt: 3, maxAttempts: 3, remainingAttempts: 1 },
     ]);
     expect(attempts.every(Object.isFrozen)).toBe(true);
+  });
+
+  it('preserves the zero-argument callback contract for optional parameters', async () => {
+    const invocations: Array<{ force: boolean | undefined; argumentCount: number }> = [];
+    async function legacyCallback(force?: boolean): Promise<boolean> {
+      invocations.push({ force, argumentCount: arguments.length });
+      if (invocations.length === 1) throw new Error('retry');
+      return force ?? false;
+    }
+
+    await expect(withRetry(legacyCallback, {
+      maxAttempts: 2,
+      baseDelayMs: 0,
+      jitter: 0,
+    })).resolves.toBe(false);
+    expect(invocations).toEqual([
+      { force: undefined, argumentCount: 0 },
+      { force: undefined, argumentCount: 0 },
+    ]);
   });
 
   it('returns on first success', async () => {

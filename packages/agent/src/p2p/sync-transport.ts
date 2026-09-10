@@ -1,7 +1,7 @@
 import { assertSyncWorkAdmission, SyncWorkAdmissionExhaustedError, UNRESTRICTED_SYNC_WORK, type SyncWorkAdmission } from '../sync/work-admission.js';
 import { randomUUID } from 'node:crypto';
 import {
-  withRetry,
+  withRetryContext,
   withSpan,
   getMetrics,
   type RetryAttemptContext,
@@ -54,7 +54,7 @@ export function createSingleUseSyncSender(
 }
 
 /**
- * Sync-page transport. Wraps `withRetry` around a per-attempt
+ * Sync-page transport. Wraps `withRetryContext` around a per-attempt
  * `requestFactory()` → `send()` chain, freshly minting both the
  * envelope bytes AND the substrate messageId on every attempt.
  *
@@ -112,7 +112,7 @@ interface SyncSendParams {
   offset: number;
   /**
    * Builds the envelope bytes for ONE attempt. Called once per
-   * `withRetry` attempt so each attempt carries a fresh
+   * `withRetryContext` attempt so each attempt carries a fresh
    * `issuedAtMs`/`requestId` (private CGs) — the auth gate at the
    * responder enforces freshness, so re-sending the same envelope
    * past `SYNC_AUTH_MAX_AGE_MS` would be denied.
@@ -127,7 +127,7 @@ interface SyncSendParams {
   send: SingleUseSyncSender;
   /**
    * Optional per-attempt response validator. Throwing here keeps the attempt
-   * inside `withRetry`, which lets sync-level retry sentinels share the same
+   * inside `withRetryContext`, which lets sync-level retry sentinels share the same
    * bounded backoff path as transport failures.
    */
   validateResponse?: (responseBytes: Uint8Array) => void | Promise<void>;
@@ -149,7 +149,7 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
     'sync.request',
     async () => {
       try {
-        const out = await withRetry(
+        const out = await withRetryContext(
     async (attempt) => {
       // Resolved once per attempt so all three W1 points describe the same
       // send, and so the ambient source is read once rather than three times.

@@ -40,6 +40,17 @@ const DEFAULTS: Required<Omit<
  * delay = min(baseDelay * 2^attempt + jitter, maxDelay)
  */
 export async function withRetry<T>(
+  fn: () => Promise<T>,
+  opts: RetryOptions = {},
+): Promise<T> {
+  return withRetryContext(() => fn(), opts);
+}
+
+/**
+ * Execute an async function with exponential backoff retry and expose the
+ * canonical attempt state to callers that explicitly opt in to it.
+ */
+export async function withRetryContext<T>(
   fn: (attempt: RetryAttemptContext) => Promise<T>,
   opts: RetryOptions = {},
 ): Promise<T> {

@@ -267,6 +267,7 @@ export {
 } from './entity-predicate.js';
 export {
   withRetry,
+  withRetryContext,
   type RetryAttemptContext,
   type RetryOptions,
 } from './retry.js';
