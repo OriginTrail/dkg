@@ -199,16 +199,12 @@ export class SwmTargetExecutorV1 {
     };
     const result = await recoverContextGraphSwmWithProgressRetries({
       window,
+      owner: `private-swm:${target.contextGraphId}:${target.remotePeerId}`,
+      createRoundDeadline: () => this.#ports.createContextGraphSyncDeadline(1),
       onRetry: target.onRetry,
       snapshotProgressRetention: () => snapshotLease?.kind ?? 'detached',
-      recover: (round) => {
-        const deadline = this.#ports.createContextGraphSyncDeadline(1);
-        const workAdmission = window.admitRound(deadline, {
-          sharing: 'exclusive',
-          owner: `private-swm:${target.contextGraphId}:${target.remotePeerId}:round-${round}`,
-        });
-        return recoverContextGraphSwm({ ...options, deadline, workAdmission });
-      },
+      recover: (_round, workAdmission, deadline) =>
+        recoverContextGraphSwm({ ...options, deadline, workAdmission }),
     });
     if (result.completed) snapshotLease?.release();
     return result;

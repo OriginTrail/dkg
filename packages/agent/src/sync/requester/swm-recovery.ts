@@ -234,7 +234,13 @@ export const ABSOLUTE_PRIVATE_SWM_RECOVERY_MAX_ROUNDS = 24;
  */
 export async function recoverContextGraphSwmWithProgressRetries(params: {
   readonly window: PrivateSwmRecoveryWindow;
-  readonly recover: (round: number) => Promise<RecoverContextGraphSwmResult>;
+  readonly owner: string;
+  readonly createRoundDeadline: (round: number) => number;
+  readonly recover: (
+    round: number,
+    workAdmission: SyncWorkAdmission,
+    deadline: number,
+  ) => Promise<RecoverContextGraphSwmResult>;
   readonly maxRounds?: number;
   readonly onRetry?: (progress: SwmRecoveryProgress) => void;
   readonly snapshotProgressRetention?: () => 'retained' | 'detached';
@@ -250,7 +256,13 @@ export async function recoverContextGraphSwmWithProgressRetries(params: {
   for (let round = 1; round <= maxRounds; round += 1) {
     // Recheck after the retry observer too: logging must not admit a late round.
     if (!params.window.canStartRound(round)) break;
-    result = await params.recover(round);
+    const deadline = params.createRoundDeadline(round);
+    // The driver owns both round gating and page/transport admission from the
+    // same window. Callers receive the composed capability with its deadline.
+    const workAdmission = params.window.admitRound(deadline, {
+      sharing: 'exclusive', owner: `${params.owner}:round-${round}`,
+    });
+    result = await params.recover(round, workAdmission, deadline);
     if (result.completed) return result;
 
     if (explicitMaxRounds === undefined && Number.isSafeInteger(result.totalSnapshots)) {
